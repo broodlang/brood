@@ -574,7 +574,7 @@ module included), built from the whole `files` universe — the KI-17 reachabili
 ;; `[head name]` for a recognised def-style form (both strings), else nil. The head
 ;; is what says whether the name is ambient, so the two travel together.
 (defn- project-def-entry (list-node)
-  (let (kids (filter (project-node-val list-node)
+  (let (kids (seq/filter (project-node-val list-node)
                (fn (c) (not (includes? [:whitespace :comment] (project-node-kind c))))))
     (when (>= (count kids) 2)
       (let (head (first kids) nm (second kids))
@@ -593,7 +593,7 @@ module included), built from the whole `files` universe — the KI-17 reachabili
 ;; The namespace a top-level `(defmodule ns …)` node declares (a string), or nil
 ;; if the node isn't a `defmodule`. The file-level shape of `project-def-entry`.
 (defn- project-module-name (list-node)
-  (let (kids (filter (project-node-val list-node)
+  (let (kids (seq/filter (project-node-val list-node)
                (fn (c) (not (includes? [:whitespace :comment] (project-node-kind c))))))
     (when (>= (count kids) 2)
       (let (head (first kids) nm (second kids))
@@ -618,7 +618,7 @@ module included), built from the whole `files` universe — the KI-17 reachabili
 ;; `parse-source` never raises — malformed input just yields fewer recognised
 ;; defs — so a syntax error in one file can't abort the scan.
 (defn- project-file-def-names (path)
-  (let (nodes (filter (project-node-val (reflect/parse-source (file/slurp path)))
+  (let (nodes (seq/filter (project-node-val (reflect/parse-source (file/slurp path)))
                 (fn (c) (= (project-node-kind c) :list)))
         ns (first (seq/keep nodes project-module-name)))
     (map (seq/keep nodes project-def-entry)
@@ -675,7 +675,7 @@ Returns nil when there is nothing to report."
         srcs (source-files root)
         extracts (project-gather-extracts srcs)
         source-set (fold srcs {} (fn (m p) (%map-assoc m p true))))
-    (filter (project-duplicate-def-warnings extracts source-set)
+    (seq/filter (project-duplicate-def-warnings extracts source-set)
       (fn (w) (any? defined (fn (nm) (includes? w (str "'" nm "'"))))))))
 
 (defn- project-check-duplicate-defs (extracts source-set)
@@ -1219,7 +1219,7 @@ the global table. A scan per name would be O(names × globals) against a table o
 
 (defn- rename-plan (bare mods pname)
   "The decision for one unbound bare name: `[:fix qualified]` to rewrite, or `[:skip why]`."
-  (let (owned (filter (vec mods) (fn (m) (project-owned-module? m pname)))
+  (let (owned (seq/filter (vec mods) (fn (m) (project-owned-module? m pname)))
         withdrawn (symbol (str "%" bare)))
     (cond
       (not (empty? owned))
@@ -1262,7 +1262,7 @@ more than one namespace, and a name that moved behind `%`. Backs `nest check --f
           ;; The ledger first (ADR-304): a deliberate rename is exact and unambiguous —
           ;; bare or qualified — and needs no search. Whatever it does not cover goes to
           ;; the image-search heuristic below, bare names only.
-          ledgered (filter (sort (vec (unbound-names diags))) (fn (nm) (contains? ledger nm)))
+          ledgered (seq/filter (sort (vec (unbound-names diags))) (fn (nm) (contains? ledger nm)))
           names (fold ledgered (unbound-bare-names diags) (fn (acc nm) (disj acc nm)))
           pname (if *project-name* (->string *project-name*) nil))
       (if (and (empty? names) (empty? ledgered))
@@ -1274,8 +1274,8 @@ more than one namespace, and a name that moved behind `%`. Backs `nest check --f
                                   [nm [:fix (get entry :to) (str " (" (get entry :adr) ")")]])))
                       (map (sort (vec names))
                         (fn (bare) [bare (rename-plan bare (%map-get index bare #{}) pname)])))
-              fixes (filter plans (fn (p) (= (first (second p)) :fix)))
-              skips (filter plans (fn (p) (= (first (second p)) :skip))))
+              fixes (seq/filter plans (fn (p) (= (first (second p)) :fix)))
+              skips (seq/filter plans (fn (p) (= (first (second p)) :skip))))
           (for (p fixes)
             (io/puts (str (if apply? "  fix:  " "  would fix: ")
                        (first p)
@@ -1388,7 +1388,7 @@ and reports `skipped` when the result would not parse, or when a definition coul
 be located."
   (let (text (file/slurp path)
         lines (into [] (string/split text "\n"))
-        wanted (count (filter (reflect/file-signatures path)
+        wanted (count (seq/filter (reflect/file-signatures path)
                         (fn (e) (not (nil? (suggestion-line e))))))
         insertions (sig-insertions path lines)
         found (count insertions))
@@ -1471,7 +1471,7 @@ Backs `nest check --suggest-sigs`."
         total (fold targets
                 0
                 (fn (acc path)
-                  (let (lines (filter (map (reflect/file-signatures path) suggestion-line)
+                  (let (lines (seq/filter (map (reflect/file-signatures path) suggestion-line)
                                 (fn (x) (not (nil? x)))))
                     (if (empty? lines)
                       acc

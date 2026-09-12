@@ -90,6 +90,26 @@
       (assert= (count (get model :defs)) 1)
       (assert= (get (first (get model :defs)) :name) "model-pub"))))
 
+;; A `deftype` binds no global, so the module's name walk cannot see it; the docs read
+;; the checker's alias store by module instead (`reflect/type-aliases`, ADR-327 follow-up).
+;; Top level, like the `meta` fixture: the alias is keyed to THIS module's namespace.
+(deftype doc-cell (tuple int int))
+
+(describe "docs: a deftype is documented under Types"
+  (test "reflect/type-aliases lists a module's aliases with the type as written"
+    (let (aliases (reflect/type-aliases 'docs-test))
+      (assert= (count aliases) 1)
+      (assert= (get (first aliases) :name) "docs-test/doc-cell")
+      (assert= (get (first aliases) :type) "(tuple int int)")))
+  (test "the Markdown carries a Types section, bare name over the type"
+    (is (includes? (docs/docs-render "docs-test" nil '() "docs-test")
+          "## Types\n\n### `doc-cell`\n\n`(tuple int int)`\n\n"))
+    ;; …and none when the namespace is unknown (the load-delta fallback)
+    (refute (includes? (docs/docs-render "docs-test" nil '()) "## Types")))
+  (test "the structured model carries :types the same way"
+    (let (model (docs/docs-module-model "docs-test" nil '() "docs-test"))
+      (assert= (get model :types) [{:name "doc-cell" :type "(tuple int int)"}]))))
+
 (describe "docs: doctests (nest doctest)"
   (test "a `expr ;=> expected` line parses into [expr expected]"
     (assert= (docs/doctest-of-line "(+ 1 2) ;=> 3") ["(+ 1 2)" "3"])
@@ -207,7 +227,7 @@
       (fn (_ m)
         (check-allow :discarded-catch (try (require-one (string/->symbol m)) (catch _ nil)))))
     (let (forms (into #{} (map (reflect/special-forms) (fn (f) (if (pair? f) (first f) f))))
-          missing (filter (keys doc-catalog/*catalog*)
+          missing (seq/filter (keys doc-catalog/*catalog*)
                     (fn (k)
                       (let (s (string/->symbol k))
                         (not (or (bound? s) (contains? forms s)))))))
@@ -257,7 +277,7 @@
                       (let (i (string/last-index-of nm "/"))
                         (or (< i 0)
                           (contains? (doc-catalog-prefixes) (string/substring nm 0 i)))))
-          candidates (filter (reflect/global-names)
+          candidates (seq/filter (reflect/global-names)
                        (fn (s)
                          (let (nm (->string s))
                            (and (not (includes? nm "--"))
@@ -272,7 +292,7 @@
                       (let (i (string/last-index-of nm "/"))
                         (or (< i 0)
                           (contains? (doc-catalog-prefixes) (string/substring nm 0 i)))))
-          uncatalogued (filter (reflect/global-names)
+          uncatalogued (seq/filter (reflect/global-names)
                          (fn (s)
                            (let (nm (->string s))
                              (and (not (includes? nm "--"))

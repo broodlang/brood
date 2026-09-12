@@ -430,7 +430,7 @@ before ordering."
 0-arg fn returning proc/info maps — the remote-attach source (future) has the
 same shape (it requests a peer's snapshot over the node link), so `observe-loop`
 is source-agnostic: inline and remote are one loop with a swapped thunk."
-  (filter (map (proc/list) proc/info) (fn (p) (not (nil? p)))))
+  (seq/filter (map (proc/list) proc/info) (fn (p) (not (nil? p)))))
 
 (defn- observe-local-snapshot ()
   "A full snapshot of THIS runtime — `{:node <node-info> :procs <proc/info list>

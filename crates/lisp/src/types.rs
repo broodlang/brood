@@ -2799,20 +2799,33 @@ pub struct GradualTy {
 mod sig;
 pub use sig::Sig;
 
-/// The process-wide strict switch `nest check --strict` flips before it runs the
-/// checker; a file check reads it once, at its root (`check_file_ext`), into the
-/// checker context — so it is a launch setting, never something the walk consults.
-static STRICT_CHECKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The process-wide strict switch. `nest check --strict` flips it before it runs the
+/// checker; with nothing set explicitly it is `BROOD_CHECK_STRICT=1`, read once — so
+/// EVERY entry point (`brood --check`, the REPL's advisory check, the LSP,
+/// `check-string-here`) honours the env spelling, not only the one command that used to
+/// read it itself (2026-09-12: the flag catalogue and ADR-298 named it as the mode switch,
+/// and `brood --check` with it set reported the plain verdict). A file check reads the
+/// mode once, at its root (`check_file_ext`), into the checker context — so it is a
+/// launch setting, never something the walk consults.
+///
+/// `0` = not set explicitly (the env decides), `1` = off, `2` = on.
+static STRICT_CHECKING: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+static STRICT_FROM_ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// Turn strict checking on or off for this process — see
-/// [`GradualTy::consistent_with_mode`].
+/// [`GradualTy::consistent_with_mode`]. An explicit setting wins over the env.
 pub fn set_strict_checking(on: bool) {
-    STRICT_CHECKING.store(on, std::sync::atomic::Ordering::Relaxed);
+    STRICT_CHECKING.store(if on { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Is strict checking on for this process?
 pub fn strict_checking() -> bool {
-    STRICT_CHECKING.load(std::sync::atomic::Ordering::Relaxed)
+    match STRICT_CHECKING.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => *STRICT_FROM_ENV
+            .get_or_init(|| std::env::var_os("BROOD_CHECK_STRICT").is_some_and(|v| v == "1")),
+    }
 }
 
 impl GradualTy {

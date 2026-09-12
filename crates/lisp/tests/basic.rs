@@ -196,7 +196,7 @@ fn maps_survive_arena_reset() {
 #[test]
 fn higher_order() {
     assert_eq!(run("(map (list 1 2 3) inc)"), "(2 3 4)");
-    assert_eq!(run("(filter (list -1 2 -3 4) math/positive?)"), "(2 4)");
+    assert_eq!(run("(seq/filter (list -1 2 -3 4) math/positive?)"), "(2 4)");
     assert_eq!(run("(reduce (list 1 2 3 4) 0 +)"), "10");
     assert_eq!(run("(apply + (list 1 2 3))"), "6");
 }
@@ -1902,12 +1902,12 @@ fn letrec_self_recursion_accumulates() {
 #[test]
 fn defseq_ops_run_correctly() {
     assert_eq!(run("(map (range 5) inc)"), "(1 2 3 4 5)");
-    assert_eq!(run("(filter (range 10) math/even?)"), "(0 2 4 6 8)");
+    assert_eq!(run("(seq/filter (range 10) math/even?)"), "(0 2 4 6 8)");
     assert_eq!(
         run("(mapcat (range 3) (fn (x) (list x x)))"),
         "(0 0 1 1 2 2)"
     );
-    assert_eq!(run("(seq/remove (range 6) math/even?)"), "(1 3 5)");
+    assert_eq!(run("(seq/reject (range 6) math/even?)"), "(1 3 5)");
     assert_eq!(
         run("(seq/keep (range 6) (fn (x) (if (math/even? x) (* x 10) nil)))"),
         "(0 20 40)"

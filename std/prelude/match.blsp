@@ -464,7 +464,7 @@ NON-LINEAR patterns (the same name twice) work.
 ;; The explicit `{key subpattern}` entries — every key except the two markers — as
 ;; a list of `[key subpattern]` pairs.
 (defn- %match-map-entries (pat)
-  (filter (%map-pairs pat) (fn (kv) (not (or (= (first kv) :keys) (= (first kv) :or))))))
+  (%filter (%map-pairs pat) (fn (kv) (not (or (= (first kv) :keys) (= (first kv) :or))))))
 
 (defn- %match-map-vars (pat)
   (do

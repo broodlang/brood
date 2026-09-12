@@ -661,7 +661,8 @@ def main():
                 # check above sees nothing wrong. It happened with ADR-302's data-first
                 # wave (`(map f coll)` -> `(map coll f)`), where 14 of 25 seeds reported
                 # here and sent the reader to investigate the checker for twenty minutes.
-                combinators = ("map", "fold", "reduce", "filter", "keep", "seq/find")
+                combinators = ("map", "fold", "reduce", "seq/filter", "seq/reject",
+                               "seq/keep", "seq/find")
                 stale_order = [
                     ln for ln in w.splitlines()
                     if "argument" in ln and "expects" in ln

@@ -461,6 +461,15 @@ pub fn spawn_root_program(
     let runtime = heap.runtime_arc();
     let mut child = Heap::with_regions(prelude, runtime);
     child.set_global(EnvId::GLOBAL);
+    // Package-rooted namespaces (ADR-070): the program inherits the caller's package
+    // context, exactly as a spawned child does above. `nest run FILE` runs `project/setup`
+    // (which installs the project's context) and then launches the file through here — and
+    // without this the file's `(:use model)` loaded the project's module a SECOND time,
+    // bare, beside the rooted `bedit/model` the pre-flight check had already loaded, so
+    // every `deftype` alias in it was registered under two names and read as ambiguous
+    // (KI-129). Empty pair outside a package, so this is free for a plain `brood FILE`.
+    let (package_prefix, package_modules) = heap.package_context();
+    child.set_package_context(package_prefix, package_modules);
     // The program's file must be CURRENT before the read, not merely recorded in
     // `ProgramState` for error rendering: the reader stamps every form's position record
     // with `current_file_arc` at read time, and without this every form of a

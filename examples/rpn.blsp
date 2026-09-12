@@ -51,7 +51,7 @@
     (_ (failure (count stack) " values left on the stack: " (pr-str stack)))))
 
 (defn rpn (expr)
-  (ok-> expr (string/split) (seq/remove $ (fn (t) (= t ""))) (reduce '() step) (result)))
+  (ok-> expr (string/split) (seq/reject $ (fn (t) (= t ""))) (reduce '() step) (result)))
 
 (defn- show (src)
   (io/puts (str (string/pad-right (pr-str src) 18)

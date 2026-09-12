@@ -93,7 +93,7 @@
           (after 3000 (cons :timeout acc))))))
   (let (downs (collect-downs n nil))
     (io/puts "down messages:" (count downs))
-    (let (crashes (count (filter downs (fn (r) (string? (error-message r))))))
+    (let (crashes (count (seq/filter downs (fn (r) (string? (error-message r))))))
       (io/puts "crashed processes (approx):" crashes))))
 
 (io/puts "--- named-spawn idempotency: same name spawned from many processes ---")
@@ -140,7 +140,7 @@
     (io/puts "cube(10):" (get cubes 10))
     (io/puts "cube(200):" (get cubes 200))
     (io/puts "all correct?"
-      (= (count (filter cubes
+      (= (count (seq/filter cubes
                   (fn (kv) (= (first (rest kv)) (* (first kv) (* (first kv) (first kv)))))))
         n))))
 

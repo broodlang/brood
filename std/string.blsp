@@ -272,7 +272,7 @@ returns at least one piece, and the checker leans on that.
     (string/fields \" 1  2 \")   → (\"1\" \"2\")
     (string/fields \"a , b,,\" \",\")   → (\"a\" \"b\")
     (string/fields \"   \")   → nil"
-  (filter (map (split s sep) trim) (fn (piece) (not (= piece "")))))
+  (seq/filter (map (split s sep) trim) (fn (piece) (not (= piece "")))))
 (sig fields (string &optional string -> (or nil (list string))))
 
 (defn fill (s width)

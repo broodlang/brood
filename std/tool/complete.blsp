@@ -223,7 +223,7 @@ suggestions\", never to an error on the user's command line."
 
 ;; The bare names of the `:keyword`s in a whitespace-separated fragment.
 (defn- complete-keywords (fragment)
-  (fold (filter (string/split (string/trim fragment) " ") (fn (s) (not (= s ""))))
+  (fold (seq/filter (string/split (string/trim fragment) " ") (fn (s) (not (= s ""))))
     nil
     (fn (acc token)
       (if (and (string/starts-with? token ":") (> (string/length token) 1))
@@ -287,13 +287,13 @@ suggestions\", never to an error on the user's command line."
                                           nil
                                           (complete-plist-get (rest form) :dependencies)))
                                (if (or (vector? deps) (pair? deps))
-                                 (filter (map deps
-                                           (fn (d)
-                                             (complete-safely (fn ()
-                                                                (->string (if (or (vector? d)
-                                                                                (pair? d))
-                                                                            (first d)
-                                                                            d))))))
+                                 (seq/filter (map deps
+                                               (fn (d)
+                                                 (complete-safely (fn ()
+                                                                    (->string (if (or (vector? d)
+                                                                                    (pair? d))
+                                                                                (first d)
+                                                                                d))))))
                                    (fn (n) (not (nil? n))))
                                  nil))))
         nil))))
@@ -372,7 +372,7 @@ suggestions\", never to an error on the user's command line."
 
 (defn print-candidates (kind prefix)
   "Print one candidate per line for `kind`, keeping only those starting with `prefix` — the form `nest complete` consumes. Prints nothing (and never raises) when there is nothing to suggest, so the shell falls back to filename completion."
-  (fold (filter (or (complete-safely (fn () (for-kind kind))) nil)
+  (fold (seq/filter (or (complete-safely (fn () (for-kind kind))) nil)
           (fn (c) (or (= prefix "") (string/starts-with? c prefix))))
     nil
     (fn (_ c) (io/puts c)))

@@ -309,21 +309,21 @@ fn narrowing_on_the_wanted_type_silences_it() {
 
 /// The lint's own advice has to WORK on a collection, not only on a scalar.
 ///
-/// `(filter xs int?)` keeps exactly the items `int?` admits, so nothing downstream of it can
+/// `(seq/filter xs int?)` keeps exactly the items `int?` admits, so nothing downstream of it can
 /// be a failure — but `filter` used to pass the element type straight through, so the lint
 /// fired on code that had narrowed exactly as its message tells you to ("narrow with the type
 /// you want (`int?` …)"). A diagnostic whose recommended remedy does not silence it is worse
 /// than no diagnostic: it teaches the reader to ignore the message.
 ///
 /// Found on bedit, where it reddened CI's downstream gate on correct code:
-/// `(or (second (filter (map parts string/->number) int?)) 1)`.
+/// `(or (second (seq/filter (map parts string/->number) int?)) 1)`.
 #[test]
 fn filtering_a_collection_on_a_type_predicate_narrows_its_elements() {
     // `file_warnings`, not `warnings`: the bare-fragment harness cannot see through
     // `map`/`second` here — the element type comes back unknown, no failure is in the type,
     // and BOTH cases pass vacuously. The control below catches that, and did, twice.
     let narrowed = file_warnings(
-        "(defn f (parts) (let (nums (filter (map parts string/->number) int?)) \
+        "(defn f (parts) (let (nums (seq/filter (map parts string/->number) int?)) \
          (or (second nums) 1)))",
     );
     assert!(

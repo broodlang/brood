@@ -90,6 +90,13 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "The type expression a `(sig …)` DECLARED for global `name`, as written — `(model any -> model)` — or nil when none was declared (a `deftype` alias is not a signature and answers nil too). Symbol or string arg; a `mod/name` reference is rooted to its package like any other.",
         declared_sig);
     primitives.def(
+        "%type-aliases",
+        Arity::exact(0),
+        Sig::new(vec![], list_ty),
+        &[],
+        "Every `(deftype name T)` alias the checker knows (ADR-327), as a list of `[qualified-name-string type-form]` — the raw type-expression as written. The prelude's and every loaded module's. The mechanism under `reflect/type-aliases`, which filters by module and renders.",
+        type_aliases);
+    primitives.def(
         "%type-signature",
         Arity::exact(1),
         Sig::new(vec![sym.union(string)], string.union(nil_ty)),
@@ -275,7 +282,12 @@ pub(super) fn declared_sig(args: &[Value], _env: EnvId, heap: &mut Heap) -> Lisp
             }
         }
         other => {
-            return Err(LispError::wrong_type(heap, "declared-sig", "symbol or string", other))
+            return Err(LispError::wrong_type(
+                heap,
+                "declared-sig",
+                "symbol or string",
+                other,
+            ))
         }
     };
     // `commands/cmd-open` is `bedit/commands/cmd-open` inside project bedit (ADR-070) —
@@ -294,6 +306,31 @@ pub(super) fn declared_sig(args: &[Value], _env: EnvId, heap: &mut Heap) -> Lisp
         matches!(items.first(), Some(Value::Sym(h)) if value::symbol_is(*h, crate::builtins::modules::TYPE_ALIAS_MARKER))
     });
     Ok(if is_alias { Value::nil() } else { form })
+}
+
+/// `(%type-aliases)` — every `deftype` alias in the declared-sig store, as
+/// `[qualified-name type-form]` vectors. An alias rides the store wrapped as `(%type T)`
+/// (ADR-327); this unwraps the marker, and answers ONLY the alias entries — a signature is
+/// `%declared-sig`'s. The docs' "Types" section reads it: a `deftype` binds no global, so
+/// the module's name walk cannot see it.
+pub(super) fn type_aliases(_args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let entries = heap.declared_sigs_everywhere();
+    let mut out = Vec::new();
+    for (sym, form) in entries {
+        let Ok(items) = heap.list_to_vec(form) else {
+            continue;
+        };
+        let [Value::Sym(head), inner] = items.as_slice() else {
+            continue;
+        };
+        if !value::symbol_is(*head, crate::builtins::modules::TYPE_ALIAS_MARKER) {
+            continue;
+        }
+        let name = heap.alloc_string(&value::symbol_name(sym));
+        let inner = *inner;
+        out.push(heap.alloc_vector2(name, inner));
+    }
+    Ok(heap.list(out))
 }
 
 /// `(references-in-source name source)` — every occurrence of the global `name`

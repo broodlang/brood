@@ -22,7 +22,7 @@
       true)))
 
 (defn blsp-files (dir)
-  (filter (map (file/ls dir) (fn (e) (path/join dir e))) (fn (p) (string/ends-with? p ".blsp"))))
+  (seq/filter (map (file/ls dir) (fn (e) (path/join dir e))) (fn (p) (string/ends-with? p ".blsp"))))
 
 (defn check-dir (dir)
   (do

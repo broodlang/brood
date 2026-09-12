@@ -1268,22 +1268,22 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
             elem.union(absent.unwrap_or(Ty::of(Tag::Nil)))
         });
     }
-    // `(filter pred coll)` keeps `coll`'s element type — the result is the items
+    // `(seq/filter coll pred)` keeps `coll`'s element type — the result is the items
     // that pass, so `nil | list<A>` for `A = elem(coll)` (ADR-078 parametric
     // results). `None` element → fall through to the flat curated `list`.
-    if value::symbol_is(head, "filter") {
+    if value::symbol_is(head, "seq/filter") {
         // Data-first (ADR-308): the collection is argument one.
         let coll = *items.get(1)?;
         let coll_ty = expr_ty(heap, coll, ctx);
         let a = coll_ty.as_ref().and_then(|t| t.elem_ty());
-        // …NARROWED by the predicate when it is a type predicate: `(filter xs int?)` keeps
+        // …NARROWED by the predicate when it is a type predicate: `(seq/filter xs int?)` keeps
         // only the items `int?` admits, so the result's elements are `elem ∩ int`. This is
         // the same `Ty::tested_by` bridge occurrence typing uses for an `if` guard, applied
         // to the elements that survive rather than to a binding.
         //
         // Without it the element type passed straight through, and ADR-316's failure lint
         // fired on code that had narrowed exactly as the lint's own message advises:
-        // `(or (second (filter (map parts string/->number) int?)) 1)` still carried
+        // `(or (second (seq/filter (map parts string/->number) int?)) 1)` still carried
         // `failure`, so the remedy the diagnostic recommends did not silence it. Found on
         // bedit, where it reddened the downstream CI gate.
         let a = match (a, items.get(2).and_then(|p| predicate_tested_ty(*p))) {
@@ -1293,7 +1293,7 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         };
         // `filter` builds a LIST whatever it is handed (a vector in, a list out), so with
         // the element type unknown the result is still `list`, not the curated `seqable` —
-        // `(filter pred (file/ls d))` declared `(list string)` is not "seqable ⊄ list".
+        // `(seq/filter pred (file/ls d))` declared `(list string)` is not "seqable ⊄ list".
         return list_result(a).or_else(|| coll_ty.map(|_| Ty::LIST));
     }
     // `(seq/find coll pred)` is ONE item that passes, or `nil` — the element type
@@ -1554,12 +1554,12 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
         return list_result(a);
     }
-    // `(seq/remove coll pred)` keeps what `pred` REJECTS — the complement of `filter`: with
-    // a type predicate the survivors are `elem ∖ tested`, so `(seq/remove xs nil?)` — the
+    // `(seq/reject coll pred)` keeps what `pred` REJECTS — the complement of `seq/filter`: with
+    // a type predicate the survivors are `elem ∖ tested`, so `(seq/reject xs nil?)` — the
     // idiom for "the matches, minus the misses" — answers `list<T>` from a `list<nil | T>`.
     // Its element type used to pass through unchanged, and the `nil` the call exists to
     // drop reached the next consumer as a finding.
-    if value::symbol_is(head, "seq/remove") && items.len() == 3 {
+    if value::symbol_is(head, "seq/reject") && items.len() == 3 {
         let coll_ty = expr_ty(heap, items[1], ctx);
         let a = coll_ty.as_ref().and_then(|t| t.elem_ty());
         let a = match (a, predicate_tested_ty(items[2])) {

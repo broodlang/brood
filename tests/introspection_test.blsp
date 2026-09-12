@@ -239,7 +239,8 @@
 (describe "declared-signature"
   (test "answers the sig as the author wrote it, alias names and all"
     (assert= (reflect/declared-signature 'introspection-test/intro-declared) "(intro-thing -> int)")
-    (assert= (reflect/declared-signature "introspection-test/intro-declared") "(intro-thing -> int)"))
+    (assert= (reflect/declared-signature "introspection-test/intro-declared")
+      "(intro-thing -> int)"))
   (test "nil for a function nothing was declared for, and for a name that is not a global"
     (assert= (reflect/declared-signature 'introspection-test/intro-undeclared) nil)
     (assert= (reflect/declared-signature 'no-such-global-xyz) nil)
@@ -266,21 +267,25 @@
         (let (v (thunk))
           (do (%restore-compile-context before) v)))))
   (test "a declared return type is checked, and a same-module alias resolves by its short name"
-    (let (w (under-context 'introspection-test []
+    (let (w (under-context 'introspection-test
+              []
               (fn () (reflect/check-string-here "(sig g (intro-thing -> string)) (defn g (t) 42)"))))
       (assert= (count w) 1)
       (is (includes? (:message (first w)) "declared return type string"))))
   (test "an imported bare name resolves through the context's imports; as a file it is unbound"
     (let (src "(defn g (t) (pane-count t))"
-          here (under-context 'introspection-test [['pane-count 'editor/pane/pane-count]]
+          here (under-context 'introspection-test
+                 [['pane-count 'editor/pane/pane-count]]
                  (fn () (reflect/check-string-here src)))
           alone (reflect/check-string-structured src))
       (assert= here ())
       (assert= (count alone) 1)
       (is (includes? (:message (first alone)) "unbound symbol: pane-count"))))
   (test "forms that open their own module are checked under it, as a file would be"
-    (let (w (under-context 'introspection-test []
-              (fn () (reflect/check-string-here "(defmodule elsewhere) (sig g (int -> string)) (defn g (t) 42)"))))
+    (let (w (under-context 'introspection-test
+              []
+              (fn ()
+                (reflect/check-string-here "(defmodule elsewhere) (sig g (int -> string)) (defn g (t) 42)"))))
       (assert= (count w) 1)
       (is (includes? (:message (first w)) "elsewhere/g: declared return type string"))))
   (test "unparsable input is () — a buffer mid-edit is not an error"
@@ -493,7 +498,7 @@
   (test "returns a vector of keywords"
     (let (fs (system/features))
       (is (vector? fs))
-      (assert= (count (filter fs (fn (f) (not (keyword? f))))) 0)))
+      (assert= (count (seq/filter fs (fn (f) (not (keyword? f))))) 0)))
 
   (test "the jit is on in a default build" (is (includes? (system/features) :jit)))
 

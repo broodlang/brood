@@ -162,7 +162,7 @@ shape `std/observer` draws by hand. Returns one `text` op.
 can splice in conditional ops inline. Pass the result to a frontend (`term/draw`).
 
     (count (editor/display/frame (editor/display/clear)))   → 1"
-  (into [] (filter ops (fn (o) (not (nil? o))))))
+  (into [] (seq/filter ops (fn (o) (not (nil? o))))))
 
 ;; ---- interaction zones (hover / click hit-testing) --------------------------
 ;; `cursor-zone` (above) is a *render op* the frontend hit-tests to choose a pointer
@@ -196,7 +196,7 @@ zone) and on click (to find the target)."
   "`cursor-zone` render ops for every zone in `zones` that requests a `:cursor` shape — so
 the one zone list the model hit-tests also drives the frontend's pointer shape. Zones with
 no `:cursor` contribute nothing."
-  (map (filter zones :cursor)
+  (map (seq/filter zones :cursor)
     (fn (z) (let ([x y w h] (get z :rect)) (cursor-zone x y w h (get z :cursor))))))
 (sig zone-cursor-ops (seqable -> (or nil (list (tuple :cursor-zone any any any any any)))))
 

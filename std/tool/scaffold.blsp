@@ -359,7 +359,7 @@ test discovery, lints, release, config)."
     "    (is (get (app-update {:count 0} :ctrl-c 80 24) :done))\n"
     "    (is (get (app-update {:count 0} :escape 80 24) :done)))\n"
     "  (test \"view shows the counter value\"\n" "    (let (f (app-view {:count 3} 80 24))\n"
-    "      (is (> (count (filter f (fn (op) (and (= (first op) :text)\n"
+    "      (is (> (count (seq/filter f (fn (op) (and (= (first op) :text)\n"
     "                                            (includes? (nth op 3) \"count: 3\")))))\n"
     "             0)))))\n"))
 

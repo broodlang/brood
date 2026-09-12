@@ -276,7 +276,7 @@ full budget still yields the failing value, while a merely slow one is forgiven.
 (defn- stream-test-my-id () (get (proc/info (self)) :id))
 
 (defn- stream-test-parked-children (me)
-  (count (filter (proc/list)
+  (count (seq/filter (proc/list)
            (fn (p)
              (and (= me (get (proc/info p) :parent))
                (= :waiting (get (proc/info p) :status)))))))

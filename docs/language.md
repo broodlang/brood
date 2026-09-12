@@ -268,7 +268,7 @@ A **keyword is callable** — the one exception to "the head of a form is a func
 (:name person "unknown")    ; ≡ (get person :name "unknown")
 (map :name people)          ; the reason for the exception
 (sort-by :id procs)
-(filter :cursor zones)
+(seq/filter zones :cursor)
 ```
 
 The point is the last three: a keyword is a first-class *value*, so any higher-order
@@ -300,7 +300,7 @@ answers by index-or-membership, the ambiguity `contains?` deliberately refuses
 mean the literal keyword `:k`.
 
 A map is **seqable as its `[k v]` pairs**: `seq`, `first`, `rest`, `last`, `map`,
-`filter`, `fold`/`reduce`, `into`, and `vec` all read it that way, so
+`seq/filter`, `fold`/`reduce`, `into`, and `vec` all read it that way, so
 `(map first m)` is its keys and `(first m)` is a `[k v]` vector (`nil` for an empty
 map). Use `reduce-kv` when you want the key and value as separate arguments.
 
@@ -572,7 +572,7 @@ checker and LSP read.
 
 The id is held in a reserved `:__id__` field, reachable by direct `(get r :__id__)`,
 but the record's **collection view is the fields, id-free**: `seq`/`count`/`keys`/`vals`
-— and `map`/`filter`/`fold`/`for`/`into`, which coerce through `seq` — see only the
+— and `map`/`seq/filter`/`fold`/`for`/`into`, which coerce through `seq` — see only the
 fields, so `(count (circle 2))` is `1`. This is the `Seqable` ability (op `->seq`,
 default = the fields); a custom-collection record overrides it to define its own
 iteration. `(fields r)` gives the id-free map explicitly; nothing else should read
@@ -2525,7 +2525,7 @@ to your mailbox — resend the queue on `[:nodeup …]`.
 > **Where these live:** only a small primitive kernel is implemented in Rust
 > (the `%`-prefixed numeric ops, `cons`/`first`/`rest`, type predicates, I/O,
 > `reflect/eval`/`reflect/load`, …). The functions below that aren't primitives — `+ - * / <
-> = map filter reduce list …` — are defined *in Brood* in `std/prelude/*.blsp`,
+> = map reduce list …` — are defined *in Brood* in `std/prelude/*.blsp`,
 > the same way you'd define your own. See spec.md §9 for the exact split. From a
 > caller's point of view they're all just functions.
 
@@ -2667,8 +2667,9 @@ In the `math` module: `math/mod`  `math/rem`  `math/quot`  `math/floor`  `math/m
 > *derived* sequence helpers live in the `seq` module rather than the bare prelude: `dedupe`, `distinct-by`,
 > `group-by`, `frequencies`, `chunk-by`, `chunk-every`, `interpose`, `interleave`,
 > `scan`, `zip-with`, `reduce-while`, `min-by`, `max-by`, `enumerate`, `index-where`.
-> The *core* protocol above (`map`/`filter`/`reduce`/`fold`/`take`/`drop`/`distinct`/
-> `take-while`/`partition`/`zip`/…) stays bare. Reach the helpers with `(:use seq)`
+> The *core* protocol above (`map`/`reduce`/`fold`/`take`/`drop`/`take-while`/
+> `partition`/…) stays bare. **`filter` is not bare** — it is `seq/filter`, moved here in
+> ADR-330 to sit beside its complement `seq/reject`; so are `distinct`, `zip` and `find`. Reach the helpers with `(:use seq)`
 > in your module header, or call them qualified (`seq/group-by`). The descriptions
 > below cover them all; the enum ones just need the import.
 
@@ -2679,7 +2680,7 @@ In the `math` module: `math/mod`  `math/rem`  `math/quot`  `math/floor`  `math/m
   returning the last accumulator. `(reduce-while (fn (a x) (if (> a 100) [:halt a]
   [:cont (+ a x)])) 0 (range 1000))` → `105`. An all-`:cont` reducer is just `fold`.
 - **One sequence view, every collection.** `first`/`rest`/`last`/`count`/`empty?`/
-  `map`/`filter`/`fold`/`reduce`/`into`/`vec`/`seq` accept a list, vector, `bytes`,
+  `map`/`seq/filter`/`fold`/`reduce`/`into`/`vec`/`seq` accept a list, vector, `bytes`,
   **set** (as its elements) or **map** (as its `[k v]` pairs) — so
   `(first {:a 1})` is `[:a 1]`, not an error, as it was before 2026-07-26.
   `(seq coll)` is the explicit coercion to that list view, and `(vec coll)` /
@@ -2715,9 +2716,13 @@ In the `math` module: `math/mod`  `math/rem`  `math/quot`  `math/floor`  `math/m
 - `subvec` slices a vector, returning a **vector**: `(subvec v start)` to the end
   or `(subvec v start end)` for the half-open range `[start, end)` (the
   vector-preserving counterpart of `take`/`drop`, which return lists).
-- `remove` is the complement of `filter`; `remove-nth` drops the element at a
-  given index (returning a vector for a vector, a list for a list); `keep` maps a
-  function and drops the `nil` results (map + filter fused).
+- `seq/reject` is the complement of `seq/filter` (ADR-330 — it was `seq/remove`, renamed
+  because `remove` reads as element removal, which is what its neighbour `seq/remove-nth`
+  actually does: that one drops the element at a given index, returning a vector for a
+  vector and a list for a list). `seq/keep` maps a function and drops the `nil` results
+  (map + filter fused) — note it collects `(f x)`, not the item, which is what makes it a
+  different operation from `seq/filter` rather than a synonym. `seq/filterv`/`seq/rejectv`
+  are the vector-returning pair.
 - On a vector, `assoc`/`update`/`get` index by integer position — see
   [Maps](#maps) (`assoc`/`update`) and the index note there.
 - `distinct` removes duplicates, keeping the first occurrence (order-preserving);
@@ -2740,11 +2745,11 @@ In the `math` module: `math/mod`  `math/rem`  `math/quot`  `math/floor`  `math/m
 - `sort` orders ascending (or with a strict less-than predicate:
   `(sort xs >)`); `sort-by` orders by a key function. Both are a **stable**
   merge sort. All of these are tail-recursive (stack-safe on long inputs).
-- **Lazy, fusing pipelines.** `map`/`filter`/`keep`/`remove` are **eager** — they
+- **Lazy, fusing pipelines.** `map`/`seq/filter`/`seq/keep`/`seq/reject` are **eager** — they
   return a concrete list and run their function immediately (so `(map f xs)` for
   side effects works). When you want a pipeline to **fuse** — fold/reduce in a
   single pass with no intermediate lists — use the lazy combinators `seq/lmap`,
-  `seq/lfilter`, `seq/lkeep`, `seq/lremove`, threaded with `->`:
+  `seq/lfilter`, `seq/lkeep`, `seq/lreject`, threaded with `->`:
   `(-> (range n) (seq/lfilter odd?) (seq/lmap sq) (reduce 0 +))`. Each returns a **lazy
   seq-view** — an O(1) value (like a [lazy range](#lists--sequences)) that stands
   in for the list it would produce. Chaining composes the stages onto one view,
@@ -2759,15 +2764,15 @@ In the `math` module: `math/mod`  `math/rem`  `math/quot`  `math/floor`  `math/m
   live view.
 
 ### Transducers
-`transduce`  `xmap`  `xfilter`  `xremove`  `xkeep`
+`seq/transduce`  `seq/xmap`  `seq/xfilter`  `seq/xreject`  `seq/xkeep`
 
 The `l*` combinators above are the ergonomic front end; `transduce` is the same
 machinery with the stages exposed, for when the pipeline is **computed, reused, or
 your own**:
 
 ```clojure
-(transduce (comp (xfilter odd?) (xmap sq)) + 0 (range 10))   ;=> 165, one pass
-(transduce (xmap inc) conj [] (list 1 2 3))                  ;=> [2 3 4]
+(seq/transduce (range 10) (comp (seq/xfilter odd?) (seq/xmap sq)) + 0)   ;=> 165, one pass
+(seq/transduce (list 1 2 3) (seq/xmap inc) conj [])                      ;=> [2 3 4]
 ```
 
 A **transducer** is a function `(rf) -> rf'`, where a **reducing function** `rf` is
@@ -2778,12 +2783,12 @@ input. So a stage of your own is a plain `fn` — no protocol to implement:
 (defn xtake-while (pred)
   (fn (rf) (fn (acc x) (if (pred x) (rf acc x) acc))))
 
-(transduce (xtake-while (fn (n) (< n 3))) conj [] (range 6))  ;=> [0 1 2]
+(seq/transduce (range 6) (xtake-while (fn (n) (< n 3))) conj [])  ;=> [0 1 2]
 ```
 
 Stages compose **left to right in data-flow order** under `comp` — the reverse of
 ordinary function composition — because each stage wraps the *next* one's reducer.
-`(comp (xfilter p) (xmap f))` filters, then maps.
+`(comp (seq/xfilter p) (seq/xmap f))` filters, then maps.
 
 ### Maps
 `hash-map`  `get`  `assoc`  `dissoc`  `contains?`  `keys`  `vals`  `reduce-kv`
@@ -2799,20 +2804,21 @@ in **O(1)** — the CHAMP root node tracks its size (exposed by the `%map-count`
 kernel primitive), so neither walks nor materialises the entries.
 
 ### Higher-order
-`map`  `filter`  `mapv`  `filterv`  `reduce`  `fold`  `apply`
+`map`  `seq/filter`  `seq/reject`  `mapv`  `seq/filterv`  `seq/rejectv`  `reduce`  `fold`  `apply`
 `comp`  `partial`  `complement`  `constantly`  `identity`
 
 ```clojure
-(map inc (list 1 2 3))        ;=> (2 3 4)
-(filter positive? (list -1 2 -3 4)) ;=> (2 4)
-(mapv inc (list 1 2 3))       ;=> [2 3 4]   (vector result)
-(filterv even? (range 5))     ;=> [0 2 4]   (vector result)
-(reduce + 0 (list 1 2 3 4))   ;=> 10
-(apply + (list 1 2 3))        ;=> 6
+(map (list 1 2 3) inc)                      ;=> (2 3 4)
+(seq/filter (list -1 2 -3 4) math/positive?) ;=> (2 4)
+(seq/reject (list -1 2 -3 4) math/positive?) ;=> (-1 -3)
+(mapv (list 1 2 3) inc)                     ;=> [2 3 4]   (vector result)  ; `mapv` is BARE
+(seq/filterv (range 5) math/even?)          ;=> [0 2 4]   (vector result)
+(reduce (list 1 2 3 4) 0 +)                 ;=> 10
+(apply + (list 1 2 3))                      ;=> 6
 ```
 
-`map`/`filter` return lists; `mapv`/`filterv` are the vector-returning variants
-for when the caller needs indexed access — the named form of
+`map`/`seq/filter`/`seq/reject` return lists; `mapv`/`seq/filterv`/`seq/rejectv` are the
+vector-returning variants for when the caller needs indexed access — the named form of
 `(into [] (map …))`.
 
 `reduce` takes `(reduce f init coll)` or `(reduce f coll)` (first item as the
@@ -2823,9 +2829,10 @@ surface you reach for, `fold` the strict-arity primitive it dispatches to (ADR-1
 The function combinators build the callbacks those ops take:
 
 ```clojure
-(map (partial + 10) (list 1 2 3))     ;=> (11 12 13)  ; fix the leading args
-(filter (complement odd?) (range 5))  ;=> (0 2 4)     ; negate a predicate
-(map (constantly :x) (list 1 2))      ;=> (:x :x)     ; ignore the argument
+(map (list 1 2 3) (partial + 10))                ;=> (11 12 13)  ; fix the leading args
+(seq/filter (range 5) (complement math/odd?))    ;=> (0 2 4)     ; negate a predicate
+(seq/reject (range 5) math/odd?)                 ;=> (0 2 4)     ; or just say reject
+(map (list 1 2) (constantly :x))                 ;=> (:x :x)     ; ignore the argument
 ((comp inc (partial * 2)) 5)          ;=> 11          ; right-to-left composition
 ```
 
@@ -3421,7 +3428,7 @@ its names bare. Run `nest doc <module>` for the full API of any module.
 | `std/file.blsp` | `'file` | Filesystem policy over the kernel's fs primitives: `read-lines`, `write-lines`, `regular?`, `list-files`, `list-dirs`, `walk-files`. Pure path-string ops (`extension`, `stem`, …) live in `path` (ADR-234). All Brood (ADR-006), no new Rust |
 | `std/io.blsp` | `'io` | Output **ports** — the `Port` ability (`io-write`), `stdout-port`, `stderr-port`, `process-port`, `file-port`, `fn-port`, and the `with-out`/`with-err` redirections — so output has a first-class destination instead of a fixed stdout. Also the writers themselves: `io/write`, `io/puts`, `io/inspect`, each taking an optional trailing `:to <port>` (see also `std/log.blsp`) |
 | `std/text.blsp` | `'text` | Plain-text transforms with no editor/buffer/IO dependency: `fill`, greedy word-wrap to a column width. Pure Brood over the string primitives, so it is reusable anywhere (fill-paragraph, wrapping help text or REPL output) |
-| `std/enum.blsp` | `'enum` | Derived **sequence helpers** (ADR-227) layered over the bare collection protocol: `dedupe`, `distinct-by`, `group-by`, `frequencies`, `chunk-by`, `chunk-every`, `interpose`, `interleave`, `scan`, `zip-with`, `reduce-while`, `min-by`, `max-by`, `enumerate`, `index-where`. The core ops (`map`/`filter`/`reduce`/`fold`/`take`/`drop`/`distinct`/`take-while`/`partition`/`zip`) stay bare in the prelude; `(:use seq)` for bare access or call qualified |
+| `std/seq.blsp` | `'seq` | Derived **sequence helpers** (ADR-227) layered over the bare collection protocol: `dedupe`, `distinct-by`, `group-by`, `frequencies`, `chunk-by`, `chunk-every`, `interpose`, `interleave`, `scan`, `zip-with`, `reduce-while`, `min-by`, `max-by`, `enumerate`, `index-where`. Also `filter`/`reject`/`keep`/`filterv`/`rejectv`/`distinct`/`zip`/`find`/`flatten` and the transducer + lazy stages. The core ops (`map`/`reduce`/`fold`/`take`/`drop`/`take-while`/`partition`) stay bare in the prelude; `(:use seq)` for bare access or call qualified |
 | `std/map.blsp` | `'map` | Derived **map-transformation helpers** (ADR-227): `merge-with`, `update-vals`, `update-keys`, `select-keys`. The core map protocol (`assoc`/`dissoc`/`get`/`keys`/`vals`/`contains?`/`reduce-kv`/`update`/`get-in`/`update-in`/`merge`) stays bare in the prelude; `(:use map)` for bare access or call qualified (the bare `map` *function* is unaffected) |
 | `std/math.blsp` | `'math` | The derived **math library** (ADR-227): `sqrt`, `pow`, `ceil`, `round`, `round-to`, `clamp`, `abs`, `sum`, `product`, the sign/parity predicates (`positive?`/`negative?`/`even?`/`odd?`), and the constants `pi`/`e`. Only the **operators** (`+` `-` `*` `/` `<` `=` …) and `inc`/`dec` stay bare in the prelude — `quot`/`mod`/`rem`/`floor`/`min`/`max` are derived arithmetic and live here too, so they are `math/quot`, `math/min`, … unless `(:use math)` brings them back bare |
 | `std/ansi.blsp` | `'ansi` | ANSI/VT100 escape-sequence **stripping** for pipe output — `strip-ansi` removes CSI colour/cursor sequences (reading a subprocess that emits colour). For *emitting* escapes in a display frontend, see `std/editor/ansi.blsp` instead |

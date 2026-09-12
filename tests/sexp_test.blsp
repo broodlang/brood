@@ -112,10 +112,10 @@
   ;; brute-force references: the same queries over the WHOLE-buffer CST, un-narrowed.
   (defn bf-enc (text point) (enclosing (tree text) point))
   (defn bf-forward (text point)
-    (let (nxt (first (filter (forms-of (bf-enc text point)) (fn (f) (>= (get f :start) point)))))
+    (let (nxt (first (seq/filter (forms-of (bf-enc text point)) (fn (f) (>= (get f :start) point)))))
       (if (nil? nxt) point (get nxt :end))))
   (defn bf-backward (text point)
-    (let (prev (last (filter (forms-of (bf-enc text point)) (fn (f) (<= (get f :end) point)))))
+    (let (prev (last (seq/filter (forms-of (bf-enc text point)) (fn (f) (<= (get f :end) point)))))
       (if (nil? prev) point (get prev :start))))
   (def many
     (str (string/join (map (range 300) (fn (i) (str "(defn f" i " () " i ")\n"))) "")

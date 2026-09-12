@@ -70,9 +70,18 @@ thread_local! {
     /// so a module's own `(deftype pane …)` is the `pane` its sigs mean even when another
     /// loaded module declared one too.
     static ALIAS_FILE_NS: RefCell<Option<String>> = const { RefCell::new(None) };
-    /// The aliases currently being expanded — a recursive alias (`(deftype t (or nil
-    /// (vector t)))`) would otherwise expand forever. A name met again on its own path
-    /// reads as `any`: the checker has no recursive types, and unknown is the sound answer.
+    /// The file's imports: the rooted names of its `(:use …)` modules, and its
+    /// `(:alias mod :as short)` prefixes — a bare alias name resolves to a `:use`d
+    /// module's before the loaded-module-wide unique-suffix rule, and `short/name`
+    /// reaches `mod/name`. What a reader of the header expects (ADR-327 follow-up).
+    static ALIAS_IMPORTS: RefCell<super::ImportScope> = RefCell::new(super::ImportScope::default());
+    /// The aliases currently being expanded, one entry per level — a recursive alias
+    /// (`(deftype tree (or nil (record :v int :l tree :r tree)))`) would otherwise expand
+    /// forever. The checker has no recursive types, so a name met on its own path is
+    /// UNROLLED: it expands [`RECURSIVE_UNROLL`] more times and then reads as `any`, the
+    /// gradual unknown. Sound at every depth (`any` is a superset of what the name
+    /// denotes), and one level of unrolling is what types the field reads a tree walk
+    /// actually writes — `(:v (:l t))` is `nil | int`, where it was `any`.
     static ALIASES_EXPANDING: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     /// What each expanded alias LOOKS like, back to the name it was written as — so a
     /// diagnostic can say `declared return type model` rather than print the forty-field
@@ -80,6 +89,12 @@ thread_local! {
     /// identity beyond its shape); filled as aliases resolve, cleared with the table.
     static ALIAS_DISPLAY: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
 }
+
+/// How many times a recursive alias re-expands inside its own expansion before the
+/// occurrence reads as `any` (see [`ALIASES_EXPANDING`]). One: the outer expansion holds
+/// one unrolled copy, whose own self-references are the unknown. Bounded so a shape with
+/// `k` self-references costs `k` copies, not `k^n`.
+const RECURSIVE_UNROLL: usize = 1;
 
 /// How to SHOW a type in a diagnostic: the alias it was declared through, when one in
 /// scope expands to exactly this shape (the `model` a `sig` named, not its record), else
@@ -92,18 +107,24 @@ pub(crate) fn display_ty(ty: &Ty) -> String {
 }
 
 /// Install the type-alias table for this file (see [`TYPE_ALIASES`]).
-pub(super) fn set_type_aliases(map: HashMap<String, Value>, file_ns: Option<String>) {
+pub(super) fn set_type_aliases(
+    map: HashMap<String, Value>,
+    file_ns: Option<String>,
+    imports: super::ImportScope,
+) {
     TYPE_ALIASES.with(|m| *m.borrow_mut() = map);
     ALIAS_FILE_NS.with(|n| *n.borrow_mut() = file_ns);
+    ALIAS_IMPORTS.with(|i| *i.borrow_mut() = imports);
     ALIAS_DISPLAY.with(|m| m.borrow_mut().clear());
 }
 
 /// The type an alias `name` denotes, or `None` when no alias is in scope by that name.
-/// Resolution: the file's own namespace first (`ns/name` — a module's own alias is the one
-/// its sigs mean), then the spelling itself (already qualified), then the ONE alias in
-/// scope whose qualified name ends in `/name` — two candidates decline, as a record name's
-/// `record_id_for` does, so an ambiguous bare name is reported as unknown rather than
-/// silently picking a module.
+/// Resolution, nearest first: the file's own namespace (`ns/name` — a module's own alias
+/// is the one its sigs mean); the spelling itself (already qualified); through an
+/// `(:alias mod :as short)` prefix (`short/name` is `mod/name`); the ONE `(:use …)`d module
+/// declaring it; then the ONE alias in scope whose qualified name ends in `/name`. Two
+/// candidates at any step decline, as a record name's `record_id_for` does, so an
+/// ambiguous bare name is reported as unknown rather than silently picking a module.
 fn alias_ty(heap: &Heap, name: &str) -> Option<Ty> {
     let (qualified, form) = TYPE_ALIASES.with(|m| {
         let aliases = m.borrow();
@@ -114,6 +135,34 @@ fn alias_ty(heap: &Heap, name: &str) -> Option<Ty> {
         if let Some(form) = aliases.get(name) {
             return Some((name.to_string(), *form));
         }
+        let imported = ALIAS_IMPORTS.with(|i| {
+            let imports = i.borrow();
+            if let Some((short, bare)) = name.rsplit_once('/') {
+                let mut hits = imports
+                    .aliases
+                    .iter()
+                    .filter(|(prefix, _)| prefix == short)
+                    .map(|(_, module)| format!("{module}/{bare}"))
+                    .filter(|id| aliases.contains_key(id));
+                let first = hits.next();
+                return if hits.next().is_some() { None } else { first };
+            }
+            let mut hits = imports
+                .used
+                .iter()
+                .map(|module| format!("{module}/{name}"))
+                .filter(|id| aliases.contains_key(id));
+            let first = hits.next();
+            if hits.next().is_some() {
+                None
+            } else {
+                first
+            }
+        });
+        if let Some(id) = imported {
+            let form = *aliases.get(&id)?;
+            return Some((id, form));
+        }
         let suffix = format!("/{name}");
         let mut hits = aliases.iter().filter(|(id, _)| id.ends_with(&suffix));
         let first = hits.next().map(|(id, form)| (id.clone(), *form))?;
@@ -122,8 +171,8 @@ fn alias_ty(heap: &Heap, name: &str) -> Option<Ty> {
         }
         Some(first)
     })?;
-    let recursive = ALIASES_EXPANDING.with(|v| v.borrow().contains(&qualified));
-    if recursive {
+    let depth = ALIASES_EXPANDING.with(|v| v.borrow().iter().filter(|q| **q == qualified).count());
+    if depth > RECURSIVE_UNROLL {
         return Some(Ty::ANY);
     }
     ALIASES_EXPANDING.with(|v| v.borrow_mut().push(qualified));

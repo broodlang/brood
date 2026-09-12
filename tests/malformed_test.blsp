@@ -200,7 +200,7 @@
 
   (test "map/filter/fold accept nil as an empty sequence"
     (assert= nil (map nil (fn (x) (* x 2))))
-    (assert= nil (filter nil odd?))
+    (assert= nil (seq/filter nil odd?))
     (assert= 0 (fold nil 0 +)))
 
   (test "(reduce f '()) with no init value returns nil"

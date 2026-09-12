@@ -120,7 +120,8 @@ exist."
   (test "enough blocks still PARSE to make the head checks meaningful"
     ;; If a reader or fence change made every block unparseable, the checks would go
     ;; vacuously green. They are fragments, so this is a floor, not a total.
-    (is (> (count (filter (mapcat *docs* blocks-in) (fn (b) (not (nil? (heads-of-block b)))))) 20)))
+    (is (> (count (seq/filter (mapcat *docs* blocks-in) (fn (b) (not (nil? (heads-of-block b))))))
+          20)))
 
   (test "the retired list still names names that are actually gone"
     ;; Guards the guard the other way: if a retired name came back, checking for its
@@ -134,7 +135,7 @@ exist."
     ;; `bound?` alone is not enough: a qualified reference auto-requires at COMPILE time,
     ;; and nothing here compiles the block, so the module must be loaded first. Without
     ;; this the check reports `node/start` and eight others as missing when they are fine.
-    (let (heads (seq/distinct (filter (all-heads) qualified?)))
+    (let (heads (seq/distinct (seq/filter (all-heads) qualified?)))
       (doseq (h heads)
         ;; check-allow :discarded-catch — a snippet that does not read, or a module with no file behind it, is expected
         (check-allow :discarded-catch (try (require-one (symbol (module-of h))) (catch _ nil))))

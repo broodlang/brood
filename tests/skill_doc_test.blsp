@@ -92,14 +92,14 @@ with the name attached, which a raise here would not have."
   ;; to diffing a 200-line markdown table against the std tree.
   (test "every name it presents as available is bound"
     (load-owners! *available*)
-    (assert= [] (into [] (filter *available* (fn (name) (not (bound? name)))))))
+    (assert= [] (into [] (seq/filter *available* (fn (name) (not (bound? name)))))))
 
   ;; Deliberately AFTER the loads above are possible: a retired bare name must stay unbound
   ;; even once `io`, `seq`, `rand` and `string` are in the image, which is the state a real
   ;; program is in. `io/puts` exists and bare `puts` must not — that is the whole claim.
   (test "every name it presents as retired is absent"
     (load-owners! *available*)
-    (assert= [] (into [] (filter *retired* bound?))))
+    (assert= [] (into [] (seq/filter *retired* bound?))))
 
   ;; Guards the shipped TEXT of BOTH documents, not just the names. `nest new` and
   ;; `nest update-tooling` write these two files into every project from this binary, so a
@@ -118,5 +118,5 @@ with the name attached, which a raise here would not have."
             ;; NOT here: the "don't guess the standard library" section names it as an
             ;; example of a plausible-but-wrong guess, which is exactly right. The
             ;; *retired* list above is what holds that name to account.
-            (filter (list "`(print " "`string->list`" "`string->graphemes`" "`(private? ")
+            (seq/filter (list "`(print " "`string->list`" "`string->graphemes`" "`(private? ")
               (fn (bad) (>= (index-of text bad) 0)))))))))

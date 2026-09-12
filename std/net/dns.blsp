@@ -33,12 +33,12 @@
   follows will fail with something a caller can act on."
   (let (text (check-allow :discarded-catch
                (try (file/slurp "/etc/resolv.conf") (catch _e ""))))
-    (or (first (filter (map (string/split (or text "") "\n")
-                         (fn (line)
-                           (let (t (string/trim line))
-                             (if (string/starts-with? t "nameserver")
-                               (string/trim (string/substring t 10 (string/length t)))
-                               nil))))
+    (or (first (seq/filter (map (string/split (or text "") "\n")
+                             (fn (line)
+                               (let (t (string/trim line))
+                                 (if (string/starts-with? t "nameserver")
+                                   (string/trim (string/substring t 10 (string/length t)))
+                                   nil))))
                  (fn (v) (and v (not (= v ""))))))
       "127.0.0.1")))
 

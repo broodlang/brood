@@ -117,13 +117,15 @@ what incremental search rides on (formerly the separate `index-of`).
 
 ;; `includes?` follows it for the same reason — the membership question over any
 ;; collection, string included, not a string op that happens to accept a vector.
-;; Only the RETURN is declared: an index or -1, never anything else. The arguments stay
-;; open because `index-of` is polymorphic over strings, lists and vectors and the `from`
-;; offset may arrive as nil. Without this the inferred return is `number`, and that width
-;; travels into every caller's arithmetic — `string/substring` and `bytes/at` want an int,
-;; so hatch's request parser, its BML scanner and hive's changelog renderer all reported
-;; positions that were only ever integers.
-(sig index-of (any any &optional any -> int))
+;; The RETURN is an index or -1, never anything else: without it the inferred return was
+;; `number`, and that width travelled into every caller's arithmetic — `string/substring`
+;; and `bytes/at` want an int, so hatch's request parser, its BML scanner and hive's
+;; changelog renderer all reported positions that were only ever integers. The collection
+;; is what the body accepts (2026-09-12): a string, or anything `first`/`rest` walk —
+;; every seqable, a bytes value included — or nil (-1). An int or a keyword raises inside
+;; `%index-of-seq-from`, and `(any …)` here was the reason a caller's parameter handed to
+;; `index-of` inferred as `any` in every module that uses it.
+(sig index-of ((or nil string seqable) any &optional (or nil int) -> int))
 (defn includes? (coll x)
   "True if `coll` contains `x`. Works on lists, vectors, strings (string/substring), sets, and maps (membership among values — use `contains?` for keys).
 
@@ -543,10 +545,10 @@ this clause was an expansion error."
   (%repeat-acc n x nil))
 
 ;; ---- lazy / fusing seq-views (compute-frontier lever 3) ---------------------
-;; `map`/`filter`/`keep`/`remove` are EAGER — they return a concrete list, and
+;; `map`/`seq/filter`/`seq/keep`/`seq/reject` are EAGER — they return a concrete list, and
 ;; running them for side effects (`(map require-one mods)`, `(map run ts)`)
 ;; works as it always has. Fusion is **opt-in**, via `seq/lmap`/`seq/lfilter`/`seq/lkeep`/
-;; `seq/lremove` composed with `->`. Each returns a lazy seq-view (`%seqview`): a
+;; `seq/lreject` composed with `->`. Each returns a lazy seq-view (`%seqview`): a
 ;; non-materialising value carrying a transducer over a source. Chaining
 ;; composes the transducers onto one view, so a `->` pipeline folds/reduces in
 ;; a **single pass with no intermediate lists**:
@@ -601,7 +603,7 @@ for a higher-order op that wants a fixed answer.
 ;; Internal stateless transducer constructors — the fused stages behind the
 ;; `l*` combinators. A transducer is `(xf rf) -> rf'`; composing them (`comp`)
 ;; fuses a pipeline into one per-step reducing function. Named `%x*` because they
-;; are plumbing: the public surface is `seq/lmap`/`seq/lfilter`/`seq/lkeep`/`seq/lremove`, not
+;; are plumbing: the public surface is `seq/lmap`/`seq/lfilter`/`seq/lkeep`/`seq/lreject`, not
 ;; raw transducers. Fixed-arity (no rest-list) so they keep the fast call path.
 ;; The four built-in stages. Internal: the `l*` combinators below build on them and
 ;; the prelude cannot `require` a module. Published as `seq/xmap` … (ADR-251) — the
@@ -620,8 +622,8 @@ for a higher-order op that wants a fixed answer.
 (defn %xfilter (pred)
   "The `filter` stage as a transducer — internal; published as `seq/xfilter`."
   (fn (rf) (fn (acc x) (if (pred x) (rf acc x) acc))))
-(defn %xremove (pred)
-  "The `remove` stage as a transducer — internal; published as `seq/xremove`."
+(defn %xreject (pred)
+  "The `reject` stage as a transducer — internal; published as `seq/xreject`."
   (fn (rf) (fn (acc x) (if (pred x) acc (rf acc x)))))
 (defn %xkeep (f)
   "The `keep` stage as a transducer — internal; published as `seq/xkeep`."
@@ -639,7 +641,7 @@ for a higher-order op that wants a fixed answer.
 ;;   reverse of ordinary function composition, because each stage wraps the *next*
 ;;   one's reducer.
 ;;
-;; `seq/xmap`/`xfilter`/`xremove`/`xkeep` are the built-in stages (the same functions
+;; `seq/xmap`/`xfilter`/`xreject`/`xkeep` are the built-in stages (the same functions
 ;; the `l*` combinators use), and `seq/transduce` runs a stack over any collection.
 (defn- %seqview-wrap (coll xf)
   "Wrap `coll` in a lazy seq-view applying transducer `xf`. If `coll` is already a
@@ -660,22 +662,22 @@ iterating for side effects.
   (%seqview-wrap coll (%xmap f)))
 
 (defn seq/lfilter (coll pred)
-  "Lazy, fusing `filter` — see `seq/lmap`.
+  "Lazy, fusing `seq/filter` — see `seq/lmap`. The complement is `seq/lreject`.
 
     (seq (seq/lfilter [1 2 3 4] math/even?))   → (2 4)   ; `seq` realises the view"
   (%seqview-wrap coll (%xfilter pred)))
 
 (defn seq/lkeep (coll f)
-  "Lazy, fusing `keep` (map + filter of non-nil `(f x)`) — see `seq/lmap`.
+  "Lazy, fusing `seq/keep` (map + filter of non-nil `(f x)`) — see `seq/lmap`.
 
     (seq (seq/lkeep [1 2 3 4] (fn (x) (when (math/even? x) (* x 10)))))   → (20 40)"
   (%seqview-wrap coll (%xkeep f)))
 
-(defn seq/lremove (coll pred)
-  "Lazy, fusing `remove` — see `seq/lmap`.
+(defn seq/lreject (coll pred)
+  "Lazy, fusing `seq/reject` — see `seq/lmap`. The complement is `seq/lfilter`.
 
-    (seq (seq/lremove [1 2 3 4] math/even?))   → (1 3)"
-  (%seqview-wrap coll (%xremove pred)))
+    (seq (seq/lreject [1 2 3 4] math/even?))   → (1 3)"
+  (%seqview-wrap coll (%xreject pred)))
 
 ;; ---- iteration combinators --------------------------------------------------
 ;; Hide the hand-rolled counter/accumulator recursion behind names that read as

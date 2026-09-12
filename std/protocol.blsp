@@ -38,5 +38,8 @@
       (mount [params])
       (render [model])
       (handle-event [name params model]))"
-  (let (ops (filter specs (fn (s) (pair? s))))
+  ;; `%filter`, not `seq/filter`: this is a MACRO body, so it runs at expansion time —
+  ;; and protocol.blsp is part of the PRELUDE (boot.rs concatenates it last), where no
+  ;; module has loaded yet. See the note at `%filter` in prelude/predicates.blsp (ADR-330).
+  (let (ops (%filter specs (fn (s) (pair? s))))
     (list '%register-protocol (list 'quote bname) (list 'quote ops))))

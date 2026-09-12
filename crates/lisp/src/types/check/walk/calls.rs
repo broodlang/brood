@@ -429,9 +429,16 @@ pub(super) const ELEMENT_CALLBACK_COMBINATORS: &[&str] = &[
     "map",
     "mapv",
     "mapcat",
+    // Both spellings: the qualified one is how `seq/` names are written outside a
+    // `(:use seq)` module, the bare one how they read inside it. Unlike the curated
+    // signature table, a key here suppresses no lint — it only seeds a callback's
+    // parameter type — so carrying both costs nothing and covers both call styles.
     "filter",
-    "remove",
+    "seq/filter",
+    "reject",
+    "seq/reject",
     "keep",
+    "seq/keep",
     "each",
     "take-while",
     "drop-while",

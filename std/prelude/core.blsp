@@ -231,7 +231,7 @@ this by implementing the `Display` ability, which takes over this name below.
 ;; list form for the recursion, so a map costs one extra `%map-pairs` pass total
 ;; rather than O(n) per step.
 (defn fold (coll acc f)
-  "Left-fold: combine the items of `coll` left-to-right with `(f acc item)`, starting from `acc`. Tail-recursive, so it is stack-safe. Maps fold as their `[k v]` pairs. A lazy range folds in a counted loop with no list materialised; a lazy seq-view fuses — its transducer wraps `f` and folds straight over the source, so `(reduce (map (filter (range n) p) sq) 0 +)` walks the range once with no intermediate lists.
+  "Left-fold: combine the items of `coll` left-to-right with `(f acc item)`, starting from `acc`. Tail-recursive, so it is stack-safe. Maps fold as their `[k v]` pairs. A lazy range folds in a counted loop with no list materialised; a lazy seq-view fuses — its transducer wraps `f` and folds straight over the source, so `(reduce (map (seq/filter (range n) p) sq) 0 +)` walks the range once with no intermediate lists.
 
     (fold [1 2 3 4] 0 +)                      → 10
     (fold [1 2 3] nil (fn (a x) (cons x a)))  → (3 2 1)

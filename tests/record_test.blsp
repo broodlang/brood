@@ -84,7 +84,7 @@
       (assert= (count s) 3) ; not 1 (the one `items` field)
       (assert= (fold s 0 +) 60)
       (assert= (map s inc) (list 11 21 31))
-      (assert= (filter s even?) (list 10 20 30))))
+      (assert= (seq/filter s even?) (list 10 20 30))))
   (test "the accessors first/rest/empty?/nth route through Seqable too"
     (let (s (stack (list 10 20 30)))
       (assert= (first s) 10)

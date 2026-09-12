@@ -52,7 +52,7 @@
 
 (defn- test-body-problems (form)
   "A modifier among a test form's body forms is inert."
-  (map (filter (after-modifiers (drop (proper form '()) 2)) modifier?)
+  (map (seq/filter (after-modifiers (drop (proper form '()) 2)) modifier?)
     (fn (kw) (str "(" (first form) " …) body contains " kw))))
 
 (defn- describe-body-problems (body acc)
@@ -126,7 +126,7 @@
     (assert= '() (scan-source "(test \"n\" (dolist (x '(1 2)) x) :ok)")))
 
   (test "every test file in the tree places its modifiers legally"
-    (let (files (filter (file/walk-files "tests") blsp?)
+    (let (files (seq/filter (file/walk-files "tests") blsp?)
           problems (mapcat files scan-file))
       ;; Assert the sweep actually swept. A walk that resolves to nothing — wrong cwd, a
       ;; renamed directory — reports a clean tree in exactly the same way a clean tree does.

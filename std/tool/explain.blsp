@@ -209,5 +209,5 @@ insensitive substring) against each cookbook entry's intent + keywords. Returns
 `{:matches [{:intent :idiom :example :see} …]}` (the `:keywords` are dropped from
 the result — they're the search index, not content). Empty matches suggests
 `apropos`/`doc-search` for a name-based search instead."
-  {:matches (map (filter *idiom-cookbook* (fn (e) (explain-matches? query e)))
+  {:matches (map (seq/filter *idiom-cookbook* (fn (e) (explain-matches? query e)))
               (fn (e) (dissoc e :keywords)))})

@@ -21274,6 +21274,23 @@ ride it for editors: `reflect/declared-signature` (the `sig` as written — the 
 `reflect/check-string-here` (the checker under the current compile context, which is how an
 eval-in-buffer form is about to be resolved — `types::check::check_forms_here`).
 
+**Addendum (2026-09-12, later) — the three things "not in scope" said, done.** An alias
+resolves through the file's IMPORTS: between the own-namespace step and the loaded-wide
+unique-suffix rule, a bare name resolves to the ONE `(:use …)`d module declaring it, and
+`short/name` through an `(:alias mod :as short)` reaches `mod/name`; two `:use`d declarers
+still decline. (The checker now `ensure_loaded`s an alias clause's target, as the runtime
+`require-one`s it — a *call* `short/name` infers its load lazily, ADR-227; a type name
+cannot.) `nest doc` and the doc site list a module's aliases under **Types**, read from
+`reflect/type-aliases` — a `deftype` binds no global, so the name walk cannot see it. And a
+recursive alias is **unrolled one level** (`annot::RECURSIVE_UNROLL`) before its
+self-reference reads as `any`: `(:v (:l t))` over a `tree` is `nil | int`, where it was the
+unknown, and the level past the unrolling is pinned as `any` — sound at every depth, and
+bounded so a `k`-way recursive shape costs `k` copies. What "recursive types" would mean
+beyond that — coinductive subtyping, a finite display, a round-trip through `to_source` —
+stays deferred; this is the decidable part. Guards: `crates/cli/tests/deftype_through_imports.rs`,
+`tests/docs_test.blsp` "a deftype is documented under Types",
+`names_as_types::a_recursive_alias_unrolls_one_level_then_reads_as_any`.
+
 ## ADR-328 — A named key spells its modifiers the way a character chord does
 
 **Status:** accepted; implemented 2026-09-12 (`host::gui::named_key`, used by both
@@ -21303,3 +21320,105 @@ are bindable keys. A held Ctrl or Alt on an arrow no longer falls through to the
 motion; an editor that wants the plain motion under a modifier binds it. The vocabulary is
 closed (a dozen keys × eight modifier sets) so each spelling is built once and kept for the
 process, which is what lets `Key` stay `Copy` and the GUI thread deliver it heap-free.
+
+## ADR-330 — `filter` joins its complement: the pair lives in `seq/`, and `remove` becomes `reject`
+
+**Status:** accepted; implemented 2026-09-12. Follows [ADR-227](#adr-227) (core stays bare,
+derived helpers namespace), [ADR-234](#adr-234) (`enum` → `seq`) and the `19405319` wave that
+moved twenty derived sequence names into `seq/`.
+
+**Context.** `filter` was bare in the prelude; its complement was `seq/remove`. That split one
+operation's positive and negative across two namespaces, and it was the only place in the
+sequence library where that was true. The wart was visible three ways at once:
+
+- **You could not find the negative from the positive.** `(filter xs p)` works with no import;
+  `(remove xs p)` is an unbound symbol unless you know to write `seq/remove` or `(:use seq)`.
+- **The whole rest of the family had already moved.** `seq/filterv`, `seq/keep`,
+  `seq/xfilter`/`xremove`, `seq/lfilter`/`lremove` — every variant and every negative was
+  namespaced. `filter` alone was not, which made the module look like it was missing its
+  headline function rather than holding all but one of them.
+- **`remove` is the wrong word.** It reads as element removal, which is what its neighbours
+  `seq/remove-nth`, `multimap/remove-value` and `layers/remove-layer` actually do. `reject`
+  says "by predicate", and pairs with `filter` the way Elixir's and Ruby's do.
+
+ADR-227 forbids re-export aliases, so `seq/filter` *beside* a bare `filter` was not available:
+one home or the other.
+
+**Decision.** Move the positive rather than duplicate it.
+
+- `filter` is `seq/filter`. Bare `filter` is gone.
+- `seq/remove` is `seq/reject`; `seq/xremove` is `seq/xreject`; `seq/lremove` is `seq/lreject`.
+- `seq/rejectv` is added beside `seq/filterv`, which had no negative partner.
+- `seq/keep` keeps its name. It is not a duplicate of `filter` — it collects `(f x)` where
+  that is non-nil, not the item where a predicate holds — and its docstring now says so
+  rather than leaving a reader to infer it.
+
+**Why the positive moved, when it is the more-used name.** The alternative was to bring
+`reject` bare beside `filter`, which fits ADR-227's letter equally well (the complement of a
+core op is core). It was rejected because the *family* is the unit: `filterv`/`rejectv`,
+`xfilter`/`xreject`, `lfilter`/`lreject` are six names that cannot come bare, so a bare
+`filter`/`reject` pair would still leave four layers split. Moving one name down is the only
+choice that puts all eight in one place.
+
+**The prelude keeps a private `%filter`.** `filter` is called during MACRO EXPANSION by
+`defmodule`'s clause readers, `match`'s map-pattern reader and `defbehaviour` — before any
+module can load — and, decisively, by `require-one`'s own machinery (`%std-edges-for`,
+`%merge-require-edges!`, `%require-drop-waiter!`, `%bundle-short-collides?`), where an
+`%autoload` stub would call `require-one` from inside `require-one` and recurse. So the rule is
+prelude-wide rather than per-site: **the prelude says `%filter`, everything else says
+`seq/filter`.** A `%`-prefixed name is not part of the public surface, so ADR-227's no-alias
+rule is intact — there is exactly one public `filter`.
+
+This is the same constraint that pinned `mapcat`/`mapv`/`take-while` in the prelude during the
+`19405319` wave, and it is enforced, not remembered: `boot::prelude_hygiene::
+prelude_code_references_no_unloaded_module_wrapper` fails the build on a prelude reference to
+an unloaded module. It caught `std/protocol.blsp` — a prelude file that does not live under
+`std/prelude/`, and so was missed by a directory-shaped sweep.
+
+**Migration.** Every moved name is in the rename ledger (`crates/lisp/src/renames.rs`), so
+`unbound symbol: filter` says `— renamed to seq/filter (ADR-330)` and `nest check --fix-renames`
+applies it. `filter` is the entry that matters: it is a prelude name nearly every file uses, so
+without it the wave lands downstream as an unbound symbol with nowhere to go.
+
+**Consequences.** `docs/bare-names.md` loses `filter` (the ADR-233 gate fails otherwise). The
+checker's curated signature moves to the qualified key for the reason the table already states
+— a bare key would suppress the unbound lint on a name that no longer exists bare — so bare
+`filter` under `(:use seq)` no longer carries a curated domain, which is the trade already
+accepted for `seq/keep` and `seq/reject`. `infer.rs`'s element-type arms follow the rename.
+The `l*` combinators are renamed **in place**: [ADR-291](#adr-291) pins their definitions in
+the prelude, and relocating them into `std/seq.blsp` is a separate question this ADR does not
+reopen.
+
+## ADR-331 — Docstring `[[name]]` cross-references render as links
+
+**Status:** accepted; implemented 2026-09-12, alongside ADR-330.
+
+**Context.** Docstrings across the tree cite each other with a `[[name]]` wiki-link —
+`io/inspect` cites `[[puts]]`, `debug/trace-hold` cites `[[trace-release]]`,
+`editor/markdown` cites `[[markdown-render]]`. About forty of them had accumulated. **Nothing
+rendered any of them.** `docsite.blsp`'s `inline` handled backticks and `**bold**` and nothing
+else, and `nest doc` emitted the docstring verbatim, so both surfaces printed the brackets:
+*"The debugging counterpart of [[puts]]"*. The convention was being written and never read —
+authors kept adding links to a renderer that had none.
+
+**Decision.** Render them, in both surfaces, by the medium each can support.
+
+- **The docsite** emits a real anchor to the definition's existing `def-anchor`
+  (`#d-<module>-<name>`), so a cross-reference is a click. A bare `[[name]]` resolves against
+  the module being rendered — which is how every existing one is written — and `[[mod/name]]`
+  is the explicit cross-module form. The module is threaded from `definition-html` into
+  `prose`, which grew an optional parameter for it.
+- **`nest doc`** emits a code span, and **qualifies** a bare reference with the citing
+  definition's own module: `seq/filter`'s `[[reject]]` prints `` `seq/reject` ``. That output is
+  Markdown read in a terminal, where an anchor into a page nobody has open is worse than no
+  link — and the heading slug a Markdown renderer would generate is not something the module
+  can predict. The qualification is the part that earns its keep: without a link to supply
+  context, a bare `reject` is a spelling the reader cannot type.
+
+**Two guards, both load-bearing.** A name has no spaces, so `[[hatch :path "../hatch"]]` and
+`[[pc caps]]` — literal vectors inside docstrings — stay as written rather than becoming links
+to nothing; and an unclosed `[[` is prose. Rendering runs *after* HTML escaping, like
+`emphasis`, so the `<a>` is the only markup emitted and the cited name stays escaped. With no
+module to resolve against, a bare reference is left as written rather than pointed at
+`#d-nil-<name>`: a visible `[[name]]` is a missing argument a reader can report, a dead link
+is not.

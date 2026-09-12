@@ -21,7 +21,7 @@ will get wrong if you write Brood like Clojure, Scheme, or Common Lisp.
 2. **No loops — no `while`, no `for`, no `loop`/`recur`.** Iterate with
    **tail recursion + an accumulator** (proper tail calls give O(1) stack, including
    calls to *other* functions) or the combinators `fold` / `reduce` / `map` /
-   `filter`. A *local*, self-contained loop is a `letrec`-bound closure called by
+   `seq/filter`. A *local*, self-contained loop is a `letrec`-bound closure called by
    name — `(letrec (go (fn (i acc) … (go …))) (go 0 0))` — which closes over the
    enclosing scope (thread only the changing state). Deep *non*-tail recursion
    overflows the green-process stack.
@@ -53,7 +53,7 @@ will get wrong if you write Brood like Clojure, Scheme, or Common Lisp.
    bootstrap). Maps have **no commas**: `{:a 1 :b 2}`.
 
 8. **One sequence view over every collection; `sort`/`index-of` are polymorphic.**
-   `count`/`empty?`/`first`/`rest`/`last`/`map`/`filter`/`fold`/`reduce`/`into`/
+   `count`/`empty?`/`first`/`rest`/`last`/`map`/`fold`/`reduce`/`into`/
    `vec`/`seq` walk a list, vector, `bytes`, a **set** (its elements) or a **map**
    (its `[k v]` pairs) — so no `(zip (keys m) (vals m))`, and `(first {:a 1})` is
    `[:a 1]`. Map order is hash-driven, so compare with `seq/frequencies`.
@@ -179,12 +179,12 @@ round-trips. Two faster moves:
   | You reach for | Brood has |
   | --- | --- |
   | `concat` | `append` — variadic over lists *and* vectors, returns a list (the `concat` alias was removed) |
-  | `loop`/`recur` | **neither exists** — a local loop is `(letrec (go (fn (i acc) … (go …))) (go 0 0))` (tail calls → O(1)); or a top-level `--acc` helper / `fold`/`map`/`filter`/`reduce` |
+  | `loop`/`recur` | **neither exists** — a local loop is `(letrec (go (fn (i acc) … (go …))) (go 0 0))` (tail calls → O(1)); or a top-level `--acc` helper / `fold`/`map`/`seq/filter`/`reduce` |
   | string building / `str(...)` interpolation | `(str a b)`, or `(fmt "a={a} b={b}")` — interpolation lowered to a plain `str`; `{{`/`}}` are literal braces. Printf-style: `(format "…%s…" x)` |
   | `some?` (Clojure non-nil) | Brood's `some?` was **renamed `any?`** ("any element matches a pred"); for non-nil use `(not (nil? x))` |
   | `conj` onto a vector | `cons` (lists); `into` / `(apply vector …)` (vectors) |
   | `set!` / `swap!` / atoms | nothing — state is a process or a Rust handle (trap #1) |
-  | `while`, `for`-loop | tail recursion (or a local `letrec`), or `fold`/`map`/`filter`/`reduce` (trap #2) |
+  | `while`, `for`-loop | tail recursion (or a local `letrec`), or `fold`/`map`/`seq/filter`/`reduce` (trap #2) |
   | `print` / `puts` / `println` | **none of those exist** — output is `io/`-qualified and needs no `(:use io)`: `(io/puts x)` writes a line, `(io/write x)` writes without a newline, `(io/inspect x)` writes the re-readable form (`"a\nb"` rather than two lines). A trailing `:to <port>` redirects one call: `(io/puts "boom" :to *err*)` |
   | a `flush` after printing | nothing — every `io/` writer flushes on each call, pipe or terminal |
   | raw ANSI (`clear`/`home`/cursor) | `(:use editor/ansi)` (a bare `editor/ansi/…` reference loads it but leaves names qualified) → `(ansi-clear)`/`(ansi-home)`/`(ansi-cursor r c)` are **zero-arg fns returning an escape string** — call them: `(io/write (ansi-clear))`, never `(io/write ansi-clear)` (writes `#<fn …>`). A render loop wants `std/display`. |

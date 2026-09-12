@@ -203,7 +203,7 @@
       (assert= (count m) 3)
       (assert= (fold (map m second) 0 +) 6)
       (assert= (reduce (map m second) 0 +) 6)
-      (assert= (frequencies (filter m (fn ([_ v]) (> v 1)))) {[:b 2] 1 [:c 3] 1})
+      (assert= (frequencies (seq/filter m (fn ([_ v]) (> v 1)))) {[:b 2] 1 [:c 3] 1})
       (assert= (frequencies (mapcat m (fn ([k v]) (list k v)))) {:a 1 :b 1 :c 1 1 1 2 1 3 1})))
   (test "seq coerces a map to its pairs; entries is an alias for %map-pairs"
     (let (m {:x 1 :y 2})
@@ -258,8 +258,8 @@
 
 (describe "remove / keep"
   (test "remove is the complement of filter"
-    (assert= (seq/remove (range 8) even?) (list 1 3 5 7))
-    (assert= (seq/remove (range 3) (fn (x) true)) nil))
+    (assert= (seq/reject (range 8) even?) (list 1 3 5 7))
+    (assert= (seq/reject (range 3) (fn (x) true)) nil))
   (test "keep takes the non-nil results of f (map+filter fused)"
     (assert= (seq/keep (range 6) (fn (x) (if (even? x) (* x x) nil))) (list 0 4 16))
     (assert= (seq/keep (range 3) (fn (x) nil)) nil)))
@@ -362,7 +362,7 @@
     (assert= (seq-sum 0 10 0) 220)))
 
 ;; ---- lazy, fusing seq-views (compute-frontier lever 3) -----------------------
-;; `seq/lmap`/`seq/lfilter`/`seq/lkeep`/`seq/lremove` return a non-materialising view that fuses
+;; `seq/lmap`/`seq/lfilter`/`seq/lkeep`/`seq/lreject` return a non-materialising view that fuses
 ;; through `fold`; compose them with `->`. `map`/`filter` stay EAGER (and keep
 ;; running side effects). See ADR lazy-seq-view.
 
@@ -371,13 +371,13 @@
     (is (seqview? (seq/lmap [1 2 3] inc)))
     (is (seqview? (seq/lfilter (range 5) even?)))
     (refute (seqview? (map [1 2 3] inc)))
-    (refute (seqview? (filter (range 5) even?))))
+    (refute (seqview? (seq/filter (range 5) even?))))
 
   (test "a view realises to the list it stands for"
     (assert= (seq (seq/lmap [10 20 30] inc)) (list 11 21 31))
     (assert= (seq (seq/lfilter (range 8) even?)) (list 0 2 4 6))
     (assert= (seq (seq/lkeep (range 4) (fn (x) (if (even? x) (* x 10) nil)))) (list 0 20))
-    (assert= (seq (seq/lremove (range 6) even?)) (list 1 3 5)))
+    (assert= (seq (seq/lreject (range 6) even?)) (list 1 3 5)))
 
   (test "fold/reduce/sum/count fuse over a view"
     (assert= (reduce (seq/lmap (seq/lfilter (range 10) odd?) (fn (i) (* i i))) 0 +) 165)
@@ -391,14 +391,14 @@
                        (fn (i) (* i i)))
                0 +)
       944)
-    (assert= (seq (seq/lremove (seq/lmap (range 6) inc) even?)) (list 1 3 5)))
+    (assert= (seq (seq/lreject (seq/lmap (range 6) inc) even?)) (list 1 3 5)))
 
   (test "-> threads l* stages into one fused left-to-right pipeline"
     ;; (even? then inc): 0→1, 2→3, 4→5, 6→7, 8→9 ⇒ 1+3+5+7+9 = 25
     (assert= (-> (range 10) (seq/lfilter even?) (seq/lmap inc) (reduce 0 +)) 25)
     (assert= (seq (-> (range 3) (seq/lmap inc))) (list 1 2 3))
     (assert= (-> (range 6) (seq/lfilter odd?) (seq/lmap (fn (i) (* i i))) (sum)) 35)
-    (assert= (into [] (-> (range 8) (seq/lremove even?) (seq/lkeep (fn (x) (if (> x 3) x nil)))))
+    (assert= (into [] (-> (range 8) (seq/lreject even?) (seq/lkeep (fn (x) (if (> x 3) x nil)))))
       [5 7]))
 
   (test "view interop: first/rest/nth/empty?/into/=/join/apply/str"

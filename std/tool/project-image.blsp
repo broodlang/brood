@@ -87,7 +87,7 @@ takes; everything else is the mechanism behind it.")
   ;; `distinct`: a dep file declaring more than one module (ADR-223) now has one
   ;; `*module-files*` entry per module, all pointing at the same path — the
   ;; fingerprint wants each file once, not once per module it declares.
-  (sort (seq/distinct (map (seq/remove (seq *module-files*)
+  (sort (seq/distinct (map (seq/reject (seq *module-files*)
                              (fn (kv) (not (project-image-dep-module? (first kv)))))
                         second))))
 
@@ -101,7 +101,7 @@ takes; everything else is the mechanism behind it.")
 
 ;; The globals the load CREATED: everything bound now that was not bound before it ran.
 (defn- project-image-fresh-names (seen)
-  (seq/remove (reflect/global-names) (fn (n) (contains? seen n))))
+  (seq/reject (reflect/global-names) (fn (n) (contains? seen n))))
 
 ;; The registries the load MUTATED — derived from the funnel, minus the exclusions above,
 ;; minus any that ride their OWN materialised section (writing them here too would double
@@ -113,7 +113,7 @@ takes; everything else is the mechanism behind it.")
 ;; did — dropped it from the image entirely: a deferred module's buffer type vanished on an
 ;; imaged start (register-type-layers runs at that module's load, which materialising skips).
 (defn- project-image-registry-names (seen)
-  (seq/remove (%registry-names)
+  (seq/reject (%registry-names)
     (fn (n)
       (or (includes? *project-image-registry-exclusions* n)
         (and (not (contains? seen n))
@@ -162,7 +162,7 @@ takes; everything else is the mechanism behind it.")
                (or (get grouped "") nil)))
     (cons ["" root]
       (map
-        (seq/remove (keys grouped)
+        (seq/reject (keys grouped)
           (fn (k)
             ;; A non-root section is materialised from the image only for the project's
             ;; own modules and its dependencies — both live in `*module-files*`
@@ -230,7 +230,7 @@ permanent rather than transient."
   (let (regs (stdimage/registrations-by-module)
         impls (stdimage/%std-impls-by-module)
         keep (image-preexisting-reg-keys before-regs)
-        n-regs (fold (filter (keys regs) image-foreign-owner?)
+        n-regs (fold (seq/filter (keys regs) image-foreign-owner?)
                  0
                  (fn (n m)
                    (fold (get regs m)
@@ -239,7 +239,7 @@ permanent rather than transient."
                        (if (contains? keep [(get t 0) (get t 1)])
                          n2
                          (do (%registry-update! (get t 0) :dissoc (get t 1) nil) (+ n2 1)))))))
-        n-impls (fold (filter (keys impls) image-foreign-owner?)
+        n-impls (fold (seq/filter (keys impls) image-foreign-owner?)
                   0
                   (fn (n m)
                     (fold (get impls m)

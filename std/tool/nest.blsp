@@ -212,7 +212,7 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
 
 (defn subcommands ()
   "The subcommands this module implements, sorted — hidden ones (`complete`) excluded."
-  (sort (filter (keys *commands*) (fn (c) (not (get (get *commands* c) :hidden))))))
+  (sort (seq/filter (keys *commands*) (fn (c) (not (get (get *commands* c) :hidden))))))
 
 (defn flags-of (cmd)
   "The flag spellings of `cmd`, sorted — `()` for a command this module does not own."
@@ -347,11 +347,11 @@ than `:arity` admits, or fewer than it demands."
 `:no-positional-with`. First violation wins, in clap's words."
   (let (flags (get parsed :flags)
         on? (fn (f) (get flags f))
-        conflict (first (filter (get spec :conflicts)
+        conflict (first (seq/filter (get spec :conflicts)
                           (fn (pair) (and (on? (nth pair 0)) (on? (nth pair 1))))))
-        missing (first (filter (seq (get spec :requires))
+        missing (first (seq/filter (seq (get spec :requires))
                          (fn (kv) (and (on? (first kv)) (not (on? (second kv)))))))
-        lonely (first (filter (get spec :no-positional-with)
+        lonely (first (seq/filter (get spec :no-positional-with)
                         (fn (f) (and (on? f) (not (empty? (get parsed :positionals))))))))
     (cond
       (get parsed :error) parsed
@@ -472,7 +472,7 @@ false (the caller exits 2 — clap's usage-error code)."
   "The boundary guard for a FILE list: every path must exist and not be a directory. Says
 so at the CLI boundary and returns false (exit 2) — before this, a mistyped filename
 surfaced as `check-file-deps: cannot read …` with a four-frame Brood trace."
-  (let (bad (first (filter files (fn (p) (not (file/regular? p))))))
+  (let (bad (first (seq/filter files (fn (p) (not (file/regular? p))))))
     (cond
       (nil? bad) true
       (file/dir? bad)
@@ -542,8 +542,9 @@ surfaced as `check-file-deps: cannot read …` with a four-frame Brood trace."
 (defn- run-check (o)
   (let (flags (get o :flags) files (get o :positionals))
     ;; Strict is a process-wide checker mode, not an argument, so it is set before the
-    ;; first file is read; the env spelling is the one CI uses.
-    (%check-strict! (or (get flags "--strict") (= (os/env "BROOD_CHECK_STRICT") "1")))
+    ;; first file is read. Only the flag is set here: the env spelling (`BROOD_CHECK_STRICT`)
+    ;; is the kernel flag's own default, so every checker entry point reads it alike.
+    (when (get flags "--strict") (%check-strict! true))
     (cond
       (get flags "--suggest-sigs")
         (do
@@ -754,7 +755,7 @@ reason was already printed, so the caller exits silently."
                              (file/regular? (first watch)))
                          (first watch)
                          nil)
-              watched-a-file (not (empty? (filter watch file/regular?))))
+              watched-a-file (not (empty? (seq/filter watch file/regular?))))
           (when (and (nil? file) (nil? doc-arg) (nil? promoted) watched-a-file)
             (eputs "nest run: watching "
               (count watch)

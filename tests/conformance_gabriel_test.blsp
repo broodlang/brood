@@ -176,7 +176,7 @@
     ;; sustained allocation — a GC or JIT-tiering bug rather than a logic one — shows up
     ;; at 1.8M rewrites and not at 95k.
     (let (db (setup-boyer))
-      (dolist (n (filter [1 2] (fn (k) (<= k gb-nboyer-max-n))))
+      (dolist (n (seq/filter [1 2] (fn (k) (<= k gb-nboyer-max-n))))
         (assert= (test-boyer nboyer-alist nboyer-term n db)
           (get gb-nboyer-rewrites n)))))
 

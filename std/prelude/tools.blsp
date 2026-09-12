@@ -12,7 +12,7 @@
 ;; probe against a name in the table with no value yet.
 (defn- %discoverable-names ()
   "Every global worth OFFERING to a human: no `%` plumbing, no module-private names."
-  (filter (reflect/global-names)
+  (%filter (reflect/global-names)
     (fn (s) (and (not (string/starts-with? (->string s) "%")) (not (reflect/private? s))))))
 
 (defn apropos (pattern)
@@ -24,14 +24,14 @@ are not callable vocabulary, and they used to bury the answer.
   ;; `name` (not `str`) so a keyword pattern drops its leading colon, matching
   ;; the bare global names; a string passes through unchanged.
   (let (needle (if (string? pattern) pattern (->string pattern)))
-    (filter (%discoverable-names) (fn (s) (includes? (->string s) needle)))))
+    (%filter (%discoverable-names) (fn (s) (includes? (->string s) needle)))))
 
 ;; Whitespace-split a query into lowercased terms (blanks dropped) — the unit
 ;; doc-search ranks by. A single-word query yields one term, so it degrades to
 ;; the old "docstring contains this word" search.
 (defn- %doc-search-terms (query)
   "Lowercased, whitespace-separated terms of `query`, with blanks removed."
-  (filter (string/split (string/lower query) " ") (fn (t) (not (string/blank? t)))))
+  (%filter (string/split (string/lower query) " ") (fn (t) (not (string/blank? t)))))
 
 (defn doc-search (query)
   "Globals whose name or docstring matches `query`, ranked by how many of its
@@ -51,7 +51,7 @@ degrades to a plain case-insensitive name/docstring search, e.g.
               (let (d (check-allow :discarded-catch (try (doc (reflect/eval s)) (catch _ nil))))
                 (when (string? d)
                   (let (hay (string/lower (str s " " d))
-                        hits (count (filter terms (fn (t) (includes? hay t)))))
+                        hits (count (%filter terms (fn (t) (includes? hay t)))))
                     (when (> hits 0) [hits s d]))))))
           (fn (e) [(- (first e)) (str (second e))]))
         (fn (e) [(second e) (nth e 2)])))))
@@ -307,7 +307,7 @@ The primary source is consulted first, then `*image-sources*` in install order."
   *load-path*)
 (defn reflect/add-load-path (& dirs)
   "Prepend `dirs` to the module search path (skipping any already present); returns the new path."
-  (reflect/set-load-path (append (seq/remove dirs (fn (d) (includes? *load-path* d))) *load-path*)))
+  (reflect/set-load-path (append (seq/reject dirs (fn (d) (includes? *load-path* d))) *load-path*)))
 
 ;; Package-rooted namespaces (ADR-070): a *dependency* `foo` providing a module `b`
 ;; is loaded as the rooted global namespace `foo/b`, so two deps can both provide a
@@ -522,7 +522,7 @@ one call site is inside `defmodule`'s template — see the note there."
 ;; (skipping the optional docstring / any non-`:use` form), flattened for splicing.
 (defn- %defmodule-use-forms (clauses)
   (apply append
-    (map (filter clauses (fn (c) (and (pair? c) (= (first c) :use)))) %defmodule-use-clause)))
+    (map (%filter clauses (fn (c) (and (pair? c) (= (first c) :use)))) %defmodule-use-clause)))
 
 ;; The forms for one `(:use-internals mod [:only [a b]])` clause — module privacy's
 ;; @testable seam (ADR-146): like `(:use mod)` (reflect/load + refer publics), PLUS a grant
@@ -551,7 +551,7 @@ one call site is inside `defmodule`'s template — see the note there."
 
 (defn- %defmodule-internals-forms (clauses)
   (apply append
-    (map (filter clauses (fn (c) (and (pair? c) (= (first c) :use-internals))))
+    (map (%filter clauses (fn (c) (and (pair? c) (= (first c) :use-internals))))
       %defmodule-internals-clause)))
 
 ;; web/views/counter → counter  (a module name's last `/`-segment, as a symbol).
@@ -574,7 +574,7 @@ one call site is inside `defmodule`'s template — see the note there."
 
 (defn- %defmodule-alias-forms (clauses)
   (apply append
-    (map (filter clauses (fn (c) (and (pair? c) (= (first c) :alias)))) %defmodule-alias-clause)))
+    (map (%filter clauses (fn (c) (and (pair? c) (= (first c) :alias)))) %defmodule-alias-clause)))
 
 ;; A file declares itself a **module = namespace** at the top with `defmodule`
 ;; (ADR-065): each `def`/`defn`/`defmacro` defines `mod/name`, and a bare reference
@@ -828,7 +828,7 @@ binary cannot load would fail the require outright."
       (let (rec (get (or *std-require-edges* {}) key))
         (when rec
           (let (have (into #{} (map (reflect/builtin-modules) ->string)))
-            (filter rec (fn (d) (contains? have (->string d))))))))))
+            (%filter rec (fn (d) (contains? have (->string d))))))))))
 
 (def- *std-impls* nil)
 
@@ -914,7 +914,7 @@ own, and whichever installs second must not erase the first."
         (when (not (contains? *require-edges* k))
           (%registry-update! '*require-edges*
             :assoc [k]
-            (filter deps (fn (d) (contains? have (->string d)))))))))
+            (%filter deps (fn (d) (contains? have (->string d)))))))))
   *require-edges*)
 
 ;; --- the stdlib image, from the prelude --------------------------------------
@@ -1068,7 +1068,7 @@ image and before any `require`."
 ;; cross-dependency name collision (two deps each shipping a `parser`). Only such a name needs
 ;; the rooted `pkg/mod` binding to stay distinct; a uniquely-named module does not.
 (defn- %bundle-short-collides? (short)
-  (> (count (filter (map (%map-pairs *package-modules-of*) first)
+  (> (count (%filter (map (%map-pairs *package-modules-of*) first)
               (fn (pkg) (includes? (get *package-modules-of* pkg) short))))
     1))
 
@@ -1455,7 +1455,7 @@ is exactly what OTP 24 reply aliases exist for."
   (%swap-registry! *features-waiting*
     (fn (m)
       (let (ws (or (get m key) (list))
-            left (filter ws (fn (w) (not (= (first w) me)))))
+            left (%filter ws (fn (w) (not (= (first w) me)))))
         (if (empty? left) (dissoc m key) (assoc m key left))))))
 
 ;; Load one feature once. CONCURRENT-SAFE: `require` returning means the module's
@@ -1611,9 +1611,14 @@ and that every declared arity still matches its module's actual definition."
 (%autoload seq
   (find 2)
   (keep 2)
-  (remove 2)
+  (reject 2)
   (distinct 1)
   (vector-ref 2))
+;; `seq/filter` is deliberately NOT declared here. The prelude reaches filtering through the
+;; private `%filter` (predicates.blsp) instead, because four of its call sites ARE the require
+;; machinery — `%std-edges-for`, `%merge-require-edges!`, `%require-drop-waiter!`,
+;; `%bundle-short-collides?` — and a stub there would call `require-one 'seq` from inside
+;; `require-one`. See the note at `%filter` (ADR-330).
 
 ;; std/proc/crash-report.blsp — the default crash reporter (ADR-305), reached from the
 ;; lazy arm in process.blsp. `take-over` is the ONLY name the prelude references, and it
@@ -1899,7 +1904,7 @@ resolution; `%impl-for` is what picks the winner."
   (legal, ADR-172 late binding) simply isn't arity-checked here; the checker covers the rest.
   A fixed-arity impl must match exactly; a variadic impl must accept the declared arity."
   (let (specs (get *abilities* aname)
-        op-spec (if specs (first (filter specs (fn (s) (= (first s) op)))) nil)
+        op-spec (if specs (first (%filter specs (fn (s) (= (first s) op)))) nil)
         op-args (if op-spec (second op-spec) nil))
     ; Skip a variadic OP spec — it declares no single arity to pin against (matches the
     ; checker). Only a fixed op spec is arity-checked.
@@ -2171,7 +2176,7 @@ which is meaningless for a rope, so falling through unconditionally would swap a
   ; An op spec is a pair whose second element is the `[args]` VECTOR; that excludes a
   ; `:derive-record` recipe `(fn (fields) …)` (its second is a `(fields)` *list*) and any
   ; keyword-clause value, so only real ops are collected.
-  (let (ops (filter specs (fn (s) (and (pair? s) (vector? (second s)))))
+  (let (ops (%filter specs (fn (s) (and (pair? s) (vector? (second s)))))
         ;; The ability's own docstring, if it wrote one — the leading string in `specs`.
         ;; Each generated op inherits it (see the `defn` below): an op IS the ability's
         ;; surface, and a generic function with no doc at all is a hole in `(doc …)`,

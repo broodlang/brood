@@ -299,7 +299,10 @@ pub fn named_key(base: &'static str, ctrl: bool, alt: bool, shift: bool) -> &'st
         base
     );
     static NAMES: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
-    let mut names = NAMES.get_or_init(|| Mutex::new(HashSet::new())).lock().unwrap();
+    let mut names = NAMES
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap();
     if let Some(s) = names.get(name.as_str()) {
         return s;
     }

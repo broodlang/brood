@@ -192,40 +192,40 @@ reverse. Each matched region is consumed whole, so spans stay non-overlapping."
   ;; and the editor re-lexes a ~300-line band on every keystroke in a `.md` buffer —
   ;; the per-edit hitch the fontify window could not amortise away.
   (let (i (if (>= i n) n (string/span-until line i "`*_[")))
-  (if (>= i n)
-    (reverse acc)
-    (let (c (string/char-at line i))
-      (cond
-        ;; inline code: `…`
-        (= c "`")
-          (let (j (md-find-char line (inc i) n "`"))
-            (if (< j 0)
-              (md-inline line base (inc i) n acc)
-              (md-inline line
-                base
-                (inc j)
-                n
-                (cons [(+ base i) (+ base (inc j)) md-face-code] acc))))
-        ;; bold: **…** or __…__ (fall back to italic when unclosed)
-        (md-delim2? line i n)
-          (let (a (string/char-at line i)
-                j (md-find-2 line (+ i 2) n a a))
-            (if (< j 0)
-              (md-inline-emph line base i n acc)
-              (md-inline line
-                base
-                (+ j 2)
-                n
-                (cons [(+ base i) (+ base (+ j 2)) md-face-bold] acc))))
-        ;; italic: *…* or _…_
-        (or (= c "*") (= c "_")) (md-inline-emph line base i n acc)
-        ;; link: [text](url)
-        (= c "[")
-          (let (span (md-link-span line base i n))
-            (if (nil? span)
-              (md-inline line base (inc i) n acc)
-              (md-inline line base (- (second span) base) n (cons span acc))))
-        else (md-inline line base (inc i) n acc))))))
+    (if (>= i n)
+      (reverse acc)
+      (let (c (string/char-at line i))
+        (cond
+          ;; inline code: `…`
+          (= c "`")
+            (let (j (md-find-char line (inc i) n "`"))
+              (if (< j 0)
+                (md-inline line base (inc i) n acc)
+                (md-inline line
+                  base
+                  (inc j)
+                  n
+                  (cons [(+ base i) (+ base (inc j)) md-face-code] acc))))
+          ;; bold: **…** or __…__ (fall back to italic when unclosed)
+          (md-delim2? line i n)
+            (let (a (string/char-at line i)
+                  j (md-find-2 line (+ i 2) n a a))
+              (if (< j 0)
+                (md-inline-emph line base i n acc)
+                (md-inline line
+                  base
+                  (+ j 2)
+                  n
+                  (cons [(+ base i) (+ base (+ j 2)) md-face-bold] acc))))
+          ;; italic: *…* or _…_
+          (or (= c "*") (= c "_")) (md-inline-emph line base i n acc)
+          ;; link: [text](url)
+          (= c "[")
+            (let (span (md-link-span line base i n))
+              (if (nil? span)
+                (md-inline line base (inc i) n acc)
+                (md-inline line base (- (second span) base) n (cons span acc))))
+          else (md-inline line base (inc i) n acc))))))
 (sig md-inline (string int int int list -> list))
 
 ;; ---- a line's spans + the document walker -----------------------------------
@@ -385,23 +385,21 @@ its face. Unclosed markers are literal characters, as in the highlighter."
 (defn- md-words (runs)
   "Cut `runs` into words at spaces: a list of words, each a list of `[text face]`
 fragments, in order, with empty words (runs of spaces) dropped."
-  (let ([cur done]
-          (fold runs
-            ['() '()]
-            (fn (acc run)
-              (let ([cur done] acc
-                    [text face] run
-                    pieces (string/split text " ")
-                    ;; the first piece continues the current word; each later piece starts one
-                    cur1 (if (= (first pieces) "") cur (cons [(first pieces) face] cur))
-                    [cur2 done2]
-                      (fold (rest pieces)
-                        [cur1 done]
-                        (fn (a p)
-                          (let ([c d] a
-                                d1 (if (empty? c) d (cons (reverse c) d)))
-                            [(if (= p "") '() (list [p face])) d1]))))
-                [cur2 done2]))))
+  (let ([cur done] (fold runs
+                     ['() '()]
+                     (fn (acc run)
+                       (let ([cur done] acc
+                             [text face] run
+                             pieces (string/split text " ")
+                             ;; the first piece continues the current word; each later piece starts one
+                             cur1 (if (= (first pieces) "") cur (cons [(first pieces) face] cur))
+                             [cur2 done2] (fold (rest pieces)
+                                            [cur1 done]
+                                            (fn (a p)
+                                              (let ([c d] a
+                                                    d1 (if (empty? c) d (cons (reverse c) d)))
+                                                [(if (= p "") '() (list [p face])) d1]))))
+                         [cur2 done2]))))
     (reverse (if (empty? cur) done (cons (reverse cur) done)))))
 (sig md-words (list -> list))
 
@@ -433,33 +431,36 @@ keeps its own line). The first line opens with `first-prefix`, every later one w
         ;; one line: its prefix, then its words separated by single spaces
         finish (fn (prefix line-words)
                  (let (ws (reverse line-words)
-                       [end spans]
-                         (fold ws
-                           ;; the prefix's face covers its marker, not the space after it
-                           [(pre-len prefix)
-                             (if (nil? (second prefix))
-                               '()
-                               (list [0 (string/length (string/trimr (first prefix))) (second prefix)]))]
-                           (fn (st w)
-                             (let ([pos acc] st
-                                   [pos1 acc1] (if (= pos (pre-len prefix)) [pos acc] [(inc pos) acc])
-                                   [end acc2] (md-word-spans w pos1 acc1))
-                               [end acc2])))
+                       [end spans] (fold ws
+                                     ;; the prefix's face covers its marker, not the space after it
+                                     [(pre-len prefix)
+                                       (if (nil? (second prefix))
+                                         '()
+                                         (list [0
+                                                 (string/length (string/trimr (first prefix)))
+                                                 (second prefix)]))]
+                                     (fn (st w)
+                                       (let ([pos acc] st
+                                             [pos1 acc1] (if (= pos (pre-len prefix))
+                                                           [pos acc]
+                                                           [(inc pos) acc])
+                                             [end acc2] (md-word-spans w pos1 acc1))
+                                         [end acc2])))
                        text (str (first prefix)
                               (string/join (map ws (fn (w) (string/join (map w first) ""))) " ")))
                    [text (reverse spans)]))
-        [cur cur-len done]
-          (fold words
-            ['() (pre-len first-prefix) '()]
-            (fn (st w)
-              (let ([cur cur-len done] st
-                    wl (md-word-len w)
-                    sep (if (empty? cur) 0 1))
-                (if (or (empty? cur) (<= (+ cur-len sep wl) width))
-                  [(cons w cur) (+ cur-len sep wl) done]
-                  [(list w)
-                    (+ (pre-len rest-prefix) wl)
-                    (cons (finish (if (empty? done) first-prefix rest-prefix) cur) done)])))))
+        [cur cur-len done] (fold words
+                             ['() (pre-len first-prefix) '()]
+                             (fn (st w)
+                               (let ([cur cur-len done] st
+                                     wl (md-word-len w)
+                                     sep (if (empty? cur) 0 1))
+                                 (if (or (empty? cur) (<= (+ cur-len sep wl) width))
+                                   [(cons w cur) (+ cur-len sep wl) done]
+                                   [(list w)
+                                     (+ (pre-len rest-prefix) wl)
+                                     (cons (finish (if (empty? done) first-prefix rest-prefix) cur)
+                                       done)])))))
     (reverse (if (empty? cur)
                (if (empty? done) (list (finish first-prefix '())) done)
                (cons (finish (if (empty? done) first-prefix rest-prefix) cur) done)))))
@@ -570,8 +571,7 @@ preview following the cursor lands in the right part of a long paragraph."
           ;; the closing fence, when there is one, is consumed too
           [(if (empty? body) (list ["" '() i]) body) (if (< j (count lines)) (inc j) j)])
       (md-heading-level line) [(md-heading line i width) (inc i)]
-      (md-rule? line)
-        [(list [(string/repeat "─" width) (list [0 width md-face-quote]) i]) (inc i)]
+      (md-rule? line) [(list [(string/repeat "─" width) (list [0 width md-face-quote]) i]) (inc i)]
       ;; blockquote: a run of `>` lines, re-flowed, under a bar
       (md-quote? line)
         (let (j (md-take-while lines i md-quote?)
@@ -589,9 +589,8 @@ preview following the cursor lands in the right part of a long paragraph."
               j (md-take-while lines
                   (inc i)
                   (fn (l) (and (md-paragraph-line? l) (> (md-lead-ws l) 0))))
-              text (string/join
-                     (cons (string/substring line col (string/length line))
-                       (map (range (inc i) j) (fn (k) (string/trim (nth lines k)))))
+              text (string/join (cons (string/substring line col (string/length line))
+                                  (map (range (inc i) j) (fn (k) (string/trim (nth lines k)))))
                      " ")
               bullet (if (md-digit? (string/char-at marker 0)) marker "•")
               indent (string/repeat " " lead)
@@ -620,14 +619,15 @@ accumulating rendered `[text spans src]` lines in reverse, one block at a time."
 
 (defn- md-assemble (rendered)
   ;; `[text spans src]` lines → `{:text :spans :lines}`, the spans shifted to absolute offsets
-  (let ([off spans]
-          (fold rendered
-            [0 '()]
-            (fn (st line)
-              (let ([off acc] st
-                    [text sp src] line)
-                [(+ off (string/length text) 1)
-                  (fold sp acc (fn (a s) (let ([a1 b1 f] s) (cons [(+ off a1) (+ off b1) f] a))))]))))
+  (let ([off spans] (fold rendered
+                      [0 '()]
+                      (fn (st line)
+                        (let ([off acc] st
+                              [text sp src] line)
+                          [(+ off (string/length text) 1)
+                            (fold sp
+                              acc
+                              (fn (a s) (let ([a1 b1 f] s) (cons [(+ off a1) (+ off b1) f] a))))]))))
     {:text (string/join (map rendered (fn (l) (nth l 0))) "\n")
      :spans (reverse spans)
      :lines (into [] (map rendered (fn (l) (nth l 2))))}))
@@ -649,7 +649,8 @@ faces kept as data. Returns `{:text :spans :lines}`:
 Lexical, like `markdown-spans`, and pure: the editor shows the result in a preview pane
 and follows the cursor with `:lines`."
   (let (width (math/max 10 width))
-    (md-assemble (md-render-lines (into [] (md-drop-trailing-empty (string/split src "\n"))) 0 width '()))))
+    (md-assemble (md-render-lines (into [] (md-drop-trailing-empty (string/split src "\n")))
+                   0 width '()))))
 (sig markdown-render (string int -> map))
 
 (defn- md-line-at (lines i n src-line)

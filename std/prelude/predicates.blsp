@@ -212,12 +212,30 @@ current element and `acc` is the current accumulator."
     (map [] inc)               → nil"
   (cons (f item) acc))
 
-(%defseq filter
+;; `filter` itself is NOT bare — it is `seq/filter`, beside its complement `seq/reject`
+;; (ADR-330). What stays here is a PRIVATE `%filter` for the handful of prelude call sites
+;; that cannot reach the module. Two reasons, and the second is the one that decides it:
+;;
+;;   1. MACRO-EXPANSION time. `defmodule`'s clause readers and `match`'s map-pattern reader
+;;      run during expansion, before any require. That is the same constraint that pinned
+;;      `mapcat`/`mapv`/`take-while` here when the rest of the sequence library moved (see
+;;      seq.blsp's note) — late binding does not help when the call happens at expansion.
+;;   2. `require-one` ITSELF filters. `%std-edges-for`, `%merge-require-edges!`,
+;;      `%require-drop-waiter!` and `%bundle-short-collides?` are the require machinery, so
+;;      an autoload stub there would call `require-one 'seq` from inside `require-one` and
+;;      recurse. The `%autoload` mechanism has no answer to that, and should not need one.
+;;
+;; So the rule is prelude-wide rather than per-site: the PRELUDE says `%filter`, everything
+;; else says `seq/filter`. One rule, no boot-order reasoning at each call, and no stub for
+;; `filter` in the `%autoload seq` declaration at all.
+;;
+;; This is an internal, not a second public spelling: `%`-prefixed names are not part of
+;; the surface, so ADR-227's "no bare re-export aliases" still holds — there is exactly one
+;; public `filter`, and it is `seq/filter`.
+(%defseq %filter
   (pred)
-  "A list of the items of `coll` for which `(pred x)` is truthy.
-
-    (filter [1 2 3 4] math/even?)   → (2 4)
-    (filter [1 3] math/even?)       → nil"
+  "A list of the items of `coll` for which `(pred x)` is truthy — the expansion-time-safe
+internal behind `seq/filter`. Prelude-private; call `seq/filter`."
   (if (pred item) (cons item acc) acc))
 
 (defn vec (coll)

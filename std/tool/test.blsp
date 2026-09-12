@@ -234,8 +234,8 @@ docs/testing.md for the full guide.")
         ;; A test marked `:isolated` on its own gets its own isolated unit even in a
         ;; parallel group — that is what the marker says, and honouring it per test avoids
         ;; serialising the other N-1 tests of the group to protect one.
-        solo (filter tagged test-isolated?)
-        rest (filter tagged (fn (t) (not (test-isolated? t)))))
+        solo (seq/filter tagged test-isolated?)
+        rest (seq/filter tagged (fn (t) (not (test-isolated? t)))))
     (fold solo nil (fn (_ t) (add-unit :isolated group (list t))))
     (if (empty? rest)
       nil
@@ -710,11 +710,12 @@ the test rather than hanging the run."
   (if (nil? spec)
     units
     (let (resolved (test-resolve-lines units (get spec :lines)))
-      (filter (map units
-                (fn (unit)
-                  (list (first unit)
-                    (second unit)
-                    (filter (third unit) (fn (t) (test-select? (second unit) t spec resolved))))))
+      (seq/filter (map units
+                    (fn (unit)
+                      (list (first unit)
+                        (second unit)
+                        (seq/filter (third unit)
+                          (fn (t) (test-select? (second unit) t spec resolved))))))
         (fn (unit) (not (empty? (third unit))))))))
 
 ;; A stable hash of a test's full label — FNV-1a over its codepoints, masked to
@@ -741,14 +742,14 @@ the test rather than hanging the run."
 (defn- test-shard-units (units index total)
   (if (or (nil? total) (< total 2))
     units
-    (filter (map units
-              (fn (unit)
-                (list (first unit)
-                  (second unit)
-                  (filter (third unit)
-                    (fn (t)
-                      (= index
-                        (math/rem (test-label-hash (label (second unit) (first t))) total)))))))
+    (seq/filter (map units
+                  (fn (unit)
+                    (list (first unit)
+                      (second unit)
+                      (seq/filter (third unit)
+                        (fn (t)
+                          (= index
+                            (math/rem (test-label-hash (label (second unit) (first t))) total)))))))
       (fn (unit) (not (empty? (third unit)))))))
 
 ;; Randomise unit order for this run. `nil` seed keeps declaration order (the
@@ -1301,8 +1302,8 @@ the test rather than hanging the run."
 ;; body of `run-tests` and `run-tests-scoped`.
 (defn- drain-current ()
   (let (units (test-select-units (reverse *units*) *test-filter*)
-        par (filter units (fn (u) (not (= (first u) :isolated))))
-        iso (filter units (fn (u) (= (first u) :isolated))))
+        par (seq/filter units (fn (u) (not (= (first u) :isolated))))
+        iso (seq/filter units (fn (u) (= (first u) :isolated))))
     (drain-runner iso par)))
 
 ;; Run each `loader` (a 0-arg thunk that `reflect/load`s one test file) in its OWN global
@@ -1393,7 +1394,7 @@ the test rather than hanging the run."
 ;; hit we warn and restore anyway, exactly as the single pass did, because proceeding is no
 ;; worse than the old behaviour and a hang is worse than both.
 (defn- test-quiesce-rounds (before rounds)
-  (let (stragglers (filter (proc/list) (fn (p) (not (includes? before p)))))
+  (let (stragglers (seq/filter (proc/list) (fn (p) (not (includes? before p)))))
     (cond
       (empty? stragglers) nil
       (= rounds 0)
@@ -1421,7 +1422,7 @@ the test rather than hanging the run."
 ;; at the victim's next safepoint, so this is µs in practice — the bound is for a
 ;; process wedged in a native call, which is not made worse by proceeding).
 (defn- test-await-dead (pids tries)
-  (let (live (filter pids proc/alive?))
+  (let (live (seq/filter pids proc/alive?))
     (cond
       (empty? live) nil
       (= tries 0) live
@@ -1571,7 +1572,7 @@ the test rather than hanging the run."
 ;; Emit one editor-parseable block per failed assertion. There is a single
 ;; output format — structured — for humans, LLMs and Emacs alike (docs/tooling.md).
 (defn- report-failures (results)
-  (let (failed (filter results r-failed?))
+  (let (failed (seq/filter results r-failed?))
     (unless (empty? failed) (fold failed nil (fn (_ r) (print-failure "    " r))))))
 
 (defn- report-slow (results n)
@@ -1597,7 +1598,8 @@ the test rather than hanging the run."
 ;; nothing when every test is under the threshold — the common, fast case stays
 ;; quiet.
 (defn- report-slow-over (results over)
-  (let (slow (filter (map results (fn (r) [(full-name r) (r-ms r)])) (fn (p) (> (second p) over))))
+  (let (slow (seq/filter (map results (fn (r) [(full-name r) (r-ms r)]))
+               (fn (p) (> (second p) over))))
     (unless (empty? slow)
       (io/puts "")
       (io/puts (str "Slow tests (> " (secs-str over) "):"))
@@ -1749,7 +1751,7 @@ the exit code still reflects the run. An unknown formatter name is a clean error
 (defn- test-report-pass (results elapsed opts extra)
   ;; `--failed` tracking happens on every path (the interesting run is the failing one).
   (def *test-last-ran* (map results full-name))
-  (def *test-last-failed* (map (filter results r-failed?) full-name))
+  (def *test-last-failed* (map (seq/filter results r-failed?) full-name))
   (if *test-formatter*
     (test-report-formatted results elapsed)
     (test-report-human results elapsed opts extra)))
@@ -1860,9 +1862,9 @@ read the un-imaged path as evidence about the imaged one."
 ;; `run-tests` so `:repeat` can run it more than once.
 (defn- run-tests-pass (opts)
   (let (units (test-select-units (reverse *units*) *test-filter*)
-        par (filter units (fn (u) (not (= (first u) :isolated))))
+        par (seq/filter units (fn (u) (not (= (first u) :isolated))))
         ; parallel + serial
-        iso (filter units (fn (u) (= (first u) :isolated)))
+        iso (seq/filter units (fn (u) (= (first u) :isolated)))
         start (os/now))
     ;; All result-gathering runs in the hibernating driver (isolated units first
     ;; and serially, then the parallel groups), so the runner's per-step transients
@@ -1882,8 +1884,8 @@ read the un-imaged path as evidence about the imaged one."
   "Like `run-tests`, but returns the result as data — `{:total :passed :failed :failed-assertions :ms :results [...]}` — instead of printing and raising. Backs the `nest mcp` `run-tests` tool."
   (test-apply-opts opts)
   (let (units (test-select-units (reverse *units*) *test-filter*)
-        par (filter units (fn (u) (not (= (first u) :isolated))))
-        iso (filter units (fn (u) (= (first u) :isolated)))
+        par (seq/filter units (fn (u) (not (= (first u) :isolated))))
+        iso (seq/filter units (fn (u) (= (first u) :isolated)))
         start (os/now))
     (let (results (drain-runner iso par)
           elapsed (- (os/now) start)

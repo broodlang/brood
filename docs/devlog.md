@@ -12517,6 +12517,58 @@ each a gate doing its job, none a behavioural fault:
   run, and the script now says when the checkout is not the pinned commit. The rename-wave
   checklist in CLAUDE.md ends with it.
 
+## 2026-09-12 — The type system reviewed: the tail measured, and five things it turned up
+
+A review of where the type system stands (recorded in full at the end of
+`docs/type-system-status.md`, which had stopped on 09-03 and was wrong in three places).
+The short version: the lattice and the annotation surface are done and gated, bedit runs
+strict at zero with its own hard gate, and the "inference frontier" this project has carried
+since 08-29 — the `any` tail of `--suggest-sigs` — is **mostly not an inference gap**. Of 624
+all-`any` parameter lists over std, 152 are predicates whose domain is everything, ~100
+render to a string, 25 hand their argument to a closure a `spawn` may never run, and the
+residue is primitives whose contracts say `any`. Read forty of them before concluding that.
+
+What the reading did find, each landed with a sabotage-verified guard:
+
+- **The demand walk never entered a vector, map or set literal** — KI-70's hole, in the
+  inference rather than the walk: `[(- a b)]` left `a`,`b` at `any` while `(list (- a b))`
+  typed them. Every element evaluates, so each element's demand holds. 636 → 624.
+- **A keyword in call-head position as a demand — built, measured, dropped.** `(:end a)`
+  raises on anything but a map, a set or nil, so `nil | map | set` is sound; it moved one
+  std signature and put **40 strict findings into bedit** (every unsigged function that
+  reads a model's field and passes the model on), because strict reads a positively-known
+  bound by inclusion. ADR-326's trap from the side; the decision is pinned by a test.
+- **`index-of` declared `(any any …)`** "because it is polymorphic" — and made every parameter
+  handed to it `any` in every module. It accepts what the body accepts: `(or nil string seqable)`.
+- **`BROOD_CHECK_STRICT=1` reached `nest check` only** — `brood --check`, the REPL, the LSP and
+  `check-string-here` ran plain with the flag the catalogue names as the strict switch. The env
+  read is the kernel flag's default now (`types::strict_checking`); every entry point reads it.
+- **KI-129 fixed** one level below its diagnosis: `spawn_root_program` — the process `brood
+  FILE` and `nest run FILE` run in — never inherited the package context an ordinary `spawn`
+  has carried since ADR-070, so a script's `(:use model)` loaded the project's module a second
+  time, bare, and every `deftype` in it read as ambiguous.
+
+**Downstream, the same day.** The ADR-330 wave (`filter` → `seq/filter`, `remove` →
+`reject`) applied across the seventeen sibling projects: `--fix-renames` where the project
+loaded, by hand where a top-level form used the old name — the tool needs the project to
+load before it can find the sites, which is a gap worth closing — then `nest format`. Every
+leaf is at `nest check` zero and its suite green (bedit 1520/1545, the 24 `modes_test`
+cases being the debug binary's missing grammars and the ratchet test shelling out to the
+installed `nest`); brood's new duplicate-def lint found an identical dead copy of
+`sitemap-date` in hatch, and one hatch test asserted a map's iteration order. `hive`,
+`hatch-demo` and `store-postgres`'s tests wait on their published dependencies carrying the
+rename.
+
+And the three things ADR-327 had scoped out of `deftype`: resolution through the file's
+`(:use …)`/`(:alias …)` imports, a **Types** heading in `nest doc` and the doc site (via the
+new `reflect/type-aliases`), and one level of unrolling for a recursive alias before it reads
+as `any` (see the ADR's addendum).
+
+Also found by probe, landed separately with the day's red strict gate: the fold accumulator
+widened a tuple slot to `number` when the OTHER slot changed (`(fold xs [0 '()] (fn (st x)
+(let ([j acc] st) [(inc j) (cons j acc)])))` inferred `(tuple number pair)`, `j` should be
+`int`) — a strict false positive, and one of the three std findings.
+
 ## 2026-09-12 — A fold over a non-empty sequence ran its step; and `string/fields`
 
 An inlay hint in bedit read `calc : (string -> (or failure nil number))` for an RPN

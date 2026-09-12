@@ -74,7 +74,7 @@
 
   (test "exactly one pane is flagged selected"
     (let (panes (get (pane-layout (wt-tree3) [0 0 80 24]) :panes)
-          sel (filter panes (fn (p) (get p :selected))))
+          sel (seq/filter panes (fn (p) (get p :selected))))
       (assert= (count sel) 1)
       (assert= (get (first sel) :payload) {:buf 0}))))
 
@@ -226,7 +226,6 @@
       (is (nil? (pane-neighbor l pa :up)))
       (is (nil? (pane-neighbor l pc :down)))
       (is (nil? (pane-neighbor l '(:x) :up))))) ; no such pane
-
   (test "pane-neighbor picks, of several panes along the edge, the one most in line"
     ;; bottom pane c is full width; going UP from it, a and b both qualify. Split evenly
     ;; they tie exactly (c's centre column is the divider) and the first in order, a,

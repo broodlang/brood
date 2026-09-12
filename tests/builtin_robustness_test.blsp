@@ -101,7 +101,8 @@ that a megabyte of it costs seconds; doubling costs milliseconds."
                               r (%os-cmd bin [p])
                               _ (file/rm p))
                           (= (get r :stdout) this-build)))
-          bin (first (filter (filter ["target/release/brood" "target/debug/brood"] file/exists?)
+          bin (first (seq/filter (seq/filter ["target/release/brood" "target/debug/brood"]
+                                   file/exists?)
                        same-build?)))
       (if (nil? bin)
         (is true)
@@ -147,7 +148,7 @@ that a megabyte of it costs seconds; doubling costs milliseconds."
           data (str dir "/data")
           _ (file/spit data "old")
           _ (%file-swap (str dir "/lock") data "old" "new")
-          left (filter (file/ls dir) (fn (n) (>= (index-of n ".swap.") 0))))
+          left (seq/filter (file/ls dir) (fn (n) (>= (index-of n ".swap.") 0))))
       (assert= '() (seq left))
       (file/rmdir dir))))
 

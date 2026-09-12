@@ -14,7 +14,7 @@
     else (do (sleep 5) (wait-until dbg pred (dec tries)))))
 
 (defn trace-count (state)
-  (count (filter (get state :events) (fn (e) (= (get e :kind) :trace)))))
+  (count (seq/filter (get state :events) (fn (e) (= (get e :kind) :trace)))))
 
 ;; A varying classification most workers agree on, a couple don't (math/mod 5 == 0).
 (defn classify (n) (if (= 0 (math/mod n 5)) :flag :ok))
@@ -32,7 +32,7 @@
   (receive
     ([:go] (spawn (send reporter [:child-has (not (nil? (tc-debugger)))])))))
 (defn exit-count (state)
-  (count (filter (get state :events) (fn (e) (= (get e :kind) :span-exit)))))
+  (count (seq/filter (get state :events) (fn (e) (= (get e :kind) :span-exit)))))
 
 (describe "debugger — no-op when unwired"
   (test "break returns nil and does not block with no *debugger*"
@@ -299,7 +299,7 @@
       (trace-fn 'debug-test/tfn-square)
       (def debug/*traced-fns* (assoc debug/*traced-fns* 'list (fn (& args) args)))
       (untrace-all)
-      (assert= 0 (count (filter (traced-fns) (fn (s) (= s 'debug-test/tfn-square)))))
+      (assert= 0 (count (seq/filter (traced-fns) (fn (s) (= s 'debug-test/tfn-square)))))
       ;; and `list` still means what Brood says it means
       (assert= (list 1 2) '(1 2))))
 
@@ -365,7 +365,7 @@
       (assert= 10 (table/get acc :n))
       ;; every kept entry is a :call — a stopped tracer delegates in tail position, so
       ;; there is no :return to emit (and for a tail call there never was one to see)
-      (assert= 10 (count (filter (table/get acc :entries) (fn (e) (= :call (:spy e))))))
+      (assert= 10 (count (seq/filter (table/get acc :entries) (fn (e) (= :call (:spy e))))))
       (table/drop acc)))
   (test "REGRESSION: a traced tail loop deeper than the VM's frame limit still returns"
     ;; The wrapper emits `:return` AFTER the call, so a traced self-call is no longer a

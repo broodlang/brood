@@ -315,3 +315,41 @@ fn deftype_names_a_structural_type_for_sigs() {
     );
     assert_eq!(strict.len(), 3, "{strict:?}");
 }
+
+// A recursive alias is UNROLLED one level (2026-09-12): a name met on its own expansion
+// path expands once more, and only the occurrence past that reads as `any`. So the field
+// read a tree walk writes — `(:v (:l t))` — is typed, where it was the unknown; the level
+// past the unrolling is pinned as the unknown, which is the sound answer and the bound
+// that keeps a `k`-way recursive shape at `k` copies. The checker has no recursive types
+// (deferred: coinductive subtyping, display, round-trip); this is what is decidable now.
+#[test]
+fn a_recursive_alias_unrolls_one_level_then_reads_as_any() {
+    let src = "\
+         (defmodule t)\n\
+         (deftype tree (or nil (record :v int :l tree :r tree)))\n\
+         (sig one-deep (tree -> int))\n\
+         (defn one-deep (t) (string/length (:v (:l t))))\n\
+         (sig two-deep (tree -> int))\n\
+         (defn two-deep (t) (string/length (:v (:l (:l t)))))\n\
+         (sig root (tree -> int))\n\
+         (defn root (t) (string/length (:v t)))";
+    let ws = file_warnings_mode(src, false);
+    // the root and the unrolled level both see `:v` as `nil | int`, disjoint from string
+    assert!(
+        ws.iter().any(|w| w.contains("root")
+            || w.contains("string/length: argument 1 expects string, got nil | int ((:v t))")),
+        "{ws:?}"
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w
+                .contains("string/length: argument 1 expects string, got nil | int ((:v (:l t)))")),
+        "the unrolled level must type the field read: {ws:?}"
+    );
+    // past the unrolling the occurrence is the unknown, so nothing is provable there
+    assert!(
+        !ws.iter().any(|w| w.contains("(:l (:l t))")),
+        "the level past the unrolling reads as any: {ws:?}"
+    );
+    assert_eq!(ws.len(), 2, "{ws:?}");
+}

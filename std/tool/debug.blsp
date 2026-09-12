@@ -452,7 +452,7 @@ A name nobody holds is left alone — an untraced name, or one already restored 
 ;; traces are data, not text, these are plain folds over the debugger's event log.
 (defn trace-entries (dbg)
   "The raw `:trace` events the debugger collected (each `{:pid :entry :seq …}`)."
-  (filter (dbg-events dbg) (fn (e) (= (get e :kind) :trace))))
+  (seq/filter (dbg-events dbg) (fn (e) (= (get e :kind) :trace))))
 (sig trace-entries ((or map pid) -> seqable))
 
 (defn observations (dbg)
@@ -485,7 +485,7 @@ A name nobody holds is left alone — an untraced name, or one already restored 
 (defn outliers (dbg form-string)
   "The observations of `form-string` whose value is NOT the modal one — the few rows to inspect when the population mostly agrees. Each is `{:pid :form :value}`."
   (let (modal (modal-value dbg form-string))
-    (filter (observations dbg)
+    (seq/filter (observations dbg)
       (fn (o) (and (= (pr-str (get o :form)) form-string) (not (= (get o :value) modal)))))))
 
 ;; ---- causal tree reconstruction ---------------------------------------------
@@ -494,20 +494,20 @@ A name nobody holds is left alone — an untraced name, or one already restored 
 list of root nodes, each `{:span :label :pid :value :children [...]}`. A span still
 running shows `:value :running`."
   (let (events (dbg-events dbg)
-        enters (filter events (fn (e) (= (get e :kind) :span-enter)))
-        exits (filter events (fn (e) (= (get e :kind) :span-exit)))
+        enters (seq/filter events (fn (e) (= (get e :kind) :span-enter)))
+        exits (seq/filter events (fn (e) (= (get e :kind) :span-exit)))
         value-of (fn (id)
-                   (let (ex (first (filter exits (fn (e) (= (get e :span) id)))))
+                   (let (ex (first (seq/filter exits (fn (e) (= (get e :span) id)))))
                      (if ex (get ex :value) :running)))
         children-of (fn (parent-id)
-                      (filter enters (fn (e) (= (get e :parent) parent-id)))))
+                      (seq/filter enters (fn (e) (= (get e :parent) parent-id)))))
     (letrec (build (fn (e)
                      {:span (get e :span)
                       :label (get e :label)
                       :pid (get e :pid)
                       :value (value-of (get e :span))
                       :children (map (children-of (get e :span)) build)}))
-      (map (filter enters (fn (e) (nil? (get e :parent)))) build))))
+      (map (seq/filter enters (fn (e) (nil? (get e :parent)))) build))))
 (sig causal-tree ((or map pid) -> seqable))
 
 (defn- causal-lines (nodes depth)

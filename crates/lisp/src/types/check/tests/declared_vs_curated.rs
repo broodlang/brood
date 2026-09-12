@@ -702,7 +702,7 @@ fn length_preserving_combinators_over_a_non_empty_list_drop_the_nil() {
     assert_eq!(ty_str("(range 5)"), "list<int>");
     assert_eq!(ty_str("(into '(1) '(2))"), "list<1 | 2>");
     // …and what may be empty keeps the nil
-    assert!(ty_str("(filter '(1 2) even?)").starts_with("nil | "));
+    assert!(ty_str("(seq/filter '(1 2) even?)").starts_with("nil | "));
     assert!(ty_str("(rest '(1 2))").starts_with("nil | "));
     assert!(ty_str("(nth '(1 2) 5)").contains("nil"));
     assert!(ty_str("(first [1 2])").contains("nil") || ty_str("(first [1 2])") == "1");

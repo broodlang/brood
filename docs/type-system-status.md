@@ -1,7 +1,8 @@
 # Type system — status & what's left
 
-**Revised 2026-08-27**, after the work the day's audit ranked (ADR-259..263); previous
-wrap-up 2026-07-30. Where the type system actually
+**Revised 2026-09-12** (the review at the end of this document — where the `any` tail
+actually is, measured); previous revisions 2026-08-27 (the audit's ranked items,
+ADR-259..263) and 2026-07-30. Where the type system actually
 stands against its goal — a **set-theoretic, gradual, advisory** system in the Castagna
 line (see [research/set-theoretic-types-in-brood.md](research/set-theoretic-types-in-brood.md)).
 For the model and the compatibility contract see [types.md](types.md); for the "why" of each
@@ -25,7 +26,7 @@ missing is now measured as present; what remains is listed under
 |---|---|
 | **The lattice** — values-as-sets, semantic subtyping, ∪/∩/¬/∖, gradual `dynamic(bound)` | A union now **keeps its terms** (ADR-262), so a union of two structured types is exact instead of widening to a bare tag, and a record **says what a value is not** (ADR-264) — closed by default, openness modelled as the type of the undeclared keys — which is what makes that union usable rather than merely representable. Complements are sayable (`(not T)`, ADR-263). The relations are now checked *against each other* over a type corpus (`disjointness_agrees_with_intersection` and friends), which found three defects a per-case test had not. Still approximate in two documented places: the complement of a *refined* term, and subtyping's incompleteness across terms — both the safe direction. |
 | **Inference** — how a function's domain and range are derived without annotations | A parameter's type is now its **domain** (ADR-261): a guarded use is credited *within its guard* and the alternatives union, so branch shapes, `match` patterns, head destructuring, multi-arm functions and `:when` clause guards all constrain callers with no annotation. |
-| **The annotation surface** — `sig`, and the checker's reach over program text | `sig` **fails closed** (ADR-259) and the *definition* owns the arity. The walk's totality is now gated (ADR-260), and that gate immediately found the next instance of the KI-67/KI-70 class (quasiquote escapes). |
+| **The annotation surface** — `sig`, and the checker's reach over program text | `sig` **fails closed** (ADR-259) and the *definition* owns the arity. The walk's totality is now gated (ADR-260), and that gate immediately found the next instance of the KI-67/KI-70 class (quasiquote escapes). A shape has a name: `deftype` (ADR-327) declares a structural alias a `sig` can spell, resolved through the file's own namespace, then its `(:use …)`/`(:alias …)` imports, then the one loaded declarer — and a diagnostic shows the alias, not its expansion. **Strict mode** (ADR-298) reads a positively-known bound by inclusion, with consistent subtyping for nested unknowns (ADR-326); `std/` is at zero in both modes, gated in CI, and bedit holds itself at zero with its own hard gate. |
 
 ---
 
@@ -123,7 +124,7 @@ inference or a compiler channel (5, 7), and adoption (9), which is ongoing by na
 | ~~6~~ | ~~Qualified cross-module ability type names~~ | **Shipped 2026-08-29** — and the headline was already done: in a PROJECT check both `Shape` and `shapes/Shape` resolve, because `ability_type` reads the last `/` segment (the registry is keyed by bare CamelCase name, ADR-255). What was broken was the loose single-file fallback, where neither can resolve and the checker falls back to "capitalised means an ability I cannot see" — that test read the WHOLE spelling, so `shapes/Shape` reported `unknown type` while bare `Shape` was accepted. Naming the module an ability comes from must not be what manufactures a diagnostic | ✅ |
 | 7 | **Tier-2 monomorphization** — devirtualizing an *inferred-variable* op call | Still deferred, and now for a better-founded reason. Turning `BROOD_MONO` on for the first time (2026-08-29 — **nothing in the repo had ever set it**) found Tier 1 miscompiling: it baked the resolved impl *value*, and a body compiles before it runs, so a module registering an impl and using it in the same body called the wrong one. Fixed by proving the identity and leaving resolution behind the epoch-guarded cache (ADR-294), and gated by a differential. Tier 2 multiplies that surface across every call site the checker can type and still needs the checker→compiler channel — but it now has a sound base and a gate that catches a miscompile the first time the flag goes on | Large |
 | ~~8~~ | ~~Runtime contracts for ability ops~~ | **Shipped 2026-08-29** (ADR-293): `impl` wraps a method whose op declares `:-> RET`, decided at expansion time so an unset flag emits nothing. Building it revealed `BROOD_CONTRACTS=1` had rotted into *unusable* — three cold-boot-cache-only defects, none of which any gate could see, because the mode had no end-to-end test at all (KI-81) | ✅ |
-| 9 | **`sig` adoption across std** — **407** declarations over **2942** `defn`s (369 earlier on 2026-08-29; 34/2828 on 2026-08-28) | Every one now buys more than it did: a declared sig is what the reversed-args gate (KI-71) reads, and inference is checked against it (ADR-259) | Ongoing |
+| 9 | **`sig` adoption across std** — **787** declarations over **3357** `defn`s on 2026-09-12 (407/2942 on 2026-08-29; 34/2828 on 2026-08-28), plus 12 `deftype`s | Every one now buys more than it did: a declared sig is what the reversed-args gate (KI-71) reads, and inference is checked against it (ADR-259). The strict sweeps of 2026-08-30 and 2026-09-07 were mostly this | Ongoing |
 
 **On adopting in bulk (2026-08-29).** `nest check --suggest-sigs` prints what the checker
 would infer, and it is advice rather than a patch for a good reason: an inferred domain
@@ -639,9 +640,10 @@ The first `--strict` run over std gave **336** warnings; the tree is now at **0*
 
 **What strict does not do, and why that is right.** A record name is an OPEN shape, so a
 key it does not declare reads as unknown — `(get date :hour 0)` on a `date` is not `int`;
-the honest form is a declared accessor. `datetime?`-style user predicates do not narrow
-(the checker knows the built-in `tested_by` predicates only) — a **type-guard signature**
-(`x is T`) is the general answer and is the next item. `tests/` is not held to strict on
+the honest form is a declared accessor. `datetime?`-style user predicates did not narrow
+at the time (the checker knew the built-in `tested_by` predicates only) — the **type-guard
+signature** `(sig datetime? (any -> (is datetime)))` shipped the same day as this section's
+sweep (ADR-301, 2026-08-30) and is the general answer. `tests/` is not held to strict on
 purpose: a test hands a sig the literals it must reject.
 
 **Measured on the way.** The demand walk consulting a loaded module's inferred sig costs
@@ -814,3 +816,106 @@ right for values, wrong for scope. With only the walk, the guarded function chec
 and its inferred *return* still carried the `nil`, so every caller was reported instead of
 it. Twice now the lesson has been the same: **a narrowing that only the walk knows is a
 narrowing the callers do not get.**
+
+## Nine days on: the review, and where the `any` tail actually is (2026-09-12)
+
+The status above was last revised on 2026-09-03; this section is what a review of the
+type system found on 2026-09-12, measured against the tree rather than read off the
+documents — which had drifted in three places (type guards listed as "the next item"
+thirteen days after they shipped; the `sig` count at 407 against 787; "the backlog is
+empty" written before ADR-326/327 and the week's element rules).
+
+**What moved in the nine days.** Strict inclusion became *consistent subtyping*
+(ADR-326): a nested unknown — a record field, a vector's elements, a map's shape — is the
+gradual `?` wherever it sits, so a strict warning points at the parameter whose type is
+missing and never at a field that inherited its unknown-ness. `deftype` (ADR-327) gave a
+structural shape a name a `sig` can spell, and a diagnostic prints the alias rather than the
+forty-field record it stands for. The element rules landed one at a time from bedit's
+hover: `map`/`filter`/`mapcat`/`seq/keep`/`seq/remove` answer a `list` exactly, `seq/find`
+the element or nil, `seq/remove` with a type predicate keeps what it rejects, a field read
+over `nil | record` is `nil | field`, `update`/`assoc-in`/`update-in` keep a record shape,
+a fold over a provably non-empty sequence is its step result, an impl's `self` is the
+record it dispatches on, a multimethod's params are seeded from its dispatch key. Two
+strict sweeps took `tests/` from 269 findings to the nine KI-116 records as the checker
+being right, and bedit from 461 to **zero** — where it now holds itself with a hard gate
+of its own (`tests/strict_ratchet_test.blsp`).
+
+**What the review found, by probe.**
+
+- The **std strict gate was red** on every CI run of the day — three findings in the
+  morning's editor commits — and bedit's smoke was red on a stale `BEDIT_REF`, eight
+  commits behind bedit's own strict-zero sweep. Landed separately.
+- A **strict false positive** in the fold accumulator, bisected to one shape:
+  `(fold xs [0 '()] (fn (st x) (let ([j acc] st) [(inc j) (cons j acc)])))` infers
+  `(or (tuple 0 nil) (tuple number pair))` — the `j` slot widens to `number` when the
+  OTHER slot changes, and stays `int` when it does not (`(tuple int nil)`); a scalar
+  accumulator is right. Destructuring a union of two tuple terms joins the slot at tag
+  level. One of the three std findings was exactly this. Landed with the gate fix.
+- **`BROOD_CHECK_STRICT=1` reached `nest check` only.** The flag catalogue and ADR-298
+  named it as the strict switch; `brood --check`, the REPL, the LSP and
+  `check-string-here` ran plain with it set. The env read is the kernel flag's own
+  default now (`types::strict_checking`), so every entry point reads it alike; guarded by
+  `crates/cli/tests/strict_env_flag.rs` on a strict-ONLY finding.
+- **KI-129** — a script outside `src/` loaded a project module twice, rooted and bare, so
+  every `deftype` in it was ambiguous. The cause was one level below the entry's
+  diagnosis: `spawn_root_program`, the process `brood FILE` and `nest run FILE` run in,
+  built its heap without the package-context inheritance an ordinary `spawn` has carried
+  since ADR-070. Fixed and guarded.
+- `tests/` strict has drifted 9 → 21 since KI-116 (not gated, by design); four of the
+  new ones are one missing `(sig pop-mark (buffer -> buffer))`.
+
+**The `deftype` follow-ups ADR-327 scoped out, done.** An alias resolves through the
+file's imports — a bare name to the ONE `(:use …)`d module declaring it, `short/name`
+through `(:alias mod :as short)` — between the own-namespace step and the loaded-wide
+unique-suffix rule, and two `:use`d declarers still decline (the checker now
+`ensure_loaded`s an alias clause's target, as the runtime `require-one`s it).
+`nest doc` and the doc site render a module's aliases under a **Types** heading, read
+from the new `reflect/type-aliases` (a `deftype` binds no global, so the name walk cannot
+see it). A recursive alias is **unrolled one level** before its self-reference reads as
+`any` — `(:v (:l t))` over `(deftype tree (or nil (record :v int :l tree :r tree)))` is
+`nil | int`, where it was the unknown — with the level past that pinned as `any`. True
+recursive types (coinductive subtyping, display, round-trip) stay deferred; this is the
+decidable part.
+
+**The `any` tail, classified.** `--suggest-sigs` over std writes 1930 signatures, 1307
+containing `any`, **624** with an all-`any` parameter list. Two general demand rules
+came out of reading a sample of forty, each sound by the same argument as a call's
+arguments; one was kept, and both decisions are pinned in
+`types::check::tests::effective_signatures`:
+
+- **A literal carries its elements' demands.** `[(- a b)]` and `{:k (- a b)}` left `a`
+  and `b` at `any` while `(list (- a b))` typed them — the demand walk had the hole KI-70
+  closed for the checking walk. Vector, map (keys too) and set literals now fold their
+  elements' domains. 636 → 624.
+- **A keyword in call-head position demands a keyed argument — built, measured, and
+  dropped.** `(:end a)` raises on anything but a map, a set or nil (verified, not assumed),
+  so `nil | map | set` is a sound domain for `a`. It moved one signature over std (std
+  reaches for `get`) and manufactured **40 strict findings in bedit**, one per unsigged
+  function that reads a model's field and hands the model on to a declared `model`
+  parameter — strict reads a positively-known bound by inclusion, and this rule turns the
+  commonest idiom in the language into a positive claim. That is the "declare the whole
+  program at once" trap ADR-326 removed for map *shapes*, re-entered from the side. The
+  decision is pinned (`a_keyword_call_is_not_read_as_a_demand`), so the next "obvious"
+  demand rule gets measured downstream before it is kept.
+
+And one contract: `index-of` declared `(any any …)` "because it is polymorphic", which
+made every parameter handed to it `any` in every module; it is `(or nil string seqable)`,
+which is what the body accepts.
+
+What remains is **not an inference gap**, and the sample says so with numbers: of the
+624, **152 are predicates** (`list?`, `ws?`, `hl-close?`, `tempo?` …) whose domain
+genuinely is everything; ~100 render to a string (`str` accepts anything); 25 hand their
+argument to a closure a `spawn` may never run (a demand that cannot be credited — sound);
+a further band uses the parameter only inside a `cond` test that runs conditionally
+(the sound meet cannot use it, ADR-261); and the residue is primitives whose *contracts*
+say `any` (`%digest`, `seq`, `%check`) — sig adoption, one primitive at a time, not a
+mechanism. The polymorphic `?A` suggestion the earlier revision named would change the
+*spelling* of a pass-through function (`(?A -> ?A)`), not narrow anything. So the
+"inference frontier" this document has carried since 2026-08-29 is closed as measured:
+the checker infers what a body demands; what it cannot infer is what the body does not
+demand.
+
+**Still deferred, unchanged**: return-type dispatch (item 5 — bidirectional inference),
+Tier-2 monomorphization (item 7 — the checker→compiler channel, on ADR-294's sound base),
+true recursive types, contract blame and contracts-by-default (roadmap 10/11, ADR-153),
+parametric abilities, view patterns.

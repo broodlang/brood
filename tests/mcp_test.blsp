@@ -76,7 +76,7 @@
       (is (includes? (get r :impls) "mcpt-circle"))
       (assert= (count (get r :ops)) 2)
       ;; the provided op carries :provided true; the required one false
-      (let (provided (filter (get r :ops) (fn (o) (get o :provided))))
+      (let (provided (seq/filter (get r :ops) (fn (o) (get o :provided))))
         (assert= (count provided) 1))))
   (test "an unknown ability name returns an :error map, not a throw"
     (is (contains? (mcp/ability-tool {:name "NoSuchAbilityXyz"}) :error))))

@@ -48,7 +48,7 @@ const SHOULD_WARN: &[(&str, &str)] = &[
     (r#"(+ 1 (first (list "a" "b")))"#, "+"),                    // (list …) → string
     // ---- parametric HOF results: types flow through ----
     ("(string/length (first (map (list 1 2 3) inc)))", "string/length"), // map → number
-    ("(string/length (first (filter (list 1 2 3) even?)))", "string/length"), // filter preserves int
+    ("(string/length (first (seq/filter (list 1 2 3) even?)))", "string/length"), // filter preserves int
     ("(string/length (reduce (list 1 2 3) 0 +))", "string/length"),      // reduce → number
     (
         "(string/length (fold (list 1 2 3) 0 (fn (acc x) (+ acc x))))",

@@ -362,7 +362,7 @@ on malformed input or trailing content. Pure.
 ;; `[raw escape]` for every control char the named escapes below don't cover —
 ;; strict JSON forbids any raw char < U+0020 in a string, named escape or not.
 (def- json-control-escapes
-  (map (filter (range 32) (fn (cp) (not (includes? [8 9 10 12 13] cp))))
+  (map (seq/filter (range 32) (fn (cp) (not (includes? [8 9 10 12 13] cp))))
     (fn (cp) [(cp->string cp) (enc-u cp)])))
 
 (defn- needs-escape? (s)

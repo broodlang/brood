@@ -81,10 +81,10 @@
         (assert= (map xs (fn (x) (* 2 (+ x 1))))
           (map (map xs inc) (fn (x) (* 2 x))))
         true)))
-  (test "filter splits: (filter p) ++ (remove p) permutes the input"
+  (test "filter splits: (seq/filter p) ++ (seq/reject p) permutes the input"
     (let (xs (range 1000)
-          evens (filter xs (fn (x) (= (math/rem x 2) 0)))
-          odds (seq/remove xs (fn (x) (= (math/rem x 2) 0))))
+          evens (seq/filter xs (fn (x) (= (math/rem x 2) 0)))
+          odds (seq/reject xs (fn (x) (= (math/rem x 2) 0))))
       (do
         (assert= (+ (count evens) (count odds)) 1000)
         (assert= (fold evens 0 +) 249500)

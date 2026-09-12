@@ -168,7 +168,7 @@
       (assert= (get (editor/lineedit/lineedit-handle s :enter) :done) :submit))))
 
 (defn- rs-init ()
-  (editor/lineedit/lineedit-init "x> " "" (list "(map f xs)" "(reduce + 0 ys)" "(filter p zs)")))
+  (editor/lineedit/lineedit-init "x> " "" (list "(map f xs)" "(reduce + 0 ys)" "(seq/filter p zs)")))
 
 (describe "reverse incremental search (C-r)"
   (test "C-r enters search and selects the newest entry (empty query)"
@@ -183,7 +183,7 @@
           f (editor/lineedit/lineedit-handle e "f"))
       ; newest with 'f' = (map f xs)
       (assert= (get f :text) "(map f xs)")
-      (assert= (get (editor/lineedit/lineedit-handle f :ctrl-r) :text) "(filter p zs)")))
+      (assert= (get (editor/lineedit/lineedit-handle f :ctrl-r) :text) "(seq/filter p zs)")))
   (test "C-g cancels and restores the pre-search line"
     (let (s (le-keys (le-fresh) (list "w" "i" "p"))
           e (lineedit-reverse-search s :ctrl-r)

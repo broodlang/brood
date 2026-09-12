@@ -172,7 +172,7 @@
       (let (r (receive ([:watcher-result v] v) (after 10000 :timeout)))
         (collect-watchers (- n 1) (cons r acc)))))
   (def results (collect-watchers watcher-count nil))
-  (def all-normal (= (count (filter results (fn (r) (= :normal r)))) watcher-count))
+  (def all-normal (= (count (seq/filter results (fn (r) (= :normal r)))) watcher-count))
   (io/puts "P28: watchers that got :down:" (count results))
   (io/puts "P28-correct (all normal):" all-normal))
 

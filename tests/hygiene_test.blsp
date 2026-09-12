@@ -66,8 +66,8 @@
 
   (test "defseq-based sequence ops remain correct"
     (assert= (map (list 1 2 3 4) (fn (x) (* x x))) (list 1 4 9 16))
-    (assert= (filter (list 1 2 3 4) (fn (x) (> x 2))) (list 3 4))
-    (assert= (seq/remove (list 1 2 3 4) (fn (x) (> x 2))) (list 1 2))))
+    (assert= (seq/filter (list 1 2 3 4) (fn (x) (> x 2))) (list 3 4))
+    (assert= (seq/reject (list 1 2 3 4) (fn (x) (> x 2))) (list 1 2))))
 
 ;; ---- across processes -------------------------------------------------------
 ;; A hygienic macro must behave identically when its result is built in a spawned

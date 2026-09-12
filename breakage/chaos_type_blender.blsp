@@ -79,7 +79,7 @@
 (io/puts "--- structural equality: every element equals itself ---")
 (let (all-self-equal (=
                        (count
-                         (filter soup
+                         (seq/filter soup
                            (fn (v)
                              (if (= (type-of v) :float)
                                ;; NaN != NaN — expected; count float as "special"
@@ -89,13 +89,13 @@
   (io/puts "all self-equal (NaN excepted):" all-self-equal))
 
 (io/puts "--- filter: keep only truthy values ---")
-(def truthy-vals (filter soup (fn (v) v)))
+(def truthy-vals (seq/filter soup (fn (v) v)))
 (io/puts "truthy count (nil and false removed):" (count truthy-vals))
 
 (io/puts "--- map: pr-str every value (exercises the printer on all types) ---")
 (def strs (map soup pr-str))
 (io/puts "stringified count:" (count strs))
-(io/puts "all strings?" (= (count (filter strs string?)) (count strs)))
+(io/puts "all strings?" (= (count (seq/filter strs string?)) (count strs)))
 
 (io/puts "--- type-of frequencies ---")
 (def type-freq (seq/frequencies (map soup type-of)))

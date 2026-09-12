@@ -123,13 +123,13 @@ suite, then reports which functions were never entered. Backs `nest test --cover
       (map *coverage-targets*
         (fn (target) (assoc target :hits (or (get snapshot (->string (get target :name))) 0)))))))
 
-(defn- coverage-covered (results) (filter results (fn (r) (> (get r :hits) 0))))
+(defn- coverage-covered (results) (seq/filter results (fn (r) (> (get r :hits) 0))))
 
 ;; Uncovered functions in SOURCE order. The underlying target list comes from
 ;; `reflect/global-names` (sorted by spelling), so without this the report reads 7, 15, 9 —
 ;; sorting by line is what makes it walk the file top-to-bottom.
 (defn- coverage-uncovered (results)
-  (sort-by (filter results (fn (r) (= (get r :hits) 0))) :line))
+  (sort-by (seq/filter results (fn (r) (= (get r :hits) 0))) :line))
 
 ;; Percentage as a whole number, rounded to nearest. An empty denominator is 100%
 ;; (nothing to cover is not a failure), which keeps a source-less project from
@@ -145,7 +145,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
                       nil
                       (fn (acc r)
                         (if (includes? acc (get r :file)) acc (cons (get r :file) acc))))))
-    (map files (fn (f) [f (filter results (fn (r) (= (get r :file) f)))]))))
+    (map files (fn (f) [f (seq/filter results (fn (r) (= (get r :file) f)))]))))
 
 ;; Shorten an absolute path to a project-relative one for display.
 (defn- coverage-relative (path root)
@@ -279,15 +279,15 @@ suite, then reports which functions were never entered. Backs `nest test --cover
                                        nil
                                        (fn (acc dir) (append acc (project/collect-sources dir))))))
                 nil))
-    (filter (map files
-              (fn (path)
-                (let (executable (or (get instrumented path) nil)
-                      ran (or (get hits path) {})
-                      missing (filter executable (fn (line) (not (contains? ran line)))))
-                  {:file path
-                   :total (count executable)
-                   :covered (- (count executable) (count missing))
-                   :missing missing})))
+    (seq/filter (map files
+                  (fn (path)
+                    (let (executable (or (get instrumented path) nil)
+                          ran (or (get hits path) {})
+                          missing (seq/filter executable (fn (line) (not (contains? ran line)))))
+                      {:file path
+                       :total (count executable)
+                       :covered (- (count executable) (count missing))
+                       :missing missing})))
       (fn (result) (> (get result :total) 0)))))
 
 ;; Typed accessors over a per-file result map — its `:total`/`:covered` are counts, which a
@@ -409,21 +409,21 @@ files under `source-dirs` are measured; files with no branches are omitted."
                                        nil
                                        (fn (acc dir) (append acc (project/collect-sources dir))))))
                 nil))
-    (filter (map files
-              (fn (path)
-                (let (sites (or (get sites-by-file path) nil)
-                      taken (or (get taken-by-file path) {})
-                      states (map sites (fn (s) [s (coverage-branch-state taken s)]))
-                      covered (filter states (fn (st) (= (second st) :both)))
-                      partial (filter states
-                                (fn (st) (or (= (second st) :then) (= (second st) :else))))
-                      missing (filter states (fn (st) (= (second st) :none))))
-                  {:file path
-                   :total (count sites)
-                   :covered (count covered)
-                   :partial (map partial
-                              (fn (st) [(first (first st)) (second (first st)) (second st)]))
-                   :missing (map missing (fn (st) (first st)))})))
+    (seq/filter (map files
+                  (fn (path)
+                    (let (sites (or (get sites-by-file path) nil)
+                          taken (or (get taken-by-file path) {})
+                          states (map sites (fn (s) [s (coverage-branch-state taken s)]))
+                          covered (seq/filter states (fn (st) (= (second st) :both)))
+                          partial (seq/filter states
+                                    (fn (st) (or (= (second st) :then) (= (second st) :else))))
+                          missing (seq/filter states (fn (st) (= (second st) :none))))
+                      {:file path
+                       :total (count sites)
+                       :covered (count covered)
+                       :partial (map partial
+                                  (fn (st) [(first (first st)) (second (first st)) (second st)]))
+                       :missing (map missing (fn (st) (first st)))})))
       (fn (result) (> (get result :total) 0)))))
 
 (defn- coverage-branch-line (root r)

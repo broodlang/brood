@@ -16,7 +16,8 @@
 (defn tst-find (node k)
   (if (= (get node :kind) k)
     node
-    (first (filter (map (or (get node :kids) []) (fn (c) (tst-find c k))) (fn (x) (not (nil? x)))))))
+    (first (seq/filter (map (or (get node :kids) []) (fn (c) (tst-find c k)))
+             (fn (x) (not (nil? x)))))))
 
 ;; The ruby/elixir grammars are opt-in (--features treesit-grammars); the kernel
 ;; ships none by default. Detect each and skip the grammar-dependent suites when
@@ -32,7 +33,7 @@
 (defn tst-search (node pred)
   (if (pred node)
     node
-    (first (filter (map (or (get node :kids) []) (fn (c) (tst-search c pred)))
+    (first (seq/filter (map (or (get node :kids) []) (fn (c) (tst-search c pred)))
              (fn (x) (not (nil? x)))))))
 
 ;; ---- grammar-dependent suites (skipped without --features treesit-grammars) -

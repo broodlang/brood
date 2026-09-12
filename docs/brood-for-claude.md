@@ -15,7 +15,7 @@ A small, dynamic Lisp implemented in Rust.
   **process** (`spawn` / `send` / `receive`) or behind a Rust-backed handle.
 - **No loops** (`while`, `for`, `loop`/`recur`). Iterate with recursion — proper
   tail calls are guaranteed (including calls to *other* functions), so it's O(1)
-  stack — or the combinators `fold` / `reduce` / `map` / `filter`. A *local*,
+  stack — or the combinators `fold` / `reduce` / `map` / `seq/filter`. A *local*,
   self-contained loop is a `letrec`-bound closure called by name.
 - **Truthy / falsy**: only `nil` and `false` are falsy. `0`, `""`, `[]`, `{}`,
   `#{}` are *truthy*. **The one trap: an empty *list* is falsy**, because `()` ≡
@@ -485,16 +485,16 @@ calling a name (`go` here), and the tail call keeps it O(1).
 Prefer the higher-order combinators:
 
 ```lisp
-(reduce + 0 xs)
-(map sq xs)
-(filter math/even? xs)             ; even?/odd?/… live in the `math` module (ADR-227)
-(fold (fn (m k) (assoc m k (* k k))) {} (range 10))
-(map (partial + 10) xs)            ; partial / complement / constantly / comp all exist
-(filter (complement math/odd?) xs)
+(reduce xs 0 +)
+(map xs sq)
+(seq/filter xs math/even?)         ; even?/odd?/… live in the `math` module (ADR-227)
+(seq/reject xs math/even?)         ; the complement — `reject`, not `remove` (ADR-330)
+(fold (range 10) {} (fn (m k) (assoc m k (* k k))))
+(map xs (partial + 10))            ; partial / complement / constantly / comp all exist
 ```
 
 **One sequence view over every collection.** `count` `empty?` `first` `rest` `last`
-`map` `filter` `fold` `reduce` `into` `vec` `seq` take a list, vector, `bytes`, a
+`map` `fold` `reduce` `into` `vec` `seq` (and `seq/filter`) take a list, vector, `bytes`, a
 **set** (as its elements) or a **map** (as its `[k v]` pairs) — `(first {:a 1})` is
 `[:a 1]`. `conj`/`into` insert at each kind's natural point and *preserve the kind*;
 `(conj #{1} 2)` and `(disj s x)` are prelude, no `(:use set)` needed. Two ops stay
@@ -511,7 +511,7 @@ is an error, because in `match` a bare symbol silently *binds* instead of compar
 ```
 
 **A keyword is callable — `(:name p)` ≡ `(get p :name)`** (ADR-165), and it is a
-first-class value, so `(map :name people)` / `(sort-by :id rows)` / `(filter :cursor
+first-class value, so `(map people :name)` / `(sort-by rows :id)` / `(seq/filter zones :cursor
 zones)` all work. That is the point: no throwaway `(fn (p) (get p :name))`. Receivers
 mirror `get` (map by key, set by membership, `nil` empty); anything else — notably a
 *list of maps* — is a type error naming the keyword. Use `(get m k)` when the key is
@@ -562,7 +562,7 @@ intermediate collections (one pass, no throwaway lists). Thread them with `->`:
 
 ```lisp
 ;; eager: builds two throwaway lists of ~1000 / ~500 elements
-(reduce + 0 (map sq (filter math/even? (range 1000))))
+(reduce (map (seq/filter (range 1000) math/even?) sq) 0 +)
 ;; fused: one pass, no intermediate lists (≈3× faster on large inputs)
 (-> (range 1000) (seq/lfilter math/even?) (seq/lmap sq) (reduce 0 +))
 ```
@@ -574,7 +574,7 @@ pass. Consume with `fold`/`reduce`/`sum`/`count`/`into`/`string/join`/`seq`; `se
 `into`/`str`/`=` realise it. Two things to know: a view is **lazy** (it defers
 its fns until realised — don't build one for side effects; use eager `map`), and
 a view is **heap-local** (`send` refuses to ship one — realise it with `seq`/
-`into` before crossing a process). Eager `map`/`filter`/`keep`/`remove` are
+`into` before crossing a process). Eager `map`/`seq/filter`/`seq/keep`/`seq/reject` are
 unchanged: use them for a concrete list or for side effects.
 
 **`range` is a reducible lazy range — folding it builds no list.** `(range n)`
@@ -582,7 +582,7 @@ returns a lazy range, not a materialised list: `reduce` / `fold` / `sum` /
 `count` walk it in a counted loop with **zero allocation** (so `(reduce + 0
 (range 1_000_000))` is O(1) memory, not a million cons cells). It still behaves
 as the list of those integers everywhere else — `first` / `rest` / `nth` / `=`
-against a list / printing all work, and `map` / `filter` realise it on demand —
+against a list / printing all work, and `map` / `seq/filter` realise it on demand —
 so you never have to think about it except to know the common `(reduce f init
 (range n))` shape is already streaming. (Empty ranges are `nil`.)
 
@@ -607,7 +607,7 @@ path:
   ```
 
   Same shape for build-a-collection-then-rebuild: fold the source straight into
-  the target instead of `filter`-then-`into`. (For longer `map`/`filter`
+  the target instead of `seq/filter`-then-`into`. (For longer `map`/`seq/filter`
   pipelines over large data, the `l*` combinators threaded with `->` do this
   fusion for you — reach for them before hand-rolling a `fold`.)
 
@@ -941,7 +941,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
 `display`/`buffer`/`ansi`; `apropos`/`doc-search` search it interactively.)
 
 - **list / seq**: `first` `rest` `cons` `list` `count` `empty?` `nth`
-  `reverse` `map` `filter` `reduce` `fold` `append` (variadic, over
+  `reverse` `map` `reduce` `fold` `append` (variadic, over
   lists *and* vectors, returning a list) `mapcat` `sort` `take`
   `drop` `range` `zip` `partition` `repeat` `repeatedly`. The derived
   sequence helpers — `frequencies` `enumerate` `group-by` `chunk-by`
@@ -978,7 +978,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
 - **map**: `assoc` `dissoc` `get` `keys` `vals` `contains?` `into` `%map-pairs`
   (a map's `[k v]` pairs) `seq` (universal list-view — coerces a map to its
   `[k v]` pairs; lists, vectors, strings, nil pass through). **Maps are seqable**:
-  `(map f m)` / `(filter f m)` / `(fold f acc m)` / `(reduce f acc m)` /
+  `(map m f)` / `(seq/filter m f)` / `(fold m acc f)` / `(reduce m acc f)` /
   `(count m)` / `(into [] m)` all walk the map as its `[k v]` pairs — no need
   for `(zip (keys m) (vals m))`. Iteration order (`keys`/`vals`/print/`seq`) is
   **hash-derived (ADR-040), NOT insertion order and NOT sorted** — don't rely on
@@ -1092,7 +1092,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
 - **No `setq` / `set!` / atoms.** State = a process, or re-bind a global with
   `def`.
 - **No `while` / `for`.** Use recursion (TCO is guaranteed) or
-  `fold` / `map` / `filter` / `reduce`.
+  `fold` / `map` / `seq/filter` / `reduce`.
 - **Calls are `(f x)`, never `f(x)`.** Brood has no C-style call syntax: `f(x)`
   reads as *two* forms — `f`, then `(x)` — so the `(x)` tries to *call the value
   of* `x` and you get `cannot call non-function`. Write `(io/puts "hi")`, not

@@ -228,7 +228,6 @@ Core vocabulary — the language's own words: special-form companions, sequence 
 - `exit`
 - `failure`
 - `fields`
-- `filter`
 - `first`
 - `fold`
 - `for`

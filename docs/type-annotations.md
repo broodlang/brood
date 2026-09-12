@@ -190,11 +190,15 @@ What a `defrecord` gives a *nominal* value, this gives a shape that stays a plai
 the toolkit's panes, dividers and layouts are documented-in-prose maps, and every
 function over them either spelt the shape or left the parameter `any`. Module-scoped
 like a `sig` — declared in `m`, it is `m/name` everywhere; a bare `name` resolves in
-the file's own namespace first, then to the one loaded module that declares it (two
-candidates decline, and the sig reports an unknown type, as a record name does). A
-declaration only: `name` is not bound at runtime, so a stray reference to it is unbound
-rather than a type-turned-value. A recursive alias reads as `any` where it meets
-itself — the checker has no recursive types, and unknown is the sound answer.
+the file's own namespace first, then through the file's header — the one `(:use …)`d
+module declaring it, or `short/name` via `(:alias mod :as short)` — then to the one
+loaded module that declares it (two candidates at any step decline, and the sig reports
+an unknown type, as a record name does). A declaration only: `name` is not bound at
+runtime, so a stray reference to it is unbound rather than a type-turned-value; `nest
+doc` lists a module's aliases under **Types**, and `(reflect/type-aliases 'm)` answers
+them as data. A recursive alias is unrolled one level — `(:v (:l t))` over a `tree` is
+typed — and reads as `any` where it meets itself past that: the checker has no recursive
+types, and unknown is the sound answer.
 
 Under the hood it is a declared-sig entry wrapped `(%type T)`, which is why it survives
 an image, is read through the checker's dep-tracked path, and costs no new store;

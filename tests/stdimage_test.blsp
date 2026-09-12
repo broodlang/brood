@@ -20,7 +20,7 @@
     ;; `json` is a good probe: a plain namespaced module with no root globals.
     (require-one 'json)
     (let (from-source (into #{}
-                        (filter (reflect/global-names)
+                        (seq/filter (reflect/global-names)
                           (fn (s) (string/starts-with? (->string s) "json/")))))
       (is (> (count from-source) 20))
       ;; the image path is only exercised when one exists for THIS binary
@@ -55,14 +55,15 @@
   ;; `exe` is resolved as the race test below does: beside the runner or one level up.
   (test "a root global is attributed to the module that defines it, not to a dependent"
     (let (dir (path/dirname (or (os/exe-path) ""))
-          exe (first (filter [(path/join dir "brood") (path/join dir ".." "brood")] file/exists?))
+          exe (first (seq/filter [(path/join dir "brood") (path/join dir ".." "brood")]
+                       file/exists?))
           prog (path/temp "stdimage-attrib-")
           _ (file/spit prog
               (string/join ["(let (introduced (fn (mod)"
                              "                    (%isolate (fn ()"
                              "                      (let (before (into #{} (reflect/global-names))"
                              "                            _ (require-one mod))"
-                             "                        (into #{} (filter (reflect/global-names)"
+                             "                        (into #{} (seq/filter (reflect/global-names)"
                              "                                    (fn (s) (not (contains? before s)))))))))"
                              "      own (introduced 'editor/lineedit)"
                              "      via (introduced 'repl))"
@@ -184,7 +185,7 @@
     ;; newest few before writing.
     (let (dir (path/dirname (or (image-path) (error "stdimage-test: no image path"))))
       (when (file/dir? dir)
-        (let (n (count (filter (file/ls dir)
+        (let (n (count (seq/filter (file/ls dir)
                          (fn (e)
                            (and (string/starts-with? e "std-image-")
                              (string/ends-with? e ".bin"))))))
@@ -216,7 +217,7 @@
           mine (or (%map-get by-mod "datetime" nil) []))
       (is (> (count mine) 0))
       ;; every tuple this module claims really was declared by it
-      (is (empty? (filter mine (fn (r) (not (= (->string (get r 4)) "datetime"))))))))
+      (is (empty? (seq/filter mine (fn (r) (not (= (->string (get r 4)) "datetime"))))))))
 
   :isolated (test "a module materialised under concurrency is never seen before its deps are"
     ;; THE regression test for the race. The image branch used to `provide` before following
@@ -240,7 +241,8 @@
     ;; test, so resolve the real binary: beside the runner (`brood --test`, `nest test`) or
     ;; one level up (`target/release/deps/` → `target/release/`), and skip if absent.
     (let (dir (path/dirname (or (os/exe-path) (error "stdimage-test: no exe path")))
-          exe (first (filter [(path/join dir "brood") (path/join dir ".." "brood")] file/exists?))
+          exe (first (seq/filter [(path/join dir "brood") (path/join dir ".." "brood")]
+                       file/exists?))
           prog (path/temp "stdimage-race-")
           _ (file/spit prog
               (string/join ["(require-one 'stdimage) (stdimage/ensure)"

@@ -215,7 +215,7 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
     (get *format-defn-family* (symbol (node-text head-node)) false)))
 
 (defn- first-structural-child (n)
-  (first (filter (vec->list (node-children n)) (fn (c) (not (trivia? c))))))
+  (first (seq/filter (vec->list (node-children n)) (fn (c) (not (trivia? c))))))
 
 (defn multi-arity-defn? (head-node args)
   "True if `head-node` is a `defn`-family head and `args` (the head's structural args)
@@ -282,7 +282,7 @@ the name on the head line so every arm lands on its own line."
 (defn- single-line-seq (kids open close)
   ;; Render the structural children space-separated. Any comment, or any
   ;; un-inlineable child, sinks the attempt.
-  (let (forms (filter (vec->list kids) (fn (c) (not (trivia? c)))))
+  (let (forms (seq/filter (vec->list kids) (fn (c) (not (trivia? c)))))
     (cond
       (any-comment? kids) nil
       (nil? forms) (str open close)
@@ -407,7 +407,7 @@ the name on the head line so every arm lands on its own line."
   ;; Generic calls (head not in the headers table) also keep their *first*
   ;; arg on the head line — provided it is single-line — so the visual unit
   ;; `(head arg1)` survives the break.
-  (let (forms (filter (vec->list kids) (fn (c) (not (trivia? c)))))
+  (let (forms (seq/filter (vec->list kids) (fn (c) (not (trivia? c)))))
     (cond
       (nil? forms) (str open close)
       else
@@ -1241,7 +1241,7 @@ that does not parse is reported and skipped, never rewritten."
   (let (changed (%git-changed-files root))
     (if (keyword? changed)
       :not-a-repo (let (project (format-set-of (format-every-blsp root)))
-        (filter (filter changed (fn (p) (string/ends-with? p ".blsp")))
+        (seq/filter (seq/filter changed (fn (p) (string/ends-with? p ".blsp")))
           (fn (p) (contains? project p)))))))
 
 (defn project-changed ()
@@ -1290,7 +1290,8 @@ number of files rewritten."
                 (io/puts (if (= (seq/vector-ref entry 1) :unparseable)
                            (str "  does not parse: " (seq/vector-ref entry 0))
                            (str "  needs formatting: " (seq/vector-ref entry 0))))))
-            (let (unparseable (count (filter changed (fn (e) (= (seq/vector-ref e 1) :unparseable))))
+            (let (unparseable (count (seq/filter changed
+                                       (fn (e) (= (seq/vector-ref e 1) :unparseable))))
                   dirty (- (count changed) unparseable))
               (error "format: "
                 dirty

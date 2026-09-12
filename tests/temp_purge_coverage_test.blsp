@@ -33,7 +33,7 @@
 (def self-name (path/basename (or (reflect/current-file) "")))
 
 (defn- test-files ()
-  (filter (file/ls tests-dir)
+  (seq/filter (file/ls tests-dir)
     (fn (e) (and (string/ends-with? e "_test.blsp") (not (= e self-name))))))
 
 ;; Every string literal appearing immediately after `marker`. Hand-rolled rather than
@@ -48,7 +48,7 @@
 (defn- unpurged-prefixes (text)
   (let (used (quoted-args text "(temp-dir \"")
         purged (quoted-args text "(purge-stale-temp \""))
-    (filter used (fn (u) (not (any? purged (fn (p) (string/starts-with? u p))))))))
+    (seq/filter used (fn (u) (not (any? purged (fn (p) (string/starts-with? u p))))))))
 
 (describe "temp fixtures: every prefix used is purged at load (KI-30)"
 

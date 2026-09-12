@@ -35,7 +35,7 @@
   (fold m {} (fn (acc pair) (let ([k v] pair) (assoc acc (->string k) v)))))
 
 (defn- csv-expected (stem)
-  (let (p (first (filter (csv-dir "json") (fn (f) (= (csv-stem f) stem)))))
+  (let (p (first (seq/filter (csv-dir "json") (fn (f) (= (csv-stem f) stem)))))
     (if (nil? p)
       (error "conformance-csv: no json expectation for " stem)
       (into []

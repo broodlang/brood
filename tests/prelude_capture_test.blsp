@@ -34,7 +34,7 @@
 (def- capturable
   (let (sf (into #{} (map (reflect/special-forms) ->string)))
     (into #{}
-      (seq/remove (map (reflect/global-names) ->string)
+      (seq/reject (map (reflect/global-names) ->string)
         (fn (s)
           (or (string/starts-with? s "%")
             (includes? s "/")

@@ -76,6 +76,7 @@
    "reflect/file-signatures" :meta
    "string/fill" :strings
    "seq/filterv" :collections
+   "seq/rejectv" :collections
    "seq/find" :collections
    "proc/flag" :processes
    "seq/flatten" :collections
@@ -133,7 +134,7 @@
    "path/relative-to" :filesystem
    "path/relative?" :predicates
    "*reload-diagnostics*" :meta
-   "seq/remove" :collections
+   "seq/reject" :collections
    "seq/remove-nth" :collections
    "seq/repeatedly" :collections
    "*require-edges*" :meta
@@ -217,6 +218,7 @@
    "seq/transduce" :collections
    "reflect/type-signature" :meta
    "reflect/declared-signature" :meta
+   "reflect/type-aliases" :meta
    "map/update-keys" :maps
    "map/update-vals" :maps
    "seq/vector-length" :collections
@@ -351,7 +353,7 @@
    "file/mtime" :filesystem
    "file/size" :filesystem
    "file/stat" :filesystem
-   "filter" :collections
+   "seq/filter" :collections
    "first" :collections
    "bit/float->" :convert
    "float?" :predicates
@@ -389,7 +391,7 @@
    "seq/lfilter" :collections
    "seq/lkeep" :collections
    "seq/lmap" :collections
-   "seq/lremove" :collections
+   "seq/lreject" :collections
    "string/join" :strings
    "keys" :maps
    "keyword" :convert
@@ -611,7 +613,7 @@
    "seq/xfilter" :collections
    "seq/xkeep" :collections
    "seq/xmap" :collections
-   "seq/xremove" :collections
+   "seq/xreject" :collections
    "seq/zip-with" :collections
    "map/zipmap" :maps
    "system/stdlib-id" :meta

@@ -174,7 +174,7 @@ const CORPUS: &[&str] = &[
      (drive (make-adder 1) 0 0 1000)",
     // higher-order + threading
     "(map (range 1 6) (fn (x) (* x x)))",
-    "(filter (range 1 11) math/even?)",
+    "(seq/filter (range 1 11) math/even?)",
     "(reduce (range 1 101) 0 +)",
     "(-> 5 (+ 3) (* 2))",
     "(-> (range 1 6) (map (fn (x) (* x x))) (reduce 0 +))",

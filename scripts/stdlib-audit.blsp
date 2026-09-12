@@ -25,7 +25,7 @@
 (defn- public-names ()
   "Every public global the runtime can see, minus the `%` primitives (mechanism, not
 vocabulary) and minus anything a module marked private."
-  (sort (filter (reflect/global-names)
+  (sort (seq/filter (reflect/global-names)
           (fn (s)
             (let (n (->string s))
               (and (not (string/starts-with? n "%")) (not (reflect/private? s))))))))
@@ -74,15 +74,15 @@ parenthesised call on its own line — the shapes the stdlib actually uses."
     (io/puts "   " (reduce chunk "" (fn (a b) (if (= a "") b (str a "  " b)))))))
 
 (let (names (map (public-names) ->string)
-      qualified (filter names (fn (n) (module-of n)))
-      bare (filter names (fn (n) (not (module-of n))))
-      stutter (filter qualified stutters?)
-      no-doc (filter names
+      qualified (seq/filter names (fn (n) (module-of n)))
+      bare (seq/filter names (fn (n) (not (module-of n))))
+      stutter (seq/filter qualified stutters?)
+      no-doc (seq/filter names
                ;; The raise IS the answer: a name with no reachable doc is what we count.
                (fn (n)
                  (nil? (check-allow :discarded-catch
                          (try (doc (reflect/eval (string/->symbol n))) (catch _ nil))))))
-      no-example (filter names
+      no-example (seq/filter names
                    (fn (n)
                      (let (d (check-allow :discarded-catch
                                (try (doc (reflect/eval (string/->symbol n))) (catch _ nil))))

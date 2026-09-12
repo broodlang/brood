@@ -62,7 +62,7 @@ Per-language face tables + keymaps are policy in the editor. `(require
   "The `language-contract` services `layer` fails to provide — `()` when it is complete.
 What a registration checks before accepting a language, so an incomplete mode fails at
 load with the list rather than at the keypress that needed it."
-  (filter (get language-contract :required) (fn (k) (nil? (get layer k)))))
+  (seq/filter (get language-contract :required) (fn (k) (nil? (get layer k)))))
 (sig missing-services (any -> list))
 
 ;; ---- fontify ----------------------------------------------------------------
@@ -350,7 +350,7 @@ The innermost bracket enclosing the line, when that bracket opened with content 
 Only a real delimiter counts — `(`, `[`, `{` — because a `:brackets` entry may be a
 CONSTRUCT rather than a delimiter (Elixir's `fn … end`), and a construct has no column to
 align under."
-  (let (inner (last (filter chain
+  (let (inner (last (seq/filter chain
                       (fn (node)
                         (and (contains? brackets (get node :kind))
                           (< (ts-start node) bol)
@@ -458,7 +458,7 @@ shape `nest format` answers for Brood, and it is checked line-for-line against r
         ;; Counting a list for its own opening line pushes `[` in by a level, and the same
         ;; mistake appears on every `%{`, `{` and `fn` that begins a line.
         brackets (get spec :brackets #{})
-        openers (filter chain
+        openers (seq/filter chain
                   (fn (node)
                     (let (k (get node :kind))
                       (or (contains? blocks k)
@@ -478,7 +478,7 @@ shape `nest format` answers for Brood, and it is checked line-for-line against r
                      [:bracket (ts-line-start text (get node :start))]))))
         n (count keys)
         ;; how many of those levels a closing delimiter could be leaving
-        brackets-counted (count (filter keys (fn (k) (= (first k) :bracket)))))
+        brackets-counted (count (seq/filter keys (fn (k) (= (first k) :bracket)))))
     (if broken
       ;; No tree can say what is open while the text does not parse — an unterminated
       ;; `do` collapses into an error node rather than staying open — which is the
@@ -509,7 +509,7 @@ shape `nest format` answers for Brood, and it is checked line-for-line against r
 
 (defn- ts-named-kids (node)
   "The named children of `node` (grammar nodes, not anonymous tokens)."
-  (filter (or (get node :kids) []) :named))
+  (seq/filter (or (get node :kids) []) :named))
 
 (defn- ts-enclosing (node point)
   "The deepest container node strictly containing `point`; `node` if none."
@@ -542,7 +542,7 @@ shape `nest format` answers for Brood, and it is checked line-for-line against r
 (defn- ts-siblings (text lang point)
   "The named children of the node strictly containing `point` — the siblings a motion
 steps through, comments excluded (see [[*comment-kinds*]])."
-  (filter (%tree-sitter-kids text lang point)
+  (seq/filter (%tree-sitter-kids text lang point)
     (fn (n) (not (contains? *comment-kinds* (get n :kind))))))
 
 ;; A node's offsets are ints by construction (the kernel writes them), but a `get` on a map
@@ -562,7 +562,7 @@ unchanged if none (the Emacs `forward-sexp`, over a tree-sitter tree)."
 
 (defn point-backward (text lang point)
   "Start of the previous named node ending at or before `point` (`backward-sexp`)."
-  (let (prev (last (filter (ts-siblings text lang point) (fn (f) (<= (get f :end) point)))))
+  (let (prev (last (seq/filter (ts-siblings text lang point) (fn (f) (<= (get f :end) point)))))
     (if (nil? prev) point (get prev :start))))
 (sig point-backward (string keyword any -> any))
 
@@ -577,7 +577,7 @@ stopped at (Emacs `forward-list`); unchanged if none."
 (defn point-list-backward (text lang point)
   "Start of the previous child CONTAINER ending at or before `point` — leaves stepped over
 (Emacs `backward-list`); unchanged if none."
-  (let (prev (last (filter (ts-siblings text lang point)
+  (let (prev (last (seq/filter (ts-siblings text lang point)
                      (fn (f) (and (get f :container) (<= (get f :end) point))))))
     (if (nil? prev) point (get prev :start))))
 (sig point-list-backward (string keyword any -> any))
@@ -585,7 +585,7 @@ stopped at (Emacs `forward-list`); unchanged if none."
 (defn- ts-enclosing-node (text lang point)
   "The deepest node STRICTLY containing `point`, or nil at the top level — the last
 container on the chain that neither begins nor ends at `point` itself."
-  (last (filter (%tree-sitter-chain text lang point)
+  (last (seq/filter (%tree-sitter-chain text lang point)
           (fn (n) (and (get n :container) (< (get n :start) point) (< point (get n :end)))))))
 
 (defn point-up (text lang point)
@@ -656,9 +656,9 @@ where `def`/`defmodule`/… are calls, not distinct node kinds)."
   "The `edge` (`:start` / `:end`) of the enclosing **definition**: the deepest `def` /
 `class` / `module` / … containing `point`, falling back to the top-level form, then `point`.
 The shared body of `point-defun-start` / `point-defun-end`."
-  (let (chain (filter (%tree-sitter-chain text lang point)
+  (let (chain (seq/filter (%tree-sitter-chain text lang point)
                 (fn (n) (and (get n :container) (< (get n :start) point) (< point (get n :end)))))
-        defuns (filter chain (fn (n) (ts-defun? text n))))
+        defuns (seq/filter chain (fn (n) (ts-defun? text n))))
     (cond
       (not (empty? defuns)) (get (last defuns) edge)
       (not (empty? chain)) (get (first chain) edge)

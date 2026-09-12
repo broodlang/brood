@@ -2,13 +2,20 @@
 ;; A namespace (ADR-065): its functions are `seq/dedupe`, `seq/group-by`, … —
 ;; consumers `(:use seq)` to refer them bare, or call them qualified.
 ;;
-;; The *core* sequence protocol stays bare in the prelude — `map`/`filter`/`reduce`/
-;; `fold`/`seq`/`into`/`count`/`take`/`drop`/`take-while`/`drop-while`/`partition`/`sort`
-;; and friends are the universal collection surface (and several are load-bearing
-;; during the prelude's own bootstrap, so they cannot move). This module is the
-;; higher-level, derived helpers layered on top.
+;; The *core* sequence protocol stays bare in the prelude — `map`/`reduce`/`fold`/`seq`/
+;; `into`/`count`/`take`/`drop`/`take-while`/`drop-while`/`partition`/`sort` and friends
+;; are the universal collection surface (and several are load-bearing during the prelude's
+;; own bootstrap, so they cannot move). This module is the higher-level, derived helpers
+;; layered on top.
 ;;
-;; `distinct`, `zip`, `find` and `flatten` are NOT bare — they live here, as
+;; `filter` is HERE, not bare — `seq/filter`, beside its complement `seq/reject` (ADR-330).
+;; It was the one core-protocol op whose negative lived in a different namespace from the
+;; positive, which is the split that ADR-330 closed by moving the positive rather than
+;; duplicating it. The prelude keeps a PRIVATE `%filter` for the four macro-expansion-time
+;; call sites that cannot wait for a require (`defmodule`, `match`); that is an internal,
+;; not a second public spelling.
+;;
+;; `distinct`, `zip`, `find` and `flatten` are NOT bare either — they live here, as
 ;; `seq/distinct` and friends. This comment and the module docstring below both listed
 ;; them among the bare core until 2026-08-27, which sent a reader to write `(distinct xs)`
 ;; and get an unbound symbol. `(bound? 'distinct)` is `false`; check before adding a name
@@ -16,9 +23,11 @@
 (defmodule seq
   "Sequence helpers — the derived enumeration API over the bare collection protocol.
 
-The core ops (`map` `filter` `reduce` `fold` `into` `count` `take` `drop`
+The core ops (`map` `reduce` `fold` `into` `count` `take` `drop`
 `take-while` `drop-while` `partition` `sort` …) stay bare in the
-prelude and need no import. `distinct`, `zip`, `find` and `flatten` are NOT bare —
+prelude and need no import. `filter` is NOT bare: it is [[filter]] here, beside its
+complement [[reject]] (ADR-330), so the pair shares one home. `distinct`, `zip`, `find`
+and `flatten` are not bare either —
 they are `seq/distinct` and friends, defined here. This module adds the higher-level helpers: grouping
 (`group-by` `frequencies` `chunk-by` `chunk-every`), dedup-by-key (`distinct-by`),
 running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
@@ -265,12 +274,21 @@ Stages compose LEFT to RIGHT in data-flow order under `comp` — `(comp (xfilter
 (sig transduce (seqable (or fn keyword) any any -> any))
 
 (defn filterv (coll pred)
-  "A VECTOR of the items of `coll` for which `(pred x)` is truthy — `filter`
-when the caller needs indexed access (`(into [] (filter coll pred))`, named).
+  "A VECTOR of the items of `coll` for which `(pred x)` is truthy — [[filter]]
+when the caller needs indexed access (`(into [] (seq/filter coll pred))`, named).
+The complement is [[rejectv]].
 
     (seq/filterv [1 2 3 4] math/even?)   → [2 4]"
-  (into [] (filter coll pred)))
+  (into [] (seq/filter coll pred)))
 (sig filterv (seqable (any -> any) -> vector))
+
+(defn rejectv (coll pred)
+  "A VECTOR of the items of `coll` for which `(pred x)` is *falsy* — [[reject]]
+when the caller needs indexed access. The complement of [[filterv]].
+
+    (seq/rejectv [1 2 3 4] math/even?)   → [1 3]"
+  (into [] (seq/reject coll pred)))
+(sig rejectv (seqable (any -> any) -> vector))
 
 ;; (find pred coll) -> the first element satisfying pred, or nil.
 (defn find (coll pred)
@@ -444,16 +462,24 @@ The collection comes FIRST, like every other function in this module
     (append (take coll i) (drop coll (inc i)))))
 (sig remove-nth (seqable int -> any))
 
-(%defseq remove
+(%defseq filter
   (pred)
-  "A list of the items of `coll` for which `(pred x)` is *falsy* — the complement of `filter`.
+  "A list of the items of `coll` for which `(pred x)` is truthy. The complement is [[reject]]; [[keep]] filters on `(f x)` and collects that instead of the item.
 
-    (seq/remove [1 2 3 4] math/even?)   → (1 3)"
+    (seq/filter [1 2 3 4] math/even?)   → (2 4)
+    (seq/filter [1 3] math/even?)       → nil"
+  (if (pred item) (cons item acc) acc))
+
+(%defseq reject
+  (pred)
+  "A list of the items of `coll` for which `(pred x)` is *falsy* — the complement of [[filter]].
+
+    (seq/reject [1 2 3 4] math/even?)   → (1 3)"
   (if (pred item) acc (cons item acc)))
 
 (%defseq keep
   (f)
-  "A list of the non-nil results of `(f x)` over `coll` — map and filter fused (the eager counterpart of `seq/xkeep`). Only `nil` drops: a `failure` is a result the caller asked for and is never discarded silently, so `(seq/keep lines string/->number)` on an unparseable line yields that failure rather than a quietly shorter list. To drop failures, say so — return `nil` for them in `f`.
+  "A list of the non-nil results of `(f x)` over `coll` — `map` and [[filter]] fused (the eager counterpart of [[xkeep]]). Unlike [[filter]], which collects the ITEM, this collects `(f x)`. Only `nil` drops: a `failure` is a result the caller asked for and is never discarded silently, so `(seq/keep lines string/->number)` on an unparseable line yields that failure rather than a quietly shorter list. To drop failures, say so — return `nil` for them in `f`.
 
     (seq/keep [1 2 3 4] (fn (n) (if (math/even? n) (* n 10) nil)))   → (20 40)"
   (let (y (f item)) (if (nil? y) acc (cons y acc))))
@@ -478,20 +504,21 @@ with `transduce`, or reach for `seq/lmap` when you just want a fusing pipeline.
   (%xmap f))
 
 (defn xfilter (pred)
-  "The `filter` stage as a transducer: keep inputs where `(pred x)` is truthy.
+  "The [[filter]] stage as a transducer: keep inputs where `(pred x)` is truthy — the
+complement of [[xreject]].
 
     (seq/transduce [1 2 3] (seq/xfilter math/odd?) conj [])   → [1 3]"
   (%xfilter pred))
 
-(defn xremove (pred)
-  "The `remove` stage as a transducer: drop inputs where `(pred x)` is truthy — the
-complement of `xfilter`.
+(defn xreject (pred)
+  "The [[reject]] stage as a transducer: drop inputs where `(pred x)` is truthy — the
+complement of [[xfilter]].
 
-    (seq/transduce [1 2 3] (seq/xremove math/odd?) conj [])   → [2]"
-  (%xremove pred))
+    (seq/transduce [1 2 3] (seq/xreject math/odd?) conj [])   → [2]"
+  (%xreject pred))
 
 (defn xkeep (f)
-  "The `keep` stage as a transducer: `(f x)` for each input, dropping `nil` results.
+  "The [[keep]] stage as a transducer: `(f x)` for each input, dropping `nil` results.
 
     (seq/transduce [1 2 3] (seq/xkeep (fn (n) (if (math/odd? n) n nil))) conj [])   → [1 3]"
   (%xkeep f))

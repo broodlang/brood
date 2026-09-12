@@ -1089,6 +1089,168 @@ query-replace, re-indentation, and transpose are all this. Composes `delete-char
   (insert (delete-char (goto-char buf start) (- end start)) s))
 (sig replace-region (buffer int int string -> buffer))
 
+;; ---- rectangles: column-block ops (Emacs C-x r r/k/d/o/c/t/y) ---------------
+;; A RECTANGLE is the character grid between two corners — point and mark taken as
+;; (line, column) rather than as a linear span. Every op is pure and line-wise: it acts
+;; on `[left, right)` of each line in `[top, bottom]`. Edits run BOTTOM-TO-TOP so an
+;; earlier splice never invalidates a lower line's offsets. Short lines (content shorter
+;; than a column) are handled per op — `extract` pads to width so a kill round-trips, the
+;; blanking ops pad to `left` where Emacs does, `delete` simply takes what is there.
+;;
+;; The kernel has no rectangle primitive and needs none: this is `replace-region` over a
+;; computed set of per-line spans. bedit wires the keys and holds the killed rows (a
+;; rectangle kill is a LIST of rows, not a flat string — that is what makes a rectangle
+;; yank rebuild the block).
+
+(defn rectangle-bounds (buf)
+  "`[top bottom left right]` — the rectangle point↔mark spans as line/column corners
+(`top <= bottom`, `left <= right`), or nil when no mark is set. `left`/`right` are columns
+(0-based char offsets within a line); the block on each line is `[left, right)`."
+  (let (mark (get buf :mark))
+    (if (nil? mark)
+      nil
+      (let (rope (get buf :rope)
+            point (get buf :point)
+            pl (text/char->line rope point)
+            ml (text/char->line rope mark)
+            pc (- point (text/line->char rope pl))
+            mc (- mark (text/line->char rope ml)))
+        [(math/min pl ml) (math/max pl ml) (math/min pc mc) (math/max pc mc)]))))
+(sig rectangle-bounds (buffer -> (or nil (tuple int int int int))))
+
+(defn- rect-line-content (rope line)
+  ;; the line's length excluding any trailing newline
+  (let (lt (text/line rope line))
+    (if (string/ends-with? lt "\n") (dec (string/length lt)) (string/length lt))))
+(sig rect-line-content (any int -> int))
+
+(defn- rect-spans (buf)
+  ;; per line top..bottom, `[start l r]`: absolute line-start char, and the block's
+  ;; column offsets clamped to the line's content. nil when there is no rectangle.
+  (let (rb (rectangle-bounds buf))
+    (if (nil? rb)
+      nil
+      (let ([top bottom left right] rb
+            rope (get buf :rope))
+        (map (range top (inc bottom))
+          (fn (line)
+            (let (start (text/line->char rope line)
+                  content (rect-line-content rope line))
+              [start (math/min left content) (math/min right content)])))))))
+(sig rect-spans (buffer -> (or nil list)))
+
+(defn extract-rectangle (buf)
+  "The rectangle's rows as a list of strings, one per line top..bottom, each right-padded
+with spaces to the rectangle's full width — so a kill round-trips through
+[[insert-rectangle]]. `()` when no mark is set."
+  (let (rb (rectangle-bounds buf))
+    (if (nil? rb)
+      '()
+      (let ([top bottom left right] rb
+            rope (get buf :rope)
+            width (- right left))
+        (map (range top (inc bottom))
+          (fn (line)
+            (let (start (text/line->char rope line)
+                  content (rect-line-content rope line)
+                  l (math/min left content)
+                  r (math/min right content)
+                  piece (text/slice rope (+ start l) (+ start r)))
+              (str piece (string/repeat " " (- width (string/length piece)))))))))))
+(sig extract-rectangle (buffer -> list))
+
+(defn- rect-fold-lines (buf spans f)
+  ;; apply `(f buf start l r)` to each span, BOTTOM-TO-TOP so offsets above the edit stay
+  ;; valid, then park point at the rectangle's top-left. `spans` is `rect-spans`' output.
+  (let (edited (fold (reverse spans) buf (fn (b sp) (let ([start l r] sp) (f b start l r)))))
+    (goto-char edited (+ (first (first spans)) (second (first spans))))))
+(sig rect-fold-lines (buffer list any -> buffer))
+
+(defn delete-rectangle (buf)
+  "Delete `[left, right)` of every line the rectangle spans, closing the gap; point lands
+at the top-left. A no-op when no mark is set. Throws if the text is read-only."
+  (let (spans (rect-spans buf))
+    (if (nil? spans)
+      buf
+      (rect-fold-lines buf spans (fn (b start l r) (replace-region b (+ start l) (+ start r) ""))))))
+(sig delete-rectangle (buffer -> buffer))
+
+(defn clear-rectangle (buf)
+  "Blank the rectangle in place — replace `[left, right)` of each line with spaces, keeping
+every following column where it was. A no-op when no mark is set. Throws if read-only."
+  (let (spans (rect-spans buf))
+    (if (nil? spans)
+      buf
+      (rect-fold-lines buf
+        spans
+        (fn (b start l r) (replace-region b (+ start l) (+ start r) (string/repeat " " (- r l))))))))
+(sig clear-rectangle (buffer -> buffer))
+
+(defn open-rectangle (buf)
+  "Shift the rectangle's text to the right — insert the rectangle's width in spaces at its
+left column on every line, so the block becomes blank and what was there moves over. Short
+lines are padded to the left column first. A no-op when no mark is set; throws if read-only."
+  (let (rb (rectangle-bounds buf))
+    (if (nil? rb)
+      buf
+      (let ([top bottom left right] rb
+            width (- right left)
+            spans (rect-spans buf))
+        (rect-fold-lines buf
+          spans
+          (fn (b start l r)
+            ;; l is the content-clamped left; pad a short line out to `left`, then the width
+            (let (pad (- left l))
+              (replace-region b (+ start l) (+ start l) (string/repeat " " (+ pad width))))))))))
+(sig open-rectangle (buffer -> buffer))
+
+(defn string-rectangle (buf s)
+  "Replace `[left, right)` of every line the rectangle spans with the string `s` (the same
+`s` on each line) — Emacs `string-rectangle`. Short lines are padded to the left column
+first. A no-op when no mark is set; throws if read-only."
+  (let (rb (rectangle-bounds buf))
+    (if (nil? rb)
+      buf
+      (let ([top bottom left right] rb
+            spans (rect-spans buf))
+        (rect-fold-lines buf
+          spans
+          (fn (b start l r)
+            (let (pad (- left l))
+              (replace-region b (+ start l) (+ start r) (str (string/repeat " " pad) s)))))))))
+(sig string-rectangle (buffer string -> buffer))
+
+(defn insert-rectangle (buf rows)
+  "Insert `rows` (a list of strings — an [[extract-rectangle]] result) as a column block at
+point: the first row at point, each later row on the next line at point's column, padding a
+short line (or a missing one at end of buffer) with spaces so the block stays aligned. Point
+returns to where it started. `rows` empty leaves `buf` unchanged. Throws if read-only."
+  (if (empty? rows)
+    buf
+    (let (rope (get buf :rope)
+          start-point (get buf :point)
+          start-line (text/char->line rope start-point)
+          col (- start-point (text/line->char rope start-line)))
+      (goto-char
+        (fold (seq/zip (range (count rows)) rows)
+          buf
+          (fn (b pair)
+            (let ([i row] pair
+                  line (+ start-line i)
+                  rope (get b :rope)
+                  nlines (text/line-count rope))
+              (if (>= line nlines)
+                ;; past the end: a fresh line at `col`, made by padding after the last char
+                (let (end (buffer-length b))
+                  (insert (goto-char b end) (str "\n" (string/repeat " " col) row)))
+                (let (lstart (text/line->char rope line)
+                      content (rect-line-content rope line)
+                      at (+ lstart (math/min col content))
+                      pad (math/max 0 (- col content)))
+                  (insert (goto-char b at) (str (string/repeat " " pad) row)))))))
+        start-point))))
+(sig insert-rectangle (buffer list -> buffer))
+
 ;; ---- public marker API ------------------------------------------------------
 
 (defn buffer-marker-set (buf id pos)
@@ -1386,7 +1548,7 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
       ;; second keystroke one column too far. The push carries the splice AS APPLIED.
       ([:splice lo hi repl origin base] (let (since (reverse (take-while rec
                                                                (fn (e) (> (first e) base))))
-                                              foreign (filter since
+                                              foreign (seq/filter since
                                                         (fn (e)
                                                           (or (nil? origin)
                                                             (not (= (nth e 4 nil) origin)))))
@@ -1458,14 +1620,14 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
                                    nil])
                                (buffer-serve buf (cons {:pid pid :proj proj} subs) version rec)))
       ([:unsubscribe pid] (buffer-serve buf
-                            (seq/remove subs (fn (s) (= (get s :pid) pid)))
+                            (seq/reject subs (fn (s) (= (get s :pid) pid)))
                             version
                             rec))
       ([:down _ pid _]
-        (let (ns (seq/remove subs (fn (s) (= (get s :pid) pid)))
+        (let (ns (seq/reject subs (fn (s) (= (get s :pid) pid)))
               ;; the dead subscriber's transient markers: keyed BY its pid (its cursor)
               ;; or by a vector containing it (e.g. [pid :mark] — its selection anchor)
-              nb (fold (filter (keys (buffer-markers buf))
+              nb (fold (seq/filter (keys (buffer-markers buf))
                          (fn (k) (or (= k pid) (and (vector? k) (includes? k pid)))))
                    buf
                    (fn (b k) (buffer-marker-delete b k))))

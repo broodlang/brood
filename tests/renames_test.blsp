@@ -30,7 +30,7 @@
   (test "the checker's unbound warning carries the same pointer"
     (let (diags (reflect/check-string-structured "(defn f () (os/clipboard-set! \"x\"))")
           messages (map diags (fn (d) (get d :message)))
-          unbound (filter messages (fn (m) (includes? m "unbound symbol: os/clipboard-set!"))))
+          unbound (seq/filter messages (fn (m) (includes? m "unbound symbol: os/clipboard-set!"))))
       (assert= (count unbound) 1)
       (is (includes? (first unbound) "renamed to os/clipboard-set (ADR-302)"))))
 
@@ -46,7 +46,7 @@
 
   (test "every ledger old name is unbound and every new name is bound"
     (let (entries (seq (ledger))
-          stale (filter entries
+          stale (seq/filter entries
                   (fn (kv)
                     (let (old (first kv)
                           new (get (second kv) :to)

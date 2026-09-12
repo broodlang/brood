@@ -41,9 +41,9 @@
 (defn- dt-numeric? (s)
   (and (> (string/length s) 0)
     (let (cs (string/->list s))
-      (and (nil? (first (seq/remove cs (fn (c) (includes? "0123456789+-.eE" c)))))
+      (and (nil? (first (seq/reject cs (fn (c) (includes? "0123456789+-.eE" c)))))
         ;; at least one digit — rules out a bare sign and dectest's `#` null
-        (not (nil? (first (filter cs (fn (c) (includes? "0123456789" c))))))))))
+        (not (nil? (first (seq/filter cs (fn (c) (includes? "0123456789" c))))))))))
 
 ;; dectest's absurd-exponent cases (1E+999999999) all carry Overflow/Underflow and
 ;; are dropped by the conditions filter — but `decimal/->string` expands integer-side
@@ -62,7 +62,7 @@
 (defn- dt-words (line)
   (let (s (string/replace line "\t" " ")
         i (index-of s "--"))
-    (seq/remove (string/split (if (< i 0) s (string/substring s 0 i)) " ") string/blank?)))
+    (seq/reject (string/split (if (< i 0) s (string/substring s 0 i)) " ") string/blank?)))
 
 ;; The computed result as a canonical decimal string, or nil when the case does not
 ;; apply to Brood's decimal. `compare` answers -1/0/1, so it renders as an int.
@@ -113,8 +113,8 @@
               (and binary (not (= (count args) 2)))
               (not (dt-numeric? want))
               (not (dt-in-range? want))
-              (first (seq/remove args dt-numeric?))
-              (first (seq/remove args dt-in-range?)))
+              (first (seq/reject args dt-numeric?))
+              (first (seq/reject args dt-in-range?)))
           nil
           (let (a (decimal/of (or (first args) ""))
                 b (if binary (decimal/of (or (nth args 1) "")) nil)

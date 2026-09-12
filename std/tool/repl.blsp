@@ -186,7 +186,7 @@ highlights. Used to colour a printed result on an interactive TTY."
 
 (defn- repl-command-for (cmd)
   "The registered command whose `:names` include `cmd`, or nil."
-  (first (filter *repl-commands* (fn (c) (repl-has-name? (get c :names) cmd)))))
+  (first (seq/filter *repl-commands* (fn (c) (repl-has-name? (get c :names) cmd)))))
 
 (defn register-repl-command (spec)
   "Register a `,cmd` meta-command. `spec` is `{:names (->string alias…) :usage str
@@ -200,7 +200,8 @@ registration order, the new one last). The extension seam tools use to add comma
     ;; promises to replace survived (KI-23 — it failed `repl_test` 2 runs in 5).
     (%swap-registry! repl/*repl-commands*
       (fn (l)
-        (append (filter l (fn (c) (not (any? (get c :names) (fn (n) (repl-has-name? names n))))))
+        (append (seq/filter l
+                  (fn (c) (not (any? (get c :names) (fn (n) (repl-has-name? names n))))))
           (list spec))))
     (first names)))
 
@@ -225,7 +226,7 @@ registration order, the new one last). The extension seam tools use to add comma
   "Print the `,help` table — generated from the command registry (skipping `:hidden`
 entries) plus the static Tab / `*1 *2 *3` footer."
   (io/puts (str "\e[90m"
-             (string/join (map (filter *repl-commands* (fn (c) (not (get c :hidden))))
+             (string/join (map (seq/filter *repl-commands* (fn (c) (not (get c :hidden))))
                             repl-command-help-line)
                "\n")
              "\n"
@@ -659,7 +660,7 @@ of `repl-save-history`.)"
 (defn- repl-history<-text (text)
   "Parse history-file `text` into a history list (newest first), dropping blank
 lines. (Pure — the testable core of `repl-load-history`.)"
-  (reverse (filter (string/split text "\n") (fn (l) (not (= l ""))))))
+  (reverse (seq/filter (string/split text "\n") (fn (l) (not (= l ""))))))
 
 (defn- repl-load-history ()
   "Load saved history (newest first) from the history file, or `()` if none / on any
@@ -785,7 +786,7 @@ from your home directory doesn't load the same file twice."
         ;; Compared against the *absolute* local path, since `user` is absolute — a
         ;; bare "./.broodrc.blsp" would never match it and we'd load twice.
         local (try (path/join (file/cwd) ".broodrc.blsp") (catch _ ".broodrc.blsp")))
-    (filter (if (= user local) (list user) (list user local)) (fn (p) (not (nil? p))))))
+    (seq/filter (if (= user local) (list user) (list user local)) (fn (p) (not (nil? p))))))
 
 ;; Loaded ONCE per runtime, not once per `run`: `pry` launches a nested `run`
 ;; mid-session, and re-running the user's rc there would re-execute its side effects

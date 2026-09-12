@@ -1787,7 +1787,10 @@ mod key_to_value_tests {
             "ctrl-shift-up"
         );
         assert_eq!(kw_of(KeyCode::Down, KeyModifiers::ALT), "alt-down");
-        assert_eq!(kw_of(KeyCode::Backspace, KeyModifiers::CONTROL), "ctrl-backspace");
+        assert_eq!(
+            kw_of(KeyCode::Backspace, KeyModifiers::CONTROL),
+            "ctrl-backspace"
+        );
         assert_eq!(kw_of(KeyCode::BackTab, KeyModifiers::SHIFT), "back-tab");
         assert_eq!(kw_of(KeyCode::Esc, KeyModifiers::CONTROL), "escape");
     }

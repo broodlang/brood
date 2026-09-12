@@ -362,7 +362,7 @@
     (let (rows (list {:id 2 :name "b"} {:id 1 :name "a"}))
       (assert= (map rows :name) (list "b" "a"))
       (assert= (map (sort-by rows :id) :id) (list 1 2))
-      (assert= (count (filter rows :name)) 2)
+      (assert= (count (seq/filter rows :name)) 2)
       (assert= (seq/keep rows :id) (list 2 1))))
   (test "it is a value, so it composes like any function"
     (assert= (apply :name (list {:name "ada"})) "ada")

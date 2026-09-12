@@ -122,7 +122,7 @@ only for verification (`:delete` and `:keep` ops are expected to match `a` in
 order); the output is built from `:keep` and `:insert` ops.
 
     (diff/patch [1 2 3] (diff/seq [1 2 3] [1 3]))   → (1 3)"
-  (map (filter ops (fn (op) (not (= (first op) :delete)))) second))
+  (map (seq/filter ops (fn (op) (not (= (first op) :delete)))) second))
 (sig patch (any seqable -> (or nil (list any))))
 
 (defn unified (ops context-lines)

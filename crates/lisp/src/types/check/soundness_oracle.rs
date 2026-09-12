@@ -201,14 +201,14 @@ fn expr_ty_is_a_sound_overapproximation_of_runtime_values() {
         "(let (r \"x\") (unless r (error \"no\")) r)",
         // higher-order results (parametric — ADR-078)
         "(map [1 2 3] inc)",
-        "(filter [1 2 3 4] math/even?)",
+        "(seq/filter [1 2 3 4] math/even?)",
         "(reduce [1 2 3] 0 +)",
         "(fold [1 2 3] 0 (fn (a x) (+ a x)))",
         "(map [1 2 3] (fn (x) (+ x 1)))",
         // empty / all-filtered results evaluate to `nil` — these exercise the
         // `… | nil` widening in `list_result`; drop it and the oracle bites.
         "(map [] inc)",
-        "(filter [1 2 3] (fn (x) false))",
+        "(seq/filter [1 2 3] (fn (x) false))",
         // nested
         "(first (map [1 2 3] inc))",
         "(reduce (map [1 2 3] inc) 0 +)",
@@ -246,7 +246,7 @@ fn expr_ty_is_a_sound_overapproximation_of_runtime_values() {
         "(drop [1 2 3] 5)",
         "(seq/take-while math/even? [2 4 5])",
         "(seq/drop-while math/even? [2 4 5])",
-        "(seq/remove [1 2 3] math/even?)",
+        "(seq/reject [1 2 3] math/even?)",
         "(cons 1 [2 3])",
         "(cons \"a\" [2 3])",
         "(append [1 2] [\"a\"])",
@@ -433,7 +433,7 @@ fn correct_programs_draw_no_type_disjointness_warning() {
         "(map [1 2 3] inc)",
         "(map [1 2 3] (fn (n) (+ n 1)))",
         "(reduce [1 2 3] 0 +)",
-        "(filter [1 2 3 4] math/even?)",
+        "(seq/filter [1 2 3 4] math/even?)",
         "(first (map [1 2 3] inc))",
         "(match 5 (5 (+ 5 1)) (_ 0))",
         "(match [1 2] ([a b] (+ a b)) (_ 0))",

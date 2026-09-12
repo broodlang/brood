@@ -121,12 +121,13 @@ version strings that exist for it; `deps-fn` maps a name + a version to that rel
   "The subset of `pkg`'s REAL versions matching `constraint` (a version string; nil/\"\" =
 all). NONE never matches — a version constraint is about a selected version."
   (let (compiled (version/compile constraint))
-    (filter (pg-universe ctx pkg) (fn (v) (and (not (= v pg-none)) (version/match? compiled v))))))
+    (seq/filter (pg-universe ctx pkg)
+      (fn (v) (and (not (= v pg-none)) (version/match? compiled v))))))
 
-(defn- pg-intersect (a b) (filter a (fn (v) (includes? b v))))
+(defn- pg-intersect (a b) (seq/filter a (fn (v) (includes? b v))))
 (defn- pg-subset? (a b) (every? a (fn (v) (includes? b v))))
 (defn- pg-disjoint? (a b) (not (any? a (fn (v) (includes? b v)))))
-(defn- pg-complement (ctx pkg s) (filter (pg-universe ctx pkg) (fn (v) (not (includes? s v)))))
+(defn- pg-complement (ctx pkg s) (seq/filter (pg-universe ctx pkg) (fn (v) (not (includes? s v)))))
 (defn- pg-empty? (s) (empty? s))
 
 ;; --- incompatibilities -----------------------------------------------------------
@@ -207,7 +208,7 @@ all). NONE never matches — a version constraint is about a selected version."
 ;; Drop every assignment above `level`, then rebuild `pos`/`decs` from what remains — the
 ;; backjump. `assigns` is newest-first, so kept assignments keep their order.
 (defn- pg-backtrack (state level)
-  (let (kept (filter (get state :assigns) (fn (a) (<= (get a :level) level)))
+  (let (kept (seq/filter (get state :assigns) (fn (a) (<= (get a :level) level)))
         pos (fold (reverse kept)
               {}
               (fn (m a)
@@ -380,7 +381,7 @@ all). NONE never matches — a version constraint is about a selected version."
         ;; this package: if empty, the satisfier fully explains it and the package cancels;
         ;; otherwise the complement of that difference stays in the resolvent (pub's
         ;; `difference.inverse`), so the learned incompatibility is not weakened.
-        difference (filter satisfier-set (fn (v) (not (includes? ic-pkg-set v))))
+        difference (seq/filter satisfier-set (fn (v) (not (includes? ic-pkg-set v))))
         others (fold (%map-pairs (get cause :terms))
                  (dissoc (get ic :terms) pkg)
                  (fn (terms kv)
@@ -526,7 +527,7 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
 ;; A package's REAL versions (never NONE) an incompatibility term ALLOWS — the complement of
 ;; its forbidden set — for phrasing a step's consequence.
 (defn- pg-term-allows (ctx pkg forbidden)
-  (filter (pg-complement ctx pkg forbidden) (fn (v) (not (= v pg-none)))))
+  (seq/filter (pg-complement ctx pkg forbidden) (fn (v) (not (= v pg-none)))))
 
 ;; The fact a derived incompatibility establishes going forward, phrased for prose. An
 ;; incompatibility forbids all its terms holding at once; dropping the (always-true) root term,
@@ -537,7 +538,7 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
   ;; empty-set term (`P → {}` forbids nothing, so its complement is the whole universe — rendering
   ;; it as "P must be <every version>" is both wrong and unbounded; such a term can arise as an
   ;; empty-intersection resolvent on the spine).
-  (let (reals (filter (%map-pairs (get ic :terms))
+  (let (reals (seq/filter (%map-pairs (get ic :terms))
                 (fn (kv) (and (not (= (nth kv 0) pg-root-pkg)) (not (empty? (nth kv 1)))))))
     (cond
       (empty? reals) "version solving failed"
@@ -644,7 +645,7 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
     (apply str
       (map pkgs
         (fn (pkg)
-          (let (real (filter (pg-universe ctx pkg) (fn (v) (not (= v pg-none)))))
+          (let (real (seq/filter (pg-universe ctx pkg) (fn (v) (not (= v pg-none)))))
             (str "\n  "
               (->string pkg)
               (if (empty? real)

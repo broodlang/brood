@@ -36,7 +36,7 @@
 
 (io/puts "--- filter: keep entries where value mod 7 == 0 ---")
 ;; `filter` on a map walks [k v] pairs
-(def mod7-map (into {} (filter big-map (fn (kv) (= (math/rem (first (rest kv)) 7) 0)))))
+(def mod7-map (into {} (seq/filter big-map (fn (kv) (= (math/rem (first (rest kv)) 7) 0)))))
 (io/puts "entries divisible by 7:" (count mod7-map))
 
 (io/puts "--- map values: increment every value in a 100k-entry slice ---")

@@ -335,7 +335,7 @@
 
 (defn- stability-messages (src)
   "The stability diagnostics the checker reports for `src`."
-  (filter (map (reflect/check-string-structured src) (fn (d) (get d :message)))
+  (seq/filter (map (reflect/check-string-structured src) (fn (d) (get d :message)))
     (fn (m) (or (includes? m "is deprecated") (includes? m "is beta")))))
 
 (describe "stability metadata (meta …)"

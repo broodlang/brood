@@ -34,7 +34,7 @@ fn racing_requirers_are_all_released_by_the_loader() {
             "(def root (self))\
              (dotimes (_ 32) (spawn (send root [:r (string/blank? \"\")])))\
              (let (got (reduce (range 32) (list) (fn (a _) (receive ([:r v] (cons v a))))))\
-               [(count got) (count (filter got (fn (x) (= x true))))\
+               [(count got) (count (seq/filter got (fn (x) (= x true))))\
                 (%registry-member? '*features* \"string\")])",
         )
         .expect("32 processes racing the first call into `string`");
@@ -145,7 +145,7 @@ fn a_failed_load_does_not_report_success_to_racing_requirers() {
                (spawn (send root [:r (try (do (require-one \"zzz-no-such-module\") :ok)\
                                        (catch _ :err))])))\
              (let (got (reduce (range 8) (list) (fn (a _) (receive ([:r v] (cons v a))))))\
-               [(count got) (count (filter got (fn (x) (= x :err))))])",
+               [(count got) (count (seq/filter got (fn (x) (= x :err))))])",
         )
         .expect("8 processes racing a require of a module that does not exist");
     assert_eq!(

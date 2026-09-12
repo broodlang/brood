@@ -24,7 +24,7 @@
       (is (not (includes? kw "->>")))
       ;; the count matches: the canonical list with def-heads filtered out
       (assert= (count kw)
-        (count (filter (reflect/special-forms) (fn (k) (not (string/starts-with? k "def"))))))))
+        (count (seq/filter (reflect/special-forms) (fn (k) (not (string/starts-with? k "def"))))))))
 
   (test "(tmlanguage) is valid JSON of the TextMate shape"
     ;; narrowed once: `decode` answers any shape, and every `get` below assumes a map

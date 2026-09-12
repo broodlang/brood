@@ -156,7 +156,7 @@
       (is (includes? message "Because"))
       ;; exactly two of the three requirers are named in the proof
       (is (= 2
-            (count (filter ["x" "y" "z"]
+            (count (seq/filter ["x" "y" "z"]
                      (fn (pkg) (includes? message (str pkg " 1.0.0 requires s")))))))))
   (test "a required package the provider does not know is a clear error"
     (let (p (rt-prov {'foo ["1.0.0"]} {'foo {"1.0.0" [['ghost ">= 1.0"]]}})
@@ -395,7 +395,7 @@
 (defn rt-g-version-map (seed pkg versions acc)
   (if (empty? versions)
     [acc seed]
-    (let ([deps s1] (rt-g-deps seed pkg (filter rt-g-packages (fn (p) (not (= p pkg)))) nil))
+    (let ([deps s1] (rt-g-deps seed pkg (seq/filter rt-g-packages (fn (p) (not (= p pkg)))) nil))
       (rt-g-version-map s1 pkg (rest versions) (assoc acc (first versions) deps)))))
 
 (defn rt-g-package (seed pkg)

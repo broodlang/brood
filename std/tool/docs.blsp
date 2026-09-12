@@ -56,9 +56,57 @@ module's namespace-rooted globals (ADR-070) back to it."
 
 ;; Names present in `after` but not `before` — the bindings a module introduced
 ;; between two (reflect/global-names) snapshots. global-names is sorted, so this is too.
-(defn- docs-added (before after) (filter after (fn (s) (not (includes? before s)))))
+(defn- docs-added (before after) (seq/filter after (fn (s) (not (includes? before s)))))
 
 ;; --- rendering ---------------------------------------------------------------
+
+;; A `[[name]]` cross-reference in a docstring (ADR-331). The docsite renders these as real
+;; anchor links; this file emits GitHub-flavoured Markdown that is mostly READ IN A TERMINAL,
+;; where an anchor into a page that is not open is worse than no link at all — and the heading
+;; slug a renderer would generate from `### \`(seq/reject coll pred)\`` is not something this
+;; module can predict. So here the reference renders as the code span it is: `reject`. The
+;; brackets never reach the reader either way, which is the bug being fixed — they used to
+;; print verbatim in both surfaces.
+;;
+;; Same two guards as the docsite's: a name has no spaces (docstrings carry literal vectors
+;; like `[[hatch :path "…"]]`), and an unclosed `[[` is prose.
+(defn- docs-link-part (part prefix)
+  (let (end (index-of part "]]"))
+    (cond
+      (< end 0) (str "[[" part)
+      else
+        (let (raw (string/substring part 0 end)
+              tail (string/substring part (inc (inc end)) (count part)))
+          (if (or (= raw "") (includes? raw " "))
+            (str "[[" part)
+            ;; QUALIFY a bare reference with the citing definition's own module. The docsite
+            ;; can leave `[[reject]]` reading as "reject" because it is a link on the page
+            ;; that defines it; here there is no link and no page, so the bare spelling is
+            ;; all the reader gets — and for a namespaced module the bare spelling is one
+            ;; they cannot type. `seq/filter`'s docstring citing [[reject]] must print
+            ;; `seq/reject`, not `reject`, which is unbound.
+            (str "`"
+              (if (or (nil? prefix) (>= (index-of raw "/") 0)) raw (str prefix raw))
+              "`"
+              tail))))))
+
+(defn- docs-module-prefix (sym)
+  "The `mod/` a bare `[[name]]` in `sym`'s docstring should be read against, or nil for a
+bare-surface (prelude) name, whose references are bare already."
+  (let (name (->string sym)
+        slash (index-of name "/"))
+    (if (< slash 0) nil (string/substring name 0 (inc slash)))))
+
+(defn- docs-links (text &optional prefix)
+  "Render `[[name]]` cross-references in `text` as code spans, qualifying bare ones with
+`prefix` (a `mod/` string) when there is one."
+  (if (nil? text)
+    text
+    (let (parts (string/split text "[["))
+      (if (< (count parts) 2)
+        text
+        (str (first parts)
+          (apply str (map (rest parts) (fn (p) (docs-link-part p prefix)))))))))
 
 ;; A value worth a full entry (signature + docstring): a function or a macro.
 (defn- docs-documentable? (v) (or (fn? v) (= (type-of v) :macro)))
@@ -113,11 +161,11 @@ module's namespace-rooted globals (ADR-070) back to it."
       "\n\n"
       stability
       type-line
-      (if (nil? d) "_Undocumented._\n" (str d "\n")))))
+      (if (nil? d) "_Undocumented._\n" (str (docs-links d (docs-module-prefix sym)) "\n")))))
 
 ;; The "Definitions" section: every public function/macro the module added.
 (defn- docs-section-defs (syms)
-  (let (defs (filter syms
+  (let (defs (seq/filter syms
                (fn (s) (and (docs-documentable? (reflect/eval s)) (not (docs-private? s))))))
     (if (empty? defs)
       ""
@@ -130,7 +178,7 @@ module's namespace-rooted globals (ADR-070) back to it."
 
 ;; The "Variables" section: public names the module bound to non-function values.
 (defn- docs-section-vars (syms)
-  (let (vars (filter syms
+  (let (vars (seq/filter syms
                (fn (s)
                  (and (not (docs-documentable? (reflect/eval s)))
                    (not (docs-private? s))))))
@@ -138,12 +186,27 @@ module's namespace-rooted globals (ADR-070) back to it."
       ""
       (str "## Variables\n\n" (apply str (map vars (fn (s) (str "- `" (->string s) "`\n"))))))))
 
-;; Assemble one module's Markdown from its title, module doc, and added names.
-(defn- docs-render (title mdoc syms)
+;; The "Types" section: every `(deftype name T)` the module declares (ADR-327), as its
+;; bare name over the type as written. A `deftype` binds no global, so the module's name
+;; walk cannot see it — `reflect/type-aliases` enumerates the checker's store by module.
+;; Nothing for a module whose namespace is unknown (the load-delta fallback).
+(defn- docs-section-types (ns)
+  (let (types (if (nil? ns) nil (reflect/type-aliases ns)))
+    (if (empty? types)
+      ""
+      (str "## Types\n\n"
+        (apply str
+          (map types
+            (fn (t) (str "### `" (docs-bare (:name t)) "`\n\n`" (:type t) "`\n\n"))))))))
+
+;; Assemble one module's Markdown from its title, module doc, and added names; `ns` is
+;; the module's namespace when known, which is what its types are listed under.
+(defn- docs-render (title mdoc syms &optional ns)
   (str "# module "
     title
     "\n\n"
     (if (nil? mdoc) "" (str mdoc "\n\n"))
+    (docs-section-types ns)
     (docs-section-defs syms)
     (docs-section-vars syms)))
 
@@ -168,7 +231,8 @@ module's namespace-rooted globals (ADR-070) back to it."
     (if feature
       (docs-render (or declared (docs-basename path))
         (docs-leading-doc src)
-        (docs-namespace-syms feature))
+        (docs-namespace-syms feature)
+        feature)
       (docs-render (docs-basename path)
         (docs-leading-doc src)
         (docs-added before (reflect/global-names))))))
@@ -196,7 +260,7 @@ module's namespace-rooted globals (ADR-070) back to it."
         ;; namespace (a bare-rooted module), where the prefix filter finds nothing.
         (let (owned (docs-namespace-syms key)
               syms (if (empty? owned) (docs-added before (reflect/global-names)) owned))
-          (docs-render key (docs-leading-doc src) syms))))))
+          (docs-render key (docs-leading-doc src) syms key))))))
 
 ;; Markdown for the whole project: find it from the cwd, put its sources on the
 ;; load-path, and document each source file in turn.
@@ -225,7 +289,7 @@ module's namespace-rooted globals (ADR-070) back to it."
 
 (defn document-all ()
   "The Markdown reference for every *public* global currently bound in the image — each builtin and prelude function/macro with its signature and one-line summary. The complete primitive reference (`nest doc --all`); read this once instead of probing names one at a time. Opt-in std modules (`display`, `buffer`, `ansi`, …) aren't loaded here — `nest doc <module>` documents those."
-  (let (syms (filter (reflect/global-names) docs-public?))
+  (let (syms (seq/filter (reflect/global-names) docs-public?))
     (str "# Brood — global reference\n\n"
       "Every public global bound in a fresh image: the Rust builtins plus the "
       "`std/prelude` functions and macros — i.e. everything callable without a "
@@ -261,7 +325,8 @@ module's namespace-rooted globals (ADR-070) back to it."
 ;; The public documentable definitions among `syms`, as records (in `syms` order).
 (defn- docs-def-records (syms)
   (apply vector
-    (map (filter syms (fn (s) (and (docs-documentable? (reflect/eval s)) (not (docs-private? s)))))
+    (map (seq/filter syms
+           (fn (s) (and (docs-documentable? (reflect/eval s)) (not (docs-private? s)))))
       (fn (s) (docs-def-record s (reflect/eval s))))))
 
 ;; One module entry of the doc model: `{:module :doc :defs :qualified?}`. `:qualified? true`
@@ -269,8 +334,14 @@ module's namespace-rooted globals (ADR-070) back to it."
 ;; (`math/sqrt`, `web/endpoint/handler`), not bare (a bare `sqrt` is unbound; you reference
 ;; the qualified name or `(:use)`). The prelude-category pseudo-modules the reference adds
 ;; leave it false (their names — `+`, `map` — are genuinely bare).
-(defn- docs-module-model (title mdoc syms)
-  {:module title :doc mdoc :defs (docs-def-records syms) :qualified? true})
+(defn- docs-module-model (title mdoc syms &optional ns)
+  {:module title
+   :doc mdoc
+   :types (apply vector
+            (map (if (nil? ns) nil (reflect/type-aliases ns))
+              (fn (t) {:name (docs-bare (:name t)) :type (:type t)})))
+   :defs (docs-def-records syms)
+   :qualified? true})
 
 ;; A file's declared module name — the `(defmodule NAME …)` symbol — or nil if the file
 ;; has no module header. Read from source (the form is discarded once loaded).
@@ -285,7 +356,7 @@ module's namespace-rooted globals (ADR-070) back to it."
 ;; dependencies to whichever file pulled them in.
 (defn- docs-namespace-syms (modname)
   (let (prefix (str modname "/"))
-    (filter (reflect/global-names) (fn (s) (string/starts-with? (->string s) prefix)))))
+    (seq/filter (reflect/global-names) (fn (s) (string/starts-with? (->string s) prefix)))))
 
 (defn model-file (path)
   "The doc-model module entry for the file at `path`: load it, then collect its module's
@@ -303,11 +374,14 @@ module's namespace-rooted globals (ADR-070) back to it."
         before (reflect/global-names))
     (reflect/load path)
     (if feature
-      (docs-module-model (or declared feature) (docs-leading-doc src) (docs-namespace-syms feature))
+      (docs-module-model (or declared feature)
+        (docs-leading-doc src)
+        (docs-namespace-syms feature)
+        feature)
       (docs-module-model (docs-basename path)
         (docs-leading-doc src)
         (docs-added before (reflect/global-names))))))
-(sig model-file (string -> (record :defs any :doc any :module any :qualified? true)))
+(sig model-file (string -> (record :defs any :doc any :module any :types vector :qualified? true)))
 
 (defn model-module (modname)
   "The doc-model module entry for the module named `modname` (a symbol or string),
@@ -345,17 +419,17 @@ module's namespace-rooted globals (ADR-070) back to it."
   ;; module binding has no def-site, ADR-218.)
   (let (namespaced? (fn (nm) (let (i (index-of nm "/")) (and i (> i 0))))
         language? (fn (s) (and (docs-public? s) (not (namespaced? (->string s)))))
-        syms (filter (reflect/global-names) language?)
+        syms (seq/filter (reflect/global-names) language?)
         category-of (fn (s) (doc-catalog/category-of (docs-bare s))))
     {:name "Brood"
      :version (try (system/brood-version) (catch _ nil))
      :modules (apply vector
-                (filter (map doc-catalog/*category-order*
-                          (fn (pair)
-                            (let ([key title] pair)
-                              (docs-module-model title
-                                nil
-                                (filter syms (fn (s) (= (category-of s) key)))))))
+                (seq/filter (map doc-catalog/*category-order*
+                              (fn (pair)
+                                (let ([key title] pair)
+                                  (docs-module-model title
+                                    nil
+                                    (seq/filter syms (fn (s) (= (category-of s) key)))))))
                   (fn (group) (not (empty? (get group :defs))))))}))
 
 (defn- write-site (out-dir model title)
@@ -546,7 +620,7 @@ module's namespace-rooted globals (ADR-070) back to it."
     (if (not (file/dir? dir))
       []
       (apply vector
-        (map (sort (filter (map (file/ls dir) (fn (f) (path/join dir f)))
+        (map (sort (seq/filter (map (file/ls dir) (fn (f) (path/join dir f)))
                      (fn (p) (string/ends-with? p ".md"))))
           (fn (path) {:title (guide-title path) :html (markdown->html (file/slurp path))}))))))
 
@@ -565,7 +639,7 @@ module's namespace-rooted globals (ADR-070) back to it."
 
 ;; Every `expr ;=> expected` example in a docstring, in source order.
 (defn- doctests-in (docstring)
-  (filter (map (string/split docstring "\n") doctest-of-line) (fn (x) (not (nil? x)))))
+  (seq/filter (map (string/split docstring "\n") doctest-of-line) (fn (x) (not (nil? x)))))
 
 ;; Evaluate one example: `[:ok]`, `[:fail actual expected]`, or `[:error message]`.
 (defn- run-one-doctest (expr-str expected-str)
@@ -594,7 +668,7 @@ module's namespace-rooted globals (ADR-070) back to it."
             acc))))))
 
 (defn- doctest-report (results)
-  (let (fails (filter results (fn (r) (not (= (first (nth r 3)) :ok)))))
+  (let (fails (seq/filter results (fn (r) (not (= (first (nth r 3)) :ok)))))
     (doseq (r results)
       (let ([sym expr expected outcome] r)
         (match outcome

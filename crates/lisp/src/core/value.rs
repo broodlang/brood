@@ -507,7 +507,7 @@ pub enum Value {
     /// forwarding machinery exactly like a [`Range`]): `source` is the underlying
     /// collection and `xform` a transducer composing every pending stage.
     /// `fold` fuses straight over it — `(fold (xform rf) init source)` — so a
-    /// `(reduce + 0 (map sq (filter p (range n))))` walks the range once with no
+    /// `(reduce + 0 (map sq (seq/filter p (range n))))` walks the range once with no
     /// intermediate lists; `seq` (and the prelude `first`/`rest`/`count`/…)
     /// realise it to a list on demand by running the transducer. Like `Range`,
     /// [`tag`] reports it as a [`Tag::Pair`] so the type system treats it as the

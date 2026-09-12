@@ -521,7 +521,7 @@ fn sequence_types_render_with_element() {
     );
     // a bare vector (no element refinement) still prints as its tag
     assert_eq!(Ty::of(Tag::Vector).to_string(), "vector");
-    // `nil | list<E>` (the shape a `(map …)`/`(filter …)` result carries)
+    // `nil | list<E>` (the shape a `(map …)`/`(seq/filter …)` result carries)
     // names the nil rather than hiding it.
     assert_eq!(
         Ty::list_of(Ty::of(Tag::Int))

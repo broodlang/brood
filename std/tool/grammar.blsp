@@ -34,14 +34,14 @@ read. The shared input to every grammar's docstring rule."
 (defn fn-doc-heads ()
   "The subset of `doc-heads` that build a FUNCTION — where a lone trailing string is
 the return value rather than documentation."
-  (filter (doc-heads) (fn (h) (= :fn (get (reflect/doc-forms) h)))))
+  (seq/filter (doc-heads) (fn (h) (= :fn (get (reflect/doc-forms) h)))))
 
 (defn special-keywords ()
   "The special-form / core-macro names to highlight as control keywords:
 `(reflect/special-forms)` minus the `def…` heads (those get a distinct name-capturing rule,
 so they must not also land in the keyword alternation). The shared input to every
 grammar target."
-  (filter (reflect/special-forms) (fn (k) (not (string/starts-with? k "def")))))
+  (seq/filter (reflect/special-forms) (fn (k) (not (string/starts-with? k "def")))))
 
 ;; ---- regex helpers (TextMate uses the Oniguruma engine) ----------------------
 

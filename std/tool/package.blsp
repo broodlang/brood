@@ -107,7 +107,8 @@ land in a later slice."
         ;; for it. This lets an app (e.g. the registry server itself) pin its whole
         ;; closure to git and build with zero registry contact. Empty in the common
         ;; all-registry case, where resolution is unchanged.
-        direct-non-registry (map (filter deps (fn (dep) (not (package-registry-dep? dep)))) :name)
+        direct-non-registry (map (seq/filter deps (fn (dep) (not (package-registry-dep? dep))))
+                              :name)
         walked (package-resolve-loop root
                  deps
                  {}
@@ -246,7 +247,7 @@ land in a later slice."
           discovered (seq/distinct (apply append
                                      (map results
                                        (fn (pair) (package-release-dep-names (second pair))))))
-          next-frontier (filter discovered (fn (nm) (not (contains? fetched2 nm)))))
+          next-frontier (seq/filter discovered (fn (nm) (not (contains? fetched2 nm)))))
       (package-prefetch-bfs base next-frontier fetched2))))
 
 ;; Fetch every package in `frontier` CONCURRENTLY — one spawned process each, results
@@ -300,8 +301,8 @@ land in a later slice."
   (dolist (kv (%map-pairs fetched))
     (let (nm (first kv)
           releases (second kv))
-      (when (and (not (empty? releases)) (empty? (filter releases package-release-brood-ok?)))
-        (let (needed (seq/distinct (filter (map releases (fn (r) (get r :brood)))
+      (when (and (not (empty? releases)) (empty? (seq/filter releases package-release-brood-ok?)))
+        (let (needed (seq/distinct (seq/filter (map releases (fn (r) (get r :brood)))
                                      (fn (c) (and c (not (= c "")))))))
           (error "package: no published release of "
             (->string nm)
@@ -320,7 +321,7 @@ land in a later slice."
 ;; release's declared deps.
 (defn- package-prefetched-provider (fetched)
   (resolver/make-provider (fn (nm)
-                            (map (filter (or (get fetched nm) nil) package-release-brood-ok?)
+                            (map (seq/filter (or (get fetched nm) nil) package-release-brood-ok?)
                               (fn (release) (get release :version))))
     (fn (nm version)
       (let (release (seq/find (or (get fetched nm) nil) (fn (r) (= (get r :version) version))))
@@ -1117,7 +1118,7 @@ sha256 pin still holds."
   ;; check-allow :discarded-catch — a body / signature / name that does not parse or verify is the negative answer
   (check-allow :discarded-catch
     (try
-      (map (filter (reflect/read-all (file/slurp file))
+      (map (seq/filter (reflect/read-all (file/slurp file))
              (fn (form) (and (pair? form) (= (first form) 'defmodule) (symbol? (second form)))))
         second)
       (catch _ nil))))
@@ -1389,7 +1390,7 @@ sha256 pin still holds."
   (if (empty? names)
     nil
     (apply vector
-      (filter (if (nil? lock) nil (vec->list lock))
+      (seq/filter (if (nil? lock) nil (vec->list lock))
         (fn (v) (not (includes? names (first (vec->list v)))))))))
 
 ;; --- `nest tree` -------------------------------------------------------------
@@ -1441,7 +1442,7 @@ sha256 pin still holds."
 ;; Is `n` the manifest's top-level (project …) list node?
 (defn- package-project-list? (n)
   (and (= (node-kind n) :list)
-    (let (forms (filter (vec->list (node-children n)) (fn (c) (not (trivia? c)))))
+    (let (forms (seq/filter (vec->list (node-children n)) (fn (c) (not (trivia? c)))))
       (and (not (empty? forms))
         (= (node-kind (first forms)) :symbol)
         (= (node-text (first forms)) "project")))))
@@ -1476,7 +1477,7 @@ sha256 pin still holds."
 
 ;; The dep name (symbol) of an entry node `[:vector [[:symbol "name"] …]]`, or nil.
 (defn- package-entry-name (entry-node)
-  (let (forms (filter (vec->list (node-children entry-node)) (fn (c) (not (trivia? c)))))
+  (let (forms (seq/filter (vec->list (node-children entry-node)) (fn (c) (not (trivia? c)))))
     (if (and (not (empty? forms)) (= (node-kind (first forms)) :symbol))
       (symbol (node-text (first forms)))
       nil)))
@@ -1506,7 +1507,7 @@ sha256 pin still holds."
         (fn (vecnode)
           [:vector
             (apply vector
-              (filter (vec->list (node-children vecnode))
+              (seq/filter (vec->list (node-children vecnode))
                 (fn (c) (not (and (= (node-kind c) :vector) (= (package-entry-name c) nm))))))])))))
 
 ;; Re-render `src` after applying `f` to its (project …) node. Comments survive.
@@ -1728,7 +1729,7 @@ construction, which is the point — see `registry-build-tarball`."
               (catch _ nil))))
     (if (or (nil? r) (not (= (get r :exit) 0)))
       nil
-      (let (paths (filter (string/split (get r :stdout) "\n")
+      (let (paths (seq/filter (string/split (get r :stdout) "\n")
                     (fn (l) (not (= (string/trim l) "")))))
         (if (empty? paths) nil paths)))))
 
@@ -1761,8 +1762,8 @@ construction, which is the point — see `registry-build-tarball`."
   "The project's `:version` (registry) dependencies as a vector of `{:name :version}` —
   the only deps a published package can carry on the registry. Path/git/tarball deps
   are local, so they are omitted (with a warning)."
-  (let (registry-deps (filter *project-dependencies* (fn (d) (= (dep-kind d) :registry)))
-        other (filter *project-dependencies* (fn (d) (not (= (dep-kind d) :registry)))))
+  (let (registry-deps (seq/filter *project-dependencies* (fn (d) (= (dep-kind d) :registry)))
+        other (seq/filter *project-dependencies* (fn (d) (not (= (dep-kind d) :registry)))))
     (dolist (d other)
       (io/puts (str "package: warning — omitting non-registry dependency "
                  (->string (get d :name))

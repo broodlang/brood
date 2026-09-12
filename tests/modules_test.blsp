@@ -38,7 +38,7 @@
   :isolated (test "no feature is lost when many processes provide at once"
     (let (n 120)
       (concurrently n (fn (i) (provide (symbol (mt-conc-feature i)))))
-      (assert= (count (seq/remove (range n) (fn (i) (contains? *features* (mt-conc-feature i))))) 0))))
+      (assert= (count (seq/reject (range n) (fn (i) (contains? *features* (mt-conc-feature i))))) 0))))
 
 ;; :serial — these mutate the shared *features* global, so run them one-at-a-time.
 (describe "modules: includes? / provide / require"
@@ -50,7 +50,7 @@
     ;; idempotent: still exactly one entry after a second provide. A map makes a
     ;; duplicate structurally impossible, so this now guards the *key spelling* —
     ;; a `provide` that stored the symbol rather than its name would add a second.
-    (assert= (count (filter (keys *features*) (fn (k) (= k "demo-feature")))) 1))
+    (assert= (count (seq/filter (keys *features*) (fn (k) (= k "demo-feature")))) 1))
   (test "require returns the list of feature names and is idempotent"
     (assert= (require-one 'test) "test")
     ; variadic now: a list of names

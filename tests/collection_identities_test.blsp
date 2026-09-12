@@ -51,7 +51,7 @@
   (and (= (count (map v (fn (x) (* x 2)))) (count v))
     ; map preserves length
     ; filter never grows
-    (<= (count (filter v (fn (x) (> x 0)))) (count v))
+    (<= (count (seq/filter v (fn (x) (> x 0)))) (count v))
     (= (map v (fn (x) (+ 1 (* 2 x))))
       ; map fusion
       (map (map v (fn (x) (* 2 x))) (fn (x) (+ 1 x))))

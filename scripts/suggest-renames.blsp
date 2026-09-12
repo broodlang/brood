@@ -26,7 +26,7 @@
   "Every public global whose LOCAL part is exactly `n` — i.e. the places `n` could have
 moved to. A `%`-prefixed primitive counts: several names became mechanism rather than
 vocabulary, and the caller still needs to know."
-  (sort (map (filter (reflect/global-names)
+  (sort (map (seq/filter (reflect/global-names)
                (fn (s)
                  (let (full (->string s)
                        i (index-of full "/"))
@@ -43,7 +43,7 @@ all along. Tries each hyphen left to right, so `editor-buffer-put` finds `editor
 before giving up."
   (let (parts (string/split n "-"))
     (when (> (count parts) 1)
-      (first (filter (map (range 1 (count parts))
+      (first (seq/filter (map (range 1 (count parts))
                        (fn (i)
                          (str (reduce (take parts i) "" (fn (a b) (if (= a "") b (str a "-" b))))
                            "/"
@@ -54,7 +54,7 @@ before giving up."
   ;; `read-line` is the only stdin door (there is no bulk reader); nil marks EOF.
   (let (l (read-line)) (if (nil? l) (reverse acc) (stdin-lines (cons l acc)))))
 
-(let (lines (filter (stdin-lines nil) (fn (l) (not (= (string/trim l) "")))))
+(let (lines (seq/filter (stdin-lines nil) (fn (l) (not (= (string/trim l) "")))))
   (doseq (raw lines)
     (let (n (string/trim raw)
           cs (candidates n))

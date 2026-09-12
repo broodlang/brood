@@ -24,6 +24,18 @@
 
 /// `(old, new, adr)` for every deliberate public rename still worth pointing at.
 pub const RENAMES: &[(&str, &str, &str)] = &[
+    // ADR-330 — `filter` joins its complement in `seq/`. The positive was the last core
+    // sequence op whose negative lived in a different namespace, so the pair is reunited by
+    // moving the positive rather than duplicating it: bare `filter` is gone, `seq/remove` is
+    // `seq/reject`, and the transducer/lazy/vector layers follow the same spelling.
+    //
+    // The bare `filter` entry is the one that matters most here: it is a prelude name every
+    // downstream file uses, so without it the whole wave lands as `unbound symbol: filter`
+    // with nowhere to go. `--fix-renames` applies it unambiguously.
+    ("filter", "seq/filter", "ADR-330"),
+    ("seq/remove", "seq/reject", "ADR-330"),
+    ("seq/xremove", "seq/xreject", "ADR-330"),
+    ("seq/lremove", "seq/lreject", "ADR-330"),
     // ADR-325 — `std/tool/project.blsp` split into `project` (the model), `project-image`,
     // `project-check`, `project-run` and `project-release`; every public name that left
     // the model module is pointed at its new home (bedit's `about.blsp` was the first

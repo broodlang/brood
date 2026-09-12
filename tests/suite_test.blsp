@@ -51,7 +51,7 @@
 
 (describe "higher-order functions"
   (test "map" (assert= (map (list 1 2 3) inc) (list 2 3 4)))
-  (test "filter" (assert= (filter (list -1 2 -3 4) positive?) (list 2 4)))
+  (test "filter" (assert= (seq/filter (list -1 2 -3 4) positive?) (list 2 4)))
   (test "reduce" (assert= (reduce (list 1 2 3 4) 0 +) 10))
   (test "apply" (assert= (apply + (list 1 2 3)) 6)))
 

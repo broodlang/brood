@@ -49,7 +49,7 @@ fn scaffold(dir: &Path) {
              (is (contains? *record-ids* (%identity-of (make 1))))\n\
              (is (= 7 (get (make 7) :id))))\n\
            (test \"no registered record id lacks its constructor\"\n\
-             (is (empty? (filter (keys *record-ids*)\n\
+             (is (empty? (seq/filter (keys *record-ids*)\n\
                            (fn (id) (not (bound? (symbol (->string id))))))))))\n",
     )
     .unwrap();

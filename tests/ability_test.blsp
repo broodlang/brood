@@ -392,7 +392,7 @@
       (concurrently n
         (fn (i) (%register-impl (abt-conc-name i) (abt-conc-op i) :int (fn (x) i) nil)))
       ;; before the fix this lost roughly 40% of them
-      (assert= (count (seq/remove (range n) abt-conc-registered?)) 0))))
+      (assert= (count (seq/reject (range n) abt-conc-registered?)) 0))))
 
 ;; ---- typed ability ops: the checker consumes an op's `:-> RET` return type ----
 ;; A static/advisory feature, so these assert on the checker's warnings (via
@@ -476,7 +476,7 @@
     ;; Over the whole image, not just this file's records — the property has to hold for
     ;; every `defrecord` the compiler might meet, including the stdlib's.
     (let (ids (keys *record-ids*)
-          orphans (filter ids (fn (id) (not (bound? (symbol (->string id)))))))
+          orphans (seq/filter ids (fn (id) (not (bound? (symbol (->string id)))))))
       ;; Not vacuous: an empty or near-empty registry would satisfy the assertion below
       ;; while checking nothing (ADR-280). This file alone defines several records.
       (is (>= (count ids) 3))

@@ -32,11 +32,11 @@
   (do
     (doseq (m (reflect/builtin-modules))
       (check-allow :discarded-catch (try (require-one m) (catch _ nil))))
-    (sort (map (filter (filter (reflect/global-names) public?) bare?) ->string))))
+    (sort (map (seq/filter (seq/filter (reflect/global-names) public?) bare?) ->string))))
 
 (defn- ledger-names ()
   "The names recorded in the ledger: every `- \\`name\\`` bullet."
-  (sort (map (filter (string/split (file/slurp ledger-path) "\n")
+  (sort (map (seq/filter (string/split (file/slurp ledger-path) "\n")
                (fn (l) (string/starts-with? l "- `")))
           (fn (l)
             (let (rest (string/substring l 3 (count l))
@@ -45,7 +45,7 @@
 
 (defn- missing-from (a b)
   "Every name in `a` that is not in `b`."
-  (filter a (fn (n) (not (includes? b n)))))
+  (seq/filter a (fn (n) (not (includes? b n)))))
 
 ;; A lean runtime has no dev-tools modules, so the surface is smaller by design. Any name
 ;; from one of those modules is enough to tell the two builds apart.

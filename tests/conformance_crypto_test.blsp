@@ -22,7 +22,7 @@
 (defmodule conformance-crypto-test (:use test) (:use corpus))
 
 (defn- cy-file (name)
-  (first (filter (corpus-files "crypto") (fn (p) (= (path/basename p) name)))))
+  (first (seq/filter (corpus-files "crypto") (fn (p) (= (path/basename p) name)))))
 
 ;; A `.rsp` field line: "Msg = d3" -> "d3". nil for a non-field line.
 (defn- cy-field (line key)

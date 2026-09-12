@@ -1025,7 +1025,26 @@ fn collect_raw_qualified(heap: &Heap, forms: &[Value]) -> HashSet<String> {
 /// `(:use mod :only [a b])` / `:refer` refers just those; `(:alias mod [:as short])` adds a
 /// `short/` → `mod` prefix alias. A used module that isn't loaded (a bare-file check outside a
 /// project) is `require`d first — rare, and correctness there beats the O(files²) speed win.
-fn setup_check_imports(heap: &mut Heap, header: Value) {
+/// The modules a `(defmodule …)` header brings into scope, as the type-alias resolver
+/// needs them (ADR-327 follow-up, 2026-09-12): the ROOTED names of every `:use`d module —
+/// a bare alias name resolves to one of theirs before the loaded-module-wide unique-suffix
+/// rule — and each `(:alias mod :as short)` prefix, so `short/name` in a `sig` reaches
+/// `mod/name`. Accumulated across a file's headers (the region model, ADR-223).
+#[derive(Default)]
+pub(crate) struct ImportScope {
+    pub(crate) used: Vec<String>,
+    pub(crate) aliases: Vec<(String, String)>,
+}
+
+impl ImportScope {
+    fn extend(&mut self, other: ImportScope) {
+        self.used.extend(other.used);
+        self.aliases.extend(other.aliases);
+    }
+}
+
+fn setup_check_imports(heap: &mut Heap, header: Value) -> ImportScope {
+    let mut scope = ImportScope::default();
     // PASS A — parse the clauses into GC-STABLE data (`Symbol`s are Copy `u32`) with NO
     // eval, so nothing LOCAL is held across the `require` eval in pass B (which can collect
     // and relocate handles). Holding a parsed `Value` across that eval was a use-after-GC.
@@ -1038,7 +1057,7 @@ fn setup_check_imports(heap: &mut Heap, header: Value) {
     let mut clauses: Vec<Clause> = Vec::new();
     {
         let Some(items) = list_items(heap, header) else {
-            return;
+            return scope;
         };
         // items = [defmodule, mod-name, doc?, clause...]; clauses follow name + optional doc.
         let first_clause = if matches!(items.get(2), Some(Value::Str(_))) {
@@ -1160,6 +1179,7 @@ fn setup_check_imports(heap: &mut Heap, header: Value) {
                 // std / already-qualified names are left unchanged.
                 let mod_sym = heap.root_module_name(mod_sym);
                 let mod_name = value::symbol_name(mod_sym);
+                scope.used.push(mod_name.clone());
                 let prefix = format!("{}/", mod_name);
                 ensure_loaded(heap, mod_sym);
                 match subset {
@@ -1191,6 +1211,7 @@ fn setup_check_imports(heap: &mut Heap, header: Value) {
             Clause::UseExcept(mod_sym, excluded) => {
                 let mod_sym = heap.root_module_name(mod_sym); // ADR-070, as in Clause::Use
                 let mod_name = value::symbol_name(mod_sym);
+                scope.used.push(mod_name.clone());
                 let prefix = format!("{}/", mod_name);
                 ensure_loaded(heap, mod_sym);
                 let excluded: std::collections::HashSet<Symbol> = excluded.into_iter().collect();
@@ -1209,11 +1230,19 @@ fn setup_check_imports(heap: &mut Heap, header: Value) {
                 // Root the alias TARGET (ADR-070) so `short/name` resolves to `pkg/mod/name`;
                 // the local `short` prefix is unchanged.
                 let mod_sym = heap.root_module_name(mod_sym);
+                // The runtime clause `require-one`s the target; the checker must too, or the
+                // module's `deftype`s are not in the alias table when a `sig` says `short/name`
+                // (a CALL `short/name` infers its load lazily, ADR-227 — a type name cannot).
+                ensure_loaded(heap, mod_sym);
                 let key = value::intern(&format!("{}/", value::symbol_name(short)));
                 heap.add_import(key, mod_sym);
+                scope
+                    .aliases
+                    .push((value::symbol_name(short), value::symbol_name(mod_sym)));
             }
         }
     }
+    scope
 }
 
 /// The **type signature** of the callable `sym` resolves to — declared, curated, or
@@ -1227,7 +1256,11 @@ pub fn signature_string(heap: &Heap, sym: Symbol) -> Option<String> {
     // A declared sig may name a `deftype` alias (ADR-327): install the loaded aliases, or
     // the declaration fails to parse and the answer silently falls back to the inferred
     // one — `(model any -> model)` read as `(any, any) -> map`.
-    annot::set_type_aliases(protocol::type_alias_table(heap, &[], None), None);
+    annot::set_type_aliases(
+        protocol::type_alias_table(heap, &[], None),
+        None,
+        ImportScope::default(),
+    );
     sigs::sig_of(heap, sym).map(|s| s.to_string())
 }
 
@@ -1250,7 +1283,7 @@ pub fn check_located(heap: &Heap, form: Value) -> Vec<(Option<Pos>, String)> {
     // leak a stale table into a `(check 'form)` — defensive: an ability type is sound
     // regardless, but an empty table here is unambiguously so.
     annot::clear_ability_types();
-    annot::set_type_aliases(HashMap::new(), None);
+    annot::set_type_aliases(HashMap::new(), None, ImportScope::default());
     // …and the inference memos, whose entries were computed against that file's Ctx
     // tables (`fn_form`, `clause_arms`) — `signature_string` already does this.
     sigs::clear_sig_memo();
@@ -1511,7 +1544,7 @@ fn check_forms(
     // expanded tree is built, so a bare `(sig f (Shape -> …))` resolves. Cleared here so a
     // panic mid-check can't leak one file's abilities into the next.
     annot::clear_ability_types();
-    annot::set_type_aliases(HashMap::new(), None);
+    annot::set_type_aliases(HashMap::new(), None, ImportScope::default());
     // Pass 1: macroexpand each form (recording the expanded shape we'll also
     // walk in pass 2). A macroexpand failure isn't this pass's job to report,
     // so we fall back to the un-expanded form silently.
@@ -1537,7 +1570,11 @@ fn check_forms(
     // Forms checked "here" (`check_forms_here`) that open no module of their own are
     // resolved in the namespace already open, as `eval` would resolve them.
     let inherit = inherit_context && declared_ns.is_none();
-    let file_ns = if inherit { heap.compile_ns() } else { declared_ns };
+    let file_ns = if inherit {
+        heap.compile_ns()
+    } else {
+        declared_ns
+    };
     let prev_ns = heap.set_compile_ns(file_ns);
     // Region model (ADR-223): a file may declare more than one `(defmodule …)`. Install the
     // per-module forward-ref pre-scan and start the active set on the FIRST module's region;
@@ -1585,6 +1622,7 @@ fn check_forms(
         }
         let n = forms.len();
         let mut expanded: Vec<Value> = Vec::with_capacity(n);
+        let mut import_scope = ImportScope::default();
         for j in 0..n {
             // Re-read the (relocated) form from the root stack, NOT the `forms` slice:
             // an earlier iteration's `(require …)` `eval` can collect at any depth
@@ -1635,7 +1673,7 @@ fn check_forms(
                     heap.set_compile_ns(Some(rooted));
                     heap.activate_ns_region(m);
                 }
-                setup_check_imports(heap, f);
+                import_scope.extend(setup_check_imports(heap, f));
             } else if is_require_form(heap, exp) {
                 let _ = crate::eval::eval(heap, exp, root);
             }
@@ -1726,6 +1764,7 @@ fn check_forms(
         annot::set_type_aliases(
             protocol::type_alias_table(heap, &expanded, file_ns_name.as_deref()),
             file_ns_name.clone(),
+            import_scope,
         );
         // ADR-299: the operator sugar's domains — `number` plus the records `num/*` /
         // `compare-to` have methods for — from this file's `defmethod`s + the registry.

@@ -13,6 +13,42 @@ fn file_signatures_reports_what_the_checker_inferred() {
     assert!(!sigs[0].2, "an inferred sig must not read as declared");
 }
 
+// The demand walk reaches into a vector, map or set LITERAL (2026-09-12): every element
+// evaluates, so `[(- a b)]` demands `number` of `a` and `b` exactly as `(list (- a b))`
+// does. KI-70's hole, in the inference rather than the walk — and the ordinary shape of a
+// Brood function that returns a tuple or a record.
+#[test]
+fn a_literal_carries_its_elements_demands_to_the_parameters() {
+    let sigs = signatures(
+        "(defn v (a b) [(- a b)])\n\
+         (defn m (a b) {:k (- a b)})\n\
+         (defn s (a b) #{(- a b)})\n\
+         (defn key (k v) {(string/upper k) v})",
+    );
+    for (name, sig, _) in &sigs {
+        match name.as_str() {
+            "v" | "m" | "s" => assert!(sig.starts_with("(number, number) ->"), "{name}: {sig}"),
+            // a map KEY evaluates too
+            "key" => assert!(sig.starts_with("(string, any) ->"), "{name}: {sig}"),
+            other => panic!("unexpected {other}"),
+        }
+    }
+    assert_eq!(sigs.len(), 4, "{sigs:?}");
+}
+
+// A keyword in call-head position is deliberately NOT a demand (2026-09-12): `(:end a)`
+// raises on a non-keyed `a`, so `nil | map | set` would be sound — and it was measured
+// before being kept: one signature moved over std, and 40 strict findings appeared in
+// bedit, one per unsigged function that reads a model's field and hands the model on to a
+// declared parameter (strict reads a positively-known bound by inclusion). The parameter
+// stays `any`; this pins the decision so a future "obvious" rule is measured first.
+#[test]
+fn a_keyword_call_is_not_read_as_a_demand() {
+    let sigs = signatures("(defn f (a) (:end a))");
+    assert_eq!(sigs.len(), 1, "{sigs:?}");
+    assert!(sigs[0].1.starts_with("(any) ->"), "{sigs:?}");
+}
+
 #[test]
 fn file_signatures_prefer_and_mark_a_declaration() {
     let sigs = signatures("(sig f (int -> string))\n(defn f (n) \"x\")");

@@ -34,7 +34,7 @@ and its advice) and `check-boot` (load everything, resolve `:main`, run nothing 
   (let (f (project-failed-file root))
     (when (not (nil? f))
       (let (previous (or (get (project-read-failed-record root) :failed) (list))
-            kept (filter previous (fn (l) (not (includes? (or ran (list)) l))))
+            kept (seq/filter previous (fn (l) (not (includes? (or ran (list)) l))))
             merged (append kept (or failed (list))))
         ;; check-allow :discarded-catch — a best-effort cache, manifest or git read/write: absence is the answer
         (check-allow :discarded-catch (try (file/spit f (pr-str {:failed merged})) (catch _ nil)))))))
@@ -95,7 +95,7 @@ project's require-closure."
 that were never recorded) — the `--stale` run set."
   (let (prev (project-read-stale-record root)
         current (project-stale-mtimes root files))
-    (filter files
+    (seq/filter files
       (fn (tf) (let (was (get prev tf) now (get current tf 0)) (or (nil? was) (> now was)))))))
 
 (defn- project-write-stale (root files)

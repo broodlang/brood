@@ -472,7 +472,7 @@ thing worth catching (an imaged boot that records none takes stdlib `M-.` down).
 ;; names only. Comparing UNBOUND facts would therefore fail the matrix on a design decision
 ;; instead of on a defect. What must still match exactly — and does — is every fact about a
 ;; name the boot bound, which is the whole of the state a program can observe.
-(let (facts (filter (%side-facts)
+(let (facts (seq/filter (%side-facts)
               (fn (f) (bound? (symbol (nth (string/split f " ") 1))))))
   (io/puts "FACTS " (count facts))
   (doseq (f facts) (io/puts f)))

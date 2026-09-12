@@ -33,7 +33,7 @@ mod sequence {
     fn pipeline(bencher: divan::Bencher, n: usize) {
         bench_prog(
             bencher,
-            format!("(reduce (filter (map (range {n}) (fn (x) (* x x))) math/even?) 0 +)"),
+            format!("(reduce (seq/filter (map (range {n}) (fn (x) (* x x))) math/even?) 0 +)"),
         );
     }
 

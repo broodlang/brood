@@ -128,7 +128,7 @@ would be worse than saying nothing. What survives is the half worth showing anyw
 `(spawn (receive …))` that parks forever reads as `1 still running` instead of
 looking identical to a round-trip that cleaned up after itself."
   (let (after (proc/list))
-    {:alive (count (filter after (fn (p) (not (includes? before p)))))}))
+    {:alive (count (seq/filter after (fn (p) (not (includes? before p)))))}))
 
 (defn- eval-server-spy-entry (e)
   ;; One collected `*spy-sink*` entry, display-bounded for the wire.
@@ -175,7 +175,7 @@ definitions, with the language's and any later-required module's excluded. What
 `:trace :all` resolves to."
   (let (base (eval-server-baseline))
     (into []
-      (filter (map (reflect/global-names) ->string)
+      (seq/filter (map (reflect/global-names) ->string)
         (fn (n) (and (not (contains? base n)) (eval-server-own-name? n)))))))
 
 (defn- eval-server-trace-names (trace)

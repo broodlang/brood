@@ -233,6 +233,19 @@ string arg; a `deftype` alias is a type, not a signature, and answers nil."
   (let (form (%declared-sig name)) (if (nil? form) nil (pr-str form))))
 (sig declared-signature ((or string symbol) -> (or nil string)))
 
+(defn type-aliases (&optional module)
+  "Every `(deftype name T)` alias the checker knows (ADR-327), as `{:name :type}` maps —
+the qualified name and the type-expression as written, rendered — sorted by name. With
+`module` (a symbol or string), only that module's: `(type-aliases 'editor/pane)`. A
+`deftype` binds no global, so this is the only way to enumerate them; `nest doc` renders
+a module's under a Types heading."
+  (let (prefix (if (nil? module) nil (str (->string module) "/"))
+        entries (seq/filter (%type-aliases)
+                  (fn (entry) (or (nil? prefix) (string/starts-with? (first entry) prefix)))))
+    (sort-by (map entries (fn (entry) {:name (first entry) :type (pr-str (second entry))}))
+      :name)))
+(sig type-aliases (&optional (or nil string symbol) -> (or nil (list map))))
+
 (defn type-signature (name)
   "The checker's type signature for global `name` (declared/curated/inferred) as an arrow string like \"(int -> int)\", or nil if it can't be pinned. Symbol or string arg: (type-signature 'map)."
   (%type-signature name))

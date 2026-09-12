@@ -55,7 +55,7 @@
       (assert= 4 (count q))
       (assert= (list 10 20 30 40) (map q (fn (n) (* n 10))))
       (assert= 10 (fold q 0 +))
-      (assert= (list 2 4) (filter q even?))
+      (assert= (list 2 4) (seq/filter q even?))
       (assert= [1 2 3 4 5] (into [] (conj q 5))))) ; Conjable
   (test "interleaved push/pop"
     (let (q0 (queue/empty)

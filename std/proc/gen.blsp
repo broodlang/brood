@@ -244,15 +244,15 @@ clause is dropped (so the mailbox can't leak)."
         init-clause (seq/find clauses (fn (c) (= (first c) 'init)))
         term-clause (seq/find clauses (fn (c) (= (first c) 'terminate)))
         cc-clause (seq/find clauses (fn (c) (= (first c) 'code-change)))
-        msg-clauses (filter clauses
+        msg-clauses (seq/filter clauses
                       (fn (c)
                         (not (includes? (list 'init 'terminate 'code-change) (first c)))))
         ;; Envelope clauses (cast/call/query) are matched BEFORE info clauses,
         ;; regardless of declaration order, so a broad `info` pattern can never
         ;; swallow a `[:$call …]` / `[:$cast …]` envelope (receive is first-match).
-        env-clauses (filter msg-clauses
+        env-clauses (seq/filter msg-clauses
                       (fn (c) (includes? (list 'cast 'call 'query 'defer) (first c))))
-        info-clauses (filter msg-clauses (fn (c) (= (first c) 'info)))
+        info-clauses (seq/filter msg-clauses (fn (c) (= (first c) 'info)))
         from (gensym "from")
         rf (gensym "ref")
         res (gensym "res")

@@ -119,7 +119,7 @@
   (defn lines-of (r) (string/split (:text r) "\n"))
   (defn faced (r face)
     ;; the rendered substrings carrying `face`
-    (map (filter (:spans r) (fn (s) (= (nth s 2) face)))
+    (map (seq/filter (:spans r) (fn (s) (= (nth s 2) face)))
       (fn (s) (string/substring (:text r) (nth s 0) (nth s 1)))))
 
   (test "a heading is its text, the top two levels underlined to their width"
@@ -128,7 +128,8 @@
       (assert= (faced r md-face-heading) (list "Title" "Sub" "Deep"))))
 
   (test "a paragraph is re-flowed to the width, markers gone, faces kept"
-    (let (r (markdown-render "Some *italic* and **bold text** here, with `code` and a [link](http://x)." 30))
+    (let (r (markdown-render "Some *italic* and **bold text** here, with `code` and a [link](http://x)."
+              30))
       (assert= (lines-of r)
         (list "Some italic and bold text" "here, with code and a link."))
       (assert= (faced r md-face-italic) (list "italic"))
@@ -145,7 +146,8 @@
       (assert= (lines-of r) (list "a" "bbbbbbbbbbbbbbbbbbbbbbbbbbb" "c"))))
 
   (test "list items get a bullet and a hanging indent; an indented line continues the item"
-    (let (r (markdown-render "- one item\n- a much longer item that wraps\n  and continues\n1. first" 22))
+    (let (r (markdown-render "- one item\n- a much longer item that wraps\n  and continues\n1. first"
+              22))
       (assert= (lines-of r)
         (list "• one item" "• a much longer item" "  that wraps and" "  continues" "1. first"))
       (assert= (faced r md-face-list) (list "•" "•" "1."))))

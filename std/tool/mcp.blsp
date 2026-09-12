@@ -334,7 +334,7 @@ Outside a Brood project, returns `{:error msg}`."
   "A `(proc/info pid)` stat map for every live process, dropping any that died
 mid-scan. The shared snapshot behind both the `processes` and `proc/info`
 tools — one definition of \"what we know about a process\"."
-  (seq/remove (map (or (proc/list) []) proc/info) nil?))
+  (seq/reject (map (or (proc/list) []) proc/info) nil?))
 
 (defn processes-tool (args)
   "`processes` — snapshot every live green process with its runtime stats.

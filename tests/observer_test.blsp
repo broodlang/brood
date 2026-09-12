@@ -323,7 +323,7 @@
     (let (ui {:mode :command :edit (editor/lineedit/lineedit-init "λ " "" []) :msg nil}
           f (observe-frame sample-node [(pinfo 1 :a :running 0 0)] 0 60 12 false :id :ok ui))
       ;; the footer (last text op) is the minibuffer prompt, and a cursor op is placed
-      (is (includes? (nth (last (filter f (fn (op) (= (first op) :text)))) 3) "λ"))
+      (is (includes? (nth (last (seq/filter f (fn (op) (= (first op) :text)))) 3) "λ"))
       (is (includes? (map f first) :cursor))))
   (test "command-mode minibuffer syntax-highlights the input (shared with the REPL)"
     ;; the input is coloured by the same `highlight-chunks` the REPL line editor uses
@@ -338,7 +338,7 @@
               {:mode :command :edit edit :msg nil})
           ;; text ops on the minibuffer row (rows-1 = 11) carrying an :fg face — the
           ;; coloured tokens (e.g. the numbers / the operator)
-          coloured (filter f
+          coloured (seq/filter f
                      (fn (op)
                        (and (= (first op) :text)
                          (= (nth op 1) 11)

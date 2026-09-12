@@ -538,9 +538,9 @@ manifest is read, naming the key, not later inside whoever consumes the map."
   "The project's source files that carry co-located tests (ADR-225), so a `describe` written
 beside the code runs under `nest test` without a `tests/` file. Scans the source paths
 only; `tests/` files come from `project-collect-tests`."
-  (filter (fold (abs-paths root *project-source-paths*)
-            nil
-            (fn (acc d) (append acc (collect-sources d))))
+  (seq/filter (fold (abs-paths root *project-source-paths*)
+                nil
+                (fn (acc d) (append acc (collect-sources d))))
     project-file-has-tests?))
 
 ;; The feature a source file provides — the name of its top-level `(defmodule NAME …)`
@@ -682,7 +682,7 @@ empty `:enhances` (an ordinary library) satisfies-all vacuously, so it must not 
         host {app-symbol app-version})
     (if (not (file/exists? dir))
       []
-      (vec (filter (file/ls dir)
+      (vec (seq/filter (file/ls dir)
              (fn (dep-name)
                (let (enhances (manifest-enhances (path/join (path/join dir dep-name) "project.blsp")))
                  (and (get enhances app-symbol)

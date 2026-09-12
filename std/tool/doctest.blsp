@@ -54,7 +54,7 @@ the sentence.
 
 (defn example-lines (d)
   "The indented ` → ` lines of docstring `d` — the example cases it carries."
-  (filter (string/split (str d) "\n") example-line?))
+  (seq/filter (string/split (str d) "\n") example-line?))
 
 (defn- case-of (line)
   ;; `[source expected]` for one example line, or nil when it does not split cleanly.
@@ -124,11 +124,11 @@ example — `\"myapp/\"` for one package's own surface. A nil `prefix` means eve
   ;; Narrow by PREFIX before looking for examples, not after: `documented?` evaluates a
   ;; global to read its docstring, so filtering last makes a scoped run pay that for every
   ;; one of the thousands of names it is about to discard.
-  (let (public (filter (reflect/global-names) (fn (s) (not (reflect/private? s))))
+  (let (public (seq/filter (reflect/global-names) (fn (s) (not (reflect/private? s))))
         scoped (if (nil? prefix)
                  public
-                 (filter public (fn (s) (string/starts-with? (->string s) prefix)))))
-    (filter scoped documented?)))
+                 (seq/filter public (fn (s) (string/starts-with? (->string s) prefix)))))
+    (seq/filter scoped documented?)))
 
 (defn documented-names ()
   "Every public name in the image whose docstring carries at least one indented example."
@@ -136,7 +136,7 @@ example — `\"myapp/\"` for one package's own surface. A nil `prefix` means eve
 
 (defn- failures-of (s)
   (let (d (doc (reflect/eval s)))
-    (filter (map (example-lines d) (fn (l) (check (->string s) l))) (fn (x) (not (nil? x))))))
+    (seq/filter (map (example-lines d) (fn (l) (check (->string s) l))) (fn (x) (not (nil? x))))))
 
 (defn failures-under (prefix)
   "Every documented example that does not hold, for public names under `prefix` (nil = the

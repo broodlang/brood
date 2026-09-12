@@ -26,7 +26,7 @@
 (defmodule conformance-ucd-test (:use test) (:use corpus))
 
 (defn- ucd-file (name)
-  (first (filter (corpus-files "ucd") (fn (p) (= (path/basename p) name)))))
+  (first (seq/filter (corpus-files "ucd") (fn (p) (= (path/basename p) name)))))
 
 ;; A line's payload: everything before the `#` comment, tabs folded to spaces.
 (defn- ucd-payload (line)
@@ -64,7 +64,7 @@
 
 (defn- gb-case (line)
   "[input expected-clusters] for a test line, or nil if the line has no test."
-  (let (toks (seq/remove (string/split (ucd-payload line) " ") string/blank?))
+  (let (toks (seq/reject (string/split (ucd-payload line) " ") string/blank?))
     (if (nil? toks)
       nil
       (let (clusters (gb-fold toks nil nil))
@@ -92,7 +92,7 @@
 
 ;; "0044 0307" -> the string it spells.
 (defn- nt-field (s)
-  (ucd-codes->string (map (seq/remove (string/split s " ") string/blank?) hex->int)))
+  (ucd-codes->string (map (seq/reject (string/split s " ") string/blank?) hex->int)))
 
 (defn- nt-case (line)
   "The five columns [source nfc nfd nfkc nfkd] as strings, or nil for a non-test line."
@@ -127,8 +127,8 @@
 (defn- nt-wrong (cols)
   (let ([c1 c2 c3 c4 c5] cols
         expect (fn (form sources want)
-                 (first (seq/remove sources (fn (s) (= (string/normalize s form) want)))))
-        fails (seq/remove (list (expect :nfc (list c1 c2 c3) c2)
+                 (first (seq/reject sources (fn (s) (= (string/normalize s form) want)))))
+        fails (seq/reject (list (expect :nfc (list c1 c2 c3) c2)
                             (expect :nfc (list c4 c5) c4)
                             (expect :nfd (list c1 c2 c3) c3)
                             (expect :nfd (list c4 c5) c5)

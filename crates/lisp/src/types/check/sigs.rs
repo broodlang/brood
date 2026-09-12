@@ -205,9 +205,7 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     // honest and loose, and the looseness cost every consumer with a narrower domain:
     // `(sort (map …))` read as `seqable` into `nil | pair | vector | set` under
     // `--strict`, at every one of the six such sites in bedit.
-    for n in ["map", "filter"] {
-        put(n, Sig::new(vec![seq, cb1.clone()], Ty::LIST));
-    }
+    put("map", Sig::new(vec![seq, cb1.clone()], Ty::LIST));
     put("reduce", Sig::new(vec![seq, any, cb2.clone()], any));
     put("fold", Sig::new(vec![seq, any, cb2], any));
     // The rest of the data-first sequence walkers (ADR-308) — curated for the same
@@ -222,11 +220,13 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     for n in ["each", "take-while", "drop-while"] {
         put(n, Sig::new(vec![seq, cb1.clone()], any));
     }
-    // `mapcat`, `seq/keep` and `seq/remove` build a fresh list like `map` does
-    // (`append` / `cons`; `nil` for nothing) — so `list`, for the reason given there.
+    // `mapcat`, `seq/filter`, `seq/reject` and `seq/keep` build a fresh list like `map`
+    // does (`append` / `cons`; `nil` for nothing) — so `list`, for the reason given there.
     // `seq/` is qualified, like `seq/index-where` above (a bare key would suppress
-    // the unbound lint on names that no longer exist bare, ADR-227).
-    for n in ["mapcat", "seq/keep", "seq/remove"] {
+    // the unbound lint on names that no longer exist bare, ADR-227) — which is why
+    // `filter` sits here rather than beside `map` since ADR-330 moved it out of the
+    // prelude: bare `filter` is unbound now, and a bare key would hide that.
+    for n in ["mapcat", "seq/filter", "seq/reject", "seq/keep"] {
         put(n, Sig::new(vec![seq, cb1.clone()], Ty::LIST));
     }
     // The count is `number`, not `int`: the merely-wider residue (a provably-int
@@ -1840,6 +1840,40 @@ fn domain_of_inner(
     ctx: &Ctx,
 ) -> Domain {
     let n = params.len();
+    // A vector, map or set LITERAL evaluates every element (keys too — a map key is
+    // data only once evaluated, KI-70), so each element's demands hold. Returning a
+    // tuple `[(- a b)]` or a record `{:k (- a b)}` is the ordinary shape of Brood
+    // code, and until 2026-09-12 both left every parameter at `any` while `(list (- a
+    // b))` typed them — the demand walk had the hole KI-70 closed for the checking walk.
+    match form {
+        Value::Vector(id) => {
+            return heap
+                .vector(id)
+                .to_vec()
+                .into_iter()
+                .fold(any_domain(n), |acc, it| {
+                    meet(acc, domain_of(heap, it, params, scope, ctx))
+                });
+        }
+        Value::Set(id) => {
+            return heap
+                .set_elems(id)
+                .into_iter()
+                .fold(any_domain(n), |acc, it| {
+                    meet(acc, domain_of(heap, it, params, scope, ctx))
+                });
+        }
+        Value::Map(id) => {
+            return heap
+                .map_entries(id)
+                .into_iter()
+                .fold(any_domain(n), |acc, (k, v)| {
+                    let acc = meet(acc, domain_of(heap, k, params, scope, ctx));
+                    meet(acc, domain_of(heap, v, params, scope, ctx))
+                });
+        }
+        _ => {}
+    }
     let Some(items) = list_items(heap, form) else {
         return any_domain(n); // an atom demands nothing on its own
     };
@@ -1848,9 +1882,19 @@ fn domain_of_inner(
     };
     let Value::Sym(h) = head else {
         // A computed callee `((f) x …)` — the operands still all evaluate.
-        return items[1..].iter().fold(any_domain(n), |acc, &arg| {
+        let acc = items[1..].iter().fold(any_domain(n), |acc, &arg| {
             meet(acc, domain_of(heap, arg, params, scope, ctx))
         });
+        // A KEYWORD in call-head position is NOT a demand, deliberately (2026-09-12). `(:end
+        // a)` does raise on anything but a map, a set or nil, so `nil | map | set` would be a
+        // sound domain for `a` — and it moved ONE signature over std (std reaches for `get`)
+        // while manufacturing 40 strict findings in bedit: every unsigged function that reads
+        // a field of a model and hands it to a declared `model` parameter, because strict
+        // reads a positively-known bound by inclusion. That is the "declare the whole program
+        // at once" trap ADR-326 removed for map SHAPES, re-entered through the commonest
+        // idiom in the language. The plain-mode gain (a caller passing an int to a
+        // field-reading function) is not worth that; measured before deciding.
+        return acc;
     };
     // Nothing here runs against the parameters now: quoted data, a closure body
     // (deferred), a definer, or a `try` — whose failure is caught, so what its body

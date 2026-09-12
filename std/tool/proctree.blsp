@@ -30,7 +30,7 @@ cycle (impossible from `proc/info`, but a buggy remote peer could send one) is
 bounded rather than overflowing the stack."
   (if (>= depth limit)
     [(assoc p :depth depth)]
-    (let (kids (by-id (filter procs (fn (c) (= (get c :parent) (get p :id))))))
+    (let (kids (by-id (seq/filter procs (fn (c) (= (get c :parent) (get p :id))))))
       (cons (assoc p :depth depth)
         (mapcat kids (fn (k) (tree-walk k procs (inc depth) limit)))))))
 
@@ -42,6 +42,6 @@ parent."
   (let (ids (map procs :id)
         limit (count procs)
         root? (fn (p) (let (pa (get p :parent)) (or (nil? pa) (< (index-of ids pa) 0))))
-        roots (by-id (filter procs root?)))
+        roots (by-id (seq/filter procs root?)))
     (mapcat roots (fn (r) (tree-walk r procs 0 limit)))))
 (sig tree-order (seqable -> any))

@@ -44,7 +44,7 @@ process you own."
   "`table` with any handler whose id is `id` removed from every event bucket."
   (fold (keys table)
     {}
-    (fn (acc ev) (assoc acc ev (filter (get table ev) (fn (h) (not (= (get h :id) id))))))))
+    (fn (acc ev) (assoc acc ev (seq/filter (get table ev) (fn (h) (not (= (get h :id) id))))))))
 
 (defn- telemetry-dispatch (bucket event measurements metadata)
   "Run every handler in `bucket` (the handlers for `event`), each guarded by
@@ -271,7 +271,7 @@ telemetry's own global, which the listener process reads. Returns `on`."
 
 (defn- telemetry-missing-keys (schema-map actual)
   "The declared keys of `schema-map` absent from `actual`."
-  (filter (keys schema-map) (fn (k) (not (contains? actual k)))))
+  (seq/filter (keys schema-map) (fn (k) (not (contains? actual k)))))
 (defn- telemetry-check-event (event measurements metadata)
   "The declared keys missing from a declared event's payload, as `[kind key]` pairs
 (`kind` = `:measurements` / `:metadata`); empty when `event` is undeclared or complete.
@@ -346,7 +346,7 @@ with the default crash reporter, an MCP snapshot, or a second `watch-runtime`."
 
 (defn- telemetry-absent (xs ys)
   "The elements of list `xs` not present in list `ys`."
-  (filter xs (fn (x) (not (telemetry-member? ys x)))))
+  (seq/filter xs (fn (x) (not (telemetry-member? ys x)))))
 
 (defn- telemetry-nodes-loop (known interval)
   "Poll `(node/list)` every `interval` ms, emit a `[:runtime :nodeup]`/`[:runtime
@@ -463,7 +463,7 @@ detach it. `subs` tracks the attached ids so a `:stop` cleans them all up."
                                          (send subscriber [:subscribed ref])
                                          (telemetry-serve-loop (cons id subs))))
     ([:unsubscribe ref] (detach [:remote ref])
-      (telemetry-serve-loop (filter subs (fn (id) (not (= id [:remote ref]))))))
+      (telemetry-serve-loop (seq/filter subs (fn (id) (not (= id [:remote ref]))))))
     (:stop (do (doseq (id subs) (detach id)) nil))
     (_ (telemetry-serve-loop subs))))
 

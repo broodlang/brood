@@ -134,8 +134,8 @@ fn map_result_flows_the_callback_return() {
 
 #[test]
 fn filter_preserves_the_element_type() {
-    // `(filter (list 1 2 3) even?)` : list<int> — element type unchanged.
-    let w = warnings("(string/length (first (filter (list 1 2 3) even?)))");
+    // `(seq/filter (list 1 2 3) even?)` : list<int> — element type unchanged.
+    let w = warnings("(string/length (first (seq/filter (list 1 2 3) even?)))");
     assert!(
         w.iter().any(|s| s.contains("string/length")),
         "filter should preserve the int element type: {w:?}"
@@ -153,7 +153,7 @@ fn element_type_flows_through_more_combinators() {
         r#"(+ 1 (first (but-last ["a" "b"])))"#,
         r#"(+ 1 (first (distinct ["a" "b"])))"#,
         r#"(+ 1 (first (seq/dedupe ["a" "b"])))"#,
-        r#"(+ 1 (first (seq/remove ["a" "b"] (fn (x) false))))"#,
+        r#"(+ 1 (first (seq/reject ["a" "b"] (fn (x) false))))"#,
         r#"(+ 1 (first (seq/take-last ["a" "b"] 1)))"#,
         r#"(+ 1 (first (seq/keep ["a" "b"] (fn (x) x))))"#,
         "(string/length (first (range 5)))",
@@ -484,7 +484,7 @@ fn a_reduce_over_a_non_empty_sequence_is_its_step_result_not_the_init() {
     );
     // …and over a sequence that MAY be empty, the init stays in — `nil` is honest there.
     let sigs = signatures(
-        "(defn h () (first (reduce (filter (list 1 2) int?) '() (fn (acc x) (conj acc x)))))",
+        "(defn h () (first (reduce (seq/filter (list 1 2) int?) '() (fn (acc x) (conj acc x)))))",
     );
     let (_, sig, _) = sigs
         .iter()
@@ -512,16 +512,16 @@ fn seq_find_answers_the_element_or_nil() {
     assert!(strict.is_empty(), "{strict:?}");
 }
 
-// `seq/remove` with a type predicate answers the elements the predicate REJECTS —
-// `(seq/remove xs nil?)` over `list<nil | int>` is `list<int>`.
+// `seq/reject` with a type predicate answers the elements the predicate REJECTS —
+// `(seq/reject xs nil?)` over `list<nil | int>` is `list<int>`.
 #[test]
 fn seq_remove_drops_what_the_predicate_admits() {
     assert_eq!(
-        ty_str("(seq/remove (list 1 nil 2) nil?)"),
+        ty_str("(seq/reject (list 1 nil 2) nil?)"),
         "nil | list<1 | 2>"
     );
     assert_eq!(
-        ty_str("(seq/remove (list 1 \"a\") string?)"),
+        ty_str("(seq/reject (list 1 \"a\") string?)"),
         "nil | list<1>"
     );
 }

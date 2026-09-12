@@ -10,6 +10,8 @@
        :version \"0.1.0\"             ; optional
        :modules [{:module \"my/mod\"  ; module (namespace) name
                   :doc    \"…\"        ; moduledoc, or nil
+                  :types  [{:name \"pane\"           ; a `deftype` alias (ADR-327), or absent
+                            :type \"(record …)\"}]  ; the type as written
                   :defs   [{:name  \"foo\"          ; bare definition name (for anchors)
                             :sig   \"(foo x y)\"     ; rendered signature
                             :doc   \"…\"             ; docstring, or nil
@@ -36,17 +38,70 @@
     (string/replace "<" "&lt;")
     (string/replace ">" "&gt;")))
 
-(defn- inline (para)
+(defn- inline (para module-name)
   (let (parts (string/split para "`"))
     (apply str
       (map (seq/zip (range (count parts)) parts)
         (fn (pair)
           (let ([index segment] pair)
             (if (odd? index)
-              ;; inside backticks: code, and NOT scanned for emphasis — `**kwargs` is a
-              ;; literal there, not the start of a bold run
+              ;; inside backticks: code, and NOT scanned for emphasis or doc-links — `**kwargs`
+              ;; is a literal there, and so is a `[[…]]` someone is writing ABOUT
               (str "<code>" (escape segment) "</code>")
-              (emphasis (escape segment)))))))))
+              (doclinks (emphasis (escape segment)) module-name))))))))
+
+;; ---- doc links: `[[name]]` --------------------------------------------------
+;; Docstrings across the tree cross-reference each other with `[[name]]` — `io/inspect` cites
+;; [[puts]], `debug/trace-hold` cites [[trace-release]]. Until ADR-331 NOTHING rendered it:
+;; both this page and `nest doc` printed the brackets literally, so ~40 deliberate
+;; cross-references were dead text. They are links now.
+;;
+;; A bare `[[name]]` means THIS module's `name` — which is how every existing one is written,
+;; and why the module has to be threaded down here from `definition-html`. `[[mod/name]]` is
+;; the explicit cross-module form. Both land on the same `def-anchor` a definition already
+;; publishes, so a link cannot point somewhere the page does not have.
+
+(defn- doc-link-target (module-name raw)
+  "The anchor `[[raw]]` names, read from `module-name` when `raw` is bare."
+  (let (slash (index-of raw "/"))
+    (if (< slash 0)
+      (def-anchor module-name raw)
+      (def-anchor (string/substring raw 0 slash) (string/substring raw (inc slash) (count raw))))))
+
+(defn- doc-link-part (part module-name)
+  "One `[[`-split segment: its link, then whatever followed the `]]`."
+  (let (end (index-of part "]]"))
+    (cond
+      ;; An unclosed `[[` is prose, not a broken link — leave it exactly as written.
+      (< end 0) (str "[[" part)
+      else
+        (let (raw (string/substring part 0 end)
+              tail (string/substring part (inc (inc end)) (count part)))
+          ;; A name has no spaces. This is the guard that keeps DATA out: docstrings carry
+          ;; literal vectors-of-vectors (`[[hatch :path \"../hatch\"]]`, `[[pc caps]]`), and
+          ;; turning one of those into a link would both mangle the example and emit an
+          ;; anchor to nothing.
+          ;; A bare name with no module to resolve it against would build `d-nil-<name>` —
+          ;; an anchor to nothing. Leave it as written instead: a visible `[[name]]` is a
+          ;; missing renderer argument the reader can report, a dead link is not.
+          (if (or (= raw "") (includes? raw " ") (and (nil? module-name) (< (index-of raw "/") 0)))
+            (str "[[" part)
+            (str "<a class=\"doc-link\" href=\"#"
+              (escape (doc-link-target module-name raw))
+              "\"><code>"
+              (escape raw)
+              "</code></a>"
+              tail))))))
+
+(defn- doclinks (escaped module-name)
+  "Render `[[name]]` cross-references in ALREADY-ESCAPED text as links to their definition.
+Applied after escaping, like `emphasis`, so the `<a>` this emits is the only markup in the
+result and the cited name stays escaped."
+  (let (parts (string/split escaped "[["))
+    (if (< (count parts) 2)
+      escaped
+      (str (first parts)
+        (apply str (map (rest parts) (fn (p) (doc-link-part p module-name))))))))
 
 (defn- emphasis (escaped)
   "Render `**bold**` runs in ALREADY-ESCAPED text.
@@ -89,7 +144,7 @@
   "True if `block` is an indented code example — its first non-blank line starts with
   whitespace. Such a block's newlines are significant (each example on its own line), so it must
   render as `<pre>` rather than a `<p>` whose newlines HTML would collapse into one run-on line."
-  (let (lines (filter (string/split block "\n") (fn (l) (not (= (string/trim l) "")))))
+  (let (lines (seq/filter (string/split block "\n") (fn (l) (not (= (string/trim l) "")))))
     (let (line (first lines)) (and line (> (leading-space-count line 0) 0)))))
 
 ;; The smallest leading indentation across `lines`. A `fold` over `math/min` rather than
@@ -103,24 +158,30 @@
   "Strip the common leading indentation from every line of `block`, so an indented docstring
   code example renders flush-left in its `<pre>` rather than doubly indented."
   (let (lines (string/split block "\n")
-        non-blank (filter lines (fn (l) (not (= (string/trim l) ""))))
+        non-blank (seq/filter lines (fn (l) (not (= (string/trim l) ""))))
         n (if (empty? non-blank) 0 (common-indent block non-blank)))
     (string/join (map lines
                    (fn (l) (if (>= (string/length l) n) (string/substring l n (string/length l)) l)))
       "\n")))
 
-(defn prose (text)
+(defn prose (text &optional module-name)
   "Render a docstring as safe HTML: blank-line-separated blocks become `<p>` paragraphs (with
-  inline `code` spans), except an indented block, which becomes a `<pre>` code example with its
-  line breaks preserved. Every value is HTML-escaped. Empty/nil text renders to the empty string."
+  inline `code` spans and `[[name]]` cross-reference links), except an indented block, which
+  becomes a `<pre>` code example with its line breaks preserved. Every value is HTML-escaped.
+  Empty/nil text renders to the empty string.
+
+  `module-name` is what a bare `[[name]]` is resolved against; without it only the explicit
+  `[[mod/name]]` form links (the bare one is left as written rather than pointed at an anchor
+  that would not exist)."
   (if (or (nil? text) (= (string/trim (str text)) ""))
     ""
     (apply str
-      (map (filter (string/split (str text) "\n\n") (fn (block) (not (= (string/trim block) ""))))
+      (map (seq/filter (string/split (str text) "\n\n")
+             (fn (block) (not (= (string/trim block) ""))))
         (fn (block)
           (if (code-block? block)
             (str "<pre class=\"doc-example\"><code>" (escape (dedent block)) "</code></pre>")
-            (str "<p>" (inline block) "</p>")))))))
+            (str "<p>" (inline block module-name) "</p>")))))))
 
 ;; ---- anchors ----------------------------------------------------------------
 
@@ -167,15 +228,34 @@
       "</div>"
       (if type-arrow (str "<div class=\"type\">" (escape type-arrow) "</div>") "")
       (if docstring
-        (str "<div class=\"doc\">" (prose docstring) "</div>")
+        (str "<div class=\"doc\">" (prose docstring module-name) "</div>")
         "<p class=\"undoc\">Undocumented.</p>")
       "</div>")))
 
 ;; ---- one module -------------------------------------------------------------
 
+;; One `deftype` alias (ADR-327): the name as a signature-styled head, the type as
+;; written where a definition shows its arrow. Reuses the definition's classes so the
+;; stylesheet already covers it.
+(defn- type-html (module-name type-alias)
+  (str "<div class=\"def\" id=\""
+    (escape (def-anchor module-name (get type-alias :name)))
+    "\">"
+    "<div class=\"def-head\">"
+    "<code class=\"sig\">"
+    (escape (str module-name "/" (get type-alias :name)))
+    "</code>"
+    " <span class=\"tag\">type</span>"
+    "</div>"
+    "<div class=\"type\">"
+    (escape (get type-alias :type))
+    "</div>"
+    "</div>"))
+
 (defn- module-html (module)
   (let (module-name (get module :module)
         qualified? (get module :qualified?)
+        types (or (get module :types) [])
         defs (get module :defs))
     (str "<section class=\"module\" id=\""
       (escape (module-anchor module-name))
@@ -184,7 +264,12 @@
       (escape module-name)
       "</h2>"
       (let (moduledoc (get module :doc))
-        (if moduledoc (str "<div class=\"moduledoc\">" (prose moduledoc) "</div>") ""))
+        (if moduledoc (str "<div class=\"moduledoc\">" (prose moduledoc module-name) "</div>") ""))
+      (if (empty? types)
+        ""
+        (str "<div class=\"defs\">"
+          (apply str (map types (fn (t) (type-html module-name t))))
+          "</div>"))
       (if (empty? defs)
         "<p class=\"empty\">No public definitions.</p>"
         (str "<div class=\"defs\">"
@@ -360,6 +445,12 @@
     ".docsite .brand{font-weight:700;margin-bottom:.5rem}.docsite .ver{color:var(--docsite-dim);font-weight:400}"
     ".docsite #docsite-filter{width:100%;padding:.35rem .5rem;margin-bottom:.75rem;border:1px solid var(--docsite-border-strong);border-radius:.375rem;background:var(--docsite-input-bg);color:inherit}"
     ".docsite .nav-module{margin-bottom:.4rem}.docsite .nav-module-link{font-weight:600}"
+    ;; A doc-link is a `[[name]]` cross-reference (ADR-331). It carries a `<code>` inside,
+    ;; so it must NOT inherit the code span's plain colour — the point is that it reads as
+    ;; something you can click.
+    ".docsite .doc-link{color:var(--docsite-accent);text-decoration:none}"
+    ".docsite .doc-link:hover{text-decoration:underline}"
+    ".docsite .doc-link code{color:inherit;background:none;padding:0}"
     ".docsite .nav-defs{list-style:none;margin:.15rem 0 .5rem;padding-left:.75rem}"
     ".docsite .nav-defs li{margin:.05rem 0}.docsite .nav-defs a{color:var(--docsite-muted);font-size:.86rem}"
     ".docsite .content{flex:1 1 auto;min-width:0;max-width:52rem;padding:1.5rem 2rem}"

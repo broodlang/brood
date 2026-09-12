@@ -19,7 +19,7 @@
     ["keyword arg, call value"
       "(io/puts (str \"warning: no test found at \" (first entry) \":\" (second entry) \" — addresses nothing\") :to (io/stderr-port))"]
     ["nested call chain"
-      "(defn f (x) (reduce + 0 (map (fn (y) (* y y)) (filter (fn (y) (> y 0)) (range 0 100)))))"]
+      "(defn f (x) (reduce + 0 (map (fn (y) (* y y)) (seq/filter (fn (y) (> y 0)) (range 0 100)))))"]
     ["let with several bindings"
       "(let (alpha (compute-one input) beta (compute-two input) gamma (compute-three input)) (combine alpha beta gamma))"]
     ["cond with long branches"
@@ -29,7 +29,7 @@
     ["vector of vectors"
       "(def rows [[\"alpha\" 1 :one] [\"beta\" 2 :two] [\"gamma\" 3 :three] [\"delta\" 4 :four]])"]
     ["threading macro"
-      "(-> (range 0 1000) (filter (fn (n) (= 0 (math/rem n 3)))) (map (fn (n) (* n n))) (reduce 0 +))"]
+      "(-> (range 0 1000) (seq/filter (fn (n) (= 0 (math/rem n 3)))) (map (fn (n) (* n n))) (reduce 0 +))"]
     ["defn with docstring and body"
       "(defn tally (items) \"Count each distinct item, returning a map of item to count.\" (fold (fn (acc x) (map-assoc acc x (inc (map-get acc x 0)))) {} items))"]
     ["receive with clauses"
@@ -48,7 +48,7 @@
 ;; Checked here rather than assumed, because a layout rule that joins two items is exactly
 ;; the kind that can oscillate — join on pass 1, re-split on pass 2.
 (io/puts "── idempotency")
-(let (bad (filter *cases*
+(let (bad (seq/filter *cases*
             (fn (c)
               (let (once (format/source (second c)))
                 (not (= once (format/source once)))))))
