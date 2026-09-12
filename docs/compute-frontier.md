@@ -1929,9 +1929,17 @@ re-stamp in `jit_run_fast_link` removed: the loop reads **1.68 G instructions, ~
 call** (from 390; from 640 at the day's start), cycles 0.72 → 0.54 G. The rows read noise
 under both protocols — their hot loops are gate-refused or interpreted, so nothing on the
 corpus makes native calls from a depth-0 native loop; user code with a main loop calling
-helpers does. What remains of the 234 is the blob itself (frame nil-fill, ~14 heap-field
-saves/restores, the gateway sequence) plus the callee's entry and `read_out` — the next
-number for the convention work to beat.
+helpers does. Then the callee's entry: every native arm fetched its `roots` base pointer through the
+`brood_rt_roots_base` FFI at entry and again after every call — a `call`/`ret` and a
+callback for one pointer load the blob was already doing directly (`RootsBuf`'s header is
+pinned at +0/+8/+16). Six sites → one `load`: **1.68 → 1.59 G, ~218 per call**; the
+call-free loop and the spliced one move ~1.5% the same way. What remains of the 218 is the
+blob itself (frame nil-fill, ~14 heap-field saves/restores, the gateway sequence), the
+callee's stack-limit check and tick init, and `read_out` — the next number for the
+convention work to beat. On the rows: `make ab --floor` pinned `pfib` −5.3%
+(improved), fib/bintree/nqueens/nbody/mandelbrot −1…−3% under their floors; unpinned
+interleaved bintree −2.8%, nqueens −3.2%, json −2.1%, collatz −2.2%, nbody −2.0%, base64
+−2.0%, nothing the other way.
 
 **4. A hotness-ordered compile queue — not needed.** The queue probe (§7.11) showed the
 compiler idle from 42–72 ms into every row once boot stopped feeding it; what remains

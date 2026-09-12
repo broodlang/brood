@@ -700,13 +700,6 @@ fn jit_lower_arm_inner(
         .declare_function(&format!("brood_jit_arm_{seq}"), Linkage::Export, &sig)
         .ok()
         .or_bail("cranelift-declare-function")?;
-    let mut rb_sig = m.make_signature();
-    rb_sig.params.push(AbiParam::new(ptr_ty));
-    rb_sig.returns.push(AbiParam::new(ptr_ty));
-    let rb_id = m
-        .declare_function("brood_rt_roots_base", Linkage::Import, &rb_sig)
-        .ok()
-        .or_bail("cranelift-declare-function")?;
     // brood_rt_note_deopt(heap, reason): records WHY the arm is deopting. The shared deopt
     // block takes the id as a block param, so every guard can name itself (KI-49: a deopt
     // reported only its resume checkpoint, and an arm can have many guards after that).
@@ -1128,7 +1121,6 @@ fn jit_lower_arm_inner(
             vec![]
         }
     };
-    let rb_ref = m.declare_func_in_func(rb_id, b.func);
     let tickn_ref = m.declare_func_in_func(tickn_id, b.func);
     let car_ref = m.declare_func_in_func(car_id, b.func);
     let cdr_ref = m.declare_func_in_func(cdr_id, b.func);
@@ -1217,8 +1209,8 @@ fn jit_lower_arm_inner(
     // definition (no phi, no reload) — the int/cons subset is unaffected. Helpers read it
     // via `b.use_var(rb_var)`.
     let rb_var = b.declare_var(ptr_ty);
-    let call = b.ins().call(rb_ref, &[heap]);
-    b.def_var(rb_var, b.inst_results(call)[0]);
+    let rb0 = emit::load_roots_base(&mut b, heap);
+    b.def_var(rb_var, rb0);
     // The frame-access context the extracted slot helpers (`emit::load_slot_int` etc.)
     // read; all fields are `Copy`, so it threads by value.
     // KI-49: which slots the tier-time profile saw an `Int` in. A profiled-Int slot keeps
@@ -1735,7 +1727,6 @@ fn jit_lower_arm_inner(
         tget: tget_ref,
         mget: mget_ref,
         tput: tput_ref,
-        rb: rb_ref,
         globic: globic_ref,
         pushroom: pushroom_ref,
         callslow: callslow_ref,

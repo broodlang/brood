@@ -13,6 +13,19 @@ use cranelift_codegen::ir::{
 };
 use cranelift_frontend::{FunctionBuilder, Variable};
 
+/// The current `roots` data pointer, read straight off the heap: `Heap.roots` is a
+/// `RootsBuf` whose header is (ptr, len, cap) at +0/+8/+16 (pinned by
+/// `RootsBuf::header_offsets`), the same load the §7.5 inline call blob makes. This
+/// used to be an FFI call (`brood_rt_roots_base`) at every arm entry and after every
+/// call — one `call`/`ret` plus the callback, per activation, for one pointer load.
+pub(super) fn load_roots_base(
+    b: &mut FunctionBuilder,
+    heap: cranelift_codegen::ir::Value,
+) -> cranelift_codegen::ir::Value {
+    let off = crate::core::heap::jit_ceremony_offsets().roots as i32;
+    b.ins().load(types::I64, MemFlagsData::trusted(), heap, off)
+}
+
 /// The runtime-call context threaded into the extracted call/read helpers (and,
 /// as the decomposition proceeds, the per-`Inst` arm bodies): the heap pointer
 /// param, the scratch out-slot for the out-pointer ABI, the target pointer type,
@@ -51,8 +64,6 @@ pub(super) struct Funcs {
     /// `table_prim` helper drives it: status 0 hands back the value, status 1 deopts to the
     /// VM, which owns every branch of `get` this declines.
     pub mget: FuncRef,
-    /// `brood_rt_roots_base` — re-fetch the frame base after a call may realloc `roots`.
-    pub rb: FuncRef,
     /// `brood_rt_global_ic` — resolve a free global through the per-site inline cache.
     pub globic: FuncRef,
     /// `brood_rt_push_room(heap, n) -> *mut Value` — reserve n argument slots on `roots`

@@ -170,8 +170,8 @@ pub(super) fn emit_make_closure(
     let c = b.ins().call(funcs.mkclo, &[heap, out_addr, inst_v]);
     let status = b.inst_results(c)[0];
     // The callback (and the staging push before it) may have reallocated `roots`.
-    let rbc = b.ins().call(funcs.rb, &[heap]);
-    b.def_var(frame.rb_var, b.inst_results(rbc)[0]);
+    let rb = super::emit::load_roots_base(b, heap);
+    b.def_var(frame.rb_var, rb);
     let cont = b.create_block();
     b.ins().brif(status, funcs.error, &[], cont, &[]);
     b.seal_block(cont);
@@ -377,8 +377,8 @@ pub(super) fn emit_call(
             .ins()
             .call(funcs.callslow, &[heap, out_addr, argc_v, site_v, head_v]);
         let status = b.inst_results(c)[0];
-        let rbc = b.ins().call(funcs.rb, &[heap]);
-        b.def_var(rb_var, b.inst_results(rbc)[0]);
+        let rb = super::emit::load_roots_base(b, heap);
+        b.def_var(rb_var, rb);
         b.ins().brif(status, error, &[], cont, &[]);
     };
 
@@ -466,8 +466,8 @@ pub(super) fn emit_call(
             .ins()
             .call(funcs.natfl, &[heap, out_addr, code_v, stage_ptr, argc_v]);
         let nst = b.inst_results(nfc)[0];
-        let rbc_n = b.ins().call(funcs.rb, &[heap]);
-        b.def_var(rb_var, b.inst_results(rbc_n)[0]);
+        let rb = super::emit::load_roots_base(b, heap);
+        b.def_var(rb_var, rb);
         b.ins().brif(nst, error, &[], cont, &[]);
 
         b.switch_to_block(brood_blk);
@@ -730,8 +730,8 @@ pub(super) fn emit_call(
             .call(funcs.fastframe, &[heap, out_addr, site_v, slot_ptr]);
         let fst = b.inst_results(ffc)[0];
         // The callee may have relocated `roots`; re-fetch the base.
-        let rbc = b.ins().call(funcs.rb, &[heap]);
-        b.def_var(rb_var, b.inst_results(rbc)[0]);
+        let rb = super::emit::load_roots_base(b, heap);
+        b.def_var(rb_var, rb);
         // status: 1 = error → `error`; 2 = could-not-link → `miss`; 0 = `cont`.
         let is_err = b.ins().icmp_imm_s(IntCC::Equal, fst, 1);
         let not_err = b.create_block();

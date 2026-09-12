@@ -667,10 +667,6 @@ pub(super) fn jit_lower_i64_arm(
     let mut ptr_sig = m.make_signature();
     ptr_sig.params.push(AbiParam::new(ptr_ty));
     ptr_sig.returns.push(AbiParam::new(ptr_ty));
-    let rb_id = m
-        .declare_function("brood_rt_roots_base", Linkage::Import, &ptr_sig)
-        .ok()
-        .or_bail("cranelift-declare-function")?;
     let ovp_id = m
         .declare_function("brood_rt_i64_overflow_ptr", Linkage::Import, &ptr_sig)
         .ok()
@@ -834,7 +830,6 @@ pub(super) fn jit_lower_i64_arm(
         let mut fbctx = FunctionBuilderContext::new();
         let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
         let worker_ref = m.declare_func_in_func(worker_id, b.func);
-        let rb_ref = m.declare_func_in_func(rb_id, b.func);
         let ovp_ref = m.declare_func_in_func(ovp_id, b.func);
         let entry = b.create_block();
         b.append_block_params_for_function_params(entry);
@@ -871,8 +866,7 @@ pub(super) fn jit_lower_i64_arm(
         // Frame base address: roots + base*STRIDE. Args are at slots base+0..base+nargs-1; the
         // result goes back to slot base+0 (the VM's Done convention). The worker never touches
         // roots (it takes no heap), so this address stays valid across the worker call.
-        let rbc = b.ins().call(rb_ref, &[heap]);
-        let rbase = b.inst_results(rbc)[0];
+        let rbase = super::emit::load_roots_base(&mut b, heap);
         let off = b.ins().imul_imm_s(base, STRIDE);
         let argbase = b.ins().iadd(rbase, off);
         // Every arg must match the worker's scalar (Int/Float), else deopt to the VM.

@@ -845,6 +845,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-12** — the refused arms are the hot core (108k activations on json, dispatch 43% of its main thread); leaf admission built and not landed; the lever is the native→native call (compute-frontier §7.12)
 - **2026-09-12** — KI-133: a preempted native loop resumed on the interpreter via its callee's frame — 5M-call loop 3.86 → 2.53 G instructions, the leaf-spliced one −72%
 - **2026-09-12** — the inline xcall blob was refused at native depth 0 (the frame every main loop lives in); allowed, and the per-call stack re-stamp dropped — 234 instructions per native→native call, from 640
+- **2026-09-12** — every native arm fetched its roots base through an FFI at entry and after each call; now one load — 218 instructions per native→native call
 - **2026-09-12** — the GUI retains its frame and repaints by cell row (ADR-332): a keystroke paints 0.3 ms instead of 4–13; whole-pixel ppem, subpixel text at 1× (`gui-text-aa!`), snapped hairlines, `gui-line-height!`
 - **2026-09-12** — `0xFF` reads: radix literals, the second ADR-169 reservation to pay out (ADR-334)
 - **2026-09-12** — a qualified reference loads its module on first use (ADR-335): `nest complete` 72 → 20 ms, five modules instead of 62
@@ -13095,4 +13096,16 @@ re-derives the limit through `stacker` on every depth-0 call. 5M-call loop 2.53 
 instructions; rows noise on both protocols (their hot loops are refused or interpreted); the
 stack-guard tests (`jit_deep_recursion_test`, `vm_nested_stack_guard_test`,
 `deep_handle_spill_under_jit`, the 32 768-deep throw) hold. compute-frontier §7.12.
+
+### 2026-09-12 — the roots base is a load, not a callback: 234 → 218 per call
+
+The callee side of the call: every native arm called `brood_rt_roots_base` at entry and
+again after every call it made, to learn the `roots` data pointer — a `call`/`ret` plus the
+Rust callback, for one pointer load the caller's inline blob already performs directly
+(`RootsBuf`'s header is pinned at +0/+8/+16 by `header_offsets`). Six emission sites became
+one `load` off the heap (`emit::load_roots_base`); the `FuncRef` plumbing for the callback
+went with them. 5M-call loop 1.68 → 1.59 G instructions; the call-free loop 0.508 → 0.500
+(its entry paid it once per activation too). Rows: pinned `pfib` −5.3%, the rest −1…−3% under floor; unpinned
+bintree −2.8%, nqueens −3.2%, json −2.1%, collatz −2.2%, nothing the other way. Rust jit tests,
+both guards and the in-language suite hold (the one failure is KI-134's `lazy_load_test:120`).
 
