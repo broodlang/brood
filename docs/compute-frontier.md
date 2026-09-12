@@ -1964,13 +1964,23 @@ only to run code that is native. Taking `jit_run_fast_link` straight from the VM
 same link a native caller takes — should replace ~1 400 with ~220. The wiring (exec_chunk's
 non-tail `Call`, site present, global env, depth/headroom ok → `vm_call_ic_fast_link` →
 `jit_run_fast_link`) built and compiled, but `json` aborted on a **103 GB allocation**
-(`103079218656 ≈ 2^32 × sizeof(Value)`): a roots-index underflow, so the operand-stack layout
-at a VM Call site is not the `[stage_base, stage_base+argc)` staging `jit_run_fast_link`
-assumes — the head-resolution branch there leaves the roots in a different shape than
-`jit_dispatch_call`'s native staging. Reverted the same hour; the fix is to stage the args into
-the exact window the link expects (or add a VM-entry variant of the link that takes the operand
-stack as it stands) and re-verify with a fuzz-differential pass before trusting it. **This is
-the lever** — a fifth of `json`/`nbody`'s instructions — and the next session's first job.
+(`103079218656 ≈ 2^32 × sizeof(Value)`): a roots-index underflow **now root-caused by reading** (`exec_chunk.rs`, the non-tail `Call`
+arm): at a **staged** call the callee VALUE is on the operand stack, so `drop_base = n - argc
+- 1` and the args are `[drop_base+1, drop_base+1+argc)` — but I passed `drop_base` as
+`jit_run_fast_link`'s `stage_base`, and the link stages args from `[stage_base,
+stage_base+argc)`, so it read the callee-value slot as arg 0, dropped the real last arg, and
+the native body computed a garbage allocation size. **The fix is one line: `stage_base = n -
+argc`** (the true arg start, whether or not the head is staged), and on `Done` `truncate_roots(drop_base)`
+then `push_root(ret)` so a staged call's callee slot is dropped too — the VM's normal
+"result replaces the whole call frame" convention; `jit_run_fast_link`'s own Done/cold paths
+truncate to *its* `stage_base` (= `n-argc`), leaving `roots[drop_base]` for the caller to drop.
+The non-staged `head: Some(sym)` branch already has `drop_base = n - argc`, so it was correct;
+only the staged branch underflowed. Reverted rather than shipped because a JIT correctness
+path must clear the fuzz-differential + repeated suite first, and the box was memory-bound this
+session (every build-heavy task OOM-killed — `/tmp` is a 16 GB tmpfs and the suite spikes free
+memory below the guard; see the disk-cleanup memory note). **Next session: apply the one-line
+`stage_base` fix, checksum every row against the pre-change binary, `scripts/fuzz/run.sh`, then
+land.** This is the lever — a fifth of `json`/`nbody`'s instructions.
 
 **4. A hotness-ordered compile queue — not needed.** The queue probe (§7.11) showed the
 compiler idle from 42–72 ms into every row once boot stopped feeding it; what remains
