@@ -1941,6 +1941,37 @@ convention work to beat. On the rows: `make ab --floor` pinned `pfib` −5.3%
 interleaved bintree −2.8%, nqueens −3.2%, json −2.1%, collatz −2.2%, nbody −2.0%, base64
 −2.0%, nothing the other way.
 
+**Hot admission, re-tested at 218 instructions per call — §7.1's verdict holds.** The
+gate's cost model was measured when a native call cost 640 instructions plus KI-133's
+preemption churn; with both gone the question deserved one env var: `BROOD_XADMIT=1`
+(9 arms admitted on `json`, 4 installed) reads **+1–5% instructions** on json/regex/nqueens/
+pipeline, and with the frame cap lifted (`BROOD_XADMIT_MAX_NSLOTS=32`) **+8–23% instructions,
++7–15% wall** on wordcount, sort, base64 and spawn; fib/bintree/nbody flat. A call-mediated
+boxed arm's native code — boxed values, tag guards, the deferred compile of a big body —
+costs more than the interpreter it replaces, whatever the call costs. Admission is closed;
+the number that is left for these rows is the VM's own call, ~1 400 instructions
+(`BROOD_TIER=1` on the same loop: 11.0 G vs 4.0 G call-free), paid by every refused
+activation — 108k of them on `json`.
+
+**A VM→native DIRECT call — the biggest lever, ATTEMPTED and REVERTED 2026-09-13 (a runaway).**
+The counts say it plainly: on the corpus the VM does not make many *VM-level* applies, it makes
+**VM→native entries** — `json` 193k `jit_native` against 42k `vm_apply` per run, `nbody` 250k,
+`nqueens` 35k with 721k native→native links beside them. Each of those 193k is a chunked
+non-tail `Call` whose callee is already native, and today it exits `exec_chunk` to the driver
+(frame save, `push_frame`, the loop-top safepoints, the tier check, re-entry — the VM's own
+call is ~1 400 instructions: `BROOD_TIER=1` on the 5M-call loop reads 11.2 G vs 4.1 G call-free)
+only to run code that is native. Taking `jit_run_fast_link` straight from the VM Call site — the
+same link a native caller takes — should replace ~1 400 with ~220. The wiring (exec_chunk's
+non-tail `Call`, site present, global env, depth/headroom ok → `vm_call_ic_fast_link` →
+`jit_run_fast_link`) built and compiled, but `json` aborted on a **103 GB allocation**
+(`103079218656 ≈ 2^32 × sizeof(Value)`): a roots-index underflow, so the operand-stack layout
+at a VM Call site is not the `[stage_base, stage_base+argc)` staging `jit_run_fast_link`
+assumes — the head-resolution branch there leaves the roots in a different shape than
+`jit_dispatch_call`'s native staging. Reverted the same hour; the fix is to stage the args into
+the exact window the link expects (or add a VM-entry variant of the link that takes the operand
+stack as it stands) and re-verify with a fuzz-differential pass before trusting it. **This is
+the lever** — a fifth of `json`/`nbody`'s instructions — and the next session's first job.
+
 **4. A hotness-ordered compile queue — not needed.** The queue probe (§7.11) showed the
 compiler idle from 42–72 ms into every row once boot stopped feeding it; what remains
 arrives one arm at a time. Ordering a queue that is rarely deeper than one changes nothing
