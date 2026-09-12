@@ -74,12 +74,28 @@ thread_local! {
     /// (vector t)))`) would otherwise expand forever. A name met again on its own path
     /// reads as `any`: the checker has no recursive types, and unknown is the sound answer.
     static ALIASES_EXPANDING: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// What each expanded alias LOOKS like, back to the name it was written as — so a
+    /// diagnostic can say `declared return type model` rather than print the forty-field
+    /// record `model` stands for. Keyed by the expansion's display string (a `Ty` has no
+    /// identity beyond its shape); filled as aliases resolve, cleared with the table.
+    static ALIAS_DISPLAY: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+}
+
+/// How to SHOW a type in a diagnostic: the alias it was declared through, when one in
+/// scope expands to exactly this shape (the `model` a `sig` named, not its record), else
+/// the type's own rendering. Only a shape an alias produced during THIS check is known —
+/// the map is filled as sigs resolve — which is the right scope: a type the author never
+/// spelled by that name is not presented as if they had.
+pub(crate) fn display_ty(ty: &Ty) -> String {
+    let shown = ty.to_string();
+    ALIAS_DISPLAY.with(|m| m.borrow().get(&shown).cloned().unwrap_or(shown))
 }
 
 /// Install the type-alias table for this file (see [`TYPE_ALIASES`]).
 pub(super) fn set_type_aliases(map: HashMap<String, Value>, file_ns: Option<String>) {
     TYPE_ALIASES.with(|m| *m.borrow_mut() = map);
     ALIAS_FILE_NS.with(|n| *n.borrow_mut() = file_ns);
+    ALIAS_DISPLAY.with(|m| m.borrow_mut().clear());
 }
 
 /// The type an alias `name` denotes, or `None` when no alias is in scope by that name.
@@ -115,6 +131,15 @@ fn alias_ty(heap: &Heap, name: &str) -> Option<Ty> {
     ALIASES_EXPANDING.with(|v| {
         v.borrow_mut().pop();
     });
+    if let Some(t) = &ty {
+        // remembered under the name as WRITTEN (`model`, not `bedit/model/model`): that is
+        // the spelling the reader of the diagnostic has in front of them
+        ALIAS_DISPLAY.with(|m| {
+            m.borrow_mut()
+                .entry(t.to_string())
+                .or_insert_with(|| name.to_string());
+        });
+    }
     ty
 }
 

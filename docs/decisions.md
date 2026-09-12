@@ -21261,6 +21261,19 @@ declare its pane geometry in types at all. Not in scope: resolution through a fi
 `(:use …)` imports (an alias resolves like a record name, by unique suffix), a `nest doc`
 entry for an alias, and recursive types.
 
+**Addendum (2026-09-12) — the alias is how the type is SHOWN, too.** A diagnostic that
+printed a `model` mismatch as the forty-field record it expands to was unreadable, and it was
+not what the author wrote. `annot::display_ty` renders a type by the alias in scope that
+expanded to exactly that shape (remembered as sigs resolve, cleared with the table), so the
+two mismatch messages read `declared return type model but the body yields 42` and `argument
+1 expects pane, got "not a pane"`. Only a shape an alias produced during that check is named
+— a type the author never spelled that way is not presented as if they had. The same
+resolution now serves `reflect/type-signature` (the alias table is installed before a declared
+sig is parsed, where it used to fail silently to the inferred one), and two reflect entries
+ride it for editors: `reflect/declared-signature` (the `sig` as written — the contract) and
+`reflect/check-string-here` (the checker under the current compile context, which is how an
+eval-in-buffer form is about to be resolved — `types::check::check_forms_here`).
+
 ## ADR-328 — A named key spells its modifiers the way a character chord does
 
 **Status:** accepted; implemented 2026-09-12 (`host::gui::named_key`, used by both

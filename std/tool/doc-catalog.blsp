@@ -51,6 +51,7 @@
    "reflect/check-file-deps" :meta
    "reflect/check-file-structured" :meta
    "reflect/check-string-structured" :meta
+   "reflect/check-string-here" :meta
    "reflect/strict-checking?" :meta
    "seq/chunk-by" :collections
    "seq/chunk-every" :collections
@@ -215,6 +216,7 @@
    "seq/times" :collections
    "seq/transduce" :collections
    "reflect/type-signature" :meta
+   "reflect/declared-signature" :meta
    "map/update-keys" :maps
    "map/update-vals" :maps
    "seq/vector-length" :collections

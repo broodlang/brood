@@ -282,8 +282,11 @@ fn deftype_names_a_structural_type_for_sigs() {
             .contains("string/length: argument 1 expects string, got (tuple int, int, int, int)")),
         "{strict:?}"
     );
+    // …and named as the alias the sig spelled, not as the shape it expands to
     assert!(
-        strict.iter().any(|w| w.contains("t/rows: argument 1 expects {rect: (tuple int, int, int, int), selected: bool, ...}, got \"not a pane\"")),
+        strict
+            .iter()
+            .any(|w| w.contains("t/rows: argument 1 expects pane, got \"not a pane\"")),
         "{strict:?}"
     );
     // an unknown name is still reported (ADR-259); the alias names are not

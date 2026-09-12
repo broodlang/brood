@@ -1224,6 +1224,10 @@ fn setup_check_imports(heap: &mut Heap, header: Value) {
 /// cleared first so a re-edited/reloaded function re-infers rather than showing a stale sig.
 pub fn signature_string(heap: &Heap, sym: Symbol) -> Option<String> {
     sigs::clear_sig_memo();
+    // A declared sig may name a `deftype` alias (ADR-327): install the loaded aliases, or
+    // the declaration fails to parse and the answer silently falls back to the inferred
+    // one — `(model any -> model)` read as `(any, any) -> map`.
+    annot::set_type_aliases(protocol::type_alias_table(heap, &[], None), None);
     sigs::sig_of(heap, sym).map(|s| s.to_string())
 }
 
@@ -1468,6 +1472,28 @@ pub fn check_file_mode(
     extra_required: &[String],
     strict: bool,
 ) -> Vec<(Option<Pos>, String)> {
+    check_forms(heap, forms, extra_required, strict, false)
+}
+
+/// [`check_file`] for forms that are about to be EVALUATED HERE — a REPL line, an
+/// editor's `C-x C-e` — rather than loaded as a file: when the forms declare no
+/// `(defmodule …)` of their own, they are checked under this process's current compile
+/// context (the namespace `%in-ns` last opened and its `(:use …)` imports), which is
+/// exactly how `eval` will resolve them. Without it a form pulled out of a module's
+/// buffer reads every bare import as unbound and the module's own `deftype`s as
+/// unknown, so the checker's verdict on it describes a different program than the one
+/// that runs.
+pub fn check_forms_here(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)> {
+    check_forms(heap, forms, &[], super::strict_checking(), true)
+}
+
+fn check_forms(
+    heap: &mut Heap,
+    forms: &[Value],
+    extra_required: &[String],
+    strict: bool,
+    inherit_context: bool,
+) -> Vec<(Option<Pos>, String)> {
     let mut out = Vec::new();
     // Block the copying GC for the whole check: this fn holds LOCAL handles in
     // Rust `Vec`s (`forms`/`expanded`) *across* the `eval` of `(require …)` forms
@@ -1507,14 +1533,18 @@ pub fn check_file_mode(
     // namespace is `bedit/tutor`. The checker has to set the SAME rooted namespace, or every
     // comparison against it disagrees with the runtime — most visibly the `--` privacy rule,
     // which then reads a module's reference to its own helper as a foreign private access.
-    let file_ns = crate::eval::macros::file_ns(heap, forms).map(|ns| heap.root_module_name(ns));
+    let declared_ns = crate::eval::macros::file_ns(heap, forms).map(|ns| heap.root_module_name(ns));
+    // Forms checked "here" (`check_forms_here`) that open no module of their own are
+    // resolved in the namespace already open, as `eval` would resolve them.
+    let inherit = inherit_context && declared_ns.is_none();
+    let file_ns = if inherit { heap.compile_ns() } else { declared_ns };
     let prev_ns = heap.set_compile_ns(file_ns);
     // Region model (ADR-223): a file may declare more than one `(defmodule …)`. Install the
     // per-module forward-ref pre-scan and start the active set on the FIRST module's region;
     // the pass-1 loop below switches compile-ns + region at each subsequent `defmodule`
     // (the checker doesn't `eval` `%in-ns`, so it must mirror that switch itself). A
     // single-module file has one region equal to the old whole-file scan.
-    let regions = if file_ns.is_some() {
+    let regions = if declared_ns.is_some() {
         crate::eval::macros::scan_regions(heap, forms)
     } else {
         std::collections::HashMap::new()
@@ -1526,8 +1556,14 @@ pub fn check_file_mode(
     let prev_known = heap.set_ns_known_names(first_known);
     let prev_by_module = heap.set_ns_known_by_module(regions);
     // Imports start empty; a `(:use …)` in the header populates them during pass 1
-    // (its `(require …)`/`%refer` is evaluated like any other header form).
-    let prev_imports = heap.set_imports(std::collections::HashMap::new());
+    // (its `(require …)`/`%refer` is evaluated like any other header form). Checked
+    // "here", the process's current imports are the header.
+    let inherited_imports: HashMap<Symbol, crate::core::heap::ImportEntry> = if inherit {
+        heap.imports_snapshot().into_iter().collect()
+    } else {
+        HashMap::new()
+    };
+    let prev_imports = heap.set_imports(inherited_imports);
     // Root the input forms and the expanding-into vec across the loop:
     // each iteration may call `eval` on a `(require …)`, which runs a
     // GC safepoint at outermost depth — any LOCAL `Value` held only in

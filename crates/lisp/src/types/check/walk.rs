@@ -775,8 +775,8 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
                         "{}: argument {} expects {}, got {} ({})",
                         name_of(s),
                         i + 1,
-                        param,
-                        g.bound,
+                        crate::types::check::annot::display_ty(&param),
+                        crate::types::check::annot::display_ty(&g.bound),
                         crate::syntax::printer::print(heap, arg),
                     );
                     // Anchor at the offending ARGUMENT when it's a positioned

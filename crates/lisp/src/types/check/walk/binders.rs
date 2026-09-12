@@ -280,7 +280,9 @@ pub(super) fn check_fn_seeded(
                     heap.form_pos_only(ret_form),
                     format!(
                         "{}declared return type {} but the body yields {}",
-                        who, s.ret, g.bound
+                        who,
+                        crate::types::check::annot::display_ty(&s.ret),
+                        crate::types::check::annot::display_ty(&g.bound)
                     ),
                 ));
             }

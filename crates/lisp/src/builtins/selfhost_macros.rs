@@ -28,6 +28,13 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         check_builtin,
     );
     primitives.def(
+        "%check-string-here",
+        Arity::exact(1),
+        Sig::new(vec![string], list_ty),
+        &["src"],
+        "Advisory type-check the source string `src` under THIS process's compile context — the namespace last opened and its imports, as `eval` would resolve it — returning `{:line :col :message}` maps like `%check-string-structured`; `()` when `src` does not parse. Forms that open a `(defmodule …)` of their own are checked under it instead.",
+        check_string_here);
+    primitives.def(
         "%check-file",
         Arity::range(1, 2),
         // 2nd arg (optional required-mods) is a list OR vector of module names — `any`
@@ -545,13 +552,29 @@ pub(super) fn expr_type(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispRes
 /// variant (`types::check::check_file`).
 pub(super) fn check_string_structured(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
     let src = expect_string(heap, "check-string-structured", arg(args, 0))?;
-    let forms = match reader::read_all_positioned(heap, &src) {
+    check_string_as(heap, &src, false)
+}
+
+/// `%check-string-here`: [`check_string_structured`] under the CURRENT compile context —
+/// what a REPL or an editor's eval-in-buffer wants, since that is how the form is about
+/// to be resolved (`types::check::check_forms_here`).
+pub(super) fn check_string_here(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let src = expect_string(heap, "check-string-here", arg(args, 0))?;
+    check_string_as(heap, &src, true)
+}
+
+fn check_string_as(heap: &mut Heap, src: &str, here: bool) -> LispResult {
+    let forms = match reader::read_all_positioned(heap, src) {
         Ok(fs) => fs,
         // unparsable (e.g. mid-edit) — no diagnostics rather than an error
         Err(_) => return Ok(heap.list(Vec::new())),
     };
     let just_forms: Vec<Value> = forms.into_iter().map(|(f, _)| f).collect();
-    let warnings = crate::types::check::check_file(heap, &just_forms);
+    let warnings = if here {
+        crate::types::check::check_forms_here(heap, &just_forms)
+    } else {
+        crate::types::check::check_file(heap, &just_forms)
+    };
     let line_kw = Value::keyword(value::intern("line"));
     let col_kw = Value::keyword(value::intern("col"));
     let msg_kw = Value::keyword(value::intern("message"));

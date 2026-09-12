@@ -229,6 +229,63 @@
   (test "a never-interned string name is nil, not an error"
     (assert= (reflect/type-signature "definitely-not-a-real-global-42") nil)))
 
+;; declared-signature — the contract AS WRITTEN, for an editor to show beside a name.
+;; `type-signature` is the checker's view (aliases expanded, or inferred when nothing was
+;; declared); this is the author's `(sig …)`, verbatim, or nil.
+(deftype intro-thing (record &open :a int))
+(defn intro-declared (t) (:a t))
+(sig intro-declared (intro-thing -> int))
+(defn intro-undeclared (t) (:a t))
+(describe "declared-signature"
+  (test "answers the sig as the author wrote it, alias names and all"
+    (assert= (reflect/declared-signature 'introspection-test/intro-declared) "(intro-thing -> int)")
+    (assert= (reflect/declared-signature "introspection-test/intro-declared") "(intro-thing -> int)"))
+  (test "nil for a function nothing was declared for, and for a name that is not a global"
+    (assert= (reflect/declared-signature 'introspection-test/intro-undeclared) nil)
+    (assert= (reflect/declared-signature 'no-such-global-xyz) nil)
+    (assert= (reflect/declared-signature "definitely-not-a-real-global-42") nil))
+  (test "a deftype alias is a type, not a signature: nil"
+    (assert= (reflect/declared-signature 'introspection-test/intro-thing) nil))
+  (test "type-signature reads a declared sig through its aliases rather than falling back to inference"
+    (let (sig (reflect/type-signature 'introspection-test/intro-declared))
+      (is (string? sig))
+      (is (includes? sig "-> int"))
+      ;; the alias was resolved to its record shape, not dropped (which would have read the
+      ;; inferred `(any -> any)`-ish signature instead)
+      (is (includes? sig "a: int")))))
+
+;; check-string-here — the checker under the CURRENT compile context, for a REPL or an
+;; editor's eval-in-buffer: the form is checked the way `eval` is about to resolve it.
+(describe "check-string-here"
+  (defn under-context (ns imports thunk)
+    ;; install a compile context for the duration of `thunk` — what an eval session does
+    ;; (`%restore-compile-context`) before it evaluates; put the root back after
+    (let (before (%compile-context))
+      (do
+        (%restore-compile-context [ns imports])
+        (let (v (thunk))
+          (do (%restore-compile-context before) v)))))
+  (test "a declared return type is checked, and a same-module alias resolves by its short name"
+    (let (w (under-context 'introspection-test []
+              (fn () (reflect/check-string-here "(sig g (intro-thing -> string)) (defn g (t) 42)"))))
+      (assert= (count w) 1)
+      (is (includes? (:message (first w)) "declared return type string"))))
+  (test "an imported bare name resolves through the context's imports; as a file it is unbound"
+    (let (src "(defn g (t) (pane-count t))"
+          here (under-context 'introspection-test [['pane-count 'editor/pane/pane-count]]
+                 (fn () (reflect/check-string-here src)))
+          alone (reflect/check-string-structured src))
+      (assert= here ())
+      (assert= (count alone) 1)
+      (is (includes? (:message (first alone)) "unbound symbol: pane-count"))))
+  (test "forms that open their own module are checked under it, as a file would be"
+    (let (w (under-context 'introspection-test []
+              (fn () (reflect/check-string-here "(defmodule elsewhere) (sig g (int -> string)) (defn g (t) 42)"))))
+      (assert= (count w) 1)
+      (is (includes? (:message (first w)) "elsewhere/g: declared return type string"))))
+  (test "unparsable input is () — a buffer mid-edit is not an error"
+    (assert= (reflect/check-string-here "(defn g (t") ())))
+
 ;; expr-type — the same question for an expression with no name. `type-signature` needs a
 ;; global to ask about, which leaves a REPL or a scratch buffer nothing to ask with: the
 ;; thing you just typed is anonymous. The checker already computes this walking any form;

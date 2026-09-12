@@ -83,6 +83,13 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "Per TOP-LEVEL form of `src`, in document order, what it defines and what globals it uses: a list of `{:defines (…) :references (…)}` maps of name strings. What a live evaluator needs to re-run only the forms an edit could affect instead of everything below it. Syntactic, read the way find-references reads: locals are excluded, a quoted `'…` is data. It cannot see a name a macro introduces, nor a side effect through which one form reaches another without naming anything.",
         source_deps);
     primitives.def(
+        "%declared-sig",
+        Arity::exact(1),
+        Sig::new(vec![sym.union(string)], any),
+        &["name"],
+        "The type expression a `(sig …)` DECLARED for global `name`, as written — `(model any -> model)` — or nil when none was declared (a `deftype` alias is not a signature and answers nil too). Symbol or string arg; a `mod/name` reference is rooted to its package like any other.",
+        declared_sig);
+    primitives.def(
         "%type-signature",
         Arity::exact(1),
         Sig::new(vec![sym.union(string)], string.union(nil_ty)),
@@ -251,6 +258,42 @@ pub(super) fn type_signature(args: &[Value], _env: EnvId, heap: &mut Heap) -> Li
         Some(signature) => Ok(heap.alloc_string(&signature)),
         None => Ok(Value::nil()),
     }
+}
+
+/// `(%declared-sig name)` — the raw type expression a `(sig …)` declared for `name`, or
+/// nil. What an editor shows as a command's CONTRACT: the declaration as the author wrote
+/// it (`(model any -> model)`), not the checker's expansion of it. A `deftype` alias entry
+/// (`(%type T)`) is a declaration of a type, not of a global, so it answers nil.
+pub(super) fn declared_sig(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let sym = match arg(args, 0) {
+        Value::Sym(s) => s,
+        Value::Str(id) => {
+            let name = heap.string(id).to_string();
+            match value::intern_existing(&name) {
+                Some(s) => s,
+                None => return Ok(Value::nil()),
+            }
+        }
+        other => {
+            return Err(LispError::wrong_type(heap, "declared-sig", "symbol or string", other))
+        }
+    };
+    // `commands/cmd-open` is `bedit/commands/cmd-open` inside project bedit (ADR-070) —
+    // the same rooting an `(eval 'commands/cmd-open)` behind a keymap gets; a bare name
+    // resolves in the current namespace, as a def head would.
+    let rooted = heap
+        .root_qualified_ref(sym)
+        .unwrap_or_else(|| crate::eval::macros::resolve_reference(heap, sym));
+    let Some(form) = heap
+        .declared_sig_value(rooted)
+        .or_else(|| heap.declared_sig_value(sym))
+    else {
+        return Ok(Value::nil());
+    };
+    let is_alias = heap.list_to_vec(form).ok().is_some_and(|items| {
+        matches!(items.first(), Some(Value::Sym(h)) if value::symbol_is(*h, crate::builtins::modules::TYPE_ALIAS_MARKER))
+    });
+    Ok(if is_alias { Value::nil() } else { form })
 }
 
 /// `(references-in-source name source)` — every occurrence of the global `name`

@@ -113,6 +113,20 @@ with [[file-signatures]], so a buffer and the file it will be saved as cannot di
   (%check-string-structured src))
 (sig check-string-structured (string -> list))
 
+(defn check-string-here (src)
+  "Advisory type-check the source string `src` **as it is about to be evaluated here**:
+under this process's current compile context — the namespace `defmodule` last opened and
+its `(:use …)` imports — rather than as a file of its own. The same `{:line :col
+:message}` maps as [[check-string-structured]], `()` when `src` doesn't parse.
+
+What a REPL line or an editor's eval-in-buffer wants: a form pulled out of a module's
+buffer names the module's imports bare and its `deftype`s by their short names, and only
+this context resolves them the way `eval` will — checked as a standalone file, every one
+of them reads as unbound. Forms that open a `(defmodule …)` of their own are checked under
+it, as a file would be."
+  (%check-string-here src))
+(sig check-string-here (string -> list))
+
 (defn source-deps (src)
   "Per TOP-LEVEL form of `src`, in document order, what it defines and what globals it uses:
 a list of `{:defines (…) :references (…)}` maps of name strings.
@@ -209,6 +223,15 @@ cannot load is a citation that does not work."
   "Where global name was defined, as [file line col], or nil. Quote it: (source-location 'foo)."
   (%source-location name))
 (sig source-location (symbol -> (or nil vector)))
+
+(defn declared-signature (name)
+  "The type expression a `(sig …)` DECLARED for global `name`, as the author wrote it —
+`\"(model any -> model)\"` — or nil when none was declared. [[type-signature]] answers
+the checker's view (declared, curated or inferred, aliases expanded); this answers the
+CONTRACT as stated, which is what an editor shows beside a command's name. Symbol or
+string arg; a `deftype` alias is a type, not a signature, and answers nil."
+  (let (form (%declared-sig name)) (if (nil? form) nil (pr-str form))))
+(sig declared-signature ((or string symbol) -> (or nil string)))
 
 (defn type-signature (name)
   "The checker's type signature for global `name` (declared/curated/inferred) as an arrow string like \"(int -> int)\", or nil if it can't be pinned. Symbol or string arg: (type-signature 'map)."
