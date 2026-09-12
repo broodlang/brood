@@ -511,6 +511,7 @@ at `next.end` (the whitespace between the two forms is preserved in place).
 (defn- sexp-line-end (text i n)
   "Offset of the next newline at or after `i`, or `n` (end of text)."
   (cond (>= i n) n (= (string/char-at text i) "\n") i else (sexp-line-end text (inc i) n)))
+(sig sexp-line-end (string int int -> int))
 
 ; list spans lines → kill to end of line
 (defn point-kill-end (text point)
@@ -531,7 +532,7 @@ parens. At end of line, kills the newline. At least `point` (a no-op at the clos
           (= point le) (math/min n (inc point))
           ; empty rest of line → kill the newline
           else le)))))
-(sig point-kill-end (string any -> any))
+(sig point-kill-end (string int -> int))
 ;; ---- buffer commands: (buf key) -> buf (bind these in a keymap) -------------
 
 (defn- sexp-apply-edit (buf result)

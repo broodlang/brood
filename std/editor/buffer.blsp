@@ -534,6 +534,7 @@ positions; a snapshot without them drops the key so that state stays as it was."
 each `undo-next` records the state it leaves onto `:undo`, a run started after some undos
 walks the *reverse* direction — i.e. it redoes."
   (assoc buf :pending-undo (get buf :undo)))
+(sig undo-start (buffer -> buffer))
 
 (defn undo-next (buf)
   "One step of the current undo run: restore the next snapshot in `:pending-undo`,
@@ -545,6 +546,7 @@ advancing `:pending-undo`. A no-op (returns `buf`) when the run is exhausted."
       (assoc (buffer-restore buf (first p))
         :undo (cons (buffer-snapshot buf) (or (get buf :undo) ()))
         :pending-undo (rest p)))))
+(sig undo-next (buffer -> buffer))
 
 ;; ---- undo in a region: undo only the lines you selected ----------------------
 ;; Emacs's `undo-in-region`, and it costs almost nothing here — because of what
@@ -707,7 +709,11 @@ whole thing back."
               ;; undo continues backwards through the same lines.
               :undo (cons (assoc (first (get pushed :undo)) :region-undo true) tail)
               :point (math/min (get buf :point) (text/length rope))
-              :mark (math/min (get buf :mark) (text/length rope)))))))))
+              ;; `bounds` being non-nil says the mark is set; the `or` says so to the
+              ;; checker (`:mark` reads `nil | int` on its own), with point as the
+              ;; never-taken fallback.
+              :mark (math/min (or (get buf :mark) (get buf :point)) (text/length rope)))))))))
+(sig undo-in-region (buffer -> buffer))
 
 (defn undo (buf)
   "A standalone single undo: begin a fresh run and take one step. The editor's repeat
@@ -715,6 +721,7 @@ behaviour — continue a run vs. restart after a non-undo command (which is what
 fresh run into a redo) — lives in cmd-undo / cmd-redo, which call `undo-start` /
 `undo-next` directly."
   (undo-next (undo-start buf)))
+(sig undo (buffer -> buffer))
 
 ;; ---- editing (returns a fresh buffer; records undo; clears the mark) ---------
 ;;

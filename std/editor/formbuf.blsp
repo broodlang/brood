@@ -40,6 +40,11 @@ keep the generated part intact."
 
 ;; ---- region providers ---------------------------------------------------------
 
+;; What `delimited-regions` hands out, named once (ADR-327): char offsets and 0-based line
+;; numbers, all ints. Open, so a consumer may tag a region with more (the tutorial adds a
+;; `:kind`) and still have a `region`.
+(deftype region (record &open :start int :end int :open-line int :close-line int))
+
 (defn delimited-regions (text open-prefix close-prefix)
   "The regions of `text` delimited by whole LINES: content strictly between a line
 starting with `open-prefix` and the next line starting with `close-prefix`. Returns
@@ -76,7 +81,7 @@ buffer wants — the user should be able to see where they may type."
                             acc))
                       else (go (rest lines) (inc lineno) next-off open acc))))))
     (go (string/split text "\n") 0 0 nil '())))
-(sig delimited-regions (string any any -> any))
+(sig delimited-regions (string string string -> (or nil (list region))))
 
 (defn tail-region (text start)
   "The single region from `start` to the end of `text` — the shape a prompt buffer
