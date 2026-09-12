@@ -1537,7 +1537,11 @@ fn check_forms(
     // Forms checked "here" (`check_forms_here`) that open no module of their own are
     // resolved in the namespace already open, as `eval` would resolve them.
     let inherit = inherit_context && declared_ns.is_none();
-    let file_ns = if inherit { heap.compile_ns() } else { declared_ns };
+    let file_ns = if inherit {
+        heap.compile_ns()
+    } else {
+        declared_ns
+    };
     let prev_ns = heap.set_compile_ns(file_ns);
     // Region model (ADR-223): a file may declare more than one `(defmodule …)`. Install the
     // per-module forward-ref pre-scan and start the active set on the FIRST module's region;

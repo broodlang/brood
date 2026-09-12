@@ -275,7 +275,12 @@ pub(super) fn declared_sig(args: &[Value], _env: EnvId, heap: &mut Heap) -> Lisp
             }
         }
         other => {
-            return Err(LispError::wrong_type(heap, "declared-sig", "symbol or string", other))
+            return Err(LispError::wrong_type(
+                heap,
+                "declared-sig",
+                "symbol or string",
+                other,
+            ))
         }
     };
     // `commands/cmd-open` is `bedit/commands/cmd-open` inside project bedit (ADR-070) —

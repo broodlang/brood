@@ -188,7 +188,12 @@ pub(super) fn translate_key(ke: &KeyEvent, mods: ModifiersState) -> Option<Key> 
             // editor binds `C-<left>` / `C-S-<arrow>` as distinctly as `:shift-up`
             // (shift-select) from a plain arrow. Tab and Escape keep their own spellings.
             let with_mods = |base: &'static str| {
-                Key::Named(named_key(base, mods.control_key(), mods.alt_key(), mods.shift_key()))
+                Key::Named(named_key(
+                    base,
+                    mods.control_key(),
+                    mods.alt_key(),
+                    mods.shift_key(),
+                ))
             };
             Some(match n {
                 NamedKey::ArrowUp => with_mods("up"),

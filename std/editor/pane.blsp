@@ -279,7 +279,8 @@ in the same place (Emacs `rotate-frame`'s buffer half)."
   (if (empty? cands)
     best
     (let (c (first cands)
-          better? (or (nil? best) (< (pane-gap (get c :rect) from dir) (pane-gap (get best :rect) from dir))))
+          better? (or (nil? best)
+                    (< (pane-gap (get c :rect) from dir) (pane-gap (get best :rect) from dir))))
       (pane-nearest (rest cands) from dir (if better? c best)))))
 (sig pane-nearest (list rect keyword (or nil pane) -> (or nil pane)))
 

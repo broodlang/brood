@@ -1166,7 +1166,6 @@ suite run. `*test-wait-ms*` is a failure deadline, reached only if a relay never
   (test "whitespace-run-at stops at a newline, in both directions"
     (assert= (whitespace-run-at (at "a  \n  b" 2)) [1 3]) ; before the newline
     (assert= (whitespace-run-at (at "a  \n  b" 4)) [4 6]))) ; after it
-
 (describe "buffer: the electric pair ops"
   (test "insert-pair types both delimiters and leaves point between them"
     (let (b (insert-pair (goto-char (make-buffer "ab") 1) "(" ")"))
