@@ -237,7 +237,7 @@ the runtime kept serving the old text, and a doctest sabotage against it passed.
 trap. `is_embedded_module` is the same fact from the other side.) A sabotage run against the un-rebuilt binary passes — which reads exactly like
 "the harness does not execute this example" and sent this session looking for a collection bug
 that did not exist. Worse, the boot artifacts hide it a second way: a run that has written a
-prelude image or the ADR-138 text cache serves the OLD docstring even after a rebuild. To verify
+prelude image serves the OLD docstring even after a rebuild. To verify
 a docstring example: **rebuild, then run under a private `XDG_CACHE_HOME`**, and sabotage-check
 in both directions before believing the pass. Verified that way here — a wrong value reds the
 harness naming the example, for both a Rust docstring and a prelude one.

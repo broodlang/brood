@@ -12561,3 +12561,17 @@ Method note: my first attempt landed the `use super::OrBail;` import *inside* a 
 BEFORE the first `use` cannot fail that way; order is irrelevant in Rust. Also: counting
 sites with `grep -c` counts *lines* — two `stack.pop()?` on one line made "7" really 9, and an
 assertion caught it before any write.
+
+## 2026-09-12 (later) — the boot text cache is gone; the image carries its own gensym floor
+
+Boot had image → text cache → source. The middle tier existed only as the net under the
+image: a second file per build, its own reader, a paired-file prune with a known hazard, and
+a second knob overlapping the first. Deleted (ADR-329): −263 lines, boot is image → source,
+`BROOD_NO_PRELUDE_IMAGE` is the one switch, `%boot-source` has two answers.
+
+The part that mattered: the image read its **gensym floor from the text cache's header** —
+the one fact tying the two together, and the KI-105/106 class exactly (a fact the evaluation
+records rather than binds). It is in the image header now (`v3`), behind a round-trip test.
+Found by reading the call site before deleting, not after.
+
+Done so that persisting compiled chunks (the next item) extends ONE format with ONE fallback.

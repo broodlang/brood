@@ -354,14 +354,9 @@ pub const FLAGS: &[DebugFlag] = &[
         "alias for BROOD_TIER=0 — `=0` runs the tree-walker (~10x slower; the differential reference)",
     ),
     f(
-        "BROOD_NO_BOOT_CACHE",
-        ENGINE,
-        "skip the expanded-prelude boot cache — a cold boot is ~11x a warm one, so this is visible",
-    ),
-    f(
         "BROOD_NO_PRELUDE_IMAGE",
         OPTOUT,
-        "opt OUT of the prelude image (ADR-314, default ON since 2026-09-04): a warm boot materialises the prelude's bindings instead of evaluating 544 forms (startup -11%, no regression on 30 rows). Falls back to the text cache, then source. KI-105/KI-106 were its two same-day reverts, both fixed and gated",
+        "opt OUT of the prelude image (ADR-314, default ON since 2026-09-04): neither read nor written, so every boot is the full source boot (a cold boot is ~11x a warm one). The only boot-artifact knob since the ADR-138 text cache was deleted (2026-09-12). KI-105/KI-106 were the image's two same-day reverts, both fixed and gated",
     ),
     f(
         "BROOD_NO_CHECK",

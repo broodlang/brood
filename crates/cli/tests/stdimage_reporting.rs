@@ -66,14 +66,13 @@ fn run_suite_env(
         // Clear every artifact switch, in BOTH spellings, before applying this case's own.
         // An inherited one decides the answer otherwise, and CI is where that bites: the
         // tree-walker job sets `BROOD_NO_PRELUDE_IMAGE=1` and `BROOD_NO_STDIMAGE=1` for the
-        // whole run, so a child that inherits them takes the text-cache path and a case
+        // whole run, so a child that inherits them takes the source path and a case
         // asserting "this run used the image" fails for a reason that has nothing to do
         // with the code. Owning `XDG_CACHE_HOME` is only half of owning the state; the
         // other half is the environment, and the prelude differential beside this one
         // already says so in as many words.
         .env_remove("BROOD_PRELUDE_IMAGE")
-        .env_remove("BROOD_NO_PRELUDE_IMAGE")
-        .env_remove("BROOD_NO_BOOT_CACHE");
+        .env_remove("BROOD_NO_PRELUDE_IMAGE");
     for (k, v) in extra {
         cmd.env(k, v);
     }
@@ -157,17 +156,17 @@ fn the_suite_summary_says_whether_this_run_used_the_stdlib_image() {
 /// **A run must also say how its PRELUDE arrived**, which is the other half of "which
 /// artifacts did this run use?" and the half that has cost the most.
 ///
-/// The prelude has three boot paths — the image (ADR-314), the expanded-text cache
-/// (ADR-138), and a cold source boot that writes both — and which one runs is decided by
-/// whether artifacts keyed on `build-id` already exist. Since `build-id` embeds the
+/// The prelude has two boot paths — the image (ADR-314) and a cold source boot that writes
+/// it (the ADR-138 text cache between them was deleted, ADR-329) — and which one runs is
+/// decided by whether an image keyed on `build-id` already exists. Since `build-id` embeds the
 /// binary's mtime, **the first run after any rebuild is a source boot and every run after
 /// it is not**. That is precisely the moment someone is checking whether an image change
 /// worked, so the un-imaged path gets read as evidence about the imaged one: three separate
 /// "it is fixed" readings during KI-106 were cold boots, and ADR-314 records the same trap
 /// corrupting a diagnosis in a session that had already been caught by it twice.
 ///
-/// All three states are asserted. A line that can only ever print one of them would be
-/// worse than none, because it would read as an answer.
+/// Both states are asserted, plus the opt-out: a line that can only ever print one of them
+/// would be worse than none, because it would read as an answer.
 #[test]
 fn the_suite_summary_says_how_the_prelude_arrived() {
     let dir = temp_dir("prelude-line");
@@ -175,7 +174,7 @@ fn the_suite_summary_says_how_the_prelude_arrived() {
     let cache = temp_dir("prelude-line-cache");
 
     // 1. Nothing cached for this binary yet, so the prelude is read and evaluated — and
-    //    this run is what WRITES the two artifacts the next one will use.
+    //    this run is what WRITES the image the next one will use.
     let cold = run_suite(&dir, &cache.path, false);
     assert!(
         cold.contains("(prelude: SOURCE"),
@@ -189,12 +188,14 @@ fn the_suite_summary_says_how_the_prelude_arrived() {
         "a second run must report the prelude image it just gained:\n{warm}"
     );
 
-    // 3. The image declined, so the boot falls back to the expanded-text cache the cold
-    //    run also wrote. Distinguishing these two is the point: both are "warm", and only
-    //    one of them is exercising ADR-314.
+    // 3. The image declined — with a LIVE image on disk from step 1 — must report SOURCE.
+    //    This is the assertion that matters most: `BROOD_NO_PRELUDE_IMAGE=1` means neither
+    //    read nor written, and a summary that still said "image" here would be the exact
+    //    lie this line exists to prevent (the stdlib-image case above checks the same
+    //    property for its artifact).
     let text = run_suite_env(&dir, &cache.path, false, &[("BROOD_NO_PRELUDE_IMAGE", "1")]);
     assert!(
-        text.contains("(prelude: expanded-text cache)"),
-        "with the prelude image off the boot must name the text cache, not the image:\n{text}"
+        text.contains("(prelude: SOURCE"),
+        "with the prelude image opted out, the boot must report SOURCE even with a live image on disk:\n{text}"
     );
 }

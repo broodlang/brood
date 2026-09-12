@@ -150,7 +150,7 @@ carry must not travel in it (KI-89)."
 never touching `keep`. Returns how many were removed.
 
 Bounded by COUNT rather than by age, for the reason the prelude boot cache learned the hard
-way (`boot_cache_prune`): the name carries `system/stdlib-id`, a content hash, so **every edit
+way (`prelude_image_prune`): the name carries `system/stdlib-id`, a content hash, so **every edit
 to any baked-in `.blsp` mints a new ~2 MB file**. On a machine that is editing the standard
 library — the only machine that builds these — nothing is ever old enough for an age rule to
 catch, and measured 2026-08-27 this directory held **35 images, 74 MB**, all of them from that

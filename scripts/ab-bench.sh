@@ -36,7 +36,7 @@
 #  3. **Prove the binaries differ.** If a build silently no-ops, both sides are
 #     the same file and every delta reads 0.0%. This aborts on identical hashes
 #     unless you passed --allow-same.
-#  4. **Warm the boot cache.** The expanded-prelude cache (ADR-138) is keyed by
+#  4. **Warm the boot cache.** The prelude image (ADR-314) is keyed by
 #     build id, so the FIRST run of a freshly built binary pays ~30ms extra. Each
 #     binary gets a discarded warmup per row; without it a new binary looks slower
 #     on every short row.

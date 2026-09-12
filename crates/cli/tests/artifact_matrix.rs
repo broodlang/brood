@@ -36,13 +36,11 @@ mod support;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// How the prelude is made to arrive. The three real boot paths, forced.
+/// How the prelude is made to arrive. The two real boot paths, forced.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Prelude {
-    /// No artifacts consulted at all: read and evaluate the prelude every time.
+    /// No artifact consulted: read and evaluate the prelude every time.
     Source,
-    /// ADR-138's expanded-text cache, with the image declined.
-    TextCache,
     /// ADR-314's prelude image — the default.
     Image,
 }
@@ -52,14 +50,12 @@ impl Prelude {
     fn expected_boot_source(self) -> &'static str {
         match self {
             Prelude::Source => ":source",
-            Prelude::TextCache => ":boot-cache",
             Prelude::Image => ":prelude-image",
         }
     }
     fn tag(self) -> &'static str {
         match self {
             Prelude::Source => "source",
-            Prelude::TextCache => "text",
             Prelude::Image => "image",
         }
     }
@@ -106,14 +102,10 @@ fn base_command(cache: &Path, cell: &Cell) -> Command {
         // value from the developer's shell cannot decide which cell this is.
         .env_remove("BROOD_PRELUDE_IMAGE")
         .env_remove("BROOD_NO_PRELUDE_IMAGE")
-        .env_remove("BROOD_NO_BOOT_CACHE")
         .env_remove("BROOD_NO_STDIMAGE");
     match cell.prelude {
-        // No cache of either kind: every run re-reads and re-evaluates.
+        // No image: every run re-reads and re-evaluates the prelude.
         Prelude::Source => {
-            cmd.env("BROOD_NO_BOOT_CACHE", "1");
-        }
-        Prelude::TextCache => {
             cmd.env("BROOD_NO_PRELUDE_IMAGE", "1");
         }
         Prelude::Image => {}
@@ -227,7 +219,7 @@ fn every_artifact_combination_boots_to_the_same_state() {
     body.push_str("\n(io/puts (str \"BOOT \" (%boot-source)) :to *err*)\n");
     std::fs::write(&program, body).expect("write fingerprint program");
 
-    let cells: Vec<Cell> = [Prelude::Source, Prelude::TextCache, Prelude::Image]
+    let cells: Vec<Cell> = [Prelude::Source, Prelude::Image]
         .into_iter()
         .flat_map(|p| {
             [false, true].into_iter().map(move |s| Cell {

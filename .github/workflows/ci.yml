@@ -282,7 +282,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-      - uses: taiki-e/install-action@nextest
+      # PINNED, not the floating `@nextest` tag. That tag resolves to the newest release after
+      # a ~1-day cooldown, and on 2026-09-12 it moved to cargo-nextest 0.9.144 (published
+      # 09-10) whose checksum verification then failed on every run — `::error::install-action`
+      # under "verifying sha256 checksum", two consecutive pushes, before any test ran. 0.9.143
+      # had served green for five weeks. A floating tool version is an unreviewed dependency
+      # bump on every CI run; bump this deliberately, and only after it installs cleanly.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.143
 
       # The no-JIT configuration (`BROOD_NO_JIT` has a build-level counterpart —
       # CLAUDE.md documents `--no-default-features` as supported). It broke silently
@@ -384,7 +392,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-      - uses: taiki-e/install-action@nextest
+      # PINNED, not the floating `@nextest` tag. That tag resolves to the newest release after
+      # a ~1-day cooldown, and on 2026-09-12 it moved to cargo-nextest 0.9.144 (published
+      # 09-10) whose checksum verification then failed on every run — `::error::install-action`
+      # under "verifying sha256 checksum", two consecutive pushes, before any test ran. 0.9.143
+      # had served green for five weeks. A floating tool version is an unreviewed dependency
+      # bump on every CI run; bump this deliberately, and only after it installs cleanly.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.143
 
       # No --all-features here: this job only needs the default surface (the
       # engine under test), so it skips the gui/audio system-dep install above.
@@ -415,7 +431,8 @@ jobs:
           # is its whole purpose. The pairing is engine x load-path, not either alone.
           BROOD_NO_STDIMAGE: 1
           # Same reason, one artifact over: the PRELUDE image is default-on too (ADR-314, since
-          # 2026-09-04), so this job also keeps the text-cache boot path covered on purpose.
+          # 2026-09-04), so this job also keeps the SOURCE boot path covered on purpose — the
+          # only fallback there is, since the ADR-138 text cache was deleted (2026-09-12).
           BROOD_NO_PRELUDE_IMAGE: 1
         shell: bash
         run: |

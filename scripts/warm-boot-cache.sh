@@ -1,7 +1,7 @@
 #!/bin/sh
-# Warm the expanded-prelude boot cache before the suite fans out (KI-38).
+# Warm the prelude image before the suite fans out (KI-38).
 #
-# The cache (`~/.cache/brood/prelude-expanded-<hash>.blsp`) is keyed on
+# The image (`~/.cache/brood/prelude-expanded-<hash>.img`) is keyed on
 # `build_id` = version + git sha + **the running executable's own mtime**, so a
 # rebuild colds it for every binary at once. A cold boot costs ~1.23 s against
 # ~0.11 s warm, essentially all of it macro-expanding the prelude.
@@ -23,7 +23,7 @@
 # Off switch: `BROOD_NO_WARM_BOOT_CACHE=1` skips the warm-up, which is how you
 # reproduce the original KI-38 failure (there is no nextest-side way to skip a
 # setup script — `--config 'profile.default.scripts=[]'` does NOT disable it,
-# verified). Named after `BROOD_NO_BOOT_CACHE`, which disables the cache itself.
+# verified). `BROOD_NO_PRELUDE_IMAGE` disables the image itself.
 set -u
 
 if [ -n "${BROOD_NO_WARM_BOOT_CACHE:-}" ]; then

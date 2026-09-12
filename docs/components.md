@@ -231,7 +231,7 @@ before working in any Rust component:
 
 ### `boot.rs` + `boot/` — how a runtime comes to hold the prelude
 - **Owns:** the shared `SHARED` bundle and the three paths that build it — the prelude
-  image (ADR-314), the expanded-prelude text cache (ADR-138), the full source boot —
+  image (ADR-314) or the full source boot —
   plus `PRELUDE` (the `std/prelude/*.blsp` concatenation, in order), `boot_source()`
   (which path THIS process took) and the cache pruning. `boot/image.rs` is the
   startup-image mechanism (ADR-218): the sectioned stdlib image and the prelude image.
