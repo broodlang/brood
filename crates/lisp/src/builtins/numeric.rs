@@ -356,7 +356,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::range(1, 2),
         Sig::with_optional(vec![string], vec![int], num.union(Ty::of(Tag::Failure))),
         &["s", "&optional", "radix"],
-        "Parse s strictly as an int (a bignum when out of i64 range), else a float, else a falsy failure value naming the input (unlike reflect/read-string). The inverse of str. With radix (2-36) the parse is integer-only in that base — the only way to read hex/octal/binary, since Brood has no radix literals; give the digits alone, no 0x/0b/0o prefix. A radix outside 2-36 raises.\n\n    (string/->number \"42\")   → 42",
+        "Parse s strictly as an int (a bignum when out of i64 range), else a float, else a falsy failure value naming the input (unlike reflect/read-string). The inverse of str. With radix (2-36) the parse is integer-only in that base — how hex/octal/binary is read from DATA (in source, write the literal: 0xFF, 0b1010, 0o17); give the digits alone, no 0x/0b/0o prefix. A radix outside 2-36 raises.\n\n    (string/->number \"42\")   → 42\n    (string/->number \"1F\" 16)   → 31",
         string_to_number);
 }
 
