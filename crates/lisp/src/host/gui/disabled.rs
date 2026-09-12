@@ -64,6 +64,21 @@ pub fn inset(_px: f32) -> Result<(), String> {
 pub fn bg(_rgb: Option<[u8; 3]>) -> Result<(), String> {
     Err(NOT_COMPILED.into())
 }
+pub fn line_height(_mult: f32) -> Result<(), String> {
+    Err(NOT_COMPILED.into())
+}
+pub fn text_aa(_mode: TextAa) -> Result<(), String> {
+    Err(NOT_COMPILED.into())
+}
+/// The text anti-aliasing modes `gui-text-aa!` names, so the builtin parses its
+/// argument identically with or without the GUI compiled in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TextAa {
+    Auto,
+    Gray,
+    Subpixel,
+    Bgr,
+}
 pub fn register_family(
     _name: u32,
     _regular: Vec<u8>,

@@ -46,7 +46,7 @@ dev-tools = []
 # fallback and color emoji, via its bundled swash) into the monospace cell grid.
 # The display *protocol* is unchanged Brood data (render ops); these just paint it
 # to a window instead of a terminal. See src/host/gui.rs and std/tool/observer.blsp's `(observe)`.
-gui = ["dep:winit", "dep:softbuffer", "dep:cosmic-text", "clipboard"]
+gui = ["dep:winit", "dep:softbuffer", "dep:cosmic-text", "dep:swash", "clipboard"]
 # Audio output (the `audio-beep` builtin), via `rodio`. OPT-IN and independent of
 # `gui` on purpose: rodio→cpal links `libasound.so.2` as a hard runtime dependency
 # on Linux, so a `gui` build that pulled it in would refuse to start on a box
@@ -298,6 +298,10 @@ arboard = { version = "3", optional = true, default-features = false, features =
 # glyph rendering (CBDT/COLR) via its bundled swash. Replaces the per-char monochrome
 # fontdue rasteriser. No windowing types, so no raw-window-handle coupling above.
 cosmic-text = { version = "0.19", optional = true }
+# cosmic-text's own rasteriser, used directly for the subpixel (LCD) text path: its
+# `SwashCache` renders alpha masks only, and a per-channel mask needs swash's `Render`
+# with `Format::Subpixel`. Same version cosmic-text pins, so nothing new is compiled.
+swash = { version = "0.2", optional = true }
 # Display-cell width (the `display-width` builtin) + grapheme-cluster segmentation
 # (the renderer advances per cluster, not per codepoint). Always linked — tiny, no_std
 # tables — so the width primitive is available in the lean runtime too.

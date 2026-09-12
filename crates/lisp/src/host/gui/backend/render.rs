@@ -4,18 +4,39 @@
 
 use super::*;
 
+use swash::scale::ScaleContext;
+
 // ---- rasterising the cell grid ------------------------------------------
 
 /// A rasterised grapheme cluster, baked into a small RGBA canvas sized to its
 /// cell span (`width`×`height` px, the cluster's `string/display-width` cells wide). For
 /// a `color` cluster (emoji) the RGBA is the glyph's own colors; for a monochrome
 /// cluster the RGB is white and only the alpha carries coverage, so the caller
-/// recolors it with the face `fg` at blit time (syntax colors vary per op).
+/// recolors it with the face `fg` at blit time (syntax colors vary per op). A
+/// `subpixel` cluster is monochrome too, but its R/G/B bytes are the coverage of each
+/// colour channel's third of the pixel (LCD text) — recoloured per channel at blit time.
 pub(crate) struct CachedGlyph {
     pub(crate) color: bool,
+    pub(crate) subpixel: bool,
     pub(crate) width: usize,
     pub(crate) height: usize,
     pub(crate) rgba: Vec<u8>, // width*height*4, straight (non-premultiplied) alpha
+}
+
+/// How monochrome text is anti-aliased (behind `gui-text-aa!`). `Gray` is one coverage
+/// value per pixel; `Subpixel` renders three — one per colour channel, each shifted a
+/// third of a pixel — tripling the horizontal resolution of every stem on an LCD panel
+/// whose subpixels run R-G-B left to right (`Bgr` for the other order). `Auto` (the
+/// default) is subpixel at a 1× scale, where text has the fewest pixels to spend and the
+/// gain is plainest, and gray on HiDPI, where grayscale is already sharp and the
+/// compositor may scale or rotate the surface (which turns subpixel fringes into colour
+/// noise).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TextAa {
+    Auto,
+    Gray,
+    Subpixel,
+    Bgr,
 }
 
 /// The grapheme-cluster part of a glyph-cache key. The vast majority of probes
@@ -39,6 +60,60 @@ impl ClusterKey {
     }
 }
 
+/// The raster target: a `w`×`h` framebuffer plus the half-open pixel-row band
+/// `[y0, y1)` the primitives may touch. Pixels outside the band are left exactly as
+/// they were — that is what lets a paint re-rasterise only the cell rows whose ops
+/// changed (`paint::strip_diff`) and trust the rest of the retained canvas.
+pub(super) struct Canvas<'a> {
+    pub(super) buf: &'a mut [u32],
+    pub(super) w: usize,
+    pub(super) h: usize,
+    pub(super) y0: usize,
+    pub(super) y1: usize,
+}
+
+impl<'a> Canvas<'a> {
+    /// The whole framebuffer (the fuzz tests' target; a paint always goes by band).
+    #[cfg(test)]
+    pub(super) fn full(buf: &'a mut [u32], w: usize, h: usize) -> Self {
+        Canvas {
+            buf,
+            w,
+            h,
+            y0: 0,
+            y1: h,
+        }
+    }
+
+    /// The framebuffer with painting confined to rows `[y0, y1)` (clamped to it).
+    pub(super) fn band(buf: &'a mut [u32], w: usize, h: usize, y0: usize, y1: usize) -> Self {
+        Canvas {
+            buf,
+            w,
+            h,
+            y0: y0.min(h),
+            y1: y1.min(h),
+        }
+    }
+
+    /// The rows of `[top, top + h)` that fall inside the band — the loop bounds every
+    /// primitive clips to.
+    #[inline]
+    pub(super) fn rows(&self, top: usize, h: usize) -> std::ops::Range<usize> {
+        let lo = top.max(self.y0);
+        let hi = top.saturating_add(h).min(self.y1);
+        lo..hi.max(lo)
+    }
+
+    /// Fill rows `[top, top + h)` of the band with `color` — the clear.
+    pub(super) fn fill_rows(&mut self, top: usize, h: usize, color: u32) {
+        let w = self.w;
+        for y in self.rows(top, h) {
+            self.buf[y * w..(y + 1) * w].fill(color);
+        }
+    }
+}
+
 /// The shared text engine on the single GUI thread: cosmic-text's `FontSystem`
 /// (font database + shaping + fallback) and `SwashCache` (glyph rasterisation,
 /// color and mono), plus the family-keyword → family-name map a `:family` resolves
@@ -47,6 +122,10 @@ impl ClusterKey {
 pub(super) struct FontShared {
     fs: FontSystem,
     swash: SwashCache,
+    /// swash's own scaler, for the subpixel (LCD) raster path: cosmic-text's
+    /// `SwashCache` renders alpha masks only, so a per-channel mask is rendered here
+    /// from the same font + glyph id + hinting.
+    scaler: ScaleContext,
     /// interned family keyword id → fontdb family name (`:mono` → "DejaVu Sans Mono").
     names: HashMap<u32, String>,
 }
@@ -68,6 +147,7 @@ impl FontShared {
         FontShared {
             fs,
             swash: SwashCache::new(),
+            scaler: ScaleContext::new(),
             names,
         }
     }
@@ -128,17 +208,21 @@ pub(crate) struct Renderer {
     baseline: i32,       // pixels from a cell's top to the text baseline
     base_inset: f32,     // logical-px content margin before the grid (ADR-079); 0 = flush
     bg: Option<[u8; 3]>, // window background (clear/inset-margin fill); None = DEFAULT_BG
+    line_height: f32,    // cell height as a multiple of the font px (`gui-line-height!`)
+    text_aa: TextAa,     // how monochrome text is anti-aliased (`gui-text-aa!`)
 
-    // keyed by (cluster, family id, bold, italic, scale): the same cluster at a
-    // different family/style/scale rasterises to a different baked canvas.
-    pub(super) cache: HashMap<(ClusterKey, u32, bool, bool, u16), CachedGlyph>,
+    // keyed by (cluster, family id, bold, italic, scale, subpixel): the same cluster at
+    // a different family/style/scale/AA rasterises to a different baked canvas.
+    pub(super) cache: HashMap<(ClusterKey, u32, bool, bool, u16, bool), CachedGlyph>,
 
-    // Damage-only present state (opt-in via BROOD_GUI_DAMAGE; see `paint`).
-    // `prev_pixels` is the last *presented* framebuffer; `damage_ring` is the
-    // per-frame changed-bbox of recent frames (oldest→newest) so we can union
-    // the last `buffer.age()` frames' damage. Empty/unused when the flag is off.
-    pub(super) prev_pixels: Vec<u32>,
-    pub(super) damage_ring: Vec<DamageRect>,
+    // The retained frame (see `paint`): `canvas` holds the pixels of the last frame
+    // rasterised, `prev_ops` the ops that produced it. A new frame is diffed against
+    // `prev_ops` per cell row and only the rows that changed are re-rasterised into
+    // `canvas`; `damage_ring` is the per-frame list of changed pixel bands of recent
+    // frames (oldest→newest), so a present can cover the last `buffer.age()` frames.
+    pub(super) canvas: Vec<u32>,
+    pub(super) prev_ops: Vec<Op>,
+    pub(super) damage_ring: Vec<Vec<DamageRect>>,
 }
 
 impl Renderer {
@@ -154,8 +238,11 @@ impl Renderer {
             baseline: 0,
             base_inset: 0.0,
             bg: None,
+            line_height: LINE_HEIGHT,
+            text_aa: TextAa::Auto,
             cache: HashMap::new(),
-            prev_pixels: Vec::new(),
+            canvas: Vec::new(),
+            prev_ops: Vec::new(),
             damage_ring: Vec::new(),
         };
         r.recompute();
@@ -186,9 +273,10 @@ impl Renderer {
         scale: u16,
     ) -> &CachedGlyph {
         let fid = family.unwrap_or(self.default_family);
-        let key = (ClusterKey::of(g), fid, bold, italic, scale.max(1));
+        // Always an alpha mask: the GPU shader recolours one coverage per pixel.
+        let key = (ClusterKey::of(g), fid, bold, italic, scale.max(1), false);
         if !self.cache.contains_key(&key) {
-            let baked = self.build_cluster(g, fid, bold, italic, scale);
+            let baked = self.build_cluster(g, fid, bold, italic, scale, false);
             self.cache.insert(key.clone(), baked);
         }
         &self.cache[&key]
@@ -199,6 +287,7 @@ impl Renderer {
     /// (`update_cells`) and repaints; no glyph-cache drop (unlike `set_font`).
     pub(super) fn set_inset(&mut self, px: f32) {
         self.base_inset = px.max(0.0);
+        self.invalidate();
     }
 
     /// The window background colour — the fill for `Op::Clear`, the pre-clear, and
@@ -213,6 +302,7 @@ impl Renderer {
     /// repaint — so the caller just requests a redraw.
     pub(super) fn set_bg(&mut self, rgb: Option<[u8; 3]>) {
         self.bg = rgb;
+        self.invalidate();
     }
 
     /// The grid's top-left origin in PHYSICAL px, beyond the inset. `cols`/`rows`
@@ -242,9 +332,14 @@ impl Renderer {
     /// cache (baked at the old px). The grid stays uniform — a per-face
     /// `:family`/`:italic` only changes glyphs within the fixed cell.
     fn recompute(&mut self) {
-        self.px = (self.base_px * self.scale as f32).max(1.0);
+        // Whole pixels per em: the rasteriser hints outlines to the pixel grid, and
+        // hinting at a fractional ppem (15 px × a 1.25 HiDPI scale = 18.75) leaves stems
+        // straddling pixels — soft, uneven text. Rounding keeps every glyph on the grid
+        // the cell metrics already round to; the ≤0.5 px size error is invisible.
+        self.px = (self.base_px * self.scale as f32).round().max(1.0);
         self.cache.clear();
-        let line_h = (self.px * LINE_HEIGHT).round().max(1.0);
+        self.invalidate();
+        let line_h = (self.px * self.line_height).round().max(1.0);
         self.cell_h = line_h as usize;
         // `name_of` returns owned data, so the immutable borrow ends on this
         // line — letting the `borrow_mut` below succeed (don't make it borrow).
@@ -274,6 +369,49 @@ impl Renderer {
         self.recompute();
     }
 
+    /// The HiDPI scale factor (physical px per logical px).
+    pub(crate) fn scale(&self) -> f64 {
+        self.scale
+    }
+
+    /// Set the cell height as a multiple of the font px (behind `gui-line-height!`),
+    /// then recompute the grid: the row count changes, so the caller re-derives
+    /// `(cols, rows)` and re-renders — the same path as `set_font`.
+    pub(super) fn set_line_height(&mut self, mult: f32) {
+        self.line_height = if mult.is_finite() {
+            mult.clamp(0.8, 3.0)
+        } else {
+            LINE_HEIGHT
+        };
+        self.recompute();
+    }
+
+    /// Set how monochrome text is anti-aliased (behind `gui-text-aa!`). Drops the
+    /// cluster cache (baked in the old mode) and the retained frame, so the next paint
+    /// re-rasterises everything.
+    pub(super) fn set_text_aa(&mut self, mode: TextAa) {
+        self.text_aa = mode;
+        self.cache.clear();
+        self.prev_ops.clear();
+    }
+
+    /// Whether text is rasterised per colour channel right now: the explicit mode, or
+    /// under `Auto` only at a 1× scale (see `TextAa`).
+    pub(super) fn subpixel_text(&self) -> bool {
+        match self.text_aa {
+            TextAa::Gray => false,
+            TextAa::Subpixel | TextAa::Bgr => true,
+            TextAa::Auto => (self.scale - 1.0).abs() < 1e-6,
+        }
+    }
+
+    /// Forget the retained frame, so the next paint rasterises every row. For a
+    /// metric change (font, inset, scale, line height) — `recompute` does it — and
+    /// for anything else that changes how the same ops look (`set_bg`).
+    pub(super) fn invalidate(&mut self) {
+        self.prev_ops.clear();
+    }
+
     /// Set the global default cell font — family and/or pixel size — then
     /// recompute the grid. The whole-window knob behind `gui-font!`.
     pub(super) fn set_font(&mut self, family: Option<u32>, px: Option<f32>) {
@@ -297,6 +435,7 @@ impl Renderer {
         bold: bool,
         italic: bool,
         scale: u16,
+        subpixel: bool,
     ) -> CachedGlyph {
         let scale = scale.max(1) as usize;
         let px = (self.px * scale as f32).max(1.0);
@@ -327,7 +466,7 @@ impl Renderer {
         // *color* font (an emoji). Text/symbol glyphs are mono.
         let tb = shape_cluster(shared, g, attrs(()), px, cw as f32, line_h);
         let mut rgba = vec![0u8; cw * ch * 4];
-        let color = if first_glyph_is_color(shared, &tb) {
+        let (color, subpixel) = if first_glyph_is_color(shared, &tb) {
             // Emoji: render big enough to fill the cell block and center it — color
             // glyphs have no useful text baseline, so baseline-aligning them looks
             // low and cramped. Size to the smaller block dimension so the (square)
@@ -335,8 +474,23 @@ impl Renderer {
             let epx = ch.min(cw) as f32;
             let tb2 = shape_cluster(shared, g, attrs(()), epx, cw as f32, epx);
             composite_cluster(shared, &tb2, &mut rgba, cw, ch, Placement::Center);
-            true
+            (true, false)
+        } else if subpixel
+            && composite_cluster_subpixel(
+                shared,
+                &tb,
+                &mut rgba,
+                cw,
+                ch,
+                baseline,
+                self.text_aa == TextAa::Bgr,
+            )
+        {
+            (false, true)
         } else {
+            // Gray AA — also the fallback when a glyph has no outline to render per
+            // channel (a bitmap-only font), so the cluster still appears.
+            rgba.fill(0);
             composite_cluster(
                 shared,
                 &tb,
@@ -345,10 +499,11 @@ impl Renderer {
                 ch,
                 Placement::Baseline(baseline),
             );
-            false
+            (false, false)
         };
         CachedGlyph {
             color,
+            subpixel,
             width: cw,
             height: ch,
             rgba,
@@ -362,9 +517,7 @@ impl Renderer {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn draw_cluster(
         &mut self,
-        buf: &mut [u32],
-        fb_w: usize,
-        fb_h: usize,
+        canvas: &mut Canvas,
         left: usize,
         top: usize,
         g: &str,
@@ -379,24 +532,30 @@ impl Renderer {
             return;
         }
         let fid = family.unwrap_or(self.default_family);
+        let subpixel = self.subpixel_text();
         // The common single-char cluster keys via `ClusterKey::Char` with no
         // allocation; only a rare multi-char cluster allocates (a `Box<str>`).
-        let key = (ClusterKey::of(g), fid, bold, italic, scale.max(1));
+        let key = (ClusterKey::of(g), fid, bold, italic, scale.max(1), subpixel);
         PAINT_CLUSTERS.fetch_add(1, Ordering::Relaxed);
         if !self.cache.contains_key(&key) {
             let t0 = Instant::now();
-            let baked = self.build_cluster(g, fid, bold, italic, scale);
+            let baked = self.build_cluster(g, fid, bold, italic, scale, subpixel);
             PAINT_BUILD_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
             PAINT_MISSES.fetch_add(1, Ordering::Relaxed);
             self.cache.insert(key.clone(), baked);
         }
         let cg = &self.cache[&key];
         // `clip_skip` glyph rows from the top are above the clip boundary (the grid
-        // origin); they're skipped and the remaining rows land at `top` onward.
+        // origin); they're skipped and the remaining rows land at `top` onward. The
+        // canvas band clips the rest: rows outside `[y0, y1)` are not touched.
+        let (fb_w, y0, y1) = (canvas.w, canvas.y0, canvas.y1);
         for ry in clip_skip..cg.height {
             let py = top + (ry - clip_skip);
-            if py >= fb_h {
+            if py >= y1 {
                 break;
+            }
+            if py < y0 {
+                continue;
             }
             let row = py * fb_w;
             for rx in 0..cg.width {
@@ -409,12 +568,14 @@ impl Renderer {
                 if a == 0 {
                     continue;
                 }
-                let src = if cg.color {
-                    [cg.rgba[i], cg.rgba[i + 1], cg.rgba[i + 2]]
+                let dst = &mut canvas.buf[row + pxx];
+                *dst = if cg.color {
+                    blend(*dst, [cg.rgba[i], cg.rgba[i + 1], cg.rgba[i + 2]], a)
+                } else if cg.subpixel {
+                    blend_rgb(*dst, fg, [cg.rgba[i], cg.rgba[i + 1], cg.rgba[i + 2]])
                 } else {
-                    fg
+                    blend(*dst, fg, a)
                 };
-                buf[row + pxx] = blend(buf[row + pxx], src, a);
             }
         }
     }
@@ -552,6 +713,85 @@ pub(super) fn composite_cluster(
     }
 }
 
+/// Composite a shaped cluster's glyphs into `rgba` as a **subpixel** mask: R/G/B carry
+/// the coverage of each channel's third of the pixel (rendered by swash at 1/3-px
+/// offsets, hinted like the gray path), A is the max of the three so the blit's
+/// "anything here?" test still works. `bgr` flips the channel order for a panel whose
+/// subpixels run blue-first. Baseline-placed like text. Returns false — leaving `rgba`
+/// untouched — if no glyph had an outline to render this way (a bitmap-only face),
+/// so the caller can fall back to the gray mask.
+pub(super) fn composite_cluster_subpixel(
+    shared: &mut FontShared,
+    tb: &CtBuffer,
+    rgba: &mut [u8],
+    cw: usize,
+    ch: usize,
+    baseline: i32,
+    bgr: bool,
+) -> bool {
+    use swash::scale::{Render, Source};
+    use swash::zeno::{Format, Vector};
+    let mut drew = false;
+    for run in tb.layout_runs() {
+        for gl in run.glyphs.iter() {
+            let phys = gl.physical((0.0, 0.0), 1.0);
+            let key = phys.cache_key;
+            let Some(font) = shared.fs.get_font(key.font_id, key.font_weight) else {
+                continue;
+            };
+            let mut scaler = shared
+                .scaler
+                .builder(font.as_swash())
+                .size(f32::from_bits(key.font_size_bits))
+                .hint(true)
+                .build();
+            let format = if bgr {
+                Format::subpixel_bgra()
+            } else {
+                Format::Subpixel
+            };
+            let Some(img) = Render::new(&[Source::Outline])
+                .format(format)
+                .offset(Vector::new(key.x_bin.as_float(), key.y_bin.as_float()))
+                .render(&mut scaler, key.glyph_id)
+            else {
+                continue;
+            };
+            if img.data.len() < (img.placement.width * img.placement.height * 4) as usize {
+                continue;
+            }
+            let (iw, ih) = (img.placement.width as i32, img.placement.height as i32);
+            let (ox, oy) = (
+                phys.x + img.placement.left,
+                baseline + phys.y - img.placement.top,
+            );
+            for ry in 0..ih {
+                for rx in 0..iw {
+                    let i = ((ry * iw + rx) * 4) as usize;
+                    let (r, g, b) = (img.data[i], img.data[i + 1], img.data[i + 2]);
+                    let a = r.max(g).max(b);
+                    if a == 0 {
+                        continue;
+                    }
+                    let (x, y) = (ox + rx, oy + ry);
+                    if x < 0 || y < 0 || x >= cw as i32 || y >= ch as i32 {
+                        continue;
+                    }
+                    let idx = (y as usize * cw + x as usize) * 4;
+                    // Per-channel union with what's there (two glyphs of one cluster
+                    // may overlap — a base + combining mark): the max coverage wins.
+                    rgba[idx] = rgba[idx].max(r);
+                    rgba[idx + 1] = rgba[idx + 1].max(g);
+                    rgba[idx + 2] = rgba[idx + 2].max(b);
+                    rgba[idx + 3] = rgba[idx + 3].max(a);
+                    drew = true;
+                }
+            }
+        }
+    }
+    drew
+}
+
 pub(super) fn pack(rgb: [u8; 3]) -> u32 {
     ((rgb[0] as u32) << 16) | ((rgb[1] as u32) << 8) | rgb[2] as u32
 }
@@ -594,21 +834,42 @@ pub(super) fn blend(dst: u32, fg: [u8; 3], cov: u8) -> u32 {
     (r << 16) | (g << 8) | b
 }
 
+/// The subpixel sibling of `blend`: composite `fg` over `dst` with a separate coverage
+/// per colour channel (`cov[0]` red, `[1]` green, `[2]` blue), in linear light. Each
+/// channel is the same single-channel lerp `blend` does, so the two are visually
+/// consistent where a gray and a subpixel glyph sit side by side.
+pub(super) fn blend_rgb(dst: u32, fg: [u8; 3], cov: [u8; 3]) -> u32 {
+    if cov == [0, 0, 0] {
+        return dst;
+    }
+    if cov == [255, 255, 255] {
+        return pack(fg);
+    }
+    let lut = &*SRGB_TO_LINEAR;
+    let ch = |shift: u32, c: u8, f: u8| -> u32 {
+        let d = lut[((dst >> shift) & 0xff) as usize];
+        let a = c as f32 / 255.0;
+        linear_to_srgb(lut[f as usize] * a + d * (1.0 - a))
+    };
+    (ch(16, cov[0], fg[0]) << 16) | (ch(8, cov[1], fg[1]) << 8) | ch(0, cov[2], fg[2])
+}
+
 pub(super) fn fill_cell(
-    buf: &mut [u32],
-    fb_w: usize,
-    fb_h: usize,
+    canvas: &mut Canvas,
     left: usize,
     top: usize,
     w: usize,
     h: usize,
     color: u32,
 ) {
-    for y in top..(top + h).min(fb_h) {
+    let fb_w = canvas.w;
+    let x1 = left.saturating_add(w).min(fb_w);
+    if left >= x1 {
+        return;
+    }
+    for y in canvas.rows(top, h) {
         let row = y * fb_w;
-        for x in left..(left + w).min(fb_w) {
-            buf[row + x] = color;
-        }
+        canvas.buf[row + left..row + x1].fill(color);
     }
 }
 
@@ -618,12 +879,11 @@ pub(super) fn fill_cell(
 /// gives a 1px coverage ramp at the edge, so corners and fractional edges read
 /// smooth instead of stair-stepped. `radius == 0` is a sharp rect (full coverage
 /// inside, just the opacity blend). Blends over whatever's already in `buf`
-/// (`blend`), so a faded overlay shows the content beneath it.
+/// (`blend`), so a faded overlay shows the content beneath it. A dimension thinner than a
+/// logical pixel is a hairline and snaps to whole device pixels first (`snap_hairline`).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn fill_rrect(
-    buf: &mut [u32],
-    fb_w: usize,
-    fb_h: usize,
+    canvas: &mut Canvas,
     fx: f32,
     fy: f32,
     fw: f32,
@@ -631,19 +891,29 @@ pub(super) fn fill_rrect(
     radius: f32,
     color: [u8; 3],
     opacity: f32,
+    scale: f32,
 ) {
     if fw <= 0.0 || fh <= 0.0 || opacity <= 0.0 {
         return;
     }
+    // A hairline — a dimension thinner than one LOGICAL pixel — snaps to a whole
+    // number of device pixels (one per logical pixel, so 2 px at 2×) centred where it
+    // was asked for. Otherwise a 0.45 px rule lands on 1 or 2 solid pixels depending on
+    // which pixel boundary its fractional position straddles: uneven, and different
+    // for every divider. Snapped, every hairline in a window is the same crisp line.
+    let (fx, fw, fy, fh, radius) = snap_hairline(fx, fw, fy, fh, radius, scale);
+    let (fb_w, fb_h) = (canvas.w, canvas.h);
     let base = opacity.clamp(0.0, 1.0) * 255.0;
     let r = radius.max(0.0).min(fw / 2.0).min(fh / 2.0);
     // The inner core the corners round around: the rect inset by `r` on each side.
     let (rx0, ry0) = (fx + r, fy + r);
     let (rx1, ry1) = (fx + fw - r, fy + fh - r);
     let x0 = fx.floor().max(0.0) as usize;
-    let y0 = fy.floor().max(0.0) as usize;
+    let y0 = (fy.floor().max(0.0) as usize).max(canvas.y0);
     let x1 = ((fx + fw).ceil().max(0.0) as usize).min(fb_w);
-    let y1 = ((fy + fh).ceil().max(0.0) as usize).min(fb_h);
+    let y1 = ((fy + fh).ceil().max(0.0) as usize)
+        .min(fb_h)
+        .min(canvas.y1);
     for py in y0..y1 {
         let cy = py as f32 + 0.5;
         let row = py * fb_w;
@@ -666,9 +936,39 @@ pub(super) fn fill_rrect(
                 continue;
             }
             let idx = row + px;
-            buf[idx] = blend(buf[idx], color, cov.min(255) as u8);
+            canvas.buf[idx] = blend(canvas.buf[idx], color, cov.min(255) as u8);
         }
     }
+}
+
+/// The hairline rule behind `fill_rrect`: a rect dimension under one logical pixel
+/// (`scale` device px) becomes exactly `max(1, round(scale))` device pixels, placed so
+/// the requested centre is inside them; the snapped line is square-cornered (a
+/// radius on a 1 px line only fades it). Both axes are checked independently, so a
+/// thin vertical and a thin horizontal rule both snap. Returns the (possibly)
+/// adjusted `(x, w, y, h, radius)`; a rect that isn't a hairline passes through.
+pub(super) fn snap_hairline(
+    fx: f32,
+    fw: f32,
+    fy: f32,
+    fh: f32,
+    radius: f32,
+    scale: f32,
+) -> (f32, f32, f32, f32, f32) {
+    let logical = scale.max(1.0);
+    let hair = logical.round().max(1.0);
+    let snap = |pos: f32, len: f32| -> (f32, f32) {
+        let centre = pos + len / 2.0;
+        ((centre - hair / 2.0).round(), hair)
+    };
+    let thin_w = fw < logical;
+    let thin_h = fh < logical;
+    if !thin_w && !thin_h {
+        return (fx, fw, fy, fh, radius);
+    }
+    let (fx, fw) = if thin_w { snap(fx, fw) } else { (fx, fw) };
+    let (fy, fh) = if thin_h { snap(fy, fh) } else { (fy, fh) };
+    (fx, fw, fy, fh, 0.0)
 }
 
 /// Draw the text cursor at a cell per its `style`:
@@ -688,9 +988,7 @@ pub(super) fn fill_rrect(
 /// it may be negative or above `oy` when the cursor is partially scrolled off the top.
 /// Used only for `Underline` to locate the baseline inside the cell.
 pub(super) fn cursor_cell(
-    buf: &mut [u32],
-    fb_w: usize,
-    fb_h: usize,
+    canvas: &mut Canvas,
     left: usize,
     draw_top: usize,
     draw_bottom: usize,
@@ -699,9 +997,14 @@ pub(super) fn cursor_cell(
     cell_top: isize,
     style: crate::host::gui::CursorStyle,
 ) {
+    // The band clips the visible slice further; everything below derives from it.
+    let draw_top = draw_top.max(canvas.y0);
+    let draw_bottom = draw_bottom.min(canvas.y1);
     if draw_top >= draw_bottom {
         return;
     }
+    let fb_w = canvas.w;
+    let buf = &mut *canvas.buf;
     match style {
         crate::host::gui::CursorStyle::Block => {
             for y in draw_top..draw_bottom {
@@ -744,9 +1047,7 @@ pub(super) fn cursor_cell(
         crate::host::gui::CursorStyle::Bar => {
             let thickness = (w / 8).max(2);
             fill_cell(
-                buf,
-                fb_w,
-                fb_h,
+                canvas,
                 left,
                 draw_top,
                 thickness,
@@ -762,9 +1063,33 @@ pub(super) fn cursor_cell(
                 let uy = uy as usize;
                 if uy >= draw_top && uy < draw_bottom {
                     let visible = thickness.min(draw_bottom - uy);
-                    fill_cell(buf, fb_w, fb_h, left, uy, w, visible, pack(CURSOR_FG));
+                    fill_cell(canvas, left, uy, w, visible, pack(CURSOR_FG));
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod text_aa_tests {
+    use super::*;
+
+    /// A subpixel-rendered cluster carries three coverages per pixel that differ from
+    /// one another somewhere along a stem's edge — the whole point of LCD text — and
+    /// the gray path renders the same glyph as one coverage in the alpha.
+    #[test]
+    fn subpixel_text_renders_per_channel_coverage() {
+        let mut r = Renderer::new(1.0, default_families(), 15.0);
+        r.set_text_aa(TextAa::Subpixel);
+        let sub = r.build_cluster("l", r.default_family, false, false, 1, true);
+        assert!(sub.subpixel, "the subpixel path fell back to gray");
+        let fringe = sub
+            .rgba
+            .chunks(4)
+            .any(|p| p[3] > 0 && (p[0] != p[1] || p[1] != p[2]));
+        assert!(fringe, "no per-channel coverage differences at all");
+        let gray = r.build_cluster("l", r.default_family, false, false, 1, false);
+        assert!(!gray.subpixel);
+        assert!(gray.rgba.chunks(4).any(|p| p[3] > 0));
     }
 }

@@ -841,6 +841,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-09** — KI-122: the KI-120 tripwire was crying wolf on bedit, on a false claim
 - **2026-09-12** — `filter` joins its complement in `seq/`; `remove` becomes `reject` (ADR-330), and docstring `[[links]]` finally render (ADR-331)
 - **2026-09-12** — pre-compilation, counted: bytecode is 2.5 ms of `json`, Cranelift is 60–80 ms, and both persistence ideas are dead (compute-frontier §7.11)
+- **2026-09-12** — the GUI retains its frame and repaints by cell row (ADR-332): a keystroke paints 0.3 ms instead of 4–13; whole-pixel ppem, subpixel text at 1× (`gui-text-aa!`), snapped hairlines, `gui-line-height!`
 
 ---
 
@@ -12727,3 +12728,20 @@ the lead it leaves: `json`'s main thread is barely faster under the JIT than on 
 (52 vs 54 ms of CPU at N=500), because 114 of its 142 tiering attempts are gate-refused and
 the hot stage that would admit them never runs before the program ends.
 
+## 2026-09-12 — the GUI repaints by cell row; text hinted at whole pixels, subpixel at 1×
+
+Measured first: on bedit at 1920×1045 a paint was 4–13 ms and dominated a keystroke (the
+Brood side was 3–5 ms); every cursor blink paid it for one cell. The renderer now keeps the
+last frame's ops + canvas, diffs a new frame per cell-row strip (`Op: PartialEq`, a
+`ScrollRegion` flattened to shifted leaves), and re-rasterises only the dirty strips through a
+clipped `Canvas` — the unit test is the invariant: incremental == full raster, pixel for pixel.
+A blink is now 0.18 ms, a keystroke-shaped change 0.3 ms, and the cost no longer scales with the
+window. Identical frames are dropped at the `Draw` event. ADR-332 has the rest: ppem rounding,
+`gui-text-aa!` (subpixel via swash's own `Render`, blended per channel in linear light),
+hairline snapping (a 0.45 px rule was 1 *or* 2 solid pixels), `gui-line-height!`.
+
+Two diagnostics came out of measuring: `BROOD_GUI_TRACE=1` (every paint, rows repainted) and
+`BROOD_GUI_DUMP=<ppm>` (the canvas as an image — how the subpixel fringes and the hairlines
+were checked without a screenshot). One gotcha: `nest run -- file.blsp` runs the `.blsp` as a
+script rather than handing it to the project's `main` as a document; the bedit measurement
+used a `.txt` copy.
