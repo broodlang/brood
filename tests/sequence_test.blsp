@@ -519,3 +519,20 @@
         (spawn (send me [:r (fold (into [] (range k)) 0 +)])))
       (assert= (fold (map (range 1 9) (fn (_) (receive ([:r v] v)))) 0 +)
         (fold (map (range 1 9) (fn (k) (math/quot (* (- k 1) k) 2))) 0 +)))))
+
+(describe "append shares its last list (ADR-336)"
+  (test "the result is correct for every arity, lists and vectors"
+    (assert= (append) nil)
+    (assert= (append (list 1 2)) (list 1 2))
+    (assert= (append [1 2]) (list 1 2))
+    (assert= (append (list 1) (list 2) (list 3)) (list 1 2 3))
+    (assert= (append (list) (list 1) (list)) (list 1))
+    (assert= (append [1 2] (list 3) [4 5]) (list 1 2 3 4 5))
+    (assert= (append nil nil) nil))
+  (test "putting a few items in front of a long list costs O(few), not O(long)"
+    (let (big (map (range 200000) (fn (x) x))
+          t0 (os/now-ns)
+          _ (fold (range 2000) nil (fn (_ _) (append (list 1 2 3) big)))
+          ms (/ (- (os/now-ns) t0) 1000000.0))
+      ;; copying the tail 2000 times would be 400M conses; sharing it is 6000
+      (is (< ms 500)))))

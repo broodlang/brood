@@ -39,7 +39,7 @@ Used by `std/editor/lineedit.blsp` (the REPL editor); pure, so independently tes
   (:use editor/face))
 ;; ---- faces: the :syntax/* theme seam ----------------------------------------
 ;; Syntax faces live in the shared face registry (`std/editor/face.blsp`) under
-;; `:syntax/*` names, resolved live (`(face …)`) where each span is built — so an
+;; `:syntax/*` names, resolved once per lexing pass (`hl-faces`) — so an
 ;; app restyles the whole highlighter by redefining ONE face
 ;; (`(face-set :syntax/keyword {:fg \"#cba6f7\"})`), the same late-bound seam the
 ;; `:ui/*` faces and keymaps use. The DEFAULTS are the original palette keywords, so
@@ -159,16 +159,11 @@ the opening quote), honouring `\\` escapes; `n` if the string is unterminated."
 ;; regardless of position — so `(nil? x)` shows `nil` as a constant, not a call head.
 ;; (The native `scan-tokens` classifies those, and `:`-prefixed names, as `:keyword`.)
 
-;; The `:syntax/*` face NAME a `:keyword` / `:number` / `:comment` token paints in —
-;; the position-independent kinds. `:symbol` and `:string` are resolved separately (head
-;; position decides special-form vs call vs plain; doc position decides doc vs. string
-;; value), and `:open`/`:close` carry no colour. The name is resolved to a face via
-;; `(face …)` at span time, so a live restyle of `:syntax/*` takes effect on the next
-;; frame.
-(def- hl-kind->face-name
-  {:comment :syntax/comment
-   :number :syntax/number
-   :keyword :syntax/keyword})
+;; A `:keyword` / `:number` / `:comment` token paints in the `:syntax/*` face of its
+;; own kind — the position-independent kinds; `:symbol` and `:string` are resolved by
+;; position (head: special form vs call vs plain; doc position: doc vs. string value),
+;; and `:open`/`:close` carry no colour. The faces are resolved once per lexing pass
+;; (`hl-faces`), so a live restyle of `:syntax/*` takes effect on the next re-lex.
 
 ;; ---- the form stack ---------------------------------------------------------
 ;; The lexer carries one frame per open bracket: `[open n head params?]` — the
@@ -231,37 +226,53 @@ string). `toks` is the stream AFTER the string."
 
 ;; ---- the lexer walk ---------------------------------------------------------
 
-(defn- hl-spans (toks stack acc specials)
+(defn- hl-faces ()
+  "The `:syntax/*` faces a lexing pass paints with, resolved ONCE per pass — a map
+from token kind (`:comment` `:number` `:keyword` `:string` `:doc` `:special`
+`:function`) to the attribute map. Resolving per span cost the inherit-chain walk per
+coloured token, a third of the pass on a 100-line band; per pass, a live `face-set` of
+a `:syntax/*` face still restyles the editor on its next re-lex."
+  {:comment (face :syntax/comment)
+   :number (face :syntax/number)
+   :keyword (face :syntax/keyword)
+   :string (face :syntax/string)
+   :doc (face :syntax/doc)
+   :special (face :syntax/special)
+   :function (face :syntax/function)})
+
+(defn- hl-spans (toks stack acc specials faces)
   "Walk the `scan-tokens` stream into `[start end face]` colour spans, carrying the
 form `stack` (head position, and enough shape to tell a docstring from a string).
 `:symbol` needs position — head + special form → keyword face, head → call face, else
-uncoloured — and `:string` needs it too (doc vs. value). Accumulates in reverse."
+uncoloured — and `:string` needs it too (doc vs. value). `faces` is the pass's resolved
+`hl-faces`. Accumulates in reverse."
   (if (empty? toks)
     (reverse acc)
     (let ([s e kind text] (first toks)
           more (rest toks))
       (cond
-        (= kind :open) (hl-spans more (hl-push (hl-advance stack true) text) acc specials)
-        (= kind :close) (hl-spans more (rest stack) acc specials)
-        (= kind :comment) (hl-spans more stack (cons [s e (face :syntax/comment)] acc) specials)
+        (= kind :open) (hl-spans more (hl-push (hl-advance stack true) text) acc specials faces)
+        (= kind :close) (hl-spans more (rest stack) acc specials faces)
+        (= kind :comment) (hl-spans more stack (cons [s e (get faces :comment)] acc) specials faces)
         ; a comment starts no form — the stack is untouched
         (= kind :symbol)
           (let (head? (hl-head? stack)
                 f (cond
-                    (and head? (= true (get specials text))) (face :syntax/special)
-                    head? (face :syntax/function)
+                    (and head? (= true (get specials text))) (get faces :special)
+                    head? (get faces :function)
                     else nil))
-            (hl-spans more (hl-name stack text) (if (nil? f) acc (cons [s e f] acc)) specials))
+            (hl-spans more (hl-name stack text) (if (nil? f) acc (cons [s e f] acc)) specials faces))
         (= kind :string)
-          (let (f (if (hl-doc? stack more) (face :syntax/doc) (face :syntax/string)))
-            (hl-spans more (hl-advance stack false) (cons [s e f] acc) specials))
+          (let (f (if (hl-doc? stack more) (get faces :doc) (get faces :string)))
+            (hl-spans more (hl-advance stack false) (cons [s e f] acc) specials faces))
         else
-          (let (f (face (get hl-kind->face-name kind)))
+          (let (f (get faces kind))
             ; :number / :keyword
             (hl-spans more
               (hl-advance stack false)
               (if (nil? f) acc (cons [s e f] acc))
-              specials))))))
+              specials
+              faces))))))
 
 (defn highlight-spans (src &optional (specials hl-special-set))
   "Lexically tokenize Lisp `src` into a list of `[start end face]` colour spans
@@ -277,7 +288,7 @@ stream (O(tokens)), so it stays fast enough for per-frame fontification.
 s-expression language: parens, `;` comments, `\"` strings, numbers. Passing another
 dialect's set is therefore the whole of teaching it to colour, which is what an elisp or
 Scheme mode needs and all it needs."
-  (hl-spans (reflect/scan-tokens src) '() '() specials))
+  (hl-spans (reflect/scan-tokens src) '() '() specials (hl-faces)))
 (sig highlight-spans (string -> any))
 
 ;; ---- windowed highlighting (fontify just a viewport) ------------------------

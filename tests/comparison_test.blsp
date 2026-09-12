@@ -198,3 +198,31 @@
     (assert-error (< '(1 2)))
     (assert-error (> "a"))
     (assert-error (<= nil))))
+
+(describe "= on the same heap cell is identity — O(1), never a walk (ADR-336)"
+  ;; A value is immutable, so the same cell is trivially equal to itself. The observable
+  ;; contract is the cost: comparing a 20000-element list to ITSELF must not scale with
+  ;; its length. A copy still walks and still compares equal.
+  (test "a list, vector, map and string each equal themselves"
+    (let (xs (range 20000)
+          v (into [] xs)
+          m {:a xs :b v}
+          s (string/join (map (range 500) (fn (_) "abcdefghij")) ""))
+      (is (= xs xs))
+      (is (= v v))
+      (is (= m m))
+      (is (= s s))
+      (is (= xs (map xs (fn (x) x))))
+      (is (= v (into [] xs)))))
+  (test "the same list is compared in O(1): 2000 self-compares of 20000 elements are quick"
+    (let (xs (range 20000)
+          t0 (os/now-ns)
+          _ (fold (range 2000) nil (fn (_ _) (= xs xs)))
+          ms (/ (- (os/now-ns) t0) 1000000.0))
+      ;; a walk would be 2000 × 20000 elements ≈ seconds; identity is microseconds
+      (is (< ms 200))))
+  (test "a structure that holds a NaN equals itself (identity), while the NaN alone does not"
+    (let (v [nan 1])
+      (is (= v v))
+      (is (not (= nan nan)))
+      (is (not (= [nan 1] [nan 1]))))))

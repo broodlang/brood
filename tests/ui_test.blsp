@@ -516,3 +516,72 @@
          :draw (fn (f) nil)
          :poll (fn (ms) (receive ([:input i] i) (after 0 nil)))})
       (assert= (receive ([:saw x] x) (after 200 :none)) "z"))))
+
+(describe "ui-memo — memoised view fragments (ADR-336)"
+  (test "outside a loop it is just the thunk: plain ops, no marker"
+    (assert= (ui-memo [:line 1] [:a] (fn () (list (text 1 0 "x")))) (list [:text 1 0 "x"]))
+    (is (nil? *ui-memo*)))
+
+  (test "inside a loop it reuses the ops while deps are =, recomputes when they change"
+    (let (me (self)
+          ;; the view counts every real computation of the fragment
+          view (fn (m c r)
+                 (append [(clear)]
+                   (ui-memo [:frag]
+                     (get m :deps)
+                     (fn ()
+                       (do (send me [:computed (get m :n)]) (list (text 0 0 (str "n" (get m :n)))))))))
+          update (fn (m input c r)
+                   (case input
+                     :same (assoc m :n (inc (get m :n)))
+                     :change (assoc m :n (inc (get m :n)) :deps [:b])
+                     :quit (assoc m :done true)
+                     m)))
+      (send me [:input :same])
+      (send me [:input :change])
+      (send me [:input :same])
+      (send me [:input :quit])
+      (ui-run {:done false :n 0 :deps [:a]}
+        view
+        update
+        {:enter (fn () nil)
+         :leave (fn () nil)
+         :size (fn () [40 10])
+         :draw (fn (f) (send me [:frame f]))
+         :poll (fn (ms) (receive ([:input i] i) (after 0 :quit)))})
+      ;; computed at n=0 (first turn), reused at n=1 (same deps), recomputed at n=2
+      ;; (deps changed), reused at n=3
+      (assert= (receive ([:computed x] x) (after 100 :none)) 0)
+      (assert= (receive ([:computed x] x) (after 100 :none)) 2)
+      (assert= (receive ([:computed x] x) (after 100 :none)) :none)
+      ;; and every frame the frontend saw is plain — the marker is spliced away
+      (let (frames (letrec (go (fn (acc)
+                                 (receive ([:frame f] (go (cons f acc))) (after 0 (reverse acc)))))
+                     (go (list))))
+        (assert= (count frames) 4)
+        (assert= (nth frames 0) [[:clear] [:text 0 0 "n0"]])
+        ;; the reused fragment paints last turn's ops, by design: its deps said nothing changed
+        (assert= (nth frames 1) [[:clear] [:text 0 0 "n0"]])
+        (assert= (nth frames 2) [[:clear] [:text 0 0 "n2"]])
+        (assert= (nth frames 3) [[:clear] [:text 0 0 "n2"]]))))
+
+  (test "ui-harvest splices markers (nested, and inside a scroll-region) and tables them"
+    (let (inner [:ui/memo [:l 2] [:d2] (list (text 2 0 "b"))]
+          outer [:ui/memo [:pane] [:d1] (list (text 1 0 "a") inner)]
+          [frame table] (ui-harvest [(clear) outer (scroll-region 0.5 [inner]) (cursor 0 0)]))
+      (assert= frame
+        [[:clear]
+          [:text 1 0 "a"]
+          [:text 2 0 "b"]
+          [:scroll-region 0.5 [[:text 2 0 "b"]]]
+          [:cursor 0 0]])
+      (assert= (get table [:l 2]) [[:d2] (list [:text 2 0 "b"])])
+      (assert= (get table [:pane]) [[:d1] (list [:text 1 0 "a"] [:text 2 0 "b"])])))
+
+  (test "a frame without markers harvests to itself and an empty table"
+    (assert= (ui-harvest [(clear) (text 0 0 "x")]) [[[:clear] [:text 0 0 "x"]] {}])))
+
+(describe "ui-memo — a nil key opts out"
+  (test "inside a loop table, a nil key computes and emits no marker"
+    (assert= (binding (*ui-memo* {}) (ui-memo nil [:a] (fn () (list (text 1 0 "x")))))
+      (list [:text 1 0 "x"]))))

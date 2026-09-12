@@ -21848,3 +21848,95 @@ exists for; the checker under eager policy still flagging a qualified typo; `--c
 still failing on a broken transitively-referenced module. `make ab --floor` must read
 `startup` flat on a machine where it may run — a lazy load can only remove work from the
 rows, so a movement there is a mechanism cost on the hit path, which item 1 forbids.
+
+## ADR-336 — Memoised view fragments: `ui-memo`, and the frame carries its own cache
+
+**Status:** accepted and implemented 2026-09-12 (`std/editor/ui.blsp`: `*ui-memo*`,
+`ui-memo`, `ui-harvest`; the native `%ui-harvest`). Two supporting changes stand on their
+own: `=` short-circuits on an identical heap cell, and `append` shares its last argument.
+
+**Context — the number.** With ADR-332 a keystroke's paint is 0.3 ms; the Brood side of
+the same keystroke on bedit, measured with the new `BROOD_UI_TRACE=1`, is 2.7 ms of `view`
+and 3.1 ms of `update` — and a cursor blink, which changes one cell, pays the full `view`.
+The view is pure: a buffer line's ops are a function of its text, its syntax spans and its
+highlights; a pane's mode line of nine segment strings. Nothing in it can remember last
+turn's answer, because the loop hands `view` only the model, and the model is the
+application's. Elm has `Html.Lazy` for exactly this; TEA loops without it re-render
+everything, and that is where bedit stood.
+
+**Decision.**
+
+1. **A memo table is loop state, bound around `view`.** `ui-loop` keeps the previous
+   turn's fragments as a map `{key -> [deps ops]}` on its `clock` bookkeeping (like the
+   timers: never rolled back with the model) and binds it to the dynamic `*ui-memo*`
+   (ADR-032) while `view` runs. Outside a loop the var is nil, so a test that calls a
+   view directly gets the plain frame it always did.
+2. **`(ui-memo key deps thunk)` is the fragment.** Inside a loop it reuses the previous
+   ops when the key's `deps` are `=`, else runs the thunk — and returns a one-element
+   list holding a marker `[:ui/memo key deps ops]`, spliced where the ops would go. A nil
+   key opts a fragment out (a pane whose ops are transformed after this).
+3. **The frame carries the cache back.** `ui-harvest` walks the rendered frame once:
+   every marker is replaced by its ops (the frontend never sees one) and tabled for the
+   next turn. No cell is written anywhere; a fragment not emitted this turn is simply
+   absent from the next table, so the memo is bounded by the frame. The walk is native
+   (`%ui-harvest`) for the same reason `%span-runs` is: it runs over every op of every
+   frame, and in Brood it cost 0.8 ms — more than the paint the memo saves.
+4. **`=` is O(1) on an identical cell.** Structural equality on the same list, vector,
+   map, set, string, rope or bytes handle returned true only after walking it — 53 µs for
+   a 1000-element list. Immutability makes identity exact, so `Heap::equal` answers a
+   shared handle immediately (a NaN float, a scalar, keeps its IEEE answer). This is what
+   lets a fragment name a cached span band or the rope itself as a dep at no cost.
+5. **`append` shares its last argument.** The prelude reversed the whole result, walking
+   every argument twice; the last list is now the result's tail, as in every Lisp, and
+   only the lists before it are copied. `(append small big)` is O(small).
+
+**Consequences.** bedit memoises each visible line (`[:line x row]`), the gutter ops and
+the mode-line layout. A blink turn's `view` is 2.7 → 0.68 ms with 49 fragments hit; the
+harvest is 48 µs. A cursor motion next to a bracket and a typed character still miss
+every line — their deps name the whole span band and the whole override list — and cost
+what they did; the per-line refinement (a line's own spans and overrides as its deps) is
+the open item, and `update`'s re-lex of the band on every keystroke (2.5 ms, half of it a
+face resolved per token, now once per pass) is the larger one. The deps are the author's
+promise: omit something a thunk reads and a stale fragment is painted, which is why every
+fragment names values the model keeps between turns.
+
+**Alternatives rejected.** *A mutable memo handle* (`memoize`): the one place state
+would leak into a pure view, and unbounded. *Threading the table through `view`'s
+signature*: every `ui-run` app changes for a feature most never touch. *Diffing harder in
+the frontend*: the frontend already diffs; the cost was producing the ops.
+
+## ADR-337 — Text contrast is a setting: `gui-text-contrast!` lifts light-on-dark stems
+
+**Status:** accepted and implemented 2026-09-12 (`gui/text-contrast`, `%gui-text-contrast!`;
+`Renderer::set_text_contrast`, `contrast_lut`).
+
+**Context.** ADR-332 blends glyph coverage in linear light, which is the correct
+composite and the reason a stem no longer looked fuzzy. It is also why light text on a
+dark theme reads *thin* next to the same font in Kitty, WezTerm or macOS: perceptually,
+a partially covered edge pixel blended in linear light carries less ink than the eye
+expects, and the effect is one-sided — dark-on-light text under the same blend reads
+heavy if anything. Every renderer that blends in linear light grows a knob for this
+(Kitty's `text_gamma_adjustment`, Skia's contrast hack, FreeType's stem darkening); none
+of them can pick the value for the user, because it is a taste over a panel.
+
+**Decision.** A coverage curve `cov → 255·(cov/255)^(1/γ)`, applied to a monochrome
+glyph's coverage — per channel under subpixel text — **only where the text is lighter
+than the pixel it lands on** (a luma compare per pixel, so a dark glyph over a light
+band is untouched even on a dark theme) and never to a colour glyph. `γ` is
+`gui-text-contrast!`: 1.0 the plain blend and the runtime's default, clamped to 0.5..3.0;
+1.4–1.8 is the range the renderers above ship. Full and zero coverage are fixed points,
+so a glyph's interior and exterior never move — only its anti-aliased rim fills. A pure
+repaint: the glyph cache holds raw coverage, the curve is a 256-entry table consulted
+at composite time, and the retained frame is invalidated.
+
+**Consequences.** bedit ships `:text-contrast 1.4` in init.blsp as its own default — the
+primitive's default stays 1.0, since the runtime has no theme. The knob composes with
+`gui-text-aa!`: subpixel text gets the lift per channel. Two unit tests pin the shape:
+the curve's fixed points and monotone lift, and the one-sidedness (white on black gains
+ink at γ = 1.8, black on white renders identically at 1.0 and 1.8).
+
+**Alternatives rejected.** *Blend in sRGB space* (the "legacy" strategy): heavier text by
+accident, with the fuzz ADR-332 removed. *Stem darkening at rasterisation* (emboldening
+the outline): changes glyph shapes and advances, and the cache would need the value in
+its key. *A fixed lift in the renderer*: the value is a taste, and a setting is one
+line.

@@ -600,6 +600,19 @@ impl Heap {
             (ValueRef::Nil, ValueRef::Nil) => return true,
             (ValueRef::Bool(x), ValueRef::Bool(y)) => return x == y,
             (ValueRef::Float(x), ValueRef::Float(y)) => return x == y,
+            // The same heap cell is equal to itself: a value is immutable, so identity is
+            // exact for every compound kind, and it makes `=` O(1) on a value handed back
+            // from a cache (a memo key, a retained frame, a span band) instead of a walk
+            // of its whole structure. Scalars were answered above, so a NaN float stays
+            // unequal to itself; a structure holding one compares equal to the same
+            // structure, as in every Lisp with an identity fast path.
+            (ValueRef::Pair(x), ValueRef::Pair(y)) if x == y => return true,
+            (ValueRef::Vector(x), ValueRef::Vector(y)) if x == y => return true,
+            (ValueRef::Map(x), ValueRef::Map(y)) if x == y => return true,
+            (ValueRef::Set(x), ValueRef::Set(y)) if x == y => return true,
+            (ValueRef::Str(x), ValueRef::Str(y)) if x == y => return true,
+            (ValueRef::Rope(x), ValueRef::Rope(y)) if x == y => return true,
+            (ValueRef::Bytes(x), ValueRef::Bytes(y)) if x == y => return true,
             _ => {}
         }
         // Deep-car-nesting guard — see `WALKER_RED_ZONE`.
@@ -650,6 +663,10 @@ impl Heap {
             (Pair(x), Pair(y)) => {
                 let (mut x, mut y) = (x, y);
                 loop {
+                    // A shared tail (one list consed onto another) ends the walk here.
+                    if x == y {
+                        break true;
+                    }
                     let (a0, a1) = self.pair(x);
                     let (b0, b1) = self.pair(y);
                     if !self.equal(a0, b0) {

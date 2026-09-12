@@ -108,6 +108,11 @@
   (%gui-text-aa! mode))
 (sig text-aa (keyword -> nil))
 
+(defn text-contrast (gamma)
+  "Set the text contrast exponent γ: 1.0 by default (the plain linear-light blend), clamped to 0.5..3.0. A monochrome glyph's partial coverage is lifted to cov^(1/γ) where the text is lighter than the pixel it lands on — light text on a dark ground, which a linear-light blend renders with thin stems, reads fuller; a glyph's interior and exterior, dark-on-light text and colour emoji are untouched. 1.4–1.8 is the range other linear-light renderers ship. Applies to every open window and the default for ones opened later; a pure repaint. Needs --features gui. Returns nil."
+  (%gui-text-contrast! gamma))
+(sig text-contrast ((or float int) -> nil))
+
 (defn image-thumb (bytes max-w max-h)
   "Decode an encoded image (PNG/JPEG/GIF/WebP/BMP) from a byte sequence and downscale it to fit within max-w×max-h pixels (aspect ratio preserved), returning {:width :height :rgba} where :rgba is a width*height*4 bytes value (row-major RGBA8). nil when the bytes aren't a decodable image or the dims are non-positive. Per-call decode limits bound a decompression bomb. The one image primitive; rendering (half-block cells, a GUI texture) is Brood policy over the decoded buffer."
   (%image-thumb bytes max-w max-h))

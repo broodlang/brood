@@ -210,6 +210,12 @@ pub(crate) struct Renderer {
     bg: Option<[u8; 3]>, // window background (clear/inset-margin fill); None = DEFAULT_BG
     line_height: f32,    // cell height as a multiple of the font px (`gui-line-height!`)
     text_aa: TextAa,     // how monochrome text is anti-aliased (`gui-text-aa!`)
+    /// The text contrast exponent γ (`gui-text-contrast!`): a glyph's partial coverage
+    /// is lifted to `cov^(1/γ)` where the text is lighter than what it is drawn over.
+    /// 1.0 is the plain linear-light blend.
+    text_contrast: f32,
+    /// `cov -> lifted cov` for the current `text_contrast`, 256 entries; identity at 1.0.
+    cov_lut: Box<[u8; 256]>,
 
     // keyed by (cluster, family id, bold, italic, scale, subpixel): the same cluster at
     // a different family/style/scale/AA rasterises to a different baked canvas.
@@ -243,6 +249,8 @@ impl Renderer {
             bg: None,
             line_height: LINE_HEIGHT,
             text_aa: TextAa::Auto,
+            text_contrast: 1.0,
+            cov_lut: Box::new(contrast_lut(1.0)),
             cache: HashMap::new(),
             canvas: Vec::new(),
             canvas_size: (0, 0),
@@ -396,6 +404,19 @@ impl Renderer {
     pub(super) fn set_text_aa(&mut self, mode: TextAa) {
         self.text_aa = mode;
         self.cache.clear();
+        self.invalidate();
+    }
+
+    /// Set the text contrast exponent (behind `gui-text-contrast!`): γ in 0.5..3.0, 1.0
+    /// the plain linear-light blend. Rebuilds the coverage curve and forgets the retained
+    /// frame; the glyph cache holds raw coverage and is untouched.
+    pub(super) fn set_text_contrast(&mut self, gamma: f32) {
+        self.text_contrast = if gamma.is_finite() {
+            gamma.clamp(0.5, 3.0)
+        } else {
+            1.0
+        };
+        *self.cov_lut = contrast_lut(self.text_contrast);
         self.invalidate();
     }
 
@@ -553,6 +574,12 @@ impl Renderer {
         // origin); they're skipped and the remaining rows land at `top` onward. The
         // canvas band clips the rest: rows outside `[y0, y1)` are not touched.
         let (fb_w, y0, y1) = (canvas.w, canvas.y0, canvas.y1);
+        // Contrast lift (`text_contrast`): applied to a monochrome glyph where its
+        // colour is lighter than the pixel it lands on — light text on a dark ground is
+        // what a linear-light blend renders thin — and never to a colour glyph (emoji).
+        let lift = self.text_contrast != 1.0 && !cg.color;
+        let lut = &self.cov_lut;
+        let fg_lum = luma(fg);
         for ry in clip_skip..cg.height {
             let py = top + (ry - clip_skip);
             if py >= y1 {
@@ -573,12 +600,23 @@ impl Renderer {
                     continue;
                 }
                 let dst = &mut canvas.buf[row + pxx];
+                let lifted = lift && fg_lum > luma_packed(*dst);
                 *dst = if cg.color {
                     blend(*dst, [cg.rgba[i], cg.rgba[i + 1], cg.rgba[i + 2]], a)
                 } else if cg.subpixel {
-                    blend_rgb(*dst, fg, [cg.rgba[i], cg.rgba[i + 1], cg.rgba[i + 2]])
+                    let cov = [cg.rgba[i], cg.rgba[i + 1], cg.rgba[i + 2]];
+                    let cov = if lifted {
+                        [
+                            lut[cov[0] as usize],
+                            lut[cov[1] as usize],
+                            lut[cov[2] as usize],
+                        ]
+                    } else {
+                        cov
+                    };
+                    blend_rgb(*dst, fg, cov)
                 } else {
-                    blend(*dst, fg, a)
+                    blend(*dst, fg, if lifted { lut[a as usize] } else { a })
                 };
             }
         }
@@ -1110,5 +1148,99 @@ mod text_aa_tests {
         let gray = r.build_cluster("l", r.default_family, false, false, 1, false);
         assert!(!gray.subpixel);
         assert!(gray.rgba.chunks(4).any(|p| p[3] > 0));
+    }
+}
+
+/// The coverage curve for a text contrast exponent `gamma`: `cov -> 255·(cov/255)^(1/γ)`.
+/// Identity at 1.0; above it, partial coverage is lifted (a stem's anti-aliased rim reads
+/// fuller), which is the correction light-on-dark text wants under a linear-light blend.
+/// Full and zero coverage are fixed points, so a glyph's interior and exterior never move.
+pub(super) fn contrast_lut(gamma: f32) -> [u8; 256] {
+    let mut lut = [0u8; 256];
+    let inv = 1.0 / gamma.max(0.01);
+    for (i, slot) in lut.iter_mut().enumerate() {
+        let c = i as f32 / 255.0;
+        *slot = (c.powf(inv) * 255.0 + 0.5) as u8;
+    }
+    lut[0] = 0;
+    lut[255] = 255;
+    lut
+}
+
+/// Rec. 601 luma of an sRGB triple, in 0..=255·1000 units — a cheap "is this lighter
+/// than that" ordering, not a colorimetric quantity.
+#[inline]
+pub(super) fn luma(rgb: [u8; 3]) -> u32 {
+    299 * rgb[0] as u32 + 587 * rgb[1] as u32 + 114 * rgb[2] as u32
+}
+
+/// `luma` of a packed `0xRRGGBB` pixel.
+#[inline]
+pub(super) fn luma_packed(px: u32) -> u32 {
+    luma([
+        ((px >> 16) & 0xff) as u8,
+        ((px >> 8) & 0xff) as u8,
+        (px & 0xff) as u8,
+    ])
+}
+
+#[cfg(test)]
+mod text_contrast_tests {
+    use super::*;
+
+    /// The coverage curve: identity at γ = 1, a lift everywhere in between at γ > 1,
+    /// monotone, and with 0 and 255 as fixed points so a glyph's interior and exterior
+    /// never move.
+    #[test]
+    fn the_contrast_curve_lifts_partial_coverage_and_keeps_the_ends() {
+        let flat = contrast_lut(1.0);
+        assert!(
+            (0..=255).all(|i| flat[i] == i as u8),
+            "γ=1 must be the identity"
+        );
+        let lut = contrast_lut(1.6);
+        assert_eq!((lut[0], lut[255]), (0, 255));
+        // strictly above the identity through the body of the range; the last entries
+        // round back onto it (254 → 254.4)
+        assert!(
+            (1..250).all(|i| lut[i] > i as u8) && (250..255).all(|i| lut[i] >= i as u8),
+            "γ>1 must lift every partial coverage"
+        );
+        assert!(
+            lut.windows(2).all(|w| w[0] <= w[1]),
+            "the curve must be monotone"
+        );
+        assert!(
+            lut[128] >= 160,
+            "half coverage should lift markedly at γ=1.6: {}",
+            lut[128]
+        );
+    }
+
+    /// Ink (blue-channel sum) of the glyph `l` drawn in `fg` over a canvas of `ground`
+    /// at contrast `gamma`.
+    fn ink(r: &mut Renderer, gamma: f32, fg: [u8; 3], ground: u32) -> (u64, Vec<u32>) {
+        r.set_text_contrast(gamma);
+        let mut buf = vec![ground; 32 * 32];
+        let mut canvas = Canvas::full(&mut buf, 32, 32);
+        r.draw_cluster(&mut canvas, 2, 2, "l", None, false, false, 1, fg, 0);
+        (buf.iter().map(|&p| (p & 0xff) as u64).sum(), buf)
+    }
+
+    /// The lift applies only where the text is lighter than its ground: white on black
+    /// gains ink at γ > 1, and black on white renders identically at γ = 1 and γ = 1.8.
+    #[test]
+    fn the_lift_is_one_sided_light_on_dark_only() {
+        let mut r = Renderer::new(1.0, default_families(), 15.0);
+        r.set_text_aa(TextAa::Gray);
+        let (plain, _) = ink(&mut r, 1.0, [0xff; 3], 0);
+        let (lifted, _) = ink(&mut r, 1.8, [0xff; 3], 0);
+        assert!(
+            lifted > plain,
+            "white on black should gain ink: {plain} -> {lifted}"
+        );
+        let (_, a) = ink(&mut r, 1.0, [0; 3], 0xffffff);
+        let (_, b) = ink(&mut r, 1.8, [0; 3], 0xffffff);
+        assert_eq!(a, b, "dark on light must be untouched by the lift");
     }
 }

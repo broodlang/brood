@@ -408,12 +408,12 @@ pub(crate) mod gpu; // the experimental OpenGL render path behind `BROOD_GUI_GPU
 pub use disabled::{
     bg, close, drag_move, drag_resize, draw, focus, font, fullscreen, grab, held_key,
     host_main_thread, icon, inset, line_height, maximize, minimize, open, register_family, size,
-    text_aa, title, TextAa,
+    text_aa, text_contrast, title, TextAa,
 };
 
 #[cfg(feature = "gui")]
 pub use backend::{
     bg, close, drag_move, drag_resize, draw, focus, font, fullscreen, grab, held_key,
     host_main_thread, icon, inset, line_height, maximize, minimize, open, register_family, size,
-    text_aa, title, TextAa,
+    text_aa, text_contrast, title, TextAa,
 };

@@ -40,6 +40,7 @@
    "math/atan2" :math
    "path/basename" :filesystem
    "string/bytes->" :convert
+   "string/number->" :convert
    "doc-catalog/*catalog*" :meta
    "doc-catalog/category-of" :meta
    "doc-catalog/*category-order*" :meta

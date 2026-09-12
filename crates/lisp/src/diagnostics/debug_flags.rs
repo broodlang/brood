@@ -581,6 +581,11 @@ pub const FLAGS: &[DebugFlag] = &[
         "`=1`: print every GUI paint's breakdown (rows repainted, clusters, timing) — BROOD_STALL_MS at threshold 0 without the per-native-call flood",
     ),
     f(
+        "BROOD_UI_TRACE",
+        HOST,
+        "`=1`: print every `ui-run` turn's Brood-side breakdown (view, draw, update in ms) — the other half of BROOD_GUI_TRACE",
+    ),
+    f(
         "BROOD_GUI_DUMP",
         HOST,
         "`=<path.ppm>`: write the retained canvas as a PPM after every paint — look at the raster (text AA, hairlines) from a script",

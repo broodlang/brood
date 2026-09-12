@@ -679,6 +679,10 @@ column the formatter would put it, rather than submitting."
    :ctrl-p 'editor/lineedit/lineedit-history-prev
    :down 'editor/lineedit/lineedit-history-next
    :ctrl-n 'editor/lineedit/lineedit-history-next
+   ;; M-p / M-n — the Emacs minibuffer's history keys, so a completion UI that takes
+   ;; C-p / C-n and the arrows for its candidates still has the history reachable
+   :alt-p 'editor/lineedit/lineedit-history-prev
+   :alt-n 'editor/lineedit/lineedit-history-next
    :ctrl-l 'editor/lineedit/lineedit-clear-screen
    :ctrl-r 'editor/lineedit/lineedit-reverse-search
    :tab 'editor/lineedit/lineedit-complete

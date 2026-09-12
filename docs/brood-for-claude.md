@@ -824,6 +824,14 @@ code paints to a terminal or a GUI window unchanged.
   `(view model cols rows)` → poll input → fold it with `(update model input cols
   rows)` → recurse, until the model is `:done`, then tear the frontend down. Set
   `:tick-ms` in the model for the refresh beat (input is `:tick` on timeout).
+- **Where a turn's time goes** = `BROOD_UI_TRACE=1`: one stderr line per phase —
+  `ui-run: view=4.71ms 236 ops`, `draw=`, `update=… <input>` — the Brood side of a
+  keystroke; `BROOD_GUI_TRACE=1` is the window's paint, the other half.
+- **A fragment that need not re-render** = `(ui-memo key deps thunk)` (ADR-336): inside
+  a running loop the previous turn's ops are reused while `deps` are `=` — a buffer
+  line of its rope and spans, a status bar of its segments — else `(thunk)` runs. Name
+  as deps everything the thunk reads, preferring values the model keeps between turns
+  (`=` is O(1) on the same cell). Outside a loop it is just the thunk.
 
 ```lisp
 (defmodule main "a counter app" (:use editor/ui) (:use editor/display))
