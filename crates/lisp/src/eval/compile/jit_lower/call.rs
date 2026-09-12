@@ -495,9 +495,17 @@ pub(super) fn emit_call(
             let xc_depth = b.create_block();
             b.ins().brif(env_glob, xc_depth, &[], ff_blk, &[]);
 
-            // Guard 2: `1 <= depth < 64` in one unsigned compare (`depth-1 <u 63`).
-            // depth 0 would need the stack-limit stamp; depth >= 64 the stacker
-            // headroom probe (JIT_HEADROOM_PROBE_FROM) — both live on the callback path.
+            // Guard 2: `depth < 64` — from 64 on, the stacker headroom probe
+            // (JIT_HEADROOM_PROBE_FROM) lives on the callback path. Depth 0 used to be
+            // excluded too, "because it would need the stack-limit stamp": it does not.
+            // The stamp is an absolute stack address, laid down when the OUTERMOST native
+            // frame is entered (`jit_tier_in_frame`, `hof_apply_native`, the scheduler on
+            // resume), and a call from that frame cannot move the line. Excluding depth 0
+            // sent every call from a program's top-level loop — the frame most programs
+            // spend their time in — down the FFI path, where `jit_run_fast_link` also
+            // re-stamped through `stacker` per call: 40% of a call-loop's samples
+            // (`jit_run_fast_link` 20%, `brood_rt_fast_frame` 8%, `stacker` 6%, …) with
+            // the blob installed and idle. Measured 2026-09-12, see §7.12.
             b.switch_to_block(xc_depth);
             let depth = b.ins().load(
                 types::I32,
@@ -505,8 +513,7 @@ pub(super) fn emit_call(
                 heap,
                 offs.jit_native_depth as i32,
             );
-            let dm1 = b.ins().iadd_imm_s(depth, -1);
-            let d_ok = b.ins().icmp_imm_s(IntCC::UnsignedLessThan, dm1, 63);
+            let d_ok = b.ins().icmp_imm_s(IntCC::UnsignedLessThan, depth, 64);
             let xc_cap = b.create_block();
             b.ins().brif(d_ok, xc_cap, &[], ff_blk, &[]);
 

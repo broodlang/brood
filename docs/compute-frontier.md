@@ -1915,11 +1915,23 @@ spawned copy of a shared arm.
 
 **The call itself, counted (later that evening).** A 5M-iteration native loop with one
 native call read 640 instructions per call — and 40% of that was KI-133 (a preempted loop
-resumed on the interpreter through its callee's frame). Fixed, the loop reads **~390
-instructions / ~95 cycles per native→native call** against ~1 400 for the VM's; the
-`jit_run_fast_link` ceremony — roots truncate/extend, ~10 heap fields saved and restored,
-`stamp_stack_limit_if_outermost`, IC bases, the gateway sequence — is the remaining cost, and
-the number the call-convention work has to beat.
+resumed on the interpreter through its callee's frame). Fixed, the loop read **~390
+instructions / ~95 cycles per native→native call** against ~1 400 for the VM's — and the
+post-fix profile said where: **40% of the loop's samples were the Rust-side call path**
+(`jit_run_fast_link` 20%, `brood_rt_fast_frame` 8%, `stacker::remaining_stack` + `psm` 6%,
+`brood_rt_push_room`, `brood_rt_fastlink_base`, `brood_rt_roots_base`) with the §7.5 inline
+xcall blob installed on the caller and idle. The blob's guard excluded native depth 0 —
+"it would need the stack-limit stamp" — but the stamp is an absolute stack address laid down
+when the outermost native frame is entered, and a call from that frame cannot move it; the
+exclusion sent every call from a program's top-level loop down the FFI path, which then
+re-stamped through `stacker` per call. Guard changed to `depth < 64` and the per-call
+re-stamp in `jit_run_fast_link` removed: the loop reads **1.68 G instructions, ~234 per
+call** (from 390; from 640 at the day's start), cycles 0.72 → 0.54 G. The rows read noise
+under both protocols — their hot loops are gate-refused or interpreted, so nothing on the
+corpus makes native calls from a depth-0 native loop; user code with a main loop calling
+helpers does. What remains of the 234 is the blob itself (frame nil-fill, ~14 heap-field
+saves/restores, the gateway sequence) plus the callee's entry and `read_out` — the next
+number for the convention work to beat.
 
 **4. A hotness-ordered compile queue — not needed.** The queue probe (§7.11) showed the
 compiler idle from 42–72 ms into every row once boot stopped feeding it; what remains

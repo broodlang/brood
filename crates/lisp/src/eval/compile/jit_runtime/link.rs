@@ -82,7 +82,10 @@ pub(crate) fn jit_run_fast_link(
     let saved = std::mem::replace(&mut heap.jit_call_env, env_root);
     let saved_fn = std::mem::replace(&mut heap.jit_dbg_fn, head);
     heap.jit_native_depth = native_depth + 1;
-    stamp_stack_limit_if_outermost(heap, native_depth);
+    // No stack-limit stamp here: the outermost native frame stamped it on entry
+    // (`jit_tier_in_frame` / `hof_apply_native` / the scheduler's resume), the value is an
+    // absolute address that a call from that frame cannot move, and re-deriving it through
+    // `stacker::remaining_stack` on every depth-0 call was 6% of a call loop's samples.
     let saved_force_vm = heap.jit_force_vm;
     // KI-20: the callee's native code reads its OWN per-arm IC block through the heap
     // cursors (`vm_call_ic_put`/`vm_global_ic_put`/fast-link publishes). Install the callee's

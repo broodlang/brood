@@ -844,6 +844,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-12** — the tier threshold is a call threshold and it is 128 (ADR-333): boot stopped queueing 139 compiles ahead of the hot arm — `spawn` −31%, `fib` −18%, `bintree` −14%
 - **2026-09-12** — the refused arms are the hot core (108k activations on json, dispatch 43% of its main thread); leaf admission built and not landed; the lever is the native→native call (compute-frontier §7.12)
 - **2026-09-12** — KI-133: a preempted native loop resumed on the interpreter via its callee's frame — 5M-call loop 3.86 → 2.53 G instructions, the leaf-spliced one −72%
+- **2026-09-12** — the inline xcall blob was refused at native depth 0 (the frame every main loop lives in); allowed, and the per-call stack re-stamp dropped — 234 instructions per native→native call, from 640
 - **2026-09-12** — the GUI retains its frame and repaints by cell row (ADR-332): a keystroke paints 0.3 ms instead of 4–13; whole-pixel ppem, subpixel text at 1× (`gui-text-aa!`), snapped hairlines, `gui-line-height!`
 - **2026-09-12** — `0xFF` reads: radix literals, the second ADR-169 reservation to pay out (ADR-334)
 - **2026-09-12** — a qualified reference loads its module on first use (ADR-335): `nest complete` 72 → 20 ms, five modules instead of 62
@@ -13082,4 +13083,16 @@ preempt bought ~256 interpreted iterations. Fixed by yielding at the native pree
 honest call cost is ~390 instructions. Rows barely move (they are short and their loops are
 refused anyway); every long-running native loop that calls anything was paying it. Details
 and the guard in KI-133.
+
+### 2026-09-12 — the call blob at depth 0: 390 → 234 instructions per native→native call
+
+The post-KI-133 profile of the call loop had 40% of its samples in the Rust-side call
+path with the §7.5 inline blob installed and idle: its guard `1 <= depth < 64` refused the
+outermost native frame, "because depth 0 would need the stack-limit stamp". The stamp is an
+absolute address laid down at that frame's entry; the exclusion was only cost, and it fell
+on the frame a program's main loop runs in. `depth < 64`, and `jit_run_fast_link` no longer
+re-derives the limit through `stacker` on every depth-0 call. 5M-call loop 2.53 → 1.68 G
+instructions; rows noise on both protocols (their hot loops are refused or interpreted); the
+stack-guard tests (`jit_deep_recursion_test`, `vm_nested_stack_guard_test`,
+`deep_handle_spill_under_jit`, the 32 768-deep throw) hold. compute-frontier §7.12.
 
