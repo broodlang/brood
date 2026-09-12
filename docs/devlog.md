@@ -12409,6 +12409,54 @@ The trap for next time: **std/ is baked into the binary** (`include_str!`), so a
 edit is invisible to every gate until `cargo build --bin brood --bin nest`. One round of
 "still failing" here was exactly that.
 
+## 2026-09-11 (later) — KI-127: a value rendered on every native run, and four ways the measurement lied
+
+The brood-benchmarks 0.27.2 column refresh turned up `sort` slower than early September. Chasing
+it took most of a session, most of that spent being wrong in instructive ways.
+
+**The bug.** `7a72135b` ungated a `#[cfg(target_arch = "wasm32")]` block so the playground's
+shipped entry point (`run_program_repr`) became assertable from a host test — a correct fix for a
+real gap (KI-115). It also made `ProgramState::finish_form` render **every** top-level form's
+value to a string on the native path, where `run_program` discards it. Cost is proportional to
+the value's size, so it is invisible until a program's top level binds something big. `sort`'s is
+`(def data (sort …))` over a 375k-element list: 132 → 146 ms. `nest run FILE` paid it too, via
+`%run-program-file` — the call site the diagnosis nearly missed.
+
+The ungating **was** measured at the time ("200 top-level forms each a 20k-element vector, 0.58s
+against 0.60s"). Many small top-level values, never one large one. Sound measurement, wrong
+shape: a per-form cost proportional to the form's value needs a workload with one *big* value.
+
+Fixed with `ProgramExit::want_result`, set once at construction. The path stays ungated — that is
+what makes it host-testable — and KI-115's guard is untouched. `sort` back to +0.7% of its
+pre-regression commit, against a 0.7% control. Suite 1023/1023.
+
+**The four measurement failures, all mine, all already written down somewhere I had quoted.**
+
+1. **A bisect built on cross-run deltas.** `--floor` bounds error *within* one `ab-bench` run;
+   I compared deltas *across* runs, one baseline each. It produced a smooth ramp and converged on
+   a commit that changes four lines of markdown. FRONTIER already says a bisect must return
+   something — the absurd answer was the tell.
+2. **A hand-rolled harness that reintroduced the bias `ab-bench` exists to refuse.** It compared
+   source-booting baselines against an imaged HEAD (~10 ms on a 146 ms row, in exactly the
+   direction that erases a HEAD slowdown) and produced a confident *retraction* of a true
+   finding. `ab-bench` had refused that configuration three times that day with
+   `stdimage MISMATCH`, correctly, and I bypassed it.
+3. **`stdimage`'s `prune` keeps `max-keep 4`.** Comparing 5 baselines + HEAD silently evicted the
+   earliest arm into a source boot — failure 2 arriving with no warning. The harness refuses past
+   four now.
+4. **`pkill -f` from inside the same invocation kills its own wrapper shell** (exit 144). Three
+   times.
+
+What finally worked is what `perf-handoff.md` already prescribed: every arm verified `:state
+:live`, all commits in ONE interleaved session, and the same binary measured twice as a control.
+That file now carries the corrected machine description (`whklat` is a **12-core laptop**, not a
+28-core workstation), traps 4-6, and the note that **`8a2aaa01` reaches only 19 of 31 rows** —
+ADR-302's argument reorder means the bench corpus can no longer run on a pre-09-02 brood.
+
+Tasks 1 and 3 from the perf queue are answered in the same file. Task 1: `mandelbrot` +0.4%,
+`nbody` +1.2%, both inside floor — KI-109's closure holds on magnitude as well as mechanism.
+Task 3: the KI-100 re-baseline numbers moved, and `sort`'s swing was KI-127 rather than drift.
+
 ## 2026-09-11 — `nest completions` / `nest complete` are Brood (ADR-322, item 6)
 
 The last two policy arms of `nest` left `main.rs`: the three shell scripts and the
