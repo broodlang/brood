@@ -1756,6 +1756,83 @@ Sabotage-verified: removing the plan gate's record alone brings back 40+ `return
    ~3-5× native rather than the VM's ~27× — not for loosening the gate. Not yet an entry in
    this file's option list; recorded here as the shape the names point at.
 
+### 7.11 Pre-compilation, counted — the bytecode idea is dead, the JIT's cost is elsewhere (2026-09-12)
+
+**The plan this measured.** After ADR-329, "persist compiled chunks in the stdlib image" was
+the next item. Count the calls first: a throwaway probe (three `Instant` accumulators, dumped
+at `run_program` exit, restored from backups) split the compile side of `json` at default N,
+warm boot, 140 ms wall, three runs each:
+
+| stage | time | count | thread |
+|---|---|---|---|
+| macro expansion (`macros::compile`) | 0.2 ms | 5 forms | program |
+| `compile_arm` (Node → bytecode) | 2.5 ms | 243 arms | program |
+| Cranelift lowering (`lower_arm*`) | **92–118 ms** | 206 arms | `brood-jit` |
+
+`regex` 71–82 ms / 177–193 arms, `bintree` 36 / 100, `sort` 38 / 118; expansion + bytecode
+under 3 ms on every row. **Persisting bytecode saves ~10 µs per arm** — against a
+serialised-IR format for a `Chunk` that is not self-contained (IC atomics, `NodePtr`s,
+`ConstVal::Handle`) and that the JIT does not even lower from (it reads `arm.body`). Struck.
+
+**Where the Cranelift time goes** (`make perf-brood` + `BROOD_COMPILE_TRACE=1`, `json`): 128
+compiles, 79 ms, **97% initial tier** (2 deferred compiles landed before exit). Median 275 µs,
+p90 1.4 ms, max 7.6 ms (`json/object-acc`); top 10 arms = 48% of the time, top 25 = 71%. Arms
+that also carry a bail line account for **9.5 ms** — so "persist the tiering decisions and skip
+the bails" caps at 12% of the compile thread. Struck. On the thread itself (symbolized perf)
+regalloc2 is ~20%, the verifier ~7% (§7.2 says why it stays), egraph ~3%.
+
+**Single-pass regalloc, tried and rejected.** Cranelift 0.134 has `regalloc_algorithm =
+single_pass`. One flag: the compile thread's share of `json` fell 36% → 28% of task-clock
+(≈ −25% compile CPU) and `json N=500` −8.9% unpinned — but **`fib` +48%, `nbody` +47%,
+`mandelbrot` +35%, `bintree` +26%** (best-of-5, same for pinned). Rejected as a global setting.
+As a *baseline* tier it would need the hot re-lowering to replace it on every arm that matters,
+and `fib`'s scalar-register worker declines its upgrade by design — the first compile IS the
+final code. A real fast/opt split is a tiering redesign for ~20 ms of *background* CPU per run.
+Not now.
+
+**The compile thread is not the main thread's cost.** `perf stat`: `json N=500` JIT 116 ms
+task-clock (main 52, `brood-jit` 60) vs `BROOD_TIER=1` 54 ms; N=2000: main 125 vs VM 147.
+So the main thread's CPU under the JIT is **equal to the VM's at N=500 and −15% at N=2000**,
+and native arms are 0.6–1.9% of samples. `json` barely runs native code: 114 of its 142 tiering
+attempts are `call-mediated-boxed` (§7.1, correctly), and the §7.1 hot-admission path hands a
+refused arm to the *deferred* queue, which drains only once the primary is empty — never, in a
+140 ms run. Pinned (`make ab`'s compute rows), the compile thread is paid in full: `json
+N=2000` 130 → 204 ms. Unpinned on 12 cores, the wall gap (70 vs 50 ms at N=500) is not CPU and
+not a futex (`strace -f`: the executing thread never waits); the JIT run has 25 MB more RSS
+and `kernel_init_pages` at the top of the kernel share. Left there.
+
+**Deopts are not the cost either.** `BROOD_DEOPT_TRACE`: **17 560 deopts** on `json N=2000`
+(`any?` 5 207, `json/skip-ws` 4 330, `json/emit` 5 288, `object-acc` 1 749) — polymorphic arms
+oscillating below the 16-*consecutive* latch. Symbolized profile: `deopt|ckpt|resume` is
+**0.2–0.3%** of samples. The latch is fine; leave it.
+
+**A trap that cost an hour: the first run after a rebuild is a COLD boot.** A fresh
+`release-fast` binary's first run source-boots the prelude and writes the image, so a profile
+taken on that run puts `Heap::env_get` at 13.5% and `eval_tail_loop` at 5% (the tree-walker
+expanding 544 prelude forms), and `BROOD_DEFER_DBG` reads 1 435 deferrals (`cond` 317, `and`
+216 …) where the warm run reads 45. Run once, then measure — the same rule as the stdlib image,
+one artifact over.
+
+**What is left standing, in order:**
+
+1. **The gate-refused arms never reach the hot stage.** §7.10 lead 4 named the *shape* (a
+   baseline tier); the measurement says the *scheduling* comes first: the deferred queue starves
+   behind the primary, so hot admission is dead code on every short row. Interleave (one
+   deferred per N primary) or order the primary by hotness, then re-measure `json`/`regex`/
+   `sort`/`bintree` with `fib`/`pfib`/`nbody` as the control. Small change, `compiler.rs` only.
+2. **Duplicate compiles.** `BROOD_TRACE_COMPILE`: 44 of 178 bytecode compiles on `json` repeat
+   a `Body` key already compiled in the same process; the JIT trace shows `map?` ×6, `set?` ×5,
+   `not` ×5 (~8 ms of Cranelift). Why the shared body cache misses in ONE process is unanswered.
+3. **Per-activation cost of a not-yet-native arm**: `i64_too_deep` + `jit_shared_lookup`
+   (a hash probe) run on every activation while `jit_code` is null/QUEUED — ~3% of `json`'s main
+   thread. Probe the shared cache once per threshold crossing, not per call.
+4. **A persistent native-code cache** is the only pre-compilation with a prize left, and the
+   prize is *latency to native* on short runs (median arm lands at 20 ms of a 70 ms run) plus
+   the whole compile thread when cores are scarce. It needs relocation of the `brood_rt_*`
+   absolute addresses (PIE), the `ConstVal` handles baked as immediates, tag-snapshot keying and
+   epoch validity — a multi-day project whose failure mode is wrong code. Not until 1–3 are done
+   and a row still wants it.
+
 ### The measurement discipline (each of these burned someone this week)
 
 Image `:live` on **both** arms, verified per run (`(stdimage/status)` — any commit

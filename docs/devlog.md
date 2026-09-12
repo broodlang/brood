@@ -839,13 +839,14 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-09** — the wasm cooperative scheduler was compiled on every CI run and executed on none
 - **2026-09-09** — the bare namespace gets a gate: 264 names recorded, a new one fails by name
 - **2026-09-09** — KI-122: the KI-120 tripwire was crying wolf on bedit, on a false claim
-- **2026-09-12** — `filter` joins its complement in `seq/`; `remove` becomes `reject` (ADR-329), and docstring `[[links]]` finally render (ADR-330)
+- **2026-09-12** — `filter` joins its complement in `seq/`; `remove` becomes `reject` (ADR-330), and docstring `[[links]]` finally render (ADR-331)
+- **2026-09-12** — pre-compilation, counted: bytecode is 2.5 ms of `json`, Cranelift is 60–80 ms, and both persistence ideas are dead (compute-frontier §7.11)
 
 ---
 
 ## Recent — full entries
 
-## 2026-09-12 — `filter` joins its complement in `seq/`; `remove` becomes `reject` (ADR-329), and docstring `[[links]]` finally render (ADR-330)
+## 2026-09-12 — `filter` joins its complement in `seq/`; `remove` becomes `reject` (ADR-330), and docstring `[[links]]` finally render (ADR-331)
 
 **The wart.** `filter` was bare; its complement was `seq/remove`. One operation, two
 namespaces — and the only place in the sequence library where that was true, since
@@ -906,7 +907,7 @@ is not.
 
 **The migration is in the ledger.** `filter` is the entry that matters: a prelude name nearly
 every file uses, so without it the wave lands downstream as `unbound symbol: filter` with
-nowhere to go. It now says `— renamed to seq/filter (ADR-329)` and `--fix-renames` applies it.
+nowhere to go. It now says `— renamed to seq/filter (ADR-330)` and `--fix-renames` applies it.
 `docs/bare-names.md` loses `filter` (the ADR-233 gate reds otherwise), and the checker's
 curated signature moved to the qualified key for the reason that table already states — a bare
 key would suppress the unbound lint on a name that no longer exists bare.
@@ -12710,3 +12711,19 @@ records rather than binds). It is in the image header now (`v3`), behind a round
 Found by reading the call site before deleting, not after.
 
 Done so that persisting compiled chunks (the next item) extends ONE format with ONE fallback.
+
+### 2026-09-12 — pre-compilation, counted: the item the last entry promised is dead
+
+The previous entry ended "persisting compiled chunks (the next item)". Before designing the
+format, a throwaway probe timed the three compile-side stages on `json` at default N (warm
+boot, 140 ms wall): **macro expansion 0.2 ms, `compile_arm` 2.5 ms for 243 arms, Cranelift
+lowering 92–118 ms for 206 arms** — the last on the background thread. Persisting bytecode
+would save ~10 µs per arm against a serialised-IR project; persisting *tiering decisions*
+saves at most the bails' share of the compile thread, 9.5 of 79 ms. Both struck. The full
+account — per-arm distribution, the single-pass-regalloc experiment (−25% compile CPU, but
+`fib` +48%, `nbody` +47%: rejected), the 17 560 deopts that cost 0.3%, and the cold-boot
+trap that put `env_get` at the top of a profile — is `docs/compute-frontier.md` §7.11, with
+the lead it leaves: `json`'s main thread is barely faster under the JIT than on the VM
+(52 vs 54 ms of CPU at N=500), because 114 of its 142 tiering attempts are gate-refused and
+the hot stage that would admit them never runs before the program ends.
+
