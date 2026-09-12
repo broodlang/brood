@@ -198,11 +198,36 @@ pub(super) fn register(primitives: &mut super::Primitives) {
 /// `~/.local/bin` — so "the runtime that installed me is my sibling" is the reliable lookup,
 /// and it needs this. (myedit's eval sandbox spawns a Brood runtime for its child; from a
 /// dash-launched editor, PATH alone finds nothing.)
+///
+/// Linux's `" (deleted)"` marker is stripped — see [`strip_deleted_marker`]; without that
+/// the answer stops being usable the moment the binary is upgraded in place.
 pub(super) fn exe_path(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match std::env::current_exe() {
-        Ok(p) => Ok(heap.alloc_string(&p.to_string_lossy())),
+        Ok(p) => Ok(heap.alloc_string(strip_deleted_marker(&p.to_string_lossy()))),
         Err(_) => Ok(Value::nil()),
     }
+}
+
+/// Strip Linux's `" (deleted)"` marker from a `/proc/self/exe` readlink.
+///
+/// The kernel appends it when the running binary's inode has been UNLINKED — which is not
+/// an exotic state, it is what every in-place upgrade does: you cannot write over a busy
+/// executable (`ETXTBSY`), so `cargo`, `make install`, `cp` and every package manager
+/// unlink-and-rename instead. From that moment `current_exe()` returns
+/// `/usr/local/bin/brood (deleted)`, a string that names no file — so `(file/exists? …)` on
+/// it is false and the sibling lookup this primitive exists for silently stops working,
+/// with no error anyone can see.
+///
+/// Stripping is not merely cosmetic, it is the MORE correct answer: after an upgrade the
+/// replacement binary sits at exactly that path, so the un-suffixed string is the live
+/// install, while the suffixed one is a description of a deleted inode. If nothing is there
+/// any more the caller gets a path that does not exist, which is the honest result and the
+/// one `file/exists?` can act on.
+///
+/// Found via `introspection_test.blsp`'s `os/exe-path` case failing three consecutive
+/// full-suite runs and never solo — the runs that followed a `cargo build` (KI-130).
+fn strip_deleted_marker(path: &str) -> &str {
+    path.strip_suffix(" (deleted)").unwrap_or(path)
 }
 
 pub(super) fn cwd(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
