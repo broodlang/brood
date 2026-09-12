@@ -12941,6 +12941,27 @@ pinned deltas run larger than the unpinned ones. One caveat, recorded because th
 says to: the stdimage read `stale` on BOTH arms of that sweep (the day's rebuilds had pruned
 it) — symmetric, so the deltas are fair, but both sides paid the source boot.
 
+**The workload a call threshold could hurt, measured last (same tree, three `nest` builds
+differing only in the constant, one interleaved round):** `nest test` over 5 699 tests —
+T=8 **113.4 s**, T=64 104.0 s, T=128 **105.3 s**, so −7% for 128 on the thousands-of-small-
+functions shape too. An earlier reading of +8–10% was confounded: its T=8 arm was the
+`be0638d3` `nest` running the day's newer tests (9 version-skew failures, 6 fewer tests) across
+the lazy-load runner change. One follow-up tried and not landed: probing the shared-code cache on
+an untried arm's first activation and every 16th after instead of every call (a `RwLock` read
+plus a `Mutex` per activation, on a path 16× longer-lived at 128) measured noise on all ten
+rows of `make ab --floor` — `collatz` −3.8% against a 0.8% floor was the largest — so §7.8's
+rule applies and the code is not in the tree (compute-frontier §7.11 lead 3).
+
+**Left open, diagnosed:** `cli::artifact_matrix` is red since the lazy-load wave
+(`80b33fb1`–`5fca2758`) — `*require-edges*` is a registry in the `prelude=source
+stdlib-image=false` cell and not in the imaged one. The source boot follows a qualified
+reference into `seq`, whose `(:use map)` header records the edge `{seq (map)}` and so writes
+the registry; the imaged boot never loads `seq` (the referencing bindings arrive materialised),
+so nothing writes it. Writing the served record in `%std-edges-for` was tried and does not
+close it — `%std-edges-for` is never reached in that cell. The question is which cell is
+right: an inferred load that records a header edge on the way, or an image that skips the
+load entirely. That is ADR-335's call.
+
 Two smaller things the same probes settled: the 44 repeated bytecode compiles on `json` are
 `probe_arm_for`'s documented throwaway copies for the JIT's leaf probe (~0.6 ms, by design);
 and lead 1 of §7.11 as first written — "the deferred queue starves" — was wrong, and is

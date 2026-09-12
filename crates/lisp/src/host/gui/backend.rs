@@ -1704,12 +1704,9 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                         };
                         w.wheel_last = Some(now);
                         w.wheel_streak = streak;
-                        let boost =
-                            (1.0 + WHEEL_STREAK_BOOST * streak as f64).min(WHEEL_STREAK_CAP);
                         let same_way = w.scroll_momentum_active && w.scroll_velocity * dy > 0.0;
                         let carried = if same_way { w.scroll_velocity } else { 0.0 };
-                        w.scroll_velocity =
-                            carried + WHEEL_IMPULSE * boost * dy.signum() * dy.abs().max(1.0);
+                        w.scroll_velocity = wheel_velocity(carried, streak, dy);
                         w.scroll_decay = WHEEL_DECAY;
                         w.scroll_pending = false;
                         w.scroll_momentum_active = true;

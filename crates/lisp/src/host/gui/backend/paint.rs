@@ -107,7 +107,8 @@ fn op_band(op: &Op, dy: isize, oy: usize, ch: usize) -> Option<(isize, isize)> {
         Op::Cursor { row, .. } => band(cell_top(*row), ch_i),
         Op::Rect { row, h, .. } => band(cell_top(*row), px_h(*h as usize)),
         Op::FRect { y, h, .. } => {
-            let top = oy as f32 + y * ch as f32;
+            // shifted like a cell (`cell_top`): an frect inside a scroll region moves
+            let top = oy as f32 + y * ch as f32 - dy as f32;
             let bottom = top + h * ch as f32;
             if !top.is_finite() || !bottom.is_finite() {
                 // Non-finite geometry paints nothing sensible; treat it as everywhere
@@ -431,10 +432,14 @@ pub(super) fn render_ops(
                 // cell metrics every op shares, then an AA, alpha-blended fill.
                 let bg = if face.reverse { face.fg } else { face.bg };
                 if let Some(bg) = bg {
+                    // Inside a scroll region the rect rides with the text: a gutter's
+                    // change bar or a link's hover band is drawn as an `frect` in the
+                    // pane body, and one that ignored the shift stayed put while the
+                    // lines glided, snapping a row each time the top advanced.
                     fill_rrect(
                         canvas,
                         ox as f32 + *x * cw as f32,
-                        oy as f32 + *y * ch as f32,
+                        oy as f32 + *y * ch as f32 - scroll_dy as f32,
                         *w * cw as f32,
                         *h * ch as f32,
                         *radius * cw as f32,
@@ -1115,6 +1120,53 @@ mod strip_diff_tests {
                 "frame {i}: incremental raster differs from a full one (repainted {bands:?})"
             );
         }
+    }
+
+    /// An `frect` inside a scroll region rides with the text: a gutter's change bar
+    /// painted half a cell up lands where a text op at the same row does, both in the
+    /// raster and in the rows the diff marks dirty. It used to stay put while the
+    /// lines glided — the bar jumped a row each time the top advanced.
+    #[test]
+    fn an_frect_inside_a_scroll_region_shifts_with_the_text() {
+        let bar = Op::FRect {
+            x: 0.0,
+            y: 2.0,
+            w: 1.0,
+            h: 1.0,
+            face: Face {
+                bg: Some([0, 255, 0]),
+                ..Face::default()
+            },
+            opacity: 1.0,
+            radius: 0.0,
+        };
+        let region = |dy: f32| Op::ScrollRegion {
+            dy_frac: dy,
+            ops: vec![bar.clone()],
+        };
+        // raster: at a half-cell shift the bar's top pixel row moves up by half a cell
+        let raster = |dy: f32| {
+            let mut r = Renderer::new(1.0, default_families(), 14.0);
+            raster_frame(&mut r, &[Op::Clear, region(dy)], 40, 80, true);
+            let (fb_w, ch) = (40, r.cell_h);
+            let first_green = r
+                .canvas
+                .iter()
+                .position(|&p| p == 0x00ff00)
+                .map(|i| i / fb_w)
+                .expect("the bar was painted");
+            (first_green, ch)
+        };
+        let (at_rest, ch) = raster(0.0);
+        let (shifted, _) = raster(0.5);
+        assert_eq!(at_rest, 2 * ch, "unshifted, the bar starts at its cell row");
+        assert_eq!(shifted, 2 * ch - ch / 2, "shifted, it rides up half a cell");
+        // diff: the shift dirties the rows the bar left and entered, not the whole frame
+        let old = vec![Op::Clear, region(0.0), text(6, "modeline")];
+        let new = vec![Op::Clear, region(0.5), text(6, "modeline")];
+        let rows = dirty_rows(&new, &old, 0, 10, 80);
+        assert!(rows.contains(&2) && rows.contains(&3), "{rows:?}");
+        assert!(!rows.contains(&7), "{rows:?}");
     }
 
     /// A hairline whose unsnapped geometry sits just below a strip boundary snaps onto

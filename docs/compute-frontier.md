@@ -1830,12 +1830,21 @@ one artifact over.
    `json` are `probe_arm_for`'s documented throwaway copies for the JIT leaf probe (one cold
    compile per caller→callee edge, ~0.6 ms). The Cranelift half is open: `map?` ×6, `set?` ×5,
    `not` ×5 lowered in one process (~8 ms of compile thread) despite the `published` dedupe;
-   either six distinct arms carry that name or the dedupe misses. Fewer arms tier at 128, so
-   re-count before chasing it.
+   either six distinct arms carry that name or the dedupe misses. **Re-counted at 128
+   (`BROOD_JIT_DUMP_IR` headers, `json`): 41 arms lowered, 14 of them a name already lowered
+   (`not` ×4, `vector?`/`string?`/`map?`/`int?` ×3) — ~4 ms of background thread.** The
+   likely mechanism is the same throwaway: `probe_arm_for`'s uncached copy is handed to the
+   leaf inliner, and if the residual call of a partial splice dispatches through THAT arm
+   object, each caller→callee edge tiers its own `map?`. Unverified; not worth 4 ms until a
+   pinned row says otherwise.
 3. **Per-activation cost of a not-yet-native arm**: `i64_too_deep` + `jit_shared_lookup`
    (a hash probe) run on every activation while `jit_code` is null/QUEUED — ~3% of `json`'s
-   main thread at a threshold of 8; at 128 an arm spends 16× longer in that state, so this is
-   worth re-measuring now. Probe the shared cache once per threshold crossing, not per call.
+   main thread at a threshold of 8; at 128 an arm spends 16× longer in that state. **Tried
+   and NOT landed (2026-09-12):** probing on the first activation and every 16th after, with
+   the `Mutex` behind `may_adopt_shared_code` taken only on a probe, measured **noise on all
+   ten rows** under `make ab --floor` — `collatz` −3.8% (floor 0.8%), `sort` −2.2%, `json`
+   −1.4%, the rest ±1% — nothing clears `max(5%, 2×floor)`. The path is 16× longer-lived at
+   128 and still does not show; §7.8's rule applies (implemented, measured noise, reverted).
 4. **A persistent native-code cache** is the only pre-compilation with a prize left, and the
    prize is *latency to native* on short runs plus the whole compile thread when cores are
    scarce. It needs relocation of the `brood_rt_*` absolute addresses (PIE), the `ConstVal`
