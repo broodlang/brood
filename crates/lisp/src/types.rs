@@ -97,6 +97,8 @@ const SEQ_BITS: u32 =
 
 /// The map tag — the one tag a key/value refinement applies to.
 const MAP_BIT: u32 = 1u32 << bit(Tag::Map);
+/// The nil tag — the one non-map a keyword read does not raise on (it answers `nil`).
+const NIL_BIT: u32 = 1u32 << bit(Tag::Nil);
 
 /// The bytes tag. Not refinement-bearing — a `bytes` is a sequence of octets, so its
 /// element type is fixed by the kind rather than carried — but [`Ty::elem_ty`] names it
@@ -853,16 +855,11 @@ impl Ty {
         // reads the shape in place rather than materialising a term vector (this is a
         // per-field-read hot path in the checker).
         if self.alts.is_none() {
-            return (self.tags == MAP_BIT)
-                .then(|| self.term_field_ty(key))
-                .flatten();
+            return self.term_field_ty_or_nil(key);
         }
         let mut acc: Option<Ty> = None;
         for term in self.terms_vec() {
-            if term.tags != MAP_BIT {
-                return None;
-            }
-            let t = term.term_field_ty(key)?;
+            let t = term.term_field_ty_or_nil(key)?;
             acc = Some(match acc {
                 Some(a) => a.union(t),
                 None => t,
@@ -871,22 +868,61 @@ impl Ty {
         acc
     }
 
+    /// One term's field reading, with the `nil` member folded in: `(:k nil)` and `(get nil
+    /// :k)` answer `nil` at runtime, so `(:k maybe-record)` over `nil | {k: int}` is
+    /// `nil | int` — the shape every optional field read has. A `nil | {…}` union is ONE
+    /// term (`nil` carries no refinement to keep it apart), tagged `nil|map` with the
+    /// record's shape, and reading it used to demand `tags == map` and give up — so the
+    /// whole read was UNKNOWN and every consumer downstream of an optional record lost
+    /// the field types the record had declared. Any other non-map tag (a vector, a string
+    /// — a keyword read raises on those) still declines.
+    fn term_field_ty_or_nil(&self, key: Symbol) -> Option<Ty> {
+        if self.tags & !(MAP_BIT | NIL_BIT) != 0 {
+            return None;
+        }
+        let from_map = if self.tags & MAP_BIT != 0 {
+            Some(self.term_field_ty(key)?)
+        } else {
+            None
+        };
+        let from_nil = (self.tags & NIL_BIT != 0).then(|| Ty::of(Tag::Nil));
+        match (from_map, from_nil) {
+            (Some(m), Some(n)) => Some(m.union(n)),
+            (Some(m), None) => Some(m),
+            (None, Some(n)) => Some(n),
+            (None, None) => None,
+        }
+    }
+
     /// [`record_field_ty`](Self::record_field_ty) for `(get r k default)`: the absence
     /// case reads as `default`'s type rather than `nil`. See [`RecordShape::field_ty_with_default`].
     pub fn record_field_ty_with_default(&self, key: Symbol, default: &Ty) -> Option<Ty> {
         let mut acc: Option<Ty> = None;
         for term in self.terms_vec() {
-            if term.tags != MAP_BIT {
+            // The `nil` member reads as the default — `(get nil :k 7)` is `7` — see
+            // `term_field_ty_or_nil` for why a `nil | {…}` union is one term.
+            if term.tags & !(MAP_BIT | NIL_BIT) != 0 {
                 return None;
             }
-            let shape = term.fields.as_deref()?;
-            let t = if !shape.fields.contains_key(&key) && shape.is_open() {
-                match term.map_kv.as_deref() {
-                    Some((_, v)) => v.clone().union(default.clone()),
-                    None => shape.field_ty_with_default(key, default.clone()),
-                }
+            let from_nil = (term.tags & NIL_BIT != 0).then(|| default.clone());
+            let from_map = if term.tags & MAP_BIT != 0 {
+                let shape = term.fields.as_deref()?;
+                Some(if !shape.fields.contains_key(&key) && shape.is_open() {
+                    match term.map_kv.as_deref() {
+                        Some((_, v)) => v.clone().union(default.clone()),
+                        None => shape.field_ty_with_default(key, default.clone()),
+                    }
+                } else {
+                    shape.field_ty_with_default(key, default.clone())
+                })
             } else {
-                shape.field_ty_with_default(key, default.clone())
+                None
+            };
+            let t = match (from_map, from_nil) {
+                (Some(m), Some(n)) => m.union(n),
+                (Some(m), None) => m,
+                (None, Some(n)) => n,
+                (None, None) => return None,
             };
             acc = Some(match acc {
                 Some(a) => a.union(t),

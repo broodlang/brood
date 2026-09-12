@@ -255,3 +255,36 @@ fn int_literal_return_type_flows_through_checker() {
         file_warnings(src2)
     );
 }
+
+// A field read over `nil | record` is `nil | field`, never unknown: `(:k nil)` answers
+// `nil` at runtime and `(get nil :k d)` answers `d`, so the `nil` term contributes those
+// rather than aborting the read — which had made every optional record's fields unknown
+// downstream of the first `(:orig maybe)`.
+#[test]
+fn a_field_read_over_a_maybe_record_keeps_the_field_type() {
+    let src = "\
+         (defmodule t)\n\
+         (deftype cs (record &open :orig (record &open :offset int)))\n\
+         (sig want-int (int -> int))\n\
+         (defn want-int (n) n)\n\
+         (sig f ((or nil cs) -> int))\n\
+         (defn f (st) (let (o (:orig st)) (want-int (+ 1 (if o (:offset o) 0)))))\n\
+         (sig g ((or nil cs) -> int))\n\
+         (defn g (st) (want-int (+ 1 (:offset (get st :orig {:offset 0})))))\n\
+         (sig h ((or nil cs) -> int))\n\
+         (defn h (st) (want-int (:offset (:orig st))))";
+    let strict = file_warnings_mode(src, true);
+    assert!(
+        !strict
+            .iter()
+            .any(|w| w.contains("t/want-int") && (w.contains("number") || w.contains("got any"))),
+        "{strict:?}"
+    );
+    // …and the honest `nil` is still there for a caller that forgets the guard
+    assert!(
+        strict
+            .iter()
+            .any(|w| w.contains("t/want-int: argument 1 expects int, got nil | int")),
+        "{strict:?}"
+    );
+}
