@@ -544,7 +544,9 @@ preview following the cursor lands in the right part of a long paragraph."
 
 (defn- md-heading (line src width)
   ;; the heading text under its face, underlined for the top two levels
-  (let (level (md-heading-level line)
+  ;; only ever called on a heading line, so the level is never nil here — the `0` says so
+  ;; to the checker without changing what runs
+  (let (level (or (md-heading-level line) 0)
         text (string/trim (string/substring line level (string/length line)))
         n (string/length text)
         head [text (if (= n 0) '() (list [0 n md-face-heading])) src])

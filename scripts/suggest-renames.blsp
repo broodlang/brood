@@ -44,10 +44,12 @@ before giving up."
   (let (parts (string/split n "-"))
     (when (> (count parts) 1)
       (first (seq/filter (map (range 1 (count parts))
-                       (fn (i)
-                         (str (reduce (take parts i) "" (fn (a b) (if (= a "") b (str a "-" b))))
-                           "/"
-                           (reduce (drop parts i) "" (fn (a b) (if (= a "") b (str a "-" b)))))))
+                           (fn (i)
+                             (str (reduce (take parts i)
+                                    ""
+                                    (fn (a b) (if (= a "") b (str a "-" b))))
+                               "/"
+                               (reduce (drop parts i) "" (fn (a b) (if (= a "") b (str a "-" b)))))))
                (fn (q) (bound? (string/->symbol q))))))))
 
 (defn- stdin-lines (acc)

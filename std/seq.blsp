@@ -217,6 +217,7 @@ input. `(zip-with + '(1 2) '(3 4))` → `(4 6)`.
 
     (seq/enumerate [:a :b])    → ([0 :a] [1 :b])"
   (enumerate-acc 0 (seq coll) nil))
+(sig enumerate (seqable -> (or nil (list (tuple int any)))))
 
 (defn- index-where-from (pred coll i)
   (cond
@@ -495,6 +496,7 @@ The pairwise sibling of `zip-with`, which combines instead of pairing.
 
     (seq/zip [1 2] [:a :b])   → ([1 :a] [2 :b])"
   (%zip a b))
+(sig zip (seqable seqable -> (or nil (list (tuple any any)))))
 
 (defn xmap (f)
   "The `map` stage as a transducer: `(f x)` for each input. Compose with `comp`, run

@@ -980,6 +980,27 @@ impl Ty {
         this.tuple.as_deref()
     }
 
+    /// The type at tuple position `n` — exact over a UNION of tuple terms too (2026-09-12):
+    /// `(tuple 0 nil) | (tuple int pair)` at position 0 is `0 | int`, since each term is
+    /// nothing but a vector of a known shape and position `n` of the union is the union of
+    /// the positions. `None` when any term is not such a tuple, or is too short — the same
+    /// refusal [`Ty::tuple_elems`] makes for one term. What a destructuring `[j acc] st`
+    /// over a fold accumulator reads: without this the union fell to `elem_ty` — every
+    /// element of every term — and `j` came out `nil | int | pair`, which `inc` widened to
+    /// `number` (a strict false positive in `std/editor/markdown`).
+    pub fn tuple_elem_at(&self, n: usize) -> Option<Ty> {
+        let terms = self.terms_vec();
+        let mut out = Ty::NEVER;
+        for term in &terms {
+            if term.tags != VECTOR_BIT {
+                return None;
+            }
+            let elem = term.tuple.as_deref()?.get(n)?.clone();
+            out = out.union(elem);
+        }
+        Some(out)
+    }
+
     /// A keyword-literal (singleton) type — exactly the keyword `sym`. Unions of
     /// these build an enumerated keyword type, e.g. `(or :maximized :fullboth)`.
     pub fn keyword_lit(sym: Symbol) -> Ty {

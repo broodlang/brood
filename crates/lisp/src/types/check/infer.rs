@@ -1200,9 +1200,11 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     // exactly the element (a tuple position when the index is literal).
     if value::symbol_is(head, "%vector-ref") && items.len() == 3 {
         let coll_ty = expr_ty(heap, items[1], ctx)?;
-        if let (Some(elems), Value::Int(n)) = (coll_ty.tuple_elems(), items[2]) {
+        if let Value::Int(n) = items[2] {
             if n >= 0 {
-                return elems.get(n as usize).cloned();
+                if let Some(elem) = coll_ty.tuple_elem_at(n as usize) {
+                    return Some(elem);
+                }
             }
         }
         return coll_ty.elem_ty();
@@ -1975,17 +1977,25 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         // An unknown element is `any` here — still sound, and the accumulator's own closure
         // (`(fn (m s) (math/max m (string/length s)))` over an untyped `lines`) is what
         // matters.
+        // A FEW steps, not one (2026-09-12): a tuple accumulator whose slots feed each
+        // other stabilises one step later than a scalar — `[0 '()]` under `[(inc j) (cons
+        // j acc)]` goes `(tuple 0 nil)` → `(tuple int list<0>)` → `(tuple int list<int>)`,
+        // and only the third iterate contains the fourth. Read after one step it fell to
+        // the `any`-seeded reading, where `j` is `number` — a strict false positive in
+        // `std/editor/markdown`. Bounded: the union can only grow, a `Ty` is bounded in
+        // size (KI-13), and four steps covers a slot feeding a slot feeding a slot.
         if let Some(i) = &init_ty {
             let e = elem.clone().unwrap_or(Ty::ANY);
-            if let Some(step) = callback_ret(heap, f, &[Some(i.clone()), Some(e.clone())], ctx) {
-                let acc = i.clone().union(step);
-                if let Some(again) =
-                    callback_ret(heap, f, &[Some(acc.clone()), Some(e.clone())], ctx)
-                {
-                    if again.is_subtype(&acc) {
-                        return Some(if ran_at_least_once { again } else { acc });
-                    }
+            let mut acc = i.clone();
+            for _ in 0..4 {
+                let Some(step) = callback_ret(heap, f, &[Some(acc.clone()), Some(e.clone())], ctx)
+                else {
+                    break;
+                };
+                if step.is_subtype(&acc) {
+                    return Some(if ran_at_least_once { step } else { acc });
                 }
+                acc = acc.union(step);
             }
         }
         let b = callback_ret(heap, f, &[Some(Ty::ANY), elem], ctx);

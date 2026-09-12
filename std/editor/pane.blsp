@@ -214,12 +214,13 @@ in the same place (Emacs `rotate-frame`'s buffer half)."
   (let (paths (pane-leaf-paths tree)
         k (count paths)
         payloads (map paths (fn (p) (pane-payload-at tree p))))
-    (fold (seq/zip paths (range k))
+    (fold (seq/enumerate paths)
       tree
       (fn (t pair)
-        (let ([path i] pair
+        (let ([i path] pair
               from (nth payloads (math/mod (- i n) k)))
           (pane-update-path t path (fn (_) from)))))))
+(sig pane-rotate (map &optional int -> map))
 
 ;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
 (check-allow :non-tail-recursion

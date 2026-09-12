@@ -839,10 +839,88 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-09** — the wasm cooperative scheduler was compiled on every CI run and executed on none
 - **2026-09-09** — the bare namespace gets a gate: 264 names recorded, a new one fails by name
 - **2026-09-09** — KI-122: the KI-120 tripwire was crying wolf on bedit, on a false claim
+- **2026-09-12** — `filter` joins its complement in `seq/`; `remove` becomes `reject` (ADR-329), and docstring `[[links]]` finally render (ADR-330)
 
 ---
 
 ## Recent — full entries
+
+## 2026-09-12 — `filter` joins its complement in `seq/`; `remove` becomes `reject` (ADR-329), and docstring `[[links]]` finally render (ADR-330)
+
+**The wart.** `filter` was bare; its complement was `seq/remove`. One operation, two
+namespaces — and the only place in the sequence library where that was true, since
+`seq/filterv`, `seq/keep`, `seq/xfilter`/`xremove` and `seq/lfilter`/`lremove` had all
+moved in the `19405319` wave. So you could not find the negative from the positive:
+`(filter xs p)` needs no import, `(remove xs p)` is unbound unless you know to reach for
+`seq/`. And `remove` was the wrong word for it — it reads as element removal, which is
+what its neighbours `seq/remove-nth` and `multimap/remove-value` actually do.
+
+**Moved the positive, not duplicated it.** ADR-227 forbids re-export aliases, so
+`seq/filter` beside a bare `filter` was never available. Bare `filter` is gone;
+`seq/remove` → `seq/reject`, `xremove` → `xreject`, `lremove` → `lreject`, and
+`seq/rejectv` is new beside `seq/filterv`. The *family* is why the positive moved rather
+than the negative coming bare: six of the eight names (the `v`/`x`/`l` layers) cannot be
+bare at all, so a bare pair would still have left four layers split.
+
+**The prelude keeps a private `%filter`, and the reason is not the obvious one.** Macro
+expansion was the expected constraint — `defmodule`'s clause readers, `match`'s map-pattern
+reader, `defbehaviour` — the same one that pinned `mapcat`/`mapv`/`take-while` last time.
+The decisive one was different: **`require-one` itself filters.** `%std-edges-for`,
+`%merge-require-edges!`, `%require-drop-waiter!` and `%bundle-short-collides?` are the
+require machinery, so an `%autoload` stub there would call `require-one` from inside
+`require-one` and recurse. That turned a per-site judgement into one prelude-wide rule —
+the prelude says `%filter`, everything else says `seq/filter` — which is both simpler and
+the only version that cannot be got wrong at a new call site.
+
+**Three things caught what the sweep missed, and each is worth naming.**
+
+- **`prelude_hygiene` caught `std/protocol.blsp`** — a prelude file that does not live under
+  `std/prelude/`, so a directory-shaped sweep never saw it. It is a macro body, so it needed
+  `%filter`. This is precisely the class that gate exists for and it fired on the first run.
+- **`check-corpora` caught `breakage/` and `scripts/`** — 11 names in files no test run
+  reaches. The runtime gates were all green while this was red, exactly as its own message
+  warns.
+- **`doc_snippets_test` caught a doc I broke while fixing docs**: I wrote `seq/mapv` in
+  `language.md`, but `mapv` is one of the nine names pinned BARE in the prelude. The gate
+  that executes every qualified call head in a doc block failed by name.
+
+**Argument order was stale in the two shipped AI references.** `docs/brood-for-claude.md`
+and the `writing-brood` skill still showed `(map sq xs)`, `(filter math/even? xs)`,
+`(reduce + 0 xs)` — callback-first, from before ADR-308's data-first reorder. Those files
+are baked into the binary and dropped into every scaffolded project by `nest new`, so they
+were teaching an order the checker rejects. Fixed on the lines this wave touched;
+`docs/language.md` has more of the same further out (see below).
+
+**ADR-330 — the `[[name]]` convention was write-only.** About forty docstrings cite each
+other with a wiki-link (`io/inspect` cites `[[puts]]`, `debug/trace-hold` cites
+`[[trace-release]]`) and **nothing rendered any of them**: `docsite`'s `inline` handled
+backticks and `**bold**` and stopped, and `nest doc` emitted the docstring verbatim. Both
+surfaces printed the brackets. They render now — real anchors on the docsite, code spans in
+`nest doc`, which additionally **qualifies** a bare reference with the citing definition's
+module (`seq/filter`'s `[[reject]]` prints `seq/reject`), because terminal Markdown has no
+link to supply the context a bare spelling is missing. Two guards, both load-bearing: a name
+has no spaces, so literal vectors in docstrings (`[[hatch :path "…"]]`) stay as written; and
+with no module to resolve against, a bare reference is left visible rather than pointed at
+`#d-nil-<name>` — a visible `[[name]]` is a missing argument someone can report, a dead link
+is not.
+
+**The migration is in the ledger.** `filter` is the entry that matters: a prelude name nearly
+every file uses, so without it the wave lands downstream as `unbound symbol: filter` with
+nowhere to go. It now says `— renamed to seq/filter (ADR-329)` and `--fix-renames` applies it.
+`docs/bare-names.md` loses `filter` (the ADR-233 gate reds otherwise), and the checker's
+curated signature moved to the qualified key for the reason that table already states — a bare
+key would suppress the unbound lint on a name that no longer exists bare.
+
+**Green:** 5641/5641 in-language, 1042/1042 Rust, 271/271 nest+cli, clippy `--all-features`
+clean, `nest format --check` clean, `nest check` clean, `check-corpora` clean, and bedit's
+`nest check` clean against this tree (the user had already migrated it in `dc102e38`).
+
+**Left undone, deliberately.** The `l*` combinators were renamed **in place**: ADR-291 pins
+their definitions in the prelude and its own note says reopening that needs the ADR reopened,
+so `seq/lfilter` and friends still are not referable bare under `(:use seq)`. And
+`docs/language.md` carries pre-ADR-308 callback-first order in sections this wave did not
+touch — real drift, but a separate pass.
+
 
 The last day or two in full; older sessions are condensed into the digest above,
 their full text in [devlog-archive.md](archive/devlog-archive.md) (and git history).
@@ -12564,10 +12642,15 @@ And the three things ADR-327 had scoped out of `deftype`: resolution through the
 new `reflect/type-aliases`), and one level of unrolling for a recursive alias before it reads
 as `any` (see the ADR's addendum).
 
-Also found by probe, landed separately with the day's red strict gate: the fold accumulator
-widened a tuple slot to `number` when the OTHER slot changed (`(fold xs [0 '()] (fn (st x)
-(let ([j acc] st) [(inc j) (cons j acc)])))` inferred `(tuple number pair)`, `j` should be
-`int`) — a strict false positive, and one of the three std findings.
+**Landing the day's red strict gate turned up three more**, each general rather than a
+patch to the file that showed it: the fold accumulator widened a tuple slot to `number`
+when the OTHER slot changed (`Ty::tuple_elem_at` reads a position exactly over a union of
+tuple terms, and the fixpoint iterates a bounded few steps instead of one); a lambda handed
+to a function whose signature declares an arrow got nothing from it (`arrow_callback_seed`,
+the general case of the fold/element seeds — eleven findings in the rectangle ops closed by
+the rule); and `seq/enumerate`/`seq/zip` had no signatures, so an indexed fold's index was
+`any`. A type variable inside a refinement inside `or` does not bind — `zip` cannot carry
+its element types yet; recorded in the status document.
 
 ## 2026-09-12 — A fold over a non-empty sequence ran its step; and `string/fields`
 

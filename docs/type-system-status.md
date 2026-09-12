@@ -849,8 +849,11 @@ of its own (`tests/strict_ratchet_test.blsp`).
   `(fold xs [0 '()] (fn (st x) (let ([j acc] st) [(inc j) (cons j acc)])))` infers
   `(or (tuple 0 nil) (tuple number pair))` — the `j` slot widens to `number` when the
   OTHER slot changes, and stays `int` when it does not (`(tuple int nil)`); a scalar
-  accumulator is right. Destructuring a union of two tuple terms joins the slot at tag
-  level. One of the three std findings was exactly this. Landed with the gate fix.
+  accumulator is right. Two causes, both fixed the same day: a position read over a UNION
+  of tuple terms fell to the whole-element union (`tuple_elems` answers only for one term;
+  `Ty::tuple_elem_at` is exact over the union), and the fold fixpoint took exactly one step
+  where a tuple whose slots feed each other stabilises on the second — it iterates, bounded.
+  `[0 '()]` under `[(inc j) (cons j acc)]` is `(tuple int list<int>)`.
 - **`BROOD_CHECK_STRICT=1` reached `nest check` only.** The flag catalogue and ADR-298
   named it as the strict switch; `brood --check`, the REPL, the LSP and
   `check-string-here` ran plain with it set. The env read is the kernel flag's own
@@ -900,7 +903,22 @@ arguments; one was kept, and both decisions are pinned in
 
 And one contract: `index-of` declared `(any any …)` "because it is polymorphic", which
 made every parameter handed to it `any` in every module; it is `(or nil string seqable)`,
-which is what the body accepts.
+which is what the body accepts. `seq/enumerate` and `seq/zip` had none; `enumerate`'s
+`(tuple int any)` element is what types the index of an indexed fold.
+
+**And the general callback seed**, found landing the strict gate: a lambda handed to a
+function whose signature declares an arrow at that position was walked with NO knowledge
+of the arrow — only `fold` and the named element combinators seeded their callbacks, so
+`(sig rect-fold-lines (… (buffer int int int -> buffer) -> …))` bought its lambdas nothing
+and strict reported the arithmetic the arrow declares as `int`. `arrow_callback_seed` is
+the general case, bound the way the element seed binds (as inferred, since a declared arrow
+may over-approximate). Eleven findings in `std/editor/buffer` closed by one rule.
+
+**A limitation met on the way, left open:** a type variable inside a refinement inside a
+union does not bind — `(sig zip ((or nil (list ?A) (vector ?A)) … -> (list (tuple ?A ?B))))`
+leaves `?A` unbound against a `nil | list<int>` argument, so `zip` cannot carry its
+elements' types today. `(or ?A nil)` binds (the 2026-08-29 rule); the refined case
+needs unification through the alternatives.
 
 What remains is **not an inference gap**, and the sample says so with numbers: of the
 624, **152 are predicates** (`list?`, `ws?`, `hl-close?`, `tempo?` …) whose domain

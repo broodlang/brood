@@ -1137,7 +1137,7 @@ query-replace, re-indentation, and transpose are all this. Composes `delete-char
             (let (start (text/line->char rope line)
                   content (rect-line-content rope line))
               [start (math/min left content) (math/min right content)])))))))
-(sig rect-spans (buffer -> (or nil list)))
+(sig rect-spans (buffer -> (or nil (list (tuple int int int)))))
 
 (defn extract-rectangle (buf)
   "The rectangle's rows as a list of strings, one per line top..bottom, each right-padded
@@ -1164,7 +1164,7 @@ with spaces to the rectangle's full width — so a kill round-trips through
   ;; valid, then park point at the rectangle's top-left. `spans` is `rect-spans`' output.
   (let (edited (fold (reverse spans) buf (fn (b sp) (let ([start l r] sp) (f b start l r)))))
     (goto-char edited (+ (first (first spans)) (second (first spans))))))
-(sig rect-fold-lines (buffer list any -> buffer))
+(sig rect-fold-lines (buffer (list (tuple int int int)) (buffer int int int -> buffer) -> buffer))
 
 (defn delete-rectangle (buf)
   "Delete `[left, right)` of every line the rectangle spans, closing the gap; point lands
@@ -1232,7 +1232,7 @@ returns to where it started. `rows` empty leaves `buf` unchanged. Throws if read
           start-line (text/char->line rope start-point)
           col (- start-point (text/line->char rope start-line)))
       (goto-char
-        (fold (seq/zip (range (count rows)) rows)
+        (fold (seq/enumerate rows)
           buf
           (fn (b pair)
             (let ([i row] pair

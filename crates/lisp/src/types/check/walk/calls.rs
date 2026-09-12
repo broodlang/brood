@@ -493,6 +493,69 @@ pub(super) fn element_callback_seed(
     Some((items.len() - 1, crate::types::Sig::new(vec![elem], Ty::ANY)))
 }
 
+/// For any call whose callee's signature declares an ARROW at position `i` and whose
+/// argument there is a single-clause `fn` literal of that arity: `(i, arrow)` — the
+/// seed for walking it. The general case of the two seeds above (2026-09-12): those
+/// name their combinators, and every other higher-order function — a `(sig each3
+/// (… (buffer int int int -> buffer) -> …))` of the author's own — handed its lambda
+/// nothing, so the lambda's parameters inferred from their own body (`(+ start l)` →
+/// `number`) and strict reported the very arithmetic the arrow declares as `int`. The
+/// arrow's parameters are exactly what the callee promises to hand over (and its body is
+/// checked against that promise, ADR-273), so binding them is the same move
+/// `element_callback_seed` makes with an element type — and bound the same way, as an
+/// INFERRED type, since a declared arrow may over-approximate.
+///
+/// The callee is resolved as the call check resolves it: a local whose own type is an
+/// arrow first, then the file's declaration, the global's signature, the file's
+/// inference. First matching position only (the seed API carries one).
+pub(super) fn arrow_callback_seed(
+    heap: &Heap,
+    items: &[Value],
+    ctx: &Ctx,
+) -> Option<(usize, crate::types::Sig)> {
+    let Some(&Value::Sym(head)) = items.first() else {
+        return None;
+    };
+    let callee = ctx
+        .get(head)
+        .as_ref()
+        .and_then(Ty::as_arrow)
+        .cloned()
+        .or_else(|| ctx.declared_sig(head))
+        .or_else(|| {
+            (!ctx.is_lexical_local(head) && !ctx.is_file_global(head))
+                .then(|| sig_of(heap, head))
+                .flatten()
+        })
+        .or_else(|| {
+            (!ctx.is_lexical_local(head))
+                .then(|| ctx.inferred_fn_sig(head))
+                .flatten()
+        })?;
+    for (i, &arg) in items[1..].iter().enumerate() {
+        let Some(param) = callee.param(i) else { break };
+        let Some(arrow) = param.as_arrow() else {
+            continue;
+        };
+        if arrow.rest.is_some() {
+            continue;
+        }
+        let Some(f_items) = list_items(heap, arg) else {
+            continue;
+        };
+        if !matches!(f_items.first(), Some(&Value::Sym(h)) if is_fn_head(h)) {
+            continue;
+        }
+        let wanted = arrow.params.len();
+        let fits = matches!(lambda_literal_arity(heap, arg), Some(a) if a.min == wanted && a.max == Some(wanted));
+        if !fits {
+            continue;
+        }
+        return Some((i + 1, crate::types::Sig::new(arrow.params.clone(), Ty::ANY)));
+    }
+    None
+}
+
 /// The **gradual** type of an expression in *assignment* position — the value
 /// flowing into a `(def x …)` whose `x` has a declared value type. This is the
 /// first consumer of [`GradualTy`] (ADR-024): the gradual `dynamic()` is what lets

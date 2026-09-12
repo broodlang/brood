@@ -941,7 +941,8 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         // `(fold s 5381 (fn (h c) (bit/xor (* h 31) …)))` read as `any` and `(* h 31)` as
         // `number`, while the fold as a whole was already known to be an int.
         let seeded_callback = fold_callback_seed(heap, form, &items, ctx)
-            .or_else(|| element_callback_seed(heap, &items, ctx));
+            .or_else(|| element_callback_seed(heap, &items, ctx))
+            .or_else(|| arrow_callback_seed(heap, &items, ctx));
         // A body sequence threads its scope: a **guard that diverges** narrows every form
         // after it (see [`diverging_guard_scope`]). Only for a `do` — in any other form
         // the items are arguments, evaluated in one scope, and there is no "after".

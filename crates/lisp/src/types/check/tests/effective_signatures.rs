@@ -49,6 +49,48 @@ fn a_keyword_call_is_not_read_as_a_demand() {
     assert!(sigs[0].1.starts_with("(any) ->"), "{sigs:?}");
 }
 
+// A tuple accumulator whose slots feed each other stabilises a step later than a scalar,
+// and a position read over a UNION of tuple terms is exact (2026-09-12): `[0 '()]` under
+// `[(inc j) (cons j acc)]` is `(tuple int list<int>)`, where the one-step fixpoint fell to
+// the `any`-seeded reading and `j` came out `number` — a strict false positive in
+// `std/editor/markdown`'s `md-spread`.
+#[test]
+fn a_tuple_accumulator_that_feeds_itself_reaches_its_fixpoint() {
+    let sigs = signatures(
+        "(defn t5 (xs) (fold xs [0 '()] (fn (st x) (let ([j acc] st) [(inc j) (cons j acc)]))))",
+    );
+    assert_eq!(sigs.len(), 1, "{sigs:?}");
+    assert!(sigs[0].1.contains("(tuple int, list<int>)"), "{sigs:?}");
+    assert!(!sigs[0].1.contains("number"), "{sigs:?}");
+}
+
+// A lambda handed to ANY function whose signature declares an arrow at that position is
+// walked with the arrow's parameters (2026-09-12) — the general case of the fold and
+// element-combinator seeds. Under strict, `(+ start l)` inside the lambda is the `int`
+// the arrow declares, not the `number` the lambda's own body would infer.
+#[test]
+fn a_lambda_is_walked_under_the_arrow_its_callee_declares() {
+    let src = "\
+         (defmodule ar)\n\
+         (defn- each3 (xs f) (fold xs 0 (fn (acc sp) (let ([a b c] sp) (f acc a b c)))))\n\
+         (sig each3 ((list (tuple int int int)) (int int int int -> int) -> int))\n\
+         (defn use-it (xs) (each3 xs (fn (acc a b c) (math/quot (+ a b) c))))\n\
+         (sig use-it ((list (tuple int int int)) -> int))\n\
+         (defn wrong (xs) (each3 xs (fn (acc a b c) (string/length a))))";
+    let strict = file_warnings_mode(src, true);
+    assert!(
+        !strict.iter().any(|w| w.contains("math/quot")),
+        "the arrow's int parameters must reach the lambda: {strict:?}"
+    );
+    // …and the seed is a real binding: a misuse of the seeded parameter is reported
+    assert!(
+        strict
+            .iter()
+            .any(|w| w.contains("string/length: argument 1 expects string, got int")),
+        "{strict:?}"
+    );
+}
+
 #[test]
 fn file_signatures_prefer_and_mark_a_declaration() {
     let sigs = signatures("(sig f (int -> string))\n(defn f (n) \"x\")");
