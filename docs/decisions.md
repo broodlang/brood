@@ -21904,3 +21904,39 @@ fragment names values the model keeps between turns.
 would leak into a pure view, and unbounded. *Threading the table through `view`'s
 signature*: every `ui-run` app changes for a feature most never touch. *Diffing harder in
 the frontend*: the frontend already diffs; the cost was producing the ops.
+
+## ADR-337 — Text contrast is a setting: `gui-text-contrast!` lifts light-on-dark stems
+
+**Status:** accepted and implemented 2026-09-12 (`gui/text-contrast`, `%gui-text-contrast!`;
+`Renderer::set_text_contrast`, `contrast_lut`).
+
+**Context.** ADR-332 blends glyph coverage in linear light, which is the correct
+composite and the reason a stem no longer looked fuzzy. It is also why light text on a
+dark theme reads *thin* next to the same font in Kitty, WezTerm or macOS: perceptually,
+a partially covered edge pixel blended in linear light carries less ink than the eye
+expects, and the effect is one-sided — dark-on-light text under the same blend reads
+heavy if anything. Every renderer that blends in linear light grows a knob for this
+(Kitty's `text_gamma_adjustment`, Skia's contrast hack, FreeType's stem darkening); none
+of them can pick the value for the user, because it is a taste over a panel.
+
+**Decision.** A coverage curve `cov → 255·(cov/255)^(1/γ)`, applied to a monochrome
+glyph's coverage — per channel under subpixel text — **only where the text is lighter
+than the pixel it lands on** (a luma compare per pixel, so a dark glyph over a light
+band is untouched even on a dark theme) and never to a colour glyph. `γ` is
+`gui-text-contrast!`: 1.0 the plain blend and the runtime's default, clamped to 0.5..3.0;
+1.4–1.8 is the range the renderers above ship. Full and zero coverage are fixed points,
+so a glyph's interior and exterior never move — only its anti-aliased rim fills. A pure
+repaint: the glyph cache holds raw coverage, the curve is a 256-entry table consulted
+at composite time, and the retained frame is invalidated.
+
+**Consequences.** bedit ships `:text-contrast 1.4` in init.blsp as its own default — the
+primitive's default stays 1.0, since the runtime has no theme. The knob composes with
+`gui-text-aa!`: subpixel text gets the lift per channel. Two unit tests pin the shape:
+the curve's fixed points and monotone lift, and the one-sidedness (white on black gains
+ink at γ = 1.8, black on white renders identically at 1.0 and 1.8).
+
+**Alternatives rejected.** *Blend in sRGB space* (the "legacy" strategy): heavier text by
+accident, with the fuzz ADR-332 removed. *Stem darkening at rasterisation* (emboldening
+the outline): changes glyph shapes and advances, and the cache would need the value in
+its key. *A fixed lift in the renderer*: the value is a taste, and a setting is one
+line.

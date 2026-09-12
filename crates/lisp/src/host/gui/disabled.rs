@@ -70,6 +70,9 @@ pub fn line_height(_mult: f32) -> Result<(), String> {
 pub fn text_aa(_mode: TextAa) -> Result<(), String> {
     Err(NOT_COMPILED.into())
 }
+pub fn text_contrast(_gamma: f32) -> Result<(), String> {
+    Err(NOT_COMPILED.into())
+}
 /// The text anti-aliasing modes `gui-text-aa!` names, so the builtin parses its
 /// argument identically with or without the GUI compiled in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

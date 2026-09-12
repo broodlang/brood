@@ -222,6 +222,9 @@ enum UserEvent {
     /// Set how monochrome text is anti-aliased (gray / subpixel / auto) — for every
     /// open window and ones opened later. Behind `gui-text-aa!`. A pure repaint.
     TextAa { mode: TextAa },
+    /// Set the text contrast exponent — for every open window and ones opened later.
+    /// Behind `gui-text-contrast!`. A pure repaint.
+    TextContrast { gamma: f32 },
     /// Register a font family (interned `name`) from raw TTF bytes per style, so
     /// a face's `:family` can select it. Parsed on the GUI thread and shared by
     /// every renderer. Behind `gui-font-register`.
@@ -745,6 +748,21 @@ pub fn text_aa(mode: TextAa) -> Result<(), String> {
     Ok(())
 }
 
+/// `(gui-text-contrast! gamma)` — set the text contrast exponent on every window + the
+/// default for ones opened later. No-op (silently) if the GUI thread never started.
+pub fn text_contrast(gamma: f32) -> Result<(), String> {
+    if headless() {
+        return Ok(());
+    }
+    if let Ok(g) = gui() {
+        let _ = g
+            .lock()
+            .unwrap()
+            .send_event(UserEvent::TextContrast { gamma });
+    }
+    Ok(())
+}
+
 /// `(gui-title! id text)` — set window `id`'s title-bar text at runtime. Routed
 /// through the event-loop proxy like `font`; a no-op (silently) if the GUI thread
 /// never started or `id` isn't a live window.
@@ -917,6 +935,8 @@ struct RenderDefaults {
     line_height: f32,
     /// How monochrome text is anti-aliased.
     text_aa: TextAa,
+    /// The text contrast exponent (1.0 = the plain linear-light blend).
+    text_contrast: f32,
 }
 
 impl Default for RenderDefaults {
@@ -928,6 +948,7 @@ impl Default for RenderDefaults {
             bg: None,
             line_height: LINE_HEIGHT,
             text_aa: TextAa::Auto,
+            text_contrast: 1.0,
         }
     }
 }
@@ -992,6 +1013,7 @@ fn build_window(
     renderer.set_bg(defaults.bg);
     renderer.set_line_height(defaults.line_height);
     renderer.set_text_aa(defaults.text_aa);
+    renderer.set_text_contrast(defaults.text_contrast);
     Ok(Win {
         window,
         backend,
@@ -1287,6 +1309,13 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 self.defaults.text_aa = mode;
                 for w in self.wins.values_mut() {
                     w.renderer.set_text_aa(mode);
+                    w.window.request_redraw();
+                }
+            }
+            UserEvent::TextContrast { gamma } => {
+                self.defaults.text_contrast = gamma;
+                for w in self.wins.values_mut() {
+                    w.renderer.set_text_contrast(gamma);
                     w.window.request_redraw();
                 }
             }
