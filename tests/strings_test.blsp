@@ -638,3 +638,18 @@
     (assert= "" (string/bytes-> (string/->bytes ""))))
   (test "UTF-8 multi-byte character"
     (assert= "café" (string/bytes-> (string/->bytes "café")))))
+(describe "string/number-> and format's %x — hex on demand"
+  (test "number-> renders any radix and round-trips through ->number"
+    (assert= (string/number-> 255 16) "ff")
+    (assert= (string/number-> 0 16) "0")
+    (assert= (string/number-> -5 2) "-101")
+    (assert= (string/number-> 4095) "4095")
+    (assert= (string/->number (string/number-> 305419896 16) 16) 305419896)
+    (assert= (string/number-> 35 36) "z"))
+  (test "%x, %X, and a zero-filled or space-filled width"
+    (assert= (string/format "%x %X" 255 255) "ff FF")
+    (assert= (string/format "%02x%02x" 1 171) "01ab")
+    (assert= (string/format "%08x:" 4096) "00001000:")
+    (assert= (string/format "%4d|%s" 42 "x") "  42|x")
+    ;; a float through %x is not an error, it is rendered readably
+    (assert= (string/format "%x" 1.5) "1.5")))
