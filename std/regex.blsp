@@ -740,7 +740,11 @@ pattern used one way compiles one."
                  :start (get nfa :start)
                  :ngroups ngroups
                  ;; two slots per group (open, close) — plus group 0, the whole match
-                 :nslots (* 2 (inc ngroups))})
+                 :nslots (* 2 (inc ngroups))
+                 ;; a boundary pattern must keep scanning past a position no thread
+                 ;; survives (`regex-cap-run`); any other may stop there
+                 :wordb (any? (get nfa :states)
+                          (fn (st) (or (= (get st :t) :wordb) (= (get st :t) :nwordb))))})
         (table/put regex-cap-cache pattern obj)
         obj)
       hit)))
@@ -822,14 +826,15 @@ walk — everything after it is lower priority, so it cannot improve on this."
             (regex-cap-scan states threads (inc j) codes code pos n best added2 acc2))
           (regex-cap-scan states threads (inc j) codes code pos n best added acc))))))
 
-(defn- regex-cap-run (states start nslots codes n pos threads added best)
+(defn- regex-cap-run (states start nslots codes n pos threads added best wordb?)
   "Run the VM from `pos` to the end of input; returns the winning capture slots, or nil.
 A fresh start thread is injected at every position — at the BACK of the list, so a
 match beginning further left always outranks one beginning further right — and only
 until something matches, after which a later start could only be worse. No live
 thread ends the run only once something HAS matched: before that, a later start can
 still succeed — an injected start whose `\\b` failed here leaves this position empty
-and the next one open."
+and the next one open. Only a boundary pattern (`wordb?`) can do that: for any other
+an injected start always yields a thread, so an empty position IS the end."
   (if (> pos n)
     best
     (let ([added2 threads2] (if (nil? best)
@@ -842,7 +847,7 @@ and the next one open."
                                 added
                                 threads)
                               [added threads]))
-      (if (and (empty? threads2) (not (nil? best)))
+      (if (and (empty? threads2) (or (not (nil? best)) (not wordb?)))
         best
         (let (code (if (< pos n) (nth codes pos) nil)
               [best2 added3 next-threads] (if (empty? threads2)
@@ -857,7 +862,7 @@ and the next one open."
                                               best
                                               0
                                               [])))
-          (regex-cap-run states start nslots codes n (inc pos) next-threads added3 best2))))))
+          (regex-cap-run states start nslots codes n (inc pos) next-threads added3 best2 wordb?))))))
 
 (defn- regex-cap-group (s caps k)
   "Group `k` as {:start :end :text}, or nil when it never participated."
@@ -891,7 +896,8 @@ still means the start of the whole string even when scanning a later suffix."
                from
                []
                0
-               nil))
+               nil
+               (get obj :wordb)))
     (when caps (regex-cap-match obj s caps))))
 
 ;; ---- public entry points ----------------------------------------------------
