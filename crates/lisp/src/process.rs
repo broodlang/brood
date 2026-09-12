@@ -110,6 +110,8 @@ pub(crate) use scheduler::tick_capture_n;
 // fn directly.
 #[cfg(all(test, feature = "jit"))]
 pub(crate) use scheduler::set_capture_run;
+#[cfg(test)]
+pub(crate) use scheduler::set_reduction_budget_for_test;
 
 pub(crate) use mailbox::{deliver, is_alive, read_name_address};
 pub(crate) use monitor::{

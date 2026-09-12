@@ -863,15 +863,33 @@ pub(crate) fn vm_run_bc(
                                 // chunk and frame layout are the spliced ones.
                                 cur_arm = ArmHandle::new(ra);
                             }
-                            exec_chunk(
-                                heap,
-                                &cur_arm,
-                                &mut cur_ip,
-                                cur_base,
-                                cur_env,
-                                capture,
-                                &mut cur_back_edges,
-                            )
+                            if jit_outcome == Some(2) && capture {
+                                // A native PREEMPT: the reduction budget is spent, so yield
+                                // NOW with this frame — do not hand it to the interpreter
+                                // "until its own loop-top notices". That interpreter run
+                                // reaches its first safepoint inside the CALLEE's entry (a
+                                // loop body's `Call` pushes a frame before its `SelfCall`
+                                // ticks), so the capture landed on the callee at ip 0, the
+                                // resume ran the callee natively and returned into this loop
+                                // MID-BODY, and the loop then interpreted up to 256
+                                // iterations before its back-edge boundary re-tiered it.
+                                // Measured 2026-09-12 on a 5M-iteration native loop with one
+                                // call: 3 252 preempts, 839 607 interpreted iterations,
+                                // −36% instructions with preemption disabled. Captured here
+                                // the frame is at ip 0 (or at the journal's resume point,
+                                // applied just above), which is exactly what a resume re-tiers.
+                                Ok(ChunkExit::Preempt)
+                            } else {
+                                exec_chunk(
+                                    heap,
+                                    &cur_arm,
+                                    &mut cur_ip,
+                                    cur_base,
+                                    cur_env,
+                                    capture,
+                                    &mut cur_back_edges,
+                                )
+                            }
                         }
                     }
                 } else {

@@ -453,6 +453,14 @@ impl Drop for TreeWalkGuard {
 /// Reduction tick for the capture-mode VM driver: like [`tick`] but **returns**
 /// whether the budget is exhausted (so the driver captures + yields a `Preempted`).
 /// Decrements otherwise. The budget is refreshed by `run_one` at the next resume.
+/// Test hook: set this thread's remaining reduction budget directly, so a unit test can
+/// drive the capture-mode VM through preemptions without a scheduler (`run_one` refills
+/// the budget on every resume; a test standing in for it must too).
+#[cfg(test)]
+pub(crate) fn set_reduction_budget_for_test(n: u32) {
+    REDUCTIONS.with(|r| r.set(n));
+}
+
 pub(crate) fn tick_capture() -> bool {
     REDUCTIONS.with(|r| {
         let n = r.get();

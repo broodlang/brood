@@ -1913,6 +1913,14 @@ starts with cold per-process caches (ADR-215 shares the compiled arm, not its IC
 leads: receive/matcher cost (§7.3's receive-as-native-exit) and a warm IC seed for a
 spawned copy of a shared arm.
 
+**The call itself, counted (later that evening).** A 5M-iteration native loop with one
+native call read 640 instructions per call — and 40% of that was KI-133 (a preempted loop
+resumed on the interpreter through its callee's frame). Fixed, the loop reads **~390
+instructions / ~95 cycles per native→native call** against ~1 400 for the VM's; the
+`jit_run_fast_link` ceremony — roots truncate/extend, ~10 heap fields saved and restored,
+`stamp_stack_limit_if_outermost`, IC bases, the gateway sequence — is the remaining cost, and
+the number the call-convention work has to beat.
+
 **4. A hotness-ordered compile queue — not needed.** The queue probe (§7.11) showed the
 compiler idle from 42–72 ms into every row once boot stopped feeding it; what remains
 arrives one arm at a time. Ordering a queue that is rarely deeper than one changes nothing

@@ -843,6 +843,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-12** — pre-compilation, counted: bytecode is 2.5 ms of `json`, Cranelift is 60–80 ms, and both persistence ideas are dead (compute-frontier §7.11)
 - **2026-09-12** — the tier threshold is a call threshold and it is 128 (ADR-333): boot stopped queueing 139 compiles ahead of the hot arm — `spawn` −31%, `fib` −18%, `bintree` −14%
 - **2026-09-12** — the refused arms are the hot core (108k activations on json, dispatch 43% of its main thread); leaf admission built and not landed; the lever is the native→native call (compute-frontier §7.12)
+- **2026-09-12** — KI-133: a preempted native loop resumed on the interpreter via its callee's frame — 5M-call loop 3.86 → 2.53 G instructions, the leaf-spliced one −72%
 - **2026-09-12** — the GUI retains its frame and repaints by cell row (ADR-332): a keystroke paints 0.3 ms instead of 4–13; whole-pixel ppem, subpixel text at 1× (`gui-text-aa!`), snapped hairlines, `gui-line-height!`
 - **2026-09-12** — `0xFF` reads: radix literals, the second ADR-169 reservation to pay out (ADR-334)
 - **2026-09-12** — a qualified reference loads its module on first use (ADR-335): `nest complete` 72 → 20 ms, five modules instead of 62
@@ -13070,4 +13071,15 @@ process rows: receive + matcher is 40–55% of quantum, and a spawned process's 
 miss as often as they hit. The hotness-ordered compile queue is closed on the queue probe's
 count — the compiler idles from ~50 ms in. All in compute-frontier §7.12; the lever it
 leaves is the native→native call convention.
+
+### 2026-09-12 — KI-133: the call-cost probe found a preemption bug, not a call cost
+
+The probe the day ended on — what does one native→native call cost — read 640 instructions
+and a profile full of `exec_chunk`. It was not the call: a preempted native loop was being
+handed to the interpreter and captured one frame too deep, inside its callee, so every
+preempt bought ~256 interpreted iterations. Fixed by yielding at the native preempt itself;
+5M-call loop 3.86 → 2.53 G instructions, the leaf-spliced variant 2.15 → 0.61 G, and the
+honest call cost is ~390 instructions. Rows barely move (they are short and their loops are
+refused anyway); every long-running native loop that calls anything was paying it. Details
+and the guard in KI-133.
 

@@ -2395,3 +2395,108 @@ fn a_self_tail_loop_is_elected_for_tiering_within_one_activation() {
          BACKEDGE_TIER_WEIGHT ≥ TIER_THRESHOLD), but jit_calls={calls} and jit_code is null"
     );
 }
+
+/// A native loop's PREEMPT must capture the loop's own frame at ip 0, not its callee's.
+///
+/// Before the fix in `vm_run_bc`'s outcome-2 arm, a preempted native loop was handed to the
+/// interpreter "until its loop-top noticed the spent budget"; the first safepoint that run
+/// reached was inside the callee's entry, so the capture landed on the callee at ip 0, the
+/// resume ran the callee natively and returned into the loop MID-BODY, and the loop then
+/// interpreted up to 256 iterations before its back-edge boundary re-tiered it — measured
+/// as 839 607 interpreted iterations across 3 252 preempts of a 5M-iteration loop (−36%
+/// instructions with preemption disabled). This drives the real capture-mode driver through
+/// the real entry point with a 300-reduction budget and asserts that once the loop is native
+/// every capture is the loop's frame at ip 0. Sabotage-verified: with the outcome-2 capture
+/// removed, the captures land on `pre-g`.
+#[cfg(feature = "jit")]
+#[test]
+fn a_native_preempt_captures_the_loop_frame_not_its_callee() {
+    use std::sync::atomic::Ordering::Acquire;
+    set_forced_ceiling(Some(Tier::Native));
+    let mut interp = crate::Interp::new();
+    // The callee is too big to leaf-splice (so the loop keeps a real call) and trivially
+    // lowerable; the loop is a self-tail accumulator with that one non-tail call.
+    interp
+        .eval_str(
+            "(defn pre-g (x) (cond (< x 0) (- 0 x) (< x 10) (+ x 1) (< x 100) (+ x 2) \
+             (< x 1000) (+ x 3) (< x 10000) (+ x 4) (< x 100000) (+ x 5) \
+             (< x 1000000) (+ x 6) :else (+ x 7)))",
+        )
+        .expect("define pre-g");
+    interp
+        .eval_str("(defn pre-f (i acc) (if (< i 1) acc (pre-f (- i 1) (pre-g (- acc 7)))))")
+        .expect("define pre-f");
+    let f_id = match interp.eval_str("pre-f").expect("read pre-f back").unpack() {
+        crate::core::value::ValueRef::Fn(id) => id,
+        other => panic!("pre-f is not a closure: {other:?}"),
+    };
+    let f_arm = super::closure::compiled_arm_for(&interp.heap, f_id, 2)
+        .expect("a VM arm for pre-f")
+        .arc()
+        .clone();
+    let installed = |arm: &CompiledArm| {
+        let c = arm.jit_code.load(Acquire);
+        !c.is_null() && c != crate::jit::BAILED && c != crate::jit::QUEUED
+    };
+    // Stand in for the scheduler: a capture-mode run with a small budget, refilled on
+    // every resume exactly as `run_one` does.
+    crate::process::set_capture_run(true);
+    crate::process::set_reduction_budget_for_test(300);
+    let heap = &mut interp.heap;
+    let mut outcome = vm_run_bc(
+        heap,
+        ArmHandle::new(f_arm.clone()),
+        &[Value::int(300_000), Value::int(0)],
+        EnvId::GLOBAL,
+        None,
+        true,
+    )
+    .expect("run pre-f");
+    let mut captures_after_native = 0u32;
+    let mut misplaced: Vec<(String, usize)> = Vec::new();
+    loop {
+        match outcome {
+            VmOutcome::Done(v) => {
+                assert!(
+                    matches!(v.unpack(), crate::core::value::ValueRef::Int(_)),
+                    "pre-f must finish with an int"
+                );
+                break;
+            }
+            VmOutcome::Preempted(s) => {
+                if installed(&f_arm) {
+                    captures_after_native += 1;
+                    let cur = s.cur.arm.arc();
+                    if cur.uid != f_arm.uid || s.cur.ip != 0 {
+                        misplaced.push((
+                            cur.dbg_name
+                                .map(crate::core::value::symbol_name_ref)
+                                .unwrap_or("<closure>")
+                                .to_string(),
+                            s.cur.ip,
+                        ));
+                    }
+                }
+                crate::process::set_reduction_budget_for_test(300);
+                let arm = s.cur.arm.clone();
+                outcome =
+                    vm_run_bc(heap, arm, &[], EnvId::GLOBAL, Some(s), true).expect("resume pre-f");
+            }
+            VmOutcome::Suspended(_) => panic!("pre-f suspended — it has no receive"),
+            VmOutcome::Killed => panic!("pre-f was killed"),
+        }
+    }
+    crate::process::set_capture_run(false);
+    assert!(
+        captures_after_native >= 10,
+        "vacuous: pre-f never went native during the run ({captures_after_native} captures after install)"
+    );
+    assert!(
+        misplaced.is_empty(),
+        "{} of {captures_after_native} preempts of the native loop captured a frame other than \
+         pre-f at ip 0 (first few: {:?}) — the resume then re-enters the loop mid-body and \
+         interprets it to the next back-edge boundary",
+        misplaced.len(),
+        &misplaced[..misplaced.len().min(4)]
+    );
+}
