@@ -321,6 +321,9 @@ The primary source is consulted first, then `*image-sources*` in install order."
 (defn reflect/set-load-path (dirs)
   "Replace the module search path with `dirs` (a list of directory strings); returns it."
   (def *load-path* dirs)
+  ;; A module the miss path has already failed to find may be reachable down a path we did
+  ;; not have a moment ago, so the kernel's record of absences cannot outlive this (ADR-335).
+  (%forget-absent-modules!)
   *load-path*)
 (defn reflect/add-load-path (& dirs)
   "Prepend `dirs` to the module search path (skipping any already present); returns the new path."

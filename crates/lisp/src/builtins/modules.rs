@@ -151,6 +151,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         load_edge_skipped,
     );
     primitives.def(
+        "%forget-absent-modules!",
+        Arity::exact(0),
+        Sig::new(vec![], Ty::of(Tag::Nil)),
+        &[],
+        "Forget which modules a require has already failed to FIND. The miss path remembers an absence so `(mod/nope)` in a loop does not re-run the filesystem search that failed (ADR-335 declined a permanent memo because a module absent now may exist later — this one is not permanent). A successful load clears it by itself; `reflect/set-load-path` calls this because a new search path can make any number of absent modules resolvable.",
+        forget_absent_modules,
+    );
+    primitives.def(
         "%eager-loads!",
         Arity::exact(1),
         Sig::new(vec![any], bool_ty),
@@ -1015,6 +1023,12 @@ pub(super) fn root_module_name(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
 /// `(%load-edge-skipped?)` — see the registration.
 pub(super) fn load_edge_skipped(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     Ok(Value::Bool(crate::eval::derive::take_skip_next_edge()))
+}
+
+/// `(%forget-absent-modules!)` — see the registration.
+pub(super) fn forget_absent_modules(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    crate::eval::derive::clear_absent_modules();
+    Ok(Value::nil())
 }
 
 /// `(%eager-loads! on?)` — see the registration. Mechanism only; the policy of WHO pins it
