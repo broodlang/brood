@@ -17,6 +17,7 @@
 ;;   [...] [^...]        a character set / negated set: literal chars, `a-z` RANGES,
 ;;                       and `\d`/`\w`/`\s` classes written inside the brackets
 ;;   \d \w \s            digit / word (letter|digit|_) / whitespace classes
+;;   \b \B               a word boundary / not one (zero-width, like the anchors)
 ;;   \. \* …             escape — a metacharacter taken literally
 ;;   |                   alternation
 ;;   (...)  (?:...)      a CAPTURING group, and a non-capturing one
@@ -73,6 +74,9 @@ lookaround.")
       (= c "d") [{:t :class :k :digit} (inc i)]
       (= c "w") [{:t :class :k :word} (inc i)]
       (= c "s") [{:t :class :k :space} (inc i)]
+      ;; word-boundary assertions: zero-width, like the anchors
+      (= c "b") [{:t :wordb} (inc i)]
+      (= c "B") [{:t :nwordb} (inc i)]
       (nil? c) [{:t :lit :c "\\"} i]
       ; trailing backslash → literal
       else [{:t :lit :c c} (inc i)])))
@@ -308,6 +312,8 @@ Group 0 is the whole match, so the numbering starts at 1 and the count excludes 
 ;;   {:t :split :a s1 :b s2}           epsilon fork to s1 and s2 (no consume)
 ;;   {:t :bol :next s}                 epsilon to s, only when position = 0
 ;;   {:t :eol :next s}                 epsilon to s, only when position = n
+;;   {:t :wordb :next s} {:t :nwordb …}  epsilon to s, only at / not at a word boundary —
+;;                                      the Pike VM's alone: see `regex-wordb?`
 ;;   {:t :match}                       accept
 ;; A `test` is a tagged map picking the char predicate: {:kind :any},
 ;; {:kind :lit :c c}, {:kind :set :neg b :chars "…"}, {:kind :class :k :digit}.
@@ -364,6 +370,8 @@ Group 0 is the whole match, so the numbering starts at 1 and the count excludes 
           (regex-nfa-alt (get a :alt) nx states cap))
       (= t :bol) (regex-push states {:t :bol :next nx})
       (= t :eol) (regex-push states {:t :eol :next nx})
+      (= t :wordb) (regex-push states {:t :wordb :next nx})
+      (= t :nwordb) (regex-push states {:t :nwordb :next nx})
       else (regex-push states {:t :char :test (regex-atom->test a) :next nx}))))
 
 (defn- regex-split (as nx greedy)
@@ -465,7 +473,10 @@ is a flat copy (a CHAMP map rebuilds nodes), and the entry glue reads it with
                input (`^` fires, `$` doesn't — position-independent for n > 0);
   3 startmid   the split-only closure of {start} (the search loop's injection);
   4 memo       the lazy DFA — (state-set, char) -> next set, filled on demand;
-  5 exitmemo   accept-closure memo — final set -> boolean.
+  5 exitmemo   accept-closure memo — final set -> boolean;
+  6 wordb?     whether the pattern carries a `\\b`/`\\B` — a bitset state set cannot
+               remember the character it came from, so such a pattern answers its
+               booleans on the Pike VM instead (`match?`/`matches?` route there).
 The state vector itself is cached separately (`regex-states-cache`) so this
 object's per-call clone-out stays a few words — see the cache note above."
   (let (hit (table/get regex-cache pattern))
@@ -480,7 +491,8 @@ object's per-call clone-out stays a few words — see the cache note above."
                   (regex-eps-close states startbit 0 1 m)
                   (regex-eps-close-mid states startbit m)
                   (table/new)
-                  (table/new)])
+                  (table/new)
+                  (any? states (fn (st) (or (= (get st :t) :wordb) (= (get st :t) :nwordb))))])
         (table/put regex-states-cache pattern {:states states :start start})
         (table/put regex-cache pattern obj)
         obj)
@@ -738,10 +750,21 @@ pattern used one way compiles one."
 match keeps its nils and comes back as `nil` rather than as an empty string."
   (into [] (map (range nslots) (fn (_) nil))))
 
+(defn- regex-word-code? (code)
+  "Is codepoint `code` a word character (`\\w`: letter, digit, `_`)?"
+  (regex-class-match? :word (string/int->char code)))
+
+(defn- regex-wordb? (codes pos n)
+  "Is `pos` a word boundary in `codes` — the character before and the one at `pos`
+disagree about being word characters (the string's edges count as non-word)?"
+  (let (before (and (> pos 0) (regex-word-code? (nth codes (dec pos))))
+        at (and (< pos n) (regex-word-code? (nth codes pos))))
+    (not (= before at))))
+
 ;; check-allow: deliberately non-tail — the fork depth is the NFA's nesting, bounded
 ;; by the state count, not by the length of the subject.
 (check-allow :non-tail-recursion
-  (defn- regex-cap-add (states pc caps pos n added acc)
+  (defn- regex-cap-add (states pc caps codes pos n added acc)
     "Add thread `pc` and its epsilon closure to `acc`, in priority order; returns
 [added acc]. `added` is the bitset of states already claimed at this position — the
 FIRST arrival keeps the state, and it is that rule, not a search, that resolves
@@ -754,18 +777,37 @@ ambiguity in favour of the higher-priority path."
         (cond
           ;; `:a` before `:b` — the fork's preferred side goes in front
           (= t :split)
-            (let ([a1 c1] (regex-cap-add states (get st :a) caps pos n added2 acc))
-              (regex-cap-add states (get st :b) caps pos n a1 c1))
+            (let ([a1 c1] (regex-cap-add states (get st :a) caps codes pos n added2 acc))
+              (regex-cap-add states (get st :b) caps codes pos n a1 c1))
           (= t :save)
-            (regex-cap-add states (get st :next) (assoc caps (get st :slot) pos) pos n added2 acc)
+            (regex-cap-add states
+              (get st :next)
+              (assoc caps (get st :slot) pos)
+              codes
+              pos
+              n
+              added2
+              acc)
           (= t :bol)
-            (if (= pos 0) (regex-cap-add states (get st :next) caps pos n added2 acc) [added2 acc])
+            (if (= pos 0)
+              (regex-cap-add states (get st :next) caps codes pos n added2 acc)
+              [added2 acc])
           (= t :eol)
-            (if (= pos n) (regex-cap-add states (get st :next) caps pos n added2 acc) [added2 acc])
+            (if (= pos n)
+              (regex-cap-add states (get st :next) caps codes pos n added2 acc)
+              [added2 acc])
+          (= t :wordb)
+            (if (regex-wordb? codes pos n)
+              (regex-cap-add states (get st :next) caps codes pos n added2 acc)
+              [added2 acc])
+          (= t :nwordb)
+            (if (regex-wordb? codes pos n)
+              [added2 acc]
+              (regex-cap-add states (get st :next) caps codes pos n added2 acc))
           ;; `:char` and `:match` are where a thread comes to rest for this position
           else [added2 (into acc [[pc caps]])])))))
 
-(defn- regex-cap-scan (states threads j code pos n best added acc)
+(defn- regex-cap-scan (states threads j codes code pos n best added acc)
   "Walk the threads at `pos` in priority order, seeding the list for `pos + 1`.
 Returns [best added acc]. The first `:match` becomes the best-so-far and stops the
 walk — everything after it is lower priority, so it cannot improve on this."
@@ -776,30 +818,45 @@ walk — everything after it is lower priority, so it cannot improve on this."
       (if (= (get st :t) :match)
         [caps added acc]
         (if (and (not (nil? code)) (regex-char-test? (get st :test) (string/int->char code)))
-          (let ([added2 acc2] (regex-cap-add states (get st :next) caps (inc pos) n added acc))
-            (regex-cap-scan states threads (inc j) code pos n best added2 acc2))
-          (regex-cap-scan states threads (inc j) code pos n best added acc))))))
+          (let ([added2 acc2] (regex-cap-add states (get st :next) caps codes (inc pos) n added acc))
+            (regex-cap-scan states threads (inc j) codes code pos n best added2 acc2))
+          (regex-cap-scan states threads (inc j) codes code pos n best added acc))))))
 
 (defn- regex-cap-run (states start nslots codes n pos threads added best)
   "Run the VM from `pos` to the end of input; returns the winning capture slots, or nil.
 A fresh start thread is injected at every position — at the BACK of the list, so a
 match beginning further left always outranks one beginning further right — and only
-until something matches, after which a later start could only be worse."
+until something matches, after which a later start could only be worse. No live
+thread ends the run only once something HAS matched: before that, a later start can
+still succeed — an injected start whose `\\b` failed here leaves this position empty
+and the next one open."
   (if (> pos n)
     best
     (let ([added2 threads2] (if (nil? best)
                               (regex-cap-add states
                                 start
                                 (regex-cap-blank nslots)
+                                codes
                                 pos
                                 n
                                 added
                                 threads)
                               [added threads]))
-      (if (empty? threads2)
+      (if (and (empty? threads2) (not (nil? best)))
         best
         (let (code (if (< pos n) (nth codes pos) nil)
-              [best2 added3 next-threads] (regex-cap-scan states threads2 0 code pos n best 0 []))
+              [best2 added3 next-threads] (if (empty? threads2)
+                                            [best 0 []]
+                                            (regex-cap-scan states
+                                              threads2
+                                              0
+                                              codes
+                                              code
+                                              pos
+                                              n
+                                              best
+                                              0
+                                              [])))
           (regex-cap-run states start nslots codes n (inc pos) next-threads added3 best2))))))
 
 (defn- regex-cap-group (s caps k)
@@ -857,18 +914,22 @@ start/end of the whole string, so e.g. `(match? \"\\\\.blsp$\" name)` tests a su
   (let (obj (regex-compile pattern)
         codes (string/->codepoints s)
         n (count codes))
-    (if (= n 0)
-      (regex-empty-input? pattern (nth obj 1))
-      (regex-run-search-loop pattern
-        (nth obj 5)
-        (nth obj 4)
-        (nth obj 0)
-        (nth obj 3)
-        (nth obj 1)
-        codes
-        n
-        0
-        (nth obj 2)))))
+    (cond
+      ;; a word-boundary pattern: the DFA cannot see the previous character, so the
+      ;; Pike VM answers (the same search, with positions it then discards)
+      (nth obj 6) (not (nil? (find pattern s)))
+      (= n 0) (regex-empty-input? pattern (nth obj 1))
+      else
+        (regex-run-search-loop pattern
+          (nth obj 5)
+          (nth obj 4)
+          (nth obj 0)
+          (nth obj 3)
+          (nth obj 1)
+          codes
+          n
+          0
+          (nth obj 2)))))
 (sig match? (any string -> bool))
 
 (defn matches? (pattern s)
@@ -878,17 +939,21 @@ start/end of the whole string, so e.g. `(match? \"\\\\.blsp$\" name)` tests a su
   (let (obj (regex-compile pattern)
         codes (string/->codepoints s)
         n (count codes))
-    (if (= n 0)
-      (regex-empty-input? pattern (nth obj 1))
-      (regex-run-anchored-loop pattern
-        (nth obj 5)
-        (nth obj 4)
-        (nth obj 0)
-        (nth obj 1)
-        codes
-        n
-        0
-        (nth obj 2)))))
+    (cond
+      ;; a word-boundary pattern answers on the Pike VM, anchored both ends (the
+      ;; non-capturing wrap keeps a top-level alternation whole)
+      (nth obj 6) (not (nil? (find (str "^(?:" pattern ")$") s)))
+      (= n 0) (regex-empty-input? pattern (nth obj 1))
+      else
+        (regex-run-anchored-loop pattern
+          (nth obj 5)
+          (nth obj 4)
+          (nth obj 0)
+          (nth obj 1)
+          codes
+          n
+          0
+          (nth obj 2)))))
 (sig matches? (any string -> bool))
 
 ;; ---- where, and with which groups -------------------------------------------

@@ -234,3 +234,24 @@
     (is (agree? "(foo|bar)+baz" "foobar"))
     (is (agree? "\\d+" ""))
     (is (agree? "a*" ""))))
+
+(describe "\\b and \\B — word boundaries (zero-width, on both engines)"
+  (test "find sees a whole word and not the same letters inside one"
+    (assert= (map (regex/find-all "\\bfi\\b" "file fi fi_ x fi") (fn (m) (get m :start)))
+      (list 5 14))
+    (is (nil? (regex/find "\\bfi\\b" "file")))
+    (assert= (get (regex/find "\\bfi\\b" "fi") :text) "fi"))
+  (test "the string's edges are boundaries; \\B is the complement"
+    (assert= (get (regex/find "\\b\\w+\\b" "  hello  ") :text) "hello")
+    (assert= (map (regex/find-all "\\Bi\\B" "fix i fi") (fn (m) (get m :start))) (list 1))
+    (assert= (get (regex/find "\\B" "ab") :start) 1))
+  (test "match? and matches? answer a boundary pattern too"
+    (is (regex/match? "\\bthen\\b" "if x; then"))
+    (is (not (regex/match? "\\bfi\\b" "file")))
+    (is (regex/matches? "\\bfi\\b|\\bdone\\b" "done"))
+    (is (not (regex/matches? "\\bfi\\b" "fix")))
+    (is (not (regex/match? "\\b" "")))
+    (is (regex/match? "\\B" "")))
+  (test "a boundary inside a group and under a quantifier"
+    (assert= (map (regex/find-all "(\\bin\\b)" "in inside in") (fn (m) (get m :start))) (list 0 10))
+    (assert= (get (regex/find "\\b\\w+\\b(?:\\s+\\b\\w+\\b)*" "a bb ccc") :text) "a bb ccc")))
