@@ -47,6 +47,32 @@ pub(crate) use support::*;
 /// (The other native entries — `jit_dispatch_call`, `hof_apply_native`, `jit_run_fast_link` —
 /// do not come through here at all: each loads the code pointer itself and sizes from THAT,
 /// via [`frame_size_for_code`], which is the same rule spelled the other way round.)
+/// Activations before an arm is handed to the background compiler.
+///
+/// This is a CALL threshold, and it is deliberately high. Boot alone tiers ~139 prelude
+/// arms at a threshold of 8 (`startup` runs 18 ms and queues 139 compiles), and the
+/// compiler drains a FIFO — so a row's own hot function waited behind tens of milliseconds
+/// of boot-path code that ran eight times and never again. Measured 2026-09-12 (interleaved
+/// best-of-7, unpinned, same-binary control ±4%): 8 → 128 is `fib` −18%, `bintree` −14%,
+/// `spawn` −31%, `collatz` −14%, `pipeline` −11%, `nqueens` −9%, `base64` −8%, `nbody` −7%,
+/// every other row within the control; 64 is the same within noise; 256 and 512 start
+/// losing `sort`/`sieve`/`persistent-map` (+4–25%). What this threshold is NOT for is a
+/// loop's iteration count — see [`BACKEDGE_TIER_WEIGHT`].
+#[cfg(feature = "jit")]
+pub(crate) const TIER_THRESHOLD: u32 = 128;
+
+/// What one back-edge boundary exit counts for toward [`TIER_THRESHOLD`].
+///
+/// A self-tail loop is ONE activation; it reaches the compiler by exiting to the driver
+/// every `BACKEDGE_TIER_INTERVAL` (256) iterations while untried, each exit counting as a
+/// call. Raising the call threshold alone would therefore delay every loop's tiering by
+/// the same factor — `sieve` read +6–7% at 64 and 128 with weight 1, its 1M-iteration
+/// `count-primes` interpreting 32k iterations before enqueueing instead of 2k. Weighting a boundary exit
+/// at `TIER_THRESHOLD / 8` keeps a spinning loop's tiering where it has always been: eight
+/// boundaries, 2048 iterations, whatever the call threshold says.
+#[cfg(feature = "jit")]
+pub(crate) const BACKEDGE_TIER_WEIGHT: u32 = TIER_THRESHOLD / 8;
+
 #[cfg(feature = "jit")]
 pub(crate) fn jit_tier_in_frame(
     arm: &Arc<CompiledArm>,
@@ -57,8 +83,6 @@ pub(crate) fn jit_tier_in_frame(
     out: *mut Value,
 ) -> Option<i64> {
     use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
-    const THRESHOLD: u32 = 8;
-
     // Draining an over-deep native-recursion subtree on the VM (see [`JIT_FORCE_VM`]):
     // interpret this arm so its recursion stays in the bounded heap-frame loop.
     if heap.jit_force_vm {
@@ -118,7 +142,7 @@ pub(crate) fn jit_tier_in_frame(
         }
         return None; // out of subset (or awaiting the hot install) — run the VM
     }
-    // Shared-JIT install (the spawn lever): before this process spends THRESHOLD
+    // Shared-JIT install (the spawn lever): before this process spends TIER_THRESHOLD
     // interpreted calls + a background compile on its OWN copy of a RUNTIME/PRELUDE
     // arm, check whether another process of this runtime already compiled it. If so,
     // and the code is epoch-current, install the shared pointer directly and run it
@@ -173,7 +197,7 @@ pub(crate) fn jit_tier_in_frame(
     }
     if code.is_null() {
         // Count the invocation; only enqueue once the arm is hot.
-        if arm.jit_calls.fetch_add(1, Relaxed) + 1 < THRESHOLD {
+        if arm.jit_calls.fetch_add(1, Relaxed) + 1 < TIER_THRESHOLD {
             return None;
         }
         // Hot. Refuse to JIT an arm whose inlined operators are no longer native (a `def`
@@ -230,11 +254,11 @@ pub(crate) fn jit_tier_in_frame(
                 // The background compile queue is full (a burst of distinct hot arms — e.g.
                 // thousands of short-lived green processes each tiering their own arm copy,
                 // overwhelming the bounded channel). Reset to untried AND back the hotness
-                // counter all the way off, so the arm runs on the VM for another THRESHOLD
+                // counter all the way off, so the arm runs on the VM for another TIER_THRESHOLD
                 // calls before re-attempting — instead of re-validating (`chunk_ops_all_native`,
                 // an `env_get`/`resolve_prim` per op) on *every* call while the queue stays
                 // full. Measured: ~36M redundant re-validations in `spawn` (20 000 procs)
-                // collapse to ~1/THRESHOLD of that. The arm still compiles once the queue
+                // collapse to ~1/TIER_THRESHOLD of that. The arm still compiles once the queue
                 // drains (a long-lived process re-reaches the threshold and re-enqueues).
                 arm.jit_code.store(std::ptr::null_mut(), Release);
                 arm.jit_calls.store(0, Relaxed);
@@ -248,7 +272,7 @@ pub(crate) fn jit_tier_in_frame(
     // recompiling at the new epoch, or bailing if one was genuinely redefined.
     if arm.compile_epoch.load(Acquire) != heap.global_epoch() {
         arm.jit_code.store(std::ptr::null_mut(), Release);
-        arm.jit_calls.store(THRESHOLD, Release); // re-tier promptly (already proven hot)
+        arm.jit_calls.store(TIER_THRESHOLD, Release); // re-tier promptly (already proven hot)
         arm.jit_deopts.store(0, Relaxed); // fresh deopt-feedback trial for the recompile
         arm.shared_published.store(false, Relaxed); // recompiled code must re-publish
         arm.inline_installed.store(false, Relaxed); // re-decide the inline swap at the new epoch
@@ -548,7 +572,7 @@ pub(crate) fn jit_tier_in_frame(
             ActiveBackend::note_depth_bail(sym);
         }
         arm.jit_code.store(std::ptr::null_mut(), Release);
-        arm.jit_calls.store(THRESHOLD, Release);
+        arm.jit_calls.store(TIER_THRESHOLD, Release);
         arm.shared_published.store(false, Relaxed);
         return None;
     }

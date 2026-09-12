@@ -1,6 +1,6 @@
 ;; Regression: a Brood error raised inside JIT-compiled code must stay *catchable*
 ;; — parked and re-raised as a normal Err, never an abort across the extern-"C"
-;; JIT callback boundary. Hammer each throwing arm past the tier threshold (~8) in
+;; JIT callback boundary. Hammer each throwing arm past the tier threshold (`TIER_THRESHOLD`, 128) in
 ;; a single process (`:serial`) so the throw originates from native code; the
 ;; runtime must survive and the catch must fire every time.
 ;;

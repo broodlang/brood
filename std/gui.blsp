@@ -98,6 +98,16 @@
   (%gui-bg! color))
 (sig bg ((or keyword nil string vector) -> nil))
 
+(defn line-height (mult)
+  "Set the cell height as a multiple of the font pixel size (the line height): 1.4 by default — an editor's vertical breathing room — clamped to 0.8..3.0. A metric change like gui/font: the row count moves, so every open window is told its new (cols, rows) and re-renders; also the default for windows opened later. Needs --features gui. Returns nil."
+  (%gui-line-height! mult))
+(sig line-height ((or float int) -> nil))
+
+(defn text-aa (mode)
+  "Set how monochrome text is anti-aliased: :gray (one coverage value per pixel), :subpixel (one per colour channel, each a third of a pixel apart — LCD text, three times the horizontal resolution of every stem, for a panel whose subpixels run red-green-blue), :bgr (the same for a blue-first panel), or :auto (the default: subpixel at a 1× scale where text has the fewest pixels to spend, gray on HiDPI where grayscale is already sharp and a scaled or rotated surface would turn subpixel fringes into colour noise). Applies to every open window and the default for ones opened later; a pure repaint. Needs --features gui. Returns nil."
+  (%gui-text-aa! mode))
+(sig text-aa (keyword -> nil))
+
 (defn image-thumb (bytes max-w max-h)
   "Decode an encoded image (PNG/JPEG/GIF/WebP/BMP) from a byte sequence and downscale it to fit within max-w×max-h pixels (aspect ratio preserved), returning {:width :height :rgba} where :rgba is a width*height*4 bytes value (row-major RGBA8). nil when the bytes aren't a decodable image or the dims are non-positive. Per-call decode limits bound a decompression bomb. The one image primitive; rendering (half-block cells, a GUI texture) is Brood policy over the decoded buffer."
   (%image-thumb bytes max-w max-h))

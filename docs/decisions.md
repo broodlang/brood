@@ -21465,6 +21465,197 @@ module to resolve against, a bare reference is left as written rather than point
 `#d-nil-<name>`: a visible `[[name]]` is a missing argument a reader can report, a dead link
 is not.
 
+## ADR-332 — The GUI retains its frame and repaints by cell row; text is hinted at whole pixels, subpixel at 1×, hairlines snapped
+
+**Status:** accepted; implemented 2026-09-12 (`host::gui::backend::paint` / `render`;
+`gui-text-aa!`, `gui-line-height!`).
+
+**Context.** The windowed frontend painted every frame from scratch: clear the whole
+framebuffer, rasterise every glyph on screen, diff the pixels against the last presented
+buffer to find the damage, copy the buffer for the next diff, present. Measured on bedit
+at 1920×1045 (1×), a paint was 4–13 ms with the body (clear + ~2 300 glyph blits + the
+7 MB memcmp) dominating — and it scaled with pixels, so a 2× HiDPI window would have
+spent 15–35 ms per keystroke, past a frame. The Brood side of a keystroke (`update` +
+`view`) was 3–5 ms, and every cursor blink paid the full paint for one cell.
+
+Three smaller things kept the text softer than it needed to be. The rasteriser hints
+outlines to the pixel grid, but the font size was `15 × scale` unrounded, so a 1.25× desktop
+hinted at 18.75 ppem — stems straddling pixels. Anti-aliasing was grayscale only: swash can
+render one coverage per colour channel (LCD text, three times the horizontal resolution of a
+stem), and the compositing path explicitly threw that away. And `fill_rrect` with a zero
+radius gave every pixel in `floor(x)..ceil(x+w)` full coverage, so bedit's 0.05-cell hairline
+(0.45 px) painted as 1 *or* 2 solid pixels depending on where its fractional centre fell — a
+stacked split's divider was twice the weight of the mode line's rule.
+
+**Decision.**
+
+1. **The frame is retained and diffed by cell row.** The renderer keeps the last frame's ops
+   and the canvas they rasterised to. A new frame is flattened to leaves (a `ScrollRegion`
+   contributes its children, each carrying its shift), each leaf is assigned the pixel-row
+   *strips* (the top margin, each cell row, the bottom remainder) its conservative band
+   covers, and a strip is dirty iff its sequence of covering leaves differs from the previous
+   frame's — compared as values, `Op: PartialEq`. Dirty strips are cleared and re-rasterised
+   with every primitive clipped to the band (`Canvas`); only those rows are copied into the
+   window buffer and declared as damage, unioned over the buffer's age as before. A frame
+   equal to the one on screen is dropped at the `Draw` event and never reaches the painter.
+   `BROOD_GUI_DAMAGE=0` keeps its meaning: full raster, full present, every frame.
+2. **Whole pixels per em.** `px = round(base × scale)`.
+3. **Subpixel text at 1×, a knob everywhere.** `gui-text-aa!` takes `:gray`, `:subpixel`,
+   `:bgr` or `:auto` (the default: subpixel when the scale factor is exactly 1, gray on HiDPI
+   — where grayscale is already sharp and a compositor may scale or rotate the surface, which
+   turns subpixel fringes into colour noise). The per-channel mask is rendered by swash
+   directly, hinted like the gray path, baked into the same glyph cache (keyed by the mode)
+   and blended per channel in linear light like `blend`.
+4. **Hairlines snap.** An `frect` dimension under one logical pixel becomes exactly
+   `max(1, round(scale))` device pixels centred where it was asked for, square-cornered.
+5. **Line height is a primitive.** `gui-line-height!` sets the cell height as a multiple of
+   the font px (1.4 by default), a metric change routed like `gui-font!`.
+
+**Consequences.** On bedit at 1920×1045 a cursor blink repaints one 21-px row in ~0.18 ms;
+a keystroke-shaped change (a text row and the mode line) ~0.3 ms, against 4–13 ms for the
+full paint that opening or resizing the window still costs. The paint no longer scales with
+the window: a HiDPI display changes nothing per keystroke. The cost is one clone of the
+frame's ops per paint and a canvas the size of the window. The diff is conservative by
+construction — a band may be wider than the pixels an op touches, never narrower — and the
+property the scheme rests on (an incremental raster of a frame sequence equals a full raster
+of the last frame, pixel for pixel) is a unit test. `BROOD_GUI_TRACE=1` prints every paint
+with the rows it repainted; `BROOD_GUI_DUMP=<path.ppm>` writes the canvas so the raster can
+be inspected from a script.
+
+**Alternatives rejected.** *Finish the GPU backend* — the glyph atlas is still the right
+long-term answer for smooth scrolling on HiDPI, but the row diff gets the per-keystroke win
+on the CPU path in one afternoon, and the GPU path can adopt the same diff. *Blink in the
+backend* — a cursor overlay the GUI thread toggles itself would hide state from the model;
+with the row diff the model-driven blink costs one cell, so the TEA shape stays. *Diff pixels
+harder* — the old memcmp already found the damage; the cost was producing the pixels, which
+only an op-level diff avoids.
+
+## ADR-333 — The tier threshold is a CALL threshold, and it is 128; loops keep their own
+
+**Status:** accepted; implemented 2026-09-12.
+
+**Context.** An arm was handed to the background compiler after **8** activations. That
+number was set when the JIT had a handful of arms to compile and never revisited; meanwhile
+the prelude grew to ~800 bindings and boot alone came to tier **~139 arms** (`startup` runs
+18 ms and queues 139 compiles — counted with a throwaway probe on the enqueue and compile
+sites, `docs/compute-frontier.md` §7.11). The compiler drains a FIFO, one Cranelift lowering
+at a time (median 275 µs, p90 1.4 ms, `json/object-acc` 7.6 ms), so a program's own hot
+function sat in the queue behind tens of milliseconds of boot-path code that had run eight
+times and would never run again. The same probe showed the queue is otherwise healthy — the
+compiler goes idle 40–70 ms into every row and the deferred queue never starves — so the
+cost was purely *latency to native for the arm that mattered*, plus, when cores are scarce,
+the compile CPU itself (`make ab` pins to one core: `json` 130 → 204 ms there).
+
+**Decision.** `TIER_THRESHOLD = 128` (`eval/compile/jit_runtime.rs`), a named constant with
+the measurement in its doc comment, replacing the local `const THRESHOLD: u32 = 8`.
+
+**And a loop's tiering is decoupled from it.** A self-tail loop is ONE activation; it reached
+the compiler by exiting to the driver every `BACKEDGE_TIER_INTERVAL` (256) iterations while
+untried, each exit counting as one call — so 8 boundaries, 2048 iterations. Raising the call
+threshold alone would have multiplied that by 16: `sieve` read +6–7% at 64 and 128 with the
+old weight, its 1M-iteration `count-primes` interpreting 32k iterations before enqueueing.
+`BACKEDGE_TIER_WEIGHT = TIER_THRESHOLD / 8` makes one boundary exit worth sixteen calls
+(`exec_chunk` adds `WEIGHT − 1` at the boundary; `jit_tier` adds the last unit on re-entry),
+so a spinning loop still tiers at eight boundaries whatever the call threshold says. With it
+`sieve` reads −1.6%.
+
+**Measured** (interleaved best-of-7, unpinned — the protocol for a compile-volume change —
+with a same-binary control that read ±4%): 8 → 128 is **`spawn` −31%, `fib` −18%,
+`bintree` −14%, `collatz` −14%, `pipeline` −11%, `nqueens` −9%, `base64` −8%, `nbody` −7%,
+`pfib` −8%, `mandelbrot` −4%, `ackermann` −4%**, and `json`/`regex`/`sort`/`strings`/
+`reduce`/`ring`/`startup`/`persistent-map` within the control. 64 is the same within noise;
+**256 and 512 lose** — `sort` +4/+12%, `sieve` +10/+25%, `persistent-map` +10/+24% — which
+is the other side of the trade: an arm called a few hundred times with real work in it stays
+interpreted. 128 sits with margin on both sides. Compile counts per row fall 140–230 → 32–133.
+Pinned (`make ab --floor`, the official gate) is recorded in the devlog entry.
+
+**What it does not change.** The threshold on a hot-reload re-tier and a depth bail is
+still "promptly" (`jit_calls` is set to the threshold, not zero); `JIT_QUEUED_SYNC_EDGES`
+(2048) still sync-compiles a loop stuck QUEUED; the shared-code install path
+(`jit_shared_lookup`) still short-circuits the count for an arm a peer already compiled.
+
+**Rejected on the way.** *Persisting bytecode chunks in the stdlib image*: `compile_arm`
+is 2.5 ms of `json`'s 140 ms (243 arms). *Persisting tiering decisions*: bails are 9.5 of
+79 ms of compile-thread time. *Cranelift `single_pass` regalloc*: −25% compile CPU but
+`fib` +48%, `nbody` +47%. *A hotness-ordered compile queue* was not needed once the queue
+stopped filling with boot arms; it remains the next lever if a row ever shows an arm waiting
+behind genuinely hot work. All in `compute-frontier.md` §7.11.
+
+## ADR-334 — Radix literals: `0xFF`, `0b1010`, `0o17` read as plain ints
+
+**Status:** accepted; implemented 2026-09-12. Cashes in the second of [ADR-169](#adr-169)'s
+reservations, the way [ADR-196](#adr-196) cashed in the first (`1/2`).
+
+**Context.** ADR-169 reserved every digit-led non-number token so that a numeric syntax
+added later would be *additive* rather than a break, and named radix literals as one of
+the four it was holding the door open for. It also left the runtime answer in place:
+`(string/->number "1F" 16)`. That answer is right for *data* and wrong for *source*.
+Bit masks and flag bytes are written in source, and the tree was writing them in decimal
+because it had no choice: `std/uuid.blsp` sets the RFC 4122 variant with
+`(bit/or 128 (bit/and (nth bv 8) 63))` — `0x80` and `0x3F`, the two numbers the RFC
+prints in hex; `std/prelude/string.blsp` holds `*rand-mask*` as `4294967295`;
+`std/tool/test.blsp`'s FNV mask is the same ten digits again; `std/net/dns.blsp` and
+`std/bytes.blsp` split words with `255`. Thirty-four `bit/*` call sites, every one of
+them a reader translating a hex constant to decimal by hand and a reviewer translating it
+back. `(string/->number "3F" 16)` at those sites is not an improvement — it is a runtime
+parse of a constant the author already knew, and it reads as a function call where a
+number belongs.
+
+**Decision.** `0x…` (hex), `0b…` (binary) and `0o…` (octal) are integer literals. Either
+case of the prefix letter is accepted (`0xFF`, `0XFF`), as C, Java and Clojure all do; a
+sign goes in front (`-0xFF`, `+0x10`).
+
+- **The radix is spelling, not a type.** `0xFF` reads as the same `Value::Int` that `255`
+  does — `(type-of 0xFF)` is `:int`, `(= 0xFF 255)` is true, and it *prints* as `255`.
+  Nothing downstream of the reader knows the spelling existed. The formatter keeps it,
+  because the CST is lossless and never re-prints an atom.
+- **Past `i64` it is a bignum**, exactly as an oversized decimal literal is: the reader
+  parses the digits as a `BigInt` at the token's radix. `-0x8000000000000000` — whose
+  *magnitude* is one past `i64::MAX` — stays an `Int`, via an `i128` intermediate.
+- **Malformed is an error, never a symbol.** Digits wrong for the radix (`0b102`, `0o18`,
+  `0xZZ`) or none at all (`0x`) are a parse error with a **per-radix hint** naming the
+  legal digits — "a binary literal holds only `0` and `1`" — rather than the generic
+  reserved-token hint. `AtomKind::RadixInvalid` is its own variant so the CST maps it to
+  `Error` and the LSP flags it like every other malformed literal (the ADR-025
+  one-definition rule: the hint text lives in `syntax/atom.rs`, and the reader and the
+  tooling tree both read it).
+- **Only a digit-led token is a radix literal.** `x0b1`, `a0xFF`, `foo0x1` are names, as
+  ADR-169's first-character rule already guaranteed.
+
+**Why plain int, not a preserved spelling.** Clojure prints `0xFF` back as `255` too, and
+for the same reason: a number is a value, and the spelling is a fact about the source text,
+which the CST already keeps. Carrying a radix on the value would give `=` and `hash` a
+second axis to be wrong on, for a feature whose whole job is to make the source readable.
+
+**Why not `string/->number` at the call site.** It is the runtime function for text a
+program *holds* — a config value, a wire field, a user's input — and it stays that. A
+constant known when the file is written is the reader's job. The two never overlap: the
+function takes the digits alone and refuses a `0x` prefix, so `(string/->number "0x1F" 16)`
+is a `failure` and `0x1F` in source is `31`, and neither can be mistaken for the other.
+
+**Consequences.**
+- `reserved_numeric_hint` loses its radix arm; `tests/reader_hints_test.blsp` moves `0x1F`
+  from the must-ERROR list to the must-READ one, beside `1/2`. `1_000`, `1N` and `#…` are
+  still reserved.
+- **A found tooling bug, fixed in passing.** The CST mapped `AtomKind::IntOverflow` to
+  `NodeKind::Error`, so the LSP flagged `99999999999999999999` as malformed while the
+  reader read it as a bignum and the program ran. It is `NodeKind::Int` now, and
+  `RadixOverflow` maps the same way.
+- **The two highlighters do not see it yet.** `std/editor/highlight.blsp`'s `hl-number?`
+  decides by `string/->number`, which by design refuses the prefix — so bedit paints
+  `0xFF` as a symbol. That gap is not new: the same test already misses `1/2` and `1.5M`,
+  since neither is data the function reads. The tree-sitter scanner in `brood-treesitter`
+  (`looks_number`) has the same shape. Both want the reader's own classification rather
+  than a third hand-written approximation of it, which is a separate change.
+- The freeze list (ADR-170) drops `0x1F` from its digit-led row and records this as the
+  second relaxation the freeze allows.
+
+**References.** [ADR-169](#adr-169) (the reservation), [ADR-196](#adr-196) (the first
+cash-in, and the precedent for "spelling, not type"), [ADR-025](#adr-025) (the shared
+hint), [ADR-310](#adr-310) (why the runtime parse answers `failure`). Tests:
+`tests/reader_hints_test.blsp` (reads, per-radix errors, the `i64::MIN` edge, bignum
+spill, non-digit-led names).
+
 ## ADR-335 — A qualified reference loads its module on first use, not when the referencing file loads
 
 **Status:** accepted and implemented 2026-09-12. Refines [ADR-227](#adr-227)'s
@@ -21624,79 +21815,3 @@ exists for; the checker under eager policy still flagging a qualified typo; `--c
 still failing on a broken transitively-referenced module. `make ab --floor` must read
 `startup` flat on a machine where it may run — a lazy load can only remove work from the
 rows, so a movement there is a mechanism cost on the hit path, which item 1 forbids.
-
-## ADR-334 — Radix literals: `0xFF`, `0b1010`, `0o17` read as plain ints
-
-**Status:** accepted; implemented 2026-09-12. Cashes in the second of [ADR-169](#adr-169)'s
-reservations, the way [ADR-196](#adr-196) cashed in the first (`1/2`).
-
-**Context.** ADR-169 reserved every digit-led non-number token so that a numeric syntax
-added later would be *additive* rather than a break, and named radix literals as one of
-the four it was holding the door open for. It also left the runtime answer in place:
-`(string/->number "1F" 16)`. That answer is right for *data* and wrong for *source*.
-Bit masks and flag bytes are written in source, and the tree was writing them in decimal
-because it had no choice: `std/uuid.blsp` sets the RFC 4122 variant with
-`(bit/or 128 (bit/and (nth bv 8) 63))` — `0x80` and `0x3F`, the two numbers the RFC
-prints in hex; `std/prelude/string.blsp` holds `*rand-mask*` as `4294967295`;
-`std/tool/test.blsp`'s FNV mask is the same ten digits again; `std/net/dns.blsp` and
-`std/bytes.blsp` split words with `255`. Thirty-four `bit/*` call sites, every one of
-them a reader translating a hex constant to decimal by hand and a reviewer translating it
-back. `(string/->number "3F" 16)` at those sites is not an improvement — it is a runtime
-parse of a constant the author already knew, and it reads as a function call where a
-number belongs.
-
-**Decision.** `0x…` (hex), `0b…` (binary) and `0o…` (octal) are integer literals. Either
-case of the prefix letter is accepted (`0xFF`, `0XFF`), as C, Java and Clojure all do; a
-sign goes in front (`-0xFF`, `+0x10`).
-
-- **The radix is spelling, not a type.** `0xFF` reads as the same `Value::Int` that `255`
-  does — `(type-of 0xFF)` is `:int`, `(= 0xFF 255)` is true, and it *prints* as `255`.
-  Nothing downstream of the reader knows the spelling existed. The formatter keeps it,
-  because the CST is lossless and never re-prints an atom.
-- **Past `i64` it is a bignum**, exactly as an oversized decimal literal is: the reader
-  parses the digits as a `BigInt` at the token's radix. `-0x8000000000000000` — whose
-  *magnitude* is one past `i64::MAX` — stays an `Int`, via an `i128` intermediate.
-- **Malformed is an error, never a symbol.** Digits wrong for the radix (`0b102`, `0o18`,
-  `0xZZ`) or none at all (`0x`) are a parse error with a **per-radix hint** naming the
-  legal digits — "a binary literal holds only `0` and `1`" — rather than the generic
-  reserved-token hint. `AtomKind::RadixInvalid` is its own variant so the CST maps it to
-  `Error` and the LSP flags it like every other malformed literal (the ADR-025
-  one-definition rule: the hint text lives in `syntax/atom.rs`, and the reader and the
-  tooling tree both read it).
-- **Only a digit-led token is a radix literal.** `x0b1`, `a0xFF`, `foo0x1` are names, as
-  ADR-169's first-character rule already guaranteed.
-
-**Why plain int, not a preserved spelling.** Clojure prints `0xFF` back as `255` too, and
-for the same reason: a number is a value, and the spelling is a fact about the source text,
-which the CST already keeps. Carrying a radix on the value would give `=` and `hash` a
-second axis to be wrong on, for a feature whose whole job is to make the source readable.
-
-**Why not `string/->number` at the call site.** It is the runtime function for text a
-program *holds* — a config value, a wire field, a user's input — and it stays that. A
-constant known when the file is written is the reader's job. The two never overlap: the
-function takes the digits alone and refuses a `0x` prefix, so `(string/->number "0x1F" 16)`
-is a `failure` and `0x1F` in source is `31`, and neither can be mistaken for the other.
-
-**Consequences.**
-- `reserved_numeric_hint` loses its radix arm; `tests/reader_hints_test.blsp` moves `0x1F`
-  from the must-ERROR list to the must-READ one, beside `1/2`. `1_000`, `1N` and `#…` are
-  still reserved.
-- **A found tooling bug, fixed in passing.** The CST mapped `AtomKind::IntOverflow` to
-  `NodeKind::Error`, so the LSP flagged `99999999999999999999` as malformed while the
-  reader read it as a bignum and the program ran. It is `NodeKind::Int` now, and
-  `RadixOverflow` maps the same way.
-- **The two highlighters do not see it yet.** `std/editor/highlight.blsp`'s `hl-number?`
-  decides by `string/->number`, which by design refuses the prefix — so bedit paints
-  `0xFF` as a symbol. That gap is not new: the same test already misses `1/2` and `1.5M`,
-  since neither is data the function reads. The tree-sitter scanner in `brood-treesitter`
-  (`looks_number`) has the same shape. Both want the reader's own classification rather
-  than a third hand-written approximation of it, which is a separate change.
-- The freeze list (ADR-170) drops `0x1F` from its digit-led row and records this as the
-  second relaxation the freeze allows.
-
-**References.** [ADR-169](#adr-169) (the reservation), [ADR-196](#adr-196) (the first
-cash-in, and the precedent for "spelling, not type"), [ADR-025](#adr-025) (the shared
-hint), [ADR-310](#adr-310) (why the runtime parse answers `failure`). Tests:
-`tests/reader_hints_test.blsp` (reads, per-radix errors, the `i64::MIN` edge, bignum
-spill, non-digit-led names).
-

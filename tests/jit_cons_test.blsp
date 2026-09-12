@@ -6,7 +6,7 @@
 ;; editor as a `nil` cursor-zone shape (`ed-divider-ops`). The fix removes `Cons`
 ;; from the JIT subset (`chunk_in_jit_subset`) so cons-arms run on the bytecode VM.
 ;;
-;; These tests hammer cons-built lists past the tier threshold (8) in a single
+;; These tests hammer cons-built lists past the tier threshold (`TIER_THRESHOLD`, 128) in a single
 ;; process (`:serial`), so they'd fail deterministically against the buggy JIT and
 ;; pass on the VM / fixed JIT. `make test` also runs the whole suite through both
 ;; engines (ADR-076), so the differential gate catches any re-divergence too.

@@ -53,6 +53,8 @@ wasm_unsupported_builtins!(
     gui_font,
     gui_inset,
     gui_bg,
+    gui_line_height,
+    gui_text_aa,
     gui_font_register,
 );
 

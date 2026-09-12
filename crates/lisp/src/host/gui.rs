@@ -42,7 +42,7 @@
 /// `scale` (≥1): the op's text is drawn `scale`× larger, occupying a
 /// `scale`×`scale` block of base cells anchored at its `(row, col)`. The terminal
 /// frontend has no notion of scale and renders 1×. See ADR-079.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Face {
     pub fg: Option<[u8; 3]>,
     pub bg: Option<[u8; 3]>,
@@ -139,6 +139,11 @@ pub enum CursorStyle {
 
 /// One render op, parsed out of a frame vector into plain (Send) data so it can
 /// cross to the GUI thread. Mirrors the protocol `term-draw` interprets.
+///
+/// `PartialEq` is what the backend's frame diff runs on: a frame equal to the last one
+/// is not repainted at all, and within a changed frame only the cell rows whose op
+/// sequence differs are re-rasterised (`paint::strip_diff`).
+#[derive(Clone, PartialEq)]
 pub enum Op {
     Clear,
     Text {
@@ -402,11 +407,13 @@ pub(crate) mod gpu; // the experimental OpenGL render path behind `BROOD_GUI_GPU
 #[cfg(not(feature = "gui"))]
 pub use disabled::{
     bg, close, drag_move, drag_resize, draw, focus, font, fullscreen, grab, held_key,
-    host_main_thread, icon, inset, maximize, minimize, open, register_family, size, title,
+    host_main_thread, icon, inset, line_height, maximize, minimize, open, register_family, size,
+    text_aa, title, TextAa,
 };
 
 #[cfg(feature = "gui")]
 pub use backend::{
     bg, close, drag_move, drag_resize, draw, focus, font, fullscreen, grab, held_key,
-    host_main_thread, icon, inset, maximize, minimize, open, register_family, size, title,
+    host_main_thread, icon, inset, line_height, maximize, minimize, open, register_family, size,
+    text_aa, title, TextAa,
 };

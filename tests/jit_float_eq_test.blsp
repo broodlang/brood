@@ -8,7 +8,7 @@
 ;; from `emit_float_arith` (jit_lower.rs) so a float `=` bails the arm to the VM,
 ;; whose `prim_apply_float` likewise defers `=` to the structural native `prim_eq`.
 ;;
-;; These hammer the `=` arm past the tier threshold (8) in a single process
+;; These hammer the `=` arm past the tier threshold (`TIER_THRESHOLD`, 128) in a single process
 ;; (`:serial`), so they fail deterministically against the buggy JIT and pass on
 ;; the VM / fixed JIT. `make test` also runs the whole suite through both engines
 ;; (ADR-076), so the differential gate catches any re-divergence too.

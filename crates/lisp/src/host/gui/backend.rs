@@ -11,6 +11,7 @@ mod render;
 use input::*;
 use paint::*;
 pub(crate) use render::Renderer;
+pub use render::TextAa;
 use render::*;
 
 use super::{Key, Mouse, MouseAction, MouseButton, Op, WindowSpec};
@@ -214,6 +215,13 @@ enum UserEvent {
     /// and ones opened later. Behind `gui-bg!`; `None` restores `DEFAULT_BG`. Pure
     /// repaint, no metric change.
     Background { rgb: Option<[u8; 3]> },
+    /// Set the cell height as a multiple of the font px — for every open window and
+    /// ones opened later. Behind `gui-line-height!`. A metric change, like a font
+    /// change: the row count moves, so each window is told its new grid and re-renders.
+    LineHeight { mult: f32 },
+    /// Set how monochrome text is anti-aliased (gray / subpixel / auto) — for every
+    /// open window and ones opened later. Behind `gui-text-aa!`. A pure repaint.
+    TextAa { mode: TextAa },
     /// Register a font family (interned `name`) from raw TTF bytes per style, so
     /// a face's `:family` can select it. Parsed on the GUI thread and shared by
     /// every renderer. Behind `gui-font-register`.
@@ -712,6 +720,31 @@ pub fn bg(rgb: Option<[u8; 3]>) -> Result<(), String> {
     Ok(())
 }
 
+/// `(gui-line-height! mult)` — set the cell height as a multiple of the font px on
+/// every window + the default for ones opened later. No-op (silently) if the GUI
+/// thread never started.
+pub fn line_height(mult: f32) -> Result<(), String> {
+    if headless() {
+        return Ok(());
+    }
+    if let Ok(g) = gui() {
+        let _ = g.lock().unwrap().send_event(UserEvent::LineHeight { mult });
+    }
+    Ok(())
+}
+
+/// `(gui-text-aa! mode)` — set how monochrome text is anti-aliased on every window +
+/// the default for ones opened later. No-op (silently) if the GUI thread never started.
+pub fn text_aa(mode: TextAa) -> Result<(), String> {
+    if headless() {
+        return Ok(());
+    }
+    if let Ok(g) = gui() {
+        let _ = g.lock().unwrap().send_event(UserEvent::TextAa { mode });
+    }
+    Ok(())
+}
+
 /// `(gui-title! id text)` — set window `id`'s title-bar text at runtime. Routed
 /// through the event-loop proxy like `font`; a no-op (silently) if the GUI thread
 /// never started or `id` isn't a live window.
@@ -866,6 +899,39 @@ struct Win {
     scroll_pending: bool,
 }
 
+/// The global renderer settings a window opens with — each behind a `gui-*!`
+/// primitive whose `id`-less form sets the default for windows opened later as well
+/// as every open one. One struct rather than a growing positional tail through
+/// `build_window` (the `WindowSpec` lesson).
+#[derive(Clone, Copy)]
+struct RenderDefaults {
+    /// Default cell font family (interned keyword id); `None` = the bundled mono.
+    family: Option<u32>,
+    /// Default cell font size, logical px.
+    px: f32,
+    /// Content inset (logical px) before the grid on every edge.
+    inset: f32,
+    /// Window background; `None` = `DEFAULT_BG`.
+    bg: Option<[u8; 3]>,
+    /// Cell height as a multiple of the font px.
+    line_height: f32,
+    /// How monochrome text is anti-aliased.
+    text_aa: TextAa,
+}
+
+impl Default for RenderDefaults {
+    fn default() -> Self {
+        RenderDefaults {
+            family: None,
+            px: DEFAULT_PX,
+            inset: 0.0,
+            bg: None,
+            line_height: LINE_HEIGHT,
+            text_aa: TextAa::Auto,
+        }
+    }
+}
+
 /// Build a window + softbuffer surface + glyph renderer inside the running event
 /// loop. Errors (window / surface creation) propagate to the `open` caller.
 fn build_window(
@@ -873,10 +939,7 @@ fn build_window(
     subscriber: u64,
     spec: WindowSpec,
     families: Families,
-    base_px: f32,
-    default_family: Option<u32>,
-    default_inset: f32,
-    default_bg: Option<[u8; 3]>,
+    defaults: RenderDefaults,
 ) -> Result<Win, String> {
     let (w, h) = spec.size.unwrap_or((840.0, 560.0));
     let attributes = Window::default_attributes()
@@ -920,15 +983,15 @@ fn build_window(
     };
     #[cfg(not(feature = "gui-gpu"))]
     let backend = cpu_backend(&window)?;
-    let mut renderer = Renderer::new(window.scale_factor(), families, base_px);
-    // honour a global default family set before this window opened
-    if let Some(f) = default_family {
+    let mut renderer = Renderer::new(window.scale_factor(), families, defaults.px);
+    // honour the global defaults set before this window opened
+    if let Some(f) = defaults.family {
         renderer.set_font(Some(f), None);
     }
-    // honour a global default content inset set before this window opened
-    renderer.set_inset(default_inset);
-    // honour a global default window background set before this window opened
-    renderer.set_bg(default_bg);
+    renderer.set_inset(defaults.inset);
+    renderer.set_bg(defaults.bg);
+    renderer.set_line_height(defaults.line_height);
+    renderer.set_text_aa(defaults.text_aa);
     Ok(Win {
         window,
         backend,
@@ -963,14 +1026,9 @@ struct GuiApp {
     /// Font-family registry shared by every window's renderer (so a
     /// `gui-font-register` reaches them all).
     families: Families,
-    /// Global default cell font (family / px) applied to windows opened later.
-    default_family: Option<u32>,
-    default_px: f32,
-    /// Global default content inset (logical px) applied to windows opened later.
-    default_inset: f32,
-    /// Global default window background applied to windows opened later; `None` =
-    /// `DEFAULT_BG`.
-    default_bg: Option<[u8; 3]>,
+    /// The renderer settings windows opened later start with (font, inset,
+    /// background, line height, text AA) — each `gui-*!` default arm updates it.
+    defaults: RenderDefaults,
     /// winit 0.30 only lets a window be created once the event loop is
     /// **resumed** (an `ActiveEventLoop` whose platform display is live). On
     /// desktop `resumed` fires before the first user event, but rather than
@@ -1001,10 +1059,7 @@ impl GuiApp {
             subscriber,
             spec,
             self.families.clone(),
-            self.default_px,
-            self.default_family,
-            self.default_inset,
-            self.default_bg,
+            self.defaults,
         ) {
             Ok(win) => {
                 update_cells(&win.window, &win.renderer, &win.size);
@@ -1071,6 +1126,14 @@ impl ApplicationHandler<UserEvent> for GuiApp {
             }
             UserEvent::Draw { id, ops } => {
                 if let Some(w) = self.ids.get(&id).and_then(|wid| self.wins.get_mut(wid)) {
+                    // Brood finished rendering; the next momentum step may fire.
+                    w.scroll_pending = false;
+                    // A frame identical to the one on screen — a timer that fired and
+                    // changed nothing, a model turn whose view is unchanged — costs no
+                    // repaint at all. The op vocabulary is plain data, so equality is exact.
+                    if ops == w.frame {
+                        return;
+                    }
                     // Refresh the cursor hot-zones from this frame, then store it.
                     w.zones = ops
                         .iter()
@@ -1086,7 +1149,6 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                         })
                         .collect();
                     w.frame = ops;
-                    w.scroll_pending = false; // Brood finished rendering; next momentum step may fire
                     w.window.request_redraw();
                 }
             }
@@ -1182,10 +1244,10 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 }
                 None => {
                     if let Some(f) = family {
-                        self.default_family = Some(f);
+                        self.defaults.family = Some(f);
                     }
                     if let Some(p) = px {
-                        self.default_px = p.max(1.0);
+                        self.defaults.px = p.max(1.0);
                     }
                     for w in self.wins.values_mut() {
                         apply_font(w, family, px);
@@ -1193,7 +1255,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 }
             },
             UserEvent::Inset { px } => {
-                self.default_inset = px.max(0.0);
+                self.defaults.inset = px.max(0.0);
                 for w in self.wins.values_mut() {
                     w.renderer.set_inset(px);
                     update_cells(&w.window, &w.renderer, &w.size);
@@ -1201,11 +1263,30 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 }
             }
             UserEvent::Background { rgb } => {
-                self.default_bg = rgb;
+                self.defaults.bg = rgb;
                 for w in self.wins.values_mut() {
                     w.renderer.set_bg(rgb);
                     // Background is a pure repaint — no metric change, so no
                     // `update_cells`/snap.
+                    w.window.request_redraw();
+                }
+            }
+            UserEvent::LineHeight { mult } => {
+                self.defaults.line_height = mult;
+                for w in self.wins.values_mut() {
+                    w.renderer.set_line_height(mult);
+                    // The cell height moved, so the grid did: the same path as a font
+                    // change — new (cols, rows) to the app, then a repaint.
+                    update_cells(&w.window, &w.renderer, &w.size);
+                    let (cols, rows) = *w.size.lock().unwrap();
+                    deliver(w.subscriber, resize_message(cols, rows));
+                    w.window.request_redraw();
+                }
+            }
+            UserEvent::TextAa { mode } => {
+                self.defaults.text_aa = mode;
+                for w in self.wins.values_mut() {
+                    w.renderer.set_text_aa(mode);
                     w.window.request_redraw();
                 }
             }
@@ -1223,9 +1304,11 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     .borrow_mut()
                     .register(name, regular, bold, italic, bold_italic);
                 // a re-registration replaces a family; clear caches keyed by the
-                // old glyphs and repaint.
+                // old glyphs, forget the retained frame (its ops are unchanged but
+                // their glyphs are not), and repaint.
                 for w in self.wins.values_mut() {
                     w.renderer.cache.clear();
+                    w.renderer.invalidate();
                     w.window.request_redraw();
                 }
             }
@@ -1662,10 +1745,7 @@ fn run_gui(ready: Sender<Result<EventLoopProxy<UserEvent>, String>>) {
         wins: HashMap::new(),
         ids: HashMap::new(),
         families: default_families(),
-        default_family: None,
-        default_px: DEFAULT_PX,
-        default_inset: 0.0,
-        default_bg: None,
+        defaults: RenderDefaults::default(),
         resumed: false,
         pending_open: Vec::new(),
     };

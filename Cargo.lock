@@ -464,6 +464,7 @@ dependencies = [
  "softbuffer",
  "stacker",
  "subtle",
+ "swash",
  "tree-sitter",
  "tree-sitter-elixir",
  "tree-sitter-language",
