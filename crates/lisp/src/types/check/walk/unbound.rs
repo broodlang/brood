@@ -192,6 +192,38 @@ pub(in crate::types::check) fn resolves_to_macro(heap: &Heap, ctx: &Ctx, s: Symb
         )
 }
 
+/// A call head nothing can be proven about: a **qualified** `mod/name` whose
+/// module is not loaded, so the checker cannot tell a function from a macro.
+///
+/// [`is_unbound`] already declines to flag such a head — the module may be
+/// defined dynamically, or added to `*load-path*` by the program itself before
+/// the reference runs. This is the other half of that carve-out. If the head
+/// might be a macro, its arguments might be *opaque syntax*, exactly as
+/// [`resolves_to_macro`] describes, so the walk must not descend into them
+/// either. Without this the checker stays silent about the head it cannot
+/// resolve and then reports every mnemonic inside `(mod/asm (movz x0 …) …)` as
+/// an unbound symbol — silent about the thing it doesn't know, loud about the
+/// things that follow from it.
+///
+/// Narrow on purpose: a BARE unresolvable head is still walked into, because a
+/// bare name that resolves to nothing is a typo the checker should report,
+/// arguments and all. Only the unknown-module case is opaque.
+pub(in crate::types::check) fn head_is_unresolvable(heap: &Heap, ctx: &Ctx, s: Symbol) -> bool {
+    if ctx.is_local(s) || is_globally_bound(heap, s) || curated_sig(s).is_some() {
+        return false;
+    }
+    let nm = name_of(s);
+    match nm.rfind('/') {
+        Some(slash) => {
+            // Record the known-ns query for the Phase-2 cache, as `is_unbound` does:
+            // this file's verdict depends on whether the prefix is known.
+            crate::types::check::deps::obs_known_ns(heap, &nm[..=slash]);
+            !ctx.module_is_known(&nm[..=slash])
+        }
+        None => false,
+    }
+}
+
 /// Walk `form` recursively, adding to `ctx.file_globals` every name introduced
 /// by a `(def name …)` or `(defmacro name …)` — at any depth, since Brood's
 /// `def` always binds globally regardless of where it textually sits (a

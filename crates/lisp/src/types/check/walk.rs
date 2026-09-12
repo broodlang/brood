@@ -927,13 +927,20 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
     // template's spliced binders (`(wp v (+ a b))` where `wp` binds `a`/`b`).
     let head_is_macro =
         matches!(items.first(), Some(&Value::Sym(s)) if resolves_to_macro(heap, ctx, s));
+    // …and a head we cannot resolve AT ALL — `mod/name` with no `mod/*` loaded —
+    // might be one, so its arguments are opaque for the same reason. `is_unbound`
+    // already stays silent about such a head; descending into its arguments anyway
+    // made the checker quiet about what it didn't know and loud about everything
+    // that followed from it.
+    let head_is_opaque =
+        matches!(items.first(), Some(&Value::Sym(s)) if head_is_unresolvable(heap, ctx, s));
     // A `do`'s non-final forms are a body sequence, so a bare symbol among them is
     // evaluated and discarded — see `lint_discarded_symbols`, which also recognises the
     // `f(x)` shape that lands there.
     if matches!(items.first(), Some(&Value::Sym(s)) if value::symbol_is(s, kw::DO)) {
         lint_discarded_symbols(heap, &items[1..], form, ctx, out);
     }
-    if !head_is_macro {
+    if !head_is_macro && !head_is_opaque {
         // A `fold`/`reduce` callback written as a `fn` literal is walked with its
         // parameters SEEDED: the accumulator to the fold's own result type (the fixpoint
         // `infer::seq_aware_call_ty` computes — a superset of every accumulator value, by
