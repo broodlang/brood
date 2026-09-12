@@ -222,12 +222,12 @@ current element and `acc` is the current accumulator."
 ;;      seq.blsp's note) — late binding does not help when the call happens at expansion.
 ;;   2. `require-one` ITSELF filters. `%std-edges-for`, `%merge-require-edges!`,
 ;;      `%require-drop-waiter!` and `%bundle-short-collides?` are the require machinery, so
-;;      an autoload stub there would call `require-one 'seq` from inside `require-one` and
-;;      recurse. The `%autoload` mechanism has no answer to that, and should not need one.
+;;      a `seq/filter` miss there would call `require-one 'seq` from inside `require-one`,
+;;      mid-claim (ADR-335's miss path loads at the lookup). No mechanism should have to
+;;      answer that.
 ;;
 ;; So the rule is prelude-wide rather than per-site: the PRELUDE says `%filter`, everything
-;; else says `seq/filter`. One rule, no boot-order reasoning at each call, and no stub for
-;; `filter` in the `%autoload seq` declaration at all.
+;; else says `seq/filter`. One rule, no boot-order reasoning at each call.
 ;;
 ;; This is an internal, not a second public spelling: `%`-prefixed names are not part of
 ;; the surface, so ADR-227's "no bare re-export aliases" still holds — there is exactly one

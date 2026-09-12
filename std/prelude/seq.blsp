@@ -238,7 +238,7 @@ Always true for `n` <= 0.
       coll
       ;; `%split-at-acc`, NOT `seq/split-at`. The module function is a one-line wrapper
       ;; over this very helper three lines above, and reaching it through the qualified
-      ;; name meant every `sort` of a non-trivial list fired the `%autoload seq` stub and
+      ;; name meant every `sort` of a non-trivial list loaded `seq` at the lookup miss and
       ;; loaded the whole `seq` module — to call back into the prelude. `sort` is core and
       ;; now pulls in nothing.
       (let (h (%quot n 2)

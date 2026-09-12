@@ -427,6 +427,26 @@ impl Drop for EagerLoadScope {
     }
 }
 
+/// The module of an already-RESOLVED qualified name — the runtime counterpart of
+/// [`module_to_require`], for [`global_miss`]. A name reaching a lookup has been through
+/// `resolve_sym`: an alias prefix was rewritten to the real module path and an intra-package
+/// name rooted, so the compile-time alias test is not applied here. It must not be: the
+/// import table it reads is per-file compile state, and at run time it holds whatever the
+/// last compiled file left — an alias `(:alias web/json :as json)` in some unrelated file
+/// would otherwise make a plain `json/parse` miss read as "alias, already loaded" and raise
+/// unbound. Nor is the name re-rooted: it already is, and `root_qualified_ref` reads the
+/// package context, which during a dependency's load is that dependency's — a std `json/parse`
+/// missing while a dependency with its own `json` module is mid-load would otherwise be sent
+/// to `dep/json`. `/foo` (the root escape) and the bare `/` have no module.
+fn module_of_resolved(s: Symbol) -> Option<Symbol> {
+    let name = value::symbol_name_ref(s);
+    let last = name.rfind('/')?;
+    if last == 0 {
+        return None;
+    }
+    Some(value::intern(&name[..last]))
+}
+
 /// The global-lookup MISS path for every engine: a lookup of `sym` in `env` found nothing.
 /// A *requireable* name — one with a module prefix, after the same exclusions
 /// [`module_to_require`] applies — loads its module and is looked up again; only if it is
@@ -446,7 +466,7 @@ impl Drop for EagerLoadScope {
 /// are [`ensure_required`]'s: a module that cannot be found, or a `still loading` cycle,
 /// falls through to the plain unbound error; an error inside a found module propagates.
 pub(crate) fn global_miss(heap: &mut Heap, env: EnvId, sym: Symbol) -> LispResult {
-    if let Some(module) = module_to_require(heap, sym) {
+    if let Some(module) = module_of_resolved(sym) {
         // A module's reference to its OWN not-yet-defined name while it is mid-load:
         // never re-require it (mirrors `require_qualified_head`).
         if heap.compile_ns() != Some(module) {

@@ -442,13 +442,13 @@ mod prelude_hygiene {
     use crate::core::value::{self, ValueRef};
     use crate::Interp;
 
-    // There is no allowed-module list any more. The prelude used to force-load `string`
-    // and `seq` at boot, which made every `string/…` / `seq/…` reference resolve and cost
-    // 12.1 ms of a 26 ms boot on every invocation (KI-61); those modules now load lazily,
-    // so a qualified reference is only safe when something binds the name up front. The
-    // three things that do are checked by name below — a registered primitive, a prelude
-    // definition, or an `%autoload` declaration — which is stricter than a module allowlist
-    // and needs no editing when a namespacing wave moves another name out of the prelude.
+    // There is no allowed-module list. The prelude used to force-load `string` and `seq` at
+    // boot, which cost 12.1 ms of a 26 ms boot on every invocation (KI-61); then it carried
+    // hand-declared `%autoload` stubs for the names it references; since ADR-335 a qualified
+    // reference simply loads its module at the first lookup that misses, and the stubs are
+    // gone. What the lint checks now: every qualified name the prelude references is either
+    // bound at boot (a registered primitive, a prelude definition) or names a module this
+    // binary embeds — so a typo cannot hide behind "loads later".
 
     /// Every name `builtins::register` binds — the always-available set, slash-named
     /// primitives included.
@@ -551,42 +551,6 @@ mod prelude_hygiene {
         out
     }
 
-    /// The `(%autoload mod (name arity) …)` declarations in a prelude file, as
-    /// `(mod/name, arity)`. Read out of the source rather than out of a live image so the
-    /// two tests below can check the declaration itself: that one exists for every
-    /// reference, and that its arity still matches the module.
-    fn autoload_declarations(heap: &Heap, forms: &[Value]) -> Vec<(String, usize)> {
-        let mut out = Vec::new();
-        for &form in forms {
-            let Ok(items) = heap.list_to_vec(form) else {
-                continue;
-            };
-            let Some(&head) = items.first() else { continue };
-            let ValueRef::Sym(h) = head.unpack() else {
-                continue;
-            };
-            if value::symbol_name(h) != "%autoload" {
-                continue;
-            }
-            let ValueRef::Sym(module) = items[1].unpack() else {
-                continue;
-            };
-            let module = value::symbol_name(module);
-            for &spec in &items[2..] {
-                let Ok(pair) = heap.list_to_vec(spec) else {
-                    continue;
-                };
-                let (Some(&name), Some(&arity)) = (pair.first(), pair.get(1)) else {
-                    continue;
-                };
-                if let (ValueRef::Sym(n), Value::Int(a)) = (name.unpack(), arity) {
-                    out.push((format!("{module}/{}", value::symbol_name(n)), a as usize));
-                }
-            }
-        }
-        out
-    }
-
     #[test]
     fn prelude_code_references_no_unloaded_module_wrapper() {
         const FILES: &[(&str, &str)] = &[
@@ -621,7 +585,7 @@ mod prelude_hygiene {
         ];
         let primitives = registered_primitives();
         let mut heap = Heap::new();
-        // Two passes: the whole prelude's definitions and autoload declarations have to be
+        // Two passes: the whole prelude's definitions have to be
         // known before any file's references can be judged, since a reference in `core.blsp`
         // may name something `tools.blsp` declares.
         let read: Vec<(&str, Vec<Value>)> = FILES
@@ -633,14 +597,8 @@ mod prelude_hygiene {
             })
             .collect();
         let mut defined = std::collections::HashSet::new();
-        let mut autoloaded = std::collections::HashSet::new();
         for (_, forms) in &read {
             defined.extend(prelude_definitions(&heap, forms));
-            autoloaded.extend(
-                autoload_declarations(&heap, forms)
-                    .into_iter()
-                    .map(|(q, _)| q),
-            );
         }
         let mut violations: Vec<String> = Vec::new();
         for (fname, forms) in &read {
@@ -648,11 +606,19 @@ mod prelude_hygiene {
                 let mut found = Vec::new();
                 collect_qualified(&heap, form, &mut found);
                 for q in found {
-                    // Three ways a qualified name is bound with no module load: a
-                    // slash-named kernel primitive (`file/slurp`, `string/split`), a
-                    // prelude definition (`string/format` lives in the prelude, not in
-                    // the `string` module), and an `%autoload` stub.
-                    if primitives.contains(&q) || defined.contains(&q) || autoloaded.contains(&q) {
+                    // Two ways a qualified name is bound with no module load: a slash-named
+                    // kernel primitive (`file/slurp`, `string/split`) and a prelude definition
+                    // (`string/format` lives in the prelude, not in the `string` module).
+                    if primitives.contains(&q) || defined.contains(&q) {
+                        continue;
+                    }
+                    // Everything else loads at the first lookup that misses (ADR-335) — which
+                    // is only a load if the module EXISTS. A typo (`strng/join`) or a module
+                    // that was renamed out from under the prelude would surface as `unbound
+                    // symbol` at a user's call, exactly the failure this lint is for; require
+                    // the module to be one this binary embeds.
+                    let module = &q[..q.rfind('/').unwrap_or(0)];
+                    if crate::builtins::modules::is_embedded_module(module) {
                         continue;
                     }
                     violations.push(format!("{fname}: {q}"));
@@ -663,22 +629,13 @@ mod prelude_hygiene {
         violations.dedup();
         assert!(
             violations.is_empty(),
-            "prelude code references a name nothing binds at boot. The modules the prelude \
-             once force-loaded now load lazily (KI-61), so reach for the `%`-primitive, or \
-             declare the name in the `%autoload` list in std/prelude/tools.blsp:\n  {}",
+            "prelude code references a qualified name whose module this binary does not embed, \
+             and nothing binds it at boot. A reference into a real std module loads that module \
+             on first use (ADR-335); this is none of those — a typo, or a module that moved. \
+             Reach for the `%`-primitive, or fix the name:\n  {}",
             violations.join("\n  ")
         );
     }
-
-    /// The other half of the autoload contract: a declared arity that has drifted from its
-    /// module would make `def`'s reload check announce an arity change on every load of that
-    /// module, and would report a caller's arity error from inside the stub. A declared name
-    /// the module does not define at all would loop until `%autoload-call`'s re-entry guard
-    /// raised — a runtime failure this catches at build.
-    ///
-    /// Checks both: the loaded arity matches the declaration, and the loaded arglist is not
-    /// still the stub's own generated `(a0 a1 …)` parameters (which would mean the module
-    /// loaded without defining the name, and the count alone would agree).
     /// `->string` is defined TWICE by construction: once in `std/prelude/core.blsp` as the
     /// bootstrap implementation the prelude's own machinery calls (~60 sites, all of them
     /// before `defability Display` has been evaluated), and again as the `Display` impls for
@@ -785,64 +742,6 @@ mod prelude_hygiene {
                 "numeric.rs no longer names `{op}` — update this test with the table"
             );
         }
-    }
-
-    #[test]
-    fn every_autoload_declaration_matches_its_module() {
-        let mut heap = Heap::new();
-        let src = include_str!("../../../std/prelude/tools.blsp");
-        let forms = syntax::reader::read_all(&mut heap, src).expect("read tools.blsp");
-        let declared = autoload_declarations(&heap, &forms);
-        assert!(
-            !declared.is_empty(),
-            "no `%autoload` declarations found — the scanner has drifted from the macro's shape"
-        );
-        // A declaration that shadows a slash-named kernel primitive is the worst case:
-        // the stub REPLACES an always-bound native with one that loads a module and
-        // forwards to itself. Caught here rather than at the first call site.
-        let primitives = registered_primitives();
-        let mut interp = Interp::new();
-        let mut problems: Vec<String> = Vec::new();
-        for (qualified, arity) in declared {
-            if primitives.contains(&qualified) {
-                problems.push(format!(
-                    "{qualified}: already a kernel primitive — the stub shadows it; drop the \
-                     declaration"
-                ));
-                continue;
-            }
-            let module = &qualified[..qualified.find('/').unwrap()];
-            interp
-                .eval_str(&format!("(require-one '{module})"))
-                .unwrap_or_else(|e| panic!("require {module}: {e:?}"));
-            let arglist = interp
-                .eval_str(&format!("(arglist {qualified})"))
-                .map(|v| interp.print(v))
-                .unwrap_or_else(|e| format!("<error: {}>", e.message));
-            let stub_params = format!(
-                "({})",
-                (0..arity)
-                    .map(|i| format!("a{i}"))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            );
-            let count = arglist.split_whitespace().count();
-            if arglist == stub_params {
-                problems.push(format!(
-                    "{qualified}: still the autoload stub after loading `{module}` — \
-                     the module does not define it"
-                ));
-            } else if count != arity {
-                problems.push(format!(
-                    "{qualified}: declared arity {arity}, module defines {arglist}"
-                ));
-            }
-        }
-        assert!(
-            problems.is_empty(),
-            "autoload declarations in std/prelude/tools.blsp have drifted:\n  {}",
-            problems.join("\n  ")
-        );
     }
 }
 

@@ -109,7 +109,7 @@ inverse of the `string/->codepoints` primitive.
 ;; Collect `coll`'s elements interleaved with `sep` into a parts list (tail-
 ;; recursively, reversed), then build the string in one `apply str` pass.
 ;; Byte-identical to `seq/interpose-acc`, deliberately. `string/join` is one of the ops the
-;; PRELUDE reaches for (it is in the `%autoload string` list), and routing it through
+;; PRELUDE reaches for (it loads `string` at the first lookup that misses, ADR-335), and routing it through
 ;; `seq/interpose` would make every `join` drag in a second module. Three lines of
 ;; duplication buys that; noted here and there so neither looks like an oversight.
 (defn- join-parts (sep coll acc)

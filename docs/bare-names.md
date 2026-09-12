@@ -34,7 +34,7 @@ The groups below are coarse on purpose: they carry the *kind* of justification, 
 per name. `*earmuffed*` dynamics and operators are bare by convention and need no argument;
 the `core` list is the one worth pushing back on, and the one to read before adding to it.
 
-Counts are as of 2026-09-11: **265** bare public names.
+Counts are as of 2026-09-12: **264** bare public names.
 
 ## operator (13)
 
@@ -53,10 +53,9 @@ Operators — arithmetic, comparison and the reader's own punctuation. Bare by c
 - `>`
 - `>=`
 
-## dynamic (62)
+## dynamic (61)
 
 Dynamic variables (`defdyn`) — earmuffed, so they cannot be mistaken for ordinary bindings, and bare because `binding` sites read better unqualified. The largest group and the least contentious; note how many are one subsystem's configuration (`*project-*`, `*test-*`, `*repl-*`).
-- `*autoloading*`
 - `*comment-kinds*`
 - `*config-git-init*`
 - `*config-registry*`

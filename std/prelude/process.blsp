@@ -460,9 +460,9 @@ order — so other mailbox messages stay queued while waiting (selective receive
 ;; subscribe is a crash nobody reports. That costs one `proc/*` load and nothing else.
 ;;
 ;; Everything that formats a report is reached only through the qualified name in
-;; `%crash-reporter-shim` below, and ADR-246's autoload stubs resolve a qualified call at
-;; CALL time — so a run that never crashes never loads the module, and the first crash
-;; loads it before rendering anything. Semantics are unchanged either way: same
+;; `%crash-reporter-shim` below, and a qualified reference loads its module at the first
+;; lookup that misses (ADR-335) — so a run that never crashes never loads the module, and the
+;; first crash loads it before rendering anything. Semantics are unchanged either way: same
 ;; subscription, same registered name, same reports.
 
 (defn- %crash-reporter-shim (starter)
@@ -471,12 +471,13 @@ holding no reference to `crash-report` until one fires. The first event loads th
 and hands off to `crash-report/take-over`, which never returns. `:stop` disarms without
 ever loading it, so stopping a run that never crashed stays free.
 
-`crash-report/take-over` resolves through the `%autoload` stub declared in tools.blsp, not
-through the module machinery's own stubs: those are installed for a MODULE's references,
-and the prelude is compiled before any of that exists, so a bare qualified call here raises
-`unbound symbol` — as the first cut of this did, killing the reporter silently at the exact
-moment it was needed (the reporter is the one process whose own death nobody reports). The
-`prelude_hygiene` test enforces the declaration, which is why that mistake cannot recur."
+`crash-report/take-over` is bound by nothing at boot: the first lookup that misses loads
+`std/proc/crash-report.blsp` (ADR-335), so a run that never crashes never pays for the
+reporter's nine-module closure (ADR-313). Before ADR-335 that took a hand-declared
+`%autoload` stub, because the prelude is compiled before any module machinery exists and a
+bare qualified call here raised `unbound symbol` — as the first cut of this did, killing the
+reporter silently at the exact moment it was needed (the reporter is the one process whose
+own death nobody reports)."
   (receive
     (:stop (do (proc/system-monitor nil) nil))
     (m (crash-report/take-over starter m))))
