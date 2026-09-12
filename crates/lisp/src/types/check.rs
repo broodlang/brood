@@ -623,6 +623,23 @@ fn lint_duplicate_defs_in(
     seen: &mut HashMap<Symbol, Option<Pos>>,
     out: &mut Vec<(Option<Pos>, String)>,
 ) {
+    // Recurses through nested `(do (do …))`, like `collect_register_sig_forms` beside it,
+    // and for the same reason grows the stack in heap-backed segments: a 30 000-deep
+    // legal chain (`checker_survives_pathologically_deep_forms`) overflowed the native
+    // stack here — the one walker of the un-expanded tree that lacked the guard, and a
+    // SIGSEGV `catch_unwind` cannot catch.
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        lint_duplicate_defs_in_inner(heap, form, allowed, seen, out)
+    })
+}
+
+fn lint_duplicate_defs_in_inner(
+    heap: &mut Heap,
+    form: Value,
+    allowed: bool,
+    seen: &mut HashMap<Symbol, Option<Pos>>,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
     let Ok(items) = heap.list_to_vec(form) else {
         return;
     };
