@@ -420,10 +420,11 @@ impl<'a> Cst<'a> {
             AtomKind::Float(_) => NodeKind::Float,
             AtomKind::Keyword => NodeKind::Keyword,
             AtomKind::Symbol => NodeKind::Symbol,
-            // An integer-shaped token that overflows `i64` — the reader
-            // rejects this as a parse error; in the tooling tree it's an
-            // `Error` token so the LSP flags it the same way.
-            AtomKind::IntOverflow => NodeKind::Error,
+            // An integer-shaped token past `i64` is a *bignum* literal, not an
+            // error — `read_atom` allocates one. It is an `Int` node here for the
+            // same reason: flagging `99999999999999999999` in the editor while it
+            // evaluates fine is a tooling bug, not a diagnostic.
+            AtomKind::IntOverflow => NodeKind::Int,
             // A valid `M`-suffixed decimal literal is its own kind; an invalid one
             // (bad numeric prefix) is an `Error`, like `IntOverflow`.
             AtomKind::Decimal => NodeKind::Decimal,
@@ -435,7 +436,12 @@ impl<'a> Cst<'a> {
             // A float-shaped but unparseable token (`1e`, `1.2.3`) — a parse error
             // in the reader; an `Error` token here so the LSP flags it the same.
             AtomKind::FloatInvalid => NodeKind::Error,
-            // Digit-led but not a number (`1/2`, `0x1F`, `1_000`) — reserved syntax,
+            // A radix literal is an integer, whatever its spelling — including one
+            // past `i64`, which the reader reads as a bignum. Malformed digits are
+            // an `Error`, like the other invalid literals above.
+            AtomKind::RadixOverflow => NodeKind::Int,
+            AtomKind::RadixInvalid => NodeKind::Error,
+            // Digit-led but not a number (`1_000`, `1N`, `3px`) — reserved syntax,
             // so the tooling tree marks it an `Error` like the malformed literals
             // above rather than a `Symbol` the LSP would offer to rename.
             AtomKind::ReservedNumeric => NodeKind::Error,

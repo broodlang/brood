@@ -43,7 +43,8 @@ these are the ones to unlearn:
 | `#"[0-9]+"` regex literal | Regexes are library values: a `(regex/match? "pat" s)` reference auto-loads the `regex` module. | A parse error **with a hint** naming `(regex/match? …)` (was a stray `#`-symbol). |
 | `\c` / `\newline` character literal | No character type — a character is a 1-char string `"c"` (or `(string/int->char 99)`). | A parse error **with a hint** naming the 1-char string (was `unbound symbol: \c`). |
 | `#\|…\|#` block comment (Scheme/CL) | No block comments — comment each line with `;`, or wrap forms in `(comment …)` (read but never evaluated). | A parse error **with a hint** (ADR-169; used to read as a bar-quoted symbol). Any other `#…` is likewise reserved — `#` is a dispatch character, and `#{…}` / `#b"…"` are its only forms. |
-| `0x1F`/`0b1010` radix, `1_000` separators, `1N` bigint | None of these — a digit-led token must be a number Brood has. `(string/->number "1F" 16)` parses hex, `1000` needs no separator, plain `1` already widens to bignum. | A parse error **with a targeted hint** (ADR-169; these read as symbols before, surfacing as a far-away "unbound symbol"). Reserving the tokens keeps each future numeric syntax additive. |
+| `0x1F`/`0b1010`/`0o17` radix literals | **Yes** (ADR-334) — they read as plain ints: `0xFF` → `255`, `0b1010` → `10`, `0o17` → `15`, signed forms too. The radix is spelling, not a type — `(type-of 0xFF)` is `:int` and it prints back as `255`. Past `i64` it is a bignum, like an oversized decimal literal. | Malformed digits (`0b102`, `0xZZ`, a bare `0x`) are a parse error **with a per-radix hint**, never a symbol. |
+| `1_000` separators, `1N` bigint | Neither — a digit-led token must be a number Brood has. `1000` needs no separator; plain `1` already widens to bignum. | A parse error **with a targeted hint** (ADR-169; these read as symbols before, surfacing as a far-away "unbound symbol"). Reserving the tokens is what let ratios (ADR-196) and radix literals (ADR-334) ship additively; the same holds for whatever comes next. |
 | `(/ 7 2)` → ratio `7/2` | **Yes — this is what happens** (ADR-196). `/` on integers is exact: `(/ 7 2)` → `7/2`, `(/ 12 3)` → `4` (divides evenly → int). `1/2` is a reader literal. Reach for `->float` when you want an inexact result. | A ratio, exactly as in Clojure/Scheme. |
 
 Within a *single* clause, optional and rest arguments use the Common-Lisp /
@@ -60,7 +61,7 @@ is the one piece that can't be guessed from Clojure; it has to be read.
 |---|---|---|
 | Nil | `nil` | The empty value; also the empty list. |
 | Boolean | `true`, `false` | |
-| Integer | `0`, `42`, `-7` | 64-bit; arithmetic is overflow-checked. A result out of `i64` range promotes to an arbitrary-precision **bignum** rather than wrapping, and demotes back when it fits again — so the integer type is unbounded in practice. |
+| Integer | `0`, `42`, `-7`, `0xFF`, `0b1010`, `0o17` | 64-bit; arithmetic is overflow-checked. A radix prefix (`0x` hex, `0b` binary, `0o` octal, either case, sign in front) is spelling only — `0xFF` *is* `255`, `:int`, and prints as decimal. A result out of `i64` range promotes to an arbitrary-precision **bignum** rather than wrapping, and demotes back when it fits again — so the integer type is unbounded in practice. |
 | Float | `3.14`, `-0.5`, `1e3`, `inf`, `nan` | 64-bit. **`inf`, `-inf` and `nan` are reader literals** — those three bare tokens are floats, not symbols, so they can't be used as names (the digit-required rule below has these three exceptions). Test them with `infinite?` / `nan?`; `=` reports NaN as equal to nothing, per IEEE. |
 | Decimal | `1.50M`, `0M`, `-3.14M` | Exact arbitrary-precision base-10, for money and Postgres `numeric` — values a float can't hold (`(+ 0.1M 0.2M)` *is* `0.3M`). The literal is a trailing `M`; `(decimal/of x)` builds one from a string, int, bignum or float. Scale is significant in arithmetic (see [Arithmetic](#arithmetic)) but **not** in `=`, which compares values (`1.5M` = `1.50M`). |
 | Ratio | `1/2`, `-3/4`, `22/7` | Exact rational (`num_rational::BigRational`), always **reduced** with a positive denominator (ADR-196). `1/2` is a literal; **`/` on integers is exact** — `(/ 1 2)` is `1/2`, `(/ 6 3)` is `2` (a denominator of 1 demotes to an integer, so `4/2` IS `2`). Does the full arithmetic tower: ratio+int/ratio → ratio, ratio+decimal → ratio (lossless), ratio+float → float (contagion). `->float`/`decimal/number->` convert out; `math/numerator`/`math/denominator` read the parts. `=` is by value (`1/2` = `2/4`). |
@@ -3004,16 +3005,16 @@ is `-43`):
 (math/round (string/->number "42.5"))    ;=> 43
 ```
 
-**A radix reads the notations the reader will not.** Brood has no `0x1F`/`0b1010`/`0o17`
-literals — ADR-169 reserved that syntax rather than defining it — so this is how you read
-one. With a radix the parse is integer-only (in every base, 10 included), and it takes the
-digits alone, no prefix:
+**A radix reads hex, octal or binary from *data*.** In *source*, write the literal —
+`0x1F`, `0b1010`, `0o17` (ADR-334). This is for text a program holds at runtime. With a
+radix the parse is integer-only (in every base, 10 included), and it takes the digits
+alone, no prefix:
 
 ```clojure
 (string/->number "1F" 16)     ;=> 31
 (string/->number "1010" 2)    ;=> 10
 (string/->number "-ff" 16)    ;=> -255
-(string/->number "0x1f" 16)   ;=> nil   ; the prefix is the syntax this replaces
+(string/->number "0x1f" 16)   ;=> #failure{…}   ; the prefix is reader syntax, not digits
 ```
 
 A radix outside 2–36 **raises** — that is a bug in the caller, and `nil` could not be told

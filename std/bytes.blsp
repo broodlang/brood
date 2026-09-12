@@ -104,4 +104,4 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\".
 (defn- int->bytes-be (v w acc)
   (if (<= w 0)
     acc
-    (int->bytes-be (bit/shift-right v 8) (- w 1) (cons (bit/and v 255) acc))))
+    (int->bytes-be (bit/shift-right v 8) (- w 1) (cons (bit/and v 0xFF) acc))))

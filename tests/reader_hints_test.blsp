@@ -70,12 +70,12 @@
 ;; symbol" instead of a reader error, and it silently spent every numeric syntax
 ;; Brood might later want. Reserving them kept ratios / radix literals / digit
 ;; separators / a bigint suffix purely additive — and the reservation has now paid
-;; out once: `1/2` is a real ratio literal (ADR-196), added without a break, so it
-;; moved out of the reserved list below and into the case that must READ.
+;; out twice: `1/2` is a real ratio literal (ADR-196) and `0x1F` a real radix one
+;; (ADR-334), both added without a break, so both moved out of the reserved list
+;; below and into the case that must READ.
 (describe "digit-led tokens are reserved numeric syntax, not names"
   (test "the reserved shapes each error with a targeted hint"
-    (let (cases [["0x1F" "radix"]
-                  ["1_000" "digit separator"]
+    (let (cases [["1_000" "digit separator"]
                   ["1N" "bigint"]
                   ["3px" "must be a number"]])
       (map cases
@@ -98,7 +98,43 @@
     (assert= (reflect/read-string "2/4") 1/2)
     (assert= (reflect/read-string "-3/4") -3/4)
     (assert= (reflect/read-string "4/2") 2)
-    (assert= (type-of (reflect/read-string "4/2")) :int))
+    (assert= (type-of (reflect/read-string "4/2")) :int)
+    ;; the second reservation to pay out: radix literals (ADR-334). The radix is
+    ;; spelling, not a type — every one of these reads as a plain int.
+    (assert= (reflect/read-string "0xFF") 255)
+    (assert= (reflect/read-string "0xff") 255)
+    (assert= (reflect/read-string "0XFF") 255)
+    (assert= (reflect/read-string "0b1010") 10)
+    (assert= (reflect/read-string "0o17") 15)
+    (assert= (reflect/read-string "0x0") 0)
+    (assert= (type-of (reflect/read-string "0xFF")) :int)
+    (assert= (reflect/read-string "-0xFF") -255)
+    (assert= (reflect/read-string "+0x10") 16)
+    ;; the magnitude of i64::MIN is one past i64::MAX before the sign applies —
+    ;; it must still be an int, not spill to a bignum
+    (assert= (reflect/read-string "-0x8000000000000000") -9223372036854775808)
+    (assert= (type-of (reflect/read-string "-0x8000000000000000")) :int)
+    ;; past i64 it becomes a bignum, exactly as an oversized decimal literal does
+    (assert= (reflect/read-string "0xFFFFFFFFFFFFFFFFFF") 4722366482869645213695)
+    (assert= (reflect/read-string "-0xFFFFFFFFFFFFFFFFFF") -4722366482869645213695))
+  (test "a malformed radix literal errors with a per-radix hint"
+    (let (cases [["0xZZ" "hex literal holds only"]
+                  ["0b102" "binary literal holds only"]
+                  ["0o18" "octal literal holds only"]
+                  ["0xFM" "hex literal holds only"]
+                  ["0x" "needs at least one hex digit"]
+                  ["0b" "needs at least one binary digit"]
+                  ["0o" "needs at least one octal digit"]])
+      (map cases
+        (fn (c)
+          (let (e (try (reflect/read-string (first c)) (catch e e)))
+            (assert= (get e :kind) :parse)
+            (is (includes? (get e :hint) (second c))))))))
+  (test "a radix prefix only counts when the token leads with it"
+    ;; `x0b1` is not digit-led, so it is an ordinary name — the radix rules never
+    ;; see it. Same for a name that merely contains `0x`.
+    (map ["x0b1" "a0xFF" "foo0x1"]
+      (fn (t) (assert= (type-of (reflect/read-string t)) :symbol))))
   (test "names that merely contain a sign or dot are untouched"
     ;; The rule keys on a digit AFTER the sign/dot, which is what keeps these legal.
     (map ["+" "-" "..." "..foo" "foo." ".foo" "foo/bar" "a1" "x2y"]

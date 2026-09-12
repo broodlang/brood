@@ -841,10 +841,51 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-09** — KI-122: the KI-120 tripwire was crying wolf on bedit, on a false claim
 - **2026-09-12** — `filter` joins its complement in `seq/`; `remove` becomes `reject` (ADR-330), and docstring `[[links]]` finally render (ADR-331)
 - **2026-09-12** — pre-compilation, counted: bytecode is 2.5 ms of `json`, Cranelift is 60–80 ms, and both persistence ideas are dead (compute-frontier §7.11)
+- **2026-09-12** — `0xFF` reads: radix literals, the second ADR-169 reservation to pay out (ADR-334)
 
 ---
 
 ## Recent — full entries
+
+## 2026-09-12 — `0xFF` reads: radix literals, the second ADR-169 reservation to pay out (ADR-334)
+
+**The tree was writing hex in decimal.** `std/uuid.blsp` sets the RFC 4122 variant bits
+with `(bit/or 128 (bit/and (nth bv 8) 63))` — `0x80` and `0x3F` in every copy of the RFC;
+`*rand-mask*` is `4294967295`; the FNV mask in `test.blsp` is the same ten digits; `dns`
+and `bytes` split words with `255`. ADR-169 had reserved `0x1F` as syntax and pointed at
+`(string/->number "1F" 16)`, which is the right answer for a wire field and the wrong one
+for a constant — a runtime parse of a number the author already knew, spelled as a call.
+
+**Shipped as spelling, not a type.** `0xFF`, `0b1010`, `0o17` (either case, sign in front)
+read as the same `Value::Int` that `255` does: `:int`, `=` to `255`, prints as `255`. The
+formatter keeps the spelling because the CST is lossless. Past `i64` the digits parse as a
+`BigInt` at the token's radix — the same call an oversized decimal literal makes — and
+`-0x8000000000000000` stays an `Int` through an `i128` intermediate, because its magnitude
+is one past `i64::MAX` before the sign applies. Malformed digits (`0b102`, `0xZZ`, a bare
+`0x`) are a parse error with a **per-radix** hint that names the legal digits; a new
+`AtomKind::RadixInvalid` carries it so the reader and the CST explain it identically.
+
+**Checked ahead of every other numeric shape, and why that is safe.** `classify` tests the
+radix prefix before the `M`-decimal, float and ratio arms. No decimal, float or `M` token
+has an `x`/`b`/`o` behind a leading zero, so nothing is shadowed — and going first is what
+lets `0b102` earn its specific diagnostic instead of the generic reserved-token one.
+
+**A tooling bug found on the way.** The CST mapped `AtomKind::IntOverflow` to
+`NodeKind::Error`, so the LSP flagged `99999999999999999999` as malformed while the reader
+read it as a bignum and the program ran fine. It is an `Int` node now.
+
+**Not done, and named so nobody assumes it.** The editor highlighter (`hl-number?`) and
+the tree-sitter scanner both decide "is this a number" with their own approximation —
+`string/->number` and a hand-written `looks_number` — and neither sees a `0x`. That gap
+already existed for `1/2` and `1.5M`; radix joins it. The fix is one classification, the
+reader's, exposed to both, and it is a separate change.
+
+**The verification that mattered.** `tests/reader_hints_test.blsp` moves `0x1F` from the
+must-error list into the must-read case beside `1/2`, and adds the per-radix errors, the
+`i64::MIN` edge, the bignum spill, and three non-digit-led names (`x0b1`, `a0xFF`,
+`foo0x1`) that must stay symbols. The session that wrote the change was lost mid-`make
+test`; the targeted file, the syntax unit tests and the LSP suite were re-run green before
+anything else was touched.
 
 ## 2026-09-12 — `filter` joins its complement in `seq/`; `remove` becomes `reject` (ADR-330), and docstring `[[links]]` finally render (ADR-331)
 

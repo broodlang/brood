@@ -636,7 +636,32 @@ impl<'a> Parser<'a> {
                      nonzero integer denominator — write `-1/2` (sign on the numerator), \
                      not `1/-2`, and not `1/0`",
                 )),
-            // Digit-led but not a number Brood has (`1/2`, `0x1F`, `1_000`, `1N`).
+            // A radix literal past `i64` is a bignum, not an error — the same call
+            // `IntOverflow` makes, but parsing the digits at the token's own radix
+            // and re-applying the sign. `classify_radix` already validated the
+            // digits, so the parse can only fail on something it would never have
+            // routed here; handled rather than asserted.
+            AtomKind::RadixOverflow => match atom::radix_parts(token).and_then(
+                |(radix, digits, negative)| {
+                    num_bigint::BigInt::parse_bytes(digits.as_bytes(), radix)
+                        .map(|magnitude| if negative { -magnitude } else { magnitude })
+                },
+            ) {
+                Some(n) => Ok(self.heap.alloc_bigint(n)),
+                None => Err(self.err_at(
+                    self.s.pos_at(token_start),
+                    format!("malformed radix literal: {}", token),
+                )),
+            },
+            // Digits wrong for the radix (`0b102`), or none at all (`0x`). The hint
+            // comes from `atom` so the CST explains it identically.
+            AtomKind::RadixInvalid => Err(self
+                .err_at(
+                    self.s.pos_at(token_start),
+                    format!("malformed radix literal: {}", token),
+                )
+                .with_hint(atom::radix_invalid_hint(token))),
+            // Digit-led but not a number Brood has (`1_000`, `1N`, `3px`).
             // Reserved syntax, so it errors here rather than interning as a symbol
             // and resurfacing later as a puzzling "unbound symbol". The hint comes
             // from `atom` so the CST explains it identically.

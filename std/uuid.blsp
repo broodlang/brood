@@ -182,9 +182,9 @@ random. Use v7 for database keys and time-ordered IDs; use v4 for privacy.
   "Format 16 byte ints as a UUID string, setting version nibble and variant bits."
   (let (bv (into [] bytes)
         ;; Set version in byte 6: high nibble = version, low nibble kept
-        b6 (bit/or (* version-nibble 16) (bit/and (nth bv 6) 15))
+        b6 (bit/or (* version-nibble 16) (bit/and (nth bv 6) 0x0F))
         ;; Set variant in byte 8: high 2 bits = 10, rest kept
-        b8 (bit/or 128 (bit/and (nth bv 8) 63))
+        b8 (bit/or 0x80 (bit/and (nth bv 8) 0x3F))
         ;; Build hex
         hex (fold (range 16)
               ""

@@ -349,7 +349,8 @@ pub(super) fn register(primitives: &mut super::Primitives) {
     );
     // string/->number returns int *or* float *or* nil (the parse-failed case).
     // The optional radix is what ADR-169 pointed at when it reserved `0x1F` as syntax
-    // rather than a name: with no radix literals, this is the only way to read one.
+    // rather than a name. The literal itself exists now (ADR-334); this is how a radix
+    // is read from text a program holds at runtime.
     primitives.def(
         "string/->number",
         Arity::range(1, 2),
@@ -1446,17 +1447,19 @@ pub(super) fn math_atan2(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
 /// the strict parse is a primitive. Surrounding whitespace is not accepted —
 /// `trim` first if the input may carry any.
 ///
-/// **`radix` is the only way to read hex, octal or binary in Brood.** ADR-169 reserved
+/// **`radix` is how hex, octal or binary is read from DATA.** ADR-169 reserved
 /// `0x1F`/`0b1010`/`0o17` as syntax rather than names *on the grounds that this function
 /// covers the need at runtime* — and the reader's own hint, `syntax/atom.rs`'s
-/// `reserved_numeric_hint`, has been telling people to call `(string/->number "1F" 16)`
-/// since. It took two arguments nowhere: the arity was `exact(1)`, so the hint named a
-/// call that raised, and the language could not read a radix at all (found 2026-08-30).
+/// `reserved_numeric_hint`, told people to call `(string/->number "1F" 16)`. It took two
+/// arguments nowhere: the arity was `exact(1)`, so the hint named a call that raised, and
+/// the language could not read a radix at all (found 2026-08-30). The *literals* arrived
+/// later (ADR-334): `0xFF` in source is the reader's job; this function reads text a
+/// program holds at runtime, and the two never overlap — see the prefix rule below.
 ///
 /// With a radix the parse is **integer-only**, for every radix including 10: a radix
 /// describes an integer notation, and `"3.5"` in base 16 is not a number anyone means.
 /// A leading `-`/`+` is accepted; a `0x`/`0b`/`0o` *prefix* is not (the digits alone —
-/// the prefix is the syntax this function exists to replace). Out of `2..=36` the radix
+/// the prefix is reader syntax, and a radix argument already says the base). Out of `2..=36` the radix
 /// is a caller bug, so it raises rather than answering `nil`, which would be
 /// indistinguishable from unparseable text.
 /// How `string/->number` reads a string — heap-free, allocation-free, and the SINGLE

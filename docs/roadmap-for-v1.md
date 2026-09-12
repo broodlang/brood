@@ -215,7 +215,7 @@ freeze asymmetry) and the note that every *relaxation* stays open post-1.0:
 | Metadata (`^{}`), reader macros, `#(…)`, `#_` | Permanent surface for what a macro already does; `^` is the pattern pin | ADR-150 |
 | A character type | A character is a 1-char string; the cursor unit is a grapheme cluster | ADR-159 |
 | ~~Ratios~~ — **superseded by ADR-196** (shipped as a kernel type): `1/2` is a literal, `(/ 1 2)` is exact (`1/2`), `->float` escapes. A relaxation the freeze allows. | ADR-169 → ADR-196 |
-| Digit-led tokens as names (`0x1F`, `1_000`, `1N`, `1+`) | A digit-led token must be a number; reserving the shapes keeps radix literals / digit separators / a bigint suffix additive after 1.0 | ADR-169 |
+| Digit-led tokens as names (`1_000`, `1N`, `1+`) | A digit-led token must be a number; reserving the shapes keeps digit separators / a bigint suffix additive after 1.0 — as it did for ratios (ADR-196) and radix literals (`0x1F`, ADR-334), both shipped without a break | ADR-169 |
 | `#…` beyond `#{…}` / `#b"…"` (incl. `#|…|#` block comments) | `#` is a dispatch character; reserving the space keeps every future `#` literal additive | ADR-169, ADR-150 |
 | `contains?` answering by index on a vector | Clojure's trap: `(contains? [1 2] 1)` true for the wrong reason | ADR-156 |
 | Strings as seqable | Codepoint vs grapheme is the caller's decision; bridge explicitly | ADR-156, ADR-159 |

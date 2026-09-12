@@ -809,8 +809,10 @@ What that review consciously left OPEN, with the reasoning:
 - ✅ **`#|…|#` now says "Brood has no block comments"** (ADR-169, 2026-07-27) rather
   than reading as the bar-quoted symbol `|#\|…\|#|`. Folded into the broader reader
   reservation: `#` is a dispatch character (`#{…}` / `#b"…"` its only forms) and a
-  digit-led non-number token (`1/2`, `0x1F`, `1_000`, `1N`, `1+`) is a reader error,
-  not a symbol — closing the freeze gate's §2 (reader's permanent reservations). **[kernel]**
+  digit-led non-number token (`1_000`, `1N`, `1+`) is a reader error, not a symbol —
+  closing the freeze gate's §2 (reader's permanent reservations). Two of the reserved
+  shapes have since shipped additively, as intended: `1/2` is a ratio (ADR-196) and
+  `0x1F`/`0b1010`/`0o17` are radix literals (ADR-334, 2026-09-12). **[kernel]**
 - ⬜ **Unbounded laziness** (`iterate`, `lazy-seq`) stays rejected — seq-views plus
   processes cover it, and `Value::Lazy` adds a GC story, force semantics, and
   head-holding pitfalls. Recorded in [deferred.md](docs/deferred.md) #2.

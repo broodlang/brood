@@ -1013,9 +1013,10 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   **`failure`** (it never throws, and it rejects `"3abc"`, `"  7 "`, `"1/2"` —
   `string/trim` first). So `"3"` gives you an int even when you wanted a float:
   `(->float (string/->number "3"))`. Going the other way, `math/floor`/`math/round`
-  return an `int` (there is no `trunc`). An optional **radix** reads hex/octal/binary —
-  `(string/->number "1F" 16)` → `31` — integer-only, digits alone (no `0x` prefix), 2–36
-  or it raises; this is the *only* way, since Brood has no radix literals. For money use
+  return an `int` (there is no `trunc`). An optional **radix** reads hex/octal/binary
+  from *data* — `(string/->number "1F" 16)` → `31` — integer-only, digits alone (no `0x`
+  prefix), 2–36 or it raises. In *source*, write the literal: `0xFF`, `0b1010`, `0o17`
+  are plain ints (ADR-334), so a mask is `(bit/and b 0x3F)`, not `63`. For money use
   `(decimal/of "1.50")`, which **throws**: a parse failing is data, a constructor failing
   is a bug.
 - **A `failure` is a returned value, not a raise (ADR-310).** Brood splits two channels:

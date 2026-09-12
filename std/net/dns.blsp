@@ -55,7 +55,7 @@
 
 (defn- u16 (n)
   "A 16-bit big-endian field."
-  (bytes (bit/and (bit/shift-right n 8) 255) (bit/and n 255)))
+  (bytes (bit/and (bit/shift-right n 8) 0xFF) (bit/and n 0xFF)))
 
 (defn- query-message (host qtype)
   "A complete DNS query: header, one question, nothing else.
@@ -98,7 +98,7 @@
   "One IPv6 group, lowercase hex, no leading zeros — the form every tool prints."
   (let (digits "0123456789abcdef"
         nib (fn (shift)
-              (string/char-at digits (bit/and (bit/shift-right n shift) 15)))
+              (string/char-at digits (bit/and (bit/shift-right n shift) 0xF)))
         s (str (nib 12) (nib 8) (nib 4) (nib 0))
         trimmed (letrec (drop (fn (i)
                                 (if (and (< i 3) (= (string/char-at s i) "0"))

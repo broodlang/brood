@@ -12,6 +12,9 @@
 pub enum AtomKind {
     Nil,
     Bool(bool),
+    /// An integer. Both a decimal literal (`42`) and a radix-prefixed one
+    /// (`0xFF`, `0b1010`, `0o17`) classify here — a radix literal is spelling,
+    /// not a distinct type, so it prints back as decimal.
     Int(i64),
     Float(f64),
     /// An integer-shaped token (digits only, optional leading sign) that won't
@@ -48,6 +51,14 @@ pub enum AtomKind {
     /// sign / dot and held only number characters) but is malformed should fail
     /// loudly, not silently read back as a symbol.
     FloatInvalid,
+    /// A radix-prefixed integer literal whose value doesn't fit in `i64` —
+    /// `0xFFFFFFFFFFFFFFFFFF`. The reader parses the digits as a `BigInt` at the
+    /// token's radix, exactly as [`AtomKind::IntOverflow`] does for decimal.
+    RadixOverflow,
+    /// A radix-prefixed token whose digits are not valid for its radix, or which
+    /// has no digits at all — `0xZZ`, `0b102`, `0o18`, `0x`. A reader error, never
+    /// a symbol (mirrors [`AtomKind::RatioInvalid`]).
+    RadixInvalid,
     /// A **digit-led** token that is not any number Brood has — `1/2`, `0x1F`,
     /// `1_000`, `1N`, `3px`. Reserved, not a symbol.
     ///
@@ -106,11 +117,6 @@ pub fn reserved_numeric_hint(token: &str) -> &'static str {
                 Write the division `(/ 1 2)` for a float, or use an exact decimal \
                 literal like `0.5M` (arbitrary-precision, no binary rounding).";
     }
-    if lower.starts_with("0x") || lower.starts_with("0b") || lower.starts_with("0o") {
-        return "Brood has no radix literals — `0x1F` / `0b1010` / `0o17` are reserved \
-                syntax, not names. Parse at runtime with `(string/->number \"1F\" 16)`, \
-                or write the value in decimal.";
-    }
     if token.contains('_') {
         return "Brood has no digit separators — `1_000` is reserved syntax, not a name. \
                 Write the digits out: `1000`.";
@@ -142,6 +148,16 @@ pub fn classify(token: &str) -> AtomKind {
         "-inf" => return AtomKind::Float(f64::NEG_INFINITY),
         "nan" => return AtomKind::Float(f64::NAN),
         _ => {}
+    }
+    // A radix-prefixed integer literal (`0xFF`, `0b1010`, `0o17`, and their signed
+    // forms). Checked ahead of every other numeric shape: no decimal, float or
+    // `M`-decimal token has an `x`/`b`/`o` behind a leading zero, so this can't
+    // shadow them, and going first means a malformed one (`0xZZ`, `0b102`) earns
+    // the specific `RadixInvalid` diagnostic rather than the generic reserved-token
+    // one. Additive under ADR-169, which reserved exactly this shape (ADR-196 did
+    // the same for ratios).
+    if radix_parts(token).is_some() {
+        return classify_radix(token);
     }
     // A Clojure-style decimal literal: a trailing `M`/`m` on a numeric-shaped
     // prefix (`1.50M`, `0M`, `-3.14M`, `100M`). Checked before everything else so
@@ -220,6 +236,77 @@ fn classify_ratio(token: &str) -> AtomKind {
         AtomKind::Ratio
     } else {
         AtomKind::RatioInvalid
+    }
+}
+
+/// Split a radix-prefixed integer token into its radix, its digit text, and
+/// whether it was negative: `-0xFF` → `(16, "FF", true)`. `None` when the token
+/// has no radix prefix at all, which is how [`classify`] decides whether the
+/// radix rules apply.
+///
+/// Both cases of the prefix letter are accepted (`0xFF` and `0XFF`), as C, Java
+/// and Clojure all do; rejecting one spelling buys nothing and surprises people.
+pub fn radix_parts(token: &str) -> Option<(u32, &str, bool)> {
+    let (negative, rest) = match token.as_bytes().first()? {
+        b'-' => (true, &token[1..]),
+        b'+' => (false, &token[1..]),
+        _ => (false, token),
+    };
+    let mut chars = rest.chars();
+    if chars.next()? != '0' {
+        return None;
+    }
+    let radix = match chars.next()? {
+        'x' | 'X' => 16,
+        'b' | 'B' => 2,
+        'o' | 'O' => 8,
+        _ => return None,
+    };
+    Some((radix, &rest[2..], negative))
+}
+
+/// Classify a radix-prefixed token. A valid one is [`AtomKind::Int`] — the radix
+/// is spelling, not a type — or [`AtomKind::RadixOverflow`] past `i64`. Digits
+/// wrong for the radix (`0b102`, `0xZZ`) or absent entirely (`0x`) are
+/// [`AtomKind::RadixInvalid`], never a symbol.
+fn classify_radix(token: &str) -> AtomKind {
+    let Some((radix, digits, negative)) = radix_parts(token) else {
+        return AtomKind::RadixInvalid;
+    };
+    if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
+        return AtomKind::RadixInvalid;
+    }
+    // Via `i128` so the magnitude of `i64::MIN` (`-0x8000000000000000`, which is
+    // one past `i64::MAX` before the sign is applied) stays an `Int` rather than
+    // spilling to a bignum.
+    let Ok(magnitude) = i128::from_str_radix(digits, radix) else {
+        return AtomKind::RadixOverflow;
+    };
+    let signed = if negative { -magnitude } else { magnitude };
+    match i64::try_from(signed) {
+        Ok(value) => AtomKind::Int(value),
+        Err(_) => AtomKind::RadixOverflow,
+    }
+}
+
+/// The teaching hint for an [`AtomKind::RadixInvalid`] token, named per radix so
+/// the message says which digits are actually legal. Lives here rather than in
+/// the reader for the same reason [`reserved_numeric_hint`] does (ADR-025).
+pub fn radix_invalid_hint(token: &str) -> &'static str {
+    match radix_parts(token) {
+        Some((16, digits, _)) if digits.is_empty() => {
+            "`0x` needs at least one hex digit — write `0x1F`, or `0` for zero."
+        }
+        Some((16, _, _)) => "a hex literal holds only `0`–`9`, `a`–`f`, `A`–`F`.",
+        Some((2, digits, _)) if digits.is_empty() => {
+            "`0b` needs at least one binary digit — write `0b1010`, or `0` for zero."
+        }
+        Some((2, _, _)) => "a binary literal holds only `0` and `1`.",
+        Some((8, digits, _)) if digits.is_empty() => {
+            "`0o` needs at least one octal digit — write `0o17`, or `0` for zero."
+        }
+        Some((8, _, _)) => "an octal literal holds only `0`–`7`.",
+        _ => "a radix literal is `0x…` (hex), `0b…` (binary) or `0o…` (octal).",
     }
 }
 

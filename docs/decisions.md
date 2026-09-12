@@ -10976,6 +10976,10 @@ ratio type would be additive rather than breaking.
 > the ratio type later was additive, so `1/2` is now a **ratio literal** and `/` on
 > integers is exact (`(/ 1 2)` → `1/2`). The rest of ADR-169's reservations (`0x1F`,
 > `1_000`, `1N`, `#…`) stand.
+>
+> **Superseded for `0x1F` (ADR-334, 2026-09-12).** The second reservation to pay out:
+> `0x1F`/`0b1010`/`0o17` are now **radix literals**, reading as plain ints. `1_000`, `1N`
+> and `#…` still stand.
 
 **Consequences.**
 - The printer needed no change. `printer::symbol_needs_bars` already asks
@@ -11027,7 +11031,7 @@ recoverable and the cost of the feature is permanent; when in doubt, refuse.
 | Metadata (`^{}`), reader macros, `#(…)`, `#_` | Permanent surface for what a macro already does; `^` is the pattern pin | ADR-150 |
 | A character type | A character is a 1-char string; the cursor unit is a grapheme cluster | ADR-159 |
 | ~~Ratios~~ — **superseded by ADR-196** (shipped as a kernel type): `1/2` is a literal, `(/ 1 2)` is exact (`1/2`), `->float` escapes. A relaxation the freeze allows. | ADR-169 → ADR-196 |
-| Digit-led tokens as names (`0x1F`, `1_000`, `1N`, `1+`) | A digit-led token must be a number; reserving the shapes keeps radix literals / digit separators / a bigint suffix additive after 1.0 | ADR-169 |
+| Digit-led tokens as names (`1_000`, `1N`, `1+`) | A digit-led token must be a number; reserving the shapes keeps digit separators / a bigint suffix additive after 1.0 — as it did for ratios (ADR-196) and radix literals (`0x1F`, ADR-334), both shipped without a break | ADR-169 |
 | `#…` beyond `#{…}` / `#b"…"` (incl. `#\|…\|#` block comments) | `#` is a dispatch character; reserving the space keeps every future `#` literal additive | ADR-169, ADR-150 |
 | `contains?` answering by index on a vector | Clojure's trap: `(contains? [1 2] 1)` true for the wrong reason | ADR-156 |
 | Strings as seqable | Codepoint vs grapheme is the caller's decision; bridge explicitly | ADR-156, ADR-159 |
@@ -21460,3 +21464,79 @@ to nothing; and an unclosed `[[` is prose. Rendering runs *after* HTML escaping,
 module to resolve against, a bare reference is left as written rather than pointed at
 `#d-nil-<name>`: a visible `[[name]]` is a missing argument a reader can report, a dead link
 is not.
+
+## ADR-334 — Radix literals: `0xFF`, `0b1010`, `0o17` read as plain ints
+
+**Status:** accepted; implemented 2026-09-12. Cashes in the second of [ADR-169](#adr-169)'s
+reservations, the way [ADR-196](#adr-196) cashed in the first (`1/2`).
+
+**Context.** ADR-169 reserved every digit-led non-number token so that a numeric syntax
+added later would be *additive* rather than a break, and named radix literals as one of
+the four it was holding the door open for. It also left the runtime answer in place:
+`(string/->number "1F" 16)`. That answer is right for *data* and wrong for *source*.
+Bit masks and flag bytes are written in source, and the tree was writing them in decimal
+because it had no choice: `std/uuid.blsp` sets the RFC 4122 variant with
+`(bit/or 128 (bit/and (nth bv 8) 63))` — `0x80` and `0x3F`, the two numbers the RFC
+prints in hex; `std/prelude/string.blsp` holds `*rand-mask*` as `4294967295`;
+`std/tool/test.blsp`'s FNV mask is the same ten digits again; `std/net/dns.blsp` and
+`std/bytes.blsp` split words with `255`. Thirty-four `bit/*` call sites, every one of
+them a reader translating a hex constant to decimal by hand and a reviewer translating it
+back. `(string/->number "3F" 16)` at those sites is not an improvement — it is a runtime
+parse of a constant the author already knew, and it reads as a function call where a
+number belongs.
+
+**Decision.** `0x…` (hex), `0b…` (binary) and `0o…` (octal) are integer literals. Either
+case of the prefix letter is accepted (`0xFF`, `0XFF`), as C, Java and Clojure all do; a
+sign goes in front (`-0xFF`, `+0x10`).
+
+- **The radix is spelling, not a type.** `0xFF` reads as the same `Value::Int` that `255`
+  does — `(type-of 0xFF)` is `:int`, `(= 0xFF 255)` is true, and it *prints* as `255`.
+  Nothing downstream of the reader knows the spelling existed. The formatter keeps it,
+  because the CST is lossless and never re-prints an atom.
+- **Past `i64` it is a bignum**, exactly as an oversized decimal literal is: the reader
+  parses the digits as a `BigInt` at the token's radix. `-0x8000000000000000` — whose
+  *magnitude* is one past `i64::MAX` — stays an `Int`, via an `i128` intermediate.
+- **Malformed is an error, never a symbol.** Digits wrong for the radix (`0b102`, `0o18`,
+  `0xZZ`) or none at all (`0x`) are a parse error with a **per-radix hint** naming the
+  legal digits — "a binary literal holds only `0` and `1`" — rather than the generic
+  reserved-token hint. `AtomKind::RadixInvalid` is its own variant so the CST maps it to
+  `Error` and the LSP flags it like every other malformed literal (the ADR-025
+  one-definition rule: the hint text lives in `syntax/atom.rs`, and the reader and the
+  tooling tree both read it).
+- **Only a digit-led token is a radix literal.** `x0b1`, `a0xFF`, `foo0x1` are names, as
+  ADR-169's first-character rule already guaranteed.
+
+**Why plain int, not a preserved spelling.** Clojure prints `0xFF` back as `255` too, and
+for the same reason: a number is a value, and the spelling is a fact about the source text,
+which the CST already keeps. Carrying a radix on the value would give `=` and `hash` a
+second axis to be wrong on, for a feature whose whole job is to make the source readable.
+
+**Why not `string/->number` at the call site.** It is the runtime function for text a
+program *holds* — a config value, a wire field, a user's input — and it stays that. A
+constant known when the file is written is the reader's job. The two never overlap: the
+function takes the digits alone and refuses a `0x` prefix, so `(string/->number "0x1F" 16)`
+is a `failure` and `0x1F` in source is `31`, and neither can be mistaken for the other.
+
+**Consequences.**
+- `reserved_numeric_hint` loses its radix arm; `tests/reader_hints_test.blsp` moves `0x1F`
+  from the must-ERROR list to the must-READ one, beside `1/2`. `1_000`, `1N` and `#…` are
+  still reserved.
+- **A found tooling bug, fixed in passing.** The CST mapped `AtomKind::IntOverflow` to
+  `NodeKind::Error`, so the LSP flagged `99999999999999999999` as malformed while the
+  reader read it as a bignum and the program ran. It is `NodeKind::Int` now, and
+  `RadixOverflow` maps the same way.
+- **The two highlighters do not see it yet.** `std/editor/highlight.blsp`'s `hl-number?`
+  decides by `string/->number`, which by design refuses the prefix — so bedit paints
+  `0xFF` as a symbol. That gap is not new: the same test already misses `1/2` and `1.5M`,
+  since neither is data the function reads. The tree-sitter scanner in `brood-treesitter`
+  (`looks_number`) has the same shape. Both want the reader's own classification rather
+  than a third hand-written approximation of it, which is a separate change.
+- The freeze list (ADR-170) drops `0x1F` from its digit-led row and records this as the
+  second relaxation the freeze allows.
+
+**References.** [ADR-169](#adr-169) (the reservation), [ADR-196](#adr-196) (the first
+cash-in, and the precedent for "spelling, not type"), [ADR-025](#adr-025) (the shared
+hint), [ADR-310](#adr-310) (why the runtime parse answers `failure`). Tests:
+`tests/reader_hints_test.blsp` (reads, per-radix errors, the `i64::MIN` edge, bignum
+spill, non-digit-led names).
+
