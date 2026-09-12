@@ -53,9 +53,8 @@ incomplete input; feeds the editor's `:fontify` mode service and the shared
   (md-lead-ws-at line 0 (string/length line)))
 (sig md-lead-ws (string -> int))
 (defn- md-lead-ws-at (line i n)
-  (if (and (< i n) (or (= (string/char-at line i) " ") (= (string/char-at line i) "\t")))
-    (md-lead-ws-at line (inc i) n)
-    i))
+  ;; `string/span` is the native run scan — one call, not one `char-at` per column
+  (math/min n (string/span line i " \t")))
 (sig md-lead-ws-at (string int int -> int))
 
 (defn- md-count-char (line i n ch)
@@ -63,25 +62,19 @@ incomplete input; feeds the editor's `:fontify` mode service and the shared
   (md-count-char-at line i n ch 0))
 (sig md-count-char (string int int string -> int))
 (defn- md-count-char-at (line i n ch k)
-  (if (and (< i n) (= (string/char-at line i) ch))
-    (md-count-char-at line (inc i) n ch (inc k))
-    k))
+  (+ k (- (math/min n (string/span line i ch)) i)))
 (sig md-count-char-at (string int int string int -> int))
 
 (defn- md-find-char (line i n ch)
   "The offset of the next single-char `ch` at or after `i` in `line`, or -1."
-  (cond
-    (>= i n) -1
-    (= (string/char-at line i) ch) i
-    else (md-find-char line (inc i) n ch)))
+  ;; `index-of` with a `from` rides the native `%str-index-of`; `n` is the line's length,
+  ;; so a hit is always inside it.
+  (if (>= i n) -1 (index-of line ch i)))
 (sig md-find-char (string int int string -> int))
 
 (defn- md-find-2 (line i n a b)
   "The offset of the next two-char run `a b` at or after `i` in `line`, or -1."
-  (cond
-    (>= i n) -1
-    (and (= (string/char-at line i) a) (< (inc i) n) (= (string/char-at line (inc i)) b)) i
-    else (md-find-2 line (inc i) n a b)))
+  (if (>= i n) -1 (index-of line (str a b) i)))
 (sig md-find-2 (string int int string string -> int))
 
 (defn- md-space-after? (line i n)
@@ -189,6 +182,12 @@ delimiter (or skip the char if unclosed), then continue the inline scan."
   "Tail-recursive inline scanner over `[i, n)` of `line` (offsets shifted by `base`),
 accumulating spans for `` `code` ``, `**bold**`, `*italic*`, and `[text](url)` in
 reverse. Each matched region is consumed whole, so spans stay non-overlapping."
+  ;; Plain text is the common case, so the scan JUMPS to the next delimiter with one
+  ;; native `string/span-until` instead of visiting each character through `char-at`:
+  ;; a per-char step in interpreted Brood cost ~2 ms/KB, eight times brood-mode's lexer,
+  ;; and the editor re-lexes a ~300-line band on every keystroke in a `.md` buffer —
+  ;; the per-edit hitch the fontify window could not amortise away.
+  (let (i (if (>= i n) n (string/span-until line i "`*_[")))
   (if (>= i n)
     (reverse acc)
     (let (c (string/char-at line i))
@@ -222,7 +221,7 @@ reverse. Each matched region is consumed whole, so spans stay non-overlapping."
             (if (nil? span)
               (md-inline line base (inc i) n acc)
               (md-inline line base (- (second span) base) n (cons span acc))))
-        else (md-inline line base (inc i) n acc)))))
+        else (md-inline line base (inc i) n acc))))))
 (sig md-inline (string int int int list -> list))
 
 ;; ---- a line's spans + the document walker -----------------------------------
