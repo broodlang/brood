@@ -117,11 +117,13 @@ LSP's DOC_FORMS list."
   (or (hl-ws? c) (hl-bracket? c) (= c "\"") (= c ";")))
 
 (defn- hl-number? (tok)
-  "True if `tok` reads as a number (so it colours as one rather than a symbol). A cheap
-first-char gate skips the `string/->number` parse for the common case — an identifier
-that can't begin a number — since this runs on every atom on the fontify hot path."
-  (and (includes? "+-.0123456789" (string/char-at tok 0))
-    (not (failure? (string/->number tok)))))
+  "True if `tok` reads as a number (so it colours as one rather than a symbol). Asks the
+native `scan-tokens` — the reader's own classification — rather than `string/->number`,
+which reads DATA and by design refuses the shapes only source has: a radix literal
+(`0xFF`), a ratio (`1/2`), an `M`-decimal (`1.50M`). One classifier, so the callee test
+here and the face the fontifier paints cannot disagree (ADR-334)."
+  (let (toks (reflect/scan-tokens tok))
+    (and (= (count toks) 1) (= (nth (first toks) 2) :number))))
 
 ;; ---- scanning primitives (shared by lexer + matchers) -----------------------
 

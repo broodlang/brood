@@ -25,6 +25,17 @@
       [[0 6 :string "\"a\\\"b\""] [7 10 :comment "; c"]]))
   (test "nil/true/false classify as keyword (constants)"
     (assert= (reflect/scan-tokens "nil") [[0 3 :keyword "nil"]]))
+  (test "a number is whatever the reader reads as one — radix, ratio, decimal, bignum"
+    ;; the kind comes from the reader's own classifier, not a second opinion on the
+    ;; shape (ADR-334): before, `0xFF` / `1/2` / `1.50M` all lexed as :symbol.
+    (map ["0xFF" "0XFF" "-0b1010" "0o17" "1/2" "1.50M" "99999999999999999999" "inf" "-inf"]
+      (fn (t) (assert= (nth (first (reflect/scan-tokens t)) 2) :number)))
+    ;; a malformed digit-led token is number-shaped, not a name — the LSP carries the error
+    (map ["0xZZ" "0x" "1e" "1_000"]
+      (fn (t) (assert= (nth (first (reflect/scan-tokens t)) 2) :number)))
+    ;; names that merely contain a radix prefix, or that Rust would parse as a float
+    (map ["x0b1" "a0xFF" "infinity" "+" "..."]
+      (fn (t) (assert= (nth (first (reflect/scan-tokens t)) 2) :symbol))))
   (test "empty source yields no tokens"
     (assert= (reflect/scan-tokens "") [])))
 
@@ -42,6 +53,10 @@
   (test "nil / true / false colour as constants, even in head position"
     (assert= (highlight-spans "nil") (list [0 3 hl-face-keyword]))
     (assert= (highlight-spans "(true)") (list [1 5 hl-face-keyword])))
+  (test "a radix literal colours as a number, in argument and in head position"
+    (assert= (highlight-spans "(bit/and b 0x3F)")
+      (list [1 8 hl-face-function] [11 15 hl-face-number]))
+    (assert= (highlight-spans "(0xFF)") (list [1 5 hl-face-number])))
   (test "a plain variable reference carries no span"
     (assert= (highlight-spans "x") '())))
 
@@ -262,6 +277,12 @@
     (assert= (enclosing-call "(+ (* 2 3) " 11) ["+" 1]))
   (test "outside any call there is no hint"
     (assert= (enclosing-call "abc " 4) nil))
+  (test "a number in head position is not a callee"
+    ;; `hl-number?` asks the reader's classifier, so a radix literal or ratio in head
+    ;; position is data, not a call to hint on
+    (assert= (enclosing-call "(0xFF " 6) nil)
+    (assert= (enclosing-call "(1/2 " 5) nil)
+    (assert= (enclosing-call "(42 " 4) nil))
   (test "a call deep below many top-level forms is found (scan starts at the defun, not 0)"
     ;; the enclosing-bracket scan begins at the nearest column-0 form start (safe-restart),
     ;; so cost is O(enclosing form), not O(pos) — but the answer must still be exact.

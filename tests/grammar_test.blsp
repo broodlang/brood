@@ -52,6 +52,26 @@
       (is (not (includes? m "defn")))
       (is (map? (get repo :definition)))))
 
+  (test "the number rule reads what the reader reads — radix, ratio, decimal, exponent"
+    ;; the rule is a hand-mirror of `atom::classify` (ADR-334): hold it to the reader's
+    ;; own verdict on each spelling, anchored, since the lookarounds are TextMate's
+    (let (whole (str "^" grammar-number "$")
+          reads-as-number? (fn (t) (number? (reflect/read-string t))))
+      (map ["0xFF"
+             "0XFF" "-0xff" "+0x10" "0b1010" "0o17" "42" "-7" "3.14" "1e10" "1.5e-3" "1/2" "-3/4"
+             "1.50M" "0M"]
+        (fn (t)
+          (is (reads-as-number? t))
+          (is (regex/match? whole t))))
+      ;; names the reader keeps as names must not colour as numbers
+      (map ["x0b1" "a0xFF" "foo" "+" "-" "..." "x-5"]
+        (fn (t)
+          (is (not (regex/match? whole t)))))
+      ;; and the emitted grammar carries it
+      (let (decoded (decode (tmlanguage))
+            repo (get (if (map? decoded) decoded {}) :repository))
+        (is (includes? (get (get repo :number) :match) grammar-number)))))
+
   (test "doc-heads is exactly (reflect/doc-forms)'s heads, and fn-doc-heads its function half"
     (is (includes? (doc-heads) "defn"))
     (is (includes? (doc-heads) "defmodule"))

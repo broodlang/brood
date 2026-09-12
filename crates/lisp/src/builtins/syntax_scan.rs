@@ -51,13 +51,32 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         scan_form_end);
 }
 
+/// The token kind a fontifier paints an atom in. Asks the reader's own classifier
+/// (`atom::classify`) rather than keeping a second opinion on what a number looks
+/// like: the previous `str::parse::<i64>() || parse::<f64>()` test could not see a
+/// radix literal (`0xFF`), a ratio (`1/2`) or an `M`-decimal (`1.50M`), and took
+/// Rust's `infinity` for a number when the reader reads it as a symbol (ADR-334).
+///
+/// A digit-led token the reader REFUSES (`0xZZ`, `1e`, `1_000` — reserved numeric
+/// syntax, ADR-169) still colours as a number: it is number-shaped and malformed,
+/// which is how every editor treats a bad literal, and the LSP carries the error.
+/// Painting it as a name would be the one wrong answer.
 pub(super) fn scan_atom_kind(t: &str) -> &'static str {
-    if t.starts_with(':') || t == "nil" || t == "true" || t == "false" {
-        "keyword"
-    } else if t.parse::<i64>().is_ok() || t.parse::<f64>().is_ok() {
-        "number"
-    } else {
-        "symbol"
+    use crate::syntax::atom::AtomKind;
+    match crate::syntax::atom::classify(t) {
+        AtomKind::Nil | AtomKind::Bool(_) | AtomKind::Keyword => "keyword",
+        AtomKind::Symbol => "symbol",
+        AtomKind::Int(_)
+        | AtomKind::Float(_)
+        | AtomKind::IntOverflow
+        | AtomKind::Decimal
+        | AtomKind::DecimalInvalid
+        | AtomKind::Ratio
+        | AtomKind::RatioInvalid
+        | AtomKind::FloatInvalid
+        | AtomKind::RadixOverflow
+        | AtomKind::RadixInvalid
+        | AtomKind::ReservedNumeric => "number",
     }
 }
 

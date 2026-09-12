@@ -50,6 +50,14 @@ grammar target."
 ;; inside `a->b`). Plain ASCII, no escaping needed.
 (def- grammar-sym "[A-Za-z0-9*?!<>=+./_-]")
 
+;; What the reader reads as a number, as a regex: a radix literal (ADR-334), a ratio
+;; (ADR-196), or a decimal/float with an optional exponent and `M` suffix. A TextMate
+;; rule can only be a regex, so this mirrors `atom::classify` by hand — the one place in
+;; the tree that does; `scan-tokens` and the editor highlighter ask the classifier itself.
+;; Extend the two together. Public so the test can hold the rule to the reader's answers.
+(def grammar-number
+  "[+-]?(?:0[xX][0-9A-Fa-f]+|0[bB][01]+|0[oO][0-7]+|[0-9]+/[0-9]+|(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?[Mm]?)")
+
 ;; Regex metacharacters to backslash-escape in a literal keyword. `\` is first so
 ;; the backslashes we add for the others aren't themselves re-escaped.
 (def- grammar-meta (list "\\" "*" "?" "+" "." "(" ")" "[" "]" "{" "}" "|" "^" "$"))
@@ -163,8 +171,7 @@ LSP's semantic tokens (which parse) correct that wherever the server runs."
                            :match (grammar-bounded "nil|true|false")}
                 :keyword {:name "constant.keyword.brood" :match (str ":" grammar-sym "+")}
                 :number {:name "constant.numeric.brood"
-                         :match (str "(?<!"
-                                  grammar-sym ")-?[0-9]+(\\.[0-9]+)?(?!" grammar-sym ")")}}})
+                         :match (grammar-bounded grammar-number)}}})
 
 (defn tmlanguage ()
   "The VS Code TextMate grammar as JSON text (the `.tmLanguage.json` file body),
