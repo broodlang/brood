@@ -1704,6 +1704,58 @@ rejected on a premise that was measured under a runtime where the callee could n
 native. That class is wider than one benchmark row, and nothing else records which clause
 fires or that its premise moved.
 
+### 7.10 Every JIT give-up path names itself — and what the names say (2026-09-12)
+
+**The finding that motivated it.** `BROOD_JIT_BAIL_TRACE=1` on the string-heavy rows read
+`lowering-returned-none` as the #1 bail reason: **42 arms on `json`, 25 on `regex`, 13 on
+`base64`**. That label is the printer's *fallback* — it means the lowering answered `None` and
+nothing said why. You cannot unblock what is not named, and these rows are the ones furthest
+behind every other runtime (`json` 33× Elixir), so the "unexplained" bucket sat exactly where
+the work was.
+
+**Three sources, none of them a missing trace.** (1) The `Option`-returning lowering has ~80
+`?` sites and ~10 leaf `return None`s, and only three sites ever recorded a reason. (2) The
+three internal printers — `trace_lower_bail`, `trace_lower_bail_inst`, `jit_plan::trace_bail` —
+*printed* an arm line but never *recorded*, so `trace_lower_declined` followed each with a
+second line for the same arm reading `returned-none`: most "unexplained" bails were the
+explanation's own echo. (3) `plan_general_lowering`'s `Err(BailReason)` was dropped by `.ok()?`.
+
+**The model now: every internal site records, one printer prints.** `bail(reason)` and
+`Option::or_bail(reason)` in `jit_lower.rs`; the recorder carries an optional detail
+(`emit-unsupported-inst:MakeVector`); `trace_lower_declined` is the only `eprintln!`. Wrapping
+rule, because the recorder is last-writer-wins: name **originators** (`stack.pop()`, a Cranelift
+`Result`, an unset field), never a call to a helper that names its own refusal.
+
+| row | before: lines / `returned-none` | after: lines / `returned-none` |
+|---|---|---|
+| `json` | 86 / 42 | **85 / 0** |
+| `regex` | 46 / 25 | **55 / 0** |
+| `base64` | 31 / 13 | **74 / 0** |
+
+(`regex`/`base64` lines rise because refusals that used to be one unexplained line are now one
+explained line each; `json` falls because its duplicates outnumbered its hidden ones.)
+Sabotage-verified: removing the plan gate's record alone brings back 40+ `returned-none` on
+`json`.
+
+**What the names say — the leads this earns, in priority order:**
+
+1. **Cranelift rejects the generated code for five `json` arms** — `json/num-end`,
+   `%match-parse-clause`, `%match-splice-fail-in`, `%pattern-vars`, one `<closure>` —
+   `reason=cranelift-define-function`. These reach codegen and fail *inside* Cranelift, then
+   run on the VM at ~27× the native cost. Unknown before today. Next: log the `Err` text
+   under the flag; it is a verifier or legalizer message that names the bad instruction.
+2. **`operand-stack-underflow`** in `%register-impl` and `%require-notify-each`: the lowering
+   pops what the chunk never pushed. Both carry `MakeVector`/`Pop`. A stack-model divergence —
+   either an unmodelled opcode or a real lowering bug that the deopt path has been hiding.
+3. **`tail-nonempty-stack`** in `%match-compile-clause`.
+4. **`call-mediated-boxed` is 40 of `json`'s 85** — the §7.1 profitability gate, correctly
+   rejecting (closed there). But the arms it rejects are prelude generics (`seq`, `nth`, `get`,
+   `map`, `filter`, `reverse`), called from everywhere, so the gate's *cost* is wide even where
+   its *decision* is right. That is the argument for a **baseline tier** — a no-speculation
+   lowering that removes dispatch overhead without type guards, so a rejected arm runs at
+   ~3-5× native rather than the VM's ~27× — not for loosening the gate. Not yet an entry in
+   this file's option list; recorded here as the shape the names point at.
+
 ### The measurement discipline (each of these burned someone this week)
 
 Image `:live` on **both** arms, verified per run (`(stdimage/status)` — any commit

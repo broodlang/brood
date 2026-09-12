@@ -10,6 +10,7 @@ use super::emit::{
     inline_vec_ref, load_slot_int, op_is_float, read_words, table_prim, vector_ref, Frame, Funcs,
 };
 use super::Op;
+use super::OrBail;
 use crate::core::value::jit_layout::{
     PAYLOAD_OFFSET, TAG_BOOL, TAG_FLOAT, TAG_INT, TAG_KEYWORD, TAG_PAIR,
 };
@@ -48,7 +49,7 @@ pub(super) fn emit_prim1(
 ) -> Option<()> {
     let deopt = frame.deopt;
     let ptr_ty = funcs.ptr_ty;
-    let operand = stack.pop()?;
+    let operand = stack.pop().or_bail("operand-stack-underflow")?;
     match op {
         PrimOp1::First | PrimOp1::Rest => {
             // Tag-check it's a Pair (deopt otherwise — the VM handles first/rest of
@@ -334,7 +335,10 @@ pub(super) fn emit_make_vector(
         // stores. `alloc_vector2_room` leaves the elements `Nil` rather than uninitialised
         // precisely because this window exists: a missed store degrades to a wrong value,
         // never to a word the GC would trace as a handle.
-        let (b_op, a_op) = (stack.pop()?, stack.pop()?);
+        let (b_op, a_op) = (
+            stack.pop().or_bail("operand-stack-underflow")?,
+            stack.pop().or_bail("operand-stack-underflow")?,
+        );
         let aw = read_words(b, a_op, frame);
         let bw = read_words(b, b_op, frame);
         let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
@@ -373,7 +377,7 @@ pub(super) fn emit_make_vector(
         // live across the call. Read the fresh handle back out of `out_slot`.
         let mut ops = Vec::with_capacity(n);
         for _ in 0..n {
-            ops.push(stack.pop()?);
+            ops.push(stack.pop().or_bail("operand-stack-underflow")?);
         }
         ops.reverse(); // ops[i] = element i, in source order
         let stage = b.create_sized_stack_slot(StackSlotData::new(
@@ -423,9 +427,9 @@ pub(super) fn emit_prim3_table_put(
     let out_slot = funcs.out_slot;
     let error = funcs.error;
     // `(table-put t k v)`: operands pushed in source order — value on top.
-    let val = stack.pop()?;
-    let key = stack.pop()?;
-    let tbl = stack.pop()?;
+    let val = stack.pop().or_bail("operand-stack-underflow")?;
+    let key = stack.pop().or_bail("operand-stack-underflow")?;
+    let tbl = stack.pop().or_bail("operand-stack-underflow")?;
     if let Op::HoistedTable {
         slots,
         flag,
@@ -593,7 +597,10 @@ pub(super) fn emit_prim2(
     let deopt = frame.deopt;
     // Operands were pushed in source order: `aa` (deeper) is source 0, `bb` (top) is
     // source 1.
-    let (bb_op, aa_op) = (stack.pop()?, stack.pop()?);
+    let (bb_op, aa_op) = (
+        stack.pop().or_bail("operand-stack-underflow")?,
+        stack.pop().or_bail("operand-stack-underflow")?,
+    );
     if matches!(op, PrimOp::Cons) {
         // `cons` takes any operands and allocates: car = source 0, cdr = source 1
         // (cons's `map` is `[0,1]`). Read each as words, alloc.

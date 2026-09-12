@@ -119,14 +119,59 @@ thread_local! {
     /// as unexplained `lowering-returned-none`, which cost a re-investigation of
     /// `call-spill-exhausted` on 2026-08-30 (compute-frontier §7.1's "silent refusal"
     /// open lead was this line-shape gap, not a missing trace).
-    static LAST_MID_EMIT_REASON: std::cell::Cell<Option<&'static str>> =
+    static LAST_MID_EMIT_REASON: std::cell::Cell<Option<(&'static str, Option<&'static str>)>> =
         const { std::cell::Cell::new(None) };
 }
 
 /// Record a mid-emit refusal reason for the arm currently being lowered on this thread.
 #[cfg(feature = "jit")]
 pub(super) fn record_mid_emit_reason(reason: &'static str) {
-    LAST_MID_EMIT_REASON.set(Some(reason));
+    LAST_MID_EMIT_REASON.set(Some((reason, None)));
+}
+
+/// [`record_mid_emit_reason`] with a second static token the printer appends as
+/// `reason:detail` — for a refusal whose class is fixed but whose instance matters
+/// (`emit-unsupported-inst:MakeVector`).
+#[cfg(feature = "jit")]
+pub(super) fn record_mid_emit_detail(reason: &'static str, detail: &'static str) {
+    LAST_MID_EMIT_REASON.set(Some((reason, Some(detail))));
+}
+
+/// Give up on the lowering in progress, naming WHY — the one legitimate way for the
+/// `Option`-returning lowering to answer `None`. The arm-named `[jit-bail]` line that
+/// `jit_runtime::trace_lower_declined` prints carries the reason; nothing here prints.
+///
+/// Every give-up path records (this, [`OrBail::or_bail`] on a `?`, or one of the
+/// `trace_*_bail` helpers) so that `lowering-returned-none` — the printer's fallback
+/// when NOTHING recorded — can only mean a path that was missed. On 2026-09-12 it was
+/// the single most common reason on the string-heavy rows (42 arms on `json`), and
+/// most of those were duplicates of refusals that HAD been printed by an inner helper
+/// which forgot to record: the arm line said "unexplained" one line after the
+/// explanation.
+#[cfg(feature = "jit")]
+pub(super) fn bail<T>(reason: &'static str) -> Option<T> {
+    record_mid_emit_reason(reason);
+    None
+}
+
+/// `opt.or_bail("reason")?` — name a `None` at the site that ORIGINATES it, so the `?`
+/// chain above propagates a reason rather than a bare `None`. Records only when the
+/// option is `None`, and the recorder is last-writer-wins, so wrap ORIGINATORS
+/// (`stack.pop()`, a Cranelift `Result`, a field that may be unset) and never a call
+/// to a lowering helper that already names its own refusal — that would overwrite the
+/// specific reason with the generic one.
+#[cfg(feature = "jit")]
+pub(super) trait OrBail<T> {
+    fn or_bail(self, reason: &'static str) -> Option<T>;
+}
+#[cfg(feature = "jit")]
+impl<T> OrBail<T> for Option<T> {
+    fn or_bail(self, reason: &'static str) -> Option<T> {
+        if self.is_none() {
+            record_mid_emit_reason(reason);
+        }
+        self
+    }
 }
 
 /// Is the §7.5 hot re-lowering enabled for this process (the tiering glue's gate)?
@@ -138,7 +183,7 @@ pub(crate) fn xcall_relower_enabled() -> bool {
 /// Take (and clear) the mid-emit refusal reason recorded during the lowering attempt
 /// that just returned `None` — for the caller's arm-named decline line.
 #[cfg(feature = "jit")]
-pub(crate) fn take_mid_emit_reason() -> Option<&'static str> {
+pub(crate) fn take_mid_emit_reason() -> Option<(&'static str, Option<&'static str>)> {
     LAST_MID_EMIT_REASON.take()
 }
 
@@ -151,15 +196,11 @@ pub(crate) fn take_mid_emit_reason() -> Option<&'static str> {
 /// Refusal from the per-instruction emit loop, naming the opcode that could not be
 /// lowered. Same flag and line shape as [`trace_lower_bail`].
 #[cfg(feature = "jit")]
-fn trace_lower_bail_inst(arm: &CompiledArm, inst: &'static str) -> Option<*const u8> {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
-        let name = arm
-            .dbg_name
-            .map(crate::core::value::symbol_name_ref)
-            .unwrap_or("<closure>");
-        eprintln!("[jit-bail] arm={name} reason=emit-unsupported-inst:{inst}");
-    }
+fn trace_lower_bail_inst(_arm: &CompiledArm, inst: &'static str) -> Option<*const u8> {
+    // Records; `jit_runtime::trace_lower_declined` prints the one arm-named line. This
+    // used to print its own AND leave the recorder empty, so the printer followed it with
+    // a second line for the same arm reading `lowering-returned-none`.
+    record_mid_emit_detail("emit-unsupported-inst", inst);
     None
 }
 
@@ -174,16 +215,9 @@ fn trace_lower_bail_inst(arm: &CompiledArm, inst: &'static str) -> Option<*const
 /// for the natively-lowered keyword matcher, and the trace named nine unrelated prelude arms
 /// and not this one. Absence of evidence read as absence of a refusal.
 #[cfg(feature = "jit")]
-fn trace_lower_bail(arm: &CompiledArm, reason: &'static str) -> Option<*const u8> {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
-        let name = arm
-            .dbg_name
-            .map(crate::core::value::symbol_name_ref)
-            .unwrap_or("<closure>");
-        eprintln!("[jit-bail] arm={name} reason={reason}");
-    }
-    None
+fn trace_lower_bail(_arm: &CompiledArm, reason: &'static str) -> Option<*const u8> {
+    // Records; the arm-named line is printed once, by the caller's `trace_lower_declined`.
+    bail(reason)
 }
 
 pub(crate) fn jit_lower_arm(
@@ -211,7 +245,7 @@ pub(crate) fn jit_lower_arm(
     // Whether the general lowering is worth doing at all is a backend-independent decision:
     // it lives in `jit_plan` with the measurement that justifies it, and a refusal is
     // reportable there (`BROOD_JIT_BAIL_TRACE=1`) instead of an unexplained `None` from here.
-    plan_general_lowering(arm, slot_tags).ok()?;
+    plan_general_lowering(arm, slot_tags).ok()?; // its `trace_bail` records the reason
     jit_lower_arm_inner(jit, arm, slot_tags, None, false)
 }
 
@@ -327,7 +361,12 @@ pub(crate) fn jit_lower_inlined_arm(
             jit,
             arm,
             slot_tags,
-            Some((&r.body, r.chunk.as_ref()?, arm.inline_nslots, r.ckpt_slot)),
+            Some((
+                &r.body,
+                r.chunk.as_ref().or_bail("arm-has-no-chunk")?,
+                arm.inline_nslots,
+                r.ckpt_slot,
+            )),
             true,
         );
     }
@@ -336,14 +375,15 @@ pub(crate) fn jit_lower_inlined_arm(
     // code, which the keepalive below guarantees. This layout never journals: its ips
     // don't match any chunk the VM holds, so a deopt re-runs the small body from ip 0
     // (effect-free — the self-inline gate admits only pure-arith bodies).
-    let name = arm.inline_name?;
+    let name = arm.inline_name.or_bail("no-inline-name")?;
     let spliced: Box<Node> = Box::new(rederive_inlined_body(
         &arm.body,
         name,
         arm.nrequired,
         arm.inline_stride,
     )?);
-    let chunk: Box<Chunk> = Box::new(compile_chunk(&spliced)?);
+    let chunk: Box<Chunk> =
+        Box::new(compile_chunk(&spliced).or_bail("splice-chunk-not-compilable")?);
     let ptr = jit_lower_arm_inner(
         jit,
         arm,
@@ -391,7 +431,12 @@ fn jit_lower_arm_inner(
     // `nrequired` is identical for both (inlining doesn't change the param count).
     let (lower_body, chunk, nslots, ckpt_slot): (&Node, &Chunk, usize, u32) = match inline {
         Some((b, c, ns, cs)) => (b, c, ns, cs),
-        None => (&arm.body, arm.chunk.as_ref()?, arm.nslots, arm.ckpt_slot),
+        None => (
+            &arm.body,
+            arm.chunk.as_ref().or_bail("arm-has-no-chunk")?,
+            arm.nslots,
+            arm.ckpt_slot,
+        ),
     };
     let nrequired = arm.nrequired;
     let code = &chunk.code;
@@ -653,13 +698,15 @@ fn jit_lower_arm_inner(
     let seq = JIT_ARM_SEQ.fetch_add(1, Ordering::Relaxed);
     let id = m
         .declare_function(&format!("brood_jit_arm_{seq}"), Linkage::Export, &sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     let mut rb_sig = m.make_signature();
     rb_sig.params.push(AbiParam::new(ptr_ty));
     rb_sig.returns.push(AbiParam::new(ptr_ty));
     let rb_id = m
         .declare_function("brood_rt_roots_base", Linkage::Import, &rb_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // brood_rt_note_deopt(heap, reason): records WHY the arm is deopting. The shared deopt
     // block takes the id as a block param, so every guard can name itself (KI-49: a deopt
     // reported only its resume checkpoint, and an arm can have many guards after that).
@@ -668,7 +715,8 @@ fn jit_lower_arm_inner(
     nd_sig.params.push(AbiParam::new(types::I32));
     let nd_id = m
         .declare_function("brood_rt_note_deopt", Linkage::Import, &nd_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // brood_rt_trace_push(heap, arm): records this arm in the parked error's `:trace` as
     // the error exits it (KI-117) — the native counterpart of `attach_vm_trace`'s entry.
     let mut tp_sig = m.make_signature();
@@ -676,7 +724,8 @@ fn jit_lower_arm_inner(
     tp_sig.params.push(AbiParam::new(types::I64));
     let tp_id = m
         .declare_function("brood_rt_trace_push", Linkage::Import, &tp_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // brood_rt_tick_n(heap, n) -> u8: the batched back-edge poll (burns n reductions).
     let mut tickn_sig = m.make_signature();
     tickn_sig.params.push(AbiParam::new(ptr_ty));
@@ -684,7 +733,8 @@ fn jit_lower_arm_inner(
     tickn_sig.returns.push(AbiParam::new(types::I8));
     let tickn_id = m
         .declare_function("brood_rt_tick_n", Linkage::Import, &tickn_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // The handle ops, by-value with an out-pointer (a `Value` is 24 bytes → no register-pair
     // return): brood_rt_cons(heap, out, car0,car1,car2, cdr0,cdr1,cdr2);
     // brood_rt_{car,cdr}(heap, out, w0,w1,w2). They write the result `Value` to `*out`.
@@ -696,10 +746,12 @@ fn jit_lower_arm_inner(
     }
     let car_id = m
         .declare_function("brood_rt_car", Linkage::Import, &car_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     let cdr_id = m
         .declare_function("brood_rt_cdr", Linkage::Import, &car_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // Inline `first`/`rest` support: expose LOCAL pair-slab base pointers once per arm entry
     // so the JIT can emit `ptr + idx*48 + {0,24}` loads instead of per-element FFI calls.
     let mut pbase_sig = m.make_signature();
@@ -707,19 +759,23 @@ fn jit_lower_arm_inner(
     pbase_sig.returns.push(AbiParam::new(ptr_ty)); // *const u8
     let pnbase_id = m
         .declare_function("brood_rt_pair_nursery_base", Linkage::Import, &pbase_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     let pobase_id = m
         .declare_function("brood_rt_pair_old_base", Linkage::Import, &pbase_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // Inline small-vector `nth` support: LOCAL vector-slab base pointers (same
     // `heap -> *const u8` signature as the pair bases), for `slot + items_off +
     // i*24` loads instead of per-read `brood_rt_vector_ref` FFI calls.
     let vnbase_id = m
         .declare_function("brood_rt_vec_nursery_base", Linkage::Import, &pbase_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     let vobase_id = m
         .declare_function("brood_rt_vec_old_base", Linkage::Import, &pbase_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     let mut cons_sig = m.make_signature();
     cons_sig.params.push(AbiParam::new(ptr_ty)); // heap
     cons_sig.params.push(AbiParam::new(ptr_ty)); // out
@@ -728,7 +784,8 @@ fn jit_lower_arm_inner(
     }
     let cons_id = m
         .declare_function("brood_rt_cons", Linkage::Import, &cons_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // brood_rt_vec2_room(heap, out) -> *mut Value: allocate a 2-element vector (`[a b]`,
     // e.g. bintree's `make`), write the handle to `*out`, and return its element storage
     // for the arm to fill in place.
@@ -738,7 +795,8 @@ fn jit_lower_arm_inner(
     vec2room_sig.returns.push(AbiParam::new(ptr_ty)); // *mut Value (items)
     let vec2room_id = m
         .declare_function("brood_rt_vec2_room", Linkage::Import, &vec2room_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // brood_rt_make_closure(heap, out, inst) -> status: build a `(fn …)` literal's closure,
     // running exec_chunk's own arm verbatim (captures staged on `roots`); 0 = ok (closure at
     // `*out`), 1 = error parked. `inst` is a baked pointer into the arm's chunk — the
@@ -750,7 +808,8 @@ fn jit_lower_arm_inner(
     mkclo_sig.returns.push(AbiParam::new(types::I64)); // status
     let mkclo_id = m
         .declare_function("brood_rt_make_closure", Linkage::Import, &mkclo_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // brood_rt_make_vector_n(heap, out, elems: *const Value, n) — builds an n-element
     // vector from `n` `Value`s the JIT staged contiguously at `elems` (a stack slot it
     // owns). The variadic `MakeVector(n != 2)` path; `alloc_vector` never collects, so
@@ -762,13 +821,15 @@ fn jit_lower_arm_inner(
     makevecn_sig.params.push(AbiParam::new(types::I64)); // n
     let makevecn_id = m
         .declare_function("brood_rt_make_vector_n", Linkage::Import, &makevecn_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // brood_rt_gc_safepoint(heap): collect if due (bounds the nursery for cons loops).
     let mut sp_sig = m.make_signature();
     sp_sig.params.push(AbiParam::new(ptr_ty));
     let sp_id = m
         .declare_function("brood_rt_gc_safepoint", Linkage::Import, &sp_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // DEBUG ONLY: brood_rt_dbg_set_staging(heap, site) — record the staging call site.
     #[cfg(debug_assertions)]
     let dbg_staging_id = {
@@ -776,7 +837,8 @@ fn jit_lower_arm_inner(
         s.params.push(AbiParam::new(ptr_ty));
         s.params.push(AbiParam::new(types::I32));
         m.declare_function("brood_rt_dbg_set_staging", Linkage::Import, &s)
-            .ok()?
+            .ok()
+            .or_bail("cranelift-declare-function")?
     };
     // DEBUG ONLY: brood_rt_dbg_check_slot(heap, w0, abs_idx) — validate a slot read.
     #[cfg(debug_assertions)]
@@ -788,7 +850,8 @@ fn jit_lower_arm_inner(
         s.params.push(AbiParam::new(types::I64)); // w2
         s.params.push(AbiParam::new(types::I64)); // abs_idx
         m.declare_function("brood_rt_dbg_check_slot", Linkage::Import, &s)
-            .ok()?
+            .ok()
+            .or_bail("cranelift-declare-function")?
     };
     // The Brood→Brood call ABI. brood_rt_push(heap, w0,w1,w2): stage one operand `Value`
     // onto `roots`. brood_rt_global(heap, out, sym) -> status: resolve a free global into
@@ -801,7 +864,8 @@ fn jit_lower_arm_inner(
     }
     let _push_id = m
         .declare_function("brood_rt_push", Linkage::Import, &push_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     let mut glob_sig = m.make_signature();
     glob_sig.params.push(AbiParam::new(ptr_ty)); // heap
     glob_sig.params.push(AbiParam::new(ptr_ty)); // out: *mut Value
@@ -809,12 +873,14 @@ fn jit_lower_arm_inner(
     glob_sig.returns.push(AbiParam::new(types::I64)); // status
     let glob_id = m
         .declare_function("brood_rt_global", Linkage::Import, &glob_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // Same signature, but resolves WITHOUT parking an unbound error — the entry hoist
     // deopts on unbound rather than raising (see `brood_rt_global_probe`).
     let globprobe_id = m
         .declare_function("brood_rt_global_probe", Linkage::Import, &glob_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // brood_rt_global_ic(heap, out, sym, site) -> status: as above but through the
     // per-site global inline cache (no `env_get` walk on a cache hit).
     let mut globic_sig = m.make_signature();
@@ -825,7 +891,8 @@ fn jit_lower_arm_inner(
     globic_sig.returns.push(AbiParam::new(types::I64)); // status
     let globic_id = m
         .declare_function("brood_rt_global_ic", Linkage::Import, &globic_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     let mut callslow_sig = m.make_signature();
     callslow_sig.params.push(AbiParam::new(ptr_ty)); // heap
     callslow_sig.params.push(AbiParam::new(ptr_ty)); // out: *mut Value
@@ -835,7 +902,8 @@ fn jit_lower_arm_inner(
     callslow_sig.returns.push(AbiParam::new(types::I64)); // status
     let callslow_id = m
         .declare_function("brood_rt_call_slow", Linkage::Import, &callslow_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // brood_rt_push_room(heap, n) -> *mut Value: reserve n argument slots at the top of
     // `roots` and hand back the pointer, so the arm's operand stores land in place instead
     // of going into a stack slot and being copied across. See `Heap::push_roots_room`.
@@ -845,7 +913,8 @@ fn jit_lower_arm_inner(
     pushroom_sig.returns.push(AbiParam::new(ptr_ty)); // *mut Value
     let pushroom_id = m
         .declare_function("brood_rt_push_room", Linkage::Import, &pushroom_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // brood_rt_call_native_fl(heap, out, func, args, argc): direct builtin call for
     // a native flat-cell hit (nslots == u32::MAX) — no roots staging at all.
     let mut natfl_sig = m.make_signature();
@@ -857,7 +926,8 @@ fn jit_lower_arm_inner(
     natfl_sig.returns.push(AbiParam::new(types::I64));
     let natfl_id = m
         .declare_function("brood_rt_call_native_fl", Linkage::Import, &natfl_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // Track B / Technique A — the in-IR fast call path. brood_rt_fastlink_base(heap,
     // out_len: *mut u64) -> *const FastLink: base + length of the IR-readable fast-link
     // mirror. brood_rt_fast_frame(heap, out, site, head, argc, nslots, code, env,
@@ -870,7 +940,8 @@ fn jit_lower_arm_inner(
     flbase_sig.returns.push(AbiParam::new(ptr_ty)); // *const FastLink
     let flbase_id = m
         .declare_function("brood_rt_fastlink_base", Linkage::Import, &flbase_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // Four arguments, all register-passed. It took ten — head/argc/nslots/code/env and the
     // two callee IC bases — which spilled four onto the stack on SysV and made the callee's
     // profile mostly argument shuffling. They are all fields of the `FastLink` the IR has
@@ -884,7 +955,8 @@ fn jit_lower_arm_inner(
     fastframe_sig.returns.push(AbiParam::new(types::I64)); // status
     let fastframe_id = m
         .declare_function("brood_rt_fast_frame", Linkage::Import, &fastframe_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // §7.5 BROOD_XCALL — the inline fast-frame path's two cold callbacks.
     // brood_rt_xcall_latch(heap, code, site_head, argc, epoch): suspend-host latch
     // resolution after the gateway-token compare matched.
@@ -896,7 +968,8 @@ fn jit_lower_arm_inner(
     xlatch_sig.params.push(AbiParam::new(types::I64)); // epoch
     let xlatch_id = m
         .declare_function("brood_rt_xcall_latch", Linkage::Import, &xlatch_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // brood_rt_xcall_cold(heap, outcome, out, site_head, argc_nslots, epoch, stage_base)
     // -> status: the deopt/preempt/tail/error outcomes (everything but 0).
     let mut xcold_sig = m.make_signature();
@@ -910,7 +983,8 @@ fn jit_lower_arm_inner(
     xcold_sig.returns.push(AbiParam::new(types::I64)); // status (0/1/2)
     let xcold_id = m
         .declare_function("brood_rt_xcall_cold", Linkage::Import, &xcold_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // The callee-arm indirect-call signature (crate::jit::JitArmFn): (heap, base, out)
     // -> outcome. Imported into the function below for `call_indirect`.
     let mut armfn_sig = m.make_signature();
@@ -929,19 +1003,23 @@ fn jit_lower_arm_inner(
     vref_sig.returns.push(AbiParam::new(types::I64)); // status
     let vref_id = m
         .declare_function("brood_rt_vector_ref", Linkage::Import, &vref_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // brood_rt_table_has / brood_rt_table_get2: (heap, out, table 3 words, key 3 words)
     // -> status. Same word-triple signature as vector_ref; status 2 = error parked.
     let thas_id = m
         .declare_function("brood_rt_table_has", Linkage::Import, &vref_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     let tget_id = m
         .declare_function("brood_rt_table_get2", Linkage::Import, &vref_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // brood_rt_map_get: the same (heap, out, map 3w, key 3w) -> status signature.
     let mget_id = m
         .declare_function("brood_rt_map_get", Linkage::Import, &vref_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // brood_rt_table_put: (heap, out, table 3w, key 3w, val 3w) -> status.
     let mut tput_sig = m.make_signature();
     tput_sig.params.push(AbiParam::new(ptr_ty)); // heap
@@ -952,7 +1030,8 @@ fn jit_lower_arm_inner(
     tput_sig.returns.push(AbiParam::new(types::I64));
     let tput_id = m
         .declare_function("brood_rt_table_put", Linkage::Import, &tput_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // brood_rt_vector_base(heap, vec 3 words, out_len: *mut i64) -> *const Value: resolve
     // an invariant vector's element (data_ptr, len) once for the LICM hoist; null ptr ⇒
     // not a vector (the hoist deopts at entry). Only declared/used when `hoist_slots`.
@@ -965,13 +1044,15 @@ fn jit_lower_arm_inner(
     vbase_sig.returns.push(AbiParam::new(ptr_ty)); // element data ptr (null = non-vector)
     let vbase_id = m
         .declare_function("brood_rt_vector_base", Linkage::Import, &vbase_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // brood_rt_table_dense_base(heap, table 3 words, out_flag: *mut i64) -> *const u8:
     // resolve a hoisted global table's dense slot region once (the sieve lever); null ⇒
     // non-table / hashed / dropped (per-op FFI path used instead). Same shape as vbase.
     let tdbase_id = m
         .declare_function("brood_rt_table_dense_base", Linkage::Import, &vbase_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // brood_rt_global_epoch(heap) -> i64: the process global-rebind epoch, for the
     // back-edge guard that keeps a hoisted global vector bit-identical to the VM's late
     // binding (deopt if the global was rebound). Only declared/used when hoisting a global.
@@ -983,7 +1064,8 @@ fn jit_lower_arm_inner(
     gepochptr_sig.returns.push(AbiParam::new(ptr_ty));
     let gepochptr_id = m
         .declare_function("brood_rt_global_epoch_ptr", Linkage::Import, &gepochptr_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // brood_rt_const_load(cv: *const ConstVal, out: *mut Value): load the current Value
     // from a GC-movable ConstVal::Handle, writing it to *out. No return value — never fails.
     let mut const_load_sig = m.make_signature();
@@ -991,7 +1073,8 @@ fn jit_lower_arm_inner(
     const_load_sig.params.push(AbiParam::new(ptr_ty)); // out: *mut Value
     let const_load_id = m
         .declare_function("brood_rt_const_load", Linkage::Import, &const_load_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
 
     let mut ctx = m.make_context();
     ctx.func.signature = sig;
@@ -1581,7 +1664,7 @@ fn jit_lower_arm_inner(
     // produced and consumed within a block (stored to a slot by a self-call/binder, returned,
     // or tag-checked back to an int), never crossing the loop back-edge live, which is the
     // only safepoint — so the moving GC never sees a handle in a register.
-    let done_block = leader_block[len]?;
+    let done_block = leader_block[len].or_bail("jump-target-not-a-leader")?;
     // Store an unboxed scalar `Op::Int` value into frame slot `k`, boxing it as `Int` or
     // (for a comparison `i8`) `Bool` via `box_scalar`.
     // Copy the whole `Value` from frame slot `src` to slot `dst` (handle-safe — moves the
@@ -1885,7 +1968,7 @@ fn jit_lower_arm_inner(
                 }
                 Inst::Pop => {
                     // A non-final `do` form, evaluated for effect: drop its value.
-                    stack.pop()?;
+                    stack.pop().or_bail("operand-stack-underflow")?;
                 }
                 Inst::SetLocal(i) => {
                     // A `let`/`letrec` binder → frame slot `i`. A `Slot` operand (possibly a
@@ -1918,7 +2001,7 @@ fn jit_lower_arm_inner(
                             Op::Handle(w[0], w[1], w[2])
                         };
                     }
-                    let op = stack.pop()?;
+                    let op = stack.pop().or_bail("operand-stack-underflow")?;
                     store_op(&mut b, *i as i64, op);
                 }
                 Inst::Prim1 { op, .. } => {
@@ -2040,7 +2123,7 @@ fn jit_lower_arm_inner(
             if j == len {
                 // Fall off the end into Done: return the single result via roots[base].
                 if stack.len() != 1 {
-                    return None;
+                    return bail("done-with-nonunit-operand-stack");
                 }
                 exit_done(&mut b, stack[0]);
                 break;
@@ -2057,7 +2140,8 @@ fn jit_lower_arm_inner(
                         .enumerate()
                         .map(|(i, &op)| BlockArg::Value(as_block_arg(&mut b, op, i)))
                         .collect();
-                    b.ins().jump(leader_block[j]?, &args);
+                    b.ins()
+                        .jump(leader_block[j].or_bail("jump-target-not-a-leader")?, &args);
                 } else {
                     // Type-mixed join (see `record_block_flags`): deopt to the VM.
                     let __dr = b.ins().iconst(types::I32, 107);
@@ -2143,7 +2227,9 @@ fn jit_lower_arm_inner(
         }
     }
 
-    m.define_function(id, &mut ctx).ok()?;
+    m.define_function(id, &mut ctx)
+        .ok()
+        .or_bail("cranelift-define-function")?;
     // DEBUG (bug #2): dump this arm's finalized machine code (hex bytes) for offline
     // disassembly, when `BROOD_DUMP_CODE=<substr>` matches the arm's defn name. gdb can't
     // read JIT code pages at the crash pc (execute-only / superseded), so capture the bytes
@@ -2177,7 +2263,9 @@ fn jit_lower_arm_inner(
         }
     };
     m.clear_context(&mut ctx);
-    m.finalize_definitions().ok()?;
+    m.finalize_definitions()
+        .ok()
+        .or_bail("cranelift-finalize")?;
     let entry = m.get_finalized_function(id);
     #[cfg(debug_assertions)]
     if let Some((name, len)) = dump_name {
