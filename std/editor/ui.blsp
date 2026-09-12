@@ -294,6 +294,44 @@ already-open window instead of opening a duplicate (e.g. a repeated `(observe)`)
   (io/puts (str "ui-run: " where " error (recovering to last good frame): " (error-message e))
     :to *err*))
 
+;; ---- per-turn tracing (BROOD_UI_TRACE=1) ------------------------------------
+;; Where a turn's time goes on the BROOD side of the loop: `view` (model → frame),
+;; `:draw` (the frame handed to the frontend — for the GUI, marshalling the ops to the
+;; window thread) and `update` (folding one input). The GUI's own paint is traced by
+;; `BROOD_GUI_TRACE=1` on the Rust side; the two together account for a keystroke end
+;; to end. One stderr line per phase, prefixed `ui-run:`, so a filter reads either.
+
+(defn- ui-trace? ()
+  "Whether per-turn tracing is on — read per call, not at load: a `def-` here would be
+snapshotted into the startup image (ADR-218) and the env var never consulted again."
+  (= (os/env "BROOD_UI_TRACE") "1"))
+
+(defn- ui-timed (thunk)
+  "`[result elapsed-ms]` for `(thunk)` — the elapsed a float in ms, off `os/now-ns`."
+  (let (t0 (os/now-ns)
+        r (thunk))
+    [r (/ (- (os/now-ns) t0) 1000000.0)]))
+
+(defn- ui-trace (phase ms detail)
+  "One `ui-run: <phase>=<ms> <detail>` line to stderr when `BROOD_UI_TRACE=1`; nil
+otherwise (and the caller pays nothing but the two clock reads)."
+  (when (ui-trace?)
+    (io/puts (string/format "ui-run: %s=%.2fms %s" phase ms detail) :to *err*)))
+
+(defn- ui-abbrev (s)
+  "`s` cut to 72 characters for a trace line (an input can carry a paste or a task reply)."
+  (if (> (string/length s) 72) (str (string/substring s 0 72) "…") s))
+
+(defn- ui-fold (update model input cols rows)
+  "`(update model input cols rows)`, timed and traced as `update` — and survived: a
+throwing `update` is logged (`ui-log-error`) and drops that one input, returning
+`model` unchanged. Every fold in the loop and the drain goes through here."
+  (let ([next ms] (ui-timed (fn ()
+                              (try
+                                (update model input cols rows)
+                                (catch e (do (ui-log-error "update" e) model))))))
+    (do (ui-trace "update" ms (ui-abbrev (pr-str input))) next)))
+
 (defn- ui-drain-input (model update display cols rows fuel)
   "Fold every input ALREADY queued into `model` WITHOUT rendering between them, returning
 `[model' pending]`. The render, not the fold, is the per-input cost, so a burst of async
@@ -313,9 +351,7 @@ exactly as before."
         (quit-request? raw) [model raw] ; a close/focus control message: hand it back
         (focus-request? raw) [model raw] ; (the loop, not update, owns these)
         else
-          (let (next (try
-                       (update model raw cols rows)
-                       (catch e (do (ui-log-error "update" e) model))))
+          (let (next (ui-fold update model raw cols rows))
             (ui-drain-input next update display cols rows (dec fuel)))))))
 
 (defn- ui-loop (model last-good clock view update display)
@@ -350,7 +386,8 @@ re-raises, surfacing a genuine startup bug instead of spinning."
           ;; render this model; a `[:frame …]` result is the frame to draw, `:failed`
           ;; means `view` threw (already logged) and we must fall back to `last-good`.
           rendered (try
-                     [:frame (view model cols rows)]
+                     (let ([frame ms] (ui-timed (fn () (view model cols rows))))
+                       (do (ui-trace "view" ms (str (count frame) " ops")) [:frame frame]))
                      (catch e
                        (if (nil? last-good)
                          ; first render failed — a real startup bug, not a wedge
@@ -361,7 +398,7 @@ re-raises, surfacing a genuine startup bug instead of spinning."
         ;; (the clock keeps advancing — it's wall-clock reality, not model state).
         (ui-loop last-good last-good clock view update display)
         (do
-          ((get display :draw) (second rendered))
+          (ui-trace "draw" (second (ui-timed (fn () ((get display :draw) (second rendered))))) "")
           ;; `model` rendered cleanly: it's now the fallback point for the next turns.
           ;; Named timers are opt-in via the `:timers` key — `timers` is nil for a
           ;; pre-timers app (the legacy `:tick-ms`/`:tick` path) and the clock is just
@@ -387,18 +424,14 @@ re-raises, surfacing a genuine startup bug instead of spinning."
               ;; earliest due timer (if any), else re-park without folding.
               (nil? raw)
                 (if (nil? timers)
-                  (let (next (try
-                               (update model :tick cols rows)
-                               (catch e (do (ui-log-error "update" e) model))))
+                  (let (next (ui-fold update model :tick cols rows))
                     (ui-loop next model clock1 view update display))
                   (let (fr (ui-fire timers clock1 (ui-now model))
                         event (first fr)
                         clock2 (second fr))
                     (if (nil? event)
                       (ui-loop model model clock2 view update display)
-                      (let (next (try
-                                   (update model event cols rows)
-                                   (catch e (do (ui-log-error "update" e) model))))
+                      (let (next (ui-fold update model event cols rows))
                         (ui-loop next model clock2 view update display)))))
               ;; a real key/mouse/system event: with timers, stamp `:last-input` (resets
               ;; idle timers); then fold it. A throwing `update` drops this input.
@@ -406,9 +439,7 @@ re-raises, surfacing a genuine startup bug instead of spinning."
                 (let (clock2 (if (nil? timers)
                                clock1
                                (assoc clock1 :last-input (ui-now model)))
-                      next0 (try
-                              (update model raw cols rows)
-                              (catch e (do (ui-log-error "update" e) model)))
+                      next0 (ui-fold update model raw cols rows)
                       ;; a `:coalesce-input?` app also drains any inputs ALREADY queued
                       ;; into this same fold, so a burst renders once instead of once
                       ;; per event (`ui-drain-input`); a control message pulled mid-drain
