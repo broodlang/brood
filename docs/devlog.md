@@ -841,6 +841,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-09** — KI-122: the KI-120 tripwire was crying wolf on bedit, on a false claim
 - **2026-09-12** — `filter` joins its complement in `seq/`; `remove` becomes `reject` (ADR-330), and docstring `[[links]]` finally render (ADR-331)
 - **2026-09-12** — pre-compilation, counted: bytecode is 2.5 ms of `json`, Cranelift is 60–80 ms, and both persistence ideas are dead (compute-frontier §7.11)
+- **2026-09-12** — the tier threshold is a call threshold and it is 128 (ADR-333): boot stopped queueing 139 compiles ahead of the hot arm — `spawn` −31%, `fib` −18%, `bintree` −14%
 - **2026-09-12** — the GUI retains its frame and repaints by cell row (ADR-332): a keystroke paints 0.3 ms instead of 4–13; whole-pixel ppem, subpixel text at 1× (`gui-text-aa!`), snapped hairlines, `gui-line-height!`
 - **2026-09-12** — `0xFF` reads: radix literals, the second ADR-169 reservation to pay out (ADR-334)
 
@@ -12786,3 +12787,34 @@ Two diagnostics came out of measuring: `BROOD_GUI_TRACE=1` (every paint, rows re
 were checked without a screenshot). One gotcha: `nest run -- file.blsp` runs the `.blsp` as a
 script rather than handing it to the project's `main` as a document; the bedit measurement
 used a `.txt` copy.
+
+### 2026-09-12 — the tier threshold was 8 for a JIT that now tiers the whole boot path (ADR-333)
+
+The probe that killed the pre-compilation item found the real one. Counting enqueues against
+compiles on ten rows: the deferred queue never starves (queued = compiled, 0–3 items), the
+compiler goes idle 40–70 ms into every row — and **`startup` alone queues 139 arms in 18 ms**.
+At a threshold of 8 the boot path tiers itself, and a row's own hot function waits in the
+FIFO behind it. `TIER_THRESHOLD` 8 → 128, with `BACKEDGE_TIER_WEIGHT` so a self-tail loop
+still tiers at eight boundary exits (`sieve` was the row that said the weight was needed:
++7% without it, −1.6% with). Unpinned interleaved best-of-7 against a same-binary control:
+`spawn` −31%, `fib` −18%, `bintree` −14%, `collatz` −14%, `pipeline` −11%, `nqueens` −9%,
+`base64` −8%, `nbody` −7%; the rest within the control's ±4%. Compile counts 140–230 →
+32–133 per row. 256/512 rejected (`sort`/`sieve`/`persistent-map` +4–25%).
+
+The official gate, `make ab --all --floor` (pinned to one core, best-of-7, working tree vs
+`be0638d3`): **25 rows improved, 5 noise, 0 regressions** — `spawn` −32.6%, `fib` −24.8%,
+`primes` −24.2%, `bintree` −21.2%, `collatz` −20.6%, `errors-deep` −20.4%, `sieve` −18.3%,
+`wordcount` −18.2%, `nqueens` −18.0%, `persistent-map` −17.9%, `loop` −16.2%, `nbody` −13.0%,
+`mandelbrot` −12.5%, `sort` −12.4%, `errors` −12.1%, `pfib` −12.0%, `reduce` −11.9%,
+`json` −11.8%, `strings` −11.4%, `regex` −10.3%, `startup` −9.8%, `pipeline` −9.7%,
+`base64`/`matmul` −9.0%, `ackermann` −7.8%; `latency`/`pingpong`/`ring`/`spawn-live`/
+`supervisor` within floor. Pinned charges the row for the compile thread, which is why the
+pinned deltas run larger than the unpinned ones. One caveat, recorded because the discipline
+says to: the stdimage read `stale` on BOTH arms of that sweep (the day's rebuilds had pruned
+it) — symmetric, so the deltas are fair, but both sides paid the source boot.
+
+Two smaller things the same probes settled: the 44 repeated bytecode compiles on `json` are
+`probe_arm_for`'s documented throwaway copies for the JIT's leaf probe (~0.6 ms, by design);
+and lead 1 of §7.11 as first written — "the deferred queue starves" — was wrong, and is
+corrected there.
+

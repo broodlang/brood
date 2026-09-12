@@ -1813,25 +1813,34 @@ expanding 544 prelude forms), and `BROOD_DEFER_DBG` reads 1 435 deferrals (`cond
 216 …) where the warm run reads 45. Run once, then measure — the same rule as the stdlib image,
 one artifact over.
 
-**What is left standing, in order:**
+**What is left standing, in order** (revised the same day — see the strike-through):
 
-1. **The gate-refused arms never reach the hot stage.** §7.10 lead 4 named the *shape* (a
-   baseline tier); the measurement says the *scheduling* comes first: the deferred queue starves
-   behind the primary, so hot admission is dead code on every short row. Interleave (one
-   deferred per N primary) or order the primary by hotness, then re-measure `json`/`regex`/
-   `sort`/`bintree` with `fib`/`pfib`/`nbody` as the control. Small change, `compiler.rs` only.
-2. **Duplicate compiles.** `BROOD_TRACE_COMPILE`: 44 of 178 bytecode compiles on `json` repeat
-   a `Body` key already compiled in the same process; the JIT trace shows `map?` ×6, `set?` ×5,
-   `not` ×5 (~8 ms of Cranelift). Why the shared body cache misses in ONE process is unanswered.
+1. ~~**The gate-refused arms never reach the hot stage** — the deferred queue starves behind
+   the primary.~~ **Measured, and wrong.** A probe on the enqueue and compile sites (ten rows,
+   default N): deferred queued = deferred compiled on every row (0–3 items — the xcall/inlined
+   upgrade qualifies few arms), the compiler thread goes **idle 42–72 ms into every run**, and
+   the primary compiles everything queued. Hot admission is also `BROOD_XADMIT=1` opt-in and
+   closed on cost grounds in §7.1. What the same probe DID show: **`startup` alone queues 139
+   arms in 18 ms** — at a threshold of 8 the boot path tiers itself, and a row's hot arm waits
+   in the FIFO behind it. → **ADR-333: `TIER_THRESHOLD` 8 → 128 with a back-edge weight** —
+   `spawn` −31%, `fib` −18%, `bintree` −14%, `collatz` −14%, `pipeline` −11%, unpinned
+   interleaved with a same-binary control. A hotness-ordered queue is the follow-on lever if a
+   row ever shows an arm waiting behind genuinely hot work; with boot out of the queue none does.
+2. **Duplicate compiles.** The bytecode half is closed: the 44 repeats of a `Body` key on
+   `json` are `probe_arm_for`'s documented throwaway copies for the JIT leaf probe (one cold
+   compile per caller→callee edge, ~0.6 ms). The Cranelift half is open: `map?` ×6, `set?` ×5,
+   `not` ×5 lowered in one process (~8 ms of compile thread) despite the `published` dedupe;
+   either six distinct arms carry that name or the dedupe misses. Fewer arms tier at 128, so
+   re-count before chasing it.
 3. **Per-activation cost of a not-yet-native arm**: `i64_too_deep` + `jit_shared_lookup`
-   (a hash probe) run on every activation while `jit_code` is null/QUEUED — ~3% of `json`'s main
-   thread. Probe the shared cache once per threshold crossing, not per call.
+   (a hash probe) run on every activation while `jit_code` is null/QUEUED — ~3% of `json`'s
+   main thread at a threshold of 8; at 128 an arm spends 16× longer in that state, so this is
+   worth re-measuring now. Probe the shared cache once per threshold crossing, not per call.
 4. **A persistent native-code cache** is the only pre-compilation with a prize left, and the
-   prize is *latency to native* on short runs (median arm lands at 20 ms of a 70 ms run) plus
-   the whole compile thread when cores are scarce. It needs relocation of the `brood_rt_*`
-   absolute addresses (PIE), the `ConstVal` handles baked as immediates, tag-snapshot keying and
-   epoch validity — a multi-day project whose failure mode is wrong code. Not until 1–3 are done
-   and a row still wants it.
+   prize is *latency to native* on short runs plus the whole compile thread when cores are
+   scarce. It needs relocation of the `brood_rt_*` absolute addresses (PIE), the `ConstVal`
+   handles baked as immediates, tag-snapshot keying and epoch validity — a multi-day project
+   whose failure mode is wrong code. Not until 2–3 are done and a row still wants it.
 
 ### The measurement discipline (each of these burned someone this week)
 

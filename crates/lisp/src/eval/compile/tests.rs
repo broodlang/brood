@@ -2352,3 +2352,46 @@ fn the_vector_base_hoist_is_off_for_any_allocating_arm() {
         "a non-tail call is a GC safepoint (and can `def` → RUNTIME compaction)"
     );
 }
+
+/// ADR-333: a self-tail loop is elected for tiering within its FIRST activation, whatever
+/// `TIER_THRESHOLD` says. The call threshold is 128, but a loop reaches the compiler through
+/// the back-edge boundary exits (every 256 iterations), each worth `BACKEDGE_TIER_WEIGHT`
+/// calls — so eight boundaries, 2048 iterations, elect it. This runs the loop through the
+/// real entry point (`eval_str` → the VM → `exec_chunk`'s boundary → `jit_tier_in_frame`)
+/// for 3000 iterations and asserts the arm left the untried state. Sabotage-verified: with
+/// the weight at 1 the same loop has counted 11 of 128 and `jit_code` is still null.
+#[cfg(feature = "jit")]
+#[test]
+fn a_self_tail_loop_is_elected_for_tiering_within_one_activation() {
+    use std::sync::atomic::Ordering::Acquire;
+    set_forced_ceiling(Some(Tier::Native));
+    let mut interp = crate::Interp::new();
+    interp
+        .eval_str("(defn tier-loop (i acc) (if (< i 1) acc (tier-loop (- i 1) (+ acc i))))")
+        .expect("define the loop");
+    let f = interp.eval_str("tier-loop").expect("read the loop back");
+    let id = match f.unpack() {
+        crate::core::value::ValueRef::Fn(id) => id,
+        other => panic!("tier-loop is not a closure: {other:?}"),
+    };
+    let handle = super::closure::compiled_arm_for(&interp.heap, id, 2).expect("a VM arm");
+    let arm = handle.arc().clone();
+    assert!(
+        arm.jit_code.load(Acquire).is_null() && arm.jit_calls.load(Acquire) == 0,
+        "the arm must start untried"
+    );
+    let got = interp
+        .eval_str("(tier-loop 3000 0)")
+        .expect("run the loop once");
+    match got.unpack() {
+        crate::core::value::ValueRef::Int(r) => assert_eq!(r, 4_501_500),
+        other => panic!("tier-loop returned {other:?}"),
+    }
+    let calls = arm.jit_calls.load(Acquire);
+    let code = arm.jit_code.load(Acquire);
+    assert!(
+        !code.is_null() || calls >= super::jit_runtime::TIER_THRESHOLD,
+        "one 3000-iteration activation must elect the loop for tiering (11 boundary exits × \
+         BACKEDGE_TIER_WEIGHT ≥ TIER_THRESHOLD), but jit_calls={calls} and jit_code is null"
+    );
+}
