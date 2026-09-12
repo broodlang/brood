@@ -1724,8 +1724,8 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
                 _ => None,
             }
         };
+        let map_ty = expr_ty(heap, items[1], ctx);
         if let Some(key) = key {
-            let map_ty = expr_ty(heap, items[1], ctx);
             if let Some(shape) = record_shape_of(map_ty.as_ref()) {
                 let mut fields = shape.fields;
                 fields.insert(key, (Ty::ANY, true));
@@ -1738,6 +1738,15 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
             if map_ty.as_ref().and_then(Ty::map_kv).is_none() {
                 return Some(Ty::of(Tag::Map));
             }
+        } else if map_ty
+            .as_ref()
+            .is_some_and(|t| t.is_subtype(&Ty::of(Tag::Map)))
+        {
+            // A DYNAMIC key on a known map — `(update m (:key spec) …)`. Which field
+            // changed is unknown, so the shape cannot be kept; but the receiver is a map,
+            // so the result is a map — never the `vector | map` of `update`'s body, which
+            // read a model threaded through one dynamic-key update as possibly a vector.
+            return Some(Ty::of(Tag::Map));
         }
     }
     // `(assoc m k1 v1 …)` → `map<K, V>` with the assoc'd keys and values UNIONED into
@@ -1787,7 +1796,11 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         // call that returns at all returns a map. This is the shape every `model -> model`
         // step in an editor has (`(assoc (step m) :k v)` on an unsigged `step`), and
         // `vector | map` where `map` was declared was the strict finding at every one.
-        if literal_keyword_pairs(&items[2..]).is_some() {
+        if literal_keyword_pairs(&items[2..]).is_some()
+            || map_ty
+                .as_ref()
+                .is_some_and(|t| t.is_subtype(&Ty::of(Tag::Map)))
+        {
             return Some(Ty::of(Tag::Map));
         }
     }

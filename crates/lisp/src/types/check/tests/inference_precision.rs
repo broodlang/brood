@@ -550,3 +550,16 @@ fn an_extremum_over_an_unknown_operand_is_the_unknown() {
         "{strict:?}"
     );
 }
+
+// A DYNAMIC key on a KNOWN map receiver still answers a map — `(update m (:key spec) …)`
+// on a record is a map (which field changed is unknown, so the shape goes; the map-ness
+// does not), never `update`'s own `vector | map`.
+#[test]
+fn a_dynamic_key_on_a_known_map_keeps_it_a_map() {
+    assert_eq!(ty_str("(fn (k) (update {:a 1} k inc))"), "(any) -> map");
+    assert_eq!(ty_str("(fn (k) (assoc {:a 1} k 2))"), "(any) -> map");
+    assert_eq!(
+        ty_str("(fn (m k) (update m k inc))"),
+        "(any, any) -> vector | map"
+    );
+}
