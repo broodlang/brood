@@ -286,3 +286,23 @@
                         a
                         (cons [text p] a)))))))
       (assert= 0 (count bad)))))
+
+(describe "sexp: wrapping a selection, and any delimiter pair"
+  (test "point-wrap takes the pair — square and curly are the round rule with other brackets"
+    (assert= ["[a] b" 1] (sexp/point-wrap "a b" 0 "[" "]"))
+    (assert= ["{a} b" 1] (sexp/point-wrap "a b" 0 "{" "}"))
+    (assert= (sexp/point-wrap-round "a b" 0) (sexp/point-wrap "a b" 0 "(" ")")))
+  (test "span-wrap wraps exactly the span — no structure consulted, the selection is the form"
+    (assert= ["a (b) c" 3] (sexp/span-wrap "a b c" 2 3 "(" ")"))
+    (assert= ["[a b c]" 1] (sexp/span-wrap "a b c" 0 5 "[" "]"))
+    ;; a selection that splits a form still wraps: the user chose the span
+    (assert= ["(a (b c) d)" 4] (sexp/span-wrap "(a b c d)" 3 6 "(" ")")))
+  (test "wrap-region wraps the active region, lands inside the opener, and drops the mark"
+    (let (b (assoc (goto-char (make-buffer "a b c") 3) :mark 2)
+          w (sexp/wrap-region b "(" ")"))
+      (assert= "a (b) c" (buffer-text w))
+      (assert= 3 (buffer-point w))
+      (assert= nil (buffer-mark w))))
+  (test "wrap-region is a no-op without a region"
+    (let (b (goto-char (make-buffer "a b c") 2))
+      (assert= b (sexp/wrap-region b "(" ")")))))

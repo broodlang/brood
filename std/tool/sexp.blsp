@@ -457,24 +457,47 @@ form's siblings (paredit `raise-sexp`).
           (math/max es
             (dec point))]))))
 
-(defn point-wrap-round (text point)
-  "Wrap the form at or after `point` in a fresh `( … )`, point landing just inside the
-new open (paredit `wrap-round`).
+(defn point-wrap (text point open close)
+  "Wrap the form at or after `point` in a fresh `open … close`, point landing just inside
+the new open — paredit's `wrap-round` for any delimiter pair (`wrap-square`, `wrap-curly`).
 
-    (sexp/point-wrap-round \"a b\" 0)     → [\"(a) b\" 1]"
+    (sexp/point-wrap \"a b\" 0 \"[\" \"]\")   → [\"[a] b\" 1]"
   (let (tr (tree text)
         enc (enclosing tr point)
         nxt (seq/find (forms-of enc) (fn (f) (>= (get f :end) point))))
     (if (nil? nxt)
       nil
-      (let (ns (get nxt :start) ne (get nxt :end))
+      (let (ns (sexp-start nxt) ne (sexp-end nxt))
         [(str (string/substring text 0 ns)
-           "("
+           open
            (string/substring text ns ne)
-           ")"
+           close
            (string/substring text ne))
-          (inc ns)]))))
-(sig point-wrap-round (string any -> (or nil (vector (or number string)))))
+          (+ ns (string/length open))]))))
+(sig point-wrap (string int string string -> (or nil (tuple string int))))
+
+(defn point-wrap-round (text point)
+  "Wrap the form at or after `point` in a fresh `( … )`, point landing just inside the
+new open (paredit `wrap-round`).
+
+    (sexp/point-wrap-round \"a b\" 0)     → [\"(a) b\" 1]"
+  (point-wrap text point "(" ")"))
+(sig point-wrap-round (string int -> (or nil (tuple string int))))
+
+(defn span-wrap (text lo hi open close)
+  "Wrap the span `[lo, hi)` of `text` in `open … close`, point landing just inside the new
+open — what an opening bracket typed over an ACTIVE REGION does (paredit's `wrap-round`
+on a selection, Emacs's `electric-pair-mode` with a region). No structure is consulted:
+the selection IS the form the user means.
+
+    (sexp/span-wrap \"a b c\" 2 3 \"(\" \")\")   → [\"a (b) c\" 3]"
+  [(str (string/substring text 0 lo)
+     open
+     (string/substring text lo hi)
+     close
+     (string/substring text hi))
+    (+ lo (string/length open))])
+(sig span-wrap (string int int string string -> (tuple string int)))
 
 (defn point-transpose (text point)
   "Interchange the sexp before `point` with the one after it, point landing just past both
@@ -614,6 +637,21 @@ buffer command, no-op when it's empty."
   "Wrap the form at or after point in a fresh `( … )` (paredit `wrap-round`); buffer
 command, no-op when there's no following form."
   (sexp-apply-edit buf (point-wrap-round (buffer-text buf) (get buf :point))))
+(defn wrap (buf open close)
+  "Wrap the form at or after point in a fresh `open … close` (`point-wrap`); buffer
+command, no-op when there's no following form."
+  (sexp-apply-edit buf (point-wrap (buffer-text buf) (get buf :point) open close)))
+(sig wrap (buffer string string -> buffer))
+(defn wrap-region (buf open close)
+  "Wrap the buffer's active region in `open … close` (`span-wrap`), point landing just
+inside the new open and the region deactivated — what an opening bracket typed over a
+selection does. `buf` unchanged when no region is active."
+  (let (bounds (buffer-region-bounds buf))
+    (if (nil? bounds)
+      buf
+      (let ([lo hi] bounds)
+        (clear-mark (sexp-apply-edit buf (span-wrap (buffer-text buf) lo hi open close)))))))
+(sig wrap-region (buffer string string -> buffer))
 (defn transpose (buf key)
   "Swap the sexps before and after point (Emacs `transpose-sexps`); buffer command,
 no-op without a form on each side."

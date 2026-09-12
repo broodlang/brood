@@ -1043,6 +1043,22 @@ Recorded for undo (a no-op at point 0 is not recorded). Throws if `buf` is read-
           :delete start p)))))
 (sig delete-backward-char (buffer &optional int -> buffer))
 
+(defn insert-pair (buf open close)
+  "Insert `open` and `close` at point with point between them — the electric half of a
+bracket key: `(` types `()` and leaves you inside. One undo unit."
+  (backward-char (insert buf (str open close)) (string/length close)))
+(sig insert-pair (buffer string string -> buffer))
+
+(defn delete-empty-pair (buf open close)
+  "When point sits between `open` and `close` with nothing in between — `(|)` — delete
+both, else `buf` unchanged. The backspace half of an electric bracket key: what typing
+`(` put there, one backspace takes away, so a pair is never left half-deleted. Callers
+fall through to `delete-backward-char` on the unchanged buffer."
+  (if (and (= (buffer-char-before buf) open) (= (buffer-char-after buf) close))
+    (delete-char (delete-backward-char buf (string/length open)) (string/length close))
+    buf))
+(sig delete-empty-pair (buffer string string -> buffer))
+
 (defn delete-region (buf)
   "Delete the text between point and mark; point moves to the region start and
 the mark is cleared. A no-op (returns `buf`, unrecorded) if no mark is set or the
