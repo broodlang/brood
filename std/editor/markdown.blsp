@@ -17,10 +17,14 @@
 
 (defmodule editor/markdown
   "Lexical Markdown syntax highlighting, as a pure function over a source string —
-the Markdown analogue of `editor/highlight` (ADR-052):
+the Markdown analogue of `editor/highlight` (ADR-052) — and the document RENDERED:
 
   - `(markdown-spans src)` — `[start end face]` colour spans for `src`'s tokens,
     in the `highlight-spans` shape (ascending, non-overlapping, end-exclusive).
+  - `(markdown-render src width)` — `{:text :spans :lines}`: the text the markup
+    describes (markers gone, paragraphs re-flowed to `width`), the same span shape
+    over it as DATA, and a rendered-line → source-line map for a preview that
+    follows the cursor; `(markdown-rendered-line rendered src-line)` reads it.
 
 Classifies *line shapes* (ATX `#` headings, ``` fenced code blocks, `-`/`*`/`+` and
 ordered list bullets, `>` blockquotes) plus an inline scan (`` `code` ``, `**bold**`,
@@ -283,3 +287,383 @@ code / bold / italic / links. Spans are ascending and non-overlapping; text carr
 no markup carries no span (the default face)."
   (md-lex-lines (md-drop-trailing-empty (string/split src "\n")) 0 false '()))
 (sig markdown-spans (string -> any))
+
+;; ---- rendering: the document as READABLE text, faces carried as data ---------
+;;
+;; `markdown-spans` colours the SOURCE — the markers stay, the reader sees `**bold**`. A
+;; preview wants the other thing: the text the markup DESCRIBES, with the markers gone,
+;; paragraphs re-flowed to a width, and the faces that survived attached to the rendered
+;; characters. That is a rich-text value, `{:text :spans :lines}`: the same
+;; `[start end face]` spans over `:text` that the `fontify-runs` tiler already takes, so a
+;; buffer holding the rendered text paints from the spans as DATA rather than from a lexer
+;; (no lexer can recover faces from text whose markers are gone). `:lines` maps each
+;; rendered line back to the source line it came from, which is what lets a preview pane
+;; follow the cursor in the source.
+;;
+;; The same lexical stance as the highlighter: line shapes and a left-to-right inline scan,
+;; not a CommonMark parser. The inline scan is the highlighter's, re-expressed to yield the
+;; text BETWEEN the markers with the marker's face — the two must agree on what a marker
+;; is, and they do by construction.
+
+(defn- md-plain-runs (s face)
+  ;; A run of plain text, dropped when empty so no zero-width run reaches the wrapper.
+  (if (= s "") '() (list [s face])))
+(sig md-plain-runs (string any -> list))
+
+(defn- md-inline-runs (line i n base-face acc)
+  "The inline scan as RUNS: `[text face]` pairs (reverse order in `acc`) covering `[i, n)`
+of `line`, plain text under `base-face`, each marked region reduced to its content under
+its face. Unclosed markers are literal characters, as in the highlighter."
+  (let (j (if (>= i n) n (string/span-until line i "`*_["))
+        acc (if (> j i) (append (md-plain-runs (string/substring line i j) base-face) acc) acc)
+        i j)
+    (if (>= i n)
+      (reverse acc)
+      (let (c (string/char-at line i))
+        (cond
+          (= c "`")
+            (let (k (md-find-char line (inc i) n "`"))
+              (if (< k 0)
+                (md-inline-runs line (inc i) n base-face (cons ["`" base-face] acc))
+                (md-inline-runs line
+                  (inc k)
+                  n
+                  base-face
+                  (append (md-plain-runs (string/substring line (inc i) k) md-face-code) acc))))
+          (md-delim2? line i n)
+            (let (a (string/char-at line i)
+                  k (md-find-2 line (+ i 2) n a a))
+              (if (< k 0)
+                (md-inline-emph-runs line i n base-face acc)
+                (md-inline-runs line
+                  (+ k 2)
+                  n
+                  base-face
+                  (append (md-plain-runs (string/substring line (+ i 2) k) md-face-bold) acc))))
+          (or (= c "*") (= c "_")) (md-inline-emph-runs line i n base-face acc)
+          (= c "[")
+            (let (span (md-link-span line 0 i n))
+              (if (nil? span)
+                (md-inline-runs line (inc i) n base-face (cons ["[" base-face] acc))
+                (let (close (md-find-char line (inc i) n "]"))
+                  (md-inline-runs line
+                    (second span)
+                    n
+                    base-face
+                    (append (md-plain-runs (string/substring line (inc i) close) md-face-link)
+                      acc)))))
+          else (md-inline-runs line (inc i) n base-face (cons [c base-face] acc)))))))
+(sig md-inline-runs (string int int any list -> list))
+
+(defn- md-inline-emph-runs (line i n base-face acc)
+  ;; `*x*` / `_x_` → x in italics; an unclosed marker is the literal character
+  (let (a (string/char-at line i)
+        k (md-find-char line (inc i) n a))
+    (if (< k 0)
+      (md-inline-runs line (inc i) n base-face (cons [a base-face] acc))
+      (md-inline-runs line
+        (inc k)
+        n
+        base-face
+        (append (md-plain-runs (string/substring line (inc i) k) md-face-italic) acc)))))
+(sig md-inline-emph-runs (string int int any list -> list))
+
+(defn- md-runs-of (text base-face)
+  "The `[text face]` runs of one line of inline markup, plain text under `base-face`."
+  (md-inline-runs text 0 (string/length text) base-face '()))
+(sig md-runs-of (string any -> list))
+
+;; ---- words: runs cut at whitespace, so a paragraph can be re-flowed ----------
+;; A WORD is a list of `[text face]` fragments with no whitespace in it — more than one
+;; fragment when markup starts mid-word (`foo**bar**`). Filling then places words, and a
+;; word's fragments become spans at wherever it landed.
+
+(defn- md-word-len (word)
+  (fold word 0 (fn (n frag) (+ n (string/length (first frag))))))
+(sig md-word-len (list -> int))
+
+(defn- md-words (runs)
+  "Cut `runs` into words at spaces: a list of words, each a list of `[text face]`
+fragments, in order, with empty words (runs of spaces) dropped."
+  (let ([cur done]
+          (fold runs
+            ['() '()]
+            (fn (acc run)
+              (let ([cur done] acc
+                    [text face] run
+                    pieces (string/split text " ")
+                    ;; the first piece continues the current word; each later piece starts one
+                    cur1 (if (= (first pieces) "") cur (cons [(first pieces) face] cur))
+                    [cur2 done2]
+                      (fold (rest pieces)
+                        [cur1 done]
+                        (fn (a p)
+                          (let ([c d] a
+                                d1 (if (empty? c) d (cons (reverse c) d)))
+                            [(if (= p "") '() (list [p face])) d1]))))
+                [cur2 done2]))))
+    (reverse (if (empty? cur) done (cons (reverse cur) done)))))
+(sig md-words (list -> list))
+
+(defn- md-word-spans (word at acc)
+  ;; The spans of `word`'s faced fragments placed at column `at`, consed (reversed) onto `acc`;
+  ;; a fragment continuing the previous span's face extends it instead of starting another
+  ;; (so `**a b**` is ONE bold span across its space, the way the source marked it).
+  (fold word
+    [at acc]
+    (fn (st frag)
+      (let ([pos acc] st
+            [text face] frag
+            end (+ pos (string/length text))
+            prev (first acc))
+        [end
+          (cond
+            (nil? face) acc
+            (and prev (= (nth prev 2) face) (>= (inc (nth prev 1)) pos))
+              (cons [(nth prev 0) end face] (rest acc))
+            else (cons [pos end face] acc))]))))
+(sig md-word-spans (list int list -> vector))
+
+(defn- md-fill-words (words width first-prefix rest-prefix)
+  "Greedily fill `words` into lines of at most `width` columns (a word longer than that
+keeps its own line). The first line opens with `first-prefix`, every later one with
+`rest-prefix` (a hanging indent); each prefix is a `[text face]` run. Returns a list of
+`[text spans]` lines, spans relative to the line."
+  (let (pre-len (fn (p) (string/length (first p)))
+        ;; one line: its prefix, then its words separated by single spaces
+        finish (fn (prefix line-words)
+                 (let (ws (reverse line-words)
+                       [end spans]
+                         (fold ws
+                           ;; the prefix's face covers its marker, not the space after it
+                           [(pre-len prefix)
+                             (if (nil? (second prefix))
+                               '()
+                               (list [0 (string/length (string/trimr (first prefix))) (second prefix)]))]
+                           (fn (st w)
+                             (let ([pos acc] st
+                                   [pos1 acc1] (if (= pos (pre-len prefix)) [pos acc] [(inc pos) acc])
+                                   [end acc2] (md-word-spans w pos1 acc1))
+                               [end acc2])))
+                       text (str (first prefix)
+                              (string/join (map ws (fn (w) (string/join (map w first) ""))) " ")))
+                   [text (reverse spans)]))
+        [cur cur-len done]
+          (fold words
+            ['() (pre-len first-prefix) '()]
+            (fn (st w)
+              (let ([cur cur-len done] st
+                    wl (md-word-len w)
+                    sep (if (empty? cur) 0 1))
+                (if (or (empty? cur) (<= (+ cur-len sep wl) width))
+                  [(cons w cur) (+ cur-len sep wl) done]
+                  [(list w)
+                    (+ (pre-len rest-prefix) wl)
+                    (cons (finish (if (empty? done) first-prefix rest-prefix) cur) done)])))))
+    (reverse (if (empty? cur)
+               (if (empty? done) (list (finish first-prefix '())) done)
+               (cons (finish (if (empty? done) first-prefix rest-prefix) cur) done)))))
+(sig md-fill-words (list int vector vector -> list))
+
+;; ---- block shapes -------------------------------------------------------------
+
+(defn- md-rule? (line)
+  ;; `---` / `***` / `___` (three or more, spaces allowed) — a thematic break
+  (let (t (string/replace (string/trim line) " " "")
+        n (string/length t))
+    (and (>= n 3)
+      (let (c (string/char-at t 0))
+        (and (or (= c "-") (= c "*") (= c "_")) (= (string/span t 0 c) n))))))
+(sig md-rule? (string -> bool))
+
+(defn- md-quote? (line)
+  (let (lead (md-lead-ws line))
+    (and (< lead (string/length line)) (= (string/char-at line lead) ">"))))
+(sig md-quote? (string -> bool))
+
+(defn- md-quote-body (line)
+  ;; the text after the `>` and one optional space
+  (let (lead (md-lead-ws line)
+        n (string/length line)
+        i (inc lead))
+    (string/substring line (if (and (< i n) (= (string/char-at line i) " ")) (inc i) i) n)))
+(sig md-quote-body (string -> string))
+
+(defn- md-item-marker (line)
+  "`[marker body-col]` when `line` opens a list item — the marker text (`-`, `*`, `+` or
+`12.`) and the column its content starts at — else nil."
+  (let (lead (md-lead-ws line)
+        n (string/length line)
+        [spans col] (md-block line 0 lead n))
+    (if (empty? spans)
+      nil
+      (let ([s e f] (first spans))
+        (if (= f md-face-list) [(string/substring line s e) (md-lead-ws-at line col n)] nil)))))
+(sig md-item-marker (string -> (or nil (tuple string int))))
+
+(defn- md-blank? (line)
+  (string/blank? line))
+(sig md-blank? (string -> bool))
+
+(defn- md-paragraph-line? (line)
+  ;; a line that continues a paragraph: not blank and not opening any other block
+  (not (or (md-blank? line)
+         (md-fence? line)
+         (md-heading-level line)
+         (md-rule? line)
+         (md-quote? line)
+         (md-item-marker line))))
+(sig md-paragraph-line? (string -> bool))
+
+;; ---- the walker: source lines → rendered lines --------------------------------
+;; A rendered line is `[text spans src]` — its text, its spans relative to itself, and the
+;; source line it stands for. Blocks are cut here, filled by `md-fill-words`, and the
+;; document is assembled at the end (`md-assemble`), where the relative spans become
+;; absolute.
+
+(defn- md-take-while (lines i pred)
+  ;; the index of the first line at/after `i` failing `pred` (or the end)
+  (if (and (< i (count lines)) (pred (nth lines i))) (md-take-while lines (inc i) pred) i))
+(sig md-take-while (vector int any -> int))
+
+(defn- md-spread (rendered from to)
+  "Stamp the `[text spans]` lines of one block with source lines: a block from source lines
+`from`..`to` (inclusive) that filled to k lines maps them across that range evenly, so a
+preview following the cursor lands in the right part of a long paragraph."
+  (let (k (count rendered)
+        span (inc (- to from))
+        [_ out] (fold rendered
+                  [0 '()]
+                  (fn (st line)
+                    (let ([j acc] st
+                          [text spans] line)
+                      [(inc j) (cons [text spans (+ from (math/quot (* j span) k))] acc)]))))
+    (reverse out)))
+(sig md-spread (list int int -> list))
+
+(defn- md-heading (line src width)
+  ;; the heading text under its face, underlined for the top two levels
+  (let (level (md-heading-level line)
+        text (string/trim (string/substring line level (string/length line)))
+        n (string/length text)
+        head [text (if (= n 0) '() (list [0 n md-face-heading])) src])
+    (cond
+      (= level 1) (list head [(string/repeat "━" (math/max 1 (math/min width n))) '() src])
+      (= level 2) (list head [(string/repeat "─" (math/max 1 (math/min width n))) '() src])
+      else (list head))))
+(sig md-heading (string int int -> list))
+
+(defn- md-block-at (lines i width)
+  "Cut the block opening at source line `i`: `[rendered next]` — its rendered
+`[text spans src]` lines and the index of the first line after it."
+  (let (line (nth lines i))
+    (cond
+      ;; blank: one blank rendered line for a run of them
+      (md-blank? line) [(list ["" '() i]) (md-take-while lines i md-blank?)]
+      ;; fenced code: the lines between the fences, verbatim, indented, all code
+      (md-fence? line)
+        (let (j (md-take-while lines (inc i) (fn (l) (not (md-fence? l))))
+              body (map (range (inc i) j)
+                     (fn (k)
+                       (let (t (str "    " (nth lines k)))
+                         [t (list [0 (string/length t) md-face-code]) k]))))
+          ;; the closing fence, when there is one, is consumed too
+          [(if (empty? body) (list ["" '() i]) body) (if (< j (count lines)) (inc j) j)])
+      (md-heading-level line) [(md-heading line i width) (inc i)]
+      (md-rule? line)
+        [(list [(string/repeat "─" width) (list [0 width md-face-quote]) i]) (inc i)]
+      ;; blockquote: a run of `>` lines, re-flowed, under a bar
+      (md-quote? line)
+        (let (j (md-take-while lines i md-quote?)
+              text (string/join (map (range i j) (fn (k) (md-quote-body (nth lines k)))) " ")
+              filled (md-fill-words (md-words (md-runs-of text md-face-quote))
+                       width
+                       ["│ " md-face-quote]
+                       ["│ " md-face-quote]))
+          [(md-spread filled i (dec j)) j])
+      ;; list item: the marker, then the item text with a hanging indent; the lines that
+      ;; follow it indented (and open nothing else) belong to the item
+      (md-item-marker line)
+        (let ([marker col] (md-item-marker line)
+              lead (md-lead-ws line)
+              j (md-take-while lines
+                  (inc i)
+                  (fn (l) (and (md-paragraph-line? l) (> (md-lead-ws l) 0))))
+              text (string/join
+                     (cons (string/substring line col (string/length line))
+                       (map (range (inc i) j) (fn (k) (string/trim (nth lines k)))))
+                     " ")
+              bullet (if (md-digit? (string/char-at marker 0)) marker "•")
+              indent (string/repeat " " lead)
+              hang (string/repeat " " (+ lead (string/length bullet) 1))
+              filled (md-fill-words (md-words (md-runs-of text nil))
+                       width
+                       [(str indent bullet " ") md-face-list]
+                       [hang nil]))
+          [(md-spread filled i (dec j)) j])
+      ;; paragraph: a run of plain lines, re-flowed
+      else
+        (let (j (md-take-while lines i md-paragraph-line?)
+              text (string/join (map (range i j) (fn (k) (string/trim (nth lines k)))) " ")
+              filled (md-fill-words (md-words (md-runs-of text nil)) width ["" nil] ["" nil]))
+          [(md-spread filled i (dec j)) j]))))
+(sig md-block-at (vector int int -> vector))
+
+(defn- md-render-lines (lines i width acc)
+  "Tail-recursive walker over the pre-split source `lines` (a vector) from index `i`,
+accumulating rendered `[text spans src]` lines in reverse, one block at a time."
+  (if (>= i (count lines))
+    (reverse acc)
+    (let ([rendered next] (md-block-at lines i width))
+      (md-render-lines lines next width (fold rendered acc (fn (a l) (cons l a)))))))
+(sig md-render-lines (vector int int list -> list))
+
+(defn- md-assemble (rendered)
+  ;; `[text spans src]` lines → `{:text :spans :lines}`, the spans shifted to absolute offsets
+  (let ([off spans]
+          (fold rendered
+            [0 '()]
+            (fn (st line)
+              (let ([off acc] st
+                    [text sp src] line)
+                [(+ off (string/length text) 1)
+                  (fold sp acc (fn (a s) (let ([a1 b1 f] s) (cons [(+ off a1) (+ off b1) f] a))))]))))
+    {:text (string/join (map rendered (fn (l) (nth l 0))) "\n")
+     :spans (reverse spans)
+     :lines (into [] (map rendered (fn (l) (nth l 2))))}))
+(sig md-assemble (list -> map))
+
+(defn markdown-render (src width)
+  "Render Markdown `src` as readable text `width` columns wide — the markers gone, the
+faces kept as data. Returns `{:text :spans :lines}`:
+
+  - `:text`  — headings on their own lines (the top two underlined), paragraphs and
+    blockquotes (`│ `) re-flowed to `width`, list items as `•`/`1.` with a hanging
+    indent, fenced code indented and verbatim, a rule as a line of `─`;
+  - `:spans` — `[start end face]` over `:text`, ascending and non-overlapping (the
+    `fontify-runs` shape), with the highlighter's faces: what was `**bold**` is bold,
+    a link is its text underlined, code is green;
+  - `:lines` — a vector, one entry per rendered line: the SOURCE line it came from,
+    non-decreasing. See [[markdown-rendered-line]].
+
+Lexical, like `markdown-spans`, and pure: the editor shows the result in a preview pane
+and follows the cursor with `:lines`."
+  (let (width (math/max 10 width))
+    (md-assemble (md-render-lines (into [] (md-drop-trailing-empty (string/split src "\n"))) 0 width '()))))
+(sig markdown-render (string int -> map))
+
+(defn- md-line-at (lines i n src-line)
+  (cond
+    (>= i n) (math/max 0 (dec n))
+    (>= (nth lines i) src-line) i
+    else (md-line-at lines (inc i) n src-line)))
+(sig md-line-at (vector int int int -> int))
+
+(defn markdown-rendered-line (rendered src-line)
+  "The first rendered line of `rendered` (a [[markdown-render]] result) standing for
+source line `src-line` or a later one — where a preview should scroll to when the
+cursor is on that line; the last rendered line when the source line is past them all.
+0 for an empty render."
+  (let (lines (:lines rendered))
+    (md-line-at lines 0 (count lines) src-line)))
+(sig markdown-rendered-line (map int -> int))

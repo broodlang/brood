@@ -112,3 +112,106 @@
   (test "empty and newline-only sources produce no spans"
     (assert= (markdown-spans "") ())
     (assert= (markdown-spans "\n") ())))
+
+;; ---- markdown-render: the document as readable text, faces as data ---------------
+
+(describe "markdown-render — block shapes"
+  (defn lines-of (r) (string/split (:text r) "\n"))
+  (defn faced (r face)
+    ;; the rendered substrings carrying `face`
+    (map (filter (:spans r) (fn (s) (= (nth s 2) face)))
+      (fn (s) (string/substring (:text r) (nth s 0) (nth s 1)))))
+
+  (test "a heading is its text, the top two levels underlined to their width"
+    (let (r (markdown-render "# Title\n\n## Sub\n\n### Deep" 40))
+      (assert= (lines-of r) (list "Title" "━━━━━" "" "Sub" "───" "" "Deep"))
+      (assert= (faced r md-face-heading) (list "Title" "Sub" "Deep"))))
+
+  (test "a paragraph is re-flowed to the width, markers gone, faces kept"
+    (let (r (markdown-render "Some *italic* and **bold text** here, with `code` and a [link](http://x)." 30))
+      (assert= (lines-of r)
+        (list "Some italic and bold text" "here, with code and a link."))
+      (assert= (faced r md-face-italic) (list "italic"))
+      (assert= (faced r md-face-bold) (list "bold text")) ; ONE span across its space
+      (assert= (faced r md-face-code) (list "code"))
+      (assert= (faced r md-face-link) (list "link"))))
+
+  (test "consecutive source lines are one paragraph; a blank line ends it"
+    (let (r (markdown-render "one\ntwo\n\nthree" 40))
+      (assert= (lines-of r) (list "one two" "" "three"))))
+
+  (test "a word longer than the width keeps its own line"
+    (let (r (markdown-render "a bbbbbbbbbbbbbbbbbbbbbbbbbbb c" 12))
+      (assert= (lines-of r) (list "a" "bbbbbbbbbbbbbbbbbbbbbbbbbbb" "c"))))
+
+  (test "list items get a bullet and a hanging indent; an indented line continues the item"
+    (let (r (markdown-render "- one item\n- a much longer item that wraps\n  and continues\n1. first" 22))
+      (assert= (lines-of r)
+        (list "• one item" "• a much longer item" "  that wraps and" "  continues" "1. first"))
+      (assert= (faced r md-face-list) (list "•" "•" "1."))))
+
+  (test "a nested item keeps its source indentation"
+    (let (r (markdown-render "- outer\n  - inner" 40))
+      (assert= (lines-of r) (list "• outer" "  • inner"))))
+
+  (test "a blockquote is re-flowed under a bar, in the quote face"
+    (let (r (markdown-render "> a quote\n> that continues" 40))
+      (assert= (lines-of r) (list "│ a quote that continues"))
+      (assert= (faced r md-face-quote) (list "│ a quote that continues"))))
+
+  (test "a fenced block is verbatim, indented, all code; the fences are gone"
+    (let (r (markdown-render "```\n(defn f (x)\n  x)\n```\nafter" 40))
+      (assert= (lines-of r) (list "    (defn f (x)" "      x)" "after"))
+      (assert= (faced r md-face-code) (list "    (defn f (x)" "      x)"))))
+
+  (test "an unclosed fence runs to the end"
+    (assert= (lines-of (markdown-render "```\ncode" 40)) (list "    code")))
+
+  (test "a rule is a line of ─ the width of the pane"
+    (assert= (lines-of (markdown-render "a\n\n---\n\nb" 10)) (list "a" "" "──────────" "" "b")))
+
+  (test "runs of blank lines collapse to one"
+    (assert= (lines-of (markdown-render "a\n\n\n\nb" 40)) (list "a" "" "b")))
+
+  (test "empty input renders empty"
+    (let (r (markdown-render "" 40))
+      (assert= (:text r) "")
+      (assert= (:spans r) ())
+      (assert= (:lines r) [])
+      (assert= (markdown-rendered-line r 3) 0)))
+
+  (test "the width has a floor, so a sliver of a pane still renders"
+    (assert= (lines-of (markdown-render "one two three" 2)) (list "one two" "three")))
+
+  (test "spans are ascending, non-overlapping and within the text"
+    (let (r (markdown-render "# H\n\n**b** *i* `c` [l](u)\n\n- **x** y\n\n> q **z**" 30)
+          n (string/length (:text r)))
+      (fold (:spans r)
+        0
+        (fn (prev s)
+          (let ([a b _] s)
+            (do
+              (is (<= prev a))
+              (is (< a b))
+              (is (<= b n))
+              b))))))
+  (test "an unclosed marker is a literal character"
+    (assert= (:text (markdown-render "2*3 and a[b" 40)) "2*3 and a[b")))
+
+(describe "markdown-render — following the source"
+  (test ":lines maps each rendered line to its source line, non-decreasing"
+    (let (r (markdown-render "# T\n\npara\n\n- a\n- b\n\n```\nc\n```\nend" 40))
+      ;;            T  ━  ""  para ""  •a •b ""  code  end
+      (assert= (:lines r) [0 0 1 2 3 4 5 6 8 10])))
+
+  (test "a long paragraph spreads its source lines across the rendered ones"
+    (let (r (markdown-render "aaa bbb\nccc ddd\neee fff" 7))
+      (assert= (string/split (:text r) "\n") (list "aaa bbb" "ccc ddd" "eee fff"))
+      (assert= (:lines r) [0 1 2])))
+
+  (test "markdown-rendered-line finds where a source line landed"
+    (let (r (markdown-render "# T\n\npara\n\n- a\n- b" 40))
+      (assert= (markdown-rendered-line r 0) 0)
+      (assert= (markdown-rendered-line r 2) 3) ; "para"
+      (assert= (markdown-rendered-line r 5) 6) ; "• b"
+      (assert= (markdown-rendered-line r 99) 6)))) ; past the end: the last line
