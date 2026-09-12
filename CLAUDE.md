@@ -879,6 +879,18 @@ working, `(cons x acc)` keeps running and builds garbage. Do the first; refuse t
 `tests/doctest_test.blsp` *execute* every indented `form → result` example in every
 docstring. They caught nine stale examples nothing else would have. Run them early, not last.
 
+**A rename wave ends downstream, not in this repo.** bedit is where the wave lands (CI's
+`downstream-bedit` job runs it at `BEDIT_REF`, pinned in `ci.yml`, so bedit's own breakage can
+never red brood — only brood can). The sequence, learned on ADR-325: put every moved public
+name in the rename ledger (`crates/lisp/src/renames.rs`) so bedit's `nest check` says
+`renamed to … (ADR-N)` and `--fix-renames` applies it; fix and push bedit; then
+`make smoke-bedit ARGS=--bump` — it runs bedit's three gates against this tree's `nest`,
+tells you when the checkout is not the pinned commit, and on green moves `BEDIT_REF` to
+bedit's pushed HEAD (refusing a dirty or unpushed one). Commit the pin with the change.
+Smoke with a grammar-enabled `nest` (`NEST=target/release/nest` built with
+`brood/treesit-grammars`): the plain debug binary fails 24 of bedit's mode tests on "no
+grammar for :elixir", which reads as a regression and is not.
+
 **Two measurement rules, learned the hard way in the same session:**
 - **Assert the summary line is PRESENT**, never that failures are absent. `nest test | grep
   "test failed"` returns empty both when the suite passes and when the runner died before
