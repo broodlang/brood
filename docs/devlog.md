@@ -849,6 +849,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-12** — KI-131: lazy loading met `%isolate`; the runner declares its closure with a new `(:load …)` header clause
 - **2026-09-12** — memoised view fragments (ADR-336): `ui-memo`, the frame carries its cache back; `=` is O(1) on the same cell, `append` shares its last list; `BROOD_UI_TRACE`; KI-132 filed
 - **2026-09-12** — text contrast is a setting (ADR-337): `gui/text-contrast` lifts light-on-dark stems under the linear-light blend; bedit ships 1.4
+- **2026-09-12** — `editor/shell`: shell-script highlighting, and a script typed by its `#!` line (`register-interpreter-type`, Emacs `interpreter-mode-alist`)
 
 ---
 

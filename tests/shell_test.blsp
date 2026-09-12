@@ -1,0 +1,43 @@
+;; editor/shell — lexical shell-script highlighting, and the shebang → type rule that
+;; makes an extensionless script find it.
+
+(defmodule shell-test
+  (:use test)
+  (:use editor/shell)
+  (:use editor/layers))
+
+(defn- spans-of (src)
+  "`[text start end]` per span — the shape the assertions read."
+  (map (shell-spans src) (fn ([s e _]) [(string/substring src s e) s e])))
+
+(defn- texts (src) (map (spans-of src) first))
+
+(describe "shell-spans — the tokens a script is coloured by"
+  (test "the shebang and a comment are comments; a `#` inside a string is not"
+    (assert= (texts "#!/usr/bin/env bash\nset -e # strict\nx=\"a # b\"")
+      (list "#!/usr/bin/env bash" "set" "# strict" "\"a # b\"")))
+  (test "strings, expansions and keywords, each once and whole"
+    (assert= (texts "if [ -n \"$HOME\" ]; then echo '${x}' ${y} $(pwd) $1; fi")
+      (list "if" "\"$HOME\"" "then" "echo" "'${x}'" "${y}" "$(pwd)" "$1" "fi")))
+  (test "a keyword is a whole word: `file` is not `fi`, `done_` is not `done`"
+    (assert= (texts "file done_ fi") (list "fi")))
+  (test "a function definition names the function, by either spelling"
+    (assert= (texts "build() {\n  make\n}\nfunction deploy {\n  :\n}")
+      (list "build" "make" "function" "deploy")))
+  (test "spans are ascending, non-overlapping, and offset into the whole source"
+    (let (src "a=1 # one\nb=\"two\" # two"
+          ss (spans-of src)
+          ranges (map ss (fn ([_ s e]) [s e])))
+      (assert= ranges (list [4 9] [12 17] [18 23]))
+      (is (every? (partition ranges 2) (fn (pair) (<= (second (first pair)) (first (second pair)))))))))
+
+(describe "shebang-interpreter — the program a `#!` line names"
+  (test "a direct path, an env indirection, env's -S flag, and arguments"
+    (assert= (shebang-interpreter "#!/bin/bash") "bash")
+    (assert= (shebang-interpreter "#!/usr/bin/env bash\n") "bash")
+    (assert= (shebang-interpreter "#!/usr/bin/env -S python3 -u") "python3")
+    (assert= (shebang-interpreter "#!/bin/sh -e") "sh")
+    (assert= (shebang-interpreter "#! /usr/bin/zsh") "zsh"))
+  (test "a line that is not a shebang is nil"
+    (is (nil? (shebang-interpreter "# just a comment")))
+    (is (nil? (shebang-interpreter "")))))

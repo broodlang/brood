@@ -635,6 +635,9 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // UI a shipped app may `require` (bedit's env-/docker-mode); CORE, like markdown.
     embedded_module!("editor/dotenv", "std/editor/dotenv.blsp"),
     embedded_module!("editor/dockerfile", "std/editor/dockerfile.blsp"),
+    // Shell scripts (sh / bash / zsh) the same way — `shell-spans`, one regex
+    // alternation per line so a band re-lexes at native speed on every keystroke.
+    embedded_module!("editor/shell", "std/editor/shell.blsp"),
     embedded_module!("editor/lineedit", "std/editor/lineedit.blsp"),
     embedded_module!("format", "std/format.blsp"),
     // The process-native tracing debugger — `break` (park without timeout),
