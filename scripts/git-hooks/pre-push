@@ -1,71 +1,145 @@
 #!/bin/sh
-# Local pre-push guard: catch the two format gates here instead of five minutes into
-# CI. Install with `make hooks`. Bypass with --no-verify if you must.
+# Local pre-push guard: catch the cheap gates here instead of five minutes into CI.
+# Install with `make hooks`; run it by hand with `make prepush`. Bypass a single push
+# with --no-verify if you must.
 #
-# Rust half: unformatted Rust reached main three times on 2026-07-26 (ADR-165,
-# ADR-167, plus a clippy unused_mut).
+# What it runs, and why each is here (every one is a gate that went red on `main`
+# because nothing between "it works" and CI asked):
 #
-# Brood half added 2026-08-18: the hook only ever checked `cargo fmt`, so `nest
-# format` was the gate that could still go red in a push — and did, when a merge was
-# pushed with the formatter red because its *last line* was read instead of its exit
-# code. Two different formatters, two different gates; the hook needs both.
+#   always (under a second)
+#     - `cargo fmt --check` — unformatted Rust reached main three times on 2026-07-26.
+#     - the BROOD_* flag catalogue — every `"BROOD_X"` literal in a changed .rs/.blsp must
+#       have an entry in diagnostics/debug_flags.rs (the same rule the 0.03 s Rust unit test
+#       `every_runtime_flag_is_catalogued` enforces, as a grep, so it costs nothing to ask
+#       here). `BROOD_GUI_BLIT` landed uncatalogued on 2026-09-13.
+#   when a .blsp is involved (a minute or so; a Rust-only push never pays it)
+#     - `nest format --check` — whole-project by design; the merge that went red on
+#       2026-08-18 read the formatter's LAST LINE instead of its exit code.
+#     - the tests that name the modules touched: `std/**/foo-bar.blsp` → `tests/foo_bar_test.blsp`
+#       when it exists, every changed `tests/*_test.blsp`, plus the surface audit
+#       (`tests/audit_test.blsp`: docstring + `form → result` example ratchets) and the
+#       executed doc examples (`tests/doc_examples_test.blsp`) whenever std/ changed — two
+#       public functions landed without an example on 2026-09-13 and moved the ratchet.
+#     - a change under crates/lisp/src/types/ runs the checker's expectation files
+#       (`sig_adoption_test`, `checker_pass_agreement_test`): a spelling change in a warning
+#       (ADR-341's tuple merge) sat red in the suite for a day.
+#
+# Not here, deliberately: the Rust suite and the full `nest test` (12 minutes each — CI's
+# job, `make green` reads the verdict), clippy (`make check`), and anything that needs a
+# release build. A hook that takes ten minutes is a hook that gets --no-verify'd.
+set -u
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+fail() { echo "pre-push: $*" >&2; exit 1; }
+
+# ---- 1. rustfmt --------------------------------------------------------------------
 if ! cargo fmt --all --check >/dev/null 2>&1; then
-    echo "pre-push: rustfmt would fail CI. Run: cargo fmt --all" >&2
     cargo fmt --all --check 2>&1 | grep '^Diff in' | sed 's/^/  /' >&2
-    exit 1
+    fail "rustfmt would fail CI. Run: cargo fmt --all"
 fi
 
-# `nest format --check` is whole-project by design (`--changed` is documented as
-# ignored with `--check`), so it costs ~50s with a debug binary and there is no
-# cheaper subset to check. Only pay that when the push actually carries Brood
-# changes — most pushes here are Rust-only and stay fast.
-# Both the commits being pushed AND the working tree, because `nest format --check`
-# reads the tree: gating only on the pushed commits left a dirty .blsp unchecked while
-# the Rust half above checks the tree unconditionally. Whichever shows a .blsp, look.
+# ---- 2. the change set: the commits being pushed AND the working tree -------------
+# Both, because the Brood gates read the TREE: gating only on the pushed commits left a
+# dirty .blsp unchecked while the Rust half checks the tree unconditionally.
 upstream=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || echo origin/main)
-blsp_touched=$( { git diff --name-only "$upstream..HEAD" 2>/dev/null; \
-                  git diff --name-only HEAD 2>/dev/null; \
-                  git diff --name-only --cached 2>/dev/null; \
-                  git ls-files --others --exclude-standard 2>/dev/null; } | grep -c '\.blsp$' )
-if [ "$blsp_touched" -gt 0 ]; then
-    # Pick the nest that MATCHES THIS TREE, not merely the first one that exists.
-    # The old order was release, then debug, then PATH — so it used whatever
-    # `make gcstress` / `make breakagetests` last left in target/release/, which can be
-    # arbitrarily old. On 2026-08-25 that was `nest 0.10.0 (f53ad7dc)` against a tree at
-    # 0.11.0: a formatter one release behind reported "134 files need formatting" and
-    # blocked a push whose tree the CURRENT formatter calls clean. A stale gate that
-    # refuses correct work is worse than no gate, because the reflex is to --no-verify.
-    #
-    # So: prefer a binary whose build sha matches HEAD; failing that take the newest by
-    # mtime and say the answer may be stale. Never block on "no binary" — unchanged.
-    #
-    # `target/release-fast/nest` comes FIRST because that is what `make release` builds
-    # (RELEASE_DIR); target/release is only written by a plain `cargo build --release`.
-    # Omitting it is how this hook announced "no nest built at 39cb081b; using the newest
-    # (./target/debug/nest, 6790e1b6)" on 2026-08-28 while a matching binary sat in
-    # release-fast — the same wrong-artifact class as KI-76, which was `green.sh` reading
-    # target/release for the same reason. If you add a build output path, add it here.
-    head_sha=$(git rev-parse --short=8 HEAD 2>/dev/null)
-    for candidate in ./target/release-fast/nest ./target/release/nest ./target/debug/nest "$(command -v nest 2>/dev/null)"; do
+changed=$( { git diff --name-only "$upstream..HEAD" 2>/dev/null; \
+             git diff --name-only HEAD 2>/dev/null; \
+             git diff --name-only --cached 2>/dev/null; \
+             git ls-files --others --exclude-standard 2>/dev/null; } | sort -u )
+blsp_touched=$(printf '%s\n' "$changed" | grep -c '\.blsp$')
+types_touched=$(printf '%s\n' "$changed" | grep -c '^crates/lisp/src/types/')
+
+# ---- 3. the BROOD_* flag catalogue -------------------------------------------------
+catalogue=crates/lisp/src/diagnostics/debug_flags.rs
+missing=""
+for f in $(printf '%s\n' "$changed" | grep -E '\.(rs|blsp)$'); do
+    [ -f "$f" ] || continue
+    [ "$f" = "$catalogue" ] && continue
+    for flag in $(grep -oE '"BROOD_[A-Z0-9_]+"' "$f" 2>/dev/null | sort -u); do
+        grep -qF -- "$flag" "$catalogue" || missing="$missing $flag ($f)"
+    done
+done
+[ -n "$missing" ] && fail "BROOD_* flag read by the runtime but absent from the catalogue:$missing
+  add an f(NAME, GROUP, \"…\") entry — or NON_FLAGS if it is not an env flag — in $catalogue"
+
+[ "$blsp_touched" -eq 0 ] && [ "$types_touched" -eq 0 ] && exit 0
+
+# ---- 4. the binaries that MATCH THIS TREE ------------------------------------------
+# Not merely the first that exists: the old order was release, then debug, then PATH, so
+# it used whatever `make gcstress` last left in target/release/, which can be arbitrarily
+# old — on 2026-08-25 a formatter one release behind reported "134 files need formatting"
+# against a tree the current one calls clean. A stale gate that refuses correct work is
+# worse than no gate, because the reflex is to --no-verify.
+#
+# Prefer a binary whose build sha matches HEAD; failing that take the newest by mtime and
+# say the answer may be stale. Never block on "no binary". `target/release-fast/` comes
+# FIRST because that is what `make release` builds (RELEASE_DIR); target/release is only
+# written by a plain `cargo build --release`. If you add a build output path, add it here.
+head_sha=$(git rev-parse --short=8 HEAD 2>/dev/null)
+pick_bin() { # $1 = nest | brood ; prints the path, or nothing
+    name=$1; best=""
+    for candidate in "./target/release-fast/$name" "./target/release/$name" "./target/debug/$name" "$(command -v "$name" 2>/dev/null)"; do
         [ -n "$candidate" ] && [ -x "$candidate" ] || continue
         case "$("$candidate" --version 2>/dev/null)" in
-            *"$head_sha"*) nest_bin="$candidate"; break ;;
+            *"$head_sha"*) echo "$candidate"; return ;;
         esac
     done
-    if [ -z "$nest_bin" ]; then
-        # Nothing matches HEAD (a dirty tree, or nothing rebuilt since the last commit).
-        # Fall back to the most recently BUILT candidate rather than a fixed order.
-        for candidate in ./target/release-fast/nest ./target/release/nest ./target/debug/nest "$(command -v nest 2>/dev/null)"; do
-            [ -n "$candidate" ] && [ -x "$candidate" ] || continue
-            if [ -z "$nest_bin" ] || [ "$candidate" -nt "$nest_bin" ]; then nest_bin="$candidate"; fi
-        done
-        [ -n "$nest_bin" ] && echo "pre-push: no nest built at $head_sha; using the newest ($nest_bin, $("$nest_bin" --version 2>/dev/null)) — this check may be stale." >&2
-    fi
-    if [ -z "$nest_bin" ]; then
-        echo "pre-push: .blsp files changed but no nest binary found — skipping the format check." >&2
-    elif ! "$nest_bin" format --check >/dev/null 2>&1; then
-        echo "pre-push: nest format would fail CI. Run: nest format" >&2
-        "$nest_bin" format --check 2>&1 | tail -5 | sed 's/^/  /' >&2
-        exit 1
+    for candidate in "./target/release-fast/$name" "./target/release/$name" "./target/debug/$name" "$(command -v "$name" 2>/dev/null)"; do
+        [ -n "$candidate" ] && [ -x "$candidate" ] || continue
+        if [ -z "$best" ] || [ "$candidate" -nt "$best" ]; then best="$candidate"; fi
+    done
+    [ -n "$best" ] && echo "pre-push: no $name built at $head_sha; using the newest ($best, $("$best" --version 2>/dev/null | head -1)) — this check may be stale." >&2
+    echo "$best"
+}
+nest_bin=$(pick_bin nest)
+if [ -z "$nest_bin" ]; then
+    echo "pre-push: Brood files changed but no nest binary found — skipping the Brood gates." >&2
+    exit 0
+fi
+# Build uncapped, run capped (CLAUDE.md): one runaway is the whole spike.
+ulimit -v 16000000 2>/dev/null
+
+# ---- 5. nest format --check --------------------------------------------------------
+if [ "$blsp_touched" -gt 0 ]; then
+    if ! "$nest_bin" format --check >/dev/null 2>&1; then
+        "$nest_bin" format --check 2>&1 | grep -E 'needs formatting|error' | head -8 | sed 's/^/  /' >&2
+        fail "nest format would fail CI. Run: nest format --changed"
     fi
 fi
+
+# ---- 6. the tests that name what changed ------------------------------------------
+tests=""
+add_test() { [ -f "$1" ] && case " $tests " in *" $1 "*) ;; *) tests="$tests $1" ;; esac; }
+std_changed=0
+for f in $(printf '%s\n' "$changed" | grep -E '\.blsp$'); do
+    case "$f" in
+        std/*)
+            std_changed=1
+            name=$(basename "$f" .blsp | tr '-' '_')
+            add_test "tests/${name}_test.blsp" ;;
+        tests/*_test.blsp)
+            add_test "$f" ;;
+    esac
+done
+if [ "$std_changed" -eq 1 ]; then
+    add_test tests/audit_test.blsp
+    add_test tests/doc_examples_test.blsp
+fi
+if [ "$types_touched" -gt 0 ]; then
+    add_test tests/sig_adoption_test.blsp
+    add_test tests/checker_pass_agreement_test.blsp
+fi
+if [ -n "$tests" ]; then
+    echo "pre-push: running$tests" >&2
+    out=$("$nest_bin" test $tests 2>&1)
+    status=$?
+    # Assert the summary line is PRESENT, never that failures are absent: a runner that
+    # died before printing anything has no "test failed" line either (CLAUDE.md).
+    summary=$(printf '%s\n' "$out" | grep -E '^[0-9]+ tests,' | tail -1)
+    if [ "$status" -ne 0 ] || [ -z "$summary" ]; then
+        printf '%s\n' "$out" | grep -E 'test failed|assert:|actual:|expect:|error' | head -20 | sed 's/^/  /' >&2
+        fail "these tests would fail CI (${summary:-no summary line — the runner died}). Run: $nest_bin test$tests"
+    fi
+    echo "pre-push: $summary" >&2
+fi
+exit 0

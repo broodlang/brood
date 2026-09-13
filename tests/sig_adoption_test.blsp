@@ -168,8 +168,10 @@
 
 (describe "a union of shapes is checkable (ADR-262/263)"
   (test "a union of tuple shapes rejects a member of neither"
+    ;; Since ADR-341 tuples of one arity that differ in ONE position merge by position, so the
+    ;; declared `(or (tuple int) (tuple string))` prints as `(tuple int | string)`.
     (is (warns-about? "(sig f ((or (tuple int) (tuple string)) -> any)) (defn f (t) t) (defn c () (f [true]))"
-          "expects (tuple int) | (tuple string)")))
+          "expects (tuple int | string)")))
   (test "…and admits either alternative"
     (refute (warns-about? "(sig f ((or (tuple int) (tuple string)) -> any)) (defn f (t) t) (defn c () (f [1]))"
               "f: argument"))

@@ -189,6 +189,17 @@ impl Heap {
                 return Some(val);
             }
         }
+        // KI-135 / ADR-344: a name this process's OPEN module load has defined but not yet
+        // published — checked BEFORE the table, because a load may REBIND a live name (the
+        // image branch's `(def- *std-regs* …)` tables exist live as nil, and the loader must
+        // read its own value, or its dependency edges read as none and nothing it needs
+        // loads). Only a process with a frame open pays the probe; every other process's
+        // lookup falls straight through to the table. Cached like a table hit: a staged
+        // rebind and the publish both bump `version`.
+        if let Some(val) = self.staged_lookup(sym) {
+            self.global_ic.borrow_mut().insert(sym, (cur, val));
+            return Some(val);
+        }
         if let Some(val) = self.runtime.globals_read().get(&sym).copied() {
             self.global_ic.borrow_mut().insert(sym, (cur, val));
             return Some(val);
@@ -289,22 +300,169 @@ impl Heap {
         *d = d.saturating_sub(1);
     }
 
-    /// KI-134: is this process inside a `%with-load-journal` — a `require-one` load — and not
-    /// in the one place a load-time write must NOT be journalled (a registry update's own
-    /// write-back, a restore's replay)?
+    /// KI-134/KI-135: is this process inside a `%with-load-journal` — a `require-one` load —
+    /// and not in the one place a load-time write must NOT be staged (a registry update's own
+    /// whole-map write-back, a restore's replay)? While true, a global define or registry
+    /// update lands in the innermost open [`LoadStage`] rather than the shared table.
     pub fn in_journalled_load(&self) -> bool {
         self.cold()
-            .is_some_and(|c| c.load_journal_depth > 0 && !c.journal_suppressed)
+            .is_some_and(|c| !c.load_stages.is_empty() && !c.journal_suppressed)
     }
 
-    /// Enter/leave a journalled module load. Paired by `%with-load-journal`, which leaves
-    /// even when the load throws.
+    /// Open a module load: push a staging frame (ADR-344). Everything the load defines or
+    /// registers goes into it; [`Self::publish_module_load`] installs it, or
+    /// [`Self::discard_module_load`] drops it when the load throws. RUNTIME compaction is
+    /// held off for the frame's life, as `snapshot_globals` holds it off for a snapshot: the
+    /// frame holds promoted handles that are not yet on the shared graph.
     pub fn enter_journalled_load(&mut self) {
-        self.cold_mut().load_journal_depth += 1;
+        self.begin_rt_collect_block();
+        self.cold_mut().load_stages.push(LoadStage::default());
     }
-    pub fn leave_journalled_load(&mut self) {
-        let d = &mut self.cold_mut().load_journal_depth;
-        *d = d.saturating_sub(1);
+
+    /// A load threw: drop its frame. Nothing it defined or registered ever reaches the
+    /// shared table — a broken module leaves no half-module behind.
+    pub fn discard_module_load(&mut self) {
+        if self.cold_mut().load_stages.pop().is_some() {
+            // The loader's own lookups cached the staged values (`global_lookup_cached` keys
+            // its cache on `version`), and an arm it ran may have baked one in: both must
+            // re-read now that the frame is gone.
+            self.runtime.version.fetch_add(1, Ordering::Relaxed);
+            self.runtime.code_epoch.fetch_add(1, Ordering::Relaxed);
+            self.end_rt_collect_block();
+        }
+    }
+
+    /// A name defined by one of this process's open loads, innermost first.
+    fn staged_lookup(&self, sym: Symbol) -> Option<Value> {
+        let cold = self.cold()?;
+        cold.load_stages
+            .iter()
+            .rev()
+            .find_map(|st| st.bindings.get(&sym).copied())
+    }
+
+    /// The index of the innermost open load that defined `sym`, if any.
+    fn staged_frame_of(&self, sym: Symbol) -> Option<usize> {
+        let cold = self.cold()?;
+        cold.load_stages
+            .iter()
+            .rposition(|st| st.bindings.contains_key(&sym))
+    }
+
+    /// Every value an open load of this process holds unpublished — collector roots for
+    /// exactly the window they are not on the shared graph.
+    pub(crate) fn staged_values(&self) -> impl Iterator<Item = Value> + '_ {
+        self.cold()
+            .into_iter()
+            .flat_map(|c| c.load_stages.iter())
+            .flat_map(|st| st.bindings.values().copied())
+    }
+
+    /// The two registries `require-one` and its waiters coordinate THROUGH while a load is
+    /// open. They must stay live: a staged `*features-loading*` claim would let a second
+    /// process start the same load, and a staged waiter entry would never be released.
+    fn is_live_coordination_registry(sym: Symbol) -> bool {
+        let n = crate::core::value::symbol_name(sym);
+        n == "*features-loading*" || n == "*features-waiting*"
+    }
+
+    /// A load completed: publish its frame (ADR-344). Under `registry_lock` — no registry
+    /// read-modify-write interleaves — every staged registry op is re-applied to the LIVE
+    /// table (a concurrent process may have registered into the same registry meanwhile),
+    /// every value is re-homed into the current generation under the promote guard, and the
+    /// whole set lands under ONE write of the globals table: a reader sees the module
+    /// entirely or not at all. The writes are journalled for the KI-134 replay here, at the
+    /// moment they land, with the same before/after check `env_define` makes.
+    pub fn publish_module_load(&mut self) {
+        let Some(stage) = self.cold_mut().load_stages.pop() else {
+            return;
+        };
+        let rt = self.runtime.clone();
+        let _registry = rt.registry_lock.lock().unwrap_or_else(|e| e.into_inner());
+        // Resolve every write to the value it will bind. A registry op reads the LIVE
+        // registry (the journal shape KI-134 settled on: replay the OPERATION, never a whole
+        // map). `promote` takes the promote guard per value and must not nest inside the
+        // guard held below, so this pass runs first.
+        let mut pending: Vec<(Symbol, Value, LoadWrite)> = Vec::with_capacity(stage.writes.len());
+        let mut staged_regs: std::collections::HashMap<Symbol, Value> =
+            std::collections::HashMap::new();
+        for w in stage.writes {
+            match w {
+                LoadWrite::Define { sym, val } => {
+                    // A registry op later in this load builds on the map this load bound
+                    // (`(defonce *reg* {})`, a swap, then an op — in any order).
+                    staged_regs.insert(sym, val);
+                    pending.push((sym, val, LoadWrite::Define { sym, val }));
+                }
+                LoadWrite::Registry { sym, op, path, val } => {
+                    // Later ops on one registry within this load build on the earlier ones'
+                    // result, not on the live value again.
+                    let cur = staged_regs
+                        .get(&sym)
+                        .copied()
+                        .or_else(|| self.runtime.globals_read().get(&sym).copied())
+                        .unwrap_or(Value::nil());
+                    if let Some(next) = self.registry_next(cur, op, &path, val) {
+                        let next = self.promote(next);
+                        staged_regs.insert(sym, next);
+                        pending.push((sym, next, LoadWrite::Registry { sym, op, path, val }));
+                    }
+                }
+            }
+        }
+        let pre = {
+            let j = self
+                .runtime
+                .load_journal
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            j.outstanding > 0
+        };
+        if pre {
+            for (_, _, w) in &pending {
+                self.journal_load_write(w.clone());
+            }
+        }
+        let mut rebind = false;
+        {
+            let _promote_guard = self
+                .runtime
+                .promote_lock
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            let mut table = self.runtime.globals_write();
+            for (sym, val, _) in &pending {
+                let shared = self.rehome_to_current_locked(*val);
+                if table.insert(*sym, shared).is_some() {
+                    rebind = true;
+                }
+            }
+        }
+        if !pre {
+            // A snapshot may have begun between the check above and the insert; its clone
+            // may predate these writes. A replayed define is idempotent, so the rare double
+            // entry costs nothing.
+            for (_, _, w) in &pending {
+                if !self.journal_load_write(w.clone()) {
+                    break;
+                }
+            }
+        }
+        {
+            let mut generations = self
+                .runtime
+                .global_generations
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            let generation = self.runtime.version.fetch_add(1, Ordering::Relaxed) + 1;
+            for (sym, _, _) in &pending {
+                generations.insert(*sym, generation);
+            }
+        }
+        if rebind {
+            self.runtime.code_epoch.fetch_add(1, Ordering::Relaxed);
+        }
+        self.end_rt_collect_block();
     }
 
     /// Append `w` to the runtime's load journal — only while a snapshot is outstanding, i.e.
@@ -515,19 +673,42 @@ impl Heap {
         // write straight to the globals table there is silently dropped (it cost the prelude
         // its own `Display`/`Inspect` impls). Read and write the same place `def` would.
         let root = self.env_root(env);
-        let cur = self.env_get(env, sym).unwrap_or(Value::nil());
+        // This process's open load's staged result for `sym` first (a second op on a live
+        // registry within one load builds on the first's), then the table — the order
+        // `global_lookup_cached` reads in, so the loader's own view is consistent.
+        let cur = self
+            .staged_lookup(sym)
+            .or_else(|| self.env_get(env, sym))
+            .unwrap_or(Value::nil());
         let Some(next) = self.registry_next(cur, op, path, val) else {
             return false;
         };
-        // KI-134: journal the OPERATION (not the resulting map — see `LoadWrite`) before the
-        // write lands, with its keys and value promoted so the entry holds RUNTIME handles;
-        // and keep the whole-map `env_define` beneath it out of the journal.
-        if journal && self.in_journalled_load() {
+        // KI-135 / ADR-344: while a module load is open, the OPERATION is staged (with its
+        // keys and value promoted, so the frame holds RUNTIME handles) and the resulting map
+        // is staged as this process's view of the registry. `publish_module_load` re-applies
+        // the op to the live registry — never the map, which would clobber what a concurrent
+        // process registered meanwhile — and journals it for the KI-134 replay. The two
+        // registries loads coordinate through stay live (`is_live_coordination_registry`).
+        if journal && self.in_journalled_load() && !Self::is_live_coordination_registry(sym) {
             let path: Vec<Value> = path.iter().map(|v| self.promote(*v)).collect();
             let val = self.promote(val);
-            self.journal_load_write(LoadWrite::Registry { sym, op, path, val });
+            let next = self.promote(next);
+            // Into the frame that DEFINED the registry when one of this process's open loads
+            // did (a module defining a registry, then requiring the submodules that register
+            // into it): the owner publishes the whole binding, so the op must be its.
+            let owner = self.staged_frame_of(sym);
+            let stages = &mut self.cold_mut().load_stages;
+            let idx = owner.unwrap_or(stages.len() - 1);
+            let st = &mut stages[idx];
+            st.writes.push(LoadWrite::Registry { sym, op, path, val });
+            st.bindings.insert(sym, next);
+            self.runtime.version.fetch_add(1, Ordering::Relaxed);
+            return true;
         }
         let was_private = self.runtime.is_private_recorded(sym);
+        // The whole-map write-back goes to the live table (a live coordination registry, or
+        // no load open); `journal_suppressed` keeps `env_define` from staging or journalling
+        // a define whose OPERATION is the real record.
         let prev_suppressed = std::mem::replace(&mut self.cold_mut().journal_suppressed, true);
         self.env_define(root, sym, next);
         self.cold_mut().journal_suppressed = prev_suppressed;
@@ -577,7 +758,14 @@ impl Heap {
         // Matching `def` is what makes a `defdyn` registry safe to convert — an active
         // `binding` shadows the root write for both spellings identically.
         let root = self.env_root(env);
-        let cur = self.env_get(env, sym).unwrap_or(Value::nil());
+        // Compare against the view the caller READ: `global_lookup_cached` reaches this
+        // process's staged binding before the table (ADR-344), so a live registry rebound in
+        // an open load, read staged and compared live, would never match — `%registry-swap!`
+        // retried forever (that is how `repl`'s `*require-edges*` edge went missing).
+        let cur = self
+            .staged_lookup(sym)
+            .or_else(|| self.env_get(env, sym))
+            .unwrap_or(Value::nil());
         if !self.equal(cur, old) {
             return false;
         }
@@ -594,7 +782,31 @@ impl Heap {
         // Found by ADR-320's journal differential, because the name is absent from
         // `(reflect/global-names)` and no per-global gate could see it.
         let was_private = self.runtime.is_private_recorded(sym);
+        // ADR-344: a registry this process's OPEN load defined (`(defonce *reg* {})` then a
+        // swap in the same module) is not on the shared table yet — the new map replaces the
+        // staged binding in the frame that owns it, and publishes with the module. Written
+        // live instead, the frame's `Define` would overwrite it at publish.
+        if self.in_journalled_load() {
+            if let Some(owner) = self.staged_frame_of(sym) {
+                let shared = self.promote(new);
+                let st = &mut self.cold_mut().load_stages[owner];
+                st.writes.push(LoadWrite::Define { sym, val: shared });
+                st.bindings.insert(sym, shared);
+                self.runtime.version.fetch_add(1, Ordering::Relaxed);
+                self.runtime.code_epoch.fetch_add(1, Ordering::Relaxed);
+                guard.insert(sym);
+                return true;
+            }
+        }
+        // Otherwise LIVE, never staged or journalled: this funnel writes a WHOLE map, and a
+        // whole map cannot be re-applied — staged, it would publish an older copy over what a
+        // nested load or a concurrent process added meanwhile; replayed after an isolate, it
+        // would clobber what other processes wrote since. The live registries that reach here
+        // are bookkeeping whose transform is policy in Brood (`registry-swap!`); a registration
+        // that must survive an isolate goes through `%registry-update!`'s ops instead.
+        let prev_suppressed = std::mem::replace(&mut self.cold_mut().journal_suppressed, true);
         self.env_define(root, sym, new);
+        self.cold_mut().journal_suppressed = prev_suppressed;
         if was_private {
             self.runtime.mark_private(sym);
         }
@@ -709,6 +921,33 @@ impl Heap {
             // read guard: an aging flip between the re-home and the store would either
             // strand this binding on a generation about to be freed or let migration's
             // reconcile revert it. See `promote_rehome_publish`.
+            // KI-135 / ADR-344: an OPEN module load binds into its staging frame, never the
+            // shared table; `publish_module_load` installs the frame whole. The loader's own
+            // lookups reach it through `staged_lookup`; a rebind of a staged (or live) name
+            // bumps `version` so this process's inline cache re-reads, and `code_epoch` so
+            // an arm that baked the old value in re-validates.
+            if self.in_journalled_load() {
+                let shared = self.promote(val);
+                let was_live = self.runtime.globals_read().contains_key(&sym);
+                let was_staged = {
+                    let st = self.cold_mut().load_stages.last_mut().expect("open load");
+                    st.writes.push(LoadWrite::Define { sym, val: shared });
+                    st.bindings.insert(sym, shared).is_some()
+                };
+                {
+                    let mut generations = self
+                        .runtime
+                        .global_generations
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner());
+                    let generation = self.runtime.version.fetch_add(1, Ordering::Relaxed) + 1;
+                    generations.insert(sym, generation);
+                }
+                if was_live || was_staged {
+                    self.runtime.code_epoch.fetch_add(1, Ordering::Relaxed);
+                }
+                return;
+            }
             let journal = self.in_journalled_load();
             let rebind = self.promote_rehome_publish(val, |h, shared| {
                 // Test probe: assert (from inside the window) that the publish really is

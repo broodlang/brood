@@ -324,6 +324,7 @@
    "disj" :collections
    "string/display-width" :strings
    "string/width->index" :strings
+   "string/expand-tabs" :strings
    "dissoc" :maps
    "doc" :meta
    "reflect/doc-forms" :meta

@@ -22261,3 +22261,179 @@ falsy `(or A (nil? root) C)` proves `root` is not `nil` — every biconditional 
 complement narrows the else-branch, each on its own variable (`guards::or_disjunct_guards`,
 the dual of `and_conjunct_guards`; the same-variable `or` rule keeps the then-branch). A
 `then_only` disjunct (an `and`) is left out: falsy, it proves nothing of its variable.
+
+## ADR-342 — A tab is a column-dependent cluster: one stop rule under width, its inverse, and the expansion
+
+**Context.** The display seam measures text in grapheme clusters, each 0, 1 or 2 cells
+(`text_width`). A tab was a 0-cell cluster — the one cluster whose width is not a property
+of the cluster but of *where it sits*: it advances to the next tab stop. So `a\tb` painted
+as `ab`, every tab-indented line (Go, a Makefile, most C) sat flush left, and the caret and
+the click mapping, which count the same clusters, agreed with each other and disagreed
+with the screen. The GUI renderer could not fix it alone: a render op is a string at a
+column, and a tab's stop is the LINE's, not the op's — a fontified line arrives as chunks
+starting mid-line.
+
+**Decision.** The tab rule lives in `text_width`, beside the cluster rule, and every
+function that lays text out by cell carries a running column: `display_width_from(s,
+start_col, tab_width)`, `index_at_cell_from`, and a third leg, `expand_tabs`, the string
+with each tab replaced by the spaces that reach its stop. `string/display-width` and
+`string/width->index` take the optional `start-col` / `tab-width` tail (default 0 and 8 —
+Emacs's `tab-width`); `string/expand-tabs` is new. A view expands each chunk of a line
+with the column it starts at, so the stops stay the line's, and hands the frontend a
+tab-free op; the caret and click use the same two functions with the same column. A raw
+tab that still reaches the GUI advances to the next *screen* stop, background only — what
+a terminal does with one, so the two frontends agree on the fallback too.
+
+**Consequences.** One rule, three entry points, one module — the caret, the click and the
+paint cannot disagree, and `strings_test` pins the round trip (`expand-tabs` measures what
+`display-width` says, from any column). A per-buffer `tab-width` is an argument, not a
+mode. `cluster_cells` stays column-free for the callers that walk a string a cluster at a
+time; `cluster_cells_at` is the column-aware form they reach for at a tab.
+
+**Alternatives rejected.** *Expand in the renderer at the op's column*: wrong stops for
+any chunk that does not start the line. *Expand at the screen column*: right only when
+the text area starts at a multiple of the tab width; kept as the fallback, not the rule.
+*Expand the buffer line before fontifying*: shifts every span offset after a tab —
+three coordinate systems where one running column does.
+
+## ADR-343 — The scroll blit: a dirty strip that is a translation of old pixels is copied, not drawn
+
+**Context.** The strip diff (`paint::strip_diff`) re-rasterises only the cell rows whose
+ops changed — a keystroke paints one line. A scroll changes every row of a pane, so it
+paid the whole pane: ~6 ms of glyph blitting at 1080p, four times that on a 4K display,
+for pixels the retained canvas already held one line up. The strip diff's unit of trust
+(this row's op sequence is unchanged) had no way to say "this row's ops are THAT row's ops,
+moved".
+
+**Decision.** After the diff, `strip_blits` looks for exactly that. A dirty full-height
+strip is copied from the old canvas rows `[y0 - Δ, y1 - Δ)` when every leaf op covering
+the strip pairs, in frame order, with a leaf covering the source band under one of two
+exact relations: the same op at a position `Δ` pixels lower (text, the cursor, a one-row
+band — a `ScrollRegion`'s sub-cell shift folds into the position, so a gliding frame
+translates too), or a solid fill that covers both bands with its straight part (the gutter
+wash, a divider, the clear — a fill has no row-dependent pixels away from its corners,
+which a rounded rect keeps `radius` clear of). `Δ` comes from the strip's first
+translatable leaf matched against the old frame; the Δ that carried the previous strip is
+tried first, since a scroll moves a pane by one Δ. Sources are read before any destination
+is written, so two panes scrolling opposite ways cannot corrupt each other. Bands are
+conservative (`op_band`), so a near miss vetoes a blit and never fakes one. The trace
+reports `blit=` rows beside `rows=` drawn; `BROOD_GUI_BLIT=0` is the escape hatch, as
+`BROOD_GUI_DAMAGE=0` is for the diff.
+
+**Consequences.** A one-line scroll at 1920×1045 paints in 2.3 ms instead of 10.1 ms (83
+rows drawn, 946 copied), and the cost of a scroll is now the lines that entered plus the
+mode line — independent of the pane's height. The rule is exactness, not likeness: the
+tests check a blitted raster against a from-scratch one pixel for pixel, including a
+sub-cell step, two panes scrolling against each other, and a row that only looks shifted
+(the cursor arrived with it) and must be drawn. The GPU backend, when it draws text, gets
+the same win from the same diff.
+
+**Alternatives rejected.** *A whole-pane `memmove` driven by the app* ("this region
+scrolled by N"): a new op the terminal frontend would ignore and every view would have to
+emit correctly; the paint can see the translation for itself. *Hash the normalised row*: a
+`HashMap` over ops with floats and a nested map, for a search that is a few hundred
+comparisons per frame. *Skip the blit under a fractional shift*: that is the wheel case,
+the one that matters most.
+
+## ADR-344 — A module publishes whole: a load's defines and registrations are staged and installed under one write
+
+**Status:** accepted and implemented 2026-09-13 (`LoadStage` in `heap/runtime_code.rs`;
+`enter_journalled_load` / `publish_module_load` / `discard_module_load`, `staged_lookup`,
+`staged_frame_of`, and the staging arms of `env_define`, `registry_apply` and `registry_cas` in
+`heap/env_globals.rs`; `%with-load-journal` publishes on success and discards on a throw;
+`gc_runtime.rs` roots the staged values). Closes KI-135.
+
+**Context.** Since ADR-335 a module loads at its first use, through the global lookup MISS
+path — which waits for an in-flight loader. A name that loader has ALREADY bound is a HIT, and a
+hit consults nothing, so a concurrent process could run against a half-loaded module. For the
+image branch that was the whole module at once (KI-134's second window, closed by publication
+order); for a source load it was one form wide (`queue/empty` bound at line 28 of
+`std/queue.blsp`, its `Conjable` impl registered at line 73) — narrow, never reproduced on
+demand, and the last open member of a class that had cost three diagnoses (KI-89, KI-134 twice).
+Every fix so far had ordered writes; none had made a partial module unobservable.
+
+**Decision.** A partial module is never in the shared table.
+
+- **Stage.** `require-one` runs every load inside `%with-load-journal`, which now opens a
+  staging frame in the loading process. Under it a global `def` promotes its value and binds it
+  in the frame (recording a `Define` write); a registry update (`%registry-update!`'s
+  `:assoc`/`:dissoc`/… ops) records its OPERATION and the resulting map as this process's view.
+  Nested loads push nested frames. The loader's own lookups consult the frames before the
+  table — `global_lookup_cached` innermost first, and the two registry funnels read the same
+  way — so a module reads its own definitions, and a rebind of a live name (the image branch
+  `def-`s its bookkeeping tables over live `nil`s) is visible to the load that made it. A
+  staged rebind bumps `version` (this process's inline cache re-reads) and `code_epoch` (an arm
+  that baked the old value in re-validates).
+- **Publish.** When the load completes, under `registry_lock`: every registry op is re-applied
+  to the LIVE registry — never the staged map, which would clobber what a concurrent process
+  registered meanwhile — with a staged `Define` of the same registry seeding the ops after it;
+  every value is re-homed into the current generation under the promote read guard; and the
+  whole set lands under ONE `globals_write()`. The writes are journalled for the KI-134 replay at
+  that moment, with `env_define`'s before/after check. A load that throws discards its frame:
+  a broken module leaves no half-module behind, and the discard bumps both counters so nothing
+  keeps a discarded value.
+- **Two registries stay live.** `*features-loading*` and `*features-waiting*` are how loaders
+  coordinate WHILE a load is open — a staged claim would let a second process start the same
+  load, and a staged waiter entry would never be released.
+- **`%registry-cas!` (the `%swap-registry!` funnel) writes back LIVE**, unless the registry was
+  defined by one of this process's open loads, in which case the new map replaces the binding in
+  the frame that OWNS it and publishes with the module. A whole map cannot be staged: the first
+  cut staged it, and the image builder lost 10 of its 35 `*require-edges*` records — `repl`'s
+  load recorded its edge in its own frame, `editor/lineedit`'s nested load recorded its edges on
+  top and published, then `repl`'s frame published its older copy over them. With the edges gone
+  `(require-one 'repl)` no longer loaded `editor/lineedit`, which is how it showed
+  (`stdimage_test.blsp:83`). A registry op has no such problem because the op, not the map, is
+  what publishes. The same ownership rule applies to an op from a nested load on a registry the
+  outer load defined: it lands in the owner's frame, since the owner publishes the binding.
+- **The collector** treats staged values as roots (they are promoted RUNTIME handles not yet on
+  the shared graph), and RUNTIME compaction is held off for the frame's life, as it is for a
+  globals snapshot.
+
+**Consequences.** `tests/module_publish_test.blsp`: a fixture that defines a name, sleeps 300 ms
+and defines another, with an observer polling `bound?` and `*record-ids*` (a name read FIRST,
+the feature SECOND, so an atomic publish can never produce a false count) — 0 sightings staged,
+58 with staging bypassed; and the registry-ownership case (a `defonce`, a swap in the module, a
+swap and an op from a nested load), which goes red when the owner-frame rule is removed. The
+process that loads pays one `Vec::is_empty` per global define and one frame probe per cached
+lookup miss while a frame is open; every other process's lookup falls straight through to the
+table, and the inline-cache HIT path is untouched. The lazy-load test's first-use and JIT units
+now observe from a child `brood`: ADR-340's checker materialisation loads the fixture
+in-process before the unit runs, so nothing in this process can be "not yet loaded".
+## ADR-345 — Buffers are global by name: a registry of buffer processes, and a frame is a process that joins it
+
+**Context.** A buffer process (`spawn-buffer`, ADR-134) lets several holders edit and
+watch one document — bedit's hosted flip backs every pool buffer with one, and its
+collab session shares files across sessions through a private `{path → process}` loop.
+The editor's next need is Emacs *frames*: a second OS window over the SAME buffers.
+Two ways: (1) a second window driven by the editor's own process, which needs a window id
+on every input message and a per-window mailbox to be sound — a tag alone is not, since
+the loop's poll keeps a catch-all arm for async replies that would swallow the other
+window's tagged keys; (2) a second `ui-run` process with its own window, whose slots are
+linked to the same buffer processes — the collab session with no network and every
+buffer shared, not just files. What (2) lacks is the directory: the one process for a
+NAME, an enumeration for a holder that joins late, and membership notifications for one
+that watches.
+
+**Decision.** `std/editor/buffer-registry`: a registry process keyed by buffer name.
+`registry-share name text meta` answers the one process for the name (spawned on the
+first ask, the existing pid after — serialised in the registry, so two askers cannot
+both spawn); `registry-entries` lists them; `registry-remove` stops one everywhere (a
+kill is global, as in Emacs); a `registry-watch`er is sent `[:registry-added name proc
+meta]` and `[:registry-removed name :killed|:died]`. The registry keeps no mirror: a
+process that dies is dropped and announced, a holder that still has the text re-shares,
+and everyone else relinks on the `:added` that follows. Frames are (2): one process per
+window, which is the routing the runtime already mandates (ADR-058/059).
+
+**Consequences.** A local frame and a remote `--attach` window become the same thing at
+different distances, both clients of the registry. The window-id-on-input half of
+ADR-059 stays deferred, now with the reason recorded: it is only needed for (1), and its
+sound form is a per-window mailbox. bedit's collab registry (keyed by path, with a text
+mirror for respawn) is a candidate client of this module — left as is, so its respawn
+semantics and tests stay untouched.
+
+**Alternatives rejected.** *Stamp the window id and keep one process* — see above.
+*Extend `editor/serve`* — a served session owns its own pool by design (independent
+sessions); sharing is a property of the buffers, not of the session protocol. *The
+registry mirrors every buffer's text* — the collab loop does, for a daemon whose
+holders are remote and may all be gone when a process dies; here the holders are local
+frames that outlive their windows' buffers, so the copies already exist.

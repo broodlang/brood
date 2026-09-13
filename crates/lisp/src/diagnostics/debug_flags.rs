@@ -576,6 +576,11 @@ pub const FLAGS: &[DebugFlag] = &[
         "`=0`: re-rasterise and blit the whole buffer each frame instead of the changed rows (the safe fallback)",
     ),
     f(
+        "BROOD_GUI_BLIT",
+        HOST,
+        "`=0`: rasterise every dirty strip instead of copying one that is a translation of old pixels (ADR-343) — the escape hatch if a blitted strip ever differs from a drawn one",
+    ),
+    f(
         "BROOD_GUI_TRACE",
         HOST,
         "`=1`: print every GUI paint's breakdown (rows repainted, clusters, timing) — BROOD_STALL_MS at threshold 0 without the per-native-call flood",

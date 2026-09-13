@@ -1,0 +1,79 @@
+;;; KI-135 / ADR-344: a module publishes WHOLE — no name of a loading module is visible to
+;;; another process before the module is provided.
+;;;
+;;; Before ADR-344 every `def` a load performed went straight into the shared table, so a
+;;; concurrent process that reached a freshly-bound name through a global HIT (lazy loading
+;;; waits only on a MISS, ADR-335) ran against a half-loaded module: a bound `queue/list->`
+;;; whose `Conjable` impl was not yet registered died on `conj`. The image branch opened that
+;;; window for a whole module at once (KI-134's second half); a source load opens it one form
+;;; wide. The fixture below makes the window 300 ms wide on purpose — `early` is defined,
+;;; the load sleeps, then `late` — and an observer polls with `bound?` (a plain lookup, which
+;;; never waits on a load) for any instant at which a name is bound while the feature is not
+;;; yet provided. Sabotage-verified: with staging bypassed the observer sees `early` bound for
+;;; the whole sleep.
+
+(defmodule module-publish-test (:use test))
+
+(purge-stale-temp "modpub-")
+(def- *dir* (temp-dir "modpub-"))
+(file/mkdir *dir*)
+(reflect/add-load-path *dir*)
+(file/spit (path/join *dir* "modpub-slow.blsp")
+  (str "(defmodule modpub-slow)\n"
+    "(def early 1)\n" "(defrecord thing (n))\n" "(sleep 300)\n" "(def late 2)\n"))
+
+;; Poll every 5 ms until the module is provided (or 4 s pass): how many polls saw a name of
+;; the module bound while the module was not yet provided? The reads are ordered so an
+;; atomic publish can never produce a false count — a name is read FIRST and the feature
+;; SECOND, so "bound and then not provided" cannot happen unless the module was visible
+;; before it was provided.
+(defn- observe (n seen)
+  (if (>= n 800)
+    seen
+    (let (any-bound (or (bound? 'modpub-slow/early)
+                      (bound? 'modpub-slow/late)
+                      (contains? *record-ids* :modpub-slow/thing))
+          provided (contains? *features* "modpub-slow"))
+      (cond
+        provided seen
+        any-bound (do (sleep 5) (observe (+ n 1) (+ seen 1)))
+        else (do (sleep 5) (observe (+ n 1) seen))))))
+
+;; A registry born in the load that swaps it. `%swap-registry!`'s write-back is LIVE (a
+;; whole map cannot be staged: an older staged copy would publish over a nested load's or a
+;; concurrent process's additions) — EXCEPT when the registry was defined by an open load of
+;; this process, where "live" would put the map on the table and the frame's `defonce` would
+;; then overwrite it at publish. `parent` defines the registry and requires `child`, which
+;; registers into it through both funnels (the swap and a `%registry-update!` op): the
+;; parent's frame owns the binding, so both must land in ITS frame, not the child's.
+(file/spit (path/join *dir* "modpub-reg-parent.blsp")
+  (str "(defmodule modpub-reg-parent)\n"
+    "(defonce *reg* {})\n" "(%swap-registry! modpub-reg-parent/*reg* (fn (m) (assoc m :own 1)))\n"
+    "(let (f modpub-reg-child/answer) (f))\n"
+    "(def in-load-view (get modpub-reg-parent/*reg* :child))\n"))
+(file/spit (path/join *dir* "modpub-reg-child.blsp")
+  (str "(defmodule modpub-reg-child)\n"
+    "(%swap-registry! modpub-reg-parent/*reg* (fn (m) (assoc m :child 2)))\n"
+    "(%registry-update! 'modpub-reg-parent/*reg* :assoc [:op] 3)\n" "(defn answer () 42)\n"))
+
+(describe "a registry defined by the load that writes it (KI-135)"
+  (test "swaps and ops from the module and from a nested load publish with the module"
+    (require-one 'modpub-reg-parent)
+    (assert= {:own 1 :child 2 :op 3} (reflect/eval 'modpub-reg-parent/*reg*))
+    ;; …and the loader saw the nested load's write while its own load was still open.
+    (assert= 2 (reflect/eval 'modpub-reg-parent/in-load-view))))
+
+(describe "a module publishes whole (KI-135)"
+  (test "no name or registration of a loading module is visible before it is provided"
+    (assert= false (contains? *features* "modpub-slow"))
+    (let (me (self)
+          _loader (spawn (do (require-one 'modpub-slow) (send me :loaded)))
+          seen (observe 0 0))
+      (assert= 0 seen)
+      (assert= :ok (receive (:loaded :ok) (after 5000 :timeout)))
+      ;; …and after the publish the whole module is there, registrations included.
+      (assert= true (contains? *features* "modpub-slow"))
+      (assert= 1 (reflect/eval 'modpub-slow/early))
+      (assert= 2 (reflect/eval 'modpub-slow/late))
+      (assert= true (contains? *record-ids* :modpub-slow/thing))
+      (assert= 5 (reflect/eval '(modpub-slow/thing-n (modpub-slow/thing 5)))))))

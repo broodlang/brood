@@ -87,7 +87,7 @@ pub(super) fn reg_trace_enabled() -> bool {
 /// here is a RUNTIME handle (promoted before journalling), and an entry lives only while a
 /// snapshot is outstanding — the same window `snapshot_globals`'s compaction block covers.
 #[derive(Clone)]
-pub(super) enum LoadWrite {
+pub(crate) enum LoadWrite {
     Define {
         sym: Symbol,
         val: Value,
@@ -100,7 +100,20 @@ pub(super) enum LoadWrite {
     },
 }
 
-/// The module-load journal (see [`LoadWrite`]). `outstanding` counts the runtime's live
+/// One OPEN module load's staging frame (KI-135, ADR-344): the bindings and registry
+/// results the load has produced so far — read by the loading process's own lookups before
+/// the table, by nobody else — and the ordered writes that publish it. A load is a
+/// process-shared fact only once it is complete: before ADR-344 every `def` went straight
+/// into the shared table, so a concurrent process that reached a freshly-bound name
+/// through a global HIT (ADR-335 waits only on a MISS) ran against a half-loaded module.
+/// `bindings` values are RUNTIME handles (promoted at define time); the frame is a
+/// collector root for its process until it is published or discarded.
+#[derive(Default)]
+pub(crate) struct LoadStage {
+    pub(crate) bindings: HashMap<Symbol, Value>,
+    pub(crate) writes: Vec<LoadWrite>,
+}
+
 /// The module-load journal (see [`LoadWrite`]). `outstanding` counts the runtime's live
 /// `snapshot_globals` — it lives under this lock rather than in an atomic so that "is a
 /// snapshot outstanding?" and "append this entry" are one step, and so are "the first

@@ -232,6 +232,9 @@ pub(crate) struct Renderer {
     pub(super) canvas_size: (usize, usize),
     pub(super) prev_ops: Vec<Op>,
     pub(super) damage_ring: Vec<Vec<DamageRect>>,
+    /// The pixel rows the last `raster_frame` copied from the old canvas instead of
+    /// drawing (the scroll blit) — a per-paint stat for the trace and the tests.
+    pub(super) blit_rows: usize,
 }
 
 impl Renderer {
@@ -256,6 +259,7 @@ impl Renderer {
             canvas_size: (0, 0),
             prev_ops: Vec::new(),
             damage_ring: Vec::new(),
+            blit_rows: 0,
         };
         r.recompute();
         r

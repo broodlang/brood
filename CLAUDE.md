@@ -604,6 +604,7 @@ contention races).
 | `BROOD_DBG_CONST=1` | Trace JIT constant-pool decisions (`jit.rs`). For diagnosing a wrong-constant miscompile. **Needs `--features jit`**. |
 | `BROOD_GUI_GPU=1` | Select the experimental **OpenGL** render backend at *runtime*, so one installed binary can default to softbuffer and opt into the GPU path per run (build with `--with-gui-gpu`). |
 | `BROOD_GUI_MAIN_THREAD=1` | Host the winit event loop on the **process main thread** instead of the dedicated `brood-gui` one. **Forced on macOS/Windows and not switchable off there** — AppKit's run loop is main-thread-only and winit's `with_any_thread` escape hatch is Wayland/X11-only, which is why `brood/gui` did not compile for macOS at all until 2026-09-11 (KI-125). On Linux the dedicated thread stays the default and this is the lever that makes the *other* path runnable: there is no macOS in this project's CI beyond a compile check, so without it the main-thread code would ship having never executed. Verify by thread name — with it set there is **no `brood-gui` thread** and the loop runs on tid == pid, with a `brood-main-join` waiting on the runtime. Costs nothing when unset (one cached `var`). |
+| `BROOD_GUI_BLIT=0` | **Opt-OUT** of the **scroll blit** (ADR-343) — default ON. A dirty strip that is a pure translation of pixels already on the canvas is copied instead of re-rasterised; with this set every dirty strip is drawn. The escape hatch if a blitted strip ever differs from a drawn one. Read once. |
 | `BROOD_GUI_HEADLESS=1` | Run the GUI/display layer with no real window — also silences audio, so a windowing/audio test stays safe on a headless CI box. |
 | `BROOD_AUDIO=0` | Disable `audio-beep` (also off with no device present, or under `BROOD_GUI_HEADLESS`). |
 | `BROOD_CONTRACTS=1` | Arm **runtime type contracts** from `sig` declarations (implemented in `std/prelude/core.blsp`, not Rust — a `sig` wraps the function in a checking shim). The runtime counterpart of `nest check`'s static advice. Turns every plain `(sig …)` into a **rebinding**, so a `sig` above its `defn` fails the module's load — `crates/lisp/tests/sig_placement.rs` gates that tree-wide (indentation-blind since 2026-09-06; an indented one inside `check-allow` slipped past it, KI-113). **Take any contracts-mode reading with a private `XDG_CACHE_HOME` or `BROOD_NO_STDIMAGE=1`:** a materialised module never evaluates its sigs, so with a stdlib image present the mode is barely exercised — eleven std modules could not load under it from source and nothing noticed (KI-113). `contracts_mode.rs` now walks every baked-in module from source. |
@@ -664,6 +665,19 @@ see the parallel-edits note above), fast-forward local `main` to it first
 (`git merge --ff-only origin/main`) and put the work on top; **re-run the suite on the
 combined tree before pushing**, because your green run was against the older base and the
 combination is untested until you test it.
+
+**Before every push: `make hooks` once, then let the hook run (or `make prepush` by hand).**
+The pre-push hook (`scripts/git-hooks/pre-push`) is the fast half of CI: always rustfmt and
+the `BROOD_*` flag catalogue (under a second); with a `.blsp` involved, `nest format --check`,
+the tests that NAME the changed modules (`std/**/foo-bar.blsp` → `tests/foo_bar_test.blsp`,
+every changed `tests/*_test.blsp`), the surface audit and the executed doc examples, and for a
+change under `crates/lisp/src/types/` the checker's expectation files — about a minute. It
+exists because three reds landed on `main` in one afternoon (2026-09-13) that each of those
+gates catches in seconds: an uncatalogued `BROOD_GUI_BLIT`, two public functions with no
+`form → result` example (the audit ratchet), and a warning spelling ADR-341 changed under
+`sig_adoption_test`. The full suites stay CI's job — `make green` reads the verdict — and a red
+you did not cause is still yours to attribute before building on it: run the failing file
+against a clean build of the previous commit, and say which side it belongs to.
 
 **Do not add a `Co-Authored-By: Claude` trailer (or any Claude/AI co-author
 attribution) to commits in this repo.** Write commit messages with no AI

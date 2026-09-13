@@ -854,6 +854,8 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-13** — the VM→native direct call lands as the frame path minus the round trip (`mandelbrot` −12%, `supervisor` −5.4%); on the way in: the fast-link probe handed back native flat cells as Brood links (the §7.12 "runaway"), and a nested tail chain put 19 820 dirty parks on `supervisor`
 - **2026-09-13** — the timer thread is woken only for a new earliest deadline: a parked `(receive … (after ms …))` no longer costs a futex wake per park (2.5 → 2.0 µs on the timed round trip)
 - **2026-09-13** — KI-134 FIXED (ADR-339), two mechanisms: the isolate rollback (journalled loads, replayed atomically; `%isolate-discard-loads` for the image builder) and — traced, not the rollback — the image branch binding a module before its impls, reached through a lazy global hit (publication order fixed). The source-path residue is KI-135
+- **2026-09-13** — the pre-push hook grows the fast half of CI (`make prepush`): the `BROOD_*` flag catalogue as a grep, and with a `.blsp` involved the tests naming the changed modules, the surface audit and the executed doc examples — the three reds that landed on `main` this afternoon (`BROOD_GUI_BLIT` uncatalogued, nine public functions without a `form → result` example, `sig_adoption_test` reading ADR-341's old tuple spelling) each fail it in seconds; all three fixed, sabotage-verified both ways
+- **2026-09-13** — KI-135 FIXED (ADR-344): a module publishes whole — every load stages its defines and registry OPERATIONS in a per-load frame the loader reads before the table, and installs them under one write of the globals table when it completes (discarded when it throws). The whole-map `%swap-registry!` write-back cannot be staged (an outer frame's copy published over a nested load's additions and cost the image builder 10 of 35 require-edge records); it writes live unless the registry was born in the same load. Guard: a 300 ms-wide fixture window, 0 sightings vs 58 bypassed
 - **2026-09-12** — memoised view fragments (ADR-336): `ui-memo`, the frame carries its cache back; `=` is O(1) on the same cell, `append` shares its last list; `BROOD_UI_TRACE`; KI-132 filed
 - **2026-09-12** — text contrast is a setting (ADR-337): `gui/text-contrast` lifts light-on-dark stems under the linear-light blend; bedit ships 1.4
 - **2026-09-12** — `editor/shell`: shell-script highlighting, and a script typed by its `#!` line (`register-interpreter-type`, Emacs `interpreter-mode-alist`)
@@ -864,6 +866,8 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-13** — `:on-move` is a layer facet (ADR-338): a follower runs only when point or the text moved (`buffer-moved?`), never on every event like a `:post-key` guard; `string/width->index`, the inverse of `display-width`, for a click on a wide glyph
 - **2026-09-13** — the checker types a `def-` literal like a `def` one: Gap A reads `top_level_defs`, so a private `(def- k 10)` is an `int`, not `dynamic()` — bedit's strict count 13 → 0
 - **2026-09-13** — `--version` says `-dirty`: a binary whose `crates/`/`std/` differed from its commit is no longer indistinguishable from a clean build of the same sha; `make doctor` names it; build.rs re-runs from a worktree too
+- **2026-09-13** — tabs are a column-dependent cluster (ADR-342): `display-width` / `width->index` take `start-col` + `tab-width`, `string/expand-tabs` is the third leg, the GUI paints a raw tab to the screen stop; the scroll blit (ADR-343): a dirty strip that is a translation of old canvas rows is copied, not drawn — a 1080p scroll paints in 2.3 ms, not 10; `ui-coalesce-motion` collapses a `:move` flood like a `:drag` one; `:close-is-input?` lets an app ask before the X button quits; `buffer-file-changed?` — a buffer stamps its file's mtime at read/save
+- **2026-09-13** — `editor/buffer-registry` (ADR-345): a named directory of buffer processes — share-once, enumeration, membership notifications — the seam a second frame (a process with its own window) joins the same buffers through
 
 ---
 
@@ -13246,3 +13250,50 @@ theory.** Every KI in this class (KI-89, KI-134 twice) was attributed from the f
 assertion; one `BROOD_REG_TRACE` run with the death and the restores on the same timeline
 settled it in a minute. And prove a fix with a test of the *mechanism* — the order, the
 count, the state — never with N green runs of a race.
+## 2026-09-13 — tabs land on their stops, a scroll copies what it keeps, a hover costs one turn
+
+Three display-seam gaps bedit exposed, measured before and after.
+
+**Tabs (ADR-342).** `a\tb` painted as `ab`: a tab was a zero-width cluster
+(`text_width::cluster_cells`), so the GUI advanced nothing, and the caret and the click
+mapping — which count the same clusters — agreed with each other and with nothing on
+screen. The rule now lives beside the cluster rule with a running column:
+`string/display-width` and `string/width->index` take an optional `start-col` (a mid-line
+chunk's column, so its tabs land on the LINE's stops) and `tab-width` (default 8), and
+`string/expand-tabs` is the string a frontend is handed. `strings_test` pins the round trip;
+the Rust tests were sabotaged (tab width 4) to prove they bite.
+
+**The scroll blit (ADR-343).** The strip diff paid the whole pane on a scroll — every row's
+ops changed — for pixels the canvas held one line up. `strip_blits` finds a dirty strip
+that is an exact translation of an old band (each leaf the same op `Δ` lower, or a solid
+fill covering both) and copies the rows. Measured with a `ui-run` app scrolling a maximised
+1920×1045 window one line per tick, `BROOD_GUI_TRACE=1`, 50 steady-state paints:
+`blit=0` 10.1 ms/paint (1029 rows drawn); `blit=1` 2.3 ms (83 drawn, 946 copied). The
+pixel-for-pixel tests cover a whole-line scroll, a sub-cell step, two panes scrolling
+opposite ways, and a row that only looks shifted.
+
+**Motion coalescing.** `ui-coalesce-drag` collapsed a `:drag` flood to its last event;
+a `:move` flood (hover) still cost a full fold + view per cell crossed — 95 of ~110 turns
+in a 12 s idle bedit run. `ui-coalesce-motion` collapses either kind to its latest, never
+across kinds (a press between two moves changes what the later one means).
+
+**Two seams the editor needed for safety.** `ui-run` quit on the window's X button before
+`update` ever saw it — so no app could ask "save first?". A model with `:close-is-input?
+true` now receives `:close` like a key and quits by setting `:done` itself (the deferred
+half of ADR-011, opt-in so every other app stays closeable for free; `ui_test` pins both
+paths). And `std/editor/buffer` stamps `:file-mtime` at `buffer-from-file` / `save-buffer`
+so `buffer-file-changed?` can say whether another writer touched the file since — the
+knowledge auto-revert and a save-time guard are built on (`buffer_test`).
+
+## 2026-09-13 — `editor/buffer-registry`: buffers are global by name (ADR-345)
+
+The editor wants Emacs frames — a second OS window over the same buffers. The sound
+shape is a second `ui-run` *process* whose pool slots link to the same buffer processes
+(the collab session with no network), and what that lacked was the directory:
+`registry-share` (the one process for a name, spawned on the first ask), `registry-entries`
+(a late joiner's list), `registry-watch` (created / killed / died notifications), and
+`registry-remove` (a kill is global). No mirror — the holders are the copies; a died
+process is announced and re-shared by whoever still has the text. `buffer_registry_test`
+pins share-once, the notifications, the died-then-reshared path and stop. The
+window-id-on-input alternative is recorded as the other half of ADR-059 and why a tag
+alone is not sound.

@@ -72,7 +72,7 @@ use cosmic_text::{
 
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::host::text_width::cluster_cells;
+use crate::host::text_width::{cluster_cells, cluster_cells_at, TAB_WIDTH};
 
 /// The winit cursor for a frontend-neutral `CursorShape`.
 fn cursor_icon(shape: super::CursorShape) -> CursorIcon {

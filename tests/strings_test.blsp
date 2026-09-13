@@ -143,6 +143,38 @@
               (let (prefix (string/substring s 0 i))
                 (= (string/width->index s (string/display-width prefix)) i))))))))
 
+;; Tabs — the one cluster whose width is a function of its column: a tab advances to
+;; the next stop (a multiple of the tab width, 8 by default) counted from the string's
+;; start, or from `start-col` for a chunk laid out mid-line. Width, its inverse and the
+;; expansion share the rule, so a caret, a click and the painted text agree (ADR-342).
+(describe "tab stops — display-width, width->index and expand-tabs share one rule"
+  (test "a tab reaches the next stop; a tab AT a stop spans a whole width"
+    (assert= (string/display-width "\t") 8)
+    (assert= (string/display-width "a\tb") 9)
+    (assert= (string/display-width "abcdefgh\tx") 17)
+    (assert= (string/display-width "\t\t") 16))
+  (test "start-col lays a chunk out on the LINE's stops; tab-width sets the stop distance"
+    (assert= (string/display-width "\tx" 3) 6)
+    (assert= (string/display-width "\tx" 0 4) 5)
+    (assert= (string/display-width "\tx" 5 4) 4))
+  (test "expand-tabs materialises exactly that width, and returns a tab-free string as is"
+    (assert= (string/expand-tabs "a\tb") "a       b")
+    (assert= (string/expand-tabs "\tx" 3) "     x")
+    (assert= (string/expand-tabs "\tx" 0 4) "    x")
+    (assert= (string/expand-tabs "plain") "plain")
+    (is (every? [["a\tb\t\tc" 0] ["\t😀\tz" 5] ["x\ty" 7]]
+          (fn ([s col])
+            (= (string/display-width (string/expand-tabs s col) col)
+              (string/display-width s col))))))
+  (test "a cell inside a tab's span is the tab; the cell after it, the next char"
+    ;; a=[0,1) \t=[1,8) b=[8,9)
+    (assert= (string/width->index "a\tb" 1) 1)
+    (assert= (string/width->index "a\tb" 5) 1)
+    (assert= (string/width->index "a\tb" 7) 1)
+    (assert= (string/width->index "a\tb" 8) 2)
+    (assert= (string/width->index "\tx" 4 3) 0)
+    (assert= (string/width->index "\tx" 5 3) 1)))
+
 ;; The grapheme-INDEXED accessors (ADR-159). `string->graphemes` already gave the
 ;; clusters, but only as a whole vector — so the documented-correct cursor step
 ;; ("step by cluster, never by codepoint") cost a vector of every cluster in the
