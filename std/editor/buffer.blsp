@@ -108,7 +108,9 @@ Where `end-of-line` lands and the rightmost column point can hold on that line."
 (defn buffer-stamp-file (buf)
   "`buf` with `:file-mtime` set to its file's modification time as it is NOW (nil when
 it has no file, or the file is missing) — the moment the buffer's text and the file
-agreed. `buffer-from-file` and `save-buffer` stamp it; `buffer-file-changed?` reads it."
+agreed. `buffer-from-file` and `save-buffer` stamp it; `buffer-file-changed?` reads it.
+
+    (get (editor/buffer/buffer-stamp-file (editor/buffer/make-buffer \"x\")) :file-mtime)   → nil"
   (let (f (get buf :file))
     (assoc buf :file-mtime (if (nil? f) nil (file/mtime f)))))
 
@@ -138,7 +140,9 @@ file and the text agree again."
 — its mtime differs from the `:file-mtime` stamped at the read or the last save — so
 someone else (another editor, a formatter, `git checkout`) changed it. False for a
 buffer with no file, one never stamped, or a file that has since vanished (that is a
-different question). One `stat`; cheap enough to ask on an idle beat."
+different question). One `stat`; cheap enough to ask on an idle beat.
+
+    (editor/buffer/buffer-file-changed? (editor/buffer/make-buffer \"x\"))   → false"
   (let (f (get buf :file)
         stamp (get buf :file-mtime))
     (if (or (nil? f) (nil? stamp))

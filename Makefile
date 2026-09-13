@@ -549,11 +549,16 @@ gui-debug: ## Build + install JIT+GUI brood/nest with GC debug-assertions ARMED,
 fmt: ## Format all Rust code
 	cargo fmt
 
-hooks: ## Install the local git pre-push hook (both format gates, before CI sees them)
+prepush: ## Run the pre-push hook's gates by hand (rustfmt, the BROOD_* flag catalogue; with a .blsp involved: nest format --check + the tests naming what changed, the surface audit and the doc examples)
+	@sh scripts/git-hooks/pre-push && echo "prepush: clean"
+
+hooks: ## Install the local git pre-push hook (`make prepush` on every push, before CI sees it)
 	# Opt-in and local: the hook lives in scripts/git-hooks/ so it is version-controlled
-	# and survives a fresh clone, but nothing installs it for you. It runs `cargo fmt
-	# --check` always, and `nest format --check` only when a .blsp is involved (that one
-	# is whole-project by design, ~50s) — so a Rust-only push stays under a second.
+	# and survives a fresh clone, but nothing installs it for you. Always: `cargo fmt
+	# --check` and the BROOD_* flag catalogue (under a second). With a .blsp involved:
+	# `nest format --check` (whole-project by design, ~50s) and the tests that name the
+	# changed modules plus the surface audit and the executed doc examples (~1 min) —
+	# so a Rust-only push stays under a second. `make prepush` runs the same script.
 	@mkdir -p .git/hooks
 	@if [ -e .git/hooks/pre-push ] && ! cmp -s scripts/git-hooks/pre-push .git/hooks/pre-push; then \
 		cp .git/hooks/pre-push .git/hooks/pre-push.bak; \

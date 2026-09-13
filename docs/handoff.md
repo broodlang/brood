@@ -14,7 +14,8 @@ promotion it constrained.
 
 State when written: `main` = `0223cb1f`, pushed, clean. **One open bug: KI-134**, and it is
 the release blocker — **FIXED later the same day, see item 1; its residue KI-135 too (ADR-344).
-No open bug at the end of 2026-09-13.** `nest check` and `nest format --check` are clean; `artifact_matrix` is
+No open bug at the end of 2026-09-13.** The pre-push hook now runs the fast half of CI
+(`make prepush`; see CLAUDE.md "Before every push") — install it with `make hooks`. `nest check` and `nest format --check` are clean; `artifact_matrix` is
 green and sabotage-verified.
 
 **Landed later on 2026-09-13 (see the devlog for the numbers):** the VM→native direct call

@@ -95,7 +95,9 @@ mirror sharing one buffer set — every holder links its own copy to the same pr
 ;; ---- the API ------------------------------------------------------------------
 
 (defn registry-start ()
-  "Spawn a registry and return its pid."
+  "Spawn a registry and return its pid.
+
+    (let (r (editor/buffer-registry/registry-start)) (editor/buffer-registry/registry-stop r) (pid? r))   → true"
   (spawn (registry-loop {} '())))
 
 (defn- registry-call (reg msg-fn &optional (timeout 2000))
@@ -109,35 +111,47 @@ mirror sharing one buffer set — every holder links its own copy to the same pr
   "The ONE buffer process for `name`: spawned from `text` and `meta` (`{:file :type :dir}`
 — what a holder needs to build its own copy; `:file` backs the process's buffer) on the
 first ask, the existing pid after. Serialised in the registry, so two askers at once get
-the same process. `:no-reply` when the registry does not answer within `timeout` ms."
+the same process. `:no-reply` when the registry does not answer within `timeout` ms.
+
+    (let (r (editor/buffer-registry/registry-start)) (let (p (editor/buffer-registry/registry-share r \"notes\" \"hello\" {})) (editor/buffer-registry/registry-stop r) (pid? p)))   → true"
   (registry-call reg (fn (me r) [:share name text meta me r]) timeout))
 (sig registry-share (pid string string map &optional int -> any))
 
 (defn registry-entries (reg &optional (timeout 2000))
   "Every registered buffer as `{:name :proc :meta}`, a vector; `:no-reply` when the
-registry does not answer."
+registry does not answer.
+
+    (let (r (editor/buffer-registry/registry-start)) (let (es (editor/buffer-registry/registry-entries r)) (editor/buffer-registry/registry-stop r) es))   → []"
   (registry-call reg (fn (me r) [:entries me r]) timeout))
 (sig registry-entries (pid &optional int -> any))
 
 (defn registry-remove (reg name &optional (timeout 2000))
   "Kill buffer `name` everywhere: stop its process and drop the entry; watchers are told
-`[:registry-removed name :killed]`. The pid stopped, nil when there was none."
+`[:registry-removed name :killed]`. The pid stopped, nil when there was none.
+
+    (let (r (editor/buffer-registry/registry-start)) (let (v (editor/buffer-registry/registry-remove r \"nope\")) (editor/buffer-registry/registry-stop r) v))   → nil"
   (registry-call reg (fn (me r) [:remove name me r]) timeout))
 (sig registry-remove (pid string &optional int -> any))
 
 (defn registry-watch (reg pid)
   "Have `pid` sent `[:registry-added name proc meta]` for every buffer shared from now on
 and `[:registry-removed name reason]` for every one removed (`:killed`) or died (`:died`).
-Idempotent. Asynchronous."
+Idempotent. Asynchronous.
+
+    (let (r (editor/buffer-registry/registry-start)) (editor/buffer-registry/registry-watch r (self)) (editor/buffer-registry/registry-share r \"a\" \"\" {}) (editor/buffer-registry/registry-stop r) (receive ([:registry-added n _ _] n) (after 1000 :none)))   → \"a\""
   (send reg [:watch pid]))
 (sig registry-watch (pid pid -> nil))
 
 (defn registry-unwatch (reg pid)
-  "Stop the notifications to `pid`. Asynchronous."
+  "Stop the notifications to `pid`. Asynchronous.
+
+    (let (r (editor/buffer-registry/registry-start)) (editor/buffer-registry/registry-watch r (self)) (editor/buffer-registry/registry-unwatch r (self)) (editor/buffer-registry/registry-share r \"a\" \"\" {}) (editor/buffer-registry/registry-stop r) (receive ([:registry-added n _ _] n) (after 0 :none)))   → :none"
   (send reg [:unwatch pid]))
 (sig registry-unwatch (pid pid -> nil))
 
 (defn registry-stop (reg &optional (timeout 2000))
-  "End every registered process and the registry; the count stopped, or `:no-reply`."
+  "End every registered process and the registry; the count stopped, or `:no-reply`.
+
+    (editor/buffer-registry/registry-stop (editor/buffer-registry/registry-start))   → 0"
   (registry-call reg (fn (me r) [:stop me r]) timeout))
 (sig registry-stop (pid &optional int -> any))
