@@ -22262,6 +22262,24 @@ complement narrows the else-branch, each on its own variable (`guards::or_disjun
 the dual of `and_conjunct_guards`; the same-variable `or` rule keeps the then-branch). A
 `then_only` disjunct (an `and`) is left out: falsy, it proves nothing of its variable.
 
+**The third cut: a handover is a site, not an escape.** "Declined the moment the name is
+used as a value" threw away the commonest use of a helper — `(map xs helper)`, `(fold xs init
+step)`, `(each2 add)` under `(sig each2 ((int int -> any) -> any))` — though in each the
+callee PROMISES what it will call the value with: the collection's element, the fold's
+accumulator (its own result type, a joint fixpoint with the callback's return) and an
+element, the declared or inferred arrow's parameters. Those are exactly the three promises
+the walk already seeds a `fn` literal's parameters from, so they are one function now
+(`walk::callback_seed`, taking the caller's "does this argument fit" predicate — the walk
+asks for a literal of the arity, the collector for a bare candidate of it), and the
+collector records a `Site::Handover` of the promised types instead of an escape. Sound on
+the same argument as a direct site: the promise is the callee's contract (a declared arrow
+is checked against its body, ADR-273; a curated one is the primitive's), or an
+over-approximation the checker computed (an element type, an inferred arrow's demand). What
+has no promise — `(apply helper xs)`, a value stored in a map, an argument to a function of
+unknown type — still escapes. A test that pinned "unknown while `h`'s callers are unknown"
+now pins the precise finding: `(defn h (n) n)` handed to `((int -> string) -> int)` returns
+the `int` it is given where a string is used.
+
 ## ADR-342 — A tab is a column-dependent cluster: one stop rule under width, its inverse, and the expansion
 
 **Context.** The display seam measures text in grapheme clusters, each 0, 1 or 2 cells
@@ -22437,3 +22455,29 @@ sessions); sharing is a property of the buffers, not of the session protocol. *T
 registry mirrors every buffer's text* — the collab loop does, for a daemon whose
 holders are remote and may all be gone when a process dies; here the holders are local
 frames that outlive their windows' buffers, so the copies already exist.
+
+## ADR-346 — An arrow in head position describes the call
+
+**Status:** accepted and implemented 2026-09-13 (`walk::check_computed_call`,
+`check_arg_against_param`; `infer::expr_ty`'s computed-callee arm).
+
+**Context.** A local whose type is an arrow described the call it heads (ADR-273): `(f 1)`
+under `(sig apply-it ((int -> string) -> any))` typed as `string` and checked its argument.
+A COMPUTED head did not — `((cur 1) "x")` under `(sig cur (int -> (string -> int)))`, or
+`((get handlers :k) msg)` over a record of lambdas: the head's type was an arrow the checker
+had derived itself, and nothing read it. The curried and the dispatch-table shapes are the
+two ways Brood code reaches a function without naming it.
+
+**Decision.** When the head of a call is a form whose `expr_ty` is a single arrow, the arrow
+is the call's signature: the result is its return; the arity is exact (an arrow says how
+many arguments it takes, as the local-arrow rule already held); each argument meets its
+parameter through the ONE per-argument rule, `check_arg_against_param` — extracted from the
+named-callee loop so a named and a computed callee cannot check differently — reported
+under the printed head (`(cur 1): argument 1 expects string, got 2`). A union with an arrow
+member (`nil | (string -> int)`) is not a single arrow and says nothing; a `fn` literal in
+head position is the immediate-application case `infer.rs` types by its body, unchanged.
+
+**Soundness.** The head's arrow is either a declaration (a contract the checker holds the
+body to) or an inference over the lambda's body with its parameters unknown (`(any… -> R)`,
+where `R` over-approximates every result) — the same two sources the local-arrow rule
+trusts. The argument check is the gradual relation every other call uses.

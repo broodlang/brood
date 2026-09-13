@@ -150,6 +150,128 @@ pub(super) fn check_into(
     })
 }
 
+/// Check argument `i` of a call to `callee` against the parameter type `param` — the ONE
+/// per-argument rule, whether the callee is a named function or a computed one (an arrow in
+/// head position, `check_computed_call`). `false` when the argument was reported as a
+/// function in a slot with no room for one, so the caller skips its callback checks.
+///
+/// The argument meets the parameter through the **full gradual relation** — the same
+/// `gradual_of` / `consistent_with` the return-type check uses (ADR-110; gating "B1",
+/// docs/type-gating.md):
+///   - a **precise** argument (a literal singleton — B0 makes these faithful, a
+///     `(sig …)`-typed param, integer-closed arithmetic) is checked with `⊆`, catching a
+///     *merely-wider* misuse (a `number` where `int` is wanted) — closing the
+///     return/argument asymmetry;
+///   - a **dynamic** argument (a call result, an inferred/redefinable global) is checked
+///     with `∩ ≠ ⊥` (`!is_disjoint`), identical to the old behaviour — no new
+///     over-warning, reload-safe.
+/// A `NEVER` bound means "this branch is unreachable" (a guard narrowed the arg to the
+/// empty type); skip it — the code can't run, so there's no real misuse to flag (under the
+/// dynamic reading a bare NEVER would else read as disjoint-from-everything).
+/// A function LITERAL in a slot with no room for a function: a lambda whose result can't be
+/// inferred (`(fn (x) x)`) has no arrow type, so it reads as dynamic and the gradual check
+/// stays quiet — but its TAG is never in doubt. If the parameter is disjoint from fn/native
+/// entirely, the call is wrong whatever the lambda returns. This is the check that catches
+/// a pre-data-first `(map (fn (x) x) xs)` argument order, which the 0.20 migration showed
+/// failing only at runtime.
+#[allow(clippy::too_many_arguments)]
+fn check_arg_against_param(
+    heap: &Heap,
+    callee: &str,
+    i: usize,
+    arg: Value,
+    param: &Ty,
+    form: Value,
+    ctx: &Ctx,
+    out: &mut Vec<(Option<Pos>, String)>,
+) -> bool {
+    let fn_literal = matches!(arg, Value::Pair(_))
+        && list_items(heap, arg)
+            .as_deref()
+            .and_then(|it| it.first().copied())
+            .is_some_and(|h| matches!(h, Value::Sym(hs) if is_fn_head(hs)));
+    if fn_literal
+        && param.is_disjoint(
+            &Ty::of(crate::core::value::Tag::Fn).union(Ty::of(crate::core::value::Tag::Native)),
+        )
+        && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
+    {
+        out.push((
+            arg_pos(heap, arg, form),
+            format!(
+                "{}: argument {} expects {}, got a function ({})",
+                callee,
+                i + 1,
+                param,
+                crate::syntax::printer::print(heap, arg),
+            ),
+        ));
+        return false;
+    }
+    let g = gradual_of(heap, arg, ctx);
+    // Relax the parameter for the membership test in the two places the lattice
+    // deliberately under-approximates (see `relax_param_for_arg`), so the advisory check
+    // never misfires; the original `param` is still what the message reports.
+    let param_relaxed = relax_param_for_arg(param);
+    if !g.bound.is_never()
+        && !g.clone().consistent_with_mode(param_relaxed, ctx.strict())
+        && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
+    {
+        let msg = format!(
+            "{}: argument {} expects {}, got {} ({})",
+            callee,
+            i + 1,
+            crate::types::check::annot::display_ty(param),
+            crate::types::check::annot::display_ty(&g.bound),
+            crate::syntax::printer::print(heap, arg),
+        );
+        // Anchor at the offending ARGUMENT when it's a positioned sub-form (a nested
+        // call), else the call form.
+        out.push((arg_pos(heap, arg, form), msg));
+    }
+    true
+}
+
+/// **A computed callee** — `((cur 1) "x")`, `((get handlers :k) msg)`: a head that is itself
+/// a form. When its TYPE is an arrow, that arrow describes the call exactly as a named
+/// function's signature does — the arity is exact and each argument meets its parameter
+/// (`check_arg_against_param`); `infer::expr_ty` reads the result from the same arrow. An
+/// arrow in head position used to be inert: a curried `(sig cur (int -> (string -> int)))`
+/// typed `(cur 1)` and then nothing checked what it was applied to. A `fn` literal in head
+/// position is the immediate-application case `infer.rs` types by its body, not this.
+fn check_computed_call(
+    heap: &Heap,
+    form: Value,
+    items: &[Value],
+    ctx: &Ctx,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
+    let Some(&head @ Value::Pair(_)) = items.first() else {
+        return;
+    };
+    let Some(sig) = expr_ty(heap, head, ctx)
+        .as_ref()
+        .and_then(Ty::as_arrow)
+        .cloned()
+    else {
+        return;
+    };
+    let callee = elide(&crate::syntax::printer::print(heap, head), 40);
+    let argc = items.len() - 1;
+    let arity = arity_of_sig(&sig);
+    if !arity.accepts(argc) {
+        out.push((
+            heap.form_pos_only(form),
+            crate::eval::arity_message(&callee, arity.min, arity.max, argc, ""),
+        ));
+        return;
+    }
+    for (i, &arg) in items[1..].iter().enumerate() {
+        let Some(param) = sig.param(i) else { break };
+        check_arg_against_param(heap, &callee, i, arg, &param, form, ctx, out);
+    }
+}
+
 fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<Pos>, String)>) {
     // A vector or map **literal in value position is evaluated code**: `[:tag (f x)]`
     // calls `f`, and so does `{:k (f x)}`. This walk used to return here for anything
@@ -721,75 +843,8 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         if let Some(sig) = sig {
             for (i, &arg) in items[1..].iter().enumerate() {
                 let Some(param) = sig.param(i) else { continue };
-                // Check the argument against the parameter with the **full gradual
-                // relation** — the same `gradual_of` / `consistent_with` the
-                // return-type check uses (ADR-110; gating "B1", docs/type-gating.md).
-                //   - a **precise** argument (a literal singleton — B0 makes these
-                //     faithful, a `(sig …)`-typed param, integer-closed arithmetic)
-                //     is checked with `⊆`, catching a *merely-wider* misuse (a
-                //     `number` where `int` is wanted) — closing the return/argument
-                //     asymmetry;
-                //   - a **dynamic** argument (a call result, an inferred/redefinable
-                //     global) is checked with `∩ ≠ ⊥` (`!is_disjoint`), identical to
-                //     the old behaviour — no new over-warning, reload-safe.
-                // A `NEVER` bound means "this branch is unreachable" (a guard
-                // narrowed the arg to the empty type); skip it — the code can't run,
-                // so there's no real misuse to flag (the old `is_never` skip; under
-                // the dynamic reading a bare NEVER would else read as
-                // disjoint-from-everything).
-                // A function LITERAL in a slot with no room for a function: a
-                // lambda whose result can't be inferred (`(fn (x) x)`) has no
-                // arrow type, so it reads as dynamic and the gradual check below
-                // stays quiet — but its TAG is never in doubt. If the parameter
-                // is disjoint from fn/native entirely, the call is wrong whatever
-                // the lambda returns. This is the check that catches a
-                // pre-data-first `(map (fn (x) x) xs)` argument order, which the
-                // 0.20 migration showed failing only at runtime.
-                let fn_literal = matches!(arg, Value::Pair(_))
-                    && list_items(heap, arg)
-                        .as_deref()
-                        .and_then(|it| it.first().copied())
-                        .is_some_and(|h| matches!(h, Value::Sym(hs) if is_fn_head(hs)));
-                if fn_literal
-                    && param.is_disjoint(
-                        &Ty::of(crate::core::value::Tag::Fn)
-                            .union(Ty::of(crate::core::value::Tag::Native)),
-                    )
-                    && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
-                {
-                    out.push((
-                        arg_pos(heap, arg, form),
-                        format!(
-                            "{}: argument {} expects {}, got a function ({})",
-                            name_of(s),
-                            i + 1,
-                            param,
-                            crate::syntax::printer::print(heap, arg),
-                        ),
-                    ));
+                if !check_arg_against_param(heap, &name_of(s), i, arg, &param, form, ctx, out) {
                     continue;
-                }
-                let g = gradual_of(heap, arg, ctx);
-                // Relax the parameter for the membership test in the two places the
-                // lattice deliberately under-approximates (see `relax_param_for_arg`),
-                // so the advisory check never misfires; the original `param` is still
-                // what the message reports.
-                let param_relaxed = relax_param_for_arg(&param);
-                if !g.bound.is_never()
-                    && !g.clone().consistent_with_mode(param_relaxed, ctx.strict())
-                    && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
-                {
-                    let msg = format!(
-                        "{}: argument {} expects {}, got {} ({})",
-                        name_of(s),
-                        i + 1,
-                        crate::types::check::annot::display_ty(&param),
-                        crate::types::check::annot::display_ty(&g.bound),
-                        crate::syntax::printer::print(heap, arg),
-                    );
-                    // Anchor at the offending ARGUMENT when it's a positioned
-                    // sub-form (a nested call), else the call form.
-                    out.push((arg_pos(heap, arg, form), msg));
                 }
 
                 // Callback-arity check (ADR-078 arrows): when the parameter is a
@@ -929,6 +984,8 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         }
     }
 
+    check_computed_call(heap, form, &items, ctx, out);
+
     // Recurse into arguments (and nested forms) — unless the head is an
     // unexpandable macro, whose operands are opaque syntax, not evaluated code
     // (see `resolves_to_macro`). Walking a macro's args as code would false-flag a
@@ -948,9 +1005,7 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         // induction) and the element to the collection's element type. Unseeded, `h` in
         // `(fold s 5381 (fn (h c) (bit/xor (* h 31) …)))` read as `any` and `(* h 31)` as
         // `number`, while the fold as a whole was already known to be an int.
-        let seeded_callback = fold_callback_seed(heap, form, &items, ctx)
-            .or_else(|| element_callback_seed(heap, &items, ctx))
-            .or_else(|| arrow_callback_seed(heap, &items, ctx));
+        let seeded_callback = callback_seed(heap, form, &items, ctx, &literal_fits(heap));
         // A body sequence threads its scope: a **guard that diverges** narrows every form
         // after it (see [`diverging_guard_scope`]). Only for a `do` — in any other form
         // the items are arguments, evaluated in one scope, and there is no "after".

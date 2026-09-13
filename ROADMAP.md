@@ -330,13 +330,24 @@ surface feeding it — and each turned out to need a different kind of fix. Deta
       inferencer no longer loses nested demands cross-module; the checker materialises every
       module a loaded body names, so a leaf `sig` (`text/char->line`) reaches what derives from
       it without re-declaring the derived function.
-- [x] **7. Caller-derived parameter types** (ADR-341, 2026-09-13; every single-arm function the file defines, public or private — the type is a fact about the file's calls, not about privacy). The walk checked a
-      body under its parameters' bottom-up *demands* (`(+ i 1)` says `number`) with no view of
-      what the callers pass; a private function's caller set is closed, so the union of the
-      call sites' argument types is a sound binding when the name never escapes as a value.
-      Pass 2.9: a least fixpoint over the file's call sites, jointly with the private returns,
-      the sites read in the scope the walk sees. `std/json.blsp` is strict-zero with NO
-      signature on its parser chain (`hex-val`'s and `json-value`'s went too).
+- [x] **7. Caller-derived parameter types** (ADR-341, 2026-09-13). The walk checked a body
+      under its parameters' bottom-up *demands* (`(+ i 1)` says `number`) with no view of what
+      the callers pass. Pass 2.9: every single-arm function the file defines, public or private
+      (the derived type is a fact about the file's calls, not about privacy), bound to the union
+      of what its sites hand it — a least fixpoint over the file's call sites, jointly with the
+      returns, the sites read in the scope the walk sees; a handover to a combinator is a site
+      of what the combinator promises (`map`'s element, `fold`'s accumulator, a declared arrow),
+      and only a promise-less use (`apply`, a value in a map) escapes. `std/json.blsp` is
+      strict-zero with NO signature on its parser chain.
+- [x] **8. An arrow in head position describes the call** (ADR-346, 2026-09-13). `((cur 1) "x")`
+      and `((get handlers :k) msg)` were inert; they now type as the arrow's result, with exact
+      arity and the one per-argument rule a named callee gets.
+- [ ] **9. A fixed-length list has no shape type.** `(list a b)` is `list<A | B>`, so `(first
+      (list m '(…)))` reads `pair | map`; a positional shape for the pair member, the sibling of
+      `(tuple …)` for vectors, would read it exactly.
+- [ ] **10. Recursive types.** A value type that nests itself (`json`'s
+      `vector<… | vector<…>>`) is cut at a depth by `Ty::widened_below`; a one-level unroll of a
+      named recursive type would say it exactly.
 
 
 ### Standard-library surface audit — the bare namespace (2026-08-26)

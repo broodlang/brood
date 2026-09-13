@@ -294,6 +294,15 @@ fn expr_ty_inner(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                         items[1..].iter().map(|&a| expr_ty(heap, a, ctx)).collect();
                     return lambda_ret(heap, head, &inputs, ctx);
                 }
+                // **A computed callee whose type is an arrow** — `((cur 1) "x")` under
+                // `(sig cur (int -> (string -> int)))`, `((get handlers :k) msg)` over a
+                // record of arrows: the arrow's result is the call's, as a local arrow's
+                // is for `(f 1)` below. The walk checks the arguments against the same
+                // arrow (`walk::check_computed_call`). Unknown, not `any`, when the head
+                // has no arrow type: nothing is known of what it returns.
+                if let Some(sig) = expr_ty(heap, head, ctx).as_ref().and_then(Ty::as_arrow) {
+                    return Some(sig.ret.clone());
+                }
             }
             match items.first().copied() {
                 // **Keyword accessor** `(:key coll [default])` (ADR-165) — the same

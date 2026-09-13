@@ -685,3 +685,76 @@ fn a_file_local_declaration_constrains_its_callers_in_that_file() {
         "a shadowing local must not inherit the global's declared parameters: {w:?}"
     );
 }
+
+#[test]
+fn a_computed_callee_with_an_arrow_type_describes_the_call_it_heads() {
+    // An arrow in HEAD position — a curried function's partial application, a handler
+    // read out of a record — was inert: nothing typed the result and nothing checked the
+    // arguments. The same arrow rule a local's arrow gets (`an_arrow_parameter_…` above).
+
+    // The result flows…
+    let w = file_warnings(
+        r#"
+        (sig cur (int -> (string -> int)))
+        (defn cur (n) (fn (s) (+ n (string/length s))))
+        (defn use-it () (string/length ((cur 1) "x")))
+        "#,
+    );
+    assert!(
+        w.iter()
+            .any(|s| s.contains("string/length: argument 1 expects string, got int")),
+        "the call's result should be the arrow's return type: {w:?}"
+    );
+
+    // …the arguments are checked against the arrow's parameters, and the arity is exact.
+    let w = file_warnings(
+        r#"
+        (sig cur (int -> (string -> int)))
+        (defn cur (n) (fn (s) (+ n (string/length s))))
+        (defn use-it () ((cur 1) 2))
+        "#,
+    );
+    assert!(
+        w.iter()
+            .any(|s| s.contains("(cur 1): argument 1 expects string, got 2 (2)")),
+        "the argument should be checked against the arrow's parameter: {w:?}"
+    );
+    let w = file_warnings(
+        r#"
+        (sig cur (int -> (string -> int)))
+        (defn cur (n) (fn (s) (+ n (string/length s))))
+        (defn use-it () ((cur 1) "a" "b"))
+        "#,
+    );
+    assert!(
+        w.iter()
+            .any(|s| s.contains("(cur 1)") && s.contains("expected 1 argument, got 2")),
+        "the arrow's arity is exact: {w:?}"
+    );
+
+    // A handler read from a record of lambdas: the literal's own arrow, `(any… -> R)`.
+    let w = file_warnings(
+        r#"
+        (defn handlers () {:len (fn (s) (string/length s)) :neg (fn (n) (- 0 n))})
+        (defn use-it (h) (string/length ((get (handlers) :len) "x")))
+        "#,
+    );
+    assert!(
+        w.iter()
+            .any(|s| s.contains("string/length: argument 1 expects string, got int")),
+        "a record field's arrow types the call: {w:?}"
+    );
+
+    // A correct use stays silent, and a head with no arrow type says nothing.
+    let w = file_warnings(
+        r#"
+        (sig cur (int -> (string -> int)))
+        (defn cur (n) (fn (s) (+ n (string/length s))))
+        (defn use-it (g) (+ ((cur 1) "x") ((g 1) 2)))
+        "#,
+    );
+    assert!(
+        w.is_empty(),
+        "a correct use of a computed callee must be silent: {w:?}"
+    );
+}

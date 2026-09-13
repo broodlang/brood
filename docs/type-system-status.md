@@ -985,9 +985,14 @@ the name never escapes as a value — is what removes those, and it needs its ow
 (a second walk per file, or a stored-scope collection pass).
 
 **Still deferred, unchanged**: return-type dispatch, Tier-2 monomorphization, true recursive
-types, contract blame and contracts-by-default, parametric abilities, view patterns; the
-computed-callee `((cur 1) "x")` (an arrow in head position is not consulted); strict's arrow
-inclusion reading an unknown lambda result as `any` rather than `?`.
+types, contract blame and contracts-by-default, parametric abilities, view patterns; strict's
+arrow inclusion reading an unknown lambda result as `any` rather than `?`. The computed
+callee `((cur 1) "x")` is no longer on this list (2026-09-13): an arrow in head position
+describes the call as a named function's signature does — the result is the arrow's, the
+arity is exact and each argument meets its parameter through the one per-argument rule
+(`walk::check_arg_against_param`, extracted so a named and a computed callee cannot
+diverge; `check_computed_call`). A record of handlers `{:len (fn (s) …)}` types
+`((get h :len) "x")` from the literal's own arrow.
 
 ## Caller-derived parameter types (2026-09-13, ADR-341)
 
@@ -1007,9 +1012,17 @@ to collapse to a bare `vector` past the term cap); and a widening operator
 (`Ty::widened_below`) for the round when a JSON value's `vector<… | vector<…>>` would otherwise
 nest one level deeper forever.
 
-What derivation does NOT reach, by design: a function used as a value (`(map xs helper)`), a
-file with an unexpanded macro call, callers in another file (`(:use-internals mod)`
-included) — those read the demand-based loaded inference as before. And what it surfaced in
+What derivation does NOT reach, by design: a function handed somewhere with no promise of
+what it will be called with (`(apply helper xs)`, a value in a map, an argument to an
+unknown function), a file with an unexpanded macro call, callers in another file
+(`(:use-internals mod)` included) — those read the demand-based loaded inference as before.
+A HANDOVER to a combinator is not an escape (third cut, the same day): `(map xs helper)`
+calls `helper` with `xs`'s elements, `(fold xs init helper)` with the fold's accumulator and
+an element, a callee with a declared or inferred arrow with that arrow's parameters — the
+three promises the walk already seeds a `fn` literal's parameters from (`walk::callback_seed`,
+now one entry with a caller-supplied "does this argument fit" predicate), and each is a site
+of those types (`Site::Handover`). The fold case is a joint fixpoint with the callback's own
+return, as the `fn`-literal seed always was. And what it surfaced in
 `json` was the `nth`-answers-`nil | int` class once more (`(digit? (nth s i))` under a `(< i
 n)` the checker cannot tie to it): `(nth s i -1)` says what the guard says, and a `->number`
 after `strict-number?` unwraps the failure it cannot get.
