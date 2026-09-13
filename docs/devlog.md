@@ -865,6 +865,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-13** — the checker types a `def-` literal like a `def` one: Gap A reads `top_level_defs`, so a private `(def- k 10)` is an `int`, not `dynamic()` — bedit's strict count 13 → 0
 - **2026-09-13** — `--version` says `-dirty`: a binary whose `crates/`/`std/` differed from its commit is no longer indistinguishable from a clean build of the same sha; `make doctor` names it; build.rs re-runs from a worktree too
 - **2026-09-13** — tabs are a column-dependent cluster (ADR-342): `display-width` / `width->index` take `start-col` + `tab-width`, `string/expand-tabs` is the third leg, the GUI paints a raw tab to the screen stop; the scroll blit (ADR-343): a dirty strip that is a translation of old canvas rows is copied, not drawn — a 1080p scroll paints in 2.3 ms, not 10; `ui-coalesce-motion` collapses a `:move` flood like a `:drag` one; `:close-is-input?` lets an app ask before the X button quits; `buffer-file-changed?` — a buffer stamps its file's mtime at read/save
+- **2026-09-13** — `editor/buffer-registry` (ADR-345): a named directory of buffer processes — share-once, enumeration, membership notifications — the seam a second frame (a process with its own window) joins the same buffers through
 
 ---
 
@@ -13281,3 +13282,16 @@ half of ADR-011, opt-in so every other app stays closeable for free; `ui_test` p
 paths). And `std/editor/buffer` stamps `:file-mtime` at `buffer-from-file` / `save-buffer`
 so `buffer-file-changed?` can say whether another writer touched the file since — the
 knowledge auto-revert and a save-time guard are built on (`buffer_test`).
+
+## 2026-09-13 — `editor/buffer-registry`: buffers are global by name (ADR-345)
+
+The editor wants Emacs frames — a second OS window over the same buffers. The sound
+shape is a second `ui-run` *process* whose pool slots link to the same buffer processes
+(the collab session with no network), and what that lacked was the directory:
+`registry-share` (the one process for a name, spawned on the first ask), `registry-entries`
+(a late joiner's list), `registry-watch` (created / killed / died notifications), and
+`registry-remove` (a kill is global). No mirror — the holders are the copies; a died
+process is announced and re-shared by whoever still has the text. `buffer_registry_test`
+pins share-once, the notifications, the died-then-reshared path and stop. The
+window-id-on-input alternative is recorded as the other half of ADR-059 and why a tag
+alone is not sound.

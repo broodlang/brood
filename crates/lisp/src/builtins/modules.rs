@@ -524,6 +524,7 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // + the pure push fold (echo suppression, splice transform over in-flight
     // edits, resync fallback) a subscriber uses to track a hosted document.
     embedded_module!("editor/buffer-client", "std/editor/buffer-client.blsp"),
+    embedded_module!("editor/buffer-registry", "std/editor/buffer-registry.blsp"),
     // The display/input seam (M3, ADR-046): `display` is the render-op protocol
     // (pure data constructors); `keymap` is the rebindable key→command dispatcher
     // shared by the line editor and the observer; `observer` is a process-viewer

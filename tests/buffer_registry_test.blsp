@@ -1,0 +1,85 @@
+;; editor/buffer-registry — the named directory of buffer processes (a second frame, a
+;; remote session and a mirror share one buffer set through it).
+(defmodule buffer-registry-test
+  (:use test)
+  (:use editor/buffer)
+  (:use editor/buffer-registry))
+
+(defn- drain (acc)
+  "Every `[:registry-…]` notification already in the mailbox, oldest first."
+  (receive
+    ([:registry-added n p meta] (drain (cons [:added n meta] acc)))
+    ([:registry-removed n why] (drain (cons [:removed n why] acc)))
+    (after 0 (reverse acc))))
+
+(describe "buffer-registry"
+  (test "the first share spawns the process, later ones get the same pid, entries list it"
+    (let (reg (registry-start)
+          a (registry-share reg "notes" "hello" {:file "/tmp/notes" :type :text})
+          b (registry-share reg "notes" "IGNORED" {:file "/tmp/notes" :type :text}))
+      (is (pid? a))
+      (assert= a b)
+      ;; the process holds the FIRST text
+      (assert= (buffer-query a buffer-text) "hello")
+      (let (entries (registry-entries reg))
+        (assert= (count entries) 1)
+        (assert= (:name (first entries)) "notes")
+        (assert= (:proc (first entries)) a)
+        (assert= (get-in (first entries) [:meta :type]) :text))
+      (registry-stop reg)))
+  (test "a watcher is told of every share and remove; remove stops the process"
+    (let (reg (registry-start))
+      (registry-watch reg (self))
+      (let (a (registry-share reg "a" "" {})
+            _ (registry-share reg "b" "" {})
+            _ (registry-share reg "a" "" {}))
+        ; a repeat share announces nothing
+        (registry-remove reg "a")
+        ;; the round-trips above are barriers: every notification is queued by now
+        (assert= (drain '()) (list [:added "a" {}] [:added "b" {}] [:removed "a" :killed]))
+        (assert= (map (registry-entries reg) :name) (list "b"))
+        (assert= (registry-remove reg "nope") nil)
+        ;; the removed process is gone: an edit reaches nobody
+        (is (nil? (proc/info a))) ; stopped: no 2 s stop-buffer timeout
+        (registry-unwatch reg (self))
+        (registry-remove reg "b")
+        (assert= (registry-entries reg) []) ; barrier
+        (assert= (drain '()) (list))) ; unwatched: no :removed for b
+      (registry-stop reg)))
+  (test "a process that dies is dropped and announced :died; a re-share spawns afresh"
+    (let (reg (registry-start))
+      (registry-watch reg (self))
+      (let (a (registry-share reg "x" "text" {}))
+        (exit a :kill)
+        ;; the registry learns of the death through its monitor (a third process), so
+        ;; this is the one place that polls — bounded, not a guessed delay
+        (let (gone (fn (tries)
+                     (cond
+                       (empty? (registry-entries reg)) true
+                       (= tries 0) false
+                       else (do (sleep 10) (gone (dec tries))))))
+          (is (gone 200)))
+        (let (b (registry-share reg "x" "text again" {}))
+          (is (not (= a b)))
+          (assert= (buffer-query b buffer-text) "text again")
+          (assert= (drain '()) (list [:added "x" {}] [:removed "x" :died] [:added "x" {}]))))
+      (registry-stop reg)))
+  (test "registry-stop ends every process and answers the count"
+    (let (reg (registry-start)
+          a (registry-share reg "p" "" {})
+          b (registry-share reg "q" "" {}))
+      (assert= (registry-stop reg) 2)
+      (is (nil? (proc/info a))) ; stopped: no 2 s stop-buffer timeout
+      (is (nil? (proc/info b))))))
+
+(describe "buffer-registry — a re-share that outruns the death notice"
+  (test "sharing a name whose process is dead spawns afresh even before the [:down] is folded"
+    (let (reg (registry-start)
+          a (registry-share reg "x" "text" {}))
+      ;; kill and IMMEDIATELY re-share: the registry's own [:down] may still be queued
+      (exit a :kill)
+      (let (b (registry-share reg "x" "again" {}))
+        (is (not (= a b)))
+        (is (not (nil? (proc/info b))))
+        (assert= (buffer-query b buffer-text) "again"))
+      (registry-stop reg))))

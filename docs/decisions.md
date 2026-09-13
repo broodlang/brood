@@ -22382,3 +22382,41 @@ lookup miss while a frame is open; every other process's lookup falls straight t
 table, and the inline-cache HIT path is untouched. The lazy-load test's first-use and JIT units
 now observe from a child `brood`: ADR-340's checker materialisation loads the fixture
 in-process before the unit runs, so nothing in this process can be "not yet loaded".
+## ADR-345 — Buffers are global by name: a registry of buffer processes, and a frame is a process that joins it
+
+**Context.** A buffer process (`spawn-buffer`, ADR-134) lets several holders edit and
+watch one document — bedit's hosted flip backs every pool buffer with one, and its
+collab session shares files across sessions through a private `{path → process}` loop.
+The editor's next need is Emacs *frames*: a second OS window over the SAME buffers.
+Two ways: (1) a second window driven by the editor's own process, which needs a window id
+on every input message and a per-window mailbox to be sound — a tag alone is not, since
+the loop's poll keeps a catch-all arm for async replies that would swallow the other
+window's tagged keys; (2) a second `ui-run` process with its own window, whose slots are
+linked to the same buffer processes — the collab session with no network and every
+buffer shared, not just files. What (2) lacks is the directory: the one process for a
+NAME, an enumeration for a holder that joins late, and membership notifications for one
+that watches.
+
+**Decision.** `std/editor/buffer-registry`: a registry process keyed by buffer name.
+`registry-share name text meta` answers the one process for the name (spawned on the
+first ask, the existing pid after — serialised in the registry, so two askers cannot
+both spawn); `registry-entries` lists them; `registry-remove` stops one everywhere (a
+kill is global, as in Emacs); a `registry-watch`er is sent `[:registry-added name proc
+meta]` and `[:registry-removed name :killed|:died]`. The registry keeps no mirror: a
+process that dies is dropped and announced, a holder that still has the text re-shares,
+and everyone else relinks on the `:added` that follows. Frames are (2): one process per
+window, which is the routing the runtime already mandates (ADR-058/059).
+
+**Consequences.** A local frame and a remote `--attach` window become the same thing at
+different distances, both clients of the registry. The window-id-on-input half of
+ADR-059 stays deferred, now with the reason recorded: it is only needed for (1), and its
+sound form is a per-window mailbox. bedit's collab registry (keyed by path, with a text
+mirror for respawn) is a candidate client of this module — left as is, so its respawn
+semantics and tests stay untouched.
+
+**Alternatives rejected.** *Stamp the window id and keep one process* — see above.
+*Extend `editor/serve`* — a served session owns its own pool by design (independent
+sessions); sharing is a property of the buffers, not of the session protocol. *The
+registry mirrors every buffer's text* — the collab loop does, for a daemon whose
+holders are remote and may all be gone when a process dies; here the holders are local
+frames that outlive their windows' buffers, so the copies already exist.
