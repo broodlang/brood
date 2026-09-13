@@ -62,6 +62,18 @@ pub(super) fn gui_damage_enabled() -> bool {
     })
 }
 
+/// The scroll blit (`strip_blits`) is on by default; `BROOD_GUI_BLIT=0` rasterises
+/// every dirty strip instead — the escape hatch if a translated strip ever differs
+/// from a drawn one. Read once.
+pub(super) fn gui_blit_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("BROOD_GUI_BLIT")
+            .map(|v| v != "0")
+            .unwrap_or(true)
+    })
+}
+
 /// A region's `dy-frac` (in cell units) as a pixel offset that the coordinate math
 /// can safely subtract. A non-finite `dy-frac` casts to 0 — no scroll — which is the
 /// only defensible reading of "shift by NaN".
@@ -212,44 +224,397 @@ impl Strips {
     }
 }
 
+/// A frame flattened for the diff: its leaves, each leaf's signed pixel band (`None`
+/// for one that paints nothing), and per strip the leaves whose band covers it.
+struct Leaves<'a> {
+    leaves: Vec<Entry<'a>>,
+    bands: Vec<Option<(isize, isize)>>,
+    per_strip: Vec<Vec<u32>>,
+}
+
+impl<'a> Leaves<'a> {
+    fn of(ops: &'a [Op], strips: &Strips, oy: usize, ch: usize) -> Leaves<'a> {
+        let mut leaves = Vec::new();
+        flatten(ops, ch, 0, &mut leaves);
+        let bands: Vec<Option<(isize, isize)>> =
+            leaves.iter().map(|e| op_band(e.op, e.dy, oy, ch)).collect();
+        let mut per_strip = vec![Vec::new(); strips.count];
+        for (i, band) in bands.iter().enumerate() {
+            if let Some((top, bottom)) = band {
+                for k in strips.covering(*top, *bottom) {
+                    per_strip[k].push(i as u32);
+                }
+            }
+        }
+        Leaves {
+            leaves,
+            bands,
+            per_strip,
+        }
+    }
+
+    /// The leaves whose band overlaps the pixel rows `[y0, y1)`, in frame order — what
+    /// a strip's `per_strip` list is, for an arbitrary band.
+    fn covering(&self, y0: usize, y1: usize) -> impl Iterator<Item = usize> + '_ {
+        let (y0, y1) = (y0 as isize, y1 as isize);
+        self.bands
+            .iter()
+            .enumerate()
+            .filter(move |(_, b)| matches!(b, Some((top, bottom)) if *top < y1 && *bottom > y0))
+            .map(|(i, _)| i)
+    }
+}
+
 /// Which strips of the framebuffer must be re-rasterised to turn the frame `old`
 /// painted into the frame `new` would paint: those whose sequence of covering leaf
 /// ops differs — an op added, removed, changed, reordered, or shifted by a scroll
 /// region. Per strip, the ops are compared as values (`Op: PartialEq`), so an
 /// identical frame dirties nothing and a one-line edit dirties one strip. Returns a
 /// bool per strip.
-fn strip_diff(new: &[Op], old: &[Op], strips: &Strips, oy: usize, ch: usize) -> Vec<bool> {
-    // The leaf sequences covering each strip, as indices into the flattened lists.
-    fn by_strip<'a>(
-        ops: &'a [Op],
-        strips: &Strips,
-        oy: usize,
-        ch: usize,
-    ) -> (Vec<Entry<'a>>, Vec<Vec<u32>>) {
-        let mut leaves = Vec::new();
-        flatten(ops, ch, 0, &mut leaves);
-        let mut per = vec![Vec::new(); strips.count];
-        for (i, e) in leaves.iter().enumerate() {
-            if let Some((top, bottom)) = op_band(e.op, e.dy, oy, ch) {
-                for k in strips.covering(top, bottom) {
-                    per[k].push(i as u32);
-                }
-            }
-        }
-        (leaves, per)
-    }
-    let (new_leaves, new_per) = by_strip(new, strips, oy, ch);
-    let (old_leaves, old_per) = by_strip(old, strips, oy, ch);
+fn strip_diff(new: &Leaves, old: &Leaves, strips: &Strips) -> Vec<bool> {
     (0..strips.count)
         .map(|k| {
-            let (a, b) = (&new_per[k], &old_per[k]);
+            let (a, b) = (&new.per_strip[k], &old.per_strip[k]);
             a.len() != b.len()
                 || a.iter().zip(b).any(|(&i, &j)| {
-                    let (x, y) = (&new_leaves[i as usize], &old_leaves[j as usize]);
+                    let (x, y) = (&new.leaves[i as usize], &old.leaves[j as usize]);
                     x.dy != y.dy || x.op != y.op
                 })
         })
         .collect()
+}
+
+// ---- the scroll blit ----------------------------------------------------------
+//
+// A scroll changes every strip of a pane, so the strip diff alone re-rasterises the
+// whole pane — 6 ms of glyph blitting at 1080p, four times that on a 4K display — for
+// pixels the canvas already holds one line up or down. The blit finds them: a dirty
+// strip whose ops are the previous frame's ops at some other rows, TRANSLATED by a whole
+// number of pixels, paints exactly the pixels the retained canvas has there, so those
+// rows are copied instead of drawn. Only the strips that really changed (the line
+// scrolled in, the mode line's `L12`, the scrollbar thumb) are rasterised.
+//
+// The rule is exact, not heuristic: a strip's pixels are a function of the leaves
+// whose band overlaps it, each painted at a position; if the new strip's leaves are
+// the old band's leaves in the same order, each the same op at a position `delta`
+// pixels lower (a text line, the cursor, a one-row band), or a solid fill that covers
+// both bands entirely (the gutter wash, a divider, the frame clear — a fill has no
+// row-dependent pixels away from its corners), the strips are pixel-identical. Bands are
+// conservative (`op_band`), so a leaf that only nearly touches the strip can veto a
+// blit but never fake one.
+
+/// The pixel top of a leaf that is a translatable cell-row op (text, cursor, a rect), as
+/// `op_band` places it; `None` for the others.
+fn leaf_top(op: &Op, dy: isize, oy: usize, ch: usize) -> Option<isize> {
+    match op {
+        Op::Text { row, .. } | Op::Cursor { row, .. } | Op::Rect { row, .. } => {
+            Some(oy as isize + *row as isize * ch as isize - dy)
+        }
+        _ => None,
+    }
+}
+
+/// Whether painting `new` into the rows `[y0, y1)` produces the pixels `old` painted
+/// into `[y0 - delta, y1 - delta)`: the same op translated by `delta` pixels, or a solid
+/// fill that covers both bands with its straight part (rounded corners kept `radius`
+/// clear of the bands, and a hairline's snap slop on top).
+fn leaf_translates(
+    new: &Entry,
+    old: &Entry,
+    delta: isize,
+    (y0, y1): (isize, isize),
+    oy: usize,
+    cw: usize,
+    ch: usize,
+) -> bool {
+    let (src0, src1) = (y0 - delta, y1 - delta);
+    let ch_i = ch as isize;
+    let covers = |top: f32, bottom: f32, margin: f32, lo: isize, hi: isize| {
+        top + margin <= lo as f32 && bottom - margin >= hi as f32
+    };
+    match (new.op, old.op) {
+        (Op::Clear, Op::Clear) => true,
+        (
+            Op::Text {
+                row: nr,
+                col: nc,
+                s: ns,
+                face: nf,
+            },
+            Op::Text {
+                row: or,
+                col: oc,
+                s: os,
+                face: of,
+            },
+        ) => {
+            nc == oc
+                && nf == of
+                && ns == os
+                && oy as isize + *nr as isize * ch_i - new.dy
+                    == oy as isize + *or as isize * ch_i - old.dy + delta
+        }
+        (
+            Op::Cursor {
+                row: nr,
+                col: nc,
+                style: nst,
+            },
+            Op::Cursor {
+                row: or,
+                col: oc,
+                style: ost,
+            },
+        ) => {
+            nc == oc
+                && nst == ost
+                && oy as isize + *nr as isize * ch_i - new.dy
+                    == oy as isize + *or as isize * ch_i - old.dy + delta
+        }
+        (
+            Op::Rect {
+                row: nr,
+                col: nc,
+                w: nw,
+                h: nh,
+                face: nf,
+                radius: nrad,
+            },
+            Op::Rect {
+                row: or,
+                col: oc,
+                w: ow,
+                h: oh,
+                face: of,
+                radius: orad,
+            },
+        ) => {
+            if nc != oc || nw != ow || nf != of || nrad != orad {
+                return false;
+            }
+            let ntop = oy as isize + *nr as isize * ch_i - new.dy;
+            let otop = oy as isize + *or as isize * ch_i - old.dy;
+            if nh == oh && ntop == otop + delta {
+                return true;
+            }
+            // a solid fill: the same pixels wherever it is, away from its corners
+            let margin = if *nrad > 0.0 {
+                (nrad * cw as f32).ceil() + 1.0
+            } else {
+                0.0
+            };
+            covers(
+                ntop as f32,
+                (ntop + *nh as isize * ch_i) as f32,
+                margin,
+                y0,
+                y1,
+            ) && covers(
+                otop as f32,
+                (otop + *oh as isize * ch_i) as f32,
+                margin,
+                src0,
+                src1,
+            )
+        }
+        (
+            Op::FRect {
+                x: nx,
+                y: ny,
+                w: nw,
+                h: nh,
+                face: nf,
+                opacity: nop,
+                radius: nrad,
+            },
+            Op::FRect {
+                x: ox_,
+                y: oy_,
+                w: ow,
+                h: oh,
+                face: of,
+                opacity: oop,
+                radius: orad,
+            },
+        ) => {
+            if nx != ox_ || nw != ow || nf != of || nop != oop || nrad != orad {
+                return false;
+            }
+            let ntop = oy as f32 + ny * ch as f32 - new.dy as f32;
+            let otop = oy as f32 + oy_ * ch as f32 - old.dy as f32;
+            if !(ntop.is_finite() && otop.is_finite()) {
+                return false;
+            }
+            if nh == oh && (ntop - otop - delta as f32).abs() < 1e-3 {
+                return true;
+            }
+            // the same slop `op_band` allows a hairline's snap, plus the corners
+            let margin = nrad * cw as f32 + 5.0;
+            covers(ntop, ntop + nh * ch as f32, margin, y0, y1)
+                && covers(otop, otop + oh * ch as f32, margin, src0, src1)
+        }
+        // bitboards and column spans ignore the scroll shift and are never translated
+        _ => false,
+    }
+}
+
+/// The pixel translations that could carry an old leaf onto the first translatable
+/// leaf of the new strip `k`: for each old leaf equal to it up to its row, the
+/// difference of their tops. The candidates a strip's blit is tried at.
+fn blit_deltas(new: &Leaves, old: &Leaves, k: usize, oy: usize, ch: usize) -> Vec<isize> {
+    let mut deltas = Vec::new();
+    for &i in &new.per_strip[k] {
+        let leaf = &new.leaves[i as usize];
+        let Some(top) = leaf_top(leaf.op, leaf.dy, oy, ch) else {
+            continue;
+        };
+        // a whole-pane rect anchors nothing (it matches anywhere by covering)
+        if matches!(leaf.op, Op::Rect { h, .. } if *h > 1) {
+            continue;
+        }
+        for old_leaf in &old.leaves {
+            let Some(old_top) = leaf_top(old_leaf.op, old_leaf.dy, oy, ch) else {
+                continue;
+            };
+            let same = match (leaf.op, old_leaf.op) {
+                (
+                    Op::Text {
+                        col: a,
+                        s: sa,
+                        face: fa,
+                        ..
+                    },
+                    Op::Text {
+                        col: b,
+                        s: sb,
+                        face: fb,
+                        ..
+                    },
+                ) => a == b && fa == fb && sa == sb,
+                (
+                    Op::Cursor {
+                        col: a, style: sa, ..
+                    },
+                    Op::Cursor {
+                        col: b, style: sb, ..
+                    },
+                ) => a == b && sa == sb,
+                (
+                    Op::Rect {
+                        col: a,
+                        w: wa,
+                        h: ha,
+                        face: fa,
+                        radius: ra,
+                        ..
+                    },
+                    Op::Rect {
+                        col: b,
+                        w: wb,
+                        h: hb,
+                        face: fb,
+                        radius: rb,
+                        ..
+                    },
+                ) => a == b && wa == wb && ha == hb && fa == fb && ra == rb,
+                _ => false,
+            };
+            let delta = top - old_top;
+            if same && delta != 0 && !deltas.contains(&delta) {
+                deltas.push(delta);
+            }
+        }
+        // one anchor is enough: every other leaf still has to agree
+        if !deltas.is_empty() {
+            break;
+        }
+    }
+    deltas
+}
+
+/// Whether dirty strip `k` (pixel rows `[y0, y1)`) is the old frame's band
+/// `[y0 - delta, y1 - delta)` translated: every new leaf covering the strip pairs, in
+/// order, with an old leaf covering the source band under `leaf_translates`.
+fn strip_translates(
+    new: &Leaves,
+    old: &Leaves,
+    k: usize,
+    delta: isize,
+    (y0, y1): (usize, usize),
+    fb_h: usize,
+    oy: usize,
+    cw: usize,
+    ch: usize,
+) -> bool {
+    let (src0, src1) = (y0 as isize - delta, y1 as isize - delta);
+    if src0 < 0 || src1 > fb_h as isize {
+        return false;
+    }
+    let new_leaves = &new.per_strip[k];
+    let mut old_leaves = old.covering(src0 as usize, src1 as usize);
+    for &i in new_leaves {
+        let Some(j) = old_leaves.next() else {
+            return false;
+        };
+        if !leaf_translates(
+            &new.leaves[i as usize],
+            &old.leaves[j],
+            delta,
+            (y0 as isize, y1 as isize),
+            oy,
+            cw,
+            ch,
+        ) {
+            return false;
+        }
+    }
+    old_leaves.next().is_none()
+}
+
+/// For every dirty full-height cell-row strip that is a translation of pixels the
+/// canvas already holds, `(k, source_y0)`: strip `k`'s rows are copied from the old
+/// canvas rows starting at `source_y0` instead of rasterised. The translation that
+/// carried the previous strip is tried first — a scroll moves a whole pane by one
+/// delta — then the ones the strip's own anchor suggests.
+#[allow(clippy::too_many_arguments)]
+fn strip_blits(
+    new: &Leaves,
+    old: &Leaves,
+    dirty: &[bool],
+    strips: &Strips,
+    fb_h: usize,
+    oy: usize,
+    cw: usize,
+    ch: usize,
+) -> Vec<(usize, usize)> {
+    let mut blits = Vec::new();
+    let mut last_delta: Option<isize> = None;
+    for k in 1..strips.count {
+        if !dirty[k] {
+            continue;
+        }
+        let (y0, y1) = strips.rows(k);
+        if y1 - y0 != ch {
+            continue; // a partial strip at the bottom: its rows are its own
+        }
+        let mut candidates = Vec::new();
+        if let Some(d) = last_delta {
+            candidates.push(d);
+        }
+        for d in blit_deltas(new, old, k, oy, ch) {
+            if !candidates.contains(&d) {
+                candidates.push(d);
+            }
+        }
+        for delta in candidates {
+            if strip_translates(new, old, k, delta, (y0, y1), fb_h, oy, cw, ch) {
+                blits.push((k, (y0 as isize - delta) as usize));
+                last_delta = Some(delta);
+                break;
+            }
+        }
+    }
+    blits
 }
 
 /// Merge runs of dirty strips into pixel bands `[y0, y1)` — one raster pass each.
@@ -340,6 +705,19 @@ pub(super) fn render_ops(
                 let mut cx = *col as usize;
                 let bg_packed = pack(bg);
                 for g in s.graphemes(true) {
+                    // A raw tab — the frontend has no line column to measure from, so
+                    // it advances to the next SCREEN stop, as a terminal would (an app
+                    // that wants the line's stops expands first: `string/expand-tabs`).
+                    // Background only: a tab has no glyph.
+                    if g == "\t" {
+                        let cells = cluster_cells_at(g, cx, TAB_WIDTH); // base cells to the stop
+                        if paint_bg {
+                            let left = ox + cx * cw;
+                            fill_cell(canvas, left, render_top, cells * cw, visible_h, bg_packed);
+                        }
+                        cx += cells;
+                        continue;
+                    }
                     let cells = cluster_cells(g);
                     if cells == 0 {
                         // zero-width (a lone combining mark): nothing to advance.
@@ -553,8 +931,11 @@ pub(super) fn render_ops(
 /// Rasterise `frame` into the renderer's retained canvas (sized `fb_w`×`fb_h`),
 /// re-rendering only the strips the diff against the previous frame marks dirty —
 /// or everything, when the canvas is fresh/resized, the diff is disabled, or
-/// `force` (the caller wants a clean full render). Records the frame as the new
-/// previous one and returns the pixel bands `[y0, y1)` that were repainted.
+/// `force` (the caller wants a clean full render). A dirty strip that is a translation
+/// of pixels the canvas already holds (a scroll, `strip_blits`) is copied, not drawn.
+/// Records the frame as the new previous one and returns the pixel bands `[y0, y1)`
+/// whose pixels changed — drawn or copied — for the present. `Renderer::blit_rows` counts
+/// the copied rows for the trace.
 pub(super) fn raster_frame(
     r: &mut Renderer,
     frame: &[Op],
@@ -571,18 +952,47 @@ pub(super) fn raster_frame(
         r.canvas_size = (fb_w, fb_h);
     }
     let same = frame == r.prev_ops.as_slice();
-    let bands = if fresh || force || r.prev_ops.is_empty() || !gui_damage_enabled() {
-        vec![(0, fb_h)]
-    } else if same {
-        Vec::new()
-    } else {
-        dirty_bands(&strip_diff(frame, &r.prev_ops, &strips, oy, ch), &strips)
-    };
+    // `changed`: every band whose pixels differ after this raster (what the present
+    // ships); `raster`: the subset drawn; `blits`: the strips copied from old rows.
+    let (changed, raster, blits) =
+        if fresh || force || r.prev_ops.is_empty() || !gui_damage_enabled() {
+            (vec![(0, fb_h)], vec![(0, fb_h)], Vec::new())
+        } else if same {
+            (Vec::new(), Vec::new(), Vec::new())
+        } else {
+            let new = Leaves::of(frame, &strips, oy, ch);
+            let old = Leaves::of(&r.prev_ops, &strips, oy, ch);
+            let mut dirty = strip_diff(&new, &old, &strips);
+            let changed = dirty_bands(&dirty, &strips);
+            let blits = if gui_blit_enabled() {
+                strip_blits(&new, &old, &dirty, &strips, fb_h, oy, cw, ch)
+            } else {
+                Vec::new()
+            };
+            for &(k, _) in &blits {
+                dirty[k] = false;
+            }
+            (changed, dirty_bands(&dirty, &strips), blits)
+        };
     let bg0 = pack(r.bg());
     // The canvas leaves the renderer for the duration of the raster (the primitives
     // borrow both), and comes back untouched in shape.
     let mut pixels = std::mem::take(&mut r.canvas);
-    for &(y0, y1) in &bands {
+    r.blit_rows = blits.len() * ch;
+    // The blits first, all sources read before any destination is written: two
+    // panes can scroll opposite ways, so a destination may be another's source.
+    if !blits.is_empty() {
+        let mut sources = Vec::with_capacity(blits.len() * ch * fb_w);
+        for &(_, src_y0) in &blits {
+            sources.extend_from_slice(&pixels[src_y0 * fb_w..(src_y0 + ch) * fb_w]);
+        }
+        for (n, &(k, _)) in blits.iter().enumerate() {
+            let (y0, _) = strips.rows(k);
+            pixels[y0 * fb_w..(y0 + ch) * fb_w]
+                .copy_from_slice(&sources[n * ch * fb_w..(n + 1) * ch * fb_w]);
+        }
+    }
+    for &(y0, y1) in &raster {
         let mut canvas = Canvas::band(&mut pixels, fb_w, fb_h, y0, y1);
         // The conventional frame opens with a full `:clear`; a frame that doesn't
         // still expects a clean background, and a strip repaint needs one either
@@ -594,7 +1004,7 @@ pub(super) fn raster_frame(
     if !same {
         r.prev_ops = frame.to_vec();
     }
-    bands
+    changed
 }
 
 pub(super) fn paint(
@@ -729,7 +1139,13 @@ pub(super) fn paint(
             let setup_us = us(t_setup.duration_since(t0));
             let body_us = us(t_body.duration_since(t_setup));
             let present_us = us(t_body.elapsed());
-            let rows: usize = bands.iter().map(|(a, b)| b - a).sum();
+            let blit = r.blit_rows;
+            // `rows` is what was drawn: the changed rows less the ones a blit copied
+            let rows: usize = bands
+                .iter()
+                .map(|(a, b)| b - a)
+                .sum::<usize>()
+                .saturating_sub(blit);
             let shipped: usize = rects.iter().map(|d| d.y1 - d.y0).sum();
             let aa = if r.subpixel_text() {
                 "subpixel"
@@ -737,7 +1153,7 @@ pub(super) fn paint(
                 "gray"
             };
             eprintln!(
-                "[gui-paint] {}us: fb={fb_w}x{fb_h} ops={op_count} rows={rows}/{fb_h} \
+                "[gui-paint] {}us: fb={fb_w}x{fb_h} ops={op_count} rows={rows}/{fb_h} blit={blit} \
                  shipped={shipped} clusters={clusters} misses={misses} build={build_us}us \
                  aa={aa} | setup={setup_us}us body={body_us}us present={present_us}us",
                 us(el)
@@ -1005,12 +1421,16 @@ mod strip_diff_tests {
     /// Which strips (cell rows, 1-based; 0 is the top margin) a change dirties.
     fn dirty_rows(new: &[Op], old: &[Op], oy: usize, ch: usize, fb_h: usize) -> Vec<usize> {
         let strips = Strips::new(oy, ch, fb_h);
-        strip_diff(new, old, &strips, oy, ch)
-            .iter()
-            .enumerate()
-            .filter(|(_, d)| **d)
-            .map(|(k, _)| k)
-            .collect()
+        strip_diff(
+            &Leaves::of(new, &strips, oy, ch),
+            &Leaves::of(old, &strips, oy, ch),
+            &strips,
+        )
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| **d)
+        .map(|(k, _)| k)
+        .collect()
     }
 
     #[test]
@@ -1063,7 +1483,11 @@ mod strip_diff_tests {
         let old = vec![text(0, "a")];
         let new = vec![Op::Clear, text(0, "a")];
         let strips = Strips::new(0, 10, 30);
-        let all: Vec<bool> = strip_diff(&new, &old, &strips, 0, 10);
+        let all: Vec<bool> = strip_diff(
+            &Leaves::of(&new, &strips, 0, 10),
+            &Leaves::of(&old, &strips, 0, 10),
+            &strips,
+        );
         // every strip that has rows (the top margin is empty at oy = 0)
         let mut with_rows = (0..strips.count).filter(|&k| strips.rows(k).1 > strips.rows(k).0);
         assert!(
@@ -1204,6 +1628,144 @@ mod strip_diff_tests {
             raster_frame(&mut full, frame, fb_w, fb_h, true);
             assert!(incremental.canvas == full.canvas, "frame {i} differs");
         }
+    }
+
+    /// The frames of a scrolling pane: the gutter wash and the divider stay, the
+    /// line-number/text rows shift by `top`, the mode line keeps its row and says where
+    /// we are. What `strip_blits` exists for.
+    fn scrolled_frame(top: usize, lines: &[&str], dy_frac: f32) -> Vec<Op> {
+        let rows = 5usize;
+        let mut body = vec![rect(0, rows as u16)]; // the gutter wash, taller than a strip
+        for r in 0..rows {
+            let line = top + r;
+            if line < lines.len() {
+                body.push(Op::Text {
+                    row: r as u16,
+                    col: 0,
+                    s: format!("{line:2}"),
+                    face: Face {
+                        fg: Some([120, 120, 120]),
+                        ..Face::default()
+                    },
+                });
+                body.push(text(r as u16, lines[line]));
+            }
+        }
+        vec![
+            Op::Clear,
+            Op::ScrollRegion { dy_frac, ops: body },
+            Op::Rect {
+                row: 0,
+                col: 7,
+                w: 1,
+                h: 6,
+                face: Face {
+                    bg: Some([80, 80, 80]),
+                    ..Face::default()
+                },
+                radius: 0.0,
+            },
+            text(5, &format!("L{top}")),
+        ]
+    }
+
+    /// Paint `frames` in sequence incrementally, checking each against a from-scratch
+    /// raster; returns the blitted row count of each frame.
+    fn blit_run(frames: &[Vec<Op>], fb_w: usize, fb_h: usize) -> Vec<usize> {
+        let mut incremental = Renderer::new(1.0, default_families(), 14.0);
+        let mut blitted = Vec::new();
+        for (i, frame) in frames.iter().enumerate() {
+            raster_frame(&mut incremental, frame, fb_w, fb_h, false);
+            blitted.push(incremental.blit_rows);
+            let mut full = Renderer::new(1.0, default_families(), 14.0);
+            raster_frame(&mut full, frame, fb_w, fb_h, true);
+            assert!(
+                incremental.canvas == full.canvas,
+                "frame {i}: a blitted raster differs from a full one"
+            );
+        }
+        blitted
+    }
+
+    #[test]
+    fn a_scroll_copies_the_rows_it_keeps_and_draws_only_the_new_ones() {
+        let lines = [
+            "alpha", "beta", "gamma", "delta", "eps", "zeta", "eta", "theta",
+        ];
+        let frames = [
+            scrolled_frame(0, &lines, 0.0),
+            scrolled_frame(1, &lines, 0.0), // one line: four strips copied, one drawn
+            scrolled_frame(3, &lines, 0.0), // two lines at once: three rows survive
+            scrolled_frame(2, &lines, 0.0), // and back down
+        ];
+        let ch = Renderer::new(1.0, default_families(), 14.0).cell_h;
+        // seven cell rows tall, so every row of the six-row frame is a full strip
+        let blitted = blit_run(&frames, 96, 7 * ch);
+        assert_eq!(blitted[0], 0, "the first frame has nothing to copy from");
+        assert_eq!(blitted[1], 4 * ch, "{blitted:?}");
+        assert_eq!(blitted[2], 3 * ch, "{blitted:?}");
+        assert_eq!(blitted[3], 4 * ch, "{blitted:?}");
+    }
+
+    #[test]
+    fn a_sub_cell_scroll_step_is_a_translation_too() {
+        let lines = [
+            "alpha", "beta", "gamma", "delta", "eps", "zeta", "eta", "theta",
+        ];
+        // the same top, gliding: every strip is the old canvas a few pixels up — except
+        // the ones a partially shown line enters or leaves
+        let frames = [
+            scrolled_frame(1, &lines, 0.0),
+            scrolled_frame(1, &lines, 0.25),
+            scrolled_frame(1, &lines, 0.5),
+            scrolled_frame(2, &lines, 0.0), // the snap: back to whole rows
+        ];
+        let ch = Renderer::new(1.0, default_families(), 14.0).cell_h;
+        let blitted = blit_run(&frames, 96, 7 * ch);
+        assert!(blitted[1] >= 2 * ch, "{blitted:?}");
+        assert!(blitted[2] >= 2 * ch, "{blitted:?}");
+        assert!(blitted[3] >= 2 * ch, "{blitted:?}");
+    }
+
+    #[test]
+    fn two_panes_scrolling_opposite_ways_copy_from_each_other_safely() {
+        let lines = [
+            "alpha", "beta", "gamma", "delta", "eps", "zeta", "eta", "theta",
+        ];
+        // pane A rows 0..4 scrolls down, pane B rows 4..8 scrolls up, in one frame:
+        // a destination strip of one is a source strip of the other
+        let pane = |top: usize, at: u16| -> Vec<Op> {
+            (0..4)
+                .filter(|r| top + r < lines.len())
+                .map(|r| text(at + r as u16, lines[top + r]))
+                .collect()
+        };
+        let frame = |a: usize, b: usize| {
+            let mut ops = vec![Op::Clear];
+            ops.extend(pane(a, 0));
+            ops.extend(pane(b, 4));
+            ops
+        };
+        let frames = [frame(1, 1), frame(2, 0), frame(0, 2)];
+        let ch = Renderer::new(1.0, default_families(), 14.0).cell_h;
+        let blitted = blit_run(&frames, 96, 7 * ch);
+        assert!(blitted[1] > 0 && blitted[2] > 0, "{blitted:?}");
+    }
+
+    #[test]
+    fn a_strip_that_only_looks_shifted_is_drawn_not_copied() {
+        // the text moves down a row but a cursor appears with it: the row it lands on
+        // is not a translation of any old band (no old strip had text + cursor)
+        let frames = [
+            vec![Op::Clear, text(0, "alpha"), text(1, "beta")],
+            vec![Op::Clear, text(1, "alpha"), text(2, "beta"), cursor(1)],
+        ];
+        let ch = Renderer::new(1.0, default_families(), 14.0).cell_h;
+        let blitted = blit_run(&frames, 96, 7 * ch);
+        assert_eq!(
+            blitted[1], ch,
+            "only `beta`'s new row is a pure translation: {blitted:?}"
+        );
     }
 
     /// A window whose width and height swap keeps its pixel count; the canvas must

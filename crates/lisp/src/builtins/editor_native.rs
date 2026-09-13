@@ -15,6 +15,7 @@
 //! were appended later, for the same order reason.
 
 use super::numeric::arg;
+use super::sequences::tab_layout;
 use crate::core::heap::Heap;
 use crate::core::value::{self, EnvId, Value, ValueRef};
 use crate::error::{LispError, LispResult};
@@ -46,11 +47,21 @@ pub(super) fn register(primitives: &mut super::Primitives) {
     // beside its sibling in `sequences.rs` for the registration-order reason above.
     primitives.def(
         "string/width->index",
-        Arity::exact(2),
-        Sig::new(vec![string, int], int),
-        &["s", "cell"],
-        "The character index in s of the grapheme cluster occupying display cell `cell` (0-based), or (string/length s) when cell is at or past the string's width — the inverse of string/display-width. A cell inside a 2-cell glyph (emoji, CJK) gives that glyph's start, and a combining mark rides with its base, so mapping a mouse click back to a character lands BEFORE a wide glyph, never inside it. The cells -> chars half of the editor's column geometry; string/display-width is the chars -> cells half.\n\n    (string/width->index \"a😀b\" 2)   → 1\n    (string/width->index \"a😀b\" 3)   → 2",
+        Arity::range(2, 4),
+        Sig::with_optional(vec![string, int], vec![int, int], int),
+        &["s", "cell", "start-col", "tab-width"],
+        "The character index in s of the grapheme cluster occupying display cell `cell` (0-based), or (string/length s) when cell is at or past the string's width — the inverse of string/display-width. A cell inside a 2-cell glyph (emoji, CJK) gives that glyph's start, a cell inside a tab's span the tab, and a combining mark rides with its base, so mapping a mouse click back to a character lands BEFORE a wide glyph, never inside it. The cells -> chars half of the editor's column geometry; string/display-width is the chars -> cells half, and the optional start-col (default 0) / tab-width (default 8) are the same tab layout it takes.\n\n    (string/width->index \"a😀b\" 2)   → 1\n    (string/width->index \"a😀b\" 3)   → 2\n    (string/width->index \"a\\tb\" 5)   → 1",
         string_width_to_index,
+    );
+    // The third leg of the tab layout: the string a frontend is handed, tabs already
+    // spaced to their stops — a raw tab in a render op has no column to measure from.
+    primitives.def(
+        "string/expand-tabs",
+        Arity::range(1, 3),
+        Sig::with_optional(vec![string], vec![int, int], string),
+        &["s", "start-col", "tab-width"],
+        "s with every tab replaced by the spaces that carry it to its next tab stop, laid out from column start-col (default 0) with a stop every tab-width columns (default 8) — so the result occupies exactly (string/display-width s start-col tab-width) cells, with no tab left for a frontend to misplace (a render op has no column to expand one from; a terminal would use the SCREEN column). A view lays each chunk of a line out with the column it starts at, so the stops stay the line's. Returns s itself when it holds no tab.\n\n    (string/expand-tabs \"a\\tb\")     → \"a       b\"\n    (string/expand-tabs \"\\tx\" 3)    → \"     x\"\n    (string/expand-tabs \"\\tx\" 0 4)  → \"    x\"",
+        string_expand_tabs,
     );
 }
 
@@ -158,7 +169,8 @@ fn gui_text_contrast(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(Value::nil())
 }
 
-/// `(string/width->index s cell)` — see the registration; `text_width::index_at_cell`.
+/// `(string/width->index s cell &optional start-col tab-width)` — see the
+/// registration; `text_width::index_at_cell_from`.
 fn string_width_to_index(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let s = match arg(args, 0) {
         Value::Str(id) => heap.string(id),
@@ -182,7 +194,31 @@ fn string_width_to_index(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
             ))
         }
     };
+    let (start_col, tab_width) = tab_layout(heap, "string/width->index", args, 2)?;
     Ok(Value::int(
-        crate::host::text_width::index_at_cell(&s, cell) as i64
+        crate::host::text_width::index_at_cell_from(&s, cell, start_col, tab_width) as i64,
     ))
+}
+
+/// `(string/expand-tabs s &optional start-col tab-width)` — see the registration;
+/// `text_width::expand_tabs`. A tab-free `s` comes back as the same heap string.
+fn string_expand_tabs(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = match arg(args, 0) {
+        Value::Str(id) => id,
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "string/expand-tabs",
+                "string",
+                other,
+            ))
+        }
+    };
+    let (start_col, tab_width) = tab_layout(heap, "string/expand-tabs", args, 1)?;
+    let expanded =
+        match crate::host::text_width::expand_tabs(&heap.string(id), start_col, tab_width) {
+            std::borrow::Cow::Borrowed(_) => return Ok(Value::Str(id)),
+            std::borrow::Cow::Owned(expanded) => expanded,
+        };
+    Ok(heap.alloc_string(&expanded))
 }

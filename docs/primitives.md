@@ -1,4 +1,3 @@
-|  | `string/width->index` | 2 | The character index in s of the grapheme cluster occupying display cell `cell`, or (string/length s) past the end — the inverse of string/display-width. A cell inside a 2-cell glyph gives its start, so a click maps back to BEFORE a wide glyph, never inside it. |
 # Native primitive kernel
 
 The **complete set of functions implemented in Rust** (every `Value::Native`
@@ -255,7 +254,9 @@ literal — no constructor call.
 |  | `%set-remove` | 2 | A fresh set like s with element x removed (absent → unchanged). O(log n). |
 |  | `%set-has?` | 2 | Is x an element of set s? O(log n). |
 |  | `%set-count` | 1 | The number of elements in set s. O(1) — the CHAMP root tracks its size. |
-| **Unicode / text width** | `string/display-width` | 1 | How many terminal/grid cells string s occupies (grapheme-cluster aware: an emoji / flag / CJK char counts as 2, a combining mark 0). The width-aware counterpart to string-length. |
+| **Unicode / text width** | `string/display-width` | 1–3 | How many terminal/grid cells string s occupies (grapheme-cluster aware: an emoji / flag / CJK char counts as 2, a combining mark 0, a tab the cells to its next stop). The width-aware counterpart to string-length. Optional `start-col` (the column a mid-line chunk is laid out from, so its tabs land on the LINE's stops) and `tab-width` (default 8) — ADR-342. |
+|  | `string/width->index` | 2–4 | The character index in s of the grapheme cluster occupying display cell `cell`, or (string/length s) past the end — the inverse of string/display-width, with the same optional `start-col` / `tab-width`. A cell inside a 2-cell glyph gives its start (a cell inside a tab's span, the tab), so a click maps back to BEFORE a wide glyph, never inside it. |
+|  | `string/expand-tabs` | 1–3 | s with every tab replaced by the spaces that reach its next stop, laid out from `start-col` with a stop every `tab-width` — the tab-free string a frontend is handed (a render op has no column to expand one from). s itself when it holds no tab. |
 |  | `string-normalize` | 2 | s in Unicode normalization form, one of :nfc :nfd :nfkc :nfkd. Brood's = is byte-structural, so text that reads identically ('é' as U+00E9 vs U+0065 U+0301) compares unequal until normalized. Canonical (:nfc/:nfd) preserves meaning; |
 |  | `string/char->int` | 1 | Unicode codepoint of the first character of string s (identical to the byte value for ASCII). |
 |  | `string/int->char` | 1 | A 1-char string for Unicode codepoint n. Errors on an invalid codepoint. |

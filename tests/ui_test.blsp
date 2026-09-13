@@ -103,6 +103,31 @@
       ;; update is bypassed entirely for :close (the loop quits before calling it).
       (assert= (receive ([:update-saw x] x) (after 100 :never-called)) :never-called)))
 
+  (test "an app that claims :close (:close-is-input?) sees it in update and quits on its own terms"
+    ;; the editor's case: ask about unsaved work first. Two closes queued — the app
+    ;; refuses the first (it stays open) and accepts the second by setting :done.
+    (let (me (self))
+      (send me :close)
+      (send me :close)
+      (assert= (ui-run {:done false :close-is-input? true :closes 0}
+                 (fn (m c r) [])
+                 (fn (m input c r)
+                   (if (= input :close)
+                     (let (n (inc (:closes m)))
+                       (do
+                         (send me [:update-saw n])
+                         (assoc m :closes n :done (= n 2))))
+                     m))
+                 {:enter (fn () nil)
+                  :leave (fn () :left)
+                  :size (fn () [80 24])
+                  :draw (fn (f) nil)
+                  :poll (fn (ms) (receive (m m) (after 0 :tick)))})
+        :left)
+      ;; update saw BOTH closes: the first did not end the loop
+      (assert= (receive ([:update-saw x] x) (after 100 :never)) 1)
+      (assert= (receive ([:update-saw x] x) (after 100 :never)) 2)))
+
   (test "quit-request? recognises :close, not the Escape key or other input"
     (is (quit-request? :close))
     ; the Escape key is NOT a close request
@@ -289,16 +314,16 @@
           r (overlay-route mixed {:mini true} "q" rec-fallback))
       (assert= (get r :typed) "q"))))
 
-;; ui-coalesce-drag — collapse a flood of per-cell mouse :drag events to the latest,
-;; so a fast drag renders once at the final position instead of once per cell crossed.
-; the key is still there
-(describe "ui-coalesce-drag"
-  (test "non-drag messages pass through untouched (incl. nil on timeout)"
-    (assert= (editor/ui/ui-coalesce-drag "x") "x")
-    (assert= (editor/ui/ui-coalesce-drag :tick) :tick)
-    (assert= (editor/ui/ui-coalesce-drag [:mouse :press :left 3 3 []])
+;; ui-coalesce-motion — collapse a flood of per-cell mouse :drag / :move events to the
+;; latest of its kind, so a fast drag renders once at the final position instead of once
+;; per cell crossed, and a hover costs one turn, not one per cell.
+(describe "ui-coalesce-motion"
+  (test "non-motion messages pass through untouched (incl. nil on timeout)"
+    (assert= (editor/ui/ui-coalesce-motion "x") "x")
+    (assert= (editor/ui/ui-coalesce-motion :tick) :tick)
+    (assert= (editor/ui/ui-coalesce-motion [:mouse :press :left 3 3 []])
       [:mouse :press :left 3 3 []])
-    (is (nil? (editor/ui/ui-coalesce-drag nil))))
+    (is (nil? (editor/ui/ui-coalesce-motion nil))))
   (test "queued drags collapse to the latest; other messages stay in the mailbox"
     (let (me (self))
       (send me [:mouse :drag :left 6 6 []])
@@ -306,9 +331,25 @@
       ; a key after the drags — must survive
       (send me "k")
       ;; pass in the first drag (as the poll would); the queued drags drain to the last
-      (assert= (editor/ui/ui-coalesce-drag [:mouse :drag :left 5 5 []])
+      (assert= (editor/ui/ui-coalesce-motion [:mouse :drag :left 5 5 []])
         [:mouse :drag :left 7 7 []])
-      (assert= (receive (m m) (after 200 :none)) "k"))))
+      (assert= (receive (m m) (after 200 :none)) "k")))
+  (test "queued moves collapse to the latest too"
+    (let (me (self))
+      (send me [:mouse :move nil 6 6 []])
+      (send me [:mouse :move nil 7 7 []])
+      (send me :tick)
+      (assert= (editor/ui/ui-coalesce-motion [:mouse :move nil 5 5 []])
+        [:mouse :move nil 7 7 []])
+      (assert= (receive (m m) (after 200 :none)) :tick)))
+  (test "a move never swallows a drag, nor a drag a move — a press between them matters"
+    (let (me (self))
+      (send me [:mouse :drag :left 6 6 []])
+      (send me [:mouse :move nil 7 7 []])
+      (assert= (editor/ui/ui-coalesce-motion [:mouse :move nil 5 5 []])
+        [:mouse :move nil 7 7 []])
+      ;; the drag is still queued, in place
+      (assert= (receive (m m) (after 200 :none)) [:mouse :drag :left 6 6 []]))))
 
 ;; ui-drain-input — fold every input ALREADY queued into one turn (one render), so an
 ;; app that streams async events into its own mailbox (a test/run feed, collab deltas)
