@@ -16,6 +16,12 @@ State when written: `main` = `0223cb1f`, pushed, clean. **One open bug: KI-134**
 the release blocker — **FIXED later the same day, see item 1; its residue KI-135 too (ADR-344).
 No open bug at the end of 2026-09-13.** The pre-push hook now runs the fast half of CI
 (`make prepush`; see CLAUDE.md "Before every push") — install it with `make hooks`.
+**One watch item: KI-136** — the stdlib image replays registrations a module's own load never
+made (attribution by key qualifier), which let a missing `(:load editor/highlight)` in
+`editor/lexer` pass every imaged test; the builder should attribute by writer and the
+ADR-280 differential should compare registry contents. `BROOD_NO_STDIMAGE=1` on a module's
+test file is the cheap check meanwhile.
+
 The checker is 1.8× the pre-ADR-340 cost over `std/` (28 s vs 15.6 s, debug) after the `Ctx`
 split (devlog 2026-09-13); what remains is the fixpoints' genuine re-walks — `resolver.blsp`
 takes 11 joint rounds. If it needs to come down further, the next lever is making a round's

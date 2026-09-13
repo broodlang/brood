@@ -18,26 +18,33 @@
 (def- *dir* (temp-dir "modpub-"))
 (file/mkdir *dir*)
 (reflect/add-load-path *dir*)
-(file/spit (path/join *dir* "modpub-slow.blsp")
-  (str "(defmodule modpub-slow)\n"
-    "(def early 1)\n" "(defrecord thing (n))\n" "(sleep 300)\n" "(def late 2)\n"))
+
+;; The slow fixture is written INSIDE the unit under a name unique to this run: a module
+;; with a fixed name written at file load was found already provided when the unit began
+;; (once, in a full `nest test`, after this file changed — the runner's pre-flight had
+;; materialised it), and a provided module has no window to observe.
+(defn- write-slow-fixture (name)
+  (file/spit (path/join *dir* (str name ".blsp"))
+    (str "(defmodule "
+      name ")\n" "(def early 1)\n" "(defrecord thing (n))\n" "(sleep 300)\n" "(def late 2)\n"))
+  name)
 
 ;; Poll every 5 ms until the module is provided (or 4 s pass): how many polls saw a name of
 ;; the module bound while the module was not yet provided? The reads are ordered so an
 ;; atomic publish can never produce a false count — a name is read FIRST and the feature
 ;; SECOND, so "bound and then not provided" cannot happen unless the module was visible
 ;; before it was provided.
-(defn- observe (n seen)
+(defn- observe (name n seen)
   (if (>= n 800)
     seen
-    (let (any-bound (or (bound? 'modpub-slow/early)
-                      (bound? 'modpub-slow/late)
-                      (contains? *record-ids* :modpub-slow/thing))
-          provided (contains? *features* "modpub-slow"))
+    (let (any-bound (or (bound? (symbol (str name "/early")))
+                      (bound? (symbol (str name "/late")))
+                      (contains? *record-ids* (keyword (str name "/thing"))))
+          provided (contains? *features* name))
       (cond
         provided seen
-        any-bound (do (sleep 5) (observe (+ n 1) (+ seen 1)))
-        else (do (sleep 5) (observe (+ n 1) seen))))))
+        any-bound (do (sleep 5) (observe name (+ n 1) (+ seen 1)))
+        else (do (sleep 5) (observe name (+ n 1) seen))))))
 
 ;; A registry born in the load that swaps it. `%swap-registry!`'s write-back is LIVE (a
 ;; whole map cannot be staged: an older staged copy would publish over a nested load's or a
@@ -65,15 +72,17 @@
 
 (describe "a module publishes whole (KI-135)"
   (test "no name or registration of a loading module is visible before it is provided"
-    (assert= false (contains? *features* "modpub-slow"))
-    (let (me (self)
-          _loader (spawn (do (require-one 'modpub-slow) (send me :loaded)))
-          seen (observe 0 0))
-      (assert= 0 seen)
-      (assert= :ok (receive (:loaded :ok) (after 5000 :timeout)))
-      ;; …and after the publish the whole module is there, registrations included.
-      (assert= true (contains? *features* "modpub-slow"))
-      (assert= 1 (reflect/eval 'modpub-slow/early))
-      (assert= 2 (reflect/eval 'modpub-slow/late))
-      (assert= true (contains? *record-ids* :modpub-slow/thing))
-      (assert= 5 (reflect/eval '(modpub-slow/thing-n (modpub-slow/thing 5)))))))
+    (let (name (write-slow-fixture (str "modpub-slow-" (os/now-ns)))
+          sym (fn (suffix) (symbol (str name "/" suffix))))
+      (assert= false (contains? *features* name))
+      (let (me (self)
+            _loader (spawn (do (require-one (symbol name)) (send me :loaded)))
+            seen (observe name 0 0))
+        (assert= 0 seen)
+        (assert= :ok (receive (:loaded :ok) (after 5000 :timeout)))
+        ;; …and after the publish the whole module is there, registrations included.
+        (assert= true (contains? *features* name))
+        (assert= 1 (reflect/eval (sym "early")))
+        (assert= 2 (reflect/eval (sym "late")))
+        (assert= true (contains? *record-ids* (keyword (str name "/thing"))))
+        (assert= 5 (reflect/eval (list (sym "thing-n") (list (sym "thing") 5))))))))

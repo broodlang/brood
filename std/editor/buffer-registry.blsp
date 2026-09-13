@@ -44,22 +44,26 @@ mirror sharing one buffer set — every holder links its own copy to the same pr
     ;; a holder can re-share a died buffer before this loop has folded the `[:down]`
     ;; for it: an entry whose process is gone counts as absent, so the answer is never
     ;; a dead pid
-    ([:share name text meta from r] (let (existing (get entries name)
-                                          existing (if (and existing
-                                                         (nil? (proc/info (:proc existing))))
-                                                     nil
-                                                     existing))
-                                      (if existing
-                                        (do
-                                          (send from [:reply r (:proc existing)])
-                                          (registry-loop entries watchers))
-                                        (let (bp (spawn-buffer (make-buffer text name (:file meta)))
-                                              mref (monitor bp))
-                                          (send from [:reply r bp])
-                                          (registry-notify watchers [:registry-added name bp meta])
-                                          (registry-loop (assoc entries
-                                                           name {:proc bp :meta meta :mref mref})
-                                            watchers)))))
+    ([:share name text meta from r]
+      (let (existing (get entries name)
+            existing (if (and existing (nil? (proc/info (:proc existing))))
+                       nil
+                       existing))
+        (if existing
+          (do
+            (send from [:reply r (:proc existing)])
+            (registry-loop entries watchers))
+          (let (bp (spawn-buffer (make-buffer text name (:file meta)))
+                mref (monitor bp))
+            ;; notify BEFORE replying: the reply is the barrier a
+            ;; caller that is also a watcher relies on ("every
+            ;; notification is queued by the time the call returns")
+            ;; — the other order let a `drain` after the reply miss
+            ;; the notice by a hair under load
+            (registry-notify watchers [:registry-added name bp meta])
+            (send from [:reply r bp])
+            (registry-loop (assoc entries name {:proc bp :meta meta :mref mref})
+              watchers)))))
     ([:entries from r] (do
                          (send from
                            [:reply
@@ -74,8 +78,8 @@ mirror sharing one buffer set — every holder links its own copy to the same pr
                                (do
                                  (demonitor (:mref e))
                                  (stop-buffer (:proc e))
-                                 (send from [:reply r (:proc e)])
                                  (registry-notify watchers [:registry-removed name :killed])
+                                 (send from [:reply r (:proc e)])
                                  (registry-loop (dissoc entries name) watchers)))))
     ([:watch pid] (registry-loop entries (if (includes? watchers pid) watchers (cons pid watchers))))
     ([:unwatch pid] (registry-loop entries (seq/reject watchers (fn (w) (= w pid)))))

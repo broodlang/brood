@@ -76,8 +76,16 @@
   (test "sharing a name whose process is dead spawns afresh even before the [:down] is folded"
     (let (reg (registry-start)
           a (registry-share reg "x" "text" {}))
-      ;; kill and IMMEDIATELY re-share: the registry's own [:down] may still be queued
+      ;; kill, and re-share as soon as the process is GONE: `exit` is a signal (the victim
+      ;; dies at its next reduction tick), so wait for that — bounded — rather than racing
+      ;; it; the registry's own [:down] for the death may still be queued, which is the case
       (exit a :kill)
+      (let (dead (fn (tries)
+                   (cond
+                     (nil? (proc/info a)) true
+                     (= tries 0) false
+                     else (do (sleep 5) (dead (dec tries))))))
+        (is (dead 400)))
       (let (b (registry-share reg "x" "again" {}))
         (is (not (= a b)))
         (is (not (nil? (proc/info b))))
