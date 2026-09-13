@@ -251,15 +251,35 @@ pub fn write_release(base: &[u8], archive: &[u8], out: &Path) -> std::io::Result
     buf.extend_from_slice(MAGIC);
     buf.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
     buf.extend_from_slice(&(archive.len() as u64).to_le_bytes());
-    std::fs::write(out, &buf)?;
+    // Write beside the target and RENAME over it, never open the target for writing:
+    // Linux refuses to write a running executable (`ETXTBSY`, "Text file busy"), and
+    // `make install` while the app is open is the ordinary way a release lands — the
+    // rename replaces the directory entry while the old inode keeps running (the
+    // unlink-and-rename every installer does; KI-130 is the other half of that story).
+    // The temporary name is unique per process, so two concurrent releases into one
+    // directory do not share it; a failure leaves the target untouched.
+    let stem = out
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "release".to_string());
+    let tmp = out.with_file_name(format!(".{stem}.nest-release-{}", std::process::id()));
+    let written = write_then_rename(&buf, &tmp, out);
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
+}
+
+fn write_then_rename(buf: &[u8], tmp: &Path, out: &Path) -> std::io::Result<()> {
+    std::fs::write(tmp, buf)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(out)?.permissions();
+        let mut perms = std::fs::metadata(tmp)?.permissions();
         perms.set_mode(0o755);
-        std::fs::set_permissions(out, perms)?;
+        std::fs::set_permissions(tmp, perms)?;
     }
-    Ok(())
+    std::fs::rename(tmp, out)
 }
 
 #[cfg(test)]
