@@ -1339,7 +1339,24 @@ the test rather than hanging the run."
 ;; non-zero.
 (defn- drain-one-file (loader)
   (reset-units)
-  (let (outcome (try (do (loader) :%loaded) (catch e (list :%load-failed e))))
+  ;; Load the file EAGERLY: every module its qualified references name is loaded now, while
+  ;; the file is being compiled, rather than at whichever first use happens to reach it
+  ;; (ADR-335). The invariant is KI-131's, which held by accident before the lazy-load wave
+  ;; and is restated here for the units: everything a file touches is loaded before any of
+  ;; its units run, so no unit's `%isolate` can be the window a module load lands in.
+  ;;
+  ;; Without it, a module first used inside an `:isolated` unit is written into that unit's
+  ;; snapshot and rolled back when it closes — while the file's other units, running
+  ;; concurrently in their own green processes, are still using it. The registrations go
+  ;; with it, so an ability call dispatches against a `*record-ids*`/`*impls*` table the
+  ;; module is no longer in: KI-134, seen as `(queue/pop (queue/empty))` answering a queue
+  ;; of `:size -1` because `empty?` no longer reached queue's impl.
+  ;;
+  ;; Scoped to the load, not the run: a test that deliberately exercises lazy loading still
+  ;; sees the lazy policy in its own body.
+  (let (prev-eager (%eager-loads! true)
+        outcome (try (do (loader) :%loaded) (catch e (list :%load-failed e)))
+        _ (%eager-loads! prev-eager))
     (if (= outcome :%loaded)
       (drain-current)
       (list (test-load-failure-result (second outcome))))))

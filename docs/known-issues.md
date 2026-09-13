@@ -9810,3 +9810,34 @@ project image, entered from a new door. `ability_test.blsp:478` names the orphan
 runner's per-file orphan probe KI-89 built is the tool. Not chased tonight: it is the
 lazy-load author's mechanism and the fix belongs with ADR-335's runner clause (KI-131).
 
+
+**Reproduced small, and split in two (2026-09-13).** The full suite is not needed: three
+files reproduce it in ~10 s.
+
+    nest test tests/queue_test.blsp tests/ability_test.blsp tests/lazy_load_test.blsp
+
+Baseline **5 of 12** runs fail. Both ingredients are necessary, each measured against that
+rate: `BROOD_TEST_NO_SCOPE=1` (no isolates) **0 of 6**, `BROOD_NO_LAZY_LOAD=1` (eager) **0 of
+6** — p≈0.04 apiece. The failure is legible rather than merely "a case failed":
+`(queue/pop (queue/empty))` answers `[nil {… :size -1}]`, a queue of size MINUS ONE, because
+`pop`'s emptiness check dispatched against an `*impls*` table `queue` was no longer in while
+`queue/pop` and `queue/empty` themselves still resolved. Bindings present, registrations
+gone — the orphan asymmetry caught mid-act.
+
+**Window 1 — a unit's own isolate, CLOSED.** `drain-one-file` runs the file's `reflect/load`
+inside the file's `%isolate`, and an `:isolated` unit nests another inside that. A module
+whose first use falls in the nested window is written into the nested snapshot and rolled
+back when it closes, while the file's other units — concurrent green processes — are still
+using it. `queue_test.blsp` never `(:use queue)`s; every `queue/…` is a qualified reference,
+so under ADR-335 it loads at whichever use gets there first. Closed by loading the file
+eagerly (`%eager-loads!` around the loader only, so a unit body still sees the lazy policy):
+**5/12 → 1/12**.
+
+**Window 2 — a spawned worker, OPEN.** What remains is a different case with a different
+shape: `queue_test.blsp:157` "queues built in workers arrive as queues and pop in order",
+`(every? results queue?)` false after a 20 s wait. `queue?` is a record-id predicate, so this
+is the same orphan read from a worker the test spawned — KI-89's grandchild shape, now able
+to *load a module* (and write its registrations) inside the window rather than merely
+`defrecord` in it. The eager file load cannot reach it: the worker's first use happens in its
+own process, at run time. That is the half still to fix, and it is why this KI stays OPEN —
+the rate is lower, which makes it rarer to catch, not closer to gone.
