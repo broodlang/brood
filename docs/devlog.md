@@ -856,6 +856,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-12** — `editor/shell`: shell-script highlighting, and a script typed by its `#!` line (`register-interpreter-type`, Emacs `interpreter-mode-alist`)
 - **2026-09-12** — `\b` / `\B` in the regex engine: the Pike VM answers them, and a boundary pattern's `match?`/`matches?` route there too
 - **2026-09-13** — `:on-move` is a layer facet (ADR-338): a follower runs only when point or the text moved (`buffer-moved?`), never on every event like a `:post-key` guard; `string/width->index`, the inverse of `display-width`, for a click on a wide glyph
+- **2026-09-13** — the checker types a `def-` literal like a `def` one: Gap A reads `top_level_defs`, so a private `(def- k 10)` is an `int`, not `dynamic()` — bedit's strict count 13 → 0
 
 ---
 
@@ -13131,3 +13132,18 @@ is the inverse (`text_width::index_at_cell`, one module with `display_width` so 
 cannot disagree): a cell inside a wide glyph is that glyph's start — Emacs's rule, point
 before the glyph, never inside it. Registered last (`editor_native.rs`) for the
 intern-order reason recorded there.
+
+### 2026-09-13 — a private constant is an int too: Gap A opens the `def-` expansion
+
+bedit's `strict_ratchet` (ceiling 0) was failing on eight "`expects int, got number`"
+findings, all of the shape `(math/quot (+ shown (dec hexl-row-bytes)) …)` where the
+named constant is a `(def- name 16)`. Same code with a public `def` checked clean. The
+cause was the Gap A pass (type-gating.md): it walked the raw top-level forms for `(def g
+<expr>)`, and `def-` expands to `(do (def g …) (%mark-private 'g))` — the `def` sat one
+level down and was never seen, so a private constant had no current type, and int
+arithmetic over an unknown falls to `+`'s declared `number`. Pass 2.8 had already solved
+the identical problem for private functions with `top_level_defs`; Gap A now reads the
+same list. One new finding surfaced in brood's own tree from the sharper checker — a
+`def-` stride read from the environment through `string/->number`, which also reads
+`"1.5"` — and it was right: narrowed to `int?`. Brood's own strict count is unchanged at
+22; bedit's went 13 → 0 with contracts declared at the remaining sites.
