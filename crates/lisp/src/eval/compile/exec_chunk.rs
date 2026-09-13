@@ -572,6 +572,130 @@ pub(crate) fn exec_chunk(
                 } else {
                     (heap.root_at(n - argc - 1), n - argc - 1)
                 };
+                // VM→native DIRECT call (`docs/compute-frontier.md` §7.12). On the
+                // call-heavy rows the interpreter's dominant "call" is not a VM-level apply
+                // but an entry into a callee that is ALREADY native — a gate-refused arm's
+                // loop calling a native helper non-tail (`json` 193k of these against 42k
+                // `vm_apply`s per run; 650k on `supervisor`). Until now every one exited
+                // `exec_chunk` to the driver (frame save, `push_frame`, the loop-top
+                // safepoints, the tier check, re-entry) only to run code that is native.
+                // Here the call site lays the callee's frame out itself and enters the
+                // SAME `jit_tier_in_frame` the driver would, so the semantics are the frame
+                // path's by construction; only the round trip is gone. A value comes back
+                // here; a staged tail call is dispatched below exactly as `jit_dispatch_tail`
+                // would (at frame level — so a `receive` down that chain suspends cleanly);
+                // a deopt, preempt or declined activation is handed to the driver in its
+                // in-place frame (`ChunkExit::CallResume`). Nothing runs nested: the first
+                // cut of this used the native→native fast link, whose outcome-4 tail chain
+                // is nested, and put 19 820 dirty worker parks on the `supervisor` row.
+                //
+                // Gated on installed native code, so the interpreted case pays one relaxed
+                // load. Both head shapes qualify: a staged head's callee value sits at
+                // `drop_base`, and the frame is laid out FROM `drop_base` either way, which
+                // is where the result must land when the callee returns.
+                #[cfg(feature = "jit")]
+                if !*tail {
+                    if let Some((ref arm, cenv, bases)) = fast {
+                        if vm_direct_eligible(heap, arm, argc) {
+                            let arm = arm.clone();
+                            heap.truncate_roots(drop_base);
+                            for a in &argv {
+                                heap.push_root(*a);
+                            }
+                            let (r, frame_nslots) =
+                                vm_call_native_direct(heap, &arm, argc, drop_base, cenv, bases);
+                            match r {
+                                DirectNative::Done(v) => {
+                                    // `roots` is back at `drop_base`; the result replaces
+                                    // the call. `v` is unrooted until pushed — nothing may
+                                    // allocate before this (see `crate::jit::JitArmFn`).
+                                    heap.push_root(v);
+                                    if !crate::process::macro_block_active() && heap.gc_due() {
+                                        heap.collect(&mut [], &mut []);
+                                    }
+                                    continue;
+                                }
+                                DirectNative::Error => {
+                                    let e = jit_take_error(heap).expect(
+                                        "native callee reported an error without parking one",
+                                    );
+                                    // A hard kill unwinds untouched to the top-level driver
+                                    // (as the `dispatch` arm below does). The native arm
+                                    // recorded its own trace frame (KI-117); the driver's
+                                    // `Err` arm names this caller and the pending frames.
+                                    if e.is_kill_signal() {
+                                        return Err(e);
+                                    }
+                                    return Err(tag_pos(e, pos));
+                                }
+                                DirectNative::Tail { top } => {
+                                    // `[callee, arg0..]` staged above the callee's frame:
+                                    // `jit_dispatch_tail`'s dispatch, done here. A VM
+                                    // closure comes back UN-RUN as `Step::Tail` and becomes
+                                    // this call's frame push (the frame the native callee
+                                    // would have reused — same depth, same base); a native
+                                    // or tree-walked callee ran to `Done`, as it would there.
+                                    let n2 = heap.roots_len();
+                                    let tail_callee = heap.root_at(top);
+                                    let mut tail_argv: SmallVec<[Value; 4]> =
+                                        SmallVec::with_capacity(n2 - top - 1);
+                                    for k in (top + 1)..n2 {
+                                        tail_argv.push(heap.root_at(k));
+                                    }
+                                    let step =
+                                        match dispatch(heap, tail_callee, tail_argv, true, cur_env)
+                                        {
+                                            Ok(s) => s,
+                                            Err(e) if e.is_control() => {
+                                                // Only a kill can arrive here: the tail callee
+                                                // of a native arm is never `%receive` (the
+                                                // receive fence keeps that chunk off the JIT),
+                                                // so there is no suspend to rewind for.
+                                                debug_assert!(e.is_kill_signal());
+                                                return Err(e);
+                                            }
+                                            Err(e) => return Err(tag_pos(e, pos)),
+                                        };
+                                    heap.truncate_roots(drop_base);
+                                    match step {
+                                        Step::Tail {
+                                            compiled,
+                                            args,
+                                            genv,
+                                            bases,
+                                        } => {
+                                            return Ok(ChunkExit::Call {
+                                                arm: compiled,
+                                                args,
+                                                genv,
+                                                bases,
+                                            });
+                                        }
+                                        Step::Done(v) => {
+                                            heap.push_root(v);
+                                            if !crate::process::macro_block_active()
+                                                && heap.gc_due()
+                                            {
+                                                heap.collect(&mut [], &mut []);
+                                            }
+                                            continue;
+                                        }
+                                    }
+                                }
+                                DirectNative::Handoff { outcome } => {
+                                    return Ok(ChunkExit::CallResume {
+                                        arm,
+                                        base: drop_base,
+                                        nslots: frame_nslots,
+                                        genv: cenv,
+                                        bases,
+                                        outcome,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
                 // Inline fast-path: IC hit for the exact same arm, same captured env, no
                 // optional/rest params, and GC is not yet due. Covers the common
                 // `(defn f (x) … (f …))` self-tail pattern (which uses `Inst::Call` via

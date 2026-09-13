@@ -91,6 +91,12 @@ mod imp {
         /// `jit_dispatch_call` linked native→native but the callee deopted/preempted/
         /// tail-returned, so it re-ran on the VM via `vm_apply`.
         jit_link_rerun,
+        /// The VM's `Inst::Call` linked straight to an already-native callee through the
+        /// call-site fast-link mirror and the callee returned **Done** — the VM→native
+        /// direct call (compute-frontier §7.12). Read against `vm_apply`: on a call-heavy
+        /// row most VM "calls" are entries into native code, and this is how many of them
+        /// skipped the driver round trip.
+        vm_native_link,
         /// A native arm deopted/preempted but left `roots` **longer than `jit_tier`
         /// found them** — a dirty operand stack that corrupts the `exec_chunk` re-run.
         /// Nonzero ⇒ a real correctness hole.

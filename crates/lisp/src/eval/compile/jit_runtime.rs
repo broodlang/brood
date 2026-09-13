@@ -73,6 +73,132 @@ pub(crate) const TIER_THRESHOLD: u32 = 128;
 #[cfg(feature = "jit")]
 pub(crate) const BACKEDGE_TIER_WEIGHT: u32 = TIER_THRESHOLD / 8;
 
+/// What a VM→native direct call ([`vm_call_native_direct`]) has to report back to the
+/// `Inst::Call` that made it.
+#[cfg(feature = "jit")]
+pub(crate) enum DirectNative {
+    /// The callee returned a value; `roots` is back at the frame base.
+    Done(Value),
+    /// The callee raised: the error is parked in `Heap::jit_pending_error`, `roots` is back
+    /// at the frame base.
+    Error,
+    /// The callee staged a tail call — `[callee, arg0..]` at `roots[top..]`, above its
+    /// frame — for the CALLER to dispatch as its own tail dispatch would: at frame level,
+    /// so a `receive` down that chain suspends cleanly instead of parking the worker.
+    Tail { top: usize },
+    /// The activation has to continue on the VM in its in-place frame (deopt / preempt /
+    /// declined / i64 depth bail): hand it to the driver as `ChunkExit::CallResume`.
+    Handoff { outcome: Option<i64> },
+}
+
+/// Run `arm` **natively, in place**, for a non-tail `Inst::Call` whose `argc` args the caller
+/// has laid out at `roots[base..base+argc]` — the VM→native direct call
+/// (`docs/compute-frontier.md` §7.12).
+///
+/// This is the frame path (`ChunkExit::Call` → `push_frame` → the driver's `try_jit` block)
+/// with the driver round trip cut out, and **only** that: the frame is built exactly as
+/// `push_frame` builds it for an arm with no optionals, rest or captures (params, then nil
+/// to `frame_size_for_new_entry()`), the env is rooted, the arm registered if it carries
+/// RUNTIME handles, and the native is entered through the very same [`jit_tier_in_frame`]
+/// — so the hot-reload epoch guard, the frame-size agreement, the shared-code adoption, the
+/// inline/xcall swaps, the suspend-host latch and the deopt feedback are all the frame
+/// path's. What differs is only who handles the outcome: a value comes back to the call
+/// site (`Done`) instead of through a frame pop; an error is parked as it always is; a
+/// staged tail call and every other outcome are handed back so they are honoured at frame
+/// level — never nested. The first cut of this call ran the tail chain nested, which put a
+/// `receive` two calls down under a native gateway: 19 820 dirty worker parks on the
+/// `supervisor` row where the frame path has none.
+///
+/// `frame_nslots` is returned in every case so a `Handoff` can tell the driver the size the
+/// frame was BUILT to (KI-48 family). The caller must have checked eligibility
+/// ([`vm_direct_eligible`]) — arity, layout and an installed code pointer — so a `None`
+/// from the tier is rare (an epoch reset, a frame-size disagreement, a swap transition or
+/// the i64 depth bail) and still correct: the activation simply runs on the VM.
+#[cfg(feature = "jit")]
+pub(crate) fn vm_call_native_direct(
+    heap: &mut Heap,
+    arm: &Arc<ArmHandle>,
+    argc: usize,
+    base: usize,
+    callee_env: EnvId,
+    callee_bases: (u32, u32),
+) -> (DirectNative, usize) {
+    debug_assert_eq!(heap.roots_len(), base + argc);
+    // The frame the native runs against, sized the way the driver sizes it: `push_frame`'s
+    // `nslots` plus the inlined layout's growth when the inlined body is installed. Read
+    // ONCE and passed down (`jit_tier_in_frame` declines on a mismatch rather than
+    // re-deriving).
+    let frame_nslots = arm.frame_size_for_new_entry();
+    heap.extend_roots_to_nil(base + frame_nslots);
+    let env_base = heap.env_roots_len();
+    let env_root = heap.root_env(callee_env);
+    let arm_slot = if arm.has_runtime_handles {
+        heap.live_arm_push(arm.clone())
+    } else {
+        usize::MAX
+    };
+    // KI-20: the callee's native code publishes and probes ITS OWN inline caches through
+    // the heap's block cursors, which the driver installs on every frame push. Install
+    // them here for the same reason and restore the caller's after: without this the
+    // callee's publishes landed in the caller's block at the callee's site indices and
+    // both arms ran cache-cold — never a wrong answer (every probe re-validates
+    // sym/argc/epoch), but `nbody` read 329k IC hits turning into 304k misses, +24.5%.
+    let saved_bases = heap.set_ic_bases(callee_bases);
+    let mut ret = Value::Nil;
+    let outcome = jit_tier_in_frame(arm.arc(), heap, base, env_root, frame_nslots, &mut ret);
+    heap.set_ic_bases(saved_bases);
+    if arm_slot != usize::MAX {
+        heap.live_arm_truncate(arm_slot);
+    }
+    // The driver re-roots the env for a frame it adopts; the value-returning outcomes are
+    // finished with it.
+    heap.truncate_env_roots(env_base);
+    let r = match outcome {
+        Some(0) => {
+            crate::perf_bump!(jit_native);
+            crate::perf_bump!(vm_native_link);
+            heap.truncate_roots(base);
+            DirectNative::Done(ret)
+        }
+        Some(3) => {
+            heap.truncate_roots(base);
+            DirectNative::Error
+        }
+        Some(4) => {
+            crate::perf_bump!(jit_native);
+            crate::perf_bump!(vm_native_link);
+            DirectNative::Tail {
+                top: base + frame_nslots,
+            }
+        }
+        other => DirectNative::Handoff { outcome: other },
+    };
+    (r, frame_nslots)
+}
+
+/// May `exec_chunk` run this call's arm natively in place ([`vm_call_native_direct`])?
+///
+/// The layout half mirrors `vm_call_ic_fast_link`'s guard — exactly `argc` required params,
+/// no optionals, no rest, no captures — because the frame is built by the call site, not by
+/// `push_frame`. The code half asks whether native code is INSTALLED right now (a real
+/// pointer, not null/`QUEUED`/`BAILED`): a cold or refused arm takes the ordinary
+/// `ChunkExit::Call`, so the interpreted case pays one relaxed load and nothing else, and
+/// the tier's own bookkeeping for those arms keeps running where it always has.
+#[cfg(feature = "jit")]
+#[inline]
+pub(crate) fn vm_direct_eligible(heap: &Heap, arm: &CompiledArm, argc: usize) -> bool {
+    if heap.jit_force_vm
+        || arm.nrequired != argc
+        || arm.noptional != 0
+        || arm.rest_slot.is_some()
+        || !arm.capture_names.is_empty()
+    {
+        return false;
+    }
+    let code = arm.jit_code.load(std::sync::atomic::Ordering::Acquire);
+    !code.is_null() && code != crate::jit::BAILED && code != crate::jit::QUEUED
+}
+
 #[cfg(feature = "jit")]
 pub(crate) fn jit_tier_in_frame(
     arm: &Arc<CompiledArm>,
