@@ -678,10 +678,23 @@ impl Heap {
         // entry, written in lockstep with this table — two representations of one fact.
         // Valid because within an epoch an installed arm's code pointer is stable (a `def`
         // or a recompile bumps the epoch).
+        //
+        // A NATIVE flat cell (`vm_fast_link_publish_native`: `nslots == u32::MAX`, `code` a
+        // builtin's fn pointer) is NOT a Brood link and must miss here. The IR never reaches
+        // this probe for one — it branches to the native trampoline on the marker before the
+        // callback — so the two JIT callers were safe by their pre-check, not by this
+        // function; the VM's direct call (`exec_chunk`'s `Inst::Call`) has no pre-check and
+        // ran `%table-incr`'s fn pointer as an arm with a 4-billion-slot frame (the 103 GB
+        // allocation of 2026-09-13). Refused here so every caller is safe by construction.
         {
             let fls = self.vm_fast_links.borrow();
             if let Some(fl) = fls.get(abs) {
-                if fl.code != 0 && fl.epoch == epoch && fl.sym == sym && fl.argc == argc {
+                if fl.code != 0
+                    && fl.nslots != u32::MAX
+                    && fl.epoch == epoch
+                    && fl.sym == sym
+                    && fl.argc == argc
+                {
                     return Some((
                         fl.code as *const u8,
                         fl.nslots as usize,
@@ -1019,5 +1032,36 @@ impl Heap {
         if let Ok(mut cache) = self.runtime.jit_inline_cache.write() {
             cache.insert(key, (code as usize, epoch));
         }
+    }
+}
+
+#[cfg(all(test, feature = "jit"))]
+mod fast_link_tests {
+    use super::*;
+
+    /// A NATIVE flat cell (`vm_fast_link_publish_native`) is a builtin's fn pointer with
+    /// `nslots == u32::MAX` as its marker. It is not a Brood link and the Brood-link probe
+    /// must miss it. The IR never asks (it branches on the marker first), so the two JIT
+    /// callers were safe by their pre-check alone; the VM's direct call has no pre-check
+    /// and ran `%table-incr`'s pointer as an arm with a 4-billion-slot frame (the 103 GB
+    /// allocation of 2026-09-13). Sabotage: drop the `nslots != u32::MAX` clause and this
+    /// returns `Some`.
+    #[test]
+    fn the_fast_link_probe_refuses_a_native_flat_cell() {
+        let heap = Heap::new();
+        let sym = crate::core::value::intern("%table-incr");
+        let epoch = heap.global_epoch();
+        heap.vm_fast_link_publish_native(3, sym, 3, epoch, 0xdead_beef);
+        assert!(
+            heap.vm_call_ic_fast_link(3, sym, 3, epoch).is_none(),
+            "a native flat cell was handed back as a Brood fast link"
+        );
+        // The same slot IS still honoured as what it is: a native cell the IR can read.
+        let (fls, len) = heap.vm_fast_links_base();
+        assert!(len > 3);
+        // SAFETY: `fls` points at `len` initialised `FastLink`s; index 3 < len.
+        let fl = unsafe { std::ptr::read(fls.add(3)) };
+        assert_eq!(fl.nslots, u32::MAX);
+        assert_eq!(fl.code, 0xdead_beef);
     }
 }
