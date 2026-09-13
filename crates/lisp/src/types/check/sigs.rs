@@ -2836,34 +2836,29 @@ pub(super) fn caller_derived_params(
     heap: &Heap,
     forms: &[Value],
     candidates: &HashMap<Symbol, Value>,
+    live: &HashMap<Symbol, usize>,
     ctx: &Ctx,
     resume_from: &HashMap<Symbol, Vec<Option<Ty>>>,
 ) -> HashMap<Symbol, Vec<Option<Ty>>> {
     let targets: HashSet<Symbol> = candidates.keys().copied().collect();
     // A LEAST fixpoint starts at ⊥: the live candidates — those with a site and no
-    // escape, which a preliminary pass finds since neither depends on any type — begin
-    // with every parameter `never`, so a self-call's `(+ i 1)` contributes nothing until
-    // some other caller has said what `i` is. Started at UNKNOWN instead, that same
+    // escape (`live`, name → arity, found by [`live_private_functions`] ONCE per file since
+    // neither depends on any type; this used to be re-walked here on every joint round)
+    // — begin with every parameter `never`, so a self-call's `(+ i 1)` contributes nothing
+    // until some other caller has said what `i` is. Started at UNKNOWN instead, that same
     // argument read `number` in the first round and nothing could ever narrow it back.
     // An escaped or site-less candidate stays out of the map, hence unknown: its callers
     // are not all here, so nothing may be assumed of the arguments its body hands on.
-    let Some(first) =
-        collect_private_sites(heap, forms, &targets, candidates, &HashMap::new(), ctx)
-    else {
-        return HashMap::new();
-    };
     // …or from `resume_from`, the previous joint round's result (Pass 2.9 alternates this
     // with the returns): computed under LOWER returns, it lies below the fixpoint sought
     // now, so continuing from it is the same ascent with the early rounds already done.
-    let mut derived: HashMap<Symbol, Vec<Option<Ty>>> = first
-        .sites
+    let mut derived: HashMap<Symbol, Vec<Option<Ty>>> = live
         .iter()
-        .filter(|(name, sites)| !first.escaped.contains(name) && !sites.is_empty())
-        .map(|(&name, sites)| {
+        .map(|(&name, &arity)| {
             let seed = resume_from
                 .get(&name)
                 .cloned()
-                .unwrap_or_else(|| vec![Some(Ty::NEVER); sites[0].0.len()]);
+                .unwrap_or_else(|| vec![Some(Ty::NEVER); arity]);
             (name, seed)
         })
         .collect();
@@ -3175,7 +3170,7 @@ pub(super) fn live_private_functions(
     forms: &[Value],
     candidates: &HashMap<Symbol, Value>,
     ctx: &Ctx,
-) -> Option<HashSet<Symbol>> {
+) -> Option<HashMap<Symbol, usize>> {
     let targets: HashSet<Symbol> = candidates.keys().copied().collect();
     let first = collect_private_sites(heap, forms, &targets, candidates, &HashMap::new(), ctx)?;
     Some(
@@ -3183,7 +3178,7 @@ pub(super) fn live_private_functions(
             .sites
             .iter()
             .filter(|(name, sites)| !first.escaped.contains(name) && !sites.is_empty())
-            .map(|(&name, _)| name)
+            .map(|(&name, sites)| (name, sites[0].0.len()))
             .collect(),
     )
 }
