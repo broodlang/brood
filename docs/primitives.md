@@ -1,3 +1,4 @@
+|  | `string/width->index` | 2 | The character index in s of the grapheme cluster occupying display cell `cell`, or (string/length s) past the end — the inverse of string/display-width. A cell inside a 2-cell glyph gives its start, so a click maps back to BEFORE a wide glyph, never inside it. |
 # Native primitive kernel
 
 The **complete set of functions implemented in Rust** (every `Value::Native`

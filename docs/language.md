@@ -2898,7 +2898,10 @@ another type, so they are **not** string-library ops:
   four code points and one cluster. This is the unit to step a cursor by; stepping by
   code point splits a cluster and corrupts the text. `(apply str (string/->graphemes
   s))` is `s`. `string/display-width` counts terminal cells over the same clusters (a CJK
-  char or emoji is 2, a combining mark 0).
+  char or emoji is 2, a combining mark 0), and `(string/width->index s cell)` maps a cell
+  back to the character index of the cluster on it (`(string/length s)` past the end; a cell
+  inside a wide glyph gives the glyph's start) — the pair an editor needs to place a caret
+  and to map a click back to a character by the same measure.
 - **The cluster-indexed accessors** are `string/grapheme-count`, `(string/grapheme-at s i
   [default])`, and `(string/substring-graphemes s start [end])` — the grapheme-indexed
   counterparts of `string/length`, `string/char-at`, and `string/substring`, which are all

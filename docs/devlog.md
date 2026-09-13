@@ -855,6 +855,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-12** — text contrast is a setting (ADR-337): `gui/text-contrast` lifts light-on-dark stems under the linear-light blend; bedit ships 1.4
 - **2026-09-12** — `editor/shell`: shell-script highlighting, and a script typed by its `#!` line (`register-interpreter-type`, Emacs `interpreter-mode-alist`)
 - **2026-09-12** — `\b` / `\B` in the regex engine: the Pike VM answers them, and a boundary pattern's `match?`/`matches?` route there too
+- **2026-09-13** — `:on-move` is a layer facet (ADR-338): a follower runs only when point or the text moved (`buffer-moved?`), never on every event like a `:post-key` guard; `string/width->index`, the inverse of `display-width`, for a click on a wide glyph
 
 ---
 
@@ -13109,3 +13110,24 @@ went with them. 5M-call loop 1.68 → 1.59 G instructions; the call-free loop 0.
 bintree −2.8%, nqueens −3.2%, json −2.1%, collatz −2.2%, nothing the other way. Rust jit tests,
 both guards and the in-language suite hold (the one failure is KI-134's `lazy_load_test:120`).
 
+
+### 2026-09-13 — a follower is not a guard: the `:on-move` facet, and a click by the view's measure
+
+bedit's markdown preview snapped back to the cursor's line on every wheel notch over it.
+The follow rode `:post-key`, layers §7's GUARD facet — which the loop runs on every event,
+a mouse gesture included, because a gesture can edit — so a scroll that moved nothing
+re-asserted the pane's position. Two other followers (the tutorial's *Workings* pane, the
+playground's spy pane) were on the same facet and only escaped by remembering their last
+region. The facet was the wrong shape for the job: a follower wants to hear about a MOVE,
+and only the loop can say cheaply whether there was one. So `:on-move` (ADR-338): the
+app's loop runs it after the guards, once, when `buffer-moved?` (point or rope — the rope
+is a handle, so an unchanged text is an O(1) `=`) or the current buffer changed. Nothing on
+that facet can fight a scroll, and no follower keeps state to avoid doing so.
+
+The second half is the click's column: `string/display-width` lays a line out in cells (an
+emoji or CJK glyph is two), and the mouse mapping turned a cell back into a character 1:1,
+so every wide glyph left of a click put point one character too far. `string/width->index`
+is the inverse (`text_width::index_at_cell`, one module with `display_width` so the two
+cannot disagree): a cell inside a wide glyph is that glyph's start — Emacs's rule, point
+before the glyph, never inside it. Registered last (`editor_native.rs`) for the
+intern-order reason recorded there.

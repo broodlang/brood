@@ -119,6 +119,30 @@
     (is (> (string/length "👨‍👩‍👧") 1))
     (assert= (string/display-width "👨‍👩‍👧") 2)))
 
+(describe "string/width->index — a display cell back to the character on it"
+  (test "ASCII is the identity, clamped to the length"
+    (assert= (string/width->index "hello" 0) 0)
+    (assert= (string/width->index "hello" 3) 3)
+    (assert= (string/width->index "hello" 5) 5)
+    (assert= (string/width->index "hello" 50) 5)
+    (assert= (string/width->index "" 0) 0))
+  (test "a cell inside a wide glyph is the glyph's start; the cell after it, the next char"
+    ;; cells: a=[0,1) 😀=[1,3) b=[3,4) — the emoji is one codepoint, two cells.
+    (assert= (string/width->index "a😀b" 1) 1)
+    (assert= (string/width->index "a😀b" 2) 1)
+    (assert= (string/width->index "a😀b" 3) 2)
+    (assert= (string/width->index "中文x" 2) 1))
+  (test "it inverts display-width at every cluster boundary"
+    ;; Boundaries only: a prefix cut INSIDE the ZWJ family is not a cluster boundary.
+    (let (s "ab😀c👨‍👩‍👧d"
+          boundaries (fold (string/->graphemes s)
+                       [0]
+                       (fn (acc g) (conj acc (+ (last acc) (string/length g))))))
+      (is (every? boundaries
+            (fn (i)
+              (let (prefix (string/substring s 0 i))
+                (= (string/width->index s (string/display-width prefix)) i))))))))
+
 ;; The grapheme-INDEXED accessors (ADR-159). `string->graphemes` already gave the
 ;; clusters, but only as a whole vector — so the documented-correct cursor step
 ;; ("step by cluster, never by codepoint") cost a vector of every cluster in the
