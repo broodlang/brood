@@ -869,6 +869,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-13** — `--version` says `-dirty`: a binary whose `crates/`/`std/` differed from its commit is no longer indistinguishable from a clean build of the same sha; `make doctor` names it; build.rs re-runs from a worktree too
 - **2026-09-13** — tabs are a column-dependent cluster (ADR-342): `display-width` / `width->index` take `start-col` + `tab-width`, `string/expand-tabs` is the third leg, the GUI paints a raw tab to the screen stop; the scroll blit (ADR-343): a dirty strip that is a translation of old canvas rows is copied, not drawn — a 1080p scroll paints in 2.3 ms, not 10; `ui-coalesce-motion` collapses a `:move` flood like a `:drag` one; `:close-is-input?` lets an app ask before the X button quits; `buffer-file-changed?` — a buffer stamps its file's mtime at read/save
 - **2026-09-13** — `editor/buffer-registry` (ADR-345): a named directory of buffer processes — share-once, enumeration, membership notifications — the seam a second frame (a process with its own window) joins the same buffers through
+- **2026-09-13** — `editor/lexer` (ADR-346): a lexical language mode is a table — structured rules, word classes, line rules — and `editor/configs` is JSON / YAML / TOML / Makefile / INI / commit-message as tables over it
 
 ---
 
@@ -13298,3 +13299,12 @@ process is announced and re-shared by whoever still has the text. `buffer_regist
 pins share-once, the notifications, the died-then-reshared path and stop. The
 window-id-on-input alternative is recorded as the other half of ADR-059 and why a tag
 alone is not sound.
+
+## 2026-09-13 — `editor/lexer`: the line-lexer shape, once (ADR-346)
+
+Six configuration formats the editor needed next, and `dotenv` / `dockerfile` / `shell`
+had each hand-written the walk they all share. `editor/lexer` is that walk from a table
+(`lexer-grammar`: structured rules in one alternation, word classes, line rules), and
+`editor/configs` is JSON, YAML, TOML, Makefile, INI / git config and a commit message as
+tables — a `<fmt>-spans` fn each, `configs_test` naming the tokens each paints. Shell
+keeps its own walker (its function-name rule is contextual).

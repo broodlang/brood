@@ -22456,6 +22456,36 @@ registry mirrors every buffer's text* — the collab loop does, for a daemon who
 holders are remote and may all be gone when a process dies; here the holders are local
 frames that outlive their windows' buffers, so the copies already exist.
 
+## ADR-346 — A lexical language mode is a table: `editor/lexer`, and the configuration formats as data
+
+**Context.** `editor/dotenv`, `editor/dockerfile` and `editor/shell` each hand-wrote the
+same walk: per line, a regex alternation for the structured tokens (comments, strings),
+a word pattern and a lookup for the identifiers between them, a merge into ascending
+non-overlapping spans. The editor's next need was six more formats — JSON, YAML, TOML, a
+Makefile, INI / git config, a commit message — every one of them that walk with a
+different table, and none of them worth a tree-sitter grammar (they are line-shaped,
+and a user opens them a dozen times a day).
+
+**Decision.** `std/editor/lexer`: `lexer-grammar` compiles a spec — `:structured`
+`[pattern role]` rules joined into one alternation (the matched group names the rule; a
+rule's leading whitespace is not the token), `:words` + `:classes` for identifiers
+outside the structured tokens, `:line` rules anchored at the line start painting their
+first group — and `lexer-spans` walks a source with it, in the `highlight-spans` shape.
+Roles are `:syntax/*` faces resolved once per pass, so a theme restyles every
+table-driven mode at once. `std/editor/configs` is the six formats as tables, one
+`<fmt>-spans` each; an editor mode is `{:fontify 'editor/configs/yaml-spans}`.
+
+**Consequences.** A new line-shaped format is a table and a file pattern — no walker,
+no merge, no face plumbing — and its tests name tokens, not offsets. The regex engine's
+limits (no lookahead) shape the tables (`\b`, or a consuming alternative). `editor/shell`
+keeps its own walker: its "a word before `()` names a function" rule is contextual, not
+a lookup, which is the line between a table and a lexer of its own.
+
+**Alternatives rejected.** *Tree-sitter for these*: a grammar to build and load for
+`Cargo.toml`, and no structural motion worth having in it. *One big regex per format
+with no table*: the shape every format shares is exactly what should not be copied six
+times.
+
 ## ADR-347 — An arrow in head position describes the call
 
 **Status:** accepted and implemented 2026-09-13 (`walk::check_computed_call`,

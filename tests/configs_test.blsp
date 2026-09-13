@@ -1,0 +1,101 @@
+;; editor/lexer — the table-driven line lexer — and editor/configs, the everyday
+;; configuration formats written as its tables. Each check names the TOKEN a span covers
+;; (`spans-of`), so a wrong extent fails by text, not by offset.
+(defmodule configs-test
+  (:use test)
+  (:use editor/face)
+  (:use editor/lexer)
+  (:use editor/configs))
+
+(defn- spans-of (spans src role)
+  "The texts of the spans painted in `role`'s face, in order."
+  (let (f (face (get lexer-roles role)))
+    (map (seq/filter spans (fn ([s e face]) (= face f)))
+      (fn ([s e _]) (string/substring src s e)))))
+
+(defn- ordered? (spans)
+  "Ascending and non-overlapping — the `highlight-spans` contract."
+  (or (< (count spans) 2)
+    (every? (map (range (dec (count spans))) (fn (i) [(nth spans i) (nth spans (inc i))]))
+      (fn ([a b]) (<= (second a) (first b))))))
+
+(describe "editor/lexer — a lexer from a table"
+  (test "structured rules: leftmost match wins, the group says which rule"
+    (let (g (lexer-grammar {:structured [["#.*" :comment] ["\"[^\"]*\"" :string]]})
+          src "x = \"a # not a comment\" # yes")
+      (assert= (spans-of (lexer-spans g src) src :string) (list "\"a # not a comment\""))
+      (assert= (spans-of (lexer-spans g src) src :comment) (list "# yes"))))
+  (test "words are classified by exact lookup, outside structured tokens only"
+    (let (g (lexer-grammar {:structured [["\"[^\"]*\"" :string]]
+                            :words "[a-z]+"
+                            :classes {"true" :special}})
+          src "true \"true\" truer")
+      (assert= (spans-of (lexer-spans g src) src :special) (list "true"))))
+  (test "a line rule paints its first group at the line's start, and only there"
+    (let (g (lexer-grammar {:line [["^(\\w+):" :function]]})
+          src "build: x\n  not: a target\nall:")
+      (assert= (spans-of (lexer-spans g src) src :function) (list "build" "all"))))
+  (test "every span list is ascending and non-overlapping"
+    (let (g (lexer-grammar {:structured [["#.*" :comment] ["\\d+" :number]]
+                            :words "[a-z]+"
+                            :classes {"if" :special}
+                            :line [["^(\\w+)=" :keyword]]}))
+      (is (ordered? (lexer-spans g "a=1 if 2 # if 3\nb=if"))))))
+
+(describe "editor/configs — the everyday formats"
+  (test "JSON: keys, strings, numbers, literals, JSONC comments"
+    (let (src "{\"name\": \"bedit\", \"n\": -1.5e3, \"ok\": true, \"x\": null // c\n}"
+          spans (json-spans src))
+      (assert= (spans-of spans src :keyword) (list "\"name\":" "\"n\":" "\"ok\":" "\"x\":"))
+      (assert= (spans-of spans src :string) (list "\"bedit\""))
+      (assert= (spans-of spans src :number) (list "-1.5e3"))
+      (assert= (spans-of spans src :special) (list "true" "null"))
+      (assert= (spans-of spans src :comment) (list "// c"))
+      (is (ordered? spans))))
+  (test "YAML: keys (nested, in lists), strings, numbers, booleans, anchors, comments, markers"
+    (let (src "---\nname: bedit # the editor\nversion: 0.4\ndeps:\n  - name: \"brood\"\n    pinned: true\n    ref: &base main\nother: *base\n"
+          spans (yaml-spans src))
+      (assert= (spans-of spans src :keyword)
+        (list "name" "version" "deps" "name" "pinned" "ref" "other"))
+      (assert= (spans-of spans src :comment) (list "# the editor"))
+      (assert= (spans-of spans src :number) (list "0.4"))
+      (assert= (spans-of spans src :string) (list "\"brood\""))
+      (assert= (spans-of spans src :special) (list "---" "true" "&base" "*base"))
+      (is (ordered? spans))))
+  (test "TOML: tables, keys, strings, numbers and dates, booleans, comments"
+    (let (src "[package]\nname = \"bedit\" # x\nversion = \"0.4.2\"\n\n[[bin]]\nports = [8080, 0xff]\nborn = 2026-09-13T10:00:00Z\ndebug = false\n"
+          spans (toml-spans src))
+      (assert= (spans-of spans src :function) (list "[package]" "[[bin]]"))
+      (assert= (spans-of spans src :keyword) (list "name" "version" "ports" "born" "debug"))
+      (assert= (spans-of spans src :string) (list "\"bedit\"" "\"0.4.2\""))
+      (assert= (spans-of spans src :number) (list "8080" "0xff" "2026-09-13T10:00:00Z"))
+      (assert= (spans-of spans src :special) (list "false"))
+      (assert= (spans-of spans src :comment) (list "# x"))
+      (is (ordered? spans))))
+  (test "Makefile: targets, assignments, $(VAR) references, directives, comments"
+    (let (src "CC := gcc\n# build it\n.PHONY: all\nall: main.o\n\t$(CC) -o $@ $^\nifeq ($(OS),linux)\nendif\n"
+          spans (makefile-spans src))
+      (assert= (spans-of spans src :keyword) (list "CC" "$(CC)" "$@" "$^" "$(OS)"))
+      (assert= (spans-of spans src :function) (list "all"))
+      (assert= (spans-of spans src :special) (list ".PHONY" "ifeq" "endif"))
+      (assert= (spans-of spans src :comment) (list "# build it"))
+      (is (ordered? spans))))
+  (test "INI / git config: sections, keys, quoted values, booleans, ; and # comments"
+    (let (src "[core]\n\tautocrlf = false ; win\n[remote \"origin\"]\n\turl = \"git@x\"\n# done\n"
+          spans (ini-spans src))
+      (assert= (spans-of spans src :function) (list "[core]" "[remote \"origin\"]"))
+      (assert= (spans-of spans src :keyword) (list "autocrlf" "url"))
+      (assert= (spans-of spans src :special) (list "false"))
+      (assert= (spans-of spans src :string) (list "\"git@x\""))
+      (assert= (spans-of spans src :comment) (list "; win" "# done"))
+      (is (ordered? spans))))
+  (test "a commit message: the subject, its conventional prefix, git's commentary"
+    (let (src "feat(modes): lisp-mode\n\nA body line.\n# Please enter the commit message\n# On branch main\n"
+          spans (gitcommit-spans src))
+      (assert= (spans-of spans src :keyword) (list "feat(modes):"))
+      (assert= (spans-of spans src :doc) (list " lisp-mode"))
+      (assert= (spans-of spans src :comment)
+        (list "# Please enter the commit message" "# On branch main"))
+      (is (ordered? spans)))
+    ;; no prefix: the whole subject line
+    (assert= (spans-of (gitcommit-spans "Fix it\n") "Fix it\n" :doc) (list "Fix it"))))
