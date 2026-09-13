@@ -66,6 +66,7 @@ impl Heap {
         work.extend(self.runtime.globals_read().values().copied());
         work.extend(self.roots.iter().copied());
         work.extend(self.msg_roots.iter().flat_map(|t| t.slots.iter()).copied());
+        work.extend(self.staged_values());
         while let Some(v) = work.pop() {
             match v.unpack() {
                 ValueRef::Fn(id) | ValueRef::Macro(id) if id.region() == RUNTIME => {
@@ -709,6 +710,9 @@ impl Heap {
     ) -> bool {
         // --- Shared roots: globals + declared `(sig …)` type-exprs. Skipped by the
         // private probe (the drain self-report) — see `runtime_gen_referenced_private`. ---
+        // An OPEN module load's staged bindings (ADR-344) are this process's private roots:
+        // promoted handles not yet on the shared graph, live until published or discarded.
+        work.extend(self.staged_values());
         if include_shared {
             work.extend(self.runtime.globals_read().values().copied());
             work.extend(
@@ -1137,6 +1141,7 @@ impl Heap {
         let mut fwd = RuntimeForward::for_gens(cg, cg);
         let mut roots: Vec<Value> = self.runtime.globals_read().values().copied().collect();
         roots.extend(self.roots.iter().copied());
+        roots.extend(self.staged_values());
         // Delivered-message slots (L1) — a root set here too, so this preview cannot
         // disagree with what `runtime_collect_with` actually evacuates.
         roots.extend(self.msg_roots.iter().flat_map(|t| t.slots.iter()).copied());

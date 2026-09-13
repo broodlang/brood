@@ -22245,3 +22245,68 @@ invariant. `std/` is at zero in both modes; `tests/` strict carries seventeen mo
 wider-than-the-truth kind (a test that knows its `read-n` succeeded), by design ungated; bedit
 is in the devlog. A chain settles in one round per level (bounded at 32), each round one walk
 of the file's forms.
+
+## ADR-344 — A module publishes whole: a load's defines and registrations are staged and installed under one write
+
+**Status:** accepted and implemented 2026-09-13 (`LoadStage` in `heap/runtime_code.rs`;
+`enter_journalled_load` / `publish_module_load` / `discard_module_load`, `staged_lookup`,
+`staged_frame_of`, and the staging arms of `env_define`, `registry_apply` and `registry_cas` in
+`heap/env_globals.rs`; `%with-load-journal` publishes on success and discards on a throw;
+`gc_runtime.rs` roots the staged values). Closes KI-135.
+
+**Context.** Since ADR-335 a module loads at its first use, through the global lookup MISS
+path — which waits for an in-flight loader. A name that loader has ALREADY bound is a HIT, and a
+hit consults nothing, so a concurrent process could run against a half-loaded module. For the
+image branch that was the whole module at once (KI-134's second window, closed by publication
+order); for a source load it was one form wide (`queue/empty` bound at line 28 of
+`std/queue.blsp`, its `Conjable` impl registered at line 73) — narrow, never reproduced on
+demand, and the last open member of a class that had cost three diagnoses (KI-89, KI-134 twice).
+Every fix so far had ordered writes; none had made a partial module unobservable.
+
+**Decision.** A partial module is never in the shared table.
+
+- **Stage.** `require-one` runs every load inside `%with-load-journal`, which now opens a
+  staging frame in the loading process. Under it a global `def` promotes its value and binds it
+  in the frame (recording a `Define` write); a registry update (`%registry-update!`'s
+  `:assoc`/`:dissoc`/… ops) records its OPERATION and the resulting map as this process's view.
+  Nested loads push nested frames. The loader's own lookups consult the frames before the
+  table — `global_lookup_cached` innermost first, and the two registry funnels read the same
+  way — so a module reads its own definitions, and a rebind of a live name (the image branch
+  `def-`s its bookkeeping tables over live `nil`s) is visible to the load that made it. A
+  staged rebind bumps `version` (this process's inline cache re-reads) and `code_epoch` (an arm
+  that baked the old value in re-validates).
+- **Publish.** When the load completes, under `registry_lock`: every registry op is re-applied
+  to the LIVE registry — never the staged map, which would clobber what a concurrent process
+  registered meanwhile — with a staged `Define` of the same registry seeding the ops after it;
+  every value is re-homed into the current generation under the promote read guard; and the
+  whole set lands under ONE `globals_write()`. The writes are journalled for the KI-134 replay at
+  that moment, with `env_define`'s before/after check. A load that throws discards its frame:
+  a broken module leaves no half-module behind, and the discard bumps both counters so nothing
+  keeps a discarded value.
+- **Two registries stay live.** `*features-loading*` and `*features-waiting*` are how loaders
+  coordinate WHILE a load is open — a staged claim would let a second process start the same
+  load, and a staged waiter entry would never be released.
+- **`%registry-cas!` (the `%swap-registry!` funnel) writes back LIVE**, unless the registry was
+  defined by one of this process's open loads, in which case the new map replaces the binding in
+  the frame that OWNS it and publishes with the module. A whole map cannot be staged: the first
+  cut staged it, and the image builder lost 10 of its 35 `*require-edges*` records — `repl`'s
+  load recorded its edge in its own frame, `editor/lineedit`'s nested load recorded its edges on
+  top and published, then `repl`'s frame published its older copy over them. With the edges gone
+  `(require-one 'repl)` no longer loaded `editor/lineedit`, which is how it showed
+  (`stdimage_test.blsp:83`). A registry op has no such problem because the op, not the map, is
+  what publishes. The same ownership rule applies to an op from a nested load on a registry the
+  outer load defined: it lands in the owner's frame, since the owner publishes the binding.
+- **The collector** treats staged values as roots (they are promoted RUNTIME handles not yet on
+  the shared graph), and RUNTIME compaction is held off for the frame's life, as it is for a
+  globals snapshot.
+
+**Consequences.** `tests/module_publish_test.blsp`: a fixture that defines a name, sleeps 300 ms
+and defines another, with an observer polling `bound?` and `*record-ids*` (a name read FIRST,
+the feature SECOND, so an atomic publish can never produce a false count) — 0 sightings staged,
+58 with staging bypassed; and the registry-ownership case (a `defonce`, a swap in the module, a
+swap and an op from a nested load), which goes red when the owner-frame rule is removed. The
+process that loads pays one `Vec::is_empty` per global define and one frame probe per cached
+lookup miss while a frame is open; every other process's lookup falls straight through to the
+table, and the inline-cache HIT path is untouched. The lazy-load test's first-use and JIT units
+now observe from a child `brood`: ADR-340's checker materialisation loads the fixture
+in-process before the unit runs, so nothing in this process can be "not yet loaded".

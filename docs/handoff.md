@@ -13,7 +13,8 @@ promotion it constrained.
 ## Work queue — written 2026-09-13 (read this first; the 09-07 queue below is history)
 
 State when written: `main` = `0223cb1f`, pushed, clean. **One open bug: KI-134**, and it is
-the release blocker — **FIXED later the same day, see item 1.** `nest check` and `nest format --check` are clean; `artifact_matrix` is
+the release blocker — **FIXED later the same day, see item 1; its residue KI-135 too (ADR-344).
+No open bug at the end of 2026-09-13.** `nest check` and `nest format --check` are clean; `artifact_matrix` is
 green and sabotage-verified.
 
 **Landed later on 2026-09-13 (see the devlog for the numbers):** the VM→native direct call
@@ -33,8 +34,11 @@ so the load rolls back — now `%isolate-discard-loads`), and the replay has to 
 the worker dying before the run's first `RESTORE`, right after another process registered
 `:queue/queue` — the image branch bound the module before replaying its impls, and a lazy
 global HIT reached it mid-load. Fixed by publication order (registrations, impls, then
-bindings, then `provide`); the source-path residue is KI-135. Repro under load: 0 of 20
-(7 of 30 before). The item text below is kept as history. The eager file load (`7e26803b`,
+bindings, then `provide`); the source-path residue was KI-135 — **also FIXED 2026-09-13
+(ADR-344)**: every load stages its defines and registry ops in a per-load frame and publishes
+them under one write of the globals table, so a partial module is never in the table at all.
+Guard `tests/module_publish_test.blsp` (300 ms window, 0 vs 58 sightings). Repro under load:
+0 of 20 (7 of 30 before). The item text below is kept as history. The eager file load (`7e26803b`,
 `%eager-loads!` in `drain-one-file`) is **reverted** in the same change: redundant, and it
 made `lazy_load_test` fail 5 of 11 units in the full suite once that file actually loaded
 (it had only ever loaded because the checker pre-flight's absent-memo skipped its broken

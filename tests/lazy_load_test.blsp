@@ -52,25 +52,44 @@
 
 (describe "lazy module loading (ADR-335)"
   (test "a qualified operand reference loads its module on first use, not at load"
-    (is (not (loaded? "lazyprobe-a")))
-    (is (not (file/exists? (path/join *dir* "a-loaded"))))
-    (assert= 42 (use-a))
-    (is (loaded? "lazyprobe-a"))
-    ;; The module's load-time effect happened at first use — and exactly then.
-    (is (file/exists? (path/join *dir* "a-loaded"))))
+    (let (marker (path/join *dir* "a-loaded")
+          out (in-child
+                (str
+                  ;; the marker is a shared file: the in-process checker load
+                  ;; may already have written it — the child starts from a clean one
+                  "(when (file/exists? \"" marker "\") (file/rm \"" marker "\"))\n"
+                  "(defn use-a () (let (f lazyprobe-a/answer) (f)))\n"
+                  "(io/puts (str \"before=\" (contains? *features* \"lazyprobe-a\")"
+                  " \" marker-before=\" (file/exists? \"" marker "\")))\n"
+                  "(io/puts (str \"v=\" (use-a)))\n"
+                  "(io/puts (str \"after=\" (contains? *features* \"lazyprobe-a\")"
+                  " \" marker-after=\" (file/exists? \"" marker "\")))\n")))
+      (when out
+        ;; Not loaded at the referencing load — `use-a` compiled, nothing loaded…
+        (is (includes? out "before=false marker-before=false"))
+        (assert= true (includes? out "v=42"))
+        ;; …and the module's load-time effect happened at first use, and exactly then.
+        (is (includes? out "after=true marker-after=true")))))
 
   (test "a hot function's cold branch into an unloaded module is pre-loaded at tier-up"
-    (is (not (loaded? "lazyprobe-jit")))
-    ;; Well past the tiering threshold; the branch is never taken.
-    (assert= 5000050000 (hot-drive 0 100000 0))
-    ;; The pre-load ran when the arm was elected for compilation: the module is loaded
-    ;; although nothing ever called into it … — when an election can happen at all. Under
-    ;; `BROOD_NO_JIT=1` / `BROOD_TIER=1` no arm tiers, nothing pre-loads, and the branch
-    ;; below loads it on first use like any other reference.
-    (when (%native-tier?)
-      (is (loaded? "lazyprobe-jit")))
-    ;; … and the cold branch works when finally taken.
-    (assert= 42 (hot-pick -1)))
+    (let (out (in-child
+                (str "(defn hot-pick (n) (if (< n 0) (apply lazyprobe-jit/answer nil) (+ n 1)))\n"
+                  "(defn hot-drive (i n acc) (if (= i n) acc (hot-drive (+ i 1) n (+ acc (hot-pick i)))))\n"
+                  "(io/puts (str \"before=\" (contains? *features* \"lazyprobe-jit\")))\n"
+                  ;; Well past the tiering threshold; the branch is never taken.
+                  "(io/puts (str \"sum=\" (hot-drive 0 100000 0)))\n"
+                  ;; The pre-load ran when the arm was elected for compilation: the module is
+                  ;; loaded although nothing ever called into it — when an election can happen
+                  ;; at all. Under `BROOD_NO_JIT=1` / `BROOD_TIER=1` no arm tiers, nothing
+                  ;; pre-loads, and the branch below loads it on first use like any other.
+                  "(io/puts (str \"native=\" (%native-tier?) \" after-drive=\" (contains? *features* \"lazyprobe-jit\")))\n"
+                  "(io/puts (str \"cold=\" (hot-pick -1) \" after-call=\" (contains? *features* \"lazyprobe-jit\")))\n")))
+      (when out
+        (is (includes? out "before=false"))
+        (assert= true (includes? out "sum=5000050000"))
+        (when (includes? out "native=true")
+          (is (includes? out "after-drive=true")))
+        (is (includes? out "cold=42 after-call=true")))))
 
   (test "the unbound error is unchanged for a typo, in a module that exists or not"
     (let (in-module (try (let (f lazyprobe-a/nope) f) (catch e (error-message e)))
@@ -114,6 +133,29 @@
 ;; a head into a temp-dir module no image describes is eager, so `(lazyprobe-mac/go)` written
 ;; in a test body would load the fixture while the `describe` compiled — before the test runs.
 (defn- run-fixture (f) (f))
+
+;; Run `src` in a FRESH `brood` with this file's fixture dir on its load path and return its
+;; stdout (trimmed), or nil when no binary sits beside the runner (a legitimate environment —
+;; the callers assert the skip is visible). `BROOD_NO_CHECK=1`: the file runner's pre-flight
+;; checker would otherwise load the fixtures before the program's first line. A non-zero exit
+;; comes back as the child's stderr, so a failure names itself.
+;;
+;; Why a child at all: "not loaded yet" is a fact about a whole runtime, and this runtime
+;; shares its globals with every other test file's units. Since ADR-339 a module load
+;; survives a sibling's isolate, and since ADR-340 the checker — which two units in this very
+;; file run in-process — materialises every module a LOADED module's bodies name, `use-a`
+;; and `hot-pick` included. In this process the fixtures are therefore loaded by the time
+;; these units run; only a fresh runtime can show the deferral.
+(defn- in-child (src)
+  (let (dir (path/dirname (or (os/exe-path) ""))
+        exe (first (seq/filter [(path/join dir "brood") (path/join dir ".." "brood")] file/exists?)))
+    (when exe
+      (let (prog (path/temp "lazyload-child-"))
+        (file/spit prog (str "(reflect/add-load-path \"" *dir* "\")\n" src))
+        (let (r (os/cmd "env" ["BROOD_NO_CHECK=1" exe prog]))
+          (if (= 0 (get r :exit))
+            (os/cmd-out r)
+            (str "CHILD FAILED: " (get r :stderr ""))))))))
 
 ;; The function-head case observes "not loaded yet" in a SUBPROCESS. Since ADR-339 a module
 ;; load is a runtime-wide fact that survives a sibling file's `%isolate`, so in the full

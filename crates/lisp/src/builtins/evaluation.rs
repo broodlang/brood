@@ -872,7 +872,13 @@ pub(super) fn with_load_journal(args: &[Value], env: EnvId, heap: &mut Heap) -> 
     let thunk = arg(args, 0);
     heap.enter_journalled_load();
     let result = apply_engine(heap, thunk, &[], env);
-    heap.leave_journalled_load();
+    // ADR-344: a completed load is published whole; a throwing one is discarded, so a broken
+    // module leaves no half-module behind and never leaks the mark (a leaked one would stage
+    // a test's own defs as a module's).
+    match &result {
+        Ok(_) => heap.publish_module_load(),
+        Err(_) => heap.discard_module_load(),
+    }
     result
 }
 
