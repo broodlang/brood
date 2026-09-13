@@ -2008,21 +2008,24 @@ fn check_forms(
         // (ambiguous type → stays `dynamic()`); a macro; and a function/native value
         // (its arrow is inferred separately, and gating a bare function name used as a
         // value is a different concern).
+        //
+        // Reads `top_level_defs`, not `expanded`: a `def-` expands to `(do (def g …)
+        // (%mark-private 'g))`, and a pass over the raw forms never saw the `def` inside —
+        // so a private `(def- k 10)` stayed `dynamic()` while a public `(def k 10)` was an
+        // `int`, and `(+ x k)` on the private one read as `number` and tripped every int
+        // consumer downstream (`math/quot`, `string/char-at`, a declared `int` parameter).
         {
             let mut def_count: HashMap<Symbol, usize> = HashMap::new();
             for &form in &expanded {
                 count_defs(heap, form, &mut def_count);
             }
-            // Over `top_level_defs`, not `expanded`: a `def-` constant lives inside the
-            // privacy expansion `(do (def x 10) (%mark-private 'x))`, and reading only the
-            // top-level `def`s left every private constant untyped — `(def- col 10)` then
-            // `(+ col 39)` was `number`, and a `(sig …)` declaring it `int` reported the
-            // literal arithmetic as not assignable (found in bedit's hexl mode, 2026-09-13).
-            // Pass 2.8 had made the same descent for private FUNCTIONS on 2026-08-28.
             for form in top_level_defs(heap, &expanded) {
                 let Some((name, rhs)) = def_name_and_value(heap, form) else {
                     continue;
                 };
+                if value::is_gensym(name) {
+                    continue;
+                }
                 // Skip a global defined more than once (ambiguous), a macro, and a
                 // **dynamic variable** (`defdyn`): a dynvar's `def` sets only the
                 // default, but `binding` rebinds it to any type in a dynamic extent, so

@@ -937,6 +937,29 @@ pub(crate) enum ChunkExit {
         /// Callee IC block (see [`Step::Tail::bases`]).
         bases: (u32, u32),
     },
+    /// A native callee ran **in place** from `exec_chunk`'s non-tail `Inst::Call` (the
+    /// VM→native direct call, `docs/compute-frontier.md` §7.12) through
+    /// `jit_tier_in_frame`, and ended with an outcome only the driver can honour: a deopt
+    /// (`Some(1)`) or preempt (`Some(2)`) — continue THIS activation on the VM, at its
+    /// checkpoint or ip 0 — or `None` (declined, or an i64 depth bail, both already booked
+    /// by `jit_tier_in_frame`) — run the activation on the VM from ip 0 without tiering it
+    /// again. The callee's frame is still laid out at `roots[base..base+nslots]` (params
+    /// plus whatever the native left), the caller's operands below `base`. The driver
+    /// adopts it as the current frame — pushing the caller exactly as `Call` does, minus
+    /// `push_frame` — and settles it with the same routine that settles a frame the
+    /// frame path's `jit_tier_in_frame` hands back with the same outcome. A value, an
+    /// error and a staged tail call never reach here: `exec_chunk` finishes those itself.
+    #[cfg(feature = "jit")]
+    CallResume {
+        arm: Arc<ArmHandle>,
+        base: usize,
+        /// The size the frame was BUILT to (`frame_size_for_new_entry()` at entry) — the
+        /// deopt-resume helpers must be told it, never re-derive it (KI-48 family).
+        nslots: usize,
+        genv: EnvId,
+        bases: (u32, u32),
+        outcome: Option<i64>,
+    },
     /// A clean `receive` on an empty mailbox raised `Control::Suspend` through the
     /// `%receive` native (state-capture path, ADR-100 §8). `exec_chunk` rewound `ip`
     /// so re-entry re-runs the suspending `Inst::Call`, leaving the callee + args on

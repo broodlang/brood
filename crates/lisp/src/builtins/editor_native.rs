@@ -183,6 +183,6 @@ fn string_width_to_index(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
         }
     };
     Ok(Value::int(
-        crate::host::text_width::index_at_cell(&s, cell) as i64,
+        crate::host::text_width::index_at_cell(&s, cell) as i64
     ))
 }

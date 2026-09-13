@@ -83,12 +83,25 @@ pub(super) fn arm_timer(pid: u64, deadline: Instant, gen: u64) {
     ensure_timer_thread();
     let (lock, cv) = &*TIMERS;
     let mut q = crate::core::sync::lock(lock);
+    // Wake the timer thread only when this deadline is the NEW EARLIEST (or the heap was
+    // empty, so the thread is in an untimed `wait`). It sleeps in `wait_timeout` until the
+    // head's deadline, and an entry that sorts behind the head cannot need an earlier wake:
+    // the thread will re-peek when the head comes due and find it. Notifying on every arm
+    // was a futex wake per `(receive … (after ms …))` that parks — one per `gen/call`,
+    // since the reply has not arrived when the caller parks — with the timer thread then
+    // waking on another core, taking this lock against the next arm, and going straight
+    // back to sleep. A `gen/call` deadline (5 s out) is almost never the earliest.
+    let earliest = q
+        .peek()
+        .is_none_or(|Reverse((head, _, _))| deadline < *head);
     q.push(Reverse((deadline, pid, gen)));
     if q.len() >= compact_threshold() {
         compact(&mut q);
     }
     drop(q);
-    cv.notify_one();
+    if earliest {
+        cv.notify_one();
+    }
 }
 
 /// Floor below which compacting is pointless — a few hundred `(deadline, pid, gen)`

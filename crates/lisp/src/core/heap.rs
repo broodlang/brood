@@ -286,6 +286,17 @@ pub enum ImportEntry {
 pub(crate) struct ColdHeap {
     /// Nesting depth of an embedded-module load (ADR-166). See `Heap::in_module_load`.
     pub(crate) module_load_depth: u32,
+    /// Nesting depth of a JOURNALLED module load — `%with-load-journal`, which `require-one`
+    /// wraps around every load (KI-134, ADR-339). While > 0 this process's global defines
+    /// and registry updates are journalled for replay after an `%isolate` restore. Distinct
+    /// from `module_load_depth`, which is the reserved-name exemption for EMBEDDED modules
+    /// only; this one covers a project module off `*load-path*` and an image
+    /// materialisation too.
+    pub(crate) load_journal_depth: u32,
+    /// Set while a registry update writes its result back through `env_define`, and while a
+    /// restore replays the journal: the journal holds the OPERATION, so the whole-map define
+    /// underneath it must not be journalled as well.
+    pub(crate) journal_suppressed: bool,
     /// Source position of LOCAL list forms, keyed by [`form_pos_key`].
     pub(crate) form_pos: HashMap<u64, FormPos>,
     /// The file currently being `load`ed, exposed via `(current-file)`.
@@ -1244,7 +1255,7 @@ mod roots_buf;
 /// The runtime's shared code region: the `def`'d code and globals table every process of
 /// a runtime holds in common, and the generation machinery around them.
 mod runtime_code;
-use self::runtime_code::{reg_trace_enabled, ClosureTemplateMap, ConstClosureMap};
+use self::runtime_code::{reg_trace_enabled, ClosureTemplateMap, ConstClosureMap, LoadWrite};
 pub use self::runtime_code::{
     GenPin, GlobalsSnapshot, NameMeta, RegistryOp, RuntimeCode, SourceLoc, SymbolHasher, SymbolMap,
     VmCacheMap,

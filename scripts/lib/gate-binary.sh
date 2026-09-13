@@ -29,8 +29,10 @@
 
 gate_head_sha() { git -C "$ROOT" rev-parse --short HEAD 2>/dev/null; }
 
-# The sha `<binary> --version` reports — `brood 0.15.0 (adc5c775)`.
-gate_sha_of() { "$1" --version 2>/dev/null | sed -n 's/.*(\([0-9a-f]\{7,\}\)).*/\1/p'; }
+# The sha `<binary> --version` reports — `brood 0.15.0 (adc5c775)`, or `(adc5c775-dirty)` for
+# a build whose `crates/`/`std/` differed from the commit; the bare sha either way, since the
+# freshness question is mtime's (`gate_require_fresh`), not the marker's.
+gate_sha_of() { "$1" --version 2>/dev/null | sed -n 's/.*(\([0-9a-f]\{7,\}\)\(-dirty\)\{0,1\}).*/\1/p'; }
 
 # gate_pick <basename> — echo the best candidate path.
 # A candidate reporting HEAD's sha wins outright; failing that the NEWEST one wins (a

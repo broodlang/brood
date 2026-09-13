@@ -102,7 +102,10 @@ mod tests {
         // A ZWJ family is several codepoints in one 2-cell glyph: the index after it
         // is its codepoint count, and a combining mark rides with its base.
         let family = "👨‍👩‍👧";
-        assert_eq!(index_at_cell(&format!("{family}x"), 2), family.chars().count());
+        assert_eq!(
+            index_at_cell(&format!("{family}x"), 2),
+            family.chars().count()
+        );
         assert_eq!(index_at_cell("e\u{0301}x", 1), 2);
         assert_eq!(index_at_cell("e\u{0301}x", 0), 0);
     }

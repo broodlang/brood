@@ -13,10 +13,32 @@ promotion it constrained.
 ## Work queue — written 2026-09-13 (read this first; the 09-07 queue below is history)
 
 State when written: `main` = `0223cb1f`, pushed, clean. **One open bug: KI-134**, and it is
-the release blocker. `nest check` and `nest format --check` are clean; `artifact_matrix` is
+the release blocker — **FIXED later the same day, see item 1.** `nest check` and `nest format --check` are clean; `artifact_matrix` is
 green and sabotage-verified.
 
-### 1 — KI-134: make a module load survive an `%isolate` restore (THE blocker)
+**Landed later on 2026-09-13 (see the devlog for the numbers):** the VM→native direct call
+(compute-frontier §7.13 — `mandelbrot` −12%, `supervisor` −5.4%, everything else inside its
+floor, semantics identical to the frame path by construction), with two holes it exposed on
+the way closed: the fast-link probe handed back native flat cells as Brood links, and a
+nested tail chain put 19 820 dirty parks on `supervisor`. Guards: `crates/cli/tests/
+vm_direct_call.rs`, `fast_link_tests`, `jit_effect_once_test` case 7. Also the timer
+thread is now woken only for a new earliest deadline.
+
+### 1 — KI-134: make a module load survive an `%isolate` restore ✅ FIXED 2026-09-13 (ADR-339)
+
+Landed as specified for window 1, plus two things the spec did not say: `%isolate` had a
+second client with the opposite need (the stdlib image builder probes each module inside one
+so the load rolls back — now `%isolate-discard-loads`), and the replay has to be atomic
+(rebuilt privately, one swap). **Window 2 was not the rollback**: a traced failing run shows
+the worker dying before the run's first `RESTORE`, right after another process registered
+`:queue/queue` — the image branch bound the module before replaying its impls, and a lazy
+global HIT reached it mid-load. Fixed by publication order (registrations, impls, then
+bindings, then `provide`); the source-path residue is KI-135. Repro under load: 0 of 20
+(7 of 30 before). The item text below is kept as history. The eager file load (`7e26803b`,
+`%eager-loads!` in `drain-one-file`) is **reverted** in the same change: redundant, and it
+made `lazy_load_test` fail 5 of 11 units in the full suite once that file actually loaded
+(it had only ever loaded because the checker pre-flight's absent-memo skipped its broken
+fixture).
 
 Fully diagnosed, not fixed. Read the KI first — it has the repro, the numbers and the
 mechanism; none of that needs rediscovering.

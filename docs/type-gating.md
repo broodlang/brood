@@ -53,7 +53,15 @@ undeclared global defined **exactly once** by `(def g <non-fn-expr>)` — the RH
 and `gradual_of` (value/return checks) consult it after the declared value type,
 always as `dynamic_within` (the `∩` relation → reload-safe, warns only on provable
 disjointness). Same-file is conservative: defined-exactly-once (a redefined global
-is ambiguous → stays `dynamic()`), non-function values.
+is ambiguous → stays `dynamic()`), non-function values. **Private globals too** (2026-09-13):
+a `def-` expands to `(do (def g …) (%mark-private 'g))`, and the pass originally walked the
+raw top-level forms, so it never saw the `def` inside — a private `(def- k 10)` stayed
+`dynamic()` while a public one was `int`, and `(+ x k)` over it read as `number`, tripping
+every int consumer downstream (`math/quot`, `string/char-at`, a declared `int` parameter)
+with a warning the author could only silence by re-declaring a literal. The pass now reads
+`top_level_defs`, the same `%mark-private`-fingerprinted opening Pass 2.8 uses for
+functions (and only that shape — see its doc for the two `do`-emitting macros that must
+stay closed).
 
 **Cross-file: also shipped** — and it needed no new store or pre-pass. An
 undeclared global used in *another* file is typed from its **current heap value**

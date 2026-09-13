@@ -106,6 +106,25 @@
         (* big big)
         (eo-loop6 t (- i 1) (+ acc (eo-leaf6 i)) big)))))
 
+;; --- 7. the VM→native DIRECT call (compute-frontier §7.12): the DRIVER stays interpreted
+;; (its `try` puts the chunk out of the JIT subset) and calls the effectful, always-deopting
+;; arm NON-tail, so the call runs the native in place from `exec_chunk` and the deopt —
+;; landing AFTER the put, with a journal — is handed to the driver as a `CallResume` and
+;; resumed at the checkpoint. A from-ip-0 restart here would put twice per iteration.
+(def eo-t7 (table/new))
+(defn eo-bump7 (t k big)
+  (do
+    (table/put t k (+ 1 (table/get t k)))
+    (* big big)))
+(defn eo-drive7 (t i big)
+  ;; check-allow :discarded-catch — the `try` is a decoy that keeps this arm on the VM
+  (if (= i 0)
+    nil
+    (do
+      (eo-bump7 t 0 big)
+      (check-allow :discarded-catch (try 0 (catch e nil)))
+      (eo-drive7 t (- i 1) big))))
+
 (describe "a JIT deopt never re-runs a table/put"
   (test "effectful arm with no non-tail call"
     (table/put eo-t1 0 0)
@@ -146,4 +165,9 @@
     (let (got (eo-loop6 eo-t6 eo-n 0 4000000000))
       (assert= eo-n (table/get eo-t6 0))
       ;; sum of 2*i for i in 1..eo-n
-      (assert= (* eo-n (+ eo-n 1)) got))))
+      (assert= (* eo-n (+ eo-n 1)) got)))
+
+  (test "effect before a deopt in a callee the VM entered directly"
+    (table/put eo-t7 0 0)
+    (eo-drive7 eo-t7 eo-n 4000000000)
+    (assert= eo-n (table/get eo-t7 0))))

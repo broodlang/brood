@@ -710,6 +710,27 @@ fn undeclared_global_current_type_gates_its_use() {
 }
 
 #[test]
+fn private_global_current_type_gates_its_use_like_a_public_one() {
+    // The same Gap A inference through `def-`: it expands to `(do (def g …)
+    // (%mark-private 'g))`, and a pass over the raw top-level forms never saw the
+    // `def` inside — a private `(def- k 10)` stayed `dynamic()` while a public one was
+    // an `int`, so `(+ x k)` read as `number` and tripped every int consumer after it
+    // (`math/quot`, `string/char-at`, a declared `int` parameter). Both spellings must
+    // type alike, both ways: the misuse warns, and int arithmetic over it stays int.
+    let w = file_warnings("(def- g 5) (defn f () (string/length g))");
+    assert!(
+        w.iter()
+            .any(|m| m.contains("string/length") && m.contains("got 5")),
+        "a private int global misused must warn like a public one: {w:?}"
+    );
+    let w = file_warnings("(def- k 10) (defn f (x) (math/quot (+ x k) 2)) (sig f (int -> int))");
+    assert!(
+        w.iter().all(|m| !m.contains("expects")),
+        "int arithmetic over a private int global must stay int: {w:?}"
+    );
+}
+
+#[test]
 fn cross_file_undeclared_global_gates_via_loaded_image() {
     // Cross-file Gap A: an undeclared global defined in one place (loaded into
     // the image) is typed from its heap value where it's used elsewhere — the

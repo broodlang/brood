@@ -1183,40 +1183,52 @@ image and before any `require`."
           ;; embedded module's registry that is already bound (restored by a project image,
           ;; or accumulated by a running program) keeps its binding rather than being reset
           ;; to the image's empty seed — the `defonce` a source load would have run.
-          (%image-load-section img-path (first sec) (second sec) (not (nil? src)))
-          (when (%getenv "BROOD_IMAGE_TRACE") (%eprint (str "[image] " (->string key) "\n")))
-          ;; Materialising defines this module's bindings but evaluates nothing, so the
-          ;; requires its load would have run have to be replayed from the edges the
-          ;; original load recorded. Without this an imaged start built a heap with holes
-          ;; and the program died on the first call across a missing edge — and it looked
-          ;; like it worked, because `nest run`'s advisory pre-flight incidentally requires
-          ;; each checked file's header deps, which propped up exactly one level.
+          ;; PUBLICATION ORDER — the invariant a source load has by construction and this
+          ;; branch must reproduce: **a name is never bound before everything its callers
+          ;; need is in place.** In `std/queue.blsp` the `(impl Conjable …)` precedes
+          ;; `(defn list-> …)`, so no process can call `list->` and find `conj` undispatchable.
+          ;; Materialising in the OTHER order — bindings first, registrations after — opens
+          ;; exactly that window for the whole module at once, and under lazy loading
+          ;; (ADR-335) a concurrent process reaches a freshly-bound `queue/list->` through an
+          ;; ordinary global HIT — no `require-one`, no wait — and dies on `conj: adding to a
+          ;; record takes a [k v] pair or a map`. That was KI-134's second window: seven of
+          ;; thirty three-file runs under load, with no `%isolate` restore anywhere near.
           ;;
-          ;; The edges are followed BEFORE `provide`, and that ordering is load-bearing under
-          ;; CONCURRENCY. `provide` is what makes `require-one` return immediately for every
-          ;; other process, so providing first publishes a module whose dependencies are not
-          ;; loaded yet: a racing process calls `uuid/v7` and dies on `unbound symbol:
-          ;; rand/token` while this one is still replaying. That is the true source-path
-          ;; order, which the earlier note here read off the macro expansion and got backwards
-          ;; — `defmodule` does expand to `%defmodule-provide` first, but the source path
-          ;; COMPILES the whole file before evaluating any of it, and a qualified reference
-          ;; auto-requires its module at compile time. Every dependency is therefore in place
-          ;; before `provide` runs, body references included, not just the header's `(:use …)`.
-          ;; A require CYCLE still terminates: `require-one` returns immediately for this
-          ;; process's own in-flight load (the `*features-loading*` marker is already set by
-          ;; the caller). Measured: 60 of the 157 suite failures under a boot-installed image
-          ;; were this race, and they are concurrency-only — every one of those files passes
-          ;; when run alone.
+          ;; So: the dependencies this module's load would have pulled in, its non-impl
+          ;; registrations, its impls — and only THEN its bindings, and only then `provide`.
+          ;;
+          ;; Dependencies first. Materialising evaluates nothing, so the requires the load
+          ;; would have run are replayed from the edges the original load recorded; without
+          ;; this an imaged start built a heap with holes and the program died on the first
+          ;; call across a missing edge (`nest run`'s pre-flight incidentally requires each
+          ;; checked file's header deps, which propped up exactly one level). A require CYCLE
+          ;; still terminates: `require-one` returns immediately for this process's own
+          ;; in-flight load (the `*features-loading*` marker is already set by the caller).
           (%std-image-tables!)
           (fold (or (%std-edges-for key) nil) nil (fn (_ d) (require-one d)))
-          ;; …and the ability impls its `impl` forms would have registered — also before
-          ;; `provide`, and for the same reason: a racing process that sees the module as
-          ;; loaded must find it fully dispatchable, not merely bound.
-          ;; Declarations first, impls second: `%impl-rank` reads `*ability-owner*` to decide
-          ;; an impl's precedence tier, so replaying impls against an undeclared ability
-          ;; would tier every one of them as "other".
-          (%replay-std-regs! key)
-          (%replay-std-impls! key)
+          ;; Registrations next. Declarations before impls: `%impl-rank` reads
+          ;; `*ability-owner*` to decide an impl's precedence tier, so replaying impls against
+          ;; an undeclared ability would tier every one of them as "other". Neither needs the
+          ;; module's bindings: the impl fns travel in the image's own `*std-impls*` table.
+          (let (nregs (%replay-std-regs! key)
+                nimpls (%replay-std-impls! key))
+            (when (%getenv "BROOD_IMAGE_TRACE")
+              (%eprint (str "[image] "
+                         (->string key)
+                         " registered "
+                         nregs
+                         " regs, "
+                         nimpls
+                         " impls\n"))))
+          ;; Bindings last — the moment the module becomes reachable by a global hit.
+          (%image-load-section img-path (first sec) (second sec) (not (nil? src)))
+          (when (%getenv "BROOD_IMAGE_TRACE") (%eprint (str "[image] " (->string key) "\n")))
+          ;; `provide` after all of it: it is what makes `require-one` return immediately for
+          ;; every other process, so providing earlier publishes a module whose dependencies
+          ;; are not loaded — a racing process calls `uuid/v7` and dies on `unbound symbol:
+          ;; rand/token` while this one is still replaying. Measured before this order: 60 of
+          ;; the 157 suite failures under a boot-installed image were that race, and they are
+          ;; concurrency-only — every one of those files passes when run alone.
           (provide key)
           key)
       ;; A dependency module (ADR-070): `key` is a rooted name (`"foo/b"`) the package
@@ -1549,8 +1561,12 @@ it waits for that load to finish (a half-evaluated module is never observable)."
           ;; guard read was stale reloads an already-loaded module — the co-located-secondary
           ;; double-load (ADR-225). The marker is released either way.
           (unless (%registry-member? '*features* key)
+            ;; `%with-load-journal` (KI-134, ADR-339): this load's defines and registrations
+            ;; are journalled, so an `%isolate` restore — this process's window or a
+            ;; concurrent one's — replays them instead of rolling back a module every other
+            ;; process may already be using. Isolation undoes what a TEST did, never a load.
             (try
-              (%require-force key)
+              (%with-load-journal (fn () (%require-force key)))
               (catch e
                 (do
                   (%registry-update! '*features-loading* :dissoc [key] nil)

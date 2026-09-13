@@ -128,13 +128,17 @@ fn the_prim_is_what_makes_a_field_reading_body_inlinable() {
     let env = &[("BROOD_INLINE_DBG", "1"), ("BROOD_TIER", "2")];
     let off = run(&file, false, env);
     let on = run(&file, true, env);
+    // The marker is the DERIVATION line (`leaf probe hot sites=…`). Since 2026-09-12 the
+    // trace also names why a probe declines (`leaf probe hot declined: …`), so a bare
+    // `leaf probe hot ` matches both and the "without the prim" half of this test read as
+    // failing on every binary, baseline included.
     assert!(
-        !off.contains("leaf probe hot "),
+        !off.contains("leaf probe hot sites="),
         "without the prim a field-reading body must NOT be inlinable — if this starts \
          passing, the premise of the whole change has changed:\n{off}"
     );
     assert!(
-        on.contains("leaf probe hot "),
+        on.contains("leaf probe hot sites="),
         "with the prim the field-reading body must become leaf-inlinable:\n{on}"
     );
 }

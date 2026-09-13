@@ -1987,6 +1987,76 @@ compiler idle from 42–72 ms into every row once boot stopped feeding it; what 
 arrives one arm at a time. Ordering a queue that is rarely deeper than one changes nothing
 measurable. Closed on the count.
 
+### 7.13 The VM→native direct call LANDED — as the frame path with the round trip cut out (2026-09-13)
+
+§7.12's lever, taken to a landing, and two things it found on the way in.
+
+**What shipped.** `exec_chunk`'s non-tail `Inst::Call`, once the call IC has resolved the
+callee to an arm with native code INSTALLED (`vm_direct_eligible`: a real pointer, exactly
+`argc` required params, no optionals/rest/captures), lays the callee's frame out itself at
+`drop_base` — params, then nil to `frame_size_for_new_entry()`, which is what `push_frame`
+would have built — installs the callee's IC block cursors, roots its env, and enters the
+SAME `jit_tier_in_frame` the driver enters after a `ChunkExit::Call`
+(`vm_call_native_direct`, `jit_runtime.rs`). So the hot-reload epoch guard, the frame-size
+agreement, shared-code adoption, the inline/xcall swaps, the suspend latch and deopt
+feedback are the frame path's, by construction. Only the outcome's *route* changes:
+
+| outcome | frame path | direct call |
+|---|---|---|
+| 0 value | frame pop, `push_root` in the caller | `push_root` at the call site |
+| 3 error | `Some(3)` arm, callers attached | parked error → `Err` from `exec_chunk`, same trace |
+| 4 staged tail | `jit_dispatch_tail` → `ChunkExit::Tail` (frame reuse) | the same `dispatch` → `ChunkExit::Call` — same base, same depth |
+| 1/2/None | settle in the frame, resume/`Preempt`/`exec_chunk` | `ChunkExit::CallResume`: the driver adopts the in-place frame and runs **the same settle routine** (`settle_native_frame`, factored out of the frame path so the two cannot drift) |
+
+Nothing runs nested. That is the whole design, and it is there because the first cut did
+not have it.
+
+**Found on the way in, #1 — the native→native fast link's outcome-4 handling is nested, and
+that is a scheduler hole when a VM frame reaches it.** The first cut called
+`jit_run_fast_link` from the VM (the native caller's own link). Its `4 =>` arm follows the
+staged tail call with a nested `apply_value` — fine for a native caller, whose whole
+activation is already under a gateway — but from a VM frame it put every `fill` →
+`start-child` (native, one tail call) → `gen/call` → `receive` chain under a native gateway,
+where a park cannot be captured. **19 820 dirty worker parks on the `supervisor` row against
+0 for the frame path.** The row still read −16.8% — dirty parks are not slow, they are
+*unfair and unmigratable* — which is why a timing-only gate would have shipped it.
+`crates/cli/tests/vm_direct_call.rs` pins the count at 0 for exactly that shape, refusing to
+be vacuous (it asserts the wrapper lowered).
+
+**Found on the way in, #2 — `vm_call_ic_fast_link` handed back NATIVE flat cells as Brood
+links.** `vm_fast_link_publish_native` marks a builtin's cell with `nslots == u32::MAX`; the
+IR branches on the marker before it ever reaches the probe, so both JIT callers were safe by
+their pre-check, not by the function. The VM has no pre-check: `%table-incr`'s fn pointer
+ran as an arm with a 4-billion-slot frame — `memory allocation of 103079218656 bytes`
+(2³² × 24) on `json`, `regex`, `wordcount`, `supervisor`. This is the "runaway" §7.12
+attributed to a `stage_base` slip; that diagnosis was wrong. The probe now refuses the
+marker (unit test `fast_link_tests`, sabotage-verified), so every caller is safe by
+construction.
+
+**And one more, in the second cut: the callee ran without its IC block cursors.**
+`jit_tier_in_frame` does not install them — the driver does, on frame push — so the callee's
+publishes landed in the caller's block at the callee's site indices (KI-20's shape: never a
+wrong answer, both arms cache-cold). `nbody` read **+24.5%** with 329k IC hits turned into
+304k misses; `set_ic_bases(callee_bases)` around the call and it is −2.4%. The counters
+found it in one run; the timing alone would have said "regressed" and nothing else.
+
+**Measured** (`make ab --floor` against `e566483d`, 15 rows, box idle): **`mandelbrot`
+−12.0%**, **`supervisor` −5.4%**, `nbody` −2.4%, and every other row inside its floor —
+`json` −1.5%, `regex` −1.6%, `nqueens` 0.0%, `bintree` +2.4% (0.0% floor; the sweep
+before read +4.9% and the one before that +1.6% — code-layout noise between binaries, the
+class §2k documents). Smaller than the nested cut's numbers (−24% / −17% / −9%), and the
+difference is the price of honouring outcomes at frame level; `json`'s 31k deopts per run
+resume at their checkpoints in the frame again rather than as nested `vm_apply`s, which is
+why it stopped losing. The `vm_native_link` counter (perf-stats) says how many calls took the
+path: 252k on `nbody`, 162k on `json`, 650k on `supervisor`.
+
+**What this leaves.** The VM's own call — `~1 400` instructions for a VM→VM `Call` — is
+untouched; this only removes the round trip for a callee that is already native. The
+gate-refused arms themselves (`advance`, `solve`, `seq`, `reverse`) still interpret, and
+their calls to each other still pay the full protocol. `json`'s 31k per-run deopts are a
+lead of their own: an arm deopting on every activation without latching (only
+`deopt_watch` arms feed `jit_deopt_feedback`).
+
 ### The measurement discipline (each of these burned someone this week)
 
 Image `:live` on **both** arms, verified per run (`(stdimage/status)` — any commit
