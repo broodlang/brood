@@ -857,6 +857,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-12** — `\b` / `\B` in the regex engine: the Pike VM answers them, and a boundary pattern's `match?`/`matches?` route there too
 - **2026-09-13** — `:on-move` is a layer facet (ADR-338): a follower runs only when point or the text moved (`buffer-moved?`), never on every event like a `:post-key` guard; `string/width->index`, the inverse of `display-width`, for a click on a wide glyph
 - **2026-09-13** — the checker types a `def-` literal like a `def` one: Gap A reads `top_level_defs`, so a private `(def- k 10)` is an `int`, not `dynamic()` — bedit's strict count 13 → 0
+- **2026-09-13** — `--version` says `-dirty`: a binary whose `crates/`/`std/` differed from its commit is no longer indistinguishable from a clean build of the same sha; `make doctor` names it; build.rs re-runs from a worktree too
 
 ---
 
@@ -13147,3 +13148,22 @@ same list. One new finding surfaced in brood's own tree from the sharper checker
 `def-` stride read from the environment through `string/->number`, which also reads
 `"1.5"` — and it was right: narrowed to `int?`. Brood's own strict count is unchanged at
 22; bedit's went 13 → 0 with contracts declared at the remaining sites.
+
+### 2026-09-13 — two binaries, one sha: `--version` now says `-dirty`
+
+Chasing bedit's strict ratchet, the installed `nest` reported 23 findings where a debug
+build "of the same commit" reported 4, then 0 with the `def-` fix. Both said `0.27.2
+(a81deedc)`. The installed one had been built from `../brood` with ~700 uncommitted lines
+of another session's checker work; nothing in the version, `system/build-id`, a crash dump
+or a test footer could have said so, and an hour went to theories about caches and images.
+
+`BROOD_GIT_SHA` now carries `-dirty` when `git status --porcelain -- crates std` is
+non-empty — scoped to the binary's inputs, so a docs edit is not dirt. Two other things in
+`build.rs` made the sha lie by omission and are fixed with it: it re-ran only when
+`<root>/.git/HEAD` moved, a path that does not exist in a worktree (`.git` is a file there),
+so a worktree's binary kept its first sha across every later commit; and a plain source
+edit never re-ran it, so a tree that went dirty after the last build.rs run would still
+have read clean. The paths come from `git rev-parse --git-path` now, and the crate's own
+`src/` is watched (it is recompiling in that case anyway; the second build of an unchanged
+tree stays at 0.17 s). `make doctor` distinguishes "built from HEAD" from "built from HEAD
+plus uncommitted crates/std", and the gate scripts read the bare sha through the marker.

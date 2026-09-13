@@ -40,9 +40,11 @@ echo "brood doctor — HEAD is $head_sha"
 echo
 echo "1. build drift"
 
-# The sha a binary reports (`brood --version` prints "brood <ver> (<sha>)"), or "" if the
-# binary is old enough not to report one at all — which is itself the finding.
-binary_sha() { "$1" --version 2>/dev/null | sed -n 's/.*(\([0-9a-f]\{7,\}\)).*/\1/p'; }
+# The sha a binary reports (`brood --version` prints "brood <ver> (<sha>)", or "(<sha>-dirty)"
+# when its `crates/`/`std/` differed from the commit), or "" if the binary is old enough not
+# to report one at all — which is itself the finding. `binary_dirty` is the marker alone.
+binary_sha() { "$1" --version 2>/dev/null | sed -n 's/.*(\([0-9a-f]\{7,\}\)\(-dirty\)\{0,1\}).*/\1/p'; }
+binary_dirty() { "$1" --version 2>/dev/null | grep -q '-dirty)'; }
 
 # `nest` is here for the same reason `brood` is, and it was missing: `brood` is the
 # binary a MEASUREMENT lies through, `nest` the one a GATE lies through. A stale
@@ -62,6 +64,11 @@ for b in target/release-fast/brood target/release-fast/nest target/release/brood
     note "$b reports no build sha — predates the sha in --version; cannot be checked, rebuild it"
   elif [ "$sha" != "$head_sha" ]; then
     note "$b is built from $sha, HEAD is $head_sha — it will silently ignore anything newer"
+  elif binary_dirty "$b"; then
+    # Same commit, different inputs: it carries whatever was uncommitted in crates/ or std/
+    # when it was built — which may or may not be what is on disk now (the mtime check below
+    # answers that half).
+    note "$b is built from $sha with UNCOMMITTED crates/ or std/ changes — a clean rebuild of $head_sha is a different binary"
   else
     ok "$b matches HEAD"
   fi
