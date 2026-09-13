@@ -858,6 +858,9 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-12** — text contrast is a setting (ADR-337): `gui/text-contrast` lifts light-on-dark stems under the linear-light blend; bedit ships 1.4
 - **2026-09-12** — `editor/shell`: shell-script highlighting, and a script typed by its `#!` line (`register-interpreter-type`, Emacs `interpreter-mode-alist`)
 - **2026-09-12** — `\b` / `\B` in the regex engine: the Pike VM answers them, and a boundary pattern's `match?`/`matches?` route there too
+- **2026-09-13** — `:on-move` is a layer facet (ADR-338): a follower runs only when point or the text moved (`buffer-moved?`), never on every event like a `:post-key` guard; `string/width->index`, the inverse of `display-width`, for a click on a wide glyph
+- **2026-09-13** — the checker types a `def-` literal like a `def` one: Gap A reads `top_level_defs`, so a private `(def- k 10)` is an `int`, not `dynamic()` — bedit's strict count 13 → 0
+- **2026-09-13** — `--version` says `-dirty`: a binary whose `crates/`/`std/` differed from its commit is no longer indistinguishable from a clean build of the same sha; `make doctor` names it; build.rs re-runs from a worktree too
 
 ---
 
@@ -13112,6 +13115,61 @@ went with them. 5M-call loop 1.68 → 1.59 G instructions; the call-free loop 0.
 bintree −2.8%, nqueens −3.2%, json −2.1%, collatz −2.2%, nothing the other way. Rust jit tests,
 both guards and the in-language suite hold (the one failure is KI-134's `lazy_load_test:120`).
 
+
+### 2026-09-13 — a follower is not a guard: the `:on-move` facet, and a click by the view's measure
+
+bedit's markdown preview snapped back to the cursor's line on every wheel notch over it.
+The follow rode `:post-key`, layers §7's GUARD facet — which the loop runs on every event,
+a mouse gesture included, because a gesture can edit — so a scroll that moved nothing
+re-asserted the pane's position. Two other followers (the tutorial's *Workings* pane, the
+playground's spy pane) were on the same facet and only escaped by remembering their last
+region. The facet was the wrong shape for the job: a follower wants to hear about a MOVE,
+and only the loop can say cheaply whether there was one. So `:on-move` (ADR-338): the
+app's loop runs it after the guards, once, when `buffer-moved?` (point or rope — the rope
+is a handle, so an unchanged text is an O(1) `=`) or the current buffer changed. Nothing on
+that facet can fight a scroll, and no follower keeps state to avoid doing so.
+
+The second half is the click's column: `string/display-width` lays a line out in cells (an
+emoji or CJK glyph is two), and the mouse mapping turned a cell back into a character 1:1,
+so every wide glyph left of a click put point one character too far. `string/width->index`
+is the inverse (`text_width::index_at_cell`, one module with `display_width` so the two
+cannot disagree): a cell inside a wide glyph is that glyph's start — Emacs's rule, point
+before the glyph, never inside it. Registered last (`editor_native.rs`) for the
+intern-order reason recorded there.
+
+### 2026-09-13 — a private constant is an int too: Gap A opens the `def-` expansion
+
+bedit's `strict_ratchet` (ceiling 0) was failing on eight "`expects int, got number`"
+findings, all of the shape `(math/quot (+ shown (dec hexl-row-bytes)) …)` where the
+named constant is a `(def- name 16)`. Same code with a public `def` checked clean. The
+cause was the Gap A pass (type-gating.md): it walked the raw top-level forms for `(def g
+<expr>)`, and `def-` expands to `(do (def g …) (%mark-private 'g))` — the `def` sat one
+level down and was never seen, so a private constant had no current type, and int
+arithmetic over an unknown falls to `+`'s declared `number`. Pass 2.8 had already solved
+the identical problem for private functions with `top_level_defs`; Gap A now reads the
+same list. One new finding surfaced in brood's own tree from the sharper checker — a
+`def-` stride read from the environment through `string/->number`, which also reads
+`"1.5"` — and it was right: narrowed to `int?`. Brood's own strict count is unchanged at
+22; bedit's went 13 → 0 with contracts declared at the remaining sites.
+
+### 2026-09-13 — two binaries, one sha: `--version` now says `-dirty`
+
+Chasing bedit's strict ratchet, the installed `nest` reported 23 findings where a debug
+build "of the same commit" reported 4, then 0 with the `def-` fix. Both said `0.27.2
+(a81deedc)`. The installed one had been built from `../brood` with ~700 uncommitted lines
+of another session's checker work; nothing in the version, `system/build-id`, a crash dump
+or a test footer could have said so, and an hour went to theories about caches and images.
+
+`BROOD_GIT_SHA` now carries `-dirty` when `git status --porcelain -- crates std` is
+non-empty — scoped to the binary's inputs, so a docs edit is not dirt. Two other things in
+`build.rs` made the sha lie by omission and are fixed with it: it re-ran only when
+`<root>/.git/HEAD` moved, a path that does not exist in a worktree (`.git` is a file there),
+so a worktree's binary kept its first sha across every later commit; and a plain source
+edit never re-ran it, so a tree that went dirty after the last build.rs run would still
+have read clean. The paths come from `git rev-parse --git-path` now, and the crate's own
+`src/` is watched (it is recompiling in that case anyway; the second build of an unchanged
+tree stays at 0.17 s). `make doctor` distinguishes "built from HEAD" from "built from HEAD
+plus uncommitted crates/std", and the gate scripts read the bare sha through the marker.
 ### 2026-09-13 — the VM→native direct call lands, and what it found on the way in
 
 §7.12's lever, landed as the frame path with the driver round trip cut out: a non-tail

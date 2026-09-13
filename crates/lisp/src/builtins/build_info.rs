@@ -102,12 +102,13 @@ pub(super) fn features(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// stamp for an on-disk cache of anything the kernel computes (the checker's
 /// own logic is Rust, so its results are not portable across binaries).
 ///
-/// The git-sha half is baked in at compile time (`BROOD_GIT_SHA`) and is
-/// **not** by itself a reliable staleness stamp: it's `git rev-parse --short
-/// HEAD`, which doesn't change across an uncommitted rebuild on the same
-/// commit (exactly the case during active development on the checker
-/// itself), and `build.rs`'s `rerun-if-changed` only watches `.git/HEAD`/
-/// `.git/refs/heads` — a plain source edit + rebuild doesn't even re-run it.
+/// The git-sha half is baked in at compile time (`BROOD_GIT_SHA`): `git rev-parse
+/// --short HEAD`, with `-dirty` appended when `crates/` or `std/` differed from the
+/// commit (2026-09-13 — two binaries from one commit, one carrying an uncommitted
+/// checker change, reported the same version and disagreed on a `nest check`). It is
+/// still **not** by itself a reliable staleness stamp: two dirty builds on one commit
+/// share it, and the marker is re-evaluated only when this crate's sources or the head
+/// change (`build.rs`'s `rerun-if-changed`).
 /// The `binary-stamp` half (this executable's own mtime, read at *runtime*
 /// via [`binary_stamp`]) closes that gap: it changes on literally any
 /// rebuild, committed or not, for any reason, with no `build.rs` changes

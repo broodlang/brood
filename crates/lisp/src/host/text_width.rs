@@ -31,6 +31,28 @@ pub fn display_width(s: &str) -> usize {
     s.graphemes(true).map(cluster_cells).sum()
 }
 
+/// The inverse of `display_width`: the codepoint index of the grapheme cluster that
+/// occupies display cell `cell`, or the codepoint count of `s` when `cell` lies at or
+/// past its end. A cell inside a 2-cell glyph maps to that glyph's start, and a
+/// zero-width cluster (a combining mark) belongs to the cell of the base before it — so
+/// a click anywhere on a wide glyph puts point before it, never inside it. The
+/// column half of the editor's mouse mapping: `display_width` places the caret
+/// (chars -> cells), this maps a click back (cells -> chars); one module, so they
+/// cannot disagree.
+pub fn index_at_cell(s: &str, cell: usize) -> usize {
+    let mut cells = 0;
+    let mut chars = 0;
+    for cluster in s.graphemes(true) {
+        let width = cluster_cells(cluster);
+        if width > 0 && cell < cells + width {
+            return chars;
+        }
+        cells += width;
+        chars += cluster.chars().count();
+    }
+    chars
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -60,5 +82,28 @@ mod tests {
     fn combining_marks_add_nothing() {
         // base 'e' + combining acute → one cell, not two.
         assert_eq!(display_width("e\u{0301}"), 1);
+    }
+
+    #[test]
+    fn index_at_cell_inverts_display_width() {
+        // cells: a=[0,1) 😀=[1,3) b=[3,4); the emoji is ONE codepoint.
+        assert_eq!(index_at_cell("a😀b", 0), 0);
+        assert_eq!(index_at_cell("a😀b", 1), 1);
+        assert_eq!(index_at_cell("a😀b", 2), 1); // inside the wide glyph → its start
+        assert_eq!(index_at_cell("a😀b", 3), 2);
+        assert_eq!(index_at_cell("a😀b", 4), 3); // at the end → the length
+        assert_eq!(index_at_cell("a😀b", 40), 3);
+        assert_eq!(index_at_cell("", 0), 0);
+        assert_eq!(index_at_cell("hello", 3), 3);
+    }
+
+    #[test]
+    fn index_at_cell_counts_codepoints_through_clusters() {
+        // A ZWJ family is several codepoints in one 2-cell glyph: the index after it
+        // is its codepoint count, and a combining mark rides with its base.
+        let family = "👨‍👩‍👧";
+        assert_eq!(index_at_cell(&format!("{family}x"), 2), family.chars().count());
+        assert_eq!(index_at_cell("e\u{0301}x", 1), 2);
+        assert_eq!(index_at_cell("e\u{0301}x", 0), 0);
     }
 }

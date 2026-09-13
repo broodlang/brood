@@ -977,7 +977,8 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   `"e\u{301}"` is 2 codepoints but 1 cluster) · `string/->codepoints` ·
   `string/normalize` (`(string/normalize s :nfc)`, also `:nfd` `:nfkc` `:nfkd` — `=` is
   byte-structural, so `"é"` written two ways compares unequal until you normalise) ·
-  `string/display-width` (terminal cells, bare)
+  `string/display-width` (terminal cells, bare) · `string/width->index` (a cell → the
+  char index of the cluster on it — the inverse; mouse → point)
 - **string formatting**: `string/repeat` `string/pad-left` `string/pad-right`
   `->fixed` (number → string with fixed decimals, e.g. `(math/->fixed 3.14159 2)`
   → `"3.14"` — `str` prints full f64 precision, so reach for this for output) ·

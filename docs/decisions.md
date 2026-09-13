@@ -21941,6 +21941,44 @@ the outline): changes glyph shapes and advances, and the cache would need the va
 its key. *A fixed lift in the renderer*: the value is a taste, and a setting is one
 line.
 
+## ADR-338 — `:on-move` is a layer facet: a follower runs on a move, a guard on every event
+
+**Status:** accepted and implemented 2026-09-13 (`editor/layers` §7, `buffer-moved?` in
+`editor/buffer`; bedit's dispatcher gates the facet, its three followers ride it).
+
+**Context.** Layers §7 standardised one post-dispatch facet, `:post-key`: a GUARD `(fn
+(ctx-before ctx-after key) -> ctx)` the app's loop runs after every event, which vetoes an
+edit by returning `ctx-before`. It must see every event — a mouse gesture (a context-menu
+paste, a drag-kill) edits as surely as a key. Editors also grow FOLLOWERS: a companion pane
+kept on the cursor (a rendered preview, a trace pane, a docs pane). With one facet on offer
+the followers rode it, and a follower on an every-event facet re-asserts its position on
+events that moved nothing. The concrete bug: bedit's markdown preview, scrolled by the
+wheel, snapped back to the cursor's line on each notch — the wheel over the preview is a
+`:mouse` event, the guard facet ran, the follow saw the line out of view. Two other
+followers avoided it only by remembering their last region, state that exists to work
+around the facet's shape.
+
+**Decision.** A second standard facet, `:on-move` — `(fn (ctx) -> ctx)`, same order as
+`:post-key`, run AFTER the guards (a guard decides what the event did; a follower reacts to
+where the cursor ended up) and ONLY when the context moved: its point or its text changed,
+or the app switched what is current. `editor/buffer` supplies the test, `(buffer-moved?
+before after)` — point or rope differ, an O(1) comparison because the rope is a handle. The
+app's loop decides "moved" once; a follower never sees an event that moved nothing, and
+keeps no state to avoid reacting to one.
+
+**Consequences.** The class of bug — a pane that fights the reader's scroll — cannot be
+written on this facet; bedit's `modes_test` pins the gate with a counting layer (a motion
+and an edit count once, a wheel notch, `C-g` and `M-<` at the top count zero) and
+`mdpreview_test` pins the pane staying scrolled. Followers get cheaper: they no longer run
+on the events that dominate a session (wheel ticks, ticks, blur). `:post-key` keeps its
+one job. A profile switch that re-renders (bedit's tutorial) stays on `:post-key`: it is a
+reaction to the KEY, not to a move.
+
+**Alternatives rejected.** *Compare in each follower* (`m-before` is already an argument):
+every follower re-derives the same test and one forgets. *Skip `:post-key` for mouse
+events*: a mouse gesture can edit, which is exactly what the guards exist for. *A
+`:moved?` flag on the model*: the same information, but state to keep in sync where a
+comparison at the one site that has both models needs none.
 ## ADR-339 — A module load survives an `%isolate` restore: load writes are journalled and replayed
 
 **Status:** accepted and implemented 2026-09-13 (`%with-load-journal` and

@@ -130,6 +130,13 @@ unsaved buffer rather than erroring."
 (defn buffer-text (buf) "The buffer's full text as a string." (text/->string (get buf :rope)))
 (defn buffer-point (buf) "The cursor position (a char index)." (get buf :point))
 (defn buffer-mark (buf) "The mark (a char index), or nil if unset." (get buf :mark))
+(defn buffer-moved? (before after)
+  "Did the cursor or the text move between two states of a buffer — `before` and `after`
+its point or rope differ? The test an app's loop runs a layer's `:on-move` followers on
+(layers §7): the rope is a handle, so an unchanged text is an O(1) `=`. Compares STATES,
+not identities — an app that can switch buffers between the two states checks that itself."
+  (or (not (= (get before :point) (get after :point)))
+    (not (= (get before :rope) (get after :rope)))))
 (defn buffer-name (buf) "The buffer's name." (get buf :name))
 (defn buffer-file (buf) "The buffer's backing file path, or nil." (get buf :file))
 (defn buffer-length (buf) "The number of characters in the buffer." (text/length (get buf :rope)))

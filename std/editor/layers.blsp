@@ -146,6 +146,14 @@ core knows nothing about buffers."
 ;;     `ctx-before` — the canonical way a layer protects read-only regions (a
 ;;     shell prompt, generated prose around an editable playground) without the
 ;;     app hardcoding per-layer checks in its dispatch path.
+;;   * `:on-move` — a FOLLOWER run after dispatch ONLY when the context's point or text
+;;     changed (`buffer-moved?` in editor/buffer is the test): `(fn (ctx) -> ctx)`, the
+;;     same order as `:post-key`. Keeps a companion pane (a preview, a trace pane) on
+;;     the cursor. It is a separate facet because a guard must see EVERY event —
+;;     a mouse gesture can edit — while a follower on that facet re-asserts its
+;;     position on events that moved nothing, such as the wheel scrolling the very
+;;     pane it follows with, and fights the user for it. The app's loop decides
+;;     "moved" once and runs the facet only then; a follower never has to remember.
 ;;
 ;; ---- semantics to remember -------------------------------------------------
 ;;   * head of :layers = highest precedence (keymap merge + hook order).

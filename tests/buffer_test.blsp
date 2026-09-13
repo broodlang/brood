@@ -26,6 +26,12 @@
       (assert= (buffer-name b) "*scratch*")
       (assert= (buffer-file b) nil)
       (assert= (buffer-length b) 11)))
+  (test "buffer-moved?: a point or text change, not a mark or a no-op"
+    (let (b (make-buffer "hello world"))
+      (is (not (buffer-moved? b b)))
+      (is (not (buffer-moved? b (set-mark b))))
+      (is (buffer-moved? b (forward-char b)))
+      (is (buffer-moved? b (insert b "x")))))
   (test "make-buffer with name and file"
     (let (b (make-buffer "x" "notes" "/tmp/notes.txt"))
       (assert= (buffer-name b) "notes")

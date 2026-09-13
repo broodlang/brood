@@ -1,6 +1,6 @@
 //! Natives added for the editor toolkit (`std/editor/*`), registered LAST: registration
 //! order feeds the intern table, and a primitive inserted mid-list reshuffles small-map
-//! key order image-wide (see `syntax_scan::register`). Two live here:
+//! key order image-wide (see `syntax_scan::register`). What lives here:
 //!
 //! `%ui-harvest` — the per-frame pass under `editor/ui`'s memoised view fragments
 //! (ADR-336). A `view` marks a fragment it memoised as `[:ui/memo key deps ops]` inside
@@ -9,6 +9,10 @@
 //! One walk of the frame produces both. It is the same shape as `%span-runs`: plain
 //! data in, plain data out, and it runs on every frame — where a Brood-level walk of a
 //! few hundred ops costs about a millisecond, more than the paint it exists to save.
+//!
+//! `%gui-text-contrast!` (ADR-337) and `string/width->index` — the inverse of
+//! `string/display-width`, the cells -> chars half of the editor's mouse-column mapping —
+//! were appended later, for the same order reason.
 
 use super::numeric::arg;
 use crate::core::heap::Heap;
@@ -37,6 +41,16 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         &["gamma"],
         "Set the text contrast exponent γ (1.0 by default, clamped to 0.5..3.0): a monochrome glyph's partial coverage is lifted to cov^(1/γ) where the text is lighter than the pixel it lands on, so light-on-dark text — which a linear-light blend renders with thin stems — reads fuller without touching a glyph's interior, its exterior, dark-on-light text or colour emoji. 1.0 is the plain blend; 1.4–1.8 is the range other linear-light renderers ship. Applies to every open window and the default for ones opened later; a pure repaint. Needs --features gui. Returns nil.",
         gui_text_contrast,
+    );
+    // The inverse of `string/display-width` (cells -> chars). Lives here rather than
+    // beside its sibling in `sequences.rs` for the registration-order reason above.
+    primitives.def(
+        "string/width->index",
+        Arity::exact(2),
+        Sig::new(vec![string, int], int),
+        &["s", "cell"],
+        "The character index in s of the grapheme cluster occupying display cell `cell` (0-based), or (string/length s) when cell is at or past the string's width — the inverse of string/display-width. A cell inside a 2-cell glyph (emoji, CJK) gives that glyph's start, and a combining mark rides with its base, so mapping a mouse click back to a character lands BEFORE a wide glyph, never inside it. The cells -> chars half of the editor's column geometry; string/display-width is the chars -> cells half.\n\n    (string/width->index \"a😀b\" 2)   → 1\n    (string/width->index \"a😀b\" 3)   → 2",
+        string_width_to_index,
     );
 }
 
@@ -142,4 +156,33 @@ fn gui_text_contrast(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     };
     crate::host::gui::text_contrast(gamma).map_err(LispError::runtime)?;
     Ok(Value::nil())
+}
+
+/// `(string/width->index s cell)` — see the registration; `text_width::index_at_cell`.
+fn string_width_to_index(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let s = match arg(args, 0) {
+        Value::Str(id) => heap.string(id),
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "string/width->index",
+                "string",
+                other,
+            ))
+        }
+    };
+    let cell = match arg(args, 1) {
+        Value::Int(n) => n.max(0) as usize,
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "string/width->index",
+                "int (a display cell)",
+                other,
+            ))
+        }
+    };
+    Ok(Value::int(
+        crate::host::text_width::index_at_cell(&s, cell) as i64,
+    ))
 }
