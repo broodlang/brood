@@ -1293,6 +1293,69 @@ impl Ty {
         n
     }
 
+    /// This type with every structural refinement (elements, key/value, fields, tuple
+    /// positions) nested more than `depth` levels down DROPPED to its tags — the literal
+    /// sets, the subtraction and the alternatives are kept. `widened_below(0)` is the flat
+    /// tag set with its literals.
+    ///
+    /// The **widening operator** a fixpoint over types needs (Pass 2.9, ADR-341): a JSON
+    /// value contains vectors of JSON values, and with no recursive types the inferred
+    /// element refinement nests one level deeper every round — `vector<… | vector<… |
+    /// vector<…>>>` — until [`MAX_TY_NODES`] flattens it, after which it regrows, and the
+    /// sequence never repeats. Applied to what is still moving after a few rounds, it makes
+    /// the ascent stationary: what a round computes from inputs of depth `d` has depth at most
+    /// `d + 1`, and widening it back to `d` gives the previous round's value. Sound — a
+    /// dropped refinement is an over-approximation, like every widening here.
+    pub fn widened_below(&self, depth: usize) -> Ty {
+        let mut out = self.clone();
+        if depth == 0 {
+            out.arrow = None;
+            out.overload = None;
+            out.elem = None;
+            out.map_kv = None;
+            out.fields = None;
+            out.tuple = None;
+        } else {
+            let below = |t: &Ty| t.widened_below(depth - 1);
+            out.elem = self.elem.as_ref().map(|e| Arc::new(below(e)));
+            out.map_kv = self
+                .map_kv
+                .as_ref()
+                .map(|kv| Arc::new((below(&kv.0), below(&kv.1))));
+            out.fields = self.fields.as_ref().map(|f| {
+                Arc::new(RecordShape {
+                    fields: f
+                        .fields
+                        .iter()
+                        .map(|(k, (t, req))| (*k, (below(t), *req)))
+                        .collect(),
+                    rest: below(&f.rest),
+                })
+            });
+            out.tuple = self
+                .tuple
+                .as_ref()
+                .map(|ts| Arc::new(ts.iter().map(below).collect()));
+            out.arrow = self
+                .arrow
+                .as_ref()
+                .map(|s| Arc::new(widen_sig(s, depth - 1)));
+            out.overload = self
+                .overload
+                .as_ref()
+                .map(|ss| Arc::new(ss.iter().map(|s| widen_sig(s, depth - 1)).collect()));
+        }
+        // The alternatives and the subtraction sit at THIS level.
+        out.alts = self
+            .alts
+            .as_ref()
+            .map(|a| Arc::new(a.iter().map(|t| t.widened_below(depth)).collect()));
+        out.neg = self
+            .neg
+            .as_ref()
+            .map(|n| Arc::new(n.iter().map(|t| t.widened_below(depth)).collect()));
+        out
+    }
     /// If this type's refinement tree exceeds [`MAX_TY_NODES`] nodes, widen it to the flat
     /// tag set (dropping the structural refinements; the bounded literal sets are kept).
     /// Sound — widening over-approximates, never manufacturing a false positive — and it
@@ -1362,12 +1425,18 @@ impl Ty {
             other.tags & MAP_BIT != 0,
             &other.fields,
         );
-        let tuple = merge_union(
-            self.tags & VECTOR_BIT != 0,
-            &self.tuple,
-            other.tags & VECTOR_BIT != 0,
-            &other.tuple,
-        );
+        // Two tuple shapes of one arity: exact when they differ in one position
+        // (`A×B ∪ C×B = (A∪C)×B`), and otherwise the per-position union — a WIDENING that
+        // keeps the arity and every other position, where the plain rule dropped the
+        // shape to a bare `vector` (see [`tuple_union`]).
+        let tuple = tuple_union(&self, &other).unwrap_or_else(|| {
+            merge_union(
+                self.tags & VECTOR_BIT != 0,
+                &self.tuple,
+                other.tags & VECTOR_BIT != 0,
+                &other.tuple,
+            )
+        });
         // Literal sets union *exactly* (not widen) — `:a ∪ :b = {a,b}` — unless a
         // side has that member *open* (tag present, no set), which contributes
         // every value of the tag (`:a ∪ keyword = keyword`). Each tag is
@@ -2036,12 +2105,23 @@ impl Ty {
                     }
                     None => match &self.fields {
                         // A closed record IS a map with keyword keys: it's a subtype of
-                        // `map<K,V>` when a keyword key fits K and every field value type
-                        // fits V. (Uses the conservative "any keyword" for the key rather
-                        // than the exact literal set — enough for the common `map<keyword,
-                        // any>`, and never a false accept.)
+                        // `map<K,V>` when each of its KEYS fits K and every field value type
+                        // fits V. The keys of a closed record are exactly its field names, so
+                        // the empty closed record `{}` is inside every `map<K, V>` — which is
+                        // what lets a `fold` from `{}` over `(assoc m k v)` settle on the
+                        // `map<K, V>` its step builds instead of the union's bare `map`. An
+                        // OPEN record's undeclared keys are keywords (a shape comes from a
+                        // keyword-keyed literal), so it keeps the "any keyword" reading.
                         Some(shape) => {
-                            if !Ty::of(Tag::Keyword).is_subtype(&b.0) {
+                            if shape.is_open() {
+                                if !Ty::of(Tag::Keyword).is_subtype(&b.0) {
+                                    return false;
+                                }
+                            } else if !shape
+                                .fields
+                                .keys()
+                                .all(|name| Ty::keyword_lit(*name).is_subtype(&b.0))
+                            {
                                 return false;
                             }
                             for (vty, _opt) in shape.fields.values() {
@@ -2712,11 +2792,44 @@ fn merge_is_exact(a: &Ty, b: &Ty) -> bool {
         && (!contested(sa, &a.elem, sb, &b.elem) || elem_union_exact(a, b).is_some())
         && !contested(ma, &a.map_kv, mb, &b.map_kv)
         && !contested(ma, &a.fields, mb, &b.fields)
-        && !contested(va, &a.tuple, vb, &b.tuple)
+        && (!contested(va, &a.tuple, vb, &b.tuple) || tuple_union_is_exact(a, b))
     // The four literal slots are *never* contested: their union is the union of the
     // two literal sets, which `merge_union_lit_set` computes exactly.
 }
 
+/// The merged tuple slot of `a ∪ b` when BOTH carry a tuple shape of the same arity:
+/// `Some(Some(shape))` with each position the union of the two — or `None` to fall back
+/// to the plain rule (a side without a shape, or unequal arities). Exact when the shapes
+/// differ in at most one position (`A×B ∪ C×B = (A∪C)×B`); a WIDENING otherwise — the
+/// per-position union admits combinations neither side had — which is what the cap on a
+/// union's terms reaches for: eight `[<literal> (+ i 1)]` branches of a parser used to
+/// collapse to a bare `vector`, and every caller reading the index back got `any`.
+fn tuple_union(a: &Ty, b: &Ty) -> Option<Option<Arc<Vec<Ty>>>> {
+    let (Some(ta), Some(tb)) = (a.tuple.as_deref(), b.tuple.as_deref()) else {
+        return None;
+    };
+    if ta.len() != tb.len() || a.tags & VECTOR_BIT == 0 || b.tags & VECTOR_BIT == 0 {
+        return None;
+    }
+    let merged: Vec<Ty> = ta
+        .iter()
+        .zip(tb)
+        .map(|(x, y)| x.clone().union(y.clone()))
+        .collect();
+    Some(Some(Arc::new(merged)))
+}
+
+/// Is the tuple half of `a ∪ b` EXACT under [`tuple_union`] — same arity, differing in at
+/// most one position (or identical)?
+fn tuple_union_is_exact(a: &Ty, b: &Ty) -> bool {
+    let (Some(ta), Some(tb)) = (a.tuple.as_deref(), b.tuple.as_deref()) else {
+        return false;
+    };
+    ta.len() == tb.len()
+        && a.tags & VECTOR_BIT != 0
+        && b.tags & VECTOR_BIT != 0
+        && ta.iter().zip(tb).filter(|(x, y)| x != y).count() <= 1
+}
 /// The merged element refinement of `a ∪ b` when that merge is EXACT although the two
 /// element types differ — `Some(elem)` — or `None` when it is not (the caller then falls
 /// back to the plain "identical or one-sided" rule, which widens).
@@ -2957,7 +3070,19 @@ impl GradualTy {
     /// the gradual `?` in either mode — only what is positively known is read strictly.
     pub fn consistent_with_mode(&self, expected: Ty, strict: bool) -> bool {
         if !self.dynamic {
-            return self.bound.is_consistent_subtype(&expected);
+            // A PRECISE bound — a literal, a sig-typed parameter — is read by inclusion, term
+            // by term; but an arm known only by exclusion is the unknown even when it came
+            // from a declaration: `(sig f (any -> …))` then `(when xs (first xs))` leaves
+            // `xs : (not (nil | false))`, which says nothing positive, and reading it by
+            // inclusion reported the guarded use of a declared-`any` parameter in both
+            // modes. Declaring `any` means what not declaring means.
+            return self.bound.terms_vec().into_iter().all(|term| {
+                if term.is_known_only_by_exclusion() {
+                    !term.is_disjoint(&expected)
+                } else {
+                    term.is_consistent_subtype(&expected)
+                }
+            });
         }
         // A dynamic bound is read TERM BY TERM. A union that puts a positively-known
         // alternative beside one known only by exclusion — `nil | list<int> | (not (nil |
@@ -3031,3 +3156,17 @@ impl GradualTy {
 
 #[cfg(test)]
 mod tests;
+
+/// [`Ty::widened_below`] over a signature's parameters and result.
+fn widen_sig(sig: &Sig, depth: usize) -> Sig {
+    let mut out = sig.clone();
+    out.params = sig.params.iter().map(|t| t.widened_below(depth)).collect();
+    out.optional = sig
+        .optional
+        .iter()
+        .map(|t| t.widened_below(depth))
+        .collect();
+    out.rest = sig.rest.as_ref().map(|t| t.widened_below(depth));
+    out.ret = sig.ret.widened_below(depth);
+    out
+}

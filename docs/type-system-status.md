@@ -938,7 +938,7 @@ Tier-2 monomorphization (item 7 — the checker→compiler channel, on ADR-294's
 true recursive types, contract blame and contracts-by-default (roadmap 10/11, ADR-153),
 parametric abilities, view patterns.
 
-## Declare at the leaf, derive from the call (2026-09-13, ADR-339)
+## Declare at the leaf, derive from the call (2026-09-13, ADR-340)
 
 A review of this document against the tree found that the two closing verdicts above — "the
 backlog is empty" and "the inference frontier is closed as measured" — were written about the
@@ -988,3 +988,28 @@ the name never escapes as a value — is what removes those, and it needs its ow
 types, contract blame and contracts-by-default, parametric abilities, view patterns; the
 computed-callee `((cur 1) "x")` (an arrow in head position is not consulted); strict's arrow
 inclusion reading an unknown lambda result as `any` rather than `?`.
+
+## Caller-derived parameter types for private functions (2026-09-13, ADR-341)
+
+The residue ADR-340 left — four `json` index helpers declared `(… -> (tuple int int))` because
+the walk read a body under its parameters' bottom-up demands — is gone, and so is `hex-val`'s
+and `json-value`'s declaration: **`std/json.blsp` is strict-zero with no signature on its parser
+chain.** `int` (and `vector<int>` for the codepoints) flows from `decode` down ten private
+levels, because a `defn-`'s callers are all in its file and Pass 2.9 binds its parameters to
+the union of what those callers pass — a least fixpoint, jointly with the private returns
+(`(+ i 1)` is `int` under the callers where the demand alone said `number`), the sites read in
+the scope the walk sees there (a `let` binder, an `(and j …)` alias, an `if`'s narrowing).
+
+Three things the ascent needed and now has: a call with an uninhabited argument types as ⊥
+(unknown was absorbing, and a fixpoint seeded at ⊥ could never rise); tuples of one arity
+merge by position (exact when one position differs; eight `[<literal> (+ i 1)]` branches used
+to collapse to a bare `vector` past the term cap); and a widening operator
+(`Ty::widened_below`) for the round when a JSON value's `vector<… | vector<…>>` would otherwise
+nest one level deeper forever.
+
+What derivation does NOT reach, by design: a private function used as a value (`(map xs
+helper)`), a file with an unexpanded macro call, a public function (its callers are anywhere),
+`(:use-internals mod)` callers in another file — those read the demand-based loaded inference
+as before. And what it surfaced in `json` was the `nth`-answers-`nil | int` class once more
+(`(digit? (nth s i))` under a `(< i n)` the checker cannot tie to it): `(nth s i -1)` says what
+the guard says, and a `->number` after `strict-number?` unwraps the failure it cannot get.

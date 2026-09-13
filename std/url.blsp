@@ -152,6 +152,7 @@ pass through, space becomes +, all other bytes become %XX."
           v (url-query-encode-str (second kv))
           sep (if first? "" "&"))
       (url-pairs->query (rest pairs) (cons (str sep k "=" v) acc) false))))
+(sig url-pairs->query ((or nil (list (tuple string string))) any bool -> any))
 
 (defn query-encode (params)
   "Encode a map of string→string (or keyword→string) params as a
@@ -163,8 +164,8 @@ defines rather than as its field map.
     (url/query-encode {:a 1})    → \"a=1\""
   (let (pairs (sort (map (%map-pairs params)
                       (fn (kv)
-                        (list (if (keyword? (first kv)) (->string (first kv)) (str (first kv)))
-                          (->string (second kv)))))))
+                        [(if (keyword? (first kv)) (->string (first kv)) (str (first kv)))
+                          (->string (second kv))]))))
     (apply str (reverse (url-pairs->query pairs nil true)))))
 (sig query-encode (map -> string))
 

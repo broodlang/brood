@@ -481,7 +481,7 @@ call is still in the old callback-first order.
                   (or (>= closep len) (not (= (string/char-at text closep) ")"))) (skip)
                   ;; already data-first: the first argument no longer looks like the
                   ;; old subject, so this call has been migrated (or never needed it)
-                  (not (old-order? kind (first args) (last args))) (skip)
+                  (not (old-order? kind (or (first args) "") (or (last args) ""))) (skip)
                   else
                     (reorder-loop text
                       name
@@ -497,7 +497,7 @@ call is still in the old callback-first order.
                           ;; scan past `closep` would skip it — the file then needed
                           ;; one pass per nesting level.
                           (string/join (map order
-                                         (fn (k) (reorder-text (nth args k) name order kind)))
+                                         (fn (k) (reorder-text (nth args k "") name order kind)))
                             " ")
                           ")")
                         (cons (string/substring text from i) parts))))))))))))

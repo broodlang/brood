@@ -1173,7 +1173,7 @@ sha256 pin still holds."
 ;; is two of YOUR OWN source files declaring the same `(defmodule …)`. So only the
 ;; project's own source dirs are checked; `entries` is kept for signature stability.
 (defn- package-collision-sources (root entries)
-  (map (project/abs-paths root *project-source-paths*) (fn (d) (list "your project" d))))
+  (map (project/abs-paths root *project-source-paths*) (fn (d) ["your project" d])))
 
 ;; `main` is a project's ENTRY POINT, not part of its library surface: `nest run` only
 ;; ever uses the ROOT project's `:main`, and nothing `require`s a dependency's. So two
@@ -1205,6 +1205,7 @@ sha256 pin still holds."
                 "); rename one module (a `(defmodule …)` name must be"
                 " unique within a package)")
               (assoc m mod label))))))))
+(sig package-collision-loop ((or nil (list (tuple string string))) map -> (or nil map)))
 
 ;; A dependency may not be NAMED after a standard-library module (ADR-070/166): its
 ;; name becomes a load-time package prefix, so a dep called `net` would provide `tcp`

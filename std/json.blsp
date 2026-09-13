@@ -90,7 +90,7 @@ escape (the codepoint→char mechanism pure Brood otherwise lacks)."
 ;; -- numbers --
 (defn- num-end (s i n)
   (if (< i n)
-    (let (c (nth s i))
+    (let (c (nth s i -1))
       ;; digit or one of `-+.eE` (45 43 46 101 69)
       (if (or (digit? c) (= c 45) (= c 43) (= c 46) (= c 101) (= c 69))
         (num-end s (+ i 1) n)
@@ -106,7 +106,7 @@ escape (the codepoint→char mechanism pure Brood otherwise lacks)."
 ;; over the token's [i, end) range — no token string is built unless it parses.
 (defn- digits-run (s i n)
   ; consume zero or more digits
-  (if (and (< i n) (digit? (nth s i))) (digits-run s (+ i 1) n) i))
+  (if (and (< i n) (digit? (nth s i -1))) (digits-run s (+ i 1) n) i))
 
 (defn- int-end (s i n)
   "Index after the integer part at `i`, or nil. A lone `0`, or `[1-9]` then digits —
@@ -115,14 +115,14 @@ no leading zeros."
     (>= i n) nil
     (= (nth s i) 48) (+ i 1)
     ; lone 0 (leading-zero check below)
-    (digit? (nth s i)) (digits-run s (+ i 1) n)
+    (digit? (nth s i -1)) (digits-run s (+ i 1) n)
     else nil))
 
 (defn- frac-end (s i n)
   "Index after an optional `.digit+` fraction at `i`; `i` unchanged if none; nil if a
 `.` isn't followed by a digit."
   (if (and (< i n) (= (nth s i) 46))
-    (if (and (< (+ i 1) n) (digit? (nth s (+ i 1))))
+    (if (and (< (+ i 1) n) (digit? (nth s (+ i 1) -1)))
       (digits-run s (+ i 2) n)
       nil)
     i))
@@ -134,7 +134,7 @@ nil if malformed."
     (let (j (if (and (< (+ i 1) n) (or (= (nth s (+ i 1)) 43) (= (nth s (+ i 1)) 45)))
               (+ i 2)
               (+ i 1)))
-      (if (and (< j n) (digit? (nth s j)))
+      (if (and (< j n) (digit? (nth s j -1)))
         (digits-run s (+ j 1) n)
         nil))
     i))
@@ -153,7 +153,10 @@ leading zeros)."
 (defn- json-number (s i n)
   (let (end (num-end s i n))
     (if (strict-number? s i end)
-      [(string/->number (json-slice s i end)) end]
+      ;; `strict-number?` is the whole grammar, so the conversion cannot fail — the
+      ;; `failure?` arm exists to say so where the type is read, not to run.
+      (let (n (string/->number (json-slice s i end)))
+        (if (failure? n) (error "json: invalid number at index " i) [n end]))
       (error "json: invalid number '" (json-slice s i end) "' at index " i))))
 
 ;; -- strings --
@@ -164,10 +167,10 @@ leading zeros)."
     (and (>= c 97) (<= c 102)) (- c 87)
     (and (>= c 65) (<= c 70)) (- c 55)
     else nil))
-(sig hex-val (int -> (or nil int)))
 
 (defn- hex1 (s i)
-  (let (v (hex-val (nth s i)))
+  ;; past the end reads as -1, which is no hex digit: the same error as any other
+  (let (v (hex-val (nth s i -1)))
     (if (nil? v) (error "json: invalid hex digit in \\u escape at index " i) v)))
 
 (defn- hex4 (s i)
@@ -202,7 +205,6 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
         ; ("string/int->char: 56320 is not a valid Unicode codepoint") instead of a json one.
         (and (>= hi 56320) (<= hi 57343)) (error "json: lone low surrogate at index " i)
         else [hi (+ i 4)]))))
-(sig json-unicode (vector int int -> (tuple int int)))
 
 (defn- json-escape (s i n)
   "An escape body starting at `i` (after the backslash). Returns `[code next-index]`."
@@ -226,7 +228,6 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
       ; \f
       (= c 117) (json-unicode s (+ i 1) n)
       else (error "json: invalid escape at index " i))))
-(sig json-escape (vector int int -> (tuple int int)))
 
 ;; `acc` is the content CODES collected in reverse; the string is assembled once at
 ;; the close quote. (The old per-char `(str acc c)` rebuilt the whole accumulator
@@ -248,12 +249,10 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
         (error "json: unescaped control character in string: U+"
           (string/pad-left (string/upper (int->hex c)) 4 "0"))
       else (string-acc s (+ i 1) n (cons c acc)))))
-(sig string-acc (vector int int (or nil (list int)) -> (tuple string int)))
 
 (defn- json-string (s i n)
   "A string body starting at `i` (just after the opening quote). Returns `[str end]`."
   (string-acc s i n nil))
-(sig json-string (vector int int -> (tuple string int)))
 
 ;; -- literals --
 (defn- lit-match (s i codes k m)
@@ -333,7 +332,6 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
       ; null
       (= c -1) (error "json: unexpected end of input")
       else (json-number s i n))))
-(sig json-value (vector int int -> vector))
 
 (defn decode (s)
   "Parse JSON text `s` into Brood data: object → a map with **keyword** keys, array →

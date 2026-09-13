@@ -21980,7 +21980,7 @@ events*: a mouse gesture can edit, which is exactly what the guards exist for. *
 `:moved?` flag on the model*: the same information, but state to keep in sync where a
 comparison at the one site that has both models needs none.
 
-## ADR-339 — Declare at the leaf, derive from the call: recursive call-site specialization, and the checker materialises what a loaded body names
+## ADR-340 — Declare at the leaf, derive from the call: recursive call-site specialization, and the checker materialises what a loaded body names
 
 **Status:** accepted and implemented 2026-09-13 (`types/check/sigs.rs` `specialize_recursive`,
 `types/check.rs` `materialise_referenced_modules`, `types.rs` `elem_union_exact` and the
@@ -22080,3 +22080,85 @@ module-private functions, whose caller set is closed (the union of the call site
 types is a sound binding, provided the name never escapes as a value) — after which those four
 go and `hex-val` alone stays. Not built here: it is a second full walk per file or a stored-scope
 collection pass, and it wants its own measurement.
+
+## ADR-341 — Caller-derived parameter types for module-private functions
+
+**Status:** accepted and implemented 2026-09-13 (`types/check.rs` Pass 2.9,
+`types/check/sigs.rs` `caller_derived_params` / `collect_private_sites`, `Ctx::derived_params`,
+`walk/binders.rs` `check_def`; two lattice rules — `tuple_union`, and a call with an
+uninhabited argument is `never`).
+
+**Context.** ADR-340 left one class of declaration that should derive: `json`'s index-returning
+helpers carried `(sig … -> (tuple int int))` because the walk checks a body under its
+parameters' bottom-up *demands* — `(+ i 1)` says `number` — with no view of what the callers
+pass, and the same demand bound the return Pass 2.8 inferred, so `number` leaked into every
+caller. The rule this repo follows is *declare at the leaf, derive from the call*; a private
+helper is not a leaf.
+
+**Decision.** A module-private function (`defn-`) is callable only from its own file, so its
+callers are exactly the call sites there. Pass 2.9 computes, for every private single-arm
+plain-parameter function with no declaration, the union of what each site hands each
+parameter — the **least fixpoint** over the file, jointly with the candidates' returns:
+
+- Sites are collected by a scoped walk of the file's expanded forms that keeps the scope the
+  WALK would have there — `let`/`letrec` binders typed (with the `(let (name other) …)` alias
+  the `and`/`or` expansions rely on), `fn` parameters bound (a declared function's to its
+  sig, a derived function's to its current derived types, a public function's unknown),
+  `if` narrowed through `guards::branch_scopes`, body sequences through
+  `diverging_guard_scope`. Without the scope, `(if (nil? j) nil (f j))` handed `f` a `nil | int`
+  the walk knows is `int`, and strict reported every arithmetic on it inside `f`.
+- Live candidates (a site, no escape) start at ⊥ and every candidate's return starts at ⊥;
+  each round re-reads the sites and the returns (`infer_return_from_form` under the MEET of
+  demand and derived type) until nothing moves. A return a round cannot type stays where it
+  is — falling back to the demand-based one would put a value above the least fixpoint into a
+  monotone ascent — and one that never types gets Pass 2.8's answer back at the end. No
+  fixpoint within the bound restores everything. Afterwards the PUBLIC functions' returns are
+  re-read over the sharper private ones (`refresh_returns`).
+- The result binds the parameters in the walk of the private body (plainly, not as a
+  sig-authoritative contract, so a defensive guard the callers never exercise is not a dead
+  clause) and in the same-file return inference; a loaded-closure caller elsewhere still reads
+  the demand-based inference, which is what `(:use-internals mod)` needs.
+- Declined, hence unknown: a name that ESCAPES as a value (`(map xs helper)`, `(apply helper …)`,
+  inside quoted data); a function with no site; an unexpanded macro call anywhere in the file
+  (its operands are syntax that may construct a call the walk cannot see — the whole pass
+  declines); a call of the wrong arity contributes nothing (it raises).
+
+**Soundness.** By induction along any chain of activations from a public entry: a public
+function's parameters are unknown; every site's argument is typed by `expr_ty` under a scope
+whose bindings over-approximate the values; the fixpoint closes over the sites inside private
+bodies; so every actual argument lies in the derived type, and a body checked under it warns
+only on a use every in-file call would fail. A warning inside a private body under a wrong
+caller (`(bump "s")`) is therefore a true finding about this file.
+
+**Two lattice rules the ascent needed.** A call whose argument is uninhabited never executes,
+so `expr_ty` answers ⊥ for it (not unknown — unknown is absorbing, and `(+ i 1)` under `i :
+never` was untypeable); only for a head that evaluates its operands. And tuples of one arity
+merge by position: exactly when they differ in one position (`A×B ∪ C×B = (A∪C)×B`), and as a
+widening past the four-term cap — eight `[<literal> (+ i 1)]` branches of `json-escape` used to
+collapse to a bare `vector`, and the index read back was `any`.
+
+**Consequences.** `std/json.blsp` is at zero in strict with NO signature on its parser chain:
+`int` (and `vector<int>` for the codepoints) flows from `decode` through ten private levels, and
+the four ADR-340 declarations plus `hex-val`'s and `json-value`'s are gone. Turning the
+derivation on over `std/` showed 55 strict findings of one class — a caller hands a private
+helper an `nth`/`first` result, and the body uses it under a guard the checker cannot tie to
+the `nth` — and reading them produced FIVE general rules before any code changed, each a
+sound tightening: `(empty? xs)` is an ELSE-ONLY guard (its false branch proves `¬nil`; `Guard`
+gained `else_only`, the dual of `then_only`, and `not` swaps the two — so a `then_only` guard
+negates soundly now too); an exclusion-only term of a PRECISE bound reads by overlap (a
+declared `any` narrowed by `(when xs …)` was read by inclusion in both modes — a
+false-positive class older than this ADR); a map literal with no keyword key is `map<K, V>`,
+and `(assoc <closed record> k v)` under a computed key is `map<K, V>` too, so a table built
+by a fold from `{}` types its lookups; the empty closed record is inside every `map<K, V>`
+(a closed record's keys are exactly its field names); and an `if` whose every branch is a
+self-call contributes ⊥ to what encloses it, not unknown. What remained was fixed where the
+code already held the fact: leaf declarations that said `any` where they return `int`
+(`bytes/uint` and siblings, `%term-size`'s `(tuple int int)`, `ansi-param`'s `int?`), the
+`ui-run` callback contracts (`observe-view`, `observe-update`), two pair lists built as
+`(list a b)` that are the fixed shape a vector is (`url`, `package`), inert defaults on
+index reads the code has already bounded, and two `check-allow :type-mismatch` on the regex
+DFA loops, where `nth`'s default arm is not the VM-eligible one and the `(= i n)` guard is the
+invariant. `std/` is at zero in both modes; `tests/` strict carries seventeen more of the
+wider-than-the-truth kind (a test that knows its `read-n` succeeded), by design ungated; bedit
+is in the devlog. A chain settles in one round per level (bounded at 32), each round one walk
+of the file's forms.

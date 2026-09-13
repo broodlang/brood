@@ -1042,11 +1042,11 @@
       (pkg-write-project a "a" "util" "(defn f () 1)" "")
       (pkg-write-project b "b" "util" "(defn g () 2)" "")
       (is (includes? (try
-                       (package/package-check-namespace-collisions (list (list "your project"
+                       (package/package-check-namespace-collisions (list ["your project"
                                                                            (path/join a
-                                                                             "src"))
-                                                                     (list "your project"
-                                                                       (path/join b "src"))))
+                                                                             "src")]
+                                                                     ["your project"
+                                                                       (path/join b "src")]))
                        (catch e e))
             "collision"))))
   (test "distinct module names across providers are fine"
@@ -1055,10 +1055,10 @@
           b (path/join parent "b"))
       (pkg-write-project a "a" "alpha" "(defn f () 1)" "")
       (pkg-write-project b "b" "beta" "(defn g () 2)" "")
-      (assert= (package/package-check-namespace-collisions (list (list "dependency 'a'"
-                                                                   (path/join a "src"))
-                                                             (list "dependency 'b'"
-                                                               (path/join b "src"))))
+      (assert= (package/package-check-namespace-collisions (list ["dependency 'a'"
+                                                                   (path/join a "src")]
+                                                             ["dependency 'b'"
+                                                               (path/join b "src")]))
         nil)))
   ;; A hierarchical module `(defmodule gui/window)` lives in a SUBdirectory
   ;; (`src/gui/window.blsp`), so the scan must recurse — a top-level-only listing
@@ -1083,10 +1083,10 @@
       (file/spit (path/join (path/join (path/join b "src") "gui") "window.blsp")
         "(defmodule gui/window)\n(defn g () 2)\n")
       (is (includes? (try
-                       (package/package-check-namespace-collisions (list (list "dependency 'a'"
-                                                                           (path/join a "src"))
-                                                                     (list "dependency 'b'"
-                                                                       (path/join b "src"))))
+                       (package/package-check-namespace-collisions (list ["dependency 'a'"
+                                                                           (path/join a "src")]
+                                                                     ["dependency 'b'"
+                                                                       (path/join b "src")]))
                        (catch e e))
             "collision")))))
 

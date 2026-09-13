@@ -562,7 +562,126 @@ fn a_self_call_argument_is_typed_in_its_enclosing_scope() {
          (defn use-it (rows) (string/length (scan rows 3 1 1)))",
     );
     assert!(
-        ws.iter().any(|w| w.contains("string/length: argument 1 expects string, got int")),
+        ws.iter()
+            .any(|w| w.contains("string/length: argument 1 expects string, got int")),
         "{ws:?}"
     );
+}
+
+// ---- Pass 2.9: caller-derived parameter types for module-private functions (ADR-341) ----
+// A `defn-` is callable only from its file, so the union of what its call sites hand each
+// parameter binds it in the walk of its body and in the return its callers read — the
+// mechanism that lets a leaf `sig` be enough. Sabotage-verified: with `set_derived_params`
+// never called the first two cases go silent and the third loses its `int`.
+
+#[test]
+fn a_private_function_is_walked_under_what_its_callers_pass() {
+    // Strict: `(+ i 1)` under a demand alone reads `number`; under the callers it is `int`.
+    let ws = file_warnings_mode(
+        "(defmodule t)\n\
+         (sig want-int (int -> int))\n\
+         (defn want-int (x) x)\n\
+         (defn- bump (i) (want-int (+ i 1)))\n\
+         (defn pub (xs) (+ (bump 3) (bump (count xs))))",
+        true,
+    );
+    assert!(ws.is_empty(), "{ws:?}");
+    // …and a caller that hands a string over is reported INSIDE the body too: every
+    // in-file call would raise there.
+    let ws = file_warnings_mode(
+        "(defmodule t)\n\
+         (defn- bump (i) (+ i 1))\n\
+         (defn pub () (bump \"s\"))",
+        true,
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("+: argument 1 expects number, got \"s\" (i)")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn a_private_functions_return_is_read_under_its_callers() {
+    // Ten-deep in `json`, three-deep here: the index stays `int` through the chain and
+    // the public function's return is re-read over it.
+    let sigs = signatures(
+        "(defmodule t)\n\
+         (defn- step3 (i) [i (+ i 1)])\n\
+         (defn- step2 (i) (let ([a b] (step3 (+ i 1))) [a b]))\n\
+         (defn- step1 (i) (step2 (+ i 1)))\n\
+         (defn pub (s) (step1 (string/length s)))",
+    );
+    let sig_of = |name: &str| {
+        sigs.iter()
+            .find(|(n, _, _)| n == name)
+            .map(|(_, s, _)| s.clone())
+            .unwrap_or_else(|| panic!("{name}: no signature in {sigs:?}"))
+    };
+    assert_eq!(sig_of("t/step3"), "(number) -> (tuple int, int)");
+    assert_eq!(sig_of("t/pub"), "(string) -> (tuple int, int)");
+}
+
+#[test]
+fn a_private_function_that_escapes_or_has_unseen_callers_stays_unknown() {
+    // Handed to `map` as a value: its arguments are whatever the combinator passes.
+    let ws = file_warnings_mode(
+        "(defmodule t)\n\
+         (sig want-int (int -> int))\n\
+         (defn want-int (x) x)\n\
+         (defn- bump (i) (want-int (+ i 1)))\n\
+         (defn pub (xs) (+ (bump 3) (first (map xs bump))))",
+        true,
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("want-int: argument 1 expects int, got number")),
+        "{ws:?}"
+    );
+    // Quoted (an `apply`, an `eval`, a registry): the same.
+    let ws = file_warnings_mode(
+        "(defmodule t)\n\
+         (sig want-int (int -> int))\n\
+         (defn want-int (x) x)\n\
+         (defn- bump (i) (want-int (+ i 1)))\n\
+         (defn pub () (+ (bump 3) (count '(bump))))",
+        true,
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("want-int: argument 1 expects int, got number")),
+        "{ws:?}"
+    );
+    // A public function is not derived: its callers are anywhere.
+    let ws = file_warnings_mode(
+        "(defmodule t)\n\
+         (sig want-int (int -> int))\n\
+         (defn want-int (x) x)\n\
+         (defn bump (i) (want-int (+ i 1)))\n\
+         (defn pub () (bump 3))",
+        true,
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("want-int: argument 1 expects int, got number")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn a_call_site_is_read_in_the_scope_the_walk_sees() {
+    // A guard on the way to the call narrows the argument (`(and j (f j))` binds a
+    // temporary aliased to `j`), and a `let` binder types it — so the callee's `i` is
+    // `int`, never `nil | int`.
+    let ws = file_warnings_mode(
+        "(defmodule t)\n\
+         (sig want-int (int -> int))\n\
+         (defn want-int (x) x)\n\
+         (defn- next-of (i) (want-int (+ i 1)))\n\
+         (defn- maybe (i) (if (> i 0) i nil))\n\
+         (sig pub (int -> any))\n\
+         (defn pub (n) (let (j (maybe n)) (and j (let (k (next-of j)) (next-of k)))))",
+        true,
+    );
+    assert!(ws.is_empty(), "{ws:?}");
 }

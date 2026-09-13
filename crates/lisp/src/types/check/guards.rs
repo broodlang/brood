@@ -85,11 +85,17 @@ pub(super) fn is_syntactic_keyword(name: &str) -> bool {
 /// narrowed (the `and` short-circuit is the case: a falsy `and` may have failed
 /// on a *later* conjunct, so the first conjunct can still hold). An ordinary type
 /// predicate is biconditional (`then_only = false`): the else-branch narrows to
-/// `¬ty` soundly.
+/// `¬ty` soundly. `else_only` is the dual — a truthy `test` establishes NOTHING about
+/// `sym` (`(empty? xs)` holds for `nil`, `[]`, `""` and `#{}` alike, and the lattice has
+/// no "empty vector"), while a falsy one establishes `¬ty` (`xs` is not `nil`): only the
+/// else-branch narrows. Negation swaps the two: `(not (empty? xs))` is a `then_only`
+/// guard of `¬nil`, and `(not <then_only>)` is an `else_only` guard of the complement,
+/// sound for the same reason each side is.
 pub(super) struct Guard {
     pub(super) sym: Symbol,
     pub(super) ty: Ty,
     pub(super) then_only: bool,
+    pub(super) else_only: bool,
 }
 
 /// A type guard over a **compound access path** — a keyword-`get` and/or fixed
@@ -275,6 +281,7 @@ fn guard_assertion_inner(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Guard> {
                 sym,
                 ty,
                 then_only: false,
+                else_only: false,
             });
         }
         // **Truthiness.** A bare local as the test is itself a guard: `nil`, `false`
@@ -305,6 +312,7 @@ fn guard_assertion_inner(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Guard> {
                 // arrived and left `(or (parse s) 0)` reading `number | failure`.
                 ty: Ty::truthy(),
                 then_only: false,
+                else_only: false,
             });
         }
         return None;
@@ -319,13 +327,13 @@ fn guard_assertion_inner(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Guard> {
     // (we'd be reasoning from `inner` being false), so we decline.
     if items.len() == 2 && head_name == kw::NOT {
         let inner = guard_assertion(heap, items[1], ctx)?;
-        if inner.then_only {
-            return None;
-        }
+        // Negation swaps the one-sided flags: the then-branch of `(not G)` is the
+        // else-branch of `G` and vice versa (see `Guard`).
         return Some(Guard {
             sym: inner.sym,
             ty: inner.ty.negate(),
-            then_only: false,
+            then_only: inner.else_only,
+            else_only: inner.then_only,
         });
     }
     // `(%eq sym literal)` / `(%eq literal sym)` — equality against a literal
@@ -362,6 +370,7 @@ fn guard_assertion_inner(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Guard> {
                 sym,
                 ty,
                 then_only: !exact,
+                else_only: false,
             });
         }
         return None;
@@ -385,12 +394,27 @@ fn guard_assertion_inner(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Guard> {
     if items.len() != 2 {
         return None;
     }
+    // `(empty? x)`: nothing sayable when true (`nil`, `[]`, `""`, `#{}` all are), and `x`
+    // is not `nil` when false — the else-only guard, and the idiom every list walk is
+    // built on: `(if (empty? xs) acc (… (first xs) …))`.
+    if head_name == "empty?" && !ctx.is_lexical_local(head) && !ctx.is_file_global(head) {
+        return match items[1] {
+            Value::Sym(s) => Some(Guard {
+                sym: s,
+                ty: Ty::of(Tag::Nil),
+                then_only: false,
+                else_only: true,
+            }),
+            _ => None,
+        };
+    }
     let ty = predicate_guard_ty(heap, Some(ctx), head)?;
     match items[1] {
         Value::Sym(s) => Some(Guard {
             sym: s,
             ty,
             then_only: false,
+            else_only: false,
         }),
         _ => None,
     }
@@ -437,6 +461,9 @@ fn and_first_conjunct_guard(heap: &Heap, binding: Value, body: Value, ctx: &Ctx)
         return None;
     }
     let inner = guard_assertion(heap, cond, ctx)?;
+    if inner.else_only {
+        return None; // a truthy conjunct that proves nothing proves nothing of the `and`
+    }
     Some(Guard {
         then_only: true, // a falsy `and` doesn't establish `¬E`
         ..inner
@@ -495,7 +522,11 @@ fn chain_shape(heap: &Heap, test: Value, want_then_g: bool) -> Option<(Value, Va
 pub(super) fn branch_scopes(heap: &Heap, test: Value, ctx: &Ctx) -> (Ctx, Ctx) {
     let (mut then_ctx, mut else_ctx) = match guard_assertion(heap, test, ctx) {
         Some(g) => {
-            let then_ctx = ctx.narrow(g.sym, g.ty.clone());
+            let then_ctx = if g.else_only {
+                ctx.clone()
+            } else {
+                ctx.narrow(g.sym, g.ty.clone())
+            };
             let else_ctx = if g.then_only {
                 ctx.clone()
             } else {
@@ -556,7 +587,7 @@ pub(super) fn and_conjunct_guards(heap: &Heap, test: Value, ctx: &Ctx) -> Vec<Gu
         match chain_shape(heap, cur, true) {
             Some((cond, rest)) => {
                 matched = true;
-                if let Some(g) = guard_assertion(heap, cond, ctx) {
+                if let Some(g) = guard_assertion(heap, cond, ctx).filter(|g| !g.else_only) {
                     out.push(Guard {
                         then_only: true,
                         ..g
@@ -568,7 +599,7 @@ pub(super) fn and_conjunct_guards(heap: &Heap, test: Value, ctx: &Ctx) -> Vec<Gu
                 // The last conjunct is a bare guard expression (only counted once we've
                 // seen at least one `and` link, so a non-`and` test yields nothing).
                 if matched {
-                    if let Some(g) = guard_assertion(heap, cur, ctx) {
+                    if let Some(g) = guard_assertion(heap, cur, ctx).filter(|g| !g.else_only) {
                         out.push(Guard {
                             then_only: true,
                             ..g
@@ -595,7 +626,7 @@ pub(super) fn or_same_var_narrowing(heap: &Heap, test: Value, ctx: &Ctx) -> Opti
     // Fold one disjunct's guard into the accumulator; returns `false` to abort.
     let take = |g: Option<Guard>, sym: &mut Option<Symbol>, union: &mut Ty| -> bool {
         match g {
-            Some(guard) if !guard.then_only => {
+            Some(guard) if !guard.then_only && !guard.else_only => {
                 match sym {
                     None => *sym = Some(guard.sym),
                     Some(s) if *s == guard.sym => {}

@@ -41,7 +41,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
     primitives.def(
         "%term-size",
         Arity::exact(0),
-        Sig::new(vec![], vec_ty),
+        Sig::new(vec![], Ty::tuple_of(vec![int, int])),
         &[],
         "The terminal size as [cols rows] in character cells.",
         term_size,

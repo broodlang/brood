@@ -391,11 +391,21 @@ fn an_unguarded_final_clause_keeps_a_multi_clause_call_silent() {
 #[test]
 fn a_union_of_tuple_shapes_rejects_a_member_of_neither() {
     let ws = file_warnings(
+        "(sig f ((or (tuple int int) (tuple string string)) -> any))\n(defn f (t) t)\n(defn c () (f [true true]))",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("expects (tuple int, int) | (tuple string, string)")),
+        "{ws:?}"
+    );
+    // Shapes differing in ONE position merge exactly — `(tuple int) | (tuple string)` IS
+    // `(tuple int | string)` — and the check is the same.
+    let ws = file_warnings(
         "(sig f ((or (tuple int) (tuple string)) -> any))\n(defn f (t) t)\n(defn c () (f [true]))",
     );
     assert!(
         ws.iter()
-            .any(|w| w.contains("expects (tuple int) | (tuple string)")),
+            .any(|w| w.contains("expects (tuple int | string)")),
         "{ws:?}"
     );
     // …and admits either alternative.

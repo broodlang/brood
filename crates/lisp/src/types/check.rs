@@ -2166,6 +2166,167 @@ fn check_forms(
                 }
             }
         }
+        // Pass 2.9: **caller-derived parameter types for module-private functions**
+        // (ADR-341). A `defn-` is callable only from this file, so the union of what its
+        // call sites hand each parameter is a sound binding for the walk of its body — and
+        // for the return its same-file callers read, where Pass 2.8 above bound the
+        // parameters to their bottom-up DEMANDS alone (`(+ i 1)` says `number`; the callers
+        // say `int`). This is what lets a leaf `sig` be enough: `int` flows from the public
+        // entry down through every private helper without a declaration on each. The
+        // derivation and the return inference feed each other (a helper's sharper return is
+        // a caller's sharper argument), so the two alternate until the derived types settle.
+        {
+            let private = private_def_names(heap, &expanded);
+            let mut def_count: HashMap<Symbol, usize> = HashMap::new();
+            for &form in &expanded {
+                count_defs(heap, form, &mut def_count);
+            }
+            // Pass 2.8's candidates again (the same criteria), split into the private ones
+            // this pass derives and the public ones whose returns it refreshes afterwards.
+            let all_candidates: Vec<(Symbol, Value)> = top_level_defs(heap, &expanded)
+                .into_iter()
+                .filter_map(|form| {
+                    let (name, rhs) = def_name_and_value(heap, form)?;
+                    (def_count.get(&name) == Some(&1)
+                        && !ctx.is_file_macro(name)
+                        && !value::is_dynamic(name)
+                        && !value::is_gensym(name)
+                        && ctx.declared_sig(name).is_none()
+                        && ctx.fn_form(name).is_some())
+                    .then_some((name, rhs))
+                })
+                .collect();
+            let candidates: HashMap<Symbol, Value> = all_candidates
+                .iter()
+                .filter(|(name, _)| private.contains(name))
+                .copied()
+                .collect();
+            let public_candidates: Vec<(Symbol, Value)> = all_candidates
+                .iter()
+                .filter(|(name, _)| !private.contains(name))
+                .copied()
+                .collect();
+            if !candidates.is_empty() {
+                // A JOINT least fixpoint of the derived parameters and the candidates'
+                // returns. Pass 2.8's returns were read under the demands alone — `number`
+                // for an index — and two helpers that hand each other an index through
+                // their returns can never leave `number` from that start: every round
+                // reads the other's `number`. So the candidates' returns START at ⊥ and
+                // rise with the parameters (Kleene), and only the fixpoint is used: it is
+                // one, so it over-approximates every call's return like any other answer.
+                // A round that cannot type a return keeps the demand-based one Pass 2.8
+                // found. No fixpoint within the bound: everything is restored as it was.
+                let original: HashMap<Symbol, Option<crate::types::Sig>> = candidates
+                    .keys()
+                    .map(|&name| (name, ctx.inferred_fn_sig(name)))
+                    .collect();
+                // Only a LIVE function's return starts at ⊥. An escaped or site-less one is
+                // never derived, and its in-file callers read its return while the others
+                // iterate: a ⊥ there would make THEIR derived parameters under-approximate.
+                let live = sigs::live_private_functions(heap, &expanded, &candidates, &ctx)
+                    .unwrap_or_default();
+                for (&name, sig) in &original {
+                    if let (Some(sig), true) = (sig, live.contains(&name)) {
+                        let mut floor = sig.clone();
+                        floor.ret = crate::types::Ty::NEVER;
+                        ctx.add_inferred_fn_sig(name, floor);
+                    }
+                }
+                let mut previous: HashMap<Symbol, Vec<Option<crate::types::Ty>>> = HashMap::new();
+                // Which returns a round has TYPED — as opposed to typed as `never`, which is a
+                // real answer (every call raises: a body demanding `int` whose callers all pass
+                // a string) and must not be mistaken for a floor that never typed.
+                let mut typed: HashSet<Symbol> = HashSet::new();
+                let mut converged = false;
+                for round in 0..32 {
+                    let derived =
+                        sigs::caller_derived_params(heap, &expanded, &candidates, &ctx, &previous);
+                    ctx.set_derived_params(derived.clone());
+                    let mut returns_moved = false;
+                    for (&name, &rhs) in &candidates {
+                        let Some(Some(base)) = original.get(&name) else {
+                            continue;
+                        };
+                        // Only a DERIVED candidate's return is re-read: an escaped or site-less one
+                        // keeps Pass 2.8's (restored below) — its `any` is what lets the recursive
+                        // call-site specialization sharpen it, where a demand-based `number` would
+                        // not.
+                        if ctx.derived_params(name).is_none() {
+                            continue;
+                        }
+                        // A return this round cannot type stays where it is (⊥, or the last
+                        // round's): falling back to Pass 2.8's demand-based return would put a
+                        // value ABOVE the least fixpoint into a monotone ascent, and nothing
+                        // could bring it back down. What never types at all is restored below.
+                        let Some(mut ret) =
+                            sigs::infer_return_from_form(heap, rhs, Some(name), &ctx)
+                        else {
+                            continue;
+                        };
+                        typed.insert(name);
+                        // The widening the parameter ascent applies (`sigs::WIDEN_AFTER_ROUND`),
+                        // applied to the returns on the same schedule and for the same reason.
+                        if round >= sigs::WIDEN_AFTER_ROUND {
+                            ret = ret.widened_below(sigs::WIDEN_DEPTH);
+                        }
+                        if ctx.inferred_fn_sig(name).map(|s| s.ret) != Some(ret.clone()) {
+                            let mut sig = base.clone();
+                            sig.ret = ret;
+                            ctx.add_inferred_fn_sig(name, sig);
+                            returns_moved = true;
+                        }
+                    }
+                    if derived == previous && !returns_moved {
+                        // A live function whose return never typed is still at the floor,
+                        // and the others have been reading it as ⊥. Lift it to Pass 2.8's
+                        // answer (a sound value, above ⊥, so the ascent stays monotone) and
+                        // go again; only a round with nothing left to lift is the fixpoint.
+                        let mut lifted = false;
+                        for (&name, sig) in &original {
+                            if let Some(sig) = sig {
+                                if !typed.contains(&name)
+                                    && ctx.inferred_fn_sig(name).is_some_and(|s| s.ret.is_never())
+                                    && !sig.ret.is_never()
+                                {
+                                    ctx.add_inferred_fn_sig(name, sig.clone());
+                                    lifted = true;
+                                }
+                            }
+                        }
+                        if !lifted {
+                            converged = true;
+                            break;
+                        }
+                    }
+                    previous = derived;
+                }
+                if !converged {
+                    for (&name, sig) in &original {
+                        if let Some(sig) = sig {
+                            ctx.add_inferred_fn_sig(name, sig.clone());
+                        }
+                    }
+                    ctx.set_derived_params(HashMap::new());
+                } else {
+                    // A candidate that was not derived, or whose return never typed (still at
+                    // the floor): give it Pass 2.8's answer back.
+                    for (&name, sig) in &original {
+                        if let Some(sig) = sig {
+                            if ctx.derived_params(name).is_none()
+                                || (!typed.contains(&name)
+                                    && ctx.inferred_fn_sig(name).is_some_and(|s| s.ret.is_never())
+                                    && !sig.ret.is_never())
+                            {
+                                ctx.add_inferred_fn_sig(name, sig.clone());
+                            }
+                        }
+                    }
+                    // …and the PUBLIC functions' returns, read in Pass 2.8 before any private
+                    // return was sharpened, are read again over the sharper ones.
+                    refresh_returns(heap, &public_candidates, &mut ctx);
+                }
+            }
+        }
         // Pass 2.85 (ADR-259): **the declaration must be readable, and it must match what it
         // annotates.** A `(sig …)` is trusted ahead of every other signature source, so
         // a declaration the parser silently drops is worse than none at all — the
@@ -2579,3 +2740,44 @@ mod tests;
 /// `seq_aware_call_ty` / `expr_ty` / the guard pipeline.
 #[cfg(test)]
 mod soundness_oracle;
+
+/// The names this file defines PRIVATELY — every `(def name …)` inside a top-level `do`
+/// that carries the `(%mark-private …)` fingerprint of a `defn-`/`def-` expansion.
+fn private_def_names(heap: &Heap, expanded: &[Value]) -> HashSet<Symbol> {
+    let mut out = HashSet::new();
+    for &form in expanded {
+        if let Some(body) = walk::do_body(heap, form).filter(|body| marks_private(heap, body)) {
+            for inner in body {
+                if let Some((name, _)) = def_name_and_value(heap, inner) {
+                    out.insert(name);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Pass 2.8's return fixpoint over `candidates`, run again: each function's return is
+/// re-read from its form, leaf-up, until a pass records nothing new (a cap bounds a
+/// pathological chain — the tail stays as it was, which is sound). Pass 2.9 calls it for the
+/// PUBLIC functions once the private returns beneath them have been sharpened.
+fn refresh_returns(heap: &Heap, candidates: &[(Symbol, Value)], ctx: &mut Ctx) {
+    for _ in 0..16 {
+        let mut changed = false;
+        for &(name, rhs) in candidates {
+            if let Some(ret) = sigs::infer_return_from_form(heap, rhs, Some(name), ctx) {
+                if ctx.inferred_fn_sig(name).map(|s| s.ret) != Some(ret.clone()) {
+                    let sig = match sigs::infer_params_from_form(heap, rhs, ctx) {
+                        Some(demands) => demands.into_sig(ret),
+                        None => crate::types::Sig::new(Vec::new(), ret),
+                    };
+                    ctx.add_inferred_fn_sig(name, sig);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}

@@ -1070,8 +1070,10 @@ fn self_call_sites(
         }
         if super::walk::is_fn_head(head) {
             let mut inner = scope.clone();
-            for p in super::walk::fn_params(heap, form) {
-                inner = inner.bind(p, None);
+            if let Some(&plist) = items.get(1) {
+                for p in super::walk::fn_params(heap, plist) {
+                    inner = inner.bind(p, None);
+                }
             }
             for &it in &items[1..] {
                 walk(heap, it, sym, arity, &inner, out);
@@ -1786,8 +1788,17 @@ pub(super) fn infer_return_from_form(
             Some(n) => base_ctx.with_inferring_self(n),
             None => base_ctx.clone(),
         };
+        // A module-private function's parameters are also bounded by what its callers
+        // hand it (Pass 2.9, ADR-341): the MEET of the demand and the caller-derived type
+        // over-approximates every successful call's argument, so the tail under it is still
+        // the return of every successful call — and `(+ i 1)` under `i : int` is `int`, not
+        // the `number` the demand alone says.
+        let derived = self_name.and_then(|n| base_ctx.derived_params(n));
         for (index, &p) in binders.iter().enumerate() {
-            let bound = demands.get(index).cloned().unwrap_or(Ty::ANY);
+            let mut bound = demands.get(index).cloned().unwrap_or(Ty::ANY);
+            if let Some(Some(from_callers)) = derived.and_then(|d| d.get(index)) {
+                bound = bound.intersect(from_callers.clone());
+            }
             ctx = ctx.bind(p, Some(bound));
         }
         let t = expr_ty(heap, *tail, &ctx)?;
@@ -2418,7 +2429,9 @@ fn guard_slices(
     let mut else_slice = any_domain(n);
     if let Some(guard) = super::guards::guard_assertion(heap, test, ctx) {
         if let Some(idx) = param_index(Value::Sym(guard.sym), params, scope) {
-            then_slice[idx] = guard.ty.clone();
+            if !guard.else_only {
+                then_slice[idx] = guard.ty.clone();
+            }
             if !guard.then_only {
                 else_slice[idx] = guard.ty.negate();
             }
@@ -2777,4 +2790,402 @@ fn global_fn_arrow(heap: &Heap, arg: Value, ctx: &Ctx) -> Option<Ty> {
         .or_else(|| ctx.inferred_fn_sig(s))
         .or_else(|| (!ctx.is_file_global(s)).then(|| sig_of(heap, s)).flatten())?;
     Some(Ty::arrow(sig))
+}
+
+// ---- Pass 2.9: caller-derived parameter types for module-private functions (ADR-341) ----
+
+/// Bound on the rounds of [`caller_derived_params`]: a chain of private helpers settles in
+/// one round per level, and `json`'s parser is ten levels deep (`decode` → `json-value` →
+/// `json-object` → `object-acc` → `json-string` → `string-acc` → `json-escape` →
+/// `json-unicode` → `hex4` → `hex1`); a round is one walk of the file's forms.
+const MAX_DERIVE_ROUNDS: usize = 32;
+
+/// The round of a derivation from which every moving type is widened (see
+/// [`Ty::widened_below`]) — after the early rounds a deep chain needs to settle exactly.
+pub(super) const WIDEN_AFTER_ROUND: usize = 12;
+/// The depth a widened type keeps: a record's fields and a sequence's elements, and those
+/// elements' own structure one level down — `vector<vector<int>>` survives, a JSON value's
+/// third level of nesting does not.
+pub(super) const WIDEN_DEPTH: usize = 2;
+
+/// The **caller-derived parameter types** of this file's module-private functions: for each
+/// candidate in `candidates` (name → its single-arm `(fn …)` form), per parameter, the
+/// union of the types every call site in `forms` hands it, as the least fixpoint over the
+/// file — a site inside another private function is typed with THAT function's derived
+/// parameters bound, so `int` flows from the public entry down through every helper.
+///
+/// **Why this is sound.** A `defn-` is callable only from its own file, so its callers are
+/// exactly the call sites here; every site's argument is typed by `expr_ty` under a scope
+/// whose bindings over-approximate the values (a public function's parameters are unknown,
+/// a private one's are its derived types, a `let` binder is its RHS's type), and the
+/// fixpoint closes over the sites inside private bodies. By induction along any chain of
+/// activations from a public entry, every actual argument lies in the derived type.
+/// Everything that could break the closed-caller premise declines the function instead:
+/// the name used as a VALUE anywhere (`(map xs helper)`, `(apply helper …)`, inside quoted
+/// data) — `escapes`; an unexpanded macro call anywhere in the file (its operands are
+/// syntax that may construct a call the walk cannot see) — the whole pass declines; a call
+/// of the wrong arity (it raises, contributing nothing); a function with no site at all
+/// (dead code — unknown, not `never`, so its body is still checked as written). A position
+/// some site cannot type is unknown. Not reaching a fixpoint within the bound declines too.
+///
+/// `(:use-internals mod)` lets another file call a private function; the derived types are
+/// used only for THIS file's walk and this file's same-file return inference, both of which
+/// describe this file's own calls, and a loaded-closure caller elsewhere reads the
+/// demand-based inference as before.
+pub(super) fn caller_derived_params(
+    heap: &Heap,
+    forms: &[Value],
+    candidates: &HashMap<Symbol, Value>,
+    ctx: &Ctx,
+    resume_from: &HashMap<Symbol, Vec<Option<Ty>>>,
+) -> HashMap<Symbol, Vec<Option<Ty>>> {
+    let targets: HashSet<Symbol> = candidates.keys().copied().collect();
+    // A LEAST fixpoint starts at ⊥: the live candidates — those with a site and no
+    // escape, which a preliminary pass finds since neither depends on any type — begin
+    // with every parameter `never`, so a self-call's `(+ i 1)` contributes nothing until
+    // some other caller has said what `i` is. Started at UNKNOWN instead, that same
+    // argument read `number` in the first round and nothing could ever narrow it back.
+    // An escaped or site-less candidate stays out of the map, hence unknown: its callers
+    // are not all here, so nothing may be assumed of the arguments its body hands on.
+    let Some(first) =
+        collect_private_sites(heap, forms, &targets, candidates, &HashMap::new(), ctx)
+    else {
+        return HashMap::new();
+    };
+    // …or from `resume_from`, the previous joint round's result (Pass 2.9 alternates this
+    // with the returns): computed under LOWER returns, it lies below the fixpoint sought
+    // now, so continuing from it is the same ascent with the early rounds already done.
+    let mut derived: HashMap<Symbol, Vec<Option<Ty>>> = first
+        .sites
+        .iter()
+        .filter(|(name, sites)| !first.escaped.contains(name) && !sites.is_empty())
+        .map(|(&name, sites)| {
+            let seed = resume_from
+                .get(&name)
+                .cloned()
+                .unwrap_or_else(|| vec![Some(Ty::NEVER); sites[0].0.len()]);
+            (name, seed)
+        })
+        .collect();
+    for round in 0..MAX_DERIVE_ROUNDS {
+        let Some(collected) =
+            collect_private_sites(heap, forms, &targets, candidates, &derived, ctx)
+        else {
+            return HashMap::new();
+        };
+        let mut next: HashMap<Symbol, Vec<Option<Ty>>> = HashMap::new();
+        for (name, sites) in collected.sites {
+            if collected.escaped.contains(&name) || sites.is_empty() {
+                continue;
+            }
+            let arity = sites[0].0.len();
+            let mut acc: Vec<Option<Ty>> = vec![Some(Ty::NEVER); arity];
+            for (args, scope) in &sites {
+                for (k, &arg) in args.iter().enumerate() {
+                    if let Some(current) = acc[k].clone() {
+                        acc[k] = super::infer::with_fresh_depth(|| expr_ty(heap, arg, scope))
+                            .map(|t| current.union(t));
+                    }
+                }
+            }
+            // WIDENING (`Ty::widened_below`): a parameter still moving after the early
+            // rounds — a value type nesting one level deeper each time — is cut to a fixed
+            // depth, after which the ascent is stationary. The early rounds are left
+            // exact so a chain of helpers settles at full precision first.
+            if round >= WIDEN_AFTER_ROUND {
+                for slot in acc.iter_mut() {
+                    if let Some(t) = slot {
+                        *t = t.widened_below(WIDEN_DEPTH);
+                    }
+                }
+            }
+            next.insert(name, acc);
+        }
+        if next == derived {
+            return derived;
+        }
+        derived = next;
+    }
+    HashMap::new()
+}
+
+struct PrivateSites {
+    /// Per candidate, every call site of the right arity with the scope it sits in.
+    sites: HashMap<Symbol, Vec<(Vec<Value>, Ctx)>>,
+    /// Candidates whose name occurs somewhere other than a call head.
+    escaped: HashSet<Symbol>,
+}
+
+/// The call sites of every candidate across the file's expanded top-level forms, each with
+/// its enclosing scope (see [`self_call_sites`] for the scope rules) — the parameters of a
+/// candidate's own body bound to its CURRENT derived types, a public function's unknown.
+/// `None` when the file holds an unexpanded macro call, which could construct a call the
+/// walk cannot see.
+fn collect_private_sites(
+    heap: &Heap,
+    forms: &[Value],
+    targets: &HashSet<Symbol>,
+    candidates: &HashMap<Symbol, Value>,
+    derived: &HashMap<Symbol, Vec<Option<Ty>>>,
+    ctx: &Ctx,
+) -> Option<PrivateSites> {
+    struct Walker<'a> {
+        heap: &'a Heap,
+        targets: &'a HashSet<Symbol>,
+        candidates: &'a HashMap<Symbol, Value>,
+        derived: &'a HashMap<Symbol, Vec<Option<Ty>>>,
+        ctx: &'a Ctx,
+        out: PrivateSites,
+        opaque: bool,
+    }
+    impl Walker<'_> {
+        /// Quoted data is not namespace-resolved, so a target appears there under its BARE
+        /// spelling (`'(bump)` for `t/bump`); either spelling escapes it.
+        fn escape_in_data(&mut self, form: Value) {
+            let mut work = vec![form];
+            while let Some(v) = work.pop() {
+                match v {
+                    Value::Sym(s) if self.targets.contains(&s) => {
+                        self.out.escaped.insert(s);
+                    }
+                    Value::Sym(s) => {
+                        let bare = value::symbol_name_ref(s);
+                        let hits: Vec<Symbol> = self
+                            .targets
+                            .iter()
+                            .copied()
+                            .filter(|t| {
+                                let name = value::symbol_name_ref(*t);
+                                name.rsplit('/').next() == Some(bare)
+                            })
+                            .collect();
+                        self.out.escaped.extend(hits);
+                    }
+                    Value::Pair(_) => {
+                        if let Some(items) = list_items(self.heap, v) {
+                            work.extend(items);
+                        }
+                    }
+                    Value::Vector(id) => work.extend(self.heap.vector(id).iter().copied()),
+                    Value::Map(id) => {
+                        for (k, val) in self.heap.map_entries(id) {
+                            work.push(k);
+                            work.push(val);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        /// Walk `form` in `scope`; `def_of` is the candidate a `(def name …)` value slot
+        /// belongs to, so its `(fn …)` binds the derived parameters.
+        fn walk(&mut self, form: Value, scope: &Ctx, def_of: Option<Symbol>) {
+            let heap = self.heap;
+            match form {
+                Value::Sym(s) if self.targets.contains(&s) => {
+                    self.out.escaped.insert(s);
+                    return;
+                }
+                Value::Pair(_) => {}
+                Value::Vector(id) => {
+                    for it in heap.vector(id).to_vec() {
+                        self.walk(it, scope, None);
+                    }
+                    return;
+                }
+                Value::Map(id) => {
+                    for (k, v) in heap.map_entries(id) {
+                        self.walk(k, scope, None);
+                        self.walk(v, scope, None);
+                    }
+                    return;
+                }
+                _ => return,
+            }
+            let Some(items) = list_items(heap, form) else {
+                return;
+            };
+            let Some(&Value::Sym(head)) = items.first() else {
+                for &it in &items {
+                    self.walk(it, scope, None);
+                }
+                return;
+            };
+            // The privacy expansion's own `(%mark-private 'name)` is bookkeeping, not a use.
+            if value::symbol_is(head, "%mark-private") {
+                return;
+            }
+            if value::symbol_is(head, kw::QUOTE) || value::symbol_is(head, kw::QUASIQUOTE) {
+                for &it in &items[1..] {
+                    self.escape_in_data(it);
+                }
+                return;
+            }
+            if self.targets.contains(&head) {
+                let arity = self
+                    .candidates
+                    .get(&head)
+                    .and_then(|&f| fixed_arms_of_form(heap, f))
+                    .and_then(|arms| arms.first().map(|a| a.heads.len()));
+                if arity == Some(items.len() - 1) {
+                    self.out
+                        .sites
+                        .entry(head)
+                        .or_default()
+                        .push((items[1..].to_vec(), scope.clone()));
+                }
+                for &it in &items[1..] {
+                    self.walk(it, scope, None);
+                }
+                return;
+            }
+            if value::symbol_is(head, kw::DEF) {
+                let name = match items.get(1) {
+                    Some(&Value::Sym(n)) => Some(n),
+                    _ => None,
+                };
+                for &it in items.iter().skip(2) {
+                    self.walk(it, scope, name);
+                }
+                return;
+            }
+            // The scope a site sits in must be what the WALK sees there, or a caller's
+            // `(if (nil? j) nil (f j))` hands `f` a `nil | int` the walk knows is `int` —
+            // and strict then reports every arithmetic on it inside `f`. Same guard rule
+            // (`guards::branch_scopes`), same diverging-guard sequencing over a body.
+            if value::symbol_is(head, kw::IF) && (items.len() == 3 || items.len() == 4) {
+                self.walk(items[1], scope, None);
+                let (then_scope, else_scope) = super::guards::branch_scopes(heap, items[1], scope);
+                self.walk(items[2], &then_scope, None);
+                if let Some(&else_form) = items.get(3) {
+                    self.walk(else_form, &else_scope, None);
+                }
+                return;
+            }
+            if value::symbol_is(head, kw::DO) {
+                let mut seq = scope.clone();
+                for &it in &items[1..] {
+                    self.walk(it, &seq, None);
+                    if let Some(next) = super::walk::diverging_guard_scope(heap, it, &seq) {
+                        seq = next;
+                    }
+                }
+                return;
+            }
+            if value::symbol_is(head, kw::LET) || value::symbol_is(head, kw::LETREC) {
+                let Some(binds) = items.get(1).and_then(|&b| super::walk::bindings(heap, b)) else {
+                    for &it in &items[1..] {
+                        self.walk(it, scope, None);
+                    }
+                    return;
+                };
+                let mut inner = scope.clone();
+                if value::symbol_is(head, kw::LETREC) {
+                    for pair in binds.chunks(2) {
+                        if let Some(&Value::Sym(n)) = pair.first() {
+                            inner = inner.bind(n, None);
+                        }
+                    }
+                }
+                for pair in binds.chunks(2) {
+                    let (Some(&pat), Some(&rhs)) = (pair.first(), pair.get(1)) else {
+                        continue;
+                    };
+                    self.walk(rhs, &inner, None);
+                    let rhs_ty = super::infer::with_fresh_depth(|| expr_ty(heap, rhs, &inner));
+                    inner = bind_head(heap, inner, pat, rhs_ty);
+                    // `(let (name other) …)` aliases the two, as `check_let` does — the
+                    // `and`/`or` expansions bind a temporary to the tested value, and a
+                    // guard on the temporary must narrow the value it stands for.
+                    if let (Value::Sym(name), Value::Sym(target)) = (pat, rhs) {
+                        inner = inner.add_alias(name, target);
+                    }
+                }
+                for &body in &items[2..] {
+                    self.walk(body, &inner, None);
+                    if let Some(next) = super::walk::diverging_guard_scope(heap, body, &inner) {
+                        inner = next;
+                    }
+                }
+                return;
+            }
+            if super::walk::is_fn_head(head) {
+                let mut inner = scope.clone();
+                let params = items
+                    .get(1)
+                    .map(|&p| super::walk::fn_params(heap, p))
+                    .unwrap_or_default();
+                let single_arm = fixed_arms_of_form(heap, form).is_some_and(|arms| arms.len() == 1);
+                // What the WALK binds this body's parameters to: a DECLARED sig's types (the
+                // shape `check_def` seeds), else the derived types — a public function's
+                // stay unknown. Only a single plain arm binds positionally.
+                let declared: Option<Vec<Option<Ty>>> = def_of
+                    .and_then(|n| self.ctx.declared_sig(n))
+                    .map(|sig| (0..params.len()).map(|i| sig.param(i)).collect());
+                let bound: Option<Vec<Option<Ty>>> = declared
+                    .or_else(|| def_of.and_then(|n| self.derived.get(&n).cloned()))
+                    .filter(|d| single_arm && d.len() == params.len());
+                for (i, p) in params.iter().enumerate() {
+                    let ty = bound.as_ref().and_then(|d| d[i].clone());
+                    inner = inner.bind(*p, ty);
+                }
+                for &it in &items[1..] {
+                    self.walk(it, &inner, None);
+                }
+                return;
+            }
+            if super::walk::resolves_to_macro(heap, self.ctx, head) {
+                // Syntax the expander left as written: it may construct a call the walk
+                // cannot see, so the file's closed-caller premise is gone.
+                self.opaque = true;
+                return;
+            }
+            for &it in &items[1..] {
+                self.walk(it, scope, None);
+            }
+        }
+    }
+    let mut walker = Walker {
+        heap,
+        targets,
+        candidates,
+        derived,
+        ctx,
+        out: PrivateSites {
+            sites: HashMap::new(),
+            escaped: HashSet::new(),
+        },
+        opaque: false,
+    };
+    for &form in forms {
+        walker.walk(form, ctx, None);
+        if walker.opaque {
+            return None;
+        }
+    }
+    Some(walker.out)
+}
+
+/// The candidates [`caller_derived_params`] will derive — those with a call site and no
+/// escape — or `None` when the file holds an unexpanded macro call. Type-independent (a
+/// site is an arity match, an escape a spelling), so Pass 2.9 can learn it BEFORE it floors
+/// any return: a function not in this set keeps Pass 2.8's return through the whole
+/// iteration, since its in-file callers read that return and a ⊥ there would make their
+/// derived parameters under-approximate.
+pub(super) fn live_private_functions(
+    heap: &Heap,
+    forms: &[Value],
+    candidates: &HashMap<Symbol, Value>,
+    ctx: &Ctx,
+) -> Option<HashSet<Symbol>> {
+    let targets: HashSet<Symbol> = candidates.keys().copied().collect();
+    let first = collect_private_sites(heap, forms, &targets, candidates, &HashMap::new(), ctx)?;
+    Some(
+        first
+            .sites
+            .iter()
+            .filter(|(name, sites)| !first.escaped.contains(name) && !sites.is_empty())
+            .map(|(&name, _)| name)
+            .collect(),
+    )
 }

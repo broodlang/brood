@@ -324,19 +324,19 @@ surface feeding it — and each turned out to need a different kind of fix. Deta
 - [x] **5. `(not T)`, and complements that read as complements** (ADR-263). The lattice has
       computed complements since ADR-023 and the grammar could not say one; `expects string,
       got nil | bool | number | …` (twenty-two tags) now reads `(not string)`.
-- [x] **6. Declare at the leaf, derive from the call** (ADR-339, 2026-09-13). A self-recursive
+- [x] **6. Declare at the leaf, derive from the call** (ADR-340, 2026-09-13). A self-recursive
       function is specialized at its call site by a joint fixpoint over parameters and result
       (`(sum-to 10 0)` is `int`; the accumulator loop was `any` at every call); the loaded-closure
       inferencer no longer loses nested demands cross-module; the checker materialises every
       module a loaded body names, so a leaf `sig` (`text/char->line`) reaches what derives from
       it without re-declaring the derived function.
-- [ ] **7. Caller-derived parameter types for module-private functions.** The walk checks a
+- [x] **7. Caller-derived parameter types for module-private functions** (ADR-341, 2026-09-13). The walk checked a
       body under its parameters' bottom-up *demands* (`(+ i 1)` says `number`) with no view of
       what the callers pass; a private function's caller set is closed, so the union of the
       call sites' argument types is a sound binding when the name never escapes as a value.
-      This is what lets `json`'s four index-returning helpers drop their `(sig … -> (tuple int
-      int))` and keep `hex-val` alone (ADR-339 "What is still declared that should derive").
-      Cost is the question: a second walk per file, or a stored-scope collection pass.
+      Pass 2.9: a least fixpoint over the file's call sites, jointly with the private returns,
+      the sites read in the scope the walk sees. `std/json.blsp` is strict-zero with NO
+      signature on its parser chain (`hex-val`'s and `json-value`'s went too).
 
 
 ### Standard-library surface audit — the bare namespace (2026-08-26)

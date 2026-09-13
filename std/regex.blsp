@@ -633,6 +633,7 @@ Runs once per distinct (set, char) — every repeat is the loop's one `table/get
         nxt (regex-eps-close-mid states (regex-step states set c 0 m 0) m))
     (table/put memo (+ (* set 2097152) code) nxt)
     nxt))
+(sig regex-delta-slow (any any any int int -> any))
 
 ;; Accept test at the end of input (position n > 0): full eps-closure of the final
 ;; set (`$` fires, `^` doesn't), then the matchbit test — memoised per SET in
@@ -669,39 +670,47 @@ Runs once per distinct (set, char) — every repeat is the loop's one `table/get
 ;; slot read and the loop runs native. (Engine follow-up: per-leader slot
 ;; passthrough across block boundaries would make the natural style equally
 ;; fast — see docs/devlog.md 2026-07-17.)
-(defn- regex-run-anchored-loop (pattern exitmemo memo m matchbit codes n i set)
-  (if (= i n)
-    (regex-exit pattern exitmemo m matchbit set)
-    (if (= set 0)
-      false
-      (let (nxt (table/get memo (+ (* set 2097152) (nth codes i)))
-            nxt2 (if (nil? nxt)
-                   (regex-delta-slow (regex-states-of pattern) memo m set (nth codes i))
-                   nxt))
-        (regex-run-anchored-loop pattern exitmemo memo m matchbit codes n (+ i 1) nxt2)))))
+;; check-allow: `(nth codes i)` is read under the `(= i n)` guard with `n` the vector's length,
+;; so it is never past the end; `nth`'s default arm is not VM-eligible, and this loop runs
+;; native (the note above says why every self-call argument must stay a slot read).
+(check-allow :type-mismatch
+  (defn- regex-run-anchored-loop (pattern exitmemo memo m matchbit codes n i set)
+    (if (= i n)
+      (regex-exit pattern exitmemo m matchbit set)
+      (if (= set 0)
+        false
+        (let (nxt (table/get memo (+ (* set 2097152) (nth codes i)))
+              nxt2 (if (nil? nxt)
+                     (regex-delta-slow (regex-states-of pattern) memo m set (nth codes i))
+                     nxt))
+          (regex-run-anchored-loop pattern exitmemo memo m matchbit codes n (+ i 1) nxt2))))))
 
 ;; unanchored search (match?): inject the (split-closed) start state at every
 ;; position so a match may begin anywhere; `^` fires only in the start closure
 ;; (position 0), `$` only in the exit closure at position n.
-(defn- regex-run-search-loop (pattern exitmemo memo m startmid matchbit codes n i set)
-  (if (not (= 0 (bit/and set matchbit)))
-    true
-    (if (>= i n)
-      (regex-exit pattern exitmemo m matchbit set)
-      (let (nxt (table/get memo (+ (* set 2097152) (nth codes i)))
-            nxt2 (if (nil? nxt)
-                   (regex-delta-slow (regex-states-of pattern) memo m set (nth codes i))
-                   nxt))
-        (regex-run-search-loop pattern
-          exitmemo
-          memo
-          m
-          startmid
-          matchbit
-          codes
-          n
-          (+ i 1)
-          (bit/or nxt2 startmid))))))
+;; check-allow: `(nth codes i)` is read under the `(>= i n)` guard with `n` the vector's length,
+;; so it is never past the end; `nth`'s default arm is not VM-eligible, and this loop runs
+;; native (see the note above `regex-run-anchored-loop`).
+(check-allow :type-mismatch
+  (defn- regex-run-search-loop (pattern exitmemo memo m startmid matchbit codes n i set)
+    (if (not (= 0 (bit/and set matchbit)))
+      true
+      (if (>= i n)
+        (regex-exit pattern exitmemo m matchbit set)
+        (let (nxt (table/get memo (+ (* set 2097152) (nth codes i)))
+              nxt2 (if (nil? nxt)
+                     (regex-delta-slow (regex-states-of pattern) memo m set (nth codes i))
+                     nxt))
+          (regex-run-search-loop pattern
+            exitmemo
+            memo
+            m
+            startmid
+            matchbit
+            codes
+            n
+            (+ i 1)
+            (bit/or nxt2 startmid)))))))
 
 ;; ---- the Pike VM: where a match is, and what its groups caught ---------------
 ;; The bitset engine above answers "is there a match" by forgetting everything about

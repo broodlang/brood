@@ -109,7 +109,7 @@ would write spaces where the program asked for deletion."
   "The numeric parameter of a CSI, or `default` — `ESC[A` and `ESC[1A` are the same."
   (if (= params "")
     default
-    (let (n (string/->number params)) (if (number? n) n default))))
+    (let (n (string/->number params)) (if (int? n) n default))))
 
 (defn- ansi-csi (lines row col params final)
   "Apply one CSI; returns [lines row col]. Anything not listed is a no-op, which is the

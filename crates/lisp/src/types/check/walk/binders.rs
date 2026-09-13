@@ -326,6 +326,31 @@ pub(super) fn check_def(
                 return;
             }
         }
+        // A module-PRIVATE function with no declaration: its parameters are what its
+        // callers in this file hand it (Pass 2.9, ADR-341) — bound plainly, not as a
+        // sig-authoritative contract, so a defensive guard the callers never exercise
+        // is not reported as a dead clause.
+        if let Some(derived) = ctx.derived_params(name).cloned() {
+            if let Some(fn_items) = fn_form_items(heap, value_form) {
+                let params = fn_params(heap, fn_items[1]);
+                if params.len() == derived.len()
+                    && !crate::eval::macros::fn_is_arity_multi_clause(heap, &fn_items)
+                {
+                    let mut scope = ctx.clone();
+                    for (p, ty) in params.iter().zip(derived) {
+                        scope = scope.bind_derived(*p, ty);
+                    }
+                    let body_start = match (fn_items.get(2), fn_items.get(3)) {
+                        (Some(Value::Str(_)), Some(_)) => 3,
+                        _ => 2,
+                    };
+                    for &body_form in &fn_items[body_start..] {
+                        check_into(heap, body_form, &scope, out);
+                    }
+                    return;
+                }
+            }
+        }
         // Gradual-assignment check (the first `GradualTy` consumer): when `name`
         // carries a non-arrow `(sig name T)`, the assigned value must be
         // *consistent* with `T`. A dynamic value (a redefinable global, an
@@ -460,7 +485,13 @@ pub(super) fn check_if(
 
     let (then_ctx, else_ctx) = match guard_assertion(heap, test, ctx) {
         Some(g) => {
-            let then_ctx = ctx.narrow(g.sym, g.ty.clone());
+            // An `else_only` guard (`(empty? xs)`) asserts nothing when true: the
+            // then-branch keeps the scope, and the dead-clause lint has nothing to judge.
+            let then_ctx = if g.else_only {
+                ctx.clone()
+            } else {
+                ctx.narrow(g.sym, g.ty.clone())
+            };
             // **Dead-clause lint.** If the guard narrowed a dead-clause-eligible
             // binding — a *sig-typed parameter* or a *precise surface `let`-local*
             // (ADR-131) — to the empty type, this branch can never run: the
@@ -688,7 +719,7 @@ pub(super) fn check_let(
         // short-circuit) must not be stored as a let-alias, or a later
         // `(if alias …)` would negate it in the else-branch (unsound).
         if let Some(g) = rhs_guard {
-            if !g.then_only {
+            if !g.then_only && !g.else_only {
                 scope = scope.add_guard(name, g.sym, g.ty);
             }
         }

@@ -105,7 +105,11 @@
           mac (cy-field line "Mac"))
       (cond
         sect (cy-hmac-scan (rest lines) (cy-l->algo sect) tlen key msg ran skipped bad)
-        t (cy-hmac-scan (rest lines) algo (string/->number t) key msg ran skipped bad)
+        t
+          (let (n (string/->number t))
+            (if (not (int? n))
+              (error "crypto-test: Tlen is not a number: " t)
+              (cy-hmac-scan (rest lines) algo n key msg ran skipped bad)))
         k (cy-hmac-scan (rest lines) algo tlen k msg ran skipped bad)
         m (cy-hmac-scan (rest lines) algo tlen key m ran skipped bad)
         mac

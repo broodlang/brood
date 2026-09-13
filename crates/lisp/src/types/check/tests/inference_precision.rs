@@ -557,7 +557,10 @@ fn an_extremum_over_an_unknown_operand_is_the_unknown() {
 #[test]
 fn a_dynamic_key_on_a_known_map_keeps_it_a_map() {
     assert_eq!(ty_str("(fn (k) (update {:a 1} k inc))"), "(any) -> map");
-    assert_eq!(ty_str("(fn (k) (assoc {:a 1} k 2))"), "(any) -> map");
+    assert_eq!(
+        ty_str("(fn (k) (assoc {:a 1} k 2))"),
+        "(any) -> map<any, 1 | 2>"
+    );
     assert_eq!(
         ty_str("(fn (m k) (update m k inc))"),
         "(any, any) -> vector | map"

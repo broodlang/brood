@@ -233,9 +233,29 @@ fn expr_ty_inner(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
             // `nil`. But a non-keyword key, or a value whose type is unknown, means an
             // entry was dropped from the shape, and claiming it absent would be a lie
             // the checker could warn on. Those infer OPEN.
+            let entries = heap.map_entries(id);
+            // A TABLE — no keyword key at all, every key and value typeable — is a
+            // `map<K, V>` rather than a record with no fields: `{48 0 49 1 …}` keyed by
+            // codepoints is `map<int, int>`, so a `get` on it answers `nil | int` where the
+            // fieldless open record answered `any`. Exact for what it claims (every key is
+            // a `K`, every value a `V`); which keys are PRESENT it does not claim.
+            if !entries.is_empty() && entries.iter().all(|(k, _)| !matches!(k, Value::Keyword(_))) {
+                let keyed: Option<Vec<(Ty, Ty)>> = entries
+                    .iter()
+                    .map(|&(k, v)| Some((expr_ty(heap, k, ctx)?, expr_ty(heap, v, ctx)?)))
+                    .collect();
+                if let Some(keyed) = keyed {
+                    let (ks, vs) = keyed
+                        .into_iter()
+                        .fold((Ty::NEVER, Ty::NEVER), |(ks, vs), (k, v)| {
+                            (ks.union(k), vs.union(v))
+                        });
+                    return Some(Ty::map_of(ks, vs));
+                }
+            }
             let mut fields = std::collections::BTreeMap::new();
             let mut complete = true;
-            for (k, v) in heap.map_entries(id) {
+            for (k, v) in entries {
                 match (k, expr_ty(heap, v, ctx)) {
                     (Value::Keyword(name), Some(vty)) => {
                         fields.insert(name, (vty, true));
@@ -336,6 +356,22 @@ fn expr_ty_inner(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                         if let Some(t) = control_flow_ty(heap, s, &items, ctx) {
                             return Some(t);
                         }
+                    }
+                    // **A call with an UNINHABITED argument never executes**, so its value is
+                    // ⊥ — not unknown. `(+ i 1)` under `i : never` used to be untypeable, and
+                    // unknown is absorbing: a least fixpoint seeded at ⊥ (Pass 2.9's
+                    // caller-derived parameters, `sigs::caller_derived_params`) could never
+                    // rise out of it. Exact, not merely sound: the empty set of values has no
+                    // result. Only for a head that EVALUATES its operands — a special form,
+                    // a `fn` literal or an unexpanded macro reads them as syntax.
+                    if super::walk::SPECIAL_HEAD.get(&s).is_none()
+                        && !is_fn_head(s)
+                        && !super::walk::resolves_to_macro(heap, ctx, s)
+                        && items[1..]
+                            .iter()
+                            .any(|&a| expr_ty(heap, a, ctx).is_some_and(|t| t.is_never()))
+                    {
+                        return Some(Ty::NEVER);
                     }
                     // **Calling a variable whose type is an arrow.** A parameter
                     // declared `(sig apply-it ((int -> string) -> any))` carries a
@@ -760,6 +796,7 @@ fn short_circuit_union(heap: &Heap, operands: &[Value], ctx: &Ctx, short: Ty) ->
 /// return-check from warning on a form whose value isn't fully pinned.
 fn branch_union(heap: &Heap, forms: &[Value], ctx: &Ctx) -> Option<Ty> {
     let mut acc: Option<Ty> = None;
+    let mut skipped_self = false;
     for &f in forms {
         // **Recursion inference.** When inferring a function's own signature, a
         // self-recursive call in a branch-result position contributes ⊥ to the union — by
@@ -769,6 +806,7 @@ fn branch_union(heap: &Heap, forms: &[Value], ctx: &Ctx) -> Option<Ty> {
         // unknown self-call. Sound: the recursive branch adds nothing the fixpoint doesn't
         // already contain. If every branch is a self-call, `acc` stays `None` → defer.
         if is_inferring_self_call(heap, f, ctx) {
+            skipped_self = true;
             continue;
         }
         let t = expr_ty(heap, f, ctx)?;
@@ -776,6 +814,15 @@ fn branch_union(heap: &Heap, forms: &[Value], ctx: &Ctx) -> Option<Ty> {
             Some(a) => a.union(t),
             None => t,
         });
+    }
+    // Every branch a self-call: this form contributes ⊥ to whatever encloses it — exactly
+    // what the skip above means — and NOT the unknown that used to stand here. An inner
+    // `(if p (self …) (self …))` of a `cond` made the whole `cond` untypeable, and the
+    // walker's index helper (`kids-index-of-form-at`) inferred `-> any` for a body whose
+    // every other arm is an `int`. A function whose every path recurses never returns,
+    // and `never` is its return.
+    if acc.is_none() && skipped_self {
+        return Some(Ty::NEVER);
     }
     acc
 }
@@ -1826,6 +1873,25 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
                 } else {
                     Ty::record_of(fields)
                 });
+            }
+            // A CLOSED shape under a computed key — `(assoc {} k v)` in a table-building
+            // fold — is a `map<K, V>`: the declared fields' keys and values, plus the
+            // assoc'd ones. Sound for what a map type claims (every key a `K`, every
+            // value a `V`); an open shape keeps the flat `map` below, since its undeclared
+            // keys could be anything. This is what lets a fold from `{}` settle on
+            // `map<int, int>` instead of a bare `map` whose every `get` is `any`.
+            if !shape.open {
+                let mut key_ty = Ty::NEVER;
+                let mut val_ty = Ty::NEVER;
+                for (name, (fty, _)) in &shape.fields {
+                    key_ty = key_ty.union(Ty::keyword_lit(*name));
+                    val_ty = val_ty.union(fty.clone());
+                }
+                for pair in items[2..].as_chunks::<2>().0 {
+                    key_ty = key_ty.union(expr_ty(heap, pair[0], ctx).unwrap_or(Ty::ANY));
+                    val_ty = val_ty.union(expr_ty(heap, pair[1], ctx).unwrap_or(Ty::ANY));
+                }
+                return Some(Ty::map_of(key_ty, val_ty));
             }
         }
         if let Some((k, v)) = map_ty.as_ref().and_then(Ty::map_kv) {

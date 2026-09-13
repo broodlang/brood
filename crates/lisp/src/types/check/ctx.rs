@@ -462,6 +462,19 @@ pub(super) struct Ctx {
     /// Scoped like every binding: `bind` on the name drops it, and the scope clone the
     /// `let` body is walked in is discarded with the body.
     let_fn_sigs: HashMap<Symbol, Sig>,
+    /// **Caller-derived parameter types** of this file's module-PRIVATE functions (Pass 2.9,
+    /// ADR-341): per parameter, the union of what every call site in the file hands it —
+    /// `None` for a position some site cannot type. A private function's callers are all in
+    /// its file, so this is a sound binding for the walk of its body and for the return its
+    /// same-file callers read. Absent for a function that escapes as a value, has no site,
+    /// declares a sig, or is not a single plain-parameter arm.
+    derived_params: HashMap<Symbol, Vec<Option<Ty>>>,
+    /// Parameters bound to a CALLER-DERIVED type in the walk of a private body (Pass 2.9).
+    /// Such a binding is for checking the body's uses, not for judging its guards: a
+    /// defensive `(nil? x)` the in-file callers never exercise is not "never true" in the
+    /// sense the impossible-predicate lint reports — the author wrote it for the callers
+    /// that are not here yet. Dropped by `bind` (a shadow), like every binding fact.
+    derived_locals: HashSet<Symbol>,
     /// The `(fn …)` FORM of each same-file, single-def, undeclared function (the Pass 2.8
     /// candidates) — what call-site specialization (`sigs::specialized_ret`) re-types under
     /// a call's argument types. The file isn't loaded while it is checked, so this is the
@@ -738,6 +751,7 @@ impl Ctx {
         // the dead-clause lint.
         c.sig_params.remove(&sym);
         c.let_fn_sigs.remove(&sym);
+        c.derived_locals.remove(&sym);
         c.dead_clause_locals.remove(&sym);
         if let Some(neighbours) = c.aliases.remove(&sym) {
             for n in neighbours {
@@ -926,6 +940,25 @@ impl Ctx {
         let mut c = self.clone();
         c.let_fn_sigs.insert(sym, sig);
         c
+    }
+    /// The caller-derived parameter types of private function `sym`, if Pass 2.9 derived them.
+    pub(super) fn derived_params(&self, sym: Symbol) -> Option<&Vec<Option<Ty>>> {
+        self.derived_params.get(&sym)
+    }
+    /// Install Pass 2.9's caller-derived parameter types (replacing any earlier set).
+    pub(super) fn set_derived_params(&mut self, derived: HashMap<Symbol, Vec<Option<Ty>>>) {
+        self.derived_params = derived;
+    }
+    /// Bind `sym` to its caller-derived type — a plain binding, marked so the impossible-
+    /// predicate lint leaves the body's guards alone (see `derived_locals`).
+    pub(super) fn bind_derived(&self, sym: Symbol, ty: Option<Ty>) -> Ctx {
+        let mut c = self.bind(sym, ty);
+        c.derived_locals.insert(sym);
+        c
+    }
+    /// Was `sym` bound to a caller-derived type (and not rebound since)?
+    pub(super) fn is_derived_local(&self, sym: Symbol) -> bool {
+        self.derived_locals.contains(&sym)
     }
     /// The `(fn …)` form of a same-file function recorded by Pass 2.8, for call-site
     /// specialization.

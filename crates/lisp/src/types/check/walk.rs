@@ -699,7 +699,11 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         {
             if let Some(tested) = super::guards::predicate_guard_ty(heap, Some(ctx), s) {
                 let bound = gradual_of(heap, items[1], ctx).bound;
-                if !bound.is_never() && bound != Ty::ANY && bound.is_disjoint(&tested) {
+                // A parameter bound to what its in-file callers pass (Pass 2.9) is not
+                // judged here: the guard may be there for callers that do not exist yet.
+                let derived =
+                    matches!(items.get(1), Some(&Value::Sym(a)) if ctx.is_derived_local(a));
+                if !derived && !bound.is_never() && bound != Ty::ANY && bound.is_disjoint(&tested) {
                     out.push((
                         arg_pos(heap, items[1], form),
                         format!(

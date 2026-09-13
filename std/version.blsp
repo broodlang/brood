@@ -208,7 +208,7 @@ everything (the \"no release yet\" placeholder a registry starts from).
 'missing segment reads as 0' rule the comparisons use."
   (cond
     (empty? parts) 0
-    (= i 0) (first parts)
+    (= i 0) (or (first parts) 0)
     else (nth0 (rest parts) (dec i))))
 
 (defn- first-nonzero-index (parts)

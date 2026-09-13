@@ -132,8 +132,12 @@ binary payload (digests, salts, wire bytes)."
 ; the code point of "="
 (def- encoding-b64-pad 61)
 ;; Encode a byte sequence to base64 using the given 64-entry code-point vector.
-(defn- encoding-b64-encode (bytes codes)
-  (string/bytes-> (encoding-b64-enc-loop (seq bytes) codes nil)))
+;; check-allow: every `(nth codes …)` index the loop conses is 0..63 by its arithmetic
+;; (`(* (math/rem b 4) 16)`, `(math/quot b 4)`, …) over a 64-entry vector, so the
+;; list holds ints — the `nil` the type carries is the out-of-range case that cannot occur.
+(check-allow :type-mismatch
+  (defn- encoding-b64-encode (bytes codes)
+    (string/bytes-> (encoding-b64-enc-loop (seq bytes) codes nil))))
 
 (defn- encoding-b64-enc-loop (bytes codes acc)
   (if (empty? bytes)

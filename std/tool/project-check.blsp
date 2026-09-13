@@ -1356,12 +1356,12 @@ caller, which would rather write nothing than guess a line."
       (when (not (nil? (suggestion-line entry)))
         (let (name (get entry :name)
               hit (seq/find (range (count lines))
-                    (fn (k) (not (nil? (sig-defn-name-at (nth lines k) name))))))
+                    (fn (k) (not (nil? (sig-defn-name-at (nth lines k "") name))))))
           (when hit
             [hit
-              (str (sig-line-indent (nth lines hit))
+              (str (sig-line-indent (nth lines hit ""))
                 "(sig "
-                (sig-defn-name-at (nth lines hit) name)
+                (sig-defn-name-at (nth lines hit "") name)
                 " "
                 (get entry :sig)
                 ")")]))))))

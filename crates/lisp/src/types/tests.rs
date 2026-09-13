@@ -1094,14 +1094,16 @@ fn inferred_type_size_is_bounded_ki13() {
 
 #[test]
 fn a_union_of_two_tuple_shapes_keeps_both() {
-    let a = Ty::tuple_of(vec![Ty::of(Tag::Int)]);
-    let b = Ty::tuple_of(vec![Ty::of(Tag::Str)]);
+    // Two positions differ, so the union is NOT a product and the terms stay apart
+    // (one differing position merges exactly — see `tuples_of_one_arity_merge_by_position`).
+    let a = Ty::tuple_of(vec![Ty::of(Tag::Int), Ty::of(Tag::Int)]);
+    let b = Ty::tuple_of(vec![Ty::of(Tag::Str), Ty::of(Tag::Str)]);
     let u = a.clone().union(b.clone());
-    assert_eq!(u.to_string(), "(tuple int) | (tuple string)");
+    assert_eq!(u.to_string(), "(tuple int, int) | (tuple string, string)");
     // Each alternative is still a subtype of the union…
     assert!(a.is_subtype(&u) && b.is_subtype(&u));
     // …and a shape neither admits is provably outside it.
-    let c = Ty::tuple_of(vec![Ty::of(Tag::Bool)]);
+    let c = Ty::tuple_of(vec![Ty::of(Tag::Int), Ty::of(Tag::Str)]);
     assert!(!c.is_subtype(&u));
     assert!(c.is_disjoint(&u));
 }
@@ -1164,7 +1166,8 @@ fn a_refinement_accessor_reports_nothing_for_a_union() {
     // A refinement that holds for one term does not hold for the union, so every
     // accessor reports `None` there — exactly what a widened type reported before,
     // which is why no consumer had to change.
-    let u = Ty::tuple_of(vec![Ty::of(Tag::Int)]).union(Ty::tuple_of(vec![Ty::of(Tag::Str)]));
+    let u = Ty::tuple_of(vec![Ty::of(Tag::Int), Ty::of(Tag::Int)])
+        .union(Ty::tuple_of(vec![Ty::of(Tag::Str), Ty::of(Tag::Str)]));
     assert_eq!(u.tuple_elems(), None);
     assert_eq!(u.elem_ty(), None);
     let r = rec(&[("a", Ty::of(Tag::Int), true)]).union(rec(&[("b", Ty::of(Tag::Str), true)]));
@@ -1893,4 +1896,39 @@ fn a_union_of_nested_sequence_elements_merges_into_the_wider_one() {
         !Ty::list_of(int.union(Ty::of(Tag::Str))).is_subtype(&mixed),
         "{mixed}"
     );
+}
+
+#[test]
+fn tuples_of_one_arity_merge_by_position() {
+    // Exact when they differ in one position: `A×B ∪ C×B = (A∪C)×B`.
+    let int = Ty::of(Tag::Int);
+    let a = Ty::tuple_of(vec![Ty::int_lit(34), int.clone()]);
+    let b = Ty::tuple_of(vec![Ty::int_lit(92), int.clone()]);
+    let merged = a.clone().union(b.clone());
+    assert_eq!(
+        merged,
+        Ty::tuple_of(vec![Ty::int_lit(34).union(Ty::int_lit(92)), int.clone()]),
+        "{merged}"
+    );
+    assert!(a.is_subtype(&merged) && b.is_subtype(&merged));
+    assert!(!Ty::tuple_of(vec![Ty::int_lit(1), int.clone()]).is_subtype(&merged));
+    // Differing in two positions is NOT exact: the terms are kept, and a combination
+    // neither side had is outside the union.
+    let c = Ty::tuple_of(vec![Ty::int_lit(1), Ty::of(Tag::Str)]);
+    let two = a.clone().union(c.clone());
+    assert!(
+        !Ty::tuple_of(vec![Ty::int_lit(1), int.clone()]).is_subtype(&two),
+        "{two}"
+    );
+    // Past the term cap the WIDENING keeps the arity and every position — eight
+    // `[<literal> int]` branches are `(tuple int, int)`, not a bare `vector`.
+    let eight = (0..8)
+        .map(|k| Ty::tuple_of(vec![Ty::int_lit(k), int.clone()]))
+        .fold(Ty::NEVER, Ty::union);
+    assert_eq!(eight.tuple_elems().map(|e| e.len()), Some(2), "{eight}");
+    assert!(
+        eight.is_subtype(&Ty::tuple_of(vec![int.clone(), int.clone()])),
+        "{eight}"
+    );
+    assert!(!eight.is_subtype(&Ty::tuple_of(vec![int.clone(), Ty::of(Tag::Str)])));
 }

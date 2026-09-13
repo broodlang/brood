@@ -686,6 +686,7 @@ the minibuffer UI state. Paints to whatever frontend `ui-run` holds."
       sort
       (get model :link)
       ui)))
+(sig observe-view (map int int -> any))
 
 ;; The eval minibuffer (`:command` mode) is a modal overlay over the keymap — the same
 ;; shape the editor's minibuffer has — so it rides the shared `editor/ui/overlay-route`
@@ -729,6 +730,7 @@ honours). The backend rides in the model under `:backend`."
               (assoc (observe-derived m cols rows) :msg nil)
               k
               (fn (s _) s)))))))
+(sig observe-update (map any int int -> any))
 
 ;; ---- demo processes (so a fresh observer has something to show) -------------
 
