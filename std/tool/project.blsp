@@ -157,16 +157,13 @@ identity and may override those paths. The rest of the tool is its siblings:
 ;;   "app"        => (app main)
 ;;   "app/start"  => (app start)
 (defn- project-parse-main-spec (spec)
-  (let (parts (string/split spec "/")
-        ; reject blank module/fn halves so a typo like "" or "/start" errors
-        ; cleanly here, not as a malformed load downstream.
-        ok? (fn (p) (not (string/blank? p))))
-    (cond
-      (and (= (count parts) 1) (ok? (first parts))) (list (symbol (first parts)) 'main)
-      (and (= (count parts) 2) (ok? (first parts)) (ok? (second parts)))
-        (list (symbol (first parts))
-          (symbol (or (second parts) "")))
-      else (error "nest run --main: expected \"module\" or \"module/fn\", got " spec))))
+  ; reject blank module/fn halves so a typo like "" or "/start" errors cleanly
+  ; here, not as a malformed load downstream.
+  (let (ok? (fn (p) (not (string/blank? p))))
+    (match (string/split spec "/")
+      ((m) :when (ok? m) (list (symbol m) 'main))
+      ((m f) :when (and (ok? m) (ok? f)) (list (symbol m) (symbol f)))
+      (_ (error "nest run --main: expected \"module\" or \"module/fn\", got " spec)))))
 
 (defn set-project-main (spec)
   "Override the `nest run` entry point from a CLI spec string (`\"module\"` or `\"module/fn\"`), without editing the manifest's `:main`. Sets a dedicated override slot that wins over the manifest even though `run` re-applies the manifest internally. Backs `nest run --main`."

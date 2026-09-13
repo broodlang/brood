@@ -461,8 +461,12 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         // name, and `ctx.get` only answers for a variable actually in scope.
         let local_ty = ctx.get(s);
         let local_arrow = local_ty.as_ref().and_then(Ty::as_arrow).cloned();
-        let sig = local_arrow
-            .clone()
+        // A `let`-bound `fn` LITERAL carries its parameter domains as a per-name fact
+        // (`sigs::let_bound_lambda_sig`) — read ahead of the arrow, which types only the
+        // result; same arity either way.
+        let sig = ctx
+            .let_fn_sig(s)
+            .or_else(|| local_arrow.clone())
             .or_else(|| declared.clone())
             .or_else(|| {
                 (!ctx.is_lexical_local(s) && !ctx.is_file_global(s))
@@ -498,7 +502,7 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         // `apply-it` had to supply a one-argument function to satisfy that parameter, so
         // calling it with two always raises. Without this the arrow described the call's
         // types (ADR-273) but not its shape, which is half a contract.
-        let arity = if let Some(sg) = &local_arrow {
+        let arity = if let Some(sg) = ctx.let_fn_sig(s).as_ref().or(local_arrow.as_ref()) {
             Some(arity_of_sig(sg))
         } else if ctx.is_lexical_local(s) {
             None

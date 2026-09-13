@@ -324,6 +324,19 @@ surface feeding it — and each turned out to need a different kind of fix. Deta
 - [x] **5. `(not T)`, and complements that read as complements** (ADR-263). The lattice has
       computed complements since ADR-023 and the grammar could not say one; `expects string,
       got nil | bool | number | …` (twenty-two tags) now reads `(not string)`.
+- [x] **6. Declare at the leaf, derive from the call** (ADR-339, 2026-09-13). A self-recursive
+      function is specialized at its call site by a joint fixpoint over parameters and result
+      (`(sum-to 10 0)` is `int`; the accumulator loop was `any` at every call); the loaded-closure
+      inferencer no longer loses nested demands cross-module; the checker materialises every
+      module a loaded body names, so a leaf `sig` (`text/char->line`) reaches what derives from
+      it without re-declaring the derived function.
+- [ ] **7. Caller-derived parameter types for module-private functions.** The walk checks a
+      body under its parameters' bottom-up *demands* (`(+ i 1)` says `number`) with no view of
+      what the callers pass; a private function's caller set is closed, so the union of the
+      call sites' argument types is a sound binding when the name never escapes as a value.
+      This is what lets `json`'s four index-returning helpers drop their `(sig … -> (tuple int
+      int))` and keep `hex-val` alone (ADR-339 "What is still declared that should derive").
+      Cost is the question: a second walk per file, or a stored-scope collection pass.
 
 
 ### Standard-library surface audit — the bare namespace (2026-08-26)
@@ -620,6 +633,11 @@ Shipped as ADRs:
   - ✅ **Occurrence typing — inferred params check callers** ([ADR-190](docs/decisions.md),
     2026-07-30) — an unannotated function's inferred parameter types flag wrong callers, incl.
     the sealed-op-derived case, cross-file. Sound (under-constrained → under-warn). **[checker]**
+    *Cross-file was weaker than this line said until 2026-09-13:* the loaded-closure
+    inferencer had a "Tier 1" that read only DIRECT parameter arguments of a one-call body
+    and returned before the domain walk, so `(defn v (s) (+ 1 (string/length s)))` checked
+    its callers in its own file and from no other module. Deleted; the domain walk is the
+    one inferencer now (`docs/type-system-status.md`, 2026-09-13).
   - ✅ **Ability bounds** ([ADR-192](docs/decisions.md)) — a sealed ability name in a `sig` is
     `where T: Ability`; `(and A B)` is `T: A + B`. Documented (already worked via ADR-181/186).
   - ✅ **Super-abilities — `:requires`** ([ADR-193](docs/decisions.md), 2026-07-30) — an

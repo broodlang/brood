@@ -665,6 +665,14 @@ pub(super) fn check_let(
         let rhs_precise = !gradual_of(heap, rhs, &scope).dynamic;
         let rhs_guard = guard_assertion(heap, rhs, &scope);
         scope = scope.bind(name, rhs_ty.clone());
+        // A `fn` LITERAL on the right binds a name that heads calls in the body; give
+        // those calls the literal's parameter domains (see `sigs::let_bound_lambda_sig`
+        // for why this is a per-name fact and not the arrow's type).
+        if let Some(sig) =
+            super::super::sigs::let_bound_lambda_sig(heap, rhs, rhs_ty.as_ref(), &scope)
+        {
+            scope = scope.bind_let_fn_sig(name, sig);
+        }
         // Dead-clause lint eligibility: a surface (non-gensym), precisely-typed
         // `let`-local joins the set the dead-clause lint may flag, so a later guard
         // that narrows it to `never` is caught — `(let (x 5) (cond (string? x) …))`.

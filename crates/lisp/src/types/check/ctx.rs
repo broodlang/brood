@@ -457,6 +457,11 @@ pub(super) struct Ctx {
     /// argument constraints. Redefinable-global caution is the caller's (treated as an
     /// over-approximation, like the loaded-inferred sigs).
     inferred_fn_sig: HashMap<Symbol, Sig>,
+    /// A `let`-bound name whose RHS is a `fn` LITERAL → the call-site signature
+    /// `sigs::let_bound_lambda_sig` derived from that literal (parameter domains + result).
+    /// Scoped like every binding: `bind` on the name drops it, and the scope clone the
+    /// `let` body is walked in is discarded with the body.
+    let_fn_sigs: HashMap<Symbol, Sig>,
     /// The `(fn …)` FORM of each same-file, single-def, undeclared function (the Pass 2.8
     /// candidates) — what call-site specialization (`sigs::specialized_ret`) re-types under
     /// a call's argument types. The file isn't loaded while it is checked, so this is the
@@ -732,6 +737,7 @@ impl Ctx {
         // same name — the new binding's type is unrelated, so it must not drive
         // the dead-clause lint.
         c.sig_params.remove(&sym);
+        c.let_fn_sigs.remove(&sym);
         c.dead_clause_locals.remove(&sym);
         if let Some(neighbours) = c.aliases.remove(&sym) {
             for n in neighbours {
@@ -910,6 +916,16 @@ impl Ctx {
         if !self.declared.contains_key(&sym) {
             self.inferred_fn_sig.insert(sym, sig);
         }
+    }
+    /// The call-site signature of the `fn` literal `sym` is `let`-bound to, if any.
+    pub(super) fn let_fn_sig(&self, sym: Symbol) -> Option<Sig> {
+        self.let_fn_sigs.get(&sym).cloned()
+    }
+    /// Record the call-site signature of a `let`-bound `fn` literal (see `let_fn_sig`).
+    pub(super) fn bind_let_fn_sig(&self, sym: Symbol, sig: Sig) -> Ctx {
+        let mut c = self.clone();
+        c.let_fn_sigs.insert(sym, sig);
+        c
     }
     /// The `(fn …)` form of a same-file function recorded by Pass 2.8, for call-site
     /// specialization.

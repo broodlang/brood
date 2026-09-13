@@ -538,7 +538,7 @@ pub(super) fn collect_pattern_syms(heap: &Heap, pat: Value, out: &mut Vec<Symbol
 
 /// Parse a `let` bindings form — accepts both `(name val name val …)` lists
 /// and `[name val name val …]` vectors, the two shapes the reader emits.
-pub(super) fn bindings(heap: &Heap, form: Value) -> Option<Vec<Value>> {
+pub(in crate::types::check) fn bindings(heap: &Heap, form: Value) -> Option<Vec<Value>> {
     match form {
         Value::Vector(id) => Some(heap.vector(id).to_vec()),
         Value::Nil | Value::Pair(_) => list_items(heap, form),

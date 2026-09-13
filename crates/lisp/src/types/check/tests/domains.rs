@@ -515,3 +515,68 @@ fn a_bare_local_test_narrows_by_truthiness() {
     );
     assert!(!ws.iter().any(|w| w.contains("unreachable")), "{ws:?}");
 }
+
+// ---- a LOADED closure infers the same domains as its file does ----
+// The inferencer a cross-module caller consults (`sig_of` over the loaded closure) had a
+// "Tier 1" ahead of the domain walk: a body that was one call to a primitive/curated callee
+// read its parameters off that call — direct parameter arguments only — and returned. So
+// `(defn v (s) (+ 1 (string/length s)))` inferred `(string)` in its own file (Pass 2.8
+// never had the tier) and `(any)` from every other module, and the reversed call the
+// signature exists to catch was accepted in silence everywhere but at home. Verified by
+// sabotage: restoring the tier fails every case below.
+
+#[test]
+fn a_loaded_closure_walks_the_nested_arguments_of_a_primitive_callee() {
+    let mut interp = crate::Interp::new();
+    for def in [
+        "(defn under-str (s n) (str (string/length s) (+ n 1)))",
+        "(defn under-plus (s) (+ 1 (string/length s)))",
+        "(defn under-puts (s) (io/puts (string/length s)))",
+        "(defn under-vector (s) (vector 1 (string/length s)))",
+        "(defn under-lt (s) (< 1 (string/length s)))",
+    ] {
+        interp.eval_str(def).expect("def");
+    }
+    let param = |name: &str, index: usize| {
+        super::sigs::sig_of(&interp.heap, crate::core::value::intern(name))
+            .unwrap_or_else(|| panic!("{name}: a sig is inferred"))
+            .params[index]
+            .to_string()
+    };
+    assert_eq!(param("under-str", 0), "string");
+    assert_eq!(param("under-str", 1), "number");
+    assert_eq!(param("under-plus", 0), "string");
+    assert_eq!(param("under-puts", 0), "string");
+    assert_eq!(param("under-vector", 0), "string");
+    assert_eq!(param("under-lt", 0), "string");
+}
+
+#[test]
+fn a_cross_module_caller_is_checked_against_the_loaded_domain() {
+    // The user-facing half of the case above: the reversed call is a warning from another
+    // module, not only from the callee's own file.
+    let ws = check_with_defs(
+        &["(defn pad-name (name n) (str (string/upper name) (+ n 1)))"],
+        "(pad-name 5 \"x\")",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("pad-name: argument 1 expects string, got 5")),
+        "{ws:?}"
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("pad-name: argument 2 expects number, got \"x\"")),
+        "{ws:?}"
+    );
+    // …and the direct-parameter case the tier DID handle still infers, with its return.
+    let ws = check_with_defs(
+        &["(defn shout (s) (string/upper s))"],
+        "(string/length (shout 5))",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("shout: argument 1 expects string, got 5")),
+        "{ws:?}"
+    );
+}

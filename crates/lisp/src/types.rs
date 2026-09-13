@@ -1338,12 +1338,18 @@ impl Ty {
             other.tags & FN_BITS != 0,
             &other.overload,
         );
-        let elem = merge_union(
-            self.tags & SEQ_BITS != 0,
-            &self.elem,
-            other.tags & SEQ_BITS != 0,
-            &other.elem,
-        );
+        // The element slot has an EXACT merge beyond "identical or one-sided": when one
+        // side's elements sit inside the other's and so do its sequence kinds, the union
+        // of the two sequence parts is the wider side's — see [`elem_union_exact`].
+        // `merge_is_exact` has already agreed, so `None` here is the plain widening.
+        let elem = elem_union_exact(&self, &other).unwrap_or_else(|| {
+            merge_union(
+                self.tags & SEQ_BITS != 0,
+                &self.elem,
+                other.tags & SEQ_BITS != 0,
+                &other.elem,
+            )
+        });
         let map_kv = merge_union(
             self.tags & MAP_BIT != 0,
             &self.map_kv,
@@ -2258,6 +2264,29 @@ impl Ty {
     pub const fn is_any(&self) -> bool {
         self.tags == UNIVERSE
     }
+
+    /// Does this type name a collection kind without saying what is in it — `any`, or a
+    /// single flat term with a sequence or map tag and no element, key/value, field or
+    /// tuple refinement (`nil | list`, `seqable`, `countable`, bare `map`)? These are the
+    /// answers call-site specialization can sharpen: a function whose flat return is the
+    /// `seqable` its parameter was demanded to be (it returns that parameter on one
+    /// branch) is `list<string>` at a call that hands it one, and a recursive list builder
+    /// whose flat return is `nil | list` is `nil | list<int>` at its call. A return of
+    /// `int`, `string` or `list<int>` says all a re-typing could, and a union of several
+    /// terms already says which.
+    pub fn is_unrefined_collection(&self) -> bool {
+        if self.is_any() {
+            return true;
+        }
+        self.alts.is_none()
+            && self.neg.is_none()
+            && self.tags & (SEQ_BITS | MAP_BIT) != 0
+            && self.arrow.is_none()
+            && self.elem.is_none()
+            && self.map_kv.is_none()
+            && self.fields.is_none()
+            && self.tuple.is_none()
+    }
 }
 
 /// Record-shape subtyping: is `self`'s field map a subtype of `other`'s?
@@ -2680,7 +2709,7 @@ fn merge_is_exact(a: &Ty, b: &Ty) -> bool {
     let (va, vb) = (a.tags & VECTOR_BIT != 0, b.tags & VECTOR_BIT != 0);
     !contested(fa, &a.arrow, fb, &b.arrow)
         && !contested(fa, &a.overload, fb, &b.overload)
-        && !contested(sa, &a.elem, sb, &b.elem)
+        && (!contested(sa, &a.elem, sb, &b.elem) || elem_union_exact(a, b).is_some())
         && !contested(ma, &a.map_kv, mb, &b.map_kv)
         && !contested(ma, &a.fields, mb, &b.fields)
         && !contested(va, &a.tuple, vb, &b.tuple)
@@ -2688,6 +2717,38 @@ fn merge_is_exact(a: &Ty, b: &Ty) -> bool {
     // two literal sets, which `merge_union_lit_set` computes exactly.
 }
 
+/// The merged element refinement of `a ∪ b` when that merge is EXACT although the two
+/// element types differ — `Some(elem)` — or `None` when it is not (the caller then falls
+/// back to the plain "identical or one-sided" rule, which widens).
+///
+/// For every sequence kind `s` (list, vector, set), `E₁ ⊆ E₂` gives `s<E₁> ⊆ s<E₂>`. So if
+/// one side's element type is inside the other's AND that side's sequence kinds are among
+/// the other's, the union of the two sequence parts is exactly the wider side's: a term
+/// carrying the wider elements over the union of the tags denotes `⋃ s<E₂>` over the
+/// wider side's kinds, which contains the narrower side's part and equals the wider's.
+/// `nil | list<3>` ∪ `list<int>` is then `nil | list<int>` — one term — where before it was
+/// two alternatives that no element read could speak for (a derivation only answers when
+/// the term admits ONE collection), so a list built by a recursive accumulator degraded to
+/// a bare `pair` on its second element. An absent refinement is "any element" and takes
+/// part as such. Only for terms with no subtraction — `merge_is_exact` refuses those first.
+fn elem_union_exact(a: &Ty, b: &Ty) -> Option<Option<Arc<Ty>>> {
+    let (sa, sb) = (a.tags & SEQ_BITS, b.tags & SEQ_BITS);
+    if sa == 0 || sb == 0 {
+        return None; // one-sided: the plain rule is already exact
+    }
+    let elem_of = |t: &Ty| t.elem.as_deref().cloned().unwrap_or(Ty::ANY);
+    let (ea, eb) = (elem_of(a), elem_of(b));
+    if ea == eb {
+        return None; // identical: the plain rule keeps it
+    }
+    if sa & !sb == 0 && ea.is_subtype(&eb) {
+        return Some(b.elem.clone());
+    }
+    if sb & !sa == 0 && eb.is_subtype(&ea) {
+        return Some(a.elem.clone());
+    }
+    None
+}
 /// The surviving refinement for a **union**: present on just one side → carry it;
 /// on both and equal → keep; on both and different → widen to `None` (the union
 /// of two distinct refinements isn't a single one). Shared by the `arrow` and
@@ -2895,14 +2956,27 @@ impl GradualTy {
     /// [`Ty::is_consistent_subtype`]: a NESTED unknown (a record field, an element) is
     /// the gradual `?` in either mode — only what is positively known is read strictly.
     pub fn consistent_with_mode(&self, expected: Ty, strict: bool) -> bool {
-        // Strict applies to a bound that is POSITIVELY known. `any ∖ nil` — what a
-        // `(when x …)` guard leaves — says what the value is not, never what it is; it
-        // is still the unknown, and reading it by inclusion would flag every guarded
-        // use of an untyped parameter.
-        if self.dynamic && strict && !self.bound.is_known_only_by_exclusion() {
+        if !self.dynamic {
             return self.bound.is_consistent_subtype(&expected);
         }
-        if self.dynamic {
+        // A dynamic bound is read TERM BY TERM. A union that puts a positively-known
+        // alternative beside one known only by exclusion — `nil | list<int> | (not (nil |
+        // vector))`, what a `cond` that returns its scrutinee in the `else` arm yields —
+        // is not positively known as a whole, and reading it as one would charge the
+        // known arms with the unknown arm's admissions: the exclusion arm admits a
+        // `failure` the way it admits everything, and strict inclusion would demand that
+        // "anything but nil or a vector" fit the parameter. So each arm gets the reading
+        // its own knowledge earns, and the whole is consistent when every arm is.
+        let failure = Ty::of(Tag::Failure);
+        self.bound.terms_vec().into_iter().all(|term| {
+            // Strict applies to a bound that is POSITIVELY known. `any ∖ nil` — what a
+            // `(when x …)` guard leaves — says what the value is not, never what it is; it
+            // is still the unknown, and reading it by inclusion would flag every guarded
+            // use of an untyped parameter.
+            let by_exclusion = term.is_known_only_by_exclusion();
+            if strict && !by_exclusion {
+                return term.is_consistent_subtype(&expected);
+            }
             // **A failure is never a valid materialisation** of a domain that excludes
             // one — checked by inclusion in both modes, where every other arm of a union
             // gets the overlap reading. This is the converse of the impossible-`failure?`
@@ -2928,23 +3002,17 @@ impl GradualTy {
             //
             // Reload safety is unaffected: a `def` that stops returning failures changes
             // the signature the next check reads, and this warning goes with it.
-            let failure = Ty::of(Tag::Failure);
-            if !self.bound.is_known_only_by_exclusion()
-                && !self.bound.is_disjoint(&failure)
-                && expected.is_disjoint(&failure)
-            {
+            if !by_exclusion && !term.is_disjoint(&failure) && expected.is_disjoint(&failure) {
                 return false;
             }
-            // Some inhabited materialisation fits — i.e. `bound` is not *provably
+            // Some inhabited materialisation fits — i.e. the arm is not *provably
             // disjoint* from `expected`. Uses [`Ty::is_disjoint`], not
             // `intersect().is_never()`: the two agree on flat tags, but only
             // `is_disjoint` also sees the refinement-level conflicts (record
             // fields, tuple shapes, literal sets), so a dynamic value with a
             // refined type that provably can't fit is caught here too.
-            !self.bound.is_disjoint(&expected)
-        } else {
-            self.bound.is_consistent_subtype(&expected)
-        }
+            !term.is_disjoint(&expected)
+        })
     }
 
     /// Gradual union — union of bounds, dynamic if either side is. Used to join

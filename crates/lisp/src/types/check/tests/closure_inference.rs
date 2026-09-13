@@ -144,18 +144,28 @@ fn infers_a_tail_recursive_function_return_from_its_base_case() {
 }
 
 #[test]
-fn recursive_inference_defers_when_the_base_case_is_unknown() {
-    // SOUNDNESS: an accumulator-returning recursion (`acc` is an unconstrained param → the
-    // base case is unknown) must infer an unknown return, never a spuriously-narrow one — so
-    // a caller using its result in any way is NOT false-flagged.
+fn an_accumulator_loop_returns_what_the_accumulator_grows_into() {
+    // `acc` is an unconstrained parameter, so the FLAT inference says `-> any`; the
+    // call-site fixpoint (`sigs::specialize_recursive`) reads the recursive call passing
+    // `(+ acc (first xs))` and settles on `number` — `(sum-acc (list 1 2) 0)` IS `3`, and a
+    // string function on it is a real finding, not a false positive. (This test used to pin
+    // the opposite, when the fixpoint did not exist and declining was the sound answer.)
     let w = check_with_defs(
         &["(defn sum-acc (xs acc) (if (empty? xs) acc (sum-acc (rest xs) (+ acc (first xs)))))"],
         "(string/length (sum-acc (list 1 2) 0))",
     );
     assert!(
-        !w.iter().any(|s| s.contains("string/length")),
-        "an unknown (param) base case must defer, not false-flag: {w:?}"
+        w.iter()
+            .any(|s| s.contains("string/length: argument 1 expects string, got number")),
+        "{w:?}"
     );
+    // SOUNDNESS: a seed the call site does not know keeps the result unknown — the
+    // fixpoint over-approximates from `inputs`, and an unknown input stays unknown.
+    let w = check_with_defs(
+        &["(defn sum-acc (xs acc) (if (empty? xs) acc (sum-acc (rest xs) (+ acc (first xs)))))"],
+        "(defn use-it (k) (string/length (sum-acc (list 1 2) k)))",
+    );
+    assert!(!w.iter().any(|s| s.contains("string/length")), "{w:?}");
 }
 
 #[test]
@@ -410,4 +420,149 @@ fn skips_inference_for_variadic_or_optional_closures() {
     // A variadic-tail closure isn't a "fixed-arity straight-line" — skip.
     let w = check_with_defs(&["(defn vlist (& xs) (first xs))"], "(vlist 1 2 3)");
     assert!(w.is_empty(), "variadic defns must not infer: {:?}", w);
+}
+
+// ---- a `let`-bound `fn` literal constrains the calls it heads ----
+// The literal's arrow type is `(any… -> R)` on purpose (see `sigs::let_bound_lambda_sig`
+// for the contravariance argument), so its parameter DOMAINS travel as a per-name fact
+// instead: `(g "x")` under `(let (g (fn (b) (+ 1 b))) …)` is the same finding a same-file
+// `defn` would give. Sabotage-verified: without the `let_fn_sig` lookup in `walk.rs` the
+// first two cases pass in silence.
+
+#[test]
+fn a_let_bound_lambda_checks_its_arguments_against_its_domain() {
+    let ws = file_warnings("(defn f () (let (g (fn (b) (+ 1 b))) (g \"x\")))");
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("g: argument 1 expects number, got \"x\"")),
+        "{ws:?}"
+    );
+    // A guarded use is credited only within its guard — the domain rule, not a demand.
+    let ws = file_warnings("(defn f () (let (g (fn (b) (if (int? b) (+ 1 b) b))) (g \"x\")))");
+    assert!(ws.is_empty(), "{ws:?}");
+    // The arity comes with it, even when the result cannot be typed.
+    let ws = file_warnings("(defn f (h) (let (g (fn (b) (h b))) (g 1 2)))");
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("g: expected 1 argument, got 2")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn a_let_bound_lambda_domain_is_scoped_and_never_its_arrow() {
+    // A rebinding of the name shadows the fact.
+    let ws = file_warnings("(defn f (k) (let (g (fn (b) (+ 1 b))) (let (g k) (g \"x\"))))");
+    assert!(ws.is_empty(), "{ws:?}");
+    // The literal HANDED ON keeps its `(any -> R)` arrow: an inferred callback slot's
+    // `any` means unknown, and a `(number -> number)` there would be a false positive.
+    let ws = file_warnings(
+        "(defn each-of (xs f) (map xs f))\n\
+         (defn f (xs) (let (g (fn (b) (+ 1 b))) (each-of xs g)))",
+    );
+    assert!(ws.is_empty(), "{ws:?}");
+    let ws = file_warnings("(defn f (xs) (let (g (fn (b) (+ 1 b))) (map xs g)))");
+    assert!(ws.is_empty(), "{ws:?}");
+}
+
+// ---- the self-recursive fixpoint (`sigs::specialize_recursive`) ----
+// Every case is a FILE check (Pass 2.8 + call-site specialization), which is the path a
+// project's own accumulator loops take. Sabotage-verified: with the fixpoint replaced by
+// the old decline, the first three go silent.
+
+#[test]
+fn a_tail_recursive_accumulator_is_typed_at_its_call_site() {
+    // `(number any -> any)` flat; `int` at this call.
+    let ws = file_warnings(
+        "(defn sum-to (i acc) (if (= i 0) acc (sum-to (- i 1) (+ acc i))))\n\
+         (defn use-it () (string/length (sum-to 10 0)))",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("string/length: argument 1 expects string, got int")),
+        "{ws:?}"
+    );
+    // A list builder: `never` → `list<int>` → stable.
+    let ws = file_warnings(
+        "(defn build (i acc) (if (= i 0) acc (build (- i 1) (cons i acc))))\n\
+         (defn use-it () (+ 1 (build 3 '())))",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("+: argument 2 expects number, got nil | list<int>")),
+        "{ws:?}"
+    );
+    // A self-call in a NESTED position (`cons` of the recursive result): the classic map.
+    let ws = file_warnings(
+        "(defn my-map (xs f) (if (nil? xs) nil (cons (f (first xs)) (my-map (rest xs) f))))\n\
+         (defn use-it () (string/length (first (my-map '(1 2 3) inc))))",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("string/length: argument 1 expects string, got")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn the_recursive_fixpoint_keeps_the_correct_calls_silent() {
+    // Every one of these is right, and each exercises a widening the fixpoint must make.
+    let ws = file_warnings(
+        "(defn sum-to (i acc) (if (= i 0) acc (sum-to (- i 1) (+ acc i))))\n\
+         (defn build (i acc) (if (= i 0) acc (build (- i 1) (cons i acc))))\n\
+         (defn my-map (xs f) (if (nil? xs) nil (cons (f (first xs)) (my-map (rest xs) f))))\n\
+         (defn grow (i acc) (if (= i 0) acc (grow (- i 1) (if (= (mod i 2) 1) (cons \"s\" acc) (cons i acc)))))\n\
+         (defn ok1 () (+ 1 (sum-to 10 0)))\n\
+         (defn ok2 () (+ 1 (sum-to 10 0.5)))\n\
+         (defn ok3 () (count (build 3 '())))\n\
+         (defn ok4 () (map (my-map '(1 2 3) inc) (fn (n) (+ n 1))))\n\
+         (defn ok5 () (each (grow 4 '()) (fn (x) (if (string? x) (string/length x) (+ x 1)))))\n\
+         (defn ok6 (k) (string/length (sum-to 10 k)))",
+    );
+    // `my-map` earns the (correct) non-tail-recursion lint; only type findings matter here.
+    let ws: Vec<_> = ws.into_iter().filter(|w| w.contains("expects")).collect();
+    assert!(ws.is_empty(), "{ws:?}");
+}
+
+#[test]
+fn the_recursive_fixpoint_declines_rather_than_under_approximate() {
+    // A parameter that grows on every round — a list nesting one level deeper per
+    // call — never converges within the bound, and the answer is the flat one, not the
+    // last round's: no finding on either use.
+    let ws = file_warnings(
+        "(defn nest (i acc) (if (= i 0) acc (nest (- i 1) (list acc))))\n\
+         (defn use-a () (string/length (nest 3 1)))\n\
+         (defn use-b () (+ 1 (nest 3 1)))",
+    );
+    assert!(ws.is_empty(), "{ws:?}");
+    // Two arms fit the call's arity (a `:when` overload): declined, flat answer.
+    let ws = file_warnings(
+        "(defn pick ((i acc) :when (= i 0) acc) ((i acc) (pick (- i 1) (+ acc i))))\n\
+         (defn use-it () (string/length (pick 3 0)))",
+    );
+    assert!(!ws.iter().any(|w| w.contains("string/length")), "{ws:?}");
+}
+
+#[test]
+fn a_self_call_argument_is_typed_in_its_enclosing_scope() {
+    // `j2` is a `let` binder on the way down to the self-call. Typed under the parameters
+    // alone it was unbound, `j` went unknown, and `(inc j)` read `number` (bedit's
+    // `git-scan-rows`); the exact `int` below is what the scoped site walk earns. The
+    // `:else` keyword (a plain truthy test to `cond`) is the spelling that showed it.
+    let ws = file_warnings(
+        "(defn- scan (rows j dir n)\n\
+           (if (= n 0)\n\
+             (inc j)\n\
+             (let (j2 (+ j dir))\n\
+               (cond\n\
+                 (< j2 0) (inc j)\n\
+                 (>= j2 (count rows)) (inc j)\n\
+                 (nil? (nth rows j2)) (scan rows j2 dir n)\n\
+                 :else (scan rows j2 dir (dec n))))))\n\
+         (defn use-it (rows) (string/length (scan rows 3 1 1)))",
+    );
+    assert!(
+        ws.iter().any(|w| w.contains("string/length: argument 1 expects string, got int")),
+        "{ws:?}"
+    );
 }

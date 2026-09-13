@@ -132,6 +132,7 @@ mod sigs;
 pub(crate) use sigs::cover_name_of;
 mod walk;
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use crate::core::heap::Heap;
@@ -211,6 +212,145 @@ fn feature_loaded(heap: &mut Heap, name: &str) -> bool {
     match features {
         Some(Value::Map(mid)) => heap.map_get(mid, key).is_some(),
         _ => false,
+    }
+}
+
+/// Load `mod_sym` unless it is already loaded (the FEATURE registry, exactly what the
+/// runtime `require-one` consults — see `setup_check_imports` for why "some `mod/*` global
+/// exists" was the wrong test). Advisory: a load error is swallowed, the checker never gates
+/// on a missing module. `require-one` is idempotent, so a spurious call costs a map lookup.
+fn ensure_loaded(heap: &mut Heap, mod_sym: Symbol) {
+    if feature_loaded(heap, &value::symbol_name(mod_sym)) {
+        return;
+    }
+    let quoted = heap.list(vec![
+        Value::Sym(value::intern("quote")),
+        Value::Sym(mod_sym),
+    ]);
+    let form = heap.list(vec![Value::Sym(value::intern("require-one")), quoted]);
+    let root = heap.global();
+    let _ = crate::eval::eval(heap, form, root);
+}
+
+/// Materialise, transitively, every module that the LOADED modules' bodies refer to by a
+/// qualified name — `text` for a loaded `editor/buffer`, whose `buffer-current-line` calls
+/// `text/char->line`.
+///
+/// A program loads such a module on the first call that reaches the name (ADR-335's lazy
+/// policy: the global-lookup miss path), and the checker never calls. The stdlib image
+/// records only the edges the policy followed at build time — header `(:use …)`s and macro
+/// heads — so materialising a module from it brings in none of the modules its plain function
+/// references name. The checker's inference then reads a loaded body up to the first
+/// unmaterialised qualified name and stops: `buffer-current-line` inferred `-> any`, though
+/// `text/char->line` DECLARES `(rope int -> int)`, and every derivation above it — the whole
+/// point of declaring the leaf — was lost, in `nest check` and the LSP alike. Found through
+/// bedit's `git-scan-rows` (2026-09-13): its `int` result read as `number` because the
+/// buffer's current line had no type.
+///
+/// Fixpoint: scan each loaded module's bindings once (a per-thread memo, since a project
+/// check runs this per file), collect the module prefixes its closures' bodies mention, load
+/// the ones not yet loaded, and go again while something new loaded. A prefix is tried once
+/// per thread; a name that is not a module (a load error) is swallowed like every other
+/// advisory load. Runs under the check's `EagerLoadScope`, and before the passes that infer.
+fn materialise_referenced_modules(heap: &mut Heap) {
+    thread_local! {
+        static SCANNED: RefCell<HashSet<Symbol>> = RefCell::new(HashSet::new());
+        static TRIED: RefCell<HashSet<Symbol>> = RefCell::new(HashSet::new());
+    }
+    loop {
+        let unscanned: Vec<Symbol> = loaded_feature_modules(heap)
+            .into_iter()
+            .filter(|m| SCANNED.with(|s| s.borrow_mut().insert(*m)))
+            .collect();
+        if unscanned.is_empty() {
+            return;
+        }
+        // One pass over the globals for all of this round's modules.
+        let prefixes: Vec<String> = unscanned
+            .iter()
+            .map(|m| format!("{}/", value::symbol_name(*m)))
+            .collect();
+        let mut wanted: HashSet<Symbol> = HashSet::new();
+        let global_env = heap.global();
+        for g in heap.global_symbols() {
+            let name = value::symbol_name(g);
+            if !prefixes.iter().any(|p| name.starts_with(p.as_str())) {
+                continue;
+            }
+            let Some(Value::Fn(cid)) = heap.env_get(global_env, g) else {
+                continue;
+            };
+            let bodies: Vec<Value> = heap
+                .closure(cid)
+                .arms
+                .iter()
+                .flat_map(|arm| arm.body.iter().copied())
+                .collect();
+            for body in bodies {
+                collect_qualified_prefixes(heap, body, &mut wanted);
+            }
+        }
+        let mut loaded_any = false;
+        for module in wanted {
+            if !TRIED.with(|t| t.borrow_mut().insert(module)) {
+                continue;
+            }
+            if feature_loaded(heap, &value::symbol_name(module)) {
+                continue;
+            }
+            ensure_loaded(heap, module);
+            loaded_any |= feature_loaded(heap, &value::symbol_name(module));
+        }
+        if !loaded_any {
+            return;
+        }
+    }
+}
+
+/// The names in the `*features*` registry — every module loaded in this process.
+fn loaded_feature_modules(heap: &Heap) -> Vec<Symbol> {
+    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*features*")) else {
+        return Vec::new();
+    };
+    heap.map_entries(mid)
+        .into_iter()
+        .filter_map(|(k, _)| match k {
+            Value::Str(id) => Some(value::intern(&heap.string(id))),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every module prefix named by a qualified symbol anywhere in `form` — `math` for
+/// `math/quot`, `editor/buffer` for `editor/buffer/point` — descending through lists, vectors
+/// and maps. The root escape `/name` and a bare name contribute nothing. Over-approximate on
+/// purpose (quoted data counts): the only cost of a spurious prefix is one swallowed load.
+fn collect_qualified_prefixes(heap: &Heap, form: Value, out: &mut HashSet<Symbol>) {
+    let mut work = vec![form];
+    while let Some(v) = work.pop() {
+        match v {
+            Value::Sym(s) => {
+                let name = value::symbol_name_ref(s);
+                if let Some(slash) = name.rfind('/') {
+                    if slash > 0 {
+                        out.insert(value::intern(&name[..slash]));
+                    }
+                }
+            }
+            Value::Pair(_) => {
+                if let Some(items) = list_items(heap, v) {
+                    work.extend(items);
+                }
+            }
+            Value::Vector(id) => work.extend(heap.vector(id).iter().copied()),
+            Value::Map(id) => {
+                for (k, val) in heap.map_entries(id) {
+                    work.push(k);
+                    work.push(val);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -1199,18 +1339,6 @@ fn setup_check_imports(heap: &mut Heap, header: Value) -> ImportScope {
     //
     // Erring toward "not loaded" is free: `require-one` is idempotent, so a spurious call
     // costs a map lookup; erring toward "loaded" is what produced the false positives.
-    fn ensure_loaded(heap: &mut Heap, mod_sym: Symbol) {
-        if feature_loaded(heap, &value::symbol_name(mod_sym)) {
-            return;
-        }
-        let quoted = heap.list(vec![
-            Value::Sym(value::intern("quote")),
-            Value::Sym(mod_sym),
-        ]);
-        let form = heap.list(vec![Value::Sym(value::intern("require-one")), quoted]);
-        let root = heap.global();
-        let _ = crate::eval::eval(heap, form, root);
-    }
     for clause in clauses {
         match clause {
             Clause::Use(mod_sym, subset) => {
@@ -1736,6 +1864,9 @@ fn check_forms(
                 let _ = crate::eval::eval(heap, exp, root);
             }
         }
+        // What the modules loaded so far refer to, transitively — so the inference passes
+        // below read a loaded body all the way down to the leaf that declares its type.
+        materialise_referenced_modules(heap);
         // A pass-1 `(require …)` `eval` can collect at ANY depth (ADR-061), which
         // relocates the rooted forms/expansions — so the `expanded` Vec and the
         // `forms` slice now hold **stale** handles, even though the data survives on
@@ -1882,7 +2013,13 @@ fn check_forms(
             for &form in &expanded {
                 count_defs(heap, form, &mut def_count);
             }
-            for &form in &expanded {
+            // Over `top_level_defs`, not `expanded`: a `def-` constant lives inside the
+            // privacy expansion `(do (def x 10) (%mark-private 'x))`, and reading only the
+            // top-level `def`s left every private constant untyped — `(def- col 10)` then
+            // `(+ col 39)` was `number`, and a `(sig …)` declaring it `int` reported the
+            // literal arithmetic as not assignable (found in bedit's hexl mode, 2026-09-13).
+            // Pass 2.8 had made the same descent for private FUNCTIONS on 2026-08-28.
+            for form in top_level_defs(heap, &expanded) {
                 let Some((name, rhs)) = def_name_and_value(heap, form) else {
                     continue;
                 };

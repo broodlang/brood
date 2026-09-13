@@ -388,14 +388,16 @@ fn expr_ty_inner(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                         // loaded-closure path can't see (the file isn't loaded while checked).
                         // After a declaration (authoritative), before the loaded lookup below.
                         if let Some(sg) = ctx.inferred_fn_sig(s) {
-                            if sg.ret.is_any() {
-                                // The body says nothing about its result from its own
-                                // parameters (a pass-through, an unconstrained accumulator):
-                                // re-type it under THIS call's argument types.
+                            if sg.ret.is_unrefined_collection() {
+                                // The body says nothing — or only "a collection" — about its
+                                // result from its own parameters (a pass-through, an
+                                // unconstrained accumulator, a recursive list builder whose
+                                // flat answer is `nil | list`): re-type it under THIS call's
+                                // argument types.
                                 if let Some(t) =
                                     super::sigs::specialize_call(heap, s, &items[1..], ctx)
                                 {
-                                    return Some(t);
+                                    return Some(t.intersect(sg.ret));
                                 }
                             }
                             return Some(sg.ret);
@@ -455,11 +457,27 @@ fn expr_ty_inner(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                             items[1..].iter().map(|&a| expr_ty(heap, a, ctx)).collect();
                         return Some(resolve_overload_ret(&sigs, &arg_tys));
                     }
+                    // A DECLARED return that says anything is the author's contract and is not
+                    // sharpened by re-typing the body (ADR-259: a declaration is authoritative;
+                    // `fuzzy/match` declares `(or nil map)` and callers get exactly that). A
+                    // declared `any` says nothing, and the body is read as for an undeclared
+                    // function — `assoc` declares `-> any` and types `vector | map` at a call.
+                    if let Some(sg) = super::sigs::declared_heap_sig(heap, s) {
+                        if !sg.ret.is_any() {
+                            return Some(sg.ret);
+                        }
+                    }
                     match sig_of(heap, s).map(|sig| sig.ret) {
-                        Some(t) if !t.is_any() => Some(t),
-                        // A loaded function whose flat return is `any` (or that inferred
-                        // nothing): re-type its body under this call's argument types.
-                        flat => super::sigs::specialize_call(heap, s, &items[1..], ctx).or(flat),
+                        Some(t) if !t.is_unrefined_collection() => Some(t),
+                        // A loaded function whose flat return is `any` or an unrefined
+                        // collection (or that inferred nothing): re-type its body under
+                        // this call's argument types — and MEET the answer with the flat
+                        // one (`meet_flat`), since a curated `vector | map` can be sharper
+                        // than what the body says under `any` inputs.
+                        flat => meet_flat(
+                            super::sigs::specialize_call(heap, s, &items[1..], ctx),
+                            flat,
+                        ),
                     }
                 }
                 _ => None,
@@ -2105,8 +2123,8 @@ pub(super) fn callback_ret(heap: &Heap, f: Value, inputs: &[Option<Ty>], ctx: &C
             // re-type the body under `inputs` (call-site specialization) before settling.
             let specialize = |flat: Option<Ty>| -> Option<Ty> {
                 match flat {
-                    Some(t) if !t.is_any() => Some(t),
-                    flat => super::sigs::specialized_ret(heap, s, inputs, ctx).or(flat),
+                    Some(t) if !t.is_unrefined_collection() => Some(t),
+                    flat => meet_flat(super::sigs::specialized_ret(heap, s, inputs, ctx), flat),
                 }
             };
             // The same-file tables first: the file being checked isn't loaded, so the heap
@@ -2136,6 +2154,13 @@ pub(super) fn callback_ret(heap: &Heap, f: Value, inputs: &[Option<Ty>], ctx: &C
             // `inputs` instead of a single flat `ret`, same as the call-form case.
             if let Some(sigs) = declared_heap_overload(heap, s) {
                 return Some(resolve_overload_ret(&sigs, inputs));
+            }
+            // …and a declared single arrow that says anything is the contract, not re-typed
+            // (ADR-259); a declared `any` is read as no declaration.
+            if let Some(sg) = super::sigs::declared_heap_sig(heap, s) {
+                if !sg.ret.is_any() {
+                    return Some(sg.ret);
+                }
             }
             specialize(sig_of(heap, s).map(|sig| sig.ret))
         }
@@ -2244,4 +2269,18 @@ fn lambda_ret(heap: &Heap, form: Value, inputs: &[Option<Ty>], ctx: &Ctx) -> Opt
         sub = sub.bind(*p, input.clone());
     }
     expr_ty(heap, *parts.last()?, &sub)
+}
+
+/// The call-site answer when a body was re-typed under the call's argument types
+/// (`specialized`) and a flat answer already stood (`flat`): their INTERSECTION when both
+/// exist. Each is a sound over-approximation of what the call returns, so the meet is
+/// one too, and either side can be the sharper: a curated `assoc` says `vector | map`
+/// where its prelude body under `any` inputs says `any`; a recursive list builder's body
+/// under `list<int>` says `nil | list<int>` where its flat answer says `nil | list`.
+/// Taking the specialized answer alone regressed the first to `any` (2026-09-13).
+fn meet_flat(specialized: Option<Ty>, flat: Option<Ty>) -> Option<Ty> {
+    match (specialized, flat) {
+        (Some(s), Some(f)) => Some(s.intersect(f)),
+        (s, f) => s.or(f),
+    }
 }

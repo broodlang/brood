@@ -1242,9 +1242,7 @@ if you are reintroducing hoisting, they are what you have to write back."
 per rewritten file and a summary; returns the number of files rewritten. A file
 that does not parse is reported and skipped, never rewritten."
   (let (root (format-require-root) files (format-every-blsp root))
-    (let (counts (format-apply files 0 0)
-          rewrote (first counts)
-          skipped (second counts))
+    (let ([rewrote skipped] (format-apply files 0 0))
       (io/puts (str "format: "
                  (count files)
                  " file"
@@ -1256,12 +1254,12 @@ that does not parse is reported and skipped, never rewritten."
                  "."))
       rewrote)))
 
-;; Returns `(rewrote skipped)`. An unparseable file prints a `does not parse`
+;; Returns `[rewrote skipped]`. An unparseable file prints a `does not parse`
 ;; line so it is never silently passed over — the whole point is that the user
 ;; finds out their file was left alone, and why.
 (defn- format-apply (files rewrote skipped)
   (if (nil? files)
-    (list rewrote skipped)
+    [rewrote skipped]
     (let (path (first files)
           r (file path))
       (when (= r :rewrote) (io/puts (str "  rewrote " path)))

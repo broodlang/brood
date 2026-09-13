@@ -21979,3 +21979,104 @@ every follower re-derives the same test and one forgets. *Skip `:post-key` for m
 events*: a mouse gesture can edit, which is exactly what the guards exist for. *A
 `:moved?` flag on the model*: the same information, but state to keep in sync where a
 comparison at the one site that has both models needs none.
+
+## ADR-339 — Declare at the leaf, derive from the call: recursive call-site specialization, and the checker materialises what a loaded body names
+
+**Status:** accepted and implemented 2026-09-13 (`types/check/sigs.rs` `specialize_recursive`,
+`types/check.rs` `materialise_referenced_modules`, `types.rs` `elem_union_exact` and the
+term-by-term `GradualTy::consistent_with_mode`; the "Tier 1" loaded-closure inferencer deleted).
+
+**Context.** The rule for the type system is: *define types as low down as possible, and
+derive them correctly from as high up as possible.* A `sig` belongs on the leaf that knows a
+fact nothing above it can prove — a primitive's contract, `text/char->line`'s `(rope int ->
+int)`, `hex-val`'s `(int -> (or nil int))` — and every function above it should be typed by
+reading its body under what its callers actually pass, not by annotating it too. Four things
+stood between the checker and that rule, found by probing rather than by reading:
+
+1. **A loaded closure was inferred by a weaker inferencer than its own file.** `sig_of` had a
+   "Tier 1" ahead of the domain walk: a one-form body calling a primitive/curated callee read
+   its parameters off that call's *direct* parameter arguments and returned. `(defn v (s) (+ 1
+   (string/length s)))` inferred `(string)` in its file and `(any)` from every other module —
+   and `str`, `io/puts`, `+`, `-`, `=`, `<`, `vector` head most one-line functions. The
+   roadmap said inferred parameters checked callers cross-file; they did in its own file only.
+2. **A self-recursive function was never specialized.** `specialized_ret` declined any body
+   mentioning its own name, so every accumulator loop — the commonest idiom in a language with
+   no loops — returned `any` at its call site, and a recursive list builder returned a bare
+   `list`. The reason recorded was right: binding the first call's arguments and skipping the
+   recursive branch types `(sum-acc xs 0)` as `0`.
+3. **A `let`-bound `fn` literal checked nothing at its calls.** Its arrow is deliberately
+   `(any… -> R)`, so `(let (g (fn (b) (+ 1 b))) (g "x"))` was silent.
+4. **Inference stopped at the first unmaterialised module.** Under lazy loading (ADR-335) a
+   materialised `editor/buffer` brings in none of the modules its function bodies name by
+   qualified reference — the image records only the edges the policy followed at build time,
+   header `(:use …)`s and macro heads — and the checker never *calls* anything, so `text` stayed
+   unloaded and `buffer-current-line` inferred `-> any` though its leaf declares `int`. Every
+   derivation above it was lost, and the temptation was to re-declare the derived function.
+
+**Decision.**
+
+- *One inferencer.* Tier 1 is deleted; the domain walk (ADR-261) is what a loaded closure and a
+  file both get. A direct parameter argument takes the callee's demand at that position and a
+  nested one is walked, so the same function constrains its callers from every module alike.
+- *A self-recursive function is specialized by a joint fixpoint* over its parameters and its
+  result (`specialize_recursive`). Parameters start at the call's argument types and the result
+  at `never`; each round binds the parameters, binds the function's own name to `(any… -> R)`
+  so a self-call in a nested position types as `R` (a branch-position self-call still contributes
+  ⊥ through `branch_union`), reads every self-call site's arguments into the parameters and the
+  tail into `R`, and stops when a round changes nothing. It declines — the flat answer stands —
+  after a bound (6 rounds), when a site's argument or the tail cannot be typed, when a round
+  changes no parameter and the tail is untypeable (every later round would repeat it), or when
+  more than one arm fits the call's arity. A bare global function handed as an argument (`inc`
+  in `(my-map xs inc)`) is typed as its arrow for the re-typing only, so `(f x)` inside reads the
+  arrow's result. Soundness is by induction on an activation's recursion depth and needs only
+  that `expr_ty` over-approximates under the binding it is given and that the loop stopped at a
+  genuine fixpoint — no monotonicity: the initial arguments lie in `P*`; an activation with
+  parameters in `P*` makes self-calls whose arguments lie in `P*` (fixpoint); a depth-0
+  activation's value comes from a non-self sub-form under `P*` and lies in `F(R*) = R*`; a
+  depth-`d+1` activation's self-calls return values in `R*` and its tail under `P*` with the
+  self-call typed `R*` is `F(R*) = R*`. `(sum-to 10 0)` is `int`; `(my-map '(1 2 3) inc)` is
+  `nil | list<int>`.
+- *Specialization triggers on an unrefined collection, not only on `any`*, and on a declared
+  return only when that return is `any` (a declaration that says anything is the author's
+  contract, ADR-259). The specialized answer is MET with the flat one: each is a sound
+  over-approximation, and either can be the sharper (`assoc`'s curated `vector | map` against
+  its body under `any` inputs).
+- *A `let`-bound `fn` literal carries its parameter domains as a per-name fact*
+  (`Ctx::let_fn_sig`), consulted where the name heads a call and dropped with the binding —
+  never as the literal's arrow type, whose parameters are contravariant: a `(number -> number)`
+  handed to an inferred `(any -> any)` callback slot would read as a mismatch where that `any`
+  means unknown.
+- *The checker materialises, transitively, every module the loaded modules' bodies name*
+  (`materialise_referenced_modules`, after Pass 1, under the check's eager-load scope): scan
+  each loaded module's bindings once per thread, load the prefixes its closures mention, repeat
+  while something new loads. A whole-std check loads everything anyway; it measured free.
+- *Two lattice tightenings the fixpoint needed.* `nil | list<3>` ∪ `list<int>` is
+  `nil | list<int>` as one term (`elem_union_exact`: `s<E₁> ⊆ s<E₂>` for every sequence kind
+  when `E₁ ⊆ E₂`, so the wider side's elements over the union of the kinds is exact when the
+  narrower side's kinds are among the wider's); before, the two-term union had no readable
+  element and a list built by a loop degraded to `pair` on its second element. And a dynamic
+  union is read *term by term* by `consistent_with_mode`: a positively-known arm by inclusion
+  (strict) and the failure rule, an exclusion-only arm (`(not (nil | vector))`, what a `cond`
+  returning its scrutinee yields) by overlap — the union as a whole is not positively known,
+  and reading it so charged the known arms with the unknown arm's admissions.
+- *Gap A reads a private constant* (`(def- col 10)`) through the same privacy-expansion
+  descent Pass 2.8 already made for private functions.
+
+**Consequences.** `std/` is at zero in both modes with **fewer** declarations than it needed
+before for the same coverage; `tests/` strict went 22 → 20; bedit's plain check stays at zero
+and its strict gate shows ten findings of the class its own sweep fixes in code (`nil | int`
+from `nth`/`first` handed to arithmetic) — real, and downstream. What surfaced in `std/` on the
+way was a real bug (`string/bytes->` declared narrower than the primitive it wraps, so
+`hex-decode`'s list of ints was a declared misuse), a list-of-two that should have been a tuple
+(`format-apply`), and a `cond` over `(second parts)` that is a `match`. The whole-std strict
+gate costs ~13% more (debug, 14.8 → 16.7 s), all of it the fixpoint; the early decline halved
+its rounds.
+
+**What is still declared that should derive.** `json-unicode`, `json-escape`, `string-acc`
+and `json-string` return an index computed as `(+ i n)`, and the only bottom-up fact about `i`
+is `number`: the walk checks a body under its parameters' *demands*, with no view of what the
+callers pass. Deriving `int` there is the next mechanism — caller-derived parameter types for
+module-private functions, whose caller set is closed (the union of the call sites' argument
+types is a sound binding, provided the name never escapes as a value) — after which those four
+go and `hex-val` alone stays. Not built here: it is a second full walk per file or a stored-scope
+collection pass, and it wants its own measurement.

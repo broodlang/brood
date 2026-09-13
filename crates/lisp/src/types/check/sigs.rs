@@ -461,47 +461,6 @@ pub(super) fn curated_sig(sym: Symbol) -> Option<Sig> {
     CURATED_SIGS.get(&sym).cloned()
 }
 
-/// Try to peel a `(let (alias orig) inner)` wrapper where `orig` is a closure
-/// parameter. Returns the inner body and a one-entry `{alias → orig}` map on
-/// success, or the original body with an empty map. One level only.
-fn unwrap_let_alias(
-    heap: &Heap,
-    body: Value,
-    params: &[Symbol],
-) -> (Value, HashMap<Symbol, Symbol>) {
-    let empty: HashMap<Symbol, Symbol> = HashMap::new();
-    let Some(items) = list_items(heap, body) else {
-        return (body, empty);
-    };
-    // Must be exactly (let <bindings> <inner>).
-    if items.len() != 3 {
-        return (body, empty);
-    }
-    let Value::Sym(head) = items[0] else {
-        return (body, empty);
-    };
-    if !value::symbol_is(head, "let") {
-        return (body, empty);
-    }
-    // Bindings must be a single (alias orig) pair.
-    let Some(binding) = list_items(heap, items[1]) else {
-        return (body, empty);
-    };
-    if binding.len() != 2 {
-        return (body, empty);
-    }
-    let (Value::Sym(alias), Value::Sym(orig)) = (binding[0], binding[1]) else {
-        return (body, empty);
-    };
-    // `orig` must be a closure param; `alias` must not be (else it's a re-bind).
-    if !params.contains(&orig) || params.contains(&alias) {
-        return (body, empty);
-    }
-    let mut map = HashMap::new();
-    map.insert(alias, orig);
-    (items[2], map)
-}
-
 thread_local! {
     /// Symbols whose signature is currently being inferred **on this thread** — a
     /// re-entry guard so the return-type inference (which runs [`expr_ty`], hence
@@ -612,7 +571,10 @@ pub(super) fn specialize_call(heap: &Heap, sym: Symbol, args: &[Value], ctx: &Ct
         return None;
     }
     SPEC_ARG_NEST.with(|n| n.set(n.get() + 1));
-    let inputs: Vec<Option<Ty>> = args.iter().map(|&a| expr_ty(heap, a, ctx)).collect();
+    let inputs: Vec<Option<Ty>> = args
+        .iter()
+        .map(|&a| expr_ty(heap, a, ctx).or_else(|| global_fn_arrow(heap, a, ctx)))
+        .collect();
     SPEC_ARG_NEST.with(|n| n.set(n.get() - 1));
     specialized_ret(heap, sym, &inputs, ctx)
 }
@@ -841,17 +803,19 @@ pub(super) fn specialized_ret(
         }
         return None;
     };
-    // A SELF-RECURSIVE body is not specialized. Binding its parameters to the first
-    // call's argument types and skipping the recursive branch (`with_inferring_self`)
-    // would type an accumulator loop from its FIRST base case — `(sum-acc xs 0)` as `0`,
-    // where later iterations return the `number` the accumulator has grown into. The
-    // sound answer needs a fixpoint over the recursive calls' argument types; until that
-    // exists the flat inference (parameters at their demands) stands.
+    // A SELF-RECURSIVE body is specialized by a FIXPOINT over the recursive calls'
+    // argument types and the result — see [`specialize_recursive`]. Binding the parameters
+    // to the first call's argument types and skipping the recursive branch would type an
+    // accumulator loop from its FIRST base case — `(sum-acc xs 0)` as `0`, where later
+    // iterations return the `number` the accumulator has grown into — so until 2026-09-13
+    // this declined and the flat inference (parameters at their demands, `-> any` for
+    // every accumulator loop) stood.
     if arms.iter().any(|a| form_mentions(heap, a.tail, sym)) {
-        if stable {
-            memo_specialization(key, None);
+        let out = specialize_recursive(heap, sym, &arms, inputs, ctx);
+        if out.is_some() || stable {
+            memo_specialization(key, out.clone());
         }
-        return None;
+        return out;
     }
     let mut ret: Option<Ty> = None;
     let mut matched = false;
@@ -900,6 +864,228 @@ pub(super) fn specialized_ret(
     out
 }
 
+/// Bound on the joint fixpoint of [`specialize_recursive`]. A scalar accumulator settles
+/// on its third round (`0` → `int`, then unchanged), a list builder on its fourth (a
+/// literal seed widens, then the element type, then the result catches up), a tuple
+/// whose slots feed each other one later; two rounds of slack on top of that.
+const MAX_RECURSIVE_ITERS: usize = 6;
+
+/// [`specialized_ret`] for a **self-recursive** function: the result of `sym` called with
+/// arguments of types `inputs`, as the least fixpoint of the parameters and the result
+/// TOGETHER.
+///
+/// The parameters start at the call's argument types and the result at `never`. Each
+/// round binds the parameters to their current types and the function's own name to the
+/// arrow `(any… -> R)` (so a self-call in a NESTED position — `(cons x (self …))` — types
+/// as `R`, while one in a branch-result position still contributes ⊥ through
+/// `infer::branch_union`), reads the type of every argument at every self-call site into
+/// the parameters, and the tail's type into `R`. It stops when a round changes nothing,
+/// and DECLINES (`None`, the flat answer) if [`MAX_RECURSIVE_ITERS`] rounds have not
+/// converged, if a site's argument or the tail cannot be typed, or if the call's arity
+/// fits more than one arm — no partial answer ever leaks.
+///
+/// **Soundness**, by induction on an activation's recursion depth — the deepest chain of
+/// recursive activations beneath it, finite for any activation that returns. Let `(P*, R*)`
+/// be the fixpoint. The initial activation's arguments lie in `inputs ⊆ P*`. An activation
+/// whose parameters lie in `P*` makes self-calls whose arguments, typed under `P*` by
+/// `expr_ty` (a proven over-approximation, `soundness_oracle`), lie in the next round's
+/// parameters — which at the fixpoint are `P*` again; so EVERY activation's parameters
+/// lie in `P*`. A depth-0 activation executes no self-call, so its value comes from a
+/// non-self sub-form typed under `P*` — in `R*`. A depth-`d+1` activation's self-calls
+/// return values in `R*` (the hypothesis); its tail under `P*` with the self-call typed
+/// `R*` is `F(R*) = R*`. So `R*` contains every return, whatever the depth. No
+/// monotonicity of `expr_ty` is needed: only that it over-approximates under the binding
+/// it is given, and that the loop stopped at a genuine fixpoint.
+///
+/// `(sum-to 10 0)` under `(defn sum-to (i acc) (if (= i 0) acc (sum-to (- i 1) (+ acc
+/// i))))` is `int`: round 1 reads `acc` as `0` and `R` as `0`; round 2 finds the self-call
+/// passing `(+ acc i)` — `int` under `acc : 0, i : 10` — so `acc : int` and `R : int`;
+/// round 3 changes nothing. `(my-map '(1 2 3) inc)` under the classic `cons`/`first`/`rest`
+/// definition is `nil | list<int>`, where the flat answer was a bare `list`.
+fn specialize_recursive(
+    heap: &Heap,
+    sym: Symbol,
+    arms: &[FixedArm],
+    inputs: &[Option<Ty>],
+    ctx: &Ctx,
+) -> Option<Ty> {
+    let arity = inputs.len();
+    let mut fitting = arms.iter().filter(|a| a.heads.len() == arity);
+    let arm = fitting.next()?;
+    if fitting.next().is_some() {
+        return None;
+    }
+    if self_call_sites(heap, arm.tail, sym, arity, ctx).is_empty() {
+        // The self-mention is not a call of this arity (a reference, a call of another
+        // arity, a quoted symbol): nothing here to iterate over.
+        return None;
+    }
+    let bind = |params: &[Option<Ty>], ret: Ty| -> Ctx {
+        let mut sub = ctx.with_inferring_self(sym);
+        for (&h, input) in arm.heads.iter().zip(params) {
+            sub = bind_head(heap, sub, h, input.clone());
+        }
+        sub.bind(sym, Some(Ty::arrow(Sig::new(vec![Ty::ANY; arity], ret))))
+    };
+    let mut params: Vec<Option<Ty>> = inputs.to_vec();
+    let mut ret = Ty::NEVER;
+    for _ in 0..MAX_RECURSIVE_ITERS {
+        // One unit of the file's budget per round, like an arm re-typed above.
+        if !SPECIAL_FUEL.with(|f| {
+            let n = f.get();
+            f.set(n.saturating_sub(1));
+            n > 0
+        }) {
+            return None;
+        }
+        let sub = bind(&params, ret.clone());
+        // The body is a fresh question, not an operand of the call that asked it.
+        let outer_nest = SPEC_ARG_NEST.with(|n| n.replace(0));
+        let round = super::infer::with_fresh_depth(|| {
+            let mut next = params.clone();
+            // The sites are re-read each round: a `let` binder on the way down to one is
+            // typed under the round's bindings, and a self-call's argument is typed in
+            // THAT scope.
+            for (args, site_scope) in self_call_sites(heap, arm.tail, sym, arity, &sub) {
+                for (k, &arg) in args.iter().enumerate() {
+                    // An unknown parameter stays unknown; a known one takes the union of
+                    // what every site hands it, and an untypeable argument makes it
+                    // unknown too (the flat retreat, never an under-approximation).
+                    if let Some(current) = next[k].clone() {
+                        next[k] = expr_ty(heap, arg, &site_scope).map(|t| current.union(t));
+                    }
+                }
+            }
+            let next_ret = expr_ty(heap, arm.tail, &sub);
+            (next, next_ret)
+        });
+        SPEC_ARG_NEST.with(|n| n.set(outer_nest));
+        let (next, next_ret) = round;
+        // Converged only when a TYPED tail reproduces `ret` under unchanged parameters —
+        // a genuine fixpoint of the round, which is all the soundness argument needs.
+        // A round whose tail cannot be typed contributes nothing and the loop goes on:
+        // at `(sum-to 10 0)` the parameter `i` is the singleton `10`, so `(= i 0)` is
+        // provably false and the base case is DEAD in round one (`Ctx::is_dead`) — every
+        // live branch is a self-call and the tail has no type until round two widens
+        // `i` to `int`. A tail that never types leaves the loop to the bound below.
+        if next == params && next_ret.as_ref() == Some(&ret) {
+            return Some(ret);
+        }
+        // Unchanged parameters and an untypeable tail: every later round is this one.
+        // (A parameter that went unknown — an unknown callback's result feeding an
+        // accumulator — lands here on its second round, where it used to spend six.)
+        if next == params && next_ret.is_none() {
+            return None;
+        }
+        params = next;
+        if let Some(r) = next_ret {
+            ret = r;
+        }
+    }
+    None
+}
+
+/// Every `(sym a₁ … aₙ)` call of exactly `arity` arguments inside `form`, as its argument
+/// list paired with the SCOPE it sits in: `ctx` extended by every `let`/`letrec` binder and
+/// inner `fn` parameter on the path down to it. The binders are typed as the round's
+/// bindings make them — `(let (j2 (+ j dir)) … (self rows j2 …))` hands `j2` over as `int`
+/// when `j` is — which is what lets the recursive call's arguments say anything: typed under
+/// the parameters alone, `j2` was unbound, the parameter went unknown, and `(inc j)` read as
+/// `number` (bedit's `git-scan-rows`, 2026-09-13). A `letrec` binds its names unknown first;
+/// an inner `fn`'s parameters are unknown (a self-call inside it types its arguments to the
+/// extent the outer scope decides them — sound, wider). Descends through lists, vectors and
+/// maps in source order; a self-call inside quoted data is collected too, which can only
+/// WIDEN a parameter (its arguments type or fail to), never narrow it.
+fn self_call_sites(
+    heap: &Heap,
+    form: Value,
+    sym: Symbol,
+    arity: usize,
+    ctx: &Ctx,
+) -> Vec<(Vec<Value>, Ctx)> {
+    fn walk(
+        heap: &Heap,
+        form: Value,
+        sym: Symbol,
+        arity: usize,
+        scope: &Ctx,
+        out: &mut Vec<(Vec<Value>, Ctx)>,
+    ) {
+        match form {
+            Value::Pair(_) => {}
+            Value::Vector(id) => {
+                for it in heap.vector(id).to_vec() {
+                    walk(heap, it, sym, arity, scope, out);
+                }
+                return;
+            }
+            Value::Map(id) => {
+                for (k, v) in heap.map_entries(id) {
+                    walk(heap, k, sym, arity, scope, out);
+                    walk(heap, v, sym, arity, scope, out);
+                }
+                return;
+            }
+            _ => return,
+        }
+        let Some(items) = list_items(heap, form) else {
+            return;
+        };
+        let Some(&Value::Sym(head)) = items.first() else {
+            for &it in &items {
+                walk(heap, it, sym, arity, scope, out);
+            }
+            return;
+        };
+        if head == sym && items.len() == arity + 1 {
+            out.push((items[1..].to_vec(), scope.clone()));
+        }
+        if value::symbol_is(head, kw::LET) || value::symbol_is(head, kw::LETREC) {
+            let Some(binds) = items.get(1).and_then(|&b| super::walk::bindings(heap, b)) else {
+                for &it in &items[1..] {
+                    walk(heap, it, sym, arity, scope, out);
+                }
+                return;
+            };
+            let mut inner = scope.clone();
+            if value::symbol_is(head, kw::LETREC) {
+                for pair in binds.chunks(2) {
+                    if let Some(&Value::Sym(name)) = pair.first() {
+                        inner = inner.bind(name, None);
+                    }
+                }
+            }
+            for pair in binds.chunks(2) {
+                let (Some(&pat), Some(&rhs)) = (pair.first(), pair.get(1)) else {
+                    continue;
+                };
+                walk(heap, rhs, sym, arity, &inner, out);
+                let rhs_ty = expr_ty(heap, rhs, &inner);
+                inner = bind_head(heap, inner, pat, rhs_ty);
+            }
+            for &body in &items[2..] {
+                walk(heap, body, sym, arity, &inner, out);
+            }
+            return;
+        }
+        if super::walk::is_fn_head(head) {
+            let mut inner = scope.clone();
+            for p in super::walk::fn_params(heap, form) {
+                inner = inner.bind(p, None);
+            }
+            for &it in &items[1..] {
+                walk(heap, it, sym, arity, &inner, out);
+            }
+            return;
+        }
+        for &it in &items[1..] {
+            walk(heap, it, sym, arity, scope, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(heap, form, sym, arity, ctx, &mut out);
+    out
+}
 /// [`specialized_ret`] for an inline `(fn …)` **literal with clauses or patterns** — the
 /// callback shape [`super::infer::lambda_ret`] declines. A named multi-clause `defn` in
 /// the same position already gets the full clause machinery via `specialized_ret`; an
@@ -1124,24 +1310,21 @@ impl Drop for InferGuard {
     }
 }
 
-/// Inferred signature for a **user closure** named `sym`. Two tiers, both sound:
+/// Inferred signature for a **user closure** named `sym`, sound in both halves:
 ///
-/// 1. **Precise (params + return)** — a single-expression body that's one direct
-///    call to a callee with a known primitive/curated sig (optionally through one
-///    let-alias). Each parameter inherits the type the callee expects at the
-///    position(s) it's passed *directly*; the return is the callee's. Sound
-///    because a straight-line use is unconditional. See [`infer_from_single_call`].
-/// 2. **Return-only (sound, not complete)** — for any other single-arm body, infer
-///    just the *return* type as [`expr_ty`] of the body's tail, with parameters
-///    bound to `ANY`. This never constrains a parameter, so it **cannot** produce
-///    the guarded-use false positive that full parameter inference would (a param
-///    used as a number only inside `(if (number? x) …)` must NOT be typed number).
-///    Sound because `expr_ty` is a proven over-approximation (soundness oracle)
-///    and already unions branch results — so even a branchy body's return is safe.
+/// - **Parameters** are their *domains* (ADR-261, [`param_domains`]): the union over the
+///   body's possible executions of what each execution demands, a guarded use credited
+///   only within its guard. This over-approximates the valid arguments, so a caller
+///   rejected on it would have failed anyway — and a parameter nothing constrains stays
+///   `ANY` (a param used as a number only inside `(if (number? x) …)` is NOT typed number).
+/// - **The return** is [`expr_ty`] of the body's tail with each parameter bound to its
+///   demand — what every call that reaches the tail satisfied. Sound because `expr_ty` is a
+///   proven over-approximation (soundness oracle) and already unions branch results.
 ///
-/// Skipped for a multi-arity closure or one taking `&optional` / rest params (no
-/// single signature / arity to state cleanly). Recursion — direct or mutual — is
-/// broken by [`InferGuard`], so a cyclic call graph just declines to infer.
+/// A multi-arity closure or one taking `&optional` params has no single parameter
+/// signature and gets return-only inference ([`infer_return_only`]); a `& rest` binder is
+/// fine (its demand becomes a per-argument one). Recursion — direct or mutual — is broken
+/// by [`InferGuard`], so a cyclic call graph just declines to infer.
 fn infer_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
     // Memoize completed inferences: a function's inferred signature is deterministic for
     // the read-only heap of a single check pass, so cache it. Without the cache every
@@ -1427,19 +1610,21 @@ fn infer_sig_inner(heap: &Heap, sym: Symbol) -> Option<Sig> {
     let params: Vec<Symbol> = arm.params.clone();
     let rest_binder: Option<Symbol> = arm.rest;
 
-    // Tier 1: precise params + return from a single known-callee call.
-    if arm.body.len() == 1 && rest_binder.is_none() {
-        if let Some(sig) = infer_from_single_call(heap, arm.body[0], &params, self_name) {
-            return Some(sig);
-        }
-    }
-
-    // Tier 1.5: each parameter's **domain** across the whole body — the union over
-    // the body's possible executions, each branch credited only within the guard
-    // that selects it (see [`param_domains`]). Generalises Tier 1 beyond a single
-    // top-level call, and reaches the guarded uses the old unconditional-demand rule
-    // had to ignore. Params nothing constrains stay `ANY`, recovering the return-only
-    // behaviour exactly.
+    // Every parameter's **domain** across the whole body — the union over the body's
+    // possible executions, each branch credited only within the guard that selects it
+    // (see [`param_domains`]). Params nothing constrains stay `ANY`, recovering the
+    // return-only behaviour exactly.
+    //
+    // There used to be a "Tier 1" ahead of this: a body that was exactly one call to a
+    // primitive/curated callee read its parameters off that call's signature — and
+    // ONLY the arguments that were directly a parameter, then returned without ever
+    // running the walk below. It predated the domain walk and, once that existed,
+    // could only lose: `(defn v (s) (+ 1 (string/length s)))` inferred `(any)` here and
+    // `(string)` from the file (Pass 2.8 never had the tier), so the SAME function
+    // constrained its callers in its own module and not from any other — which is
+    // where `str`, `io/puts`, `+`, `-`, `=`, `<` and `vector` heads put most one-line
+    // functions. The domain walk subsumes it: a direct parameter argument takes the
+    // callee's demand at that position, and a nested one is walked (2026-09-13).
     let mut names = params.clone();
     names.extend(rest_binder);
     let mut param_tys = param_domains(heap, &arm.body, &names, &Ctx::default());
@@ -1452,10 +1637,7 @@ fn infer_sig_inner(heap: &Heap, sym: Symbol) -> Option<Sig> {
         rest,
     };
 
-    // Tier 2: sound return-only inference. Bind parameters to `ANY` (in scope, no
-    // constraint) and read the body tail's type — the return, unconditionally.
-    // (Kept independent of the param demands above so the return type — and every
-    // test pinned to it — is byte-identical to before.)
+    // The return: read the body tail's type under the parameter demands.
     let tail = *arm.body.last()?;
     // Mark the ctx as inferring `self_name`, so a self-recursive call in a branch result is
     // skipped in the return union (see `infer::branch_union`) — this is what lets a
@@ -2262,50 +2444,6 @@ fn is_match_failure(heap: &Heap, arg: Value) -> bool {
         if value::symbol_name_ref(tag) == "match-error")
 }
 
-/// Tier 1 of [`infer_sig`]: the precise, parameter-inferring case — a body that is
-/// exactly one call to a primitive/curated callee (optionally through one
-/// let-alias `(let (y x) (callee … y …))`). Returns `None` (so `infer_sig` falls
-/// to the sound return-only tier) for anything else: a non-call body, a
-/// user/unknown callee, a macro head, or direct self-recursion.
-fn infer_from_single_call(
-    heap: &Heap,
-    body: Value,
-    params: &[Symbol],
-    self_name: Option<Symbol>,
-) -> Option<Sig> {
-    // Optionally unwrap a single let-alias: `(let (y x) call)` where `x` is a
-    // closure param. The alias `y` is resolved back to `x` in the arg loop.
-    let (call_form, alias_map) = unwrap_let_alias(heap, body, params);
-    let items = list_items(heap, call_form)?;
-    let Value::Sym(callee) = items.first().copied()? else {
-        return None;
-    };
-    // No direct self-recursion, and only a callee we can describe *without*
-    // inference (`primitive`/`curated`) — so this precise tier never recurses.
-    if self_name == Some(callee) {
-        return None;
-    }
-    let callee_sig = primitive_sig(heap, callee).or_else(|| curated_sig(callee))?;
-
-    // Each closure parameter takes the type the callee expects where the
-    // parameter is used. Multiple positions → intersect (the param must satisfy
-    // every use). Unmentioned parameters stay `ANY`.
-    let mut param_tys = vec![Ty::ANY; params.len()];
-    for (i, &arg) in items[1..].iter().enumerate() {
-        let Value::Sym(arg_sym) = arg else { continue };
-        // Resolve alias → original closure param (identity if not aliased).
-        let arg_sym = alias_map.get(&arg_sym).copied().unwrap_or(arg_sym);
-        let Some(pos) = params.iter().position(|&p| p == arg_sym) else {
-            continue;
-        };
-        let Some(expected) = callee_sig.param(i) else {
-            continue;
-        };
-        param_tys[pos] = param_tys[pos].clone().intersect(expected);
-    }
-    Some(Sig::new(param_tys, callee_sig.ret))
-}
-
 /// A **user-declared** signature for `sym` — the `(sig name (A -> B))` the author
 /// wrote, recorded on the heap (keyed by the module-qualified global) by the
 /// `%register-sig` primitive when the `(sig …)` form evaluated at load time. Read
@@ -2575,4 +2713,68 @@ mod guard_tests {
         drop(guards);
         assert_eq!(INFERRING.with(|s| s.borrow().len()), 0);
     }
+}
+
+/// The call-site signature of a **`fn` literal bound to a `let` name**: each parameter's
+/// domain over the literal's body ([`param_domains`], the ADR-261 rule a `defn` gets) and
+/// the literal's own result (`literal_ty`, the arrow `check_let` already typed). `(let (g (fn (b) (+ 1 b))) (g "x"))` is then a warning, where the
+/// literal's own arrow type — `(any -> number)`, see `infer::lambda_arrow` — only typed the
+/// result. The domain must NOT go into that arrow: an arrow's parameters are contravariant,
+/// and a `(number -> number)` handed to an inferred `(any -> any)` callback slot would read
+/// as a mismatch when the slot's `any` means "unknown". So this is a per-NAME fact consulted
+/// where the name heads a call, exactly as a same-file `defn`'s inferred sig is, and it is
+/// dropped with the binding (`Ctx::bind` shadows it). Single-clause, plain-symbol
+/// parameters only; `None` otherwise. An all-`any` signature is still returned: it carries the
+/// literal's ARITY, which the arrow cannot when the result is unknown (`lambda_arrow`
+/// declines then), so `(g 1 2)` on a one-parameter `g` is reported either way.
+pub(super) fn let_bound_lambda_sig(
+    heap: &Heap,
+    form: Value,
+    literal_ty: Option<&Ty>,
+    ctx: &Ctx,
+) -> Option<Sig> {
+    let items = super::walk::fn_form_items(heap, form)?;
+    let parts = &items[1..];
+    if parts.len() < 2 {
+        return None;
+    }
+    let params: Vec<Symbol> = list_items(heap, parts[0])?
+        .iter()
+        .map(|p| match p {
+            Value::Sym(s) if !value::symbol_name_ref(*s).starts_with('&') => Some(*s),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    let domains = param_domains(heap, &parts[1..], &params, ctx);
+    let ret = literal_ty
+        .and_then(|t| t.as_arrow().map(|a| a.ret.clone()))
+        .unwrap_or(Ty::ANY);
+    Some(Sig::new(domains, ret))
+}
+
+/// The arrow type of a **bare global function reference** handed as an argument to a call
+/// being specialized — `inc` in `(my-map xs inc)` — or `None` for anything else.
+///
+/// A function-valued global has NO type as a value (`infer::global_value_ty` declines it:
+/// a redefinable global is `dynamic()`, and an arrow in value position would be checked
+/// contravariantly against whatever slot it lands in). It does have a signature, and
+/// inside the specialized body the parameter it binds heads calls — `(f (first xs))` —
+/// where the arrow's RESULT is exactly what a direct `(inc …)` would be typed as: an
+/// over-approximation of what the function returns from any call that succeeds, dynamic
+/// under reload the same way. Only `expr_ty` runs over a specialized body, so the arrow
+/// is read for its result and never checked; that is what keeps this sound where typing
+/// the reference itself would not be. Same-file names read the file's tables (the file
+/// is not loaded); a lexical local shadowing the name is not the global.
+fn global_fn_arrow(heap: &Heap, arg: Value, ctx: &Ctx) -> Option<Ty> {
+    let Value::Sym(s) = arg else {
+        return None;
+    };
+    if ctx.is_lexical_local(s) {
+        return None;
+    }
+    let sig = ctx
+        .declared_sig(s)
+        .or_else(|| ctx.inferred_fn_sig(s))
+        .or_else(|| (!ctx.is_file_global(s)).then(|| sig_of(heap, s)).flatten())?;
+    Some(Ty::arrow(sig))
 }

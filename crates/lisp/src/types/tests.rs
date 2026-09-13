@@ -1849,3 +1849,48 @@ fn an_intersection_of_arrows_satisfies_a_requirement_together() {
     // tuple: the same function may return an int for one input and a string for another.
     assert!(!arr(vec![i.clone()], i.clone().union(s)).is_subtype(&is.union(ii)));
 }
+
+#[test]
+fn a_union_of_nested_sequence_elements_merges_into_the_wider_one() {
+    // `s<E₁> ⊆ s<E₂>` for every sequence kind when `E₁ ⊆ E₂`, so the union of the two
+    // sequence parts is the wider side's — exactly, and as ONE term (`elem_union_exact`).
+    let nil = Ty::of(Tag::Nil);
+    let int = Ty::of(Tag::Int);
+    let a = nil.clone().union(Ty::list_of(Ty::int_lit(3)));
+    let b = Ty::list_of(int.clone());
+    let merged = a.clone().union(b.clone());
+    assert_eq!(
+        merged,
+        nil.clone().union(Ty::list_of(int.clone())),
+        "{merged}"
+    );
+    assert_eq!(b.clone().union(a.clone()), merged, "commutative");
+    assert_eq!(
+        merged.elem_ty(),
+        Some(int.clone()),
+        "one term, so the element reads"
+    );
+    // Both inputs sit inside the answer, and nothing outside it got in.
+    assert!(a.is_subtype(&merged) && b.is_subtype(&merged));
+    assert!(!Ty::list_of(Ty::of(Tag::Str)).is_subtype(&merged));
+    assert!(
+        !Ty::vector_of(int.clone()).is_subtype(&merged),
+        "the kinds do not widen"
+    );
+    // An absent refinement is "any element": `list<int> ∪ list` is `list`.
+    assert_eq!(
+        Ty::list_of(int.clone()).union(Ty::of(Tag::Pair)),
+        Ty::of(Tag::Pair)
+    );
+    // NOT exact when the narrower-element side has a kind the other lacks —
+    // `vector<3> ∪ list<int>` keeps two alternatives (a `vector<int>` is in neither).
+    let two = Ty::vector_of(Ty::int_lit(3)).union(b.clone());
+    assert!(!Ty::vector_of(int.clone()).is_subtype(&two), "{two}");
+    // …and not when the elements are incomparable: `list<int> ∪ list<string>` is not
+    // `list<int | string>` (a mixed list is in the latter only).
+    let mixed = b.union(Ty::list_of(Ty::of(Tag::Str)));
+    assert!(
+        !Ty::list_of(int.union(Ty::of(Tag::Str))).is_subtype(&mixed),
+        "{mixed}"
+    );
+}

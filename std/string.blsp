@@ -98,11 +98,12 @@ inverse of the `string/->codepoints` primitive.
 (sig ->bytes (string -> bytes))
 
 (defn bytes-> (b)
-  "Decode a bytes value of UTF-8 bytes back to a string. Inverse of `string/->bytes`.
+  "Decode UTF-8 bytes back to a string — a bytes value, or a list or vector of byte ints
+(nil is the empty case). Inverse of `string/->bytes`.
 
     (string/bytes-> #b\"hi\")   → \"hi\""
   (%utf8-bytes->string b))
-(sig bytes-> (bytes -> string))
+(sig bytes-> ((or nil bytes (list int) (vector int)) -> string))
 
 (def- number->digits "0123456789abcdefghijklmnopqrstuvwxyz")
 

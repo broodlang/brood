@@ -937,3 +937,54 @@ demand.
 Tier-2 monomorphization (item 7 — the checker→compiler channel, on ADR-294's sound base),
 true recursive types, contract blame and contracts-by-default (roadmap 10/11, ADR-153),
 parametric abilities, view patterns.
+
+## Declare at the leaf, derive from the call (2026-09-13, ADR-339)
+
+A review of this document against the tree found that the two closing verdicts above — "the
+backlog is empty" and "the inference frontier is closed as measured" — were written about the
+*lattice* and the *demand walk*, and held for those. They did not hold for what a caller gets
+back. Probed, not read:
+
+- **`(defn sum-to (i acc) (if (= i 0) acc (sum-to (- i 1) (+ acc i))))` returned `any`** at
+  every call — the accumulator loop, the commonest idiom in a language with no loops. The flat
+  answer is right (`acc` is whatever the caller seeds); the call-site answer was never computed,
+  because `specialized_ret` declined any self-recursive body. It is a joint fixpoint over the
+  parameters and the result now: `(sum-to 10 0)` is `int`, a recursive list builder is
+  `nil | list<int>`, and the user-defined `my-map` — also self-recursive, so the "polymorphic
+  `?A` suggestion would only change the spelling" argument above did not cover it — types its
+  callback's result through `cons`.
+- **A loaded closure was inferred by a weaker inferencer than its own file.** The roadmap's
+  "inferred parameter types flag wrong callers, cross-file" was true only for a body whose
+  parameters were passed *directly* to a primitive: a one-call body's nested arguments were
+  never walked by the loaded-closure path ("Tier 1", now deleted). `(defn pad-name (name n)
+  (str (string/upper name) (+ n 1)))` checked its callers in its own file and from no other
+  module.
+- **Inference stopped at the first unmaterialised module.** `buffer-current-line` calls
+  `text/char->line`, declared `(rope int -> int)` at the leaf; under lazy loading `text` is not
+  materialised in a checking process unless something in the checked file names it, and the
+  inferencer read `-> any`. The checker now materialises, transitively, every module the loaded
+  bodies name — so the leaf declaration is what the derivation reaches, and a `(sig
+  buffer-current-line …)` would have been a declaration of something already known.
+- **A `let`-bound lambda checked nothing at its calls**; it carries its parameter domains as a
+  per-name fact now. **A private constant had no value type** (`(def- col 10)` read as unknown
+  through its privacy expansion; a declared `int` sum of two of them was reported).
+
+**Measured after.** `std/` at zero in both modes; `tests/` strict 22 → 20 (the four `pop-mark`
+findings above derive now); bedit plain at zero, strict showing ten of the `nil | int`-from-
+`first`/`nth` class its own sweep fixes in code. The whole-std strict gate is ~13% slower
+(debug), all of it the fixpoint. Three real findings in `std/` fell out — a `string/bytes->`
+declared narrower than its primitive, a `(list a b)` that was a tuple, a `cond` that was a
+`match` — and one lattice defect: `nil | list<3>` ∪ `list<int>` kept two terms.
+
+**What is still declared that should derive** — the honest residue, and the next mechanism:
+`json`'s index-returning helpers (`json-escape` and three siblings) are declared `int` because
+the walk checks a body under its parameters' bottom-up *demands* (`(+ i 1)` says `number`) with
+no view of what the callers pass. Caller-derived parameter types for module-private functions —
+a closed caller set, so the union of the call sites' argument types is a sound binding when
+the name never escapes as a value — is what removes those, and it needs its own measurement
+(a second walk per file, or a stored-scope collection pass).
+
+**Still deferred, unchanged**: return-type dispatch, Tier-2 monomorphization, true recursive
+types, contract blame and contracts-by-default, parametric abilities, view patterns; the
+computed-callee `((cur 1) "x")` (an arrow in head position is not consulted); strict's arrow
+inclusion reading an unknown lambda result as `any` rather than `?`.

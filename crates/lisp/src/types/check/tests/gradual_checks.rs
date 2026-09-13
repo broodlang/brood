@@ -1022,3 +1022,30 @@ fn strict_mode_reads_a_nested_unknown_as_the_gradual_unknown() {
     assert!(!ty_of_sig("(map keyword int)").is_consistent_subtype(&needs_name));
     assert!(ty_of_sig("map").is_consistent_subtype(&needs_name));
 }
+
+// ---- a private constant is read through its privacy expansion ----
+// `def-` expands to `(do (def x …) (%mark-private 'x))`, and Gap A read only top-level
+// `def`s, so a private constant had no value type: `(def- col 10)` then `(+ col 39)` was
+// `number`, and a `(sig …)` declaring the sum `int` reported literal arithmetic as not
+// assignable. Sabotage-verified: iterating `expanded` instead of `top_level_defs` fails
+// both halves.
+
+#[test]
+fn a_private_constant_has_its_literal_value_type() {
+    let ws = file_warnings_mode(
+        "(defmodule t)\n\
+         (def- col 10)\n\
+         (def- ascii-col (+ col 39 2))\n\
+         (sig ascii-col int)\n\
+         (defn use-it () (math/quot (+ 5 (dec col)) col))",
+        true,
+    );
+    assert!(ws.is_empty(), "{ws:?}");
+    // …and the value really is read, not merely left unknown.
+    let ws = file_warnings("(defmodule t)\n(def- label \"ten\")\n(def total (+ label 1))");
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("+: argument 1 expects number, got \"ten\"")),
+        "{ws:?}"
+    );
+}

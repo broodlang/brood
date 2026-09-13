@@ -79,6 +79,7 @@ the keybindings."
       (f node)
       (let (k (first path))
         (assoc node k (pane-update (get node k) (rest path) f))))))
+(sig pane-update (map list fn -> map))
 
 ;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
 (check-allow :non-tail-recursion
@@ -183,6 +184,7 @@ returned unchanged — you can't delete the only one."
             sib (if (= (last p) :a) :b :a)
             pruned (pane-update tree parent (fn (split) (get split sib))))
         (pane-select-path pruned (first (pane-leaf-paths pruned)))))))
+(sig pane-delete (map -> map))
 
 (defn pane-delete-others (tree)
   "Collapse the layout to just the selected pane, filling the whole frame (Emacs
@@ -234,6 +236,7 @@ in the same place (Emacs `rotate-frame`'s buffer half)."
         :dir (if (= (get tree :dir) :row) :col :row)
         :a (pane-transpose (get tree :a))
         :b (pane-transpose (get tree :b))))))
+(sig pane-transpose (map -> map))
 
 ;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
 (check-allow :non-tail-recursion
