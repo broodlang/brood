@@ -529,6 +529,23 @@
         (save-buffer (-> b end-of-buffer (insert "third line\n")))
         (assert= (buffer-text (buffer-from-file path))
           "first line\nsecond line\nthird line\n"))))
+  ;; The mtime stamp: a buffer remembers when its text and its file last agreed, so an
+  ;; editor can notice another writer (a formatter, `git checkout`) on an idle beat.
+  (test "a read and a save stamp the file's mtime; a later write on disk shows as changed"
+    (let (path (str (temp-dir "brood-buf-") ".txt"))
+      (file/spit path "v1\n")
+      (let (b (buffer-from-file path))
+        (assert= (get b :file-mtime) (file/mtime path))
+        (is (not (buffer-file-changed? b)))
+        ;; the file written since (an older stamp stands in for the clock having moved)
+        (is (buffer-file-changed? (assoc b :file-mtime (dec (get b :file-mtime)))))
+        ;; a save re-stamps: the returned buffer agrees with the file again
+        (let (saved (save-buffer (-> (assoc b :file-mtime 1) end-of-buffer (insert "v2\n"))))
+          (assert= (get saved :file-mtime) (file/mtime path))
+          (is (not (buffer-file-changed? saved)))))))
+  (test "a buffer with no file, or never stamped, has not changed on disk"
+    (is (not (buffer-file-changed? (make-buffer "x"))))
+    (is (not (buffer-file-changed? (make-buffer "x" "n" "/nowhere/at/all")))))
   (test "save-buffer with no file raises"
     (assert-error (save-buffer (make-buffer "x"))))
   ;; find-file-buffer: vim/emacs `find-file` — read an existing file, else a fresh

@@ -863,6 +863,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-13** — `:on-move` is a layer facet (ADR-338): a follower runs only when point or the text moved (`buffer-moved?`), never on every event like a `:post-key` guard; `string/width->index`, the inverse of `display-width`, for a click on a wide glyph
 - **2026-09-13** — the checker types a `def-` literal like a `def` one: Gap A reads `top_level_defs`, so a private `(def- k 10)` is an `int`, not `dynamic()` — bedit's strict count 13 → 0
 - **2026-09-13** — `--version` says `-dirty`: a binary whose `crates/`/`std/` differed from its commit is no longer indistinguishable from a clean build of the same sha; `make doctor` names it; build.rs re-runs from a worktree too
+- **2026-09-13** — tabs are a column-dependent cluster (ADR-342): `display-width` / `width->index` take `start-col` + `tab-width`, `string/expand-tabs` is the third leg, the GUI paints a raw tab to the screen stop; the scroll blit (ADR-343): a dirty strip that is a translation of old canvas rows is copied, not drawn — a 1080p scroll paints in 2.3 ms, not 10; `ui-coalesce-motion` collapses a `:move` flood like a `:drag` one; `:close-is-input?` lets an app ask before the X button quits; `buffer-file-changed?` — a buffer stamps its file's mtime at read/save
 
 ---
 
@@ -13245,3 +13246,37 @@ theory.** Every KI in this class (KI-89, KI-134 twice) was attributed from the f
 assertion; one `BROOD_REG_TRACE` run with the death and the restores on the same timeline
 settled it in a minute. And prove a fix with a test of the *mechanism* — the order, the
 count, the state — never with N green runs of a race.
+## 2026-09-13 — tabs land on their stops, a scroll copies what it keeps, a hover costs one turn
+
+Three display-seam gaps bedit exposed, measured before and after.
+
+**Tabs (ADR-342).** `a\tb` painted as `ab`: a tab was a zero-width cluster
+(`text_width::cluster_cells`), so the GUI advanced nothing, and the caret and the click
+mapping — which count the same clusters — agreed with each other and with nothing on
+screen. The rule now lives beside the cluster rule with a running column:
+`string/display-width` and `string/width->index` take an optional `start-col` (a mid-line
+chunk's column, so its tabs land on the LINE's stops) and `tab-width` (default 8), and
+`string/expand-tabs` is the string a frontend is handed. `strings_test` pins the round trip;
+the Rust tests were sabotaged (tab width 4) to prove they bite.
+
+**The scroll blit (ADR-343).** The strip diff paid the whole pane on a scroll — every row's
+ops changed — for pixels the canvas held one line up. `strip_blits` finds a dirty strip
+that is an exact translation of an old band (each leaf the same op `Δ` lower, or a solid
+fill covering both) and copies the rows. Measured with a `ui-run` app scrolling a maximised
+1920×1045 window one line per tick, `BROOD_GUI_TRACE=1`, 50 steady-state paints:
+`blit=0` 10.1 ms/paint (1029 rows drawn); `blit=1` 2.3 ms (83 drawn, 946 copied). The
+pixel-for-pixel tests cover a whole-line scroll, a sub-cell step, two panes scrolling
+opposite ways, and a row that only looks shifted.
+
+**Motion coalescing.** `ui-coalesce-drag` collapsed a `:drag` flood to its last event;
+a `:move` flood (hover) still cost a full fold + view per cell crossed — 95 of ~110 turns
+in a 12 s idle bedit run. `ui-coalesce-motion` collapses either kind to its latest, never
+across kinds (a press between two moves changes what the later one means).
+
+**Two seams the editor needed for safety.** `ui-run` quit on the window's X button before
+`update` ever saw it — so no app could ask "save first?". A model with `:close-is-input?
+true` now receives `:close` like a key and quits by setting `:done` itself (the deferred
+half of ADR-011, opt-in so every other app stays closeable for free; `ui_test` pins both
+paths). And `std/editor/buffer` stamps `:file-mtime` at `buffer-from-file` / `save-buffer`
+so `buffer-file-changed?` can say whether another writer touched the file since — the
+knowledge auto-revert and a save-time guard are built on (`buffer_test`).

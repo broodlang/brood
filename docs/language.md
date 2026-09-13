@@ -2901,7 +2901,14 @@ another type, so they are **not** string-library ops:
   char or emoji is 2, a combining mark 0), and `(string/width->index s cell)` maps a cell
   back to the character index of the cluster on it (`(string/length s)` past the end; a cell
   inside a wide glyph gives the glyph's start) — the pair an editor needs to place a caret
-  and to map a click back to a character by the same measure.
+  and to map a click back to a character by the same measure. A **tab** is the one
+  cluster whose width depends on where it is: it advances to the next tab stop (a
+  multiple of 8 from the string's start), so `(string/display-width "a\tb")` is 9; both
+  take an optional `start-col` (the column a mid-line chunk is laid out from, so its tabs
+  land on the LINE's stops) and `tab-width`, and `(string/expand-tabs s [start-col
+  tab-width])` is the string with each tab replaced by the spaces that reach its stop —
+  what a view hands a frontend, since a raw tab in a render op has no column to measure
+  from (ADR-342).
 - **The cluster-indexed accessors** are `string/grapheme-count`, `(string/grapheme-at s i
   [default])`, and `(string/substring-graphemes s start [end])` — the grapheme-indexed
   counterparts of `string/length`, `string/char-at`, and `string/substring`, which are all

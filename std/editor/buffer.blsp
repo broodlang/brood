@@ -105,10 +105,17 @@ Where `end-of-line` lands and the rightmost column point can hold on that line."
       (if (get b :file) (str " file=" (get b :file)) "")
       ">")))
 
+(defn buffer-stamp-file (buf)
+  "`buf` with `:file-mtime` set to its file's modification time as it is NOW (nil when
+it has no file, or the file is missing) — the moment the buffer's text and the file
+agreed. `buffer-from-file` and `save-buffer` stamp it; `buffer-file-changed?` reads it."
+  (let (f (get buf :file))
+    (assoc buf :file-mtime (if (nil? f) nil (file/mtime f)))))
+
 (defn buffer-from-file (path)
   "Read the file at `path` into a fresh buffer, with `:file` set to `path` so
-`save-buffer` can write it back."
-  (make-buffer (file/slurp path) path path))
+`save-buffer` can write it back, stamped with the file's mtime (`buffer-stamp-file`)."
+  (buffer-stamp-file (make-buffer (file/slurp path) path path)))
 
 (defn find-file-buffer (path)
   "Open `path` for editing, vim/emacs `find-file` style: its contents if the file
@@ -118,11 +125,26 @@ unsaved buffer rather than erroring."
   (if (file/exists? path) (buffer-from-file path) (make-buffer "" path path)))
 
 (defn save-buffer (buf)
-  "Write `buf`'s text to its `:file`; raise if it has none. Returns `buf`."
+  "Write `buf`'s text to its `:file`; raise if it has none. Returns `buf` stamped with
+the file's new mtime (`buffer-stamp-file`), so a caller that keeps the result knows the
+file and the text agree again."
   (let (f (get buf :file))
     (if (nil? f)
       (error "save-buffer: buffer has no file: " (get buf :name))
-      (do (file/spit f (buffer-text buf)) buf))))
+      (do (file/spit f (buffer-text buf)) (buffer-stamp-file buf)))))
+
+(defn buffer-file-changed? (buf)
+  "True when the file behind `buf` has been written since the buffer last agreed with it
+— its mtime differs from the `:file-mtime` stamped at the read or the last save — so
+someone else (another editor, a formatter, `git checkout`) changed it. False for a
+buffer with no file, one never stamped, or a file that has since vanished (that is a
+different question). One `stat`; cheap enough to ask on an idle beat."
+  (let (f (get buf :file)
+        stamp (get buf :file-mtime))
+    (if (or (nil? f) (nil? stamp))
+      false
+      (let (now (file/mtime f))
+        (and (not (nil? now)) (not (= now stamp)))))))
 
 ;; ---- reads ------------------------------------------------------------------
 

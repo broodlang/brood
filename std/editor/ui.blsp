@@ -45,19 +45,26 @@ beat. The observer and the editor are both `ui-run` clients — see
   ;; terminal), so it's a fixed display map of the 0-arg `term-*` primitives.
   {:enter term/enter :leave term/leave :size term/size :draw term/draw :poll term/poll})
 
-(defn- ui-coalesce-drag (msg)
-  "Collapse a flood of mouse `:drag` events down to the latest. A fast drag emits one
-event per cell the pointer crosses (ADR-080), so the mailbox backs up and the loop
-renders every intermediate position — the drag visibly lags, filling in cell by cell.
-Only the *final* pointer position matters for the gesture (a drag-select region is just
-`[mark, point]`, a resize just the latest ratio), so when `msg` is a drag we pull every
-further drag already queued — a non-blocking selective `receive` that leaves keys / ticks
-/ async replies untouched — and return the last. The loop then renders once at the end
-instead of once per cell. `msg` unchanged when it isn't a drag (incl. nil on timeout)."
-  (if (and (vector? msg) (>= (count msg) 2) (= (nth msg 0) :mouse) (= (nth msg 1) :drag))
-    (receive
-      ([:mouse :drag button row col mods] (ui-coalesce-drag [:mouse :drag button row col mods]))
-      (after 0 msg))
+(defn- ui-coalesce-motion (msg)
+  "Collapse a flood of pointer-motion events — a `:drag` or a `:move` — down to the
+latest of its kind. A fast pointer emits one event per cell it crosses (ADR-080), so the
+mailbox backs up and the loop folds and renders every intermediate position: a drag
+visibly lags, filling in cell by cell, and a plain move costs a full turn (fold + view)
+per cell even when nothing on screen depends on it. Only the *final* position matters
+for either gesture (a drag-select region is just `[mark, point]`, a hover just where the
+pointer is now), so when `msg` is one, we pull every further event of the SAME kind
+already queued — a non-blocking selective `receive` that leaves keys / ticks / async
+replies / the other kind untouched — and return the last. A `:move` never swallows a
+`:drag` (nor the reverse): a press between two moves changes what the later one means.
+`msg` unchanged when it isn't motion (incl. nil on timeout)."
+  (if (and (vector? msg)
+        (>= (count msg) 2)
+        (= (nth msg 0) :mouse)
+        (or (= (nth msg 1) :drag) (= (nth msg 1) :move)))
+    (let (kind (nth msg 1))
+      (receive
+        ([:mouse ^kind button row col mods] (ui-coalesce-motion [:mouse kind button row col mods]))
+        (after 0 msg)))
     msg))
 
 (defn gui-display (&optional (opts nil))
@@ -95,7 +102,7 @@ their input. Both are deferred trade-offs (ADR-059), fine for the observer."
      ;; `:poll` is a `receive` that parks the process — it holds no scheduler worker
      ;; while waiting (ADR-058), unlike a blocking poll. Returns the next key/mouse
      ;; message, or nil after `ms` (the live-refresh tick).
-     :poll (fn (ms) (ui-coalesce-drag (receive (m m) (after ms nil))))
+     :poll (fn (ms) (ui-coalesce-motion (receive (m m) (after ms nil))))
      ;; Raise this window to the front + focus it (un-minimising) — `ui-run` calls
      ;; this when a `:focus` control message lands in the mailbox, so another process
      ;; can surface an already-open singleton window (e.g. a second `(observe)`).
@@ -280,6 +287,15 @@ button) asking the app to quit, as distinct from the Escape *key* (`:escape`).
 alongside whatever quit keys you bind — e.g. `(:close :quit)` next to your own."
   (= input :close))
 
+(defn- ui-close-quits? (model input)
+  "Whether `input` is a `:close` the LOOP must act on: the window's X button, for an app
+that has not claimed it. An app sets `:close-is-input? true` on its model to fold `:close`
+through `update` like any key instead — so it can ask about unsaved work before quitting
+(Emacs's `save-buffers-kill-terminal` on the window manager's close) and quit by setting
+`:done` itself. Without the flag every `ui-run` app stays closeable by its X button with
+no wiring, as before."
+  (and (quit-request? input) (not (get model :close-is-input?))))
+
 (defn focus-request? (input)
   "True if `input` is a `:focus` control message — a request (delivered to this
 process's mailbox by another process) to raise this app's window to the front.
@@ -404,7 +420,7 @@ exactly as before."
     (let (raw ((get display :poll) 0))
       (cond
         (nil? raw) [model nil] ; queue empty — render the settled model
-        (quit-request? raw) [model raw] ; a close/focus control message: hand it back
+        (ui-close-quits? model raw) [model raw] ; a close/focus control message: hand it back
         (focus-request? raw) [model raw] ; (the loop, not update, owns these)
         else
           (let (next (ui-fold update model raw cols rows))
@@ -415,8 +431,9 @@ exactly as before."
 O(1) stack). Renders, parks the poll until the soonest timer is due, folds the input
 (a key/mouse/system event, or a timer firing), recurses; stops when `:done` (the
 caller, `ui-run`, runs `:leave` in all cases). A `:close` input (the window's X
-button) always quits, so every `ui-run` app is closeable by its close button without
-wiring it into `update` — independent of how the app binds the Escape key. A `:focus`
+button) quits unless the app claims it (`:close-is-input?`, `ui-close-quits?`), so every
+`ui-run` app is closeable by its close button without wiring it into `update` —
+independent of how the app binds the Escape key. A `:focus`
 control message (from another process) raises the window via the display's `:focus`
 and is NOT folded into `update`.
 
@@ -478,7 +495,7 @@ re-raises, surfacing a genuine startup bug instead of spinning."
                   raw ((get display :poll) poll-ms))
               (cond
                 ;; the window's close button always quits; `ui-run` then runs `:leave`
-                (quit-request? raw) nil
+                (ui-close-quits? model raw) nil
                 ;; raise-to-front request: act on the display, keep the model untouched and
                 ;; do NOT advance `:last-input` (a focus message from another process is
                 ;; not user input — it must not reset idle timers).
@@ -518,7 +535,7 @@ re-raises, surfacing a genuine startup bug instead of spinning."
                         next (first drained)
                         pending (second drained))
                     (cond
-                      (quit-request? pending) nil
+                      (ui-close-quits? next pending) nil
                       (focus-request? pending)
                         (let (f (get display :focus))
                           (do
@@ -556,8 +573,10 @@ exactly as before.
 a `:close` input (distinct from the Escape *key*, `:escape`), and `ui-run` treats
 `:close` as an immediate quit — before `update` even sees it — then runs `:leave`.
 So every app is closeable by its X button for free, no matter how it binds Escape
-(an editor binds Escape to cancel/normal-mode, not quit). Intercepting `:close` to
-prompt first (\"unsaved changes\") is a deferred power feature (ADR-011).
+(an editor binds Escape to cancel/normal-mode, not quit). An app that must ask first
+(\"unsaved changes\") sets `:close-is-input? true` on its model: `:close` is then folded
+through `update` like a key, and the app quits by setting `:done` itself — the deferred
+power feature of ADR-011, opt-in so the default stays free.
 
 **A `view`/`update` crash is survived, not fatal** (let-it-crash at the render
 loop). A throw from `view` or `update` is caught and logged to stderr, and the loop

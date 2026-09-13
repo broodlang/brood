@@ -22245,3 +22245,75 @@ invariant. `std/` is at zero in both modes; `tests/` strict carries seventeen mo
 wider-than-the-truth kind (a test that knows its `read-n` succeeded), by design ungated; bedit
 is in the devlog. A chain settles in one round per level (bounded at 32), each round one walk
 of the file's forms.
+## ADR-342 — A tab is a column-dependent cluster: one stop rule under width, its inverse, and the expansion
+
+**Context.** The display seam measures text in grapheme clusters, each 0, 1 or 2 cells
+(`text_width`). A tab was a 0-cell cluster — the one cluster whose width is not a property
+of the cluster but of *where it sits*: it advances to the next tab stop. So `a\tb` painted
+as `ab`, every tab-indented line (Go, a Makefile, most C) sat flush left, and the caret and
+the click mapping, which count the same clusters, agreed with each other and disagreed
+with the screen. The GUI renderer could not fix it alone: a render op is a string at a
+column, and a tab's stop is the LINE's, not the op's — a fontified line arrives as chunks
+starting mid-line.
+
+**Decision.** The tab rule lives in `text_width`, beside the cluster rule, and every
+function that lays text out by cell carries a running column: `display_width_from(s,
+start_col, tab_width)`, `index_at_cell_from`, and a third leg, `expand_tabs`, the string
+with each tab replaced by the spaces that reach its stop. `string/display-width` and
+`string/width->index` take the optional `start-col` / `tab-width` tail (default 0 and 8 —
+Emacs's `tab-width`); `string/expand-tabs` is new. A view expands each chunk of a line
+with the column it starts at, so the stops stay the line's, and hands the frontend a
+tab-free op; the caret and click use the same two functions with the same column. A raw
+tab that still reaches the GUI advances to the next *screen* stop, background only — what
+a terminal does with one, so the two frontends agree on the fallback too.
+
+**Consequences.** One rule, three entry points, one module — the caret, the click and the
+paint cannot disagree, and `strings_test` pins the round trip (`expand-tabs` measures what
+`display-width` says, from any column). A per-buffer `tab-width` is an argument, not a
+mode. `cluster_cells` stays column-free for the callers that walk a string a cluster at a
+time; `cluster_cells_at` is the column-aware form they reach for at a tab.
+
+**Alternatives rejected.** *Expand in the renderer at the op's column*: wrong stops for
+any chunk that does not start the line. *Expand at the screen column*: right only when
+the text area starts at a multiple of the tab width; kept as the fallback, not the rule.
+*Expand the buffer line before fontifying*: shifts every span offset after a tab —
+three coordinate systems where one running column does.
+
+## ADR-343 — The scroll blit: a dirty strip that is a translation of old pixels is copied, not drawn
+
+**Context.** The strip diff (`paint::strip_diff`) re-rasterises only the cell rows whose
+ops changed — a keystroke paints one line. A scroll changes every row of a pane, so it
+paid the whole pane: ~6 ms of glyph blitting at 1080p, four times that on a 4K display,
+for pixels the retained canvas already held one line up. The strip diff's unit of trust
+(this row's op sequence is unchanged) had no way to say "this row's ops are THAT row's ops,
+moved".
+
+**Decision.** After the diff, `strip_blits` looks for exactly that. A dirty full-height
+strip is copied from the old canvas rows `[y0 - Δ, y1 - Δ)` when every leaf op covering
+the strip pairs, in frame order, with a leaf covering the source band under one of two
+exact relations: the same op at a position `Δ` pixels lower (text, the cursor, a one-row
+band — a `ScrollRegion`'s sub-cell shift folds into the position, so a gliding frame
+translates too), or a solid fill that covers both bands with its straight part (the gutter
+wash, a divider, the clear — a fill has no row-dependent pixels away from its corners,
+which a rounded rect keeps `radius` clear of). `Δ` comes from the strip's first
+translatable leaf matched against the old frame; the Δ that carried the previous strip is
+tried first, since a scroll moves a pane by one Δ. Sources are read before any destination
+is written, so two panes scrolling opposite ways cannot corrupt each other. Bands are
+conservative (`op_band`), so a near miss vetoes a blit and never fakes one. The trace
+reports `blit=` rows beside `rows=` drawn; `BROOD_GUI_BLIT=0` is the escape hatch, as
+`BROOD_GUI_DAMAGE=0` is for the diff.
+
+**Consequences.** A one-line scroll at 1920×1045 paints in 2.3 ms instead of 10.1 ms (83
+rows drawn, 946 copied), and the cost of a scroll is now the lines that entered plus the
+mode line — independent of the pane's height. The rule is exactness, not likeness: the
+tests check a blitted raster against a from-scratch one pixel for pixel, including a
+sub-cell step, two panes scrolling against each other, and a row that only looks shifted
+(the cursor arrived with it) and must be drawn. The GPU backend, when it draws text, gets
+the same win from the same diff.
+
+**Alternatives rejected.** *A whole-pane `memmove` driven by the app* ("this region
+scrolled by N"): a new op the terminal frontend would ignore and every view would have to
+emit correctly; the paint can see the translation for itself. *Hash the normalised row*: a
+`HashMap` over ops with floats and a nested map, for a search that is a few hundred
+comparisons per frame. *Skip the blit under a fractional shift*: that is the wheel case,
+the one that matters most.
