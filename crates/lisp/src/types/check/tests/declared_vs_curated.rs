@@ -708,3 +708,25 @@ fn length_preserving_combinators_over_a_non_empty_list_drop_the_nil() {
     assert!(ty_str("(first [1 2])").contains("nil") || ty_str("(first [1 2])") == "1");
     assert!(ty_str("(map [] inc)").starts_with("nil"));
 }
+
+// A module's OWN qualified definition of a name the by-name rules describe is that function:
+// `math/max` defined in `std/math.blsp` is `math`'s `max`, not a shadow of it, so the
+// extremum rule applies to the module's own call. Without this `clamp`'s body read `max`'s
+// inferred return — the registry-derived `ordered` cover, which grows with every record a
+// loaded module registers `compare-to` for — and the strict gate over `std/` was clean
+// with `math.blsp` checked alone and red with the project loaded (2026-09-13).
+#[test]
+fn a_modules_own_qualified_definition_is_the_function_the_rule_names() {
+    let strict = file_warnings_mode(
+        "\
+         (defmodule math)\n\
+         (defrecord date (d))\n\
+         (defmethod compare-to [date date] (a b) 0)\n\
+         (defn max ((a b) (%max a b)) ((& xs) (apply %max xs)))\n\
+         (defn min ((a b) (%min a b)) ((& xs) (apply %min xs)))\n\
+         (sig clamp (number number number -> number))\n\
+         (defn clamp (x lo hi) (math/max lo (math/min hi x)))",
+        true,
+    );
+    assert!(strict.is_empty(), "{strict:?}");
+}
