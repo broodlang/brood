@@ -216,7 +216,7 @@ fn a_release_replaces_a_running_binary() {
         )],
     );
     // the parallel-tests fork race `run_bundle` documents applies to the spawn too
-    let mut child = (0..50)
+    let child = (0..50)
         .find_map(|attempt| {
             match Command::new(&app)
                 .current_dir(&cwd)
