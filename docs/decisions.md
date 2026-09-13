@@ -22456,7 +22456,7 @@ registry mirrors every buffer's text* — the collab loop does, for a daemon who
 holders are remote and may all be gone when a process dies; here the holders are local
 frames that outlive their windows' buffers, so the copies already exist.
 
-## ADR-346 — An arrow in head position describes the call
+## ADR-347 — An arrow in head position describes the call
 
 **Status:** accepted and implemented 2026-09-13 (`walk::check_computed_call`,
 `check_arg_against_param`; `infer::expr_ty`'s computed-callee arm).

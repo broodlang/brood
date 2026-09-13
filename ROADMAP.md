@@ -339,7 +339,7 @@ surface feeding it — and each turned out to need a different kind of fix. Deta
       of what the combinator promises (`map`'s element, `fold`'s accumulator, a declared arrow),
       and only a promise-less use (`apply`, a value in a map) escapes. `std/json.blsp` is
       strict-zero with NO signature on its parser chain.
-- [x] **8. An arrow in head position describes the call** (ADR-346, 2026-09-13). `((cur 1) "x")`
+- [x] **8. An arrow in head position describes the call** (ADR-347, 2026-09-13). `((cur 1) "x")`
       and `((get handlers :k) msg)` were inert; they now type as the arrow's result, with exact
       arity and the one per-argument rule a named callee gets.
 - [ ] **9. A fixed-length list has no shape type.** `(list a b)` is `list<A | B>`, so `(first
