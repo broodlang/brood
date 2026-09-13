@@ -1,0 +1,177 @@
+;; std/editor/configs.blsp — the configuration formats every project has open, as
+;; `editor/lexer` grammars: JSON, YAML, TOML, a Makefile, INI / git config, and a git
+;; commit message. Each is a table — the rules a format's colouring needs, nothing about
+;; how a line is walked (`editor/lexer` owns that) — and a `<fmt>-spans` fn in the
+;; `highlight-spans` shape, so an editor mode is `{:fontify 'editor/configs/json-spans}`.
+;; Line-oriented like every lexical mode here: a JSON string never spans lines anyway; a
+;; YAML block scalar or a TOML multi-line string colours its first line only.
+
+(defmodule editor/configs
+  "Lexical highlighting for the everyday configuration formats — `json-spans`,
+`yaml-spans`, `toml-spans`, `makefile-spans`, `ini-spans` (INI and git config) and
+`gitcommit-spans` — each a pure `src -> [start end face]` spans fn in the
+`highlight-spans` shape, from a table of `editor/lexer` rules. Feed one to an editor's
+`:fontify` service unchanged."
+  (:use editor/lexer))
+
+;; ---- JSON ---------------------------------------------------------------------------
+;; A key is a string followed by `:`; it paints as a keyword so the shape of an object
+;; reads at a glance, a value string as a string, the three literals as specials.
+
+(def json-grammar
+  (lexer-grammar
+    {:structured [["\"(?:[^\"\\\\]|\\\\.)*\"\\s*:" :keyword]
+                   ["\"(?:[^\"\\\\]|\\\\.)*\"" :string]
+                   ["-?\\d+(?:\\.\\d+)?(?:[eE][-+]?\\d+)?" :number]
+                   ["//.*" :comment]] ; JSONC / tsconfig-style
+     :words "[A-Za-z_]+"
+     :classes {"true" :special "false" :special "null" :special}}))
+
+(defn json-spans (src)
+  "JSON (and JSONC) colour spans: keys, strings, numbers, `true`/`false`/`null`, `//` comments."
+  (lexer-spans json-grammar src))
+(sig json-spans (string -> any))
+
+;; ---- YAML ---------------------------------------------------------------------------
+
+(def yaml-grammar
+  (lexer-grammar
+    {:structured [["(?:^|\\s)#.*" :comment]
+                   ["\"(?:[^\"\\\\]|\\\\.)*\"" :string]
+                   ["'[^']*'" :string]
+                   ["[&*][A-Za-z0-9_-]+" :special] ; anchors and aliases
+                   ["!![a-z]+" :special] ; tags
+                   ["\\b-?\\d+(?:\\.\\d+)?\\b" :number]]
+     :words "[A-Za-z_~]+"
+     :classes {"true" :special
+               "false" :special
+               "null" :special
+               "yes" :special
+               "no" :special
+               "on" :special
+               "off" :special
+               "~" :special}
+     ;; a key: the first thing on the line (after list dashes), up to its `:`
+     :line [["^\\s*(?:-\\s+)*([A-Za-z0-9_.\\-\"' ]+?)\\s*:(?:\\s|$)" :keyword]
+             ["^(---|\\.\\.\\.)\\s*$" :special]]}))
+
+(defn yaml-spans (src)
+  "YAML colour spans: keys, strings, numbers, booleans/null, anchors, tags, comments,
+document markers."
+  (lexer-spans yaml-grammar src))
+(sig yaml-spans (string -> any))
+
+;; ---- TOML ---------------------------------------------------------------------------
+
+(def toml-grammar
+  (lexer-grammar
+    {:structured [["#.*" :comment]
+                   ["\"(?:[^\"\\\\]|\\\\.)*\"" :string]
+                   ["'[^']*'" :string]
+                   ["\\d{4}-\\d{2}-\\d{2}(?:[T ]\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[-+]\\d{2}:\\d{2})?)?"
+                     :number]
+                   ["\\b(?:0x[0-9A-Fa-f_]+|\\d[\\d_]*(?:\\.[\\d_]+)?(?:[eE][-+]?\\d+)?|inf|nan)\\b"
+                     :number]]
+     :words "[A-Za-z_]+"
+     :classes {"true" :special "false" :special}
+     :line [["^\\s*(\\[\\[?[^\\]]+\\]\\]?)" :function]
+             ; [table] / [[array of tables]]
+             ["^\\s*([A-Za-z0-9_.\\-\"']+)\\s*=" :keyword]]}))
+
+(defn toml-spans (src)
+  "TOML colour spans: table headers, keys, strings, numbers and dates, booleans, comments."
+  (lexer-spans toml-grammar src))
+(sig toml-spans (string -> any))
+
+;; ---- Makefile -----------------------------------------------------------------------
+
+(def makefile-grammar
+  (lexer-grammar
+    {:structured [["#.*" :comment]
+                   ["\\$[({][^)}]*[)}]|\\$[@<^*?%+|]" :keyword] ; $(VAR) / $@ …
+                   ["\"(?:[^\"\\\\]|\\\\.)*\"" :string]]
+     :words "[A-Za-z_.]+"
+     :classes {"ifeq" :special
+               "ifneq" :special
+               "ifdef" :special
+               "ifndef" :special
+               "else" :special
+               "endif" :special
+               "include" :special
+               "define" :special
+               "endef" :special
+               "export" :special
+               "unexport" :special
+               "override" :special
+               ".PHONY" :special
+               ".DEFAULT" :special
+               ".SUFFIXES" :special
+               ".PRECIOUS" :special}
+     ;; a rule's target(s) — the line starts at column 0 and reaches a `:` that is not `:=`
+     :line [["^([^\\s:#=][^:#=]*):(?:[^=]|$)" :function]
+             ["^([A-Za-z_][A-Za-z0-9_.]*)\\s*[:?+!]?=" :keyword]]}))
+
+(defn makefile-spans (src)
+  "Makefile colour spans: targets, variable assignments and `$(…)` references, the
+conditional / include directives, comments."
+  (lexer-spans makefile-grammar src))
+(sig makefile-spans (string -> any))
+
+;; ---- INI / git config ---------------------------------------------------------------
+
+(def ini-grammar
+  (lexer-grammar
+    {:structured [["(?:^|\\s)[;#].*" :comment]
+                   ["\"(?:[^\"\\\\]|\\\\.)*\"" :string]]
+     :words "[A-Za-z]+"
+     :classes {"true" :special
+               "false" :special
+               "yes" :special
+               "no" :special
+               "on" :special
+               "off" :special}
+     :line [["^\\s*(\\[[^\\]]*\\])" :function]
+             ; [section] / [remote \"origin\"]
+             ["^\\s*([A-Za-z0-9_.\\-]+)\\s*=" :keyword]]}))
+
+(defn ini-spans (src)
+  "INI and git-config colour spans: `[section]` headers, keys, quoted values, booleans,
+`;` / `#` comments."
+  (lexer-spans ini-grammar src))
+(sig ini-spans (string -> any))
+
+;; ---- a git commit message ----------------------------------------------------------
+;; `COMMIT_EDITMSG`: `#` lines are git's commentary (dim), the first non-comment line
+;; is the subject (bold, as `git-commit-mode` does), a `Type(scope):` conventional
+;; prefix reads as a keyword.
+
+(def gitcommit-grammar
+  (lexer-grammar {:structured [["^#.*" :comment]] :line [["^([a-z]+(?:\\([^)]*\\))?!?:)" :keyword]]}))
+
+(defn- gitcommit-subject-from (src i n)
+  "The `[start end]` of the first line at or after `i` that is neither git commentary
+nor blank — the subject — or nil."
+  (if (>= i n)
+    nil
+    (let (e (math/min n (string/span-until src i "\n"))
+          line (string/substring src i e))
+      (if (or (string/starts-with? line "#") (= (string/trim line) ""))
+        (gitcommit-subject-from src (inc e) n)
+        [i e]))))
+
+(defn gitcommit-spans (src)
+  "Commit-message colour spans: git's `#` commentary, the subject line (as `:doc`, after
+any conventional-commit `type(scope):` prefix, which reads as a keyword)."
+  (let (base (lexer-spans gitcommit-grammar src)
+        subject (gitcommit-subject-from src 0 (string/length src)))
+    (if (nil? subject)
+      base
+      (let ([s e] subject
+            doc (editor/face/face :syntax/doc)
+            ;; a prefix span at the subject's start: the doc span starts after it
+            prefix (seq/find base (fn ([a b _]) (= a s)))
+            from (if (nil? prefix) s (second prefix)))
+        (if (>= from e)
+          base
+          (sort (cons [from e doc] base) (fn (x y) (< (first x) (first y)))))))))
+(sig gitcommit-spans (string -> any))

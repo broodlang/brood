@@ -1,0 +1,167 @@
+;; std/editor/lexer.blsp — a line-oriented lexer from a table of rules.
+;;
+;; `editor/shell` set the shape every lexical (non-tree-sitter) language mode wants: per
+;; line, ONE regex alternation finds the structured tokens (comments, strings, …) — the
+;; native engine does the per-character work — then a word pattern finds identifiers
+;; and a lookup classifies each one that sits outside a structured token. The next six
+;; formats an editor needs (JSON, YAML, TOML, a Makefile, an INI / git config, a commit
+;; message) are that shape with different tables, so the walker lives here once and a
+;; format is DATA: a `lexer-grammar` map. Line-oriented: a token never crosses a line
+;; (a multi-line string colours on its first line only — the trade dotenv, shell and
+;; markdown all make), so a band re-lexes on every keystroke and needs no restart rule.
+;;
+;;     (def json-grammar
+;;       (lexer-grammar
+;;         {:structured [["\"(?:[^\"\\\\]|\\\\.)*\"" :string] ["-?\\d+(?:\\.\\d+)?" :number]]
+;;          :words "[A-Za-z_]+"
+;;          :classes {"true" :keyword "false" :keyword "null" :keyword}}))
+;;     (lexer-spans json-grammar src)      ; → ([start end face] …), the highlight-spans shape
+;;
+;; Faces are named by `:syntax/*` role (`:comment` `:string` `:doc` `:number` `:keyword`
+;; `:special` `:function`), resolved through `editor/face` once per pass, so a theme
+;; restyles every table-driven mode with the rest.
+
+(defmodule editor/lexer
+  "A line-oriented lexer from a table of rules: `lexer-grammar` compiles a map of
+`:structured` `[pattern role]` rules (joined into one alternation, leftmost match wins),
+an optional `:words` pattern with `:classes` (word → role) for identifiers outside the
+structured tokens, and optional `:line` rules (`[pattern role]` anchored at the line's
+start, painting a capture group); `(lexer-spans grammar src)` returns `[start end face]`
+spans in the `highlight-spans` shape — what an editor's `:fontify` service is. Roles are
+`:syntax/*` faces (`:comment` `:string` `:doc` `:number` `:keyword` `:special`
+`:function`), resolved per pass."
+  (:use editor/face))
+
+;; ---- the grammar ----------------------------------------------------------------
+
+(def lexer-roles
+  ;; role keyword → the `:syntax/*` face it resolves to
+  {:comment :syntax/comment
+   :string :syntax/string
+   :doc :syntax/doc
+   :number :syntax/number
+   :keyword :syntax/keyword
+   :special :syntax/special
+   :function :syntax/function})
+
+(defn lexer-grammar (spec)
+  "Compile `spec` into a grammar: `:structured` — a vector of `[pattern role]`, each
+pattern wrapped in its own group and all joined into one alternation (so the i-th
+group tells which rule matched; a pattern must not contain capturing groups of its own —
+use `(?:…)`); `:words` — a pattern for identifiers (default none) with `:classes`, a map
+word → role; `:line` — a vector of `[pattern role]` tried at each line's START (the
+pattern's FIRST group is what is painted, so `^(\\w+):` paints a Makefile target). The
+result is what `lexer-spans` takes."
+  (let (structured (or (:structured spec) [])
+        pattern (string/join (map structured (fn ([p _]) (str "(" p ")"))) "|"))
+    {:pattern (if (empty? structured) nil pattern)
+     :roles (into [] (map structured (fn ([_ r]) r)))
+     :words (:words spec)
+     :classes (or (:classes spec) {})
+     :line (or (:line spec) [])}))
+(sig lexer-grammar (map -> map))
+
+(defn- lexer-faces ()
+  "Every role's face, resolved once per pass."
+  (fold (%map-pairs lexer-roles) {} (fn (acc [role name]) (assoc acc role (face name)))))
+
+;; ---- one line ---------------------------------------------------------------------
+
+(defn- lexer-structured (grammar line faces)
+  "The structured token spans of `line`, line-relative, ascending: for each match of
+the alternation, the one group that matched names the rule."
+  (if (nil? (:pattern grammar))
+    '()
+    (seq/keep (regex/find-all (:pattern grammar) line)
+      (fn (m)
+        (let (groups (get m :groups)
+              which (seq/find (range (count groups)) (fn (i) (not (nil? (nth groups i))))))
+          (if (nil? which)
+            nil
+            (let (g (nth groups which))
+              ;; a rule may consume the separator that lets it match (`(?:^|\\s)#.*` — a
+              ;; `#` that starts a word); the token itself never starts with whitespace
+              [(lexer-skip-ws line (get g :start) (get g :end))
+                (get g :end)
+                (get faces (nth (:roles grammar) which))])))))))
+
+(defn- lexer-skip-ws (line s e)
+  "`s` advanced past the spaces and tabs before `e`."
+  (if (and (< s e) (or (= (string/char-at line s) " ") (= (string/char-at line s) "\t")))
+    (lexer-skip-ws line (inc s) e)
+    s))
+
+(defn- lexer-inside? (spans s e)
+  "Does `[s e)` fall inside any of `spans` (`[start end face]`)?"
+  (any? spans (fn ([a b _]) (and (>= s a) (<= e b)))))
+
+(defn- lexer-words (grammar line structured faces)
+  "The classified word spans of `line`, line-relative, ascending: each identifier
+outside the structured spans whose text is in `:classes`."
+  (if (nil? (:words grammar))
+    '()
+    (seq/keep (regex/find-all (:words grammar) line)
+      (fn (m)
+        (let (s (get m :start)
+              e (get m :end)
+              role (get (:classes grammar) (get m :text)))
+          (if (or (nil? role) (lexer-inside? structured s e))
+            nil
+            [s e (get faces role)]))))))
+
+(defn- lexer-line-rules (grammar line faces)
+  "The spans of the `:line` rules that match at `line`'s start: each paints its
+pattern's first group (the whole match when it has none)."
+  (seq/keep (:line grammar)
+    (fn ([pattern role])
+      (let (m (regex/find pattern line))
+        (if (or (nil? m) (not (= (get m :start) 0)))
+          nil
+          (let (g (first (or (get m :groups) [])))
+            (if (nil? g)
+              [(get m :start) (get m :end) (get faces role)]
+              [(get g :start) (get g :end) (get faces role)])))))))
+
+(defn- lexer-merge (a b acc)
+  "Merge two ascending span lists in reverse onto `acc`; a span inside an earlier one is
+dropped, so the result stays non-overlapping."
+  (cond
+    (and (empty? a) (empty? b)) acc
+    (or (empty? b) (and (not (empty? a)) (<= (first (first a)) (first (first b)))))
+      (lexer-merge (rest a) b (lexer-push acc (first a)))
+    else (lexer-merge a (rest b) (lexer-push acc (first b)))))
+
+(defn- lexer-push (acc span)
+  "`span` consed onto the reversed `acc` unless it starts inside the span before it."
+  (if (and (not (empty? acc)) (< (first span) (second (first acc))))
+    acc
+    (cons span acc)))
+
+(defn lexer-line-spans (grammar line base faces)
+  "The spans for one `line` at offset `base`, ascending and non-overlapping: the
+structured tokens, the classified words and the line rules, merged."
+  (let (structured (lexer-structured grammar line faces)
+        words (lexer-words grammar line structured faces)
+        rules (lexer-line-rules grammar line faces)
+        merged (reverse (lexer-merge (reverse (lexer-merge structured words '())) rules '())))
+    (map merged (fn ([s e f]) [(+ base s) (+ base e) f]))))
+(sig lexer-line-spans (map string int map -> any))
+
+;; ---- the walk ---------------------------------------------------------------------
+
+(defn- lexer-walk (grammar src i n faces acc)
+  "Tail-recursive line walker, accumulating each line's spans in reverse."
+  (if (>= i n)
+    (reverse acc)
+    (let (e (math/min n (string/span-until src i "\n"))
+          spans (lexer-line-spans grammar (string/substring src i e) i faces))
+      (lexer-walk grammar src (inc e) n faces (fold spans acc (fn (a s) (cons s a)))))))
+
+(defn lexer-spans (grammar src)
+  "Lexically tokenize `src` with `grammar` (from `lexer-grammar`) into `[start end face]`
+colour spans — character offsets, end-exclusive, ascending, non-overlapping — the
+`highlight-spans` shape an editor's `:fontify` service returns.
+
+    (map (editor/lexer/lexer-spans (editor/lexer/lexer-grammar {:structured [[\"#.*\" :comment]]}) \"x # y\") (fn ([s e _]) [s e]))   → ([2 5])"
+  (lexer-walk grammar src 0 (string/length src) (lexer-faces) '()))
+(sig lexer-spans (map string -> any))
