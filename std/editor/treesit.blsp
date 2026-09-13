@@ -686,7 +686,9 @@ not the whole enclosing module. Falls back to the top-level form, then `point`."
 ;; from a declaration of WHERE the grammar is, rather than a README the user follows.
 
 (defn grammar-library-name (lang)
-  "The file name a grammar for `lang` is loaded from: `libtree-sitter-<lang>.so`."
+  "The file name a grammar for `lang` is loaded from: `libtree-sitter-<lang>.so`.
+
+    (editor/treesit/grammar-library-name :elixir)   → \"libtree-sitter-elixir.so\""
   (str "libtree-sitter-" (->string lang) ".so"))
 (sig grammar-library-name (any -> string))
 
@@ -700,7 +702,9 @@ not the whole enclosing module. Falls back to the top-level form, then `point`."
 (defn grammar-fetch (source dest)
   "Bring the grammar at `source` to the directory `dest`: a git URL is cloned (shallow,
 so a language costs seconds, not a history); a local directory is used as it is. Returns
-`{:ok dir}` — the checkout holding `src/` — or `{:error text}`."
+`{:ok dir}` — the checkout holding `src/` — or `{:error text}`.
+
+    (editor/treesit/grammar-fetch \"nowhere\" \"unused\")   → {:error \"no grammar at nowhere (a git URL or a directory)\"}"
   (cond
     (file/dir? source) {:ok source}
     (or (string/starts-with? source "http") (string/starts-with? source "git@"))
@@ -717,7 +721,9 @@ so a language costs seconds, not a history); a local directory is used as it is.
 `<out-dir>/libtree-sitter-<lang>.so`, the library `%tree-sitter-load-grammar` takes. A
 `src/` a grammar generator has not produced yet (a repository shipping only
 `grammar.js`) is reported, not generated: that needs the tree-sitter CLI. Returns
-`{:ok path}` or `{:error text}`."
+`{:ok path}` or `{:error text}`.
+
+    (contains? (editor/treesit/grammar-build \".\" :none \".\") :error)   → true"
   (let (src (path/join checkout "src")
         parser (path/join src "parser.c")
         out (path/join out-dir (grammar-library-name lang)))
@@ -740,7 +746,9 @@ so a language costs seconds, not a history); a local directory is used as it is.
   "`grammar-fetch` then `grammar-build`: from where a grammar lives (`source` — a git URL
 or a directory) to `<out-dir>/libtree-sitter-<lang>.so`, cloning into
 `<work-dir>/<lang>` when it has to. The one call a mode's `:grammar` declaration needs
-to become a loadable library. `{:ok path}` or `{:error text}`."
+to become a loadable library. `{:ok path}` or `{:error text}`.
+
+    (contains? (editor/treesit/grammar-install \"nowhere\" :none \".\" \".\") :error)   → true"
   (let (fetched (grammar-fetch source (path/join work-dir (->string lang))))
     (if (:error fetched)
       fetched
