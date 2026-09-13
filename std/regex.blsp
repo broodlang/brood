@@ -737,6 +737,49 @@ Runs once per distinct (set, char) — every repeat is the loop's one `table/get
 
 (def- regex-cap-cache (table/new))
 
+(defn- regex-first-tests (states stack seen acc)
+  "The `:char` tests a match can START with — the tests of every `:char` state in the
+start state's epsilon closure, walked from the work `stack` of state indices (a
+tail-recursive worklist; `seen` is the visited bitset) — as a list, or with `:any` in
+it when the closure reaches `:match` (an empty match is possible), a `.`, or a
+zero-width test (`\\b`, `^`, `$`: a start the prefilter cannot judge from one
+character)."
+  (if (empty? stack)
+    acc
+    (let (pc (first stack)
+          more (rest stack))
+      (if (regex-bit? seen pc)
+        (regex-first-tests states more seen acc)
+        (let (seen2 (bit/or seen (bit/shift-left 1 pc))
+              st (nth states pc)
+              t (get st :t))
+          (cond
+            (= t :split)
+              (regex-first-tests states (cons (get st :a) (cons (get st :b) more)) seen2 acc)
+            (= t :save) (regex-first-tests states (cons (get st :next) more) seen2 acc)
+            (= t :char)
+              (regex-first-tests states
+                more
+                seen2
+                (cons (if (= (get (get st :test) :kind) :any) :any (get st :test)) acc))
+            else (regex-first-tests states more seen2 (cons :any acc))))))))
+
+(defn- regex-first-set (states start)
+  "The prefilter for `regex-cap-run`: the list of `:char` tests a match at a position
+must begin by satisfying, or nil when no such judgement is possible."
+  (let (tests (regex-first-tests states (list start) 0 (list)))
+    (if (any? tests (fn (x) (= x :any))) nil tests)))
+
+(defn- regex-can-start? (first codes pos n)
+  "Could a match begin at `pos`? Always when there is no prefilter; else only when the
+character there satisfies one of the first tests (never past the end)."
+  (or (nil? first)
+    (let (code (if (< pos n) (nth codes pos) nil))
+      (if (nil? code)
+        false
+        (let (c (string/int->char code))
+          (any? first (fn (test) (regex-char-test? test c))))))))
+
 (defn- regex-cap-compile (pattern)
   "The capture-bearing machine for `pattern`, memoised: {:states :start :ngroups :nslots}.
 Separate from `regex-cache` so a pattern used both ways compiles both machines and a
@@ -750,18 +793,23 @@ pattern used one way compiles one."
                  :ngroups ngroups
                  ;; two slots per group (open, close) — plus group 0, the whole match
                  :nslots (* 2 (inc ngroups))
+                 ;; the first-character prefilter (`regex-first-set`)
+                 :first (regex-first-set (get nfa :states) (get nfa :start))
                  ;; a boundary pattern must keep scanning past a position no thread
                  ;; survives (`regex-cap-run`); any other may stop there
                  :wordb (any? (get nfa :states)
                           (fn (st) (or (= (get st :t) :wordb) (= (get st :t) :nwordb))))})
-        (table/put regex-cap-cache pattern obj)
-        obj)
+        ;; the start thread's capture slots, built once per pattern, not once per position
+        (let (full (assoc obj :blank (regex-cap-blank (get obj :nslots))))
+          (table/put regex-cap-cache pattern full)
+          full))
       hit)))
 
 (defn- regex-cap-blank (nslots)
   "Capture slots with nothing recorded yet — a group that never participates in the
 match keeps its nils and comes back as `nil` rather than as an empty string."
-  (into [] (map (range nslots) (fn (_) nil))))
+  (into [] (map (range (math/floor nslots)) (fn (_) nil))))
+(sig regex-cap-blank (number -> vector))
 
 (defn- regex-word-code? (code)
   "Is codepoint `code` a word character (`\\w`: letter, digit, `_`)?"
@@ -817,61 +865,75 @@ ambiguity in favour of the higher-priority path."
             (if (regex-wordb? codes pos n)
               [added2 acc]
               (regex-cap-add states (get st :next) caps codes pos n added2 acc))
-          ;; `:char` and `:match` are where a thread comes to rest for this position
-          else [added2 (into acc [[pc caps]])])))))
+          ;; `:char` and `:match` are where a thread comes to rest for this position. Consed,
+          ;; so `acc` is the thread list in REVERSE priority order (the caller reverses it
+          ;; once per position): an `into` onto a vector here copied the whole list per
+          ;; thread — the capture engine's dominant cost, 80× the bitset engine's.
+          else [added2 (cons [pc caps] acc)])))))
 
-(defn- regex-cap-scan (states threads j codes code pos n best added acc)
-  "Walk the threads at `pos` in priority order, seeding the list for `pos + 1`.
-Returns [best added acc]. The first `:match` becomes the best-so-far and stops the
-walk — everything after it is lower priority, so it cannot improve on this."
-  (if (>= j (count threads))
+(defn- regex-cap-scan (states threads codes code pos n best added acc)
+  "Walk `threads` (the position's list, in PRIORITY order) seeding the list for
+`pos + 1` — consed onto `acc`, so it comes back in reverse priority order. Returns
+[best added acc]. The first `:match` becomes the best-so-far and stops the walk —
+everything after it is lower priority, so it cannot improve on this."
+  (if (empty? threads)
     [best added acc]
-    (let ([pc caps] (nth threads j)
+    (let ([pc caps] (first threads)
           st (nth states pc))
       (if (= (get st :t) :match)
         [caps added acc]
         (if (and (not (nil? code)) (regex-char-test? (get st :test) (string/int->char code)))
           (let ([added2 acc2] (regex-cap-add states (get st :next) caps codes (inc pos) n added acc))
-            (regex-cap-scan states threads (inc j) codes code pos n best added2 acc2))
-          (regex-cap-scan states threads (inc j) codes code pos n best added acc))))))
+            (regex-cap-scan states (rest threads) codes code pos n best added2 acc2))
+          (regex-cap-scan states (rest threads) codes code pos n best added acc))))))
 
-(defn- regex-cap-run (states start nslots codes n pos threads added best wordb?)
+(defn- regex-cap-run (states start blank first codes n pos threads added best wordb?)
   "Run the VM from `pos` to the end of input; returns the winning capture slots, or nil.
-A fresh start thread is injected at every position — at the BACK of the list, so a
-match beginning further left always outranks one beginning further right — and only
-until something matches, after which a later start could only be worse. No live
-thread ends the run only once something HAS matched: before that, a later start can
-still succeed — an injected start whose `\\b` failed here leaves this position empty
-and the next one open. Only a boundary pattern (`wordb?`) can do that: for any other
-an injected start always yields a thread, so an empty position IS the end."
+`threads` is the position's list in REVERSE priority order (as `regex-cap-add` conses
+it); it is reversed once here before the scan. A fresh start thread is injected at every
+position — consed on, i.e. at the BACK in priority, so a match beginning further left
+always outranks one beginning further right — and only until something matches, after
+which a later start could only be worse. No live thread ends the run only once something
+HAS matched: before that, a later start can still succeed — an injected start whose `\\b`
+failed here leaves this position empty and the next one open. Only a boundary pattern
+(`wordb?`) can do that: for any other an injected start always yields a thread, so an
+empty position IS the end."
   (if (> pos n)
     best
-    (let ([added2 threads2] (if (nil? best)
+    ;; inject the start thread only while nothing has matched AND a match could begin
+    ;; here (`regex-can-start?`): a lexer pattern like `#.*` then costs one char test at
+    ;; every position but the `#`
+    (let ([added2 threads2] (if (and (nil? best) (regex-can-start? first codes pos n))
                               (regex-cap-add states
-                                start
-                                (regex-cap-blank nslots)
-                                codes
-                                pos
-                                n
-                                added
-                                threads)
+                                start blank codes pos n added threads)
                               [added threads]))
-      (if (and (empty? threads2) (or (not (nil? best)) (not wordb?)))
+      ;; an empty position ends the run once something matched — or, without a prefilter
+      ;; (which leaves positions empty on purpose) and without boundaries, at all
+      (if (and (empty? threads2) (or (not (nil? best)) (and (nil? first) (not wordb?))))
         best
         (let (code (if (< pos n) (nth codes pos) nil)
               [best2 added3 next-threads] (if (empty? threads2)
-                                            [best 0 []]
+                                            [best 0 '()]
                                             (regex-cap-scan states
-                                              threads2
-                                              0
+                                              (reverse threads2)
                                               codes
                                               code
                                               pos
                                               n
                                               best
                                               0
-                                              [])))
-          (regex-cap-run states start nslots codes n (inc pos) next-threads added3 best2 wordb?))))))
+                                              '())))
+          (regex-cap-run states
+            start
+            blank
+            first
+            codes
+            n
+            (inc pos)
+            next-threads
+            added3
+            best2
+            wordb?))))))
 
 (defn- regex-cap-group (s caps k)
   "Group `k` as {:start :end :text}, or nil when it never participated."
@@ -899,11 +961,12 @@ group."
 still means the start of the whole string even when scanning a later suffix."
   (let (caps (regex-cap-run (get obj :states)
                (get obj :start)
-               (get obj :nslots)
+               (get obj :blank)
+               (get obj :first)
                codes
                n
                from
-               []
+               (list)
                0
                nil
                (get obj :wordb)))
