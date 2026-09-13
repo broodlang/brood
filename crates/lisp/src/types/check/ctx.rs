@@ -338,58 +338,19 @@ impl Default for CtxId {
     }
 }
 
+/// The FILE-level half of a [`Ctx`] (2026-09-13): what a whole file's walk knows about the
+/// file — its globals, declared and inferred signatures, the forms of its functions — as
+/// opposed to what one SCOPE knows about its bindings. Behind an `Arc` so that extending a
+/// scope (`bind`, `narrow`, a branch of an `if`) shares it by reference: before the split
+/// every `Ctx::clone` deep-copied these ~20 maps — hundreds of `Sig`s, each a `Vec<Ty>` —
+/// and a `perf` profile of the checker on `std/editor/buffer.blsp` read 70% of its time in
+/// `Vec<Ty>::clone`, `RawTable<(Symbol, Sig)>::clone`, `Ty::drop` and the allocator
+/// (ADR-340/341's fixpoints made the file's walk repeat, which multiplied the copies; the
+/// copies were the cost). The between-pass mutators (`add_inferred_fn_sig`, …) go through
+/// `Arc::make_mut`: in place when this is the only holder, a single copy otherwise — so the
+/// value semantics are exactly the pre-split ones, only the sharing changed.
 #[derive(Clone, Default)]
-pub(super) struct Ctx {
-    /// See [`CtxId`].
-    id: CtxId,
-    /// Strict mode (`nest check --strict`): a dynamic value with a PRECISE bound is
-    /// checked by inclusion, not overlap — see [`crate::types::GradualTy::consistent_with_mode`].
-    strict_mode: bool,
-    /// Lint categories suppressed in the current subtree (a `(check-allow …)`
-    /// scope, ORed as we descend). `0` = nothing suppressed (the common case).
-    suppressed: u8,
-    /// Ability facts for the file (op-fn symbols → `(ability, op)`, and the covered
-    /// impls) — set once at the file level so `check_into` can flag an ability op applied
-    /// to a record-typed value with no impl. `None` in a file with no `defability`.
-    /// Shared (`Arc`) so cloning `Ctx` as the walk descends stays cheap.
-    ability: Option<std::sync::Arc<super::protocol::AbilityInfo>>,
-    /// Multimethod facts for the file (`defmulti` generic symbols + covered tuples) — set
-    /// once at the file level so `check_into` can flag a generic call whose args' identities
-    /// come from *inference* (a record-typed variable), complementing the syntactic pass.
-    /// `None` in a file with no `defmulti`. Shared (`Arc`) so cloning `Ctx` stays cheap.
-    multi: Option<std::sync::Arc<super::protocol::MultiInfo>>,
-    /// The function whose signature is being **inferred** (`sigs::infer_sig`), if any. A
-    /// self-recursive call to it in a branch-result position contributes ⊥ to the return
-    /// union — by induction it returns the same as the base cases, so skipping it lets a
-    /// recursive function's return infer from its non-recursive branches. `None` outside
-    /// return inference. (Set only on the return-inference `Ctx`, never the file walk.)
-    inferring_self: Option<Symbol>,
-    types: HashMap<Symbol, Ty>,
-    /// **Path narrowings** — the type of a *compound path* asserted by an
-    /// enclosing guard, keyed by a base symbol plus a chain of [`PathKey`]s
-    /// (keyword fields and/or fixed indices). Occurrence typing through
-    /// (possibly nested) field / index access: `(if (int? (get r :age)) …)`
-    /// records `(r, [Field :age]) → int`, and `(if (int? (nth (get cfg :items) 0)) …)`
-    /// records `(cfg, [Field :items, Index 0]) → int`, for the then-branch. Sound
-    /// because Brood is immutable — neither the base nor the pure access chain can
-    /// change between the guard and a use, so the assertion holds. Consulted by
-    /// `guards::expr_ty`'s path lookup; empty in the common (no-guard) case.
-    path_types: HashMap<(Symbol, Vec<PathKey>), Ty>,
-    /// `bound-name → (variable, type-it-asserts)`: a `let`-stored guard result.
-    guards: HashMap<Symbol, (Symbol, Ty)>,
-    /// **Let-binding aliases.** `(let (a b) …)` aliases `a` and `b` — they
-    /// name the same value through the scope, so narrowing either propagates
-    /// to the other. Stored as an undirected adjacency map (each name maps
-    /// to its co-equivalent set), so `narrow` BFSes the equivalence class
-    /// and tightens every member. Brood is immutable, so the relation is
-    /// sound for the binding's extent; `bind` (shadow) disconnects the name
-    /// from every neighbour to prevent stale aliasing across re-bindings.
-    aliases: HashMap<Symbol, HashSet<Symbol>>,
-    /// Every locally-bound name in scope — fn/lambda params and let bindings.
-    /// Distinct from `types`: a fn-param has *no known type* (`ANY` by default)
-    /// but is *in scope*, so it must not be flagged unbound. `types` records
-    /// narrowings on top; `locals` records existence.
-    locals: HashSet<Symbol>,
+struct FileFacts {
     /// Top-level names defined earlier in the same file (`def`/`defn`/
     /// `defmacro` accumulated by [`check_file`]). The file isn't being
     /// evaluated, so these aren't in `heap`'s global table — we track them
@@ -457,11 +418,6 @@ pub(super) struct Ctx {
     /// argument constraints. Redefinable-global caution is the caller's (treated as an
     /// over-approximation, like the loaded-inferred sigs).
     inferred_fn_sig: HashMap<Symbol, Sig>,
-    /// A `let`-bound name whose RHS is a `fn` LITERAL → the call-site signature
-    /// `sigs::let_bound_lambda_sig` derived from that literal (parameter domains + result).
-    /// Scoped like every binding: `bind` on the name drops it, and the scope clone the
-    /// `let` body is walked in is discarded with the body.
-    let_fn_sigs: HashMap<Symbol, Sig>,
     /// **Caller-derived parameter types** of this file's module-PRIVATE functions (Pass 2.9,
     /// ADR-341): per parameter, the union of what every call site in the file hands it —
     /// `None` for a position some site cannot type. A private function's callers are all in
@@ -469,12 +425,6 @@ pub(super) struct Ctx {
     /// same-file callers read. Absent for a function that escapes as a value, has no site,
     /// declares a sig, or is not a single plain-parameter arm.
     derived_params: HashMap<Symbol, Vec<Option<Ty>>>,
-    /// Parameters bound to a CALLER-DERIVED type in the walk of a private body (Pass 2.9).
-    /// Such a binding is for checking the body's uses, not for judging its guards: a
-    /// defensive `(nil? x)` the in-file callers never exercise is not "never true" in the
-    /// sense the impossible-predicate lint reports — the author wrote it for the callers
-    /// that are not here yet. Dropped by `bind` (a shadow), like every binding fact.
-    derived_locals: HashSet<Symbol>,
     /// The `(fn …)` FORM of each same-file, single-def, undeclared function (the Pass 2.8
     /// candidates) — what call-site specialization (`sigs::specialized_ret`) re-types under
     /// a call's argument types. The file isn't loaded while it is checked, so this is the
@@ -509,37 +459,6 @@ pub(super) struct Ctx {
     /// give a call site the *matching arm's* return type instead of a flat
     /// fallback. See `docs/type-arrow-intersection.md`.
     declared_overloads: HashMap<Symbol, Vec<Sig>>,
-    /// Parameters whose type was **seeded from the enclosing function's `(sig …)`
-    /// declaration** — the subset of `types` we trust enough to flag a *dead
-    /// clause* on. A guard that narrows one of these to the empty type means a
-    /// `match`/`cond` clause can never run (the declared type is incompatible
-    /// with the pattern). Gating on this set is what keeps the dead-clause lint
-    /// free of false positives: a literal scrutinee or a compiler-generated guard
-    /// (destructure / `match` lowering) never involves a sig-typed param, so it
-    /// is never flagged. Shadowing removes a name (see [`bind`](Ctx::bind)).
-    sig_params: HashSet<Symbol>,
-    /// **Surface `let`-locals eligible for the dead-clause lint** — the broadening
-    /// of that lint past sig-typed params. A `let`-bound local qualifies only when
-    /// its RHS has a **precise** (`GradualTy.dynamic == false`) type — a literal or
-    /// integer-closed expression, never a call-result or redefinable-global
-    /// reference (those are `dynamic`, so a "dead" conclusion could be invalidated
-    /// by a reload — excluding them keeps the lint reload-safe) — and its name is
-    /// **surface** (not a gensym temp from macro expansion) with a source position.
-    /// A local is immutable within its scope, so an over-approximated-but-precise
-    /// type narrowed to `never` by a guard proves the branch dead, exactly as a
-    /// sig-param does. Shadowing removes a name (see [`bind`](Ctx::bind)).
-    dead_clause_locals: HashSet<Symbol>,
-    /// Whether to flag *operand / value-slot* unbound symbols (a bare symbol in
-    /// an evaluated argument or a `def`/`let`/`if` value position). On only when
-    /// checking a **complete file** ([`check_file`]): there every top-level def
-    /// is in `file_globals` and the project image is loaded, so an unresolved
-    /// operand is genuinely unbound. Off for a bare fragment ([`check_form`] /
-    /// the `(check 'form)` builtin / REPL snippets), where a free variable is
-    /// legitimately ambiguous (a surrounding-scope or REPL global), so flagging
-    /// it would be a false positive. Call *heads* are flagged in both modes —
-    /// an unbound callee is reliably a real error. Threads through every cloned
-    /// sub-scope.
-    check_operands: bool,
     /// Known namespace prefixes — every `mod/` (the segment up to and including the
     /// last `/`) for which *some* `mod/<name>` global is loaded in the heap. Lets
     /// the unbound check stay silent on a qualified reference whose module we don't
@@ -573,7 +492,111 @@ pub(super) struct Ctx {
     bound_guarded: Arc<HashSet<Symbol>>,
 }
 
+#[derive(Clone, Default)]
+pub(super) struct Ctx {
+    /// See [`CtxId`].
+    id: CtxId,
+    /// Strict mode (`nest check --strict`): a dynamic value with a PRECISE bound is
+    /// checked by inclusion, not overlap — see [`crate::types::GradualTy::consistent_with_mode`].
+    strict_mode: bool,
+    /// Lint categories suppressed in the current subtree (a `(check-allow …)`
+    /// scope, ORed as we descend). `0` = nothing suppressed (the common case).
+    suppressed: u8,
+    /// Ability facts for the file (op-fn symbols → `(ability, op)`, and the covered
+    /// impls) — set once at the file level so `check_into` can flag an ability op applied
+    /// to a record-typed value with no impl. `None` in a file with no `defability`.
+    /// Shared (`Arc`) so cloning `Ctx` as the walk descends stays cheap.
+    ability: Option<std::sync::Arc<super::protocol::AbilityInfo>>,
+    /// Multimethod facts for the file (`defmulti` generic symbols + covered tuples) — set
+    /// once at the file level so `check_into` can flag a generic call whose args' identities
+    /// come from *inference* (a record-typed variable), complementing the syntactic pass.
+    /// `None` in a file with no `defmulti`. Shared (`Arc`) so cloning `Ctx` stays cheap.
+    multi: Option<std::sync::Arc<super::protocol::MultiInfo>>,
+    /// The function whose signature is being **inferred** (`sigs::infer_sig`), if any. A
+    /// self-recursive call to it in a branch-result position contributes ⊥ to the return
+    /// union — by induction it returns the same as the base cases, so skipping it lets a
+    /// recursive function's return infer from its non-recursive branches. `None` outside
+    /// return inference. (Set only on the return-inference `Ctx`, never the file walk.)
+    inferring_self: Option<Symbol>,
+    types: HashMap<Symbol, Ty>,
+    /// **Path narrowings** — the type of a *compound path* asserted by an
+    /// enclosing guard, keyed by a base symbol plus a chain of [`PathKey`]s
+    /// (keyword fields and/or fixed indices). Occurrence typing through
+    /// (possibly nested) field / index access: `(if (int? (get r :age)) …)`
+    /// records `(r, [Field :age]) → int`, and `(if (int? (nth (get cfg :items) 0)) …)`
+    /// records `(cfg, [Field :items, Index 0]) → int`, for the then-branch. Sound
+    /// because Brood is immutable — neither the base nor the pure access chain can
+    /// change between the guard and a use, so the assertion holds. Consulted by
+    /// `guards::expr_ty`'s path lookup; empty in the common (no-guard) case.
+    path_types: HashMap<(Symbol, Vec<PathKey>), Ty>,
+    /// `bound-name → (variable, type-it-asserts)`: a `let`-stored guard result.
+    guards: HashMap<Symbol, (Symbol, Ty)>,
+    /// **Let-binding aliases.** `(let (a b) …)` aliases `a` and `b` — they
+    /// name the same value through the scope, so narrowing either propagates
+    /// to the other. Stored as an undirected adjacency map (each name maps
+    /// to its co-equivalent set), so `narrow` BFSes the equivalence class
+    /// and tightens every member. Brood is immutable, so the relation is
+    /// sound for the binding's extent; `bind` (shadow) disconnects the name
+    /// from every neighbour to prevent stale aliasing across re-bindings.
+    aliases: HashMap<Symbol, HashSet<Symbol>>,
+    /// Every locally-bound name in scope — fn/lambda params and let bindings.
+    /// Distinct from `types`: a fn-param has *no known type* (`ANY` by default)
+    /// but is *in scope*, so it must not be flagged unbound. `types` records
+    /// narrowings on top; `locals` records existence.
+    locals: HashSet<Symbol>,
+    /// A `let`-bound name whose RHS is a `fn` LITERAL → the call-site signature
+    /// `sigs::let_bound_lambda_sig` derived from that literal (parameter domains + result).
+    /// Scoped like every binding: `bind` on the name drops it, and the scope clone the
+    /// `let` body is walked in is discarded with the body.
+    let_fn_sigs: HashMap<Symbol, Sig>,
+    /// Parameters bound to a CALLER-DERIVED type in the walk of a private body (Pass 2.9).
+    /// Such a binding is for checking the body's uses, not for judging its guards: a
+    /// defensive `(nil? x)` the in-file callers never exercise is not "never true" in the
+    /// sense the impossible-predicate lint reports — the author wrote it for the callers
+    /// that are not here yet. Dropped by `bind` (a shadow), like every binding fact.
+    derived_locals: HashSet<Symbol>,
+    /// Parameters whose type was **seeded from the enclosing function's `(sig …)`
+    /// declaration** — the subset of `types` we trust enough to flag a *dead
+    /// clause* on. A guard that narrows one of these to the empty type means a
+    /// `match`/`cond` clause can never run (the declared type is incompatible
+    /// with the pattern). Gating on this set is what keeps the dead-clause lint
+    /// free of false positives: a literal scrutinee or a compiler-generated guard
+    /// (destructure / `match` lowering) never involves a sig-typed param, so it
+    /// is never flagged. Shadowing removes a name (see [`bind`](Ctx::bind)).
+    sig_params: HashSet<Symbol>,
+    /// **Surface `let`-locals eligible for the dead-clause lint** — the broadening
+    /// of that lint past sig-typed params. A `let`-bound local qualifies only when
+    /// its RHS has a **precise** (`GradualTy.dynamic == false`) type — a literal or
+    /// integer-closed expression, never a call-result or redefinable-global
+    /// reference (those are `dynamic`, so a "dead" conclusion could be invalidated
+    /// by a reload — excluding them keeps the lint reload-safe) — and its name is
+    /// **surface** (not a gensym temp from macro expansion) with a source position.
+    /// A local is immutable within its scope, so an over-approximated-but-precise
+    /// type narrowed to `never` by a guard proves the branch dead, exactly as a
+    /// sig-param does. Shadowing removes a name (see [`bind`](Ctx::bind)).
+    dead_clause_locals: HashSet<Symbol>,
+    /// Whether to flag *operand / value-slot* unbound symbols (a bare symbol in
+    /// an evaluated argument or a `def`/`let`/`if` value position). On only when
+    /// checking a **complete file** ([`check_file`]): there every top-level def
+    /// is in `file_globals` and the project image is loaded, so an unresolved
+    /// operand is genuinely unbound. Off for a bare fragment ([`check_form`] /
+    /// the `(check 'form)` builtin / REPL snippets), where a free variable is
+    /// legitimately ambiguous (a surrounding-scope or REPL global), so flagging
+    /// it would be a false positive. Call *heads* are flagged in both modes —
+    /// an unbound callee is reliably a real error. Threads through every cloned
+    /// sub-scope.
+    check_operands: bool,
+    /// The file-level half — shared by reference across every scope derived from one walk's
+    /// root; see [`FileFacts`].
+    file: Arc<FileFacts>,
+}
+
 impl Ctx {
+    /// The file-level half for mutation — in place while this scope is its only holder, a
+    /// single copy otherwise (`Arc::make_mut`), which keeps the pre-split value semantics.
+    fn file_mut(&mut self) -> &mut FileFacts {
+        Arc::make_mut(&mut self.file)
+    }
     /// The locally-known type for `sym`, or `None` if it isn't tracked.
     pub(super) fn get(&self, sym: Symbol) -> Option<Ty> {
         self.types.get(&sym).cloned()
@@ -592,13 +615,13 @@ impl Ctx {
             || self.types.contains_key(&sym)
             || self.guards.contains_key(&sym)
             || self.aliases.contains_key(&sym)
-            || self.file_globals.contains(&sym)
+            || self.file.file_globals.contains(&sym)
     }
     /// Is `sym` a `def`/`defn`/`defdyn`-defined **file-global** (as opposed to a
     /// lexical binder)? Used by the unused-`let` lint to tell a deliberate shadow
     /// of a file-global (`(let (*dt* 5) …)`) from a genuine leftover.
     pub(super) fn is_file_global(&self, sym: Symbol) -> bool {
-        self.file_globals.contains(&sym)
+        self.file.file_globals.contains(&sym)
     }
     /// A copy of this ctx with the given lint categories additionally suppressed
     /// (a `(check-allow …)` scope entered). ORs into any already-suppressed set.
@@ -793,84 +816,85 @@ impl Ctx {
     /// `name` won't appear in `heap`'s global table). In-place mutation; the
     /// accumulator threads through [`check_file`].
     pub(super) fn add_file_global(&mut self, sym: Symbol) {
-        self.file_globals.insert(sym);
+        self.file_mut().file_globals.insert(sym);
     }
     /// Record a file-local `(defmacro name …)` — both as a file-global (it's a
     /// bound name) and in the macro set (its calls take opaque syntax).
     pub(super) fn add_file_macro(&mut self, sym: Symbol) {
-        self.file_globals.insert(sym);
-        self.file_macros.insert(sym);
+        self.file_mut().file_globals.insert(sym);
+        self.file_mut().file_macros.insert(sym);
     }
     /// Is `sym` a file-local macro name accumulated by [`check_file`]?
     pub(super) fn is_file_macro(&self, sym: Symbol) -> bool {
-        self.file_macros.contains(&sym)
+        self.file.file_macros.contains(&sym)
     }
     /// Adopt the heap's cached, shared prefix set ([`Heap::known_ns_prefixes`]) as `known_ns`
     /// (each prefix ends in `/`) — an O(1) `Arc` bump, so a whole-project check builds it once
     /// instead of per file.
     pub(super) fn set_known_ns_arc(&mut self, prefixes: Arc<HashSet<String>>) {
-        self.known_ns = prefixes;
+        self.file_mut().known_ns = prefixes;
     }
     /// Is `prefix` (a `mod/` segment, trailing slash included) a namespace the
     /// loaded image knows? Used to decide whether an unresolved *qualified* name is
     /// a real unbound reference or a dynamically/elsewhere-defined one.
     pub(super) fn module_is_known(&self, prefix: &str) -> bool {
-        self.known_ns.contains(prefix)
+        self.file.known_ns.contains(prefix)
     }
     /// Record the KI-17 reachability set (see [`required_mods`](Ctx::required_mods)) —
     /// enables the unrequired-module lint for this (whole-file) check.
     pub(super) fn set_required_mods(&mut self, mods: HashSet<String>) {
-        self.required_mods = Some(Arc::new(mods));
+        self.file_mut().required_mods = Some(Arc::new(mods));
     }
     /// The file's reachability set, or `None` when the lint is disabled (fragment mode).
     pub(super) fn required_mods(&self) -> Option<&HashSet<String>> {
-        self.required_mods.as_deref()
+        self.file.required_mods.as_deref()
     }
     /// Record the set of user-written qualified symbol names (see
     /// [`raw_qualified`](Ctx::raw_qualified)).
     pub(super) fn set_raw_qualified(&mut self, names: HashSet<String>) {
-        self.raw_qualified = Arc::new(names);
+        self.file_mut().raw_qualified = Arc::new(names);
     }
     /// Did the qualified name `name` (`"mod/name"`) appear literally in the source?
     pub(super) fn raw_qualified_has(&self, name: &str) -> bool {
-        self.raw_qualified.contains(name)
+        self.file.raw_qualified.contains(name)
     }
     /// Record the `(bound? 'name)`-guarded names of the top-level form about to be
     /// walked (see [`bound_guarded`](Ctx::bound_guarded)).
     pub(super) fn set_bound_guarded(&mut self, names: HashSet<Symbol>) {
-        self.bound_guarded = Arc::new(names);
+        self.file_mut().bound_guarded = Arc::new(names);
     }
     /// Does the enclosing top-level form test `sym` with `(bound? 'sym)`? Then a
     /// reference to it is deliberately conditional — an ambient global some other
     /// module `def`s (`*project-name*`, set at project setup) — and reporting it
     /// unbound would flag code that is correct precisely *because* of the guard.
     pub(super) fn is_bound_guarded(&self, sym: Symbol) -> bool {
-        self.bound_guarded.contains(&sym)
+        self.file.bound_guarded.contains(&sym)
     }
     /// Record that file-local `sym`'s value is a **variadic** `fn` (has a `&`
     /// rest param). Consulted by the arity check so a `(sig …)`-derived *exact*
     /// arity is never used to flag a variadic defn (see `variadic_globals`).
     pub(super) fn mark_variadic_global(&mut self, sym: Symbol) {
-        self.variadic_globals.insert(sym);
+        self.file_mut().variadic_globals.insert(sym);
     }
     /// The inferred per-arm signatures of a same-file multi-arm function, if any.
     pub(super) fn inferred_overload(&self, sym: Symbol) -> Option<Vec<Sig>> {
-        self.inferred_overload.get(&sym).cloned()
+        self.file.inferred_overload.get(&sym).cloned()
     }
     /// Record a same-file multi-arm function's per-arm signatures (Pass 2.8).
     pub(super) fn add_inferred_overload(&mut self, sym: Symbol, sigs: Vec<Sig>) {
-        self.inferred_overload.insert(sym, sigs);
+        self.file_mut().inferred_overload.insert(sym, sigs);
     }
     /// Is `sym` a file-local definition whose value is a variadic `fn`?
     pub(super) fn is_variadic_global(&self, sym: Symbol) -> bool {
-        self.variadic_globals.contains(&sym)
+        self.file.variadic_globals.contains(&sym)
     }
     /// Record the arity a same-file definition of `sym` admits. A name defined more
     /// than once (a redefinition, or a `def` in two branches) merges to the interval
     /// **hull** of the two — accepting a call either definition would accept, which is
     /// the only sound reading when the checker can't say which one a given call sees.
     pub(super) fn add_file_arity(&mut self, sym: Symbol, arity: Arity) {
-        self.file_arity
+        self.file_mut()
+            .file_arity
             .entry(sym)
             .and_modify(|a| {
                 *a = Arity {
@@ -885,50 +909,50 @@ impl Ctx {
     }
     /// The arity a same-file definition of `sym` admits, if the checker could read it.
     pub(super) fn file_arity(&self, sym: Symbol) -> Option<Arity> {
-        self.file_arity.get(&sym).copied()
+        self.file.file_arity.get(&sym).copied()
     }
     /// The user-declared signature for `sym` from a `(sig …)` form, if any.
     pub(super) fn declared_sig(&self, sym: Symbol) -> Option<Sig> {
-        self.declared.get(&sym).cloned()
+        self.file.declared.get(&sym).cloned()
     }
     /// Record a `(sig name (… -> …))` declaration. In-place; threads through
     /// [`check_file`] like [`add_file_global`](Ctx::add_file_global).
     pub(super) fn add_declared_sig(&mut self, sym: Symbol, sig: Sig) {
-        self.declared.insert(sym, sig);
+        self.file_mut().declared.insert(sym, sig);
     }
     /// The declared **value** type for `sym` from a non-arrow `(sig x T)`, if any.
     pub(super) fn declared_value_ty(&self, sym: Symbol) -> Option<Ty> {
-        self.declared_value_ty.get(&sym).cloned()
+        self.file.declared_value_ty.get(&sym).cloned()
     }
     /// Record a `(sig x T)` value-type declaration (`T` non-arrow).
     pub(super) fn add_declared_value_ty(&mut self, sym: Symbol, ty: Ty) {
-        self.declared_value_ty.insert(sym, ty);
+        self.file_mut().declared_value_ty.insert(sym, ty);
     }
     /// The **inferred** value type for undeclared global `sym` (Gap A), if one was
     /// recorded. Never returned when a declared value type exists (callers check
     /// [`declared_value_ty`] first). Callers must treat it as `dynamic_within`.
     pub(super) fn inferred_value_ty(&self, sym: Symbol) -> Option<Ty> {
-        self.inferred_value_ty.get(&sym).cloned()
+        self.file.inferred_value_ty.get(&sym).cloned()
     }
     /// Record an inferred current-image value type for an undeclared,
     /// defined-exactly-once global (Gap A). No-op if a declared value type already
     /// exists (that's authoritative).
     pub(super) fn add_inferred_value_ty(&mut self, sym: Symbol, ty: Ty) {
-        if !self.declared_value_ty.contains_key(&sym) {
-            self.inferred_value_ty.insert(sym, ty);
+        if !self.file.declared_value_ty.contains_key(&sym) {
+            self.file_mut().inferred_value_ty.insert(sym, ty);
         }
     }
     /// The same-file inferred function signature for `sym`, if one was recorded. Read
     /// *after* [`declared_sig`] (authoritative). Callers treat its return as an
     /// over-approximation (a call result), like a loaded-inferred sig.
     pub(super) fn inferred_fn_sig(&self, sym: Symbol) -> Option<Sig> {
-        self.inferred_fn_sig.get(&sym).cloned()
+        self.file.inferred_fn_sig.get(&sym).cloned()
     }
     /// Record a same-file inferred function sig (Pass 2.8). No-op if a sig is already
     /// declared for `sym` — a declaration wins.
     pub(super) fn add_inferred_fn_sig(&mut self, sym: Symbol, sig: Sig) {
-        if !self.declared.contains_key(&sym) {
-            self.inferred_fn_sig.insert(sym, sig);
+        if !self.file.declared.contains_key(&sym) {
+            self.file_mut().inferred_fn_sig.insert(sym, sig);
         }
     }
     /// The call-site signature of the `fn` literal `sym` is `let`-bound to, if any.
@@ -943,11 +967,11 @@ impl Ctx {
     }
     /// The caller-derived parameter types of private function `sym`, if Pass 2.9 derived them.
     pub(super) fn derived_params(&self, sym: Symbol) -> Option<&Vec<Option<Ty>>> {
-        self.derived_params.get(&sym)
+        self.file.derived_params.get(&sym)
     }
     /// Install Pass 2.9's caller-derived parameter types (replacing any earlier set).
     pub(super) fn set_derived_params(&mut self, derived: HashMap<Symbol, Vec<Option<Ty>>>) {
-        self.derived_params = derived;
+        self.file_mut().derived_params = derived;
     }
     /// Bind `sym` to its caller-derived type — a plain binding, marked so the impossible-
     /// predicate lint leaves the body's guards alone (see `derived_locals`).
@@ -963,24 +987,24 @@ impl Ctx {
     /// The `(fn …)` form of a same-file function recorded by Pass 2.8, for call-site
     /// specialization.
     pub(super) fn fn_form(&self, sym: Symbol) -> Option<Value> {
-        self.fn_forms.get(&sym).copied()
+        self.file.fn_forms.get(&sym).copied()
     }
     /// Record a same-file function's `(fn …)` form (Pass 2.8 candidates only).
     pub(super) fn add_fn_form(&mut self, sym: Symbol, form: Value) {
-        self.fn_forms.insert(sym, form);
+        self.file_mut().fn_forms.insert(sym, form);
     }
     /// The un-expanded clauses of a same-file multi-clause `defn`, if recorded.
     pub(super) fn clause_arms(&self, sym: Symbol) -> Option<&Vec<Value>> {
-        self.clause_arms.get(&sym)
+        self.file.clause_arms.get(&sym)
     }
     /// Record a same-file multi-clause `defn`'s clauses (see [`clause_arms`]).
     pub(super) fn add_clause_arms(&mut self, sym: Symbol, clauses: Vec<Value>) {
-        self.clause_arms.insert(sym, clauses);
+        self.file_mut().clause_arms.insert(sym, clauses);
     }
     /// The surface clauses of the inline pattern-clause `fn` literal whose clause-head
     /// list prints as `key` — see the field. `None` also for an ambiguous key.
     pub(super) fn fn_literal_clauses(&self, key: &str) -> Option<&Vec<(Vec<Value>, Value)>> {
-        match self.fn_literal_clauses.get(key) {
+        match self.file.fn_literal_clauses.get(key) {
             Some(Some((clauses, _))) => Some(clauses),
             _ => None,
         }
@@ -995,7 +1019,7 @@ impl Ctx {
         printed: String,
     ) {
         use std::collections::hash_map::Entry;
-        match self.fn_literal_clauses.entry(key) {
+        match self.file_mut().fn_literal_clauses.entry(key) {
             Entry::Vacant(e) => {
                 e.insert(Some((clauses, printed)));
             }
@@ -1010,19 +1034,19 @@ impl Ctx {
     /// The full (variable-bearing) declared sig for `sym`, if it was parsed
     /// with at least one type variable.
     pub(super) fn declared_sig_with_vars(&self, sym: Symbol) -> Option<&SigWithVars> {
-        self.declared_vars.get(&sym)
+        self.file.declared_vars.get(&sym)
     }
     /// Record the type-variable-bearing sig alongside the flattened one.
     pub(super) fn add_declared_sig_with_vars(&mut self, sym: Symbol, sig: SigWithVars) {
-        self.declared_vars.insert(sym, sig);
+        self.file_mut().declared_vars.insert(sym, sig);
     }
     /// The declared overload (2+ distinct arrow sigs) for `sym`, if any.
     pub(super) fn declared_overload(&self, sym: Symbol) -> Option<&Vec<Sig>> {
-        self.declared_overloads.get(&sym)
+        self.file.declared_overloads.get(&sym)
     }
     /// Record a `(sig name (and (A -> B) (C -> D) …))` overload declaration.
     pub(super) fn add_declared_overload(&mut self, sym: Symbol, sigs: Vec<Sig>) {
-        self.declared_overloads.insert(sym, sigs);
+        self.file_mut().declared_overloads.insert(sym, sigs);
     }
     /// Seed parameter `sym` with the type `ty` its enclosing function's `(sig …)`
     /// declared for it, and remember it as a sig-typed param (so a guard that

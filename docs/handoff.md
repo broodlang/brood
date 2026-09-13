@@ -15,7 +15,12 @@ promotion it constrained.
 State when written: `main` = `0223cb1f`, pushed, clean. **One open bug: KI-134**, and it is
 the release blocker — **FIXED later the same day, see item 1; its residue KI-135 too (ADR-344).
 No open bug at the end of 2026-09-13.** The pre-push hook now runs the fast half of CI
-(`make prepush`; see CLAUDE.md "Before every push") — install it with `make hooks`. `nest check` and `nest format --check` are clean; `artifact_matrix` is
+(`make prepush`; see CLAUDE.md "Before every push") — install it with `make hooks`.
+The checker is 1.8× the pre-ADR-340 cost over `std/` (28 s vs 15.6 s, debug) after the `Ctx`
+split (devlog 2026-09-13); what remains is the fixpoints' genuine re-walks — `resolver.blsp`
+takes 11 joint rounds. If it needs to come down further, the next lever is making a round's
+`collect_private_sites` incremental (only the private functions whose inputs moved), not a
+bigger cap. `nest check` and `nest format --check` are clean; `artifact_matrix` is
 green and sabotage-verified.
 
 **Landed later on 2026-09-13 (see the devlog for the numbers):** the VM→native direct call

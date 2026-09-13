@@ -40,10 +40,12 @@
     ;; passes vacuously. Fail loudly instead of reporting a green gate over zero files.
     (is (> (count (std-check-files "std")) 50)))
 
-  (test "check-file reports nothing for any std file"
-    (let (warnings (fold (sort (std-check-files "std"))
-                     nil
-                     (fn (acc path) (append acc (or (reflect/check-file path) nil)))))
-      ;; Assert on the warnings themselves, so a failure names the file, line and lint
-      ;; rather than only a count.
-      (assert= warnings nil))))
+  ;; One unit PER FILE, registered from the directory walk, rather than one fold over all
+  ;; 123: the units run across the worker pool, so the wall time is the slowest file's, not
+  ;; the sum; each file has its own timeout; and a warning fails by FILE NAME. The single
+  ;; unit sat at 105 s against the 120 s per-test cap when ADR-340/341 made the checker
+  ;; six times slower (2026-09-13), and read as a flake whenever the box was loaded.
+  ;; Asserted on the warnings themselves, so a failure names the line and lint too.
+  (doseq (path (sort (std-check-files "std")))
+    (test (str "check-file reports nothing for " path)
+      (assert= (or (reflect/check-file path) nil) nil))))

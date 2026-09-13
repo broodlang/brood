@@ -2229,7 +2229,7 @@ fn check_forms(
                 let live = sigs::live_private_functions(heap, &expanded, &candidates, &ctx)
                     .unwrap_or_default();
                 for (&name, sig) in &original {
-                    if let (Some(sig), true) = (sig, live.contains(&name)) {
+                    if let (Some(sig), true) = (sig, live.contains_key(&name)) {
                         let mut floor = sig.clone();
                         floor.ret = crate::types::Ty::NEVER;
                         ctx.add_inferred_fn_sig(name, floor);
@@ -2241,9 +2241,24 @@ fn check_forms(
                 // a string) and must not be mistaken for a floor that never typed.
                 let mut typed: HashSet<Symbol> = HashSet::new();
                 let mut converged = false;
+                // Whether anything the derivation reads — a return, lifted or re-inferred —
+                // moved since the derivation last ran. When nothing did, re-running it would
+                // walk the file again to reproduce `previous` exactly (the inner fixpoint is a
+                // deterministic function of the returns and its seed), so the round reuses it.
+                let mut inputs_moved = true;
                 for round in 0..32 {
-                    let derived =
-                        sigs::caller_derived_params(heap, &expanded, &candidates, &ctx, &previous);
+                    let derived = if inputs_moved {
+                        sigs::caller_derived_params(
+                            heap,
+                            &expanded,
+                            &candidates,
+                            &live,
+                            &ctx,
+                            &previous,
+                        )
+                    } else {
+                        previous.clone()
+                    };
                     ctx.set_derived_params(derived.clone());
                     let mut returns_moved = false;
                     for (&name, &rhs) in &candidates {
@@ -2300,6 +2315,9 @@ fn check_forms(
                             converged = true;
                             break;
                         }
+                        inputs_moved = true;
+                    } else {
+                        inputs_moved = returns_moved;
                     }
                     previous = derived;
                 }

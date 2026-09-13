@@ -23,6 +23,10 @@
 #     - a change under crates/lisp/src/types/ runs the checker's expectation files
 #       (`sig_adoption_test`, `checker_pass_agreement_test`): a spelling change in a warning
 #       (ADR-341's tuple merge) sat red in the suite for a day.
+#     - a change under crates/lisp/src/types/ or std/ runs CI's two checker gates over the
+#       tree — `nest check` on std/tests/examples and `nest check --strict` on std, both at
+#       zero — because a checker change is judged by what it says about std/: ADR-341's
+#       second cut landed with `math/clamp` red in strict (2026-09-13).
 #
 # Not here, deliberately: the Rust suite and the full `nest test` (12 minutes each — CI's
 # job, `make green` reads the verdict), clippy (`make check`), and anything that needs a
@@ -128,6 +132,22 @@ fi
 if [ "$types_touched" -gt 0 ]; then
     add_test tests/sig_adoption_test.blsp
     add_test tests/checker_pass_agreement_test.blsp
+fi
+if [ "$types_touched" -gt 0 ] || [ "$std_changed" -eq 1 ]; then
+    # CI's checker gates, as CI runs them (ci.yml): the file-list form, since the repo root
+    # is not a nest project. `nest check` exits 1 on any warning.
+    echo "pre-push: running the checker gates over std/ tests/ examples/ (zero warnings)" >&2
+    # shellcheck disable=SC2086
+    set -- $(find std tests examples -name '*.blsp' 2>/dev/null | sort)
+    if ! out=$("$nest_bin" check "$@" 2>&1); then
+        printf '%s\n' "$out" | grep -E 'warning|error' | head -10 | sed 's/^/  /' >&2
+        fail "nest check would fail CI (zero warnings over std/ tests/ examples/)"
+    fi
+    set -- $(find std -name '*.blsp' 2>/dev/null | sort)
+    if ! out=$("$nest_bin" check --strict "$@" 2>&1); then
+        printf '%s\n' "$out" | grep -E 'warning|error' | head -10 | sed 's/^/  /' >&2
+        fail "nest check --strict over std/ would fail CI"
+    fi
 fi
 if [ -n "$tests" ]; then
     echo "pre-push: running$tests" >&2
