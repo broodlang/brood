@@ -578,9 +578,10 @@ pub(super) fn check_if(
         None => (then_ctx, else_ctx),
     };
     // Layer **chained-guard** narrowing on top: every conjunct of an `and`-test narrows
-    // the then-branch (a truthy `and` proves all of them), and an `or`-test whose disjuncts
-    // are all biconditional guards over one variable narrows both branches (then → the
-    // union, else → its complement). All via intersecting `narrow`, so they compose with
+    // the then-branch (a truthy `and` proves all of them), every biconditional disjunct of
+    // an `or`-test narrows the else-branch by its complement (a falsy `or` refutes all of
+    // them, each on its own variable), and an `or`-test whose disjuncts are all
+    // biconditional guards over ONE variable narrows the then-branch to their union. All via intersecting `narrow`, so they compose with
     // the single-guard and path narrowings above. Guards read against the original `ctx`
     // (for let-alias resolution); the tightening lands on the branch ctxs.
     let (then_ctx, else_ctx) = {
@@ -589,9 +590,11 @@ pub(super) fn check_if(
         for g in and_conjunct_guards(heap, test, ctx) {
             t = t.narrow(g.sym, g.ty);
         }
+        for g in or_disjunct_guards(heap, test, ctx) {
+            e = e.narrow(g.sym, g.ty.negate());
+        }
         if let Some((sym, union)) = or_same_var_narrowing(heap, test, ctx) {
-            t = t.narrow(sym, union.clone());
-            e = e.narrow(sym, union.negate());
+            t = t.narrow(sym, union);
         }
         (t, e)
     };
@@ -604,6 +607,50 @@ pub(super) fn check_if(
         check_value_leaf(heap, else_form, form, &else_ctx, out);
         check_into(heap, else_form, &else_ctx, out);
     }
+}
+
+/// The scope after ONE `let` binding `(pat rhs)`, given the RHS's type as read in the
+/// pre-bind scope — the one place the rules live, so every walker that must see a
+/// `let` body the way `check_let` does (the caller-derived site collector,
+/// `sigs::collect_private_sites`) binds identically. A symbol binder gets the type, a
+/// `fn` literal's parameter domains as a per-name fact (`sigs::let_bound_lambda_sig`),
+/// a BICONDITIONAL guard result as a guard alias (a `then_only`/`else_only` one must
+/// not be, or a later `(if alias …)` would negate it in the other branch — the `and`
+/// short-circuit), and a plain `(let (name other) …)` as an alias of `other` — the
+/// `match` compiler's `(let (m__28 x) (if (%eq m__28 lit) …))` narrows the user's `x`
+/// through it, and `and`/`or`'s temporaries narrow the value they stand for. `other` is
+/// not required to be a known local: narrowing inside a branch is sound on a free
+/// reference too (vacuously, on an unreachable path). A destructuring binder binds each
+/// symbol leaf to its position's type.
+pub(in crate::types::check) fn let_bind_scope(
+    heap: &Heap,
+    scope: Ctx,
+    pat: Value,
+    rhs: Value,
+    rhs_ty: Option<Ty>,
+) -> Ctx {
+    let Value::Sym(name) = pat else {
+        let mut scope = scope;
+        for (sym, ty) in pattern_bindings(heap, pat, rhs_ty.as_ref()) {
+            scope = scope.bind(sym, ty);
+        }
+        return scope;
+    };
+    let rhs_guard = guard_assertion(heap, rhs, &scope);
+    let mut scope = scope.bind(name, rhs_ty.clone());
+    if let Some(sig) = super::super::sigs::let_bound_lambda_sig(heap, rhs, rhs_ty.as_ref(), &scope)
+    {
+        scope = scope.bind_let_fn_sig(name, sig);
+    }
+    if let Some(g) = rhs_guard {
+        if !g.then_only && !g.else_only {
+            scope = scope.add_guard(name, g.sym, g.ty);
+        }
+    }
+    if let Value::Sym(target) = rhs {
+        scope = scope.add_alias(name, target);
+    }
+    scope
 }
 
 /// `(let bindings body…)` / `(letrec …)` — walk the bindings,
@@ -668,22 +715,7 @@ pub(super) fn check_let(
     }
     let mut i = 0;
     while i < binds.len() {
-        let Value::Sym(name) = binds[i] else {
-            // Destructuring binder (`(let ((a b) rhs) …)`): we can't pin a precise
-            // type per position here, but the pattern's symbol leaves ARE bound in
-            // the body — bind each to `None` (in scope, unknown type) so a use like
-            // `(+ a b)` doesn't misfire as an unbound-symbol error. Still check the
-            // RHS as an evaluated expression.
-            check_value_leaf(heap, binds[i + 1], form, &scope, out);
-            check_into(heap, binds[i + 1], &scope, out);
-            let rhs_ty = expr_ty(heap, binds[i + 1], &scope);
-            for (sym, ty) in pattern_bindings(heap, binds[i], rhs_ty.as_ref()) {
-                scope = scope.bind(sym, ty);
-            }
-            i += 2;
-            continue;
-        };
-        let rhs = binds[i + 1];
+        let (pat, rhs) = (binds[i], binds[i + 1]);
         // The RHS is an evaluated value position — a bare unbound symbol there
         // (`(let (x typo) …)`) is a reference error.
         check_value_leaf(heap, rhs, form, &scope, out);
@@ -694,46 +726,19 @@ pub(super) fn check_let(
         // call-result or global reference — the reload-safe subset the dead-clause
         // lint may key off (ADR-131).
         let rhs_precise = !gradual_of(heap, rhs, &scope).dynamic;
-        let rhs_guard = guard_assertion(heap, rhs, &scope);
-        scope = scope.bind(name, rhs_ty.clone());
-        // A `fn` LITERAL on the right binds a name that heads calls in the body; give
-        // those calls the literal's parameter domains (see `sigs::let_bound_lambda_sig`
-        // for why this is a per-name fact and not the arrow's type).
-        if let Some(sig) =
-            super::super::sigs::let_bound_lambda_sig(heap, rhs, rhs_ty.as_ref(), &scope)
-        {
-            scope = scope.bind_let_fn_sig(name, sig);
-        }
+        scope = let_bind_scope(heap, scope, pat, rhs, rhs_ty.clone());
         // Dead-clause lint eligibility: a surface (non-gensym), precisely-typed
         // `let`-local joins the set the dead-clause lint may flag, so a later guard
         // that narrows it to `never` is caught — `(let (x 5) (cond (string? x) …))`.
-        if rhs_precise
-            && rhs_ty.as_ref().is_some_and(|t| !t.is_never())
-            && !is_gensym_sym(name)
-            && heap.form_pos_only(form).is_some()
-            && !heap.is_synthetic(form)
-        {
-            scope.mark_dead_clause_local(name);
-        }
-        // Only alias a *biconditional* guard: a `then_only` guard (the `and`
-        // short-circuit) must not be stored as a let-alias, or a later
-        // `(if alias …)` would negate it in the else-branch (unsound).
-        if let Some(g) = rhs_guard {
-            if !g.then_only && !g.else_only {
-                scope = scope.add_guard(name, g.sym, g.ty);
+        if let Value::Sym(name) = pat {
+            if rhs_precise
+                && rhs_ty.as_ref().is_some_and(|t| !t.is_never())
+                && !is_gensym_sym(name)
+                && heap.form_pos_only(form).is_some()
+                && !heap.is_synthetic(form)
+            {
+                scope.mark_dead_clause_local(name);
             }
-        }
-        // A plain `(let (name other) …)` aliases `name` to `other` — narrowing
-        // either propagates to the other via `narrow_chain`. This is what
-        // makes the `match` pattern compiler's `(let (m__28 x) (if (%eq m__28
-        // lit) …))` expansion narrow the user's `x`, not just the internal
-        // `m__28`. We don't gate on `other` being a known local: it might be
-        // a free reference (e.g. when checking a bare form via
-        // `(check 'form)`) or a top-level global — either way, narrowing
-        // inside the branch is sound (it describes "if this branch is
-        // reached, then…", vacuously true on unreachable paths).
-        if let Value::Sym(target) = rhs {
-            scope = scope.add_alias(name, target);
         }
         i += 2;
     }

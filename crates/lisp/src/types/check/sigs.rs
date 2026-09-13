@@ -2976,8 +2976,15 @@ fn collect_private_sites(
             }
         }
         /// Walk `form` in `scope`; `def_of` is the candidate a `(def name …)` value slot
-        /// belongs to, so its `(fn …)` binds the derived parameters.
+        /// belongs to, so its `(fn …)` binds the derived parameters. Grows the stack as the
+        /// other body walkers do: this runs over EVERY file, and a macro can construct a
+        /// body deeper than the reader would ever read.
         fn walk(&mut self, form: Value, scope: &Ctx, def_of: Option<Symbol>) {
+            stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+                self.walk_inner(form, scope, def_of)
+            })
+        }
+        fn walk_inner(&mut self, form: Value, scope: &Ctx, def_of: Option<Symbol>) {
             let heap = self.heap;
             match form {
                 Value::Sym(s) if self.targets.contains(&s) => {
@@ -3078,9 +3085,13 @@ fn collect_private_sites(
                     return;
                 };
                 let mut inner = scope.clone();
-                if value::symbol_is(head, kw::LETREC) {
-                    for pair in binds.chunks(2) {
-                        if let Some(&Value::Sym(n)) = pair.first() {
+                // The pre-binding `check_let` does: `letrec` every name, `let` its
+                // `fn`-valued ones (a closure resolves its own name by late lookup).
+                for pair in binds.chunks(2) {
+                    if let (Some(&Value::Sym(n)), Some(&rhs)) = (pair.first(), pair.get(1)) {
+                        if value::symbol_is(head, kw::LETREC)
+                            || super::walk::fn_form_items(heap, rhs).is_some()
+                        {
                             inner = inner.bind(n, None);
                         }
                     }
@@ -3091,13 +3102,10 @@ fn collect_private_sites(
                     };
                     self.walk(rhs, &inner, None);
                     let rhs_ty = super::infer::with_fresh_depth(|| expr_ty(heap, rhs, &inner));
-                    inner = bind_head(heap, inner, pat, rhs_ty);
-                    // `(let (name other) …)` aliases the two, as `check_let` does — the
-                    // `and`/`or` expansions bind a temporary to the tested value, and a
-                    // guard on the temporary must narrow the value it stands for.
-                    if let (Value::Sym(name), Value::Sym(target)) = (pat, rhs) {
-                        inner = inner.add_alias(name, target);
-                    }
+                    // One rule set with `check_let` (`let_bind_scope`): a guard result
+                    // stored in a temporary — `and`'s `(let (g (int? y)) (if g …))` —
+                    // narrows `y` at a site under the `if`, as it does in the walk.
+                    inner = super::walk::let_bind_scope(heap, inner, pat, rhs, rhs_ty);
                 }
                 for &body in &items[2..] {
                     self.walk(body, &inner, None);

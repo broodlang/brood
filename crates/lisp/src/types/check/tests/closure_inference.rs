@@ -482,14 +482,15 @@ fn a_tail_recursive_accumulator_is_typed_at_its_call_site() {
             .any(|w| w.contains("string/length: argument 1 expects string, got int")),
         "{ws:?}"
     );
-    // A list builder: `never` → `list<int>` → stable.
+    // A list builder: `never` → `list<int>` → stable. The element is what the else branch
+    // of `(= i 0)` knows of `i` — its caller-derived `int`, minus the literal.
     let ws = file_warnings(
         "(defn build (i acc) (if (= i 0) acc (build (- i 1) (cons i acc))))\n\
          (defn use-it () (+ 1 (build 3 '())))",
     );
     assert!(
         ws.iter()
-            .any(|w| w.contains("+: argument 2 expects number, got nil | list<int>")),
+            .any(|w| w.contains("+: argument 2 expects number, got nil | list<(int and (not 0))>")),
         "{ws:?}"
     );
     // A self-call in a NESTED position (`cons` of the recursive result): the classic map.
@@ -527,14 +528,20 @@ fn the_recursive_fixpoint_keeps_the_correct_calls_silent() {
 #[test]
 fn the_recursive_fixpoint_declines_rather_than_under_approximate() {
     // A parameter that grows on every round — a list nesting one level deeper per
-    // call — never converges within the bound, and the answer is the flat one, not the
-    // last round's: no finding on either use.
+    // call — never converges as written; the call-site fixpoint declines to the flat
+    // answer, and the caller-derived one WIDENS (`Ty::widened_below`) to `1 | pair`, which
+    // is sound and exact enough: `(nest 3 1)` is a list, so `string/length` on it is a
+    // true finding and `+` (which `1` satisfies) is not.
     let ws = file_warnings(
         "(defn nest (i acc) (if (= i 0) acc (nest (- i 1) (list acc))))\n\
          (defn use-a () (string/length (nest 3 1)))\n\
          (defn use-b () (+ 1 (nest 3 1)))",
     );
-    assert!(ws.is_empty(), "{ws:?}");
+    assert_eq!(
+        ws,
+        vec!["string/length: argument 1 expects string, got 1 | pair ((nest 3 1))".to_string()],
+        "{ws:?}"
+    );
     // Two arms fit the call's arity (a `:when` overload): declined, flat answer.
     let ws = file_warnings(
         "(defn pick ((i acc) :when (= i 0) acc) ((i acc) (pick (- i 1) (+ acc i))))\n\
@@ -568,11 +575,12 @@ fn a_self_call_argument_is_typed_in_its_enclosing_scope() {
     );
 }
 
-// ---- Pass 2.9: caller-derived parameter types for module-private functions (ADR-341) ----
-// A `defn-` is callable only from its file, so the union of what its call sites hand each
-// parameter binds it in the walk of its body and in the return its callers read — the
-// mechanism that lets a leaf `sig` be enough. Sabotage-verified: with `set_derived_params`
-// never called the first two cases go silent and the third loses its `int`.
+// ---- Pass 2.9: caller-derived parameter types (ADR-341) ----
+// The union of what a function's call sites in its file hand each parameter binds it in the
+// walk of its body and in the return its same-file callers read — the mechanism that lets a
+// leaf `sig` be enough. A fact about this file's calls, so public and private alike.
+// Sabotage-verified: with `set_derived_params` never called the first two cases go silent
+// and the third loses its `int`.
 
 #[test]
 fn a_private_function_is_walked_under_what_its_callers_pass() {
@@ -652,7 +660,8 @@ fn a_private_function_that_escapes_or_has_unseen_callers_stays_unknown() {
             .any(|w| w.contains("want-int: argument 1 expects int, got number")),
         "{ws:?}"
     );
-    // A public function is not derived: its callers are anywhere.
+    // A PUBLIC function derives too: the type is a fact about this file's calls, and a
+    // caller in another file reads the demand-based loaded inference as before.
     let ws = file_warnings_mode(
         "(defmodule t)\n\
          (sig want-int (int -> int))\n\
@@ -661,9 +670,50 @@ fn a_private_function_that_escapes_or_has_unseen_callers_stays_unknown() {
          (defn pub () (bump 3))",
         true,
     );
+    assert!(ws.is_empty(), "{ws:?}");
+}
+
+#[test]
+fn a_call_site_under_a_stored_guard_is_narrowed_like_the_walk() {
+    // `and` stores each conjunct in a temporary — `(let (g (int? y)) (if g …))` — and the
+    // site collector binds a `let` by the walk's one rule (`let_bind_scope`), so the guard
+    // alias narrows `y` at the site: `days-in-month` is handed `int`, not `nil | int`.
+    let ws = file_warnings_mode(
+        "(defmodule t)\n\
+         (sig leap? (int -> bool))\n\
+         (defn leap? (y) (= (math/rem y 4) 0))\n\
+         (defn days-in (y m) (if (= m 2) (if (leap? y) 29 28) 30))\n\
+         (defn parse (s) (let (y (string/->number s) m 2) (and (int? y) (> m 0) (days-in y m))))",
+        true,
+    );
+    assert!(ws.is_empty(), "{ws:?}");
+}
+
+#[test]
+fn a_falsy_or_refutes_every_disjunct_in_the_else_branch() {
+    // `(or A (nil? root) C)` false ⇒ `root` is not `nil` — each biconditional disjunct
+    // narrows its own variable, no shared variable needed.
+    let ws = file_warnings_mode(
+        "(defmodule t)\n\
+         (sig want-str (string -> string))\n\
+         (defn want-str (s) s)\n\
+         (defn pub (root files flag) (if (or flag (nil? root) (empty? files)) 0 (want-str root)))\n\
+         (defn go () (pub (os/env \"HOME\") '(1) false))",
+        true,
+    );
+    assert!(ws.is_empty(), "{ws:?}");
+    // …and a `then_only` disjunct (an `and`) proves nothing of its variable when falsy.
+    let ws = file_warnings_mode(
+        "(defmodule t)\n\
+         (sig want-int (int -> int))\n\
+         (defn want-int (x) x)\n\
+         (defn pub (x) (if (or (and (string? x) (> (string/length x) 3)) false) 0 (want-int x)))\n\
+         (defn go () (pub (if (> (count (os/args)) 0) \"s\" 1)))",
+        true,
+    );
     assert!(
         ws.iter()
-            .any(|w| w.contains("want-int: argument 1 expects int, got number")),
+            .any(|w| w.contains("want-int: argument 1 expects int, got")),
         "{ws:?}"
     );
 }

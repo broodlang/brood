@@ -22164,7 +22164,7 @@ types is a sound binding, provided the name never escapes as a value) — after 
 go and `hex-val` alone stays. Not built here: it is a second full walk per file or a stored-scope
 collection pass, and it wants its own measurement.
 
-## ADR-341 — Caller-derived parameter types for module-private functions
+## ADR-341 — Caller-derived parameter types
 
 **Status:** accepted and implemented 2026-09-13 (`types/check.rs` Pass 2.9,
 `types/check/sigs.rs` `caller_derived_params` / `collect_private_sites`, `Ctx::derived_params`,
@@ -22178,10 +22178,9 @@ pass, and the same demand bound the return Pass 2.8 inferred, so `number` leaked
 caller. The rule this repo follows is *declare at the leaf, derive from the call*; a private
 helper is not a leaf.
 
-**Decision.** A module-private function (`defn-`) is callable only from its own file, so its
-callers are exactly the call sites there. Pass 2.9 computes, for every private single-arm
-plain-parameter function with no declaration, the union of what each site hands each
-parameter — the **least fixpoint** over the file, jointly with the candidates' returns:
+**Decision.** Pass 2.9 computes, for every single-arm plain-parameter function the file
+defines with no declaration — public or private — the union of what each call site in the
+file hands each parameter — the **least fixpoint** over the file, jointly with the candidates' returns:
 
 - Sites are collected by a scoped walk of the file's expanded forms that keeps the scope the
   WALK would have there — `let`/`letrec` binders typed (with the `(let (name other) …)` alias
@@ -22197,7 +22196,7 @@ parameter — the **least fixpoint** over the file, jointly with the candidates'
   monotone ascent — and one that never types gets Pass 2.8's answer back at the end. No
   fixpoint within the bound restores everything. Afterwards the PUBLIC functions' returns are
   re-read over the sharper private ones (`refresh_returns`).
-- The result binds the parameters in the walk of the private body (plainly, not as a
+- The result binds the parameters in the walk of the body (plainly, not as a
   sig-authoritative contract, so a defensive guard the callers never exercise is not a dead
   clause) and in the same-file return inference; a loaded-closure caller elsewhere still reads
   the demand-based inference, which is what `(:use-internals mod)` needs.
@@ -22206,12 +22205,19 @@ parameter — the **least fixpoint** over the file, jointly with the candidates'
   (its operands are syntax that may construct a call the walk cannot see — the whole pass
   declines); a call of the wrong arity contributes nothing (it raises).
 
-**Soundness.** By induction along any chain of activations from a public entry: a public
-function's parameters are unknown; every site's argument is typed by `expr_ty` under a scope
-whose bindings over-approximate the values; the fixpoint closes over the sites inside private
-bodies; so every actual argument lies in the derived type, and a body checked under it warns
-only on a use every in-file call would fail. A warning inside a private body under a wrong
-caller (`(bump "s")`) is therefore a true finding about this file.
+**Soundness.** Every derived fact is a fact about the activation chains ROOTED IN THIS FILE —
+a top-level form, or a call whose arguments the file's own scope typed. By induction along
+such a chain: every site's argument is typed by `expr_ty` under a scope whose bindings
+over-approximate the values on that chain (a parameter's binding is the derived type, which
+covers the argument by the hypothesis); the fixpoint closes over the sites inside every
+candidate's body; so every actual argument on the chain lies in the derived type. The three
+consumers are all conditioned the same way: a body checked under it warns only on a use every
+in-file call would fail (`(bump "s")` is a true finding about this file, whatever a caller
+elsewhere passes); a sharpened return is read only by this file's callers, whose activations
+are on such a chain; and a caller in another file reads the demand-based loaded inference,
+which the derivation never touches. Privacy is therefore not what the argument rests on. The
+first cut derived `defn-` only on a closed-caller premise; the second, the same day, derives
+every single-arm function the file defines.
 
 **Two lattice rules the ascent needed.** A call whose argument is uninhabited never executes,
 so `expr_ty` answers ⊥ for it (not unknown — unknown is absorbing, and `(+ i 1)` under `i :
@@ -22245,3 +22251,13 @@ invariant. `std/` is at zero in both modes; `tests/` strict carries seventeen mo
 wider-than-the-truth kind (a test that knows its `read-n` succeeded), by design ungated; bedit
 is in the devlog. A chain settles in one round per level (bounded at 32), each round one walk
 of the file's forms.
+
+**The second cut, on every function.** Turning the derivation on for public functions found
+two sites the collector read wider than the walk, both fixed as general rules: `and` stores
+each conjunct in a temporary — `(let (g (int? y)) (if g …))` — and the collector bound a
+`let` without the guard alias `check_let` records, so the per-binding rule is now ONE function
+(`walk::let_bind_scope`) both walkers call, and a divergence of this kind cannot recur; and a
+falsy `(or A (nil? root) C)` proves `root` is not `nil` — every biconditional disjunct's
+complement narrows the else-branch, each on its own variable (`guards::or_disjunct_guards`,
+the dual of `and_conjunct_guards`; the same-variable `or` rule keeps the then-branch). A
+`then_only` disjunct (an `and`) is left out: falsy, it proves nothing of its variable.

@@ -2169,9 +2169,9 @@ fn check_forms(
                 }
             }
         }
-        // Pass 2.9: **caller-derived parameter types for module-private functions**
-        // (ADR-341). A `defn-` is callable only from this file, so the union of what its
-        // call sites hand each parameter is a sound binding for the walk of its body — and
+        // Pass 2.9: **caller-derived parameter types** (every single-arm function this file
+        // defines, ADR-341). The union of what a function's call sites in this file hand its
+        // parameters is a sound binding for the walk of its body — and
         // for the return its same-file callers read, where Pass 2.8 above bound the
         // parameters to their bottom-up DEMANDS alone (`(+ i 1)` says `number`; the callers
         // say `int`). This is what lets a leaf `sig` be enough: `int` flows from the public
@@ -2199,16 +2199,16 @@ fn check_forms(
                     .then_some((name, rhs))
                 })
                 .collect();
-            let candidates: HashMap<Symbol, Value> = all_candidates
-                .iter()
-                .filter(|(name, _)| private.contains(name))
-                .copied()
-                .collect();
-            let public_candidates: Vec<(Symbol, Value)> = all_candidates
-                .iter()
-                .filter(|(name, _)| !private.contains(name))
-                .copied()
-                .collect();
+            // EVERY candidate is derived, public or private (2026-09-13, the second cut). The
+            // closed-caller premise the first cut rested on is not what the soundness needs:
+            // a derived type is a fact about THIS FILE's calls, a body warning under it says
+            // "every call in this file would fail here" — true whatever callers exist
+            // elsewhere — and the sharpened return is read by this file's callers only,
+            // whose arguments it covers; a caller in another file reads the demand-based
+            // loaded inference as before. `private` still says which names are in the
+            // privacy expansion, for the site walk's `%mark-private` skip.
+            let _ = &private;
+            let candidates: HashMap<Symbol, Value> = all_candidates.iter().copied().collect();
             if !candidates.is_empty() {
                 // A JOINT least fixpoint of the derived parameters and the candidates'
                 // returns. Pass 2.8's returns were read under the demands alone — `number`
@@ -2324,9 +2324,15 @@ fn check_forms(
                             }
                         }
                     }
-                    // …and the PUBLIC functions' returns, read in Pass 2.8 before any private
-                    // return was sharpened, are read again over the sharper ones.
-                    refresh_returns(heap, &public_candidates, &mut ctx);
+                    // …and the returns of the candidates that were NOT derived (no site, or an
+                    // escape), read in Pass 2.8 before any return was sharpened, are read
+                    // again over the sharper ones.
+                    let undecided: Vec<(Symbol, Value)> = all_candidates
+                        .iter()
+                        .filter(|(name, _)| ctx.derived_params(*name).is_none())
+                        .copied()
+                        .collect();
+                    refresh_returns(heap, &undecided, &mut ctx);
                 }
             }
         }
