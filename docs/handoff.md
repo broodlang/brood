@@ -10,7 +10,75 @@ needing one is queued in [`perf-handoff.md`](perf-handoff.md) instead — curren
 high-priority item: whether KI-114's `as_f64_pair` holds the closure KI-109 got from the
 promotion it constrained.
 
-## Work queue — written 2026-09-07 for the next session (read this first)
+## Work queue — written 2026-09-13 (read this first; the 09-07 queue below is history)
+
+State when written: `main` = `0223cb1f`, pushed, clean. **One open bug: KI-134**, and it is
+the release blocker. `nest check` and `nest format --check` are clean; `artifact_matrix` is
+green and sabotage-verified.
+
+### 1 — KI-134: make a module load survive an `%isolate` restore (THE blocker)
+
+Fully diagnosed, not fixed. Read the KI first — it has the repro, the numbers and the
+mechanism; none of that needs rediscovering.
+
+- **Repro, 10 seconds**, where the KI originally had only "full `nest test`, one run in
+  three": `nest test tests/queue_test.blsp tests/ability_test.blsp tests/lazy_load_test.blsp`.
+  Baseline **5/12**. Both ingredients necessary: `BROOD_TEST_NO_SCOPE=1` 0/6,
+  `BROOD_NO_LAZY_LOAD=1` 0/6 (p≈0.04 each against that baseline).
+- **One root cause, two shapes.** A module's registrations are rolled back while something is
+  still using it. Window 1 returns a wrong value (`pop`'s emptiness check misses — a queue of
+  `:size -1`); window 2 RAISES (`conj` finds no impl, the record default refuses the integer,
+  the worker dies, the `receive` times out and the slot holds `:timeout`). The KI's table
+  mixes the shapes for that reason, not because there are two bugs.
+- **The fix, specified.** `require-one` marks "in module load" — the one-shot trick
+  `SKIP_NEXT_EDGE` already uses; every `env_define`/`registry_update` under that mark is
+  journalled; `restore_globals` replays the journal after its wholesale swap. Keyed on what
+  KIND of write it was, not where the load happened — which is what reaches the
+  spawned-worker case, since that worker's first use is in its own process at run time.
+- **Already tried, do not repeat.** Eager-loading the test file (`7e26803b`) closes window 1
+  only: 5/12 → 1/12. It is landed and deliberately marked PARTIAL. Consider reverting it once
+  the journal lands — two mechanisms for one invariant will confuse the next reader. The
+  absence memo (`0c66565b`) was ruled out as a contributor (1/12 with it stubbed).
+- **Verify like a flake, not a test.** The repro is 10 s: loop it 30×, not 3×.
+
+### 2 — bedit's strict ratchet, then the `BEDIT_REF` bump
+
+`nest check --strict` in bedit reports **7**, down from 18 (two commits, zero `check-allow`).
+Six are ONE class: values that are ints at run time typed `number`, because the hexl helpers
+carry no `sig` and `*hexl-cap*` is a `defdyn` (so `dynamic`). That needs a signature decision
+from whoever owns that code — a `math/min` int-closed rule in the checker was tried and does
+NOT reach it (reverted, because `defdyn` means `math/min` never sees two ints). The seventh
+is fixed upstream (`288aa585`).
+
+`BEDIT_REF` in `ci.yml` is ~16 commits stale; `bshell_test` already passes at newer bedit, so
+the bump clears half the `downstream-bedit` red by itself — but it cannot land until the
+ratchet is zero, because `strict_ratchet_test.blsp` asserts exactly that.
+
+### 3 — the `BROOD_VM=0` suite, off this box
+
+The tree-walker CI job's timeout was a real regression and is fixed (`0c66565b`, 1.22 s →
+0.04 s on 2000 unbound qualified lookups; bisected to green at `8d6352ad`, red at
+`5fca2758`). Verified by microbenchmark and by the bisect, NOT by the suite that timed out.
+One `BROOD_VM=0` full run elsewhere closes it.
+
+### Loose end
+
+`stash@{0}` holds another session's uncommitted `lazy_load_test` note from 2026-09-12 22:27.
+Its temp-purge half landed as `f5894529`; what is unique is a `KNOWN FAILURE` comment arguing
+that `:isolated` does not help (a module load is neither a global nor rollback-able) and that
+the fix is a probe module no other test file references. That argument is not in KI-134.
+`git stash pop` recovers it.
+
+### The trap that cost the most on 2026-09-12/13
+
+**A `.blsp` edit changes nothing until you rebuild.** The prelude and `std/tool/*` are
+`include_str!`'d into the binary, so sabotaging a guard in Brood source and re-running the
+old binary "proves" the guard is unnecessary. It happened twice in ten minutes and produced
+two wrong conclusions, both reversed only by rebuilding. Its sibling: the stdlib image is
+keyed on build-id, so rebuilding between A/B arms silently turns the "imaged" cell into a
+source cell — and the two cells then agree, for the wrong reason.
+
+## Work queue — written 2026-09-07 (superseded by the 2026-09-13 queue above; kept for its item text)
 
 State when written: `main` = `5e238340`, pushed; **no open bug in `known-issues.md`** — every
 row is ✅/☑️/📦 (KI-107 closed 2026-09-06 with ADR-323, KI-112/KI-113 fixed the same weekend).
