@@ -59,8 +59,10 @@
                        file/exists?))
           prog (path/temp "stdimage-attrib-")
           _ (file/spit prog
+              ;; `%isolate-discard-loads`, as the builder itself probes (ADR-339): a plain
+              ;; `%isolate` keeps a module load now, and this probe exists to undo one.
               (string/join ["(let (introduced (fn (mod)"
-                             "                    (%isolate (fn ()"
+                             "                    (%isolate-discard-loads (fn ()"
                              "                      (let (before (into #{} (reflect/global-names))"
                              "                            _ (require-one mod))"
                              "                        (into #{} (seq/filter (reflect/global-names)"

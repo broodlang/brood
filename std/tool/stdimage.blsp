@@ -219,7 +219,12 @@ since the prelude is always present."
                      (fn (acc m)
                        (%map-assoc acc
                          (->string m)
-                         (%isolate
+                         ;; `-discard-loads`: this probe exists to learn what `m` introduces
+                         ;; and then UNDO the load, so the next probe starts clean. A plain
+                         ;; `%isolate` keeps a module load (KI-134, ADR-339) — which is right
+                         ;; for a test and would credit every later probe with this one's
+                         ;; globals here.
+                         (%isolate-discard-loads
                            (fn ()
                              (let (before (into #{} (reflect/global-names))
                                    ;; check-allow :discarded-catch — image-cache housekeeping; a module that will not load stays out of the image (the ADR-280 differential catches it)

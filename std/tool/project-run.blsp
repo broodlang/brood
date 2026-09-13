@@ -176,7 +176,9 @@ as unchanged (only when some were)."
       ;; the run O(N²). Rolling the check's loads back keeps the run's baseline small (just
       ;; prelude + src + the test framework), so each file's snapshot is O(1) → linear.
       ;; (Warnings are stderr I/O, unaffected by the global rollback.)
-      (%isolate (fn () (project-check/check)))
+      ;; `-discard-loads` (ADR-339): a plain `%isolate` keeps module loads — the test
+      ;; contract — and this isolate exists precisely to drop the check's.
+      (%isolate-discard-loads (fn () (project-check/check)))
       ;; Run file-by-file, each in its own rolled-back global scope, so a large
       ;; suite's promoted code + top-level defs are reclaimed per file instead of
       ;; accumulating every file's code in one image (the shared-RUNTIME test-runner

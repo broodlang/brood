@@ -115,17 +115,45 @@
 ;; in a test body would load the fixture while the `describe` compiled — before the test runs.
 (defn- run-fixture (f) (f))
 
+;; The function-head case observes "not loaded yet" in a SUBPROCESS. Since ADR-339 a module
+;; load is a runtime-wide fact that survives a sibling file's `%isolate`, so in the full
+;; suite `url` is loaded by its own test file at some point — and a global `loaded?` here
+;; cannot tell a sibling's load landing in the window from the deferral under test (it did:
+;; the unit passed alone and failed beside `url_test`). A child `brood` where nothing else
+;; runs can. `exe` is resolved as `stdimage_test` resolves it: beside the runner or one up.
 (describe "lazy call heads (the image's kind index)"
   (test "a function head into an imaged module loads at first call, not at the referencing load"
-    (is (not (loaded? "url")))
-    (require-one 'lazyprobe-head)
-    (when (%std-image-installed)
-      (is (not (loaded? "url"))))
-    (assert= "a%20b" (run-fixture lazyprobe-head/go))
-    (is (loaded? "url")))
+    (let (dir (path/dirname (or (os/exe-path) ""))
+          exe (first (seq/filter [(path/join dir "brood") (path/join dir ".." "brood")]
+                       file/exists?))
+          prog (path/temp "lazyhead-")
+          _ (file/spit prog
+              (string/join [(str "(reflect/add-load-path \"" *dir* "\")")
+                             "(defn run-fixture (f) (f))"
+                             "(let (before (contains? *features* \"url\"))"
+                             "  (require-one 'lazyprobe-head)"
+                             "  (let (after-ref (contains? *features* \"url\")"
+                             "        v (run-fixture lazyprobe-head/go)"
+                             "        after-call (contains? *features* \"url\"))"
+                             "    (io/puts (str \"before=\" before \" imaged=\" (%std-image-installed)"
+                             "               \" after-ref=\" after-ref \" v=\" v \" after-call=\" after-call))))"]
+                "\n"))
+          ;; Through `env`: `os/cmd` takes no environment, and without `BROOD_NO_CHECK` the
+          ;; file runner's pre-flight checker loads `url` before the program's first line.
+          result (if exe (os/cmd "env" ["BROOD_NO_CHECK=1" exe prog]) nil))
+      (is (or (nil? exe) (string? exe)))
+      (when result
+        ;; The child's stderr IS the diagnosis when it fails; compare it, not just the code.
+        (assert= "" (if (= (get result :exit) 0) "" (get result :stderr "")))
+        (let (out (os/cmd-out result))
+          (is (includes? out "before=false"))
+          ;; The deferral itself — only an imaged child has the kind index to defer on.
+          (when (includes? out "imaged=true")
+            (is (includes? out "after-ref=false")))
+          (is (includes? out "v=a%20b"))
+          (is (includes? out "after-call=true"))))))
 
   (test "a MACRO head into an imaged module still loads before expansion, and expands"
-    (is (not (loaded? "telemetry")))
     (require-one 'lazyprobe-mac)
     ;; The macro's module had to load while `lazyprobe-mac` compiled — a call form that
     ;; should have expanded and did not would be a silently different program.

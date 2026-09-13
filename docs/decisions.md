@@ -21940,3 +21940,86 @@ accident, with the fuzz ADR-332 removed. *Stem darkening at rasterisation* (embo
 the outline): changes glyph shapes and advances, and the cache would need the value in
 its key. *A fixed lift in the renderer*: the value is a taste, and a setting is one
 line.
+
+## ADR-339 — A module load survives an `%isolate` restore: load writes are journalled and replayed
+
+**Status:** accepted and implemented 2026-09-13 (`%with-load-journal` and
+`%isolate-discard-loads`, `LoadJournal`/`LoadWrite` in `heap/runtime_code.rs`,
+`env_define`/`registry_apply`/`snapshot_globals`/`restore_globals` in `heap/env_globals.rs`;
+`require-one` wraps every load). Closes KI-134.
+
+**Context.** `%isolate` snapshots the globals table, runs a thunk, and restores by wholesale
+swap — the mechanism `nest test` uses to give each file, and each `:isolated` unit, a private
+view of the globals. Its contract is "undo what the thunk did". Since ADR-335 a qualified
+reference loads its module at FIRST USE, so a module load can land inside an isolate window
+— this process's, when a unit is the first to touch `queue/…`, or a concurrent process's,
+since every file's isolate runs beside every other's. The swap then discards that load's
+bindings and registrations while other processes are already using them: `queue/pop`
+dispatched against an `*impls*` table `queue` was no longer in and answered a queue of
+`:size -1`; a worker's `conj` found no impl, fell to the record default, and died on the
+integer it was handed. One run in three of the full suite; five of twelve on the three-file
+repro. Loading the test file eagerly closed the in-process shape (5/12 → 1/12) and could not
+reach the concurrent one: the worker's first use is in its own process, at run time.
+
+**Decision.** A module load is a process-shared, idempotent fact, and isolation exists to roll
+back what a TEST did, not what a LOAD did. So the kernel journals a load's writes and a
+restore replays them:
+
+- `require-one` runs every load — source, embedded, image, package — inside
+  `%with-load-journal`, a per-process mark released even when the load throws.
+- Under the mark, `env_define` journals `Define{sym, val}` and a registry update journals
+  `Registry{sym, op, path, val}` — the **operation**, not the resulting map. A registry
+  global accumulates entries from many loads; replaying its value would resurrect what the
+  isolate itself registered. Values are promoted before journalling, so an entry holds
+  RUNTIME handles for exactly the window the snapshot's own compaction block already covers.
+- `snapshot_globals` records the journal's sequence mark; `restore_globals` swaps, then
+  re-applies every entry at or past its mark to the restored table, under the same
+  `registry_lock` that already serialises it against registry read-modify-writes (KI-89).
+- The journal exists only while a snapshot is outstanding anywhere in the runtime: the
+  count, the append, the first snapshot's clear and the last restore's clear all happen
+  under one lock, so an entry cannot slip between an observation of zero and the clear that
+  follows it. `env_define` journals before its insert and re-checks after it, so a snapshot
+  that begins between the two still finds the write.
+
+**Two isolates, because `%isolate` had two clients with opposite needs.** The stdlib image
+builder probes each module inside an isolate *precisely so the load is rolled back* and the
+next probe starts clean (it attributes a root global to the smallest module set that
+introduces it); `nest run` checks inside one so the check's loads do not stay bound for the
+run. With loads surviving, the first landing of this built an image that credited every
+later probe with the earlier probes' globals — `*units*` unbound in every `nest test`. So
+the contract is explicit at the primitive: `%isolate` keeps loads (test isolation, and what
+`:isolated` means), and **`%isolate-discard-loads`** is the scratch world where everything
+rolls back, which those two tool sites now name. Each journal entry carries its writer's
+isolate scope, so a scratch restore drops exactly its own window's loads and still replays
+everyone else's — the first cut dropped nothing and a concurrent `%isolate`'s replay
+resurrected the scratch module (2 of 15 guard runs).
+
+**And the other half of KI-134: a module publishes its registrations before its bindings.**
+The worker shape turned out not to be the rollback (a traced failure has the worker dying
+before the run's first restore). The loader's image branch materialised a module's bindings
+first and replayed its impls after; a source load has the opposite order by construction (in
+`std/queue.blsp` the `impl` precedes `list->`), and under ADR-335 a concurrent process reaches a
+freshly-bound name through a global HIT that waits for nothing. The rule the image branch now
+follows is the source path's invariant, stated: **a name is never bound before everything its
+callers need is in place** — dependencies, registrations, impls, bindings, `provide`, in that
+order. The single-form window a SOURCE load still has (a value-producing def before the impl
+that makes its values dispatchable) is KI-135; closing it means atomic publication, which this
+ADR's restore already does for its own replay.
+
+**Consequences.** A module loaded inside an isolate stays loaded after it, as if it had
+been loaded before — which is what every other process observed anyway. What a test `def`s
+or registers inside the window is still rolled back, including a test's own `def` of a name
+a module just defined (the replay re-binds the module's value). Keyed on what KIND of write
+it was, not where the load happened, so the concurrent shape is covered: another process's
+restore replays a loader's journal too. The eager file load of `7e26803b` is reverted with
+this: redundant for correctness, and it loaded every fixture `lazy_load_test` names at file
+load, so that file could only observe laziness when the checker pre-flight's "module absent"
+memo happened to make the eager drain skip them — alone, never in the full suite.
+
+**Alternatives rejected.** *Diff the tables at restore* (keep any key the snapshot lacks that
+looks module-shaped): a heuristic over names, and it cannot tell a load's registry entry
+from a test's. *Quiesce every process before any restore*: the runner already quiesces the
+file's own stragglers (KI-120) and cannot stop unrelated files' processes from loading. *Make
+loads eager everywhere*: reverses ADR-335, and does not reach a worker whose first use is at
+run time. *A load-time lock that excludes isolates*: a load inside an isolate would deadlock
+against its own window.

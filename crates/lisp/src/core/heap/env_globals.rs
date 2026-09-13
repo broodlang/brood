@@ -289,6 +289,44 @@ impl Heap {
         *d = d.saturating_sub(1);
     }
 
+    /// KI-134: is this process inside a `%with-load-journal` — a `require-one` load — and not
+    /// in the one place a load-time write must NOT be journalled (a registry update's own
+    /// write-back, a restore's replay)?
+    pub fn in_journalled_load(&self) -> bool {
+        self.cold()
+            .is_some_and(|c| c.load_journal_depth > 0 && !c.journal_suppressed)
+    }
+
+    /// Enter/leave a journalled module load. Paired by `%with-load-journal`, which leaves
+    /// even when the load throws.
+    pub fn enter_journalled_load(&mut self) {
+        self.cold_mut().load_journal_depth += 1;
+    }
+    pub fn leave_journalled_load(&mut self) {
+        let d = &mut self.cold_mut().load_journal_depth;
+        *d = d.saturating_sub(1);
+    }
+
+    /// Append `w` to the runtime's load journal — only while a snapshot is outstanding, i.e.
+    /// while there is a restore that could discard the write; returns whether it did. One
+    /// step under the journal's lock, so it cannot interleave with a snapshot's
+    /// begin-and-clear or a restore's replay-and-clear (see `LoadJournal`).
+    fn journal_load_write(&self, w: LoadWrite) -> bool {
+        let mut j = self
+            .runtime
+            .load_journal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if j.outstanding == 0 {
+            return false;
+        }
+        let seq = j.next_seq;
+        j.next_seq += 1;
+        j.entries
+            .push((seq, crate::process::self_isolate_scope(), w));
+        true
+    }
+
     /// **Atomically** update a global that holds a registry (KI-22).
     ///
     /// Every load-time registry — `*impls*`, `*features*`, `*abilities*`, `*methods*`,
@@ -334,108 +372,15 @@ impl Heap {
         // are immutable), and wedging every later registration would be worse.
         let rt = self.runtime.clone();
         let mut guard = rt.registry_lock.lock().unwrap_or_else(|e| e.into_inner());
-
-        // `def` binds at `env_root(env)`, which is NOT always `EnvId::GLOBAL`: during prelude
-        // load the root is a bootstrap env whose bindings later seed the shared runtime. A
-        // write straight to the globals table there is silently dropped (it cost the prelude
-        // its own `Display`/`Inspect` impls). Read and write the same place `def` would.
-        let root = self.env_root(env);
-        let cur = self.env_get(env, sym).unwrap_or(Value::nil());
-        let k1 = path.first().copied().unwrap_or(Value::nil());
-
-        let next = match op {
-            RegistryOp::ConsNew => {
-                if self.list_contains(cur, val) {
-                    return false;
-                }
-                self.alloc_pair(val, cur)
-            }
-            RegistryOp::Dissoc => match cur.unpack() {
-                ValueRef::Map(id) => {
-                    if path.len() >= 2 {
-                        // NESTED dissoc, symmetric with `:assoc`'s two-key path: remove `k2`
-                        // from the inner map at `k1`, leaving that map (and every sibling
-                        // key) in place. Without this, a two-key `:dissoc` silently used
-                        // only `k1` and removed the WHOLE inner map — which is how
-                        // `unregister-impl`, retracting one id of `[ability op]`, destroyed
-                        // every impl of that op including the language's `:default`.
-                        let k2 = path[1];
-                        match self.map_get(id, k1).map(|v| v.unpack()) {
-                            Some(ValueRef::Map(inner)) => {
-                                let inner_next = self.map_dissoc(inner, k2);
-                                self.map_assoc(id, k1, inner_next)
-                            }
-                            // no inner map at `k1`: nothing to remove
-                            _ => return false,
-                        }
-                    } else {
-                        self.map_dissoc(id, k1)
-                    }
-                }
-                _ => return false,
-            },
-            RegistryOp::Assoc | RegistryOp::AssocNew => {
-                let outer = match cur.unpack() {
-                    ValueRef::Map(id) => id,
-                    // An uninitialised registry (nil) starts as an empty map rather than
-                    // failing — the same shape `(or *X* {})` had at the call sites.
-                    _ => match self.alloc_empty_map().unpack() {
-                        ValueRef::Map(id) => id,
-                        _ => unreachable!("alloc_empty_map returns a map"),
-                    },
-                };
-                if path.len() >= 2 {
-                    let k2 = path[1];
-                    let inner_cur = self.map_get(outer, k1);
-                    let inner_id = match inner_cur.map(|v| v.unpack()) {
-                        Some(ValueRef::Map(id)) => id,
-                        _ => match self.alloc_empty_map().unpack() {
-                            ValueRef::Map(id) => id,
-                            _ => unreachable!("alloc_empty_map returns a map"),
-                        },
-                    };
-                    if op == RegistryOp::AssocNew && self.map_get(inner_id, k2).is_some() {
-                        return false;
-                    }
-                    let inner = self.map_assoc(inner_id, k2, val);
-                    // Re-resolve the outer handle from the binding rather than reusing the
-                    // one read above: `registry_update` is the shared entry point for the
-                    // `provide`/`:cons-new` ops, and re-reading keeps it correct if a caller
-                    // ever rebinds `sym` between the two reads. (Allocation itself cannot
-                    // invalidate `outer` — collection in this runtime happens only at eval
-                    // safepoints, never inside `map_assoc`.)
-                    let outer = match self.env_get(env, sym).unwrap_or(Value::nil()).unpack() {
-                        ValueRef::Map(id) => id,
-                        _ => outer,
-                    };
-                    self.map_assoc(outer, k1, inner)
-                } else {
-                    if op == RegistryOp::AssocNew && self.map_get(outer, k1).is_some() {
-                        return false;
-                    }
-                    self.map_assoc(outer, k1, val)
-                }
-            }
-        };
-        // Reuse `env_define`'s global path: it promotes into the shared RUNTIME region and
-        // bumps the version that invalidates every process's global inline cache.
-        //
-        // It also calls `unmark_private` — correct for a real `def` (an author editing
-        // `def-` → `def` and reloading must stop being private), wrong here. This is an
-        // in-place UPDATE of an existing registry, not a redefinition, and nothing re-marks
-        // afterwards the way a `def-` form does. So a `def-`'d registry silently turned
-        // public on its first write: `*impls*`, `*record-ids*` and friends read
-        // `reflect/private? = true` at boot and `false` the moment any module registered anything,
-        // which put all of them back on the published core reference.
-        let was_private = self.runtime.is_private_recorded(sym);
-        self.env_define(root, sym, next);
-        if was_private {
-            self.runtime.mark_private(sym);
+        let wrote = self.registry_apply(env, sym, op, path, val, true);
+        if !wrote {
+            return false;
         }
         // Only on the write path: a declined op leaves the registry untouched, and a name
         // that was never written has nothing for an image to carry.
         guard.insert(sym);
         if reg_trace_enabled() && crate::core::value::symbol_name(sym) == "*record-ids*" {
+            let k1 = path.first().copied().unwrap_or(Value::nil());
             // Ancestry chain (up to 4 hops), so a leaked writer can be attributed to the
             // unit/driver that spawned it even after intermediates exited.
             let mut chain = String::new();
@@ -463,6 +408,131 @@ impl Heap {
                     .map(crate::process::isolate_owner_of)
                     .unwrap_or(0),
             );
+        }
+        true
+    }
+
+    /// The body of [`Self::registry_update`] — the read-modify-write itself, with
+    /// `registry_lock` HELD BY THE CALLER. Split out so a restore can re-apply a journalled
+    /// registry operation to the restored table under the lock it already holds (KI-134);
+    /// `journal` is false there, since the entry being replayed IS the journal. Returns
+    /// whether the registry was written (false when the op declined).
+
+    /// The value registry global `sym` takes after `op` at `path` with `val`, given its
+    /// current value `cur` — the read-modify-write's MODIFY, with no read and no write, so
+    /// that [`Self::registry_apply`] can run it against the live binding and a restore's
+    /// journal replay (KI-134) against the table it is rebuilding. `None` when the op
+    /// declines (`:assoc-new` onto a present key, `:cons-new` of a member, a `:dissoc` with
+    /// nothing to remove). Allocates the new map LOCALLY; the caller promotes it.
+    fn registry_next(
+        &mut self,
+        cur: Value,
+        op: RegistryOp,
+        path: &[Value],
+        val: Value,
+    ) -> Option<Value> {
+        let k1 = path.first().copied().unwrap_or(Value::nil());
+        let next = match op {
+            RegistryOp::ConsNew => {
+                if self.list_contains(cur, val) {
+                    return None;
+                }
+                self.alloc_pair(val, cur)
+            }
+            RegistryOp::Dissoc => match cur.unpack() {
+                ValueRef::Map(id) => {
+                    if path.len() >= 2 {
+                        // NESTED dissoc, symmetric with `:assoc`'s two-key path: remove `k2`
+                        // from the inner map at `k1`, leaving that map (and every sibling
+                        // key) in place. Without this, a two-key `:dissoc` silently used
+                        // only `k1` and removed the WHOLE inner map — which is how
+                        // `unregister-impl`, retracting one id of `[ability op]`, destroyed
+                        // every impl of that op including the language's `:default`.
+                        let k2 = path[1];
+                        match self.map_get(id, k1).map(|v| v.unpack()) {
+                            Some(ValueRef::Map(inner)) => {
+                                let inner_next = self.map_dissoc(inner, k2);
+                                self.map_assoc(id, k1, inner_next)
+                            }
+                            // no inner map at `k1`: nothing to remove
+                            _ => return None,
+                        }
+                    } else {
+                        self.map_dissoc(id, k1)
+                    }
+                }
+                _ => return None,
+            },
+            RegistryOp::Assoc | RegistryOp::AssocNew => {
+                let outer = match cur.unpack() {
+                    ValueRef::Map(id) => id,
+                    // An uninitialised registry (nil) starts as an empty map rather than
+                    // failing — the same shape `(or *X* {})` had at the call sites.
+                    _ => match self.alloc_empty_map().unpack() {
+                        ValueRef::Map(id) => id,
+                        _ => unreachable!("alloc_empty_map returns a map"),
+                    },
+                };
+                if path.len() >= 2 {
+                    let k2 = path[1];
+                    let inner_cur = self.map_get(outer, k1);
+                    let inner_id = match inner_cur.map(|v| v.unpack()) {
+                        Some(ValueRef::Map(id)) => id,
+                        _ => match self.alloc_empty_map().unpack() {
+                            ValueRef::Map(id) => id,
+                            _ => unreachable!("alloc_empty_map returns a map"),
+                        },
+                    };
+                    if op == RegistryOp::AssocNew && self.map_get(inner_id, k2).is_some() {
+                        return None;
+                    }
+                    let inner = self.map_assoc(inner_id, k2, val);
+                    // (Allocation cannot invalidate `outer` — collection in this runtime happens
+                    // only at eval safepoints, never inside `map_assoc`.)
+                    self.map_assoc(outer, k1, inner)
+                } else {
+                    if op == RegistryOp::AssocNew && self.map_get(outer, k1).is_some() {
+                        return None;
+                    }
+                    self.map_assoc(outer, k1, val)
+                }
+            }
+        };
+        Some(next)
+    }
+
+    fn registry_apply(
+        &mut self,
+        env: EnvId,
+        sym: Symbol,
+        op: RegistryOp,
+        path: &[Value],
+        val: Value,
+        journal: bool,
+    ) -> bool {
+        // `def` binds at `env_root(env)`, which is NOT always `EnvId::GLOBAL`: during prelude
+        // load the root is a bootstrap env whose bindings later seed the shared runtime. A
+        // write straight to the globals table there is silently dropped (it cost the prelude
+        // its own `Display`/`Inspect` impls). Read and write the same place `def` would.
+        let root = self.env_root(env);
+        let cur = self.env_get(env, sym).unwrap_or(Value::nil());
+        let Some(next) = self.registry_next(cur, op, path, val) else {
+            return false;
+        };
+        // KI-134: journal the OPERATION (not the resulting map — see `LoadWrite`) before the
+        // write lands, with its keys and value promoted so the entry holds RUNTIME handles;
+        // and keep the whole-map `env_define` beneath it out of the journal.
+        if journal && self.in_journalled_load() {
+            let path: Vec<Value> = path.iter().map(|v| self.promote(*v)).collect();
+            let val = self.promote(val);
+            self.journal_load_write(LoadWrite::Registry { sym, op, path, val });
+        }
+        let was_private = self.runtime.is_private_recorded(sym);
+        let prev_suppressed = std::mem::replace(&mut self.cold_mut().journal_suppressed, true);
+        self.env_define(root, sym, next);
+        self.cold_mut().journal_suppressed = prev_suppressed;
+        if was_private {
+            self.runtime.mark_private(sym);
         }
         true
     }
@@ -639,6 +709,7 @@ impl Heap {
             // read guard: an aging flip between the re-home and the store would either
             // strand this binding on a generation about to be freed or let migration's
             // reconcile revert it. See `promote_rehome_publish`.
+            let journal = self.in_journalled_load();
             let rebind = self.promote_rehome_publish(val, |h, shared| {
                 // Test probe: assert (from inside the window) that the publish really is
                 // covered by the read guard. `try_write` fails iff a read guard is held —
@@ -646,7 +717,18 @@ impl Heap {
                 // otherwise; see `heap::def_publish_probe`.
                 #[cfg(test)]
                 def_publish_probe::observe(&h.runtime.promote_lock);
-                h.runtime.globals_write().insert(sym, shared).is_some()
+                // KI-134: a module-load write is journalled BEFORE it lands, so a restore
+                // that swaps the table between the two finds it in the journal; the second
+                // attempt after the insert covers a snapshot that began between the first
+                // attempt (nothing outstanding, so nothing journalled) and the insert — its
+                // clone may predate the write. A replayed define is idempotent, so the rare
+                // double entry costs nothing.
+                let pre = journal && h.journal_load_write(LoadWrite::Define { sym, val: shared });
+                let was = h.runtime.globals_write().insert(sym, shared).is_some();
+                if journal && !pre {
+                    h.journal_load_write(LoadWrite::Define { sym, val: shared });
+                }
+                was
             });
             // Invalidate every process's global inline cache (late binding), and stamp
             // this name with the new version — its rebinding generation.
@@ -756,9 +838,27 @@ impl Heap {
         // covered, not just `%isolate`. The `#[must_use]` guard + by-value restore make
         // forgetting-to-restore a compiler warning and double-restore impossible.
         self.begin_rt_collect_block();
+        // KI-134: register this snapshot BEFORE reading the table, so a module-load write
+        // that lands after the clone is journalled (`env_define` checks the journal on both
+        // sides of its insert). The first outstanding snapshot starts the journal fresh —
+        // with nothing outstanding, nothing before it can need replaying — and one lock
+        // covers the count, the clear and the mark together (see `LoadJournal`).
+        let journal_mark = {
+            let mut j = self
+                .runtime
+                .load_journal
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if j.outstanding == 0 {
+                j.entries.clear();
+            }
+            j.outstanding += 1;
+            j.next_seq
+        };
         GlobalsSnapshot {
             saved: self.runtime.globals_read().clone(),
             block_depth: self.rt_collect_block.get(),
+            journal_mark,
         }
     }
 
@@ -994,7 +1094,25 @@ impl Heap {
     /// earlier value. The `def`'d code the bindings referenced is now unreachable and
     /// is reclaimed by the next RUNTIME compaction (which this call re-enables — see
     /// [`rt_collect_block`](Self::rt_collect_block) — after `snapshot_globals` suppressed it).
-    pub fn restore_globals(&self, snapshot: GlobalsSnapshot) {
+    ///
+    /// `discard_scope` (KI-134, ADR-339): `None` replays every module load journalled since
+    /// the snapshot over the restored table — `%isolate`'s contract. `Some(scope)` is the
+    /// scratch-world contract (`%isolate-discard-loads`, which the stdlib image builder probes
+    /// each module under): the loads written under isolate `scope` — this isolate's own thunk
+    /// and whatever it spawned — are dropped from the journal and NOT replayed, while loads
+    /// other processes made in the same window are replayed exactly as before, so a scratch
+    /// probe cannot roll a bystander's module back either.
+    ///
+    /// Returns the names the replay re-bound — the module loads that survived — so the
+    /// caller can keep the side facts a define carries beside its binding (the `defn-`
+    /// privacy mark, the `defdyn` mark) for exactly those names when it restores its own
+    /// snapshots of them. Without that a kept module came back with every private name
+    /// public: the surface audit read forty `defn-` helpers as undocumented public API.
+    pub fn restore_globals(
+        &mut self,
+        snapshot: GlobalsSnapshot,
+        discard_scope: Option<u64>,
+    ) -> Vec<Symbol> {
         // LIFO check: the live suppression depth must still equal what this snapshot set,
         // or snapshots were restored out of order and we'd release the wrong scope's
         // suppression (re-exposing an outer snapshot to KI-6). The newtype already rules
@@ -1018,11 +1136,10 @@ impl Heap {
         // racing RMW either completes first (and is wiped — the isolation contract) or
         // starts after (and reads the restored table). Lock order is registry_lock →
         // globals lock here and in every RMW, so no inversion.
-        let _registry = self
-            .runtime
-            .registry_lock
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        // Clone the Arc so the guard borrows a LOCAL, leaving `&mut self` free for the
+        // journal replay below (the same shape `registry_update` uses).
+        let rt = self.runtime.clone();
+        let _registry = rt.registry_lock.lock().unwrap_or_else(|e| e.into_inner());
         if reg_trace_enabled() {
             eprintln!(
                 "[reg] pid={:?} RESTORE scope={}",
@@ -1030,7 +1147,78 @@ impl Heap {
                 crate::process::self_isolate_scope(),
             );
         }
-        *self.runtime.globals_write() = snapshot.saved;
+        // KI-134 (ADR-339): the snapshot rolls back every write since it was taken,
+        // including a MODULE LOAD's — this process's own first-use load inside the window,
+        // or a concurrent process's — whose bindings and registrations other processes may
+        // be using right now. Isolation rolls back what a test did, not what a load did: the
+        // journalled load writes are replayed over the snapshot. A define is re-bound as it
+        // was; a registry write is re-applied as the OPERATION it was, so the entries the
+        // isolate itself registered stay rolled back (see `LoadWrite`).
+        //
+        // Replayed into a PRIVATE copy first, then installed with the ONE swap below. Readers
+        // are not under this lock: swapping the bare snapshot in and replaying into the live
+        // table left a window in which a worker's `conj` dispatched against an `*impls*`
+        // table its record was no longer in — 4 of 12 three-file repro runs, the same
+        // symptom this exists to remove. Copied out under the journal lock, applied after it
+        // (the apply allocates and takes `promote_lock`); still under `registry_lock`, so no
+        // registry read-modify-write interleaves with the rebuild.
+        let mut table = snapshot.saved;
+        let mut rebound: Vec<Symbol> = Vec::new();
+        let replay: Vec<LoadWrite> = {
+            let mut j = self
+                .runtime
+                .load_journal
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let mark = snapshot.journal_mark;
+            let mine = |scope: u64| discard_scope == Some(scope);
+            let writes = j
+                .entries
+                .iter()
+                .filter(|(seq, scope, _)| *seq >= mark && !mine(*scope))
+                .map(|(_, _, w)| w.clone())
+                .collect();
+            if discard_scope.is_some() {
+                // The scratch window's own loads are gone for good: nobody may replay them.
+                j.entries
+                    .retain(|(seq, scope, _)| !(*seq >= mark && mine(*scope)));
+            }
+            j.outstanding = j.outstanding.saturating_sub(1);
+            if j.outstanding == 0 {
+                j.entries.clear();
+            }
+            writes
+        };
+        if !replay.is_empty() {
+            if reg_trace_enabled() {
+                eprintln!(
+                    "[reg] pid={:?} RESTORE replays {} module-load write(s)",
+                    crate::process::current_pid(),
+                    replay.len()
+                );
+            }
+            for w in replay {
+                match w {
+                    LoadWrite::Define { sym, val } => {
+                        // `val` is already a RUNTIME handle; the publish re-homes it into the
+                        // current generation under the guard `env_define` uses.
+                        self.promote_rehome_publish(val, |_h, shared| {
+                            table.insert(sym, shared).is_some()
+                        });
+                        rebound.push(sym);
+                    }
+                    LoadWrite::Registry { sym, op, path, val } => {
+                        let cur = table.get(&sym).copied().unwrap_or(Value::nil());
+                        if let Some(next) = self.registry_next(cur, op, &path, val) {
+                            self.promote_rehome_publish(next, |_h, shared| {
+                                table.insert(sym, shared).is_some()
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        *self.runtime.globals_write() = table;
         // Wholesale table swap — invalidate every stamped global inline cache. This one
         // bumps the code epoch too (ADR-217): a restore can *replace or remove* bindings
         // a compiled arm baked in, so it is a rebind in every sense that matters.
@@ -1039,6 +1227,7 @@ impl Heap {
         // Release the compaction suppression `snapshot_globals` took: the snapshot is no
         // longer outstanding, so a relocation can no longer strand it (KI-6).
         self.end_rt_collect_block();
+        rebound
     }
 
     /// Walk to the global scope at the bottom of the frame chain.

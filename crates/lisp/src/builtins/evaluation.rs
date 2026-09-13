@@ -100,6 +100,29 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "",
         isolate,
     );
+    // ADR-339: the isolate for a SCRATCH world — everything rolls back, module loads
+    // included. The stdlib image builder probes each module inside one to learn what that
+    // module introduces on its own; `nest run` checks inside one so the check's loads do
+    // not stay bound for the run. `%isolate` itself keeps a load (KI-134): isolation undoes
+    // what a TEST did, and a module load is a runtime-wide fact.
+    primitives.def(
+        "%isolate-discard-loads",
+        Arity::exact(1),
+        Sig::new(vec![callable], any),
+        &[],
+        "",
+        isolate_discard_loads,
+    );
+    // KI-134 / ADR-339: `require-one` runs every load inside this, so the load's writes
+    // survive an `%isolate` restore — the loader's counterpart to `%isolate` itself.
+    primitives.def(
+        "%with-load-journal",
+        Arity::exact(1),
+        Sig::new(vec![callable], any),
+        &[],
+        "",
+        with_load_journal,
+    );
     // The quiescence mechanism `%isolate`'s own soundness note asks for: an isolate is sound
     // only while nothing else mutates globals concurrently, and this is how a runner checks
     // before entering one. See `system::scope_live_pids`.
@@ -840,7 +863,32 @@ pub(super) fn scope_live_pids(_args: &[Value], _env: EnvId, heap: &mut Heap) -> 
     Ok(heap.list(items))
 }
 
+/// `(%with-load-journal thunk)` — run `thunk` (a module load) with this process marked as
+/// loading, so every global define and registry update it performs is journalled and
+/// replayed by any `%isolate` restore that would otherwise discard it (KI-134, ADR-339).
+/// The mark is released even when the load throws: a leaked one would journal a test's own
+/// defs as if they were a module's, and they would then survive their isolate.
+pub(super) fn with_load_journal(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
+    let thunk = arg(args, 0);
+    heap.enter_journalled_load();
+    let result = apply_engine(heap, thunk, &[], env);
+    heap.leave_journalled_load();
+    result
+}
+
+/// `(%isolate thunk)`: run `thunk` against a private view of the globals and roll back what
+/// it defined — except module loads, which are replayed (KI-134, ADR-339).
 pub(super) fn isolate(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
+    isolate_impl(args, env, heap, true)
+}
+
+/// `(%isolate-discard-loads thunk)`: the same, and a module load inside the window is
+/// rolled back too — a scratch world. See the registration for who needs this.
+pub(super) fn isolate_discard_loads(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
+    isolate_impl(args, env, heap, false)
+}
+
+fn isolate_impl(args: &[Value], env: EnvId, heap: &mut Heap, replay_loads: bool) -> LispResult {
     let thunk = arg(args, 0);
     // `snapshot_globals`/`restore_globals` now bracket RUNTIME compaction themselves (the
     // snapshot holds off-graph RUNTIME handles a mid-thunk relocation would strand — KI-6),
@@ -996,11 +1044,24 @@ pub(super) fn isolate(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult
         }
     }
     wait_for_inflight_loads(heap);
-    heap.restore_globals(saved);
+    // The marks as they stand NOW, read before the restore: a module load the restore keeps
+    // (ADR-339) made its `defn-`/`defdyn` marks live in here, and only here.
+    let live_dynamics = crate::core::value::dynamic_syms();
+    let live_private = heap.private_names_snapshot();
+    let kept = heap.restore_globals(saved, if replay_loads { None } else { Some(scope) });
     // Both registries are restored on the error path too — `result` is returned below
     // rather than `?`-propagated, so a throwing thunk rolls back exactly as a clean one
-    // does. Replaces rather than unions, so a mark *added* inside the thunk is dropped.
-    crate::core::value::restore_dynamics(saved_dynamics);
-    heap.restore_private_names(saved_private);
+    // does. Replaces rather than unions, so a mark *added* inside the thunk is dropped —
+    // EXCEPT for the names a kept module load bound: their marks travel with the binding,
+    // or the module comes back with every private helper public and every dynamic var
+    // plain (the surface audit read forty `defn-` helpers as undocumented public API).
+    let (mut dynamics, mut private) = (saved_dynamics, saved_private);
+    if !kept.is_empty() {
+        let kept: std::collections::HashSet<_> = kept.into_iter().collect();
+        dynamics.extend(live_dynamics.into_iter().filter(|s| kept.contains(s)));
+        private.extend(live_private.into_iter().filter(|s| kept.contains(s)));
+    }
+    crate::core::value::restore_dynamics(dynamics);
+    heap.restore_private_names(private);
     result
 }

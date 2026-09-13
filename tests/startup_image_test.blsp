@@ -14,6 +14,10 @@
 
 (defmodule startup-image-test (:use test))
 
+;; The prune test writes its foreign fixture module to a `temp-dir` (KI-30: every prefix
+;; used is purged at load).
+(purge-stale-temp "imgforeign-")
+
 (defn- img-tmp (n) (path/join "/tmp" (str "brood-startup-image-" n ".bin")))
 
 ;; A worker that re-reads the global on every request — the late-binding contract.
@@ -319,9 +323,19 @@
     ;; prelude registered: its qualifier names no module the image carries, and yet nothing
     ;; would ever replay it (KI-106). It must survive the prune on that ground alone.
     (%registry-update! '*record-ids* :assoc [:zz-preexisting/thing] 'zz-preexisting/thing)
-    (let (before-regs (stdimage/registrations-by-module))
-      (require-one 'tempo)
-      (is (contains? *record-ids* :tempo/tempo))
+    ;; The foreign module is a FIXTURE written here, not a std module: since ADR-339 a
+    ;; module load survives a sibling test's `%isolate`, so `tempo` may already be loaded —
+    ;; and registered — when this unit starts, which would make it PREEXISTING to the
+    ;; baseline below and rightly kept by the prune. A module nothing else knows is
+    ;; guaranteed fresh; it is foreign because it is in no `*module-files*` entry.
+    (let (dir (temp-dir "imgforeign-")
+          _ (file/mkdir dir)
+          _ (reflect/add-load-path dir)
+          _ (file/spit (path/join dir "zz-imgforeign.blsp")
+              "(defmodule zz-imgforeign)\n(defrecord probe (n))\n")
+          before-regs (stdimage/registrations-by-module))
+      (require-one 'zz-imgforeign)
+      (is (contains? *record-ids* :zz-imgforeign/probe))
       ;; a root-level registration — unqualified key, no owning module — is kept
       (%registry-update! '*record-ids* :assoc [:zz-image-root-probe] 'zz-image-root-probe)
       ;; one owned by a module the image carries (present in `*module-files*`) is kept
@@ -329,7 +343,7 @@
       (%registry-update! '*record-ids* :assoc [:zz-imgproj/shapes/circle] 'zz-imgproj/shapes/circle)
       (let (n (project-image/image-prune-foreign-registrations before-regs))
         (is (> n 0))
-        (is (not (contains? *record-ids* :tempo/tempo)))
+        (is (not (contains? *record-ids* :zz-imgforeign/probe)))
         (is (contains? *record-ids* :zz-image-root-probe))
         (is (contains? *record-ids* :zz-imgproj/shapes/circle))
         (is (contains? *record-ids* :zz-preexisting/thing)))))

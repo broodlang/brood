@@ -77,6 +77,49 @@ pub(super) fn reg_trace_enabled() -> bool {
 }
 
 /// Which update [`Heap::registry_update`] performs. See that method for why the whole
+/// One write a MODULE LOAD made to the globals table while an `%isolate` snapshot was
+/// outstanding somewhere in the runtime (KI-134, ADR-339). Replayed by `restore_globals`
+/// after its wholesale swap, so a load survives a rollback that was only ever meant to undo
+/// what a TEST did. Two kinds, because a registry global (`*record-ids*`, `*impls*`,
+/// `*features*` …) is one map accumulating entries from many loads: replaying the VALUE it
+/// had after this load would resurrect every entry the isolate itself added, so a registry
+/// write is journalled as its OPERATION and re-applied to the restored table. Every `Value`
+/// here is a RUNTIME handle (promoted before journalling), and an entry lives only while a
+/// snapshot is outstanding — the same window `snapshot_globals`'s compaction block covers.
+#[derive(Clone)]
+pub(super) enum LoadWrite {
+    Define {
+        sym: Symbol,
+        val: Value,
+    },
+    Registry {
+        sym: Symbol,
+        op: RegistryOp,
+        path: Vec<Value>,
+        val: Value,
+    },
+}
+
+/// The module-load journal (see [`LoadWrite`]). `outstanding` counts the runtime's live
+/// The module-load journal (see [`LoadWrite`]). `outstanding` counts the runtime's live
+/// `snapshot_globals` — it lives under this lock rather than in an atomic so that "is a
+/// snapshot outstanding?" and "append this entry" are one step, and so are "the first
+/// snapshot begins" and "start the journal fresh": no entry can slip in between an
+/// observation of zero and the clear that follows it. `next_seq` is monotonic for the life
+/// of the runtime; a snapshot records it as its mark and replays every entry at or past it.
+/// Each entry also carries the writer's **isolate scope** (`process::self_isolate_scope`,
+/// which a spawned child inherits), so a scratch isolate (`%isolate-discard-loads`) can drop
+/// exactly its own window's loads on restore while still replaying everyone else's — without
+/// the tag, a concurrent `%isolate`'s replay resurrected the scratch module (2 of 15 runs of
+/// the guard).
+#[derive(Default)]
+pub(super) struct LoadJournal {
+    pub(super) outstanding: usize,
+    pub(super) next_seq: u64,
+    /// `(seq, writer's isolate scope, write)`.
+    pub(super) entries: Vec<(u64, u64, LoadWrite)>,
+}
+
 /// read-modify-write has to happen inside one kernel call (KI-22).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegistryOp {
@@ -202,6 +245,9 @@ pub struct RuntimeCode {
     /// Recorded on the write path only, under the lock already held, so it costs one
     /// `HashSet` insert per registration and nothing at all per lookup.
     pub(super) registry_lock: Mutex<HashSet<Symbol>>,
+    /// KI-134: the module-load writes to replay after an `%isolate` restore. See
+    /// [`LoadJournal`]. Lock order where both are taken: `registry_lock` → this.
+    pub(super) load_journal: Mutex<LoadJournal>,
     /// **Reserved** names — everything the language itself ships, which a user `def`
     /// may not rebind (ADR-166). Seeded with every symbol bound at runtime-seed time
     /// (the prelude's 443 definitions plus every Rust builtin), and extended with each
@@ -450,6 +496,10 @@ pub struct SourceLoc {
               leaves the globals table mutated and RUNTIME compaction suppressed (KI-6)"]
 pub struct GlobalsSnapshot {
     pub(super) saved: SymbolMap<Value>,
+    /// The load journal's `next_seq` when this snapshot was taken: every journalled
+    /// module-load write at or past it landed after the table was read, and is replayed
+    /// over the restored table (KI-134).
+    pub(super) journal_mark: u64,
     /// The `rt_collect_block` depth this snapshot established (post-increment). Restore
     /// asserts the live depth still matches — catching an out-of-order (non-LIFO) restore,
     /// which would release the wrong scope's suppression.
@@ -547,6 +597,7 @@ impl Default for RuntimeCode {
             global_generations: RwLock::new(SymbolMap::default()),
             meta: RwLock::new(SymbolMap::default()),
             registry_lock: Mutex::new(HashSet::new()),
+            load_journal: Mutex::new(LoadJournal::default()),
             // A default (un-seeded) runtime reserves nothing — the prelude hasn't run.
             sealed: RwLock::new(std::collections::HashSet::new()),
             // Likewise no private names until the prelude has been seeded.
@@ -684,6 +735,7 @@ impl RuntimeCode {
             globals: RwLock::new(globals),
             global_generations: RwLock::new(SymbolMap::default()),
             registry_lock: Mutex::new(HashSet::new()),
+            load_journal: Mutex::new(LoadJournal::default()),
             version: AtomicU64::new(0),
             code_epoch: AtomicU64::new(0),
             def_sites: RwLock::new(HashMap::new()),

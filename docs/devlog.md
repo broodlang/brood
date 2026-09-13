@@ -851,6 +851,9 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-12** — a qualified reference loads its module on first use (ADR-335): `nest complete` 72 → 20 ms, five modules instead of 62
 - **2026-09-12** — the lazy-load wave's two artifact divergences: `REGISTRIES` closed (`bd88a386`), `FACTS`/`GLOBALS` shown to be the lazy-load win and normalised in the gate
 - **2026-09-12** — KI-131: lazy loading met `%isolate`; the runner declares its closure with a new `(:load …)` header clause
+- **2026-09-13** — the VM→native direct call lands as the frame path minus the round trip (`mandelbrot` −12%, `supervisor` −5.4%); on the way in: the fast-link probe handed back native flat cells as Brood links (the §7.12 "runaway"), and a nested tail chain put 19 820 dirty parks on `supervisor`
+- **2026-09-13** — the timer thread is woken only for a new earliest deadline: a parked `(receive … (after ms …))` no longer costs a futex wake per park (2.5 → 2.0 µs on the timed round trip)
+- **2026-09-13** — KI-134 FIXED (ADR-339), two mechanisms: the isolate rollback (journalled loads, replayed atomically; `%isolate-discard-loads` for the image builder) and — traced, not the rollback — the image branch binding a module before its impls, reached through a lazy global hit (publication order fixed). The source-path residue is KI-135
 - **2026-09-12** — memoised view fragments (ADR-336): `ui-memo`, the frame carries its cache back; `=` is O(1) on the same cell, `append` shares its last list; `BROOD_UI_TRACE`; KI-132 filed
 - **2026-09-12** — text contrast is a setting (ADR-337): `gui/text-contrast` lifts light-on-dark stems under the linear-light blend; bedit ships 1.4
 - **2026-09-12** — `editor/shell`: shell-script highlighting, and a script typed by its `#!` line (`register-interpreter-type`, Emacs `interpreter-mode-alist`)
@@ -13109,3 +13112,76 @@ went with them. 5M-call loop 1.68 → 1.59 G instructions; the call-free loop 0.
 bintree −2.8%, nqueens −3.2%, json −2.1%, collatz −2.2%, nothing the other way. Rust jit tests,
 both guards and the in-language suite hold (the one failure is KI-134's `lazy_load_test:120`).
 
+### 2026-09-13 — the VM→native direct call lands, and what it found on the way in
+
+§7.12's lever, landed as the frame path with the driver round trip cut out: a non-tail
+`Inst::Call` whose callee has native code INSTALLED lays the frame out at the call site,
+installs the callee's IC cursors, and enters the same `jit_tier_in_frame` the driver would.
+A value comes back to the call site; a staged tail call is dispatched exactly as
+`jit_dispatch_tail` does; a deopt/preempt/declined activation is handed back as
+`ChunkExit::CallResume` and settled by `settle_native_frame` — the frame path's own
+settling, factored out so the two cannot drift. Nothing runs nested. `make ab --floor`
+against `e566483d`: `mandelbrot` −12.0%, `supervisor` −5.4%, thirteen rows inside their
+floors, none regressed.
+
+Three things had to be found first. The §7.12 "runaway" was not a `stage_base` slip:
+`vm_call_ic_fast_link` returned NATIVE flat cells (`nslots == u32::MAX`, a builtin's fn
+pointer) as Brood links — the IR pre-checks the marker, so the two JIT callers never saw it;
+the VM ran `%table-incr`'s pointer as an arm with a 2³²-slot frame (`memory allocation of
+103079218656 bytes` on json/regex/wordcount/supervisor). Refused in the probe, unit-tested.
+Then the first cut, which reused the native→native fast link, put every
+`fill → start-child → gen/call → receive` chain under a native gateway through the link's
+nested outcome-4 arm: **19 820 dirty worker parks on `supervisor` against 0 for the frame
+path**, while the row read −16.8% — a timing gate alone would have shipped it. Then the
+second cut ran the callee without its IC block cursors (KI-20's shape): `nbody` +24.5%, 329k
+IC hits become 304k misses; one `set_ic_bases` and it is −2.4%. Guards:
+`crates/cli/tests/vm_direct_call.rs` (dirty parks stay 0, and the wrapper must have
+lowered), `jit_effect_once_test` case 7 (an effect before a deopt in a directly-entered
+callee happens once), `fast_link_tests` (the native-cell refusal). compute-frontier §7.13.
+
+### 2026-09-13 — the timer thread wakes only for a new earliest deadline
+
+`arm_timer` notified the timer thread on every push. The thread sleeps in `wait_timeout`
+until the heap's head deadline, so an entry that sorts behind the head cannot need an
+earlier wake — and a `gen/call`'s 5 s deadline never is the head. That was a futex wake per
+parked timed receive, i.e. per `gen/call` (the reply is not there when the caller parks).
+Notify only when the new deadline is strictly earlier than the head, or the heap was
+empty. Timed round trip with `(after 5000)`: 2.5 → 2.0 µs; `supervisor` row unchanged
+(the wake was landing on an idle core). Found while decomposing `gen/call`: 9.4 µs
+against 2.0 for a bare round trip, and the hand-rolled equivalent of everything it does
+measures 4.8 — the missing 4.6 µs is not in the ceremony and is still open.
+
+### 2026-09-13 — KI-134 fixed: two mechanisms, and the second was never the rollback (ADR-339)
+
+The blocker in this morning's queue. Window 1 landed as specified: `require-one` runs every
+load inside `%with-load-journal`; under that mark a global define and a registry update are
+journalled — the registry one as its OPERATION, so what the isolate itself registered stays
+rolled back — and `restore_globals` replays the entries since its snapshot into a private copy
+and installs it with one swap. Two things the spec did not say: `%isolate` had a second client
+with the opposite need (the stdlib image builder probes each module inside one so the load
+rolls back; with loads surviving it built an image that credited every later probe with the
+earlier ones' globals and every `nest test` died with `*units*` unbound — so `%isolate` keeps
+loads and `%isolate-discard-loads` is the scratch world), and the replay must be atomic
+(replaying into the live table left readers a window: 4 of 12).
+
+Then the three-file repro still failed 7 of 30 under load, and a `BROOD_REG_TRACE` run of a
+failure said why the journal could not have helped: the worker died BEFORE the run's first
+`RESTORE` line, on the line after another process registered `:queue/queue`. It had reached
+`queue/list->` while `queue` was mid-load — impossible from a source load, where the `impl`
+precedes `list->` in the file, but the loader's image branch materialised all the bindings
+first and replayed the impls after, and a lazy global HIT (ADR-335) waits for nothing. The
+KI's "one root cause, two shapes" had folded this into the rollback story on the strength of
+an assertion, not a trace. Fixed by publication order — dependencies, registrations, impls,
+then bindings, then `provide` — and pinned by a deterministic test of the ORDER
+(`crates/cli/tests/image_publication_order.rs`) rather than by another loop. Repro under load,
+image live: 0 of 20 (7 of 30 before). The source path's one-form version of the same
+window is filed as KI-135 with its fix direction (atomic publication). The eager file load
+of `7e26803b` is reverted: redundant now, and in the full suite it loaded every fixture
+`lazy_load_test` names at file load, failing 5 of its 11 units — it had passed alone only
+because the checker pre-flight's "module absent" memo made the eager drain skip them.
+
+The method lesson, written down so it stops repeating: **get the event trace before the
+theory.** Every KI in this class (KI-89, KI-134 twice) was attributed from the failing
+assertion; one `BROOD_REG_TRACE` run with the death and the restores on the same timeline
+settled it in a minute. And prove a fix with a test of the *mechanism* — the order, the
+count, the state — never with N green runs of a race.
