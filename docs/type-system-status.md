@@ -989,7 +989,7 @@ types, contract blame and contracts-by-default, parametric abilities, view patte
 computed-callee `((cur 1) "x")` (an arrow in head position is not consulted); strict's arrow
 inclusion reading an unknown lambda result as `any` rather than `?`.
 
-## Caller-derived parameter types for private functions (2026-09-13, ADR-341)
+## Caller-derived parameter types (2026-09-13, ADR-341)
 
 The residue ADR-340 left — four `json` index helpers declared `(… -> (tuple int int))` because
 the walk read a body under its parameters' bottom-up demands — is gone, and so is `hex-val`'s
@@ -1007,9 +1007,26 @@ to collapse to a bare `vector` past the term cap); and a widening operator
 (`Ty::widened_below`) for the round when a JSON value's `vector<… | vector<…>>` would otherwise
 nest one level deeper forever.
 
-What derivation does NOT reach, by design: a private function used as a value (`(map xs
-helper)`), a file with an unexpanded macro call, a public function (its callers are anywhere),
-`(:use-internals mod)` callers in another file — those read the demand-based loaded inference
-as before. And what it surfaced in `json` was the `nth`-answers-`nil | int` class once more
-(`(digit? (nth s i))` under a `(< i n)` the checker cannot tie to it): `(nth s i -1)` says what
-the guard says, and a `->number` after `strict-number?` unwraps the failure it cannot get.
+What derivation does NOT reach, by design: a function used as a value (`(map xs helper)`), a
+file with an unexpanded macro call, callers in another file (`(:use-internals mod)`
+included) — those read the demand-based loaded inference as before. And what it surfaced in
+`json` was the `nth`-answers-`nil | int` class once more (`(digit? (nth s i))` under a `(< i
+n)` the checker cannot tie to it): `(nth s i -1)` says what the guard says, and a `->number`
+after `strict-number?` unwraps the failure it cannot get.
+
+**Extended to every single-arm function the file defines (2026-09-13, second cut).** The
+first cut derived `defn-` only, on the premise that soundness needed a closed caller set. It
+does not. A derived type is a fact about *this file's* calls: a warning in a body walked
+under it says "every call in this file would fail here" — true whatever callers exist
+elsewhere — and the sharpened return is read only by this file's callers, whose activations
+the derived type covers; a caller in another file still reads the demand-based loaded
+inference. So a public `days-in-month (y m)` is walked under the `int` its parser hands it,
+and the induction runs over activation chains rooted in this file, not over privacy. What
+turning it on found: two sites whose scope the collector read wider than the walk —
+`and` stores each conjunct in a temporary (`(let (g (int? y)) (if g …))`) and the collector
+had no guard alias for it, so `check_let`'s per-binding rule is now one function
+(`let_bind_scope`) both walkers call; and a falsy `(or A (nil? root) C)` proves `root` is not
+`nil`, the dual of the `and`-conjunct rule the then-branch already had (`or_disjunct_guards`,
+each biconditional disjunct's complement on its own variable, no shared variable needed).
+Both are general rules; `std/` is at zero in both modes with the derivation on for every
+function.

@@ -525,6 +525,10 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // edits, resync fallback) a subscriber uses to track a hosted document.
     embedded_module!("editor/buffer-client", "std/editor/buffer-client.blsp"),
     embedded_module!("editor/buffer-registry", "std/editor/buffer-registry.blsp"),
+    // A line-oriented lexer from a table of rules, and the configuration formats
+    // (JSON / YAML / TOML / Makefile / INI / commit message) as tables over it.
+    embedded_module!("editor/lexer", "std/editor/lexer.blsp"),
+    embedded_module!("editor/configs", "std/editor/configs.blsp"),
     // The display/input seam (M3, ADR-046): `display` is the render-op protocol
     // (pure data constructors); `keymap` is the rebindable key→command dispatcher
     // shared by the line editor and the observer; `observer` is a process-viewer

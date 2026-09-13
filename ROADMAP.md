@@ -330,7 +330,7 @@ surface feeding it — and each turned out to need a different kind of fix. Deta
       inferencer no longer loses nested demands cross-module; the checker materialises every
       module a loaded body names, so a leaf `sig` (`text/char->line`) reaches what derives from
       it without re-declaring the derived function.
-- [x] **7. Caller-derived parameter types for module-private functions** (ADR-341, 2026-09-13). The walk checked a
+- [x] **7. Caller-derived parameter types** (ADR-341, 2026-09-13; every single-arm function the file defines, public or private — the type is a fact about the file's calls, not about privacy). The walk checked a
       body under its parameters' bottom-up *demands* (`(+ i 1)` says `number`) with no view of
       what the callers pass; a private function's caller set is closed, so the union of the
       call sites' argument types is a sound binding when the name never escapes as a value.

@@ -511,8 +511,8 @@ fn chain_shape(heap: &Heap, test: Value, want_then_g: bool) -> Option<(Value, Va
 /// The two scopes an `(if test …)` branches into: the then-branch narrowed by what a truthy
 /// `test` proves (a single guard, every conjunct of an `and`-expansion, a same-variable
 /// `or`-union), the else-branch by the complement of what is biconditional (a plain guard,
-/// a same-variable `or`; never a `then_only` `and`-conjunct — a falsy `and` may have failed
-/// on a later conjunct). The one construction the checker's three `if` readers share —
+/// every disjunct of an `or`-expansion; never a `then_only` `and`-conjunct — a falsy `and`
+/// may have failed on a later conjunct). The one construction the checker's three `if` readers share —
 /// `check_if` (the walk), `gradual_of` (the checked value type) and `expr_ty` (the inferred
 /// type, which drives a function's inferred return) — so all three see the same branch
 /// types. `expr_ty` used to union both branches under the UNnarrowed scope, so
@@ -568,9 +568,11 @@ pub(super) fn branch_scopes(heap: &Heap, test: Value, ctx: &Ctx) -> (Ctx, Ctx) {
     for g in and_conjunct_guards(heap, test, ctx) {
         then_ctx = then_ctx.narrow(g.sym, g.ty);
     }
+    for g in or_disjunct_guards(heap, test, ctx) {
+        else_ctx = else_ctx.narrow(g.sym, g.ty.negate());
+    }
     if let Some((sym, union)) = or_same_var_narrowing(heap, test, ctx) {
-        then_ctx = then_ctx.narrow(sym, union.clone());
-        else_ctx = else_ctx.narrow(sym, union.negate());
+        then_ctx = then_ctx.narrow(sym, union);
     }
     (then_ctx, else_ctx)
 }
@@ -614,10 +616,11 @@ pub(super) fn and_conjunct_guards(heap: &Heap, test: Value, ctx: &Ctx) -> Vec<Gu
 }
 
 /// If `test` is an `or`-expansion whose disjuncts are **all** biconditional guards over
-/// the **same** variable, return `(sym, ⋃ tyᵢ)`. The then-branch narrows `sym` to the
-/// union (a truthy `or` ⇒ some disjunct holds); the else-branch to its complement (a falsy
-/// `or` ⇒ none hold — sound only because every disjunct is biconditional). `None` the moment
-/// a disjunct is `then_only`, targets another variable, or isn't a recognised guard.
+/// the **same** variable, return `(sym, ⋃ tyᵢ)`: the then-branch narrows `sym` to the
+/// union (a truthy `or` ⇒ some disjunct holds — and only with one variable is that a
+/// statement about a named one). The else-branch is [`or_disjunct_guards`]'s, which
+/// needs no shared variable. `None` the moment a disjunct is `then_only`, targets
+/// another variable, or isn't a recognised guard.
 pub(super) fn or_same_var_narrowing(heap: &Heap, test: Value, ctx: &Ctx) -> Option<(Symbol, Ty)> {
     let mut cur = test;
     let mut sym: Option<Symbol> = None;
@@ -659,6 +662,46 @@ pub(super) fn or_same_var_narrowing(heap: &Heap, test: Value, ctx: &Ctx) -> Opti
         }
     }
     sym.map(|s| (s, union))
+}
+
+/// Every disjunct guard of an `or`-expansion test that a FALSY `or` refutes — the dual of
+/// [`and_conjunct_guards`]: a falsy `or` proves **every** disjunct falsy, so each
+/// disjunct's negation narrows the *else*-branch, each on its own variable (`(or
+/// (nil? root) (empty? files))` proves `root` is not `nil` AND `files` is not `nil`
+/// after it fails). A `then_only` disjunct is left out — `(and (int? x) …)` as a
+/// disjunct being falsy proves nothing about `x` — and so is one the reader cannot
+/// name. `[]` when `test` is not an or-expansion. Returned as `else_only` guards: what a
+/// truthy `or` proves is one disjunct, not a named one (see [`or_same_var_narrowing`]).
+pub(super) fn or_disjunct_guards(heap: &Heap, test: Value, ctx: &Ctx) -> Vec<Guard> {
+    let mut out = Vec::new();
+    let mut cur = test;
+    let mut matched = false;
+    loop {
+        match chain_shape(heap, cur, false) {
+            Some((cond, rest)) => {
+                matched = true;
+                if let Some(g) = guard_assertion(heap, cond, ctx).filter(|g| !g.then_only) {
+                    out.push(Guard {
+                        else_only: true,
+                        ..g
+                    });
+                }
+                cur = rest;
+            }
+            None => {
+                if matched {
+                    if let Some(g) = guard_assertion(heap, cur, ctx).filter(|g| !g.then_only) {
+                        out.push(Guard {
+                            else_only: true,
+                            ..g
+                        });
+                    }
+                }
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// If `a` is a symbol and `b` is a self-evaluating literal, return the guard

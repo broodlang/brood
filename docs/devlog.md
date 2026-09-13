@@ -861,6 +861,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-12** — text contrast is a setting (ADR-337): `gui/text-contrast` lifts light-on-dark stems under the linear-light blend; bedit ships 1.4
 - **2026-09-12** — `editor/shell`: shell-script highlighting, and a script typed by its `#!` line (`register-interpreter-type`, Emacs `interpreter-mode-alist`)
 - **2026-09-12** — `\b` / `\B` in the regex engine: the Pike VM answers them, and a boundary pattern's `match?`/`matches?` route there too
+- **2026-09-13** — Caller-derived parameter types for EVERY single-arm function a file defines (ADR-341, second cut): the derived type is a fact about the file's calls, not about privacy — a body warning says "every call in this file would fail here", the sharpened return is read by this file's callers only. Two general rules it needed: `check_let`'s per-binding scope is one function (`let_bind_scope`) both walkers call, so an `and` temporary's guard narrows at a call site; a falsy `or` refutes every biconditional disjunct in the else branch (`or_disjunct_guards`), each on its own variable
 - **2026-09-13** — Caller-derived parameter types for private functions (ADR-341): a `defn-`'s parameters are the union of what its file's call sites pass, a least fixpoint jointly with the private returns; `std/json.blsp` is strict-zero with no signature on its ten-level parser chain; a call with an uninhabited argument is ⊥; tuples merge by position; `Ty::widened_below` for the round a recursive value shape would nest forever
 - **2026-09-13** — Declare at the leaf, derive from the call (ADR-340): a self-recursive function is specialized at its call by a joint fixpoint (`(sum-to 10 0)` is `int`, not `any`); the loaded-closure "Tier 1" that lost nested demands cross-module is gone; the checker materialises what a loaded body names so `text/char->line`'s leaf sig reaches `buffer-current-line`; a `let`-bound lambda checks its calls; a private constant has its value; `nil | list<3>` ∪ `list<int>` is one term; a dynamic union is read term by term
 - **2026-09-13** — `:on-move` is a layer facet (ADR-338): a follower runs only when point or the text moved (`buffer-moved?`), never on every event like a `:post-key` guard; `string/width->index`, the inverse of `display-width`, for a click on a wide glyph
@@ -868,6 +869,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-13** — `--version` says `-dirty`: a binary whose `crates/`/`std/` differed from its commit is no longer indistinguishable from a clean build of the same sha; `make doctor` names it; build.rs re-runs from a worktree too
 - **2026-09-13** — tabs are a column-dependent cluster (ADR-342): `display-width` / `width->index` take `start-col` + `tab-width`, `string/expand-tabs` is the third leg, the GUI paints a raw tab to the screen stop; the scroll blit (ADR-343): a dirty strip that is a translation of old canvas rows is copied, not drawn — a 1080p scroll paints in 2.3 ms, not 10; `ui-coalesce-motion` collapses a `:move` flood like a `:drag` one; `:close-is-input?` lets an app ask before the X button quits; `buffer-file-changed?` — a buffer stamps its file's mtime at read/save
 - **2026-09-13** — `editor/buffer-registry` (ADR-345): a named directory of buffer processes — share-once, enumeration, membership notifications — the seam a second frame (a process with its own window) joins the same buffers through
+- **2026-09-13** — `editor/lexer` (ADR-346): a lexical language mode is a table — structured rules, word classes, line rules — and `editor/configs` is JSON / YAML / TOML / Makefile / INI / commit-message as tables over it
 
 ---
 
@@ -13297,3 +13299,12 @@ process is announced and re-shared by whoever still has the text. `buffer_regist
 pins share-once, the notifications, the died-then-reshared path and stop. The
 window-id-on-input alternative is recorded as the other half of ADR-059 and why a tag
 alone is not sound.
+
+## 2026-09-13 — `editor/lexer`: the line-lexer shape, once (ADR-346)
+
+Six configuration formats the editor needed next, and `dotenv` / `dockerfile` / `shell`
+had each hand-written the walk they all share. `editor/lexer` is that walk from a table
+(`lexer-grammar`: structured rules in one alternation, word classes, line rules), and
+`editor/configs` is JSON, YAML, TOML, Makefile, INI / git config and a commit message as
+tables — a `<fmt>-spans` fn each, `configs_test` naming the tokens each paints. Shell
+keeps its own walker (its function-name rule is contextual).
