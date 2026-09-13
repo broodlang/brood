@@ -9841,3 +9841,38 @@ to *load a module* (and write its registrations) inside the window rather than m
 `defrecord` in it. The eager file load cannot reach it: the worker's first use happens in its
 own process, at run time. That is the half still to fix, and it is why this KI stays OPEN —
 the rate is lower, which makes it rarer to catch, not closer to gone.
+
+**Window 2 is the SAME bug, and the two windows have one root cause (2026-09-13).** The
+paragraph above guessed at the worker's failure from the assertion alone; instrumenting it
+(`(assert= [] (seq/filter results (fn (r) (not (queue? r)))))`) says what actually happens,
+and it is not a lost record id read by a bystander:
+
+    expect: [:timeout]
+    process 4 died: error: conj: adding to a record takes a [k v] pair or a map, got 0
+
+Exactly ONE of the four workers is missing; the other three return proper queues. That worker
+did not stall and was not descheduled — it RAN and RAISED. `(queue/list-> (list 0 10))` calls
+`conj` on a queue, `conj`'s ability dispatch missed queue's `Conjable` impl, and the call
+fell through to the generic record `conj`, which rejects the integer `0`. The `:timeout` is
+two steps downstream: a dead worker never sends, so the `receive` waits out
+`*test-wait-ms*`, and `queue?` is false because the slot holds `:timeout`.
+
+So both windows are one mechanism — a module's registrations rolled back while something is
+still using it — and they differ only in which ability call reaches the gap first. Window 1
+returns a WRONG VALUE (`pop`'s emptiness check misses, `:size -1`); window 2 RAISES (`conj`
+finds no impl and the record default refuses the argument). The KI's own table mixes the two
+shapes (`queue_test:18`/`:16` against `:157`) for that reason, not because there are two
+bugs.
+
+**What that settles for the fix.** One fix closes both: module-load writes must survive an
+`%isolate` restore. A module load is a process-shared, idempotent fact, and isolation exists
+to roll back what a TEST did, not what a LOAD did. The shape that reaches the spawned-worker
+case (which no amount of eager loading in the parent can, since the worker's first use is in
+its own process at run time): `require-one` marks "in module load" — the same one-shot trick
+`SKIP_NEXT_EDGE` already uses — every `env_define`/`registry_update` under that mark is
+journalled, and `restore_globals` replays the journal after its wholesale swap. Keyed on what
+KIND of write it was, not on where the load happened.
+
+**Ruled out, so nobody re-checks it.** The absence memo (`0c66565b`) is not a contributor,
+which was worth testing because it predates the KI's own runs (21:55 against 22:48): with
+`module_known_absent` stubbed out the rate is 1/12, the same as with it live.
