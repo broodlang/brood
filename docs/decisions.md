@@ -21979,6 +21979,7 @@ every follower re-derives the same test and one forgets. *Skip `:post-key` for m
 events*: a mouse gesture can edit, which is exactly what the guards exist for. *A
 `:moved?` flag on the model*: the same information, but state to keep in sync where a
 comparison at the one site that has both models needs none.
+
 ## ADR-339 — A module load survives an `%isolate` restore: load writes are journalled and replayed
 
 **Status:** accepted and implemented 2026-09-13 (`%with-load-journal` and

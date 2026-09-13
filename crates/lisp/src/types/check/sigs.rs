@@ -2893,10 +2893,8 @@ pub(super) fn caller_derived_params(
             // depth, after which the ascent is stationary. The early rounds are left
             // exact so a chain of helpers settles at full precision first.
             if round >= WIDEN_AFTER_ROUND {
-                for slot in acc.iter_mut() {
-                    if let Some(t) = slot {
-                        *t = t.widened_below(WIDEN_DEPTH);
-                    }
+                for t in acc.iter_mut().flatten() {
+                    *t = t.widened_below(WIDEN_DEPTH);
                 }
             }
             next.insert(name, acc);
