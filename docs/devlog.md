@@ -13308,3 +13308,23 @@ had each hand-written the walk they all share. `editor/lexer` is that walk from 
 `editor/configs` is JSON, YAML, TOML, Makefile, INI / git config and a commit message as
 tables — a `<fmt>-spans` fn each, `configs_test` naming the tokens each paints. Shell
 keeps its own walker (its function-name rule is contextual).
+
+## 2026-09-13 — the regex capture engine, measured: 30% now, the rest is a design question
+
+The table-driven lexers (`editor/configs`) and `editor/shell` all run on `regex/find-all`,
+and a 40-line `Cargo.toml` took ~150 ms to colour — ~1 ms per pattern per line, 80× the
+bitset engine's `match?`. Two fixes inside the capture engine, both pure Brood: the
+epsilon closure consed a thread LIST (it rebuilt a vector per thread — `into` copying the
+whole list each time, and the scan walked it by `nth`), the start thread's capture slots
+are built once per pattern instead of once per position, and a first-character prefilter
+(`regex-first-set`: the `:char` tests of the start closure; off when a match can begin
+with `.`, be empty, or start on a zero-width test) skips injecting a start thread where
+no match can begin. `(#.*)` on a 90-char comment line: 2.08 → 1.43 ms. The remaining cost
+is the interpreted VM's ~15 µs per character per live thread inside a match — and a
+comment line IS one long match, so the prefilter cannot help it. A 10× needs a different
+engine (a DFA for the capture-free scan, or a native path), which is a design decision,
+not an optimisation; recorded here with the numbers rather than decided.
+
+`editor/treesit` gains the grammar recipe — `grammar-fetch` (a git URL or a directory),
+`grammar-build` (`cc`/`c++` to `libtree-sitter-<lang>.so`), `grammar-install` — so an
+editor mode can declare WHERE a grammar lives and build it, instead of printing a README.
