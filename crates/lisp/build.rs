@@ -26,8 +26,15 @@ fn main() {
     // footer; a `nest check` run against each disagreed and nothing said why (2026-09-13).
     // Scoped to the build's inputs on purpose: a docs-only edit does not change the binary.
     let sha = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
-    let dirty = git(&["status", "--porcelain", "--untracked-files=no", "--", "crates", "std"])
-        .is_some();
+    let dirty = git(&[
+        "status",
+        "--porcelain",
+        "--untracked-files=no",
+        "--",
+        "crates",
+        "std",
+    ])
+    .is_some();
     let sha = if dirty { format!("{sha}-dirty") } else { sha };
     println!("cargo:rustc-env=BROOD_GIT_SHA={sha}");
 
@@ -74,7 +81,11 @@ fn main() {
     let git_path = |what: &str| {
         git(&["rev-parse", "--git-path", what]).map(|p| {
             let p = std::path::PathBuf::from(p);
-            if p.is_absolute() { p } else { root.join(p) }
+            if p.is_absolute() {
+                p
+            } else {
+                root.join(p)
+            }
         })
     };
     let mut watched = vec![std::path::Path::new(&manifest).join("src")];

@@ -323,6 +323,7 @@
    "file/dir?" :filesystem
    "disj" :collections
    "string/display-width" :strings
+   "string/width->index" :strings
    "dissoc" :maps
    "doc" :meta
    "reflect/doc-forms" :meta
