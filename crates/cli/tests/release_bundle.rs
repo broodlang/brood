@@ -199,3 +199,68 @@ fn bundled_bare_reference_to_unique_dep_module_resolves() {
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "bare-dep-ok");
     let _ = std::fs::remove_dir_all(app.parent().unwrap());
 }
+
+/// `nest release -o <path>` over a binary that is RUNNING: Linux refuses to open a busy
+/// executable for writing (`ETXTBSY`, "Text file busy"), which is exactly what
+/// `make install` while the app is open used to hit. Writing beside the target and
+/// renaming over it succeeds — the old inode keeps running — and the next start is the
+/// new release, while the running one is untouched.
+#[test]
+fn a_release_replaces_a_running_binary() {
+    let (app, cwd) = write_app(
+        "busy",
+        "(project :name busy :main app)",
+        &[(
+            "app",
+            "(defmodule app \"\")\n(defn main () (do (sleep 4000) (io/puts \"v1\")))",
+        )],
+    );
+    // the parallel-tests fork race `run_bundle` documents applies to the spawn too
+    let mut child = (0..50)
+        .find_map(|attempt| {
+            match Command::new(&app)
+                .current_dir(&cwd)
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+            {
+                Ok(c) => Some(c),
+                Err(e) if e.raw_os_error() == Some(26) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10 * (attempt + 1)));
+                    None
+                }
+                Err(e) => panic!("start the first release: {e:?}"),
+            }
+        })
+        .expect("start the first release");
+    // let it get past exec — from here the file is a busy executable
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let base = std::fs::read(env!("CARGO_BIN_EXE_brood")).expect("read brood binary");
+    let archive = brood::bundle::serialize(
+        "(project :name busy :main app)",
+        &[(
+            "app".to_string(),
+            "(defmodule app \"\")\n(defn main () (io/puts \"v2\"))".to_string(),
+        )],
+    );
+    brood::bundle::write_release(&base, &archive, &app)
+        .expect("a release must replace a running binary");
+
+    let second = run_bundle(Command::new(&app).current_dir(&cwd));
+    assert_eq!(String::from_utf8_lossy(&second.stdout).trim(), "v2");
+    let first = child
+        .wait_with_output()
+        .expect("the running release finishes");
+    assert_eq!(
+        String::from_utf8_lossy(&first.stdout).trim(),
+        "v1",
+        "the running one is untouched"
+    );
+    // no temporary left beside the target
+    let leftovers: Vec<_> = std::fs::read_dir(app.parent().unwrap())
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().contains("nest-release-"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
