@@ -30,7 +30,14 @@ start, painting a capture group); `(lexer-spans grammar src)` returns `[start en
 spans in the `highlight-spans` shape — what an editor's `:fontify` service is. Roles are
 `:syntax/*` faces (`:comment` `:string` `:doc` `:number` `:keyword` `:special`
 `:function`), resolved per pass."
-  (:use editor/face))
+  (:use editor/face)
+  ;; `editor/highlight` is where the `:syntax/*` faces are DECLARED (`def-face`), and
+  ;; nothing on this module's own path loads it: from source every role resolved to nil
+  ;; and every span came back unstyled (`configs_test` 2/10). The stdlib image hid it —
+  ;; `editor/face`'s replayed registrations carry every face recorded at build time,
+  ;; highlight's included — which is why a load-only clause, not a `:use`: the faces are
+  ;; a dependency of the pass, and none of highlight's names are wanted here.
+  (:load editor/highlight))
 
 ;; ---- the grammar ----------------------------------------------------------------
 
@@ -139,7 +146,9 @@ dropped, so the result stays non-overlapping."
 
 (defn lexer-line-spans (grammar line base faces)
   "The spans for one `line` at offset `base`, ascending and non-overlapping: the
-structured tokens, the classified words and the line rules, merged."
+structured tokens, the classified words and the line rules, merged.
+
+    (editor/lexer/lexer-line-spans (editor/lexer/lexer-grammar {:structured [[\"#.*\" :comment]]}) \"x # y\" 10 {:comment {:fg :grey}})   → ([12 15 {:fg :grey}])"
   (let (structured (lexer-structured grammar line faces)
         words (lexer-words grammar line structured faces)
         rules (lexer-line-rules grammar line faces)

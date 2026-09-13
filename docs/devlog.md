@@ -854,6 +854,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-13** — the VM→native direct call lands as the frame path minus the round trip (`mandelbrot` −12%, `supervisor` −5.4%); on the way in: the fast-link probe handed back native flat cells as Brood links (the §7.12 "runaway"), and a nested tail chain put 19 820 dirty parks on `supervisor`
 - **2026-09-13** — the timer thread is woken only for a new earliest deadline: a parked `(receive … (after ms …))` no longer costs a futex wake per park (2.5 → 2.0 µs on the timed round trip)
 - **2026-09-13** — KI-134 FIXED (ADR-339), two mechanisms: the isolate rollback (journalled loads, replayed atomically; `%isolate-discard-loads` for the image builder) and — traced, not the rollback — the image branch binding a module before its impls, reached through a lazy global hit (publication order fixed). The source-path residue is KI-135
+- **2026-09-13** — the afternoon's reds, cleaned: `buffer-registry` replied to a caller BEFORE notifying the watchers, so a caller that was also a watcher could `drain` a notice that had not arrived (the test's "round-trips are barriers" premise; now notify, then reply), and its kill-then-reshare test raced `exit`'s next-tick delivery (it now waits for the death, bounded — the registry's `[:down]` may still be queued, which is the case under test); the seven `editor/configs` / `editor/lexer` span functions carry executed examples (audit ratchet back at 1138); `editor/lexer` `(:load editor/highlight)`s — from source every `:syntax/*` face resolved to nil (`configs_test` 2/10) and only the image's over-attributed `*faces*` replay made it pass, filed as KI-136. The `math/clamp` strict red seen twice (merged tree, and a clean origin build) then not in seven runs turned out to depend on whether `datetime` was LOADED when `math.blsp` was checked (`%max`'s number-or-comparable-record contract; the record half is inhabited only after a module registers comparable records) — a verdict that varies with `nest check`'s parallel load order, filed as KI-137; `math/max` and `math/min` now declare `(& ?A -> ?A)`, so the result is its arguments' type whatever is loaded
 - **2026-09-13** — the checker's 6.7× slowdown (ADR-340/341) attributed and mostly recovered: `reflect/check-file` over all of `std/` went 15.6 s → 104.6 s at `e64b65f8`, and `std_check_test` sat at 105 s against the 120 s per-unit cap. Not the fixpoints' arithmetic — a `perf` profile read 70% in `Vec<Ty>::clone`, `RawTable<(Symbol, Sig)>::clone`, `Ty::drop` and the allocator: every `Ctx::clone` (each `bind`/`narrow`/branch, thousands per walk) deep-copied the ~20 FILE-level maps, and the two nested fixpoints turned one walk of the file into up to a few dozen. `Ctx` is now a per-scope half plus an `Arc<FileFacts>` shared by reference (`Arc::make_mut` for the between-pass mutators — value semantics unchanged): 104.6 → 31.4 s. The live set is walked once per file instead of once per joint round, and a joint round whose returns did not move reuses its derivation instead of re-walking the file to reproduce it: → 28.2 s. `std_check_test` is one unit per std file (parallel, own cap, fails by file name): 105 → 18.5 s wall. Checker output identical: `nest check` std+tests+examples and strict std at zero both before and after
 - **2026-09-13** — the pre-push hook grows the fast half of CI (`make prepush`): the `BROOD_*` flag catalogue as a grep, and with a `.blsp` involved the tests naming the changed modules, the surface audit and the executed doc examples — the three reds that landed on `main` this afternoon (`BROOD_GUI_BLIT` uncatalogued, nine public functions without a `form → result` example, `sig_adoption_test` reading ADR-341's old tuple spelling) each fail it in seconds; all three fixed, sabotage-verified both ways
 - **2026-09-13** — KI-135 FIXED (ADR-344): a module publishes whole — every load stages its defines and registry OPERATIONS in a per-load frame the loader reads before the table, and installs them under one write of the globals table when it completes (discarded when it throws). The whole-map `%swap-registry!` write-back cannot be staged (an outer frame's copy published over a nested load's additions and cost the image builder 10 of 35 require-edge records); it writes live unless the registry was born in the same load. Guard: a 300 ms-wide fixture window, 0 sightings vs 58 bypassed
@@ -13310,3 +13311,23 @@ had each hand-written the walk they all share. `editor/lexer` is that walk from 
 `editor/configs` is JSON, YAML, TOML, Makefile, INI / git config and a commit message as
 tables — a `<fmt>-spans` fn each, `configs_test` naming the tokens each paints. Shell
 keeps its own walker (its function-name rule is contextual).
+
+## 2026-09-13 — the regex capture engine, measured: 30% now, the rest is a design question
+
+The table-driven lexers (`editor/configs`) and `editor/shell` all run on `regex/find-all`,
+and a 40-line `Cargo.toml` took ~150 ms to colour — ~1 ms per pattern per line, 80× the
+bitset engine's `match?`. Two fixes inside the capture engine, both pure Brood: the
+epsilon closure consed a thread LIST (it rebuilt a vector per thread — `into` copying the
+whole list each time, and the scan walked it by `nth`), the start thread's capture slots
+are built once per pattern instead of once per position, and a first-character prefilter
+(`regex-first-set`: the `:char` tests of the start closure; off when a match can begin
+with `.`, be empty, or start on a zero-width test) skips injecting a start thread where
+no match can begin. `(#.*)` on a 90-char comment line: 2.08 → 1.43 ms. The remaining cost
+is the interpreted VM's ~15 µs per character per live thread inside a match — and a
+comment line IS one long match, so the prefilter cannot help it. A 10× needs a different
+engine (a DFA for the capture-free scan, or a native path), which is a design decision,
+not an optimisation; recorded here with the numbers rather than decided.
+
+`editor/treesit` gains the grammar recipe — `grammar-fetch` (a git URL or a directory),
+`grammar-build` (`cc`/`c++` to `libtree-sitter-<lang>.so`), `grammar-install` — so an
+editor mode can declare WHERE a grammar lives and build it, instead of printing a README.
