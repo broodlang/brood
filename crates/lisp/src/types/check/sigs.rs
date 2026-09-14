@@ -170,23 +170,12 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     for n in ["io/puts", "io/write"] {
         put(n, Sig::variadic(any, nil_ty));
     }
-    // min/max: at least one number-or-`Ord`-record arg (fixed) plus a variadic rest of the
-    // same → same domain (they route through `compare-to` for records, ADR-179).
-    // Variadic via rest; infer_sig bails on rest-param closures, so curate.
-    // Module-qualified since the math wave: bare `min`/`max` do not exist. Curating them
-    // under the old names made the checker vouch for names the runtime had moved, so
-    // `(max 1 2)` in ordinary code checked clean and raised at run time — which is how
-    // hive shipped a broken `clamp-limit`.
-    for n in ["math/min", "math/max"] {
-        put(
-            n,
-            Sig::with_rest(
-                vec![num_or_record.clone()],
-                num_or_record.clone(),
-                num_or_record.clone(),
-            ),
-        );
-    }
+    // `math/min` / `math/max` are no longer curated (2026-09-13): `std/math.blsp` declares
+    // them `(& ?A -> ?A)` — the result IS an argument — which is the contract the
+    // by-name extremum rule (`infer::is_extremum`) also reads; a curated `number | map`
+    // return beside that declaration only tripped the widening gate. (They were curated
+    // module-qualified since the math wave: bare `min`/`max` do not exist, and curating
+    // them under the old names made the checker vouch for names the runtime had moved.)
     // higher-order: the callback is of a *known arity* — what the combinator calls
     // it with. The arrow's parameter count drives the callback-arity check
     // (ADR-078): `(map xs f)` calls `(f x)` → 1-ary; `(fold xs init f)` calls
