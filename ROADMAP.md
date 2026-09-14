@@ -58,6 +58,37 @@ and **observability**. See "What's next — by area".
 
 ## Active work — dated findings & backlogs
 
+### Findings from bedit (2026-09-13) — the display seam, buffers as a directory, and regex speed
+
+What a day of measuring the editor against Emacs exposed in the language. Shipped the same
+day: tab stops in the display seam (ADR-342), the scroll blit (ADR-343),
+`ui-coalesce-motion`, `:close-is-input?`, `buffer-file-changed?`, `editor/buffer-registry`
+(ADR-345), `editor/lexer` + `editor/configs` (ADR-346), the tree-sitter grammar recipe in
+`editor/treesit`. Left open, with the numbers:
+
+- ⬜ **The regex capture engine is the ceiling on every lexical mode.** `regex/find-all`
+  costs ~1.4 ms per MATCHED line (a 90-char `#.*` comment is one long match; the
+  first-character prefilter only skips positions outside a match), against 25 µs for the
+  bitset `match?`. A ~100-line YAML/TOML/shell band re-lexes in ~150 ms per keystroke.
+  30% was recoverable in Brood (consed thread list, hoisted slots, prefilter — 2026-09-13
+  devlog has the profile); the rest is the interpreted VM's ~15 µs per character per live
+  thread. The 10× is a DESIGN decision: (a) a DFA for the capture-free scan that finds match
+  extents, with the capture VM run only over each match — pure Brood, but a capture run over
+  a whole-line match costs the same; (b) a native regex path (the Rust `regex` crate) behind
+  the same `std/regex` API, memoised compile, char-offset results — against the module's
+  "no kernel primitives" stance, but the only route to sub-100 µs per line; (c) JIT the
+  compiled NFA to Brood code per pattern. Decide before more table-driven modes ship.
+- ⬜ **The window-id half of ADR-059.** Frames chose one process per window (ADR-345), so
+  input routing needs nothing; a sound "two windows, one process" still needs a per-window
+  mailbox, not a tag (the loop's catch-all poll arm would swallow the other window's keys).
+- ⬜ **`editor/shell` onto `editor/lexer`** — its function-name rule is contextual (a word
+  before `()`), one step past what a table expresses; a `:context` hook on the lexer would
+  fold it in and delete its walker.
+- ⬜ **`collab.blsp`'s file registry onto `editor/buffer-registry`** — keyed by path with a
+  text mirror; the registry's `:meta` can carry the path, the mirror is the one thing to add.
+- ⬜ **The GPU glyph atlas** (`gui.rs` still draws no text) — the scroll blit made the CPU
+  path 2.3 ms at 1080p, so this is a 4K item now, not a 1080p one.
+
 ### Argument order + error conventions — ✅ COMPLETE (2026-08-30)
 
 Three linked changes, all landed:
@@ -330,13 +361,24 @@ surface feeding it — and each turned out to need a different kind of fix. Deta
       inferencer no longer loses nested demands cross-module; the checker materialises every
       module a loaded body names, so a leaf `sig` (`text/char->line`) reaches what derives from
       it without re-declaring the derived function.
-- [x] **7. Caller-derived parameter types** (ADR-341, 2026-09-13; every single-arm function the file defines, public or private — the type is a fact about the file's calls, not about privacy). The walk checked a
-      body under its parameters' bottom-up *demands* (`(+ i 1)` says `number`) with no view of
-      what the callers pass; a private function's caller set is closed, so the union of the
-      call sites' argument types is a sound binding when the name never escapes as a value.
-      Pass 2.9: a least fixpoint over the file's call sites, jointly with the private returns,
-      the sites read in the scope the walk sees. `std/json.blsp` is strict-zero with NO
-      signature on its parser chain (`hex-val`'s and `json-value`'s went too).
+- [x] **7. Caller-derived parameter types** (ADR-341, 2026-09-13). The walk checked a body
+      under its parameters' bottom-up *demands* (`(+ i 1)` says `number`) with no view of what
+      the callers pass. Pass 2.9: every single-arm function the file defines, public or private
+      (the derived type is a fact about the file's calls, not about privacy), bound to the union
+      of what its sites hand it — a least fixpoint over the file's call sites, jointly with the
+      returns, the sites read in the scope the walk sees; a handover to a combinator is a site
+      of what the combinator promises (`map`'s element, `fold`'s accumulator, a declared arrow),
+      and only a promise-less use (`apply`, a value in a map) escapes. `std/json.blsp` is
+      strict-zero with NO signature on its parser chain.
+- [x] **8. An arrow in head position describes the call** (ADR-347, 2026-09-13). `((cur 1) "x")`
+      and `((get handlers :k) msg)` were inert; they now type as the arrow's result, with exact
+      arity and the one per-argument rule a named callee gets.
+- [ ] **9. A fixed-length list has no shape type.** `(list a b)` is `list<A | B>`, so `(first
+      (list m '(…)))` reads `pair | map`; a positional shape for the pair member, the sibling of
+      `(tuple …)` for vectors, would read it exactly.
+- [ ] **10. Recursive types.** A value type that nests itself (`json`'s
+      `vector<… | vector<…>>`) is cut at a depth by `Ty::widened_below`; a one-level unroll of a
+      named recursive type would say it exactly.
 
 
 ### Standard-library surface audit — the bare namespace (2026-08-26)

@@ -355,14 +355,55 @@ pub(super) fn evaluates_args(heap: &Heap, ctx: &Ctx, s: Symbol) -> bool {
     }
 }
 
-/// For `(fold coll init f)` / `(reduce coll init f)` / `(reduce f coll)` whose `f` is a
-/// two-parameter `fn` literal: `(1, (acc elem -> any))` — the seed for walking it. `None`
-/// when the head is neither, `f` is not such a literal, or the fold's type is unknown.
-pub(super) fn fold_callback_seed(
+/// The callback a call hands its argument at some position, with the parameter types the
+/// callee promises to call it with: `(index, (params… -> any))`. `fits(arg, n)` says whether
+/// the argument at that position is the callback the caller is asking about, taking `n`
+/// parameters — the walk asks for a single-clause `fn` literal of that arity
+/// ([`literal_fits`]), the caller-derived site collector for a bare name of one of its
+/// candidates (`sigs::collect_private_sites`, ADR-341: a function handed to `map` is called
+/// with the elements, so the combinator's promise is a site like any other). Three sources,
+/// in order: a fold's accumulator + element, an element combinator's element, and a
+/// declared or inferred ARROW at the position. One position only — the first that fits.
+pub(in crate::types::check) fn callback_seed(
     heap: &Heap,
     form: Value,
     items: &[Value],
     ctx: &Ctx,
+    fits: &dyn Fn(Value, usize) -> bool,
+) -> Option<(usize, Sig)> {
+    fold_callback_seed(heap, form, items, ctx, fits)
+        .or_else(|| element_callback_seed(heap, items, ctx, fits))
+        .or_else(|| arrow_callback_seed(heap, items, ctx, fits))
+}
+
+/// The walk's `fits`: a single-clause `fn` literal of exactly `wanted` parameters.
+pub(super) fn literal_fits(heap: &Heap) -> impl Fn(Value, usize) -> bool + '_ {
+    move |arg, wanted| {
+        let Some(f_items) = list_items(heap, arg) else {
+            return false;
+        };
+        if !matches!(f_items.first(), Some(&Value::Sym(h)) if is_fn_head(h)) {
+            return false;
+        }
+        // Arity `wanted`, however the literal is written. `lambda_literal_arity`
+        // deliberately bails on the CLAUSE form (its parts are clause lists, not bare
+        // symbols), so a clause callback — the shape people reach for the moment they
+        // want to match on the element — got no seed at all. Accept it when every clause
+        // takes exactly `wanted` heads.
+        matches!(lambda_literal_arity(heap, arg), Some(a) if a.min == wanted && a.max == Some(wanted))
+            || clause_literal_takes(heap, arg) == Some(wanted)
+    }
+}
+
+/// For `(fold coll init f)` / `(reduce coll init f)` / `(reduce f coll)` whose `f` fits two
+/// parameters: `(1, (acc elem -> any))`. `None` when the head is neither, `f` does not fit,
+/// or the fold's type is unknown.
+fn fold_callback_seed(
+    heap: &Heap,
+    form: Value,
+    items: &[Value],
+    ctx: &Ctx,
+    fits: &dyn Fn(Value, usize) -> bool,
 ) -> Option<(usize, Sig)> {
     let Some(&Value::Sym(head)) = items.first() else {
         return None;
@@ -374,11 +415,7 @@ pub(super) fn fold_callback_seed(
     // Positions come from `sigs::combinator_args` — the one place the data-first
     // convention is stated (ADR-308), so this cannot drift against the signatures.
     let (coll_arg, f) = crate::types::check::sigs::combinator_args(items)?;
-    let f_items = list_items(heap, f)?;
-    if !matches!(f_items.first(), Some(&Value::Sym(h)) if is_fn_head(h)) {
-        return None;
-    }
-    if !matches!(lambda_literal_arity(heap, f), Some(a) if a.min == 2 && a.max == Some(2)) {
+    if !fits(f, 2) {
         return None;
     }
     let acc = expr_ty(heap, form, ctx)?;
@@ -451,8 +488,7 @@ pub(super) const ELEMENT_CALLBACK_COMBINATORS: &[&str] = &[
     "find",
 ];
 
-/// For `(map coll f)` and its siblings whose `f` is a ONE-parameter `fn` literal:
-/// `(1, (elem -> any))` — the seed for walking it.
+/// For `(map coll f)` and its siblings whose `f` fits ONE parameter: `(1, (elem -> any))`.
 ///
 /// The fold seed above existed; these did not, so a callback param bound `any` and its body
 /// went unchecked: `(map ["s"] (fn (p) (+ p 1)))` was silent, because `any` is consistent
@@ -462,10 +498,11 @@ pub(super) const ELEMENT_CALLBACK_COMBINATORS: &[&str] = &[
 /// Bound as an INFERRED type (`check_fn_bound`, `dynamic_within`) rather than a declared
 /// one, for the reason that function's own comment gives: an element type read by inclusion
 /// would flag correct code where the collection's type is an over-approximation.
-pub(super) fn element_callback_seed(
+fn element_callback_seed(
     heap: &Heap,
     items: &[Value],
     ctx: &Ctx,
+    fits: &dyn Fn(Value, usize) -> bool,
 ) -> Option<(usize, crate::types::Sig)> {
     let Some(&Value::Sym(head)) = items.first() else {
         return None;
@@ -476,17 +513,7 @@ pub(super) fn element_callback_seed(
     }
     // Same source of truth for argument order as the fold seed (ADR-308).
     let (coll_arg, f) = crate::types::check::sigs::combinator_args(items)?;
-    let f_items = list_items(heap, f)?;
-    if !matches!(f_items.first(), Some(&Value::Sym(h)) if is_fn_head(h)) {
-        return None;
-    }
-    // Arity 1, however the literal is written. `lambda_literal_arity` deliberately bails on
-    // the CLAUSE form (its parts are clause lists, not bare symbols), so a clause callback
-    // — the shape people reach for the moment they want to match on the element — got no
-    // seed at all. Accept it when every clause takes exactly one head.
-    let takes_one = matches!(lambda_literal_arity(heap, f), Some(a) if a.min == 1 && a.max == Some(1))
-        || clause_literal_takes(heap, f) == Some(1);
-    if !takes_one {
+    if !fits(f, 1) {
         return None;
     }
     let elem = expr_ty(heap, coll_arg, ctx).and_then(|t| t.elem_ty())?;
@@ -494,8 +521,7 @@ pub(super) fn element_callback_seed(
 }
 
 /// For any call whose callee's signature declares an ARROW at position `i` and whose
-/// argument there is a single-clause `fn` literal of that arity: `(i, arrow)` — the
-/// seed for walking it. The general case of the two seeds above (2026-09-12): those
+/// argument there fits that arity: `(i, arrow)`. The general case of the two seeds above (2026-09-12): those
 /// name their combinators, and every other higher-order function — a `(sig each3
 /// (… (buffer int int int -> buffer) -> …))` of the author's own — handed its lambda
 /// nothing, so the lambda's parameters inferred from their own body (`(+ start l)` →
@@ -508,10 +534,11 @@ pub(super) fn element_callback_seed(
 /// The callee is resolved as the call check resolves it: a local whose own type is an
 /// arrow first, then the file's declaration, the global's signature, the file's
 /// inference. First matching position only (the seed API carries one).
-pub(super) fn arrow_callback_seed(
+fn arrow_callback_seed(
     heap: &Heap,
     items: &[Value],
     ctx: &Ctx,
+    fits: &dyn Fn(Value, usize) -> bool,
 ) -> Option<(usize, crate::types::Sig)> {
     let Some(&Value::Sym(head)) = items.first() else {
         return None;
@@ -540,15 +567,7 @@ pub(super) fn arrow_callback_seed(
         if arrow.rest.is_some() {
             continue;
         }
-        let Some(f_items) = list_items(heap, arg) else {
-            continue;
-        };
-        if !matches!(f_items.first(), Some(&Value::Sym(h)) if is_fn_head(h)) {
-            continue;
-        }
-        let wanted = arrow.params.len();
-        let fits = matches!(lambda_literal_arity(heap, arg), Some(a) if a.min == wanted && a.max == Some(wanted));
-        if !fits {
+        if !fits(arg, arrow.params.len()) {
             continue;
         }
         return Some((i + 1, crate::types::Sig::new(arrow.params.clone(), Ty::ANY)));

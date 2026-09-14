@@ -156,11 +156,24 @@ fn a_callback_whose_result_merely_widens_is_silent() {
         !ws.iter().any(|w| w.contains("callback whose result")),
         "{ws:?}"
     );
+    // `h` is handed to `g`, so its `n` is the arrow's `int` (ADR-341) and its result
+    // `"s" | int` — which overlaps `string`, so it is merely wider, not disjoint.
+    let ws = file_warnings(
+        "(sig g ((int -> string) -> int))\n(defn g (f) 0)\n(defn h (n) (if (> n 0) \"s\" n))\n\
+         (defn c () (g h))",
+    );
+    assert!(
+        !ws.iter().any(|w| w.contains("callback whose result")),
+        "{ws:?}"
+    );
+    // …where `(defn h (n) n)` returns exactly the `int` it is handed: a true finding,
+    // which the derivation made precise (it read `any` while `h`'s callers were unknown).
     let ws = file_warnings(
         "(sig g ((int -> string) -> int))\n(defn g (f) 0)\n(defn h (n) n)\n(defn c () (g h))",
     );
     assert!(
-        !ws.iter().any(|w| w.contains("callback whose result")),
+        ws.iter().any(|w| w
+            == "g: argument 1 is a callback whose result is used as string, but h returns int"),
         "{ws:?}"
     );
 }

@@ -170,23 +170,12 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     for n in ["io/puts", "io/write"] {
         put(n, Sig::variadic(any, nil_ty));
     }
-    // min/max: at least one number-or-`Ord`-record arg (fixed) plus a variadic rest of the
-    // same → same domain (they route through `compare-to` for records, ADR-179).
-    // Variadic via rest; infer_sig bails on rest-param closures, so curate.
-    // Module-qualified since the math wave: bare `min`/`max` do not exist. Curating them
-    // under the old names made the checker vouch for names the runtime had moved, so
-    // `(max 1 2)` in ordinary code checked clean and raised at run time — which is how
-    // hive shipped a broken `clamp-limit`.
-    for n in ["math/min", "math/max"] {
-        put(
-            n,
-            Sig::with_rest(
-                vec![num_or_record.clone()],
-                num_or_record.clone(),
-                num_or_record.clone(),
-            ),
-        );
-    }
+    // `math/min` / `math/max` are no longer curated (2026-09-13): `std/math.blsp` declares
+    // them `(& ?A -> ?A)` — the result IS an argument — which is the contract the
+    // by-name extremum rule (`infer::is_extremum`) also reads; a curated `number | map`
+    // return beside that declaration only tripped the widening gate. (They were curated
+    // module-qualified since the math wave: bare `min`/`max` do not exist, and curating
+    // them under the old names made the checker vouch for names the runtime had moved.)
     // higher-order: the callback is of a *known arity* — what the combinator calls
     // it with. The arrow's parameter count drives the callback-arity check
     // (ADR-078): `(map xs f)` calls `(f x)` → 1-ary; `(fold xs init f)` calls
@@ -2873,13 +2862,12 @@ pub(super) fn caller_derived_params(
             if collected.escaped.contains(&name) || sites.is_empty() {
                 continue;
             }
-            let arity = sites[0].0.len();
+            let arity = sites[0].arity();
             let mut acc: Vec<Option<Ty>> = vec![Some(Ty::NEVER); arity];
-            for (args, scope) in &sites {
-                for (k, &arg) in args.iter().enumerate() {
+            for site in &sites {
+                for k in 0..arity {
                     if let Some(current) = acc[k].clone() {
-                        acc[k] = super::infer::with_fresh_depth(|| expr_ty(heap, arg, scope))
-                            .map(|t| current.union(t));
+                        acc[k] = site.param_ty(heap, k).map(|t| current.union(t));
                     }
                 }
             }
@@ -2902,10 +2890,40 @@ pub(super) fn caller_derived_params(
     HashMap::new()
 }
 
+/// One place a candidate is called from: a direct call with its arguments and the scope
+/// they are typed in, or a HANDOVER to a combinator that promises what it calls the
+/// candidate with — `(map xs helper)` calls `helper` with `xs`'s elements, `(fold xs init
+/// helper)` with the fold's accumulator and an element, a callee with a declared arrow with
+/// that arrow's parameters (`walk::callback_seed`, the same three promises the walk seeds a
+/// `fn` literal's parameters from). Anywhere else a bare name goes is an escape.
+enum Site {
+    Call(Vec<Value>, Box<Ctx>),
+    Handover(Vec<Ty>),
+}
+
+impl Site {
+    fn arity(&self) -> usize {
+        match self {
+            Site::Call(args, _) => args.len(),
+            Site::Handover(params) => params.len(),
+        }
+    }
+    /// What this site hands parameter `k`: an argument's type in its scope, or the
+    /// combinator's promise.
+    fn param_ty(&self, heap: &Heap, k: usize) -> Option<Ty> {
+        match self {
+            Site::Call(args, scope) => {
+                super::infer::with_fresh_depth(|| expr_ty(heap, args[k], scope))
+            }
+            Site::Handover(params) => Some(params[k].clone()),
+        }
+    }
+}
+
 struct PrivateSites {
-    /// Per candidate, every call site of the right arity with the scope it sits in.
-    sites: HashMap<Symbol, Vec<(Vec<Value>, Ctx)>>,
-    /// Candidates whose name occurs somewhere other than a call head.
+    /// Per candidate, every site of the right arity.
+    sites: HashMap<Symbol, Vec<Site>>,
+    /// Candidates whose name occurs somewhere other than a call head or a handover.
     escaped: HashSet<Symbol>,
 }
 
@@ -3022,21 +3040,14 @@ fn collect_private_sites(
                 return;
             }
             if self.targets.contains(&head) {
-                let arity = self
-                    .candidates
-                    .get(&head)
-                    .and_then(|&f| fixed_arms_of_form(heap, f))
-                    .and_then(|arms| arms.first().map(|a| a.heads.len()));
-                if arity == Some(items.len() - 1) {
+                if self.arity_of(head) == Some(items.len() - 1) {
                     self.out
                         .sites
                         .entry(head)
                         .or_default()
-                        .push((items[1..].to_vec(), scope.clone()));
+                        .push(Site::Call(items[1..].to_vec(), Box::new(scope.clone())));
                 }
-                for &it in &items[1..] {
-                    self.walk(it, scope, None);
-                }
+                self.walk_args(form, &items, scope);
                 return;
             }
             if value::symbol_is(head, kw::DEF) {
@@ -3141,8 +3152,39 @@ fn collect_private_sites(
                 self.opaque = true;
                 return;
             }
-            for &it in &items[1..] {
-                self.walk(it, scope, None);
+            self.walk_args(form, &items, scope);
+        }
+        /// The parameter count of candidate `name`'s one arm.
+        fn arity_of(&self, name: Symbol) -> Option<usize> {
+            self.candidates
+                .get(&name)
+                .and_then(|&f| fixed_arms_of_form(self.heap, f))
+                .and_then(|arms| arms.first().map(|a| a.heads.len()))
+        }
+        /// Walk a call's arguments. A bare candidate among them is a HANDOVER when the
+        /// callee promises what it will call it with (`walk::callback_seed`: a fold, an
+        /// element combinator, a declared or inferred arrow) — recorded as a site of those
+        /// parameter types, and not walked, since walked it would read as an escape.
+        fn walk_args(&mut self, form: Value, items: &[Value], scope: &Ctx) {
+            let handed = super::walk::callback_seed(
+                self.heap,
+                form,
+                items,
+                scope,
+                &|arg, wanted| matches!(arg, Value::Sym(s) if self.targets.contains(&s) && self.arity_of(s) == Some(wanted)),
+            );
+            for (i, &it) in items.iter().enumerate().skip(1) {
+                match &handed {
+                    Some((index, sig)) if *index == i => {
+                        let Value::Sym(name) = it else { continue };
+                        self.out
+                            .sites
+                            .entry(name)
+                            .or_default()
+                            .push(Site::Handover(sig.params.clone()));
+                    }
+                    _ => self.walk(it, scope, None),
+                }
             }
         }
     }
@@ -3186,7 +3228,7 @@ pub(super) fn live_private_functions(
             .sites
             .iter()
             .filter(|(name, sites)| !first.escaped.contains(name) && !sites.is_empty())
-            .map(|(&name, sites)| (name, sites[0].0.len()))
+            .map(|(&name, sites)| (name, sites[0].arity()))
             .collect(),
     )
 }

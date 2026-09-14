@@ -135,10 +135,15 @@ impl SigWithVars {
     /// Each arg's known type is unified against the corresponding param term
     /// (left-to-right, one level deep).  Binding two args to the same var
     /// unions their types (over-approximation; sound).
+    ///
+    /// An argument the checker cannot type binds every variable its term mentions to
+    /// `any`: the variable stands for THAT argument's values too, and nothing is known of
+    /// them. Skipping the argument instead read `(math/min 3 x)` under `(& ?A -> ?A)` as
+    /// exactly `3` — the known operand alone — where the value is `x` as often as not
+    /// (2026-09-13; the by-name extremum rule had always answered the unknown here).
     pub(super) fn unify_args(&self, arg_tys: &[Option<Ty>]) -> HashMap<u32, Ty> {
         let mut subst: HashMap<u32, Ty> = HashMap::new();
         for (i, arg_ty) in arg_tys.iter().enumerate() {
-            let Some(ty) = arg_ty else { continue };
             let term = if i < self.params.len() {
                 &self.params[i]
             } else if let Some(r) = &self.rest {
@@ -146,7 +151,10 @@ impl SigWithVars {
             } else {
                 continue;
             };
-            unify_term(term, ty.clone(), &mut subst);
+            match arg_ty {
+                Some(ty) => unify_term(term, ty.clone(), &mut subst),
+                None => unify_unknown(term, &mut subst),
+            }
         }
         subst
     }
@@ -188,6 +196,31 @@ pub(super) fn resolve_overload_ret(sigs: &[Sig], arg_tys: &[Option<Ty>]) -> Ty {
         }
     }
     matched.unwrap_or(Ty::ANY)
+}
+
+/// Unify a `SigTerm` against an argument of UNKNOWN type: every variable the term
+/// mentions absorbs `any`, since the argument's values are among the variable's and
+/// nothing is known of them. The counterpart of [`unify_term`] for a `None` argument.
+pub(super) fn unify_unknown(term: &SigTerm, subst: &mut HashMap<u32, Ty>) {
+    match term {
+        SigTerm::Ty(_) => {}
+        SigTerm::Var(i) => {
+            subst.insert(*i, Ty::ANY);
+        }
+        SigTerm::ListOf(inner) | SigTerm::VectorOf(inner) | SigTerm::SetOf(inner) => {
+            unify_unknown(inner, subst);
+        }
+        SigTerm::Or(alts) | SigTerm::And(alts) => {
+            for part in alts {
+                unify_unknown(part, subst);
+            }
+        }
+        SigTerm::RecordOf { fields, .. } => {
+            for (_, term, _) in fields {
+                unify_unknown(term, subst);
+            }
+        }
+    }
 }
 
 /// Unify a single `SigTerm` against a known concrete `ty`, extending `subst`.

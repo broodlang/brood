@@ -294,6 +294,15 @@ fn expr_ty_inner(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                         items[1..].iter().map(|&a| expr_ty(heap, a, ctx)).collect();
                     return lambda_ret(heap, head, &inputs, ctx);
                 }
+                // **A computed callee whose type is an arrow** — `((cur 1) "x")` under
+                // `(sig cur (int -> (string -> int)))`, `((get handlers :k) msg)` over a
+                // record of arrows: the arrow's result is the call's, as a local arrow's
+                // is for `(f 1)` below. The walk checks the arguments against the same
+                // arrow (`walk::check_computed_call`). Unknown, not `any`, when the head
+                // has no arrow type: nothing is known of what it returns.
+                if let Some(sig) = expr_ty(heap, head, ctx).as_ref().and_then(Ty::as_arrow) {
+                    return Some(sig.ret.clone());
+                }
             }
             match items.first().copied() {
                 // **Keyword accessor** `(:key coll [default])` (ADR-165) — the same
@@ -418,6 +427,23 @@ fn expr_ty_inner(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                         }
                         if let Some(sg) = ctx.declared_sig(s) {
                             return Some(sg.ret);
+                        }
+                        // A QUALIFIED file global is the very function a by-name rule
+                        // describes — `math/max` defined in `std/math.blsp` IS `math`'s
+                        // `max`, not a shadow of it — and the rule, which reads the
+                        // arguments, is sharper than the sig inferred over unknown
+                        // parameters. Without this the module's own `(math/max lo (math/min
+                        // hi x))` in `clamp` read `max`'s inferred return: the
+                        // registry-derived `ordered` cover, which grows with every loaded
+                        // module that registers `compare-to` — strict-clean with the file
+                        // checked alone, red with the project loaded (2026-09-13).
+                        if ctx.is_file_global(s) && is_qualified(s) {
+                            if let Some(t) = numeric_call_ty(heap, s, &items, ctx) {
+                                return Some(t);
+                            }
+                            if let Some(t) = seq_aware_call_ty(heap, s, &items, ctx) {
+                                return Some(t);
+                            }
                         }
                         // A **same-file inferred** function sig (Pass 2.8): the return the
                         // checker inferred for a `(defn …)` in this file, which `sig_of`'s
@@ -933,6 +959,12 @@ fn numeric_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
         tys.push(expr_ty(heap, arg, ctx)?);
     }
     numeric_result(head, &tys)
+}
+
+/// Is `sym` spelled with a module prefix (`math/max`)? A qualified file global is the
+/// module's own definition of that name, never a shadow of a same-named root function.
+fn is_qualified(sym: Symbol) -> bool {
+    value::symbol_name_ref(sym).contains('/')
 }
 
 /// The extremum operators — the ones that answer with one of their operands rather than a

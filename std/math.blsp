@@ -69,11 +69,18 @@ and the constants `pi`/`e`. `(:use math)` for bare access, or call qualified.")
     (math/max 1 2)   → 2"
   ((a b) (%max a b))
   ((& xs) (apply %max xs)))
+;; The result IS one of the arguments, so its type is theirs — `(math/max 2 3)` is `2 | 3`,
+;; `(math/max lo hi)` over numbers is a number. Without this the checker read the kernel's
+;; `%max` contract (a number or a comparable record) and `clamp`'s declared `number` return
+;; went red in strict — but only once a module with comparable records (`datetime`) was
+;; loaded, which is why the gate flickered with the order files were checked in (KI-137).
+(sig max (& ?A -> ?A))
 (defn min "The smallest of the arguments.
 
     (math/min 1 2)   → 1"
   ((a b) (%min a b))
   ((& xs) (apply %min xs)))
+(sig min (& ?A -> ?A))
 (defn rem (a b)
   "The remainder of `a / b`, taking the sign of the DIVIDEND (truncated division), the
 partner of `quot`. `mod` is the one whose sign follows the divisor.
@@ -302,14 +309,7 @@ a float for a float `x` unless the rounded value is an integer, exact for an exa
 
     (math/clamp 12 0 10)   → 10
     (math/clamp -1 0 10)   → 0"
-  ;; The kernel extrema directly — exactly what `math/max`'s and `math/min`'s two-argument
-  ;; clauses are — rather than the closures: the checker types `(%max a b)` as the union of
-  ;; its operands (a number here), while the closures' inferred return is the registry-derived
-  ;; `ordered` cover, which grows to `number | date | …` once a module with `compare-to`
-  ;; records (`datetime`) is loaded and then reads wider than the declared `number` in strict
-  ;; (KI-137). Same value, same cost; a type the declaration can stand behind whatever is
-  ;; loaded.
-  (%max lo (%min hi x)))
+  (math/max lo (math/min hi x)))
 (sig clamp (number number number -> number))
 
 ;; ---- transcendental functions -----------------------------------------------

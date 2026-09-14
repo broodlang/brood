@@ -674,6 +674,69 @@ fn a_private_function_that_escapes_or_has_unseen_callers_stays_unknown() {
 }
 
 #[test]
+fn a_function_handed_to_a_combinator_is_called_with_what_it_promises() {
+    // `(map xs bump)` calls `bump` with `xs`'s elements: a site of the element type, not
+    // an escape. Strict: `(+ i 1)` under the callers is `int`.
+    let ws = file_warnings_mode(
+        "(defmodule t)\n\
+         (sig want-int (int -> int))\n\
+         (defn want-int (x) x)\n\
+         (defn- bump (i) (want-int (+ i 1)))\n\
+         (defn pub (xs) (+ (bump 3) (count (map (map xs (fn (s) (string/length s))) bump))))",
+        true,
+    );
+    assert!(ws.is_empty(), "{ws:?}");
+    // …and an element the body cannot take is reported inside it, as a direct call is.
+    let ws = file_warnings_mode(
+        "(defmodule t)\n\
+         (defn- bump (i) (+ i 1))\n\
+         (defn pub () (map [\"a\" \"b\"] bump))",
+        true,
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("+: argument 1 expects number, got \"a\" | \"b\" (i)")),
+        "{ws:?}"
+    );
+    // A fold hands its accumulator and an element; the accumulator is the fold's own
+    // type, a joint fixpoint with the callback's return.
+    let ws = file_warnings_mode(
+        "(defmodule t)\n\
+         (sig want-int (int -> int))\n\
+         (defn want-int (x) x)\n\
+         (defn- add (acc x) (want-int (+ acc (string/length x))))\n\
+         (defn pub (xs) (fold xs 0 add))",
+        true,
+    );
+    assert!(ws.is_empty(), "{ws:?}");
+    // A callee with a declared arrow hands what the arrow says.
+    let ws = file_warnings_mode(
+        "(defmodule t)\n\
+         (sig want-int (int -> int))\n\
+         (defn want-int (x) x)\n\
+         (sig each2 ((int int -> any) -> any))\n\
+         (defn each2 (f) (f 1 2))\n\
+         (defn- add (a b) (want-int (+ a b)))\n\
+         (defn pub () (each2 add))",
+        true,
+    );
+    assert!(ws.is_empty(), "{ws:?}");
+    // Handed somewhere with no promise (`apply`): still an escape, hence unknown.
+    let ws = file_warnings_mode(
+        "(defmodule t)\n\
+         (sig want-int (int -> int))\n\
+         (defn want-int (x) x)\n\
+         (defn- bump (i) (want-int (+ i 1)))\n\
+         (defn pub (xs) (+ (bump 3) (apply bump xs)))",
+        true,
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("want-int: argument 1 expects int, got number")),
+        "{ws:?}"
+    );
+}
+#[test]
 fn a_call_site_under_a_stored_guard_is_narrowed_like_the_walk() {
     // `and` stores each conjunct in a temporary — `(let (g (int? y)) (if g …))` — and the
     // site collector binds a `let` by the walk's one rule (`let_bind_scope`), so the guard
