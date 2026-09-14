@@ -1993,6 +1993,10 @@ fn check_forms(
         // heap registries), so the demand fires for a same- or other-file sealed op alike.
         let ability_info = std::sync::Arc::new(protocol::build_ability_info(heap, &expanded));
         annot::set_sealed_op_domains(protocol::build_sealed_op_domains(&ability_info));
+        // …and on the ctx from here, not only from the body walk: the demand walk asks
+        // `is_ability_op` of `ctx.ability()` to tell an op function from a same-file
+        // function that spells its name (ADR-350), and Pass 2.8 runs before the walk.
+        ctx.set_ability(ability_info.clone());
         for &form in &forms {
             register_declared_sig(heap, &mut ctx, file_ns_name.as_deref(), form);
         }
@@ -2414,10 +2418,9 @@ fn check_forms(
         let multi_info = std::sync::Arc::new(protocol::build_multi_info(heap, &expanded));
         protocol::check_multi_calls(heap, &expanded, &multi_info, &mut out);
         ctx.set_multi(multi_info);
-        ctx.set_ability(ability_info);
         // Ability impl-return conformance: an op declaring `:-> RET` has each of its
         // impls' bodies checked against that return type (gradual, false-positive-clean).
-        // Runs with `ctx` carrying the ability facts just set.
+        // Runs with `ctx` carrying the ability facts set above (before Pass 2.8).
         walk::check_impl_returns(heap, &expanded, &ctx, &mut out);
         // Pass 3: check each expanded form with the accumulated file-globals, plus the
         // names *this* form guards with `(bound? 'name)` — a deliberately conditional
