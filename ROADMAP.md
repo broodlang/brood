@@ -58,6 +58,37 @@ and **observability**. See "What's next — by area".
 
 ## Active work — dated findings & backlogs
 
+### Findings from bedit (2026-09-13) — the display seam, buffers as a directory, and regex speed
+
+What a day of measuring the editor against Emacs exposed in the language. Shipped the same
+day: tab stops in the display seam (ADR-342), the scroll blit (ADR-343),
+`ui-coalesce-motion`, `:close-is-input?`, `buffer-file-changed?`, `editor/buffer-registry`
+(ADR-345), `editor/lexer` + `editor/configs` (ADR-346), the tree-sitter grammar recipe in
+`editor/treesit`. Left open, with the numbers:
+
+- ⬜ **The regex capture engine is the ceiling on every lexical mode.** `regex/find-all`
+  costs ~1.4 ms per MATCHED line (a 90-char `#.*` comment is one long match; the
+  first-character prefilter only skips positions outside a match), against 25 µs for the
+  bitset `match?`. A ~100-line YAML/TOML/shell band re-lexes in ~150 ms per keystroke.
+  30% was recoverable in Brood (consed thread list, hoisted slots, prefilter — 2026-09-13
+  devlog has the profile); the rest is the interpreted VM's ~15 µs per character per live
+  thread. The 10× is a DESIGN decision: (a) a DFA for the capture-free scan that finds match
+  extents, with the capture VM run only over each match — pure Brood, but a capture run over
+  a whole-line match costs the same; (b) a native regex path (the Rust `regex` crate) behind
+  the same `std/regex` API, memoised compile, char-offset results — against the module's
+  "no kernel primitives" stance, but the only route to sub-100 µs per line; (c) JIT the
+  compiled NFA to Brood code per pattern. Decide before more table-driven modes ship.
+- ⬜ **The window-id half of ADR-059.** Frames chose one process per window (ADR-345), so
+  input routing needs nothing; a sound "two windows, one process" still needs a per-window
+  mailbox, not a tag (the loop's catch-all poll arm would swallow the other window's keys).
+- ⬜ **`editor/shell` onto `editor/lexer`** — its function-name rule is contextual (a word
+  before `()`), one step past what a table expresses; a `:context` hook on the lexer would
+  fold it in and delete its walker.
+- ⬜ **`collab.blsp`'s file registry onto `editor/buffer-registry`** — keyed by path with a
+  text mirror; the registry's `:meta` can carry the path, the mirror is the one thing to add.
+- ⬜ **The GPU glyph atlas** (`gui.rs` still draws no text) — the scroll blit made the CPU
+  path 2.3 ms at 1080p, so this is a 4K item now, not a 1080p one.
+
 ### Argument order + error conventions — ✅ COMPLETE (2026-08-30)
 
 Three linked changes, all landed:
