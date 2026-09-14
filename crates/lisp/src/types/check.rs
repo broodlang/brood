@@ -2246,6 +2246,9 @@ fn check_forms(
                 // walk the file again to reproduce `previous` exactly (the inner fixpoint is a
                 // deterministic function of the returns and its seed), so the round reuses it.
                 let mut inputs_moved = true;
+                // Each return's value from the round before last, for the fold (a value
+                // that recurses through another function grows every other round).
+                let mut older_returns: HashMap<Symbol, Ty> = HashMap::new();
                 for round in 0..32 {
                     let derived = if inputs_moved {
                         sigs::caller_derived_params(
@@ -2282,12 +2285,27 @@ fn check_forms(
                             continue;
                         };
                         typed.insert(name);
-                        // The widening the parameter ascent applies (`sigs::WIDEN_AFTER_ROUND`),
-                        // applied to the returns on the same schedule and for the same reason.
+                        // A return whose last value appears inside this round's folds into a
+                        // recursive type (`Ty::fold_recursive`, ADR-349) — `json`'s value
+                        // type is `μX. nil | bool | number | string | vector<X> | map<string,
+                        // X>`, confirmed when the next round folds back to it — and the
+                        // widening the parameter ascent applies (`sigs::WIDEN_AFTER_ROUND`)
+                        // is applied to the returns on the same schedule, for what neither
+                        // converges nor folds.
+                        let current = ctx.inferred_fn_sig(name).map(|s| s.ret);
+                        for prev in current.iter().chain(older_returns.get(&name)) {
+                            if let Some(folded) = Ty::fold_recursive(prev, &ret) {
+                                ret = folded;
+                                break;
+                            }
+                        }
                         if round >= sigs::WIDEN_AFTER_ROUND {
                             ret = ret.widened_below(sigs::WIDEN_DEPTH);
                         }
-                        if ctx.inferred_fn_sig(name).map(|s| s.ret) != Some(ret.clone()) {
+                        if let Some(current) = current.clone() {
+                            older_returns.insert(name, current);
+                        }
+                        if current != Some(ret.clone()) {
                             let mut sig = base.clone();
                             sig.ret = ret;
                             ctx.add_inferred_fn_sig(name, sig);

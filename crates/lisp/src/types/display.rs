@@ -72,12 +72,45 @@ fn render_subtraction(positive: &str, negs: &[Ty], universe: bool) -> String {
     }
 }
 
+thread_local! {
+    /// How many `(rec …)` binders enclose the type being rendered — the letter a
+    /// self-reference prints as.
+    static REC_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The binder name at nesting `depth`: `X`, `Y`, `Z`, then `X1`, `Y1`, …
+fn rec_name(depth: usize) -> String {
+    let letter = ['X', 'Y', 'Z'][depth % 3];
+    if depth < 3 {
+        letter.to_string()
+    } else {
+        format!("{letter}{}", depth / 3)
+    }
+}
+
 impl fmt::Display for Ty {
     /// A readable rendering for diagnostics: the named lattice points where they
     /// apply (`never`, `any`, `number`, `list`), a single tag by its `type-of`
     /// name, otherwise the members joined with ` | ` (e.g. `int | string`). A
     /// purely-function type with a known arrow renders as `(p1, p2) -> ret`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // A recursive type renders as its binder, `(rec X <body>)`, and every
+        // self-reference inside as `X` (ADR-349) — the annotation grammar's spelling.
+        // Nested binders take the next letter, so an inner reference reads as its own.
+        if self.is_recursive() {
+            let name = REC_DEPTH.with(|d| {
+                let depth = d.get();
+                d.set(depth + 1);
+                rec_name(depth)
+            });
+            let body = self.body_for_display().to_string();
+            REC_DEPTH.with(|d| d.set(d.get() - 1));
+            return write!(f, "(rec {name} {body})");
+        }
+        if self.is_rec_ref() {
+            let name = REC_DEPTH.with(|d| rec_name(d.get().saturating_sub(1)));
+            return f.write_str(&name);
+        }
         // A union of terms renders as its terms, joined — `(tuple int) | (tuple
         // string)`, the shape that used to print as bare `vector` because the union
         // had nowhere to keep both (ADR-262). Each term renders by the rules below.
@@ -359,7 +392,13 @@ impl fmt::Display for Ty {
                     || (tag as u8 as u32 == bit(Tag::Bool) && self.lit_bool.is_some())
                     || (tag as u8 as u32 == bit(Tag::Str) && self.lit_str.is_some());
                 if !is_literal_tag && self.contains_tag(tag) {
-                    parts.push(tag.name().to_string());
+                    // A sequence member keeps its element type beside the literals too.
+                    match self.term_elem_for_display() {
+                        Some(elem) if (1u32 << bit(tag)) & SEQ_BITS != 0 => {
+                            parts.push(format!("{}<{elem}>", tag.name()));
+                        }
+                        _ => parts.push(tag.name().to_string()),
+                    }
                 }
             }
             return f.write_str(&parts.join(" | "));
@@ -424,6 +463,14 @@ impl fmt::Display for Ty {
                 }
                 first = false;
                 f.write_str(tag.name())?;
+                // A sequence member of a MIXED term still carries the term's element
+                // type: `nil | number | vector<X>` is what a recursive value type's body
+                // is, and printing `vector` there hid the reference that makes it one.
+                if (1u32 << bit(tag)) & SEQ_BITS != 0 {
+                    if let Some(elem) = self.term_elem_for_display() {
+                        write!(f, "<{elem}>")?;
+                    }
+                }
             }
         }
         Ok(())
@@ -443,6 +490,20 @@ impl Ty {
     /// [`Display`] is the diagnostic rendering and deliberately reads differently
     /// (`vector<int>`, `{a: int}`); this is the one that has to parse.
     pub fn to_source(&self) -> Option<String> {
+        // A recursive type is `(rec X body)`, its self-references `X` (ADR-349).
+        if self.is_recursive() {
+            let name = REC_DEPTH.with(|d| {
+                let depth = d.get();
+                d.set(depth + 1);
+                rec_name(depth)
+            });
+            let body = self.body_for_display().to_source();
+            REC_DEPTH.with(|d| d.set(d.get() - 1));
+            return body.map(|b| format!("(rec {name} {b})"));
+        }
+        if self.is_rec_ref() {
+            return Some(REC_DEPTH.with(|d| rec_name(d.get().saturating_sub(1))));
+        }
         // A term that SUBTRACTS (ADR-288) is written with the `(not …)` the grammar
         // already has. Falling through would emit the positive part alone, which is
         // strictly WIDER than the type — and ADR-271's rule is that a suggestion must

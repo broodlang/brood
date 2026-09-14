@@ -22546,3 +22546,32 @@ used to claim `⊆ vector<int> | pair<int>` from the tuple alone.
 `[a b]`): the code that motivated this is a test of list semantics, and the language has
 both. *A short-list heuristic* (shapes only under N elements): the cap already bounds the
 type; degrading a long shape to its element union keeps one rule.
+
+## ADR-349 — Recursive types: `(rec X …)`, unrolled coinductively, folded from the ascent
+
+**Status:** accepted and implemented 2026-09-14 (`types.rs` `mu`/`rec_ref`, `unroll`,
+`fold_recursive`, the coinductive `is_subtype`/`is_disjoint`; `annot.rs` `(rec X body)`;
+`display.rs`; the fold in Pass 2.9's two fixpoints). Design in `docs/type-recursive.md`.
+
+**Context.** ADR-341's fixpoints climb a value type that nests itself — `json`'s decoder
+returns vectors of what it returns — one level per round, and `Ty::widened_below` cut the
+ascent at depth two: sound, and every level below the cut read as `any`. Item 10 of the
+type-system audit: say it exactly.
+
+**Decision.** A recursive type is a μ binder on a whole `Ty` with a self-reference term
+inside; the self-reference reads as `any` to anything that does not resolve it and as an
+UNKNOWN set to the relations that meet it dangling, so nothing can be unsound for having
+ignored it. Every relation unrolls a binder before descending, coinductively for the two
+that recurse (the pair under comparison is assumed; regular types have finitely many pairs).
+Inference gets it by FOLDING: a round whose previous value appears inside its new one
+proposes `μX. G[X]`, and the candidate is accepted only when the next round folds back to
+it — a post-fixpoint, hence above the least fixpoint, hence sound; until then the ascent
+continues from the round's own value, which is above the un-folded sequence. The widening
+stays for what neither converges nor folds.
+
+**Alternatives rejected.** *De Bruijn-indexed nested binders*: inference never produces a
+reference across two binders, and the grammar has no consumer for it; one level keeps every
+substitution a single pass. *Named type aliases* (`deftype`): a naming feature, not a
+lattice one — deferred to a consumer. *Folding only after the widening round*: the node cap
+flattens a JSON value's type before round twelve, so the fold must be tried every round;
+the confirmation rule makes an early candidate cost nothing but a round.

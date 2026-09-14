@@ -2851,6 +2851,7 @@ pub(super) fn caller_derived_params(
             (name, seed)
         })
         .collect();
+    let mut older: HashMap<Symbol, Vec<Option<Ty>>> = HashMap::new();
     for round in 0..MAX_DERIVE_ROUNDS {
         let Some(collected) =
             collect_private_sites(heap, forms, &targets, candidates, &derived, ctx)
@@ -2871,12 +2872,30 @@ pub(super) fn caller_derived_params(
                     }
                 }
             }
-            // WIDENING (`Ty::widened_below`): a parameter still moving after the early
-            // rounds — a value type nesting one level deeper each time — is cut to a fixed
-            // depth, after which the ascent is stationary. The early rounds are left
-            // exact so a chain of helpers settles at full precision first.
-            if round >= WIDEN_AFTER_ROUND {
-                for t in acc.iter_mut().flatten() {
+            // A parameter whose last value appears INSIDE this round's — a value type
+            // nesting one level deeper each round — is folded into a RECURSIVE type
+            // (`Ty::fold_recursive`, ADR-349): the candidate `μX. G[X]`, which the next
+            // round confirms by folding back to it, or moves past. WIDENING
+            // (`Ty::widened_below`) remains for what neither converges nor folds after
+            // the early rounds: cut to a fixed depth, after which the ascent is
+            // stationary. The early rounds are left exact so a chain of helpers settles
+            // at full precision first.
+            // The value a round nests may be the one from TWO rounds back — a value
+            // that recurses through another function's parameter grows by a level every
+            // other round — so both are tried, the nearer first.
+            for (k, t) in acc.iter_mut().enumerate() {
+                let Some(t) = t else { continue };
+                let recent = [derived.get(&name), older.get(&name)]
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|p| p.get(k).cloned().flatten());
+                for prev in recent {
+                    if let Some(folded) = Ty::fold_recursive(&prev, t) {
+                        *t = folded;
+                        break;
+                    }
+                }
+                if round >= WIDEN_AFTER_ROUND {
                     *t = t.widened_below(WIDEN_DEPTH);
                 }
             }
@@ -2885,7 +2904,7 @@ pub(super) fn caller_derived_params(
         if next == derived {
             return derived;
         }
-        derived = next;
+        older = std::mem::replace(&mut derived, next);
     }
     HashMap::new()
 }

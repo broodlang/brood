@@ -108,7 +108,7 @@ fn value_member_of(heap: &Heap, v: Value, ty: &Ty) -> bool {
         let entries = heap.map_entries(id);
         if let Some((key_ty, val_ty)) = ty.map_kv() {
             for (k, val) in &entries {
-                if !value_member_of(heap, *k, key_ty) || !value_member_of(heap, *val, val_ty) {
+                if !value_member_of(heap, *k, &key_ty) || !value_member_of(heap, *val, &val_ty) {
                     return false;
                 }
             }

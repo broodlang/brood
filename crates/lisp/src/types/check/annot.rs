@@ -452,6 +452,12 @@ pub(super) fn base_ty(name: &str) -> Option<Ty> {
     })
 }
 
+thread_local! {
+    /// The names bound by the `(rec X …)` binders enclosing the type expression being
+    /// parsed — a symbol among them is the self-reference.
+    static REC_BOUND: std::cell::RefCell<Vec<value::Symbol>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// Parse a type-expression form to a [`Ty`]. Handles base names, type
 /// variables (`?A` → `Ty::ANY`), arrows `(p… -> r)`, `(list E)` /
 /// `(vector E)`, `(or A B …)`, `(and A B …)`, `(map K V)` (flat
@@ -468,6 +474,10 @@ pub fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
             // checker uses the widest safe type at positions it can't unify.
             if name.starts_with('?') {
                 return Some(Ty::ANY);
+            }
+            // The name bound by an enclosing `(rec X …)` is the self-reference (ADR-349).
+            if REC_BOUND.with(|b| b.borrow().contains(&s)) {
+                return Some(Ty::rec_ref());
             }
             // A base type name wins; then a bare **sealed ability** name (ADR-181) — the
             // union of its members' record shapes — then a **record** name. An unknown
@@ -589,6 +599,19 @@ pub fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
                 }
                 return Some(Ty::tuple_of(elems));
             }
+            // `(rec X body)` — a recursive type (ADR-349): `X` inside `body` is the whole.
+            // `(rec json (or nil bool number string (vector json) (map string json)))`.
+            if value::symbol_is(head, "rec") && items.len() == 3 {
+                let Value::Sym(name) = items[1] else {
+                    return None;
+                };
+                REC_BOUND.with(|b| b.borrow_mut().push(name));
+                let body = parse_type(heap, items[2]);
+                REC_BOUND.with(|b| {
+                    b.borrow_mut().pop();
+                });
+                return body.map(Ty::mu);
+            }
             // (record :k1 T1 :k2 T2 …) — a keyword-keyed heterogeneous map
             // shape. A field's type may be wrapped `(optional T)` to allow
             // the field to be absent/`nil`; every other field is required.
@@ -637,8 +660,8 @@ pub fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
 /// [`parse_type`]'s dispatch (which is the authority); a head added there and not
 /// here would be reported as unknown, so `sig_grammar_heads_are_all_validated`
 /// pins the two lists together.
-pub(super) const TYPE_HEADS: [&str; 8] = [
-    "list", "vector", "or", "and", "not", "map", "tuple", "record",
+pub(super) const TYPE_HEADS: [&str; 9] = [
+    "list", "vector", "or", "and", "not", "map", "tuple", "record", "rec",
 ];
 
 /// Why this type-expression can't be read as a type, or `None` if it can.
@@ -710,6 +733,19 @@ pub(super) fn type_expr_problem(heap: &Heap, form: Value) -> Option<String> {
             let head_name = value::symbol_name(head);
             if !TYPE_HEADS.contains(&head_name.as_str()) {
                 return Some(format!("unknown type constructor `{head_name}`"));
+            }
+            // `(rec X body)`: the name is a binder, not a type; the body reads with it
+            // bound, which is what `parse_type` does for the whole form.
+            if head_name == "rec" {
+                if items.len() == 3 && matches!(items[1], Value::Sym(_)) {
+                    if parse_type(heap, form).is_some() {
+                        return None;
+                    }
+                    return type_expr_problem(heap, items[2]);
+                }
+                return Some(
+                    "`rec` takes a name and a body: `(rec X (or nil (vector X)))`".to_string(),
+                );
             }
             // A known constructor: report a bad argument before the arity, so the
             // innermost real problem wins.

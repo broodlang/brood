@@ -101,7 +101,7 @@ fn every_type_constructor_the_grammar_parses_is_known_to_the_validator() {
             "map" => "(map keyword int)".to_string(),
             "record" => "(record :a int)".to_string(),
             "tuple" => "(tuple int string)".to_string(),
-            "or" | "and" => format!("({head} int string)"),
+            "rec" => "(rec X (or nil (vector X)))".to_string(),
             "not" => "(not nil)".to_string(),
             _ => format!("({head} int)"),
         };

@@ -798,3 +798,34 @@ fn a_call_site_is_read_in_the_scope_the_walk_sees() {
     );
     assert!(ws.is_empty(), "{ws:?}");
 }
+
+// ---- recursive types from the fixpoint (ADR-349) ----
+
+#[test]
+fn a_recursive_value_type_folds_into_a_rec_instead_of_nesting_forever() {
+    // A JSON-shaped decoder: a value is nil, a number, or a vector of values. The
+    // return used to nest one level deeper per round until the widening cut it at a
+    // depth; it is now the recursive type, exactly, and a caller reads it through the
+    // binder — the element of the vector arm is the value type again.
+    let sigs = signatures(
+        "(defmodule t)\n\
+         (defn- val (s i) (if (= (nth s i) \"[\") (arr s (+ i 1) []) (if (= (nth s i) \"n\") nil 1)))\n\
+         (defn- arr (s i acc) (if (= (nth s i) \"]\") acc (arr s (+ i 1) (conj acc (val s i)))))\n\
+         (defn decode (s) (val s 0))\n\
+         (defn use-it (s) (let (v (decode s)) (if (vector? v) (first v) v)))",
+    );
+    let sig_of = |name: &str| {
+        sigs.iter()
+            .find(|(n, _, _)| n == name)
+            .map(|(_, s, _)| s.clone())
+            .unwrap_or_else(|| panic!("{name}: no signature in {sigs:?}"))
+    };
+    assert_eq!(
+        sig_of("t/decode"),
+        "(seqable) -> (rec X 1 | nil | vector<X>)"
+    );
+    // `(first v)` on the vector arm is a value again (or nil for the empty vector), and
+    // the union with the other arms reads as the recursive type plus its own parts.
+    let use_it = sig_of("t/use-it");
+    assert!(use_it.contains("(rec X 1 | nil | vector<X>)"), "{use_it}");
+}

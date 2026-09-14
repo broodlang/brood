@@ -1950,7 +1950,7 @@ fn a_list_shape_is_a_non_empty_list_of_exactly_its_positions() {
     // Elements: the union of the positions; positions: exact.
     assert_eq!(shape.elem_ty(), Some(int.clone().union(string.clone())));
     assert_eq!(
-        shape.positional_elems().cloned(),
+        shape.positional_elems(),
         Some(vec![int.clone(), string.clone()])
     );
     // A uniform list is not a shape (it has no arity), and a shape with `nil` beside it
@@ -1969,7 +1969,7 @@ fn a_list_shape_is_a_non_empty_list_of_exactly_its_positions() {
         .clone()
         .intersect(Ty::list_shape_of(vec![Ty::int_lit(3), string.clone()]));
     assert_eq!(
-        narrowed.positional_elems().cloned(),
+        narrowed.positional_elems(),
         Some(vec![Ty::int_lit(3), string.clone()])
     );
     // Shapes of one arity merge by position (exact when one position differs), and a
@@ -1978,7 +1978,7 @@ fn a_list_shape_is_a_non_empty_list_of_exactly_its_positions() {
         .clone()
         .union(Ty::list_shape_of(vec![Ty::of(Tag::Float), string.clone()]));
     assert_eq!(
-        merged.positional_elems().cloned(),
+        merged.positional_elems(),
         Some(vec![int.clone().union(Ty::of(Tag::Float)), string.clone()])
     );
     let two_arities = shape.clone().union(one.clone());
@@ -2004,4 +2004,146 @@ fn parse_ty(src: &str) -> Ty {
     let mut interp = crate::Interp::new();
     let form = crate::syntax::reader::read_one(&mut interp.heap, src).expect("parses");
     super::check::annot::parse_type(&interp.heap, form).expect("is a type")
+}
+
+// ---- recursive types (ADR-349): μX. …, unrolled coinductively ----
+
+/// `μX. nil | vector<X>` — a nested list of nothing, the smallest recursive shape.
+fn nested_vectors() -> Ty {
+    Ty::mu(Ty::of(Tag::Nil).union(Ty::vector_of(Ty::rec_ref())))
+}
+
+/// A JSON value: `μX. nil | bool | number | string | vector<X> | map<string, X>`.
+fn json_ty() -> Ty {
+    let base = Ty::of(Tag::Nil)
+        .union(Ty::of(Tag::Bool))
+        .union(Ty::NUMBER)
+        .union(Ty::of(Tag::Str));
+    Ty::mu(
+        base.union(Ty::vector_of(Ty::rec_ref()))
+            .union(Ty::map_of(Ty::of(Tag::Str), Ty::rec_ref())),
+    )
+}
+
+#[test]
+fn a_recursive_type_renders_and_reads_back_as_its_binder() {
+    let t = nested_vectors();
+    assert!(t.is_recursive());
+    assert_eq!(t.to_string(), "(rec X nil | vector<X>)");
+    assert_eq!(
+        t.to_source().as_deref(),
+        Some("(rec X (or nil (vector X)))")
+    );
+    assert_eq!(parse_ty("(rec X (or nil (vector X)))"), t);
+    assert_eq!(parse_ty("(rec json (or nil (vector json)))"), t);
+    // A body with no self-reference is not recursive.
+    assert!(!Ty::mu(Ty::of(Tag::Int)).is_recursive());
+    assert_eq!(parse_ty("(rec X int)"), Ty::of(Tag::Int));
+}
+
+#[test]
+fn a_recursive_type_unrolls_to_itself_one_level_down() {
+    let t = nested_vectors();
+    let once = t.unroll();
+    assert!(!once.is_recursive());
+    // The element of the unrolling IS the recursive type, not a placeholder.
+    let elem = once.clone().intersect(Ty::of(Tag::Vector)).elem_ty();
+    assert_eq!(elem, Some(t.clone()), "{once}");
+    // …and the accessors read through the binder the same way.
+    assert_eq!(
+        t.clone().intersect(Ty::of(Tag::Vector)).elem_ty(),
+        Some(t.clone())
+    );
+    let json = json_ty();
+    let (k, v) = json
+        .clone()
+        .intersect(Ty::of(Tag::Map))
+        .map_kv()
+        .expect("a map");
+    assert_eq!(k, Ty::of(Tag::Str));
+    assert_eq!(v, json);
+}
+
+#[test]
+fn recursive_subtyping_is_coinductive() {
+    let t = nested_vectors();
+    // Reflexive, and equal to its own unrolling in both directions.
+    assert!(t.is_subtype(&t));
+    assert!(t.unroll().is_subtype(&t));
+    assert!(t.is_subtype(&t.unroll()));
+    // Inside a wider recursive type, and not inside a narrower one.
+    let wider = Ty::mu(
+        Ty::of(Tag::Nil)
+            .union(Ty::of(Tag::Int))
+            .union(Ty::vector_of(Ty::rec_ref())),
+    );
+    assert!(t.is_subtype(&wider));
+    assert!(!wider.is_subtype(&t));
+    // A finite value of the shape is inside it; one that is not is not.
+    let two_deep = Ty::vector_of(Ty::vector_of(Ty::of(Tag::Nil)));
+    assert!(two_deep.is_subtype(&t), "{two_deep} ⊆ {t}");
+    assert!(!Ty::vector_of(Ty::of(Tag::Int)).is_subtype(&t));
+    // Disjointness through the binder: a string shares nothing with it, an int
+    // shares nothing either, a vector may.
+    assert!(t.is_disjoint(&Ty::of(Tag::Str)));
+    assert!(!t.is_disjoint(&Ty::of(Tag::Vector)));
+    assert!(!json_ty().is_disjoint(&Ty::map_of(Ty::of(Tag::Str), Ty::of(Tag::Int))));
+    // A dangling self-reference is an unknown set: inside nothing but `any`, disjoint
+    // from nothing, and it absorbs nothing in a union.
+    let dangling = Ty::rec_ref();
+    assert!(dangling.is_subtype(&Ty::ANY));
+    assert!(!dangling.is_subtype(&Ty::of(Tag::Int)));
+    assert!(!Ty::of(Tag::Int).is_subtype(&dangling));
+    assert!(!dangling.is_disjoint(&Ty::of(Tag::Int)));
+    let kept = dangling.clone().union(Ty::of(Tag::Int));
+    assert!(Ty::of(Tag::Int).is_subtype(&kept) && dangling.is_subtype(&kept));
+}
+
+#[test]
+fn a_fixpoint_ascent_folds_into_a_recursive_type_and_confirms_it() {
+    // The rounds a JSON decoder's return climbs: F(⊥), F(F(⊥)), … — each nesting the
+    // last as its vectors' element. Folding the second into the first gives the
+    // candidate; the round after, computed ON the candidate, folds back to it.
+    let base = Ty::of(Tag::Nil).union(Ty::NUMBER);
+    let step = |x: &Ty| base.clone().union(Ty::vector_of(x.clone()));
+    let t1 = step(&Ty::NEVER);
+    let t2 = step(&t1);
+    assert!(
+        Ty::fold_recursive(&Ty::NEVER, &t1).is_none(),
+        "a flat previous folds nothing"
+    );
+    let candidate = Ty::fold_recursive(&t1, &t2).expect("t1 nests inside t2");
+    assert_eq!(candidate.to_string(), "(rec X nil | number | vector<X>)");
+    let t3 = step(&candidate);
+    assert_eq!(
+        Ty::fold_recursive(&candidate, &t3).as_ref(),
+        Some(&candidate),
+        "the round on the candidate folds back to it: a post-fixpoint"
+    );
+    // Every finite round is inside the candidate (it is above the least fixpoint).
+    assert!(t1.is_subtype(&candidate) && t2.is_subtype(&candidate) && t3.is_subtype(&candidate));
+    // Unrelated growth does not fold: `t1` absent from a value.
+    assert!(Ty::fold_recursive(&t1, &Ty::vector_of(Ty::of(Tag::Int))).is_none());
+}
+
+#[test]
+fn set_operations_on_a_recursive_type_go_through_its_unrolling() {
+    let t = nested_vectors();
+    // Union with a flat type keeps the binder: the references name the union, a
+    // superset, which is sound and here exact.
+    let with_int = t.clone().union(Ty::of(Tag::Int));
+    assert!(with_int.is_recursive());
+    assert!(t.is_subtype(&with_int) && Ty::of(Tag::Int).is_subtype(&with_int));
+    // Intersection narrows by the guard: `(vector? x)` on the recursive type is the
+    // vector arm, whose elements are the type again.
+    let narrowed = t.clone().intersect(Ty::of(Tag::Vector));
+    assert!(!narrowed.is_recursive());
+    assert_eq!(narrowed.elem_ty(), Some(t.clone()));
+    // Negation excludes it, and the difference of the type with its vector arm is nil.
+    assert!(t.is_disjoint(&t.clone().negate()));
+    assert_eq!(t.clone().difference(Ty::of(Tag::Vector)), Ty::of(Tag::Nil));
+    // Widening leaves a recursive type alone — it is finite already.
+    assert_eq!(t.widened_below(0), t);
+    // Equality and hashing see the binder.
+    assert_ne!(t, t.body_for_display());
 }

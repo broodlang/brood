@@ -377,9 +377,10 @@ surface feeding it — and each turned out to need a different kind of fix. Deta
       (list m '(…)))` read `pair | map`; `list_shape` — a positional shape on the pair member,
       the sibling of `(tuple …)` — reads it exactly, from `(list …)`, a quoted list, `cons`,
       `rest` and a `& rest` binder; `(list T U …)` in the grammar and the runtime contract.
-- [ ] **10. Recursive types.** A value type that nests itself (`json`'s
-      `vector<… | vector<…>>`) is cut at a depth by `Ty::widened_below`; a one-level unroll of a
-      named recursive type would say it exactly.
+- [x] **10. Recursive types** (ADR-349, 2026-09-14). A value type that nests itself (`json`'s
+      `vector<… | vector<…>>`) was cut at a depth by `Ty::widened_below`; `(rec X …)` says it
+      exactly — a μ binder unrolled coinductively by every relation, and the fixpoints fold an
+      ascent that nests itself into one, confirmed when the next round folds back to it.
 
 
 ### Standard-library surface audit — the bare namespace (2026-08-26)

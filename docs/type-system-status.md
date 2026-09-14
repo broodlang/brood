@@ -1055,3 +1055,15 @@ cap degrades to its element union first, so a long quoted table stays `list<int>
 tightened on the way: the subtype rule's derived element bound covers every sequence member
 of the left side (`(tuple int) | pair` claimed `vector<int> | pair<int>` from the tuple
 alone). `docs/type-tuples.md` carries the design.
+
+## Recursive types (2026-09-14, ADR-349)
+
+Item 10, the last of the audit's list: a value type that nests itself is `(rec X …)` — a μ
+binder on the whole `Ty` and a self-reference term that reads as `any` to what does not
+resolve it and as an unknown set to what does; every relation unrolls it first, the two
+that recurse coinductively. Inference folds an ascent whose previous value appears inside
+its new one into `μX. G[X]` and accepts the candidate only when the next round folds back to
+it (a post-fixpoint, so sound); `Ty::widened_below` remains for what neither converges nor
+folds. A JSON-shaped decoder reads `(rec X 1 | nil | vector<X>)` where the depth cut read
+`vector<… | vector<any>>`. `docs/type-recursive.md` carries the design; deferred there: a
+reference across two binders, a named alias, the runtime contract.
