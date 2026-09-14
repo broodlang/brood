@@ -562,8 +562,11 @@ pub(super) struct Ctx {
     /// change between the guard and a use, so the assertion holds. Consulted by
     /// `guards::expr_ty`'s path lookup; empty in the common (no-guard) case.
     path_types: HashMap<(Symbol, Vec<PathKey>), Ty>,
-    /// `bound-name → (variable, type-it-asserts)`: a `let`-stored guard result.
-    guards: HashMap<Symbol, (Symbol, Ty, Option<Ty>)>,
+    /// `bound-name → (variable, type-it-asserts, what-a-falsy-result-proves, then-only)`: a
+    /// `let`-stored guard result. `then_only` marks a `when`-shaped binding — `(let (s (if k
+    /// E nil)) …)` — whose truthy value proves `k` truthy and whose falsy value proves
+    /// nothing (`E` may be nil).
+    guards: HashMap<Symbol, (Symbol, Ty, Option<Ty>, bool)>,
     /// **Count aliases** (ADR-350): `n → xs` for a `(let (n (count xs)) …)`, so a guard on
     /// `n` — `(>= n 4)`, `(< i n)` — is a fact about `xs`'s length and about `i` as an
     /// index of `xs`. Sound under immutability: `xs` never changes, so `n` is its count
@@ -644,7 +647,7 @@ impl Ctx {
         self.types.get(&sym).cloned()
     }
     /// The guard (variable + asserted type) `sym` was bound to, if any.
-    pub(super) fn guard(&self, sym: Symbol) -> Option<(Symbol, Ty, Option<Ty>)> {
+    pub(super) fn guard(&self, sym: Symbol) -> Option<(Symbol, Ty, Option<Ty>, bool)> {
         self.guards.get(&sym).cloned()
     }
     /// Is `sym` in scope here? — a local binder (fn-param or let), a recorded
@@ -877,12 +880,13 @@ impl Ctx {
         target: Symbol,
         ty: Ty,
         else_ty: Option<Ty>,
+        then_only: bool,
     ) -> Ctx {
         if sym == target {
             return self.clone();
         }
         let mut c = self.clone();
-        c.guards.insert(sym, (target, ty, else_ty));
+        c.guards.insert(sym, (target, ty, else_ty, then_only));
         c
     }
     /// Record `(let (n (count xs)) …)`: `n` is the length of `xs` for the scope.

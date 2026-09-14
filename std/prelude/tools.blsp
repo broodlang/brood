@@ -1159,11 +1159,11 @@ image and before any `require`."
   ;; dependency module embedded under its rooted key `pkg/key` (`%bundle-resolve-bare`) — the
   ;; bundle's basename lookup, so a bare `(:alias repo)` / `pool` reference finds `store/repo`
   ;; / `store-postgres/pool` regardless of load order. The load below uses the resolved key for
-  ;; both its context (`%bundle-module-package`) and its source file.
+  ;; both its context (`%bundle-module-package`) and its source file. `src` is read under
+  ;; `(when load-key …)`, so the source branch below knows `load-key` is a key.
   (let (direct (%builtin-module key)
-        alt (if direct nil (%bundle-resolve-bare key))
-        src (or direct (if alt (%builtin-module alt) nil))
-        load-key (if direct key alt))
+        load-key (if direct key (%bundle-resolve-bare key))
+        src (when load-key (if direct direct (%builtin-module load-key))))
     (cond
       ;; The IMAGE branch is tested FIRST — before the embedded-source branch below.
       ;; Every baked-in std module has embedded source, so `src` matches for all of them
@@ -1267,7 +1267,7 @@ image and before any `require`."
           ;; Reached by resolving a bare name to the embedded rooted key `pkg/key`: mark the
           ;; rooted key loaded too, so the run-bundle load-all loop, requiring `pkg/key`
           ;; directly, does not re-evaluate the same source and redefine its macros.
-          (when (and alt (not (= alt key))) (provide alt)))
+          (when (and load-key (not (= load-key key))) (provide load-key)))
       ;; A feature can come from a startup IMAGE instead of a source file (ADR-218): its
       ;; bindings are materialised from a byte range rather than evaluated. This is the
       ;; seam that makes an imaged project load LAZILY — `require` stays the unit of

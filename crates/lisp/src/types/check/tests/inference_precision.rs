@@ -701,3 +701,25 @@ fn a_recursive_accumulator_is_typed_under_its_branch_guard() {
     assert_eq!(ws.len(), 1, "{ws:?}");
     assert!(ws[0].ends_with("the body yields string"), "{ws:?}");
 }
+
+/// A `when`-shaped binding is a then-only guard on its condition: `(let (src (when k
+/// (lookup k))) (if src (use k) …))` reads `k` truthy where `src` is — a falsy `src` proves
+/// nothing, so the else-branch is left alone.
+#[test]
+fn a_when_shaped_binding_guards_its_condition() {
+    let src = "(defmodule t)\n\
+         (sig want-str (string -> int))\n\
+         (defn want-str (s) 1)\n\
+         (sig lookup (string -> (or nil string)))\n\
+         (defn lookup (k) nil)\n\
+         (sig f ((or nil string) -> any))\n\
+         (defn f (k) (let (src (when k (lookup k))) (if src (want-str k) 0)))\n\
+         (sig g ((or nil string) -> any))\n\
+         (defn g (k) (let (src (when k (lookup k))) (if src 0 (want-str k))))";
+    let ws = file_warnings_mode(src, true);
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert!(
+        ws[0].contains("expects string, got nil | string (k)"),
+        "{ws:?}"
+    );
+}

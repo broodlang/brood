@@ -320,9 +320,11 @@ pub(super) fn guard_assertion(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Gua
 
 fn guard_assertion_inner(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Guard> {
     if let Value::Sym(s) = test {
-        // A let-stored guard alias — recorded only for biconditional guards
-        // (see `check_let`), so it narrows the else-branch too.
-        if let Some((sym, ty, else_ty)) = ctx.guard(s) {
+        // A let-stored guard alias — recorded for biconditional guards (see `check_let`),
+        // so it narrows the else-branch too. A `when`-shaped alias is NOT the guard here:
+        // its value is data (`(let (src (when k (lookup k))) …)`), so the test narrows
+        // `src` itself by truthiness below, and `and_conjunct_guards` adds `k` beside it.
+        if let Some((sym, ty, else_ty, false)) = ctx.guard(s) {
             return Some(Guard {
                 sym,
                 ty,
@@ -647,6 +649,20 @@ pub(super) fn branch_scopes(heap: &Heap, test: Value, ctx: &Ctx) -> (Ctx, Ctx) {
 /// handled by [`guard_assertion`], adds nothing here). Sound to apply all to the then-ctx.
 pub(super) fn and_conjunct_guards(heap: &Heap, test: Value, ctx: &Ctx) -> Vec<Guard> {
     let mut out = Vec::new();
+    // A bare local bound `when`-shaped — `(let (src (when k E)) (if src …))` — proves its
+    // condition `k` truthy in the then-branch, beside its own truthiness (which
+    // `guard_assertion` states). Then-only: a falsy `src` may be `E`'s own nil.
+    if let Value::Sym(s) = test {
+        if let Some((k, ty, _, true)) = ctx.guard(s) {
+            out.push(Guard {
+                sym: k,
+                ty,
+                then_only: true,
+                else_only: false,
+                else_ty: None,
+            });
+        }
+    }
     let mut cur = test;
     let mut matched = false;
     loop {

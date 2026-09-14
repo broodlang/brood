@@ -645,7 +645,19 @@ pub(in crate::types::check) fn let_bind_scope(
     }
     if let Some(g) = rhs_guard {
         if !g.then_only && !g.else_only {
-            scope = scope.add_guard(name, g.sym, g.ty, g.else_ty);
+            scope = scope.add_guard(name, g.sym, g.ty, g.else_ty, false);
+        }
+    }
+    // A `when`-shaped binding — `(let (src (when k (lookup k))) …)`, which is `(if k E nil)`
+    // once expanded — is a guard on `k`: a truthy `src` proves `k` truthy (a falsy `k` makes
+    // the value `nil`), so `(cond src (use k) …)` reads `k` narrowed in that branch. A falsy
+    // `src` proves nothing (`E` may be nil), hence then-only. Only for a lexical local `k`.
+    if let Some(items) = list_items(heap, rhs) {
+        let when_shaped = items.len() == 3 || (items.len() == 4 && matches!(items[3], Value::Nil));
+        if let (Some(Value::Sym(head)), Some(Value::Sym(k))) = (items.first(), items.get(1)) {
+            if when_shaped && value::symbol_is(*head, kw::IF) && scope.is_lexical_local(*k) {
+                scope = scope.add_guard(name, *k, Ty::truthy(), None, true);
+            }
         }
     }
     if let Value::Sym(target) = rhs {
