@@ -16,11 +16,17 @@ State when written: `main` = `0223cb1f`, pushed, clean. **One open bug: KI-134**
 the release blocker — **FIXED later the same day, see item 1; its residue KI-135 too (ADR-344).
 No open bug at the end of 2026-09-13.** The pre-push hook now runs the fast half of CI
 (`make prepush`; see CLAUDE.md "Before every push") — install it with `make hooks`.
-**One watch item: KI-136** — the stdlib image replays registrations a module's own load never
-made (attribution by key qualifier), which let a missing `(:load editor/highlight)` in
-`editor/lexer` pass every imaged test; the builder should attribute by writer and the
-ADR-280 differential should compare registry contents. `BROOD_NO_STDIMAGE=1` on a module's
-test file is the cheap check meanwhile.
+**One watch item: KI-136** — the stdlib image carries, in `editor/face`'s section, the VALUE
+of `*faces*` as it stood after every std module had loaded (26 faces; a source load of
+`editor/face` has 6): a `%swap-registry!` registry is imaged as its owner's binding, so the
+writers' registrations travel with the owner and a missing dependency (`editor/lexer` on
+`editor/highlight`) passes every imaged test. The honest fix needs a mechanism: record each
+CAS-funnel write's WRITER module during the builder's per-module probe (the diff of the
+registry map before/after that module's isolated load), replay those per writer, and snapshot
+the owner's binding at the end of its OWN load; then extend the ADR-280 differential to
+compare registry contents per module. Not started — it is the image builder's design, and the
+current behaviour is what makes CAS registries survive the image at all. `BROOD_NO_STDIMAGE=1`
+on a module's test file is the cheap check meanwhile; KI-137 (check-order dependence) is fixed.
 
 The checker is 1.8× the pre-ADR-340 cost over `std/` (28 s vs 15.6 s, debug) after the `Ctx`
 split (devlog 2026-09-13); what remains is the fixpoints' genuine re-walks — `resolver.blsp`

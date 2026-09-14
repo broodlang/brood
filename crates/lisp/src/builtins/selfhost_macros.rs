@@ -87,6 +87,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         check_strict,
     );
     primitives.def(
+        "%check-materialise-referenced!",
+        Arity::exact(0),
+        Sig::new(vec![], nil_ty),
+        &[],
+        "Load, to a fixpoint, every module a LOADED module's function bodies name with a qualified reference — the ADR-340 materialisation a check performs on demand, run once up front. `nest check` calls it after requiring the listed files' closures and before checking any file, so every file is checked against ONE heap state instead of whichever modules earlier checks happened to load (KI-137: a strict verdict on std/math.blsp flipped with the order files were checked in). Returns nil.",
+        check_materialise_referenced,
+    );
+    primitives.def(
         "%check-strict!",
         Arity::exact(1),
         Sig::new(vec![any], bool_ty),
@@ -461,6 +469,15 @@ pub(super) fn check_deps_fp(args: &[Value], _env: EnvId, heap: &mut Heap) -> Lis
 /// cache reads it to key its manifest: a stored verdict is only reusable by a run in the
 /// mode that produced it, and without the key a plain `nest check` poisons the cache for
 /// the next `nest check --strict`, which then reports what the plain run found.
+pub(super) fn check_materialise_referenced(
+    _args: &[Value],
+    _env: EnvId,
+    heap: &mut Heap,
+) -> LispResult {
+    crate::types::check::materialise_referenced_modules(heap);
+    Ok(Value::Nil)
+}
+
 pub(super) fn check_strict(_args: &[Value], _env: EnvId, _heap: &mut Heap) -> LispResult {
     Ok(Value::Bool(crate::types::strict_checking()))
 }
