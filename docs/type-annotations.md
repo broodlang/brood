@@ -60,8 +60,11 @@ arrow  ::= ( type* -> type )                   ; fixed arity
          | ( type* & type -> type )            ; fixed leading params + variadic rest
          | ( type* &optional type* -> type )   ; fixed params + optional (ADR-127)
          | ( type* &optional type* & type -> type ) ; + a trailing rest too
-seq    ::= (list type) | (vector type) | (set type) ; element type checked at runtime
+seq    ::= (list type) | (vector type) | (set type) ; element type checked at runtime;
+                                               ; `(list E)` is `nil | list<E>` — may be empty
 map-kv ::= (map key-type val-type)             ; key/val checked at runtime
+range  ::= (int lo hi)                         ; an int within [lo, hi]; `_` is an open end (ADR-350)
+         | (len type lo hi)                    ; a countable of length within [lo, hi]
 union  ::= (or type type+)
 inter  ::= (and type+)                         ; intersection; (and) = any
 compl  ::= (not type)                          ; complement — every value that is NOT a type

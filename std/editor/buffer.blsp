@@ -1197,7 +1197,9 @@ with spaces to the rectangle's full width — so a kill round-trips through
   ;; valid, then park point at the rectangle's top-left. `spans` is `rect-spans`' output.
   (let (edited (fold (reverse spans) buf (fn (b sp) (let ([start l r] sp) (f b start l r)))))
     (goto-char edited (+ (first (first spans)) (second (first spans))))))
-(sig rect-fold-lines (buffer (list (tuple int int int)) (buffer int int int -> buffer) -> buffer))
+;; A NON-EMPTY list of spans: `(first spans)` is what point parks at, so an empty
+;; rectangle is the caller's to refuse (`rect-spans` never yields one).
+(sig rect-fold-lines (buffer (len (list (tuple int int int)) 1 _) (buffer int int int -> buffer) -> buffer))
 
 (defn delete-rectangle (buf)
   "Delete `[left, right)` of every line the rectangle spans, closing the gap; point lands

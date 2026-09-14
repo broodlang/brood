@@ -1067,3 +1067,21 @@ it (a post-fixpoint, so sound); `Ty::widened_below` remains for what neither con
 folds. A JSON-shaped decoder reads `(rec X 1 | nil | vector<X>)` where the depth cut read
 `vector<… | vector<any>>`. `docs/type-recursive.md` carries the design; deferred there: a
 reference across two binders, a named alias, the runtime contract.
+
+## Lengths and indices (2026-09-14, ADR-350)
+
+Item 11, the first of the three Idris took: an interval on the `int` member and a length on
+every countable member, in the slots the lattice already had. `count` reads the length,
+`rest`/`cons`/`conj`/`range` and the length-preserving combinators move it, int-closed
+arithmetic carries intervals (checked — overflow widens, never wraps), and a positional
+read is present when the length proves it: `(nth words 1)` under `(>= n 4)`, `(first ms)`
+under `(not (empty? ms))`, `(nth xs i)` under `(< i (count xs))` with `i ≥ 0`. Every
+fixpoint widens an interval end that moved to its infinity before the ADR-349 fold. The
+guards: `empty?` biconditional by length, a comparison between a local, a count and a
+literal narrowing both branches, and `(= (nth a k) lit)` a path guard that drops the tuple
+alternatives it rules out from the base itself — so a `[:ok x] | [:error msg]` dispatch
+types the whole value. On the way: a sealed ability op's domain no longer applies to a
+same-file function spelling its name (`tempo/->iso` against `Temporal`, latent), and a
+recursive specialization types its self-calls in the branch they sit in (`path/join`'s
+accumulator). `(list E)` in the grammar is now `nil | list<E>`. std plain 0, std strict 0,
+tests plain 0. `docs/type-intervals.md` carries the design.

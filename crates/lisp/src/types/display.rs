@@ -78,6 +78,25 @@ thread_local! {
     static REC_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// An interval as a suffix: `[3]`, `[1..]`, `[..5]`, `[2..5]`; empty for everything.
+pub(crate) fn range_suffix(r: Range) -> String {
+    if r.is_all() {
+        return String::new();
+    }
+    if let Some(n) = r.as_point() {
+        return format!("[{n}]");
+    }
+    let lo = r.lo.map(|n| n.to_string()).unwrap_or_default();
+    let hi = r.hi.map(|n| n.to_string()).unwrap_or_default();
+    format!("[{lo}..{hi}]")
+}
+
+/// One end of an interval as source: the int, or `_` for unbounded.
+fn range_end(end: Option<i64>) -> String {
+    end.map(|n| n.to_string())
+        .unwrap_or_else(|| "_".to_string())
+}
+
 /// The binder name at nesting `depth`: `X`, `Y`, `Z`, then `X1`, `Y1`, …
 fn rec_name(depth: usize) -> String {
     let letter = ['X', 'Y', 'Z'][depth % 3];
@@ -286,10 +305,11 @@ impl fmt::Display for Ty {
                 } else {
                     ""
                 };
+                let len = self.len_suffix();
                 match kinds.as_slice() {
                     [] => {}
-                    [one] => return write!(f, "{nil}{one}<{elem}>"),
-                    many => return write!(f, "{nil}({})<{elem}>", many.join(" | ")),
+                    [one] => return write!(f, "{nil}{one}<{elem}>{len}"),
+                    many => return write!(f, "{nil}({})<{elem}>{len}", many.join(" | ")),
                 }
             }
         }
@@ -395,9 +415,13 @@ impl fmt::Display for Ty {
                     // A sequence member keeps its element type beside the literals too.
                     match self.term_elem_for_display() {
                         Some(elem) if (1u32 << bit(tag)) & SEQ_BITS != 0 => {
-                            parts.push(format!("{}<{elem}>", tag.name()));
+                            parts.push(format!(
+                                "{}<{elem}>{}",
+                                tag.name(),
+                                self.len_suffix_for(tag)
+                            ));
                         }
-                        _ => parts.push(tag.name().to_string()),
+                        _ => parts.push(format!("{}{}", tag.name(), self.range_suffix_for(tag))),
                     }
                 }
             }
@@ -415,7 +439,9 @@ impl fmt::Display for Ty {
         // the `Num` ability) — renders as `number | map`, not `int | float | map | decimal`.
         // (An exact `number` is already named above; this only fires for a strict superset.)
         let number_tags = Ty::NUMBER.tags;
-        let factor_number = (self.tags & number_tags) == number_tags && self.tags != number_tags;
+        let factor_number = (self.tags & number_tags) == number_tags
+            && self.tags != number_tags
+            && self.int_suffix().is_empty();
         // …and the same for `fn`. The `Fn`/`Native` split is an implementation detail the
         // LANGUAGE does not have: `(type-of inc)` is `:fn`, `(fn? inc)` is true for a
         // builtin and a closure alike, and the type grammar's `fn` already parses to both
@@ -471,6 +497,8 @@ impl fmt::Display for Ty {
                         write!(f, "<{elem}>")?;
                     }
                 }
+                // …and its interval: an int's, a countable member's length (ADR-350).
+                f.write_str(&self.range_suffix_for(tag))?;
             }
         }
         Ok(())
@@ -503,6 +531,23 @@ impl Ty {
         }
         if self.is_rec_ref() {
             return Some(REC_DEPTH.with(|d| rec_name(d.get().saturating_sub(1))));
+        }
+        // An interval (ADR-350): a lone ranged int is `(int lo hi)`; a term with a length
+        // is `(len <the rest> lo hi)`. A ranged int INSIDE a wider term has no spelling of
+        // its own (the grammar refines the int member alone), so it declines.
+        if let Some(r) = self.int_interval_for_source() {
+            if self.is_only_ranged_int() {
+                return Some(format!("(int {} {})", range_end(r.lo), range_end(r.hi)));
+            }
+            return None;
+        }
+        if let Some((r, without)) = self.len_for_source() {
+            let inner = without.to_source()?;
+            return Some(format!(
+                "(len {inner} {} {})",
+                range_end(r.lo),
+                range_end(r.hi)
+            ));
         }
         // A term that SUBTRACTS (ADR-288) is written with the `(not …)` the grammar
         // already has. Falling through would emit the positive part alone, which is
@@ -663,11 +708,17 @@ impl Ty {
             if self.tags & !(SEQ_BITS | nil_bit) == 0 {
                 let inner = elem.to_source()?;
                 let mut parts: Vec<String> = Vec::new();
-                if self.contains_tag(Tag::Nil) {
+                // `(list E)` is `nil | list<E>` in the grammar (ADR-350: a list may be
+                // empty), so the pair-and-nil pair is one spelling, and a pair WITHOUT
+                // nil — the non-empty list — is `(len (list E) 1 _)`.
+                let list_with_nil = self.contains_tag(Tag::Nil) && self.contains_tag(Tag::Pair);
+                if self.contains_tag(Tag::Nil) && !list_with_nil {
                     parts.push("nil".to_string());
                 }
-                if self.contains_tag(Tag::Pair) {
+                if list_with_nil {
                     parts.push(format!("(list {inner})"));
+                } else if self.contains_tag(Tag::Pair) {
+                    parts.push(format!("(len (list {inner}) 1 _)"));
                 }
                 if self.contains_tag(Tag::Vector) {
                     parts.push(format!("(vector {inner})"));

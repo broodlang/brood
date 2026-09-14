@@ -60,7 +60,11 @@ fn a_tuple_accumulator_that_feeds_itself_reaches_its_fixpoint() {
         "(defn t5 (xs) (fold xs [0 '()] (fn (st x) (let ([j acc] st) [(inc j) (cons j acc)]))))",
     );
     assert_eq!(sigs.len(), 1, "{sigs:?}");
-    assert!(sigs[0].1.contains("(tuple int, list<int>)"), "{sigs:?}");
+    // …and since ADR-350 the counter carries its interval: `j` starts at 0 and only grows.
+    assert!(
+        sigs[0].1.contains("(tuple int[0..], nil | list<int[0..]>)"),
+        "{sigs:?}"
+    );
     assert!(!sigs[0].1.contains("number"), "{sigs:?}");
 }
 

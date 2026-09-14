@@ -56,14 +56,14 @@ UTF-8-encodes a string.
 
     (encoding/hex-encode-bytes #b\"hi\")   → \"6869\""
   (encoding-hex-encode-codes bytes encoding-hex-lower-codes))
-(sig hex-encode-bytes ((or bytes seqable) -> string))
+(sig hex-encode-bytes ((or bytes (vector (int 0 255)) (list (int 0 255))) -> string))
 
 (defn hex-encode-bytes-upper (bytes)
   "Encode a byte sequence (a `bytes` value, vector, or list of ints 0–255) as uppercase hexadecimal.
 
     (encoding/hex-encode-bytes-upper [222 173 190 239])   → \"DEADBEEF\""
   (encoding-hex-encode-codes bytes encoding-hex-upper-codes))
-(sig hex-encode-bytes-upper ((or bytes seqable) -> string))
+(sig hex-encode-bytes-upper ((or bytes (vector (int 0 255)) (list (int 0 255))) -> string))
 
 ;; Codepoint → nibble value (int keys — the decode loop walks a `string->codepoints`
 ;; vector, so lookups hash an int, not a fresh 1-char string per char).
@@ -189,14 +189,14 @@ UTF-8 form.
 
     (encoding/base64-encode-bytes [255 0 1])   → \"/wAB\""
   (encoding-b64-encode bytes encoding-b64-std-codes))
-(sig base64-encode-bytes ((or bytes seqable) -> string))
+(sig base64-encode-bytes ((or bytes (vector (int 0 255)) (list (int 0 255))) -> string))
 
 (defn base64-url-encode-bytes (bytes)
   "Encode a byte sequence (a `bytes` value, vector, or list of ints 0–255) as URL-safe Base64.
 
     (encoding/base64-url-encode-bytes [251 255])   → \"-_8=\""
   (encoding-b64-encode bytes encoding-b64-url-codes))
-(sig base64-url-encode-bytes ((or bytes seqable) -> string))
+(sig base64-url-encode-bytes ((or bytes (vector (int 0 255)) (list (int 0 255))) -> string))
 
 ;; Reverse lookup: base64 char CODEPOINT → 6-bit value, as a **dense 128-entry vector
 ;; indexed by the codepoint itself**, nil at every non-alphabet slot.

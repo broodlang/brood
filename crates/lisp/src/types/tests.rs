@@ -281,7 +281,10 @@ fn elem_of_a_tuple_shape_unioned_with_a_bare_pair_is_unknown() {
 // has unknown elements, the same reason a tuple beside a `pair` does.
 #[test]
 fn a_derived_element_type_needs_the_term_to_admit_one_collection() {
-    assert_eq!(Ty::of(Tag::Bytes).elem_ty(), Some(Ty::of(Tag::Int)));
+    assert_eq!(
+        Ty::of(Tag::Bytes).elem_ty(),
+        Some(Ty::int_in(Range::new(Some(0), Some(255))))
+    );
     assert_eq!(
         Ty::map_of(Ty::of(Tag::Str), Ty::of(Tag::Int)).elem_ty(),
         Some(Ty::tuple_of(vec![Ty::of(Tag::Str), Ty::of(Tag::Int)]))
@@ -1986,7 +1989,11 @@ fn a_list_shape_is_a_non_empty_list_of_exactly_its_positions() {
     assert!(!Ty::list_shape_of(vec![string.clone()]).is_subtype(&two_arities));
     // The annotation grammar reads it back: `(list T U …)`.
     assert_eq!(parse_ty("(list int string)"), shape);
-    assert_eq!(parse_ty("(list int)"), Ty::list_of(int.clone()));
+    assert_eq!(
+        parse_ty("(list int)"),
+        Ty::list_of(int.clone()).union(Ty::of(Tag::Nil)),
+        "a `(list E)` may be empty"
+    );
 }
 
 #[test]
@@ -2146,4 +2153,100 @@ fn set_operations_on_a_recursive_type_go_through_its_unrolling() {
     assert_eq!(t.widened_below(0), t);
     // Equality and hashing see the binder.
     assert_ne!(t, t.body_for_display());
+}
+
+// ---- intervals: an int's range, a countable's length (ADR-350) ----
+
+#[test]
+fn an_int_interval_is_a_refinement_of_the_int_member() {
+    let non_negative = Ty::int_in(Range::at_least(0));
+    assert_eq!(non_negative.to_string(), "int[0..]");
+    assert!(non_negative.is_subtype(&Ty::of(Tag::Int)));
+    assert!(!Ty::of(Tag::Int).is_subtype(&non_negative));
+    // A literal is a point: inside the interval, and a point interval IS a literal.
+    assert!(Ty::int_lit(3).is_subtype(&non_negative));
+    assert!(!Ty::int_lit(-1).is_subtype(&non_negative));
+    assert_eq!(Ty::int_in(Range::point(3)), Ty::int_lit(3));
+    // Meet, hull, disjointness.
+    let small = Ty::int_in(Range::at_most(5));
+    let both = non_negative.clone().intersect(small.clone());
+    assert_eq!(both.to_string(), "int[0..5]");
+    assert_eq!(both.int_range(), Some(Range::new(Some(0), Some(5))));
+    assert!(Ty::int_in(Range::at_least(6)).is_disjoint(&small));
+    assert!(Ty::int_in(Range::at_least(6))
+        .intersect(small.clone())
+        .is_never());
+    let hull = Ty::int_lit(0).union(Ty::int_in(Range::at_least(5)));
+    assert_eq!(hull.to_string(), "int[0..]");
+    // A literal set is filtered by an interval it meets.
+    let filtered = Ty::int_lit(3)
+        .union(Ty::int_lit(5))
+        .union(Ty::int_lit(7))
+        .intersect(Ty::int_in(Range::new(Some(4), Some(10))));
+    assert_eq!(filtered.to_string(), "5 | 7");
+    // Other members are untouched: an interval guard says nothing of a float.
+    let guarded = Ty::ANY
+        .difference(Ty::of(Tag::Int))
+        .union(Ty::int_in(Range::at_most(4)));
+    assert!(Ty::of(Tag::Float).is_subtype(&guarded));
+    assert!(!Ty::int_lit(5).is_subtype(&guarded));
+    assert!(Ty::int_lit(4).is_subtype(&guarded));
+    // The grammar reads it back.
+    assert_eq!(parse_ty("(int 0 _)"), non_negative);
+    assert_eq!(non_negative.to_source().as_deref(), Some("(int 0 _)"));
+}
+
+#[test]
+fn a_length_is_a_refinement_of_the_countable_members() {
+    let three = Ty::vector_of(Ty::of(Tag::Int)).with_len(Range::point(3));
+    assert_eq!(three.to_string(), "vector<int>[3]");
+    assert!(three.is_subtype(&Ty::vector_of(Ty::of(Tag::Int))));
+    assert!(!Ty::vector_of(Ty::of(Tag::Int)).is_subtype(&three));
+    assert_eq!(three.count_range(), Some(Range::point(3)));
+    // A tuple is its arity; a list is at least one; `nil` counts 0.
+    assert_eq!(
+        Ty::tuple_of(vec![Ty::of(Tag::Int), Ty::of(Tag::Str)]).count_range(),
+        Some(Range::point(2))
+    );
+    assert_eq!(
+        Ty::list_of(Ty::of(Tag::Int)).count_range(),
+        Some(Range::at_least(1))
+    );
+    assert_eq!(
+        Ty::LIST.count_range(),
+        Some(Range::at_least(0)),
+        "nil | pair counts 0 or more"
+    );
+    // A length of 0 is no list: `with_len` drops the pair member.
+    let empty = Ty::LIST.with_len(Range::point(0));
+    assert_eq!(empty, Ty::of(Tag::Nil));
+    // Two lengths that do not meet are disjoint; the meet narrows.
+    let two = Ty::vector_of(Ty::of(Tag::Int)).with_len(Range::point(2));
+    assert!(two.is_disjoint(&three));
+    let at_least_two = Ty::vector_of(Ty::of(Tag::Int)).with_len(Range::at_least(2));
+    assert_eq!(at_least_two.clone().intersect(three.clone()), three);
+    // Nothing else is touched: a length says nothing of an int member.
+    let mixed = Ty::of(Tag::Int)
+        .union(Ty::of(Tag::Vector))
+        .with_len(Range::at_least(1));
+    assert!(Ty::int_lit(0).is_subtype(&mixed));
+    assert_eq!(mixed.to_string(), "int | vector[1..]");
+    assert_eq!(parse_ty("(len (vector int) 3 3)"), three);
+}
+
+#[test]
+fn an_interval_widens_to_its_infinity_when_it_moves() {
+    let prev = Ty::int_in(Range::new(Some(0), Some(1)));
+    let next = Ty::int_in(Range::new(Some(0), Some(2)));
+    assert_eq!(next.widen_intervals_against(&prev).to_string(), "int[0..]");
+    // A stationary interval is left alone; so is one nested in a matching shape.
+    assert_eq!(next.widen_intervals_against(&next), next);
+    let nested_prev = Ty::vector_of(prev.clone()).with_len(Range::point(1));
+    let nested_next = Ty::vector_of(next.clone()).with_len(Range::new(Some(1), Some(2)));
+    assert_eq!(
+        nested_next
+            .widen_intervals_against(&nested_prev)
+            .to_string(),
+        "vector<int[0..]>[1..]"
+    );
 }

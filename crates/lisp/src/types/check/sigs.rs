@@ -950,6 +950,17 @@ fn specialize_recursive(
         });
         SPEC_ARG_NEST.with(|n| n.set(outer_nest));
         let (next, next_ret) = round;
+        // An interval that moved goes to its infinity (ADR-350): `(sum-to 10 0)`'s `i` is
+        // `10`, then `9 | 10`, … — a descent the round never ends on its own.
+        let next: Vec<Option<Ty>> = next
+            .into_iter()
+            .zip(params.iter())
+            .map(|(n, p)| match (n, p) {
+                (Some(n), Some(p)) => Some(n.widen_intervals_against(p)),
+                (n, _) => n,
+            })
+            .collect();
+        let next_ret = next_ret.map(|r| r.widen_intervals_against(&ret));
         // Converged only when a TYPED tail reproduces `ret` under unchanged parameters —
         // a genuine fixpoint of the round, which is all the soundness argument needs.
         // A round whose tail cannot be typed contributes nothing and the loop goes on:
@@ -1028,6 +1039,25 @@ fn self_call_sites(
         };
         if head == sym && items.len() == arity + 1 {
             out.push((items[1..].to_vec(), scope.clone()));
+        }
+        // A self-call under an `if` is typed in the scope its test proves — the same
+        // `branch_scopes` inference reads the branches under — so `(l (rest xs) (cons
+        // (first xs) acc))` in the else of `(nil? xs)` hands `acc` an element, not an
+        // element-or-nil. A branch the test has killed (`Ctx::is_dead`) is not walked:
+        // inference gives it ⊥, and a site typed in it would feed the parameters a
+        // value no activation passes.
+        if value::symbol_is(head, kw::IF) && (items.len() == 3 || items.len() == 4) {
+            walk(heap, items[1], sym, arity, scope, out);
+            let (then_scope, else_scope) = super::guards::branch_scopes(heap, items[1], scope);
+            if !then_scope.is_dead() {
+                walk(heap, items[2], sym, arity, &then_scope, out);
+            }
+            if let Some(&else_form) = items.get(3) {
+                if !else_scope.is_dead() {
+                    walk(heap, else_form, sym, arity, &else_scope, out);
+                }
+            }
+            return;
         }
         if value::symbol_is(head, kw::LET) || value::symbol_is(head, kw::LETREC) {
             let Some(binds) = items.get(1).and_then(|&b| super::walk::bindings(heap, b)) else {
@@ -2260,8 +2290,16 @@ fn domain_of_inner(
                 .flatten()
         });
     // Ability-op occurrence typing (ADR-190): a call to a *sealed* ability op demands
-    // its first argument be a member of that ability.
-    let op_domain = super::protocol::sealed_op_domain(h);
+    // its first argument be a member of that ability. Only when the head IS that op
+    // (`is_ability_op`): the domain is keyed by the op's bare name, and `std/tempo`
+    // defines its own `->iso` beside `datetime`'s sealed `Temporal` op of that name —
+    // `(->iso t)` there is tempo's function, and demanding a `datetime` member of `t`
+    // typed `explain`'s parameter as one (surfaced the moment `parse!` stopped answering
+    // `any`).
+    let op_domain = (!scope.shadowed.contains(&h)
+        && super::protocol::is_ability_op(heap, ctx.ability(), h))
+    .then(|| super::protocol::sealed_op_domain(h))
+    .flatten();
     let mut acc = any_domain(n);
     // **A parameter in call-HEAD position is callable.** `(g x)` only runs if `g` is,
     // so an accepted call proves it — the same argument every other demand rests on.
@@ -2422,7 +2460,7 @@ fn guard_slices(
                 then_slice[idx] = guard.ty.clone();
             }
             if !guard.then_only {
-                else_slice[idx] = guard.ty.negate();
+                else_slice[idx] = guard.else_type();
             }
         }
         return (then_slice, else_slice);
@@ -2889,6 +2927,13 @@ pub(super) fn caller_derived_params(
                     .into_iter()
                     .flatten()
                     .filter_map(|p| p.get(k).cloned().flatten());
+                // An INTERVAL that moved since the last round goes to its infinity
+                // (`Ty::widen_intervals_against`, ADR-350): a counter's `[0,0], [0,1], …`
+                // is `[0, ∞)` in one step, where the depth widening never saw it move.
+                // Before the fold, so a moving length does not hide a nesting.
+                if let Some(Some(prev)) = derived.get(&name).and_then(|p| p.get(k)) {
+                    *t = t.widen_intervals_against(prev);
+                }
                 for prev in recent {
                     if let Some(folded) = Ty::fold_recursive(&prev, t) {
                         *t = folded;

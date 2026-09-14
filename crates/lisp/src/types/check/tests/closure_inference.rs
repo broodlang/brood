@@ -147,16 +147,19 @@ fn infers_a_tail_recursive_function_return_from_its_base_case() {
 fn an_accumulator_loop_returns_what_the_accumulator_grows_into() {
     // `acc` is an unconstrained parameter, so the FLAT inference says `-> any`; the
     // call-site fixpoint (`sigs::specialize_recursive`) reads the recursive call passing
-    // `(+ acc (first xs))` and settles on `number` — `(sum-acc (list 1 2) 0)` IS `3`, and a
-    // string function on it is a real finding, not a false positive. (This test used to pin
-    // the opposite, when the fixpoint did not exist and declining was the sound answer.)
+    // `(+ acc (first xs))` and settles on `int[0..]` — the elements are `1 | 2` (the
+    // self-call sits in the else of `(empty? xs)`, so `(first xs)` is never nil there) and
+    // the accumulator's ascent `0`, `0 | 1 | 2`, … widens to its infinity (ADR-350).
+    // `(sum-acc (list 1 2) 0)` IS `3`, and a string function on it is a real finding, not
+    // a false positive. (This test used to pin the opposite, when the fixpoint did not
+    // exist and declining was the sound answer.)
     let w = check_with_defs(
         &["(defn sum-acc (xs acc) (if (empty? xs) acc (sum-acc (rest xs) (+ acc (first xs)))))"],
         "(string/length (sum-acc (list 1 2) 0))",
     );
     assert!(
         w.iter()
-            .any(|s| s.contains("string/length: argument 1 expects string, got number")),
+            .any(|s| s.contains("string/length: argument 1 expects string, got int[0..]")),
         "{w:?}"
     );
     // SOUNDNESS: a seed the call site does not know keeps the result unknown — the

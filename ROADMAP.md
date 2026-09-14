@@ -381,7 +381,8 @@ surface feeding it — and each turned out to need a different kind of fix. Deta
       `vector<… | vector<…>>`) was cut at a depth by `Ty::widened_below`; `(rec X …)` says it
       exactly — a μ binder unrolled coinductively by every relation, and the fixpoints fold an
       ascent that nests itself into one, confirmed when the next round folds back to it.
-- [ ] **11. Lengths and indices.** The largest class left in `tests/`'s strict findings, and
+- [x] **11. Lengths and indices.** Shipped 2026-09-14 (ADR-350, `docs/type-intervals.md`).
+      Was: The largest class left in `tests/`'s strict findings, and
       bedit's: `nil | int` from `(nth words 1)` after `(>= n 4)`, `(first ms)` after `(not
       (empty? ms))` on a vector, `(nth parts 1)` after `(= (count parts) 3)` — a length fact the
       code states and the lattice cannot hold. Three pieces: a length interval on the sequence

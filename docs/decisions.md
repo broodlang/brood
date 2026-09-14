@@ -22575,3 +22575,50 @@ substitution a single pass. *Named type aliases* (`deftype`): a naming feature, 
 lattice one — deferred to a consumer. *Folding only after the widening round*: the node cap
 flattens a JSON value's type before round twelve, so the fold must be tried every round;
 the confirmation rule makes an early candidate cost nothing but a round.
+
+## ADR-350 — Lengths and indices: an interval on `int`, a length on every countable
+
+**Status:** accepted and implemented 2026-09-14 (`types.rs` `Range`, `int_range`, `len`,
+`with_len`/`int_in`/`count_range`, `widen_intervals_against`; `annot.rs` `(int lo hi)` and
+`(len T lo hi)`; `guards.rs` `comparison_facts` and the length-biconditional `empty?`;
+`ctx.rs` `count_aliases`/`index_bounds`, the positional-alternative retention in
+`narrow_path`; `infer.rs` the readers and builders; the widening in every fixpoint;
+`sigs.rs` `if`-scoped self-call sites). Design in `docs/type-intervals.md`.
+
+**Context.** The largest class left in `tests/`'s strict findings, and bedit's: `nil | int`
+from `(nth words 1)` after `(>= n 4)`, `(first ms)` after `(not (empty? ms))`, `(nth parts
+1)` after `(= (count parts) 3)` — a length fact the code states and the lattice could not
+hold, so every positional read answered `elem | nil` and the honest remedy was a default the
+runtime never took. Item 11 of the type-system audit, the Idris `Vect n a` lesson read as a
+refinement rather than a dependent type.
+
+**Decision.** Two interval refinements, in the slots the lattice already has: `int_range` on
+the `int` member and `len` on the countable members (`nil` never among them — a list of
+length 0 IS `nil`, a positional shape IS its arity). Unions hull, intersections meet (empty
+drops the tag), subtyping is inclusion, and every fixpoint WIDENS an end that moved to its
+infinity before the ADR-349 fold is tried, because an interval ascent never converges on its
+own. `count` reads the length; `rest`/`cons`/`conj`/`range` and the length-preserving
+combinators move it; int-closed arithmetic carries intervals with checked operations that
+widen on overflow. The guards: `empty?` is biconditional by length; a comparison between a
+local, a `(count local)` and a literal narrows both branches and records `i < |xs|` for the
+reads under it; `(= (nth a k) lit)` is a path guard whose base retention drops the tuple
+alternatives it rules out in both branches. A read is pronounced present only from a lower
+bound the lattice holds.
+
+Three things the corpus then asked for, each a mechanism gap and not a signature: a sealed
+ability op's domain applies only to the op function itself (`is_ability_op`), not to a
+same-file function that spells its name; `specialize_recursive` types a self-call in the
+`if` branch it sits in, a dead branch contributing no site; and the byte encoders declare
+the octet contract their docstrings already stated (`(or bytes (vector (int 0 255)) (list
+(int 0 255)))`) — the leaf that knows the fact.
+
+**Grammar change.** `(list E)` now denotes `nil | list<E>` — a list that may be empty,
+which is what every list-returning function produces; the non-empty list is spelled
+`(len (list E) 1 _)`. One std sig (`rect-fold-lines`) says so explicitly.
+
+**Alternatives rejected.** *A relational domain over locals* (`i < j`, octagons): the one
+relation the corpus states is `i < (count xs)`, kept as a fact between two names; a general
+domain is another lattice. *Symbolic lengths* (`Vect n a` proper): the reads that matter are
+against a bound the code compares to, not a variable the type carries. *A float interval*:
+no reader. *Dropping the `pair`-implies-≥1 convention for an explicit `[1..]`*: the slot
+would then say what the tag already says on every non-empty list in the corpus.

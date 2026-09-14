@@ -2293,6 +2293,11 @@ fn check_forms(
                         // is applied to the returns on the same schedule, for what neither
                         // converges nor folds.
                         let current = ctx.inferred_fn_sig(name).map(|s| s.ret);
+                        // An interval that moved goes to its infinity (ADR-350), before
+                        // the fold so a moving length does not hide a nesting.
+                        if let Some(prev) = &current {
+                            ret = ret.widen_intervals_against(prev);
+                        }
                         for prev in current.iter().chain(older_returns.get(&name)) {
                             if let Some(folded) = Ty::fold_recursive(prev, &ret) {
                                 ret = folded;

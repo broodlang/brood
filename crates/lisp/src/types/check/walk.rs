@@ -8,9 +8,9 @@
 
 use super::ctx::{Ctx, PathKey};
 use super::guards::{
-    and_conjunct_guards, find_redundant_clause, guard_assertion, is_syntactic_keyword,
-    literal_eq_test_raw, match_exhaustiveness_gap, or_disjunct_guards, or_same_var_narrowing,
-    path_guard_assertion, render_literal_pattern,
+    and_conjunct_guards, apply_comparison_facts, find_redundant_clause, guard_assertion,
+    is_syntactic_keyword, literal_eq_test_raw, match_exhaustiveness_gap, or_disjunct_guards,
+    or_same_var_narrowing, path_guard_assertion, render_literal_pattern,
 };
 use super::infer::{expr_ty, global_value_ty};
 use super::sigs::{
