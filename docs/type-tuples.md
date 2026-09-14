@@ -128,3 +128,35 @@ each position against its declared type. See `tests/contract_test.blsp`'s
   is fully recursive (`expr_ty` calls itself on each position/field), but
   weren't a specific focus of the verification above beyond what the
   corpus diff already covers.
+
+## The list sibling: `(list T U …)` — a positional list shape (2026-09-14)
+
+A `[ ]` literal had positions; `(list a b)` did not — it typed as `list<A | B>`, so
+`(first (list m '(…)))` read `pair | map` and a function returning a two-element list
+carried nothing of which element was which. `Ty` now carries a `list_shape` refinement on
+the `pair` tag, the exact sibling of `tuple` on `vector`: one type per position, a
+non-empty list of exactly that many elements (the empty list is `nil`, a separate tag, so a
+shape never admits it).
+
+- **Where it comes from**: `(list a b …)`, a quoted list `'(1 "s")` (each datum in its
+  position; nested lists recursively), `(cons x <shape>)` and `(cons x nil)` (one longer),
+  `(rest <shape>)` / `(but-last <shape>)` (one shorter, `nil` at one), a `& rest` binder
+  over a shape (the positions that remain). The grammar reads it: `(list int string)` —
+  two or more types; one type is still the uniform `(list T)`, and a one-position shape
+  has no spelling (it needs none).
+- **What reads it**: `first`/`second`/`third`/`last`/`nth <literal>` answer the position
+  exactly (past the end: `nil`), `count` the arity, `elem_ty` the union of the positions,
+  destructuring `(a b)` / `((a b) xs)` each binder by position, the soundness oracle each
+  element against its position, and `sig!` under `BROOD_CONTRACTS=1` the same (exact
+  arity, each position — `type-matches?`'s `list` case with two or more types).
+- **The lattice**: the same rules as tuples, through the same functions — union merges
+  two shapes of one arity by position (exact when one position differs, a widening past
+  the term cap), intersection by position (a differing arity, or a position no value
+  satisfies, drops the `pair` member), subtyping covariant per position and into
+  `list<⋃ positions>`, disjointness by arity or by a disjoint position, and the
+  product-covering rule of ADR-262 (`(list (or int string))` is covered by `(list int)`
+  and `(list string)` together).
+- **Over the node cap** a positional shape — a hundred-element quoted table, a wide
+  literal vector — degrades to its ELEMENT union first (the bound the shape stood for),
+  and only past that to bare tags: `'(1 2 … 100)` is `list<int>`, where the flat cap made
+  it a bare `pair`.

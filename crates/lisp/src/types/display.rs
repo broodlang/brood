@@ -228,6 +228,15 @@ impl fmt::Display for Ty {
                 return write!(f, "(tuple {joined})");
             }
         }
+        // A list shape: `(list int, string)` — the positional list, `(list a b)`'s type.
+        if let Some(elems) = self.list_shape_elems() {
+            let joined = elems
+                .iter()
+                .map(Ty::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return write!(f, "(list {joined})");
+        }
         if let Some(elem) = self.elem_ty() {
             if self.tags & !(SEQ_BITS | (1u32 << bit(Tag::Nil))) == 0 {
                 let kinds: Vec<&str> = [
@@ -569,6 +578,18 @@ impl Ty {
                     .map(Ty::to_source)
                     .collect::<Option<Vec<_>>>()?;
                 return Some(format!("(tuple {})", parts.join(" ")));
+            }
+        }
+        // A list shape of two or more positions is `(list T U …)` in the grammar; ONE
+        // position has no spelling of its own (`(list T)` is the uniform list), so it
+        // falls through to the element rendering, a sound widening.
+        if let Some(elems) = self.list_shape_elems() {
+            if elems.len() >= 2 {
+                let parts: Vec<String> = elems
+                    .iter()
+                    .map(Ty::to_source)
+                    .collect::<Option<Vec<_>>>()?;
+                return Some(format!("(list {})", parts.join(" ")));
             }
         }
         if let Some(elem) = self.elem_ty() {

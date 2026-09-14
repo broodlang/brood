@@ -373,9 +373,10 @@ surface feeding it — and each turned out to need a different kind of fix. Deta
 - [x] **8. An arrow in head position describes the call** (ADR-347, 2026-09-13). `((cur 1) "x")`
       and `((get handlers :k) msg)` were inert; they now type as the arrow's result, with exact
       arity and the one per-argument rule a named callee gets.
-- [ ] **9. A fixed-length list has no shape type.** `(list a b)` is `list<A | B>`, so `(first
-      (list m '(…)))` reads `pair | map`; a positional shape for the pair member, the sibling of
-      `(tuple …)` for vectors, would read it exactly.
+- [x] **9. A fixed-length list has a shape type** (ADR-348, 2026-09-14). `(list a b)` was `list<A | B>`, so `(first
+      (list m '(…)))` read `pair | map`; `list_shape` — a positional shape on the pair member,
+      the sibling of `(tuple …)` — reads it exactly, from `(list …)`, a quoted list, `cons`,
+      `rest` and a `& rest` binder; `(list T U …)` in the grammar and the runtime contract.
 - [ ] **10. Recursive types.** A value type that nests itself (`json`'s
       `vector<… | vector<…>>`) is cut at a depth by `Ty::widened_below`; a one-level unroll of a
       named recursive type would say it exactly.

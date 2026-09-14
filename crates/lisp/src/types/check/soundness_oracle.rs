@@ -1,5 +1,6 @@
 use super::ctx::Ctx;
 use super::infer::expr_ty;
+use super::walk::list_items;
 use crate::core::heap::Heap;
 use crate::core::value::{self, Value};
 use crate::types::Ty;
@@ -74,6 +75,21 @@ fn value_member_of(heap: &Heap, v: Value, ty: &Ty) -> bool {
     // A tuple pins both the length and each position, and neither was checked.
     if let (Value::Vector(id), Some(positions)) = (v, ty.tuple_elems()) {
         let items = heap.vector(id).to_vec();
+        if items.len() != positions.len() {
+            return false;
+        }
+        for (item, want) in items.iter().zip(positions.iter()) {
+            if !value_member_of(heap, *item, want) {
+                return false;
+            }
+        }
+    }
+    // **List shapes** — the same for a positional list: exactly this many elements,
+    // each in its position's type.
+    if let (Value::Pair(_), Some(positions)) = (v, ty.list_shape_elems()) {
+        let Some(items) = list_items(heap, v) else {
+            return false;
+        };
         if items.len() != positions.len() {
             return false;
         }

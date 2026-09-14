@@ -22511,3 +22511,38 @@ head position is the immediate-application case `infer.rs` types by its body, un
 body to) or an inference over the lambda's body with its parameters unknown (`(any… -> R)`,
 where `R` over-approximates every result) — the same two sources the local-arrow rule
 trusts. The argument check is the gradual relation every other call uses.
+
+## ADR-348 — A list has a positional shape: `(list T U …)`
+
+**Status:** accepted and implemented 2026-09-14 (`types.rs` `list_shape` beside `tuple`,
+`positional_elems`; `infer.rs` the constructors and readers; `annot.rs` the grammar;
+`type-matches?` the contract). Detail in `docs/type-tuples.md`, "The list sibling".
+
+**Context.** ADR-128 gave a `[ ]` literal its positions and left `(list a b)` as `list<A |
+B>`, on the reasoning that a cons list's length "isn't part of its type the way a vector
+literal's positions are". It is, exactly as often: `(list acc '(%map-get acc 1))` is a
+pair of a map and a form, `(first …)` of it is the map, and the strict gate reported
+`pair | map` there (ROADMAP item 9 of the type-system audit); every function returning a
+two-element list lost which element was which.
+
+**Decision.** `Ty` carries `list_shape: Option<Arc<Vec<Ty>>>`, a refinement of the `pair`
+tag alone, the exact sibling of `tuple` on `vector`, and every lattice rule that reads
+`tuple` reads it through the same functions (`positional_union`, `intersect_tuples`,
+`tuple_is_subtype`, `tuple_covered_by`). A shape is a NON-EMPTY list of exactly its arity
+— the empty list is `nil`, its own tag — so `nil | (list int string)` keeps both facts
+and `first` of it is `nil | int`. It arises from `(list …)`, a quoted list, `cons`, `rest`
+and `but-last`, a `& rest` binder; `first`/`nth`/`count`/destructuring/the oracle/the
+runtime contract read it. The grammar spells it `(list T U …)` with two or more types;
+`(list T)` stays the uniform list, and a one-position shape has no spelling.
+
+**Two consequences worth naming.** A positional shape that exceeds the node cap degrades
+to its element union before the flat tags (`bounded`): a hundred-element quoted table
+is `list<int>`, not a bare `pair` — the flat cap would have made the change a regression
+for exactly the lists it was not built for. And the subtype rule's derived element bound
+now requires EVERY sequence member of the left side to be covered: `(tuple int) | pair`
+used to claim `⊆ vector<int> | pair<int>` from the tuple alone.
+
+**Alternatives rejected.** *Vectors for fixed shapes* (rewrite std's `(list a b)` pairs as
+`[a b]`): the code that motivated this is a test of list semantics, and the language has
+both. *A short-list heuristic* (shapes only under N elements): the cap already bounds the
+type; degrading a long shape to its element union keeps one rule.

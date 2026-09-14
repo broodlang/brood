@@ -46,7 +46,7 @@ fn a_decidable_division_types_exactly() {
     assert_eq!(ty_str("(let (x (+ 1 2)) (/ x 2))"), "int | ratio");
     // a literal SET that lands on both kinds is exactly `int | ratio` — the answer the
     // caller already gives, so the fold stops rather than walking the rest of it
-    assert_eq!(ty_str("(/ (first (list 6 5)) 2)"), "int | ratio");
+    assert_eq!(ty_str("(/ (if (os/env \"X\") 6 5) 2)"), "int | ratio");
     // a zero divisor RAISES (E0040), so the checker declines rather than typing an
     // expression that cannot produce a value
     assert_eq!(ty_str("(/ 6 0)"), "int | ratio");
@@ -209,10 +209,10 @@ fn precision_rules_give_the_exact_type_where_it_is_provable() {
         // the declared `number | map` (the `Num`-record widening) for numeric operands
         ("(+ 1 1.5M)", "number"),
         // a nil tail contributes no elements
-        ("(cons 1 '())", "list<1>"),
-        ("(cons 1 nil)", "list<1>"),
-        // a quoted list is data with its elements in view
-        ("'(1 2)", "list<1 | 2>"),
+        ("(cons 1 '())", "(list 1)"),
+        ("(cons 1 nil)", "(list 1)"),
+        // a quoted list is data with its elements in view — each in its position
+        ("'(1 2)", "(list 1, 2)"),
         ("(vec '(1 2))", "vector<1 | 2>"),
         // a range is a range of integers
         ("(range 5)", "list<int>"),
@@ -565,4 +565,43 @@ fn a_dynamic_key_on_a_known_map_keeps_it_a_map() {
         ty_str("(fn (m k) (update m k inc))"),
         "(any, any) -> vector | map"
     );
+}
+
+// ---- list shapes (2026-09-13): `(list a b)` is a positional list, not `list<A | B>` ----
+
+#[test]
+fn a_list_call_and_a_quoted_list_are_positional_shapes() {
+    assert_eq!(ty_str("(list 1 \"s\")"), "(list 1, \"s\")");
+    // (a quoted string reads through the heap-free `of_value`: its tag, not its content)
+    assert_eq!(ty_str("'(1 \"s\")"), "(list 1, string)");
+    assert_eq!(ty_str("(list)"), "nil");
+    // Reading them: `first`/`second`/`nth` by position, `rest` the tail shape, `count`
+    // the arity, `cons` one longer — and `first` of a two-shape is exactly the first,
+    // never `nil | …`.
+    assert_eq!(ty_str("(first (list {:a 1} '(x)))"), "{a: 1}");
+    assert_eq!(ty_str("(second (list {:a 1} '(x)))"), "(list symbol)");
+    assert_eq!(ty_str("(nth (list 1 \"s\") 1)"), "\"s\"");
+    assert_eq!(ty_str("(nth (list 1 \"s\") 5)"), "nil");
+    assert_eq!(ty_str("(rest (list 1 \"s\"))"), "(list \"s\")");
+    assert_eq!(ty_str("(rest (list 1))"), "nil");
+    assert_eq!(ty_str("(rest [])"), "nil");
+    assert_eq!(ty_str("(but-last [1])"), "nil");
+    assert_eq!(ty_str("(count (list 1 \"s\"))"), "2");
+    assert_eq!(ty_str("(cons :k (list 1 \"s\"))"), "(list :k, 1, \"s\")");
+    assert_eq!(ty_str("(cons :k nil)"), "(list :k)");
+    // Destructuring binds by position, and `& rest` to the remaining positions.
+    assert_eq!(ty_str("(let ((a b) (list 1 \"s\")) b)"), "\"s\"");
+    assert_eq!(
+        ty_str("(let ((a & more) (list 1 \"s\" :k)) more)"),
+        "(list \"s\", :k)"
+    );
+    // The strict finding this was built for: a two-element list built as `(list m '(…))`
+    // read `pair | map` at `first`.
+    let ws = file_warnings_mode(
+        "(defmodule t)\n\
+         (defn lm-quoted (acc) (list acc '(%map-get acc 1)))\n\
+         (defn use-it () (%map-get (first (lm-quoted {})) :a))",
+        true,
+    );
+    assert!(ws.is_empty(), "{ws:?}");
 }

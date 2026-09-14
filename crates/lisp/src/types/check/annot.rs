@@ -513,6 +513,16 @@ pub fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
             if value::symbol_is(head, "list") && items.len() == 2 {
                 return Some(Ty::list_of(parse_type(heap, items[1])?));
             }
+            // (list T U …) — two or more positions: a fixed-arity positional LIST shape,
+            // the list sibling of `(tuple …)` (2026-09-13). One type is the uniform list
+            // above; a shape of one position has no spelling, and needs none.
+            if value::symbol_is(head, "list") && items.len() > 2 {
+                let mut elems = Vec::with_capacity(items.len() - 1);
+                for &it in &items[1..] {
+                    elems.push(parse_type(heap, it)?);
+                }
+                return Some(Ty::list_shape_of(elems));
+            }
             if value::symbol_is(head, "vector") && items.len() == 2 {
                 return Some(Ty::vector_of(parse_type(heap, items[1])?));
             }
@@ -738,9 +748,10 @@ pub(super) fn type_expr_problem(heap: &Heap, form: Value) -> Option<String> {
             }
             // Every part reads as a type, so the arity of the constructor is what's wrong.
             Some(match head_name.as_str() {
-                "list" | "vector" => {
-                    format!("`{head_name}` takes exactly one element type")
+                "list" => {
+                    "`list` takes one element type, or two or more position types".to_string()
                 }
+                "vector" => "`vector` takes exactly one element type".to_string(),
                 "map" => "`map` takes exactly two types — a key and a value".to_string(),
                 "or" => "`or` needs at least one member type".to_string(),
                 _ => format!("malformed `{head_name}` type"),

@@ -474,7 +474,9 @@ pub(in crate::types::check) fn pattern_bindings(
     };
     let flat = items.iter().all(|it| matches!(it, Value::Sym(_)));
     let elem = rhs_ty.and_then(|t| t.elem_ty());
-    let tuple = rhs_ty.and_then(|t| t.tuple_elems().cloned());
+    // A positional shape — a vector tuple or a list shape — types each binder by its
+    // position, and a `& rest` binder by the positions that remain.
+    let tuple = rhs_ty.and_then(|t| t.positional_elems().cloned());
     if !flat || (elem.is_none() && tuple.is_none()) {
         return names.into_iter().map(|s| (s, None)).collect();
     }
@@ -489,7 +491,14 @@ pub(in crate::types::check) fn pattern_bindings(
             continue;
         }
         if rest_next {
-            out.push((s, elem.clone().map(Ty::list_of)));
+            let rest_ty = match &tuple {
+                Some(elems) => Some(match elems.get(position..) {
+                    Some(tail) if !tail.is_empty() => Ty::list_shape_of(tail.to_vec()),
+                    _ => Ty::of(crate::types::Tag::Nil),
+                }),
+                None => elem.clone().map(Ty::list_of),
+            };
+            out.push((s, rest_ty));
             rest_next = false;
             continue;
         }

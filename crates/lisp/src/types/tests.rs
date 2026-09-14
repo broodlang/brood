@@ -1932,3 +1932,76 @@ fn tuples_of_one_arity_merge_by_position() {
     );
     assert!(!eight.is_subtype(&Ty::tuple_of(vec![int.clone(), Ty::of(Tag::Str)])));
 }
+
+// ---- list shapes: the positional list, the sibling of the vector tuple (2026-09-13) ----
+
+#[test]
+fn a_list_shape_is_a_non_empty_list_of_exactly_its_positions() {
+    let int = Ty::of(Tag::Int);
+    let string = Ty::of(Tag::Str);
+    let shape = Ty::list_shape_of(vec![int.clone(), string.clone()]);
+    assert_eq!(shape.to_string(), "(list int, string)");
+    // The pair tag alone: never `nil`, and inside `list<int | string>` (every element is
+    // one of the two) but not inside `list<int>`.
+    assert!(!shape.is_subtype(&Ty::of(Tag::Nil)));
+    assert!(shape.is_subtype(&Ty::of(Tag::Pair)));
+    assert!(shape.is_subtype(&Ty::list_of(int.clone().union(string.clone()))));
+    assert!(!shape.is_subtype(&Ty::list_of(int.clone())));
+    // Elements: the union of the positions; positions: exact.
+    assert_eq!(shape.elem_ty(), Some(int.clone().union(string.clone())));
+    assert_eq!(
+        shape.positional_elems().cloned(),
+        Some(vec![int.clone(), string.clone()])
+    );
+    // A uniform list is not a shape (it has no arity), and a shape with `nil` beside it
+    // has no positional answer (the empty list has no first).
+    assert!(Ty::list_of(int.clone()).positional_elems().is_none());
+    assert!(shape
+        .clone()
+        .union(Ty::of(Tag::Nil))
+        .positional_elems()
+        .is_none());
+    // Two arities share no value; two shapes of one arity intersect by position.
+    let one = Ty::list_shape_of(vec![int.clone()]);
+    assert!(shape.is_disjoint(&one));
+    assert!(shape.clone().intersect(one.clone()).is_never());
+    let narrowed = shape
+        .clone()
+        .intersect(Ty::list_shape_of(vec![Ty::int_lit(3), string.clone()]));
+    assert_eq!(
+        narrowed.positional_elems().cloned(),
+        Some(vec![Ty::int_lit(3), string.clone()])
+    );
+    // Shapes of one arity merge by position (exact when one position differs), and a
+    // union with a different arity keeps both terms.
+    let merged = shape
+        .clone()
+        .union(Ty::list_shape_of(vec![Ty::of(Tag::Float), string.clone()]));
+    assert_eq!(
+        merged.positional_elems().cloned(),
+        Some(vec![int.clone().union(Ty::of(Tag::Float)), string.clone()])
+    );
+    let two_arities = shape.clone().union(one.clone());
+    assert!(shape.is_subtype(&two_arities) && one.is_subtype(&two_arities));
+    assert!(!Ty::list_shape_of(vec![string.clone()]).is_subtype(&two_arities));
+    // The annotation grammar reads it back: `(list T U …)`.
+    assert_eq!(parse_ty("(list int string)"), shape);
+    assert_eq!(parse_ty("(list int)"), Ty::list_of(int.clone()));
+}
+
+#[test]
+fn a_positional_shape_over_the_node_cap_degrades_to_its_element_union() {
+    // A hundred-element quoted list is `list<int>`, not a bare `pair`: the shape goes,
+    // the element bound it stood for stays.
+    let long = Ty::list_shape_of((0..100).map(Ty::int_lit).collect());
+    assert!(long.positional_elems().is_none(), "{long}");
+    assert!(long.is_subtype(&Ty::list_of(Ty::of(Tag::Int))), "{long}");
+    assert!(!long.is_subtype(&Ty::list_of(Ty::of(Tag::Str))), "{long}");
+}
+
+/// The annotation grammar's reading of `src`.
+fn parse_ty(src: &str) -> Ty {
+    let mut interp = crate::Interp::new();
+    let form = crate::syntax::reader::read_one(&mut interp.heap, src).expect("parses");
+    super::check::annot::parse_type(&interp.heap, form).expect("is a type")
+}

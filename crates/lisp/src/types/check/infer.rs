@@ -345,12 +345,11 @@ fn expr_ty_inner(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                         // lists/symbols type through `of_value` (a symbol is a `symbol`).
                         let d = *items.get(1)?;
                         if let Value::Pair(_) = d {
+                            // …and its every position is right there too: a SHAPE.
                             let elems = list_items(heap, d)?;
-                            let mut acc = Ty::NEVER;
-                            for &e in &elems {
-                                acc = acc.union(quoted_datum_ty(heap, e));
-                            }
-                            return Some(Ty::list_of(acc));
+                            return Some(Ty::list_shape_of(
+                                elems.iter().map(|&e| quoted_datum_ty(heap, e)).collect(),
+                            ));
                         }
                         return Some(Ty::of_value(d));
                     }
@@ -1286,8 +1285,19 @@ fn literal_keyword_pairs(args: &[Value]) -> Option<Vec<(value::Symbol, Value)>> 
 /// (widened with `nil` for the empty / out-of-range case, so the result is a
 /// sound superset). Only refines when the element type is actually known.
 fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Option<Ty> {
+    // `(list a b …)` is a list of exactly those elements, each in its position — a
+    // positional SHAPE (the list sibling of a vector literal's tuple), so `(first (list m
+    // '(…)))` is the map and not `pair | map`. An unknown element is `any` in its slot:
+    // the arity is a fact whatever the elements are. `(list)` is `nil`.
     if value::symbol_is(head, "list") {
-        return element_union(heap, &items[1..], ctx).map(Ty::list_of);
+        if items.len() == 1 {
+            return Some(Ty::of(Tag::Nil));
+        }
+        let elems: Vec<Ty> = items[1..]
+            .iter()
+            .map(|&it| expr_ty(heap, it, ctx).unwrap_or(Ty::ANY))
+            .collect();
+        return Some(Ty::list_shape_of(elems));
     }
     if value::symbol_is(head, "vector") {
         return element_union(heap, &items[1..], ctx).map(Ty::vector_of);
@@ -1320,7 +1330,7 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         // 1, `third` = 2, `last` = the final position, `nth` reads its own
         // literal-int index argument (a non-literal index can't be resolved
         // this precisely, so it falls through to the union case below).
-        if let Some(elems) = coll_ty.tuple_elems() {
+        if let Some(elems) = coll_ty.positional_elems() {
             let idx = if value::symbol_is(head, "first") {
                 Some(0)
             } else if value::symbol_is(head, "second") {
@@ -1427,8 +1437,31 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     }
     if value::symbol_is(head, "rest") || value::symbol_is(head, "but-last") {
         let coll = *items.get(1)?;
-        let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
+        let coll_ty = expr_ty(heap, coll, ctx);
+        // Of a positional shape, the shape less its head (or its last): exact, and `nil`
+        // when there was one element.
+        if let Some(elems) = coll_ty.as_ref().and_then(|t| t.positional_elems()) {
+            // (An empty `(tuple)` has no head to drop: `nil` either way.)
+            let kept: Vec<Ty> = if elems.is_empty() {
+                Vec::new()
+            } else if value::symbol_is(head, "rest") {
+                elems[1..].to_vec()
+            } else {
+                elems[..elems.len() - 1].to_vec()
+            };
+            return Some(if kept.is_empty() {
+                Ty::of(Tag::Nil)
+            } else {
+                Ty::list_shape_of(kept)
+            });
+        }
+        let a = coll_ty.and_then(|t| t.elem_ty());
         return list_result(a);
+    }
+    // `(count x)` of a positional shape is its arity, exactly.
+    if value::symbol_is(head, "count") && items.len() == 2 {
+        let n = expr_ty(heap, items[1], ctx)?.positional_elems()?.len();
+        return Some(Ty::int_lit(n as i64));
     }
     // `(range …)` is "a range of integers" (its own docstring): every argument an int
     // means every element is one. Empty ranges are `nil`.
@@ -1673,9 +1706,23 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     // a `pair` (not nil), so we return `list<E>` without the `nil` variant.
     if value::symbol_is(head, "cons") && items.len() == 3 {
         let hd_ty = expr_ty(heap, items[1], ctx);
+        let tail_ty = expr_ty(heap, items[2], ctx);
+        // Onto `nil` or onto a positional shape, the result is a shape one longer: the
+        // head in front, exactly.
+        if let Some(tail) = &tail_ty {
+            let tail_shape: Option<Vec<Ty>> = if tail.is_subtype(&Ty::of(Tag::Nil)) {
+                Some(Vec::new())
+            } else {
+                tail.list_shape_elems().cloned()
+            };
+            if let Some(mut elems) = tail_shape {
+                elems.insert(0, hd_ty.clone().unwrap_or(Ty::ANY));
+                return Some(Ty::list_shape_of(elems));
+            }
+        }
         // A `nil` tail (`'()`, `nil`) contributes no elements at all, so the list's
         // elements are exactly the head's — `(cons 1 '())` is `list<1>`, not a bare `pair`.
-        let tail_elem = expr_ty(heap, items[2], ctx).and_then(|t| {
+        let tail_elem = tail_ty.and_then(|t| {
             if t.is_subtype(&Ty::of(Tag::Nil)) {
                 Some(Ty::NEVER)
             } else {
@@ -2272,7 +2319,7 @@ pub(super) fn callback_ret(heap: &Heap, f: Value, inputs: &[Option<Ty>], ctx: &C
     }
 }
 
-/// The type of one quoted datum: a nested list recurses (`'((1) (2))` is `list<list<1|2>>`),
+/// The type of one quoted datum: a nested list recurses (`'((1) (2))` is `(list (list 1) (list 2))`),
 /// an empty list is `nil`, anything else is its `of_value` singleton/tag.
 fn quoted_datum_ty(heap: &Heap, d: Value) -> Ty {
     // Deep-form stack safety: recurses into itself, never back through `expr_ty`'s
@@ -2283,13 +2330,10 @@ fn quoted_datum_ty(heap: &Heap, d: Value) -> Ty {
 fn quoted_datum_ty_inner(heap: &Heap, d: Value) -> Ty {
     match d {
         Value::Pair(_) => match list_items(heap, d) {
-            Some(elems) => {
-                let mut acc = Ty::NEVER;
-                for &e in &elems {
-                    acc = acc.union(quoted_datum_ty(heap, e));
-                }
-                Ty::list_of(acc)
+            Some(elems) if !elems.is_empty() => {
+                Ty::list_shape_of(elems.iter().map(|&e| quoted_datum_ty(heap, e)).collect())
             }
+            Some(_) => Ty::of(Tag::Nil),
             None => Ty::of(Tag::Pair),
         },
         other => Ty::of_value(other),

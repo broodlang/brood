@@ -729,11 +729,19 @@ names accept anything, so a contract never throws on a type it can't interpret.
           (%eq h 'or) (any? (rest t) (fn (s) (type-matches? s v)))
           (%eq h 'and) (every? (rest t) (fn (s) (type-matches? s v)))
           (%eq h 'not) (not (any? (rest t) (fn (s) (type-matches? s v))))
+          ;; `(list T)` is the uniform list; `(list T U …)` — two or more types — a
+          ;; positional SHAPE, the list sibling of `tuple`: exact arity, each position
+          ;; against its own type. What the checker means by `(list a b)`'s type.
           (%eq h 'list)
             (and (list? v)
               (let (elem (first (rest t)))
-                (or (nil? elem)
-                  (every? v (fn (x) (type-matches? elem x))))))
+                (cond
+                  (nil? elem) true
+                  (< 1 (count (rest t)))
+                    (and (= (count v) (count (rest t)))
+                      (every? (range (count v))
+                        (fn (i) (type-matches? (nth (rest t) i) (nth v i)))))
+                  else (every? v (fn (x) (type-matches? elem x))))))
           (%eq h 'vector)
             (and (vector? v)
               (let (elem (first (rest t)))

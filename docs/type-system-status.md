@@ -1043,3 +1043,15 @@ had no guard alias for it, so `check_let`'s per-binding rule is now one function
 each biconditional disjunct's complement on its own variable, no shared variable needed).
 Both are general rules; `std/` is at zero in both modes with the derivation on for every
 function.
+
+## A list has a positional shape (2026-09-14, ADR-348)
+
+Item 9 of the audit: `(list a b)` was `list<A | B>`, and `(first (list m '(…)))` read
+`pair | map` under strict. `Ty` now carries `list_shape` on the pair tag, the sibling of
+`tuple` on vector, through the same lattice functions; `(list …)`, a quoted list, `cons`,
+`rest` and a `& rest` binder produce it, `first`/`nth`/`count`/destructuring/the oracle/the
+runtime contract read it, and the grammar spells it `(list T U …)`. A shape over the node
+cap degrades to its element union first, so a long quoted table stays `list<int>`. Also
+tightened on the way: the subtype rule's derived element bound covers every sequence member
+of the left side (`(tuple int) | pair` claimed `vector<int> | pair<int>` from the tuple
+alone). `docs/type-tuples.md` carries the design.
