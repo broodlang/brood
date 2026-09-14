@@ -107,11 +107,18 @@ const BYTES_BIT: u32 = 1u32 << bit(Tag::Bytes);
 
 /// The vector tag alone (not `pair` too) — the one tag a *positional* tuple
 /// refinement applies to. Deliberately narrower than `SEQ_BITS`: a tuple is a
-/// fixed-arity, per-position-typed shape, which only ever makes sense for a
-/// `[ ]` vector (ADR-003 already keeps vectors and cons-list `pair`s
-/// separate) — a `pair`-based list's length isn't part of its type the way a
-/// vector literal's positions are.
+/// fixed-arity, per-position-typed shape of a `[ ]` vector (ADR-003 already keeps
+/// vectors and cons-list `pair`s separate). A list built by `(list a b)` or read from
+/// a quoted literal has its own positional shape on the `pair` tag alone —
+/// `list_shape`, see [`PAIR_BIT`].
 const VECTOR_BIT: u32 = 1u32 << bit(Tag::Vector);
+
+/// The pair tag alone — the one tag a *positional* LIST shape refines (2026-09-13).
+/// `(list m '(…))` is a two-element list whose first is a map and whose second a pair,
+/// and `(first …)` of it is the map, not `pair | map`: the element union threw the
+/// positions away exactly as it did for vectors before ADR-128. `nil` — the empty list
+/// — is not a `pair`, so a shape describes a non-empty list of exactly its arity.
+const PAIR_BIT: u32 = 1u32 << bit(Tag::Pair);
 
 /// The keyword tag — the one tag a literal (singleton) refinement applies to. A
 /// keyword-literal type `:maximized` refines the keyword members to exactly the
@@ -425,6 +432,11 @@ pub struct Ty {
     /// `vector_of` or `tuple_of`), same independent-fields story as
     /// `map_kv`/`fields` above — see `docs/type-tuples.md`.
     tuple: Option<Arc<Vec<Ty>>>,
+    /// Refinement of the pair member (`pair`) to a **positional** shape — one type per
+    /// index, a non-empty list of exactly that many elements: `(list a b)`, `'(1 2 3)`,
+    /// `(cons x <shaped>)`. The list sibling of `tuple`, same independent-field story;
+    /// `None` means "no known positional shape". See [`PAIR_BIT`].
+    list_shape: Option<Arc<Vec<Ty>>>,
     /// Refinement of the keyword member (`keyword`) to a literal set — the exact
     /// keyword symbols admitted, e.g. `{:maximized, :fullboth}`. `None` means "any
     /// keyword". When `Some`, the `Keyword` bit is in `tags` and the set is
@@ -535,6 +547,7 @@ impl Ty {
             map_kv,
             fields,
             tuple,
+            list_shape,
             lit,
             lit_int,
             lit_bool,
@@ -549,6 +562,7 @@ impl Ty {
             && *map_kv == other.map_kv
             && *fields == other.fields
             && *tuple == other.tuple
+            && *list_shape == other.list_shape
             && *lit == other.lit
             && *lit_int == other.lit_int
             && *lit_bool == other.lit_bool
@@ -568,6 +582,7 @@ impl Ty {
             map_kv,
             fields,
             tuple,
+            list_shape,
             lit,
             lit_int,
             lit_bool,
@@ -582,6 +597,7 @@ impl Ty {
         map_kv.hash(state);
         fields.hash(state);
         tuple.hash(state);
+        list_shape.hash(state);
         lit.hash(state);
         lit_int.hash(state);
         lit_bool.hash(state);
@@ -708,6 +724,7 @@ impl Ty {
             overload: None,
             fields: None,
             tuple: None,
+            list_shape: None,
             lit: None,
             lit_int: None,
             lit_bool: None,
@@ -964,6 +981,36 @@ impl Ty {
         .bounded()
     }
 
+    /// A positional LIST shape — a non-empty list of exactly these elements, one type
+    /// per index. Tagged `pair` alone (the empty list is `nil`, a separate tag); the
+    /// list sibling of [`Ty::tuple_of`]. `elems` must be non-empty.
+    pub fn list_shape_of(elems: Vec<Ty>) -> Ty {
+        debug_assert!(!elems.is_empty(), "a list shape has at least one element");
+        Ty {
+            list_shape: Some(Arc::new(elems)),
+            ..Ty::flat(PAIR_BIT)
+        }
+        .bounded()
+    }
+
+    /// The list-shape refinement, if this type is nothing but a list of a known shape —
+    /// the same refusal [`Ty::tuple_elems`] makes: a term that also admits `nil` or a
+    /// vector has no positional answer.
+    pub fn list_shape_elems(&self) -> Option<&Vec<Ty>> {
+        let this = self.single()?;
+        if this.tags != PAIR_BIT {
+            return None;
+        }
+        this.list_shape.as_deref()
+    }
+
+    /// The positions of a type that is exactly a vector tuple or exactly a list shape —
+    /// what `(first x)` / `(nth x <literal>)` / `(rest x)` read, since each answers the
+    /// same way for either sequence kind.
+    pub fn positional_elems(&self) -> Option<&Vec<Ty>> {
+        self.tuple_elems().or_else(|| self.list_shape_elems())
+    }
+
     /// The tuple-shape refinement, if this vector type carries one. The
     /// bridge the checker reads to flow `(nth t i)`/`(first t)` to the exact
     /// per-position type.
@@ -1135,6 +1182,11 @@ impl Ty {
                 .tuple
                 .as_ref()
                 .map(|elems| elems.iter().cloned().fold(Ty::NEVER, |acc, t| acc.union(t))),
+            // …and a list shape's, for the pair member.
+            PAIR_BIT => this
+                .list_shape
+                .as_ref()
+                .map(|elems| elems.iter().cloned().fold(Ty::NEVER, |acc, t| acc.union(t))),
             // `bytes` is a sequence of octets: its element type is fixed by the kind, so
             // it needs no refinement to carry one.
             BYTES_BIT => Some(Ty::of(Tag::Int)),
@@ -1282,7 +1334,7 @@ impl Ty {
                 }
             }
         }
-        if let Some(ts) = &self.tuple {
+        for ts in [&self.tuple, &self.list_shape].into_iter().flatten() {
             for t in ts.iter() {
                 n += t.node_count(lim - n);
                 if n >= lim {
@@ -1315,6 +1367,7 @@ impl Ty {
             out.map_kv = None;
             out.fields = None;
             out.tuple = None;
+            out.list_shape = None;
         } else {
             let below = |t: &Ty| t.widened_below(depth - 1);
             out.elem = self.elem.as_ref().map(|e| Arc::new(below(e)));
@@ -1334,6 +1387,10 @@ impl Ty {
             });
             out.tuple = self
                 .tuple
+                .as_ref()
+                .map(|ts| Arc::new(ts.iter().map(below).collect()));
+            out.list_shape = self
+                .list_shape
                 .as_ref()
                 .map(|ts| Arc::new(ts.iter().map(below).collect()));
             out.arrow = self
@@ -1366,21 +1423,49 @@ impl Ty {
             && self.map_kv.is_none()
             && self.fields.is_none()
             && self.tuple.is_none()
+            && self.list_shape.is_none()
         {
             return self;
         }
-        if self.node_count(MAX_TY_NODES + 1) > MAX_TY_NODES {
-            Ty {
-                arrow: None,
-                overload: None,
-                elem: None,
-                map_kv: None,
-                fields: None,
+        if self.node_count(MAX_TY_NODES + 1) <= MAX_TY_NODES {
+            return self;
+        }
+        // A positional shape over the cap — a long quoted list, a wide literal vector —
+        // degrades to its ELEMENT union first (each position's union, widened to its
+        // tags), which is the bound the shape stood for; only past that does everything
+        // go. Without this step a hundred-element `'(1 2 …)` read as a bare `pair`, where
+        // the plain element rule had kept `list<int>`.
+        if self.tuple.is_some() || self.list_shape.is_some() {
+            let positions = self
+                .tuple
+                .iter()
+                .chain(self.list_shape.iter())
+                .flat_map(|ts| ts.iter())
+                .fold(Ty::NEVER, |acc, t| acc.union(t.widened_below(0)));
+            let elem = match &self.elem {
+                Some(e) => e.as_ref().clone().union(positions),
+                None => positions,
+            };
+            let degraded = Ty {
+                elem: Some(Arc::new(elem)),
                 tuple: None,
+                list_shape: None,
                 ..self
+            };
+            if degraded.node_count(MAX_TY_NODES + 1) <= MAX_TY_NODES {
+                return degraded;
             }
-        } else {
-            self
+            return degraded.bounded();
+        }
+        Ty {
+            arrow: None,
+            overload: None,
+            elem: None,
+            map_kv: None,
+            fields: None,
+            tuple: None,
+            list_shape: None,
+            ..self
         }
     }
 
@@ -1429,12 +1514,28 @@ impl Ty {
         // (`A×B ∪ C×B = (A∪C)×B`), and otherwise the per-position union — a WIDENING that
         // keeps the arity and every other position, where the plain rule dropped the
         // shape to a bare `vector` (see [`tuple_union`]).
-        let tuple = tuple_union(&self, &other).unwrap_or_else(|| {
+        let tuple = positional_union(&self.tuple, self.tags, &other.tuple, other.tags, VECTOR_BIT)
+            .unwrap_or_else(|| {
+                merge_union(
+                    self.tags & VECTOR_BIT != 0,
+                    &self.tuple,
+                    other.tags & VECTOR_BIT != 0,
+                    &other.tuple,
+                )
+            });
+        let list_shape = positional_union(
+            &self.list_shape,
+            self.tags,
+            &other.list_shape,
+            other.tags,
+            PAIR_BIT,
+        )
+        .unwrap_or_else(|| {
             merge_union(
-                self.tags & VECTOR_BIT != 0,
-                &self.tuple,
-                other.tags & VECTOR_BIT != 0,
-                &other.tuple,
+                self.tags & PAIR_BIT != 0,
+                &self.list_shape,
+                other.tags & PAIR_BIT != 0,
+                &other.list_shape,
             )
         });
         // Literal sets union *exactly* (not widen) — `:a ∪ :b = {a,b}` — unless a
@@ -1476,6 +1577,7 @@ impl Ty {
             map_kv,
             fields,
             tuple,
+            list_shape,
             lit,
             lit_int,
             lit_bool,
@@ -1557,6 +1659,21 @@ impl Ty {
         } else {
             None
         };
+        // The same for a list shape on the pair member.
+        let list_shape = if tags & PAIR_BIT != 0 {
+            match (&self.list_shape, &other.list_shape) {
+                (Some(a), Some(b)) => match intersect_tuples(a, b) {
+                    Some(elems) => Some(Arc::new(elems)),
+                    None => {
+                        tags &= !PAIR_BIT;
+                        None
+                    }
+                },
+                (a, b) => merge_intersect(a, b),
+            }
+        } else {
+            None
+        };
         // Literal sets intersect; an empty result means no value of the tag
         // qualifies, so clear that tag bit. An *open* side (tag, no set) intersects
         // to the other side's set (the narrower). Each tag is independent.
@@ -1608,6 +1725,7 @@ impl Ty {
             map_kv,
             fields,
             tuple,
+            list_shape,
             lit,
             lit_int,
             lit_bool,
@@ -1660,6 +1778,9 @@ impl Ty {
         if self.tuple.is_some() {
             tags |= self.tags & VECTOR_BIT;
         }
+        if self.list_shape.is_some() {
+            tags |= self.tags & PAIR_BIT;
+        }
         // A literal set omits the *other* values of its tag, which are in the
         // complement — so the tag survives (widened to "any" of that tag). Each
         // literal kind is an independent tag/field.
@@ -1699,6 +1820,7 @@ impl Ty {
             || self.overload.is_some()
             || self.elem.is_some()
             || self.tuple.is_some()
+            || self.list_shape.is_some()
             || self.map_kv.is_some()
             || self.fields.is_some()
         {
@@ -1932,11 +2054,14 @@ impl Ty {
         }
         let filled = self.terms_vec().into_iter().map(|term| {
             let mut out = term.clone();
-            if term.tags & SEQ_BITS != 0 && term.tuple.is_none() {
+            if term.tags & SEQ_BITS != 0 && term.tuple.is_none() && term.list_shape.is_none() {
                 out.elem = Some(Arc::new(term.elem.as_deref().map_or(Ty::NEVER, fill)));
             }
             if let Some(elems) = &term.tuple {
                 out.tuple = Some(Arc::new(elems.iter().map(fill).collect()));
+            }
+            if let Some(elems) = &term.list_shape {
+                out.list_shape = Some(Arc::new(elems.iter().map(fill).collect()));
             }
             if term.tags & MAP_BIT != 0 {
                 match (&term.map_kv, &term.fields) {
@@ -1995,6 +2120,7 @@ impl Ty {
             map_kv: keep(tag_bit & MAP_BIT != 0, &self.map_kv),
             fields: keep(tag_bit & MAP_BIT != 0, &self.fields),
             tuple: keep(tag_bit & VECTOR_BIT != 0, &self.tuple),
+            list_shape: keep(tag_bit & PAIR_BIT != 0, &self.list_shape),
             lit: keep(tag_bit & KEYWORD_BIT != 0, &self.lit),
             lit_int: keep(tag_bit & INT_BIT != 0, &self.lit_int),
             lit_bool: keep(tag_bit & BOOL_BIT != 0, &self.lit_bool),
@@ -2064,10 +2190,22 @@ impl Ty {
                 // `vector<int>` (every element is an int), so derive an
                 // equivalent uniform element type from `tuple` when `elem`
                 // itself is absent, rather than rejecting outright.
+                // …and the same for a list shape on the pair member. Each sequence member
+                // `self` admits must be covered — a `(tuple int) | pair` has a bound for its
+                // vector and none for its pair, so it has none at all.
                 let self_elem = self.elem.clone().or_else(|| {
-                    self.tuple.as_ref().map(|elems| {
-                        Arc::new(elems.iter().cloned().fold(Ty::NEVER, |acc, t| acc.union(t)))
-                    })
+                    let mut bound = Ty::NEVER;
+                    for (bit, shape) in [(VECTOR_BIT, &self.tuple), (PAIR_BIT, &self.list_shape)] {
+                        if self.tags & bit == 0 {
+                            continue;
+                        }
+                        let elems = shape.as_ref()?;
+                        bound = elems.iter().cloned().fold(bound, |acc, t| acc.union(t));
+                    }
+                    if self.tags & SEQ_BITS & !(VECTOR_BIT | PAIR_BIT) != 0 {
+                        return None; // a set member with no element bound
+                    }
+                    Some(Arc::new(bound))
                 });
                 match &self_elem {
                     Some(a) => {
@@ -2090,6 +2228,18 @@ impl Ty {
                     // self has no specific positional shape (a plain vector, or
                     // only a uniform `elem`) — can't prove it matches an exact
                     // per-position shape `other` requires.
+                    None => return false,
+                }
+            }
+        }
+        if self.tags & PAIR_BIT != 0 {
+            if let Some(b) = &other.list_shape {
+                match &self.list_shape {
+                    Some(a) => {
+                        if !tuple_is_subtype(a, b) {
+                            return false;
+                        }
+                    }
                     None => return false,
                 }
             }
@@ -2207,6 +2357,14 @@ impl Ty {
                 // too would skip the subtraction check below, which is the one that knows
                 // `(tuple int|string) ∖ (tuple int)` shares nothing with `(tuple int)`.
                 if a.iter().zip(b.iter()).any(|(x, y)| x.is_disjoint(y)) {
+                    return true;
+                }
+            }
+        }
+        // …and two list shapes, the same way (a list has exactly one length).
+        if shared == PAIR_BIT {
+            if let (Some(a), Some(b)) = (&self.list_shape, &other.list_shape) {
+                if a.len() != b.len() || a.iter().zip(b.iter()).any(|(x, y)| x.is_disjoint(y)) {
                     return true;
                 }
             }
@@ -2366,6 +2524,7 @@ impl Ty {
             && self.map_kv.is_none()
             && self.fields.is_none()
             && self.tuple.is_none()
+            && self.list_shape.is_none()
     }
 }
 
@@ -2697,6 +2856,20 @@ fn term_is_subtype_of_union(a: &Ty, others: &[Ty]) -> bool {
                 }
             }
         }
+        // A list shape is a product too.
+        if tag_bit == PAIR_BIT {
+            if let Some(elems) = part.list_shape_elems() {
+                let candidates: Vec<Vec<Ty>> = others
+                    .iter()
+                    .filter(|b| b.tags & PAIR_BIT != 0)
+                    .filter_map(|b| b.list_shape_elems().cloned())
+                    .filter(|c| c.len() == elems.len())
+                    .collect();
+                if tuple_covered_by(elems, &candidates) {
+                    continue;
+                }
+            }
+        }
         return false;
     }
     true
@@ -2787,28 +2960,39 @@ fn merge_is_exact(a: &Ty, b: &Ty) -> bool {
     let (sa, sb) = (a.tags & SEQ_BITS != 0, b.tags & SEQ_BITS != 0);
     let (ma, mb) = (a.tags & MAP_BIT != 0, b.tags & MAP_BIT != 0);
     let (va, vb) = (a.tags & VECTOR_BIT != 0, b.tags & VECTOR_BIT != 0);
+    let (pa, pb) = (a.tags & PAIR_BIT != 0, b.tags & PAIR_BIT != 0);
     !contested(fa, &a.arrow, fb, &b.arrow)
         && !contested(fa, &a.overload, fb, &b.overload)
         && (!contested(sa, &a.elem, sb, &b.elem) || elem_union_exact(a, b).is_some())
         && !contested(ma, &a.map_kv, mb, &b.map_kv)
         && !contested(ma, &a.fields, mb, &b.fields)
-        && (!contested(va, &a.tuple, vb, &b.tuple) || tuple_union_is_exact(a, b))
+        && (!contested(va, &a.tuple, vb, &b.tuple)
+            || positional_union_is_exact(&a.tuple, a.tags, &b.tuple, b.tags, VECTOR_BIT))
+        && (!contested(pa, &a.list_shape, pb, &b.list_shape)
+            || positional_union_is_exact(&a.list_shape, a.tags, &b.list_shape, b.tags, PAIR_BIT))
     // The four literal slots are *never* contested: their union is the union of the
     // two literal sets, which `merge_union_lit_set` computes exactly.
 }
 
-/// The merged tuple slot of `a ∪ b` when BOTH carry a tuple shape of the same arity:
+/// The merged positional slot (a vector's `tuple`, a list's `list_shape` — `bit` says
+/// which tag the slot refines) of `a ∪ b` when BOTH carry a shape of the same arity:
 /// `Some(Some(shape))` with each position the union of the two — or `None` to fall back
 /// to the plain rule (a side without a shape, or unequal arities). Exact when the shapes
 /// differ in at most one position (`A×B ∪ C×B = (A∪C)×B`); a WIDENING otherwise — the
 /// per-position union admits combinations neither side had — which is what the cap on a
 /// union's terms reaches for: eight `[<literal> (+ i 1)]` branches of a parser used to
 /// collapse to a bare `vector`, and every caller reading the index back got `any`.
-fn tuple_union(a: &Ty, b: &Ty) -> Option<Option<Arc<Vec<Ty>>>> {
-    let (Some(ta), Some(tb)) = (a.tuple.as_deref(), b.tuple.as_deref()) else {
+fn positional_union(
+    a: &Option<Arc<Vec<Ty>>>,
+    a_tags: u32,
+    b: &Option<Arc<Vec<Ty>>>,
+    b_tags: u32,
+    bit: u32,
+) -> Option<Option<Arc<Vec<Ty>>>> {
+    let (Some(ta), Some(tb)) = (a.as_deref(), b.as_deref()) else {
         return None;
     };
-    if ta.len() != tb.len() || a.tags & VECTOR_BIT == 0 || b.tags & VECTOR_BIT == 0 {
+    if ta.len() != tb.len() || a_tags & bit == 0 || b_tags & bit == 0 {
         return None;
     }
     let merged: Vec<Ty> = ta
@@ -2819,15 +3003,21 @@ fn tuple_union(a: &Ty, b: &Ty) -> Option<Option<Arc<Vec<Ty>>>> {
     Some(Some(Arc::new(merged)))
 }
 
-/// Is the tuple half of `a ∪ b` EXACT under [`tuple_union`] — same arity, differing in at
-/// most one position (or identical)?
-fn tuple_union_is_exact(a: &Ty, b: &Ty) -> bool {
-    let (Some(ta), Some(tb)) = (a.tuple.as_deref(), b.tuple.as_deref()) else {
+/// Is the positional half of `a ∪ b` EXACT under [`positional_union`] — same arity,
+/// differing in at most one position (or identical)?
+fn positional_union_is_exact(
+    a: &Option<Arc<Vec<Ty>>>,
+    a_tags: u32,
+    b: &Option<Arc<Vec<Ty>>>,
+    b_tags: u32,
+    bit: u32,
+) -> bool {
+    let (Some(ta), Some(tb)) = (a.as_deref(), b.as_deref()) else {
         return false;
     };
     ta.len() == tb.len()
-        && a.tags & VECTOR_BIT != 0
-        && b.tags & VECTOR_BIT != 0
+        && a_tags & bit != 0
+        && b_tags & bit != 0
         && ta.iter().zip(tb).filter(|(x, y)| x != y).count() <= 1
 }
 /// The merged element refinement of `a ∪ b` when that merge is EXACT although the two
