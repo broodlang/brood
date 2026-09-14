@@ -252,7 +252,7 @@ fn ensure_loaded(heap: &mut Heap, mod_sym: Symbol) {
 /// the ones not yet loaded, and go again while something new loaded. A prefix is tried once
 /// per thread; a name that is not a module (a load error) is swallowed like every other
 /// advisory load. Runs under the check's `EagerLoadScope`, and before the passes that infer.
-fn materialise_referenced_modules(heap: &mut Heap) {
+pub(crate) fn materialise_referenced_modules(heap: &mut Heap) {
     thread_local! {
         static SCANNED: RefCell<HashSet<Symbol>> = RefCell::new(HashSet::new());
         static TRIED: RefCell<HashSet<Symbol>> = RefCell::new(HashSet::new());

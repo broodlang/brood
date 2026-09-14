@@ -1,0 +1,60 @@
+;;; `nest check` brings the heap to ONE state before it checks anything (KI-137): every module
+;;; in the listed files' closures is loaded, in sorted order, and then every module a loaded
+;;; body names — so a file's verdict is a function of the LIST, never of the order the files
+;;; were checked in or of what an earlier file's check happened to load. Before this, the
+;;; strict verdict on `std/math.blsp` flipped with whether `math` was already loaded when it
+;;; was checked: red on a merge, green seven runs later, red again from the pre-push hook,
+;;; one binary throughout.
+;;;
+;;; Observed through what a load can see: two fixture modules each record, AT LOAD, whether
+;;; the other is already provided, and two listed files `:use` one each. Listed as `uses-b
+;;; uses-a`, the canonical (sorted) load order is still `a` then `b`, so `a` sees no `b` and
+;;; `b` sees `a`. Without the preload the modules load as each file's check requires them —
+;;; `b` first — and `b` records `false`. Sabotage-verified.
+
+(defmodule check-preload-test (:use test))
+
+(purge-stale-temp "chkpre-")
+(def- *dir* (temp-dir "chkpre-"))
+(file/mkdir *dir*)
+
+(defn- fixture! (name other)
+  (file/spit (path/join *dir* (str name ".blsp"))
+    (str "(defmodule "
+      name
+      ")\n"
+      "(file/spit \""
+      (path/join *dir* (str name ".marker"))
+      "\" (str (contains? *features* \""
+      other
+      "\")))\n"
+      "(defn f () 1)\n")))
+
+(defn- user! (name uses)
+  (file/spit (path/join *dir* (str name ".blsp"))
+    (str "(defmodule " name " (:use " uses "))\n" "(defn g () (f))\n")))
+
+(defn- nest-bin ()
+  (let (dir (path/dirname (or (os/exe-path) "")))
+    (first (seq/filter [(path/join dir "nest") (path/join dir ".." "nest")] file/exists?))))
+
+(describe "nest check loads the listed files' modules before it checks any of them (KI-137)"
+  (test "listed b then a, the modules still load a then b, and each check sees the same heap"
+    (fixture! "chkpre-a" "chkpre-b")
+    (fixture! "chkpre-b" "chkpre-a")
+    (user! "chkpre-uses-a" "chkpre-a")
+    (user! "chkpre-uses-b" "chkpre-b")
+    (let (nest (nest-bin))
+      (if (nil? nest)
+        (is true) ; no sibling binary to drive (an odd install) — nothing to observe
+        (let (r (os/cmd "sh"
+                  ["-c"
+                    (str "cd "
+                      *dir* " && BROOD_NO_CHECK_CACHE=1 " nest
+                      " check chkpre-uses-b.blsp chkpre-uses-a.blsp")]))
+          (assert= 0 (get r :exit))
+          ;; `a` loaded first: `b` was not there yet…
+          (assert= "false" (file/slurp (path/join *dir* "chkpre-a.marker")))
+          ;; …and `b` loaded second, with `a` already provided — the order the LIST would
+          ;; have given is `b` first (`uses-b` is checked first), which records "false" here.
+          (assert= "true" (file/slurp (path/join *dir* "chkpre-b.marker"))))))))

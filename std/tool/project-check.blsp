@@ -451,6 +451,7 @@ module included), built from the whole `files` universe — the KI-17 reachabili
                       [(%map-assoc reuse p c) recheck]
                       [reuse (cons [p cl] recheck)]))))
         [reuse recheck] parts
+        _ (when (not (empty? recheck)) (project-preload! (map recheck first) closures))
         ;; re-check the dirty set in PARALLEL across the worker pool — safe now that
         ;; the dependency recorder is per-process (Heap::check_dep_rec). Each entry is
         ;; [mtime warnings dep-keys fp closure].
@@ -482,6 +483,55 @@ module included), built from the whole `files` universe — the KI-17 reachabili
         (fold entries cache (fn (m kv) (let ([p e] kv) (%map-assoc m p e))))))
     n))
 
+(defn- project-preload! (files closures)
+  "Bring the heap to ONE state before any of `files` is checked: require every module in
+their closures (sorted, so the order is the same on every run), then materialise every
+module a loaded body names, to a fixpoint (`%check-materialise-referenced!`).
+
+A verdict can depend on what is loaded — `std/math.blsp` was clean in a fresh process and
+red in strict once `datetime` was, and `nest check` used to load modules as each file's check
+reached them, so the verdict raced the order files were checked in (KI-137: red on a merge,
+green seven runs later, red again from the pre-push hook, one binary throughout). Checking
+every file against the fully-loaded state is also what a live image would see. Returns nil."
+  ;; Three sources, all of which a check would otherwise load in whatever order it reached
+  ;; them: the project's closures; the listed files' own header closures (`nest check
+  ;; std/math.blsp` from a project root lists files outside the project, whose entries in
+  ;; `closures` are nil); and every module a listed file's BODY names with a qualified
+  ;; reference (`math/quot` in datetime.blsp) — the checker's lookups of those are global
+  ;; MISSES that lazy-load the module (ADR-335) mid-check, which is how `math` came to be
+  ;; loaded before `math.blsp` in one file order and after it in another. A file's own module
+  ;; is left out unless its body names it (checking a test file must not run its top level;
+  ;; a std module naming itself qualified would be loaded by the first miss anyway).
+  (let (infos (project-module-infos files)
+        own (fold (%map-pairs infos)
+              #{}
+              (fn (acc kv) (let (m (%map-get (second kv) :module nil)) (if m (conj acc m) acc))))
+        listed (project-require-closures files)
+        named (fold files
+                #{}
+                (fn (acc f)
+                  (fold (or (reflect/source-deps (or (file/slurp f) "")) nil)
+                    acc
+                    (fn (a form)
+                      (fold (or (get form :references) nil)
+                        a
+                        (fn (a2 r)
+                          (let (i (string/last-index-of r "/"))
+                            (if (and i (> i 0)) (conj a2 (string/substring r 0 i)) a2))))))))
+        mods (fold files
+               named
+               (fn (acc f)
+                 (fold (%append-two (or (%map-get closures f nil) nil)
+                         (or (%map-get listed f nil) nil))
+                   acc
+                   (fn (a m) (if (contains? own m) a (conj a m)))))))
+    (doseq (m (sort mods))
+      ;; a module that will not load is reported by its own file's check, not here
+      (check-allow :discarded-catch (try (require-one (symbol (->string m))) (catch _ nil))))
+    (%check-materialise-referenced!)
+    nil))
+(sig project-preload! (any map -> nil))
+
 (defn- project-check-files (files root)
   (if (= (os/env "BROOD_NO_CHECK") "1")
     *project-tally-zero*
@@ -495,8 +545,9 @@ module included), built from the whole `files` universe — the KI-17 reachabili
         ;; No cache when it's disabled, there's no project root, or the project is over
         ;; the file cap (the manifest read would rival re-checking) — parallel fresh path.
         (or (project-cache-off?) (nil? root) (>= (count files) (project-cache-max-files)))
-          (project-check-files-fresh files
-            closures)
+          (do
+            (project-preload! files closures)
+            (project-check-files-fresh files closures))
         else (project-check-files-cached files root closures (project-check-manifest "checks") true)))))
 
 ;; Make sure the project is set up and all its sources are loaded — the
@@ -541,6 +592,7 @@ module included), built from the whole `files` universe — the KI-17 reachabili
       (let (files (all-files root)
             closures (project-require-closures files)
             total (count files))
+        (project-preload! files closures)
         (project-check-fold files closures total 0 nil)))))
 
 (defn- project-check-fold (files closures total done acc)
