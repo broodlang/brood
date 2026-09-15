@@ -10113,3 +10113,44 @@ negative answers escape is not a memo.
 **What to take from it.** A checker's cost is a *runtime* cost on this system, because the
 file runner checks before it runs, and no test in the tree measured that. The signal came
 from a benchmark row in another repo — which is the argument for keeping that column fresh.
+
+## KI-139 — the checker's transitive specialization costs `brood file.blsp` ~240 ms on a two-line file (OPEN 2026-09-15)
+
+**Filed from the KI-138 follow-up measurement**, which found that fix recovering half of the
+`supervisor` row's regression and not all of it. Same probe, three imaged release binaries, a
+quiet machine, five runs each:
+
+| binary | `brood --check probe.blsp` | harness `supervisor` row |
+|---|---|---|
+| `5c913fe3` — the last-good column | **10 ms** | 975 ms today (886 published) |
+| `c9d6c1a1` — the regressed column | 463 ms | 1343 published |
+| `0148a3a5` — the KI-138 fix alone | **240 ms** | 1097 / 1110 / 1121 ms |
+| `b393c38c` — the merged tree | 290 ms | 1143 / 1150 / 1176 ms |
+
+```blsp
+(defmodule probe)
+(def sup (supervisor/start []))
+```
+
+**It is not another re-ask.** The KI-138 meter reads 238 arm re-typings for 236 distinct
+questions, so each question is walked once; at 240 ms that is roughly **1 ms per specialized
+body walk**, and the walks are of small functions. What changed between the two columns is how
+much the checker looks at: `BROOD_IMAGE_TRACE=1 brood --check` shows the old checker
+materialising `supervisor` alone (2 sections) where the new one materialises `os`, `io`,
+`string`, `map`, `seq` and more — ADR-339's transitive materialisation — and then specializes
+every private body it reaches under caller-derived types (ADR-341). More work per file by
+design, at a price nothing gates: `brood file.blsp` checks before it runs, so this is paid on
+every invocation of a program that calls into a map-heavy module.
+
+Origin's ADR-349/350 commits add a further, consistent ~50 ms on the probe (240 → 290 ms) that
+reads as noise on the row (`make ab --floor`: +0.4% against a 0.4% floor).
+
+**Profile** (`perf`, the dev binary, `--check` on the probe) is flat: `Ty` clone/drop,
+`(u32, Ty)` hashbrown clone/drop (a `Ctx` copied per specialization?), `symbol_is`, the memo's
+hashing. No single hotspot, so this is the walk's constant factor, not an escape.
+
+**Candidate directions, none tried:** cache a materialised module's specializations across
+files (today they are per file — `clear_sig_memo` drops them); or bound the transitive depth the
+*file runner* specializes into, keeping `nest check` exhaustive. Either way, the guard to add
+first is a wall-clock bound on the probe's check in the file runner's own tests, because the
+existing meter counts walks, not their cost, and passed throughout.
