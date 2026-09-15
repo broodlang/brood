@@ -1,11 +1,20 @@
-(defmodule mcp-test (:use test))
+;; `(:load mcp)`: the module under test loads at THIS file's load, not at the first
+;; `mcp/…` call (ADR-335). The watch-runtime tests arm a monitor and read a 300 ms window;
+;; with the load happening inside that first call, the helper's burst — 20 ms after the
+;; spawn — had come and gone before the monitor existed, under the tree-walker from source
+;; (the load is slow there), and the window collected nothing (CI's differential job).
+(defmodule mcp-test (:use test) (:load mcp))
 
 ;; The `reflect/eval` MCP tool must evaluate *every* form in a multi-form `:source` and
 ;; return the last value — not silently drop everything after the first form (the
 ;; old `reflect/read-first` behaviour, which made a pasted batch of `defn`s run only the
 ;; first). See docs/devlog.md and the brood-life feedback triage.
 (describe "mcp eval tool"
-  (test "runs every form in a multi-form source, returns the last value"
+  ;; `:isolated`: the source defines `mcpt-a`/`mcpt-b` at root through the tool, and a test
+  ;; that leaves globals behind is visible to every later file in an unscoped run —
+  ;; `audit_test` read them as two undocumented public names whenever the two files were
+  ;; named together (`nest test FILE…` loads the named files into one image).
+  :isolated (test "runs every form in a multi-form source, returns the last value"
     (assert= {:value "21"}
       (mcp/eval-tool {:source "(defn mcpt-a (x) (* x 2)) (defn mcpt-b (x) (+ x 1)) (mcpt-b (mcpt-a 10))"})))
   (test "a def and its use in the same batch both take effect"
@@ -68,7 +77,7 @@
 (describe "mcp ability introspection tools"
   (test "abilities lists the core abilities"
     (is (includes? (get (mcp/abilities-tool {}) :abilities) "Display")))
-  (test "ability describes ops, sealed members, requires, and impls"
+  :isolated (test "ability describes ops, sealed members, requires, and impls"
     (mcp/eval-tool {:source "(defrecord mcpt-circle (r)) (defability McptShape :sealed [mcpt-circle] (mcpt-area [self] :-> float) (mcpt-big? [self o] :-> bool (> (mcpt-area self) 0))) (impl McptShape mcpt-circle (mcpt-area [c] 1.0))"})
     (let (r (mcp/ability-tool {:name "McptShape"}))
       (assert= (get r :sealed) true)

@@ -370,7 +370,7 @@ The primary source is consulted first, then `*image-sources*` in install order."
 ;; ---- the general registry update: compare-and-swap + retry (KI-23) ------------
 ;;
 ;; `%registry-update!` names each shape it supports as a kernel op (`:assoc`,
-;; `:cons-new`, …), which fits a registry whose update is one map/list operation. Several
+;; `:cons-new`, `:append-new`, `:merge`, …), which fits a registry whose update is one map/list operation. Several
 ;; registries are not like that — `face-set` merges into the *existing* entry, `attach`
 ;; strips an id from every bucket before consing onto one, `register-repl-command` filters
 ;; by name overlap and appends. Adding a Rust op per shape would push policy into the

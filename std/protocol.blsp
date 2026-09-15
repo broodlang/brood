@@ -23,7 +23,9 @@
 
 (defn %register-protocol (pname specs)
   "Record interface `pname`'s declared op specs (raw forms) for the checker / LSP."
-  (%swap-registry! *protocols* (fn (m) (assoc m pname specs)))
+  ;; An op, not a swap: a `defprotocol` in a lazily loaded module must survive the
+  ;; `%isolate` window its load happened to land in (KI-141; see `editor/face`).
+  (%registry-update! '*protocols* :assoc [pname] specs)
   nil)
 
 ; ---- the behaviour macro ----------------------------------------------------

@@ -1257,9 +1257,13 @@ pub(super) fn registry_update(args: &[Value], env: EnvId, heap: &mut Heap) -> Li
         RegistryOp::Dissoc
     } else if op_sym == value::intern("cons-new") {
         RegistryOp::ConsNew
+    } else if op_sym == value::intern("append-new") {
+        RegistryOp::AppendNew
+    } else if op_sym == value::intern("merge") {
+        RegistryOp::Merge
     } else {
         return Err(LispError::type_err(
-            "%registry-update!: op must be :assoc, :assoc-new, :dissoc or :cons-new",
+            "%registry-update!: op must be :assoc, :assoc-new, :dissoc, :cons-new, :append-new or :merge",
         ));
     };
     let path = match arg(args, 2).unpack() {

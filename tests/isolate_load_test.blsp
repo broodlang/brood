@@ -56,3 +56,23 @@
     (%isolate-discard-loads (fn () (require-one 'isoload-scratch)))
     (assert= false (contains? *features* "isoload-scratch"))
     (assert= false (bound? 'isoload-scratch/answer))))
+
+;;; KI-141: a module's REGISTRATION onto a registry another module owns survives the isolate
+;;; its load landed in — not only its defines. `editor/highlight` `def-face`s its `:syntax/*`
+;;; faces onto `editor/face`'s `*faces*` at load; written as a whole-map swap that was a LIVE
+;;; write the restore discarded while the module stayed provided, and every later file in the
+;;; tree-walker CI job found `highlight-spans` answering nil. The fixture below is the exact
+;;; shape with the load journal opened by hand: a def-face made INSIDE a journalled load
+;;; inside an isolate must be there after the restore; the same def-face made by a TEST (no
+;;; load) inside an isolate must be gone — isolation still undoes what a test did.
+(describe "a module's registration onto a foreign registry survives the isolate (KI-141)"
+  :isolated (test "a def-face inside a journalled load, inside an isolate, is there after the restore"
+    (%isolate (fn () (%with-load-journal (fn () (editor/face/def-face :ki141-loaded {:fg :red})))))
+    (assert= {:fg :red} (editor/face/face :ki141-loaded)))
+  :isolated (test "a system layer registered inside a journalled load, inside an isolate, survives too"
+    (%isolate (fn ()
+                (%with-load-journal (fn () (editor/layers/register-system-layer :ki141-layer)))))
+    (is (any? editor/layers/*system-layers* (fn (r) (= r :ki141-layer)))))
+  :isolated (test "…and a test's own def-face inside an isolate is still rolled back"
+    (%isolate (fn () (editor/face/def-face :ki141-scratch {:fg :blue})))
+    (is (nil? (editor/face/face :ki141-scratch)))))

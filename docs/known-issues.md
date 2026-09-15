@@ -134,6 +134,8 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-137 | **a strict verdict can depend on which OTHER modules are loaded when the file is checked, so the strict gate over std/ flickers with check order** — `math/clamp` (declared `-> number`, body `(math/max lo (math/min hi x))`) is clean in a fresh process and warns "body yields ordered" once `datetime` is loaded: `math/max` had no declaration, so its return was the kernel `%max` contract (number or comparable record), and the record half is inhabited only after a module registers comparable records. `nest check` checks files in parallel over one heap, so whether `datetime` is loaded when `math.blsp` is checked is a race: red twice on 2026-09-13 (a merged tree, a clean origin build), green in seven runs after, red again from the pre-push hook | ✅ **FIXED 2026-09-14** — three places, two people. The MECHANISM (881552a6, 6367ac6e): a module's own qualified definition of a name a by-name rule describes (`math/max` in `math.blsp`) reads that rule — an extremum is its operands' union — ahead of the sig inferred over unknown parameters, and a type variable absorbs an untyped argument, so `math/max`/`math/min` leave the curated table and declare `(& ?A -> ?A)`; `clamp` is clean with or without the declaration. The GATE: `nest check` brings the heap to ONE state before it checks anything (`project-check/project-preload!` — the project's and the listed files' header closures, the modules the listed files' bodies name, then the ADR-340 materialisation to a fixpoint through `%check-materialise-referenced!`, sorted), so a verdict is a function of the LIST, never of check order; verified with the declarations removed: `[math datetime]`, `[datetime math]`, std sorted and std reversed all agreed where the same lists split 0/1 before. Guard `tests/check_preload_test.blsp` (two fixture modules record at load whether the other is provided; listed in reverse, the sorted preload order still shows; sabotage-verified). What stays open is the class — any inferred return that is a registry-derived cover reads wider as modules load — now visible only as a verdict that differs between two LISTS, never between two runs of one |
 | KI-138 | **the advisory checker re-walked one question 36 times, and every `brood file.blsp` paid it** — the cross-language `supervisor` row read **+50% (886 → 1330 ms)** with every other row inside drift and peak RSS flat. Not the supervisor and not per-child: a `BENCH_N` sweep put it at a **flat ~520 ms** of LOAD time, and a two-line file was the whole repro — `(def sup (supervisor/start []))` checked in 463 ms against 41 ms. `brood` type-checks a program before running it, so a checker cost is a runtime cost on this system, and no test in the tree measured that | ✅ **FIXED 2026-09-14** — `specialized_ret` re-types a callee's body under the call's argument types and memoizes per `(name, argument types)`, but an arm whose tail could not be typed returned through `?` **before the memo write**, so a `None` that cost a full body walk was never remembered and the question was re-asked at every call site and every enclosing level: the prelude's `get` re-typed **1864 times for 52 distinct questions**, the file spending 2760 arm re-typings to ask 236. The escape dates from `68c250e8` (call-site specialization); `f3842f6a` (ADR-341) made it reachable by giving private parameters types, since the specializer declines when every input is unknown. Fixed by memoizing that `None` under the same `stable` rule the bottom of the function already uses — the answer is unchanged, only remembered. 2760 → 236 re-typings, and every name's count now equals its distinct-question count. Guard `crates/lisp/tests/check_specialization_cost.rs` (bound 800, plus a companion proving the meter still moves), sabotage-verified |
 | KI-139 | **the checker's ADR-339/341 specialization costs `brood file.blsp` ~240 ms on a two-line file that calls `supervisor/start` — 24× the 10 ms it cost at `5c913fe3`** — and every `brood` invocation pays it before the program runs. The `supervisor` benchmark row is still **+15–25% over the last-good column after KI-138** (1097–1121 ms at `0148a3a5` vs 975 ms for `5c913fe3` rebuilt the same day; 886 published). Not a re-ask: the KI-138 meter reads 238 arm re-typings for 236 distinct questions, so it is ~1 ms PER specialized body walk. The old checker materialised `supervisor` alone (`BROOD_IMAGE_TRACE=1 brood --check`: 2 sections); the new one materialises `os`, `io`, `string`, `map`, `seq` and more transitively (ADR-339) and specializes private bodies under caller-derived types (ADR-341) — more work per file by design, at a price nothing gates. Origin's ADR-349/350 commits add ~50 ms more on the probe (240 → 290 ms, consistent over 5 runs each) that reads as noise on the row (`make ab --floor`: +0.4% against a 0.4% floor) | ✅ **FIXED 2026-09-15** — not the walks' constant factor after all: a `let`/`do`/`if` whose body the inferencer could not type returned `None` from `control_flow_ty` and then **fell through to the call path**, which treated `(do X)` as a call to a function named `do` and `(let (b) body)` as a call to `let`, and `specialize_call` re-typed every "argument" — the bindings and the body — a second time. Every unknown-typed control-flow level doubled the walk beneath it: `supervisor-group-restart`'s 239-node body, twelve levels deep, took **78 910 expression visits** (2^12 × its size), three times over. One line — a special-form head that cannot be typed is unknown, never a call (`crate::eval::is_special_form`) — takes the probe's check **290 → 65 ms** and the visit count 288 408 → 20 979; the harness `supervisor` row reads 902 / 907 ms from source, under the 975 ms the last-good binary measures the same day. Guards in `crates/lisp/tests/check_specialization_cost.rs`: an `expr_ty` visit meter bounds the probe (sabotaged: 288 408 vs a 60 000 bound), and a synthetic body of 6 vs 12 nested unknown `let`/`do` levels must grow linearly (fixed 469 → 685; sabotaged 25 687 → 5 999 833) |
+| KI-140 | **`apply` does not bind a callee's type variable — `(apply math/max 1 xs)` types as `number` (or the `ordered` cover) where `(math/max 1 x)` types as `int`** — so a width computed by `apply`ing an extremum over lengths fails a `-> int` declaration under `--strict`, and bedit's strict ratchet went 0 → 25 at brood `0cf7e80b` with four of them this shape (`ed-dired-cols`), none a bedit change. The other 21 are the checker being *wider* on shapes it used to leave unknown: a private helper's caller-derived parameter reading `number` where every caller passes an int (3), `(first xs)` as `nil \| int` after an `(is (not (empty? xs)))` the checker cannot read (13), honest maybe-nil reads (5). Repro: `nest check --strict` on a file declaring `(sig widest (list -> int))` over `(apply math/max 1 (map xs string/length))` — "declared return type int but the body yields number" | **OPEN 2026-09-15** — filed from the downstream smoke, which is the only gate that watches strict. bedit's ceiling was raised to 25 with the classes named (`tests/strict_ratchet_test.blsp`) and comes back down as each closes. The `apply` half is a checker precision gap in `sigs.rs`'s call typing: `apply f a b… coll` should type as `f` applied to `(a b… ∪ element-of coll)` for a variadic `(& ?A -> ?A)` callee; today `apply`'s own curated signature stands in |
+| KI-141 | **a module's registration onto a registry ANOTHER module owns did not survive the `%isolate` its load landed in — the module stayed provided with its faces gone** — CI's `differential (tree-walker)` job red since 3bc5307e (2026-09-12, the lazy-loading day), 27 failures across `highlight_test`, `configs_test`, `observer_test`, `doc_examples_test`: every face lookup nil (`highlight-spans "(+ 1)"` → nil, `[0 3 nil]` where `{:fg :cyan}` is documented). Not the tree-walker: the same 27 on the VM with the images off, through the in-process `brood_suite_passes` wrapper — and 0 through the `nest test` binary, whose dispatcher had loaded `editor/face` at root before any isolate | ✅ **FIXED 2026-09-15** — `def-face` was a whole-map `%swap-registry!`; `registry_cas` writes those LIVE and its own comment says "a registration that must survive an isolate goes through `%registry-update!`'s ops instead". Under ADR-335 `editor/highlight` loads inside whichever test file first colours a token; its function defines were journalled and replayed (KI-134), its `:syntax/*` def-faces were live writes onto `*faces*` (born in `editor/face`, a closed frame) and the file's restore dropped them: `BROOD_TRACE_GLOBAL='*faces*'` (new, catalogued) showed `restore: live value before` with the `:syntax/*` keys and `value after replay` without, target entries in the journal = `editor/face`'s own defaults only. Fix: `def-face`/`face-set`, `%register-protocol` and the three `editor/layers` registrations are one `%registry-update!` op each, staged with the load and replayed; `:append-new` joins the op set for the system-layer list (append unless member — order is precedence) and `:merge` for `face-set` (the read-merge-write under the registry lock — `registry_test`'s 64 concurrent merges into one face caught the read-then-`:assoc` first cut losing keys). `mcp_test` `(:load mcp)`s so its 300 ms watch window does not start with the module's load (its burst had come and gone). Guards in `tests/isolate_load_test.blsp`: a def-face inside a journalled load inside an isolate is there after the restore, a test's own def-face inside an isolate is still rolled back. The tree-walker wrapper: 27 → 0 |
 | KI-133 | **a preempted native loop resumed on the interpreter for up to 256 iterations — via its callee's frame** — a native self-tail loop that makes a call is preempted every ~1 500 iterations (the 2 000-reduction quantum); the driver handed the preempted frame to the interpreter "until its loop-top noticed", but the first safepoint that run reached was the CALLEE's entry, so the capture landed on the callee at ip 0, the resume ran the callee natively and returned into the loop MID-BODY, and the loop interpreted to its next 256th back-edge before re-tiering. A 5M-iteration loop with one call: 3 252 preempts, **839 607 interpreted iterations**, −36% instructions with preemption disabled; the leaf-spliced variant −72%. Invisible on the benchmark rows (±1–4%: they are short, or their loops are gate-refused anyway) — this is the cost of every long-running native loop that calls anything, and a candidate for why §7.1's admission experiments read as losses | ✅ **FIXED 2026-09-12** — `vm_run_bc`'s outcome-2 arm yields at once: the budget IS spent, and the frame is at ip 0 (or the journal's resume point, applied first), which is exactly what a resume re-tiers. Guarded by `a_native_preempt_captures_the_loop_frame_not_its_callee`, which drives the capture-mode driver with a 300-reduction budget and asserts every capture after the loop goes native is the loop's frame at ip 0 (sabotage-verified: removing the yield puts the captures on the callee). Found from the call-cost probe: 640 instructions per native→native call read as the call ceremony and was 40% preemption churn |
 | KI-132 | **the JIT latches the syntax highlighter's walk onto the VM — every helper of `editor/highlight/hl-spans` deopt-thrashes** — `BROOD_JIT_BAIL_TRACE=1` over one fontify pass of a 111-line band: `hl-head?`, `hl-advance`, `hl-name`, `hl-doc?` each `reason=deopt-thrash-latched … deopts=16`, `hl-spans` itself 56 deopts at `resume_ip=0` and `108`. The pass runs interpreted: 1.1 ms for 421 tokens (2.4 µs a token), re-lexed on every keystroke in bedit — the single largest cost of a typed character there | **OPEN 2026-09-12** — filed from the bedit performance pass (ADR-336). Cause hypothesis, unverified: the helpers destructure the walk's frame vector `[open n head p]`, whose `head` slot is `nil` on a fresh frame and a string once the head symbol is seen; the type-deopts land on the `SetLocal` after that `(nth frame 2)` (`resume_ip` 40/47/48, `watch=true`), and the re-lowering after a deopt appears to re-specialise to the first-seen tag rather than widen — sixteen identical attempts, then `BAILED`. Repro: `BROOD_JIT_BAIL_TRACE=1 nest run <a script calling (editor/highlight/highlight-spans src) on any 100-line .blsp>`; measure with the same script under `(bench …)`. Not worked here because the JIT is mid-change by another session (ADR-333); the expected win is 3–5× on the pass, which is also every per-token walk of this shape in std |
 | KI-131 | **lazy module loading (ADR-335) made the test runner's driver die on `unbound symbol: math/max` one run in three** — any file with an `:isolated` unit; `process 2 died` from `test/collect-loop`, the same with the JIT off. The unit was the first to use `math`, so `math` loaded INSIDE its `%isolate` snapshot and was rolled back with it, while the driver running beside it had started depending on it. Before ADR-335 the runner's closure loaded at the runner's load, before any isolate — an invariant that held by accident and was never stated | ✅ **FIXED 2026-09-12**, the same day it landed. Stated and pinned: a fourth `defmodule` header clause `(:load a b …)` loads modules at the file's load and refers nothing (the explicit eager request), `std/tool/test.blsp` `:load`s its sixteen-module closure, and `crates/cli/tests/test_framework_closure.rs` measures the real closure (a source load under the eager policy) and fails naming any module the clause lacks — sabotage-verified by dropping `math`. `%isolate`'s restore also waits for another process's in-flight load (`wait_for_inflight_loads`, the `*features-loading*` claim) so a load straddling the swap cannot leave KI-89's record-without-bindings asymmetry. Verified 25/25 + 6/6 (`BROOD_NO_JIT=1`) + 4/4 (`BROOD_NO_STDIMAGE=1`) on the reproducing file and 15/15 on `startup_image_test.blsp`, against 3/20 and 4/12 failing before. Worth recording how the first diagnosis went wrong: the wait alone was written first, on the define→`provide` theory, and the loop still failed — the mechanism was a module *consistently* loaded and unloaded by the unit, not a torn load |
@@ -10203,3 +10205,105 @@ question, not this bug's.
 attribution; the three timings that were (per-walk time, per-form entry counts, backtraces at
 the hot entry) took forty minutes and each contradicted the previous theory. And the meter that
 existed measured the wrong quantity: KI-138's guard counts walks, KI-139 was the size of each.
+
+## KI-140 — `apply` does not bind a callee's type variable (OPEN 2026-09-15)
+
+**Found by the downstream smoke, not by a test here.** bedit's `tests/strict_ratchet_test.blsp`
+holds `nest check --strict` at zero findings; against brood `0cf7e80b` it read **25**, with no
+bedit change in between. Classified:
+
+| findings | shape | side |
+|---|---|---|
+| 4 | `(apply math/max 1 (map entries …))` typed `ordered`, then handed to `string/pad-left`'s `int` | checker — this KI |
+| 3 | a private helper's caller-derived parameter reads `number` where the callers pass ints (`ed-word-end`, `sb-clip`'s `(math/max 0 n)`) | checker, wider by design (ADR-341) or a caller really passes a `number` — unclassified |
+| 13 | `(first idxs)` / `(last idxs)` as `nil \| int` right after `(is (not (empty? idxs)))` | the checker cannot read a test framework's `is` as a guard — a strict true-positive by its rules |
+| 5 | `(get *vim-digits* key)` as `1 \| … \| 9 \| nil`, `ed-selected-pane` declared `pane` yielding `nil \| {…}`, `assoc` on a maybe-buffer | honest strict findings for bedit |
+
+**The `apply` half reproduces minimally:**
+
+```blsp
+(defn widest (xs) (apply math/max 1 (map xs string/length)))
+(sig widest (list -> int))          ; strict: declared int but the body yields number
+(defn widest2 (xs) (math/max 1 (string/length (first xs))))
+(sig widest2 (list -> int))         ; clean
+```
+
+`math/max` declares `(& ?A -> ?A)` (KI-137), so a direct call binds `?A` to its operands'
+union — `int`. Through `apply` the call is typed by `apply`'s own curated signature, which
+knows nothing of the callee's variable, and the result falls to the callee's flat return. The
+rule wanted: `(apply f a b … coll)` types as `f` applied to `a`, `b`, … and `coll`'s element
+type — for a variadic callee that is one more operand of the element type. Lives in the call
+typing of `crates/lisp/src/types/check/sigs.rs`.
+
+Not fixed in this session because the checker is mid-change by another session (ADR-349/350/351
+landed the same day); bedit carries the 25 with the classes named in its ratchet's comment, and
+the ceiling comes back down as each class closes.
+
+## KI-141 — a module's registration onto a foreign registry did not survive the isolate its load landed in ✅ FIXED 2026-09-15
+
+**Symptom.** CI's `differential (tree-walker)` job had been red since `3bc5307e` (2026-09-12
+evening, one push after the last green), and the `test` job's own reds hid it: 27 failures,
+all one shape — a face lookup answering nil. `(highlight-spans "(+ 1)")` → nil where
+`([1 2 {:fg :cyan}] [3 4 {:fg :yellow}])` is expected; `editor/configs`' documented examples
+`([0 3 nil])` where `{:fg :dark-grey}` is written; the observer's status row nil. Every one
+of those files passes alone, under either engine, with or without images.
+
+**Not the tree-walker.** The same 27 appear on the VM with `BROOD_NO_STDIMAGE=1
+BROOD_NO_PRELUDE_IMAGE=1` through `cargo nextest run -E 'binary(suite)'` — the in-process
+`brood_suite_passes` wrapper, which evaluates `(require-one 'test) (project-run/run-tests)`.
+And **zero** through `target/release/nest test` from the same tree with the same env. Two
+mechanisms reproduce in two minutes but not in a two- or three-file `nest test <files>`: an
+explicit file list does not open the per-file isolates (everything ran at scope 0 in the
+trace), so the shape needs the whole project run.
+
+**The trace that named it.** `BROOD_TRACE_GLOBAL='*faces*'` (new: every root write to one
+global — define / staged swap / live swap — with pid and isolate scope, plus its value before
+and after every globals restore, and the load journal's mark, outstanding count and entries
+for that global). Through the wrapper:
+
+1. The first isolate is `run-tests`' pre-flight `(%isolate-discard-loads (fn ()
+   (project-check/check)))`, and in the wrapper it is where `editor/face` loads for the FIRST
+   time (in `nest test` the dispatcher had loaded it at root already). `discard=Some(1)`,
+   2345 journalled writes dropped — as designed. `*features*` reverts with the table, so
+   nothing is left half-loaded here.
+2. A later test file loads `editor/face` again inside its isolate (scope 36): `define *faces*
+   {}`, seven `swap->staged` def-faces (its own `:ui/*` defaults), seven `JOURNAL write`s.
+   Then `editor/highlight` loads lazily beneath it and def-faces its `:syntax/*` roles —
+   **`swap->LIVE`**, no journal write: `*faces*` was born in a frame that had closed.
+3. That file's restore: `live value before` carries `:syntax/number`, `:syntax/comment`, …;
+   `target-entries` in the journal are the seven from step 2 only; `value after replay` has
+   the `:ui/*` defaults and nothing else. `editor/highlight`'s function defines WERE
+   journalled and replayed, so `*features*` says it is provided and it never reloads.
+
+`registry_cas`'s own comment describes the rule exactly: a whole-map swap "writes a WHOLE map,
+and a whole map cannot be re-applied … a registration that must survive an isolate goes
+through `%registry-update!`'s ops instead." `def-face` was a swap.
+
+**The fix.** `editor/face`'s `def-face` and `face-set`, `protocol`'s `%register-protocol`,
+and `editor/layers`' `register-system-layer` / `register-type-layers` / `register-file-type` /
+`register-interpreter-type` are each one `%registry-update!` op — staged with the load that
+makes them, published whole, replayed by every restore that would otherwise discard them.
+`register-system-layer` appends at the END unless a member (its order is precedence, newcomers
+lowest), which no op did, so `:append-new` joins `:cons-new` in the kernel; and `face-set`'s
+restyle is a `:merge` op — a read-then-`:assoc` first cut lost keys under `registry_test`'s 64
+concurrent merges into one face, which is exactly the lost-update the ops exist to rule out. The
+remaining
+`%swap-registry!` callers in std are runtime bookkeeping (`debug/*traced-fns*`,
+`telemetry/*telemetry-handlers*`, `repl/*repl-commands*`, `eval-server/*trace-holders*`), not
+load-time registrations, and stay as they are.
+
+**Guards** (`tests/isolate_load_test.blsp`): a `def-face` inside `%with-load-journal` inside
+`%isolate` is there after the restore; a `register-system-layer` likewise; a test's own
+`def-face` inside `%isolate` is still rolled back — isolation keeps undoing what a test did.
+
+**The other red in the same job** was `mcp_test`'s watch-runtime window: under ADR-335 the
+first `mcp/watch-runtime-tool` call loaded the `mcp` module — slow under the tree-walker from
+source — before arming its monitor, and the helper's burst 20 ms after its spawn had come and
+gone. The file `(:load mcp)`s now, KI-131's idiom.
+
+**Why the image path never saw it.** With the stdlib image, the faces of every std module are
+installed at boot from the image's sections, outside any isolate — KI-136's observation from
+the other side: the image replays registrations a module never made *here*, and so hides
+what the source path does not have. CI's differential job runs from source on purpose; it was
+the only gate that could see this, and it had been red for three days behind the `test` job's
+own failures.

@@ -144,6 +144,15 @@ pub enum RegistryOp {
     Dissoc,
     /// Prepend to a list-valued global unless already a member.
     ConsNew,
+    /// Append to a list-valued global unless already a member — `:cons-new`'s tail-end
+    /// twin, for a registry whose ORDER is precedence and whose newcomers rank lowest
+    /// (`editor/layers/*system-layers*`, KI-141).
+    AppendNew,
+    /// Merge a map into the map at a one-key `path` (creating it), the whole read-merge-write
+    /// under the registry lock — `face-set`'s restyle, where a lost update is a missing key
+    /// (`registry_test`: 64 concurrent merges into one face must all land). Non-map values
+    /// on either side decline.
+    Merge,
 }
 
 /// What a `(meta name …)` form records about a global (ADR-283): three independent facts,
