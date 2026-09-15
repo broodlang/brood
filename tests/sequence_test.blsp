@@ -530,9 +530,20 @@
     (assert= (append [1 2] (list 3) [4 5]) (list 1 2 3 4 5))
     (assert= (append nil nil) nil))
   (test "putting a few items in front of a long list costs O(few), not O(long)"
+    ;; Measured as a RATIO against the same appends onto a short list, not as a wall-clock
+    ;; bound: copying the tail 2000 times would be 400M conses against 6000, a ratio no
+    ;; runner is slow enough to hide — where the old `(< ms 500)` failed under the
+    ;; tree-walker differential job on a loaded runner, doing the right thing slowly.
     (let (big (map (range 200000) (fn (x) x))
-          t0 (os/now-ns)
-          _ (fold (range 2000) nil (fn (_ _) (append (list 1 2 3) big)))
-          ms (/ (- (os/now-ns) t0) 1000000.0))
-      ;; copying the tail 2000 times would be 400M conses; sharing it is 6000
-      (is (< ms 500)))))
+          small (map (range 20) (fn (x) x))
+          time-of (fn (xs)
+                    (let (t0 (os/now-ns))
+                      (fold (range 2000) nil (fn (_ _) (append (list 1 2 3) xs)))
+                      (- (os/now-ns) t0)))
+          ;; the short list first, twice, so the second reading is the warm one
+          _ (time-of small)
+          ns-small (time-of small)
+          ns-big (time-of big))
+      ;; sharing: the same six thousand conses either way, so the big one is not an order
+      ;; of magnitude slower (a 10x allowance for noise; a copied tail would be 60 000x)
+      (is (< ns-big (+ (* 10 ns-small) 50000000))))))

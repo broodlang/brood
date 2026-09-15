@@ -55,9 +55,18 @@ otherwise, so it does not depend on an author's choice of spelling.")
   ;; (`introspection-test/a-defined-name`: a nested def records no site), so the audit's
   ;; "every public name carries a docstring" failed whenever that file ran before it in
   ;; the same suite — an order-dependent red.
+  ;; A BARE name is root/prelude — but only when the binary actually ships it. A test that
+  ;; `def`s at RUNTIME (`mcp/eval-tool` evaluating a source string, a REPL session) binds a
+  ;; bare global too, and those are not the surface: `mcpt-a` and `mcpt-b` were reported as
+  ;; undocumented public names whenever `mcp_test` ran in the same batch as this audit. The
+  ;; discriminator is the pair — a prelude function has a source location (the materialised
+  ;; prelude file) and a kernel primitive is `:native`; a bare `:fn` with neither is
+  ;; something this process made up after boot.
   (let (text (->string name)
         slash (string/last-index-of text "/"))
-    (or (< slash 0)
+    (if (< slash 0)
+      (or (not (nil? (reflect/source-location name)))
+        (= (type-of (reflect/eval name)) :native))
       (contains? builtin-module-names (string/substring text 0 slash)))))
 
 (defn load-everything ()
