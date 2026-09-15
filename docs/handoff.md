@@ -87,7 +87,18 @@ mechanism; none of that needs rediscovering.
 
 ### 2 — bedit's strict ratchet, then the `BEDIT_REF` bump
 
-`nest check --strict` in bedit reports **7**, down from 18 (two commits, zero `check-allow`).
+**Re-measured 2026-09-15, after the type-system list closed (ADR-341..351):** bedit's
+`nest check --strict` reads **58** with the current checker, and **53** with the checker as
+it stood before ADR-350 — so the ratchet (a hard gate at zero) was already behind the
+checker before the last three ADRs, and the `downstream-bedit` CI job is red on every push
+until bedit's commit lands. The delta this round is 11 true findings (`first` of a
+possibly-empty pane list — `ed-selected-pane` and ten test sites), 6 fixed, 8 respelled
+(`nil | int[0..255]`). Per bedit's own ratchet comment: fix or raise the ceiling in the
+same commit, then bump. `docs/type-system-status.md` § "Review — stable, and called" has
+the full account; the brood side is closed.
+
+(The paragraph below is the 2026-09-13 reading and is history.) `nest check --strict` in
+bedit reported **7**, down from 18 (two commits, zero `check-allow`).
 Six are ONE class: values that are ints at run time typed `number`, because the hexl helpers
 carry no `sig` and `*hexl-cap*` is a `defdyn` (so `dynamic`). That needs a signature decision
 from whoever owns that code — a `math/min` int-closed rule in the checker was tried and does

@@ -772,3 +772,40 @@ fn a_no_init_reduce_keeps_its_seed_unless_two_elements_are_proven() {
     );
     assert_eq!(ty_str("(reduce [1 2 3] (fn (a x) (+ a x)))"), "int[2..]");
 }
+
+/// A return that is two tuple alternatives — two branches each yielding `[model idx]`,
+/// with the model reshaped in one of them — keeps BOTH shapes through Pass 2.9's
+/// widening (ADR-350): a union that is not growing is not an ascent, and merging it lost
+/// the tuple, so a caller's `[m1 idx]` read `int | map` for `m1`.
+#[test]
+fn a_stable_union_of_tuples_keeps_its_shapes_through_the_fixpoint() {
+    let src = "(defmodule t)\n\
+         (sig want-map (map -> int))\n\
+         (defn want-map (m) 1)\n\
+         (defn- ensure (m path)\n\
+           (let (idx (get m path))\n\
+             (if idx [m idx] [(assoc m :extra path) (dec (count (get m :buffers)))])))\n\
+         (sig use-it ((record &open :buffers (vector any)) string -> int))\n\
+         (defn use-it (m path) (let ([m1 idx] (ensure m path)) (want-map m1)))";
+    let ws = file_warnings_mode(src, true);
+    assert!(ws.is_empty(), "{ws:?}");
+}
+
+#[test]
+fn a_growing_union_of_tuples_widens_to_one_shape_not_a_bare_vector() {
+    // The lattice half: a fixpoint round that gained a second tuple alternative differing
+    // in TWO positions widens to the position-wise hull, a tuple a destructuring can still
+    // read — not the bare `vector<int | map>` the plain merge produced.
+    let prev = ty_of_sig("(tuple (record :a int) int)");
+    let now =
+        ty_of_sig("(or (tuple (record :a int) int) (tuple (record :a int :b int) (int -1 _)))");
+    let widened = now.widen_intervals_against(&prev);
+    let first = widened.tuple_elem_at(0).expect("a tuple shape survives");
+    assert!(first.is_subtype(&Ty::of(Tag::Map)), "{widened}");
+    assert!(
+        widened
+            .tuple_elem_at(1)
+            .is_some_and(|t| t.is_subtype(&Ty::of(Tag::Int))),
+        "{widened}"
+    );
+}

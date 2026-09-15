@@ -1893,7 +1893,18 @@ for optional ones (see [type-records.md](type-records.md)). A record is **closed
 it names every key the value has, and a key it doesn't declare reads as `nil`; write
 `(record &open :k T)` for the permissive form. That is what makes a tagged union
 usable: `(get r :ok)` over `(or (record :ok int) (record :error string))` is
-`int | nil`, because the second alternative says `:ok` is absent.
+`int | nil`, because the second alternative says `:ok` is absent. An int can carry an
+interval, `(int 0 _)` (`_` is an open end), and any countable a length, `(len (vector int)
+3 3)` — what `count` reads and a positional read is proven present by (see
+[type-intervals.md](type-intervals.md)); `(list E)` is a list that may be empty, and the
+non-empty one is `(len (list E) 1 _)`.
+
+**Properties.** Keywords after the type — or alone — declare what the checker holds the
+function to (see [type-properties.md](type-properties.md)): `:pure` (no effect: no
+message, no I/O, no table, no clock or randomness, through every function it calls) and
+`:total` (every self-call decreases an argument, and no `match` in the body can fall
+through). `(sig area (number -> number) :pure)`; `(sig walk :total)`. A `ui-memo` thunk is
+held to `:pure` without being asked.
 
 A type-expression the checker cannot read is **reported**, not guessed: a
 misspelled name (`strng`) or constructor (`(tupel int)`), a declaration whose

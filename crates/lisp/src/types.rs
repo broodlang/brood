@@ -1477,14 +1477,24 @@ impl Ty {
     /// refinement trees in parallel where they have the same shape; leaves the rest.
     pub fn widen_intervals_against(&self, prev: &Ty) -> Ty {
         // Alternatives that share their tags are merged first — by the widening merge —
-        // on both sides, so a tuple accumulator whose steps differ in two positions
-        // (`(tuple 0 nil) | (tuple 1 (list 0)) | …`) is widened as one shape rather than
-        // growing an alternative per round. A record alternative is left alone: the
-        // tagged-union idiom (`{:ok v} | {:error e}`) must not merge under a fixpoint.
-        let (mine, theirs) = (
-            collapse_same_tags(self.terms_vec()),
-            collapse_same_tags(prev.terms_vec()),
-        );
+        // on both sides, WHEN the alternatives are multiplying: a tuple accumulator whose
+        // steps differ in two positions (`(tuple 0 nil) | (tuple 1 (list 0)) | …`) grows
+        // an alternative per round, and is widened as one shape instead. A union that is
+        // not growing keeps its alternatives — `(tuple model int) | (tuple model' int)`,
+        // two branches returning a pair, is not an ascent, and merging it lost the tuple
+        // shape (a destructuring `[m idx]` then read `int | map`). A record alternative is
+        // left alone either way: the tagged-union idiom (`{:ok v} | {:error e}`) must not
+        // merge under a fixpoint.
+        let (my_terms, their_terms) = (self.terms_vec(), prev.terms_vec());
+        let growing = my_terms.len() > their_terms.len();
+        let (mine, theirs) = if growing {
+            (
+                collapse_same_tags(my_terms),
+                collapse_same_tags(their_terms),
+            )
+        } else {
+            (my_terms, their_terms)
+        };
         let widened: Vec<Ty> = mine
             .into_iter()
             .map(|term| {
@@ -1989,6 +1999,23 @@ impl Ty {
         // go. Without this step a hundred-element `'(1 2 …)` read as a bare `pair`, where
         // the plain element rule had kept `list<int>`.
         if self.tuple.is_some() || self.list_shape.is_some() {
+            // First, the shape with FLAT positions: a `[model idx]` whose model record is
+            // deep is still a pair a destructuring reads as `map` and `int` — dropping to
+            // the element union made it `int | map` at both positions (ADR-350). Only a
+            // shape too wide for even that goes to the element union.
+            let flat = |ts: &Option<Arc<Vec<Ty>>>| {
+                ts.as_ref()
+                    .map(|ts| Arc::new(ts.iter().map(|t| t.widened_below(0)).collect::<Vec<Ty>>()))
+            };
+            let shaped = Ty {
+                tuple: flat(&self.tuple),
+                list_shape: flat(&self.list_shape),
+                elem: self.elem.as_ref().map(|e| Arc::new(e.widened_below(0))),
+                ..self.clone()
+            };
+            if shaped.node_count(MAX_TY_NODES + 1) <= MAX_TY_NODES {
+                return shaped;
+            }
             let positions = self
                 .tuple
                 .iter()
@@ -4137,10 +4164,15 @@ fn positional_union_is_exact(
     let (Some(ta), Some(tb)) = (a.as_deref(), b.as_deref()) else {
         return false;
     };
-    ta.len() == tb.len()
-        && a_tags & bit != 0
-        && b_tags & bit != 0
-        && ta.iter().zip(tb).filter(|(x, y)| x != y).count() <= 1
+    if ta.len() != tb.len() || a_tags & bit == 0 || b_tags & bit == 0 {
+        return false;
+    }
+    // Exact when at most one position differs — or when one shape is inside the other
+    // position-wise, so the union IS the wider shape: `(tuple m int)` beside `(tuple m
+    // int[-1..])` is one tuple, not two alternatives for a merge to lose (ADR-350).
+    ta.iter().zip(tb).filter(|(x, y)| x != y).count() <= 1
+        || ta.iter().zip(tb).all(|(x, y)| x.is_subtype(y))
+        || ta.iter().zip(tb).all(|(x, y)| y.is_subtype(x))
 }
 /// The merged element refinement of `a ∪ b` when that merge is EXACT although the two
 /// element types differ — `Some(elem)` — or `None` when it is not (the caller then falls
@@ -4273,7 +4305,22 @@ fn collapse_same_tags(terms: Vec<Ty>) -> Vec<Ty> {
                     && existing.neg.is_none()
                     && !tagged_apart(existing, &term)
                 {
-                    *existing = existing.clone().union_term(term);
+                    // The widening merge — but a positional shape of one arity on both
+                    // sides is kept as a shape, each position the hull of the two: an
+                    // over-approximation of the union (sound) that a destructuring can
+                    // still read, where the plain merge drops the shape the moment two
+                    // positions differ (`[m idx]` beside `[(assoc m …) (dec n)]` read
+                    // `int | map` for `m`).
+                    let tuple = positional_hull(&existing.tuple, &term.tuple);
+                    let list_shape = positional_hull(&existing.list_shape, &term.list_shape);
+                    let mut merged = existing.clone().union_term(term);
+                    if merged.tags & VECTOR_BIT != 0 && tuple.is_some() {
+                        merged.tuple = tuple;
+                    }
+                    if merged.tags & PAIR_BIT != 0 && list_shape.is_some() {
+                        merged.list_shape = list_shape;
+                    }
+                    *existing = merged.normalise_len();
                     continue 'next;
                 }
             }
@@ -4281,6 +4328,24 @@ fn collapse_same_tags(terms: Vec<Ty>) -> Vec<Ty> {
         out.push(term);
     }
     out
+}
+
+/// The position-wise hull of two positional shapes of ONE arity — `Some` only when both
+/// carry a shape and the arities agree. Every value of either shape is in the hull, so a
+/// union widened to it is still over-approximated.
+fn positional_hull(a: &Option<Arc<Vec<Ty>>>, b: &Option<Arc<Vec<Ty>>>) -> Option<Arc<Vec<Ty>>> {
+    let (Some(ta), Some(tb)) = (a.as_deref(), b.as_deref()) else {
+        return None;
+    };
+    if ta.len() != tb.len() {
+        return None;
+    }
+    Some(Arc::new(
+        ta.iter()
+            .zip(tb.iter())
+            .map(|(x, y)| x.clone().union(y.clone()))
+            .collect(),
+    ))
 }
 
 /// Are two positional shapes of one arity a TAGGED union — `[:ok v]` beside `[:error e]`,
