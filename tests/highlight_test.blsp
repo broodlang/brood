@@ -308,3 +308,8 @@
       (send w [:lex "(+ 1)" (self)])
       (assert= (receive (r r))
         (list [1 2 hl-face-function] [3 4 hl-face-number])))))
+
+(describe "line-restart — a line-oriented mode's restart rule (ADR-352)"
+  (test "answers the position itself: any line start is a safe restart"
+    (assert= (editor/highlight/line-restart "a\nb\nc" 4) 4)
+    (assert= (editor/highlight/line-restart "" 0) 0)))

@@ -54,8 +54,8 @@
                "off" :special
                "~" :special}
      ;; a key: the first thing on the line (after list dashes), up to its `:`
-     :line [["^\\s*(?:-\\s+)*([A-Za-z0-9_.\\-\"' ]+?)\\s*:(?:\\s|$)" :keyword]
-             ["^(---|\\.\\.\\.)\\s*$" :special]]}))
+     :line [["^\\s*(?:-\\s+)*" "[A-Za-z0-9_.\\-\"' ]+?" "\\s*:(?:\\s|$)" :keyword]
+             ["^" "---|\\.\\.\\." "\\s*$" :special]]}))
 
 (defn yaml-spans (src)
   "YAML colour spans: keys, strings, numbers, booleans/null, anchors, tags, comments,
@@ -78,9 +78,9 @@ document markers.
                      :number]]
      :words "[A-Za-z_]+"
      :classes {"true" :special "false" :special}
-     :line [["^\\s*(\\[\\[?[^\\]]+\\]\\]?)" :function]
+     :line [["^\\s*" "\\[\\[?[^\\]]+\\]\\]?" "" :function]
              ; [table] / [[array of tables]]
-             ["^\\s*([A-Za-z0-9_.\\-\"']+)\\s*=" :keyword]]}))
+             ["^\\s*" "[A-Za-z0-9_.\\-\"']+" "\\s*=" :keyword]]}))
 
 (defn toml-spans (src)
   "TOML colour spans: table headers, keys, strings, numbers and dates, booleans, comments.
@@ -114,8 +114,8 @@ document markers.
                ".SUFFIXES" :special
                ".PRECIOUS" :special}
      ;; a rule's target(s) — the line starts at column 0 and reaches a `:` that is not `:=`
-     :line [["^([^\\s:#=][^:#=]*):(?:[^=]|$)" :function]
-             ["^([A-Za-z_][A-Za-z0-9_.]*)\\s*[:?+!]?=" :keyword]]}))
+     :line [["^" "[^\\s:#=][^:#=]*" ":(?:[^=]|$)" :function]
+             ["^" "[A-Za-z_][A-Za-z0-9_.]*" "\\s*[:?+!]?=" :keyword]]}))
 
 (defn makefile-spans (src)
   "Makefile colour spans: targets, variable assignments and `$(…)` references, the
@@ -138,9 +138,9 @@ conditional / include directives, comments.
                "no" :special
                "on" :special
                "off" :special}
-     :line [["^\\s*(\\[[^\\]]*\\])" :function]
+     :line [["^\\s*" "\\[[^\\]]*\\]" "" :function]
              ; [section] / [remote \"origin\"]
-             ["^\\s*([A-Za-z0-9_.\\-]+)\\s*=" :keyword]]}))
+             ["^\\s*" "[A-Za-z0-9_.\\-]+" "\\s*=" :keyword]]}))
 
 (defn ini-spans (src)
   "INI and git-config colour spans: `[section]` headers, keys, quoted values, booleans,
@@ -156,7 +156,8 @@ conditional / include directives, comments.
 ;; prefix reads as a keyword.
 
 (def gitcommit-grammar
-  (lexer-grammar {:structured [["^#.*" :comment]] :line [["^([a-z]+(?:\\([^)]*\\))?!?:)" :keyword]]}))
+  (lexer-grammar {:structured [["^#.*" :comment]]
+                  :line [["^" "[a-z]+(?:\\([^)]*\\))?!?:" "" :keyword]]}))
 
 (defn- gitcommit-subject-from (src i n)
   "The `[start end]` of the first line at or after `i` that is neither git commentary

@@ -66,18 +66,16 @@ day: tab stops in the display seam (ADR-342), the scroll blit (ADR-343),
 (ADR-345), `editor/lexer` + `editor/configs` (ADR-346), the tree-sitter grammar recipe in
 `editor/treesit`. Left open, with the numbers:
 
-- ⬜ **The regex capture engine is the ceiling on every lexical mode.** `regex/find-all`
-  costs ~1.4 ms per MATCHED line (a 90-char `#.*` comment is one long match; the
-  first-character prefilter only skips positions outside a match), against 25 µs for the
-  bitset `match?`. A ~100-line YAML/TOML/shell band re-lexes in ~150 ms per keystroke.
-  30% was recoverable in Brood (consed thread list, hoisted slots, prefilter — 2026-09-13
-  devlog has the profile); the rest is the interpreted VM's ~15 µs per character per live
-  thread. The 10× is a DESIGN decision: (a) a DFA for the capture-free scan that finds match
-  extents, with the capture VM run only over each match — pure Brood, but a capture run over
-  a whole-line match costs the same; (b) a native regex path (the Rust `regex` crate) behind
-  the same `std/regex` API, memoised compile, char-offset results — against the module's
-  "no kernel primitives" stance, but the only route to sub-100 µs per line; (c) JIT the
-  compiled NFA to Brood code per pattern. Decide before more table-driven modes ship.
+- ✅ **The regex capture engine is no longer on any lexer's path** (2026-09-15, ADR-352).
+  Decided as (a), refined: the lexers never wanted captures — a token's identity is its
+  table row — so `regex/tokens` scans a rule table on the bitset DFA (earliest position,
+  first rule, longest match; `regex/tokenizer` compiles a table once), `regex/paint` does
+  the one grouped question a line rule asks (prefix / paint / suffix, three DFA runs), and
+  `find`/`find-all` enter the VM only at a start the DFA found. `editor/lexer` (one scan per
+  line, the word rule as the last row) and `editor/shell` ride it. Measured on bedit's
+  173-line `.bashrc` (worktree dev build): `shell-spans` 303 → 12 ms whole-file, a 36-char
+  line 2.0 → 0.11 ms, 40 YAML lines 17.8 → 5.6 ms. The native path (b) stays open behind
+  the same surface if a lexer ever needs more.
 - ⬜ **The window-id half of ADR-059.** Frames chose one process per window (ADR-345), so
   input routing needs nothing; a sound "two windows, one process" still needs a per-window
   mailbox, not a tag (the loop's catch-all poll arm would swallow the other window's keys).
