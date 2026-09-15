@@ -391,12 +391,12 @@ surface feeding it — and each turned out to need a different kind of fix. Deta
       `int` (`0 ∪ (+ i 1)` reads `i ≥ 0`; needs its own widening to `[0, ∞)`); and the
       relational guard `(< i (count xs))` as a fact between two locals, read at `(nth xs i)`.
       The Idris `Vect n a` lesson in the clothes this lattice already wears (2026-09-14).
-- [ ] **12. `total`.** A declaration that a function terminates and covers every case — the
+- [x] **12. `total`.** Shipped 2026-09-15 as `(sig f … :total)` (ADR-351, `docs/type-properties.md`). Was: a declaration that a function terminates and covers every case — the
       two lints exist (non-tail recursion, `match` exhaustiveness); what is missing is a name to
       tie them to, plus a structural-decrease check for the termination half (`(rest xs)`,
       `(- n 1)` under `(> n 0)` on the recursive call). The property a supervisor's `init` or a
       `gen` handler should be able to state.
-- [ ] **13. `pure`.** A declaration that a function performs no effect — `send`, I/O, a table
+- [x] **13. `pure`.** Shipped 2026-09-15 as `(sig f … :pure)` (ADR-351); `ui-memo` thunks are checked without one. Was: a declaration that a function performs no effect — `send`, I/O, a table
       write — checked from `guard_effects.rs`'s effectful-head detection. Its consumer already
       exists: `ui-memo` (ADR-336) caches view fragments on the assumption the render function
       is pure, and nothing checks it.

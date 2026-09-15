@@ -65,6 +65,7 @@ seq    ::= (list type) | (vector type) | (set type) ; element type checked at ru
 map-kv ::= (map key-type val-type)             ; key/val checked at runtime
 range  ::= (int lo hi)                         ; an int within [lo, hi]; `_` is an open end (ADR-350)
          | (len type lo hi)                    ; a countable of length within [lo, hi]
+sig    ::= (sig name type prop*) | (sig name prop+) ; prop ::= :pure | :total (ADR-351)
 union  ::= (or type type+)
 inter  ::= (and type+)                         ; intersection; (and) = any
 compl  ::= (not type)                          ; complement — every value that is NOT a type

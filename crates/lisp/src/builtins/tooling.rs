@@ -296,9 +296,10 @@ pub(super) fn declared_sig(args: &[Value], _env: EnvId, heap: &mut Heap) -> Lisp
     let rooted = heap
         .root_qualified_ref(sym)
         .unwrap_or_else(|| crate::eval::macros::resolve_reference(heap, sym));
-    let Some(form) = heap
-        .declared_sig_value(rooted)
-        .or_else(|| heap.declared_sig_value(sym))
+    // The type-form alone: the properties a `(sig f T :pure)` stores beside it are
+    // `%declared-sig-props`'s (ADR-351).
+    let Some(form) = crate::builtins::modules::sig_type_of(heap, heap.declared_sig_value(rooted))
+        .or_else(|| crate::builtins::modules::sig_type_of(heap, heap.declared_sig_value(sym)))
     else {
         return Ok(Value::nil());
     };

@@ -48,6 +48,7 @@
     (let (p (first rest-parts)
           sep (if (or (string/ends-with? head "/") (string/starts-with? p "/")) "" "/"))
       (path-glue (str head sep p) (rest rest-parts)))))
+(sig path-glue :total)
 
 ;; ---- components -------------------------------------------------------------
 
@@ -119,7 +120,7 @@ an empty argument list.
 
     (path/join \"a\" \"b\" \"c.txt\")    → \"a/b/c.txt\""
   (join-loop (seq parts) nil))
-(sig join (& string -> string))
+(sig join (& string -> string) :pure :total)
 
 ;; acc is built in reverse (cons prepends); reverse before gluing.
 (defn- join-loop (parts acc)
@@ -133,6 +134,7 @@ an empty argument list.
         (= p "") (join-loop (rest parts) acc)
         (and (> (string/length p) 0) (= (string/char-at p 0) "/")) (join-loop (rest parts) (list p))
         else (join-loop (rest parts) (cons p acc))))))
+(sig join-loop :total)
 
 ;; ---- split ------------------------------------------------------------------
 

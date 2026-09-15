@@ -63,10 +63,19 @@ pub(super) fn obs_global(heap: &Heap, sym: Symbol) -> Option<Value> {
     heap.env_get(heap.global(), rooted)
 }
 
-/// Record + read a global's declared `(sig …)` type-expression value.
+/// Record + read a global's declared `(sig …)` type-expression value — the type-form
+/// alone, unwrapped from the properties a `(sig name T :pure …)` stores beside it
+/// (ADR-351; `None` for a name that declared properties and no type).
 pub(super) fn obs_declared_sig_value(heap: &Heap, sym: Symbol) -> Option<Value> {
     heap.rec_check_dep_sym(sym);
-    heap.declared_sig_value(sym)
+    crate::builtins::modules::sig_type_of(heap, heap.declared_sig_value(sym))
+}
+
+/// Record + read a global's declared signature PROPERTIES (`:pure`, `:total`, … —
+/// ADR-351), empty when none were declared.
+pub(super) fn obs_declared_sig_props(heap: &Heap, sym: Symbol) -> Vec<Symbol> {
+    heap.rec_check_dep_sym(sym);
+    crate::builtins::modules::sig_props_of(heap, heap.declared_sig_value(sym))
 }
 
 /// Record + read a module's public exports (for `(:use m)` resolution).

@@ -22628,3 +22628,36 @@ a caller states it, between two parameters; a general domain is another lattice.
 against a bound the code compares to, not a variable the type carries. *A float interval*:
 no reader. *Dropping the `pair`-implies-≥1 convention for an explicit `[1..]`*: the slot
 would then say what the tag already says on every non-empty list in the corpus.
+
+## ADR-351 — Declared properties: `:pure` and `:total` on a `sig`
+
+**Status:** accepted and implemented 2026-09-15 (`sig` macro `(name & spec)`;
+`%register-sig-props` and the `(%sig T prop…)` store entry in `builtins/modules.rs`;
+`annot::sig_decl_head`; `Ctx::declared_props`; `check/properties.rs`; the walk's coverage
+finding under `Ctx::total_fn`; `check-allow :pure` / `:total`). Design in
+`docs/type-properties.md`.
+
+**Context.** Items 12 and 13 of the type-system audit — what Idris has that an advisory
+checker could use. The two lints a `total` needs existed (non-tail recursion, `match`
+exhaustiveness) with no name to tie them to and no termination half; `ui-memo` (ADR-336)
+cached view fragments on an unchecked assumption of purity.
+
+**Decision.** A property is a keyword on the `sig` — `(sig f (int -> int) :pure :total)`,
+or `(sig f :pure)` with no type — registered beside the type in the one declared-sig store
+(wrapped as `(%sig T prop…)`, so every reader of the store unwraps through one helper and
+an image carries it). `:pure`: the body reaches no effectful head, through the functions it
+calls, by a deny-list — the sound direction for a checker that never flags a valid program.
+`:total`: every self-call hands some parameter a structural decrease read in its branch
+scope (a shorter non-empty sequence, a smaller int bounded below, a larger int bounded
+above by a literal or an immutable count), and the walk reports a `match` failure it cannot
+prove unreachable. Neither claims anything of the callees. `ui-memo`'s thunk is checked
+without a declaration.
+
+**Alternatives rejected.** *Separate forms `(pure f)` / `(total f)`*: two more bare names
+(ADR-250 spent an audit removing them), and a signature already IS the declaration of what
+the checker holds a function to. *Effect types on the arrow* (`(int -> int !io)`): the
+right long-term shape, and premature — no consumer needs an effect in a type position, and
+a union or intersection of arrows with effects is a lattice question this checker has no
+answer for yet. *An allow-list of pure primitives*: complete but noisy — every unlisted
+primitive a false positive, against the checker's one promise. *Transitive totality*: a
+call graph with a measure per edge, a different analysis; declared as not claimed.

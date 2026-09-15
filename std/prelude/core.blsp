@@ -602,13 +602,21 @@ Written beside the definition, like `(sig …)`, and cleared if the name is rede
   ;; is not a name at all, and `%register-meta` reads a list or a vector alike.
   `(%register-meta '~name [~@clauses]))
 
-(defmacro sig (name type)
+(defmacro sig (name & spec)
   "Declare a type signature for `name`, e.g. `(sig area (number -> number))`.
 Read by the advisory type checker; a runtime no-op unless `BROOD_CONTRACTS=1`
 is set, in which case it installs a runtime contract like `(sig! …)`. Type
 grammar: base names (`int` `string` `number` `list` `vector` `map` `fn` `any` …),
 arrows `(p… -> r)`, `(list E)`/`(vector E)`, `(or A B)`, and `(& rest-type)`
-for variadic tails."
+for variadic tails.
+
+Property keywords may follow the type — or stand alone — to declare what the
+checker should hold the function to (ADR-351): `:pure` (no effect: no message, no
+I/O, no table write, no read of the clock or the environment) and `:total` (every
+self-call decreases an argument, and no `match` in the body can fail).
+
+    (sig area (number -> number) :pure)
+    (sig walk :total)"
   ;; Always register the declaration on the heap (keyed by the module-qualified
   ;; global name, resolved as `def` would) so the checker treats it as `name`'s
   ;; authoritative signature everywhere — intra-module and cross-module — not just
@@ -628,37 +636,46 @@ for variadic tails."
   ;; stands down, in the one mode where installing it makes the language unable to boot.
   ;; Nested `if` and `%`-prims rather than `and`/`or`/`cond` on purpose: this macro body is
   ;; expanded where it is defined, and those macros are defined further down the file.
-  `(do
-     ~(if (= (%getenv "BROOD_CONTRACTS") "1")
-        (if (%le 0 (%sig-pos '(reverse append) name 0)) `(%register-sig '~name '~type) nil)
-        `(%register-sig '~name '~type))
-     ~(if (= (%getenv "BROOD_CONTRACTS") "1")
-        ;; Contracts mode turns this *declaration* into an *action*: `sig!` rebinds
-        ;; `name` to a checking wrapper, so the definition must already exist. A
-        ;; `sig` written above its `defn` — the natural place, since a signature is
-        ;; documentation, and the style the strict sweep adopted across std/ — used
-        ;; to abort the whole module load here. It now DEFERS instead: the pending
-        ;; contract is queued and installed at the next `provide`, when the module's
-        ;; defs all exist (`%contract-defer!` / `%contracts-apply-pending!` in
-        ;; tools.blsp — late-bound, so this expansion referencing them from an
-        ;; earlier prelude file is fine). In a bare file with no module (no provide)
-        ;; an above-defn sig stays a pure declaration, which is what it was before
-        ;; contracts mode existed.
-        ;; `bound?` on a QUOTED symbol is not namespace-resolved — inside
-        ;; `(defmodule path)` it would ask about bare `basename` while the
-        ;; definition is `path/basename`, and report "not defined yet" for a
-        ;; perfectly-placed sig. `%register-sig` already returns the qualified
-        ;; symbol it keyed the declaration under, so ask about *that*. NO `let`
-        ;; around this — `sig!` expands to `def`s of a shim `fn`, and a binding
-        ;; frame here makes that shim capture a local env, which the prelude
-        ;; freeze hard-rejects (KI-81's other half). The defer branch calls
-        ;; `%register-sig` a second time instead: cold, idempotent.
-        (if (%le 0 (%sig-pos '(reverse append) name 0))
-          nil
-          `(if (bound? (%register-sig '~name '~type))
-             (sig! ~name ~type)
-             (%contract-defer! (%register-sig '~name '~type) '~type)))
-        nil)))
+  ;; The type-form is the first item of `spec` unless it is a keyword; every item after
+  ;; it is a property keyword, recorded beside the type (`%register-sig-props`). A
+  ;; properties-only `(sig f :pure)` registers no type and installs no contract.
+  (let (typed (if (pair? spec) (if (%eq (type-of (first spec)) :keyword) false true) false)
+        type (if typed (first spec) nil)
+        props (if typed (rest spec) spec))
+    `(do
+       ~(if typed
+          (if (= (%getenv "BROOD_CONTRACTS") "1")
+            (if (%le 0 (%sig-pos '(reverse append) name 0)) `(%register-sig '~name '~type) nil)
+            `(%register-sig '~name '~type))
+          nil)
+       ~(if (pair? props) `(%register-sig-props '~name '~props) nil)
+       ~(if (if typed (= (%getenv "BROOD_CONTRACTS") "1") false)
+          ;; Contracts mode turns this *declaration* into an *action*: `sig!` rebinds
+          ;; `name` to a checking wrapper, so the definition must already exist. A
+          ;; `sig` written above its `defn` — the natural place, since a signature is
+          ;; documentation, and the style the strict sweep adopted across std/ — used
+          ;; to abort the whole module load here. It now DEFERS instead: the pending
+          ;; contract is queued and installed at the next `provide`, when the module's
+          ;; defs all exist (`%contract-defer!` / `%contracts-apply-pending!` in
+          ;; tools.blsp — late-bound, so this expansion referencing them from an
+          ;; earlier prelude file is fine). In a bare file with no module (no provide)
+          ;; an above-defn sig stays a pure declaration, which is what it was before
+          ;; contracts mode existed.
+          ;; `bound?` on a QUOTED symbol is not namespace-resolved — inside
+          ;; `(defmodule path)` it would ask about bare `basename` while the
+          ;; definition is `path/basename`, and report "not defined yet" for a
+          ;; perfectly-placed sig. `%register-sig` already returns the qualified
+          ;; symbol it keyed the declaration under, so ask about *that*. NO `let`
+          ;; around this — `sig!` expands to `def`s of a shim `fn`, and a binding
+          ;; frame here makes that shim capture a local env, which the prelude
+          ;; freeze hard-rejects (KI-81's other half). The defer branch calls
+          ;; `%register-sig` a second time instead: cold, idempotent.
+          (if (%le 0 (%sig-pos '(reverse append) name 0))
+            nil
+            `(if (bound? (%register-sig '~name '~type))
+               (sig! ~name ~type)
+               (%contract-defer! (%register-sig '~name '~type) '~type)))
+          nil))))
 
 (defmacro deftype (name type)
   "Name a type for the checker — `(deftype pane (record &open :rect (tuple int int int int)))`
@@ -692,9 +709,11 @@ shape, a union, a tuple, another alias. Module-scoped like a `sig`: declared in 
 keyword: `:non-tail-recursion`, `:unreachable-clause`, `:type-mismatch`, `:unbound`
 (globals defined at runtime — a `reflect/eval`-driven `def`, the wasm `use-native`
 binding — that the checker cannot see in source), `:unrequired`, `:deprecated`,
-`:discarded-catch`, or `:duplicate-def` (a second top-level definition of a name in
-one file that is a deliberate override). A runtime no-op; the marker is read only by
-the type checker (`nest check`)."
+`:discarded-catch`, `:duplicate-def` (a second top-level definition of a name in
+one file that is a deliberate override), `:pure` (a `ui-memo` thunk, or a `:pure`-declared
+function, that performs an effect on purpose) or `:total` (a `:total`-declared function
+the checker cannot see terminate or cover its cases). A runtime no-op; the marker is
+read only by the type checker (`nest check`)."
   `(%lint-allow ~category (do ~@body)))
 
 ;; ---- runtime contracts: `(sig! …)` enforces a signature at call time --------

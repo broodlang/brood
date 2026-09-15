@@ -215,8 +215,12 @@ pub(super) fn check_fn_seeded(
         // …))` would type `xs` as `int` and then flag `(reduce … xs)` for passing an
         // int where a sequence is wanted. Bind it plainly (not sig-authoritative) so
         // no dead-clause lint keys off it.
+        // …and `nil` beside it: a call that supplies no rest argument binds the collector
+        // to `nil` (a list with nothing in it IS `nil`), so `(first xs)` there is `nil`.
         if has_rest && i + 1 == params.len() {
-            let rest_ty = sig.and_then(|s| s.rest.clone()).map(Ty::list_of);
+            let rest_ty = sig
+                .and_then(|s| s.rest.clone())
+                .map(|elem| Ty::list_of(elem).union(Ty::of(crate::core::value::Tag::Nil)));
             scope = scope.bind(p, rest_ty);
             continue;
         }
@@ -309,6 +313,16 @@ pub(super) fn check_def(
     // expands to. Seed the fn's params with the declared types so the body knows
     // them (and a guard narrowing a param to `never` becomes a dead clause).
     if let Some(&Value::Sym(name)) = items.get(1) {
+        // A `:total` declaration (ADR-351) is checked BY the walk: every `match` failure
+        // the body can reach has to be proven covered (`walk.rs`'s throw site), so the
+        // body's scope carries the name it is held to.
+        let total_scope;
+        let ctx = if super::super::properties::has_prop(heap, ctx, name, "total") {
+            total_scope = ctx.with_total_fn(name);
+            &total_scope
+        } else {
+            ctx
+        };
         // `ctx.declared_sig` is keyed by the *bare* name Pass 2.5 recorded from
         // the file's un-expanded `(sig …)` text; `name` here is `defn`'s
         // *expanded* def head, which is module-qualified inside a `defmodule`

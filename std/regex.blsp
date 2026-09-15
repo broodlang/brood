@@ -686,6 +686,9 @@ Runs once per distinct (set, char) — every repeat is the loop's one `table/get
                    (regex-delta-slow (regex-states-of pattern) memo m set (nth codes i))
                    nxt))
         (regex-run-anchored-loop pattern exitmemo memo m matchbit codes n (+ i 1) nxt2)))))
+;; Terminates: `i` climbs by one under `i < n` with `n` the count of an immutable `codes`
+;; (ADR-351 reads the count relation the callers establish).
+(sig regex-run-anchored-loop :total)
 
 ;; unanchored search (match?): inject the (split-closed) start state at every
 ;; position so a match may begin anywhere; `^` fires only in the start closure
@@ -711,6 +714,7 @@ Runs once per distinct (set, char) — every repeat is the loop's one `table/get
           n
           (+ i 1)
           (bit/or nxt2 startmid))))))
+(sig regex-run-search-loop :total)
 
 ;; ---- the Pike VM: where a match is, and what its groups caught ---------------
 ;; The bitset engine above answers "is there a match" by forgetting everything about

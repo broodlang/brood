@@ -1088,3 +1088,18 @@ two PARAMETERS is derived from the callers too (`n = (count codes)` handed besid
 preserved by every self-call), which retired `std/regex`'s last two `check-allow
 :type-mismatch` scopes; and a `when`-shaped binding is a guard on its condition. std plain
 0, std strict 0, tests plain 0. `docs/type-intervals.md` carries the design.
+
+## `:pure` and `:total` (2026-09-15, ADR-351)
+
+Items 12 and 13, together: a property keyword on the `sig` — `(sig f (int -> int) :pure
+:total)`, or `(sig f :total)` alone — registered beside the type in the declared-sig
+store. `:pure` walks the body for an effectful head through the functions it calls (a
+deny-list, so a finding is an effect the body reaches); `:total` asks every self-call for
+a structural decrease read in its branch scope — a shorter non-empty list, a smaller
+bounded-below int, a larger int under a literal or a count bound (ADR-350's parameter
+relation makes `regex`'s upward loops sayable) — and the walk reports a `match` failure it
+cannot prove unreachable. `ui-memo`'s thunk is checked without a declaration, which found
+the one deliberate effect in `tests/ui_test.blsp`. `path/join` and the regex DFA loops
+carry the first declarations. Also on the way: a `& rest` binder is `nil | list<rest>`
+(it was `list<rest>`, unsound for a call with no rest argument), and the site walk binds a
+variadic function's parameters from its declared sig. `docs/type-properties.md`.

@@ -299,16 +299,18 @@
   ;; A literal types as ITSELF, not as its tag — the checker keeps singleton literal types,
   ;; which is how it knows `(if true a b)` never takes the second branch. Worth pinning:
   ;; anything rendering these to a human has to expect `"1"` where it assumed `"int"`.
+  ;; Int arithmetic over literals folds the same way (ADR-350): `(+ 1 2)` IS `3`.
   (test "a literal types as the singleton it is; a call types as its result"
     (assert= (reflect/expr-type "1") "1")
     (assert= (reflect/expr-type ":score") ":score")
-    (assert= (reflect/expr-type "(+ 1 2)") "int"))
+    (assert= (reflect/expr-type "(+ 1 2)") "3")
+    (assert= (reflect/expr-type "(+ 1 (string/length (str 1)))") "int[1..]"))
 
   (test "the type follows the call, not the arguments"
     (assert= (reflect/expr-type "(str 1 2)") "string"))
 
   (test "only the FIRST form is typed — the rest are somebody else's question"
-    (assert= (reflect/expr-type "(+ 1 2)\n\"later\"") "int"))
+    (assert= (reflect/expr-type "(+ 1 2)\n\"later\"") "3"))
 
   ;; Both read live from a buffer that is unbalanced half the time, so neither may raise.
   ;; `check-string-structured` answers () there; the honest analogue for one type is nil.
@@ -354,7 +356,8 @@
           hit (first sigs))
       (assert= (count sigs) 1)
       (assert= (:name hit) "ixs-len")
-      (assert= (:sig hit) "(string -> int)")
+      ;; `string/length` is never negative (ADR-350).
+      (assert= (:sig hit) "(string -> (int 0 _))")
       (assert= (:declared? hit) false)
       (assert= (:informative? hit) true)))
 
@@ -400,15 +403,17 @@
                                (fn (e) (= (:name e) name))))
                      (if (nil? hit) :no-such-fn (:sig hit)))))
       ;; map: element type flows through the callback's return
-      (assert= "(seqable -> (or nil (list string)))"
+      ;; `(list E)` may be empty (ADR-350): the spelling of `nil | list<E>`.
+      (assert= "(seqable -> (list string))"
         (sig-of "(defn icb-m (xs) (map xs (fn (x) (str x))))" "icb-m"))
-      ;; fold: accumulator seeded from init, stepped by the callback
-      (assert= "(seqable -> int)"
+      ;; fold: accumulator seeded from init, stepped by the callback — and never below it
+      (assert= "(seqable -> (int 0 _))"
         (sig-of "(defn icb-f (xs) (fold xs 0 (fn (a x) (+ a 1))))" "icb-f"))
       ;; reduce/2 — no init: the accumulator starts at the collection's first element,
       ;; so a typed collection is what makes the result provable (an untyped one is
       ;; honestly `any`, which a STALE position also yields — hence the literal here)
-      (assert= "(-> int)"
+      ;; …three elements, so at least two steps from a seed of `1 | 2 | 3` (ADR-350).
+      (assert= "(-> (int 2 _))"
         (sig-of "(defn icb-r () (reduce [1 2 3] (fn (a x) (+ a x))))" "icb-r"))
       ;; seq/keep — `map` then drop nils; its own arm in `infer.rs`. Keyed QUALIFIED,
       ;; like `seq/interpose`: `keep` lives in `seq` (ADR-227), so an arm matching the
@@ -416,7 +421,7 @@
       ;; element type has the callback's nil REMOVED — dropping nil is what `keep`
       ;; does — but NOT its failure: `keep` drops only nil, so a failure the callback
       ;; produced stays in the element type, which is what makes it visible here.
-      (assert= "(seqable -> (or nil (list (or failure number))))"
+      (assert= "(seqable -> (list (or failure number)))"
         (sig-of "(defn icb-k (xs) (seq/keep xs (fn (x) (string/->number x))))" "icb-k"))))
 
   ;; An INLINE pattern-clause literal is two spellings of the named `token` reducer the

@@ -9,8 +9,8 @@
 use super::ctx::{Ctx, PathKey};
 use super::guards::{
     and_conjunct_guards, apply_comparison_facts, find_redundant_clause, guard_assertion,
-    is_syntactic_keyword, literal_eq_test_raw, match_exhaustiveness_gap, or_disjunct_guards,
-    or_same_var_narrowing, path_guard_assertion, render_literal_pattern,
+    is_syntactic_keyword, literal_eq_test_raw, or_disjunct_guards, or_same_var_narrowing,
+    path_guard_assertion, render_literal_pattern,
 };
 use super::infer::{expr_ty, global_value_ty};
 use super::sigs::{
@@ -745,7 +745,7 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         // `throw` call path, not a dedicated `match`/`SPECIAL_HEAD` entry,
         // since by now `match` has already macroexpanded to this) is enough
         // to flag a literal-enum scrutinee whose clauses don't cover every
-        // member. See `match_exhaustiveness_gap`.
+        // member. See `guards::match_coverage`.
         // A SPECIAL FORM's name sitting in an ARGUMENT slot: the commonest paren slip in
         // the language. `(reduce xs '() fn (acc token) acc)` reported only
         // `unbound symbol: acc`, twice — a symptom two levels down — and said nothing about
@@ -778,8 +778,31 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         }
 
         if value::symbol_is(s, "throw") && items.len() == 2 {
-            if let Some(msg) = match_exhaustiveness_gap(heap, items[1], ctx) {
-                out.push((heap.form_pos_only(form), msg));
+            match super::guards::match_coverage(heap, items[1], ctx) {
+                Some(super::guards::MatchCoverage::Missing(msg)) => {
+                    out.push((heap.form_pos_only(form), msg));
+                }
+                // A `:total` function (ADR-351) may not reach a `match` failure the
+                // checker cannot prove unreachable: a scrutinee that is not a closed
+                // literal type, or a pattern that is not a literal, is a case the
+                // declaration promised and nothing here establishes.
+                Some(super::guards::MatchCoverage::Unknown) => {
+                    if let Some(total) = ctx
+                        .total_fn()
+                        .filter(|_| !ctx.is_suppressed(super::ctx::SUPPRESS_TOTAL))
+                    {
+                        out.push((
+                            heap.form_pos_only(form),
+                            format!(
+                                "{} is declared :total but a match in its body has no \
+                                 catch-all clause and the checker cannot prove it covers \
+                                 every case",
+                                name_of(total)
+                            ),
+                        ));
+                    }
+                }
+                Some(super::guards::MatchCoverage::Covered) | None => {}
             }
         }
 
