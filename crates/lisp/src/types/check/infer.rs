@@ -127,6 +127,7 @@ pub(super) fn with_fresh_depth<T>(f: impl FnOnce() -> T) -> T {
 /// with a known signature gets its result type; a variable returns whatever
 /// `ctx` knows about it (typically `None` for a free / global reference).
 pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
+    EXPR_TY_VISITS.with(|c| c.set(c.get().wrapping_add(1)));
     // Bail (defer) if the type-walk is pathologically deep — overflow guard.
     let _depth = DepthGuard::enter()?;
     let key = match form {
@@ -156,6 +157,24 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
         });
     }
     out
+}
+
+thread_local! {
+    /// Every [`expr_ty`] entry since the last [`reset_expr_ty_visits`] — the inferencer's
+    /// work meter. A body of N nodes typed once costs about N; a multiple of N is a re-walk
+    /// (KI-139's 2^depth). One increment per visit, so it costs nothing to keep on.
+    static EXPR_TY_VISITS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Visits since the last reset (see [`EXPR_TY_VISITS`]).
+pub(super) fn expr_ty_visits() -> u64 {
+    EXPR_TY_VISITS.with(Cell::get)
+}
+
+/// Zero the visit meter — `check_file` does this alongside the sig memo, so a reading is
+/// per file.
+pub(super) fn reset_expr_ty_visits() {
+    EXPR_TY_VISITS.with(|c| c.set(0));
 }
 
 fn expr_ty_inner(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
@@ -363,6 +382,20 @@ fn expr_ty_inner(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                     if !ctx.is_lexical_local(s) {
                         if let Some(t) = control_flow_ty(heap, s, &items, ctx) {
                             return Some(t);
+                        }
+                        // …and when it CAN'T be typed, the answer is unknown — not a call.
+                        // Falling through here treated `(do X)` as a call to a function
+                        // named `do` and `(let (b) body)` as a call to `let`, and the call
+                        // path's specializer then re-typed every "argument" — the bindings
+                        // and the body — a second time. Every unknown-typed control-flow
+                        // level doubled the walk below it: `supervisor-group-restart`'s
+                        // 239-node body, twelve `let`/`do` levels deep, was typed with
+                        // 78 910 expression visits (2^12 × its size), and every
+                        // `brood file.blsp` that reached it paid ~240 ms before running
+                        // (KI-139). A special-form head cannot be a callable global, so
+                        // there is nothing for the call path to find.
+                        if crate::eval::is_special_form(s) {
+                            return None;
                         }
                     }
                     // **A call with an UNINHABITED argument never executes**, so its value is

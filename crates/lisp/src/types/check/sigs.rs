@@ -494,6 +494,7 @@ pub(super) fn clear_sig_memo() {
     // keeps a long-lived LSP process from ever reaching the saturating ceiling, where a
     // delta would read zero and a refused `None` would look stable.
     REFUSALS.with(|c| c.set(0));
+    super::infer::reset_expr_ty_visits();
     // The operator domains are a file's too (`set_operator_domains`); a fragment checked
     // after a file must derive its own from the registry, not read that file's.
     OPERATOR_DOMAINS.with(|m| *m.borrow_mut() = None);

@@ -13397,3 +13397,18 @@ half. The residual is not a re-ask (238 walks for 236 questions) but ~1 ms per s
 walk across the modules ADR-339 now materialises transitively; filed as KI-139 with the profile
 and the repro. Origin's ADR-349/350 add a consistent 50 ms on the probe and read as noise
 (+0.4% against a 0.4% floor) on the row.
+
+## 2026-09-15 — KI-139 closed the same day: an unknown `let` was being typed as a call to `let`
+
+The "constant factor" residual from the morning was not one. Timing each specialized arm walk
+put 249 of 259 ms on one 239-node body (`supervisor-group-restart`); counting `expr_ty` entries
+during it read 78 910; per-form entry counts showed each `let` level re-entering its body and
+each `(do …)` re-entering its single form twice; backtraces at the doubled entry named
+`specialize_call`'s argument typing. `control_flow_ty` returns `None` for a body it cannot type,
+and `expr_ty_inner` then fell through to the call path, typing `(let (b) body)` as a call to a
+function named `let` with the bindings and the body as its arguments — every unknown-typed level
+doubling the walk beneath it, 2^12 here. One guard (`crate::eval::is_special_form` → unknown,
+never a call): probe check 290 → 65 ms, visits 288 408 → 20 979, the `supervisor` row 1087 →
+902 ms — under the last-good binary's 975 the same day. `expr_ty` gained a visit meter; the
+guards are sabotage-verified (6 vs 12 nested unknown levels: fixed 469 → 685, sabotaged
+25 687 → 5 999 833).
