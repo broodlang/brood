@@ -213,8 +213,13 @@ pub const RENAMES: &[(&str, &str, &str)] = &[
     ),
     (
         "project/run-loaded-tests",
-        "project-run/run-loaded-tests",
+        "project-run/run-named-tests",
         "ADR-325",
+    ),
+    (
+        "project-run/run-loaded-tests",
+        "project-run/run-named-tests",
+        "ADR-339",
     ),
     ("project/run-tests", "project-run/run-tests", "ADR-325"),
     (

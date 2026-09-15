@@ -13440,3 +13440,11 @@ target) off the VM too, as prefix / paint / suffix triples, and `editor/lexer` a
 went to ONE scan per line with the word rule as the table's last row. Same lines, worktree dev
 build: `shell-spans` over the whole file 303 → 12 ms, the 36-char line 2.0 → 0.11 ms, the
 164-char alias line 10 → 0.41 ms; 40 YAML lines 17.8 → 5.6 ms, 40 TOML lines 13 → 3.2 ms.
+
+## 2026-09-15 — `nest test FILE…` scopes each named file like the whole-project run
+
+Found while reproducing KI-141: no explicit file list could show a fault that needed two files'
+isolates, because named files were loaded into one image with no isolate at all — and the same
+gap had `audit_test` reading `mcp_test`'s eval-tool defs as public names in the pre-push hook.
+`project-run/run-named-tests` now feeds the named files to the per-file scoped runner; guard in
+`crates/nest/tests/named_files_scoped.rs`.

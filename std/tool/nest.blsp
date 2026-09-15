@@ -684,21 +684,18 @@ file) is rethrown for the normal error report."
           (project/load-config)
           (run-suite (fn () (apply project-run/run-tests (test-opts flags lines)))))
       else
-      ;; Named files: load each (registering its cases) and run the suite once. Inside a
-      ;; project the image is loaded first so cross-module names resolve, and the run
-      ;; goes through `run-loaded-tests` so `--failed` and `--cover` mean what they mean
-      ;; on a whole-project run; outside one there is no record to keep.
+      ;; Named files: each is loaded inside its own rolled-back scope and the suite runs
+      ;; once — `run-named-tests`, the same per-file scoping as the whole-project run, so a
+      ;; test's top-level defs never reach the next file. Inside a project the image is
+      ;; loaded first so cross-module names resolve, and `--failed`/`--cover` mean what
+      ;; they mean on a whole-project run; outside one there is no record to keep.
         (let (root (project/find-root (file/cwd)))
           (when root
             (project/load-config)
             (project/setup root)
             (project/load-sources root))
           (require-one 'test)
-          (doseq (p paths) (reflect/load p))
-          (run-suite (fn ()
-                       (if root
-                         (apply project-run/run-loaded-tests (test-opts flags lines))
-                         (apply test/run-tests (test-opts flags lines)))))))))
+          (run-suite (fn () (apply project-run/run-named-tests paths (test-opts flags lines))))))))
 
 ;; `nest run` -------------------------------------------------------------------------
 

@@ -63,7 +63,7 @@ Before starting new work:
 - **Build uncapped, run capped.** Put an address-space cap in front of every test, `nest check`,
   `nest run` (in a downstream project too — bedit is where KI-87 first showed) and `brood`
   run — `( ulimit -v 16000000; cargo nextest run -p brood -j1 -E '…' )` — and keep `-j1`, so
-  one runaway is the whole spike. **16 GB, not 4:** the runtime *reserves* ~3 GB of address
+  one runaway is the whole spike. **16 GB, not 4** (and since v0.28.0, **24 GB for the in-language suite wrapper** — it reserves 19.3 GB with 1.8 GB resident and aborts under 16, KI-142)**:** the runtime *reserves* ~3 GB of address
   space before it does any work on a 28-core box — the allocator's per-thread arenas (20 ×
   128 MB `PROT_NONE`) plus the worker stacks (28 × 16 MB) — so a 4 GB cap fails the first
   test that creates a `table` (its 64 MB virtual region is merely the mapping that lands on
