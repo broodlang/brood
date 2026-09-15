@@ -44,7 +44,7 @@ echo "1. build drift"
 # when its `crates/`/`std/` differed from the commit), or "" if the binary is old enough not
 # to report one at all — which is itself the finding. `binary_dirty` is the marker alone.
 binary_sha() { "$1" --version 2>/dev/null | sed -n 's/.*(\([0-9a-f]\{7,\}\)\(-dirty\)\{0,1\}).*/\1/p'; }
-binary_dirty() { "$1" --version 2>/dev/null | grep -q '-dirty)'; }
+binary_dirty() { "$1" --version 2>/dev/null | grep -q -e '-dirty)'; }
 
 # `nest` is here for the same reason `brood` is, and it was missing: `brood` is the
 # binary a MEASUREMENT lies through, `nest` the one a GATE lies through. A stale
