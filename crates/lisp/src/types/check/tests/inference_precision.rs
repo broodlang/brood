@@ -723,3 +723,38 @@ fn a_when_shaped_binding_guards_its_condition() {
         "{ws:?}"
     );
 }
+
+/// A count relation between two PARAMETERS, established by every caller (ADR-350): the
+/// loop below is handed `n = (count codes)` beside `codes` by its one external caller and
+/// passes both through in its self-call, so `(nth codes i)` under `(>= i n)`'s else is an
+/// element — the shape `std/regex`'s two DFA loops have, which used to carry a
+/// `(check-allow :type-mismatch …)` for exactly this.
+#[test]
+fn a_count_relation_between_parameters_is_derived_from_the_callers() {
+    let src = "(defmodule t)\n\
+         (defn- walk (codes n i acc) (if (>= i n) acc (walk codes n (+ i 1) (+ acc (nth codes i)))))\n\
+         (defn f (s) (let (codes (string/->codepoints s) n (count codes)) (walk codes n 0 0)))";
+    assert!(file_warnings_mode(src, true).is_empty());
+    assert!(
+        signatures(src)
+            .iter()
+            .any(|(name, sig, _)| name == "t/f" && sig == "(string) -> int"),
+        "{:?}",
+        signatures(src)
+    );
+    // A second caller that passes something else for `n` breaks the relation everywhere.
+    let src2 = "(defmodule t)\n\
+         (defn- walk (codes n i acc) (if (>= i n) acc (walk codes n (+ i 1) (+ acc (nth codes i)))))\n\
+         (defn f (s) (let (codes (string/->codepoints s) n (count codes)) (walk codes n 0 0)))\n\
+         (defn g (s) (walk (string/->codepoints s) 100 0 0))";
+    let ws = file_warnings_mode(src2, true);
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert!(ws[0].contains("nil | int ((nth codes i))"), "{ws:?}");
+    // …and so does a self-call that hands `n` on beside a DIFFERENT collection.
+    let src3 = "(defmodule t)\n\
+         (defn- walk (codes n i acc) (if (>= i n) acc (walk (rest codes) n (+ i 1) (+ acc (nth codes i)))))\n\
+         (defn f (s) (let (codes (string/->codepoints s) n (count codes)) (walk codes n 0 0)))";
+    let ws = file_warnings_mode(src3, true);
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert!(ws[0].contains("nil | int ((nth codes i))"), "{ws:?}");
+}

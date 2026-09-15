@@ -22616,9 +22616,15 @@ the octet contract their docstrings already stated (`(or bytes (vector (int 0 25
 which is what every list-returning function produces; the non-empty list is spelled
 `(len (list E) 1 _)`. One std sig (`rect-fold-lines`) says so explicitly.
 
+A relation the caller states — `std/regex`'s DFA loops read `(nth codes i)` under `(>= i n)`
+with `n = (count codes)` computed one frame up — is derived from the callers like the
+parameter types are (`derive_count_aliases`): a `(n, xs)` pair of positions every external
+site establishes and every self-call preserves, a least fixpoint, read as a count alias in
+the body. That retired the last two `(check-allow :type-mismatch …)` scopes in `std/`.
+
 **Alternatives rejected.** *A relational domain over locals* (`i < j`, octagons): the one
-relation the corpus states is `i < (count xs)`, kept as a fact between two names; a general
-domain is another lattice. *Symbolic lengths* (`Vect n a` proper): the reads that matter are
+relation the corpus states is `i < (count xs)`, kept as a fact between two names — and, when
+a caller states it, between two parameters; a general domain is another lattice. *Symbolic lengths* (`Vect n a` proper): the reads that matter are
 against a bound the code compares to, not a variable the type carries. *A float interval*:
 no reader. *Dropping the `pair`-implies-≥1 convention for an explicit `[1..]`*: the slot
 would then say what the tag already says on every non-empty list in the corpus.

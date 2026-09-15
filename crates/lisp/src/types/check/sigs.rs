@@ -1820,6 +1820,9 @@ pub(super) fn infer_return_from_form(
             }
             ctx = ctx.bind(p, Some(bound));
         }
+        if let Some(n) = self_name {
+            ctx = ctx.with_derived_count_aliases(n, binders);
+        }
         let t = expr_ty(heap, *tail, &ctx)?;
         ret = Some(match ret {
             Some(a) => a.union(t),
@@ -2961,22 +2964,49 @@ pub(super) fn caller_derived_params(
 /// that arrow's parameters (`walk::callback_seed`, the same three promises the walk seeds a
 /// `fn` literal's parameters from). Anywhere else a bare name goes is an escape.
 enum Site {
-    Call(Vec<Value>, Box<Ctx>),
+    /// The arguments, the scope they are typed in, and the candidate whose own body the
+    /// call sits in (a self-call), if any.
+    Call(Vec<Value>, Box<Ctx>, Option<Symbol>),
     Handover(Vec<Ty>),
 }
 
 impl Site {
     fn arity(&self) -> usize {
         match self {
-            Site::Call(args, _) => args.len(),
+            Site::Call(args, _, _) => args.len(),
             Site::Handover(params) => params.len(),
+        }
+    }
+    /// Does this site hand parameter `n` the count of what it hands parameter `xs`? The
+    /// `xs` argument must be a plain symbol `b`, and the `n` argument `(count b)` (or its
+    /// string/vector spelling, unshadowed) or a symbol the site's scope knows as `b`'s
+    /// count alias. A handover promises no such relation.
+    fn counts(&self, heap: &Heap, n: usize, xs: usize) -> bool {
+        let Site::Call(args, scope, _) = self else {
+            return false;
+        };
+        let (Some(&Value::Sym(b)), Some(&n_arg)) = (args.get(xs), args.get(n)) else {
+            return false;
+        };
+        match n_arg {
+            Value::Sym(a) => scope.count_alias(a) == Some(b),
+            _ => match list_items(heap, n_arg).as_deref() {
+                Some([Value::Sym(head), Value::Sym(arg)]) => {
+                    *arg == b
+                        && !scope.is_lexical_local(*head)
+                        && (value::symbol_is(*head, "count")
+                            || value::symbol_is(*head, "string/length")
+                            || value::symbol_is(*head, "vector-length"))
+                }
+                _ => false,
+            },
         }
     }
     /// What this site hands parameter `k`: an argument's type in its scope, or the
     /// combinator's promise.
     fn param_ty(&self, heap: &Heap, k: usize) -> Option<Ty> {
         match self {
-            Site::Call(args, scope) => {
+            Site::Call(args, scope, _) => {
                 super::infer::with_fresh_depth(|| expr_ty(heap, args[k], scope))
             }
             Site::Handover(params) => Some(params[k].clone()),
@@ -3012,6 +3042,9 @@ fn collect_private_sites(
         ctx: &'a Ctx,
         out: PrivateSites,
         opaque: bool,
+        /// The candidate whose single-arm body is being walked — a site found here is a
+        /// self-call of it.
+        within: Option<Symbol>,
     }
     impl Walker<'_> {
         /// Quoted data is not namespace-resolved, so a target appears there under its BARE
@@ -3105,11 +3138,11 @@ fn collect_private_sites(
             }
             if self.targets.contains(&head) {
                 if self.arity_of(head) == Some(items.len() - 1) {
-                    self.out
-                        .sites
-                        .entry(head)
-                        .or_default()
-                        .push(Site::Call(items[1..].to_vec(), Box::new(scope.clone())));
+                    self.out.sites.entry(head).or_default().push(Site::Call(
+                        items[1..].to_vec(),
+                        Box::new(scope.clone()),
+                        self.within,
+                    ));
                 }
                 self.walk_args(form, &items, scope);
                 return;
@@ -3205,9 +3238,17 @@ fn collect_private_sites(
                     let ty = bound.as_ref().and_then(|d| d[i].clone());
                     inner = inner.bind(*p, ty);
                 }
+                // …and the count relations its callers establish (ADR-350), so a self-call
+                // under `(< i n)` sees `i` bounded by `xs`, as the walk will.
+                let outer_within = self.within;
+                if let Some(name) = def_of.filter(|_| single_arm) {
+                    inner = inner.with_derived_count_aliases(name, &params);
+                    self.within = Some(name);
+                }
                 for &it in &items[1..] {
                     self.walk(it, &inner, None);
                 }
+                self.within = outer_within;
                 return;
             }
             if super::walk::resolves_to_macro(heap, self.ctx, head) {
@@ -3263,6 +3304,7 @@ fn collect_private_sites(
             escaped: HashSet::new(),
         },
         opaque: false,
+        within: None,
     };
     for &form in forms {
         walker.walk(form, ctx, None);
@@ -3277,6 +3319,92 @@ fn collect_private_sites(
 /// escape — or `None` when the file holds an unexpanded macro call. Type-independent (a
 /// site is an arity match, an escape a spelling), so Pass 2.9 can learn it BEFORE it floors
 /// any return: a function not in this set keeps Pass 2.8's return through the whole
+/// The **count relations** between a live private function's parameters that every call
+/// site establishes (ADR-350): `(n, xs)` when each site hands `n` the count of what it
+/// hands `xs` — `(count b)` (or `string/length`/`vector-length`) beside `b`, or a `let`-bound
+/// count alias of `b` beside `b` — and each self-call passes a pair the body's own aliases
+/// already relate (`n` and `xs` themselves, typically). A GREATEST fixpoint: every pair is
+/// assumed, the sites are re-read with the assumption seeded into the bodies, and a pair
+/// some site does not establish is dropped, until nothing drops. Sound by induction on the
+/// call: an external site establishes the relation outright, and a self-call preserves it
+/// under the assumption that its own activation had it. A handover site establishes
+/// nothing, so a function reached that way keeps no relation. Purely syntactic — no type
+/// is read — so it runs once, before the typed fixpoints, which then see `(nth xs i)`
+/// under `(< i n)` as an element.
+pub(super) fn derive_count_aliases(
+    heap: &Heap,
+    forms: &[Value],
+    candidates: &HashMap<Symbol, Value>,
+    live: &HashMap<Symbol, usize>,
+    ctx: &mut Ctx,
+) {
+    let targets: HashSet<Symbol> = candidates.keys().copied().collect();
+    // The base case: the pairs every EXTERNAL site establishes, read with nothing assumed.
+    // (A self-call's arguments are judged under the assumption, so it is left out here and
+    // checked in the rounds below.)
+    ctx.set_derived_count_aliases(HashMap::new());
+    let Some(first) =
+        collect_private_sites(heap, forms, &targets, candidates, &HashMap::new(), ctx)
+    else {
+        return;
+    };
+    let mut relations: HashMap<Symbol, Vec<(usize, usize)>> = HashMap::new();
+    for (&name, &arity) in live {
+        let Some(sites) = first.sites.get(&name) else {
+            continue;
+        };
+        let external: Vec<&Site> = sites
+            .iter()
+            .filter(|site| !matches!(site, Site::Call(_, _, Some(within)) if *within == name))
+            .collect();
+        if arity < 2 || external.is_empty() || first.escaped.contains(&name) {
+            continue;
+        }
+        let pairs: Vec<(usize, usize)> = (0..arity)
+            .flat_map(|n| (0..arity).filter(move |&xs| xs != n).map(move |xs| (n, xs)))
+            .filter(|&(n, xs)| external.iter().all(|site| site.counts(heap, n, xs)))
+            .collect();
+        if !pairs.is_empty() {
+            relations.insert(name, pairs);
+        }
+    }
+    // The inductive step: with the pairs assumed in every body, each self-call must hand
+    // them on too; a pair some site does not is dropped, and dropping can only fail more
+    // sites, so this descends to a fixpoint.
+    for _ in 0..MAX_DERIVE_ROUNDS {
+        if relations.is_empty() {
+            break;
+        }
+        ctx.set_derived_count_aliases(relations.clone());
+        let Some(collected) =
+            collect_private_sites(heap, forms, &targets, candidates, &HashMap::new(), ctx)
+        else {
+            relations.clear();
+            break;
+        };
+        let mut next: HashMap<Symbol, Vec<(usize, usize)>> = HashMap::new();
+        for (name, pairs) in &relations {
+            let Some(sites) = collected.sites.get(name) else {
+                continue;
+            };
+            let kept: Vec<(usize, usize)> = pairs
+                .iter()
+                .copied()
+                .filter(|&(n, xs)| sites.iter().all(|site| site.counts(heap, n, xs)))
+                .collect();
+            if !kept.is_empty() {
+                next.insert(*name, kept);
+            }
+        }
+        let settled = next == relations;
+        relations = next;
+        if settled {
+            break;
+        }
+    }
+    ctx.set_derived_count_aliases(relations);
+}
+
 /// iteration, since its in-file callers read that return and a ⊥ there would make their
 /// derived parameters under-approximate.
 pub(super) fn live_private_functions(

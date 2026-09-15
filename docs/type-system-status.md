@@ -1083,5 +1083,8 @@ alternatives it rules out from the base itself — so a `[:ok x] | [:error msg]`
 types the whole value. On the way: a sealed ability op's domain no longer applies to a
 same-file function spelling its name (`tempo/->iso` against `Temporal`, latent), and a
 recursive specialization types its self-calls in the branch they sit in (`path/join`'s
-accumulator). `(list E)` in the grammar is now `nil | list<E>`. std plain 0, std strict 0,
-tests plain 0. `docs/type-intervals.md` carries the design.
+accumulator). `(list E)` in the grammar is now `nil | list<E>`. A count relation between
+two PARAMETERS is derived from the callers too (`n = (count codes)` handed beside `codes`,
+preserved by every self-call), which retired `std/regex`'s last two `check-allow
+:type-mismatch` scopes; and a `when`-shaped binding is a guard on its condition. std plain
+0, std strict 0, tests plain 0. `docs/type-intervals.md` carries the design.

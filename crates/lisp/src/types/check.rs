@@ -2232,6 +2232,10 @@ fn check_forms(
                 // iterate: a ⊥ there would make THEIR derived parameters under-approximate.
                 let live = sigs::live_private_functions(heap, &expanded, &candidates, &ctx)
                     .unwrap_or_default();
+                // The count relations between a live function's parameters that its sites
+                // establish (ADR-350) — syntactic, so settled once here, and live for every
+                // typed round below and for the walk.
+                sigs::derive_count_aliases(heap, &expanded, &candidates, &live, &mut ctx);
                 for (&name, sig) in &original {
                     if let (Some(sig), true) = (sig, live.contains_key(&name)) {
                         let mut floor = sig.clone();

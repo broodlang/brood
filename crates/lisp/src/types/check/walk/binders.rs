@@ -340,6 +340,7 @@ pub(super) fn check_def(
                     for (p, ty) in params.iter().zip(derived) {
                         scope = scope.bind_derived(*p, ty);
                     }
+                    scope = scope.with_derived_count_aliases(name, &params);
                     let body_start = match (fn_items.get(2), fn_items.get(3)) {
                         (Some(Value::Str(_)), Some(_)) => 3,
                         _ => 2,

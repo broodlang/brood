@@ -458,6 +458,13 @@ struct FileFacts {
     /// same-file callers read. Absent for a function that escapes as a value, has no site,
     /// declares a sig, or is not a single plain-parameter arm.
     derived_params: HashMap<Symbol, Vec<Option<Ty>>>,
+    /// **Caller-derived count relations** between a private function's parameters
+    /// (ADR-350): `(n, xs)` pairs of positions such that EVERY call site hands `n` the
+    /// count of what it hands `xs` — a caller's `(count codes)` or a `let`-bound count
+    /// alias of it, and a self-call passing both through. Read as a count alias in the
+    /// body, so `(< i n)` there bounds `(nth xs i)`. Absent (empty) for every function
+    /// whose sites do not all say so.
+    derived_count_aliases: HashMap<Symbol, Vec<(usize, usize)>>,
     /// The `(fn …)` FORM of each same-file, single-def, undeclared function (the Pass 2.8
     /// candidates) — what call-site specialization (`sigs::specialized_ret`) re-types under
     /// a call's argument types. The file isn't loaded while it is checked, so this is the
@@ -1092,6 +1099,33 @@ impl Ctx {
     /// Install Pass 2.9's caller-derived parameter types (replacing any earlier set).
     pub(super) fn set_derived_params(&mut self, derived: HashMap<Symbol, Vec<Option<Ty>>>) {
         self.file_mut().derived_params = derived;
+    }
+    /// The caller-derived count relations of `sym`'s parameters (ADR-350), as `(n, xs)`
+    /// position pairs; empty when none is established.
+    pub(super) fn derived_count_aliases(&self, sym: Symbol) -> &[(usize, usize)] {
+        self.file
+            .derived_count_aliases
+            .get(&sym)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+    /// Install the caller-derived count relations (replacing any earlier set).
+    pub(super) fn set_derived_count_aliases(
+        &mut self,
+        relations: HashMap<Symbol, Vec<(usize, usize)>>,
+    ) {
+        self.file_mut().derived_count_aliases = relations;
+    }
+    /// Seed a body scope's count aliases from `sym`'s derived relations over its
+    /// positional `params`.
+    pub(super) fn with_derived_count_aliases(&self, sym: Symbol, params: &[Symbol]) -> Ctx {
+        let mut c = self.clone();
+        for &(n, xs) in self.derived_count_aliases(sym) {
+            if let (Some(&n), Some(&xs)) = (params.get(n), params.get(xs)) {
+                c = c.add_count_alias(n, xs);
+            }
+        }
+        c
     }
     /// Bind `sym` to its caller-derived type — a plain binding, marked so the impossible-
     /// predicate lint leaves the body's guards alone (see `derived_locals`).

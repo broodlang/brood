@@ -85,6 +85,23 @@ and the fold-accumulator loop.
   the `[:ok x] | [:error msg]` dispatch: `(if (= (nth r 0) :error) r (nth r 1))` types the
   whole `r` in the then-branch and the `:ok` payload in the else.
 
+## A count relation between parameters
+
+`std/regex`'s DFA loops read `(nth codes i)` under `(>= i n)` where `n = (count codes)` was
+computed by the caller, one frame up — a relation between two parameters that no interval
+on either can hold. It is derived from the callers (`sigs::derive_count_aliases`), like the
+parameter types are: a pair of positions `(n, xs)` is a count relation of a module-private
+function when every EXTERNAL site hands `n` the count of what it hands `xs` — `(count b)`
+beside `b`, or a `let`-bound count alias of `b` beside `b` — and every SELF-call, read with
+the relation assumed in the body, hands it on (`n` and `xs` themselves, typically). A least
+fixpoint from the external sites: a pair a self-call does not preserve is dropped, and
+dropping can only fail more sites. Sound by induction on the call. Purely syntactic, so it
+runs once before the typed fixpoints, and the body reads the pair as a count alias — so
+`(nth codes i)` under `(>= i n)`'s else, with `i ≥ 0` from its derived interval, is an
+element. The two `(check-allow :type-mismatch …)` scopes in `std/regex.blsp` are gone; the
+anchored loop tests `(>= i n)` rather than `(= i n)`, which agree (`i` only climbs by one)
+and only the former's else says `i < n`.
+
 ## Where the fixpoints read their branches
 
 `specialize_recursive`'s self-call sites are typed in the `if` branch they sit in
@@ -105,10 +122,6 @@ bound on the length that the lattice holds, never from the absence of one.
 
 - A relation between two locals beyond `i < |xs|` (`i < j`, `i + 1 ≤ |xs|`): the index
   bound is the case the corpus asks for; a general relational domain is a different lattice.
-- A bound stated in the CALLER: `regex-run-anchored-loop` reads `(nth codes i)` under
-  `(= i n)` where `n = (count codes)` was computed one frame up, so the two
-  `(check-allow :type-mismatch …)` scopes in `std/regex.blsp` stay — the fact would have to
-  travel through the call as a relation between two parameters.
 - A `float` interval: nothing in the corpus reads one.
 - The runtime contract (`BROOD_CONTRACTS`) reads the interval grammar and checks the
   tag; checking the bound at runtime is a separate decision.
