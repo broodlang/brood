@@ -13386,3 +13386,14 @@ reverting the fix alone reds it with 2760 in the message.
 Worth keeping: this came from a benchmark column in another repo, not from a test here. It
 is the concrete case for the rule that a published column which has stopped describing the
 runtime hides regressions.
+
+## 2026-09-15 — KI-138 recovers half of the `supervisor` regression; the other half is KI-139
+
+Re-measured after the crash, on a quiet machine with imaged release binaries at three commits.
+The probe file's check: 10 ms at `5c913fe3` (last-good column), 240 ms at the KI-138 fix alone,
+290 ms at the merged tree. The harness row: 1097–1121 ms at the fix alone against 1343 published
+and 975 for `5c913fe3` rebuilt today. Yesterday's "back to its pre-regression level" was wrong —
+half. The residual is not a re-ask (238 walks for 236 questions) but ~1 ms per specialized body
+walk across the modules ADR-339 now materialises transitively; filed as KI-139 with the profile
+and the repro. Origin's ADR-349/350 add a consistent 50 ms on the probe and read as noise
+(+0.4% against a 0.4% floor) on the row.
