@@ -91,6 +91,11 @@ pub const FLAGS: &[DebugFlag] = &[
         "name every closure entering the append-only RUNTIME region; per-operation promotion is a leak",
     ),
     f(
+        "BROOD_TRACE_GLOBAL",
+        ATTRIBUTION,
+        "=<name>: narrate every root write to that ONE global (define / staged swap / live swap, with pid + isolate scope) and its value at every globals restore — the tool for a registry that is full in one test file and empty in the next (KI-141)",
+    ),
+    f(
         "BROOD_REG_TRACE",
         ATTRIBUTION,
         "trace *record-ids* registry writes (with the writer's ancestry chain AND the isolate scope it was spawned under) and every globals restore — the KI-89 orphan-attribution tool; trace LEAN, heavy tracing suppresses the race",

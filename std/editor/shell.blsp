@@ -79,15 +79,14 @@ builtins, in the `:syntax/*` faces. Pure, so independently testable."
    :keyword (face :syntax/special)
    :builtin (face :syntax/function)})
 
-(sig shell-skip-blank (string int -> int))
 (defn- shell-skip-blank (line i)
   "`i` advanced past the spaces and tabs at `i`."
   (if (and (< i (string/length line))
         (or (= (string/char-at line i) " ") (= (string/char-at line i) "\t")))
     (shell-skip-blank line (inc i))
     i))
+(sig shell-skip-blank (string int -> int))
 
-(sig shell-defines-after? (string int -> bool))
 (defn- shell-defines-after? (line e)
   "Is the word ending at `e` followed by `()` (spaces allowed) — a function definition?
 Two character reads, asked once per word: a regex here (`^\\s*\\(\\)` over the rest of
@@ -96,6 +95,7 @@ the line) was a third of the whole pass."
     (and (< (inc i) (string/length line))
       (= (string/char-at line i) "(")
       (= (string/char-at line (inc i)) ")"))))
+(sig shell-defines-after? (string int -> bool))
 
 (defn- shell-line-spans (line base faces)
   "The spans for one `line` at offset `base`, ascending and non-overlapping: one scan,

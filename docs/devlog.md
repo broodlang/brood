@@ -13413,6 +13413,19 @@ never a call): probe check 290 → 65 ms, visits 288 408 → 20 979, the `superv
 902 ms — under the last-good binary's 975 the same day. `expr_ty` gained a visit meter; the
 guards are sabotage-verified (6 vs 12 nested unknown levels: fixed 469 → 685, sabotaged
 25 687 → 5 999 833).
+
+## 2026-09-15 — KI-141: a `def-face` was a live write, and the tree-walker CI had been red for three days on it
+
+CI's `differential (tree-walker)` job: 27 failures since 2026-09-12, every one a face lookup
+answering nil, invisible behind the `test` job's own reds. Not the tree-walker — the same 27 on
+the VM from source through the `brood_suite_passes` wrapper, zero through `nest test`, whose
+dispatcher loads `editor/face` at root before any isolate. A new `BROOD_TRACE_GLOBAL=<name>`
+narrated `*faces*`: `editor/highlight`'s `:syntax/*` def-faces were `swap->LIVE` writes onto a
+registry born in a closed frame, and the loading file's restore replayed the module's
+defines and dropped its faces, leaving it provided and empty. `def-face`/`face-set`,
+`%register-protocol` and the three `editor/layers` registrations are `%registry-update!` ops
+now (`:append-new` added for the system-layer list); guards in `tests/isolate_load_test.blsp`.
+The kernel's own comment on `registry_cas` had named the rule the whole time.
 ## 2026-09-15 — the regex engine decided: lexers scan on the DFA (ADR-352)
 
 bedit on a 173-line `.bashrc`: 430 ms per keystroke, the whole file re-lexed through
@@ -13427,3 +13440,11 @@ target) off the VM too, as prefix / paint / suffix triples, and `editor/lexer` a
 went to ONE scan per line with the word rule as the table's last row. Same lines, worktree dev
 build: `shell-spans` over the whole file 303 → 12 ms, the 36-char line 2.0 → 0.11 ms, the
 164-char alias line 10 → 0.41 ms; 40 YAML lines 17.8 → 5.6 ms, 40 TOML lines 13 → 3.2 ms.
+
+## 2026-09-15 — `nest test FILE…` scopes each named file like the whole-project run
+
+Found while reproducing KI-141: no explicit file list could show a fault that needed two files'
+isolates, because named files were loaded into one image with no isolate at all — and the same
+gap had `audit_test` reading `mcp_test`'s eval-tool defs as public names in the pre-push hook.
+`project-run/run-named-tests` now feeds the named files to the per-file scoped runner; guard in
+`crates/nest/tests/named_files_scoped.rs`.

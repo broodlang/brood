@@ -480,6 +480,22 @@ impl Heap {
         }
         let seq = j.next_seq;
         j.next_seq += 1;
+        if let Some(t) = Self::global_trace_target() {
+            let hit = match &w {
+                LoadWrite::Define { sym, .. } | LoadWrite::Registry { sym, .. } => *sym == t,
+            };
+            if hit {
+                eprintln!(
+                    "[global] pid={:?} scope={} JOURNAL write for {} seq={} outstanding={} entries={}",
+                    crate::process::current_pid(),
+                    crate::process::self_isolate_scope(),
+                    crate::core::value::symbol_name(t),
+                    seq,
+                    j.outstanding,
+                    j.entries.len()
+                );
+            }
+        }
         j.entries
             .push((seq, crate::process::self_isolate_scope(), w));
         true
@@ -596,6 +612,40 @@ impl Heap {
                     return None;
                 }
                 self.alloc_pair(val, cur)
+            }
+            RegistryOp::AppendNew => {
+                if self.list_contains(cur, val) {
+                    return None;
+                }
+                let mut items = self.list_to_vec(cur).unwrap_or_default();
+                items.push(val);
+                self.list(items)
+            }
+            RegistryOp::Merge => {
+                let ValueRef::Map(patch) = val.unpack() else {
+                    return None;
+                };
+                let outer = match cur.unpack() {
+                    ValueRef::Map(id) => id,
+                    _ => match self.alloc_empty_map().unpack() {
+                        ValueRef::Map(id) => id,
+                        _ => return None,
+                    },
+                };
+                let mut merged = match self.map_get(outer, k1) {
+                    Some(v) => match v.unpack() {
+                        ValueRef::Map(_) => v,
+                        _ => return None,
+                    },
+                    None => self.alloc_empty_map(),
+                };
+                for (k, v) in self.map_entries(patch) {
+                    let ValueRef::Map(id) = merged.unpack() else {
+                        return None;
+                    };
+                    merged = self.map_assoc(id, k, v);
+                }
+                self.map_assoc(outer, k1, merged)
             }
             RegistryOp::Dissoc => match cur.unpack() {
                 ValueRef::Map(id) => {
@@ -788,6 +838,7 @@ impl Heap {
         // live instead, the frame's `Define` would overwrite it at publish.
         if self.in_journalled_load() {
             if let Some(owner) = self.staged_frame_of(sym) {
+                self.global_trace(sym, "swap->staged", Some(new));
                 let shared = self.promote(new);
                 let st = &mut self.cold_mut().load_stages[owner];
                 st.writes.push(LoadWrite::Define { sym, val: shared });
@@ -804,6 +855,7 @@ impl Heap {
         // would clobber what other processes wrote since. The live registries that reach here
         // are bookkeeping whose transform is policy in Brood (`registry-swap!`); a registration
         // that must survive an isolate goes through `%registry-update!`'s ops instead.
+        self.global_trace(sym, "swap->LIVE", Some(new));
         let prev_suppressed = std::mem::replace(&mut self.cold_mut().journal_suppressed, true);
         self.env_define(root, sym, new);
         self.cold_mut().journal_suppressed = prev_suppressed;
@@ -880,7 +932,53 @@ impl Heap {
         false
     }
 
+    /// `BROOD_TRACE_GLOBAL=<name>`: the global whose every root write and every isolate
+    /// restore is narrated to stderr (`[global] …`), with the writer's pid and isolate scope
+    /// and which funnel it took (define / staged swap / live swap / restore). Read once.
+    /// The KI-141 tool: a registry that is full in one test file and empty in the next has a
+    /// timeline nothing else prints — `BROOD_REG_TRACE` watches `*record-ids*` alone.
+    fn global_trace_target() -> Option<Symbol> {
+        static TARGET: std::sync::OnceLock<Option<Symbol>> = std::sync::OnceLock::new();
+        *TARGET.get_or_init(|| {
+            std::env::var("BROOD_TRACE_GLOBAL")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|s| crate::core::value::intern(&s))
+        })
+    }
+
+    fn global_trace(&self, sym: Symbol, what: &str, val: Option<Value>) {
+        if Self::global_trace_target() != Some(sym) {
+            return;
+        }
+        let shown = match val {
+            Some(v) => {
+                let text = crate::syntax::printer::print(self, v);
+                let n: String = text.chars().take(120).collect();
+                format!(" {n}")
+            }
+            None => String::from(" <absent>"),
+        };
+        eprintln!(
+            "[global] pid={:?} scope={} {} {}{}",
+            crate::process::current_pid(),
+            crate::process::self_isolate_scope(),
+            what,
+            crate::core::value::symbol_name(sym),
+            shown
+        );
+    }
+
     pub fn env_define(&mut self, env: EnvId, sym: Symbol, val: Value) {
+        self.global_trace(
+            sym,
+            if env == EnvId::GLOBAL {
+                "define"
+            } else {
+                "define(non-root)"
+            },
+            Some(val),
+        );
         if env == EnvId::GLOBAL {
             // Privacy (ADR-146) is declared by the def FORM, not the name: clear any
             // prior private mark on every global def (before the dedup early-return,
@@ -1092,6 +1190,16 @@ impl Heap {
                 j.entries.clear();
             }
             j.outstanding += 1;
+            if Self::global_trace_target().is_some() {
+                eprintln!(
+                    "[global] pid={:?} scope={} SNAPSHOT journal: mark={} outstanding={} entries={}",
+                    crate::process::current_pid(),
+                    crate::process::self_isolate_scope(),
+                    j.next_seq,
+                    j.outstanding,
+                    j.entries.len()
+                );
+            }
             j.next_seq
         };
         GlobalsSnapshot {
@@ -1403,6 +1511,11 @@ impl Heap {
         // registry read-modify-write interleaves with the rebuild.
         let mut table = snapshot.saved;
         let mut rebound: Vec<Symbol> = Vec::new();
+        if let Some(t) = Self::global_trace_target() {
+            let live = self.runtime.globals_read().get(&t).copied();
+            self.global_trace(t, "restore: live value before", live);
+            self.global_trace(t, "restore: snapshot value", table.get(&t).copied());
+        }
         let replay: Vec<LoadWrite> = {
             let mut j = self
                 .runtime
@@ -1411,6 +1524,28 @@ impl Heap {
                 .unwrap_or_else(|e| e.into_inner());
             let mark = snapshot.journal_mark;
             let mine = |scope: u64| discard_scope == Some(scope);
+            if let Some(t) = Self::global_trace_target() {
+                let hits: Vec<String> = j
+                    .entries
+                    .iter()
+                    .filter(|(_, _, w)| match w {
+                        LoadWrite::Define { sym, .. } | LoadWrite::Registry { sym, .. } => {
+                            *sym == t
+                        }
+                    })
+                    .map(|(seq, scope, _)| format!("seq={seq}/scope={scope}"))
+                    .collect();
+                eprintln!(
+                    "[global] pid={:?} scope={} RESTORE journal: mark={} outstanding={} entries={} discard={:?} target-entries=[{}]",
+                    crate::process::current_pid(),
+                    crate::process::self_isolate_scope(),
+                    mark,
+                    j.outstanding,
+                    j.entries.len(),
+                    discard_scope,
+                    hits.join(" ")
+                );
+            }
             let writes = j
                 .entries
                 .iter()
@@ -1456,6 +1591,9 @@ impl Heap {
                     }
                 }
             }
+        }
+        if let Some(t) = Self::global_trace_target() {
+            self.global_trace(t, "restore: value after replay", table.get(&t).copied());
         }
         *self.runtime.globals_write() = table;
         // Wholesale table swap — invalidate every stamped global inline cache. This one

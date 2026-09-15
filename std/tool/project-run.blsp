@@ -292,18 +292,27 @@ as unchanged (only when some were)."
     (cons :filter
       (cons (project-failed-filter root (test/opt-val :filter opts nil)) opts))))
 
-(defn run-loaded-tests (& opts)
-  "Run the ALREADY-REGISTERED suite — the `nest test FILE…` path, where the CLI has loaded the named files itself. Inside a project this resolves `:failed` against the project's record, updates that record afterwards, and honours `:cover`, so the flags mean the same thing as on a whole-project run; outside a project it is just `run-tests` (with a warning if coverage was asked for, since there are no project sources to instrument)."
+(defn run-named-tests (paths & opts)
+  "Run the NAMED test files — the `nest test FILE…` path — file-by-file, each loaded inside
+its own rolled-back global scope, exactly as the whole-project run does (`run-tests`). The
+named files used to be loaded into ONE image and run together, so a test's top-level `def`
+in the first file was a public global to every file after it: `audit_test` read
+`mcp_test`'s `mcpt-a`/`mcpt-b` as two undocumented public names whenever the pre-push hook
+named the two together, and a fault that needed two files' isolates to interleave (KI-141)
+could not be reproduced with any file list at all. Inside a project the flags mean what they
+mean on a whole-project run — `:failed` resolves against the project's record and the record
+is updated afterwards, `:cover` instruments the sources; outside one it is the scoped run
+alone. `BROOD_TEST_NO_SCOPE` restores the one-image run, as it does for the whole project."
   (let (root (project/find-root (file/cwd)))
     (if (nil? root)
       (do
         (when (test/opt? :cover opts)
           (io/puts "warning: --cover needs a project (no project.blsp found) — running without coverage"
             :to *err*))
-        (/apply test/run-tests opts))
+        (project-run-suite paths opts))
       (let (_ (when (test/opt? :cover opts) (project-coverage-begin root))
             resolved (project-resolve-test-opts root opts)
-            outcome (try (/apply test/run-tests resolved) (catch e (list :%suite-raised e))))
+            outcome (try (project-run-suite paths resolved) (catch e (list :%suite-raised e))))
         (project-write-failed root *test-last-ran* *test-last-failed*)
         (let (percent (project-coverage-report root opts))
           (if (and (pair? outcome) (= (first outcome) :%suite-raised))

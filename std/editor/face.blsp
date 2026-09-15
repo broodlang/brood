@@ -63,16 +63,24 @@ theme change is visible to a running UI on its next frame (late binding).")
 (defdyn *faces* {})
 ; the theme: face-name (keyword) -> attribute map
 
+;; Both writers are ONE map operation through `%registry-update!`, never a whole-map
+;; `%swap-registry!`. The difference is not style: a swap writes the whole map LIVE, and
+;; the kernel documents that as the write an `%isolate` restore discards — whereas an op is
+;; staged with the module load that makes it, published whole, and replayed by every restore
+;; that would otherwise roll the module back (ADR-339/344). `editor/highlight` declares its
+;; `:syntax/*` faces at load; under lazy loading that load lands inside whichever test file
+;; first colours a token, and with the swap every later file found the module provided and
+;; its faces gone — `highlight-spans` answered nil for a week of tree-walker CI (KI-141).
 (defn def-face (name attrs)
   "Register (or replace) face `name` with the attribute map `attrs`; returns `name`.
 `attrs` may carry an `:inherit` face name layered under it at resolution time."
-  (%swap-registry! *faces* (fn (m) (assoc m name attrs)))
+  (%registry-update! '*faces* :assoc [name] attrs)
   name)
 
 (defn face-set (name attrs)
   "Merge `attrs` into face `name` (creating it if absent) — restyle a face in one
 place, keeping its other attributes. Returns `name`."
-  (%swap-registry! *faces* (fn (m) (assoc m name (merge (or (get m name) {}) attrs))))
+  (%registry-update! '*faces* :merge [name] attrs)
   name)
 
 (defn faces ()
