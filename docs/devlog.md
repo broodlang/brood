@@ -13334,3 +13334,53 @@ not an optimisation; recorded here with the numbers rather than decided.
 `editor/treesit` gains the grammar recipe — `grammar-fetch` (a git URL or a directory),
 `grammar-build` (`cc`/`c++` to `libtree-sitter-<lang>.so`), `grammar-install` — so an
 editor mode can declare WHERE a grammar lives and build it, instead of printing a README.
+
+## 2026-09-14 — a benchmark row found a checker bug: one question, walked 36 times (KI-138)
+
+The cross-language column was refreshed at `c9d6c1a1` (full eight-language field run, the
+first since 2026-08-28) and every row landed inside drift except `supervisor`, which read
+**886 → 1330 ms**. It held up against the verification rule in both directions: three
+brood-only harness invocations at this tree read 1342/1345/1350 ms; the previous column's
+commit, rebuilt in a worktree with its own std image and run through the same harness under
+a PATH override, read 888.6/892.1/891.4 ms. Spreads under 0.6% on a row that is in the
+harness's `NOISY` set because it usually wanders.
+
+**It was not supervision.** A `BENCH_N` sweep put the cost at a flat ~520 ms — N=100 read
+625 ms against 104 — so it was load-time, and cutting the benchmark file form by form put
++414 ms on one line. Two lines reproduce it: `(def sup (supervisor/start []))` checked in
+463 ms where it had cost 41. `json`, `gen`, `http`, `set` and `regex` were all unaffected,
+which made it look module-specific and is not — `supervisor` is just the std module with 31
+mutually-calling private functions passing maps around.
+
+`brood file.blsp` type-checks a program before running it, so **a checker cost is a runtime
+cost on this system**, and nothing in the tree measured that. Inside the checker,
+`specialized_ret` re-types a callee's body under the call's argument types and memoizes per
+`(name, argument types)`; an arm whose tail could not be typed returned through `?` *before*
+the memo write, so a `None` that cost a full body walk was never remembered and the same
+question was re-asked at every call site and every enclosing level. Instrumenting the work
+counter showed it exactly: the prelude's `get` re-typed **1864 times for 52 distinct
+questions**, the file spending 2760 arm re-typings to ask 236.
+
+The escape dates from `68c250e8`, where call-site specialization landed. What made it
+reachable was `f3842f6a` (ADR-341): private parameters now have caller-derived types, and
+the specializer declines outright when every input is unknown — so before it, none of these
+bodies specialized at all. A latent quadratic, revealed rather than introduced.
+
+The fix memoizes that `None` under the same `stable` rule the bottom of the same function
+already uses (a loaded body, never a same-file global still in flux — memoizing that one
+would outlive the Pass 2.8 fixpoint that turns it into an answer), and only when nothing was
+refused underneath it: a depth-cap or in-flight refusal is a fact about where the question
+was asked, not about the question, so a `None` reached through one is not a stable answer.
+That exactness turned out to be free — 238 re-typings against 236 without the refusal guard —
+which is why it is in rather than noted as a risk. The answer does not change; it is only
+remembered. Re-typings fall 2760 → 238, and every name's count now equals its
+distinct-question count — one walk per question, as designed.
+
+Guard: `crates/lisp/tests/check_specialization_cost.rs`, bounding the re-typings a check of
+the two-line probe may spend, with a companion asserting a file that specializes nothing
+reads near zero so the bound cannot pass by the meter going quiet. Sabotage-verified —
+reverting the fix alone reds it with 2760 in the message.
+
+Worth keeping: this came from a benchmark column in another repo, not from a test here. It
+is the concrete case for the rule that a published column which has stopped describing the
+runtime hides regressions.

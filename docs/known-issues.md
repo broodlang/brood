@@ -132,6 +132,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-135 | **a module is observable mid-load through a global HIT** — ADR-335 moved a module's load to the first use through the lookup MISS path, which waits for an in-flight loader; a name that loader has already bound is a HIT and waits for nothing, so a concurrent process can run against a half-loaded module. The image branch exposed it for a whole module at once (KI-134 window 2, fixed by publication order); the SOURCE path leaves a one-form window (`queue/empty` bound at line 28, `Conjable` registered at line 73) | ✅ **FIXED 2026-09-13 (ADR-344)** — a module publishes whole: every load runs inside a staging frame (defines and registry OPERATIONS staged, the loader reading its frames before the table), installed under `registry_lock` in ONE write of the globals table when the load completes, discarded when it throws. `%swap-registry!`'s whole-map write-back stays live unless the registry was born in the same load (staged, it lost the image builder 10 of 35 require-edge records). Guard `tests/module_publish_test.blsp`: a 300 ms-wide fixture window, 0 sightings staged vs 58 bypassed |
 | KI-136 | **the stdlib image replays registrations a module never made: `editor/face`'s section carries every face any std module `def-face`d at build time (26), while a source load of `editor/face` has 6** — so a module that resolves faces another module declares works from the image and not from source: `editor/lexer` resolved every `:syntax/*` role to nil from source (`configs_test` 2/10, 10/10 imaged) because nothing on its path loaded `editor/highlight`, where they are declared. Found 2026-09-13 attributing a test that failed on one binary and passed on another: the two binaries read different images. The ADR-280 differential compares names, kinds, privacy and sigs — not registry CONTENTS — so it did not see it | ⏳ **WATCH 2026-09-13** — the lexer now `(:load editor/highlight)`s (the missing dependency was real, and the image hid it). Open: `%std-regs-by-module` attributes a registration by its KEY's qualifier (`:syntax/comment` → no module → the registry's own section), where the writer's module is the sound owner; and the differential should compare each registry's contents per module load. Repro: `BROOD_NO_STDIMAGE=1 brood --test tests/configs_test.blsp` at `820472eb` |
 | KI-137 | **a strict verdict can depend on which OTHER modules are loaded when the file is checked, so the strict gate over std/ flickers with check order** — `math/clamp` (declared `-> number`, body `(math/max lo (math/min hi x))`) is clean in a fresh process and warns "body yields ordered" once `datetime` is loaded: `math/max` had no declaration, so its return was the kernel `%max` contract (number or comparable record), and the record half is inhabited only after a module registers comparable records. `nest check` checks files in parallel over one heap, so whether `datetime` is loaded when `math.blsp` is checked is a race: red twice on 2026-09-13 (a merged tree, a clean origin build), green in seven runs after, red again from the pre-push hook | ✅ **FIXED 2026-09-14** — three places, two people. The MECHANISM (881552a6, 6367ac6e): a module's own qualified definition of a name a by-name rule describes (`math/max` in `math.blsp`) reads that rule — an extremum is its operands' union — ahead of the sig inferred over unknown parameters, and a type variable absorbs an untyped argument, so `math/max`/`math/min` leave the curated table and declare `(& ?A -> ?A)`; `clamp` is clean with or without the declaration. The GATE: `nest check` brings the heap to ONE state before it checks anything (`project-check/project-preload!` — the project's and the listed files' header closures, the modules the listed files' bodies name, then the ADR-340 materialisation to a fixpoint through `%check-materialise-referenced!`, sorted), so a verdict is a function of the LIST, never of check order; verified with the declarations removed: `[math datetime]`, `[datetime math]`, std sorted and std reversed all agreed where the same lists split 0/1 before. Guard `tests/check_preload_test.blsp` (two fixture modules record at load whether the other is provided; listed in reverse, the sorted preload order still shows; sabotage-verified). What stays open is the class — any inferred return that is a registry-derived cover reads wider as modules load — now visible only as a verdict that differs between two LISTS, never between two runs of one |
+| KI-138 | **the advisory checker re-walked one question 36 times, and every `brood file.blsp` paid it** — the cross-language `supervisor` row read **+50% (886 → 1330 ms)** with every other row inside drift and peak RSS flat. Not the supervisor and not per-child: a `BENCH_N` sweep put it at a **flat ~520 ms** of LOAD time, and a two-line file was the whole repro — `(def sup (supervisor/start []))` checked in 463 ms against 41 ms. `brood` type-checks a program before running it, so a checker cost is a runtime cost on this system, and no test in the tree measured that | ✅ **FIXED 2026-09-14** — `specialized_ret` re-types a callee's body under the call's argument types and memoizes per `(name, argument types)`, but an arm whose tail could not be typed returned through `?` **before the memo write**, so a `None` that cost a full body walk was never remembered and the question was re-asked at every call site and every enclosing level: the prelude's `get` re-typed **1864 times for 52 distinct questions**, the file spending 2760 arm re-typings to ask 236. The escape dates from `68c250e8` (call-site specialization); `f3842f6a` (ADR-341) made it reachable by giving private parameters types, since the specializer declines when every input is unknown. Fixed by memoizing that `None` under the same `stable` rule the bottom of the function already uses — the answer is unchanged, only remembered. 2760 → 236 re-typings, and every name's count now equals its distinct-question count. Guard `crates/lisp/tests/check_specialization_cost.rs` (bound 800, plus a companion proving the meter still moves), sabotage-verified |
 | KI-133 | **a preempted native loop resumed on the interpreter for up to 256 iterations — via its callee's frame** — a native self-tail loop that makes a call is preempted every ~1 500 iterations (the 2 000-reduction quantum); the driver handed the preempted frame to the interpreter "until its loop-top noticed", but the first safepoint that run reached was the CALLEE's entry, so the capture landed on the callee at ip 0, the resume ran the callee natively and returned into the loop MID-BODY, and the loop interpreted to its next 256th back-edge before re-tiering. A 5M-iteration loop with one call: 3 252 preempts, **839 607 interpreted iterations**, −36% instructions with preemption disabled; the leaf-spliced variant −72%. Invisible on the benchmark rows (±1–4%: they are short, or their loops are gate-refused anyway) — this is the cost of every long-running native loop that calls anything, and a candidate for why §7.1's admission experiments read as losses | ✅ **FIXED 2026-09-12** — `vm_run_bc`'s outcome-2 arm yields at once: the budget IS spent, and the frame is at ip 0 (or the journal's resume point, applied first), which is exactly what a resume re-tiers. Guarded by `a_native_preempt_captures_the_loop_frame_not_its_callee`, which drives the capture-mode driver with a 300-reduction budget and asserts every capture after the loop goes native is the loop's frame at ip 0 (sabotage-verified: removing the yield puts the captures on the callee). Found from the call-cost probe: 640 instructions per native→native call read as the call ceremony and was 40% preemption churn |
 | KI-132 | **the JIT latches the syntax highlighter's walk onto the VM — every helper of `editor/highlight/hl-spans` deopt-thrashes** — `BROOD_JIT_BAIL_TRACE=1` over one fontify pass of a 111-line band: `hl-head?`, `hl-advance`, `hl-name`, `hl-doc?` each `reason=deopt-thrash-latched … deopts=16`, `hl-spans` itself 56 deopts at `resume_ip=0` and `108`. The pass runs interpreted: 1.1 ms for 421 tokens (2.4 µs a token), re-lexed on every keystroke in bedit — the single largest cost of a typed character there | **OPEN 2026-09-12** — filed from the bedit performance pass (ADR-336). Cause hypothesis, unverified: the helpers destructure the walk's frame vector `[open n head p]`, whose `head` slot is `nil` on a fresh frame and a string once the head symbol is seen; the type-deopts land on the `SetLocal` after that `(nth frame 2)` (`resume_ip` 40/47/48, `watch=true`), and the re-lowering after a deopt appears to re-specialise to the first-seen tag rather than widen — sixteen identical attempts, then `BAILED`. Repro: `BROOD_JIT_BAIL_TRACE=1 nest run <a script calling (editor/highlight/highlight-spans src) on any 100-line .blsp>`; measure with the same script under `(bench …)`. Not worked here because the JIT is mid-change by another session (ADR-333); the expected win is 3–5× on the pass, which is also every per-token walk of this shape in std |
 | KI-131 | **lazy module loading (ADR-335) made the test runner's driver die on `unbound symbol: math/max` one run in three** — any file with an `:isolated` unit; `process 2 died` from `test/collect-loop`, the same with the JIT off. The unit was the first to use `math`, so `math` loaded INSIDE its `%isolate` snapshot and was rolled back with it, while the driver running beside it had started depending on it. Before ADR-335 the runner's closure loaded at the runner's load, before any isolate — an invariant that held by accident and was never stated | ✅ **FIXED 2026-09-12**, the same day it landed. Stated and pinned: a fourth `defmodule` header clause `(:load a b …)` loads modules at the file's load and refers nothing (the explicit eager request), `std/tool/test.blsp` `:load`s its sixteen-module closure, and `crates/cli/tests/test_framework_closure.rs` measures the real closure (a source load under the eager policy) and fails naming any module the clause lacks — sabotage-verified by dropping `math`. `%isolate`'s restore also waits for another process's in-flight load (`wait_for_inflight_loads`, the `*features-loading*` claim) so a load straddling the swap cannot leave KI-89's record-without-bindings asymmetry. Verified 25/25 + 6/6 (`BROOD_NO_JIT=1`) + 4/4 (`BROOD_NO_STDIMAGE=1`) on the reproducing file and 15/15 on `startup_image_test.blsp`, against 3/20 and 4/12 failing before. Worth recording how the first diagnosis went wrong: the wait alone was written first, on the define→`provide` theory, and the loop still failed — the mechanism was a module *consistently* loaded and unloaded by the unit, not a torn load |
@@ -10030,3 +10031,79 @@ them (deterministic, and the state a live image would be in), or kernel contract
 `%max` kind carry their type variable so no union grows with the heap. Until then a strict
 red that does not reproduce alone is this until proven otherwise; the repro above settles it
 in seconds.
+
+## KI-138 — the advisory checker re-walked one question 36 times, and `brood file.blsp` paid it ✅ FIXED 2026-09-14
+
+**Found by the benchmark, not by a test.** The 2026-09-14 cross-language field run read
+`supervisor` **886 → 1330 ms (+50%)** with every other row inside drift. Three brood-only
+invocations at `c9d6c1a1` read 1342/1345/1350 ms against 888.6/892.1/891.4 ms for the
+previous column's commit rebuilt with its own std image — spreads under 0.6% on a row that
+is in the harness's `NOISY` set precisely because it usually wanders. Peak RSS did not move
+with it (626 → 644 MB), which is the first clue: whatever it was cost time, not allocation.
+
+**It was not the supervisor, and it was not per-child.** A sweep of `BENCH_N` put the cost
+at a **flat ~520 ms** — N=100 read 625 ms against 104 ms, N=20000 read 1455 against 884 — so
+it was load-time. Cutting the benchmark file form by form put +414 ms on a single line,
+`(def sup (start [] {…}))`, and a two-line file was enough to reproduce it:
+
+```blsp
+(defmodule probe)
+(def sup (supervisor/start []))    ; 41 ms before, 463 ms after
+```
+
+`json`, `gen`, `http`, `set` and `regex` were all unaffected, which is what made it look
+module-specific. It is not: `supervisor` is simply the std module with 31 mutually-calling
+private functions passing maps around.
+
+**The mechanism.** `brood` type-checks a program before running it (`check_one_file`,
+`crates/cli/src/main.rs`), so this is a cost every invocation pays. Inside the checker,
+`specialized_ret` re-types a callee's body under the call's argument types and memoizes the
+answer per `(name, argument types)`. An arm whose tail could not be typed returned through
+`?`:
+
+```rust
+let t = typed?;   // ← returns None BEFORE the memo write at the bottom of the function
+```
+
+so that `None` — a full body walk to reach — was never remembered, and the same question was
+re-asked at every call site and every enclosing level. Instrumenting the counter showed the
+shape exactly: the prelude's `get` was re-typed **1864 times for 52 distinct questions**,
+`%lookup-miss` 592 times for 61. The file spent **2760 arm re-typings to ask 236 questions**.
+
+**The escape is older than the regression.** It dates from `68c250e8`, where call-site
+specialization was introduced. What `f3842f6a` (ADR-341, caller-derived parameter types for
+module-private functions) changed is that private parameters now *have* types — and
+`specialized_ret` returns early when every input is unknown, so before ADR-341 the
+specializer never engaged on these bodies at all. A latent quadratic became reachable.
+
+**The fix** memoizes that `None` under the same rule the bottom of the function already
+uses — `stable`, i.e. a body loaded from the image rather than a same-file global still in
+flux (a same-file `None` is a fact about the moment, and memoizing it would outlive the
+Pass 2.8 fixpoint that turns it into an answer) — **and only when no specialization was
+refused underneath it**, tracked by a `REFUSALS` counter snapshotted around the arm walk. A
+refusal (a name already in flight, or the depth cap) is a fact about *where* the question was
+asked, so a `None` reached through one is not a stable answer; this is the same trap
+`robustness::a_depth_capped_body_walk_is_not_memoized_as_the_callees_signature` already pins
+for `infer_sig`. Exactness is free here: 238 re-typings with the refusal guard against 236
+without it. Nothing about the *answer* changes; it is only remembered. Re-typings on the
+probe file fall 2760 → 238, and every name's count now equals its distinct-question count —
+one walk per question, as designed.
+
+Measured: the probe file 463 → 194 ms, the benchmark row back to its pre-regression level.
+The whole 2760 → 236 is not the whole 450 ms, because a run under `BROOD_NO_STDIMAGE=1`
+also re-evaluates `supervisor` from source; with the stdlib image on, the row is level again.
+
+**Guard:** `crates/lisp/tests/check_specialization_cost.rs` — bounds the arm re-typings a
+check of the two-line probe file may spend (238 at the fix, 2760 before it, bound 800), plus
+a companion asserting a file that specializes nothing reads near zero, so the bound cannot
+pass because the meter stopped moving. Sabotage-verified: reverting the fix alone reds the
+first test with the number in its message.
+
+**The same class as KI-13**, which is the part worth carrying forward. `infer_sig` memoizes
+its negative answers deliberately — its comment names the ~400k body walks that taught it —
+and the call-site specializer, added later beside it, reopened the hole. A memo whose
+negative answers escape is not a memo.
+
+**What to take from it.** A checker's cost is a *runtime* cost on this system, because the
+file runner checks before it runs, and no test in the tree measured that. The signal came
+from a benchmark row in another repo — which is the argument for keeping that column fresh.
