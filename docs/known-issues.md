@@ -10410,6 +10410,8 @@ environment (`BROOD_VM=0 BROOD_NO_STDIMAGE=1 BROOD_NO_PRELUDE_IMAGE=1`):
 | `face` + `registry` + `highlight` + `configs` + `observer` + `lazy_load` | 167/167 |
 | `stdimage` + `highlight` + `configs` + `observer` | 146/146 |
 | ten files — every one changed this week and every one that fails in CI | 520/520 |
+| the 30 most isolate-heavy files + the four that fail | 1061/1061 |
+| `audit_test` (whose `load-everything` requires every baked-in module) first, then all four | 147/147 |
 
 The stdlib image hides it for the reason [KI-136](#ki-136) records: `editor/face`'s
 replayed registrations carry the eight `:syntax/*` faces `editor/highlight` declares, so
@@ -10424,6 +10426,13 @@ later reader sees an empty registry. `BROOD_SCOPE_DBG=1` is set in the job's env
 which fits a single unlucky ordering rather than a storm. KI-136's fix — `editor/lexer`
 declaring `(:load editor/highlight)` — covers `configs_test` standalone and says nothing
 about the suite's interleaving, which is why that file passes alone and fails here.
+
+Retested 2026-09-15 after `000a68aa` made `nest test FILE…` scope each named file the way
+the whole-project run does — the per-file `%isolate` was the best remaining suspect, since a
+module loaded during a file's scoped load would be rolled back with that scope, faces and
+all. It is not sufficient: every combination above passes WITH the scoping, and
+`BROOD_TEST_NO_SCOPE=1` changes nothing either way. Whatever the trigger is, it needs more
+of the suite than 34 files.
 
 **Open.** The durable fix is KI-89's own: an isolate is sound only while nothing else is
 mutating globals, and nothing says so when that is violated. The cheap mitigation is to
