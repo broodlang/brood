@@ -4,6 +4,37 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## v0.28.0 — lexers scan on the DFA, and the checker learns lengths, properties and recursive types
+
+**Every lexical editor mode is off the regex capture engine** (ADR-352). bedit opened a
+173-line `.bashrc` and each keystroke cost 430 ms, because `editor/shell` ran
+`regex/find-all` twice per line over the whole file and the Pike VM costs ~40 µs per
+character where the bitset `match?` costs 0.19 µs. A lexer never wanted captures — a token's
+identity is its table row — so `regex/tokens` scans a `[[pattern tag] …]` table on the
+anchored DFA (earliest position, first rule in table order, longest match; a `\b` only at a
+rule's edges), `regex/tokenizer` is the pure-data handle a `def` holds, `regex/paint` answers
+a line rule's one grouped question (prefix / paint / suffix) as three DFA runs, and
+`find`/`find-all` enter the VM only at a start the DFA found. `editor/lexer` (JSON, YAML,
+TOML, Makefile, INI, commit messages) and `editor/shell` are one scan per line, and
+`editor/highlight/line-restart` is the restart rule a line-oriented mode declares. Same
+lines: `shell-spans` over the whole file 303 → 12 ms, a 36-char line 2.0 → 0.11 ms; the
+editor's keystroke 430 → 15 ms. One answer corrected: `(regex/find "$" "abc")` is the empty
+match at 3, not nil.
+
+**The checker, since 0.27.2:** lengths and indices as intervals on `int` and a length on
+every countable (ADR-350), a count relation between parameters derived from the callers,
+recursive types `(rec X …)` (ADR-349), positional list shapes `(list T U …)` (ADR-348),
+`:pure` and `:total` declared on a `sig` and checked (ADR-351), caller-derived parameter
+types for every function a file defines (ADR-341), and the strict gate over `std/` closed.
+A definition's inferred signature now prints what the lattice holds — `(string -> (int 0 _))`
+where it used to say `int` — so a test that pins the printed type moves with it.
+
+**Also:** `editor/buffer-registry` (ADR-345), `editor/lexer` + `editor/configs` (ADR-346),
+tabs on their stops and the scroll blit in the display (ADR-342/343), `BROOD_UI_TRACE=1`,
+memoised view fragments (ADR-336), kinetic wheel scrolling, radix literals (ADR-334),
+`\b`/`\B` in regex, `humanize/byte-size`, `string/number->`, and a module loads on its first
+qualified reference (ADR-335). The full narrative is in `docs/devlog.md`.
+
 ## v0.27.2 — macOS builds again
 
 **The macOS binaries are back** (KI-124). `os/spawn-pty`, added on 2026-09-03, called

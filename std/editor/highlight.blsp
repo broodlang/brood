@@ -323,6 +323,19 @@ fontify-restart multi-second on every idle beat in a large file."
   (reflect/scan-form-start src pos))
 (sig safe-restart (string int -> int))
 
+(defn line-restart (src pos)
+  "A line-oriented lexer's `:fontify-restart`: `pos` itself. No token crosses a line (shell,
+dotenv, dockerfile, every `editor/lexer` grammar), so lexing may (re)start at any line start
+with nothing known-false — the viewport's own first line is a safe point, and the windowed
+lead-in above it (an editor's backscan, 200 lines in bedit) is cut entirely instead of
+re-lexed on every keystroke. Lives here, beside `safe-restart`, because a mode names its
+restart by a SYMBOL resolved at render time: this module is loaded wherever anything is
+fontified, where the lexer that happens to colour the buffer may not be.
+
+    (editor/highlight/line-restart \"line one\" 4)   → 4"
+  pos)
+(sig line-restart (string int -> int))
+
 ;; ---- the shared span -> runs tiler ------------------------------------------
 ;; `face-at` / `ranges-face` / `fontify-runs` are the renderer-agnostic core: a
 ;; caller hands in the lexer `spans` plus one `ranges` overlay channel and gets

@@ -188,6 +188,17 @@ const EFFECTFUL_EXACT: &[&str] = &[
     "datetime/utc-now",
     "datetime/today",
     "tempo/today",
+    // The kernel's own I/O, clock, environment and randomness, which the prelude reaches
+    // for directly (`(%write-out …)` is how a warning is printed).
+    "%write-out",
+    "%write-err",
+    "%getenv",
+    "%env-all",
+    "%now",
+    "%random-bytes",
+    "%random-token",
+    "%clipboard-get",
+    "%clipboard-set",
 ];
 
 /// Whole namespaces that are effects: I/O, the OS, the network, the mutable table,
@@ -218,7 +229,6 @@ const EFFECTFUL_PREFIXES: &[&str] = &[
     "agent/",
     "supervisor/",
     "wasm/",
-    "zlib/",
     "crypto/random",
     "crypto/keypair",
 ];

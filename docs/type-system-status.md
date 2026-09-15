@@ -1103,3 +1103,51 @@ the one deliberate effect in `tests/ui_test.blsp`. `path/join` and the regex DFA
 carry the first declarations. Also on the way: a `& rest` binder is `nil | list<rest>`
 (it was `list<rest>`, unsound for a call with no rest argument), and the site walk binds a
 variadic function's parameters from its declared sig. `docs/type-properties.md`.
+
+## Review — stable, and called (2026-09-15)
+
+The audit's thirteen items (ROADMAP "The type system, reviewed") are all shipped:
+ADR-341's three cuts, ADR-347 (an arrow in head position), ADR-348 (list shapes), ADR-349
+(recursive types), ADR-350 (intervals, lengths, the two count relations), ADR-351 (`:pure`
+and `:total`). This entry is the closing review: what was read cold, what it found, what
+holds, and what is left.
+
+**Read cold, fixed on the way.** Four things the review found, each with a pin:
+- `widen_intervals_against` merged same-tag alternatives on EVERY round; now only when the
+  alternatives are multiplying (the divergence signature). A two-branch `[model idx]`
+  return is not an ascent, and merging it lost the tuple shape.
+- A positional union is exact when one shape is inside the other position-wise, not only
+  when at most one position differs — `(tuple m int)` beside `(tuple m int[-1..])` is one
+  tuple.
+- A positional shape over the node cap keeps its shape with FLAT positions before it
+  degrades to the element union: a pair whose model record is deep is still a pair a
+  destructuring reads.
+- `zlib/` is pure and was on the effect deny-list; the kernel's raw `%write-out`,
+  `%getenv`, `%now`, `%random-*` and the clipboard were not on it.
+
+**What holds.** Every relation over-approximates in the direction the checker promises:
+hull on union, meet on intersection, checked arithmetic that widens on overflow, a
+length never claimed beyond what the shape carries, a read pronounced present only from
+a lower bound the lattice holds, a count relation only from sites that all establish it,
+an effect reported only when the body reaches a head the list names, a decrease only from
+a bound the branch established. `soundness_oracle` runs the corpus; the types suite is
+547; `std/` is at zero plain and strict, `tests/` and `examples/` at zero plain.
+
+**Downstream.** bedit's strict ratchet (its own hard gate at zero, against the INSTALLED
+`nest`) reads **58** with this checker — and **53** with the checker as it stood before
+item 11, so the gate was already behind the checker; the delta is 11 true findings (`first`
+of a possibly-empty pane list, in `ed-selected-pane` and ten test sites) and 6 findings
+fixed (`git-section-lines`), 8 more only respelled (`nil | int[0..255]`). bedit's ratchet
+comment says what to do: fix what the sharper checker found, or raise the ceiling in the
+same commit with the reason. That is bedit's commit to make, and `BEDIT_REF` moves with it
+(the smoke target's `--bump`).
+
+**What is left**, deliberately:
+- `tests/ --strict` holds 37 findings (not a gate): test code that assumes non-emptiness
+  or handles nil later than the read. A sweep like the 2026-08-30 one over std.
+- A relation between two locals beyond `i < |xs|`; a `float` interval; a runtime contract
+  for an interval or a property; effect inference as a displayed property; totality across
+  calls and mutual recursion; a `:total` coverage proof over destructuring patterns (only
+  literal patterns are proven today). Each is listed in its ADR's *Deferred* and none has a
+  consumer asking.
+- Items 5 and 7 above (return-type dispatch, tier-2 monomorphization): unchanged, large.

@@ -13426,3 +13426,17 @@ defines and dropped its faces, leaving it provided and empty. `def-face`/`face-s
 `%register-protocol` and the three `editor/layers` registrations are `%registry-update!` ops
 now (`:append-new` added for the system-layer list); guards in `tests/isolate_load_test.blsp`.
 The kernel's own comment on `registry_cas` had named the rule the whole time.
+## 2026-09-15 — the regex engine decided: lexers scan on the DFA (ADR-352)
+
+bedit on a 173-line `.bashrc`: 430 ms per keystroke, the whole file re-lexed through
+`regex/find-all` twice per line, and the editor "pretty much unresponsive" with the close
+button queued behind held keys. Measured on the file's own lines: the capture VM ~40 µs per
+character, the bitset `match?` 0.19 µs — 200×. So the capture engine leaves the lexer's
+path entirely: `regex/tokens` scans a rule table on the anchored DFA (leftmost position,
+first rule in table order, longest match; edge `\b` as scanner guards), `editor/lexer` and
+`editor/shell` run on it, and `find` uses the same scan as a prefilter so the VM only ever
+starts where a match starts. `regex/paint` then took the line rules (a YAML key, a Makefile
+target) off the VM too, as prefix / paint / suffix triples, and `editor/lexer` and `editor/shell`
+went to ONE scan per line with the word rule as the table's last row. Same lines, worktree dev
+build: `shell-spans` over the whole file 303 → 12 ms, the 36-char line 2.0 → 0.11 ms, the
+164-char alias line 10 → 0.41 ms; 40 YAML lines 17.8 → 5.6 ms, 40 TOML lines 13 → 3.2 ms.

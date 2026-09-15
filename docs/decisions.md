@@ -22661,3 +22661,60 @@ a union or intersection of arrows with effects is a lattice question this checke
 answer for yet. *An allow-list of pure primitives*: complete but noisy — every unlisted
 primitive a false positive, against the checker's one promise. *Transitive totality*: a
 call graph with a measure per edge, a different analysis; declared as not claimed.
+## ADR-352 — Lexers scan on the bitset engine: `regex/tokens`, and `find` enters the VM only at a match
+
+**Status:** accepted and implemented 2026-09-15 (`std/regex.blsp` `regex-longest-at`,
+`regex-first-start`, `tokens`; `editor/lexer` and `editor/shell` on it).
+
+**Context.** bedit opened a 173-line `.bashrc` and every keystroke cost 430 ms — held
+arrow keys queued seconds of work, the window's close request landed behind it, and the
+editor read as hung. The profile was the regex capture engine: `editor/shell` ran two
+`regex/find-all` passes per line over the whole file, and the Pike VM costs ~40 µs per
+character of input (1.4 ms for a 36-char line, 7.5 ms for a 164-char one), where the
+bitset `match?` costs 0.19 µs — a 200× gap measured on the same lines. The 2026-09-13
+devlog had already found the 30% recoverable inside the VM and named the rest a design
+choice: (a) a DFA scan, (b) a native path behind the same API, (c) a JIT of the NFA. The
+objection to (a) as first stated — a capture run over a whole-line match costs the same —
+holds only while the lexer asks for captures at all.
+
+**Decision.** A lexer never wants captures: a token's identity is the table ROW that
+produced it, never a group inside it, and that question the bitset engine can answer.
+`regex-longest-at` runs the anchored DFA from a position and keeps the last accept —
+the longest match starting there; `regex/tokens` scans a `[[pattern tag] …]` table left
+to right on it: at the earliest position any rule matches, the first rule in table order
+wins with its longest match, the scan resumes at the token's end, and an empty match is
+never a token — what a `(r1)|(r2)|…` alternation under `find-all` meant, minus the
+captures. `^` fires only at 0 and `$` only at `n`, as in the boolean loops; a `\b` may
+sit only at a rule's edges, where the scanner tests the boundary itself (a state set
+cannot carry one), and one inside a rule is refused by name. `editor/lexer`'s
+`:structured` and `:words` and `editor/shell`'s two passes are `tokens` scans now; the
+`:line` rules, which paint a group, stay on `find`.
+
+`find`/`find-all` (and `replace`/`split` over them) keep every semantic and gain the
+scan as a PREFILTER: `regex-first-start` finds the leftmost start on the DFA — the
+first-character test, then the anchored run — and the VM is entered there and only
+there, so the positions a match cannot begin at, which is the whole of a line that does
+not match, never cost a thread. A boundary pattern and the empty input take the VM
+directly as before. One answer changed, and it was wrong before: `(find "$" "abc")` is
+the empty match at 3, not nil.
+
+Pure Brood over the engine that was already there; no kernel primitive, and the module's
+stance ("no per-step closures, linear in the input") is unchanged — the scan is the
+`match?` loop with an accumulator.
+
+**Alternatives rejected.** *The native `regex` crate behind the API* (b): already in the
+lock file, and the only route below the DFA's ~0.2 µs per character — but the lexers
+needed 100×, not 1000×, and a builtin is added when Brood cannot do the work, which it
+now demonstrably can; the option stays open behind the same `tokens`/`find` surface.
+*A JIT of the NFA* (c): research, against a two-hundred-line change. *A DFA for match
+extents with the VM for captures inside each*: pays the VM over every matched character
+still, which on a comment line is the line — the objection the devlog recorded; dropping
+the captures, not bounding them, was the move. *Per-line memoisation in the editor's
+span cache*: hides the cost on a keystroke and leaves it on every scroll, every open and
+every other caller of `find-all`.
+
+**Measured** (bedit's 173-line `.bashrc`, the worktree's dev build, same lines before and
+after): `shell-spans` whole-file 303 → 12 ms; a 36-char `export` line 2.0 → 0.11 ms; the
+164-char `alias alert=…` line 10 → 0.41 ms; 40 YAML lines 17.8 → 5.6 ms, 40 TOML lines
+13 → 3.2 ms. What remains is interpreter overhead per token (~7 µs: the result map, the
+substring, the append), not the engine.

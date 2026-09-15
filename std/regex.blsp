@@ -792,7 +792,8 @@ pattern used one way compiles one."
     (if (nil? hit)
       (let ([branches ngroups] (regex-parse-numbered pattern)
             nfa (regex-nfa-capturing branches)
-            obj {:states (get nfa :states)
+            obj {:pattern pattern
+                 :states (get nfa :states)
                  :start (get nfa :start)
                  :ngroups ngroups
                  ;; two slots per group (open, close) — plus group 0, the whole match
@@ -960,21 +961,333 @@ group."
         :groups
           (into [] (map (range 1 (inc (get obj :ngroups))) (fn (k) (regex-cap-group s caps k))))))))
 
+;; ---- the scanner: WHERE a match begins and how far it reaches, on the bitset engine --
+;; The Pike VM answers "where, and with which groups"; a lexer only ever asks "where, and
+;; which RULE" — the identity of a token is the table row that produced it, never a group
+;; inside it. That question the bitset engine can answer: run the anchored DFA from a
+;; position and keep the last position it accepted at, and you have the longest match
+;; starting there; scan positions left to right and the first one that yields a match is
+;; the leftmost start. No thread list, no capture slots — the per-character work is the
+;; DFA memo lookup `match?` pays, ~200× under the VM's (ADR-352 has the measurement).
+;;
+;; Two things ride on it. `tokens` is the lexer's entry: a table of `[pattern tag]` rules
+;; scanned as one, the FIRST rule (in table order) to match at the EARLIEST position
+;; winning with its longest match — what a `(r1)|(r2)|…` alternation under `find-all`
+;; meant, minus the captures. And `find` uses the scan as a PREFILTER: the leftmost start
+;; is found on the DFA, and the VM is entered there and only there, so the positions a
+;; match cannot begin at — the whole of a line that does not match — never cost a thread.
+;;
+;; `^` fires only at position 0 (the start closure with anchors, `startfull`) and `$` only
+;; at `n` (the exit closure), exactly as the boolean loops have it. A `\b` cannot be judged
+;; by a state set, so a pattern with one skips the prefilter, and a rule may carry one only
+;; at its edges, where the scanner tests the boundary itself.
+
+(defn- regex-longest-loop (pattern exitmemo memo m matchbit codes n trail j set best)
+  "Walk from position `j` with the live `set`; `best` is the end of the longest accept so
+far (nil for none). Dead set → done. An accept at `j < n` is the matchbit in the split-
+closed set; at `n` it is the exit closure (`$` fires). With `trail`, only a word boundary
+counts as an accept — a rule ending in `\\b`."
+  (if (= set 0)
+    best
+    (if (>= j n)
+      (if (and (regex-exit pattern exitmemo m matchbit set)
+            (or (not trail) (regex-wordb? codes n n)))
+        n
+        best)
+      (let (best2 (if (and (not (= 0 (bit/and set matchbit)))
+                        (or (not trail) (regex-wordb? codes j n)))
+                    j
+                    best)
+            nxt (table/get memo (+ (* set 2097152) (nth codes j)))
+            nxt2 (if (nil? nxt)
+                   (regex-delta-slow (regex-states-of pattern) memo m set (nth codes j))
+                   nxt))
+        (regex-longest-loop pattern exitmemo memo m matchbit codes n trail (+ j 1) nxt2 best2)))))
+
+(defn- regex-longest-at (pattern obj trail codes n i)
+  "The end of the longest match of `pattern` (its bitset object `obj`) that begins at
+position `i` of `codes`, or nil when none does — an empty match answers `i`."
+  (regex-longest-loop pattern
+    (nth obj 5)
+    (nth obj 4)
+    (nth obj 0)
+    (nth obj 1)
+    codes
+    n
+    trail
+    i
+    (if (= i 0) (nth obj 2) (nth obj 3))
+    nil))
+
+(defn- regex-first-start (pattern obj first codes n i)
+  "The leftmost position at or after `i` where a match of `pattern` begins, or nil. The
+first-character prefilter skips a position before the DFA is even entered; past `n` only
+nothing can begin."
+  (if (> i n)
+    nil
+    (if (and (regex-can-start? first codes i n)
+          (not (nil? (regex-longest-at pattern obj false codes n i))))
+      i
+      (regex-first-start pattern obj first codes n (inc i)))))
+
 (defn- regex-find-at (obj s codes n from)
   "The leftmost match at or after `from`, or nil. Positions stay absolute, so `^`
-still means the start of the whole string even when scanning a later suffix."
-  (let (caps (regex-cap-run (get obj :states)
-               (get obj :start)
-               (get obj :blank)
-               (get obj :first)
-               codes
-               n
-               from
-               (list)
-               0
-               nil
-               (get obj :wordb)))
-    (when caps (regex-cap-match obj s caps))))
+still means the start of the whole string even when scanning a later suffix. The start
+is found on the bitset engine first (`regex-first-start`) and the VM entered there — a
+boundary pattern, which the DFA cannot judge, and the empty input, whose closures the
+bitset object does not carry, go straight to the VM as before."
+  (let (start (if (or (get obj :wordb) (= n 0))
+                from
+                (regex-first-start (get obj :pattern)
+                  (regex-compile (get obj :pattern))
+                  (get obj :first)
+                  codes
+                  n
+                  from)))
+    (when (not (nil? start))
+      (let (caps (regex-cap-run (get obj :states)
+                   (get obj :start)
+                   (get obj :blank)
+                   (get obj :first)
+                   codes
+                   n
+                   start
+                   (list)
+                   0
+                   nil
+                   (get obj :wordb)))
+        (when caps (regex-cap-match obj s caps))))))
+
+;; A rule's scanner form. A `\b` at the very start or end of a rule is a boundary GUARD
+;; the scanner applies itself (the character before a token's start, the one after its
+;; end); the pattern the DFA runs is the rule without them. One anywhere else is refused —
+;; a state set cannot carry it, and a lexer rule has never needed one there.
+(def- regex-token-cache (table/new))
+
+(defn- regex-token-rule (pattern)
+  "`{:pattern core :lead lead? :trail trail?}` for rule `pattern`, memoised."
+  (let (hit (table/get regex-token-cache pattern))
+    (if (nil? hit)
+      (let (lead (string/starts-with? pattern "\\b")
+            p1 (if lead (string/substring pattern 2 (string/length pattern)) pattern)
+            len1 (string/length p1)
+            trail (and (>= len1 2)
+                    (= (string/substring p1 (- len1 2) len1) "\\b")
+                    ;; `\\b` — an escaped backslash then a `b` — is not a boundary
+                    (not (and (>= len1 3) (= (string/substring p1 (- len1 3) (- len1 2)) "\\"))))
+            core (if trail (string/substring p1 0 (- len1 2)) p1)
+            obj (regex-compile core))
+        (when (nth obj 6)
+          (error "regex/tokens: a \\b inside a rule is not supported, only at its edges: " pattern))
+        (let (r {:pattern core :lead lead :trail trail})
+          (table/put regex-token-cache pattern r)
+          r))
+      hit)))
+
+(defn- regex-token-resolve (rules)
+  "The rules as the scanner threads them: a vector of `[pattern obj lead trail tag]`, the
+bitset object fetched once per plan rather than once per position."
+  (into []
+    (map rules
+      (fn ([pattern tag])
+        (let (r (regex-token-rule pattern))
+          [(:pattern r) (regex-compile (:pattern r)) (:lead r) (:trail r) tag])))))
+
+;; A rule table is a `def` scanned once per line, so its resolved form and its
+;; first-character memo are kept per table, keyed by the table's printed form. The memo
+;; maps a char code to the bitmask of rules — bit k for table row k — whose DFA takes a
+;; first step on that char, filled on first sight. A position whose mask is 0 costs one
+;; table read and nothing else, and on a shell line that is most positions: a token
+;; begins on `#`, a quote, a `$` or a letter, and everything else is skipped without a
+;; rule being entered.
+(def- regex-tokens-cache (table/new))
+
+(defn- regex-tokens-plan (key rules)
+  "`{:rules resolved :first memo}` for `rules`, memoised under `key` (the table's printed
+form). The plan lives HERE, in the module's own table, never in the tokenizer value a
+caller holds: it carries table handles (the DFA memos, the first-character memo), and a
+table cannot be imaged — a `def` holding one would fail the stdlib image (ADR-218)."
+  (let (hit (table/get regex-tokens-cache key))
+    (if (nil? hit)
+      (let (plan {:rules (regex-token-resolve rules) :first (table/new)})
+        (table/put regex-tokens-cache key plan)
+        plan)
+      hit)))
+
+(defn- regex-steps? (pattern obj set code)
+  "Does the DFA of `pattern` (bitset object `obj`) leave `set` alive on char `code`?"
+  (let (memo (nth obj 4)
+        nxt (table/get memo (+ (* set 2097152) code))
+        nxt2 (if (nil? nxt)
+               (regex-delta-slow (regex-states-of pattern) memo (nth obj 0) set code)
+               nxt))
+    (not (= nxt2 0))))
+
+(defn- regex-first-mask-loop (resolved code k acc)
+  "Bit k set in `acc` for every rule from row `k` on whose DFA steps on `code`."
+  (if (>= k (count resolved))
+    acc
+    (let ([pattern obj _ _ _] (nth resolved k)
+          can (or (regex-steps? pattern obj (nth obj 2) code)
+                (regex-steps? pattern obj (nth obj 3) code)))
+      (regex-first-mask-loop resolved code (inc k) (if can (bit/or acc (bit/shift-left 1 k)) acc)))))
+
+(defn- regex-first-mask (resolved first code)
+  "The bitmask of rules that can begin a token on char `code`, memoised in `first` on
+first sight. The step is tried from both start closures (`^` fired or not), so one mask
+serves every position; the scan itself then decides."
+  (let (hit (table/get first code))
+    (if (nil? hit)
+      (let (mask (regex-first-mask-loop resolved code 0 0))
+        (table/put first code mask)
+        mask)
+      hit)))
+
+(defn- regex-token-hit (resolved mask k codes n i)
+  "`[end tag]` for the first rule in table order from row `k` whose bit is in `mask` and
+which has a non-empty match at `i`, or nil."
+  (if (>= k (count resolved))
+    nil
+    (if (= 0 (bit/and mask (bit/shift-left 1 k)))
+      (regex-token-hit resolved mask (inc k) codes n i)
+      (let ([pattern obj lead trail tag] (nth resolved k)
+            e (if (and lead (not (regex-wordb? codes i n)))
+                nil
+                (regex-longest-at pattern obj trail codes n i)))
+        (if (or (nil? e) (= e i))
+          (regex-token-hit resolved mask (inc k) codes n i)
+          [e tag])))))
+
+(defn- regex-tokens-loop (resolved first s codes n i acc)
+  (if (>= i n)
+    acc
+    (let (mask (regex-first-mask resolved first (nth codes i))
+          hit (if (= mask 0) nil (regex-token-hit resolved mask 0 codes n i)))
+      (if (nil? hit)
+        (regex-tokens-loop resolved first s codes n (inc i) acc)
+        (let ([e tag] hit)
+          (regex-tokens-loop resolved
+            first
+            s
+            codes
+            n
+            e
+            (into acc [{:start i :end e :text (string/substring s i e) :tag tag}])))))))
+
+(defn tokens (rules s)
+  "Scan `s` with `rules` — a vector of `[pattern tag]` — into a vector of the tokens
+`{:start :end :text :tag}` (half-open char offsets, ascending, non-overlapping). At the
+earliest position any rule matches, the FIRST rule in table order that matches there wins,
+and it takes its LONGEST match; the scan resumes at the token's end. A position no rule
+matches is skipped, and a rule's empty match never makes a token. `^`/`$` anchor to the
+string's ends; a `\\b` at a rule's start or end is a word-boundary guard (one inside a
+rule is refused).
+
+This is the lexer's entry point — a token's identity is its rule, not a group — and it runs
+on the bitset DFA engine, so a line costs what `match?` costs per character, not what
+`find-all` costs (ADR-352).
+
+    (map (regex/tokens [[\"#.*\" :comment] [\"[a-z]+\" :word]] \"ab # c\") (fn (t) [(get t :tag) (get t :text)]))   → ([:word \"ab\"] [:comment \"# c\"])"
+  (let (codes (string/->codepoints s)
+        n (count codes))
+    (if (= n 0)
+      []
+      (let (tz (if (map? rules) rules (tokenizer rules))
+            plan (regex-tokens-plan (:key tz) (:rules tz)))
+        (regex-tokens-loop (:rules plan) (:first plan) s codes n 0 [])))))
+(sig tokens (any string -> vector))
+
+(defn tokenizer (rules)
+  "The scanner value for `rules` (a vector of `[pattern tag]`) — what `tokens` takes in
+place of the table itself: `{:key :rules}`, pure data a `def` can hold and an image can
+carry, its `:key` the table's printed form under which the compiled plan (the resolved
+rules, the first-character memo) is kept in this module's cache. Passing the table to
+`tokens` each time prints it per call to find the same plan.
+
+    (regex/tokens (regex/tokenizer [[\"\\\\d+\" :n]]) \"a1\")   → [{:start 1 :end 2 :text \"1\" :tag :n}]"
+  {:key (pr-str rules) :rules (into [] rules)})
+(sig tokenizer (vector -> map))
+
+;; ---- a line rule on the DFA: the painted text between a prefix and a suffix -------
+;; A `^prefix(paint)suffix` rule paints its group — a YAML key up to its `:`, a Makefile
+;; target up to a `:` that is not `:=` — and that is the one lexer question with a group
+;; in it. It needs no capture VM either: the prefix's ends at the line's start, the paint's
+;; ends after one of them, and the suffix matched after one of those, each a DFA run, and
+;; each backtracked when what follows cannot match. Greedy takes the paint's longest such
+;; end, lazy (`*?` `+?` `??` in it) the shortest — the `find` answer on the same text.
+
+(defn- regex-accepts-loop (pattern exitmemo memo m matchbit codes n j set acc)
+  "Every position from `j` on at which the live `set` accepts, consed onto `acc` — so
+the result is DESCENDING, the longest end first. Dead set → done; `$` only at `n`."
+  (if (= set 0)
+    acc
+    (if (>= j n)
+      (if (regex-exit pattern exitmemo m matchbit set) (cons n acc) acc)
+      (let (acc2 (if (= 0 (bit/and set matchbit)) acc (cons j acc))
+            nxt (table/get memo (+ (* set 2097152) (nth codes j)))
+            nxt2 (if (nil? nxt)
+                   (regex-delta-slow (regex-states-of pattern) memo m set (nth codes j))
+                   nxt))
+        (regex-accepts-loop pattern exitmemo memo m matchbit codes n (+ j 1) nxt2 acc2)))))
+
+(defn- regex-accepts-at (pattern obj codes n i)
+  "Every end of a match of `pattern` beginning at `i`, longest first (`()` for none)."
+  (regex-accepts-loop pattern
+    (nth obj 5)
+    (nth obj 4)
+    (nth obj 0)
+    (nth obj 1)
+    codes
+    n
+    i
+    (if (= i 0) (nth obj 2) (nth obj 3))
+    (list)))
+
+(defn- regex-paint-from (pattern pat lazy? suffix suf codes n p)
+  "`[p e]` for the longest (shortest, when `lazy?`) end `e` of `pattern` from `p` after
+which `suffix` matches, or nil."
+  (let (ends (regex-accepts-at pattern pat codes n p)
+        ordered (if lazy? (reverse ends) ends)
+        e (seq/find ordered (fn (e) (not (nil? (regex-longest-at suffix suf false codes n e))))))
+    (when e [p e])))
+
+(defn- regex-paint-loop (pattern pat lazy? suffix suf codes n pends)
+  "The first prefix end in `pends` (longest first) the paint and suffix can follow."
+  (if (empty? pends)
+    nil
+    (or (regex-paint-from pattern pat lazy? suffix suf codes n (first pends))
+      (regex-paint-loop pattern pat lazy? suffix suf codes n (rest pends)))))
+
+(defn paint (prefix pattern suffix s)
+  "At the start of `s`: the `[start end]` of the text `pattern` matches between a `prefix`
+matched at position 0 and a `suffix` matched after it — the group a `^prefix(pattern)suffix`
+regex would paint — or nil when the line does not match. Found on the bitset engine: the
+prefix's longest match first, then `pattern`'s longest end after which `suffix` matches
+(its shortest, when `pattern` is lazy: it contains `*?`, `+?` or `??`), each backtracked
+when the rest cannot follow. The empty pattern `\"\"` is an absent prefix or suffix.
+A `\\b` in any of the three is refused.
+
+    (regex/paint \"^\\\\s*\" \"\\\\[[^\\\\]]*\\\\]\" \"\" \"  [core] x\")   → [2 8]"
+  (let (codes (string/->codepoints s)
+        n (count codes)
+        pre (regex-compile prefix)
+        pat (regex-compile pattern)
+        suf (regex-compile suffix)
+        lazy? (or (includes? pattern "*?") (includes? pattern "+?") (includes? pattern "??")))
+    (when (or (nth pre 6) (nth pat 6) (nth suf 6))
+      (error "regex/paint: a \\b is not supported in a line rule: "
+        (pr-str [prefix pattern suffix])))
+    (if (= n 0)
+      nil
+      (regex-paint-loop pattern
+        pat
+        lazy?
+        suffix
+        suf
+        codes
+        n
+        (regex-accepts-at prefix pre codes n 0)))))
+(sig paint (string string string string -> any))
 
 ;; ---- public entry points ----------------------------------------------------
 ;; The n == 0 edge (empty input) is the one case where the precomputed closures

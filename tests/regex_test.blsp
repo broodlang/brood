@@ -255,3 +255,93 @@
   (test "a boundary inside a group and under a quantifier"
     (assert= (map (regex/find-all "(\\bin\\b)" "in inside in") (fn (m) (get m :start))) (list 0 10))
     (assert= (get (regex/find "\\b\\w+\\b(?:\\s+\\b\\w+\\b)*" "a bb ccc") :text) "a bb ccc")))
+
+;; `tokens` — the lexer's scan on the bitset engine (ADR-352): where a match begins and
+;; how far it reaches, with the RULE as the token's identity instead of a capture group.
+(defn- toks (rules s)
+  "`[tag text]` per token — the shape the assertions read."
+  (map (regex/tokens rules s) (fn (t) [(get t :tag) (get t :text)])))
+
+(describe "regex tokens — a rule table scanned as one"
+  (test "the earliest position wins, and at it the first rule in table order"
+    (assert= (toks [["#.*" :comment] ["\"[^\"]*\"" :string] ["[a-z]+" :word]] "ab \"x#y\" # c")
+      (list [:word "ab"] [:string "\"x#y\""] [:comment "# c"]))
+    ;; two rules match at 0: the first listed takes it, even though the second is longer
+    (assert= (toks [["ab" :short] ["abc" :long]] "abc") (list [:short "ab"])))
+  (test "a rule takes its longest match; tokens are ascending, non-overlapping offsets"
+    (assert= (map (regex/tokens [["\\d+" :n]] "a12b345")
+               (fn (t) [(get t :start) (get t :end) (get t :text)]))
+      (list [1 3 "12"] [4 7 "345"]))
+    (assert= (toks [["a|ab|abc" :x]] "abcd") (list [:x "abc"])))
+  (test "^ and $ anchor to the string's ends, never to a token's"
+    (assert= (toks [["^#.*" :c]] "x #a") '())
+    (assert= (toks [["^#.*" :c]] "#a b") (list [:c "#a b"]))
+    (assert= (map (regex/tokens [["b$" :e]] "bab") (fn (t) (get t :start))) (list 2))
+    (assert= (toks [["a+$" :e]] "aa aa") (list [:e "aa"])))
+  (test "a \\b at a rule's edge is a boundary guard on the scanner's side"
+    (assert= (toks [["\\b\\d+\\b" :n]] "a1 22 3b 44") (list [:n "22"] [:n "44"]))
+    (assert= (toks [["\\bfi" :k]] "file fi") (list [:k "fi"] [:k "fi"]))
+    (assert= (toks [["fi\\b" :k]] "file fi") (list [:k "fi"]))
+    ;; `\\\\b` is an escaped backslash then a `b`, not a boundary
+    (assert= (toks [["x\\\\b" :k]] "x\\b") (list [:k "x\\b"])))
+  (test "a \\b inside a rule is refused, naming the rule"
+    (assert-error (regex/tokens [["a\\bb" :x]] "ab")))
+  (test "an empty match never makes a token; the empty string has none"
+    (assert= (regex/tokens [["a*" :a]] "bbb") [])
+    (assert= (toks [["a*" :a] ["b" :b]] "bab") (list [:b "b"] [:a "a"] [:b "b"]))
+    (assert= (regex/tokens [["x" :x]] "") []))
+  (test "agrees with find-all over the same rules joined as an alternation"
+    (let (rules [["(?:^|\\s)#.*" :comment]
+                  ["\"(?:[^\"\\\\]|\\\\.)*\"" :string]
+                  ["\\$[A-Za-z_]+" :var]
+                  ["[a-z]+" :word]]
+          joined (string/join (map rules (fn ([p _]) (str "(" p ")"))) "|")
+          lines (list "echo \"$HOME # x\" $USER # done" "# only" "no tokens here?" "a\"b\"c")
+          via-find (fn (s)
+                     (map (regex/find-all joined s)
+                       (fn (m)
+                         (let (groups (get m :groups)
+                               which (seq/find (range (count groups))
+                                       (fn (i) (not (nil? (nth groups i))))))
+                           [(second (nth rules which)) (get m :text)])))))
+      (doseq (s lines)
+        (assert= (toks rules s) (via-find s))))))
+
+(describe "regex find — the bitset prefilter finds the start, the VM runs from there"
+  (test "results are unchanged where a match exists, including empty and end matches"
+    (assert= (get (regex/find "a*" "bbb") :end) 0)
+    (assert= (map (regex/find-all "\\d*" "a1") (fn (m) [(get m :start) (get m :end)]))
+      (list [0 0] [1 2] [2 2]))
+    (assert= (get (regex/find "x*$" "ab") :start) 2)
+    (assert= (map (regex/find-all "(?:^|\\s)#.*" "a #b #c") (fn (m) [(get m :start) (get m :end)]))
+      (list [1 7]))
+    (assert= (get (regex/find "(a)|(b)" "xxb") :start) 2)
+    (assert= (map (regex/find-all "a|" "ba") (fn (m) (get m :start))) (list 0 1 2)))
+  (test "an anchor-only pattern matches where the anchor is"
+    (assert= (get (regex/find "^" "abc") :start) 0)
+    (assert= (get (regex/find "$" "abc") :start) 3)
+    (assert= (get (regex/find "^$" "") :start) 0))
+  (test "a long line with no match is answered without a match"
+    (is (nil? (regex/find "#.*" (string/repeat "abcdefgh" 200))))
+    (assert= (regex/find-all "\"[^\"]*\"" (string/repeat "no quotes " 100)) [])))
+
+(describe "regex paint — a line rule on the DFA: prefix, the painted text, suffix"
+  (test "paints the text between a prefix at the line's start and a suffix after it"
+    (assert= (regex/paint "^\\s*" "\\[[^\\]]*\\]" "" "  [core] x") [2 8])
+    (assert= (regex/paint "^" "[^\\s:#=][^:#=]*" ":(?:[^=]|$)" "build: x") [0 5])
+    ;; `:=` is an assignment, not a target: no `:` end lets the suffix follow
+    (is (nil? (regex/paint "^" "[^\\s:#=][^:#=]*" ":(?:[^=]|$)" "CC := gcc"))))
+  (test "a greedy paint backtracks to the longest end the suffix follows; a lazy one takes the shortest"
+    (assert= (regex/paint "^" "[a-z :]+" ":" "a b: c: d") [0 6])
+    (assert= (regex/paint "^" "[a-z :]+?" ":" "a b: c: d") [0 3]))
+  (test "the prefix takes its longest match first, and a line that does not match answers nil"
+    (assert= (regex/paint "^\\s*(?:-\\s+)*"
+               "[A-Za-z0-9_.\\-\"' ]+?" "\\s*:(?:\\s|$)" "  - brood: \"0.27\"")
+      [4 9])
+    (is (nil? (regex/paint "^" "[a-z]+" ":" "abc")))
+    (is (nil? (regex/paint "^" "x" "" "")))
+    (assert-error (regex/paint "^" "\\bx" "" "x")))
+  (test "a tokenizer held in a def scans like its table"
+    (let (tz (regex/tokenizer [["\\d+" :n] ["[a-z]+" :w]]))
+      (assert= (map (regex/tokens tz "ab12") (fn (t) (get t :tag))) (list :w :n))
+      (assert= (regex/tokens tz "ab12") (regex/tokens [["\\d+" :n] ["[a-z]+" :w]] "ab12")))))
