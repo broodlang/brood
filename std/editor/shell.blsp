@@ -85,6 +85,7 @@ builtins, in the `:syntax/*` faces. Pure, so independently testable."
         (or (= (string/char-at line i) " ") (= (string/char-at line i) "\t")))
     (shell-skip-blank line (inc i))
     i))
+(sig shell-skip-blank (string int -> int))
 
 (defn- shell-defines-after? (line e)
   "Is the word ending at `e` followed by `()` (spaces allowed) — a function definition?
