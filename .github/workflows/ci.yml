@@ -434,11 +434,6 @@ jobs:
           # 2026-09-04), so this job also keeps the SOURCE boot path covered on purpose — the
           # only fallback there is, since the ADR-138 text cache was deleted (2026-09-12).
           BROOD_NO_PRELUDE_IMAGE: 1
-          # DIAGNOSTIC (2026-09-15, to be removed with the fix): this job has failed since
-          # 5afd40bd with every face resolving to nil in highlight/configs/observer — a
-          # registry emptied under the suite, which no local subset reproduces. Name the
-          # isolate restores and the processes live under them (the KI-89 tool).
-          BROOD_SCOPE_DBG: 1
         shell: bash
         run: |
           set -o pipefail
