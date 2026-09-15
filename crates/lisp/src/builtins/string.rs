@@ -654,22 +654,22 @@ pub(super) fn str_last_index_of(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
     if before <= 0 {
         return Ok(Value::int(-1));
     }
-    // Byte limit for `before` (clamped past-the-end to the whole string). A match may START
-    // before the limit and extend past it — that is still a match, so the bound is on the
-    // match's start, not on the slice searched.
-    let limit = if before as usize >= char_len {
+    // The bound is on a match's START (strictly before `before`); the match itself may
+    // extend past it. A needle of `k` chars starting at char `c < before` lies within the
+    // first `before + k - 1` chars, and any match inside that prefix starts before
+    // `before` — so `rfind` over that prefix is exactly the answer. It must be `rfind`:
+    // `match_indices` (the previous scan) yields NON-overlapping matches and so skipped
+    // the last occurrence whenever it overlapped the one before it —
+    // `(last-index-of "xaaay" "aa")` answered 1, the occurrence at 2 never enumerated.
+    // Found by the strings fuzz oracle the day it was made to run again (KI-145).
+    let needle_chars = needle.chars().count();
+    let end_char = (before as usize).saturating_add(needle_chars - 1);
+    let end = if end_char >= char_len {
         a.s.len()
     } else {
-        a.char_to_byte(h, before as usize)
+        a.char_to_byte(h, end_char)
     };
-    let mut best: Option<usize> = None;
-    for (b, _) in a.s.match_indices(&*needle) {
-        if b >= limit {
-            break;
-        }
-        best = Some(b);
-    }
-    Ok(Value::int(match best {
+    Ok(Value::int(match a.s[..end].rfind(&*needle) {
         Some(b) => a.byte_to_char(h, b) as i64,
         None => -1,
     }))

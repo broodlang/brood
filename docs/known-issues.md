@@ -139,8 +139,10 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-142 | **the in-language suite wrapper reserves 19.3 GB of address space at v0.28.0 with 1.8 GB resident, so the documented 16 GB `ulimit -v` cap now aborts it** — `brood_suite_passes` dies with `memory allocation of N bytes failed` (SIGABRT) at the same point on every try, capped, on a tree where it passed capped before the 2026-09-15 merge of `aa5f2a15` (v0.28.0) and ADR-352's DFA lexers; uncapped it runs to completion (5878 tests). Measured on the test binary directly: `VmPeak` 19 306 336 kB, `VmHWM` 1 764 636 kB — reservation, not use | **OPEN 2026-09-15** — filed from the KI-141 verification. The cap's own note says the runtime reserves ~3 GB before any work (arenas + worker stacks) and that a `table` is a 64 MB virtual region; something in the merge window reserves ~3–4 GB more — a `table` per DFA/lexer cache would do it (ADR-352), unverified. Until it is attributed, run the wrapper under **24 GB** (`ulimit -v 24000000`), which still catches the KI-87 class (54 GB). `make test` under 16 GB is red on this tree for this reason and no other |
 | KI-143 | **`nest check --strict` over std/ is red at origin `916c505a` — 12 warnings, all in the ADR-352 code landed 2026-09-15**: `std/regex.blsp` 1001/1003/1120/1122/1131/1132/1227/1229 (`(nth codes j)` and the `code` derived from it read `nil \| int` into `+` and `regex-delta-slow`'s `int`), `std/editor/shell.blsp` 94–96 (`i` reads `ordered` into `inc`/`string/char-at`). The pre-push hook stops every push on it. Reproduced with a checker this session did not touch (the merged tree's `nest`; this session's std changes are `editor/face`, `editor/layers`, `protocol`, `tool/nest`, `tool/project-run`, a `prelude/tools` comment) | ✅ **FIXED 2026-09-15 by `c247c996`** (the other session, an hour later: the ADR-352 scan loops declare their indices — `nest check --strict` over std/ reads 0 at `400382f5`). What this session did with it: reproduced it with an untouched checker, tried one guard that moved the verdict to eight other sites, stopped, and pushed the KI-141 fix past the hook's strict gate with the twelve named — the entry below keeps the list and the two classes for the next time a fresh scan loop meets strict |
 | KI-144 | **every `:syntax/*` face resolves to nil under the FULL suite on the source path — the `differential (tree-walker)` job has been red since `5afd40bd`** — 28 cases across `highlight_test`, `configs_test`, `observer_test` and the executed doc examples, each asserting a face and getting `nil` (`(highlight-spans "(defn f () (str \"a\"))")` → `([16 19 nil])` where three styled spans are documented). Not the type-system work: the identical failure set is present at `5afd40bd` (ADR-346), before ADR-347..351, and the commits between change nothing on the face path | ⏳ **WATCH 2026-09-15**, diagnostic armed. Needs BOTH the whole suite and `BROOD_NO_STDIMAGE=1` (the job's deliberate source path): no subset reproduces — `face`+`registry`+`highlight`+`configs`+`observer`+`lazy_load` is 167/167, a ten-file set including every changed and every failing file is 520/520, all under `BROOD_VM=0 BROOD_NO_STDIMAGE=1 BROOD_NO_PRELUDE_IMAGE=1`. The image hides it for the reason KI-136 records — `editor/face`'s replayed registrations carry the eight `:syntax/*` faces `editor/highlight` declares — which is why only this job sees it. **KI-89 class:** an `%isolate` restores the globals table to its snapshot, so a face registered AFTER that snapshot (because `editor/highlight` loaded lazily, inside or after another test's isolate) is rolled back and every later reader sees an empty `*faces*`; `BROOD_SCOPE_DBG=1` in the job's env logs 6003 restores, each with one live process. KI-136's fix (`editor/lexer` declaring `(:load editor/highlight)`) covers `configs_test` standalone and not the suite's interleaving. The durable fix is KI-89's own; the cheap mitigation is eager-loading the face-declaring modules before any isolate runs |
+| KI-145 | **the differential fuzz harness had been vacuous since the rename waves — every generator emitted stale names (`println`, `rem`, `concat`, `rope-insert`, `bit-shl`, …), each program died on its first form, all four engines agreed on an empty stdout, and `scripts/fuzz/run.sh` reported "0 divergences"** — 1850 programs "clean" on 2026-09-15 in the session that found it, and `match.py` also emitted a clause after an irrefutable pattern, which is a compile error since ADR-297 | ✅ **FIXED 2026-09-15** — the twelve stale names renamed in all ten generators (`rem`→`math/rem`, `concat`→`append`, `rope-*`→`text/*`, `bit-shl`→`bit/shift-left`, `string->list`→codepoints mapped through `string/int->char`, …), the irrefutable-pattern clause dropped; `run.sh` now counts `STALE GENERATOR` (an unbound symbol, or no output from a generator whose programs must run) and exits nonzero on any finding; `crates/cli/tests/fuzz_generators_live.rs` runs one program per generator in the ordinary suite (sabotage-verified: one `println` put back reds it). The class is the third instance — `bench/smoke.py` (KI-42/44) and `stress/fuzz_programs.py` closed the same hole for their own generators — and the lesson is unchanged: a generator writes Brood from Python, no static sweep sees it, and a differential's "no divergence" is only evidence once something proves the programs ran |
+| KI-146 | **`string/last-index-of` missed an occurrence that overlapped the previous one — `(string/last-index-of "xaaay" "aa")` answered 1, the occurrence at 2 never enumerated** — the native pass (`%str-last-index-of`) walked `match_indices`, which yields NON-overlapping matches, and reported the last of those. `index-of` with a rising `from` finds every occurrence, so the pair disagreed — which is exactly the property the strings fuzz oracle checks, and it fired within its first hundred live programs | ✅ **FIXED 2026-09-15** — `rfind` over the prefix that can hold any match starting before `before` (`before + k − 1` chars, `k` the needle's char count), which is the answer by construction; guarded in `tests/strings_test.blsp` ("sees an occurrence that overlaps the previous one", nine cases incl. `before` bounds and a multibyte needle), the docstring carries `"xaaay"`. The first bug the differential fuzz harness has found since it stopped running (KI-145) — a reverse incremental search in bedit over `..`-style needles was wrong for as long as the native pass existed |
 | KI-133 | **a preempted native loop resumed on the interpreter for up to 256 iterations — via its callee's frame** — a native self-tail loop that makes a call is preempted every ~1 500 iterations (the 2 000-reduction quantum); the driver handed the preempted frame to the interpreter "until its loop-top noticed", but the first safepoint that run reached was the CALLEE's entry, so the capture landed on the callee at ip 0, the resume ran the callee natively and returned into the loop MID-BODY, and the loop interpreted to its next 256th back-edge before re-tiering. A 5M-iteration loop with one call: 3 252 preempts, **839 607 interpreted iterations**, −36% instructions with preemption disabled; the leaf-spliced variant −72%. Invisible on the benchmark rows (±1–4%: they are short, or their loops are gate-refused anyway) — this is the cost of every long-running native loop that calls anything, and a candidate for why §7.1's admission experiments read as losses | ✅ **FIXED 2026-09-12** — `vm_run_bc`'s outcome-2 arm yields at once: the budget IS spent, and the frame is at ip 0 (or the journal's resume point, applied first), which is exactly what a resume re-tiers. Guarded by `a_native_preempt_captures_the_loop_frame_not_its_callee`, which drives the capture-mode driver with a 300-reduction budget and asserts every capture after the loop goes native is the loop's frame at ip 0 (sabotage-verified: removing the yield puts the captures on the callee). Found from the call-cost probe: 640 instructions per native→native call read as the call ceremony and was 40% preemption churn |
-| KI-132 | **the JIT latches the syntax highlighter's walk onto the VM — every helper of `editor/highlight/hl-spans` deopt-thrashes** — `BROOD_JIT_BAIL_TRACE=1` over one fontify pass of a 111-line band: `hl-head?`, `hl-advance`, `hl-name`, `hl-doc?` each `reason=deopt-thrash-latched … deopts=16`, `hl-spans` itself 56 deopts at `resume_ip=0` and `108`. The pass runs interpreted: 1.1 ms for 421 tokens (2.4 µs a token), re-lexed on every keystroke in bedit — the single largest cost of a typed character there | **OPEN 2026-09-12** — filed from the bedit performance pass (ADR-336). Cause hypothesis, unverified: the helpers destructure the walk's frame vector `[open n head p]`, whose `head` slot is `nil` on a fresh frame and a string once the head symbol is seen; the type-deopts land on the `SetLocal` after that `(nth frame 2)` (`resume_ip` 40/47/48, `watch=true`), and the re-lowering after a deopt appears to re-specialise to the first-seen tag rather than widen — sixteen identical attempts, then `BAILED`. Repro: `BROOD_JIT_BAIL_TRACE=1 nest run <a script calling (editor/highlight/highlight-spans src) on any 100-line .blsp>`; measure with the same script under `(bench …)`. Not worked here because the JIT is mid-change by another session (ADR-333); the expected win is 3–5× on the pass, which is also every per-token walk of this shape in std |
+| KI-132 | **the JIT latches the syntax highlighter's walk onto the VM — every helper of `editor/highlight/hl-spans` deopt-thrashes** — `BROOD_JIT_BAIL_TRACE=1` over one fontify pass of a 111-line band: `hl-head?`, `hl-advance`, `hl-name`, `hl-doc?` each `reason=deopt-thrash-latched … deopts=16`, `hl-spans` itself 56 deopts at `resume_ip=0` and `108`. The pass runs interpreted: 1.1 ms for 421 tokens (2.4 µs a token), re-lexed on every keystroke in bedit — the single largest cost of a typed character there | ✅ **FIXED 2026-09-15 (ADR-353)** — and the hypothesis was wrong on both counts: no re-lowering happens after a deopt (the same native runs again and the sixteenth latches it), and neither cause was the `head` slot. Two mechanisms, found by bisecting the helpers down to one-line arms with `BROOD_JIT_BAIL_TRACE`: (1) **`=` with a string operand deopted per activation** — `eq_dispatch` compared Int×Int and Sym/Keyword inline and deopted for EVERY other tag, so `hl-head?`'s `(= open "(")` fell out of native code on every call; the residual case now calls `brood_rt_equal` (`Heap::equal`, exactly `%eq`), and only a seq-view deopts. (2) **a type-mixed join was an unconditional deopt** — a join's block params were typed by the FIRST edge emitted, and a later edge whose repr disagreed (`(or p X)`: `p` a boxed slot, `X` a scalar) was compiled as a jump to `deopt`, so `hl-advance` deopted on every frame where `p` was false; edges are now deferred and a join is typed with every predecessor in hand, a disagreement widening to a spill slot or to three tagged words in extra block params (ADR-353). Also found en route: the prepass depth model had no stack effect for `MakeVector`/`Prim3`, so every arm with a `[…]` literal ahead of a join was refused with a Cranelift verifier error (`%match-splice-fail-in`) — modelled, and any future gap bails by name (`prepass-unmodelled-inst`). Measured: the 300-line highlighter pass 7.7 → 4.0 ms; both `[jit-bail]` lines gone. Guard `tests/jit_eq_join_test.blsp`, whose tier cases read the arm's state through the new `%jit-arm-state` probe (sabotage-verified both ways: each restored bug reds its own guard with `:bailed`) |
 | KI-131 | **lazy module loading (ADR-335) made the test runner's driver die on `unbound symbol: math/max` one run in three** — any file with an `:isolated` unit; `process 2 died` from `test/collect-loop`, the same with the JIT off. The unit was the first to use `math`, so `math` loaded INSIDE its `%isolate` snapshot and was rolled back with it, while the driver running beside it had started depending on it. Before ADR-335 the runner's closure loaded at the runner's load, before any isolate — an invariant that held by accident and was never stated | ✅ **FIXED 2026-09-12**, the same day it landed. Stated and pinned: a fourth `defmodule` header clause `(:load a b …)` loads modules at the file's load and refers nothing (the explicit eager request), `std/tool/test.blsp` `:load`s its sixteen-module closure, and `crates/cli/tests/test_framework_closure.rs` measures the real closure (a source load under the eager policy) and fails naming any module the clause lacks — sabotage-verified by dropping `math`. `%isolate`'s restore also waits for another process's in-flight load (`wait_for_inflight_loads`, the `*features-loading*` claim) so a load straddling the swap cannot leave KI-89's record-without-bindings asymmetry. Verified 25/25 + 6/6 (`BROOD_NO_JIT=1`) + 4/4 (`BROOD_NO_STDIMAGE=1`) on the reproducing file and 15/15 on `startup_image_test.blsp`, against 3/20 and 4/12 failing before. Worth recording how the first diagnosis went wrong: the wait alone was written first, on the define→`provide` theory, and the loop still failed — the mechanism was a module *consistently* loaded and unloaded by the unit, not a torn load |
 | KI-129 | **a script `nest run FILE` outside `src/` that `(:use model)`s a project module loads it TWICE — once rooted (`bedit/model`, by the pre-flight checker's require) and once bare (`model`, by the script's own `(:use …)`)** — so every `deftype` alias in it is registered under two names, `bedit/model/model` and `model/model`, and a `sig` naming `model` from then on is *ambiguous* (`alias_ty`'s unique-suffix rule declines) — `unknown type \`model\`` from `reflect/check` and `check-string-here` in that process. Seen 2026-09-12 probing bedit from a scratchpad script; `nest test` and the project's own `nest run` (rooted throughout) are unaffected | ✅ **FIXED 2026-09-12** — one level below the diagnosis: `spawn_root_program` (the process `brood FILE` and `nest run FILE` run in) built its heap WITHOUT the package-context inheritance `spawn_impl` already does, so the context `project/setup` installed never reached the program; it inherits now, as a spawned child does, and the file's `(:use model)` roots exactly as the checker's did. Guard `crates/nest/tests/run_file_roots_project_modules.rs` — a script beside a fixture project, asserting `*features*` holds the rooted name ONLY and the alias resolves in a `sig`; red without the inheritance. Original analysis: the checker's `setup_check_imports` roots the `(:use …)` target (`root_module_name`) before requiring it; the runtime load of a FILE outside the package does not, since the file is not the package's. Fix is one rule for both: a bare `(:use m)` from a file the project does not own, run in that project's directory, should still root `m` when the project provides it. Guard to write with the fix: a `nest run` of a scratch file using a fixture project's module, asserting `*features*` holds the rooted name only |
 | KI-128 | **a top-level form's value was rendered to a string on every native run, and thrown away** — `7a72135b` ungated the wasm result path so the playground's shipped entry point became host-testable (KI-115), which also made `finish_form` call `printer::print` on EVERY top-level form on the native path, where `run_program` discards it. Cost is proportional to the value's size, so a program binding one large structure pays in full: the `sort` benchmark (`(def data (sort …))` over a 375k-element list) went 132 -> 146 ms, **+10.6%**. `nest run FILE` paid it too, via `%run-program-file` | ✅ **FIXED 2026-09-11** — `ProgramExit::want_result`, set once at construction so nothing races the program starting: `run_program_repr` (the playground) true, `run_program`/`with_preamble`/`spawn_program_for_test`/`%run-program-file` false. The path stays UNGATED — that is what makes it host-testable, and KI-115's guard is untouched; the work is simply skipped when the answer is discarded. Measured interleaved with every arm verified `:state :live`, best-of-15, 0.7% control: pre-regression 134 ms · regressed 145 ms · fixed **135 ms**, i.e. inside the control. Guards `run_program_does_not_render_a_result_nobody_reads` (asserts `take_result()` is None after `run_program` — the observable consequence, not the flag) and `run_program_repr_still_renders_the_result` (so the first cannot be satisfied by deleting rendering); sabotage-verified, reverting the fix reds the first alone |
@@ -9707,7 +9709,7 @@ mailbox ahead of the next child's reply.
 child death, the reason in that message is the bug; if it names a 60-second silence with
 23 of 24 replies, look at the scheduler, not the loader.
 
-## KI-132 — the JIT latches the syntax highlighter's walk onto the VM: every helper of `hl-spans` deopt-thrashes — OPEN 2026-09-12
+## KI-132 — the JIT latches the syntax highlighter's walk onto the VM: every helper of `hl-spans` deopt-thrashes ✅ FIXED 2026-09-15 (ADR-353)
 
 **Symptom.** One fontify pass over a 111-line, 421-token band of `bedit/src/view.blsp`
 under `BROOD_JIT_BAIL_TRACE=1`:
@@ -9749,6 +9751,109 @@ per pass now (`hl-faces`, −0.4 ms), which is independent of this.
 `hl-*` arm, and the pass several times faster.
 
 **Guard.** None until fixed; the guard is the bail trace above going quiet on this repro.
+
+**Resolution (2026-09-15).** The hypothesis above was wrong twice over, which is worth
+recording because it was the plausible reading. First, nothing re-lowers after a type deopt:
+`jit_deopt_feedback` only counts — the same native code runs on the next activation, deopts
+at the same guard, and the sixteenth consecutive one stores `BAILED`. Second, the `head` slot
+was innocent (`f-nilstr`, a helper reading a nil-then-string slot, never deopted). The method
+that found the real causes: run the repro, then cut each latched helper down to one-line arms
+of its shapes until exactly one still latches — `BROOD_JIT_BAIL_TRACE=1` on a ten-line file, a
+minute per round.
+
+1. **`(= open "(")` — `=` with a string operand.** `eq_dispatch` lowered `=` as an
+   Int×Int payload compare, a Sym/Keyword identity compare, and a **deopt for every other
+   tag**. A string compare per activation is therefore a deopt per activation; `hl-head?` and
+   `hl-name` latched on it. The residual case now calls `brood_rt_equal` — `Heap::equal`,
+   which is exactly `%eq` (`prim_eq`) for anything but a lazy seq-view, and the seq-view
+   (status 2) is the only thing that still deopts, because realising it needs the evaluator.
+2. **`(or p (and params? (= n 2)))` — a type-mixed join.** A join block carries its operand
+   stack as one `i64` param per entry, typed per entry as raw int / 0-1 bool / "lives in
+   frame slot k". Edges were emitted in ip order and the FIRST edge fixed the join's typing;
+   a later edge that disagreed was compiled as an unconditional jump to `deopt`. `(or p X)`
+   expands to `(let (t p) (if t t X))`, whose join takes `t` (a boxed slot) from one edge and
+   `X`'s scalar from the other — so every activation with `p` false deopted. `hl-advance`
+   and `hl-doc?` latched on it; so does any `(if c x 7)`, `(or flag default)` or
+   `(if c 7 (< a b))` in a hot arm. ADR-353: branches now target fresh edge blocks and
+   record their stacks; when the target leader is translated every predecessor is in hand,
+   the typings are unified, and a disagreement widens — into the block-argument spill slot
+   when the arm reserved one, else as three tagged words in extra block params — with the
+   edge blocks filled then.
+
+A third, found by asking what else crosses a join: a materialised float had no repr, was
+typed `Int`, and deopted on every crossing — `(+ acc (if (< x 0) 0.5 1.5))` thrashed the same
+way (`ParamRepr::Float` now; guarded in the same file).
+
+En route: `%match-splice-fail-in` was being refused with `cranelift-define-function`, a
+Cranelift verifier rejection ("mismatched argument count") — the prepass depth model had no
+stack effect for `MakeVector` or `Prim3`, so it stopped walking there and sized every later
+join at 0 params. Both are modelled now, the verifier error prints under the bail trace, a
+prepass/emit depth disagreement bails as `join-depth-mismatch` naming the ip, and an unmodelled
+opcode bails as `prepass-unmodelled-inst` naming it.
+
+Measured on `highlight-spans` over the 300-line `std/editor/highlight.blsp`: **7.7 → 4.0 ms
+per pass**, no `[jit-bail]` line for any `hl-*` arm. Guard: `tests/jit_eq_join_test.blsp` —
+value cases for engine agreement, and tier cases that assert the arm is `:native` through the
+new dev-tools probe `(%jit-arm-state f argc)`, because both bugs produced the right answer
+slowly and a value test passed against them. Sabotage-verified: restoring the deopt in
+`eq_dispatch`'s residual reds "string `=` keeps the arm native" with `:bailed`; restoring
+first-edge-wins reds the join tier case the same way.
+
+## KI-145 — the differential fuzz harness was vacuous: every generator emitted stale names ✅ FIXED 2026-09-15
+
+**Symptom.** `scripts/fuzz/run.sh <generator> 150` reported `checked=1050 bad=0 divergences=0
+crashes=0` for `metamorphic`, and the same shape of clean result for six more generators —
+1850 programs — and a session cited that as the VM/JIT differential being green. One
+generated program run by hand: `warning: unbound symbol: abs`, `unbound symbol: rem`, and
+**0 bytes of stdout**. Every generator: `println` (177 programs), `rem` (222), `quot`, `max`,
+`min`, `abs`, `mod`, `concat`, `subvec`, `substring`, `char-at`, `last-index-of`,
+`string->list`, `rope-insert`/`-delete`/`-length`/`-slice`, `string->rope`/`rope->string`,
+`scan-form-start`, `check`, `bit-or`/`bit-xor`/`bit-shl`. Each program died on its first form
+on all four engines, which therefore agreed — on nothing.
+
+**Why it survived.** The runner compared engine outputs and counted `BAD` lines; an error on
+stderr with an empty stdout is neither a divergence nor a `BAD`. No test ran a generator.
+Brood's rename sweeps cover `std/`, `tests/`, `examples/`, `breakage/`; a generator writes Brood
+from Python. This is the third time the same hole has been closed for a different generator
+(`bench/smoke.py` after KI-42/KI-44; `stress/fuzz_programs.py`'s `STALE GENERATOR` line), and
+the `CLAUDE.md` rename checklist already says "grep the Python too".
+
+**Fix.** The names updated in all ten generators; `match.py` no longer emits `(_ :NOMATCH)`
+behind a top-level bare-variable pattern (an unreachable clause after a catch-all is a
+compile error, ADR-297); `run.sh` counts a `STALE GENERATOR` — the reference engine reports an
+unbound symbol, or prints nothing for a generator whose programs must run (`syntax` and
+`checker` are exempt from the second rule: their programs are meant to be rejected) — and
+exits nonzero on any finding. Guard: `crates/cli/tests/fuzz_generators_live.rs`, one program
+per generator on the tree-walker in the ordinary suite; sabotage-verified with one `println`
+restored.
+
+**What the harness then said, on the same day, once it ran:** see the devlog entry — every
+generator clean on the ADR-353 tree, with real output this time.
+
+## KI-146 — `string/last-index-of` skipped overlapping occurrences ✅ FIXED 2026-09-15
+
+**Symptom.** `scripts/fuzz/run.sh strings`, on its first live run after KI-145:
+`BAD str_801.blsp: BAD nothing-after-last got 445 want -1` — the oracle's property that
+`(index-of s needle (+ last 1))` finds nothing once `last` is `(string/last-index-of s
+needle)`. Reduced: `(string/last-index-of "xaaay" "aa")` → 1 (the occurrence at 2 exists);
+`(string/last-index-of "ab\n\n\ncd" "\n\n")` → 2 (3 exists).
+
+**Cause.** `%str-last-index-of` (`builtins/string.rs`) scanned `a.s.match_indices(needle)`
+and kept the last start under the bound. Rust's `match_indices` yields *non-overlapping*
+matches — after the one at 1 it resumes at 3 — so an occurrence overlapping the previous
+one is never a candidate. The forward `index-of` uses `find` from `from`, which sees every
+occurrence, so the two disagreed exactly on self-overlapping needles (`aa`, `\n\n`, `..`).
+
+**Fix.** A match of `k` chars starting at char `c < before` lies within the first
+`before + k − 1` chars, and any match inside that prefix starts before `before`; so
+`prefix.rfind(needle)` is the answer with no enumeration at all. The prefix end is a char
+boundary by construction (`char_to_byte` of a char index, or the whole string).
+
+**Guard.** `tests/strings_test.blsp` "last-index-of sees an occurrence that overlaps the
+previous one": the two reductions, `"aaaa" "aa"` at `before` 2/3/default (the bound is on
+the START, a match may extend past it), a multibyte needle, a needle longer than the string.
+The old primitive answers 1 on the first case; the strings oracle keeps watching the
+property.
 
 ## KI-133 — a preempted native loop resumed on the interpreter, via its callee's frame ✅ FIXED 2026-09-12
 

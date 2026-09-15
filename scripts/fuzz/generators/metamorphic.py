@@ -14,7 +14,7 @@ def leaf(rng):
     if r < 0.85: return str(rng.choice([2**60, -(2**60), 9007199254740993]))
     return rng.choice(["0.0","1.5","2.0","-2.5","100.0"])
 
-OPS = ["+","-","*","max","min","quot","rem"]
+OPS = ["+","-","*","math/max","math/min","math/quot","math/rem"]
 def expr(rng, d):
     if d <= 0 or rng.random() < 0.35: return leaf(rng)
     r = rng.random()
@@ -41,8 +41,8 @@ def program(E_variant):
             f"(defn lp (i acc)\n"
             f"  (if (= i 0) acc\n"
             f"    (lp (- i 1)\n"
-            f"      (str acc \"|\" (try (pr-str (f (- (rem i 11) 5) (- (rem i 7) 3))) (catch e \"E\"))))))\n"
-            f"(println (lp 200 \"\"))\n")
+            f"      (str acc \"|\" (try (pr-str (f (- (math/rem i 11) 5) (- (math/rem i 7) 3))) (catch e \"E\"))))))\n"
+            f"(io/puts (lp 200 \"\"))\n")
 
 if __name__ == "__main__":
     n = int(sys.argv[1]); base = int(sys.argv[2]); outdir = sys.argv[3]

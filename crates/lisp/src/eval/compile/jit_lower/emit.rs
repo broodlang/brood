@@ -64,6 +64,9 @@ pub(super) struct Funcs {
     /// `table_prim` helper drives it: status 0 hands back the value, status 1 deopts to the
     /// VM, which owns every branch of `get` this declines.
     pub mget: FuncRef,
+    /// `brood_rt_equal` — `Heap::equal` for the operand pairs [`eq_dispatch`] cannot
+    /// decide inline (strings, floats, structural values); status 2 (a seq-view) deopts.
+    pub equal: FuncRef,
     /// `brood_rt_global_ic` — resolve a free global through the per-site inline cache.
     pub globic: FuncRef,
     /// `brood_rt_push_room(heap, n) -> *mut Value` — reserve n argument slots on `roots`
@@ -165,9 +168,19 @@ pub(super) struct Frame<'a> {
 pub(super) enum ParamRepr {
     Int,
     Bool,
+    /// A materialised `Op::Float` (a literal, an arithmetic result): its bits cross in the
+    /// `i64` param and the target bitcasts them back. Without this a float join read as
+    /// `Int` and `as_int` deopted on it every time — `(+ acc (if c 0.5 1.5))` thrashed.
+    Float,
     /// The value lives in frame slot `k`; the arg word is a placeholder. Every predecessor
-    /// must name the *same* slot, which `record_block_flags` enforces by equality.
+    /// must name the *same* slot, which `control::resolve_edges` settles.
     Slot(usize),
+    /// A join entry whose predecessors DISAGREED and that has no spill slot to widen into
+    /// (a call-free arm reserves none — `jit_spill_reserve`): the value crosses as its
+    /// three tagged words, the entry's own param plus two extra block params appended for
+    /// the `n`th widened entry (`control::resolve_edges`), and the target rebuilds an
+    /// `Op::Handle`. Never produced by [`param_repr`] — only unification makes one.
+    Words(usize),
 }
 
 /// The representation `op` at operand-stack index `idx` will cross a block boundary as.
@@ -179,6 +192,7 @@ pub(super) fn param_repr(b: &FunctionBuilder, op: Op, idx: usize, f: Frame) -> P
         return ParamRepr::Bool;
     }
     match op {
+        Op::Float(_) => ParamRepr::Float,
         // A slot the tier-time profile did NOT see an Int in: carry it as a slot reference
         // rather than unboxing it (which would deopt for a vector/map/string/…).
         Op::Slot(k) if !f.slot_int_profile.get(k).copied().unwrap_or(false) => ParamRepr::Slot(k),
@@ -635,66 +649,76 @@ pub(super) fn as_int(b: &mut FunctionBuilder, op: Op, f: Frame) -> cranelift_cod
     }
 }
 
-/// Materialise an operand as a block argument. Block params are declared `I64`
-/// (see `leader_block`), but a comparison result is an `i8`; passing it raw would
-/// be an `I8`-into-`I64`-param type mismatch the Cranelift verifier rejects, which
-/// bailed *every* arm that carried a comparison across a block boundary — i.e. every
-/// `(and …)`/`(or …)` (they short-circuit a bool through a merge). Zero-extend the
-/// `i8` (0/1 → bool); the target reconstructs it as `Op::Bool` via the `bool_param`
-/// flag recorded at this jump, so it branches with correct Brood truthiness. Every
-/// other `as_int` result is already `i64`.
-pub(super) fn as_block_arg(
+/// The word an operand crosses a block edge as, for the repr [`param_repr`] assigned it
+/// when the edge was emitted, which is when
+/// the single-pass slot flags described the value crossing it. `control::resolve_edges`
+/// fills an edge block later, after other blocks' stores have moved those flags, so it
+/// must not re-derive the repr here: a slot flagged bool by a store on another path
+/// would be read as its payload byte without a tag check.
+pub(super) fn as_block_arg_for(
     b: &mut FunctionBuilder,
     op: Op,
-    idx: usize,
+    repr: ParamRepr,
     f: Frame,
 ) -> cranelift_codegen::ir::Value {
-    // A slot proven to hold a `Value::Bool` (`slot_bool`): load its payload byte (0/1)
-    // as the i64 arg — the target reconstructs `Op::Bool` via the `bool_param` flag
-    // (`is_bool_op` is true for it too, so every predecessor agrees). `as_int` would
-    // instead tag-check `Int` and deopt on the `Bool`.
-    if let Op::Slot(k) = op {
-        if f.slot_bool.borrow().get(k).copied().unwrap_or(false) {
-            let roots_base = b.use_var(f.rb_var);
-            let i = b.ins().iadd_imm_s(f.base, k as i64);
-            let o = b.ins().imul_imm_s(i, STRIDE);
-            let addr = b.ins().iadd(roots_base, o);
-            let pl = b.ins().load(
-                types::I64,
-                MemFlagsData::trusted(),
-                addr,
-                PAYLOAD_OFFSET as i32,
-            );
-            return b.ins().band_imm_s(pl, 0xff);
+    match repr {
+        // KI-49: an operand crossing as `ParamRepr::Slot` is NOT materialised — the target
+        // rebuilds `Op::Slot(k)` and reads the frame when it needs the value. Forcing it
+        // through `as_int` here is what deopted every tagged-tuple matcher.
+        ParamRepr::Slot(k) => {
+            // A Handle has to be materialised INTO the slot first; a Slot operand already
+            // lives in one (and `k` is that same slot, so this would be a self-copy).
+            if matches!(op, Op::Handle(..)) {
+                store_op(b, k as i64, op, f);
+            }
+            b.ins().iconst(types::I64, 0)
         }
-    }
-    // KI-49: an operand crossing as `ParamRepr::Slot` is NOT materialised — the target
-    // rebuilds `Op::Slot(k)` and reads the frame when it needs the value. Forcing it
-    // through `as_int` here is what deopted every tagged-tuple matcher.
-    if let ParamRepr::Slot(k) = param_repr(b, op, idx, f) {
-        // A Handle has to be materialised INTO the slot first; a Slot operand already
-        // lives in one (and `k` is that same slot, so this would be a self-copy).
-        if matches!(op, Op::Handle(..)) {
-            store_op(b, k as i64, op, f);
+        // A bool crossing the edge is legitimate (an `(and …)`/`(or …)` short-circuits its
+        // bound operand through the merge) and must NOT go through `as_int`, which deopts
+        // on a boolean operand: the target reconstructs `Op::Bool` from the `bool_param`
+        // flag, so what crosses is the 0/1 word, not a number.
+        ParamRepr::Bool => match op {
+            Op::Bool(v) => v, // already an i64 0/1
+            Op::Int(v) if b.func.dfg.value_type(v) == types::I8 => b.ins().uextend(types::I64, v),
+            // A slot proven to hold a `Value::Bool` (`slot_bool`): load its payload byte
+            // (0/1) as the i64 arg. `as_int` would instead tag-check `Int` and deopt on
+            // the `Bool`.
+            Op::Slot(k) => {
+                let roots_base = b.use_var(f.rb_var);
+                let i = b.ins().iadd_imm_s(f.base, k as i64);
+                let o = b.ins().imul_imm_s(i, STRIDE);
+                let addr = b.ins().iadd(roots_base, o);
+                let pl = b.ins().load(
+                    types::I64,
+                    MemFlagsData::trusted(),
+                    addr,
+                    PAYLOAD_OFFSET as i32,
+                );
+                b.ins().band_imm_s(pl, 0xff)
+            }
+            _ => {
+                let v = as_int(b, op, f);
+                if b.func.dfg.value_type(v) == types::I8 {
+                    b.ins().uextend(types::I64, v)
+                } else {
+                    v
+                }
+            }
+        },
+        ParamRepr::Int => {
+            let v = as_int(b, op, f);
+            if b.func.dfg.value_type(v) == types::I8 {
+                b.ins().uextend(types::I64, v)
+            } else {
+                v
+            }
         }
-        return b.ins().iconst(types::I64, 0);
-    }
-    // A bool crossing the edge is legitimate (an `(and …)`/`(or …)` short-circuits its bound
-    // operand through the merge) and must NOT go through `as_int`, which deopts on a boolean
-    // operand: the target reconstructs `Op::Bool` from the `bool_param` flag, so what crosses
-    // is the 0/1 word, not a number. `param_repr` already typed this edge `ParamRepr::Bool`.
-    match op {
-        Op::Bool(v) => return v, // already an i64 0/1
-        Op::Int(v) if b.func.dfg.value_type(v) == types::I8 => {
-            return b.ins().uextend(types::I64, v)
-        }
-        _ => {}
-    }
-    let v = as_int(b, op, f);
-    if b.func.dfg.value_type(v) == types::I8 {
-        b.ins().uextend(types::I64, v)
-    } else {
-        v
+        ParamRepr::Float => match op {
+            Op::Float(v) => b.ins().bitcast(types::I64, MemFlagsData::new(), v),
+            _ => unreachable!("only a materialised float is typed Float"),
+        },
+        // The first of the three words; `resolve_edges` passes the other two itself.
+        ParamRepr::Words(_) => read_words(b, op, f)[0],
     }
 }
 
@@ -1336,15 +1360,20 @@ pub(super) fn table_prim(
 ///   * either side Sym/Keyword → interned identity: equal iff tags equal AND ids
 ///     equal (a keyword/symbol equals nothing but its same-tag same-id self — never
 ///     numerically coerced, so `(= :a 1)`/`(= :a 'a)` are correctly false);
-///   * anything else (floats, bignums, structural values) → deopt: the VM owns
-///     numeric coercion and deep equality.
+///   * anything else (strings, floats, bignums, structural values) → `brood_rt_equal`,
+///     i.e. `Heap::equal` — the exact `%eq` — through an FFI call; only a lazy seq-view
+///     (status 2) deopts, since realising it needs the evaluator.
 /// This is what keeps keyword-dispatching arms (`(= (get st :t) :split)` — the regex
 /// NFA walkers, any tagged-map code) running native instead of deopting per compare.
+/// The residual case used to deopt outright, which made a string compare per activation
+/// (the highlighter's `(= open "(")`, KI-132) a guaranteed deopt-thrash latch: sixteen
+/// activations, then the arm and every helper of its shape ran interpreted for good.
 pub(super) fn eq_dispatch(
     b: &mut FunctionBuilder,
     wa: [cranelift_codegen::ir::Value; 3],
     wb: [cranelift_codegen::ir::Value; 3],
     f: Frame,
+    fu: Funcs,
 ) -> cranelift_codegen::ir::Value {
     let ta = b.ins().band_imm_s(wa[0], 0xff);
     let tb = b.ins().band_imm_s(wb[0], 0xff);
@@ -1370,9 +1399,25 @@ pub(super) fn eq_dispatch(
     let b_in = b.ins().bor(b_sym, b_kw);
     let either = b.ins().bor(a_in, b_in);
     let kwb = b.create_block();
+    let residual = b.create_block();
+    b.ins().brif(either, kwb, &[], residual, &[]);
+    // Neither inline case: ask the kernel. `Heap::equal` allocates nothing and cannot
+    // error, so this is a plain call with the answer in the status; 2 means a seq-view
+    // operand, which only the VM's `%eq` can realise → deopt.
+    b.switch_to_block(residual);
+    let c = b.ins().call(
+        fu.equal,
+        &[fu.heap, wa[0], wa[1], wa[2], wb[0], wb[1], wb[2]],
+    );
+    let status = b.inst_results(c)[0];
+    let declined = b.ins().icmp_imm_s(IntCC::Equal, status, 2);
+    let decided = b.create_block();
     let __dr = b.ins().iconst(types::I32, 29);
     b.ins()
-        .brif(either, kwb, &[], f.deopt, &[BlockArg::Value(__dr)]);
+        .brif(declined, f.deopt, &[BlockArg::Value(__dr)], decided, &[]);
+    b.switch_to_block(decided);
+    let req = b.ins().icmp_imm_s(IntCC::NotEqual, status, 0);
+    b.ins().jump(done, &[BlockArg::Value(req)]);
     b.switch_to_block(kwb);
     let tags_eq = b.ins().icmp(IntCC::Equal, ta, tb);
     // A Sym/Keyword payload is a u32 — the HIGH half of the payload word is

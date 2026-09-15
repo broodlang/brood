@@ -42,7 +42,7 @@ use emit::store_int;
 #[cfg(feature = "jit")]
 mod control;
 #[cfg(feature = "jit")]
-use control::record_block_flags;
+use control::PendingEdge;
 
 // Primitive-op arm bodies (`Prim1` / `MakeVector` / `Prim3` / the fused
 // `Prim2`/`Prim2SlotSlot`/`Prim2SlotInt`), extracted from the emit loop.
@@ -681,7 +681,13 @@ fn jit_lower_arm_inner(
         }
     }
 
-    let (is_leader, depth) = prepass::block_analysis(code, len);
+    let (is_leader, depth, unmodelled) = prepass::block_analysis_checked(code, len);
+    if let Some(name) = unmodelled {
+        // The subset admitted an instruction the depth model does not know: every leader
+        // past it would be sized wrong. Refuse by name (see `block_analysis_checked`).
+        record_mid_emit_detail("prepass-unmodelled-inst", name);
+        return None;
+    }
 
     let m = jit.module();
     let ptr_ty = m.target_config().pointer_type();
@@ -1013,6 +1019,19 @@ fn jit_lower_arm_inner(
         .declare_function("brood_rt_map_get", Linkage::Import, &vref_sig)
         .ok()
         .or_bail("cranelift-declare-function")?;
+    // brood_rt_equal: (heap, a 3w, b 3w) -> 1 equal / 0 not / 2 declined — the residual
+    // case of `eq_dispatch`, `Heap::equal` on the operand pairs the inline paths cannot
+    // decide (KI-132). No out slot: the answer is the status.
+    let mut eq_sig = m.make_signature();
+    eq_sig.params.push(AbiParam::new(ptr_ty)); // heap
+    for _ in 0..6 {
+        eq_sig.params.push(AbiParam::new(types::I64)); // a 3 words + b 3 words
+    }
+    eq_sig.returns.push(AbiParam::new(types::I64));
+    let equal_id = m
+        .declare_function("brood_rt_equal", Linkage::Import, &eq_sig)
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // brood_rt_table_put: (heap, out, table 3w, key 3w, val 3w) -> status.
     let mut tput_sig = m.make_signature();
     tput_sig.params.push(AbiParam::new(ptr_ty)); // heap
@@ -1156,6 +1175,7 @@ fn jit_lower_arm_inner(
     let thas_ref = m.declare_func_in_func(thas_id, b.func);
     let tget_ref = m.declare_func_in_func(tget_id, b.func);
     let mget_ref = m.declare_func_in_func(mget_id, b.func);
+    let equal_ref = m.declare_func_in_func(equal_id, b.func);
     let tput_ref = m.declare_func_in_func(tput_id, b.func);
     let vbase_ref = m.declare_func_in_func(vbase_id, b.func);
     let tdbase_ref = m.declare_func_in_func(tdbase_id, b.func);
@@ -1674,10 +1694,6 @@ fn jit_lower_arm_inner(
     let read_words = |b: &mut FunctionBuilder, op: Op| -> [cranelift_codegen::ir::Value; 3] {
         emit::read_words(b, op, frame)
     };
-    let as_block_arg =
-        |b: &mut FunctionBuilder, op: Op, idx: usize| -> cranelift_codegen::ir::Value {
-            emit::as_block_arg(b, op, idx, frame)
-        };
     // Integer-vs-float dispatch for a binary op: an operand is float if it's an
     // `Op::Float`, or a `Slot` the profile/tracking marks float. (`Op::Int`/`Handle` are
     // integer/non-number.)
@@ -1726,6 +1742,7 @@ fn jit_lower_arm_inner(
         thas: thas_ref,
         tget: tget_ref,
         mget: mget_ref,
+        equal: equal_ref,
         tput: tput_ref,
         globic: globic_ref,
         pushroom: pushroom_ref,
@@ -1752,16 +1769,30 @@ fn jit_lower_arm_inner(
     // is reached. A back-edge target with params would see no flags and default to `Int`;
     // self-tail back-edges target the param-less leader 0, so this doesn't arise in practice.
     let mut bool_param: Vec<Option<Vec<emit::ParamRepr>>> = vec![None; len + 1];
-    // Edge typing at joins is handled by `control::record_block_flags` (imported).
+    // The not-yet-typed edges into each leader (`control::PendingEdge`): every branch
+    // targets a fresh edge block and records its stack here; the target's translation
+    // unifies the typings and fills the edge blocks (`control::resolve_edges`).
+    let mut pending: Vec<Vec<PendingEdge>> = (0..=len).map(|_| Vec::new()).collect();
 
     // Translate each leader block in ip order.
     for ip in 0..len {
         let Some(blk) = leader_block[ip] else {
             continue;
         };
+        // Every predecessor of this leader has been emitted (edges are forward-only, in
+        // ip order), so its block-param typing can be settled now.
+        let edges = std::mem::take(&mut pending[ip]);
+        if !edges.is_empty() {
+            let unified = control::resolve_edges(&mut b, ip, blk, edges, false, frame)
+                .or_bail("join-depth-or-widening")?;
+            bool_param[ip] = Some(unified);
+        }
         b.switch_to_block(blk);
         let params: Vec<cranelift_codegen::ir::Value> = b.block_params(blk).to_vec();
-        let mut stack: Vec<Op> = params
+        // The operand-stack depth's worth of params; a widened `Words` entry's two extra
+        // words sit after them (`control::resolve_edges`).
+        let depth_here = bool_param[ip].as_ref().map_or(params.len(), |f| f.len());
+        let mut stack: Vec<Op> = params[..depth_here]
             .iter()
             .enumerate()
             .map(|(i, &v)| {
@@ -1775,6 +1806,14 @@ fn jit_lower_arm_inner(
                     // in frame slot `k`, which every predecessor agreed on.
                     emit::ParamRepr::Slot(k) => Op::Slot(k),
                     emit::ParamRepr::Int => Op::Int(v),
+                    emit::ParamRepr::Float => {
+                        Op::Float(b.ins().bitcast(types::F64, MemFlagsData::new(), v))
+                    }
+                    emit::ParamRepr::Words(n) => Op::Handle(
+                        v,
+                        params[depth_here + 2 * n],
+                        params[depth_here + 2 * n + 1],
+                    ),
                 }
             })
             .collect();
@@ -2037,10 +2076,10 @@ fn jit_lower_arm_inner(
                         &mut b,
                         &stack,
                         *t,
+                        j,
                         len,
                         done_block,
-                        &leader_block,
-                        &mut bool_param,
+                        &mut pending,
                         frame,
                     )?;
                     break;
@@ -2064,15 +2103,7 @@ fn jit_lower_arm_inner(
                     break;
                 }
                 Inst::JumpIfFalse(t) => {
-                    control::emit_jump_if_false(
-                        &mut b,
-                        &mut stack,
-                        *t,
-                        j,
-                        &leader_block,
-                        &mut bool_param,
-                        frame,
-                    )?;
+                    control::emit_jump_if_false(&mut b, &mut stack, *t, j, &mut pending, frame)?;
                     break;
                 }
                 other => {
@@ -2120,29 +2151,21 @@ fn jit_lower_arm_inner(
                 break;
             }
             if is_leader[j] {
-                let flags: Vec<emit::ParamRepr> = stack
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &op)| emit::param_repr(&b, op, i, frame))
-                    .collect();
-                if record_block_flags(&mut bool_param[j], flags) {
-                    let args: Vec<BlockArg> = stack
-                        .iter()
-                        .enumerate()
-                        .map(|(i, &op)| BlockArg::Value(as_block_arg(&mut b, op, i)))
-                        .collect();
-                    b.ins()
-                        .jump(leader_block[j].or_bail("jump-target-not-a-leader")?, &args);
-                } else {
-                    // Type-mixed join (see `record_block_flags`): deopt to the VM.
-                    let __dr = b.ins().iconst(types::I32, 107);
-                    b.ins().jump(deopt, &[BlockArg::Value(__dr)]);
-                }
+                // Fall through into the next leader: a deferred edge like any other, so
+                // the join is typed with every predecessor in hand.
+                let e = control::defer_edge(&mut b, &stack, j, j - 1, &mut pending, frame)
+                    .or_bail("backward-jump")?;
+                b.ins().jump(e, &[]);
                 break;
             }
         }
     }
 
+    // Edges into Done that were deferred (a `JumpIfFalse` whose else is the end of the
+    // arm): each stores its single result through `out` and jumps here.
+    let done_edges = std::mem::take(&mut pending[len]);
+    control::resolve_edges(&mut b, len, done_block, done_edges, true, frame)
+        .or_bail("join-depth-or-widening")?;
     // Done block: the result was already stored through the `out` pointer by the exiting
     // block (see `exit_done`), so this just signals normal completion.
     b.switch_to_block(done_block);
@@ -2218,9 +2241,17 @@ fn jit_lower_arm_inner(
         }
     }
 
-    m.define_function(id, &mut ctx)
-        .ok()
-        .or_bail("cranelift-define-function")?;
+    // A define failure is a LOWERING BUG surfacing as a bail (the verifier rejected IR this
+    // file built), so under the bail trace print what Cranelift said — a bare reason name
+    // sends the reader to the IR dump for something the verifier already named.
+    let defined = m.define_function(id, &mut ctx);
+    if let Err(e) = &defined {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+            eprintln!("[jit-bail] cranelift-define-function: {e:?}");
+        }
+    }
+    defined.ok().or_bail("cranelift-define-function")?;
     // DEBUG (bug #2): dump this arm's finalized machine code (hex bytes) for offline
     // disassembly, when `BROOD_DUMP_CODE=<substr>` matches the arm's defn name. gdb can't
     // read JIT code pages at the crash pc (execute-only / superseded), so capture the bytes

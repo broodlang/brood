@@ -1,0 +1,177 @@
+;;; Regression guards for the two deopt-thrash mechanisms behind KI-132 — the JIT
+;;; latching the syntax highlighter's walk onto the VM. `BROOD_JIT_BAIL_TRACE=1` over one
+;;; fontify pass named four helpers `reason=deopt-thrash-latched … deopts=16`, and neither
+;;; cause was the one the entry guessed:
+;;;
+;;;   1. `=` WITH A STRING OPERAND DEOPTED PER ACTIVATION. `eq_dispatch` (jit_lower/emit.rs)
+;;;      compared Int×Int and Sym/Keyword identity inline and DEOPTED for every other tag —
+;;;      so `hl-head?`'s `(= open "(")` fell out of native code on every call, sixteen
+;;;      calls latched the arm `BAILED`, and it ran interpreted for the rest of the process.
+;;;      The residual case now calls `brood_rt_equal` — `Heap::equal`, exactly `%eq` — and
+;;;      only a lazy seq-view (which needs the evaluator to realise) deopts.
+;;;   2. A TYPE-MIXED JOIN WAS AN UNCONDITIONAL DEOPT. A join block's operand-stack params
+;;;      are typed by the FIRST edge to reach it; a later edge whose repr disagreed
+;;;      (`(or p 7)`: `p` a boxed slot on one edge, a raw int on the other) was compiled as
+;;;      a jump to `deopt`, so `hl-advance`'s `(or p (and params? (= n 2)))` deopted on every
+;;;      frame where `p` was false. Edges are now deferred (`control::PendingEdge`) and a
+;;;      join is typed with every predecessor in hand; a disagreement widens to a spill
+;;;      slot holding the tagged value.
+;;;
+;;; Two kinds of guard here. The VALUE cases pin engine agreement (the suite runs them on
+;;; the JIT and the VM); the TIER cases pin that the arm STAYS NATIVE, through
+;;; `%jit-arm-state`, because both bugs produced the right answer slowly — a value test
+;;; passed against them, which is how KI-132 sat open. Sabotage-verified (2026-09-15):
+;;; restoring the deopt in `eq_dispatch`'s residual case fails "string `=` keeps the arm
+;;; native" with `:bailed`; restoring the first-edge-wins typing fails every "join" tier
+;;; case the same way. The value cases pass either way — they are guards against the fix
+;;; ever miscompiling, not reproductions.
+
+(defmodule jit-eq-join-test (:use test))
+
+;; Drive `f` through `batch` until its `argc`-ary arm has settled on a tier (native or
+;; latched), or give up after `rounds` batches. Tiering is asynchronous — the background
+;; compiler installs the code some calls after the arm went hot — so a fixed call count
+;; would be a flake either way.
+(defn- settle (f argc batch rounds)
+  (batch)
+  (let (st (get (%jit-arm-state f argc) :state))
+    (if (or (= st :native) (= st :bailed) (= rounds 0))
+      st
+      (settle f argc batch (- rounds 1)))))
+
+(defn- times (n thunk) (if (= n 0) nil (do (thunk) (times (- n 1) thunk))))
+
+(defn- count-true (f v i acc)
+  (if (= i 0) acc (count-true f v (- i 1) (if (f v) (+ acc 1) acc))))
+
+;; --- 1. `=` beyond Int×Int / Sym/Keyword ---------------------------------------------
+
+;; `hl-head?`'s shape: a string compared per activation, an int compared beside it.
+(defn ej-streq (v) (let ([open n] v) (and (= open "(") (= n 0))))
+(defn ej-str-ne (v) (let ([open n] v) (= open "[")))
+(defn ej-float-eq (v) (let ([a b] v) (= a b)))
+(defn ej-vec-eq (v) (let ([a b] v) (= a b)))
+(defn ej-nil-eq (v) (let ([a b] v) (= a b)))
+(defn ej-int-float (v) (let ([a b] v) (= a b)))
+(defn ej-kw-str (v) (let ([a b] v) (= a b)))
+
+(describe "JIT `=` on non-scalar operands"
+  (test "string `=` computes the same answer as the VM"
+    (assert= 3000 (count-true ej-streq ["(" 0] 3000 0))
+    (assert= 0 (count-true ej-streq ["[" 0] 3000 0))
+    (assert= 0 (count-true ej-streq ["(" 1] 3000 0))
+    (assert= 0 (count-true ej-str-ne ["(" 0] 3000 0))
+    (assert= 3000 (count-true ej-str-ne ["[" 0] 3000 0)))
+
+  (test "float, vector, nil, mixed-number and keyword-vs-string `=`"
+    (assert= 500 (count-true ej-float-eq [1.5 1.5] 500 0))
+    (assert= 0 (count-true ej-float-eq [1.5 2.5] 500 0))
+    (assert= 500 (count-true ej-vec-eq [[1 [2 "x"]] [1 [2 "x"]]] 500 0))
+    (assert= 0 (count-true ej-vec-eq [[1 2] [1 3]] 500 0))
+    (assert= 500 (count-true ej-nil-eq [nil nil] 500 0))
+    (assert= 0 (count-true ej-nil-eq [nil false] 500 0))
+    ;; Whatever `=` says about 1 vs 1.0, native and VM must say the same thing.
+    (assert= (if (= 1 1.0) 500 0) (count-true ej-int-float [1 1.0] 500 0))
+    (assert= 0 (count-true ej-kw-str [:a "a"] 500 0)))
+
+  (test "string `=` keeps the arm native (was: deopt per activation, latched at 16)"
+    (when (%native-tier?)
+      (let (st (settle ej-streq 1 (fn () (count-true ej-streq ["(" 0] 4000 0)) 40))
+        (assert= :native st)
+        (assert= 0 (get (%jit-arm-state ej-streq 1) :deopts))))))
+
+;; --- 2. type-mixed joins -------------------------------------------------------------
+
+;; `hl-advance`'s shape: `(or p X)` with `p` a boxed slot (false on most frames) and `X`
+;; a scalar — the two edges into the `or`'s join disagree.
+(defn ej-or-bool (v) (let ([open n head p] v) (or p (= n 2))))
+(defn ej-or-int (v) (let ([open n head p] v) (or p 7)))
+(defn ej-or-nil (v) (let ([open n head p] v) (or head (= n 2))))
+;; The join's value flowing on: into a vector, a call argument, a truthiness test.
+(defn ej-if-live (c x) (let (r (if c x 7)) [r x]))
+(defn ej-if-arg (c) (list (if c "s" 7) 1))
+(defn ej-if-truthy (c a b) (if (if c 7 (< a b)) :t :f))
+(defn ej-if-eq-true (c a b) (let (t (if c 7 (< a b))) (= t true)))
+(defn ej-if-handle (c) (if c [1 2] 7))
+(defn ej-nested (p q) (or (and p q) 3))
+(defn ej-hl-advance (stack params?)
+  (if (empty? stack)
+    stack
+    (let ([open n head p] (first stack))
+      (cons [open (+ n 1) head (or p (and params? (= n 2)))] (rest stack)))))
+
+;; A materialised float on both edges: `param_repr` had no float repr, typed the join `Int`,
+;; and `as_int` deopted on the float every time (found while closing the two above).
+(defn ej-float-join (x acc) (+ acc (if (< x 0) 0.5 1.5)))
+(defn- drive-float (i acc) (if (= i 0) acc (drive-float (- i 1) (ej-float-join (- 5 i) acc))))
+
+;; The OTHER widening: an arm with two non-tail calls reserves block-argument spill slots,
+;; so its mixed join widens into the frame (`Slot(spill)`) rather than into extra block
+;; params (`Words`). A closure arm, because the profitability gate refuses a named defn of
+;; this shape. Verified to take that path by disabling `Words` in the lowering: this still
+;; lowers and still computes 111000.
+(defn- ej-g (x) (+ x 1))
+(defn ej-spill-run (xs flag)
+  (reduce xs 0 (fn (acc x) (+ (ej-g x) (ej-g acc) (if (or flag (< x 3)) 1 0)))))
+(defn- drive-spill (i acc)
+  (if (= i 0) acc (drive-spill (- i 1) (+ acc (ej-spill-run [1 2 3 4 5 6] (= 0 (bit/and i 1)))))))
+
+(defn- drive-advance (i st)
+  (if (= i 0) st (drive-advance (- i 1) (ej-hl-advance st true))))
+
+(describe "JIT type-mixed joins"
+  (test "`(or p X)` yields the right value on every edge"
+    (assert= 3000 (count-true ej-or-bool ["(" 2 nil false] 3000 0))
+    (assert= 0 (count-true ej-or-bool ["(" 3 nil false] 3000 0))
+    (assert= 3000 (count-true ej-or-bool ["(" 3 nil true] 3000 0))
+    (assert= 7 (ej-or-int ["(" 2 nil false]))
+    (assert= true (ej-or-int ["(" 2 nil true]))
+    (assert= 3000 (count-true ej-or-int ["(" 2 nil false] 3000 0))
+    (assert= true (ej-or-nil ["(" 2 nil false]))
+    (assert= "h" (ej-or-nil ["(" 3 "h" false]))
+    (assert= false (ej-or-nil ["(" 3 nil false])))
+
+  (test "a widened join never clobbers a live local, and its value flows on intact"
+    (times 2000 (fn () (ej-if-live true "x") (ej-if-live false "x")))
+    (assert= ["x" "x"] (ej-if-live true "x"))
+    (assert= [7 "x"] (ej-if-live false "x"))
+    (assert= (list "s" 1) (ej-if-arg true))
+    (assert= (list 7 1) (ej-if-arg false))
+    (times 2000 (fn () (ej-if-truthy true 1 2) (ej-if-truthy false 1 2) (ej-if-truthy false 2 1)))
+    (assert= :t (ej-if-truthy true 1 2))
+    (assert= :t (ej-if-truthy false 1 2))
+    (assert= :f (ej-if-truthy false 2 1))
+    (times 2000 (fn () (ej-if-eq-true true 1 2) (ej-if-eq-true false 1 2)))
+    (assert= false (ej-if-eq-true true 1 2))
+    (assert= true (ej-if-eq-true false 1 2))
+    (assert= false (ej-if-eq-true false 2 1))
+    (times 2000 (fn () (ej-if-handle true) (ej-if-handle false)))
+    (assert= [1 2] (ej-if-handle true))
+    (assert= 7 (ej-if-handle false))
+    (times 2000 (fn () (ej-nested true 5) (ej-nested false 5) (ej-nested true false)))
+    (assert= 5 (ej-nested true 5))
+    (assert= 3 (ej-nested false 5))
+    (assert= 3 (ej-nested true false)))
+
+  (test "a mixed join in a two-call arm (widened into the spill slot)"
+    (assert= 111000 (drive-spill 3000 0)))
+
+  (test "a float on both edges of a join"
+    ;; 19 995 halves and five 1.5s — every term a multiple of 0.5, so the sum is exact.
+    (assert= 10005.0 (drive-float 20000 0.0)))
+
+  (test "the highlighter walk's frame advance"
+    (let (st (drive-advance 3000 (list ["(" 0 nil false])))
+      (assert= ["(" 3000 nil true] (first st))))
+
+  (test "`(or p X)` keeps the arm native (was: the second edge deopted, latched at 16)"
+    (when (%native-tier?)
+      (assert= :native
+        (settle ej-or-bool 1 (fn () (count-true ej-or-bool ["(" 2 nil false] 4000 0)) 40))
+      (assert= :native
+        (settle ej-or-int 1 (fn () (count-true ej-or-int ["(" 2 nil false] 4000 0)) 40))
+      (assert= :native
+        (settle ej-if-truthy 3 (fn () (times 4000 (fn () (ej-if-truthy false 1 2)))) 40))
+      (assert= :native
+        (settle ej-hl-advance 2 (fn () (drive-advance 4000 (list ["(" 0 nil false]))) 40))
+      (assert= :native (settle ej-float-join 2 (fn () (drive-float 4000 0.0)) 40)))))

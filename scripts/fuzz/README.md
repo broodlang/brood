@@ -19,6 +19,17 @@ VM-no-JIT (`BROOD_NO_JIT=1`), VM+JIT (default), and GC-stress
 engines, any `BAD` line (oracle generators self-check), or any **crash** (a
 crashing input is copied next to this README).
 
+**A differential is evidence only when the programs run — and for weeks they did not.**
+After the ADR-302/ADR-330 rename waves every generator still emitted `println`, `rem`,
+`concat`, `rope-insert`, …; each program died on its first form, all four engines agreed on an
+empty stdout, and `run.sh` reported "0 divergences" on 1850 programs (2026-09-15). Two things
+now hold the line: `run.sh` counts a program as **`STALE GENERATOR`** (and exits nonzero) when
+the reference engine reports an unbound symbol or prints nothing — for every generator but
+`syntax`/`checker`, whose programs are meant to be rejected — and
+`crates/cli/tests/fuzz_generators_live.rs` runs one program per generator in the ordinary
+test suite, so a rename wave reds CI here instead of hollowing the harness out silently.
+A generator writes Brood from Python; no `nest check` sweep can see it. Grep the Python too.
+
 **An engine differential cannot see a bug in a heap-level cache** — the string slot's
 char→byte index (ADR-213) and the form-start safepoint table (ADR-214) are shared by every
 engine config, so all four agree on a wrong answer. That is why `strings` is an *oracle*

@@ -10,6 +10,32 @@ needing one is queued in [`perf-handoff.md`](perf-handoff.md) instead — curren
 high-priority item: whether KI-114's `as_f64_pair` holds the closure KI-109 got from the
 promotion it constrained.
 
+## 2026-09-15 evening — what changed, and what to do next (read with the 09-13 queue below)
+
+The benchmark column was refreshed at v0.28.0 (`brood-benchmarks` `05139cc`/`09945c2`, every
+row inside drift). Then a VM/JIT correctness pass, three things landed (all on `main`):
+
+- **KI-132 closed (ADR-353).** Two deopt-thrash mechanisms, neither the one the entry guessed:
+  `=` with a string operand deopted per activation (`brood_rt_equal` now), and a type-mixed
+  join was compiled as an unconditional deopt — joins are typed with every predecessor in
+  hand now, widening to a spill slot or to three tagged words in extra block params. A third
+  fell out (a materialised float crossing a join had no repr). `regex` −30.5%, highlighter
+  pass 1.9×. `(%jit-arm-state f argc)` is the new probe for "did the arm STAY native".
+- **KI-145: the differential fuzz harness had been vacuous for weeks** — every generator
+  emitted pre-rename names, every program died before printing, "0 divergences". Fixed and
+  gated (`run.sh` `STALE GENERATOR`; `crates/cli/tests/fuzz_generators_live.rs`). **Do not
+  cite a fuzz result without `stale=0` in its summary.**
+- **KI-146: `string/last-index-of` skipped overlapping occurrences** — the harness's first
+  live finding, within its first hundred strings programs.
+
+**Open:** KI-140 (checker: `apply` does not bind a callee's type variable — bedit's strict
+ratchet sits at 25 because of it), KI-142 (the suite wrapper's 19.3 GB reservation — run it
+under a 24 GB cap until attributed; a `table` per DFA/lexer cache is the unverified guess),
+KI-136 (watch). **Next for BEAM parity** (`docs/runtime-frontier.md` "Recommended execution
+order"): M2 shared IC tables — the largest per-process item and a warm start — then the
+process floor (~5.5 KB vs ~3.1 KB) behind `spawn-live`'s 1.9×. Both are multi-session; do
+KI-142's attribution first, it is a one-hour probe (`strace -e mmap` on the wrapper).
+
 ## Work queue — written 2026-09-13 (read this first; the 09-07 queue below is history)
 
 State when written: `main` = `0223cb1f`, pushed, clean. **One open bug: KI-134**, and it is

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Rope property fuzzer. A rope must ALWAYS equal the plain string it represents.
 Apply a random sequence of insert/delete edits to both a rope (in Brood, threaded
-via `->`) and a reference Python string; assert (rope->string r) == reference,
+via `->`) and a reference Python string; assert (text/->string r) == reference,
 plus rope-length and a sample rope-slice. Codepoints align (both index by
 codepoint). Includes newlines + unicode. Each program prints OK / BAD.
 """
@@ -26,25 +26,25 @@ def program(seed):
         if not ref or rng.random() < 0.55:        # insert
             pos = rng.randint(0, len(ref))
             ins = rand_str(rng, 1, 5)
-            ops.append(f"(rope-insert {pos} {blit(ins)})")
+            ops.append(f"(text/insert {pos} {blit(ins)})")
             ref = ref[:pos] + ins + ref[pos:]
         else:                                      # delete [a, b)
             a = rng.randint(0, len(ref) - 1)
             b = rng.randint(a + 1, len(ref))
-            ops.append(f"(rope-delete {a} {b})")
+            ops.append(f"(text/delete {a} {b})")
             ref = ref[:a] + ref[b:]
     # sample slice oracle
     if ref:
         sa = rng.randint(0, len(ref) - 1); sb = rng.randint(sa, len(ref))
     else:
         sa = sb = 0
-    chain = "(-> (string->rope " + blit(init) + ")\n      " + "\n      ".join(ops) + ")"
+    chain = "(-> (text/from-string " + blit(init) + ")\n      " + "\n      ".join(ops) + ")"
     return (f"(let (r {chain})\n"
-            f"  (let (s (rope->string r))\n"
-            f"    (println (if (and (= s {blit(ref)})\n"
-            f"                      (= (rope-length r) {len(ref)})\n"
-            f"                      (= (rope-slice r {sa} {sb}) {blit(ref[sa:sb])}))\n"
-            f"               \"OK\" (str \"BAD len=\" (rope-length r) \" s=\" (pr-str s))))))\n")
+            f"  (let (s (text/->string r))\n"
+            f"    (io/puts (if (and (= s {blit(ref)})\n"
+            f"                      (= (text/length r) {len(ref)})\n"
+            f"                      (= (text/slice r {sa} {sb}) {blit(ref[sa:sb])}))\n"
+            f"               \"OK\" (str \"BAD len=\" (text/length r) \" s=\" (pr-str s))))))\n")
 
 if __name__ == "__main__":
     n = int(sys.argv[1]); base = int(sys.argv[2]); outdir = sys.argv[3]

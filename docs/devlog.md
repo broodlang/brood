@@ -13426,6 +13426,40 @@ defines and dropped its faces, leaving it provided and empty. `def-face`/`face-s
 `%register-protocol` and the three `editor/layers` registrations are `%registry-update!` ops
 now (`:append-new` added for the system-layer list); guards in `tests/isolate_load_test.blsp`.
 The kernel's own comment on `registry_cas` had named the rule the whole time.
+## 2026-09-15 — KI-132 closed: `=` on a string deopted per activation, and a type-mixed join was an unconditional deopt (ADR-353)
+
+Asked to review the VM and JIT for correctness, I ran the differential fuzzers first (seven
+generators, 1850 programs, tree-walker vs VM vs JIT vs GC-stress: clean) and then took the one
+open JIT issue with an unverified hypothesis. The hypothesis was wrong twice — nothing re-lowers
+after a deopt, and the nil-then-string slot never deopted — and the method that worked was
+cutting each latched helper down to one-line arms until exactly one still latched. Two causes:
+`eq_dispatch` deopted for every tag but Int and Sym/Keyword, so a string compare per activation
+was a deopt per activation (`brood_rt_equal` now runs `Heap::equal` for the residual); and a
+join's block params were typed by the first edge emitted, a disagreeing later edge compiled as
+`jump deopt` (`(or p 7)`, `(if c x 7)`). Edges are deferred now and a join is typed once every
+predecessor is known, widening a disagreement into a spill slot or three tagged words in extra
+block params. En route the prepass turned out to have no stack effect for `MakeVector`/`Prim3`,
+which had been refusing every arm with a vector literal ahead of a join through a Cranelift
+verifier error nobody printed — modelled, and both directions now bail by name. Highlighter
+pass 7.7 → 4.0 ms. New dev-tools probe `%jit-arm-state` so a test can assert an arm stayed
+native; `tests/jit_eq_join_test.blsp` is sabotage-verified both ways.
+
+## 2026-09-15 — the fuzz harness had been vacuous for weeks (KI-145), and found a real bug within an hour of running again (KI-146)
+
+The morning's "1850 programs clean" was nothing of the kind: every generator still emitted
+`println`, `rem`, `concat`, `rope-insert`, … from before the rename waves, each program died on
+its first form, and four engines agreeing on an empty stdout read as "0 divergences". The
+third generator this repo has had to catch this way (`bench/smoke.py`, `stress/fuzz_programs.py`
+before it). All ten generators updated; `match.py` also emitted a clause behind an
+irrefutable pattern (a compile error since ADR-297) and `trycatch.py` leaned on `nth`
+throwing out of range, which it no longer does. `run.sh` now counts `STALE GENERATOR` and
+exits nonzero on any finding; `crates/cli/tests/fuzz_generators_live.rs` runs one program
+per generator in the ordinary suite. Then, live: metamorphic 700, and 100 each of the rest,
+clean on the ADR-353 tree — except the strings oracle, which reported
+`nothing-after-last` on its first hundred: `string/last-index-of` walked `match_indices`,
+which yields non-overlapping matches, so `(string/last-index-of "xaaay" "aa")` was 1.
+`rfind` over the bounded prefix; guarded.
+
 ## 2026-09-15 — the regex engine decided: lexers scan on the DFA (ADR-352)
 
 bedit on a 173-line `.bashrc`: 430 ms per keystroke, the whole file re-lexed through

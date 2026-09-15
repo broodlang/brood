@@ -183,6 +183,7 @@ incremental search rides on.
 
     (string/last-index-of \"a.b.c\" \".\")   → 3
     (string/last-index-of \"a.b.c\" \".\" 3)   → 1
+    (string/last-index-of \"xaaay\" \"aa\")   → 2
     (string/last-index-of \"abc\" \"z\")   → -1"
   ;; One native pass. This used to walk forward in Brood calling `(index-of s needle i)`
   ;; per match; every one of those re-derives a char offset (and, before `index-of` took a
