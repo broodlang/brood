@@ -4,7 +4,7 @@
 //! `%register-sig`), and the bundle manifest a released binary answers from.
 
 use crate::core::heap::{Heap, ImportEntry};
-use crate::core::value::{self, EnvId, Value};
+use crate::core::value::{self, EnvId, Symbol, Value};
 use crate::error::{LispError, LispResult};
 
 use super::numeric::{arg, expect_symbol};
@@ -205,6 +205,16 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         &[],
         "",
         register_sig,
+    );
+    // `(%register-sig-props 'name '(:pure :total))` — the property keywords of a
+    // `(sig name T :pure …)` declaration (ADR-351), merged into the same store entry.
+    primitives.def(
+        "%register-sig-props",
+        Arity::exact(2),
+        Sig::new(vec![sym, any], sym),
+        &[],
+        "",
+        register_sig_props,
     );
     // `deftype` emits it to record a type alias for the checker (ADR-327).
     primitives.def(
@@ -1092,8 +1102,94 @@ pub(super) fn register_sig(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     // call site resolves to (intra-module misses the bare file-local ctx; cross-module
     // the sig isn't in the caller's ctx at all).
     let qualified = crate::eval::macros::resolve_reference(heap, name);
-    heap.set_declared_sig(qualified, type_value);
+    // Properties already registered for the name (a `(sig f :pure)` above the typed one)
+    // ride along in the wrapped entry; a name with none keeps the bare type-form, so
+    // nothing that never asked for a property sees a wrapper.
+    let props = sig_props_of(heap, heap.declared_sig_value(qualified));
+    let stored = if props.is_empty() {
+        type_value
+    } else {
+        wrap_sig(heap, type_value, &props)
+    };
+    heap.set_declared_sig(qualified, stored);
     Ok(Value::symbol(qualified))
+}
+
+/// The head that marks a declared-sig entry as a type-form WITH properties (ADR-351):
+/// `(%sig T :pure :total)`, `T` being `nil` when only properties were declared.
+pub const SIG_PROPS_MARKER: &str = "%sig";
+
+/// `(%register-sig-props 'name '(:pure :total))` — record the property keywords of a
+/// `(sig name … :pure …)` declaration (ADR-351) beside its type-form in the declared-sig
+/// store, as `(%sig T prop…)`. Idempotent and order-free: a later `%register-sig` keeps the
+/// properties, a later call here keeps the type and unions the keywords.
+pub(super) fn register_sig_props(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let name = expect_symbol(heap, "%register-sig-props", arg(args, 0))?;
+    let qualified = crate::eval::macros::resolve_reference(heap, name);
+    let mut props = sig_props_of(heap, heap.declared_sig_value(qualified));
+    for p in heap.list_to_vec(arg(args, 1))? {
+        if let Value::Keyword(k) = p {
+            if !props.contains(&k) {
+                props.push(k);
+            }
+        }
+    }
+    let type_value = sig_type_of(heap, heap.declared_sig_value(qualified)).unwrap_or(Value::Nil);
+    let stored = wrap_sig(heap, type_value, &props);
+    heap.set_declared_sig(qualified, stored);
+    Ok(Value::symbol(qualified))
+}
+
+fn wrap_sig(heap: &mut Heap, type_value: Value, props: &[Symbol]) -> Value {
+    let mut items = vec![Value::symbol(value::intern(SIG_PROPS_MARKER)), type_value];
+    items.extend(props.iter().map(|&k| Value::Keyword(k)));
+    heap.list(items)
+}
+
+/// The TYPE-form of a declared-sig store entry: the entry itself, or the type inside a
+/// `(%sig T prop…)` wrapper — `None` for an absent entry or a wrapper whose type is `nil`
+/// (properties declared, no type). A `(%type T)` alias entry is returned as it is: its
+/// readers recognise that marker themselves.
+pub fn sig_type_of(heap: &Heap, entry: Option<Value>) -> Option<Value> {
+    let entry = entry?;
+    match sig_wrapper_items(heap, entry) {
+        Some(items) => match items.get(1) {
+            Some(Value::Nil) | None => None,
+            Some(&t) => Some(t),
+        },
+        None => Some(entry),
+    }
+}
+
+/// The property keywords of a declared-sig store entry (`:pure`, `:total`, …); empty for
+/// a bare type-form or an absent entry.
+pub fn sig_props_of(heap: &Heap, entry: Option<Value>) -> Vec<Symbol> {
+    let Some(entry) = entry else {
+        return Vec::new();
+    };
+    sig_wrapper_items(heap, entry)
+        .map(|items| {
+            items
+                .iter()
+                .skip(2)
+                .filter_map(|v| match v {
+                    Value::Keyword(k) => Some(*k),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn sig_wrapper_items(heap: &Heap, entry: Value) -> Option<Vec<Value>> {
+    if !matches!(entry, Value::Pair(_)) {
+        return None;
+    }
+    let items = heap.list_to_vec(entry).ok()?;
+    match items.first() {
+        Some(Value::Sym(s)) if value::symbol_is(*s, SIG_PROPS_MARKER) => Some(items),
+        _ => None,
+    }
 }
 
 /// `(%register-type 'name 'type)` — record a **type alias** `(deftype name type)` for the

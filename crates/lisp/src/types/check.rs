@@ -126,6 +126,7 @@ mod exhaustive;
 mod guard_effects;
 mod guards;
 mod infer;
+mod properties;
 mod protocol;
 mod recursion;
 mod sigs;
@@ -380,6 +381,13 @@ fn qualify_decl_name(ctx: &Ctx, file_ns: Option<&str>, name: Symbol) -> Symbol {
 /// sources — the un-expanded top-level `(sig …)` forms and the `(sig …)` forms
 /// reconstructed from `%register-sig` in the expanded tree.
 fn register_declared_sig(heap: &Heap, ctx: &mut Ctx, file_ns: Option<&str>, form: Value) {
+    // The property keywords — `:pure`, `:total` — of any sig shape (ADR-351).
+    if let Some((name, _, props)) = annot::sig_decl_head(heap, form) {
+        if !props.is_empty() {
+            let qn = qualify_decl_name(ctx, file_ns, name);
+            ctx.add_declared_props(qn, &props);
+        }
+    }
     if let Some((name, sig)) = annot::parse_sig_decl(heap, form) {
         let qn = qualify_decl_name(ctx, file_ns, name);
         ctx.add_declared_sig(qn, sig);
@@ -2473,6 +2481,11 @@ fn check_forms(
         // pre-expansion, and only there is an author-written catch distinguishable from
         // the one `assert-error` builds.
         discarded_catch::check_discarded_catches(heap, &forms, &mut out);
+        // Pass 3.9: declared properties (ADR-351) — a `:pure` function whose body reaches
+        // an effect, a `:total` function whose self-call decreases nothing, and a
+        // `ui-memo` thunk that performs an effect. (`:total`'s coverage half is the walk's:
+        // a `match` failure it cannot prove unreachable, at the failure.)
+        properties::check_properties(heap, &expanded, &ctx, &mut out);
         // (The macro binding-capture lint was retired when automatic binding hygiene
         // shipped — ADR-066 amendment: a template's `let`/`fn` binders are alpha-renamed
         // to fresh gensyms by the expander, so a plain literal binder can no longer

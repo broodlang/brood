@@ -373,7 +373,7 @@ pub(in crate::types::check) fn fn_form_items(heap: &Heap, form: Value) -> Option
 /// without false-flagging the inner body's references.
 /// Does this parameter list end in a `& rest` tail? (The `&`/`&rest` marker; a
 /// bare-symbol binder follows it.) Used to seed the rest binder as `list<elem>`.
-pub(super) fn params_form_has_rest(heap: &Heap, form: Value) -> bool {
+pub(in crate::types::check) fn params_form_has_rest(heap: &Heap, form: Value) -> bool {
     let items = match form {
         Value::Vector(id) => heap.vector(id).to_vec(),
         Value::Nil | Value::Pair(_) => list_items(heap, form).unwrap_or_default(),

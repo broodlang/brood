@@ -1034,7 +1034,7 @@ fn specialize_recursive(
 /// extent the outer scope decides them — sound, wider). Descends through lists, vectors and
 /// maps in source order; a self-call inside quoted data is collected too, which can only
 /// WIDEN a parameter (its arguments type or fail to), never narrow it.
-fn self_call_sites(
+pub(super) fn self_call_sites(
     heap: &Heap,
     form: Value,
     sym: Symbol,
@@ -3164,8 +3164,13 @@ fn collect_private_sites(
                 }
                 return;
             };
-            // The privacy expansion's own `(%mark-private 'name)` is bookkeeping, not a use.
-            if value::symbol_is(head, "%mark-private") {
+            // The privacy expansion's own `(%mark-private 'name)` is bookkeeping, not a use —
+            // and so is a `sig`'s registration of its properties (`(sig walk :total)`,
+            // ADR-351), which quotes the name it describes.
+            if value::symbol_is(head, "%mark-private")
+                || value::symbol_is(head, "%register-sig-props")
+                || value::symbol_is(head, "%register-sig")
+            {
                 return;
             }
             if value::symbol_is(head, kw::QUOTE) || value::symbol_is(head, kw::QUASIQUOTE) {
@@ -3272,6 +3277,30 @@ fn collect_private_sites(
                 let bound: Option<Vec<Option<Ty>>> = declared
                     .or_else(|| def_of.and_then(|n| self.derived.get(&n).cloned()))
                     .filter(|d| single_arm && d.len() == params.len());
+                // A VARIADIC single arm is not a fixed arm, so it is never derived; its
+                // declared sig still binds it — the fixed positions as declared and the
+                // rest binder to `nil | list<rest>`, as the walk binds them.
+                let has_rest = items
+                    .get(1)
+                    .is_some_and(|&p| super::walk::params_form_has_rest(heap, p));
+                let variadic_declared: Option<Vec<Option<Ty>>> = if has_rest && bound.is_none() {
+                    def_of.and_then(|n| self.ctx.declared_sig(n)).map(|sig| {
+                        (0..params.len())
+                            .map(|i| {
+                                if i + 1 == params.len() {
+                                    sig.rest
+                                        .clone()
+                                        .map(|elem| Ty::list_of(elem).union(Ty::of(Tag::Nil)))
+                                } else {
+                                    sig.param(i)
+                                }
+                            })
+                            .collect()
+                    })
+                } else {
+                    None
+                };
+                let bound = bound.or(variadic_declared);
                 for (i, p) in params.iter().enumerate() {
                     let ty = bound.as_ref().and_then(|d| d[i].clone());
                     inner = inner.bind(*p, ty);

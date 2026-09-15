@@ -788,14 +788,22 @@ an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and 
       (str "HTTP " (get resp :status)))))
 
 (defn- registry-get-json (url)
-  "GET `url` and parse its JSON body. Returns `[:ok data]` on 2xx, `[:error status
-  message]` on an error status (with the server's `:error` text when present), or
-  `[:error 0 message]` on a transport failure."
+  "GET `url` and parse its JSON body. Returns `[:ok data]` on 2xx with `data` the decoded
+  JSON OBJECT (every registry endpoint answers one; a body that is not an object is an
+  error like any other, not a map the callers then `get` from), `[:error status message]`
+  on an error status (with the server's `:error` text when present), or `[:error 0 message]`
+  on a transport failure."
   (let (resp (http/fetch url)
         status (get resp :status))
     (cond
       (= status 0) [:error 0 (str "cannot reach the registry at " url ": " (get resp :error))]
-      (and (>= status 200) (< status 300)) [:ok (json/decode (http/body-text resp))]
+      (and (>= status 200) (< status 300))
+        (let (data (json/decode (http/body-text resp)))
+          (if (map? data)
+            [:ok data]
+            [:error
+              status
+              (str "the registry at " url " answered with a JSON value that is not an object")]))
       else [:error status (registry-error-text resp)])))
 
 ;; --- the resolver's registry provider (ADR-209) ---------------------------------

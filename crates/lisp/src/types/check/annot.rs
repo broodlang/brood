@@ -1104,20 +1104,48 @@ pub(super) fn parse_arrow_type_with_vars(heap: &Heap, type_value: Value) -> Opti
 }
 
 pub(super) fn parse_sig_decl_with_vars(heap: &Heap, form: Value) -> Option<(Symbol, SigWithVars)> {
+    let (name, type_value, _) = sig_decl_head(heap, form)?;
+    Some((name, parse_arrow_type_with_vars(heap, type_value?)?))
+}
+
+/// The pieces of any `(sig name T prop…)` / `(sig! …)` declaration: the name, the
+/// type-form `T` when one is written, and the property keywords after it (ADR-351) —
+/// `(sig f (int -> int) :pure :total)`, or `(sig f :pure)` with no type at all. `None` for
+/// anything that is not a `sig` form of that shape (a property must be a keyword, and
+/// only the FIRST item after the name may be a type-form).
+pub(super) fn sig_decl_head(
+    heap: &Heap,
+    form: Value,
+) -> Option<(Symbol, Option<Value>, Vec<Symbol>)> {
     let items = list_items(heap, form)?;
-    if items.len() != 3 {
-        return None;
-    }
-    let Value::Sym(head) = items[0] else {
+    let Some(&Value::Sym(head)) = items.first() else {
         return None;
     };
     if !value::symbol_is(head, "sig") && !value::symbol_is(head, "sig!") {
         return None;
     }
-    let Value::Sym(name) = items[1] else {
+    let Some(&Value::Sym(name)) = items.get(1) else {
         return None;
     };
-    Some((name, parse_arrow_type_with_vars(heap, items[2])?))
+    let mut rest = &items[2..];
+    let type_value = match rest.first() {
+        Some(&Value::Keyword(_)) | None => None,
+        Some(&t) => {
+            rest = &rest[1..];
+            Some(t)
+        }
+    };
+    let mut props = Vec::with_capacity(rest.len());
+    for &p in rest {
+        let Value::Keyword(k) = p else {
+            return None;
+        };
+        props.push(k);
+    }
+    if type_value.is_none() && props.is_empty() {
+        return None;
+    }
+    Some((name, type_value, props))
 }
 
 /// The `(name, type-form)` of any `(sig name T)` / `(sig! name T)` declaration,
@@ -1125,20 +1153,8 @@ pub(super) fn parse_sig_decl_with_vars(heap: &Heap, form: Value) -> Option<(Symb
 /// needs, since every other recogniser here returns `None` for a declaration it
 /// cannot parse, which is exactly the case being reported on.
 pub(super) fn sig_decl_parts(heap: &Heap, form: Value) -> Option<(Symbol, Value)> {
-    let items = list_items(heap, form)?;
-    if items.len() != 3 {
-        return None;
-    }
-    let Value::Sym(head) = items[0] else {
-        return None;
-    };
-    if !value::symbol_is(head, "sig") && !value::symbol_is(head, "sig!") {
-        return None;
-    }
-    let Value::Sym(name) = items[1] else {
-        return None;
-    };
-    Some((name, items[2]))
+    let (name, type_value, _) = sig_decl_head(heap, form)?;
+    Some((name, type_value?))
 }
 
 /// If `form` is a `(sig name (… -> …))` declaration whose type-expr is an arrow,
@@ -1146,23 +1162,11 @@ pub(super) fn sig_decl_parts(heap: &Heap, form: Value) -> Option<(Symbol, Value)
 /// non-arrow type-expr (`(sig x int)` — accepted by the grammar but not a call
 /// signature, so nothing to record in slice 1).
 pub(super) fn parse_sig_decl(heap: &Heap, form: Value) -> Option<(Symbol, Sig)> {
-    let items = list_items(heap, form)?;
-    if items.len() != 3 {
-        return None;
-    }
-    let Value::Sym(head) = items[0] else {
-        return None;
-    };
     // `sig` (static only) and `sig!` (also runtime-enforced) declare the same
     // signature as far as the checker is concerned — it reads both.
-    if !value::symbol_is(head, "sig") && !value::symbol_is(head, "sig!") {
-        return None;
-    }
-    let Value::Sym(name) = items[1] else {
-        return None;
-    };
+    let (name, type_value, _) = sig_decl_head(heap, form)?;
     // Only an arrow type-expr is a callable signature worth recording.
-    let sig = parse_type(heap, items[2])?.as_arrow()?.clone();
+    let sig = parse_type(heap, type_value?)?.as_arrow()?.clone();
     Some((name, sig))
 }
 
@@ -1173,20 +1177,8 @@ pub(super) fn parse_sig_decl(heap: &Heap, form: Value) -> Option<(Symbol, Sig)> 
 /// mirrors [`parse_sig_decl_with_vars`]'s parallel-path pattern. See
 /// `docs/type-arrow-intersection.md`.
 pub(super) fn parse_sig_decl_overload(heap: &Heap, form: Value) -> Option<(Symbol, Vec<Sig>)> {
-    let items = list_items(heap, form)?;
-    if items.len() != 3 {
-        return None;
-    }
-    let Value::Sym(head) = items[0] else {
-        return None;
-    };
-    if !value::symbol_is(head, "sig") && !value::symbol_is(head, "sig!") {
-        return None;
-    }
-    let Value::Sym(name) = items[1] else {
-        return None;
-    };
-    let sigs = parse_type(heap, items[2])?.overload_sigs()?.clone();
+    let (name, type_value, _) = sig_decl_head(heap, form)?;
+    let sigs = parse_type(heap, type_value?)?.overload_sigs()?.clone();
     Some((name, sigs))
 }
 
@@ -1196,20 +1188,8 @@ pub(super) fn parse_sig_decl_overload(heap: &Heap, form: Value) -> Option<(Symbo
 /// which the gradual-assignment check consults to verify `(def x …)`. Returns
 /// `None` for a non-`sig` form or an arrow type-expr (that's `parse_sig_decl`'s).
 pub(super) fn parse_value_sig_decl(heap: &Heap, form: Value) -> Option<(Symbol, Ty)> {
-    let items = list_items(heap, form)?;
-    if items.len() != 3 {
-        return None;
-    }
-    let Value::Sym(head) = items[0] else {
-        return None;
-    };
-    if !value::symbol_is(head, "sig") && !value::symbol_is(head, "sig!") {
-        return None;
-    }
-    let Value::Sym(name) = items[1] else {
-        return None;
-    };
-    let ty = parse_type(heap, items[2])?;
+    let (name, type_value, _) = sig_decl_head(heap, form)?;
+    let ty = parse_type(heap, type_value?)?;
     // A function arrow is a *callable* signature — that's `parse_sig_decl`'s job;
     // here we only take a plain value type.
     if ty.as_arrow().is_some() {

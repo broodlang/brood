@@ -322,6 +322,13 @@ pub(super) const SUPPRESS_UNREQUIRED: u8 = 1 << 4;
 /// (ADR-283). A library must sometimes call its own deprecated name from the shim that
 /// replaces it, and a test must sometimes exercise the old surface deliberately.
 pub(super) const SUPPRESS_DEPRECATED: u8 = 1 << 5;
+/// `(check-allow :total …)` — a `:total`-declared function's coverage finding (a `match`
+/// failure the checker cannot prove unreachable) and its termination finding (ADR-351).
+pub(super) const SUPPRESS_TOTAL: u8 = 1 << 6;
+/// `(check-allow :pure …)` — a `:pure`-declared function's effect finding, and a `ui-memo`
+/// thunk that performs one on purpose (a test that counts its own recomputations by
+/// sending a message from the thunk is the case).
+pub(super) const SUPPRESS_PURE: u8 = 1 << 7;
 
 /// One step of a narrowable access path: a keyword field (`(get x :k)`) or a
 /// fixed integer index (`(nth x 0)` / `(first x)` / `(second x)` / `(third x)`).
@@ -429,6 +436,12 @@ struct FileFacts {
     /// provable error. Populated by `check_file`'s Pass 2.8.
     inferred_overload: HashMap<Symbol, Vec<Sig>>,
     declared: HashMap<Symbol, Sig>,
+    /// The property keywords a `(sig name … :pure :total)` declared in THIS file
+    /// (ADR-351), keyed like `declared`; a loaded module's are read off the heap store.
+    declared_props: HashMap<Symbol, Vec<Symbol>>,
+    /// The `:total`-declared function whose body this scope is inside (ADR-351): a `match`
+    /// failure reachable here that is not proven covered is reported against it.
+    total_fn: Option<Symbol>,
     /// `(sig x T)` declarations for **value** names (non-arrow types) — `x : int`.
     /// The gradual-assignment check reads these to verify a `(def x <expr>)`
     /// assigns a value consistent with `T` (via [`GradualTy::consistent_with`]).
@@ -919,6 +932,12 @@ impl Ctx {
         c
     }
     /// Does `i < (count xs)` hold on this path?
+    /// Is `i` bounded above by SOME collection's count on this path — `i < (count xs)` for
+    /// an `xs` that, being immutable, never changes? A counter climbing under such a bound
+    /// is a descent of `(count xs) - i` (ADR-351's termination check reads it).
+    pub(super) fn is_index_bound_by_any(&self, i: Symbol) -> bool {
+        self.index_bounds.get(&i).is_some_and(|set| !set.is_empty())
+    }
     pub(super) fn is_index_bound(&self, i: Symbol, xs: Symbol) -> bool {
         self.index_bounds
             .get(&i)
@@ -1041,6 +1060,35 @@ impl Ctx {
     /// The user-declared signature for `sym` from a `(sig …)` form, if any.
     pub(super) fn declared_sig(&self, sym: Symbol) -> Option<Sig> {
         self.file.declared.get(&sym).cloned()
+    }
+    /// The property keywords this file's `(sig …)` declared for `sym` (ADR-351); empty
+    /// when none. A loaded module's are `deps::obs_declared_sig_props`'s.
+    pub(super) fn declared_props(&self, sym: Symbol) -> &[Symbol] {
+        self.file
+            .declared_props
+            .get(&sym)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+    /// The `:total` function this scope is the body of, if any (ADR-351).
+    pub(super) fn total_fn(&self) -> Option<Symbol> {
+        self.file.total_fn
+    }
+    /// This scope as the body of the `:total` function `name`.
+    pub(super) fn with_total_fn(&self, name: Symbol) -> Ctx {
+        let mut c = self.clone();
+        c.file_mut().total_fn = Some(name);
+        c
+    }
+    /// Record the property keywords of a `(sig name … :pure …)` declaration, unioning
+    /// with any recorded before (a properties-only sig beside a typed one).
+    pub(super) fn add_declared_props(&mut self, sym: Symbol, props: &[Symbol]) {
+        let entry = self.file_mut().declared_props.entry(sym).or_default();
+        for &p in props {
+            if !entry.contains(&p) {
+                entry.push(p);
+            }
+        }
     }
     /// Record a `(sig name (… -> …))` declaration. In-place; threads through
     /// [`check_file`] like [`add_file_global`](Ctx::add_file_global).

@@ -2310,7 +2310,24 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         // the empty-input case (`init`) does not join in. `(first (reduce (string/split s)
         // '() …))` read `nil | string` for this reason alone: `string/split` never returns
         // an empty list and says so, but the fold put `init`'s `nil` back.
-        let ran_at_least_once = coll_ty.as_ref().is_some_and(provably_non_empty);
+        // …for the WITH-init forms. A no-init `(reduce coll f)` takes its first element as
+        // the accumulator and steps over the REST, so its step runs only over a collection
+        // of two or more: `(reduce [1] +)` is `1`, the seed, and no step at all.
+        let length = coll_ty.as_ref().and_then(|t| t.count_range());
+        let first_step_at = if items.len() == 3 { 2 } else { 1 };
+        let ran_at_least_once = match items.len() {
+            3 => length
+                .and_then(|r| r.lo)
+                .is_some_and(|lo| lo >= first_step_at),
+            _ => coll_ty.as_ref().is_some_and(provably_non_empty),
+        };
+        // …and never, over a collection too short for a step: the result is the seed.
+        if length
+            .and_then(|r| r.hi)
+            .is_some_and(|hi| hi < first_step_at)
+        {
+            return init_ty;
+        }
         // A numeric operator folded over a numeric sequence stays inside the operator's
         // closure: by induction the accumulator is `init` at first and `(op acc x)` after,
         // so with `init` and every element in a closed set the result is in it too —

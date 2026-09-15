@@ -828,13 +828,26 @@ fn literal_eq_guard(heap: &Heap, a: Value, b: Value) -> Option<(Symbol, Ty)> {
 /// so `check_if` never narrows it going down the chain. If that type is a
 /// **pure** literal-enum (every member is a keyword-literal or an
 /// int-literal, nothing else mixed in), and the tried patterns don't cover
-/// every member, this returns a message naming what's missing.
+/// every member, [`match_coverage`] answers `Missing` with a message naming them.
 ///
 /// Conservative by construction: a non-literal pattern among those tried
-/// (a destructuring pattern, a guarded bind) bails to `None` rather than
+/// (a destructuring pattern, a guarded bind) answers `Unknown` rather than
 /// half-reasoning about coverage; a scrutinee whose type isn't a pure
-/// literal-enum bails too. Never a false positive, may miss a real gap.
-pub(super) fn match_exhaustiveness_gap(heap: &Heap, throw_arg: Value, ctx: &Ctx) -> Option<String> {
+/// literal-enum does too. Never a false positive, may miss a real gap.
+pub(super) enum MatchCoverage {
+    /// Every value the scrutinee's type admits is tried by some clause.
+    Covered,
+    /// The scrutinee is an enumerable literal type and these members are not tried.
+    Missing(String),
+    /// Not decidable here: the scrutinee's type is not a closed literal set, or a pattern
+    /// is not a literal.
+    Unknown,
+}
+
+/// The coverage of the `match` a `(throw [:match-error …])` shape belongs to — `None` when
+/// `throw_arg` is not that shape at all (an ordinary throw). The walk reports the `Missing`
+/// case (ADR-118); a `:total` declaration (ADR-351) demands `Covered`.
+pub(super) fn match_coverage(heap: &Heap, throw_arg: Value, ctx: &Ctx) -> Option<MatchCoverage> {
     let Value::Vector(vid) = throw_arg else {
         return None;
     };
@@ -849,9 +862,11 @@ pub(super) fn match_exhaustiveness_gap(heap: &Heap, throw_arg: Value, ctx: &Ctx)
         return None;
     }
     let Value::Sym(target) = elems[2] else {
-        return None;
+        return Some(MatchCoverage::Unknown);
     };
-    let target_ty = expr_ty(heap, Value::Sym(target), ctx)?;
+    let Some(target_ty) = expr_ty(heap, Value::Sym(target), ctx) else {
+        return Some(MatchCoverage::Unknown);
+    };
     // Name the *surface* form in the diagnostic. `match`/`case`/refutable `let`
     // all lower to the same `match*` failure, so the embedded context keyword is
     // the only thing that distinguishes them — without it a `case` was reported
@@ -868,17 +883,21 @@ pub(super) fn match_exhaustiveness_gap(heap: &Heap, throw_arg: Value, ctx: &Ctx)
         .unwrap_or_else(|| "match".to_string());
 
     // Unwrap `(quote patterns-list)` to the raw pattern list.
-    let quote_items = list_items(heap, elems[3])?;
+    let Some(quote_items) = list_items(heap, elems[3]) else {
+        return Some(MatchCoverage::Unknown);
+    };
     if quote_items.len() != 2 {
-        return None;
+        return Some(MatchCoverage::Unknown);
     }
     let Value::Sym(q) = quote_items[0] else {
-        return None;
+        return Some(MatchCoverage::Unknown);
     };
     if !value::symbol_is(q, "quote") {
-        return None;
+        return Some(MatchCoverage::Unknown);
     }
-    let patterns = list_items(heap, quote_items[1])?;
+    let Some(patterns) = list_items(heap, quote_items[1]) else {
+        return Some(MatchCoverage::Unknown);
+    };
 
     // **Purity check, generalized (ADR-121):** every tag `target_ty` admits
     // must be one of the five enumerable kinds — `coverable` carries no
@@ -893,7 +912,7 @@ pub(super) fn match_exhaustiveness_gap(heap: &Heap, throw_arg: Value, ctx: &Ctx)
         .union(Ty::of(Tag::Str))
         .union(Ty::of(Tag::Nil));
     if !target_ty.is_subtype(&coverable) {
-        return None;
+        return Some(MatchCoverage::Unknown);
     }
 
     // Render every declared member to a canonical label, one tag at a time.
@@ -906,22 +925,34 @@ pub(super) fn match_exhaustiveness_gap(heap: &Heap, throw_arg: Value, ctx: &Ctx)
         declared.insert("nil".to_string());
     }
     if target_ty.contains_tag(Tag::Keyword) {
-        for &s in target_ty.as_lit()? {
+        let Some(members) = target_ty.as_lit() else {
+            return Some(MatchCoverage::Unknown);
+        };
+        for &s in members {
             declared.insert(format!(":{}", value::symbol_name_ref(s)));
         }
     }
     if target_ty.contains_tag(Tag::Int) {
-        for &n in target_ty.as_lit_int()? {
+        let Some(members) = target_ty.as_lit_int() else {
+            return Some(MatchCoverage::Unknown);
+        };
+        for &n in members {
             declared.insert(n.to_string());
         }
     }
     if target_ty.contains_tag(Tag::Bool) {
-        for &b in target_ty.as_lit_bool()? {
+        let Some(members) = target_ty.as_lit_bool() else {
+            return Some(MatchCoverage::Unknown);
+        };
+        for &b in members {
             declared.insert(b.to_string());
         }
     }
     if target_ty.contains_tag(Tag::Str) {
-        for s in target_ty.as_lit_str()? {
+        let Some(members) = target_ty.as_lit_str() else {
+            return Some(MatchCoverage::Unknown);
+        };
+        for s in members {
             declared.insert(format!("{s:?}"));
         }
     }
@@ -931,12 +962,15 @@ pub(super) fn match_exhaustiveness_gap(heap: &Heap, throw_arg: Value, ctx: &Ctx)
     // attempted for those (sound: misses a real gap rather than guessing).
     let mut tested: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for &p in &patterns {
-        tested.insert(render_literal_pattern(heap, p)?);
+        let Some(label) = render_literal_pattern(heap, p) else {
+            return Some(MatchCoverage::Unknown);
+        };
+        tested.insert(label);
     }
 
     let mut missing: Vec<&String> = declared.difference(&tested).collect();
     if missing.is_empty() {
-        return None;
+        return Some(MatchCoverage::Covered);
     }
     missing.sort();
     let joined = missing
@@ -944,7 +978,9 @@ pub(super) fn match_exhaustiveness_gap(heap: &Heap, throw_arg: Value, ctx: &Ctx)
         .map(|s| s.as_str())
         .collect::<Vec<_>>()
         .join(", ");
-    Some(format!("{surface}: not exhaustive — missing {joined}"))
+    Some(MatchCoverage::Missing(format!(
+        "{surface}: not exhaustive — missing {joined}"
+    )))
 }
 
 /// Render a raw literal pattern `Value` to the same canonical label

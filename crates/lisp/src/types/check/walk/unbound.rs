@@ -96,6 +96,10 @@ pub(super) fn lint_allow_mask(category: Option<Value>) -> u8 {
         crate::types::check::ctx::SUPPRESS_UNREQUIRED
     } else if value::symbol_is(k, "deprecated") {
         crate::types::check::ctx::SUPPRESS_DEPRECATED
+    } else if value::symbol_is(k, "total") {
+        crate::types::check::ctx::SUPPRESS_TOTAL
+    } else if value::symbol_is(k, "pure") {
+        crate::types::check::ctx::SUPPRESS_PURE
     } else {
         0
     }

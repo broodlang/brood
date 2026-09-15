@@ -24,7 +24,7 @@ use super::walk::list_items;
 /// (Brood's one identity-mutable structure, ADR-107), I/O, or global rebinding / effectful
 /// metaprogramming. The complement is the guard-safe subset (comparisons, type/shape
 /// predicates, total arithmetic, pure data reads) that every guard in `std/` already uses.
-const EFFECTFUL_IN_GUARD: &[&str] = &[
+pub(super) const EFFECTFUL_IN_GUARD: &[&str] = &[
     // message passing / process control
     "send",
     "spawn",

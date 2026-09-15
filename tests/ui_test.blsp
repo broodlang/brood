@@ -566,12 +566,17 @@
   (test "inside a loop it reuses the ops while deps are =, recomputes when they change"
     (let (me (self)
           ;; the view counts every real computation of the fragment
+          ;; The thunk sends on purpose — that IS the count — which is exactly what the
+          ;; checker's memo lint exists to flag (ADR-351), so it is opted out here.
           view (fn (m c r)
                  (append [(clear)]
-                   (ui-memo [:frag]
-                     (get m :deps)
-                     (fn ()
-                       (do (send me [:computed (get m :n)]) (list (text 0 0 (str "n" (get m :n)))))))))
+                   (check-allow :pure
+                     (ui-memo [:frag]
+                       (get m :deps)
+                       (fn ()
+                         (do
+                           (send me [:computed (get m :n)])
+                           (list (text 0 0 (str "n" (get m :n))))))))))
           update (fn (m input c r)
                    (case input
                      :same (assoc m :n (inc (get m :n)))

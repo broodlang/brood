@@ -758,3 +758,17 @@ fn a_count_relation_between_parameters_is_derived_from_the_callers() {
     assert_eq!(ws.len(), 1, "{ws:?}");
     assert!(ws[0].contains("nil | int ((nth codes i))"), "{ws:?}");
 }
+
+/// A no-init `reduce` seeds the accumulator with the first element and steps over the
+/// REST: on a one-element collection it is that element, unstepped — so the seed joins
+/// the result unless the length proves two or more (ADR-350). It read `int[2..]` for
+/// `(reduce [1] +)`, whose value is `1`.
+#[test]
+fn a_no_init_reduce_keeps_its_seed_unless_two_elements_are_proven() {
+    assert_eq!(ty_str("(reduce [1] (fn (a x) (+ a x)))"), "1");
+    assert_eq!(
+        ty_str("(let (xs (if (int? 1) [1] [1 2 3])) (reduce xs (fn (a x) (+ a x))))"),
+        "int[1..]"
+    );
+    assert_eq!(ty_str("(reduce [1 2 3] (fn (a x) (+ a x)))"), "int[2..]");
+}

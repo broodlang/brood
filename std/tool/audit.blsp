@@ -46,18 +46,19 @@ otherwise, so it does not depend on an author's choice of spelling.")
   ;; that pulled in the Gabriel benchmark modules and reported their functions as
   ;; convention breaches. Keyed on the module registry rather than a definition site,
   ;; because a Rust builtin has no site and neither does a materialised module.
+  ;;
+  ;; The registry is the WHOLE answer. This used to admit, besides, any single-segment
+  ;; namespace whose binding had no definition site — meant for a kernel-registered
+  ;; namespace with no `.blsp` of its own (`table/*`, before ADR-251 gave every one a
+  ;; module that declares it). With everything loaded that clause admits no std name at
+  ;; all, and what it did admit was a `defn` a TEST ran inside a test body
+  ;; (`introspection-test/a-defined-name`: a nested def records no site), so the audit's
+  ;; "every public name carries a docstring" failed whenever that file ran before it in
+  ;; the same suite — an order-dependent red.
   (let (text (->string name)
         slash (string/last-index-of text "/"))
     (or (< slash 0)
-      (contains? builtin-module-names (string/substring text 0 slash))
-      ;; A Rust-only NAMESPACE has no `.blsp` module, so it is absent from
-      ;; `reflect/builtin-modules` — `table/*`, and any other kernel-registered
-      ;; namespace (ADR-251). Such a namespace is SINGLE-SEGMENT: requiring that is
-      ;; what keeps a multi-segment project module out, since an image-materialised
-      ;; binding has no definition site either and the site test alone re-admitted
-      ;; `brood/gabriel/chudnovsky/*`.
-      (and (nil? (reflect/source-location name))
-        (not (includes? (string/substring text 0 slash) "/"))))))
+      (contains? builtin-module-names (string/substring text 0 slash)))))
 
 (defn load-everything ()
   "`require` every module the binary bakes in, so the audit sees the WHOLE surface.
