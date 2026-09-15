@@ -1501,6 +1501,13 @@ pub fn specialization_fuel_spent() -> u32 {
     sigs::fuel_spent()
 }
 
+/// Expression visits the inferencer made on the LAST file checked on this thread — the
+/// finer meter beside [`specialization_fuel_spent`]: that one counts body walks, this one
+/// counts what each walk cost (KI-139). Reset at the start of every [`check_file`].
+pub fn expr_ty_visits_spent() -> u64 {
+    infer::expr_ty_visits()
+}
+
 pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)> {
     check_file_ext(heap, forms, &[])
 }

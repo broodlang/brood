@@ -20,14 +20,53 @@
 
 use brood::Interp;
 
-/// Arm re-typings a check of `src` spends.
-fn fuel_for(src: &str) -> u32 {
+/// `(arm re-typings, expression visits)` a check of `src` spends.
+fn meters_for(src: &str) -> (u32, u64) {
     let mut interp = Interp::new();
     let forms = brood::syntax::reader::read_all_positioned(&mut interp.heap, src)
         .unwrap_or_else(|e| panic!("the probe file must parse: {e}"));
     let just: Vec<_> = forms.into_iter().map(|(f, _)| f).collect();
     brood::types::check::check_file(&mut interp.heap, &just);
-    brood::types::check::specialization_fuel_spent()
+    (
+        brood::types::check::specialization_fuel_spent(),
+        brood::types::check::expr_ty_visits_spent(),
+    )
+}
+
+/// Arm re-typings a check of `src` spends.
+fn fuel_for(src: &str) -> u32 {
+    meters_for(src).0
+}
+
+/// A body of `depth` nested `let`-in-`do` levels whose every binding is UNKNOWN (an
+/// unbound callee), so no level can be typed. Before the KI-139 fix each unknown
+/// control-flow level fell through to the call path and had its "arguments" re-typed,
+/// doubling the walk below it: 2^depth visits for a body of ~6·depth nodes.
+fn nested_unknown_control_flow(depth: usize) -> String {
+    let mut body = String::from("(opaque x)");
+    for i in 0..depth {
+        body = format!(
+            "(let (v{i} (opaque {})) (do {body}))",
+            if i == 0 { "x" } else { "v0" }
+        );
+    }
+    format!("(defmodule cost-probe-nested)\n(defn f (x) {body})\n")
+}
+
+#[test]
+fn an_unknown_control_flow_level_is_typed_once_not_as_a_call_to_its_own_head() {
+    // KI-139. `(do X)` with `X` unknown is unknown; it is not a call to a function named
+    // `do` whose argument `X` deserves a second typing for specialization. Linear in the
+    // nesting depth, so doubling the depth must not square the visits.
+    let (_, shallow) = meters_for(&nested_unknown_control_flow(6));
+    let (_, deep) = meters_for(&nested_unknown_control_flow(12));
+    eprintln!("nested unknown control flow: depth 6 → {shallow} visits, depth 12 → {deep}");
+    assert!(
+        deep < shallow * 4,
+        "typing 12 nested unknown `let`/`do` levels cost {deep} expression visits against \
+         {shallow} for 6 — a re-walk per level (2^depth) is back: a control-flow form the \
+         inferencer cannot type must return unknown, never fall through to the call path"
+    );
 }
 
 #[test]
@@ -35,7 +74,14 @@ fn a_call_into_a_map_heavy_module_asks_each_question_once() {
     // `supervisor` is the module that exposed this: 31 mutually-calling private functions
     // passing maps around, so the same `(get <precise map> <keyword>)` question arises at
     // many levels of one walk.
-    let spent = fuel_for("(defmodule cost-probe)\n(def sup (supervisor/start []))\n");
+    let (spent, visits) = meters_for("(defmodule cost-probe)\n(def sup (supervisor/start []))\n");
+    eprintln!("supervisor/start probe: {spent} arm re-typings, {visits} expression visits");
+    assert!(
+        visits < 60_000,
+        "checking a call to `supervisor/start` made {visits} expression visits; it made \
+         ~240 000 when every unknown control-flow level was re-typed as a call to its own \
+         head (KI-139), and the fix reads well under 60 000. A multiple of that is a re-walk."
+    );
     assert!(
         spent < 800,
         "checking a call to `supervisor/start` spent {spent} arm re-typings; it spends 238 \
