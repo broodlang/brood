@@ -3382,22 +3382,24 @@ fn collect_private_sites(
     Some(walker.out)
 }
 
-/// The candidates [`caller_derived_params`] will derive — those with a call site and no
-/// escape — or `None` when the file holds an unexpanded macro call. Type-independent (a
-/// site is an arity match, an escape a spelling), so Pass 2.9 can learn it BEFORE it floors
-/// any return: a function not in this set keeps Pass 2.8's return through the whole
-/// The **count relations** between a live private function's parameters that every call
-/// site establishes (ADR-350): `(n, xs)` when each site hands `n` the count of what it
-/// hands `xs` — `(count b)` (or `string/length`/`vector-length`) beside `b`, or a `let`-bound
-/// count alias of `b` beside `b` — and each self-call passes a pair the body's own aliases
-/// already relate (`n` and `xs` themselves, typically). A GREATEST fixpoint: every pair is
-/// assumed, the sites are re-read with the assumption seeded into the bodies, and a pair
-/// some site does not establish is dropped, until nothing drops. Sound by induction on the
-/// call: an external site establishes the relation outright, and a self-call preserves it
-/// under the assumption that its own activation had it. A handover site establishes
-/// nothing, so a function reached that way keeps no relation. Purely syntactic — no type
-/// is read — so it runs once, before the typed fixpoints, which then see `(nth xs i)`
-/// under `(< i n)` as an element.
+/// The **count relations** between a live private function's parameters that its call
+/// sites establish (ADR-350): `(n, xs)` when every EXTERNAL site hands `n` the count of what
+/// it hands `xs` — `(count b)` (or `string/length`/`vector-length`) beside `b`, or a count
+/// alias of `b` beside `b`: one a `let` bound, or one the CALLER's own parameters carry —
+/// and every self-call hands the pair on under its own assumption (`n` and `xs`
+/// themselves, typically).
+///
+/// A LEAST fixpoint climbed from the direct sites: round `k+1` reads every site with round
+/// `k`'s relations seeded into the bodies, so a relation `tokens` establishes for
+/// `tokens-loop` reaches `token-hit` the round after, and `longest-loop` the round after
+/// that — the shape `std/regex`'s scan has, four calls deep. Each round's candidates are
+/// the pairs every external site establishes under that seed; the self-sites are then read
+/// with the candidates assumed as well, and a pair a self-call does not hand on is
+/// dropped. Sound by induction on the call chain: a site in a caller's body hands on a
+/// relation the caller's own activation had (the previous round's answer), a self-call
+/// preserves it under the assumption that its activation had it. A handover site
+/// establishes nothing. Purely syntactic — no type is read — so it runs once, before the
+/// typed fixpoints, which then see `(nth xs i)` under `(< i n)` as an element.
 pub(super) fn derive_count_aliases(
     heap: &Heap,
     forms: &[Value],
@@ -3406,42 +3408,15 @@ pub(super) fn derive_count_aliases(
     ctx: &mut Ctx,
 ) {
     let targets: HashSet<Symbol> = candidates.keys().copied().collect();
-    // The base case: the pairs every EXTERNAL site establishes, read with nothing assumed.
-    // (A self-call's arguments are judged under the assumption, so it is left out here and
-    // checked in the rounds below.)
-    ctx.set_derived_count_aliases(HashMap::new());
-    let Some(first) =
-        collect_private_sites(heap, forms, &targets, candidates, &HashMap::new(), ctx)
-    else {
-        return;
-    };
-    let mut relations: HashMap<Symbol, Vec<(usize, usize)>> = HashMap::new();
-    for (&name, &arity) in live {
-        let Some(sites) = first.sites.get(&name) else {
-            continue;
-        };
-        let external: Vec<&Site> = sites
-            .iter()
-            .filter(|site| !matches!(site, Site::Call(_, _, Some(within)) if *within == name))
-            .collect();
-        if arity < 2 || external.is_empty() || first.escaped.contains(&name) {
-            continue;
-        }
-        let pairs: Vec<(usize, usize)> = (0..arity)
+    let all_pairs = |arity: usize| -> Vec<(usize, usize)> {
+        (0..arity)
             .flat_map(|n| (0..arity).filter(move |&xs| xs != n).map(move |xs| (n, xs)))
-            .filter(|&(n, xs)| external.iter().all(|site| site.counts(heap, n, xs)))
-            .collect();
-        if !pairs.is_empty() {
-            relations.insert(name, pairs);
-        }
-    }
-    // The inductive step: with the pairs assumed in every body, each self-call must hand
-    // them on too; a pair some site does not is dropped, and dropping can only fail more
-    // sites, so this descends to a fixpoint.
+            .collect()
+    };
+    let is_self_site = |site: &Site, name: Symbol| matches!(site, Site::Call(_, _, Some(within)) if *within == name);
+    let mut relations: HashMap<Symbol, Vec<(usize, usize)>> = HashMap::new();
     for _ in 0..MAX_DERIVE_ROUNDS {
-        if relations.is_empty() {
-            break;
-        }
+        // The external sites, under the previous round's relations.
         ctx.set_derived_count_aliases(relations.clone());
         let Some(collected) =
             collect_private_sites(heap, forms, &targets, candidates, &HashMap::new(), ctx)
@@ -3449,15 +3424,48 @@ pub(super) fn derive_count_aliases(
             relations.clear();
             break;
         };
+        let mut candidates_now: HashMap<Symbol, Vec<(usize, usize)>> = HashMap::new();
+        for (&name, &arity) in live {
+            let Some(sites) = collected.sites.get(&name) else {
+                continue;
+            };
+            let external: Vec<&Site> = sites
+                .iter()
+                .filter(|site| !is_self_site(site, name))
+                .collect();
+            if arity < 2 || external.is_empty() || collected.escaped.contains(&name) {
+                continue;
+            }
+            let pairs: Vec<(usize, usize)> = all_pairs(arity)
+                .into_iter()
+                .filter(|&(n, xs)| external.iter().all(|site| site.counts(heap, n, xs)))
+                .collect();
+            if !pairs.is_empty() {
+                candidates_now.insert(name, pairs);
+            }
+        }
+        // The self-sites, under the candidates assumed as well.
+        ctx.set_derived_count_aliases(candidates_now.clone());
+        let Some(collected) =
+            collect_private_sites(heap, forms, &targets, candidates, &HashMap::new(), ctx)
+        else {
+            relations.clear();
+            break;
+        };
         let mut next: HashMap<Symbol, Vec<(usize, usize)>> = HashMap::new();
-        for (name, pairs) in &relations {
+        for (name, pairs) in &candidates_now {
             let Some(sites) = collected.sites.get(name) else {
                 continue;
             };
             let kept: Vec<(usize, usize)> = pairs
                 .iter()
                 .copied()
-                .filter(|&(n, xs)| sites.iter().all(|site| site.counts(heap, n, xs)))
+                .filter(|&(n, xs)| {
+                    sites
+                        .iter()
+                        .filter(|site| is_self_site(site, *name))
+                        .all(|site| site.counts(heap, n, xs))
+                })
                 .collect();
             if !kept.is_empty() {
                 next.insert(*name, kept);
@@ -3472,6 +3480,10 @@ pub(super) fn derive_count_aliases(
     ctx.set_derived_count_aliases(relations);
 }
 
+/// The candidates [`caller_derived_params`] will derive — those with a call site and no
+/// escape — or `None` when the file holds an unexpanded macro call. Type-independent (a
+/// site is an arity match, an escape a spelling), so Pass 2.9 can learn it BEFORE it floors
+/// any return: a function not in this set keeps Pass 2.8's return through the whole
 /// iteration, since its in-file callers read that return and a ⊥ there would make their
 /// derived parameters under-approximate.
 pub(super) fn live_private_functions(

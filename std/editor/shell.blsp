@@ -79,6 +79,7 @@ builtins, in the `:syntax/*` faces. Pure, so independently testable."
    :keyword (face :syntax/special)
    :builtin (face :syntax/function)})
 
+(sig shell-skip-blank (string int -> int))
 (defn- shell-skip-blank (line i)
   "`i` advanced past the spaces and tabs at `i`."
   (if (and (< i (string/length line))
@@ -86,6 +87,7 @@ builtins, in the `:syntax/*` faces. Pure, so independently testable."
     (shell-skip-blank line (inc i))
     i))
 
+(sig shell-defines-after? (string int -> bool))
 (defn- shell-defines-after? (line e)
   "Is the word ending at `e` followed by `()` (spaces allowed) — a function definition?
 Two character reads, asked once per word: a regex here (`^\\s*\\(\\)` over the rest of

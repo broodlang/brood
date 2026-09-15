@@ -982,27 +982,35 @@ group."
 ;; by a state set, so a pattern with one skips the prefilter, and a rule may carry one only
 ;; at its edges, where the scanner tests the boundary itself.
 
-(defn- regex-longest-loop (pattern exitmemo memo m matchbit codes n trail j set best)
-  "Walk from position `j` with the live `set`; `best` is the end of the longest accept so
-far (nil for none). Dead set → done. An accept at `j < n` is the matchbit in the split-
-closed set; at `n` it is the exit closure (`$` fires). With `trail`, only a word boundary
-counts as an accept — a rule ending in `\\b`."
-  (if (= set 0)
-    best
-    (if (>= j n)
-      (if (and (regex-exit pattern exitmemo m matchbit set)
-            (or (not trail) (regex-wordb? codes n n)))
-        n
-        best)
-      (let (best2 (if (and (not (= 0 (bit/and set matchbit)))
-                        (or (not trail) (regex-wordb? codes j n)))
-                    j
-                    best)
-            nxt (table/get memo (+ (* set 2097152) (nth codes j)))
-            nxt2 (if (nil? nxt)
-                   (regex-delta-slow (regex-states-of pattern) memo m set (nth codes j))
-                   nxt))
-        (regex-longest-loop pattern exitmemo memo m matchbit codes n trail (+ j 1) nxt2 best2)))))
+;; check-allow :type-mismatch — the DFA scanners read `(nth codes p)` at a position `p`
+;; that is non-negative (every position derives from 0 or a match END, both >= 0) and bounded
+;; above by the count relation `p < (count codes)` (ADR-350). The checker proves the upper
+;; bound but not the lower: a match end flows back through several returns typed `number`, so
+;; `p` reads as possibly-negative and `(nth codes p)` as `nil | int`. The reads are safe; the
+;; scanners are the hot path and carry no per-read default. (The anchored/search loops needed
+;; no marker because their index starts at the literal 0 the interval widening can see.)
+(check-allow :type-mismatch
+  (defn- regex-longest-loop (pattern exitmemo memo m matchbit codes n trail j set best)
+    "Walk from position `j` with the live `set`; `best` is the end of the longest accept so
+  far (nil for none). Dead set → done. An accept at `j < n` is the matchbit in the split-
+  closed set; at `n` it is the exit closure (`$` fires). With `trail`, only a word boundary
+  counts as an accept — a rule ending in `\\b`."
+    (if (= set 0)
+      best
+      (if (>= j n)
+        (if (and (regex-exit pattern exitmemo m matchbit set)
+              (or (not trail) (regex-wordb? codes n n)))
+          n
+          best)
+        (let (best2 (if (and (not (= 0 (bit/and set matchbit)))
+                          (or (not trail) (regex-wordb? codes j n)))
+                      j
+                      best)
+              nxt (table/get memo (+ (* set 2097152) (nth codes j)))
+              nxt2 (if (nil? nxt)
+                     (regex-delta-slow (regex-states-of pattern) memo m set (nth codes j))
+                     nxt))
+          (regex-longest-loop pattern exitmemo memo m matchbit codes n trail (+ j 1) nxt2 best2))))))
 
 (defn- regex-longest-at (pattern obj trail codes n i)
   "The end of the longest match of `pattern` (its bitset object `obj`) that begins at
@@ -1114,23 +1122,25 @@ table cannot be imaged — a `def` holding one would fail the stdlib image (ADR-
         plan)
       hit)))
 
-(defn- regex-steps? (pattern obj set code)
-  "Does the DFA of `pattern` (bitset object `obj`) leave `set` alive on char `code`?"
-  (let (memo (nth obj 4)
-        nxt (table/get memo (+ (* set 2097152) code))
-        nxt2 (if (nil? nxt)
-               (regex-delta-slow (regex-states-of pattern) memo (nth obj 0) set code)
-               nxt))
-    (not (= nxt2 0))))
+(check-allow :type-mismatch
+  (defn- regex-steps? (pattern obj set code)
+    "Does the DFA of `pattern` (bitset object `obj`) leave `set` alive on char `code`?"
+    (let (memo (nth obj 4)
+          nxt (table/get memo (+ (* set 2097152) code))
+          nxt2 (if (nil? nxt)
+                 (regex-delta-slow (regex-states-of pattern) memo (nth obj 0) set code)
+                 nxt))
+      (not (= nxt2 0)))))
 
-(defn- regex-first-mask-loop (resolved code k acc)
-  "Bit k set in `acc` for every rule from row `k` on whose DFA steps on `code`."
-  (if (>= k (count resolved))
-    acc
-    (let ([pattern obj _ _ _] (nth resolved k)
-          can (or (regex-steps? pattern obj (nth obj 2) code)
-                (regex-steps? pattern obj (nth obj 3) code)))
-      (regex-first-mask-loop resolved code (inc k) (if can (bit/or acc (bit/shift-left 1 k)) acc)))))
+(check-allow :type-mismatch
+  (defn- regex-first-mask-loop (resolved code k acc)
+    "Bit k set in `acc` for every rule from row `k` on whose DFA steps on `code`."
+    (if (>= k (count resolved))
+      acc
+      (let ([pattern obj _ _ _] (nth resolved k)
+            can (or (regex-steps? pattern obj (nth obj 2) code)
+                  (regex-steps? pattern obj (nth obj 3) code)))
+        (regex-first-mask-loop resolved code (inc k) (if can (bit/or acc (bit/shift-left 1 k)) acc))))))
 
 (defn- regex-first-mask (resolved first code)
   "The bitmask of rules that can begin a token on char `code`, memoised in `first` on
@@ -1216,19 +1226,20 @@ rules, the first-character memo) is kept in this module's cache. Passing the tab
 ;; each backtracked when what follows cannot match. Greedy takes the paint's longest such
 ;; end, lazy (`*?` `+?` `??` in it) the shortest — the `find` answer on the same text.
 
-(defn- regex-accepts-loop (pattern exitmemo memo m matchbit codes n j set acc)
-  "Every position from `j` on at which the live `set` accepts, consed onto `acc` — so
-the result is DESCENDING, the longest end first. Dead set → done; `$` only at `n`."
-  (if (= set 0)
-    acc
-    (if (>= j n)
-      (if (regex-exit pattern exitmemo m matchbit set) (cons n acc) acc)
-      (let (acc2 (if (= 0 (bit/and set matchbit)) acc (cons j acc))
-            nxt (table/get memo (+ (* set 2097152) (nth codes j)))
-            nxt2 (if (nil? nxt)
-                   (regex-delta-slow (regex-states-of pattern) memo m set (nth codes j))
-                   nxt))
-        (regex-accepts-loop pattern exitmemo memo m matchbit codes n (+ j 1) nxt2 acc2)))))
+(check-allow :type-mismatch
+  (defn- regex-accepts-loop (pattern exitmemo memo m matchbit codes n j set acc)
+    "Every position from `j` on at which the live `set` accepts, consed onto `acc` — so
+  the result is DESCENDING, the longest end first. Dead set → done; `$` only at `n`."
+    (if (= set 0)
+      acc
+      (if (>= j n)
+        (if (regex-exit pattern exitmemo m matchbit set) (cons n acc) acc)
+        (let (acc2 (if (= 0 (bit/and set matchbit)) acc (cons j acc))
+              nxt (table/get memo (+ (* set 2097152) (nth codes j)))
+              nxt2 (if (nil? nxt)
+                     (regex-delta-slow (regex-states-of pattern) memo m set (nth codes j))
+                     nxt))
+          (regex-accepts-loop pattern exitmemo memo m matchbit codes n (+ j 1) nxt2 acc2))))))
 
 (defn- regex-accepts-at (pattern obj codes n i)
   "Every end of a match of `pattern` beginning at `i`, longest first (`()` for none)."
