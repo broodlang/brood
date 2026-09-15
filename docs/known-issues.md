@@ -10186,6 +10186,19 @@ synthetic body of 6 vs 12 nested unknown `let`/`do` levels must grow linearly �
 sabotaged 25 687 → 5 999 833 (the first cut used 8 vs 16 and the sabotaged run did not finish in
 the two-minute cap, which is a red but not a legible one).
 
+**A verdict moved with it, and the move is towards consistency.** The pre-push hook ran the
+strict gate over std/ with the pre-fix `nest` and reported six `get: argument 1 expects
+countable, got nil | bool | number | string | vector | map` warnings in `std/tool/package.blsp`
+(`meta`/`data`, the `[:ok payload]` of `registry-get-json`, whose payload IS `json/decode`'s
+declared union). The fixed checker reports none. Neither reports them with the file checked
+**alone** — so the old checker inferred `registry-get-json`'s return only in the full-list
+context, by the spurious fall-through walk specializing `registry-error-text` at a shallower
+depth than the real walk is allowed (`MAX_SPECIALIZE_DEPTH`) and leaving it in the memo. That is
+the KI-137 class exactly — a verdict that differs between two lists — and the fixed checker
+answers the same way for the file alone and for all of std/. The finding itself is real under
+strict (the payload can be a number), and reaching it *deliberately* is the depth cap's
+question, not this bug's.
+
 **What to take from it.** A flat profile plus a per-walk count that "looks about right" is not
 attribution; the three timings that were (per-walk time, per-form entry counts, backtraces at
 the hot entry) took forty minutes and each contradicted the previous theory. And the meter that
