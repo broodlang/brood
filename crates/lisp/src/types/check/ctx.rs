@@ -24,7 +24,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::core::value::{Arity, Symbol, Value};
+use crate::core::value::{Arity, Symbol, Tag, Value};
 use crate::types::{Sig, Ty};
 
 // ---- Type-variable representation for user-declared sigs --------------------
@@ -84,7 +84,7 @@ impl SigTerm {
             SigTerm::VectorOf(inner) => {
                 let e = inner.resolve(subst);
                 if e == Ty::ANY {
-                    crate::types::Ty::of(crate::core::value::Tag::Vector)
+                    Ty::of(Tag::Vector)
                 } else {
                     Ty::vector_of(e)
                 }
@@ -92,7 +92,7 @@ impl SigTerm {
             SigTerm::SetOf(inner) => {
                 let e = inner.resolve(subst);
                 if e == Ty::ANY {
-                    crate::types::Ty::of(crate::core::value::Tag::Set)
+                    Ty::of(Tag::Set)
                 } else {
                     Ty::set_of(e)
                 }
@@ -562,8 +562,20 @@ pub(super) struct Ctx {
     /// change between the guard and a use, so the assertion holds. Consulted by
     /// `guards::expr_ty`'s path lookup; empty in the common (no-guard) case.
     path_types: HashMap<(Symbol, Vec<PathKey>), Ty>,
-    /// `bound-name → (variable, type-it-asserts)`: a `let`-stored guard result.
-    guards: HashMap<Symbol, (Symbol, Ty)>,
+    /// `bound-name → (variable, type-it-asserts, what-a-falsy-result-proves, then-only)`: a
+    /// `let`-stored guard result. `then_only` marks a `when`-shaped binding — `(let (s (if k
+    /// E nil)) …)` — whose truthy value proves `k` truthy and whose falsy value proves
+    /// nothing (`E` may be nil).
+    guards: HashMap<Symbol, (Symbol, Ty, Option<Ty>, bool)>,
+    /// **Count aliases** (ADR-350): `n → xs` for a `(let (n (count xs)) …)`, so a guard on
+    /// `n` — `(>= n 4)`, `(< i n)` — is a fact about `xs`'s length and about `i` as an
+    /// index of `xs`. Sound under immutability: `xs` never changes, so `n` is its count
+    /// for the whole scope. `bind` on either name drops it.
+    count_aliases: HashMap<Symbol, Symbol>,
+    /// **Index bounds** (ADR-350): `i → {xs, …}` when a guard established `i < (count
+    /// xs)` on this path — the relational fact `(nth xs i)` reads (with `i ≥ 0` from its
+    /// interval) to drop the `nil` arm. `bind` on either name drops it.
+    index_bounds: HashMap<Symbol, HashSet<Symbol>>,
     /// **Let-binding aliases.** `(let (a b) …)` aliases `a` and `b` — they
     /// name the same value through the scope, so narrowing either propagates
     /// to the other. Stored as an undirected adjacency map (each name maps
@@ -635,7 +647,7 @@ impl Ctx {
         self.types.get(&sym).cloned()
     }
     /// The guard (variable + asserted type) `sym` was bound to, if any.
-    pub(super) fn guard(&self, sym: Symbol) -> Option<(Symbol, Ty)> {
+    pub(super) fn guard(&self, sym: Symbol) -> Option<(Symbol, Ty, Option<Ty>, bool)> {
         self.guards.get(&sym).cloned()
     }
     /// Is `sym` in scope here? — a local binder (fn-param or let), a recorded
@@ -736,7 +748,22 @@ impl Ctx {
     /// `x` the `let` bound it to.
     pub(super) fn narrow(&self, sym: Symbol, ty: Ty) -> Ctx {
         let mut c = self.clone();
-        c.narrow_chain(sym, ty);
+        c.narrow_chain(sym, ty.clone());
+        // A narrowing of `n` where `n` is `(count xs)` is a narrowing of `xs`'s LENGTH
+        // (ADR-350): `(>= n 4)` proves `xs` has at least four elements — and no `nil`,
+        // when the interval excludes 0.
+        if let Some(xs) = c.count_aliases.get(&sym).copied() {
+            if let Some(r) = ty.int_range() {
+                if !r.is_all() {
+                    let base = if crate::types::Range::subset(crate::types::Range::point(0), r) {
+                        Ty::ANY
+                    } else {
+                        Ty::ANY.difference(Ty::of(Tag::Nil))
+                    };
+                    c.narrow_chain(xs, base.with_len(r));
+                }
+            }
+        }
         c
     }
     /// Narrow the compound path `base.keys…` (a field/index access chain) to
@@ -751,7 +778,27 @@ impl Ctx {
             .get(&(base, keys.clone()))
             .cloned()
             .unwrap_or(Ty::ANY);
-        c.path_types.insert((base, keys), prior.intersect(ty));
+        let known = prior.intersect(ty);
+        // A guard on ONE position rules out every positional alternative of the base whose
+        // element there cannot be what the guard established (ADR-350): under
+        // `(= (nth r 0) :error)` a `(tuple :ok T)` is not `r`, in the then-branch; under its
+        // negation the `(tuple :error string)` is not. Sound in both branches — a
+        // positional shape's read at `k` is its element there, or `nil` past its end — and
+        // it is what lets the whole value `r` (returned, or passed on) carry the dispatch,
+        // not only the reads of that position. A term without a positional shape is kept.
+        if let [PathKey::Index(k)] = keys.as_slice() {
+            if let Some(base_ty) = c.types.get(&base).cloned() {
+                let retained = base_ty.retain_terms(|term| match term.positional_elems() {
+                    Some(elems) => {
+                        let at = elems.get(*k).cloned().unwrap_or(Ty::of(Tag::Nil));
+                        !at.is_disjoint(&known)
+                    }
+                    None => true,
+                });
+                c.types.insert(base, retained);
+            }
+        }
+        c.path_types.insert((base, keys), known);
         c
     }
     /// The narrowed type of the path `base.keys…`, if a guard asserted one.
@@ -799,6 +846,11 @@ impl Ctx {
         }
         c.locals.insert(sym);
         c.guards.remove(&sym);
+        c.count_aliases.retain(|n, xs| *n != sym && *xs != sym);
+        c.index_bounds.remove(&sym);
+        for bounded in c.index_bounds.values_mut() {
+            bounded.remove(&sym);
+        }
         // A fresh binding of `sym` invalidates any `(get sym :k)` path narrowing —
         // the new value is unrelated to whatever a prior guard asserted.
         c.path_types.retain(|(base, _), _| *base != sym);
@@ -822,13 +874,48 @@ impl Ctx {
     /// `ty` — so a later `(if sym then else)` narrows `target` accordingly.
     /// Self-aliasing (`(let (x (int? x)) …)` would shadow the outer `x` the
     /// guard means to narrow) is rejected.
-    pub(super) fn add_guard(&self, sym: Symbol, target: Symbol, ty: Ty) -> Ctx {
+    pub(super) fn add_guard(
+        &self,
+        sym: Symbol,
+        target: Symbol,
+        ty: Ty,
+        else_ty: Option<Ty>,
+        then_only: bool,
+    ) -> Ctx {
         if sym == target {
             return self.clone();
         }
         let mut c = self.clone();
-        c.guards.insert(sym, (target, ty));
+        c.guards.insert(sym, (target, ty, else_ty, then_only));
         c
+    }
+    /// Record `(let (n (count xs)) …)`: `n` is the length of `xs` for the scope.
+    pub(super) fn add_count_alias(&self, n: Symbol, xs: Symbol) -> Ctx {
+        if n == xs {
+            return self.clone();
+        }
+        let mut c = self.clone();
+        c.count_aliases.insert(n, xs);
+        c
+    }
+    /// The collection `n` is the count of, if a `let` bound it so.
+    pub(super) fn count_alias(&self, n: Symbol) -> Option<Symbol> {
+        self.count_aliases.get(&n).copied()
+    }
+    /// Record that `i < (count xs)` holds on this path.
+    pub(super) fn add_index_bound(&self, i: Symbol, xs: Symbol) -> Ctx {
+        if i == xs {
+            return self.clone();
+        }
+        let mut c = self.clone();
+        c.index_bounds.entry(i).or_default().insert(xs);
+        c
+    }
+    /// Does `i < (count xs)` hold on this path?
+    pub(super) fn is_index_bound(&self, i: Symbol, xs: Symbol) -> bool {
+        self.index_bounds
+            .get(&i)
+            .is_some_and(|set| set.contains(&xs))
     }
     /// Record `(let (sym target) …)` — an undirected alias. Each side gets
     /// the other added to its neighbour-set, so a later `narrow` on either

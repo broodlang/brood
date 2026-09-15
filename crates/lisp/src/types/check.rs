@@ -2000,6 +2000,10 @@ fn check_forms(
         // heap registries), so the demand fires for a same- or other-file sealed op alike.
         let ability_info = std::sync::Arc::new(protocol::build_ability_info(heap, &expanded));
         annot::set_sealed_op_domains(protocol::build_sealed_op_domains(&ability_info));
+        // …and on the ctx from here, not only from the body walk: the demand walk asks
+        // `is_ability_op` of `ctx.ability()` to tell an op function from a same-file
+        // function that spells its name (ADR-350), and Pass 2.8 runs before the walk.
+        ctx.set_ability(ability_info.clone());
         for &form in &forms {
             register_declared_sig(heap, &mut ctx, file_ns_name.as_deref(), form);
         }
@@ -2253,6 +2257,9 @@ fn check_forms(
                 // walk the file again to reproduce `previous` exactly (the inner fixpoint is a
                 // deterministic function of the returns and its seed), so the round reuses it.
                 let mut inputs_moved = true;
+                // Each return's value from the round before last, for the fold (a value
+                // that recurses through another function grows every other round).
+                let mut older_returns: HashMap<Symbol, Ty> = HashMap::new();
                 for round in 0..32 {
                     let derived = if inputs_moved {
                         sigs::caller_derived_params(
@@ -2289,12 +2296,32 @@ fn check_forms(
                             continue;
                         };
                         typed.insert(name);
-                        // The widening the parameter ascent applies (`sigs::WIDEN_AFTER_ROUND`),
-                        // applied to the returns on the same schedule and for the same reason.
+                        // A return whose last value appears inside this round's folds into a
+                        // recursive type (`Ty::fold_recursive`, ADR-349) — `json`'s value
+                        // type is `μX. nil | bool | number | string | vector<X> | map<string,
+                        // X>`, confirmed when the next round folds back to it — and the
+                        // widening the parameter ascent applies (`sigs::WIDEN_AFTER_ROUND`)
+                        // is applied to the returns on the same schedule, for what neither
+                        // converges nor folds.
+                        let current = ctx.inferred_fn_sig(name).map(|s| s.ret);
+                        // An interval that moved goes to its infinity (ADR-350), before
+                        // the fold so a moving length does not hide a nesting.
+                        if let Some(prev) = &current {
+                            ret = ret.widen_intervals_against(prev);
+                        }
+                        for prev in current.iter().chain(older_returns.get(&name)) {
+                            if let Some(folded) = Ty::fold_recursive(prev, &ret) {
+                                ret = folded;
+                                break;
+                            }
+                        }
                         if round >= sigs::WIDEN_AFTER_ROUND {
                             ret = ret.widened_below(sigs::WIDEN_DEPTH);
                         }
-                        if ctx.inferred_fn_sig(name).map(|s| s.ret) != Some(ret.clone()) {
+                        if let Some(current) = current.clone() {
+                            older_returns.insert(name, current);
+                        }
+                        if current != Some(ret.clone()) {
                             let mut sig = base.clone();
                             sig.ret = ret;
                             ctx.add_inferred_fn_sig(name, sig);
@@ -2398,10 +2425,9 @@ fn check_forms(
         let multi_info = std::sync::Arc::new(protocol::build_multi_info(heap, &expanded));
         protocol::check_multi_calls(heap, &expanded, &multi_info, &mut out);
         ctx.set_multi(multi_info);
-        ctx.set_ability(ability_info);
         // Ability impl-return conformance: an op declaring `:-> RET` has each of its
         // impls' bodies checked against that return type (gradual, false-positive-clean).
-        // Runs with `ctx` carrying the ability facts just set.
+        // Runs with `ctx` carrying the ability facts set above (before Pass 2.8).
         walk::check_impl_returns(heap, &expanded, &ctx, &mut out);
         // Pass 3: check each expanded form with the accumulated file-globals, plus the
         // names *this* form guards with `(bound? 'name)` — a deliberately conditional

@@ -385,24 +385,68 @@ The primary source is consulted first, then `*image-sources*` in install order."
   "Atomically set registry global `sym` to `(f current)`, retrying if another process
 wrote in between; returns the value that landed. `read` is a thunk re-reading the global,
 so each retry recomputes against the value that won. `f` must be pure — it can run more
-than once. Prefer the `%swap-registry!` macro, which writes both arguments for you."
+than once. Prefer the `%swap-registry!` macro, which writes both arguments for you.
+
+Raises rather than spinning when `sym` and `read` cannot agree. `%registry-cas!` reads an
+UNBOUND `sym` as nil, so if `read` answers anything else the compare can never hold — and
+`read` never consults `sym`, so retrying re-reads the same disagreement forever. That is a
+misnamed registry, not contention: one process cannot wait out a name that does not exist.
+It used to hang with no error, no log line and no bound on it, which is a hard failure to
+place — it took a `nest test` to its 600-second timeout with no clue which test was stuck."
   (let (old (read)
         new (f old))
     (if (%registry-cas! sym old new)
       new
-      (%registry-swap! sym read f))))
+      (do
+        (when (and (not (bound? sym)) (not (nil? old)))
+          (error "%registry-swap!: registry "
+            sym
+            " is not bound, but its reader answered "
+            (pr-str old)
+            " — the name and the value being read are different globals, so the compare-and-swap can never land. Name the global `def` actually binds (inside a module that is `<module>/<name>`, and inside a package the package prefix too)."))
+        (%registry-swap! sym read f)))))
 (sig %registry-swap! (any (or fn keyword) (or fn keyword) -> any))
+
+;; The name a `def` of `sym` actually BINDS, resolved at macro-EXPANSION time — which is
+;; load time of the module being compiled, so `reflect/current-ns` is that module.
+;;
+;; `%swap-registry!` needs a literal symbol for the kernel, and a hand-written one is wrong
+;; in both directions once the caller is inside a module. A bare name there names a ROOT
+;; global that does not exist, and `%registry-cas!` reads an unbound symbol as nil, so the
+;; compare never holds and the swap spins. A hand-qualified `mod/*name*` misses a PACKAGE
+;; prefix, so inside a published package it quietly registers into a second global that
+;; nothing reads — hatch hit both, one as a hang and one as a live-route table that stayed
+;; empty.
+;;
+;; Every caller in std/ was already correct, and none of them is namespaced: the prelude's
+;; own registries and `*protocols*` (std/protocol.blsp is CORE — loaded in the prelude with
+;; no `defmodule`, so its globals are root) are bare and root, `editor/face`'s `*faces*` is
+;; `defdyn` and therefore ambient (root, never namespaced, ADR-151), and the rest are
+;; written out qualified. So this resolution must not disturb any of them — which is why it
+;; checks rather than assumes: an already-qualified name passes through untouched, and
+;; between the qualified and bare forms it picks whichever is actually BOUND. Root registries
+;; keep resolving to root; a module's own registry now resolves to the module.
+(defn %registry-global-name (sym)
+  (let (ns (reflect/current-ns))
+    (if (or (nil? ns) (includes? (str sym) "/"))
+      sym
+      (let (qualified (symbol (str (->string ns) "/" (str sym))))
+        (cond
+          (bound? qualified) qualified
+          (bound? sym) sym
+          else qualified)))))
 
 (defmacro %swap-registry! (registry f)
   "Atomically update registry global `registry` by `(f current)` — e.g.
 `(%swap-registry! debug/*traced-fns* (fn (m) (assoc m sym orig)))`.
 
-`registry` must be the name the global is actually bound under: **fully qualified**
-(`debug/*traced-fns*`) for a module-level `def`, bare for a root or `defdyn` one. It is
-quoted for the kernel *and* spliced as a live reference for the re-read, and a quoted
-symbol is data the namespace resolver never rewrites — so a bare name inside a module
-would name a registry that does not exist."
-  `(%registry-swap! '~registry (fn () ~registry) ~f))
+Write `registry` the way you would refer to it in ordinary code: bare inside the module
+that defines it, qualified from outside, and bare for a `defdyn` (which is ambient). The
+macro resolves it to the name `def` actually binds (`%registry-global-name`) at expansion
+time, so a module does not have to know its own namespace — or, inside a published
+package, its package prefix. It is quoted for the kernel *and* spliced as a live reference
+for the re-read; the resolution is what keeps those two naming the same global."
+  `(%registry-swap! '~(%registry-global-name registry) (fn () ~registry) ~f))
 
 ;; (provide 'foo) — mark a feature loaded (idempotent). Returns its name.
 ;; ---- deferred runtime contracts (BROOD_CONTRACTS=1) --------------------------
@@ -1159,11 +1203,11 @@ image and before any `require`."
   ;; dependency module embedded under its rooted key `pkg/key` (`%bundle-resolve-bare`) — the
   ;; bundle's basename lookup, so a bare `(:alias repo)` / `pool` reference finds `store/repo`
   ;; / `store-postgres/pool` regardless of load order. The load below uses the resolved key for
-  ;; both its context (`%bundle-module-package`) and its source file.
+  ;; both its context (`%bundle-module-package`) and its source file. `src` is read under
+  ;; `(when load-key …)`, so the source branch below knows `load-key` is a key.
   (let (direct (%builtin-module key)
-        alt (if direct nil (%bundle-resolve-bare key))
-        src (or direct (if alt (%builtin-module alt) nil))
-        load-key (if direct key alt))
+        load-key (if direct key (%bundle-resolve-bare key))
+        src (when load-key (if direct direct (%builtin-module load-key))))
     (cond
       ;; The IMAGE branch is tested FIRST — before the embedded-source branch below.
       ;; Every baked-in std module has embedded source, so `src` matches for all of them
@@ -1267,7 +1311,7 @@ image and before any `require`."
           ;; Reached by resolving a bare name to the embedded rooted key `pkg/key`: mark the
           ;; rooted key loaded too, so the run-bundle load-all loop, requiring `pkg/key`
           ;; directly, does not re-evaluate the same source and redefine its macros.
-          (when (and alt (not (= alt key))) (provide alt)))
+          (when (and load-key (not (= load-key key))) (provide load-key)))
       ;; A feature can come from a startup IMAGE instead of a source file (ADR-218): its
       ;; bindings are materialised from a byte range rather than evaluated. This is the
       ;; seam that makes an imaged project load LAZILY — `require` stays the unit of

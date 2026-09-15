@@ -659,9 +659,28 @@ fn read_impls_registry(
     }
 }
 
+/// Does the global `sym` denote an ability's op function — the generic `defn` a
+/// `defability` emits? Asked of this file's ability facts (an ability declared here is not
+/// registered yet) and of the runtime `*op-ability*` registry, which keys the QUALIFIED op
+/// symbol every other loaded module's ability bound. A same-file function that merely
+/// spells an op's name — `tempo/->iso` beside `datetime`'s `Temporal` op `->iso` — is in
+/// neither, which is the point: the sealed-op domain below is keyed by the op's bare name,
+/// and applied to that function it demanded a `datetime` member of a `tempo`.
+pub(super) fn is_ability_op(heap: &Heap, info: Option<&AbilityInfo>, sym: value::Symbol) -> bool {
+    if info.is_some_and(|info| info.op_of(sym).is_some()) {
+        return true;
+    }
+    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*op-ability*")) else {
+        return false;
+    };
+    heap.map_get(mid, Value::Sym(sym)).is_some()
+}
+
 /// The occurrence-typing domain of a sealed op (ADR-190): the member-union type
 /// `%{__id__: (:a | :b | …)}` an argument to op `op_sym` must have, or `None` when no sound
 /// demand exists (read from the per-file table `annot::set_sealed_op_domains` installed).
+/// The caller establishes that `op_sym` IS an op ([`is_ability_op`]); this only reads the
+/// domain its bare name anchors.
 pub(super) fn sealed_op_domain(op_sym: value::Symbol) -> Option<crate::types::Ty> {
     let full = value::symbol_name(op_sym);
     let op_last = full.rsplit('/').next().unwrap_or(&full);

@@ -7,7 +7,7 @@ use super::walk::{is_fn_head, list_items};
 use crate::core::heap::Heap;
 use crate::core::keywords as kw;
 use crate::core::value::{self, Symbol, Tag, Value};
-use crate::types::{Sig, Ty};
+use crate::types::{Range, Sig, Ty};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
@@ -1002,8 +1002,12 @@ fn numeric_op_kind(head: Symbol) -> Option<(bool, bool, bool, bool)> {
         || value::symbol_is(head, "quot")
         || value::symbol_is(head, "rem")
         || value::symbol_is(head, "mod")
-        // `math/` since ADR-227 — see the `math/sqrt` note above.
-        || value::symbol_is(head, "math/abs");
+        // `math/` since ADR-227 — see the `math/sqrt` note above. The integer divisions
+        // exist in both spellings (the prelude's and `math`'s).
+        || value::symbol_is(head, "math/abs")
+        || value::symbol_is(head, "math/quot")
+        || value::symbol_is(head, "math/rem")
+        || value::symbol_is(head, "math/mod");
     (is_contagious || is_int_closed).then_some((is_contagious, is_int_closed, is_ring, is_division))
 }
 
@@ -1077,7 +1081,53 @@ pub(super) fn numeric_result(head: Symbol, tys: &[Ty]) -> Option<Ty> {
         return Some(float);
     }
     if is_int_closed && all_int {
-        return Some(int);
+        // …within the INTERVAL the operands' intervals give (ADR-350): `(+ i 1)` over
+        // `int[0..]` is `int[1..]`, `(- n 1)` over `int[4..]` is `int[3..]`; a literal
+        // result is a literal. `quot`/`rem`/`mod` stay plain `int`.
+        let ranges: Vec<Range> = tys
+            .iter()
+            .map(|t| t.int_range().unwrap_or(Range::ALL))
+            .collect();
+        let name = value::symbol_name(head);
+        let r = match (name.as_str(), ranges.as_slice()) {
+            ("+", rs) => rs.iter().copied().reduce(Range::plus),
+            ("*", rs) => rs.iter().copied().reduce(Range::times),
+            ("-", [only]) => Some(Range::negated(*only)),
+            ("-", [first, rest @ ..]) => {
+                Some(rest.iter().fold(*first, |acc, r| Range::minus(acc, *r)))
+            }
+            ("inc", [only]) => Some(Range::plus(*only, Range::point(1))),
+            ("dec", [only]) => Some(Range::minus(*only, Range::point(1))),
+            ("math/abs", [only]) => Some(if only.lo.is_some_and(|lo| lo >= 0) {
+                *only
+            } else if only.hi.is_some_and(|hi| hi <= 0) {
+                Range::negated(*only)
+            } else {
+                Range::at_least(0)
+            }),
+            // `(mod a b)` with `b > 0` is in `[0, b-1]` (the sign follows the divisor);
+            // `(rem a b)` the same when `a ≥ 0` too; `(quot a b)` with both non-negative
+            // is in `[0, hi(a) / lo(b)]`.
+            ("mod" | "rem" | "quot" | "math/mod" | "math/rem" | "math/quot", [a, b]) => {
+                let positive_divisor = b.lo.is_some_and(|lo| lo >= 1);
+                let non_negative_dividend = a.lo.is_some_and(|lo| lo >= 0);
+                if !positive_divisor {
+                    None
+                } else if name.ends_with("quot") {
+                    non_negative_dividend
+                        .then(|| Range::new(Some(0), a.hi.zip(b.lo).map(|(ah, bl)| ah / bl)))
+                } else if name.ends_with("mod") || non_negative_dividend {
+                    Some(Range::new(Some(0), b.hi.map(|bh| bh - 1)))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        return Some(match r {
+            Some(r) => Ty::int_in(r),
+            None => int,
+        });
     }
     // `(+ 1 1/2)` is 3/2 and can be nothing else — see the doc comment above. Placed
     // before the int|ratio fallback, which is the honest answer only once more than one
@@ -1359,13 +1409,72 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
                 });
             }
         }
+        // Over a UNION of shapes and sequences — `(tuple :error string) | (tuple :ok
+        // map)`, the tagged pair every parser returns — the read is answered term by
+        // term (a shape by its position), never by the union of every element.
+        if coll_ty.alt_terms().is_some() {
+            let index = if value::symbol_is(head, "first") {
+                Some(Some(0))
+            } else if value::symbol_is(head, "second") {
+                Some(Some(1))
+            } else if value::symbol_is(head, "third") {
+                Some(Some(2))
+            } else if value::symbol_is(head, "last") {
+                Some(None)
+            } else {
+                match items.get(2) {
+                    Some(Value::Int(n)) if *n >= 0 => Some(Some(*n as usize)),
+                    _ => None,
+                }
+            };
+            if let Some(index) = index {
+                // A guard on another position has already dropped the alternatives it
+                // rules out from `coll_ty` itself (`Ctx::narrow_path`): under
+                // `(= (nth r 0) :ok)` the `(tuple :error string)` is not `r`, so this
+                // reads the `:ok` tuple's second position alone.
+                return coll_ty.element_at_over_union(index);
+            }
+        }
+        // A read from exactly `nil` — the then-branch of `(nil? xs)` or `(empty? xs)` on a
+        // list — is `nil`, or the `nth` default (ADR-350): `nil` has no element to fall to
+        // `any` through, and the runtime answers exactly this.
+        if coll_ty == Ty::of(Tag::Nil) {
+            let absent = if value::symbol_is(head, "nth") && items.len() == 4 {
+                expr_ty(heap, items[3], ctx)
+            } else {
+                None
+            };
+            return Some(absent.unwrap_or(Ty::of(Tag::Nil)));
+        }
         let elem = coll_ty.elem_ty()?;
         // `first`/`last` of a provably non-empty list is an element, full stop; every
         // other access (an index that may run off the end, a seq that may be empty)
         // yields `nil` too — except `(nth coll i default)`, whose absent case IS the
         // default, exactly as `get`'s (`(nth parts 1 "0")` is a string, never nil).
-        let always_present = provably_non_empty(&coll_ty)
-            && (value::symbol_is(head, "first") || value::symbol_is(head, "last"));
+        // …and by LENGTH (ADR-350): `second` of a collection of two or more, `(nth xs 3)`
+        // of one at least four long, `(nth xs i)` where a guard established `i < (count
+        // xs)` and `i`'s interval says it is not negative — each an element, never `nil`.
+        let count = coll_ty.count_range();
+        let at_least = |k: i64| count.is_some_and(|r| r.lo.is_some_and(|lo| lo >= k));
+        let always_present = (provably_non_empty(&coll_ty)
+            && (value::symbol_is(head, "first") || value::symbol_is(head, "last")))
+            || (value::symbol_is(head, "second") && at_least(2))
+            || (value::symbol_is(head, "third") && at_least(3))
+            || (value::symbol_is(head, "nth") && items.len() >= 3 && {
+                match items[2] {
+                    Value::Int(k) => k >= 0 && at_least(k + 1),
+                    Value::Sym(i) if ctx.is_lexical_local(i) => {
+                        let index = ctx.get(i).and_then(|t| t.int_range());
+                        let non_negative = index.is_some_and(|r| r.lo.is_some_and(|lo| lo >= 0));
+                        let bounded_by_guard =
+                            matches!(arg, Value::Sym(xs) if ctx.is_index_bound(i, xs));
+                        let bounded_by_interval =
+                            index.and_then(|r| r.hi).is_some_and(|hi| at_least(hi + 1));
+                        non_negative && (bounded_by_guard || bounded_by_interval)
+                    }
+                    _ => false,
+                }
+            });
         let absent = if value::symbol_is(head, "nth") && items.len() == 4 {
             expr_ty(heap, items[3], ctx)
         } else {
@@ -1384,7 +1493,7 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         // Data-first (ADR-308): the collection is argument one.
         let coll = *items.get(1)?;
         let coll_ty = expr_ty(heap, coll, ctx);
-        let a = coll_ty.as_ref().and_then(|t| t.elem_ty());
+        let a = coll_ty.as_ref().and_then(|t| t.elem_ty_union());
         // …NARROWED by the predicate when it is a type predicate: `(seq/filter xs int?)` keeps
         // only the items `int?` admits, so the result's elements are `elem ∩ int`. This is
         // the same `Ty::tested_by` bridge occurrence typing uses for an `if` guard, applied
@@ -1429,10 +1538,13 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         || value::symbol_is(head, "distinct")
         // `seq/` since ADR-227; `distinct` stayed in the core protocol.
         || value::symbol_is(head, "seq/dedupe")
+        // `(seq x)` is `x`'s elements as a list, the same number of them (a bytes'
+        // octets, a vector's items): its element type and length are the input's.
+        || value::symbol_is(head, "seq")
     {
         let coll = *items.get(1)?;
         let coll_ty = expr_ty(heap, coll, ctx);
-        let a = coll_ty.as_ref().and_then(|t| t.elem_ty());
+        let a = coll_ty.as_ref().and_then(|t| t.elem_ty_union());
         return list_result_over(coll_ty.as_ref(), a);
     }
     if value::symbol_is(head, "rest") || value::symbol_is(head, "but-last") {
@@ -1455,13 +1567,30 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
                 Ty::list_shape_of(kept)
             });
         }
-        let a = coll_ty.and_then(|t| t.elem_ty());
-        return list_result(a);
+        // One shorter than the input: `nil` only when the input may have had one element
+        // (or none).
+        let shorter = coll_ty.as_ref().and_then(|t| t.count_range()).map(|r| {
+            Range::new(
+                r.lo.map(|lo| (lo - 1).max(0)),
+                r.hi.map(|hi| (hi - 1).max(0)),
+            )
+        });
+        let a = coll_ty.and_then(|t| t.elem_ty_union());
+        return match (a, shorter) {
+            (Some(e), Some(r)) => Some(list_with_len(e, r)),
+            (a, _) => list_result(a),
+        };
     }
-    // `(count x)` of a positional shape is its arity, exactly.
-    if value::symbol_is(head, "count") && items.len() == 2 {
-        let n = expr_ty(heap, items[1], ctx)?.positional_elems()?.len();
-        return Some(Ty::int_lit(n as i64));
+    // `(count x)` is the LENGTH interval of `x`'s type (ADR-350): the arity of a
+    // positional shape exactly, `0` for `nil`, at least 1 for a `pair`, what a guard
+    // narrowed a collection's length to.
+    if (value::symbol_is(head, "count")
+        || value::symbol_is(head, "string/length")
+        || value::symbol_is(head, "vector-length"))
+        && items.len() == 2
+    {
+        let r = expr_ty(heap, items[1], ctx)?.count_range()?;
+        return Some(Ty::int_in(r));
     }
     // `(range …)` is "a range of integers" (its own docstring): every argument an int
     // means every element is one. Empty ranges are `nil`.
@@ -1476,17 +1605,28 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
             (Some(Value::Int(a)), Some(Value::Int(b)), 3) => a < b,
             _ => false,
         };
+        // `(range n)` has exactly `n` elements when `n ≥ 0` (none otherwise), so its
+        // length is `n`'s interval clipped at 0 — and non-empty when `n ≥ 1`.
+        let length = match (items.len(), expr_ty(heap, items[1], ctx)) {
+            (2, Some(n)) => n
+                .int_range()
+                .map(|r| Range::new(Some(r.lo.unwrap_or(0).max(0)), r.hi.map(|h| h.max(0)))),
+            _ => None,
+        };
         return if all_int && non_empty {
             Some(Ty::list_of(int))
         } else if all_int {
-            list_result(Some(int))
+            match length {
+                Some(r) => Some(list_with_len(int, r)),
+                None => list_result(Some(int)),
+            }
         } else {
             None
         };
     }
     // `(vec coll)` — the same elements, as a vector. Unknown elements → a bare vector.
     if value::symbol_is(head, "vec") && items.len() == 2 {
-        let elem = expr_ty(heap, items[1], ctx).and_then(|t| t.elem_ty());
+        let elem = expr_ty(heap, items[1], ctx).and_then(|t| t.elem_ty_union());
         return Some(match elem {
             Some(e) => Ty::vector_of(e),
             None => Ty::of(Tag::Vector),
@@ -1498,7 +1638,7 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     // entries come from pairs).
     if value::symbol_is(head, "into") && items.len() == 3 {
         let target = expr_ty(heap, items[1], ctx)?;
-        let added = expr_ty(heap, items[2], ctx).and_then(|t| t.elem_ty());
+        let added = expr_ty(heap, items[2], ctx).and_then(|t| t.elem_ty_union());
         let own = if target.is_subtype(&Ty::of(Tag::Nil)) {
             Some(Ty::NEVER)
         } else {
@@ -1549,9 +1689,16 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         }
         let added = added?;
         if coll.is_subtype(&Ty::of(Tag::Vector)) {
-            return Some(match coll.elem_ty() {
+            let out = match coll.elem_ty() {
                 Some(e) => Ty::vector_of(e.union(added)),
                 None => Ty::of(Tag::Vector),
+            };
+            let grown = coll
+                .count_range()
+                .map(|r| Range::plus(r, Range::point(items.len() as i64 - 2)));
+            return Some(match grown {
+                Some(r) => out.with_len(r),
+                None => out,
             });
         }
         if coll.is_subtype(&Ty::of(Tag::Set)) {
@@ -1632,9 +1779,11 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
             Value::Sym(f)
                 if !ctx.is_local(f) && numeric_op_kind(f).is_some() && items.len() == 3 =>
             {
-                let elem = expr_ty(heap, items[2], ctx).and_then(|t| t.elem_ty());
+                let elem = expr_ty(heap, items[2], ctx).and_then(|t| t.elem_ty_union());
                 match elem {
-                    Some(e) => numeric_result(f, &[e]),
+                    // The closure class, not one element's interval: the spread's count
+                    // is unknown, so `(apply + [1 2])` is an int, not `int[1..2]`.
+                    Some(e) => numeric_result(f, &[e]).map(|t| t.without_int_interval()),
                     None => sig_of(heap, f).map(|sig| sig.ret),
                 }
             }
@@ -1653,7 +1802,7 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     if value::symbol_is(head, "sort-by") {
         let coll = *items.get(1)?;
         let coll_ty = expr_ty(heap, coll, ctx);
-        let a = coll_ty.as_ref().and_then(|t| t.elem_ty());
+        let a = coll_ty.as_ref().and_then(|t| t.elem_ty_union());
         return list_result_over(coll_ty.as_ref(), a);
     }
     // `(sort coll)` / `(sort coll less?)` — data-first (ADR-308), sequence FIRST in
@@ -1664,7 +1813,7 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     if value::symbol_is(head, "sort") {
         let coll = *items.get(1)?;
         let coll_ty = expr_ty(heap, coll, ctx);
-        let a = coll_ty.as_ref().and_then(|t| t.elem_ty());
+        let a = coll_ty.as_ref().and_then(|t| t.elem_ty_union());
         return list_result_over(coll_ty.as_ref(), a);
     }
     // Element-preserving slices/filters whose sequence is the *first* argument
@@ -1683,7 +1832,7 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         || value::symbol_is(head, "seq/drop-last")
     {
         let coll = *items.get(1)?;
-        let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
+        let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty_union());
         return list_result(a);
     }
     // `(seq/reject coll pred)` keeps what `pred` REJECTS — the complement of `seq/filter`: with
@@ -1693,7 +1842,7 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     // drop reached the next consumer as a finding.
     if value::symbol_is(head, "seq/reject") && items.len() == 3 {
         let coll_ty = expr_ty(heap, items[1], ctx);
-        let a = coll_ty.as_ref().and_then(|t| t.elem_ty());
+        let a = coll_ty.as_ref().and_then(|t| t.elem_ty_union());
         let a = match (a, predicate_tested_ty(items[2])) {
             (Some(elem), Some(tested)) => Some(elem.difference(tested)),
             (elem, _) => elem,
@@ -1722,15 +1871,22 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         }
         // A `nil` tail (`'()`, `nil`) contributes no elements at all, so the list's
         // elements are exactly the head's — `(cons 1 '())` is `list<1>`, not a bare `pair`.
-        let tail_elem = tail_ty.and_then(|t| {
+        let tail_elem = tail_ty.clone().and_then(|t| {
             if t.is_subtype(&Ty::of(Tag::Nil)) {
                 Some(Ty::NEVER)
             } else {
                 t.elem_ty()
             }
         });
+        let longer = tail_ty
+            .as_ref()
+            .and_then(|t| t.count_range())
+            .map(|r| Range::plus(r, Range::point(1)));
         return match (hd_ty, tail_elem) {
-            (Some(h), Some(e)) => Some(Ty::list_of(h.union(e))),
+            (Some(h), Some(e)) => Some(match longer {
+                Some(r) => Ty::list_of(h.union(e)).with_len(r),
+                None => Ty::list_of(h.union(e)),
+            }),
             _ => Some(Ty::of(Tag::Pair)), // one side unknown → unrefined pair
         };
     }
@@ -2049,7 +2205,7 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     if value::symbol_is(head, "map") {
         let (coll, f) = super::sigs::combinator_args(items)?;
         let coll_ty = expr_ty(heap, coll, ctx);
-        let a = coll_ty.as_ref().and_then(|t| t.elem_ty());
+        let a = coll_ty.as_ref().and_then(|t| t.elem_ty_union());
         let b = callback_ret(heap, f, &[a], ctx);
         return list_result_over(coll_ty.as_ref(), b);
     }
@@ -2064,7 +2220,7 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     // `keep` is `seq/keep` (ADR-227) — keyed qualified, as `seq/interpose` is.
     if value::symbol_is(head, "seq/keep") {
         let (coll, f) = super::sigs::combinator_args(items)?;
-        let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
+        let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty_union());
         let b = callback_ret(heap, f, &[a], ctx).map(|t| {
             let non_nil = t.clone().difference(Ty::of(Tag::Nil));
             // A callback that only ever yields nil keeps an empty list, i.e. `nil`.
@@ -2082,7 +2238,7 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     // holds both, `nil | list<A | type(sep)>`. Both must be known, else flat.
     // Keyed qualified: `seq/` since ADR-227.
     if value::symbol_is(head, "seq/interpose") && items.len() == 3 {
-        let a = expr_ty(heap, items[1], ctx).and_then(|t| t.elem_ty());
+        let a = expr_ty(heap, items[1], ctx).and_then(|t| t.elem_ty_union());
         let sep_ty = expr_ty(heap, items[2], ctx);
         return match (sep_ty, a) {
             (Some(s), Some(e)) => list_result(Some(s.union(e))),
@@ -2109,13 +2265,13 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
             // (reduce coll f) — initial accumulator is the first element
             3 if value::symbol_is(head, "reduce") => {
                 let coll = coll_arg;
-                let elem = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
+                let elem = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty_union());
                 (elem, coll)
             }
             _ => return None,
         };
         let coll_ty = expr_ty(heap, coll, ctx);
-        let elem = coll_ty.as_ref().and_then(|t| t.elem_ty());
+        let elem = coll_ty.as_ref().and_then(|t| t.elem_ty_union());
         // Over a PROVABLY non-empty sequence (`list<T>` is the `pair` tag alone — the empty
         // list is `nil`) the step runs at least once, so the result is a STEP result and
         // the empty-input case (`init`) does not join in. `(first (reduce (string/split s)
@@ -2129,7 +2285,8 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         // path below produces from `+`'s declared signature.
         if let (Value::Sym(fs), Some(i), Some(e)) = (f, &init_ty, &elem) {
             if let Some(t) = numeric_result(fs, &[i.clone(), e.clone()]) {
-                return Some(t);
+                // The closure class; one step's interval is not the fold's (ADR-350).
+                return Some(t.without_int_interval());
             }
         }
         // Seed the accumulator from `init` and take one step to a fixpoint: with `acc₁ =
@@ -2158,7 +2315,9 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
                 if step.is_subtype(&acc) {
                     return Some(if ran_at_least_once { step } else { acc });
                 }
-                acc = acc.union(step);
+                // An interval that moved goes to its infinity (ADR-350): a counter slot
+                // `(inc j)` would otherwise climb `0`, `0 | 1`, … past the step bound.
+                acc = acc.clone().union(step).widen_intervals_against(&acc);
             }
         }
         let b = callback_ret(heap, f, &[Some(Ty::ANY), elem], ctx);
@@ -2198,6 +2357,12 @@ fn provably_non_empty(t: &Ty) -> bool {
     if t.is_subtype(&Ty::of(Tag::Pair)) {
         return true;
     }
+    // A LENGTH of at least one, however it was established (ADR-350).
+    if t.count_range()
+        .is_some_and(|r| r.lo.is_some_and(|lo| lo >= 1))
+    {
+        return true;
+    }
     // A tuple states its arity, and a CLOSED record states its keys — so either can carry
     // the same "has a first element" fact a `list<T>` does. (An open record cannot: it says
     // nothing about a value that declares no field at all. An optional field cannot either
@@ -2228,10 +2393,31 @@ fn provably_non_empty(t: &Ty) -> bool {
 /// the `nil` case is dropped. `(map inc '(1 2))` is `list<int>`, not `nil | list<int>`. An
 /// input that may be empty keeps the `nil`.
 fn list_result_over(input: Option<&Ty>, elem: Option<Ty>) -> Option<Ty> {
+    if let Some(r) = input.and_then(|t| t.count_range()) {
+        // A closed record's required fields prove non-emptiness where the length
+        // interval alone does not (a map's length is unrefined).
+        let r = if input.is_some_and(provably_non_empty) {
+            Range::meet(r, Range::at_least(1)).unwrap_or(r)
+        } else {
+            r
+        };
+        return elem.map(|e| list_with_len(e, r));
+    }
     if input.is_some_and(provably_non_empty) {
         elem.map(Ty::list_of)
     } else {
         list_result(elem)
+    }
+}
+
+/// `list<elem>` of a length within `r` (ADR-350): the `pair` member carries the length
+/// (at least 1 there), and `nil` is in the union exactly when `r` admits 0.
+fn list_with_len(elem: Ty, r: Range) -> Ty {
+    let non_empty = Ty::list_of(elem).with_len(r);
+    if Range::subset(Range::point(0), r) {
+        non_empty.union(Ty::of(Tag::Nil))
+    } else {
+        non_empty
     }
 }
 

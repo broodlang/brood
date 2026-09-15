@@ -377,9 +377,29 @@ surface feeding it — and each turned out to need a different kind of fix. Deta
       (list m '(…)))` read `pair | map`; `list_shape` — a positional shape on the pair member,
       the sibling of `(tuple …)` — reads it exactly, from `(list …)`, a quoted list, `cons`,
       `rest` and a `& rest` binder; `(list T U …)` in the grammar and the runtime contract.
-- [ ] **10. Recursive types.** A value type that nests itself (`json`'s
-      `vector<… | vector<…>>`) is cut at a depth by `Ty::widened_below`; a one-level unroll of a
-      named recursive type would say it exactly.
+- [x] **10. Recursive types** (ADR-349, 2026-09-14). A value type that nests itself (`json`'s
+      `vector<… | vector<…>>`) was cut at a depth by `Ty::widened_below`; `(rec X …)` says it
+      exactly — a μ binder unrolled coinductively by every relation, and the fixpoints fold an
+      ascent that nests itself into one, confirmed when the next round folds back to it.
+- [x] **11. Lengths and indices.** Shipped 2026-09-14 (ADR-350, `docs/type-intervals.md`).
+      Was: The largest class left in `tests/`'s strict findings, and
+      bedit's: `nil | int` from `(nth words 1)` after `(>= n 4)`, `(first ms)` after `(not
+      (empty? ms))` on a vector, `(nth parts 1)` after `(= (count parts) 3)` — a length fact the
+      code states and the lattice cannot hold. Three pieces: a length interval on the sequence
+      slot (`count` reads it, `conj`/`rest` move it, a positional shape is a point, the
+      `count`/`empty?` guards narrow it — for vectors and strings too); an interval refinement on
+      `int` (`0 ∪ (+ i 1)` reads `i ≥ 0`; needs its own widening to `[0, ∞)`); and the
+      relational guard `(< i (count xs))` as a fact between two locals, read at `(nth xs i)`.
+      The Idris `Vect n a` lesson in the clothes this lattice already wears (2026-09-14).
+- [ ] **12. `total`.** A declaration that a function terminates and covers every case — the
+      two lints exist (non-tail recursion, `match` exhaustiveness); what is missing is a name to
+      tie them to, plus a structural-decrease check for the termination half (`(rest xs)`,
+      `(- n 1)` under `(> n 0)` on the recursive call). The property a supervisor's `init` or a
+      `gen` handler should be able to state.
+- [ ] **13. `pure`.** A declaration that a function performs no effect — `send`, I/O, a table
+      write — checked from `guard_effects.rs`'s effectful-head detection. Its consumer already
+      exists: `ui-memo` (ADR-336) caches view fragments on the assumption the render function
+      is pure, and nothing checks it.
 
 
 ### Standard-library surface audit — the bare namespace (2026-08-26)

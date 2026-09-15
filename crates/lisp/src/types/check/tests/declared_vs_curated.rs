@@ -694,9 +694,9 @@ fn length_preserving_combinators_over_a_non_empty_list_drop_the_nil() {
         "list<1 | 2 | string>"
     );
     assert_eq!(ty_str("(append '(1) nil)"), "list<1>");
-    assert_eq!(ty_str("(map '(1 2) inc)"), "list<int>");
-    assert_eq!(ty_str("(sort '(3 1))"), "list<1 | 3>");
-    assert_eq!(ty_str("(reverse '(1 2))"), "list<1 | 2>");
+    assert_eq!(ty_str("(map '(1 2) inc)"), "list<int[2..3]>[2]"); // the interval and the length carry
+    assert_eq!(ty_str("(sort '(3 1))"), "list<1 | 3>[2]");
+    assert_eq!(ty_str("(reverse '(1 2))"), "list<1 | 2>[2]");
     // (a quoted list is a positional shape, so its first and last are exact)
     assert_eq!(ty_str("(first '(1 2))"), "1");
     assert_eq!(ty_str("(last '(1 2))"), "2");

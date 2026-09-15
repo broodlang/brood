@@ -43,9 +43,9 @@ fn a_decidable_division_types_exactly() {
     // …and the literal itself is NOT carried through: `(/ 6 -1)` is -6, not 6
     assert_eq!(ty_str("(/ 6 -1)"), "int");
     // what stays deferred: an unknown numerator over a divisor that is not ±1
-    assert_eq!(ty_str("(let (x (+ 1 2)) (/ x 2))"), "int | ratio");
-    // a literal SET that lands on both kinds is exactly `int | ratio` — the answer the
-    // caller already gives, so the fold stops rather than walking the rest of it
+    assert_eq!(ty_str("(let (x (+ 1 2)) (/ x 2))"), "ratio"); // `x` is exactly 3 now
+                                                              // a literal SET that lands on both kinds is exactly `int | ratio` — the answer the
+                                                              // caller already gives, so the fold stops rather than walking the rest of it
     assert_eq!(ty_str("(/ (if (os/env \"X\") 6 5) 2)"), "int | ratio");
     // a zero divisor RAISES (E0040), so the checker declines rather than typing an
     // expression that cannot produce a value
@@ -82,10 +82,13 @@ fn narrowing_division_names_a_bug_and_clears_two_correct_programs() {
 // against the runtime, not assumed).
 #[test]
 fn bytes_and_map_entries_carry_their_element_types() {
-    assert_eq!(ty_str("(first (string/->bytes \"ab\"))"), "nil | int");
+    assert_eq!(
+        ty_str("(first (string/->bytes \"ab\"))"),
+        "nil | int[0..255]"
+    ); // an octet
     assert_eq!(
         ty_str("(map (string/->bytes \"ab\") inc)"),
-        "nil | list<int>"
+        "nil | list<int[1..256]>"
     );
     // a closed record states its keys, so its entries are exact
     assert_eq!(ty_str("(first {:a 1 :b 2})"), "(tuple :a | :b, 1 | 2)");
@@ -185,8 +188,8 @@ fn adding_whole_numbers_to_one_ratio_is_exactly_a_ratio() {
     assert_eq!(ty_str("(/ 1 1/2)"), "int | ratio");
     // and the rules above it still win in order: float contagion first, then int closure
     assert_eq!(ty_str("(+ 1.0 1/2)"), "float");
-    assert_eq!(ty_str("(+ 1 2)"), "int");
-    // A declared `int` over it is now provably wrong, where before it was merely wider.
+    assert_eq!(ty_str("(+ 1 2)"), "3"); // int closure, and the interval arithmetic makes it exact
+                                        // A declared `int` over it is now provably wrong, where before it was merely wider.
     let ws = file_warnings("(defmodule t)\n(sig f (int -> int))\n(defn f (x) (+ x 1/2))");
     assert!(
         ws.iter()
@@ -219,7 +222,7 @@ fn precision_rules_give_the_exact_type_where_it_is_provable() {
         // a numeric operator as a callback / a fold / spread — the same closure rules
         // a two-element vector literal is a TUPLE, whose arity is part of its type — so
         // it is provably non-empty and `map` keeps that (the `nil` arm is the empty case)
-        ("(map [1 2] inc)", "list<int>"),
+        ("(map [1 2] inc)", "list<int[2..3]>[2]"),
         ("(reduce [1 2] +)", "int"),
         ("(reduce [1 2] 0 +)", "int"),
         ("(apply + [1 2])", "int"),
@@ -228,7 +231,7 @@ fn precision_rules_give_the_exact_type_where_it_is_provable() {
         ("(vec [1 2])", "vector<1 | 2>"),
         ("(into [] (list 1))", "vector<1>"),
         ("(into {} [[:a 1]])", "map"),
-        ("(conj [1] 2)", "vector<1 | 2>"),
+        ("(conj [1] 2)", "vector<1 | 2>[2]"),
         ("(conj (list 1) 2)", "list<1 | 2>"),
         ("(conj #{1} 2)", "set<1 | 2>"),
         ("(merge {:a 1} {:b 2})", "{a: 1, b: 2}"),
@@ -604,4 +607,119 @@ fn a_list_call_and_a_quoted_list_are_positional_shapes() {
         true,
     );
     assert!(ws.is_empty(), "{ws:?}");
+}
+
+// ---- lengths and indices (ADR-350) --------------------------------------------------
+
+/// A comparison on a variable's `count` is a fact about the collection's LENGTH, and a
+/// positional read within that length is present: `(nth words 1)` under `(>= n 4)` is a
+/// string, not `nil | string`.
+#[test]
+fn a_count_comparison_bounds_the_collection_length() {
+    let src = "(defmodule t)\n\
+         (sig want-str (string -> int))\n\
+         (defn want-str (s) 1)\n\
+         (sig f ((list string) -> any))\n\
+         (defn f (words) (let (n (count words)) (if (>= n 4) (want-str (nth words 1)) 0)))\n\
+         (sig g ((list string) -> any))\n\
+         (defn g (words) (if (= (count words) 3) (want-str (nth words 1)) 0))\n\
+         (sig h ((list string) -> any))\n\
+         (defn h (words) (if (= (count words) 3) 0 (want-str (nth words 2))))";
+    let ws = file_warnings_mode(src, true);
+    // `f` and `g` are clean; `h` reads position 2 of a list whose length is NOT 3.
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert!(ws[0].contains("nil | string ((nth words 2))"), "{ws:?}");
+}
+
+/// `(not (empty? xs))` proves a length of at least one, so `(first xs)` is an element;
+/// the then-branch of `(empty? xs)` proves nothing about `first` (it is nil).
+#[test]
+fn a_non_empty_guard_makes_first_present() {
+    let src = "(defmodule t)\n\
+         (sig want-map (map -> int))\n\
+         (defn want-map (m) 1)\n\
+         (sig f ((list map) -> any))\n\
+         (defn f (ms) (if (not (empty? ms)) (want-map (first ms)) 0))\n\
+         (sig g ((list map) -> any))\n\
+         (defn g (ms) (if (empty? ms) (want-map (first ms)) 0))";
+    let ws = file_warnings_mode(src, true);
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert!(ws[0].contains("got nil ((first ms))"), "{ws:?}");
+}
+
+/// An index proven below the count and at least zero reads an element, full stop.
+#[test]
+fn an_index_bounded_by_the_count_is_in_range() {
+    let src = "(defmodule t)\n\
+         (sig want-int (int -> int))\n\
+         (defn want-int (n) 1)\n\
+         (sig f ((vector int) (int 0 _) -> any))\n\
+         (defn f (xs i) (if (< i (count xs)) (want-int (nth xs i)) 0))\n\
+         (sig g ((vector int) int -> any))\n\
+         (defn g (xs i) (if (< i (count xs)) (want-int (nth xs i)) 0))";
+    let ws = file_warnings_mode(src, true);
+    // `g`'s index may be negative, and a negative `nth` is nil.
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert!(ws[0].contains("nil | int ((nth xs i))"), "{ws:?}");
+}
+
+/// An equality guard on ONE position of a tagged tuple selects the alternative in both
+/// branches — for the whole value, not only the reads of that position. This is the
+/// `[:ok x] | [:error msg]` dispatch every `parse!` is built on.
+#[test]
+fn a_position_guard_selects_the_tagged_tuple_alternative() {
+    let src = "(defmodule t)\n\
+         (sig want-map (map -> int))\n\
+         (defn want-map (m) 1)\n\
+         (sig want-err ((tuple :error string) -> int))\n\
+         (defn want-err (e) 1)\n\
+         (sig use-it ((or (tuple :error string) (tuple :ok (record :a int))) -> any))\n\
+         (defn use-it (a) (if (= (nth a 0) :error) (want-err a) (want-map (nth a 1))))\n\
+         (defn p (s) (if (= s \"x\") [:error \"bad\"] [:ok {:a 1}]))\n\
+         (defn use-p (s) (let (a (p s)) (if (= (nth a 0) :error) (want-err a) (want-map (nth a 1)))))\n\
+         (defn wrong (s) (let (a (p s)) (if (= (nth a 0) :ok) (want-err a) 0)))";
+    let ws = file_warnings_mode(src, true);
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert!(
+        ws[0].contains(
+            "want-err: argument 1 expects (tuple :error, string), got (tuple :ok, {a: 1})"
+        ),
+        "{ws:?}"
+    );
+}
+
+/// A self-call is typed in the branch it sits in: the accumulator of a list walk takes
+/// an ELEMENT of the list, not an element-or-nil, because the self-call is in the else of
+/// `(nil? xs)`.
+#[test]
+fn a_recursive_accumulator_is_typed_under_its_branch_guard() {
+    let src = "(defmodule t)\n\
+         (defn- walk (xs acc) (if (nil? xs) (first acc) (walk (rest xs) (cons (first xs) acc))))\n\
+         (sig f (& string -> int))\n\
+         (defn f (& parts) (walk (seq parts) (list \"x\")))";
+    let ws = file_warnings_mode(src, true);
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert!(ws[0].ends_with("the body yields string"), "{ws:?}");
+}
+
+/// A `when`-shaped binding is a then-only guard on its condition: `(let (src (when k
+/// (lookup k))) (if src (use k) …))` reads `k` truthy where `src` is — a falsy `src` proves
+/// nothing, so the else-branch is left alone.
+#[test]
+fn a_when_shaped_binding_guards_its_condition() {
+    let src = "(defmodule t)\n\
+         (sig want-str (string -> int))\n\
+         (defn want-str (s) 1)\n\
+         (sig lookup (string -> (or nil string)))\n\
+         (defn lookup (k) nil)\n\
+         (sig f ((or nil string) -> any))\n\
+         (defn f (k) (let (src (when k (lookup k))) (if src (want-str k) 0)))\n\
+         (sig g ((or nil string) -> any))\n\
+         (defn g (k) (let (src (when k (lookup k))) (if src 0 (want-str k))))";
+    let ws = file_warnings_mode(src, true);
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert!(
+        ws[0].contains("expects string, got nil | string (k)"),
+        "{ws:?}"
+    );
 }

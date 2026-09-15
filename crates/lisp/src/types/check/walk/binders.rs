@@ -521,7 +521,7 @@ pub(super) fn check_if(
             let else_ctx = if g.then_only {
                 ctx.clone()
             } else {
-                ctx.narrow(g.sym, g.ty.negate())
+                ctx.narrow(g.sym, g.else_type())
             };
             (then_ctx, else_ctx)
         }
@@ -591,12 +591,13 @@ pub(super) fn check_if(
             t = t.narrow(g.sym, g.ty);
         }
         for g in or_disjunct_guards(heap, test, ctx) {
-            e = e.narrow(g.sym, g.ty.negate());
+            e = e.narrow(g.sym, g.else_type());
         }
         if let Some((sym, union)) = or_same_var_narrowing(heap, test, ctx) {
             t = t.narrow(sym, union);
         }
-        (t, e)
+        // …and a comparison's intervals, lengths and index bounds (ADR-350).
+        apply_comparison_facts(heap, test, ctx, t, e)
     };
     // A branch whose scope is contradicted by its own test cannot run: don't check it.
     if !then_ctx.is_dead() {
@@ -644,11 +645,35 @@ pub(in crate::types::check) fn let_bind_scope(
     }
     if let Some(g) = rhs_guard {
         if !g.then_only && !g.else_only {
-            scope = scope.add_guard(name, g.sym, g.ty);
+            scope = scope.add_guard(name, g.sym, g.ty, g.else_ty, false);
+        }
+    }
+    // A `when`-shaped binding — `(let (src (when k (lookup k))) …)`, which is `(if k E nil)`
+    // once expanded — is a guard on `k`: a truthy `src` proves `k` truthy (a falsy `k` makes
+    // the value `nil`), so `(cond src (use k) …)` reads `k` narrowed in that branch. A falsy
+    // `src` proves nothing (`E` may be nil), hence then-only. Only for a lexical local `k`.
+    if let Some(items) = list_items(heap, rhs) {
+        let when_shaped = items.len() == 3 || (items.len() == 4 && matches!(items[3], Value::Nil));
+        if let (Some(Value::Sym(head)), Some(Value::Sym(k))) = (items.first(), items.get(1)) {
+            if when_shaped && value::symbol_is(*head, kw::IF) && scope.is_lexical_local(*k) {
+                scope = scope.add_guard(name, *k, Ty::truthy(), None, true);
+            }
         }
     }
     if let Value::Sym(target) = rhs {
         scope = scope.add_alias(name, target);
+    }
+    // `(let (n (count xs)) …)`: `n` is the length of `xs` for the scope (ADR-350), so a
+    // guard on `n` narrows `xs`'s length and bounds an index of it.
+    if let Some(items) = list_items(heap, rhs) {
+        if let [Value::Sym(head), Value::Sym(target)] = items[..] {
+            let counts = value::symbol_is(head, "count")
+                || value::symbol_is(head, "string/length")
+                || value::symbol_is(head, "vector-length");
+            if counts && !scope.is_lexical_local(head) && scope.is_lexical_local(target) {
+                scope = scope.add_count_alias(name, target);
+            }
+        }
     }
     scope
 }

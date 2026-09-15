@@ -476,7 +476,7 @@ pub(in crate::types::check) fn pattern_bindings(
     let elem = rhs_ty.and_then(|t| t.elem_ty());
     // A positional shape — a vector tuple or a list shape — types each binder by its
     // position, and a `& rest` binder by the positions that remain.
-    let tuple = rhs_ty.and_then(|t| t.positional_elems().cloned());
+    let tuple = rhs_ty.and_then(|t| t.positional_elems());
     if !flat || (elem.is_none() && tuple.is_none()) {
         return names.into_iter().map(|s| (s, None)).collect();
     }

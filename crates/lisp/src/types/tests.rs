@@ -281,7 +281,10 @@ fn elem_of_a_tuple_shape_unioned_with_a_bare_pair_is_unknown() {
 // has unknown elements, the same reason a tuple beside a `pair` does.
 #[test]
 fn a_derived_element_type_needs_the_term_to_admit_one_collection() {
-    assert_eq!(Ty::of(Tag::Bytes).elem_ty(), Some(Ty::of(Tag::Int)));
+    assert_eq!(
+        Ty::of(Tag::Bytes).elem_ty(),
+        Some(Ty::int_in(Range::new(Some(0), Some(255))))
+    );
     assert_eq!(
         Ty::map_of(Ty::of(Tag::Str), Ty::of(Tag::Int)).elem_ty(),
         Some(Ty::tuple_of(vec![Ty::of(Tag::Str), Ty::of(Tag::Int)]))
@@ -1950,7 +1953,7 @@ fn a_list_shape_is_a_non_empty_list_of_exactly_its_positions() {
     // Elements: the union of the positions; positions: exact.
     assert_eq!(shape.elem_ty(), Some(int.clone().union(string.clone())));
     assert_eq!(
-        shape.positional_elems().cloned(),
+        shape.positional_elems(),
         Some(vec![int.clone(), string.clone()])
     );
     // A uniform list is not a shape (it has no arity), and a shape with `nil` beside it
@@ -1969,7 +1972,7 @@ fn a_list_shape_is_a_non_empty_list_of_exactly_its_positions() {
         .clone()
         .intersect(Ty::list_shape_of(vec![Ty::int_lit(3), string.clone()]));
     assert_eq!(
-        narrowed.positional_elems().cloned(),
+        narrowed.positional_elems(),
         Some(vec![Ty::int_lit(3), string.clone()])
     );
     // Shapes of one arity merge by position (exact when one position differs), and a
@@ -1978,7 +1981,7 @@ fn a_list_shape_is_a_non_empty_list_of_exactly_its_positions() {
         .clone()
         .union(Ty::list_shape_of(vec![Ty::of(Tag::Float), string.clone()]));
     assert_eq!(
-        merged.positional_elems().cloned(),
+        merged.positional_elems(),
         Some(vec![int.clone().union(Ty::of(Tag::Float)), string.clone()])
     );
     let two_arities = shape.clone().union(one.clone());
@@ -1986,7 +1989,11 @@ fn a_list_shape_is_a_non_empty_list_of_exactly_its_positions() {
     assert!(!Ty::list_shape_of(vec![string.clone()]).is_subtype(&two_arities));
     // The annotation grammar reads it back: `(list T U …)`.
     assert_eq!(parse_ty("(list int string)"), shape);
-    assert_eq!(parse_ty("(list int)"), Ty::list_of(int.clone()));
+    assert_eq!(
+        parse_ty("(list int)"),
+        Ty::list_of(int.clone()).union(Ty::of(Tag::Nil)),
+        "a `(list E)` may be empty"
+    );
 }
 
 #[test]
@@ -2004,4 +2011,242 @@ fn parse_ty(src: &str) -> Ty {
     let mut interp = crate::Interp::new();
     let form = crate::syntax::reader::read_one(&mut interp.heap, src).expect("parses");
     super::check::annot::parse_type(&interp.heap, form).expect("is a type")
+}
+
+// ---- recursive types (ADR-349): μX. …, unrolled coinductively ----
+
+/// `μX. nil | vector<X>` — a nested list of nothing, the smallest recursive shape.
+fn nested_vectors() -> Ty {
+    Ty::mu(Ty::of(Tag::Nil).union(Ty::vector_of(Ty::rec_ref())))
+}
+
+/// A JSON value: `μX. nil | bool | number | string | vector<X> | map<string, X>`.
+fn json_ty() -> Ty {
+    let base = Ty::of(Tag::Nil)
+        .union(Ty::of(Tag::Bool))
+        .union(Ty::NUMBER)
+        .union(Ty::of(Tag::Str));
+    Ty::mu(
+        base.union(Ty::vector_of(Ty::rec_ref()))
+            .union(Ty::map_of(Ty::of(Tag::Str), Ty::rec_ref())),
+    )
+}
+
+#[test]
+fn a_recursive_type_renders_and_reads_back_as_its_binder() {
+    let t = nested_vectors();
+    assert!(t.is_recursive());
+    assert_eq!(t.to_string(), "(rec X nil | vector<X>)");
+    assert_eq!(
+        t.to_source().as_deref(),
+        Some("(rec X (or nil (vector X)))")
+    );
+    assert_eq!(parse_ty("(rec X (or nil (vector X)))"), t);
+    assert_eq!(parse_ty("(rec json (or nil (vector json)))"), t);
+    // A body with no self-reference is not recursive.
+    assert!(!Ty::mu(Ty::of(Tag::Int)).is_recursive());
+    assert_eq!(parse_ty("(rec X int)"), Ty::of(Tag::Int));
+}
+
+#[test]
+fn a_recursive_type_unrolls_to_itself_one_level_down() {
+    let t = nested_vectors();
+    let once = t.unroll();
+    assert!(!once.is_recursive());
+    // The element of the unrolling IS the recursive type, not a placeholder.
+    let elem = once.clone().intersect(Ty::of(Tag::Vector)).elem_ty();
+    assert_eq!(elem, Some(t.clone()), "{once}");
+    // …and the accessors read through the binder the same way.
+    assert_eq!(
+        t.clone().intersect(Ty::of(Tag::Vector)).elem_ty(),
+        Some(t.clone())
+    );
+    let json = json_ty();
+    let (k, v) = json
+        .clone()
+        .intersect(Ty::of(Tag::Map))
+        .map_kv()
+        .expect("a map");
+    assert_eq!(k, Ty::of(Tag::Str));
+    assert_eq!(v, json);
+}
+
+#[test]
+fn recursive_subtyping_is_coinductive() {
+    let t = nested_vectors();
+    // Reflexive, and equal to its own unrolling in both directions.
+    assert!(t.is_subtype(&t));
+    assert!(t.unroll().is_subtype(&t));
+    assert!(t.is_subtype(&t.unroll()));
+    // Inside a wider recursive type, and not inside a narrower one.
+    let wider = Ty::mu(
+        Ty::of(Tag::Nil)
+            .union(Ty::of(Tag::Int))
+            .union(Ty::vector_of(Ty::rec_ref())),
+    );
+    assert!(t.is_subtype(&wider));
+    assert!(!wider.is_subtype(&t));
+    // A finite value of the shape is inside it; one that is not is not.
+    let two_deep = Ty::vector_of(Ty::vector_of(Ty::of(Tag::Nil)));
+    assert!(two_deep.is_subtype(&t), "{two_deep} ⊆ {t}");
+    assert!(!Ty::vector_of(Ty::of(Tag::Int)).is_subtype(&t));
+    // Disjointness through the binder: a string shares nothing with it, an int
+    // shares nothing either, a vector may.
+    assert!(t.is_disjoint(&Ty::of(Tag::Str)));
+    assert!(!t.is_disjoint(&Ty::of(Tag::Vector)));
+    assert!(!json_ty().is_disjoint(&Ty::map_of(Ty::of(Tag::Str), Ty::of(Tag::Int))));
+    // A dangling self-reference is an unknown set: inside nothing but `any`, disjoint
+    // from nothing, and it absorbs nothing in a union.
+    let dangling = Ty::rec_ref();
+    assert!(dangling.is_subtype(&Ty::ANY));
+    assert!(!dangling.is_subtype(&Ty::of(Tag::Int)));
+    assert!(!Ty::of(Tag::Int).is_subtype(&dangling));
+    assert!(!dangling.is_disjoint(&Ty::of(Tag::Int)));
+    let kept = dangling.clone().union(Ty::of(Tag::Int));
+    assert!(Ty::of(Tag::Int).is_subtype(&kept) && dangling.is_subtype(&kept));
+}
+
+#[test]
+fn a_fixpoint_ascent_folds_into_a_recursive_type_and_confirms_it() {
+    // The rounds a JSON decoder's return climbs: F(⊥), F(F(⊥)), … — each nesting the
+    // last as its vectors' element. Folding the second into the first gives the
+    // candidate; the round after, computed ON the candidate, folds back to it.
+    let base = Ty::of(Tag::Nil).union(Ty::NUMBER);
+    let step = |x: &Ty| base.clone().union(Ty::vector_of(x.clone()));
+    let t1 = step(&Ty::NEVER);
+    let t2 = step(&t1);
+    assert!(
+        Ty::fold_recursive(&Ty::NEVER, &t1).is_none(),
+        "a flat previous folds nothing"
+    );
+    let candidate = Ty::fold_recursive(&t1, &t2).expect("t1 nests inside t2");
+    assert_eq!(candidate.to_string(), "(rec X nil | number | vector<X>)");
+    let t3 = step(&candidate);
+    assert_eq!(
+        Ty::fold_recursive(&candidate, &t3).as_ref(),
+        Some(&candidate),
+        "the round on the candidate folds back to it: a post-fixpoint"
+    );
+    // Every finite round is inside the candidate (it is above the least fixpoint).
+    assert!(t1.is_subtype(&candidate) && t2.is_subtype(&candidate) && t3.is_subtype(&candidate));
+    // Unrelated growth does not fold: `t1` absent from a value.
+    assert!(Ty::fold_recursive(&t1, &Ty::vector_of(Ty::of(Tag::Int))).is_none());
+}
+
+#[test]
+fn set_operations_on_a_recursive_type_go_through_its_unrolling() {
+    let t = nested_vectors();
+    // Union with a flat type keeps the binder: the references name the union, a
+    // superset, which is sound and here exact.
+    let with_int = t.clone().union(Ty::of(Tag::Int));
+    assert!(with_int.is_recursive());
+    assert!(t.is_subtype(&with_int) && Ty::of(Tag::Int).is_subtype(&with_int));
+    // Intersection narrows by the guard: `(vector? x)` on the recursive type is the
+    // vector arm, whose elements are the type again.
+    let narrowed = t.clone().intersect(Ty::of(Tag::Vector));
+    assert!(!narrowed.is_recursive());
+    assert_eq!(narrowed.elem_ty(), Some(t.clone()));
+    // Negation excludes it, and the difference of the type with its vector arm is nil.
+    assert!(t.is_disjoint(&t.clone().negate()));
+    assert_eq!(t.clone().difference(Ty::of(Tag::Vector)), Ty::of(Tag::Nil));
+    // Widening leaves a recursive type alone — it is finite already.
+    assert_eq!(t.widened_below(0), t);
+    // Equality and hashing see the binder.
+    assert_ne!(t, t.body_for_display());
+}
+
+// ---- intervals: an int's range, a countable's length (ADR-350) ----
+
+#[test]
+fn an_int_interval_is_a_refinement_of_the_int_member() {
+    let non_negative = Ty::int_in(Range::at_least(0));
+    assert_eq!(non_negative.to_string(), "int[0..]");
+    assert!(non_negative.is_subtype(&Ty::of(Tag::Int)));
+    assert!(!Ty::of(Tag::Int).is_subtype(&non_negative));
+    // A literal is a point: inside the interval, and a point interval IS a literal.
+    assert!(Ty::int_lit(3).is_subtype(&non_negative));
+    assert!(!Ty::int_lit(-1).is_subtype(&non_negative));
+    assert_eq!(Ty::int_in(Range::point(3)), Ty::int_lit(3));
+    // Meet, hull, disjointness.
+    let small = Ty::int_in(Range::at_most(5));
+    let both = non_negative.clone().intersect(small.clone());
+    assert_eq!(both.to_string(), "int[0..5]");
+    assert_eq!(both.int_range(), Some(Range::new(Some(0), Some(5))));
+    assert!(Ty::int_in(Range::at_least(6)).is_disjoint(&small));
+    assert!(Ty::int_in(Range::at_least(6))
+        .intersect(small.clone())
+        .is_never());
+    let hull = Ty::int_lit(0).union(Ty::int_in(Range::at_least(5)));
+    assert_eq!(hull.to_string(), "int[0..]");
+    // A literal set is filtered by an interval it meets.
+    let filtered = Ty::int_lit(3)
+        .union(Ty::int_lit(5))
+        .union(Ty::int_lit(7))
+        .intersect(Ty::int_in(Range::new(Some(4), Some(10))));
+    assert_eq!(filtered.to_string(), "5 | 7");
+    // Other members are untouched: an interval guard says nothing of a float.
+    let guarded = Ty::ANY
+        .difference(Ty::of(Tag::Int))
+        .union(Ty::int_in(Range::at_most(4)));
+    assert!(Ty::of(Tag::Float).is_subtype(&guarded));
+    assert!(!Ty::int_lit(5).is_subtype(&guarded));
+    assert!(Ty::int_lit(4).is_subtype(&guarded));
+    // The grammar reads it back.
+    assert_eq!(parse_ty("(int 0 _)"), non_negative);
+    assert_eq!(non_negative.to_source().as_deref(), Some("(int 0 _)"));
+}
+
+#[test]
+fn a_length_is_a_refinement_of_the_countable_members() {
+    let three = Ty::vector_of(Ty::of(Tag::Int)).with_len(Range::point(3));
+    assert_eq!(three.to_string(), "vector<int>[3]");
+    assert!(three.is_subtype(&Ty::vector_of(Ty::of(Tag::Int))));
+    assert!(!Ty::vector_of(Ty::of(Tag::Int)).is_subtype(&three));
+    assert_eq!(three.count_range(), Some(Range::point(3)));
+    // A tuple is its arity; a list is at least one; `nil` counts 0.
+    assert_eq!(
+        Ty::tuple_of(vec![Ty::of(Tag::Int), Ty::of(Tag::Str)]).count_range(),
+        Some(Range::point(2))
+    );
+    assert_eq!(
+        Ty::list_of(Ty::of(Tag::Int)).count_range(),
+        Some(Range::at_least(1))
+    );
+    assert_eq!(
+        Ty::LIST.count_range(),
+        Some(Range::at_least(0)),
+        "nil | pair counts 0 or more"
+    );
+    // A length of 0 is no list: `with_len` drops the pair member.
+    let empty = Ty::LIST.with_len(Range::point(0));
+    assert_eq!(empty, Ty::of(Tag::Nil));
+    // Two lengths that do not meet are disjoint; the meet narrows.
+    let two = Ty::vector_of(Ty::of(Tag::Int)).with_len(Range::point(2));
+    assert!(two.is_disjoint(&three));
+    let at_least_two = Ty::vector_of(Ty::of(Tag::Int)).with_len(Range::at_least(2));
+    assert_eq!(at_least_two.clone().intersect(three.clone()), three);
+    // Nothing else is touched: a length says nothing of an int member.
+    let mixed = Ty::of(Tag::Int)
+        .union(Ty::of(Tag::Vector))
+        .with_len(Range::at_least(1));
+    assert!(Ty::int_lit(0).is_subtype(&mixed));
+    assert_eq!(mixed.to_string(), "int | vector[1..]");
+    assert_eq!(parse_ty("(len (vector int) 3 3)"), three);
+}
+
+#[test]
+fn an_interval_widens_to_its_infinity_when_it_moves() {
+    let prev = Ty::int_in(Range::new(Some(0), Some(1)));
+    let next = Ty::int_in(Range::new(Some(0), Some(2)));
+    assert_eq!(next.widen_intervals_against(&prev).to_string(), "int[0..]");
+    // A stationary interval is left alone; so is one nested in a matching shape.
+    assert_eq!(next.widen_intervals_against(&next), next);
+    let nested_prev = Ty::vector_of(prev.clone()).with_len(Range::point(1));
+    let nested_next = Ty::vector_of(next.clone()).with_len(Range::new(Some(1), Some(2)));
+    assert_eq!(
+        nested_next
+            .widen_intervals_against(&nested_prev)
+            .to_string(),
+        "vector<int[0..]>[1..]"
+    );
 }

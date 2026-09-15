@@ -14,7 +14,7 @@
 use crate::core::heap::Heap;
 use crate::core::keywords as kw;
 use crate::core::value::{self, Symbol, Tag, Value};
-use crate::types::Ty;
+use crate::types::{Range, Ty};
 
 use super::ctx::{Ctx, PathKey};
 use super::infer::expr_ty;
@@ -96,6 +96,20 @@ pub(super) struct Guard {
     pub(super) ty: Ty,
     pub(super) then_only: bool,
     pub(super) else_only: bool,
+    /// What a FALSY test proves, stated positively, when that is sharper than `¬ty` —
+    /// `(empty? xs)` false is "a countable of length at least 1", which the complement
+    /// of the then-type only says as a subtraction no length reader can see (ADR-350).
+    /// `None`: the else-branch narrows by `ty.negate()`, as ever.
+    pub(super) else_ty: Option<Ty>,
+}
+
+impl Guard {
+    /// The type the else-branch narrows `sym` to.
+    pub(super) fn else_type(&self) -> Ty {
+        self.else_ty
+            .clone()
+            .unwrap_or_else(|| self.ty.clone().negate())
+    }
 }
 
 /// A type guard over a **compound access path** — a keyword-`get` and/or fixed
@@ -107,6 +121,8 @@ pub(super) struct Guard {
 pub(super) struct PathGuard {
     pub(super) base: Symbol,
     pub(super) keys: Vec<PathKey>,
+    /// The guarded access form itself — `(nth a 0)` — whose own type seeds the narrowing.
+    pub(super) subject: Value,
     pub(super) ty: Ty,
     pub(super) then_only: bool,
 }
@@ -242,6 +258,35 @@ fn path_guard_assertion_inner(heap: &Heap, test: Value) -> Option<PathGuard> {
             ..inner
         });
     }
+    // `(= <get-path> lit)` — an equality test on a path against an exact literal
+    // (ADR-350): biconditional exactly as the variable form is, and for the same reason
+    // — the literal's complement is representable. This is how a tagged-tuple dispatch
+    // `(if (= (nth a 0) :error) … (nth a 1))` narrows `a`'s first position in BOTH
+    // branches, so the positional read in the else branch sees only the `:ok` shape.
+    if items.len() == 3 && (head_name == kw::EQ_PRIM || head_name == "=") {
+        let is_path = |form: Value| path_of(heap, form).is_some_and(|(_, keys)| !keys.is_empty());
+        let (path, lit) = if is_path(items[1]) {
+            (items[1], items[2])
+        } else {
+            (items[2], items[1])
+        };
+        let ty = match lit {
+            Value::Keyword(_) | Value::Int(_) | Value::Bool(_) | Value::Nil => Ty::of_value(lit),
+            Value::Str(id) => Ty::str_lit(&heap.string(id)),
+            _ => return None,
+        };
+        let (base, keys) = path_of(heap, path)?;
+        if keys.is_empty() {
+            return None;
+        }
+        return Some(PathGuard {
+            base,
+            keys,
+            subject: path,
+            ty,
+            then_only: false,
+        });
+    }
     // `(pred? <get-path>)` — a type predicate over a (possibly nested) field path.
     if items.len() != 2 {
         return None;
@@ -254,6 +299,7 @@ fn path_guard_assertion_inner(heap: &Heap, test: Value) -> Option<PathGuard> {
     Some(PathGuard {
         base,
         keys,
+        subject: items[1],
         ty,
         then_only: false,
     })
@@ -274,14 +320,17 @@ pub(super) fn guard_assertion(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Gua
 
 fn guard_assertion_inner(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Guard> {
     if let Value::Sym(s) = test {
-        // A let-stored guard alias — recorded only for biconditional guards
-        // (see `check_let`), so it narrows the else-branch too.
-        if let Some((sym, ty)) = ctx.guard(s) {
+        // A let-stored guard alias — recorded for biconditional guards (see `check_let`),
+        // so it narrows the else-branch too. A `when`-shaped alias is NOT the guard here:
+        // its value is data (`(let (src (when k (lookup k))) …)`), so the test narrows
+        // `src` itself by truthiness below, and `and_conjunct_guards` adds `k` beside it.
+        if let Some((sym, ty, else_ty, false)) = ctx.guard(s) {
             return Some(Guard {
                 sym,
                 ty,
                 then_only: false,
                 else_only: false,
+                else_ty,
             });
         }
         // **Truthiness.** A bare local as the test is itself a guard: `nil`, `false`
@@ -313,6 +362,7 @@ fn guard_assertion_inner(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Guard> {
                 ty: Ty::truthy(),
                 then_only: false,
                 else_only: false,
+                else_ty: None,
             });
         }
         return None;
@@ -329,11 +379,14 @@ fn guard_assertion_inner(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Guard> {
         let inner = guard_assertion(heap, items[1], ctx)?;
         // Negation swaps the one-sided flags: the then-branch of `(not G)` is the
         // else-branch of `G` and vice versa (see `Guard`).
+        // …and an explicit else-type becomes the then-type, the then-type the else-type.
+        let negated = inner.else_type();
         return Some(Guard {
             sym: inner.sym,
-            ty: inner.ty.negate(),
+            ty: negated,
             then_only: inner.else_only,
             else_only: inner.then_only,
+            else_ty: Some(inner.ty),
         });
     }
     // `(%eq sym literal)` / `(%eq literal sym)` — equality against a literal
@@ -371,6 +424,7 @@ fn guard_assertion_inner(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Guard> {
                 ty,
                 then_only: !exact,
                 else_only: false,
+                else_ty: None,
             });
         }
         return None;
@@ -398,12 +452,24 @@ fn guard_assertion_inner(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Guard> {
     // is not `nil` when false — the else-only guard, and the idiom every list walk is
     // built on: `(if (empty? xs) acc (… (first xs) …))`.
     if head_name == "empty?" && !ctx.is_lexical_local(head) && !ctx.is_file_global(head) {
+        // BICONDITIONAL by length (ADR-350): true, `x` is `nil` or a countable of length
+        // 0 (no `pair` — a list of length 0 is `nil`); false, `x` is a countable of
+        // length at least 1, or something that is not `nil` and not countable at all.
         return match items[1] {
             Value::Sym(s) => Some(Guard {
                 sym: s,
-                ty: Ty::of(Tag::Nil),
+                ty: Ty::of(Tag::Nil).union(
+                    Ty::ANY
+                        .difference(Ty::of(Tag::Nil))
+                        .with_len(Range::point(0)),
+                ),
                 then_only: false,
-                else_only: true,
+                else_only: false,
+                else_ty: Some(
+                    Ty::ANY
+                        .difference(Ty::of(Tag::Nil))
+                        .with_len(Range::at_least(1)),
+                ),
             }),
             _ => None,
         };
@@ -415,6 +481,7 @@ fn guard_assertion_inner(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Guard> {
             ty,
             then_only: false,
             else_only: false,
+            else_ty: None,
         }),
         _ => None,
     }
@@ -530,7 +597,7 @@ pub(super) fn branch_scopes(heap: &Heap, test: Value, ctx: &Ctx) -> (Ctx, Ctx) {
             let else_ctx = if g.then_only {
                 ctx.clone()
             } else {
-                ctx.narrow(g.sym, g.ty.negate())
+                ctx.narrow(g.sym, g.else_type())
             };
             (then_ctx, else_ctx)
         }
@@ -552,10 +619,7 @@ pub(super) fn branch_scopes(heap: &Heap, test: Value, ctx: &Ctx) -> (Ctx, Ctx) {
         // this the else branch reads `¬failure`, a true statement and a wider one than the
         // `number` the expression structurally has, and the inferred return says
         // `(not failure)` where it should say `number`.
-        let guarded = list_items(heap, test)
-            .and_then(|items| items.get(1).copied())
-            .and_then(|e| super::infer::expr_ty(heap, e, ctx))
-            .unwrap_or(Ty::ANY);
+        let guarded = super::infer::expr_ty(heap, pg.subject, ctx).unwrap_or(Ty::ANY);
         then_ctx = then_ctx.narrow_path(
             pg.base,
             pg.keys.clone(),
@@ -569,12 +633,14 @@ pub(super) fn branch_scopes(heap: &Heap, test: Value, ctx: &Ctx) -> (Ctx, Ctx) {
         then_ctx = then_ctx.narrow(g.sym, g.ty);
     }
     for g in or_disjunct_guards(heap, test, ctx) {
-        else_ctx = else_ctx.narrow(g.sym, g.ty.negate());
+        else_ctx = else_ctx.narrow(g.sym, g.else_type());
     }
     if let Some((sym, union)) = or_same_var_narrowing(heap, test, ctx) {
         then_ctx = then_ctx.narrow(sym, union);
     }
-    (then_ctx, else_ctx)
+    // …and what a COMPARISON proves: an int's interval, a collection's length, an index
+    // bound (ADR-350).
+    apply_comparison_facts(heap, test, ctx, then_ctx, else_ctx)
 }
 
 /// Every conjunct guard of an `and`-expansion test — a truthy `and` proves **all**
@@ -583,6 +649,20 @@ pub(super) fn branch_scopes(heap: &Heap, test: Value, ctx: &Ctx) -> (Ctx, Ctx) {
 /// handled by [`guard_assertion`], adds nothing here). Sound to apply all to the then-ctx.
 pub(super) fn and_conjunct_guards(heap: &Heap, test: Value, ctx: &Ctx) -> Vec<Guard> {
     let mut out = Vec::new();
+    // A bare local bound `when`-shaped — `(let (src (when k E)) (if src …))` — proves its
+    // condition `k` truthy in the then-branch, beside its own truthiness (which
+    // `guard_assertion` states). Then-only: a falsy `src` may be `E`'s own nil.
+    if let Value::Sym(s) = test {
+        if let Some((k, ty, _, true)) = ctx.guard(s) {
+            out.push(Guard {
+                sym: k,
+                ty,
+                then_only: true,
+                else_only: false,
+                else_ty: None,
+            });
+        }
+    }
     let mut cur = test;
     let mut matched = false;
     loop {
@@ -683,6 +763,7 @@ pub(super) fn or_disjunct_guards(heap: &Heap, test: Value, ctx: &Ctx) -> Vec<Gua
                 if let Some(g) = guard_assertion(heap, cond, ctx).filter(|g| !g.then_only) {
                     out.push(Guard {
                         else_only: true,
+                        else_ty: None,
                         ..g
                     });
                 }
@@ -693,6 +774,7 @@ pub(super) fn or_disjunct_guards(heap: &Heap, test: Value, ctx: &Ctx) -> Vec<Gua
                     if let Some(g) = guard_assertion(heap, cur, ctx).filter(|g| !g.then_only) {
                         out.push(Guard {
                             else_only: true,
+                            else_ty: None,
                             ..g
                         });
                     }
@@ -969,4 +1051,273 @@ pub(super) fn find_redundant_clause(
         }
         form = items[3];
     }
+}
+
+// ---- comparison facts: intervals, lengths and index bounds (ADR-350) ------------------
+
+/// One side of a comparison the interval rules can read: a local (narrowed by its int
+/// interval), the count of a local (`(count xs)` / `(string/length xs)` — narrowed by its
+/// length), or a literal int.
+enum CmpSide {
+    Local(Symbol),
+    Count(Symbol),
+    Lit(i64),
+}
+
+/// The facts a comparison establishes on each branch: each is `(symbol, type)` to narrow
+/// by (the type is `int[…] ∪ ¬int` for a local, a length refinement for a collection), and
+/// the index bounds `(i, xs)` — `i < (count xs)` — the branch establishes.
+#[derive(Default)]
+pub(super) struct CmpFacts {
+    pub(super) then_narrow: Vec<(Symbol, Ty)>,
+    pub(super) else_narrow: Vec<(Symbol, Ty)>,
+    pub(super) then_index: Vec<(Symbol, Symbol)>,
+    pub(super) else_index: Vec<(Symbol, Symbol)>,
+}
+
+impl CmpFacts {
+    fn swapped(self) -> CmpFacts {
+        CmpFacts {
+            then_narrow: self.else_narrow,
+            else_narrow: self.then_narrow,
+            then_index: self.else_index,
+            else_index: self.then_index,
+        }
+    }
+    fn extend_then(&mut self, other: CmpFacts) {
+        self.then_narrow.extend(other.then_narrow);
+        self.then_index.extend(other.then_index);
+    }
+    fn extend_else(&mut self, other: CmpFacts) {
+        self.else_narrow.extend(other.else_narrow);
+        self.else_index.extend(other.else_index);
+    }
+    fn is_empty(&self) -> bool {
+        self.then_narrow.is_empty()
+            && self.else_narrow.is_empty()
+            && self.then_index.is_empty()
+            && self.else_index.is_empty()
+    }
+}
+
+/// `int` within `r`, or anything that is not an int at all — what a comparison proves of
+/// a local: nothing of a float or a comparable record, and the interval of an int.
+fn int_guard_ty(r: Range) -> Ty {
+    Ty::ANY.difference(Ty::of(Tag::Int)).union(Ty::int_in(r))
+}
+
+/// Every countable value of length within `r` — and `nil` only when `r` admits 0, since
+/// the empty list counts 0 and nothing else does.
+fn len_guard_ty(r: Range) -> Ty {
+    let base = if Range::subset(Range::point(0), r) {
+        Ty::ANY
+    } else {
+        Ty::ANY.difference(Ty::of(Tag::Nil))
+    };
+    base.with_len(r)
+}
+
+fn cmp_side(heap: &Heap, form: Value, ctx: &Ctx) -> Option<CmpSide> {
+    match form {
+        Value::Int(n) => Some(CmpSide::Lit(n)),
+        Value::Sym(s) if ctx.is_lexical_local(s) => Some(CmpSide::Local(s)),
+        Value::Pair(_) => {
+            let items = list_items(heap, form)?;
+            let [Value::Sym(head), Value::Sym(target)] = items[..] else {
+                return None;
+            };
+            let counts = value::symbol_is(head, "count")
+                || value::symbol_is(head, "string/length")
+                || value::symbol_is(head, "vector-length");
+            (counts && !ctx.is_lexical_local(head) && ctx.is_lexical_local(target))
+                .then_some(CmpSide::Count(target))
+        }
+        _ => None,
+    }
+}
+
+/// The interval a side's value lies in — a local's int interval (every int, when its
+/// type is not known), a count's length interval, a literal's point.
+fn side_range(side: &CmpSide, ctx: &Ctx) -> Range {
+    match side {
+        CmpSide::Lit(n) => Range::point(*n),
+        CmpSide::Local(s) => ctx
+            .get(*s)
+            .and_then(|t| t.int_range())
+            .unwrap_or(Range::ALL),
+        CmpSide::Count(xs) => ctx
+            .get(*xs)
+            .and_then(|t| t.count_range())
+            .unwrap_or(Range::at_least(0)),
+    }
+}
+
+/// The narrowing that puts a side's value within `r`: a local's int member, a count's
+/// collection's length. A literal narrows nothing.
+fn side_narrowing(side: &CmpSide, r: Range) -> Option<(Symbol, Ty)> {
+    match side {
+        CmpSide::Lit(_) => None,
+        CmpSide::Local(s) => Some((*s, int_guard_ty(r))),
+        CmpSide::Count(xs) => Some((*xs, len_guard_ty(r))),
+    }
+}
+
+/// The collection a side is the count of: `(count xs)` itself, or a local `n` a `let`
+/// bound to one (`Ctx::count_alias`).
+fn counted_collection(side: &CmpSide, ctx: &Ctx) -> Option<Symbol> {
+    match side {
+        CmpSide::Count(xs) => Some(*xs),
+        CmpSide::Local(n) => ctx.count_alias(*n),
+        CmpSide::Lit(_) => None,
+    }
+}
+
+/// The facts of one comparison `(op L R)` — `<`, `<=`, `>`, `>=` in either spelling, and
+/// `=` over a count. Strict and non-strict, each way round:
+/// - then-branch of `L < R`: `L ≤ hi(R) − 1`, `R ≥ lo(L) + 1`, and `L` is an index of the
+///   collection `R` counts; else-branch: `L ≥ lo(R)`, `R ≤ hi(L)`.
+/// - `L <= R`: then `L ≤ hi(R)`, `R ≥ lo(L)`; else `L ≥ lo(R) + 1`, `R ≤ hi(L) − 1`, and `L`
+///   is an index of what `R` counts is NOT established (equality is allowed).
+/// A `>`/`>=` is the same with the sides swapped.
+fn comparison_facts(heap: &Heap, test: Value, ctx: &Ctx) -> Option<CmpFacts> {
+    let items = list_items(heap, test)?;
+    if items.len() != 3 {
+        return None;
+    }
+    let Value::Sym(head) = items[0] else {
+        return None;
+    };
+    if ctx.is_lexical_local(head) {
+        return None;
+    }
+    let name = value::symbol_name(head);
+    let (swap, strict, equality) = match name.as_str() {
+        "<" | "%lt" => (false, true, false),
+        "<=" | "%le" => (false, false, false),
+        ">" | "%gt" => (true, true, false),
+        ">=" | "%ge" => (true, false, false),
+        "=" | "%eq" => (false, false, true),
+        _ => return None,
+    };
+    let (a, b) = (
+        cmp_side(heap, items[1], ctx)?,
+        cmp_side(heap, items[2], ctx)?,
+    );
+    let (l, r) = if swap { (b, a) } else { (a, b) };
+    let mut facts = CmpFacts::default();
+    if equality {
+        // `(= (count xs) 3)`: the length is exactly the other side's value. (Two locals'
+        // ints are the literal guard's business, and its else-branch has no interval.)
+        let (rl, rr) = (side_range(&l, ctx), side_range(&r, ctx));
+        if let Some(meet) = Range::meet(rl, rr) {
+            facts.then_narrow.extend(side_narrowing(&l, meet));
+            facts.then_narrow.extend(side_narrowing(&r, meet));
+        }
+        return (!facts.is_empty()).then_some(facts);
+    }
+    let (rl, rr) = (side_range(&l, ctx), side_range(&r, ctx));
+    let step = i64::from(strict);
+    // then: L < R (or ≤)
+    if let Some(hi) = rr.hi {
+        facts
+            .then_narrow
+            .extend(side_narrowing(&l, Range::at_most(hi - step)));
+    }
+    if let Some(lo) = rl.lo {
+        facts
+            .then_narrow
+            .extend(side_narrowing(&r, Range::at_least(lo + step)));
+    }
+    // else: L ≥ R (or >)
+    let back = 1 - step;
+    if let Some(lo) = rr.lo {
+        facts
+            .else_narrow
+            .extend(side_narrowing(&l, Range::at_least(lo + back)));
+    }
+    if let Some(hi) = rl.hi {
+        facts
+            .else_narrow
+            .extend(side_narrowing(&r, Range::at_most(hi - back)));
+    }
+    // The relational fact: `i < (count xs)` — a strict bound of a local by a count.
+    if strict {
+        if let (CmpSide::Local(i), Some(xs)) = (&l, counted_collection(&r, ctx)) {
+            facts.then_index.push((*i, xs));
+        }
+    } else if let (Some(xs), CmpSide::Local(i)) = (counted_collection(&l, ctx), &r) {
+        // `(<= (count xs) i)` false ⇒ `i < (count xs)`.
+        facts.else_index.push((*i, xs));
+    }
+    (!facts.is_empty()).then_some(facts)
+}
+
+/// The comparison facts of a whole test: a comparison, `(not …)` of one (swapped), every
+/// conjunct of an `and`-expansion (then-side only: a falsy `and` proves nothing of its
+/// conjuncts), every disjunct of an `or`-expansion (else-side only).
+pub(super) fn test_comparison_facts(heap: &Heap, test: Value, ctx: &Ctx) -> CmpFacts {
+    // Deep-form stack safety, as `guard_assertion`.
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        test_comparison_facts_inner(heap, test, ctx)
+    })
+}
+
+fn test_comparison_facts_inner(heap: &Heap, test: Value, ctx: &Ctx) -> CmpFacts {
+    if let Some(facts) = comparison_facts(heap, test, ctx) {
+        return facts;
+    }
+    let Some(items) = list_items(heap, test) else {
+        return CmpFacts::default();
+    };
+    if let Some(&Value::Sym(head)) = items.first() {
+        if items.len() == 2 && value::symbol_is(head, kw::NOT) {
+            return test_comparison_facts(heap, items[1], ctx).swapped();
+        }
+    }
+    let mut out = CmpFacts::default();
+    let mut cur = test;
+    let mut matched = false;
+    while let Some((cond, rest)) = chain_shape(heap, cur, true) {
+        matched = true;
+        out.extend_then(test_comparison_facts(heap, cond, ctx));
+        cur = rest;
+    }
+    if matched {
+        out.extend_then(test_comparison_facts(heap, cur, ctx));
+        return out;
+    }
+    let mut cur = test;
+    while let Some((cond, rest)) = chain_shape(heap, cur, false) {
+        matched = true;
+        out.extend_else(test_comparison_facts(heap, cond, ctx));
+        cur = rest;
+    }
+    if matched {
+        out.extend_else(test_comparison_facts(heap, cur, ctx));
+    }
+    out
+}
+
+/// Apply a test's comparison facts to the two branch scopes.
+pub(super) fn apply_comparison_facts(
+    heap: &Heap,
+    test: Value,
+    ctx: &Ctx,
+    mut then_ctx: Ctx,
+    mut else_ctx: Ctx,
+) -> (Ctx, Ctx) {
+    let facts = test_comparison_facts(heap, test, ctx);
+    for (sym, ty) in facts.then_narrow {
+        then_ctx = then_ctx.narrow(sym, ty);
+    }
+    for (sym, ty) in facts.else_narrow {
+        else_ctx = else_ctx.narrow(sym, ty);
+    }
+    for (i, xs) in facts.then_index {
+        then_ctx = then_ctx.add_index_bound(i, xs);
+    }
+    for (i, xs) in facts.else_index {
+        else_ctx = else_ctx.add_index_bound(i, xs);
+    }
+    (then_ctx, else_ctx)
 }
