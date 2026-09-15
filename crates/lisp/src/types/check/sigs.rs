@@ -472,6 +472,15 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
+/// Arm re-typings [`specialized_ret`] has spent since the last [`clear_sig_memo`] — i.e.
+/// on the file currently being checked. The memo makes a repeated question free, so this
+/// tracks the number of DISTINCT questions the file asked; a multiple of that is the
+/// KI-138 signature (2760 re-typings for 52 distinct questions), which
+/// `tests/check_specialization_cost.rs` bounds.
+pub(super) fn fuel_spent() -> u32 {
+    SPECIAL_FUEL.with(|f| MAX_SPECIAL_FUEL - f.get())
+}
+
 /// Reset the per-pass inference memo. `check_file` calls this at the start of each file so
 /// one file's inferred signatures never leak into the next — and, in the long-lived LSP,
 /// so an edit re-infers rather than serving a stale cached sig.
@@ -481,6 +490,10 @@ pub(super) fn clear_sig_memo() {
     SPECIAL_MEMO.with(|m| m.borrow_mut().clear());
     NO_ARMS.with(|m| m.borrow_mut().clear());
     SPECIAL_FUEL.with(|f| f.set(MAX_SPECIAL_FUEL));
+    // Only DELTAS of this are ever read, so the reset is not needed for correctness — it
+    // keeps a long-lived LSP process from ever reaching the saturating ceiling, where a
+    // delta would read zero and a refused `None` would look stable.
+    REFUSALS.with(|c| c.set(0));
     // The operator domains are a file's too (`set_operator_domains`); a fragment checked
     // after a file must derive its own from the registry, not read that file's.
     OPERATOR_DOMAINS.with(|m| *m.borrow_mut() = None);
@@ -492,6 +505,11 @@ thread_local! {
     /// [`INFERRING`] so the two do not compete for one depth budget. Same discipline:
     /// a refusal never constructs a guard (KI-87).
     static SPECIALIZING: RefCell<HashSet<Symbol>> = RefCell::new(HashSet::new());
+    /// Specialization questions [`SpecializeGuard`] has refused — a name already in flight,
+    /// or the depth cap. A refusal is a fact about WHERE the question was asked, not about
+    /// the question, so a `None` reached while one happened underneath is not a stable
+    /// answer and must not be memoized (KI-138's fix is bounded by this counter).
+    static REFUSALS: Cell<u32> = const { Cell::new(0) };
     /// Arm re-typings [`specialized_ret`] may still do in this file check — the bound on
     /// its total work. The memo makes a REPEATED question free, but a question refused
     /// by the guard (a name in flight, the depth cap) has no answer to memoize, and the
@@ -774,7 +792,10 @@ pub(super) fn specialized_ret(
     if !SPECIAL_FUEL.with(|f| f.get() > 0) {
         return None;
     }
-    let _guard = SpecializeGuard::enter(sym)?;
+    let Some(_guard) = SpecializeGuard::enter(sym) else {
+        REFUSALS.with(|c| c.set(c.get().saturating_add(1)));
+        return None;
+    };
     let Some((arms, stable)) = fixed_arms_of(heap, sym, ctx) else {
         // Nothing to re-type. For a builtin or an unknown name that is a fact about the
         // image; for a SAME-FILE global it is a fact about the moment — Pass 2.8 has not
@@ -832,11 +853,27 @@ pub(super) fn specialized_ret(
             sub = bind_head(heap, sub, h, input.clone());
         }
         // The body is a fresh question, not an operand of the call that asked it.
+        let refusals_before = REFUSALS.with(|c| c.get());
         let outer_nest = SPEC_ARG_NEST.with(|n| n.replace(0));
         // One untypeable arm makes the union an under-approximation — defer instead.
         let typed = super::infer::with_fresh_depth(|| expr_ty(heap, arm.tail, &sub));
         SPEC_ARG_NEST.with(|n| n.set(outer_nest));
-        let t = typed?;
+        let Some(t) = typed else {
+            // An untypeable arm makes the union an under-approximation, so the answer is
+            // `None` — but for a LOADED body that is an ANSWER, and one that cost a full
+            // body walk to reach. It has to be memoized under the same rule the bottom of
+            // this function uses, or it is re-asked at every call site and every enclosing
+            // level, each time re-walking the body: checking a one-line file that calls
+            // `supervisor/start` re-typed the prelude's `get` **1864 times for 52 distinct
+            // questions** and spent 470 ms doing it (KI-138). Returning through `?` here
+            // skipped the memo entirely. [`infer_sig`] holds the same discipline for the
+            // same reason (KI-13, ~400k body walks): one walk per distinct question, and a
+            // negative answer is an answer.
+            if stable && REFUSALS.with(|c| c.get()) == refusals_before {
+                memo_specialization(key, None);
+            }
+            return None;
+        };
         ret = Some(match ret {
             Some(a) => a.union(t),
             None => t,

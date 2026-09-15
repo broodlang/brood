@@ -1486,6 +1486,13 @@ pub fn check_located(heap: &Heap, form: Value) -> Vec<(Option<Pos>, String)> {
 /// A form whose macroexpansion fails (a malformed macro call) falls back to
 /// its un-expanded shape — the eval path will surface the same parse-time
 /// error later anyway, so the checker just stays quiet there.
+/// Arm re-typings the call-site specializer spent on the LAST file checked on this
+/// thread — the checker's own work meter, for a test that bounds it (KI-138). Reset at the
+/// start of every [`check_file`], so read it straight after one.
+pub fn specialization_fuel_spent() -> u32 {
+    sigs::fuel_spent()
+}
+
 pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)> {
     check_file_ext(heap, forms, &[])
 }
