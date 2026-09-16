@@ -10,15 +10,15 @@
 ;;   brood scripts/redundant-sigs.blsp -- std/*.blsp std/*/*.blsp   > redundant.txt
 ;;   brood scripts/redundant-sigs.blsp -- --remove redundant.txt
 ;;
-;; The first prints `path:line name sig` per redundant declaration; the second deletes
-;; them (whole lines) and re-derives each file, printing `MISMATCH` for a function whose
-;; inferred signature moved once its neighbours' sigs were gone — a sig that only LOOKED
-;; redundant because another one anchored it. Restore those by hand, then run the gates:
-;; a sig can also anchor a CALLER's verdict (`bytes/at` did — four return checks in the
-;; same file read `number` without it), which only `nest check --strict` sees.
-;;
-;; The prelude sweeps like any other file (21 went on 2026-09-16, every gate green) —
-;; the curated table and the frozen heap did not change what this equality proves.
+;; The first prints `path:line name sig` per candidate. The second removes them ONE AT A
+;; TIME, keeping each removal only when the file's `nest check --strict` count does not
+;; rise — because the same signature is necessary, not sufficient. A sig can be a CONTRACT
+;; on what callers hand over: `ed-reindent-line`'s `(buffer int -> buffer)` names the `int`
+;; a mode service returns, and its own inference reads the same arrow from the body's
+;; demands, yet without it `(+ bol target)` reads `number` at every caller. Eight such
+;; sigs across std and bedit survived the first sweep (2026-09-16) only because the gates
+;; ran afterwards; the tool measures the gate itself now. The prelude sweeps like any other
+;; file (21 went that day, every gate green).
 
 (defn- sig-spans (text)
   "`[start end name]` for every top-level-looking `(sig NAME …)` form in `text`: the
@@ -116,6 +116,28 @@ char range of the whole form (balanced parens from the `(sig`) and the declared 
                     end))
         (str (string/substring t 0 ls) (string/substring t after (string/length t)))))))
 
+(defn- strict-count (path)
+  "How many strict findings `nest check --strict` reports for `path` alone — the gate a
+removal must not move. A sig whose function infers identically without it can still be
+a CONTRACT: `ed-reindent-line`'s `(buffer int -> buffer)` names the `int` a mode service
+hands its caller, and without it `(+ bol target)` reads `number`. Only the gate sees that."
+  (let (r (%os-cmd "nest" ["check" "--strict" path]))
+    (count (seq/filter (string/split (str (:stdout r) "\n" (:stderr r)) "\n")
+             (fn (line) (includes? line "warning:"))))))
+
+(defn- remove-one-at-a-time (path spans baseline)
+  "Remove each span in turn, keeping a removal only when the file's strict count stays at
+`baseline`; returns `[removed kept]` counts. Last span first, so earlier offsets hold."
+  (fold (reverse (sort-by spans first))
+    [0 0]
+    (fn ([removed kept] span)
+      (let (text (file/slurp path)
+            candidate (remove-spans text (list span)))
+        (file/spit path candidate)
+        (if (<= (strict-count path) baseline)
+          [(inc removed) kept]
+          (do (file/spit path text) [removed (inc kept)]))))))
+
 (defn- remove-listed (listing)
   (let (lines (seq/filter (string/split (file/slurp listing) "\n") (fn (l) (not (= l ""))))
         by-file (fold lines
@@ -123,30 +145,16 @@ char range of the whole form (balanced parens from the `(sig`) and the declared 
                   (fn (acc l)
                     (let (path (first (string/split l ":"))
                           tail (string/substring l (inc (string/length path)) (string/length l))
-                          parts (string/split tail " ")
-                          name (nth parts 1 "")
-                          declared (string/join (rest (rest parts)) " "))
-                      (assoc acc path (cons [name declared] (get acc path '())))))))
+                          name (nth (string/split tail " ") 1 ""))
+                      (assoc acc path (cons name (get acc path '())))))))
     (doseq (kv (%map-pairs by-file))
       (let ([path wanted] kv
-            text (file/slurp path)
-            names (into #{} (map wanted first))
-            spans (seq/filter (sig-spans text) (fn ([_ _ name]) (contains? names name)))
-            new-text (remove-spans text spans))
-        (file/spit path new-text)
-        (let (after (reflect/source-signatures new-text))
-          (doseq ([name declared] wanted)
-            (let (e (entry-for after name))
-              (when (or (nil? e) (not (= (:sig e) declared)))
-                (io/puts (str "MISMATCH "
-                           path
-                           " "
-                           name
-                           " declared "
-                           declared
-                           " now "
-                           (if e (:sig e) "<none>")))))))
-        (io/puts (str path ": removed " (count spans) " of " (count wanted)))))))
+            names (into #{} wanted)
+            spans (seq/filter (sig-spans (file/slurp path))
+                    (fn ([_ _ name]) (contains? names name)))
+            baseline (strict-count path)
+            [removed kept] (remove-one-at-a-time path spans baseline))
+        (io/puts (str path ": removed " removed ", kept " kept " (a contract the gate reads)"))))))
 
 (let (args (system/script-args))
   (when (= (first args) "--remove")

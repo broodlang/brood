@@ -13657,3 +13657,12 @@ anchored four RETURN checks in the same file: without it `bytes/int` and sibling
 Both gates, the sig-adoption, doc-example, doctest, audit and contract files, and bedit's
 strict zero all hold. The prelude went next — 21 more, every gate green; "read through the
 curated table, so equality proves less" was a guess, and the gates were the measurement.
+
+**The kept sigs were contracts, not a checker gap.** Reading `ed-reindent-line`'s callers
+settled it: `target` comes from `(svc text bol)`, an untyped mode service, so the derivation
+honestly says `any`, `(+ bol target)` is `number`, and the `int` on the sig is the leaf that
+knows what the service returns — the function's own inference reads the same arrow from
+its body's DEMANDS, which is why "same signature" flagged it. The tool's criterion was the
+defect: it now removes one sig at a time and keeps each removal only when the file's
+`nest check --strict` count does not rise (sabotage-verified: it keeps both bedit
+contracts). The eight survivors of the first sweep are what that rule finds.
