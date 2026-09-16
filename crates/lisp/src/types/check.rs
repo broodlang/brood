@@ -1977,6 +1977,34 @@ fn check_forms(
             file_ns_name.clone(),
             import_scope,
         );
+        // A `deftype` whose shape exceeds the lattice's node budget (`MAX_TY_NODES`) is
+        // widened to its bare tags by the constructors — SILENTLY, which turned every
+        // `model`-typed read in bedit to `number` the day its `model` record crossed the
+        // line by one optional field. A written shape that came back with no fields (or
+        // no positions) is that case exactly; say so at the declaration.
+        for &form in &expanded {
+            let mut aliases = HashMap::new();
+            protocol::collect_register_types_into(heap, form, None, &mut aliases);
+            for (name, ty_form) in aliases {
+                let Some(ty) = annot::parse_type(heap, ty_form) else {
+                    continue;
+                };
+                let declares_shape = list_items(heap, ty_form)
+                    .and_then(|items| items.first().copied())
+                    .is_some_and(|h| matches!(h, Value::Sym(s) if value::symbol_is(s, "record") || value::symbol_is(s, "tuple")));
+                if declares_shape && ty.record_fields().is_none() && ty.positional_elems().is_none()
+                {
+                    out.push((
+                        heap.form_pos_only(form),
+                        format!(
+                            "deftype {name}: the shape exceeds the checker's budget of {} nodes and is read as a bare `{}` — every field is unrefined; split it into named parts",
+                            crate::types::MAX_TY_NODES,
+                            ty
+                        ),
+                    ));
+                }
+            }
+        }
         // ADR-299: the operator sugar's domains — `number` plus the records `num/*` /
         // `compare-to` have methods for — from this file's `defmethod`s + the registry.
         sigs::set_operator_domains(protocol::operator_domains(&protocol::build_multi_info(

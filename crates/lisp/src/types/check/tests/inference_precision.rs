@@ -217,8 +217,8 @@ fn precision_rules_give_the_exact_type_where_it_is_provable() {
         // a quoted list is data with its elements in view — each in its position
         ("'(1 2)", "(list 1, 2)"),
         ("(vec '(1 2))", "vector<1 | 2>"),
-        // a range is a range of integers
-        ("(range 5)", "list<int>"),
+        // a range is a range of integers, carrying its bounds' interval (never reaching 5)
+        ("(range 5)", "list<int[0..4]>"),
         // a numeric operator as a callback / a fold / spread — the same closure rules
         // a two-element vector literal is a TUPLE, whose arity is part of its type — so
         // it is provably non-empty and `map` keeps that (the `nil` arm is the empty case)

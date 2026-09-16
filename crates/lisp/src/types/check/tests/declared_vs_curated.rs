@@ -700,7 +700,7 @@ fn length_preserving_combinators_over_a_non_empty_list_drop_the_nil() {
     // (a quoted list is a positional shape, so its first and last are exact)
     assert_eq!(ty_str("(first '(1 2))"), "1");
     assert_eq!(ty_str("(last '(1 2))"), "2");
-    assert_eq!(ty_str("(range 5)"), "list<int>");
+    assert_eq!(ty_str("(range 5)"), "list<int[0..4]>");
     assert_eq!(ty_str("(into '(1) '(2))"), "list<1 | 2>");
     // …and what may be empty keeps the nil
     assert!(ty_str("(seq/filter '(1 2) even?)").starts_with("nil | "));

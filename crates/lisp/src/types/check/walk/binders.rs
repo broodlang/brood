@@ -93,6 +93,23 @@ pub(super) fn check_fn_bound_with(
     tys: &[Option<Ty>],
     derived: bool,
 ) {
+    check_fn_bound_indexed(heap, items, ctx, out, tys, derived, None)
+}
+
+/// [`check_fn_bound_with`], with the literal's FIRST parameter recorded as an index of
+/// `indexes` (ADR-350's `i < (count xs)` relation) when the caller established it — a
+/// callback over `(range (count xs))` is handed every index of `xs` and nothing past it,
+/// so `(nth xs i)` inside reads the element, not `nil | element`. `(map (range (count
+/// levels)) (fn (i) … (nth levels i) …))` is the shape; it read `nil | int[1..6]`.
+pub(super) fn check_fn_bound_indexed(
+    heap: &Heap,
+    items: &[Value],
+    ctx: &Ctx,
+    out: &mut Vec<(Option<Pos>, String)>,
+    tys: &[Option<Ty>],
+    derived: bool,
+    indexes: Option<Symbol>,
+) {
     // A CLAUSE-style callback — `(fn ((acc n) …) (((x y & r) "+") …))` — gets the seed too,
     // per clause and through `bind_head`, so a destructuring head's binders are typed from
     // the position they destructure. Without this the whole seed was dropped for anything
@@ -153,6 +170,11 @@ pub(super) fn check_fn_bound_with(
         } else {
             scope.bind(p, ty)
         };
+        if i == 0 {
+            if let Some(xs) = indexes.filter(|xs| scope.is_lexical_local(*xs)) {
+                scope = scope.add_index_bound(p, xs);
+            }
+        }
     }
     let body_start = match (items.get(2), items.get(3)) {
         (Some(Value::Str(_)), Some(_)) => 3,
@@ -747,6 +769,16 @@ pub(in crate::types::check) fn let_bind_scope(
     }
     if let Value::Sym(target) = rhs {
         scope = scope.add_alias(name, target);
+    }
+    // `(let (el (%vector-ref m 0)) (if (%eq el :ok) …))` — the `match` compiler's shape —
+    // names the path `m[0]`: a guard on `el` is then a guard on `m`'s first position,
+    // which retains the tuple alternative the clause matched, so the clause's later
+    // `(%vector-ref m 1)` reads THAT arm's second position rather than the union over
+    // every arm (`[:ok got conn]` read `got` as `int | map` beside an `[:error 502 msg]`).
+    if let Some((base, keys)) = crate::types::check::guards::path_of(heap, rhs) {
+        if !keys.is_empty() && scope.is_lexical_local(base) {
+            scope = scope.add_path_alias(name, base, keys);
+        }
     }
     // `(let (n (count xs)) …)`: `n` is the length of `xs` for the scope (ADR-350), so a
     // guard on `n` narrows `xs`'s length and bounds an index of it.

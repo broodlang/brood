@@ -1261,6 +1261,17 @@ fn unwrap_type_alias(heap: &Heap, form: Value) -> Option<Value> {
     }
 }
 
+/// [`collect_register_types`] for a caller outside this module — the shape-budget
+/// diagnostic in `check_file` reads this file's own aliases through it.
+pub(super) fn collect_register_types_into(
+    heap: &Heap,
+    form: Value,
+    file_ns: Option<&str>,
+    out: &mut std::collections::HashMap<String, Value>,
+) {
+    collect_register_types(heap, form, file_ns, out)
+}
+
 /// Walk for `(%register-type (quote name) (quote T))` — what `deftype` expands to —
 /// through the `(do …)` wrappers a top-level macro may leave.
 fn collect_register_types(

@@ -28,16 +28,30 @@ reads its elements over every term, two record shapes over one key set merge fie
 under the ascent's widening, and a callback literal in the collector is walked under the
 accumulator the fold promises. `BROOD_DERIVE_DBG=1` traces the derivation's rounds.
 
-**344 redundant `sig`s are gone from std and the prelude** — each one the checker infers verbatim without
-it (`scripts/redundant-sigs.blsp` asks per declaration, and its `--remove` re-derives to
-catch a sig another one depended on). What remains declares a fact the inference does not
-reach on its own.
+**335 redundant `sig`s are gone from std and the prelude** — each one the checker infers verbatim without
+it (`scripts/redundant-sigs.blsp` asks per declaration, and its `--remove` removes one at a
+time, keeping any the strict gate reads through). What remains declares a fact the inference
+does not reach on its own — or, for nine names the curated table also lists, keeps the
+declaration ahead of that table for callers in other modules.
 
 **`nest check FILE…` runs the whole-project lints too, and both forms count them** (KI-149).
 The unused-private and duplicate-defs lints ran only in the bare `nest check` — CI's
 explicit-list invocation never ran them — and their counts were discarded, so a dead private
 function had never failed a gate in either form. Both forms now compute the lints over the
 whole project, report them for the files asked about, and fail on them.
+
+**A `match` clause on a tagged tuple binds its own arm's positions**: `[:ok got conn]`
+beside `[:error code msg]` reads `got` as the `:ok` arm's type, not the union over every
+arm — the compiler's `(let (el (%vector-ref m 0)) (if (%eq el :ok) …))` is a guard on a
+path alias, and the checker follows it. **A callback over `(range (count xs))` reads
+`xs`'s elements**: its parameter is an index of `xs`, and a range carries its bounds'
+interval (`(range 5)` is `list<int[0..4]>`).
+
+**A `deftype` past the lattice's node budget is reported, not silently flattened.** The
+budget (`MAX_TY_NODES`) bounded declared shapes too: bedit's `model` record crossed it by
+one optional field and every `model`-typed sig in the project quietly read `map`. The
+budget is 256 (it was 64; the fixpoints converge by widening, not by it), and a `deftype`
+that still exceeds it warns at the declaration.
 
 **A field read guards itself.** `(when (:proc state) (os/close (:proc state)))` — the idiom
 for a maybe-field — read `nil | subprocess` under its own guard: a bare access path as a

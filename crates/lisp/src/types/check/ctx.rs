@@ -604,6 +604,13 @@ pub(super) struct Ctx {
     /// sound for the binding's extent; `bind` (shadow) disconnects the name
     /// from every neighbour to prevent stale aliasing across re-bindings.
     aliases: HashMap<Symbol, HashSet<Symbol>>,
+    /// **Path aliases.** `(let (el (%vector-ref m 0)) …)` — the `match` compiler's shape —
+    /// names the PATH `m[0]`, so a guard on `el` is a guard on the path: `(%eq el :ok)`
+    /// retains the tuple alternatives of `m` whose first position admits `:ok`, and the
+    /// clause's `(%vector-ref m 1)` then reads the `:ok` shape's second position, not the
+    /// union over every arm. Sound under immutability, as `aliases` is; `bind` on either
+    /// name drops it.
+    path_aliases: HashMap<Symbol, (Symbol, Vec<PathKey>)>,
     /// Every locally-bound name in scope — fn/lambda params and let bindings.
     /// Distinct from `types`: a fn-param has *no known type* (`ANY` by default)
     /// but is *in scope*, so it must not be flagged unbound. `types` records
@@ -769,6 +776,11 @@ impl Ctx {
     pub(super) fn narrow(&self, sym: Symbol, ty: Ty) -> Ctx {
         let mut c = self.clone();
         c.narrow_chain(sym, ty.clone());
+        // A narrowing of a path's ALIAS is a narrowing of the path — and, for an index
+        // position, of the base's positional alternatives (`narrow_path`'s retention).
+        if let Some((base, keys)) = c.path_aliases.get(&sym).cloned() {
+            c = c.narrow_path(base, keys, ty.clone());
+        }
         // A narrowing of `n` where `n` is `(count xs)` is a narrowing of `xs`'s LENGTH
         // (ADR-350): `(>= n 4)` proves `xs` has at least four elements — and no `nil`,
         // when the interval excludes 0.
@@ -881,6 +893,8 @@ impl Ctx {
         // A fresh binding of `sym` invalidates any `(get sym :k)` path narrowing —
         // the new value is unrelated to whatever a prior guard asserted.
         c.path_types.retain(|(base, _), _| *base != sym);
+        c.path_aliases
+            .retain(|name, (base, _)| *name != sym && *base != sym);
         // A fresh binding shadows the sig-typed param / dead-clause local of the
         // same name — the new binding's type is unrelated, so it must not drive
         // the dead-clause lint.
@@ -962,6 +976,16 @@ impl Ctx {
         let mut c = self.clone();
         c.aliases.entry(sym).or_default().insert(target);
         c.aliases.entry(target).or_default().insert(sym);
+        c
+    }
+    /// Record that `sym` was let-bound to the access path `base.keys…` — see
+    /// `path_aliases`. A path rooted at `sym` itself would shadow what it names.
+    pub(super) fn add_path_alias(&self, sym: Symbol, base: Symbol, keys: Vec<PathKey>) -> Ctx {
+        if sym == base || keys.is_empty() {
+            return self.clone();
+        }
+        let mut c = self.clone();
+        c.path_aliases.insert(sym, (base, keys));
         c
     }
     /// Record a top-level `(def/defn/defmacro name …)` so subsequent forms in

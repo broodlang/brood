@@ -500,7 +500,10 @@ fn a_reduce_over_a_non_empty_sequence_is_its_step_result_not_the_init() {
 // `(nil? x)` guard on the result leaves the element, not an unknown.
 #[test]
 fn seq_find_answers_the_element_or_nil() {
-    assert_eq!(ty_str("(seq/find (range 3) (fn (i) (> i 1)))"), "nil | int");
+    assert_eq!(
+        ty_str("(seq/find (range 3) (fn (i) (> i 1)))"),
+        "nil | int[0..2]"
+    );
     assert_eq!(ty_str("(seq/find [1 \"a\"] string?)"), "\"a\" | nil");
     let src = "\
          (defmodule t)\n\

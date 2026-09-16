@@ -25,9 +25,9 @@
   with inlined CSS + a client-side filter; with `:wrap? false` just the content
   fragment (sidebar + main), for embedding in a host layout (e.g. hive's themed page).
 
-  Docstrings are treated as light Markdown — blank-line paragraphs and inline `code`
-  spans — and every value is HTML-escaped, so a docstring can never inject markup."
-  (:use math))
+  Docstrings are Markdown (`markdown/->html`: paragraphs, lists, emphasis, inline `code`,
+  indented examples) plus `[[name]]` cross-references, and every value is HTML-escaped, so a
+  docstring can never inject markup.")
 
 ;; ---- escaping + inline prose ------------------------------------------------
 
@@ -37,18 +37,6 @@
     (string/replace "&" "&amp;")
     (string/replace "<" "&lt;")
     (string/replace ">" "&gt;")))
-
-(defn- inline (para module-name)
-  (let (parts (string/split para "`"))
-    (apply str
-      (map (seq/zip (range (count parts)) parts)
-        (fn (pair)
-          (let ([index segment] pair)
-            (if (odd? index)
-              ;; inside backticks: code, and NOT scanned for emphasis or doc-links — `**kwargs`
-              ;; is a literal there, and so is a `[[…]]` someone is writing ABOUT
-              (str "<code>" (escape segment) "</code>")
-              (doclinks (emphasis (escape segment)) module-name))))))))
 
 ;; ---- doc links: `[[name]]` --------------------------------------------------
 ;; Docstrings across the tree cross-reference each other with `[[name]]` — `io/inspect` cites
@@ -103,85 +91,41 @@ result and the cited name stays escaped."
       (str (first parts)
         (apply str (map (rest parts) (fn (p) (doc-link-part p module-name))))))))
 
-(defn- emphasis (escaped)
-  "Render `**bold**` runs in ALREADY-ESCAPED text.
-
-  Docstrings across the tree are written with it — `**Every value is UTC**`, `**Timezones.**` —
-  and it reached the page as its own asterisks, on every generated docs page and in `nest
-  docs` output. Applied after escaping, so the `<strong>` this emits is the only markup in
-  the result and the text between the markers stays escaped.
-
-  An odd number of markers means the last one opens nothing; that run is left as written
-  rather than swallowed, so an asterisk pair that was never emphasis reads as it was typed."
-  (let (parts (string/split escaped "**"))
-    (if (< (count parts) 3)
-      escaped
-      (let (pairs (count-pairs (count parts)))
-        (apply str
-          (map (seq/zip (range (count parts)) parts)
-            (fn (pair)
-              (let ([index segment] pair)
-                (cond
-                  (= index 0) segment
-                  (> index (* 2 pairs)) (str "**" segment)
-                  (odd? index) (str "<strong>" segment "</strong>")
-                  else segment)))))))))
-
-(defn- count-pairs (part-count)
-  "How many complete `**…**` runs `part-count` split parts describe."
-  (math/quot (- part-count 1) 2))
-(sig count-pairs (int -> int))
-
-(defn- leading-space-count (line i)
-  "The number of leading space/tab characters in `line`, scanning from `i`."
-  (if (and (< i (string/length line))
-        (let (c (string/substring line i (+ i 1))) (or (= c " ") (= c "\t"))))
-    (leading-space-count line (+ i 1))
-    i))
-(sig leading-space-count (string int -> int))
-
-(defn- code-block? (block)
-  "True if `block` is an indented code example — its first non-blank line starts with
-  whitespace. Such a block's newlines are significant (each example on its own line), so it must
-  render as `<pre>` rather than a `<p>` whose newlines HTML would collapse into one run-on line."
-  (let (lines (seq/filter (string/split block "\n") (fn (l) (not (= (string/trim l) "")))))
-    (let (line (first lines)) (and line (> (leading-space-count line 0) 0)))))
-
-;; The smallest leading indentation across `lines`. A `fold` over `math/min` rather than
-;; `(apply min …)`, whose result the checker can only call `ordered`; the block's own length
-;; bounds every line's indent, so it is an inert seed.
-(defn- common-indent (block lines)
-  (fold lines (string/length block) (fn (acc l) (math/min acc (leading-space-count l 0)))))
-(sig common-indent (string (list string) -> int))
-
-(defn- dedent (block)
-  "Strip the common leading indentation from every line of `block`, so an indented docstring
-  code example renders flush-left in its `<pre>` rather than doubly indented."
-  (let (lines (string/split block "\n")
-        non-blank (seq/filter lines (fn (l) (not (= (string/trim l) ""))))
-        n (if (empty? non-blank) 0 (common-indent block non-blank)))
-    (string/join (map lines
-                   (fn (l) (if (>= (string/length l) n) (string/substring l n (string/length l)) l)))
-      "\n")))
+;; `[[name]]` links in rendered HTML, applied to the text BETWEEN `<code>` spans only — inside
+;; one, `[[…]]` is something the author is writing about. The renderer emits `<code>` and
+;; `</code>` verbatim and never nests them, so the split is exact.
+(defn- doclinks-outside-code (html module-name)
+  (let (pieces (string/split html "<code>"))
+    (str (doclinks (first pieces) module-name)
+      (apply str
+        (map (rest pieces)
+          (fn (piece)
+            (let (close (index-of piece "</code>"))
+              (if (< close 0)
+                (str "<code>" piece)
+                (str "<code>"
+                  (string/substring piece 0 (+ close 7))
+                  (doclinks (string/substring piece (+ close 7) (string/length piece)) module-name))))))))))
 
 (defn prose (text &optional module-name)
-  "Render a docstring as safe HTML: blank-line-separated blocks become `<p>` paragraphs (with
-  inline `code` spans and `[[name]]` cross-reference links), except an indented block, which
-  becomes a `<pre>` code example with its line breaks preserved. Every value is HTML-escaped.
-  Empty/nil text renders to the empty string.
+  "Render a docstring as safe HTML: `markdown/->html` — paragraphs, `- ` lists, `**bold**`
+  and `*emphasis*`, inline `code`, and an indented block as a `<pre>` code example with its
+  line breaks preserved (any indentation counts, since a docstring's prose is never
+  indented and its examples are indented by whatever the author chose) — plus `[[name]]`
+  cross-reference links. Every value is HTML-escaped. Empty/nil text renders to the empty
+  string.
+
+  Until ADR-356's follow-up this was a second renderer of its own, which knew `**bold**`
+  and nothing else a docstring uses: `*seqable*` reached the page with its asterisks and a
+  `- ` list as one run-on paragraph. One renderer now; a docstring and a README read the
+  same.
 
   `module-name` is what a bare `[[name]]` is resolved against; without it only the explicit
   `[[mod/name]]` form links (the bare one is left as written rather than pointed at an anchor
   that would not exist)."
   (if (or (nil? text) (= (string/trim (str text)) ""))
     ""
-    (apply str
-      (map (seq/filter (string/split (str text) "\n\n")
-             (fn (block) (not (= (string/trim block) ""))))
-        (fn (block)
-          (if (code-block? block)
-            (str "<pre class=\"doc-example\"><code>" (escape (dedent block)) "</code></pre>")
-            (str "<p>" (inline block module-name) "</p>")))))))
+    (doclinks-outside-code (markdown/->html (str text) {:code-indent 1}) module-name)))
 
 ;; ---- anchors ----------------------------------------------------------------
 
@@ -464,10 +408,19 @@ result and the cited name stays escaped."
     ".docsite .def{border:1px solid var(--docsite-border);border-radius:.5rem;padding:.75rem 1rem;margin:.6rem 0;scroll-margin-top:1rem}"
     ".docsite .sig{font-weight:600;color:var(--docsite-fg)}.docsite .tag{background:var(--docsite-border);color:var(--docsite-muted);border-radius:.25rem;padding:0 .35rem;font-size:.72rem;vertical-align:middle}"
     ".docsite .type{color:var(--docsite-dim);font-size:.85rem;margin-top:.15rem}"
-    ".docsite .doc{margin-top:.4rem;color:var(--docsite-text)}.docsite .doc p{margin:.4rem 0}.docsite .undoc{color:var(--docsite-faint);font-style:italic;margin:.4rem 0 0}"
+    ;; `.doc` and `.moduledoc` share one block vocabulary — what `prose` renders: paragraphs,
+    ;; lists, quotes and indented examples. The moduledoc used to have no paragraph rule at
+    ;; all, so a host that zeroes `p` margins (Tailwind's preflight) ran its paragraphs together.
+    ".docsite .doc{margin-top:.4rem;color:var(--docsite-text)}"
+    ".docsite .doc p,.docsite .moduledoc p{margin:.5rem 0}"
+    ".docsite .doc ul,.docsite .moduledoc ul{list-style:disc;margin:.5rem 0;padding-left:1.4rem}"
+    ".docsite .doc ol,.docsite .moduledoc ol{list-style:decimal;margin:.5rem 0;padding-left:1.4rem}"
+    ".docsite .doc li,.docsite .moduledoc li{margin:.15rem 0}"
+    ".docsite .doc blockquote,.docsite .moduledoc blockquote{margin:.5rem 0;padding-left:.8rem;border-left:3px solid var(--docsite-border-strong);color:var(--docsite-muted)}"
+    ".docsite .undoc{color:var(--docsite-faint);font-style:italic;margin:.4rem 0 0}"
     ".docsite .doc code,.docsite .moduledoc code{background:var(--docsite-code-bg);border-radius:.25rem;padding:.05rem .3rem;font-size:.9em}"
-    ".docsite .doc-example{background:var(--docsite-code-bg);border-radius:.375rem;padding:.6rem .8rem;margin:.5rem 0;overflow-x:auto;font-size:.85rem;line-height:1.45}"
-    ".docsite .doc-example code{background:none;padding:0;white-space:pre}"
+    ".docsite .doc pre,.docsite .moduledoc pre{background:var(--docsite-code-bg);border-radius:.375rem;padding:.6rem .8rem;margin:.5rem 0;overflow-x:auto;font-size:.85rem;line-height:1.45}"
+    ".docsite .doc pre code,.docsite .moduledoc pre code{background:none;padding:0;white-space:pre}"
     ".docsite .empty{color:var(--docsite-faint)}" ".docsite .guide-body{color:var(--docsite-text)}"
     ;; The guide headings follow `--docsite-fg` rather than a literal. They used to be a
     ;; hard `#1f2933` that the dark block never overrode, so a dark standalone page drew

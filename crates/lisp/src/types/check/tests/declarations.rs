@@ -148,3 +148,23 @@ fn a_sig_over_the_required_positions_seeds_a_defn_with_undeclared_optionals() {
         "{ws:?}"
     );
 }
+
+// A `deftype` past the lattice's node budget is widened to its bare tags by the
+// constructors, silently — which is how every `model`-typed read in bedit went `number` the
+// day its `model` record crossed the line by one optional field. The declaration now says
+// so. A record wide enough for the budget stays whole; one three times over it warns.
+#[test]
+fn a_deftype_past_the_shape_budget_is_reported_at_the_declaration() {
+    let wide = |n: usize| {
+        let fields: String = (0..n).map(|i| format!(" :f{i} int")).collect();
+        format!("(defmodule t)\n(deftype big (record{fields}))\n(sig g (big -> int))\n(defn g (b) (:f0 b))")
+    };
+    let ws = file_warnings(&wide(crate::types::MAX_TY_NODES / 2));
+    assert!(ws.is_empty(), "{ws:?}");
+    let ws = file_warnings(&wide(crate::types::MAX_TY_NODES * 3));
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("deftype big") && w.contains("exceeds the checker's budget")),
+        "{ws:?}"
+    );
+}

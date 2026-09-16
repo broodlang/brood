@@ -161,6 +161,31 @@
       :mode :none
       :buf nil)))
 
+;; An indented code block, closed: trailing blank lines dropped, every line shed of the
+;; block's common indentation, so an example indented for the docstring it sits in renders
+;; flush-left.
+(defn- md-close-indented (state)
+  (let (lines (reverse (drop-while (get state :buf) (fn (l) (= (string/trim l) ""))))
+        indent (fold lines
+                 (string/length (or (first lines) ""))
+                 (fn (least l)
+                   (if (= (string/trim l) "") least (math/min least (string/span l 0 " \t")))))
+        shed (fn (l) (string/substring l (math/min indent (string/length l)) (string/length l))))
+    (assoc state
+      :out
+        (str (get state :out)
+          "<pre><code>"
+          (md-escape (string/join (map lines shed) "\n"))
+          "</code></pre>")
+      :mode :none
+      :buf nil)))
+
+;; Does `line` open (or continue) an indented code block? A tab, or at least the
+;; renderer's `:code-indent` spaces — four by default (CommonMark), one for a docstring,
+;; whose examples are indented by whatever their author chose.
+(defn- md-indented? (state line)
+  (or (string/starts-with? line "\t") (>= (string/span line 0 " ") (get state :code-indent 4))))
+
 (defn- md-items (buf)
   (apply str (map (reverse buf) (fn (l) (str "<li>" (md-inline l) "</li>")))))
 
@@ -195,6 +220,7 @@
           :buf nil)
       ;; an unclosed ``` fence at end-of-input: emit what was buffered rather than drop it
       (= mode :code) (md-close-code state)
+      (= mode :indented) (md-close-indented state)
       else state)))
 (sig md-flush (map -> map))
 
@@ -236,7 +262,13 @@
             :buf nil
             :indent (- (string/length line) (string/length (string/triml line)))))
       (= mode :code) (assoc state :buf (cons line (get state :buf)))
+      ;; an indented block continues through blank lines and ends at the first unindented
+      ;; text, which is then read as the line it is
+      (and (= mode :indented) (or (= t "") (md-indented? state line)))
+        (assoc state :buf (cons line (get state :buf)))
+      (= mode :indented) (md-line (md-close-indented state) line)
       (= t "") (md-flush state)
+      (and (= mode :none) (md-indented? state line)) (assoc state :mode :indented :buf (list line))
       (string/starts-with? t "#### ") (md-heading state 4 (string/substring t 5 end))
       (string/starts-with? t "### ") (md-heading state 3 (string/substring t 4 end))
       (string/starts-with? t "## ") (md-heading state 2 (string/substring t 3 end))
@@ -263,15 +295,21 @@
           (assoc s :mode :para :buf (cons line (get s :buf)))))))
 (sig md-line (map string -> map))
 
-(defn ->html (md)
+(defn ->html (md &optional (opts {}))
   "Render a Markdown string to HTML — a small subset: ATX headings (`#` to `####`), fenced
-  ``` code, `- ` and `1. ` lists (indented continuation lines join their item), `> ` quotes,
-  `---` rules, blank-line paragraphs, and inline `code`, `[text](url)` links,
+  ``` and indented code, `- ` and `1. ` lists (indented continuation lines join their item),
+  `> ` quotes, `---` rules, blank-line paragraphs, and inline `code`, `[text](url)` links,
   `<https://…>` autolinks, `**strong**` and `*emphasis*`. Everything is HTML-escaped; not a
-  full CommonMark parser. The doc generator renders its guides with it; the hosted
-  registry its package READMEs.
+  full CommonMark parser. The doc generator renders its guides and every docstring with it;
+  the hosted registry its package READMEs.
+
+  `opts` `:code-indent` is how many leading spaces make a line (after a blank one) an
+  indented code block: 4 by default, as CommonMark; a docstring passes 1, since its examples
+  are indented by whatever their author chose and its prose is never indented at all.
 
     (markdown/->html \"# hi\")   → \"<h1>hi</h1>\""
-  (get (md-flush (fold (string/split md "\n") {:out "" :mode :none :buf nil :start 1} md-line))
+  (get (md-flush (fold (string/split md "\n")
+                   {:out "" :mode :none :buf nil :start 1 :code-indent (get opts :code-indent 4)}
+                   md-line))
     :out))
-(sig ->html (string -> string))
+(sig ->html (string &optional map -> string))

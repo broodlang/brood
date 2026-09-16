@@ -45,3 +45,16 @@
     (assert= (->html "#### D") "<h4>D</h4>")
     (assert= (->html "> a\n> b") "<blockquote><p>a b</p></blockquote>")
     (assert= (->html "a\n\n---\n\nb") "<p>a</p><hr><p>b</p>")))
+
+(describe "markdown/->html — indented code"
+  (test "four spaces after a blank line is code, dedented, blank lines inside kept"
+    (assert= (->html "p\n\n    (a)\n\n      (b)\n\nq")
+      "<p>p</p><pre><code>(a)\n\n  (b)</code></pre><p>q</p>"))
+
+  (test "fewer than four is prose by default; :code-indent lowers the bar"
+    (assert= (->html "p\n\n  (a)") "<p>p</p><p>  (a)</p>")
+    (assert= (->html "p\n\n  (a)" {:code-indent 1}) "<p>p</p><pre><code>(a)</code></pre>"))
+
+  (test "an indented line inside a paragraph or list is not code"
+    (assert= (->html "a\n    b") "<p>a     b</p>")
+    (assert= (->html "- a\n    b") "<ul><li>a b</li></ul>")))
