@@ -53,18 +53,16 @@ pub(in crate::types::check) fn diverging_guard_scope(
 /// Walk a single-clause `fn` literal with each parameter bound to an INFERRED bound —
 /// a plain binding (`dynamic_within`, never a sig-authoritative type), because an
 /// inferred accumulator is an over-approximation: reading it by inclusion would flag
-/// `(- x best)` under `(if best …)` as "`(not nil)` is not a number". A position the
-/// seed could not type is left UNKNOWN (`None`) — bound like an unseeded parameter —
-/// rather than `any`, which reads as a known top type to the relations that ask; positions
-/// past `tys` bind unknown. Body forms are checked in that scope; nothing else
-/// `check_fn_seeded` does (the declared-return check, the dead-clause eligibility) applies
-/// to an inferred seed.
-///
-/// `derived` marks the seed as CALLER-DERIVED (the `let`-bound literal's,
-/// `derived_let_lambda`): each parameter is then bound through `Ctx::bind_derived`, so
-/// the impossible-predicate lint leaves its guards alone — a defensive `(int? b)` the
-/// in-scope callers never exercise is not "never true", it is there for the callers that
-/// are not here yet (the private-`defn` rule, ADR-341).
+/// `(- x best)` under `(if best …)` as "`(not nil)` is not a number". Positions past
+/// `tys` bind unknown, and a position the seed could not type is `None` — bound like an
+/// unseeded parameter rather than `any`, which reads as a known top type to the relations
+/// that ask. Body forms are checked in that scope; nothing else `check_fn_seeded` does (the
+/// declared-return check, the dead-clause eligibility) applies to an inferred seed.
+/// `derived` marks the seed as CALLER-DERIVED (the
+/// `let`-bound literal's, `derived_let_lambda`): each parameter is then bound through
+/// `Ctx::bind_derived`, so the impossible-predicate lint leaves its guards alone — a
+/// defensive `(int? b)` the in-scope callers never exercise is not "never true", it is
+/// there for the callers that are not here yet (the private-`defn` rule, ADR-341).
 pub(super) fn check_fn_bound_with(
     heap: &Heap,
     items: &[Value],
