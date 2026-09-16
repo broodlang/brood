@@ -2990,7 +2990,24 @@ pub(super) fn caller_derived_params(
         if next == derived {
             return derived;
         }
+        if std::env::var_os("BROOD_DERIVE_DBG").is_some() {
+            for (name, tys) in &next {
+                if derived.get(name) != Some(tys) {
+                    let shown: Vec<String> = tys
+                        .iter()
+                        .map(|t| t.as_ref().map_or("?".into(), |t| t.to_string()))
+                        .collect();
+                    eprintln!(
+                        "[derive] round {round} {} -> {shown:?}",
+                        value::symbol_name_ref(*name)
+                    );
+                }
+            }
+        }
         older = std::mem::replace(&mut derived, next);
+    }
+    if std::env::var_os("BROOD_DERIVE_DBG").is_some() {
+        eprintln!("[derive] NO FIXPOINT");
     }
     HashMap::new()
 }
@@ -3083,10 +3100,12 @@ fn collect_private_sites(
         /// The candidate whose single-arm body is being walked — a site found here is a
         /// self-call of it.
         within: Option<Symbol>,
-        /// The caller-derived parameter types of the `let`-bound `fn` literal about to be
-        /// walked (ADR-355) — set by the `let` arm for exactly the next form, taken by the
-        /// `fn` arm, so the literal's body is walked under what the walk binds it to.
-        let_fn_params: Option<Vec<Option<Ty>>>,
+        /// The parameter types of the `fn` LITERAL about to be walked — a `let`-bound
+        /// literal's caller-derived types (ADR-355, set by the `let` arm) or a callback
+        /// literal's promised types (set by `walk_args` from `callback_seed`) — left for
+        /// exactly the next form and taken by the `fn` arm, so the literal's body is walked
+        /// under what the walk binds it to.
+        pending_fn_params: Option<Vec<Option<Ty>>>,
     }
     impl Walker<'_> {
         /// Quoted data is not namespace-resolved, so a target appears there under its BARE
@@ -3289,9 +3308,9 @@ fn collect_private_sites(
                         }
                         _ => None,
                     };
-                    self.let_fn_params = derived.as_ref().map(|(tys, _)| tys.clone());
+                    self.pending_fn_params = derived.as_ref().map(|(tys, _)| tys.clone());
                     self.walk(rhs, &inner, None);
-                    self.let_fn_params = None;
+                    self.pending_fn_params = None;
                     let rhs_ty = derived
                         .as_ref()
                         .and_then(|(tys, ret)| super::walk::derived_let_lambda_arrow(tys, ret))
@@ -3316,46 +3335,37 @@ fn collect_private_sites(
                     .map(|&p| super::walk::fn_params(heap, p))
                     .unwrap_or_default();
                 let single_arm = fixed_arms_of_form(heap, form).is_some_and(|arms| arms.len() == 1);
-                // What the WALK binds this body's parameters to: a DECLARED sig's types (the
-                // shape `check_def` seeds), else the derived types — a public function's
-                // stay unknown. Only a single plain arm binds positionally.
-                let declared: Option<Vec<Option<Ty>>> = def_of
-                    .and_then(|n| self.ctx.declared_sig(n))
-                    .map(|sig| (0..params.len()).map(|i| sig.param(i)).collect());
+                // What the WALK binds this body's parameters to: a DECLARED sig's types,
+                // seeded by the one rule `check_fn_seeded` uses (`seeded_param_types` —
+                // an `&optional` position as its declared type or default, a `& rest`
+                // binder as its list, a sig naming only the required positions still
+                // seeding those); else the derived types — a public function's stay
+                // unknown. Only a single plain arm derives positionally.
+                let declared: Option<Vec<Option<Ty>>> =
+                    match (def_of.and_then(|n| self.ctx.declared_sig(n)), items.get(1)) {
+                        (Some(sig), Some(&params_form)) => {
+                            let (seeded, fits) = super::walk::seeded_param_types(
+                                heap,
+                                params_form,
+                                Some(&sig),
+                                self.ctx,
+                            );
+                            fits.map(|_| seeded.into_iter().map(|(ty, _)| ty).collect())
+                        }
+                        _ => None,
+                    };
                 // …or, for a `let`-bound literal, what its callers hand it (the `let` arm
                 // left them for this form alone — taken here so a nested literal never
                 // inherits them).
-                let let_derived = self.let_fn_params.take();
-                let bound: Option<Vec<Option<Ty>>> = declared
-                    .or_else(|| def_of.and_then(|n| self.derived.get(&n).cloned()))
-                    .or(let_derived)
-                    .filter(|d| single_arm && d.len() == params.len());
-                // A VARIADIC single arm is not a fixed arm, so it is never derived; its
-                // declared sig still binds it — the fixed positions as declared and the
-                // rest binder to `nil | list<rest>`, as the walk binds them.
-                let has_rest = items
-                    .get(1)
-                    .is_some_and(|&p| super::walk::params_form_has_rest(heap, p));
-                let variadic_declared: Option<Vec<Option<Ty>>> = if has_rest && bound.is_none() {
-                    def_of.and_then(|n| self.ctx.declared_sig(n)).map(|sig| {
-                        (0..params.len())
-                            .map(|i| {
-                                if i + 1 == params.len() {
-                                    sig.rest
-                                        .clone()
-                                        .map(|elem| Ty::list_of(elem).union(Ty::of(Tag::Nil)))
-                                } else {
-                                    sig.param(i)
-                                }
-                            })
-                            .collect()
-                    })
-                } else {
-                    None
-                };
-                let bound = bound.or(variadic_declared);
+                let let_derived = self.pending_fn_params.take();
+                let bound: Option<Vec<Option<Ty>>> = declared.or_else(|| {
+                    def_of
+                        .and_then(|n| self.derived.get(&n).cloned())
+                        .or(let_derived)
+                        .filter(|d| single_arm && d.len() == params.len())
+                });
                 for (i, p) in params.iter().enumerate() {
-                    let ty = bound.as_ref().and_then(|d| d[i].clone());
+                    let ty = bound.as_ref().and_then(|d| d.get(i).cloned().flatten());
                     inner = inner.bind(*p, ty);
                 }
                 // …and the count relations its callers establish (ADR-350), so a self-call
@@ -3398,6 +3408,31 @@ fn collect_private_sites(
                 scope,
                 &|arg, wanted| matches!(arg, Value::Sym(s) if self.targets.contains(&s) && self.arity_of(s) == Some(wanted)),
             );
+            // …and a `fn` LITERAL in a callback position is walked under the parameters
+            // the callee promises it — a fold's accumulator and element, `map`'s element,
+            // a declared arrow — as the walk binds it (`check_call`'s seeding). Unseeded,
+            // a site inside `(fold segs {:col x} (fn (a s) … (:col a) …))` handed its
+            // callee `number` for an accumulator field the walk knew was `int`.
+            // Asked only when an argument IS a literal: the fold seed is the fold's own
+            // result inference (a fixpoint), and this runs at every call form on every
+            // derivation round — asked unconditionally it took bedit's `commands.blsp`
+            // from a second to twenty-seven.
+            let has_literal = items[1..].iter().any(|&arg| {
+                list_items(self.heap, arg)
+                    .and_then(|l| l.first().copied())
+                    .is_some_and(|h| matches!(h, Value::Sym(s) if super::walk::is_fn_head(s)))
+            });
+            let literal = if has_literal {
+                super::walk::callback_seed(
+                    self.heap,
+                    form,
+                    items,
+                    scope,
+                    &super::walk::literal_fits(self.heap),
+                )
+            } else {
+                None
+            };
             for (i, &it) in items.iter().enumerate().skip(1) {
                 match &handed {
                     Some((index, sig)) if *index == i => {
@@ -3408,7 +3443,16 @@ fn collect_private_sites(
                             .or_default()
                             .push(Site::Handover(sig.params.clone()));
                     }
-                    _ => self.walk(it, scope, None),
+                    _ => {
+                        if let Some((index, sig)) = &literal {
+                            if *index == i {
+                                self.pending_fn_params =
+                                    Some(sig.params.iter().cloned().map(Some).collect());
+                            }
+                        }
+                        self.walk(it, scope, None);
+                        self.pending_fn_params = None;
+                    }
                 }
             }
         }
@@ -3425,7 +3469,7 @@ fn collect_private_sites(
         },
         opaque: false,
         within: None,
-        let_fn_params: None,
+        pending_fn_params: None,
     };
     for &form in forms {
         walker.walk(form, ctx, None);

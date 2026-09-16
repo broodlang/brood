@@ -825,6 +825,13 @@ impl Ctx {
     pub(super) fn path_ty(&self, base: Symbol, keys: &[PathKey]) -> Option<Ty> {
         self.path_types.get(&(base, keys.to_vec())).cloned()
     }
+    /// This scope with the narrowing of one path forgotten — what `expr_ty` reads a
+    /// narrowed path's STRUCTURAL type in, so the two can be intersected.
+    pub(super) fn without_path(&self, base: Symbol, keys: &[PathKey]) -> Ctx {
+        let mut c = self.clone();
+        c.path_types.remove(&(base, keys.to_vec()));
+        c
+    }
     /// In-place narrow over the equivalence class of `sym` — BFS through the
     /// alias graph, intersecting `ty` into each visited name's type. A
     /// `visited` set caps each name at one narrow so a cycle (the

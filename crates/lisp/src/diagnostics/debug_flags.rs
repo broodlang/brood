@@ -535,6 +535,11 @@ pub const FLAGS: &[DebugFlag] = &[
         "bypass `nest check`'s incremental result cache — recheck everything from scratch",
     ),
     f(
+        "BROOD_DERIVE_DBG",
+        DIAG,
+        "trace the checker's caller-derived parameter fixpoint (ADR-341): each round's moved candidates, or NO FIXPOINT",
+    ),
+    f(
         "BROOD_CHECK_CACHE_MAX",
         DIAG,
         "`=<n>`: project file count above which the check cache stands aside (default 50000)",

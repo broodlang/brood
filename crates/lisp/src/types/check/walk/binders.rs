@@ -177,6 +177,84 @@ pub(super) fn check_fn(
     check_fn_seeded(heap, items, ctx, out, None, None);
 }
 
+/// What a declared `(sig …)` binds each parameter of a single-arm `fn` to — one entry per
+/// parameter, `(type, sig-authoritative)` — and the sig itself when its shape fits the
+/// parameter list (else `None`, and every entry is unknown). The ONE rule for seeding a
+/// body from its declaration, shared by the walk (`check_fn_seeded`) and the caller-derived
+/// site collector (`sigs::collect_private_sites`): the collector used to bind an
+/// `&optional` function's parameters to nothing, so a site inside one handed every
+/// callee unknowns where the walk saw the declared ints.
+///
+/// The closure's actual param count must fall inside the declared sig's arity range for
+/// seeding to make sense: at least `params.len()` required, at most `params.len() +
+/// optional.len()` unless it has a rest tail (any count at or above `params.len()` is then
+/// fine). …or the declaration names exactly the REQUIRED positions and says nothing about
+/// the optionals — `(sig f (int int -> int))` over `(defn f (a b &optional (c nil)) …)`.
+/// The required positions align exactly, so those seed; each undeclared optional is bound
+/// as an unseeded optional (its default's type, or unknown). Refusing the whole declaration
+/// left every parameter of such a function unknown — bedit's `ed-visible-lines`, ten
+/// declared parameters over ten required and two optionals, read `(+ y k)` as `number`
+/// with `y` declared `int` two lines up.
+///
+/// An `&optional` position may genuinely be absent at the call site: an unsupplied optional
+/// WITH a default `(n 1)` is bound to the default, never to nil — so the absence case is the
+/// default's type (seeding it as `T | nil` made `(+ p n)` under `&optional (n 1)` read
+/// `nil | int` and every such site a strict warning; a default whose type can't be pinned
+/// keeps the nil reading, a superset). It is a plain (not sig-authoritative) binding, so a
+/// defensive `(nil? p)` in the body is never mistaken for dead code the way an exact
+/// required-param contract would be. The `& rest` binder (always last) collects the
+/// variadic arguments into a list, so its type is `nil | list<rest-elem>` — not the element
+/// type the sig's rest position carries (seeding it as the element was a false-positive
+/// source: `(defn f (& xs) (reduce xs 0 +))` under `(sig f (& int -> …))` flagged `reduce`
+/// for an int where a sequence is wanted), and `nil` beside it because a call that supplies
+/// no rest argument binds the collector to `nil`. Plain too, so no dead-clause lint keys
+/// off it.
+pub(in crate::types::check) fn seeded_param_types<'s>(
+    heap: &Heap,
+    params_form: Value,
+    sig: Option<&'s crate::types::Sig>,
+    ctx: &Ctx,
+) -> (Vec<(Option<Ty>, bool)>, Option<&'s crate::types::Sig>) {
+    let params = fn_params(heap, params_form);
+    let defaults = fn_param_defaults(heap, params_form);
+    let has_rest = params_form_has_rest(heap, params_form);
+    let required = required_param_count(heap, params_form);
+    let sig = sig.filter(|s| {
+        (params.len() >= s.params.len()
+            && (s.rest.is_some() || params.len() <= s.params.len() + s.optional.len()))
+            || (!has_rest
+                && s.rest.is_none()
+                && s.optional.is_empty()
+                && required == s.params.len())
+    });
+    let seeded = (0..params.len())
+        .map(|i| {
+            if has_rest && i + 1 == params.len() {
+                let rest_ty = sig
+                    .and_then(|s| s.rest.clone())
+                    .map(|elem| Ty::list_of(elem).union(Ty::of(crate::core::value::Tag::Nil)));
+                return (rest_ty, false);
+            }
+            let is_optional_pos =
+                sig.is_some_and(|s| i >= s.params.len() && i < s.params.len() + s.optional.len());
+            match sig.and_then(|s| s.param(i)) {
+                Some(ty) if is_optional_pos => {
+                    let absent = defaults
+                        .get(i)
+                        .copied()
+                        .flatten()
+                        .and_then(|d| expr_ty(heap, d, ctx))
+                        .unwrap_or(Ty::of(crate::core::value::Tag::Nil));
+                    (Some(ty.union(absent)), false)
+                }
+                Some(ty) => (Some(ty), true),
+                None => (None, false),
+            }
+        })
+        .collect();
+    (seeded, sig)
+}
+
 /// `check_fn`, optionally seeding the parameters from a `(sig …)` signature — used
 /// when this `fn` is the value of a `(def name …)` whose `name` is declared. Each
 /// parameter is then bound to its declared type *and* marked a sig-typed param,
@@ -229,73 +307,13 @@ pub(super) fn check_fn_seeded(
         return;
     };
     let params = fn_params(heap, params_form);
-    let defaults = fn_param_defaults(heap, params_form);
-    // Whether the param list ends in a `& rest` binder (always the last binder). Its
-    // seeded type differs — the binder collects the variadic args into a *list*.
-    let has_rest = params_form_has_rest(heap, params_form);
-    // The closure's actual param count must fall inside the declared sig's
-    // arity range for seeding to make sense: at least `params.len()`
-    // required, at most `params.len() + optional.len()` unless it has a
-    // rest tail (any count at or above `params.len()` is then fine).
-    // …or the declaration names exactly the REQUIRED positions and says nothing about the
-    // optionals — `(sig f (int int -> int))` over `(defn f (a b &optional (c nil)) …)`.
-    // The required positions align exactly, so those seed; each undeclared optional is
-    // bound below as an unseeded optional (its default's type, or unknown). Refusing the
-    // whole declaration left every parameter of such a function unknown — bedit's
-    // `ed-visible-lines`, ten declared parameters over ten required and two optionals,
-    // read `(+ y k)` as `number` with `y` declared `int` two lines up.
-    let required = required_param_count(heap, params_form);
-    let sig = sig.filter(|s| {
-        (params.len() >= s.params.len()
-            && (s.rest.is_some() || params.len() <= s.params.len() + s.optional.len()))
-            || (!has_rest
-                && s.rest.is_none()
-                && s.optional.is_empty()
-                && required == s.params.len())
-    });
+    let (seeded, sig) = seeded_param_types(heap, params_form, sig, ctx);
     let mut scope = ctx.clone();
-    for (i, &p) in params.iter().enumerate() {
-        // An `&optional` position may genuinely be absent at the call site
-        // (bound to `nil`, same as an unsupplied optional with no default) —
-        // widen with `nil` and seed it as a plain (not sig-authoritative)
-        // type, so a defensive `(nil? p)` in the body is never mistaken for
-        // dead code the way an exact required-param contract would be.
-        // The `& rest` binder (always last) collects the variadic arguments into a
-        // list, so its type is `list<rest-elem>` — not the element type the sig's
-        // rest position carries. Seeding it as the bare element type was a false-
-        // positive source: `(defn f (& xs) (reduce xs 0 +))` with `(sig f (& int ->
-        // …))` would type `xs` as `int` and then flag `(reduce … xs)` for passing an
-        // int where a sequence is wanted. Bind it plainly (not sig-authoritative) so
-        // no dead-clause lint keys off it.
-        // …and `nil` beside it: a call that supplies no rest argument binds the collector
-        // to `nil` (a list with nothing in it IS `nil`), so `(first xs)` there is `nil`.
-        if has_rest && i + 1 == params.len() {
-            let rest_ty = sig
-                .and_then(|s| s.rest.clone())
-                .map(|elem| Ty::list_of(elem).union(Ty::of(crate::core::value::Tag::Nil)));
-            scope = scope.bind(p, rest_ty);
-            continue;
-        }
-        let is_optional_pos =
-            sig.is_some_and(|s| i >= s.params.len() && i < s.params.len() + s.optional.len());
-        match sig.and_then(|s| s.param(i)) {
-            Some(ty) if is_optional_pos => {
-                // An unsupplied optional WITH a default `(n 1)` is bound to the default,
-                // never to nil — so the absence case is the default's type. Seeding it as
-                // `T | nil` made `(+ p n)` under `&optional (n 1)` read `nil | int` and
-                // every such site a strict warning. A default whose type can't be pinned
-                // keeps the nil reading (a superset — sound).
-                let absent = defaults
-                    .get(i)
-                    .copied()
-                    .flatten()
-                    .and_then(|d| expr_ty(heap, d, ctx))
-                    .unwrap_or(Ty::of(crate::core::value::Tag::Nil));
-                scope = scope.bind(p, Some(ty.union(absent)));
-            }
-            Some(ty) => scope = scope.bind_sig_param(p, ty),
-            None => scope = scope.bind(p, None),
-        }
+    for (&p, (ty, authoritative)) in params.iter().zip(seeded) {
+        scope = match (ty, authoritative) {
+            (Some(ty), true) => scope.bind_sig_param(p, ty),
+            (ty, _) => scope.bind(p, ty),
+        };
     }
     // Skip a leading docstring (a lone string when more body follows).
     let body_start = match (items.get(2), items.get(3)) {
@@ -960,8 +978,15 @@ pub(in crate::types::check) fn derived_let_lambda(
         return None;
     }
     // …and the literal's result under those inputs, for the arrow the name is bound to:
-    // `(row-op 2)` then types as the body does over an int.
-    let ret = super::super::infer::callback_ret(heap, rhs, &derived, scope);
+    // `(row-op 2)` then types as the body does over an int. A self-call inside the body
+    // contributes ⊥ to that result — the least fixpoint: by induction a recursive call
+    // returns something the non-recursive branches already cover, and a call with an
+    // uninhabited argument is `never`, so `(inc (step next))` folds away too. Read under
+    // the pre-bound (unknown) name instead, `(if … (step next) l)` was unknown, the arrow's
+    // result unknown, and every caller of a recursive local helper read `any`.
+    let self_arrow = Ty::arrow(Sig::new(vec![Ty::ANY; derived.len()], Ty::NEVER));
+    let body_scope = scope.bind(name, Some(self_arrow));
+    let ret = super::super::infer::callback_ret(heap, rhs, &derived, &body_scope);
     Some((derived, ret))
 }
 
@@ -1056,19 +1081,66 @@ fn let_lambda_derived_params(
     if sites.is_empty() {
         return None;
     }
-    let mut derived: Vec<Option<Ty>> = vec![None; arity];
-    for (i, slot) in derived.iter_mut().enumerate() {
-        let mut acc: Option<Ty> = None;
-        for site in &sites {
-            match site.get(i).cloned().flatten() {
-                Some(t) => acc = Some(acc.map_or(t.clone(), |a| a.union(t))),
-                None => {
-                    acc = None;
-                    break;
+    let union_sites = |sites: &[Vec<Option<Ty>>]| -> Vec<Option<Ty>> {
+        (0..arity)
+            .map(|i| {
+                let mut acc: Option<Ty> = None;
+                for site in sites {
+                    match site.get(i).cloned().flatten() {
+                        Some(t) => acc = Some(acc.map_or(t.clone(), |a| a.union(t))),
+                        None => return None,
+                    }
                 }
+                acc
+            })
+            .collect()
+    };
+    let external = union_sites(&sites);
+    // …and the literal's OWN self-calls, to a least fixpoint over its body: `(f (inc k))`
+    // under `(f 0)` alone read `k` as the literal `0`, decided `(> k 3)` false, and typed
+    // the result `never` — the recursive arm was the only live one. Each round binds the
+    // parameters to what is derived so far, reads the self-call sites under them, unions
+    // them with the external sites and widens an interval that moved (ADR-350), so `0`,
+    // `0 | 1`, … is `int[0..]` in one step. A self-reference that is not a call (the name
+    // escaping inside its own body) keeps the external derivation alone.
+    let param_syms: Vec<Symbol> = params
+        .iter()
+        .filter_map(|p| match p {
+            Value::Sym(s) => Some(*s),
+            _ => None,
+        })
+        .collect();
+    let body: Vec<Value> = items.iter().skip(2).copied().collect();
+    let mut derived = external.clone();
+    // Only a literal that names itself pays for the ascent: each round re-collects the
+    // body, and a body's nested `let`s derive their own literals on the way, so an
+    // unconditional loop multiplied the cost by its rounds at every level of nesting.
+    if !body.iter().any(|&form| sym_appears_in(heap, form, name)) {
+        return Some(derived);
+    }
+    for _ in 0..8 {
+        let mut inner = scope.clone();
+        for (p, t) in param_syms.iter().zip(&derived) {
+            inner = inner.bind(*p, t.clone());
+        }
+        let mut self_sites: Vec<Vec<Option<Ty>>> = Vec::new();
+        let sound = body.iter().all(|&form| {
+            collect_let_lambda_sites(heap, name, arity, form, &inner, &mut self_sites)
+        });
+        if !sound || self_sites.is_empty() {
+            break;
+        }
+        self_sites.extend(sites.iter().cloned());
+        let mut next = union_sites(&self_sites);
+        for (slot, prev) in next.iter_mut().zip(&derived) {
+            if let (Some(n), Some(p)) = (slot.as_ref(), prev) {
+                *slot = Some(n.widen_intervals_against(p));
             }
         }
-        *slot = acc;
+        if next == derived {
+            break;
+        }
+        derived = next;
     }
     Some(derived)
 }

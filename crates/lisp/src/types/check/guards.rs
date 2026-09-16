@@ -193,6 +193,13 @@ pub(super) fn path_of(heap: &Heap, expr: Value) -> Option<(Symbol, Vec<PathKey>)
             return None;
         }
         let items = list_items(heap, expr)?;
+        // The keyword-call read `(:k m)` is `(get m :k)` spelled the other way round — the
+        // spelling every `(when (:proc state) (os/close (:proc state)))` uses.
+        if let (Some(&Value::Keyword(k)), 2) = (items.first(), items.len()) {
+            keys_outer_first.push(PathKey::Field(k));
+            expr = items[1];
+            continue;
+        }
         let Some(&Value::Sym(head)) = items.first() else {
             return None;
         };
@@ -244,7 +251,8 @@ pub(super) fn path_guard_assertion(heap: &Heap, test: Value) -> Option<PathGuard
 fn path_guard_assertion_inner(heap: &Heap, test: Value) -> Option<PathGuard> {
     let items = list_items(heap, test)?;
     let Value::Sym(head) = *items.first()? else {
-        return None;
+        // A keyword-call read `(:k m)` is a path too — the bare-path case below.
+        return bare_path_guard(heap, test);
     };
     let head_name = value::symbol_name(head);
     // `(not <inner>)` — invert a biconditional inner path guard.
@@ -287,6 +295,14 @@ fn path_guard_assertion_inner(heap: &Heap, test: Value) -> Option<PathGuard> {
             then_only: false,
         });
     }
+    // `<get-path>` as the test itself — `(when (:proc state) (os/close (:proc state)))`:
+    // a truthy read proves the path is not `nil | false`, a falsy one that it is
+    // (biconditional, as the bare-variable form in `guard_assertion` is), so the idiom
+    // that guards a maybe-field by reading it narrows the read under it. `Ty::truthy()`
+    // is the one definition of falsiness in the checker.
+    if let Some(guard) = bare_path_guard(heap, test) {
+        return Some(guard);
+    }
     // `(pred? <get-path>)` — a type predicate over a (possibly nested) field path.
     if items.len() != 2 {
         return None;
@@ -301,6 +317,22 @@ fn path_guard_assertion_inner(heap: &Heap, test: Value) -> Option<PathGuard> {
         keys,
         subject: items[1],
         ty,
+        then_only: false,
+    })
+}
+
+/// The guard a bare access path asserts as a test: `(when (:proc state) …)` / `(if (get
+/// r :n) …)` — a truthy read proves the path is not `nil | false`, a falsy one that it
+/// is (biconditional, as the bare-variable form in [`guard_assertion`] is). A bare
+/// variable (empty path) is that function's. `Ty::truthy()` is the one definition of
+/// falsiness in the checker.
+fn bare_path_guard(heap: &Heap, test: Value) -> Option<PathGuard> {
+    let (base, keys) = path_of(heap, test).filter(|(_, keys)| !keys.is_empty())?;
+    Some(PathGuard {
+        base,
+        keys,
+        subject: test,
+        ty: Ty::truthy(),
         then_only: false,
     })
 }

@@ -377,7 +377,7 @@ pub(in crate::types::check) fn callback_seed(
 }
 
 /// The walk's `fits`: a single-clause `fn` literal of exactly `wanted` parameters.
-pub(super) fn literal_fits(heap: &Heap) -> impl Fn(Value, usize) -> bool + '_ {
+pub(in crate::types::check) fn literal_fits(heap: &Heap) -> impl Fn(Value, usize) -> bool + '_ {
     move |arg, wanted| {
         let Some(f_items) = list_items(heap, arg) else {
             return false;

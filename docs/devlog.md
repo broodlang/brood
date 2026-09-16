@@ -882,7 +882,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-15** — the four open known issues closed: `apply` binds a callee's type variable (KI-140); the dense table region is chunked, 6.4 GB → 52 MB reserved on `regex_test` (KI-142, ADR-354); registry writes are attributed to the module whose load made them and the image differential compares per-module registrations (KI-136)
 - **2026-09-16** — v0.29.0 (the open issues closed) and v0.29.1 (KI-147: a refer-all mistook another process's finishing load for a cycle, so `nest release` refused every hive bundle since v0.28.0); every project at `:brood ">= 0.29.0"`; hive deployed on v0.29.1
 - **2026-09-15** — ADR-355: a `let`-bound `fn` literal's parameters are derived from its callers (the ADR-341 rule scoped to the binding; sites under callback literals and nested `let`s type), and a `sig` naming the required positions seeds a `defn` with undeclared `&optional`s. bedit strict 58 → 48 with no bedit change; downstream sweep of 16 projects green (hive's reds = version skew)
-- **2026-09-16** — v0.29.2 (ADR-356: `markdown/->html` a core module — hive's lean bundle could not find `docs`); hive's tests render the running version's reference seeds; then bedit strict 48 → 0 through three checker rules (`get-in` over a literal path reads the declared shape, `%map-pairs` walks a `map<K, V>` as its entries, the site collector walks a `let`-bound lambda under its derived parameters) and bedit's own leaves
+- **2026-09-16** — v0.29.2 (ADR-356: `markdown/->html` a core module — hive's lean bundle could not find `docs`); hive's tests render the running version's reference seeds; then bedit strict 48 → 0 through three checker rules (`get-in` over a literal path reads the declared shape, `%map-pairs` walks a `map<K, V>` as its entries, the site collector walks a `let`-bound lambda under its derived parameters) and bedit's own leaves; then three more derivation gaps (an `&optional` function.s collected parameters, a let-bound lambda.s self-call folding to ⊥, a fold accumulator.s fields through the ascent) and the four workaround `sig`s deleted
 
 ---
 
@@ -13554,3 +13554,52 @@ handling in the tests — `(or (seq/find …) (error …))` where the test knows
 Also found on the way: a duplicate `ed-body-layout` sig (`-> map` above `-> layout`) and
 `ed-current-pane` declared `pane` while returning the payload. bedit's ratchet is a hard
 zero again.
+
+## 2026-09-16 — the three derivation gaps behind bedit's remaining `sig`s
+
+Taking bedit to zero left four `sig`s on private, derived functions — each against the
+rule that a declaration belongs on the leaf that knows a fact, never on what derives from
+it. Reading why each was needed gave three checker gaps, all in what the SITE COLLECTOR or
+the return inference read narrower than the walk:
+
+- **An `&optional` function's body was collected with every parameter unknown.** The
+  collector bound a declared single arm's parameters only when `fixed_arms_of_form` called
+  it fixed (it does not, with an optional) or when it had a `& rest` tail (a special case).
+  So `ed-chunks->ops-impl`, called once from the declared `ed-chunks->ops (… &optional …)`,
+  derived `number` for `(- limit x)` from unknowns the walk had seeded as `int`. The walk's
+  seeding rule is now one function, `seeded_param_types`, and the collector calls it.
+- **A `let`-bound lambda's result was inferred under its own pre-bound, unknown name.**
+  `(if … (step next) l)` was unknown, the arrow's result unknown, and `ed-blank-run`'s
+  callers read `any`. The self-call contributes ⊥ — the least fixpoint, by induction the
+  recursive call returns something the other branches cover, and an uninhabited argument
+  makes `(inc (step next))` fold away too. That exposed the other half: the literal's
+  PARAMETERS were derived from the external sites alone, so `(f 0)` made `k` the literal
+  `0`, decided `(> k 3)` false, and the ⊥ arm was the only live one — `never`. The
+  self-call sites now join the derivation, a least fixpoint over the body with ADR-350's
+  interval widening (`0`, `0 | 1`, … is `int[0..]` in one step), and the result is `int[4..]`.
+- **A fold accumulator built from a record literal lost its fields on step two.** After one
+  step the accumulator is a union of two records (the seed beside the step); `assoc` over
+  that union answered a flat `map`, and `conj` over its `(tuple) | vector<string>` field
+  read one term's elements. Both distribute over the union now, and the collector walks a
+  callback literal under the accumulator the fold promises (`callback_seed`, as the walk
+  does). A seed with a LITERAL (`{:col 1 …}`) still multiplied: `{col: 1} | {col: 2} | …`
+  one alternative a round, because the ascent's widening left record alternatives alone
+  to protect the tagged-union idiom. Two shapes over the SAME key set now merge
+  field-wise under it (`collapse_same_tags`), which keeps `{ok: …} | {error: …}` apart
+  and makes `col` an interval on the move — `int[2..]` after a step over a non-empty
+  list. `statusbar-layout`'s `sb-clip` derives its `int`.
+
+The four `sig`s are gone from bedit; `BROOD_DERIVE_DBG=1` (catalogued) prints each round of
+the derivation, which is what found the first two in minutes each.
+
+Deleting those `sig`s and re-running bedit under the sharper checker surfaced nine findings
+the old one had read as `any`. Four were real "the code knows" sites (a clamped index, a
+`range` over `(count rows)` the lattice cannot relate to the read, a filter lambda that is
+not a predicate — `(seq/reject … nil?)` is — and a test's `first` after its count assert),
+and one was a checker gap worth the general rule: **a field read guards itself**.
+`(when (:proc state) (os/close (:proc state)))` read `nil | subprocess` under its own guard,
+because only a type predicate over a path narrowed the path, never the path's truthiness, and
+the keyword-call spelling `(:k m)` was not a path at all. Both are now; and the narrowed read
+is the MEET of the narrowing and the structural type, because the guard is recorded in
+whatever scope met the `if` — an inference-side scope that did not know `state` recorded
+`false | nil` for the else branch, and the walk then read that instead of `nil`.

@@ -763,3 +763,37 @@ fn shadowing_clears_an_alias() {
         w
     );
 }
+
+// A bare access path as the test narrows the path by truthiness, in both branches —
+// `(when (:proc state) (os/close (:proc state)))`, the idiom for a maybe-field, read
+// `nil | subprocess` under its own guard. The keyword-call spelling `(:k m)` is a path
+// like `(get m :k)`; the else branch reads the falsy half, so a use there still warns.
+#[test]
+fn a_bare_path_test_narrows_the_path_by_truthiness() {
+    let ws = file_warnings_mode(
+        "\
+         (defmodule t)\n\
+         (deftype st (record &open :proc (or nil subprocess) :n (or nil int)))\n\
+         (sig f (st -> any))\n\
+         (defn f (state) (when (:proc state) (os/close (:proc state))))\n\
+         (sig g (st -> any))\n\
+         (defn g (state) (when (get state :proc) (os/close (get state :proc))))\n\
+         (sig h (st -> int))\n\
+         (defn h (state) (if (:n state) (inc (:n state)) 0))",
+        true,
+    );
+    assert!(ws.is_empty(), "{ws:?}");
+    let ws = file_warnings_mode(
+        "\
+         (defmodule t)\n\
+         (deftype st (record &open :n (or nil int)))\n\
+         (sig h (st -> int))\n\
+         (defn h (state) (if (:n state) 0 (inc (:n state))))",
+        true,
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("inc: argument 1 expects number, got nil")),
+        "the else branch reads the falsy half — {ws:?}"
+    );
+}
