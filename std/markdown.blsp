@@ -1,8 +1,9 @@
 ;; std/markdown.blsp — a small Markdown renderer: Markdown text to HTML.
 ;;
-;; A deliberately small subset: ATX headings, fenced ``` code, `- ` lists, blank-line
-;; paragraphs, and inline `code` / [text](url) links — enough for a guide, a README, a
-;; package's documentation page. Everything is HTML-escaped; it is not a CommonMark parser.
+;; A deliberately small subset: ATX headings, fenced ``` code, `- ` and `1. ` lists, `> `
+;; quotes, `---` rules, blank-line paragraphs, and inline `code`, links, autolinks and
+;; `**emphasis**` — enough for a guide, a README, a package's documentation page.
+Everything is HTML-escaped; it is not a CommonMark parser.
 ;;
 ;; A CORE module, not tooling: it began as `docs/markdown->html` inside the doc generator
 ;; (a DEV module), and the hosted registry rendered package READMEs with it — which only
@@ -11,8 +12,9 @@
 ;; every runtime has it.
 
 (defmodule markdown
-  "Markdown to HTML: `->html` renders a small subset (ATX headings, fenced code, `- `
-lists, blank-line paragraphs, inline `code` and links), HTML-escaping everything.")
+  "Markdown to HTML: `->html` renders a small subset (ATX headings, fenced code, `- ` and
+`1. ` lists, quotes, rules, blank-line paragraphs, inline `code`, links, autolinks and
+`**emphasis**`), HTML-escaping everything.")
 
 (defn- md-escape (s)
   (-> (str s) (string/replace "&" "&amp;") (string/replace "<" "&lt;") (string/replace ">" "&gt;")))
@@ -111,10 +113,6 @@ lists, blank-line paragraphs, inline `code` and links), HTML-escaping everything
         end (string/length text))
     (when (> close 1)
       (let (url (string/substring text 1 close))
-        (when (and (any? *md-autolink-schemes* (fn (scheme) (string/starts-with? url scheme)))
-                (< (string/span-until url 0 " \t") (string/length url) )
-                false)
-          nil)
         (when (and (any? *md-autolink-schemes* (fn (scheme) (string/starts-with? url scheme)))
                 (= (string/span-until url 0 " \t") (string/length url)))
           [(str "<a href=\"" (md-attr url) "\">" (md-escape url) "</a>")
