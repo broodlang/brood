@@ -38,9 +38,9 @@
 (defn- loaded? (name) (contains? *features* name))
 
 ;; ── an operand reference is deferred ──────────────────────────────────────────
-;; `lazyprobe-a/answer` in VALUE position: recorded at compile, loaded at first use.
-
-(defn- use-a () (let (f lazyprobe-a/answer) (f)))
+;; `lazyprobe-a/answer` in VALUE position: recorded at compile, loaded at first use. The
+;; `use-a` that shows it is defined IN THE CHILD PROGRAM (below) — a copy here was dead
+;; code once the unit moved to a child, and the unused-private lint said so (KI-149).
 
 ;; ── the JIT shape ──────────────────────────────────────────────────────────────
 ;; A hot function whose cold branch holds the only reference to `lazyprobe-jit`. The entry

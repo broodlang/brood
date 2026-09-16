@@ -22,3 +22,26 @@
   ;; carries no developer tooling — so it must not live in one.
   (test "it is a CORE module, present on every runtime"
     (is (includes? (reflect/builtin-modules) "markdown"))))
+
+(describe "markdown/->html — the README subset"
+  (test "strong and emphasis, with arithmetic and identifiers left alone"
+    (assert= (->html "a **b** c *d*") "<p>a <strong>b</strong> c <em>d</em></p>")
+    (assert= (->html "2 * 3 * 4") "<p>2 * 3 * 4</p>")
+    (assert= (->html "x_y_z **open") "<p>x_y_z **open</p>")
+    (assert= (->html "**see [x](/y)**") "<p><strong>see <a href=\"/y\">x</a></strong></p>"))
+
+  (test "an angle-bracket URL is a link; a tag or a placeholder is text"
+    (assert= (->html "at <https://a.b/c>.")
+      "<p>at <a href=\"https://a.b/c\">https://a.b/c</a>.</p>")
+    (assert= (->html "<b>x</b> <your token>") "<p>&lt;b&gt;x&lt;/b&gt; &lt;your token&gt;</p>")
+    (assert= (->html "<javascript:alert(1)>") "<p>&lt;javascript:alert(1)&gt;</p>"))
+
+  (test "ordered lists, continued items, and a list that resumes after a code block"
+    (assert= (->html "1. one\n2. two\n   more") "<ol><li>one</li><li>two more</li></ol>")
+    (assert= (->html "1. one\n\n   ```\n   code\n   ```\n\n2. two")
+      "<ol><li>one</li></ol><pre><code>code</code></pre><ol start=\"2\"><li>two</li></ol>"))
+
+  (test "h4, quotes and rules"
+    (assert= (->html "#### D") "<h4>D</h4>")
+    (assert= (->html "> a\n> b") "<blockquote><p>a b</p></blockquote>")
+    (assert= (->html "a\n\n---\n\nb") "<p>a</p><hr><p>b</p>")))

@@ -1042,12 +1042,30 @@ check-result cache and the `--failed`/`--stale` records live in; created on dema
                                (str path ": warning: unused private function: " bare)))))
             acc))))))
 
-;; Print the unused-private warnings to stderr and return the count. Advisory;
-;; honors `BROOD_NO_CHECK=1` like the other whole-project passes.
-(defn- project-check-unused-private (extracts)
+;; The whole-project lints (duplicate-defs, unused-private) for a check that REPORTS on
+;; `paths` — the whole project, or the listed files of `nest check FILE…`. Always computed
+;; over the project's every file, because "is this private used?" is only answerable there;
+;; reported for the paths asked about. Before this the listed form ran neither lint —
+;; `nest check` warned `unused private function: use-a` where CI's explicit-list invocation
+;; over the same files said nothing (KI-149) — and the bare form THREW THE COUNTS AWAY, so
+;; the lints had never failed a gate in either form. Returns the count printed.
+(defn- project-whole-lints (root paths)
   (if (= (os/env "BROOD_NO_CHECK") "1")
     0
-    (fold (project-unused-private-warnings extracts) 0 (fn (n w) (io/puts w :to *err*) (+ n 1)))))
+    (let (files (all-files root)
+          listed (map paths path/absolute)
+          ;; a duplicate-def warning names its files mid-message; an unused-private one
+          ;; leads with its file — both are kept by the path they mention
+          keep? (fn (w) (any? listed (fn (p) (includes? w p))))
+          ;; native parallel scan every run — cheaper than any disk cache (see
+          ;; `project-gather-extracts`)
+          extracts (project-gather-extracts files)
+          source-set (fold (source-files root) {} (fn (m p) (%map-assoc m p true))))
+      (fold (seq/filter (append (project-duplicate-def-warnings extracts source-set)
+                          (project-unused-private-warnings extracts))
+              keep?)
+        0
+        (fn (n w) (io/puts w :to *err*) (+ n 1))))))
 
 (defn check ()
   "Advisory type-check the whole project (every source + test file), printing GNU-style `FILE:LINE:COL:` warnings to stderr. Errors if not in a Brood project. Backs `nest check`."
@@ -1055,16 +1073,11 @@ check-result cache and the `--failed`/`--stale` records live in; created on dema
     (when (nil? root)
       (error "check: not in a Brood project (no project.blsp found from " (file/cwd) ")"))
     (project-ensure-loaded root)
-    (let (files (all-files root)
-          ;; Phase 1 (unused-private + duplicate-defs): native parallel scan every
-          ;; run — cheaper than any disk cache (see `project-gather-extracts`).
-          extracts (project-gather-extracts files)
-          source-set (fold (source-files root) {} (fn (m p) (%map-assoc m p true))))
-      (project-check-duplicate-defs extracts source-set)
-      (project-check-unused-private extracts)
-      ;; Phase 2 (per-file type-check): the EXPENSIVE pass — disk-cached per file
-      ;; (dep-fingerprint) so a warm re-check reuses everything unchanged.
-      (first (project-check-files files root)))))
+    (let (files (all-files root))
+      ;; Phase 1: the whole-project lints. Phase 2 (per-file type-check): the EXPENSIVE
+      ;; pass — disk-cached per file (dep-fingerprint) so a warm re-check reuses
+      ;; everything unchanged. Both count: a warning from either fails the gate.
+      (+ (project-whole-lints root files) (first (project-check-files files root))))))
 
 ;; (check-files paths) — advisory-check a specific list of files, the entry
 ;; behind `nest check FILE…`. Loads the project image *first* (same
@@ -1079,8 +1092,13 @@ check-result cache and the `--failed`/`--stale` records live in; created on dema
 (defn check-files (paths)
   "Advisory type-check the listed files with the project image loaded first (so cross-module/namespace imports resolve), printing GNU `FILE:LINE:COL:` warnings to stderr and returning the total count. The entry behind `nest check FILE…`; shares its loader and per-file walk with `check`. Outside a project, checks against the prelude alone."
   (let (root (project/find-root (file/cwd)))
-    (when root (project-ensure-loaded root))
-    (first (project-check-files paths root))))
+    (if (nil? root)
+      (first (project-check-files paths nil))
+      (do
+        (project-ensure-loaded root)
+        ;; the whole-project lints too, reported for the listed files (KI-149): CI's
+        ;; explicit-list invocation is this form, and it had never run them
+        (+ (project-whole-lints root paths) (first (project-check-files paths root)))))))
 
 ;; Sources-only variant for `run`'s auto pre-flight: skip `tests/`,
 ;; because test files depend on the test-framework macros (`describe`/`test`/

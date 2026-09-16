@@ -144,42 +144,43 @@
   (test "an unclosed code fence at EOF is emitted, not dropped"
     (is (includes? (markdown/->html "```\n(+ 1 2)") "<pre><code>(+ 1 2)</code></pre>"))))
 
-;; `md-links` — inline link rendering. Characterisation tests written BEFORE making the
+;; `md-run` — the inline scanner (links, autolinks, emphasis; once `md-links`, links only).
+;; Characterisation tests written BEFORE making the
 ;; function tail-recursive: it had no coverage at all, and it is fiddly index arithmetic over
 ;; strings, so the rewrite needed something to hold it to. Every case below passed against the
 ;; original non-tail implementation first.
-(describe "docs: md-links"
+(describe "docs: md-run"
   (test "text with no bracket is escaped and returned"
-    (assert= "plain &lt;b&gt;" (markdown/md-links "plain <b>")))
+    (assert= "plain &lt;b&gt;" (markdown/md-run "plain <b>")))
 
   (test "a real [text](url) link becomes an anchor"
-    (assert= "<a href=\"u\">a</a>" (markdown/md-links "[a](u)")))
+    (assert= "<a href=\"u\">a</a>" (markdown/md-run "[a](u)")))
 
   (test "text around a link is preserved and escaped"
-    (assert= "x <a href=\"u\">a</a> y" (markdown/md-links "x [a](u) y")))
+    (assert= "x <a href=\"u\">a</a> y" (markdown/md-run "x [a](u) y")))
 
   (test "two links in one run both render"
     (assert= "<a href=\"u\">a</a><a href=\"v\">b</a>"
-      (markdown/md-links "[a](u)[b](v)")))
+      (markdown/md-run "[a](u)[b](v)")))
 
   (test "a bracket run that is not a link is emitted literally, and scanning continues"
-    (assert= "[a] then <a href=\"u\">b</a>" (markdown/md-links "[a] then [b](u)")))
+    (assert= "[a] then <a href=\"u\">b</a>" (markdown/md-run "[a] then [b](u)")))
 
   (test "an unclosed ] escapes the whole run"
-    (assert= "[a(u)" (markdown/md-links "[a(u)")))
+    (assert= "[a(u)" (markdown/md-run "[a(u)")))
 
   (test "an unclosed ) escapes the whole run"
-    (assert= "[a](u" (markdown/md-links "[a](u")))
+    (assert= "[a](u" (markdown/md-run "[a](u")))
 
   (test "link text and url are escaped"
-    (assert= "<a href=\"u&amp;v\">&lt;t&gt;</a>" (markdown/md-links "[<t>](u&v)")))
+    (assert= "<a href=\"u&amp;v\">&lt;t&gt;</a>" (markdown/md-run "[<t>](u&v)")))
 
   (test "a javascript: url is neutralised"
     ;; The trailing `)` is real, not a bug in the test: `index-of ")"` finds the INNER paren,
     ;; so the url is `javascript:alert(1` and the outer `)` falls through as literal text.
     ;; Nested parens in a url truncate it — pinned here because the security property that
     ;; matters (a `javascript:` url becomes `#`) holds regardless.
-    (assert= "<a href=\"#\">x</a>)" (markdown/md-links "[x](javascript:alert(1))")))
+    (assert= "<a href=\"#\">x</a>)" (markdown/md-run "[x](javascript:alert(1))")))
 
   (test "a long run of links all render"
     ;; 2000 links. Recursion depth here is one frame per link, so this is also the shape the
@@ -187,7 +188,7 @@
     ;; warning is about headroom, not an observed failure. `string-split` on N separators
     ;; yields N+1 pieces.
     (let (src (apply str (map (range 0 2000) (fn (_) "[a](u)"))))
-      (assert= 2001 (count (string/split (markdown/md-links src) "<a href="))))))
+      (assert= 2001 (count (string/split (markdown/md-run src) "<a href="))))))
 
 ;; The namespaces the catalogue covers, read off the catalogue itself: every entry's
 ;; qualifier. Derived rather than listed so the gate follows the file — the first
