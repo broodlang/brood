@@ -82,6 +82,7 @@ pub use io::{arm_mcp_progress, begin_stdout_capture, disarm_mcp_progress, take_c
 // classifier rather than growing a second one that could drift (`types::check::infer`).
 pub(crate) use numeric::{classify_numeric_text, NumericText};
 pub use os::set_script_args;
+#[cfg(feature = "jit")]
 pub(crate) use sequences::{first_without_eval, rest_without_eval};
 pub use terminal::{restore_raw, restore_terminal, restore_terminal_on_exit};
 pub use tooling::{DOC_FORMS, SPECIAL_FORMS};

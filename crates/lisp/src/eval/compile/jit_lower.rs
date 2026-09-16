@@ -700,6 +700,7 @@ fn jit_lower_arm_inner(
                                                 // destination down lets the callee store once, into the slot the ultimate consumer
                                                 // already owns. See docs/compute-frontier.md §2h.
     sig.params.push(AbiParam::new(ptr_ty)); // out: *mut Value (Done result)
+    sig.params.push(AbiParam::new(ptr_ty)); // ctx: *const JitCallCtx (rung A0: unread)
     sig.returns.push(AbiParam::new(types::I64)); // outcome: 0 = Done, 1 = deopt, 2 = preempt
     let seq = JIT_ARM_SEQ.fetch_add(1, Ordering::Relaxed);
     let id = m
@@ -1002,6 +1003,7 @@ fn jit_lower_arm_inner(
     armfn_sig.params.push(AbiParam::new(ptr_ty)); // heap
     armfn_sig.params.push(AbiParam::new(types::I64)); // base
     armfn_sig.params.push(AbiParam::new(ptr_ty)); // out
+    armfn_sig.params.push(AbiParam::new(ptr_ty)); // ctx: *const JitCallCtx
     armfn_sig.returns.push(AbiParam::new(types::I64)); // outcome
                                                        // brood_rt_vector_ref(heap, out, vec 3 words, idx 3 words) -> status: bounds-checked
                                                        // slab read into `*out` (0 = ok, 1 = deopt for non-vector / non-int / out-of-range).
@@ -1237,6 +1239,9 @@ fn jit_lower_arm_inner(
     let heap = b.block_params(entry)[0];
     let base = b.block_params(entry)[1];
     let out_ptr = b.block_params(entry)[2];
+    // The activation context (`JitCallCtx`, rung A0): in the ABI, not yet read — the
+    // rungs after A0 move the IC-base, depth and env reads here.
+    let _ctx_ptr = b.block_params(entry)[3];
     // `roots_base` is a **Variable**, not a fixed SSA value: a Brood→Brood call's staging
     // pushes (and the callee's own frames) may reallocate `roots`, so the base is re-fetched
     // after each call (`def_var` below). For a call-free arm it keeps its single entry

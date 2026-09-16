@@ -640,10 +640,40 @@ pub(super) fn emit_call(
             );
             let argc_c = b.ins().iconst(types::I64, argc as i64);
             let argc_shifted = b.ins().iconst(types::I64, (argc as i64) << 32);
+            // The callee's `JitCallCtx` (rung A0, `docs/call-convention.md`): the same four
+            // facts the heap stores above carry — env (Stable(GLOBAL) = (0, u64::MAX) by
+            // guard 1), the callee's IC cursors, the depth it runs at — built in a stack
+            // slot and passed by pointer. Unread by the callee at A0; the rungs after move
+            // its reads here and the heap stores go.
+            let ctx_slot = b.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                std::mem::size_of::<crate::jit::JitCallCtx>() as u32,
+                3,
+            ));
+            {
+                use crate::jit::JitCallCtx;
+                let env_o = std::mem::offset_of!(JitCallCtx, env) as i32;
+                let ic_o = std::mem::offset_of!(JitCallCtx, ic_base) as i32;
+                let gic_o = std::mem::offset_of!(JitCallCtx, gic_base) as i32;
+                let depth_o = std::mem::offset_of!(JitCallCtx, depth) as i32;
+                // `stack_store`'s leading type is the POINTER width (it addresses the slot),
+                // not the stored value's — `I32` there fails the verifier with "invalid
+                // pointer width", which `make tier-audit` caught on ten rows while the
+                // whole suite passed (a refused arm just runs on the VM).
+                let pt = funcs.ptr_ty;
+                b.ins().stack_store(pt, z64, ctx_slot, env_o);
+                b.ins().stack_store(pt, neg1, ctx_slot, env_o + 8);
+                b.ins().stack_store(pt, cic, ctx_slot, ic_o);
+                b.ins().stack_store(pt, cgic, ctx_slot, gic_o);
+                b.ins().stack_store(pt, d1, ctx_slot, depth_o);
+            }
+            let ctx_addr = b.ins().stack_addr(funcs.ptr_ty, ctx_slot, 0);
             // The call itself — straight into the callee's native code.
-            let icall =
-                b.ins()
-                    .call_indirect(funcs.armfn_sig, code_v, &[heap, stage_base, out_addr]);
+            let icall = b.ins().call_indirect(
+                funcs.armfn_sig,
+                code_v,
+                &[heap, stage_base, out_addr, ctx_addr],
+            );
             let outcome = b.inst_results(icall)[0];
             // Restores, in `jit_run_fast_link`'s order.
             b.ins()

@@ -976,7 +976,8 @@ pub(crate) fn hof_apply_native(
     heap.native_gateway_seq += 1;
     let gw_seq = heap.native_gateway_seq;
     let saved_gw = std::mem::replace(&mut heap.cur_native_gateway, gw_seq);
-    let outcome = f(heap as *mut Heap, base as i64, &mut ret as *mut Value);
+    let ctx = crate::jit::JitCallCtx::from_heap(heap);
+    let outcome = f(heap as *mut Heap, base as i64, &mut ret as *mut Value, &ctx);
     heap.cur_native_gateway = saved_gw;
     heap.jit_native_depth = depth;
     heap.set_ic_bases(saved_bases);

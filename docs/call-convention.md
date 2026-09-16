@@ -163,7 +163,7 @@ flip, and then the interpreter's call stops being the number these rows pay.
 
 | rung | change | gate |
 |---|---|---|
-| A0 | `JitArmFn` takes the context as arguments; Rust callers pass what they read; native code still writes nothing new | flat everywhere (`perf stat` on the call loop identical ±1%); full suite; fuzz |
+| A0 | `JitArmFn` takes the context as arguments; Rust callers pass what they read; native code still writes nothing new | flat everywhere (`perf stat` on the call loop identical ±1%); full suite; fuzz — **LANDED 2026-09-16**: the context is one pointer to a `JitCallCtx` (env is two words, so seven scalars would not fit six registers); the spliced loop reads 82.8 → 82.8 instr/iter, a loop with a real inline call 293.8 → 303.9 (the five ctx stores, which A1 spends); eight rows inside their floors; `make tier-audit` caught the one bug on the way (`stack_store`'s leading type is the pointer width) that the whole suite passed over |
 | A1 | the inline blob stops saving/restoring rows 2–6; the cold path restores `jit_force_vm`/env roots | the call loop's instruction count (target ≤ 120 from 218); `bintree`, `pfib`, `nqueens`, `pipeline` under `ab --floor` |
 | A2 | gateway token = frame base; latch compare unchanged | `vm_direct_call.rs` dirty-park count 0; call loop ≤ 100 |
 | A3 | 2-register result + tag-gated third word | call loop ≤ 70; `sort`/`json`/`strings` (string results) flat; fuzz `strings` oracle |

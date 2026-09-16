@@ -494,6 +494,7 @@ pub(super) fn record_seq(heap: &mut Heap, v: Value) -> Result<Option<Value>, Lis
 /// answered; `None` for the two that need the evaluator (a record's `Seqable` dispatch,
 /// a lazy seq-view's realisation), which the caller turns into a deopt so the VM's own
 /// `first`/`rest` runs them. Everything else here is exactly the builtin.
+#[cfg(feature = "jit")]
 pub(crate) fn first_without_eval(heap: &mut Heap, v: Value) -> Option<LispResult> {
     if matches!(v, Value::Map(_) | Value::SeqView(_)) {
         return None;
@@ -503,6 +504,7 @@ pub(crate) fn first_without_eval(heap: &mut Heap, v: Value) -> Option<LispResult
 }
 
 /// See [`first_without_eval`].
+#[cfg(feature = "jit")]
 pub(crate) fn rest_without_eval(heap: &mut Heap, v: Value) -> Option<LispResult> {
     if matches!(v, Value::Map(_) | Value::SeqView(_)) {
         return None;

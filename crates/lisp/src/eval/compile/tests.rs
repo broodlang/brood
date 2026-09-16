@@ -349,7 +349,8 @@ fn vm_run_bc_captures_and_resumes_a_suspend() {
 #[cfg(feature = "jit")]
 fn run_arm(f: crate::jit::JitArmFn, heap: &mut Heap, base: usize) -> (i64, Value) {
     let mut out = Value::Nil;
-    let outcome = f(heap as *mut Heap, base as i64, &mut out as *mut Value);
+    let ctx = crate::jit::JitCallCtx::from_heap(heap);
+    let outcome = f(heap as *mut Heap, base as i64, &mut out as *mut Value, &ctx);
     (outcome, out)
 }
 
