@@ -188,6 +188,12 @@ retries = 1
 # is 5 ms and pulls in 27 globals, all of them `complete`'s own. So this is not the dependency
 # coming back, and the budget is not hiding it.
 #
+# 2026-09-16: red on two consecutive main runs at 360 s. The cost was never the case's — it was
+# the job's env: `BROOD_NO_STDIMAGE=1 BROOD_NO_PRELUDE_IMAGE=1 BROOD_VM=0` makes every one of
+# the 96 spawns a source boot (1.31 s on an idle box against 0.02 s imaged). The test now hands
+# its children the boot artifacts and builds the stdlib image once up front: 104 s -> 26 s from
+# a cold cache under that env, solo. The budget stands; it is no longer load-bearing.
+#
 # What it is: the same engine mismatch every other raise in this file has turned out to be.
 # The CI `differential (tree-walker)` job runs this case under `BROOD_VM=0` and timed out at
 # **180.005s** on five consecutive commits. Measured here, same commit, case alone on a

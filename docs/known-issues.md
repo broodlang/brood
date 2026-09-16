@@ -10109,7 +10109,8 @@ what no load replays (the prelude's and the root's), each module's entries come 
 that module — by replay from the image, or by evaluation from source — and the session
 keeps everything when the isolate closes.
 
-*The differential.* `image_matches_source.rs` gained
+*The differential.* `image_registrations_match_source.rs` (a binary of its own — it owns
+its cache through `set_var`, and `env_isolation` allows one test per such binary) holds
 `an_imaged_module_registers_what_its_source_registers`: the image is built in a runtime of
 its own (the build loads every module into the process that runs it), then every module is
 loaded alone inside `%isolate-discard-loads` in a source runtime and an imaged one, and the

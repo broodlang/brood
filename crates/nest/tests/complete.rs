@@ -43,6 +43,17 @@ impl Completion {
 fn complete_in(dir: &Path, words: &[&str]) -> Completion {
     let out = Command::new(env!("CARGO_BIN_EXE_nest"))
         .current_dir(dir)
+        // The boot artifacts stay ON for these children whatever the job's policy. The
+        // subject here is completion over hostile input, not the boot path, and the
+        // `differential (tree-walker)` job sets both off-switches for the whole suite —
+        // under which one spawn is a 1.3 s source boot (measured 2026-09-16, idle box:
+        // 0.02 s imaged, 0.21 s with the prelude image alone, 1.31 s with neither) and
+        // the 96-spawn matrix ran 360 s+ beside `brood_suite_passes` on the 2-core runner,
+        // red on two consecutive runs. Every other case in that job still boots from
+        // source; this one exercises `complete`, and its own cost guard is
+        // `completion_load_cost.rs`, not a budget.
+        .env_remove("BROOD_NO_PRELUDE_IMAGE")
+        .env_remove("BROOD_NO_STDIMAGE")
         .arg("complete")
         .arg("--")
         .args(words)
@@ -112,6 +123,20 @@ fn project() -> TempDir {
 
 #[test]
 fn completion_never_fails_however_it_is_called() {
+    // Build the stdlib image ONCE before the 96 spawns below, whatever the job's policy:
+    // `complete_in` hands its children the boot artifacts, but the `differential
+    // (tree-walker)` job's setup skipped building the image (that is `BROOD_NO_STDIMAGE`'s
+    // other effect), so each spawn there still loaded `std/` from source under the
+    // tree-walker — 104 s for the matrix on an idle 28-core box (2026-09-16), 360 s+ beside
+    // `brood_suite_passes` on the runner. Best-effort, as `nest` itself builds it: a
+    // failure here costs the source path, never the case.
+    let _ = Command::new(env!("CARGO_BIN_EXE_nest"))
+        .env_remove("BROOD_NO_PRELUDE_IMAGE")
+        .env_remove("BROOD_NO_STDIMAGE")
+        .arg("stdimage")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
     let proj = project();
     let bare = tempdir("bare");
 
