@@ -935,3 +935,39 @@ fn a_combinator_reads_a_let_bound_lambdas_derived_result() {
     );
     assert!(ws.is_empty(), "{ws:?}");
 }
+
+// The derivation reaches through a `let`-bound literal in BOTH directions: the walk binds
+// the literal's parameters from its callers (above), and the site collector — what a
+// same-file function's parameters are derived from (ADR-341) — walks the literal's body
+// under the same types. Before this the collector bound the literal's parameters to
+// nothing, so a private helper called from inside one derived `number` from `(+ l dir)`
+// where the walk saw `int`: bedit's `ed-blank-line?` from the `step` of `ed-blank-run`.
+#[test]
+fn a_site_inside_a_let_bound_lambda_hands_the_derived_type() {
+    let program = |arg: &str| {
+        format!(
+            "\
+             (defmodule t)\n\
+             (defn- blank? (text line) (= \"\" (string/trim (string/substring text line))))\n\
+             (sig run (string int int -> int))\n\
+             (defn run (text line dir)\n\
+               (let (n (string/length text)\n\
+                     step (fn (l)\n\
+                            (let (next (+ l dir))\n\
+                              (if (and (>= next 0) (< next n) (blank? text next)) (step next) l))))\n\
+                 (if (blank? text {arg}) (step line) line)))"
+        )
+    };
+    let ws = file_warnings_mode(&program("line"), true);
+    assert!(
+        ws.is_empty(),
+        "`next` is an int under the derived `l` — {ws:?}"
+    );
+    // The helper's parameter is still DERIVED (not declared): a wrong caller shows.
+    let ws = file_warnings_mode(&program("\"s\""), true);
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("string/substring") && w.contains("string")),
+        "{ws:?}"
+    );
+}

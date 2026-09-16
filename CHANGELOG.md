@@ -4,6 +4,17 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## Unreleased
+
+**Three checker rules, found by taking bedit's strict findings to zero.** `get-in` with a
+literal path reads the declared shape key by key — an absent key at any step answers the
+default, a present nil at the last key stays nil — where it read `any` beside a chain of
+`get`s that typed. `%map-pairs` walks a `map<K, V>` as its `(tuple K V)` entries, like
+`seq`. And the caller-derived parameter pass (ADR-341) walks a `let`-bound lambda's body
+under the parameters the walk derives for it (ADR-355), so a helper called from inside one
+no longer reads `number` for an `int`. `std/editor`'s `layout` declares that it holds a
+pane, and `link-fold` its map.
+
 ## v0.29.2 — `markdown/->html` is a core module
 
 **The Markdown renderer leaves the doc generator** (ADR-356): `docs/markdown->html` is

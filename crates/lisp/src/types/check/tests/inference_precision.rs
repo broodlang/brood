@@ -853,3 +853,45 @@ fn apply_of_a_ring_operator_stays_in_its_closure_not_one_steps_interval() {
     assert_eq!(ty_str("(apply + [1 2])"), "int");
     assert_eq!(ty_str("(apply * 2 [1.5])"), "float");
 }
+
+// `get-in` with a literal path reads through a declared shape the way a chain of `get`s
+// does — a keyword step is the record field, any other step is a `map<K, V>`'s value.
+// The offset read back from a declared `(map any int)` two levels down is `int`, so the
+// arithmetic on it is int and the `range` it feeds does not warn; with the leaf declared
+// `any` the same read says `number`, which is what every consumer of `get-in` used to see.
+#[test]
+fn get_in_with_a_literal_path_reads_the_declared_shape() {
+    let program = |leaf: &str| {
+        format!(
+            "\
+             (defmodule t)\n\
+             (deftype model (record &open :hosted (optional (map int (record &open :cursors (optional (map any {leaf})))))))\n\
+             (sig f (model int any -> list))\n\
+             (defn f (m i who)\n\
+               (let (pos (get-in m [:hosted i :cursors who]))\n\
+                 (if (nil? pos) '() (range (dec pos) (+ pos 1)))))"
+        )
+    };
+    let precise = file_warnings_mode(&program("int"), true);
+    assert!(precise.is_empty(), "{precise:?}");
+    let vague = file_warnings_mode(&program("any"), true);
+    assert!(
+        vague
+            .iter()
+            .any(|w| w.contains("range") && w.contains("number")),
+        "{vague:?}"
+    );
+}
+
+// The default form: the walk stops at the first absent key (or non-map value) and answers
+// the default, so an empty map two keys deep IS the default — `1`, not `1 | nil` — while a
+// present key holding nil at the last step is still nil.
+#[test]
+fn get_in_with_a_default_reads_the_default_for_absence_only() {
+    assert_eq!(ty_str("(get-in {} [:sandbox :next-id] 1)"), "1");
+    assert_eq!(ty_str("(get-in {:a {:b 2}} [:a :b] 1)"), "2");
+    assert_eq!(ty_str("(get-in {:a {:b nil}} [:a :b] 1)"), "nil");
+    assert_eq!(ty_str("(get-in {:a {:b 2}} [:a :c] 1)"), "1");
+    assert_eq!(ty_str("(get-in {:a {:b 2}} [:a :b])"), "2");
+    assert_eq!(ty_str("(get-in {:a {:b 2}} [:a :c])"), "nil");
+}

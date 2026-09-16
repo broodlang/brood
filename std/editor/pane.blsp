@@ -48,7 +48,10 @@ the keybindings."
 (deftype rect (tuple int int int int))
 (deftype pane (record &open :path list :payload any :selected bool :rect rect))
 (deftype divider (record &open :path list :dir (or :row :col) :rect rect :split-rect rect))
-(deftype layout (record &open :panes (list pane) :dividers (or nil (list divider))))
+;; A layout always holds a pane: a tree is a pane or a split of trees, so its leaves are
+;; never none — which is what makes `(first (:panes layout))` a pane and not `nil | pane`.
+(deftype layout
+  (record &open :panes (len (list pane) 1 _) :dividers (or nil (list divider))))
 
 ;; ---- nodes ------------------------------------------------------------------
 
