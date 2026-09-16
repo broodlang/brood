@@ -541,7 +541,6 @@ the test rather than hanging the run."
 (defn r-group (r)
   "The group (describe) name of a result tuple `(group name fails ms …)`, or \"\" when ungrouped."
   (first r))
-(sig r-group (seqable -> any))
 (defn r-name (r) "The test name of a result tuple `(group name fails ms …)`." (second r))
 (defn r-fails (r)
   "The list of failure records for a result — empty means the test passed. Each record is `(loc detail-lines)`."
@@ -965,7 +964,6 @@ the test rather than hanging the run."
       (let (pid (spawn (send me (list :unit-result (self) (run-unit unit)))))
         (monitor pid)
         (cons (list pid unit) acc)))))
-(sig spawn-units (seqable any -> list))
 
 ;; How many units run concurrently in the parallel phase. This BOUNDS MEMORY: the
 ;; GC is still a no-op (M1), so every *started* worker holds its entire allocation
@@ -1389,7 +1387,6 @@ the test rather than hanging the run."
 ;; what a test reports; a process that outlives its own test was a leak either way.
 (defn- test-quiesce-file (before)
   (test-quiesce-rounds before 20))
-(sig test-quiesce-file (seqable -> any))
 
 ;; Kill every process the file left behind, and REPEAT until none is left — bounded by
 ;; `rounds`. One pass is not enough (KI-120): a supervisor among the stragglers respawns

@@ -351,7 +351,6 @@ worse.
   ;; its fields with `get`, so a plain map would work — but relying on that
   ;; would make this module depend on an undocumented duck-typing contract.
   (datetime/datetime y mo d h mi s ms))
-(sig tp-dt (int int int int int int int -> datetime))
 
 (defn- tp-floor-dt (t)
   (let (m (tempo-by-unit t))
@@ -367,7 +366,6 @@ worse.
 (defn from-ms (t)
   "The instant `t` opens, in Unix epoch milliseconds (inclusive)."
   (datetime/->epoch-ms (tp-floor-dt t)))
-(sig from-ms (map -> int))
 
 (defn to-ms (t)
   "The instant `t` closes, in Unix epoch milliseconds (**exclusive**)."

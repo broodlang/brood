@@ -58,7 +58,6 @@ that is not an RFC 3986 unreserved character (A-Z a-z 0-9 - _ . ~) is encoded as
 
     (url/percent-encode \"a b\")   → \"a%20b\""
   (apply str (reverse (url-encode-bytes (seq (string/->bytes s)) nil))))
-(sig percent-encode (string -> string))
 
 ;; ---- percent-decoding -------------------------------------------------------
 
@@ -122,7 +121,6 @@ that is not an RFC 3986 unreserved character (A-Z a-z 0-9 - _ . ~) is encoded as
     (if (= r :invalid)
       (failure "url/percent-decode: invalid percent-encoding: " (pr-str s))
       r)))
-(sig percent-decode (string -> (or string failure)))
 
 ;; ---- query string encoding --------------------------------------------------
 ;;
@@ -167,7 +165,6 @@ defines rather than as its field map.
                         [(if (keyword? (first kv)) (->string (first kv)) (str (first kv)))
                           (->string (second kv))]))))
     (apply str (reverse (url-pairs->query pairs nil true)))))
-(sig query-encode (map -> string))
 
 ;; ---- query string decoding --------------------------------------------------
 

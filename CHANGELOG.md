@@ -15,6 +15,31 @@ under the parameters the walk derives for it (ADR-355), so a helper called from 
 no longer reads `number` for an `int`. `std/editor`'s `layout` declares that it holds a
 pane, and `link-fold` its map.
 
+**Three more derivation gaps closed — the ones bedit had papered over with a `sig` on a
+derived function.** The site collector seeds an `&optional` function's parameters from its
+declaration by the same rule the walk uses (`seeded_param_types`), so a self-recursive
+accumulator called from one derives `int`, not `number`; a `let`-bound lambda's parameters
+are derived from its own self-call sites too (a least fixpoint over its body, intervals
+widened) and its result is inferred with the self-call contributing ⊥, so a recursive local
+helper's callers read `int[4..]` for `(let (f (fn (k) (if (> k 3) k (f (inc k))))) (f 0))`
+instead of `any`; and a fold accumulator built from a record literal keeps its fields through
+the ascent — `assoc` with literal keys distributes over a union of record shapes, `conj`
+reads its elements over every term, two record shapes over one key set merge field-wise
+under the ascent's widening, and a callback literal in the collector is walked under the
+accumulator the fold promises. `BROOD_DERIVE_DBG=1` traces the derivation's rounds.
+
+**344 redundant `sig`s are gone from std and the prelude** — each one the checker infers verbatim without
+it (`scripts/redundant-sigs.blsp` asks per declaration, and its `--remove` re-derives to
+catch a sig another one depended on). What remains declares a fact the inference does not
+reach on its own.
+
+**A field read guards itself.** `(when (:proc state) (os/close (:proc state)))` — the idiom
+for a maybe-field — read `nil | subprocess` under its own guard: a bare access path as a
+test now narrows the path by truthiness in both branches, the keyword-call read `(:k m)` is
+a path like `(get m :k)`, and a narrowed path is read as the meet of the narrowing and what
+the form reads structurally (the else branch of `(if (:n state) …)` is `nil`, not the bare
+`false | nil` a scope that did not know the base recorded).
+
 ## v0.29.2 — `markdown/->html` is a core module
 
 **The Markdown renderer leaves the doc generator** (ADR-356): `docs/markdown->html` is

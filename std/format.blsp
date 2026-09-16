@@ -43,18 +43,15 @@ for every well-formed input. Hand-checked across the brood repo's std/ and tests
 (defn node-kind (n)
   "The kind keyword of CST node `n` (`:list`, `:symbol`, `:whitespace`, …)."
   (seq/vector-ref n 0))
-(sig node-kind (vector -> any))
 (defn node-text (n)
   "The raw source text of leaf node `n` (so it re-emits byte-for-byte)."
   (seq/vector-ref n 1))
-(sig node-text (vector -> any))
 ; leaf
 (defn- node-form (n) (seq/vector-ref n 1))
 ; wrapper (quote/quasi/unquote/splice)
 (defn node-children (n)
   "The child-node vector of container node `n` (includes trivia)."
   (seq/vector-ref n 1))
-(sig node-children (vector -> any))
 ; container (a vector)
 
 (defn- whitespace? (n) (= (node-kind n) :whitespace))
@@ -179,7 +176,6 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
     (let (sym (symbol (node-text head-node)))
       (get *format-headers-extra* sym (get *format-headers* sym -1)))
     -1))
-(sig head-header-count (vector -> any))
 
 ;; Forms whose FIRST header arg is a pair-list (alternating name/value). When
 ;; that list breaks across lines, we group each name+value on one line and
@@ -197,7 +193,6 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
   "True if `head-node` names a form whose first header arg is a pair-list."
   (and (= (node-kind head-node) :symbol)
     (get *format-pair-bindings* (symbol (node-text head-node)) false)))
-(sig pair-bindings? (vector -> bool))
 
 (defn pair-body? (head-node)
   "True if `head-node` names a form whose body emits in pairs."
@@ -228,7 +223,6 @@ the name on the head line so every arm lands on its own line."
       (and (= (node-kind slot) :list)
         (let (lead (first-structural-child slot))
           (and lead (or (= (node-kind lead) :list) (= (node-kind lead) :vector))))))))
-(sig multi-arity-defn? (vector any -> (or nil bool)))
 
 ;; ---- the inlineability check ------------------------------------------------
 ;; Every LEAF node kind that re-emits as exactly its own source text. ONE
@@ -297,7 +291,6 @@ keyword (`:next`) is not one."
       ; a set literal `#{ … }` — a flat sequence, like a vector, with the `#{` glued
       (= k :set) (single-line-seq (node-children n) "#{" "}")
       else nil)))
-(sig single-line (vector -> any))
 
 (defn- single-line-str (text)
   ;; A literal multi-line string can't be re-emitted on one line.
@@ -347,7 +340,6 @@ keyword (`:next`) is not one."
       ; a set literal `#{ … }` — flat like a vector (not pair-broken like a map)
       (= k :set) (render-seq n indent "#{" "}")
       else (node-text n))))
-(sig render (vector any -> any))
 
 (defn- render-wrap (prefix child indent)
   ;; Reader-macro wrappers don't introduce their own break: render the child at
@@ -510,7 +502,6 @@ same-line trailing comment is left in place rather than hoisted above its form
 That retired the `comment-on-own-line?` pair this used to need, and they are gone —
 if you are reintroducing hoisting, they are what you have to write back."
   (last-nonws-comment?-at kids (dec (seq/vector-length kids))))
-(sig last-nonws-comment? (vector -> bool))
 (defn- last-nonws-comment?-at (kids i)
   (cond
     (< i 0) false
@@ -748,7 +739,6 @@ if you are reintroducing hoisting, they are what you have to write back."
 ;; one (an `else` indented as a value, its body at the test column).
 (defn- render-body-pairs (kids start-idx body-ind)
   (render-body-pairs-at kids start-idx (seq/vector-length kids) body-ind 0 "" false))
-(sig render-body-pairs (vector int int -> string))
 
 (defn- render-body-pairs-at (kids i n body-ind nl acc pending?)
   (if (= i n)
@@ -879,7 +869,6 @@ if you are reintroducing hoisting, they are what you have to write back."
 ;; own line *above* the form (a trailing comment never stays after the code on the
 ;; same line). Returns the index of that comment, or nil if there is none.
 (defn- trailing-comment-at (kids start n) (trailing-comment-at-scan kids start n))
-(sig trailing-comment-at (vector int int -> (or int nil)))
 (defn- trailing-comment-at-scan (kids i n)
   (cond
     (= i n) nil
@@ -1053,7 +1042,6 @@ if you are reintroducing hoisting, they are what you have to write back."
 
     (string/trim (format/source \"(a  b)\"))   → \"(a b)\""
   (let (root (reflect/parse-source src)) (cst-root (node-children root))))
-(sig source (string -> string))
 
 (defn cst-root (kids)
   "Render the root's child nodes `kids` — the top-level forms — into the formatted source string, with exactly one trailing newline."
@@ -1066,7 +1054,6 @@ if you are reintroducing hoisting, they are what you have to write back."
   ;; that clears a row, and it was mistakenly cleared once on the small-N numbers alone.
   (let (out (apply str (reverse (format-cst-root-walk kids 0 (seq/vector-length kids) 0 ()))))
     (cond (= out "") "" (string/ends-with? out "\n") out else (str out "\n"))))
-(sig cst-root (vector -> string))
 
 ;; The walker threads `nl-since-last`: the newline count between the last
 ;; emitted block and the cursor. Whitespace adds its newline count; a comment
@@ -1235,7 +1222,6 @@ if you are reintroducing hoisting, they are what you have to write back."
     (if (not (format-parses? src))
       :unparseable (let (out (source src))
         (if (= src out) :unchanged (do (file/spit path out) :rewrote))))))
-(sig file (string -> (or :rewrote :unchanged :unparseable)))
 
 (defn project ()
   "Format every .blsp under the current project (sources + tests). Prints one line

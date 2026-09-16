@@ -70,7 +70,6 @@ raises at once rather than hanging; a timeout raises too. Use `call-timeout`
 for a custom deadline. Other messages stay queued — the reply is matched by a
 fresh (ref)."
   (call-timeout pid payload 5000))
-(sig call ((or map pid) any -> any))
 
 (defn call-timeout (pid payload ms)
   "Like `call`, but wait at most `ms` milliseconds. Monitors the server for
@@ -118,7 +117,6 @@ simply exit on timeout, which made a late reply moot.)"
         (receive ([:reply ^r _] :ok) (after 0 :ok))
         (receive ([:down ^m _ _] :ok) (after 0 :ok))
         (error "call: timed out after " ms " ms")))))
-(sig call-timeout ((or map pid) any (or int nil) -> any))
 
 (defn reply (token value)
   "Answer a `defer`red call: send `value` to the caller still blocked in `gen/call`.
@@ -173,7 +171,6 @@ propagates either way (Erlang `start_link`). Returns the pid."
 Address it later via `(proc/whereis name)` or by sending to `{:name name}`. (Combine
 with linking by registering the result of `start-link` yourself.)"
   (let (pid (start f state)) (proc/register name pid) pid))
-(sig start-named ((or keyword symbol) any any -> pid))
 
 ;; (`sleep` lives in the prelude — it used to be redefined here with the
 ;; unforgeable-`(ref)` trick because the prelude's version was buggy, but that fix

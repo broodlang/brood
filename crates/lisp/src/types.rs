@@ -4325,6 +4325,41 @@ fn collapse_same_tags(terms: Vec<Ty>) -> Vec<Ty> {
                 }
             }
         }
+        // Two record shapes over the SAME field names merge field-wise — the widening a
+        // fold ascent needs when its accumulator is a record: the seed `{col: 1, ops:
+        // (tuple)}` beside the step `{col: 2, ops: vector<string>[1]}` is one shape whose
+        // `col` is then an interval on the move, not two alternatives that multiply by one
+        // per round until the union caps. A shape with a different key set is left alone:
+        // the tagged-union idiom (`{ok: …} | {error: …}`) keeps its arms.
+        if let (Some(shape), false, false, None) = (&term.fields, term.mu, term.rec_ref, &term.neg)
+        {
+            for existing in out.iter_mut() {
+                let Some(existing_shape) = &existing.fields else {
+                    continue;
+                };
+                if existing.tags & !NIL_BIT == term.tags & !NIL_BIT
+                    && !existing.mu
+                    && !existing.rec_ref
+                    && existing.neg.is_none()
+                    && existing_shape.is_open() == shape.is_open()
+                    && existing_shape.fields.keys().eq(shape.fields.keys())
+                {
+                    let fields = existing_shape
+                        .fields
+                        .iter()
+                        .map(|(k, (t, req))| {
+                            let (u, ureq) = &shape.fields[k];
+                            (*k, (t.clone().union(u.clone()), *req && *ureq))
+                        })
+                        .collect();
+                    let rest = existing_shape.rest.clone().union(shape.rest.clone());
+                    let mut merged = existing.clone().union_term(term);
+                    merged.fields = Some(Arc::new(RecordShape { fields, rest }));
+                    *existing = merged;
+                    continue 'next;
+                }
+            }
+        }
         out.push(term);
     }
     out

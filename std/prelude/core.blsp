@@ -1188,4 +1188,3 @@ one shim IS variadic, so `arity-of` reports `2+` where the function reads `2-3`.
 ;; `string/->list`) and every scalar, and both accept a record, which is a `map` to
 ;; the type system and IS indexable through its Seqable view.
 (sig reverse (seqable -> any))
-(sig but-last (seqable -> any))

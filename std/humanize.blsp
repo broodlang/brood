@@ -52,7 +52,6 @@ Comparing the ROUNDED value (`>= 10240` tenths, i.e. 1024 whole units) is what k
       (str n " B")
       (let (tenths (humanize-tenths n div))
         (str (math/quot tenths 10) "." (math/rem tenths 10) " " (first unit))))))
-(sig byte-size (int -> string))
 
 (defn byte-size-short (n)
   "`n` bytes the way `ls -h` writes it: lowercase unit, no space, and no decimal at ten
@@ -70,4 +69,3 @@ units or more — the spelling for a column where every character costs.
         (if (>= tenths 100)
           (str (math/quot tenths 10) short)
           (str (math/quot tenths 10) "." (math/rem tenths 10) short))))))
-(sig byte-size-short (int -> string))

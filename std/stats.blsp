@@ -20,7 +20,6 @@ Empty sequences raise unless documented otherwise.
   (let (n (count xs))
     (when (= n 0) (error "stats/mean: empty sequence"))
     (/ (* 1.0 (sum xs)) n)))
-(sig mean (seqable -> float))
 
 (defn- sum-of-squares (xs m)
   (fold xs 0 (fn (acc x) (+ acc (* (- x m) (- x m))))))
@@ -34,7 +33,6 @@ a 1-element sequence has population variance 0.0.
     (when (< n 1) (error "stats/variance: empty sequence"))
     (let (m (mean xs))
       (/ (* 1.0 (sum-of-squares xs m)) n))))
-(sig variance (seqable -> float))
 
 (defn sample-variance (xs)
   "The sample variance (divided by n-1, Bessel's correction) of `xs`. Raises if fewer than 2 elements.
@@ -44,21 +42,18 @@ a 1-element sequence has population variance 0.0.
     (when (< n 2) (error "stats/sample-variance: need at least 2 elements"))
     (let (m (mean xs))
       (/ (* 1.0 (sum-of-squares xs m)) (- n 1)))))
-(sig sample-variance (seqable -> float))
 
 (defn stddev (xs)
   "The population standard deviation of `xs`.
 
     (stats/stddev [2 2 2])   → 0.0"
   (sqrt (variance xs)))
-(sig stddev (seqable -> float))
 
 (defn sample-stddev (xs)
   "The sample standard deviation of `xs` (Bessel's correction).
 
     (stats/sample-stddev [2 4 4 4 5 5 7 9])   → 2.138089935299395"
   (sqrt (sample-variance xs)))
-(sig sample-stddev (seqable -> float))
 
 ;; ---- order statistics --------------------------------------------------------
 
@@ -100,7 +95,6 @@ For an even-length sequence, returns the mean of the two middle values.
 
     (stats/quantile [1 2 3 4] 0.5)   → 2"
   (percentile xs (* q 100)))
-(sig quantile ((or list vector set) number -> number))
 
 ;; ---- range and spread --------------------------------------------------------
 
@@ -127,7 +121,6 @@ For an even-length sequence, returns the mean of the two middle values.
   ;; Qualified: `max` is now defined in BOTH `math` (variadic over arguments) and here
   ;; (over a collection), so bare is ambiguous inside this module and the compiler says so.
   (- (stats/max xs) (stats/min xs)))
-(sig range-of (seqable -> number))
 
 ;; ---- frequency ---------------------------------------------------------------
 ;; `mode` uses the `seq` library's `frequencies` (a general sequence op, ADR-227);
@@ -140,4 +133,3 @@ For an even-length sequence, returns the mean of the two middle values.
   (when (empty? xs) (error "stats/mode: empty sequence"))
   (let (freq (frequencies xs))
     (fold (rest xs) (first xs) (fn (best x) (if (> (get freq x) (get freq best)) x best)))))
-(sig mode (seqable -> any))

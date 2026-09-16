@@ -62,7 +62,6 @@ running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
   ;; (`%map-assoc`/`%map-get`) directly — variadic `assoc` would build a rest-list
   ;; and `get` a `cond` dispatch on every one of the n elements.
   (fold coll {} (fn (m x) (%map-assoc m x (%add (%map-get m x 0) 1)))))
-(sig frequencies (seqable -> map))
 
 ;; dedupe: collapse only *consecutive* runs of equal items (no "seen" set needed).
 (defn- dedupe-acc (coll prev acc)
@@ -108,7 +107,6 @@ running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
                      {}
                      (fn (m x) (let (k (f x)) (%map-assoc m k (cons x (%map-get m k nil))))))
     reverse))
-(sig group-by (seqable any -> map))
 
 ;; Byte-identical to `string/join-parts` — see the note there for why the copy stands.
 (defn- interpose-acc (sep coll acc)
@@ -200,13 +198,11 @@ input. `(zip-with + '(1 2) '(3 4))` → `(4 6)`.
 
     (seq/min-by [\"aaa\" \"b\"] count)   → \"b\""
   (fold (rest coll) (first coll) (fn (best x) (if (< (f x) (f best)) x best))))
-(sig min-by (seqable any -> any))
 (defn max-by (coll f)
   "The item in `coll` for which `(f item)` is largest; `nil` if `coll` is empty.
 
     (seq/max-by [\"aaa\" \"b\"] count)   → \"aaa\""
   (fold (rest coll) (first coll) (fn (best x) (if (> (f x) (f best)) x best))))
-(sig max-by (seqable any -> any))
 
 (defn- enumerate-acc (i coll acc)
   (if (empty? coll)
@@ -250,12 +246,10 @@ vector comes FIRST here, unlike the rest of this module — see the note above.
 (defn vector-ref (v i)
   "The element at index i of vector v."
   (%vector-ref v i))
-(sig vector-ref (vector int -> any))
 
 (defn vector-length (v)
   "The number of elements in vector v."
   (%vector-length v))
-(sig vector-length (vector -> int))
 
 (defn transduce (coll xform rf init)
   "Reduce `coll` with `rf`/`init` through the transducer `xform` — one pass, no
@@ -272,7 +266,6 @@ Stages compose LEFT to RIGHT in data-flow order under `comp` — `(comp (xfilter
 `seq/lmap`/`seq/lfilter`/… are the ergonomic front end over the same machinery; use
 `transduce` when the stage stack is computed, reused, or your own."
   (fold coll init (xform rf)))
-(sig transduce (seqable (or fn keyword) any any -> any))
 
 (defn filterv (coll pred)
   "A VECTOR of the items of `coll` for which `(pred x)` is truthy — [[filter]]
@@ -281,7 +274,6 @@ The complement is [[rejectv]].
 
     (seq/filterv [1 2 3 4] math/even?)   → [2 4]"
   (into [] (seq/filter coll pred)))
-(sig filterv (seqable (any -> any) -> vector))
 
 (defn rejectv (coll pred)
   "A VECTOR of the items of `coll` for which `(pred x)` is *falsy* — [[reject]]
@@ -289,7 +281,6 @@ when the caller needs indexed access. The complement of [[filterv]].
 
     (seq/rejectv [1 2 3 4] math/even?)   → [1 3]"
   (into [] (seq/reject coll pred)))
-(sig rejectv (seqable (any -> any) -> vector))
 
 ;; (find pred coll) -> the first element satisfying pred, or nil.
 (defn find (coll pred)
@@ -325,7 +316,6 @@ when the caller needs indexed access. The complement of [[filterv]].
 
     (seq/distinct [1 1 2])     → (1 2)"
   (reverse (nth (fold coll [{} nil] distinct-step) 1)))
-(sig distinct (seqable -> any))
 
 ;; flatten: splice nested lists into one flat list. Descends through `pair?`/`nil` (so
 ;; empty sub-lists and nils vanish); vectors and maps are leaf items. The outer walk is

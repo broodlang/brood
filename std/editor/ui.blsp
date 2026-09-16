@@ -364,7 +364,6 @@ comes back as it went in, with an empty table. Recurses into a marker's ops and 
 `:scroll-region`'s. Native (`%ui-harvest`): it walks every op of every frame, where a
 Brood-level walk cost about a millisecond — more than the paint the memo saves."
   (%ui-harvest frame))
-(sig ui-harvest (any -> vector))
 
 ;; ---- per-turn tracing (BROOD_UI_TRACE=1) ------------------------------------
 ;; Where a turn's time goes on the BROOD side of the loop: `view` (model → frame),

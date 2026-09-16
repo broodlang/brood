@@ -114,14 +114,12 @@ is the word-constituent predicate (`lineedit-word-pred` picks it per mode)."
   (let (n (string/length text)
         i (lineedit-fwd text p n (fn (c) (not (word? c)))))
     (lineedit-fwd text i n word?)))
-(sig lineedit-fwd-word (string int fn -> int))
 
 (defn- lineedit-bwd-word (text p word?)
   "Point at the start of the word backward from `p` (skip non-word, then word), with
 `word?` the word-constituent predicate."
   (let (i (lineedit-bwd text p (fn (c) (not (word? c)))))
     (lineedit-bwd text i word?)))
-(sig lineedit-bwd-word (string int fn -> int))
 
 ;; ---- multi-line geometry (pure) ---------------------------------------------
 ;; `:text` may hold newlines (a multi-line form). Point is a flat offset; these map
@@ -142,13 +140,11 @@ newline, or 0)."
 (defn- lineedit-count-nl (s)
   "How many newlines are in `s` (deleting them and measuring the length drop)."
   (- (string/length s) (string/length (string/replace s "\n" ""))))
-(sig lineedit-count-nl (string -> int))
 
 (defn- lineedit-cursor-rc (text p)
   "Point `p` as `[row col]` — `row` the count of newlines before `p`, `col` the offset
 within that line."
   [(lineedit-count-nl (string/substring text 0 p)) (- p (lineedit-line-start text p))])
-(sig lineedit-cursor-rc (string int -> (tuple int int)))
 
 (defn- lineedit-up-point (text p)
   "Point one line up from `p`, keeping the column (clamped to the shorter line), or nil
@@ -160,7 +156,6 @@ when `p` is already on the first line."
             prev-start (lineedit-line-start text (dec ls)))
         ; (dec ls) is the prior "\n"
         (math/min (+ prev-start col) (dec ls))))))
-(sig lineedit-up-point (string int -> (or int nil)))
 
 (defn- lineedit-down-point (text p)
   "Point one line down from `p`, keeping the column (clamped), or nil when `p` is on
@@ -171,7 +166,6 @@ the last line."
       (let (col (- p (lineedit-line-start text p))
             next-start (inc le))
         (math/min (+ next-start col) (lineedit-line-end text next-start))))))
-(sig lineedit-down-point (string int -> (or int nil)))
 
 ;; ---- pure edit operations ---------------------------------------------------
 
@@ -295,7 +289,6 @@ observer's eval minibuffer (the `:hist` list `lineedit-init` is seeded with)."
     (if (or (= entry "") (and (not (empty? history)) (= (first history) entry)))
       history
       (cons entry history))))
-(sig lineedit-remember (any string -> any))
 
 (defn- lineedit-hist-next (state)
   "Recall the next (newer) history entry, or the saved in-progress line at the end (↓)."
@@ -584,7 +577,6 @@ the column of the innermost unclosed `(`/`[`, one past a `{`, and 0 at top level
         (if (= (string/char-at text open) "{")
           (inc col)
           (+ col *lineedit-indent-width*))))))
-(sig lineedit-indent-for (string int -> int))
 
 (defn lineedit-newline-and-indent (state)
   "Insert a newline and indent the new line to its structural column."

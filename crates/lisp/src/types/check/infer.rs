@@ -295,10 +295,19 @@ fn expr_ty_inner(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
             // `(first …)`…) that an enclosing `(if (pred? <path>) …)` narrowed,
             // that's the most specific type for the branch (occurrence typing,
             // sound under immutability). Subsumes the per-accessor rules below.
+            // …INTERSECTED with what the form reads structurally: a guard is recorded in
+            // whatever scope the `if` was met in, and an inference-side scope may not know
+            // the base's type at that point, so the narrowing alone can be wider than the
+            // read — `(if (:n state) …)` recorded `false | nil` for the else branch where
+            // the field is `nil | int`. Occurrence typing is the meet of the two.
             if let Some((base, keys)) = path_of(heap, form) {
                 if !keys.is_empty() {
                     if let Some(t) = ctx.path_ty(base, &keys) {
-                        return Some(t);
+                        let structural = expr_ty(heap, form, &ctx.without_path(base, &keys));
+                        return Some(match structural {
+                            Some(s) => s.intersect(t),
+                            None => t,
+                        });
                     }
                 }
             }
@@ -1715,7 +1724,10 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         return None;
     }
     // `(conj coll x …)` — `coll`'s kind, its elements plus the `x`s. A vector, list or
-    // set carries the elements; a map is its kind, unrefined.
+    // set carries the elements; a map is its kind, unrefined. The elements are read over
+    // every term of a union (`elem_ty_union`): a fold accumulator's `(tuple) |
+    // vector<string>` — the empty seed beside the grown step — conj'd as a bare `vector`
+    // under the single-term read, dropping the element type on the second step.
     if value::symbol_is(head, "conj") && items.len() >= 3 {
         let coll = expr_ty(heap, items[1], ctx)?;
         let mut added: Option<Ty> = None;
@@ -1728,7 +1740,7 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         }
         let added = added?;
         if coll.is_subtype(&Ty::of(Tag::Vector)) {
-            let out = match coll.elem_ty() {
+            let out = match coll.elem_ty_union() {
                 Some(e) => Ty::vector_of(e.union(added)),
                 None => Ty::of(Tag::Vector),
             };
@@ -1741,7 +1753,7 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
             });
         }
         if coll.is_subtype(&Ty::of(Tag::Set)) {
-            return Some(match coll.elem_ty() {
+            return Some(match coll.elem_ty_union() {
                 Some(e) => Ty::set_of(e.union(added)),
                 None => Ty::of(Tag::Set),
             });
@@ -1751,7 +1763,7 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
             let own = if coll.is_subtype(&Ty::of(Tag::Nil)) {
                 Some(Ty::NEVER)
             } else {
-                coll.elem_ty()
+                coll.elem_ty_union()
             };
             return Some(match own {
                 Some(e) => Ty::list_of(e.union(added)),
@@ -2183,6 +2195,40 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     if value::symbol_is(head, "assoc") && items.len() >= 4 && (items.len() - 2).is_multiple_of(2) {
         let map_arg = *items.get(1)?;
         let map_ty = expr_ty(heap, map_arg, ctx);
+        // Over a UNION of record shapes, with literal-keyword keys: the update applied to
+        // each alternative, and the alternatives kept. A fold accumulator is exactly this
+        // after one step — `{col: int, ops: (tuple)} | {col: int, ops: vector<string>}`,
+        // the seed beside the step — and the single-shape rule below answered a flat
+        // `map` for it, so the ascent lost every field on its second step and the fold's
+        // result carried nothing a `(:col a)` could read.
+        if let Some(terms) = map_ty
+            .as_ref()
+            .filter(|t| t.alts.is_some())
+            .map(Ty::terms_vec)
+        {
+            if let Some(updates) = literal_keyword_pairs(&items[2..]) {
+                let values: Vec<(value::Symbol, Ty)> = updates
+                    .into_iter()
+                    .map(|(name, form)| (name, expr_ty(heap, form, ctx).unwrap_or(Ty::ANY)))
+                    .collect();
+                let updated = terms.iter().try_fold(Ty::NEVER, |out, term| {
+                    let shape = record_shape_of(Some(term))?;
+                    let mut fields = shape.fields;
+                    for (name, vty) in &values {
+                        fields.insert(*name, (vty.clone(), true));
+                    }
+                    Some(out.union(if shape.open {
+                        Ty::record_of_open(fields)
+                    } else {
+                        Ty::record_of(fields)
+                    }))
+                });
+                // A term that is not a record shape leaves this to the rules below.
+                if let Some(updated) = updated {
+                    return Some(updated);
+                }
+            }
+        }
         // On a record shape with literal-keyword keys, carry the SHAPE forward with the
         // assoc'd fields added or replaced — required, since `assoc` definitely puts them
         // there. Without this a closed record degrades to a flat `map` on the first

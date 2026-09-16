@@ -334,7 +334,6 @@ Linux so a gnu + musl matrix cannot collide.
              (includes? triple "freebsd") "freebsd"
              :else nil))
     (if os (str os "-" arch) triple)))
-(sig release-target-suffix (string -> string))
 
 (defn release-windows-triple? (triple)
   "Is `triple` a Windows target — i.e. does its artifact need a `.exe` suffix?

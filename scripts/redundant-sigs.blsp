@@ -1,0 +1,153 @@
+;; scripts/redundant-sigs.blsp — the `(sig …)` declarations the checker would derive anyway.
+;;
+;; A sig is REDUNDANT when the checker infers the same signature for its function with the
+;; declaration removed and everything else in the file left as it is — the rule this repo
+;; follows is "declare at the leaf that knows a fact nothing above can prove", and a sig
+;; that restates the inference proves nothing. Judged per sig, in isolation, through
+;; `reflect/source-signatures` (the checker's own pass over the text with that one form
+;; blanked), so the comparison is between two renderings of the same `Sig`.
+;;
+;;   brood scripts/redundant-sigs.blsp -- std/*.blsp std/*/*.blsp   > redundant.txt
+;;   brood scripts/redundant-sigs.blsp -- --remove redundant.txt
+;;
+;; The first prints `path:line name sig` per redundant declaration; the second deletes
+;; them (whole lines) and re-derives each file, printing `MISMATCH` for a function whose
+;; inferred signature moved once its neighbours' sigs were gone — a sig that only LOOKED
+;; redundant because another one anchored it. Restore those by hand, then run the gates:
+;; a sig can also anchor a CALLER's verdict (`bytes/at` did — four return checks in the
+;; same file read `number` without it), which only `nest check --strict` sees.
+;;
+;; The prelude sweeps like any other file (21 went on 2026-09-16, every gate green) —
+;; the curated table and the frozen heap did not change what this equality proves.
+
+(defn- sig-spans (text)
+  "`[start end name]` for every top-level-looking `(sig NAME …)` form in `text`: the
+char range of the whole form (balanced parens from the `(sig`) and the declared name."
+  (let (n (string/length text))
+    (letrec (scan (fn (i acc)
+                    (let (at (index-of text "(sig " i))
+                      (if (< at 0)
+                        (reverse acc)
+                        (let (line-start (let (nl (string/last-index-of (string/substring text 0 at)
+                                                    "\n"))
+                                           (if (< nl 0) 0 (inc nl)))
+                              prefix (string/substring text line-start at))
+                          (if (not (= "" (string/trim prefix)))
+                            (scan (inc at) acc)
+                            (let (end (balanced-end text at n))
+                              (if (nil? end)
+                                (reverse acc)
+                                (let (body (string/substring text (+ at 5) end)
+                                      name (first (string/split (string/trim body) " ")))
+                                  (scan end (cons [at end name] acc)))))))))))
+      (scan 0 '()))))
+
+(defn- balanced-end (text start n)
+  "The index just past the paren that closes the form opening at `start`, or nil."
+  (letrec (go (fn (i depth in-str)
+                (if (>= i n)
+                  nil
+                  (let (c (string/substring text i (inc i)))
+                    (cond
+                      in-str
+                        (if (= c "\\") (go (+ i 2) depth true) (go (inc i) depth (not (= c "\""))))
+                      (= c "\"") (go (inc i) depth true)
+                      (= c "(") (go (inc i) (inc depth) false)
+                      (= c ")") (if (= depth 1) (inc i) (go (inc i) (dec depth) false))
+                      else (go (inc i) depth false))))))
+    (go start 0 false)))
+
+(defn- line-of (text at)
+  (count (string/split (string/substring text 0 at) "\n")))
+
+(defn- entry-for (entries name)
+  "The signature entry whose name is `name`, qualified or bare."
+  (seq/find entries
+    (fn (e)
+      (let (n (:name e)
+            bare (let (i (string/last-index-of n "/"))
+                   (if (< i 0) n (string/substring n (inc i) (string/length n)))))
+        (or (= n name) (= bare name))))))
+
+(defn- blank-span (text start end)
+  "`text` with `[start end)` replaced by spaces — the form gone, every position kept."
+  (str (string/substring text 0 start)
+    (string/repeat " " (- end start))
+    (string/substring text end (string/length text))))
+
+(defn- check-file (path)
+  (let (text (file/slurp path)
+        spans (sig-spans text)
+        declared (reflect/source-signatures text))
+    (doseq (span spans)
+      (let ([start end name] span
+            before (entry-for declared name)
+            after (entry-for (reflect/source-signatures (blank-span text start end)) name))
+        (when (and before
+                after
+                (:declared? before)
+                (not (:declared? after))
+                (not (nil? (:sig before)))
+                (= (:sig before) (:sig after)))
+          (io/puts (str path ":" (line-of text start) " " name " " (:sig before))))))))
+
+(when (not (= (first (system/script-args)) "--remove"))
+  (doseq (path (system/script-args))
+    (check-file path)))
+
+;; ---- removal ------------------------------------------------------------------------
+;; `brood redundant-sigs.blsp -- --remove redundant.txt`: delete every listed sig (whole
+;; lines, spans processed last-first so offsets hold), then re-derive the file and report
+;; any removed function whose inferred signature no longer matches what was declared —
+;; a sig whose presence another sig's redundancy depended on.
+
+(defn- line-start-of (text at)
+  (let (nl (string/last-index-of (string/substring text 0 at) "\n"))
+    (if (< nl 0) 0 (inc nl))))
+
+(defn- remove-spans (text spans)
+  "`text` without the lines the spans occupy, spans given in any order."
+  (fold (reverse (sort-by spans first))
+    text
+    (fn (t [start end _])
+      (let (ls (line-start-of t start)
+            after (if (and (< end (string/length t)) (= "\n" (string/substring t end (inc end))))
+                    (inc end)
+                    end))
+        (str (string/substring t 0 ls) (string/substring t after (string/length t)))))))
+
+(defn- remove-listed (listing)
+  (let (lines (seq/filter (string/split (file/slurp listing) "\n") (fn (l) (not (= l ""))))
+        by-file (fold lines
+                  {}
+                  (fn (acc l)
+                    (let (path (first (string/split l ":"))
+                          tail (string/substring l (inc (string/length path)) (string/length l))
+                          parts (string/split tail " ")
+                          name (nth parts 1 "")
+                          declared (string/join (rest (rest parts)) " "))
+                      (assoc acc path (cons [name declared] (get acc path '())))))))
+    (doseq (kv (%map-pairs by-file))
+      (let ([path wanted] kv
+            text (file/slurp path)
+            names (into #{} (map wanted first))
+            spans (seq/filter (sig-spans text) (fn ([_ _ name]) (contains? names name)))
+            new-text (remove-spans text spans))
+        (file/spit path new-text)
+        (let (after (reflect/source-signatures new-text))
+          (doseq ([name declared] wanted)
+            (let (e (entry-for after name))
+              (when (or (nil? e) (not (= (:sig e) declared)))
+                (io/puts (str "MISMATCH "
+                           path
+                           " "
+                           name
+                           " declared "
+                           declared
+                           " now "
+                           (if e (:sig e) "<none>")))))))
+        (io/puts (str path ": removed " (count spans) " of " (count wanted)))))))
+
+(let (args (system/script-args))
+  (when (= (first args) "--remove")
+    (remove-listed (second args))))

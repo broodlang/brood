@@ -311,7 +311,6 @@ counterpart to `rename`. Prints each changed file and returns the count."
       (opener? c) (scan-close text (inc i) 1)
       (= c "\"") (skip-str text (inc i))
       else (atom-end text i))))
-(sig read-one (string int -> int))
 
 (defn- swap-loop (text old new from parts)
   (let (needle (str "(" old)
@@ -407,7 +406,6 @@ call is still in the old callback-first order.
         (if (and sym (bound? sym))
           (let (k (type-of (reflect/eval sym))) (or (= k :fn) (= k :native)))
           false)))))
-(sig callback-shaped? (string -> bool))
 
 (defn- number-shaped? (text)
   "True when `text` reads as a COUNT — the old first argument of `(take n coll)`.
@@ -420,7 +418,6 @@ call is still in the old callback-first order.
       (string/starts-with? t "(count ")
       (string/starts-with? t "(- ")
       (string/starts-with? t "(+ "))))
-(sig number-shaped? (string -> bool))
 
 (defn- literal-shaped? (text)
   "True when `text` is a STRING or keyword literal — the old first argument of
@@ -429,7 +426,6 @@ call is still in the old callback-first order.
     (codemod/literal-shaped? \"\\\", \\\"\")   → true"
   (let (t (string/trim text))
     (or (string/starts-with? t "\"") (string/starts-with? t ":"))))
-(sig literal-shaped? (string -> bool))
 
 (defn- old-order? (kind first-arg last-arg)
   ;; The subject moved to the FRONT, so a migrated call has its callback LAST. Requiring

@@ -25,7 +25,6 @@ spellings of one instant.")
   ;; Integer division toward negative infinity (floor division).
   (let (q (math/quot a b) r (math/rem a b))
     (if (< r 0) (- q 1) q)))
-(sig dt-fdiv (int int -> int))
 
 ;; check-allow: deliberately non-tail — depth = the pad width — single digits.
 (check-allow :non-tail-recursion
@@ -105,7 +104,6 @@ spellings of one instant.")
         second (math/rem time-s 60)
         ymd (dt-days->ymd days))
     (datetime (get ymd :year) (get ymd :month) (get ymd :day) hour minute second ms-part)))
-(sig epoch-ms-> (int -> datetime))
 
 (defn ->epoch-ms (dt)
   "Convert a UTC datetime (or date — its time is taken as midnight) to Unix epoch
@@ -466,7 +464,6 @@ produces is UTC.
   (and (= (math/rem y 4) 0)
     (or (not (= (math/rem y 100) 0))
       (= (math/rem y 400) 0))))
-(sig leap-year? (int -> bool))
 
 (defn days-in-month (y m)
   "Number of days in month `m` (1–12) of year `y`."

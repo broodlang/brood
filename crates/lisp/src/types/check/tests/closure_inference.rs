@@ -971,3 +971,112 @@ fn a_site_inside_a_let_bound_lambda_hands_the_derived_type() {
         "{ws:?}"
     );
 }
+
+// Three derivation gaps bedit paid for with a `sig` on a derived function (2026-09-16),
+// each a place the site collector or the return inference read less than the walk knew.
+
+// (1) An `&optional` function's body was walked by the collector with every parameter
+// unknown — `fixed_arms_of_form` does not count it as a fixed arm, and only a `& rest`
+// arm had a declared-sig fallback — so a self-recursive accumulator it called derived
+// `number` from `(- limit x)` under unknowns, where the walk seeded the declared ints.
+#[test]
+fn a_site_inside_an_optional_function_hands_its_declared_types() {
+    let ws = file_warnings_mode(
+        "\
+         (defmodule t)\n\
+         (defn- fit (s w)\n\
+           (if (> (string/display-width s) w) (string/substring s 0 (string/width->index s w)) s))\n\
+         (defn- paint (row x column limit chunks acc)\n\
+           (if (or (empty? chunks) (>= x limit))\n\
+             (reverse acc)\n\
+             (let (s (first chunks)\n\
+                   expanded (fit (string/expand-tabs s column) (- limit x))\n\
+                   cells (string/display-width expanded))\n\
+               (paint row (+ x cells) (+ column (string/display-width s column)) limit\n\
+                 (rest chunks) (cons [row x expanded] acc)))))\n\
+         (sig ops (int int list &optional int int -> list))\n\
+         (defn ops (row x chunks &optional (column 0) (limit 100000))\n\
+           (paint row x column limit chunks '()))",
+        true,
+    );
+    assert!(
+        ws.is_empty(),
+        "`w` derives int through the optional caller — {ws:?}"
+    );
+}
+
+// (2) A `let`-bound lambda's RESULT was inferred under the pre-bound (unknown) name, so
+// its self-call made the whole result unknown and every caller of the binder read `any`.
+// The self-call contributes ⊥ — the least fixpoint — so `(if … (step next) l)` is `l`'s.
+#[test]
+fn a_let_bound_lambdas_result_folds_its_self_call_away() {
+    let ws = file_warnings_mode(
+        "\
+         (defmodule t)\n\
+         (defn- blank? (text line) (= line (string/length text)))\n\
+         (defn- run (text line dir)\n\
+           (let (n (string/length text)\n\
+                 step (fn (l)\n\
+                        (let (next (+ l dir))\n\
+                          (if (and (>= next 0) (< next n) (blank? text next)) (step next) l))))\n\
+             (if (blank? text line) (step line) line)))\n\
+         (sig use (string -> int))\n\
+         (defn use (text)\n\
+           (let (first (run text 3 -1)\n\
+                 last (run text 3 1))\n\
+             (string/length (string/substring text (inc first) last))))",
+        true,
+    );
+    assert!(
+        ws.is_empty(),
+        "`run` returns the int its `step` does — {ws:?}"
+    );
+    // The parameters are derived from the self-call sites too — `k` is `0` from the one
+    // external site and `(inc k)` from its own, widened to `int[0..]` — and the result is
+    // the base case under the guard: the first `k` past 3. Read from the external site
+    // alone, `k` was the literal `0`, `(> k 3)` decided false, and the result was `never`.
+    assert_eq!(
+        ty_str("(let (f (fn (k) (if (> k 3) k (f (inc k))))) (f 0))"),
+        "int[4..]"
+    );
+}
+
+// (3) A fold accumulator built from a record literal lost its fields on the second step:
+// after one step the accumulator is a UNION of two record shapes (the seed beside the
+// step), `assoc` over that union answered a flat `map`, and `conj` over its `(tuple) |
+// vector<string>` field read the elements of one term only. Both now distribute over the
+// union, so the ascent settles with every field, and a callback literal in the collector
+// is walked under the accumulator the fold promises it.
+#[test]
+fn a_fold_accumulator_keeps_its_fields_through_the_ascent() {
+    let ws = file_warnings_mode(
+        "\
+         (defmodule t)\n\
+         (defn- clip (s n)\n\
+           (if (> (string/length s) n) (string/substring s 0 (math/max 0 n)) s))\n\
+         (sig layout ((list string) int int -> map))\n\
+         (defn layout (segments x w)\n\
+           (fold segments\n\
+             {:col x :ops []}\n\
+             (fn (a s)\n\
+               (let (scol (:col a)\n\
+                     label (clip s (math/max 0 (- (+ x w) scol))))\n\
+                 (assoc a :col (+ scol (string/length label)) :ops (conj (:ops a) label))))))",
+        true,
+    );
+    assert!(
+        ws.is_empty(),
+        "`n` derives int from the accumulator's `:col` — {ws:?}"
+    );
+    // Seeded at 1 and stepped at least once (the list is provably non-empty): `[2, ∞)`.
+    // The seed and the step are two record shapes over one key set, merged field-wise by
+    // the ascent's widening; kept apart they multiplied by one alternative a round.
+    assert_eq!(
+        ty_str("(:col (fold '(\"a\" \"b\") {:col 1 :ops []} (fn (a s) (assoc a :col (+ (:col a) 1) :ops (conj (:ops a) s)))))"),
+        "int[2..]"
+    );
+    assert_eq!(
+        ty_str("(:ops (fold '(\"a\" \"b\") {:col 1 :ops []} (fn (a s) (assoc a :col (+ (:col a) 1) :ops (conj (:ops a) s)))))"),
+        "vector<string>[1..]"
+    );
+}

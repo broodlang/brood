@@ -110,7 +110,6 @@ private, and anything defined outside `std/`.
 
     (audit/documented? 'audit/report)   → true"
   (not (= "" (docstring-of name))))
-(sig documented? (any -> bool))
 
 (defn exemplified? (name)
   "True when `name`'s docstring carries at least one `form → result` example —
@@ -118,7 +117,6 @@ the shape `doctest` executes.
 
     (audit/exemplified? 'audit/documented?)   → true"
   (includes? (docstring-of name) "→"))
-(sig exemplified? (any -> bool))
 
 (defn undocumented ()
   "The public names carrying no docstring at all."
@@ -176,7 +174,6 @@ A name with no recognisable pair is vacuously true.
     ;; takes a single `vector` named `n`, collection by type and index by name. A parameter
     ;; cannot be out of order with itself.
     (or (< coll-at 0) (< subject-at 0) (= coll-at subject-at) (< coll-at subject-at))))
-(sig data-first? (any -> bool))
 
 ;; ---- signature parsing: paren-aware, because a callback's own type has commas ----
 
@@ -272,7 +269,6 @@ exempt too: their arity is a range no fixed list can contradict.
       (contains? #{'table/get} name) true
       (any? (map params ->string) (fn (p) (string/starts-with? p "&"))) true
       else (= (count params) (count declared)))))
-(sig sig-arity-ok? (any -> bool))
 
 (defn sig-arity-mismatches ()
   "Public names whose declared signature and actual parameter list disagree on COUNT —

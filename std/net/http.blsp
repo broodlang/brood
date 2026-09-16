@@ -267,7 +267,6 @@ request/response splitting)."
           ": "
           (http-crlf-free "header value" (second kv))
           "\r\n")))))
-(sig render-headers (map -> string))
 
 (defn render-response (resp)
   "Render a response map into the HTTP/1.0 wire **iolist** (ADR-139) — hand it to
@@ -365,7 +364,6 @@ rather than closed after a body. An identity check on the record, not a key snif
 (defn listen (port)
   "A listening socket on 127.0.0.1:`port` (port 0 = OS-assigned), owned by the calling process — which must be the one that runs `serve-loop` on it."
   (tcp/listen "127.0.0.1" port))
-(sig listen (int -> socket))
 
 (defn serve-loop (ls handler)
   "Accept connections on `ls` and serve each in its **own** process, forever.
@@ -468,7 +466,6 @@ knows the body is text — the map itself always carries byte-faithful `bytes`."
 
 (defn- http-chunk-size (d)
   (if (string? d) (string/length d) (bytes/length d)))
-(sig http-chunk-size ((or string bytes) -> int))
 
 ;; Collect the response delivered as messages until close; [:ok bytes] or
 ;; [:error msg]. `acc` is the chunks in reverse, `have` their running byte total;

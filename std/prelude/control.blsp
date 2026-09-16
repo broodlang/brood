@@ -205,13 +205,11 @@ The steps after a failure never run, so a pipe does not have to end in `(if (fai
     (with-out-str (tap 5 io/write))   → \"5\"
     (tap 5 (fn (n) nil))              → 5     ; the value passes through unchanged"
   (do (f x) x))
-(sig tap (any (or fn keyword) -> any))
 (defn then (x f)
   "Return `(f x)` — apply `f` to `x`. Lets a `->` pipeline step call an arbitrary function on the threaded value, not only splice it as a first argument: `(-> v (then (fn (n) (g n other))))`. Elixir's `Kernel.then`.
 
     (then 5 (fn (n) (* n 3)))   → 15"
   (f x))
-(sig then (any (or fn keyword) -> any))
 
 ;; ---- binding-conditionals: bind, test the *source* value, branch -------------
 ;; `if-let`/`when-let` evaluate the binding expression once, branch on its
@@ -290,7 +288,6 @@ Bindings are ONE flat list, exactly like `let`'s — not a list per pair. `(with
     (each [1 2 3] (fn (n) nil))              → nil   ; the results are discarded"
   (fold coll nil (fn (acc x) (f x) acc))
   nil)
-(sig each (seqable any -> nil))
 
 ;; ---- error handling ----
 ;; The kernel gives us `throw` (raise) and `%try` (low-level catch). Everything
@@ -301,7 +298,6 @@ Bindings are ONE flat list, exactly like `let`'s — not a list per pair. `(with
     (last [1 2 3])   → 3
     (last nil)       → nil"
   (first (reverse xs)))
-(sig last (seqable -> any))
 
 (defn error (& parts)
   "Raise an error whose message is the concatenated display forms of `parts`.
