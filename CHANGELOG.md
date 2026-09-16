@@ -12,6 +12,12 @@ the key, so the `[key cand]` wrapper and its `second` are gone), and `top` binds
 `k` once instead of testing `limit` at every use. The `fuzzy-worse?` sig claimed `int` for a
 score the checker can only prove `number` (the scorer is a dynamic) and is gone.
 
+**KI-150 mitigated**: the ten codec sigs the sig wave removed (`encoding`'s nine,
+`bytes/length`) are back under a `kept for cost` comment — they declare nothing the checker
+cannot derive, but `brood file`'s pre-flight check paid ~30 M instructions inferring them on
+every run of a program that touches `encoding`. `scripts/redundant-sigs.blsp` honours the
+marker, so the next sweep leaves them.
+
 ## v0.30.0 — ranking is bounded and sharded, text composites in sRGB space, and the checker derives what bedit had declared
 
 **Ranking a candidate set is bounded by what it shows, and shards across processes**

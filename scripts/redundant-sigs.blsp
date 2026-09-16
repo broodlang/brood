@@ -20,9 +20,21 @@
 ;; ran afterwards; the tool measures the gate itself now. The prelude sweeps like any other
 ;; file (21 went that day, every gate green).
 
+(defn- kept-for-cost? (text line-start)
+  "True when the line before `line-start` is a comment carrying `kept for cost` — a sig the
+checker infers verbatim that stays anyway, because `brood file`'s pre-flight check pays
+for the inference on every run (KI-150). Listed nowhere, removed never."
+  (let (before (string/substring text 0 (math/max 0 (dec line-start)))
+        nl (string/last-index-of before "\n")
+        previous (string/trim (string/substring before
+                                (if (< nl 0) 0 (inc nl))
+                                (string/length before))))
+    (and (string/starts-with? previous ";") (includes? previous "kept for cost"))))
+
 (defn- sig-spans (text)
   "`[start end name]` for every top-level-looking `(sig NAME …)` form in `text`: the
-char range of the whole form (balanced parens from the `(sig`) and the declared name."
+char range of the whole form (balanced parens from the `(sig`) and the declared name.
+A sig under a `kept for cost` comment (KI-150) is not a candidate."
   (let (n (string/length text))
     (letrec (scan (fn (i acc)
                     (let (at (index-of text "(sig " i))
@@ -32,7 +44,8 @@ char range of the whole form (balanced parens from the `(sig`) and the declared 
                                                     "\n"))
                                            (if (< nl 0) 0 (inc nl)))
                               prefix (string/substring text line-start at))
-                          (if (not (= "" (string/trim prefix)))
+                          (if (or (not (= "" (string/trim prefix)))
+                                (kept-for-cost? text line-start))
                             (scan (inc at) acc)
                             (let (end (balanced-end text at n))
                               (if (nil? end)
