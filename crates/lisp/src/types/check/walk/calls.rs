@@ -498,7 +498,7 @@ pub(super) const ELEMENT_CALLBACK_COMBINATORS: &[&str] = &[
 /// with `number`. The element type is exactly what the combinator promises to hand over, so
 /// binding it is the same move `fold_callback_seed` already makes for the accumulator.
 ///
-/// Bound as an INFERRED type (`check_fn_bound`, `dynamic_within`) rather than a declared
+/// Bound as an INFERRED type (`check_fn_bound_with`, `dynamic_within`) rather than a declared
 /// one, for the reason that function's own comment gives: an element type read by inclusion
 /// would flag correct code where the collection's type is an over-approximation.
 fn element_callback_seed(
