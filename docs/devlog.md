@@ -880,6 +880,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-13** — `editor/buffer-registry` (ADR-345): a named directory of buffer processes — share-once, enumeration, membership notifications — the seam a second frame (a process with its own window) joins the same buffers through
 - **2026-09-13** — `editor/lexer` (ADR-346): a lexical language mode is a table — structured rules, word classes, line rules — and `editor/configs` is JSON / YAML / TOML / Makefile / INI / commit-message as tables over it
 - **2026-09-15** — the four open known issues closed: `apply` binds a callee's type variable (KI-140); the dense table region is chunked, 6.4 GB → 52 MB reserved on `regex_test` (KI-142, ADR-354); registry writes are attributed to the module whose load made them and the image differential compares per-module registrations (KI-136)
+- **2026-09-16** — v0.29.0 (the open issues closed) and v0.29.1 (KI-147: a refer-all mistook another process's finishing load for a cycle, so `nest release` refused every hive bundle since v0.28.0); every project at `:brood ">= 0.29.0"`; hive deployed on v0.29.1
 - **2026-09-15** — ADR-355: a `let`-bound `fn` literal's parameters are derived from its callers (the ADR-341 rule scoped to the binding; sites under callback literals and nested `let`s type), and a `sig` naming the required positions seeds a `defn` with undeclared `&optional`s. bedit strict 58 → 48 with no bedit change; downstream sweep of 16 projects green (hive's reds = version skew)
 
 ---
@@ -13511,3 +13512,18 @@ a live watchdog; nothing to fix); KI-132 landed from the other session the same 
   bedit's strict ratchet under this tree: 58 → 53 (KI-140) → 48 (ADR-355: a `let`-bound
   lambda's parameters derived from its callers; a `sig` over the required positions seeds a
   `defn` with undeclared `&optional`s).
+
+## 2026-09-16 — v0.29.0, then v0.29.1: the release that could not release hive (KI-147)
+
+v0.29.0 tagged on a green main (after two CI reds of my own making were fixed: an
+env-mutating test binary with two cases, and the completion matrix source-booting 96
+children under the tree-walker job — 104 s → 26 s once the children get the boot artifacts).
+Every project's `:brood` floor moved to `>= 0.29.0`; hive's deps re-pinned; bedit formatted
+(its CI's format gate had wanted 23 files for a day).
+
+Then `fly deploy` died in `nest release`'s boot check with a `circular (:use http/util)` on a
+module with no `:use`. Neither v0.28.0 nor v0.29.0 could bundle hive — hive's pin sat between
+them where the race was won. `BROOD_TRACE_GLOBAL='*features-loading*'` over the kept bundle
+showed two loaders; the refer's cycle check read the other process's claim. Fixed as v0.29.1:
+a claim is a cycle only when the refering process holds it. The boot check was the gate that
+worked — it refused the artifact.

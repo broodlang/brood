@@ -121,7 +121,29 @@
       (require-one 'reqcirc-mod)
       (reflect/set-load-path saved-path)
       (file/rm path)
-      (assert= (reqcirc-mod/ok) :yes))))
+      (assert= (reqcirc-mod/ok) :yes)))
+
+  ;; A refer-all against a module ANOTHER process is mid-load is not a cycle. `require-one`
+  ;; waits for that load and returns on its `provide`, which lands inside `%require-force` a
+  ;; few instructions before the loader clears its marker — so a `(:use m)` evaluated in that
+  ;; window saw the marker and was refused as "circular `(:use m)`" on a module with no `:use`
+  ;; at all. That is how `nest release` refused every hive bundle since v0.28.0: the boot
+  ;; loop loads in one process while a supervisor a module started at load pulls modules in
+  ;; from another (2026-09-16). The claim is a CYCLE only when THIS process holds it.
+  (test "a refer-all sees another process's finishing load as loaded, and its own as a cycle"
+    (%load-string "(defmodule refer-race-target) (defn hello () :hi)")
+    ;; another process's marker over a module that is already provided: refer succeeds
+    (let (other (spawn (fn () (receive ([:stop] :ok)))))
+      (%registry-update! '*features-loading* :assoc ["refer-race-target"] other)
+      (let (r (try (do (%refer 'refer-race-target nil nil) :referred) (catch e (error-message e))))
+        (%registry-update! '*features-loading* :dissoc ["refer-race-target"] nil)
+        (send other [:stop])
+        (assert= r :referred)))
+    ;; our OWN marker is the cycle the check exists for
+    (%registry-update! '*features-loading* :assoc ["refer-race-target"] (self))
+    (let (r (try (do (%refer 'refer-race-target nil nil) :referred) (catch e (error-message e))))
+      (%registry-update! '*features-loading* :dissoc ["refer-race-target"] nil)
+      (is (includes? (str r) "circular")))))
 
 ;; `:implements` is read by the type checker (types/check/protocol.rs), which pulls the
 ;; clause out of the header source; the loader only has to tolerate it. It was left out
