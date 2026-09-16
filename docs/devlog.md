@@ -879,6 +879,8 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-13** — tabs are a column-dependent cluster (ADR-342): `display-width` / `width->index` take `start-col` + `tab-width`, `string/expand-tabs` is the third leg, the GUI paints a raw tab to the screen stop; the scroll blit (ADR-343): a dirty strip that is a translation of old canvas rows is copied, not drawn — a 1080p scroll paints in 2.3 ms, not 10; `ui-coalesce-motion` collapses a `:move` flood like a `:drag` one; `:close-is-input?` lets an app ask before the X button quits; `buffer-file-changed?` — a buffer stamps its file's mtime at read/save
 - **2026-09-13** — `editor/buffer-registry` (ADR-345): a named directory of buffer processes — share-once, enumeration, membership notifications — the seam a second frame (a process with its own window) joins the same buffers through
 - **2026-09-13** — `editor/lexer` (ADR-346): a lexical language mode is a table — structured rules, word classes, line rules — and `editor/configs` is JSON / YAML / TOML / Makefile / INI / commit-message as tables over it
+- **2026-09-15** — the four open known issues closed: `apply` binds a callee's type variable (KI-140); the dense table region is chunked, 6.4 GB → 52 MB reserved on `regex_test` (KI-142, ADR-354); registry writes are attributed to the module whose load made them and the image differential compares per-module registrations (KI-136)
+- **2026-09-15** — ADR-355: a `let`-bound `fn` literal's parameters are derived from its callers (the ADR-341 rule scoped to the binding; sites under callback literals and nested `let`s type), and a `sig` naming the required positions seeds a `defn` with undeclared `&optional`s. bedit strict 58 → 48 with no bedit change; downstream sweep of 16 projects green (hive's reds = version skew)
 
 ---
 
@@ -13448,3 +13450,30 @@ isolates, because named files were loaded into one image with no isolate at all 
 gap had `audit_test` reading `mcp_test`'s eval-tool defs as public names in the pre-push hook.
 `project-run/run-named-tests` now feeds the named files to the per-file scoped runner; guard in
 `crates/nest/tests/named_files_scoped.rs`.
+
+## 2026-09-15 — three of the four open known issues closed: KI-136, KI-140, KI-142
+
+Asked to fix every open issue. Four were open (KI-88 is archived-dormant with no cause and
+a live watchdog; nothing to fix); KI-132 landed from the other session the same evening
+(ADR-353), so this entry covers the other three. Each got a guard that was sabotage-verified.
+
+- **KI-140** — `apply` types as the callee applied to the spread operands plus one operand of
+  the collection's element type (`callback_ret`), so a `(& ?A -> ?A)` binds through it as in
+  the written-out call. Checker gates zero, strict included.
+- **KI-142** — counted first (`strace -e mmap`): `regex_test` alone reserved 100 × 64 MB. The
+  dense table region is now a directory of 512 KB chunks mapped on demand (ADR-354); the JIT's
+  inline table ops read the chunk pointer per op. `regex_test` 6.4 GB → 52 MB reserved; the
+  suite wrapper is back under 16 GB and CLAUDE.md's 24 GB note is withdrawn.
+- **KI-136** — the kernel journals which module's load wrote each registry entry
+  (`%registry-writer`); the stdlib image attributes by writer, prunes module-owned entries
+  from the values it snapshots, and the ADR-280 differential compares each module's own
+  registrations from source and from the image. `editor/face` materialises its six faces.
+- **Downstream sweep** (the second half of the ask): every `~/src/broodlang/*` project's
+  `nest check` / `--check-boot` / `nest test` against this tree — 15 projects green (bedit
+  1660/1660 with the grammar build); hive's 11 reds are only version skew (its tree pins
+  0.27.2 and carries no 0.28.0 reference seeds — with them rendered, 70/70; nothing to fix).
+  bedit's queue item 2 is not a brood bug: `line-restart` was born in `editor/highlight`
+  (ADR-352) and never existed in `editor/lexer`; the auto-load worked, the name was wrong.
+  bedit's strict ratchet under this tree: 58 → 53 (KI-140) → 48 (ADR-355: a `let`-bound
+  lambda's parameters derived from its callers; a `sig` over the required positions seeds a
+  `defn` with undeclared `&optional`s).

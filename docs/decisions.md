@@ -22718,3 +22718,76 @@ after): `shell-spans` whole-file 303 → 12 ms; a 36-char `export` line 2.0 → 
 164-char `alias alert=…` line 10 → 0.41 ms; 40 YAML lines 17.8 → 5.6 ms, 40 TOML lines
 13 → 3.2 ms. What remains is interpreter overhead per token (~7 µs: the result map, the
 substring, the append), not the engine.
+
+## ADR-354 — A table's dense region is a directory of lazily-mapped chunks
+
+**Status:** accepted (2026-09-15). **Context:** KI-142.
+
+**Context.** The dense representation of a `Table` (ADR-107) indexed int keys straight into
+one 64 MB anonymous mapping, reserved on the table's first dense write whatever the key —
+"virtual, committed a page at a time", which is true of RSS and false of address space. A
+memo table holding five small ints cost 64 MB of address space, and the regex object holds
+two such tables per compiled pattern: after ADR-352 put every lexer rule of every mode through
+`regex-compile`, `regex_test` alone reserved 100 regions (6.4 GB) and the in-language suite
+wrapper aborted under the `ulimit -v` the tree documents as its runaway guard. The cap's own
+note had recorded the 64 MB as "merely the mapping that lands on the wall".
+
+**Decision.** `DenseSlots` is a directory of `DENSE_KEY_MAX / CHUNK_SLOTS` = 128 chunk
+pointers, each null until a write reaches its key range and then a `CHUNK_SLOTS` (2^16 × 8 B
+= 512 KB) anonymous mapping, installed by a `compare_exchange` whose loser unmaps its own
+attempt. A table's address space tracks the keys it touches: a five-key memo costs one
+chunk, a sieve over millions at most 128; reads of an unmapped chunk answer `EMPTY` without
+mapping it; scans (count, migrate, snapshot, drop) skip unmapped chunks whole. Chunks and the
+directory never move and are never unmapped (the "Lifetime" rule stands), so JIT'd code holds
+the directory's address and loads the chunk pointer per inline op — an unmapped chunk routes
+to the FFI, whose `put` maps it. One extra dependent load on the dense fast path; the
+lock-free per-slot protocol is unchanged, and so is the loom model, which never modelled the
+storage. The `OnceLock`/init-mutex pair that serialised the single reservation is gone: the
+directory is born with the store.
+
+**Alternatives rejected.** *Shrink `DENSE_KEY_MAX`*: moves the same cost, does not remove
+it, and migrates more tables to the hashed side. *Grow the region with `mremap`*: readers
+hold raw pointers. *Fix the caller (`regex.blsp`)*: the memo tables are the documented use
+of a dense table — a Brood program that makes many small int-keyed tables is not wrong, the
+reservation was.
+
+**Consequence.** `regex_test` maps 105 chunks (52 MB); its `VmPeak` is the runtime's ~3.5 GB
+baseline. The suite wrapper is back under 16 GB. Guard: `crates/lisp/tests/table_address_space.rs`.
+
+## ADR-355 — A `let`-bound `fn` literal's parameters are derived from its callers
+
+**Status:** accepted (2026-09-15). **Context:** bedit's strict ratchet.
+
+**Context.** ADR-341 derives a module-private `defn`'s parameter types from its call sites,
+and the walk seeds a `fn` literal handed straight to a combinator from the element the
+combinator promises. Between the two sat the local helper — `(let (row-op (fn (k …) …
+(+ y k))) (mapcat (range …) (fn (line) (row-op (- line top) …))))` — whose parameters
+were unknown, so `(+ y k)` read `number` and its use as an `int` was a strict finding.
+Fifteen of bedit's 58 were this shape, every one a local helper over an index, while the
+same literal written inline in the `map` was typed. A second rule beside it refused a
+`(sig …)` outright when the `defn` carried `&optional` parameters the declaration did not
+name, so every parameter of `ed-visible-lines` was unknown two lines under its declaration.
+
+**Decision.** `walk::derived_let_lambda`: for a `let`/`letrec` binder whose value is a
+single-clause, plain-parameter literal, the callers are exactly the forms the name is
+visible in — the later bindings' right-hand sides and the body — and each parameter is the
+union of what those sites hand it: a direct call's argument, typed in the scope every binder
+is bound in; or a callee's promise when the name is HANDED OVER (`callback_seed` — a fold, an
+element combinator, a declared arrow). The site walk enters a callback literal with the
+promise's parameters bound and a nested `let` with its binders bound, so a site under
+`(mapcat xs (fn (line) …))` or `(let ([line from to] (nth rows k)) …)` types. The name
+ESCAPING — as a value where nothing promises what it will be called with, quoted, rebound by
+a nested binder, or under a macro the expander left as written — declines the whole
+derivation, the ADR-341 rule. The literal's body is checked with the parameters bound as
+**derived** (`Ctx::bind_derived`, so a defensive guard the in-scope callers never exercise
+is not "never true"), and the name is bound to the arrow `(any… -> R)` with `R` the body's
+type under the derived inputs, so the name's calls type too — in all three `let` typings
+(`check_let`, `expr_ty`, `gradual_of`), which now share `let_rhs_ty`.
+
+And a declaration naming exactly the REQUIRED positions of a `defn` with undeclared
+`&optional` parameters seeds those positions (`required_param_count`); the optionals stay
+unknown. The positions align exactly, which was the only reason to refuse.
+
+**Consequence.** bedit's strict findings 58 → 48 with no bedit change; `std/` strict stays
+at zero. And a combinator handed the derived name reads its result (`callback_ret` answers a lexical local whose type is an arrow), so `(map xs f)` is `list<R>`, not a bare `list`. A trap met on the way, kept as a test: the derivation's sites are typed with the binder PRE-BOUND, or `(reduce xs '() step)` under `(let (step …))` resolves to a global `step`. Guards in `types/check/tests/closure_inference.rs` (derivation, escape, the guard
+exemption) and `declarations.rs` (the optional rule), sabotage-verified.
