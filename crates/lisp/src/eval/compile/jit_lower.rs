@@ -751,6 +751,18 @@ fn jit_lower_arm_inner(
         .declare_function("brood_rt_cdr", Linkage::Import, &car_sig)
         .ok()
         .or_bail("cranelift-declare-function")?;
+    // brood_rt_{first,rest}(heap, out, w0,w1,w2) -> status: the NON-pair fallback of the
+    // inline `first`/`rest` (0 = `*out` holds the answer, 1 = deopt, 2 = error parked).
+    let mut seq1_sig = car_sig.clone();
+    seq1_sig.returns.push(AbiParam::new(types::I64));
+    let first_id = m
+        .declare_function("brood_rt_first", Linkage::Import, &seq1_sig)
+        .ok()
+        .or_bail("cranelift-declare-function")?;
+    let rest_id = m
+        .declare_function("brood_rt_rest", Linkage::Import, &seq1_sig)
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // Inline `first`/`rest` support: expose LOCAL pair-slab base pointers once per arm entry
     // so the JIT can emit `ptr + idx*48 + {0,24}` loads instead of per-element FFI calls.
     let mut pbase_sig = m.make_signature();
@@ -1142,6 +1154,8 @@ fn jit_lower_arm_inner(
     };
     let tickn_ref = m.declare_func_in_func(tickn_id, b.func);
     let car_ref = m.declare_func_in_func(car_id, b.func);
+    let first_ref = m.declare_func_in_func(first_id, b.func);
+    let rest_ref = m.declare_func_in_func(rest_id, b.func);
     let cdr_ref = m.declare_func_in_func(cdr_id, b.func);
     let pnbase_ref = m.declare_func_in_func(pnbase_id, b.func);
     let pobase_ref = m.declare_func_in_func(pobase_id, b.func);
@@ -1415,7 +1429,12 @@ fn jit_lower_arm_inner(
     // safepoint call) at line ~8020, which includes MakeVector. If MakeVector is present,
     // the safepoint fires on the back-edge, `minor_collect` replaces `self.local`, and the
     // hoisted nursery base pointer becomes a dangling pointer into the freed slab.
-    let pair_bases: Option<(cranelift_codegen::ir::Value, cranelift_codegen::ir::Value)> = {
+    // Held in `Variable`s, not bare SSA values: the non-pair fallback of `rest`
+    // (`brood_rt_rest`, a fresh list for a vector/set/bytes, a fresh range) can grow the
+    // pair slab and move its base, so that path re-fetches both bases and `def_var`s them
+    // (`prim::emit_prim1`), and every inline read `use_var`s — a straight-line arm pays
+    // nothing for it, and an arm that took the fallback reads through the new pointer.
+    let pair_bases: Option<(Variable, Variable)> = {
         let has_car_cdr = code.iter().any(|i| {
             matches!(
                 i,
@@ -1437,7 +1456,11 @@ fn jit_lower_arm_inner(
             let nursery = b.inst_results(cn)[0];
             let co = b.ins().call(pobase_ref, &[heap]);
             let old = b.inst_results(co)[0];
-            Some((nursery, old))
+            let nv = b.declare_var(ptr_ty);
+            b.def_var(nv, nursery);
+            let ov = b.declare_var(ptr_ty);
+            b.def_var(ov, old);
+            Some((nv, ov))
         } else {
             None
         }
@@ -1734,6 +1757,10 @@ fn jit_lower_arm_inner(
         vobase: vobase_ref,
         vref: vref_ref,
         car: car_ref,
+        first: first_ref,
+        rest: rest_ref,
+        pnbase: pnbase_ref,
+        pobase: pobase_ref,
         cdr: cdr_ref,
         cons: cons_ref,
         vec2room: vec2room_ref,
@@ -1779,6 +1806,20 @@ fn jit_lower_arm_inner(
         let Some(blk) = leader_block[ip] else {
             continue;
         };
+        // A leader the prepass never reached is DEAD: the bytecode compiler emits a
+        // jump-past-the-`else` after a then-branch that ends in a tail `SelfCall`, and
+        // nothing falls through a SelfCall. Emitting it anyway gave it an empty operand
+        // stack and an edge into a live join of another depth — the verifier rejection
+        // that kept `json/num-end` and `json/object-acc` off the native tier for as long
+        // as they have existed. Terminate it as unreachable instead; if the assumption
+        // were ever wrong it deopts to the VM rather than mis-executing.
+        if ip != 0 && depth[ip].is_none() {
+            pending[ip].clear();
+            b.switch_to_block(blk);
+            let __dr = b.ins().iconst(types::I32, 1);
+            b.ins().jump(deopt, &[BlockArg::Value(__dr)]);
+            continue;
+        }
         // Every predecessor of this leader has been emitted (edges are forward-only, in
         // ip order), so its block-param typing can be settled now.
         let edges = std::mem::take(&mut pending[ip]);

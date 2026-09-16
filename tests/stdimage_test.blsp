@@ -74,10 +74,18 @@
                              "             \" via=\" (contains? via '*lineedit-keymap*)"
                              "             \" smaller=\" (< (count own) (count via)))))"]
                 "\n"))
-          result (if exe (os/cmd exe [prog]) nil))
+          ;; `repl` is a DEV module. The sibling `brood` beside a `make release` nest is the
+          ;; LEAN binary, where `(require-one 'repl)` cannot find it and the child exits 1 —
+          ;; so the child first says whether it carries the dev modules at all, and a lean
+          ;; sibling is a visible skip (the `is` below), not a failure (2026-09-16).
+          probe (path/temp "stdimage-lean-probe-")
+          _ (file/spit probe "(io/puts (if (%builtin-module \"repl\") \"dev\" \"lean\"))")
+          lean (and exe (= "lean" (os/cmd-out (os/cmd exe [probe]))))
+          result (if (and exe (not lean)) (os/cmd exe [prog]) nil))
       ;; `exe` nil means no brood binary beside the runner — a legitimate environment, not a
       ;; failure. Assert it separately so a skip is visible rather than silently green.
       (is (or (nil? exe) (string? exe)))
+      (when lean (io/puts "  (stdimage attribution: sibling brood is lean — skipped)"))
       (when result
         (is (= (get result :exit) 0))
         (is (= (os/cmd-out result) "own=true via=true smaller=true")))))

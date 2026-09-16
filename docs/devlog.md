@@ -13428,6 +13428,19 @@ defines and dropped its faces, leaving it provided and empty. `def-face`/`face-s
 `%register-protocol` and the three `editor/layers` registrations are `%registry-update!` ops
 now (`:append-new` added for the system-layer list); guards in `tests/isolate_load_test.blsp`.
 The kernel's own comment on `registry_cas` had named the rule the whole time.
+## 2026-09-16 — the tier audit: two more latched arms, one dead-block lowering bug, and a gate (KI-147)
+
+With `BROOD_JIT_BAIL_TRACE` naming latches, running every benchmark row under it took ten
+minutes and found what a week of value gates could not: `second` latched on `http` and
+`supervisor` (the inline `first`/`rest` deopted for anything but a pair), and json's
+`num-end`/`object-acc` had never lowered — the dead jump the compiler emits after a
+then-branch's tail `SelfCall` was translated with an empty stack into a live join. The
+`first`/`rest` fallback exposed a real hazard on its first run: `rest` of a vector allocates
+a list, the arm had hoisted the pair-slab bases at entry, and the next inline pair read went
+through a stale pointer — a segfault, now a sabotage-verified guard, fixed by holding the
+bases in `Variable`s and re-fetching after the call. `make tier-audit` runs the sweep as a
+gate (red on 0.29.0, green now), and the list/message rows A/B flat.
+
 ## 2026-09-15 — KI-132 closed: `=` on a string deopted per activation, and a type-mixed join was an unconditional deopt (ADR-353)
 
 Asked to review the VM and JIT for correctness, I ran the differential fuzzers first (seven

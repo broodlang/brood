@@ -343,9 +343,15 @@ green: ## Answer one question honestly: is this tree green? (completed CI runs +
 	# `--local` skips the CI half, `--remote` skips the local half.
 	@./scripts/green.sh $(ARGS)
 
-green-all: check-examples check-stress check-imaged smoke-bedit wasm-test ## `make green` plus clippy (CI's flags), the two slow .blsp corpus gates, the bedit smoke and the wasm behavioural suite
+green-all: check-examples check-stress check-imaged smoke-bedit tier-audit wasm-test ## `make green` plus clippy (CI's flags), the two slow .blsp corpus gates, the bedit smoke, the tier audit and the wasm behavioural suite
 	@./scripts/green.sh --clippy
-	@echo "green-all: clippy, the .blsp gates, the bedit smoke and the wasm suite passed too. Still not run: make test, breakage, tree-walker differential."
+	@echo "green-all: clippy, the .blsp gates, the bedit smoke, the tier audit and the wasm suite passed too. Still not run: make test, breakage, tree-walker differential."
+
+tier-audit: release-brood ## Every benchmark row under BROOD_JIT_BAIL_TRACE — fail on any arm latched off the native tier or any lowering bug (KI-132's class)
+	# Every other gate is a value gate, and the KI-132 class is right-but-slow: an arm that
+	# deopts per activation is latched onto the interpreter after sixteen, and nothing but a
+	# benchmark ever noticed. Uses ../brood-benchmarks (BENCH_DIR) like smoke-bedit.
+	@./scripts/tier-audit.sh
 
 wasm-test: ## Run the wasm32 cooperative scheduler BEHAVIOURALLY (build + wasm-bindgen + node)
 	# CI's wasm job is build-only ("there is no wasm test runner here"), so an entire

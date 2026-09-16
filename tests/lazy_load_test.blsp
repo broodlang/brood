@@ -82,7 +82,12 @@
                   ;; loaded although nothing ever called into it — when an election can happen
                   ;; at all. Under `BROOD_NO_JIT=1` / `BROOD_TIER=1` no arm tiers, nothing
                   ;; pre-loads, and the branch below loads it on first use like any other.
-                  "(io/puts (str \"native=\" (%native-tier?) \" after-drive=\" (contains? *features* \"lazyprobe-jit\")))\n"
+                  ;; `%native-tier?` is a DEV-TOOLS primitive, and the sibling `brood` beside a
+                  ;; `make release` nest is the LEAN binary — the child died `unbound symbol`
+                  ;; on it (2026-09-16). Ask the question here and hand the child the answer.
+                  "(io/puts (str \"native="
+                  (%native-tier?)
+                  " after-drive=\" (contains? *features* \"lazyprobe-jit\")))\n"
                   "(io/puts (str \"cold=\" (hot-pick -1) \" after-call=\" (contains? *features* \"lazyprobe-jit\")))\n")))
       (when out
         (is (includes? out "before=false"))

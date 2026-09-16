@@ -45,6 +45,14 @@ pub(super) struct Funcs {
     pub vref: FuncRef,
     /// `brood_rt_car` / `brood_rt_cdr` — the `first`/`rest` handle ops (FFI fallback).
     pub car: FuncRef,
+    /// `brood_rt_first` / `brood_rt_rest` — `first`/`rest` of a NON-pair (the inline
+    /// path's tag-check miss): status 0 answers, 1 deopts, 2 parks an error.
+    pub first: FuncRef,
+    pub rest: FuncRef,
+    /// `brood_rt_pair_nursery_base` / `_old_base` — re-fetched after a `rest` fallback
+    /// that may have grown the pair slab (see `pair_bases` in `jit_lower_arm_inner`).
+    pub pnbase: FuncRef,
+    pub pobase: FuncRef,
     pub cdr: FuncRef,
     /// `brood_rt_cons` — pair allocation.
     pub cons: FuncRef,

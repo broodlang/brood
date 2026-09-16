@@ -381,7 +381,8 @@ cargo run -p nest -- new foo      # scaffold a new project
 make ab BASE=<ref>                # A/B the working tree vs a git ref on the benchmark rows
 make green                        # IS THE TREE GREEN? completed CI runs + the gates `make check` skips
 make wasm-test                    # RUN the wasm32 cooperative scheduler (build + wasm-bindgen + node), don't just compile it
-make green-all                    # …plus clippy on CI's flags, the examples/stress gates, and `check-imaged`
+make green-all                    # …plus clippy on CI's flags, the examples/stress gates, `check-imaged` and `tier-audit`
+make tier-audit                   # every benchmark row under BROOD_JIT_BAIL_TRACE: fail on an arm latched off the native tier (KI-132's class — right answers, slowly, that no value gate sees)
 ```
 
 **`make green` is the answer to "is the tree green?" — do not hand-read the run list.** It

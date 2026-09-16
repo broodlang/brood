@@ -19,7 +19,7 @@ use cranelift_codegen::ir::{
     condcodes::{FloatCC, IntCC},
     types, AtomicRmwOp, BlockArg, InstBuilder, MemFlagsData, StackSlotData, StackSlotKind, Value,
 };
-use cranelift_frontend::FunctionBuilder;
+use cranelift_frontend::{FunctionBuilder, Variable};
 use std::collections::HashMap;
 
 /// The size of a `Value` in bytes — the frame-slot stride in `roots`.
@@ -43,7 +43,7 @@ pub(super) fn emit_prim1(
     b: &mut FunctionBuilder,
     stack: &mut Vec<Op>,
     op: &PrimOp1,
-    pair_bases: Option<(Value, Value)>,
+    pair_bases: Option<(Variable, Variable)>,
     frame: Frame,
     funcs: Funcs,
 ) -> Option<()> {
@@ -52,18 +52,75 @@ pub(super) fn emit_prim1(
     let operand = stack.pop().or_bail("operand-stack-underflow")?;
     match op {
         PrimOp1::First | PrimOp1::Rest => {
-            // Tag-check it's a Pair (deopt otherwise — the VM handles first/rest of
-            // nil / non-list / type error). The result is an arbitrary Value, so it's
-            // a Handle.
+            // Tag-check it's a Pair; anything else takes the `brood_rt_first`/`_rest`
+            // FALLBACK, which answers nil / vector / range / bytes / set and the type
+            // error itself and deopts only for a record or a seq-view (they need the
+            // evaluator). This used to deopt for every non-pair — an arm whose `first`
+            // saw a vector on each activation (`second`, `(first (rest x))`, on `http`)
+            // deopted per activation and was latched off the native tier (ADR-353's
+            // class). The result is an arbitrary Value, so it's a Handle; the two paths
+            // meet at `merge`.
             let [w0, w1, w2] = read_words(b, operand, frame);
             let tagb = b.ins().band_imm_s(w0, 0xff);
             let is_pair = b.ins().icmp_imm_s(IntCC::Equal, tagb, TAG_PAIR as i64);
             let cont = b.create_block();
-            let __dr = b.ins().iconst(types::I32, 4);
-            b.ins()
-                .brif(is_pair, cont, &[], deopt, &[BlockArg::Value(__dr)]);
+            let slow = b.create_block();
+            let merge = b.create_block();
+            for _ in 0..3 {
+                b.append_block_param(merge, types::I64);
+            }
+            b.ins().brif(is_pair, cont, &[], slow, &[]);
+            b.switch_to_block(slow);
+            {
+                let fref = match op {
+                    PrimOp1::First => funcs.first,
+                    PrimOp1::Rest => funcs.rest,
+                    _ => unreachable!(),
+                };
+                let out_addr = b.ins().stack_addr(funcs.ptr_ty, funcs.out_slot, 0);
+                let c = b.ins().call(fref, &[funcs.heap, out_addr, w0, w1, w2]);
+                let status = b.inst_results(c)[0];
+                // `rest` of a non-pair ALLOCATES (a fresh list / range), which can grow the
+                // pair slab and move its base: re-fetch the hoisted bases here so the
+                // arm's later inline reads go through the new pointers.
+                if let (PrimOp1::Rest, Some((nursery_var, old_var))) = (op, pair_bases) {
+                    let cn = b.ins().call(funcs.pnbase, &[funcs.heap]);
+                    let nb = b.inst_results(cn)[0];
+                    b.def_var(nursery_var, nb);
+                    let co = b.ins().call(funcs.pobase, &[funcs.heap]);
+                    let ob = b.inst_results(co)[0];
+                    b.def_var(old_var, ob);
+                }
+                let ok = b.create_block();
+                let not_ok = b.create_block();
+                b.ins().brif(status, not_ok, &[], ok, &[]);
+                b.switch_to_block(not_ok);
+                let is_err = b.ins().icmp_imm_s(IntCC::Equal, status, 2);
+                let __dr = b.ins().iconst(types::I32, 4);
+                b.ins()
+                    .brif(is_err, funcs.error, &[], deopt, &[BlockArg::Value(__dr)]);
+                b.switch_to_block(ok);
+                let o0 = b
+                    .ins()
+                    .stack_load(types::I64, types::I64, funcs.out_slot, 0);
+                let o1 = b.ins().stack_load(
+                    types::I64,
+                    types::I64,
+                    funcs.out_slot,
+                    PAYLOAD_OFFSET as i32,
+                );
+                let o2 = b.ins().stack_load(
+                    types::I64,
+                    types::I64,
+                    funcs.out_slot,
+                    PAYLOAD_OFFSET as i32 + 8,
+                );
+                b.ins().jump(merge, &[o0.into(), o1.into(), o2.into()]);
+            }
             b.switch_to_block(cont);
-            let h = if let Some((nursery_base, old_base)) = pair_bases {
+            let h = if let Some((nursery_var, old_var)) = pair_bases {
+                let nursery_base = b.use_var(nursery_var);
+                let old_base = b.use_var(old_var);
                 // Inline LOCAL pair read. PairId layout (w1):
                 //   bits 0..31  = index into the slab
                 //   bits 32..60 = gen epoch (ignored here)
@@ -155,7 +212,14 @@ pub(super) fn emit_prim1(
                 };
                 call_handle(b, fref, &[w0, w1, w2], funcs)
             };
-            stack.push(h);
+            let (p0, p1, p2) = match h {
+                Op::Handle(a, c, d) => (a, c, d),
+                _ => unreachable!("the pair path yields a Handle"),
+            };
+            b.ins().jump(merge, &[p0.into(), p1.into(), p2.into()]);
+            b.switch_to_block(merge);
+            let mp = b.block_params(merge);
+            stack.push(Op::Handle(mp[0], mp[1], mp[2]));
         }
         PrimOp1::IsNil => {
             // Tag-only nil check: compare the tag byte to 0 (Tag::Nil). Result is an
