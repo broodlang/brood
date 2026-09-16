@@ -433,6 +433,22 @@ impl Heap {
         old
     }
 
+    /// Set only the global-IC cursor (a global read's assert, rung A1).
+    #[inline]
+    pub fn set_gic_base(&self, gic: u32) {
+        self.cur_gic_base.set(gic);
+    }
+
+    /// [`vm_fast_links_base`](Self::vm_fast_links_base) for an explicit block cursor — what
+    /// a native call site reads from its own `JitCallCtx` (rung A1), so the per-call table
+    /// fetch writes nothing into the heap.
+    pub fn vm_fast_links_base_for(&self, ic_base: u32) -> (*const FastLink, usize) {
+        // SAFETY: as `vm_fast_links_base`.
+        let v = unsafe { &*self.vm_fast_links.as_ptr() };
+        let base = (ic_base as usize).min(v.len());
+        (unsafe { v.as_ptr().add(base) }, v.len() - base)
+    }
+
     /// The current activation's IC block bases (see [`Self::set_ic_bases`]).
     #[inline]
     pub fn ic_bases(&self) -> (u32, u32) {

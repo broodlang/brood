@@ -882,6 +882,7 @@ fn jit_lower_arm_inner(
     glob_sig.params.push(AbiParam::new(ptr_ty)); // heap
     glob_sig.params.push(AbiParam::new(ptr_ty)); // out: *mut Value
     glob_sig.params.push(AbiParam::new(types::I32)); // sym (interned u32)
+    glob_sig.params.push(AbiParam::new(ptr_ty)); // ctx: *const JitCallCtx (rung A1)
     glob_sig.returns.push(AbiParam::new(types::I64)); // status
     let glob_id = m
         .declare_function("brood_rt_global", Linkage::Import, &glob_sig)
@@ -900,6 +901,7 @@ fn jit_lower_arm_inner(
     globic_sig.params.push(AbiParam::new(ptr_ty)); // out: *mut Value
     globic_sig.params.push(AbiParam::new(types::I32)); // sym
     globic_sig.params.push(AbiParam::new(types::I32)); // site
+    globic_sig.params.push(AbiParam::new(ptr_ty)); // ctx: *const JitCallCtx (rung A1)
     globic_sig.returns.push(AbiParam::new(types::I64)); // status
     let globic_id = m
         .declare_function("brood_rt_global_ic", Linkage::Import, &globic_sig)
@@ -911,6 +913,7 @@ fn jit_lower_arm_inner(
     callslow_sig.params.push(AbiParam::new(types::I32)); // argc (u32)
     callslow_sig.params.push(AbiParam::new(types::I32)); // call site (NO_SITE if none)
     callslow_sig.params.push(AbiParam::new(types::I32)); // call-head sym (u32::MAX if none)
+    callslow_sig.params.push(AbiParam::new(ptr_ty)); // ctx: *const JitCallCtx (rung A1)
     callslow_sig.returns.push(AbiParam::new(types::I64)); // status
     let callslow_id = m
         .declare_function("brood_rt_call_slow", Linkage::Import, &callslow_sig)
@@ -935,6 +938,7 @@ fn jit_lower_arm_inner(
     natfl_sig.params.push(AbiParam::new(types::I64)); // func bits
     natfl_sig.params.push(AbiParam::new(ptr_ty)); // args ptr
     natfl_sig.params.push(AbiParam::new(types::I32)); // argc
+    natfl_sig.params.push(AbiParam::new(ptr_ty)); // ctx: *const JitCallCtx (rung A1)
     natfl_sig.returns.push(AbiParam::new(types::I64));
     let natfl_id = m
         .declare_function("brood_rt_call_native_fl", Linkage::Import, &natfl_sig)
@@ -949,6 +953,7 @@ fn jit_lower_arm_inner(
     let mut flbase_sig = m.make_signature();
     flbase_sig.params.push(AbiParam::new(ptr_ty)); // heap
     flbase_sig.params.push(AbiParam::new(ptr_ty)); // out_len: *mut u64
+    flbase_sig.params.push(AbiParam::new(ptr_ty)); // ctx: *const JitCallCtx (rung A1)
     flbase_sig.returns.push(AbiParam::new(ptr_ty)); // *const FastLink
     let flbase_id = m
         .declare_function("brood_rt_fastlink_base", Linkage::Import, &flbase_sig)
@@ -964,6 +969,7 @@ fn jit_lower_arm_inner(
     fastframe_sig.params.push(AbiParam::new(ptr_ty)); // out: *mut Value
     fastframe_sig.params.push(AbiParam::new(types::I32)); // site
     fastframe_sig.params.push(AbiParam::new(ptr_ty)); // slot: *const FastLink
+    fastframe_sig.params.push(AbiParam::new(ptr_ty)); // ctx: *const JitCallCtx (rung A1)
     fastframe_sig.returns.push(AbiParam::new(types::I64)); // status
     let fastframe_id = m
         .declare_function("brood_rt_fast_frame", Linkage::Import, &fastframe_sig)
@@ -978,6 +984,7 @@ fn jit_lower_arm_inner(
     xlatch_sig.params.push(AbiParam::new(types::I64)); // site<<32 | head
     xlatch_sig.params.push(AbiParam::new(types::I64)); // argc
     xlatch_sig.params.push(AbiParam::new(types::I64)); // epoch
+    xlatch_sig.params.push(AbiParam::new(ptr_ty)); // ctx: *const JitCallCtx (rung A1)
     let xlatch_id = m
         .declare_function("brood_rt_xcall_latch", Linkage::Import, &xlatch_sig)
         .ok()
@@ -992,6 +999,7 @@ fn jit_lower_arm_inner(
     xcold_sig.params.push(AbiParam::new(types::I64)); // argc<<32 | nslots
     xcold_sig.params.push(AbiParam::new(types::I64)); // epoch
     xcold_sig.params.push(AbiParam::new(types::I64)); // stage_base
+    xcold_sig.params.push(AbiParam::new(ptr_ty)); // ctx: *const JitCallCtx (rung A1)
     xcold_sig.returns.push(AbiParam::new(types::I64)); // status (0/1/2)
     let xcold_id = m
         .declare_function("brood_rt_xcall_cold", Linkage::Import, &xcold_sig)
@@ -1239,9 +1247,10 @@ fn jit_lower_arm_inner(
     let heap = b.block_params(entry)[0];
     let base = b.block_params(entry)[1];
     let out_ptr = b.block_params(entry)[2];
-    // The activation context (`JitCallCtx`, rung A0): in the ABI, not yet read — the
-    // rungs after A0 move the IC-base, depth and env reads here.
-    let _ctx_ptr = b.block_params(entry)[3];
+    // The activation context (`JitCallCtx`, rungs A0/A1): every runtime callback that
+    // consults activation state takes it and asserts it into the heap fields first
+    // (`JitCallCtx::assert_into`), so the inline call path writes none of those fields.
+    let ctx_ptr = b.block_params(entry)[3];
     // `roots_base` is a **Variable**, not a fixed SSA value: a Brood→Brood call's staging
     // pushes (and the callee's own frames) may reallocate `roots`, so the base is re-fetched
     // after each call (`def_var` below). For a call-free arm it keeps its single entry
@@ -1519,7 +1528,9 @@ fn jit_lower_arm_inner(
         for sym in gsyms {
             let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
             let symv = b.ins().iconst(types::I32, sym as i64);
-            let c = b.ins().call(globprobe_ref, &[heap, out_addr, symv]);
+            let c = b
+                .ins()
+                .call(globprobe_ref, &[heap, out_addr, symv, ctx_ptr]);
             let status = b.inst_results(c)[0];
             let okb = b.create_block();
             let __dr = b.ins().iconst(types::I32, 103);
@@ -1553,7 +1564,9 @@ fn jit_lower_arm_inner(
         for sym in ssyms {
             let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
             let symv = b.ins().iconst(types::I32, sym as i64);
-            let c = b.ins().call(globprobe_ref, &[heap, out_addr, symv]);
+            let c = b
+                .ins()
+                .call(globprobe_ref, &[heap, out_addr, symv, ctx_ptr]);
             let status = b.inst_results(c)[0];
             let okb = b.create_block();
             let __dr = b.ins().iconst(types::I32, 105);
@@ -1785,6 +1798,7 @@ fn jit_lower_arm_inner(
         xlatch: xlatch_ref,
         xcold: xcold_ref,
         armfn_sig: armfn_sigref,
+        ctx: ctx_ptr,
         xcall: call::xcall_emit(hot),
         sp: sp_ref,
         tickn: tickn_ref,
@@ -1958,9 +1972,10 @@ fn jit_lower_arm_inner(
                         let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
                         let c = if let Inst::GlobalIc { site, .. } = &code[j] {
                             let site_v = b.ins().iconst(types::I32, *site as i64);
-                            b.ins().call(globic_ref, &[heap, out_addr, sym, site_v])
+                            b.ins()
+                                .call(globic_ref, &[heap, out_addr, sym, site_v, ctx_ptr])
                         } else {
-                            b.ins().call(glob_ref, &[heap, out_addr, sym])
+                            b.ins().call(glob_ref, &[heap, out_addr, sym, ctx_ptr])
                         };
                         let status = b.inst_results(c)[0];
                         let cont = b.create_block();

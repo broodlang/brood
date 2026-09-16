@@ -683,7 +683,16 @@ pub(crate) fn jit_tier_in_frame(
     let gw_seq = heap.native_gateway_seq;
     let saved_gw = std::mem::replace(&mut heap.cur_native_gateway, gw_seq);
     let ctx = crate::jit::JitCallCtx::from_heap(heap);
+    // This entry does not raise the depth or install IC cursors — the driver installed the
+    // cursors for this frame — but the chain below may ASSERT deeper activations' values
+    // into those fields from its callbacks (rung A1: the inline native→native call no
+    // longer restores them), so this gateway restores what it found. Without this the
+    // depth leaked upward one per chain: `bintree` reached ctx.depth 75 and every inline
+    // call fell to the callback path on the `depth < 64` guard (+30% on the row).
+    let saved_bases = heap.ic_bases();
     let outcome = f(heap as *mut Heap, base as i64, out, &ctx);
+    heap.set_ic_bases(saved_bases);
+    heap.jit_native_depth = native_depth;
     heap.cur_native_gateway = saved_gw;
     heap.jit_force_vm = saved_force_vm;
     heap.jit_call_env = saved_env;

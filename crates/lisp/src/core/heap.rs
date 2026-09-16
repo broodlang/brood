@@ -1174,16 +1174,12 @@ pub(crate) struct JitCeremonyOffsets {
     /// `Heap.roots` — a [`roots_buf::RootsBuf`], whose own header is (ptr, len, cap)
     /// at +0/+8/+16 (pinned by `RootsBuf::header_offsets`).
     pub roots: usize,
-    pub jit_call_env: usize,
-    pub jit_native_depth: usize,
-    pub jit_force_vm: usize,
-    pub jit_dbg_fn: usize,
-    /// `Cell<u32>` — `repr(transparent)`, so a raw u32 load/store at the offset is the
-    /// same access `set_ic_bases` makes.
-    pub cur_ic_base: usize,
-    pub cur_gic_base: usize,
+    /// The gateway-token counter — bumped per inline call so the callee's token is
+    /// unique among live activations. The per-call save/restore of `jit_call_env`,
+    /// `jit_native_depth`, `jit_force_vm`, `jit_dbg_fn`, the IC cursors and
+    /// `cur_native_gateway` is gone (rung A1): callbacks assert them from the callee's
+    /// `JitCallCtx` instead, so those offsets are no longer needed here.
     pub native_gateway_seq: usize,
-    pub cur_native_gateway: usize,
     pub blocked_under_gateway: usize,
 }
 
@@ -1194,14 +1190,7 @@ pub(crate) fn jit_ceremony_offsets() -> JitCeremonyOffsets {
     const { assert!(std::mem::size_of::<EnvRoot>() == 16) };
     JitCeremonyOffsets {
         roots: std::mem::offset_of!(Heap, roots),
-        jit_call_env: std::mem::offset_of!(Heap, jit_call_env),
-        jit_native_depth: std::mem::offset_of!(Heap, jit_native_depth),
-        jit_force_vm: std::mem::offset_of!(Heap, jit_force_vm),
-        jit_dbg_fn: std::mem::offset_of!(Heap, jit_dbg_fn),
-        cur_ic_base: std::mem::offset_of!(Heap, cur_ic_base),
-        cur_gic_base: std::mem::offset_of!(Heap, cur_gic_base),
         native_gateway_seq: std::mem::offset_of!(Heap, native_gateway_seq),
-        cur_native_gateway: std::mem::offset_of!(Heap, cur_native_gateway),
         blocked_under_gateway: std::mem::offset_of!(Heap, blocked_under_gateway),
     }
 }
