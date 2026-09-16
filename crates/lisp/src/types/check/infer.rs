@@ -1577,6 +1577,9 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         // `(seq x)` is `x`'s elements as a list, the same number of them (a bytes'
         // octets, a vector's items): its element type and length are the input's.
         || value::symbol_is(head, "seq")
+        // …and `(%map-pairs m)` is the kernel's spelling of `seq` over a map: its
+        // `[k v]` entries, one per key, so a `map<K, V>` walks as `(tuple K V)` here too.
+        || value::symbol_is(head, "%map-pairs")
     {
         let coll = *items.get(1)?;
         let coll_ty = expr_ty(heap, coll, ctx);
@@ -1999,6 +2002,57 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
                 Some(d) => v.clone().union(d),
                 None => v.clone().union(Ty::of(Tag::Nil)),
             });
+        }
+    }
+    // `(get-in m [k …] [default])` with a LITERAL vector path → the `get` rule applied
+    // key by key: a literal keyword reads the record field, any other key reads a
+    // `map<K, V>`'s value. The walk STOPS at a key that is absent or whose value is not a
+    // map — `%get-in-walk` answers the default there (nil without one) — so every step
+    // but the last strips the `nil` its read admits and remembers that the default is
+    // among the answers; the last step reads with the default in place of absence
+    // (`record_field_ty_with_default`), keeping a PRESENT nil as nil. A step neither rule
+    // can type leaves the whole read unknown, as before. Before this a `(get-in m
+    // [:hosted i])` on a declared `model` read `any` where `(get (:hosted m) i)` beside it
+    // read the slot type, and every arithmetic downstream of it said `number`.
+    if value::symbol_is(head, "get-in") && (items.len() == 3 || items.len() == 4) {
+        if let Value::Vector(path_id) = items[2] {
+            let path = heap.vector(path_id).to_vec();
+            let nil = Ty::of(Tag::Nil);
+            let default = match items.get(3) {
+                Some(&d) => expr_ty(heap, d, ctx)?,
+                None => nil.clone(),
+            };
+            let mut cur = expr_ty(heap, items[1], ctx)?;
+            let mut defaulted = false;
+            for (index, key) in path.iter().enumerate() {
+                let last = index + 1 == path.len();
+                // A step reads only the maps among what reached it; anything else —
+                // nil, or a non-map value at an inner key — stops the walk at the default.
+                let readable = cur.clone().difference(nil.clone());
+                if readable.is_never() {
+                    return Some(default);
+                }
+                if !readable.is_subtype(&Ty::of(Tag::Map)) {
+                    return None;
+                }
+                let read = match key {
+                    Value::Keyword(name) if last => {
+                        readable.record_field_ty_with_default(*name, &default)
+                    }
+                    Value::Keyword(name) => readable.record_field_ty(*name),
+                    _ => None,
+                }
+                .or_else(|| {
+                    readable
+                        .map_kv()
+                        .map(|(_, v)| v.union(if last { default.clone() } else { nil.clone() }))
+                })?;
+                if !last && read.contains_tag(Tag::Nil) {
+                    defaulted = true;
+                }
+                cur = read;
+            }
+            return Some(if defaulted { cur.union(default) } else { cur });
         }
     }
     // `(keys m)` → `nil | list<K>`. On a **closed** record shape the keys are exactly

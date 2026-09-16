@@ -525,3 +525,35 @@ fn seq_remove_drops_what_the_predicate_admits() {
         "nil | list<1>"
     );
 }
+
+// `%map-pairs` is the kernel's `seq` over a map — the `[k v]` entries — so a declared
+// `map<K, V>` walks as `(tuple K V)` through it, and the offset read out of an entry is
+// the value type. bedit enumerates every presence map this way; before the rule the entry
+// was `any` and the arithmetic on the value said `number`.
+#[test]
+fn map_pairs_walks_a_typed_map_as_its_entries() {
+    let ws = file_warnings_mode(
+        "\
+         (defmodule t)\n\
+         (sig f ((map any int) int -> list))\n\
+         (defn f (cursors len)\n\
+           (map (%map-pairs cursors)\n\
+             (fn (kv) (range 0 (math/min (second kv) len)))))",
+        true,
+    );
+    assert!(ws.is_empty(), "{ws:?}");
+    let ws = file_warnings_mode(
+        "\
+         (defmodule t)\n\
+         (sig f ((map any string) int -> list))\n\
+         (defn f (cursors len)\n\
+           (map (%map-pairs cursors)\n\
+             (fn (kv) (range 0 (math/min (second kv) len)))))",
+        true,
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("math/min") && w.contains("string")),
+        "{ws:?}"
+    );
+}

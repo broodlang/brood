@@ -184,3 +184,4 @@ cursor-only delta is `:noop`."
         ;; (atomic snapshot; includes our sends by FIFO order), pendings reset
         (not (empty? pending)) [(assoc nlink :pending ()) :resync]
         else [nlink [:text text]]))))
+(sig link-fold (map int any any -> (tuple map any)))

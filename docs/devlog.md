@@ -880,7 +880,9 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-13** — `editor/buffer-registry` (ADR-345): a named directory of buffer processes — share-once, enumeration, membership notifications — the seam a second frame (a process with its own window) joins the same buffers through
 - **2026-09-13** — `editor/lexer` (ADR-346): a lexical language mode is a table — structured rules, word classes, line rules — and `editor/configs` is JSON / YAML / TOML / Makefile / INI / commit-message as tables over it
 - **2026-09-15** — the four open known issues closed: `apply` binds a callee's type variable (KI-140); the dense table region is chunked, 6.4 GB → 52 MB reserved on `regex_test` (KI-142, ADR-354); registry writes are attributed to the module whose load made them and the image differential compares per-module registrations (KI-136)
+- **2026-09-16** — v0.29.0 (the open issues closed) and v0.29.1 (KI-147: a refer-all mistook another process's finishing load for a cycle, so `nest release` refused every hive bundle since v0.28.0); every project at `:brood ">= 0.29.0"`; hive deployed on v0.29.1
 - **2026-09-15** — ADR-355: a `let`-bound `fn` literal's parameters are derived from its callers (the ADR-341 rule scoped to the binding; sites under callback literals and nested `let`s type), and a `sig` naming the required positions seeds a `defn` with undeclared `&optional`s. bedit strict 58 → 48 with no bedit change; downstream sweep of 16 projects green (hive's reds = version skew)
+- **2026-09-16** — v0.29.2 (ADR-356: `markdown/->html` a core module — hive's lean bundle could not find `docs`); hive's tests render the running version's reference seeds; then bedit strict 48 → 0 through three checker rules (`get-in` over a literal path reads the declared shape, `%map-pairs` walks a `map<K, V>` as its entries, the site collector walks a `let`-bound lambda under its derived parameters) and bedit's own leaves
 
 ---
 
@@ -13428,7 +13430,7 @@ defines and dropped its faces, leaving it provided and empty. `def-face`/`face-s
 `%register-protocol` and the three `editor/layers` registrations are `%registry-update!` ops
 now (`:append-new` added for the system-layer list); guards in `tests/isolate_load_test.blsp`.
 The kernel's own comment on `registry_cas` had named the rule the whole time.
-## 2026-09-16 — the tier audit: two more latched arms, one dead-block lowering bug, and a gate (KI-147)
+## 2026-09-16 — the tier audit: two more latched arms, one dead-block lowering bug, and a gate (KI-148)
 
 With `BROOD_JIT_BAIL_TRACE` naming latches, running every benchmark row under it took ten
 minutes and found what a week of value gates could not: `second` latched on `http` and
@@ -13524,3 +13526,44 @@ a live watchdog; nothing to fix); KI-132 landed from the other session the same 
   bedit's strict ratchet under this tree: 58 → 53 (KI-140) → 48 (ADR-355: a `let`-bound
   lambda's parameters derived from its callers; a `sig` over the required positions seeds a
   `defn` with undeclared `&optional`s).
+
+## 2026-09-16 — v0.29.0, then v0.29.1: the release that could not release hive (KI-147)
+
+v0.29.0 tagged on a green main (after two CI reds of my own making were fixed: an
+env-mutating test binary with two cases, and the completion matrix source-booting 96
+children under the tree-walker job — 104 s → 26 s once the children get the boot artifacts).
+Every project's `:brood` floor moved to `>= 0.29.0`; hive's deps re-pinned; bedit formatted
+(its CI's format gate had wanted 23 files for a day).
+
+Then `fly deploy` died in `nest release`'s boot check with a `circular (:use http/util)` on a
+module with no `:use`. Neither v0.28.0 nor v0.29.0 could bundle hive — hive's pin sat between
+them where the race was won. `BROOD_TRACE_GLOBAL='*features-loading*'` over the kept bundle
+showed two loaders; the refer's cycle check read the other process's claim. Fixed as v0.29.1:
+a claim is a cycle only when the refering process holds it. The boot check was the gate that
+worked — it refused the artifact.
+
+## 2026-09-16 — bedit strict 48 → 0: three checker rules and the leaves that knew
+
+The 48 strict findings bedit's ratchet carried since the ADR-350/341 sharpening fell into
+three checker gaps and a handful of undeclared leaves. The gaps first, each a general rule:
+
+- **`get-in` with a literal path** read `any` where the chain of `get`s beside it read the
+  declared shape — `(get-in m [:hosted bi])` on a `model` whose `:hosted` is `(map int …)`.
+  The rule applies the `get` rule key by key, and models the walk's stop: an absent key (or
+  a non-map value) at any step answers the default, so `(get-in {} [:sandbox :next-id] 1)`
+  is `1`, not `1 | nil`, while a present nil at the last key stays nil.
+- **`%map-pairs`** is the kernel's `seq` over a map and now types like it — a `map<K, V>`
+  walks as `(tuple K V)` — so the offset read out of a presence entry is an `int`.
+- **The site collector** (ADR-341) walked a `let`-bound lambda's body with its parameters
+  bound to nothing, so a private helper called from inside one derived `number` from
+  `(+ l dir)` where the walk (ADR-355) saw `int`. It now derives the literal's parameters
+  the way `check_let` does and walks the body under them.
+
+Then bedit's own leaves: a `diagnostic` deftype and the typed `:diag-by-line` /
+`:hosted` fields on the model, the row-table tuples (`ed-rows-line-rows`, `wrap/rows-from`),
+screen-column ints on the chunk painter and the status bar, `std`'s `layout` declared to
+hold a pane (`(len (list pane) 1 _)`) and `link-fold` declared over a map, and honest nil
+handling in the tests — `(or (seq/find …) (error …))` where the test knows the row exists.
+Also found on the way: a duplicate `ed-body-layout` sig (`-> map` above `-> layout`) and
+`ed-current-pane` declared `pane` while returning the payload. bedit's ratchet is a hard
+zero again.

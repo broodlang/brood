@@ -480,6 +480,10 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // LCS-based sequence diff: diff-seq, diff-lines, diff-summary, diff-patch,
     // diff-unified. O(m*n) time/space; suitable for small-to-medium sequences.
     embedded_module!("diff", "std/diff.blsp"),
+    // Markdown to HTML — a small subset, HTML-escaped. CORE, not tooling: the doc generator
+    // renders its guides with it and the hosted registry its package READMEs, at request
+    // time, on a shipped runtime (ADR-356).
+    embedded_module!("markdown", "std/markdown.blsp"),
     // Path string manipulation: join, split, basename, dirname, extension, stem,
     // normalize, relative-to. Consolidates the prelude's path-* globals under
     // a single path/ namespace with additional operations.
@@ -1364,6 +1368,19 @@ pub(crate) fn is_embedded_module(key: &str) -> bool {
     embedded_module(key).is_some()
 }
 
+/// Is `mod_name` mid-load **in this process** — the only way a `(:use mod)` can be a cycle
+/// back into the module being loaded? `*features-loading*` maps a key to the pid that
+/// claimed its load, and the claim is what a refer-all must not run under: the public set
+/// is incomplete until the load provides.
+///
+/// Another process's claim is not that. `require-one` (which `defmodule` runs before this
+/// refer) already waited for that load and returned on its `provide`, which happens INSIDE
+/// `%require-force` — a few instructions before the loader clears its marker. Reading the
+/// marker alone here called that window a "circular `(:use http/util)`" on a module with no
+/// `:use` at all: a bundle's boot loop in one process met a module a supervisor started at
+/// load had begun pulling in from another, and `nest release` refused every hive since
+/// v0.28.0 (found 2026-09-16, `BROOD_TRACE_GLOBAL='*features-loading*'`). Under lazy loading
+/// (ADR-335) a load starting in a spawned process is the ordinary case, not a race to fix.
 fn module_is_loading(heap: &mut Heap, mod_name: &str) -> bool {
     let map_id = match heap
         .env_get(value::EnvId::GLOBAL, value::intern("*features-loading*"))
@@ -1373,7 +1390,11 @@ fn module_is_loading(heap: &mut Heap, mod_name: &str) -> bool {
         _ => return false,
     };
     let key = heap.alloc_string(mod_name);
-    heap.map_get(map_id, key).is_some()
+    let Some(claimant) = heap.map_get(map_id, key) else {
+        return false;
+    };
+    let me = crate::process::pid_value(crate::process::self_pid());
+    heap.equal(claimant, me)
 }
 
 /// `(%refer 'mod subset exclude)` — add `(:use …)` imports to the current file's

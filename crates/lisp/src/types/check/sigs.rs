@@ -3083,6 +3083,10 @@ fn collect_private_sites(
         /// The candidate whose single-arm body is being walked — a site found here is a
         /// self-call of it.
         within: Option<Symbol>,
+        /// The caller-derived parameter types of the `let`-bound `fn` literal about to be
+        /// walked (ADR-355) — set by the `let` arm for exactly the next form, taken by the
+        /// `fn` arm, so the literal's body is walked under what the walk binds it to.
+        let_fn_params: Option<Vec<Option<Ty>>>,
     }
     impl Walker<'_> {
         /// Quoted data is not namespace-resolved, so a target appears there under its BARE
@@ -3242,12 +3246,56 @@ fn collect_private_sites(
                         }
                     }
                 }
-                for pair in binds.chunks(2) {
+                // A `fn`-valued binder's parameters are derived from its callers — the
+                // later bindings and the body — as `check_let` derives them (ADR-355), and
+                // its body is walked under them: a site inside `(let (step (fn (l) … (f
+                // (+ l dir)))) … (step line))` hands `f` the `int` the walk sees there,
+                // not the `number` an unknown `l` makes of the arithmetic. The sites are
+                // typed in the scope every binder is bound in, built once ahead.
+                let full = if binds.chunks(2).any(|pair| {
+                    matches!(pair.first(), Some(Value::Sym(_)))
+                        && pair
+                            .get(1)
+                            .is_some_and(|&rhs| super::walk::fn_form_items(heap, rhs).is_some())
+                }) {
+                    let mut full = inner.clone();
+                    for pair in binds.chunks(2) {
+                        let (Some(&pat), Some(&rhs)) = (pair.first(), pair.get(1)) else {
+                            continue;
+                        };
+                        let rhs_ty = super::infer::with_fresh_depth(|| expr_ty(heap, rhs, &full));
+                        full = super::walk::let_bind_scope(heap, full, pat, rhs, rhs_ty);
+                    }
+                    Some(full)
+                } else {
+                    None
+                };
+                for (index, pair) in binds.chunks(2).enumerate() {
                     let (Some(&pat), Some(&rhs)) = (pair.first(), pair.get(1)) else {
                         continue;
                     };
+                    let derived = match (pat, full.as_ref()) {
+                        (Value::Sym(name), Some(full))
+                            if super::walk::fn_form_items(heap, rhs).is_some() =>
+                        {
+                            let visible: Vec<Value> = binds[index * 2 + 2..]
+                                .iter()
+                                .skip(1)
+                                .step_by(2)
+                                .copied()
+                                .chain(items[2..].iter().copied())
+                                .collect();
+                            super::walk::derived_let_lambda(heap, name, rhs, &visible, full)
+                        }
+                        _ => None,
+                    };
+                    self.let_fn_params = derived.as_ref().map(|(tys, _)| tys.clone());
                     self.walk(rhs, &inner, None);
-                    let rhs_ty = super::infer::with_fresh_depth(|| expr_ty(heap, rhs, &inner));
+                    self.let_fn_params = None;
+                    let rhs_ty = derived
+                        .as_ref()
+                        .and_then(|(tys, ret)| super::walk::derived_let_lambda_arrow(tys, ret))
+                        .or_else(|| super::infer::with_fresh_depth(|| expr_ty(heap, rhs, &inner)));
                     // One rule set with `check_let` (`let_bind_scope`): a guard result
                     // stored in a temporary — `and`'s `(let (g (int? y)) (if g …))` —
                     // narrows `y` at a site under the `if`, as it does in the walk.
@@ -3274,8 +3322,13 @@ fn collect_private_sites(
                 let declared: Option<Vec<Option<Ty>>> = def_of
                     .and_then(|n| self.ctx.declared_sig(n))
                     .map(|sig| (0..params.len()).map(|i| sig.param(i)).collect());
+                // …or, for a `let`-bound literal, what its callers hand it (the `let` arm
+                // left them for this form alone — taken here so a nested literal never
+                // inherits them).
+                let let_derived = self.let_fn_params.take();
                 let bound: Option<Vec<Option<Ty>>> = declared
                     .or_else(|| def_of.and_then(|n| self.derived.get(&n).cloned()))
+                    .or(let_derived)
                     .filter(|d| single_arm && d.len() == params.len());
                 // A VARIADIC single arm is not a fixed arm, so it is never derived; its
                 // declared sig still binds it — the fixed positions as declared and the
@@ -3372,6 +3425,7 @@ fn collect_private_sites(
         },
         opaque: false,
         within: None,
+        let_fn_params: None,
     };
     for &form in forms {
         walker.walk(form, ctx, None);

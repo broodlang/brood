@@ -22873,3 +22873,30 @@ unknown. The positions align exactly, which was the only reason to refuse.
 **Consequence.** bedit's strict findings 58 → 48 with no bedit change; `std/` strict stays
 at zero. And a combinator handed the derived name reads its result (`callback_ret` answers a lexical local whose type is an arrow), so `(map xs f)` is `list<R>`, not a bare `list`. A trap met on the way, kept as a test: the derivation's sites are typed with the binder PRE-BOUND, or `(reduce xs '() step)` under `(let (step …))` resolves to a global `step`. Guards in `types/check/tests/closure_inference.rs` (derivation, escape, the guard
 exemption) and `declarations.rs` (the optional rule), sabotage-verified.
+
+## ADR-356 — The Markdown renderer is a CORE module (`markdown/->html`)
+
+**Status:** accepted (2026-09-16). **Context:** hive's local `nest release`.
+
+**Context.** `docs/markdown->html` lived inside the doc generator, a DEV module a shipped
+runtime does not carry (docs/release.md). The hosted registry rendered package READMEs with
+it at request time — `(:alias docs)` in `web/views/packages` — and its deploys worked only
+because the Docker runtime is not as lean as its build command claims: `cargo build --bin
+brood --no-default-features --features brood/jit` at the workspace root unifies features
+with `nest`, whose dependency on the `brood` lib keeps the defaults, so production ships
+dev-tools, wasm and treesit. `make install`'s embedded runtime (`release-brood`, built
+`-p cli`, which depends on the lib with `default-features = false`) is genuinely lean, and
+`nest release` on hive from that toolchain dies in the boot check on `cannot find module
+'docs'`. Two "lean" runtimes that disagree about what they ship is how KI-147 went unseen:
+the local `nest` had never bundled hive at all.
+
+**Decision.** The renderer moves whole to `std/markdown.blsp` as `markdown/->html`
+(`docs` renders its guides through it; the ledger carries `docs/markdown->html →
+markdown/->html`). A renderer an app calls at request time belongs where every runtime has
+it, and a Markdown subset is a language-library thing, not tooling — the same line that
+keeps `debug` and `eval-server` in CORE. The Docker build's feature leak is recorded here
+and left as it is: it ships MORE than intended, never less, and hive's build pins its own
+runtime command; hive's manifest no longer needs the leak.
+
+**Consequence.** hive bundles on the genuinely lean runtime. `tests/markdown_test.blsp` pins
+the module's presence on every runtime (`reflect/builtin-modules`) beside its rendering cases.

@@ -4,6 +4,41 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## Unreleased
+
+**Three checker rules, found by taking bedit's strict findings to zero.** `get-in` with a
+literal path reads the declared shape key by key — an absent key at any step answers the
+default, a present nil at the last key stays nil — where it read `any` beside a chain of
+`get`s that typed. `%map-pairs` walks a `map<K, V>` as its `(tuple K V)` entries, like
+`seq`. And the caller-derived parameter pass (ADR-341) walks a `let`-bound lambda's body
+under the parameters the walk derives for it (ADR-355), so a helper called from inside one
+no longer reads `number` for an `int`. `std/editor`'s `layout` declares that it holds a
+pane, and `link-fold` its map.
+
+## v0.29.2 — `markdown/->html` is a core module
+
+**The Markdown renderer leaves the doc generator** (ADR-356): `docs/markdown->html` is
+`markdown/->html`, in `std/markdown.blsp`, present on every runtime. The hosted registry
+renders package READMEs with it at request time, and a shipped app's runtime does not carry
+`docs` — the deploys had been working only because the Docker build ships more than its
+command claims (workspace feature unification), while `make install`'s embedded runtime is
+genuinely lean and could not bundle hive at all. The rename ledger carries the old name.
+
+## v0.29.1 — `nest release` boots an app whose modules spawn at load again
+
+**A refer-all no longer mistakes another process's finishing load for a cycle** (KI-147).
+Since v0.28.0 `nest release` refused every hive bundle: the boot check loads every embedded
+module in one process while a supervisor a module starts at load pulls modules in from
+another — under lazy loading that is ordinary — and `%refer`'s cycle check read the other
+process's `*features-loading*` claim as `circular (:use http/util)` on a module with no
+`:use` at all. `require-one` had already waited for that load and returned on its `provide`,
+a few instructions before the loader clears its marker. The claim is a cycle only when the
+process refering holds it. v0.29.0's other contents are unchanged.
+
+Also in this release: the two CI reds behind v0.29.0's tag (an env-mutating test binary that
+had grown a second case, and the completion matrix source-booting 96 children under the
+tree-walker job) are fixed; neither touched the runtime.
+
 ## v0.29.0 — the open issues closed: the JIT keeps `or`/`and` and string `=` native, tables reserve what they touch, the image attributes registrations to their writer
 
 **Every open known issue is closed** (KI-132, KI-136, KI-140, KI-141, KI-142, KI-145,

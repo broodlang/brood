@@ -2,7 +2,7 @@
 ;; load+introspect renderer behind `nest doc`. Register-only — discovered and run
 ;; by `nest test` (and cargo test, via crates/lisp/tests/suite.rs).
 
-(defmodule docs-test (:use-internals docs) (:use test) (:use docs))
+(defmodule docs-test (:use-internals docs) (:use-internals markdown) (:use test) (:use docs))
 
 (describe "docs: leading module docstring"
   (test "a file's leading string form is its module doc"
@@ -124,25 +124,25 @@
 
 (describe "docs: guides (Markdown → HTML)"
   (test "headings, inline code, links, lists, and fenced code render"
-    (assert= (docs/markdown->html "# Hi") "<h1>Hi</h1>")
-    (is (includes? (docs/markdown->html "a `b` c") "<code>b</code>"))
-    (is (includes? (docs/markdown->html "see [x](/y)") "<a href=\"/y\">x</a>"))
-    (is (includes? (docs/markdown->html "- one\n- two") "<li>one</li>"))
-    (is (includes? (docs/markdown->html "```\n(+ 1 2)\n```") "<pre><code>(+ 1 2)</code></pre>"))
+    (assert= (markdown/->html "# Hi") "<h1>Hi</h1>")
+    (is (includes? (markdown/->html "a `b` c") "<code>b</code>"))
+    (is (includes? (markdown/->html "see [x](/y)") "<a href=\"/y\">x</a>"))
+    (is (includes? (markdown/->html "- one\n- two") "<li>one</li>"))
+    (is (includes? (markdown/->html "```\n(+ 1 2)\n```") "<pre><code>(+ 1 2)</code></pre>"))
     ; HTML in prose is escaped
-    (is (includes? (docs/markdown->html "a <b> c") "&lt;b&gt;")))
+    (is (includes? (markdown/->html "a <b> c") "&lt;b&gt;")))
   (test "guide title humanises the filename"
     (assert= (docs/guide-title "guides/getting-started.md") "Getting started")))
 
 (describe "docs: Markdown edge cases (review fixes)"
   (test "an unmatched [ is a literal, not a runaway recursion"
-    (assert= (docs/markdown->html "a [b c") "<p>a [b c</p>")
-    (assert= (docs/markdown->html "cost $[5 today") "<p>cost $[5 today</p>"))
+    (assert= (markdown/->html "a [b c") "<p>a [b c</p>")
+    (assert= (markdown/->html "cost $[5 today") "<p>cost $[5 today</p>"))
   (test "a link URL is attribute-escaped and javascript: is neutralised"
-    (is (includes? (docs/markdown->html "x [y](\" onx=1)") "&quot;"))
-    (is (includes? (docs/markdown->html "[a](javascript:alert(1))") "href=\"#\"")))
+    (is (includes? (markdown/->html "x [y](\" onx=1)") "&quot;"))
+    (is (includes? (markdown/->html "[a](javascript:alert(1))") "href=\"#\"")))
   (test "an unclosed code fence at EOF is emitted, not dropped"
-    (is (includes? (docs/markdown->html "```\n(+ 1 2)") "<pre><code>(+ 1 2)</code></pre>"))))
+    (is (includes? (markdown/->html "```\n(+ 1 2)") "<pre><code>(+ 1 2)</code></pre>"))))
 
 ;; `md-links` — inline link rendering. Characterisation tests written BEFORE making the
 ;; function tail-recursive: it had no coverage at all, and it is fiddly index arithmetic over
@@ -150,36 +150,36 @@
 ;; original non-tail implementation first.
 (describe "docs: md-links"
   (test "text with no bracket is escaped and returned"
-    (assert= "plain &lt;b&gt;" (docs/md-links "plain <b>")))
+    (assert= "plain &lt;b&gt;" (markdown/md-links "plain <b>")))
 
   (test "a real [text](url) link becomes an anchor"
-    (assert= "<a href=\"u\">a</a>" (docs/md-links "[a](u)")))
+    (assert= "<a href=\"u\">a</a>" (markdown/md-links "[a](u)")))
 
   (test "text around a link is preserved and escaped"
-    (assert= "x <a href=\"u\">a</a> y" (docs/md-links "x [a](u) y")))
+    (assert= "x <a href=\"u\">a</a> y" (markdown/md-links "x [a](u) y")))
 
   (test "two links in one run both render"
     (assert= "<a href=\"u\">a</a><a href=\"v\">b</a>"
-      (docs/md-links "[a](u)[b](v)")))
+      (markdown/md-links "[a](u)[b](v)")))
 
   (test "a bracket run that is not a link is emitted literally, and scanning continues"
-    (assert= "[a] then <a href=\"u\">b</a>" (docs/md-links "[a] then [b](u)")))
+    (assert= "[a] then <a href=\"u\">b</a>" (markdown/md-links "[a] then [b](u)")))
 
   (test "an unclosed ] escapes the whole run"
-    (assert= "[a(u)" (docs/md-links "[a(u)")))
+    (assert= "[a(u)" (markdown/md-links "[a(u)")))
 
   (test "an unclosed ) escapes the whole run"
-    (assert= "[a](u" (docs/md-links "[a](u")))
+    (assert= "[a](u" (markdown/md-links "[a](u")))
 
   (test "link text and url are escaped"
-    (assert= "<a href=\"u&amp;v\">&lt;t&gt;</a>" (docs/md-links "[<t>](u&v)")))
+    (assert= "<a href=\"u&amp;v\">&lt;t&gt;</a>" (markdown/md-links "[<t>](u&v)")))
 
   (test "a javascript: url is neutralised"
     ;; The trailing `)` is real, not a bug in the test: `index-of ")"` finds the INNER paren,
     ;; so the url is `javascript:alert(1` and the outer `)` falls through as literal text.
     ;; Nested parens in a url truncate it — pinned here because the security property that
     ;; matters (a `javascript:` url becomes `#`) holds regardless.
-    (assert= "<a href=\"#\">x</a>)" (docs/md-links "[x](javascript:alert(1))")))
+    (assert= "<a href=\"#\">x</a>)" (markdown/md-links "[x](javascript:alert(1))")))
 
   (test "a long run of links all render"
     ;; 2000 links. Recursion depth here is one frame per link, so this is also the shape the
@@ -187,7 +187,7 @@
     ;; warning is about headroom, not an observed failure. `string-split` on N separators
     ;; yields N+1 pieces.
     (let (src (apply str (map (range 0 2000) (fn (_) "[a](u)"))))
-      (assert= 2001 (count (string/split (docs/md-links src) "<a href="))))))
+      (assert= 2001 (count (string/split (markdown/md-links src) "<a href="))))))
 
 ;; The namespaces the catalogue covers, read off the catalogue itself: every entry's
 ;; qualifier. Derived rather than listed so the gate follows the file — the first
@@ -312,25 +312,25 @@
   (test "javascript: is neutralised"
     ;; `includes?` on the href, not equality on the whole string: the link parser stops at
     ;; the first `)`, so `alert(1))` leaves a stray paren in the text. The href is the claim.
-    (is (includes? (docs/markdown->html "[x](javascript:alert(1))") "href=\"#\""))
-    (is (not (includes? (docs/markdown->html "[x](javascript:alert(1))") "javascript"))))
+    (is (includes? (markdown/->html "[x](javascript:alert(1))") "href=\"#\""))
+    (is (not (includes? (markdown/->html "[x](javascript:alert(1))") "javascript"))))
 
   ;; A browser matches a scheme case-insensitively, so a check on the literal spelling
   ;; catches only the spelling an attacker would not use.
   (test "and so is every casing of it"
-    (is (includes? (docs/markdown->html "[x](JaVaScRiPt:alert(1))") "href=\"#\""))
-    (is (not (includes? (docs/markdown->html "[x](JaVaScRiPt:alert(1))") "JaVaScRiPt:")))
-    (is (includes? (docs/markdown->html "[x](JAVASCRIPT:alert(1))") "href=\"#\"")))
+    (is (includes? (markdown/->html "[x](JaVaScRiPt:alert(1))") "href=\"#\""))
+    (is (not (includes? (markdown/->html "[x](JaVaScRiPt:alert(1))") "JaVaScRiPt:")))
+    (is (includes? (markdown/->html "[x](JAVASCRIPT:alert(1))") "href=\"#\"")))
 
   (test "vbscript: and data: too — a data: URL is a document with an origin"
-    (is (includes? (docs/markdown->html "[x](vbscript:msgbox(1))") "href=\"#\""))
-    (is (includes? (docs/markdown->html "[x](data:text/html,hi)") "href=\"#\""))
-    (is (includes? (docs/markdown->html "[x](DATA:text/html,hi)") "href=\"#\"")))
+    (is (includes? (markdown/->html "[x](vbscript:msgbox(1))") "href=\"#\""))
+    (is (includes? (markdown/->html "[x](data:text/html,hi)") "href=\"#\""))
+    (is (includes? (markdown/->html "[x](DATA:text/html,hi)") "href=\"#\"")))
 
   (test "leading whitespace does not smuggle one past the check"
-    (is (includes? (docs/markdown->html "[x](  javascript:alert(1))") "href=\"#\"")))
+    (is (includes? (markdown/->html "[x](  javascript:alert(1))") "href=\"#\"")))
 
   (test "ordinary links are untouched"
-    (is (includes? (docs/markdown->html "[x](https://example.com)") "href=\"https://example.com\""))
-    (is (includes? (docs/markdown->html "[x](/relative)") "href=\"/relative\""))
-    (is (includes? (docs/markdown->html "[x](mailto:a@b.com)") "href=\"mailto:a@b.com\""))))
+    (is (includes? (markdown/->html "[x](https://example.com)") "href=\"https://example.com\""))
+    (is (includes? (markdown/->html "[x](/relative)") "href=\"/relative\""))
+    (is (includes? (markdown/->html "[x](mailto:a@b.com)") "href=\"mailto:a@b.com\""))))
