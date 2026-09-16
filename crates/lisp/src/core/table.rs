@@ -43,8 +43,8 @@ use crate::core::value::Value;
 use crate::error::{LispError, LispResult};
 use crate::process::{from_message, to_message, Message};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{LazyLock, Mutex, MutexGuard, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{LazyLock, Mutex, MutexGuard};
 
 /// One structural-hash bucket: the (key-clone, value-clone) pairs sharing a hash. Almost
 /// always length 1 — a genuine hash collision is rare — so the single entry is stored
@@ -157,89 +157,188 @@ fn slot_to_message(s: u64) -> Option<Message> {
 
 /// Largest int key the dense representation will hold. Beyond it (or for a negative /
 /// non-int key, or a value outside the tagged-scalar shapes) the store migrates to
-/// the hashed map. The dense region is a single lazily-committed anonymous mapping
-/// (2^23 slots × 8 B = 64 MB **virtual**); the OS commits 4 KB pages as slots are
-/// first written, so RSS tracks the keys actually used — which is also why the old
-/// sparsity guard is gone: one far-out key costs one page, not a 64 MB resize.
+/// the hashed map. The dense region is `DENSE_KEY_MAX / CHUNK_SLOTS` chunks of
+/// `CHUNK_SLOTS` atomic words, each an anonymous mapping reserved the first time a key
+/// in its range is WRITTEN (the OS then commits 4 KB pages as slots are first touched),
+/// so both address space and RSS track the keys actually used — which is also why the
+/// old sparsity guard is gone: one far-out key costs one chunk and one page, not a
+/// resize.
 pub(crate) const DENSE_KEY_MAX: i64 = 1 << 23;
 
-/// The dense slot region: `DENSE_KEY_MAX` atomic words, all-zero (= `EMPTY`) at
-/// birth, reserved on the first dense write. On unix this is one anonymous
-/// `mmap` — a virtual reservation whose pages the OS commits on first touch, so
-/// an idle or sparse table costs pages, not the full span. (It also deliberately
-/// bypasses the ADR-043 counting allocator: 64 MB of untouched reservation
-/// against the soft cap would be pure fiction; the hashed side's real
-/// allocations are counted as always.) Never unmapped — see "Lifetime" above.
-struct DenseSlots(*const AtomicU64);
-// SAFETY: the region is shared, immovable, and only ever accessed through
-// `&AtomicU64` — exactly what atomics are for.
-unsafe impl Send for DenseSlots {}
-unsafe impl Sync for DenseSlots {}
+/// Slots per dense chunk: 2^16 × 8 B = 512 KB of address space per chunk a table
+/// touches. The region used to be ONE 64 MB reservation per table, made on the first
+/// dense write whatever the key — so a memo table holding five small ints cost 64 MB of
+/// address space, and the regex DFA memos (two per compiled pattern) put `regex_test`
+/// alone at 100 such regions, 6.4 GB, which is what aborted the in-language suite under
+/// its documented `ulimit -v` (KI-142). A chunk is small enough that a table of a few
+/// keys costs one, and large enough that a sieve over millions of keys maps at most 128.
+pub(crate) const CHUNK_SHIFT: u32 = 16;
+pub(crate) const CHUNK_SLOTS: usize = 1 << CHUNK_SHIFT;
+/// The chunk count — `DENSE_KEY_MAX` is a multiple of `CHUNK_SLOTS` by construction.
+pub(crate) const CHUNKS: usize = (DENSE_KEY_MAX as usize) >> CHUNK_SHIFT;
+
+/// The dense slot region: `CHUNKS` chunk pointers, each null until a write reaches
+/// its key range, then a `CHUNK_SLOTS`-word mapping that is all-zero (= `EMPTY`) at
+/// birth. On unix a chunk is one anonymous `mmap` — a virtual reservation whose pages
+/// the OS commits on first touch, so a sparse chunk costs pages, not the full span.
+/// (It also deliberately bypasses the ADR-043 counting allocator: an untouched
+/// reservation against the soft cap would be pure fiction; the hashed side's real
+/// allocations are counted as always.) A chunk, once installed, never moves and is
+/// never unmapped — see "Lifetime" above — which is what lets JIT'd code hold the
+/// chunk directory's address (`jit_dense_base`) and read a chunk pointer per op.
+struct DenseSlots {
+    chunks: Box<[AtomicPtr<AtomicU64>; CHUNKS]>,
+}
 
 impl DenseSlots {
-    /// The failure is a Brood error, not a panic. This reservation is the first
-    /// large mapping a *small* program makes, so it is the one that hits an
-    /// address-space cap that something else filled: on a 28-core box the
-    /// allocator's per-thread arenas (20 × 128 MB, `PROT_NONE`) and the worker
-    /// stacks (28 × 16 MB) reserve ~3 GB before any table exists, and under
-    /// `ulimit -v 4000000` the table's 64 MB is simply the mapping that lands on
-    /// the wall. As an `assert!` this aborted the process from inside a JIT
-    /// callback that cannot unwind, with a message blaming the table. As an error
-    /// it names the cause, is catchable, and the test that hit it fails alone.
-    #[cfg(unix)]
-    fn try_new() -> Result<Self, LispError> {
-        let bytes = DENSE_KEY_MAX as usize * std::mem::size_of::<AtomicU64>();
-        // SAFETY: a fresh private anonymous mapping; MAP_ANONYMOUS pages read as
-        // zero (= every slot EMPTY) and commit lazily on first write.
-        let ptr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                bytes,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                -1,
-                0,
-            )
-        };
-        if ptr == libc::MAP_FAILED {
-            let os_error = std::io::Error::last_os_error();
-            return Err(LispError::runtime(format!(
-                "table: cannot reserve the {} MB dense slot region: {os_error}. The region is \
-                 virtual (committed a page at a time), so this is an address-space limit — an \
-                 `ulimit -v` below what the runtime reserves (allocator arenas + worker stacks, \
-                 ~3 GB on a 28-core box) or a `BROOD_MEM_LIMIT`; raise it or run with fewer cores",
-                bytes >> 20
-            )));
+    fn new() -> Self {
+        DenseSlots {
+            chunks: Box::new([const { AtomicPtr::new(std::ptr::null_mut()) }; CHUNKS]),
         }
-        Ok(DenseSlots(ptr as *const AtomicU64))
     }
 
-    #[cfg(not(unix))]
-    fn try_new() -> Result<Self, LispError> {
-        // Fallback: one zeroed allocation (committed up front — the unix path's
-        // lazy-commit is an optimization, not a semantic requirement).
-        let layout =
-            std::alloc::Layout::array::<AtomicU64>(DENSE_KEY_MAX as usize).expect("layout");
-        // SAFETY: AtomicU64 is repr(transparent) over u64 and all-zero is a valid
-        // (EMPTY) value; the region is leaked (never freed), matching the unix path.
-        let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
-        if ptr.is_null() {
-            return Err(LispError::runtime(format!(
-                "table: cannot allocate the {} MB dense slot region",
-                layout.size() >> 20
-            )));
-        }
-        Ok(DenseSlots(ptr as *const AtomicU64))
+    /// The chunk directory's address, for JIT'd code (see [`jit_dense_base`]). Stable
+    /// for the process lifetime: the box is never reallocated.
+    #[cfg(feature = "jit")]
+    fn directory(&self) -> *const AtomicPtr<AtomicU64> {
+        self.chunks.as_ptr()
     }
 
-    /// The slot for dense index `i`. Callers only produce `i` via [`dense_idx`],
-    /// which bounds it below `DENSE_KEY_MAX`.
+    /// The slot for dense index `i` if its chunk has been mapped — `None` reads as
+    /// `EMPTY` (no key in that range was ever written). Callers only produce `i` via
+    /// [`dense_idx`], which bounds it below `DENSE_KEY_MAX`.
     #[inline]
-    fn slot(&self, i: usize) -> &AtomicU64 {
+    fn slot(&self, i: usize) -> Option<&AtomicU64> {
         debug_assert!(i < DENSE_KEY_MAX as usize);
-        // SAFETY: in-bounds within the region mapped in `new`.
-        unsafe { &*self.0.add(i) }
+        let chunk = self.chunks[i >> CHUNK_SHIFT].load(Ordering::Acquire);
+        if chunk.is_null() {
+            return None;
+        }
+        // SAFETY: an installed chunk is a live `CHUNK_SLOTS`-word mapping and
+        // `i & (CHUNK_SLOTS - 1)` is inside it.
+        Some(unsafe { &*chunk.add(i & (CHUNK_SLOTS - 1)) })
     }
+
+    /// The slot for dense index `i`, mapping its chunk on first use. Fallible — the
+    /// failure is a Brood error, not a panic: a chunk reservation is the first sizeable
+    /// mapping a *small* program makes, so it is the one that hits an address-space cap
+    /// that something else filled (on a 28-core box the allocator's per-thread arenas
+    /// (20 × 128 MB, `PROT_NONE`) and the worker stacks (28 × 16 MB) reserve ~3 GB
+    /// before any table exists). As an `assert!` this aborted the process from inside a
+    /// JIT callback that cannot unwind, with a message blaming the table. As an error it
+    /// names the cause, is catchable, and the test that hit it fails alone.
+    #[inline]
+    fn slot_or_map(&self, i: usize) -> Result<&AtomicU64, LispError> {
+        if let Some(slot) = self.slot(i) {
+            return Ok(slot);
+        }
+        self.map_chunk(i >> CHUNK_SHIFT)?;
+        Ok(self.slot(i).expect("mapped above"))
+    }
+
+    /// Install chunk `c`, unless a racing writer installed it first — the loser
+    /// releases its own mapping, so two first-users cannot leak one.
+    fn map_chunk(&self, c: usize) -> Result<(), LispError> {
+        let fresh = map_chunk_region()?;
+        if self.chunks[c]
+            .compare_exchange(
+                std::ptr::null_mut(),
+                fresh,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            unmap_chunk_region(fresh);
+        }
+        Ok(())
+    }
+
+    /// Every mapped slot below index `max`, in index order, with its index — a whole
+    /// unmapped chunk is skipped without a read, so a scan (count / migrate / snapshot
+    /// / drop) over a sparse table costs its touched chunks, never the region.
+    fn slots_below(&self, max: usize) -> impl Iterator<Item = (usize, &AtomicU64)> + '_ {
+        let max = max.min(DENSE_KEY_MAX as usize);
+        self.chunks
+            .iter()
+            .enumerate()
+            .take_while(move |(c, _)| c << CHUNK_SHIFT < max)
+            .filter_map(move |(c, ptr)| {
+                let chunk = ptr.load(Ordering::Acquire);
+                if chunk.is_null() {
+                    return None;
+                }
+                let base = c << CHUNK_SHIFT;
+                let len = (max - base).min(CHUNK_SLOTS);
+                // SAFETY: an installed chunk is a live `CHUNK_SLOTS`-word mapping and
+                // `len <= CHUNK_SLOTS`.
+                let words = unsafe { std::slice::from_raw_parts(chunk as *const AtomicU64, len) };
+                Some(words.iter().enumerate().map(move |(k, s)| (base + k, s)))
+            })
+            .flatten()
+    }
+}
+
+/// Reserve one chunk: `CHUNK_SLOTS` zeroed atomic words. Returns the mapping's address.
+#[cfg(unix)]
+fn map_chunk_region() -> Result<*mut AtomicU64, LispError> {
+    let bytes = CHUNK_SLOTS * std::mem::size_of::<AtomicU64>();
+    // SAFETY: a fresh private anonymous mapping; MAP_ANONYMOUS pages read as zero
+    // (= every slot EMPTY) and commit lazily on first write.
+    let ptr = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            bytes,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    if ptr == libc::MAP_FAILED {
+        let os_error = std::io::Error::last_os_error();
+        return Err(LispError::runtime(format!(
+            "table: cannot reserve a {} KB dense slot chunk: {os_error}. The chunk is virtual \
+             (committed a page at a time), so this is an address-space limit — an `ulimit -v` \
+             below what the runtime reserves (allocator arenas + worker stacks, ~3 GB on a \
+             28-core box) or a `BROOD_MEM_LIMIT`; raise it or run with fewer cores",
+            bytes >> 10
+        )));
+    }
+    Ok(ptr as *mut AtomicU64)
+}
+
+#[cfg(unix)]
+fn unmap_chunk_region(ptr: *mut AtomicU64) {
+    let bytes = CHUNK_SLOTS * std::mem::size_of::<AtomicU64>();
+    // SAFETY: `ptr` is a mapping `map_chunk_region` made, never published (the CAS lost).
+    unsafe {
+        libc::munmap(ptr as *mut libc::c_void, bytes);
+    }
+}
+
+#[cfg(not(unix))]
+fn map_chunk_region() -> Result<*mut AtomicU64, LispError> {
+    // Fallback: one zeroed allocation (committed up front — the unix path's
+    // lazy-commit is an optimization, not a semantic requirement).
+    let layout = std::alloc::Layout::array::<AtomicU64>(CHUNK_SLOTS).expect("layout");
+    // SAFETY: AtomicU64 is repr(transparent) over u64 and all-zero is a valid
+    // (EMPTY) value; an installed chunk is leaked (never freed), matching the unix path.
+    let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+    if ptr.is_null() {
+        return Err(LispError::runtime(format!(
+            "table: cannot allocate a {} KB dense slot chunk",
+            layout.size() >> 10
+        )));
+    }
+    Ok(ptr as *mut AtomicU64)
+}
+
+#[cfg(not(unix))]
+fn unmap_chunk_region(ptr: *mut AtomicU64) {
+    let layout = std::alloc::Layout::array::<AtomicU64>(CHUNK_SLOTS).expect("layout");
+    // SAFETY: `ptr` came from `alloc_zeroed` with this layout and was never published.
+    unsafe { std::alloc::dealloc(ptr as *mut u8, layout) }
 }
 
 /// One shared store.
@@ -284,10 +383,7 @@ impl DenseSlots {
 /// accesses (the litmus in that file demonstrates it); the real code needs no
 /// fences — its SeqCst RMWs/stores/loads already carry that order per C11.
 struct Store {
-    slots: OnceLock<DenseSlots>,
-    /// Serialises the one-time reservation of `slots`, so two first-users cannot both
-    /// `mmap` a region (the loser's would leak — 64 MB of address space, never freed).
-    slots_init: Mutex<()>,
+    slots: DenseSlots,
     dense_count: AtomicUsize,
     /// Watermark: 1 + the highest dense index ever written.
     dense_max: AtomicUsize,
@@ -312,23 +408,6 @@ struct Store {
 }
 
 impl Store {
-    /// The dense slot region, reserved on first use. Fallible: see
-    /// [`DenseSlots::try_new`]. The fast path is one lock-free `get`; the reservation
-    /// itself runs under `slots_init`, re-checking after the lock so a racing
-    /// first-user finds the winner's region instead of mapping a second one.
-    #[inline]
-    fn dense_slots(&self) -> Result<&DenseSlots, LispError> {
-        if let Some(slots) = self.slots.get() {
-            return Ok(slots);
-        }
-        let _guard = self.slots_init.lock().unwrap_or_else(|e| e.into_inner());
-        if self.slots.get().is_none() {
-            let fresh = DenseSlots::try_new()?;
-            let _ = self.slots.set(fresh);
-        }
-        Ok(self.slots.get().expect("set under the init lock"))
-    }
-
     /// The slot range every scan (count/migrate/snapshot/drop) must cover:
     /// the exact watermark normally, the whole region once JIT'd code holds the
     /// slot pointer (see `jit_shared`).
@@ -355,25 +434,21 @@ impl Store {
     fn migrate_to_hashed(&self, guard: &mut MutexGuard<'_, Option<StoreMap>>) {
         self.dense.store(false, Ordering::SeqCst);
         let mut map = StoreMap::default();
-        if let Some(slots) = self.slots.get() {
-            let max = self.scan_max();
-            for k in 0..max {
-                let slot = slots.slot(k);
-                // Skip EMPTY without writing (an untouched page stays untouched);
-                // capture the rest with swap(MOVED) — the swap's return value is
-                // authoritative even against a concurrent last-instant write.
-                if slot.load(Ordering::SeqCst) == SLOT_EMPTY {
-                    continue;
-                }
-                let s = slot.swap(SLOT_MOVED, Ordering::SeqCst);
-                if let Some(vm) = slot_to_message(s) {
-                    // Int keys hash exactly as the hashed ops hash them (the
-                    // heap's int fast path is heap-independent).
-                    let hash = Heap::hash_int(k as i64);
-                    map.entry(hash)
-                        .or_default()
-                        .push((Message::Int(k as i64), vm));
-                }
+        for (k, slot) in self.slots.slots_below(self.scan_max()) {
+            // Skip EMPTY without writing (an untouched page stays untouched);
+            // capture the rest with swap(MOVED) — the swap's return value is
+            // authoritative even against a concurrent last-instant write.
+            if slot.load(Ordering::SeqCst) == SLOT_EMPTY {
+                continue;
+            }
+            let s = slot.swap(SLOT_MOVED, Ordering::SeqCst);
+            if let Some(vm) = slot_to_message(s) {
+                // Int keys hash exactly as the hashed ops hash them (the
+                // heap's int fast path is heap-independent).
+                let hash = Heap::hash_int(k as i64);
+                map.entry(hash)
+                    .or_default()
+                    .push((Message::Int(k as i64), vm));
             }
         }
         **guard = Some(map);
@@ -451,8 +526,7 @@ pub fn check_key(who: &str, key: Value) -> Result<(), LispError> {
 /// unused (or immediately-hashed) table costs only this small shell.
 pub fn create() -> u64 {
     let idx = REGISTRY.push(Store {
-        slots: OnceLock::new(),
-        slots_init: Mutex::new(()),
+        slots: DenseSlots::new(),
         dense_count: AtomicUsize::new(0),
         dense_max: AtomicUsize::new(0),
         jit_shared: AtomicBool::new(false),
@@ -481,15 +555,11 @@ pub fn drop_table(id: u64) -> bool {
                 // the drop — so a dropped table errors instead of silently writing
                 // into the retained region.
                 store.dense.store(false, Ordering::SeqCst);
-                if let Some(slots) = store.slots.get() {
-                    let max = store.scan_max();
-                    for k in 0..max {
-                        // Clear only non-EMPTY slots: a blind store would commit
-                        // every untouched page of the full-region scan.
-                        let slot = slots.slot(k);
-                        if slot.load(Ordering::Relaxed) != SLOT_EMPTY {
-                            slot.store(SLOT_EMPTY, Ordering::Relaxed);
-                        }
+                for (_, slot) in store.slots.slots_below(store.scan_max()) {
+                    // Clear only non-EMPTY slots: a blind store would commit
+                    // every untouched page of the full-region scan.
+                    if slot.load(Ordering::Relaxed) != SLOT_EMPTY {
+                        slot.store(SLOT_EMPTY, Ordering::Relaxed);
                     }
                 }
                 store.dense_count.store(0, Ordering::Relaxed);
@@ -509,21 +579,17 @@ pub fn count(id: u64) -> Result<i64, LispError> {
         if !store.jit_shared.load(Ordering::SeqCst) {
             return Ok(store.dense_count.load(Ordering::Relaxed) as i64);
         }
-        if let Some(slots) = store.slots.get() {
-            let mut n = 0i64;
-            for k in 0..store.scan_max() {
-                let s = slots.slot(k).load(Ordering::Relaxed);
-                if s != SLOT_EMPTY && s != SLOT_MOVED {
-                    n += 1;
-                }
+        let mut n = 0i64;
+        for (_, slot) in store.slots.slots_below(store.scan_max()) {
+            let s = slot.load(Ordering::Relaxed);
+            if s != SLOT_EMPTY && s != SLOT_MOVED {
+                n += 1;
             }
-            if store.dense.load(Ordering::SeqCst) {
-                return Ok(n);
-            }
-            // A migration raced the tally — fall through to the hashed count.
-        } else {
-            return Ok(0);
         }
+        if store.dense.load(Ordering::SeqCst) {
+            return Ok(n);
+        }
+        // A migration raced the tally — fall through to the hashed count.
     }
     let data = store.hashed.lock().expect("table store mutex");
     match &*data {
@@ -561,7 +627,7 @@ pub fn put(heap: &mut Heap, id: u64, key: Value, val: Value) -> LispResult {
     if store.dense.load(Ordering::Acquire) {
         if let (Some(i), Some(word)) = (dense_idx(key), slot_enc(val)) {
             store.cover(i);
-            let old = store.dense_slots()?.slot(i).swap(word, Ordering::SeqCst);
+            let old = store.slots.slot_or_map(i)?.swap(word, Ordering::SeqCst);
             if old != SLOT_MOVED && store.dense.load(Ordering::SeqCst) {
                 if old == SLOT_EMPTY {
                     store.dense_count.fetch_add(1, Ordering::Relaxed);
@@ -593,10 +659,11 @@ pub fn get(heap: &mut Heap, id: u64, key: Value, default: Value) -> LispResult {
     if store.dense.load(Ordering::Acquire) {
         match dense_idx(key) {
             Some(i) => {
-                let s = match store.slots.get() {
-                    Some(slots) => slots.slot(i).load(Ordering::SeqCst),
-                    None => SLOT_EMPTY, // no dense write ever happened
-                };
+                // An unmapped chunk: no dense write ever reached this key's range.
+                let s = store
+                    .slots
+                    .slot(i)
+                    .map_or(SLOT_EMPTY, |slot| slot.load(Ordering::SeqCst));
                 if s != SLOT_MOVED && store.dense.load(Ordering::SeqCst) {
                     return Ok(slot_dec(s).unwrap_or(default));
                 }
@@ -625,10 +692,10 @@ pub fn has(heap: &mut Heap, id: u64, key: Value) -> Result<bool, LispError> {
     if store.dense.load(Ordering::Acquire) {
         match dense_idx(key) {
             Some(i) => {
-                let s = match store.slots.get() {
-                    Some(slots) => slots.slot(i).load(Ordering::SeqCst),
-                    None => SLOT_EMPTY,
-                };
+                let s = store
+                    .slots
+                    .slot(i)
+                    .map_or(SLOT_EMPTY, |slot| slot.load(Ordering::SeqCst));
                 if s != SLOT_MOVED && store.dense.load(Ordering::SeqCst) {
                     return Ok(s != SLOT_EMPTY);
                 }
@@ -650,14 +717,12 @@ pub fn delete(heap: &mut Heap, id: u64, key: Value) -> LispResult {
     if store.dense.load(Ordering::Acquire) {
         match dense_idx(key) {
             Some(i) => {
-                if store.slots.get().is_none() {
-                    return Ok(Value::table(id)); // nothing was ever stored densely
-                }
+                // An unmapped chunk: nothing was ever stored densely in this key's range.
+                let Some(slot) = store.slots.slot(i) else {
+                    return Ok(Value::table(id));
+                };
                 store.cover(i);
-                let old = store
-                    .dense_slots()?
-                    .slot(i)
-                    .swap(SLOT_EMPTY, Ordering::SeqCst);
+                let old = slot.swap(SLOT_EMPTY, Ordering::SeqCst);
                 if old != SLOT_MOVED && store.dense.load(Ordering::SeqCst) {
                     if old != SLOT_EMPTY {
                         store.dense_count.fetch_sub(1, Ordering::Relaxed);
@@ -698,7 +763,7 @@ pub fn incr(heap: &mut Heap, id: u64, key: Value, delta: i64) -> LispResult {
     if store.dense.load(Ordering::Acquire) {
         if let Some(i) = dense_idx(key) {
             store.cover(i);
-            let slot = store.dense_slots()?.slot(i);
+            let slot = store.slots.slot_or_map(i)?;
             let mut cur = slot.load(Ordering::SeqCst);
             loop {
                 let (cur_int, was_empty) = match cur {
@@ -800,16 +865,13 @@ pub fn snapshot(heap: &mut Heap, id: u64) -> LispResult {
     let raw: Vec<(Message, Message)> = 'raw: {
         if store.dense.load(Ordering::Acquire) {
             let mut raw = Vec::new();
-            if let Some(slots) = store.slots.get() {
-                let max = store.scan_max();
-                for k in 0..max {
-                    let s = slots.slot(k).load(Ordering::SeqCst);
-                    if s == SLOT_MOVED {
-                        break 'raw snapshot_hashed(store); // migration in flight
-                    }
-                    if let Some(vm) = slot_to_message(s) {
-                        raw.push((Message::Int(k as i64), vm));
-                    }
+            for (k, slot) in store.slots.slots_below(store.scan_max()) {
+                let s = slot.load(Ordering::SeqCst);
+                if s == SLOT_MOVED {
+                    break 'raw snapshot_hashed(store); // migration in flight
+                }
+                if let Some(vm) = slot_to_message(s) {
+                    raw.push((Message::Int(k as i64), vm));
                 }
             }
             if store.dense.load(Ordering::SeqCst) {
@@ -840,24 +902,25 @@ fn snapshot_hashed(store: &Store) -> Vec<(Message, Message)> {
     map.values().flat_map(|b| b.iter().cloned()).collect()
 }
 
-/// Hand the dense slot region of table `id` to JIT'd code: `(slots_base,
+/// Hand the dense slot region of table `id` to JIT'd code: `(chunk_directory,
 /// dense_flag)` raw pointers, or `None` when the table is missing/dropped/
-/// hashed. The region is a process-lifetime anonymous mapping that never moves
-/// (stable across GC, compaction, and even `table-drop` — see "Lifetime"), so
-/// baked pointers cannot dangle; every inline op re-checks the `dense` flag
-/// after its slot access and re-routes to the FFI path when it flipped
+/// hashed. The directory is `CHUNKS` chunk pointers (see [`DenseSlots`]); an inline
+/// op loads the pointer for its key's chunk (`key >> CHUNK_SHIFT`), routes to the FFI
+/// when it is null (an unmapped chunk — the FFI put maps it, the FFI has? answers
+/// absent under the same flag protocol), and otherwise indexes the chunk by
+/// `key & (CHUNK_SLOTS - 1)`. Directory and chunks are process-lifetime allocations
+/// that never move (stable across GC, compaction, and even `table-drop` — see
+/// "Lifetime"), so baked pointers cannot dangle; every inline op re-checks the
+/// `dense` flag after its slot access and re-routes to the FFI path when it flipped
 /// (migration or drop) — the exact per-op protocol the Rust ops use. Latches
 /// `jit_shared` BEFORE the pointer escapes, so scans switch to full-region
 /// coverage no later than any inline write they could observe.
 #[cfg(feature = "jit")]
-pub(crate) fn jit_dense_base(id: u64) -> Option<(*const AtomicU64, *const AtomicBool)> {
+pub(crate) fn jit_dense_base(id: u64) -> Option<(*const AtomicPtr<AtomicU64>, *const AtomicBool)> {
     let store = lookup(id).ok()?;
     if !store.dense.load(Ordering::SeqCst) {
         return None;
     }
-    // Reserve BEFORE latching: a store whose region cannot be reserved stays on the
-    // FFI path (which reports the error) rather than latched with no slots.
-    let slots = store.dense_slots().ok()?;
     store.jit_shared.store(true, Ordering::SeqCst);
-    Some((slots.0, &store.dense as *const AtomicBool))
+    Some((store.slots.directory(), &store.dense as *const AtomicBool))
 }

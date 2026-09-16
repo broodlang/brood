@@ -507,8 +507,24 @@ pub(super) fn emit_prim3_table_put(
         b.ins().jump(enc_done, &[BlockArg::Value(wn)]);
         b.switch_to_block(enc_done);
         let word = b.block_params(enc_done)[0];
-        let off = b.ins().imul_imm_s(kw[1], 8);
-        let addr = b.ins().iadd(slots, off);
+        // The key's chunk pointer (`DenseSlots` is a directory of lazily-mapped chunks):
+        // null means no write ever reached this key's range — the FFI maps it. A plain
+        // load: the pointer is installed once, and the slot access depends on it.
+        let cidx = b
+            .ins()
+            .ushr_imm_s(kw[1], crate::core::table::CHUNK_SHIFT as i64);
+        let coff = b.ins().imul_imm_s(cidx, 8);
+        let caddr = b.ins().iadd(slots, coff);
+        let chunk = b.ins().load(types::I64, MemFlagsData::trusted(), caddr, 0);
+        let cnull = b.ins().icmp_imm_s(IntCC::Equal, chunk, 0);
+        let g_slot = b.create_block();
+        b.ins().brif(cnull, ffi, &[], g_slot, &[]);
+        b.switch_to_block(g_slot);
+        let within = b
+            .ins()
+            .band_imm_s(kw[1], (crate::core::table::CHUNK_SLOTS - 1) as i64);
+        let off = b.ins().imul_imm_s(within, 8);
+        let addr = b.ins().iadd(chunk, off);
         let old = b.ins().atomic_rmw(
             types::I64,
             MemFlagsData::trusted(),
@@ -661,8 +677,23 @@ pub(super) fn emit_prim2(
             let no = b.ins().iconst(types::I8, 0);
             b.ins().jump(merge, &[BlockArg::Value(no)]);
             b.switch_to_block(g_load);
-            let off = b.ins().imul_imm_s(kw[1], 8);
-            let addr = b.ins().iadd(slots, off);
+            // The key's chunk pointer — see the put lowering above; an unmapped chunk
+            // answers through the FFI (absent, under the same flag protocol).
+            let cidx = b
+                .ins()
+                .ushr_imm_s(kw[1], crate::core::table::CHUNK_SHIFT as i64);
+            let coff = b.ins().imul_imm_s(cidx, 8);
+            let caddr = b.ins().iadd(slots, coff);
+            let chunk = b.ins().load(types::I64, MemFlagsData::trusted(), caddr, 0);
+            let cnull = b.ins().icmp_imm_s(IntCC::Equal, chunk, 0);
+            let g_slot = b.create_block();
+            b.ins().brif(cnull, ffi, &[], g_slot, &[]);
+            b.switch_to_block(g_slot);
+            let within = b
+                .ins()
+                .band_imm_s(kw[1], (crate::core::table::CHUNK_SLOTS - 1) as i64);
+            let off = b.ins().imul_imm_s(within, 8);
+            let addr = b.ins().iadd(chunk, off);
             let sv = b
                 .ins()
                 .atomic_load(types::I64, MemFlagsData::trusted(), addr);

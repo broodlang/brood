@@ -63,12 +63,17 @@ Before starting new work:
 - **Build uncapped, run capped.** Put an address-space cap in front of every test, `nest check`,
   `nest run` (in a downstream project too — bedit is where KI-87 first showed) and `brood`
   run — `( ulimit -v 16000000; cargo nextest run -p brood -j1 -E '…' )` — and keep `-j1`, so
-  one runaway is the whole spike. **16 GB, not 4** (and since v0.28.0, **24 GB for the in-language suite wrapper** — it reserves 19.3 GB with 1.8 GB resident and aborts under 16, KI-142)**:** the runtime *reserves* ~3 GB of address
+  one runaway is the whole spike. **16 GB, not 4:** the runtime *reserves* ~3 GB of address
   space before it does any work on a 28-core box — the allocator's per-thread arenas (20 ×
   128 MB `PROT_NONE`) plus the worker stacks (28 × 16 MB) — so a 4 GB cap fails the first
-  test that creates a `table` (its 64 MB virtual region is merely the mapping that lands on
-  the wall; measured 2026-08-30 with `strace -e mmap`), and that failure is a Brood error
-  naming the cap, not a runaway. 16 GB still catches the KI-87 class (19 GB processes).
+  test that creates a `table` (its dense chunk is merely the mapping that lands on the wall;
+  measured 2026-08-30 with `strace -e mmap`), and that failure is a Brood error naming the
+  cap, not a runaway. 16 GB still catches the KI-87 class (19 GB processes). **A table's
+  address space tracks the keys it touches (512 KB chunks, KI-142)** — it used to be one
+  64 MB region per table whatever the key, and the regex DFA memos (two per compiled
+  pattern) put `regex_test` alone at 6.4 GB reserved, which aborted the suite wrapper under
+  16 GB for a day (2026-09-15). If the wrapper ever aborts capped again, count the mappings
+  first: `strace -f -e trace=mmap … | grep -c "mmap(NULL, 524288,"`.
   **The wasm exception is GONE (2026-09-04) — do not re-add it.** `tests/wasm_sandbox_limits_test.blsp` used to fail under the cap even run alone, and `tests/wasm_test.blsp` intermittently beside it, so a capped run reporting those two was written off as "the cap, not a regression" — a standing exception that would have hidden a real sandbox regression. The cause was wasmtime RESERVING 4 GiB of address space per linear memory: eight small memories asked for 32 GiB and the sandbox reported the refusal as denying a module it is documented to allow. `crates/lisp/src/host/wasm.rs` now sets `memory_reservation(MAX_GUEST_BYTES)` — never reserve more than `GuestBudget` will ever let a guest use — and both files pass capped (7/7 and 15/15). A capped run that reds a wasm file is now a real failure. A *diverging* process is indistinguishable from a
   heavy one until it has eaten the machine: KI-87 (a checker cycle guard that un-guarded) put
   three test processes at 19 GB each and a `nest run` at 54 GB, crashing the box three
