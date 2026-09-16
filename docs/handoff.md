@@ -142,6 +142,22 @@ The tree-walker CI job's timeout was a real regression and is fixed (`0c66565b`,
 `5fca2758`). Verified by microbenchmark and by the bisect, NOT by the suite that timed out.
 One `BROOD_VM=0` full run elsewhere closes it.
 
+### 4 — the stdlib image rebuilds whole; it could rebuild per section (asked 2026-09-16)
+
+The image is one section per module, materialised on demand — but KEYED as one unit
+(`system/stdlib-id`: a content hash over every baked-in `.blsp` plus the git sha), so an edit
+to any std file, or any uncommitted edit anywhere (`-dirty` is in the sha), is a full miss
+and a full rebuild: ~1 s release, ~5 s debug, ~15 s under the tree-walker, which is what the
+`differential (tree-walker)` job paid 96 times over in `completion_never_fails…` before
+`469e947d`. Nothing forbids per-section keys: bindings are late-bound by name, and since
+KI-136 registrations are attributed per writer, so a section is self-describing. What a
+section does embed is other modules' MACRO EXPANSIONS, so its key must cover its own content
+plus the modules whose macros it expanded — the recorded require closure is a safe
+over-approximation. Drop the sha from the key in favour of per-module content hashes and most
+rebuilds touch one section. A builder + loader change with its own differential to extend
+(`image_matches_source.rs` / `image_registrations_match_source.rs`); worth doing when the
+cache-miss cost is felt, not before — a dev loop does not feel 1 s.
+
 ### Loose end
 
 `stash@{0}` holds another session's uncommitted `lazy_load_test` note from 2026-09-12 22:27.
