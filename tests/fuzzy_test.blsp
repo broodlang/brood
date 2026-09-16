@@ -25,12 +25,128 @@
 
 (describe "fuzzy/filter"
   (test "keeps matches, best score first"
-    ;; "fb": foo-bar has two boundary hits, foobar one, afb none — that's the order.
+    ;; "fb": foo-bar starts a word with each of them; afb holds the query as one unbroken
+    ;; run; foobar spreads it (f, then b three chars later, mid-word) and pays for the gap.
     (assert= (fuzzy/filter "fb" (list "afb" "foobar" "foo-bar"))
-      (list "foo-bar" "foobar" "afb")))
+      (list "foo-bar" "afb" "foobar")))
   (test "a prefix match ranks above a tail match"
     (assert= (fuzzy/filter "foo" (list "barfoo" "foobar")) (list "foobar" "barfoo")))
   (test "drops non-matches"
     (assert= (fuzzy/filter "zzz" (list "abc" "def")) ()))
   (test "an empty query returns the candidates unchanged"
     (assert= (fuzzy/filter "" (list "a" "b" "c")) (list "a" "b" "c"))))
+
+(describe "fuzzy/top"
+  (test "keeps only the best `limit` of the matches"
+    (assert= (fuzzy/top "fb" (list "afb" "foobar" "foo-bar") 2) (list "foo-bar" "afb"))
+    (assert= (fuzzy/top "fb" (list "afb" "foobar" "foo-bar") 1) (list "foo-bar")))
+  (test "a nil / zero / negative limit means all of them — filter"
+    (let (cands (list "afb" "foobar" "foo-bar"))
+      (assert= (fuzzy/top "fb" cands) (fuzzy/filter "fb" cands))
+      (assert= (fuzzy/top "fb" cands 0) (list "foo-bar" "afb" "foobar"))
+      (assert= (fuzzy/top "fb" cands -1) (list "foo-bar" "afb" "foobar"))))
+  (test "a limit past the match count is not padded"
+    (assert= (fuzzy/top "fb" (list "afb" "zzz") 5) (list "afb")))
+  (test "an empty query keeps the candidates in their given order, capped"
+    (assert= (fuzzy/top "" (list "c" "a" "b") 2) (list "c" "a"))
+    (assert= (fuzzy/top "" (list "c" "a" "b")) (list "c" "a" "b")))
+  (test "drops non-matches"
+    (assert= (fuzzy/top "zzz" (list "abc" "def") 10) ())))
+
+;; ---- a path is not a bag of word starts -------------------------------------
+;; The failure this pins was live in a real editor: typing a file's name into a project
+;; find-file listed three files that merely had the query's letters sprinkled across their
+;; directories ABOVE the file actually named that. Two rules were missing. Nothing charged
+;; for the distance between matched chars, so smearing a query over six path segments
+;; collected six boundary bonuses (8 each) and beat a contiguous run (6 each) — scattering
+;; PAID. And the greedy walk, which cannot backtrack, spent the query's first letters inside
+;; `lib/moneyclub/` and so never reached the run in the file's own name.
+
+(def- project-paths
+  (list "lib/moneyclub/reports/it3b/submission.ex"
+    "lib/moneyclub/reports/it3b/sars_format.ex" "lib/moneyclub/reports/it3b/native_source.ex"
+    "lib/moneyclub/limits.ex" "lib/moneyclub/accounts/limits.ex" "test/moneyclub/limits_test.exs"
+    "lib/moneyclub/rate_limiter.ex"))
+
+(describe "ranking a project's paths"
+  (test "the file NAMED by the query outranks files that merely scatter its letters"
+    (assert= (take (fuzzy/top "limits.ex" project-paths 4) 2)
+      (list "lib/moneyclub/limits.ex" "lib/moneyclub/accounts/limits.ex")))
+  (test "a run buried past an earlier false start is still found (the walk cannot backtrack)"
+    ;; greedy alone spends l-i-m on `lib/moneyclub` and scores this below the scattered ones
+    (is (> (get (fuzzy/match "limits.ex" "lib/moneyclub/accounts/limits.ex") :score)
+          (get (fuzzy/match "limits.ex" "lib/moneyclub/reports/it3b/submission.ex") :score))))
+  (test "and the run is what gets highlighted, not the false start"
+    (assert= (get (fuzzy/match "limits" "lib/moneyclub/accounts/limits.ex") :positions)
+      (list 23 24 25 26 27 28)))
+  (test "a scattered match still matches — it just ranks last"
+    (is (not (nil? (fuzzy/match "limits.ex" "lib/moneyclub/reports/it3b/submission.ex"))))))
+
+;; ---- the bounded fold and the sort must agree -------------------------------
+;; `top` keeps the best k in a fold and `filter` sorts everything; they are two ways to
+;; read the same ranking, and the fold is the one a completion UI runs per keystroke. If
+;; they ever disagree the fold's reject test is wrong (it settles most candidates on an int
+;; compare, and only the tie path looks at length and text). `top` also picks between the
+;; two by size, so a corpus this small exercises the sort arm and the big one below the fold.
+
+(def- rank-corpus
+  ;; word boundaries, camelCase humps, separators, an early and a late match of the same
+  ;; chars, mixed case, non-ASCII — the shapes each of the score's bonuses turns on
+  (list "foo-bar"
+    "foobar" "afb" "FooBar" "a/b/foo_bar" "src/editor/buffer.blsp" "src/editor/display.blsp"
+    "crates/lisp/src/builtins/string.rs" "Fabulous" "fab" "x.f.b" "ffbb" "bf" "café-bar" "Ärger-bar"
+    "F" "f-b" "zzz"))
+
+(describe "top and filter are the same ranking"
+  (test "top k is the first k of filter, for every query shape"
+    (doseq (q (list "f" "fb" "FB" "bar" "foo" "b/f" "src" "buf" "é" "a" "zq"))
+      (doseq (k (list 1 3 20))
+        (assert= (fuzzy/top q rank-corpus k) (take (fuzzy/filter q rank-corpus) k))))))
+
+;; ---- sharding across processes ----------------------------------------------
+;; Past *fuzzy-parallel-min* candidates a ranking is split across *fuzzy-workers*
+;; processes and merged. The merge has to be invisible: same candidates, same order.
+
+(def- big-corpus
+  (into [] (map (range 5000) (fn (i) (str "src/mod_" i "/view_" i ".blsp")))))
+
+(describe "fuzzy/top across processes"
+  (test "a sharded ranking is identical to the single-process one"
+    (doseq (q (list "view" "v9" "mod_42" "srcview" "zzq"))
+      (assert= (fuzzy/top q big-corpus 20)
+        (binding (*fuzzy-parallel-min* 1000000) (fuzzy/top q big-corpus 20)))))
+  (test "and identical to sorting the whole set"
+    (assert= (fuzzy/top "v9" big-corpus 20) (take (fuzzy/filter "v9" big-corpus) 20)))
+  (test "one worker is the same answer as eight"
+    (assert= (binding (*fuzzy-workers* 1) (fuzzy/top "view_9" big-corpus 10))
+      (binding (*fuzzy-workers* 8) (fuzzy/top "view_9" big-corpus 10))))
+  ;; A worker runs a pure fold, so it only dies through a scorer that throws — and then the
+  ;; caller must still answer. The straggler is killed and its slice ranked in the caller,
+  ;; where the same scorer raises: an error you can see, not a loop that hangs.
+  (test "a scorer that throws does not hang the ranking"
+    (assert-error (binding (*fuzzy-scorer* (fn (q) (fn (c) (throw :boom)))
+                            *fuzzy-worker-timeout-ms* 200)
+                    (fuzzy/top "view" big-corpus 5)))))
+
+;; ---- the rules are still replaceable ----------------------------------------
+;; The reason the hot path stayed Brood: bind *fuzzy-scorer* and every ranking follows —
+;; including the sharded one, whose workers must be HANDED the scorer rather than inheriting
+;; a dynamic binding (they don't — bindings are per-process).
+
+(def- shortest-first (fn (q) (fn (c) (if (includes? c q) (- 0 (string/length c)) nil))))
+
+(describe "*fuzzy-scorer*"
+  (test "a custom scorer replaces the rules"
+    (assert= (binding (*fuzzy-scorer* shortest-first)
+               (fuzzy/top "o" (list "foo-bar" "fo" "foobar" "zz") 3))
+      (list "fo" "foobar" "foo-bar")))
+  (test "a custom scorer reaches the sharded path too"
+    (assert= (binding (*fuzzy-scorer* shortest-first) (fuzzy/top "view_9" big-corpus 2))
+      (binding (*fuzzy-scorer* shortest-first *fuzzy-parallel-min* 1000000)
+        (fuzzy/top "view_9" big-corpus 2))))
+  (test "scorer composes — it is a value, not a rule buried in the walk"
+    (let (boosted (fn (q)
+                    (let (base (fuzzy/scorer q))
+                      (fn (c) (let (s (base c)) (if (nil? s) nil (+ s 100)))))))
+      (assert= (binding (*fuzzy-scorer* boosted) (fuzzy/top "fb" rank-corpus 5))
+        (fuzzy/top "fb" rank-corpus 5)))))

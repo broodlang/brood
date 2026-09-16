@@ -152,7 +152,11 @@ pub const MAX_TY_NODES: usize = 256;
 /// Max **terms** an inferred union keeps before collapsing to one widened term (see
 /// [`Ty::alts`]). Four covers the shapes that occur — a tagged union of two or three
 /// record/tuple alternatives, optionally with `nil` — while keeping every set
-/// operation's pairwise work trivially bounded.
+/// operation's pairwise work trivially bounded. It is NOT a knob: the relations quantify
+/// over subsets of the alternatives (ADR-289), and eight took the checker on the match
+/// compiler's own file from 0.6 s to past five minutes. A result with more arms than
+/// this (hatch's `oidc/complete`, five `[:error …]` beside its `[:ok …]`) keeps its tag
+/// because the overflow collapse in `from_terms` merges same-tag shapes first.
 const MAX_TY_TERMS: usize = 4;
 /// How many terms one type may subtract (ADR-288). Same bounded-size discipline as
 /// [`MAX_TY_TERMS`]: beyond this the extra subtractions are dropped, which *widens* the
@@ -2624,10 +2628,29 @@ impl Ty {
                 i += 1;
             }
         }
+        // Past the cap, the widening merge — sound, less precise. TAG-AWARE first: two
+        // positional shapes sharing their tags and not told apart by a keyword (the four
+        // `[:error status why …]` arms of a result) merge before anything hulls the
+        // `[:ok …]` arm into them; only when no such pair is left do the last two go,
+        // whatever they are. Blind, the result with five error arms lost its `:ok` shape
+        // (`(tuple :ok (or 502 map) any)`), and a `match` on the tag could then read
+        // nothing from it — and raising the cap instead (eight) took the match compiler's
+        // own file from 0.6 s to past five minutes, since the relations quantify over
+        // subsets of the alternatives.
         while merged.len() > MAX_TY_TERMS {
-            let last = merged.pop().expect("len > cap");
-            let prev = merged.pop().expect("len > cap");
-            merged.push(prev.union_term(last)); // the widening merge — sound, less precise
+            let pair = (0..merged.len())
+                .flat_map(|i| ((i + 1)..merged.len()).map(move |j| (i, j)))
+                .find(|&(i, j)| {
+                    let (a, b) = (&merged[i], &merged[j]);
+                    a.tags & !NIL_BIT == b.tags & !NIL_BIT
+                        && a.fields.is_none()
+                        && b.fields.is_none()
+                        && !tagged_apart(a, b)
+                });
+            let (i, j) = pair.unwrap_or((merged.len() - 2, merged.len() - 1));
+            let second = merged.remove(j);
+            let first = merged.remove(i);
+            merged.push(first.union_term(second));
         }
         let mut head = merged.remove(0);
         if !merged.is_empty() {
@@ -4387,10 +4410,16 @@ fn positional_hull(a: &Option<Arc<Vec<Ty>>>, b: &Option<Arc<Vec<Ty>>>) -> Option
     ))
 }
 
-/// Are two positional shapes of one arity a TAGGED union — `[:ok v]` beside `[:error e]`,
-/// telling apart by a keyword or string at some position? Those are the alternatives
-/// ADR-262 keeps, and a widening must not merge them; an accumulator's shapes differ in
-/// ints, lengths and elements, never in a tag.
+/// Are two positional shapes a TAGGED union — `[:ok v]` beside `[:error e]`, telling
+/// apart by a keyword or string at some position? Those are the alternatives ADR-262
+/// keeps, and a widening must not merge them; an accumulator's shapes differ in ints,
+/// lengths and elements, never in a tag. The arities need not agree: `[:ok claims]`
+/// beside `[:error status why]` is the same idiom, and merging the two by length hulled
+/// them into a `vector[2..3]` whose second position was `502 | map` — a `match` on the
+/// `:ok` tag could then tell nothing apart. Across arities only a KEYWORD counts as the
+/// tag: a list builder's `(list "x")` beside `(list string "x")` differs by a string
+/// literal at a position, and reading that as a tag kept every step of the ascent apart
+/// (the accumulator never converged). Positions are compared as far as both go.
 fn tagged_apart(a: &Ty, b: &Ty) -> bool {
     let (Some(ta), Some(tb)) = (
         a.tuple.as_deref().or(a.list_shape.as_deref()),
@@ -4398,10 +4427,8 @@ fn tagged_apart(a: &Ty, b: &Ty) -> bool {
     ) else {
         return false;
     };
-    if ta.len() != tb.len() {
-        return false;
-    }
-    let is_tag = |t: &Ty| t.as_lit().is_some() || t.as_lit_str().is_some();
+    let same_arity = ta.len() == tb.len();
+    let is_tag = |t: &Ty| t.as_lit().is_some() || (same_arity && t.as_lit_str().is_some());
     ta.iter()
         .zip(tb.iter())
         .any(|(x, y)| x != y && (is_tag(x) || is_tag(y)))

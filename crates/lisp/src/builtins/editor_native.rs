@@ -40,7 +40,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(1),
         Sig::new(vec![Ty::of_tags(&[Tag::Int, Tag::Float])], nil_ty),
         &["gamma"],
-        "Set the text contrast exponent γ (1.0 by default, clamped to 0.5..3.0): a monochrome glyph's partial coverage is lifted to cov^(1/γ) where the text is lighter than the pixel it lands on, so light-on-dark text — which a linear-light blend renders with thin stems — reads fuller without touching a glyph's interior, its exterior, dark-on-light text or colour emoji. 1.0 is the plain blend; 1.4–1.8 is the range other linear-light renderers ship. Applies to every open window and the default for ones opened later; a pure repaint. Needs --features gui. Returns nil.",
+        "Set the text contrast exponent γ (1.0 by default, clamped to 0.5..3.0): a monochrome glyph's partial coverage is lifted to cov^(1/γ) where the text is lighter than the pixel it lands on, so light-on-dark text reads fuller without touching a glyph's interior, its exterior, dark-on-light text or colour emoji. A TASTE knob: text composites in sRGB space, the encoded space a rasteriser's coverage is made for, so 1.0 already puts a partly covered pixel at the fraction it covers — above 1.0 is deliberately bolder, not a correction. (It was a correction once: compositing text in linear light put a half-covered pixel at 188/255 instead of 128, every rim glowed, and the value that looked right was BELOW 1.0. Hence the old 1.4 default.) Applies to every open window and the default for ones opened later; a pure repaint. Needs --features gui. Returns nil.",
         gui_text_contrast,
     );
     // The inverse of `string/display-width` (cells -> chars). Lives here rather than

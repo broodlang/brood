@@ -22901,6 +22901,131 @@ runtime command; hive's manifest no longer needs the leak.
 **Consequence.** hive bundles on the genuinely lean runtime. `tests/markdown_test.blsp` pins
 the module's presence on every runtime (`reflect/builtin-modules`) beside its rendering cases.
 
+## ADR-357 — Ranking a candidate set is bounded by what it shows, and shards across processes
+
+**Status:** accepted (2026-09-16). **Context:** bedit's project find-file on a 27k-file repo.
+
+**Context.** `C-x p f` over a 27,310-file project took ~1.1 s **per keystroke**. `std/fuzzy`
+was not obviously wrong — it lowers the query once, sorts by a precomputed key, and the
+editor already narrowed incrementally and debounced onto the idle beat — but measured per
+phase over 27k repo-style paths it split as: the subsequence walk 74 ms, scoring the matches
++305 ms, and sorting 26k matches to display 20 of them +700 ms. Narrowing incrementally
+saved nothing, because the thing it narrows is the match set and a short query matches
+nearly every path in a project (26,518 of 27,310 for `app`).
+
+The obvious fix was a native kernel: one Rust pass doing walk + score + top-k ran the same
+corpus in 2 ms, 400x. It was written, tested against a Brood reference over a corpus, and
+**rejected** — by the downstream author, on the grounds this repo exists to defend. What a
+kernel costs is not portability or taste: it is that the scoring rules stop being
+redefinable at runtime, and that the rules end up stated twice (once in Brood for `match`'s
+positions, once in Rust for ranking) with only a test holding them together. A system whose
+editor is meant to be reprogrammed from inside itself cannot freeze its completion ranking
+into the binary to make it fast.
+
+**Decision.** Keep every rule in Brood and take the speed from the shape of the work.
+
+1. **One walk.** `fuzzy-bonus` is the only statement of what a matched char is worth, and
+   one tail-recursive `fuzzy-walk` applies it for both `match` (with positions, for the
+   rows a UI draws) and ranking (without a map per candidate). A score-only second walk
+   measured 8% — not worth stating the rules twice, which is the whole point.
+2. **`top` is bounded by the display.** A UI shows ~20 rows; `fuzzy/top query cands limit`
+   keeps the best `limit` in a fold whose reject test is an int compare and which allocates
+   nothing until a candidate actually places. The sort remains for the unbounded `filter`,
+   and below ~100 candidates per row shown the native sort still wins, so `top` picks.
+3. **Past a few thousand candidates it shards.** Ranking is a fold over independent
+   candidates. `*fuzzy-parallel-min*` (4000) sends slices to `*fuzzy-workers*` (8)
+   processes, each returning its own best k; the merge is the same fold over a few hundred.
+   Workers are spawned per ranking, not pooled — a shard is meaningful only for one
+   candidate set, and `spawn` plus the slice measured ~3 ms against the ~400 ms it splits.
+   The reply carries a `ref` and the receive selects on it, so this is safe in a process
+   with a live mailbox (an editor's loop); a shard that does not answer within
+   `*fuzzy-worker-timeout-ms*` is ranked in the caller instead, so a dead worker costs time
+   and not results.
+4. **The rules are a value.** `*fuzzy-scorer*` is a `(query) -> (cand) -> score | nil`;
+   bind it and every completion UI in the image ranks by your rules, live. It is curried
+   because ranking calls the inner function tens of thousands of times per keystroke, so
+   query preparation must happen once. The sharded path resolves it in the caller and ships
+   the closure, since dynamic bindings do not reach a spawned child.
+
+**Consequence.** 1183 → 711 ms single-process and 254 ms across eight, 469 → 103 ms on a
+realistic corpus, with byte-identical results (`tests/fuzzy_test.blsp` pins `top` against
+`filter`, the sharded path against the serial one, and a custom scorer against both). The
+editor drops its incremental-narrowing cache, which capping made not just pointless but
+wrong — the cached ranking is the capped twenty, and narrowing from those loses the
+candidates that belong in the next twenty. The kernel remains unwritten on purpose; the
+measurement that would justify it is in `std/fuzzy.blsp`, next to the code that does
+without it.
+
+## ADR-358 — Text composites in sRGB space; the contrast knob is taste, not a correction
+
+**Status:** accepted (2026-09-16). **Context:** bedit's text read puffy beside Emacs.
+
+**Context.** The GUI renderer composited *everything* in linear light: sRGB → linear, lerp
+by coverage, linear → sRGB (`blend`/`blend_rgb`). That is right for light — a rounded rect's
+edge coverage, a translucent cursor — and wrong for text. A rasteriser's coverage is not a
+light quantity: it is the fraction of the pixel the outline covers, and every stack text is
+tuned against (FreeType/cairo/Xft, hence Emacs) lerps it in the ENCODED space. Blended in
+linear light instead, a partly covered pixel comes out far brighter than the fraction it
+represents — white on black at half coverage 188/255 rather than 128, at quarter coverage
+137 rather than 64 — so every antialiased rim glows. Stems stop having ends.
+
+The failure mode is what makes this worth an ADR: the glow reads as *blur*, not as weight.
+So the renderer grew `gui-text-contrast!` to "fix" it, bedit defaulted it to 1.4, and that
+**lifted the same rims further** (205/255 at half coverage) — a correction applied in the
+direction of the fault. Read as a knob it looked reasonable; the number that actually looked
+right was 0.5, the clamp's *minimum*, because squaring the coverage roughly inverts the sRGB
+encode. A knob whose useful setting is at the end of its range is a design telling you it is
+compensating for something.
+
+**Decision.** Text composites in sRGB space — `blend_text` / `blend_text_rgb`, a plain
+per-channel lerp of the encoded values — and geometry keeps `blend`, which is linear and
+correct for it. `blend_rgb` (the linear subpixel sibling) had no other caller and is gone.
+`gui-text-contrast!` stays as a taste knob with 1.0 meaning no lift, and bedit's default
+drops 1.4 → 1.0. `text_composites_in_srgb_space_not_linear_light` pins the numbers, because
+"crisp" is not a thing a test can see but 128/255 is.
+
+**Consequence.** Light-on-dark text renders at the weight the outline describes, on the
+default settings, with no per-user knob. The general lesson is in the shape of the bug, not
+the fix: a correction that makes a symptom worse is evidence about the model underneath it,
+and a knob pinned at its limit is the same evidence in another form.
+
+## ADR-359 — A fuzzy score charges for distance, and looks for the run it was given
+
+**Status:** accepted (2026-09-16). **Context:** project find-file ranked the wrong files first.
+
+**Context.** Typing `limits.ex` into bedit's project find-file over a real repo listed
+`lib/moneyclub/reports/it3b/submission.ex`, `…/sars_format.ex` and `…/native_source.ex`
+above `lib/moneyclub/limits.ex` — the file actually named that. Two rules were missing, and
+each is a general one.
+
+**Nothing charged for distance.** The score paid +8 for starting a word and +6 for
+continuing the previous match, and nothing at all for the characters skipped in between. A
+query smeared across six path segments collected six boundary bonuses (73) while the
+contiguous run collected one boundary plus contiguity (63). With 8 > 6 and gaps free,
+*scattering paid* — a query's letters sprinkled through a directory tree beat the file that
+spells them. Every serious matcher charges for gaps (fzf: a penalty to open one, another per
+char extended); the bonuses say what a good match looks like, and the gap cost says what
+reaching it is worth.
+
+**Greedy could not reach the run.** The walk takes the earliest character it can and cannot
+backtrack, so `limits.ex` spent `l`,`i`,`m` inside `lib/moneyclub/` and then crawled —
+scoring `lib/moneyclub/accounts/limits.ex` *below* files that merely scatter, with the exact
+run sitting untouched in the name. A full Smith-Waterman DP is the general answer and costs
+per candidate what this library cannot spend per keystroke. But the case that matters is
+cheap to spot: a query typed by someone who knows the file appears as ONE unbroken run, and
+`index-of` finds it in a single native call.
+
+**Decision.** `fuzzy-gap-cost` charges 3 to open a gap and 1 per further char skipped, and
+`fuzzy-contiguous` scores the candidate a second time aligned to the literal run when
+`index-of` finds one, keeping whichever alignment scores higher. The run probe is paid only
+by candidates that already matched, and can only raise a candidate's score, never lower it.
+Ranking 27k paths went 194 → 254 ms sharded; correctness at that price is not a trade.
+
+**Consequence.** The file named by the query ranks first, and the highlight falls on the run
+rather than on the false start in its directories. `tests/fuzzy_test.blsp` pins the original
+report as a case. One ordering changed and is worth stating: `fb` over `("afb" "foobar"
+"foo-bar")` now ranks `afb` — which contains `fb` whole — above `foobar`, which spreads it.
+That is the same rule doing its job on a small input.
 ## ADR-360 — The linear-map rewrite recognises the tally a user writes, and both spellings are one `+`
 
 **Context.** ADR-112 made `Table` the only mutable structure and the linear-map rewrite
