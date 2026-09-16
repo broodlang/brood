@@ -13854,3 +13854,33 @@ ranks `afb` — which holds `fb` whole — above `foobar`, which spreads it.
 The thing worth keeping: making it fast is what made the ranking legible. Nobody types nine
 characters into a list that takes a second per keystroke, so nobody had seen what it did
 with them.
+
+## 2026-09-16 — `fuzzy` strict-clean, and ten sigs back for cost (KI-150)
+
+The new ranking landed with fourteen strict findings, two roots. The bounded fold's state
+started as `[0 nil nil nil ()]`, so every slot read was `nil | …` at a call that wanted the
+scalar — the nils were never read (the first candidate always places, count 0 < k), so the
+state starts from scalars. And the ranked list carried each candidate twice, `[key cand]`,
+where the key already ends in the candidate: a ranked list is a list of keys now, `sort`
+orders it (the same structural compare `sort-by first` used), `third` reads the candidate,
+and `fuzzy-kept` folded into `fuzzy-place`, where the key just placed is the natural
+fallback for "the worst kept" that `take` cannot prove present. `top` binds `k (or limit
+0)` once. The `fuzzy-worse?` sig claimed `int` for a score the checker can only prove
+`number` — the scorer is a dynamic — and the function is derived from its one call site,
+so the sig went rather than the claim being widened. 26/26; std strict 0.
+
+A trap met on the way, recorded because it cost a diagnosis: `cargo build -p brood` does
+not relink `target/debug/brood` — that binary is the `cli` package — and std/ is baked into
+it, so the fuzzy tests ran the *previous* scorer against the new expectations and read as
+six failures "on HEAD". `-p cli` and they were 26/26. CLAUDE.md says this about release
+A/Bs; it is as true of the debug binary under a test.
+
+KI-150 is the sig wave's bill: `brood file` type-checks before it runs, and the ten codec
+sigs the wave removed (`encoding`'s nine, `bytes/length`) had been lookups where inferring
+a decoder's body is ~30 M instructions on a 78 ms row. As the wave's owner: they are back,
+each under a `kept for cost (KI-150)` comment that `scripts/redundant-sigs.blsp` reads and
+skips (sabotage-verified: the unmarked file lists eight, the marked one none). Ten lines
+against the measured row; the structural options — inferred signatures cached in the
+stdlib image, or a pre-flight that skips inference for imaged std modules — are not taken
+blind, since no benchmark runs on the development box. The row is read again at the next
+column refresh.

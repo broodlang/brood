@@ -114,10 +114,12 @@ row inside drift). Then a VM/JIT correctness pass, three things landed (all on `
 - **KI-146: `string/last-index-of` skipped overlapping occurrences** — the harness's first
   live finding, within its first hundred strings programs.
 
-**Open:** KI-140 (checker: `apply` does not bind a callee's type variable — bedit's strict
-ratchet sits at 25 because of it), KI-142 (the suite wrapper's 19.3 GB reservation — run it
-under a 24 GB cap until attributed; a `table` per DFA/lexer cache is the unverified guess),
-KI-136 (watch). **Next for BEAM parity** (`docs/runtime-frontier.md` "Recommended execution
+**Open (as of 2026-09-16 evening): no bug.** KI-140, KI-142 and KI-136 are fixed (09-15);
+KI-150 (`base64` +6.6%, the sig wave's pre-flight cost) is MITIGATED — the ten codec sigs
+are back under a `kept for cost` marker — and stays a watch until the next benchmark column
+refresh reads the row; the structural options are in its entry. Strict is at zero across
+std, bedit, hive, hatch and store-postgres, each downstream holding it with a ratchet test.
+**Next for BEAM parity** (`docs/runtime-frontier.md` "Recommended execution
 order"): M2 shared IC tables — the largest per-process item and a warm start — then the
 process floor (~5.5 KB vs ~3.1 KB) behind `spawn-live`'s 1.9×. Both are multi-session; do
 KI-142's attribution first, it is a one-hour probe (`strace -e mmap` on the wrapper).
@@ -198,6 +200,12 @@ mechanism; none of that needs rediscovering.
 - **Verify like a flake, not a test.** The repro is 10 s: loop it 30×, not 3×.
 
 ### 2 — bedit's strict ratchet, then the `BEDIT_REF` bump
+
+**Closed 2026-09-16, one step left.** bedit's strict is **0** (its ratchet asserts it),
+`BEDIT_REF` was bumped to `67e689c0` with the checker work, and bedit has since released
+0.4.4 (`a99f69d0`) — plain and strict both 0 against `nest` at `05f7c626`. The one thing
+this box cannot do is `make smoke-bedit ARGS=--bump`, because it runs bedit's whole suite:
+run it elsewhere and commit the pin. Everything below is history.
 
 **Re-measured 2026-09-15, after the type-system list closed (ADR-341..351):** bedit's
 `nest check --strict` reads **58** with the current checker, and **53** with the checker as

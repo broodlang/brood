@@ -40,12 +40,21 @@ For pure ASCII input the string and byte forms agree.")
 
     (encoding/hex-encode \"hi\")         → \"6869\""
   (encoding-hex-encode-codes (string/->bytes s) encoding-hex-lower-codes))
+;; The codec sigs marked `kept for cost` are ones the checker infers verbatim — they declare
+;; no fact it cannot derive (KI-150). `brood file` type-checks a program before running it,
+;; and a call into a codec whose sig is a lookup costs nothing there, where inferring the
+;; decoder's body was ~30 M instructions on a 78 ms `base64` row. The marker is what
+;; `scripts/redundant-sigs.blsp` reads to leave them alone.
+;; kept for cost (KI-150)
+(sig hex-encode (string -> string))
 
 (defn hex-encode-upper (s)
   "Encode string `s` as uppercase hexadecimal (each UTF-8 byte → 2 hex chars).
 
     (encoding/hex-encode-upper \"~\")    → \"7E\""
   (encoding-hex-encode-codes (string/->bytes s) encoding-hex-upper-codes))
+;; kept for cost (KI-150)
+(sig hex-encode-upper (string -> string))
 
 (defn hex-encode-bytes (bytes)
   "Encode a byte sequence (a `bytes` value, vector, or list of ints 0–255) as
@@ -104,6 +113,8 @@ UTF-8-encodes a string.
     (if (= bs :invalid)
       (failure "encoding/hex-decode: not hexadecimal: " (pr-str s))
       (string/bytes-> bs))))
+;; kept for cost (KI-150)
+(sig hex-decode (string -> (or string failure)))
 
 (defn hex-decode-bytes (s)
   "Decode a hexadecimal string → a `bytes` value, or a `failure` naming the input.
@@ -113,6 +124,8 @@ binary payload (digests, salts, wire bytes)."
     (if (= bs :invalid)
       (failure "encoding/hex-decode-bytes: not hexadecimal: " (pr-str s))
       (bytes bs))))
+;; kept for cost (KI-150)
+(sig hex-decode-bytes (string -> (or bytes failure)))
 
 ;; ---- base64 -----------------------------------------------------------------
 
@@ -294,6 +307,8 @@ UTF-8 form.
     (if (= bs :invalid)
       (failure "encoding/base64-decode: not standard Base64: " (pr-str s))
       (string/bytes-> bs))))
+;; kept for cost (KI-150)
+(sig base64-decode (string -> (or string failure)))
 
 (defn base64-url-decode (s)
   "Decode a URL-safe Base64 string → original string, or a `failure` naming the input."
@@ -301,6 +316,8 @@ UTF-8 form.
     (if (= bs :invalid)
       (failure "encoding/base64-url-decode: not URL-safe Base64: " (pr-str s))
       (string/bytes-> bs))))
+;; kept for cost (KI-150)
+(sig base64-url-decode (string -> (or string failure)))
 
 (defn base64-decode-bytes (s)
   "Decode a standard Base64 string → a `bytes` value, or a `failure` naming the input.
@@ -310,6 +327,8 @@ any binary payload (a SCRAM salt, a key, wire bytes)."
     (if (= bs :invalid)
       (failure "encoding/base64-decode-bytes: not standard Base64: " (pr-str s))
       (bytes bs))))
+;; kept for cost (KI-150)
+(sig base64-decode-bytes (string -> (or bytes failure)))
 
 (defn base64-url-decode-bytes (s)
   "Decode a URL-safe Base64 string → a `bytes` value, or a `failure` naming the input."
@@ -317,3 +336,5 @@ any binary payload (a SCRAM salt, a key, wire bytes)."
     (if (= bs :invalid)
       (failure "encoding/base64-url-decode-bytes: not URL-safe Base64: " (pr-str s))
       (bytes bs))))
+;; kept for cost (KI-150)
+(sig base64-url-decode-bytes (string -> (or bytes failure)))
