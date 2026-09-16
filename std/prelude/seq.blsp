@@ -827,7 +827,6 @@ indexed access or a vector literal shape (`(into [] (map coll f))`, named).
     (mapv [1 2 3] inc)   → [2 3 4]
     (map [1 2 3] inc)    → (2 3 4)   ; the list-returning sibling"
   (into [] (map coll f)))
-(sig mapv (seqable (any -> any) -> any))
 
 (defn partition (coll n)
   "Split `coll` into consecutive `n`-sized chunks; a trailing partial chunk is dropped.

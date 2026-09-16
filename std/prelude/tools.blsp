@@ -405,7 +405,6 @@ place — it took a `nest test` to its 600-second timeout with no clue which tes
             (pr-str old)
             " — the name and the value being read are different globals, so the compare-and-swap can never land. Name the global `def` actually binds (inside a module that is `<module>/<name>`, and inside a package the package prefix too)."))
         (%registry-swap! sym read f)))))
-(sig %registry-swap! (any (or fn keyword) (or fn keyword) -> any))
 
 ;; The name a `def` of `sym` actually BINDS, resolved at macro-EXPANSION time — which is
 ;; load time of the module being compiled, so `reflect/current-ns` is that module.
@@ -1826,42 +1825,36 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 
     (queue? (list 1 2))   → false"
   (%eq (record-id x) :queue/queue))
-(sig queue? (any -> (is (record &open :__id__ :queue/queue))))
 
 (defn pq? (x)
   "True if `x` is a min-priority queue (`std/pq`) — by identity, not by shape.
 
     (pq? [1 2 3])   → false"
   (%eq (record-id x) :pq/pq))
-(sig pq? (any -> (is (record &open :__id__ :pq/pq))))
 
 (defn multimap? (x)
   "True if `x` is a multi-valued map (`std/multimap`) — by identity, not by shape.
 
     (multimap? {:a 1})   → false"
   (%eq (record-id x) :multimap/multimap))
-(sig multimap? (any -> (is (record &open :__id__ :multimap/multimap))))
 
 (defn datetime? (x)
   "True if `x` is a datetime — a date *and* a time-of-day (`std/datetime`) — by identity.
 
     (datetime? 42)   → false"
   (%eq (record-id x) :datetime/datetime))
-(sig datetime? (any -> (is (record &open :__id__ :datetime/datetime))))
 
 (defn date? (x)
   "True if `x` is a date with no time component (`std/datetime`) — by identity.
 
     (date? (datetime/today))   → true"
   (%eq (record-id x) :datetime/date))
-(sig date? (any -> (is (record &open :__id__ :datetime/date))))
 
 (defn time-of-day? (x)
   "True if `x` is a time-of-day with no date component (`std/datetime`) — by identity.
 
     (time-of-day? 42)   → false"
   (%eq (record-id x) :datetime/time-of-day))
-(sig time-of-day? (any -> (is (record &open :__id__ :datetime/time-of-day))))
 
 ; ---- registration -----------------------------------------------------------
 
@@ -2075,7 +2068,6 @@ which is meaningless for a rope, so falling through unconditionally would swap a
                   (str "ability " aname "/" op ": no impl for " key)
                   (str "ability " aname "/" op ": no impl for " key " — have " known)))
     (throw {:kind :%no-impl :message message :ability aname :op op :id key :have known})))
-(sig %no-impl (seqable any -> never))
 
 (defn satisfies? (aname x)
   "True if ability `aname` is implemented for `x`'s identity — every declared op

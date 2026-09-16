@@ -70,7 +70,6 @@
 (defn %path-join (a b)
   "Join path segments `a` and `b` with a single `/` separator."
   (if (string/ends-with? a "/") (str a b) (str a "/" b)))
-(sig %path-join (string any -> string))
 
 ;; ---- pseudo-random numbers (xorshift32, pure & seedable) --------------------
 ;; Brood has no global mutable state, so randomness is *threaded*: every step

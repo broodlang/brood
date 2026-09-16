@@ -114,7 +114,6 @@ also how you default deliberately: `(let (n (parse s)) (if (failure? n) 0 n))`.
 compiler's linear-map-accumulator rewrite (docs/linear-map-accumulator.md) to seed its
 private table, and never surfaced to user code — reach for `table/new` instead."
   (reduce (%map-pairs m) (%table) (fn (t kv) (%table-put t (first kv) (second kv)))))
-(sig %table-from-map (map -> table))
 ;; `fn?` holds for both Brood closures (:fn) and Rust builtins (:native).
 (defn fn? (x)
   "True if `x` is callable (a closure or a primitive).
@@ -161,7 +160,6 @@ itself (a type is a set of runtime tags): it does not walk the tail, so an impro
     (second [1 2 3])     → 2
     (second (list 1))    → nil"
   (first (rest coll)))
-(sig second (seqable -> any))
 (defn third (coll)
   "The third item of `coll`.
 
@@ -171,7 +169,6 @@ itself (a type is a set of runtime tags): it does not walk the tail, so an impro
   ;; had three homes: `first` a kernel builtin, `second` here, `third` a module function
   ;; you had to know to qualify. Any of the three should read the same way.
   (first (rest (rest coll))))
-(sig third (seqable -> any))
 
 ;; ---- sequence operations ----
 ;; Many eager seq ops share one structure: reverse-accumulate over `(seq coll)`,
@@ -246,7 +243,6 @@ and a set its elements, as everywhere else `seq` applies.
     (vec {:a 1})     → [[:a 1]]
     (vec nil)        → []"
   (into [] coll))
-(sig vec (seqable -> vector))
 
 (defn- %append-two (a b) "Concatenate two lists (`a` before `b`)." (fold (reverse a) b %flip-cons))
 

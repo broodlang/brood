@@ -395,7 +395,6 @@ A zero-arg lambda `(fn () …)` body is passed through (not re-wrapped), like `s
 
     (sleep 0) → nil"
   (let (never (ref)) (receive (^never nil) (after ms nil))))
-(sig sleep ((or int nil) -> nil))
 
 ;; ---- dirty-native offload (ADR-144) -----------------------------------------
 ;; The BEAM dirty-scheduler shape: a long/blocking native runs on a small OS

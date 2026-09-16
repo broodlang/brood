@@ -17,8 +17,9 @@
 ;; a sig can also anchor a CALLER's verdict (`bytes/at` did — four return checks in the
 ;; same file read `number` without it), which only `nest check --strict` sees.
 ;;
-;; The prelude is deliberately not swept: its names are read through the curated table
-;; and the frozen heap, not this file-level inference, so equality here proves less.
+;; The prelude sweeps like any other file (21 went on 2026-09-16, every gate green) —
+;; the curated table and the frozen heap did not change what this equality proves.
+
 (defn- sig-spans (text)
   "`[start end name]` for every top-level-looking `(sig NAME …)` form in `text`: the
 char range of the whole form (balanced parens from the `(sig`) and the declared name."

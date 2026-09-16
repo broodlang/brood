@@ -13655,5 +13655,5 @@ sibling's sig anchored it, and read `ordered` once all four were gone — the sc
 anchored four RETURN checks in the same file: without it `bytes/int` and siblings yielded
 `number` against a declared `int`, which only the strict gate saw. Those five stay; 323 go.
 Both gates, the sig-adoption, doc-example, doctest, audit and contract files, and bedit's
-strict zero all hold. The prelude is not swept: its names are read through the curated
-table and the frozen heap, where this file-level equality proves less.
+strict zero all hold. The prelude went next — 21 more, every gate green; "read through the
+curated table, so equality proves less" was a guess, and the gates were the measurement.
