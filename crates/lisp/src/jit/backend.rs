@@ -127,11 +127,16 @@ pub(crate) struct JitCallCtx {
     pub gic_base: u32,
     /// The native depth the callee runs at (KI-11's bound).
     pub depth: u64,
+    /// The activation's gateway token (`Heap::cur_native_gateway`): what a `receive` that
+    /// parks under this activation records, so the suspend-host latch can name the arm.
+    pub gateway: u64,
+    /// The arm's name for diagnostics (`Heap::jit_dbg_fn`).
+    pub dbg_fn: u32,
 }
 
 impl JitCallCtx {
     /// The context as the heap fields currently describe it — what every Rust caller
-    /// passes at rung A0, after it has installed those fields the way it always did.
+    /// passes, after it has installed those fields the way it always did.
     #[inline]
     pub(crate) fn from_heap(heap: &crate::core::heap::Heap) -> Self {
         let (ic_base, gic_base) = heap.ic_bases();
@@ -140,7 +145,52 @@ impl JitCallCtx {
             ic_base,
             gic_base,
             depth: heap.jit_native_depth as u64,
+            gateway: heap.cur_native_gateway,
+            dbg_fn: heap.jit_dbg_fn,
         }
+    }
+
+    /// Install this activation's state into the heap fields the Rust side reads
+    /// (`docs/call-convention.md`, rung A1). **Called by every runtime callback that
+    /// consults activation state, first thing** — the inline native→native call no longer
+    /// saves and restores these fields around a call, so between two native frames the
+    /// heap fields describe whichever activation last asserted them; a callback that
+    /// resolves a global, publishes an inline cache, dispatches a slow call or parks under
+    /// a gateway asserts its own before doing so. Six stores on a cold path, in place of
+    /// ~fourteen loads and stores on every call.
+    ///
+    /// # Safety
+    /// `ctx` must point at a live `JitCallCtx` — the one the running native arm was
+    /// entered with (its fourth argument), which its caller keeps alive across the call.
+    #[inline]
+    pub(crate) unsafe fn assert_into(ctx: *const JitCallCtx, heap: &mut crate::core::heap::Heap) {
+        let c = &*ctx;
+        heap.jit_call_env = c.env;
+        heap.set_ic_bases((c.ic_base, c.gic_base));
+        heap.jit_native_depth = c.depth as u32;
+        heap.cur_native_gateway = c.gateway;
+        heap.jit_dbg_fn = c.dbg_fn;
+    }
+
+    /// The two fields a builtin that re-enters the evaluator or parks would read from the
+    /// heap; the env it is CALLED with comes straight from the ctx (`brood_rt_call_native_fl`).
+    #[inline]
+    pub(crate) unsafe fn assert_depth_gateway(
+        ctx: *const JitCallCtx,
+        heap: &mut crate::core::heap::Heap,
+    ) {
+        let c = &*ctx;
+        heap.jit_native_depth = c.depth as u32;
+        heap.cur_native_gateway = c.gateway;
+    }
+
+    /// What a global read needs: the env to resolve in and the global-IC cursor. Resolution
+    /// never re-enters the evaluator (a global is a binding lookup), so no depth/gateway.
+    #[inline]
+    pub(crate) unsafe fn assert_global(ctx: *const JitCallCtx, heap: &mut crate::core::heap::Heap) {
+        let c = &*ctx;
+        heap.jit_call_env = c.env;
+        heap.set_gic_base(c.gic_base);
     }
 }
 

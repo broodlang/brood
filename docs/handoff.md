@@ -10,6 +10,42 @@ needing one is queued in [`perf-handoff.md`](perf-handoff.md) instead — curren
 high-priority item: whether KI-114's `as_f64_pair` holds the closure KI-109 got from the
 promotion it constrained.
 
+## 2026-09-16 evening — rungs A0 and A1 of the call convention landed; where things stand
+
+`docs/call-convention.md` §7 carries the numbers per rung. **A0** (`9e3257aa`): the arm ABI
+takes a `JitCallCtx` pointer (env, IC cursors, depth, gateway token, dbg name); flat by
+construction. **A1** (`bb880952`): the inline native→native call no longer saves/restores the
+six activation fields — the nine callbacks that consult activation state assert what THEIR
+path reads from the ctx, and every Rust gateway restores what a chain below it may have
+asserted. The real-call loop: 237 → 213 instructions per call; `make ab --floor --all`:
+`bintree` −7.4%, `nqueens` −3.5%, `nbody` +2.3% (the per-builtin-call assert; consistent),
+every other row inside its floor. Two rules the rung taught, both now in that file's A1 entry:
+a gateway that never raised a field must still restore it (the depth leaked one per chain to
+75 and every inline call fell to the callback path — `bintree` +30% until fixed), and a hot
+callback must assert only what it reads (asserting all six per builtin call read +3%
+instructions on `nbody`).
+
+**Next rung: A4** — callee-prologue nil-fill by first-safepoint write set. The CLIF of a
+caller with a real call shows the nil-fill loop (~8 machine instructions per callee slot) as
+the largest remaining per-call item after the guards; a callee with no safepoint (`big`, any
+call-free arithmetic arm) needs no nil-fill on the hot path at all — the cold deopt path must
+nil the frame before handing it to the VM (a slot the VM never wrote could hold a stale
+handle the GC would trace). Then A3 (two-register result) and A2 (gateway token = frame base,
+decide against the counter with the collision analysis in A1's entry).
+
+**Upstream red to know about (not ours):**
+`types::check::tests::declared_vs_curated::no_declared_std_sig_widens_its_curated_signature`
+fails on pristine `origin/main` at `fedda6c4` — its vacuity guard ("only 5 declared/curated
+collisions inspected") trips because the day's wave removed 323 std `sig`s. Attributed by
+running it in a clean worktree of that commit.
+
+**Two traps from today, for whoever builds next:** the scratchpad is on `/tmp`, a 16 GB tmpfs —
+a `cargo build` in a scratch worktree filled it and the Bash tool died silently (throwaway
+worktrees belong under `target/ab/`); and a fresh `make release-brood` binary has NO stdlib
+image, so a hand `perf stat` charges it ~320M instructions a run for loading `io` from source
+— `nest stdimage` after `make release`, or read the `[image] install: N sections` line first
+(`ab-bench` refuses an asymmetric pair on its own).
+
 ## 2026-09-16 — the tier audit is a gate; what to do next
 
 Since the 09-15 note below: the column was refreshed at 0.29.0 (`regex` −34%, ADR-353), and a

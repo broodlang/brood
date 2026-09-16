@@ -94,6 +94,9 @@ pub(super) struct Funcs {
     /// The [`crate::jit::JitArmFn`] signature `(heap, base, out) -> outcome`, for the
     /// inline path's `call_indirect` straight into a callee's native code.
     pub armfn_sig: cranelift_codegen::ir::SigRef,
+    /// This activation's `*const JitCallCtx` (the arm's fourth argument) — passed to every
+    /// callback that consults activation state (`docs/call-convention.md`, rung A1).
+    pub ctx: cranelift_codegen::ir::Value,
     /// Emit the inline fast-frame path in THIS lowering (§7.5): the flag is armed and
     /// this body is one whose compile cost is already deferred (the inlined upgrade) —
     /// the small first body keeps the callback so short runs never pay the fatter IR.

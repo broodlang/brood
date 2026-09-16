@@ -821,7 +821,13 @@ pub unsafe extern "C" fn brood_rt_call_native_fl(
     func: u64,
     args: *const crate::core::value::Value,
     argc: u32,
+    ctx: *const crate::jit::JitCallCtx,
 ) -> i64 {
+    // Rung A1, the hottest callback (every builtin call from native code): the env the
+    // builtin receives is READ from the activation context, not stored into the heap; only
+    // the two fields a builtin that re-enters or parks would read from the heap — the
+    // depth KI-11 bounds and the gateway token a dirty park records — are asserted.
+    crate::jit::JitCallCtx::assert_depth_gateway(ctx, &mut *heap);
     let h = &mut *heap;
     let f: crate::core::value::NativeFnPtr = std::mem::transmute(func as usize);
     // COPY, don't borrow: `args` now points into `roots` (the arm stages in place — see
@@ -861,7 +867,7 @@ pub unsafe extern "C" fn brood_rt_call_native_fl(
         spill = std::slice::from_raw_parts(args, n).to_vec();
         &spill[..]
     };
-    let env = h.read_root_env(h.jit_call_env);
+    let env = h.read_root_env((*ctx).env);
     // The emitting arm batch-staged these argc args onto `roots` too (uniform with
     // every fallback path) — they anchor the arg values for any GC the native
     // triggers, exactly like the VM keeps call operands rooted during dispatch.
@@ -1090,7 +1096,10 @@ pub unsafe extern "C" fn brood_rt_global_probe(
     heap: *mut Heap,
     out: *mut crate::core::value::Value,
     sym: u32,
+    ctx: *const crate::jit::JitCallCtx,
 ) -> i64 {
+    // Rung A1: this callback consults activation state, so it asserts its own first.
+    crate::jit::JitCallCtx::assert_global(ctx, &mut *heap);
     // Speculative sibling of `brood_rt_global` for the **entry hoist**: resolves without
     // parking an error, because the caller's answer to "unbound" is to deopt, not to raise.
     //
@@ -1118,7 +1127,10 @@ pub unsafe extern "C" fn brood_rt_global(
     heap: *mut Heap,
     out: *mut crate::core::value::Value,
     sym: u32,
+    ctx: *const crate::jit::JitCallCtx,
 ) -> i64 {
+    // Rung A1: this callback consults activation state, so it asserts its own first.
+    crate::jit::JitCallCtx::assert_global(ctx, &mut *heap);
     #[cfg(debug_assertions)]
     if jit_cb_trace_enabled() {
         eprintln!(
@@ -1152,7 +1164,10 @@ pub unsafe extern "C" fn brood_rt_global_ic(
     out: *mut crate::core::value::Value,
     sym: u32,
     site: u32,
+    ctx: *const crate::jit::JitCallCtx,
 ) -> i64 {
+    // Rung A1: this callback consults activation state, so it asserts its own first.
+    crate::jit::JitCallCtx::assert_global(ctx, &mut *heap);
     #[cfg(debug_assertions)]
     if jit_cb_trace_enabled() {
         eprintln!(
@@ -1189,7 +1204,10 @@ pub unsafe extern "C" fn brood_rt_call_slow(
     argc: u32,
     site: u32,
     head: u32,
+    ctx: *const crate::jit::JitCallCtx,
 ) -> i64 {
+    // Rung A1: this callback consults activation state, so it asserts its own first.
+    crate::jit::JitCallCtx::assert_into(ctx, &mut *heap);
     #[cfg(debug_assertions)]
     if jit_cb_trace_enabled() {
         eprintln!("[jit-cb] brood_rt_call_slow(argc={})", argc);
@@ -1273,8 +1291,11 @@ pub unsafe extern "C" fn brood_rt_note_deopt(heap: *mut Heap, reason: u32) {
 pub unsafe extern "C" fn brood_rt_fastlink_base(
     heap: *mut Heap,
     out_len: *mut u64,
+    ctx: *const crate::jit::JitCallCtx,
 ) -> *const FastLink {
-    let (base, len) = (*heap).vm_fast_links_base();
+    // Rung A1: per call site, so it writes nothing — the block cursor is read from the
+    // activation context the arm was entered with.
+    let (base, len) = (*heap).vm_fast_links_base_for((*ctx).ic_base);
     *out_len = len as u64;
     base
 }
@@ -1306,7 +1327,10 @@ pub unsafe extern "C" fn brood_rt_fast_frame(
     out: *mut crate::core::value::Value,
     site: u32,
     slot: *const crate::core::heap::FastLink,
+    ctx: *const crate::jit::JitCallCtx,
 ) -> i64 {
+    // Rung A1: this callback consults activation state, so it asserts its own first.
+    crate::jit::JitCallCtx::assert_into(ctx, &mut *heap);
     use crate::eval::compile::FastLinkOutcome;
     // Copy the whole slot BY VALUE before anything can run: the dispatch below can compile
     // and publish, which grows `vm_fast_links` and reallocates the buffer `slot` points
@@ -1350,7 +1374,10 @@ pub unsafe extern "C" fn brood_rt_xcall_latch(
     site_head: i64,
     argc: i64,
     epoch: i64,
+    ctx: *const crate::jit::JitCallCtx,
 ) {
+    // Rung A1: this callback consults activation state, so it asserts its own first.
+    crate::jit::JitCallCtx::assert_into(ctx, &mut *heap);
     let site = (site_head >> 32) as u32;
     let head = site_head as u32;
     crate::eval::compile::jit_latch_dirty_blocked(
@@ -1379,12 +1406,19 @@ pub unsafe extern "C" fn brood_rt_xcall_cold(
     argc_nslots: i64,
     epoch: i64,
     stage_base: i64,
+    ctx: *const crate::jit::JitCallCtx,
 ) -> i64 {
+    // Rung A1: this callback consults activation state, so it asserts its own first.
+    crate::jit::JitCallCtx::assert_into(ctx, &mut *heap);
     let site = (site_head >> 32) as u32;
     let head = site_head as u32;
     let argc = (argc_nslots >> 32) as usize;
     let nslots = (argc_nslots as u32) as usize;
-    crate::eval::compile::jit_xcall_cold_outcome(
+    // `jit_force_vm` is set only by a native prologue's stack-limit trip, which deopts
+    // at once — so it can change only under a cold outcome, and it is scoped here (the
+    // inline call path no longer saves and restores it per call; rung A1).
+    let saved_force_vm = (*heap).jit_force_vm;
+    let r = crate::eval::compile::jit_xcall_cold_outcome(
         &mut *heap,
         outcome,
         argc,
@@ -1394,5 +1428,7 @@ pub unsafe extern "C" fn brood_rt_xcall_cold(
         stage_base as usize,
         nslots,
         out,
-    )
+    );
+    (*heap).jit_force_vm = saved_force_vm;
+    r
 }

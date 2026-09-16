@@ -291,7 +291,9 @@ pub(super) fn emit_call(
         let sym_v2 = b.ins().iconst(types::I32, call_head as i64);
         let site_v2 = b.ins().iconst(types::I32, call_site as i64);
         let out_a = b.ins().stack_addr(ptr_ty, out_slot, 0);
-        let cv = b.ins().call(funcs.globic, &[heap, out_a, sym_v2, site_v2]);
+        let cv = b
+            .ins()
+            .call(funcs.globic, &[heap, out_a, sym_v2, site_v2, funcs.ctx]);
         let cstatus = b.inst_results(cv)[0];
         let callee_ok = b.create_block();
         b.ins().brif(cstatus, error, &[], callee_ok, &[]);
@@ -373,9 +375,10 @@ pub(super) fn emit_call(
     // or `cont` on success. Used as the only path (icall off / computed head) and as the
     // miss path of the fast-link.
     let emit_call_slow = |b: &mut FunctionBuilder, cont: Block| {
-        let c = b
-            .ins()
-            .call(funcs.callslow, &[heap, out_addr, argc_v, site_v, head_v]);
+        let c = b.ins().call(
+            funcs.callslow,
+            &[heap, out_addr, argc_v, site_v, head_v, funcs.ctx],
+        );
         let status = b.inst_results(c)[0];
         let rb = super::emit::load_roots_base(b, heap);
         b.def_var(rb_var, rb);
@@ -396,7 +399,7 @@ pub(super) fn emit_call(
         let len_slot =
             b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
         let len_addr = b.ins().stack_addr(ptr_ty, len_slot, 0);
-        let fbc = b.ins().call(funcs.flbase, &[heap, len_addr]);
+        let fbc = b.ins().call(funcs.flbase, &[heap, len_addr, funcs.ctx]);
         let fl_base = b.inst_results(fbc)[0];
         let fl_len = b.ins().stack_load(types::I64, types::I64, len_slot, 0);
         let site_idx = b.ins().iconst(types::I64, call_site as i64);
@@ -462,9 +465,10 @@ pub(super) fn emit_call(
         // Native flat cell: one trampoline call; the staged roots copies anchor the args
         // for any GC inside (the trampoline drops them).
         b.switch_to_block(nat_blk);
-        let nfc = b
-            .ins()
-            .call(funcs.natfl, &[heap, out_addr, code_v, stage_ptr, argc_v]);
+        let nfc = b.ins().call(
+            funcs.natfl,
+            &[heap, out_addr, code_v, stage_ptr, argc_v, funcs.ctx],
+        );
         let nst = b.inst_results(nfc)[0];
         let rb = super::emit::load_roots_base(b, heap);
         b.def_var(rb_var, rb);
@@ -507,11 +511,14 @@ pub(super) fn emit_call(
             // (`jit_run_fast_link` 20%, `brood_rt_fast_frame` 8%, `stacker` 6%, …) with
             // the blob installed and idle. Measured 2026-09-12, see §7.12.
             b.switch_to_block(xc_depth);
+            // The caller's own depth, from its activation context (rung A1) — the heap
+            // field is asserted only by callbacks now, so between two native frames it may
+            // describe another activation.
             let depth = b.ins().load(
-                types::I32,
+                types::I64,
                 MemFlagsData::trusted(),
-                heap,
-                offs.jit_native_depth as i32,
+                funcs.ctx,
+                std::mem::offset_of!(crate::jit::JitCallCtx, depth) as i32,
             );
             let d_ok = b.ins().icmp_imm_s(IntCC::UnsignedLessThan, depth, 64);
             let xc_cap = b.create_block();
@@ -575,64 +582,31 @@ pub(super) fn emit_call(
             // before its first safepoint).
             b.ins()
                 .store(MemFlagsData::trusted(), frame_end, heap, roots_len_off);
-            // Saves. `jit_call_env` is two opaque words (EnvRoot, repr(C, u8), pinned);
-            // the callee's value is Stable(GLOBAL) = (0, u64::MAX) by guard 1.
-            let env_off = offs.jit_call_env as i32;
-            let senv0 = b
-                .ins()
-                .load(types::I64, MemFlagsData::trusted(), heap, env_off);
-            let senv1 = b
-                .ins()
-                .load(types::I64, MemFlagsData::trusted(), heap, env_off + 8);
+            // Rung A1: no heap-field saves. The callee's activation context is built in a
+            // stack slot and passed by pointer; every callback that consults activation
+            // state asserts it from there (`JitCallCtx::assert_into`), so the ceremony that
+            // used to run here — env, dbg name, depth, force-VM flag, the two IC cursors
+            // and the gateway token saved before the call and restored after, ~22 memory
+            // operations — is gone from the hot path. What remains per call: the seven
+            // stores that fill the ctx, and the gateway counter bump (the token must be
+            // unique among live activations — frame bases repeat across time and Rust
+            // gateways use the same counter, so the counter stays; only its
+            // `cur_native_gateway` save/restore goes).
             let z64 = b.ins().iconst(types::I64, 0);
             let neg1 = b.ins().iconst(types::I64, -1);
-            b.ins().store(MemFlagsData::trusted(), z64, heap, env_off);
-            b.ins()
-                .store(MemFlagsData::trusted(), neg1, heap, env_off + 8);
-            let dbgfn_off = offs.jit_dbg_fn as i32;
-            let sfn = b
-                .ins()
-                .load(types::I32, MemFlagsData::trusted(), heap, dbgfn_off);
-            b.ins()
-                .store(MemFlagsData::trusted(), head_v, heap, dbgfn_off);
             let d1 = b.ins().iadd_imm_s(depth, 1);
-            b.ins().store(
-                MemFlagsData::trusted(),
-                d1,
-                heap,
-                offs.jit_native_depth as i32,
-            );
-            let force_off = offs.jit_force_vm as i32;
-            let sforce = b
-                .ins()
-                .load(types::I8, MemFlagsData::trusted(), heap, force_off);
-            let ic_off = offs.cur_ic_base as i32;
-            let gic_off = offs.cur_gic_base as i32;
-            let sic = b
-                .ins()
-                .load(types::I32, MemFlagsData::trusted(), heap, ic_off);
-            let sgic = b
-                .ins()
-                .load(types::I32, MemFlagsData::trusted(), heap, gic_off);
             let cic = b
                 .ins()
                 .load(types::I32, MemFlagsData::trusted(), slot_ptr, fl_icb_off);
             let cgic = b
                 .ins()
                 .load(types::I32, MemFlagsData::trusted(), slot_ptr, fl_gicb_off);
-            b.ins().store(MemFlagsData::trusted(), cic, heap, ic_off);
-            b.ins().store(MemFlagsData::trusted(), cgic, heap, gic_off);
             let seq_off = offs.native_gateway_seq as i32;
-            let curgw_off = offs.cur_native_gateway as i32;
             let seq = b
                 .ins()
                 .load(types::I64, MemFlagsData::trusted(), heap, seq_off);
             let gw = b.ins().iadd_imm_s(seq, 1);
             b.ins().store(MemFlagsData::trusted(), gw, heap, seq_off);
-            let scur = b
-                .ins()
-                .load(types::I64, MemFlagsData::trusted(), heap, curgw_off);
-            b.ins().store(MemFlagsData::trusted(), gw, heap, curgw_off);
             // Shared constants for the cold blocks (created here so they dominate both).
             let site_head_c = b.ins().iconst(
                 types::I64,
@@ -656,6 +630,8 @@ pub(super) fn emit_call(
                 let ic_o = std::mem::offset_of!(JitCallCtx, ic_base) as i32;
                 let gic_o = std::mem::offset_of!(JitCallCtx, gic_base) as i32;
                 let depth_o = std::mem::offset_of!(JitCallCtx, depth) as i32;
+                let gw_o = std::mem::offset_of!(JitCallCtx, gateway) as i32;
+                let dbg_o = std::mem::offset_of!(JitCallCtx, dbg_fn) as i32;
                 // `stack_store`'s leading type is the POINTER width (it addresses the slot),
                 // not the stored value's — `I32` there fails the verifier with "invalid
                 // pointer width", which `make tier-audit` caught on ten rows while the
@@ -666,6 +642,8 @@ pub(super) fn emit_call(
                 b.ins().stack_store(pt, cic, ctx_slot, ic_o);
                 b.ins().stack_store(pt, cgic, ctx_slot, gic_o);
                 b.ins().stack_store(pt, d1, ctx_slot, depth_o);
+                b.ins().stack_store(pt, gw, ctx_slot, gw_o);
+                b.ins().stack_store(pt, head_v, ctx_slot, dbg_o);
             }
             let ctx_addr = b.ins().stack_addr(funcs.ptr_ty, ctx_slot, 0);
             // The call itself — straight into the callee's native code.
@@ -675,23 +653,9 @@ pub(super) fn emit_call(
                 &[heap, stage_base, out_addr, ctx_addr],
             );
             let outcome = b.inst_results(icall)[0];
-            // Restores, in `jit_run_fast_link`'s order.
-            b.ins()
-                .store(MemFlagsData::trusted(), scur, heap, curgw_off);
-            b.ins().store(MemFlagsData::trusted(), sic, heap, ic_off);
-            b.ins().store(MemFlagsData::trusted(), sgic, heap, gic_off);
-            b.ins()
-                .store(MemFlagsData::trusted(), sforce, heap, force_off);
-            b.ins().store(
-                MemFlagsData::trusted(),
-                depth,
-                heap,
-                offs.jit_native_depth as i32,
-            );
-            b.ins().store(MemFlagsData::trusted(), senv0, heap, env_off);
-            b.ins()
-                .store(MemFlagsData::trusted(), senv1, heap, env_off + 8);
-            b.ins().store(MemFlagsData::trusted(), sfn, heap, dbgfn_off);
+            // No restores (rung A1): the heap fields the callee's callbacks may have
+            // asserted describe the callee; the next callback from THIS frame asserts this
+            // frame's ctx before reading any of them.
             // The callee may have grown/moved `roots` — refetch the base inline.
             let rb2 = b
                 .ins()
@@ -709,8 +673,10 @@ pub(super) fn emit_call(
             let xc_out = b.create_block();
             b.ins().brif(latched, xc_latch, &[], xc_out, &[]);
             b.switch_to_block(xc_latch);
-            b.ins()
-                .call(funcs.xlatch, &[heap, code_v, site_head_c, argc_c, gep]);
+            b.ins().call(
+                funcs.xlatch,
+                &[heap, code_v, site_head_c, argc_c, gep, funcs.ctx],
+            );
             b.ins().jump(xc_out, &[]);
             // Outcome dispatch: 0 (the overwhelmingly common case) inline; the rest cold.
             b.switch_to_block(xc_out);
@@ -731,7 +697,16 @@ pub(super) fn emit_call(
             let an = b.ins().bor(argc_shifted, nslots64);
             let coldc = b.ins().call(
                 funcs.xcold,
-                &[heap, outcome, out_addr, site_head_c, an, gep, stage_base],
+                &[
+                    heap,
+                    outcome,
+                    out_addr,
+                    site_head_c,
+                    an,
+                    gep,
+                    stage_base,
+                    funcs.ctx,
+                ],
             );
             let cst = b.inst_results(coldc)[0];
             // The cold arms can allocate/collect — refetch the base again.
@@ -755,9 +730,10 @@ pub(super) fn emit_call(
         // six in registers. Four arguments fit in registers, and the callee's reads are free:
         // the guard blocks above have just touched that cache line to check the slot's epoch,
         // sym and argc. See `brood_rt_fast_frame`'s doc.
-        let ffc = b
-            .ins()
-            .call(funcs.fastframe, &[heap, out_addr, site_v, slot_ptr]);
+        let ffc = b.ins().call(
+            funcs.fastframe,
+            &[heap, out_addr, site_v, slot_ptr, funcs.ctx],
+        );
         let fst = b.inst_results(ffc)[0];
         // The callee may have relocated `roots`; re-fetch the base.
         let rb = super::emit::load_roots_base(b, heap);
