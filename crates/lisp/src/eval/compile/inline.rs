@@ -265,6 +265,15 @@ pub(crate) fn linmap_update_op(sym: Symbol) -> Option<&'static str> {
 pub(crate) struct LinIdiom {
     get: Symbol,
     assoc: Symbol,
+    inc: Symbol,
+    dec: Symbol,
+}
+
+/// What a fused update adds to the key's count: an expression from the source, or the
+/// `1` of `inc`/`dec` (which have no addend node to point at).
+pub(crate) enum LinAddend<'a> {
+    Node(&'a Node),
+    One,
 }
 
 impl LinIdiom {
@@ -279,6 +288,8 @@ impl LinIdiom {
         Some(LinIdiom {
             get: prelude_fn("get")?,
             assoc: prelude_fn("assoc")?,
+            inc: prelude_fn("inc")?,
+            dec: prelude_fn("dec")?,
         })
     }
 
@@ -289,25 +300,24 @@ impl LinIdiom {
             .then(|| &args[1..])
     }
 
-    /// `(assoc acc K (+ (get acc K 0) E))` or `(assoc acc K (+ E (get acc K 0)))`: the key
-    /// and the addend, when this call is that fused read-modify-write on `Local(s)`. `K`
-    /// is the same pure expression on both sides (`linmap_same_key`) — evaluated twice in
-    /// the source and once in the rewrite, so its two reads must not be able to differ.
-    fn fused_add<'a>(&self, h: Symbol, args: &'a [Node], s: usize) -> Option<(&'a Node, &'a Node)> {
+    /// The fused read-modify-write on `Local(s)`, when this call is one: the key and the
+    /// addend of `(assoc acc K (+ (get acc K 0) E))` (either operand order), of
+    /// `(assoc acc K (- (get acc K 0) E))` (the read first — `(- E (get …))` is not a
+    /// tally), and of `(assoc acc K (inc (get acc K 0)))` / `dec`, with `sub` saying which
+    /// table op it is. `K` is the same pure expression on both sides (`linmap_same_key`) —
+    /// evaluated twice in the source and once in the rewrite, so its two reads must not be
+    /// able to differ. `inc`/`dec` must be the PRELUDE closures like `get`/`assoc`
+    /// (`(%add n 1)` / `(%sub n 1)`, so the table op raises the same error they would).
+    fn fused_add<'a>(
+        &self,
+        h: Symbol,
+        args: &'a [Node],
+        s: usize,
+    ) -> Option<(&'a Node, LinAddend<'a>, bool)> {
         if h != self.assoc || args.len() != 3 || !first_arg_is_local(args, s) {
             return None;
         }
         let key = &args[1];
-        let Node::Prim2 {
-            op: PrimOp::Add,
-            a,
-            b,
-            map: [0, 1],
-            ..
-        } = &args[2]
-        else {
-            return None;
-        };
         let is_get_key_0 = |n: &Node| match n {
             Node::Call { callee, args, .. } => {
                 call_head_sym(callee) == Some(self.get)
@@ -318,12 +328,44 @@ impl LinIdiom {
             }
             _ => false,
         };
-        if is_get_key_0(a) {
-            Some((key, b))
-        } else if is_get_key_0(b) {
-            Some((key, a))
-        } else {
-            None
+        match &args[2] {
+            Node::Prim2 {
+                op: PrimOp::Add,
+                a,
+                b,
+                map: [0, 1],
+                ..
+            } => {
+                if is_get_key_0(a) {
+                    Some((key, LinAddend::Node(b), false))
+                } else if is_get_key_0(b) {
+                    Some((key, LinAddend::Node(a), false))
+                } else {
+                    None
+                }
+            }
+            Node::Prim2 {
+                op: PrimOp::Sub,
+                a,
+                b,
+                map: [0, 1],
+                ..
+            } if is_get_key_0(a) => Some((key, LinAddend::Node(b), true)),
+            Node::Call {
+                callee,
+                args: inner,
+                ..
+            } if inner.len() == 1 && is_get_key_0(&inner[0]) => {
+                let head = call_head_sym(callee)?;
+                if head == self.inc {
+                    Some((key, LinAddend::One, false))
+                } else if head == self.dec {
+                    Some((key, LinAddend::One, true))
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
     }
 }
@@ -418,11 +460,14 @@ pub(crate) fn linmap_linear(node: &Node, s: usize, sink: LinSink, idiom: Option<
                         return rest_linear(rest);
                     }
                     if sink != LinSink::No {
-                        if let Some((key, addend)) = i.fused_add(h, args, s) {
+                        if let Some((key, addend, _)) = i.fused_add(h, args, s) {
                             // The key is a local or a constant (never s); the addend may
                             // READ s — `(+ (get acc k 0) (get acc j 0))` — but not consume it.
                             return linmap_linear(key, s, LinSink::No, idiom)
-                                && linmap_linear(addend, s, LinSink::No, idiom);
+                                && match addend {
+                                    LinAddend::Node(e) => linmap_linear(e, s, LinSink::No, idiom),
+                                    LinAddend::One => true,
+                                };
                         }
                     }
                 }

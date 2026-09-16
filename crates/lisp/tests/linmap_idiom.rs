@@ -133,7 +133,38 @@ fn a_two_arity_get_read_is_a_table_get_with_a_nil_default() {
     );
 }
 
+#[test]
+fn inc_dec_and_subtraction_fuse_too() {
+    // `(inc (get m k 0))` — the pocket reference's own spelling — is a %table-add of 1…
+    assert_split(
+        "(defn go (xs m) (if (empty? xs) m (go (rest xs) (assoc m (first xs) (inc (get m (first xs) 0))))))",
+        &[SPLIT, "(%table-add m (first xs) 1)"],
+        &["(inc "],
+    );
+    // …`dec` a %table-sub of 1, and `(- (get m k 0) e)` a %table-sub of e.
+    assert_split(
+        "(defn go (xs m) (if (empty? xs) m (go (rest xs) (assoc m (first xs) (dec (get m (first xs) 0))))))",
+        &[SPLIT, "(%table-sub m (first xs) 1)"],
+        &[],
+    );
+    assert_split(
+        "(defn go (i m) (if (>= i 10) m (go (+ i 1) (assoc m :k (- (get m :k 0) (* 2 i))))))",
+        &[SPLIT, "(%table-sub m :k (* 2 i))"],
+        &["%table-add"],
+    );
+}
+
 // ---- what must NOT fuse: each of these has semantics the table op would change ----
+
+#[test]
+fn a_subtraction_from_the_addend_is_not_a_tally() {
+    // `(- e (get m k 0))` stores e minus the count — not a read-modify-write of the count.
+    assert_split(
+        "(defn go (i m) (if (>= i 10) m (go (+ i 1) (assoc m :k (- 100 (get m :k 0))))))",
+        &[],
+        &[SPLIT, "%table-sub", "%table-add"],
+    );
+}
 
 #[test]
 fn a_different_read_key_is_not_a_tally() {

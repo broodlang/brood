@@ -23062,6 +23062,11 @@ only through an undocumented name is not a language feature; it is a benchmark t
    found `{0 1.5}` tallying to `2` on one arm and `2.5` on the other. With `%table-add` both
    arms are one semantics on every input, so the primitive can do what `+` does.
 
+5. **`inc`, `dec` and `-` are the same tally** (2026-09-17). `(assoc acc K (inc (get acc K
+   0)))` — the pocket reference's own spelling — is `%table-add` of 1, `dec` and
+   `(- (get acc K 0) E)` (the read first; `(- E (get …))` is not a tally) are `%table-sub`,
+   `(- (get t k 0) v)` on a table: `-` rather than a negated `+`, so a non-number raises
+   `-`'s error as `dec`'s `(%sub n 1)` would. `inc`/`dec` must be the prelude closures.
 4. **The seed is checked, and the loop as written is kept** (2026-09-17, KI-152). The
    linearity proof licenses the in-place build; it says nothing about the values in the
    accumulator's input map, and a table cannot hold every value a map can (a rope, a

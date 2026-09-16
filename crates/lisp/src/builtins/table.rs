@@ -70,6 +70,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         table_add,
     );
     primitives.def(
+        kw::TABLE_SUB,
+        Arity::exact(3),
+        Sig::new(vec![table_ty, any, any], num),
+        &["t", "k", "v"],
+        "Store (- (get t k 0) v) at key k in table t and return the new value: table-add's subtracting sibling, which the linear-map rewrite fuses `(assoc m k (- (get m k 0) v))` and the `dec` spelling into. Subtracts exactly as `-` does; not atomic in the general case.",
+        table_sub,
+    );
+    primitives.def(
         kw::TABLE_COUNT,
         Arity::exact(1),
         Sig::new(vec![table_ty], int),
@@ -149,6 +157,12 @@ pub(super) fn table_add(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
     let id = expect_table(heap, "table-add", arg(args, 0))?;
     crate::core::table::check_key("table-add", arg(args, 1))?;
     crate::core::table::add(heap, id, arg(args, 1), arg(args, 2))
+}
+
+pub(super) fn table_sub(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_table(heap, "table-sub", arg(args, 0))?;
+    crate::core::table::check_key("table-sub", arg(args, 1))?;
+    crate::core::table::sub(heap, id, arg(args, 1), arg(args, 2))
 }
 
 pub(super) fn table_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {

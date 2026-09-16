@@ -69,6 +69,7 @@ pub const TABLE_HAS: &str = "%table-has?";
 pub const TABLE_DELETE: &str = "%table-delete";
 pub const TABLE_INCR: &str = "%table-incr";
 pub const TABLE_ADD: &str = "%table-add";
+pub const TABLE_SUB: &str = "%table-sub";
 pub const TABLE_COUNT: &str = "%table-count";
 pub const TABLE_SNAPSHOT: &str = "%table-snapshot";
 pub const TABLE_DROP: &str = "%table-drop";

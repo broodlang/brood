@@ -24,7 +24,7 @@ KEYS = [
     ("(math/rem i 3)", None),          # an arithmetic key expression, twice
 ]
 ADDENDS = ["1", "2", "-1", "0.5", "9223372036854775807", "(get m :other 0)", "(+ 1 (math/rem i 2))"]
-SEEDS = ["{}", "{:hot 10 :other 3}", "{0 1.5 :hot 2.5}", "{1 \"s\"}", "{:hot 9223372036854775807}", "{2 100000000000000000000}",
+SEEDS = ["{}", "{:hot 10 :other 3}", "{0 1.5 :hot 2.5}", "{1 \"s\"}", "{:hot 9223372036854775807}", "{2 100000000000000000000}", "{:hot -9223372036854775808}",
          # seeds a table cannot stand in for: the wrapper must run the loop as written
          "{:r (text/from-string \"x\") :hot 1}", "{:f string/length}", "{:v (seq/lmap (list 0 1 2) inc) :hot 2}",
          "(lm-rec 5)"]
@@ -40,6 +40,13 @@ def update(rng, key):
         return f"(assoc m {key} (+ (get m {key} 0) {e}))"
     if r < 0.75:
         return f"(assoc m {key} (+ {e} (get m {key} 0)))"
+    if r < 0.80:
+        return rng.choice([
+            f"(assoc m {key} (inc (get m {key} 0)))",
+            f"(assoc m {key} (dec (get m {key} 0)))",
+            f"(assoc m {key} (- (get m {key} 0) {e}))",
+            f"(assoc m {key} (- {e} (get m {key} 0)))",       # e minus the count: no fuse
+        ])
     if r < 0.85:
         return f"(assoc m {key} (+ (get m {key} 1) {e}))"      # non-zero default: no fuse
     if r < 0.93:

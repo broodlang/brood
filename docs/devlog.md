@@ -886,6 +886,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-16** — ADR-360: the linear-map rewrite recognises the tally a user writes (`(assoc m k (+ (get m k 0) e))`) — `wordcount` 857 → 66 ms, `persistent-map` 535 → 79 on the idiomatic ports; `%table-add` is the fused op and `%map-int-add` is now exactly the same `+` (KI-151); a linmap fuzzer with the oracle in the program.
 - **2026-09-17** — KI-152: the linear-map rewrite was observable on its seed (a rope in the input map raised on one arm, returned on the other); `%table-from-map` declines and the split keeps the loop as written behind the seed check, under a new `(check-allow :generated …)` the checker skips — measured free. Go column published in brood-benchmarks (1.8× C, between C and .NET).
 - **2026-09-17** — KI-153: a function whose only sites were its own self-calls derived ⊥ for every parameter and was checked as dead code (no lint in its body at all); a self-call no longer makes a function live. The rewrite's forms keep their source positions.
+- **2026-09-17** — `inc`, `dec` and `(- (get m k 0) e)` fuse like `+` (ADR-360 §5, `%table-sub`); the fuzzer draws the four spellings and an i64::MIN seed.
 
 ---
 

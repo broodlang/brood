@@ -2499,12 +2499,18 @@ fn linmap_rename_self(heap: &mut Heap, form: Value, name: value::Symbol, slow: V
     rebuild_list(heap, form, out)
 }
 
-/// The `E` of `(+ (get ACC KEY 0) E)` / `(+ E (get ACC KEY 0))` when `value` is that form —
-/// the source half of `LinIdiom::fused_add`, which decided on the compiled body that this
-/// `assoc` is the tally. The two keys must be the same form — the probe's
+/// The `E` of `(+ (get ACC KEY 0) E)` / `(+ E (get ACC KEY 0))` / `(- (get ACC KEY 0) E)`,
+/// or the `1` of `(inc (get ACC KEY 0))` / `dec`, with whether it subtracts — the source
+/// half of `LinIdiom::fused_add`, which decided on the compiled body that this `assoc` is
+/// the tally. The two keys must be the same form — the probe's
 /// `linmap_same_key` is the stricter judge (it also requires the form to be pure), and
 /// the rewrite only ever runs on a body the probe admitted.
-fn linmap_fused_addend(heap: &Heap, acc: value::Symbol, key: Value, value: Value) -> Option<Value> {
+fn linmap_fused_addend(
+    heap: &Heap,
+    acc: value::Symbol,
+    key: Value,
+    value: Value,
+) -> Option<(Value, bool)> {
     let same_key = |k: Value| heap.equal(key, k);
     let is_get_key_0 = |form: Value| {
         let Ok(g) = heap.list_to_vec(form) else {
@@ -2516,17 +2522,34 @@ fn linmap_fused_addend(heap: &Heap, acc: value::Symbol, key: Value, value: Value
             && same_key(g[2])
             && matches!(g[3].unpack(), ValueRef::Int(0))
     };
-    let sum = heap.list_to_vec(value).ok()?;
-    if sum.len() != 3 || !matches!(sum[0].unpack(), ValueRef::Sym(h) if value::symbol_is(h, "+")) {
+    let items = heap.list_to_vec(value).ok()?;
+    let ValueRef::Sym(h) = items.first()?.unpack() else {
+        return None;
+    };
+    // `(inc (get acc K 0))` / `(dec …)`: the addend is 1.
+    if items.len() == 2 && is_get_key_0(items[1]) {
+        if value::symbol_is(h, "inc") {
+            return Some((Value::int(1), false));
+        }
+        if value::symbol_is(h, "dec") {
+            return Some((Value::int(1), true));
+        }
         return None;
     }
-    if is_get_key_0(sum[1]) {
-        Some(sum[2])
-    } else if is_get_key_0(sum[2]) {
-        Some(sum[1])
-    } else {
-        None
+    if items.len() != 3 {
+        return None;
     }
+    if value::symbol_is(h, "+") {
+        if is_get_key_0(items[1]) {
+            return Some((items[2], false));
+        }
+        if is_get_key_0(items[2]) {
+            return Some((items[1], false));
+        }
+    } else if value::symbol_is(h, "-") && is_get_key_0(items[1]) {
+        return Some((items[2], true));
+    }
+    None
 }
 
 /// Does `form` contain a `quasiquote` anywhere? Guards the linmap wrapper-split (see the
@@ -2616,14 +2639,12 @@ fn linmap_rewrite_form(
                 );
             }
             if value::symbol_is(h, "assoc") && items.len() == 4 {
-                if let Some(addend) = linmap_fused_addend(heap, acc, items[2], items[3]) {
+                if let Some((addend, sub)) = linmap_fused_addend(heap, acc, items[2], items[3]) {
                     let key = linmap_rewrite_form(heap, items[2], name, inner, acc);
                     let addend = linmap_rewrite_form(heap, addend, name, inner, acc);
-                    let mutate = rebuild_list(
-                        heap,
-                        form,
-                        vec![value::sym(kw::TABLE_ADD), items[1], key, addend],
-                    );
+                    let op = if sub { kw::TABLE_SUB } else { kw::TABLE_ADD };
+                    let mutate =
+                        rebuild_list(heap, form, vec![value::sym(op), items[1], key, addend]);
                     return rebuild_list(heap, form, vec![value::sym(kw::DO), mutate, items[1]]);
                 }
             }

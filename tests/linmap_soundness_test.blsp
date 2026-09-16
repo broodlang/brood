@@ -90,6 +90,14 @@
   (lookup-get [c k] (if (= k :hits) (get c :hits) 100))
   (lookup-keys [c] (list :hits)))
 
+;; `inc`, `dec` and `-` spellings of the same tally.
+(defn lm-inc (xs acc)
+  (if (empty? xs) acc (lm-inc (rest xs) (assoc acc (first xs) (inc (get acc (first xs) 0))))))
+(defn lm-dec (xs acc)
+  (if (empty? xs) acc (lm-dec (rest xs) (assoc acc (first xs) (dec (get acc (first xs) 0))))))
+(defn lm-sub (i acc)
+  (if (>= i 4) acc (lm-sub (+ i 1) (assoc acc :k (- (get acc :k 0) (* 2 i))))))
+
 ;; Quoted data alongside a qualifying accumulator fold.
 (defn lm-quoted (xs acc)
   (if (empty? xs)
@@ -170,6 +178,17 @@
       (assert= (lm-counter 5) (dissoc out :zz)))
     (assert= 100 (lm-idiom-get2 0 (lm-counter 5)))
     (assert= nil (lm-idiom-get2 0 {:hits 5})))
+
+  (test "inc, dec and - are the same tally"
+    (assert= {:a 3 :b 1} (lm-inc '(:a :b :a :a) {}))
+    (assert= {:a -3 :b -1} (lm-dec '(:a :b :a :a) {}))
+    (assert= {:k -12} (lm-sub 0 {}))
+    (assert= {:k 2.5 :x 1} (lm-inc '(:x) {:k 2.5}))
+    (assert= {:k 1.5} (lm-dec '(:k) {:k 2.5}))
+    ;; Past i64::MIN `dec` promotes, as `-` does — and its error names `-`, as `dec`'s would.
+    (assert= (- -9223372036854775808 1) (get (lm-dec '(:k) {:k -9223372036854775808}) :k))
+    (assert-error "-: expected number" (lm-dec '(:k) {:k "s"}))
+    (assert-error "+: expected number" (lm-inc '(:k) {:k "s"})))
 
   (test "quoted data is left alone by the source rewrite"
     (let (out (lm-quoted '(:a) {}))

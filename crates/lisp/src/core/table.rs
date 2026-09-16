@@ -807,6 +807,24 @@ pub fn add(heap: &mut Heap, id: u64, key: Value, delta: Value) -> LispResult {
     Ok(next)
 }
 
+/// `(%table-sub t k v)` — store `(- (get t k 0) v)` at `k` and return the new value: the
+/// subtracting sibling of [`add`], for the tally written `(assoc m k (- (get m k 0) v))`
+/// (or with `dec`). Same paths, same non-atomic general half; `-` rather than a negated
+/// `+` so a non-number raises `-`'s own error, as the source did.
+pub fn sub(heap: &mut Heap, id: u64, key: Value, delta: Value) -> LispResult {
+    if let Value::Int(d) = delta {
+        if let Some(neg) = d.checked_neg() {
+            if let Ok(next) = incr_int(heap, id, key, neg)? {
+                return Ok(Value::int(next));
+            }
+        }
+    }
+    let old = get(heap, id, key, Value::int(0))?;
+    let next = crate::builtins::numeric::sub_values(heap, old, delta)?;
+    put(heap, id, key, next)?;
+    Ok(next)
+}
+
 /// The shared read-modify-write behind `incr` and `add`: `Ok(Ok(next))` when the
 /// stored value was an `i64` (or absent) and the sum fits, `Ok(Err(miss))` when it
 /// was not — leaving the table untouched — and `Err` only for a dead table.

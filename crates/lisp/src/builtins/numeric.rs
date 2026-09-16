@@ -747,6 +747,12 @@ pub(crate) fn add_values(heap: &mut Heap, a: Value, b: Value) -> LispResult {
     prim_add(&[a, b], env, heap)
 }
 
+/// `(- a b)` for the kernel's own use — `add_values`'s sibling, for `core::table::sub`.
+pub(crate) fn sub_values(heap: &mut Heap, a: Value, b: Value) -> LispResult {
+    let env = heap.global();
+    prim_sub(&[a, b], env, heap)
+}
+
 pub(super) fn prim_add(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     num_bin(
         heap,

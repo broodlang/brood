@@ -28,6 +28,8 @@ linear-map rewrite learned that shape (`LinIdiom`, `eval/compile/inline.rs`; `%t
 float as 0; `scripts/fuzz/generators/linmap.py` found the float case diverging between the
 arms on its first run — run it after any change to the rewrite: `scripts/fuzz/run.sh linmap 300`).
 
+**(2) below landed 2026-09-17 (`inc`/`dec`/`-`, `%table-sub`); (1) and (3) remain.**
+
 **Next possible wins on this seam, in order:** (1) the same tally through `fold` with a
 closure — `(fold xs {} (fn (m x) (assoc m x (+ 1 (get m x 0)))))` is what `brood-for-claude.md`
 recommends and what `seq/frequencies` is, and neither qualifies today (the probe wants a
