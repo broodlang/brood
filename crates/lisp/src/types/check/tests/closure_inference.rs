@@ -832,3 +832,106 @@ fn a_recursive_value_type_folds_into_a_rec_instead_of_nesting_forever() {
     let use_it = sig_of("t/use-it");
     assert!(use_it.contains("(rec X 1 | nil | vector<X>)"), "{use_it}");
 }
+
+// ---- a `let`-bound `fn` literal's parameters are DERIVED from its callers ----
+// The same derivation a module-private `defn` gets (ADR-341), scoped to the binding: the
+// later bindings and the body are every form the name is visible in, so a parameter is the
+// union of what those sites hand it — a direct call's argument, or what a combinator
+// promises (`(map (range …) row-op)` hands an int). Before this the parameters were
+// unknown, `(+ y k)` read `number`, and its use as an `int` was a strict finding — fifteen
+// of bedit's, every one a local helper over an index — while the same literal written
+// inline in the `map` was typed from the element.
+
+#[test]
+fn a_let_bound_lambda_derives_its_parameters_from_its_callers() {
+    // Handed to a combinator: the element type.
+    let ws = file_warnings_mode(
+        "\
+         (defmodule t)\n\
+         (sig takes-int (int -> int))\n\
+         (defn takes-int (n) (inc n))\n\
+         (sig lam (int -> list))\n\
+         (defn lam (y)\n\
+           (let (row-op (fn (k) (takes-int (+ y k))))\n\
+             (map (range 0 3) row-op)))",
+        true,
+    );
+    assert!(ws.is_empty(), "the combinator hands `k` an int — {ws:?}");
+    // Called directly: the argument's type, and the result under it feeds the return check.
+    let ws = file_warnings_mode(
+        "\
+         (defmodule t)\n\
+         (sig direct (int -> int))\n\
+         (defn direct (y)\n\
+           (let (f (fn (k) (+ y k)))\n\
+             (f 2)))",
+        true,
+    );
+    assert!(ws.is_empty(), "`k` is 2, so the body is an int — {ws:?}");
+    assert_eq!(ty_str("(let (f (fn (k) (+ 1 k))) (f 2))"), "3");
+    // A genuine mismatch is now visible through the derivation.
+    let ws = file_warnings(
+        "\
+         (defmodule t)\n\
+         (sig takes-int (int -> int))\n\
+         (defn takes-int (n) (inc n))\n\
+         (defn wrong (y)\n\
+           (let (f (fn (k) (takes-int k)))\n\
+             (f \"s\")))",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("takes-int: argument 1 expects int, got \"s\"")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn a_let_bound_lambda_that_escapes_derives_nothing() {
+    // Handed somewhere with no promise about what it will be called with: unknown, and
+    // the body's `(+ y k)` stays the honest `number` it always was — no finding either way.
+    let ws = file_warnings_mode(
+        "\
+         (defmodule t)\n\
+         (sig keep (int -> any))\n\
+         (defn keep (y)\n\
+           (let (f (fn (k) (+ y k)))\n\
+             (spawn (fn () (f 1)))\n\
+             f))",
+        true,
+    );
+    assert!(!ws.iter().any(|w| w.contains("never")), "{ws:?}");
+    assert_eq!(
+        ty_str("(let (f (fn (k) (+ 1 k))) [f])"),
+        "(tuple (any) -> number)"
+    );
+    // A defensive guard over a derived parameter is not "never true": the callers that
+    // would exercise it are not here yet (the private-`defn` rule).
+    let ws = file_warnings("(defn f () (let (g (fn (b) (if (int? b) (+ 1 b) b))) (g \"x\")))");
+    assert!(ws.is_empty(), "{ws:?}");
+}
+
+// A combinator handed a `let`-bound literal reads the literal's derived result: `(map xs f)`
+// is `list<R>`, not a bare `list`. `callback_ret` declined every lexical local; a local whose
+// TYPE is an arrow — the derived literal, or a parameter declared `(int -> string)` — has a
+// result it can answer with.
+#[test]
+fn a_combinator_reads_a_let_bound_lambdas_derived_result() {
+    assert_eq!(
+        ty_str("(let (f (fn (k) (+ 1 k))) (map [1 2] f))"),
+        "list<int[2..3]>[2]"
+    );
+    assert_eq!(
+        ty_str("(let (f (fn (k) (str k))) (map [1 2] f))"),
+        "list<string>[2]"
+    );
+    // A declared arrow parameter answers the same way.
+    let ws = file_warnings_mode(
+        "\
+         (defmodule t)\n\
+         (sig apply-all ((int -> string) -> (list string)))\n\
+         (defn apply-all (f) (map [1 2 3] f))",
+        true,
+    );
+    assert!(ws.is_empty(), "{ws:?}");
+}

@@ -63,6 +63,36 @@ pub(super) fn check_fn_bound(
     out: &mut Vec<(Option<Pos>, String)>,
     tys: &[Ty],
 ) {
+    let tys: Vec<Option<Ty>> = tys.iter().cloned().map(Some).collect();
+    check_fn_bound_opt(heap, items, ctx, out, &tys)
+}
+
+/// [`check_fn_bound`] with a position the seed could not type left UNKNOWN (`None`) —
+/// bound like an unseeded parameter — rather than `any`, which reads as a known top type
+/// to the relations that ask.
+pub(super) fn check_fn_bound_opt(
+    heap: &Heap,
+    items: &[Value],
+    ctx: &Ctx,
+    out: &mut Vec<(Option<Pos>, String)>,
+    tys: &[Option<Ty>],
+) {
+    check_fn_bound_with(heap, items, ctx, out, tys, false)
+}
+
+/// [`check_fn_bound_opt`], with `derived` marking the seed as CALLER-DERIVED (the
+/// `let`-bound literal's, `derived_let_lambda`): each parameter is then bound through
+/// `Ctx::bind_derived`, so the impossible-predicate lint leaves its guards alone — a
+/// defensive `(int? b)` the in-scope callers never exercise is not "never true", it is
+/// there for the callers that are not here yet (the private-`defn` rule, ADR-341).
+pub(super) fn check_fn_bound_with(
+    heap: &Heap,
+    items: &[Value],
+    ctx: &Ctx,
+    out: &mut Vec<(Option<Pos>, String)>,
+    tys: &[Option<Ty>],
+    derived: bool,
+) {
     // A CLAUSE-style callback — `(fn ((acc n) …) (((x y & r) "+") …))` — gets the seed too,
     // per clause and through `bind_head`, so a destructuring head's binders are typed from
     // the position they destructure. Without this the whole seed was dropped for anything
@@ -99,7 +129,12 @@ pub(super) fn check_fn_bound(
             let mut scope = ctx.clone();
             let heads = list_items(heap, plist).unwrap_or_default();
             for (i, &h) in heads.iter().enumerate() {
-                scope = crate::types::check::sigs::bind_head(heap, scope, h, tys.get(i).cloned());
+                scope = crate::types::check::sigs::bind_head(
+                    heap,
+                    scope,
+                    h,
+                    tys.get(i).cloned().flatten(),
+                );
             }
             for &body_form in &citems[1..] {
                 check_into(heap, body_form, &scope, out);
@@ -112,7 +147,12 @@ pub(super) fn check_fn_bound(
     };
     let mut scope = ctx.clone();
     for (i, p) in fn_params(heap, params_form).into_iter().enumerate() {
-        scope = scope.bind(p, tys.get(i).cloned());
+        let ty = tys.get(i).cloned().flatten();
+        scope = if derived {
+            scope.bind_derived(p, ty)
+        } else {
+            scope.bind(p, ty)
+        };
     }
     let body_start = match (items.get(2), items.get(3)) {
         (Some(Value::Str(_)), Some(_)) => 3,
@@ -197,9 +237,21 @@ pub(super) fn check_fn_seeded(
     // arity range for seeding to make sense: at least `params.len()`
     // required, at most `params.len() + optional.len()` unless it has a
     // rest tail (any count at or above `params.len()` is then fine).
+    // …or the declaration names exactly the REQUIRED positions and says nothing about the
+    // optionals — `(sig f (int int -> int))` over `(defn f (a b &optional (c nil)) …)`.
+    // The required positions align exactly, so those seed; each undeclared optional is
+    // bound below as an unseeded optional (its default's type, or unknown). Refusing the
+    // whole declaration left every parameter of such a function unknown — bedit's
+    // `ed-visible-lines`, ten declared parameters over ten required and two optionals,
+    // read `(+ y k)` as `number` with `y` declared `int` two lines up.
+    let required = required_param_count(heap, params_form);
     let sig = sig.filter(|s| {
-        params.len() >= s.params.len()
-            && (s.rest.is_some() || params.len() <= s.params.len() + s.optional.len())
+        (params.len() >= s.params.len()
+            && (s.rest.is_some() || params.len() <= s.params.len() + s.optional.len()))
+            || (!has_rest
+                && s.rest.is_none()
+                && s.optional.is_empty()
+                && required == s.params.len())
     });
     let mut scope = ctx.clone();
     for (i, &p) in params.iter().enumerate() {
@@ -753,14 +805,58 @@ pub(super) fn check_let(
             j += 2;
         }
     }
+    // A `fn`-valued binder's parameters are derived from its callers — the later bindings
+    // and the body, which is everything the name is visible in (`let_lambda_derived_params`).
+    // Those sites are typed in the scope every binder is bound in, so the scope is built
+    // once ahead of the checking pass; only a let that binds a literal pays for it.
+    let has_fn_binder = (0..binds.len())
+        .step_by(2)
+        .any(|j| matches!(binds[j], Value::Sym(_)) && fn_form_items(heap, binds[j + 1]).is_some());
+    let derived_for: Vec<Option<(Vec<Option<Ty>>, Option<Ty>)>> = if has_fn_binder {
+        let mut full = scope.clone();
+        let mut j = 0;
+        while j < binds.len() {
+            let rhs_ty = expr_ty(heap, binds[j + 1], &full);
+            full = let_bind_scope(heap, full, binds[j], binds[j + 1], rhs_ty);
+            j += 2;
+        }
+        (0..binds.len())
+            .step_by(2)
+            .map(|j| {
+                let Value::Sym(name) = binds[j] else {
+                    return None;
+                };
+                let rhs = binds[j + 1];
+                fn_form_items(heap, rhs)?;
+                let visible: Vec<Value> = binds[j + 2..]
+                    .iter()
+                    .skip(1)
+                    .step_by(2)
+                    .copied()
+                    .chain(items[2..].iter().copied())
+                    .collect();
+                derived_let_lambda(heap, name, rhs, &visible, &full)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let mut i = 0;
     while i < binds.len() {
         let (pat, rhs) = (binds[i], binds[i + 1]);
         // The RHS is an evaluated value position — a bare unbound symbol there
         // (`(let (x typo) …)`) is a reference error.
         check_value_leaf(heap, rhs, form, &scope, out);
-        check_into(heap, rhs, &scope, out);
-        let rhs_ty = expr_ty(heap, rhs, &scope);
+        let derived = derived_for.get(i / 2).and_then(|d| d.as_ref());
+        match (derived, fn_form_items(heap, rhs)) {
+            (Some((tys, _)), Some(fn_items)) => {
+                check_fn_bound_with(heap, &fn_items, &scope, out, tys, true)
+            }
+            _ => check_into(heap, rhs, &scope, out),
+        }
+        let rhs_ty = derived
+            .and_then(|(tys, ret)| derived_let_lambda_arrow(tys, ret))
+            .or_else(|| expr_ty(heap, rhs, &scope));
         // Is the RHS *precise* (non-redefinable)? Computed in the pre-bind scope.
         // `dynamic == false` ⇔ a literal / integer-closed expression, never a
         // call-result or global reference — the reload-safe subset the dead-clause
@@ -843,5 +939,356 @@ pub(super) fn check_let(
             }
             j += 2;
         }
+    }
+}
+
+/// A `let`-bound `fn` literal's caller-derived parameter types and, under them, its result —
+/// what both the walk (`check_let`, to check the body) and the inference (`expr_ty`'s `let`,
+/// to type the name's calls) bind the name from. `visible` is every form the binding is
+/// in scope for; `scope` the scope those forms are typed in. `None` when nothing could be
+/// derived (no plain-parameter literal, no site, or the name escapes).
+pub(in crate::types::check) fn derived_let_lambda(
+    heap: &Heap,
+    name: Symbol,
+    rhs: Value,
+    visible: &[Value],
+    scope: &Ctx,
+) -> Option<(Vec<Option<Ty>>, Option<Ty>)> {
+    fn_form_items(heap, rhs)?;
+    let derived = let_lambda_derived_params(heap, name, rhs, visible, scope)?;
+    if derived.iter().all(Option::is_none) {
+        return None;
+    }
+    // …and the literal's result under those inputs, for the arrow the name is bound to:
+    // `(row-op 2)` then types as the body does over an int.
+    let ret = super::super::infer::callback_ret(heap, rhs, &derived, scope);
+    Some((derived, ret))
+}
+
+/// The arrow a derived `let`-bound literal is bound to (`infer::lambda_arrow`'s shape):
+/// `any` parameters — an arrow's parameters are contravariant, and the derivation is a
+/// fact about the callers, not a domain — and the result typed under what they hand over.
+pub(in crate::types::check) fn derived_let_lambda_arrow(
+    tys: &[Option<Ty>],
+    ret: &Option<Ty>,
+) -> Option<Ty> {
+    ret.as_ref()
+        .map(|r| Ty::arrow(Sig::new(vec![Ty::ANY; tys.len()], r.clone())))
+}
+
+/// The type a `let` binding's right-hand side is bound as, for the INFERENCE paths
+/// (`infer`'s `let`, `gradual_of`'s): a `fn` literal bound to a name is typed from its
+/// callers (`derived_let_lambda`, over the later bindings and the body), anything else by
+/// `expr_ty`. `binds` is the whole binding list, `i` the binder's index in it, `items` the
+/// `let` form's items, `scope` the scope so far. Shared so the three `let` typings agree
+/// — the walk binds the same arrow in `check_let`.
+pub(in crate::types::check) fn let_rhs_ty(
+    heap: &Heap,
+    binds: &[Value],
+    i: usize,
+    items: &[Value],
+    scope: &Ctx,
+) -> Option<Ty> {
+    let derived_arrow = match binds[i] {
+        Value::Sym(name) if fn_form_items(heap, binds[i + 1]).is_some() => {
+            let visible: Vec<Value> = binds[i + 2..]
+                .iter()
+                .skip(1)
+                .step_by(2)
+                .copied()
+                .chain(items[2..].iter().copied())
+                .collect();
+            // The name is in scope for its sites, bound to nothing yet — the pre-bind
+            // `check_let` makes for a `fn`-valued binder. Without it a site's typing
+            // resolves the name to a GLOBAL of the same spelling: `(reduce xs '() step)`
+            // under `(let (step (fn (a v) a)) …)` read the file's `step` — `conj` — and
+            // the local's derivation came back holding a list.
+            let scope = scope.bind(name, None);
+            derived_let_lambda(heap, name, binds[i + 1], &visible, &scope)
+                .and_then(|(tys, ret)| derived_let_lambda_arrow(&tys, &ret))
+        }
+        _ => None,
+    };
+    derived_arrow.or_else(|| expr_ty(heap, binds[i + 1], scope))
+}
+
+/// The **caller-derived parameter types of a `let`-bound `fn` literal** — the same
+/// derivation a module-private `defn` gets (`sigs::caller_derived_params`), scoped to the
+/// binding: `name`'s callers are exactly the forms the binding is visible in (the later
+/// bindings' right-hand sides and the body), so per parameter the answer is the union of
+/// what every call there hands it, or what a combinator promises to call it with
+/// (`walk::callback_seed` — `(map (range …) row-op)` hands an int). One position some
+/// site cannot type is unknown.
+///
+/// Sound for the reason the private-`defn` derivation is: a call inside the let's scope
+/// is the only way to reach the closure, unless the name ESCAPES — used as a value where
+/// no callee promise types it (`(spawn f)`, inside a vector, quoted), rebound by a nested
+/// binder, or reached through a macro the expander left as written — and every one of
+/// those declines the whole derivation (`None`).
+///
+/// Before this the literal's parameters were unknown, so `(+ y k)` in
+/// `(let (row-op (fn (k) … (+ y k))) (map (range 0 3) row-op))` read `number` and went
+/// into an `int` parameter as a strict finding — fifteen of bedit's, every one a local
+/// helper over an index — while the same literal written inline in the `map` was typed
+/// from the element. Plain-symbol parameters only, single clause.
+fn let_lambda_derived_params(
+    heap: &Heap,
+    name: Symbol,
+    rhs: Value,
+    visible: &[Value],
+    scope: &Ctx,
+) -> Option<Vec<Option<Ty>>> {
+    let items = fn_form_items(heap, rhs)?;
+    let params = list_items(heap, *items.get(1)?)?;
+    if params
+        .iter()
+        .any(|p| !matches!(p, Value::Sym(s) if !name_of(*s).starts_with('&')))
+    {
+        return None;
+    }
+    let arity = params.len();
+    let mut sites: Vec<Vec<Option<Ty>>> = Vec::new();
+    for &form in visible {
+        if !collect_let_lambda_sites(heap, name, arity, form, scope, &mut sites) {
+            return None;
+        }
+    }
+    if sites.is_empty() {
+        return None;
+    }
+    let mut derived: Vec<Option<Ty>> = vec![None; arity];
+    for (i, slot) in derived.iter_mut().enumerate() {
+        let mut acc: Option<Ty> = None;
+        for site in &sites {
+            match site.get(i).cloned().flatten() {
+                Some(t) => acc = Some(acc.map_or(t.clone(), |a| a.union(t))),
+                None => {
+                    acc = None;
+                    break;
+                }
+            }
+        }
+        *slot = acc;
+    }
+    Some(derived)
+}
+
+/// [`let_lambda_derived_params`]'s walk over one visible form: push a site per call of
+/// `name` (its arguments typed in `scope`) and per handover a callee promises to call
+/// (`callback_seed`); return `false` the moment `name` escapes.
+fn collect_let_lambda_sites(
+    heap: &Heap,
+    name: Symbol,
+    arity: usize,
+    form: Value,
+    scope: &Ctx,
+    sites: &mut Vec<Vec<Option<Ty>>>,
+) -> bool {
+    match form {
+        Value::Sym(s) => s != name,
+        Value::Vector(id) => {
+            let elems = heap.vector(id).to_vec();
+            elems
+                .into_iter()
+                .all(|e| collect_let_lambda_sites(heap, name, arity, e, scope, sites))
+        }
+        Value::Map(id) => heap.map_entries(id).into_iter().all(|(k, v)| {
+            collect_let_lambda_sites(heap, name, arity, k, scope, sites)
+                && collect_let_lambda_sites(heap, name, arity, v, scope, sites)
+        }),
+        Value::Pair(_) => {
+            let Some(items) = list_items(heap, form) else {
+                return false;
+            };
+            let Some(&head) = items.first() else {
+                return true;
+            };
+            if let Value::Sym(h) = head {
+                // Quoted data: a mention there is data, not a reference — unless it IS the
+                // name, which is then an escape the walk cannot follow.
+                if value::symbol_is(h, kw::QUOTE) {
+                    return !sym_appears_in(heap, form, name);
+                }
+                // A nested binder that rebinds `name` shadows it: the references beneath
+                // are someone else's. Decline rather than sort them out.
+                if is_fn_head(h) {
+                    if items
+                        .get(1)
+                        .is_some_and(|&p| fn_params(heap, p).contains(&name))
+                    {
+                        return false;
+                    }
+                    // An unseeded literal (one no callee promised anything to): its
+                    // parameters are unknown inside, and shadow whatever they are named.
+                    let mut inner = scope.clone();
+                    if let Some(&p) = items.get(1) {
+                        for param in fn_params(heap, p) {
+                            inner = inner.bind(param, None);
+                        }
+                    }
+                    return items
+                        .iter()
+                        .skip(2)
+                        .all(|&it| collect_let_lambda_sites(heap, name, arity, it, &inner, sites));
+                }
+                if value::symbol_is(h, kw::LET)
+                    || value::symbol_is(h, kw::LETREC)
+                    || value::symbol_is(h, "let*")
+                {
+                    let Some(binds) = items.get(1).and_then(|&b| bindings(heap, b)) else {
+                        return false;
+                    };
+                    if binds.len() % 2 != 0
+                        || binds
+                            .iter()
+                            .step_by(2)
+                            .any(|&p| sym_appears_in(heap, p, name))
+                    {
+                        return false;
+                    }
+                    // Each binder in scope for what follows it, so a site under
+                    // `(let ([line from to] (nth rows k)) (row-op k line from to))` types
+                    // its arguments — the same sequential binding `expr_ty`'s `let` does.
+                    let mut inner = scope.clone();
+                    let mut j = 0;
+                    while j < binds.len() {
+                        if !collect_let_lambda_sites(heap, name, arity, binds[j + 1], &inner, sites)
+                        {
+                            return false;
+                        }
+                        let rhs_ty = let_rhs_ty(heap, &binds, j, &items, &inner);
+                        match binds[j] {
+                            Value::Sym(b) => inner = inner.bind(b, rhs_ty),
+                            pat => {
+                                for (sym, ty) in pattern_bindings(heap, pat, rhs_ty.as_ref()) {
+                                    inner = inner.bind(sym, ty);
+                                }
+                            }
+                        }
+                        j += 2;
+                    }
+                    for &it in &items[2..] {
+                        if !collect_let_lambda_sites(heap, name, arity, it, &inner, sites) {
+                            return false;
+                        }
+                        if let Some(next) = diverging_guard_scope(heap, it, &inner) {
+                            inner = next;
+                        }
+                    }
+                    return true;
+                }
+                // The scope a site sits in must be what the WALK sees there (the rule
+                // `sigs::collect_private_sites` learned): a `match` arm's `(ok? m)` under
+                // the arm's own length test hands `m` a `string`, not the `nil | string`
+                // `first` answers unguarded. Same guard rule, same diverging-guard
+                // sequencing over a body.
+                if value::symbol_is(h, kw::IF) && (items.len() == 3 || items.len() == 4) {
+                    if !collect_let_lambda_sites(heap, name, arity, items[1], scope, sites) {
+                        return false;
+                    }
+                    let (then_scope, else_scope) =
+                        crate::types::check::guards::branch_scopes(heap, items[1], scope);
+                    if !collect_let_lambda_sites(heap, name, arity, items[2], &then_scope, sites) {
+                        return false;
+                    }
+                    return items.get(3).is_none_or(|&else_form| {
+                        collect_let_lambda_sites(heap, name, arity, else_form, &else_scope, sites)
+                    });
+                }
+                if value::symbol_is(h, kw::DO) {
+                    let mut seq = scope.clone();
+                    for &it in &items[1..] {
+                        if !collect_let_lambda_sites(heap, name, arity, it, &seq, sites) {
+                            return false;
+                        }
+                        if let Some(next) = diverging_guard_scope(heap, it, &seq) {
+                            seq = next;
+                        }
+                    }
+                    return true;
+                }
+                // Syntax the expander left as written may construct a call the walk
+                // cannot see.
+                if super::resolves_to_macro(heap, scope, h) {
+                    return false;
+                }
+                // A direct call: a site when the arity fits (a wrong arity raises and
+                // contributes nothing); the arguments are walked either way.
+                if h == name {
+                    if items.len() - 1 == arity {
+                        sites.push(
+                            items[1..]
+                                .iter()
+                                .map(|&a| expr_ty(heap, a, scope))
+                                .collect(),
+                        );
+                    }
+                    return items
+                        .iter()
+                        .skip(1)
+                        .all(|&a| collect_let_lambda_sites(heap, name, arity, a, scope, sites));
+                }
+            }
+            // A handover: `name` where the callee promises what it will call it with.
+            let handed = super::calls::callback_seed(
+                heap,
+                form,
+                &items,
+                scope,
+                &|arg, wanted| matches!(arg, Value::Sym(s) if s == name && wanted == arity),
+            );
+            // …and a callback LITERAL at a promised position is walked with its parameters
+            // seeded, so a site inside `(mapcat xs (fn (line) (row-op (- line top) …)))`
+            // types `line` from the element — exactly as the walk checks that literal.
+            let seeded_literal = super::calls::callback_seed(
+                heap,
+                form,
+                &items,
+                scope,
+                &super::calls::literal_fits(heap),
+            );
+            for (i, &it) in items.iter().enumerate() {
+                if let Some((idx, sig)) = &handed {
+                    if *idx == i {
+                        sites.push(sig.params.iter().cloned().map(Some).collect());
+                        continue;
+                    }
+                }
+                if i == 0 && matches!(it, Value::Sym(_)) {
+                    continue;
+                }
+                if let Some((idx, sig)) = &seeded_literal {
+                    if *idx == i {
+                        let Some(lit) = fn_form_items(heap, it) else {
+                            return false;
+                        };
+                        let Some(&plist) = lit.get(1) else {
+                            return false;
+                        };
+                        let params = fn_params(heap, plist);
+                        if params.contains(&name) {
+                            return false;
+                        }
+                        let mut inner = scope.clone();
+                        for (k, param) in params.into_iter().enumerate() {
+                            inner = inner.bind(param, sig.params.get(k).cloned());
+                        }
+                        if !lit
+                            .iter()
+                            .skip(2)
+                            .all(|&b| collect_let_lambda_sites(heap, name, arity, b, &inner, sites))
+                        {
+                            return false;
+                        }
+                        continue;
+                    }
+                }
+                if !collect_let_lambda_sites(heap, name, arity, it, scope, sites) {
+                    return false;
+                }
+            }
+            true
+        }
+        _ => true,
     }
 }

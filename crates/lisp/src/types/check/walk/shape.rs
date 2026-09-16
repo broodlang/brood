@@ -584,3 +584,22 @@ pub(in crate::types::check) fn list_items(heap: &Heap, mut v: Value) -> Option<V
         }
     }
 }
+
+/// How many of a parameter list's binders are REQUIRED — the ones before the first
+/// `&optional` / `&` / `&rest` marker.
+pub(in crate::types::check) fn required_param_count(heap: &Heap, form: Value) -> usize {
+    let items = match form {
+        Value::Vector(id) => heap.vector(id).to_vec(),
+        Value::Nil | Value::Pair(_) => list_items(heap, form).unwrap_or_default(),
+        _ => return 0,
+    };
+    items
+        .iter()
+        .take_while(|item| {
+            !matches!(item, Value::Sym(s)
+                if value::symbol_is(*s, kw::AMP)
+                    || value::symbol_is(*s, kw::AMP_OPTIONAL)
+                    || value::symbol_is(*s, kw::AMP_REST))
+        })
+        .count()
+}

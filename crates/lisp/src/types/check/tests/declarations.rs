@@ -114,3 +114,37 @@ fn every_type_constructor_the_grammar_parses_is_known_to_the_validator() {
         );
     }
 }
+
+// A declaration that names exactly the REQUIRED positions of a `defn` with `&optional`
+// parameters seeds those positions. It used to be refused whole (the closure's parameter
+// count fell outside the declared arity range), so every parameter of such a function was
+// unknown — bedit's `ed-visible-lines`, ten declared over ten required and two optionals,
+// read `(+ y k)` as `number` with `y` declared `int` two lines up. The undeclared optionals
+// stay unknown; a declaration that misaligns the required positions is still refused.
+#[test]
+fn a_sig_over_the_required_positions_seeds_a_defn_with_undeclared_optionals() {
+    let ws = file_warnings_mode(
+        "\
+         (defmodule t)\n\
+         (sig takes-int (int -> int))\n\
+         (defn takes-int (n) (inc n))\n\
+         (sig opt2 (int int -> int))\n\
+         (defn opt2 (top y &optional (memo? false))\n\
+           (takes-int (+ y top)))",
+        true,
+    );
+    assert!(ws.is_empty(), "`y` and `top` are declared ints — {ws:?}");
+    // …and a genuine mismatch on a declared position is reported through the seed.
+    let ws = file_warnings(
+        "\
+         (defmodule t)\n\
+         (sig opt3 (string int -> int))\n\
+         (defn opt3 (s y &optional (memo? false))\n\
+           (+ s y))",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("expects number, got string") || w.contains("got s")),
+        "{ws:?}"
+    );
+}

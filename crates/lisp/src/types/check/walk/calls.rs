@@ -756,7 +756,7 @@ pub(super) fn gradual_of_compound(heap: &Heap, expr: Value, ctx: &Ctx) -> Option
         let mut scope = ctx.clone();
         let mut i = 0;
         while i < binds.len() {
-            let rhs_ty = expr_ty(heap, binds[i + 1], &scope);
+            let rhs_ty = super::binders::let_rhs_ty(heap, &binds, i, &items, &scope);
             match binds[i] {
                 Value::Sym(name) => scope = scope.bind(name, rhs_ty),
                 pat => {
