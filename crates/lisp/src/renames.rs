@@ -24,6 +24,11 @@
 
 /// `(old, new, adr)` for every deliberate public rename still worth pointing at.
 pub const RENAMES: &[(&str, &str, &str)] = &[
+    // ADR-356 — the Markdown renderer is a CORE module. `docs` is developer tooling and a
+    // shipped runtime does not carry it; the hosted registry rendered package READMEs with
+    // `docs/markdown->html` at request time, which only worked because its runtime was not
+    // as lean as its build command claimed.
+    ("docs/markdown->html", "markdown/->html", "ADR-356"),
     // ADR-330 — `filter` joins its complement in `seq/`. The positive was the last core
     // sequence op whose negative lived in a different namespace, so the pair is reunited by
     // moving the positive rather than duplicating it: bare `filter` is gone, `seq/remove` is

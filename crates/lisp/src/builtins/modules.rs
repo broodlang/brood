@@ -480,6 +480,10 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // LCS-based sequence diff: diff-seq, diff-lines, diff-summary, diff-patch,
     // diff-unified. O(m*n) time/space; suitable for small-to-medium sequences.
     embedded_module!("diff", "std/diff.blsp"),
+    // Markdown to HTML — a small subset, HTML-escaped. CORE, not tooling: the doc generator
+    // renders its guides with it and the hosted registry its package READMEs, at request
+    // time, on a shipped runtime (ADR-356).
+    embedded_module!("markdown", "std/markdown.blsp"),
     // Path string manipulation: join, split, basename, dirname, extension, stem,
     // normalize, relative-to. Consolidates the prelude's path-* globals under
     // a single path/ namespace with additional operations.

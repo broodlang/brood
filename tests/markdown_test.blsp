@@ -1,219 +1,24 @@
-;; tests/markdown_test.blsp — the lexical Markdown highlighter (std/editor/markdown.blsp).
-;;
-;; The module is pure (source string -> [start end face] spans), so it's fully
-;; testable without a terminal — the live rendering is the editor's shared
-;; `fontify-runs` tiler. These cover each line shape (headings, fenced code, list
-;; bullets, blockquotes) and the inline scan (code, bold, italic, links), plus the
-;; ascending / non-overlapping span invariants the tiler relies on.
+;; std/markdown — the Markdown renderer, tested where it lives. The cases moved here with
+;; the function from `docs_test.blsp` (ADR-356); `docs_test` keeps the guide-page cases that
+;; exercise the generator's use of it.
+(defmodule markdown-test (:use test) (:use markdown))
 
-(defmodule markdown-test (:use test) (:use editor/markdown))
+(describe "markdown/->html"
+  (test "the subset renders"
+    (assert= (->html "# Hi") "<h1>Hi</h1>")
+    (is (includes? (->html "a `b` c") "<code>b</code>"))
+    (is (includes? (->html "see [x](/y)") "<a href=\"/y\">x</a>"))
+    (is (includes? (->html "- one\n- two") "<li>one</li>"))
+    (is (includes? (->html "```\n(+ 1 2)\n```") "<pre><code>(+ 1 2)</code></pre>")))
 
-(describe "markdown-spans — line shapes"
-  (test "ATX heading colours the whole line"
-    (assert= (markdown-spans "# Title")
-      (list [0 7 md-face-heading]))
-    (assert= (markdown-spans "### deep")
-      (list [0 8 md-face-heading])))
-  (test "seven #'s is not a heading (levels 1–6 only)"
-    (assert= (markdown-spans "####### no") '()))
-  (test "a fenced code block colours its lines, incl. the fences"
-    ;; "```\ncode\n```" — three lines, each whole-line code
-    (assert= (markdown-spans "```\ncode\n```")
-      (list [0 3 md-face-code] [4 8 md-face-code] [9 12 md-face-code])))
-  (test "text after a closed fence is back to inline rules"
-    (assert= (markdown-spans "```\nx\n```\n# H")
-      (list [0 3 md-face-code]
-        [4 5 md-face-code]
-        [6 9 md-face-code]
-        [10 13 md-face-heading])))
-  (test "an unordered bullet marks just the bullet char"
-    (assert= (markdown-spans "- item")
-      (list [0 1 md-face-list])))
-  (test "an ordered bullet marks the number + delimiter"
-    (assert= (markdown-spans "12. item")
-      (list [0 3 md-face-list])))
-  (test "a blockquote marks the leading >"
-    (assert= (markdown-spans "> quoted")
-      (list [0 1 md-face-quote]))))
+  (test "everything is escaped"
+    (is (includes? (->html "a <b> c") "&lt;b&gt;")))
 
-(describe "markdown-spans — inline scan"
-  (test "inline code spans the backticks"
-    (assert= (markdown-spans "a `x` b")
-      (list [2 5 md-face-code])))
-  (test "bold and italic"
-    (assert= (markdown-spans "**b**") (list [0 5 md-face-bold]))
-    (assert= (markdown-spans "_i_") (list [0 3 md-face-italic])))
-  (test "a link spans [text](url)"
-    (assert= (markdown-spans "see [t](u) ok")
-      (list [4 10 md-face-link])))
-  (test "an unclosed emphasis delimiter carries no span"
-    (assert= (markdown-spans "a * b") '()))
-  (test "inline markup applies after a list bullet"
-    (assert= (markdown-spans "- `x`")
-      (list [0 1 md-face-list] [2 5 md-face-code]))))
+  (test "an unterminated link is text, not a crash"
+    (assert= (->html "a [b c") "<p>a [b c</p>")
+    (assert= (->html "cost $[5 today") "<p>cost $[5 today</p>"))
 
-(describe "markdown-spans — invariants"
-  (test "spans are ascending and non-overlapping"
-    (let (spans (markdown-spans "# H\n- `a` **b** [t](u)\n> q"))
-      (is (= spans (sort spans)))
-      (is (md-test-non-overlapping? spans))))
-  (test "empty input yields no spans"
-    (assert= (markdown-spans "") '())))
-
-(defn- md-test-non-overlapping? (spans)
-  "True if every span ends at or before the next span starts."
-  (cond
-    (empty? spans) true
-    (empty? (rest spans)) true
-    else
-      (let ([s1 e1 f1] (first spans)
-            [s2 e2 f2] (second spans))
-        (and (<= e1 s2) (md-test-non-overlapping? (rest spans))))))
-
-;; `markdown-spans` walks PRE-SPLIT lines with a running offset rather than
-;; `(string/substring src i e)` per line, because that substring is O(i) off the ASCII fast path and
-;; made the whole document scan quadratic on any text containing one non-ASCII character
-;; (measured 5.03x then 6.92x rising, against 3.81x/3.88x for the same text in ASCII).
-;;
-;; The risk the rewrite carries is the offset arithmetic — the next line now starts at
-;; `i + (string/length line) + 1` instead of one past a scanned newline — and `string-split`'s
-;; trailing "" for a newline-terminated source, where the old `(>= i n)` loop simply stopped.
-;; So pin absolute offsets, and pin that a trailing newline changes nothing.
-(describe "markdown-spans line offsets survive the pre-split walk"
-  (test "spans carry absolute offsets across multiple lines"
-    ;; `code` on line 2 must be located relative to the whole document, not the line
-    (let (src "plain first line\nthen `code` here\n"
-          spans (markdown-spans src)
-          code (first spans))
-      (assert= 1 (count spans))
-      ;; the backtick run starts at offset 17 ("plain first line\n" is 17 chars) + 5 = 22.
-      ;; An offset computed per-line rather than per-document reads 5 here.
-      (assert= 22 (nth code 0))
-      (assert= (string/substring src (nth code 0) (nth code 1)) "`code`")))
-
-  (test "a trailing newline adds no spans (string-split's trailing empty is dropped)"
-    (assert= (markdown-spans "# Head") (markdown-spans "# Head\n")))
-
-  (test "blank interior lines keep following offsets correct"
-    (let (a (markdown-spans "# A\n\n# B\n")
-          b (markdown-spans "# A\n\n# B"))
-      (assert= a b)
-      ;; two headings, the second located after the blank line
-      (assert= 2 (count a))))
-
-  (test "multi-byte text yields the same span offsets as its ASCII-width equivalent"
-    ;; `café` and `cafe` differ in bytes but not in CHARACTERS, and Brood indexes by
-    ;; character — so every span offset must be identical. This is the property the O(i)
-    ;; byte conversion used to make expensive and could silently have made wrong.
-    (let (m (markdown-spans "café **b** x\n## h\n")
-          a (markdown-spans "cafe **b** x\n## h\n"))
-      (assert= m a)))
-
-  (test "empty and newline-only sources produce no spans"
-    (assert= (markdown-spans "") ())
-    (assert= (markdown-spans "\n") ())))
-
-;; ---- markdown-render: the document as readable text, faces as data ---------------
-
-(describe "markdown-render — block shapes"
-  (defn lines-of (r) (string/split (:text r) "\n"))
-  (defn faced (r face)
-    ;; the rendered substrings carrying `face`
-    (map (seq/filter (:spans r) (fn (s) (= (nth s 2) face)))
-      (fn (s) (string/substring (:text r) (nth s 0) (nth s 1)))))
-
-  (test "a heading is its text, the top two levels underlined to their width"
-    (let (r (markdown-render "# Title\n\n## Sub\n\n### Deep" 40))
-      (assert= (lines-of r) (list "Title" "━━━━━" "" "Sub" "───" "" "Deep"))
-      (assert= (faced r md-face-heading) (list "Title" "Sub" "Deep"))))
-
-  (test "a paragraph is re-flowed to the width, markers gone, faces kept"
-    (let (r (markdown-render "Some *italic* and **bold text** here, with `code` and a [link](http://x)."
-              30))
-      (assert= (lines-of r)
-        (list "Some italic and bold text" "here, with code and a link."))
-      (assert= (faced r md-face-italic) (list "italic"))
-      (assert= (faced r md-face-bold) (list "bold text")) ; ONE span across its space
-      (assert= (faced r md-face-code) (list "code"))
-      (assert= (faced r md-face-link) (list "link"))))
-
-  (test "consecutive source lines are one paragraph; a blank line ends it"
-    (let (r (markdown-render "one\ntwo\n\nthree" 40))
-      (assert= (lines-of r) (list "one two" "" "three"))))
-
-  (test "a word longer than the width keeps its own line"
-    (let (r (markdown-render "a bbbbbbbbbbbbbbbbbbbbbbbbbbb c" 12))
-      (assert= (lines-of r) (list "a" "bbbbbbbbbbbbbbbbbbbbbbbbbbb" "c"))))
-
-  (test "list items get a bullet and a hanging indent; an indented line continues the item"
-    (let (r (markdown-render "- one item\n- a much longer item that wraps\n  and continues\n1. first"
-              22))
-      (assert= (lines-of r)
-        (list "• one item" "• a much longer item" "  that wraps and" "  continues" "1. first"))
-      (assert= (faced r md-face-list) (list "•" "•" "1."))))
-
-  (test "a nested item keeps its source indentation"
-    (let (r (markdown-render "- outer\n  - inner" 40))
-      (assert= (lines-of r) (list "• outer" "  • inner"))))
-
-  (test "a blockquote is re-flowed under a bar, in the quote face"
-    (let (r (markdown-render "> a quote\n> that continues" 40))
-      (assert= (lines-of r) (list "│ a quote that continues"))
-      (assert= (faced r md-face-quote) (list "│ a quote that continues"))))
-
-  (test "a fenced block is verbatim, indented, all code; the fences are gone"
-    (let (r (markdown-render "```\n(defn f (x)\n  x)\n```\nafter" 40))
-      (assert= (lines-of r) (list "    (defn f (x)" "      x)" "after"))
-      (assert= (faced r md-face-code) (list "    (defn f (x)" "      x)"))))
-
-  (test "an unclosed fence runs to the end"
-    (assert= (lines-of (markdown-render "```\ncode" 40)) (list "    code")))
-
-  (test "a rule is a line of ─ the width of the pane"
-    (assert= (lines-of (markdown-render "a\n\n---\n\nb" 10)) (list "a" "" "──────────" "" "b")))
-
-  (test "runs of blank lines collapse to one"
-    (assert= (lines-of (markdown-render "a\n\n\n\nb" 40)) (list "a" "" "b")))
-
-  (test "empty input renders empty"
-    (let (r (markdown-render "" 40))
-      (assert= (:text r) "")
-      (assert= (:spans r) ())
-      (assert= (:lines r) [])
-      (assert= (markdown-rendered-line r 3) 0)))
-
-  (test "the width has a floor, so a sliver of a pane still renders"
-    (assert= (lines-of (markdown-render "one two three" 2)) (list "one two" "three")))
-
-  (test "spans are ascending, non-overlapping and within the text"
-    (let (r (markdown-render "# H\n\n**b** *i* `c` [l](u)\n\n- **x** y\n\n> q **z**" 30)
-          n (string/length (:text r)))
-      (fold (:spans r)
-        0
-        (fn (prev s)
-          (let ([a b _] s)
-            (do
-              (is (<= prev a))
-              (is (< a b))
-              (is (<= b n))
-              b))))))
-  (test "an unclosed marker is a literal character"
-    (assert= (:text (markdown-render "2*3 and a[b" 40)) "2*3 and a[b")))
-
-(describe "markdown-render — following the source"
-  (test ":lines maps each rendered line to its source line, non-decreasing"
-    (let (r (markdown-render "# T\n\npara\n\n- a\n- b\n\n```\nc\n```\nend" 40))
-      ;;            T  ━  ""  para ""  •a •b ""  code  end
-      (assert= (:lines r) [0 0 1 2 3 4 5 6 8 10])))
-
-  (test "a long paragraph spreads its source lines across the rendered ones"
-    (let (r (markdown-render "aaa bbb\nccc ddd\neee fff" 7))
-      (assert= (string/split (:text r) "\n") (list "aaa bbb" "ccc ddd" "eee fff"))
-      (assert= (:lines r) [0 1 2])))
-
-  (test "markdown-rendered-line finds where a source line landed"
-    (let (r (markdown-render "# T\n\npara\n\n- a\n- b" 40))
-      (assert= (markdown-rendered-line r 0) 0)
-      (assert= (markdown-rendered-line r 2) 3) ; "para"
-      (assert= (markdown-rendered-line r 5) 6) ; "• b"
-      (assert= (markdown-rendered-line r 99) 6)))) ; past the end: the last line
+  ;; The reason this is a core module: an app renders at request time on a runtime that
+  ;; carries no developer tooling — so it must not live in one.
+  (test "it is a CORE module, present on every runtime"
+    (is (includes? (reflect/builtin-modules) "markdown"))))
