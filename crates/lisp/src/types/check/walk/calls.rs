@@ -477,6 +477,9 @@ pub(super) const ELEMENT_CALLBACK_COMBINATORS: &[&str] = &[
     "keep",
     "seq/keep",
     "each",
+    // `dolist`'s expansion: `(%dolist-loop coll (fn (x) body…))` — the loop variable is an
+    // element, exactly as `each`'s is.
+    "%dolist-loop",
     "take-while",
     "drop-while",
     "sort-by",
