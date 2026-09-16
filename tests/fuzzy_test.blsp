@@ -63,9 +63,9 @@
 ;; `lib/moneyclub/` and so never reached the run in the file's own name.
 
 (def- project-paths
-  (list "lib/moneyclub/reports/it3b/submission.ex" "lib/moneyclub/reports/it3b/sars_format.ex"
-    "lib/moneyclub/reports/it3b/native_source.ex" "lib/moneyclub/limits.ex"
-    "lib/moneyclub/accounts/limits.ex" "test/moneyclub/limits_test.exs"
+  (list "lib/moneyclub/reports/it3b/submission.ex"
+    "lib/moneyclub/reports/it3b/sars_format.ex" "lib/moneyclub/reports/it3b/native_source.ex"
+    "lib/moneyclub/limits.ex" "lib/moneyclub/accounts/limits.ex" "test/moneyclub/limits_test.exs"
     "lib/moneyclub/rate_limiter.ex"))
 
 (describe "ranking a project's paths"
@@ -74,9 +74,8 @@
       (list "lib/moneyclub/limits.ex" "lib/moneyclub/accounts/limits.ex")))
   (test "a run buried past an earlier false start is still found (the walk cannot backtrack)"
     ;; greedy alone spends l-i-m on `lib/moneyclub` and scores this below the scattered ones
-    (is
-      (> (get (fuzzy/match "limits.ex" "lib/moneyclub/accounts/limits.ex") :score)
-        (get (fuzzy/match "limits.ex" "lib/moneyclub/reports/it3b/submission.ex") :score))))
+    (is (> (get (fuzzy/match "limits.ex" "lib/moneyclub/accounts/limits.ex") :score)
+          (get (fuzzy/match "limits.ex" "lib/moneyclub/reports/it3b/submission.ex") :score))))
   (test "and the run is what gets highlighted, not the false start"
     (assert= (get (fuzzy/match "limits" "lib/moneyclub/accounts/limits.ex") :positions)
       (list 23 24 25 26 27 28)))

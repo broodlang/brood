@@ -4,6 +4,14 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## Unreleased
+
+**`std/fuzzy.blsp` is strict-clean** (14 → 0): the bounded fold's state starts from
+scalars rather than `nil`s, the ranked list is a list of sort keys (the candidate rides in
+the key, so the `[key cand]` wrapper and its `second` are gone), and `top` binds a non-nil
+`k` once instead of testing `limit` at every use. The `fuzzy-worse?` sig claimed `int` for a
+score the checker can only prove `number` (the scorer is a dynamic) and is gone.
+
 ## v0.30.0 — ranking is bounded and sharded, text composites in sRGB space, and the checker derives what bedit had declared
 
 **Ranking a candidate set is bounded by what it shows, and shards across processes**

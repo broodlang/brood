@@ -57,7 +57,6 @@ camelCase hump (an upper preceded by a non-upper)."
 (def- fuzzy-gap-penalty 3) ; opening a gap — any run of skipped chars
 (def- fuzzy-gap-extend-penalty 1) ; each further char skipped in that gap
 (def- fuzzy-lead-penalty 3) ; most the first match can be docked for starting late
-
 (defn- fuzzy-gap-cost (gap)
   "What skipping `gap` chars between two matched ones costs: nothing when they are
 adjacent, else opening the gap plus each further char skipped.
@@ -235,33 +234,31 @@ and the key vector the sort wants is never built for a candidate that loses."
     (> length worst-length) true
     (< length worst-length) false
     :else (> (compare cand worst-cand) 0)))
-(sig fuzzy-worse? (int int string int int string -> bool))
 
 (defn- fuzzy-key (score cand)
   "The sort key `[(- score) length cand]` — best score first, then the shorter candidate,
-then lexicographic."
+then lexicographic. The candidate rides in the key, so a ranked list is a list of keys."
   [(- 0 score) (string/length cand) cand])
 
 (defn- fuzzy-place (best k score cand)
-  "`best` (ascending by key) with `cand` placed and the list re-capped to `k`. Only reached
-by a candidate that beat the worst one kept, which is rare once the first k are in."
-  (take (sort-by (cons [(fuzzy-key score cand) cand] best) first) k))
-
-(defn- fuzzy-kept (best)
-  "The fold state for a kept list: its count, the worst entry's key unpacked into scalars
-(so the reject test reads them rather than rebuilding them), and the list itself."
-  (let (key (first (last best)))
-    [(count best) (- 0 (nth key 0)) (nth key 1) (nth key 2) best]))
+  "The fold state after `cand` is placed in `best` (ascending by key) and the list re-capped
+to `k`: its count, the worst kept key unpacked into scalars (so the reject test reads them
+rather than rebuilding them), and the list itself. Only reached by a candidate that beat
+the worst one kept, which is rare once the first k are in."
+  (let (key (fuzzy-key score cand)
+        kept (take (sort (cons key best)) k)
+        worst (or (last kept) key))
+    [(count kept) (- 0 (nth worst 0)) (nth worst 1) (nth worst 2) kept]))
 
 (defn- fuzzy-fold (score-of cands k)
   "The best `k` candidates by `score-of`, best first — the bounded fold."
   (map (nth (fold cands
-              [0 nil nil nil ()]
+              [0 0 0 "" ()]
               (fn (state cand)
                 (let (score (score-of cand))
                   (cond
                     (nil? score) state
-                    (< (nth state 0) k) (fuzzy-kept (fuzzy-place (nth state 4) k score cand))
+                    (< (nth state 0) k) (fuzzy-place (nth state 4) k score cand)
                     (fuzzy-worse? score
                       (string/length cand)
                       cand
@@ -269,21 +266,20 @@ by a candidate that beat the worst one kept, which is rare once the first k are 
                       (nth state 2)
                       (nth state 3))
                       state
-                    :else (fuzzy-kept (fuzzy-place (nth state 4) k score cand))))))
+                    :else (fuzzy-place (nth state 4) k score cand)))))
          4)
-    second))
+    third))
 
 (defn- fuzzy-all (score-of cands)
   "Every match by `score-of`, best first — decorate-sort-undecorate, for an unbounded
 `filter`. (The bounded fold is the wrong shape with no k: every candidate would place, and
 placing re-sorts the kept list.)"
-  (map (sort-by (fold cands
-                  '()
-                  (fn (acc cand)
-                    (let (score (score-of cand))
-                      (if (nil? score) acc (cons [(fuzzy-key score cand) cand] acc)))))
-         first)
-    second))
+  (map (sort (fold cands
+               '()
+               (fn (acc cand)
+                 (let (score (score-of cand))
+                   (if (nil? score) acc (cons (fuzzy-key score cand) acc))))))
+    third))
 
 ;; ---- sharding a big ranking across processes --------------------------------
 ;; Ranking is a fold over independent candidates, which is the shape that shards. Each
@@ -375,20 +371,21 @@ Prefer this over `filter` whenever the caller shows a fixed number of rows: the 
 27k matches is a bounded fold, sorting all 27k to throw away 26,980 of them is not.
 
     (fuzzy/top \"ab\" [\"axb\" \"ab\" \"zz\"] 1)   → (\"ab\")"
-  (let (bounded (and (not (nil? limit)) (> limit 0))
+  (let (k (or limit 0)
+        bounded (> k 0)
         n (if bounded (count cands) 0))
     (cond
-      (= query "") (if bounded (take cands limit) cands)
+      (= query "") (if bounded (take cands k) cands)
       (not bounded) (fuzzy-all (*fuzzy-scorer* query) cands)
-      (> n *fuzzy-parallel-min*) (fuzzy-parallel (*fuzzy-scorer* query) cands limit)
+      (> n *fuzzy-parallel-min*) (fuzzy-parallel (*fuzzy-scorer* query) cands k)
       ;; The bounded fold only pays once the sort it replaces is mostly waste. Measured
       ;; (sort+take vs fold, best-20 of a repo-like corpus): 200 → 1.7/3.2 ms, 1000 →
       ;; 7.4/11.0, 2000 → 14.1/16.8, 4000 → 29.6/27.5, 16000 → 118.7/93.7 ms. So the
       ;; crossover is around a hundred candidates per row shown — under that the native
       ;; sort beats an interpreted fold, over it the fold pulls away. A ratio, not a size:
       ;; what matters is how many candidates get sorted per row actually displayed.
-      (> n (* 100 limit)) (fuzzy-fold (*fuzzy-scorer* query) cands limit)
-      :else (take (fuzzy-all (*fuzzy-scorer* query) cands) limit))))
+      (> n (* 100 k)) (fuzzy-fold (*fuzzy-scorer* query) cands k)
+      :else (take (fuzzy-all (*fuzzy-scorer* query) cands) k))))
 (sig top (string seqable &optional (or nil int) -> seqable))
 
 (defn filter (query cands)
