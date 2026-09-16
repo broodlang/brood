@@ -254,6 +254,17 @@ slow-timeout = { period = "60s", terminate-after = 4 }
 filter = 'binary(image_matches_source)'
 slow-timeout = { period = "60s", terminate-after = 6 }
 
+# `image_registrations_match_source` is the per-module REGISTRATION half of the same
+# differential (KI-136), moved to a binary of its own on 2026-09-16 because it owns its cache
+# through `set_var` (`env_isolation`: one test per env-mutating binary). It does more of the
+# same work — the image built in a runtime of its own, then every module loaded alone inside
+# `%isolate-discard-loads` twice — 7.7 s solo on the VM, and it TIMED OUT at the 120 s default
+# in the tree-walker job on its first run there (twice, the steady repeat of a budget). Same
+# budget as its sibling, for the same reasons.
+[[profile.default.overrides]]
+filter = 'binary(image_registrations_match_source)'
+slow-timeout = { period = "60s", terminate-after = 6 }
+
 # `artifact_matrix` (cli/tests/artifact_matrix.rs) is the same class of case as
 # `image_matches_source` above and had no override: six cells, each a cold or warm `brood`
 # child boot or two plus three stdlib-image builds, all in the test profile. Measured
