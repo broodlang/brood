@@ -6,6 +6,14 @@
 ;; word boundaries (string start, after a `- _ / . space`, or a camelCase upper), and
 ;; early matches all score higher. Greedy left-to-right (flx/fzf-lite — not the optimal
 ;; DP, but cheap and good in practice). Pure Brood, tail-recursive; zero kernel surface.
+;;
+;; The rules live in ONE place — `fuzzy-bonus`, what one matched char is worth — and one
+;; walk applies them, whether the caller wants a single candidate's positions (`match`, to
+;; highlight a row) or a whole set ranked (`top`, on every keystroke). They are also
+;; REPLACEABLE at runtime: bind `*fuzzy-scorer*` and every completion UI in the image ranks
+;; by your rules instead. That is the point of a self-editing system, and it is why the hot
+;; path stayed Brood instead of becoming a native primitive — `top` says what that costs
+;; and what the shape of the code does about it (ADR-357).
 
 (defmodule fuzzy
   "Fuzzy (subsequence) matching + ranking.
@@ -13,43 +21,20 @@
     (match \"fb\" \"foo-bar\")   ; => {:score N :positions [0 4]}
     (match \"xz\" \"foo-bar\")   ; => nil
     (filter \"fb\" cands)        ; => the matching cands, best score first
+    (top \"fb\" cands 20)        ; => just the best 20 of them
 
 `match` returns nil when `query` isn't a case-insensitive subsequence of the
 candidate, else `{:score :positions}` (`positions` are the matched char indices, for
 highlighting). `filter` keeps the matches and sorts them best-first (ties: shorter
-candidate, then lexicographic); an empty query returns the candidates unchanged.")
+candidate, then lexicographic); an empty query returns the candidates unchanged. `top` is
+`filter` stopping at the number of rows a UI can actually show, which is what makes
+ranking a whole project per keystroke affordable. `*fuzzy-scorer*` replaces the rules.")
 
-;; ---- the greedy subsequence match -------------------------------------------
-
-(defn- fuzzy-next (cand c i n)
-  "The index ≥ `i` of the next `c` (a 1-char string) in `cand`, or -1. Uses the native
-`index-of` rather than a per-char Brood recursion. (`n`, the length, is now implicit in
-`index-of`.)
-
-This used to claim the scan was \"the dominant cost of ranking\". It is not, and the claim
-cost real time: three separate fixes made the scan much cheaper (`index-of`'s `from` stopped
-copying the suffix, char↔byte conversion became O(1) via a cached char count, and
-`%str-index-of` stopped copying its haystack), and ranking 4000 repo-style paths moved only
-116 → 106 ms. Measured per phase over those same 4000 candidates: `match` 78 ms of a
-112 ms total, against ~1 ms each for `lower` and `string-length` across the whole list. So
-the cost is the **interpreted per-candidate work** — the subsequence walk and the scoring
-recursion — not the native search underneath it. Optimise there, and measure first."
-  (if (>= i n) -1 (index-of cand c i)))
-
-(defn- fuzzy-positions (qlow clow qi qn ci cn acc)
-  "The matched char indices (greedy, in order) of `qlow` within `clow`, or nil when
-`qlow` isn't a subsequence of `clow`. Both args are already lower-cased."
-  (if (>= qi qn)
-    (reverse acc)
-    (let (pos (fuzzy-next clow (string/char-at qlow qi) ci cn))
-      (if (< pos 0)
-        nil
-        (fuzzy-positions qlow clow (inc qi) qn (inc pos) cn (cons pos acc))))))
-
-;; ---- scoring ----------------------------------------------------------------
+;; ---- the rules --------------------------------------------------------------
 
 ; a match just after one of these is a word boundary
 (def- fuzzy-separators "-_/. ")
+
 (defn- fuzzy-upper? (ch)
   "True if 1-char string `ch` is an upper-case letter."
   (not (= (string/lower ch) ch)))
@@ -63,67 +48,355 @@ camelCase hump (an upper preceded by a non-upper)."
         (and (fuzzy-upper? (string/char-at cand pos)) (not (fuzzy-upper? prev)))))))
 (sig fuzzy-boundary? (string int -> bool))
 
-(defn- fuzzy-score-step (cand st pos)
-  "Fold step: add `pos`'s bonus to the running `{:score :prev}`."
-  (let (prev (get st :prev)
-        contiguous (and (not (nil? prev)) (= pos (inc prev)))
-        bonus (+ 1
-                (if (fuzzy-boundary? cand pos) 8 0)
-                (if contiguous 6 0)
-                (if (nil? prev) (- 0 (math/min 3 pos)) 0)))
-    ; small leading-offset penalty, first match only
-    {:score (+ (get st :score) bonus) :prev pos}))
-(sig fuzzy-score-step (string map int -> map))
+;; The four terms of the score. A match is worth something; starting a word is worth more;
+;; continuing the previous match is worth more again; and SKIPPING is worth less — that
+;; last one is not decoration, it is what stops a query smearing itself across a path.
+(def- fuzzy-match-score 1) ; being a match at all
+(def- fuzzy-boundary-bonus 8) ; this char starts a word
+(def- fuzzy-contiguous-bonus 6) ; this char directly follows the previous match
+(def- fuzzy-gap-penalty 3) ; opening a gap — any run of skipped chars
+(def- fuzzy-gap-extend-penalty 1) ; each further char skipped in that gap
+(def- fuzzy-lead-penalty 3) ; most the first match can be docked for starting late
 
-(defn- fuzzy-score (cand positions)
-  "The match score for `positions` within `cand` (higher = better)."
-  (get (fold positions {:score 0 :prev nil} (fn (st pos) (fuzzy-score-step cand st pos))) :score))
+(defn- fuzzy-gap-cost (gap)
+  "What skipping `gap` chars between two matched ones costs: nothing when they are
+adjacent, else opening the gap plus each further char skipped.
 
-;; ---- public -----------------------------------------------------------------
+This term is why a contiguous match wins. Without it the boundary bonus is pure profit, so
+a query spread across a path's segments collects one per segment and beats the file it
+names: `limits.ex` over a real project ranked `…/reports/it3b/submission.ex` (six
+boundaries, 73) ABOVE `…/moneyclub/limits.ex` (62) — scattering paid, because 8 > 6 and the
+distance between the hits cost nothing. Charging for distance is fzf's fix and it is the
+right one: the bonuses say what a good match looks like, this says what it costs to reach."
+  (if (<= gap 0)
+    0
+    (- 0 (+ fuzzy-gap-penalty (* fuzzy-gap-extend-penalty (dec gap))))))
+(sig fuzzy-gap-cost (int -> int))
 
-(defn- fuzzy-match-lc (qlow qn cand)
-  "Like `match` but with the query already lower-cased (`qlow`) and measured (`qn`),
-so a filter loop pays `(string/lower query)` / its length **once**, not per candidate. `cand` is
-still lowered here — the case-insensitive subsequence test needs the lower-cased candidate."
-  (let (positions (fuzzy-positions qlow (string/lower cand) 0 qn 0 (string/length cand) '()))
-    (if (nil? positions)
-      nil
-      {:score (fuzzy-score cand positions) :positions positions})))
+(defn- fuzzy-bonus (cand pos prev)
+  "What matching a query char at `pos` of `cand` is worth, given the previous match's
+position `prev` (nil for the first): 1 for being a match at all, +8 at a word boundary, +6
+directly after the previous match, less what the gap since the previous match cost — and on
+the first match a small penalty for starting late instead. THE scoring rule: `match` and
+`top` both score through here, so the library has one definition of \"better\" and
+redefining it moves every ranking at once."
+  (+ fuzzy-match-score
+    (if (fuzzy-boundary? cand pos) fuzzy-boundary-bonus 0)
+    (if (and (not (nil? prev)) (= pos (inc prev))) fuzzy-contiguous-bonus 0)
+    (if (nil? prev)
+      (- 0 (math/min fuzzy-lead-penalty pos))
+      (fuzzy-gap-cost (- pos (inc prev))))))
+(sig fuzzy-bonus (string int (or nil int) -> int))
+
+;; ---- the greedy walk --------------------------------------------------------
+;; One tail-recursive pass does the subsequence walk AND the scoring together. It is the
+;; hot loop of every completion UI — a whole candidate set goes through it per keystroke —
+;; so it allocates nothing per step and repeats no work it can hoist:
+;;
+;;   * the query is lowered and split ONCE per ranking (`fuzzy-prepare`), never per
+;;     candidate — the reason `*fuzzy-scorer*` is curried;
+;;   * the candidate's lowered form is the `index-of` haystack and the ORIGINAL is what the
+;;     boundary test reads (case is what a camelCase hump is made of);
+;;   * positions are consed as it goes, so a score and a highlight come out of the same
+;;     walk rather than out of two implementations of the same rules.
+;;
+;; A score-only walk beside a score-and-positions one measured 8% faster. Nowhere near
+;; enough to pay for stating the rules twice.
+;;
+;; `index-of` is the native scan: Brood has no O(1) char access, so a per-char Brood
+;; recursion here would be quadratic. Measured per phase, though, the scan is NOT the cost
+;; — the interpreted per-candidate work is (see `top`).
+
+(defn- fuzzy-walk (qchars qi qn clow cand ci prev score positions)
+  "`[score positions]` for the greedy match of prepared query `qchars` within `clow` (the
+lowered candidate), scored against `cand` (the original) — or nil when the query is not a
+subsequence of it."
+  (if (>= qi qn)
+    [score (reverse positions)]
+    (let (pos (index-of clow (nth qchars qi) ci))
+      (if (< pos 0)
+        nil
+        (fuzzy-walk qchars
+          (inc qi)
+          qn
+          clow
+          cand
+          (inc pos)
+          pos
+          (+ score (fuzzy-bonus cand pos prev))
+          (cons pos positions))))))
+
+(defn- fuzzy-prepare (query)
+  "The query lowered, as `[qchars qlow qn]`: an indexable vector of 1-char strings for the
+walk, the whole lowered string for the contiguous-run `index-of`, and the length. The
+once-per-ranking work the per-candidate walk must not repeat."
+  (let (qlow (string/lower query))
+    [(into [] (string/->list qlow)) qlow (string/length qlow)]))
+
+(defn- fuzzy-contiguous (qchars qlow qn clow cand)
+  "`[score positions]` for the query sitting in `cand` as ONE unbroken run, or nil when it
+does not appear that way. One native `index-of` to find the run, then the same walk from
+there — which, starting at the run, matches every query char adjacently.
+
+Why this exists: the walk is greedy and cannot backtrack, so it takes the earliest char it
+can and may never reach the run a reader meant. `limits.ex` against
+`lib/moneyclub/accounts/limits.ex` greedily matches l-i-m inside `lib/moneyclub` and then
+crawls, scoring the file BELOW ones that merely scatter — while the exact run sits right
+there in the name. A contiguous run is also what a person types when they know the file. The
+caller keeps whichever alignment scores higher, so this can only raise a candidate, never
+lower it, and it is paid only by candidates that already matched."
+  (let (at (index-of clow qlow))
+    (if (< at 0) nil (fuzzy-walk qchars 0 qn clow cand at nil 0 '()))))
+
+(defn- fuzzy-run (qchars qlow qn cand)
+  "`[score positions]` for one candidate against an already-prepared query, or nil — the
+better of the greedy alignment and the contiguous one (`fuzzy-contiguous`)."
+  (let (clow (string/lower cand)
+        greedy (fuzzy-walk qchars 0 qn clow cand 0 nil 0 '()))
+    (if (nil? greedy)
+      nil ; not a subsequence at all: no alignment exists, and no `index-of` is paid
+      (let (run (fuzzy-contiguous qchars qlow qn clow cand))
+        (if (and run (> (first run) (first greedy))) run greedy)))))
+
+;; ---- matching one candidate -------------------------------------------------
 
 (defn match (query cand)
   "`nil` if `query` isn't a case-insensitive subsequence of `cand`, else
 `{:score <int> :positions [i …]}`. The empty query matches anything (score 0) —
 handled directly, since its empty position list is indistinguishable from `nil`.
 
-    (fuzzy/match \"abc\" \"xAxbxC\")   → {:score 18 :positions (1 3 5)}
+For ONE candidate — the rows a UI actually draws, which need `:positions` to highlight the
+matched chars. To rank a whole set use `top`, which walks the same rules without building
+a map per candidate.
+
+    (fuzzy/match \"abc\" \"xAxbxC\")   → {:score 12 :positions (1 3 5)}
     (fuzzy/match \"zz\" \"abc\")   → nil"
   (if (= query "")
     {:score 0 :positions ()}
-    (fuzzy-match-lc (string/lower query) (string/length query) cand)))
+    (let ([qchars qlow qn] (fuzzy-prepare query)
+          r (fuzzy-run qchars qlow qn cand))
+      (if (nil? r) nil {:score (first r) :positions (second r)}))))
 (sig match (string string -> (or nil map)))
+
+;; ---- the scorer: the rules as a value you can replace -----------------------
+
+(defn scorer (query)
+  "A `(cand) -> score | nil` for `query` under the built-in rules — the query prepared
+once and closed over. The default `*fuzzy-scorer*`, and what a custom one replaces.
+
+Curried on purpose: ranking calls the inner function tens of thousands of times per
+keystroke, so everything that depends only on the query (lowering it, splitting it into
+chars) happens out here, once.
+
+    ((fuzzy/scorer \"fb\") \"foo-bar\")   → 13
+    ((fuzzy/scorer \"fb\") \"zz\")   → nil
+
+    ; the built-in rules, plus a nudge for what you opened recently
+    (binding (*fuzzy-scorer*
+               (fn (q) (let (base (fuzzy/scorer q))
+                         (fn (c) (let (s (base c)) (if (nil? s) nil (+ s (recency c))))))))
+      (fuzzy/top query files 20))"
+  (let ([qchars qlow qn] (fuzzy-prepare query))
+    (fn (cand) (let (r (fuzzy-run qchars qlow qn cand)) (if (nil? r) nil (first r))))))
+(sig scorer (string -> fn))
+
+(defdyn *fuzzy-scorer* scorer)
+;; How ranking scores a candidate: a `(query) -> (cand) -> score | nil`. Bind it to rank by
+;; your own rules — weight the boundary bonus differently, score a path's basename above
+;; its directories, prefer what you opened recently — and `top`/`filter` follow, live,
+;; everywhere in the image. `scorer` is the default and composes: wrap it, don't restate it.
+
+;; ---- ranking a whole set ----------------------------------------------------
+;; This is the per-keystroke pass, and at project scale (tens of thousands of paths, where
+;; a short query matches nearly all of them) it is where a completion UI lives or dies.
+;; Two things make it affordable without leaving Brood. Measured over 27k repo-style paths,
+;; where `filter` took 1183 ms:
+;;
+;;   1. TOP-K, NOT A SORT. A UI shows ~20 rows; sorting 26k matches to throw 26k of them
+;;      away was ~700 ms of that. `fuzzy-fold` keeps the best k instead: one int compare
+;;      rejects the common candidate, and nothing is allocated until one actually places.
+;;   2. ONE PASS, NOTHING PREPARED PER CANDIDATE. See `fuzzy-walk` above.
+;;
+;; Together: 1183 → 711 ms on that corpus and 469 → 194 ms on a realistic one, with
+;; identical results. What remains is the interpreter's own floor — roughly 0.35 µs per
+;; operation, against a handful of operations per candidate — so ranking is also SHARDED
+;; ACROSS PROCESSES past `*fuzzy-parallel-min*` candidates (`fuzzy-parallel`): 711 → 254 ms
+;; on eight (103 ms on the realistic one). Concurrency is the lever Brood has that a native
+;; rewrite would have skipped, and unlike that rewrite it leaves the rules above
+;; redefinable at runtime (ADR-357).
+
+(defn- fuzzy-worse? (score length cand worst-score worst-length worst-cand)
+  "True if `[score length cand]` loses to the worst entry currently kept. The reject test
+of the top-k fold, so it runs once per candidate: an int compare settles almost every one,
+and the key vector the sort wants is never built for a candidate that loses."
+  (cond
+    (< score worst-score) true
+    (> score worst-score) false
+    (> length worst-length) true
+    (< length worst-length) false
+    :else (> (compare cand worst-cand) 0)))
+(sig fuzzy-worse? (int int string int int string -> bool))
+
+(defn- fuzzy-key (score cand)
+  "The sort key `[(- score) length cand]` — best score first, then the shorter candidate,
+then lexicographic."
+  [(- 0 score) (string/length cand) cand])
+
+(defn- fuzzy-place (best k score cand)
+  "`best` (ascending by key) with `cand` placed and the list re-capped to `k`. Only reached
+by a candidate that beat the worst one kept, which is rare once the first k are in."
+  (take (sort-by (cons [(fuzzy-key score cand) cand] best) first) k))
+
+(defn- fuzzy-kept (best)
+  "The fold state for a kept list: its count, the worst entry's key unpacked into scalars
+(so the reject test reads them rather than rebuilding them), and the list itself."
+  (let (key (first (last best)))
+    [(count best) (- 0 (nth key 0)) (nth key 1) (nth key 2) best]))
+
+(defn- fuzzy-fold (score-of cands k)
+  "The best `k` candidates by `score-of`, best first — the bounded fold."
+  (map (nth (fold cands
+              [0 nil nil nil ()]
+              (fn (state cand)
+                (let (score (score-of cand))
+                  (cond
+                    (nil? score) state
+                    (< (nth state 0) k) (fuzzy-kept (fuzzy-place (nth state 4) k score cand))
+                    (fuzzy-worse? score
+                      (string/length cand)
+                      cand
+                      (nth state 1)
+                      (nth state 2)
+                      (nth state 3))
+                      state
+                    :else (fuzzy-kept (fuzzy-place (nth state 4) k score cand))))))
+         4)
+    second))
+
+(defn- fuzzy-all (score-of cands)
+  "Every match by `score-of`, best first — decorate-sort-undecorate, for an unbounded
+`filter`. (The bounded fold is the wrong shape with no k: every candidate would place, and
+placing re-sorts the kept list.)"
+  (map (sort-by (fold cands
+                  '()
+                  (fn (acc cand)
+                    (let (score (score-of cand))
+                      (if (nil? score) acc (cons [(fuzzy-key score cand) cand] acc)))))
+         first)
+    second))
+
+;; ---- sharding a big ranking across processes --------------------------------
+;; Ranking is a fold over independent candidates, which is the shape that shards. Each
+;; worker gets a slice and returns only its own best k, so at most `workers × k` come back
+;; for the caller to merge — the same fold over a few hundred, and the answer is identical
+;; to ranking the whole set in one process.
+;;
+;; The workers are spawned per ranking rather than pooled: a shard is only meaningful for
+;; one candidate set, `spawn` plus the slice measured ~3 ms for 27k candidates against the
+;; ~400 ms it parallelises, and a pool would need invalidating every time the set changed —
+;; state to get wrong for no gain.
+;;
+;; Two things this has to get right, because the caller is an editor's loop and its mailbox
+;; is full of other traffic. The reply carries a `ref` and the receive selects on it, so
+;; nothing else is consumed or reordered. And a shard that does not answer in time is
+;; KILLED before its slice is ranked in the caller instead — a straggler replying later
+;; would leave a message in that mailbox which nothing will ever read. A worker runs a pure
+;; fold, so this is only reachable through a `*fuzzy-scorer*` that throws; the ranking then
+;; costs time and still finishes, rather than hanging the loop.
+
+(defdyn *fuzzy-parallel-min* 4000)
+;; Candidate sets bigger than this rank across `*fuzzy-workers*` processes; smaller ones
+;; rank inline, where spawning would cost more than it saves. Set it huge to keep ranking
+;; single-process.
+
+(defdyn *fuzzy-workers* 8)
+;; How many processes a big ranking shards across. Eight measured best on a 28-core box —
+;; past that the per-shard fixed cost grows faster than the parallelism pays back.
+
+(defdyn *fuzzy-worker-timeout-ms* 1000)
+;; How long to wait for a shard before killing that worker and ranking its slice here. A
+;; ceiling on the damage a wedged worker can do, not a tuning knob.
+
+(defn- fuzzy-shards (cands n)
+  "`cands` split into `n` slices of nearly equal size."
+  (let (per (inc (math/quot (count cands) n)))
+    (map (range n) (fn (i) (into [] (take (drop cands (* i per)) per))))))
+
+(defn- fuzzy-worker (parent tag index score-of shard k)
+  "A shard's own best `k`, sent back tagged with `tag` and its shard `index`."
+  (send parent [:fuzzy-ranked tag index (fuzzy-fold score-of shard k)]))
+
+(defn- fuzzy-abandon (pending score-of k acc)
+  "Kill the workers that never answered and rank their slices here — `pending` is
+`{index -> [shard pid]}`. The kill is what keeps a late reply out of the caller's mailbox;
+the local ranking is what keeps the ANSWER whole."
+  (fold (map (seq pending) second)
+    acc
+    (fn (a entry)
+      (do (exit (second entry) :kill) (append a (fuzzy-fold score-of (first entry) k))))))
+
+(defn- fuzzy-gather (tag pending acc score-of k)
+  "The replies tagged `tag`, appended to `acc`. `pending` is `{index -> [shard pid]}` for
+the shards not yet in; the receive selects on `tag`, so other traffic in this process's
+mailbox is left where it is."
+  (if (empty? pending)
+    acc
+    (receive
+      ([:fuzzy-ranked ^tag index ranked] (fuzzy-gather tag
+                                           (dissoc pending index)
+                                           (append acc ranked)
+                                           score-of
+                                           k))
+      (after *fuzzy-worker-timeout-ms* (fuzzy-abandon pending score-of k acc)))))
+
+(defn- fuzzy-parallel (score-of cands k)
+  "The best `k` of `cands`, ranked across `*fuzzy-workers*` processes and merged here."
+  (let (shards (into [] (fuzzy-shards cands *fuzzy-workers*))
+        tag (ref)
+        me (self)
+        ;; `fold`, not `map`: every worker must have been SPAWNED before the gather starts
+        ;; waiting on it, and a lazy map would run the spawns inside the receive.
+        pending (fold (range (count shards))
+                  {}
+                  (fn (acc i)
+                    (let (shard (nth shards i))
+                      (assoc acc i [shard (spawn (fuzzy-worker me tag i score-of shard k))]))))
+        partial (fuzzy-gather tag pending '() score-of k))
+    (fuzzy-fold score-of partial k)))
+
+(defn top (query cands &optional (limit nil))
+  "The best `limit` candidates in `cands` for `query`, best score first — the ranking
+`filter` does, stopping at the `limit` a completion UI can actually show. `nil` or a limit
+≤ 0 means all of them. Ties: shorter candidate, then lexicographic. An empty `query` keeps
+`cands` in their given order. Scores through `*fuzzy-scorer*`, and shards across processes
+past `*fuzzy-parallel-min*` candidates.
+
+Prefer this over `filter` whenever the caller shows a fixed number of rows: the best 20 of
+27k matches is a bounded fold, sorting all 27k to throw away 26,980 of them is not.
+
+    (fuzzy/top \"ab\" [\"axb\" \"ab\" \"zz\"] 1)   → (\"ab\")"
+  (let (bounded (and (not (nil? limit)) (> limit 0))
+        n (if bounded (count cands) 0))
+    (cond
+      (= query "") (if bounded (take cands limit) cands)
+      (not bounded) (fuzzy-all (*fuzzy-scorer* query) cands)
+      (> n *fuzzy-parallel-min*) (fuzzy-parallel (*fuzzy-scorer* query) cands limit)
+      ;; The bounded fold only pays once the sort it replaces is mostly waste. Measured
+      ;; (sort+take vs fold, best-20 of a repo-like corpus): 200 → 1.7/3.2 ms, 1000 →
+      ;; 7.4/11.0, 2000 → 14.1/16.8, 4000 → 29.6/27.5, 16000 → 118.7/93.7 ms. So the
+      ;; crossover is around a hundred candidates per row shown — under that the native
+      ;; sort beats an interpreted fold, over it the fold pulls away. A ratio, not a size:
+      ;; what matters is how many candidates get sorted per row actually displayed.
+      (> n (* 100 limit)) (fuzzy-fold (*fuzzy-scorer* query) cands limit)
+      :else (take (fuzzy-all (*fuzzy-scorer* query) cands) limit))))
+(sig top (string seqable &optional (or nil int) -> seqable))
 
 (defn filter (query cands)
   "The candidates in `cands` that fuzzily match `query`, best score first (ties:
 shorter candidate, then lexicographic). An empty `query` returns `cands` unchanged.
 
-Lowers `query` **once** (not once per candidate), and sorts by a **precomputed** key —
-decorate-sort-undecorate — so `sort-by`'s key-fn is an O(1) field read rather than a
-per-comparison rebuild of `[(-score) len text]` (a vector alloc + map lookup + length).
-That rebuild dominated ranking large candidate sets (thousands of project files).
-
     (fuzzy/filter \"ab\" [\"axb\" \"zz\"])   → (\"axb\")"
-  (if (= query "")
-    cands
-    (let (qlow (string/lower query)
-          qn (string/length query)
-          decorated (fold cands
-                      '()
-                      (fn (acc c)
-                        (let (m (fuzzy-match-lc qlow qn c))
-                          (if (nil? m)
-                            acc
-                            (cons [[(- 0 (get m :score)) (string/length c) c] c] acc))))))
-      (map (sort-by decorated first) second))))
+  (top query cands nil))
 ;; `cands` and the result are `seqable` (empty query returns `cands` as-is, else a ranked
 ;; list) — the domain checks the argument without false-flagging a vector caller.
 (sig filter (string seqable -> seqable))

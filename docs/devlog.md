@@ -13719,3 +13719,78 @@ cap — it is the KI-13 safety net alone), and `check_file` reports a `deftype` 
 comes back shapeless at its declaration instead of letting it vanish. bedit's `model`
 carries `:text-drag` typed, and the pane the drag reads is a whole `pane` now, not a
 two-field literal the deftype had been too collapsed to reject.
+
+## 2026-09-16 — `fuzzy/top`: ranking bounded by the display, sharded across processes (ADR-357)
+
+bedit's `C-x p f` on a 27,310-file project cost **~1.1 s per keystroke**. Measured per phase
+over 27k repo-style paths, `std/fuzzy`'s `filter` split as: subsequence walk 74 ms, scoring
+the matches +305 ms, sorting 26k matches to show 20 of them +700 ms. The editor's
+incremental narrowing saved nothing, because what it narrows is the match set and a short
+query matches nearly everything in a project — `app` matched 26,518 of 27,310.
+
+**The kernel we didn't keep.** A native `%fuzzy-rank` (walk + score + top-k in one Rust
+pass) ran the same corpus in 2 ms — 400x — and passed an equivalence test against a Brood
+reference over a corpus. It was rejected downstream, correctly: it freezes the scoring rules
+into the binary and states them twice, in a system whose editor is supposed to be
+reprogrammable from inside itself. The patch is not in the tree; the measurement that would
+justify it is, in a comment beside the code that does without it.
+
+**What replaced it, all in Brood.** One `fuzzy-walk` over one `fuzzy-bonus` now serves both
+`match` (with positions) and ranking (without a map per candidate) — a score-only second
+walk measured 8%, nowhere near the price of stating the rules twice. `fuzzy/top query cands
+limit` keeps the best `limit` in a fold that rejects on an int compare and allocates nothing
+until a candidate places; below ~100 candidates per row shown the native sort still wins, so
+`top` picks between them. Past `*fuzzy-parallel-min*` (4000) it shards across
+`*fuzzy-workers*` (8) processes, each returning its own best k, merged by the same fold —
+spawned per ranking, not pooled (`spawn` + slice is ~3 ms against the ~400 ms it splits),
+tagged with a `ref` so the receive is selective in a process with a live mailbox, and with a
+shard that misses `*fuzzy-worker-timeout-ms*` ranked in the caller instead. 1183 → 711 ms
+single-process, 254 ms on eight; 469 → 103 ms on a realistic corpus; identical results.
+(Those figures include ADR-359, below, which landed the same day and costs a little.)
+
+**And the rules stayed a value.** `*fuzzy-scorer*` is a `(query) -> (cand) -> score | nil`
+— curried, because the inner function runs tens of thousands of times per keystroke and
+query preparation must not. Bind it and every completion UI in the image re-ranks live,
+including the sharded path: the caller resolves the scorer and ships the closure, since a
+dynamic binding does not reach a spawned child. That is more redefinable than before, not
+less, which was the whole argument against the kernel.
+
+Downstream, bedit passes the cap it will display into its one ranking seam and drops the
+narrowing cache — capping made it not just pointless but wrong (the cache would hold the
+capped twenty, and narrowing from those loses what belongs in the next twenty).
+
+**And the tagged-result idiom, all the way through.** Three more things stood between
+hatch's `oidc/complete` and a `match` that reads the `:ok` arm's positions: the union cap
+of four terms hulled its five `[:error …]` arms with the `:ok` one into a single tuple
+(eight now — the pairwise work is still trivial); `tagged_apart` gave up when two shapes'
+arities differed, so `[:ok claims]` beside `[:error status why]` was merged by length
+into a `vector[2..3]` (a KEYWORD at a position tells them apart now whatever the arity —
+a string does not, or a list builder's `(list "x")` beside `(list string "x")` never
+converges); and the INFERENCE's `let` bound plainly, without the path alias the walk
+records, so a function whose return re-tags a matched result inferred `(tuple :ok (or 502
+map) any)`. It binds through `let_bind_scope` — the one rule — now. hatch and
+store-postgres carry the ratchet at zero like bedit and hive.
+
+## 2026-09-16 — The fuzzy score paid for scattering (ADR-359)
+
+With find-file finally fast enough to use on a 27k-file project, the ranking turned out to
+be wrong — and wrong in a way the slowness had hidden. Typing `limits.ex` listed three files
+whose directories merely contain the letters above `lib/moneyclub/limits.ex`.
+
+Two missing rules, both general. **Gaps were free**: +8 for starting a word, +6 for
+continuing a match, nothing for the characters skipped between them — so a query smeared
+across six path segments banked six boundary bonuses (73) and beat the contiguous run (63).
+Scattering paid. **And greedy could not reach the run**: the walk takes the earliest char it
+can, so `l`,`i`,`m` went into `lib/moneyclub/` and the exact `limits.ex` in the name was
+never seen — which is how `…/accounts/limits.ex` ended up below files that only scatter.
+
+Now `fuzzy-gap-cost` charges 3 to open a gap and 1 per further char (fzf's shape), and
+`fuzzy-contiguous` re-scores a candidate aligned to the literal run when `index-of` finds
+one, keeping the better of the two alignments — paid only by candidates that already
+matched, and never able to lower a score. 194 → 254 ms over 27k paths sharded. The scores
+in the docstrings moved with the rules (`match "abc" "xAxbxC"` is 12, not 18), and `fb` now
+ranks `afb` — which holds `fb` whole — above `foobar`, which spreads it.
+
+The thing worth keeping: making it fast is what made the ranking legible. Nobody types nine
+characters into a list that takes a second per keystroke, so nobody had seen what it did
+with them.

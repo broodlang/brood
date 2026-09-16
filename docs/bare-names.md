@@ -53,7 +53,7 @@ Operators — arithmetic, comparison and the reader's own punctuation. Bare by c
 - `>`
 - `>=`
 
-## dynamic (62)
+## dynamic (66)
 
 Dynamic variables (`defdyn`) — earmuffed, so they cannot be mistaken for ordinary bindings, and bare because `binding` sites read better unqualified. The largest group and the least contentious; note how many are one subsystem's configuration (`*project-*`, `*test-*`, `*repl-*`).
 - `*comment-kinds*`
@@ -67,6 +67,10 @@ Dynamic variables (`defdyn`) — earmuffed, so they cannot be mistaken for ordin
 - `*features*`
 - `*format-headers-extra*`
 - `*format-pair-body*`
+- `*fuzzy-parallel-min*`
+- `*fuzzy-scorer*`
+- `*fuzzy-worker-timeout-ms*`
+- `*fuzzy-workers*`
 - `*http-max-head-bytes*`
 - `*http-max-response-bytes*`
 - `*lineedit-keymap*`
