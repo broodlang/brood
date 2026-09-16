@@ -2489,14 +2489,14 @@ fn linmap_rename_self(heap: &mut Heap, form: Value, name: value::Symbol, slow: V
             for &a in &items[1..] {
                 c.push(linmap_rename_self(heap, a, name, slow));
             }
-            return heap.list(c);
+            return rebuild_list(heap, form, c);
         }
     }
     let out: Vec<Value> = items
         .iter()
         .map(|&it| linmap_rename_self(heap, it, name, slow))
         .collect();
-    heap.list(out)
+    rebuild_list(heap, form, out)
 }
 
 /// The `E` of `(+ (get ACC KEY 0) E)` / `(+ E (get ACC KEY 0))` when `value` is that form —
@@ -2581,8 +2581,8 @@ fn linmap_rewrite_form(
                 for &a in &items[2..] {
                     c.push(linmap_rewrite_form(heap, a, name, inner, acc));
                 }
-                let mutate = heap.list(c);
-                return heap.list(vec![value::sym(kw::DO), mutate, items[1]]);
+                let mutate = rebuild_list(heap, form, c);
+                return rebuild_list(heap, form, vec![value::sym(kw::DO), mutate, items[1]]);
             }
             let read = if value::symbol_is(h, kw::MAP_GET) {
                 Some(kw::TABLE_GET)
@@ -2596,7 +2596,7 @@ fn linmap_rewrite_form(
                 for &a in &items[2..] {
                     c.push(linmap_rewrite_form(heap, a, name, inner, acc));
                 }
-                return heap.list(c);
+                return rebuild_list(heap, form, c);
             }
             // The idiomatic spellings the probe admits through `LinIdiom` (inline.rs):
             // `(get acc k [d])` is the read `(%table-get acc k d)`, and the tally
@@ -2609,14 +2609,22 @@ fn linmap_rewrite_form(
                     Some(&d) => linmap_rewrite_form(heap, d, name, inner, acc),
                     None => Value::nil(),
                 };
-                return heap.list(vec![value::sym(kw::TABLE_GET), items[1], key, default]);
+                return rebuild_list(
+                    heap,
+                    form,
+                    vec![value::sym(kw::TABLE_GET), items[1], key, default],
+                );
             }
             if value::symbol_is(h, "assoc") && items.len() == 4 {
                 if let Some(addend) = linmap_fused_addend(heap, acc, items[2], items[3]) {
                     let key = linmap_rewrite_form(heap, items[2], name, inner, acc);
                     let addend = linmap_rewrite_form(heap, addend, name, inner, acc);
-                    let mutate = heap.list(vec![value::sym(kw::TABLE_ADD), items[1], key, addend]);
-                    return heap.list(vec![value::sym(kw::DO), mutate, items[1]]);
+                    let mutate = rebuild_list(
+                        heap,
+                        form,
+                        vec![value::sym(kw::TABLE_ADD), items[1], key, addend],
+                    );
+                    return rebuild_list(heap, form, vec![value::sym(kw::DO), mutate, items[1]]);
                 }
             }
         }
@@ -2626,7 +2634,7 @@ fn linmap_rewrite_form(
             for &a in &items[1..] {
                 c.push(linmap_rewrite_form(heap, a, name, inner, acc));
             }
-            return heap.list(c);
+            return rebuild_list(heap, form, c);
         }
         // `(quote …)` is inert DATA, never evaluated — rewriting inside it corrupts the
         // datum instead of the program. `(io/puts '(%map-get acc 1))` printed
@@ -2641,7 +2649,7 @@ fn linmap_rewrite_form(
         .iter()
         .map(|&it| linmap_rewrite_form(heap, it, name, inner, acc))
         .collect();
-    heap.list(out)
+    rebuild_list(heap, form, out)
 }
 
 /// Rebuild a form expanding only `items[start..]` (the call's body/argument tail),

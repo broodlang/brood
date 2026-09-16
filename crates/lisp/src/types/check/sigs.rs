@@ -3592,11 +3592,22 @@ pub(super) fn live_private_functions(
 ) -> Option<HashMap<Symbol, usize>> {
     let targets: HashSet<Symbol> = candidates.keys().copied().collect();
     let first = collect_private_sites(heap, forms, &targets, candidates, &HashMap::new(), ctx)?;
+    // A self-call is not a site that seeds anything: the least fixpoint starts every
+    // parameter at ⊥ and a self-call's arguments are typed under those very parameters,
+    // so a function whose ONLY sites are its own recursion derives ⊥ for every parameter,
+    // its body reads as dead code, and nothing in it — not even `(string/length 5)` —
+    // is ever reported (2026-09-17). Its callers are not all here (a public function's
+    // never are; a private one's would be a bug of another kind), so it is site-less.
     Some(
         first
             .sites
             .iter()
-            .filter(|(name, sites)| !first.escaped.contains(name) && !sites.is_empty())
+            .filter(|(name, sites)| {
+                !first.escaped.contains(name)
+                    && sites
+                        .iter()
+                        .any(|site| !matches!(site, Site::Call(_, _, Some(w)) if w == *name))
+            })
             .map(|(&name, sites)| (name, sites[0].arity()))
             .collect(),
     )

@@ -612,6 +612,39 @@ fn a_private_function_is_walked_under_what_its_callers_pass() {
     );
 }
 
+/// A function whose only sites are its own self-calls has no base for the derivation:
+/// the least fixpoint seeds every parameter at ⊥ and a self-call's arguments are typed
+/// under those parameters, so it derived ⊥ throughout, its body read as dead code, and
+/// `(string/length 5)` inside it was never reported — while the same body with one
+/// outside caller, or with no self-call at all, was. Such a function is site-less: its
+/// parameters are unknown, and its body is walked like any other.
+#[test]
+fn a_function_reached_only_through_itself_is_not_derived() {
+    for shape in [
+        // the lint in the self-call's own argument
+        "(defn w (xs acc) (if (empty? xs) acc (w (rest xs) (+ acc (string/length 5)))))",
+        // …beside the self-call in the recursive branch
+        "(defn w (xs) (if (empty? xs) 0 (do (string/length 5) (w (rest xs)))))",
+        // …and private, where a base case that nobody calls is the same shape
+        "(defmodule t)\n(defn- w (xs) (if (empty? xs) 0 (do (string/length 5) (w (rest xs)))))",
+    ] {
+        let ws = file_warnings(shape);
+        assert!(
+            ws.iter()
+                .any(|w| w.contains("string/length: argument 1 expects string, got 5")),
+            "{shape}: {ws:?}"
+        );
+    }
+    // The derivation itself is untouched where a real caller seeds it.
+    let ws = file_warnings_mode(
+        "(defmodule t)\n\
+         (defn- w (xs acc) (if (empty? xs) acc (w (rest xs) (+ acc 1))))\n\
+         (defn pub () (w (list 1 2) 0))",
+        true,
+    );
+    assert!(ws.is_empty(), "{ws:?}");
+}
+
 #[test]
 fn a_private_functions_return_is_read_under_its_callers() {
     // Ten-deep in `json`, three-deep here: the index stays `int` through the chain and
