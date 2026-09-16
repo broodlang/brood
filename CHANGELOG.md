@@ -4,6 +4,15 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## v0.29.2 — `markdown/->html` is a core module
+
+**The Markdown renderer leaves the doc generator** (ADR-356): `docs/markdown->html` is
+`markdown/->html`, in `std/markdown.blsp`, present on every runtime. The hosted registry
+renders package READMEs with it at request time, and a shipped app's runtime does not carry
+`docs` — the deploys had been working only because the Docker build ships more than its
+command claims (workspace feature unification), while `make install`'s embedded runtime is
+genuinely lean and could not bundle hive at all. The rename ledger carries the old name.
+
 ## v0.29.1 — `nest release` boots an app whose modules spawn at load again
 
 **A refer-all no longer mistakes another process's finishing load for a cycle** (KI-147).
