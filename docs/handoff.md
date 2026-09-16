@@ -10,6 +10,30 @@ needing one is queued in [`perf-handoff.md`](perf-handoff.md) instead — curren
 high-priority item: whether KI-114's `as_f64_pair` holds the closure KI-109 got from the
 promotion it constrained.
 
+## 2026-09-16 — the tier audit is a gate; what to do next
+
+Since the 09-15 note below: the column was refreshed at 0.29.0 (`regex` −34%, ADR-353), and a
+sweep of every benchmark row under `BROOD_JIT_BAIL_TRACE` found the rest of the KI-132 class —
+`second` latched on `http`/`supervisor` (inline `first`/`rest` deopted for every non-pair), and
+json's `num-end`/`object-acc` never lowered (a dead block after a tail `SelfCall` was emitted
+into a live join). Both fixed, KI-148. **`make tier-audit`** now runs that sweep and fails on
+any latch or lowering bug (in `make green-all`); run it after any JIT change — every other
+gate is a value gate, and this class is right-but-slow.
+
+**Open watch: a checker verdict that depends on the file LIST (KI-149).** A bare project-wide
+`nest check` reports `unused private function: use-a` in `tests/lazy_load_test.blsp`; CI's
+explicit-file invocation (`std/**/*.blsp tests/**/*.blsp examples/**/*.blsp`) reports zero
+on the same tree. Present at `c1647db8` before any of today's changes. The KI-137 class
+(a verdict differing between two lists), this time on the unused-private lint rather than
+an inferred return.
+
+**Next, in order:** (1) lazy error traces — `errors-deep` is 7.5× Elixir and went +72% at
+0.27.0 when native frames started carrying `:trace`; capture frame identities at throw and
+materialise only when a `catch` reads them (one session, measurable on `errors`/`errors-deep`
+with `make ab --floor`). (2) The call protocol — bintree/nqueens/pipeline at 5–8× Elixir, ~50%
+of `bintree` is trampoline + frame plumbing (`docs/compute-frontier.md`). (3) The process
+floor — M2 shared IC tables (`docs/runtime-frontier.md`), the `spawn-live` lever.
+
 ## 2026-09-15 evening — what changed, and what to do next (read with the 09-13 queue below)
 
 The benchmark column was refreshed at v0.28.0 (`brood-benchmarks` `05139cc`/`09945c2`, every
