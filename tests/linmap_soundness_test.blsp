@@ -24,6 +24,13 @@
 ;;;      `crates/lisp/tests/linmap_idiom.rs` pins that the rewrite actually FIRES on each
 ;;;      shape (and declines the ones it must), by inspecting the expansion.
 ;;;
+;;;   4. (2026-09-16) The SEED is the one thing the linearity proof cannot see. The wrapper
+;;;      copies the accumulator's input map into its table, and a table cannot hold every
+;;;      value a map can — `(lm-idiom '(:a) {:r <rope>})` raised `cannot send a rope` with the
+;;;      rewrite on and returned the map with it off. `%table-from-map` now answers nil for
+;;;      such a seed (and for a record, whose misses consult `Lookup`), and the wrapper runs
+;;;      an unrewritten copy of the loop. The cases below seed with each such value.
+;;;
 ;;; Every test asserts the value the fold should produce; each is checked against the
 ;;; disabled path in CI simply by the suite running under both engines, and by hand with
 ;;; `BROOD_LINMAP=0`, which must agree.
@@ -74,6 +81,14 @@
 ;; A constant key, so the seed's value under it is what `+` sees.
 (defn lm-idiom-const (i acc)
   (if (>= i 3) acc (lm-idiom-const (+ i 1) (assoc acc :x (+ (get acc :x 0) 9223372036854775807)))))
+
+;; A record whose misses go through `Lookup`: the answer for an absent key is the ability's,
+;; and a table would answer nil — so a tally seeded with one must run the loop as written.
+(defrecord lm-counter (hits))
+(impl Lookup
+  lm-counter
+  (lookup-get [c k] (if (= k :hits) (get c :hits) 100))
+  (lookup-keys [c] (list :hits)))
 
 ;; Quoted data alongside a qualifying accumulator fold.
 (defn lm-quoted (xs acc)
@@ -127,6 +142,34 @@
     (assert= (* 3 9223372036854775807) (get (lm-idiom-const 0 {}) :x))
     ;; A non-number under the key is `+`'s own error, naming `+`.
     (assert-error "+: expected number" (lm-idiom '(:a) {:a "s"})))
+
+  (test "a seed a table cannot hold runs the loop as written"
+    ;; A rope, a builtin and a lazy view cannot be sent, so they cannot be table values.
+    (let (r (text/from-string "x"))
+      (assert= {:r r :a 2} (lm-idiom '(:a :a) {:r r}))
+      (assert= 2 (get (lm-idiom '(:a :a) {:r r}) :a))
+      (assert= :rope (type-of (get (lm-idiom '(:a) {:r r}) :r))))
+    (let (out (lm-idiom '(:a) {:f string/length}))
+      (assert= 1 (get out :a))
+      (assert= 2 ((get out :f) "hi")))
+    (let (out (lm-idiom '(:a :b) {:v (seq/lmap (list 0 1 2) inc)}))
+      (assert= 1 (get out :a))
+      (assert= (list 1 2 3) (seq (get out :v))))
+    ;; The plain shape still takes the table path — the split is visible only as speed,
+    ;; so pin that a plain seed's result is a map, not a table, either way.
+    (assert= :map (type-of (lm-idiom '(:a) {:b 1}))))
+
+  (test "a record seed keeps its Lookup answers"
+    ;; `get` consults `Lookup` only when the map lookup answers nil — so the tally's
+    ;; `(get c :zz 0)` never reaches it (the default is 0) and counts from 0 either way,
+    ;; while the 2-arity `(get acc :never)` base case is 100 through `Lookup`, where a table
+    ;; would have answered nil. The result is still the record (its `:__id__` kept).
+    (let (out (lm-idiom '(:zz :zz) (lm-counter 5)))
+      (assert= 2 (get out :zz))
+      (assert= 5 (get out :hits))
+      (assert= (lm-counter 5) (dissoc out :zz)))
+    (assert= 100 (lm-idiom-get2 0 (lm-counter 5)))
+    (assert= nil (lm-idiom-get2 0 {:hits 5})))
 
   (test "quoted data is left alone by the source rewrite"
     (let (out (lm-quoted '(:a) {}))

@@ -435,9 +435,11 @@ scope. Recognised categories today: **`:non-tail-recursion`**,
 call-site argument the wrapped code deliberately violates), **`:unbound`** (a name
 bound only at runtime), **`:unrequired`** (ADR-189 — a qualified `mod/name` whose
 module the file deliberately reaches via another require, e.g. a circular dependency
-that can't `(require 'mod)` at the top level), **`:deprecated`** (ADR-283), and
-**`:discarded-catch`** (a `(catch e nil)` whose nothing is genuinely the
-answer — read by `check/discarded_catch.rs` on the un-expanded forms), and
+that can't `(require 'mod)` at the top level), **`:deprecated`** (ADR-283), **`:discarded-catch`** (a `(catch e nil)` whose nothing is genuinely the
+answer — read by `check/discarded_catch.rs` on the un-expanded forms),
+**`:generated`** (the compiler's own copy of code it checks elsewhere — the linear-map
+rewrite wraps the unrewritten loop it keeps behind its seed check in one, ADR-360; the
+subtree is not walked at all, so never write it by hand), and
 **`:duplicate-def`** (one file binding the same top-level name twice in one module — the
 later definition silently replaces the earlier; wrap a deliberate override, read on the
 un-expanded forms like the sig collector). An unrecognised

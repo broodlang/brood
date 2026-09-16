@@ -360,6 +360,29 @@ fn check_allow_unbound_still_silences_an_error_testing_body() {
     );
 }
 
+/// `:generated` is the compiler's marker for a copy of code it checks elsewhere (the
+/// linear-map rewrite's unrewritten loop, ADR-360): the subtree is not walked at all.
+/// Pinned against a body every other category would still lint — an unbound name and a
+/// wrong-typed argument — so the skip is the whole subtree, not one lint's suppression.
+#[test]
+fn check_allow_generated_skips_the_subtree_entirely() {
+    let body = "(do (definitely-not-bound 1) (math/abs \"s\"))";
+    assert!(
+        !warnings(body).is_empty(),
+        "the body must lint on its own, or this test proves nothing"
+    );
+    assert!(warnings(&format!("(check-allow :generated {body})")).is_empty());
+    // …while the linear-map split's wrapper still resolves the copy it calls: the def
+    // inside the marker stays a definition for the rest of the file.
+    let file =
+        "(check-allow :generated (defn gen-copy__1 (x) x))\n(defn use-it () (gen-copy__1 1))";
+    assert!(
+        !file_warnings(file).iter().any(|w| w.contains("unbound")),
+        "{:?}",
+        file_warnings(file)
+    );
+}
+
 #[test]
 fn covers_the_other_signed_primitives() {
     assert!(warnings("(math/mod 7 3)").is_empty());

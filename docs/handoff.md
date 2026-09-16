@@ -10,6 +10,14 @@ needing one is queued in [`perf-handoff.md`](perf-handoff.md) instead — curren
 high-priority item: whether KI-114's `as_f64_pair` holds the closure KI-109 got from the
 promotion it constrained.
 
+## 2026-09-17 — Go column published; the linmap seed hole closed (KI-152)
+
+brood-benchmarks `50bca49`: eight languages, Go's first column (1.8× C on the 15-row
+aggregate, between C and .NET; `bench/go/README.md`), brood v0.30.0's idiomatic
+`wordcount`/`persistent-map` at the primitive's speed. Then KI-152 (below the 09-16 note):
+the rewrite's seed check + the unrewritten copy under `(check-allow :generated …)`. Next
+wins on the linmap seam unchanged from the 09-16 note; A4 of the call convention after.
+
 ## 2026-09-16 night — the idiomatic tally is fast (ADR-360, KI-151); the Go column is next
 
 The benchmark ports were reviewed for idiom and the two Brood rows that called

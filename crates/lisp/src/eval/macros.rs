@@ -2337,15 +2337,24 @@ fn rebuild_list(heap: &mut Heap, original: Value, items: Vec<Value>) -> Value {
 /// linear (checked by `linmap_probe`), rewrite it to
 ///
 /// ```text
-/// (do (def INNER (fn (P…) BODY'))                ; in-place table loop
-///     (def NAME  (fn (P…) (table-snapshot (INNER … (%table-from-map ACC) …)))))
+/// (do (%lint-allow :generated (def SLOW (fn (P…) BODY[NAME→SLOW])))  ; the loop as written
+///     (def INNER (fn (P…) BODY'))                  ; in-place table loop
+///     (def NAME  (fn (P…) (let (t (%table-from-map ACC))
+///                           (if t (table-snapshot (INNER … t …)) (SLOW …))))))
 /// ```
 ///
 /// where `BODY'` swaps the self-recursion head `NAME→INNER` and every whitelisted
 /// map op on the accumulator to its in-place `table-*` op. The inner loop builds a
 /// private table (seeded once by the wrapper, frozen once on return), so the
-/// per-update path-copy is gone with no per-iteration cost. Returns the replacement,
-/// or `None` to leave the `def` unchanged. `items` is the expanded `def` form.
+/// per-update path-copy is gone with no per-iteration cost. `%table-from-map` answers
+/// `nil` for a seed a table cannot stand in for — a value a table cannot hold (a rope,
+/// a builtin, a lazy view), or a record, whose misses consult `Lookup` — and the wrapper
+/// then runs `SLOW`, the loop exactly as the author wrote it (self-recursion re-pointed
+/// at itself, nothing else touched). Before that copy existed (2026-09-16) a tally seeded
+/// with `{:r <rope>}` raised `cannot send a rope` with the rewrite on and returned the
+/// map with it off; the rewrite has to be unobservable on EVERY input, and the seed is
+/// the one thing the linearity proof cannot see. Returns the replacement, or `None` to
+/// leave the `def` unchanged. `items` is the expanded `def` form.
 fn linmap_split_def(heap: &mut Heap, items: &[Value]) -> Option<Value> {
     if items.len() != 3 {
         return None;
@@ -2404,15 +2413,33 @@ fn linmap_split_def(heap: &mut Heap, items: &[Value]) -> Option<Value> {
     let inner_fn = heap.list(inner_fn);
     let inner_def = heap.list(vec![value::sym(kw::DEF), inner_val, inner_fn]);
 
+    // The loop as written, for a seed the table cannot stand in for.
+    let slow_val = value::gensym(&format!("{}/linmap-slow", value::symbol_name(name_sym)));
+    let slow_body: Vec<Value> = body
+        .iter()
+        .map(|&f| linmap_rename_self(heap, f, name_sym, slow_val))
+        .collect();
+    let mut slow_fn = vec![value::sym(kw::FN), param_form];
+    slow_fn.extend(slow_body);
+    let slow_fn = heap.list(slow_fn);
+    let slow_def = heap.list(vec![value::sym(kw::DEF), slow_val, slow_fn]);
+    // The checker walks the inner loop (the author's code, rewritten ops aside) and does
+    // not need this copy of it: `:generated` skips the subtree outright.
+    let slow_def = heap.list(vec![
+        value::sym("%lint-allow"),
+        value::kw("generated"),
+        slow_def,
+    ]);
+
+    let t_val = value::gensym("linmap-table");
     let mut call = vec![inner_val];
+    let mut slow_call = vec![slow_val];
     for (i, &pv) in param_vals.iter().enumerate() {
-        if i == idx {
-            call.push(heap.list(vec![value::sym("%table-from-map"), pv]));
-        } else {
-            call.push(pv);
-        }
+        call.push(if i == idx { t_val } else { pv });
+        slow_call.push(pv);
     }
     let inner_call = heap.list(call);
+    let slow_call = heap.list(slow_call);
     // Snapshot the loop's result back to an immutable map **only when it is the table**.
     // The accumulator is what the linearity proof licenses rewriting in place, but the base
     // case is free to return something else entirely — `(%map-count acc)`, `(%map-get acc :a)`,
@@ -2431,9 +2458,45 @@ fn linmap_split_def(heap: &mut Heap, items: &[Value]) -> Option<Value> {
     let cond = heap.list(vec![value::sym(kw::IF), is_table, snap_call, r_val]);
     let bind = heap.list(vec![r_val, inner_call]);
     let snap = heap.list(vec![value::sym(kw::LET), bind, cond]);
-    let wrapper_fn = heap.list(vec![value::sym(kw::FN), param_form, snap]);
+    // (let (t (%table-from-map ACC)) (if t <snap> (SLOW …)))
+    let seed = heap.list(vec![value::sym("%table-from-map"), param_vals[idx]]);
+    let choose = heap.list(vec![value::sym(kw::IF), t_val, snap, slow_call]);
+    let seed_bind = heap.list(vec![t_val, seed]);
+    let wrapper_body = heap.list(vec![value::sym(kw::LET), seed_bind, choose]);
+    let wrapper_fn = heap.list(vec![value::sym(kw::FN), param_form, wrapper_body]);
     let wrapper_def = heap.list(vec![value::sym(kw::DEF), items[1], wrapper_fn]);
-    Some(heap.list(vec![value::sym(kw::DO), inner_def, wrapper_def]))
+    Some(heap.list(vec![value::sym(kw::DO), slow_def, inner_def, wrapper_def]))
+}
+
+/// `form` with every self-call head `name` re-pointed at `slow` and nothing else touched —
+/// the unrewritten copy of a linmap loop keeps recursing into itself rather than back
+/// through the wrapper (which would re-run the seed check per iteration). Quoted data is
+/// left alone, as in `linmap_rewrite_form`.
+fn linmap_rename_self(heap: &mut Heap, form: Value, name: value::Symbol, slow: Value) -> Value {
+    let items = match form.unpack() {
+        ValueRef::Pair(_) => match heap.list_to_vec(form) {
+            Ok(v) if !v.is_empty() => v,
+            _ => return form,
+        },
+        _ => return form,
+    };
+    if let ValueRef::Sym(h) = items[0].unpack() {
+        if value::symbol_is(h, kw::QUOTE) {
+            return form;
+        }
+        if h == name {
+            let mut c = vec![slow];
+            for &a in &items[1..] {
+                c.push(linmap_rename_self(heap, a, name, slow));
+            }
+            return heap.list(c);
+        }
+    }
+    let out: Vec<Value> = items
+        .iter()
+        .map(|&it| linmap_rename_self(heap, it, name, slow))
+        .collect();
+    heap.list(out)
 }
 
 /// The `E` of `(+ (get ACC KEY 0) E)` / `(+ E (get ACC KEY 0))` when `value` is that form —

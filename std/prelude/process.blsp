@@ -506,3 +506,25 @@ case fails if the two ever disagree."
           (proc/register :crash-reporter listener)
           (proc/system-monitor listener {:exit-abnormal true})
           listener)))))
+
+;; Copy an immutable map into a fresh mutable table. Used only by the compiler's
+;; linear-map-accumulator rewrite (ADR-112, ADR-360 in docs/decisions.md) to seed the
+;; private table from the accumulator's input map; never surfaced to user code. Lives
+;; here, after control.blsp, because it needs `try`: a prelude body that names a macro
+;; defined LATER in the boot order compiles to nothing the VM can run and defers to the
+;; tree-walker on every call (it did, from predicates.blsp — 12M instructions per call).
+(defn %table-from-map (m)
+  "Copy the immutable map `m` into a fresh mutable table, or `nil` when a table cannot
+stand in for it — a value a table cannot hold (a rope, a builtin, a lazy view, a
+self-referential closure) or a record, whose misses go through `Lookup` where a table's
+do not. Internal: used only by the compiler's linear-map-accumulator rewrite (ADR-112,
+ADR-360 in docs/decisions.md) to seed its private table — `nil` sends the wrapper down the
+unrewritten copy of the loop, so the rewrite is exact on every input — and never surfaced to
+user code; reach for `table/new` instead."
+  ;; The refusal IS the answer: a put that raises names a value the table cannot hold,
+  ;; and nil is what the wrapper reads as "run the loop as written".
+  (if (%map-get m (quote :__id__) nil)
+    nil
+    (check-allow :discarded-catch
+      (try (reduce (%map-pairs m) (%table) (fn (t kv) (%table-put t (first kv) (second kv))))
+        (catch e nil)))))

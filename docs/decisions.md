@@ -23062,6 +23062,14 @@ only through an undocumented name is not a language feature; it is a benchmark t
    found `{0 1.5}` tallying to `2` on one arm and `2.5` on the other. With `%table-add` both
    arms are one semantics on every input, so the primitive can do what `+` does.
 
+4. **The seed is checked, and the loop as written is kept** (2026-09-17, KI-152). The
+   linearity proof licenses the in-place build; it says nothing about the values in the
+   accumulator's input map, and a table cannot hold every value a map can (a rope, a
+   builtin, a lazy view) nor stand in for a record whose misses consult `Lookup`.
+   `%table-from-map` answers nil for such a seed and the wrapper runs `NAME/linmap-slow__N`,
+   the loop exactly as the author wrote it, wrapped in `(%lint-allow :generated …)` so the
+   checker does not walk a copy of code it checks in the inner loop.
+
 **Consequences.** `wordcount` 857 → 66 ms and `persistent-map` 535 → 79 ms on the idiomatic
 ports (`make ab --floor`, every other row noise); the benchmark rows are now the code a user
 writes and the primitive has no reason to exist in user code. Guards: the expansion is pinned
@@ -23070,6 +23078,5 @@ writes and the primitive has no reason to exist in user code. Guards: the expans
 (`tests/numeric_overflow_test.blsp`), and `scripts/fuzz/generators/linmap.py` is a
 metamorphic fuzzer whose oracle is in the program (the same tally as a `fold`). Not admitted,
 deliberately: a plain `(assoc acc k v)` — the table cannot hold every value a map can
-(ropes), so it stays an escape; a record accumulator with a custom `Lookup` impl reads its
-misses through `%lookup-miss` in the source and through the table in the rewrite, the same
-property the `%map-get` whitelist has always had and not a shape anyone tallies over.
+(ropes), so it stays an escape. (A record accumulator, and a seed holding such a value, take
+the unrewritten copy — point 4.)

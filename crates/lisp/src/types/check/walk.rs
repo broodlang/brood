@@ -344,6 +344,15 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
     // the body for every *other* lint.
     if let Value::Sym(s) = head {
         if value::symbol_is(s, "%lint-allow") {
+            // `:generated` — the compiler's own copy of code it checks elsewhere (the
+            // linear-map rewrite keeps the loop as written behind its seed check, ADR-360).
+            // Not walked at all: every diagnostic it could raise is raised by the copy the
+            // author's positions belong to, and the pre-run check of `brood file` pays
+            // ~12M instructions per definition it walks (KI-150's class).
+            if matches!(items.get(1), Some(&Value::Keyword(k)) if value::symbol_is(k, "generated"))
+            {
+                return;
+            }
             let mask = lint_allow_mask(items.get(1).copied());
             let inner = ctx.with_suppressed(mask);
             for &arg in &items[1..] {

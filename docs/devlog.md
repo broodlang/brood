@@ -884,10 +884,34 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-15** — ADR-355: a `let`-bound `fn` literal's parameters are derived from its callers (the ADR-341 rule scoped to the binding; sites under callback literals and nested `let`s type), and a `sig` naming the required positions seeds a `defn` with undeclared `&optional`s. bedit strict 58 → 48 with no bedit change; downstream sweep of 16 projects green (hive's reds = version skew)
 - **2026-09-16** — v0.29.2 (ADR-356: `markdown/->html` a core module — hive's lean bundle could not find `docs`); hive's tests render the running version's reference seeds; then bedit strict 48 → 0 through three checker rules (`get-in` over a literal path reads the declared shape, `%map-pairs` walks a `map<K, V>` as its entries, the site collector walks a `let`-bound lambda under its derived parameters) and bedit's own leaves; then three more derivation gaps (an `&optional` function.s collected parameters, a let-bound lambda.s self-call folding to ⊥, a fold accumulator.s fields through the ascent) and the four workaround `sig`s deleted; then 323 redundant `sig`s removed from std (`scripts/redundant-sigs.blsp`), five kept because a neighbour or a caller read through them; KI-149 fixed (the whole-project lints ran only in the bare `nest check` and never counted — both forms run and count them now)
 - **2026-09-16** — ADR-360: the linear-map rewrite recognises the tally a user writes (`(assoc m k (+ (get m k 0) e))`) — `wordcount` 857 → 66 ms, `persistent-map` 535 → 79 on the idiomatic ports; `%table-add` is the fused op and `%map-int-add` is now exactly the same `+` (KI-151); a linmap fuzzer with the oracle in the program.
+- **2026-09-17** — KI-152: the linear-map rewrite was observable on its seed (a rope in the input map raised on one arm, returned on the other); `%table-from-map` declines and the split keeps the loop as written behind the seed check, under a new `(check-allow :generated …)` the checker skips — measured free. Go column published in brood-benchmarks (1.8× C, between C and .NET).
 
 ---
 
 ## Recent — full entries
+
+## 2026-09-17 — the seed is the one thing the linearity proof cannot see (KI-152)
+
+Writing the fuzzer's seed list asked what an accumulator's input map may hold, and the
+answer was: anything — and a table cannot. `(lm '(:a) {:r <rope>})` raised `cannot send a
+rope` with the rewrite on and returned the map with it off; a builtin, a lazy view, a
+self-referential closure the same; a record with a `Lookup` impl answered nil for a 2-arity
+`get` miss where the source answers through the ability. Pre-existing (the `%map-int-add`
+shape had it too), but ADR-360 made the shape reachable from any tally a user writes.
+
+`%table-from-map` now answers nil for such a seed, and the split keeps a third def — the
+loop exactly as written, self-calls re-pointed at itself — that the wrapper runs when the
+seed is declined. Two costs were found in the measuring and removed before the commit:
+`%table-from-map` needs `try`, which `control.blsp` defines after `predicates.blsp`, so from
+there its body could not compile and deferred to the tree-walker per call
+(`BROOD_DEFER_DBG=1` named it — 12M instructions on a two-element tally); it lives in
+`process.blsp` now. And `brood file`'s pre-run check walked the copy at ~12M instructions
+per definition — KI-150's class again — so the copy is wrapped in `(%lint-allow :generated
+…)`, a new category the checker does not walk at all (the inner loop carries the author's
+code and positions). One-definition program: +0.7M instructions against HEAD;
+`make ab --floor --all` every row noise. Same lesson as KI-150: on this runtime a checker
+cost is a runtime cost, and `perf stat -e instructions:u` on a tiny program is the
+five-minute way to see one.
 
 ## 2026-09-16 — the idiomatic tally is the fast one (ADR-360, KI-151)
 

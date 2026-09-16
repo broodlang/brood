@@ -23,6 +23,9 @@ fn expansion(src: &str) -> String {
     interp.print(expanded)
 }
 
+/// `want` must appear in the expansion; `forbid` must not appear in the REWRITTEN loop —
+/// the `linmap-loop` def — since the unrewritten copy behind the seed check keeps the
+/// source spelling by design. With no split, the whole expansion is the loop.
 fn assert_split(src: &str, want: &[&str], forbid: &[&str]) {
     let out = expansion(src);
     for w in want {
@@ -31,15 +34,47 @@ fn assert_split(src: &str, want: &[&str], forbid: &[&str]) {
             "expected `{w}` in the expansion of {src}:\n{out}"
         );
     }
+    let rewritten = match out.find("linmap-loop") {
+        Some(i) => out[i..].split("(def ").next().unwrap(),
+        None => &out,
+    };
     for f in forbid {
         assert!(
-            !out.contains(f),
-            "unexpected `{f}` in the expansion of {src}:\n{out}"
+            !rewritten.contains(f),
+            "unexpected `{f}` in the rewritten loop of {src}:\n{rewritten}"
         );
     }
 }
 
 const SPLIT: &str = "linmap-loop";
+
+#[test]
+fn the_split_keeps_an_unrewritten_copy_behind_the_seed_check() {
+    // The wrapper seeds a table from the accumulator's input map, and a table cannot hold
+    // every value a map can (a rope) nor stand in for a record (its misses consult
+    // `Lookup`). `%table-from-map` answers nil for those, and the wrapper must then run
+    // the loop AS WRITTEN — a copy whose self-calls point at itself, not at the wrapper.
+    let out = expansion(
+        "(defn tally (xs m) (if (empty? xs) m (tally (rest xs) (%map-int-add m (first xs) 1))))",
+    );
+    assert!(
+        out.contains("linmap-slow"),
+        "no unrewritten copy in:\n{out}"
+    );
+    assert!(out.contains("%table-from-map"), "no seed copy in:\n{out}");
+    // The slow copy recurses into itself: the only `(tally ` calls left are the def and
+    // the wrapper's own name, never a self-call inside the slow body.
+    let start = out.find("(def tally/linmap-slow").expect("slow def");
+    let slow = out[start + 5..].split("(def ").next().unwrap();
+    assert!(
+        !slow.contains("(tally "),
+        "the slow copy recurses through the wrapper:\n{slow}"
+    );
+    assert!(
+        slow.contains("%map-int-add"),
+        "the slow copy was rewritten:\n{slow}"
+    );
+}
 
 #[test]
 fn the_idiomatic_tally_is_fused_into_table_add() {

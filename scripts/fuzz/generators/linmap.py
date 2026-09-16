@@ -24,7 +24,10 @@ KEYS = [
     ("(math/rem i 3)", None),          # an arithmetic key expression, twice
 ]
 ADDENDS = ["1", "2", "-1", "0.5", "9223372036854775807", "(get m :other 0)", "(+ 1 (math/rem i 2))"]
-SEEDS = ["{}", "{:hot 10 :other 3}", "{0 1.5 :hot 2.5}", "{1 \"s\"}", "{:hot 9223372036854775807}", "{2 100000000000000000000}"]
+SEEDS = ["{}", "{:hot 10 :other 3}", "{0 1.5 :hot 2.5}", "{1 \"s\"}", "{:hot 9223372036854775807}", "{2 100000000000000000000}",
+         # seeds a table cannot stand in for: the wrapper must run the loop as written
+         "{:r (text/from-string \"x\") :hot 1}", "{:f string/length}", "{:v (seq/lmap (list 0 1 2) inc) :hot 2}",
+         "(lm-rec 5)"]
 BASES = ["m", "(get m :hot :none)", "(count m)", "(get m 0)"]
 
 def update(rng, key):
@@ -54,7 +57,9 @@ def program(seed):
     close = ")" if let_init else ""
     step = f"{binding}{upd}{close}"
     # xs is a list of ints so `(first xs)` is a key; `i` counts down.
-    return f"""(defn go (i xs m)
+    return f"""(defrecord lm-rec (hits))
+(impl Lookup lm-rec (lookup-get [c k] (if (= k :hits) (get c :hits) 100)) (lookup-keys [c] (list :hits)))
+(defn go (i xs m)
   (if (= i 0)
     {base}
     (go (- i 1) (rest xs) {step})))
@@ -64,8 +69,9 @@ def program(seed):
     {base}
     (ref-go (- i 1) (rest xs) (ref-step m i xs))))
 (def xs (map (range 0 {n}) (fn (i) (math/rem (* i 7) 4))))
-(def a (try (pr-str (go {n} xs {seedmap})) (catch e (str "E:" (error-message e)))))
-(def b (try (pr-str (ref-go {n} xs {seedmap})) (catch e (str "E:" (error-message e)))))
+(defn show (m) (if (map? m) (pr-str (sort (map (seq m) (fn (kv) (str (nth kv 0) "=" (let (v (nth kv 1)) (cond (rope? v) (text/->string v) (seqview? v) (pr-str (seq v)) (fn? v) "fn" else (pr-str v)))))))) (pr-str m)))
+(def a (try (show (go {n} xs {seedmap})) (catch e (str "E:" (error-message e)))))
+(def b (try (show (ref-go {n} xs {seedmap})) (catch e (str "E:" (error-message e)))))
 (io/puts (if (= a b) a (str "BAD split=" a " ref=" b)))
 """
 
