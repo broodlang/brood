@@ -3,7 +3,7 @@
 ;; A deliberately small subset: ATX headings, fenced ``` code, `- ` and `1. ` lists, `> `
 ;; quotes, `---` rules, blank-line paragraphs, and inline `code`, links, autolinks and
 ;; `**emphasis**` — enough for a guide, a README, a package's documentation page.
-Everything is HTML-escaped; it is not a CommonMark parser.
+;; Everything is HTML-escaped; it is not a CommonMark parser.
 ;;
 ;; A CORE module, not tooling: it began as `docs/markdown->html` inside the doc generator
 ;; (a DEV module), and the hosted registry rendered package READMEs with it — which only
@@ -125,8 +125,7 @@ Everything is HTML-escaped; it is not a CommonMark parser.
   (let (width (string/length marker)
         end (string/length text)
         close (index-of text marker width))
-    (when (and (> close width)
-            (not (string/starts-with? (string/substring text width end) " ")))
+    (when (and (> close width) (not (string/starts-with? (string/substring text width end) " ")))
       (let (content (string/substring text width close))
         [(str "<" tag ">" (md-run content) "</" tag ">")
           (string/substring text (+ close width) end)]))))
@@ -145,7 +144,22 @@ Everything is HTML-escaped; it is not a CommonMark parser.
 ;; The block state is `{:out :mode :buf :start}`: `out` the HTML so far, `mode` the open
 ;; block (`:none`, `:para`, `:list`, `:ordered`, `:quote`, `:code`), `buf` its lines
 ;; newest-first, `start` the first number of an ordered list (so a list that resumes after
-;; a code block keeps counting: `<ol start="2">`).
+;; a code block keeps counting: `<ol start="2">`), `indent` the column a code fence opened
+;; at (a fence inside a list item is indented with the item, and its lines shed that much).
+
+;; The code block that was buffered, its lines shed of the fence's own indentation — no more
+;; than that, so a further-indented line inside the block keeps its shape.
+(defn- md-close-code (state)
+  (let (indent (or (get state :indent) 0)
+        shed (fn (l) (string/substring l (math/min indent (string/span l 0 " ")) (string/length l))))
+    (assoc state
+      :out
+        (str (get state :out)
+          "<pre><code>"
+          (md-escape (string/join (map (reverse (get state :buf)) shed) "\n"))
+          "</code></pre>")
+      :mode :none
+      :buf nil)))
 
 (defn- md-items (buf)
   (apply str (map (reverse buf) (fn (l) (str "<li>" (md-inline l) "</li>")))))
@@ -159,8 +173,7 @@ Everything is HTML-escaped; it is not a CommonMark parser.
           :out (str out "<p>" (md-inline (string/join (reverse buf) " ")) "</p>")
           :mode :none
           :buf nil)
-      (= mode :list)
-        (assoc state :out (str out "<ul>" (md-items buf) "</ul>") :mode :none :buf nil)
+      (= mode :list) (assoc state :out (str out "<ul>" (md-items buf) "</ul>") :mode :none :buf nil)
       (= mode :ordered)
         (let (start (get state :start))
           (assoc state
@@ -173,15 +186,15 @@ Everything is HTML-escaped; it is not a CommonMark parser.
             :buf nil))
       (= mode :quote)
         (assoc state
-          :out (str out "<blockquote><p>" (md-inline (string/join (reverse buf) " ")) "</p></blockquote>")
+          :out
+            (str out
+              "<blockquote><p>"
+              (md-inline (string/join (reverse buf) " "))
+              "</p></blockquote>")
           :mode :none
           :buf nil)
       ;; an unclosed ``` fence at end-of-input: emit what was buffered rather than drop it
-      (= mode :code)
-        (assoc state
-          :out (str out "<pre><code>" (md-escape (string/join (reverse buf) "\n")) "</code></pre>")
-          :mode :none
-          :buf nil)
+      (= mode :code) (md-close-code state)
       else state)))
 (sig md-flush (map -> map))
 
@@ -217,15 +230,11 @@ Everything is HTML-escaped; it is not a CommonMark parser.
     (cond
       (string/starts-with? t "```")
         (if (= mode :code)
-          (assoc state
-            :mode :none
+          (md-close-code state)
+          (assoc (md-flush state)
+            :mode :code
             :buf nil
-            :out
-              (str (get state :out)
-                "<pre><code>"
-                (md-escape (string/join (reverse (get state :buf)) "\n"))
-                "</code></pre>"))
-          (assoc (md-flush state) :mode :code :buf nil))
+            :indent (- (string/length line) (string/length (string/triml line)))))
       (= mode :code) (assoc state :buf (cons line (get state :buf)))
       (= t "") (md-flush state)
       (string/starts-with? t "#### ") (md-heading state 4 (string/substring t 5 end))
