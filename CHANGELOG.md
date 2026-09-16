@@ -4,6 +4,47 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## v0.29.0 — the open issues closed: the JIT keeps `or`/`and` and string `=` native, tables reserve what they touch, the image attributes registrations to their writer
+
+**Every open known issue is closed** (KI-132, KI-136, KI-140, KI-141, KI-142, KI-145,
+KI-146); `docs/known-issues.md` reads fixed or retracted on all 142 entries, with KI-88
+archived-dormant behind its watchdog.
+
+**The JIT no longer latches the shapes every `or`/`and` expands to** (KI-132, ADR-353). A
+join was typed by the first edge to reach it and any disagreeing edge was compiled as a
+deopt, so `(or p (and q (= n 2)))` fell off the native tier on every activation and was
+latched onto the VM after sixteen; and `=` on anything but an int or an interned immediate
+deopted too, so `(= open "(")` did the same. A join is now typed with every predecessor in
+hand and a disagreement widens into a spill slot or three tagged words; `=` on any tag pair
+calls the runtime's structural equality. The syntax highlighter's helpers stay native (a pass
+7.7 → 4.0 ms), `regex` −30%. The fuzz harness that should have caught this was emitting
+pre-rename names for three days (KI-145); live again, its first run found `last-index-of`
+(KI-146).
+
+**A table reserves the address space its keys touch** (KI-142, ADR-354). The dense region
+was one 64 MB reservation per table on its first small-int write; the regex DFA memos are two
+tables per compiled pattern, and once every lexer rule went through them `regex_test` alone
+reserved 6.4 GB and the suite wrapper aborted under its address-space cap. The region is a
+directory of 128 lazily-mapped 512 KB chunks now — `regex_test` reserves 52 MB — and the
+JIT's inline table ops read the chunk pointer per op.
+
+**The stdlib image carries each registration with the module whose load made it**
+(KI-136). The kernel journals the writer of every registry entry (`%registry-writer`), the
+image attributes and prunes by it, and the ADR-280 differential compares each module's own
+registrations from source against from the image — the gate that would have caught
+`editor/face` materialising twenty-six faces where its source load registers six. A module's
+registration onto a foreign registry is a registry op, not a live swap (KI-141), which was
+the tree-walker CI red since 2026-09-12.
+
+**The checker:** `(apply f a … coll)` binds the callee's type variable through the spread
+(KI-140); a `let`-bound `fn` literal's parameters are derived from its callers, a combinator
+handed it reads its result, and a `sig` naming the required positions seeds a `defn` with
+undeclared `&optional`s (ADR-355) — bedit's strict findings 58 → 48 with no bedit change.
+`nest test FILE…` scopes each named file as the whole-project run does; `nest check`'s audit
+reads a bare public name as one the binary ships. `BROOD_JIT_BAIL_TRACE` names a prepass/emit
+depth disagreement and prints the Cranelift verifier's error; `(%jit-arm-state f argc)`
+answers `:native`/`:queued`/`:bailed`/`:untried` under dev-tools.
+
 ## v0.28.0 — lexers scan on the DFA, and the checker learns lengths, properties and recursive types
 
 **Every lexical editor mode is off the regex capture engine** (ADR-352). bedit opened a
