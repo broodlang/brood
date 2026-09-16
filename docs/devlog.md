@@ -13761,8 +13761,12 @@ capped twenty, and narrowing from those loses what belongs in the next twenty).
 
 **And the tagged-result idiom, all the way through.** Three more things stood between
 hatch's `oidc/complete` and a `match` that reads the `:ok` arm's positions: the union cap
-of four terms hulled its five `[:error …]` arms with the `:ok` one into a single tuple
-(eight now — the pairwise work is still trivial); `tagged_apart` gave up when two shapes'
+of four terms hulled its five `[:error …]` arms with the `:ok` one into a single tuple —
+the overflow collapse in `from_terms` merged the LAST two terms whatever they were; it
+merges same-tag shapes first now. (Raising the cap to eight was the first try, and it
+took the checker on the match compiler's own file from 0.6 s to past five minutes: the
+relations quantify over subsets of the alternatives, so the cap is not a knob. One
+per-file timing scan named the file; the cap is back at four.) `tagged_apart` gave up when two shapes'
 arities differed, so `[:ok claims]` beside `[:error status why]` was merged by length
 into a `vector[2..3]` (a KEYWORD at a position tells them apart now whatever the arity —
 a string does not, or a list builder's `(list "x")` beside `(list string "x")` never

@@ -362,3 +362,34 @@ fn a_callback_over_the_indices_of_a_collection_reads_its_elements() {
     assert_eq!(ty_str("(first (range 2 5))"), "int[2..4]");
     assert_eq!(ty_str("(range 0)"), "nil");
 }
+
+// The tagged idiom with arms of DIFFERENT arity — `[:ok claims]` beside `[:error status
+// why]` — survives the widening: `tagged_apart` decides by the tag, not the arity, so a
+// fixpoint's `collapse_same_tags` keeps both shapes instead of hulling them into a
+// `vector[2..3]`; and the INFERENCE's `let` binds through the one rule the walk uses, so a
+// function whose return re-tags a matched result reads each arm's own positions. hatch's
+// `oidc/complete` inferred `(tuple :ok (or 502 map) any)` before this.
+#[test]
+fn a_re_tagged_match_result_keeps_each_arm_apart_through_inference() {
+    let ws = file_warnings_mode(
+        "\
+         (defmodule t)\n\
+         (defn complete (n c)\n\
+           (match (claims-for n)\n\
+             ([:error status why] [:error status why c])\n\
+             ([:ok claims] [:ok claims c])))\n\
+         (defn claims-for (n)\n\
+           (cond (< n 0) [:error 502 \"neg\"] :else [:ok {:email \"a\"}]))\n\
+         (sig use (int -> any))\n\
+         (defn use (n)\n\
+           (match (complete n 1)\n\
+             ([:ok got conn] (get got :email))\n\
+             ([:error code msg cc] (str code msg))))",
+        true,
+    );
+    assert!(ws.is_empty(), "{ws:?}");
+    assert_eq!(
+        ty_str("(if (> 1 0) [:error 502 \"neg\"] [:ok {:email \"a\"}])"),
+        "(tuple :error, 502, \"neg\") | (tuple :ok, {email: \"a\"})"
+    );
+}

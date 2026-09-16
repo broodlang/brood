@@ -47,6 +47,13 @@ path alias, and the checker follows it. **A callback over `(range (count xs))` r
 `xs`'s elements**: its parameter is an index of `xs`, and a range carries its bounds'
 interval (`(range 5)` is `list<int[0..4]>`).
 
+**The tagged-result idiom holds through inference**: a union past its four-term cap
+merges same-tag shapes first (five `[:error …]` arms no longer hull the `[:ok …]` one),
+`[:ok claims]` beside `[:error status why]` stays two shapes across arities (a keyword
+tells them apart), and the inference's `let` follows a path alias the way the walk does —
+so a function that re-tags a matched result infers each arm's own positions. `dolist`'s
+loop variable is an element.
+
 **A `deftype` past the lattice's node budget is reported, not silently flattened.** The
 budget (`MAX_TY_NODES`) bounded declared shapes too: bedit's `model` record crossed it by
 one optional field and every `model`-typed sig in the project quietly read `map`. The

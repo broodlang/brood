@@ -746,8 +746,27 @@ fn control_flow_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
             // body — so a call of it types as the body does over what they hand it
             // (`walk::let_rhs_ty`; the walk binds the same arrow).
             let rhs_ty = super::walk::let_rhs_ty(heap, &binds, i, items, &scope);
+            // A symbol takes its type and, when the RHS is an access path, the PATH ALIAS
+            // a guard on it narrows through (`Ctx::add_path_alias`, as the walk's
+            // `let_bind_scope` records it) — so the `match` compiler's `(let (el
+            // (%vector-ref m 0)) (if (%eq el :ok) …))` narrows `m`'s tuple alternatives
+            // under inference as it does under the walk, and a function's inferred RETURN
+            // reads the arm's own positions. Bound plainly, `[:ok claims c]` inferred
+            // `claims` as the union over every arm of what it matched on — `502 | map`.
+            // Only the alias, deliberately: the walk's full rule (guard aliases, a
+            // let-bound lambda's sig) re-infers per binding, and this inference runs
+            // inside every expression the walk asks about — on `std/prelude/match.blsp`,
+            // the match compiler's nest of lets, the full rule here took a 0.9 s check
+            // past two minutes.
             match binds[i] {
-                Value::Sym(name) => scope = scope.bind(name, rhs_ty),
+                Value::Sym(name) => {
+                    scope = scope.bind(name, rhs_ty);
+                    if let Some((base, keys)) = path_of(heap, binds[i + 1]) {
+                        if !keys.is_empty() && scope.is_lexical_local(base) {
+                            scope = scope.add_path_alias(name, base, keys);
+                        }
+                    }
+                }
                 // A destructuring binding: each positional binder takes the element type
                 // (`super::walk::pattern_bindings`), unknown where it can't be pinned.
                 pat => {
