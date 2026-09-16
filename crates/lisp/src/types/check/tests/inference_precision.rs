@@ -809,3 +809,47 @@ fn a_growing_union_of_tuples_widens_to_one_shape_not_a_bare_vector() {
         "{widened}"
     );
 }
+
+// KI-140: `apply` binds the callee's type variable from the spread operands and the
+// collection's element type, the way the written-out call does. `math/max` declares
+// `(& ?A -> ?A)`, so `(apply math/max 1 (map xs string/length))` is an `int` — it used to
+// type by `apply`'s own curated signature, which knows nothing of the callee's variable, and
+// fell to the callee's flat return (`ordered`), failing a `-> int` declaration under `--strict`
+// (bedit's ratchet, four findings of this shape).
+#[test]
+fn apply_binds_the_callee_type_variable_from_its_operands() {
+    let ws = file_warnings_mode(
+        "\
+         (defmodule t)\n\
+         (sig widest (list -> int))\n\
+         (defn widest (xs) (apply math/max 1 (map xs string/length)))\n\
+         (sig widest2 (list -> int))\n\
+         (defn widest2 (xs) (math/max 1 (string/length (first xs))))",
+        true,
+    );
+    assert!(ws.is_empty(), "both bodies are ints — {ws:?}");
+    assert_eq!(ty_str("(apply math/max 1 [2 3])"), "1 | 2 | 3");
+    // A same-file callee with a declared variable binds through `apply` too.
+    let ws = file_warnings_mode(
+        "\
+         (defmodule t)\n\
+         (sig pick (& ?A -> ?A))\n\
+         (defn pick (& xs) (first xs))\n\
+         (sig use-pick (list -> int))\n\
+         (defn use-pick (xs) (apply pick 1 (map xs string/length)))",
+        true,
+    );
+    assert!(
+        ws.is_empty(),
+        "`?A` is bound to `int` through the spread — {ws:?}"
+    );
+}
+
+#[test]
+fn apply_of_a_ring_operator_stays_in_its_closure_not_one_steps_interval() {
+    // The spread's count is unknown: `(apply + 1 [2 3])` is an int, never `int[3..6]`, and
+    // a float element is contagious whatever the count.
+    assert_eq!(ty_str("(apply + 1 [2 3])"), "int");
+    assert_eq!(ty_str("(apply + [1 2])"), "int");
+    assert_eq!(ty_str("(apply * 2 [1.5])"), "float");
+}

@@ -733,7 +733,10 @@ fn control_flow_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
         let mut scope = ctx.clone();
         let mut i = 0;
         while i < binds.len() {
-            let rhs_ty = expr_ty(heap, binds[i + 1], &scope);
+            // A `fn`-valued binder is typed from its callers — the later bindings and the
+            // body — so a call of it types as the body does over what they hand it
+            // (`walk::let_rhs_ty`; the walk binds the same arrow).
+            let rhs_ty = super::walk::let_rhs_ty(heap, &binds, i, items, &scope);
             match binds[i] {
                 Value::Sym(name) => scope = scope.bind(name, rhs_ty),
                 // A destructuring binding: each positional binder takes the element type
@@ -1801,26 +1804,29 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
             None => Ty::of(Tag::Map),
         });
     }
-    // `(apply f args…)` — whatever `f` returns: a named global's signature (declared,
-    // curated or inferred), or a lambda literal's body with its inputs unknown. The
-    // spread arguments are not typed (their count is not even known), so this is the
-    // flat return, never an input-resolved one.
+    // `(apply f a b … coll)` — `f` applied to `a`, `b`, … and one more operand of `coll`'s
+    // element type, so a callee's type variable binds through the spread as it does in the
+    // written-out call (KI-140): `(apply math/max 1 (map xs string/length))` under
+    // `(& ?A -> ?A)` is an `int`, exactly as `(math/max 1 (string/length x))` is. The
+    // spread's COUNT is unknown, so a ring operator's result is its closure, never one
+    // step's interval (`(apply + [1 2])` is an int, not `int[1..2]`); an extremum answers
+    // one of its operands, whose union does not depend on the count. A lambda literal
+    // types as its body with its inputs unknown — the flat return.
     if value::symbol_is(head, "apply") && items.len() >= 3 {
         return match items[1] {
-            // A numeric operator spread over a sequence of known elements stays in the
-            // operator's closure over those elements — `(apply + ints)` is an `int`.
-            Value::Sym(f)
-                if !ctx.is_local(f) && numeric_op_kind(f).is_some() && items.len() == 3 =>
-            {
-                let elem = expr_ty(heap, items[2], ctx).and_then(|t| t.elem_ty_union());
-                match elem {
-                    // The closure class, not one element's interval: the spread's count
-                    // is unknown, so `(apply + [1 2])` is an int, not `int[1..2]`.
-                    Some(e) => numeric_result(f, &[e]).map(|t| t.without_int_interval()),
-                    None => sig_of(heap, f).map(|sig| sig.ret),
-                }
+            Value::Sym(f) if !ctx.is_lexical_local(f) => {
+                let (spread, coll) = items[2..].split_at(items.len() - 3);
+                let mut inputs: Vec<Option<Ty>> =
+                    spread.iter().map(|&a| expr_ty(heap, a, ctx)).collect();
+                inputs.push(expr_ty(heap, coll[0], ctx).and_then(|t| t.elem_ty_union()));
+                let ret = callback_ret(heap, items[1], &inputs, ctx)
+                    .or_else(|| sig_of(heap, f).map(|sig| sig.ret))?;
+                Some(if numeric_op_kind(f).is_some() {
+                    ret.without_int_interval()
+                } else {
+                    ret
+                })
             }
-            Value::Sym(f) if !ctx.is_local(f) => sig_of(heap, f).map(|sig| sig.ret),
             Value::Pair(_) => {
                 let n = list_items(heap, items[1])
                     .and_then(|l| l.get(1).copied())
@@ -2485,10 +2491,19 @@ fn list_with_len(elem: Ty, r: Range) -> Ty {
 /// guarded-use false-positive class.
 pub(super) fn callback_ret(heap: &Heap, f: Value, inputs: &[Option<Ty>], ctx: &Ctx) -> Option<Ty> {
     match f {
-        // A LEXICAL local (a `let`/`fn` binding) shadows the global table — its return type
-        // isn't known. A file global is a local too in `is_local`'s sense, but it is exactly
-        // the callee the same-file tables below describe, so the guard is the lexical one.
-        Value::Sym(s) if ctx.is_lexical_local(s) => None,
+        // A LEXICAL local (a `let`/`fn` binding) shadows the global table. Its return type is
+        // known exactly when its TYPE is an arrow — a parameter declared `(int -> string)`,
+        // or a `let`-bound literal typed from its callers (ADR-355, whose result is the
+        // body under the union of what every caller hands it, a superset of this call's) —
+        // and `(map xs f)` then answers `list<R>` instead of a bare `list`. A file global is
+        // a local too in `is_local`'s sense, but it is exactly the callee the same-file
+        // tables below describe, so the guard is the lexical one.
+        Value::Sym(s) if ctx.is_lexical_local(s) => ctx
+            .get(s)
+            .as_ref()
+            .and_then(Ty::as_arrow)
+            .map(|arrow| arrow.ret.clone())
+            .filter(|ret| !ret.is_any()),
         Value::Sym(s) => {
             // A numeric operator as the callback — `(map inc xs)`, `(reduce + 0 xs)` — with
             // every input known: the same closure rules a direct call gets, instead of the
