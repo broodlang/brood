@@ -964,7 +964,9 @@ Without this a materialised `datetime` is bound and its impls dispatch, but `Tem
 not declared: `satisfies?` answers no, `%sealed-members` answers nil, and an ability op
 resolves against an ability the runtime has never heard of."
   (let (regs (or (get (or *std-regs* {}) key) []))
-    (doseq (r regs) (%registry-update! (get r 0) :assoc (get r 1) (get r 2)))
+    ;; `key` as the writer: the namespace at this moment is whoever required the module,
+    ;; and the writer journal (KI-136) must credit the module being materialised.
+    (doseq (r regs) (%registry-update! (get r 0) :assoc (get r 1) (get r 2) key))
     (count regs)))
 
 (defn- %merge-require-edges! (edges)

@@ -54,87 +54,71 @@ definition, called from both ends."
 claims it by prefix."
   (not (empty? (seq/filter names (fn (m) (string/starts-with? nm (str m "/")))))))
 
-(defn- %owner-prefix (nm)
-  "The module a qualified name belongs to: everything before its LAST `/`, or nil when it
-carries none. `:datetime/date` → `\"datetime\"`; a record declared in a nested module keeps
-the whole path (`editor/keymap/km` → `\"editor/keymap\"`)."
-  (let (parts (string/split nm "/"))
-    (when (> (count parts) 1)
-      (string/join (take parts (- (count parts) 1)) "/"))))
+(defn- %add-reg (acc m triple)
+  "`triple` (`[registry-symbol key-path value]`) appended to module `m`'s entries."
+  (%map-assoc acc m (append (or (%map-get acc m nil) []) [triple])))
 
-(defn- %reg-entries (reg pairs owner-fn)
-  "Group `pairs` (a registry's `[key value]` list) by owning module, as
-`[registry-symbol [key] value]` triples ready for `%registry-update!`. `owner-fn` maps a
-`[key value]` pair to its module name, or nil to drop the entry — which is what a
-registration made at the root/REPL gets, since nothing materialises it back."
-  (fold pairs
-    {}
-    (fn (acc kv)
-      (let ([k _v] kv
-            m (owner-fn kv))
-        (if (nil? m)
-          acc
-          (%map-assoc acc
-            m
-            (append (or (%map-get acc m nil) []) [[reg [k] (second kv)]])))))))
+;; The registries a load WRITES that are not registrations: runtime state (`*features*`,
+;; `*features-loading*`), the require edges and impls the image carries in their own
+;; sections, and `*module-files*`, which maps a PACKAGE's modules to disk paths and so
+;; never describes baked-in std.
+(def- %std-regs-skip
+  #{'*features* '*features-loading* '*require-edges* '*module-files* '*impls* '*impl-from*})
 
-(defn- %merge-by-module (a b)
-  "Concatenate two module→entries maps."
-  (fold (%map-pairs b)
-    a
-    (fn (acc kv) (let ([m es] kv) (%map-assoc acc m (append (or (%map-get acc m nil) []) es))))))
+(defn- %reg-owner (reg path kv)
+  "The module that OWNS registry `reg`'s entry at `path`: the module whose load WROTE it
+(`%registry-writer`, KI-136) — or, for `*module-docs*`, the key itself, which is the module
+name by construction (the doc is recorded before `defmodule` opens the namespace, so it has
+no writer). Nil for an entry nobody owns: a prelude or root write, which no module load ever
+replays and so stays in the registry's own value."
+  (cond
+    (= reg '*module-docs*) (first kv)
+    else (let (w (%registry-writer reg path)) (when w (->string w)))))
 
 (defn- %std-regs-by-module ()
-  "Every non-impl registration a std module load performs, grouped by the module that
+  "Every non-impl registration a std module load performs, grouped by the module whose LOAD
 performed it — `[registry-symbol key-path value]` triples.
 
-The list is the enumerable set of registries reached through `%registry-update!` during a
-load, minus the ones that are runtime state rather than registration (`*features-loading*`)
-and minus `*module-files*`, which maps a PACKAGE's modules to disk
-paths and so never describes baked-in std. Ability declarations are attributed through
-`*ability-owner*`, multimethods through `*method-from*`, and record ids / op names /
-multimethod names by their own qualifier — each key names its owner, so none of this guesses."
-  (let (ability-owner (fn (kv)
-                        (let (o (%map-get *ability-owner* (first kv) nil))
-                          (when o (->string o))))
-        by-qualifier (fn (kv) (%owner-prefix (->string (first kv))))
-        method-owner (fn (kv)
-                       (let (o (%map-get *method-from* (first kv) nil))
-                         (when o (->string o))))
-        one (fn (acc spec)
-              (let ([reg pairs owner-fn] spec)
-                (%merge-by-module acc (%reg-entries reg pairs owner-fn))))
-        two (fn (acc spec)
-              ;; a two-level registry (`{k1 {k2 v}}`) flattened to `[reg [k1 k2] v]`
-              (let ([reg outer owner-fn] spec)
-                (fold (%map-pairs outer)
-                  acc
-                  (fn (a kv)
-                    (let ([k1 inner] kv)
-                      (fold (%map-pairs inner)
-                        a
-                        (fn (a2 kv2)
-                          (let ([k2 v] kv2
-                                m (owner-fn [[k1 k2] v]))
-                            (if (nil? m)
-                              a2
-                              (%merge-by-module a2 {m [[reg [k1 k2] v]]})))))))))))
-    (fold [['*methods* *methods* method-owner]]
-      (fold
-        [['*abilities* (%map-pairs *abilities*) ability-owner]
-          ['*ability-owner* (%map-pairs *ability-owner*) (fn (kv) (->string (second kv)))]
-          ['*sealed* (%map-pairs *sealed*) ability-owner]
-          ['*ability-derives* (%map-pairs *ability-derives*) ability-owner]
-          ['*ability-requires* (%map-pairs *ability-requires*) ability-owner]
-          ['*op-ability* (%map-pairs *op-ability*) by-qualifier]
-          ['*record-ids* (%map-pairs *record-ids*) by-qualifier]
-          ['*multi-algebra* (%map-pairs *multi-algebra*) by-qualifier]
-          ['*module-docs* (%map-pairs *module-docs*) (fn (kv) (first kv))]
-          ;; single-level despite its PAIR key `[multimethod id-vector]`
-          ['*method-from* (%map-pairs *method-from*) (fn (kv) (->string (second kv)))]]
-        {}
-        one)
-      two)))
+The registries are enumerable — `(%registry-names)` is every global a `%registry-update!`
+has written — and each entry's owner is the module that wrote it, which the kernel journals
+at the write (KI-136). Ownership used to be read off the KEY's qualifier, and a key names
+its owner only sometimes: `:syntax/comment` in `*faces*` names no module and landed in the
+registry's own module's section, so materialising `editor/face` registered the eight faces
+`editor/highlight` declares, and a module that resolved them through `editor/face` worked
+from the image and not from source. A two-level registry (`*methods*`: `{k1 {k2 v}}`) is
+attributed per inner entry when its outer key has no writer."
+  (fold (%registry-names)
+    {}
+    (fn (acc reg)
+      (let (v (if (bound? reg) (reflect/eval reg) nil))
+        (if (or (contains? %std-regs-skip reg) (not (map? v)))
+          acc
+          (fold (%map-pairs v)
+            acc
+            (fn (a kv)
+              (let ([k1 v1] kv
+                    m (%reg-owner reg [k1] kv))
+                (cond
+                  m (%add-reg a m [reg [k1] v1])
+                  (map? v1)
+                    (fold (%map-pairs v1)
+                      a
+                      (fn (a2 kv2)
+                        (let ([k2 v2] kv2
+                              m2 (%reg-owner reg [k1 k2] kv2))
+                          (if m2 (%add-reg a2 m2 [reg [k1 k2] v2]) a2))))
+                  else a)))))))))
+
+(defn- %prune-attributed-registrations! ()
+  "Remove from the live registries every entry some module's load wrote, so the values
+the image snapshots hold only what NO module load replays — the prelude's and the root's
+writes. Each module's own entries come back when it materialises (`%replay-std-regs!`) or
+when its source loads, so a value that still carried them would double the ones of the
+registry's own module and smuggle in every other module's (KI-136). Called inside an
+`%isolate` by `build`, so the running session keeps every registration it had."
+  (doseq (kv (%map-pairs (%std-regs-by-module)))
+    (doseq (t (second kv))
+      (%registry-update! (get t 0) :dissoc (get t 1) nil))))
 
 (defn registrations-by-module ()
   "Every live non-impl registration, grouped by the module that OWNS it: module name →
@@ -305,7 +289,13 @@ since the prelude is always present."
                              ;; A module contributing nothing would image as materialisable-but-empty,
                              ;; and a later require would restore no bindings rather than fall back.
                              (when (> (count syms) 0) [mn syms]))))))
-        [path (%image-write path sections (system/stdlib-id))]))))
+        ;; Written from a scope in which every module-owned registration is pruned, so a
+        ;; registry's snapshot holds only what no load replays (KI-136); the `%isolate`
+        ;; puts them back once the file is on disk.
+        [path
+          (%isolate (fn ()
+                      (%prune-attributed-registrations!)
+                      (%image-write path sections (system/stdlib-id))))]))))
 
 (defn install ()
   "Install this binary's stdlib image as an additional feature source, if one exists and is

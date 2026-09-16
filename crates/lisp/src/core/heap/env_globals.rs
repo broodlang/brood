@@ -532,6 +532,11 @@ impl Heap {
     /// Returns true when the registry was written, false when the op declined (`:assoc-new`
     /// onto a present key, `:cons-new` of an existing member) — so Brood can still report
     /// "already there" without a second, racy read.
+    ///
+    /// `from` names the module making the write, for the KI-136 writer journal; `None`
+    /// means "the namespace being compiled", which is the module whose LOAD is running the
+    /// registration — a replay from an image passes the module it is replaying, since the
+    /// namespace at that moment is whoever `require`d it.
     pub fn registry_update(
         &mut self,
         env: EnvId,
@@ -539,6 +544,7 @@ impl Heap {
         op: RegistryOp,
         path: &[Value],
         val: Value,
+        from: Option<Symbol>,
     ) -> bool {
         // Clone the Arc so the guard borrows a LOCAL, leaving `&mut self` free for the map
         // ops between the read and the write. Recover from a poisoned lock rather than
@@ -553,6 +559,23 @@ impl Heap {
         // Only on the write path: a declined op leaves the registry untouched, and a name
         // that was never written has nothing for an image to carry.
         guard.insert(sym);
+        // The writer journal (KI-136): who owns this entry now. A `:dissoc` retires it; any
+        // other write records the writing module, or clears the entry for a root write.
+        {
+            let key = (sym, self.registry_path_key(path));
+            let mut writers = rt
+                .registry_writers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            match (op, from.or_else(|| self.compile_ns())) {
+                (RegistryOp::Dissoc, _) | (_, None) => {
+                    writers.remove(&key);
+                }
+                (_, Some(writer)) => {
+                    writers.insert(key, writer);
+                }
+            }
+        }
         if reg_trace_enabled() && crate::core::value::symbol_name(sym) == "*record-ids*" {
             let k1 = path.first().copied().unwrap_or(Value::nil());
             // Ancestry chain (up to 4 hops), so a leaked writer can be attributed to the
@@ -896,6 +919,28 @@ impl Heap {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         guard.extend(names.iter().copied());
+    }
+
+    /// The journal key for a registry write's path: each key printed, space-joined — the
+    /// same rendering `registry_writer` asks with, so a Brood caller never has to
+    /// reproduce it.
+    fn registry_path_key(&self, path: &[Value]) -> String {
+        path.iter()
+            .map(|&k| crate::syntax::printer::print(self, k))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// The module whose load wrote registry `sym`'s entry at `path` (KI-136), or `None`
+    /// for an entry nobody owns — a prelude or root write, or one a `:dissoc` retired.
+    pub fn registry_writer(&self, sym: Symbol, path: &[Value]) -> Option<Symbol> {
+        let key = (sym, self.registry_path_key(path));
+        self.runtime
+            .registry_writers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .copied()
     }
 
     pub fn registry_names(&self) -> Vec<Symbol> {
