@@ -489,6 +489,30 @@ pub(super) fn record_seq(heap: &mut Heap, v: Value) -> Result<Option<Value>, Lis
     )?))
 }
 
+/// `first` / `rest` for the JIT's non-pair fallback (`brood_rt_first`/`_rest`): the cases
+/// the kernel decides on its own — nil, vector, range, bytes, set, and the type error —
+/// answered; `None` for the two that need the evaluator (a record's `Seqable` dispatch,
+/// a lazy seq-view's realisation), which the caller turns into a deopt so the VM's own
+/// `first`/`rest` runs them. Everything else here is exactly the builtin.
+#[cfg(feature = "jit")]
+pub(crate) fn first_without_eval(heap: &mut Heap, v: Value) -> Option<LispResult> {
+    if matches!(v, Value::Map(_) | Value::SeqView(_)) {
+        return None;
+    }
+    let genv = heap.global();
+    Some(first(&[v], genv, heap))
+}
+
+/// See [`first_without_eval`].
+#[cfg(feature = "jit")]
+pub(crate) fn rest_without_eval(heap: &mut Heap, v: Value) -> Option<LispResult> {
+    if matches!(v, Value::Map(_) | Value::SeqView(_)) {
+        return None;
+    }
+    let genv = heap.global();
+    Some(rest(&[v], genv, heap))
+}
+
 pub(super) fn first(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let v0 = arg(args, 0);
     // a record dispatches to its `Seqable` view first (custom collection or fields).

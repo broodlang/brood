@@ -682,7 +682,8 @@ pub(crate) fn jit_tier_in_frame(
     heap.native_gateway_seq += 1;
     let gw_seq = heap.native_gateway_seq;
     let saved_gw = std::mem::replace(&mut heap.cur_native_gateway, gw_seq);
-    let outcome = f(heap as *mut Heap, base as i64, out);
+    let ctx = crate::jit::JitCallCtx::from_heap(heap);
+    let outcome = f(heap as *mut Heap, base as i64, out, &ctx);
     heap.cur_native_gateway = saved_gw;
     heap.jit_force_vm = saved_force_vm;
     heap.jit_call_env = saved_env;

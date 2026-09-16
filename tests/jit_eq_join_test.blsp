@@ -175,3 +175,52 @@
       (assert= :native
         (settle ej-hl-advance 2 (fn () (drive-advance 4000 (list ["(" 0 nil false]))) 40))
       (assert= :native (settle ej-float-join 2 (fn () (drive-float 4000 0.0)) 40)))))
+
+;; --- 3. `first`/`rest` beyond pairs ---------------------------------------------------
+
+;; The inline `first`/`rest` tag-checked for a pair and DEOPTED for anything else — the
+;; same class as `=` above: `second` (`(first (rest x))`) over a vector deopted per
+;; activation and was latched on `http`. The non-pair path now calls
+;; `brood_rt_first`/`_rest`, which answer nil / vector / range / bytes / set and the type
+;; error, and deopt only for a record or a seq-view.
+(defn ej-second (v) (second v))
+(defn ej-first-range (r) (first r))
+(defn ej-rest-vec-sum (v) (+ (first (rest v)) (first (rest (rest v)))))
+;; `rest` of a vector ALLOCATES a list, which can grow the pair slab and move its base —
+;; and this arm (no call, no cons) hoists the pair-slab bases at entry. Reading the LOCAL
+;; pair `p` after the fallback must go through the re-fetched base: without that this
+;; shape read through a stale pointer and segfaulted while it was being built.
+(defn ej-rest-then-pair (v p) (if (first (rest v)) (first p) 0))
+(defn- drive-rest-pair (i acc)
+  (if (= i 0)
+    acc
+    (drive-rest-pair (- i 1) (+ acc (ej-rest-then-pair [1 2 3] (list (+ i 1) 9))))))
+
+(describe "JIT `first`/`rest` beyond pairs"
+  (test "second / first / rest on vectors, ranges and nil"
+    (assert= 2 (ej-second [1 2 3]))
+    (assert= 2 (ej-second (list 1 2 3)))
+    (assert= nil (ej-second [1]))
+    (assert= nil (ej-second nil))
+    (assert= 5 (ej-first-range (range 5 9)))
+    (assert= 5 (ej-rest-vec-sum [1 2 3]))
+    (assert= 5 (ej-rest-vec-sum (list 1 2 3)))
+    (times 3000 (fn () (ej-second [1 2 3]) (ej-first-range (range 5 9)) (ej-rest-vec-sum [1 2 3])))
+    (assert= 2 (ej-second [1 2 3]))
+    (assert= 5 (ej-rest-vec-sum [1 2 3])))
+
+  (test "the type error is the VM's, from native code too"
+    (times 3000 (fn () (ej-second [1 2 3])))
+    ;; `second` is `(first (rest x))`, so the error that fires is `rest`'s.
+    (is (includes? (or (error-of (ej-second "abc")) "") "rest: expected")))
+
+  (test "a local pair read after a `rest`-of-vector fallback (hoisted pair bases)"
+    ;; sum over i of (i+1) for i = 1..3000 = 3000*3001/2 + 3000
+    (assert= 4504500 (drive-rest-pair 3000 0)))
+
+  (test "`second` of a vector keeps the arm native (was: deopt per activation, latched)"
+    (when (%native-tier?)
+      ;; `second` itself — the prelude arm that latched on `http`; `ej-second` is a
+      ;; one-call forwarder to it and never becomes the hot arm.
+      (assert= :native (settle second 1 (fn () (times 4000 (fn () (ej-second [1 2 3])))) 40))
+      (assert= :native (settle ej-rest-then-pair 2 (fn () (drive-rest-pair 4000 0)) 40)))))

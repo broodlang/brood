@@ -280,6 +280,66 @@ pub unsafe extern "C" fn brood_rt_car(
     };
 }
 
+/// `first` of a non-pair, for the JIT's inline `first` whose tag check failed — the
+/// **fallback instead of a deopt**. The inline path used to deopt for anything but a
+/// `Pair`, so an arm reading `first` of a vector (or `second` of anything: `(first
+/// (rest x))`, whose inner `rest` of a vector is a fresh LIST but whose outer `first`
+/// still saw a non-pair on every activation elsewhere) deopted per activation and was
+/// latched off the native tier — `second` was the arm `http` lost this way. Same status
+/// protocol as [`brood_rt_vector_ref`]: 0 = `*out` holds the answer, 1 = deopt (a
+/// record's `Seqable` dispatch or a seq-view's realisation, which need the evaluator),
+/// 2 = the builtin's own type error, parked.
+///
+/// # Safety
+/// `heap`/`out` live; the word triple is bytes the JIT read out of a real `Value`.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_first(
+    heap: *mut Heap,
+    out: *mut crate::core::value::Value,
+    w0: i64,
+    w1: i64,
+    w2: i64,
+) -> i64 {
+    let h = &mut *heap;
+    match crate::builtins::first_without_eval(h, words_to_val(w0, w1, w2)) {
+        None => 1,
+        Some(Ok(v)) => {
+            *out = v;
+            0
+        }
+        Some(Err(e)) => {
+            h.jit_pending_error = Some(e);
+            2
+        }
+    }
+}
+
+/// `rest` of a non-pair — see [`brood_rt_first`].
+///
+/// # Safety
+/// As [`brood_rt_first`].
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_rest(
+    heap: *mut Heap,
+    out: *mut crate::core::value::Value,
+    w0: i64,
+    w1: i64,
+    w2: i64,
+) -> i64 {
+    let h = &mut *heap;
+    match crate::builtins::rest_without_eval(h, words_to_val(w0, w1, w2)) {
+        None => 1,
+        Some(Ok(v)) => {
+            *out = v;
+            0
+        }
+        Some(Err(e)) => {
+            h.jit_pending_error = Some(e);
+            2
+        }
+    }
+}
+
 /// Byte pointer to the LOCAL nursery pair slab (`Vec<(Value, Value)>`). Called once at JIT
 /// function entry so inline `first`/`rest` can compute `base + idx * 48 + {0,24}` directly
 /// instead of calling `brood_rt_car`/`cdr` per element. Valid only while no `cons` can grow

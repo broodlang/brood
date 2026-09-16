@@ -13430,6 +13430,43 @@ defines and dropped its faces, leaving it provided and empty. `def-face`/`face-s
 `%register-protocol` and the three `editor/layers` registrations are `%registry-update!` ops
 now (`:append-new` added for the system-layer list); guards in `tests/isolate_load_test.blsp`.
 The kernel's own comment on `registry_cas` had named the rule the whole time.
+## 2026-09-16 — "lazy error traces" measured and rejected: the trace is ≤6% of `errors-deep`
+
+The hypothesis from the 0.27.0 write-up (`errors-deep` +72% when native frames started
+carrying `:trace`, later cut to +19%) was that the remaining 7.5× vs Elixir sat in trace
+construction. Three ceiling experiments on the row, best-of-7 pinned, same binary shape:
+
+| binary | `errors-deep` | `errors` |
+|---|---|---|
+| as shipped | 128 ms | 100 ms |
+| `push_trace` a no-op (no trace built at all) | 121 ms | 100 ms |
+| `throw` skipping the payload render + error-map probe | 127 ms | 90 ms |
+
+So the whole trace is ~6% of the row and the payload render 0% — `(catch e e)` on a payload
+throw never calls `to_value_map`, so the cached-keyword / frame-dedup rewrite of it that was
+tried first read noise on both rows and was reverted. What the profile actually shows per
+iteration: two closure allocations for `try`'s thunk and handler, three nested VM driver
+entries (`%try` → thunk, then handler), a `LispError` built and dropped (8%), and fifty native
+frames each returning a status and calling `brood_rt_trace_push`. The BEAM unwinds to the
+catch frame in O(1); Brood's unwind is O(frames) by protocol. That is the call-protocol
+frontier, not a trace lever. The one measurable piece — `errors` −10% from not rendering a
+rich payload at throw — is blocked on the same fact that made the render eager: a
+`LispError` is heap-independent and its message is read by `Display`, the LSP and the crash
+reporter, none of which hold a heap. Recorded so the next reader starts from the numbers.
+
+## 2026-09-16 — the tier audit: two more latched arms, one dead-block lowering bug, and a gate (KI-148)
+
+With `BROOD_JIT_BAIL_TRACE` naming latches, running every benchmark row under it took ten
+minutes and found what a week of value gates could not: `second` latched on `http` and
+`supervisor` (the inline `first`/`rest` deopted for anything but a pair), and json's
+`num-end`/`object-acc` had never lowered — the dead jump the compiler emits after a
+then-branch's tail `SelfCall` was translated with an empty stack into a live join. The
+`first`/`rest` fallback exposed a real hazard on its first run: `rest` of a vector allocates
+a list, the arm had hoisted the pair-slab bases at entry, and the next inline pair read went
+through a stale pointer — a segfault, now a sabotage-verified guard, fixed by holding the
+bases in `Variable`s and re-fetching after the call. `make tier-audit` runs the sweep as a
+gate (red on 0.29.0, green now), and the list/message rows A/B flat.
+
 ## 2026-09-15 — KI-132 closed: `=` on a string deopted per activation, and a type-mixed join was an unconditional deopt (ADR-353)
 
 Asked to review the VM and JIT for correctness, I ran the differential fuzzers first (seven

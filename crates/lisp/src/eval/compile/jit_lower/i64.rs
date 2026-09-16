@@ -658,6 +658,7 @@ pub(super) fn jit_lower_i64_arm(
     xsig.params.push(AbiParam::new(ptr_ty)); // heap
     xsig.params.push(AbiParam::new(types::I64)); // base
     xsig.params.push(AbiParam::new(ptr_ty)); // out: *mut Value (Done result) — see jit_lower.rs
+    xsig.params.push(AbiParam::new(ptr_ty)); // ctx: *const JitCallCtx (rung A0: unread)
     xsig.returns.push(AbiParam::new(types::I64)); // outcome
     let wrap_id = m
         .declare_function(&format!("brood_jit_i64x_{seq}"), Linkage::Export, &xsig)

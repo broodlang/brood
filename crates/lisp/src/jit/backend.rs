@@ -100,8 +100,49 @@ use crate::eval::compile::CompiledArm;
 /// **GC:** `out` is *not* a root. Nothing may allocate between the callee's store and the
 /// consumer taking the value — the same discipline the `brood_rt_{cons,car,cdr}` out-pointer
 /// ABI already runs under (`emit::call_handle`), and the outcome-0 path does no allocation.
-pub(crate) type JitArmFn =
-    extern "C" fn(*mut crate::core::heap::Heap, i64, *mut crate::core::value::Value) -> i64;
+pub(crate) type JitArmFn = extern "C" fn(
+    *mut crate::core::heap::Heap,
+    i64,
+    *mut crate::core::value::Value,
+    *const JitCallCtx,
+) -> i64;
+
+/// The per-activation context a native arm runs under — what the call ceremony used to
+/// hand over through `Heap` fields (`jit_call_env`, the two IC-block cursors,
+/// `jit_native_depth`), built by the caller on its own stack and passed by pointer as
+/// the arm's fourth argument (`docs/call-convention.md`, rung A0).
+///
+/// **Rung A0 is the ABI alone.** Every caller fills this from the heap fields it has just
+/// set, so the two agree by construction, and no native code reads it yet; the rungs
+/// after A0 move the readers (the callee's IC accesses, the depth check, the env for a
+/// global miss) onto it and then stop writing the heap fields per call. `repr(C)` and
+/// `Copy` so emitted code can build one in a stack slot with four stores.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct JitCallCtx {
+    /// The callee's environment (two words — `EnvRoot` is `repr(C, u8)`).
+    pub env: crate::core::heap::EnvRoot,
+    /// The callee's per-process IC-block cursors (KI-20).
+    pub ic_base: u32,
+    pub gic_base: u32,
+    /// The native depth the callee runs at (KI-11's bound).
+    pub depth: u64,
+}
+
+impl JitCallCtx {
+    /// The context as the heap fields currently describe it — what every Rust caller
+    /// passes at rung A0, after it has installed those fields the way it always did.
+    #[inline]
+    pub(crate) fn from_heap(heap: &crate::core::heap::Heap) -> Self {
+        let (ic_base, gic_base) = heap.ic_bases();
+        JitCallCtx {
+            env: heap.jit_call_env,
+            ic_base,
+            gic_base,
+            depth: heap.jit_native_depth as u64,
+        }
+    }
+}
 
 pub(crate) trait JitBackend {
     /// Lower `arm` to native code, or `None` to bail to the VM (obligations 1–3).

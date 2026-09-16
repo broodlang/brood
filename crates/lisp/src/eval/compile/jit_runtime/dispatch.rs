@@ -297,7 +297,8 @@ pub(crate) fn jit_dispatch_call(
                 heap.native_gateway_seq += 1;
                 let gw_seq = heap.native_gateway_seq;
                 let saved_gw = std::mem::replace(&mut heap.cur_native_gateway, gw_seq);
-                let outcome = f(heap as *mut Heap, base as i64, &mut ret as *mut Value);
+                let ctx = crate::jit::JitCallCtx::from_heap(heap);
+                let outcome = f(heap as *mut Heap, base as i64, &mut ret as *mut Value, &ctx);
                 heap.cur_native_gateway = saved_gw;
                 jit_suspend_feedback(heap, &arm, outcome, gw_seq);
                 heap.set_ic_bases(saved_bases);
