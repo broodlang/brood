@@ -27,7 +27,14 @@ on the same tree. Present at `c1647db8` before any of today's changes. The KI-13
 (a verdict differing between two lists), this time on the unused-private lint rather than
 an inferred return.
 
-**Next, in order:** (1) lazy error traces — `errors-deep` is 7.5× Elixir and went +72% at
+**Lazy error traces — MEASURED AND REJECTED (devlog 2026-09-16):** the trace is ≤6% of
+`errors-deep`; the row is the O(frames) unwind protocol plus `try`'s closures and driver
+entries. **The call convention is the item, scoped in `docs/call-convention.md`** (draft:
+the per-call obligation table, a ~40-instruction target from 218, the VM-call breakdown at
+tier 1 — 2 938 instructions per loop iteration with ~6% in thread-local scheduler lookups —
+and an increment ladder with a gate per rung). Start at rung A0.
+
+**Next, in order (superseded by the draft above; kept for the numbers):** (1) lazy error traces — `errors-deep` is 7.5× Elixir and went +72% at
 0.27.0 when native frames started carrying `:trace`; capture frame identities at throw and
 materialise only when a `catch` reads them (one session, measurable on `errors`/`errors-deep`
 with `make ab --floor`). (2) The call protocol — bintree/nqueens/pipeline at 5–8× Elixir, ~50%
