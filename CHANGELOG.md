@@ -4,7 +4,37 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
-## Unreleased
+## v0.30.0 — ranking is bounded and sharded, text composites in sRGB space, and the checker derives what bedit had declared
+
+**Ranking a candidate set is bounded by what it shows, and shards across processes**
+(ADR-357). `fuzzy/top query cands limit` keeps the best `limit` in a fold that rejects on an
+int compare and allocates nothing until a candidate places, and past `*fuzzy-parallel-min*`
+it splits the work across `*fuzzy-workers*` processes and merges their partial rankings —
+identical results, 1183 → 254 ms over 27k repo-style paths, where the old `filter`-then-take
+sorted 26k matches to display twenty. `*fuzzy-scorer*` makes the rules a value you can bind:
+a `(query) -> (cand) -> score | nil`, curried because the inner function runs tens of
+thousands of times per keystroke, and the sharded path ships the resolved closure since
+dynamic bindings do not cross `spawn`. A native kernel would have been 400x and was
+rejected — it freezes the scoring rules into the binary, in a language whose editor is meant
+to be reprogrammable from inside itself.
+
+**The score charges for distance, and finds the run it was given** (ADR-359). Nothing had
+cost anything for the characters skipped between matches, so a query smeared across a path's
+segments collected a word-boundary bonus per segment and beat the file it names —
+`limits.ex` ranked `…/reports/it3b/submission.ex` above `…/moneyclub/limits.ex`. Scattering
+paid. A gap now costs 3 to open and 1 per further char, and because the greedy walk cannot
+backtrack (it spends `l`,`i`,`m` inside `lib/moneyclub/` and never reaches the name), one
+`index-of` looks for the query as a contiguous run and the better alignment wins. `fb` now
+ranks `afb` above `foobar`; the scores in the docstrings moved with the rules.
+
+**Text composites in sRGB space** (ADR-358). The GUI renderer took glyph coverage into
+linear light, which is right for a rounded rect's edge or a translucent cursor and wrong for
+a glyph: coverage is the fraction of the pixel an outline covers, and every stack text is
+tuned against composites it in the encoded space. Blended linearly, white on black at half
+coverage landed at 188/255 instead of 128 — every antialiased rim glowed, which reads as
+blur. `gui-text-contrast!` had been added to correct that and ran in the direction of the
+fault (its 1.4 default took those rims to 205/255, and the setting that looked right was the
+clamp's minimum). It is a taste knob now, 1.0 meaning no lift.
 
 **Three checker rules, found by taking bedit's strict findings to zero.** `get-in` with a
 literal path reads the declared shape key by key — an absent key at any step answers the
