@@ -526,5 +526,6 @@ user code; reach for `table/new` instead."
   (if (%map-get m (quote :__id__) nil)
     nil
     (check-allow :discarded-catch
-      (try (reduce (%map-pairs m) (%table) (fn (t kv) (%table-put t (first kv) (second kv))))
+      (try
+        (reduce (%map-pairs m) (%table) (fn (t kv) (%table-put t (first kv) (second kv))))
         (catch e nil)))))
