@@ -412,8 +412,9 @@ impl Renderer {
     }
 
     /// Set the text contrast exponent (behind `gui-text-contrast!`): γ in 0.5..3.0, 1.0
-    /// the plain linear-light blend. Rebuilds the coverage curve and forgets the retained
-    /// frame; the glyph cache holds raw coverage and is untouched.
+    /// the plain sRGB lerp (`blend_text`) — i.e. no lift at all. Rebuilds the coverage
+    /// curve and forgets the retained frame; the glyph cache holds raw coverage and is
+    /// untouched.
     pub(super) fn set_text_contrast(&mut self, gamma: f32) {
         self.text_contrast = if gamma.is_finite() {
             gamma.clamp(0.5, 3.0)
@@ -579,8 +580,11 @@ impl Renderer {
         // canvas band clips the rest: rows outside `[y0, y1)` are not touched.
         let (fb_w, y0, y1) = (canvas.w, canvas.y0, canvas.y1);
         // Contrast lift (`text_contrast`): applied to a monochrome glyph where its
-        // colour is lighter than the pixel it lands on — light text on a dark ground is
-        // what a linear-light blend renders thin — and never to a colour glyph (emoji).
+        // colour is lighter than the pixel it lands on, and never to a colour glyph
+        // (emoji). A taste knob now, not a correction: the text lerp is in sRGB space
+        // (`blend_text`), so γ = 1.0 already puts an edge pixel at the coverage it
+        // represents. It used to compensate a linear-light blend, which is why its
+        // default was 1.4 and why the value that actually looked right was 0.5.
         let lift = self.text_contrast != 1.0 && !cg.color;
         let lut = &self.cov_lut;
         let fg_lum = luma(fg);
@@ -618,9 +622,9 @@ impl Renderer {
                     } else {
                         cov
                     };
-                    blend_rgb(*dst, fg, cov)
+                    blend_text_rgb(*dst, fg, cov)
                 } else {
-                    blend(*dst, fg, if lifted { lut[a as usize] } else { a })
+                    blend_text(*dst, fg, if lifted { lut[a as usize] } else { a })
                 };
             }
         }
@@ -895,22 +899,52 @@ pub(super) fn blend(dst: u32, fg: [u8; 3], cov: u8) -> u32 {
     (r << 16) | (g << 8) | b
 }
 
-/// The subpixel sibling of `blend`: composite `fg` over `dst` with a separate coverage
-/// per colour channel (`cov[0]` red, `[1]` green, `[2]` blue), in linear light. Each
-/// channel is the same single-channel lerp `blend` does, so the two are visually
+/// Composite `fg` over `dst` at coverage `cov` **in sRGB space** — a plain per-channel
+/// lerp of the encoded values, no linear round trip. This is the TEXT path, and it is
+/// deliberately not what `blend` above does.
+///
+/// A rasteriser's coverage is not a light quantity, it is the fraction of the pixel the
+/// outline covers, and every font stack that text is tuned against (FreeType/cairo/Xft,
+/// and so Emacs) composites it in the encoded space. Blending it in linear light instead
+/// makes a partly covered pixel far brighter than the fraction it represents: white on
+/// black at half coverage lands at 188/255 rather than 128, and at quarter coverage 137
+/// rather than 64. Every antialiased rim then glows, which reads as soft, puffy text —
+/// and it is why this renderer grew a contrast knob whose useful setting was BELOW 1.0
+/// (γ=0.5 squares the coverage, which is roughly the inverse of the sRGB encode: it was
+/// cancelling this blend). With the lerp in sRGB, γ = 1.0 is the honest default again.
+///
+/// Geometry keeps `blend`: a rounded rect's edge coverage and the cursor's translucent
+/// overlay ARE light quantities, and linear light is right for them.
+pub(super) fn blend_text(dst: u32, fg: [u8; 3], cov: u8) -> u32 {
+    if cov == 0 {
+        return dst;
+    }
+    if cov == 255 {
+        return pack(fg);
+    }
+    let a = cov as u32;
+    let inv = 255 - a;
+    // +127 rounds to nearest rather than truncating, so a symmetric pair of coverages
+    // composites symmetrically.
+    let ch =
+        |shift: u32, f: u8| -> u32 { (((dst >> shift) & 0xff) * inv + f as u32 * a + 127) / 255 };
+    (ch(16, fg[0]) << 16) | (ch(8, fg[1]) << 8) | ch(0, fg[2])
+}
+
+/// The subpixel sibling of `blend_text`: composite `fg` over `dst` with a separate
+/// coverage per colour channel (`cov[0]` red, `[1]` green, `[2]` blue), in sRGB space.
+/// Each channel is the same single-channel lerp `blend_text` does, so the two stay
 /// consistent where a gray and a subpixel glyph sit side by side.
-pub(super) fn blend_rgb(dst: u32, fg: [u8; 3], cov: [u8; 3]) -> u32 {
+pub(super) fn blend_text_rgb(dst: u32, fg: [u8; 3], cov: [u8; 3]) -> u32 {
     if cov == [0, 0, 0] {
         return dst;
     }
     if cov == [255, 255, 255] {
         return pack(fg);
     }
-    let lut = &*SRGB_TO_LINEAR;
     let ch = |shift: u32, c: u8, f: u8| -> u32 {
-        let d = lut[((dst >> shift) & 0xff) as usize];
-        let a = c as f32 / 255.0;
-        linear_to_srgb(lut[f as usize] * a + d * (1.0 - a))
+        let a = c as u32;
+        (((dst >> shift) & 0xff) * (255 - a) + f as u32 * a + 127) / 255
     };
     (ch(16, cov[0], fg[0]) << 16) | (ch(8, cov[1], fg[1]) << 8) | ch(0, cov[2], fg[2])
 }
@@ -1218,6 +1252,35 @@ mod text_contrast_tests {
             lut[128] >= 160,
             "half coverage should lift markedly at γ=1.6: {}",
             lut[128]
+        );
+    }
+
+    /// Text composites in the ENCODED space, so a partly covered pixel comes out at the
+    /// fraction of the pixel the outline covers — 50% coverage of white on black is
+    /// mid-grey, not the 188/255 a linear-light lerp produces. This is the whole
+    /// difference between text that reads crisp and text that reads puffy, so it is
+    /// pinned as numbers rather than left to the eye.
+    #[test]
+    fn text_composites_in_srgb_space_not_linear_light() {
+        assert_eq!(blend_text(0x000000, [0xff; 3], 128) & 0xff, 128);
+        assert_eq!(blend_text(0x000000, [0xff; 3], 64) & 0xff, 64);
+        assert_eq!(blend_text(0xffffff, [0; 3], 128) & 0xff, 127);
+        // the ends are exact, and the linear path (geometry, cursor) is left alone
+        assert_eq!(blend_text(0x000000, [0xff; 3], 0), 0x000000);
+        assert_eq!(blend_text(0x000000, [0xff; 3], 255), 0xffffff);
+        assert!(
+            blend(0x000000, [0xff; 3], 128) & 0xff > 180,
+            "the linear-light blend must stay as it is for geometry"
+        );
+        // per-channel subpixel coverage lerps the same way, so a gray and an LCD glyph
+        // side by side carry the same weight
+        assert_eq!(
+            blend_text_rgb(0x000000, [0xff; 3], [128, 128, 128]),
+            0x808080
+        );
+        assert_eq!(
+            blend_text_rgb(0x000000, [0xff; 3], [255, 128, 0]) & 0xffffff,
+            0xff8000
         );
     }
 

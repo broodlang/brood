@@ -22956,6 +22956,39 @@ candidates that belong in the next twenty. The kernel remains unwritten on purpo
 measurement that would justify it is in `std/fuzzy.blsp`, next to the code that does
 without it.
 
+## ADR-358 — Text composites in sRGB space; the contrast knob is taste, not a correction
+
+**Status:** accepted (2026-09-16). **Context:** bedit's text read puffy beside Emacs.
+
+**Context.** The GUI renderer composited *everything* in linear light: sRGB → linear, lerp
+by coverage, linear → sRGB (`blend`/`blend_rgb`). That is right for light — a rounded rect's
+edge coverage, a translucent cursor — and wrong for text. A rasteriser's coverage is not a
+light quantity: it is the fraction of the pixel the outline covers, and every stack text is
+tuned against (FreeType/cairo/Xft, hence Emacs) lerps it in the ENCODED space. Blended in
+linear light instead, a partly covered pixel comes out far brighter than the fraction it
+represents — white on black at half coverage 188/255 rather than 128, at quarter coverage
+137 rather than 64 — so every antialiased rim glows. Stems stop having ends.
+
+The failure mode is what makes this worth an ADR: the glow reads as *blur*, not as weight.
+So the renderer grew `gui-text-contrast!` to "fix" it, bedit defaulted it to 1.4, and that
+**lifted the same rims further** (205/255 at half coverage) — a correction applied in the
+direction of the fault. Read as a knob it looked reasonable; the number that actually looked
+right was 0.5, the clamp's *minimum*, because squaring the coverage roughly inverts the sRGB
+encode. A knob whose useful setting is at the end of its range is a design telling you it is
+compensating for something.
+
+**Decision.** Text composites in sRGB space — `blend_text` / `blend_text_rgb`, a plain
+per-channel lerp of the encoded values — and geometry keeps `blend`, which is linear and
+correct for it. `blend_rgb` (the linear subpixel sibling) had no other caller and is gone.
+`gui-text-contrast!` stays as a taste knob with 1.0 meaning no lift, and bedit's default
+drops 1.4 → 1.0. `text_composites_in_srgb_space_not_linear_light` pins the numbers, because
+"crisp" is not a thing a test can see but 128/255 is.
+
+**Consequence.** Light-on-dark text renders at the weight the outline describes, on the
+default settings, with no per-user knob. The general lesson is in the shape of the bug, not
+the fix: a correction that makes a symptom worse is evidence about the model underneath it,
+and a knob pinned at its limit is the same evidence in another form.
+
 ## ADR-359 — A fuzzy score charges for distance, and looks for the run it was given
 
 **Status:** accepted (2026-09-16). **Context:** project find-file ranked the wrong files first.
