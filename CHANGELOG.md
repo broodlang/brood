@@ -33,6 +33,12 @@ it (`scripts/redundant-sigs.blsp` asks per declaration, and its `--remove` re-de
 catch a sig another one depended on). What remains declares a fact the inference does not
 reach on its own.
 
+**`nest check FILE…` runs the whole-project lints too, and both forms count them** (KI-149).
+The unused-private and duplicate-defs lints ran only in the bare `nest check` — CI's
+explicit-list invocation never ran them — and their counts were discarded, so a dead private
+function had never failed a gate in either form. Both forms now compute the lints over the
+whole project, report them for the files asked about, and fail on them.
+
 **A field read guards itself.** `(when (:proc state) (os/close (:proc state)))` — the idiom
 for a maybe-field — read `nil | subprocess` under its own guard: a bare access path as a
 test now narrows the path by truthiness in both branches, the keyword-call read `(:k m)` is

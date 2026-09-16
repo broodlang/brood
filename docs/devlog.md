@@ -882,7 +882,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-15** — the four open known issues closed: `apply` binds a callee's type variable (KI-140); the dense table region is chunked, 6.4 GB → 52 MB reserved on `regex_test` (KI-142, ADR-354); registry writes are attributed to the module whose load made them and the image differential compares per-module registrations (KI-136)
 - **2026-09-16** — v0.29.0 (the open issues closed) and v0.29.1 (KI-147: a refer-all mistook another process's finishing load for a cycle, so `nest release` refused every hive bundle since v0.28.0); every project at `:brood ">= 0.29.0"`; hive deployed on v0.29.1
 - **2026-09-15** — ADR-355: a `let`-bound `fn` literal's parameters are derived from its callers (the ADR-341 rule scoped to the binding; sites under callback literals and nested `let`s type), and a `sig` naming the required positions seeds a `defn` with undeclared `&optional`s. bedit strict 58 → 48 with no bedit change; downstream sweep of 16 projects green (hive's reds = version skew)
-- **2026-09-16** — v0.29.2 (ADR-356: `markdown/->html` a core module — hive's lean bundle could not find `docs`); hive's tests render the running version's reference seeds; then bedit strict 48 → 0 through three checker rules (`get-in` over a literal path reads the declared shape, `%map-pairs` walks a `map<K, V>` as its entries, the site collector walks a `let`-bound lambda under its derived parameters) and bedit's own leaves; then three more derivation gaps (an `&optional` function.s collected parameters, a let-bound lambda.s self-call folding to ⊥, a fold accumulator.s fields through the ascent) and the four workaround `sig`s deleted; then 323 redundant `sig`s removed from std (`scripts/redundant-sigs.blsp`), five kept because a neighbour or a caller read through them
+- **2026-09-16** — v0.29.2 (ADR-356: `markdown/->html` a core module — hive's lean bundle could not find `docs`); hive's tests render the running version's reference seeds; then bedit strict 48 → 0 through three checker rules (`get-in` over a literal path reads the declared shape, `%map-pairs` walks a `map<K, V>` as its entries, the site collector walks a `let`-bound lambda under its derived parameters) and bedit's own leaves; then three more derivation gaps (an `&optional` function.s collected parameters, a let-bound lambda.s self-call folding to ⊥, a fold accumulator.s fields through the ascent) and the four workaround `sig`s deleted; then 323 redundant `sig`s removed from std (`scripts/redundant-sigs.blsp`), five kept because a neighbour or a caller read through them; KI-149 fixed (the whole-project lints ran only in the bare `nest check` and never counted — both forms run and count them now)
 
 ---
 
@@ -13666,3 +13666,18 @@ its body's DEMANDS, which is why "same signature" flagged it. The tool's criteri
 defect: it now removes one sig at a time and keeps each removal only when the file's
 `nest check --strict` count does not rise (sabotage-verified: it keeps both bedit
 contracts). The eight survivors of the first sweep are what that rule finds.
+
+## 2026-09-16 — KI-149: the list did not change the verdict, it changed which passes ran
+
+Filed as the KI-137 class (a checker verdict that depends on the file list). It was simpler
+and worse: the unused-private and duplicate-defs lints are whole-project passes, and only
+the bare `nest check` ran them — `nest check FILE…`, the form CI uses over `std/**
+tests/** examples/**`, ran the per-file walk alone — and the bare form discarded the lints'
+counts, returning only the per-file tally. So a dead private function had never failed a
+gate in either form, ever. Both forms run both lints over the whole project now, reported
+for the files asked about and counted (`project-whole-lints`); `use-a` in
+`lazy_load_test` was dead (the unit moved to a child program that defines its own) and is
+gone. A nest integration test scaffolds a project with a dead private and asserts the
+three invocations agree; the sabotage (lints back out of `check-files`) reds exactly the
+listed arm. Downstream is unaffected today — bedit, hatch, hive and store-postgres all
+carry zero unused privates — but their `nest check` now means it.
