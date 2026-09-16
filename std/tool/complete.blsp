@@ -205,7 +205,6 @@ suggestions\", never to an error on the user's command line."
 ;; real tags, offering names like `a` and `unit` that no test actually carries. A
 ;; multi-line string could fool the line-local check; that costs one wrong hint.
 (defn- complete-line-start (text i) (complete-line-start-walk text i 0))
-(sig complete-line-start (string int -> int))
 
 (defn- complete-line-start-walk (text i at)
   (let (nl (index-of-from text "\n" at))

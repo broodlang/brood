@@ -44,7 +44,6 @@ takes; everything else is the mechanism behind it.")
 (defn image-path (root)
   "Where `root`'s startup image lives."
   (path/join root *project-image-file*))
-(sig image-path (string -> string))
 
 ;; The staleness key: every source file's path + size + mtime, plus the running
 ;; binary's build id. Any edit, add or delete changes it, as does a new `brood`.

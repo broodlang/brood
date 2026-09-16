@@ -95,7 +95,6 @@ the line) was a third of the whole pass."
     (and (< (inc i) (string/length line))
       (= (string/char-at line i) "(")
       (= (string/char-at line (inc i)) ")"))))
-(sig shell-defines-after? (string int -> bool))
 
 (defn- shell-line-spans (line base faces)
   "The spans for one `line` at offset `base`, ascending and non-overlapping: one scan,

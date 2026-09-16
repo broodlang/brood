@@ -52,7 +52,6 @@ the structure queries below navigate the result directly. (This replaced an
 in-Brood `annotate` walk that re-derived positions by summing leaf lengths: O(n)
 interpreted and the bottleneck in structural navigation.)"
   (reflect/parse-source-positioned text))
-(sig tree (string -> map))
 
 ;; ---- structure queries ------------------------------------------------------
 
@@ -182,7 +181,6 @@ shared body of the forward motions."
         nxt (or (sexp-atom-around enc rp keep?)
               (seq/find (forms-of enc) (fn (f) (and (>= (sexp-start f) rp) (keep? f))))))
     (if (nil? nxt) point (sexp-abs site (sexp-end nxt)))))
-(sig sexp-sibling-forward (string int fn -> int))
 
 (defn- sexp-sibling-backward (text point keep?)
   "Start of the previous sibling form satisfying `keep?` ending at or before `point`, within
@@ -194,7 +192,6 @@ The shared body of the backward motions."
         prev (or (sexp-atom-around enc rp keep?)
                (last (seq/filter (forms-of enc) (fn (f) (and (<= (sexp-end f) rp) (keep? f)))))))
     (if (nil? prev) point (sexp-abs site (sexp-start prev)))))
-(sig sexp-sibling-backward (string int fn -> int))
 
 (defn point-forward (text point)
   "End of the next sexp at or after `point` within the enclosing list; unchanged if
@@ -202,14 +199,12 @@ there is none (the Emacs `forward-sexp`).
 
     (sexp/point-forward \"(a b)\" 0)    → 5"
   (sexp-sibling-forward text point sexp-anything?))
-(sig point-forward (string int -> int))
 
 (defn point-backward (text point)
   "Start of the previous sexp ending at or before `point` (Emacs `backward-sexp`).
 
     (sexp/point-backward \"(a b)\" 5)   → 0"
   (sexp-sibling-backward text point sexp-anything?))
-(sig point-backward (string int -> int))
 
 (defn point-list-forward (text point)
   "End of the next LIST at or after `point` within the enclosing list — atoms are stepped
@@ -217,7 +212,6 @@ over, not stopped at (Emacs `forward-list`, C-M-n); unchanged if there is none.
 
     (sexp/point-list-forward \"(a) (b)\" 0)   → 3"
   (sexp-sibling-forward text point sexp-list?))
-(sig point-list-forward (string int -> int))
 
 (defn point-list-backward (text point)
   "Start of the previous LIST ending at or before `point` — atoms stepped over (Emacs
@@ -225,7 +219,6 @@ over, not stopped at (Emacs `forward-list`, C-M-n); unchanged if there is none.
 
     (sexp/point-list-backward \"(a) (b)\" 7)  → 4"
   (sexp-sibling-backward text point sexp-list?))
-(sig point-list-backward (string int -> int))
 
 ;; The keys get these two; the pure pair above keeps Emacs' exact contract (`forward-sexp`
 ;; at the end of a list ERRORS, i.e. does not move) because the edits are built on it —
@@ -241,7 +234,6 @@ delimiter, else `point`.
     (sexp/point-forward-out \"(a b) c\" 4)   → 5"
   (let (q (point-forward text point))
     (if (= q point) (point-up-forward text point) q)))
-(sig point-forward-out (string int -> int))
 
 (defn point-backward-out (text point)
   "`point-backward`, escaping the enclosing list when no sibling precedes (paredit
@@ -250,7 +242,6 @@ delimiter, else `point`.
     (sexp/point-backward-out \"(a b) c\" 1)   → 0"
   (let (q (point-backward text point))
     (if (= q point) (point-up text point) q)))
-(sig point-backward-out (string int -> int))
 
 (defn point-up (text point)
   "Start of the enclosing list — before its opening delimiter (Emacs
@@ -259,7 +250,6 @@ delimiter, else `point`.
     (sexp/point-up \"(a (b))\" 4)       → 3"
   (let (site (sexp-site text point))
     (if (sexp-top-level? site) point (sexp-abs site (sexp-start (:enc site))))))
-(sig point-up (string int -> int))
 
 (defn point-up-forward (text point)
   "Just past the enclosing list's closing delimiter — the forward counterpart of
@@ -268,7 +258,6 @@ delimiter, else `point`.
     (sexp/point-up-forward \"(a (b))\" 4)   → 6"
   (let (site (sexp-site text point))
     (if (sexp-top-level? site) point (sexp-abs site (sexp-end (:enc site))))))
-(sig point-up-forward (string int -> int))
 
 (defn point-down (text point)
   "Just inside the next list at or after `point` (Emacs `down-list`); unchanged if
@@ -279,7 +268,6 @@ none.
         rp (:rp site)
         lst (seq/find (forms-of (:enc site)) (fn (f) (and (sexp-list? f) (>= (sexp-start f) rp)))))
     (if (nil? lst) point (sexp-abs site (inc (sexp-start lst))))))
-(sig point-down (string int -> int))
 
 (defn- sexp-defun-edge (text point edge)
   "The `edge` (`:start` / `:end`) of the top-level form containing `point`; `point` when
@@ -297,7 +285,6 @@ none.
   "Start of the top-level form containing `point` (Emacs `beginning-of-defun`);
 unchanged if `point` isn't within one."
   (sexp-defun-edge text point :start))
-(sig point-defun-start (string int -> int))
 
 (defn point-defun-end (text point)
   "End of the top-level form containing `point` (Emacs `end-of-defun`, C-M-e);
@@ -305,7 +292,6 @@ unchanged if `point` isn't within one.
 
     (sexp/point-defun-end \"(defn f (x)\n  (+ x 1))\n\" 0)   → 22"
   (sexp-defun-edge text point :end))
-(sig point-defun-end (string int -> int))
 
 ;; ---- pure structural edits: (text point) -> [new-text new-point] ------------
 ;; The paredit family. Each computes the whole new text plus where point should land,
@@ -482,7 +468,6 @@ new open (paredit `wrap-round`).
 
     (sexp/point-wrap-round \"a b\" 0)     → [\"(a) b\" 1]"
   (point-wrap text point "(" ")"))
-(sig point-wrap-round (string int -> (or nil (tuple string int))))
 
 (defn span-wrap (text lo hi open close)
   "Wrap the span `[lo, hi)` of `text` in `open … close`, point landing just inside the new
@@ -555,7 +540,6 @@ parens. At end of line, kills the newline. At least `point` (a no-op at the clos
           (= point le) (math/min n (inc point))
           ; empty rest of line → kill the newline
           else le)))))
-(sig point-kill-end (string int -> int))
 ;; ---- buffer commands: (buf key) -> buf (bind these in a keymap) -------------
 
 (defn- sexp-apply-edit (buf result)

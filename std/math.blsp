@@ -88,13 +88,11 @@ partner of `quot`. `mod` is the one whose sign follows the divisor.
     (math/rem 7 2)    → 1
     (math/rem -7 2)   → -1"
   (%rem a b))
-(sig rem (int int -> int))
 (defn ->fixed (x n)
   "Render number `x` as a string with exactly `n` digits after the decimal point (rounded).
 
     (math/->fixed 1.5 2)   → \"1.50\""
   (%->fixed x n))
-(sig ->fixed (number int -> string))
 
 (defn rational (n d)
   "The exact rational `n`/`d` — reduced, with a positive denominator (a denominator
@@ -107,7 +105,6 @@ of 1 gives an integer). Same as `(/ n d)` for integers; errors when `d` is 0.
 
     (math/quot 7 2)    → 3"
   (%quot a b))
-(sig quot (int int -> int))
 (defn mod (a b)
   "Euclidean modulo: the result is always non-negative and lies in [0, |b|).
 
@@ -181,13 +178,11 @@ tower, not just the int `0`. A type with no impl RAISES rather than answering.
 
     (math/even? 4)         → true"
   (= (math/rem n 2) 0))
-(sig even? (int -> bool))
 (defn odd? (n)
   "True if integer `n` is odd.
 
     (math/odd? 3)         → true"
   (not (even? n)))
-(sig odd? (int -> bool))
 
 ;; ---- aggregation ------------------------------------------------------------
 (defn sum (xs)
@@ -214,7 +209,6 @@ tower, not just the int `0`. A type with no impl RAISES rather than answering.
 
     (math/ceil 1.2)       → 2"
   (- (math/floor (- x))))
-(sig ceil (number -> int))
 
 ;; round half away from zero: floor(x+0.5) for x>=0, mirrored for x<0.
 (defn round (x)
@@ -222,7 +216,6 @@ tower, not just the int `0`. A type with no impl RAISES rather than answering.
 
     (math/round 2.5)       → 3"
   (if (< x 0) (- (math/floor (+ (- x) 0.5))) (math/floor (+ x 0.5))))
-(sig round (number -> int))
 
 ;; (pow base exp) — `exp` must be an integer (use `sqrt` for roots). Int base +
 ;; non-negative exp stays an int (overflow raises, like `*`); a negative exp gives
@@ -320,64 +313,53 @@ a float for a float `x` unless the rounded value is an integer, exact for an exa
 
     (math/sin 0)          → 0.0"
   (%sin x))
-(sig sin (number -> float))
 (defn cos (x)
   "The cosine of `x` (radians). Returns a float.
 
     (math/cos 0)          → 1.0"
   (%cos x))
-(sig cos (number -> float))
 (defn tan (x)
   "The tangent of `x` (radians). Returns a float.
 
     (math/tan 0) → 0.0"
   (%tan x))
-(sig tan (number -> float))
 (defn asin (x)
   "The arcsine of `x` in radians. `x` must be in [-1, 1]; raises otherwise.
 
     (math/asin 0) → 0.0"
   (%asin x))
-(sig asin (number -> float))
 (defn acos (x)
   "The arccosine of `x` in radians. `x` must be in [-1, 1]; raises otherwise.
 
     (math/acos 1) → 0.0"
   (%acos x))
-(sig acos (number -> float))
 (defn atan (x)
   "The arctangent of `x` in radians (result in [-π/2, π/2]).
 
     (math/atan 0) → 0.0"
   (%atan x))
-(sig atan (number -> float))
 (defn atan2 (y x)
   "The angle in radians of the vector (`x`, `y`) from the positive x-axis, in (-π, π]. Handles x=0.
 
     (math/atan2 0 1)      → 0.0"
   (%atan2 y x))
-(sig atan2 (number number -> float))
 (defn exp (x)
   "e raised to the power `x`. Returns a float.
 
     (math/exp 0)          → 1.0"
   (%exp x))
-(sig exp (number -> float))
 (defn ln (x)
   "The natural logarithm of `x`. `x` must be positive; raises otherwise.
 
     (math/ln 1)           → 0.0"
   (%ln x))
-(sig ln (number -> float))
 (defn log2 (x)
   "The base-2 logarithm of `x`. `x` must be positive; raises otherwise.
 
     (math/log2 8) → 3.0"
   (%log2 x))
-(sig log2 (number -> float))
 (defn log10 (x)
   "The base-10 logarithm of `x`. `x` must be positive; raises otherwise.
 
     (math/log10 1000) → 3.0"
   (%log10 x))
-(sig log10 (number -> float))

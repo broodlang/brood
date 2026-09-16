@@ -505,4 +505,3 @@ errors unless it has a `JsonEncode` impl. Pure.
 
     (json/encode [1 2])   → \"[1,2]\""
   (apply str (reverse (emit v nil))))
-(sig encode (any -> string))

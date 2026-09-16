@@ -28,6 +28,11 @@ reads its elements over every term, two record shapes over one key set merge fie
 under the ascent's widening, and a callback literal in the collector is walked under the
 accumulator the fold promises. `BROOD_DERIVE_DBG=1` traces the derivation's rounds.
 
+**323 redundant `sig`s are gone from std** — each one the checker infers verbatim without
+it (`scripts/redundant-sigs.blsp` asks per declaration, and its `--remove` re-derives to
+catch a sig another one depended on). What remains declares a fact the inference does not
+reach on its own.
+
 **A field read guards itself.** `(when (:proc state) (os/close (:proc state)))` — the idiom
 for a maybe-field — read `nil | subprocess` under its own guard: a bare access path as a
 test now narrows the path by truthiness in both branches, the keyword-call read `(:k m)` is

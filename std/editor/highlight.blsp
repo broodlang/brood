@@ -321,7 +321,6 @@ the top (a backward scan can't know string state), which is O(pos) — run nativ
 (`scan-form-start`, the ADR-093 scanner family), because interpreted it stalled eldoc /
 fontify-restart multi-second on every idle beat in a large file."
   (reflect/scan-form-start src pos))
-(sig safe-restart (string int -> int))
 
 (defn line-restart (src pos)
   "A line-oriented lexer's `:fontify-restart`: `pos` itself. No token crosses a line (shell,
@@ -362,7 +361,6 @@ highlight, isearch overlays, and bracket-match are all such ranges."
         (not (and (>= pos lo) (< pos hi))) acc
         (nil? acc) f
         else (into acc f)))))
-(sig ranges-face (seqable any -> any))
 
 (defn fontify-runs (text base spans ranges)
   "Coalesce `text` (its first char at buffer offset `base`) into a list of
@@ -374,7 +372,6 @@ or HTML; `()` for empty `text`. `spans` must be ascending + non-overlapping (the
 The whole tile + overlay-merge is the native `%span-runs` (it runs per visible line every
 frame, including a region/isearch overlay during a drag-select), so this is a thin call."
   (%span-runs text base spans ranges))
-(sig fontify-runs (string int any any -> list))
 
 (defn highlight-chunks (full base line overrides)
   "Return `[substring face]` chunks that tile `line` — the visible region starting
@@ -509,7 +506,6 @@ that form. Sound, and the difference between O(enclosing form) and O(pos) — th
 interpreted, and at offset 600 of a 1.5 KB buffer the O(pos) version cost 1.4 ms, on every
 newline an auto-indenter handles."
   (hl-enc-scan full (safe-restart full pos) pos (string/length full) '()))
-(sig enclosing-open (string int -> int))
 
 ;; ---- enclosing call (for signature hints) -----------------------------------
 

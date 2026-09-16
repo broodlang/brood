@@ -882,7 +882,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-15** — the four open known issues closed: `apply` binds a callee's type variable (KI-140); the dense table region is chunked, 6.4 GB → 52 MB reserved on `regex_test` (KI-142, ADR-354); registry writes are attributed to the module whose load made them and the image differential compares per-module registrations (KI-136)
 - **2026-09-16** — v0.29.0 (the open issues closed) and v0.29.1 (KI-147: a refer-all mistook another process's finishing load for a cycle, so `nest release` refused every hive bundle since v0.28.0); every project at `:brood ">= 0.29.0"`; hive deployed on v0.29.1
 - **2026-09-15** — ADR-355: a `let`-bound `fn` literal's parameters are derived from its callers (the ADR-341 rule scoped to the binding; sites under callback literals and nested `let`s type), and a `sig` naming the required positions seeds a `defn` with undeclared `&optional`s. bedit strict 58 → 48 with no bedit change; downstream sweep of 16 projects green (hive's reds = version skew)
-- **2026-09-16** — v0.29.2 (ADR-356: `markdown/->html` a core module — hive's lean bundle could not find `docs`); hive's tests render the running version's reference seeds; then bedit strict 48 → 0 through three checker rules (`get-in` over a literal path reads the declared shape, `%map-pairs` walks a `map<K, V>` as its entries, the site collector walks a `let`-bound lambda under its derived parameters) and bedit's own leaves; then three more derivation gaps (an `&optional` function.s collected parameters, a let-bound lambda.s self-call folding to ⊥, a fold accumulator.s fields through the ascent) and the four workaround `sig`s deleted
+- **2026-09-16** — v0.29.2 (ADR-356: `markdown/->html` a core module — hive's lean bundle could not find `docs`); hive's tests render the running version's reference seeds; then bedit strict 48 → 0 through three checker rules (`get-in` over a literal path reads the declared shape, `%map-pairs` walks a `map<K, V>` as its entries, the site collector walks a `let`-bound lambda under its derived parameters) and bedit's own leaves; then three more derivation gaps (an `&optional` function.s collected parameters, a let-bound lambda.s self-call folding to ⊥, a fold accumulator.s fields through the ascent) and the four workaround `sig`s deleted; then 323 redundant `sig`s removed from std (`scripts/redundant-sigs.blsp`), five kept because a neighbour or a caller read through them
 
 ---
 
@@ -13640,3 +13640,20 @@ the keyword-call spelling `(:k m)` was not a path at all. Both are now; and the 
 is the MEET of the narrowing and the structural type, because the guard is recorded in
 whatever scope met the `if` — an inference-side scope that did not know `state` recorded
 `false | nil` for the else branch, and the walk then read that instead of `nil`.
+
+## 2026-09-16 — 323 redundant `sig`s removed from std
+
+The sweep the sharper derivation makes possible. `scripts/redundant-sigs.blsp` asks the
+checker, per declaration, whether it infers the same signature with that one form blanked
+(`reflect/source-signatures` on the text, everything else as written), and prints the ones
+it does: **328 of 840** across 68 files — thin wrappers over a kernel primitive (`gui/title`,
+`hash/hmac-sha1`), predicates, and a long tail of helpers whose callers already say what they
+are. Removing them found two things the per-sig test cannot see. Four of `math`'s were
+interdependent: `abs`, `sqrt`, `positive?`, `negative?` each read `number` only while a
+sibling's sig anchored it, and read `ordered` once all four were gone — the script's
+`--remove` re-derives and reports that as `MISMATCH`. And `bytes/at`'s `(bytes int -> int)`
+anchored four RETURN checks in the same file: without it `bytes/int` and siblings yielded
+`number` against a declared `int`, which only the strict gate saw. Those five stay; 323 go.
+Both gates, the sig-adoption, doc-example, doctest, audit and contract files, and bedit's
+strict zero all hold. The prelude is not swept: its names are read through the curated
+table and the frozen heap, where this file-level equality proves less.

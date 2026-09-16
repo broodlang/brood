@@ -55,7 +55,6 @@ incomplete input; feeds the editor's `:fontify` mode service and the shared
 (defn- md-lead-ws (line)
   "The column where `line`'s leading whitespace (spaces / tabs) ends."
   (md-lead-ws-at line 0 (string/length line)))
-(sig md-lead-ws (string -> int))
 (defn- md-lead-ws-at (line i n)
   ;; `string/span` is the native run scan — one call, not one `char-at` per column
   (math/min n (string/span line i " \t")))
@@ -64,7 +63,6 @@ incomplete input; feeds the editor's `:fontify` mode service and the shared
 (defn- md-count-char (line i n ch)
   "How many copies of single-char `ch` run consecutively starting at offset `i`."
   (md-count-char-at line i n ch 0))
-(sig md-count-char (string int int string -> int))
 (defn- md-count-char-at (line i n ch k)
   (+ k (- (math/min n (string/span line i ch)) i)))
 (sig md-count-char-at (string int int string int -> int))
@@ -96,7 +94,6 @@ to its leading whitespace."
         c (if (< lead n) (string/char-at line lead) ""))
     (and (or (= c "`") (= c "~"))
       (>= (md-count-char line lead n c) 3))))
-(sig md-fence? (string -> bool))
 
 (defn- md-heading-level (line)
   "The ATX heading level (1–6) of `line` — its run of leading `#`s, which must be
@@ -120,7 +117,6 @@ followed by a space or end-of-line — or nil if it isn't a heading."
             (md-space-after? line (inc d) n))
         (inc d)
         -1))))
-(sig md-ordered-end (string int int -> int))
 (defn- md-digits-end (line i n)
   (if (and (< i n) (md-digit? (string/char-at line i))) (md-digits-end line (inc i) n) i))
 (sig md-digits-end (string int int -> int))
@@ -371,7 +367,6 @@ its face. Unclosed markers are literal characters, as in the highlighter."
 (defn- md-runs-of (text base-face)
   "The `[text face]` runs of one line of inline markup, plain text under `base-face`."
   (md-inline-runs text 0 (string/length text) base-face '()))
-(sig md-runs-of (string any -> list))
 
 ;; ---- words: runs cut at whitespace, so a paragraph can be re-flowed ----------
 ;; A WORD is a list of `[text face]` fragments with no whitespace in it — more than one
@@ -475,12 +470,10 @@ keeps its own line). The first line opens with `first-prefix`, every later one w
     (and (>= n 3)
       (let (c (string/char-at t 0))
         (and (or (= c "-") (= c "*") (= c "_")) (= (string/span t 0 c) n))))))
-(sig md-rule? (string -> bool))
 
 (defn- md-quote? (line)
   (let (lead (md-lead-ws line))
     (and (< lead (string/length line)) (= (string/char-at line lead) ">"))))
-(sig md-quote? (string -> bool))
 
 (defn- md-quote-body (line)
   ;; the text after the `>` and one optional space
@@ -488,7 +481,6 @@ keeps its own line). The first line opens with `first-prefix`, every later one w
         n (string/length line)
         i (inc lead))
     (string/substring line (if (and (< i n) (= (string/char-at line i) " ")) (inc i) i) n)))
-(sig md-quote-body (string -> string))
 
 (defn- md-item-marker (line)
   "`[marker body-col]` when `line` opens a list item — the marker text (`-`, `*`, `+` or
@@ -500,11 +492,9 @@ keeps its own line). The first line opens with `first-prefix`, every later one w
       nil
       (let ([s e f] (first spans))
         (if (= f md-face-list) [(string/substring line s e) (md-lead-ws-at line col n)] nil)))))
-(sig md-item-marker (string -> (or nil (tuple string int))))
 
 (defn- md-blank? (line)
   (string/blank? line))
-(sig md-blank? (string -> bool))
 
 (defn- md-paragraph-line? (line)
   ;; a line that continues a paragraph: not blank and not opening any other block
@@ -514,7 +504,6 @@ keeps its own line). The first line opens with `first-prefix`, every later one w
          (md-rule? line)
          (md-quote? line)
          (md-item-marker line))))
-(sig md-paragraph-line? (string -> bool))
 
 ;; ---- the walker: source lines → rendered lines --------------------------------
 ;; A rendered line is `[text spans src]` — its text, its spans relative to itself, and the

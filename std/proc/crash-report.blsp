@@ -225,9 +225,7 @@ Returns nil."
         (send running :stop)
         (receive ([:down ^m _ _] nil) (after 1000 nil))))
     nil))
-(sig stop (-> nil))
 
 (defn running? ()
   "Is a crash reporter armed?"
   (not (nil? (proc/whereis crash-report-name))))
-(sig running? (-> bool))

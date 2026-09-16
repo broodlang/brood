@@ -109,7 +109,6 @@ counts as inside), or nil."
 (defn region-texts (text regions)
   "The text of every region, in order."
   (map regions (fn (r) (region-text text r))))
-(sig region-texts (any seqable -> (or nil (list string))))
 
 (defn skeleton (text regions)
   "Everything OUTSIDE the regions, concatenated — the generated part of the form,
@@ -122,7 +121,6 @@ typed inside the regions, so it is stable while they work."
                 [(get region :end) (cons (string/substring text pos (get region :start)) parts)])))
         [pos parts] r)
     (apply str (reverse (cons (string/substring text pos (string/length text)) parts)))))
-(sig skeleton (string seqable -> string))
 
 (defn protected-spans (text regions)
   "The COMPLEMENT of `regions` over `text` — the `[lo hi)` ranges *outside* every editable
@@ -164,7 +162,6 @@ changed shape, and there is no honest correspondence to preserve)."
                           parts))])))
             [pos parts] r)
         (apply str (reverse (cons (string/substring new-text pos (string/length new-text)) parts)))))))
-(sig splice (any any (or fn keyword) -> any))
 
 ;; ---- the guard policies (a `:post-key` facet body) -----------------------------
 
@@ -189,7 +186,6 @@ the form is re-rendered."
     (intact? (read-text after) regions-fn (read-skeleton after)) after
     (intact? (read-text before) regions-fn (read-skeleton before)) (on-reject before)
     else after))
-(sig guard-veto (any any (or fn keyword) (or fn keyword) any any -> any))
 
 (defn guard-clamp (after read-text read-point set-point regions-fn)
   "The `:clamp` policy: leave the text alone, but if point sits OUTSIDE every
@@ -208,4 +204,3 @@ A context with no regions is returned untouched."
                               d (abs (- p cand)))
                           (if (or (nil? best) (< d (abs (- p best)))) cand best)))))
         (if (nil? nearest) after (set-point after nearest))))))
-(sig guard-clamp (any (or fn keyword) (or fn keyword) any (or fn keyword) -> any))

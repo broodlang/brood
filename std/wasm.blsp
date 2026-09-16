@@ -73,4 +73,3 @@ that run long."
                         '(& args)
                         (list '%wasm-call inst name '(into [] args))))
         (string/->symbol name)))))
-(sig use-native (int -> (or nil (list symbol))))

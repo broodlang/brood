@@ -376,7 +376,6 @@ each pane is `{:path :payload :selected :rect}` and each divider is `{:path :dir
 that split feeds `pane-ratio-for`). Pure — the frontend paints each pane's payload
 into its rect and the dividers between them."
   (pane-layout-go tree () rect))
-(sig pane-layout (any rect -> layout))
 
 ;; ---- hit-testing + resize (drag-to-resize over :drag mouse events) ----------
 

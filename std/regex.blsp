@@ -1451,7 +1451,6 @@ the new text has to be computed rather than spliced.
 
 A group that did not participate expands to the empty string."
   (regex-replace-loop s (find-all pattern s) 0 0 "" replacement))
-(sig replace (any string any -> string))
 
 (defn- regex-split-loop (s matches j at acc)
   (if (>= j (count matches))

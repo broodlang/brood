@@ -155,7 +155,6 @@ module included), built from the whole `files` universe — the KI-17 reachabili
 (defn- project-pool-size ()
   (spawn (fn () nil))
   (project-await-pool 50))
-(sig project-pool-size (-> int))
 
 ;; Slice `coll` into ≤`n`-sized chunks, KEEPING a short trailing chunk.
 ;; A list-returning chunker that KEEPS the trailing partial chunk. Neither bare

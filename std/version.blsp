@@ -78,7 +78,6 @@ more identifiers outrank a prefix). `+build` metadata never affects order.
     (if (= c 0)
       (compare-prerelease (prerelease a) (prerelease b))
       c)))
-(sig compare (string string -> int))
 
 (defn prerelease (v)
   "The pre-release identifiers of version string `v` (`\"1.0.0-rc.1\"` → `(\"rc\" \"1\")`), or
@@ -384,7 +383,6 @@ The shape a plugin manifest's `:enhances` map is checked with:
            (let ([nm constraint] kv
                  have (get versions nm))
              (or (nil? have) (not (satisfies? have constraint))))))))
-(sig satisfies-all? (any map -> bool))
 
 (defn unsatisfied (versions constraints)
   "The `constraints` entries `versions` does NOT satisfy, as a list of
@@ -396,4 +394,3 @@ the user when it declines a plugin, instead of a bare false."
             have (get versions nm))
         (when (or (nil? have) (not (satisfies? have constraint)))
           [nm constraint have])))))
-(sig unsatisfied (any map -> (or nil (list (tuple any any any)))))

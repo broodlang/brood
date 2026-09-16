@@ -427,11 +427,9 @@ A name nobody holds is left alone — an untraced name, or one already restored 
 (defn paused (dbg)
   "The map of currently parked processes: `pid -> snapshot`."
   (get (dbg-state dbg) :paused))
-(sig paused ((or map pid) -> any))
 (defn dbg-events (dbg)
   "The ordered event log the debugger has collected."
   (get (dbg-state dbg) :events))
-(sig dbg-events ((or map pid) -> any))
 (defn resume (dbg pid)
   "Release one parked process."
   (send dbg [:resume pid])

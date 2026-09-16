@@ -32,7 +32,6 @@
 
     (editor/configs/json-spans \"{\\\"a\\\": 1}\")   → ([1 5 {:fg :magenta}] [6 7 {:fg :yellow}])"
   (lexer-spans json-grammar src))
-(sig json-spans (string -> any))
 
 ;; ---- YAML ---------------------------------------------------------------------------
 
@@ -63,7 +62,6 @@ document markers.
 
     (editor/configs/yaml-spans \"a: 1\")   → ([0 1 {:fg :magenta}] [3 4 {:fg :yellow}])"
   (lexer-spans yaml-grammar src))
-(sig yaml-spans (string -> any))
 
 ;; ---- TOML ---------------------------------------------------------------------------
 
@@ -87,7 +85,6 @@ document markers.
 
     (editor/configs/toml-spans \"[t]\")   → ([0 3 {:fg :cyan}])"
   (lexer-spans toml-grammar src))
-(sig toml-spans (string -> any))
 
 ;; ---- Makefile -----------------------------------------------------------------------
 
@@ -123,7 +120,6 @@ conditional / include directives, comments.
 
     (editor/configs/makefile-spans \"# c\")   → ([0 3 {:fg :dark-grey}])"
   (lexer-spans makefile-grammar src))
-(sig makefile-spans (string -> any))
 
 ;; ---- INI / git config ---------------------------------------------------------------
 
@@ -148,7 +144,6 @@ conditional / include directives, comments.
 
     (editor/configs/ini-spans \"[s]\")   → ([0 3 {:fg :cyan}])"
   (lexer-spans ini-grammar src))
-(sig ini-spans (string -> any))
 
 ;; ---- a git commit message ----------------------------------------------------------
 ;; `COMMIT_EDITMSG`: `#` lines are git's commentary (dim), the first non-comment line
@@ -187,4 +182,3 @@ any conventional-commit `type(scope):` prefix, which reads as a keyword).
         (if (>= from e)
           base
           (sort (cons [from e doc] base) (fn (x y) (< (first x) (first y)))))))))
-(sig gitcommit-spans (string -> any))

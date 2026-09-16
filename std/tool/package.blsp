@@ -1040,7 +1040,6 @@ registry, or nil if it is unpublished. Backs an app's 'is there an update?' chec
     (if (or (nil? versions) (empty? versions))
       nil
       (fold versions nil (fn (best v) (if (or (nil? best) (version/newer? v best)) v best))))))
-(sig registry-latest-version ((or keyword string symbol) -> any))
 
 (defn registry-enhancers (app)
   "The packages published to the configured registry that ENHANCE application `app` — a list of
@@ -1173,7 +1172,6 @@ sha256 pin still holds."
     (apply append
       (map (package-blsp-files src-dir)
         (fn (file) (map (package-module-names-of file) (fn (m) (list m file))))))))
-(sig module-files (string -> any))
 
 ;; The [label src-dir] providers to check for a *module-name* collision. Since deps
 ;; are package-rooted (ADR-070) — a dep `foo`'s `b` is the global `foo/b` — a dep can

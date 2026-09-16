@@ -18,7 +18,6 @@
 (defn ledger ()
   "The whole ledger: a map of old public name (string) to `{:to new-name :adr adr}`."
   (%renames))
-(sig ledger (-> map))
 
 (defn renamed-to (name)
   "The ledger entry `{:to new-name :adr adr}` for the old name `name` (a string or symbol), or nil when the name was never ledgered."
