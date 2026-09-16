@@ -159,6 +159,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         native_tier_p);
     #[cfg(feature = "dev-tools")]
     primitives.def(
+        "%jit-arm-state",
+        Arity::exact(2),
+        Sig::new(vec![callable, int], map_ty),
+        &["f", "argc"],
+        "The JIT tier of `f`'s `argc`-ary arm, as a map: `:state` one of `:native` (its native code is installed), `:queued` (hot, compile in flight), `:bailed` (refused, or latched off the native tier by deopt thrash / a suspend), `:untried` (not hot yet), `:no-arm` (nothing compiled — `f` was never called with `argc` args, or is not a VM-compiled closure), or `:no-jit` (this binary/ceiling has no native tier); plus `:deopts`, the arm's consecutive type-deopt count. Reads the shared arm's own atomics, so it says what the runtime DID — the probe a test needs to assert an arm stayed native (or was latched) rather than infer it from a timing. Dev-tools only.",
+        jit_arm_state);
+    #[cfg(feature = "dev-tools")]
+    primitives.def(
         "%tree-walker?",
         Arity::exact(0),
         Sig::nullary(bool_ty),
@@ -559,6 +567,67 @@ pub(super) fn native_tier_p(_: &[Value], _: EnvId, _heap: &mut Heap) -> LispResu
             crate::eval::compile::Tier::Native
         );
     Ok(Value::boolean(native))
+}
+
+/// `(%jit-arm-state f argc)` — see the registration.
+#[cfg(feature = "dev-tools")]
+pub(super) fn jit_arm_state(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let f = args[0];
+    let argc = match args[1] {
+        Value::Int(n) if n >= 0 => n as usize,
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "%jit-arm-state",
+                "non-negative int (argc)",
+                other,
+            ))
+        }
+    };
+    let state = |s: &str| value::kw(s);
+    let mut deopts: i64 = 0;
+    let st = match f {
+        Value::Fn(id) => {
+            #[cfg(feature = "jit")]
+            {
+                let native_tier = matches!(
+                    crate::eval::compile::tier_ceiling(),
+                    crate::eval::compile::Tier::Native
+                );
+                if !native_tier {
+                    state("no-jit")
+                } else {
+                    match crate::eval::compile::probe_arm_for(heap, id, argc) {
+                        None => state("no-arm"),
+                        Some(arm) => {
+                            use std::sync::atomic::Ordering::Acquire;
+                            deopts = arm.jit_deopts.load(Acquire) as i64;
+                            let p = arm.jit_code.load(Acquire);
+                            if p == crate::jit::BAILED {
+                                state("bailed")
+                            } else if p == crate::jit::QUEUED {
+                                state("queued")
+                            } else if p.is_null() {
+                                state("untried")
+                            } else {
+                                state("native")
+                            }
+                        }
+                    }
+                }
+            }
+            #[cfg(not(feature = "jit"))]
+            {
+                let _ = (id, heap as &Heap);
+                state("no-jit")
+            }
+        }
+        _ => state("no-arm"),
+    };
+    Ok(heap.map_from_pairs(vec![
+        (value::kw("state"), st),
+        (value::kw("deopts"), Value::int(deopts)),
+    ]))
 }
 
 // Registered only under `dev-tools` (mod.rs's DEV block, whose comment says the fn defs

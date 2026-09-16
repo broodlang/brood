@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Quasiquote fuzzer with an explicit-constructor oracle. Build a template tree,
 render it two ways — as a `quasiquote with ~ / ~@, and as the equivalent explicit
-`(concat (list ...) ...)` construction — and assert they are `=`. Literals are
+`(append (list ...) ...)` construction — and assert they are `=`. Literals are
 ints/keywords only (self-quoting both ways). Vars in scope: x=7, y=:m, and the
 spliceable lists xs/ys/ws. Each program prints OK / BAD; runs under all engines.
 """
@@ -43,17 +43,17 @@ def val_elem(node):
     if node[0] == "lit": return node[1]
     if node[0] == "unq": return node[1]
     if node[0] == "spl": return node[1]      # (shouldn't be hit via val_elem)
-    return "(concat " + " ".join(val_seg(k) for k in node[1]) + ")"
+    return "(append " + " ".join(val_seg(k) for k in node[1]) + ")"
 
 def program(seed):
     rng = random.Random(seed)
     t = gen(rng, 3)
     qq_form = "`" + qq(t)
-    explicit = "(concat " + " ".join(val_seg(k) for k in t[1]) + ")"
+    explicit = "(append " + " ".join(val_seg(k) for k in t[1]) + ")"
     return (f"{PRELUDE_VARS}\n"
             f"  (let (a {qq_form}\n"
             f"        b {explicit})\n"
-            f"    (println (if (= a b) \"OK\" (str \"BAD a=\" (pr-str a) \" b=\" (pr-str b))))))\n")
+            f"    (io/puts (if (= a b) \"OK\" (str \"BAD a=\" (pr-str a) \" b=\" (pr-str b))))))\n")
 
 if __name__ == "__main__":
     n = int(sys.argv[1]); base = int(sys.argv[2]); outdir = sys.argv[3]

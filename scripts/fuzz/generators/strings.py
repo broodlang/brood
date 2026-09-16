@@ -44,26 +44,26 @@ def program(seed):
 ;; char->byte conversion is caught here rather than becoming a silently wrong substring.
 (def s "{body}")
 (def needle "{needle}")
-(def cps (into [] (string->list s)))
+(def cps (into [] (map (string/->codepoints s) string/int->char)))
 (def n (string/length s))
 
-(defn bad (what a b) (println "BAD" what "got" (pr-str a) "want" (pr-str b)))
+(defn bad (what a b) (io/puts "BAD" what "got" (pr-str a) "want" (pr-str b)))
 (defn chk (what a b) (if (= a b) 0 (do (bad what a b) 1)))
 
 ;; substring / char-at against slices of the code-point vector
-(defn ref-sub (i j) (apply str (subvec cps i j)))
+(defn ref-sub (i j) (apply str (seq/subvec cps i j)))
 (defn chk-slices (i acc)
   (if (>= i n)
     acc
-    (let (j (min n (+ i 1 (rem (* i 7) 5))))
+    (let (j (math/min n (+ i 1 (math/rem (* i 7) 5))))
       (chk-slices (+ i 1)
-        (+ acc (chk "substring" (substring s i j) (ref-sub i j))
-           (chk "char-at" (char-at s i) (nth cps i)))))))
+        (+ acc (chk "string/substring" (string/substring s i j) (ref-sub i j))
+           (chk "string/char-at" (string/char-at s i) (nth cps i)))))))
 
 ;; string/length agrees with the code-point count, and the whole string round-trips
 (def errs0 (+ (chk "string/length" n (count cps))
               (chk "roundtrip" s (apply str cps))
-              (chk "substring-all" (substring s 0 n) s)))
+              (chk "substring-all" (string/substring s 0 n) s)))
 
 ;; index-of with a rising `from` must find occurrences in order, each one really there
 (defn chk-scan (from acc)
@@ -71,32 +71,32 @@ def program(seed):
     (if (< j 0)
       acc
       (chk-scan (+ j 1)
-        (+ acc (chk "index-of-at" (substring s j (min n (+ j (string/length needle))))
+        (+ acc (chk "index-of-at" (string/substring s j (math/min n (+ j (string/length needle))))
                  (if (<= (+ j (string/length needle)) n) needle
-                   (substring s j n)))
+                   (string/substring s j n)))
            (if (>= j from) 0 (do (bad "index-of-order" j from) 1)))))))
 
 ;; last-index-of: the reported position holds the needle, and nothing after it does
 (def errs2
-  (let (last (last-index-of s needle))
+  (let (last (string/last-index-of s needle))
     (if (< last 0)
       (chk "no-needle" (index-of s needle 0) -1)
-      (+ (chk "last-index-of-at" (substring s last (min n (+ last (string/length needle))))
-           (if (<= (+ last (string/length needle)) n) needle (substring s last n)))
+      (+ (chk "last-index-of-at" (string/substring s last (math/min n (+ last (string/length needle))))
+           (if (<= (+ last (string/length needle)) n) needle (string/substring s last n)))
          (chk "nothing-after-last" (index-of s needle (+ last 1)) -1)))))
 
 ;; string/span: `e` is just PAST the maximal run of set members from `i`, so every char in
 ;; [i, e) is in the set and the char AT `e` (if any) is not.
 (defn all-in-set (set i e)
-  (if (>= i e) true (if (includes? set (char-at s i)) (all-in-set set (+ i 1) e) false)))
+  (if (>= i e) true (if (includes? set (string/char-at s i)) (all-in-set set (+ i 1) e) false)))
 (def errs3
-  (let (set " \\n" i (min (max 0 (quot n 2)) (max 0 (- n 1)))
+  (let (set " \\n" i (math/min (math/max 0 (math/quot n 2)) (math/max 0 (- n 1)))
         e (string/span s i set))
     (if (= n 0) 0
       (+ (if (and (>= e i) (<= e n)) 0 (do (bad "span-range" e n) 1))
          (if (all-in-set set i e) 0 (do (bad "span-run-not-all-in-set" i e) 1))
-         (if (or (= e n) (not (includes? set (char-at s e)))) 0
-           (do (bad "span-stopped-early" (char-at s e) set) 1))))))
+         (if (or (= e n) (not (includes? set (string/char-at s e)))) 0
+           (do (bad "span-stopped-early" (string/char-at s e) set) 1))))))
 
 ;; the form-start scanner (ADR-214's safepoint table) as a property: the answer is at or
 ;; before `pos`, at a line start, and is a bracket — or 0 when there is no form start.
@@ -104,16 +104,16 @@ def program(seed):
 (defn chk-form (pos acc)
   (if (>= pos (string/length src))
     acc
-    (let (b (scan-form-start src pos))
+    (let (b (reflect/scan-form-start src pos))
       (chk-form (+ pos 3)
         (+ acc
            (if (<= b pos) 0 (do (bad "form-start-after-pos" b pos) 1))
-           (if (or (= b 0) (= (char-at src (- b 1)) "\\n")) 0
-             (do (bad "form-start-not-bol" b (char-at src (- b 1))) 1))
-           (if (includes? "([{{" (char-at src b)) 0
-             (do (bad "form-start-not-bracket" (char-at src b) b) 1)))))))
+           (if (or (= b 0) (= (string/char-at src (- b 1)) "\\n")) 0
+             (do (bad "form-start-not-bol" b (string/char-at src (- b 1))) 1))
+           (if (includes? "([{{" (string/char-at src b)) 0
+             (do (bad "form-start-not-bracket" (string/char-at src b) b) 1)))))))
 
-(println "checked"
+(io/puts "checked"
   (+ errs0 errs2 errs3 (chk-slices 0 0) (chk-scan 0 0) (chk-form 0 0)))
 '''
 

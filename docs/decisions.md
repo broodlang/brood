@@ -22719,6 +22719,88 @@ after): `shell-spans` whole-file 303 → 12 ms; a 36-char `export` line 2.0 → 
 13 → 3.2 ms. What remains is interpreter overhead per token (~7 µs: the result map, the
 substring, the append), not the engine.
 
+## ADR-353 — A JIT join is typed with every predecessor in hand; a disagreement widens, never deopts
+
+**Status:** accepted (2026-09-15). Closes KI-132's second half.
+
+**Context.** The lowering carries a leader block's operand stack as one `i64` block parameter
+per entry, and records per entry how the word is to be read (`ParamRepr`: a raw int, a 0/1
+bool, or a placeholder for a value living in frame slot `k` — KI-49's fix). Edges were
+emitted in ip order and typed at emission: the first edge into a join fixed its `ParamRepr`
+vector, and a later edge whose reprs differed was compiled as an unconditional jump to
+`deopt` ("type-mixed join"). Sound — the VM re-runs the activation with real tagged
+values — but a deopt on a hot edge is a deopt per activation, and sixteen consecutive ones
+latch the arm `BAILED`. `(or p X)` is that shape whenever `p` is a boxed slot and `X` a
+scalar (`(let (t p) (if t t X))` joins `t` with `X`), as are `(if c x 7)` and `(if c 7 (< a b))`.
+The syntax highlighter's frame advance is `(or p (and params? (= n 2)))` with `p` false on most
+frames, and it ran interpreted for every keystroke in bedit.
+
+The reason the first edge had to decide is structural: a `JumpIfFalse` is one `brif` naming
+both successors with their arguments, and its two targets are typed at that instruction — the
+later predecessors of either target have not been seen.
+
+**Decision.** Split every edge. A branch targets a fresh, empty **edge block** per successor
+and registers a `PendingEdge` — the edge block, the operand stack, and the reprs each entry
+would cross as, snapshotted at emission (the slot flags are a single-pass approximation and
+must be read when the edge's stores were emitted, not later). Edges are forward-only and
+emitted in ip order, so when a leader is about to be translated every predecessor is pending:
+`resolve_edges` unifies the reprs per entry — agreement keeps the repr; a disagreement
+**widens** — then fills each edge block with its coercions and the jump, and fixes the
+leader's `bool_param`. Widening has two forms, chosen per entry:
+
+- **`Slot(spill)`** when the arm reserved a block-argument spill slot at that index
+  (`jit_spill_reserve`, arms with ≥2 non-tail calls): every edge materialises its value into
+  the slot as a tagged `Value` (`store_op` boxes an `i64` as `Int`, an `i8`/`Bool` as `Bool`,
+  copies a slot, stores a handle's words). The value is in the frame and GC-visible, exactly
+  as a KI-49 handle crossing already is, and the slot's flags are cleared so every read
+  tag-checks.
+- **`Words(n)`** otherwise (a call-free arm reserves nothing, and the reserve is a measured
+  decision — frames cost `spawn`): two extra `i64` params are appended to the leader for the
+  `n`th widened entry, legal because no edge into it has been emitted yet, and each edge passes
+  the three tagged words (`read_words` boxes a scalar, loads a slot, passes a handle). The
+  leader rebuilds an `Op::Handle`, which every downstream path already treats correctly — the
+  spill-at-safepoint rule for a handle live below a call, or the `call-spill-exhausted` bail.
+
+A widened value is read back through the ordinary tag-checked paths, so a scalar consumer of
+a non-scalar value deopts on THAT use — where the VM raises — never on the join. Edges into
+Done are resolved the same way (each stores its single result through `out`), which also
+lowers the `JumpIfFalse`-to-end shape that used to reach `define_function` with a nonzero
+stack.
+
+**Consequences.** One unconditional jump per edge in the CLIF; Cranelift's MachBuffer folds
+an empty block's jump into its successor. Measured 2026-09-15, `make ab --floor --all`
+(best-of-7, then best-of-15 solo and unpinned on the two flagged rows): **`regex` −30.5%**
+against a 0.8% floor — the ADR-352 lexers are exactly the keyword/string-join shape — `ring`
+−4.9%, every other row inside its floor except `spawn`, which reads +6% pinned and +6% on a 2%
+floor unpinned. That one was attributed rather than believed: `perf stat` puts 1.371 G → 1.442 G
+instructions on the process, and per-thread sampling puts the delta on the `brood-jit` thread
+(~33 M → ~46 M; a variant that bails a mixed join reads ~27 M) while the worker threads swing
+630–980 M run to run with no shift. It is two arms that used to be refused at lowering and now
+compile — `%match-splice-fail-in` (3.2 ms) and the `receive` matcher closure (2.9 ms), per
+`BROOD_COMPILE_TRACE` — i.e. the per-run compile constant every short-lived program pays for
+an arm the first time it goes hot; direct timings of `spawn` at `BENCH_N` 5 000 / 20 000 /
+80 000 read parity, parity and −6%. The prepass/emit depth contract is now enforced: a leader whose
+predecessors' stacks disagree with the prepass's param count bails as
+`join-depth-mismatch` naming the ip, instead of a verifier rejection reported as
+`cranelift-define-function`; and the prepass reports any opcode it has no stack effect for,
+which the lowering turns into a `prepass-unmodelled-inst` bail — the gap that had refused
+every arm with a `[…]` literal ahead of a join. A dev-tools probe `(%jit-arm-state f argc)`
+reads an arm's tier (`:native`/`:queued`/`:bailed`/`:untried`) and consecutive-deopt count,
+so a test can assert an arm STAYED native; KI-132 sat open because every gate was a value
+gate and both bugs produced the right answer slowly.
+
+A third repr fell out of the same reading: a materialised `Op::Float` had no repr at all,
+was typed `Int`, and `as_int` deopted on it on every crossing — `(+ acc (if (< x 0) 0.5 1.5))`
+thrashed exactly like the joins above. `ParamRepr::Float` carries the bits in the `i64`
+param and the leader bitcasts them back; a Float/Int disagreement widens like any other.
+
+**Rejected.** Coercing the disagreeing edge into the first edge's repr: storing into a
+`Slot(k)` that names a live local clobbers it (`(let (r (if c x 7)) [r x])`), and unboxing a
+slot into an `Int` is the conditional deopt this replaces. A typing pre-pass: the reprs depend
+on emitted SSA value types and on the slot flags as they stand when each edge is emitted, so
+a dry run would have to be the emit loop itself. Widening every entry to words: a raw int
+carry is what makes `fib`/`collatz` fast, so only a disagreement pays.
+
 ## ADR-354 — A table's dense region is a directory of lazily-mapped chunks
 
 **Status:** accepted (2026-09-15). **Context:** KI-142.

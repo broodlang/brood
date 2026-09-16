@@ -28,7 +28,7 @@ def leaf(rng, params):
                        "1e308", "-1e16", "0.5", "100.0"])
 
 # number→number and number→bool(→if) ops, all keeping the tree number-closed
-BIN = ["+", "-", "*", "max", "min", "quot", "rem", "mod"]
+BIN = ["+", "-", "*", "math/max", "math/min", "math/quot", "math/rem", "math/mod"]
 CMP = ["<", "<=", ">", ">=", "=", "not="]
 
 def expr(rng, params, depth):
@@ -45,12 +45,12 @@ def expr(rng, params, depth):
         c = f"({op} {expr(rng,params,depth-1)} {expr(rng,params,depth-1)})"
         return f"(if {c} {expr(rng,params,depth-1)} {expr(rng,params,depth-1)})"
     if r < 0.82:
-        return f"(abs {expr(rng,params,depth-1)})"
+        return f"(math/abs {expr(rng,params,depth-1)})"
     if r < 0.9:
         # let-binding to exercise slot reuse / float-slot tracking
         return f"(let (t {expr(rng,params,depth-1)}) ({rng.choice(BIN)} t {expr(rng,params,depth-1)}))"
     # division can yield float or error (div-by-zero) — both must match across engines
-    return f"(quot {expr(rng,params,depth-1)} (max 1 (abs {expr(rng,params,depth-1)})))"
+    return f"(math/quot {expr(rng,params,depth-1)} (math/max 1 (math/abs {expr(rng,params,depth-1)})))"
 
 def program(seed):
     rng = random.Random(seed)
@@ -62,11 +62,11 @@ def program(seed):
   (if (= i 0) acc
     (lp (- i 1)
       (str acc "|"
-        (try (pr-str (f (- (rem i 11) 5)
+        (try (pr-str (f (- (math/rem i 11) 5)
                         (/ (- i 50) 4.0)
-                        (if (< (rem i 3) 1) (- i 30) (* 1.5 (- i 20)))))
+                        (if (< (math/rem i 3) 1) (- i 30) (* 1.5 (- i 20)))))
              (catch e "ERR"))))))
-(println (lp 120 ""))
+(io/puts (lp 120 ""))
 """
 
 if __name__ == "__main__":

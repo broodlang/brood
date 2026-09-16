@@ -2,7 +2,7 @@
 """Type-checker crash-resistance fuzzer. The advisory checker must NEVER panic or
 hang on any form — it returns a (possibly empty) warning list. Generate forms with
 random AND malformed type annotations (sigs) + bodies, run them through
-`(check 'form)`, and assert it returns without crashing or hanging.
+`(reflect/check 'form)`, and assert it returns without crashing or hanging.
 """
 import random, sys
 
@@ -40,7 +40,7 @@ def program(seed):
     arr = f"({ty(rng,3)} -> {ty(rng,3)})"
     form = f"(do (sig f {arr}) (defn f (x) {body(rng,3)}))"
     # `check` must return (a list) without crashing; print a marker
-    return (f"(println (try (do (check (quote {form})) \"OK\")\n"
+    return (f"(io/puts (try (do (reflect/check (quote {form})) \"OK\")\n"
             f"  (catch e (str \"CAUGHT \" (get e :message)))))\n")
 
 if __name__ == "__main__":

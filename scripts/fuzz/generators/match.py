@@ -69,15 +69,20 @@ def program(seed):
     else:
         body, expected = ":MATCHED", ":MATCHED"
     out = []
-    out.append(f"(let (got (match {vtext} ({ptext} {body}) (_ :NOMATCH)))")
-    out.append(f"  (println (if (= got {expected}) \"OK\" (str \"BAD-match got=\" (pr-str got)))))")
+    # A top-level bare variable is irrefutable, and a clause after it is a compile ERROR
+    # ("unreachable clause after a catch-all") rather than dead code — so emit no
+    # fall-through clause behind one.
+    import re as _re
+    fallthrough = "" if _re.fullmatch(r"g\d+|_", ptext) else " (_ :NOMATCH)"
+    out.append(f"(let (got (match {vtext} ({ptext} {body}){fallthrough}))")
+    out.append(f"  (io/puts (if (= got {expected}) \"OK\" (str \"BAD-match got=\" (pr-str got)))))")
     # non-match clause: mutate the value's first leaf literal in the pattern so it can't match.
     # We mutate the VALUE instead (simpler+sound): a value that differs at a kept literal.
     # Use a guaranteed-non-matching literal pattern: match the original value against a
     # different scalar pattern; it must fall through.
     diff = first_literal_mutation(v) if v.kind not in ("vec", "list") else None
     if diff:
-        out.append(f"(println (if (= :NOMATCH (match {vtext} ({diff} :HIT) (_ :NOMATCH))) \"OK\" \"BAD-nomatch\"))")
+        out.append(f"(io/puts (if (= :NOMATCH (match {vtext} ({diff} :HIT) (_ :NOMATCH))) \"OK\" \"BAD-nomatch\"))")
     return "\n".join(out) + "\n"
 
 if __name__ == "__main__":

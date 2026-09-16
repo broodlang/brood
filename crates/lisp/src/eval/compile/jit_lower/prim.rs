@@ -793,7 +793,7 @@ pub(super) fn emit_prim2(
         // compare / interned-immediate identity / deopt).
         let wa = read_words(b, aa_op, frame);
         let wb = read_words(b, bb_op, frame);
-        stack.push(Op::Int(eq_dispatch(b, wa, wb, frame)));
+        stack.push(Op::Int(eq_dispatch(b, wa, wb, frame, funcs)));
     } else if op_is_float(aa_op, frame)
         || op_is_float(bb_op, frame)
         || (has_float_slot
@@ -917,7 +917,7 @@ pub(super) fn emit_prim2_slot_slot(
         // now compare inline instead of deopting the whole arm.
         let wa = read_words(b, Op::Slot(slot_a), frame);
         let wb = read_words(b, Op::Slot(slot_b), frame);
-        stack.push(Op::Int(eq_dispatch(b, wa, wb, frame)));
+        stack.push(Op::Int(eq_dispatch(b, wa, wb, frame, funcs)));
     } else if op_is_float(Op::Slot(slot_a), frame) || op_is_float(Op::Slot(slot_b), frame) {
         // Float arith/compare on two slots (e.g. `(+ xx yy)`, `(* x y)`). Both operands
         // are slots, so the float context rests entirely on `slot_float`'s guess: read them

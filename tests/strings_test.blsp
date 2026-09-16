@@ -293,6 +293,24 @@
   (test "last-index-of is -1 when absent or nothing is before `before`"
     (assert= (string/last-index-of "hello" "z") -1)
     (assert= (string/last-index-of "hello" "h" 0) -1))
+  ;; Overlapping occurrences. The native pass enumerated NON-overlapping matches
+  ;; (`match_indices`) and reported the last of those, so an occurrence overlapping the
+  ;; one before it was never seen: `"xaaay" "aa"` answered 1, not 2. Found by the strings
+  ;; fuzz oracle on 2026-09-15, the day it was made to run again (KI-145); the property it
+  ;; checks is the one pinned here — nothing after the reported position matches.
+  (test "last-index-of sees an occurrence that overlaps the previous one"
+    (assert= (string/last-index-of "xaaay" "aa") 2)
+    (assert= (index-of "xaaay" "aa" 3) -1)
+    (assert= (string/last-index-of "ab\n\n\ncd" "\n\n") 3)
+    (assert= (string/last-index-of "aaaa" "aa") 2)
+    ; `before` bounds the START; the match at 2 is out, the overlapping one at 1 is in
+    (assert= (string/last-index-of "aaaa" "aa" 2) 1)
+    (assert= (string/last-index-of "aaaa" "aa" 3) 2)
+    ; a match may start before `before` and extend past it
+    (assert= (string/last-index-of "abcabc" "abc" 4) 3)
+    (assert= (string/last-index-of "héhé" "hé" 2) 0)
+    ; a needle longer than the string
+    (assert= (string/last-index-of "ab" "abc") -1))
 
   ;; `index-of`'s `from` and `last-index-of` both moved into the kernel: `from` no longer
   ;; builds `(string/substring coll from n)` first, and `last-index-of` is one native pass instead

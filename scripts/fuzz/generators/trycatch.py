@@ -10,7 +10,7 @@ import random, sys
 
 LEAVES = ["a", "b", "0", "1", "2", "-1", "3", "-3"]
 # ops that can throw on an edge: quot/rem/mod by zero; otherwise plain arith
-THROWY = ["quot", "rem", "mod"]
+THROWY = ["math/quot", "math/rem", "math/mod"]
 SAFE = ["+", "-", "*"]
 
 def expr(rng, depth):
@@ -18,15 +18,16 @@ def expr(rng, depth):
         return rng.choice(LEAVES)
     r = rng.random()
     if r < 0.4:
-        # may throw: (quot X Y) where Y can be 0
+        # may throw: (math/quot X Y) where Y can be 0
         return f"({rng.choice(THROWY)} {expr(rng,depth-1)} {expr(rng,depth-1)})"
     if r < 0.7:
         return f"({rng.choice(SAFE)} {expr(rng,depth-1)} {expr(rng,depth-1)})"
     if r < 0.85:
         # explicit conditional throw
         return f"(if (< {expr(rng,depth-1)} 0) (error \"neg\") {expr(rng,depth-1)})"
-    # nth that can go out of range (throws)
-    return f"(nth [10 20 30] {expr(rng,depth-1)})"
+    # nth that can go out of range — it answers nil rather than throwing now, so the
+    # throw the leaf exists to exercise is made explicit
+    return f"(or (nth [10 20 30] {expr(rng,depth-1)}) (error \"oob\"))"
 
 def program(seed):
     rng = random.Random(seed)
@@ -38,9 +39,9 @@ def program(seed):
   (if (= i 0) acc
     (lp (- i 1)
       (+ acc
-        (try (rem (+ 1000 (f (- (rem i 9) 4) (- (rem i 5) 2))) 100)
-             (catch e (+ 7 (try (f (rem i 3) 0) (catch e2 3)))))))))
-(println (lp 6000 0))
+        (try (math/rem (+ 1000 (f (- (math/rem i 9) 4) (- (math/rem i 5) 2))) 100)
+             (catch e (+ 7 (try (f (math/rem i 3) 0) (catch e2 3)))))))))
+(io/puts (lp 6000 0))
 """
 
 if __name__ == "__main__":

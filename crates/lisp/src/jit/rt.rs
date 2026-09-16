@@ -628,6 +628,39 @@ pub unsafe extern "C" fn brood_rt_map_get(
     }
 }
 
+/// Structural `=` on two operands native code could not decide inline — the residual case
+/// of `eq_dispatch` (KI-132). The lowering compares Int×Int and Sym/Keyword identity in
+/// machine ops; every other pair (strings, floats, structural values) used to DEOPT, so an
+/// arm comparing a string per activation deopted per activation and was latched off the
+/// native tier after sixteen. This is exactly `%eq` (`prim_eq`): `Heap::equal` for anything
+/// but a lazy seq-view, which the kernel cannot realise without an evaluator.
+///
+/// Returns **1** equal, **0** not equal, **2** declined (a `SeqView` operand — the caller
+/// deopts, and the VM's `%eq` realises the view). Allocation-free and cannot error, so no
+/// `out` slot and no parked error.
+///
+/// # Safety
+/// `heap` lives; the word triples are bytes the JIT read out of real `Value`s.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_equal(
+    heap: *mut Heap,
+    a0: i64,
+    a1: i64,
+    a2: i64,
+    b0: i64,
+    b1: i64,
+    b2: i64,
+) -> i64 {
+    use crate::core::value::Value;
+    let h = &*heap;
+    let a = words_to_val(a0, a1, a2);
+    let b = words_to_val(b0, b1, b2);
+    if matches!(a, Value::SeqView(_)) || matches!(b, Value::SeqView(_)) {
+        return 2;
+    }
+    h.equal(a, b) as i64
+}
+
 /// The **dispatch identity** of a value, as an interned keyword symbol — the read a
 /// speculation guard makes before calling an ability impl directly
 /// (docs/dispatch-speculation.md, phase 2a).

@@ -18,10 +18,10 @@ LEAVES = [
     "0.1", "3", "64", "65", "-5",
 ]
 # ops that bite: division family (zero!), shifts (huge/neg!), mixed-tower arith/compare
-BIN = ["+", "-", "*", "/", "quot", "rem", "mod", "max", "min",
-       "bit-and", "bit-or", "bit-xor", "bit-shl", "bit-shr"]
+BIN = ["+", "-", "*", "/", "math/quot", "math/rem", "math/mod", "math/max", "math/min",
+       "bit/and", "bit/or", "bit/xor", "bit/shift-left", "bit/shift-right"]
 CMP = ["<", "<=", ">", ">=", "=", "not="]
-UN = ["abs", "-", "inc", "dec"]
+UN = ["math/abs", "-", "inc", "dec"]
 
 def expr(rng, depth):
     if depth <= 0 or rng.random() < 0.35:
@@ -44,9 +44,9 @@ def program(seed):
   (if (= i 0) acc
     (lp (- i 1)
       (str acc "|"
-        (try (pr-str (f (- (rem i 13) 6) (* 1.0 (- (rem i 7) 3))))
+        (try (pr-str (f (- (math/rem i 13) 6) (* 1.0 (- (math/rem i 7) 3))))
              (catch e "E"))))))
-(println (lp 80 ""))
+(io/puts (lp 80 ""))
 """
 
 if __name__ == "__main__":
