@@ -177,7 +177,7 @@ fn base_is_global(heap: &Heap, base: Symbol) -> bool {
 /// callers that require a real path check for that). `None` for anything else —
 /// a computed (non-literal) key/index, `last` (arity-dependent), or a non-access
 /// form — none of which is a statically pinnable path.
-pub(super) fn path_of(heap: &Heap, expr: Value) -> Option<(Symbol, Vec<PathKey>)> {
+pub(in crate::types::check) fn path_of(heap: &Heap, expr: Value) -> Option<(Symbol, Vec<PathKey>)> {
     // A loop, not recursion, and capped: `expr_ty` asks this at its FIRST level for
     // every form, so a chain of n accessors cost O(n) frames and an O(n) key vector
     // per level — O(n²) memory, O(n³) copying on `(first (first … x))` 8k deep. A path
@@ -208,7 +208,10 @@ pub(super) fn path_of(heap: &Heap, expr: Value) -> Option<(Symbol, Vec<PathKey>)
                 return None;
             };
             (items[1], PathKey::Field(k))
-        } else if value::symbol_is(head, "nth") && items.len() == 3 {
+        } else if (value::symbol_is(head, "nth") || value::symbol_is(head, "%vector-ref"))
+            && items.len() == 3
+        {
+            // `%vector-ref` is the `match` compiler's spelling of a positional read
             let Value::Int(i) = items[2] else {
                 return None;
             };

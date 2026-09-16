@@ -141,9 +141,13 @@ const STR_BIT: u32 = 1u32 << bit(Tag::Str);
 /// `union` or a structural constructor) drops its structural refinements to "any". Bounds
 /// the SIZE of an inferred type — so a recursive value-builder can't grow a type whose
 /// `==`/`Hash`/`is_subtype` (recursive over `Arc` refinements, walking a shared DAG as a
-/// tree) goes superlinear (KI-13). Generous for real shapes — a record with its `:__id__`
-/// plus a handful of fields is well under it — so only pathological structure hits it.
-const MAX_TY_NODES: usize = 64;
+/// tree) goes superlinear (KI-13). It applies to a DECLARED shape too, and 64 was where
+/// bedit's `model` deftype sat on 2026-09-16: one more optional field — a flat `map` —
+/// widened the whole record to a bare `map`, silently, and every `model`-typed sig in the
+/// project read `number` where it had read `int`. The fixpoints converge by
+/// `widened_below`, not by this cap, so it is the safety net alone; four times the room
+/// keeps a written shape whole, and `deftype` now says so when one is still over it.
+pub const MAX_TY_NODES: usize = 256;
 
 /// Max **terms** an inferred union keeps before collapsing to one widened term (see
 /// [`Ty::alts`]). Four covers the shapes that occur — a tagged union of two or three

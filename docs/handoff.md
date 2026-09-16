@@ -230,8 +230,10 @@ cache-miss cost is felt, not before — a dev loop does not feel 1 s.
 `stash@{0}` holds another session's uncommitted `lazy_load_test` note from 2026-09-12 22:27.
 Its temp-purge half landed as `f5894529`; what is unique is a `KNOWN FAILURE` comment arguing
 that `:isolated` does not help (a module load is neither a global nor rollback-able) and that
-the fix is a probe module no other test file references. That argument is not in KI-134.
-`git stash pop` recovers it.
+the fix is a probe module no other test file references. **Read 2026-09-16 (`git stash show
+-p`, not popped): the argument is what the file already does** — every unit loads a
+`lazyprobe-*` fixture of its own, and the deferral itself is shown in a child runtime, so
+`url` is not the probe anywhere. Nothing in the stash is unlanded; it can be dropped.
 
 ### The trap that cost the most on 2026-09-12/13
 

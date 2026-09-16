@@ -1643,10 +1643,34 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     // `(range …)` is "a range of integers" (its own docstring): every argument an int
     // means every element is one. Empty ranges are `nil`.
     if value::symbol_is(head, "range") && items.len() >= 2 {
-        let int = Ty::of(Tag::Int);
-        let all_int = items[1..]
+        let bounds: Vec<Option<Ty>> = items[1..].iter().map(|&a| expr_ty(heap, a, ctx)).collect();
+        let all_int = bounds
             .iter()
-            .all(|&a| expr_ty(heap, a, ctx).is_some_and(|t| t.is_subtype(&int)));
+            .all(|t| t.as_ref().is_some_and(|t| t.is_subtype(&Ty::of(Tag::Int))));
+        // The elements carry the bounds' INTERVAL (ADR-350): `(range n)` counts from 0 up
+        // to `n - 1`, `(range a b)` from `a` up to `b - 1`, so an element is never below
+        // the start and never reaches the end — `(range (count xs))` hands its callback
+        // an `int[0..]`, which is the non-negative half of what `(nth xs i)` asks before it
+        // reads an element. A bound with no interval leaves that end open.
+        let int = {
+            let range_of = |t: &Option<Ty>| t.as_ref().and_then(|t| t.int_range());
+            let (start, end) = match items.len() {
+                2 => (Some(Range::point(0)), range_of(&bounds[0])),
+                _ => (range_of(&bounds[0]), range_of(&bounds[1])),
+            };
+            let lo = start.and_then(|r| r.lo);
+            let hi = end.and_then(|r| r.hi).map(|h| h - 1);
+            let interval = Range::new(lo, hi);
+            if interval.is_empty() {
+                // `(range 0)`: no element at all — the list is `nil`
+                return Some(Ty::of(Tag::Nil));
+            }
+            if interval.is_all() {
+                Ty::of(Tag::Int)
+            } else {
+                Ty::int_in(interval)
+            }
+        };
         // A literal bound proves the range non-empty: `(range 5)`, `(range 2 5)`.
         let non_empty = match (items.get(1), items.get(2), items.len()) {
             (Some(Value::Int(n)), None, 2) => *n > 0,

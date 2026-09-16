@@ -1998,9 +1998,10 @@ fn a_list_shape_is_a_non_empty_list_of_exactly_its_positions() {
 
 #[test]
 fn a_positional_shape_over_the_node_cap_degrades_to_its_element_union() {
-    // A hundred-element quoted list is `list<int>`, not a bare `pair`: the shape goes,
-    // the element bound it stood for stays.
-    let long = Ty::list_shape_of((0..100).map(Ty::int_lit).collect());
+    // A quoted list wider than the budget is `list<int>`, not a bare `pair`: the shape
+    // goes, the element bound it stood for stays. (Sized from the cap, which a hundred
+    // once exceeded and 256 does not.)
+    let long = Ty::list_shape_of((0..(MAX_TY_NODES * 2) as i64).map(Ty::int_lit).collect());
     assert!(long.positional_elems().is_none(), "{long}");
     assert!(long.is_subtype(&Ty::list_of(Ty::of(Tag::Int))), "{long}");
     assert!(!long.is_subtype(&Ty::list_of(Ty::of(Tag::Str))), "{long}");

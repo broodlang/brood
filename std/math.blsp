@@ -88,11 +88,13 @@ partner of `quot`. `mod` is the one whose sign follows the divisor.
     (math/rem 7 2)    → 1
     (math/rem -7 2)   → -1"
   (%rem a b))
+(sig rem (int int -> int))
 (defn ->fixed (x n)
   "Render number `x` as a string with exactly `n` digits after the decimal point (rounded).
 
     (math/->fixed 1.5 2)   → \"1.50\""
   (%->fixed x n))
+(sig ->fixed (number int -> string))
 
 (defn rational (n d)
   "The exact rational `n`/`d` — reduced, with a positive denominator (a denominator
@@ -105,6 +107,7 @@ of 1 gives an integer). Same as `(/ n d)` for integers; errors when `d` is 0.
 
     (math/quot 7 2)    → 3"
   (%quot a b))
+(sig quot (int int -> int))
 (defn mod (a b)
   "Euclidean modulo: the result is always non-negative and lies in [0, |b|).
 
@@ -178,11 +181,13 @@ tower, not just the int `0`. A type with no impl RAISES rather than answering.
 
     (math/even? 4)         → true"
   (= (math/rem n 2) 0))
+(sig even? (int -> bool))
 (defn odd? (n)
   "True if integer `n` is odd.
 
     (math/odd? 3)         → true"
   (not (even? n)))
+(sig odd? (int -> bool))
 
 ;; ---- aggregation ------------------------------------------------------------
 (defn sum (xs)

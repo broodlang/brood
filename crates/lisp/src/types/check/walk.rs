@@ -14,7 +14,7 @@ use super::guards::{
 };
 use super::infer::{expr_ty, global_value_ty};
 use super::sigs::{
-    arity_of, arity_str, curated_sig, declared_heap_overload, declared_heap_sig,
+    arity_of, arity_str, combinator_args, curated_sig, declared_heap_overload, declared_heap_sig,
     declared_heap_value_ty, infer_overload_of, is_globally_bound, sig_of,
 };
 use crate::core::heap::{Heap, SymbolMap};
@@ -269,6 +269,31 @@ fn check_computed_call(
     for (i, &arg) in items[1..].iter().enumerate() {
         let Some(param) = sig.param(i) else { break };
         check_arg_against_param(heap, &callee, i, arg, &param, form, ctx, out);
+    }
+}
+
+/// The local a combinator call's ELEMENT indexes, when its collection is `(range (count
+/// xs))` or `(range n)` with `n` let-bound as `(count xs)` — `map`/`each`/`filter` over
+/// the indices of `xs`. `None` for any other collection.
+fn indexed_collection(heap: &Heap, items: &[Value], ctx: &Ctx) -> Option<Symbol> {
+    let (coll, _) = combinator_args(items)?;
+    let range = list_items(heap, coll)?;
+    let [Value::Sym(head), bound] = range[..] else {
+        return None;
+    };
+    if !value::symbol_is(head, "range") || ctx.is_lexical_local(head) {
+        return None;
+    }
+    match bound {
+        Value::Sym(n) => ctx.count_alias(n),
+        _ => match list_items(heap, bound)?[..] {
+            [Value::Sym(count), Value::Sym(xs)]
+                if value::symbol_is(count, "count") && !ctx.is_lexical_local(count) =>
+            {
+                Some(xs)
+            }
+            _ => None,
+        },
     }
 }
 
@@ -1029,6 +1054,12 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         // `(fold s 5381 (fn (h c) (bit/xor (* h 31) …)))` read as `any` and `(* h 31)` as
         // `number`, while the fold as a whole was already known to be an int.
         let seeded_callback = callback_seed(heap, form, &items, ctx, &literal_fits(heap));
+        // …and, over `(range (count xs))` (or `(range n)` with `n` the count of `xs`), the
+        // element IS an index of `xs`: the literal's parameter is bounded by `xs`'s length
+        // for its body, so `(nth xs i)` there reads the element (ADR-350's relation).
+        let indexes = seeded_callback
+            .as_ref()
+            .and_then(|_| indexed_collection(heap, &items, ctx));
         // A body sequence threads its scope: a **guard that diverges** narrows every form
         // after it (see [`diverging_guard_scope`]). Only for a `do` — in any other form
         // the items are arguments, evaluated in one scope, and there is no "after".
@@ -1039,7 +1070,10 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
             match &seeded_callback {
                 Some((idx, sig)) if *idx == i => {
                     if let Some(fn_items) = list_items(heap, item) {
-                        check_fn_bound(heap, &fn_items, item_ctx, out, &sig.params);
+                        let tys: Vec<Option<Ty>> = sig.params.iter().cloned().map(Some).collect();
+                        check_fn_bound_indexed(
+                            heap, &fn_items, item_ctx, out, &tys, false, indexes,
+                        );
                     }
                 }
                 _ => check_into(heap, item, item_ctx, out),

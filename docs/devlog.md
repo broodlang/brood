@@ -13681,3 +13681,41 @@ gone. A nest integration test scaffolds a project with a dead private and assert
 three invocations agree; the sabotage (lints back out of `check-files`) reds exactly the
 listed arm. Downstream is unaffected today — bedit, hatch, hive and store-postgres all
 carry zero unused privates — but their `nest check` now means it.
+
+## 2026-09-16 — three more checker rules from the downstream sweep, and nine sigs back
+
+Taking hatch and hive to strict zero found three shapes the checker read wider than the
+code, each now a rule with a test:
+
+- **A `match` clause on a tagged tuple binds its own arm's positions.** The compiler
+  lowers `[:ok got conn]` to `(let (el (%vector-ref m 0)) (if (%eq el :ok) (let (got
+  (%vector-ref m 1)) …)))` — a guard on a let-bound ALIAS of the path `m[0]`. The alias is
+  recorded as one (`Ctx::path_aliases`; `%vector-ref` is a path step), a guard on it retains
+  `m`'s tuple alternatives, and the clause's `got` is the `:ok` arm's `map`, not `400 | 403
+  | 502 | map` (hatch's `web_oidc_test`).
+- **A callback over `(range (count xs))` reads `xs`'s elements.** The literal's parameter
+  is bounded by `xs`'s length for its body (ADR-350's `i < (count xs)` relation, handed
+  from the seeding site), and a range carries its bounds' interval — `(range n)` is
+  `int[0..n-1]`, so the index is non-negative too. `(range (inc (count xs)))` still
+  proves nothing (guarded by the test). Three pins that said `list<int>` say `int[0..4]`.
+- **A field read guards itself** was the morning's; the `nil | subprocess` shape.
+
+And a correction to the morning's sweep: nine of the removed sigs collided with the
+CURATED table (`math/quot`, `string/char-at`, …), where a declaration is read ahead of the
+table but the table is read ahead of the file-level inference for a caller in another
+module — so removing them let the wider curated arrow govern cross-module. They are back;
+the `no_declared_std_sig_widens_its_curated_signature` gate is what noticed (its
+"at least 8 collisions inspected" floor fell to 5).
+
+**The model that fell off a cliff.** Adding one `(optional map)` field to bedit's `model`
+deftype turned fifteen sites to `number` across five files. `MAX_TY_NODES` (64) bounds every
+`Ty` the constructors build — inferred OR declared — and the `model` record with its nested
+`:diagnostics`/`:hosted`/`:query-replace` shapes sat at the line; one more node and
+`record_of` widened the whole thing to a bare `map`, silently, so every `(sig f (model
+…))` in the project read its fields as `any`. Which also means part of this morning's
+bedit zero rested on a collapsed `model`: the fields the checker could not see, it could
+not warn on. The cap is 256 now (the fixpoints converge by `widened_below`, not by the
+cap — it is the KI-13 safety net alone), and `check_file` reports a `deftype` that still
+comes back shapeless at its declaration instead of letting it vanish. bedit's `model`
+carries `:text-drag` typed, and the pane the drag reads is a whole `pane` now, not a
+two-field literal the deftype had been too collapsed to reject.

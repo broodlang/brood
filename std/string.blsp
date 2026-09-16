@@ -49,6 +49,7 @@ another type live here too, module-rooted: `string/->number`, `string/->symbol`.
   (if (= (string/length s) 0)
     s
     (str (string/upper (string/substring s 0 1)) (string/lower (string/substring s 1)))))
+(sig capitalize (string -> string))
 
 ;; ---- char access & content conversions --------------------------------------
 
@@ -57,6 +58,7 @@ another type live here too, module-rooted: `string/->number`, `string/->symbol`.
 
     (string/char-at \"abc\" 1)   → \"b\""
   (string/substring s i (inc i)))
+(sig char-at (string int -> string))
 
 (defn ->list (s)
   "The characters of `s` as a list of 1-char strings.
@@ -86,6 +88,7 @@ inverse of the `string/->codepoints` primitive.
   ;; concatenated N of those variadically — for a shape every text parser in std/ uses to
   ;; get back from the code vector `string/->codepoints` handed it.
   (%codepoints->string cs))
+(sig codepoints-> (seqable -> string))
 
 (defn ->bytes (s)
   "Encode string `s` as a bytes value — its UTF-8 bytes. Inverse of `string/bytes->`.
@@ -219,6 +222,7 @@ incremental search rides on.
     (string/blank? \" a \")  → false"
   (let (n (string/length s))
     (cond (= n 0) true (whitespace? (char-at s 0)) (blank? (string/substring s 1 n)) else false)))
+(sig blank? (string -> bool))
 
 (defn- triml-from (s i n)
   (if (and (< i n) (whitespace? (char-at s i))) (triml-from s (inc i) n) (string/substring s i n)))

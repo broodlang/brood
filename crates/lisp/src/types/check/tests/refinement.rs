@@ -288,3 +288,77 @@ fn a_field_read_over_a_maybe_record_keeps_the_field_type() {
         "{strict:?}"
     );
 }
+
+// A `match` clause on a tagged tuple binds the OTHER positions from the arm it matched.
+// The compiler lowers `[:ok got conn]` to `(let (el (%vector-ref m 0)) (if (%eq el :ok)
+// (let (got (%vector-ref m 1)) …)))`: the guard is on a let-bound ALIAS of the path
+// `m[0]`, so the alias is recorded as one and a guard on it retains `m`'s tuple
+// alternatives — the clause's second position is then the `:ok` arm's `map`, not the
+// union with the `:error` arm's `502`. hatch's `web_oidc_test` read `got` as
+// `400 | 403 | 502 | map` for exactly this shape.
+#[test]
+fn a_match_clause_on_a_tagged_tuple_binds_the_positions_of_its_own_arm() {
+    let program = |ok_body: &str, err_body: &str| {
+        format!(
+            "\
+             (defmodule t)\n\
+             (sig step (int -> (or (tuple :error int string) (tuple :ok map int))))\n\
+             (defn step (n) (if (> n 0) [:ok {{:email \"a\"}} n] [:error 502 \"no\"]))\n\
+             (sig use (int -> any))\n\
+             (defn use (n)\n\
+               (match (step n)\n\
+                 ([:ok got conn] {ok_body})\n\
+                 ([:error code msg] {err_body})))"
+        )
+    };
+    let ws = file_warnings_mode(&program("(get got :email)", "(str code msg)"), true);
+    assert!(ws.is_empty(), "{ws:?}");
+    let ws = file_warnings_mode(
+        &program("(string/length got)", "(string/length code)"),
+        true,
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("expects string, got map (got)")),
+        "the :ok arm's second position is the map — {ws:?}"
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("expects string, got int (code)")),
+        "the :error arm's second position is the int — {ws:?}"
+    );
+}
+
+// A combinator over `(range (count xs))` hands its callback an INDEX of `xs`: the element
+// is `int[0..]` (a range carries its bounds' interval — `(range n)` never reaches `n`)
+// and the parameter is bounded by `xs`'s length for the body, so `(nth xs i)` reads the
+// element. `(range n)` with `n` let-bound as `(count xs)` is the same fact through the
+// count alias; a range past the count (`(range (inc (count xs)))`) proves nothing.
+#[test]
+fn a_callback_over_the_indices_of_a_collection_reads_its_elements() {
+    let ws = file_warnings_mode(
+        "\
+         (defmodule t)\n\
+         (sig f ((list int) -> list))\n\
+         (defn f (levels) (map (range (count levels)) (fn (i) (inc (nth levels i)))))\n\
+         (sig g ((list int) -> list))\n\
+         (defn g (levels) (let (n (count levels)) (map (range n) (fn (i) (inc (nth levels i))))))",
+        true,
+    );
+    assert!(ws.is_empty(), "{ws:?}");
+    let ws = file_warnings_mode(
+        "\
+         (defmodule t)\n\
+         (sig h ((list int) -> list))\n\
+         (defn h (levels) (map (range (inc (count levels))) (fn (i) (inc (nth levels i)))))",
+        true,
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("inc: argument 1 expects number, got nil | int")),
+        "a range past the count is not an index — {ws:?}"
+    );
+    assert_eq!(ty_str("(first (range 5))"), "int[0..4]");
+    assert_eq!(ty_str("(first (range 2 5))"), "int[2..4]");
+    assert_eq!(ty_str("(range 0)"), "nil");
+}
