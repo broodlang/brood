@@ -51,9 +51,9 @@
 (defn- md-run (text)
   (apply str (reverse (md-run-acc text '()))))
 
-;; The three characters an inline construct can begin with. `string/span-until` finds the
+;; The four characters an inline construct can begin with. `string/span-until` finds the
 ;; earliest of them in one native scan, so a run with no markup is one `md-escape`.
-(def- *md-inline-openers* "[<*")
+(def- *md-inline-openers* "[<*`")
 
 ;; The scanning worker: **tail**-recursive, carrying the emitted chunks newest-first (so the
 ;; caller reverses once) rather than nesting `str` around the recursive call. Two reasons it is
@@ -82,10 +82,21 @@
 ;; `[html remaining]`, or nil when the opener is just a character.
 (defn- md-construct (text)
   (cond
+    (string/starts-with? text "`") (md-code text)
     (string/starts-with? text "[") (md-link text)
     (string/starts-with? text "<") (md-autolink text)
     (string/starts-with? text "**") (md-span text "**" "strong")
     else (md-span text "*" "em")))
+
+;; A code span: everything to the closing backtick, escaped and not scanned — `**kwargs` is a
+;; literal there, and so is a `[[…]]` someone is writing ABOUT. Handled by the scanner rather
+;; than by splitting the run on backticks first, so `**`name`**` is bold around code: split
+;; first and the two `**` fall into different runs and never meet.
+(defn- md-code (text)
+  (let (close (index-of text "`" 1))
+    (when (> close 0)
+      [(str "<code>" (md-escape (string/substring text 1 close)) "</code>")
+        (string/substring text (+ close 1) (string/length text))])))
 
 ;; `[text](url)`: the link text is escaped, not re-scanned — `[**x**](u)` is rare enough that
 ;; a literal is the safer reading, and it keeps a `]` inside the text from ending it early.
@@ -130,15 +141,8 @@
         [(str "<" tag ">" (md-run content) "</" tag ">")
           (string/substring text (+ close width) end)]))))
 
-;; Inline Markdown for one text run: `code` spans (backtick pairs) with everything between
-;; them handed to `md-run`.
-(defn- md-inline (text)
-  (let (parts (string/split text "`"))
-    (apply str
-      (map (seq/zip (range (count parts)) parts)
-        (fn (pair)
-          (let ([i seg] pair)
-            (if (math/odd? i) (str "<code>" (md-escape seg) "</code>") (md-run seg))))))))
+;; Inline Markdown for one text run.
+(defn- md-inline (text) (md-run text))
 
 ;; ---- blocks ------------------------------------------------------------------------
 ;; The block state is `{:out :mode :buf :start}`: `out` the HTML so far, `mode` the open

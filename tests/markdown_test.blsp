@@ -58,3 +58,10 @@
   (test "an indented line inside a paragraph or list is not code"
     (assert= (->html "a\n    b") "<p>a     b</p>")
     (assert= (->html "- a\n    b") "<ul><li>a b</li></ul>")))
+
+(describe "markdown/->html — code spans are the scanner's"
+  (test "bold around a code span, and a code span keeps its markers literal"
+    (assert= (->html "**`tempo`** — a value") "<p><strong><code>tempo</code></strong> — a value</p>")
+    (assert= (->html "`**kwargs` and `[[x]]` and `<b>`")
+      "<p><code>**kwargs</code> and <code>[[x]]</code> and <code>&lt;b&gt;</code></p>")
+    (assert= (->html "an unclosed ` tick") "<p>an unclosed ` tick</p>")))
