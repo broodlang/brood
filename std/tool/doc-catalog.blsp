@@ -645,6 +645,10 @@
    "%register-protocol" :meta
    "reserved-package-name?" :meta
    "tap" :control
+   ;; `fuzzy`'s knobs are `defdyn`s, so they are bare while the module's functions are
+   ;; `fuzzy/…` and catalogued with it. `*fuzzy-scorer*` holds a FUNCTION (the default
+   ;; rules), which is what brings it into the catalogue's remit at all.
+   "*fuzzy-scorer*" :strings
    "then" :control})
 
 (defn category-of (function-name)
