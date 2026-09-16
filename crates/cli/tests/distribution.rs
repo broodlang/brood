@@ -27,8 +27,8 @@ fn two_nodes_connect_and_message() {
     // sends it `[:hi from]` or `[:ping from]`. Loops forever (the harness kills it).
     let server = format!(
         r#"
-(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (proc/register :echo (self))
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (defn serve ()
   (receive
     ([:hi from]   (do (send from [:pong (self)]) (serve)))
@@ -252,8 +252,8 @@ fn two_unix_nodes_connect_by_name_and_message() {
     ];
 
     let server = r#"
-(node/start :ua)
 (proc/register :echo (self))
+(node/start :ua)
 (defn serve ()
   (receive
     ([:hi from] (do (send from [:pong (self)]) (serve)))
@@ -314,8 +314,8 @@ fn wrong_cookie_rejected_over_unix() {
     ];
 
     let server = r#"
-(node/start :uc)
 (proc/register :echo (self))
+(node/start :uc)
 (defn serve () (receive (_ (serve))))
 (serve)
 "#;
@@ -1128,8 +1128,8 @@ fn mismatched_cookie_is_rejected() {
 
     let server = format!(
         r#"
-(node/start :a "127.0.0.1:{port_a}" "right-cookie-test-16+")
 (proc/register :echo (self))
+(node/start :a "127.0.0.1:{port_a}" "right-cookie-test-16+")
 (defn serve () (receive ([:hi from] (do (send from [:pong (self)]) (serve))) (_ (serve))))
 (serve)
 "#
@@ -1164,11 +1164,18 @@ fn mismatched_cookie_is_rejected() {
 /// An `:echo` server that replies `[:welcome]` to `[:hi from]`, and exits cleanly
 /// on `[:bye from]` (its main process returns → the OS process exits → the link's
 /// socket closes). Shared by the de-dup and node-down tests.
+///
+/// `:echo` is registered BEFORE the node listens: the client starts the moment the port
+/// accepts, and a `[:hi]` that lands between the listen and the register is dropped (a
+/// message to an unregistered name is silent by design, ADR-232) — the client then waits
+/// its full 30 s for a welcome that never comes. Seen once in a full-suite run
+/// (2026-09-17, `duplicate_connect_is_deduplicated`); registering first closes that
+/// window by construction, and every server here does the same.
 fn echo_server_src(port: u16) -> String {
     format!(
         r#"
-(node/start :a "127.0.0.1:{port}" "secret-test-cookie-16+")
 (proc/register :echo (self))
+(node/start :a "127.0.0.1:{port}" "secret-test-cookie-16+")
 (defn serve ()
   (receive
     ([:hi from]  (do (send from [:welcome]) (serve)))
@@ -1206,14 +1213,19 @@ fn duplicate_connect_is_deduplicated() {
     let b = spawn_brood(&dir, "client.blsp", &client);
     let out = b.wait_with_output().expect("client finished");
     let _ = a.kill();
-    let _ = a.wait(); // reap, so the test doesn't leave a zombie
+    // Reap with the output, so a failure can show what the SERVER said — a `[:hi]` that
+    // arrived before `:echo` was registered is dropped with a warning only the server prints
+    // (ADR-232), and the client's `no welcome` alone cannot tell that from a dead link.
+    let server = a.wait_with_output().expect("server reaped");
     let _ = std::fs::remove_dir_all(&dir);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         out.status.success() && stdout.contains("NODES=(:a@127.0.0.1)"),
-        "expected a single deduplicated link.\n--- stdout ---\n{stdout}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr)
+        "expected a single deduplicated link.\n--- stdout ---\n{stdout}\n--- stderr ---\n{}\n\
+         --- server stderr ---\n{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&server.stderr)
     );
 }
 
