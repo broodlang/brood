@@ -13771,6 +13771,29 @@ records, so a function whose return re-tags a matched result inferred `(tuple :o
 map) any)`. It binds through `let_bind_scope` — the one rule — now. hatch and
 store-postgres carry the ratchet at zero like bedit and hive.
 
+## 2026-09-16 — Text was composited in linear light; that is what "puffy" was (ADR-358)
+
+A side-by-side against Emacs: same panel, same 1× scale, bedit's text soft and Emacs's
+sharp. Hinting was on and the ppem was rounded, `:text-aa :auto` already meant subpixel at
+scale 1 (all three monitors at scale 1 in monitors.xml), so neither was it.
+
+It was the blend. `blend`/`blend_rgb` took coverage into LINEAR light — correct for a
+rounded rect's edge or a translucent cursor, wrong for a glyph, because coverage is the
+fraction of the pixel the outline covers and every stack text is tuned against lerps it in
+the encoded space. The cost, white on black: a half-covered pixel at 188/255 instead of 128,
+a quarter-covered one at 137 instead of 64. Every rim glows, and a glowing rim reads as blur.
+
+The instructive part is the previous fix. `gui-text-contrast!` exists because light-on-dark
+text "looked thin", and bedit shipped it at 1.4 — which lifts the same rims to 205/255. The
+correction ran in the direction of the fault, and the setting users would actually want was
+0.5, the clamp's minimum, because cov² roughly inverts the sRGB encode. A knob whose good
+value is the end of its range is a subsystem telling you it is compensating.
+
+Now: `blend_text`/`blend_text_rgb` lerp in sRGB for the text path, `blend` stays linear for
+geometry, `blend_rgb` had no other caller and is deleted, and the contrast knob is taste with
+1.0 = no lift (bedit's default 1.4 → 1.0). The numbers are pinned in a unit test — "crisp" is
+not something a test can see, 128/255 is.
+
 ## 2026-09-16 — The fuzzy score paid for scattering (ADR-359)
 
 With find-file finally fast enough to use on a 27k-file project, the ranking turned out to
