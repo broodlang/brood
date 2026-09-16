@@ -37,6 +37,7 @@ pub(super) const EFFECTFUL_IN_GUARD: &[&str] = &[
     // Table mutation — the one identity-mutable structure
     kw::TABLE_PUT,
     kw::TABLE_INCR,
+    kw::TABLE_ADD,
     kw::TABLE_DELETE,
     kw::TABLE_DROP,
     // I/O. These carried the pre-namespacing spellings (`println`, `print`, `os-cmd`,

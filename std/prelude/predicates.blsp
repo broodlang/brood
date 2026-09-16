@@ -107,11 +107,11 @@ also how you default deliberately: `(let (n (parse s)) (if (failure? n) 0 n))`.
     (table? {})            → false   ; a map is immutable, and a different kind"
   (%eq (type-of x) :table))
 ;; Copy an immutable map into a fresh mutable table. Used only by the compiler's
-;; linear-map-accumulator rewrite (docs/linear-map-accumulator.md) to seed the
+;; linear-map-accumulator rewrite (ADR-112, ADR-360 in docs/decisions.md) to seed the
 ;; private table from the accumulator's input map; never surfaced to user code.
 (defn %table-from-map (m)
   "Copy the immutable map `m` into a fresh mutable table. Internal: used only by the
-compiler's linear-map-accumulator rewrite (docs/linear-map-accumulator.md) to seed its
+compiler's linear-map-accumulator rewrite (ADR-112, ADR-360 in docs/decisions.md) to seed its
 private table, and never surfaced to user code — reach for `table/new` instead."
   (reduce (%map-pairs m) (%table) (fn (t kv) (%table-put t (first kv) (second kv)))))
 ;; `fn?` holds for both Brood closures (:fn) and Rust builtins (:native).

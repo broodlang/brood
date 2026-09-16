@@ -10,7 +10,26 @@ needing one is queued in [`perf-handoff.md`](perf-handoff.md) instead — curren
 high-priority item: whether KI-114's `as_f64_pair` holds the closure KI-109 got from the
 promotion it constrained.
 
-## 2026-09-16 evening — rungs A0 and A1 of the call convention landed; where things stand
+## 2026-09-16 night — the idiomatic tally is fast (ADR-360, KI-151); the Go column is next
+
+The benchmark ports were reviewed for idiom and the two Brood rows that called
+`%map-int-add` were rewritten to `(assoc m k (+ 1 (get m k 0)))` — 8× slower until the
+linear-map rewrite learned that shape (`LinIdiom`, `eval/compile/inline.rs`; `%table-add`,
+`core/table.rs`). `wordcount` 857 → 66 ms, `persistent-map` 535 → 79, no other row moved.
+`%map-int-add` is now exactly the `+` read-modify-write (it promoted nowhere and read a
+float as 0; `scripts/fuzz/generators/linmap.py` found the float case diverging between the
+arms on its first run — run it after any change to the rewrite: `scripts/fuzz/run.sh linmap 300`).
+
+**Next possible wins on this seam, in order:** (1) the same tally through `fold` with a
+closure — `(fold xs {} (fn (m x) (assoc m x (+ 1 (get m x 0)))))` is what `brood-for-claude.md`
+recommends and what `seq/frequencies` is, and neither qualifies today (the probe wants a
+self-tail `defn`); a `fold` over a literal `fn` whose accumulator is linear is the same
+proof one level in. (2) `(inc (get m k 0))` and `(- (get m k 0) e)` as the update — `inc` is
+a call to a prelude fn, so the shape is `(assoc m k (inc …))` and does not match `Prim2 Add`;
+a `%table-add` with delta `1` is the answer, as `(- …)` is with a negated addend. (3) A
+non-zero literal default: `(+ (get m k D) e)` is `%table-add` seeded at `D` — a fourth arg.
+Each is a `LinIdiom` case plus a `linmap_rewrite_form` arm plus a `linmap_idiom.rs` pin.
+
 
 `docs/call-convention.md` §7 carries the numbers per rung. **A0** (`9e3257aa`): the arm ABI
 takes a `JitCallCtx` pointer (env, IC cursors, depth, gateway token, dbg name); flat by

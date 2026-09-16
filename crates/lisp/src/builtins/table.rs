@@ -62,6 +62,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "Atomically add delta (default 1) to the integer at key k in table t, treating an absent key as 0, and return the new value. The read-modify-write is atomic under the table lock, so concurrent increments never lose an update — use this for counters. Errors if the existing value is not an integer.",
         table_incr);
     primitives.def(
+        kw::TABLE_ADD,
+        Arity::exact(3),
+        Sig::new(vec![table_ty, any, any], num),
+        &["t", "k", "v"],
+        "Store (+ (get t k 0) v) at key k in table t and return the new value: the read-modify-write the linear-map rewrite fuses `(assoc m k (+ (get m k 0) v))` into. Adds exactly as `+` does (floats, ratios, decimals, bignums, and its errors); the integer case is table-incr's lock-free path. The generic case is a read then a write, not atomic — this serves a table only its loop holds; the concurrent counter is table-incr.",
+        table_add,
+    );
+    primitives.def(
         kw::TABLE_COUNT,
         Arity::exact(1),
         Sig::new(vec![table_ty], int),
@@ -135,6 +143,12 @@ pub(super) fn table_incr(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
         v => expect_int(heap, "table-incr", v)?,
     };
     crate::core::table::incr(heap, id, arg(args, 1), delta)
+}
+
+pub(super) fn table_add(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_table(heap, "table-add", arg(args, 0))?;
+    crate::core::table::check_key("table-add", arg(args, 1))?;
+    crate::core::table::add(heap, id, arg(args, 1), arg(args, 2))
 }
 
 pub(super) fn table_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {

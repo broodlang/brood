@@ -2174,7 +2174,7 @@ fn macroexpand_all_depth_step(heap: &mut Heap, form: Value, env: EnvId, depth: u
                 out.push(macroexpand_all_depth(heap, item, env, depth + 1)?);
             }
             // Wrapper-split a linear immutable-map fold into an in-place table loop
-            // (docs/linear-map-accumulator.md); applies to a qualifying
+            // (ADR-112, ADR-360 in docs/decisions.md); applies to a qualifying
             // `(def NAME (fn …))` that passes the `linmap_probe` reachability gate.
             // On by default; opt out with `BROOD_LINMAP=0`.
             if let Some(split) = linmap_split_def(heap, &out) {
@@ -2332,7 +2332,7 @@ fn rebuild_list(heap: &mut Heap, original: Value, items: Vec<Value>) -> Value {
     new_list
 }
 
-/// Wrapper-split a **linear immutable-map fold** (docs/linear-map-accumulator.md).
+/// Wrapper-split a **linear immutable-map fold** (ADR-112, ADR-360 in docs/decisions.md).
 /// Given a fully-expanded `(def NAME (fn (P…) BODY…))` whose accumulator is provably
 /// linear (checked by `linmap_probe`), rewrite it to
 ///
@@ -2436,6 +2436,36 @@ fn linmap_split_def(heap: &mut Heap, items: &[Value]) -> Option<Value> {
     Some(heap.list(vec![value::sym(kw::DO), inner_def, wrapper_def]))
 }
 
+/// The `E` of `(+ (get ACC KEY 0) E)` / `(+ E (get ACC KEY 0))` when `value` is that form —
+/// the source half of `LinIdiom::fused_add`, which decided on the compiled body that this
+/// `assoc` is the tally. The two keys must be the same form — the probe's
+/// `linmap_same_key` is the stricter judge (it also requires the form to be pure), and
+/// the rewrite only ever runs on a body the probe admitted.
+fn linmap_fused_addend(heap: &Heap, acc: value::Symbol, key: Value, value: Value) -> Option<Value> {
+    let same_key = |k: Value| heap.equal(key, k);
+    let is_get_key_0 = |form: Value| {
+        let Ok(g) = heap.list_to_vec(form) else {
+            return false;
+        };
+        g.len() == 4
+            && matches!(g[0].unpack(), ValueRef::Sym(h) if value::symbol_is(h, "get"))
+            && matches!(g[1].unpack(), ValueRef::Sym(a) if a == acc)
+            && same_key(g[2])
+            && matches!(g[3].unpack(), ValueRef::Int(0))
+    };
+    let sum = heap.list_to_vec(value).ok()?;
+    if sum.len() != 3 || !matches!(sum[0].unpack(), ValueRef::Sym(h) if value::symbol_is(h, "+")) {
+        return None;
+    }
+    if is_get_key_0(sum[1]) {
+        Some(sum[2])
+    } else if is_get_key_0(sum[2]) {
+        Some(sum[1])
+    } else {
+        None
+    }
+}
+
 /// Does `form` contain a `quasiquote` anywhere? Guards the linmap wrapper-split (see the
 /// call site). Depth-bounded so a pathological datum can't recurse the compiler thread.
 fn form_has_quasiquote(heap: &Heap, form: Value, depth: usize) -> bool {
@@ -2476,7 +2506,7 @@ fn linmap_rewrite_form(
             matches!(items.get(1).map(|v| v.unpack()), Some(ValueRef::Sym(s)) if s == acc);
         if second_is_acc {
             let update = if value::symbol_is(h, kw::MAP_INT_ADD) {
-                Some(kw::TABLE_INCR)
+                Some(kw::TABLE_ADD)
             } else if value::symbol_is(h, kw::MAP_DISSOC) {
                 Some(kw::TABLE_DELETE)
             } else {
@@ -2504,6 +2534,27 @@ fn linmap_rewrite_form(
                     c.push(linmap_rewrite_form(heap, a, name, inner, acc));
                 }
                 return heap.list(c);
+            }
+            // The idiomatic spellings the probe admits through `LinIdiom` (inline.rs):
+            // `(get acc k [d])` is the read `(%table-get acc k d)`, and the tally
+            // `(assoc acc K (+ (get acc K 0) E))` — either operand order — is the fused
+            // `(%table-add acc K E)`. `%table-add` adds exactly as `+` does, so the
+            // float/bignum/error behaviour of the source is kept, not just the int case.
+            if value::symbol_is(h, "get") && (items.len() == 3 || items.len() == 4) {
+                let key = linmap_rewrite_form(heap, items[2], name, inner, acc);
+                let default = match items.get(3) {
+                    Some(&d) => linmap_rewrite_form(heap, d, name, inner, acc),
+                    None => Value::nil(),
+                };
+                return heap.list(vec![value::sym(kw::TABLE_GET), items[1], key, default]);
+            }
+            if value::symbol_is(h, "assoc") && items.len() == 4 {
+                if let Some(addend) = linmap_fused_addend(heap, acc, items[2], items[3]) {
+                    let key = linmap_rewrite_form(heap, items[2], name, inner, acc);
+                    let addend = linmap_rewrite_form(heap, addend, name, inner, acc);
+                    let mutate = heap.list(vec![value::sym(kw::TABLE_ADD), items[1], key, addend]);
+                    return heap.list(vec![value::sym(kw::DO), mutate, items[1]]);
+                }
             }
         }
         if h == name {

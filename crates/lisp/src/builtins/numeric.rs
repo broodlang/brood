@@ -738,6 +738,15 @@ fn compare_multi_dispatch(
     }
 }
 
+/// `(+ a b)` for the kernel's own use — the same tower dispatch and the same errors
+/// (naming `+`) as the primitive, without an argument slice. `core::table::add` is the
+/// caller: the linear-map rewrite's fused read-modify-write has to add exactly as the
+/// `+` it replaced did.
+pub(crate) fn add_values(heap: &mut Heap, a: Value, b: Value) -> LispResult {
+    let env = heap.global();
+    prim_add(&[a, b], env, heap)
+}
+
 pub(super) fn prim_add(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     num_bin(
         heap,

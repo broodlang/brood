@@ -40,7 +40,7 @@ arg silently becoming `nil`.
 | | `%map-dissoc` | 2 | a fresh map with a key removed |
 | | `%map-pairs` | 1 | entries as a list of `[k v]` vectors, insertion order, one O(n) pass — the sole enumerator; `keys`/`vals`/`contains?`/`reduce-kv` are all Brood over it |
 | | `%map-count` | 1 | the number of entries in a map — O(1) (the CHAMP root tracks its size) |
-| | `%map-int-add` | 3 | `(%map-int-add m k delta)` → a fresh map with key `k`'s integer value incremented by `delta` (inserts `delta` when `k` is absent) — a single trie traversal, equivalent to `(assoc m k (+ (get m k 0) delta))` without the extra walk |
+| | `%map-int-add` | 3 | `(%map-int-add m k delta)` → a fresh map with key `k`'s value incremented by the integer `delta` (inserts `delta` when `k` is absent) — exactly `(assoc m k (+ (get m k 0) delta))`, a single trie traversal when the stored value is a plain integer. The compiler recognises the idiomatic spelling (ADR-360), so there is no reason to write this one |
 | **String** | `string-length` | 1 | char count |
 | | `substring` | 2-3 | characters `[start, end)`, char-indexed; `end` defaults to `(string-length s)` |
 | | `%str-index-of` | 2-3 | char index of the first occurrence of a substring at or after the optional start (or -1; empty needle → the start). Linear (byte-level `find` → char index) — the search counterpart of `substring`, needed in Rust because Brood has no O(1) char access (a pure-Brood scan is O(n²)). `index-of` / `includes?` ride on it. The start offset is taken here rather than by slicing in Brood: `(index-of s needle from)` used to search `(substring s from n)`, copying the suffix on every call |

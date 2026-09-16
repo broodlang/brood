@@ -601,10 +601,16 @@ path:
   ;; allocates the full neighbour list, then counts it
   (seq/frequencies (mapcat neighbours cells))
   ;; fused: tally straight into the map, no intermediate list
-  (fold (fn (counts cell)
-          (fold (fn (c n) (assoc c n (inc (get c n 0)))) counts (neighbours cell)))
-        {} cells)
+  (fold cells {}
+        (fn (counts cell)
+          (fold (neighbours cell) counts (fn (c n) (assoc c n (+ 1 (get c n 0)))))))
   ```
+
+  Write the tally as `(assoc m k (+ (get m k 0) e))` — that exact shape, with a
+  literal `0` default — and, in a self-recursive loop that threads the map through
+  its own tail call, the compiler builds the map in place (ADR-360: no per-update
+  path copy, and the loop stays native). There is no faster spelling to reach for;
+  `%map-int-add` exists but is now just this shape by another name.
 
   Same shape for build-a-collection-then-rebuild: fold the source straight into
   the target instead of `seq/filter`-then-`into`. (For longer `map`/`seq/filter`

@@ -6,7 +6,7 @@
 
 use super::*;
 
-// ============ linear map-accumulator → Table rewrite (docs/linear-map-accumulator.md) ============
+// ============ linear map-accumulator → Table rewrite (ADR-112, ADR-360 in docs/decisions.md) ============
 //
 // A self-tail-recursive fold that threads an immutable-map accumulator one update
 // at a time pays an O(depth) path-copy per update (~2.25M node allocations for the

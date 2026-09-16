@@ -22,7 +22,7 @@
 (def I64-MIN -9223372036854775808)
 
 ;; A tail-recursive tally over a map accumulator — the shape the linear-map
-;; optimizer rewrites into a `table-incr` loop. Two steps of half of i64::MAX+1
+;; optimizer rewrites into a `%table-add` loop. Two steps of half of i64::MAX+1
 ;; overflow, so the tally below crosses the boundary on its third element. Defined
 ;; at file scope (a `defn` inside a `test` body would not be the same shape).
 (defn lm-overflow-tally (xs acc)
@@ -69,36 +69,42 @@
 ;; 2. `%map-int-add` past i64::MAX
 ;;
 ;; The fused read-modify-write used an unchecked `+`: a debug panic, and in release
-;; a large NEGATIVE count — the classic silently-corrupt counter. It now raises,
-;; matching `table-incr`, which is what the linear-map optimizer rewrites this call
-;; into on a provably-linear accumulator: promoting to a bignum here (what `+`
-;; itself does) would have made that rewrite *observable*, since the table path
-;; cannot promote. Both arms of the rewrite now fail the same way (only the
-;; operator name in the message differs) — the last test below pins that, since it
-;; is the reason the error was chosen over promotion.
+;; a large NEGATIVE count — the classic silently-corrupt counter. For a while it
+;; RAISED at the boundary, to match `table-incr`, which is what the linear-map
+;; optimizer rewrote it into and which cannot promote. Since 2026-09-16 (ADR-360)
+;; the rewrite targets `%table-add` — the same `+` over a table — so both arms can
+;; now do what `+` does: **promote to a bignum**. `%map-int-add` is exactly
+;; `(assoc m k (+ (get m k 0) delta))` on every input, and the last test below pins
+;; that the rewrite stays unobservable at the boundary, which is the property the
+;; old error existed to keep.
 ;; ---------------------------------------------------------------------------
-(describe "%map-int-add raises rather than wrapping"
-  (test "MAX + 1 raises a catchable error"
-    (assert-error (%map-int-add {:a I64-MAX} :a 1))
-    (is (includes? (error-of (%map-int-add {:a I64-MAX} :a 1)) "±2^63")))
-  (test "MIN - 1 raises in the other direction too"
-    (assert-error (%map-int-add {:a I64-MIN} :a -1)))
-  (test "a bigint already stored under the key is out of range, not read as 0"
+(describe "%map-int-add promotes rather than wrapping"
+  (test "MAX + 1 is a bignum, as + gives"
+    (assert= (get (%map-int-add {:a I64-MAX} :a 1) :a) (+ I64-MAX 1))
+    (assert= (get (%map-int-add {:a I64-MAX} :a 1) :a) 9223372036854775808))
+  (test "MIN - 1 promotes in the other direction too"
+    (assert= (get (%map-int-add {:a I64-MIN} :a -1) :a) (- I64-MIN 1)))
+  (test "a bigint already stored under the key is added to, not read as 0"
     ;; It can only have got there via `assoc`; the old `as_int().unwrap_or(0)`
     ;; silently restarted the count from `delta` instead.
-    (assert-error (%map-int-add {:a 9223372036854775808} :a 1)))
+    (assert= (get (%map-int-add {:a 9223372036854775808} :a 1) :a) 9223372036854775809))
+  (test "a float under the key adds as + does"
+    (assert= (%map-int-add {:a 1.5} :a 1) {:a 2.5}))
+  (test "a non-number under the key is +'s own error"
+    (assert-error (%map-int-add {:a "s"} :a 1))
+    (is (includes? (error-of (%map-int-add {:a "s"} :a 1)) "+: expected number")))
   (test "deep in the trie, not just at the root"
-    ;; 64 keys forces real CHAMP nodes, so the check is exercised on the branch
+    ;; 64 keys forces real CHAMP nodes, so the boundary is exercised on the branch
     ;; path rather than only on a root data slot.
     (let (m (fold (%range->list (%range 0 64 1)) {} (fn (acc i) (assoc acc i I64-MAX))))
-      (assert-error (%map-int-add m 63 1))
-      (assert-error (%map-int-add m 0 2))
+      (assert= (get (%map-int-add m 63 1) 63) (+ I64-MAX 1))
+      (assert= (get (%map-int-add m 0 2) 0) (+ I64-MAX 2))
       (assert= (get (%map-int-add m 63 -1) 63) (- I64-MAX 1))))
   (test "the linear-map rewrite is unobservable at the boundary"
     ;; A tail-recursive tally over a map accumulator is exactly the shape the
-    ;; optimizer rewrites into `table-incr`. Both arms must raise; before this,
-    ;; the rewritten one raised and the plain one wrapped.
-    (assert-error (lm-overflow-tally (list :a :a :a) {})))
+    ;; optimizer rewrites into a table loop. Both arms must give the same bignum;
+    ;; before this, the rewritten one raised and the plain one wrapped.
+    (assert= (get (lm-overflow-tally (list :a :a :a) {}) :a) (* 3 4611686018427387904)))
   (test "the ordinary path is unchanged"
     (assert= (%map-int-add {:a 1} :a 2) {:a 3})
     (assert= (%map-int-add {} :a 5) {:a 5})

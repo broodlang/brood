@@ -22900,3 +22900,51 @@ runtime command; hive's manifest no longer needs the leak.
 
 **Consequence.** hive bundles on the genuinely lean runtime. `tests/markdown_test.blsp` pins
 the module's presence on every runtime (`reflect/builtin-modules`) beside its rendering cases.
+
+## ADR-360 — The linear-map rewrite recognises the tally a user writes, and both spellings are one `+`
+
+**Context.** ADR-112 made `Table` the only mutable structure and the linear-map rewrite
+(`eval/macros.rs` `linmap_split_def`, `eval/compile/inline.rs` `linmap_probe`) the way an
+immutable-map fold gets in-place speed: a provably-linear accumulator is built on a private
+table and snapshotted back. But the whitelist was four `%`-primitives, and the one that
+mattered — `%map-int-add` — is a name the reference hides. The fold a Brood user actually
+writes, `(assoc m k (+ (get m k 0) e))`, was an escape, so it ran 8× slower than the same
+program spelled with the primitive (KI-151: `wordcount` 848 vs 99 ms). A fast path reachable
+only through an undocumented name is not a language feature; it is a benchmark trick.
+
+**Decision.**
+
+1. **The probe admits the idiom.** `LinIdiom` accepts, on the accumulator, the prelude `get`
+   (2- or 3-arity) as a read and `(assoc acc K (+ (get acc K 0) E))` in either operand order
+   as an update — only when `get`/`assoc` resolve to the PRELUDE closures (reserved, ADR-166:
+   a user cannot rebind them; a local shadow compiles to a `Local` callee and never matches)
+   and `K` is the **same pure expression** on both sides: a frame slot, an immediate constant,
+   or an inlined prelude primitive (`Prim1`/`Prim2`, not a table read) over those. The source
+   evaluates `K` twice and the rewrite once, so `K` must be something whose two evaluations
+   cannot differ — a global can be rebound by another process between the reads, a call can
+   have effects, a table can be written. The default must be the literal `0`: `(get m k)`
+   raises on a miss where the table op would store `e`, and `(get m k 1)` seeds at `1+e`.
+2. **A new table op, `%table-add`**, is `(+ (get t k 0) v)` on a table: `incr`'s lock-free
+   path when the stored value is an `i64` and the sum fits, otherwise the real `+`
+   (`builtins::numeric::add_values`) and a `put`. It adds exactly as the source did — a float
+   under the key, a bignum, an i64 overflow promoting, a non-number raising `+`'s error — and
+   it is not atomic in the general case, which is fine: it serves a table only its loop holds.
+   `%table-incr` stays the concurrent counter for `table/incr`.
+3. **`%map-int-add` is exactly the same `+`**, and is rewritten to `%table-add` too. It used
+   to raise past i64 and read a non-integer as 0, chosen (numeric_overflow_test §2) so the
+   rewrite to `table-incr` would be unobservable at the boundary — which it was, at the cost
+   of a counter that could not promote, and it was NOT unobservable on a float: the new fuzzer
+   found `{0 1.5}` tallying to `2` on one arm and `2.5` on the other. With `%table-add` both
+   arms are one semantics on every input, so the primitive can do what `+` does.
+
+**Consequences.** `wordcount` 857 → 66 ms and `persistent-map` 535 → 79 ms on the idiomatic
+ports (`make ab --floor`, every other row noise); the benchmark rows are now the code a user
+writes and the primitive has no reason to exist in user code. Guards: the expansion is pinned
+(`crates/lisp/tests/linmap_idiom.rs`), the values under both arms and all tiers
+(`tests/linmap_soundness_test.blsp`), promotion at the boundary
+(`tests/numeric_overflow_test.blsp`), and `scripts/fuzz/generators/linmap.py` is a
+metamorphic fuzzer whose oracle is in the program (the same tally as a `fold`). Not admitted,
+deliberately: a plain `(assoc acc k v)` — the table cannot hold every value a map can
+(ropes), so it stays an escape; a record accumulator with a custom `Lookup` impl reads its
+misses through `%lookup-miss` in the source and through the table in the rewrite, the same
+property the `%map-get` whitelist has always had and not a shape anyone tallies over.

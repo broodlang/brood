@@ -883,10 +883,43 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-16** — v0.29.0 (the open issues closed) and v0.29.1 (KI-147: a refer-all mistook another process's finishing load for a cycle, so `nest release` refused every hive bundle since v0.28.0); every project at `:brood ">= 0.29.0"`; hive deployed on v0.29.1
 - **2026-09-15** — ADR-355: a `let`-bound `fn` literal's parameters are derived from its callers (the ADR-341 rule scoped to the binding; sites under callback literals and nested `let`s type), and a `sig` naming the required positions seeds a `defn` with undeclared `&optional`s. bedit strict 58 → 48 with no bedit change; downstream sweep of 16 projects green (hive's reds = version skew)
 - **2026-09-16** — v0.29.2 (ADR-356: `markdown/->html` a core module — hive's lean bundle could not find `docs`); hive's tests render the running version's reference seeds; then bedit strict 48 → 0 through three checker rules (`get-in` over a literal path reads the declared shape, `%map-pairs` walks a `map<K, V>` as its entries, the site collector walks a `let`-bound lambda under its derived parameters) and bedit's own leaves; then three more derivation gaps (an `&optional` function.s collected parameters, a let-bound lambda.s self-call folding to ⊥, a fold accumulator.s fields through the ascent) and the four workaround `sig`s deleted; then 323 redundant `sig`s removed from std (`scripts/redundant-sigs.blsp`), five kept because a neighbour or a caller read through them; KI-149 fixed (the whole-project lints ran only in the bare `nest check` and never counted — both forms run and count them now)
+- **2026-09-16** — ADR-360: the linear-map rewrite recognises the tally a user writes (`(assoc m k (+ (get m k 0) e))`) — `wordcount` 857 → 66 ms, `persistent-map` 535 → 79 on the idiomatic ports; `%table-add` is the fused op and `%map-int-add` is now exactly the same `+` (KI-151); a linmap fuzzer with the oracle in the program.
 
 ---
 
 ## Recent — full entries
+
+## 2026-09-16 — the idiomatic tally is the fast one (ADR-360, KI-151)
+
+Reviewing every benchmark port for idiom, the only Brood finding was that `wordcount` and
+`persistent-map` called `%map-int-add` — a kernel name the reference hides. Rewritten to
+`(assoc m key (+ 1 (get m key 0)))`, the update every other language's port makes in one
+call, the rows went 99 → 848 ms and 109 → 561. The reason: the linear-map rewrite
+(`linmap_probe`) admitted only the four `%` map primitives on the accumulator; `get` and
+`assoc` were escapes, so the idiomatic fold never built in place, and its loop arm was
+`call-mediated-boxed` on top.
+
+**What changed.** `LinIdiom` (`eval/compile/inline.rs`) admits the prelude `get` as a read
+and the fused `assoc`/`+`/`get` shape as an update, with the key required to be the same
+*pure* expression on both sides (the source evaluates it twice, the rewrite once). The source
+rewrite emits `%table-get` and a new `%table-add`, which is `(+ (get t k 0) v)` on a table —
+`incr`'s lock-free path for the int case, the real `+` and a `put` otherwise. Then the
+kernel spelling was made honest too: `%map-int-add` had raised past i64 and read a
+non-integer as 0 so its `table-incr` rewrite would be unobservable; with `%table-add` on the
+other side it can do exactly what `+` does, and both spellings are one semantics.
+
+**What the fuzzer found on its first run.** `scripts/fuzz/generators/linmap.py` folds each
+random tally as the rewritten `defn` and as a `fold` the rewrite never touches, and prints
+`BAD` when they differ. Program 2 of 3: a float seed under a hit key — `{0 1.5}` — tallied to
+`2.5` through the fold and raised `table-incr: not an integer` through the split. The
+`%map-int-add` arm read the float as 0 *by design* ("as it always has"); the rewritten arm
+did not. That divergence predates today and nothing had ever compared the two arms on a
+non-integer. Sabotage (route back to `%table-incr`) reds 8 of 120 programs; 700 clean since.
+
+**Measured.** `make ab --floor --all`: `wordcount` −92.3%, `persistent-map` −85.2%, the
+rest noise (three rows that read +7/+26/+57% in the sweep were the concurrent test suite on
+the pinned core — alone: 0.0/0.0/−1.1%). `make tier-audit`: 29 rows, every hot arm native.
+Suite 1580/1580; clippy on CI's flags clean.
 
 ## 2026-09-12 — the lazy-load wave's two artifact divergences: one closed, one shown to be the win itself
 

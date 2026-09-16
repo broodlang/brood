@@ -237,14 +237,138 @@ pub(crate) fn linmap_read_op(sym: Symbol) -> Option<&'static str> {
 }
 
 /// Whitelisted map UPDATE ops (return the new map — must be consumed at a sink) → Table op.
-/// Only ops that provably store serializable values (integers, removals) are whitelisted;
+/// Only ops that provably store serializable values (numbers, removals) are whitelisted;
 /// `%map-assoc` stores arbitrary `Value`s including ropes, which `table-put`/`table-snapshot`
 /// cannot serialize — so it is excluded until the Table can hold non-serializable values.
+/// `%map-int-add` goes to `%table-add`, not `%table-incr`: both sides are then the one
+/// `+` read-modify-write, so a float under the key or an i64 overflow answers the same
+/// with the rewrite on and off (`table-incr` raises on both, and cannot promote).
 pub(crate) fn linmap_update_op(sym: Symbol) -> Option<&'static str> {
     match value::symbol_name_opt(sym)? {
-        n if n == kw::MAP_INT_ADD => Some(kw::TABLE_INCR),
+        n if n == kw::MAP_INT_ADD => Some(kw::TABLE_ADD),
         n if n == kw::MAP_DISSOC => Some(kw::TABLE_DELETE),
         _ => None,
+    }
+}
+
+/// The prelude names whose calls on the accumulator the probe admits **as source code a
+/// user writes** — `(get acc k [d])` as a read and the fused `(assoc acc k (+ (get acc k 0)
+/// e))` as an update — beside the `%`-primitives `linmap_read_op`/`linmap_update_op` list.
+/// `%map-int-add` is not a name anyone should have to know: the rewrite exists so the
+/// tally a Brood user writes builds in place, and until 2026-09-16 that shape was refused
+/// (the `assoc` was an escape) while only the primitive spelling was rewritten.
+///
+/// `None` when either global is not the PRELUDE closure — a user `(def get …)` means the
+/// call is not the read the rewrite assumes, so the shape simply is not recognised (the
+/// same region guard `resolve_prim` puts on `get`/`nth`).
+#[derive(Clone, Copy)]
+pub(crate) struct LinIdiom {
+    get: Symbol,
+    assoc: Symbol,
+}
+
+impl LinIdiom {
+    pub(crate) fn resolve(heap: &Heap) -> Option<LinIdiom> {
+        let prelude_fn = |name: &str| {
+            let sym = value::intern(name);
+            match heap.env_get(heap.global(), sym)?.unpack() {
+                ValueRef::Fn(id) if id.region() == crate::core::value::PRELUDE => Some(sym),
+                _ => None,
+            }
+        };
+        Some(LinIdiom {
+            get: prelude_fn("get")?,
+            assoc: prelude_fn("assoc")?,
+        })
+    }
+
+    /// `(get acc k)` / `(get acc k d)`: the args after the accumulator, when this call
+    /// is the prelude `get` on `Local(s)`.
+    fn read_args<'a>(&self, h: Symbol, args: &'a [Node], s: usize) -> Option<&'a [Node]> {
+        (h == self.get && (args.len() == 2 || args.len() == 3) && first_arg_is_local(args, s))
+            .then(|| &args[1..])
+    }
+
+    /// `(assoc acc K (+ (get acc K 0) E))` or `(assoc acc K (+ E (get acc K 0)))`: the key
+    /// and the addend, when this call is that fused read-modify-write on `Local(s)`. `K`
+    /// is the same pure expression on both sides (`linmap_same_key`) — evaluated twice in
+    /// the source and once in the rewrite, so its two reads must not be able to differ.
+    fn fused_add<'a>(&self, h: Symbol, args: &'a [Node], s: usize) -> Option<(&'a Node, &'a Node)> {
+        if h != self.assoc || args.len() != 3 || !first_arg_is_local(args, s) {
+            return None;
+        }
+        let key = &args[1];
+        let Node::Prim2 {
+            op: PrimOp::Add,
+            a,
+            b,
+            map: [0, 1],
+            ..
+        } = &args[2]
+        else {
+            return None;
+        };
+        let is_get_key_0 = |n: &Node| match n {
+            Node::Call { callee, args, .. } => {
+                call_head_sym(callee) == Some(self.get)
+                    && args.len() == 3
+                    && first_arg_is_local(args, s)
+                    && linmap_same_key(key, &args[1])
+                    && matches!(&args[2], Node::Const(c) if matches!(c.load().unpack(), ValueRef::Int(0)))
+            }
+            _ => false,
+        };
+        if is_get_key_0(a) {
+            Some((key, b))
+        } else if is_get_key_0(b) {
+            Some((key, a))
+        } else {
+            None
+        }
+    }
+}
+
+/// Are `k1` and `k2` the same **pure** key expression? The source evaluates the key
+/// twice and the fused op once, so the two must be the same expression AND one whose two
+/// evaluations cannot differ: a frame slot, an immediate constant (an int or a keyword),
+/// or an inlined prelude primitive over such — `(first xs)`, `(math/rem x 7)`. Not a
+/// global (another process may rebind it between the reads), not a call (effects), and
+/// not a table read (another process may write between the reads). A prelude name is
+/// reserved (ADR-166), so a `Prim1`/`Prim2` here is the deterministic primitive it names.
+fn linmap_same_key(k1: &Node, k2: &Node) -> bool {
+    match (k1, k2) {
+        (Node::Local(i), Node::Local(j)) => i == j,
+        (Node::Const(a), Node::Const(b)) => match (a.load().unpack(), b.load().unpack()) {
+            (ValueRef::Int(x), ValueRef::Int(y)) => x == y,
+            (ValueRef::Keyword(x), ValueRef::Keyword(y)) => x == y,
+            _ => false,
+        },
+        (Node::Prim1 { op: o1, a: a1, .. }, Node::Prim1 { op: o2, a: a2, .. }) => {
+            o1 == o2 && linmap_same_key(a1, a2)
+        }
+        (
+            Node::Prim2 {
+                op: o1,
+                a: a1,
+                b: b1,
+                map: m1,
+                ..
+            },
+            Node::Prim2 {
+                op: o2,
+                a: a2,
+                b: b2,
+                map: m2,
+                ..
+            },
+        ) => {
+            o1 == o2
+                && m1 == m2
+                && !matches!(o1, PrimOp::TableGet | PrimOp::TableHas)
+                && linmap_same_key(a1, a2)
+                && linmap_same_key(b1, b2)
+        }
+        _ => false,
     }
 }
 
@@ -275,7 +399,8 @@ pub(crate) fn first_arg_is_local(args: &[Node], s: usize) -> bool {
 /// the self-call's arg-`s` (threading), or a sink return — and update ops on `s`
 /// occur only at a sink (so the new map is linearly consumed, never aliased).
 /// Anything else → not linear (bail). `sink` is this position's flow role.
-pub(crate) fn linmap_linear(node: &Node, s: usize, sink: LinSink) -> bool {
+pub(crate) fn linmap_linear(node: &Node, s: usize, sink: LinSink, idiom: Option<LinIdiom>) -> bool {
+    let rest_linear = |rest: &[Node]| rest.iter().all(|a| linmap_linear(a, s, LinSink::No, idiom));
     match node {
         Node::Local(k) => *k != s || sink != LinSink::No,
         Node::Call { callee, args, .. } => {
@@ -286,11 +411,32 @@ pub(crate) fn linmap_linear(node: &Node, s: usize, sink: LinSink) -> bool {
                 {
                     // args[0] (== Local(s)) is consumed by the op; the rest must
                     // not mention s (s is the map, not a key/value/default).
-                    return args[1..].iter().all(|a| linmap_linear(a, s, LinSink::No));
+                    return rest_linear(&args[1..]);
+                }
+                if let Some(i) = idiom {
+                    if let Some(rest) = i.read_args(h, args, s) {
+                        return rest_linear(rest);
+                    }
+                    if sink != LinSink::No {
+                        if let Some((key, addend)) = i.fused_add(h, args, s) {
+                            // The key is a local or a constant (never s); the addend may
+                            // READ s — `(+ (get acc k 0) (get acc j 0))` — but not consume it.
+                            return linmap_linear(key, s, LinSink::No, idiom)
+                                && linmap_linear(addend, s, LinSink::No, idiom);
+                        }
+                    }
                 }
             }
-            linmap_linear(callee, s, LinSink::No)
-                && args.iter().all(|a| linmap_linear(a, s, LinSink::No))
+            linmap_linear(callee, s, LinSink::No, idiom) && rest_linear(args)
+        }
+        // The inlined `(get acc k)` (`BROOD_MAPGET`): a read, like the call it replaces.
+        Node::Prim2 {
+            op: PrimOp::MapGet,
+            a,
+            b,
+            ..
+        } if idiom.is_some() && matches!(**a, Node::Local(k) if k == s) => {
+            linmap_linear(b, s, LinSink::No, idiom)
         }
         Node::SelfCall { args, .. } => args.iter().enumerate().all(|(i, a)| {
             linmap_linear(
@@ -301,29 +447,34 @@ pub(crate) fn linmap_linear(node: &Node, s: usize, sink: LinSink) -> bool {
                 } else {
                     LinSink::No
                 },
+                idiom,
             )
         }),
         Node::If(c, t, e) => {
-            linmap_linear(c, s, LinSink::No)
-                && linmap_linear(t, s, sink)
-                && linmap_linear(e, s, sink)
+            linmap_linear(c, s, LinSink::No, idiom)
+                && linmap_linear(t, s, sink, idiom)
+                && linmap_linear(e, s, sink, idiom)
         }
         Node::Do(xs) => {
             let last = xs.len().saturating_sub(1);
-            xs.iter()
-                .enumerate()
-                .all(|(i, x)| linmap_linear(x, s, if i == last { sink } else { LinSink::No }))
+            xs.iter().enumerate().all(|(i, x)| {
+                linmap_linear(x, s, if i == last { sink } else { LinSink::No }, idiom)
+            })
         }
         Node::LetBind { binds, body } => {
-            binds.iter().all(|(_, v)| linmap_linear(v, s, LinSink::No))
-                && linmap_linear(body, s, sink)
+            binds
+                .iter()
+                .all(|(_, v)| linmap_linear(v, s, LinSink::No, idiom))
+                && linmap_linear(body, s, sink, idiom)
         }
         Node::Const(_) | Node::Global(_) | Node::GlobalIc { .. } => true,
         // Vector / Map / Prim1 / Prim2 / MakeClosure / TryCatch: any read of s here
         // is a genuine escape (capture, store, arithmetic on a map, …).
         other => {
             let mut ok = true;
-            walk_children(other, |c| ok = ok && linmap_linear(c, s, LinSink::No));
+            walk_children(other, |c| {
+                ok = ok && linmap_linear(c, s, LinSink::No, idiom)
+            });
             ok
         }
     }
@@ -331,18 +482,20 @@ pub(crate) fn linmap_linear(node: &Node, s: usize, sink: LinSink) -> bool {
 
 /// Does `s` appear as the first arg of an UPDATE op anywhere? (Only then is the
 /// rewrite a win — a read-only accumulator gains nothing.)
-pub(crate) fn linmap_has_update(node: &Node, s: usize) -> bool {
+pub(crate) fn linmap_has_update(node: &Node, s: usize, idiom: Option<LinIdiom>) -> bool {
     if let Node::Call { callee, args, .. } = node {
         if first_arg_is_local(args, s) {
             if let Some(h) = call_head_sym(callee) {
-                if linmap_update_op(h).is_some() {
+                if linmap_update_op(h).is_some()
+                    || idiom.is_some_and(|i| i.fused_add(h, args, s).is_some())
+                {
                     return true;
                 }
             }
         }
     }
     let mut found = false;
-    walk_children(node, |c| found = found || linmap_has_update(c, s));
+    walk_children(node, |c| found = found || linmap_has_update(c, s, idiom));
     found
 }
 
@@ -381,8 +534,10 @@ pub(crate) fn linmap_probe(
     if !node_any(&node, &|n| matches!(n, Node::SelfCall { .. })) {
         return None;
     }
-    (0..params.len())
-        .find(|&s| linmap_has_update(&node, s) && linmap_linear(&node, s, LinSink::Return))
+    let idiom = LinIdiom::resolve(heap);
+    (0..params.len()).find(|&s| {
+        linmap_has_update(&node, s, idiom) && linmap_linear(&node, s, LinSink::Return, idiom)
+    })
 }
 
 // ===================== recursive self-inlining (Phase B, §6b) =====================

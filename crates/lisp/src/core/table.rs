@@ -752,6 +752,17 @@ pub fn delete(heap: &mut Heap, id: u64, key: Value) -> LispResult {
     Ok(Value::table(id))
 }
 
+/// Why an integer increment could not be applied as one. `incr` turns each into its
+/// error; `add` turns each into the generic `+` path.
+enum IncrMiss {
+    /// The stored value is not an `i64` (a float, a string, a bignum, …).
+    NotInt,
+    /// The stored value is an integer outside the ±2^63 range (a bignum).
+    BigInt,
+    /// `cur + delta` leaves the i64 range.
+    Overflow,
+}
+
 /// `(%table-incr t k [delta])` — **atomically** add `delta` (default 1) to the integer
 /// at `k` (treating an absent key as 0) and return the new value. On the dense path
 /// this is a lock-free CAS loop on the key's slot (concurrent increments never lose
@@ -759,6 +770,52 @@ pub fn delete(heap: &mut Heap, id: u64, key: Value) -> LispResult {
 /// protocol on `Store`); on the hashed path the whole read-modify-write happens under
 /// the store lock. Errors if the existing value is not a plain integer.
 pub fn incr(heap: &mut Heap, id: u64, key: Value, delta: i64) -> LispResult {
+    match incr_int(heap, id, key, delta)? {
+        Ok(next) => Ok(Value::int(next)),
+        Err(IncrMiss::NotInt) => Err(LispError::type_err(
+            "table-incr: the value at this key is not an integer",
+        )),
+        // A bignum *is* an integer in Brood, but table-incr deliberately works only
+        // in the i64 range (a counter primitive) — say so precisely.
+        Err(IncrMiss::BigInt) => Err(LispError::type_err(
+            "table-incr: the value at this key is an integer outside the ±2^63 range that table-incr supports",
+        )),
+        Err(IncrMiss::Overflow) => Err(LispError::runtime(
+            "table-incr: incrementing would exceed the ±2^63 range",
+        )),
+    }
+}
+
+/// `(%table-add t k v)` — store `(+ (get t k 0) v)` at `k` and return the new value:
+/// the read-modify-write `(assoc m k (+ (get m k 0) v))` spelled on a table, which is
+/// what the linear-map rewrite turns that idiom into (`eval/compile/inline.rs`). The
+/// integer case is `incr`'s lock-free path; anything else — a float or bignum on
+/// either side, a non-number (the error `+` raises, naming `+`), an i64 overflow (a
+/// bignum result, as `+` promotes) — is exactly what `+` does with the stored value,
+/// then a `put`. The generic half is a read then a write, NOT atomic against a
+/// concurrent writer on the same key: this op serves a table no one else holds; the
+/// concurrent counter is `incr`.
+pub fn add(heap: &mut Heap, id: u64, key: Value, delta: Value) -> LispResult {
+    if let Value::Int(d) = delta {
+        if let Ok(next) = incr_int(heap, id, key, d)? {
+            return Ok(Value::int(next));
+        }
+    }
+    let old = get(heap, id, key, Value::int(0))?;
+    let next = crate::builtins::numeric::add_values(heap, old, delta)?;
+    put(heap, id, key, next)?;
+    Ok(next)
+}
+
+/// The shared read-modify-write behind `incr` and `add`: `Ok(Ok(next))` when the
+/// stored value was an `i64` (or absent) and the sum fits, `Ok(Err(miss))` when it
+/// was not — leaving the table untouched — and `Err` only for a dead table.
+fn incr_int(
+    heap: &mut Heap,
+    id: u64,
+    key: Value,
+    delta: i64,
+) -> Result<Result<i64, IncrMiss>, LispError> {
     let store = lookup(id)?;
     if store.dense.load(Ordering::Acquire) {
         if let Some(i) = dense_idx(key) {
@@ -770,15 +827,11 @@ pub fn incr(heap: &mut Heap, id: u64, key: Value, delta: i64) -> LispResult {
                     SLOT_EMPTY => (0i64, true),
                     SLOT_MOVED => break, // migration in flight → hashed path
                     s if s & INT_TAG != 0 => ((s as i64) >> 3, false),
-                    _ => {
-                        return Err(LispError::type_err(
-                            "table-incr: the value at this key is not an integer",
-                        ))
-                    }
+                    _ => return Ok(Err(IncrMiss::NotInt)),
                 };
-                let next = cur_int.checked_add(delta).ok_or_else(|| {
-                    LispError::runtime("table-incr: incrementing would exceed the ±2^63 range")
-                })?;
+                let Some(next) = cur_int.checked_add(delta) else {
+                    return Ok(Err(IncrMiss::Overflow));
+                };
                 let Some(word) = slot_enc(Value::int(next)) else {
                     break; // leaves the 61-bit tagged range → migrate below
                 };
@@ -788,7 +841,7 @@ pub fn incr(heap: &mut Heap, id: u64, key: Value, delta: i64) -> LispResult {
                             if was_empty {
                                 store.dense_count.fetch_add(1, Ordering::Relaxed);
                             }
-                            return Ok(Value::int(next));
+                            return Ok(Ok(next));
                         }
                         // CAS landed but a migration started: resolve under its
                         // lock. MOVED in the slot ⟹ the migrator captured our
@@ -797,7 +850,7 @@ pub fn incr(heap: &mut Heap, id: u64, key: Value, delta: i64) -> LispResult {
                         // map (`incr` commutes, so re-executing linearizes).
                         let mut guard = store.hashed.lock().expect("table store mutex");
                         if slot.load(Ordering::SeqCst) == SLOT_MOVED {
-                            return Ok(Value::int(next));
+                            return Ok(Ok(next));
                         }
                         return incr_hashed(heap, store, guard.as_mut(), key, delta);
                     }
@@ -819,7 +872,7 @@ fn incr_hashed(
     map: Option<&mut StoreMap>,
     key: Value,
     delta: i64,
-) -> LispResult {
+) -> Result<Result<i64, IncrMiss>, LispError> {
     let map = map.expect("hashed map exists after migration");
     let km = to_message(heap, key)?;
     let hash = heap.hash_value(key);
@@ -828,29 +881,19 @@ fn incr_hashed(
     let cur = match idx {
         Some(i) => match &bucket[i].1 {
             Message::Int(n) => *n,
-            // A bignum *is* an integer in Brood, but table-incr deliberately works only
-            // in the i64 range (a counter primitive) — say so precisely.
-            Message::BigInt(_) => {
-                return Err(LispError::type_err(
-                    "table-incr: the value at this key is an integer outside the ±2^63 range that table-incr supports",
-                ))
-            }
-            _ => {
-                return Err(LispError::type_err(
-                    "table-incr: the value at this key is not an integer",
-                ))
-            }
+            Message::BigInt(_) => return Ok(Err(IncrMiss::BigInt)),
+            _ => return Ok(Err(IncrMiss::NotInt)),
         },
         None => 0,
     };
-    let next = cur.checked_add(delta).ok_or_else(|| {
-        LispError::runtime("table-incr: incrementing would exceed the ±2^63 range")
-    })?;
+    let Some(next) = cur.checked_add(delta) else {
+        return Ok(Err(IncrMiss::Overflow));
+    };
     match idx {
         Some(i) => bucket[i].1 = Message::Int(next),
         None => bucket.push((km, Message::Int(next))),
     }
-    Ok(Value::int(next))
+    Ok(Ok(next))
 }
 
 /// `(%table-snapshot t)` — a point-in-time copy of the whole table as an immutable

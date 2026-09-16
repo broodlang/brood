@@ -256,7 +256,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(3),
         Sig::new(vec![map_ty, any, int], map_ty),
         &["m", "k", "delta"],
-        "A fresh map like m with key k's integer value incremented by delta (inserts delta when k is absent). Single trie traversal — equivalent to (assoc m k (+ (get m k 0) delta)) without the extra walk.",
+        "A fresh map like m with key k's value incremented by the integer delta (inserts delta when k is absent): exactly (assoc m k (+ (get m k 0) delta)) — a float under the key adds as + does and an i64 overflow promotes to a bignum — in a single trie traversal when the stored value is a plain integer. The compiler recognises the idiomatic spelling and treats both the same; prefer writing the assoc/get form.",
         map_int_add);
     primitives.def(
         "%map-dissoc",
@@ -1412,10 +1412,12 @@ pub(super) fn map_assoc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
     Ok(heap.map_assoc(id, arg(args, 1), arg(args, 2)))
 }
 
-/// `(%map-int-add m k delta)` — a fresh map with `k`'s integer value incremented
-/// by `delta` (inserts `delta` when `k` is absent). Single trie traversal. Raises
-/// past the i64 range, like `table-incr` — which the linear-map optimizer rewrites
-/// this into, so the two agree (see [`Heap::map_int_add`]).
+/// `(%map-int-add m k delta)` — a fresh map with `k`'s value incremented by the
+/// integer `delta` (inserts `delta` when `k` is absent): exactly
+/// `(assoc m k (+ (get m k 0) delta))`, in a single trie traversal when the stored
+/// value is a plain integer. The linear-map optimizer rewrites this — and the
+/// idiomatic spelling — into `%table-add`, which is the same `+`, so the two agree
+/// on every input (see [`Heap::map_int_add`]).
 pub(super) fn map_int_add(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_map(heap, "%map-int-add", arg(args, 0))?;
     let delta = expect_int(heap, "%map-int-add", arg(args, 2))?;

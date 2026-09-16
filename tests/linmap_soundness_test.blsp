@@ -16,6 +16,14 @@
 ;;;      this — a quoted form compiles to one `Node::Const`, so the analysis sees no
 ;;;      accumulator use at all and passes while the rewrite walks straight through it.
 ;;;
+;;;   3. (2026-09-16) The tally a Brood user WRITES — `(assoc m k (+ (get m k 0) e))` — was
+;;;      an escape: only the kernel spelling `%map-int-add` was rewritten, so the idiomatic
+;;;      fold ran 8x slower (brood-benchmarks `wordcount` 848 vs 99 ms). It is now fused into
+;;;      `%table-add`, which adds exactly as `+` does — the cases below pin that the float,
+;;;      bignum and error behaviour of the source survive, not just the integer case.
+;;;      `crates/lisp/tests/linmap_idiom.rs` pins that the rewrite actually FIRES on each
+;;;      shape (and declines the ones it must), by inspecting the expansion.
+;;;
 ;;; Every test asserts the value the fold should produce; each is checked against the
 ;;; disabled path in CI simply by the suite running under both engines, and by hand with
 ;;; `BROOD_LINMAP=0`, which must agree.
@@ -42,6 +50,31 @@
 (defn lm-tally (xs acc)
   (if (empty? xs) acc (lm-tally (rest xs) (%map-int-add acc (first xs) 1))))
 
+;; The idiomatic tally — the shape a user writes (wordcount's `(+ 1 (get m k 0))` order).
+(defn lm-idiom (xs acc)
+  (if (empty? xs) acc (lm-idiom (rest xs) (assoc acc (first xs) (+ 1 (get acc (first xs) 0))))))
+
+;; The other operand order, a let-bound key, and a compound addend (persistent-map's shape).
+(defn lm-idiom-let (i acc)
+  (if (>= i 12)
+    acc
+    (let (k (math/rem i 3))
+      (lm-idiom-let (+ i 1) (assoc acc k (+ (get acc k 0) (+ 1 (math/rem k 7))))))))
+
+;; A read of the accumulator beside the update, and a `get` read as the base case.
+(defn lm-idiom-read (i acc)
+  (if (>= i 6)
+    (get acc 0 :absent)
+    (lm-idiom-read (+ i 1) (assoc acc (math/rem i 2) (+ (get acc (math/rem i 2) 0) (get acc 1 0))))))
+
+;; A 2-arity `get` as the base case (an absent key is nil, like the source).
+(defn lm-idiom-get2 (i acc)
+  (if (>= i 3) (get acc :never) (lm-idiom-get2 (+ i 1) (assoc acc :x (+ (get acc :x 0) 1)))))
+
+;; A constant key, so the seed's value under it is what `+` sees.
+(defn lm-idiom-const (i acc)
+  (if (>= i 3) acc (lm-idiom-const (+ i 1) (assoc acc :x (+ (get acc :x 0) 9223372036854775807)))))
+
 ;; Quoted data alongside a qualifying accumulator fold.
 (defn lm-quoted (xs acc)
   (if (empty? xs)
@@ -64,6 +97,36 @@
       (assert= 1 (%map-get out :b))
       ;; It must come back as a map, not leak the in-place table.
       (assert= :map (type-of out))))
+
+  (test "the idiomatic tally builds the same map as the kernel spelling"
+    (assert= (lm-tally '(:a :b :a :c :a) {}) (lm-idiom '(:a :b :a :c :a) {}))
+    (assert= {:a 3 :b 1 :c 1} (lm-idiom '(:a :b :a :c :a) {}))
+    (assert= :map (type-of (lm-idiom '(:a) {}))))
+
+  (test "the idiomatic tally seeds from the map it is given"
+    (assert= {:a 13 :b 1 :c 0} (lm-idiom '(:a :b :a :c :a) {:a 10 :b 0 :c -1})))
+
+  (test "a let-bound key and a compound addend"
+    ;; keys 0,1,2 four times each; addend 1 + (rem k 7) = 1, 2, 3
+    (assert= {0 4 1 8 2 12} (lm-idiom-let 0 {})))
+
+  (test "a read of the accumulator beside the update, and as the base case"
+    ;; i=0: k0 += 0 (k1 absent) → {0 0}; i=1: k1 += 0 → {0 0, 1 0}; the rest add 0 too.
+    (assert= 0 (lm-idiom-read 0 {}))
+    ;; Seeded k1 = 5: k0 += k1 and k1 += k1 alternate — 5, 10, 15, 20, 35, 40 — so k0 is 35.
+    (assert= 35 (lm-idiom-read 0 {1 5}))
+    (assert= :absent (lm-idiom-read 6 {}))
+    (assert= nil (lm-idiom-get2 0 {})))
+
+  (test "the fused add adds exactly as + does: floats, bignums, and its error"
+    ;; A float stored under the key: `(+ 1.5 1)` is 2.5, where a table-incr would raise.
+    (assert= {:a 2.5 :b 1} (lm-idiom '(:a :b) {:a 1.5}))
+    ;; An int seed with a float addend in the let shape — the sum is a float.
+    (assert= {0 4.5 1 8 2 12} (lm-idiom-let 0 {0 0.5}))
+    ;; i64 overflow promotes to a bignum, as `+` does — never a range error.
+    (assert= (* 3 9223372036854775807) (get (lm-idiom-const 0 {}) :x))
+    ;; A non-number under the key is `+`'s own error, naming `+`.
+    (assert-error "+: expected number" (lm-idiom '(:a) {:a "s"})))
 
   (test "quoted data is left alone by the source rewrite"
     (let (out (lm-quoted '(:a) {}))

@@ -4,9 +4,9 @@ use super::*;
 /// `%map-int-add` past the i64 range. Deliberately the same sentence as
 /// [`crate::core::table::incr`]'s: the linear-map optimizer rewrites one into the
 /// other, so the two must fail the same way (see [`Heap::map_int_add`]).
-fn int_add_range_err() -> LispError {
-    LispError::runtime("%map-int-add: incrementing would exceed the ±2^63 range")
-}
+/// The fused walk found something it cannot add in place — the stored value is not an
+/// `i64`, or the sum leaves i64 — so `map_int_add` takes the general path instead.
+struct NotPlainInt;
 
 impl Heap {
     // ===== map operations (ADR-040: CHAMP — see `core/map_champ.rs`) =====
@@ -69,41 +69,39 @@ impl Heap {
         Value::map(new_root)
     }
 
-    /// A fresh map with `key`'s **i64** value incremented by `delta`, or `delta`
-    /// itself when `key` is absent. `(assoc m key (+ (get m key 0) delta))` in a
-    /// **single trie walk**: the read and write are fused into one path-copy
-    /// traversal instead of two.
+    /// A fresh map with `key`'s value incremented by `delta`, or `delta` itself when
+    /// `key` is absent: **exactly** `(assoc m key (+ (get m key 0) delta))`. The common
+    /// case — an `i64` under the key (or nothing) and a sum that fits — is a **single
+    /// trie walk**, the read and write fused into one path-copy traversal instead of
+    /// two. Everything else is the two-walk general form with the real `+`: a float or
+    /// a bignum under the key adds as `+` adds, an i64 overflow **promotes** to a bignum
+    /// as `+` promotes, and a non-number under the key is `+`'s own error.
     ///
-    /// The one place the equivalence stops is the i64 boundary: `+` promotes to a
-    /// bignum, this **errors** (`incrementing would exceed the ±2^63 range`), exactly
-    /// as [`crate::core::table::incr`] does. That is deliberate, and it is why this
-    /// returns a `Result` — the linear-map optimizer rewrites `%map-int-add` on a
-    /// provably-linear accumulator into `table-incr` (`eval/compile/inline.rs`), so a
-    /// promoting map path would make the rewrite *observable*: the same program
-    /// returned a bignum with `BROOD_LINMAP=0` and raised with it on. Counters agree
-    /// on both paths instead. (An unchecked `+` here previously panicked under
-    /// debug-assertions and wrapped to a negative count in release — the silently
-    /// corrupt counter this replaces.)
+    /// That exactness is load-bearing, not a nicety: the linear-map rewrite
+    /// (`eval/compile/inline.rs`) turns this call — and the idiomatic `assoc`/`get`
+    /// spelling — on a provably-linear accumulator into [`crate::core::table::add`],
+    /// which is the same `+` over a table. The two paths agree on every input, so
+    /// `BROOD_LINMAP=0` cannot change a program's answer. (Until 2026-09-16 this errored
+    /// past i64 and read a non-integer as 0, to match `table-incr`, which could not
+    /// promote; the fuzzer `scripts/fuzz/generators/linmap.py` found the float case
+    /// diverging between the two arms the day `table::add` made agreement possible.)
     pub fn map_int_add(&mut self, id: MapId, key: Value, delta: i64) -> Result<Value, LispError> {
         let hash = self.hash_value(key);
-        let new_root = self.champ_int_add(id, key, delta, hash, 0)?;
-        Ok(Value::map(new_root))
+        if let Ok(new_root) = self.champ_int_add(id, key, delta, hash, 0) {
+            return Ok(Value::map(new_root));
+        }
+        let old = self.map_get(id, key).unwrap_or(Value::int(0));
+        let new = crate::builtins::numeric::add_values(self, old, Value::int(delta))?;
+        Ok(self.map_assoc(id, key, new))
     }
 
-    /// `old + delta`, checked. A non-integer existing value reads as `0`, as it
-    /// always has; past i64 the operation errors rather than wrapping — see
-    /// [`Heap::map_int_add`] for why this errors instead of promoting.
-    fn int_add_checked(&self, old: Value, delta: i64) -> Result<Value, LispError> {
-        // A bignum already stored under the key is out of this operation's range
-        // too — it can only have got there through `assoc`, never through here.
-        let base = match old {
-            Value::Int(n) => n,
-            Value::BigInt(_) => return Err(int_add_range_err()),
-            _ => 0,
-        };
-        base.checked_add(delta)
-            .map(Value::int)
-            .ok_or_else(int_add_range_err)
+    /// `old + delta` when both are plain `i64`s and the sum fits; otherwise
+    /// [`NotPlainInt`], and the caller takes the general path.
+    fn int_add_checked(&self, old: Value, delta: i64) -> Result<Value, NotPlainInt> {
+        match old {
+            Value::Int(n) => n.checked_add(delta).map(Value::int).ok_or(NotPlainInt),
+            _ => Err(NotPlainInt),
+        }
     }
 
     fn champ_int_add(
@@ -113,7 +111,7 @@ impl Heap {
         delta: i64,
         hash: u64,
         depth: u32,
-    ) -> Result<MapId, LispError> {
+    ) -> Result<MapId, NotPlainInt> {
         let node = self.map_node(id);
         let is_collision = node.is_collision;
         let data_map = node.data_map;
