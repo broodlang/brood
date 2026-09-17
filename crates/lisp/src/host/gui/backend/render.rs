@@ -345,7 +345,7 @@ impl Renderer {
     /// WM-independent (no window resize, so it works where `request_inner_size` is
     /// ignored), and the mouse hit-test (`px_to_cell`) shares it so clicks stay
     /// aligned with what's painted.
-    pub(crate) fn grid_origin(&self, w_px: usize, h_px: usize) -> (usize, usize) {
+    pub(crate) fn grid_origin(&self, _w_px: usize, h_px: usize) -> (usize, usize) {
         let inset = self.inset();
         let ch = self.cell_h.max(1);
         let rem_h = h_px.saturating_sub(2 * inset) % ch;
