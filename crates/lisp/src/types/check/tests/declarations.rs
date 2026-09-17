@@ -208,7 +208,6 @@ fn a_declared_return_the_body_cannot_verify_is_reported_as_trusted_under_strict(
     assert!(allowed.is_empty(), "{allowed:?}");
 }
 
-
 // C10 (2026-09-17) — the merely-wider residue, re-probed under intervals.
 //
 // The item this closes said: a body typed exactly `number` under a declared `int` is
@@ -229,7 +228,10 @@ fn a_declared_return_the_body_cannot_verify_is_reported_as_trusted_under_strict(
 #[test]
 fn a_precise_return_mismatch_is_named_in_both_modes() {
     for (src, wanted) in [
-        ("(sig f (int -> int))\n(defn f (x) (* x 1.5))", "yields float"),
+        (
+            "(sig f (int -> int))\n(defn f (x) (* x 1.5))",
+            "yields float",
+        ),
         ("(sig f (int -> int))\n(defn f (x) (/ 5 2))", "yields ratio"),
         (
             "(sig f (int -> int))\n(defn f (x) (math/sqrt x))",
@@ -285,7 +287,10 @@ fn an_over_approximated_return_mismatch_is_strict_only() {
             "yields int[0..9]",
         ),
         // the residue named in the item: a declared parameter that admits floats
-        ("(sig f (number -> int))\n(defn f (x) (+ x 1))", "yields number"),
+        (
+            "(sig f (number -> int))\n(defn f (x) (+ x 1))",
+            "yields number",
+        ),
         (
             "(sig f (number -> float))\n(defn f (x) (+ x 1))",
             "yields number",
