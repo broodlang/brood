@@ -901,6 +901,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-17** — sound first (type-system list A1/A2/A4/A5): the runtime contract checks intervals, lengths and recursive types; a declared overload is checked against its body per arm (which found `(math/pow 2.0 0)` answering the int `1` — fixed in the code); strict reports a declared return the checker cannot verify as *trusted, not verified*, 43 std sites read one by one (32 fixed at the leaf, 11 acknowledged `(check-allow :trusted …)`); four never-seeded fixpoint holes and the `(int and (not 0))` exclusion misread closed on the way.
 - **2026-09-17** — perf-handoff Task 5 (tier-2 monomorphization) ANSWERED and closed: ability dispatch costs ~370 ns per call and Tier 1 recovers ~260 of it, but no benchmark row and no real program has a site (0 devirtualizations on every row, 4 in bedit's whole suite) — no channel. KI-161 found taking the number: the KI-90 rebind guard never guarded (dead in modules, permissive without one); structural now.
 - **2026-09-17** — ADR-362: the `supervisor` row **0.88 → 0.66 s (−25%)** with no edit to the supervisor — the `receive` matcher chains clauses as an `or` (no fail thunks: five closures per message and a call per failing clause, gone), the type predicates are a prim (`vector?` 168 → 67 ns on the VM, 1 ns native), `%vector-ref`/`%vector-length` inline (the `VectorRef` entry had named the native by its pre-`seq/` spelling since the rename), and `MapGet` is default-on with a plain map's miss answered inline (hit 322 → 66 ns, miss 519 → 123).
+- **2026-09-17** — CI's last two reds closed (the checker's whole-tree differentials timed out in BOTH jobs — tier pin + `image_matches_source`'s budget, `669c580c`; bedit's ratchet, `03e955c6`) and the benchmark column refreshed on request at `a406f9a6` (brood-benchmarks `d2646f4`): FLAT, except `pipeline` +7.3% which is the pre-flight type check growing 131M → 144M instructions per file (the run +0.8%) — KI-150 reopened by the trigger its mitigation named. Found beside it, unexplained: `BROOD_NO_CHECK=1` runs `pipeline` at 2.8× the instructions.
 
 ---
 
@@ -14166,3 +14167,38 @@ against the measured row; the structural options — inferred signatures cached 
 stdlib image, or a pre-flight that skips inference for imaged std modules — are not taken
 blind, since no benchmark runs on the development box. The row is read again at the next
 column refresh.
+
+## 2026-09-17 — the column read again: flat, and the checker's growth is the one row that moved (KI-150 reopened)
+
+Two CI reds stood after the day's work. The handoff called the checker differentials a
+tree-walker-only timeout and prescribed `BROOD_TIER=1`; the CI log for `989af614` shows
+`check_order_differential` and `derivation_cache_differential` at `TIMEOUT [120.00s]` in the
+`test` job as well, both attempts — a budget. Solo on an idle 12-core box in the test profile
+they are 42.6 s and 51.6 s on the VM: three and four `nest check --strict --suggest-sigs`
+runs over `tests/` (13.8 s each; 21.6 s tree-walked) and `std/`. The children now pin
+`BROOD_TIER=2` — the verdict is engine-independent, `contracts_mode`'s argument — which
+brings the tree-walker job to VM speed (43 s / 55 s), and both binaries carry the 360 s budget
+`image_matches_source` has for the same whole-tree class (`669c580c`). The bedit ratchet
+was closed upstream (`03e955c6`).
+
+The column was then refreshed on request, against the handoff's "nothing has reached the
+runtime" — which was false: `c9428cba` edited `std/regex.blsp` and `std/json.blsp` on their
+per-character peek and wrapped `defn-`s in `check-allow :trusted`, whose expansion
+`(%lint-allow cat (do (defn- …)))` nests the definition. Measured harmless: `regex`
+instructions +0.8%, `json` A/B +2.5% on a 0.0% floor. Min of three interleaved brood-only
+passes read every row +0–3% with the package climbing 67 → 78 °C (a uniform shift is the box),
+and three rows past the gate were attributed against a fixed `084060fb` binary — after
+`make ab` refused the baseline worktree for a stale std image (the cache keeps four; build
+`nest` in the worktree and run `scripts/build-std-image.sh` there). `pipeline` +7.3% is real
+and is not the runtime: instructions 208M → 222M, **of which `brood --check` alone is
+130.7M → 144.3M — the whole delta — and the run under `BROOD_NO_CHECK=1` is +0.8%**. `fib`'s
+check grew 123.6M → 133.0M on an untouched file: the checker costs ~10% more per file than at
+`084060fb` (A4/A5/B6/C9, not bisected), and every `brood file` pays it before it runs. That is
+the trigger KI-150's mitigation named, so it is reopened with its own first candidate —
+inferred signatures cached in the stdlib image. Published as measured.
+
+One thing found and not chased, for the handoff's watch list: with `BROOD_NO_CHECK=1` the
+`pipeline` row executes **586M** instructions against 208M with the check (`fib` 1330M vs
+1387M — normal). Skipping the check sends this program down a 2.8× costlier path; the check
+is doing work the run reuses. Start with `BROOD_IMAGE_TRACE=1` and `BROOD_TRACE_COMPILE=1`
+on the two runs.
