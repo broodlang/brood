@@ -158,6 +158,11 @@ pub const MAX_TY_NODES: usize = 256;
 /// this (hatch's `oidc/complete`, five `[:error …]` beside its `[:ok …]`) keeps its tag
 /// because the overflow collapse in `from_terms` merges same-tag shapes first.
 const MAX_TY_TERMS: usize = 4;
+/// The widest int interval read as its enumeration against a literal set
+/// (`Ty::enumerated_int_range`): `(int 1 2) ⊆ 1 | 2` needs the two values listed. A
+/// literal set this checker meets is a `match`'s handful of arms, so a wider interval
+/// is never inside one and enumerating it would only spend the allocation.
+const MAX_ENUMERATED_RANGE: i64 = 64;
 /// How many terms one type may subtract (ADR-288). Same bounded-size discipline as
 /// [`MAX_TY_TERMS`]: beyond this the extra subtractions are dropped, which *widens* the
 /// type — the safe direction, since a wider type warns less rather than wrongly.
@@ -1433,6 +1438,25 @@ impl Ty {
     }
 
     /// One term's effective int interval (see [`Ty::int_range`]).
+    /// The int interval as the literal set it denotes, when it is bounded and holds at
+    /// most [`MAX_ENUMERATED_RANGE`] values — `(int 1 2)` is `1 | 2`, and a relation
+    /// against a literal set can only be decided on the enumeration. `None` for an open
+    /// or wide interval (an infinite or large set is never inside a finite listing, and
+    /// the caller's `None` reads exactly that way).
+    fn enumerated_int_range(&self) -> Option<Arc<LitSet<i64>>> {
+        let Range {
+            lo: Some(lo),
+            hi: Some(hi),
+        } = self.int_range?
+        else {
+            return None;
+        };
+        if hi < lo || hi - lo >= MAX_ENUMERATED_RANGE {
+            return None;
+        }
+        Some(Arc::new(LitSet::In((lo..=hi).collect())))
+    }
+
     fn int_range_eff(&self) -> Range {
         if let Some(LitSet::In(set)) = self.lit_int.as_deref() {
             if let (Some(lo), Some(hi)) = (set.iter().next(), set.iter().next_back()) {
@@ -3119,8 +3143,14 @@ impl Ty {
         // Each literal member: every value `self` admits for the tag must be one
         // `other` admits (an unrefined `other` admits all; an open `self` is not a
         // subset of a specific literal set). One rule per independent tag/field.
+        // A small bounded interval IS a literal set — `(int 1 2)` is `1 | 2` — so it is
+        // enumerated when `other` pins a set; otherwise an interval was never inside one.
+        let self_lit_int = self.lit_int.clone().or_else(|| {
+            other.lit_int.as_ref()?;
+            self.enumerated_int_range()
+        });
         if !lit_is_subtype(self.tags & KEYWORD_BIT != 0, &self.lit, &other.lit)
-            || !lit_is_subtype(self.tags & INT_BIT != 0, &self.lit_int, &other.lit_int)
+            || !lit_is_subtype(self.tags & INT_BIT != 0, &self_lit_int, &other.lit_int)
             || !lit_is_subtype(self.tags & BOOL_BIT != 0, &self.lit_bool, &other.lit_bool)
             || !lit_is_subtype(self.tags & STR_BIT != 0, &self.lit_str, &other.lit_str)
         {
@@ -3962,6 +3992,59 @@ fn tuple_covered_by(a: &[Ty], candidates: &[Vec<Ty>]) -> bool {
     true
 }
 
+/// Is a record shape covered by several shapes together (C9)?
+///
+/// A record is a product over the keys any of the shapes declares — a key none declares
+/// on one side reads as that shape's `rest` (`nil` closed, `any` open), which is exactly
+/// `RecordShape::field_ty`, the one reading every relation uses — so the declared keys
+/// are the positions of [`tuple_covered_by`]. The **undeclared remainder is not a
+/// position**: it stands for infinitely many independent keys, and a map holding `1`
+/// under one and `"a"` under another is a `{…: int|string}` that neither `{…: int}` nor
+/// `{…: string}` contains. So the rest behaves like a vector's elements — it must fit a
+/// single surviving candidate's rest — which is the base case here, where the tuple rule
+/// has "some candidate survives".
+fn record_covered_by(a: &RecordShape, candidates: &[&RecordShape]) -> bool {
+    let keys: BTreeSet<Symbol> = a
+        .fields
+        .keys()
+        .chain(candidates.iter().flat_map(|c| c.fields.keys()))
+        .copied()
+        .collect();
+    let row =
+        |shape: &RecordShape| -> Vec<Ty> { keys.iter().map(|k| shape.field_ty(*k)).collect() };
+    let a_row = row(a);
+    let rows: Vec<(Vec<Ty>, &Ty)> = candidates.iter().map(|c| (row(c), &c.rest)).collect();
+    fn go(a: &[Ty], a_rest: &Ty, candidates: &[(Vec<Ty>, &Ty)]) -> bool {
+        if a.is_empty() {
+            return candidates.iter().any(|(_, rest)| a_rest.is_subtype(rest));
+        }
+        if candidates.len() > 8 {
+            return false; // conservative, as `tuple_covered_by`
+        }
+        let n = candidates.len();
+        for mask in 0..(1u32 << n) {
+            let mut first = Ty::NEVER;
+            let mut rest: Vec<(Vec<Ty>, &Ty)> = Vec::new();
+            for (j, (cand, cand_rest)) in candidates.iter().enumerate() {
+                if mask & (1 << j) != 0 {
+                    first = first.union(cand[0].clone());
+                } else {
+                    rest.push((cand[1..].to_vec(), cand_rest));
+                }
+            }
+            if a[0].is_subtype(&first) {
+                continue;
+            }
+            if go(&a[1..], a_rest, &rest) {
+                continue;
+            }
+            return false;
+        }
+        true
+    }
+    go(&a_row, &a.rest, &rows)
+}
+
 /// Is one term — subtractions and all — contained in the union of `others`?
 ///
 /// `(P ∖ N) ⊆ ⋃B` is `P ⊆ ⋃B ∪ N`: whatever `P` holds that the candidates do not cover is
@@ -4074,6 +4157,21 @@ fn term_is_subtype_of_union(a: &Ty, others: &[Ty]) -> bool {
                     .filter(|c| c.len() == elems.len())
                     .collect();
                 if tuple_covered_by(elems, &candidates) {
+                    continue;
+                }
+            }
+        }
+        // And a record shape (C9, 2026-09-17): its declared keys are the positions of a
+        // product, so `{a: int|string}` is covered by `{a: int} | {a: string}` the way a
+        // 1-tuple is. The undeclared remainder is not a position — see `record_covered_by`.
+        if tag_bit == MAP_BIT {
+            if let Some(shape) = part.fields.as_deref() {
+                let candidates: Vec<&RecordShape> = others
+                    .iter()
+                    .filter(|b| b.tags & MAP_BIT != 0)
+                    .filter_map(|b| b.fields.as_deref())
+                    .collect();
+                if record_covered_by(shape, &candidates) {
                     continue;
                 }
             }
