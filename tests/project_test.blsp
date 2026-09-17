@@ -1037,22 +1037,28 @@
                    "  (string/length s))"]
       "\n"))
 
-  :isolated (test "every signature lands directly above its own definition"
+  :isolated (test "every signature lands directly below its own definition"
     (let (dir (pt-sig-dir)
           path (pt-sig-file dir "two.blsp" pt-two-defns))
       (project-check/fix-sigs (list path) true)
       (let (lines (into [] (string/split (file/slurp path) "\n")))
-        ;; each `(sig x …)` is immediately followed by the `defn` of x — the property
-        ;; the drifting application breaks
+        ;; each `(sig x …)` follows the FORM that defines x: the nearest top-level form
+        ;; above it is x's own `defn`. BELOW, not above (KI-162) — under
+        ;; `BROOD_CONTRACTS=1` a `sig` wraps an existing binding, so a sig above its
+        ;; `defn` rebinds a name that does not exist yet and the module will not load;
+        ;; `crates/lisp/tests/sig_placement.rs` holds every file in the tree to it. And
+        ;; "directly" is the property the drifting application breaks.
         (is (every? (range (count lines))
               (fn (i)
                 (let (l (nth lines i ""))
-                  (if (not (string/starts-with? (string/triml l) "(sig "))
+                  (if (not (string/starts-with? l "(sig "))
                     true
-                    (let (name (nth (string/split (string/triml l) " ") 1 "")
-                          next-line (string/triml (nth lines (inc i) "")))
-                      (or (string/starts-with? next-line (str "(defn- " name " "))
-                        (string/starts-with? next-line (str "(defn " name " ")))))))))
+                    (let (name (nth (string/split l " ") 1 "")
+                          above (seq/find (reverse (take lines i))
+                                  (fn (p) (string/starts-with? p "("))))
+                      (and (not (nil? above))
+                        (or (string/starts-with? above (str "(defn- " name " "))
+                          (string/starts-with? above (str "(defn " name " "))))))))))
         ;; and nothing of the original was disturbed
         (is (includes? (file/slurp path) "(defn- alpha (a b)"))
         (is (includes? (file/slurp path) "(defn- beta (s)")))))
@@ -1095,17 +1101,18 @@
       (project-check/fix-sigs (list path) true)
       (assert= (file/slurp path) src)))
 
-  ;; A definition the locator cannot find is skipped rather than guessed at — the
-  ;; insertion point is the one thing this must never approximate.
-  :isolated (test "a definition it cannot locate is skipped, not guessed"
+  ;; The locator reads the CST, not the lines, so a head laid out oddly is located like
+  ;; any other and the sig lands after the form's LAST line — the placement is the one
+  ;; thing this must never approximate, and a line-shaped reading was how it could.
+  :isolated (test "a head split across lines is located, and the sig follows the form"
     (let (dir (pt-sig-dir)
-          ;; the head is split across lines, so no single line opens `(defn- odd `
+          ;; no single line opens `(defn- odd `, and the form spans three lines
           path (pt-sig-file dir
                  "odd.blsp"
                  (string/join ["(defmodule pt-odd)" "(defn-" "  odd (s)" "  (string/length s))"]
-                   "\n"))
-          before (file/slurp path))
+                   "\n")))
       (project-check/fix-sigs (list path) true)
-      ;; unchanged, and still parses
-      (assert= (file/slurp path) before)
+      (let (lines (into [] (string/split (file/slurp path) "\n")))
+        (is (string/starts-with? (nth lines 4 "") "(sig odd "))
+        (assert= (nth lines 3 "") "  (string/length s))"))
       (is (> (count (reflect/read-all (file/slurp path))) 0)))))

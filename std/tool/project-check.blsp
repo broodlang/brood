@@ -1395,56 +1395,85 @@ more than one namespace, and a name that moved behind `%`. Backs `nest check --f
             (get entry :informative?))
       (str "(sig " (get entry :name) " " rendered ")"))))
 
-(defn- sig-head-token (line kw name)
-  "Does `line` open `(defn name …)` / `(defn- name …)` for `kw`? Returns `name` when it
-does, so the caller writes the sig under the spelling the SOURCE uses."
-  (let (t (string/triml line)
-        head (str kw name)
-        n (string/length head))
-    (when (string/starts-with? t head)
-      (let (after (if (> (string/length t) n) (string/substring t n (inc n)) ""))
-        (when (or (= after "") (= after " ") (= after "(")) name)))))
+(defn- sig-defn-spelling (node)
+  "The name a TOP-LEVEL `(defn NAME …)` / `(defn- NAME …)` node writes, or nil — the
+spelling as the source has it, so the sig names the function the way its definition
+does. `file-signatures` reports names QUALIFIED (`regex/regex-peek`) while the
+definition is usually written bare, except where the head carries the module itself
+(`(defn reflect/read-string …)`, in `std/reflect.blsp` and friends)."
+  (when (= (project-node-kind node) :list)
+    (let (kids (seq/filter (project-node-val node)
+                 (fn (c) (not (includes? [:whitespace :comment] (project-node-kind c))))))
+      (when (>= (count kids) 2)
+        (let (head (first kids) nm (second kids))
+          (when (and (= (project-node-kind head) :symbol)
+                  (includes? ["defn" "defn-"] (project-node-val head))
+                  (= (project-node-kind nm) :symbol))
+            (project-node-val nm)))))))
 
-(defn- sig-defn-name-at (line name)
-  "The spelling of `name` this line declares, or nil. `file-signatures` reports names
-QUALIFIED (`regex/regex-peek`) while the definition is usually written bare — except
-in `std/reflect.blsp` and friends, where the `defn` head carries the module itself
-(`(defn reflect/read-string …)`). Try both, and keep whichever the file actually
-wrote, so the sig names the function the way its definition does."
+(def- *sig-container-kinds* [:root :list :vector :map :set])
+
+(defn- sig-node-newlines (node)
+  "How many newlines a CST node's source text holds. The CST is LOSSLESS — every leaf
+carries its raw text and the leaves concatenated are the file — so this is the node's
+extent in lines, with no textual guessing. A reader-macro wrapper (`'x`, `~@x`) keeps
+its sigil out of the tree, which costs nothing here: a sigil is never a newline."
+  (let (kind (project-node-kind node) v (project-node-val node))
+    (if (includes? *sig-container-kinds* kind)
+      (fold v 0 (fn (acc kid) (+ acc (sig-node-newlines kid))))
+      (if (string? v) (- (count (string/split v "\n")) 1) (sig-node-newlines v)))))
+
+(defn- sig-defn-sites (root)
+  "`[[spelling line] …]` for every top-level `defn` in the file, in source order, where
+`line` is the index one PAST the definition's last line — the line a signature for it
+goes on.
+
+**Below, not above** (KI-162). `crates/lisp/tests/sig_placement.rs` holds every `.blsp`
+in this tree to that placement, because under `BROOD_CONTRACTS=1` a `sig` is an action
+rather than a declaration — it rebinds the name to a checking wrapper — and a forward
+one took whole modules down when the adoption sweep wrote 211 of them (KI-81, KI-113).
+This writer produced exactly what that gate forbids, and the two never met only because
+the tree does not run `--fix-sigs` on itself; a downstream project that does got files
+its own gate would reject.
+
+Worth knowing before trusting the `would not load` half of that story: on 2026-09-17 it
+did NOT reproduce on a minimal module — a forward `sig` over a `defn`, a `defn-`, or a
+`check-allow`-wrapped pair all loaded under contracts and enforced the contract. So what
+is certainly true today is the RULE; whether the loader still fails a forward sig, and
+under what shape, is unverified. Either way the writer obeying the rule is the fix.
+
+Only a TOP-LEVEL definition is a site — a root child, which is structural rather than a
+column-0 reading. `file-signatures` reports a `defn` wrapped in `(check-allow …)` too
+(it is inferred like any other), but a signature spliced there would land INSIDE the
+wrapper — `(check-allow :kw (defn f …) (sig f …))` — and mean something else."
+  (second (fold (project-node-val root)
+            [0 []]
+            (fn (acc node)
+              (let (line (first acc)
+                    sites (second acc)
+                    last-line (+ line (sig-node-newlines node))
+                    spelling (sig-defn-spelling node))
+                [last-line
+                  (if (nil? spelling) sites (conj sites [spelling (inc last-line)]))])))))
+
+(defn- sig-site-for (sites name)
+  "The site whose definition declares `name`, trying the reported spelling and its bare
+tail (see `sig-defn-spelling`), or nil."
   (let (bare (let (i (index-of name "/"))
                (if (and i (>= i 0)) (string/substring name (inc i) (string/length name)) name)))
-    (or (sig-head-token line "(defn " name)
-      (sig-head-token line "(defn- " name)
-      (sig-head-token line "(defn " bare)
-      (sig-head-token line "(defn- " bare))))
+    (seq/find sites (fn (s) (or (= (first s) name) (= (first s) bare))))))
 
-(defn- sig-line-indent (line)
-  (let (t (string/triml line)) (string/substring line 0 (- (string/length line) (string/length t)))))
-
-(defn- sig-insertions (path lines)
+(defn- sig-insertions (path text)
   "`[[line-number sig-text] …]` for `path`, one per signature worth declaring, in file
 order. A signature whose definition cannot be located is dropped — and counted by the
 caller, which would rather write nothing than guess a line."
-  ;; Only a definition at column 0 is written to. `file-signatures` reports a `defn`
-  ;; wrapped in `(check-allow …)` too (it is inferred like any other), but an insertion
-  ;; there would land INSIDE the wrapper — `(check-allow :kw (sig f …) (defn f …))` —
-  ;; and this writer never approximates a placement. An indented head is left alone.
-  (seq/keep (reflect/file-signatures path)
-    (fn (entry)
-      (when (not (nil? (suggestion-line entry)))
-        (let (name (get entry :name)
-              hit (seq/find (range (count lines))
-                    (fn (k)
-                      (let (line (nth lines k ""))
-                        (and (= (sig-line-indent line) "")
-                          (not (nil? (sig-defn-name-at line name))))))))
-          (when hit
-            [hit
-              (str "(sig "
-                (sig-defn-name-at (nth lines hit "") name)
-                " "
-                (get entry :sig)
-                ")")]))))))
+  (let (sites (sig-defn-sites (reflect/parse-source text)))
+    (seq/keep (reflect/file-signatures path)
+      (fn (entry)
+        (when (not (nil? (suggestion-line entry)))
+          (let (site (sig-site-for sites (get entry :name)))
+            (when site
+              [(second site) (str "(sig " (first site) " " (get entry :sig) ")")])))))))
 
 (defn- sig-splice (lines at text)
   (into (into (into [] (take lines at)) [text]) (drop lines at)))
@@ -1470,7 +1499,7 @@ be located."
         lines (into [] (string/split text "\n"))
         wanted (count (seq/filter (reflect/file-signatures path)
                         (fn (e) (not (nil? (suggestion-line e))))))
-        insertions (sig-insertions path lines)
+        insertions (sig-insertions path text)
         found (count insertions))
     (if (= found 0)
       [0 (- wanted found)]

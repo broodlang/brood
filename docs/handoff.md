@@ -35,12 +35,21 @@ ratio in those comments is the **`[profile.test]`** `nest`; the same check on th
 binary is ~17% (12.1 s → 14.2 s). Same comparison, different binary — read a ratio with its
 profile, which is why the numbers looked contradictory for an hour.
 
+**KI-162 is fixed** (`--fix-sigs` wrote every sig above its `defn`, the placement
+`sig_placement.rs` forbids tree-wide). The locator reads the CST now — root children, each
+node's newlines counted for the extent — so the sig goes one past the form's last line, an
+oddly laid-out head is located rather than skipped, and "top level" is *root child* rather
+than *column 0*. Sabotage-verified. **Read the KI's second half before building on it:** the
+load failure the rule exists for did NOT reproduce (three forward-sig shapes all loaded under
+contracts and enforced their contracts), so the rule is verified and the breakage is not.
+Someone should decide whether `sig_placement.rs`'s rationale is still live or has been
+covered by the loader's reserved-name exemption; the gate is right either way.
+
 **Next, in order:** **C10** — the merely-wider residue re-probed under intervals — then
-C11–C17 in list order (`docs/type-system-status.md` § "The remaining list"). **Open KI:**
-KI-162 — `nest check --fix-sigs` writes a `sig` ABOVE its `defn`, which `sig_placement.rs`
-forbids; fix is to insert after the definition's extent (the CST has it) and flip the project
-test to "directly below". KI-150 is reopened by the column refresh below and is the other
-live thread.
+C11–C17 in list order (`docs/type-system-status.md` § "The remaining list"). **KI-150** is
+reopened by the column refresh below (the checker costs ~10% more per file and every `brood
+file` pays it) and is the other live thread; its first candidate is caching inferred
+signatures in the stdlib image.
 
 ## 2026-09-17 night — the two CI reds are closed; the column was refreshed on request and is FLAT; KI-150 reopened by its own trigger
 
@@ -276,9 +285,8 @@ Verified by probe: `map<K, A|B>` vs split maps stays false (a map is like a vect
 5. Commit, `git fetch` + merge, re-verify, push.
 
 **Then, in list order:** C10 (merely-wider residue re-probed under intervals), C11
-(element-typed `seqable`), C12–C17. **Open KI:** KI-162 — `nest check --fix-sigs` writes a
-`sig` ABOVE its `defn`, which `sig_placement.rs` forbids; fix is to insert after the
-definition's extent (the CST has it) and flip the project test to "directly below".
+(element-typed `seqable`), C12–C17. (KI-162, noted here as open, was fixed the same day —
+see the top section.)
 
 **Standing rules that bit this week (all in memory, repeated here for a cold start):** never
 the full suite on this box (the hook enforces it; targeted `-E` filters, `-j1`, the 16 GB
