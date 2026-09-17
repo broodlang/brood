@@ -89,15 +89,22 @@ const EVERY_BRANCH: &str = "\
 (defn hits (n acc) (if (= n 0) acc (hits (- n 1) (+ acc (get rec :r)))))\n\
 (defn misses (n acc) (if (= n 0) acc (misses (- n 1) (+ acc (if (get m :zz) 1 0)))))\n\
 (defn vmisses (n acc) (if (= n 0) acc (vmisses (- n 1) (+ acc (nth (get v :zz) 2)))))\n\
-(io/puts (str \"hot \" (hits 300000 0) \" \" (misses 300000 0) \" \" (vmisses 300000 0)))\n";
+(io/puts (str \"hot \" (hits 60000 0) \" \" (misses 60000 0) \" \" (vmisses 60000 0)))\n";
 
 #[test]
 fn a_map_read_primitive_answers_what_get_answers() {
     let (_dir, file) = fixture("mapget", EVERY_BRANCH);
-    let off = run(&file, false, &[]);
-    let on = run(&file, true, &[]);
+    // The two reference arms are pinned to the native ceiling, and the loops are 60 000
+    // iterations (the tiering threshold is well under that): the `differential
+    // (tree-walker)` job runs the whole suite under `BROOD_VM=0`, where these arms would
+    // otherwise tree-walk ~1M `get`s each on a 2-core runner — the run hit nextest's 120 s
+    // cap there (2026-09-17). The tree-walker still covers every branch below, through the
+    // `BROOD_TIER=0` run of the loop that follows.
+    let pin = &[("BROOD_TIER", "2")];
+    let off = run(&file, false, pin);
+    let on = run(&file, true, pin);
     assert!(
-        on.contains("hot 6300000 0 2100000"),
+        on.contains("hot 1260000 0 420000"),
         "the hot loops must compute correctly with the prim on:\n{on}"
     );
     assert!(

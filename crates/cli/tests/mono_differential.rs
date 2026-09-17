@@ -225,6 +225,11 @@ fn a_stale_record_id_is_not_devirtualized_to_whatever_the_name_means_now() {
         for mono in [false, true] {
             let mut cmd = Command::new(env!("CARGO_BIN_EXE_brood"));
             cmd.arg(&file);
+            // The rewrite lives in the VM's compiler, so the trace assert below needs the
+            // VM: pin the ceiling rather than inherit the `differential (tree-walker)` job's
+            // `BROOD_VM=0`, under which nothing compiles, nothing fires, and the
+            // non-vacuity assert reads that as a regression (2026-09-17).
+            cmd.env("BROOD_TIER", "1");
             if mono {
                 cmd.env("BROOD_MONO", "1").env("BROOD_MONO_DBG", "1");
             } else {
