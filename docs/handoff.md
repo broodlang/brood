@@ -10,6 +10,73 @@ needing one is queued in [`perf-handoff.md`](perf-handoff.md) instead — curren
 high-priority item: whether KI-114's `as_f64_pair` holds the closure KI-109 got from the
 promotion it constrained.
 
+## 2026-09-17 late — where to pick up (read this first; written as the week's budget ran out)
+
+**State of the tree at `989af614`.** Everything of this session's is landed and pushed: ADR-362
+(the `receive` matcher chain, `TypeIs`/`VectorLen`/`VectorRef` prims, `MapGet` default-on),
+KI-159/160/161, the audit's `sig-params` fix, and the benchmark column refreshed at 0.30.1
+(brood-benchmarks `94f0abb`: `supervisor` 879 → 613 ms, 2.3× Elixir from 3.4×). Locally green
+on both engines (5940/5940 in-language, 1601 Rust, checker/strict/format gates). **CI is not
+green yet**, and what remains is not this session's — it is the B6–B8 checker work's:
+
+1. **Two `nest` differentials time out at the 120 s cap in the `differential (tree-walker)`
+   job only**: `nest::derivation_cache_differential the_site_walk_cache_changes_no_verdict_…`
+   (since `9bf5b88b`) and `nest::check_order_differential a_files_verdict_depends_on_neither_…`
+   (`7121c5b8`, B8). Both pass on the VM. The checker is engine-independent, so the fix is
+   the one `mapget_differential`/`mono_differential` took this session (`ddeb158b`): pin
+   `BROOD_TIER=1` in the test's `Command` (or shrink the fixture; a `slow-timeout` override
+   for those binaries in `.config/nextest.toml` is the fallback). Nothing about the checker
+   is being tested under the tree-walker there — only how slowly it runs.
+2. **bedit's `strict_ratchet_test`**: five *"declared return type … is trusted, not verified"*
+   findings from `c9428cba` (A5) — `dired_test/line!`, `commands/hexl-ascii` (×3 lines),
+   `commands/cmd-shift-motion`. Fix at the leaf or `(check-allow :trusted …)` in bedit, push
+   bedit, then `make smoke-bedit ARGS=--bump` (a grammar-enabled `nest`, see CLAUDE.md) to
+   move `BEDIT_REF`.
+
+**Do NOT refresh the benchmark column again until something reaches the runtime.** Nothing
+since `084060fb` does (flag-off mono code, tooling, checker, GUI); three more invocations would
+republish the same numbers ± drift.
+
+**Then, the perf queue, in value order** (all from the supervisor decomposition in the
+afternoon section below; each is general, none is supervisor-specific):
+
+1. **The 3-arity `(get m k default)` and `(assoc m k v)` prims** — ~1.5 µs of the 16.4 µs left
+   per `start-child`, and they land on every record read-with-default and every record update
+   in the language. `get`'s 3-arity is `%map-get` then `%lookup-miss` only when the answer is
+   nil — the same rule `Heap::map_get_inline` already encodes for 2-arity, so the inline is
+   "map_get_inline, else default" and declines only for a record (see ADR-362 §4). It needs a
+   `Prim3` op beside `TablePut`: `jit_plan.rs` (three `PrimOp3::TablePut` matches + the
+   `inst_may_allocate` list), `inline.rs` (two), `prim.rs` (`emit_prim3_table_put` — a sibling
+   through `table_prim`'s status protocol with a `brood_rt_map_get3` callback in `rt.rs` and
+   `cranelift.rs`), `lower.rs` `resolve_prim3` (`get` by head, PRELUDE-guarded like `nth`).
+   `assoc` is a `Prim3` that ALLOCATES (`%map-assoc`), so it goes in `inst_may_allocate` and
+   the JIT's vector-base hoist must stand aside around it; the VM half is trivial. Measure
+   with `scratchpad`-style loops (`(assoc m8 :k v)` reads 259 ns against 162 for
+   `%map-assoc`; `(get m :k d)` 307 against 63) and `make ab --floor --all`.
+2. **The multi-pair `(assoc st :children x :ids y)`** — 1.1 µs: a rest list + the
+   `%assoc-map-pairs` loop. A compile-time unroll of a literal pair count into nested
+   single-pair `assoc`s (PRELUDE-guarded head, `lower.rs`) removes the rest list entirely.
+3. **`gen/call`'s own interpreted body** — 1.2 µs over a hand-rolled ref+monitor+after+flush
+   (2.9 µs). The `receive` with `after` keeps it off the JIT; the win is fewer forms, not a
+   new mechanism. Measure before touching: `scratchpad/gencall.blsp`'s decomposition.
+4. **The VM call protocol** — ~70 ns per Brood→Brood call, ~80 per native, ~30 calls per
+   child; `perf` on a call-only loop reads flat (`exec_chunk` 57%, a big spilled frame, one
+   atomic per call). The most general lever in the runtime and an interpreter project, not
+   a session: start by counting what a call does (`push_frame`, `dispatch`, IC probe, the
+   reduction atomic) and by reading BEAM's call sequence for the target shape.
+5. **Then refresh the benchmark column** (`make install INSTALL_FEATURES='$(RUN_FEATURES)'`,
+   three interleaved `bench/harness.py --langs brood --label sN`, `merge_brood.py <sha>
+   "brood X.Y.Z (sha)" s1 s2 s3`, chart, docs, commit, then `trend.py`) — the protocol is in
+   brood-benchmarks' CLAUDE.md and worked without surprises today.
+
+**Two traps from today worth carrying forward** (details in the afternoon section and the
+devlog): a `make ab` movement on `ring`/`pingpong` with equal instructions and counters is
+`release-fast` codegen partitioning — build both sides `release-lean` before bisecting; and a
+new prim on a shape that used to be a `Call` can expose a latent deopt cliff (KI-159's
+class) and starve a spill window (`WORDS_WANTED`'s class) — run `jit_eq_join_test` and
+settle-to-`:native` checks after adding one. The `[jit-dirty]` line is trustworthy again
+(KI-160); if it prints, believe it.
+
 ## 2026-09-17 evening — Task 5 (tier-2 monomorphization) closed on its numbers; KI-161
 
 perf-handoff Task 5 taken as written: ability dispatch is ~370 ns per call (530 vs 162 direct)
