@@ -10,7 +10,12 @@ needing one is queued in [`perf-handoff.md`](perf-handoff.md) instead — curren
 high-priority item: whether KI-114's `as_f64_pair` holds the closure KI-109 got from the
 promotion it constrained.
 
-## 2026-09-17 later — C9 is finished; next is C10 (the differentials and bedit are closed below)
+## 2026-09-17 later — C9 and C10 closed, KI-162 fixed, and the pre-push hook was inert; next is C11
+
+**Verified on the tree as pushed (`bfa6b56b`):** 598/598 across `types::`, `sig_placement`,
+`doc_refs` and both checker differentials; `nest check --strict` 0 warnings + the 8 known
+advisory notes; `nest format --check` clean; clippy `--all-targets --all-features -D
+warnings` clean; `make prepush` clean (by hand — see the hook note below).
 
 **C9 (ADR-364) is closed**, verification and docs and all: 585/585 `types::`, both mechanisms
 sabotage-verified (the `MAP_BIT` arm reds the two record pins alone, `enumerated_int_range`
