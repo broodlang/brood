@@ -384,6 +384,29 @@ fn dead_clause_flagged_for_a_sig_typed_param() {
 }
 
 #[test]
+fn a_guard_that_kills_two_bindings_names_the_one_it_tested() {
+    // `y` aliases the sig-typed `n`; `(string? y)` narrows both to `never` in one step.
+    // The finding names `y`, the symbol the guard tests — not `n`, and not whichever of
+    // the two a hash set happened to yield first (B8: the eligible bindings are kept in
+    // binding order, and the guarded one is preferred).
+    for _ in 0..8 {
+        let w = file_warnings(
+            "(sig f (int -> keyword))\n(defn f (n) (let (y n) (cond (string? y) :s else :o)))",
+        );
+        let dead: Vec<&String> = w
+            .iter()
+            .filter(|m| m.contains("unreachable clause"))
+            .collect();
+        assert_eq!(dead.len(), 1, "{w:?}");
+        assert!(
+            dead[0].contains("unreachable clause: y is int"),
+            "the guarded alias is the one named: {}",
+            dead[0]
+        );
+    }
+}
+
+#[test]
 fn dead_clause_silent_without_sig_or_when_compatible_or_a_literal_scrutinee() {
     // No `sig` → the parameter is untyped → never flagged (no false positive).
     assert!(

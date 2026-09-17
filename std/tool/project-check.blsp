@@ -1425,16 +1425,22 @@ wrote, so the sig names the function the way its definition does."
   "`[[line-number sig-text] …]` for `path`, one per signature worth declaring, in file
 order. A signature whose definition cannot be located is dropped — and counted by the
 caller, which would rather write nothing than guess a line."
+  ;; Only a definition at column 0 is written to. `file-signatures` reports a `defn`
+  ;; wrapped in `(check-allow …)` too (it is inferred like any other), but an insertion
+  ;; there would land INSIDE the wrapper — `(check-allow :kw (sig f …) (defn f …))` —
+  ;; and this writer never approximates a placement. An indented head is left alone.
   (seq/keep (reflect/file-signatures path)
     (fn (entry)
       (when (not (nil? (suggestion-line entry)))
         (let (name (get entry :name)
               hit (seq/find (range (count lines))
-                    (fn (k) (not (nil? (sig-defn-name-at (nth lines k "") name))))))
+                    (fn (k)
+                      (let (line (nth lines k ""))
+                        (and (= (sig-line-indent line) "")
+                          (not (nil? (sig-defn-name-at line name))))))))
           (when hit
             [hit
-              (str (sig-line-indent (nth lines hit ""))
-                "(sig "
+              (str "(sig "
                 (sig-defn-name-at (nth lines hit "") name)
                 " "
                 (get entry :sig)

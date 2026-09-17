@@ -341,7 +341,7 @@ fn operator_domain(heap: Option<&Heap>, op: &str) -> Option<Ty> {
         let mut slot = d.borrow_mut();
         if slot.is_none() {
             let heap = heap?;
-            let info = super::protocol::build_multi_info(heap, &[]);
+            let info = super::protocol::build_multi_info(heap, &[], None);
             *slot = Some(super::protocol::operator_domains(&info));
         }
         slot.as_ref()

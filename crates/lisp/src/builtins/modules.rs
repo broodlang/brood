@@ -805,6 +805,12 @@ fn embedded_module(key: &str) -> Option<&'static EmbeddedModule> {
         .find(|m| m.key == key)
 }
 
+/// The source of the baked-in std module registered under `key`, or `None` when there is
+/// none — for the checker, which closes a file's require set through std (B8).
+pub(crate) fn embedded_module_source(key: &str) -> Option<&'static str> {
+    embedded_module(key).map(|m| m.source)
+}
+
 /// `(%builtin-module name)` — the source of a baked-in std module as a string,
 /// or nil if there is none. Mechanism only: `require` (Brood) consults this
 /// before searching the load-path.

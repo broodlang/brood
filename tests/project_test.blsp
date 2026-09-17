@@ -1081,9 +1081,10 @@
 
   ;; A `defn` nested inside a wrapper form is never touched, which is what keeps the
   ;; insertion from landing INSIDE that wrapper — `(check-allow :kw (sig f …) (defn f …))`
-  ;; would parse and mean something else. It holds because `file-signatures` reports
-  ;; top-level definitions only; asserted here so a change there cannot quietly make
-  ;; this writer unsafe.
+  ;; would parse and mean something else. `file-signatures` DOES report such a
+  ;; definition (a check-allow-wrapped `defn` is inferred like any other, 2026-09-17), so
+  ;; the writer itself declines an indented head; asserted here so a change there cannot
+  ;; quietly make it unsafe.
   :isolated (test "a defn inside a wrapper form is left alone"
     (let (dir (pt-sig-dir)
           src (string/join ["(defmodule pt-wrap)"

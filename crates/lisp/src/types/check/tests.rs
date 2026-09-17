@@ -24,6 +24,7 @@ mod lints;
 mod match_lints;
 mod modules_and_imports;
 mod names_as_types;
+mod order;
 mod properties;
 mod reach_gate;
 mod refinement;

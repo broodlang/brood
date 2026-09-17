@@ -656,7 +656,11 @@ pub(super) struct Ctx {
     /// free of false positives: a literal scrutinee or a compiler-generated guard
     /// (destructure / `match` lowering) never involves a sig-typed param, so it
     /// is never flagged. Shadowing removes a name (see [`bind`](Ctx::bind)).
-    sig_params: HashSet<Symbol>,
+    ///
+    /// A `Vec` in binding order, not a set (B8, 2026-09-17): `newly_dead_binding` names
+    /// the FIRST one a guard killed, and a guard can kill two at once through an alias
+    /// — from a set, which one the warning named was hash order.
+    sig_params: Vec<Symbol>,
     /// **Surface `let`-locals eligible for the dead-clause lint** — the broadening
     /// of that lint past sig-typed params. A `let`-bound local qualifies only when
     /// its RHS has a **precise** (`GradualTy.dynamic == false`) type — a literal or
@@ -666,8 +670,9 @@ pub(super) struct Ctx {
     /// **surface** (not a gensym temp from macro expansion) with a source position.
     /// A local is immutable within its scope, so an over-approximated-but-precise
     /// type narrowed to `never` by a guard proves the branch dead, exactly as a
-    /// sig-param does. Shadowing removes a name (see [`bind`](Ctx::bind)).
-    dead_clause_locals: HashSet<Symbol>,
+    /// sig-param does. Shadowing removes a name (see [`bind`](Ctx::bind)). Binding
+    /// order, for the same reason as `sig_params`.
+    dead_clause_locals: Vec<Symbol>,
     /// Whether to flag *operand / value-slot* unbound symbols (a bare symbol in
     /// an evaluated argument or a `def`/`let`/`if` value position). On only when
     /// checking a **complete file** ([`check_file`]): there every top-level def
@@ -928,10 +933,10 @@ impl Ctx {
         // A fresh binding shadows the sig-typed param / dead-clause local of the
         // same name — the new binding's type is unrelated, so it must not drive
         // the dead-clause lint.
-        c.sig_params.remove(&sym);
+        c.sig_params.retain(|p| *p != sym);
         c.let_fn_sigs.remove(&sym);
         c.derived_locals.remove(&sym);
-        c.dead_clause_locals.remove(&sym);
+        c.dead_clause_locals.retain(|p| *p != sym);
         if let Some(neighbours) = c.aliases.remove(&sym) {
             for n in neighbours {
                 if let Some(set) = c.aliases.get_mut(&n) {
@@ -1317,7 +1322,7 @@ impl Ctx {
     /// extended scope.
     pub(super) fn bind_sig_param(&self, sym: Symbol, ty: Ty) -> Ctx {
         let mut c = self.bind(sym, Some(ty));
-        c.sig_params.insert(sym);
+        c.sig_params.push(sym); // `bind` just removed any earlier `sym`
         c
     }
     /// Is `sym` a parameter seeded from a `(sig …)` declaration? Its tracked type
@@ -1331,7 +1336,9 @@ impl Ctx {
     /// [`dead_clause_locals`](Ctx::dead_clause_locals). Called by `check_let` after
     /// `bind`, only for a surface, precisely-typed binding.
     pub(super) fn mark_dead_clause_local(&mut self, sym: Symbol) {
-        self.dead_clause_locals.insert(sym);
+        if !self.dead_clause_locals.contains(&sym) {
+            self.dead_clause_locals.push(sym);
+        }
     }
     /// After a guard narrowed this scope from `before`, return a **dead-clause-
     /// eligible binding that has just become the empty type** (with the type it had
@@ -1351,9 +1358,15 @@ impl Ctx {
         self.types.values().any(Ty::is_never)
     }
 
-    pub(super) fn newly_dead_binding(&self, before: &Ctx) -> Option<(Symbol, Ty)> {
-        self.sig_params
-            .iter()
+    ///
+    /// `guarded` — the symbol the guard itself tested — is preferred when it qualifies:
+    /// a guard on an alias kills the alias AND what it aliases, and the finding should
+    /// name the one the code tests. After it, binding order (B8): the first the author
+    /// bound, never whichever a set yielded first.
+    pub(super) fn newly_dead_binding(&self, before: &Ctx, guarded: Symbol) -> Option<(Symbol, Ty)> {
+        std::iter::once(&guarded)
+            .filter(|p| self.sig_params.contains(p) || self.dead_clause_locals.contains(p))
+            .chain(self.sig_params.iter())
             .chain(self.dead_clause_locals.iter())
             .find_map(|&p| {
                 let now_never = self.types.get(&p).is_some_and(Ty::is_never);

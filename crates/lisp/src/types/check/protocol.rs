@@ -148,8 +148,11 @@ pub(super) fn check_impls(
                 }
             }
         }
-        // A method the interface never declared is almost always a typo.
-        for name in provided.keys() {
+        // A method the interface never declared is almost always a typo. Sorted: two
+        // typos in one `defimpl` report in one order, not hash order (B8).
+        let mut provided_names: Vec<&String> = provided.keys().collect();
+        provided_names.sort();
+        for name in provided_names {
             if !proto.ops.iter().any(|o| &o.name == name) {
                 out.push((pos, format!("{} {}: has no op `{}`", noun, pname, name)));
             }
@@ -1358,7 +1361,10 @@ fn read_sealed_registry(heap: &Heap, out: &mut HashMap<String, Vec<String>>) {
 /// not a gate. An unknown required ability (not in the registry) is skipped (no false
 /// positive). The implementor set is `A`'s sealed members plus any id with a direct `A` impl.
 pub(super) fn check_requires(info: &AbilityInfo, out: &mut Vec<(Option<Pos>, String)>) {
-    for (ability, reqs) in &info.requires {
+    // Ability order is the report order, so it is sorted, not hash order (B8).
+    let mut requires: Vec<(&String, &Vec<String>)> = info.requires.iter().collect();
+    requires.sort();
+    for (ability, reqs) in requires {
         // Ids that implement `ability`: its sealed members (the intended set) + any id with a
         // direct impl of one of its ops.
         let mut implementors: std::collections::BTreeSet<&String> =
@@ -1400,7 +1406,9 @@ pub(super) fn check_requires(info: &AbilityInfo, out: &mut Vec<(Option<Pos>, Str
 }
 
 pub(super) fn check_sealed(info: &AbilityInfo, out: &mut Vec<(Option<Pos>, String)>) {
-    for (ability, members) in &info.sealed {
+    let mut sealed: Vec<(&String, &Vec<String>)> = info.sealed.iter().collect();
+    sealed.sort(); // report order, not hash order (B8)
+    for (ability, members) in sealed {
         let Some(ops) = info.abilities.get(ability) else {
             continue;
         };
@@ -1731,13 +1739,71 @@ fn key_tuple(heap: &Heap, key: Option<Value>) -> Option<Vec<String>> {
 
 /// Union in the runtime `*methods*` registry — `NAME → {tuple|:default → fn}` — so a method
 /// reachable through a required module (not a form in this file) counts.
+/// The `*methods*` registry, restricted to what the file being checked can SEE (B8,
+/// 2026-09-17). The registry is process state: a method a module registers stays after
+/// that module's load, so the second file checked in a process sees the first file's
+/// requires. Read whole, that made the domain of `<` — `number` plus every record
+/// `compare-to` has a method for — depend on which files came earlier: the same `(defn
+/// count-up (i n) … (< i n) …)` derived `(number number)` in one order and `(ordered
+/// ordered)` in the other. `visible` is the file's require closure (its own namespaces,
+/// what it requires, transitively through std); a method registered by a namespace outside
+/// it is a value the file cannot construct, so it is not in the file's world. `None` reads
+/// everything (a bare fragment, the registry-only fallback).
+///
+/// Provenance is `*method-from*` (`[mname key] → registering ns`), written by
+/// `%register-method`. A derived mirror (`[B A]` for an authored `[A B]` under a
+/// `:commutative`/`:antisymmetric` algebra) has no entry and takes its authored key's; the
+/// prelude registers from the root namespace (`nil`) and is visible to everyone; a key
+/// with no provenance at all is kept — unknown is the sound direction here, since this
+/// filter can only narrow a domain.
 fn read_methods_registry(
     heap: &Heap,
     methods: &mut HashMap<String, HashSet<Vec<String>>>,
     defaults: &mut HashSet<String>,
+    visible: Option<&HashSet<String>>,
 ) {
     let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*methods*")) else {
         return;
+    };
+    // `[mname key] → Some(ns)` for a registration made inside a namespace, `None` for one
+    // made at the root (the prelude's).
+    let mut from: HashMap<(String, Vec<String>), Option<String>> = HashMap::new();
+    if visible.is_some() {
+        if let Some(Value::Map(fid)) = heap.env_get(heap.global(), value::intern("*method-from*")) {
+            for (prov, ns) in heap.map_entries(fid) {
+                let Value::Vector(pid) = prov else {
+                    continue;
+                };
+                let parts = heap.vector(pid);
+                let (Some(&mname_v), Some(&Value::Vector(kid))) = (parts.first(), parts.get(1))
+                else {
+                    continue;
+                };
+                let Some(mname) = sym_name(mname_v) else {
+                    continue;
+                };
+                let Some(key) = heap
+                    .vector(kid)
+                    .iter()
+                    .map(|&e| sym_name(e))
+                    .collect::<Option<Vec<String>>>()
+                else {
+                    continue;
+                };
+                from.insert((mname, key), sym_name(ns));
+            }
+        }
+    }
+    let registered_by = |mname: &str, key: &[String]| -> Option<Option<String>> {
+        if let Some(ns) = from.get(&(mname.to_string(), key.to_vec())) {
+            return Some(ns.clone());
+        }
+        if let [a, b] = key {
+            return from
+                .get(&(mname.to_string(), vec![b.clone(), a.clone()]))
+                .cloned();
+        }
+        None
     };
     for (name_v, inner) in heap.map_entries(mid) {
         let Some(mname) = sym_name(name_v) else {
@@ -1755,6 +1821,13 @@ fn read_methods_registry(
                     let tuple: Option<Vec<String>> =
                         heap.vector(vid).iter().map(|&e| sym_name(e)).collect();
                     if let Some(tuple) = tuple {
+                        if let (Some(visible), Some(Some(ns))) =
+                            (visible, registered_by(&mname, &tuple))
+                        {
+                            if !visible.contains(&ns) {
+                                continue;
+                            }
+                        }
                         methods.entry(mname.clone()).or_default().insert(tuple);
                     }
                 }
@@ -1844,7 +1917,13 @@ fn read_multi_ret_registry(heap: &Heap, rets: &mut HashMap<String, crate::types:
 }
 
 /// Gather the multimethod facts for a file from its expanded tree + the runtime registry.
-pub(super) fn build_multi_info(heap: &Heap, expanded: &[Value]) -> MultiInfo {
+/// `visible`: the namespaces whose registry entries the file can see (its require
+/// closure) — see [`read_methods_registry`]; `None` reads the whole registry.
+pub(super) fn build_multi_info(
+    heap: &Heap,
+    expanded: &[Value],
+    visible: Option<&HashSet<String>>,
+) -> MultiInfo {
     let mut generics = HashMap::new();
     let mut ctors = HashMap::new();
     for &form in expanded {
@@ -1855,7 +1934,7 @@ pub(super) fn build_multi_info(heap: &Heap, expanded: &[Value]) -> MultiInfo {
     for &form in expanded {
         collect_register_methods(heap, form, &mut methods, &mut defaults);
     }
-    read_methods_registry(heap, &mut methods, &mut defaults);
+    read_methods_registry(heap, &mut methods, &mut defaults, visible);
     // Account for the closure mirror the runtime derives: a `:commutative`/`:antisymmetric`
     // multimethod's authored `[A B]` (A ≠ B) also covers `[B A]`. Without this, a call in the
     // mirror order (`(scale 3 money)` for a `[money :int]` method) would false-warn when the

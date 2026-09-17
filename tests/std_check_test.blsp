@@ -46,6 +46,12 @@
   ;; unit sat at 105 s against the 120 s per-test cap when ADR-340/341 made the checker
   ;; six times slower (2026-09-13), and read as a flake whenever the box was loaded.
   ;; Asserted on the warnings themselves, so a failure names the line and lint too.
+  ;; A `checker gave up:` note (B6) is not a finding: it says a cap declined soundly — a
+  ;; std file that defines and uses its own macro reports one every run — and it never
+  ;; gates `nest check` either (`project-check/project-advisory-warning?`).
   (doseq (path (sort (std-check-files "std")))
     (test (str "check-file reports nothing for " path)
-      (assert= (or (reflect/check-file path) nil) nil))))
+      (assert= (or (seq/filter (reflect/check-file path)
+                     (fn (w) (not (includes? w "checker gave up:"))))
+                 nil)
+        nil))))

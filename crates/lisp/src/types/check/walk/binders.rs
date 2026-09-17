@@ -663,7 +663,7 @@ pub(super) fn check_if(
             // redefinable global, a call-result, and every macro-generated temp are
             // ruled out at the *binding*, never at the guard site — exactly how the
             // sig-param lint stays false-positive-free without inspecting positions.
-            if let Some((p, known)) = then_ctx.newly_dead_binding(ctx) {
+            if let Some((p, known)) = then_ctx.newly_dead_binding(ctx, g.sym) {
                 out.push((
                     heap.form_pos_only(form),
                     format!(

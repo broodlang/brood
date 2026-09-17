@@ -292,6 +292,10 @@ pub(crate) fn materialise_referenced_modules(heap: &mut Heap) {
             }
         }
         let mut loaded_any = false;
+        // Load in name order, not hash order: a load has side effects (its own warnings,
+        // registry writes), and the same file must do them the same way every run (B8).
+        let mut wanted: Vec<Symbol> = wanted.into_iter().collect();
+        wanted.sort_by_key(|m| value::symbol_name(*m));
         for module in wanted {
             if !TRIED.with(|t| t.borrow_mut().insert(module)) {
                 continue;
@@ -1132,6 +1136,45 @@ fn collect_required_modules(
     mods
 }
 
+/// Extend `mods` with every module reachable from it through the standard library's own
+/// require edges (B8, 2026-09-17). A baked-in module's direct requires are read from its
+/// embedded source once per process (`STD_REQUIRES`); a name that is not a baked-in module
+/// is a leaf here (the whole-project driver has already closed the project's own edges).
+fn close_through_std(heap: &mut Heap, mods: &mut HashSet<String>) {
+    static STD_REQUIRES: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Vec<String>>>> =
+        std::sync::OnceLock::new();
+    let cache = STD_REQUIRES.get_or_init(Default::default);
+    let mut frontier: Vec<String> = mods.iter().cloned().collect();
+    while let Some(name) = frontier.pop() {
+        let cached = cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&name)
+            .cloned();
+        let direct = match cached {
+            Some(direct) => direct,
+            None => {
+                let direct = match crate::builtins::modules::embedded_module_source(&name) {
+                    Some(source) => crate::syntax::reader::read_all(heap, source)
+                        .map(|forms| module_direct_requires(heap, &forms).1)
+                        .unwrap_or_default(),
+                    None => Vec::new(),
+                };
+                cache
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(name.clone(), direct.clone());
+                direct
+            }
+        };
+        for dep in direct {
+            if mods.insert(dep.clone()) {
+                frontier.push(dep);
+            }
+        }
+    }
+}
+
 /// A file's own module name (from its `(defmodule …)` header, or `None`) and the module
 /// names it **directly** pulls in — `(:use …)` / `(:use-internals …)` clauses plus every
 /// `(require 'M)` anywhere in the file. The edge list the whole-project driver
@@ -1947,8 +1990,23 @@ fn check_forms(
             .map(|m| value::symbol_name(heap.root_module_name(value::intern(m))))
             .collect();
         required.extend(rooted);
+        let raw_qualified = collect_raw_qualified(heap, &forms);
+        // The file's WORLD (B8): what its registry reads may see. Wider than the KI-17 set
+        // — a std module reached only by a qualified `tempo/new!` is loaded on first use
+        // (ADR-335) and needs no `:use`, so every qualified prefix counts too — and closed
+        // through the standard library: the driver closes over PROJECT files, so a std
+        // module is a leaf there, but what it requires is in the file's world as well
+        // (`tempo` reaches `datetime`), and a value the file can construct must never be
+        // read as invisible.
+        let mut visible: HashSet<String> = required.clone();
+        visible.extend(
+            raw_qualified
+                .iter()
+                .filter_map(|q| q.rfind('/').map(|slash| q[..slash].to_string())),
+        );
+        close_through_std(heap, &mut visible);
         ctx.set_required_mods(required);
-        ctx.set_raw_qualified(collect_raw_qualified(heap, &forms));
+        ctx.set_raw_qualified(raw_qualified);
         for &form in &expanded {
             collect_def_names(heap, form, &mut ctx);
         }
@@ -1995,6 +2053,8 @@ fn check_forms(
         for &form in &expanded {
             let mut aliases = HashMap::new();
             protocol::collect_register_types_into(heap, form, None, &mut aliases);
+            let mut aliases: Vec<(String, Value)> = aliases.into_iter().collect();
+            aliases.sort_by(|a, b| a.0.cmp(&b.0)); // report order, not hash order (B8)
             for (name, ty_form) in aliases {
                 let Some(ty) = annot::parse_type(heap, ty_form) else {
                     continue;
@@ -2018,7 +2078,9 @@ fn check_forms(
         // ADR-299: the operator sugar's domains — `number` plus the records `num/*` /
         // `compare-to` have methods for — from this file's `defmethod`s + the registry.
         sigs::set_operator_domains(protocol::operator_domains(&protocol::build_multi_info(
-            heap, &expanded,
+            heap,
+            &expanded,
+            Some(&visible),
         )));
         // Reconstruct a `(sig name type)` form from each `%register-sig` in the expanded
         // tree (building forms needs `&mut heap`, so collect first, register after — GC
@@ -2599,7 +2661,8 @@ fn check_forms(
         protocol::check_op_collisions(&ability_info, &mut out);
         // Multimethod missing-method: a direct `defmulti` generic call whose full argument
         // tuple is statically known but has no exact method and no `:default` (ADR-179).
-        let multi_info = std::sync::Arc::new(protocol::build_multi_info(heap, &expanded));
+        let multi_info =
+            std::sync::Arc::new(protocol::build_multi_info(heap, &expanded, Some(&visible)));
         protocol::check_multi_calls(heap, &expanded, &multi_info, &mut out);
         ctx.set_multi(multi_info);
         // Ability impl-return conformance: an op declaring `:-> RET` has each of its

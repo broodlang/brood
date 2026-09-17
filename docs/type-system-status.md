@@ -1289,10 +1289,20 @@ each lands; this section is the working list, `handoff.md` points at it.
       separate policy). Outside a checkout nothing is stale. The pre-push hook and
       `make green` surface the refusal line. `crates/nest/tests/stale_binary_refuses_to_check.rs`;
       sabotage: dropping the call reds it.
-- [ ] **B8. An order-dependence audit.** KI-158 found two hash-order channels by accident.
-      One deliberate pass over the checker's `HashMap`/`HashSet` iterations that feed a
-      verdict, and a second differential gate: the same list in shuffled order, and two
-      runs, must agree.
+- [x] **B8. An order-dependence audit** (2026-09-17). Every `HashMap`/`HashSet` iteration
+      in `types/` read (≈60 sites); five reached a verdict or its order and are fixed: the
+      dead-clause lint's choice of binding (now the guarded symbol, then binding order),
+      the unknown-op / `:requires` / sealed-ability findings (sorted), a `deftype` shape
+      warning (sorted), and the checker's own module loads (name order). The rest are
+      lookups, set builds, or per-key updates. The second gate,
+      `crates/nest/tests/check_order_differential.rs` (the `tests/` tree in two processes
+      and in reverse order, every file's lines equal in sequence), then found the channel
+      the read could not: the `*methods*` registry is process state, so the domain of `<`
+      (`number` + every `compare-to` record) grew with whatever earlier files had loaded —
+      `count-up` derived `(number number)` in one order, `(ordered ordered)` in the other.
+      The checker now reads a registration only when its namespace (`*method-from*`) is in
+      the file's require closure, closed through std. `check/tests/order.rs`;
+      sabotage: reading the registry whole reds the leak pin.
 
 ### C — completeness
 
@@ -1415,3 +1425,49 @@ Two policies, deliberately: refuse for the checker, warn for the runner. The gat
 so they cannot silently become one. The pre-push hook and `make green` print the refusal
 line when a check fails (their failure filters showed only `warning:` lines, which would
 have reported a refused run as a check with no findings that somehow exited nonzero).
+
+## B8 — the order-dependence audit (2026-09-17)
+
+KI-158 was two hash-order channels found by accident (a specialization memo outliving its
+round; returns re-read in hash order). This pass read every `HashMap`/`HashSet` iteration
+under `types/` — about sixty — asking of each whether its order can reach a verdict, the
+text of one, or the order two print in. Five could:
+
+- **Which binding a dead clause names.** A guard on an alias kills the alias and what it
+  aliases in one step; `newly_dead_binding` scanned two sets and named whichever came
+  first. The eligible bindings are now kept in binding order and the guarded symbol is
+  preferred — `(let (y n) (cond (string? y) …))` names `y`, every run.
+- **The order of findings** from `defimpl`'s unknown-op check, `check_requires` and
+  `check_sealed` (three maps iterated straight into `out`), and a `deftype` that registers
+  more than one shape in a form. Sorted by name.
+- **The order the checker loads modules** it discovers by qualified reference — a load has
+  side effects (its own diagnostics, registry writes), so the same file now does them in
+  name order.
+
+The rest are lookups, set constructions, per-key updates that commute (an alias
+narrowing intersects every neighbour with the same type), or debug traces. The lattice
+itself (`types.rs`, `display.rs`) holds no hash collection. The symbol-keyed runtime table
+(`SymbolMap`) hashes deterministically, but its order is the interning order, which is the
+file order — the channel the second gate exists for.
+
+`check_order_differential.rs` runs `nest check --strict --suggest-sigs` over `tests/` in
+two processes (a fresh `RandomState` each) and once in reverse, and requires every file's
+lines — warnings, notes and inferred signatures — to agree in sequence.
+
+**What the gate found that the read could not.** With the five sites fixed, the reverse
+run still disagreed: `const_test_fold_test/count-up` derived `(number number any)` forward
+and `(ordered ordered any)` in reverse. `ordered` is the domain of `<` — `number` plus every
+record `compare-to` has a method for — and that is read from the `*methods*` registry,
+which is process state: `datetime`'s methods stay registered after `datetime_test` required
+it, so every file checked after it compared dates too. Neither answer is wrong for the
+image; the point is that the file did not decide it. The registry carries provenance
+(`*method-from*`, the registering namespace), so the checker now reads a registration only
+when that namespace is in the file's *world* — its own modules, what it requires, every
+module it names by a qualified reference (a std module reached as `tempo/new!` loads on
+first use and needs no `:use`, ADR-335), and, closed through the embedded std sources once
+per process, what those require. Wider than the KI-17 set on purpose: that lint asks what
+the author declared, this asks what the program can construct. A
+derived mirror takes its authored key's namespace; a root registration (the prelude's) is
+visible to all; a key with no provenance is kept. `check/tests/order.rs` pins both
+directions: an earlier check's `datetime` does not widen a later file, and the file's own
+`(:use datetime)` does.
