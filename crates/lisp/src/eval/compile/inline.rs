@@ -98,26 +98,53 @@ fn mono_arg_identity(heap: &Heap, arg: &Node) -> Option<Value> {
             };
             let id = Value::keyword(ctor);
             let records = global_map(heap, "*record-ids*")?;
-            let recorded = heap.map_get(records, id)?;
-            // The constructor this id names must still exist. A rolled-back or
-            // never-materialised module leaves the id behind; the binding is the thing
-            // that actually has to be there for the call to mean what the id claims.
-            heap.env_get(heap.global(), ctor)?;
-            // …and the registry must still name THIS constructor, not another that
-            // happened to register the same id.
-            let names_this_ctor = match recorded {
-                Value::Sym(s) => s == ctor,
-                v => match v.unpack() {
-                    ValueRef::Str(id) => *heap.string(id) == value::symbol_name(ctor),
-                    _ => false,
-                },
-            };
-            if !names_this_ctor {
-                return None;
+            heap.map_get(records, id)?;
+            // The constructor this id names must still exist AND still be the record's
+            // constructor. The registry cannot say so: it records the name, and a name
+            // can be rebound after registration (`(defn shape (n) {:n n})` over a
+            // `defrecord shape`) — the KI-90 shape, where the dynamic path answers
+            // `:default` for the bare map and a devirtualized call would answer the
+            // record's impl. Until 2026-09-17 this compared the registry's recorded name
+            // with the head symbol, which never guarded anything: the registry stores the
+            // BARE name and a module-qualified head never equalled it (so Tier 1 never
+            // fired on a record inside a `defmodule`), while a module-less head always
+            // did (so the rebind miscompiled). The sound test is structural, on the value
+            // the head is bound to NOW: a `defrecord` constructor is one arm whose one
+            // body form is the map literal `{:__id__ <id> …}` — and that `:__id__` IS the
+            // dispatch identity, so a closure that builds it constructs exactly the values
+            // `impl`s for this id are written for, whatever its name.
+            let bound = heap.env_get(heap.global(), ctor)?;
+            match bound.unpack() {
+                ValueRef::Fn(cid) if closure_constructs_record(heap, cid, id) => Some(id),
+                _ => None,
             }
-            Some(id)
         }
         _ => None,
+    }
+}
+
+/// True iff closure `cid` is a record constructor for `id`: a single arm (any fixed
+/// arity, no optionals or rest — `defrecord` emits positional fields) whose ONE body form
+/// is a map literal whose `:__id__` entry is `id`. That literal is what `defrecord` emits
+/// (`{:__id__ :mp/circle, :r r}`), and the `:__id__` it bakes in is the identity ability
+/// dispatch reads (`Heap::dispatch_identity`), so this is the property a devirtualization
+/// actually depends on — not the name the head happens to carry.
+fn closure_constructs_record(heap: &Heap, cid: ClosureId, id: Value) -> bool {
+    let closure = heap.closure(cid);
+    if closure.arms.len() != 1 {
+        return false;
+    }
+    let arm = &closure.arms[0];
+    if !arm.optionals.is_empty() || arm.rest.is_some() || arm.body.len() != 1 {
+        return false;
+    }
+    let record_id = Value::keyword(value::intern(kw::RECORD_ID));
+    match arm.body[0].unpack() {
+        ValueRef::Map(mid) => matches!(
+            (heap.map_get(mid, record_id).map(|v| v.unpack()), id.unpack()),
+            (Some(ValueRef::Keyword(a)), ValueRef::Keyword(b)) if a == b
+        ),
+        _ => false,
     }
 }
 

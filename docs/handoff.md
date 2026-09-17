@@ -10,6 +10,18 @@ needing one is queued in [`perf-handoff.md`](perf-handoff.md) instead — curren
 high-priority item: whether KI-114's `as_f64_pair` holds the closure KI-109 got from the
 promotion it constrained.
 
+## 2026-09-17 evening — Task 5 (tier-2 monomorphization) closed on its numbers; KI-161
+
+perf-handoff Task 5 taken as written: ability dispatch is ~370 ns per call (530 vs 162 direct)
+and Tier 1's constant-id dispatch recovers ~260 of it — but `BROOD_MONO_DBG` counts **0**
+devirtualizations on every benchmark row and **4** across bedit's 1657 tests, so no row can
+move and the checker→compiler channel is not built. On the way: KI-161, the KI-90 rebind guard
+compared the registry's bare name with the qualified head, so Tier 1 had never fired in a
+module and admitted the module-less rebind (a miscompile under the flag on the pushed
+binary); structural guard now, test non-vacuous under both spellings. The brood-benchmarks
+column was refreshed at 0.30.1 (`94f0abb`): `supervisor` 879 → 613 ms (2.3× Elixir from 3.4×),
+`json` −19.5%, `nbody` −12.6%, `pingpong` −11.9%; nothing up beyond spread.
+
 ## 2026-09-17 afternoon — the supervisor row, decomposed by layer (ADR-362) — read this first
 
 `supervisor` **0.88 → 0.66 s** (Elixir 0.256), `start-child` 22.5 → 16.4 µs, with **no edit to

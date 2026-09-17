@@ -180,42 +180,82 @@ fn a_stale_record_id_is_not_devirtualized_to_whatever_the_name_means_now() {
     // Here `shape` is a record, then rebound to a plain fn returning a bare map. The id
     // `:mono-stale/shape` stays registered either way. The dynamic path answers "DEFAULT"
     // for the plain-fn call (a bare map is not the record), and `BROOD_MONO=1` must agree.
+    //
+    // Both spellings, and the trace is asserted, because of how this test passed for three
+    // weeks: the guard compared the registry's BARE recorded name with the call head, so
+    // inside a `defmodule` (the fixture) it refused every constructor and nothing was ever
+    // devirtualized — a vacuous agreement — while module-less code, where the names DID
+    // match, devirtualized the rebound plain fn and answered `REC7` (2026-09-17). The guard
+    // is structural now (the bound closure must build `{:__id__ <id> …}`), and the first
+    // call must be seen to devirtualize under both spellings for the second to mean
+    // anything. Sabotage-verified: the name comparison back in place reds the module-less
+    // arm on the answer and the module arm on the trace.
     let dir = std::env::temp_dir().join(format!("brood-mono-stale-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create temp dir");
-    let file = dir.join("stale.blsp");
-    std::fs::write(
-        &file,
-        "(defmodule mono-stale)\n\
-         (defrecord shape (n))\n\
-         (defability Show (render [self] :-> string))\n\
-         (impl Show :default (render [x] \"DEFAULT\"))\n\
-         (impl Show mono-stale/shape (render [r] (str \"REC\" (get r :n))))\n\
-         (io/puts (str \"record: \" (render (shape 7))))\n\
-         (defn shape (n) {:n n})\n\
-         (io/puts (str \"rebound: \" (render (shape 7))))\n",
-    )
-    .expect("write fixture");
+    for (spelling, module, impl_id, id) in [
+        (
+            "in a module",
+            "(defmodule mono-stale)\n",
+            "mono-stale/shape",
+            ":mono-stale/shape",
+        ),
+        ("module-less", "", "shape", ":shape"),
+    ] {
+        let file = dir.join(format!(
+            "stale-{}.blsp",
+            if module.is_empty() { "bare" } else { "mod" }
+        ));
+        std::fs::write(
+            &file,
+            format!(
+                "{module}\
+                 (defrecord shape (n))\n\
+                 (defability Show (render [self] :-> string))\n\
+                 (impl Show :default (render [x] \"DEFAULT\"))\n\
+                 (impl Show {impl_id} (render [r] (str \"REC\" (get r :n))))\n\
+                 (io/puts (str \"record: \" (render (shape 7))))\n\
+                 (defn shape (n) {{:n n}})\n\
+                 (io/puts (str \"rebound: \" (render (shape 7))))\n"
+            ),
+        )
+        .expect("write fixture");
 
-    let mut answers = Vec::new();
-    for mono in [false, true] {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_brood"));
-        cmd.arg(&file);
-        if mono {
-            cmd.env("BROOD_MONO", "1");
-        } else {
-            cmd.env_remove("BROOD_MONO");
+        let mut answers = Vec::new();
+        let mut traces = Vec::new();
+        for mono in [false, true] {
+            let mut cmd = Command::new(env!("CARGO_BIN_EXE_brood"));
+            cmd.arg(&file);
+            if mono {
+                cmd.env("BROOD_MONO", "1").env("BROOD_MONO_DBG", "1");
+            } else {
+                cmd.env_remove("BROOD_MONO").env_remove("BROOD_MONO_DBG");
+            }
+            support::dies_with_parent(&mut cmd);
+            let out = cmd.output().expect("run brood");
+            answers.push(String::from_utf8_lossy(&out.stdout).to_string());
+            traces.push(String::from_utf8_lossy(&out.stderr).to_string());
         }
-        support::dies_with_parent(&mut cmd);
-        let out = cmd.output().expect("run brood");
-        answers.push(String::from_utf8_lossy(&out.stdout).to_string());
+        assert!(
+            answers[0].contains("rebound: DEFAULT"),
+            "{spelling}: the dynamic path must answer DEFAULT for the bare map:\n{}",
+            answers[0]
+        );
+        assert_eq!(
+            answers[0], answers[1],
+            "{spelling}: BROOD_MONO=1 must answer exactly what the dynamic path answers for a \
+             name whose record id is registered but whose binding is no longer that record's \
+             constructor (KI-90)\n  dynamic:\n{}\n  mono:\n{}",
+            answers[0], answers[1]
+        );
+        // Not vacuous: the RECORD call must have been devirtualized for the rebound call's
+        // agreement to be a test of the guard rather than of the flag never reaching it.
+        assert!(
+            traces[1].contains(&format!("devirtualized Show/render for {id}")),
+            "{spelling}: the constructor call `(render (shape 7))` must devirtualize — \
+             nothing fired, so the rebound call's agreement is vacuous:\n{}",
+            traces[1]
+        );
     }
-    assert_eq!(
-        answers[0], answers[1],
-        "BROOD_MONO=1 must answer exactly what the dynamic path answers for a name whose \
-         record id is registered but whose binding is no longer that record's constructor \
-         (KI-90)\n  dynamic:\n{}\n  mono:\n{}",
-        answers[0], answers[1]
-    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

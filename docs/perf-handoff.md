@@ -382,9 +382,43 @@ with a long-idle process holding one busy worker, then a timer fire onto that sa
 
 ---
 
-## Task 5 — tier-2 monomorphization: is the ability-dispatch win worth a checker→compiler channel?
+## Task 5 — tier-2 monomorphization: is the ability-dispatch win worth a checker→compiler channel? ✅ ANSWERED 2026-09-17 — no: the ceiling exists, the sites do not
 
-**Priority: low. Not started; a design that needs a number before it earns its surface.**
+**Answer.** Steps (1) and (2) taken the afternoon this was filed; (3) is not worth building.
+
+**(1) The dispatch cost, one process, warm** (release, `scratchpad/mono.blsp`: a
+`defrecord circle`, `(defability Shape (area [self]))`, one impl; 2M iterations, best of
+several): a direct call `(direct c)` **162 ns**, the dynamic `(area c)` **530 ns** — so ability
+dispatch costs **~370 ns per call** on top of the call itself (`%identity-of` + `%dispatch` +
+the computed-head impl call). Tier 1 on a constructor receiver, `(area (circle 2))`, reads
+**533 ns against 449 for `(direct (circle 2))`**: the constant-id `%dispatch` leaves ~85–110 ns
+of the 370. So Tier 1's ceiling is ~27% of a record-allocating loop and, for the
+variable-receiver shape Tier 2 would target, up to ~48% of the loop — well past the 10%
+"stop" line on its own.
+
+**(2) Whether any real workload has a site.** `BROOD_MONO=1 BROOD_MONO_DBG=1` over every
+benchmark row that loads a library (`json regex strings wordcount base64 sort nqueens
+pipeline supervisor persistent-map errors`): **0 devirtualizations, every row.** bedit's
+whole test suite (1657 cases, 0.4.3 at `0770056`): **4**, all one example's `Shape/area`. No
+benchmark row and no real program dispatches an ability op in a hot loop on a literal or a
+constructor call — and Tier 2's variable-receiver sites are the same ops in the same
+programs. There is no row for a channel to move. **Closed: the number is recorded, the
+channel is not built.** Reopen only when a workload appears whose profile shows
+`%identity-of`/`%dispatch`; the microbenchmark above is the probe to re-run then.
+
+**What (2) found on the way — KI-161, fixed.** Tier 1 had NEVER fired on a record constructor
+inside a `defmodule`, i.e. in any real code: the KI-90 guard compared the registry's BARE
+recorded name (`:mp/circle → circle`) with the module-qualified call head (`mp/circle`) and
+refused every one — while in module-less code the same comparison always agreed, so a
+constructor REBOUND to a plain fn (`(defn shape (n) {:n n})` after `(defrecord shape …)`) was
+devirtualized to the record's impl: `rebound: REC7` against the dynamic path's `DEFAULT`, on the
+pushed 0.30.1 binary under `BROOD_MONO=1`. The `a_stale_record_id…` test passed only because
+its fixture is a module. The guard is structural now (`closure_constructs_record`: the head's
+bound closure must be one arm whose one body form is the map literal carrying this `:__id__`
+— the very identity dispatch reads), the test asserts the record call FIRED under both
+spellings, and the sabotage (the name comparison back) reds it both ways.
+
+**Priority when filed: low. Not started; a design that needs a number before it earns its surface.**
 Filed 2026-09-17 when the type-system review's last two items were decided (item 5,
 return-type dispatch, was declined — ADR-361; this is item 7, which is a perf item).
 
