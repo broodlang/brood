@@ -1715,6 +1715,62 @@ impl Ty {
         Ty::seq_of(1u32 << bit(Tag::Set), elem)
     }
 
+    /// `(seqable elem)` — a **sequence** of `elem`, whichever of the three shapes it is
+    /// built as: `nil | list<elem> | vector<elem> | set<elem>` (C11, ADR-365). The
+    /// spelling a polymorphic-sequence parameter wants, where bare [`Ty::SEQABLE`] carries
+    /// no element type at all and the longhand `(or (list T) (vector T) (set T))` is what
+    /// authors were writing instead.
+    ///
+    /// **`map` and `bytes` are deliberately NOT in it**, though both are in bare
+    /// `seqable`. Their element types are fixed by the KIND rather than carried — a map
+    /// walks as `[key value]` entries, a `bytes` as octets — so neither is a collection of
+    /// an arbitrary `elem`, and `(map K V)` / `bytes` already say what they hold. There is
+    /// a mechanical reason too, and it points the same way: with them the union is six
+    /// terms against a [`MAX_TY_TERMS`] of four, and the overflow collapse would widen
+    /// away the very element types this spelling exists to state — silently, which is the
+    /// worst way to lose them.
+    ///
+    /// So `(seqable T) ⊆ seqable` — refining drops members, exactly as `(map K V) ⊆ map`
+    /// keeps only the maps that match. It is not "all of `seqable`, with elements".
+    pub fn seqable_of(elem: Ty) -> Ty {
+        Ty::list_of(elem.clone())
+            .union(Ty::of(Tag::Nil))
+            .union(Ty::vector_of(elem.clone()))
+            .union(Ty::set_of(elem))
+    }
+
+    /// The `elem` of a [`Ty::seqable_of`], when this type is exactly one — every one of
+    /// the four members present, each carrying the SAME element type. Used to spell it
+    /// back as `(seqable T)`; anything less than the full shape renders as the union it
+    /// is, since that is what it means.
+    pub fn as_seqable_of(&self) -> Option<Ty> {
+        // The four members MERGE into one term — they differ only in their tag, and the
+        // `elem` refinement is the same on each, so `merge_is_exact` folds them: the type
+        // is `{tags: nil|pair|vector|set, elem: E}`, not a four-alternative union. Union
+        // the terms' tags anyway rather than read `self.tags` (which is the HEAD term's),
+        // so this keeps answering if the merge ever stops applying.
+        if self.mu {
+            return None;
+        }
+        let tags = self
+            .terms_vec()
+            .iter()
+            .fold(0u32, |acc, term| acc | term.tags);
+        if tags != (SEQ_BITS | NIL_BIT) {
+            return None;
+        }
+        // Recognise by RECONSTRUCTION rather than by re-reading the slots: take the
+        // element type off any member that carries one and ask whether `seqable_of` of it
+        // is this type. That cannot drift from the constructor the way a hand-written
+        // shape test does — a slot added to `Ty` tomorrow makes the equality fail (and the
+        // union print longhand), never makes this claim something it is not.
+        let elem = self
+            .terms_vec()
+            .into_iter()
+            .find_map(|term| term.elem.as_deref().cloned())?;
+        (Ty::seqable_of(elem.clone()) == *self).then_some(elem)
+    }
+
     /// [`Ty::elem_ty`] over a UNION too: the union of the terms' elements — sound, since a
     /// value of the union is a value of one term — when every term that is a collection
     /// says what it holds (a `nil` term holds nothing and is skipped; a non-collection

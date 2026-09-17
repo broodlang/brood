@@ -23401,3 +23401,69 @@ terms are the ones that are genuinely false. Pinned by
 `check::tests::signatures::a_record_whose_field_is_a_union_passes_a_split_union_of_shapes`
 (which carries the componentwise neighbour that must still warn); each was sabotage-verified
 to red on its own mechanism alone.
+
+## ADR-365 — `(seqable T)`: a sequence of `T`, whichever shape it is built as
+
+**Status:** accepted (2026-09-17). **Context:** type-system list item C11 — a `seqable`
+parameter carried no element type.
+
+**Context.** `seqable` is the named union a polymorphic-sequence parameter is declared with:
+`nil | pair | vector | set | map | bytes`, every collection the combinators walk. It is a
+bare tag union with no refinement, so a declared `seqable` says *that* the argument is a
+collection and nothing about what it holds. The cost is not abstract — it is a body that
+cannot be checked at all:
+
+```lisp
+(sig min (seqable -> number))
+(defn min (xs) … (reduce xs math/min))    ; result unknown: `xs` holds "something"
+```
+
+Under ADR-259 that declaration is authoritative and every caller reads it as fact, so A5
+reports it as *trusted, not verified*, and `stats/min`/`stats/max` carried
+`(check-allow :trusted …)` to acknowledge it. Authors who wanted the element type wrote the
+union by hand — `stats/median` and `stats/percentile` both read
+`(or (list number) (vector number) (set number))`.
+
+**Decision: `(seqable T)` is a type constructor spelling exactly that union** —
+`nil | list<T> | vector<T> | set<T>` (`Ty::seqable_of`). `(list T)` already includes the
+empty list (ADR-350), so the four members are the three sequence shapes plus `nil`, and the
+lattice merges them into ONE term (`{tags: nil|pair|vector|set, elem: T}`) because they
+differ only by tag. Nothing in the element machinery is new: `elem_ty_union` already reads
+such a term, which is why the body above checks the moment the spelling exists.
+
+**`map` and `bytes` are in bare `seqable` and deliberately NOT in `(seqable T)`.** Their
+element types are fixed by the KIND rather than carried — a map walks as `[key value]`
+entries, a `bytes` as octets — so neither is a collection of an arbitrary `T`, and
+`(map K V)` and `bytes` already say what they hold. A mechanical reason points the same way:
+with them the union is six terms against a `MAX_TY_TERMS` of four, and the overflow collapse
+would widen away the very element types the spelling exists to state — silently, which is the
+worst way to lose them.
+
+So **`(seqable T) ⊆ seqable`**: refining drops members, exactly as `(map K V) ⊆ map` keeps
+only the maps that match. It is not "all of `seqable`, with elements", and the tests pin both
+directions.
+
+**Not chosen.** (1) An `elem` refinement that rides on a term whose tags include `map` and
+`bytes`, meaning "the sequence members hold `T`, the others hold what they hold" — the
+refinement would then describe only part of its own term, and `elem_ty`, which speaks for
+the whole term, could no longer be trusted; the one place that reading is allowed today is
+a single-collection term, and for the stated reason. (2) A new name (`(sequence T)`) to
+avoid the subset surprise — a second word for the same idea costs every reader more than
+the one line of documentation the subset needs. (3) Leaving the longhand: it is exactly
+this union, so the spelling is the whole feature — and it was already being written by
+hand, which is the concrete need ADR-011 asks for.
+
+**Consequence.** `stats/min` and `stats/max` lose their `(check-allow :trusted …)` and are
+CHECKED; `stats/median` and `stats/percentile` lose the longhand. A wrong element type is
+caught at the call and in the body. Rendering round-trips — `seqable<int>` in a message,
+`(seqable int)` from `to_source`, recognised by reconstruction so it cannot drift from the
+constructor. Pinned by `types::tests::a_seqable_of_is_the_three_sequence_shapes_and_the_empty_list`,
+`::a_seqable_of_is_recognised_back_for_display_and_source`, and
+`check::tests::element_types::a_seqable_of_{flows_its_element_type_into_the_body,admits_the_sequence_shapes_and_refuses_map_and_bytes}`;
+sabotage-verified three ways (the constructor ignoring its element, the constructor
+including map/bytes, the grammar arm removed — each reds its own pins).
+
+Found on the way and fixed with it: `set` was missing from `TYPE_HEADS`, so `(set)` — a
+known constructor with the wrong arity — reported "unknown type constructor `set`". Only a
+head that fails to parse reaches that validator, which is why a correct `(set int)` was
+never mislabelled and nothing noticed.

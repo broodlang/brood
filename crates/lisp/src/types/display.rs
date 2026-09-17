@@ -178,6 +178,12 @@ impl fmt::Display for Ty {
         if *self == Ty::SEQABLE {
             return f.write_str("seqable");
         }
+        // …and its element-typed form by the name too (C11, ADR-365): `nil | list<int> |
+        // vector<int> | set<int>` is the same set, and unreadable as the answer to "what
+        // does this take".
+        if let Some(elem) = self.as_seqable_of() {
+            return write!(f, "seqable<{elem}>");
+        }
         // A purely-function type with a known signature: show the arrow, or
         // every arm of an overload joined with ` and ` (matching the `(and
         // …)` annotation syntax that produces it).
@@ -608,6 +614,9 @@ impl Ty {
         }
         if *self == Ty::SEQABLE {
             return Some("seqable".to_string());
+        }
+        if let Some(elem) = self.as_seqable_of() {
+            return Some(format!("(seqable {})", elem.to_source()?));
         }
         // Structured refinements, each of which owns its whole tag set.
         if self.tags & !FN_BITS == 0 {

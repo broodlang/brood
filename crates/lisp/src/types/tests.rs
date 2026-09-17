@@ -2315,3 +2315,71 @@ fn a_small_interval_is_inside_the_literal_set_it_lists() {
     assert!(covered("(int 1 4)", "(and int (not 5))"));
     assert!(!covered("(int 1 5)", "(and int (not 5))"));
 }
+
+// C11 (ADR-365) — `(seqable T)`: the element-typed spelling of a polymorphic-sequence
+// parameter. Bare `seqable` carries no element type, so `(sig min (seqable -> number))`
+// left its body unverifiable, and what authors wrote instead was the longhand union —
+// `stats/median` and `stats/percentile` both had it spelled out.
+#[test]
+fn a_seqable_of_is_the_three_sequence_shapes_and_the_empty_list() {
+    let s = Ty::seqable_of(Ty::of(Tag::Int));
+    // Exactly the longhand it replaces — `(list T)` is `nil | list<T>` (ADR-350).
+    assert_eq!(
+        s,
+        Ty::list_of(Ty::of(Tag::Int))
+            .union(Ty::of(Tag::Nil))
+            .union(Ty::vector_of(Ty::of(Tag::Int)))
+            .union(Ty::set_of(Ty::of(Tag::Int)))
+    );
+    // Refining NARROWS, as `(map K V) ⊆ map` does: it is a subtype of bare `seqable`, not
+    // "all of seqable with elements".
+    assert!(s.is_subtype(&Ty::SEQABLE), "{s} ⊄ seqable");
+    assert!(!Ty::SEQABLE.is_subtype(&s));
+    // Each member is in, with its elements…
+    assert!(Ty::vector_of(Ty::of(Tag::Int)).is_subtype(&s));
+    assert!(Ty::set_of(Ty::of(Tag::Int)).is_subtype(&s));
+    assert!(Ty::list_of(Ty::of(Tag::Int)).is_subtype(&s));
+    assert!(
+        Ty::of(Tag::Nil).is_subtype(&s),
+        "the empty list is a seqable"
+    );
+    // …and a member holding something else is not.
+    assert!(!Ty::vector_of(Ty::of(Tag::Str)).is_subtype(&s));
+    // `map` and `bytes` are in bare `seqable` and deliberately NOT here: their element
+    // types are fixed by the kind (`[k v]` entries, octets), so neither is a collection
+    // of an arbitrary `T`. Six terms would also overflow MAX_TY_TERMS, and the collapse
+    // would widen away the element types the spelling exists to state.
+    assert!(!Ty::of(Tag::Map).is_subtype(&s));
+    assert!(!Ty::of(Tag::Bytes).is_subtype(&s));
+    assert!(Ty::of(Tag::Map).is_subtype(&Ty::SEQABLE));
+    assert!(Ty::of(Tag::Bytes).is_subtype(&Ty::SEQABLE));
+    // The elements are readable as one type, which is what makes a body checkable.
+    assert_eq!(s.elem_ty_union(), Some(Ty::of(Tag::Int)));
+}
+
+#[test]
+fn a_seqable_of_is_recognised_back_for_display_and_source() {
+    let s = Ty::seqable_of(Ty::of(Tag::Int));
+    assert_eq!(s.as_seqable_of(), Some(Ty::of(Tag::Int)));
+    assert_eq!(s.to_string(), "seqable<int>");
+    assert_eq!(s.to_source().as_deref(), Some("(seqable int)"));
+    // Anything less than the whole shape is the union it is, and says so. A missing
+    // member, and members that disagree about their elements:
+    let no_set = Ty::list_of(Ty::of(Tag::Int))
+        .union(Ty::of(Tag::Nil))
+        .union(Ty::vector_of(Ty::of(Tag::Int)));
+    assert_eq!(no_set.as_seqable_of(), None, "{no_set}");
+    let mixed = Ty::list_of(Ty::of(Tag::Int))
+        .union(Ty::of(Tag::Nil))
+        .union(Ty::vector_of(Ty::of(Tag::Str)))
+        .union(Ty::set_of(Ty::of(Tag::Int)));
+    assert_eq!(mixed.as_seqable_of(), None, "{mixed}");
+    // Bare `seqable` is not an element-typed one (it admits map and bytes).
+    assert_eq!(Ty::SEQABLE.as_seqable_of(), None);
+    // A nested element type renders and re-reads too.
+    let nested = Ty::seqable_of(Ty::vector_of(Ty::of(Tag::Str)));
+    assert_eq!(
+        nested.to_source().as_deref(),
+        Some("(seqable (vector string))")
+    );
+}

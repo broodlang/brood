@@ -799,6 +799,27 @@ names accept anything, so a contract never throws on a type it can't interpret.
               (let (elem (first (rest t)))
                 (or (nil? elem)
                   (every? v (fn (x) (type-matches? elem x))))))
+          ;; `(set T)` — the sibling of `(vector T)`, and it had NO arm until 2026-09-17:
+          ;; the grammar has accepted it since element types shipped, so a declared
+          ;; `(set int)` fell through to the `else true` below and the contract accepted
+          ;; anything at all. "Unknown compound → accept" is right for a type this
+          ;; function cannot interpret; it is the trusted-declaration problem (A5) for one
+          ;; it can.
+          (%eq h 'set)
+            (and (set? v)
+              (let (elem (first (rest t)))
+                (or (nil? elem)
+                  (every? v (fn (x) (type-matches? elem x))))))
+          ;; `(seqable T)` — a sequence of `T` whichever shape carries it (ADR-365):
+          ;; `nil | list<T> | vector<T> | set<T>`. A map and a `bytes` are in bare
+          ;; `seqable` and NOT here — their elements are `[k v]` entries and octets, fixed
+          ;; by the kind — so the contract must refuse them, or it would admit what the
+          ;; checker rejects and the two would disagree about one declaration.
+          (%eq h 'seqable)
+            (and (or (list? v) (vector? v) (set? v))
+              (let (elem (first (rest t)))
+                (or (nil? elem)
+                  (every? v (fn (x) (type-matches? elem x))))))
           (%eq h 'map)
             (and (map? v)
               (let (ktype (first (rest t))

@@ -560,3 +560,85 @@ fn map_pairs_walks_a_typed_map_as_its_entries() {
         "{ws:?}"
     );
 }
+
+// C11 (ADR-365) — `(seqable T)`. The payoff is a body that can be CHECKED: `stats/min` is
+// `(reduce xs math/min)` over a sequence, and under bare `seqable` its declared return was
+// "trusted, not verified" (A5) because the parameter said nothing about what it holds.
+#[test]
+fn a_seqable_of_flows_its_element_type_into_the_body() {
+    let body = "\
+                (defn f (xs)\n\
+                  (when (empty? xs) (error \"empty\"))\n\
+                  (reduce xs math/min))";
+    // With the element type, the body verifies — no warning, and nothing "trusted".
+    let ws = file_warnings_mode(
+        &format!("(defmodule t)\n{body}\n(sig f ((seqable number) -> number))"),
+        true,
+    );
+    assert!(ws.is_empty(), "{ws:?}");
+    // Bare `seqable` is what that replaced: it carries no elements, so under strict the
+    // declaration is reported as trusted rather than checked.
+    let ws = file_warnings_mode(
+        &format!("(defmodule t)\n{body}\n(sig f (seqable -> number))"),
+        true,
+    );
+    assert!(
+        ws.iter().any(|w| w.contains("trusted, not verified")),
+        "{ws:?}"
+    );
+    // And the element type is load-bearing, not decoration: the wrong one is caught.
+    let ws = file_warnings_mode(
+        "(defmodule t)\n\
+         (defn f (xs) (reduce xs math/min))\n\
+         (sig f ((seqable string) -> number))",
+        true,
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("declared return type") && w.contains("string")),
+        "{ws:?}"
+    );
+    // A positional read sees it too — `first` may run off the end, hence the `nil`.
+    let ws = file_warnings_mode(
+        "(defmodule t)\n\
+         (sig f ((seqable number) -> int))\n\
+         (defn f (xs) (string/length (first xs)))",
+        true,
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("string/length") && w.contains("nil | number")),
+        "{ws:?}"
+    );
+}
+
+// Every shape the spelling admits, and the two members it deliberately does not: a caller
+// passing a list, a vector, a set or the empty list is fine; a map or a `bytes` is not,
+// because their elements are `[k v]` entries and octets, not the declared `T`.
+#[test]
+fn a_seqable_of_admits_the_sequence_shapes_and_refuses_map_and_bytes() {
+    let call = |arg: &str| {
+        file_warnings_mode(
+            &format!(
+                "(defmodule t)\n\
+                 (sig f ((seqable number) -> number))\n\
+                 (defn f (xs) (reduce xs math/min))\n\
+                 (defn g () (f {arg}))"
+            ),
+            true,
+        )
+    };
+    for arg in ["[1 2 3]", "(list 1 2)", "#{1 2}", "nil"] {
+        assert!(call(arg).is_empty(), "{arg} must be a (seqable number)");
+    }
+    for arg in ["{:a 1}", "(bytes [1 2])"] {
+        let ws = call(arg);
+        assert!(
+            ws.iter().any(|w| w.contains("expects")),
+            "{arg} is not a (seqable number): {ws:?}"
+        );
+    }
+    // …and a sequence of the wrong thing is refused whatever shape carries it.
+    let ws = call("[\"a\" \"b\"]");
+    assert!(ws.iter().any(|w| w.contains("expects")), "{ws:?}");
+}

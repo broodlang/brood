@@ -1267,7 +1267,8 @@ each lands; this section is the working list, `handoff.md` points at it.
       the leaf (a record's field types, a `(map K V)` where a bare `map` stood, a
       three-parameter `(map keyword int -> int)` that meant one, `%renames`' value type,
       two `defdyn` value sigs), 11 acknowledged `:trusted` (a kernel message, a table, a
-      dispatch table, the assoc-threaded state, `seqable` elements — C11).
+      dispatch table, the assoc-threaded state, `seqable` elements — C11; **that last pair
+      is down to 9: C11 shipped `(seqable T)` and `stats/min`/`max` are checked now**).
       `declarations::a_declared_return_the_body_cannot_verify_is_reported_as_trusted_under_strict`.
 
 ### B — determinism and honesty of the tool
@@ -1335,8 +1336,23 @@ each lands; this section is the working list, `handoff.md` points at it.
       not occur. `check/tests/declarations.rs`, three tests; sabotage-verified three ways
       (strict never applies / strict always applies → the mode-split pin reds in opposite
       directions; the return check disabled → both warning pins red).
-- [ ] **C11. Element-typed `seqable`.** The `elem` refinement stops at `pair | vector`; a
-      `seqable` parameter carries no element type.
+- [x] **C11. Element-typed `seqable`** (2026-09-17, ADR-365). `(seqable T)` is a type
+      constructor now: `nil | list<T> | vector<T> | set<T>`, which is exactly the union
+      authors were writing by hand (`stats/median` and `stats/percentile` both spelled it
+      out). The four members merge into ONE term, so nothing in the element machinery is
+      new — `elem_ty_union` already read that shape, which is why a body checks the moment
+      the spelling exists. **`map` and `bytes` are deliberately out**: their element types
+      come from the kind (`[k v]` entries, octets), not a refinement, so neither is a
+      collection of an arbitrary `T`; with them the union is six terms against a
+      `MAX_TY_TERMS` of four and the collapse would silently widen away the element types.
+      So `(seqable T) ⊆ seqable`, as `(map K V) ⊆ map`. `stats/min`/`stats/max` drop their
+      `(check-allow :trusted …)` and are CHECKED. Enforced at runtime too — and writing
+      that found `(set T)` had **no `type-matches?` arm at all** since element types
+      shipped, so a declared `(set int)` contract checked nothing; both arms are in, both
+      sabotage-verified. Five pins (`types::tests`, `check/tests/element_types.rs`,
+      `check/tests/declarations.rs`, `tests/contract_test.blsp`); sabotage-verified five
+      ways. Also fixed on the way: `set` was missing from `TYPE_HEADS`, so `(set)` reported
+      "unknown type constructor" instead of an arity mistake.
 - [ ] **C12. Relations between two locals beyond `i < |xs|`** (`i < j`, `i + 1 ≤ |xs|`).
       A relational domain is a different lattice; do the shapes the corpora show, not the
       domain.
@@ -1388,8 +1404,9 @@ The first pass through the list above, in its order. What each found is the poin
   it, acknowledged with the new `(check-allow :trusted …)`: a kernel message
   (`read-line`), a table (`regex-exit`, `regex-first-mask`, `resolver-step-count`), a
   dispatch table (`nest/main`), assoc-threaded state (`markdown/->html`, `pane-update`),
-  `seqable` elements (`stats/min`/`max` — C11), the CST's kids (`forms-of`), and an open
-  record's undeclared key (the `datetime` time accessors over a `date`).
+  `seqable` elements (`stats/min`/`max` — C11, **resolved 2026-09-17**: `(seqable number)`
+  says it, and both are checked), the CST's kids (`forms-of`), and an open record's
+  undeclared key (the `datetime` time accessors over a `date`).
 - **Four inference holes closed on the way**, each a fixpoint that started at the unknown
   instead of ⊥ and could never come back: a destructuring of a `never` bound its names
   unknown; a numeric op on a `never` deferred to its signature (`number`); an `if` whose

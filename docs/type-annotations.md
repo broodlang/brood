@@ -62,6 +62,9 @@ arrow  ::= ( type* -> type )                   ; fixed arity
          | ( type* &optional type* & type -> type ) ; + a trailing rest too
 seq    ::= (list type) | (vector type) | (set type) ; element type checked at runtime;
                                                ; `(list E)` is `nil | list<E>` — may be empty
+         | (seqable type)                      ; a SEQUENCE of E, whichever shape carries it:
+                                               ; `nil | list<E> | vector<E> | set<E>` (ADR-365).
+                                               ; NOT `map`/`bytes` — see below
 map-kv ::= (map key-type val-type)             ; key/val checked at runtime
 range  ::= (int lo hi)                         ; an int within [lo, hi]; `_` is an open end (ADR-350)
          | (len type lo hi)                    ; a countable of length within [lo, hi]
@@ -179,6 +182,22 @@ excluded — for a polymorphic-sequence parameter without falling back to `any`,
 = `seqable∪string∪rope∪table` — what `count`/`get`/`empty?` accept; `numeric` / `ordered` =
 `number` plus every record with a `num/*` / `compare-to` method, the domains of `+` and `<`
 as the registry stands — ADR-299, …).
+
+**A sequence of something — `(seqable T)` (ADR-365).** Bare `seqable` says the argument is
+a collection and nothing about what it holds, so a body that reads its elements cannot be
+checked at all (`(reduce xs math/min)` — of what?). `(seqable T)` is the element-typed form,
+and it is exactly the union authors were writing by hand:
+
+```lisp
+(sig min ((seqable number) -> number))      ; = (or nil (list number) (vector number) (set number))
+(defn min (xs) … (reduce xs math/min))      ; …and now the body VERIFIES
+```
+
+**`map` and `bytes` are in bare `seqable` and not in `(seqable T)`.** Their element types
+come from the kind, not from a refinement — a map walks as `[key value]` entries, a `bytes`
+as octets — so neither is a collection of an arbitrary `T`; write `(map K V)` or `bytes` for
+those. `(seqable T)` is therefore a *subtype* of `seqable`, the way `(map K V)` is of `map`:
+refining drops the members that do not match.
 
 **Naming a type — `(deftype name T)` (ADR-327).** A structural alias: `name` in any
 `sig` IS `T` exactly as written — a record shape, a union, a tuple, another alias.

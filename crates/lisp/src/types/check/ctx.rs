@@ -45,6 +45,11 @@ pub(super) enum SigTerm {
     VectorOf(Box<SigTerm>),
     /// `(set T)` with a variable inside — `set<T>`.
     SetOf(Box<SigTerm>),
+    /// `(seqable T)` with a variable inside — `nil | list<T> | vector<T> | set<T>`
+    /// (C11, ADR-365). With nothing known of `T` it resolves to bare `seqable`, which
+    /// admits `map` and `bytes` too: unrefined, the name means every collection the
+    /// combinators walk.
+    SeqableOf(Box<SigTerm>),
     /// `(record [&open] :k ?A …)` — a field type may be a variable. Declaration order is
     /// kept (a `Vec`, not the shape's `BTreeMap`) only for display stability; binding is
     /// by field NAME. What this exists for: `defrecord`'s constructor signature
@@ -95,6 +100,14 @@ impl SigTerm {
                     Ty::of(Tag::Set)
                 } else {
                     Ty::set_of(e)
+                }
+            }
+            SigTerm::SeqableOf(inner) => {
+                let e = inner.resolve(subst);
+                if e == Ty::ANY {
+                    Ty::SEQABLE
+                } else {
+                    Ty::seqable_of(e)
                 }
             }
             SigTerm::Or(alts) => alts
@@ -222,7 +235,10 @@ pub(super) fn unify_unknown(term: &SigTerm, subst: &mut HashMap<u32, Ty>) {
         SigTerm::Var(i) => {
             subst.insert(*i, Ty::ANY);
         }
-        SigTerm::ListOf(inner) | SigTerm::VectorOf(inner) | SigTerm::SetOf(inner) => {
+        SigTerm::ListOf(inner)
+        | SigTerm::VectorOf(inner)
+        | SigTerm::SetOf(inner)
+        | SigTerm::SeqableOf(inner) => {
             unify_unknown(inner, subst);
         }
         SigTerm::Or(alts) | SigTerm::And(alts) => {
@@ -260,6 +276,14 @@ pub(super) fn unify_term(term: &SigTerm, ty: Ty, subst: &mut HashMap<u32, Ty>) {
         SigTerm::SetOf(inner) => {
             if let Some(elem) = ty.elem_ty() {
                 unify_term(inner, elem.clone(), subst);
+            }
+        }
+        // `elem_ty_union`, not `elem_ty`: the argument matching a `(seqable ?A)` is itself
+        // a union of members more often than not — that is the whole point of the
+        // spelling — and `elem_ty` answers for one term only.
+        SigTerm::SeqableOf(inner) => {
+            if let Some(elem) = ty.elem_ty_union() {
+                unify_term(inner, elem, subst);
             }
         }
         SigTerm::Or(alts) => {

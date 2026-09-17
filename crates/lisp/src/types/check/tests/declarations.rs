@@ -32,6 +32,34 @@ fn a_misspelled_type_constructor_in_a_sig_is_reported() {
     );
 }
 
+// A KNOWN constructor given the wrong arity must be told apart from an unknown one: only a
+// head that fails to parse reaches `type_expr_problem`, so a constructor missing from
+// `TYPE_HEADS` reports "unknown type constructor" for what is really an arity mistake.
+// `set` did exactly that until 2026-09-17 — `(set int)` was always fine, so nothing noticed
+// — and `seqable` gained the same shape with C11 (ADR-365).
+#[test]
+fn a_known_constructor_with_the_wrong_arity_is_named_as_an_arity_mistake() {
+    for (src, wanted) in [
+        ("(set)", "`set` takes exactly one element type"),
+        ("(seqable)", "`seqable` takes exactly one element type"),
+        (
+            "(seqable int string)",
+            "`seqable` takes exactly one element type",
+        ),
+        ("(vector)", "`vector` takes exactly one element type"),
+    ] {
+        let ws = file_warnings(&format!("(sig f ({src} -> int))\n(defn f (xs) 0)"));
+        assert!(
+            ws.iter().any(|w| w.contains(wanted)),
+            "expected an arity message for {src}, got {ws:?}"
+        );
+        assert!(
+            !ws.iter().any(|w| w.contains("unknown type constructor")),
+            "{src} is a known constructor: {ws:?}"
+        );
+    }
+}
+
 #[test]
 fn a_sig_whose_arity_contradicts_the_definition_is_reported() {
     let ws = file_warnings("(sig f (int -> int))\n(defn f (a b) a)");

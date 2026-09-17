@@ -61,6 +61,40 @@
   (test "(vector string) rejects a vector containing a non-string"
     (assert-error (c-first-vec [1 "b"]))))
 
+;; --- (set E) and (seqable E) ---------------------------------------------------
+;; `(set E)` had NO arm in `type-matches?` until 2026-09-17: the grammar has accepted it
+;; since element types shipped, so a declared `(set int)` fell through to "unknown
+;; compound → accept" and the contract checked nothing at all. `(seqable E)` is new with
+;; ADR-365 and must not repeat it — a grammar the checker enforces and the contract does
+;; not is the trusted-declaration problem (A5) with extra steps.
+
+(defn c-set-size (s) (count s))
+(sig! c-set-size ((set int) -> int))
+
+(defn c-seq-count (xs) (count xs))
+(sig! c-seq-count ((seqable number) -> int))
+
+(describe "(set E) and (seqable E) contracts"
+  (test "(set int) accepts a set of ints"
+    (assert= (c-set-size #{1 2 3}) 3))
+  (test "(set int) rejects a set holding a non-int"
+    (assert-error (c-set-size #{1 "two"})))
+  (test "(set int) rejects a value that is not a set at all"
+    (assert-error (c-set-size [1 2])))
+  ;; `(seqable E)` is every SHAPE a sequence comes in — and the empty list, which `nil` is.
+  (test "(seqable number) accepts each sequence shape"
+    (assert= (c-seq-count [1 2]) 2)
+    (assert= (c-seq-count (list 1 2 3)) 3)
+    (assert= (c-seq-count #{1 2}) 2)
+    (assert= (c-seq-count nil) 0))
+  (test "(seqable number) rejects a sequence holding something else"
+    (assert-error (c-seq-count ["a"])))
+  ;; …and the two members of bare `seqable` it deliberately excludes. The contract must
+  ;; agree with the checker here or one declaration means two things.
+  (test "(seqable number) rejects a map and a bytes — their elements are not the element"
+    (assert-error (c-seq-count {:a 1}))
+    (assert-error (c-seq-count (bytes [1 2])))))
+
 ;; --- keyword-literal (singleton) types ----------------------------------------
 ;; A bare keyword in a sig is a *literal* type — the value must be exactly that
 ;; keyword. `(or :a :b …)` enumerates the allowed values (set-theoretic literals).
