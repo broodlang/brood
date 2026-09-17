@@ -295,9 +295,11 @@ placing re-sorts the kept list.)"
 ;; Two things this has to get right, because the caller is an editor's loop and its mailbox
 ;; is full of other traffic. The reply carries a `ref` and the receive selects on it, so
 ;; nothing else is consumed or reordered. And a shard that does not answer in time is
-;; KILLED before its slice is ranked in the caller instead — a straggler replying later
-;; would leave a message in that mailbox which nothing will ever read. A worker runs a pure
-;; fold, so this is only reachable through a `*fuzzy-scorer*` that throws; the ranking then
+;; killed before its slice is ranked in the caller instead, and any reply that landed anyway
+;; is swept out of the mailbox first — a straggler's message left queued is one nothing will
+;; ever read, and this caller lives for the length of a session. A worker runs a pure fold,
+;; so the deadline is reached through a loaded machine or a `*fuzzy-scorer*` that throws; the
+;; ranking then
 ;; costs time and still finishes, rather than hanging the loop.
 
 (defdyn *fuzzy-parallel-min* 4000)
@@ -322,14 +324,29 @@ placing re-sorts the kept list.)"
   "A shard's own best `k`, sent back tagged with `tag` and its shard `index`."
   (send parent [:fuzzy-ranked tag index (fuzzy-fold score-of shard k)]))
 
-(defn- fuzzy-abandon (pending score-of k acc)
-  "Kill the workers that never answered and rank their slices here — `pending` is
-`{index -> [shard pid]}`. The kill is what keeps a late reply out of the caller's mailbox;
-the local ranking is what keeps the ANSWER whole."
-  (fold (map (seq pending) second)
-    acc
-    (fn (a entry)
-      (do (exit (second entry) :kill) (append a (fuzzy-fold score-of (first entry) k))))))
+(defn- fuzzy-sweep (tag pending acc)
+  "`[pending' acc']` after taking every reply for `tag` ALREADY queued, waiting for none.
+A worker that answered just past the deadline has done the work — using it beats redoing
+it, and leaving it queued is what would strand a message in the caller's mailbox."
+  (receive
+    ([:fuzzy-ranked ^tag index ranked] (fuzzy-sweep tag (dissoc pending index) (append acc ranked)))
+    (after 0 [pending acc])))
+
+(defn- fuzzy-abandon (tag pending score-of k acc)
+  "Give up on the shards still out: kill their workers, take any reply that landed anyway,
+and rank whatever is still missing here. `pending` is `{index -> [shard pid]}`.
+
+The ORDER is the point. Killing first stops any further send; sweeping second collects what
+was already in flight — and a reply sent before the kill lands is in the mailbox whether or
+not we look, so not looking is what leaves it there forever. (That is not hypothetical: at a
+1 ms budget over 8k candidates, killing alone stranded seven replies in the caller — and the
+caller is an editor's loop, which then scans past them on every selective receive it ever
+does again.) Only then is the remainder ranked locally, so the ANSWER is whole either way."
+  (let (_ (doseq (entry (map (seq pending) second)) (exit (second entry) :kill))
+        [left swept] (fuzzy-sweep tag pending acc))
+    (fold (map (seq left) second)
+      swept
+      (fn (a entry) (append a (fuzzy-fold score-of (first entry) k))))))
 
 (defn- fuzzy-gather (tag pending acc score-of k)
   "The replies tagged `tag`, appended to `acc`. `pending` is `{index -> [shard pid]}` for
@@ -343,11 +360,31 @@ mailbox is left where it is."
                                            (append acc ranked)
                                            score-of
                                            k))
-      (after *fuzzy-worker-timeout-ms* (fuzzy-abandon pending score-of k acc)))))
+      (after *fuzzy-worker-timeout-ms* (fuzzy-abandon tag pending score-of k acc)))))
+
+(defn- fuzzy-discard-loop (n)
+  "The drain itself, tail-recursive: an accumulator rather than `(inc (recur))`, which grows
+the stack by one frame per stray."
+  (receive
+    ([:fuzzy-ranked _ _ _] (fuzzy-discard-loop (inc n)))
+    (after 0 n)))
+
+(defn- fuzzy-discard-stale ()
+  "Drop any `[:fuzzy-ranked …]` left in this process's mailbox by an EARLIER ranking, waiting
+for none. Returns how many there were.
+
+A worker that missed its deadline is killed, but the kill is not synchronous: it may already
+be inside `send`, so the reply can land after the gather has stopped looking and after
+`fuzzy-abandon` has swept. Nothing closes that race at the timeout — so it is closed HERE
+instead, one ranking later. Anything matching at this point predates the tag about to be
+made, which is what makes discarding it safe. Cost: one zero-wait receive per sharded
+ranking; benefit: strays can never accumulate in a caller that lives for a whole session."
+  (fuzzy-discard-loop 0))
 
 (defn- fuzzy-parallel (score-of cands k)
   "The best `k` of `cands`, ranked across `*fuzzy-workers*` processes and merged here."
-  (let (shards (into [] (fuzzy-shards cands *fuzzy-workers*))
+  (let (_ (fuzzy-discard-stale)
+        shards (into [] (fuzzy-shards cands *fuzzy-workers*))
         tag (ref)
         me (self)
         ;; `fold`, not `map`: every worker must have been SPAWNED before the gather starts

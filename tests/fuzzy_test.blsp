@@ -123,6 +123,24 @@
   ;; A worker runs a pure fold, so it only dies through a scorer that throws — and then the
   ;; caller must still answer. The straggler is killed and its slice ranked in the caller,
   ;; where the same scorer raises: an error you can see, not a loop that hangs.
+  ;; The caller is an editor's loop and lives for a whole session, so a ranking must not
+  ;; leave anything in its mailbox. Killing the stragglers is not enough on its own — the
+  ;; kill is not synchronous, so a worker can already be inside `send` — which is why the
+  ;; timeout path SWEEPS what arrived anyway, and why the next sharded ranking discards
+  ;; whatever still landed later. Before the sweep, a 1 ms budget over this corpus stranded
+  ;; seven replies per ranking, forever.
+  (test "a ranking that times out leaves nothing in the caller's mailbox"
+    (let (answer (binding (*fuzzy-parallel-min* 1000000) (fuzzy/top "view_9" big-corpus 5))
+          timed-out (binding (*fuzzy-worker-timeout-ms* 1) (fuzzy/top "view_9" big-corpus 5))
+          ;; give every killed worker time to finish and send, then let one ordinary
+          ;; ranking run — its first act is to discard what the timed-out one stranded
+          _ (receive (:never nil) (after 600 nil))
+          _ (fuzzy/top "view_9" big-corpus 5)
+          strays (fold (range 40)
+                   0
+                   (fn (n _) (receive ([:fuzzy-ranked t i r] (inc n)) (after 50 n)))))
+      (assert= timed-out answer) ; the answer is whole either way
+      (assert= strays 0)))
   (test "a scorer that throws does not hang the ranking"
     (assert-error (binding (*fuzzy-scorer* (fn (q) (fn (c) (throw :boom)))
                             *fuzzy-worker-timeout-ms* 200)
