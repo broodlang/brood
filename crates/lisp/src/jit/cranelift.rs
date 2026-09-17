@@ -118,6 +118,7 @@ impl CraneliftBackend {
         builder.symbol("brood_rt_xcall_latch", brood_rt_xcall_latch as *const u8);
         builder.symbol("brood_rt_xcall_cold", brood_rt_xcall_cold as *const u8);
         builder.symbol("brood_rt_vector_ref", brood_rt_vector_ref as *const u8);
+        builder.symbol("brood_rt_vector_len", brood_rt_vector_len as *const u8);
         builder.symbol("brood_rt_table_has", brood_rt_table_has as *const u8);
         builder.symbol("brood_rt_table_get2", brood_rt_table_get2 as *const u8);
         builder.symbol("brood_rt_table_put", brood_rt_table_put as *const u8);

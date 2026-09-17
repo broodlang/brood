@@ -142,7 +142,10 @@ pub(super) fn resolve_edges(
     let mut words_extra: usize = 0;
     for i in 0..depth {
         let r0 = first.reprs[i];
-        if edges.iter().all(|e| e.reprs[i] == r0) {
+        // A `Words(WORDS_WANTED)` is a request, not a repr the edges can agree on: it
+        // widens even when every predecessor asks for it.
+        let wants_words = matches!(r0, ParamRepr::Words(_));
+        if !wants_words && edges.iter().all(|e| e.reprs[i] == r0) {
             unified.push(r0);
         } else if i < frame.blockarg_spill_len {
             let s = frame.blockarg_spill_base + i;

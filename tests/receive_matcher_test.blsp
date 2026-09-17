@@ -1,0 +1,83 @@
+;; The `receive` matcher — the `(fn (msg) …)` the kernel runs per candidate — chains its
+;; clauses WITHOUT fail-continuation thunks where `match` would build one (`%match-build-chain`
+;; with `nil-fail?`, 2026-09-17). A receive clause's result is `[idx var…]` or `nil`, so the
+;; thunk case becomes an `or`: the clause compiled against the constant `nil` as its fail
+;; continuation, the rest of the chain as the alternative. Before this the matcher inherited
+;; `match`'s `(let (k (fn () rest)) …)` form, which for any 3+-clause receive allocated one
+;; closure per clause per MESSAGE and called one per failing clause — ~2.2 µs of matcher on
+;; the supervisor's 7-clause loop, a fifth of a `start-child` — and, `MakeClosure` being
+;; outside the JIT subset, kept every such matcher off the native tier. The splice cases (a
+;; small rest, or one used once) are untouched: a spliced rest is pure control flow, while
+;; the `or` makes the result vector cross a join.
+;;
+;; The cases pin the CONTRACT the chain must keep: clause order, guards that fail in the
+;; middle, pins, nested patterns, a wildcard last clause, and `after`. The shape guard is the
+;; last case: a 5-clause expansion must contain no thunk. Sabotage-verified: with the receive
+;; routed through the thunk builder (`nil-fail?` false), "no fail thunks" fails (5 `(fn nil` in
+;; the expansion) and every behavioural case still passes — which is exactly why the shape
+;; guard exists beside them.
+(defmodule receive-matcher-test (:use test))
+
+(defn- classify (r)
+  (receive
+    ([:EXIT pid reason] [:exit pid reason])
+    ([:$call from ^r :which] [:which from])
+    ([:$call from ^r :count] [:count from])
+    ([:$call from ^r [:start spec]] [:start from spec])
+    ([:$call from ^r [:stop key]] :when (int? key) [:stop-int from key])
+    ([:$call from ^r [:stop key]] [:stop-other from key])
+    ([:$stop] :stopped)
+    (_ :other)))
+
+(describe "receive matcher — the or-chain"
+  (test "each clause of a 7-arm receive is reachable, in order"
+    (let (r (ref) me (self))
+      (do
+        (send me [:$call me r [:start {:id 1}]])
+        (assert= [:start me {:id 1}] (classify r))
+        (send me [:EXIT me :normal])
+        (assert= [:exit me :normal] (classify r))
+        (send me [:$call me r :count])
+        (assert= [:count me] (classify r))
+        (send me [:$call me r :which])
+        (assert= [:which me] (classify r))
+        (send me [:$stop])
+        (assert= :stopped (classify r)))))
+
+  (test "a guard failing in the middle falls through to the next clause, not past it"
+    (let (r (ref) me (self))
+      (do
+        (send me [:$call me r [:stop 7]])
+        (assert= [:stop-int me 7] (classify r))
+        (send me [:$call me r [:stop :by-name]])
+        (assert= [:stop-other me :by-name] (classify r)))))
+
+  (test "a pin that does not match skips to the wildcard"
+    (let (r (ref) other (ref) me (self))
+      (do
+        (send me [:$call me other :count])
+        (assert= :other (classify r)))))
+
+  (test "selective receive still leaves non-matching messages queued, in order"
+    (let (me (self))
+      (do
+        (send me [:b 1])
+        (send me [:a 1])
+        (send me [:b 2])
+        (assert= 1 (receive ([:a n] n)))
+        (assert= [1 2] [(receive ([:b n] n)) (receive ([:b n] n))]))))
+
+  (test "after fires when nothing matches"
+    (assert= :timeout (receive ([:never] :no) (after 5 :timeout))))
+
+  (test "the matcher carries no fail thunks"
+    (let (expansion (pr-str (macroexpand '(receive
+                                            ([:a x] x)
+                                            ([:b x y] [x y])
+                                            ([:c [x y]] :when (int? x) x)
+                                            ([:d x] x)
+                                            ([:e] :e)))))
+      (do
+        (is (includes? expansion "%receive"))
+        ;; A thunk prints as `(fn nil …)`; the matcher itself is `(fn (msg…) …)`.
+        (assert= false (includes? expansion "(fn nil"))))))

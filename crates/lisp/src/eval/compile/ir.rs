@@ -126,6 +126,23 @@ pub enum PrimOp1 {
     // element by the seq predicates), and making it call-free also makes those
     // one-line wrappers leaf-inlinable (their bodies lose their last `Call`).
     TypeOf,
+    /// A prelude **type predicate** — `vector?`, `map?`, `string?`, `int?`, `keyword?`, … —
+    /// carrying the `type-of` keyword it tests for. Every one of them is the one-line
+    /// wrapper `(%eq (type-of x) :kw)`, which `resolve_prim1` recognises STRUCTURALLY (the
+    /// `sqrt` discipline: the shape, not the name, earns the inline, and a rebind that
+    /// changes the shape drops it at the next epoch check). Before this each was a full
+    /// Brood call — ~100 ns on the VM against a tag read — and they are what every `match`
+    /// / `receive` / destructuring `let` clause tests first, what `get` and `assoc` dispatch
+    /// on, and what the seq predicates apply per element. Total over every operand: a tag
+    /// byte compared to a constant, the same `type_of_kw_table` load `TypeOf` uses in the
+    /// JIT, so the collapsing rules (`BigInt` → `int`, `Range`/`SeqView` → `pair`) hold by
+    /// construction.
+    TypeIs(Symbol),
+    /// `(%vector-length v)`: the length of a vector, inline. The other half of the
+    /// pattern compiler's vector test (`(and (vector? m) (%eq (%vector-length m) 3))`),
+    /// which `%vector-ref` then reads through [`PrimOp::VectorRef`]. A non-vector
+    /// defers to the native for its exact type error.
+    VectorLen,
 }
 
 impl PrimOp1 {
@@ -137,6 +154,7 @@ impl PrimOp1 {
             "pair?" => PrimOp1::IsPair,
             "empty?" => PrimOp1::IsEmpty,
             "type-of" => PrimOp1::TypeOf,
+            "%vector-length" => PrimOp1::VectorLen,
             _ => return None,
         })
     }
@@ -154,7 +172,10 @@ impl PrimOp {
             "%div" => PrimOp::Div,
             "%quot" => PrimOp::Quot,
             "cons" => PrimOp::Cons,
-            "vector-ref" => PrimOp::VectorRef,
+            // The native is `%vector-ref` — it was `vector-ref` until the `seq/` refactor
+            // renamed it, and this entry kept the OLD spelling, so the direct inline was dead
+            // for every pattern-match element read (`nth`'s head-keyed path survived alone).
+            "%vector-ref" => PrimOp::VectorRef,
             "%max" => PrimOp::Max,
             "%min" => PrimOp::Min,
             "bit/and" => PrimOp::BitAnd,

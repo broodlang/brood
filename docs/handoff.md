@@ -10,6 +10,69 @@ needing one is queued in [`perf-handoff.md`](perf-handoff.md) instead — curren
 high-priority item: whether KI-114's `as_f64_pair` holds the closure KI-109 got from the
 promotion it constrained.
 
+## 2026-09-17 afternoon — the supervisor row, decomposed by layer (ADR-362) — read this first
+
+`supervisor` **0.88 → 0.66 s** (Elixir 0.256), `start-child` 22.5 → 16.4 µs, with **no edit to
+`supervisor.blsp`**: the `receive` matcher chains as an `or` (five thunks per message gone),
+the type predicates are `PrimOp1::TypeIs`, `%vector-length`/`%vector-ref` inline (the latter's
+prim entry had the pre-`seq/` name — dead since the rename), and `MapGet` is default-on
+(`BROOD_NO_MAPGET=1` opts out) with a plain map's miss answered inline. The method that found
+it is the thing to keep: **decompose by layer first** (bare round trip 1.9 µs → `gen/call` 5.0 →
+`spawn-link`-in-server 7.4 → real `start-child` 22.5), then bisect the module by deletion under
+a copied name, then `BROOD_PERF_STATS=1` for the `ns_*` shares — `ns_match_run` at 19% was the
+tell — then `macroexpand` the hot form. The devlog entry has the numbers and the traps.
+
+**Where the remaining 16.4 µs per child sits, in order of size** (Elixir's whole operation is
+~3 µs), each a general lever, none supervisor-specific:
+1. **Messaging floor: ~6 µs** — the bare send/receive round trip (1.9 µs; the `pingpong` row,
+   2.8× the BEAM) twice over plus the scheduling handoffs, and `spawn-link` at 2.3. Kernel work
+   (`process/scheduler`), tracked in `runtime-frontier.md`.
+2. **The VM call protocol: ~70 ns per Brood→Brood call**, ~80 per native call, ~30 calls per
+   child. `perf` on a call-only loop reads flat — `exec_chunk` 57%, a big spilled frame, a
+   `lock` (an atomic per call) at 3.5% — so this is an interpreter-engineering project, not a
+   fix. The most general lever in the runtime after this session.
+3. **The rest of the map wrappers: ~1.5 µs** — the 3-arity `(get m k d)` (two per child) and
+   `(assoc m k v)` (five; now 259 ns against 162 for `%map-assoc`), and the multi-pair
+   `(assoc st :children x :ids y)` at 1.1 µs (a rest list + `%assoc-map-pairs`). `Prim3` is
+   `TablePut`-shaped at eight sites (`jit_plan.rs`, `inline.rs`, `prim.rs`), which is why the
+   3-arity `get` did not land this session; a `MapAssoc` `Prim3` would need `brood_rt_map_assoc`
+   and an `inst_may_allocate` entry.
+4. **`gen/call`'s own body: 1.2 µs** over a hand-rolled ref+monitor+after+flush (2.9 µs). Its
+   receive has an `after`, so it is not on the JIT; the cost is interpretation of the wrapper.
+5. **The supervisor's GC: 2.3 µs** — 54 collections over 20k children on a 6–8 MB heap (the
+   retained state map). Real but not a lever until 1–3 move.
+
+**A measurement trap this session cost four hours on — read before believing a `make ab`
+delta on `ring`/`pingpong`.** The sweep read `ring` +6% and `pingpong` +7% (floors < 1%, solo
+re-runs agreed), with instruction counts equal at `BROOD_J=1` (±3% run to run), every
+`BROOD_PERF_STATS` counter identical, the delta present under `BROOD_NO_JIT` and absent under
+`BROOD_NO_HANDOFF` (both arms 3.15 s), and a bisect by variant build blaming `PrimOp1::TypeIs`
+— a compile-time-only change that executes nothing per message. The profile diff showed
+`copy_cross_heap_rec` (per-message, entry samples only) as a symbol on the new binary and
+inlined away on the old, plus `enqueue` and kernel time. Under **`release-lean`** (LTO, one
+CGU — what `nest release` and `make install` ship) the same trees read `pingpong` 182 vs 181
+and `ring` inside its own 2% spread. `release-fast` has no LTO and many codegen units, so an
+addition to `lower.rs`/`prim.rs`/`exec_chunk.rs` can move the inliner's partition of the
+kernel's message path. A layout-only perturbation of the baseline (an `#[inline(never)]` fn in
+`mailbox.rs`) did NOT reproduce it, so the effect is which functions share a CGU, not code
+placement. When a kernel-path row moves a few percent with no counter moving, **build both
+sides `--profile release-lean` before bisecting** (`cargo build --profile release-lean -p cli
+--no-default-features --features brood/jit,brood/stdimage,brood/treesit-grammars`, ~3 min).
+
+**Watch item: `brood_suite_passes` failed once on TRY 1 (122 s, a real case failure, not the
+900 s cap) on the rebased tree `c7315ace`+ADR-362 and passed on retry; the failing case's NAME
+was lost because the run was piped through a grep for the summary line.** Five further wrapper
+runs the same hour (one under nextest, three more with `--no-capture` to a file, plus the
+earlier full suites) were 5964/5964 clean. If it recurs: run the wrapper with `--no-capture >
+file` so the `test failed:` line survives, and read the timing-sensitive files first
+(`remote_spawn_test`, the node round trips) — the retry exists for exactly those.
+
+**Two pre-existing bugs found on the way, both fixed (KI-159, KI-160):** the const-index vector
+read deopted on any shared-region vector (latent while `%vector-ref` was a call — it bailed two
+`jit_eq_join_test` arms the moment it became a prim; now the FFI, like the pair path), and the
+`jit_deopt_dirty` check had fired on every deopt of an inlined arm since two-stage tiering (it
+ran after the settle's own small-top restore) — so any past "dirty" reading on an inlined arm
+was the diagnostic, not the native.
 ## 2026-09-17 — the type-system housekeeping is done; buckets 1 and 3 remain
 
 The four "ongoing" items the 09-15 review left on the type-system list, closed (the

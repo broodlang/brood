@@ -325,6 +325,54 @@ pub(super) fn emit_prim1(
                 }
             }
         }
+        PrimOp1::TypeIs(kw) => {
+            let kw = *kw;
+            // `(vector? x)` and kin: `(%eq (type-of x) :kw)` as one compare. Total over
+            // every operand — no deopt. An unboxed operand's tag is known at compile time,
+            // so the answer is a constant; a boxed one goes through the same
+            // `type_of_kw_table` load `TypeOf` uses (so the collapsing rules hold) and
+            // compares the keyword id. Result is an i8 compare (truthy in JumpIfFalse).
+            let known = match operand {
+                Op::Int(v) if b.func.dfg.value_type(v) == types::I64 => {
+                    Some(crate::core::value::Tag::Int)
+                }
+                Op::Float(_) => Some(crate::core::value::Tag::Float),
+                Op::Bool(_) => Some(crate::core::value::Tag::Bool),
+                _ => None,
+            };
+            match known {
+                Some(t) => {
+                    let r = b.ins().iconst(types::I8, i64::from(t.keyword() == kw));
+                    stack.push(Op::Int(r));
+                }
+                None => {
+                    let [w0, _, _] = read_words(b, operand, frame);
+                    let tagb = b.ins().band_imm_s(w0, 0xff);
+                    let table = crate::core::value::jit_layout::type_of_kw_table();
+                    let base = b.ins().iconst(ptr_ty, table.as_ptr() as i64);
+                    let off = b.ins().imul_imm_s(tagb, 4);
+                    let addr = b.ins().iadd(base, off);
+                    let sym = b.ins().load(types::I32, MemFlagsData::new(), addr, 0);
+                    let is = b.ins().icmp_imm_s(IntCC::Equal, sym, kw as i64);
+                    stack.push(Op::Int(is));
+                }
+            }
+        }
+        PrimOp1::VectorLen => {
+            // `(%vector-length v)`: one callback that reads the slab, returning the
+            // length unboxed — or -1 for a non-vector, which deopts so the VM raises the
+            // native's exact type error. Not a safepoint (no allocation), so live
+            // handles stay valid across it.
+            let [w0, w1, w2] = read_words(b, operand, frame);
+            let c = b.ins().call(funcs.vlen, &[funcs.heap, w0, w1, w2]);
+            let len = b.inst_results(c)[0];
+            let ok = b.ins().icmp_imm_s(IntCC::SignedGreaterThanOrEqual, len, 0);
+            let cont = b.create_block();
+            let __dr = b.ins().iconst(types::I32, 40);
+            b.ins().brif(ok, cont, &[], deopt, &[BlockArg::Value(__dr)]);
+            b.switch_to_block(cont);
+            stack.push(Op::Int(len));
+        }
         PrimOp1::TypeOf => {
             // Total over every operand — no deopt. An unboxed operand's tag is known at
             // compile time (constant keyword); a boxed one loads its keyword id from the

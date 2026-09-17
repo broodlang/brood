@@ -72,6 +72,9 @@ pub(super) struct Funcs {
     /// `table_prim` helper drives it: status 0 hands back the value, status 1 deopts to the
     /// VM, which owns every branch of `get` this declines.
     pub mget: FuncRef,
+    /// `brood_rt_vector_len` — the length read behind [`PrimOp1::VectorLen`]: `(heap,
+    /// vec 3w) -> len`, `-1` for a non-vector (deopt). No out slot; the answer is the return.
+    pub vlen: FuncRef,
     /// `brood_rt_equal` — `Heap::equal` for the operand pairs [`eq_dispatch`] cannot
     /// decide inline (strings, floats, structural values); status 2 (a seq-view) deopts.
     pub equal: FuncRef,
@@ -186,11 +189,17 @@ pub(super) enum ParamRepr {
     /// The value lives in frame slot `k`; the arg word is a placeholder. Every predecessor
     /// must name the *same* slot, which `control::resolve_edges` settles.
     Slot(usize),
-    /// A join entry whose predecessors DISAGREED and that has no spill slot to widen into
-    /// (a call-free arm reserves none — `jit_spill_reserve`): the value crosses as its
-    /// three tagged words, the entry's own param plus two extra block params appended for
-    /// the `n`th widened entry (`control::resolve_edges`), and the target rebuilds an
-    /// `Op::Handle`. Never produced by [`param_repr`] — only unification makes one.
+    /// A join entry that has no spill slot to land in (a call-free arm reserves none —
+    /// `jit_spill_reserve`) and carries a boxed value: the value crosses as its three
+    /// tagged words, the entry's own param plus two extra block params appended for the
+    /// `n`th widened entry (`control::resolve_edges`), and the target rebuilds an
+    /// `Op::Handle`. Unification assigns `n`; [`param_repr`] asks for it with the
+    /// [`WORDS_WANTED`] placeholder for a `Handle` it cannot spill — before 2026-09-17 such
+    /// a handle fell through to `Int`, and when every predecessor agreed on that (a
+    /// `[1]` literal on one edge, `nil` on the other — the `receive` matcher's inner
+    /// join) nothing widened and `as_int` deopted on the vector every message. It was
+    /// masked while the matcher's `vector?`/`%vector-length` were CALLS: two of them
+    /// funded a spill window. The moment they became prims the window vanished.
     Words(usize),
 }
 
@@ -212,9 +221,16 @@ pub(super) fn param_repr(b: &FunctionBuilder, op: Op, idx: usize, f: Frame) -> P
         Op::Handle(..) if idx < f.blockarg_spill_len => {
             ParamRepr::Slot(f.blockarg_spill_base + idx)
         }
+        // A boxed value with no slot to spill into: cross as words (see `Words`).
+        Op::Handle(..) => ParamRepr::Words(WORDS_WANTED),
         _ => ParamRepr::Int,
     }
 }
+
+/// The `Words` index [`param_repr`] hands unification for a handle that must cross as
+/// words; `resolve_edges` replaces it with the entry's real index, so no edge is ever
+/// emitted against it.
+pub(super) const WORDS_WANTED: usize = usize::MAX;
 
 /// Does `op` carry a `Value::Float`? (An `Op::Float`, or a `Slot` flagged float.)
 pub(super) fn op_is_float(op: Op, f: Frame) -> bool {
@@ -1446,9 +1462,10 @@ pub(super) fn eq_dispatch(
 /// Inline read of `(nth v <const idx>)` for a LOCAL small (inline) vector, the analog of
 /// the pair `first`/`rest` inline. Fetches the vector-slab base *per read* (a trivial
 /// FFI, not the hoist used for pairs) so it is safe even in arms with GC safepoints (a
-/// non-tail `Call` between reads) — `bintree`'s `check` is exactly that. Any slow
-/// condition (not a `Vector`, non-LOCAL region, spilled/large vector, or out-of-range
-/// index) deopts to the VM, which produces `nth`'s exact result. Element read is `slot +
+/// non-tail `Call` between reads) — `bintree`'s `check` is exactly that. A non-LOCAL
+/// (PRELUDE/RUNTIME) vector reads through the `brood_rt_vector_ref` callback; the other
+/// slow conditions (not a `Vector`, an unexpected storage layout, or an out-of-range
+/// index) deopt to the VM, which produces `nth`'s exact result. Element read is `slot +
 /// JIT_ITEMS_OFF + idx*STRIDE`; `vec` is the handle word-triple, `idx` a compile-time
 /// index.
 pub(super) fn inline_vec_ref(
@@ -1472,13 +1489,19 @@ pub(super) fn inline_vec_ref(
     b.ins()
         .brif(is_vec, c1, &[], deopt, &[BlockArg::Value(__dr)]);
     b.switch_to_block(c1);
-    // Region: high 2 bits of the handle == 0 (LOCAL). Deopt for PRELUDE/RUNTIME.
+    // Region: high 2 bits of the handle == 0 (LOCAL). PRELUDE/RUNTIME take the FFI
+    // (`brood_rt_vector_ref`, which reads any region) rather than deopting: the shared
+    // slabs are chunked `boxcar::Vec`s with no single base to index, and deopting here
+    // was the pair path's "70x cliff on `def`'d data" (see `PrimOp1::First`'s lowering)
+    // for vectors — an arm destructuring a literal or `def`'d vector deopted on every
+    // activation and was latched off the native tier after sixteen. Latent while
+    // `%vector-ref` compiled as a call; live the moment it became `VectorRef`
+    // (2026-09-17: two `jit_eq_join_test` arms bailed on their literal argument).
     let high2 = b.ins().ushr_imm_s(w1, 62);
     let is_local = b.ins().icmp_imm_s(IntCC::Equal, high2, 0);
     let c2 = b.create_block();
-    let __dr = b.ins().iconst(types::I32, 31);
-    b.ins()
-        .brif(is_local, c2, &[], deopt, &[BlockArg::Value(__dr)]);
+    let ffi_blk = b.create_block();
+    b.ins().brif(is_local, c2, &[], ffi_blk, &[]);
     b.switch_to_block(c2);
     // Age bit 61 (0=nursery, 1=old) selects which slab base to fetch. Fetch it per-read
     // so a prior safepoint that moved the slab can't leave it stale.
@@ -1614,8 +1637,10 @@ pub(super) fn inline_vec_ref(
             BlockArg::Value(s2),
         ],
     );
-    let dead_ffi = b.create_block();
-    b.switch_to_block(dead_ffi);
+    // The shared-region read: one bounds-checked callback, status 1 (non-vector / out of
+    // range — neither possible past the tag check above except the range) deopts so the
+    // VM produces `nth`'s exact result.
+    b.switch_to_block(ffi_blk);
     let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
     let it = b.ins().iconst(types::I64, TAG_INT as i64);
     let iv = b.ins().iconst(types::I64, idx);

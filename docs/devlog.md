@@ -895,11 +895,70 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-17** — `tests/` to zero strict and a gate (from 32): `math/pow` had declared nothing for nineteen days (its `sig` sat inside its docstring — `sig_placement.rs` now reads every docstring); a declared overload's matching arms MEET (ADR-116 addendum); an assertion's `(pr-str (quote …))` is not an escape, so functions under test are derived; `record?` is a one-sided guard; `range`/`into`/`map` keep their lengths, `bit/and` a mask's bound, `nth` a computed index's interval; `:or` lowers to `(get m k default)`.
 - **2026-09-17** — the checker's site walk is memoised per form across the derivation's rounds (`sigs::SiteCache`: 73% of walks reused, `nest check` over `std/` 11.0 → 8.8 s, verdicts identical by the new `derivation_cache_differential` gate) — and that gate found KI-158: the joint fixpoint was never a function of the file (a specialization memo outliving its round, returns re-read in hash order), the same file inferring `(int 0 2)` five runs out of six.
 - **2026-09-17** — ADR-361: return-type dispatch declined, not deferred (a receiver-less op chosen by the context's type can only be a checker-driven rewrite; generic code names its target as a value; a designator-keyed multimethod is the door left open); tier-2 monomorphization queued as `perf-handoff.md` Task 5. The type-system list has no open item.
+- **2026-09-17** — ADR-362: the `supervisor` row **0.88 → 0.66 s (−25%)** with no edit to the supervisor — the `receive` matcher chains clauses as an `or` (no fail thunks: five closures per message and a call per failing clause, gone), the type predicates are a prim (`vector?` 168 → 67 ns on the VM, 1 ns native), `%vector-ref`/`%vector-length` inline (the `VectorRef` entry had named the native by its pre-`seq/` spelling since the rename), and `MapGet` is default-on with a plain map's miss answered inline (hit 322 → 66 ns, miss 519 → 123).
 
 ---
 
 ## Recent — full entries
 
+## 2026-09-17 — the supervisor row was never about the supervisor (ADR-362)
+
+`supervisor` read 866 ms against Elixir's 256, and every previous fix on that row had been a
+supervisor fix. This time the row was decomposed by LAYER before any code was read: a bare
+send/receive round trip 1.9 µs, `gen/call` 5.0, `spawn-link` 2.3, a `gen/call` that
+`spawn-link`s inside the server 7.4, and the real `start-child` **22.5 µs** — so ~15 µs was
+the supervisor's own Brood code. Then the supervisor module was copied under another name and
+bisected by deletion: `get`/`assoc` on the hot path replaced by their `%`-kernel ops took 5 µs
+off; the `:ids` index 2; nothing else moved. And the perf-stats counters put `ns_match_run` at
+**19% of the whole isolated run** — 2.2 µs per received message. `macroexpand` on the loop's
+`receive` showed why: five nested `(fn nil …)` thunks per message (the `match` compiler's fail
+continuation, taken whenever the rest of the chain is big and used twice), a call per failing
+clause, `vector?` as a Brood call per clause, `%vector-length`/`%vector-ref` as native calls.
+
+Three things followed, each a language capability rather than a supervisor edit — full
+reasoning in ADR-362:
+
+1. **The `receive` matcher chains with `or`.** Its clauses yield `[idx …]` or `nil`, so the
+   fail continuation is the constant `nil`, spliced free. 22.5 → 19.1 µs alone; row 0.88 →
+   0.77. (`match` cannot do this — its bodies are arbitrary code in tail position.)
+2. **Type predicates are `PrimOp1::TypeIs`**, recognised by the `(%eq (type-of x) :kw)` shape;
+   `%vector-length` is `PrimOp1::VectorLen`; and `"vector-ref"` → `"%vector-ref"` in the prim
+   table, dead since the `seq/` refactor renamed the native (the `nth` head-keyed inline had
+   hidden it). VM `vector?` 168 → 67 ns (floor 61), `assoc` 536 → 259, `count` 460 → 280.
+   19.1 → 17.9 µs; row 0.72.
+3. **`MapGet` default-on** (ADR-296's opt-in), after measuring the fear it shipped over: a 100%
+   miss loop stayed `:native` with 0 deopts, but a miss cost +200 ns (probe, then the generic
+   fallback dispatch). `Heap::map_get_inline` answers a plain map's miss; a record's declines.
+   17.9 → 16.4 µs; row **0.66 s**.
+
+**Traps, for next time.** The sampling profiler is unusable on a spawn-heavy program — it takes
+one sample per process per tick, so 40 000 child spawns swamp it and every count reads ≈ N.
+`make perf-brood` overwrote the lean binary mid-session (as CLAUDE.md warns) — and the
+`[jit-dirty]` line it printed was worth chasing: KI-160, the dirty-stack check had fired on
+every deopt of an inlined arm since two-stage tiering (it ran after the settle's own frame
+restore), fixed by ordering. The suite then caught KI-159: making `%vector-ref` a prim exposed
+that the const-index read deopted on any shared-region vector, the pair path's old cliff — two
+`jit_eq_join_test` arms bailed on a literal argument; it takes the FFI now. And the `sed` that
+renamed the copied module renamed `supervisor/` but not the `supervisor-` function prefix, so
+three bisection variants were silent no-ops until the results were reread.
+
+**The sweep, and the four hours after it.** `make ab --floor` against `3b2c3fb9`: `supervisor`
+−27%, `json` −15%, `nbody` −11%, `persistent-map` −7%, `spawn` −7%, `regex` −6.5%, `startup`
+−6%, the rest inside their floors — and `ring` +6%, `pingpong` +7%. The pingpong half was real:
+the first `or`-chain used the `or` for every clause, so the responder's `[1]` literal crossed an
+`if` join in a call-free arm — no spill slot, `ParamRepr::Int`, `as_int` deopt per message —
+where the old thunk-free splice had been masked by the `vector?` calls funding a spill window.
+Two fixes: the chain replaces only the thunk case (the splice cases are byte-identical to
+before), and a handle with no slot now crosses a join as words (`WORDS_WANTED`). The ring half
+was the trap recorded in the handoff: equal instructions, equal counters, a bisect blaming a
+compile-time-only change, and under the shipped LTO profile no delta at all — codegen
+partitioning in `release-fast` un-inlining a per-message kernel function.
+
+**Next on this row** (handoff): the 3-arity `(get m k d)` and `(assoc m k v)` prims (~1.5 µs
+of wrapper left per child — `Prim3` is `TablePut`-shaped at eight sites), the multi-pair
+`assoc` (1.1 µs: a rest list + `%assoc-map-pairs`), `gen/call`'s own interpreted body (1.2 µs
+over a hand-rolled equivalent), and beneath all of it the VM call protocol (~70 ns per
+Brood→Brood call, a flat `exec_chunk` profile — the general lever).
 
 ## 2026-09-17 — the site walk memoised, and KI-158 underneath it
 

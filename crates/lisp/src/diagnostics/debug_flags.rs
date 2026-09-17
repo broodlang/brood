@@ -411,9 +411,9 @@ pub const FLAGS: &[DebugFlag] = &[
         "opt IN to admitting `MakeClosure` to the JIT subset; default OFF (`docs/compute-frontier.md`)",
     ),
     f(
-        "BROOD_MAPGET",
-        JIT,
-        "opt IN to lowering `(get m k)` to a native map probe; default OFF — a miss-heavy loop can deopt to BAILED",
+        "BROOD_NO_MAPGET",
+        OPTOUT,
+        "opt OUT of lowering `(get m k)` to an inline map probe (ADR-296; default ON since 2026-09-17)",
     ),
     // ---- optimizer opt-outs (added when the catalogue was completed) ----
     f(

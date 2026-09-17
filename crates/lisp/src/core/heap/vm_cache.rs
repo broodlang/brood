@@ -618,6 +618,34 @@ impl Heap {
         Value::keyword(crate::core::value::tag(v).keyword())
     }
 
+    /// The inline answer to `(get m k)` on map `mid`, or `None` when only the prelude
+    /// `get` may answer — the one rule [`PrimOp::MapGet`](crate::eval::compile::PrimOp)
+    /// follows in the VM (`prim2_inline_exec`) and in native code (`brood_rt_map_get`).
+    ///
+    /// A present, non-nil value is the answer outright. On a miss (absent key, or a stored
+    /// `nil` — indistinguishable to the caller and treated alike by `get`) the wrapper's
+    /// only remaining work is `%lookup-miss`, which consults the `Lookup` ability for a
+    /// **record** and returns its fallback for anything else. So a plain map's miss is
+    /// answered here too — `nil`, exactly what `%map-get` gave — and only a map carrying
+    /// a truthy `:__id__` declines, the same test [`Self::dispatch_identity`] applies. That
+    /// second probe runs on misses alone; a hit never pays it.
+    ///
+    /// The miss used to decline as well (ADR-296), which cost a miss-heavy loop ~200 ns
+    /// per read over the plain call — the probe wasted, plus the generic fallback dispatch
+    /// — and was the reason the lowering shipped opt-in.
+    pub fn map_get_inline(&self, mid: MapId, k: Value) -> Option<Value> {
+        match self.map_get(mid, k) {
+            Some(v) if !matches!(v, Value::Nil) => Some(v),
+            _ => {
+                let key = Value::keyword(crate::core::value::intern(kw::RECORD_ID));
+                match self.map_get(mid, key) {
+                    Some(id) if crate::eval::truthy(id) => None,
+                    _ => Some(Value::nil()),
+                }
+            }
+        }
+    }
+
     /// The pure resolution `impl-for` does: `impls[op-key][id]`, else `[:default]`, else nil.
     fn dispatch_resolve(&self, impls: Value, op_key: Value, id: Value) -> Value {
         let impls_id = match impls {

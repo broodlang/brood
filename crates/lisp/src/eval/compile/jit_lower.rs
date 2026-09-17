@@ -1041,6 +1041,17 @@ fn jit_lower_arm_inner(
         .declare_function("brood_rt_map_get", Linkage::Import, &vref_sig)
         .ok()
         .or_bail("cranelift-declare-function")?;
+    // brood_rt_vector_len(heap, vec 3 words) -> len, or -1 for a non-vector (deopt).
+    let mut vlen_sig = m.make_signature();
+    vlen_sig.params.push(AbiParam::new(ptr_ty)); // heap
+    for _ in 0..3 {
+        vlen_sig.params.push(AbiParam::new(types::I64)); // vec 3 words
+    }
+    vlen_sig.returns.push(AbiParam::new(types::I64)); // len | -1
+    let vlen_id = m
+        .declare_function("brood_rt_vector_len", Linkage::Import, &vlen_sig)
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // brood_rt_equal: (heap, a 3w, b 3w) -> 1 equal / 0 not / 2 declined — the residual
     // case of `eq_dispatch`, `Heap::equal` on the operand pairs the inline paths cannot
     // decide (KI-132). No out slot: the answer is the status.
@@ -1199,6 +1210,7 @@ fn jit_lower_arm_inner(
     let thas_ref = m.declare_func_in_func(thas_id, b.func);
     let tget_ref = m.declare_func_in_func(tget_id, b.func);
     let mget_ref = m.declare_func_in_func(mget_id, b.func);
+    let vlen_ref = m.declare_func_in_func(vlen_id, b.func);
     let equal_ref = m.declare_func_in_func(equal_id, b.func);
     let tput_ref = m.declare_func_in_func(tput_id, b.func);
     let vbase_ref = m.declare_func_in_func(vbase_id, b.func);
@@ -1832,6 +1844,7 @@ fn jit_lower_arm_inner(
         thas: thas_ref,
         tget: tget_ref,
         mget: mget_ref,
+        vlen: vlen_ref,
         equal: equal_ref,
         tput: tput_ref,
         globic: globic_ref,
