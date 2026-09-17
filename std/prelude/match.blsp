@@ -647,28 +647,51 @@ NON-LINEAR patterns (the same name twice) work.
 ;; 2–4-arm receive/fn dispatch stays thunk-free, zero runtime cost); 2+ uses of
 ;; a big one → bind it once as `(let (k (fn () rest-code)) …)`. The `(k)` call
 ;; is in tail position wherever fail was, so match stays TCO-safe.
-(defn- %match-build-clause (clause target rest-code)
+;;
+;; `nil-fail?` is the `receive` matcher's escape from the thunk (2026-09-17). A receive
+;; clause's "body" is its result vector `[idx var…]` (`%receive-result-clause`) — always
+;; truthy — and a no-match is `nil`, so where a `match` would bind a thunk, the clause is
+;; compiled against the CONSTANT `nil` as its fail-continuation (spliced at every failure
+;; point for free) and chained as an `or`: `(let (g clause) (if g g rest-code))`. No
+;; closure, no call per failing clause. `match` cannot take this route: its clause bodies
+;; are arbitrary code (`nil` is a legal answer) that must stay in tail position.
+;;
+;; Only the THUNK case takes it. The splice cases above stay exactly as they are, for a
+;; reason that was measured: a spliced small rest is pure control flow, while the `or`
+;; form makes the result vector cross an `if` join as an operand, and an arm with no
+;; non-tail call has no block-argument spill slot for a handle (`jit_spill_reserve`), so
+;; the native tier deopts on it every message — `pingpong` +6% when the `or` was used for
+;; every clause. The 7-clause supervisor loop, whose thunks the `or` replaces, could never
+;; lower anyway (`MakeClosure` is outside the JIT subset), so it only gains.
+(defn- %match-build-clause (clause target rest-code nil-fail?)
   (let (k (gensym "mfail")
         compiled (%match-compile-clause clause target (list k))
         uses (%match-count-sym compiled k))
     (cond
       (= uses 0) compiled
       (or (= uses 1) (%match-small? rest-code)) (%match-splice-fail compiled k rest-code)
+      nil-fail?
+        (let (g (gensym "rcv"))
+          `(let (~g ~(%match-compile-clause clause target nil)) (if ~g ~g ~rest-code)))
       else `(let (~k (fn () ~rest-code)) ~compiled))))
 
 ;; Chain the clauses: each clause's fail-continuation is the code for the rest;
 ;; the innermost fail is the structured no-match throw. Each chosen body lands in
 ;; tail position of the generated if/let, so a `match` in tail position is TCO-safe.
+;; `nil-fail?` — see `%match-build-clause`; `match` passes false, `receive` true.
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- %match-build-from (clauses target fail)
+  (defn- %match-build-chain (clauses target fail nil-fail?)
     (if (empty? clauses)
       fail
       (let (clause (first clauses)
             following (rest clauses)
-            rest-code (%match-build-from following target fail))
+            rest-code (%match-build-chain following target fail nil-fail?))
         (%match-check-reachable clause following)
-        (%match-build-clause clause target rest-code)))))
+        (%match-build-clause clause target rest-code nil-fail?)))))
+
+(defn- %match-build-from (clauses target fail)
+  (%match-build-chain clauses target fail false))
 
 (defn- %match-build (clauses target context)
   (%match-build-from clauses

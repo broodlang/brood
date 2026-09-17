@@ -264,6 +264,23 @@ pub(crate) fn exec_chunk(
                             heap.push_root(result);
                             continue;
                         }
+                        // A type predicate is `(%eq (type-of x) :kw)` — total, like `type-of`.
+                        (PrimOp1::TypeIs(kw), _) => {
+                            let kw = *kw;
+                            crate::perf_bump!(prim1_inline);
+                            let result =
+                                Value::boolean(crate::core::value::tag(sa).keyword() == kw);
+                            heap.truncate_roots(n - 1);
+                            heap.push_root(result);
+                            continue;
+                        }
+                        (PrimOp1::VectorLen, ValueRef::Vector(id)) => {
+                            crate::perf_bump!(prim1_inline);
+                            let result = Value::Int(heap.vector(id).len() as i64);
+                            heap.truncate_roots(n - 1);
+                            heap.push_root(result);
+                            continue;
+                        }
                         _ => {}
                     }
                 }

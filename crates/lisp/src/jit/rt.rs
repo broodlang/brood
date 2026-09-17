@@ -454,6 +454,22 @@ pub unsafe extern "C" fn brood_rt_vector_ref(
     0
 }
 
+/// `(%vector-length v)` from JIT'd code (the `PrimOp1::VectorLen` lowering): the
+/// vector's length as a plain `i64`, or **-1** for a non-vector — the deopt signal, so the
+/// VM dispatches the native for its exact type error. Reads the slab only; never
+/// allocates, so it is not a safepoint.
+///
+/// # Safety
+/// `heap` live; the word triple is a real `Value`.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_vector_len(heap: *mut Heap, v0: i64, v1: i64, v2: i64) -> i64 {
+    use crate::core::value::Value;
+    match words_to_val(v0, v1, v2) {
+        Value::Vector(id) => (*heap).vector(id).len() as i64,
+        _ => -1,
+    }
+}
+
 /// `(%table-has? t k)` from JIT'd code (the `PrimOp::TableHas` lowering). Returns
 /// 0 = done (`*out` holds the boolean), 1 = deopt (first operand isn't a Table —
 /// the VM owns the exact type error), 2 = a real error was parked in
@@ -669,15 +685,13 @@ pub unsafe extern "C" fn brood_rt_global_epoch(heap: *mut Heap) -> i64 {
 
 /// `(get m k)` on a CHAMP map — the native half of [`PrimOp::MapGet`].
 ///
-/// Status protocol, matching [`brood_rt_table_get2`]: **0** = a present, non-nil value is in
-/// `*out`; **1** = decline. Never 2 — a map probe raises nothing, so there is no error to
-/// park.
+/// Status protocol, matching [`brood_rt_table_get2`]: **0** = the answer is in `*out`;
+/// **1** = decline. Never 2 — a map probe raises nothing, so there is no error to park.
 ///
-/// Declines for a non-map receiver, an absent key, or a stored `nil`, which is exactly the
-/// VM's rule in `prim2_inline_exec`. The last two look the same from here and must: both have
-/// to reach `get`'s `%lookup-miss`, where a record whose contents are not its fields resolves
-/// through the `Lookup` ability. Keeping that in Brood is the point — this is a fast path for
-/// the hit, not a second implementation of `get`.
+/// The rule is `Heap::map_get_inline`, shared with the VM's `prim2_inline_exec`: a hit, or
+/// a plain map's miss (`nil`), is answered; a non-map receiver or a **record's** miss
+/// declines, so `get`'s `%lookup-miss` resolves the latter through the `Lookup` ability.
+/// Keeping that in Brood is the point — this is a fast path, not a second `get`.
 ///
 /// # Safety
 /// `heap`/`out` live; the word triples are bytes the JIT read out of real `Value`s.
@@ -697,12 +711,12 @@ pub unsafe extern "C" fn brood_rt_map_get(
     let Value::Map(id) = words_to_val(m0, m1, m2) else {
         return 1;
     };
-    match h.map_get(id, words_to_val(k0, k1, k2)) {
-        Some(v) if !matches!(v, Value::Nil) => {
+    match h.map_get_inline(id, words_to_val(k0, k1, k2)) {
+        Some(v) => {
             *out = v;
             0
         }
-        _ => 1,
+        None => 1,
     }
 }
 

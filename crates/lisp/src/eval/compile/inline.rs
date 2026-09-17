@@ -33,18 +33,20 @@ pub(crate) fn mono_enabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("BROOD_MONO").is_some())
 }
 
-/// Is the `(get m k)` → [`PrimOp::MapGet`] lowering enabled? **Opt-in** (`BROOD_MAPGET=1`)
-/// while it proves itself, so a default build is byte-for-byte what it was.
+/// Is the `(get m k)` → [`PrimOp::MapGet`] lowering enabled? **Default ON since
+/// 2026-09-17**; `BROOD_NO_MAPGET=1` opts out (the A/B and bisect lever).
 ///
-/// Opt-in rather than opt-out because the risk is not correctness but *tiering*: the native
-/// lowering deopts when the probe declines (a non-map receiver, an absent key, a stored
-/// `nil`), and sixteen deopts in a row mark an arm `BAILED`. A miss-heavy loop could
-/// therefore end up interpreted where today it is compiled — a regression in a shape nothing
-/// in the suite would notice. The flag is what lets that be measured before it is anyone's
-/// default. Cached once, like the other levers.
+/// It shipped opt-in (ADR-296) over a *tiering* worry: the native lowering deopted when the
+/// probe declined — a non-map receiver, an absent key, a stored `nil` — and sixteen deopts
+/// latch an arm `BAILED`, so a miss-heavy loop could end up interpreted. Measured, the
+/// latch never fired (a 100% miss loop stayed `:native`, 0 deopts) but the decline was real
+/// money: +200 ns per miss over the plain call, the probe wasted plus the generic fallback
+/// dispatch. `Heap::map_get_inline` now answers a plain map's miss inline (only a record's
+/// miss declines), so a miss costs one more probe, not a dispatch. Cached once, like the
+/// other levers.
 pub(crate) fn mapget_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("BROOD_MAPGET").is_some())
+    *ON.get_or_init(|| std::env::var_os("BROOD_NO_MAPGET").is_none())
 }
 
 /// A global whose value is a CHAMP map (`*op-ability*`, `*impls*`), or `None`.
@@ -1154,9 +1156,19 @@ pub(crate) fn node_touches_heap(node: &Node) -> bool {
         } => true,
         Node::Prim1 {
             op:
-                PrimOp1::IsNil | PrimOp1::IsPair | PrimOp1::IsEmpty | PrimOp1::Sqrt | PrimOp1::TypeOf,
+                PrimOp1::IsNil
+                | PrimOp1::IsPair
+                | PrimOp1::IsEmpty
+                | PrimOp1::Sqrt
+                | PrimOp1::TypeOf
+                | PrimOp1::TypeIs(_),
             ..
         } => false,
+        // A length read is a structure read, like `nth`.
+        Node::Prim1 {
+            op: PrimOp1::VectorLen,
+            ..
+        } => true,
         Node::Const(_) | Node::Local(_) | Node::Global(_) | Node::GlobalIc { .. } => false,
         Node::If(a, b, c) => node_touches_heap(a) || node_touches_heap(b) || node_touches_heap(c),
         Node::Do(xs) => xs.iter().any(node_touches_heap),

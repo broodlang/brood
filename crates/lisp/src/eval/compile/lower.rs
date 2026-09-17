@@ -708,8 +708,64 @@ pub(crate) fn resolve_prim1(heap: &Heap, h: Symbol) -> Option<PrimOp1> {
     }
     match heap.env_get(heap.global(), h)?.unpack() {
         ValueRef::Native(id) => PrimOp1::from_native_name(&heap.native(id).name),
+        // A type predicate: `(defn vector? (x) (%eq (type-of x) :vector))` and its kin.
+        // Recognised by shape (see [`type_predicate_tag`]), never by name — a user's own
+        // `(defn even? …)` is not that shape and simply compiles as a call. The `?`
+        // suffix only keeps the probe off every other 1-ary call head.
+        ValueRef::Fn(id) if symbol_is_predicate(h) => {
+            type_predicate_tag(heap, id).map(PrimOp1::TypeIs)
+        }
         _ => None,
     }
+}
+
+/// A head whose name ends in `?` — the only heads worth running the type-predicate
+/// probe on (`resolve_prim1` is asked about every 1-ary call head the compiler meets).
+pub(crate) fn symbol_is_predicate(h: Symbol) -> bool {
+    value::symbol_name_ref(h).ends_with('?')
+}
+
+/// The `type-of` keyword closure `id` tests for, iff it is a canonical type predicate: a
+/// single 1-parameter arm whose one body form is exactly `(%eq (type-of p) :kw)` with
+/// `%eq` and `type-of` resolving to their natives. That shape is what makes
+/// [`PrimOp1::TypeIs`] sound: the wrapper's whole answer IS the tag compare, over every
+/// operand, so nothing is left to deopt to. Any other closure — a predicate with a guard,
+/// a rebound name, a user function that merely ends in `?` — is `None`, and the call
+/// compiles as a call.
+pub(crate) fn type_predicate_tag(heap: &Heap, id: ClosureId) -> Option<Symbol> {
+    let closure = heap.closure(id);
+    let arm = closure.select_arm(1)?;
+    if !arm.optionals.is_empty()
+        || arm.rest.is_some()
+        || arm.params.len() != 1
+        || arm.body.len() != 1
+    {
+        return None;
+    }
+    let p = arm.params[0];
+    // `(%eq <type-of-call> <keyword>)` — the native `%eq`, by the name `PrimOp::Eq` keys on.
+    let (h_eq, args) = call_parts(heap, arm.body[0])?;
+    if args.len() != 2 || !head_is_native(heap, h_eq, kw::EQ_PRIM) {
+        return None;
+    }
+    let kw = match args[1].unpack() {
+        ValueRef::Keyword(k) => k,
+        _ => return None,
+    };
+    // `(type-of p)` — the native, applied to the arm's own parameter.
+    let (h_type, inner) = call_parts(heap, args[0])?;
+    let is_type_of = inner.len() == 1
+        && head_is_native(heap, h_type, "type-of")
+        && matches!(inner[0].unpack(), ValueRef::Sym(s) if s == p);
+    is_type_of.then_some(kw)
+}
+
+/// True iff symbol `h` is bound, in the global env, to the native called `name`.
+fn head_is_native(heap: &Heap, h: Symbol, name: &str) -> bool {
+    matches!(
+        heap.env_get(heap.global(), h).map(|v| v.unpack()),
+        Some(ValueRef::Native(id)) if heap.native(id).name == name
+    )
 }
 
 /// A head whose name is `sqrt` or ends in `/sqrt` — the only heads for which the structural

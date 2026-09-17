@@ -1,0 +1,161 @@
+;; The prelude type predicates (`vector?`, `map?`, `int?`, …) are one-line wrappers,
+;; `(%eq (type-of x) :kw)`, that the compiler recognises BY SHAPE and lowers to
+;; `PrimOp1::TypeIs` — one tag compare in the VM, one table load + compare in native code —
+;; where each used to be a full Brood call (~100 ns on the VM; the first thing every
+;; `match`/`receive`/destructuring clause runs, and what `get`/`assoc` dispatch on).
+;; `%vector-length` is `PrimOp1::VectorLen` and `%vector-ref` `PrimOp::VectorRef` for the
+;; same reason: the pattern compiler's vector test is exactly those three.
+;;
+;; These cases pin the ANSWERS, at every operand shape the collapsing rules cover (a BigInt
+;; is `int?`, a range is `pair?`, a set is not a map, a record IS a map) and across the tier
+;; crossing, so a native lowering that disagreed with the VM's would show. The last cases
+;; pin the deopt path: a non-vector reaching an inlined `%vector-length` / `%vector-ref`
+;; after the arm went native must raise the native's exact error, not read garbage.
+(defmodule type-predicate-inline-test (:use test))
+
+(defrecord pt (x y))
+
+(def samples
+  [nil
+    true
+    1
+    1.5
+    (* 1000000000000 1000000000000)
+    'sym
+    :kw "s"
+    (list 1 2)
+    (range 0 3)
+    [1 2]
+    {:a 1}
+    #{1}
+    (pt 1 2)
+    (fn (x) x)
+    (ref)
+    (self)
+    1/2
+    1.5M
+    (bytes [1])])
+
+(defn- kinds (x)
+  [(nil? x)
+    (bool? x)
+    (int? x)
+    (float? x)
+    (symbol? x)
+    (keyword? x)
+    (string? x)
+    (pair? x)
+    (vector? x)
+    (map? x)
+    (set? x)
+    (fn? x)
+    (ref? x)
+    (pid? x)
+    (ratio? x)
+    (decimal? x)
+    (bytes? x)])
+
+;; The expected answer for each sample, from `type-of` — the definition the wrappers wrap.
+(defn- kinds-by-type-of (x)
+  (let (t (type-of x))
+    [(= t :nil)
+      (= t :bool)
+      (= t :int)
+      (= t :float)
+      (= t :symbol)
+      (= t :keyword)
+      (= t :string)
+      (= t :pair)
+      (= t :vector)
+      (= t :map)
+      (= t :set)
+      (= t :fn)
+      (= t :ref)
+      (= t :pid)
+      (= t :ratio)
+      (= t :decimal)
+      (= t :bytes)]))
+
+;; Drive a predicate past the tiering threshold on a mixed stream: the count of samples
+;; that satisfy it, summed over `n` rounds.
+(defn- count-where (p xs)
+  (fold xs 0 (fn (acc x) (if (p x) (+ acc 1) acc))))
+(defn- hot (p n acc)
+  (if (= n 0) acc (hot p (- n 1) (+ acc (count-where p samples)))))
+
+(describe "type predicates inline"
+  (test "every predicate agrees with type-of on every sample"
+    (dolist (x samples)
+      (assert= (kinds-by-type-of x) (kinds x))))
+
+  (test "the collapsing rules hold: a bigint is an int, a range is a pair, a record is a map"
+    (do
+      (is (int? (* 1000000000000 1000000000000)))
+      (is (pair? (range 0 3)))
+      (is (map? (pt 1 2)))
+      (assert= false (map? #{1}))))
+
+  (test "hot loops past the tiering threshold answer the same"
+    (do
+      (assert= 2000 (hot vector? 2000 0))
+      (assert= 4000 (hot map? 2000 0))
+      (assert= 4000 (hot int? 2000 0)) ; 1 and the bigint
+      (assert= 4000 (hot pair? 2000 0))
+      (assert= 2000 (hot string? 2000 0)))))
+
+;; One caller below hands these a LIST among the vectors on purpose (the deopt case), so
+;; the derived parameter type is wider than `vector` and the checker says so — correctly.
+(check-allow :type-mismatch
+  (defn- vlen-sum (xs n acc)
+    (if (= n 0) acc (vlen-sum xs (- n 1) (+ acc (%vector-length (nth xs (math/rem n 3))))))))
+(check-allow :type-mismatch
+  (defn- vref-sum (xs n acc)
+    (if (= n 0) acc (vref-sum xs (- n 1) (+ acc (%vector-ref (nth xs (math/rem n 3)) 0))))))
+
+(describe "vector length and element reads inline"
+  (test "lengths and elements, hot"
+    (let (vs [[1] [2 2] [3 3 3]])
+      (do
+        (assert= 6000 (vlen-sum vs 3000 0))
+        (assert= 6000 (vref-sum vs 3000 0)))))
+
+  (test "a non-vector after the arm went native raises the native's error"
+    (let (vs [[1] [2 2] (list 3 3 3)])
+      (do
+        (assert-error (vlen-sum vs 3000 0))
+        (assert-error (vref-sum vs 3000 0)))))
+
+  (test "an out-of-range index raises, not nil"
+    (assert-error (%vector-ref [1 2] 5))))
+
+;; The const-index element read (`Prim2SlotInt` → `inline_vec_ref`) used to DEOPT for a
+;; vector outside the LOCAL region — a literal, a `def`'d vector, anything shared — and
+;; sixteen deopts latch the arm off the native tier. The pair path had the same cliff and
+;; took the FFI instead ("70x on `def`'d data"); the vector path kept the deopt, latent
+;; while `%vector-ref` compiled as a call, live the moment it became `VectorRef`: two
+;; `jit_eq_join_test` arms bailed on their literal argument. These arms must settle
+;; `:native` on a literal argument. Sabotage-verified: with the region check routed back
+;; to `deopt`, every one of the five reads `:bailed` with 16 deopts.
+(defn- settle (f argc batch rounds)
+  (batch)
+  (let (st (get (%jit-arm-state f argc) :state))
+    (if (or (= st :native) (= st :bailed) (= rounds 0))
+      st
+      (settle f argc batch (- rounds 1)))))
+(defn- drive (f v n) (if (= n 0) nil (do (f v) (drive f v (- n 1)))))
+
+(defn- lit-destructure (v) (let ([a b] v) a))
+(defn- lit-ref (v) (%vector-ref v 0))
+(defn- lit-ref-eq (v) (= (%vector-ref v 0) "("))
+(defn- lit-nth (v) (nth v 1))
+(defn- lit-len (v) (if (vector? v) (%vector-length v) 0))
+
+(def shared-vec ["(" 0])
+
+(describe "element reads of a shared-region vector stay native"
+  (test "a literal / def'd vector argument does not deopt the reading arm"
+    (when (%native-tier?)
+      (dolist (f [lit-destructure lit-ref lit-ref-eq lit-nth lit-len])
+        (do
+          (assert= :native (settle f 1 (fn () (drive f shared-vec 4000)) 40))
+          (assert= 0 (get (%jit-arm-state f 1) :deopts)))))))

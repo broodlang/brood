@@ -229,19 +229,16 @@ pub(crate) fn prim2_inline_exec(
             }
             Ok(None)
         }
-        // `(get m k)` on a map: one CHAMP probe, no call. Inline ONLY a present, non-nil
-        // value — an absent key and a stored `nil` are indistinguishable to the caller here,
-        // and both must reach `get`'s `%lookup-miss`, which resolves a record whose contents
-        // are not its fields through the `Lookup` ability. A non-map receiver defers too, so
-        // the set / string / integer-index branches and every type error stay in Brood, and
-        // this stays a fast path rather than a second implementation of `get`.
+        // `(get m k)` on a map: one CHAMP probe, no call — `Heap::map_get_inline` is the
+        // rule (a hit, or a plain map's miss; a record's miss declines to `get`, whose
+        // `%lookup-miss` resolves it through the `Lookup` ability). A non-map receiver
+        // defers too, so the set / string / integer-index branches and every type error
+        // stay in Brood, and this stays a fast path rather than a second implementation.
         None if op == PrimOp::MapGet => {
             if let ValueRef::Map(id) = x.unpack() {
-                if let Some(v) = heap.map_get(id, y) {
-                    if !matches!(v, Value::Nil) {
-                        crate::perf_bump!(prim2_inline);
-                        return Ok(Some(v));
-                    }
+                if let Some(v) = heap.map_get_inline(id, y) {
+                    crate::perf_bump!(prim2_inline);
+                    return Ok(Some(v));
                 }
             }
             Ok(None)
@@ -581,6 +578,15 @@ pub(crate) fn exec_value(
                     (PrimOp1::TypeOf, _) => {
                         crate::perf_bump!(prim1_inline);
                         return Ok(Value::keyword(crate::core::value::tag(sa).keyword()));
+                    }
+                    (PrimOp1::TypeIs(kw), _) => {
+                        let kw = *kw;
+                        crate::perf_bump!(prim1_inline);
+                        return Ok(Value::boolean(crate::core::value::tag(sa).keyword() == kw));
+                    }
+                    (PrimOp1::VectorLen, ValueRef::Vector(id)) => {
+                        crate::perf_bump!(prim1_inline);
+                        return Ok(Value::Int(heap.vector(id).len() as i64));
                     }
                     _ => {} // vectors/ranges/type errors → the native owns them
                 }

@@ -400,6 +400,32 @@ fn settle_native_frame(
     } else {
         None
     };
+    // Dirty-stack-on-deopt check: a native arm that deopts (1) or is preempted (2) must
+    // leave `roots` as `jit_tier` found them; if it grew, the `exec_chunk` re-run starts
+    // on a corrupt operand stack. It runs HERE, before the small-top restore below — that
+    // restore is this function's own, deliberate resize of an inlined frame, not the
+    // native's doing. It used to run after it, so every deopt/preempt of a self- or
+    // leaf-inlined arm read as dirty by exactly `inline_nslots - nslots` (1432 of 1462
+    // preempts on a self-tail loop calling a leaf-spliced callee, 2026-09-17), which made
+    // the counter useless for the class it exists to catch.
+    if matches!(jit_outcome, Some(1) | Some(2)) {
+        let now = heap.roots_len();
+        if now != pre_roots {
+            crate::perf_bump!(jit_deopt_dirty);
+            #[cfg(feature = "perf-stats")]
+            {
+                static SHOWN: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !SHOWN.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    eprintln!(
+                        "[jit-dirty] deopt/preempt left roots_len={now} \
+                         (jit_tier found {pre_roots}) — dirty operand stack \
+                         before the VM re-run"
+                    );
+                }
+            }
+        }
+    }
     // Restore the small frame top on every non-Done path so the `exec_chunk`
     // re-run sees the original layout (Done retires the whole frame anyway).
     // The inlined native keeps operands in registers, so it leaves `roots`
@@ -462,27 +488,6 @@ fn settle_native_frame(
             crate::perf_bump!(jit_preempt);
         }
         _ => {}
-    }
-    // Dirty-stack-on-deopt check: a native arm that deopts (1) or is
-    // preempted (2) must leave `roots` as `jit_tier` found them; if it
-    // grew, the `exec_chunk` re-run starts on a corrupt operand stack.
-    if matches!(jit_outcome, Some(1) | Some(2)) {
-        let now = heap.roots_len();
-        if now != pre_roots {
-            crate::perf_bump!(jit_deopt_dirty);
-            #[cfg(feature = "perf-stats")]
-            {
-                static SHOWN: std::sync::atomic::AtomicBool =
-                    std::sync::atomic::AtomicBool::new(false);
-                if !SHOWN.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                    eprintln!(
-                        "[jit-dirty] deopt/preempt left roots_len={now} \
-                         (jit_tier found {pre_roots}) — dirty operand stack \
-                         before the VM re-run"
-                    );
-                }
-            }
-        }
     }
     // Deopt-resume (see `CompiledArm::ckpt_slot`): a deopt in an activation that
     // completed a non-tail call resumes AT the checkpoint (operands re-pushed from the

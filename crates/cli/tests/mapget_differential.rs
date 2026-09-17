@@ -1,4 +1,5 @@
-//! **`BROOD_MAPGET=1` must answer exactly what `get` answers.**
+//! **`PrimOp::MapGet` must answer exactly what `get` answers** (default ON since 2026-09-17;
+//! `BROOD_NO_MAPGET=1` is the plain-call baseline every case below is compared against).
 //!
 //! `PrimOp::MapGet` gives a CHAMP map read a primitive, which vectors (`VectorRef`) and the
 //! mutable table (`TableGet`) already had and maps did not. The point is not the probe itself
@@ -7,11 +8,12 @@
 //! accessor, not an ability impl, not the map-shaped helpers that are most of Brood.
 //!
 //! The risk is correspondingly wide, because `get` is polymorphic and its map branch is, in
-//! its own words, "the hottest path in the language (4796 call sites)". The prim inlines
-//! **only a present, non-nil value**; a non-map receiver, an absent key and a stored `nil`
-//! must all still reach the real `get`, which owns the set / string / integer-index branches
-//! and `%lookup-miss` (where a record whose contents are not its fields resolves through the
-//! `Lookup` ability). Each of those is a case below.
+//! its own words, "the hottest path in the language (4796 call sites)". The prim answers a
+//! present value and a **plain map's** miss (`Heap::map_get_inline`); a non-map receiver
+//! and a **record's** miss must still reach the real `get`, which owns the set / string /
+//! integer-index branches and `%lookup-miss` (where a record whose contents are not its
+//! fields resolves through the `Lookup` ability). Each of those is a case below — the
+//! `Lookup` record's miss most of all, since it is the one miss the prim must NOT answer.
 //!
 //! Both hot loops run past the tiering threshold on purpose. The native lowering deopts when
 //! the probe declines, and a tier-2-only divergence is exactly the class that read as green
@@ -47,9 +49,9 @@ fn run(file: &PathBuf, mapget: bool, extra: &[(&str, &str)]) -> String {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_brood"));
     cmd.arg(file);
     if mapget {
-        cmd.env("BROOD_MAPGET", "1");
+        cmd.env_remove("BROOD_NO_MAPGET");
     } else {
-        cmd.env_remove("BROOD_MAPGET");
+        cmd.env("BROOD_NO_MAPGET", "1");
     }
     for (k, v) in extra {
         cmd.env(k, v);
@@ -78,9 +80,16 @@ const EVERY_BRANCH: &str = "\
 (io/puts (str \"set \" (pr-str (get s :x))))\n\
 (io/puts (str \"nil-coll \" (pr-str (get nil :k))))\n\
 (io/puts (str \"record \" (get rec :r)))\n\
+(defrecord vir (seed))\n\
+(impl Lookup vir (lookup-get (r k) [:virtual k (get r :seed)]))\n\
+(def v (vir 7))\n\
+(io/puts (str \"lookup-hit \" (get v :seed)))\n\
+(io/puts (str \"lookup-miss \" (pr-str (get v :zz))))\n\
+(io/puts (str \"record-miss \" (pr-str (get rec :zz))))\n\
 (defn hits (n acc) (if (= n 0) acc (hits (- n 1) (+ acc (get rec :r)))))\n\
 (defn misses (n acc) (if (= n 0) acc (misses (- n 1) (+ acc (if (get m :zz) 1 0)))))\n\
-(io/puts (str \"hot \" (hits 300000 0) \" \" (misses 300000 0)))\n";
+(defn vmisses (n acc) (if (= n 0) acc (vmisses (- n 1) (+ acc (nth (get v :zz) 2)))))\n\
+(io/puts (str \"hot \" (hits 300000 0) \" \" (misses 300000 0) \" \" (vmisses 300000 0)))\n";
 
 #[test]
 fn a_map_read_primitive_answers_what_get_answers() {
@@ -88,8 +97,12 @@ fn a_map_read_primitive_answers_what_get_answers() {
     let off = run(&file, false, &[]);
     let on = run(&file, true, &[]);
     assert!(
-        on.contains("hot 6300000 0"),
+        on.contains("hot 6300000 0 2100000"),
         "the hot loops must compute correctly with the prim on:\n{on}"
+    );
+    assert!(
+        on.contains("lookup-miss [:virtual :zz 7]"),
+        "a `Lookup` record's miss must still reach `%lookup-miss`:\n{on}"
     );
     assert_eq!(off, on, "the prim changed an ANSWER");
 

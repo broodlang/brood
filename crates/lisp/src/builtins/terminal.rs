@@ -205,6 +205,13 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "Window id's size as [cols rows] in character cells (tracks resize / HiDPI), same shape as term-size.",
         gui_size);
     primitives.def(
+        "%gui-cell-size",
+        Arity::range(1, 2),
+        Sig::with_optional(vec![int], vec![Ty::of_tags(&[Tag::Int, Tag::Float])], vec_ty),
+        &["id", "px"],
+        "Window id's cell size as [cell-w cell-h] in PHYSICAL pixels — for the font size the window is using, or, given px (a logical font size), for the size a [:cell-region …] of that px would paint with. The question an app must answer before laying a region out at another size: how many of THAT size's cells fit the rect it has. It is not derivable from px — a cell is whatever shaping the reference glyph produces, rounded to whole pixels — so it is measured (on the GUI thread, memoised there). Errors when the window is not open, when this brood has no gui feature, and headless (no font engine to measure with), so a caller that also runs headless falls back to the size ratio.",
+        gui_cell_size);
+    primitives.def(
         "%gui-held-key",
         Arity::exact(1),
         Sig::new(vec![int], string.union(kw).union(nil_ty)),

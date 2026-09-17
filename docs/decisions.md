@@ -19227,7 +19227,10 @@ once when someone "fixes" behaviour that was correct. Re-measure before scheduli
 
 ## ADR-296 — A map read is a primitive (`PrimOp::MapGet`)
 
-**Status.** Accepted (2026-08-29), **opt-in** behind `BROOD_MAPGET=1` while it proves itself.
+**Status.** Accepted (2026-08-29); **default ON since 2026-09-17** (ADR-362), `BROOD_NO_MAPGET=1`
+opts out. The tiering worry below did not materialise (a 100% miss loop stayed `:native`, 0
+deopts) but the decline was expensive — +200 ns per miss — and ADR-362 answers a plain map's
+miss inline, so only a record's miss declines.
 
 **Context.** The IR's binary primitive set was `Add Sub Mul Lt Le Eq Rem Div Quot Cons
 VectorRef Max Min BitAnd BitOr BitXor TableHas TableGet`. A vector read is `VectorRef`; the
@@ -23182,3 +23185,159 @@ answer is a `match` (closed) or a `def`'d table (open by rebinding, ad hoc). If 
 generic library ever wants it, the small, sound, dynamic feature is a multimethod keyed on a
 designator argument — not return-type dispatch — and that would be the concrete need
 ADR-011 waits for.
+## ADR-362 — Process-shaped code runs on the VM, so the VM gets the instructions it dispatches on: predicates, vector tests, map reads
+
+**Status.** Accepted (2026-09-17).
+
+**Context.** The `supervisor` benchmark row stood at **866 ms against Elixir's 256** (3.4×),
+and every earlier attribution had been *about the supervisor* — the child-record copy (A3), the
+O(N²) list, the intensity window, the closure-by-handle send — each real, each fixed, and the
+row still 3.4×. A layer-by-layer decomposition of one `start-child` (22.5 µs) finally put the
+supervisor's own bookkeeping at ~12 µs over a 7.4 µs mechanism floor (`gen/call` + a
+`spawn-link` inside a server), and a bisection of the supervisor's code found none of it in
+the supervisor's *design*:
+
+- `get`/`assoc` on the state map: **5 µs** of the 12 — nine `get`s and six `assoc`s, each a
+  prelude *wrapper* whose call (~70 ns on the VM) and whose own `map?`/`vector?` dispatch
+  (another Brood call, ~100 ns) cost more than the CHAMP op underneath.
+- the `receive` matcher: **2.2 µs per message** — the 7-clause loop's matcher expanded, via
+  `match`'s fail-continuation thunks, to five `(fn () …)` closures allocated per MESSAGE and
+  one call per failing clause, each clause testing `vector?` (a call) and `%vector-length` /
+  `%vector-ref` (native calls — the `VectorRef` prim table still named the native by its
+  pre-`seq/`-refactor spelling, so the inline had been dead since that rename).
+
+None of this is the supervisor. It is the shape of every process-shaped program in the system
+— a `gen` server, a `match` over a message, a record update — and the JIT's profitability gate
+rightly refuses that shape (`call-mediated-boxed`: mostly calls, boxed values), so it runs on
+the VM interpreter, where a Brood→Brood call is ~70 ns and a native call ~80. Elixir pays ~5 ns
+per call and does a map read or a tuple test as one instruction. The gap is not a supervisor
+gap; it is that the operations process code dispatches on were calls.
+
+**Decision.** Give the VM (and the native tier) those operations as instructions, by the
+mechanisms the compiler already has — never by rewriting the supervisor against `%`-kernel
+ops (the CLAUDE.md `+`/`fold` rule: a Rust escape at one call site teaches nothing; a
+capability pays everywhere).
+
+1. **`receive` clauses chain as an `or` where `match` would build a thunk**
+   (`%match-build-chain` with `nil-fail?`, `std/prelude/match.blsp`). A receive clause's result
+   is `[idx var…]` — always truthy — and a no-match is `nil`, so where the rest of the chain is
+   big and used more than once (the thunk case) the clause compiles against the CONSTANT `nil`
+   as its fail-continuation and the next clause is the `or`'s alternative: no thunk, no call per
+   failing clause. The splice cases stay exactly as they were, deliberately: a spliced small
+   rest is pure control flow, while the `or` makes the result vector cross an `if` join — the
+   first version used it for every clause and cost `pingpong` +6%. `match` keeps its thunks:
+   its clause bodies are arbitrary code (`nil` is a legal answer) that must stay in tail
+   position — and a matcher with no `MakeClosure` can now tier, which `match`'s never could.
+2. **The type predicates are a prim** (`PrimOp1::TypeIs(kw)`). Every `vector?`/`map?`/
+   `string?`/`int?`/… is the one-line wrapper `(%eq (type-of x) :kw)`; `resolve_prim1`
+   recognises that shape STRUCTURALLY (the `sqrt` discipline — the shape earns the inline, the
+   `?` suffix only keeps the probe off other heads, and a rebind away from the shape drops it
+   at the next epoch check). One tag compare in the VM; the `type_of_kw_table` load `TypeOf`
+   already uses in native code, so the collapsing rules hold by construction.
+3. **`%vector-length` is `PrimOp1::VectorLen`, `%vector-ref` is `PrimOp::VectorRef`** — the
+   latter a one-line correction of the native's name in the prim table.
+4. **`PrimOp::MapGet` is default-on** (ADR-296 amended), with `Heap::map_get_inline` as the one
+   rule for both engines: a hit, or a **plain map's** miss, is answered inline; only a map
+   carrying a truthy `:__id__` — a record, whose `%lookup-miss` may resolve through the
+   `Lookup` ability — declines to the prelude `get`. The miss used to decline too, which cost
+   +200 ns per miss over the plain call (the probe wasted, then the generic fallback dispatch)
+   and was why it shipped opt-in; the tiering worry it shipped over never fired (a 100% miss
+   loop measured `:native`, 0 deopts).
+
+5. **A handle with no spill slot crosses a join as words** (`ParamRepr::Words`, requested by
+   `param_repr` with `WORDS_WANTED`). A call-free arm reserves no block-argument spill slots
+   (`jit_spill_reserve`), so a `Handle` crossing an `if` join fell through to `ParamRepr::Int`
+   and `as_int` deopted on it — and when every predecessor agreed on `Int` (a `[1]` literal on
+   one edge, `nil` on the other: the responder's inner join) nothing widened. It had been
+   masked exactly by the calls this ADR removes: two `vector?`/`%vector-length` calls funded a
+   spill window. The `Words` widening already existed for *disagreeing* edges; now a handle
+   asks for it outright.
+
+**Measured** (release-fast, best of 3, 28-core box): `(vector? v)` on the VM 168 → 67 ns
+against a 61 ns loop floor, 1 ns native; `(assoc m :k v)` 536 → 259 (its own `vector?`);
+`(get m :k)` hit 322 → 66 ns, 100% miss 519 → 123; the `receive` matcher's share of a
+`start-child` 2.2 µs → under 1. `supervisor/start-child` **22.5 → 16.4 µs**; the `supervisor`
+row **0.88 → 0.66 s (−25%)**, from three general changes and no edit to `supervisor.blsp`.
+The full `make ab --floor` sweep against `3b2c3fb9`: `supervisor` −27%, `json` −15%, `nbody`
+−11%, `persistent-map` −7%, `spawn` −7%, `regex` −6.5%, `startup` −6%, everything else inside
+its floor — and `ring` +6% / `pingpong` +7%, which the next four hours were spent on. Under the
+**shipped** profile (`release-lean`: LTO, one codegen unit) the same two trees read `pingpong`
+182 vs 181 ms and `ring` 730–746 vs 747–759 — inside ring's own 2% spread. The `release-fast`
+delta was codegen partitioning: the Rust additions shifted the crate's CGU/inliner budget and
+`copy_cross_heap_rec` (called per message) stopped inlining into its caller, `enqueue` and the
+kernel grew, with instruction counts equal at one worker (±3%) and every VM counter identical.
+A no-op layout perturbation of the baseline did NOT reproduce it, `BROOD_NO_JIT` did — the
+measurement trap is recorded in the handoff.
+
+**What is deliberately NOT here.** The 3-arity `(get m k default)` and `(assoc m k v)` prims:
+`Prim3` is wired around `TablePut`'s hoisted dense tables at eight sites, and the remaining
+wrapper cost on the row (~1.5 µs) did not justify that surface this session — it is the next
+lever, recorded in the handoff. The VM call protocol itself (~70 ns; `exec_chunk` reads flat
+under `perf`, a big spilled frame and an atomic per call) is the general one after that.
+
+**Guards.** `crates/lisp/src/eval/compile/tests.rs` pins every recogniser by name (`%vector-ref`
+→ `VectorRef`, `%vector-length`, seven predicates → `TypeIs`) and that the predicate inline is
+structural, not nominal (four `?`-named non-predicates refuse; a canonical shape under a user
+name inlines; a rebind away from it drops). `tests/type_predicate_inline_test.blsp` pins the
+answers over every operand kind and across the tier crossing, plus the deopt path (a non-vector
+reaching an inlined `%vector-length` after the arm went native raises the native's error).
+`tests/receive_matcher_test.blsp` pins the receive contract (order, mid-chain guard failure,
+pins, wildcard, `after`) and the SHAPE — no `(fn nil` in the expansion — sabotage-verified: with
+the matcher routed back through the thunk builder the shape case reds and every behavioural
+case stays green, which is the reason the shape case exists. `mapget_differential.rs` now runs
+against `BROOD_NO_MAPGET=1` as the baseline and adds the one miss the prim must not answer: a
+`Lookup` record's.
+
+**Two bugs it surfaced, both older than it (KI-159, KI-160).** Making `%vector-ref` a prim
+exposed that the const-index vector read deopted on any shared-region vector (a literal, a
+`def`'d one) — the pair path's cliff, fixed the same way, by taking the FFI. And the
+perf-stats binary's `[jit-dirty]` line, chased rather than dismissed, was the dirty-stack
+check running after the settle's own frame restore: every deopt of an inlined arm had read
+as dirty since two-stage tiering.
+
+## ADR-363 — A frame carries more than one text size: `cell-region` scopes the cell metrics
+
+**Status:** accepted (2026-09-17). **Context:** bedit's Ctrl+wheel zoom had to be per buffer.
+
+**Context.** The GUI grid has ONE cell size, set by `gui-font!`, and every op is placed in
+it. A zoom therefore meant changing the window's font: the grid shrinks, every pane is
+re-laid, the status bar jumps, and a kinetic wheel stream re-rasterises the whole window
+per event — five fixes in a morning each moved the jank somewhere else, because the model
+was wrong, not the pacing. What an editor user means by zoom is Emacs's `text-scale-adjust`:
+THIS buffer, bigger; the rest of the window as it was. The grid had one way to say that,
+the `:scale` face attribute (ADR-079), and it is a whole-number multiple of the cell — the
+smallest step it can express is a doubling. The window's text at 15 px next to a buffer at
+17 px was not a frame the runtime could draw.
+
+**Decision.** A render op that scopes the cell metrics: `[:cell-region x y w h px ops]`
+(`Op::CellRegion`). The rect is in the PARENT's cells and moves with an enclosing
+scroll-region like any op; the inner ops are positioned in the region's own cell space,
+origin at its top-left, with the metrics font size `px` produces — so a caller lays the
+region out in its own units and never learns the outer size. Scoped and self-restoring like
+`scroll-region` (ADR-114): ops after it paint at the window's metrics, regions nest, an
+inner one wins. The renderer clips the region to its rect vertically (a zoomed buffer cannot
+paint over its neighbour) and treats the whole region as one leaf in the damage bands — its
+children are on another grid, so their bands mean nothing in the parent's. The metrics of a
+size are shaped once and memoised (`metrics_at`, keyed by px bits), and the cluster cache is
+keyed by px (`91b6fd5f`), so two sizes coexist and a resize keeps its glyphs.
+
+One question only the renderer can answer comes with it: how many of the region's cells
+fit the rect? A cell is whatever shaping the reference glyph produces, rounded to whole
+pixels — it is not derivable from the px ratio. `gui/cell-size` (`%gui-cell-size id [px]`)
+measures it on the GUI thread and memoises; headless it errors rather than inventing a
+number, so a caller that also runs headless falls back to the ratio.
+
+**Not chosen.** (1) A per-op px in the face (`{:px 17}` beside `:scale`) — every op would
+carry a size, the caller would still position text in the parent's cells, and a zoomed
+line's column positions would be wrong: the region's origin-shift is the whole point. (2)
+Making the terminal frontend flatten the region like a scroll-region — a terminal cell is
+whatever the terminal says it is, and region-local ops re-based onto the parent grid land
+in the wrong place; it skips the op, as it does `frect` and `vspans`, and an app emits a
+region only when it has a size to differ by. (3) Leaving it in bedit — no amount of pacing
+a whole-window font change makes it a per-buffer zoom; the capability was missing from the
+language, which is the case the prime directive names.
+
+**Consequence.** An editor keeps the window's font where it is and gives a pane a px: the
+pane's body is a `cell-region`, laid out for the rows and columns `gui/cell-size` says fit,
+the mode line and the rest of the window untouched. A step is a pixel, a zoom re-paints one
+pane, and the model behind the frame is the one the user has: sizes belong to buffers.

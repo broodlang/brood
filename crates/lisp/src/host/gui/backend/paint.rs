@@ -151,6 +151,9 @@ fn op_band(op: &Op, dy: isize, oy: usize, ch: usize) -> Option<(isize, isize)> {
             band(cell_top(*row0) + dy, px_h(rows)) // as do the bitboards
         }
         Op::ScrollRegion { .. } => Some((isize::MIN, isize::MAX)),
+        // A region paints only inside its own rect, whose height is in PARENT cells — so
+        // this band is exact even though the ops inside it are on a different grid.
+        Op::CellRegion { y, h, .. } => band(cell_top(*y), px_h(*h as usize)),
     }
 }
 
@@ -166,6 +169,9 @@ fn flatten<'a>(ops: &'a [Op], ch: usize, dy: isize, out: &mut Vec<Entry<'a>>) {
     for op in ops {
         match op {
             Op::ScrollRegion { dy_frac, ops } => flatten(ops, ch, scroll_px(*dy_frac, ch), out),
+            // A cell region is ONE leaf: its children are on the region's grid, not this one,
+            // so their bands cannot be computed with `ch` and their positions mean nothing
+            // here. The whole region is compared (and repainted) as a unit.
             _ => out.push(Entry { op, dy }),
         }
     }
@@ -668,6 +674,48 @@ pub(super) fn render_ops(
             Op::ScrollRegion { dy_frac, ops } => {
                 let inner_dy = scroll_px(*dy_frac, ch);
                 render_ops(ops, canvas, r, ox, oy, cw, ch, bg0, inner_dy);
+            }
+            Op::CellRegion {
+                x, y, h, px, ops, ..
+            } => {
+                // The rect is in the PARENT's cells (and moves with an enclosing scroll, like
+                // any other op); everything inside it is on the region's own grid, starting at
+                // its top-left. The canvas band is narrowed to the rect, so an op that
+                // overruns the region vertically is clipped rather than painted over its
+                // neighbour — the region is a window, not a hint.
+                // The rect's WIDTH is not clipped here (the canvas bands rows, not columns): it is
+                // the width the region was laid out to, which its own ops already respect.
+                let region = r.metrics_at(*px);
+                if region.cell_w == 0 || region.cell_h == 0 {
+                    continue;
+                }
+                let top = oy as isize + *y as isize * ch as isize - scroll_dy;
+                let bottom = top.saturating_add((*h as isize).saturating_mul(ch as isize));
+                let (y0, y1) = (
+                    top.max(canvas.y0 as isize).max(0) as usize,
+                    bottom.min(canvas.y1 as isize).max(0) as usize,
+                );
+                if y1 <= y0 {
+                    continue;
+                }
+                let region_ox = ox + *x as usize * cw;
+                let region_oy = top.max(0) as usize;
+                let saved = r.metrics();
+                r.set_metrics(region);
+                let (canvas_w, canvas_h) = (canvas.w, canvas.h);
+                let mut inner = Canvas::band(canvas.buf, canvas_w, canvas_h, y0, y1);
+                render_ops(
+                    ops,
+                    &mut inner,
+                    r,
+                    region_ox,
+                    region_oy,
+                    region.cell_w,
+                    region.cell_h,
+                    bg0,
+                    0,
+                );
+                r.set_metrics(saved);
             }
             Op::Text { row, col, s, face } => {
                 let (mut fg, mut bg) =
@@ -1804,5 +1852,161 @@ mod strip_diff_tests {
             snap_hairline(3.0, 8.0, 2.0, 5.0, 1.5, 1.0),
             (3.0, 8.0, 2.0, 5.0, 1.5)
         );
+    }
+}
+
+#[cfg(test)]
+mod cell_region_tests {
+    use super::*;
+    use crate::host::gui::{Face, Op};
+
+    const FB: (usize, usize) = (160, 160);
+
+    /// Paint `ops` into a fresh framebuffer with the window's own metrics at 15 px and
+    /// the grid flush at the origin, and hand back the pixels.
+    fn paint(ops: &[Op]) -> Vec<u32> {
+        let mut r = Renderer::new(1.0, default_families(), 15.0);
+        let (cw, ch) = (r.cell_w.max(1), r.cell_h.max(1));
+        let (fb_w, fb_h) = FB;
+        let mut buf = vec![0u32; fb_w * fb_h];
+        {
+            let mut canvas = Canvas::full(&mut buf, fb_w, fb_h);
+            render_ops(ops, &mut canvas, &mut r, 0, 0, cw, ch, 0, 0);
+        }
+        buf
+    }
+
+    /// The window's cell height at 15 px — the unit the test's rects are in.
+    fn window_cell() -> (usize, usize) {
+        let r = Renderer::new(1.0, default_families(), 15.0);
+        (r.cell_w.max(1), r.cell_h.max(1))
+    }
+
+    fn white() -> Face {
+        Face {
+            fg: Some([255, 255, 255]),
+            ..Face::default()
+        }
+    }
+
+    fn text(row: u16, col: u16) -> Op {
+        Op::Text {
+            row,
+            col,
+            s: "M".into(),
+            face: white(),
+        }
+    }
+
+    /// The painted pixels' bounding box, as (max_x, max_y, count).
+    fn extent(buf: &[u32]) -> (usize, usize, usize) {
+        let (fb_w, _) = FB;
+        buf.iter()
+            .enumerate()
+            .filter(|(_, p)| **p != 0)
+            .fold((0, 0, 0), |(mx, my, n), (i, _)| {
+                (mx.max(i % fb_w), my.max(i / fb_w), n + 1)
+            })
+    }
+
+    fn region(px: f32, h: u16, ops: Vec<Op>) -> Op {
+        Op::CellRegion {
+            x: 0,
+            y: 0,
+            w: 40,
+            h,
+            px,
+            ops,
+        }
+    }
+
+    /// The point of the op: the same glyph inside a region at twice the size covers more
+    /// pixels and reaches further down and right than the window's own cell would allow.
+    #[test]
+    fn a_region_paints_its_ops_at_its_own_size() {
+        let (plain_x, plain_y, plain_n) = extent(&paint(&[text(0, 0)]));
+        let (big_x, big_y, big_n) = extent(&paint(&[region(30.0, 6, vec![text(0, 0)])]));
+        assert!(plain_n > 0, "the plain glyph painted nothing to compare to");
+        assert!(
+            big_n > plain_n && big_x > plain_x && big_y > plain_y,
+            "a 30 px region painted no bigger than the 15 px window: \
+             {big_n} px vs {plain_n}, to ({big_x}, {big_y}) vs ({plain_x}, {plain_y})"
+        );
+    }
+
+    /// Scoped: the ops AFTER a region are painted with the window's metrics again, exactly
+    /// as if the region were not there. A size that leaked would move every later op.
+    #[test]
+    fn the_window_metrics_come_back_after_a_region() {
+        let (_, ch) = window_cell();
+        let after = text(5, 0);
+        let alone = paint(std::slice::from_ref(&after));
+        let following = paint(&[region(30.0, 2, vec![text(0, 0)]), after]);
+        // below the region's 2 cell rows, the two frames must agree pixel for pixel
+        let from = 2 * ch * FB.0;
+        assert_eq!(
+            alone[from..],
+            following[from..],
+            "the region's metrics leaked into the op that followed it"
+        );
+    }
+
+    /// A region is a window, not a hint: an op that overruns it vertically is clipped to
+    /// the rect, so a zoomed buffer cannot paint over its neighbour.
+    #[test]
+    fn a_region_clips_its_ops_to_its_rect() {
+        let (_, ch) = window_cell();
+        // one window-cell tall, holding text far past its bottom at a big size
+        let buf = paint(&[region(30.0, 1, vec![text(0, 0), text(3, 0), text(6, 0)])]);
+        let spill = buf[ch * FB.0..].iter().filter(|p| **p != 0).count();
+        assert_eq!(spill, 0, "{spill} pixels painted below a 1-row region");
+    }
+
+    /// The rect is in the PARENT's cells, so a region moves by whole window cells — and
+    /// its ops move with it.
+    #[test]
+    fn a_region_is_placed_in_the_parent_grid() {
+        let (cw, ch) = window_cell();
+        let at = |x: u16, y: u16| {
+            extent(&paint(&[Op::CellRegion {
+                x,
+                y,
+                w: 20,
+                h: 8,
+                px: 15.0,
+                ops: vec![text(0, 0)],
+            }]))
+        };
+        let (x0, y0, n0) = at(0, 0);
+        let (x1, y1, n1) = at(2, 3);
+        assert!(n0 > 0 && n1 > 0, "a placed region painted nothing");
+        assert_eq!(
+            (x1 - x0, y1 - y0),
+            (2 * cw, 3 * ch),
+            "the region did not move by whole parent cells"
+        );
+    }
+
+    /// Wild geometry and sizes come straight from an app's render op. None of it may
+    /// panic (an overflow under debug-assertions, an out-of-bounds write) or hang.
+    #[test]
+    fn wild_region_geometry_does_not_overflow_the_coordinate_math() {
+        for px in [1.0f32, 3.5, 1e9, f32::MAX] {
+            for (x, y, w, h) in [
+                (0, 0, 0, 0),
+                (u16::MAX, u16::MAX, u16::MAX, u16::MAX),
+                (0, u16::MAX, 40, 4),
+                (200, 0, 4, 200),
+            ] {
+                paint(&[Op::CellRegion {
+                    x,
+                    y,
+                    w,
+                    h,
+                    px,
+                    ops: vec![text(0, 0), text(9, 9)],
+                }]);
+            }
+        }
     }
 }

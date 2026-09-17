@@ -197,6 +197,22 @@ pub(super) fn default_families() -> Families {
     Rc::new(RefCell::new(FontShared::new()))
 }
 
+/// The largest font size the renderer will measure or paint with, in physical px. A cell
+/// that big already fills a 4K screen; the bound is what keeps a wild `px` in a render op
+/// from asking the shaper for a line box the size of the address space.
+pub(super) const MAX_FONT_PX: f32 = 512.0;
+
+/// The cell metrics one font size produces. The renderer holds the window's set, and
+/// `Op::CellRegion` swaps in another for the span of its ops — which is how ONE FRAME
+/// carries two text sizes (a per-buffer zoom).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) struct CellMetrics {
+    pub(super) px: f32,
+    pub(super) cell_w: usize,
+    pub(super) cell_h: usize,
+    pub(super) baseline: i32,
+}
+
 pub(crate) struct Renderer {
     families: Families,
     default_family: u32,
@@ -225,6 +241,11 @@ pub(crate) struct Renderer {
     // continuous zoom), and two regions could never be drawn at two sizes in one frame —
     // which is what per-buffer zoom needs.
     pub(super) cache: HashMap<(ClusterKey, u32, bool, bool, u16, bool, u32), CachedGlyph>,
+
+    /// `px bits -> (cell_w, cell_h, baseline)`: shaping the reference glyph is not free and a
+    /// frame with per-buffer zoom asks for the same handful of sizes on every paint. Dropped
+    /// whenever the inputs to that shaping change (`recompute` clears it).
+    metrics_memo: RefCell<HashMap<u32, (usize, usize, i32)>>,
 
     // The retained frame (see `paint`): `canvas` holds the pixels of the last frame
     // rasterised, `prev_ops` the ops that produced it. A new frame is diffed against
@@ -260,6 +281,7 @@ impl Renderer {
             text_contrast: 1.0,
             cov_lut: Box::new(contrast_lut(1.0)),
             cache: HashMap::new(),
+            metrics_memo: RefCell::new(HashMap::new()),
             canvas: Vec::new(),
             canvas_size: (0, 0),
             prev_ops: Vec::new(),
@@ -375,34 +397,104 @@ impl Renderer {
         // straddling pixels — soft, uneven text. Rounding keeps every glyph on the grid
         // the cell metrics already round to; the ≤0.5 px size error is invisible.
         self.px = (self.base_px * self.scale as f32).round().max(1.0);
+        // The measured metrics depend on the family, the line height and the HiDPI scale —
+        // all of which land here when they change, so this is where the memo is dropped.
+        self.metrics_memo.borrow_mut().clear();
         // The cluster cache is NOT cleared: its key carries the px, so entries for the old
         // size stay valid and a zoom that returns to a size it has already drawn finds its
         // glyphs waiting. Clearing here is what made a continuous zoom re-rasterise every
         // glyph on every step. The retained FRAME is still stale — every cell moved — so
         // that is invalidated.
         self.invalidate();
-        let line_h = (self.px * self.line_height).round().max(1.0);
-        self.cell_h = line_h as usize;
+        let (cw, ch, base) = self.metrics_for_px(self.px);
+        self.cell_w = cw;
+        self.cell_h = ch;
+        self.baseline = base;
+    }
+
+    /// The cell metrics a given font size produces — `(cell_w, cell_h, baseline)` in physical
+    /// px — by shaping the reference glyph at that size.
+    ///
+    /// Pure: it stores nothing. That is what lets ONE FRAME carry two sizes, which is what
+    /// per-buffer zoom is: `Op::CellRegion` paints its ops with the metrics of its own px
+    /// while the window keeps its own. `recompute` is this plus storing the result.
+    pub(super) fn metrics_for_px(&self, px: f32) -> (usize, usize, i32) {
+        let line_h = (px * self.line_height).round().max(1.0);
         // `name_of` returns owned data, so the immutable borrow ends on this
         // line — letting the `borrow_mut` below succeed (don't make it borrow).
         let fam = self.families.borrow().name_of(self.default_family);
         let mut shared = self.families.borrow_mut();
         let shared = &mut *shared;
-        let metrics = Metrics::new(self.px, line_h);
+        let metrics = Metrics::new(px, line_h);
         let mut tb = CtBuffer::new(&mut shared.fs, metrics);
         tb.set_size(Some(line_h * 4.0), Some(line_h * 2.0));
         let attrs = Attrs::new().family(Family::Name(fam.as_str()));
         tb.set_text("M", &attrs, Shaping::Advanced, None);
         tb.shape_until_scroll(&mut shared.fs, false);
-        let (mut cw, mut base) = (self.px, self.px);
+        let (mut cw, mut base) = (px, px);
         if let Some(run) = tb.layout_runs().next() {
             base = run.line_y;
             if let Some(gl) = run.glyphs.first() {
                 cw = gl.w;
             }
         }
-        self.cell_w = cw.round().max(1.0) as usize;
-        self.baseline = base.round() as i32;
+        (
+            cw.round().max(1.0) as usize,
+            line_h as usize,
+            base.round() as i32,
+        )
+    }
+
+    /// The metrics currently in effect — what a scoped change restores.
+    pub(super) fn metrics(&self) -> CellMetrics {
+        CellMetrics {
+            px: self.px,
+            cell_w: self.cell_w,
+            cell_h: self.cell_h,
+            baseline: self.baseline,
+        }
+    }
+
+    /// The metrics a LOGICAL font size would produce (HiDPI applied here, and the px
+    /// rounded to whole pixels for the same reason `recompute` rounds). Memoised: shaping
+    /// the reference glyph is not free and a frame with per-buffer zoom asks for the same
+    /// handful of sizes on every paint.
+    pub(super) fn metrics_at(&self, logical_px: f32) -> CellMetrics {
+        // Clamped to a sane range before anything is shaped: the size comes from an app's
+        // render op, and a 1e9-px cell would ask the shaper for a line box no machine has
+        // the memory to lay out. NaN falls through `clamp` to the low end.
+        let px = (logical_px.clamp(1.0, MAX_FONT_PX) * self.scale as f32)
+            .round()
+            .clamp(1.0, MAX_FONT_PX);
+        let key = px.to_bits();
+        if let Some(&(cell_w, cell_h, baseline)) = self.metrics_memo.borrow().get(&key) {
+            return CellMetrics {
+                px,
+                cell_w,
+                cell_h,
+                baseline,
+            };
+        }
+        let (cell_w, cell_h, baseline) = self.metrics_for_px(px);
+        self.metrics_memo
+            .borrow_mut()
+            .insert(key, (cell_w, cell_h, baseline));
+        CellMetrics {
+            px,
+            cell_w,
+            cell_h,
+            baseline,
+        }
+    }
+
+    /// Install `metrics` for the ops that follow — the caller restores what `metrics()`
+    /// gave it. Nothing else is touched: the cluster cache is keyed by px, so both sizes'
+    /// glyphs coexist and neither region's work throws the other's away.
+    pub(super) fn set_metrics(&mut self, metrics: CellMetrics) {
+        self.px = metrics.px;
+        self.cell_w = metrics.cell_w;
+        self.cell_h = metrics.cell_h;
+        self.baseline = metrics.baseline;
     }
 
     /// Adjust for a new HiDPI scale factor (then recompute metrics).

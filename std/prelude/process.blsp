@@ -360,7 +360,7 @@ A zero-arg lambda `(fn () …)` body is passed through (not re-wrapped), like `s
           matcher (if (empty? real)
                     `(fn (~msg) [0 ~msg])
                     `(fn (~msg)
-                       ~(%match-build-from (map preps %receive-result-clause) msg nil)))
+                       ~(%match-build-chain (map preps %receive-result-clause) msg nil true)))
           dispatch (if (empty? real) `(/nth ~r 1) (%receive-dispatch preps r))
           ;; nil when the filter can't apply (see `%receive-tags`). Built as a vector
           ;; FORM (`[~@tags]`), not by calling a function: a plain list would expand to

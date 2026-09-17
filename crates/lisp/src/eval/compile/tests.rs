@@ -2010,6 +2010,12 @@ fn every_inlinable_head_still_reaches_its_primitive() {
         ("bit/or", PrimOp::BitOr),
         ("bit/xor", PrimOp::BitXor),
         ("nth", PrimOp::VectorRef),
+        // The native itself, by its CURRENT name. The entry read `vector-ref` from the
+        // `seq/` refactor that renamed the native until 2026-09-17, so every element read
+        // the pattern compiler emits (`%vector-ref`) was a full native call — `nth`'s
+        // head-keyed inline above survived alone and hid the gap.
+        ("%vector-ref", PrimOp::VectorRef),
+        ("get", PrimOp::MapGet),
         ("table/get", PrimOp::TableGet),
         ("table/has?", PrimOp::TableHas),
     ] {
@@ -2030,6 +2036,17 @@ fn every_inlinable_head_still_reaches_its_primitive() {
         ("pair?", PrimOp1::IsPair),
         ("empty?", PrimOp1::IsEmpty),
         ("type-of", PrimOp1::TypeOf),
+        ("%vector-length", PrimOp1::VectorLen),
+        // The type predicates are prelude WRAPPERS over `type-of`, recognised by shape
+        // (`type_predicate_tag`), so a rewording of one is a silent de-inline — exactly the
+        // KI-58 class, and these are what every `match`/`receive` clause tests first.
+        ("vector?", PrimOp1::TypeIs(value::intern("vector"))),
+        ("map?", PrimOp1::TypeIs(value::intern("map"))),
+        ("string?", PrimOp1::TypeIs(value::intern("string"))),
+        ("int?", PrimOp1::TypeIs(value::intern("int"))),
+        ("keyword?", PrimOp1::TypeIs(value::intern("keyword"))),
+        ("set?", PrimOp1::TypeIs(value::intern("set"))),
+        ("pid?", PrimOp1::TypeIs(value::intern("pid"))),
     ] {
         assert_eq!(
             resolve_prim1(&interp.heap, value::intern(head)),
@@ -2049,6 +2066,45 @@ fn every_inlinable_head_still_reaches_its_primitive() {
         resolve_prim1(&interp.heap, value::intern("math/sqrt")),
         Some(PrimOp1::Sqrt)
     );
+}
+
+/// The type-predicate inline is earned by SHAPE, never by name: a user function that merely
+/// ends in `?` — a guarded predicate, a two-way test, a predicate over a different function —
+/// compiles as an ordinary call. Every one of these would be a wrong answer if inlined as a
+/// tag compare, so the probe must refuse them all. And a predicate the user REBINDS to a
+/// different shape must stop inlining at once (the epoch guard re-runs the probe).
+#[test]
+fn type_predicate_inline_is_structural_not_nominal() {
+    let mut interp = crate::Interp::new();
+    interp
+        .eval_str(
+            "(do
+               (defn even-ish? (x) (= (math/rem x 2) 0))
+               (defn wide? (x) (or (int? x) (float? x)))
+               (defn kind? (x) (%eq (type-of x) :int))
+               (defn two? (x y) (%eq (type-of x) y))
+               (defn guarded? (x) (if (nil? x) false (%eq (type-of x) :map))))",
+        )
+        .expect("defs");
+    // `fn?` is the prelude's own two-way test — `(or (%eq (type-of x) :fn) (%eq (type-of x)
+    // :native))` — and must refuse for the same reason `wide?` does.
+    for head in ["even-ish?", "wide?", "two?", "guarded?", "fn?"] {
+        assert_eq!(
+            resolve_prim1(&interp.heap, value::intern(head)),
+            None,
+            "`{head}` is not a type predicate and must not inline as one"
+        );
+    }
+    // The canonical shape under a user's own name DOES qualify — the shape is the contract.
+    assert_eq!(
+        resolve_prim1(&interp.heap, value::intern("kind?")),
+        Some(PrimOp1::TypeIs(value::intern("int")))
+    );
+    // …and a rebind away from the shape drops it.
+    interp
+        .eval_str("(defn kind? (x) (or (int? x) (float? x)))")
+        .expect("rebind");
+    assert_eq!(resolve_prim1(&interp.heap, value::intern("kind?")), None);
 }
 
 /// The 3-arg `table-put` call-site inline survives the namespacing that turned it into a

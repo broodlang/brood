@@ -106,6 +106,24 @@ render ops (built with `into []`). Regions may be nested (inner overrides outer)
 the terminal frontend flattens the inner ops and ignores the offset. ADR-114."
   [:scroll-region dy-frac ops])
 
+(defn cell-region (x y w h px ops)
+  "A self-contained render block that draws `ops` with the cell metrics of font size `px`
+(logical pixels), inside the rect `[x y w h]` given in the PARENT's cells. Inside, ops are
+positioned in the REGION's own cell space — its top-left is row 0, column 0 — so a caller
+lays the region out in its own units without knowing the outer size, and the region is
+clipped to its rect vertically. `ops` is a flat vector of render ops (built with `into []`).
+
+This is what lets ONE FRAME carry two text sizes: an editor zooming a single buffer while
+the rest of the window stays put. The face attribute `:scale` also draws bigger text, but
+only in whole multiples of the cell (2×, 3×); a region carries a px, so a step is a pixel.
+
+How many region cells fit the rect is a question only the renderer can answer — ask
+`gui/cell-size` for the cell size at `px` and at the window's own size, and divide. Scoped
+and self-restoring like `scroll-region`, and regions nest (an inner one wins). GUI-only — the
+terminal frontend SKIPS it (like `frect` and `vspans`): a terminal cell is whatever the
+terminal says it is, and flattening the ops would paint them in the wrong place."
+  [:cell-region x y w h px ops])
+
 (defn frect (x y w h face &optional (opacity 1.0) (radius 0.0))
   "A **sub-cell** rounded-rectangle render op: like `rect`, but `x`/`y` (top-left) and
 `w`/`h` (size) are in **cell units as floats**, so the shape isn't snapped to the

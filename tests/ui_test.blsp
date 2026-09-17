@@ -624,6 +624,14 @@
       (assert= (get table [:l 2]) [[:d2] (list [:text 2 0 "b"])])
       (assert= (get table [:pane]) [[:d1] (list [:text 1 0 "a"] [:text 2 0 "b"])])))
 
+  (test "ui-harvest recurses into a cell-region the way it does a scroll-region"
+    ;; a memoised pane body zoomed to another size is a marker INSIDE a cell-region: the
+    ;; marker must still be spliced and tabled, and the region rebuilt around the result
+    (let (inner [:ui/memo [:body] [:d] (list (text 0 0 "z"))]
+          [frame table] (ui-harvest [(cell-region 1 2 30 8 21.0 [inner]) (cursor 0 0)]))
+      (assert= frame [[:cell-region 1 2 30 8 21.0 [[:text 0 0 "z"]]] [:cursor 0 0]])
+      (assert= (get table [:body]) [[:d] (list [:text 0 0 "z"])])))
+
   (test "a frame without markers harvests to itself and an empty table"
     (assert= (ui-harvest [(clear) (text 0 0 "x")]) [[[:clear] [:text 0 0 "x"]] {}])))
 
