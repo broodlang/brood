@@ -45,8 +45,20 @@ contracts and enforced their contracts), so the rule is verified and the breakag
 Someone should decide whether `sig_placement.rs`'s rationale is still live or has been
 covered by the loader's reserved-name exemption; the gate is right either way.
 
-**Next, in order:** **C10** — the merely-wider residue re-probed under intervals — then
-C11–C17 in list order (`docs/type-system-status.md` § "The remaining list"). **KI-150** is
+**C10 is closed too, by probe rather than by code.** The merely-wider residue had already
+been taken by ADR-350's intervals; what was missing was that anyone had checked. The answer
+worth carrying: the return check is a **mode split** — a *precise* mismatch is named in both
+modes, an *over-approximated* one (a call's result) under `--strict` only, plain mode
+deferring by the gradual valve. That is why a probe through `nest check --strict` and the
+same shapes through the unit harness (plain) disagreed for an hour. The residue is reported
+under strict, because a declared `(number -> int)` promises an int for every number and a
+float argument makes that false — the declaration is part of the claim. Three pins in
+`check/tests/declarations.rs`, sabotage-verified three ways. **C13 lost its rationale** with
+it (it was "do it with C10 if C10 needs it"; C10 did not) — it now needs a case of its own.
+
+**Next, in order:** **C11** (element-typed `seqable` — the `elem` refinement stops at
+`pair | vector`), then C12–C17 in list order (`docs/type-system-status.md` § "The remaining
+list"). **KI-150** is
 reopened by the column refresh below (the checker costs ~10% more per file and every `brood
 file` pays it) and is the other live thread; its first candidate is caching inferred
 signatures in the stdlib image.

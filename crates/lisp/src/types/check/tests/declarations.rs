@@ -207,3 +207,139 @@ fn a_declared_return_the_body_cannot_verify_is_reported_as_trusted_under_strict(
     );
     assert!(allowed.is_empty(), "{allowed:?}");
 }
+
+
+// C10 (2026-09-17) — the merely-wider residue, re-probed under intervals.
+//
+// The item this closes said: a body typed exactly `number` under a declared `int` is
+// "silent by design", because pinning it would need occurrence/range analysis and flagging
+// it would false-positive. ADR-350's intervals and the int-closed / float-contagion rules
+// moved that line, and a probe over the checker as it stands found the residue is now
+// reported — under STRICT, which is where an unverifiable declaration belongs. Nothing
+// here changed the checker; this pins what the probe found, in both modes, because the
+// split between them is the answer and it is not obvious from either one alone.
+//
+// What made the "undecidable" case decidable is that the DECLARATION is part of the claim.
+// `(sig f (number -> int))` over `(+ x 1)` promises an int for every number, and a float
+// argument makes that false — no analysis of the body was needed to know it.
+
+/// Provable in the body itself — a **precise** bound — so both modes name it. These are
+/// the mistakes a body makes on its own: float contagion, exact division, an interval that
+/// arithmetic over a declared interval cannot fit in.
+#[test]
+fn a_precise_return_mismatch_is_named_in_both_modes() {
+    for (src, wanted) in [
+        ("(sig f (int -> int))\n(defn f (x) (* x 1.5))", "yields float"),
+        ("(sig f (int -> int))\n(defn f (x) (/ 5 2))", "yields ratio"),
+        (
+            "(sig f (int -> int))\n(defn f (x) (math/sqrt x))",
+            "yields float",
+        ),
+        (
+            "(sig f ((int 0 10) -> (int 0 19)))\n(defn f (x) (* x 2))",
+            "yields int[0..20]",
+        ),
+        // an OPEN interval is not inside a closed one, however plausible the bound
+        (
+            "(sig f (int -> (int 1 _)))\n(defn f (x) (math/abs x))",
+            "yields int[0..]",
+        ),
+    ] {
+        for strict in [false, true] {
+            let ws = file_warnings_mode(&format!("(defmodule t)\n{src}"), strict);
+            assert!(
+                ws.iter()
+                    .any(|w| w.contains("declared return type") && w.contains(wanted)),
+                "expected a `{wanted}` mismatch (strict={strict}) for:\n{src}\ngot {ws:?}"
+            );
+        }
+    }
+}
+
+/// Provable only against an **over-approximated** bound — a call's result. Strict reads a
+/// positively-known bound by inclusion and names it; plain mode reads it by overlap and
+/// defers, which is the gradual valve (`types.md` contract #5), not a gap: the checker does
+/// not know the body cannot return the narrower thing, and a `def` always wins.
+///
+/// This is also where the residue itself landed: `(/ x 2)` over an int is genuinely
+/// `int | ratio`, so a declared `int` is unprovable — strict says so, plain stays quiet.
+#[test]
+fn an_over_approximated_return_mismatch_is_strict_only() {
+    for (src, wanted) in [
+        (
+            "(sig f (int -> (int 0 5)))\n(defn f (x) (bit/and x 255))",
+            "yields int[0..255]",
+        ),
+        (
+            "(sig f (int -> (int 0 9)))\n(defn f (x) (math/mod x 100))",
+            "yields int[0..99]",
+        ),
+        (
+            "(sig f (seqable -> (int 0 9)))\n(defn f (xs) (count xs))",
+            "yields int[0..]",
+        ),
+        // …and it holds through a call: `g` proves `int[0..9]`, `f` claims less
+        (
+            "(sig g (int -> (int 0 9)))\n(defn g (x) (math/mod x 10))\n\
+             (sig f (int -> (int 0 3)))\n(defn f (x) (g x))",
+            "yields int[0..9]",
+        ),
+        // the residue named in the item: a declared parameter that admits floats
+        ("(sig f (number -> int))\n(defn f (x) (+ x 1))", "yields number"),
+        (
+            "(sig f (number -> float))\n(defn f (x) (+ x 1))",
+            "yields number",
+        ),
+        // exact division: an int declared over `int | ratio`
+        (
+            "(sig f (int -> int))\n(defn f (x) (/ x 2))",
+            "yields int | ratio",
+        ),
+    ] {
+        let source = format!("(defmodule t)\n{src}");
+        let strict = file_warnings_mode(&source, true);
+        assert!(
+            strict
+                .iter()
+                .any(|w| w.contains("declared return type") && w.contains(wanted)),
+            "expected a `{wanted}` mismatch under strict for:\n{src}\ngot {strict:?}"
+        );
+        let plain = file_warnings_mode(&source, false);
+        assert!(
+            plain.is_empty(),
+            "plain mode defers an over-approximated bound; got {plain:?} for:\n{src}"
+        );
+    }
+}
+
+/// The other half, and the one that decides whether the sharper reading is usable: every
+/// shape below is provably RIGHT, and a warning on any of it — in either mode — is the
+/// false positive the residue was left silent to avoid. `math/floor` makes an int of a
+/// number; the int-closed ops keep an int an int; an interval that fits is not a mismatch.
+#[test]
+fn a_provable_return_is_silent_in_both_modes() {
+    for src in [
+        "(sig f (number -> int))\n(defn f (x) (math/floor x))",
+        "(sig f (number -> int))\n(defn f (x) (math/ceil x))",
+        "(sig f (number -> int))\n(defn f (x) (math/round x))",
+        "(sig f (int -> int))\n(defn f (x) (math/abs x))",
+        "(sig f (int -> int))\n(defn f (x) (math/min x 5))",
+        "(sig f (int -> int))\n(defn f (x) (math/max x 5))",
+        "(sig f (int -> int))\n(defn f (x) (if (> x 0) x (- x)))",
+        "(sig f (int -> int))\n(defn f (x) (/ x 1))",
+        "(sig f (int int -> int))\n(defn f (x y) (math/quot x y))",
+        "(sig f (int -> int))\n(defn f (x) (bit/or x 1))",
+        "(sig f (int -> (int 0 255)))\n(defn f (x) (bit/and x 255))",
+        "(sig f ((int 0 10) -> (int 0 20)))\n(defn f (x) (* x 2))",
+        "(sig f ((int 0 _) -> (int 0 _)))\n(defn f (x) (math/quot x 2))",
+        "(sig f (string -> int))\n(defn f (s) (string/length s))",
+    ] {
+        for strict in [false, true] {
+            let ws = file_warnings_mode(&format!("(defmodule t)\n{src}"), strict);
+            assert!(
+                ws.is_empty(),
+                "expected silence (strict={strict}) for:\n{src}\ngot {ws:?}"
+            );
+        }
+    }
+}

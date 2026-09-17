@@ -1319,17 +1319,30 @@ each lands; this section is the working list, `handoff.md` points at it.
       each: `map<K, A|B>` vs split maps, and the 2-field componentwise case. Sabotage: the
       `MAP_BIT` arm reds the two record pins alone, `enumerated_int_range` the interval pin
       alone.
-- [ ] **C10. The merely-wider residue, re-probed under intervals.** A body typed `number`
-      declared `int` is silent by design where undecidable; with ADR-350's intervals more
-      of it decides (`quot`, `floor`, a masked value). Flag what is provable, keep the rest
-      silent.
+- [x] **C10. The merely-wider residue, re-probed under intervals** (2026-09-17). Re-probed
+      and found ALREADY CLOSED by ADR-350's intervals and the int-closed / float-contagion
+      rules — no checker change; what landed is the pins, because the answer is a mode split
+      that neither mode shows on its own. The three shapes the item named all decide now:
+      `quot`/`mod`/`rem` carry an interval, `math/floor`/`ceil`/`round` yield `int`, a mask
+      is `(int 0 255)`. **Precise** mismatches are named in both modes (float contagion,
+      exact division, an interval arithmetic cannot fit). **Over-approximated** ones — a
+      call's result — are named under `--strict` and deferred in plain mode, which is the
+      gradual valve (`types.md` contract #5), and that is where the residue itself landed:
+      `(sig f (number -> int))` over `(+ x 1)` IS reported under strict, because the
+      declaration is part of the claim — a declared parameter admitting floats makes the
+      promise false with no analysis of the body at all. Fourteen provably-correct shapes
+      are silent in **both** modes, so the false positive this was left silent to avoid does
+      not occur. `check/tests/declarations.rs`, three tests; sabotage-verified three ways
+      (strict never applies / strict always applies → the mode-split pin reds in opposite
+      directions; the return check disabled → both warning pins red).
 - [ ] **C11. Element-typed `seqable`.** The `elem` refinement stops at `pair | vector`; a
       `seqable` parameter carries no element type.
 - [ ] **C12. Relations between two locals beyond `i < |xs|`** (`i < j`, `i + 1 ≤ |xs|`).
       A relational domain is a different lattice; do the shapes the corpora show, not the
       domain.
-- [ ] **C13. A `float` interval.** Cheap on the int one's machinery; do it with C10 if C10
-      needs it.
+- [ ] **C13. A `float` interval.** Cheap on the int one's machinery. C10 turned out not to
+      need it (it closed without a checker change), so this one now wants its own case: a
+      shape a float bound would decide that nothing decides today.
 - [ ] **C14. A named recursive alias** — `(deftype json (rec …))` so a `sig` names it once.
       Nested self-reference across binders stays out (de Bruijn for a shape inference
       never produces).
