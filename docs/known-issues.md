@@ -155,6 +155,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-159 | **the const-index vector read (`Prim2SlotInt` → `inline_vec_ref`) DEOPTED for any vector outside the LOCAL region — a literal, a `def`'d vector, anything shared — and sixteen deopts latch the arm off the native tier** — the pair path's "70x cliff on `def`'d data", for vectors; latent while `%vector-ref` compiled as a call (the `VectorRef` prim entry named the native by its pre-`seq/` spelling), live the moment ADR-362 corrected it: two `jit_eq_join_test` arms bailed on their literal argument | ✅ **FIXED 2026-09-17** — the region check routes to the `brood_rt_vector_ref` callback (which reads any region) instead of `deopt`, as `First`/`Rest` already did. Guard: `type_predicate_inline_test` "element reads of a shared-region vector stay native" (five arms on a `def`'d vector settle `:native`, 0 deopts; sabotage — the check routed back to `deopt` — reds all five) |
 | KI-160 | **`jit_deopt_dirty` (the "native left the operand stack dirty" check, and the `[jit-dirty]` line under perf-stats) fired on EVERY deopt/preempt of a self- or leaf-inlined arm — 1432 of 1462 preempts on a self-tail loop calling a leaf-spliced callee** — `settle_native_frame` restores an inlined frame to its small top (`inline_nslots` → `nslots`, deliberate) and THEN compared against the `pre_roots` captured after the frame was extended, so the counter read `inline_nslots − nslots` dirty by construction, since two-stage tiering shipped (2026-06-17, three days after the check) | ✅ **FIXED 2026-09-17** — the check runs before the restore. Not a corruption (the re-run is meant to start on the small frame); the cost was a diagnostic that could no longer catch the class it exists for — the 2026-09-13 "19 820 dirty parks" reading on `supervisor` should be re-read in this light |
 | KI-161 | **`BROOD_MONO=1`'s KI-90 guard never guarded: inside a `defmodule` it refused every record-constructor receiver (the registry records the BARE name, the call head is module-qualified), so Tier 1 never fired in real code — and module-less it always agreed, so a constructor rebound to a plain fn was devirtualized to the record's impl (`rebound: REC7` vs the dynamic `DEFAULT`)** | ✅ **FIXED 2026-09-17** — the guard is structural: the head's bound closure must build the map literal carrying this `:__id__` (`closure_constructs_record`). `mono_differential::a_stale_record_id…` runs both spellings and asserts the record call devirtualized; sabotage (the name comparison back) reds both. Found taking perf-handoff Task 5's numbers |
+| KI-163 | **a body compiled before its module lazily loaded kept its pre-load shape for the whole process — `pipeline` at 2.8× under `BROOD_NO_CHECK=1`, `(math/rem i 3)` in a loop ~1450 instructions per call over the eager compile** — `resolve_prim*`/the thin-wrapper elision/the JIT leaf splice all read the global table at bytecode-compile time (first activation), the head into an unloaded module is unbound then, the miss loads the module and the chunk stays generic; the tier-up pre-load stamped the compile epoch BEFORE loading, so the inlined upgrade read `leaf-derivation-stale` forever | ✅ **FIXED 2026-09-17 (ADR-366)** — a load that a miss triggers marks the arm `stale_bindings` and advances a runtime `stale_gen`; the per-process cache sync drops marked entries so the next lookup recompiles, a stale shared entry is never installed, and a running `SelfCall` loop adopts the recompile through the hot-reload guard's tail transition (a frame whose arm the process marked enters with a sentinel epoch, because the frame re-enters after every non-tail call and a re-read hid the load). `pipeline` no-check 591M → 183M instructions, equal to eager. Found attributing the column refresh: the pre-flight check loads eagerly, so `brood file` never showed it. Guards in `tests/lazy_load_test.blsp` (two, each sabotage-verified) via the new dev probes `%vm-arm-ops` / `%vm-arm-stale?` |
 | KI-162 | **`nest check --fix-sigs` writes each `sig` ABOVE its `defn`** — the placement `sig_placement.rs` forbids tree-wide, because under `BROOD_CONTRACTS=1` a `sig` is a rebinding of a name that must already exist | ✅ **FIXED 2026-09-17** — the locator reads the CST, not the lines: a site is a top-level `defn` ROOT CHILD and its insertion point is one past the form's last line (`sig-defn-sites`, extent from `parse-source`), so the sig lands below and a head laid out across lines is located rather than skipped. `tests/project_test.blsp` pins "directly below" (sabotage: inserting at the form's start line reds 2). Recorded with it: the **load failure did not reproduce** — a forward `sig` over a `defn`, a `defn-` and a `check-allow`-wrapped pair all loaded under contracts and enforced the contract, so what is verified today is the RULE, not the breakage the rule was written for |
 | KI-133 | **a preempted native loop resumed on the interpreter for up to 256 iterations — via its callee's frame** — a native self-tail loop that makes a call is preempted every ~1 500 iterations (the 2 000-reduction quantum); the driver handed the preempted frame to the interpreter "until its loop-top noticed", but the first safepoint that run reached was the CALLEE's entry, so the capture landed on the callee at ip 0, the resume ran the callee natively and returned into the loop MID-BODY, and the loop interpreted to its next 256th back-edge before re-tiering. A 5M-iteration loop with one call: 3 252 preempts, **839 607 interpreted iterations**, −36% instructions with preemption disabled; the leaf-spliced variant −72%. Invisible on the benchmark rows (±1–4%: they are short, or their loops are gate-refused anyway) — this is the cost of every long-running native loop that calls anything, and a candidate for why §7.1's admission experiments read as losses | ✅ **FIXED 2026-09-12** — `vm_run_bc`'s outcome-2 arm yields at once: the budget IS spent, and the frame is at ip 0 (or the journal's resume point, applied first), which is exactly what a resume re-tiers. Guarded by `a_native_preempt_captures_the_loop_frame_not_its_callee`, which drives the capture-mode driver with a 300-reduction budget and asserts every capture after the loop goes native is the loop's frame at ip 0 (sabotage-verified: removing the yield puts the captures on the callee). Found from the call-cost probe: 640 instructions per native→native call read as the call ceremony and was 40% preemption churn |
 | KI-132 | **the JIT latches the syntax highlighter's walk onto the VM — every helper of `editor/highlight/hl-spans` deopt-thrashes** — `BROOD_JIT_BAIL_TRACE=1` over one fontify pass of a 111-line band: `hl-head?`, `hl-advance`, `hl-name`, `hl-doc?` each `reason=deopt-thrash-latched … deopts=16`, `hl-spans` itself 56 deopts at `resume_ip=0` and `108`. The pass runs interpreted: 1.1 ms for 421 tokens (2.4 µs a token), re-lexed on every keystroke in bedit — the single largest cost of a typed character there | ✅ **FIXED 2026-09-15 (ADR-353)** — and the hypothesis was wrong on both counts: no re-lowering happens after a deopt (the same native runs again and the sixteenth latches it), and neither cause was the `head` slot. Two mechanisms, found by bisecting the helpers down to one-line arms with `BROOD_JIT_BAIL_TRACE`: (1) **`=` with a string operand deopted per activation** — `eq_dispatch` compared Int×Int and Sym/Keyword inline and deopted for EVERY other tag, so `hl-head?`'s `(= open "(")` fell out of native code on every call; the residual case now calls `brood_rt_equal` (`Heap::equal`, exactly `%eq`), and only a seq-view deopts. (2) **a type-mixed join was an unconditional deopt** — a join's block params were typed by the FIRST edge emitted, and a later edge whose repr disagreed (`(or p X)`: `p` a boxed slot, `X` a scalar) was compiled as a jump to `deopt`, so `hl-advance` deopted on every frame where `p` was false; edges are now deferred and a join is typed with every predecessor in hand, a disagreement widening to a spill slot or to three tagged words in extra block params (ADR-353). Also found en route: the prepass depth model had no stack effect for `MakeVector`/`Prim3`, so every arm with a `[…]` literal ahead of a join was refused with a Cranelift verifier error (`%match-splice-fail-in`) — modelled, and any future gap bails by name (`prepass-unmodelled-inst`). Measured: the 300-line highlighter pass 7.7 → 4.0 ms; both `[jit-bail]` lines gone. Guard `tests/jit_eq_join_test.blsp`, whose tier cases read the arm's state through the new `%jit-arm-state` probe (sabotage-verified both ways: each restored bug reds its own guard with `:bailed`) |
@@ -9877,6 +9878,10 @@ per-run tax. Repro: `perf stat -e instructions:u <brood> --check bench/brood/pip
 the two binaries. (Recorded beside it, unexplained: `BROOD_NO_CHECK=1` runs `pipeline` at
 586M instructions against 208M WITH the check — skipping the check sends this program down a
 2.8× costlier path; `fib` shows no such effect. Handoff 2026-09-17 night has the watch item.)
+**Resolved the same night as KI-163 (ADR-366):** that 2.8× was lazily-loaded code keeping
+its pre-load compile shape, and the checked run was faster only because the check loads
+eagerly. With the fix `BROOD_NO_CHECK=1` is the cheapest run (`pipeline` 183M against 221M
+checked), so the check's cost is now purely the checker's — this entry's question, unchanged.
 
 ## KI-161 — Tier 1 monomorphization's rebind guard refused every module constructor and admitted the module-less rebind ✅ FIXED 2026-09-17
 
@@ -11000,6 +11005,47 @@ bundles 3/3.
 `release_bundle.rs`'s apps are inert, `nest run --check-boot` loads in dependency order in
 one process, and hive's own suite runs the installed `nest`, not a bundle (its `bin/ci` says
 so). The boot check itself was the gate that worked — it refused to ship the artifact.
+
+## KI-163 — a body compiled before its module lazily loaded kept its pre-load shape for the process ✅ FIXED 2026-09-17 (ADR-366)
+
+**Symptom.** With the pre-flight type check skipped (`BROOD_NO_CHECK=1`, "raw eval, e.g. when
+timing"), the `pipeline` benchmark executed **591M instructions against 183M** with lazy
+loading off (`BROOD_NO_LAZY_LOAD=1`) and 221M checked — the flag documented as the cheaper
+path was 2.8× the costlier one. A loop calling `(math/rem i 3)` 100k times read 302M against
+157M, at both tiers; `math/max` the same; `math/abs`, `os/env`, `string/upcase` not at all.
+
+**Cause.** A closure bytecode-compiles at its first activation, and everything the compiler
+reads from the global table is read then: `resolve_prim` follows a BOUND head through its
+thin wrapper (`(defn rem (a b) (%rem a b))`) to the kernel primitive and emits
+`PrimOp::Rem` inline; the JIT derives the leaf splice from the callee's body. Under ADR-335
+the head's module is not loaded when the calling body compiles — `math/rem` is unbound — so
+the call compiles generic, the first execution's miss loads `math`, and the chunk stays as
+compiled for the rest of the process (and, via the shared body cache, for every process). At
+tier-up, `preload_arm_globals` ran AFTER `compile_epoch` was stamped, so its load moved the
+epoch past the stamp and the inlined upgrade bailed `leaf-derivation-stale` on every attempt.
+The exact names that paid were the ones the recogniser keys on (`%rem`, `%max`, `%min`).
+The pre-flight check runs under an eager scope and loads every module the file names, which
+is why every `brood file` run and the whole benchmark column hid it.
+
+**Fix (ADR-366).** The load that a miss triggers marks the missing arm (`stale_bindings`, via
+`Heap::mark_arm_stale` in `global_miss_in_arm` at the six bytecode miss sites, and at tier-up
+when the pre-load — now run before the epoch stamp — loads anything). Marking advances a
+runtime-wide `stale_gen`; the per-process cache read path compares it beside `free_epoch` and
+drops marked entries once per advance, so `compiled_arm_for` misses and recompiles; the shared
+install and `probe_arm_for` skip a marked entry. A running loop adopts it through the
+`SelfCall` hot-reload guard: marking records the arm's uid in a per-process hint, a matching
+frame enters `exec_chunk` with a sentinel epoch, and the guard's lookup finds the entry
+dropped and applies the name afresh. (The frame re-enters after each non-tail call, so a fresh
+epoch read hid the load; the first version read the arm's own flag per entry and cost
+`pipeline` +4% at the VM ceiling — a cold line — so it reads the hint.) Measured on the fixed
+release-fast binary: `pipeline` no-check 591M → **183.4M** (eager 183.0M), the `math/rem` loop 302M → **163M** (eager 156M), and at the VM tier 409M → 279M.
+
+**Guards.** `tests/lazy_load_test.blsp`, both in a child `brood` (the runner loads eagerly)
+and both sabotage-verified: the call-site shape flips from `Call(head=math/rem)` to
+`Prim2SlotInt(Rem …)` between the first call and the next lookup (`%vm-arm-ops`; eviction
+disabled → red on `warm=true`), and a loop whose first iteration loaded a fixture returns
+with its cached arm present and current (`%vm-arm-stale?` answers `false`, not `nil`; the
+entry sentinel disabled → `nil`, red).
 
 ## KI-162 — `nest check --fix-sigs` writes each `sig` ABOVE its `defn`, which `sig_placement.rs` forbids tree-wide ✅ FIXED 2026-09-17
 

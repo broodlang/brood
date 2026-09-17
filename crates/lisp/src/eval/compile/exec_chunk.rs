@@ -47,7 +47,19 @@ pub(crate) fn exec_chunk(
     // Global epoch as of entering this frame — the hot-reload guard for `Inst::SelfCall`
     // (see there). A `def` bumps the epoch, so an unchanged value means no rebinding can
     // have happened since, and the loop takes its zero-lookup fast path.
-    let mut self_epoch = heap.global_epoch();
+    //
+    // A stale arm (ADR-366) enters with the sentinel instead, so its FIRST `SelfCall` takes
+    // the slow path and hands the loop to the recompiled body. Needed because this frame
+    // re-enters here after every non-tail call in the loop body, and a plain re-read would
+    // hide the epoch the load moved: `(apply mod/f nil)` misses, loads, is then CALLED —
+    // and by the time the back-edge runs, the snapshot is fresh again. The test is against
+    // the heap's hot per-process hint (the uid the marking wrote), not the arm's flag, which
+    // sits on a cold line: reading that here cost `pipeline` 4% at the VM ceiling.
+    let mut self_epoch = if heap.stale_arm_hint() == arm.uid {
+        u64::MAX
+    } else {
+        heap.global_epoch()
+    };
     while *ip < chunk.code.len() {
         let inst = &chunk.code[*ip];
         *ip += 1;
@@ -77,7 +89,7 @@ pub(crate) fn exec_chunk(
                 // the operand stack is on `roots`, so only `env` (re-read inside) is at stake.
                 let v = match heap.env_get(env, *s) {
                     Some(v) => v,
-                    None => crate::eval::derive::global_miss(heap, env, *s)?,
+                    None => crate::eval::derive::global_miss_in_arm(heap, env, *s, arm)?,
                 };
                 heap.push_root(v);
             }
@@ -98,13 +110,13 @@ pub(crate) fn exec_chunk(
                                 v
                             }
                             // Autoload (ADR-335); not cached — the load bumped the epoch.
-                            None => crate::eval::derive::global_miss(heap, env, *sym)?,
+                            None => crate::eval::derive::global_miss_in_arm(heap, env, *sym, arm)?,
                         }
                     }
                 } else {
                     match heap.env_get(env, *sym) {
                         Some(v) => v,
-                        None => crate::eval::derive::global_miss(heap, env, *sym)?,
+                        None => crate::eval::derive::global_miss_in_arm(heap, env, *sym, arm)?,
                     }
                 };
                 heap.push_root(v);
@@ -290,7 +302,7 @@ pub(crate) fn exec_chunk(
                     Some(c) => c,
                     // Autoload (ADR-335): a load collects; the operand is on `roots` and
                     // `cur_env` is re-read below.
-                    None => crate::eval::derive::global_miss(heap, cur_env, *head)
+                    None => crate::eval::derive::global_miss_in_arm(heap, cur_env, *head, arm)
                         .map_err(|e| tag_pos(e, pos))?,
                 };
                 let cur_env = heap.read_root_env(genv);
@@ -527,8 +539,10 @@ pub(crate) fn exec_chunk(
                                 None => {
                                     // Autoload (ADR-335). The load collects: re-read the
                                     // env and the args, which sit on `roots` above `drop_base`.
-                                    let v = crate::eval::derive::global_miss(heap, cur_env, *sym)
-                                        .map_err(|e| tag_pos(e, pos))?;
+                                    let v = crate::eval::derive::global_miss_in_arm(
+                                        heap, cur_env, *sym, arm,
+                                    )
+                                    .map_err(|e| tag_pos(e, pos))?;
                                     cur_env = heap.read_root_env(genv);
                                     argv.clear();
                                     argv.extend((0..argc).map(|k| heap.root_at(drop_base + k)));
@@ -576,8 +590,10 @@ pub(crate) fn exec_chunk(
                             Some(v) => v,
                             None => {
                                 // Autoload (ADR-335); see the IC-miss arm above.
-                                let v = crate::eval::derive::global_miss(heap, cur_env, *sym)
-                                    .map_err(|e| tag_pos(e, pos))?;
+                                let v = crate::eval::derive::global_miss_in_arm(
+                                    heap, cur_env, *sym, arm,
+                                )
+                                .map_err(|e| tag_pos(e, pos))?;
                                 cur_env = heap.read_root_env(genv);
                                 argv.clear();
                                 argv.extend((0..argc).map(|k| heap.root_at(drop_base + k)));
@@ -899,6 +915,12 @@ pub(crate) fn exec_chunk(
                     self_epoch = ep;
                     if let Some(name) = arm.dbg_name {
                         let env = heap.read_root_env(genv);
+                        // ADR-366: the epoch may also have moved because a miss IN THIS LOOP
+                        // loaded a module, which marked this arm stale and dropped its cache
+                        // entry at the next lookup — so the read below finds nothing (or a
+                        // fresh arm with another uid) and the transition hands the loop to the
+                        // recompiled body. The frame entered with the sentinel epoch so this
+                        // path runs at the first back-edge after the load (see entry).
                         let still_us = match heap.env_get(env, name) {
                             Some(Value::Fn(id)) => super::cached_arm_for(heap, id, *argc)
                                 .is_some_and(|other| other.uid == arm.uid),

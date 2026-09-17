@@ -502,6 +502,7 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                 self_global_ok: std::sync::atomic::AtomicBool::new(false),
                 ckpt_slot: u32::MAX,
                 compile_epoch: AtomicU64::new(0),
+                stale_bindings: std::sync::atomic::AtomicBool::new(false),
                 share_key: None,
                 shared_published: std::sync::atomic::AtomicBool::new(false),
                 fn_name: None,

@@ -205,6 +205,46 @@ impl Heap {
             self.vm_cache.borrow_mut().clear();
             self.seen_free_epoch.set(cur);
         }
+        // ADR-366: a body compiled before a module it references was lazily loaded has been
+        // marked stale somewhere in the runtime. Drop this process's cached entries that carry
+        // the mark — once per advance, so the arms' (cold) flags are read only here.
+        let stale = self.runtime.stale_gen.load(Ordering::Relaxed);
+        if self.seen_stale_gen.get() != stale {
+            self.vm_cache
+                .borrow_mut()
+                .retain(|_, e| !e.cc.as_ref().is_some_and(|cc| cc.stale_bindings()));
+            self.seen_stale_gen.set(stale);
+        }
+    }
+
+    /// Mark `arm` as compiled against bindings a module load has since changed (ADR-366): set
+    /// its flag, advance the runtime's `stale_gen` so every process's next cache lookup drops
+    /// it, and remember its `uid` so a running loop of this process adopts the recompile.
+    pub fn mark_arm_stale(&self, arm: &crate::eval::compile::CompiledArm) {
+        arm.stale_bindings.store(true, Ordering::Release);
+        self.stale_arm_uid.set(arm.uid);
+        self.runtime.stale_gen.fetch_add(1, Ordering::Release);
+    }
+
+    /// The `uid` of the arm this process most recently marked stale, or 0 (ADR-366).
+    #[inline]
+    pub fn stale_arm_hint(&self) -> u64 {
+        self.stale_arm_uid.get()
+    }
+
+    /// [`Self::vm_cache_arm`] WITHOUT the sync — the entry exactly as this process holds it,
+    /// stale mark and all. For the `%vm-arm-stale?` probe, whose question is whether an
+    /// entry is still waiting to be dropped; the syncing readers would answer it by dropping
+    /// it.
+    pub fn vm_cache_arm_raw(
+        &self,
+        k: VmCacheKey,
+        argc: usize,
+    ) -> Option<Arc<crate::eval::compile::CompiledArm>> {
+        self.vm_cache
+            .borrow()
+            .get(&k)
+            .and_then(|e| e.cc.as_ref().and_then(|cc| cc.arm_for(argc).cloned()))
     }
 
     /// Read-only lookup of the `argc` arm for closure key `k` — no handle, no memo.

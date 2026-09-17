@@ -284,6 +284,7 @@ pub(crate) fn compile_arm(
                                     self_global_ok: std::sync::atomic::AtomicBool::new(false),
                                     ckpt_slot: d.ckpt_slot,
                                     compile_epoch: AtomicU64::new(0),
+                                    stale_bindings: std::sync::atomic::AtomicBool::new(false),
                                     // Never published to the cross-process cache: this arm
                                     // is reachable only through its caller's derivation.
                                     share_key: None,
@@ -370,6 +371,7 @@ pub(crate) fn compile_arm(
         self_global_ok: std::sync::atomic::AtomicBool::new(false),
         ckpt_slot,
         compile_epoch: AtomicU64::new(0),
+        stale_bindings: std::sync::atomic::AtomicBool::new(false),
         share_key: None,
         shared_published: std::sync::atomic::AtomicBool::new(false),
         fn_name: trace_name,
@@ -612,14 +614,24 @@ pub(crate) fn cache_key(heap: &Heap, id: ClosureId) -> Option<VmCacheKey> {
 #[cfg(feature = "jit")]
 pub(crate) fn probe_arm_for(heap: &Heap, id: ClosureId, argc: usize) -> Option<Arc<CompiledArm>> {
     let key = cache_key(heap, id)?;
+    // A hit whose bindings a module load has since staled (ADR-366) is not what a caller
+    // would run next — fall through to a fresh throwaway, exactly as the call path will
+    // recompile it; the eviction itself is the call path's, this probe installs nothing.
     if let Some(hit) = heap.vm_cache_arm(key, argc) {
-        return hit;
+        if !hit.as_ref().is_some_and(|arm| {
+            arm.stale_bindings
+                .load(std::sync::atomic::Ordering::Acquire)
+        }) {
+            return hit;
+        }
     }
     // Read-only peek at the cross-process cache — an entry there was compiled by a real
     // call, so it carries its own metadata and is safe to use (and not ours to install).
     if !crate::core::heap::Heap::shared_arms_disabled() {
         if let Some(cc) = heap.shared_closure_lookup(key.shared_bits()) {
-            return cc.arm_for(argc).cloned();
+            if !cc.stale_bindings() {
+                return cc.arm_for(argc).cloned();
+            }
         }
     }
     compile_closure(heap, id).and_then(|cc| cc.arm_for(argc).cloned())
@@ -650,8 +662,24 @@ pub(crate) fn arm_calls_receive(arm: &CompiledArm) -> bool {
     })
 }
 
+/// Does this process's cached `argc` arm of `id` carry the ADR-366 stale mark? `None` when
+/// nothing is cached — which after a stale mark means "dropped by the lookup sync and not
+/// yet recompiled", a state a guard must tell apart from "recompiled" (`Some(false)`). A pure
+/// read of the per-process cache — nothing is compiled, evicted, synced or installed — for
+/// the `%vm-arm-stale?` probe.
+pub(crate) fn cached_arm_stale(heap: &Heap, id: ClosureId, argc: usize) -> Option<bool> {
+    let key = cache_key(heap, id)?;
+    heap.vm_cache_arm_raw(key, argc).map(|arm| {
+        arm.stale_bindings
+            .load(std::sync::atomic::Ordering::Acquire)
+    })
+}
+
 pub(crate) fn compiled_arm_for(heap: &Heap, id: ClosureId, argc: usize) -> Option<Arc<ArmHandle>> {
     let key = cache_key(heap, id)?;
+    let shareable = !crate::core::heap::Heap::shared_arms_disabled();
+    // (ADR-366: a body marked stale by a module load was dropped by the lookup's own sync,
+    // so a hit here is never stale, and a miss recompiles with the bindings present.)
     if let Some(hit) = heap.vm_cache_arm_handle(key, argc) {
         return hit;
     }
@@ -675,9 +703,13 @@ pub(crate) fn compiled_arm_for(heap: &Heap, id: ClosureId, argc: usize) -> Optio
     // slot layout is a property of the AST. Without this, a process that runs a fresh
     // closure once — every `receive` matcher, every spawned handler — recompiled it:
     // measured one compile per process at 8.1 µs, a third of `spawn-live`'s per-unit time.
-    let shareable = !crate::core::heap::Heap::shared_arms_disabled();
     if shareable {
-        if let Some(cc) = heap.shared_closure_lookup(key.shared_bits()) {
+        // A peer's stale entry (ADR-366) is dropped, not installed — whoever recompiles
+        // first republishes.
+        if let Some(cc) = heap
+            .shared_closure_lookup(key.shared_bits())
+            .filter(|cc| !cc.stale_bindings())
+        {
             heap.vm_cache_put(key, Some(cc.clone()));
             // Re-enter through the cache rather than deriving here, so this arity's handle
             // is memoized for every call after this one — but do NOT trust the cache to

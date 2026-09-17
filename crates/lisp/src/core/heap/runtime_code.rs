@@ -483,6 +483,15 @@ pub struct RuntimeCode {
     /// this. Relaxed: it only has to *change* (a lazy one-shot cache clear, no data
     /// publication gated on it — the freed slab is already unreachable by the drain).
     pub(super) free_epoch: AtomicU64,
+    /// Bumped each time a compiled arm is marked `stale_bindings` (ADR-366) — a body
+    /// compiled before a module it references was lazily loaded. Each process compares it
+    /// against its own [`Heap::seen_stale_gen`] on the `vm_cache` read path (beside the
+    /// `free_epoch` compare it already does) and, once per advance, drops its cached entries
+    /// whose arms carry the mark, so the next resolution recompiles them. Rare — once per
+    /// module a running program lazily loads — so the per-lookup cost is one load of a field
+    /// on the line the lookup reads anyway; the arm's own flag (a cold line) is read only
+    /// during that scan.
+    pub(super) stale_gen: AtomicU64,
     /// **RUNTIME collector — Stage 4 (single-flight aging, ADR-091).** Held for the
     /// duration of an `age + migrate_live_globals + begin_gen_drain` sequence so at
     /// most one process ages at a time. Two processes racing the safepoint could both
@@ -651,6 +660,7 @@ impl Default for RuntimeCode {
             drain_acked: AtomicU64::new(0),
             drain_acks: RwLock::new(HashMap::new()),
             free_epoch: AtomicU64::new(0),
+            stale_gen: AtomicU64::new(0),
             aging: AtomicBool::new(false),
             aged_count: AtomicU64::new(0),
             promote_lock: RwLock::new(()),
@@ -786,6 +796,7 @@ impl RuntimeCode {
             drain_acked: AtomicU64::new(0),
             drain_acks: RwLock::new(HashMap::new()),
             free_epoch: AtomicU64::new(0),
+            stale_gen: AtomicU64::new(0),
             aging: AtomicBool::new(false),
             aged_count: AtomicU64::new(0),
             promote_lock: RwLock::new(()),

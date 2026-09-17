@@ -21876,6 +21876,12 @@ still failing on a broken transitively-referenced module. `make ab --floor` must
 `startup` flat on a machine where it may run — a lazy load can only remove work from the
 rows, so a movement there is a mechanism cost on the hit path, which item 1 forbids.
 
+**Addendum (2026-09-17, ADR-366).** "A lazy load can only remove work from the rows" was
+false for code compiled BEFORE the load: the compile-time inlines (`resolve_prim*`, the leaf
+splice) need the head bound, so a body compiled against an unloaded module stayed generic
+for the process — `pipeline` at 2.8× under `BROOD_NO_CHECK=1`. ADR-366 makes the load
+recompile that body.
+
 ## ADR-336 — Memoised view fragments: `ui-memo`, and the frame carries its own cache
 
 **Status:** accepted and implemented 2026-09-12 (`std/editor/ui.blsp`: `*ui-memo*`,
@@ -23414,3 +23420,75 @@ terms are the ones that are genuinely false. Pinned by
 `check::tests::signatures::a_record_whose_field_is_a_union_passes_a_split_union_of_shapes`
 (which carries the componentwise neighbour that must still warn); each was sabotage-verified
 to red on its own mechanism alone.
+
+## ADR-366 — A body compiled before its module loaded is recompiled once it has
+
+**Status.** Accepted (2026-09-17). Follows ADR-335 (lazy module loading).
+
+**Context.** ADR-335 made a qualified function reference load its module at the first call
+that reaches it, on the global-lookup miss path. The compiler, meanwhile, decides at
+bytecode-compile time — which is a closure's FIRST activation — everything it can read from
+the global table: `resolve_prim*` follows a bound head through its thin wrapper to a kernel
+primitive and emits `PrimOp::Rem` in place of a call; the JIT derives the leaf splice from the
+callee's compiled body. When the head's module is not loaded yet, none of that applies: the
+head is unbound, the call compiles generic, and the miss that then loads the module leaves the
+chunk exactly as it was — for the rest of the process, and, through the shared body cache
+(ADR-175/215), for every process. Correct, and slow: the `pipeline` row under
+`BROOD_NO_CHECK=1` executed **591M instructions against 183M** with the same modules loaded
+eagerly (2.8×); a 100k-iteration loop calling `math/rem` read 302M against 157M (~1450 extra
+instructions per call, at both tiers). The JIT's inlined upgrade read `leaf-derivation-stale`
+for such an arm forever, because the tier-up pre-load (ADR-335 item 4) bumped the epoch AFTER
+the arm's compile epoch had been stamped. Found on 2026-09-17 attributing the benchmark
+column: the pre-flight type check loads eagerly, so `brood file` never showed it; skipping the
+check did — the "raw eval for timing" flag was the costlier path.
+
+**Decision.** A load that a miss triggers invalidates the body that missed. `CompiledArm`
+carries a `stale_bindings` mark, set through `Heap::mark_arm_stale` at exactly two places: a
+global miss inside a compiled arm whose `ensure_required` moved the epoch
+(`derive::global_miss_in_arm`, the six bytecode miss sites), and the tier-up pre-load when it
+loads anything (now run BEFORE the compile epoch is stamped; a load there declines to lower
+the stale chunk and runs the VM). Marking also advances a runtime-wide `stale_gen` beside
+`free_epoch`, and the per-process `vm_cache` read path — which already compares
+`free_epoch` against what it last saw — compares that too, and once per advance drops its
+entries whose arms carry the mark. So the mark is honoured where every caller passes after
+the load has emptied their inline caches, the cache lookup, and `compiled_arm_for` simply
+misses and recompiles; the shared-entry install and `probe_arm_for` skip a marked entry
+rather than serving it. A long-running single activation — a loop entered once, iterating by
+`SelfCall`, which never passes a lookup — adopts the recompile through the `SelfCall`
+hot-reload guard's existing tail transition: marking records the arm's `uid` in a per-process
+hint, a frame whose arm matches it enters `exec_chunk` with a sentinel epoch, so its first
+back-edge takes the guard's slow path, whose lookup finds the entry dropped ("not us") and
+applies the name afresh. (The frame re-enters after every non-tail call in the body, so a
+plain epoch re-read would hide the load; a hint rather than the arm's own flag because the
+flag sits on a cold line of a large struct — reading it per entry cost `pipeline` 4% at the
+VM ceiling.) One recompile per (arm, first load) — the load is what earns it — and on the hit
+paths one load of a field already on the line the lookup reads, and one per-process cell
+compare per frame entry.
+
+**Rejected.** Loading at bytecode-compile time ("an arm about to run has earned what it
+names"): a dispatcher's `main` naming twenty-five subcommand modules would load all of them at
+its first activation — ADR-335's own motivating case, back. Refusing to tier a stale arm: a
+HOF driver holds the arm for a whole fold, so a stale reducer would run interpreted for the
+fold's length, worse than the generic-call native it gets today; the recompile is best-effort
+at the next lookup, never a refusal.
+
+**Guards.** `tests/lazy_load_test.blsp` "a body compiled before its module loaded is
+recompiled once it has": a child `brood` (the runner loads eagerly) whose `go` calls
+`math/rem` — `%vm-arm-ops` shows `Call(head=math/rem)` before the first call and
+`Prim2SlotInt(Rem …)` after it (sabotage: eviction disabled → `warm=true` fails); and "a loop
+that loaded the module on its first iteration finishes on the recompiled body" —
+`%vm-arm-stale?`, a raw three-state read (`false` present and current, `true` marked, `nil`
+nothing cached), answers `false` when the loop returns (sabotage: the entry sentinel disabled
+→ the old body dropped and nothing recompiled, `nil`). A first "sabotage" of the `SelfCall`
+mark test passed, which is how that test was found redundant — the guard's own lookup already
+sees the dropped entry — and removed. `%vm-arm-ops` (the chunk's instruction spellings) and
+`%vm-arm-stale?` are dev-tools primitives added for these; `BROOD_TRACE_COMPILE=1` prints a
+`[compile] stale-bindings arm=…` line at each mark.
+
+**Consequences.** `BROOD_NO_CHECK=1` is now the cheapest way to run a program (`pipeline`
+183M against 221M checked), which reframes KI-150: the pre-flight check's eager loading was the
+only thing making a checked run faster than an unchecked one, and it no longer is. A module
+load is now also a recompile trigger, so `BROOD_TRACE_COMPILE` counts one more compile per
+arm that lazily loaded something; a program that lazily loads N modules from one hot loop
+takes N nested tail transitions, bounded by N.
+

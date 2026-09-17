@@ -904,6 +904,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-17** — ADR-362: the `supervisor` row **0.88 → 0.66 s (−25%)** with no edit to the supervisor — the `receive` matcher chains clauses as an `or` (no fail thunks: five closures per message and a call per failing clause, gone), the type predicates are a prim (`vector?` 168 → 67 ns on the VM, 1 ns native), `%vector-ref`/`%vector-length` inline (the `VectorRef` entry had named the native by its pre-`seq/` spelling since the rename), and `MapGet` is default-on with a plain map's miss answered inline (hit 322 → 66 ns, miss 519 → 123).
 - **2026-09-17** — C9 closed (ADR-364): the last two joint-coverage holes ADR-262 documented, both false positives at a call. A **record is a product** over its declared keys (`record_covered_by` on ADR-289's subset rule, so `{a: int|string}` ⊆ `{a: int} | {a: string}`) with the undeclared remainder deliberately not a position — it stands for unboundedly many independent keys, so it must fit one candidate's rest, the vector argument — and a **bounded interval of ≤64 values is the literal set it denotes** (`enumerated_int_range`, int-literal rule only), so `(int 1 2)` ⊆ `1 | 2`. The neighbours that must stay false (`map<K, A|B>` vs split maps, the 2-field componentwise case) are pinned beside each; both mechanisms sabotage-verified to red their own pins alone. 585/585 types, strict 0 + the 8 advisory notes, both checker differentials agree.
 - **2026-09-17** — CI's last two reds closed (the checker's whole-tree differentials timed out in BOTH jobs — tier pin + `image_matches_source`'s budget, `669c580c`; bedit's ratchet, `03e955c6`) and the benchmark column refreshed on request at `a406f9a6` (brood-benchmarks `d2646f4`): FLAT, except `pipeline` +7.3% which is the pre-flight type check growing 131M → 144M instructions per file (the run +0.8%) — KI-150 reopened by the trigger its mitigation named. Found beside it, unexplained: `BROOD_NO_CHECK=1` runs `pipeline` at 2.8× the instructions.
+- **2026-09-17** — KI-163 / ADR-366: a body compiled before its module lazily loaded kept its pre-load shape (generic call where the eager compile inlines `PrimOp::Rem`) for the whole process, and the JIT leaf upgrade read stale forever — the `BROOD_NO_CHECK=1` 2.8× oddity of the afternoon. The load that a miss triggers now marks the arm; the cache lookups evict and recompile it, and a running `SelfCall` loop adopts it through the hot-reload guard. `pipeline` no-check 591M → 184M instructions (eager 183M); the loop 302M → 163M. Two new dev probes, `%vm-arm-ops` / `%vm-arm-stale?`; two guards, sabotage-verified.
 - **2026-09-17** — the pre-push hook has been INERT on this machine: a global `core.hooksPath` *replaces* `.git/hooks`, so `make hooks` installs a gate git never consults — and the override directory holds a deliberate `commit-msg` (which chains to a repo-local one for exactly this reason) and no `pre-push`. Found when an unformatted commit reached `main` through a gate that reported "installed". `make hooks` now WARNS with the path, `scripts/git-hooks/global-pre-push` is the chaining fix, and CLAUDE.md records the second half of it: `make prepush | tail` reports the PIPE's exit status, not the gate's.
 - **2026-09-17** — C10 answered by probe and closed with no checker change: ADR-350's intervals and the int-closed/float-contagion rules had already taken the merely-wider residue, and the answer is a **mode split** neither mode shows alone — a *precise* mismatch (float contagion, exact division, an interval arithmetic cannot fit) is named in both modes; an *over-approximated* one (a call's result) is named under `--strict` and deferred in plain, the gradual valve. The residue itself lands there: `(sig f (number -> int))` over `(+ x 1)` IS reported under strict, because the declaration is part of the claim — a parameter admitting floats makes the promise false with no analysis of the body. Fourteen provable shapes silent in both modes, so the false positive it was left silent for does not occur. Three pins, sabotage-verified three ways (strict never/always applies reds the split in opposite directions; the return check disabled reds both warning pins).
 - **2026-09-17** — KI-162: `nest check --fix-sigs` wrote every `sig` ABOVE its `defn`, the one placement `sig_placement.rs` forbids tree-wide. The locator reads the CST now (`sig-defn-sites`: root children, each node's newlines counted for the extent), so the sig lands one past the form's last line, a head laid out across lines is located instead of skipped, and "top level" is *root child* rather than *column 0* — a `check-allow`-wrapped `defn` still declines. Recorded beside the fix: the load failure the rule exists for **did not reproduce** (forward sigs over `defn`, `defn-` and a wrapped pair all loaded under contracts and enforced the contract), so the rule is what is verified, not the breakage.
@@ -14240,3 +14241,72 @@ One thing found and not chased, for the handoff's watch list: with `BROOD_NO_CHE
 1387M — normal). Skipping the check sends this program down a 2.8× costlier path; the check
 is doing work the run reuses. Start with `BROOD_IMAGE_TRACE=1` and `BROOD_TRACE_COMPILE=1`
 on the two runs.
+
+## 2026-09-17 — the 2.8× that was not the checker: lazily-loaded code kept its pre-load compile (KI-163, ADR-366)
+
+The afternoon's column refresh left one unexplained fact: `pipeline` with the pre-flight
+check SKIPPED executed 591M instructions against 221M with it. `BROOD_IMAGE_TRACE` showed
+the checked run materialising `map`, `reflect` and `seq` that the unchecked run never touched,
+and `BROOD_NO_LAZY_LOAD=1` on the unchecked run read **183M** — the cheapest configuration of
+all. So the lazy load path was costing ~400M on this program. Probing one qualified name at a
+time in a 100k loop narrowed it to the names `ir.rs` keys a `PrimOp` on: `math/rem` and
+`math/max` paid ~1450 instructions per call under lazy loading and nothing eager, while
+`math/abs`, `os/env` and `string/upcase` paid nothing either way. `(def r math/rem)` before
+the loop removed it entirely. The counters (`make perf-brood`, `BROOD_PERF_STATS=1`) said
+where: 430k extra `env_get` — four per iteration — and `BROOD_JIT_BAIL_TRACE` said
+`leaf-derivation-stale` for the loop's arm.
+
+The mechanism is compile-time reading of the global table. A closure bytecode-compiles at its
+first activation; `resolve_prim` follows a BOUND head through its thin wrapper to the kernel
+primitive and emits `PrimOp::Rem`, and the JIT derives the leaf splice from the callee's
+body. Under ADR-335 the module is not loaded when the calling body compiles — the head is
+unbound — so the call compiles generic, the first execution's miss loads the module, and the
+chunk stays as compiled for the process (and every process, through the shared body cache).
+At tier-up, `preload_arm_globals` ran after `compile_epoch` was stamped, so its own load moved
+the epoch past the stamp and the inlined upgrade bailed stale on every attempt. The pre-flight
+check runs under an eager scope, which is why no `brood file` and no benchmark row ever
+showed it.
+
+The fix (ADR-366): the load that a miss triggers marks the arm that missed
+(`CompiledArm::stale_bindings` via `Heap::mark_arm_stale`, in `global_miss_in_arm` at the
+six bytecode miss sites, and at tier-up when the pre-load — now run before the epoch stamp —
+loads anything). Marking advances a runtime `stale_gen`; the per-process cache read path
+compares it beside `free_epoch` and drops marked entries once per advance, so
+`compiled_arm_for` misses and recompiles; the shared install and `probe_arm_for` skip a
+marked entry. A loop entered once and iterating by `SelfCall` never passes a lookup, so it
+adopts the recompile through the `SelfCall` hot-reload guard: marking records the arm's uid
+in a per-process hint, a matching frame enters `exec_chunk` with a sentinel epoch, and the
+guard's lookup finds the entry dropped and applies the name afresh — the first attempt
+compared epochs only, and failed, because the frame re-enters after every non-tail call in
+the body and a fresh epoch read hid the load. Rejected: loading at compile time (the
+dispatcher case ADR-335 exists for), and refusing to tier a stale arm (a fold's reducer
+would run interpreted for the whole fold).
+
+Two things `make ab --floor` taught on the way. Against `084060fb` the sweep read `pipeline`
++7.7% — the checker-cost delta attributed in the afternoon, not this change; the control
+for a change is its OWN base (`07550da7`), where every row read inside the rule. And at the
+VM ceiling (`make ab-vm`) `pipeline` read **+4.0% against a 0.0% floor, three runs**: the
+first version tested the arm's flag at every frame entry and at every cache-memo hit, and
+that flag sits at the tail of a very large struct — a cold line per call. Moving the test to
+state those paths already touch (the runtime generation beside `free_epoch`; a per-process
+uid hint at entry) is what the mechanism above describes.
+
+Measured on the fixed release-fast binary: `pipeline` no-check **591M → 184M** (eager 183M,
+checked 221M unchanged); the `math/rem` loop **302M → 163M** (eager 156M), and at the VM tier
+409M → 279M. Two dev probes carry the guards: `%vm-arm-ops` (the chunk's instruction
+spellings) shows `Call(head=math/rem)` before the first call and `Prim2SlotInt(Rem …)` after
+it; `%vm-arm-stale?` (read-only) is false when a loop that loaded a fixture on its first
+iteration returns (`false`, not `nil`: the probe is a raw three-state read, because the
+lookup sync itself drops a marked entry during the loop's own calls, and "dropped, never
+recompiled" had to stay distinguishable from "recompiled"). Both in a child `brood` — the
+runner loads eagerly — and both sabotage-verified: the lookup sync disabled reds both, the
+entry sentinel disabled reds the loop guard with `nil`. Sabotaging the `SelfCall` mark test
+passed — the guard's own lookup already sees the dropped entry — so that test was redundant
+and came out. A first sabotage "passed" because merging origin had moved the sha
+and the debug binary's std image was stale, so the child loaded the head eagerly and the
+test was vacuous: rebuild the image (`cargo build -p nest && scripts/build-std-image.sh`)
+before believing a child-process negative.
+
+Consequence for KI-150: `BROOD_NO_CHECK=1` is the cheapest run again, so the pre-flight
+check's cost is now purely the checker's — the eager loading that made a checked run faster
+than an unchecked one is no longer needed for speed.
