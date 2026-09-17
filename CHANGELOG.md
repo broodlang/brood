@@ -4,7 +4,16 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
-## Unreleased
+## v0.30.1 — a timed-out ranking cleans up after itself; std/fuzzy is strict-clean
+**A timed-out sharded ranking leaves nothing in the caller's mailbox.** `fuzzy/top`'s
+shards are killed when they miss `*fuzzy-worker-timeout-ms*`, and that was assumed to stop
+their replies. It does not — `exit :kill` is not synchronous, so a worker can already be
+inside `send` and its reply lands after the gather has stopped looking. At a 1 ms budget
+over 8k candidates, seven replies were stranded per ranking, in a caller that is an
+editor's loop and lives for a whole session. The timeout path now sweeps what already
+arrived (and uses it — that shard did the work), and the next sharded ranking discards
+anything that landed later, which is where the remaining race can actually be closed.
+
 
 **The tagged-result idiom holds through inference**: a union past its four-term cap
 merges same-tag shapes first (five `[:error …]` arms no longer hull the `[:ok …]` one),
