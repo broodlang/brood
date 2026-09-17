@@ -640,6 +640,17 @@ pub struct CompiledArm {
     /// once per activation (not per loop iteration) is sufficient and keeps hot loops
     /// fast. Only meaningful once `jit_code` holds a real pointer.
     pub compile_epoch: std::sync::atomic::AtomicU64,
+    /// This body was compiled against bindings a LATER module load changed (ADR-366): a
+    /// global miss inside it — or the tier-up pre-load of what it names — actually loaded a
+    /// module. Every compile-time decision that read the global table (the `resolve_prim*`
+    /// inlines, the thin-wrapper elision, the leaf derivation) was made without that
+    /// module's bindings, so the chunk is CORRECT and SLOW — `(math/rem i 3)` compiled to a
+    /// generic call where the eager compile inlines `PrimOp::Rem`, 2.8x the instructions on
+    /// `pipeline`. Set once; honoured by the cache lookups (`compiled_arm_for`,
+    /// `probe_arm_for`), which evict the entry so the next activation recompiles with the
+    /// bindings present, and by the tiering election, which never lowers a stale chunk.
+    /// One recompile per (arm, first load) — the load is what earns it.
+    pub stale_bindings: std::sync::atomic::AtomicBool,
     /// Shared-JIT key (the spawn lever, ADR-101): `Some((runtime_id, argc))` for a
     /// simple fixed-arity **RUNTIME/PRELUDE** closure arm — the stable identity under
     /// which this arm's compiled native code can be shared across all processes of a
@@ -848,6 +859,17 @@ impl CompiledClosure {
     #[cfg(test)]
     pub(crate) fn dbg_arms(&self) -> impl Iterator<Item = &Arc<CompiledArm>> {
         self.arms.iter().filter_map(|a| a.compiled.as_ref())
+    }
+
+    /// Was any arm of this closure compiled against bindings a later module load changed
+    /// (ADR-366)? A cache entry answering true is evicted rather than served.
+    pub(crate) fn stale_bindings(&self) -> bool {
+        self.arms.iter().any(|a| {
+            a.compiled.as_ref().is_some_and(|arm| {
+                arm.stale_bindings
+                    .load(std::sync::atomic::Ordering::Acquire)
+            })
+        })
     }
 
     pub(crate) fn arm_for(&self, argc: usize) -> Option<&Arc<CompiledArm>> {
@@ -1312,8 +1334,9 @@ impl Inst {
     }
 
     /// Compact name for `BROOD_VM_TRACE` output — variant + key operands,
-    /// no AtomicU64 (not Debug-able).
-    #[cfg(debug_assertions)]
+    /// no AtomicU64 (not Debug-able). Also the spelling `%vm-arm-ops` (dev-tools) reports,
+    /// so a release dev binary carries it too.
+    #[cfg(any(debug_assertions, feature = "dev-tools"))]
     pub(crate) fn trace_name(&self) -> String {
         match self {
             Inst::RecordLine(line) => format!("RecordLine({line})"),

@@ -767,6 +767,14 @@ pub struct Heap {
     /// can't alias a reused handle. Cheap: one relaxed atomic load + compare per
     /// closure-call cache lookup, a full clear only on the rare free.
     seen_free_epoch: Cell<u64>,
+    /// The runtime `stale_gen` this process last synced its `vm_cache` against (ADR-366).
+    seen_stale_gen: Cell<u64>,
+    /// The `uid` of the arm most recently marked stale FROM THIS PROCESS (ADR-366), so a
+    /// running `SelfCall` loop of that arm re-enters `exec_chunk` with the sentinel epoch and
+    /// adopts the recompile at its next back-edge. One hint, not a set: a second stale arm
+    /// in the same process overwrites it and simply recompiles at its next lookup instead.
+    /// Read at every frame entry — a hot per-process cell, not the arm's cold flag.
+    stale_arm_uid: Cell<u64>,
     /// **RUNTIME collector — Stage 4 (drain free-attempt throttle, ADR-091).** A
     /// per-process tick rate-limiting how often this process runs the multigen drain
     /// **free-attempt** ([`crate::process::free_drained_gen`] → the O·live-process
@@ -1475,6 +1483,8 @@ impl Heap {
             gc_trace: gc_trace_default(),
             vm_cache: RefCell::new(VmCacheMap::default()),
             seen_free_epoch: Cell::new(0),
+            seen_stale_gen: Cell::new(0),
+            stale_arm_uid: Cell::new(0),
             rt_drain_tick: Cell::new(0),
             acked_drain_epoch: Cell::new(0),
             drain_report_tick: Cell::new(0),
@@ -1560,6 +1570,8 @@ impl Heap {
             gc_trace: gc_trace_default(),
             vm_cache: RefCell::new(VmCacheMap::default()),
             seen_free_epoch: Cell::new(0),
+            seen_stale_gen: Cell::new(0),
+            stale_arm_uid: Cell::new(0),
             rt_drain_tick: Cell::new(0),
             acked_drain_epoch: Cell::new(0),
             drain_report_tick: Cell::new(0),

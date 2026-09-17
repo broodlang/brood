@@ -546,6 +546,35 @@ pub(crate) fn global_miss(heap: &mut Heap, env: EnvId, sym: Symbol) -> LispResul
     Err(crate::eval::unbound_error(heap, sym))
 }
 
+/// [`global_miss`] from inside a compiled arm's execution (ADR-366). If the miss actually
+/// LOADED a module — the global epoch moved across it — the arm's body was compiled without
+/// that module's bindings, so its compile-time decisions are stale: mark it, and the cache
+/// lookups recompile it at its next activation (see `CompiledArm::stale_bindings`). A miss
+/// that loaded nothing (a plain unbound name, an absent module) marks nothing.
+pub(crate) fn global_miss_in_arm(
+    heap: &mut Heap,
+    env: EnvId,
+    sym: Symbol,
+    arm: &crate::eval::compile::CompiledArm,
+) -> LispResult {
+    let epoch = heap.global_epoch();
+    let v = global_miss(heap, env, sym)?;
+    if heap.global_epoch() != epoch {
+        heap.mark_arm_stale(arm);
+        if std::env::var_os("BROOD_TRACE_COMPILE").is_some() {
+            let name = arm
+                .dbg_name
+                .map(value::symbol_name_ref)
+                .unwrap_or("<closure>");
+            eprintln!(
+                "[compile] stale-bindings arm={name}: a miss on {} loaded its module; recompiles at its next activation",
+                value::symbol_name_ref(sym)
+            );
+        }
+    }
+    Ok(v)
+}
+
 // ===== The image's kind index: which qualified HEADS may defer (ADR-335 item 2) ===========
 //
 // A qualified call head into an unloaded module must load NOW if it might be a macro — a

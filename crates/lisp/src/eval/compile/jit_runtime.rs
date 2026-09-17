@@ -349,6 +349,30 @@ pub(crate) fn jit_tier_in_frame(
             arm.jit_code.store(crate::jit::BAILED, Release);
             return None;
         }
+        // ADR-335: load what the arm names BEFORE it goes native (see `preload_arm_globals`) —
+        // and BEFORE the compile epoch is recorded, or the load's own `def`s would stale the
+        // epoch we are about to stamp. If it loaded anything, this chunk was compiled without
+        // those bindings (ADR-366): it must not be lowered as it stands — its calls into the
+        // module are generic where the recompile inlines them, and its leaf derivation is
+        // stale by construction (`leaf-derivation-stale` was this, permanently). Mark it and
+        // run the VM; the next activation recompiles and re-tiers from the better chunk.
+        {
+            let epoch = heap.global_epoch();
+            preload_arm_globals(arm, heap, heap.read_root_env(env));
+            if heap.global_epoch() != epoch {
+                heap.mark_arm_stale(arm);
+                if std::env::var_os("BROOD_TRACE_COMPILE").is_some() {
+                    let name = arm
+                        .dbg_name
+                        .map(crate::core::value::symbol_name_ref)
+                        .unwrap_or("<closure>");
+                    eprintln!(
+                        "[compile] stale-bindings arm={name}: the tier-up pre-load loaded a module; recompiles at its next activation"
+                    );
+                }
+                return None;
+            }
+        }
         arm.compile_epoch.store(heap.global_epoch(), Release);
         if arm
             .jit_code
@@ -366,9 +390,6 @@ pub(crate) fn jit_tier_in_frame(
             // The frame profile types only *params*; record the arm's float-valued free
             // globals too, so a float-context arm whose floats arrive from a `def`'d
             // constant isn't lowered onto the integer path (see `record_float_globals`).
-            // ADR-335: load what the arm names BEFORE it goes native (see its doc) — this
-            // may collect, so `genv` is read after it.
-            preload_arm_globals(arm, heap, heap.read_root_env(env));
             let genv = heap.read_root_env(env);
             record_float_globals(arm, heap, genv);
             record_self_global_ok(arm, heap, genv);

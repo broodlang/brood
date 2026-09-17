@@ -167,6 +167,22 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         jit_arm_state);
     #[cfg(feature = "dev-tools")]
     primitives.def(
+        "%vm-arm-ops",
+        Arity::exact(2),
+        Sig::new(vec![callable, int], vec_or_nil),
+        &["f", "argc"],
+        "The bytecode of `f`'s `argc`-ary arm as this process would RUN it now — a vector of instruction spellings (`\"Prim2(Rem, math/rem)\"`, `\"Call(…)\"`, `\"SelfCall(…)\"`, …), compiling and caching the body first if no call has yet, exactly as a call would. Nil when `f` is not a VM-compiled closure or has no arm for `argc`. The probe for a test about compile SHAPE — did a call inline to a primitive, was a body compiled before its module loaded recompiled once it had (ADR-366) — where `%jit-arm-state` answers only which tier the arm reached. Dev-tools only.",
+        vm_arm_ops);
+    #[cfg(feature = "dev-tools")]
+    primitives.def(
+        "%vm-arm-stale?",
+        Arity::exact(2),
+        Sig::new(vec![callable, int], bool_or_nil),
+        &["f", "argc"],
+        "The compiled body this process holds for `f`'s `argc`-ary arm, by its ADR-366 state: `false` — present and current; `true` — present but marked stale (compiled before a module it references was loaded, the mark not yet acted on); `nil` — nothing cached, which after a mark means the lookup sync dropped it and nothing has recompiled it yet. Read-only: it neither compiles, evicts nor syncs, unlike `%vm-arm-ops`, so a guard can ask whether a loop that lazily loaded a module DURING its run finished on the recompiled body (`false`) or merely had its old body dropped (`nil`). Dev-tools only.",
+        vm_arm_stale_p);
+    #[cfg(feature = "dev-tools")]
+    primitives.def(
         "%tree-walker?",
         Arity::exact(0),
         Sig::nullary(bool_ty),
@@ -628,6 +644,61 @@ pub(super) fn jit_arm_state(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
         (value::kw("state"), st),
         (value::kw("deopts"), Value::int(deopts)),
     ]))
+}
+
+/// `(%vm-arm-ops f argc)` — see the registration.
+#[cfg(feature = "dev-tools")]
+pub(super) fn vm_arm_ops(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let argc = match args[1] {
+        Value::Int(n) if n >= 0 => n as usize,
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "%vm-arm-ops",
+                "non-negative int (argc)",
+                other,
+            ))
+        }
+    };
+    let Value::Fn(id) = args[0] else {
+        return Ok(Value::nil());
+    };
+    // The call path's own resolution, so a stale body (ADR-366) is recompiled here exactly
+    // as the next call would recompile it.
+    let Some(arm) = crate::eval::compile::compiled_arm_for(heap, id, argc) else {
+        return Ok(Value::nil());
+    };
+    let names: Vec<String> = match arm.chunk.as_ref() {
+        Some(chunk) => chunk.code.iter().map(|inst| inst.trace_name()).collect(),
+        None => return Ok(Value::nil()),
+    };
+    let items: Vec<Value> = names.iter().map(|n| heap.alloc_string(n)).collect();
+    Ok(heap.alloc_vector(items))
+}
+
+/// `(%vm-arm-stale? f argc)` — see the registration.
+#[cfg(feature = "dev-tools")]
+pub(super) fn vm_arm_stale_p(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let argc = match args[1] {
+        Value::Int(n) if n >= 0 => n as usize,
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "%vm-arm-stale?",
+                "non-negative int (argc)",
+                other,
+            ))
+        }
+    };
+    let Value::Fn(id) = args[0] else {
+        return Ok(Value::nil());
+    };
+    Ok(
+        match crate::eval::compile::cached_arm_stale(heap, id, argc) {
+            Some(stale) => Value::boolean(stale),
+            None => Value::nil(),
+        },
+    )
 }
 
 // Registered only under `dev-tools` (mod.rs's DEV block, whose comment says the fn defs

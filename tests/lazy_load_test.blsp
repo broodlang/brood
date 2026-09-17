@@ -32,6 +32,8 @@
     "(defn answer () 42)\n"))
 ;; The module a hot function's COLD branch references.
 (fixture "lazyprobe-jit" "(defn answer () 42)\n")
+;; The module a running LOOP loads on its first iteration (ADR-366).
+(fixture "lazyprobe-spin" "(defn answer () 1)\n")
 ;; A module whose load throws — the error must surface at first use, not be hidden.
 (fixture "lazyprobe-broken" "(error \"lazyprobe-broken: deliberately broken\")\n")
 
@@ -206,6 +208,76 @@
     ;; should have expanded and did not would be a silently different program.
     (is (loaded? "telemetry"))
     (assert= 7 (run-fixture lazyprobe-mac/go))))
+
+;; --- ADR-366: a body compiled before its module loaded is recompiled once it has -------
+;;
+;; `go` compiles at its FIRST call, while `math` is not yet loaded: `math/rem` is unbound,
+;; so the compiler cannot follow it to `%rem` and emits a generic call; that call's miss
+;; then loads `math`. Before ADR-366 the chunk ran as compiled for the rest of the process —
+;; correct, and 2.8x the instructions of the eager compile on the `pipeline` row under
+;; `BROOD_NO_CHECK=1` — and the JIT's leaf derivation read stale forever. Now the miss
+;; flags the arm and the next lookup recompiles it, so the probe shows the primitive
+;; inlined where a moment earlier it showed the call. A child process, for the same reason
+;; as the imaged-head case above: the suite process has `math` loaded long before this runs.
+(describe "a body compiled before its module loaded is recompiled once it has (ADR-366)"
+  (test "the call into the module becomes the inlined primitive at the next activation"
+    (let (dir (path/dirname (or (os/exe-path) ""))
+          exe (first (seq/filter [(path/join dir "brood") (path/join dir ".." "brood")]
+                       file/exists?))
+          prog (path/temp "lazyshape-")
+          _ (file/spit prog
+              (string/join ["(defn go (i acc) (if (< i 3) (go (inc i) (+ acc (math/rem i 3))) acc))"
+                             "(defn rem-inlined? () (any? (%vm-arm-ops go 2) (fn (op) (includes? op \"Rem\"))))"
+                             "(io/puts (str \"before=\" (contains? *features* \"math\") \" imaged=\" (%std-image-installed)))"
+                             "(io/puts (str \"cold=\" (rem-inlined?)))"
+                             "(io/puts (str \"v=\" (go 0 0)))"
+                             "(io/puts (str \"warm=\" (rem-inlined?)))"
+                             "(io/puts (str \"after=\" (contains? *features* \"math\")))"]
+                "\n"))
+          result (if exe (os/cmd "env" ["BROOD_NO_CHECK=1" exe prog]) nil))
+      (is (or (nil? exe) (string? exe)))
+      (when result
+        (assert= "" (if (= (get result :exit) 0) "" (get result :stderr "")))
+        (let (out (os/cmd-out result))
+          (is (includes? out "v=3"))
+          (is (includes? out "after=true"))
+          ;; The recompile: after the load, the call site is the primitive. This half holds
+          ;; whichever way the module came in.
+          (is (includes? out "warm=true"))
+          ;; The deferral half needs the image's kind index (an un-imaged child loads the
+          ;; head eagerly, and then there is nothing to recompile): only then was `math`
+          ;; unloaded when `go` compiled, and only then does the cold shape show the call.
+          (when (includes? out "imaged=true")
+            (is (includes? out "before=false"))
+            (is (includes? out "cold=false")))))))
+
+  ;; A long-running activation never passes a cache lookup: `spin-drive` is entered ONCE and
+  ;; iterates by `SelfCall`. Its first iteration's operand miss loads the fixture and marks
+  ;; the arm; the next `SelfCall` sees the epoch move and, the arm being stale, hands the loop
+  ;; to the recompiled body. So when the call returns, the cached arm is already the fresh
+  ;; one — read WITHOUT touching it (`%vm-arm-ops` would itself recompile a stale arm). A
+  ;; child, as above: the runner loads the fixture eagerly before a test body runs. The probe
+  ;; is dev-tools only, so a lean sibling `brood` answers `:no-probe` and asserts nothing.
+  (test "a loop that loaded the module on its first iteration finishes on the recompiled body"
+    (let (out (in-child
+                (str "(defn spin-drive (i acc) (if (< i 40) (spin-drive (+ i 1) (+ acc (apply lazyprobe-spin/answer nil))) acc))\n"
+                  "(io/puts (str \"before=\" (contains? *features* \"lazyprobe-spin\")))\n"
+                  "(io/puts (str \"sum=\" (spin-drive 0 0)))\n"
+                  "(io/puts (str \"after=\" (contains? *features* \"lazyprobe-spin\")"
+                  ;; No VM arm exists under the tree-walker ceiling (the differential job's
+                  ;; `BROOD_VM=0`, inherited by the child), so the probe would answer nil there
+                  ;; for the wrong reason: say so instead.
+                  " \" stale=\" (cond (not (bound? '%vm-arm-stale?)) :no-probe"
+                  " (%tree-walker?) :tree-walker" " else (%vm-arm-stale? spin-drive 2))))\n")))
+      (when out
+        (is (includes? out "before=false"))
+        (is (includes? out "sum=40"))
+        (is (includes? out "after=true"))
+        ;; Exactly `false`: present and current. `true` would be the mark unacted on; `nil`
+        ;; the old body dropped by a lookup's sync during the loop and nothing recompiled —
+        ;; i.e. the loop finished on the old body.
+        (when (not (or (includes? out "stale=:no-probe") (includes? out "stale=:tree-walker")))
+          (is (includes? out "stale=false")))))))
 
 ;; --- ADR-335 follow-up: a load path the FILE sets up ---------------------------
 ;;

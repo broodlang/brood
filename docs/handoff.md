@@ -143,12 +143,14 @@ same way: the checker costs ~10% more per file than at `084060fb` (A4/A5/B6/C9),
 `brood file` pays it. KI-150 is reopened on that reading (its mitigation named this trigger);
 the first candidate it names is caching inferred signatures in the stdlib image.
 
-**A watch item found on the way, unexplained:** `BROOD_NO_CHECK=1` makes `pipeline` execute
-**2.8× MORE** instructions (586M vs 208M with the check; `fib` 1330M vs 1387M, i.e. normal).
-The check does work the run then reuses — module materialisation or compiled bodies — and
-skipping it sends `pipeline` down a costlier path. Not chased; `BROOD_IMAGE_TRACE=1` and
-`BROOD_TRACE_COMPILE=1` on the two runs is where to start. Until it is understood, the flag
-is not "raw eval for timing" on every program, whatever its catalogue line says.
+**The watch item found on the way — `BROOD_NO_CHECK=1` running `pipeline` at 2.8× the
+instructions — was chased the same night and is FIXED: KI-163 / ADR-366.** A body compiled
+before its module lazily loaded kept its pre-load shape (generic call where the eager compile
+inlines `PrimOp::Rem`) for the whole process, and the JIT's leaf upgrade read stale forever;
+the check hid it by loading eagerly. Now the load recompiles the body. `pipeline` no-check
+591M → 183M, equal to eager; `BROOD_NO_CHECK=1` is the cheapest run again. What this means
+for KI-150: the checked run's only speed advantage is gone, so the check's cost is purely
+the checker's. `make ab --floor` / `make ab-vm --floor` results are in the devlog entry.
 
 **Measurement notes from today:** `make ab` refuses a baseline worktree whose std image was
 evicted (`stdimage MISMATCH — base=stale`) — the fix is `(cd target/ab/<sha> && cargo build
