@@ -1272,10 +1272,14 @@ each lands; this section is the working list, `handoff.md` points at it.
 
 ### B — determinism and honesty of the tool
 
-- [ ] **B6. A cap that was hit is reported.** `MAX_SPECIAL_FUEL`, `MAX_EXPR_MEMO`,
-      `MAX_DERIVE_ROUNDS` (NO FIXPOINT), `MAX_EXPR_TY_DEPTH`, the widening — each declines
-      soundly and none says so, so "zero warnings" can mean "gave up". A summary line
-      naming the file and the cap.
+- [x] **B6. A cap that was hit is reported** (2026-09-17). Every budget that declines —
+      the Pass 2.8 return fixpoint (16 rounds), the joint fixpoint (`MAX_DERIVE_ROUNDS`),
+      an opaque derivation (a same-file macro), `MAX_SPECIAL_FUEL`, `MAX_EXPR_TY_DEPTH` —
+      emits one `checker gave up: …` line for the file, printed as `note:` and classed
+      advisory (`project-advisory-warning?`): visible, never gating, because the commonest
+      cause is inherent. Pass 2.8 gained the joint loop's widening on the way (34 std/tests
+      returns were "still moving" the day the note went in; 0 now). `check/tests/caps.rs`;
+      sabotage: dropping the widening reds the fixpoint pin.
 - [ ] **B7. A stale binary cannot check silently.** `nest check` resolves a `:use`d std
       module from the binary's baked-in std; a `nest` built before a sig edit checks
       against the old declaration. Refuse, or warn on every run, on a stdlib-id mismatch
@@ -1316,7 +1320,8 @@ each lands; this section is the working list, `handoff.md` points at it.
 
 ### Off this box
 
-- [ ] Tier-2 monomorphization — `perf-handoff.md` Task 5.
+- [x] Tier-2 monomorphization — `perf-handoff.md` Task 5, answered 2026-09-17: no, the
+      ceiling exists and the sites do not.
 - [ ] The bedit `--bump` smoke — needs a box that runs the full suite.
 
 ## Sound first: A1, A2, A4, A5 (2026-09-17)
@@ -1356,3 +1361,33 @@ The first pass through the list above, in its order. What each found is the poin
   `{0}` — strict read such a value by overlap, and merely-wider misuses of it went
   unreported. The widening of a moving interval beside a stable tuple of the same tags,
   the string literal's length, and `pattern_bindings` over `never` are the other three.
+
+## B6 — a cap that was hit is reported (2026-09-17)
+
+The checker has five places where it stops answering rather than answer wrongly: the
+return fixpoint of Pass 2.8 (16 rounds), the joint parameter-and-return fixpoint
+(`MAX_DERIVE_ROUNDS`, 32), a derivation it must decline whole because a macro defined in
+the same file is still unexpanded when the sites are collected, the specialization fuel
+(`MAX_SPECIAL_FUEL`, 20 000 re-typings a file), and the expression depth cap
+(`MAX_EXPR_TY_DEPTH`, 128). Each is sound — the affected answer is the unknown — and each
+was silent, so a file the checker had largely given up on printed nothing and read as
+checked. Now each prints one `checker gave up: …` line for the file, naming the cap and
+what it cost ("read as unknown here and by every caller"), classed **advisory** by
+`project-advisory-warning?` and printed as `note:` by `brood --check` and `nest check`.
+Advisory, not gating, because the commonest cause is inherent — a test file that defines
+and uses its own macro — and a gate you must silence every time is a gate you stop reading.
+
+Adding the note found a defect it had been hiding: Pass 2.8 had no widening. The joint
+loop widens a moving interval to its infinity, folds a value that nests its previous one
+into a recursive type, and cuts to a depth past round twelve; Pass 2.8 did none of that,
+so with the never-seeded self-call `(list (self …))` lengthened by one per round and ran
+the loop out — 34 std/tests functions "were still moving" the day the note went in, every
+one of them reading `any` at every caller with nothing said. With the same ascent
+discipline in Pass 2.8, zero; the remaining notes over the tree are 10 opaque
+derivations (same-file macros) and 2 joint fixpoints that do not settle
+(`deep_values_test`, `prelude_capture_test` — value nests past the fold's depth), all
+honest.
+
+`check/tests/caps.rs` pins the opaque note (once per file, the only diagnostic), the depth
+note, and that a structurally growing return widens without one — the last reds when the
+widening is removed. `tests/contract_test.blsp` pins the classification.

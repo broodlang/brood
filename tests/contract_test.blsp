@@ -443,6 +443,16 @@
     (assert= false
       (project-check/project-advisory-warning? "f.blsp:1:1: warning: unbound symbol: zz")))
 
+  (test "a cap the checker hit is reported but never gates (B6)"
+    ;; The checker's four budgets (fixpoint rounds, specialization fuel, expression
+    ;; depth) decline soundly — the affected answers read as unknown — and the file
+    ;; says so with a `checker gave up:` note. It has to be VISIBLE (a file the checker
+    ;; largely gave up on must not read as checked) and it must not fail the build,
+    ;; because the commonest cause is inherent: a file that defines and uses its own
+    ;; macro.
+    (assert= true
+      (project-check/project-advisory-warning? "f.blsp: note: checker gave up: an unexpanded macro call keeps every caller-derived parameter unknown in this file")))
+
   (test "`:beta` warns with its reason"
     (let (msgs (stability-messages "(defn u (s) (contract-test/m-wobbly s))"))
       (assert= true

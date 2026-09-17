@@ -307,6 +307,11 @@ module included), built from the whole `files` universe — the KI-17 reachabili
 ;; warning severities (a fuller fix — see the roadmap).
 (defn- project-advisory-warning? (w)
   (or (includes? w "recursive call in non-tail position")
+    ;; A budget the checker ran out of (B6, 2026-09-17): the file WAS checked, with the
+    ;; part past the cap read as unknown — sound, and worth seeing, since "zero warnings"
+    ;; would otherwise read as "checked". A file defining and using its own macro hits
+    ;; the commonest one (the derivation declines) by construction, so it cannot gate.
+    (includes? w "checker gave up:")
     ;; Stability diagnostics (ADR-283). A deprecation that FAILS the build is a removal
     ;; with extra steps — the point is to say "this is going away" while the code still
     ;; works, so it prints and does not gate. Same for a beta notice.

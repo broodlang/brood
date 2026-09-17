@@ -84,7 +84,7 @@ const MAX_EXPR_MEMO: usize = 1 << 20;
 /// small enough for the green-process coroutine stack the parallel checker runs
 /// on, and far past any real form's nesting. Past it, `expr_ty` returns `None`
 /// (unknown → defer) — sound: it only ever *loses* a warning, never invents one.
-const MAX_EXPR_TY_DEPTH: u32 = 128;
+pub(super) const MAX_EXPR_TY_DEPTH: u32 = 128;
 
 /// RAII depth counter for [`expr_ty`]: `enter` bumps the thread-local depth and
 /// yields `None` at [`MAX_EXPR_TY_DEPTH`] (so `expr_ty` bails); `Drop` restores it.
@@ -94,6 +94,7 @@ impl DepthGuard {
         EXPR_TY_DEPTH.with(|d| {
             let n = d.get();
             if n >= MAX_EXPR_TY_DEPTH {
+                EXPR_TY_DEPTH_HITS.with(|c| c.set(c.get() + 1));
                 None
             } else {
                 d.set(n + 1);
@@ -164,6 +165,10 @@ thread_local! {
     /// work meter. A body of N nodes typed once costs about N; a multiple of N is a re-walk
     /// (KI-139's 2^depth). One increment per visit, so it costs nothing to keep on.
     static EXPR_TY_VISITS: Cell<u64> = const { Cell::new(0) };
+    /// How often [`expr_ty`] answered `None` because [`MAX_EXPR_TY_DEPTH`] was reached —
+    /// sound (unknown), and reported per file so a nest the checker gave up on is not read
+    /// as one it checked (B6, 2026-09-17).
+    static EXPR_TY_DEPTH_HITS: Cell<u64> = const { Cell::new(0) };
 }
 
 /// Visits since the last reset (see [`EXPR_TY_VISITS`]).
@@ -171,10 +176,16 @@ pub(super) fn expr_ty_visits() -> u64 {
     EXPR_TY_VISITS.with(Cell::get)
 }
 
+/// Depth-cap hits since the last reset (see [`EXPR_TY_DEPTH_HITS`]).
+pub(super) fn expr_ty_depth_hits() -> u64 {
+    EXPR_TY_DEPTH_HITS.with(Cell::get)
+}
+
 /// Zero the visit meter — `check_file` does this alongside the sig memo, so a reading is
 /// per file.
 pub(super) fn reset_expr_ty_visits() {
     EXPR_TY_VISITS.with(|c| c.set(0));
+    EXPR_TY_DEPTH_HITS.with(|c| c.set(0));
 }
 
 fn expr_ty_inner(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {

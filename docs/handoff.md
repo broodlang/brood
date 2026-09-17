@@ -96,7 +96,9 @@ contract checks intervals, lengths and recursive types), **A4** (a declared over
 checked against its body per arm — it found `(math/pow 2.0 0)` answering the int `1`),
 **A5** (a declared return the checker cannot verify is reported *trusted, not verified*
 under strict; `(check-allow :trusted …)` acknowledges the eleven that genuinely are).
-**A3** is decided as static-only. Next in order: **B6** (a hit cap is reported), **B7**
+**A3** is decided as static-only. **B6** landed the same day: every cap the checker hits
+prints one `checker gave up: …` note for the file (advisory, `note:`), and adding it found
+Pass 2.8 had no widening — 34 returns silently `any` at every caller. Next in order: **B7**
 (a stale binary cannot check silently), **B8** (an order-dependence audit + a shuffled-list
 differential), then the C items.
 

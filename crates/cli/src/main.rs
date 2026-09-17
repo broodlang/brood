@@ -320,11 +320,21 @@ fn check_one_file(interp: &mut Interp, path: &str, src: &str, sink: CheckSink) -
     };
     let just_forms: Vec<_> = forms.into_iter().map(|(f, _)| f).collect();
     let warnings = brood::types::check::check_file(&mut interp.heap, &just_forms);
-    let warned = !warnings.is_empty();
+    let warned = warnings
+        .iter()
+        .any(|(_, msg)| !msg.starts_with("checker gave up:"));
     for (pos, msg) in warnings {
+        // A budget the checker ran out of is a NOTE about the check, not a finding about
+        // the code (B6): printed so a run is never mistaken for a full check, worded so
+        // it is not mistaken for a warning.
+        let kind = if msg.starts_with("checker gave up:") {
+            "note"
+        } else {
+            "warning"
+        };
         let line = match pos {
-            Some(p) => format!("{}:{}:{}: warning: {}", path, p.line, p.col, msg),
-            None => format!("{}: warning: {}", path, msg),
+            Some(p) => format!("{}:{}:{}: {kind}: {}", path, p.line, p.col, msg),
+            None => format!("{}: {kind}: {}", path, msg),
         };
         match sink {
             CheckSink::Stdout => brood::cli_support::write_stdout(&format!("{line}\n")),

@@ -185,10 +185,7 @@ pub(super) fn check_file_builtin(args: &[Value], _env: EnvId, heap: &mut Heap) -
     let warnings = crate::types::check::check_file_ext(heap, &just_forms, &required);
     let mut out = Vec::with_capacity(warnings.len());
     for (pos, msg) in &warnings {
-        let s = match pos {
-            Some(p) => format!("{}:{}:{}: warning: {}", path, p.line, p.col, msg),
-            None => format!("{}: warning: {}", path, msg),
-        };
+        let s = diagnostic_line(&path, *pos, msg);
         out.push(heap.alloc_string(&s));
     }
     Ok(heap.list(out))
@@ -343,6 +340,21 @@ pub(super) fn meta_of(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResul
 }
 
 /// A list-or-vector argument flattened to a `Vec<Value>`; empty for anything else.
+/// One GNU-style diagnostic line. A budget the checker ran out of (B6, `checker gave
+/// up: …`) is a NOTE about the check, not a finding about the code; the project checker
+/// prints it as advisory and never gates on it (`project-advisory-warning?`).
+fn diagnostic_line(path: &str, pos: Option<crate::error::Pos>, msg: &str) -> String {
+    let kind = if msg.starts_with("checker gave up:") {
+        "note"
+    } else {
+        "warning"
+    };
+    match pos {
+        Some(p) => format!("{}:{}:{}: {kind}: {}", path, p.line, p.col, msg),
+        None => format!("{}: {kind}: {}", path, msg),
+    }
+}
+
 fn list_or_vec_items(heap: &Heap, v: Value) -> Vec<Value> {
     match v.unpack() {
         value::ValueRef::Vector(id) => heap.vector(id).to_vec(),
@@ -445,10 +457,7 @@ pub(super) fn check_file_deps(args: &[Value], _env: EnvId, heap: &mut Heap) -> L
     let fp_val = heap.alloc_string(&fp);
     let mut warn_vals = Vec::with_capacity(warnings.len());
     for (pos, msg) in &warnings {
-        let s = match pos {
-            Some(p) => format!("{}:{}:{}: warning: {}", path, p.line, p.col, msg),
-            None => format!("{}: warning: {}", path, msg),
-        };
+        let s = diagnostic_line(&path, *pos, msg);
         warn_vals.push(heap.alloc_string(&s));
     }
     let warns_list = heap.list(warn_vals);

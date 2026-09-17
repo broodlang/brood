@@ -482,6 +482,12 @@ pub(super) fn fuel_spent() -> u32 {
     SPECIAL_FUEL.with(|f| MAX_SPECIAL_FUEL - f.get())
 }
 
+/// Did this file spend its whole specialization budget? Every question asked after that
+/// answered "unknown" (B6 reports it).
+pub(super) fn fuel_exhausted() -> bool {
+    SPECIAL_FUEL.with(|f| f.get() == 0)
+}
+
 /// Reset the per-pass inference memo. `check_file` calls this at the start of each file so
 /// one file's inferred signatures never leak into the next — and, in the long-lived LSP,
 /// so an edit re-infers rather than serving a stale cached sig.
@@ -563,7 +569,7 @@ const MAX_SPECIALIZE_DEPTH: usize = 2;
 
 /// [`SPECIAL_FUEL`]'s per-file budget, in arm re-typings. A normal file spends a few
 /// hundred; the pathological shape above spent it in under a second.
-const MAX_SPECIAL_FUEL: u32 = 20_000;
+pub(super) const MAX_SPECIAL_FUEL: u32 = 20_000;
 
 /// Would [`specialized_ret`] even consider `sym` right now — fuel left, `sym` not in
 /// flight, depth under the cap? The call site asks this BEFORE typing the call's
@@ -2878,7 +2884,7 @@ fn global_fn_arrow(heap: &Heap, arg: Value, ctx: &Ctx) -> Option<Ty> {
 /// one round per level, and `json`'s parser is ten levels deep (`decode` → `json-value` →
 /// `json-object` → `object-acc` → `json-string` → `string-acc` → `json-escape` →
 /// `json-unicode` → `hex4` → `hex1`); a round is one walk of the file's forms.
-const MAX_DERIVE_ROUNDS: usize = 32;
+pub(super) const MAX_DERIVE_ROUNDS: usize = 32;
 
 /// The round of a derivation from which every moving type is widened (see
 /// [`Ty::widened_below`]) — after the early rounds a deep chain needs to settle exactly.
@@ -2961,6 +2967,7 @@ pub(super) fn caller_derived_params(
             cache,
             moved.as_ref(),
         ) else {
+            DERIVATION_GAVE_UP.with(|c| c.set(Some(DeriveDecline::Opaque)));
             return HashMap::new();
         };
         let mut next: HashMap<Symbol, Vec<Option<Ty>>> = HashMap::new();
@@ -3049,7 +3056,29 @@ pub(super) fn caller_derived_params(
     if std::env::var_os("BROOD_DERIVE_DBG").is_some() {
         eprintln!("[derive] NO FIXPOINT");
     }
+    DERIVATION_GAVE_UP.with(|c| c.set(Some(DeriveDecline::NoFixpoint)));
     HashMap::new()
+}
+
+/// Why the last [`caller_derived_params`] declined, if it did — read and cleared by the
+/// joint loop, which reports it (B6): a derivation that gives up leaves every parameter
+/// unknown, which reads as "zero warnings" unless something says so.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DeriveDecline {
+    /// The file holds an unexpanded macro call, which could construct a call the walk
+    /// cannot see.
+    Opaque,
+    /// The parameters did not settle within [`MAX_DERIVE_ROUNDS`].
+    NoFixpoint,
+}
+
+thread_local! {
+    static DERIVATION_GAVE_UP: Cell<Option<DeriveDecline>> = const { Cell::new(None) };
+}
+
+/// Take the last decline (see [`DeriveDecline`]), leaving none.
+pub(super) fn take_derivation_decline() -> Option<DeriveDecline> {
+    DERIVATION_GAVE_UP.with(|c| c.take())
 }
 
 /// One place a candidate is called from: a direct call with its arguments and the scope

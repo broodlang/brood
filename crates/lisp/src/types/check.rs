@@ -2183,11 +2183,40 @@ fn check_forms(
             }
             // Iterate to a fixed point; break as soon as a pass records nothing new. The cap
             // bounds a pathological deep chain (the tail just stays deferred — sound).
-            for _ in 0..16 {
-                let mut changed = false;
+            // The names whose return was still moving when the bound below ended the ascent:
+            // a value on an ascending chain cut short is an UNDER-approximation, so each of
+            // them falls back to its demands with an `any` return (sound), and the file
+            // says so (B6, 2026-09-17) — before this the last intermediate was kept, silently.
+            let mut still_moving: Vec<Symbol> = Vec::new();
+            let mut older_returns: HashMap<Symbol, Ty> = HashMap::new();
+            for round in 0..16 {
+                still_moving.clear();
                 for &(name, rhs) in &candidates {
-                    if let Some(ret) = sigs::infer_return_from_form(heap, rhs, Some(name), &ctx) {
-                        if ctx.inferred_fn_sig(name).map(|s| s.ret) != Some(ret.clone()) {
+                    if let Some(mut ret) = sigs::infer_return_from_form(heap, rhs, Some(name), &ctx)
+                    {
+                        // The same ascent discipline as the joint loop below (ADR-349/350):
+                        // an interval that moved since the last round goes to its infinity,
+                        // a value that nests its previous one folds into a recursive type,
+                        // and past the early rounds the rest is cut to a depth. A self-call
+                        // is ⊥ in its first round, so `(cons x (self …))` used to lengthen
+                        // by one per round here and run the loop out (B6, 2026-09-17).
+                        let current = ctx.inferred_fn_sig(name).map(|s| s.ret);
+                        if let Some(prev) = &current {
+                            ret = ret.widen_intervals_against(prev);
+                        }
+                        for prev in current.iter().chain(older_returns.get(&name)) {
+                            if let Some(folded) = Ty::fold_recursive(prev, &ret) {
+                                ret = folded;
+                                break;
+                            }
+                        }
+                        if round >= sigs::WIDEN_AFTER_ROUND {
+                            ret = ret.widened_below(sigs::WIDEN_DEPTH);
+                        }
+                        if let Some(current) = current.clone() {
+                            older_returns.insert(name, current);
+                        }
+                        if current != Some(ret.clone()) {
                             // ADR-190: carry the inferred parameter demands too, so a same-file
                             // caller's arguments are checked (not just the return). Sound:
                             // `infer_params_from_form` under-constrains, so a flagged arg is one
@@ -2197,14 +2226,39 @@ fn check_forms(
                                 Some(demands) => demands.into_sig(ret),
                                 None => crate::types::Sig::new(Vec::new(), ret),
                             };
+                            if derive_dbg {
+                                eprintln!(
+                                    "[derive] pass 2.8 {} -> {}",
+                                    value::symbol_name_ref(name),
+                                    sig.ret
+                                );
+                            }
                             ctx.add_inferred_fn_sig(name, sig);
-                            changed = true;
+                            still_moving.push(name);
                         }
                     }
                 }
-                if !changed {
+                if still_moving.is_empty() {
                     break;
                 }
+            }
+            for &name in &still_moving {
+                let rhs = candidates
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map(|&(_, rhs)| rhs);
+                let sig = rhs
+                    .and_then(|rhs| sigs::infer_params_from_form(heap, rhs, &ctx))
+                    .map(|demands| demands.into_sig(crate::types::Ty::ANY))
+                    .unwrap_or_else(|| crate::types::Sig::new(Vec::new(), crate::types::Ty::ANY));
+                ctx.add_inferred_fn_sig(name, sig);
+                out.push((
+                    rhs.and_then(|rhs| heap.form_pos_only(rhs)),
+                    format!(
+                        "checker gave up: the return of {} was still moving after 16 inference rounds — read as unknown here and by every caller",
+                        value::symbol_name_ref(name)
+                    ),
+                ));
             }
             // A **multi-arm** candidate has no single signature — Pass 2.8's fixpoint
             // above records nothing for it — so record each arm's own instead, and the
@@ -2324,6 +2378,7 @@ fn check_forms(
                 // everything.
                 let mut site_cache = sigs::SiteCache::new(heap, &expanded, &candidates);
                 let mut moved: Option<HashSet<Symbol>> = None;
+                let mut derivation_declined = false;
                 for round in 0..32 {
                     let round_started = std::time::Instant::now();
                     let derivation_ran = inputs_moved;
@@ -2346,6 +2401,23 @@ fn check_forms(
                     };
                     joint_derive_elapsed += round_started.elapsed();
                     joint_rounds += 1;
+                    // A derivation that declined leaves every parameter unknown for the
+                    // rest of this file: say so (B6), once.
+                    if let Some(why) = sigs::take_derivation_decline() {
+                        if !derivation_declined {
+                            derivation_declined = true;
+                            out.push((
+                                None,
+                                match why {
+                                    sigs::DeriveDecline::Opaque => "checker gave up: an unexpanded macro call keeps every caller-derived parameter unknown in this file".to_string(),
+                                    sigs::DeriveDecline::NoFixpoint => format!(
+                                        "checker gave up: the caller-derived parameters did not settle in {} rounds — every parameter is read as unknown in this file",
+                                        sigs::MAX_DERIVE_ROUNDS
+                                    ),
+                                },
+                            ));
+                        }
+                    }
                     let mut moved_now: HashSet<Symbol> = derived
                         .keys()
                         .chain(previous.keys())
@@ -2459,6 +2531,13 @@ fn check_forms(
                         }
                     }
                     ctx.set_derived_params(HashMap::new());
+                    // Sound — every return is back at Pass 2.8's and no parameter is derived
+                    // — and reported (B6): a file whose derivation gave up is checked with
+                    // its parameters unknown, which reads as "zero warnings" otherwise.
+                    out.push((
+                        None,
+                        "checker gave up: the caller-derived parameters and returns did not settle in 32 joint rounds — every parameter is read as unknown in this file".to_string(),
+                    ));
                 } else {
                     // A candidate that was not derived, or whose return never typed (still at
                     // the floor): give it Pass 2.8's answer back.
@@ -2646,6 +2725,31 @@ fn check_forms(
         // `--` name is a convention, not enforced privacy, so the editor legitimately
         // references it from other modules and tests by its qualified name, which a
         // single-file pass can't see. A per-file check produced false positives.)
+        // The two per-file budgets that DECLINE rather than answer (B6, 2026-09-17): past
+        // the specialization fuel every re-typing question answers "unknown", and past
+        // the expression depth cap a nest types as unknown. Both are sound and both
+        // used to be silent, so a file the checker had largely given up on read as
+        // checked. One line each, at the end, counted like a warning.
+        if sigs::fuel_exhausted() {
+            out.push((
+                None,
+                format!(
+                    "checker gave up: the specialization budget ({} re-typings) ran out — every later call-site specialization in this file read as unknown",
+                    sigs::MAX_SPECIAL_FUEL
+                ),
+            ));
+        }
+        let depth_hits = infer::expr_ty_depth_hits();
+        if depth_hits > 0 {
+            out.push((
+                None,
+                format!(
+                    "checker gave up: {depth_hits} expression{} nested past the depth cap ({}) read as unknown",
+                    if depth_hits == 1 { "" } else { "s" },
+                    infer::MAX_EXPR_TY_DEPTH
+                ),
+            ));
+        }
         if derive_dbg {
             eprintln!(
                 "[derive] {}: joint fixpoint {} ms ({} ms deriving over {} rounds, {} form walks, {} reused) of {} ms",
