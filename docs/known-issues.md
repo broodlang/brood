@@ -9883,6 +9883,28 @@ its pre-load compile shape, and the checked run was faster only because the chec
 eagerly. With the fix `BROOD_NO_CHECK=1` is the cheapest run (`pipeline` 183M against 221M
 checked), so the check's cost is now purely the checker's — this entry's question, unchanged.
 
+**Measured 2026-09-17 night, `perf` on an unstripped release binary, `brood --check` of a
+one-line file (cwd outside the checkout — inside it, B7's `stdlib_tree_hash` adds ~10% and
+must not be mistaken for the checker).** The checker's own Rust (`types::check::*`) is **~3%**
+of the samples. The cost is module MATERIALISATION driven by the eager policy: a check of
+`(seq/lmap inc [1 2 3])` — a PRELUDE binding, bound at boot — materialised `seq`, and through
+that module's own references `map`, `math`, `reflect` and `string`: **138M instructions
+against 75M for an io-only file**, while RUNNING the same file lazily loads nothing (73M).
+`(math/rem 7 3)` reads the same: 125M, `math` plus the four. Two consequences. (1) **Fixed the
+same night, narrowly:** the eager drain now skips a module every one of whose recorded names
+is already bound (`derive::drain_pending` — the record carries the name beside the module), so
+the prelude-name case costs nothing (138M → 82M); an unbound `json/prase` still loads `json`, so
+the unbound verdict is unchanged. Guarded in `tests/lazy_load_test.blsp` (both directions,
+sabotage-verified). `pipeline`'s own check is unchanged at 145M, because `math/rem` and
+`string/->number` are genuinely unloaded and their materialisation under the eager policy
+pulls the rest in. (2) **What remains is structural and is the decision this entry has
+always been about:** under the eager policy a materialised module's own qualified references
+load transitively — needed only so the checker can DERIVE signatures for std functions by
+walking their bodies. A std module served by the image could carry its inferred signatures IN
+the image (the checker's inference is deterministic per stdlib id), and the pre-flight would
+then load nothing it does not run. That is the first candidate named above, now with a
+number on it: ~70M of `pipeline`'s 145M check is this.
+
 ## KI-161 — Tier 1 monomorphization's rebind guard refused every module constructor and admitted the module-less rebind ✅ FIXED 2026-09-17
 
 **Symptom.** `BROOD_MONO=1 BROOD_MONO_DBG=1` on `(defmodule mp) (defrecord circle (r)) … (area

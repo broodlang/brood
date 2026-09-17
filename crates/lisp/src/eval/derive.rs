@@ -60,7 +60,7 @@ thread_local! {
     static RECORDING: Cell<bool> = const { Cell::new(false) };
     /// Modules a qualified reference in the current compile pass pulled in, deduped,
     /// drained by [`drain_pending`].
-    static PENDING: RefCell<Vec<Symbol>> = const { RefCell::new(Vec::new()) };
+    static PENDING: RefCell<Vec<(Symbol, Symbol)>> = const { RefCell::new(Vec::new()) };
     /// Bare names the current compile pass used that are `(:use …)`-imported from two or
     /// more modules at once (ADR-235): `(bare, sorted candidate qualifieds)`. Recorded by
     /// `resolve_sym` at the point the ambiguous name is referenced, raised as a use-site
@@ -197,14 +197,19 @@ pub fn record_qualified(qualified_name: &str, current_ns: &str) {
     if module == current_ns {
         return; // a reference to our own module — already loading, never re-require
     }
-    record_module(value::intern(module));
+    record_module(value::intern(module), value::intern(qualified_name));
 }
 
-fn record_module(module: Symbol) {
+/// Remember that `name` (a qualified reference) asks for `module`. The name is kept beside
+/// the module so the eager drain can skip a module every one of whose recorded names is
+/// ALREADY BOUND — `seq/lmap` is a prelude binding, and loading `std/seq.blsp` for it (and,
+/// through its edges, `map`, `math`, `reflect` and `string`) added 63M instructions to
+/// `brood --check` of a one-line file for a verdict that could not change (KI-150).
+fn record_module(module: Symbol, name: Symbol) {
     PENDING.with(|pending| {
         let mut pending = pending.borrow_mut();
-        if !pending.contains(&module) {
-            pending.push(module);
+        if !pending.iter().any(|(m, n)| *m == module && *n == name) {
+            pending.push((module, name));
         }
     });
 }
@@ -282,7 +287,7 @@ fn scan_refs(heap: &Heap, form: Value) {
     match form.unpack() {
         ValueRef::Sym(s) => {
             if let Some(module) = module_to_require(heap, s) {
-                record_module(module);
+                record_module(module, s);
             }
         }
         ValueRef::Pair(_) => {
@@ -357,12 +362,29 @@ pub fn drain_pending(heap: &mut Heap, env: EnvId) -> LispResult {
     if lazy_loads() {
         return Ok(Value::nil());
     }
+    // A module is loaded only for a name that is NOT yet bound. A reference the prelude (or
+    // an already-loaded module) satisfies — `seq/lmap`, `string/join`, `math/max` — asks
+    // nothing of a load: the eager verdict for it is "bound" with or without `std/seq.blsp`
+    // in the heap, and the unbound verdict for a genuine `json/prase` still gets `json`
+    // loaded, because `json/prase` is unbound. What this removes is the load that could not
+    // change the answer, which on a one-line `(seq/lmap …)` file was five modules and 63M
+    // instructions of a 138M check (KI-150).
+    let global = heap.global();
+    let mut modules: Vec<Symbol> = Vec::new();
+    for (module, name) in &pending {
+        if heap.env_get(global, *name).is_none() && !modules.contains(module) {
+            modules.push(*module);
+        }
+    }
+    if modules.is_empty() {
+        return Ok(Value::nil());
+    }
     // Each `ensure_required` loads a module, which collects. `env` may be a LOCAL
     // frame that the collector relocates, so root it and read it back per iteration
     // rather than holding a stale copy across the loads.
     let env_base = heap.env_roots_len();
     let env_root = heap.root_env(env);
-    for module in pending {
+    for module in modules {
         let env = heap.read_root_env(env_root);
         if let Err(error) = ensure_required(heap, env, module) {
             heap.truncate_env_roots(env_base);

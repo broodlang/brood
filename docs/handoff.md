@@ -130,6 +130,18 @@ the check hid it by loading eagerly. Now the load recompiles the body. `pipeline
 for KI-150: the checked run's only speed advantage is gone, so the check's cost is purely
 the checker's. `make ab --floor` / `make ab-vm --floor` results are in the devlog entry.
 
+**KI-150, then measured (same night):** the checker's Rust is ~3% of a `brood --check`; the
+cost is eager MATERIALISATION. The eager drain loaded a module for every recorded prefix even
+when the name was a prelude binding — fixed (`drain_pending` skips a module whose recorded
+names are all bound; 138M → 82M on a `(seq/lmap …)` file; guarded both directions). What is
+left, ~70M of `pipeline`'s 145M check, is `math`/`string` materialising and pulling in what
+their bodies name — the transitive eager load that exists so the checker can derive std
+signatures by walking bodies. **The decision to make: carry inferred std signatures in the
+stdlib image** (deterministic per stdlib id), so the pre-flight loads nothing it does not run.
+KI-150's entry has the numbers. Also noted: B7's `stdlib_tree_hash` is ~10% of a check run
+from INSIDE the checkout (126 files hashed per `brood --check`/`nest check`); an mtime
+pre-filter would remove it — small, not done.
+
 **Measurement notes from today:** `make ab` refuses a baseline worktree whose std image was
 evicted (`stdimage MISMATCH — base=stale`) — the fix is `(cd target/ab/<sha> && cargo build
 -p nest && scripts/build-std-image.sh)`, ~3 min; and `perf stat -e instructions:u` on the two
