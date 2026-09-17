@@ -10,6 +10,43 @@ needing one is queued in [`perf-handoff.md`](perf-handoff.md) instead — curren
 high-priority item: whether KI-114's `as_f64_pair` holds the closure KI-109 got from the
 promotion it constrained.
 
+## 2026-09-17 morning — where things stand after the night's run (read this first)
+
+Landed and pushed, each with its guards and its A/B sweep (newest first): the vector/list
+counted loops measured and PARKED (`98532a11` — a copy of a fold body costs 1–3M
+instructions per compiled site, which boot pays); ADR-360 §7 pipeline fusion + the counted
+range loop + passthrough reducers on the HOF path (`pipeline` −52%, published in
+brood-benchmarks `9f9901a` at `3ec4be69`); KI-157 (a native loop never saw a memory limit);
+KI-156 (no letrec loop ever got `SelfCall` — local loops were 40× slower than `defn`
+loops); rung A4's first half (`bintree` −4.5%); KI-153 (a self-only function was checked
+as dead code); KI-152 (the tally rewrite's seed); ADR-360 §5–6; the Go column.
+
+**Next, in order of value per hour:**
+1. **Leaf-splice the symbol stage's call inside the fused loop.** The pipeline row's 460
+   instructions per element are ~300 of `(mult35? e)`; the leaf inliner takes only arms
+   with a `defn_name` (`closure.rs` `compile_arm`, the `match defn_name` around the probe),
+   so a letrec loop — every fused pipeline, every `for`, every named local loop — never
+   splices. Two things to solve: the deferred upgrade installs between ACTIVATIONS and a
+   loop's only activation runs all its iterations (splice at the FIRST lowering for arms
+   with a `SelfCall`, which is the xcall lever narrowed to loops), and the install path
+   invalidates fast links by name (`invalidate_fast_links_for(sym)`), which a closure lacks.
+2. **The parked vector/list loops** come back the day a copy is cheap: the cost is the
+   closure template promotion + arm compile per copy at every compiled site. A cheaper
+   shape is one loop arm shared by the three kinds, or lazy promotion of the untaken
+   branches' templates.
+3. Rung A4's second half (first-safepoint write set), then A3 (two-register result), A2.
+4. The non-zero default `(get m k D)` on the tally seam (ADR-360 §3 leaves it).
+
+**Traps this session added to the list:** `make release` (nest TOO) before
+`scripts/build-std-image.sh release-fast`, else the fresh brood has no image and every
+fixed-cost comparison is +300M instructions; the cache keeps four images, so an `ab`
+worktree's image evicts silently — read `[image] install: N sections` on BOTH binaries
+before comparing; `cargo nextest run --no-run`/clippy at full `-j` got the background
+task killed for memory twice — build with `-j 6` first, run `make test` after; the box's
+pinned core dropped to 1.3 GHz for an hour (both arms 2.7× slower, verdicts unchanged);
+`target/debug/deps` had grown to 69 GB of stale test binaries and the disk hit 100% —
+`cargo clean --profile dev` + `make ab-clean` recovered 100 GB.
+
 ## 2026-09-17 — Go column published; the linmap seed hole closed (KI-152)
 
 brood-benchmarks `50bca49`: eight languages, Go's first column (1.8× C on the 15-row
