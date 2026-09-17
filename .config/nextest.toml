@@ -265,6 +265,29 @@ slow-timeout = { period = "60s", terminate-after = 6 }
 filter = 'binary(image_registrations_match_source)'
 slow-timeout = { period = "60s", terminate-after = 6 }
 
+# `check_order_differential` (B8) and `derivation_cache_differential` (nest/tests/) are the
+# checker's whole-tree differentials, the same class as `image_matches_source` above and by
+# the same reasoning ("why the tree rather than a fixture" is in each file's header): the one
+# runs `nest check --strict --suggest-sigs` over all of `tests/` three times (two processes
+# plus the reversed order), the other over `std/` and `tests/` twice each (cache on, cache off).
+# Measured 2026-09-17 solo on an idle 12-core box, test profile: **42.6 s and 51.6 s** on the
+# VM, with one child check of `tests/` at 13.8 s (21.6 s under the tree-walker job's env).
+# Both TIMED OUT at the 120 s default on `989af614` in the `test` job AND the tree-walker job,
+# both attempts — the steady repeat of a budget. The children now pin `BROOD_TIER=2` (the
+# verdict is engine-independent), and 60 s x 6 = 360 s keeps ~3x headroom over a plausible
+# 2-core shared-runner figure. A verdict that differs fails in the first comparison, in
+# seconds, so the budget hides no regression class.
+#
+# Sized BEFORE the split that followed the same day, so it now has about twice the headroom
+# it claims: each binary's single case was split along the claim it already made — process vs
+# order, `std/` vs `tests/` — because nextest's cap is per CASE and these were doing three and
+# four whole-tree checks inside one. Measured under the tree-walker job's own environment:
+# 21-29 s per case, from 42-51 s. That is the fix; this budget is the backstop behind it, and
+# if it ever goes red again the question is what the per-case work grew into, not the number.
+[[profile.default.overrides]]
+filter = 'binary(check_order_differential) | binary(derivation_cache_differential)'
+slow-timeout = { period = "60s", terminate-after = 6 }
+
 # `artifact_matrix` (cli/tests/artifact_matrix.rs) is the same class of case as
 # `image_matches_source` above and had no override: six cells, each a cold or warm `brood`
 # child boot or two plus three stdlib-image builds, all in the test profile. Measured

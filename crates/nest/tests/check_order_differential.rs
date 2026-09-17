@@ -51,15 +51,16 @@ fn check(root: &Path, files: &[PathBuf]) -> String {
         .arg("--suggest-sigs")
         .args(files)
         .env("BROOD_NO_CHECK_CACHE", "1")
-        // Pin the ceiling rather than inherit the `differential (tree-walker)` job's
-        // `BROOD_VM=0`: what the checker answers is a function of the file — the whole
-        // claim here — and the engine is not part of it. Worth stating what this is and
-        // is not, because the other tree-walker overrides in `.config/nextest.toml`
-        // describe 5-10x ratios and this one does not: measured 2026-09-17 on a 28-core
-        // box, one whole-`tests/` check is 12.1 s under the VM and 14.2 s under the
-        // tree-walker. The engine is ~17% here, so it is NOT why this binary timed out at
-        // the 120 s cap — the case simply did three whole-tree checks in one case. The
-        // split into two cases below is the fix; this is the cheap 17% beside it.
+        // The question is engine-independent (a verdict, not a runtime behaviour), so the
+        // child does not inherit the tree-walker job's `BROOD_VM=0`: three whole-tree checks
+        // measured 42 s solo on the VM and ~1.6x that tree-walked, against a 120 s cap on a
+        // 2-core runner. Same pin `contracts_mode` and `mapget_differential` take.
+        //
+        // Note which binary a ratio was taken on before comparing two of them. The 1.6x
+        // above is this test's own child — the `[profile.test]` `nest`. The same child
+        // check measured on the RELEASE binary is 12.1 s VM against 14.2 s tree-walked
+        // (~17%), because the release JIT is what the tree-walker is being compared to. The
+        // pin is right either way; the number is not one figure.
         .env("BROOD_TIER", "2")
         .output()
         .expect("run nest");
@@ -152,11 +153,13 @@ fn forward(root: &Path, files: &[PathBuf]) -> String {
     text
 }
 
-// The two channels are two CASES, not one, because each whole-`tests/` check is ~12 s and
-// nextest's cap is per case: as one case this did three of them and timed out at 120 s on
-// the 2-core `differential (tree-walker)` runner (2026-09-17). Split, each case does two
-// and they run in parallel — the same two claims, neither weakened, and no budget raised.
-// A failure also now names which channel broke by which case went red.
+// The two channels are two CASES, not one, because nextest's cap is per case and this did
+// three whole-`tests/` checks in one — which is what put it over the 120 s default
+// (2026-09-17). Each case now does two, and they run in parallel: 27 s each under the
+// tree-walker job's own environment, against 42 s for the single case. The
+// `.config/nextest.toml` budget is the backstop and was sized before this split, so it now
+// has about twice the headroom its comment claims. Neither claim is weakened, and a failure
+// names which channel broke by which case went red.
 
 #[test]
 fn a_files_verdict_does_not_depend_on_the_process_it_was_checked_in() {

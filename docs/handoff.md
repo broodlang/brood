@@ -10,7 +10,7 @@ needing one is queued in [`perf-handoff.md`](perf-handoff.md) instead — curren
 high-priority item: whether KI-114's `as_f64_pair` holds the closure KI-109 got from the
 promotion it constrained.
 
-## 2026-09-17 later — C9 is finished and pushed; next is the tree-walker timeout, then C10
+## 2026-09-17 later — C9 is finished; next is C10 (the differentials and bedit are closed below)
 
 **C9 (ADR-364) is closed**, verification and docs and all: 585/585 `types::`, both mechanisms
 sabotage-verified (the `MAP_BIT` arm reds the two record pins alone, `enumerated_int_range`
@@ -24,17 +24,62 @@ comment. ADR-364, the C9 tick in `type-system-status.md`, the record note in
 `type-records.md` and a devlog line are in. `types.md` contract #5 needed nothing — it never
 claimed record subtyping was incomplete in this respect.
 
-**Next, in order:**
-1. **The two `nest` differentials that time out in the `differential (tree-walker)` CI job
-   only** — the item below, still open and still the thing keeping CI red. Pin
-   `BROOD_TIER=1` in each test's `Command` the way `ddeb158b` did for
-   `mapget_differential`/`mono_differential`. Nothing about the checker is engine-dependent;
-   only its speed is.
-2. **bedit's `strict_ratchet_test`** (five *trusted, not verified* findings from A5) — the
-   item below.
-3. **C10** — the merely-wider residue re-probed under intervals, then C11–C17 in list order
-   (`docs/type-system-status.md` § "The remaining list"). **Open KI:** KI-162 —
-   `nest check --fix-sigs` writes a `sig` ABOVE its `defn`, which `sig_placement.rs` forbids.
+**The two differentials were fixed twice, in parallel, and both halves are in.** `669c580c`
+(the section below) pinned the tier and raised the budget; this side also **split each binary
+along the claim it already made** — process vs order, `std/` vs `tests/` — because nextest's
+cap is per case and each case was doing three or four whole-tree checks. 21–29 s per case
+under the tree-walker job's own environment, from 42–51 s, so the 360 s budget now carries
+about twice the headroom its comment was written for. Sabotage-verified (a per-call marker in
+`check()`'s output reds all four cases). One correction worth keeping: the 1.6× tree-walker
+ratio in those comments is the **`[profile.test]`** `nest`; the same check on the RELEASE
+binary is ~17% (12.1 s → 14.2 s). Same comparison, different binary — read a ratio with its
+profile, which is why the numbers looked contradictory for an hour.
+
+**Next, in order:** **C10** — the merely-wider residue re-probed under intervals — then
+C11–C17 in list order (`docs/type-system-status.md` § "The remaining list"). **Open KI:**
+KI-162 — `nest check --fix-sigs` writes a `sig` ABOVE its `defn`, which `sig_placement.rs`
+forbids; fix is to insert after the definition's extent (the CST has it) and flip the project
+test to "directly below". KI-150 is reopened by the column refresh below and is the other
+live thread.
+
+## 2026-09-17 night — the two CI reds are closed; the column was refreshed on request and is FLAT; KI-150 reopened by its own trigger
+
+**Tree at `a406f9a6`, CI reds from the section below both closed.** (1) The two `nest`
+differentials: the diagnosis below was half right — they timed out in the **`test` job too**,
+both attempts (CI log for `989af614`), so it was a budget, not a tree-walker cost. Measured
+solo, idle 12-core, test profile: 42.6 s and 51.6 s on the VM (three and four whole-tree
+`nest check --strict --suggest-sigs` runs). Fix `669c580c`: the children pin `BROOD_TIER=2`
+(43 s / 55 s under the tree-walker job's env, from ~1.6× that) AND both binaries get
+`image_matches_source`'s 360 s budget in `.config/nextest.toml`. (2) bedit's ratchet: closed
+by `03e955c6` (`BEDIT_REF` → `ad446851`). `make green` should read the tip's run; confirm.
+
+**The benchmark column WAS refreshed** (brood-benchmarks `d2646f4` + `6f75854`, at
+`a406f9a6`, min of 3), on request, against the advice below — and the advice's premise was
+wrong: `c9428cba` (A5) DID reach the runtime, editing `std/regex.blsp` and `std/json.blsp`
+on their per-character peek (`(or (nth s i) -1)`), `regex-word-code?` (an `int?` guard per
+char) and wrapping `defn-`s in `check-allow :trusted`, which expands to `(%lint-allow cat (do
+(defn- …)))` — a nested definition, not a top-level one. Measured: harmless — `regex`
+instructions +0.8%, `json` A/B +2.5% on a 0.0% floor, both drift. The column is flat: every
+row +0–3% with the package at 67 → 78 °C across the passes (the uniform shift is the box).
+**One real movement, and it is KI-150's mechanism, not the runtime:** `pipeline` +7.3%,
+instructions 208M → 222M, of which the **pre-flight type check alone is 131M → 144M — the
+whole delta**; the run with `BROOD_NO_CHECK=1` is +0.8%. `fib`'s check grew 124M → 133M the
+same way: the checker costs ~10% more per file than at `084060fb` (A4/A5/B6/C9), and every
+`brood file` pays it. KI-150 is reopened on that reading (its mitigation named this trigger);
+the first candidate it names is caching inferred signatures in the stdlib image.
+
+**A watch item found on the way, unexplained:** `BROOD_NO_CHECK=1` makes `pipeline` execute
+**2.8× MORE** instructions (586M vs 208M with the check; `fib` 1330M vs 1387M, i.e. normal).
+The check does work the run then reuses — module materialisation or compiled bodies — and
+skipping it sends `pipeline` down a costlier path. Not chased; `BROOD_IMAGE_TRACE=1` and
+`BROOD_TRACE_COMPILE=1` on the two runs is where to start. Until it is understood, the flag
+is not "raw eval for timing" on every program, whatever its catalogue line says.
+
+**Measurement notes from today:** `make ab` refuses a baseline worktree whose std image was
+evicted (`stdimage MISMATCH — base=stale`) — the fix is `(cd target/ab/<sha> && cargo build
+-p nest && scripts/build-std-image.sh)`, ~3 min; and `perf stat -e instructions:u` on the two
+`release-fast` binaries with `--check` / `BROOD_NO_CHECK=1` splits a row's delta between the
+checker and the run in under a minute, which is the question a wall number cannot answer.
 
 ## 2026-09-17 late — where to pick up (read this first; written as the week's budget ran out)
 
@@ -59,9 +104,8 @@ green yet**, and what remains is not this session's — it is the B6–B8 checke
    bedit, then `make smoke-bedit ARGS=--bump` (a grammar-enabled `nest`, see CLAUDE.md) to
    move `BEDIT_REF`.
 
-**Do NOT refresh the benchmark column again until something reaches the runtime.** Nothing
-since `084060fb` does (flag-off mono code, tooling, checker, GUI); three more invocations would
-republish the same numbers ± drift.
+**(Superseded — see the night section above: the column was refreshed at `a406f9a6` and read
+flat except for the checker's own cost; `c9428cba` had reached `std/regex`/`std/json`.)**
 
 **Then, the perf queue, in value order** (all from the supervisor decomposition in the
 afternoon section below; each is general, none is supervisor-specific):
@@ -224,8 +268,8 @@ Verified by probe: `map<K, A|B>` vs split maps stays false (a map is like a vect
    with themselves still). Watch for a NEW finding the sharper relation exposes — a
    `match` over an `(int lo hi)` scrutinee may now read exhaustive (fewer warnings, fine)
    and a dead-clause lint may now fire where a clause was already covered (read each one).
-4. Docs: ADR in `docs/decisions.md` ("ADR-364 — A record is a product too; an interval is
-   its listing" — the undeclared-remainder argument is the content worth recording), tick
+4. Docs: ADR in `docs/decisions.md` (the next number — 364 at the time of writing, check
+   `origin/main` first — "A record is a product too; an interval is its listing" — the undeclared-remainder argument is the content worth recording), tick
    C9 in `docs/type-system-status.md` § "The remaining list" + a short entry, a devlog
    line, `docs/type-records.md` (records section of subtyping) and `docs/types.md`
    contract #5 if it still says record subtyping is "not complete" in this respect.

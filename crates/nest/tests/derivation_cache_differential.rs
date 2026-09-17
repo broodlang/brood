@@ -55,14 +55,11 @@ fn check(root: &Path, files: &[PathBuf], cache: bool) -> String {
         .arg("--suggest-sigs")
         .args(files)
         .env("BROOD_NO_CHECK_CACHE", "1")
-        // Pin the ceiling rather than inherit the `differential (tree-walker)` job's
-        // `BROOD_VM=0`: whether a memo changes an answer is engine-independent. And say
-        // the size, since the other tree-walker overrides in `.config/nextest.toml`
-        // describe 5-10x ratios and this is not one: measured 2026-09-17 on a 28-core
-        // box, one whole-tree check is 9.1 s (`std/`) and 12.1 s (`tests/`) under the VM
-        // against 9.1 s and 14.2 s under the tree-walker — ~17% at most. So the engine is
-        // NOT why this binary timed out at the 120 s cap; four whole-tree checks in one
-        // case is. The per-tree split below is the fix, this is the cheap 17% beside it.
+        // Engine-independent question, so the child does not inherit the tree-walker job's
+        // `BROOD_VM=0` (four whole-tree checks: 52 s solo on the VM, ~1.6x tree-walked).
+        // That 1.6x is this test's child, the `[profile.test]` `nest`; the same check on
+        // the RELEASE binary is ~17% (9.1/12.1 s VM against 9.1/14.2 s tree-walked), since
+        // the release JIT is the other side of the comparison. Read a ratio with its binary.
         .env("BROOD_TIER", "2");
     if !cache {
         command.env("BROOD_NO_DERIVE_CACHE", "1");
@@ -75,10 +72,12 @@ fn check(root: &Path, files: &[PathBuf], cache: bool) -> String {
     )
 }
 
-// One tree per CASE, not both in one, because each whole-tree check is 9-12 s and nextest's
-// cap is per case: as one case this did four of them and timed out at 120 s on the 2-core
-// `differential (tree-walker)` runner (2026-09-17). Split, each case does two and the two
-// run in parallel — the same coverage, both trees, no budget raised.
+// One tree per CASE, not both in one, because nextest's cap is per case and this did four
+// whole-tree checks in one — which is what put it over the 120 s default (2026-09-17). Each
+// case now does two, and the two run in parallel: 21 s and 29 s under the tree-walker job's
+// own environment, against 51 s for the single case. The `.config/nextest.toml` budget is
+// the backstop and was sized before this split, so it now has about twice the headroom its
+// comment claims. Coverage is identical — both trees, both cache modes.
 
 #[test]
 fn the_site_walk_cache_changes_no_verdict_over_std() {
