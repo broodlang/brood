@@ -53,7 +53,10 @@ fn check(root: &Path, files: &[PathBuf], cache: bool) -> String {
         .arg("--strict")
         .arg("--suggest-sigs")
         .args(files)
-        .env("BROOD_NO_CHECK_CACHE", "1");
+        .env("BROOD_NO_CHECK_CACHE", "1")
+        // Engine-independent question, so the child does not inherit the tree-walker job's
+        // `BROOD_VM=0` (four whole-tree checks: 52 s solo on the VM, ~1.6x tree-walked).
+        .env("BROOD_TIER", "2");
     if !cache {
         command.env("BROOD_NO_DERIVE_CACHE", "1");
     }
