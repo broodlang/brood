@@ -9854,6 +9854,23 @@ candidate — it is the same shape as the bindings the image already carries. Un
 `datetime`, `http`) should count the instructions of `brood file` on a program that touches
 it before it removes anything.
 
+## KI-154 — `duplicate_connect_is_deduplicated` waited 30 s for a welcome, once 🔍 WATCH 2026-09-17
+
+**Symptom.** One full-suite run: `cli::distribution duplicate_connect_is_deduplicated` failed
+with the client's `no welcome` after its 30 s `receive`, then passed on nextest's retry.
+25 solo runs and 3 runs of the whole file since, all clean.
+
+**Hypothesis (not observed).** Every server in that file registered `:echo` AFTER
+`node/start`, and `wait_until_listening` releases the client the instant the port accepts,
+so a `[:hi]` that lands between the listen and the register is dropped — a message to an
+unregistered name is silent by design (ADR-232), with a warning only the server prints,
+and the test discarded the server's stderr.
+
+**Done.** Every server registers before it listens (five sites), which closes that window by
+construction, and the failure message now carries the server's stderr, where ADR-232's drop
+warning would name this cause. Left a watch item rather than a fix: the cause was inferred
+from the shape, not seen. If it recurs, that stderr is the first thing to read.
+
 ## KI-153 — a function reached only through itself was checked as dead code ✅ FIXED 2026-09-17
 
 **Symptom.** `(defn w (xs) (if (empty? xs) 0 (do (string/length 5) (w (rest xs)))))` —

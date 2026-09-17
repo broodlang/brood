@@ -887,10 +887,34 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-17** — KI-152: the linear-map rewrite was observable on its seed (a rope in the input map raised on one arm, returned on the other); `%table-from-map` declines and the split keeps the loop as written behind the seed check, under a new `(check-allow :generated …)` the checker skips — measured free. Go column published in brood-benchmarks (1.8× C, between C and .NET).
 - **2026-09-17** — KI-153: a function whose only sites were its own self-calls derived ⊥ for every parameter and was checked as dead code (no lint in its body at all); a self-call no longer makes a function live. The rewrite's forms keep their source positions.
 - **2026-09-17** — `inc`, `dec` and `(- (get m k 0) e)` fuse like `+` (ADR-360 §5, `%table-sub`); the fuzzer draws the four spellings and an i64::MIN seed.
+- **2026-09-17** — ADR-360 §6: the tally through a `fold`/`reduce` LITERAL builds in place too (957 → 98 ms on 750k keys), and `seq/frequencies` is written as that idiom (523 → 96 ms); a shadowed name anywhere in the form declines the rewrite; the fuzzer gained a fold arm against a named-function reference.
 
 ---
 
 ## Recent — full entries
+
+## 2026-09-17 — the fold literal is a tally too (ADR-360 §6)
+
+`brood-for-claude.md` recommends `(fold cells {} (fn (counts cell) … (assoc c n (inc (get c n
+0)))))` for a hot tally, and `seq/frequencies` is that shape with kernel ops — and neither
+qualified for the linear-map rewrite, which wanted a self-tail `defn`. The fold's literal is
+the same proof one level in: its first parameter linear, the body's return the sink, the
+fold threading the accumulator. `linmap_probe_fn` is that probe (no self-call to require);
+`linmap_fold_rewrite` runs on the fully expanded top-level form from `macroexpand_all`,
+binds the collection and the seed once, checks the seed, and runs either the table-bound
+literal or the literal as written under `:generated`.
+
+Why the whole form: a `fold` shadowed outside the literal — `(let (fold my-fn) (fold xs {}
+(fn …)))` — is invisible to a probe of the literal alone, and the source pass carries no
+scope. So any local binder of a name the rewrite reads, anywhere in the form, declines it;
+the defn split needs no such scan because its probe compiles the whole body. A named
+function is never rewritten, which is what the fuzzer's new fold arm compares against.
+
+750k keys on one core: the fold 957 → 98 ms; `seq/frequencies` rewritten to the idiom 523
+→ 96 ms (its kernel-op spelling was chosen to skip `assoc`'s variadic entry and `get`'s
+dispatch, and was exactly the spelling the rewrite could not see). `make ab --floor --all`:
+every row noise — on a box whose pinned core had dropped to 1.3 GHz, which made both arms
+2.7× slower than two hours earlier and changed nothing about the verdicts.
 
 ## 2026-09-17 — a self-call is not a caller (KI-153)
 

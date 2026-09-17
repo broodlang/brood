@@ -23075,6 +23075,20 @@ only through an undocumented name is not a language feature; it is a benchmark t
    the loop exactly as the author wrote it, wrapped in `(%lint-allow :generated …)` so the
    checker does not walk a copy of code it checks in the inner loop.
 
+6. **The same tally through a `fold`/`reduce` literal** (2026-09-17). `(fold xs {} (fn (m x)
+   (assoc m x (inc (get m x 0)))))` — the pocket reference's recommendation, and what
+   `seq/frequencies` is — builds in place too: `linmap_fold_rewrite` runs on the fully
+   expanded top-level form (`macroexpand_all`), probes the literal (`linmap_probe_fn`: the
+   first parameter linear with the body's return as its sink; the fold threads it, so no
+   self-call is required) and rewrites the call to bind the collection and the seed once,
+   check the seed, and run either the table-bound literal under `fold` or the literal as
+   written under `(%lint-allow :generated …)`. Decided on the whole form because a `fold`
+   shadowed OUTSIDE the literal is invisible to a probe of the literal — a local binder
+   of any name the rewrite reads (`fold`, `reduce`, `get`, `assoc`, `+`, `-`, `inc`, `dec`)
+   anywhere in the form declines it. Only a single-clause literal; a named function is not
+   rewritten, which is what the fuzzer's oracle stands on. 750k keys: the fold 957 → 98
+   ms, `seq/frequencies` 523 → 96 ms once written as the idiom.
+
 **Consequences.** `wordcount` 857 → 66 ms and `persistent-map` 535 → 79 ms on the idiomatic
 ports (`make ab --floor`, every other row noise); the benchmark rows are now the code a user
 writes and the primitive has no reason to exist in user code. Guards: the expansion is pinned

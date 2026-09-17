@@ -154,6 +154,68 @@ fn inc_dec_and_subtraction_fuse_too() {
     );
 }
 
+// ---- the same tally through a `fold`/`reduce` literal (ADR-360 §6) ----
+
+#[test]
+fn a_fold_literal_tally_builds_in_place() {
+    // The pocket reference's fused-tally shape: no defn at all, the fold threads the map.
+    assert_split(
+        "(defn tally (xs) (fold xs {} (fn (m x) (assoc m x (inc (get m x 0))))))",
+        &[
+            "%table-from-map",
+            "(%table-add m x 1)",
+            "%table-snapshot",
+            ":generated",
+        ],
+        &[],
+    );
+    assert_split(
+        "(defn tally (xs) (reduce xs {} (fn (m x) (assoc m x (+ (get m x 0) 1)))))",
+        &["%table-from-map", "%table-add"],
+        &[],
+    );
+    // Nested: a fold in a fold's literal body is rewritten on its own.
+    assert_split(
+        "(defn tally (xss) (fold xss {} (fn (m xs) (fold xs m (fn (m2 x) (assoc m2 x (inc (get m2 x 0))))))))",
+        &["(%table-add m2 x 1)"],
+        &[],
+    );
+}
+
+#[test]
+fn a_fold_literal_that_is_not_a_tally_is_left_alone() {
+    // A named function is not a literal — nothing to rewrite (that is the fuzzer's oracle).
+    assert_split(
+        "(defn tally (xs) (fold xs {} step))",
+        &[],
+        &["%table-from-map"],
+    );
+    // The accumulator escapes (a plain assoc).
+    assert_split(
+        "(defn tally (xs) (fold xs {} (fn (m x) (assoc m x (str x)))))",
+        &[],
+        &["%table-from-map"],
+    );
+    // A local binder shadowing `fold` anywhere in the form declines the whole form.
+    assert_split(
+        "(defn tally (xs) (let (fold (fn (c i f) :mine)) (fold xs {} (fn (m x) (assoc m x (inc (get m x 0)))))))",
+        &[],
+        &["%table-from-map"],
+    );
+    // …and so does a shadowed `get`, even in an unrelated function literal.
+    assert_split(
+        "(defn tally (xs) (do (fn (get) get) (fold xs {} (fn (m x) (assoc m x (inc (get m x 0)))))))",
+        &[],
+        &["%table-from-map"],
+    );
+    // A multi-clause literal is not walked.
+    assert_split(
+        "(defn tally (xs) (fold xs {} (fn ((m x) (assoc m x (inc (get m x 0)))) ((m) m))))",
+        &[],
+        &["%table-from-map"],
+    );
+}
+
 // ---- what must NOT fuse: each of these has semantics the table op would change ----
 
 #[test]

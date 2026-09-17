@@ -63,6 +63,16 @@ def program(seed):
     binding = f"(let (k {let_init}) " if let_init else ""
     close = ")" if let_init else ""
     step = f"{binding}{upd}{close}"
+    # The same tally through a `fold` LITERAL — rewritten too (ADR-360 §6) — against the
+    # named-function reference, which the rewrite never touches. Only for keys that do not
+    # read `xs`: the fold's element is `i`, counting up where `go` counts down, and a tally
+    # is order-independent.
+    fold_arm = ""
+    if key != "(first xs)":
+        fold_arm = f"""(defn ref-fold-step (m i) {step})
+(def c (try (show (fold (range 1 (+ {n} 1)) {seedmap} (fn (m i) {step}))) (catch e (str "E:" (error-message e)))))
+(def d (try (show (fold (range 1 (+ {n} 1)) {seedmap} ref-fold-step)) (catch e (str "E:" (error-message e)))))
+(io/puts (if (= c d) "fold-ok" (str "BAD fold=" c " ref=" d)))"""
     # xs is a list of ints so `(first xs)` is a key; `i` counts down.
     return f"""(defrecord lm-rec (hits))
 (impl Lookup lm-rec (lookup-get [c k] (if (= k :hits) (get c :hits) 100)) (lookup-keys [c] (list :hits)))
@@ -79,6 +89,7 @@ def program(seed):
 (defn show (m) (if (map? m) (pr-str (sort (map (seq m) (fn (kv) (str (nth kv 0) "=" (let (v (nth kv 1)) (cond (rope? v) (text/->string v) (seqview? v) (pr-str (seq v)) (fn? v) "fn" else (pr-str v)))))))) (pr-str m)))
 (def a (try (show (go {n} xs {seedmap})) (catch e (str "E:" (error-message e)))))
 (def b (try (show (ref-go {n} xs {seedmap})) (catch e (str "E:" (error-message e)))))
+{fold_arm}
 (io/puts (if (= a b) a (str "BAD split=" a " ref=" b)))
 """
 

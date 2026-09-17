@@ -585,6 +585,28 @@ pub(crate) fn linmap_probe(
     })
 }
 
+/// Probe whether `(fn (acc x …) body…)` — the literal a `fold`/`reduce` is handed — is a
+/// **linear** tally of its first parameter: every use of `acc` is a whitelisted read or
+/// update, and the body's return (the next accumulator) is the one place the updated map
+/// flows. The fold-shaped sibling of [`linmap_probe`]: there is no self-call to require,
+/// the fold threads the accumulator instead, and the literal may read outer locals (they
+/// compile to globals here, which the analysis never mistakes for `acc`). `None` when the
+/// shape does not hold, when nothing updates `acc` (nothing to win), or under
+/// `BROOD_LINMAP=0`.
+pub(crate) fn linmap_probe_fn(heap: &Heap, params: &[Symbol], body: &[Value]) -> Option<()> {
+    if std::env::var_os("BROOD_LINMAP").is_some_and(|v| v == "0") {
+        return None;
+    }
+    let mut scope = Scope::with_params_enclosing(&[], Vec::new());
+    for &p in params {
+        scope.bind(p);
+    }
+    let node = compile_body(heap, body, &mut scope, true)?;
+    let idiom = LinIdiom::resolve(heap);
+    (linmap_has_update(&node, 0, idiom) && linmap_linear(&node, 0, LinSink::Return, idiom))
+        .then_some(())
+}
+
 // ===================== recursive self-inlining (Phase B, §6b) =====================
 //
 // `docs/jit-optimizing-tier.md` §6b. A non-tail self-recursive call to a top-level

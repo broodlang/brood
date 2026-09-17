@@ -523,7 +523,7 @@ unrewritten copy of the loop, so the rewrite is exact on every input — and nev
 user code; reach for `table/new` instead."
   ;; The refusal IS the answer: a put that raises names a value the table cannot hold,
   ;; and nil is what the wrapper reads as "run the loop as written".
-  (if (%map-get m (quote :__id__) nil)
+  (if (or (not (map? m)) (%map-get m (quote :__id__) nil))
     nil
     (check-allow :discarded-catch
       (try

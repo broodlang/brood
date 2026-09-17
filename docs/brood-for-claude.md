@@ -607,9 +607,10 @@ path:
   ```
 
   Write the tally as `(assoc m k (+ (get m k 0) e))` — that shape, with a literal `0`
-  default; `(inc (get m k 0))`, `dec` and `(- (get m k 0) e)` count too — and, in a
-  self-recursive loop that threads the map through its own tail call, the compiler
-  builds the map in place (ADR-360: no per-update path copy, and the loop stays native). There is no faster spelling to reach for;
+  default; `(inc (get m k 0))`, `dec` and `(- (get m k 0) e)` count too — and the
+  compiler builds the map in place (ADR-360: no per-update path copy, and the loop
+  stays native), both in a self-recursive loop that threads the map through its own
+  tail call and in a `fold`/`reduce` handed a literal `fn` like the one above. There is no faster spelling to reach for;
   `%map-int-add` exists but is now just this shape by another name.
 
   Same shape for build-a-collection-then-rebuild: fold the source straight into

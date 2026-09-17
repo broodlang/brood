@@ -58,10 +58,11 @@ running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
     (seq/frequencies [])           → {}
 
     (seq/frequencies [1 1 2])   → {1 2, 2 1}"
-  ;; The map accumulator is always a map, so hit the 3-arg kernel ops
-  ;; (`%map-assoc`/`%map-get`) directly — variadic `assoc` would build a rest-list
-  ;; and `get` a `cond` dispatch on every one of the n elements.
-  (fold coll {} (fn (m x) (%map-assoc m x (%add (%map-get m x 0) 1)))))
+  ;; The tally as a user writes it — deliberately: the compiler recognises this exact
+  ;; shape in a `fold` literal and builds the map in place on a table (ADR-360 §6), where
+  ;; the kernel-op spelling it replaced (`%map-assoc` over `%map-get`) is not recognised
+  ;; and path-copied the map per element: 523 → 98 ms on 750k keys.
+  (fold coll {} (fn (m x) (assoc m x (+ (get m x 0) 1)))))
 
 ;; dedupe: collapse only *consecutive* runs of equal items (no "seen" set needed).
 (defn- dedupe-acc (coll prev acc)

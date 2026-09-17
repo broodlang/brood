@@ -2036,7 +2036,11 @@ pub fn macroexpand(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
 /// `quote` and `quasiquote` are left opaque: their contents are data, not calls
 /// to expand. Code inside a `~unquote` still expands when the quasiquote runs.
 pub fn macroexpand_all(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
-    macroexpand_all_depth(heap, form, env, 0)
+    let expanded = macroexpand_all_depth(heap, form, env, 0)?;
+    // A tally through `fold`/`reduce` with a literal `fn` builds in place too (ADR-360 §6):
+    // decided on the fully expanded form, because the rewrite must know no binder in it
+    // shadows the names it relies on, and only the whole form can say so.
+    Ok(linmap_fold_rewrite(heap, expanded))
 }
 
 fn macroexpand_all_depth(heap: &mut Heap, form: Value, env: EnvId, depth: u32) -> LispResult {
@@ -2466,6 +2470,225 @@ fn linmap_split_def(heap: &mut Heap, items: &[Value]) -> Option<Value> {
     let wrapper_fn = heap.list(vec![value::sym(kw::FN), param_form, wrapper_body]);
     let wrapper_def = heap.list(vec![value::sym(kw::DEF), items[1], wrapper_fn]);
     Some(heap.list(vec![value::sym(kw::DO), slow_def, inner_def, wrapper_def]))
+}
+
+/// The names the fold rewrite reads by spelling on the expanded form: a local binder of
+/// any of them anywhere in the top-level form declines the rewrite for the whole form. The
+/// defn split needs no such scan — its probe compiles the body, where a shadowed `get` is
+/// a `Local` callee and an escape — but a `fold` shadowed OUTSIDE the literal is invisible
+/// to a probe of the literal alone.
+const LINMAP_FOLD_HEADS: [&str; 8] = ["fold", "reduce", "get", "assoc", "+", "-", "inc", "dec"];
+
+/// Does `form` bind any of `names` — a `let`/`letrec` target, a `fn` parameter (single or
+/// multi-clause)? Post-expansion, so binders are plain symbols. Quoted data is skipped.
+fn form_binds_any(heap: &Heap, form: Value, names: &[value::Symbol], depth: usize) -> bool {
+    if depth > 256 {
+        return true; // too deep to prove clean — decline
+    }
+    let Ok(items) = heap.list_to_vec(form) else {
+        return false;
+    };
+    let Some(&head) = items.first() else {
+        return false;
+    };
+    let binds = |v: Value| matches!(v.unpack(), ValueRef::Sym(s) if names.contains(&s));
+    if let ValueRef::Sym(h) = head.unpack() {
+        if value::symbol_is(h, kw::QUOTE) || value::symbol_is(h, kw::QUASIQUOTE) {
+            return false;
+        }
+        if value::symbol_is(h, kw::LET) || value::symbol_is(h, kw::LETREC) {
+            if let Some(bs) = items.get(1).and_then(|&b| form_items(heap, b)) {
+                if bs.iter().step_by(2).any(|&b| binds(b)) {
+                    return true;
+                }
+            }
+        } else if value::symbol_is(h, kw::FN) {
+            // `(fn (params) …)`, or `(fn ((params) …) ((params) …))`.
+            let clauses: Vec<Value> = if fn_is_arity_multi_clause(heap, &items) {
+                items[1..]
+                    .iter()
+                    .filter_map(|&c| form_items(heap, c).and_then(|v| v.first().copied()))
+                    .collect()
+            } else {
+                items.get(1).copied().into_iter().collect()
+            };
+            for c in clauses {
+                if let Some(ps) = form_items(heap, c) {
+                    if ps.iter().any(|&p| binds(p)) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    items
+        .iter()
+        .any(|&it| form_binds_any(heap, it, names, depth + 1))
+}
+
+/// Rewrite every `(fold COLL INIT (fn (acc x…) BODY…))` / `reduce` in the expanded top-level
+/// `form` whose literal is a linear tally of `acc` (`linmap_probe_fn`) into an in-place build:
+///
+/// ```text
+/// (let (C COLL  I INIT  T (%table-from-map I))
+///   (if T
+///       (let (R (fold C T (fn (acc x…) BODY')))
+///         (if (= :table (type-of R)) (%table-snapshot R) R))
+///       (%lint-allow :generated (fold C I (fn (acc x…) BODY…)))))
+/// ```
+///
+/// `BODY'` is `BODY` with the accumulator's ops on the table (`linmap_rewrite_form` with no
+/// self-name to re-point). `COLL` and `INIT` are bound first, in the source's order, so each
+/// is evaluated once; the seed check and the unrewritten copy are the defn split's
+/// (`linmap_split_def`). Declined for the whole form when any binder in it shadows a name
+/// the rewrite reads (`form_binds_any`). A form already rewritten is not rewritten again:
+/// the walk does not enter `(%lint-allow :generated …)`, and the table-bound copy no longer
+/// has the shape (its accumulator's ops are table ops, which the probe treats as escapes).
+fn linmap_fold_rewrite(heap: &mut Heap, form: Value) -> Value {
+    let names: Vec<value::Symbol> = LINMAP_FOLD_HEADS.iter().map(|n| value::intern(n)).collect();
+    if !form_has_fold_literal(heap, form, 0) || form_binds_any(heap, form, &names, 0) {
+        return form;
+    }
+    linmap_fold_walk(heap, form, 0)
+}
+
+/// Is there a `(fold … (fn …))` / `reduce` anywhere in `form`? The cheap pre-check that
+/// keeps the binder scan and the rebuilding walk off every ordinary top-level form.
+fn form_has_fold_literal(heap: &Heap, form: Value, depth: usize) -> bool {
+    if depth > 256 {
+        return false;
+    }
+    let Ok(items) = heap.list_to_vec(form) else {
+        return false;
+    };
+    if let Some(ValueRef::Sym(h)) = items.first().map(|v| v.unpack()) {
+        if value::symbol_is(h, kw::QUOTE) || value::symbol_is(h, kw::QUASIQUOTE) {
+            return false;
+        }
+        if (value::symbol_is(h, "fold") || value::symbol_is(h, "reduce"))
+            && items.len() == 4
+            && matches!(heap.list_to_vec(items[3]).ok().and_then(|f| f.first().map(|v| v.unpack())),
+                Some(ValueRef::Sym(f)) if value::symbol_is(f, kw::FN))
+        {
+            return true;
+        }
+    }
+    items
+        .iter()
+        .any(|&it| form_has_fold_literal(heap, it, depth + 1))
+}
+
+fn linmap_fold_walk(heap: &mut Heap, form: Value, depth: usize) -> Value {
+    if depth > 256 {
+        return form;
+    }
+    let items = match heap.list_to_vec(form) {
+        Ok(v) if !v.is_empty() => v,
+        _ => return form,
+    };
+    if let ValueRef::Sym(h) = items[0].unpack() {
+        if value::symbol_is(h, kw::QUOTE) || value::symbol_is(h, kw::QUASIQUOTE) {
+            return form;
+        }
+        // Generated code is the compiler's own; a rewritten fold's slow copy lives here.
+        if value::symbol_is(h, "%lint-allow")
+            && matches!(items.get(1), Some(&Value::Keyword(k)) if value::symbol_is(k, "generated"))
+        {
+            return form;
+        }
+    }
+    // Children first, so a fold nested in a fold's collection or body is handled on its own.
+    let rebuilt: Vec<Value> = items
+        .iter()
+        .map(|&it| linmap_fold_walk(heap, it, depth + 1))
+        .collect();
+    let form = rebuild_list(heap, form, rebuilt.clone());
+    if let Some(out) = linmap_fold_call(heap, form, &rebuilt) {
+        return out;
+    }
+    form
+}
+
+/// The rewrite of one `(fold COLL INIT (fn (acc x…) BODY…))` call, or `None` when `items` is
+/// not that shape or the literal is not a linear tally.
+fn linmap_fold_call(heap: &mut Heap, form: Value, items: &[Value]) -> Option<Value> {
+    let ValueRef::Sym(h) = items[0].unpack() else {
+        return None;
+    };
+    if !(value::symbol_is(h, "fold") || value::symbol_is(h, "reduce")) || items.len() != 4 {
+        return None;
+    }
+    let fn_items = heap.list_to_vec(items[3]).ok()?;
+    if fn_items.len() < 3
+        || !matches!(fn_items[0].unpack(), ValueRef::Sym(s) if value::symbol_is(s, kw::FN))
+        || fn_is_arity_multi_clause(heap, &fn_items)
+    {
+        return None;
+    }
+    let param_form = fn_items[1];
+    let param_vals = form_items(heap, param_form)?;
+    let mut params: Vec<value::Symbol> = Vec::with_capacity(param_vals.len());
+    for &pv in &param_vals {
+        match pv.unpack() {
+            ValueRef::Sym(s)
+                if !value::symbol_is(s, kw::AMP) && !value::symbol_is(s, kw::AMP_OPTIONAL) =>
+            {
+                params.push(s)
+            }
+            _ => return None,
+        }
+    }
+    if params.is_empty() {
+        return None;
+    }
+    let body = &fn_items[2..];
+    if body.len() > 1 && matches!(body[0].unpack(), ValueRef::Str(_)) {
+        return None;
+    }
+    if body.iter().any(|&f| form_has_quasiquote(heap, f, 0)) {
+        return None;
+    }
+    crate::eval::compile::linmap_probe_fn(heap, &params, body)?;
+    let acc = params[0];
+    // The literal's own name is nothing: no self-call to re-point. Any symbol not in the
+    // body serves as the "name"; the literal's accumulator symbol cannot be a head there.
+    let no_name = value::gensym("linmap-fold");
+    let ValueRef::Sym(no_name_sym) = no_name.unpack() else {
+        return None;
+    };
+    let fast_body: Vec<Value> = body
+        .iter()
+        .map(|&f| linmap_rewrite_form(heap, f, no_name_sym, no_name, acc))
+        .collect();
+    let mut fast_fn = vec![value::sym(kw::FN), param_form];
+    fast_fn.extend(fast_body);
+    let fast_fn = rebuild_list(heap, items[3], fast_fn);
+
+    let c_val = value::gensym("linmap-coll");
+    let i_val = value::gensym("linmap-init");
+    let t_val = value::gensym("linmap-table");
+    let r_val = value::gensym("linmap-out");
+    let fast_call = rebuild_list(heap, form, vec![items[0], c_val, t_val, fast_fn]);
+    let type_of = heap.list(vec![value::sym("type-of"), r_val]);
+    let is_table = heap.list(vec![value::sym("="), value::kw("table"), type_of]);
+    let snap_call = heap.list(vec![value::sym(kw::TABLE_SNAPSHOT), r_val]);
+    let cond = heap.list(vec![value::sym(kw::IF), is_table, snap_call, r_val]);
+    let bind = heap.list(vec![r_val, fast_call]);
+    let snap = heap.list(vec![value::sym(kw::LET), bind, cond]);
+    let slow_call = rebuild_list(heap, form, vec![items[0], c_val, i_val, items[3]]);
+    let slow = heap.list(vec![
+        value::sym("%lint-allow"),
+        value::kw("generated"),
+        slow_call,
+    ]);
+    let choose = heap.list(vec![value::sym(kw::IF), t_val, snap, slow]);
+    let seed = heap.list(vec![value::sym("%table-from-map"), i_val]);
+    let binds = heap.list(vec![c_val, items[1], i_val, items[2], t_val, seed]);
+    Some(rebuild_list(
+        heap,
+        form,
+        vec![value::sym(kw::LET), binds, choose],
+    ))
 }
 
 /// `form` with every self-call head `name` re-pointed at `slow` and nothing else touched —
