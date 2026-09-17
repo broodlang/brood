@@ -32,7 +32,7 @@
 ;; first: the wrapper's `def` would run before this file loads (the mistake the UCD knob's
 ;; comment records).
 (def- jdr-of
-  (math/max 1 (let (n (string/->number (or (os/env "BROOD_JDR_OF") ""))) (if (failure? n) 1 n))))
+  (math/max 1 (let (n (string/->number (or (os/env "BROOD_JDR_OF") ""))) (if (int? n) n 1))))
 
 (defn- jdr-parse (path)
   (try (do (json/decode (file/slurp path)) :ok) (catch e :rejected)))

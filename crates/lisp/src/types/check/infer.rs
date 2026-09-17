@@ -513,6 +513,16 @@ fn expr_ty_inner(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                             }
                             return Some(sg.ret);
                         }
+                        // A self-call with NO return inferred yet — the first round of the
+                        // function's own inference, the call not in branch-result position
+                        // (`branch_union` skips those): Kleene from ⊥. It contributes
+                        // nothing this round and reads the round's answer next; read as
+                        // the unknown instead, `regex-alt`'s `(let ([rest i3] (regex-alt
+                        // …)) [… i3])` started its index at `any` and stayed there
+                        // (2026-09-17).
+                        if ctx.inferring_self() == Some(s) {
+                            return Some(Ty::NEVER);
+                        }
                         // An **ability op** with a declared `:-> RET` return type. The op
                         // is a generic `defn` whose body is the dispatch machinery, so its
                         // own inferred type is opaque — the declared return is the only
@@ -653,6 +663,14 @@ fn control_flow_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
         // same narrowing the walk and `gradual_of` apply, so `(let (g E) (if g g d))` (what
         // `or` expands to) reads `g` as truthy in the then-branch.
         let test = items.get(1).copied().unwrap_or(Value::nil());
+        // A test that never produces a value selects no branch: the `if` is ⊥ too. Both
+        // branch scopes are dead under it, and the union of nothing read as the UNKNOWN —
+        // which is what a destructuring `let` over a `never` (the pattern lowering's
+        // `(if (vector? g) … (throw …))`) yielded, and unknown is absorbing in a
+        // fixpoint (2026-09-17).
+        if taken.is_none() && expr_ty(heap, test, ctx).is_some_and(|t| t.is_never()) {
+            return Some(Ty::NEVER);
+        }
         let (then_ctx, else_ctx) = super::guards::branch_scopes(heap, test, ctx);
         return match (items.len(), taken) {
             (4, Some(true)) | (3, Some(true)) => expr_ty(heap, items[2], &then_ctx),
@@ -1041,6 +1059,13 @@ fn numeric_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
     let mut tys = Vec::with_capacity(args.len());
     for &arg in args {
         tys.push(expr_ty(heap, arg, ctx)?);
+    }
+    // An operand that never produces a value — a call that always throws, a binder read
+    // off the joint fixpoint's ⊥ seed — makes the operation one too. Deferred to the
+    // operator's signature instead, `(inc never)` read `number`, and a derived index
+    // that started at ⊥ ascended through `number` and never came back (2026-09-17).
+    if tys.iter().any(Ty::is_never) {
+        return Some(Ty::NEVER);
     }
     numeric_result(head, &tys)
 }

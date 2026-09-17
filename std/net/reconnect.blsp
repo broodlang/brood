@@ -32,7 +32,7 @@ Pure Brood policy over connect/monitor-node/nodes. Pair with
 (defn- reconnect-opt (opts k default)
   "A backoff bound from `opts` — `:min-ms`/`:max-ms` are milliseconds, ints."
   (get opts k default))
-(sig reconnect-opt (map keyword int -> int))
+(sig reconnect-opt ((map keyword int) keyword int -> int))
 
 (defn- reconnect-notify (subs event)
   (dolist (p subs) (send p event)))

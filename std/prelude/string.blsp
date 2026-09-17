@@ -84,6 +84,7 @@
 
 ; 2^32 - 1
 (def- *rand-mask* 0xFFFFFFFF)
+(sig *rand-mask* int)
 (defn %rand-seed (n)
   "Normalize integer `n` into a valid nonzero 32-bit PRNG seed (xorshift32 cannot start from 0)."
   (let (m (bit/and n *rand-mask*))

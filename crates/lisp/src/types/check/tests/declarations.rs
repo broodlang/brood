@@ -168,3 +168,42 @@ fn a_deftype_past_the_shape_budget_is_reported_at_the_declaration() {
         "{ws:?}"
     );
 }
+
+// A5 (2026-09-17): the declaration is authoritative (ADR-259), and outside contracts mode
+// nothing else stands between a wrong one and its callers — so where the body's result is
+// the unknown and the declared return could not be checked against anything, strict says
+// the declaration is TRUSTED there. Plain mode stays silent: a declaration is what the
+// author meant, and this is not a mismatch.
+#[test]
+fn a_declared_return_the_body_cannot_verify_is_reported_as_trusted_under_strict() {
+    let src = "(defmodule t)\n\
+               (sig f (map -> int))\n\
+               (defn f (m) (get m :k))\n\
+               (sig g (int -> int))\n\
+               (defn g (n) (+ n 1))";
+    let strict = file_warnings_mode(src, true);
+    assert_eq!(
+        strict
+            .iter()
+            .filter(|w| w.contains("trusted, not verified"))
+            .count(),
+        1,
+        "{strict:?}"
+    );
+    assert!(
+        strict
+            .iter()
+            .any(|w| w.contains("f: declared return type int is trusted, not verified")),
+        "{strict:?}"
+    );
+    let plain = file_warnings_mode(src, false);
+    assert!(plain.is_empty(), "{plain:?}");
+    // …and a `(check-allow :type-mismatch …)` around it is the author saying so.
+    let allowed = file_warnings_mode(
+        "(defmodule t)\n\
+         (sig f (map -> int))\n\
+         (check-allow :type-mismatch (defn f (m) (get m :k)))",
+        true,
+    );
+    assert!(allowed.is_empty(), "{allowed:?}");
+}

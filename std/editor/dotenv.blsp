@@ -58,7 +58,7 @@ quote, or end of line if unclosed); `()` for an unquoted value (the default face
           e (if (< close 0) n (inc close)))
       (list [(+ base v) (+ base e) env-face-string]))
     '()))
-(sig env-value-spans (string int int int -> list))
+(sig env-value-spans (string int int int -> (list (tuple int int any))))
 
 (defn- env-assign-spans (line base lead n)
   "Spans for a `KEY=value` line (offsets shifted by `base`): an `export` keyword when
@@ -72,7 +72,7 @@ present, the key, and a quoted value. `()` when the line isn't an assignment."
         (cons [(+ base ks) (+ base ke) env-face-key]
           (env-value-spans line base (inc ke) n)))
       '())))
-(sig env-assign-spans (string int int int -> list))
+(sig env-assign-spans (string int int int -> (list (tuple int int any))))
 
 (defn- env-line-spans (line base)
   "The spans for one `line` starting at offset `base`: a `#` comment whole, else the

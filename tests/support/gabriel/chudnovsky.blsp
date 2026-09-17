@@ -16,7 +16,8 @@
 ;; is f64, which would be catastrophically wrong here — so `chudnovsky-isqrt` is a
 ;; Newton iteration on exact integers, which is what a Scheme's `exact-integer-sqrt`
 ;; is anyway. It is the only code in this file that is not upstream's. `expt` -> `pow`
-;; (exact for integer arguments, including the alternating `(pow -1 b)`), `quotient` ->
+;; (exact for integer arguments) — except the alternating `(expt -1 b)`, written as the
+;; sign it is, `(if (even? b) 1 -1)`, which the checker reads as an int — `quotient` ->
 ;; `quot`, and the `(g p q)` triple becomes a `[g p q]` vector rather than a 3-list: it is
 ;; internal to the split and never reaches the result, and a vector is the Brood tuple.
 ;;
@@ -61,7 +62,7 @@ conformance port. The oracle is upstream's own expected output in
       (let (g (* (- (* 6 b) 5) (- (* 2 b) 1) (- (* 6 b) 1)))
         [g
           (math/quot (* chudnovsky-c^3 (pow b 3)) 24)
-          (* (pow -1 b) g (+ (* b chudnovsky-b) chudnovsky-a))])
+          (* (if (even? b) 1 -1) g (+ (* b chudnovsky-b) chudnovsky-a))])
       (let (mid (math/quot (+ a b) 2)
             [g1 p1 q1] (chudnovsky-split a mid)
             [g2 p2 q2] (chudnovsky-split mid b))
@@ -85,5 +86,6 @@ conformance port. The oracle is upstream's own expected output in
     (if (< m n)
       nil
       (cons (pi-digits n) (pies (+ n s) m s)))))
+(sig pies ((int 0 _) int (int 0 _) -> (list int)))
 ;; Integers throughout — this is exact big-integer arithmetic, which is the point.
 (sig pi-digits ((int 0 _) -> int))

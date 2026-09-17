@@ -2762,12 +2762,42 @@ fn reconcile_arity(heap: &Heap, value_form: Value, sig: Sig) -> Sig {
 fn top_level_defs(heap: &Heap, expanded: &[Value]) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::with_capacity(expanded.len());
     for &form in expanded {
-        match walk::do_body(heap, form).filter(|body| marks_private(heap, body)) {
-            Some(body) => out.extend(body),
-            None => out.push(form),
-        }
+        // A `(check-allow :category …)` around a definition is the author suppressing a
+        // lint, not hiding the definition: its `def` is inferred like any other, so its
+        // callers read a return rather than `any` (`encoding-b64-encode` under
+        // `:type-mismatch` made every base64 encoder's declared `string` a trusted one,
+        // 2026-09-17). `:generated` stays opaque — the copy the linear-map rewrite keeps
+        // is not the author's code (KI-152).
+        collect_top_level_def(heap, form, &mut out);
     }
     out
+}
+
+fn collect_top_level_def(heap: &Heap, form: Value, out: &mut Vec<Value>) {
+    if let Some(wrapped) = lint_allowed_body(heap, form) {
+        // `check-allow` wraps its forms in one `do`: each of them is a top-level form.
+        for &inner in &wrapped {
+            collect_top_level_def(heap, inner, out);
+        }
+        return;
+    }
+    match walk::do_body(heap, form).filter(|body| marks_private(heap, body)) {
+        Some(body) => out.extend(body),
+        None => out.push(form),
+    }
+}
+
+/// The forms a `(%lint-allow :category (do FORM…))` wraps, for every category but
+/// `:generated`; `None` for anything else.
+fn lint_allowed_body(heap: &Heap, form: Value) -> Option<Vec<Value>> {
+    let items = list_items(heap, form)?;
+    let [Value::Sym(head), Value::Keyword(category), wrapped] = items.as_slice() else {
+        return None;
+    };
+    if !value::symbol_is(*head, "%lint-allow") || value::symbol_is(*category, "generated") {
+        return None;
+    }
+    Some(walk::do_body(heap, *wrapped).unwrap_or_else(|| vec![*wrapped]))
 }
 
 /// Does this `do` body carry a `(%mark-private …)` call — the fingerprint of a

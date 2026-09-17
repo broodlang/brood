@@ -291,11 +291,13 @@ suite, then reports which functions were never entered. Backs `nest test --cover
       (fn (result) (> (get result :total) 0)))))
 
 ;; Typed accessors over a per-file result map — its `:total`/`:covered` are counts, which a
-;; bare `get` cannot say (and a sum of them is then an int, as `coverage-percent` requires).
+;; bare `get` cannot say (and a sum of them is then an int, as `coverage-percent` requires);
+;; the result's shape says it, and the accessors verify.
+(deftype coverage-result (record &open :total int :covered int))
 (defn- coverage-result-total (r) (get r :total))
-(sig coverage-result-total (map -> int))
+(sig coverage-result-total (coverage-result -> int))
 (defn- coverage-result-covered (r) (get r :covered))
-(sig coverage-result-covered (map -> int))
+(sig coverage-result-covered (coverage-result -> int))
 
 ;; Sum `(key-of r)` over the results with an int accumulator — a `fold` cannot say its
 ;; accumulator stays an int, and `coverage-percent` requires one.

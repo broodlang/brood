@@ -547,11 +547,13 @@ steps through, comments excluded (see [[*comment-kinds*]])."
 
 ;; A node's offsets are ints by construction (the kernel writes them), but a `get` on a map
 ;; says `any`, and `(inc any)` is `number` — which the int-taking motions then refuse under
-;; the strict gate. Two typed accessors state the invariant once.
+;; the strict gate. The node's shape states the invariant once, and the two accessors are
+;; verified against it rather than trusted.
+(deftype ts-node (record &open :kind keyword :start int :end int))
 (defn- ts-start (node) (get node :start))
-(sig ts-start (map -> int))
+(sig ts-start (ts-node -> int))
 (defn- ts-end (node) (get node :end))
-(sig ts-end (map -> int))
+(sig ts-end (ts-node -> int))
 
 (defn point-forward (text lang point)
   "End of the next named node at or after `point` within the enclosing node;

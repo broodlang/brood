@@ -417,7 +417,7 @@ return the matching opener (top of stack) or -1. Skips strings/comments."
             (if (empty? stack) -1 (first stack))
             (hl-opener-scan full (inc i) n cp (rest stack)))
         else (hl-opener-scan full (inc i) n cp stack)))))
-(sig hl-opener-scan (string int int int list -> int))
+(sig hl-opener-scan (string int int int (list int) -> int))
 
 (defn- hl-closer-of (c)
   ;; the closing delimiter that pairs with opener `c`, or nil
@@ -444,7 +444,7 @@ happens to sit inside one."
         (hl-open? c) (hl-close-scan full (inc i) pos n (cons i stack))
         (hl-close? c) (hl-close-scan full (inc i) pos n (rest stack))
         else (hl-close-scan full (inc i) pos n stack)))))
-(sig hl-close-scan (string int int int list -> (or int :text)))
+(sig hl-close-scan (string int int int (list int) -> (or int :text)))
 
 (defn closer-redundant? (full pos c)
   "Would typing the closing delimiter `c` at offset `pos` in `full` be redundant — is the
@@ -522,7 +522,7 @@ innermost open bracket enclosing `pos`, or -1. Skips strings/comments (clamped a
         (hl-open? c) (hl-enc-scan full (inc i) pos n (cons i stack))
         (hl-close? c) (hl-enc-scan full (inc i) pos n (rest stack))
         else (hl-enc-scan full (inc i) pos n stack)))))
-(sig hl-enc-scan (string int int int list -> int))
+(sig hl-enc-scan (string int int int (list int) -> int))
 
 (defn- hl-datum-starts (full i end n acc)
   "Start offsets (reverse order) of the complete datums in `[i, end)` at one nesting

@@ -469,6 +469,14 @@ pub(in crate::types::check) fn pattern_bindings(
     rhs_ty: Option<&Ty>,
 ) -> Vec<(Symbol, Option<Ty>)> {
     let names = pattern_syms(heap, pat);
+    // A `never` right-hand side — a call that always throws, or a return still at the
+    // joint fixpoint's ⊥ seed — has no positions to read: every binder is `never`, which
+    // contributes nothing to a derived parameter. Bound UNKNOWN instead, `(inc i2)` read
+    // `number` in the first round and the ascent could never come back down: `regex`'s
+    // whole parser chain derived `number` for its index (2026-09-17).
+    if rhs_ty.is_some_and(Ty::is_never) {
+        return names.into_iter().map(|s| (s, Some(Ty::NEVER))).collect();
+    }
     let Some(items) = bindings(heap, pat) else {
         return names.into_iter().map(|s| (s, None)).collect();
     };

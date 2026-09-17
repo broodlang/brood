@@ -67,9 +67,18 @@ as a unit — descending through them is a deferred refinement."
     (if (nil? hit) anode (enclosing hit point))))
 (sig enclosing (map number -> map))
 
-(defn forms-of (anode)
-  "The form (non-whitespace, non-comment) children of `anode`."
-  (seq/filter (or (get anode :kids) (list)) form?))
+;; A tree node — a positioned CST node `{:kind :start :end …}` with half-open character
+;; offsets; its `:kids` are nodes too. Stated once here, so the offset accessors and the
+;; walks below are verified against it rather than trusted.
+(deftype sexp-node (record &open :start int :end int))
+
+;; Trusted, not verified: a `:kids` entry is a node by the reader's construction, which a
+;; bare `get` on the parent cannot say.
+(check-allow :trusted
+  (defn forms-of (anode)
+    "The form (non-whitespace, non-comment) children of `anode`."
+    (seq/filter (or (get anode :kids) (list)) form?)))
+(sig forms-of (map -> (list sexp-node)))
 
 (defn top-level-forms (text)
   "The top-level forms of `text`, in order, each a positioned node `{:kind :start
@@ -303,12 +312,12 @@ unchanged if `point` isn't within one.
 ;; `parent` is found with the same `(enclosing tr (sexp-start enc))` idiom the indenter
 ;; uses — a top-level form's parent is the root, so slurp/barf reach the next top form.
 
-;; Typed offset accessors over a tree node — a node's `:start`/`:end` are int offsets,
-;; which a bare `get` cannot say.
+;; Typed offset accessors over a tree node (`sexp-node`, above) — a node's `:start`/`:end`
+;; are int offsets, which a bare `get` cannot say; the shape says it, and the accessors verify.
 (defn- sexp-start (anode) (get anode :start))
-(sig sexp-start (map -> int))
+(sig sexp-start (sexp-node -> int))
 (defn- sexp-end (anode) (get anode :end))
-(sig sexp-end (map -> int))
+(sig sexp-end (sexp-node -> int))
 
 (defn- sexp-enc-of (text point)
   "The deepest container enclosing `point`, or nil when that's the root (no list to
@@ -353,7 +362,11 @@ form before it (paredit `forward-barf-sexp`); point stays inside the list.
         (if (empty? fs)
           nil
           (let (n (count fs)
-                new-close (if (>= n 2) (get (nth fs (- n 2)) :end) (inc es)))
+                ;; `n - 2` is inside `fs` when `n ≥ 2` — a relation between two locals the
+                ;; checker does not hold (C12); the `or` states it in a form it reads.
+                new-close (if (>= n 2)
+                            (sexp-end (or (nth fs (- n 2)) (error "sexp: no form before the last")))
+                            (inc es)))
             [(str (string/substring text 0 new-close)
                (string/char-at text (dec ee))
                (string/substring text new-close (dec ee))

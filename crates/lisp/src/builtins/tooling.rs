@@ -9,14 +9,16 @@ use crate::syntax::{cst, printer};
 pub(super) fn register(primitives: &mut super::Primitives) {
     use super::signature_types::*;
     use crate::core::value::Arity;
-    use crate::types::Sig;
+    use crate::types::{Sig, Ty};
     // The rename ledger (ADR-304): the Rust table `crate::renames::RENAMES` handed to
     // Brood as a map `{old {:to new :adr adr}}`, so `nest check --fix-renames` reads the
     // SAME table the runtime error and the checker diagnostic read.
     primitives.def(
         "%renames",
         Arity::exact(0),
-        Sig::new(vec![], map_ty),
+        // `{old-name {:to new-name :adr adr}}` — the value type is what lets
+        // `renames/renamed-to` verify its declared `(or map nil)`.
+        Sig::new(vec![], Ty::map_of(string, map_ty)),
         &[],
         "The rename ledger (ADR-304): a map of old public name (string) to `{:to new-name :adr adr}` for every deliberate rename the runtime still points at. Backs `renames/ledger`.",
         renames_ledger,

@@ -65,6 +65,7 @@ lookaround.")
 ;; {:t :set :neg b :chars (…)} {:t :class :k :digit/:word/:space} {:t :group :alt …}.
 
 (defn- regex-peek (pcs i) (if (< i (count pcs)) (nth pcs i) nil))
+(sig regex-peek ((vector string) int -> (or nil string)))
 
 ; \. \* \\ … → that char, literal
 (defn- regex-escape (pcs i)
@@ -80,12 +81,14 @@ lookaround.")
       (nil? c) [{:t :lit :c "\\"} i]
       ; trailing backslash → literal
       else [{:t :lit :c c} (inc i)])))
-(defn- regex-set-range? (pcs i)
-  "Is there an `a-z` range starting at `i`? A `-` LAST in the set (`[a-]`) is a
-literal member, which is why the character after it has to exist and not be `]`."
+(defn- regex-set-range-end (pcs i)
+  "The upper character of an `a-z` range starting at `i`, or nil when there is none. A
+`-` LAST in the set (`[a-]`) is a literal member, which is why the character after it
+has to exist and not be `]`. Answers the character rather than a bool so the caller reads
+it once, as the string the guard proved it is."
   (let (d (regex-peek pcs (inc i))
         hi (regex-peek pcs (+ i 2)))
-    (and (= d "-") (not (nil? hi)) (not (= hi "]")))))
+    (if (and (= d "-") (not (nil? hi)) (not (= hi "]"))) hi nil)))
 
 (defn- regex-set-body (pcs i chars ranges classes)
   "Collect a set's members until the closing `]`; returns [chars ranges classes next].
@@ -108,13 +111,15 @@ of) says what it looks like it says."
             (nil? e) (regex-set-body pcs (inc i) (cons "\\" chars) ranges classes)
             ; `\]`, `\-`, `\\` → that char, literally
             else (regex-set-body pcs (+ i 2) (cons e chars) ranges classes)))
-      (regex-set-range? pcs i)
-        (regex-set-body pcs
-          (+ i 3)
-          chars
-          (cons [(string/char->int c) (string/char->int (regex-peek pcs (+ i 2)))] ranges)
-          classes)
-      else (regex-set-body pcs (inc i) (cons c chars) ranges classes))))
+      else
+        (let (hi (regex-set-range-end pcs i))
+          (if hi
+            (regex-set-body pcs
+              (+ i 3)
+              chars
+              (cons [(string/char->int c) (string/char->int hi)] ranges)
+              classes)
+            (regex-set-body pcs (inc i) (cons c chars) ranges classes))))))
 
 (defn- regex-set (pcs i)
   "Parse a `[...]` set whose body starts at `i` (just past `[`); returns [atom next]."
@@ -153,12 +158,11 @@ of) says what it looks like it says."
     (if (and c (includes? "0123456789" c))
       (regex-digits-at pcs (inc i) (str acc c))
       [acc i])))
-;; `i` is an int, and the checker cannot prove it: the index is threaded through
-;; `regex-alt`/`regex-branch`, which live in a `letrec` inside `regex-parse` — a local
-;; function cannot carry a `sig`, so the mutual recursion has nowhere to be annotated.
-;; `number` is the strongest thing provable across this family, and it is true. Lifting
-;; those two to top-level `defn-`s would let the whole chain say `int`.
-(sig regex-digits-at (countable number string -> (tuple string number)))
+;; The one declaration on the parser chain: `pcs` is the pattern as a vector of
+;; characters and `i` an index into it. `regex-seq`/`regex-alt` are top-level `defn-`s
+;; (under a `check-allow`, which since 2026-09-17 no longer hides them from inference), so
+;; the whole chain derives `int` from here and from `regex-parse`'s `0`.
+(sig regex-digits-at ((vector string) int string -> (tuple string int)))
 
 ;; The most a `{m,n}` may expand to. Repetition is expanded into copies of the atom
 ;; (there is no counting state in a Thompson NFA), so `a{1,100000}` would be 100k
@@ -653,12 +657,16 @@ Runs once per distinct (set, char) — every repeat is the loop's one `table/get
 ;; loops thread the PATTERN, not the state vector: states are fetched from
 ;; `regex-states-cache` only on a memo miss / exit-first-sight (once per
 ;; distinct (set, char) ever), keeping the per-call table clone small.
-(defn- regex-exit (pattern exitmemo m matchbit set)
-  "End-of-input accept test: the memoised exit closure, computing on first sight."
-  (let (r (table/get exitmemo set))
-    (if (nil? r)
-      (regex-exit-slow (regex-states-of pattern) exitmemo m matchbit set)
-      r)))
+;; Trusted, not verified: the memo is a table, whose values the checker cannot type; what
+;; it holds is what `regex-exit-slow` put there, a bool.
+(check-allow :trusted
+  (defn- regex-exit (pattern exitmemo m matchbit set)
+    "End-of-input accept test: the memoised exit closure, computing on first sight."
+    (let (r (table/get exitmemo set))
+      (if (nil? r)
+        (regex-exit-slow (regex-states-of pattern) exitmemo m matchbit set)
+        r))))
+(sig regex-exit (any table int int int -> bool))
 
 ;; NOTE the `nxt2` let-hoist in both loops: computing the `if` INSIDE the
 ;; self-call's argument list strands the eight earlier args (pattern, the two
@@ -817,8 +825,9 @@ match keeps its nils and comes back as `nil` rather than as an empty string."
 (sig regex-cap-blank (number -> vector))
 
 (defn- regex-word-code? (code)
-  "Is codepoint `code` a word character (`\\w`: letter, digit, `_`)?"
-  (regex-class-match? :word (string/int->char code)))
+  "Is codepoint `code` a word character (`\\w`: letter, digit, `_`)? `nil` — a read
+past either edge of the subject — is not one, which is what makes the edges boundaries."
+  (and (int? code) (regex-class-match? :word (string/int->char code))))
 
 (defn- regex-wordb? (codes pos n)
   "Is `pos` a word boundary in `codes` — the character before and the one at `pos`
@@ -1138,16 +1147,19 @@ table cannot be imaged — a `def` holding one would fail the stdlib image (ADR-
       (regex-first-mask-loop resolved code (inc k) (if can (bit/or acc (bit/shift-left 1 k)) acc)))))
 (sig regex-first-mask-loop (vector int int int -> int))
 
-(defn- regex-first-mask (resolved first code)
-  "The bitmask of rules that can begin a token on char `code`, memoised in `first` on
+;; Trusted, not verified: the memo is a table, whose values the checker cannot type; what
+;; it holds is what the loop below put there, an int.
+(check-allow :trusted
+  (defn- regex-first-mask (resolved first code)
+    "The bitmask of rules that can begin a token on char `code`, memoised in `first` on
 first sight. The step is tried from both start closures (`^` fired or not), so one mask
 serves every position; the scan itself then decides."
-  (let (hit (table/get first code))
-    (if (nil? hit)
-      (let (mask (regex-first-mask-loop resolved code 0 0))
-        (table/put first code mask)
-        mask)
-      hit)))
+    (let (hit (table/get first code))
+      (if (nil? hit)
+        (let (mask (regex-first-mask-loop resolved code 0 0))
+          (table/put first code mask)
+          mask)
+        hit))))
 (sig regex-first-mask (vector any int -> int))
 
 (defn- regex-token-hit (resolved mask k codes n i)

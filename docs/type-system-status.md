@@ -1233,3 +1233,126 @@ five runs out of six and `0 | 1 | 2` on the sixth. Fixed (the memo cleared per r
 returns in definition order; the derivation's names sorted), and
 `nest::derivation_cache_differential` holds both: `nest check --strict --suggest-sigs`
 over `std/` and `tests/`, cache on and off, byte for byte.
+
+## The remaining list — sound first, then as complete as makes sense (2026-09-17)
+
+The criteria are the two the type system is held to: (1) **always sound** — the checker
+never claims what is not so, and the runtime contract enforces what the grammar lets a
+declaration say; (2) **as complete as makes sense** — a fact the lattice can hold is held.
+"Wait for a concrete need" is not a criterion here; ADR-011 still decides language SHAPE
+(the declined items are in ADR-361 and the ROADMAP), not checker precision. Ticked here as
+each lands; this section is the working list, `handoff.md` points at it.
+
+### A — soundness
+
+- [x] **A1. Intervals enforced at runtime** (2026-09-17). `type-matches?` checks the bound
+      of `(int lo hi)` and `(len T lo hi)` — `nil` counts 0, `_` is an open end, a
+      non-countable never fits. `tests/contract_test.blsp` § intervals; sabotage reds 6.
+- [x] **A2. Recursive types enforced at runtime** (2026-09-17). `(rec X body)` matches
+      `body` with `X` standing for the whole (`%rec-unroll`), one level per level of the
+      value; an inner binder closes its own name. § recursive type contracts.
+- [ ] **A3. `:pure` / `:total` at runtime** — *left for now* (decided 2026-09-17): `:total`
+      cannot be checked at a boundary; `:pure` could be and costs; both stay static-only,
+      and `type-properties.md` says so.
+- [x] **A4. A declared overload is checked against its body per arm** (2026-09-17). The
+      body is walked once per arm, its parameters bound as ONE domain among several (the
+      guards selecting the other arms are not findings), its return checked against that
+      arm's result, a finding the arms share reported once. It found `math/pow`'s float
+      arm false at `exp = 0` — `(pow 2.0 0)` answered the int `1` — which the code fixes.
+      `refinement::a_declared_overload_is_checked_against_its_body_per_arm`.
+- [x] **A5. A trusted declaration is SHOWN as trusted** (2026-09-17). Under `--strict` a
+      declared return whose body result is the unknown reports `declared return type T is
+      trusted, not verified`; `(check-allow :trusted …)` is the author saying so. The
+      `sig!` shim is exempt (it IS the verification). The sweep of 54 sites: 43 fixed at
+      the leaf (a record's field types, a `(map K V)` where a bare `map` stood, a
+      three-parameter `(map keyword int -> int)` that meant one, `%renames`' value type,
+      two `defdyn` value sigs), 11 acknowledged `:trusted` (a kernel message, a table, a
+      dispatch table, the assoc-threaded state, `seqable` elements — C11).
+      `declarations::a_declared_return_the_body_cannot_verify_is_reported_as_trusted_under_strict`.
+
+### B — determinism and honesty of the tool
+
+- [ ] **B6. A cap that was hit is reported.** `MAX_SPECIAL_FUEL`, `MAX_EXPR_MEMO`,
+      `MAX_DERIVE_ROUNDS` (NO FIXPOINT), `MAX_EXPR_TY_DEPTH`, the widening — each declines
+      soundly and none says so, so "zero warnings" can mean "gave up". A summary line
+      naming the file and the cap.
+- [ ] **B7. A stale binary cannot check silently.** `nest check` resolves a `:use`d std
+      module from the binary's baked-in std; a `nest` built before a sig edit checks
+      against the old declaration. Refuse, or warn on every run, on a stdlib-id mismatch
+      between the binary and the tree.
+- [ ] **B8. An order-dependence audit.** KI-158 found two hash-order channels by accident.
+      One deliberate pass over the checker's `HashMap`/`HashSet` iterations that feed a
+      verdict, and a second differential gate: the same list in shuffled order, and two
+      runs, must agree.
+
+### C — completeness
+
+- [ ] **C9. Subtyping across union terms.** A term covered jointly by two of the other
+      side's terms but by neither alone reads "not a subtype" and defers (ADR-262). ADR-289
+      closed products and ADR-292 arrows; the general case remains.
+- [ ] **C10. The merely-wider residue, re-probed under intervals.** A body typed `number`
+      declared `int` is silent by design where undecidable; with ADR-350's intervals more
+      of it decides (`quot`, `floor`, a masked value). Flag what is provable, keep the rest
+      silent.
+- [ ] **C11. Element-typed `seqable`.** The `elem` refinement stops at `pair | vector`; a
+      `seqable` parameter carries no element type.
+- [ ] **C12. Relations between two locals beyond `i < |xs|`** (`i < j`, `i + 1 ≤ |xs|`).
+      A relational domain is a different lattice; do the shapes the corpora show, not the
+      domain.
+- [ ] **C13. A `float` interval.** Cheap on the int one's machinery; do it with C10 if C10
+      needs it.
+- [ ] **C14. A named recursive alias** — `(deftype json (rec …))` so a `sig` names it once.
+      Nested self-reference across binders stays out (de Bruijn for a shape inference
+      never produces).
+- [ ] **C15. Effects displayed; totality across calls.** The walk computes a function's
+      effects and shows them nowhere (`nest docs`, hover). Totality across calls and mutual
+      recursion is a call graph with a measure per edge.
+- [ ] **C16. The small holes the 2026-09-17 sweep noticed.** A string source gives `into`
+      no length; a closed record's `count` is not its field count; a computed `nth` index
+      can be bounded by its interval but not by a guard (only a local can).
+- [ ] **C17. Dispatch on a type designator** — the door ADR-361 leaves open: a multimethod
+      keyed on `(zero-of :int)`'s argument as a designator. Language-side; this one IS a
+      use-case item.
+
+### Off this box
+
+- [ ] Tier-2 monomorphization — `perf-handoff.md` Task 5.
+- [ ] The bedit `--bump` smoke — needs a box that runs the full suite.
+
+## Sound first: A1, A2, A4, A5 (2026-09-17)
+
+The first pass through the list above, in its order. What each found is the point.
+
+- **The contract now holds what the grammar can say.** `(int 0 255)`, `(len (list E) 1 _)`
+  and `(rec X …)` parsed in a `sig!` and were checked at the tag: a declaration the
+  checker trusted could lie at run time. `type-matches?` checks the bound and unrolls the
+  binder; 7 new contract cases, 6 of which red under sabotage.
+- **A declared overload is checked per arm — and its first finding was mine.** `math/pow`'s
+  `(float int -> float)` arm was false at `exp = 0`: `(pow 2.0 0)` answered the int `1`,
+  because the accumulator was seeded `1` whatever the base. The code now seeds the base's
+  kind, `pow-acc` and `pow-reciprocal` declare their arms, and the unit-base arm went (the
+  reciprocal path cannot prove it; chudnovsky's alternating sign is written as the sign).
+  A wrong arm is no longer trusted at every call the meet reaches.
+- **A trusted declaration is shown.** Strict reports `declared return type T is trusted,
+  not verified` where the body's result is the unknown. Over `std/` that was 43 sites;
+  reading each one: 32 were the checker's or the declaration's — a record's field types
+  never declared (`span`, `tempo`), a shape never named for a node (`ts-node`,
+  `sexp-node`, `coverage-result`), a bare `map` where `(map keyword int)` was meant, a
+  three-parameter `(map keyword int -> int)` that meant one, `%renames` typed as a bare
+  map, two `defdyn`s with no value sig, a `check-allow`-wrapped `defn` invisible to
+  inference, the regex parser chain declared `number` for its index because the checker
+  could not carry `int` through a destructured self-call — and 11 are genuinely beyond
+  it, acknowledged with the new `(check-allow :trusted …)`: a kernel message
+  (`read-line`), a table (`regex-exit`, `regex-first-mask`, `resolver-step-count`), a
+  dispatch table (`nest/main`), assoc-threaded state (`markdown/->html`, `pane-update`),
+  `seqable` elements (`stats/min`/`max` — C11), the CST's kids (`forms-of`), and an open
+  record's undeclared key (the `datetime` time accessors over a `date`).
+- **Four inference holes closed on the way**, each a fixpoint that started at the unknown
+  instead of ⊥ and could never come back: a destructuring of a `never` bound its names
+  unknown; a numeric op on a `never` deferred to its signature (`number`); an `if` whose
+  test is `never` read as the union of nothing; a self-call not in branch-result position
+  read as unknown in its own first round. And one relation defect: `(int and (not 0))`
+  read as "known only by exclusion" because `as_lit_int` of `0 | (not int)` answered
+  `{0}` — strict read such a value by overlap, and merely-wider misuses of it went
+  unreported. The widening of a moving interval beside a stable tuple of the same tags,
+  the string literal's length, and `pattern_bindings` over `never` are the other three.

@@ -64,16 +64,20 @@ For an even-length sequence, returns the mean of the two middle values.
     (stats/median [3 1 2])   → 2"
   (let (n (count xs))
     (when (= n 0) (error "stats/median: empty sequence"))
+    ;; Every index below is inside the sorted sequence (`n` is at least 1, `mid` at most
+    ;; `n - 1`), a relation between two locals the checker does not hold (C12); the read
+    ;; says so with the error it can never raise.
     (let (sorted (sort xs)
-          mid (math/quot n 2))
+          mid (math/quot n 2)
+          at (fn (i) (or (nth sorted i) (error "stats/median: index " i " outside " n))))
       (if (= (math/rem n 2) 1)
-        (nth sorted mid)
-        (/ (+ (nth sorted (- mid 1)) (nth sorted mid)) 2)))))
+        (at mid)
+        (/ (+ (at (- mid 1)) (at mid)) 2)))))
 ;; `(or list vector set)`, not `seqable`, for the three that SORT: `sort` materialises
 ;; through `Heap::seq_items` and raises on a string, a map or bytes, so `seqable` here
 ;; promised a domain the body cannot honour. The fold-only functions above keep the
 ;; wider declaration — they never sort.
-(sig median ((or list vector set) -> number))
+(sig median ((or (list number) (vector number) (set number)) -> number))
 
 (defn percentile (xs p)
   "The `p`-th percentile (0–100) of `xs` using the nearest-rank method.
@@ -87,8 +91,8 @@ For an even-length sequence, returns the mean of the two middle values.
     (let (sorted (sort xs)
           rank (math/max 1 (ceil (* (/ p 100.0) n)))
           idx (math/min (- n 1) (- rank 1)))
-      (nth sorted idx))))
-(sig percentile ((or list vector set) number -> number))
+      (or (nth sorted idx) (error "stats/percentile: index " idx " outside " n)))))
+(sig percentile ((or (list number) (vector number) (set number)) number -> number))
 
 (defn quantile (xs q)
   "The `q`-th quantile (0.0–1.0) of `xs` using the nearest-rank method.
@@ -98,20 +102,24 @@ For an even-length sequence, returns the mean of the two middle values.
 
 ;; ---- range and spread --------------------------------------------------------
 
-(defn min (xs)
-  "The smallest value in `xs`. Raises on an empty sequence.
+;; Trusted, not verified: `seqable` carries no element type (C11 on the type-system list).
+(check-allow :trusted
+  (defn min (xs)
+    "The smallest value in `xs`. Raises on an empty sequence.
 
     (stats/min [3 1 2])      → 1"
-  (when (empty? xs) (error "stats/min: empty sequence"))
-  (reduce xs math/min))
+    (when (empty? xs) (error "stats/min: empty sequence"))
+    (reduce xs math/min)))
 (sig min (seqable -> number))
 
-(defn max (xs)
-  "The largest value in `xs`. Raises on an empty sequence.
+;; Trusted, not verified: `seqable` carries no element type (C11 on the type-system list).
+(check-allow :trusted
+  (defn max (xs)
+    "The largest value in `xs`. Raises on an empty sequence.
 
     (stats/max [3 1 2])      → 3"
-  (when (empty? xs) (error "stats/max: empty sequence"))
-  (reduce xs math/max))
+    (when (empty? xs) (error "stats/max: empty sequence"))
+    (reduce xs math/max)))
 (sig max (seqable -> number))
 
 (defn range-of (xs)

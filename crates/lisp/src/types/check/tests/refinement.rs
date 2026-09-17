@@ -263,6 +263,45 @@ fn overlapping_overload_arms_meet_at_a_call() {
 }
 
 #[test]
+fn a_declared_overload_is_checked_against_its_body_per_arm() {
+    // An intersection is satisfied by the body under EVERY arm: walked once per arm,
+    // the return checked against that arm's result. Until 2026-09-17 the declaration
+    // bound nothing and checked nothing, and since the arms meet at a call, a wrong arm
+    // was trusted at every call site.
+    let ok = "
+(defmodule t)
+(defn ok (x) (if (int? x) (inc x) (string/length x)))
+(sig ok (and (int -> int) (string -> int)))
+";
+    let w = file_warnings_mode(ok, true);
+    assert!(
+        w.is_empty(),
+        "a guard selecting the other arm is not a finding: {w:?}"
+    );
+    let lies = "
+(defmodule t)
+(defn lies (x) (if (int? x) (inc x) x))
+(sig lies (and (int -> int) (string -> int)))
+(defn once (x) (frobnicate x))
+(sig once (and (int -> int) (string -> int)))
+";
+    let w = file_warnings_mode(lies, true);
+    assert!(
+        w.iter()
+            .any(|s| s.contains("lies: declared return type int but the body yields string")),
+        "{w:?}"
+    );
+    // …and a finding the arms share is reported once, not once per arm.
+    assert_eq!(
+        w.iter()
+            .filter(|s| s.contains("unbound symbol: frobnicate"))
+            .count(),
+        1,
+        "{w:?}"
+    );
+}
+
+#[test]
 fn a_value_sig_on_a_dynamic_is_read_cross_module() {
     // `(sig *w* int)` beside a `defdyn` in module A types A's reads in the same file
     // (`Ctx::declared_value_ty`); module B — a fresh `Ctx` — read the dynamic as unknown

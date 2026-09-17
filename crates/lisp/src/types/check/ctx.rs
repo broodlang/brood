@@ -316,34 +316,40 @@ pub(super) fn unify_term(term: &SigTerm, ty: Ty, subst: &mut HashMap<u32, Ty>) {
 /// (`narrow`/`bind` clone the ctx per branch); the whole checker needs only a
 /// couple of bits. See `docs/type-annotations.md` and the `%lint-allow` handling
 /// in `walk.rs` / `recursion.rs`.
-pub(super) const SUPPRESS_NON_TAIL: u8 = 1 << 0;
-pub(super) const SUPPRESS_UNREACHABLE: u8 = 1 << 1;
+pub(super) const SUPPRESS_NON_TAIL: u16 = 1 << 0;
+pub(super) const SUPPRESS_UNREACHABLE: u16 = 1 << 1;
 /// A declared-vs-actual type mismatch the checker would otherwise warn on: a
 /// `sig`-typed function whose body yields a type disjoint from its declared
 /// return, or a literal call-site argument disjoint from the parameter's
 /// declared type. Deliberately-wrong code under test (a negative test proving a
 /// `sig!` runtime contract throws) suppresses it with `(check-allow :type-mismatch …)`.
-pub(super) const SUPPRESS_TYPE_MISMATCH: u8 = 1 << 2;
+pub(super) const SUPPRESS_TYPE_MISMATCH: u16 = 1 << 2;
 /// `(check-allow :unbound …)` — the wrapped forms reference globals the checker
 /// cannot see because they are defined at *runtime* (`eval`-driven `def`s: the
 /// wasm `use-native` binding, a plugin loader). The one lint whose ground truth
 /// is the live image, not the source.
-pub(super) const SUPPRESS_UNBOUND: u8 = 1 << 3;
+pub(super) const SUPPRESS_UNBOUND: u16 = 1 << 3;
 /// `(check-allow :unrequired …)` — a qualified reference `mod/name` whose module the
 /// file never `require`s/`:use`s (KI-17). Suppresses the load-order-reachability lint
 /// for a file that deliberately relies on an ambient require pulled in elsewhere.
-pub(super) const SUPPRESS_UNREQUIRED: u8 = 1 << 4;
+pub(super) const SUPPRESS_UNREQUIRED: u16 = 1 << 4;
 /// `(check-allow :deprecated …)` — a use of a name a `(meta … :deprecated …)` marks
 /// (ADR-283). A library must sometimes call its own deprecated name from the shim that
 /// replaces it, and a test must sometimes exercise the old surface deliberately.
-pub(super) const SUPPRESS_DEPRECATED: u8 = 1 << 5;
+pub(super) const SUPPRESS_DEPRECATED: u16 = 1 << 5;
 /// `(check-allow :total …)` — a `:total`-declared function's coverage finding (a `match`
 /// failure the checker cannot prove unreachable) and its termination finding (ADR-351).
-pub(super) const SUPPRESS_TOTAL: u8 = 1 << 6;
+pub(super) const SUPPRESS_TOTAL: u16 = 1 << 6;
 /// `(check-allow :pure …)` — a `:pure`-declared function's effect finding, and a `ui-memo`
 /// thunk that performs one on purpose (a test that counts its own recomputations by
 /// sending a message from the thunk is the case).
-pub(super) const SUPPRESS_PURE: u8 = 1 << 7;
+pub(super) const SUPPRESS_PURE: u16 = 1 << 7;
+/// `(check-allow :trusted …)` — a declared return the checker cannot verify because the
+/// body's result is the unknown (a kernel message, a primitive with no signature), which
+/// strict otherwise reports as "trusted, not verified" (2026-09-17). The author asserting
+/// the return where the checker cannot see it — narrower than `:type-mismatch`, which
+/// also silences a body that provably contradicts its declaration.
+pub(super) const SUPPRESS_TRUSTED: u16 = 1 << 8;
 
 /// One step of a narrowable access path: a keyword field (`(get x :k)`) or a
 /// fixed integer index (`(nth x 0)` / `(first x)` / `(second x)` / `(third x)`).
@@ -569,7 +575,7 @@ pub(super) struct Ctx {
     strict_mode: bool,
     /// Lint categories suppressed in the current subtree (a `(check-allow …)`
     /// scope, ORed as we descend). `0` = nothing suppressed (the common case).
-    suppressed: u8,
+    suppressed: u16,
     /// Ability facts for the file (op-fn symbols → `(ability, op)`, and the covered
     /// impls) — set once at the file level so `check_into` can flag an ability op applied
     /// to a record-typed value with no impl. `None` in a file with no `defability`.
@@ -768,14 +774,14 @@ impl Ctx {
         self.strict_mode = on;
     }
 
-    pub(super) fn with_suppressed(&self, mask: u8) -> Ctx {
+    pub(super) fn with_suppressed(&self, mask: u16) -> Ctx {
         let mut c = self.clone();
         c.suppressed |= mask;
         c
     }
     /// Is any category in `mask` currently suppressed by an enclosing
     /// `(check-allow …)`? Checked by a lint before emitting a warning.
-    pub(super) fn is_suppressed(&self, mask: u8) -> bool {
+    pub(super) fn is_suppressed(&self, mask: u16) -> bool {
         self.suppressed & mask != 0
     }
     /// Is `sym` a genuine *lexical* binder in scope — a fn/lambda/defn param or a

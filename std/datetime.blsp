@@ -135,14 +135,17 @@ milliseconds."
 (sig month ((or datetime date) -> int))
 (defn day (dt) "The :day field (1–31)." (get dt :day))
 (sig day ((or datetime date) -> int))
-;; The time accessors take a `date` too — its time is midnight, so each reads 0.
-(defn hour (dt) "The :hour field (0–23)." (get dt :hour 0))
+;; The time accessors take a `date` too — its time is midnight, so each reads 0. Trusted,
+;; not verified (strict): a record NAME is an open shape, so `:hour` on a `date` — a key it
+;; does not declare — reads as unknown to the checker; the default is the whole answer.
+(check-allow :trusted
+  (defn hour (dt) "The :hour field (0–23)." (get dt :hour 0))
+  (defn minute (dt) "The :minute field (0–59)." (get dt :minute 0))
+  (defn second (dt) "The :second field (0–59)." (get dt :second 0))
+  (defn ms (dt) "The :ms field (0–999)." (get dt :ms 0)))
 (sig hour ((or datetime date time-of-day) -> int))
-(defn minute (dt) "The :minute field (0–59)." (get dt :minute 0))
 (sig minute ((or datetime date time-of-day) -> int))
-(defn second (dt) "The :second field (0–59)." (get dt :second 0))
 (sig second ((or datetime date time-of-day) -> int))
-(defn ms (dt) "The :ms field (0–999)." (get dt :ms 0))
 (sig ms ((or datetime date time-of-day) -> int))
 
 ;; ---- decomposition ----------------------------------------------------------

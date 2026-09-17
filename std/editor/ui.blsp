@@ -545,7 +545,9 @@ re-raises, surfacing a genuine startup bug instead of spinning."
                         ;; counts from `:last-input`, which this branch just stamped, so
                         ;; they still wait for the input to settle. Only a timer that asked
                         ;; to fire every N ms regardless now actually does.
-                        serviced (if (nil? timers) [nil clock2] (ui-fire timers clock2 (ui-now next1)))
+                        serviced (if (nil? timers)
+                                   [nil clock2]
+                                   (ui-fire timers clock2 (ui-now next1)))
                         tevent (first serviced)
                         clock3 (second serviced)
                         next (if (nil? tevent) next1 (ui-fold update next1 tevent cols rows)))

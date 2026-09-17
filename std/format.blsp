@@ -182,12 +182,14 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
 ;; align them under the opening element — the canonical let/binding shape.
 (def *format-pair-bindings*
   {'let true 'letrec true 'binding true 'dotimes true 'dolist true 'loop true})
+(sig *format-pair-bindings* (map symbol bool))
 
 ;; Forms whose body args (after the header) are emitted as test+body pairs,
 ;; one pair per line. Comments between clauses are kept on their own lines.
 ;; `assoc`/`assoc!` ride one header arg (the collection) and then pair their
 ;; trailing key/value arguments, the same shape as `cond`'s test+result.
 (defdyn *format-pair-body* {'cond true 'case true 'assoc true 'assoc! true 'project true})
+(sig *format-pair-body* (map symbol bool))
 
 (defn pair-bindings? (head-node)
   "True if `head-node` names a form whose first header arg is a pair-list."

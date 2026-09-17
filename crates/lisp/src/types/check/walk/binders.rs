@@ -174,7 +174,7 @@ pub(super) fn check_fn(
     ctx: &Ctx,
     out: &mut Vec<(Option<Pos>, String)>,
 ) {
-    check_fn_seeded(heap, items, ctx, out, None, None);
+    check_fn_seeded(heap, items, ctx, out, None, None, true);
 }
 
 /// What a declared `(sig …)` binds each parameter of a single-arm `fn` to — one entry per
@@ -268,6 +268,11 @@ pub(super) fn check_fn_seeded(
     out: &mut Vec<(Option<Pos>, String)>,
     sig: Option<&crate::types::Sig>,
     name: Option<Symbol>,
+    // Whether a seeded parameter is the function's whole contract (`bind_sig_param`: a
+    // guard narrowing it to `never` is a dead clause) or ONE ARM of a declared overload
+    // (plain `bind`: under `(and (int -> int) (string -> int))` the `(string? x)` branch
+    // is dead under the int arm and live under the other, and neither is a finding).
+    authoritative: bool,
 ) {
     // Multi-arity `fn` — `(fn ((a) …) ((a b) …))` — isn't one param list + body;
     // each form (after an optional docstring) is a clause `(param-list body…)`.
@@ -309,10 +314,14 @@ pub(super) fn check_fn_seeded(
     let params = fn_params(heap, params_form);
     let (seeded, sig) = seeded_param_types(heap, params_form, sig, ctx);
     let mut scope = ctx.clone();
-    for (&p, (ty, authoritative)) in params.iter().zip(seeded) {
-        scope = match (ty, authoritative) {
-            (Some(ty), true) => scope.bind_sig_param(p, ty),
-            (ty, _) => scope.bind(p, ty),
+    for (&p, (ty, contract)) in params.iter().zip(seeded) {
+        scope = match (ty, contract, authoritative) {
+            (Some(ty), true, true) => scope.bind_sig_param(p, ty),
+            // One arm's domain among several: bound the way a caller-derived parameter
+            // is, so the impossible-predicate lint leaves the guards that select the
+            // OTHER arms alone (`(int? x)` is never true under the string arm).
+            (Some(ty), true, false) => scope.bind_derived(p, Some(ty)),
+            (ty, _, _) => scope.bind(p, ty),
         };
     }
     // Skip a leading docstring (a lone string when more body follows).
@@ -343,13 +352,13 @@ pub(super) fn check_fn_seeded(
             // so few signatures were declared; adopting them across `std/` surfaced it.
             // The argument check has carried the same skip, for the same reason, all
             // along.
+            let who = name
+                .map(|n| format!("{}: ", name_of(n)))
+                .unwrap_or_default();
             if !g.bound.is_never()
                 && !g.consistent_with_mode(s.ret.clone(), ctx.strict())
                 && !ctx.is_suppressed(crate::types::check::ctx::SUPPRESS_TYPE_MISMATCH)
             {
-                let who = name
-                    .map(|n| format!("{}: ", name_of(n)))
-                    .unwrap_or_default();
                 out.push((
                     heap.form_pos_only(ret_form),
                     format!(
@@ -357,6 +366,31 @@ pub(super) fn check_fn_seeded(
                         who,
                         crate::types::check::annot::display_ty(&s.ret),
                         crate::types::check::annot::display_ty(&g.bound)
+                    ),
+                ));
+            } else if ctx.strict()
+                && !s.ret.is_any()
+                && g.dynamic
+                && !g.bound.is_never()
+                && g.bound
+                    .terms_vec()
+                    .iter()
+                    .all(|term| term.is_any() || term.is_known_only_by_exclusion())
+                && !ctx.is_suppressed(
+                    crate::types::check::ctx::SUPPRESS_TYPE_MISMATCH
+                        | crate::types::check::ctx::SUPPRESS_TRUSTED,
+                )
+            {
+                // The declaration is TRUSTED here, not verified: the body's result is the
+                // unknown, so nothing was checked against the declared return, and every
+                // caller reads it as fact (ADR-259). Outside contracts mode that is the one
+                // way a wrong declaration goes unreported; strict says so (2026-09-17).
+                out.push((
+                    heap.form_pos_only(ret_form),
+                    format!(
+                        "{}declared return type {} is trusted, not verified — the body's result is unknown to the checker",
+                        who,
+                        crate::types::check::annot::display_ty(&s.ret),
                     ),
                 ));
             }
@@ -406,7 +440,48 @@ pub(super) fn check_def(
             .or_else(|| declared_heap_sig(heap, name));
         if let Some(sig) = declared {
             if let Some(fn_items) = fn_form_items(heap, value_form) {
-                check_fn_seeded(heap, &fn_items, ctx, out, Some(&sig), Some(name));
+                // The `sig!` SHIM — the `def` that rebinds the name to the runtime contract
+                // — is not the function: its result is whatever `apply` answers, so under
+                // strict it read as a declaration trusted, not verified (A5). It IS the
+                // verification. The function's own `def` was checked just above it.
+                if is_contract_shim(heap, &fn_items) {
+                    return;
+                }
+                check_fn_seeded(heap, &fn_items, ctx, out, Some(&sig), Some(name), true);
+                return;
+            }
+        }
+        // A declared OVERLOAD (ADR-116) is an intersection: the body must satisfy every
+        // arm, so it is walked once under each arm's domain and its return checked
+        // against that arm's result. Nothing checked this before 2026-09-17 — the
+        // declaration bound nothing in the walk — and since the arms MEET at a call, a
+        // wrong arm was trusted everywhere. A finding the arms share (an unbound name,
+        // a misuse under every domain) is reported once.
+        let overload = ctx
+            .declared_overload(name)
+            .cloned()
+            .or_else(|| declared_heap_overload(heap, name));
+        if let Some(arms) = overload {
+            if let Some(fn_items) = fn_form_items(heap, value_form) {
+                let mut seen: std::collections::HashSet<(Option<Pos>, String)> =
+                    std::collections::HashSet::new();
+                for arm in &arms {
+                    let mut findings = Vec::new();
+                    check_fn_seeded(
+                        heap,
+                        &fn_items,
+                        ctx,
+                        &mut findings,
+                        Some(arm),
+                        Some(name),
+                        false,
+                    );
+                    for finding in findings {
+                        if seen.insert(finding.clone()) {
+                            out.push(finding);
+                        }
+                    }
+                }
                 return;
             }
         }
@@ -1373,4 +1448,18 @@ fn collect_let_lambda_sites(
         }
         _ => true,
     }
+}
+
+/// Is this `fn` the checking wrapper `sig!` expands to — a body that calls the contract
+/// checkers before `apply`ing the original? Recognised by the call, which nothing else emits.
+fn is_contract_shim(heap: &Heap, fn_items: &[Value]) -> bool {
+    fn_items.iter().skip(2).any(|&form| {
+        list_items(heap, form)
+            .and_then(|items| items.first().copied())
+            .is_some_and(|head| {
+                matches!(head, Value::Sym(s)
+                    if value::symbol_is(s, "%contract-check-args")
+                        || value::symbol_is(s, "%contract-check-rest"))
+            })
+    })
 }

@@ -256,9 +256,14 @@ This already closes the **biggest expressiveness gap**: multi-clause / branchy
 user functions, which `infer_sig` can't touch, now participate in checking the
 moment the author writes one line of `sig`.
 
-**Slice 1 is not yet *sound*.** Nothing forces `foo` to actually obey
-`(int -> int)` — the checker simply *trusts* the declaration (TypeScript-style).
-A lying annotation can still let a wrong value through. That's the job of slice 2.
+**Slice 1 is not *sound* on its own — and says so.** Nothing forces `foo` to actually
+obey `(int -> int)`: the checker checks the body it can type against the declaration
+(the return, each arm of an overload since 2026-09-17), and *trusts* the declaration
+where it cannot (a body whose result is a kernel message, a table read, a dispatch
+through a closure). That trust is visible: under `--strict` such a declaration is
+reported as `declared return type T is trusted, not verified — the body's result is
+unknown to the checker`, and the author acknowledges it with `(check-allow :trusted …)`.
+Enforcing it at run time is the job of slice 2.
 
 ## Slice 2 — runtime enforcement via `(sig! …)` (shipped)
 
@@ -442,7 +447,14 @@ rewrite wraps the unrewritten loop it keeps behind its seed check in one, ADR-36
 subtree is not walked at all, so never write it by hand), and
 **`:duplicate-def`** (one file binding the same top-level name twice in one module — the
 later definition silently replaces the earlier; wrap a deliberate override, read on the
-un-expanded forms like the sig collector). An unrecognised
+un-expanded forms like the sig collector), and **`:trusted`** (2026-09-17 — a declared
+return the checker cannot verify because the body's result is the unknown: a kernel
+message, a table read, a call through a closure in a dispatch table; `--strict` reports
+it as *trusted, not verified* and this is the author saying so. Wrap the whole `defn`:
+the return check runs at the definition, not inside the body. Narrower than
+`:type-mismatch`, which also silences a body that provably contradicts its declaration —
+prefer fixing the leaf where one exists: a record's field types, a `(map K V)` where a
+bare `map` stood, a value sig on a `defdyn`). An unrecognised
 category suppresses nothing — a typo is a
 no-op that still lints, never a silent blanket opt-out. This is what lets
 `nest check` stay at **zero** warnings project-wide without weakening any lint.

@@ -33,10 +33,11 @@ fn no_false_positives_when_type_is_unknown_or_right() {
 
 #[test]
 fn propagates_primitive_result_types() {
-    // string-length returns int; first wants a list/vector → flag the int.
+    // string-length returns int — the literal `1` here, a literal's length being known
+    // (2026-09-17); first wants a list/vector → flag it.
     assert!(warnings("(first (string/length \"a\"))")
         .iter()
-        .any(|w| w.contains("first") && w.contains("int")));
+        .any(|w| w.contains("first") && w.contains("got 1")));
 }
 
 #[test]

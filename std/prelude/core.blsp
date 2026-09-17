@@ -711,9 +711,11 @@ keyword: `:non-tail-recursion`, `:unreachable-clause`, `:type-mismatch`, `:unbou
 binding — that the checker cannot see in source), `:unrequired`, `:deprecated`,
 `:discarded-catch`, `:duplicate-def` (a second top-level definition of a name in
 one file that is a deliberate override), `:pure` (a `ui-memo` thunk, or a `:pure`-declared
-function, that performs an effect on purpose) or `:total` (a `:total`-declared function
-the checker cannot see terminate or cover its cases). A runtime no-op; the marker is
-read only by the type checker (`nest check`)."
+function, that performs an effect on purpose), `:total` (a `:total`-declared function
+the checker cannot see terminate or cover its cases) or `:trusted` (a declared return the
+checker cannot verify — the body's result is a kernel message or a primitive with no
+signature — which `--strict` otherwise reports as trusted, not verified). A runtime
+no-op; the marker is read only by the type checker (`nest check`)."
   `(%lint-allow ~category (do ~@body)))
 
 ;; ---- runtime contracts: `(sig! …)` enforces a signature at call time --------
@@ -722,6 +724,21 @@ read only by the type checker (`nest check`)."
 ;; function so each argument and the result are checked at run time and a
 ;; mismatch throws — so a value the static checker trusted can never silently
 ;; slip through. All policy, no new primitive. See `docs/type-annotations.md`.
+
+;; `lo`/`hi` are ints or the open end `_`, as the interval grammar spells them (ADR-350).
+(defn- %interval-admits? (lo hi n)
+  (and (or (%eq lo '_) (<= lo n))
+    (or (%eq hi '_) (<= n hi))))
+
+;; `body` with every free occurrence of the binder `name` replaced by `whole` — the
+;; one-level unrolling of `(rec name body)`. An inner `(rec name …)` rebinds the name and
+;; is left closed; quoted data does not occur in a type-expression.
+(defn- %rec-unroll (body name whole)
+  (cond
+    (%eq body name) whole
+    (and (pair? body) (%eq (first body) 'rec) (%eq (second body) name)) body
+    (pair? body) (map body (fn (part) (%rec-unroll part name whole)))
+    else body))
 
 ; unknown base name → accept
 (defn type-matches? (t v)
@@ -748,6 +765,22 @@ names accept anything, so a contract never throws on a type it can't interpret.
           (%eq h 'or) (any? (rest t) (fn (s) (type-matches? s v)))
           (%eq h 'and) (every? (rest t) (fn (s) (type-matches? s v)))
           (%eq h 'not) (not (any? (rest t) (fn (s) (type-matches? s v))))
+          ;; `(int lo hi)` — an int within the interval, `_` an open end (ADR-350). The
+          ;; contract checked the tag alone until 2026-09-17, so a declaration the checker
+          ;; trusted could lie at runtime.
+          (%eq h 'int)
+            (and (int? v)
+              (%interval-admits? (second t) (third t) v))
+          ;; `(len T lo hi)` — a `T` whose count lies within the interval: `nil` counts 0, a
+          ;; non-countable value never fits.
+          (%eq h 'len)
+            (and (or (nil? v) (list? v) (vector? v) (map? v) (set? v) (string? v) (bytes? v))
+              (%interval-admits? (third t) (nth t 3) (count v))
+              (type-matches? (second t) v))
+          ;; `(rec X body)` — a recursive type (ADR-349): `X` inside `body` is the whole,
+          ;; so the body is matched with `X` standing for this very form — one level of
+          ;; unrolling per level of the value, an inner `(rec X …)` closing its own name.
+          (%eq h 'rec) (type-matches? (%rec-unroll (third t) (second t) t) v)
           ;; `(list T)` is the uniform list; `(list T U …)` — two or more types — a
           ;; positional SHAPE, the list sibling of `tuple`: exact arity, each position
           ;; against its own type. What the checker means by `(list a b)`'s type.

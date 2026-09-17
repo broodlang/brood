@@ -311,6 +311,67 @@
     (assert= (c-uniform nil) nil)
     (check-allow :type-mismatch (assert-error (c-uniform (list 1 "x"))))))
 
+;; --- intervals and lengths (ADR-350) --------------------------------------------
+;; The grammar could say `(int 0 _)` and `(len (list E) 1 _)` since 2026-09-14 and the
+;; contract checked the tag alone: a declaration the checker trusted could lie at run
+;; time. Since 2026-09-17 the bound is checked too — `nil` counts 0, `_` is an open end.
+(defn c-byte (n) n)
+(sig! c-byte ((int 0 255) -> any))
+(defn c-non-neg (n) n)
+(sig! c-non-neg ((int 0 _) -> any))
+(defn c-non-empty (xs) xs)
+(sig! c-non-empty ((len (list int) 1 _) -> any))
+(defn c-short (s) s)
+(sig! c-short ((len string _ 3) -> any))
+(defn c-pair-len (v) v)
+(sig! c-pair-len ((len (vector any) 2 2) -> any))
+
+(describe "interval and length contracts"
+  (test "an int inside its interval passes, outside it throws"
+    (assert= (c-byte 0) 0)
+    (assert= (c-byte 255) 255)
+    (check-allow :type-mismatch (assert-error (c-byte 256)))
+    (check-allow :type-mismatch (assert-error (c-byte -1)))
+    (check-allow :type-mismatch (assert-error (c-byte 1.5))))
+  (test "an open end is unbounded on that side"
+    (assert= (c-non-neg 1000000) 1000000)
+    (check-allow :type-mismatch (assert-error (c-non-neg -1))))
+  (test "a length bound reads the count, and nil counts 0"
+    (assert= (c-non-empty (list 1)) (list 1))
+    (check-allow :type-mismatch (assert-error (c-non-empty nil)))
+    (check-allow :type-mismatch (assert-error (c-non-empty (list "x")))))
+  (test "a string and a vector are counted too, and a non-countable never fits"
+    (assert= (c-short "abc") "abc")
+    (check-allow :type-mismatch (assert-error (c-short "abcd")))
+    (assert= (c-pair-len [1 2]) [1 2])
+    (check-allow :type-mismatch (assert-error (c-pair-len [1])))
+    (check-allow :type-mismatch (assert-error (c-pair-len 5)))))
+
+;; --- recursive types (ADR-349) ---------------------------------------------------
+;; `type-matches?` had no `rec` case, so a `sig!` over `(rec X …)` accepted any compound.
+;; The body is now matched with `X` standing for the whole, one level per level of the
+;; value; an inner `(rec X …)` closes its own name.
+(defn c-json (v) v)
+(sig! c-json ((rec json (or nil bool number string (vector json) (map string json))) -> any))
+(defn c-nested-rec (v) v)
+(sig! c-nested-rec
+  ((rec outer (or int (vector (rec inner (or string (vector inner)))) (vector outer))) -> any))
+
+(describe "recursive type contracts"
+  (test "a value that nests itself passes at every depth"
+    (assert= (c-json 1) 1)
+    (assert= (c-json [1 "a" [true nil]]) [1 "a" [true nil]])
+    (assert= (c-json {"k" [1 {"n" nil}]}) {"k" [1 {"n" nil}]}))
+  (test "a wrong leaf deep inside throws"
+    (check-allow :type-mismatch (assert-error (c-json [1 [2 [:kw]]])))
+    (check-allow :type-mismatch (assert-error (c-json {"k" [1 {"n" 'sym}]})))
+    (check-allow :type-mismatch (assert-error (c-json {:kw 1}))))
+  (test "an inner binder closes its own name"
+    (assert= (c-nested-rec [1 [2]]) [1 [2]])
+    (assert= (c-nested-rec [["a" ["b"]]]) [["a" ["b"]]])
+    ;; inside `inner`, `inner` is strings and vectors of them — never an int
+    (check-allow :type-mismatch (assert-error (c-nested-rec [["a" [1]]])))))
+
 ;; --- the complement `(not T)` (ADR-263) -----------------------------------------
 ;; The lattice has computed complements since ADR-023 — the else-branch of a type
 ;; guard is one — but the grammar could not say one, so "anything but nil" could

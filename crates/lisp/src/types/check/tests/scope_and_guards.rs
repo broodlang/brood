@@ -18,11 +18,11 @@ fn let_binding_propagates_its_rhs_type() {
 
 #[test]
 fn let_binding_from_nested_call_propagates() {
-    // RHS is a known primitive whose return type is int. So `x : int`,
-    // and `(first x)` flags.
+    // RHS is a known primitive whose return type is int — exactly `2`, since a literal
+    // knows its length (2026-09-17). So `x : 2`, and `(first x)` flags.
     let w = warnings("(let (x (string/length \"hi\")) (first x))");
     assert!(
-        w.iter().any(|s| s.contains("first") && s.contains("int")),
+        w.iter().any(|s| s.contains("first") && s.contains("got 2")),
         "expected a `first x` warning where x : int, got {:?}",
         w
     );
@@ -808,7 +808,7 @@ fn a_record_guard_narrows_the_then_branch_only() {
         "\
          (defmodule t)\n\
          (defrecord usd ((cents int)))\n\
-         (sig f ((or number map) -> int))\n\
+         (sig f ((or number usd) -> int))\n\
          (defn f (x) (if (record? x) (get x :cents 0) 0))\n\
          (sig g ((or number map) -> int))\n\
          (defn g (x) (if (record? x) 1 (if (map? x) 2 3)))\n\

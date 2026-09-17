@@ -109,14 +109,12 @@ time unit — nil means \"nothing coarser\", never \"no such unit\"."
 ;; form — which makes unit access O(1) and means nothing has to fold a vector
 ;; back into a map on every comparison.
 
-(defrecord tempo (by-unit res))
-(defrecord span (from to))
+;; Typed fields: the accessors then carry the types, verified rather than declared beside
+;; (`by-unit` stays a bare map: a unit a tempo does not carry reads nil, which its readers
+;; handle by position — `tp-field` says int where the map has been validated).
+(defrecord tempo ((by-unit map) (res keyword)))
+(defrecord span ((from int) (to int)))
 (defrecord iset (spans))
-
-;; A span's endpoints are epoch milliseconds — `span` is only ever built from
-;; `from-ms`/`to-ms` and arithmetic on them — which the accessors say here.
-(sig span-from (map -> int))
-(sig span-to (map -> int))
 
 (defn tempo? (x) "True when `x` is a tempo value." (and (record? x) (= (record-id x) :tempo/tempo)))
 (defn span? (x) "True when `x` is a span." (and (record? x) (= (record-id x) :tempo/span)))
@@ -204,7 +202,7 @@ negative year emits a leading `-` and is not interchange-safe.
 
     (tempo/resolution (tempo/parse! \"2026-06\"))   → :month"
   (tempo-res t))
-(sig resolution (map -> keyword))
+(sig resolution (tempo -> keyword))
 
 (defn unit (t u)
   "The value of unit `u` in `t`, or nil when `t` is coarser than `u`. Throws when `u` is not
@@ -344,7 +342,7 @@ worse.
   ;; A unit of a validated tempo's unit map, which `tp-validate` has already
   ;; pinned to an int — this is where the checker learns that.
   (get m k default))
-(sig tp-field (map keyword int -> int))
+(sig tp-field ((map keyword int) keyword int -> int))
 
 (defn- tp-dt (y mo d h mi s ms)
   ;; A real `datetime` record, not a lookalike map. `datetime/->epoch-ms` reads

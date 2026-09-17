@@ -856,6 +856,36 @@ fn a_growing_union_of_tuples_widens_to_one_shape_not_a_bare_vector() {
     );
 }
 
+#[test]
+fn a_moving_interval_beside_a_stable_tuple_of_the_same_tags_still_widens() {
+    // Two alternatives with the SAME tags — a parser state whose counter moves, beside its
+    // seed — matched two previous terms by tag alone, so neither was widened and the
+    // derivation ran out of rounds (`tests/jit_eq_join_test.blsp`'s `drive-advance`,
+    // 2026-09-17). The previous term the current one GREW from is the one that is its
+    // subtype.
+    let prev = ty_of_sig("(or (tuple \"(\" (int 1 4) nil bool) (tuple \"(\" 0 nil false))");
+    let now = ty_of_sig("(or (tuple \"(\" (int 1 5) nil bool) (tuple \"(\" 0 nil false))");
+    let widened = now.widen_intervals_against(&prev);
+    assert!(
+        widened.to_string().contains("int[1..]"),
+        "the moving position goes to its infinity: {widened}"
+    );
+    assert!(
+        widened.to_string().contains("0, nil, false"),
+        "the seed is untouched: {widened}"
+    );
+    // …and end to end: the driver derives, and its callers' arithmetic is `int`.
+    let ws = file_warnings_mode(
+        "(defmodule t)\n\
+         (defn step (st) (let ([open n head p] (first st)) (cons [open (+ n 1) head (or p (= n 2))] (rest st))))\n\
+         (defn- drive (i st) (if (= i 0) st (drive (- i 1) (step st))))\n\
+         (defn- other (i acc) (if (= i 0) acc (other (- i 1) (+ acc (bit/and i 1)))))\n\
+         (defn run () (list (drive 4000 (list [\"(\" 0 nil false])) (other 3000 0)))",
+        true,
+    );
+    assert!(ws.is_empty(), "{ws:?}");
+}
+
 // KI-140: `apply` binds the callee's type variable from the spread operands and the
 // collection's element type, the way the written-out call does. `math/max` declares
 // `(& ?A -> ?A)`, so `(apply math/max 1 (map xs string/length))` is an `int` — it used to

@@ -123,5 +123,8 @@ bound on the length that the lattice holds, never from the absence of one.
 - A relation between two locals beyond `i < |xs|` (`i < j`, `i + 1 ≤ |xs|`): the index
   bound is the case the corpus asks for; a general relational domain is a different lattice.
 - A `float` interval: nothing in the corpus reads one.
-- The runtime contract (`BROOD_CONTRACTS`) reads the interval grammar and checks the
-  tag; checking the bound at runtime is a separate decision.
+- ~~The runtime contract (`BROOD_CONTRACTS`) reads the interval grammar and checks the
+  tag; checking the bound at runtime is a separate decision.~~ Done 2026-09-17:
+  `type-matches?` checks the bound — `(int lo hi)` on the value, `(len T lo hi)` on its
+  count (`nil` counts 0, `_` an open end, a non-countable never fits). A declaration
+  the checker trusts is now held at run time too (`tests/contract_test.blsp`).

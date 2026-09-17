@@ -75,13 +75,15 @@ the keybindings."
   (if (empty? path) node (pane-get (get node (first path)) (rest path))))
 
 ;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
-(check-allow :non-tail-recursion
-  (defn- pane-update (node path f)
-    "The tree like `node` with the node at `path` replaced by `(f node-at-path)`."
-    (if (empty? path)
-      (f node)
-      (let (k (first path))
-        (assoc node k (pane-update (get node k) (rest path) f))))))
+;; Trusted, not verified: the tree's shape is what `f` returns at the path, which `fn` cannot say.
+(check-allow :trusted
+  (check-allow :non-tail-recursion
+    (defn- pane-update (node path f)
+      "The tree like `node` with the node at `path` replaced by `(f node-at-path)`."
+      (if (empty? path)
+        (f node)
+        (let (k (first path))
+          (assoc node k (pane-update (get node k) (rest path) f)))))))
 (sig pane-update (map list fn -> map))
 
 ;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.

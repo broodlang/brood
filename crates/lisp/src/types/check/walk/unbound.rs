@@ -80,7 +80,7 @@ pub(super) fn is_debug_only_primitive(nm: &str) -> bool {
 /// keyword names. Unknown / missing → `0` (suppress nothing — a typo'd category
 /// is thus a no-op that still lints, never a silent blanket suppression). Keep
 /// the recognised names in sync with the `check-allow` docstring.
-pub(super) fn lint_allow_mask(category: Option<Value>) -> u8 {
+pub(super) fn lint_allow_mask(category: Option<Value>) -> u16 {
     let Some(Value::Keyword(k)) = category else {
         return 0;
     };
@@ -100,6 +100,8 @@ pub(super) fn lint_allow_mask(category: Option<Value>) -> u8 {
         crate::types::check::ctx::SUPPRESS_TOTAL
     } else if value::symbol_is(k, "pure") {
         crate::types::check::ctx::SUPPRESS_PURE
+    } else if value::symbol_is(k, "trusted") {
+        crate::types::check::ctx::SUPPRESS_TRUSTED
     } else {
         0
     }

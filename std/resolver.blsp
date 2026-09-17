@@ -59,8 +59,9 @@ version strings that exist for it; `deps-fn` maps a name + a version to that rel
 (defdyn *resolver-time-budget-ms* 10000)
 (defdyn *resolver-max-steps* 2000000)
 
-;; The step counter, read as the int it is — `table/get` itself types as `any`.
-(defn- resolver-step-count (steps) (table/get steps :n 0))
+;; The step counter, read as the int it is — `table/get` itself types as `any`, so this is
+;; trusted, not verified: a table carries no value type.
+(check-allow :trusted (defn- resolver-step-count (steps) (table/get steps :n 0)))
 (sig resolver-step-count (table -> int))
 
 (defn- resolver-tick (ctx)

@@ -42,7 +42,7 @@
   (test "the resolved map never carries the :inherit key"
     (def-face :t/p {:fg :red})
     (def-face :t/c {:inherit :t/p :bold true})
-    (refute (contains? (face :t/c) :inherit)))
+    (refute (contains? (or (face :t/c) {}) :inherit)))
   (test "inheriting an unknown parent contributes nothing (just the local attrs)"
     (def-face :t/orphan {:inherit :t/no-such :fg :magenta})
     (assert= (face :t/orphan) {:fg :magenta}))

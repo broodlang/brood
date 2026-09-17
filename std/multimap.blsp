@@ -28,7 +28,8 @@ map that happens to hold lists: `multimap?` is a real predicate, it is never `=`
 look-alike map, and it prints as `#<multimap …>` (`->map` is the plain-map view,
 `inspect` the full contents).")
 
-(defrecord multimap (entries))
+;; The field is typed so `multimap/get` verifies its declared result rather than trusting it.
+(defrecord multimap ((entries (map any (list any)))))
 
 ;; The bare `multimap?` type predicate lives in the prelude alongside `set?`/`map?` (ADR-236).
 
@@ -65,7 +66,7 @@ takes the record-FIELD path and silently answers nil for a key that holds values
 
     (multimap/get (multimap/assoc (multimap/assoc (multimap/empty) :k 1) :k 2) :k)   → (2 1)"
   (/get (/get mm :entries) k nil))
-(sig get (multimap any -> (or seqable nil)))
+(sig get (multimap any -> (list any)))
 
 (defn get-all (mm k)
   "All values for key `k` in insertion order (oldest first), or nil if absent.

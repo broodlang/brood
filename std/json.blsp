@@ -72,7 +72,9 @@ escape (the codepoint→char mechanism pure Brood otherwise lacks)."
 ;; parser helper below is that code vector; -1 is the end-of-input sentinel.
 (defn- json-at (s i n)
   "The code point at `i`, or -1 at/after the end (so callers never index past `n`)."
-  (if (< i n) (nth s i) -1))
+  ;; `n` is `(count s)` at every caller, a relation the checker does not carry this far;
+  ;; the `or` says the same thing in a form it reads — past the end `nth` is nil, and -1.
+  (if (< i n) (or (nth s i) -1) -1))
 
 (defn- json-slice (s i end)
   "The code points [i, end) of `s`, joined back into a string."

@@ -299,8 +299,11 @@
           (assoc s :mode :para :buf (cons line (get s :buf)))))))
 (sig md-line (map string -> map))
 
-(defn ->html (md &optional (opts {}))
-  "Render a Markdown string to HTML — a small subset: ATX headings (`#` to `####`), fenced
+;; Trusted, not verified: the state threads through `assoc`, which the checker types as a
+;; bare map, so its `:out` reads as unknown; every writer of `:out` appends a string.
+(check-allow :trusted
+  (defn ->html (md &optional (opts {}))
+    "Render a Markdown string to HTML — a small subset: ATX headings (`#` to `####`), fenced
   ``` and indented code, `- ` and `1. ` lists (indented continuation lines join their item),
   `> ` quotes, `---` rules, blank-line paragraphs, and inline `code`, `[text](url)` links,
   `<https://…>` autolinks, `**strong**` and `*emphasis*`. Everything is HTML-escaped; not a
@@ -312,8 +315,8 @@
   are indented by whatever their author chose and its prose is never indented at all.
 
     (markdown/->html \"# hi\")   → \"<h1>hi</h1>\""
-  (get (md-flush (fold (string/split md "\n")
-                   {:out "" :mode :none :buf nil :start 1 :code-indent (get opts :code-indent 4)}
-                   md-line))
-    :out))
+    (get (md-flush (fold (string/split md "\n")
+                     {:out "" :mode :none :buf nil :start 1 :code-indent (get opts :code-indent 4)}
+                     md-line))
+      :out)))
 (sig ->html (string &optional map -> string))

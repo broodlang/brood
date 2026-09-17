@@ -895,11 +895,38 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-17** — `tests/` to zero strict and a gate (from 32): `math/pow` had declared nothing for nineteen days (its `sig` sat inside its docstring — `sig_placement.rs` now reads every docstring); a declared overload's matching arms MEET (ADR-116 addendum); an assertion's `(pr-str (quote …))` is not an escape, so functions under test are derived; `record?` is a one-sided guard; `range`/`into`/`map` keep their lengths, `bit/and` a mask's bound, `nth` a computed index's interval; `:or` lowers to `(get m k default)`.
 - **2026-09-17** — the checker's site walk is memoised per form across the derivation's rounds (`sigs::SiteCache`: 73% of walks reused, `nest check` over `std/` 11.0 → 8.8 s, verdicts identical by the new `derivation_cache_differential` gate) — and that gate found KI-158: the joint fixpoint was never a function of the file (a specialization memo outliving its round, returns re-read in hash order), the same file inferring `(int 0 2)` five runs out of six.
 - **2026-09-17** — ADR-361: return-type dispatch declined, not deferred (a receiver-less op chosen by the context's type can only be a checker-driven rewrite; generic code names its target as a value; a designator-keyed multimethod is the door left open); tier-2 monomorphization queued as `perf-handoff.md` Task 5. The type-system list has no open item.
+- **2026-09-17** — sound first (type-system list A1/A2/A4/A5): the runtime contract checks intervals, lengths and recursive types; a declared overload is checked against its body per arm (which found `(math/pow 2.0 0)` answering the int `1` — fixed in the code); strict reports a declared return the checker cannot verify as *trusted, not verified*, 43 std sites read one by one (32 fixed at the leaf, 11 acknowledged `(check-allow :trusted …)`); four never-seeded fixpoint holes and the `(int and (not 0))` exclusion misread closed on the way.
 
 ---
 
 ## Recent — full entries
 
+
+## 2026-09-17 — sound first: the contract holds what the grammar says, and a trusted sig is shown
+
+The type-system list (`type-system-status.md` § "The remaining list") re-sorted by the
+two criteria the system is held to — always sound, then as complete as makes sense —
+and its soundness items taken first. The contract (`BROOD_CONTRACTS`) now checks the
+interval, length and recursive-type grammar it used to accept at the tag, so a `sig!`
+over `(int 0 255)` or `(rec json …)` throws on the value it should; a declared overload
+is walked under each arm and its return checked against that arm, which found the
+float arm of my own `math/pow` sig false at `exp = 0` (`(pow 2.0 0)` was the int `1`;
+the seed is the base's kind now); and where the checker trusts a declaration because
+the body's result is the unknown, `--strict` says so, with `(check-allow :trusted …)`
+as the author's acknowledgement.
+
+Reading the 43 sites strict named over `std/` was the real work: most were the
+declaration's — a record with untyped fields, a shape never named, a bare `map` where a
+keyed one was meant, a three-parameter sig that meant one, a primitive with a bare
+`map` result, a `defdyn` with no value sig — and four were the checker's, each a
+fixpoint that started at the unknown instead of ⊥ (a destructured `never`, arithmetic on
+`never`, an `if` on `never`, a self-call in a `let`), plus the exclusion predicate
+misreading `(int and (not 0))` because `as_lit_int` of its complement answered `{0}`.
+With those closed the regex parser chain types itself from one leaf declaration, where
+its comment had recorded `number` as "the strongest thing provable". Eleven sites are
+genuinely beyond the checker (a kernel message, a table, a dispatch table, assoc-threaded
+state, `seqable` elements) and say so. Both gates at zero across `std/` and `tests/`;
+the site-walk differential agrees byte for byte.
 
 ## 2026-09-17 — the site walk memoised, and KI-158 underneath it
 

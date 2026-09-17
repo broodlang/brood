@@ -236,20 +236,24 @@ tower, not just the int `0`. A type with no impl RAISES rather than answering.
 
 (defn pow (base exp)
   "`base` raised to integer `exp`. A negative exponent gives the reciprocal — **exact**
-(a ratio) for an exact `base`, a float for a float `base`.
+(a ratio) for an exact `base`, a float for a float `base` — every exponent included:
+`(math/pow 2.0 0)` is `1.0`.
 
-    (math/pow 2 10)        → 1024"
+    (math/pow 2 10)        → 1024
+    (math/pow 2.0 0)       → 1.0"
   (cond
     (not (int? exp)) (error "pow: exponent must be an integer (use sqrt for roots), got " exp)
     (< exp 0) (pow-reciprocal base exp)
-    else (pow-acc base exp 1)))
-;; An int base to a non-negative exponent stays an int (overflow raises), and a unit base
-;; (`1`, `-1`) is exact under ANY integer exponent — its reciprocal is itself; a float base
-;; stays a float; only another exact base under a negative exponent leaves its kind (a
-;; ratio). The arms meet at a call (ADR-116), so `(pow b 3)` on an int reads `int`.
+    ;; The seed is the base's kind: `(pow 2.0 0)` answered the INT `1` until 2026-09-17,
+    ;; which the overload below could not have claimed — the per-arm body check
+    ;; (ADR-116 addendum) is what found it.
+    else (pow-acc base exp (if (float? base) 1.0 1))))
+;; An int base to a non-negative exponent stays an int (overflow raises); a float base
+;; stays a float; only an exact base under a negative exponent leaves its kind (a ratio).
+;; The arms meet at a call (ADR-116), so `(pow b 3)` on an int reads `int` — and each arm
+;; is checked against the body, so `pow-acc`/`pow-reciprocal` declare theirs.
 (sig pow
   (and (int (int 0 _) -> int)
-    ((or (int -1 -1) (int 1 1)) int -> int)
     (float int -> float)
     (number int -> number)))
 
@@ -266,14 +270,19 @@ tower, not just the int `0`. A type with no impl RAISES rather than answering.
 ;; below the subnormal floor) costs one extra recompute and still yields 0.0.
 ;; (Found by the Paranoia port, 2026-07-26.)
 (defn- pow-reciprocal (base exp)
-  (let (p (pow-acc base (- exp) 1)
+  (let (p (pow base (- exp))
         r (if (pow-inf? p) 0.0 (/ 1 p)))
     (if (and (= r 0.0) (<= exp -2))
       (let (h (math/quot exp 2))
         (* (pow base h) (pow base (- exp h))))
       r)))
 
+(sig pow-reciprocal (and (float int -> float) (number int -> number)))
+
 (defn- pow-acc (base exp acc) (if (= exp 0) acc (pow-acc base (- exp 1) (* acc base))))
+;; Called only with a non-negative `exp` (a negative one never returns), so the int arm's
+;; claim is about what it answers, not what it terminates on.
+(sig pow-acc (and (int int int -> int) (float int float -> float) (number int number -> number)))
 
 ;; (round-to x places) — round to a fixed number of decimal places, staying a
 ;; number (for a fixed-width *string*, e.g. "3.10", use the `->fixed` primitive).

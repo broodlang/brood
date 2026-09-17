@@ -895,11 +895,17 @@ impl Ty {
         let without_falsy = excluded
             .difference(Ty::of(Tag::Nil))
             .difference(Ty::of(Tag::Bool));
-        if without_falsy.is_never()
-            || without_falsy.as_lit().is_some()
-            || without_falsy.as_lit_int().is_some()
-            || without_falsy.as_lit_str().is_some()
-        {
+        // The excluded set must BE the literal set — `as_lit_int` reads the int member's
+        // literals and ignores the other tags, so `any ∖ (int ∖ 0)`, which is `0 | (not
+        // int)`, answered `Some({0})` and a positively-known `(int and (not 0))` read as
+        // known only by exclusion (2026-09-17).
+        let only_literals = (without_falsy.as_lit().is_some()
+            && without_falsy.is_subtype(&Ty::of(Tag::Keyword)))
+            || (without_falsy.as_lit_int().is_some()
+                && without_falsy.is_subtype(&Ty::of(Tag::Int)))
+            || (without_falsy.as_lit_str().is_some()
+                && without_falsy.is_subtype(&Ty::of(Tag::Str)));
+        if without_falsy.is_never() || only_literals {
             return true;
         }
         // `any ∖ vector` — what a failed `(vector? x)` leaves: a flat tag set with no
@@ -1476,6 +1482,16 @@ impl Ty {
             }
             return Range::at_least(1);
         }
+        // A string literal set knows its lengths — chars, as `string/length` counts — so
+        // `"abc"` fits `(len string _ 3)` and `(into [] "abc")` has a length (2026-09-17).
+        if self.tags & COUNT_BITS == STR_BIT {
+            if let Some(LitSet::In(set)) = self.lit_str.as_deref() {
+                let lengths = set.iter().map(|s| s.chars().count() as i64);
+                if let (Some(lo), Some(hi)) = (lengths.clone().min(), lengths.max()) {
+                    return Range::new(Some(lo), Some(hi));
+                }
+            }
+        }
         Range::at_least(0)
     }
 
@@ -1507,12 +1523,25 @@ impl Ty {
             .into_iter()
             .map(|term| {
                 // The previous term with the same tags (`nil` aside — it rides along with
-                // whichever alternative it merged into), if there is exactly one.
-                let mut matching = theirs
+                // whichever alternative it merged into), if there is exactly one — or, among
+                // several, the one this term GREW from: the previous term that is a subtype
+                // of it. `(tuple "(" int[1..k] nil bool) | (tuple "(" 0 nil false)` — a
+                // parser state beside its seed — matched two previous tuples by tag alone,
+                // widened neither, and ran the derivation out of rounds (2026-09-17).
+                let same_tags: Vec<&Ty> = theirs
                     .iter()
-                    .filter(|p| p.tags & !NIL_BIT == term.tags & !NIL_BIT);
-                let (Some(prev_term), None) = (matching.next(), matching.next()) else {
-                    return term;
+                    .filter(|p| p.tags & !NIL_BIT == term.tags & !NIL_BIT)
+                    .collect();
+                let prev_term = match same_tags.as_slice() {
+                    [one] => *one,
+                    [] => return term,
+                    several => {
+                        let mut grew_from = several.iter().filter(|p| p.is_subtype(&term));
+                        match (grew_from.next(), grew_from.next()) {
+                            (Some(p), None) => *p,
+                            _ => return term,
+                        }
+                    }
                 };
                 let mut out = term.clone();
                 // A literal SET that grew is an interval on the move too — `0`, `0 | 1`,
@@ -3340,6 +3369,26 @@ impl Ty {
             || (self.tags & COUNT_BITS == PAIR_BIT && self.list_shape.is_some());
         if shaped {
             self.len = None;
+        }
+        // A string-literal set knows its lengths (`len_eff`), so a stored bound is either
+        // redundant or a FILTER on the set: keep the members it admits and drop it, so one
+        // type has one representation (`"b"` from a meet and `"b"` from a literal are `==`).
+        if self.tags & COUNT_BITS == STR_BIT {
+            if let (Some(bound), Some(LitSet::In(set))) = (self.len, self.lit_str.as_deref()) {
+                let kept: BTreeSet<String> = set
+                    .iter()
+                    .filter(|s| Range::subset(Range::point(s.chars().count() as i64), bound))
+                    .cloned()
+                    .collect();
+                if kept.is_empty() {
+                    // No literal fits the bound: there is no string here at all.
+                    self.tags &= !STR_BIT;
+                    self.lit_str = None;
+                } else {
+                    self.lit_str = Some(Arc::new(LitSet::In(kept)));
+                }
+                self.len = None;
+            }
         }
         self
     }

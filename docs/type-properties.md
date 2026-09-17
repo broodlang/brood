@@ -98,4 +98,8 @@ ADR-350's parameter relation to be sayable at all.
   the walk computes it; nothing displays it yet.
 - Transitive totality across calls, and mutual recursion: a call graph with a measure per
   edge — a different analysis.
-- A runtime contract for either property: there is nothing to check at a call boundary.
+- A runtime contract for either property — decided 2026-09-17: both stay STATIC-ONLY.
+  `:total` has nothing to check at a call boundary (termination is not an event); `:pure`
+  could be checked (an effect during the call) at a cost every call would pay, for a
+  property the walk already proves where it can see the body. A `sig!` with a property
+  installs the type's contract and none for the property, and says nothing about it.

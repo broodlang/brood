@@ -76,5 +76,8 @@ take `Y`, `Z`. `to_source` round-trips it. A body that names no `X` is the body.
   other shape; the grammar would need de Bruijn indices to say it.
 - **A named type alias** (`(deftype json …)`) so a `sig` can name the recursive type once:
   the spelling is `(rec …)` inline for now.
-- **The runtime contract**: `type-matches?` has no `rec` case; a `sig!` over a recursive
-  type accepts (an unknown compound accepts, by its existing rule).
+- ~~**The runtime contract**: `type-matches?` has no `rec` case; a `sig!` over a recursive
+  type accepts (an unknown compound accepts, by its existing rule).~~ Done 2026-09-17:
+  `(rec X body)` matches `body` with every free `X` standing for the whole form
+  (`%rec-unroll`) — one level of unrolling per level of the value, an inner `(rec X …)`
+  closing its own name — so a wrong leaf at any depth throws (`tests/contract_test.blsp`).

@@ -26,7 +26,7 @@ pub(crate) fn display_path(path: &str) -> String {
 
 /// A 1-based source position (line and column), used for editor-parseable
 /// error reporting (see `docs/tooling.md`). Columns count characters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Pos {
     pub line: u32,
     pub col: u32,
