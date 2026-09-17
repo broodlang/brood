@@ -85,6 +85,70 @@ read deopted on any shared-region vector (latent while `%vector-ref` was a call 
 `jit_deopt_dirty` check had fired on every deopt of an inlined arm since two-stage tiering (it
 ran after the settle's own small-top restore) — so any past "dirty" reading on an inlined arm
 was the diagnostic, not the native.
+## 2026-09-17 — HANDOFF: C9 in flight (records are products; a small interval is its listing)
+
+**State at handoff.** `main` = `989af614`'s successor (B6/B7/B8 pushed: `3cbeb090`,
+`cd87c8c1`, `7121c5b8` + merge `493bca01`). The working tree carries **C9, uncommitted**,
+in `crates/lisp/src/types.rs`, `crates/lisp/src/types/tests.rs` and
+`crates/lisp/src/types/check/tests/signatures.rs`. Nothing else is dirty.
+
+**What C9 is.** ADR-262's documented incompleteness: a term covered jointly by several of
+the other side's alternatives but by none alone read "not a subtype" — sound, but a
+FALSE POSITIVE at a call. ADR-267 decomposed per tag, ADR-289 closed tuples and list
+shapes, ADR-292 arrows. The probe (fifteen shapes, run before the change) found exactly two
+holes left; both are fixed in the tree:
+
+1. **A record is a product.** `{a: int|string}` ⊆ `{a: int} | {a: string}` answered false.
+   `record_covered_by` (beside `tuple_covered_by`) reads the declared keys as positions —
+   `RecordShape::field_ty` over the union of every shape's keys, so an undeclared key
+   reads as that shape's `rest` — and runs ADR-289's subset rule. The **undeclared
+   remainder is NOT a position** (infinitely many independent keys: a map with `1` under
+   one and `"a"` under another escapes both `{…: int}` and `{…: string}`), so the base
+   case requires `a.rest ⊆ some surviving candidate's rest`, the way a vector's elements
+   need a single candidate. Wired into `term_is_subtype_of_union` under `MAP_BIT`.
+2. **A small bounded interval is its enumeration.** `(int 1 2)` ⊆ `1 | 2` answered
+   false (`lit_subset(None, In{1,2})`). `Ty::enumerated_int_range` lists an interval of at
+   most `MAX_ENUMERATED_RANGE` (64) values when the other side pins a literal set;
+   `is_subtype_term` uses it in the int-literal rule only. Wide/open intervals stay `None`
+   (correctly "not inside a finite listing").
+
+Verified by probe: `map<K, A|B>` vs split maps stays false (a map is like a vector), the
+2-field componentwise case stays false, open-vs-closed rests behave.
+
+**Pins written and green (3/3 on first run):**
+`types/tests.rs::a_record_can_be_covered_by_several_alternatives_together`,
+`::a_small_interval_is_inside_the_literal_set_it_lists`, and the checker-level
+`check/tests/signatures.rs::a_record_whose_field_is_a_union_passes_a_split_union_of_shapes`
+(the false positive at a call, plus the componentwise neighbour that must still warn).
+
+**To finish C9 (in order) — tick what the log below says is done:**
+1. `( ulimit -v 16000000; cargo nextest run -p brood -j1 -E 'test(types::)' )` — 585 expected.
+2. Sabotage both: comment out the `MAP_BIT` arm → the record pins red; make
+   `enumerated_int_range` return `None` → the interval pin reds.
+3. `nest check --strict` over the tree (expect 0 + the 8 advisory notes), clippy
+   `--all-targets --all-features -D warnings`, `nest::check_order_differential` and
+   `derivation_cache_differential` (the lattice change alters answers, so both must agree
+   with themselves still). Watch for a NEW finding the sharper relation exposes — a
+   `match` over an `(int lo hi)` scrutinee may now read exhaustive (fewer warnings, fine)
+   and a dead-clause lint may now fire where a clause was already covered (read each one).
+4. Docs: ADR in `docs/decisions.md` ("ADR-364 — A record is a product too; an interval is
+   its listing" — the undeclared-remainder argument is the content worth recording), tick
+   C9 in `docs/type-system-status.md` § "The remaining list" + a short entry, a devlog
+   line, `docs/type-records.md` (records section of subtyping) and `docs/types.md`
+   contract #5 if it still says record subtyping is "not complete" in this respect.
+5. Commit, `git fetch` + merge, re-verify, push.
+
+**Then, in list order:** C10 (merely-wider residue re-probed under intervals), C11
+(element-typed `seqable`), C12–C17. **Open KI:** KI-162 — `nest check --fix-sigs` writes a
+`sig` ABOVE its `defn`, which `sig_placement.rs` forbids; fix is to insert after the
+definition's extent (the CST has it) and flip the project test to "directly below".
+
+**Standing rules that bit this week (all in memory, repeated here for a cold start):** never
+the full suite on this box (the hook enforces it; targeted `-E` filters, `-j1`, the 16 GB
+cap, build uncapped with `CARGO_BUILD_JOBS=3`); the Edit tool for source, never perl/sed;
+no Python; no benchmarks here; merge (never rebase) when `origin/main` moved and re-verify
+the combined tree; no AI trailer on commits.
+
 ## 2026-09-17 — the type system is worked from a list now: sound first, then complete
 
 The criteria changed (the user's, and the right ones): the checker is held to **always

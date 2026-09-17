@@ -2251,3 +2251,67 @@ fn an_interval_widens_to_its_infinity_when_it_moves() {
         "vector<int[0..]>[1..]"
     );
 }
+
+// ---- C9 (2026-09-17): a record is a product too, and a small interval is its listing ----
+
+#[test]
+fn a_record_can_be_covered_by_several_alternatives_together() {
+    // The tagged-union idiom's other half: `{a: int|string}` lands in `{a: int}` or in
+    // `{a: string}` — the declared keys are a product's positions, exactly as a tuple's.
+    let covered = |a: &str, b: &str| parse_ty(a).is_subtype(&parse_ty(b));
+    assert!(covered(
+        "(record :a (or int string))",
+        "(or (record :a int) (record :a string))"
+    ));
+    assert!(covered(
+        "(record :a (or int string) :b bool)",
+        "(or (record :a int :b bool) (record :a string :b bool))"
+    ));
+    // …through a tuple, since the tuple rule asks `is_subtype` per position.
+    assert!(covered(
+        "(tuple (record :a (or int string)))",
+        "(or (tuple (record :a int)) (tuple (record :a string)))"
+    ));
+    // A CLOSED shape fits open candidates (its absent keys fit `any`)…
+    assert!(covered(
+        "(record :a (or int string))",
+        "(or (record &open :a int) (record &open :a string))"
+    ));
+    // …but an open one does not fit closed candidates: it may carry keys they forbid.
+    assert!(!covered(
+        "(record &open :a (or int string))",
+        "(or (record :a int) (record :a string))"
+    ));
+    // Componentwise coverage is still not product coverage.
+    assert!(!covered(
+        "(record :a (or int string) :b (or int string))",
+        "(or (record :a int :b int) (record :a string :b string))"
+    ));
+    // The undeclared remainder is NOT a position: infinitely many independent keys, so a
+    // map holding `1` under one and `"a"` under another escapes both candidates.
+    let i = Ty::of(Tag::Int);
+    let s = Ty::of(Tag::Str);
+    let rest_of = |rest: Ty| Ty::record_shape(BTreeMap::new(), rest);
+    let mixed = rest_of(i.clone().union(s.clone()));
+    let split = rest_of(i.clone()).union(rest_of(s.clone()));
+    assert!(!mixed.is_subtype(&split), "{mixed} is not inside {split}");
+    assert!(mixed.is_subtype(&split.union(rest_of(i.union(s)))));
+    // A map<K, V> is not a product either (the vector neighbour, unchanged).
+    assert!(!covered(
+        "(map keyword (or int string))",
+        "(or (map keyword int) (map keyword string))"
+    ));
+}
+
+#[test]
+fn a_small_interval_is_inside_the_literal_set_it_lists() {
+    let covered = |a: &str, b: &str| parse_ty(a).is_subtype(&parse_ty(b));
+    assert!(covered("(int 1 2)", "(or 1 2)"));
+    assert!(covered("(int 1 2)", "(or 1 2 3)"));
+    assert!(!covered("(int 1 3)", "(or 1 2)"));
+    assert!(!covered("(int 0 _)", "(or 1 2)"));
+    assert!(!covered("(int 1 1000)", "(or 1 2)"));
+    // A `(not 5)` exclusion reads on the enumeration too.
+    assert!(covered("(int 1 4)", "(and int (not 5))"));
+    assert!(!covered("(int 1 5)", "(and int (not 5))"));
+}

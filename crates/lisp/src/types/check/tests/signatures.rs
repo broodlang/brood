@@ -603,3 +603,27 @@ fn curated_output_and_numeric_sigs() {
         );
     }
 }
+
+#[test]
+fn a_record_whose_field_is_a_union_passes_a_split_union_of_shapes() {
+    // C9 (2026-09-17): `{a: int|string}` against `(or (record :a int) (record :a string))`
+    // was a false positive — no single alternative covered the argument, and the lattice
+    // did not yet know a record is a product. Sabotage: drop the `MAP_BIT` arm of
+    // `term_is_subtype_of_union` and this warns again.
+    let w = file_warnings(
+        "(sig f ((or (record :a int) (record :a string)) -> any))
+         (defn f (r) r)
+         (defn g (b) (f {:a (if b 1 \"x\")}))",
+    );
+    assert!(w.is_empty(), "{w:?}");
+    // The neighbour that must still warn: a second field split the other way.
+    let w = file_warnings(
+        "(sig f ((or (record :a int :b int) (record :a string :b string)) -> any))
+         (defn f (r) r)
+         (defn g (b) (f {:a (if b 1 \"x\") :b (if b \"y\" 2)}))",
+    );
+    assert!(
+        w.iter().any(|m| m.contains("expects")),
+        "componentwise coverage is not product coverage: {w:?}"
+    );
+}
