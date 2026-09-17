@@ -23557,3 +23557,63 @@ load is now also a recompile trigger, so `BROOD_TRACE_COMPILE` counts one more c
 arm that lazily loaded something; a program that lazily loads N modules from one hot loop
 takes N nested tail transitions, bounded by N.
 
+## ADR-367 — A float interval is declined: floats are not totally ordered
+
+**Status:** accepted (2026-09-17). **Context:** type-system list item C13, whose text was
+"cheap on the int one's machinery". It is not, and the reason matters.
+
+**Context.** ADR-350 gave the lattice an int interval — `(int 0 10)`, `(len T 1 _)` — with
+guards narrowing it (`(< i n)`), arithmetic propagating it (`Range::plus`/`times`/`minus`)
+and the runtime contract enforcing it. C13 proposed the same for floats. The premise was
+that the machinery would carry over.
+
+**The premise is false, and the reason is soundness, not effort.** `Range` is a pair of
+`Option<i64>` bounds read by ~117 sites across `types/`, every one of which assumes a
+**total order**: that `¬(L < R)` gives `L ≥ R`. That is what `comparison_facts`' else-branch
+does, and it is what makes `(if (< i n) … else …)` informative on both sides.
+
+Floats in this language are not totally ordered, and NaN is **reachable** (measured
+2026-09-17):
+
+| expression | result |
+|---|---|
+| `(* 1.0e200 1.0e200)`, `(math/pow 10.0 400)` | `inf` — no raise |
+| `(- inf inf)`, `(* inf 0.0)`, `(/ inf inf)` | `nan` |
+| `(math/sqrt -1.0)`, `(/ 0.0 0.0)`, `(math/asin 2.0)` | raise (domain-checked) |
+| `(< nan 1.0)` | `false` |
+| `(>= nan 1.0)` | **`false`** |
+
+Both comparisons are false, so for a float the else-branch of `(< x 1.0)` proves nothing.
+A float interval would therefore have to opt out of the one rule that makes the int
+interval worth having, decide NaN's membership in every relation (an interval contains no
+NaN; a complement contains every NaN), and keep ±inf as a bound value. That is a different
+lattice wearing the same name, and the failure mode of getting it wrong is an unsound
+checker — the one thing this system does not accept.
+
+**What the corpora asked for.** Four places document a float range in prose:
+`stats/quantile` (0.0–1.0), `stats/percentile` (0–100), `display/frect`'s opacity, and a
+couple of `frac` helpers. The one that matters most already **validates at runtime and
+raises with the offending value**. No `std/` guard compares a float against a literal at
+all; the only such guards are in tests. So the static gain is catching a literal
+out-of-range argument a little earlier than the error already does.
+
+**Decision: declined, not deferred** — the same shape as ADR-361 and the A3 decision on
+`:pure`/`:total`. This is not "wait for a concrete need" (which decides language shape, not
+checker precision — the list holds the checker to "as complete as makes sense"); it is that
+the completion on offer buys little and puts an unsound rule one copy-paste from a system
+whose hard commitment is soundness.
+
+**What makes the current design safe, and is now pinned.** Floats are sound *by not
+participating*: `int_guard_ty` narrows a comparison to "an int within the range, **or not an
+int at all**", so a float survives both branches of `(< x 1)` and a NaN survives with it.
+`(sig b (number -> int)) (defn b (x) (if (< x 1) 0 x))` correctly reports
+`int[0..] | float | decimal | ratio` rather than claiming the else-branch made `x` an int.
+`check::tests::inference_precision::a_float_comparison_narrows_nothing_because_nan_fails_both`
+pins that, so a later float-interval attempt cannot quietly take the unsound shortcut — it
+has to face this entry first.
+
+**Reconsider if** NaN becomes unreachable (every producing operation raising, as
+`sqrt`/`asin`/`0.0÷0` already do — then floats ARE totally ordered here and the machinery
+does carry over), or if a corpus appears where float ranges are load-bearing rather than
+documented in prose.
+

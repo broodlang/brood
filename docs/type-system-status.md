@@ -1374,9 +1374,26 @@ each lands; this section is the working list, `handoff.md` points at it.
       Four pins in `check/tests/inference_precision.rs`, sabotage-verified three ways
       (offsets unrecognised; a larger offset no longer covering a smaller; the return
       check's alias dropped — each reds its own pin alone).
-- [ ] **C13. A `float` interval.** Cheap on the int one's machinery. C10 turned out not to
-      need it (it closed without a checker change), so this one now wants its own case: a
-      shape a float bound would decide that nothing decides today.
+- [x] **C13. A `float` interval — DECLINED, not deferred** (2026-09-17, ADR-367). The
+      item's premise ("cheap on the int one's machinery") is false, and the reason is
+      soundness. `Range` is a pair of `Option<i64>` bounds read by ~117 sites that assume a
+      **total order** — which is what lets the else-branch of `(< i n)` conclude `i ≥ n`.
+      **Floats here are not totally ordered and NaN is reachable**: `(* 1.0e200 1.0e200)`
+      and `(math/pow 10.0 400)` give `inf` without raising, `(- inf inf)` / `(* inf 0.0)` /
+      `(/ inf inf)` give `nan` (while `(math/sqrt -1.0)`, `(/ 0.0 0.0)` and `(math/asin
+      2.0)` raise), and `(< nan 1.0)` and `(>= nan 1.0)` are **both false**. A float
+      interval would have to opt out of the rule the int one is worth having for, decide
+      NaN in every relation, and carry ±inf as a bound — a different lattice under the same
+      name, whose failure mode is an unsound checker. The corpora ask for little: four
+      prose-documented ranges, and `stats/percentile` — the one that matters — already
+      validates at runtime and raises with the value. **What keeps today sound is that
+      floats do not participate**: `int_guard_ty` narrows to "an int in range, *or not an
+      int*", so a float (NaN included) survives both branches; pinned by
+      `inference_precision::a_float_comparison_narrows_nothing_because_nan_fails_both`
+      (sabotage: narrowing to the bare interval reds it), so a later attempt has to face
+      ADR-367 rather than quietly take the shortcut. **Reconsider if** every NaN-producing
+      operation comes to raise (floats would then be totally ordered here), or if float
+      ranges turn out load-bearing rather than documentation.
 - [ ] **C14. A named recursive alias** — `(deftype json (rec …))` so a `sig` names it once.
       Nested self-reference across binders stays out (de Bruijn for a shape inference
       never produces).
