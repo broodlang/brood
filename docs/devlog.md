@@ -888,10 +888,30 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-17** — KI-153: a function whose only sites were its own self-calls derived ⊥ for every parameter and was checked as dead code (no lint in its body at all); a self-call no longer makes a function live. The rewrite's forms keep their source positions.
 - **2026-09-17** — `inc`, `dec` and `(- (get m k 0) e)` fuse like `+` (ADR-360 §5, `%table-sub`); the fuzzer draws the four spellings and an i64::MIN seed.
 - **2026-09-17** — ADR-360 §6: the tally through a `fold`/`reduce` LITERAL builds in place too (957 → 98 ms on 750k keys), and `seq/frequencies` is written as that idiom (523 → 96 ms); a shadowed name anywhere in the form declines the rewrite; the fuzzer gained a fold arm against a named-function reference.
+- **2026-09-17** — call convention rung A4, first half: the callee nils its own locals (unrolled, before the stack guard) and the inline call's fill loop is gone — 380 → 321 instructions per call on a six-local callee, `bintree` −4.5%, everything else inside its floor.
 
 ---
 
 ## Recent — full entries
+
+## 2026-09-17 — rung A4, first half: the callee nils its own frame
+
+The inline native→native call nil-filled the callee's locals in the CALLER, in a loop over
+`[base+argc, base+nslots)` — ~8 instructions per slot, the largest per-call item left after
+the guards (`docs/call-convention.md` §2 row 1). The callee knows its frame statically, so
+it does that work itself now: `jit_lower_arm_inner` stores nil over every slot from the
+first `let` binder (after params, optionals, rest and captures — the ones a VM entry has
+already filled) to `nslots`, unrolled, three stores per slot, and before the stack guard
+so a guard-trip deopt hands the VM a frame that is already nil past its arguments. The
+blob keeps the capacity guard and the `len = frame_end` store and drops the loop. A Rust
+gateway still `extend_roots_to_nil`s — the callee stores nil over nil there, on a path
+that costs thousands of instructions anyway.
+
+Counted on a 5M-call loop: a callee with six locals 380 → 321 instructions per call; one
+with none unchanged (nothing was filled). `make ab --floor --all`: `bintree` −4.5%
+(confirmed solo), the rest inside their floors. The rung's second half — not nil'ing a
+slot the body definitely writes before its first safepoint — needs a write-set walk over
+the chunk and is where the remaining three stores per slot would go.
 
 ## 2026-09-17 — the fold literal is a tally too (ADR-360 §6)
 

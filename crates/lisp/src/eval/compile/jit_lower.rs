@@ -1259,6 +1259,51 @@ fn jit_lower_arm_inner(
     let rb_var = b.declare_var(ptr_ty);
     let rb0 = emit::load_roots_base(&mut b, heap);
     b.def_var(rb_var, rb0);
+
+    // **Rung A4: the callee nils its own locals.** At entry only the parameters (and, for a
+    // closure arm entered from the VM, its optionals/rest/captures, which `push_frame` filled)
+    // are live; every slot from the first `let` binder up to `nslots` is dead and may hold
+    // whatever the roots buffer's spare capacity held from earlier frames — a stale handle
+    // the collector would trace at the first safepoint (KI-49's class). The inline
+    // native→native call used to nil `[base+argc, base+nslots)` in the CALLER, in a loop
+    // (~8 instructions per slot, the largest per-call item left after the guards); the
+    // callee knows its own frame statically, so it does the same work here unrolled — three
+    // stores per slot, no counter, no compare — and a Rust caller that already extended
+    // the frame with nil (`extend_roots_to_nil`) pays the stores twice, on a path that
+    // costs thousands of instructions anyway. Before the stack guard, deliberately: a guard
+    // trip deopts, and the VM then owns a frame that must already be nil past its args.
+    {
+        let first_local = arm.nrequired
+            + arm.noptional
+            + arm.rest_slot.is_some() as usize
+            + arm.capture_names.len();
+        if first_local < nslots {
+            let zero = b.ins().iconst(types::I64, 0);
+            let base_bytes = b.ins().imul_imm_s(base, STRIDE);
+            let frame_ptr = b.ins().iadd(rb0, base_bytes);
+            for slot in first_local..nslots {
+                let off = (slot as i64 * STRIDE) as i32;
+                b.ins().store(
+                    cranelift_codegen::ir::MemFlagsData::trusted(),
+                    zero,
+                    frame_ptr,
+                    off,
+                );
+                b.ins().store(
+                    cranelift_codegen::ir::MemFlagsData::trusted(),
+                    zero,
+                    frame_ptr,
+                    off + PAYLOAD_OFFSET as i32,
+                );
+                b.ins().store(
+                    cranelift_codegen::ir::MemFlagsData::trusted(),
+                    zero,
+                    frame_ptr,
+                    off + PAYLOAD_OFFSET as i32 + 8,
+                );
+            }
+        }
+    }
     // The frame-access context the extracted slot helpers (`emit::load_slot_int` etc.)
     // read; all fields are `Copy`, so it threads by value.
     // KI-49: which slots the tier-time profile saw an `Int` in. A profiled-Int slot keeps

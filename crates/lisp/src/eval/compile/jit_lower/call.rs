@@ -542,44 +542,17 @@ pub(super) fn emit_call(
             // release if it ever did. One register op buys the same never-shrink floor.
             let frame_end = b.ins().umax(raw_end, len);
             let fits = b.ins().icmp(IntCC::UnsignedLessThanOrEqual, frame_end, cap);
-            let xc_fill = b.create_block();
-            b.append_block_param(xc_fill, types::I64); // cur
-            b.ins()
-                .brif(fits, xc_fill, &[BlockArg::Value(len)], ff_blk, &[]);
-
-            // Nil-fill the local slots `[len, frame_end)` — `extend_roots_to_nil`'s fill,
-            // zero bytes being `Value::Nil` (the same `write_bytes(0)` the Rust side does).
-            b.switch_to_block(xc_fill);
-            let cur = b.block_params(xc_fill)[0];
-            let fill_done = b
-                .ins()
-                .icmp(IntCC::UnsignedGreaterThanOrEqual, cur, frame_end);
-            let xc_fill_body = b.create_block();
             let xc_call = b.create_block();
-            b.ins().brif(fill_done, xc_call, &[], xc_fill_body, &[]);
-            b.switch_to_block(xc_fill_body);
-            let rp = b
-                .ins()
-                .load(types::I64, MemFlagsData::trusted(), heap, roots_ptr_off);
-            let byte_off = b.ins().imul_imm_s(cur, STRIDE);
-            let addr = b.ins().iadd(rp, byte_off);
-            let zfill = b.ins().iconst(types::I64, 0);
-            b.ins().store(MemFlagsData::trusted(), zfill, addr, 0);
-            b.ins()
-                .store(MemFlagsData::trusted(), zfill, addr, PAYLOAD_OFFSET as i32);
-            b.ins().store(
-                MemFlagsData::trusted(),
-                zfill,
-                addr,
-                PAYLOAD_OFFSET as i32 + 8,
-            );
-            let nxt = b.ins().iadd_imm_s(cur, 1);
-            b.ins().jump(xc_fill, &[BlockArg::Value(nxt)]);
+            b.ins().brif(fits, xc_call, &[], ff_blk, &[]);
 
             // The ceremony + the call, mirroring `jit_run_fast_link` top to bottom.
             b.switch_to_block(xc_call);
             // Frame extent: len = frame_end (the roots must cover the callee frame
-            // before its first safepoint).
+            // before its first safepoint). The slots `[len, frame_end)` are NOT nil'd
+            // here any more (rung A4): the callee's prologue nils its own locals, unrolled
+            // against its static frame, before anything in it can reach a safepoint —
+            // the loop that lived here (~8 instructions per slot) was the largest per-call
+            // item left after the guards.
             b.ins()
                 .store(MemFlagsData::trusted(), frame_end, heap, roots_len_off);
             // Rung A1: no heap-field saves. The callee's activation context is built in a
