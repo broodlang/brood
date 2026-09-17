@@ -1004,6 +1004,16 @@ pub(in crate::builtins) fn gui_size(args: &[Value], _: EnvId, heap: &mut Heap) -
     Ok(heap.alloc_vector(vec![Value::int(cols as i64), Value::int(rows as i64)]))
 }
 
+pub(in crate::builtins) fn gui_cell_size(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = gui_window_id(heap, "%gui-cell-size", arg(args, 0))?;
+    let px = match arg(args, 1) {
+        Value::Nil => None,
+        v => Some(num_to_f64(heap, "%gui-cell-size", v)? as f32),
+    };
+    let (cell_w, cell_h) = crate::host::gui::cell_size(id, px).map_err(LispError::runtime)?;
+    Ok(heap.alloc_vector(vec![Value::int(cell_w as i64), Value::int(cell_h as i64)]))
+}
+
 /// A held `gui::Key` as the same Brood value `gui-open` delivers for that press —
 /// a 1-char string, else a `:ctrl-…` / `:alt-…` / `:ctrl-meta-…` / named keyword —
 /// so an app can compare `(gui-held-key id)` directly against the key it last saw.
@@ -1047,6 +1057,7 @@ struct GuiOpTags {
     cells_t: value::Symbol,
     cells_rgb_t: value::Symbol,
     scroll_region_t: value::Symbol,
+    cell_region_t: value::Symbol,
     rect_t: value::Symbol,
     frect_t: value::Symbol,
 }
@@ -1064,6 +1075,7 @@ impl GuiOpTags {
             cells_t: value::intern("cells"),
             cells_rgb_t: value::intern("cells-rgb"),
             scroll_region_t: value::intern("scroll-region"),
+            cell_region_t: value::intern("cell-region"),
             rect_t: value::intern("rect"),
             frect_t: value::intern("frect"),
         }
@@ -1332,6 +1344,40 @@ fn parse_gui_ops(
                 let inner_ops = parse_gui_ops(heap, inner_parsed, tags);
                 ops.push(crate::host::gui::Op::ScrollRegion {
                     dy_frac,
+                    ops: inner_ops,
+                });
+            }
+        } else if tag == tags.cell_region_t {
+            // [:cell-region x y w h px inner-ops] — paint the inner ops with the cell
+            // metrics of `px`, inside the parent-cell rect [x y w h], positioned in the
+            // region's OWN cell space. Self-restoring like scroll-region; this is what lets
+            // one frame carry two text sizes (a per-buffer zoom).
+            let Ok(x_i) = expect_int(heap, "%gui-draw", arg(&parts, 1)) else {
+                continue;
+            };
+            let Ok(y_i) = expect_int(heap, "%gui-draw", arg(&parts, 2)) else {
+                continue;
+            };
+            let Ok(w_i) = expect_int(heap, "%gui-draw", arg(&parts, 3)) else {
+                continue;
+            };
+            let Ok(h_i) = expect_int(heap, "%gui-draw", arg(&parts, 4)) else {
+                continue;
+            };
+            let px = num(arg(&parts, 5));
+            if !(px.is_finite() && px >= 1.0) {
+                continue;
+            }
+            if let Ok(inner_parsed) =
+                frame_ops(heap, arg(&parts, 6), "%gui-draw", "cell-region ops")
+            {
+                let inner_ops = parse_gui_ops(heap, inner_parsed, tags);
+                ops.push(crate::host::gui::Op::CellRegion {
+                    x: clamp_u16(x_i),
+                    y: clamp_u16(y_i),
+                    w: clamp_extent(w_i),
+                    h: clamp_extent(h_i),
+                    px,
                     ops: inner_ops,
                 });
             }

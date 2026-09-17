@@ -259,6 +259,30 @@ pub enum Op {
         dy_frac: f32,
         ops: Vec<Op>,
     },
+    /// Draw `ops` with the cell metrics of font size `px`, inside the rect `[x y w h]`
+    /// given in the PARENT's cells. Inner ops are positioned in the region's own cell
+    /// space (row 0, col 0 is the region's top-left), so a caller lays a region out in its
+    /// own units and does not have to know the outer size.
+    ///
+    /// This is what lets one frame carry two text sizes — an editor zooming ONE buffer
+    /// while the rest of the window stays put. The alternative the grid already had is the
+    /// `:scale` face attr, but that is a whole-number multiple of the cell (2×, 3×), so the
+    /// smallest step it can express is a doubling. A region carries a px, so a step is a
+    /// pixel.
+    ///
+    /// Scoped and self-restoring like `ScrollRegion`: ops after the region are painted with
+    /// the window's metrics again, and regions nest (an inner one overrides). GUI-only — the
+    /// terminal SKIPS it (as it does `FRect` and `VSpans`): a terminal cell is whatever the
+    /// terminal says it is, and flattening region-local ops would paint them in the wrong
+    /// place.
+    CellRegion {
+        x: u16,
+        y: u16,
+        w: u16,
+        h: u16,
+        px: f32,
+        ops: Vec<Op>,
+    },
 }
 
 /// A keystroke, in a backend-neutral shape the Brood side turns into the same
@@ -406,14 +430,14 @@ pub(crate) mod gpu; // the experimental OpenGL render path behind `BROOD_GUI_GPU
 
 #[cfg(not(feature = "gui"))]
 pub use disabled::{
-    bg, close, drag_move, drag_resize, draw, focus, font, fullscreen, grab, held_key,
+    bg, cell_size, close, drag_move, drag_resize, draw, focus, font, fullscreen, grab, held_key,
     host_main_thread, icon, inset, line_height, maximize, minimize, open, register_family, size,
     text_aa, text_contrast, title, TextAa,
 };
 
 #[cfg(feature = "gui")]
 pub use backend::{
-    bg, close, drag_move, drag_resize, draw, focus, font, fullscreen, grab, held_key,
+    bg, cell_size, close, drag_move, drag_resize, draw, focus, font, fullscreen, grab, held_key,
     host_main_thread, icon, inset, line_height, maximize, minimize, open, register_family, size,
     text_aa, text_contrast, title, TextAa,
 };

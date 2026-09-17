@@ -4,6 +4,16 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## Unreleased
+**A frame carries more than one text size** (ADR-363). `[:cell-region x y w h px ops]` /
+`editor/display`'s `cell-region` paints its ops with the cell metrics of font size `px` inside a
+rect given in the parent's cells, positioned in the region's own cell space — scoped and
+self-restoring like `scroll-region`, nesting, clipped to its rect. `gui/cell-size` (`%gui-cell-size
+id [px]`) measures the cell a size produces, on the GUI thread, so a caller can lay a region
+out for the rows and columns that fit. The cluster cache is keyed by px, so two sizes coexist
+and a resize keeps its glyphs. This is what a per-buffer zoom needed: the window's font stays
+put and one pane gets a px, a pixel at a time.
+
 ## v0.30.1 — a timed-out ranking cleans up after itself; std/fuzzy is strict-clean
 **A timed-out sharded ranking leaves nothing in the caller's mailbox.** `fuzzy/top`'s
 shards are killed when they miss `*fuzzy-worker-timeout-ms*`, and that was assumed to stop

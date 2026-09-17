@@ -49,6 +49,9 @@ pub fn fullscreen(_id: u64, _on: bool) -> Result<(), String> {
 pub fn size(_id: u64) -> Result<(u16, u16), String> {
     Err(NOT_COMPILED.into())
 }
+pub fn cell_size(_id: u64, _px: Option<f32>) -> Result<(u16, u16), String> {
+    Err(NOT_COMPILED.into())
+}
 pub fn held_key(_id: u64) -> Result<Option<super::Key>, String> {
     Err(NOT_COMPILED.into())
 }

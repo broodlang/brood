@@ -259,6 +259,16 @@ enum UserEvent {
     /// Hand window `id` to the window manager for an interactive **resize** from
     /// `dir` — the gesture an OS window frame would have provided.
     DragResize { id: u64, dir: String },
+    /// Measure the cell metrics font size `px` would produce in window `id` (`None` = the
+    /// size the window is already using) and reply with `(cell_w, cell_h)` in PHYSICAL px.
+    /// Answered on the GUI thread because only it holds the renderer and the font engine;
+    /// memoised there. An app laying out a `CellRegion` asks this to learn how many of that
+    /// region's cells fit the rect it has — per-buffer zoom's one unavoidable question.
+    Metrics {
+        id: u64,
+        px: Option<f32>,
+        reply: Sender<Result<(u16, u16), String>>,
+    },
     /// Make window `id` borderless-fullscreen (`on`) or restore it — fills the
     /// whole monitor with no title bar / decorations (distraction-free). Behind
     /// `gui-fullscreen!`; the title-keeping sibling is `Maximize`.
@@ -717,6 +727,42 @@ pub fn size(id: u64) -> Result<(u16, u16), String> {
     let h = w.get(&id).ok_or("gui window not open")?;
     let size = *h.size.lock().unwrap();
     Ok(size)
+}
+
+/// `(gui-cell-size id [px])` — the cell metrics of window `id` in PHYSICAL pixels:
+/// `(cell_w, cell_h)` for the size the window is using, or for the font size `px`
+/// (logical) a `cell-region` would paint with.
+///
+/// The question an app has to ask before it can lay out a region at another size: how
+/// many of THAT size's cells fit the rect it has, in this window's cells. It cannot be
+/// derived from the px alone — a cell is whatever shaping the reference glyph produces,
+/// rounded to whole pixels — so it is measured, on the GUI thread, and memoised there.
+///
+/// Headless (and with no GUI thread) there is no font engine, so this fails rather than
+/// inventing a number; a caller that can run headless falls back to the size ratio.
+pub fn cell_size(id: u64, px: Option<f32>) -> Result<(u16, u16), String> {
+    {
+        let w = windows().lock().unwrap();
+        if !w.contains_key(&id) {
+            return Err("gui window not open".into());
+        }
+    }
+    if headless() {
+        return Err("gui is headless — no font engine to measure a cell with".into());
+    }
+    let (reply_tx, reply_rx) = mpsc::channel();
+    gui()?
+        .lock()
+        .unwrap()
+        .send_event(UserEvent::Metrics {
+            id,
+            px,
+            reply: reply_tx,
+        })
+        .map_err(|_| "gui thread is gone".to_string())?;
+    reply_rx
+        .recv()
+        .map_err(|_| "gui thread did not reply".to_string())?
 }
 
 /// `(gui-held-key id)` — the key window `id` currently sees as physically held,
@@ -1205,6 +1251,23 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 } else {
                     self.pending_open.push((subscriber, spec, reply));
                 }
+            }
+            // Measure a cell at some font size for a window (behind gui-cell-size).
+            UserEvent::Metrics { id, px, reply } => {
+                let answer = match self.ids.get(&id).and_then(|wid| self.wins.get(wid)) {
+                    Some(w) => {
+                        let m = match px {
+                            Some(p) => w.renderer.metrics_at(p),
+                            None => w.renderer.metrics(),
+                        };
+                        Ok((
+                            m.cell_w.min(u16::MAX as usize) as u16,
+                            m.cell_h.min(u16::MAX as usize) as u16,
+                        ))
+                    }
+                    None => Err("gui window not open".to_string()),
+                };
+                let _ = reply.send(answer);
             }
             // Set a live window's OS title-bar text (behind gui-title!).
             UserEvent::Title { id, title } => {

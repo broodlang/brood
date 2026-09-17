@@ -55,6 +55,12 @@
   "Window id's size as [cols rows] in character cells (tracks resize / HiDPI), same shape as term/size."
   (%gui-size id))
 
+(defn cell-size (id &optional px)
+  "Window id's cell size as [cell-w cell-h] in PHYSICAL pixels — for the font size the window is using, or, given px (a logical font size), for the size a `cell-region` of that px would paint with. The question an app must answer before laying a region out at another size: how many of THAT size's cells fit the rect it has. It is not derivable from px — a cell is whatever shaping the reference glyph produces, rounded to whole pixels — so it is measured (on the GUI thread, memoised there). Errors when the window is not open, when this brood has no gui feature, and headless (no font engine to measure with), so a caller that also runs headless falls back to the size ratio."
+  (if (nil? px)
+    (%gui-cell-size id)
+    (%gui-cell-size id px)))
+
 (defn held-key (id)
   "The key window id currently sees as physically held — the same value its press delivered (a 1-char string, or a keyword like :ctrl-n / :up) — or nil when none is held. Tracked from press/release transitions in the event loop (NOT winit's ke.repeat, unreliable on Wayland), so it's the source of truth for a held key: a consumer-paced auto-repeat polls it each tick and stops the instant it no longer matches, so a missed key-up (e.g. lost on focus change) can't cause runaway repeat."
   (%gui-held-key id))

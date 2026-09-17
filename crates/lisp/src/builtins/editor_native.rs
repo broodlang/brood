@@ -29,7 +29,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(1),
         Sig::new(vec![any], vec_ty),
         &["frame"],
-        "[frame' table]: frame (a vector or list of render ops) with every [:ui/memo key deps ops] marker replaced by its ops, and a map key -> [deps ops] of the markers. Recurses into a marker's ops and into a [:scroll-region frac ops] vector (its ops come back as a vector, as they went in). The pass behind editor/ui's memoised view fragments (ADR-336), native because it runs once per frame over every op.",
+        "[frame' table]: frame (a vector or list of render ops) with every [:ui/memo key deps ops] marker replaced by its ops, and a map key -> [deps ops] of the markers. Recurses into a marker's ops and into the ops a block op carries — [:scroll-region frac ops] and [:cell-region x y w h px ops] (whose ops come back as a vector, as they went in). The pass behind editor/ui's memoised view fragments (ADR-336), native because it runs once per frame over every op.",
         ui_harvest,
     );
     // The text contrast exponent (`gui-text-contrast!`, ADR-337): partial glyph coverage
@@ -77,6 +77,20 @@ fn ops_of(heap: &Heap, seq: Value) -> Option<Vec<Value>> {
 struct Tags {
     memo: value::Symbol,
     scroll_region: value::Symbol,
+    cell_region: value::Symbol,
+}
+
+/// Where an op that CARRIES ops keeps them — `Some(index)` for `[:scroll-region frac ops]`
+/// and `[:cell-region x y w h px ops]`, `None` for a leaf. The harvest has to recurse into
+/// those (a memo marker nested in one is still a marker) and rebuild them around the result.
+fn nested_ops_at(tag: value::Symbol, tags: &Tags, len: usize) -> Option<usize> {
+    if tag == tags.scroll_region && len == 3 {
+        Some(2)
+    } else if tag == tags.cell_region && len == 7 {
+        Some(6)
+    } else {
+        None
+    }
 }
 
 /// Walk `ops`, appending the flattened ops to `out` and every marker to `table`.
@@ -111,17 +125,20 @@ fn harvest_into(
             let entry = heap.alloc_vector2(deps, flat_list);
             table.push((key, entry));
             out.extend(flat);
-        } else if tag == tags.scroll_region && parts.len() == 3 {
-            let (frac, inner) = (parts[1], parts[2]);
-            let Some(inner_ops) = ops_of(heap, inner) else {
+        } else if let Some(at) = nested_ops_at(tag, tags, parts.len()) {
+            // A block op that CARRIES ops (scroll-region, cell-region): harvest inside it
+            // and rebuild it around the flattened ops, so a memoised fragment works just
+            // as well inside a region as outside one.
+            let Some(inner_ops) = ops_of(heap, parts[at]) else {
                 out.push(op);
                 continue;
             };
             let mut flat = Vec::with_capacity(inner_ops.len());
             harvest_into(heap, inner_ops, tags, &mut flat, table);
             let flat_vec = heap.alloc_vector(flat);
-            let tag_v = Value::keyword(tags.scroll_region);
-            let region = heap.alloc_vector(vec![tag_v, frac, flat_vec]);
+            let mut rebuilt = parts.clone();
+            rebuilt[at] = flat_vec;
+            let region = heap.alloc_vector(rebuilt);
             out.push(region);
         } else {
             out.push(op);
@@ -142,6 +159,7 @@ fn ui_harvest(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let tags = Tags {
         memo: value::intern("ui/memo"),
         scroll_region: value::intern("scroll-region"),
+        cell_region: value::intern("cell-region"),
     };
     let mut out = Vec::with_capacity(ops.len());
     let mut table = Vec::new();

@@ -118,3 +118,16 @@
 
   (test "a rounded rect is still a rect op, so a frontend needs no new arm"
     (assert= (first (rect 0 0 4 1 {:bg :red} 0.4)) :rect)))
+
+;; A cell region (ADR-363) is the op behind a per-buffer zoom: a block whose ops are painted
+;; with the cell metrics of another font size, inside a rect given in the parent's cells.
+;; Pure data here; the GUI paint path pins the pixels (`cell_region_tests` in paint.rs).
+(describe "cell-region — a block drawn at another font size"
+  (test "carries the parent-cell rect, the px and the inner ops as one vector"
+    (assert= (cell-region 2 3 40 10 21.0 [[:text 0 0 "M"]])
+      [:cell-region 2 3 40 10 21.0 [[:text 0 0 "M"]]]))
+  (test "nests inside a scroll-region, and a scroll-region nests inside it"
+    (assert= (scroll-region 0.5 [(cell-region 0 0 4 4 18 [])])
+      [:scroll-region 0.5 [[:cell-region 0 0 4 4 18 []]]])
+    (assert= (cell-region 0 0 4 4 18 [(scroll-region 0.5 [])])
+      [:cell-region 0 0 4 4 18 [[:scroll-region 0.5 []]]])))

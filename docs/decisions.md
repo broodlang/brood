@@ -23294,3 +23294,50 @@ exposed that the const-index vector read deopted on any shared-region vector (a 
 perf-stats binary's `[jit-dirty]` line, chased rather than dismissed, was the dirty-stack
 check running after the settle's own frame restore: every deopt of an inlined arm had read
 as dirty since two-stage tiering.
+
+## ADR-363 — A frame carries more than one text size: `cell-region` scopes the cell metrics
+
+**Status:** accepted (2026-09-17). **Context:** bedit's Ctrl+wheel zoom had to be per buffer.
+
+**Context.** The GUI grid has ONE cell size, set by `gui-font!`, and every op is placed in
+it. A zoom therefore meant changing the window's font: the grid shrinks, every pane is
+re-laid, the status bar jumps, and a kinetic wheel stream re-rasterises the whole window
+per event — five fixes in a morning each moved the jank somewhere else, because the model
+was wrong, not the pacing. What an editor user means by zoom is Emacs's `text-scale-adjust`:
+THIS buffer, bigger; the rest of the window as it was. The grid had one way to say that,
+the `:scale` face attribute (ADR-079), and it is a whole-number multiple of the cell — the
+smallest step it can express is a doubling. The window's text at 15 px next to a buffer at
+17 px was not a frame the runtime could draw.
+
+**Decision.** A render op that scopes the cell metrics: `[:cell-region x y w h px ops]`
+(`Op::CellRegion`). The rect is in the PARENT's cells and moves with an enclosing
+scroll-region like any op; the inner ops are positioned in the region's own cell space,
+origin at its top-left, with the metrics font size `px` produces — so a caller lays the
+region out in its own units and never learns the outer size. Scoped and self-restoring like
+`scroll-region` (ADR-114): ops after it paint at the window's metrics, regions nest, an
+inner one wins. The renderer clips the region to its rect vertically (a zoomed buffer cannot
+paint over its neighbour) and treats the whole region as one leaf in the damage bands — its
+children are on another grid, so their bands mean nothing in the parent's. The metrics of a
+size are shaped once and memoised (`metrics_at`, keyed by px bits), and the cluster cache is
+keyed by px (`91b6fd5f`), so two sizes coexist and a resize keeps its glyphs.
+
+One question only the renderer can answer comes with it: how many of the region's cells
+fit the rect? A cell is whatever shaping the reference glyph produces, rounded to whole
+pixels — it is not derivable from the px ratio. `gui/cell-size` (`%gui-cell-size id [px]`)
+measures it on the GUI thread and memoises; headless it errors rather than inventing a
+number, so a caller that also runs headless falls back to the ratio.
+
+**Not chosen.** (1) A per-op px in the face (`{:px 17}` beside `:scale`) — every op would
+carry a size, the caller would still position text in the parent's cells, and a zoomed
+line's column positions would be wrong: the region's origin-shift is the whole point. (2)
+Making the terminal frontend flatten the region like a scroll-region — a terminal cell is
+whatever the terminal says it is, and region-local ops re-based onto the parent grid land
+in the wrong place; it skips the op, as it does `frect` and `vspans`, and an app emits a
+region only when it has a size to differ by. (3) Leaving it in bedit — no amount of pacing
+a whole-window font change makes it a per-buffer zoom; the capability was missing from the
+language, which is the case the prime directive names.
+
+**Consequence.** An editor keeps the window's font where it is and gives a pane a px: the
+pane's body is a `cell-region`, laid out for the rows and columns `gui/cell-size` says fit,
+the mode line and the rest of the window untouched. A step is a pixel, a zoom re-paints one
+pane, and the model behind the frame is the one the user has: sizes belong to buffers.
