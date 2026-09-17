@@ -908,6 +908,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-17** — C12, and its own advice followed: the corpora were surveyed before anything was built, and they show ONE shape — a computed index `(+ i k)`/`(inc i)` guarded by exactly that expression (`json` ×4, `ansi` ×2, `url`); `i < j` between two locals appears nowhere as an index guard, so no relational domain was built. `index_bounds` is now `i → {xs → k}` (`i + k < count xs`), a proved offset covering every smaller one — which reads json's `\uXXXX` scan, guarded at `+10` and reading `+4`/`+5`. Before it, a guard over `(+ i 1)` produced **no facts at all**: the comparison was discarded whole, so it narrowed nothing either. Found underneath: a `let` is bound in THREE places — the walk, inference, and the return check's `gradual_of_compound` — and only the walk recorded the count alias, so `(let (n (count words)) (if (>= n 4) (nth words 3) ""))` was clean as an argument and warned as a RETURN; one shared helper now, and the pre-existing alias test passes with the fix removed, which is why it survived.
 - **2026-09-17** — C11 (ADR-365): `(seqable T)` — a sequence of `T` whichever shape carries it (`nil | list<T> | vector<T> | set<T>`), which is exactly the union `stats/median` and `stats/percentile` were spelling out by hand. The four members merge into ONE term, so no element machinery is new — a body checks the moment the spelling exists, and `stats/min`/`max` lose their `(check-allow :trusted …)`. `map` and `bytes` are deliberately out (their elements come from the kind, and six terms would overflow `MAX_TY_TERMS` and silently widen the element type away), so `(seqable T) ⊆ seqable`. Writing the runtime contract for it found `(set T)` had **no `type-matches?` arm at all** — a declared `(set int)` contract had been checking nothing since element types shipped — and that `set` was missing from `TYPE_HEADS`, so `(set)` read as an unknown constructor rather than an arity mistake. Five pins, sabotage-verified five ways.
 - **2026-09-17** — KI-163 / ADR-366: a body compiled before its module lazily loaded kept its pre-load shape (generic call where the eager compile inlines `PrimOp::Rem`) for the whole process, and the JIT leaf upgrade read stale forever — the `BROOD_NO_CHECK=1` 2.8× oddity of the afternoon. The load that a miss triggers now marks the arm; the cache lookups evict and recompile it, and a running `SelfCall` loop adopts it through the hot-reload guard. `pipeline` no-check 591M → 184M instructions (eager 183M); the loop 302M → 163M. Two new dev probes, `%vm-arm-ops` / `%vm-arm-stale?`; two guards, sabotage-verified.
+- **2026-09-17** — KI-150 measured, not guessed: the checker's Rust is ~3% of a `brood --check`; the cost is eager MATERIALISATION — `(seq/lmap …)`, a prelude binding, loaded `seq` + `map`/`math`/`reflect`/`string` (138M vs 75M). The eager drain now skips a module whose recorded names are all bound (138 → 82M; verdicts unchanged, both directions guarded). What remains (`math/rem`'s module pulling four more in, ~70M of `pipeline`'s 145M check) is the structural option: inferred std signatures carried in the image. Also: KI-162 was already closed by `3fd89869`; B7's std-tree hash costs ~10% of a check run INSIDE the checkout.
 - **2026-09-17** — the pre-push hook has been INERT on this machine: a global `core.hooksPath` *replaces* `.git/hooks`, so `make hooks` installs a gate git never consults — and the override directory holds a deliberate `commit-msg` (which chains to a repo-local one for exactly this reason) and no `pre-push`. Found when an unformatted commit reached `main` through a gate that reported "installed". `make hooks` now WARNS with the path, `scripts/git-hooks/global-pre-push` is the chaining fix, and CLAUDE.md records the second half of it: `make prepush | tail` reports the PIPE's exit status, not the gate's.
 - **2026-09-17** — C10 answered by probe and closed with no checker change: ADR-350's intervals and the int-closed/float-contagion rules had already taken the merely-wider residue, and the answer is a **mode split** neither mode shows alone — a *precise* mismatch (float contagion, exact division, an interval arithmetic cannot fit) is named in both modes; an *over-approximated* one (a call's result) is named under `--strict` and deferred in plain, the gradual valve. The residue itself lands there: `(sig f (number -> int))` over `(+ x 1)` IS reported under strict, because the declaration is part of the claim — a parameter admitting floats makes the promise false with no analysis of the body. Fourteen provable shapes silent in both modes, so the false positive it was left silent for does not occur. Three pins, sabotage-verified three ways (strict never/always applies reds the split in opposite directions; the return check disabled reds both warning pins).
 - **2026-09-17** — KI-162: `nest check --fix-sigs` wrote every `sig` ABOVE its `defn`, the one placement `sig_placement.rs` forbids tree-wide. The locator reads the CST now (`sig-defn-sites`: root children, each node's newlines counted for the extent), so the sig lands one past the form's last line, a head laid out across lines is located instead of skipped, and "top level" is *root child* rather than *column 0* — a `check-allow`-wrapped `defn` still declines. Recorded beside the fix: the load failure the rule exists for **did not reproduce** (forward sigs over `defn`, `defn-` and a wrapped pair all loaded under contracts and enforced the contract), so the rule is what is verified, not the breakage.
@@ -14313,3 +14314,32 @@ before believing a child-process negative.
 Consequence for KI-150: `BROOD_NO_CHECK=1` is the cheapest run again, so the pre-flight
 check's cost is now purely the checker's — the eager loading that made a checked run faster
 than an unchecked one is no longer needed for speed.
+
+## 2026-09-17 — KI-150, measured: the checker is 3% of the check; the rest is what the eager policy loads
+
+With ADR-366 in, `BROOD_NO_CHECK=1` is the cheapest run, so the pre-flight's cost is the
+checker's alone — and a profile of `brood --check` on an unstripped release binary says the
+checker's own Rust is ~3% of the samples. (First profile taken from inside the checkout:
+`cli_support::stdlib_tree_hash` at 10% — B7's stale-binary guard hashing 126 files on every
+`brood --check`/`nest check` inside the repo. Real, but not the benchmark's cost: the harness
+runs from `brood-benchmarks`, where `repo_root` finds nothing. Retaken from there.) What the
+profile is full of is materialisation — `decode_msg_at`, `freeze_as_shared_code`, `intern`,
+`env_get`, `pair` — and the experiments say why: a check of `(seq/lmap inc [1 2 3])`, a
+PRELUDE binding, materialised `seq` and through its body's references `map`, `math`,
+`reflect`, `string`: 138M instructions against 75M for an io-only file, while running the
+same file lazily loads nothing (73M). The eager drain loaded the module of every recorded
+prefix whether or not the name was bound.
+
+Fixed narrowly: `record_module` keeps the qualified name beside its module, and the eager
+drain skips a module every one of whose names is already bound — a bound name's verdict is
+"bound" with or without the load, and an unbound `json/prase` still loads `json`. 138M → 82M
+on the prelude-name file; two child-process guards in `tests/lazy_load_test.blsp`, one per
+direction, sabotage-verified (the filter forced open reds the bound case). `pipeline`'s check
+is unchanged at 145M: `math/rem` and `string/->number` are genuinely unloaded, and under the
+eager policy materialising `math` loads what math's body names. That transitive load exists
+so the checker can derive signatures for std functions by walking their bodies; a std module
+served by the image could carry those signatures in the image instead, and the pre-flight
+would load nothing it does not run. ~70M of `pipeline`'s 145M check. KI-150 stays open on
+that decision, now with a number.
+
+KI-162 turned out closed already (`3fd89869`, this evening), entry and table both updated.

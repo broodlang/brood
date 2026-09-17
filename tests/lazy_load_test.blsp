@@ -279,6 +279,52 @@
         (when (not (or (includes? out "stale=:no-probe") (includes? out "stale=:tree-walker")))
           (is (includes? out "stale=false")))))))
 
+;; --- KI-150: the EAGER drain loads nothing for a name that is already bound ----------
+;;
+;; The checker (and `--check-boot`) run under the eager policy, where every module a file's
+;; qualified references name loads at the compile pass. `seq/lmap` is a PRELUDE binding: it
+;; is bound at boot, and loading `std/seq.blsp` for it — plus `map`, `math`, `reflect` and
+;; `string` through that module's own references — cannot change what the checker says about
+;; it. It did load, at 63M instructions of a 138M `brood --check` of a one-line file. The
+;; drain now skips a module every one of whose recorded names is already bound; an unbound
+;; name (`json/prase`) still loads its module, so the unbound verdict is unchanged. A child
+;; under `BROOD_NO_LAZY_LOAD=1` is the eager policy in a process where nothing else has run.
+(describe "the eager drain does not load a module for a name the prelude already binds (KI-150)"
+  (test "a file whose only qualified reference is a prelude binding loads no module"
+    (let (dir (path/dirname (or (os/exe-path) ""))
+          exe (first (seq/filter [(path/join dir "brood") (path/join dir ".." "brood")]
+                       file/exists?))
+          prog (path/temp "eagerbound-")
+          _ (file/spit prog
+              (string/join ["(defn go (xs) (seq/lmap xs inc))"
+                             "(io/puts (str \"loaded=\" (contains? *features* \"seq\") \" v=\" (first (go [1 2]))))"]
+                "\n"))
+          result (if exe (os/cmd "env" ["BROOD_NO_CHECK=1" "BROOD_NO_LAZY_LOAD=1" exe prog]) nil))
+      (is (or (nil? exe) (string? exe)))
+      (when result
+        (assert= "" (if (= (get result :exit) 0) "" (get result :stderr "")))
+        (let (out (os/cmd-out result))
+          (is (includes? out "v=2"))
+          (is (includes? out "loaded=false"))))))
+  (test "and an UNBOUND qualified name still loads its module under the eager policy"
+    (let (dir (path/dirname (or (os/exe-path) ""))
+          exe (first (seq/filter [(path/join dir "brood") (path/join dir ".." "brood")]
+                       file/exists?))
+          prog (path/temp "eagerunbound-")
+          ;; `lazyprobe-a/answer` is unbound until its fixture loads; under EAGER the load
+          ;; happens at the compile pass, before the first form runs.
+          _ (file/spit prog
+              (string/join [(str "(reflect/add-load-path \"" *dir* "\")")
+                             "(defn go () (apply lazyprobe-a/answer nil))"
+                             "(io/puts (str \"loaded=\" (contains? *features* \"lazyprobe-a\") \" v=\" (go)))"]
+                "\n"))
+          result (if exe (os/cmd "env" ["BROOD_NO_CHECK=1" "BROOD_NO_LAZY_LOAD=1" exe prog]) nil))
+      (when result
+        (assert= "" (if (= (get result :exit) 0) "" (get result :stderr "")))
+        (let (out (os/cmd-out result))
+          (is (includes? out "v=42"))
+          (is (includes? out "loaded=true")))))))
+
 ;; --- ADR-335 follow-up: a load path the FILE sets up ---------------------------
 ;;
 ;; The checker walks a whole file before any of it runs, so a `*load-path*` entry
