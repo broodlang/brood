@@ -51,6 +51,16 @@ fn check(root: &Path, files: &[PathBuf]) -> String {
         .arg("--suggest-sigs")
         .args(files)
         .env("BROOD_NO_CHECK_CACHE", "1")
+        // Pin the ceiling rather than inherit the `differential (tree-walker)` job's
+        // `BROOD_VM=0`: what the checker answers is a function of the file — the whole
+        // claim here — and the engine is not part of it. Worth stating what this is and
+        // is not, because the other tree-walker overrides in `.config/nextest.toml`
+        // describe 5-10x ratios and this one does not: measured 2026-09-17 on a 28-core
+        // box, one whole-`tests/` check is 12.1 s under the VM and 14.2 s under the
+        // tree-walker. The engine is ~17% here, so it is NOT why this binary timed out at
+        // the 120 s cap — the case simply did three whole-tree checks in one case. The
+        // split into two cases below is the fix; this is the cheap 17% beside it.
+        .env("BROOD_TIER", "2")
         .output()
         .expect("run nest");
     format!(
@@ -132,20 +142,40 @@ fn assert_same_per_file(what: &str, a: &str, b: &str, files: &[PathBuf]) {
     }
 }
 
+/// One forward run, and the assert that it reached the checker at all.
+fn forward(root: &Path, files: &[PathBuf]) -> String {
+    let text = check(root, files);
+    assert!(
+        text.contains("(sig "),
+        "the suggestion listing is missing — the run did not reach the checker:\n{text}"
+    );
+    text
+}
+
+// The two channels are two CASES, not one, because each whole-`tests/` check is ~12 s and
+// nextest's cap is per case: as one case this did three of them and timed out at 120 s on
+// the 2-core `differential (tree-walker)` runner (2026-09-17). Split, each case does two
+// and they run in parallel — the same two claims, neither weakened, and no budget raised.
+// A failure also now names which channel broke by which case went red.
+
 #[test]
-fn a_files_verdict_depends_on_neither_the_list_order_nor_the_process() {
+fn a_files_verdict_does_not_depend_on_the_process_it_was_checked_in() {
     let root = workspace_root();
     let files = blsp_files(&root.join("tests"));
     assert!(!files.is_empty(), "no .blsp under tests/");
-    let forward = check(&root, &files);
-    assert!(
-        forward.contains("(sig "),
-        "the suggestion listing is missing — the run did not reach the checker:\n{forward}"
-    );
+    let first = forward(&root, &files);
     let again = check(&root, &files);
-    assert_same_per_file("two processes, same order", &forward, &again, &files);
+    assert_same_per_file("two processes, same order", &first, &again, &files);
+}
+
+#[test]
+fn a_files_verdict_does_not_depend_on_the_order_the_files_were_given_in() {
+    let root = workspace_root();
+    let files = blsp_files(&root.join("tests"));
+    assert!(!files.is_empty(), "no .blsp under tests/");
+    let first = forward(&root, &files);
     let mut reversed = files.clone();
     reversed.reverse();
     let backward = check(&root, &reversed);
-    assert_same_per_file("forward vs reversed order", &forward, &backward, &files);
+    assert_same_per_file("forward vs reversed order", &first, &backward, &files);
 }
