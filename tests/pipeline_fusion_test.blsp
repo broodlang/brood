@@ -19,15 +19,24 @@
 (describe "pipeline fusion"
   (test "filter/map/reduce over a range is the sum of the squares"
     (assert= 155553889038886
-             (-> (range 100000) (seq/lfilter pf-mult35?) (seq/lmap (fn (i) (* i i))) (reduce 0 +))))
+      (-> (range 100000) (seq/lfilter pf-mult35?) (seq/lmap (fn (i) (* i i))) (reduce 0 +))))
 
   (test "every stage kind, over a list, a vector and a range"
-    (assert= 20 (-> '(1 2 3 4) (seq/lkeep (fn (v) (when (= 0 (math/rem v 2)) (* v 10))))
-                    (seq/lreject (fn (v) (= v 40))) (reduce 0 +)))
-    (assert= 20 (-> [1 2 3 4] (seq/lkeep (fn (v) (when (= 0 (math/rem v 2)) (* v 10))))
-                    (seq/lreject (fn (v) (= v 40))) (reduce 0 +)))
-    (assert= 20 (-> (range 1 5) (seq/lkeep (fn (v) (when (= 0 (math/rem v 2)) (* v 10))))
-                    (seq/lreject (fn (v) (= v 40))) (reduce 0 +)))
+    (assert= 20
+      (-> '(1 2 3 4)
+        (seq/lkeep (fn (v) (when (= 0 (math/rem v 2)) (* v 10))))
+        (seq/lreject (fn (v) (= v 40)))
+        (reduce 0 +)))
+    (assert= 20
+      (-> [1 2 3 4]
+        (seq/lkeep (fn (v) (when (= 0 (math/rem v 2)) (* v 10))))
+        (seq/lreject (fn (v) (= v 40)))
+        (reduce 0 +)))
+    (assert= 20
+      (-> (range 1 5)
+        (seq/lkeep (fn (v) (when (= 0 (math/rem v 2)) (* v 10))))
+        (seq/lreject (fn (v) (= v 40)))
+        (reduce 0 +)))
     ;; a symbol stage (called by name) and a literal reducer
     (assert= 20 (reduce (seq/lmap (range 4) inc) 0 (fn (a b) (+ a (* 2 b))))))
 
@@ -35,14 +44,17 @@
     ;; The filter binds `x`; the map reads the OUTER `x` (100). A naive substitution would
     ;; read the element instead.
     (let (x 100)
-      (assert= 900 (-> (range 5) (seq/lfilter (fn (x) (> x 1))) (seq/lmap (fn (y) (* y x))) (reduce 0 +)))))
+      (assert= 900
+        (-> (range 5) (seq/lfilter (fn (x) (> x 1))) (seq/lmap (fn (y) (* y x))) (reduce 0 +)))))
 
   (test "a literal that rebinds its own parameter is called, not substituted, and still right"
     (assert= 10 (-> (range 4) (seq/lmap (fn (x) (let (x (+ x 1)) x))) (reduce 0 +))))
 
   (test "stage expressions are evaluated once each, in source order, before the fold runs"
-    (let (r (-> (range 4) (seq/lfilter (pf-make-pred :first)) (seq/lmap (fn (v) (pf-note :map) v))
-                (reduce 0 (fn (a v) (pf-note :rf) (+ a v)))))
+    (let (r (-> (range 4)
+              (seq/lfilter (pf-make-pred :first))
+              (seq/lmap (fn (v) (pf-note :map) v))
+              (reduce 0 (fn (a v) (pf-note :rf) (+ a v)))))
       (assert= 5 r)
       (assert= 1 (table/get *pf-log* :first))
       ;; the map and reducer bodies ran once per surviving element (2 and 3)
