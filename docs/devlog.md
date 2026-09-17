@@ -900,6 +900,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-17** — B6: a cap the checker hits is reported — one `checker gave up: …` note per file (`note:`, advisory, never gating) for a fixpoint that did not settle, a derivation declined over a same-file macro, the specialization fuel, the depth cap. Writing it exposed that Pass 2.8 never widened: 34 std/tests returns "still moving" after 16 rounds, each reading `any` at every caller silently; with the joint loop's widening/fold there, none. `check/tests/caps.rs`, sabotage-verified.
 - **2026-09-17** — sound first (type-system list A1/A2/A4/A5): the runtime contract checks intervals, lengths and recursive types; a declared overload is checked against its body per arm (which found `(math/pow 2.0 0)` answering the int `1` — fixed in the code); strict reports a declared return the checker cannot verify as *trusted, not verified*, 43 std sites read one by one (32 fixed at the leaf, 11 acknowledged `(check-allow :trusted …)`); four never-seeded fixpoint holes and the `(int and (not 0))` exclusion misread closed on the way.
 - **2026-09-17** — perf-handoff Task 5 (tier-2 monomorphization) ANSWERED and closed: ability dispatch costs ~370 ns per call and Tier 1 recovers ~260 of it, but no benchmark row and no real program has a site (0 devirtualizations on every row, 4 in bedit's whole suite) — no channel. KI-161 found taking the number: the KI-90 rebind guard never guarded (dead in modules, permissive without one); structural now.
+- **2026-09-17** — a `cursor-zone` inside a region is hit-tested again (ADR-080 amendment, with ADR-363): the frame's zone collector read top-level ops only, so `cell-region`/`scroll-region` swallowed every zone inside them — a zoomed pane's links lost their hand cursor the moment `cell-region` shipped. The walk recurses with the paint's own coordinate math, stores zones as grid-relative PIXEL rects (a region's cell is not the window's), and tests the pointer per pixel, not per cell.
 - **2026-09-17** — ADR-362: the `supervisor` row **0.88 → 0.66 s (−25%)** with no edit to the supervisor — the `receive` matcher chains clauses as an `or` (no fail thunks: five closures per message and a call per failing clause, gone), the type predicates are a prim (`vector?` 168 → 67 ns on the VM, 1 ns native), `%vector-ref`/`%vector-length` inline (the `VectorRef` entry had named the native by its pre-`seq/` spelling since the rename), and `MapGet` is default-on with a plain map's miss answered inline (hit 322 → 66 ns, miss 519 → 123).
 - **2026-09-17** — C9 closed (ADR-364): the last two joint-coverage holes ADR-262 documented, both false positives at a call. A **record is a product** over its declared keys (`record_covered_by` on ADR-289's subset rule, so `{a: int|string}` ⊆ `{a: int} | {a: string}`) with the undeclared remainder deliberately not a position — it stands for unboundedly many independent keys, so it must fit one candidate's rest, the vector argument — and a **bounded interval of ≤64 values is the literal set it denotes** (`enumerated_int_range`, int-literal rule only), so `(int 1 2)` ⊆ `1 | 2`. The neighbours that must stay false (`map<K, A|B>` vs split maps, the 2-field componentwise case) are pinned beside each; both mechanisms sabotage-verified to red their own pins alone. 585/585 types, strict 0 + the 8 advisory notes, both checker differentials agree.
 - **2026-09-17** — CI's last two reds closed (the checker's whole-tree differentials timed out in BOTH jobs — tier pin + `image_matches_source`'s budget, `669c580c`; bedit's ratchet, `03e955c6`) and the benchmark column refreshed on request at `a406f9a6` (brood-benchmarks `d2646f4`): FLAT, except `pipeline` +7.3% which is the pre-flight type check growing 131M → 144M instructions per file (the run +0.8%) — KI-150 reopened by the trigger its mitigation named. Found beside it, unexplained: `BROOD_NO_CHECK=1` runs `pipeline` at 2.8× the instructions.
@@ -911,6 +912,38 @@ Every session, oldest first. Early sessions' full text is in
 ---
 
 ## Recent — full entries
+
+## 2026-09-17 — the zones a region swallowed
+
+`cell-region` (ADR-363) landed the day before and took something with it that nobody
+noticed until the feature it enabled was used: a `[:cursor-zone …]` op inside the region
+stopped existing. The collector on `UserEvent::Draw` was
+`ops.iter().filter_map(CursorZone)` — the frame's TOP level, and nothing else — so a zone
+under a `cell-region` (or under a `scroll-region`, which had been true since ADR-114) was
+never stored and never hit-tested. In bedit that reads as: zoom a pane holding a results
+buffer and its links stop showing the hand, though they still paint and still click.
+
+Two changes, both mirroring what the paint already does. The walk now recurses into both
+region ops with `render_ops`' own coordinate math — a region's origin is the parent's
+cells, its contents are its own cells at `metrics_at(px)`, an enclosing scroll shifts the
+origin and resets inside, and a zone is clipped to the region's row band exactly like the
+pixels are. And a zone is stored as a **pixel** rect relative to the grid origin, because
+cells cannot carry the answer out: inside a region a cell is not the window's cell, which
+is the entire point of the op.
+
+The hit-test moved with it. It used to run only when the pointer crossed into a new
+window cell, which is a sound test when every zone is a whole number of those cells; a
+zoomed region's cells are smaller, so two zones can share one window cell and the cell-
+granular test steps over the boundary between them. `CursorMoved` has the pixel position
+before it rounds, so the test is per pixel now, against the grid-relative rects;
+`set_cursor` is still called only when the shape changes, which is the part that costs
+anything.
+
+Five tests in `paint.rs` next to the region ones: the top-level rect in window pixels, a
+zone sized in its region's cells (bigger at a bigger px, placed on the parent grid), a
+zone riding its region's scroll, a zone below the region's rect clipped away, and the
+wild-geometry pass (`u16::MAX` cells at `f32::MAX` px, a `dy_frac` of `f32::MAX`) that
+every op's coordinate math gets here, since it all comes straight from an app's frame.
 
 ## 2026-09-17 — the supervisor row was never about the supervisor (ADR-362)
 

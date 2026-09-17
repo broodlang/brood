@@ -75,7 +75,12 @@ no `style` it's `[:cursor row col]`, unchanged (a block caret).
 asks the frontend to show pointer `shape` while the cursor is over it — `:col-resize`
 (↔) on a side-by-side split's divider, `:row-resize` (↕) on a stacked one, or
 `:pointer` (👆) over a clickable region so it reads as a link. The GUI frontend
-hit-tests it on pointer-move; the terminal ignores it (ADR-080)."
+hit-tests it on pointer-move; the terminal ignores it (ADR-080).
+
+The cells are the ones the op is painted in: inside a `cell-region` they are that
+region's cells (a zone in a zoomed pane is sized and placed at the pane's px), and
+inside a `scroll-region` the zone slides with the ops around it. The frontend resolves
+each zone to pixels once per frame, so a zone means the same thing wherever it sits."
   [:cursor-zone x y w h shape])
 
 (defn rect (row col w h face &optional (radius 0.0))

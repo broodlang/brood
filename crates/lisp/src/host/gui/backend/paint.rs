@@ -642,6 +642,123 @@ fn dirty_bands(dirty: &[bool], strips: &Strips) -> Vec<(usize, usize)> {
     bands
 }
 
+// ---- the frame's cursor hot-zones --------------------------------------------------
+
+/// A cursor hot-zone from the last drawn frame, flattened to a PIXEL rect relative to the
+/// grid origin — `Op::CursorZone`'s cell rect resolved through whatever regions enclose it.
+///
+/// Cells alone cannot say where a zone is: inside an `Op::CellRegion` a cell is not the
+/// window's cell (that is the whole point of the op), and inside an `Op::ScrollRegion` a
+/// row has slid by a fraction of one. Pixels carry the answer out to the hit-test, which
+/// has the pointer's pixel position in hand anyway.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) struct Zone {
+    pub(super) x: isize,
+    pub(super) y: isize,
+    pub(super) w: isize,
+    pub(super) h: isize,
+    pub(super) shape: CursorShape,
+}
+
+impl Zone {
+    /// Is the pointer — grid-relative physical px — inside this zone?
+    pub(super) fn contains(&self, x: isize, y: isize) -> bool {
+        x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
+    }
+}
+
+/// Every `Op::CursorZone` in a frame as a pixel rect, walking INTO the regions with the
+/// same coordinate math `render_ops` paints them with — so a zone lands exactly on what
+/// the eye sees under it. Collected once per frame (at `Draw`), never per pointer move.
+pub(super) fn cursor_zones(ops: &[Op], r: &Renderer) -> Vec<Zone> {
+    let mut zones = Vec::new();
+    collect_zones(
+        ops,
+        r,
+        0,
+        0,
+        r.cell_w.max(1),
+        r.cell_h.max(1),
+        0,
+        (isize::MIN, isize::MAX),
+        &mut zones,
+    );
+    zones
+}
+
+/// `cursor_zones`' recursion: `ox`/`oy` are the enclosing region's origin in grid pixels,
+/// `cw`/`ch` the cell metrics in force there, `scroll_dy` the pixel shift applied to its
+/// ops, and `clip` the row band the region confines them to — each the mirror of what
+/// `render_ops` does with the same op.
+#[allow(clippy::too_many_arguments)]
+fn collect_zones(
+    ops: &[Op],
+    r: &Renderer,
+    ox: isize,
+    oy: isize,
+    cw: usize,
+    ch: usize,
+    scroll_dy: isize,
+    clip: (isize, isize),
+    zones: &mut Vec<Zone>,
+) {
+    for op in ops {
+        match op {
+            Op::CursorZone { x, y, w, h, shape } => {
+                let left = ox.saturating_add((*x as isize).saturating_mul(cw as isize));
+                let top = oy
+                    .saturating_add((*y as isize).saturating_mul(ch as isize))
+                    .saturating_sub(scroll_dy);
+                let bottom = top.saturating_add((*h as isize).saturating_mul(ch as isize));
+                // Clipped to the enclosing region's band, like the pixels are: a zone the
+                // region cuts off is not hoverable where it was never painted.
+                let (top, bottom) = (top.max(clip.0), bottom.min(clip.1));
+                if bottom > top {
+                    zones.push(Zone {
+                        x: left,
+                        y: top,
+                        w: (*w as isize).saturating_mul(cw as isize),
+                        h: bottom - top,
+                        shape: *shape,
+                    });
+                }
+            }
+            // The region's own offset replaces the parent's for the ops inside it.
+            Op::ScrollRegion { dy_frac, ops } => {
+                collect_zones(ops, r, ox, oy, cw, ch, scroll_px(*dy_frac, ch), clip, zones);
+            }
+            Op::CellRegion {
+                x, y, h, px, ops, ..
+            } => {
+                let region = r.metrics_at(*px);
+                if region.cell_w == 0 || region.cell_h == 0 {
+                    continue;
+                }
+                let top = oy
+                    .saturating_add((*y as isize).saturating_mul(ch as isize))
+                    .saturating_sub(scroll_dy);
+                let bottom = top.saturating_add((*h as isize).saturating_mul(ch as isize));
+                let band = (top.max(clip.0), bottom.min(clip.1));
+                if band.1 <= band.0 {
+                    continue;
+                }
+                collect_zones(
+                    ops,
+                    r,
+                    ox.saturating_add((*x as isize).saturating_mul(cw as isize)),
+                    top,
+                    region.cell_w,
+                    region.cell_h,
+                    0,
+                    band,
+                    zones,
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
 // ---- rasterising the ops ----------------------------------------------------------
 
 /// Render `ops` into `canvas` (its band is the clip: rows outside it are untouched)
@@ -1985,6 +2102,140 @@ mod cell_region_tests {
             (2 * cw, 3 * ch),
             "the region did not move by whole parent cells"
         );
+    }
+
+    // ---- the frame's cursor hot-zones ----
+
+    /// The zones of a frame, as the `Draw` handler collects them.
+    fn zones(ops: &[Op]) -> Vec<Zone> {
+        let r = Renderer::new(1.0, default_families(), 15.0);
+        cursor_zones(ops, &r)
+    }
+
+    fn zone(x: u16, y: u16, w: u16, h: u16) -> Op {
+        Op::CursorZone {
+            x,
+            y,
+            w,
+            h,
+            shape: CursorShape::Pointer,
+        }
+    }
+
+    /// At the top level a zone is its cell rect in the window's own cells — the pixels
+    /// the same rect would be painted at.
+    #[test]
+    fn a_top_level_zone_is_its_cell_rect_in_window_pixels() {
+        let (cw, ch) = window_cell();
+        let found = zones(&[zone(2, 3, 4, 1)]);
+        assert_eq!(
+            found,
+            vec![Zone {
+                x: 2 * cw as isize,
+                y: 3 * ch as isize,
+                w: 4 * cw as isize,
+                h: ch as isize,
+                shape: CursorShape::Pointer,
+            }]
+        );
+    }
+
+    /// The gap this closes: inside a `CellRegion` a zone used to be dropped entirely, so
+    /// a link in a zoomed pane showed no hand. Now it is placed at the region's origin
+    /// (parent cells) and sized in the REGION's cells — bigger at a bigger px.
+    #[test]
+    fn a_zone_inside_a_region_is_sized_in_that_regions_cells() {
+        let (cw, ch) = window_cell();
+        let region_at = |px: f32| {
+            let found = zones(&[Op::CellRegion {
+                x: 1,
+                y: 2,
+                w: 40,
+                h: 20,
+                px,
+                ops: vec![zone(0, 1, 3, 1)],
+            }]);
+            assert_eq!(found.len(), 1, "a zone inside a region went missing");
+            found[0]
+        };
+        let plain = region_at(15.0);
+        assert_eq!(
+            (plain.x, plain.y),
+            (cw as isize, (2 * ch + ch) as isize),
+            "a same-size region's zone did not land on the parent grid"
+        );
+        let big = region_at(30.0);
+        assert_eq!(big.x, cw as isize, "the region's origin moved with its px");
+        assert!(
+            big.h > plain.h && big.w > plain.w && big.y > plain.y,
+            "a 30 px region's zone is no bigger than a 15 px one: {big:?} vs {plain:?}"
+        );
+    }
+
+    /// A zone rides its region's scroll, like the pixels under it: the same op, in a
+    /// region scrolled half a cell, is half a cell higher.
+    #[test]
+    fn a_zone_rides_the_scroll_of_its_region() {
+        let (_, ch) = window_cell();
+        let at = |dy_frac: f32| {
+            zones(&[Op::ScrollRegion {
+                dy_frac,
+                ops: vec![zone(0, 4, 2, 1)],
+            }])[0]
+        };
+        assert_eq!(
+            at(0.0).y - at(0.5).y,
+            scroll_px(0.5, ch),
+            "the zone did not move with the region's offset"
+        );
+    }
+
+    /// A region is a window for its zones too: one that falls outside the rect is
+    /// clipped away, so a zoomed pane cannot claim the pointer over its neighbour.
+    #[test]
+    fn a_region_clips_the_zones_it_holds() {
+        let inside = zones(&[Op::CellRegion {
+            x: 0,
+            y: 0,
+            w: 40,
+            h: 2,
+            px: 15.0,
+            ops: vec![zone(0, 0, 4, 1), zone(0, 9, 4, 1)],
+        }]);
+        assert_eq!(
+            inside.len(),
+            1,
+            "a zone below a 2-row region survived: {inside:?}"
+        );
+    }
+
+    /// Wild geometry and sizes come straight from an app's render op. None of it may
+    /// panic (an overflow under debug-assertions, an out-of-bounds write) or hang.
+    #[test]
+    fn wild_zone_geometry_does_not_overflow_the_coordinate_math() {
+        for px in [1.0f32, 3.5, 1e9, f32::MAX] {
+            for (x, y, w, h) in [
+                (0, 0, 0, 0),
+                (u16::MAX, u16::MAX, u16::MAX, u16::MAX),
+                (0, u16::MAX, 40, 4),
+                (200, 0, 4, 200),
+            ] {
+                zones(&[Op::CellRegion {
+                    x,
+                    y,
+                    w,
+                    h,
+                    px,
+                    ops: vec![
+                        zone(x, y, w, h),
+                        Op::ScrollRegion {
+                            dy_frac: f32::MAX,
+                            ops: vec![zone(x, y, w, h)],
+                        },
+                    ],
+                }]);
+            }
+        }
     }
 
     /// Wild geometry and sizes come straight from an app's render op. None of it may
