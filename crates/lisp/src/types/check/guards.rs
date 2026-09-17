@@ -1140,19 +1140,23 @@ pub(super) fn find_redundant_clause(
 /// length), or a literal int.
 enum CmpSide {
     Local(Symbol),
+    /// `(+ i k)` / `(inc i)` — a local plus a literal offset (C12). Its value is `i + k`,
+    /// so its interval is the local's shifted by `k` and narrowing it narrows the local by
+    /// `r − k`. The shape a scan's index is written in.
+    Offset(Symbol, i64),
     Count(Symbol),
     Lit(i64),
 }
 
 /// The facts a comparison establishes on each branch: each is `(symbol, type)` to narrow
 /// by (the type is `int[…] ∪ ¬int` for a local, a length refinement for a collection), and
-/// the index bounds `(i, xs)` — `i < (count xs)` — the branch establishes.
+/// the index bounds `(i, xs, k)` — `i + k < (count xs)` — the branch establishes.
 #[derive(Default)]
 pub(super) struct CmpFacts {
     pub(super) then_narrow: Vec<(Symbol, Ty)>,
     pub(super) else_narrow: Vec<(Symbol, Ty)>,
-    pub(super) then_index: Vec<(Symbol, Symbol)>,
-    pub(super) else_index: Vec<(Symbol, Symbol)>,
+    pub(super) then_index: Vec<(Symbol, Symbol, i64)>,
+    pub(super) else_index: Vec<(Symbol, Symbol, i64)>,
 }
 
 impl CmpFacts {
@@ -1197,6 +1201,39 @@ fn len_guard_ty(r: Range) -> Ty {
     base.with_len(r)
 }
 
+/// `(+ i k)` / `(inc i)` — a local plus a literal offset, the index expression a scan
+/// writes (`(nth s (+ i 1))`). `(i, k)`; a bare local is `(i, 0)`. Only the shapes the
+/// corpora actually contain: `std/json.blsp`, `std/ansi.blsp` and `std/url.blsp` between
+/// them write `(+ i 1)`, `(+ i 2)`, `(+ i 4)`, `(+ i 5)` and `(inc i)` (C12).
+pub(super) fn local_plus_offset(heap: &Heap, form: Value, ctx: &Ctx) -> Option<(Symbol, i64)> {
+    match form {
+        Value::Sym(s) if ctx.is_lexical_local(s) => Some((s, 0)),
+        Value::Pair(_) => {
+            let items = list_items(heap, form)?;
+            let Some(&Value::Sym(head)) = items.first() else {
+                return None;
+            };
+            if ctx.is_lexical_local(head) {
+                return None; // a local shadowing `+`/`inc` is not this form
+            }
+            match items[1..] {
+                [Value::Sym(i)] if value::symbol_is(head, "inc") && ctx.is_lexical_local(i) => {
+                    Some((i, 1))
+                }
+                [Value::Sym(i), Value::Int(k)] | [Value::Int(k), Value::Sym(i)]
+                    if value::symbol_is(head, "+") && ctx.is_lexical_local(i) =>
+                {
+                    // A NEGATIVE offset is refused: the rule needs `i + b ≥ 0`, which the
+                    // index's own interval decides, and `i - 1` under `i ≥ 0` is not it.
+                    (k >= 0).then_some((i, k))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 fn cmp_side(heap: &Heap, form: Value, ctx: &Ctx) -> Option<CmpSide> {
     match form {
         Value::Int(n) => Some(CmpSide::Lit(n)),
@@ -1204,13 +1241,19 @@ fn cmp_side(heap: &Heap, form: Value, ctx: &Ctx) -> Option<CmpSide> {
         Value::Pair(_) => {
             let items = list_items(heap, form)?;
             let [Value::Sym(head), Value::Sym(target)] = items[..] else {
-                return None;
+                // Not a one-argument form: an offset index (`(+ i 1)`) is the other shape
+                // this reads. Before C12 a guard over one produced NO facts at all — the
+                // `?` here discarded the whole comparison — so `(and (< (+ i 1) n) …)`
+                // narrowed nothing and bounded nothing.
+                return local_plus_offset(heap, form, ctx).map(|(i, k)| CmpSide::Offset(i, k));
             };
             let counts = value::symbol_is(head, "count")
                 || value::symbol_is(head, "string/length")
                 || value::symbol_is(head, "vector-length");
-            (counts && !ctx.is_lexical_local(head) && ctx.is_lexical_local(target))
-                .then_some(CmpSide::Count(target))
+            if counts && !ctx.is_lexical_local(head) && ctx.is_lexical_local(target) {
+                return Some(CmpSide::Count(target));
+            }
+            local_plus_offset(heap, form, ctx).map(|(i, k)| CmpSide::Offset(i, k))
         }
         _ => None,
     }
@@ -1229,6 +1272,13 @@ fn side_range(side: &CmpSide, ctx: &Ctx) -> Range {
             .get(*xs)
             .and_then(|t| t.count_range())
             .unwrap_or(Range::at_least(0)),
+        // `i + k` lies in `i`'s interval shifted by `k`.
+        CmpSide::Offset(i, k) => Range::plus(
+            ctx.get(*i)
+                .and_then(|t| t.int_range())
+                .unwrap_or(Range::ALL),
+            Range::point(*k),
+        ),
     }
 }
 
@@ -1239,7 +1289,31 @@ fn side_narrowing(side: &CmpSide, r: Range) -> Option<(Symbol, Ty)> {
         CmpSide::Lit(_) => None,
         CmpSide::Local(s) => Some((*s, int_guard_ty(r))),
         CmpSide::Count(xs) => Some((*xs, len_guard_ty(r))),
+        // Bounding `i + k` by `r` bounds `i` by `r − k`.
+        CmpSide::Offset(i, k) => Some((*i, int_guard_ty(Range::minus(r, Range::point(*k))))),
     }
+}
+
+/// The collection `rhs` counts, when a `let` binding it makes its name a COUNT ALIAS
+/// (ADR-350): `(let (n (count xs)) …)` means `n` is `xs`'s length for the scope, so a guard
+/// on `n` narrows `xs`'s length ([`Ctx::narrow`]) and bounds `n`'s comparands as indices of
+/// it ([`counted_collection`]).
+///
+/// Shared because a `let` is bound in THREE places — the walk (`binders::let_bind_scope`),
+/// inference (`infer::expr_ty`) and the return check (`calls::gradual_of_compound`) — and
+/// only the first recorded this, so the fact reached an argument check and not a return
+/// one: `(let (n (count words)) (if (>= n 4) (nth words 3) ""))` declared `string` warned
+/// `nil | string`, while the identical read passed into a `(string -> int)` was clean
+/// (2026-09-17, C12). One function, called from all three, so they cannot drift again.
+pub(super) fn count_alias_target(heap: &Heap, rhs: Value, ctx: &Ctx) -> Option<Symbol> {
+    let items = list_items(heap, rhs)?;
+    let [Value::Sym(head), Value::Sym(target)] = items[..] else {
+        return None;
+    };
+    let counts = value::symbol_is(head, "count")
+        || value::symbol_is(head, "string/length")
+        || value::symbol_is(head, "vector-length");
+    (counts && !ctx.is_lexical_local(head) && ctx.is_lexical_local(target)).then_some(target)
 }
 
 /// The collection a side is the count of: `(count xs)` itself, or a local `n` a `let`
@@ -1248,7 +1322,8 @@ fn counted_collection(side: &CmpSide, ctx: &Ctx) -> Option<Symbol> {
     match side {
         CmpSide::Count(xs) => Some(*xs),
         CmpSide::Local(n) => ctx.count_alias(*n),
-        CmpSide::Lit(_) => None,
+        // `(+ n 1)` is a length PLUS something, not a length: nothing is the count of it.
+        CmpSide::Offset(_, _) | CmpSide::Lit(_) => None,
     }
 }
 
@@ -1320,14 +1395,30 @@ fn comparison_facts(heap: &Heap, test: Value, ctx: &Ctx) -> Option<CmpFacts> {
             .else_narrow
             .extend(side_narrowing(&r, Range::at_most(hi - back)));
     }
-    // The relational fact: `i < (count xs)` — a strict bound of a local by a count.
+    // The relational fact: `i + k < (count xs)` — a bound of an index EXPRESSION by a
+    // count. `k = 0` is the plain `i < (count xs)` this started as (ADR-350).
+    let index_side = |side: &CmpSide| match side {
+        CmpSide::Local(i) => Some((*i, 0)),
+        CmpSide::Offset(i, k) => Some((*i, *k)),
+        _ => None,
+    };
     if strict {
-        if let (CmpSide::Local(i), Some(xs)) = (&l, counted_collection(&r, ctx)) {
-            facts.then_index.push((*i, xs));
+        if let (Some((i, k)), Some(xs)) = (index_side(&l), counted_collection(&r, ctx)) {
+            facts.then_index.push((i, xs, k));
         }
-    } else if let (Some(xs), CmpSide::Local(i)) = (counted_collection(&l, ctx), &r) {
-        // `(<= (count xs) i)` false ⇒ `i < (count xs)`.
-        facts.else_index.push((*i, xs));
+    } else if let (Some((i, k)), Some(xs)) = (index_side(&l), counted_collection(&r, ctx)) {
+        // `i + k ≤ n` gives `i + (k−1) < n`, which is what makes `std/json.blsp`'s
+        // `(and (<= (+ i 10) n) … (nth s (+ i 4)) …)` read an element: 4 ≤ 9. At `k = 0`
+        // it says nothing — `i ≤ n` is not `i < n` — so nothing is recorded.
+        if k >= 1 {
+            facts.then_index.push((i, xs, k - 1));
+        }
+    }
+    if !strict {
+        if let (Some(xs), Some((i, k))) = (counted_collection(&l, ctx), index_side(&r)) {
+            // `(<= (count xs) (i + k))` false ⇒ `i + k < (count xs)`.
+            facts.else_index.push((i, xs, k));
+        }
     }
     (!facts.is_empty()).then_some(facts)
 }
@@ -1393,11 +1484,11 @@ pub(super) fn apply_comparison_facts(
     for (sym, ty) in facts.else_narrow {
         else_ctx = else_ctx.narrow(sym, ty);
     }
-    for (i, xs) in facts.then_index {
-        then_ctx = then_ctx.add_index_bound(i, xs);
+    for (i, xs, k) in facts.then_index {
+        then_ctx = then_ctx.add_index_bound(i, xs, k);
     }
-    for (i, xs) in facts.else_index {
-        else_ctx = else_ctx.add_index_bound(i, xs);
+    for (i, xs, k) in facts.else_index {
+        else_ctx = else_ctx.add_index_bound(i, xs, k);
     }
     (then_ctx, else_ctx)
 }

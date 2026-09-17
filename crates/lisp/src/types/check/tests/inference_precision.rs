@@ -709,6 +709,79 @@ fn an_index_bounded_by_the_count_is_in_range() {
     assert!(ws[0].contains("nil | int ((nth xs i))"), "{ws:?}");
 }
 
+/// C12 (2026-09-17) — the index a SCAN writes: `(nth s (+ i 1))` under `(< (+ i 1) n)`.
+/// The shape the corpora actually contain (`std/json.blsp` ×4, `std/ansi.blsp` ×2,
+/// `std/url.blsp`), and before this a guard over `(+ i 1)` produced no facts at all — the
+/// comparison was discarded whole, so it narrowed nothing and bounded nothing.
+///
+/// The fact is `i + k < (count xs)`, keyed on the base local and the offset, and a proved
+/// offset covers every SMALLER one (`i + b ≤ i + k < n`) — which is what reads
+/// `std/json.blsp`'s `\uXXXX` scan, guarded at `+10` and reading `+4`/`+5`.
+#[test]
+fn a_computed_index_is_bounded_by_a_guard_on_the_same_expression() {
+    let src = "(defmodule t)\n\
+         (sig want-int (int -> int))\n\
+         (defn want-int (n) 1)\n\
+         (sig a ((vector int) (int 0 _) -> any))\n\
+         (defn a (s i) (if (< (+ i 1) (count s)) (want-int (nth s (+ i 1))) 0))\n\
+         (sig b ((vector int) (int 0 _) -> any))\n\
+         (defn b (s i) (let (n (count s)) (if (< (inc i) n) (want-int (nth s (inc i))) 0)))\n\
+         (sig c ((vector int) (int 0 _) -> any))\n\
+         (defn c (s i) (let (n (count s)) (if (<= (+ i 10) n) (want-int (nth s (+ i 4))) 0)))";
+    assert!(file_warnings_mode(src, true).is_empty(), "{src}");
+}
+
+/// …and the two directions that must still warn, which are what keep the rule sound: a
+/// read PAST the offset the guard proved, and a guard on a DIFFERENT collection.
+#[test]
+fn a_computed_index_past_its_guard_is_not_bounded() {
+    let src = "(defmodule t)\n\
+         (sig want-int (int -> int))\n\
+         (defn want-int (n) 1)\n\
+         (sig d ((vector int) (int 0 _) -> any))\n\
+         (defn d (s i) (if (< (+ i 1) (count s)) (want-int (nth s (+ i 2))) 0))\n\
+         (sig e ((vector int) (vector int) (int 0 _) -> any))\n\
+         (defn e (s t i) (if (< (+ i 1) (count t)) (want-int (nth s (+ i 1))) 0))";
+    let ws = file_warnings_mode(src, true);
+    assert_eq!(ws.len(), 2, "{ws:?}");
+    assert!(
+        ws.iter().all(|w| w.contains("got nil | int")),
+        "both reads may run off the end: {ws:?}"
+    );
+    // A non-strict guard at offset 0 says nothing — `i ≤ n` is not `i < n`.
+    let ws = file_warnings_mode(
+        "(defmodule t)\n\
+         (sig want-int (int -> int))\n\
+         (defn want-int (n) 1)\n\
+         (sig f ((vector int) (int 0 _) -> any))\n\
+         (defn f (s i) (let (n (count s)) (if (<= i n) (want-int (nth s i)) 0)))",
+        true,
+    );
+    assert_eq!(ws.len(), 1, "{ws:?}");
+}
+
+/// The count ALIAS reaches every consumer, not just the walk's argument checks (C12). A
+/// `let` is bound in three places — the walk, inference, and the return check's
+/// `gradual_of_compound` — and only the first recorded `(let (n (count xs)) …)`, so the
+/// same read was clean as an argument and warned as a RETURN.
+#[test]
+fn a_count_alias_reaches_the_return_check_too() {
+    let src = "(defmodule t)\n\
+         (sig a ((list string) -> string))\n\
+         (defn a (words) (let (n (count words)) (if (>= n 4) (nth words 3) \"\")))\n\
+         (sig b ((vector int) (int 0 _) -> int))\n\
+         (defn b (xs i) (let (n (count xs)) (if (< i n) (nth xs i) 0)))";
+    assert!(file_warnings_mode(src, true).is_empty(), "{src}");
+    // …and the alias still proves nothing it should not: a length of 4 is not a length of 5.
+    let ws = file_warnings_mode(
+        "(defmodule t)\n\
+         (sig c ((list string) -> string))\n\
+         (defn c (words) (let (n (count words)) (if (>= n 4) (nth words 4) \"\")))",
+        true,
+    );
+    assert_eq!(ws.len(), 1, "{ws:?}");
+}
+
 /// An equality guard on ONE position of a tagged tuple selects the alternative in both
 /// branches — for the whole value, not only the reads of that position. This is the
 /// `[:ok x] | [:error msg]` dispatch every `parse!` is built on.

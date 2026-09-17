@@ -761,7 +761,18 @@ pub(super) fn gradual_of_compound(heap: &Heap, expr: Value, ctx: &Ctx) -> Option
         while i < binds.len() {
             let rhs_ty = super::binders::let_rhs_ty(heap, &binds, i, &items, &scope);
             match binds[i] {
-                Value::Sym(name) => scope = scope.bind(name, rhs_ty),
+                Value::Sym(name) => {
+                    scope = scope.bind(name, rhs_ty);
+                    // The COUNT alias (ADR-350), which this binder did not record — so a
+                    // length or index fact resting on `(let (n (count xs)) …)` reached the
+                    // walk's argument checks and NOT the return check, which comes through
+                    // here. See `guards::count_alias_target` (2026-09-17, C12).
+                    if let Some(xs) =
+                        crate::types::check::guards::count_alias_target(heap, binds[i + 1], &scope)
+                    {
+                        scope = scope.add_count_alias(name, xs);
+                    }
+                }
                 pat => {
                     for (sym, ty) in pattern_bindings(heap, pat, rhs_ty.as_ref()) {
                         scope = scope.bind(sym, ty);

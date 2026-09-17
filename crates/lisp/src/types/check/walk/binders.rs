@@ -150,7 +150,7 @@ pub(super) fn check_fn_bound_indexed(
         };
         if i == 0 {
             if let Some(xs) = indexes.filter(|xs| scope.is_lexical_local(*xs)) {
-                scope = scope.add_index_bound(p, xs);
+                scope = scope.add_index_bound(p, xs, 0);
             }
         }
     }
@@ -834,16 +834,10 @@ pub(in crate::types::check) fn let_bind_scope(
         }
     }
     // `(let (n (count xs)) …)`: `n` is the length of `xs` for the scope (ADR-350), so a
-    // guard on `n` narrows `xs`'s length and bounds an index of it.
-    if let Some(items) = list_items(heap, rhs) {
-        if let [Value::Sym(head), Value::Sym(target)] = items[..] {
-            let counts = value::symbol_is(head, "count")
-                || value::symbol_is(head, "string/length")
-                || value::symbol_is(head, "vector-length");
-            if counts && !scope.is_lexical_local(head) && scope.is_lexical_local(target) {
-                scope = scope.add_count_alias(name, target);
-            }
-        }
+    // guard on `n` narrows `xs`'s length and bounds an index of it. Shared with the other
+    // two `let` binders — see `guards::count_alias_target`.
+    if let Some(target) = crate::types::check::guards::count_alias_target(heap, rhs, &scope) {
+        scope = scope.add_count_alias(name, target);
     }
     scope
 }
