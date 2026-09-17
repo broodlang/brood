@@ -73,6 +73,30 @@ read deopted on any shared-region vector (latent while `%vector-ref` was a call 
 `jit_deopt_dirty` check had fired on every deopt of an inlined arm since two-stage tiering (it
 ran after the settle's own small-top restore) — so any past "dirty" reading on an inlined arm
 was the diagnostic, not the native.
+## 2026-09-17 — the type system is worked from a list now: sound first, then complete
+
+The criteria changed (the user's, and the right ones): the checker is held to **always
+sound** and **as complete as makes sense** — "wait for a concrete need" decides language
+shape (ADR-361), not checker precision. The working list is
+`docs/type-system-status.md` § "The remaining list", ticked as each item lands; go there,
+not here, to pick the next one. Landed today in its order: **A1, A2** (the runtime
+contract checks intervals, lengths and recursive types), **A4** (a declared overload is
+checked against its body per arm — it found `(math/pow 2.0 0)` answering the int `1`),
+**A5** (a declared return the checker cannot verify is reported *trusted, not verified*
+under strict; `(check-allow :trusted …)` acknowledges the eleven that genuinely are).
+**A3** is decided as static-only. Next in order: **B6** (a hit cap is reported), **B7**
+(a stale binary cannot check silently), **B8** (an order-dependence audit + a shuffled-list
+differential), then the C items.
+
+**Traps this batch added:** a `check-allow` around a `defn` wraps the DEFINITION for the
+return check — an inner `(check-allow :trusted (reduce …))` suppresses nothing at the
+def; a `(map keyword int -> int)` sig has THREE parameters (`map`, `keyword`, `int`) —
+the keyed map is `((map keyword int) …)`; a fixpoint that starts at the unknown never
+comes down (the four `never` holes closed today were all that shape — when a derived
+type reads `number` where `int` is expected, trace the round-0 seed with
+`BROOD_DERIVE_DBG` before anything else); and one more perl-edit corruption (memory
+updated: Edit tool only).
+
 ## 2026-09-17 — the type-system housekeeping is done; buckets 1 and 3 remain
 
 The four "ongoing" items the 09-15 review left on the type-system list, closed (the

@@ -181,7 +181,7 @@
       (assert= (get r :end) 5)
       (assert= (count (get r :kids)) 1)))
   (test "a leaf carries its raw :text and half-open positions"
-    (let (lst (first (forms-of (tree "(ab cd)")))
+    (let (lst (or (first (forms-of (tree "(ab cd)"))) (error "no top-level form"))
           ab (first (forms-of lst)))
       (assert= (get ab :kind) :symbol)
       (assert= (get ab :text) "ab")
