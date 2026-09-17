@@ -217,9 +217,14 @@ pub(crate) struct Renderer {
     /// `cov -> lifted cov` for the current `text_contrast`, 256 entries; identity at 1.0.
     cov_lut: Box<[u8; 256]>,
 
-    // keyed by (cluster, family id, bold, italic, scale, subpixel): the same cluster at
-    // a different family/style/scale/AA rasterises to a different baked canvas.
-    pub(super) cache: HashMap<(ClusterKey, u32, bool, bool, u16, bool), CachedGlyph>,
+    // Keyed by (cluster, family id, bold, italic, scale, subpixel, PX BITS): the same
+    // cluster at a different family/style/scale/AA/size rasterises to a different baked
+    // canvas. The px is in the key (as `f32::to_bits`, since f32 is not `Eq`) so entries for
+    // DIFFERENT SIZES coexist. They did not before, which had two costs: a size change had
+    // to clear the whole cache and re-rasterise every glyph on screen (the jank in a
+    // continuous zoom), and two regions could never be drawn at two sizes in one frame —
+    // which is what per-buffer zoom needs.
+    pub(super) cache: HashMap<(ClusterKey, u32, bool, bool, u16, bool, u32), CachedGlyph>,
 
     // The retained frame (see `paint`): `canvas` holds the pixels of the last frame
     // rasterised, `prev_ops` the ops that produced it. A new frame is diffed against
@@ -290,7 +295,15 @@ impl Renderer {
     ) -> &CachedGlyph {
         let fid = family.unwrap_or(self.default_family);
         // Always an alpha mask: the GPU shader recolours one coverage per pixel.
-        let key = (ClusterKey::of(g), fid, bold, italic, scale.max(1), false);
+        let key = (
+            ClusterKey::of(g),
+            fid,
+            bold,
+            italic,
+            scale.max(1),
+            false,
+            self.px.to_bits(),
+        );
         if !self.cache.contains_key(&key) {
             let baked = self.build_cluster(g, fid, bold, italic, scale, false);
             self.cache.insert(key.clone(), baked);
@@ -362,7 +375,11 @@ impl Renderer {
         // straddling pixels — soft, uneven text. Rounding keeps every glyph on the grid
         // the cell metrics already round to; the ≤0.5 px size error is invisible.
         self.px = (self.base_px * self.scale as f32).round().max(1.0);
-        self.cache.clear();
+        // The cluster cache is NOT cleared: its key carries the px, so entries for the old
+        // size stay valid and a zoom that returns to a size it has already drawn finds its
+        // glyphs waiting. Clearing here is what made a continuous zoom re-rasterise every
+        // glyph on every step. The retained FRAME is still stale — every cell moved — so
+        // that is invalidated.
         self.invalidate();
         let line_h = (self.px * self.line_height).round().max(1.0);
         self.cell_h = line_h as usize;
@@ -587,7 +604,15 @@ impl Renderer {
         let subpixel = self.subpixel_text();
         // The common single-char cluster keys via `ClusterKey::Char` with no
         // allocation; only a rare multi-char cluster allocates (a `Box<str>`).
-        let key = (ClusterKey::of(g), fid, bold, italic, scale.max(1), subpixel);
+        let key = (
+            ClusterKey::of(g),
+            fid,
+            bold,
+            italic,
+            scale.max(1),
+            subpixel,
+            self.px.to_bits(),
+        );
         PAINT_CLUSTERS.fetch_add(1, Ordering::Relaxed);
         if !self.cache.contains_key(&key) {
             let t0 = Instant::now();
@@ -1377,26 +1402,45 @@ mod grid_stability_tests {
         }
     }
 
-    /// Setting a font or line height to what it already is must not touch anything:
-    /// `recompute` drops the glyph cache and the retained frame, so a redundant set costs a
-    /// full re-rasterisation of the window. A caller that writes its type settings together
-    /// paid that twice per change for a value that had not moved.
+    /// Setting a font or line height to what it already is must not recompute at all, and a
+    /// size change must not throw away what is already rasterised. The cluster cache is keyed
+    /// by px, so sizes coexist: a zoom no longer re-rasterises every glyph per step, and a
+    /// zoom back to a size already drawn finds its glyphs waiting.
     #[test]
-    fn setting_the_same_font_or_line_height_is_free() {
+    fn the_cluster_cache_survives_a_size_change() {
         let mut r = Renderer::new(1.0, default_families(), 15.0);
         r.set_font(None, Some(20.0));
         let mut buf = vec![0u32; 32 * 32];
-        let mut canvas = Canvas::full(&mut buf, 32, 32);
-        r.draw_cluster(&mut canvas, 0, 0, "M", None, false, false, 1, [0xff; 3], 0);
+        {
+            let mut canvas = Canvas::full(&mut buf, 32, 32);
+            r.draw_cluster(&mut canvas, 0, 0, "M", None, false, false, 1, [0xff; 3], 0);
+        }
         let warm = r.cache.len();
         assert!(warm > 0, "the cluster cache should have an entry to lose");
 
         r.set_font(None, Some(20.0)); // same size
         r.set_font(Some(r.default_family), None); // same family
         r.set_line_height(r.line_height); // same line height
-        assert_eq!(r.cache.len(), warm, "an unchanged set cleared the cache");
+        assert_eq!(r.cache.len(), warm, "an unchanged set disturbed the cache");
 
-        r.set_font(None, Some(21.0)); // a real change still does
-        assert_eq!(r.cache.len(), 0);
+        // a real change keeps what is there and adds the new size beside it
+        r.set_font(None, Some(21.0));
+        {
+            let mut canvas = Canvas::full(&mut buf, 32, 32);
+            r.draw_cluster(&mut canvas, 0, 0, "M", None, false, false, 1, [0xff; 3], 0);
+        }
+        assert_eq!(r.cache.len(), warm + 1, "the old size was thrown away");
+
+        // …and coming back finds the first entry still there, with nothing new baked
+        r.set_font(None, Some(20.0));
+        {
+            let mut canvas = Canvas::full(&mut buf, 32, 32);
+            r.draw_cluster(&mut canvas, 0, 0, "M", None, false, false, 1, [0xff; 3], 0);
+        }
+        assert_eq!(
+            r.cache.len(),
+            warm + 1,
+            "returning to a drawn size re-rasterised it"
+        );
     }
 }
