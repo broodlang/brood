@@ -114,7 +114,7 @@ impl Default for WindowSpec {
 /// `CursorIcon` only inside the GUI backend). `ColResize` is the ↔ used for a
 /// side-by-side (`:col`) split's divider; `RowResize` the ↕ for a stacked (`:row`)
 /// one. (ADR-080.)
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CursorShape {
     ColResize,
     RowResize,

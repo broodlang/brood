@@ -14,7 +14,7 @@ pub(crate) use render::Renderer;
 pub use render::TextAa;
 use render::*;
 
-use super::{Key, Mouse, MouseAction, MouseButton, Op, WindowSpec};
+use super::{CursorShape, Key, Mouse, MouseAction, MouseButton, Op, WindowSpec};
 
 use crate::core::value;
 
@@ -75,28 +75,20 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::host::text_width::{cluster_cells, cluster_cells_at, TAB_WIDTH};
 
 /// The winit cursor for a frontend-neutral `CursorShape`.
-fn cursor_icon(shape: super::CursorShape) -> CursorIcon {
+fn cursor_icon(shape: CursorShape) -> CursorIcon {
     match shape {
-        super::CursorShape::ColResize => CursorIcon::EwResize, // ↔ side-by-side divider
-        super::CursorShape::RowResize => CursorIcon::NsResize, // ↕ stacked divider
-        super::CursorShape::Pointer => CursorIcon::Pointer,    // 👆 a clickable link
+        CursorShape::ColResize => CursorIcon::EwResize, // ↔ side-by-side divider
+        CursorShape::RowResize => CursorIcon::NsResize, // ↕ stacked divider
+        CursorShape::Pointer => CursorIcon::Pointer,    // 👆 a clickable link
     }
 }
 
-/// The cursor shape for the pointer at cell `(col, row)`, given the window's
-/// zones — the first zone containing the point, or None (default cursor).
-fn shape_at(
-    zones: &[(u16, u16, u16, u16, super::CursorShape)],
-    col: u16,
-    row: u16,
-) -> Option<super::CursorShape> {
-    zones.iter().find_map(|&(x, y, w, h, shape)| {
-        if col >= x && col < x + w && row >= y && row < y + h {
-            Some(shape)
-        } else {
-            None
-        }
-    })
+/// The cursor shape for the pointer at grid-relative pixel `(x, y)`, given the
+/// window's zones — the first zone containing the point, or None (default cursor).
+fn shape_at(zones: &[Zone], x: isize, y: isize) -> Option<CursorShape> {
+    zones
+        .iter()
+        .find_map(|zone| zone.contains(x, y).then_some(zone.shape))
 }
 
 // Bundled monospace font, four styles (see assets/README.md) — the default
@@ -1003,13 +995,14 @@ struct Win {
     /// clear a logical `(` — leaving `held_key` stuck and the repeat running away.
     /// The physical key is the same down and up regardless of modifiers (ADR-086).
     held_physical: Option<PhysicalKey>,
-    /// Cursor hot-zones from the last drawn frame (`Op::CursorZone`): cell rect
-    /// `(x, y, w, h)` + the shape to show while the pointer is inside. Hit-tested
-    /// on `CursorMoved`. (ADR-080.)
-    zones: Vec<(u16, u16, u16, u16, super::CursorShape)>,
+    /// Cursor hot-zones from the last drawn frame (`Op::CursorZone`), flattened to
+    /// grid-relative PIXEL rects + the shape to show while the pointer is inside —
+    /// pixels because a zone inside a `CellRegion` is measured in that region's cells,
+    /// not the window's. Hit-tested on `CursorMoved`. (ADR-080, ADR-363.)
+    zones: Vec<Zone>,
     /// The shape currently applied to the window, so we only call `set_cursor`
     /// when the hit-test result changes (not on every pointer move).
-    shape: Option<super::CursorShape>,
+    shape: Option<CursorShape>,
     /// EMA of the scroll velocity (signed lines/step) tracked during a trackpad gesture.
     /// On `TouchPhase::Ended` this seeds the kinetic-momentum animation driven by
     /// `about_to_wait`. On `Started`, any existing momentum velocity is carried forward
@@ -1298,20 +1291,10 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     if ops == w.frame {
                         return;
                     }
-                    // Refresh the cursor hot-zones from this frame, then store it.
-                    w.zones = ops
-                        .iter()
-                        .filter_map(|op| match op {
-                            Op::CursorZone {
-                                x,
-                                y,
-                                w: zw,
-                                h,
-                                shape,
-                            } => Some((*x, *y, *zw, *h, *shape)),
-                            _ => None,
-                        })
-                        .collect();
+                    // Refresh the cursor hot-zones from this frame, then store it. The walk
+                    // goes INTO the regions (`ScrollRegion`, `CellRegion`), resolving each
+                    // zone to pixels with the metrics its own region is painted at.
+                    w.zones = cursor_zones(&ops, &w.renderer);
                     w.frame = ops;
                     w.window.request_redraw();
                 }
@@ -1660,15 +1643,28 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                             scroll_dy: 0.0,
                         }),
                     );
-                    // Hover cursor: show a zone's shape (e.g. a resize cursor on
-                    // a divider) while the pointer is over it. Locally handled —
-                    // no event reaches the app, so no redraw flood. (ADR-080.)
-                    let want = shape_at(&w.zones, col, row);
-                    if want != w.shape {
-                        w.shape = want;
-                        w.window
-                            .set_cursor(want.map(cursor_icon).unwrap_or(CursorIcon::Default));
-                    }
+                }
+                // Hover cursor: show a zone's shape (e.g. a resize cursor on a divider,
+                // a pointing hand on a link) while the pointer is over it. Locally
+                // handled — no event reaches the app, so no redraw flood. (ADR-080.)
+                //
+                // Tested per PIXEL, not per cell: a zone inside a zoomed `CellRegion` is
+                // a fraction of a window cell tall, so two neighbouring zones can live in
+                // one cell — hit-testing only when the *cell* changed would step straight
+                // over them. The `set_cursor` below is still guarded by a change in shape,
+                // which is the call that costs anything.
+                let (grid_x, grid_y) = w
+                    .renderer
+                    .grid_origin(psz.width as usize, psz.height as usize);
+                let want = shape_at(
+                    &w.zones,
+                    position.x as isize - grid_x as isize,
+                    position.y as isize - grid_y as isize,
+                );
+                if want != w.shape {
+                    w.shape = want;
+                    w.window
+                        .set_cursor(want.map(cursor_icon).unwrap_or(CursorIcon::Default));
                 }
             }
             WindowEvent::MouseInput {

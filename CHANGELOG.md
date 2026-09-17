@@ -14,6 +14,13 @@ out for the rows and columns that fit. The cluster cache is keyed by px, so two 
 and a resize keeps its glyphs. This is what a per-buffer zoom needed: the window's font stays
 put and one pane gets a px, a pixel at a time.
 
+**A `cursor-zone` works inside a region.** The frame's hot-zones were collected from its
+top-level ops only, so a zone inside a `cell-region` or a `scroll-region` was never
+hit-tested — the hand cursor over a link disappeared as soon as its pane was zoomed. The
+walk now goes into both, resolving each zone to a pixel rect with the metrics of the region
+it is painted in (a region's cell is not the window's), and the pointer is tested per pixel
+so two zones inside a zoomed region can share one window cell.
+
 ## v0.30.1 — a timed-out ranking cleans up after itself; std/fuzzy is strict-clean
 **A timed-out sharded ranking leaves nothing in the caller's mailbox.** `fuzzy/top`'s
 shards are killed when they miss `*fuzzy-worker-timeout-ms*`, and that was assumed to stop

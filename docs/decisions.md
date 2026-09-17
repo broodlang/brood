@@ -5107,10 +5107,23 @@ ignores it** (an unknown op, skipped), so one frame drives both. Constructor:
 - The editor's `view` emits one zone per `std/editor/pane.blsp` divider (`:col`→
   `:col-resize`, `:row`→`:row-resize`); resizing then has a real cursor affordance.
 
+**Amendment (2026-09-17, with ADR-363).** A zone's rect is in the cells it is *painted*
+in, which stopped being the window's the day `cell-region` landed: the collector walked a
+frame's top-level ops only, so a zone inside a region (or a scroll-region) was dropped —
+the hand cursor over a results-buffer link vanished the moment its pane was zoomed. The
+frame walk now recurses into both regions with the same coordinate math the paint uses,
+and stores each zone as a **pixel** rect relative to the grid origin (a region's cell is
+not the window's, so cells could not carry the answer out). The hit-test compares the
+pointer's pixel position — which `CursorMoved` has before it rounds to a cell — on every
+move rather than only when the cell changes: inside a zoomed region two zones can share
+one window cell. `set_cursor` is still called only when the shape changes.
+
 **References.** ADR-046 (the render-op protocol this extends), ADR-077 (the drag this
 affords), ADR-056 (why bare motion isn't delivered — sidestepped by hit-testing zones
-in the frontend), ADR-079 (the sibling GUI-`Face` work this lands alongside). Lives in
+in the frontend), ADR-079 (the sibling GUI-`Face` work this lands alongside), ADR-363
+(the regions the zone walk now recurses into). Lives in
 `crates/lisp/src/gui.rs` (`Op::CursorZone`, hit-test on `CursorMoved`) +
+`crates/lisp/src/host/gui/backend/paint.rs` (`cursor_zones`, the frame walk) +
 `crates/lisp/src/builtins/mod.rs` (`gui-draw` parsing) + `std/editor/display.blsp`.
 
 ## ADR-083 — Output ports (`*out*`/`*err*`) and an async, safe logger
