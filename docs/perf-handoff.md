@@ -382,6 +382,54 @@ with a long-idle process holding one busy worker, then a timer fire onto that sa
 
 ---
 
+## Task 5 — tier-2 monomorphization: is the ability-dispatch win worth a checker→compiler channel?
+
+**Priority: low. Not started; a design that needs a number before it earns its surface.**
+Filed 2026-09-17 when the type-system review's last two items were decided (item 5,
+return-type dispatch, was declined — ADR-361; this is item 7, which is a perf item).
+
+**What it is.** ADR-182's Tier 1 (`BROOD_MONO=1`, off by default) devirtualizes an
+ability-op call whose first argument is a LITERAL or a direct record-constructor call —
+`(area (circle 2))` — to a direct impl call, the identity proven at compile time and the
+resolution left behind the epoch-guarded cache (ADR-294, so a re-registered impl still
+wins). Tier 2 would do the same for a receiver whose type the CHECKER inferred — `(area
+s)` inside `(defn total (s) …)` under a `(sig total (circle -> float))` or a caller-derived
+`circle` — which needs the compiler to ask the checker for a local's type at a call site:
+the channel neither side has today (`NoSourceRewrites`: the checker reads the author's
+code, the compiler rewrites it, and they never talk).
+
+**Why it is here and not on the build list.** Its only value is the dispatch cost —
+`identity-of` + `impl-for` per call — and every ability call site would pay a type query
+at compile time. Without a row that moves, the channel is surface for nothing; and
+`get` (~4 800 sites, the JIT cannot see through its type dispatch — CLAUDE.md's "single
+highest-leverage perf item in the library") is the same cost class with a bigger footprint,
+so the number to take first is whether devirtualizing ability calls moves anything
+`get` would not move more.
+
+**What to measure, in order.**
+
+1. **The dispatch cost itself**, one process, warm: a hot loop over `(area s)` on a record
+   with `BROOD_MONO=1` on a *literal* receiver (Tier 1, the ceiling any Tier 2 can reach)
+   against the dynamic call. If Tier 1's ceiling is under ~10% of the loop, stop — Tier 2
+   cannot beat its own ceiling and the channel is not worth building.
+2. **Whether Tier 1 is even on the path**: `BROOD_MONO_DBG=1` on the rows that use
+   abilities (`std/editor/*` under bedit, `format`, `stream`) — count devirtualizations.
+   Tier 1 has never been measured on a real workload either (it was turned on for the
+   first time on 2026-08-29 and found its own miscompile, ADR-294).
+3. Only if (1) shows a ceiling worth having: prototype the channel as a side table the
+   checker WRITES (call-site position → proven record id, from `check_file`'s derived
+   types) and the compiler READS under `BROOD_MONO=2`, measure `make ab --floor --all`
+   plus the bedit-derived rows, and gate it with the Tier 1 differential extended to
+   inferred receivers (a wrong inference must deopt to the dynamic call, never miscompile:
+   the id is a GUARD, the way a float-global guess is — `BROOD_NO_FLOAT_GLOBAL`).
+
+**A pass looks like:** a compute row with ability calls in its hot loop moves by more than
+its floor under `BROOD_MONO=2`, `make ab --floor --all` reads noise everywhere else, and the
+extended differential is green under sabotage (a wrong id in the side table must red it).
+**A fail looks like:** step (1) under 10% — record the number here and close the item.
+
+---
+
 ## How far back the bench corpus can measure (2026-09-11)
 
 **`8a2aaa01` is no longer a fully usable baseline, and neither is any pre-2026-09-02 commit.**

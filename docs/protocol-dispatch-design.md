@@ -56,9 +56,11 @@
 > `std/protocol.blsp` is now behaviours only, and the `deftype`/`reify` runtime hint
 > points at `defability`/`impl`.
 >
-> **Still open:** **return-type dispatch** (needs bidirectional inference) and
-> **monomorphization** (codegen — the *runtime* win, deferred to last; both are on the
-> post-1.0 list in [roadmap-for-v1.md](roadmap-for-v1.md)).
+> **Still open:** **monomorphization** (codegen — the *runtime* win, deferred to last;
+> Tier 1 shipped opt-in as ADR-182/294, Tier 2 is queued as a perf item). **Return-type
+> dispatch is declined** (ADR-361, 2026-09-17): it can only be implemented as a
+> checker-driven rewrite, which the advisory rule forbids; generic code names its target
+> as a value.
 
 ## The goal
 
@@ -325,9 +327,12 @@ We are not obliged to pick an existing point. Seeds for a Brood-native synthesis
   sites**; `json-encode` omitting `:__id__`; and `tests/ability_test.blsp`.
   `defprotocol`/`defimpl` **retired** (ADR-168); `defbehaviour` retained in
   `std/protocol.blsp` with `tests/behaviour_test.blsp`.
-- **Open:** **return-type dispatch** (needs bidirectional inference) and
-  **monomorphization** (static resolution where the identity is known — the runtime
-  win). Both are post-1.0 additive items. Two cosmetic/tooling residues also remain:
+- **Open:** **monomorphization** (static resolution where the identity is known — the
+  runtime win; Tier 1 opt-in as ADR-182/294, Tier 2 a perf item). **Return-type
+  dispatch is declined** (ADR-361): implicit, context-inferred selection would make a
+  program's meaning depend on the advisory checker; the explicit-argument idioms are the
+  answer, and a multimethod keyed on a type designator is the door left open if a
+  library ever asks. Two cosmetic/tooling residues also remain:
   `keys`/`count` on a record still include `:__id__` (use `fields`; a hidden kernel
   slot is the eventual fix, deferred as optional polish), and the **LSP has not been
   migrated** off `defprotocol`/`defimpl` (KI-16). `defbehaviour` stays — the

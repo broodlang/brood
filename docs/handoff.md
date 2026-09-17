@@ -49,12 +49,13 @@ to bedit 0.4.4 `a99f69d0` is the one step left). KI-150's structural options (in
 sigs cached in the stdlib image, or a pre-flight skipping inference for imaged std
 modules) stay a watch until the benchmark refresh reads the row.
 
-**Next on the type system, the review's bucket 1 (both large, both waiting on a use
-case): return-type dispatch** (item 5: selecting an impl by the expected return —
-bidirectional inference; `protocol-dispatch-design.md`) and **tier-2 monomorphization**
-(item 7: devirtualizing an inferred-variable op call — the checker→compiler channel over
-ADR-294's sound Tier 1 base and its differential). Bucket 3's ADR-011 items (parametric
-abilities, view patterns, inline `sig`s in `defn`) still have no consumer asking.
+**Decided (ADR-361, the same day): bucket 1 is closed.** Return-type dispatch is declined —
+a receiver-less op chosen by the context's expected type can only be a checker-driven
+rewrite, which the advisory rule forbids; generic code names its target as a value, and a
+multimethod keyed on a type designator is the door left open if a library asks. Tier-2
+monomorphization is a perf item: `perf-handoff.md` Task 5, with Tier 1's ceiling as the
+first number to take. **The type-system list now has no open item**; bucket 3's ADR-011
+items (parametric abilities, view patterns, inline `sig`s in `defn`) wait for a consumer.
 
 **Traps this session added:** a `(sig …)` inserted after "line 1 of the defn" lands inside
 the docstring when the docstring is line 1 — nothing but the new gate says so; the

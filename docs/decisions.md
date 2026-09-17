@@ -23134,3 +23134,51 @@ metamorphic fuzzer whose oracle is in the program (the same tally as a `fold`). 
 deliberately: a plain `(assoc acc k v)` — the table cannot hold every value a map can
 (ropes), so it stays an escape. (A record accumulator, and a seed holding such a value, take
 the unrewritten copy — point 4.)
+
+## ADR-361 — Return-type dispatch is declined, not deferred
+
+**Status:** decided 2026-09-17. Closes the item every type-system review since ADR-168
+carried as "open: return-type dispatch (needs bidirectional inference)" —
+[protocol-dispatch-design.md](protocol-dispatch-design.md), the ROADMAP's deferred
+abstractions, [type-system-status.md](type-system-status.md) item 5.
+
+**The shape.** Result-directed overloading: an op with no receiver whose implementation is
+chosen by the type its CONTEXT expects — `(zero)` the identity of whatever a fold is
+folding, `(parse s)` a datetime where a datetime is wanted, a literal `3` read as a
+`money` in a money context (Haskell's `mempty`, `read`, `fromInteger`). Its value is
+generic code that never names a type.
+
+**Why it cannot be dynamic.** A call like `(zero)` carries nothing to dispatch on at run
+time. The only implementation is for the checker to infer the expected type and REWRITE
+the call to that type's impl before it runs — the program's meaning then depends on what
+an inference could prove about the call's surroundings: the same `(zero)` raises "no
+impl" or answers `0` by the checker's reach. That is the property ADR-123/124 exist to
+rule out — the checker is advisory, never gates the live image, and a `def` always wins —
+and the direction [types.md](types.md) names as "not the TypeScript route". It is also
+ADR-011's case: three reviews, no consumer asking.
+
+**Decision.** Declined. Brood stays values-first, with Clojure and Elixir, which have no
+return-type polymorphism either: generic code names its target AS A VALUE. Three idioms,
+all dispatched the way `impl` and `defmulti` already dispatch — on an argument:
+
+- **an explicit seed** — `(fold xs 0 +)`, not `(fold xs (zero) +)`; the identity is the
+  seed;
+- **an exemplar or a constructor as the receiver** — `(decode-like (datetime …) s)`, or
+  `(parse-as datetime s)` with the constructor the argument;
+- **an ability op or multimethod whose FIRST argument decides** — the receiver is the
+  value whose identity selects the impl.
+
+What is given up is narrow: a monoid-generic library takes its identity as an argument
+instead of discovering it, and a literal never reads as a record. What is kept: what you
+wrote is what runs, hot reload's one contract (late lookup by name), and a checker that
+reports rather than decides.
+
+**Runtime and checker: nothing changes.** No dispatch rule, no rewrite, no checker→compiler
+channel; monomorphization (ADR-182/294) never depended on this.
+
+**The door left open.** Brood has no OPEN way to dispatch on a type *designator*: a
+keyword's identity is `:keyword`, so `(zero-of :int)` cannot key a `defmulti` today — the
+answer is a `match` (closed) or a `def`'d table (open by rebinding, ad hoc). If a real
+generic library ever wants it, the small, sound, dynamic feature is a multimethod keyed on a
+designator argument — not return-type dispatch — and that would be the concrete need
+ADR-011 waits for.

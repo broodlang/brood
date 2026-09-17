@@ -724,6 +724,14 @@ Shipped as ADRs:
     - 🚫 *won't* — **Open-ability bounds** — declined, not deferred: an open ability accepts
       late impls, so no argument is soundly rejectable on the type (ADR-123/124). Safety lives
       at the op call site instead.
+    - 🚫 *won't* — **Return-type dispatch** (ADR-361, 2026-09-17) — declined, not deferred:
+      a receiver-less op chosen by the context's expected type can only be a checker-driven
+      rewrite, and the checker never decides what runs (ADR-123/124). Generic code names its
+      target as a value — a seed, an exemplar, a receiver. The door left open: a multimethod
+      keyed on a type designator, if a library ever asks.
+    - 📥 *perf queue* — **Tier-2 monomorphization** (an inferred receiver devirtualized) is
+      `perf-handoff.md` Task 5: it earns its checker→compiler channel only with a row that
+      moves, and Tier 1's ceiling is the first number to take.
   - ✅ **Checker gap (resolved, note was stale):** a `:use`d ability op from a *loose
     disk* module used to be flagged `unbound symbol` though it ran. No longer reproduces
     on any current checker entry point — `brood --check <file>`, `nest check <file>`, or
