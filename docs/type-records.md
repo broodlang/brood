@@ -150,6 +150,20 @@ never claims a false one. See `crates/lisp/src/types.rs`'s
 `record_subtyping_is_width_and_depth_but_conservative` test for the exact
 cases this covers and deliberately doesn't.
 
+**Against a union of shapes, a record is a product (ADR-364).** The rule above
+compares one record with one other record. When the right-hand side is a *union*
+of shapes, `{a: int|string}` is covered by `{a: int} | {a: string}` though by
+neither alone, and answering the pairwise question per alternative would report a
+false positive at the call. `record_covered_by` treats the declared keys the way
+`tuple_covered_by` treats positions — each side's `field_ty` per key, so a key a
+shape omits reads as that shape's `rest` — and runs ADR-289's subset rule. The
+**undeclared remainder is not a position**: it stands for unboundedly many
+independent keys (a map with `1` under one and `"a"` under another escapes both
+`{…: int}` and `{…: string}`), so it must fit a single surviving candidate's rest,
+exactly as a vector's element type must. Componentwise coverage is still refused —
+`{a: int|string, b: int|string}` against `{a: int, b: int} | {a: string, b: string}`
+is false, and `{a: 1, b: "x"}` is why.
+
 **Union/intersect — reused verbatim, no new algorithm.** `fields` is threaded
 through the *existing* generic `merge_union`/`merge_intersect` helpers exactly
 like `map_kv` already is: two equal field maps survive a union/intersect

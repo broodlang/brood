@@ -1437,7 +1437,6 @@ impl Ty {
         out
     }
 
-    /// One term's effective int interval (see [`Ty::int_range`]).
     /// The int interval as the literal set it denotes, when it is bounded and holds at
     /// most [`MAX_ENUMERATED_RANGE`] values — `(int 1 2)` is `1 | 2`, and a relation
     /// against a literal set can only be decided on the enumeration. `None` for an open
@@ -1451,12 +1450,17 @@ impl Ty {
         else {
             return None;
         };
-        if hi < lo || hi - lo >= MAX_ENUMERATED_RANGE {
+        // `checked_sub`, not `hi - lo`: a full-width interval overflows the subtraction,
+        // which panics under debug-assertions and wraps without them — and a `None` here
+        // is the right answer for it anyway (far past the enumeration cap).
+        let width = hi.checked_sub(lo)?;
+        if width < 0 || width >= MAX_ENUMERATED_RANGE {
             return None;
         }
         Some(Arc::new(LitSet::In((lo..=hi).collect())))
     }
 
+    /// One term's effective int interval (see [`Ty::int_range`]).
     fn int_range_eff(&self) -> Range {
         if let Some(LitSet::In(set)) = self.lit_int.as_deref() {
             if let (Some(lo), Some(hi)) = (set.iter().next(), set.iter().next_back()) {

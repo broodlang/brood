@@ -1306,9 +1306,19 @@ each lands; this section is the working list, `handoff.md` points at it.
 
 ### C — completeness
 
-- [ ] **C9. Subtyping across union terms.** A term covered jointly by two of the other
-      side's terms but by neither alone reads "not a subtype" and defers (ADR-262). ADR-289
-      closed products and ADR-292 arrows; the general case remains.
+- [x] **C9. Subtyping across union terms** (2026-09-17, ADR-364). A term covered jointly by
+      two of the other side's terms but by neither alone read "not a subtype" (ADR-262);
+      ADR-267 decomposed per tag, ADR-289 closed products, ADR-292 arrows. A fifteen-shape
+      probe run first found exactly two holes left, both now closed: a **record is a
+      product** over its declared keys (`record_covered_by`, so `{a: int|string}` ⊆
+      `{a: int} | {a: string}`), with the undeclared remainder deliberately NOT a position —
+      it stands for unboundedly many independent keys, so it must fit one surviving
+      candidate's rest, the vector argument; and a **bounded interval of at most 64 values is
+      the literal set it denotes** (`enumerated_int_range`, consulted in the int-literal rule
+      only), so `(int 1 2)` ⊆ `1 | 2`. The neighbours that must stay false are pinned beside
+      each: `map<K, A|B>` vs split maps, and the 2-field componentwise case. Sabotage: the
+      `MAP_BIT` arm reds the two record pins alone, `enumerated_int_range` the interval pin
+      alone.
 - [ ] **C10. The merely-wider residue, re-probed under intervals.** A body typed `number`
       declared `int` is silent by design where undecidable; with ADR-350's intervals more
       of it decides (`quot`, `floor`, a masked value). Flag what is provable, keep the rest

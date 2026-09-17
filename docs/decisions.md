@@ -23341,3 +23341,63 @@ language, which is the case the prime directive names.
 pane's body is a `cell-region`, laid out for the rows and columns `gui/cell-size` says fit,
 the mode line and the rest of the window untouched. A step is a pixel, a zoom re-paints one
 pane, and the model behind the frame is the one the user has: sizes belong to buffers.
+
+## ADR-364 — A record is a product too; a small interval is the listing it denotes
+
+**Status:** accepted (2026-09-17). **Context:** type-system list item C9 — the last two
+joint-coverage holes ADR-262 documented.
+
+**Context.** ADR-262 kept a union's terms apart and accepted one incompleteness: a term
+covered *jointly* by several of the other side's alternatives but by none alone reads "not a
+subtype". Sound, but at a call site it is a **false positive** — the one class this checker
+does not accept. ADR-267 decomposed the question per tag, ADR-289 closed products (tuples,
+and the vector neighbour that must stay false), ADR-292 arrows. A fifteen-shape probe run
+before this change found exactly two holes left:
+
+```lisp
+{a: int|string}  ⊆  {a: int} | {a: string}     ; true, and answered false
+(int 1 2)        ⊆  1 | 2                      ; true, and answered false
+```
+
+**Decision 1: a record's declared keys are the positions of a product.** `record_covered_by`
+reads every key any shape on either side declares, takes each side's `RecordShape::field_ty`
+for it — the one reading every relation already uses, so a key a shape does not declare reads
+as that shape's `rest` — and runs ADR-289's subset rule over the resulting rows. A record's
+key set is fixed the way a tuple's arity is, which is exactly what makes the product rule
+apply, and the componentwise error ADR-289 names is refused here too: `{a: int|string, b:
+int|string}` against `{a: int, b: int} | {a: string, b: string}` still answers false, because
+`{a: 1, b: "x"}` belongs to neither.
+
+**The undeclared remainder is NOT a position.** It stands for infinitely many independent
+keys, so a map holding `1` under one undeclared key and `"a"` under another is a `{…:
+int|string}` that neither `{…: int}` nor `{…: string}` contains — the vector argument of
+ADR-289, for the same reason (no fixed arity). So the rest must fit **one** surviving
+candidate's rest, which is the base case of the recursion: the positions are decided by the
+splitting rule, the remainder by a single candidate. A plain unshaped `map` alternative is
+dropped from the candidates rather than treated as open (it decides nothing here, and
+dropping is the sound direction), and `map<K, A|B>` against split maps stays false.
+
+**Decision 2: a bounded interval of at most `MAX_ENUMERATED_RANGE` (64) values is its
+literal set**, when the other side pins one. `(int 1 2)` and `1 | 2` denote the same set;
+only the spelling differed, and `lit_subset(None, In{1,2})` answered on the spelling.
+`Ty::enumerated_int_range` lists the values, and `is_subtype_term` consults it in the
+int-literal rule alone — so nothing else in the lattice changes shape. An open or wide
+interval stays `None`, which reads correctly as "not inside a finite listing": a literal set
+this checker meets is a `match`'s handful of arms, so enumerating a million-value interval
+could only spend the allocation to reach the same answer.
+
+**Not chosen.** (1) Componentwise coverage for records — wrong, as above, and it is the
+classic error. (2) Treating the undeclared remainder as one more position — unsound; the
+counterexample is two keys. (3) Enumerating unbounded intervals lazily to compare against a
+set — the cap costs nothing real and keeps the relation's cost bounded, the discipline
+`MAX_TY_TERMS` and `MAX_TY_NODES` already set.
+
+**Consequence.** The two shapes stop warning at a call. C9 is closed on its list: the general
+joint-coverage machinery is now tags (ADR-267) + products (ADR-289) + arrows (ADR-292) +
+records and small intervals (here), and the remaining "not a subtype" answers across union
+terms are the ones that are genuinely false. Pinned by
+`types::tests::a_record_can_be_covered_by_several_alternatives_together`,
+`::a_small_interval_is_inside_the_literal_set_it_lists` and, at the checker level,
+`check::tests::signatures::a_record_whose_field_is_a_union_passes_a_split_union_of_shapes`
+(which carries the componentwise neighbour that must still warn); each was sabotage-verified
+to red on its own mechanism alone.

@@ -10,6 +10,32 @@ needing one is queued in [`perf-handoff.md`](perf-handoff.md) instead — curren
 high-priority item: whether KI-114's `as_f64_pair` holds the closure KI-109 got from the
 promotion it constrained.
 
+## 2026-09-17 later — C9 is finished and pushed; next is the tree-walker timeout, then C10
+
+**C9 (ADR-364) is closed**, verification and docs and all: 585/585 `types::`, both mechanisms
+sabotage-verified (the `MAP_BIT` arm reds the two record pins alone, `enumerated_int_range`
+the interval pin alone), `nest check --strict` 0 warnings + the 8 known advisory notes,
+clippy `--all-targets --all-features -D warnings` clean, and `check_order_differential` +
+`derivation_cache_differential` both agree with themselves under the sharper relation (94 s
+on the VM). No new finding appeared — the lattice got more complete, not louder. Two things
+fixed while reading the C9 code: `hi - lo` on a full-width interval overflows (panics under
+debug-assertions), now `checked_sub`, and the patch had displaced `int_range_eff`'s doc
+comment. ADR-364, the C9 tick in `type-system-status.md`, the record note in
+`type-records.md` and a devlog line are in. `types.md` contract #5 needed nothing — it never
+claimed record subtyping was incomplete in this respect.
+
+**Next, in order:**
+1. **The two `nest` differentials that time out in the `differential (tree-walker)` CI job
+   only** — the item below, still open and still the thing keeping CI red. Pin
+   `BROOD_TIER=1` in each test's `Command` the way `ddeb158b` did for
+   `mapget_differential`/`mono_differential`. Nothing about the checker is engine-dependent;
+   only its speed is.
+2. **bedit's `strict_ratchet_test`** (five *trusted, not verified* findings from A5) — the
+   item below.
+3. **C10** — the merely-wider residue re-probed under intervals, then C11–C17 in list order
+   (`docs/type-system-status.md` § "The remaining list"). **Open KI:** KI-162 —
+   `nest check --fix-sigs` writes a `sig` ABOVE its `defn`, which `sig_placement.rs` forbids.
+
 ## 2026-09-17 late — where to pick up (read this first; written as the week's budget ran out)
 
 **State of the tree at `989af614`.** Everything of this session's is landed and pushed: ADR-362
@@ -152,7 +178,7 @@ read deopted on any shared-region vector (latent while `%vector-ref` was a call 
 `jit_deopt_dirty` check had fired on every deopt of an inlined arm since two-stage tiering (it
 ran after the settle's own small-top restore) — so any past "dirty" reading on an inlined arm
 was the diagnostic, not the native.
-## 2026-09-17 — HANDOFF: C9 in flight (records are products; a small interval is its listing)
+## 2026-09-17 — C9 ✅ DONE (ADR-364; records are products, a small interval is its listing) — kept for the argument, the five steps are all ticked above
 
 **State at handoff.** `main` = `989af614`'s successor (B6/B7/B8 pushed: `3cbeb090`,
 `cd87c8c1`, `7121c5b8` + merge `493bca01`). The working tree carries **C9, uncommitted**,
