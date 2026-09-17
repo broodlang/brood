@@ -1842,6 +1842,8 @@ fn check_forms(
             // surface here — the file would fail to load), not silently swallowed;
             // the un-expanded form still feeds the rest of the walk so the other
             // lints run.
+            // The checker reads the author's code: no optimiser source rewrites here.
+            let _plain = crate::eval::macros::NoSourceRewrites::enter();
             let exp = match crate::eval::macros::compile(heap, f, root) {
                 Ok(e) => e,
                 // Re-read the relocated form: `compile` now infers `(require …)` from

@@ -1,0 +1,79 @@
+;;; Regression guard for the pipeline fusion + counted range loop (ADR-360 §7).
+;;;
+;;; `(-> (range n) (seq/lfilter p) (seq/lmap f) (reduce init rf))` is rewritten at compile
+;;; time into one `fold` literal over the base (each stage substituted in place or called by
+;;; name), and a `fold` over a `(range …)` with a literal `fn` into a counted `letrec` loop.
+;;; Every test asserts the value the pipeline should produce; `BROOD_LINMAP=0` disables both
+;;; rewrites and must agree. The expansions themselves are pinned in
+;;; `crates/lisp/tests/linmap_idiom.rs`.
+
+(defmodule pipeline-fusion-test (:use test))
+
+(defn pf-mult35? (i) (or (= 0 (math/rem i 3)) (= 0 (math/rem i 5))))
+
+;; A stage whose expression has a side effect, to pin evaluation order and count.
+(def *pf-log* (table/new))
+(defn pf-note (k) (table/incr *pf-log* k) k)
+(defn pf-make-pred (tag) (pf-note tag) (fn (x) (> x 1)))
+
+(describe "pipeline fusion"
+  (test "filter/map/reduce over a range is the sum of the squares"
+    (assert= 155553889038886
+             (-> (range 100000) (seq/lfilter pf-mult35?) (seq/lmap (fn (i) (* i i))) (reduce 0 +))))
+
+  (test "every stage kind, over a list, a vector and a range"
+    (assert= 20 (-> '(1 2 3 4) (seq/lkeep (fn (v) (when (= 0 (math/rem v 2)) (* v 10))))
+                    (seq/lreject (fn (v) (= v 40))) (reduce 0 +)))
+    (assert= 20 (-> [1 2 3 4] (seq/lkeep (fn (v) (when (= 0 (math/rem v 2)) (* v 10))))
+                    (seq/lreject (fn (v) (= v 40))) (reduce 0 +)))
+    (assert= 20 (-> (range 1 5) (seq/lkeep (fn (v) (when (= 0 (math/rem v 2)) (* v 10))))
+                    (seq/lreject (fn (v) (= v 40))) (reduce 0 +)))
+    ;; a symbol stage (called by name) and a literal reducer
+    (assert= 20 (reduce (seq/lmap (range 4) inc) 0 (fn (a b) (+ a (* 2 b))))))
+
+  (test "a later stage's free variable is not captured by an earlier stage's parameter"
+    ;; The filter binds `x`; the map reads the OUTER `x` (100). A naive substitution would
+    ;; read the element instead.
+    (let (x 100)
+      (assert= 900 (-> (range 5) (seq/lfilter (fn (x) (> x 1))) (seq/lmap (fn (y) (* y x))) (reduce 0 +)))))
+
+  (test "a literal that rebinds its own parameter is called, not substituted, and still right"
+    (assert= 10 (-> (range 4) (seq/lmap (fn (x) (let (x (+ x 1)) x))) (reduce 0 +))))
+
+  (test "stage expressions are evaluated once each, in source order, before the fold runs"
+    (let (r (-> (range 4) (seq/lfilter (pf-make-pred :first)) (seq/lmap (fn (v) (pf-note :map) v))
+                (reduce 0 (fn (a v) (pf-note :rf) (+ a v)))))
+      (assert= 5 r)
+      (assert= 1 (table/get *pf-log* :first))
+      ;; the map and reducer bodies ran once per surviving element (2 and 3)
+      (assert= 2 (table/get *pf-log* :map))
+      (assert= 2 (table/get *pf-log* :rf))))
+
+  (test "the reducer's error is the same error"
+    (assert-error "+: expected number" (-> (range 3) (seq/lmap str) (reduce 0 +)))))
+
+(describe "a fold over a range is a counted loop"
+  (test "sums, empty ranges, negative steps and strides"
+    (assert= 45 (fold (range 10) 0 (fn (acc x) (+ acc x))))
+    (assert= 7 (fold (range 0) 7 (fn (acc x) (+ acc x))))
+    (assert= '(1 4 7 10) (fold (range 10 0 -3) nil (fn (acc x) (cons x acc))))
+    (assert= [2 4 6 8] (fold (range 2 9 2) [] (fn (acc x) (conj acc x))))
+    (assert= 4999950000 (fold (range 100000) 0 (fn (acc x) (+ acc x)))))
+
+  (test "the body's effects run once per element, in order"
+    (let (seen (table/new))
+      (fold (range 3) 0 (fn (acc x) (table/incr seen x) (+ acc x)))
+      (assert= 1 (table/get seen 0))
+      (assert= 1 (table/get seen 2))
+      (assert= nil (table/get seen 3))))
+
+  (test "a body error is the body's error"
+    (assert-error "+: expected number" (fold (range 3) 0 (fn (acc x) (+ acc (str x))))))
+
+  (test "a non-literal reducer and a non-range collection take the ordinary fold"
+    (assert= 45 (fold (range 10) 0 +))
+    (assert= 6 (fold '(1 2 3) 0 (fn (acc x) (+ acc x))))
+    (assert= 6 (fold [1 2 3] 0 (fn (acc x) (+ acc x)))))
+
+  (test "a shadowed name anywhere in the form declines the rewrite, and the shadow wins"
+    (assert= 9 (let (range (fn (n) (list 9))) (fold (range 3) 0 (fn (acc x) x))))))

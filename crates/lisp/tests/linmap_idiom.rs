@@ -288,3 +288,88 @@ fn the_kernel_spelling_splits_to_the_same_op() {
         &["%table-incr"],
     );
 }
+
+// ---- pipeline fusion + the counted range loop (ADR-360 §7) ----
+
+#[test]
+fn a_stage_chain_under_reduce_fuses_into_one_literal_and_a_range_base_into_a_loop() {
+    // filter (a symbol, called by name) → map (a literal, substituted) → `+`, over a range:
+    // one fused literal, and the range base becomes the counted letrec loop.
+    let out = expansion(
+        "(defn go (n) (reduce (seq/lmap (seq/lfilter (range n) mult35?) (fn (i) (* i i))) 0 +))",
+    );
+    for w in [
+        "%range-bounds",
+        "letrec",
+        "(range? ",
+        "(mult35? pipe-e",
+        "(* pipe-e",
+        ":generated",
+    ] {
+        assert!(out.contains(w), "expected `{w}` in:\n{out}");
+    }
+    for f in ["seq/lmap", "seq/lfilter", "(fn (i)"] {
+        assert!(
+            !out.contains(f),
+            "unexpected `{f}` (the stage survived) in:\n{out}"
+        );
+    }
+    // Over a list, the fused literal is handed to the ordinary `fold`; no loop, no range check.
+    let out = expansion("(defn go (xs) (reduce (seq/lmap xs (fn (i) (* i i))) 0 +))");
+    assert!(out.contains("(fold ") && out.contains("(* pipe-e"), "{out}");
+    assert!(
+        !out.contains("%range-bounds") && !out.contains("seq/lmap"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_stage_literal_that_could_capture_is_not_substituted_blindly() {
+    // A literal that rebinds its own parameter is bound and called, never substituted.
+    let out =
+        expansion("(defn go (n) (reduce (seq/lmap (range n) (fn (x) (let (x (+ x 1)) x))) 0 +))");
+    assert!(
+        out.contains("(fn (x) (let (x"),
+        "the literal must survive as a call target:\n{out}"
+    );
+    // A quote inside a literal declines the substitution too.
+    let out =
+        expansion("(defn go (n) (reduce (seq/lmap (range n) (fn (x) (list x (quote x)))) 0 +))");
+    assert!(out.contains("(fn (x) (list x"), "{out}");
+    // Parameters are renamed to gensyms, so a later stage's free `x` stays the outer `x`.
+    let out = expansion(
+        "(defn go (n x) (reduce (seq/lmap (seq/lfilter (range n) (fn (x) (> x 1))) (fn (y) (* y x))) 0 +))",
+    );
+    assert!(out.contains("(* pipe-e") && out.contains(" x))"), "{out}");
+    assert!(
+        !out.contains("(> x "),
+        "the filter's `x` must be a gensym:\n{out}"
+    );
+}
+
+#[test]
+fn a_fold_over_a_range_with_a_literal_is_a_counted_loop() {
+    let out = expansion("(defn go (n) (fold (range n) 0 (fn (acc x) (+ acc x))))");
+    for w in [
+        "%range-bounds",
+        "letrec",
+        "(range? ",
+        "(fold ",
+        ":generated",
+        "(>= rng-i",
+    ] {
+        assert!(out.contains(w), "expected `{w}` in:\n{out}");
+    }
+    // Not a literal reducer, not a range, a shadowed `range`: the ordinary fold stays.
+    for src in [
+        "(defn go (n) (fold (range n) 0 +))",
+        "(defn go (xs) (fold xs 0 (fn (acc x) (+ acc x))))",
+        "(defn go (n) (let (range (fn (n) (list 9))) (fold (range n) 0 (fn (acc x) x))))",
+    ] {
+        let out = expansion(src);
+        assert!(
+            !out.contains("%range-bounds"),
+            "{src} was rewritten:\n{out}"
+        );
+    }
+}

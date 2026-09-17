@@ -790,10 +790,13 @@ pub(crate) fn hof_resolve(heap: &Heap, f: Value, argc: usize) -> Option<HofArm> 
         ValueRef::Fn(id) => id,
         _ => return None,
     };
-    // A thin-wrapper passthrough (`>` → `%lt`, …) redirects; leave those to `dispatch`.
-    if crate::eval::passthrough_arm(heap, id, argc).is_some() {
-        return None;
-    }
+    // A thin-wrapper passthrough used to be refused here — "`>` → `%lt` redirects; leave
+    // those to `dispatch`" — which handed every reducer shaped `(fn (acc x) (+ acc x))` to
+    // the generic path: two redirects per element, each an `env_get` of the head and a
+    // SmallVec remap, ~2 000 instructions (137 ns) against 25 ns for the same lambda with a
+    // non-passthrough body (2026-09-17). The compiled arm of a passthrough IS the cheap
+    // form — its body inlines to a `Prim2` or a direct native call — so it takes the same
+    // cached-arm path as any other closure.
     let arm = compiled_arm_for(heap, id, argc)?;
     if arm.nrequired != argc || arm.noptional != 0 || arm.rest_slot.is_some() {
         return None;

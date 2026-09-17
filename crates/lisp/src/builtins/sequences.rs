@@ -88,6 +88,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         range_count,
     );
     primitives.def(
+        "%range-bounds",
+        Arity::exact(1),
+        Sig::new(vec![list_ty], vec_ty),
+        &["r"],
+        "The [lo hi step] of a lazy range. Internal: the compiler's counted-loop rewrite of a fold over a range reads its bounds once through this (ADR-360 §7).",
+        range_bounds,
+    );
+    primitives.def(
         "%range->list",
         Arity::exact(1),
         Sig::new(vec![list_ty], list_ty),
@@ -691,6 +699,18 @@ pub(super) fn range_make(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
 /// so this is false for them — the empty case takes the ordinary list path.)
 pub(super) fn range_pred(args: &[Value], _: EnvId, _heap: &mut Heap) -> LispResult {
     Ok(Value::boolean(matches!(arg(args, 0), Value::Range(_))))
+}
+
+/// `(%range-bounds rng)` — `[lo hi step]`, for the compiler's counted-loop rewrite of a
+/// fold over a range (ADR-360 §7); it reads them once, then loops without the range.
+pub(super) fn range_bounds(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    match arg(args, 0) {
+        Value::Range(id) => {
+            let (lo, hi, step) = heap.range_parts(id);
+            Ok(heap.alloc_vector(vec![Value::int(lo), Value::int(hi), Value::int(step)]))
+        }
+        v => Err(LispError::wrong_type(heap, "%range-bounds", "range", v)),
+    }
 }
 
 /// `(%range-count rng)` — the element count of a range, O(1).

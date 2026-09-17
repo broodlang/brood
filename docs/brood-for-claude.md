@@ -606,6 +606,10 @@ path:
           (fold (neighbours cell) counts (fn (c n) (assoc c n (+ 1 (get c n 0)))))))
   ```
 
+  The lazy pipeline below and a `fold` over a `(range …)` with a literal `fn` compile
+  to one native counted loop (ADR-360 §7), so the streaming spelling is also the fast
+  one — there is no faster hand-written form to reach for.
+
   Write the tally as `(assoc m k (+ (get m k 0) e))` — that shape, with a literal `0`
   default; `(inc (get m k 0))`, `dec` and `(- (get m k 0) e)` count too — and the
   compiler builds the map in place (ADR-360: no per-update path copy, and the loop

@@ -891,10 +891,36 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-17** — call convention rung A4, first half: the callee nils its own locals (unrolled, before the stack guard) and the inline call's fill loop is gone — 380 → 321 instructions per call on a six-local callee, `bintree` −4.5%, everything else inside its floor.
 - **2026-09-17** — KI-156: no `letrec` loop in the language had its `SelfCall` — the self-name's own capture slot read as a shadowing local — 300 → 4–13 ms on a 3M-iteration local loop; every named local loop, `defseq`'s, and the `for` macro's pipeline were running through a full dispatch per iteration.
 - **2026-09-17** — KI-157: a native loop never saw a pending memory limit (E0043, the process heap limit, a mailbox overflow are VM-safepoint checks) — the back-edge poll now reports one and the loop deopts to raise it; found the moment letrec loops went native.
+- **2026-09-17** — ADR-360 §7: `seq/l*` pipelines fuse into one literal, a fold over a range is a counted letrec loop, a passthrough reducer takes the HOF fast path — `pipeline` −49% (3 735 → 460 instructions per element), `(fold (range …) 0 (fn …))` 410 → 21 ms; the checker reads the author's code, never the rewrites.
 
 ---
 
 ## Recent — full entries
+
+## 2026-09-17 — pipelines fuse, and a fold over a range is a loop (ADR-360 §7)
+
+With local loops native (KI-156), the pipeline row's 390 ns per element had a shape to be
+rewritten into. The benchmark's `(-> (range n) (seq/lfilter mult35?) (seq/lmap (fn (i) (* i
+i))) (reduce 0 +))` ran as a transducer closure per stage, composed at runtime, called per
+element through a Rust→native gateway, each stage a fast-linked call into the next. Now it
+is one literal over the range, substituted stage bodies with gensym'd parameters (a naive
+substitution captured a later stage's free `x` — the test pins the case), and that literal
+is the body of a counted `letrec` loop over the range's bounds: 3 735 → 460 instructions
+per element, the row −49%. The remaining 460 is mostly the `mult35?` call.
+
+Two more things fell out. `(fold (range 3M) 0 (fn (acc x) (+ acc x)))` read 410 ms — 137 ns
+per element — because `hof_resolve` refused a passthrough-shaped closure ("leave those to
+`dispatch`"), and `dispatch`'s redirect is two `env_get`s and two SmallVec remaps per
+element; a non-passthrough body on the same fold read 25 ns. The refusal is gone: 84 ms
+through the HOF path, 21 ms as the counted loop. And the checker: the first cut rewrote
+`encoding`'s `(fold (range 16) {} …)` into `(if (range? r) <loop> <fold>)` and the checker
+typed the union less precisely than the fold, so `hex-decode` earned a warning it never
+had. The checker holds `NoSourceRewrites` and reads the author's code; the rewrites are
+semantics-preserving, so that is the more precise thing to check anyway.
+
+`make ab --floor --all`: `pipeline` −49%, every other row inside its floor. The fuzzer folds
+each random chain from a pre-built view too — the one shape the rewrite cannot see — and
+sabotaging the filter stage reds 13 of 60.
 
 ## 2026-09-17 — the limits reach a native loop (KI-157)
 

@@ -32,7 +32,14 @@ arms on its first run — run it after any change to the rewrite: `scripts/fuzz/
 the `fold`/`reduce` literal, `seq/frequencies` 523 → 96 ms); (3) remains. Rung A4's first
 half landed the same night (the callee nils its own locals; `bintree` −4.5%); its second
 half (skip the slots the body definitely writes before its first safepoint) and A3/A2 are
-the next rungs — `docs/call-convention.md` §7.**
+the next rungs — `docs/call-convention.md` §7. Then KI-156 (letrec loops were never
+`SelfCall`), KI-157 (a native loop never saw a memory limit) and ADR-360 §7 (pipeline
+fusion + the counted range loop, `pipeline` −49%; a passthrough reducer on the HOF path).
+What §7 leaves: the fused loop still CALLS a symbol stage (`mult35?`, ~300 of its 460
+instructions per element) — leaf splicing of that call in the loop arm's deferred upgrade
+is the next number; a `fold` with a literal over a LIST or VECTOR still pays the
+per-element Rust→native gateway (~25 ns) — a counted loop over a vector by index is the
+same rewrite again with `%vector-ref`, and a list walk with `first`/`rest`.**
 
 **Next possible wins on this seam, in order:** (1) the same tally through `fold` with a
 closure — `(fold xs {} (fn (m x) (assoc m x (+ 1 (get m x 0)))))` is what `brood-for-claude.md`

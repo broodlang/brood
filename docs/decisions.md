@@ -23089,6 +23089,30 @@ only through an undocumented name is not a language feature; it is a benchmark t
    rewritten, which is what the fuzzer's oracle stands on. 750k keys: the fold 957 → 98
    ms, `seq/frequencies` 523 → 96 ms once written as the idiom.
 
+7. **Pipelines fuse, a fold over a range is a counted loop, and a passthrough reducer takes
+   the HOF fast path** (2026-09-17). `(-> (range n) (seq/lfilter p) (seq/lmap f) (reduce 0
+   +))` ran at ~390 ns per element: a transducer closure per stage composed at runtime,
+   called per element through a Rust→native gateway, each stage a fast-linked call into
+   the next. Three rewrites on the expanded form (`macroexpand_all`, in this order): a
+   `seq/lmap`/`lfilter`/`lreject`/`lkeep` chain under a `fold`/`reduce` becomes ONE literal
+   over the base — a literal stage substituted with its parameter renamed to a fresh gensym
+   (`beta_reduce`; a literal that rebinds its parameter or quotes anything is bound and
+   called instead), a symbol stage called by name, anything else bound once in source
+   order; the tally rewrite (§6); and `(fold (range …) INIT (fn (acc x) BODY))` — or a
+   fused pipeline whose base is a range — becomes `(if (range? r) <counted letrec loop over
+   %range-bounds> (fold r …))`. A `letrec` loop is a `SelfCall` loop the JIT runs native
+   (KI-156). The checker never sees these rewrites (`NoSourceRewrites`): it checks the
+   author's code, and the original infers at least as precisely. And `hof_resolve` no
+   longer refuses a passthrough-shaped closure (`(fn (acc x) (+ acc x))` took the generic
+   dispatch: two redirects per element, 137 ns; its compiled arm is a `Prim2`, 25 ns).
+   `pipeline` 3 735 → 460 instructions per element, the row −49%; `(fold (range 3M) 0 (fn
+   (acc x) (+ acc x)))` 410 → 21 ms; a `fold` over a 1M vector with a literal 141 → 42 ms.
+   Guards: `crates/lisp/tests/linmap_idiom.rs` (the expansions, the declines),
+   `tests/pipeline_fusion_test.blsp` (values under both arms and every tier — capture
+   safety, evaluation order and count, empty and negative ranges, the errors),
+   `scripts/fuzz/generators/pipeline.py` (the same chain folded from a pre-built view, which
+   the rewrite cannot see; sabotage of the filter stage reds 13 of 60).
+
 **Consequences.** `wordcount` 857 → 66 ms and `persistent-map` 535 → 79 ms on the idiomatic
 ports (`make ab --floor`, every other row noise); the benchmark rows are now the code a user
 writes and the primitive has no reason to exist in user code. Guards: the expansion is pinned

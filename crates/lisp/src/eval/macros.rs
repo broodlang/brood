@@ -2037,10 +2037,587 @@ pub fn macroexpand(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
 /// to expand. Code inside a `~unquote` still expands when the quasiquote runs.
 pub fn macroexpand_all(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
     let expanded = macroexpand_all_depth(heap, form, env, 0)?;
-    // A tally through `fold`/`reduce` with a literal `fn` builds in place too (ADR-360 §6):
-    // decided on the fully expanded form, because the rewrite must know no binder in it
-    // shadows the names it relies on, and only the whole form can say so.
-    Ok(linmap_fold_rewrite(heap, expanded))
+    if SOURCE_REWRITES_OFF.with(|c| c.get()) {
+        return Ok(expanded);
+    }
+    // Three source rewrites on the fully expanded form — each decided on the WHOLE form,
+    // because each reads names by spelling and must know no binder in the form shadows
+    // them, and only the whole form can say so. In order: a `seq/l*` stage chain under a
+    // `fold`/`reduce` fuses into one literal (§7); a tally through a `fold`/`reduce` literal
+    // builds in place (ADR-360 §6); a `fold` over a literal `(range …)` with a literal `fn`
+    // becomes a counted `letrec` loop (§7).
+    let fused = pipeline_fuse_rewrite(heap, expanded);
+    let tallied = linmap_fold_rewrite(heap, fused);
+    Ok(range_fold_rewrite(heap, tallied))
+}
+
+thread_local! {
+    static SOURCE_REWRITES_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// While alive on this thread, `macroexpand_all` expands without the optimiser's source
+/// rewrites (the pipeline fusion, the tally rewrite, the counted range loop). The CHECKER
+/// holds one: it checks the author's code, and the rewrites are semantics-preserving, so
+/// the original is what its diagnostics and its inference should read — a rewritten
+/// `(fold (range 16) {} …)` became `(if (range? r) <letrec loop> <fold>)`, whose union the
+/// checker typed less precisely than the fold alone, and `encoding/hex-decode` picked up
+/// a warning it had never earned (2026-09-17). The evaluator never holds one.
+pub struct NoSourceRewrites {
+    was: bool,
+}
+
+impl NoSourceRewrites {
+    pub fn enter() -> Self {
+        let was = SOURCE_REWRITES_OFF.with(|c| c.replace(true));
+        NoSourceRewrites { was }
+    }
+}
+
+impl Drop for NoSourceRewrites {
+    fn drop(&mut self) {
+        SOURCE_REWRITES_OFF.with(|c| c.set(self.was));
+    }
+}
+
+// ===================== pipeline fusion + the counted range loop (ADR-360 §7) ==============
+//
+// `(-> (range n) (seq/lfilter p) (seq/lmap f) (reduce 0 +))` is what the pocket reference and
+// the benchmarks write, and what it ran was: a transducer closure per stage, composed at
+// runtime, called per element through a Rust→native gateway, each stage a fast-linked call
+// into the next — ~390 ns per element against ~2 ns for the same work in a `defn` loop. The
+// two rewrites below take the shape the compiler can prove and turn it into that loop:
+//
+//   1. FUSION. A chain of `seq/lmap` / `seq/lfilter` / `seq/lreject` / `seq/lkeep` stages
+//      under a `fold`/`reduce` becomes ONE literal over the base collection: each stage's
+//      function is bound once (in the source's evaluation order) and called per element, or
+//      — when it is a literal `(fn (p) E)` — substituted in place with `p` renamed to a fresh
+//      gensym (`beta_reduce`), so no free variable of a later stage can be captured by an
+//      earlier stage's parameter. A literal that rebinds its own parameter inside, or
+//      quotes anything, is not substituted (it is bound and called instead).
+//   2. THE COUNTED LOOP. `(fold (range …) INIT (fn (acc x) BODY…))` becomes a `letrec` loop
+//      over the range's bounds (read once through `%range-bounds`), guarded by `range?` so
+//      an empty range (nil) and any other value take the ordinary `fold`. A letrec loop is
+//      a `SelfCall` loop the JIT runs native (KI-156) — the fold's per-element gateway is
+//      gone, and the literal's body is the loop body.
+//
+// Both keep every evaluation in source order and evaluate each sub-form once; both decline
+// the whole form when a local binder anywhere in it shadows a name they read.
+
+/// The names the pipeline rewrites read by spelling.
+const PIPELINE_HEADS: [&str; 14] = [
+    "fold",
+    "reduce",
+    "range",
+    "range?",
+    "nth",
+    ">=",
+    "<=",
+    ">",
+    "+",
+    "nil?",
+    "seq/lmap",
+    "seq/lfilter",
+    "seq/lreject",
+    "seq/lkeep",
+];
+
+fn pipeline_names() -> Vec<value::Symbol> {
+    PIPELINE_HEADS.iter().map(|n| value::intern(n)).collect()
+}
+
+/// Is `form` a call `(head …)` of one of `names` with exactly `argc` arguments? Returns the
+/// items.
+fn call_of(heap: &Heap, form: Value, names: &[&str], argc: usize) -> Option<Vec<Value>> {
+    let items = heap.list_to_vec(form).ok()?;
+    let ValueRef::Sym(h) = items.first()?.unpack() else {
+        return None;
+    };
+    (names.iter().any(|n| value::symbol_is(h, n)) && items.len() == argc + 1).then_some(items)
+}
+
+/// A single-clause literal `(fn (p…) body…)` with plain params, no docstring and no
+/// quasiquote: `(params, body forms)`.
+fn plain_fn_literal(heap: &Heap, form: Value) -> Option<(Vec<value::Symbol>, Vec<Value>)> {
+    let items = heap.list_to_vec(form).ok()?;
+    if items.len() < 3
+        || !matches!(items[0].unpack(), ValueRef::Sym(s) if value::symbol_is(s, kw::FN))
+        || fn_is_arity_multi_clause(heap, &items)
+    {
+        return None;
+    }
+    let mut params = Vec::new();
+    for &pv in &form_items(heap, items[1])? {
+        match pv.unpack() {
+            ValueRef::Sym(s)
+                if !value::symbol_is(s, kw::AMP) && !value::symbol_is(s, kw::AMP_OPTIONAL) =>
+            {
+                params.push(s)
+            }
+            _ => return None,
+        }
+    }
+    let body: Vec<Value> = items[2..].to_vec();
+    if body.len() > 1 && matches!(body[0].unpack(), ValueRef::Str(_)) {
+        return None;
+    }
+    if body.iter().any(|&f| form_has_quasiquote(heap, f, 0)) {
+        return None;
+    }
+    Some((params, body))
+}
+
+/// `form` with every free occurrence of `from` replaced by `to`. Only sound when nothing in
+/// `form` rebinds `from` (the caller checks with `form_binds_any`) and nothing is quoted
+/// (`quote` is skipped here; the caller has already declined a quasiquote).
+fn substitute_symbol(heap: &mut Heap, form: Value, from: value::Symbol, to: Value) -> Value {
+    match form.unpack() {
+        ValueRef::Sym(s) if s == from => to,
+        ValueRef::Pair(_) => {
+            let Ok(items) = heap.list_to_vec(form) else {
+                return form;
+            };
+            if let Some(ValueRef::Sym(h)) = items.first().map(|v| v.unpack()) {
+                if value::symbol_is(h, kw::QUOTE) {
+                    return form;
+                }
+            }
+            let out: Vec<Value> = items
+                .iter()
+                .map(|&it| substitute_symbol(heap, it, from, to))
+                .collect();
+            rebuild_list(heap, form, out)
+        }
+        _ => form,
+    }
+}
+
+/// Beta-reduce a plain literal `(fn (p…) body…)` applied to `args` (fresh gensyms, so no
+/// capture is possible): the body with each `p` replaced. `None` when the literal is not
+/// plain, its arity differs, or its body rebinds a parameter — the caller then binds the
+/// literal and calls it instead.
+fn beta_reduce(heap: &mut Heap, fn_form: Value, args: &[Value]) -> Option<Value> {
+    let (params, body) = plain_fn_literal(heap, fn_form)?;
+    if params.len() != args.len() {
+        return None;
+    }
+    if body
+        .iter()
+        .any(|&f| form_binds_any(heap, f, &params, 0) || form_has_quote(heap, f, 0))
+    {
+        return None;
+    }
+    let mut out = if body.len() == 1 {
+        body[0]
+    } else {
+        let mut d = vec![value::sym(kw::DO)];
+        d.extend(body);
+        heap.list(d)
+    };
+    for (&p, &a) in params.iter().zip(args) {
+        out = substitute_symbol(heap, out, p, a);
+    }
+    Some(out)
+}
+
+/// Does `form` contain a `(quote …)` anywhere? A substitution must not reach into data.
+fn form_has_quote(heap: &Heap, form: Value, depth: usize) -> bool {
+    if depth > 256 {
+        return true;
+    }
+    let Ok(items) = heap.list_to_vec(form) else {
+        return false;
+    };
+    if let Some(ValueRef::Sym(h)) = items.first().map(|v| v.unpack()) {
+        if value::symbol_is(h, kw::QUOTE) || value::symbol_is(h, kw::QUASIQUOTE) {
+            return true;
+        }
+    }
+    items.iter().any(|&it| form_has_quote(heap, it, depth + 1))
+}
+
+/// One `seq/l*` stage, in data-flow order.
+enum Stage {
+    Map(Value),
+    Filter(Value),
+    Reject(Value),
+    Keep(Value),
+}
+
+/// Peel `(seq/lmap (seq/lfilter C P) F)` into `(C, [Filter(P), Map(F)])`.
+fn peel_stages(heap: &Heap, form: Value) -> Option<(Value, Vec<Stage>)> {
+    let mut stages = Vec::new();
+    let mut cur = form;
+    loop {
+        let Some(items) = call_of(
+            heap,
+            cur,
+            &["seq/lmap", "seq/lfilter", "seq/lreject", "seq/lkeep"],
+            2,
+        ) else {
+            break;
+        };
+        let ValueRef::Sym(h) = items[0].unpack() else {
+            break;
+        };
+        let f = items[2];
+        stages.push(if value::symbol_is(h, "seq/lmap") {
+            Stage::Map(f)
+        } else if value::symbol_is(h, "seq/lfilter") {
+            Stage::Filter(f)
+        } else if value::symbol_is(h, "seq/lreject") {
+            Stage::Reject(f)
+        } else {
+            Stage::Keep(f)
+        });
+        cur = items[1];
+    }
+    if stages.is_empty() {
+        return None;
+    }
+    stages.reverse(); // innermost first = data order
+    Some((cur, stages))
+}
+
+/// Does `form` hold a stage chain under a `fold`/`reduce`? The cheap pre-check.
+fn form_has_pipeline(heap: &Heap, form: Value, depth: usize) -> bool {
+    if depth > 256 {
+        return false;
+    }
+    let Ok(items) = heap.list_to_vec(form) else {
+        return false;
+    };
+    if let Some(ValueRef::Sym(h)) = items.first().map(|v| v.unpack()) {
+        if value::symbol_is(h, kw::QUOTE) || value::symbol_is(h, kw::QUASIQUOTE) {
+            return false;
+        }
+        if (value::symbol_is(h, "fold") || value::symbol_is(h, "reduce"))
+            && items.len() == 4
+            && peel_stages(heap, items[1]).is_some()
+        {
+            return true;
+        }
+    }
+    items
+        .iter()
+        .any(|&it| form_has_pipeline(heap, it, depth + 1))
+}
+
+/// Rewrite every `(fold|reduce <stage chain over C> INIT RF)` in `form` into
+/// `(let (c C s1 S1 … init INIT rf RF) (fold c init (fn (acc e0) BODY)))` — see the section
+/// comment. Declined for the whole form when a binder in it shadows a name read here.
+fn pipeline_fuse_rewrite(heap: &mut Heap, form: Value) -> Value {
+    if std::env::var_os("BROOD_LINMAP").is_some_and(|v| v == "0") {
+        return form;
+    }
+    if !form_has_pipeline(heap, form, 0) || form_binds_any(heap, form, &pipeline_names(), 0) {
+        return form;
+    }
+    pipeline_walk(heap, form, 0, &|heap, form, items| {
+        pipeline_fuse_call(heap, form, items)
+    })
+}
+
+/// The shared bottom-up walk: children first (so nested shapes are handled on their own),
+/// `quote`d data and `:generated` code left alone, then `at` on the rebuilt call.
+fn pipeline_walk(
+    heap: &mut Heap,
+    form: Value,
+    depth: usize,
+    at: &dyn Fn(&mut Heap, Value, &[Value]) -> Option<Value>,
+) -> Value {
+    if depth > 256 {
+        return form;
+    }
+    let items = match heap.list_to_vec(form) {
+        Ok(v) if !v.is_empty() => v,
+        _ => return form,
+    };
+    if let ValueRef::Sym(h) = items[0].unpack() {
+        if value::symbol_is(h, kw::QUOTE) || value::symbol_is(h, kw::QUASIQUOTE) {
+            return form;
+        }
+        if value::symbol_is(h, "%lint-allow")
+            && matches!(items.get(1), Some(&Value::Keyword(k)) if value::symbol_is(k, "generated"))
+        {
+            return form;
+        }
+    }
+    let rebuilt: Vec<Value> = items
+        .iter()
+        .map(|&it| pipeline_walk(heap, it, depth + 1, at))
+        .collect();
+    let form = rebuild_list(heap, form, rebuilt.clone());
+    at(heap, form, &rebuilt).unwrap_or(form)
+}
+
+fn pipeline_fuse_call(heap: &mut Heap, form: Value, items: &[Value]) -> Option<Value> {
+    let ValueRef::Sym(h) = items[0].unpack() else {
+        return None;
+    };
+    if !(value::symbol_is(h, "fold") || value::symbol_is(h, "reduce")) || items.len() != 4 {
+        return None;
+    }
+    let (base, stages) = peel_stages(heap, items[1])?;
+    let init = items[2];
+    let rf = items[3];
+    // The element flowing through: a map/keep stage binds a new one, a filter/reject stage
+    // passes the same one on.
+    let acc = value::gensym("pipe-acc");
+    let mut elems: Vec<Value> = Vec::with_capacity(stages.len() + 1);
+    elems.push(value::gensym("pipe-e"));
+    for st in &stages {
+        let next = match st {
+            Stage::Map(_) | Stage::Keep(_) => value::gensym("pipe-e"),
+            Stage::Filter(_) | Stage::Reject(_) => *elems.last().expect("e0"),
+        };
+        elems.push(next);
+    }
+    // How each stage's function (and the reducer) enters the fused body — decided in the
+    // source's evaluation order (base, each stage outward, init, reducer), binding once
+    // what has to be evaluated:
+    //   - a plain literal `fn` that rebinds none of its parameters and quotes nothing is
+    //     SUBSTITUTED, its parameters renamed to the element gensyms (`beta_reduce`) — so no
+    //     free variable of a later stage can be captured by an earlier stage's parameter;
+    //   - a plain SYMBOL is called by that name (a global head keeps the inline-cache path
+    //     and leaf splicing; a local is immutable, so it is the same value) — the one
+    //     observable difference is a global redefined DURING the fold, which the source
+    //     would not see and this does;
+    //   - anything else is bound to a gensym and called.
+    let mut binds: Vec<Value> = Vec::new();
+    let c_val = value::gensym("pipe-coll");
+    binds.push(c_val);
+    binds.push(base);
+    let mut uses: Vec<Value> = Vec::with_capacity(stages.len()); // the applied form per stage
+    for (k, st) in stages.iter().enumerate() {
+        let f = match st {
+            Stage::Map(f) | Stage::Filter(f) | Stage::Reject(f) | Stage::Keep(f) => *f,
+        };
+        let e_in = elems[k];
+        let applied = if let Some(b) = beta_reduce(heap, f, &[e_in]) {
+            b
+        } else if matches!(f.unpack(), ValueRef::Sym(_)) {
+            heap.list(vec![f, e_in])
+        } else {
+            let v = value::gensym("pipe-stage");
+            binds.push(v);
+            binds.push(f);
+            heap.list(vec![v, e_in])
+        };
+        uses.push(applied);
+    }
+    let init_val = value::gensym("pipe-init");
+    binds.push(init_val);
+    binds.push(init);
+    let last = elems[stages.len()];
+    let mut body = if let Some(b) = beta_reduce(heap, rf, &[acc, last]) {
+        b
+    } else if matches!(rf.unpack(), ValueRef::Sym(_)) {
+        heap.list(vec![rf, acc, last])
+    } else {
+        let v = value::gensym("pipe-rf");
+        binds.push(v);
+        binds.push(rf);
+        heap.list(vec![v, acc, last])
+    };
+    // The fused body, built inside-out: the reducer step on the final element, then each
+    // stage wrapped around it from the last to the first.
+    for (k, st) in stages.iter().enumerate().rev() {
+        let e_out = elems[k + 1];
+        let applied = uses[k];
+        body = match st {
+            Stage::Map(_) => {
+                let bind = heap.list(vec![e_out, applied]);
+                heap.list(vec![value::sym(kw::LET), bind, body])
+            }
+            Stage::Filter(_) => heap.list(vec![value::sym(kw::IF), applied, body, acc]),
+            Stage::Reject(_) => heap.list(vec![value::sym(kw::IF), applied, acc, body]),
+            Stage::Keep(_) => {
+                let bind = heap.list(vec![e_out, applied]);
+                let is_nil = heap.list(vec![value::sym("nil?"), e_out]);
+                let test = heap.list(vec![value::sym(kw::IF), is_nil, acc, body]);
+                heap.list(vec![value::sym(kw::LET), bind, test])
+            }
+        };
+    }
+    let params = heap.list(vec![acc, elems[0]]);
+    let lambda = heap.list(vec![value::sym(kw::FN), params, body]);
+    // A range base takes the counted loop straight away (the base is already bound, so
+    // `range_fold_rewrite` would not see the `(range …)` call).
+    let ValueRef::Sym(acc_sym) = acc.unpack() else {
+        return None;
+    };
+    let ValueRef::Sym(e0_sym) = elems[0].unpack() else {
+        return None;
+    };
+    let call = if is_range_call(heap, base) {
+        range_or_fold(
+            heap,
+            form,
+            c_val,
+            init_val,
+            lambda,
+            acc_sym,
+            e0_sym,
+            &[body],
+        )
+    } else {
+        rebuild_list(
+            heap,
+            form,
+            vec![value::sym("fold"), c_val, init_val, lambda],
+        )
+    };
+    let binds = heap.list(binds);
+    Some(rebuild_list(
+        heap,
+        form,
+        vec![value::sym(kw::LET), binds, call],
+    ))
+}
+
+/// Rewrite every `(fold (range …) INIT (fn (acc x) BODY…))` in `form` into a counted
+/// `letrec` loop over the range's bounds, with the ordinary `fold` kept for a non-range
+/// (an empty range is nil). See the section comment.
+fn range_fold_rewrite(heap: &mut Heap, form: Value) -> Value {
+    if std::env::var_os("BROOD_LINMAP").is_some_and(|v| v == "0") {
+        return form;
+    }
+    if !form_has_range_fold(heap, form, 0) || form_binds_any(heap, form, &pipeline_names(), 0) {
+        return form;
+    }
+    pipeline_walk(heap, form, 0, &|heap, form, items| {
+        range_fold_call(heap, form, items)
+    })
+}
+
+fn is_range_call(heap: &Heap, form: Value) -> bool {
+    (1..=3).any(|n| call_of(heap, form, &["range"], n).is_some())
+}
+
+fn form_has_range_fold(heap: &Heap, form: Value, depth: usize) -> bool {
+    if depth > 256 {
+        return false;
+    }
+    let Ok(items) = heap.list_to_vec(form) else {
+        return false;
+    };
+    if let Some(ValueRef::Sym(h)) = items.first().map(|v| v.unpack()) {
+        if value::symbol_is(h, kw::QUOTE) || value::symbol_is(h, kw::QUASIQUOTE) {
+            return false;
+        }
+        if value::symbol_is(h, "fold")
+            && items.len() == 4
+            && is_range_call(heap, items[1])
+            && plain_fn_literal(heap, items[3]).is_some_and(|(p, _)| p.len() == 2)
+        {
+            return true;
+        }
+    }
+    items
+        .iter()
+        .any(|&it| form_has_range_fold(heap, it, depth + 1))
+}
+
+/// The counted `letrec` loop over the range bound to `r`, folding `body` (which reads the
+/// literal's own parameter names `acc_name`/`elem_name`) from `init`:
+///
+/// ```text
+/// (let (B (%range-bounds r) LO (nth B 0) HI (nth B 1) STEP (nth B 2))
+///   (letrec (L (fn (I A) (if (if (> STEP 0) (>= I HI) (<= I HI))
+///                          A
+///                          (L (+ I STEP) (let (acc_name A elem_name I) body…)))))
+///     (L LO init)))
+/// ```
+///
+/// `%range-reduce`'s loop, in Brood: `i < hi` / `i > hi` by the step's sign, `i + step` per
+/// iteration (a `+` past i64 promotes and the compare then stops the loop, as the Rust
+/// loop's checked add did). A `letrec` loop is a `SelfCall` loop the JIT runs native.
+fn counted_range_loop(
+    heap: &mut Heap,
+    r: Value,
+    init: Value,
+    acc_name: value::Symbol,
+    elem_name: value::Symbol,
+    body: &[Value],
+) -> Value {
+    let bounds = value::gensym("rng-bounds");
+    let lo = value::gensym("rng-lo");
+    let hi = value::gensym("rng-hi");
+    let step = value::gensym("rng-step");
+    let loop_name = value::gensym("rng-loop");
+    let i = value::gensym("rng-i");
+    let acc = value::gensym("rng-acc");
+    let up = heap.list(vec![value::sym(">"), step, Value::int(0)]);
+    let done_up = heap.list(vec![value::sym(">="), i, hi]);
+    let done_down = heap.list(vec![value::sym("<="), i, hi]);
+    let done = heap.list(vec![value::sym(kw::IF), up, done_up, done_down]);
+    let next_i = heap.list(vec![value::sym("+"), i, step]);
+    let rebind = heap.list(vec![
+        Value::symbol(acc_name),
+        acc,
+        Value::symbol(elem_name),
+        i,
+    ]);
+    let mut step_body = vec![value::sym(kw::LET), rebind];
+    step_body.extend_from_slice(body);
+    let step_form = heap.list(step_body);
+    let recur = heap.list(vec![loop_name, next_i, step_form]);
+    let branch = heap.list(vec![value::sym(kw::IF), done, acc, recur]);
+    let loop_params = heap.list(vec![i, acc]);
+    let loop_fn = heap.list(vec![value::sym(kw::FN), loop_params, branch]);
+    let loop_binds = heap.list(vec![loop_name, loop_fn]);
+    let start = heap.list(vec![loop_name, lo, init]);
+    let letrec = heap.list(vec![value::sym(kw::LETREC), loop_binds, start]);
+    let get_bounds = heap.list(vec![value::sym("%range-bounds"), r]);
+    let nth0 = heap.list(vec![value::sym("nth"), bounds, Value::int(0)]);
+    let nth1 = heap.list(vec![value::sym("nth"), bounds, Value::int(1)]);
+    let nth2 = heap.list(vec![value::sym("nth"), bounds, Value::int(2)]);
+    let b_binds = heap.list(vec![bounds, get_bounds, lo, nth0, hi, nth1, step, nth2]);
+    heap.list(vec![value::sym(kw::LET), b_binds, letrec])
+}
+
+/// `(if (range? r) <counted loop> (%lint-allow :generated (fold r init lambda)))`.
+fn range_or_fold(
+    heap: &mut Heap,
+    form: Value,
+    r: Value,
+    init: Value,
+    lambda: Value,
+    acc_name: value::Symbol,
+    elem_name: value::Symbol,
+    body: &[Value],
+) -> Value {
+    let looped = counted_range_loop(heap, r, init, acc_name, elem_name, body);
+    let is_range = heap.list(vec![value::sym("range?"), r]);
+    let slow = rebuild_list(heap, form, vec![value::sym("fold"), r, init, lambda]);
+    let slow = heap.list(vec![
+        value::sym("%lint-allow"),
+        value::kw("generated"),
+        slow,
+    ]);
+    heap.list(vec![value::sym(kw::IF), is_range, looped, slow])
+}
+
+fn range_fold_call(heap: &mut Heap, form: Value, items: &[Value]) -> Option<Value> {
+    let ValueRef::Sym(h) = items[0].unpack() else {
+        return None;
+    };
+    if !value::symbol_is(h, "fold") || items.len() != 4 || !is_range_call(heap, items[1]) {
+        return None;
+    }
+    let (params, body) = plain_fn_literal(heap, items[3])?;
+    if params.len() != 2 {
+        return None;
+    }
+    let r = value::gensym("rng");
+    let init = value::gensym("rng-init");
+    let choose = range_or_fold(heap, form, r, init, items[3], params[0], params[1], &body);
+    let outer = heap.list(vec![r, items[1], init, items[2]]);
+    Some(rebuild_list(
+        heap,
+        form,
+        vec![value::sym(kw::LET), outer, choose],
+    ))
 }
 
 fn macroexpand_all_depth(heap: &mut Heap, form: Value, env: EnvId, depth: u32) -> LispResult {

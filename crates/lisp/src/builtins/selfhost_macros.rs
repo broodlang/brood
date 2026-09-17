@@ -153,6 +153,7 @@ pub(super) fn macroexpand_1(args: &[Value], env: EnvId, heap: &mut Heap) -> Lisp
 /// `nil` when nothing is provably wrong. Advisory only: it never raises.
 pub(super) fn check_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let root = heap.env_root(env);
+    let _plain = crate::eval::macros::NoSourceRewrites::enter();
     let form = crate::eval::macros::macroexpand_all(heap, arg(args, 0), root)?;
     let warnings = crate::types::check::check_form(heap, form);
     let mut out = Vec::with_capacity(warnings.len());
