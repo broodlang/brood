@@ -10,12 +10,30 @@ needing one is queued in [`perf-handoff.md`](perf-handoff.md) instead — curren
 high-priority item: whether KI-114's `as_f64_pair` holds the closure KI-109 got from the
 promotion it constrained.
 
-## 2026-09-17 later — C9 and C10 closed, KI-162 fixed, and the pre-push hook was inert; next is C11
+## 2026-09-17 later — C9, C10 and C11 closed, KI-162 fixed, and the pre-push hook was inert; next is C12
 
-**Verified on the tree as pushed (`bfa6b56b`):** 598/598 across `types::`, `sig_placement`,
-`doc_refs` and both checker differentials; `nest check --strict` 0 warnings + the 8 known
-advisory notes; `nest format --check` clean; clippy `--all-targets --all-features -D
-warnings` clean; `make prepush` clean (by hand — see the hook note below).
+**C11 (ADR-365) — `(seqable T)`.** A sequence of `T` whichever shape carries it:
+`nil | list<T> | vector<T> | set<T>`, which is exactly what `stats/median` and
+`stats/percentile` were spelling out by hand. The four members **merge into one term**
+(they differ only by tag), so no element machinery is new — `elem_ty_union` already read
+that shape, which is why a body checks the moment the spelling exists. `stats/min`/`max`
+drop their `(check-allow :trusted …)` and are checked. **`map` and `bytes` are out on
+purpose** and the reason is worth keeping: their elements come from the KIND (`[k v]`
+entries, octets), and with them the union is six terms against a `MAX_TY_TERMS` of four,
+where the collapse would widen the element type away silently. So `(seqable T) ⊆ seqable`.
+
+Two things the work turned up, both older than it: **`(set T)` had no `type-matches?` arm
+at all**, so that contract had been accepting anything since element types shipped; and
+`set` was missing from `TYPE_HEADS`, so `(set)` reported "unknown type constructor" instead
+of an arity mistake. Both fixed here. The rule that found them is worth repeating — a
+grammar the checker enforces and the contract does not is A5's trusted-declaration problem
+with extra steps, so **write the `type-matches?` arm in the same change as the parser arm**.
+
+**Verified on the tree as pushed:** 593/593 `types::`; `tests/contract_test.blsp` 93/93;
+`nest check --strict` 0 warnings + the 8 known advisory notes; `nest format --check` clean;
+clippy `--all-targets --all-features -D warnings` clean. Earlier in the session, at
+`bfa6b56b`: 598/598 across `types::`, `sig_placement`, `doc_refs` and both checker
+differentials.
 
 **C9 (ADR-364) is closed**, verification and docs and all: 585/585 `types::`, both mechanisms
 sabotage-verified (the `MAP_BIT` arm reds the two record pins alone, `enumerated_int_range`
@@ -70,9 +88,9 @@ float argument makes that false — the declaration is part of the claim. Three 
 `check/tests/declarations.rs`, sabotage-verified three ways. **C13 lost its rationale** with
 it (it was "do it with C10 if C10 needs it"; C10 did not) — it now needs a case of its own.
 
-**Next, in order:** **C11** (element-typed `seqable` — the `elem` refinement stops at
-`pair | vector`), then C12–C17 in list order (`docs/type-system-status.md` § "The remaining
-list"). **KI-150** is
+**Next, in order:** **C12** (relations between two locals beyond `i < |xs|` — a relational
+domain, so do the shapes the corpora show rather than the domain) and C13–C17 in list order
+(`docs/type-system-status.md` § "The remaining list"). **KI-150** is
 reopened by the column refresh below (the checker costs ~10% more per file and every `brood
 file` pays it) and is the other live thread; its first candidate is caching inferred
 signatures in the stdlib image.

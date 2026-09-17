@@ -554,6 +554,16 @@ pub fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
             if value::symbol_is(head, "set") && items.len() == 2 {
                 return Some(Ty::set_of(parse_type(heap, items[1])?));
             }
+            // (seqable E) — a SEQUENCE of `E`, whichever shape it is built as: `nil |
+            // list<E> | vector<E> | set<E>` (C11, ADR-365). Bare `seqable` carries no
+            // element type, and the longhand `(or (list E) (vector E) (set E))` is what
+            // authors wrote instead — `stats/percentile` still shows it. `map` and `bytes`
+            // are in bare `seqable` and NOT here: their element types are fixed by the
+            // kind (`[k v]` entries, octets), so neither is a collection of an arbitrary
+            // `E`. See `Ty::seqable_of`.
+            if value::symbol_is(head, "seqable") && items.len() == 2 {
+                return Some(Ty::seqable_of(parse_type(heap, items[1])?));
+            }
             // (or A B …) — a union.
             if value::symbol_is(head, "or") && items.len() >= 2 {
                 let mut acc: Option<Ty> = None;
@@ -686,8 +696,9 @@ pub fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
 /// [`parse_type`]'s dispatch (which is the authority); a head added there and not
 /// here would be reported as unknown, so `sig_grammar_heads_are_all_validated`
 /// pins the two lists together.
-pub(super) const TYPE_HEADS: [&str; 11] = [
-    "list", "vector", "or", "and", "not", "map", "tuple", "record", "rec", "int", "len",
+pub(super) const TYPE_HEADS: [&str; 13] = [
+    "list", "vector", "set", "seqable", "or", "and", "not", "map", "tuple", "record", "rec", "int",
+    "len",
 ];
 
 /// Why this type-expression can't be read as a type, or `None` if it can.
@@ -825,6 +836,14 @@ pub(super) fn type_expr_problem(heap: &Heap, form: Value) -> Option<String> {
                     "`list` takes one element type, or two or more position types".to_string()
                 }
                 "vector" => "`vector` takes exactly one element type".to_string(),
+                // `set` was missing from `TYPE_HEADS` until 2026-09-17, so `(set)` — a
+                // KNOWN constructor with the wrong arity — reported "unknown type
+                // constructor `set`". Only a head that fails to parse reaches here, which
+                // is why the omission never mislabelled a correct `(set int)`.
+                "set" => "`set` takes exactly one element type".to_string(),
+                "seqable" => {
+                    "`seqable` takes exactly one element type, or is used bare".to_string()
+                }
                 "map" => "`map` takes exactly two types — a key and a value".to_string(),
                 "or" => "`or` needs at least one member type".to_string(),
                 _ => format!("malformed `{head_name}` type"),
@@ -987,6 +1006,10 @@ fn parse_type_term(heap: &Heap, form: Value, vars: &mut HashMap<String, u32>) ->
             if value::symbol_is(head, "set") && items.len() == 2 {
                 let inner = parse_type_term(heap, items[1], vars)?;
                 return Some(SigTerm::SetOf(Box::new(inner)));
+            }
+            if value::symbol_is(head, "seqable") && items.len() == 2 {
+                let inner = parse_type_term(heap, items[1], vars)?;
+                return Some(SigTerm::SeqableOf(Box::new(inner)));
             }
             // `(record [&open] :k T …)` with a `?var` in some field: the same grammar
             // `parse_type` accepts, each field parsed as a term. With no variable anywhere
