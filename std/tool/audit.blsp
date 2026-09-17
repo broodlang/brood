@@ -195,12 +195,18 @@ A name with no recognisable pair is vacuously true.
   ;; parameters, which is how a type-blind check misreads `fold`. Braces and brackets
   ;; nest too: a record shape `{day: int, ...}` is ONE parameter, and counting only
   ;; parens reported every record accessor in `datetime`/`editor/buffer` as a mismatch.
+  ;; Angle brackets too: a parametric type RENDERS as `map<any, nil | list<any>>`, one
+  ;; parameter with a comma inside — read as two, `multimap/multimap` (a one-field record
+  ;; whose field is such a map) was a mismatch the moment its sig said so (2026-09-17). The
+  ;; `>` of an arrow `->` is not a close; only a `>` not preceded by `-` nests out.
   (if (>= acc (string/length text))
     (reverse (cons (string/trim cur) out))
-    (let (ch (string/char-at text acc))
+    (let (ch (string/char-at text acc)
+          prev (if (> acc 0) (string/char-at text (- acc 1)) ""))
       (cond
-        (includes? ["(" "[" "{"] ch) (split-top text (+ depth 1) (+ acc 1) (str cur ch) out)
+        (includes? ["(" "[" "{" "<"] ch) (split-top text (+ depth 1) (+ acc 1) (str cur ch) out)
         (includes? [")" "]" "}"] ch) (split-top text (- depth 1) (+ acc 1) (str cur ch) out)
+        (and (= ch ">") (not (= prev "-"))) (split-top text (- depth 1) (+ acc 1) (str cur ch) out)
         (and (= ch ",") (= depth 0))
           (split-top text depth (+ acc 1) "" (cons (string/trim cur) out))
         else (split-top text depth (+ acc 1) (str cur ch) out)))))
