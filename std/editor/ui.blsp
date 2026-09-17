@@ -531,16 +531,32 @@ re-raises, surfacing a genuine startup bug instead of spinning."
                         drained (if (get model :coalesce-input?)
                                   (ui-drain-input next0 update display cols rows *ui-input-batch*)
                                   [next0 nil])
-                        next (first drained)
-                        pending (second drained))
+                        next1 (first drained)
+                        pending (second drained)
+                        ;; A due timer fires on THIS turn too, not only when the poll times
+                        ;; out. Without this a timer is an idle callback rather than a
+                        ;; timer: while input keeps arriving the poll never returns nil, so
+                        ;; a non-idle timer starves for as long as the stream lasts. That is
+                        ;; exactly when an app needs it — a wheel's kinetic glide, a drag, a
+                        ;; key held down are all continuous input, and anything paced during
+                        ;; one (an animation, a zoom, a throttled repaint) simply stopped.
+                        ;;
+                        ;; `:idle?` timers are unaffected by construction: their deadline
+                        ;; counts from `:last-input`, which this branch just stamped, so
+                        ;; they still wait for the input to settle. Only a timer that asked
+                        ;; to fire every N ms regardless now actually does.
+                        serviced (if (nil? timers) [nil clock2] (ui-fire timers clock2 (ui-now next1)))
+                        tevent (first serviced)
+                        clock3 (second serviced)
+                        next (if (nil? tevent) next1 (ui-fold update next1 tevent cols rows)))
                     (cond
                       (ui-close-quits? next pending) nil
                       (focus-request? pending)
                         (let (f (get display :focus))
                           (do
                             (when f (f))
-                            (ui-loop next next clock2 view update display)))
-                      else (ui-loop next model clock2 view update display)))))))))))
+                            (ui-loop next next clock3 view update display)))
+                      else (ui-loop next model clock3 view update display)))))))))))
 
 (defn ui-run (model view update display)
   "Run a UI app over `display` (a frontend map): enter it, then loop —

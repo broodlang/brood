@@ -631,3 +631,46 @@
   (test "inside a loop table, a nil key computes and emits no marker"
     (assert= (binding (*ui-memo* {}) (ui-memo nil [:a] (fn () (list (text 1 0 "x")))))
       (list [:text 1 0 "x"]))))
+
+;; ---- a timer fires when it is DUE, not only when input stops -----------------
+;; `ui-loop` used to service timers only on a poll TIMEOUT, so a non-idle timer starved for
+;; as long as input kept arriving — and a continuous stream (a wheel's kinetic glide, a
+;; drag, a held key) is exactly when an app is pacing something with one. bedit's font zoom
+;; applied once at the start of a spin and then stood still while its size climbed.
+;;
+;; The poll here never returns nil: it hands back a queued input, or `:more` (not nil), so
+;; nothing can fire on a timeout. A non-idle timer must still fire; an `:idle?` one must
+;; still wait, because its deadline counts from the input that just landed.
+
+(defn- ui-under-input (spec)
+  "Run `ui-run` against a poll that always has something; the update echoes what it folded
+(`[:saw …]`, drained afterwards) since `ui-run` itself returns the `:leave` result."
+  (let (me (self))
+    (doseq (_ (range 10)) (send me [:input "a"]))
+    (ui-run {:timers {:paced spec} :done false :now-fn (fn () 1000)}
+      (fn (m c r) [])
+      (fn (m input c r)
+        (cond
+          (and (vector? input) (= (first input) :timer)) (do (send me [:saw :tick]) m)
+          (= input :more) (assoc m :done true) ; the queue is empty: stop
+          else (do (send me [:saw :key]) m)))
+      {:enter (fn () nil)
+       :leave (fn () nil)
+       :size (fn () [80 24])
+       :draw (fn (f) nil)
+       ;; never nil — a timeout is the one thing this test must not rely on
+       :poll (fn (ms) (receive ([:input i] i) (after 0 :more)))})))
+
+(describe "timers under continuous input"
+  (test "a non-idle timer fires while input keeps arriving"
+    ;; a frozen clock and an :after-0 timer: due on sight, so the test turns on WHETHER the
+    ;; input turn services timers at all, not on how fast the run happens to be
+    (let (_ (ui-under-input {:after 0})
+          saw (drain-saw ()))
+      (assert= (count (seq/filter saw (fn (x) (= x :key)))) 10)
+      (is (> (count (seq/filter saw (fn (x) (= x :tick)))) 0))))
+  (test "an :idle? timer still waits for the input to settle"
+    (let (_ (ui-under-input {:after 1 :idle? true})
+          saw (drain-saw ()))
+      (assert= (count (seq/filter saw (fn (x) (= x :key)))) 10)
+      (assert= (count (seq/filter saw (fn (x) (= x :tick)))) 0))))
