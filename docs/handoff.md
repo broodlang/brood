@@ -45,6 +45,15 @@ contracts and enforced their contracts), so the rule is verified and the breakag
 Someone should decide whether `sig_placement.rs`'s rationale is still live or has been
 covered by the loader's reserved-name exemption; the gate is right either way.
 
+**Do this first if you push from this machine: the pre-push hook is inert.** A global
+`core.hooksPath` (`~/.config/git/hooks`) replaces `.git/hooks`, so the gate `make hooks`
+installs is never consulted — it holds a deliberate `commit-msg` and no `pre-push`. An
+unformatted commit reached `main` through it today. One line fixes it for every repo:
+`cp scripts/git-hooks/global-pre-push "$(git config --get core.hooksPath)/pre-push"` (+
+`chmod +x`); `make hooks` now prints the warning and the command. And read `make prepush`'s
+**exit status**: piping it to `tail` reports the pipe's, which let the same bad push through
+twice in one session.
+
 **C10 is closed too, by probe rather than by code.** The merely-wider residue had already
 been taken by ADR-350's intervals; what was missing was that anyone had checked. The answer
 worth carrying: the return check is a **mode split** — a *precise* mismatch is named in both

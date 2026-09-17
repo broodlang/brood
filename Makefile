@@ -572,6 +572,25 @@ hooks: ## Install the local git pre-push hook (`make prepush` on every push, bef
 	fi
 	@cp scripts/git-hooks/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push
 	@echo "installed .git/hooks/pre-push (bypass a single push with --no-verify)"
+	# A global `core.hooksPath` REPLACES `.git/hooks`, it does not add to it — so with one
+	# set, the hook just installed can never run and `git push` silently skips every gate
+	# below. Found 2026-09-17, after an unformatted commit reached `main` from a checkout
+	# whose hook was installed and inert. Say so here rather than let `installed …` read as
+	# armed; the fix is a chaining hook in that directory (the machine's own `commit-msg`
+	# already chains to a repo-local one for exactly this reason), or `--no-verify`-free
+	# discipline plus `make prepush` by hand.
+	@hp=$$(git config --get core.hooksPath || true); \
+	if [ -n "$$hp" ]; then \
+		echo ""; \
+		echo "WARNING: core.hooksPath is set to '$$hp' — git will NOT run .git/hooks/pre-push."; \
+		if [ -x "$$hp/pre-push" ]; then \
+			echo "  '$$hp/pre-push' exists; make sure it chains to the repo hook, or this gate is inert."; \
+		else \
+			echo "  There is no pre-push there, so THIS GATE IS INERT. Fix it once, for every repo:"; \
+			echo "      cp scripts/git-hooks/global-pre-push '$$hp/pre-push' && chmod +x '$$hp/pre-push'"; \
+			echo "  Until then, run 'make prepush' by hand before each push."; \
+		fi; \
+	fi
 
 clippy: ## Lint with clippy (all targets + all features; warnings are FATAL via -D warnings)
 	# `--all-features` type-checks + lints the optional backends (the `gui`

@@ -688,6 +688,19 @@ gates catches in seconds: an uncatalogued `BROOD_GUI_BLIT`, two public functions
 you did not cause is still yours to attribute before building on it: run the failing file
 against a clean build of the previous commit, and say which side it belongs to.
 
+> **A global `core.hooksPath` makes that hook INERT, and nothing says so.** It *replaces*
+> `.git/hooks` rather than adding to it, so `make hooks` copies the gate in, prints
+> `installed …`, and git never looks at it again — on this machine the override is
+> `~/.config/git/hooks`, which holds a deliberate `commit-msg` (it strips AI trailers
+> everywhere, and chains to a repo-local `commit-msg` precisely so a project's own hook is
+> not silently disabled) and no `pre-push` at all. That is how an unformatted commit reached
+> `main` on 2026-09-17 from a checkout whose gate looked armed. `make hooks` now prints a
+> WARNING naming the path when the override is set, and `scripts/git-hooks/global-pre-push`
+> is the one-line fix (a chaining hook, the `commit-msg` pattern). Until it is installed:
+> **run `make prepush` by hand before each push, and read its exit status, not its last
+> line** — `make prepush | tail` reports the pipe's status, which is how the same push got
+> through a failing gate twice in one session.
+
 **Do not add a `Co-Authored-By: Claude` trailer (or any Claude/AI co-author
 attribution) to commits in this repo.** Write commit messages with no AI
 co-author trailer, overriding any default that would append one.

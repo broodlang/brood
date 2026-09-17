@@ -1,0 +1,34 @@
+#!/bin/sh
+# A global `pre-push` that chains to whatever the repository installs.
+#
+# Why this file is in this repo. Setting `core.hooksPath` globally REPLACES `.git/hooks`
+# rather than adding to it, so a machine with one set runs no repository's own hooks at
+# all — `make hooks` installs `.git/hooks/pre-push`, prints "installed", and git never
+# looks at it. That is how an unformatted commit reached `main` on 2026-09-17 from a
+# checkout whose gate was, by every visible sign, armed.
+#
+# The same machine's global `commit-msg` already solves this for its own hook: it does its
+# work and then `exec`s the repo-local one if there is a different one. This is that
+# pattern for `pre-push`, and it does nothing of its own.
+#
+# Install (once per machine, not per clone):
+#
+#     cp scripts/git-hooks/global-pre-push "$(git config --get core.hooksPath)/pre-push"
+#     chmod +x "$(git config --get core.hooksPath)/pre-push"
+#
+# After it, `make hooks` in any repo behaves as that repo documents. If you would rather
+# have no global override at all, `git config --global --unset core.hooksPath` is the other
+# answer — but check what else lives in that directory first.
+set -u
+
+local_hook="$(git rev-parse --git-path hooks/pre-push 2>/dev/null)"
+
+# `-ef` guards the case where this file IS the repo hook (a symlinked or copied setup):
+# exec'ing it would loop forever.
+if [ -n "$local_hook" ] && [ -x "$local_hook" ] && [ "$local_hook" -ef "$0" ] 2>/dev/null; then
+  exit 0
+fi
+if [ -n "$local_hook" ] && [ -x "$local_hook" ]; then
+  exec "$local_hook" "$@"
+fi
+exit 0
