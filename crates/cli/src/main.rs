@@ -352,6 +352,9 @@ fn run_check_files(interp: &mut Interp, files: &[String]) {
         eprintln!("brood --check: expected a file, e.g. `brood --check foo.blsp`");
         std::process::exit(2);
     }
+    // A checker verdict from a binary older than the `std/` it resolves against is wrong in
+    // both directions and looks right (B7) — so this entry point declines rather than warns.
+    brood::cli_support::refuse_if_stdlib_is_stale("brood --check");
     let mut warned = false;
     for path in files {
         let src = brood::cli_support::read_source_or_exit("brood", Path::new(path));

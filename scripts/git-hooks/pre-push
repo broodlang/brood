@@ -139,13 +139,15 @@ if [ "$types_touched" -gt 0 ] || [ "$std_changed" -eq 1 ]; then
     echo "pre-push: running the checker gates over std/ tests/ examples/ (zero warnings)" >&2
     # shellcheck disable=SC2086
     set -- $(find std tests examples -name '*.blsp' 2>/dev/null | sort)
+    # `OLDER than`: a nest built before a std/ edit REFUSES to check (B7) — the fix is a
+    # rebuild, not a code change, so the line saying so must reach the screen.
     if ! out=$("$nest_bin" check "$@" 2>&1); then
-        printf '%s\n' "$out" | grep -E 'warning|error' | head -10 | sed 's/^/  /' >&2
+        printf '%s\n' "$out" | grep -E 'warning|error|OLDER than' | head -10 | sed 's/^/  /' >&2
         fail "nest check would fail CI (zero warnings over std/ tests/ examples/)"
     fi
     set -- $(find std tests -name '*.blsp' 2>/dev/null | sort)
     if ! out=$("$nest_bin" check --strict "$@" 2>&1); then
-        printf '%s\n' "$out" | grep -E 'warning|error' | head -10 | sed 's/^/  /' >&2
+        printf '%s\n' "$out" | grep -E 'warning|error|OLDER than' | head -10 | sed 's/^/  /' >&2
         fail "nest check --strict over std/ tests/ would fail CI"
     fi
 fi

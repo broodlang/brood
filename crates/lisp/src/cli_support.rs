@@ -368,20 +368,44 @@ where
 /// no tree to compare against — an installed binary run anywhere is not stale, it is
 /// installed.
 pub fn warn_if_stdlib_is_stale() {
-    let Some(root) = repo_root() else {
-        return; // not running inside a brood checkout: nothing to be stale against
-    };
-    let Some(tree) = stdlib_tree_hash(&root) else {
-        return;
-    };
-    if tree == env!("BROOD_STDLIB_HASH") {
-        return;
+    if let Some(root) = stale_stdlib_root() {
+        eprintln!(
+            "brood: this binary's baked-in std/ is OLDER than {} — it will ignore your \
+             .blsp edits (rebuild, or `make doctor`)",
+            root.display()
+        );
     }
-    eprintln!(
-        "brood: this binary's baked-in std/ is OLDER than {} — it will ignore your \
-         .blsp edits (rebuild, or `make doctor`)",
-        root.display()
-    );
+}
+
+/// **Refuse** to run a checker from a binary whose baked-in standard library is older than
+/// the tree it is running in (B7, 2026-09-17). Exits 2 with the reason.
+///
+/// The checker resolves every `:use`d std module from the binary's baked-in copy, so a
+/// `nest` built before a `sig` edit checks every caller against the OLD declaration: the
+/// edit that should have turned a file red leaves it green, and the edit that fixed a
+/// finding keeps reporting it. Unlike a test run, where the warning above at least sits
+/// beside a result that is usually still right, a checker verdict from the wrong std is
+/// wrong in both directions and reads exactly like a right one — so this entry point does
+/// not warn, it declines. Nothing to compare against (an installed binary outside a
+/// checkout) is not stale.
+pub fn refuse_if_stdlib_is_stale(command: &str) {
+    if let Some(root) = stale_stdlib_root() {
+        eprintln!(
+            "{command}: this binary's baked-in std/ is OLDER than {} — its verdict would be \
+             against the OLD declarations, not the ones on disk, so it is refused. Rebuild \
+             the binary (or `make doctor`) and run again.",
+            root.display()
+        );
+        std::process::exit(2);
+    }
+}
+
+/// The checkout this process runs in, when its `std/**/*.blsp` hashes differently from what
+/// this binary baked in; `None` when they agree or there is no checkout to compare against.
+fn stale_stdlib_root() -> Option<std::path::PathBuf> {
+    let root = repo_root()?; // not inside a brood checkout: nothing to be stale against
+    let tree = stdlib_tree_hash(&root)?;
+    (tree != env!("BROOD_STDLIB_HASH")).then_some(root)
 }
 
 /// The workspace root above `cwd`: the nearest ancestor holding both `Cargo.toml` and a

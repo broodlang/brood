@@ -98,9 +98,10 @@ checked against its body per arm — it found `(math/pow 2.0 0)` answering the i
 under strict; `(check-allow :trusted …)` acknowledges the eleven that genuinely are).
 **A3** is decided as static-only. **B6** landed the same day: every cap the checker hits
 prints one `checker gave up: …` note for the file (advisory, `note:`), and adding it found
-Pass 2.8 had no widening — 34 returns silently `any` at every caller. Next in order: **B7**
-(a stale binary cannot check silently), **B8** (an order-dependence audit + a shuffled-list
-differential), then the C items.
+Pass 2.8 had no widening — 34 returns silently `any` at every caller. **B7** too: `nest
+check`/`brood --check` refuse (exit 2) from a binary whose baked-in std is older than the
+checkout; `nest test` still warns. Next in order: **B8** (an order-dependence audit + a
+shuffled-list differential), then the C items.
 
 **Traps this batch added:** a `check-allow` around a `defn` wraps the DEFINITION for the
 return check — an inner `(check-allow :trusted (reduce …))` suppresses nothing at the

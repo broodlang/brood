@@ -197,7 +197,7 @@ if [ "$do_local" = 1 ]; then
     else
       red "nest check std/ + tests/ + examples/"
       (shopt -s globstar nullglob; "$nest" check std/**/*.blsp tests/**/*.blsp examples/**/*.blsp 2>&1) |
-        grep "warning:" | head -8 | sed 's/^/       /'
+        grep -E "warning:|OLDER than" | head -8 | sed 's/^/       /'
     fi
 
     # The STRICT gate over std/ — a separate CI job, and one this script did not run
@@ -212,7 +212,7 @@ if [ "$do_local" = 1 ]; then
     else
       red "nest check --strict std/ tests/"
       (shopt -s globstar nullglob; "$nest" check --strict std/**/*.blsp tests/**/*.blsp 2>&1) |
-        grep "warning:" | head -8 | sed 's/^/       /'
+        grep -E "warning:|OLDER than" | head -8 | sed 's/^/       /'
     fi
   fi
 

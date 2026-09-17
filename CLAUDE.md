@@ -922,7 +922,10 @@ grammar for :elixir", which reads as a regression and is not.
 - **Confirm the binary is fresh before believing any result.** A `cargo build` killed by a
   command timeout leaves the old binary in place; the runtime says `this binary's baked-in
   std/ is OLDER than …` on stderr, which a grep for failures filters away. Two diagnoses were
-  made against a stale build before this was noticed.
+  made against a stale build before this was noticed. **`nest check` and `brood --check`
+  REFUSE from a stale binary** (exit 2, since 2026-09-17): the checker resolves every `:use`d
+  std module from the baked-in copy, so its verdict from the wrong std is wrong in both
+  directions and reads like a right one. A test run still only warns.
 
 ## Known next steps (see roadmap)
 

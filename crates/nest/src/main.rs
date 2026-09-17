@@ -341,6 +341,14 @@ fn run_blsp(max_parallel: Option<usize>, argv: Vec<String>) {
     }
     brood::core::alloc::init_limits_from_env();
     brood::cli_support::warn_nondefault_gc_env();
+    if argv.first().map(String::as_str) == Some("check") {
+        // `nest check` resolves every `:use`d std module from THIS binary's baked-in copy,
+        // so from a binary older than the tree its verdict is against the old declarations
+        // — green over an edit that should red, red over the edit that fixed it — and reads
+        // exactly like a right one. A test run gets a warning (`arm_test_env`; its result
+        // is usually still right); a checker run is refused (B7).
+        brood::cli_support::refuse_if_stdlib_is_stale("nest check");
+    }
     arm_test_env(&argv);
     let mut interp = Interp::new();
     // `complete` runs on a keypress: read an image if there is one, never spend the

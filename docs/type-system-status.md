@@ -1280,10 +1280,15 @@ each lands; this section is the working list, `handoff.md` points at it.
       cause is inherent. Pass 2.8 gained the joint loop's widening on the way (34 std/tests
       returns were "still moving" the day the note went in; 0 now). `check/tests/caps.rs`;
       sabotage: dropping the widening reds the fixpoint pin.
-- [ ] **B7. A stale binary cannot check silently.** `nest check` resolves a `:use`d std
-      module from the binary's baked-in std; a `nest` built before a sig edit checks
-      against the old declaration. Refuse, or warn on every run, on a stdlib-id mismatch
-      between the binary and the tree.
+- [x] **B7. A stale binary cannot check silently** (2026-09-17). `nest check` and
+      `brood --check` REFUSE (exit 2, the reason and the fix named) inside a checkout whose
+      `std/**/*.blsp` hashes differently from what the binary baked in — the mechanism
+      `--test`/`nest test` already used to *warn*. Refuse rather than warn because a
+      checker verdict from the wrong std is wrong in both directions and reads like a right
+      one; a test result usually is not, so the runner keeps its warning (pinned as a
+      separate policy). Outside a checkout nothing is stale. The pre-push hook and
+      `make green` surface the refusal line. `crates/nest/tests/stale_binary_refuses_to_check.rs`;
+      sabotage: dropping the call reds it.
 - [ ] **B8. An order-dependence audit.** KI-158 found two hash-order channels by accident.
       One deliberate pass over the checker's `HashMap`/`HashSet` iterations that feed a
       verdict, and a second differential gate: the same list in shuffled order, and two
@@ -1391,3 +1396,22 @@ honest.
 `check/tests/caps.rs` pins the opaque note (once per file, the only diagnostic), the depth
 note, and that a structurally growing return widens without one — the last reds when the
 widening is removed. `tests/contract_test.blsp` pins the classification.
+
+## B7 — a stale binary cannot check silently (2026-09-17)
+
+`std/**/*.blsp` is baked into the binary, and the checker resolves every `:use`d std module
+from that copy. So a `nest` built before a `sig` edit checks every caller against the old
+declaration: the edit that should have turned a file red leaves it green, the edit that
+fixed a finding keeps reporting it, and nothing about the output says which std it read.
+`--test` and `nest test` had a warning for the same condition (`BROOD_STDLIB_HASH`, the
+build-time content hash, recomputed from the tree); a test result from an older binary is
+usually still right, so a warning beside it is proportionate. A checker verdict is not —
+it is wrong in both directions and reads exactly like a right one — so `nest check` and
+`brood --check` now **refuse** with exit 2, naming the checkout, the reason, and the fix
+(rebuild). An installed binary outside any checkout has nothing to be stale against and
+runs as before.
+
+Two policies, deliberately: refuse for the checker, warn for the runner. The gate pins both
+so they cannot silently become one. The pre-push hook and `make green` print the refusal
+line when a check fails (their failure filters showed only `warning:` lines, which would
+have reported a refused run as a check with no findings that somehow exited nonzero).
