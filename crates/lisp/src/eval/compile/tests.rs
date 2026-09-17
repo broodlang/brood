@@ -2372,6 +2372,9 @@ fn the_vector_base_hoist_is_off_for_any_allocating_arm() {
 #[cfg(feature = "jit")]
 #[test]
 fn a_letrec_loop_is_a_self_call_and_a_shadowed_name_is_not() {
+    // Under `BROOD_VM=0` (CI's tree-walker job) there is no VM arm to inspect: force the
+    // ceiling, as the tiering test below does.
+    set_forced_ceiling(Some(Tier::Native));
     let mut interp = crate::Interp::new();
     let chunk_of = |interp: &mut crate::Interp, src: &str| -> Vec<String> {
         let f = interp.eval_str(src).expect("build the closure");
