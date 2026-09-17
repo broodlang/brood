@@ -356,6 +356,12 @@ pub(super) fn jit_ckpt_depth(
                     _ => false,
                 }
             }
+            // The pure 3-ary map ops (ADR-367): pop three, push one, no effect to journal —
+            // a deopt re-run recomputes a read or a fresh map, never a second store.
+            Inst::Prim3 {
+                op: PrimOp3::MapGet3 | PrimOp3::MapAssoc,
+                ..
+            } => d >= 3 && merge(&mut depth, &mut work, ip + 1, d - 2),
             Inst::MakeVector(n) => d >= *n && merge(&mut depth, &mut work, ip + 1, d - n + 1),
             Inst::MakeMap(n) => d >= 2 * n && merge(&mut depth, &mut work, ip + 1, d - 2 * n + 1),
             Inst::MakeClosure { names, .. } => {
@@ -474,11 +480,9 @@ pub(super) fn chunk_in_jit_subset(code: &[Inst]) -> bool {
         Inst::Prim2 { op, .. } | Inst::Prim2SlotSlot { op, .. } | Inst::Prim2SlotInt { op, .. } => {
             in_subset_op(op)
         }
-        // `table-put` — lowered as one runtime-callback call (brood_rt_table_put).
-        Inst::Prim3 {
-            op: PrimOp3::TablePut,
-            ..
-        } => true,
+        // `table-put`, `(get m k default)`, `(assoc m k v)` — each lowered as one
+        // runtime-callback call (`brood_rt_table_put` / `_map_get3` / `_map_assoc`).
+        Inst::Prim3 { .. } => true,
         // A vector literal `[a …]`. Arity 2 (bintree's `make`) lowers via the inline
         // `brood_rt_vec2_room`; a wider literal (nbody's `[vx vy vz]` / 7-body
         // rebuild) stages its elements into a Cranelift stack slot and calls the
@@ -731,7 +735,10 @@ pub(super) mod codegen {
                     PrimOp::Cons | PrimOp::TableGet | PrimOp::TableHas | PrimOp::VectorRef
                 )
             }
-            Inst::Prim3 { .. } => true, // table-put: the store deep-copies key and value
+            // table-put deep-copies key and value; `assoc` path-copies a fresh trie. The
+            // 3-arity map READ is the one 3-ary op that provably allocates nothing — the
+            // same `Heap::map_get` reasoning as `MapGet` above.
+            Inst::Prim3 { op, .. } => !matches!(op, PrimOp3::MapGet3),
             Inst::MakeVector(_) | Inst::MakeMap(_) | Inst::MakeClosure { .. } => true,
             _ => false,
         }
@@ -804,6 +811,12 @@ pub(super) mod codegen {
                 matches!(op, PrimOp::Cons)
             }
             Inst::MakeVector(_) | Inst::MakeMap(_) | Inst::MakeClosure { .. } => true,
+            // `(assoc m k v)` allocates a fresh trie path per call — a hot loop of them is a
+            // GC-quiet builder only if the back-edge safepoint can fire (ADR-367).
+            Inst::Prim3 {
+                op: PrimOp3::MapAssoc,
+                ..
+            } => true,
             _ => false,
         }
     }

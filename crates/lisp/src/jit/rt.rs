@@ -683,6 +683,73 @@ pub unsafe extern "C" fn brood_rt_global_epoch(heap: *mut Heap) -> i64 {
     (*heap).global_epoch() as i64
 }
 
+/// `(get m k default)` on a CHAMP map — the native half of `PrimOp3::MapGet3` (ADR-367).
+/// Status 0 = the answer is in `*out`; 1 = decline (a non-map receiver, or a record's nil
+/// result, which `get`'s `%lookup-miss` owns). The rule is `Heap::map_get3_inline`, shared
+/// with the VM's `Inst::Prim3` arm. Pure: a CHAMP probe allocates nothing.
+///
+/// # Safety
+/// `heap`/`out` live; the word triples are bytes the JIT read out of real `Value`s.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_map_get3(
+    heap: *mut Heap,
+    out: *mut crate::core::value::Value,
+    m0: i64,
+    m1: i64,
+    m2: i64,
+    k0: i64,
+    k1: i64,
+    k2: i64,
+    d0: i64,
+    d1: i64,
+    d2: i64,
+) -> i64 {
+    use crate::core::value::Value;
+    let h = &mut *heap;
+    let Value::Map(id) = words_to_val(m0, m1, m2) else {
+        return 1;
+    };
+    match h.map_get3_inline(id, words_to_val(k0, k1, k2), words_to_val(d0, d1, d2)) {
+        Some(v) => {
+            *out = v;
+            0
+        }
+        None => 1,
+    }
+}
+
+/// `(assoc m k v)` on a CHAMP map — the native half of `PrimOp3::MapAssoc` (ADR-367).
+/// Status 0 = the fresh map is in `*out`; 1 = decline (a non-map receiver — the wrapper's
+/// `%vector-assoc` branch and its errors stay in Brood). `Heap::map_assoc` path-copies the
+/// touched nodes: it ALLOCATES (the planner's `inst_may_allocate`/`inst_allocates_hot` say
+/// so) but, like every allocation reached from native code, never collects, so the
+/// caller's register-held handles stay valid.
+///
+/// # Safety
+/// `heap`/`out` live; the word triples are bytes the JIT read out of real `Value`s.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_map_assoc(
+    heap: *mut Heap,
+    out: *mut crate::core::value::Value,
+    m0: i64,
+    m1: i64,
+    m2: i64,
+    k0: i64,
+    k1: i64,
+    k2: i64,
+    v0: i64,
+    v1: i64,
+    v2: i64,
+) -> i64 {
+    use crate::core::value::Value;
+    let h = &mut *heap;
+    let Value::Map(id) = words_to_val(m0, m1, m2) else {
+        return 1;
+    };
+    *out = h.map_assoc(id, words_to_val(k0, k1, k2), words_to_val(v0, v1, v2));
+    0
+}
+
 /// `(get m k)` on a CHAMP map — the native half of [`PrimOp::MapGet`].
 ///
 /// Status protocol, matching [`brood_rt_table_get2`]: **0** = the answer is in `*out`;

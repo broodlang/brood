@@ -908,6 +908,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-17** — C11 (ADR-365): `(seqable T)` — a sequence of `T` whichever shape carries it (`nil | list<T> | vector<T> | set<T>`), which is exactly the union `stats/median` and `stats/percentile` were spelling out by hand. The four members merge into ONE term, so no element machinery is new — a body checks the moment the spelling exists, and `stats/min`/`max` lose their `(check-allow :trusted …)`. `map` and `bytes` are deliberately out (their elements come from the kind, and six terms would overflow `MAX_TY_TERMS` and silently widen the element type away), so `(seqable T) ⊆ seqable`. Writing the runtime contract for it found `(set T)` had **no `type-matches?` arm at all** — a declared `(set int)` contract had been checking nothing since element types shipped — and that `set` was missing from `TYPE_HEADS`, so `(set)` read as an unknown constructor rather than an arity mistake. Five pins, sabotage-verified five ways.
 - **2026-09-17** — KI-163 / ADR-366: a body compiled before its module lazily loaded kept its pre-load shape (generic call where the eager compile inlines `PrimOp::Rem`) for the whole process, and the JIT leaf upgrade read stale forever — the `BROOD_NO_CHECK=1` 2.8× oddity of the afternoon. The load that a miss triggers now marks the arm; the cache lookups evict and recompile it, and a running `SelfCall` loop adopts it through the hot-reload guard. `pipeline` no-check 591M → 184M instructions (eager 183M); the loop 302M → 163M. Two new dev probes, `%vm-arm-ops` / `%vm-arm-stale?`; two guards, sabotage-verified.
 - **2026-09-17** — KI-150 measured, not guessed: the checker's Rust is ~3% of a `brood --check`; the cost is eager MATERIALISATION — `(seq/lmap …)`, a prelude binding, loaded `seq` + `map`/`math`/`reflect`/`string` (138M vs 75M). The eager drain now skips a module whose recorded names are all bound (138 → 82M; verdicts unchanged, both directions guarded). What remains (`math/rem`'s module pulling four more in, ~70M of `pipeline`'s 145M check) is the structural option: inferred std signatures carried in the image. Also: KI-162 was already closed by `3fd89869`; B7's std-tree hash costs ~10% of a check run INSIDE the checkout.
+- **2026-09-17** — ADR-367: `(get m k default)` and `(assoc m k v)` on a map are instructions (`PrimOp3::MapGet3`/`MapAssoc`, VM arm + one JIT callback each): a loop of two reads 1124 → 172 ms per 2M (281 → 43 ns a read), an `assoc` loop 921 → 590 ms (460 → 295 ns). Differential over every branch at every tier + a settle-to-native check; `BROOD_NO_MAPASSOC` is the allocating op's own lever. Found on the way: a map literal inside a hot arm bails the arm (`MakeMap` is not in the JIT subset).
 - **2026-09-17** — the pre-push hook has been INERT on this machine: a global `core.hooksPath` *replaces* `.git/hooks`, so `make hooks` installs a gate git never consults — and the override directory holds a deliberate `commit-msg` (which chains to a repo-local one for exactly this reason) and no `pre-push`. Found when an unformatted commit reached `main` through a gate that reported "installed". `make hooks` now WARNS with the path, `scripts/git-hooks/global-pre-push` is the chaining fix, and CLAUDE.md records the second half of it: `make prepush | tail` reports the PIPE's exit status, not the gate's.
 - **2026-09-17** — C10 answered by probe and closed with no checker change: ADR-350's intervals and the int-closed/float-contagion rules had already taken the merely-wider residue, and the answer is a **mode split** neither mode shows alone — a *precise* mismatch (float contagion, exact division, an interval arithmetic cannot fit) is named in both modes; an *over-approximated* one (a call's result) is named under `--strict` and deferred in plain, the gradual valve. The residue itself lands there: `(sig f (number -> int))` over `(+ x 1)` IS reported under strict, because the declaration is part of the claim — a parameter admitting floats makes the promise false with no analysis of the body. Fourteen provable shapes silent in both modes, so the false positive it was left silent for does not occur. Three pins, sabotage-verified three ways (strict never/always applies reds the split in opposite directions; the return check disabled reds both warning pins).
 - **2026-09-17** — KI-162: `nest check --fix-sigs` wrote every `sig` ABOVE its `defn`, the one placement `sig_placement.rs` forbids tree-wide. The locator reads the CST now (`sig-defn-sites`: root children, each node's newlines counted for the extent), so the sig lands one past the form's last line, a head laid out across lines is located instead of skipped, and "top level" is *root child* rather than *column 0* — a `check-allow`-wrapped `defn` still declines. Recorded beside the fix: the load failure the rule exists for **did not reproduce** (forward sigs over `defn`, `defn-` and a wrapped pair all loaded under contracts and enforced the contract), so the rule is what is verified, not the breakage.
@@ -14342,3 +14343,30 @@ would load nothing it does not run. ~70M of `pipeline`'s 145M check. KI-150 stay
 that decision, now with a number.
 
 KI-162 turned out closed already (`3fd89869`, this evening), entry and table both updated.
+
+## 2026-09-17 — the 3-arity `get` and `assoc` become instructions (ADR-367)
+
+Handoff item 1, taken as written. `PrimOp3` gains `MapGet3` and `MapAssoc` beside
+`TablePut`; `resolve_prim3` recognises `get` at three arguments and `assoc` by head while the
+head is the PRELUDE closure (the `get`/`nth` rule of `resolve_prim`), the VM runs them in the
+`Prim3` arm, and the JIT lowers each as one callback of `table_put`'s shape through a shared
+`emit_prim3_callback`. The inline rules are as narrow as `MapGet`'s: `Heap::map_get3_inline`
+is `get`'s own arm — a present non-nil value or a non-nil default is answered, a nil result
+declines for a record so `%lookup-miss` keeps the `Lookup` ability; `assoc` answers a map
+receiver only. `MapAssoc` allocates from native code (never collects — `alloc_slot!` only
+grows), so it is on `inst_may_allocate` and `inst_allocates_hot`, and has its own lever.
+
+Measured in one process, 2M iterations, release-fast: two 3-arity reads per iteration
+**1124 → 172 ms** (281 → 43 ns a read), one `assoc` **921 → 590 ms** (460 → 295 ns); at the VM
+ceiling 956 → 296 and 943 → 645; `make ab --floor` against `9565d911`: `supervisor` **−4.6%**
+(floor 1.9%; −4.5% at the VM ceiling), every other row inside its floor. The linear-map
+fusion had to be kept in mind: it matches `(assoc acc k (+ (get acc k 0) 1))` as CALL
+shapes, so the two ops are lowered in a LAST Node pass (`inline::lower_map_prim3`), after the
+rewrite and its `def`-time probe have seen the calls — `linmap_idiom`'s `a_constant_key_fuses`
+was the test that said so. The differential (`crates/cli/tests/mapprim3_differential.rs`)
+runs every branch of both wrappers with the prims on and off at every tier, and a second case
+settles the two hot arms and asserts `:native` — which is how a map LITERAL in a hot arm was
+found to bail the whole arm (`MakeMap` is outside the JIT subset; `nbody`'s literal vectors
+lower, its map twin would not). Also met on the way: the disk filled (`target/debug/deps`
+at 72 GB, 4143 generations of test binaries — the memory note's number, now measured) and
+truncated a test file to zero bytes mid-write; deleted, rebuilt.

@@ -197,7 +197,13 @@ green yet**, and what remains is not this session's — it is the B6–B8 checke
 flat except for the checker's own cost; `c9428cba` had reached `std/regex`/`std/json`.)**
 
 **Then, the perf queue, in value order** (all from the supervisor decomposition in the
-afternoon section below; each is general, none is supervisor-specific):
+afternoon section below; each is general, none is supervisor-specific). **Item 1 is DONE
+(ADR-367, night of 2026-09-17):** `(get m k d)` 281 → 43 ns a read, `(assoc m k v)` 460 →
+295 ns, both instructions at both tiers, differential-guarded. Two things found doing it: a
+**map literal inside a hot arm bails the arm** — `MakeMap` is not in the JIT subset, only
+`MakeVector` is — so `(get {:a 1} …)` in a loop runs interpreted for good (a cheap, general
+lever: lower `MakeMap` as `brood_rt_make_map`, `MakeVector`'s shape); and `assoc`'s remaining
+295 ns is the path-copy itself plus the callback, the same floor `%map-assoc` has.
 
 1. **The 3-arity `(get m k default)` and `(assoc m k v)` prims** — ~1.5 µs of the 16.4 µs left
    per `start-child`, and they land on every record read-with-default and every record update

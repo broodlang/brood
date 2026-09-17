@@ -293,7 +293,36 @@ fn force(heap: &mut Heap, step: Step) -> LispResult {
 /// permutation (unlike `Node::Prim2`'s `map`), so a wrapper that reorders its parameters
 /// must decline rather than silently compile the arguments in the wrong order.
 fn resolve_prim3(heap: &Heap, h: Symbol) -> Option<PrimOp3> {
-    let nid = match heap.env_get(heap.global(), h)?.unpack() {
+    let v = heap.env_get(heap.global(), h)?;
+    // The two map ops (ADR-367), by head — the 3-ary twins of `PrimOp::MapGet`'s `get`
+    // rule: accepted only while the head still resolves to the PRELUDE closure, so a user
+    // `(def get …)` cleanly disables the inline and the epoch guard re-validates on a
+    // redefinition. `get`'s 3-arity is `%map-get` then `%lookup-miss` on a nil, which
+    // `Heap::map_get3_inline` mirrors; `assoc`'s single-pair arm is `%map-assoc` for a map
+    // and `%vector-assoc` for a vector, and only the map half is inlined.
+    if crate::core::value::symbol_is(h, "get") {
+        if !inline::mapget_enabled() {
+            return None;
+        }
+        return match v.unpack() {
+            ValueRef::Fn(id) if id.region() == crate::core::value::PRELUDE => {
+                Some(PrimOp3::MapGet3)
+            }
+            _ => None,
+        };
+    }
+    if crate::core::value::symbol_is(h, "assoc") {
+        if !inline::mapassoc_enabled() {
+            return None;
+        }
+        return match v.unpack() {
+            ValueRef::Fn(id) if id.region() == crate::core::value::PRELUDE => {
+                Some(PrimOp3::MapAssoc)
+            }
+            _ => None,
+        };
+    }
+    let nid = match v.unpack() {
         ValueRef::Native(id) => id,
         ValueRef::Fn(id) => {
             let (inner_head, map) = crate::eval::passthrough_arm(heap, id, 3)?;

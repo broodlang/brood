@@ -366,16 +366,41 @@ pub(crate) fn exec_chunk(
                 };
                 let mut done = None;
                 if inlinable {
-                    if let ValueRef::Table(tid) = sa.unpack() {
-                        // Same key guard as the native — a closure/NaN key raises the
-                        // identical error; a non-Table first operand defers below.
-                        crate::core::table::check_key("table-put", sb)
-                            .map_err(|e| tag_pos(e, *pos))?;
-                        crate::perf_bump!(prim2_inline);
-                        done = Some(
-                            crate::core::table::put(heap, tid, sb, sc)
-                                .map_err(|e| tag_pos(e, *pos))?,
-                        );
+                    match op {
+                        PrimOp3::TablePut => {
+                            if let ValueRef::Table(tid) = sa.unpack() {
+                                // Same key guard as the native — a closure/NaN key raises
+                                // the identical error; a non-Table first operand defers
+                                // below.
+                                crate::core::table::check_key("table-put", sb)
+                                    .map_err(|e| tag_pos(e, *pos))?;
+                                crate::perf_bump!(prim2_inline);
+                                done = Some(
+                                    crate::core::table::put(heap, tid, sb, sc)
+                                        .map_err(|e| tag_pos(e, *pos))?,
+                                );
+                            }
+                        }
+                        // `(get m k default)` on a map (ADR-367): `Heap::map_get3_inline`
+                        // is the rule; a record's nil result and every non-map receiver
+                        // defer to the real `get` below.
+                        PrimOp3::MapGet3 => {
+                            if let ValueRef::Map(mid) = sa.unpack() {
+                                if let Some(v) = heap.map_get3_inline(mid, sb, sc) {
+                                    crate::perf_bump!(prim2_inline);
+                                    done = Some(v);
+                                }
+                            }
+                        }
+                        // `(assoc m k v)` on a map (ADR-367): the kernel path-copy directly;
+                        // a vector (or anything else) defers to the wrapper's own branches.
+                        // The operands stay rooted at n-3..n across the allocation.
+                        PrimOp3::MapAssoc => {
+                            if let ValueRef::Map(mid) = sa.unpack() {
+                                crate::perf_bump!(prim2_inline);
+                                done = Some(heap.map_assoc(mid, sb, sc));
+                            }
+                        }
                     }
                 }
                 match done {
