@@ -51,13 +51,20 @@
 ;; (runs alone — no cross-talk with other tests' spawns/GCs).
 (defn mcpt-burst (n) (when (> n 0) (spawn (+ 1 1)) (mcpt-burst (- n 1))))
 
+;; The burst SPREAD across the watcher's window: `rounds` small bursts `gap` ms apart, so
+;; some spawn/exit lands inside the window however late the watcher's subscription starts.
+;; A single burst 5 ms after the spawn was seen to come and go before a loaded CI runner
+;; scheduled the watcher (KI-155) — a slow runner, not a lost event.
+(defn mcpt-spread (rounds gap)
+  (when (> rounds 0) (sleep gap) (mcpt-burst 3) (mcpt-spread (- rounds 1) gap)))
+
 (describe "mcp watch-runtime tool"
   :isolated (test "collects spawn/exit runtime events over a window"
     ;; a burst of trivial short-lived processes, from a helper process (so the
     ;; watcher — this test process — sees their :spawn/:exit, not its own). The window
     ;; is generous: it was 300 ms, and the tree-walker differential job on a loaded
     ;; runner saw the burst land outside it (count 0) — a slow runner, not a lost event.
-    (spawn (do (sleep 5) (mcpt-burst 12)))
+    (spawn (mcpt-spread 20 25))
     (let (r (mcp/watch-runtime-tool {:ms 1500})
           evs (get r :events)
           kinds (map evs (fn (e) (get e :kind))))
@@ -67,7 +74,7 @@
       ;; every event carries the documented shape
       (is (every? evs (fn (e) (and (contains? e :kind) (contains? e :pid) (contains? e :detail)))))))
   (test "the :filter selects only the requested kinds"
-    (spawn (do (sleep 5) (mcpt-burst 10)))
+    (spawn (mcpt-spread 20 25))
     (let (r (mcp/watch-runtime-tool {:ms 1500 :filter {:exit true}})
           evs (get r :events))
       (is (> (count evs) 0))
