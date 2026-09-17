@@ -236,8 +236,6 @@ tower, not just the int `0`. A type with no impl RAISES rather than answering.
 
 (defn pow (base exp)
   "`base` raised to integer `exp`. A negative exponent gives the reciprocal — **exact**
-(sig pow (number int -> number))
-
 (a ratio) for an exact `base`, a float for a float `base`.
 
     (math/pow 2 10)        → 1024"
@@ -245,6 +243,15 @@ tower, not just the int `0`. A type with no impl RAISES rather than answering.
     (not (int? exp)) (error "pow: exponent must be an integer (use sqrt for roots), got " exp)
     (< exp 0) (pow-reciprocal base exp)
     else (pow-acc base exp 1)))
+;; An int base to a non-negative exponent stays an int (overflow raises), and a unit base
+;; (`1`, `-1`) is exact under ANY integer exponent — its reciprocal is itself; a float base
+;; stays a float; only another exact base under a negative exponent leaves its kind (a
+;; ratio). The arms meet at a call (ADR-116), so `(pow b 3)` on an int reads `int`.
+(sig pow
+  (and (int (int 0 _) -> int)
+    ((or (int -1 -1) (int 1 1)) int -> int)
+    (float int -> float)
+    (number int -> number)))
 
 ;; A negative exponent used to be `(/ 1 (pow base (- exp)))`, which loses the whole
 ;; subnormal range: when the *positive* power overflows, `1/inf` is 0.0, so

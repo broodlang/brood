@@ -512,7 +512,7 @@
 ;; ops (bodyless specs) inherits every provided op; an id-keyed impl of a provided op
 ;; overrides its default. `circle`/`rect` (declared above) are ordered here by radius/area.
 (defability Ranked
-  (rcmp [self other] :-> int) ; required
+  (rcmp [self other] :-> number) ; required (`other` is untyped, so a difference is `number`)
   (rlt [self other] :-> bool (< (rcmp self other) 0)) ; provided
   (rgt [self other] :-> bool (> (rcmp self other) 0)) ; provided
   (rle [self other] :-> bool (<= (rcmp self other) 0))) ; provided

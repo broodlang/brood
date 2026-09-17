@@ -542,6 +542,14 @@ impl Ty {
             return None;
         }
         if let Some((r, without)) = self.len_for_source() {
+            // A non-empty list under a length spells as `(list E)` inside the `(len …)`:
+            // the interval already excludes 0 (`with_len` drops the `nil`), where the
+            // bare non-empty spelling nested a second `(len (list E) 1 _)` inside.
+            let without = if without.contains_tag(Tag::Pair) && !without.contains_tag(Tag::Nil) {
+                without.union(Ty::of(Tag::Nil))
+            } else {
+                without
+            };
             let inner = without.to_source()?;
             return Some(format!(
                 "(len {inner} {} {})",

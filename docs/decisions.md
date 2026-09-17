@@ -7743,6 +7743,17 @@ runtime closure/native, same as any other `Fn`/`Native`-tagged value; `overload`
 purely a static refinement. Supersedes nothing; closes the Step 5+ "Gaps to parity"
 item ADR-078 deferred.
 
+**Addendum 2026-09-17 — several matching arms MEET.** The first cut unioned the
+results of every arm the arguments fit; the meet is the reading the declaration
+actually makes (`f : (A→B) ∧ (C→D)` on an `x ∈ A ∩ C` is in `B ∩ D`), and the union
+had made a catch-all arm cancel every sharper one it overlapped — `math/pow`'s `(number
+int -> number)` beside `(int (int 0 _) -> int)` read `number` at *every* call, so the
+sharp arm was inert (and `pow` had in fact declared nothing for nineteen days: its `sig`
+line sat inside its docstring, the slip `crates/lisp/tests/sig_placement.rs` now gates).
+The clause-INFERRED overload keeps the union (`resolve_clause_overload_ret`): the runtime
+takes the first admitting clause, so the union is the sound reading there. Verified by
+`refinement::overlapping_overload_arms_meet_at_a_call`.
+
 ## ADR-117 — Int-literal types: `5` as a type, the first slice of ADR-105's deferral
 
 **Status:** accepted; **shipped 2026-07-05** ([`types.md`](types.md) Step 5+,

@@ -10,6 +10,58 @@ needing one is queued in [`perf-handoff.md`](perf-handoff.md) instead — curren
 high-priority item: whether KI-114's `as_f64_pair` holds the closure KI-109 got from the
 promotion it constrained.
 
+## 2026-09-17 — the type-system housekeeping is done; buckets 1 and 3 remain
+
+The four "ongoing" items the 09-15 review left on the type-system list, closed (the
+narrative: `devlog.md` and `type-system-status.md`, both dated 2026-09-17):
+
+- **`tests/` is at zero strict and a gate** (CI, `make green`, the pre-push hook), from
+  32 findings. Half were the checker's — closed with pins: a declared overload's matching
+  arms MEET (ADR-116 addendum), an assertion's `(pr-str (quote …))` is not an escape (no
+  private function under a test had ever been derived), `record?` is a one-sided guard,
+  `range`/`into`/`map` keep their lengths, `bit/and` a mask's bound, `nth` a computed
+  index's interval, `:keys`/`:or` lowers to `(get m k default)`, a cross-module value sig
+  is read by inference. One was the library's: **`math/pow` had declared nothing for
+  nineteen days** — its `sig` sat inside its docstring; `sig_placement.rs` now reads every
+  docstring with the reader. A deliberate mismatch in a test says so with
+  `(check-allow :type-mismatch …)`; a read that assumes non-emptiness spells it
+  `(or (first xs) (error …))`, which narrows.
+- **The checker cost**: measured first (`BROOD_DERIVE_DBG` prints per file where the time
+  goes), then the lever the 09-13 note named — the site walk memoised per form
+  (`sigs::SiteCache`): 73% of walks reused, `std/` 11.0 → 8.8 s, `tests/` 13.5 → 12.3 s
+  (debug), verdicts identical by `nest::derivation_cache_differential` (~45 s; sabotage
+  reds it). If it needs to come down further: the alias walks (0.9 s, whole by design —
+  the relations set between them are what the scopes are built from) and the per-round
+  return re-inference (~1.6 s) are what is left in the joint fixpoint.
+- **KI-158**, found by that differential and fixed the same day: the joint fixpoint was
+  never a function of the file — a specialization memo outliving its round, the returns
+  re-read in hash order — so the same file inferred `(int 0 2)` five runs out of six.
+  The differential now holds it to one answer.
+- **`sig` adoption** is closed as an item, not by adopting: `1a8759fb` (09-16) REMOVED 323
+  sigs the checker infers verbatim, and KI-150 measured a declaration as a cost saving
+  on a short-lived run only where inference is heavy. The rule now is declare at the leaf
+  the checker cannot read (`*test-wait-ms*` is milliseconds; `pow`'s unit base) and where
+  a pre-flight would otherwise re-infer a decoder — not in bulk.
+
+**Not done here, by design:** the bedit smoke with `--bump` (it runs bedit's whole suite —
+elsewhere; bedit's strict is 0 against this checker as of 09-16, and the `BEDIT_REF` pin
+to bedit 0.4.4 `a99f69d0` is the one step left). KI-150's structural options (inferred
+sigs cached in the stdlib image, or a pre-flight skipping inference for imaged std
+modules) stay a watch until the benchmark refresh reads the row.
+
+**Next on the type system, the review's bucket 1 (both large, both waiting on a use
+case): return-type dispatch** (item 5: selecting an impl by the expected return —
+bidirectional inference; `protocol-dispatch-design.md`) and **tier-2 monomorphization**
+(item 7: devirtualizing an inferred-variable op call — the checker→compiler channel over
+ADR-294's sound Tier 1 base and its differential). Bucket 3's ADR-011 items (parametric
+abilities, view patterns, inline `sig`s in `defn`) still have no consumer asking.
+
+**Traps this session added:** a `(sig …)` inserted after "line 1 of the defn" lands inside
+the docstring when the docstring is line 1 — nothing but the new gate says so; the
+checker WAS nondeterministic across runs before KI-158, so any two-run comparison from
+before today that differed by one widening was noise; `perf stat` is locked down on this
+box (`perf_event_paranoid=4`) — pin with `taskset` and take best-of-N wall time instead.
+
 ## 2026-09-17 morning — where things stand after the night's run (read this first)
 
 Landed and pushed, each with its guards and its A/B sweep (newest first): the vector/list

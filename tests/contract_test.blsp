@@ -47,7 +47,7 @@
 (sig! c-sum-list ((list int) -> int))
 
 (defn c-first-vec (v) (first v))
-(sig! c-first-vec ((vector string) -> string))
+(sig! c-first-vec ((vector string) -> (or nil string)))
 
 (describe "element-level sequence type checks"
   (test "(list int) accepts a list of ints"

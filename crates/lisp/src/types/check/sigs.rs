@@ -23,6 +23,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::LazyLock;
 
 use crate::core::heap::{Heap, SymbolMap};
@@ -484,6 +485,17 @@ pub(super) fn fuel_spent() -> u32 {
 /// Reset the per-pass inference memo. `check_file` calls this at the start of each file so
 /// one file's inferred signatures never leak into the next — and, in the long-lived LSP,
 /// so an edit re-infers rather than serving a stale cached sig.
+/// Drop the completed specializations alone — once per JOINT ROUND of Pass 2.9. A
+/// specialization re-types a body under this file's returns and derived parameters as
+/// they stand, and the memo is keyed by `(name, argument types)` only, so an answer
+/// computed in round one (under the floored returns) was handed back in every later
+/// round: the fixpoint's answer depended on which question was asked first, and the
+/// site cache (`SiteCache`), which asks fewer, read different verdicts from the same
+/// file (2026-09-17). The fuel is not reset — it bounds the file, not the round.
+pub(super) fn clear_specializations() {
+    SPECIAL_MEMO.with(|m| m.borrow_mut().clear());
+}
+
 pub(super) fn clear_sig_memo() {
     SIG_MEMO.with(|m| m.borrow_mut().clear());
     OVERLOAD_MEMO.with(|m| m.borrow_mut().clear());
@@ -2907,6 +2919,8 @@ pub(super) fn caller_derived_params(
     live: &HashMap<Symbol, usize>,
     ctx: &Ctx,
     resume_from: &HashMap<Symbol, Vec<Option<Ty>>>,
+    cache: &mut SiteCache,
+    moved: Option<&HashSet<Symbol>>,
 ) -> HashMap<Symbol, Vec<Option<Ty>>> {
     let targets: HashSet<Symbol> = candidates.keys().copied().collect();
     // A LEAST fixpoint starts at ⊥: the live candidates — those with a site and no
@@ -2931,15 +2945,32 @@ pub(super) fn caller_derived_params(
         })
         .collect();
     let mut older: HashMap<Symbol, Vec<Option<Ty>>> = HashMap::new();
+    // What moved since the cache's last walk: the caller's answer for the first round
+    // (the returns and derived parameters the joint round changed), then the parameters
+    // this round moved — within these rounds the context is fixed, so a form's walk can
+    // change only through its own parameters (`SiteCache`).
+    let mut moved: Option<HashSet<Symbol>> = moved.cloned();
     for round in 0..MAX_DERIVE_ROUNDS {
-        let Some(collected) =
-            collect_private_sites(heap, forms, &targets, candidates, &derived, ctx)
-        else {
+        let Some(collected) = collect_private_sites(
+            heap,
+            forms,
+            &targets,
+            candidates,
+            &derived,
+            ctx,
+            cache,
+            moved.as_ref(),
+        ) else {
             return HashMap::new();
         };
         let mut next: HashMap<Symbol, Vec<Option<Ty>>> = HashMap::new();
-        for (name, sites) in collected.sites {
-            if collected.escaped.contains(&name) || sites.is_empty() {
+        // A fixed order: typing a site spends the file's specialization fuel and fills
+        // its memo, so hash order would make a round's answers depend on the process.
+        let mut names: Vec<Symbol> = collected.names().into_iter().collect();
+        names.sort_by_key(|name| value::symbol_name_ref(*name));
+        for name in names {
+            let sites = collected.sites_of(name);
+            if collected.escaped(name) || sites.is_empty() {
                 continue;
             }
             let arity = sites[0].arity();
@@ -2947,7 +2978,7 @@ pub(super) fn caller_derived_params(
             for site in &sites {
                 for k in 0..arity {
                     if let Some(current) = acc[k].clone() {
-                        acc[k] = site.param_ty(heap, k).map(|t| current.union(t));
+                        acc[k] = site.param_ty(heap, k, ctx).map(|t| current.union(t));
                     }
                 }
             }
@@ -2990,20 +3021,29 @@ pub(super) fn caller_derived_params(
         if next == derived {
             return derived;
         }
+        let changed: HashSet<Symbol> = next
+            .keys()
+            .chain(derived.keys())
+            .copied()
+            .filter(|name| next.get(name) != derived.get(name))
+            .collect();
         if std::env::var_os("BROOD_DERIVE_DBG").is_some() {
-            for (name, tys) in &next {
-                if derived.get(name) != Some(tys) {
-                    let shown: Vec<String> = tys
-                        .iter()
-                        .map(|t| t.as_ref().map_or("?".into(), |t| t.to_string()))
-                        .collect();
-                    eprintln!(
-                        "[derive] round {round} {} -> {shown:?}",
-                        value::symbol_name_ref(*name)
-                    );
-                }
+            for name in &changed {
+                let shown: Vec<String> = next
+                    .get(name)
+                    .map(|tys| {
+                        tys.iter()
+                            .map(|t| t.as_ref().map_or("?".into(), |t| t.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                eprintln!(
+                    "[derive] round {round} {} -> {shown:?}",
+                    value::symbol_name_ref(*name)
+                );
             }
         }
+        moved = Some(changed);
         older = std::mem::replace(&mut derived, next);
     }
     if std::env::var_os("BROOD_DERIVE_DBG").is_some() {
@@ -3058,17 +3098,23 @@ impl Site {
         }
     }
     /// What this site hands parameter `k`: an argument's type in its scope, or the
-    /// combinator's promise.
-    fn param_ty(&self, heap: &Heap, k: usize) -> Option<Ty> {
+    /// combinator's promise. The scope was captured when the site was walked, which may
+    /// be an earlier round (`SiteCache`): its file-level facts — the returns and derived
+    /// parameters every round moves — are re-based on the CURRENT context before the
+    /// argument is typed, so a cached site never reads a stale return.
+    fn param_ty(&self, heap: &Heap, k: usize, ctx: &Ctx) -> Option<Ty> {
         match self {
             Site::Call(args, scope, _) => {
-                super::infer::with_fresh_depth(|| expr_ty(heap, args[k], scope))
+                let scope = scope.with_file_of(ctx);
+                super::infer::with_fresh_depth(|| expr_ty(heap, args[k], &scope))
             }
             Site::Handover(params) => Some(params[k].clone()),
         }
     }
 }
 
+/// One top-level form's sites and escapes.
+#[derive(Default)]
 struct PrivateSites {
     /// Per candidate, every site of the right arity.
     sites: HashMap<Symbol, Vec<Site>>,
@@ -3076,14 +3122,201 @@ struct PrivateSites {
     escaped: HashSet<Symbol>,
 }
 
+/// Every form's sites, read across the parts without merging them (a part is shared with
+/// the cache that may hand it out again next round).
+struct CollectedSites {
+    parts: Vec<Rc<PrivateSites>>,
+}
+
+impl CollectedSites {
+    fn names(&self) -> HashSet<Symbol> {
+        self.parts
+            .iter()
+            .flat_map(|part| part.sites.keys().copied())
+            .collect()
+    }
+    fn escaped(&self, name: Symbol) -> bool {
+        self.parts.iter().any(|part| part.escaped.contains(&name))
+    }
+    fn sites_of(&self, name: Symbol) -> Vec<&Site> {
+        self.parts
+            .iter()
+            .filter_map(|part| part.sites.get(&name))
+            .flat_map(|sites| sites.iter())
+            .collect()
+    }
+}
+
+/// The site walk, memoised per top-level form across the rounds of one file's derivation
+/// (2026-09-17). The walk is the derivation's cost — it re-types every `let` binding and
+/// every guard in the file (`let_bind_scope`, `branch_scopes`) to build the scope each site
+/// is typed in — and it ran whole on every round of every joint round: 4.2 s of the 11 s
+/// `nest check` spent over `std/`, against 0.2 s typing the sites it collected. A form's
+/// walk depends on exactly two moving things: the derived types of its OWN parameters
+/// (bound by the `fn` arm) and, through the scope, the returns and derived parameters of
+/// the candidates its body reaches — transitively, since typing a call re-types the
+/// callee's body under the arguments (`specialize_call`). So a form is re-walked when
+/// either moved, and its last walk is handed out otherwise; the sites' captured scopes are
+/// re-based on the current facts when read (`Site::param_ty`). `BROOD_NO_DERIVE_CACHE=1`
+/// walks everything every round, and `check_derivation_cache_is_inert` runs both over the
+/// tree and requires the same verdicts.
+pub(super) struct SiteCache {
+    /// Per form: the own-parameter types the last walk was under, and its result.
+    walked: Vec<Option<(Option<Vec<Option<Ty>>>, Rc<PrivateSites>)>>,
+    /// Per form: the candidate a top-level `(def name …)` binds.
+    def_of: Vec<Option<Symbol>>,
+    /// Per form: the candidates it reaches, transitively through the candidates' bodies
+    /// (always including the form's own definition).
+    reaches: Vec<HashSet<Symbol>>,
+    /// The file holds an unexpanded macro call: every walk declines.
+    opaque: bool,
+    disabled: bool,
+    /// Walks done and walks saved, for `BROOD_DERIVE_DBG`.
+    pub(super) walks: u32,
+    pub(super) reuses: u32,
+}
+
+impl SiteCache {
+    pub(super) fn new(
+        heap: &Heap,
+        forms: &[Value],
+        candidates: &HashMap<Symbol, Value>,
+    ) -> SiteCache {
+        let def_of: Vec<Option<Symbol>> = forms
+            .iter()
+            .map(|&form| {
+                let items = list_items(heap, form)?;
+                match (items.first(), items.get(1)) {
+                    (Some(&Value::Sym(head)), Some(&Value::Sym(name)))
+                        if value::symbol_is(head, kw::DEF) && candidates.contains_key(&name) =>
+                    {
+                        Some(name)
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
+        // The candidates each form names, by spelling — every symbol in it, quoted or not.
+        let refs: Vec<HashSet<Symbol>> = forms
+            .iter()
+            .map(|&form| {
+                let mut out = HashSet::new();
+                let mut work = vec![form];
+                while let Some(v) = work.pop() {
+                    match v {
+                        Value::Sym(s) => {
+                            if candidates.contains_key(&s) {
+                                out.insert(s);
+                            }
+                        }
+                        Value::Pair(_) => {
+                            if let Some(items) = list_items(heap, v) {
+                                work.extend(items);
+                            }
+                        }
+                        Value::Vector(id) => work.extend(heap.vector(id).iter().copied()),
+                        Value::Map(id) => {
+                            for (k, val) in heap.map_entries(id) {
+                                work.push(k);
+                                work.push(val);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                out
+            })
+            .collect();
+        let refs_of: HashMap<Symbol, &HashSet<Symbol>> = def_of
+            .iter()
+            .zip(&refs)
+            .filter_map(|(name, set)| name.map(|n| (n, set)))
+            .collect();
+        let reaches: Vec<HashSet<Symbol>> = refs
+            .iter()
+            .zip(&def_of)
+            .map(|(direct, own)| {
+                let mut closure: HashSet<Symbol> = direct.clone();
+                closure.extend(*own);
+                let mut work: Vec<Symbol> = closure.iter().copied().collect();
+                while let Some(name) = work.pop() {
+                    if let Some(more) = refs_of.get(&name) {
+                        for &m in more.iter() {
+                            if closure.insert(m) {
+                                work.push(m);
+                            }
+                        }
+                    }
+                }
+                closure
+            })
+            .collect();
+        SiteCache {
+            walked: vec![None; forms.len()],
+            def_of,
+            reaches,
+            opaque: false,
+            disabled: std::env::var_os("BROOD_NO_DERIVE_CACHE").is_some(),
+            walks: 0,
+            reuses: 0,
+        }
+    }
+}
+
 /// The call sites of every candidate across the file's expanded top-level forms, each with
 /// its enclosing scope (see [`self_call_sites`] for the scope rules) — the parameters of a
 /// candidate's own body bound to its CURRENT derived types, a public function's unknown.
 /// `None` when the file holds an unexpanded macro call, which could construct a call the
-/// walk cannot see.
+/// walk cannot see. `moved` names the candidates whose returns or derived parameters
+/// changed since the cache's last walk — `None` when unknown, which walks every form.
 fn collect_private_sites(
     heap: &Heap,
     forms: &[Value],
+    targets: &HashSet<Symbol>,
+    candidates: &HashMap<Symbol, Value>,
+    derived: &HashMap<Symbol, Vec<Option<Ty>>>,
+    ctx: &Ctx,
+    cache: &mut SiteCache,
+    moved: Option<&HashSet<Symbol>>,
+) -> Option<CollectedSites> {
+    if cache.opaque {
+        return None;
+    }
+    let mut parts: Vec<Rc<PrivateSites>> = Vec::with_capacity(forms.len());
+    for (index, &form) in forms.iter().enumerate() {
+        let own: Option<Vec<Option<Ty>>> =
+            cache.def_of[index].and_then(|n| derived.get(&n).cloned());
+        let reusable = !cache.disabled
+            && moved.is_some_and(|moved| moved.is_disjoint(&cache.reaches[index]))
+            && cache.walked[index]
+                .as_ref()
+                .is_some_and(|(walked_under, _)| *walked_under == own);
+        if reusable {
+            cache.reuses += 1;
+            parts.push(
+                cache.walked[index]
+                    .as_ref()
+                    .map(|(_, part)| part.clone())
+                    .expect("checked"),
+            );
+            continue;
+        }
+        let Some(part) = collect_form_sites(heap, form, targets, candidates, derived, ctx) else {
+            cache.opaque = true;
+            return None;
+        };
+        let part = Rc::new(part);
+        cache.walks += 1;
+        cache.walked[index] = Some((own, part.clone()));
+        parts.push(part);
+    }
+    Some(CollectedSites { parts })
+}
+
+/// One top-level form's walk — see [`collect_private_sites`].
+fn collect_form_sites(
+    heap: &Heap,
+    form: Value,
     targets: &HashSet<Symbol>,
     candidates: &HashMap<Symbol, Value>,
     derived: &HashMap<Symbol, Vec<Option<Ty>>>,
@@ -3384,6 +3617,12 @@ fn collect_private_sites(
             if super::walk::resolves_to_macro(heap, self.ctx, head) {
                 // Syntax the expander left as written: it may construct a call the walk
                 // cannot see, so the file's closed-caller premise is gone.
+                if std::env::var_os("BROOD_DERIVE_DBG").is_some() {
+                    eprintln!(
+                        "[derive] OPAQUE: unexpanded macro call ({} …)",
+                        value::symbol_name_ref(head)
+                    );
+                }
                 self.opaque = true;
                 return;
             }
@@ -3433,7 +3672,25 @@ fn collect_private_sites(
             } else {
                 None
             };
+            // A quoted datum handed straight to a PRINTER is text, not a value anything
+            // could call: `(pr-str (quote (assert= 1500 (drive 3000 0))))` is what every
+            // assertion macro expands to for its failure message, and reading `drive`
+            // there as an escape excluded every private function under a test from
+            // derivation — a driver called only from its tests derived from its own
+            // recursion alone and reported `number` on `(- i 1)`.
+            let prints = matches!(items[0], Value::Sym(s)
+                if !scope.is_lexical_local(s)
+                    && (value::symbol_is(s, "pr-str") || value::symbol_is(s, "str")));
             for (i, &it) in items.iter().enumerate().skip(1) {
+                if prints
+                    && list_items(self.heap, it)
+                        .and_then(|l| l.first().copied())
+                        .is_some_and(
+                            |h| matches!(h, Value::Sym(s) if value::symbol_is(s, kw::QUOTE)),
+                        )
+                {
+                    continue;
+                }
                 match &handed {
                     Some((index, sig)) if *index == i => {
                         let Value::Sym(name) = it else { continue };
@@ -3471,11 +3728,9 @@ fn collect_private_sites(
         within: None,
         pending_fn_params: None,
     };
-    for &form in forms {
-        walker.walk(form, ctx, None);
-        if walker.opaque {
-            return None;
-        }
+    walker.walk(form, ctx, None);
+    if walker.opaque {
+        return None;
     }
     Some(walker.out)
 }
@@ -3513,25 +3768,31 @@ pub(super) fn derive_count_aliases(
     };
     let is_self_site = |site: &Site, name: Symbol| matches!(site, Site::Call(_, _, Some(within)) if *within == name);
     let mut relations: HashMap<Symbol, Vec<(usize, usize)>> = HashMap::new();
+    // Every walk here is whole: the relations set on `ctx` between walks are what the
+    // walk's scopes are built from, and the cache does not track them.
+    let mut cache = SiteCache::new(heap, forms, candidates);
+    let none: HashMap<Symbol, Vec<Option<Ty>>> = HashMap::new();
     for _ in 0..MAX_DERIVE_ROUNDS {
         // The external sites, under the previous round's relations.
         ctx.set_derived_count_aliases(relations.clone());
-        let Some(collected) =
-            collect_private_sites(heap, forms, &targets, candidates, &HashMap::new(), ctx)
-        else {
+        let Some(collected) = collect_private_sites(
+            heap, forms, &targets, candidates, &none, ctx, &mut cache, None,
+        ) else {
             relations.clear();
             break;
         };
         let mut candidates_now: HashMap<Symbol, Vec<(usize, usize)>> = HashMap::new();
         for (&name, &arity) in live {
-            let Some(sites) = collected.sites.get(&name) else {
+            let sites = collected.sites_of(name);
+            if sites.is_empty() {
                 continue;
-            };
+            }
             let external: Vec<&Site> = sites
                 .iter()
+                .copied()
                 .filter(|site| !is_self_site(site, name))
                 .collect();
-            if arity < 2 || external.is_empty() || collected.escaped.contains(&name) {
+            if arity < 2 || external.is_empty() || collected.escaped(name) {
                 continue;
             }
             let pairs: Vec<(usize, usize)> = all_pairs(arity)
@@ -3544,17 +3805,18 @@ pub(super) fn derive_count_aliases(
         }
         // The self-sites, under the candidates assumed as well.
         ctx.set_derived_count_aliases(candidates_now.clone());
-        let Some(collected) =
-            collect_private_sites(heap, forms, &targets, candidates, &HashMap::new(), ctx)
-        else {
+        let Some(collected) = collect_private_sites(
+            heap, forms, &targets, candidates, &none, ctx, &mut cache, None,
+        ) else {
             relations.clear();
             break;
         };
         let mut next: HashMap<Symbol, Vec<(usize, usize)>> = HashMap::new();
         for (name, pairs) in &candidates_now {
-            let Some(sites) = collected.sites.get(name) else {
+            let sites = collected.sites_of(*name);
+            if sites.is_empty() {
                 continue;
-            };
+            }
             let kept: Vec<(usize, usize)> = pairs
                 .iter()
                 .copied()
@@ -3591,7 +3853,17 @@ pub(super) fn live_private_functions(
     ctx: &Ctx,
 ) -> Option<HashMap<Symbol, usize>> {
     let targets: HashSet<Symbol> = candidates.keys().copied().collect();
-    let first = collect_private_sites(heap, forms, &targets, candidates, &HashMap::new(), ctx)?;
+    let mut cache = SiteCache::new(heap, forms, candidates);
+    let first = collect_private_sites(
+        heap,
+        forms,
+        &targets,
+        candidates,
+        &HashMap::new(),
+        ctx,
+        &mut cache,
+        None,
+    )?;
     // A self-call is not a site that seeds anything: the least fixpoint starts every
     // parameter at ⊥ and a self-call's arguments are typed under those very parameters,
     // so a function whose ONLY sites are its own recursion derives ⊥ for every parameter,
@@ -3600,15 +3872,16 @@ pub(super) fn live_private_functions(
     // never are; a private one's would be a bug of another kind), so it is site-less.
     Some(
         first
-            .sites
-            .iter()
-            .filter(|(name, sites)| {
-                !first.escaped.contains(name)
+            .names()
+            .into_iter()
+            .filter_map(|name| {
+                let sites = first.sites_of(name);
+                let live = !first.escaped(name)
                     && sites
                         .iter()
-                        .any(|site| !matches!(site, Site::Call(_, _, Some(w)) if w == *name))
+                        .any(|site| !matches!(site, Site::Call(_, _, Some(w)) if *w == name));
+                live.then(|| (name, sites[0].arity()))
             })
-            .map(|(&name, sites)| (name, sites[0].arity()))
             .collect(),
     )
 }

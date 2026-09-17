@@ -892,10 +892,59 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-17** — KI-156: no `letrec` loop in the language had its `SelfCall` — the self-name's own capture slot read as a shadowing local — 300 → 4–13 ms on a 3M-iteration local loop; every named local loop, `defseq`'s, and the `for` macro's pipeline were running through a full dispatch per iteration.
 - **2026-09-17** — KI-157: a native loop never saw a pending memory limit (E0043, the process heap limit, a mailbox overflow are VM-safepoint checks) — the back-edge poll now reports one and the loop deopts to raise it; found the moment letrec loops went native.
 - **2026-09-17** — ADR-360 §7: `seq/l*` pipelines fuse into one literal, a fold over a range is a counted letrec loop, a passthrough reducer takes the HOF fast path — `pipeline` −49% (3 735 → 460 instructions per element), `(fold (range …) 0 (fn …))` 410 → 21 ms; the checker reads the author's code, never the rewrites.
+- **2026-09-17** — `tests/` to zero strict and a gate (from 32): `math/pow` had declared nothing for nineteen days (its `sig` sat inside its docstring — `sig_placement.rs` now reads every docstring); a declared overload's matching arms MEET (ADR-116 addendum); an assertion's `(pr-str (quote …))` is not an escape, so functions under test are derived; `record?` is a one-sided guard; `range`/`into`/`map` keep their lengths, `bit/and` a mask's bound, `nth` a computed index's interval; `:or` lowers to `(get m k default)`.
+- **2026-09-17** — the checker's site walk is memoised per form across the derivation's rounds (`sigs::SiteCache`: 73% of walks reused, `nest check` over `std/` 11.0 → 8.8 s, verdicts identical by the new `derivation_cache_differential` gate) — and that gate found KI-158: the joint fixpoint was never a function of the file (a specialization memo outliving its round, returns re-read in hash order), the same file inferring `(int 0 2)` five runs out of six.
 
 ---
 
 ## Recent — full entries
+
+
+## 2026-09-17 — the site walk memoised, and KI-158 underneath it
+
+The handoff's checker-cost item, taken in the order CLAUDE.md asks: measure, then decide.
+`BROOD_DERIVE_DBG` now prints per file where a check's time goes, and over `std/` (debug)
+it was 11.0 s with 7.1 s in Pass 2.9's joint fixpoint — 4.4 s of it the site walks, of
+which 0.2 s typed the sites; the rest was the walk re-typing every `let` binding and guard
+in the file to build each site's scope, on every round. The per-form cache
+(`sigs::SiteCache`, `docs/type-system-status.md` § 2026-09-17) re-walks a form only when
+its own derived parameters or something in its reference closure moved, re-basing a cached
+site's scope on the current facts when it is read. 73% of walks reused; 11.0 → 8.8 s on
+`std/`, 13.5 → 12.3 s on `tests/`; `BROOD_NO_DERIVE_CACHE=1` opts out.
+
+The cache's differential — both ways over the tree, byte for byte — disagreed in both
+directions on its first run, and the disagreement predated the cache: six runs of one file
+inferred `run-program` as `(int 0 2)` five times and `0 | 1 | 2` once. KI-158: the
+specialization memo was cleared per file, not per round, so a body re-typed under the
+floored returns of round one answered every later round; and the returns were re-read
+iterating a `HashMap`, each applied at once, so the history-dependent widening saw a
+different sequence each run. Both fixed, and `crates/nest/tests/derivation_cache_differential.rs`
+holds the fixpoint to one answer (sabotage-verified: a cache ignoring what moved reds it).
+## 2026-09-17 — `tests/` to zero strict, and what the corpus named
+
+The review's "37 findings, not a gate" over `tests/` read 32 with the current checker.
+Roughly half were test code assuming non-emptiness — written honestly now: `(or (first
+rs) (error …))`, `(get index k {})`, a tuple compared whole, and one `(check-allow
+:type-mismatch …)` on the function a test hands `"abc"` on purpose. The other half were
+the checker's, and one was the library's: `math/pow`'s `sig` line had been inserted
+INSIDE its docstring by the 2026-08-29 adoption batch, so `pow` declared nothing, every
+`(pow int int)` read `number`, and no gate could say so. `crates/lisp/tests/sig_placement.rs`
+gains `no_sig_hides_inside_a_docstring` — read with the reader, column-0 only (an indented
+`(sig …)` is a doc example) — sabotage-verified against the slip itself.
+
+Closed on the way, each with a pin (`docs/type-system-status.md` § 2026-09-17): the
+declared-overload meet (`resolve_overload_ret` — the union let a catch-all arm cancel every
+sharper one; the clause-inferred overload keeps the union in `resolve_clause_overload_ret`);
+the `pr-str`/`str` quote exemption in `collect_private_sites` (every assertion macro quotes
+its form, so NO private function under a test was ever derived — `[derive] OPAQUE` now
+names an unexpanded macro under `BROOD_DERIVE_DBG`); `Ty::implied_by` for the one-sided
+`record?`; `range`'s exact length under a literal bound, `into`'s length onto a vector, a
+counted `map` with an unknown element; the `bit/and` mask interval and `nth` over a shape
+by a computed index; the cross-module value sig in inference (`(sig *test-wait-ms* int)`
+beside the `defdyn`, which types every deadline built from it). `std/prelude/match.blsp`'s
+`:or` binder lowers to `(get m k default)` — the same semantics in one lookup. The types
+suite is 572 + the catalog; `std/` and `tests/` are at zero strict; `tests/` joins the gate
+in CI, `make green` and the pre-push hook.
 
 ## 2026-09-17 — pipelines fuse, and a fold over a range is a loop (ADR-360 §7)
 

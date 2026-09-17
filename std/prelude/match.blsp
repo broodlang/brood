@@ -524,8 +524,11 @@ NON-LINEAR patterns (the same name twice) work.
       success
       (let (k (first keys)
             kw (keyword (->string k))
+            ;; `(get m k default)` answers the default for an ABSENT key only — a present
+            ;; nil stays nil — which is the `:or` contract in one lookup, and the shape the
+            ;; checker reads exactly (an `(if (contains? …) …)` around it typed `40 | nil`).
             getter (if (and ors (contains? ors k))
-                     `(if (contains? ~target ~kw) (get ~target ~kw) ~(get ors k))
+                     `(get ~target ~kw ~(get ors k))
                      `(get ~target ~kw)))
         `(let (~k ~getter) ~(%match-map-binds (rest keys) ors target success))))))
 

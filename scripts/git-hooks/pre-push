@@ -24,7 +24,7 @@
 #       (`sig_adoption_test`, `checker_pass_agreement_test`): a spelling change in a warning
 #       (ADR-341's tuple merge) sat red in the suite for a day.
 #     - a change under crates/lisp/src/types/ or std/ runs CI's two checker gates over the
-#       tree — `nest check` on std/tests/examples and `nest check --strict` on std, both at
+#       tree — `nest check` on std/tests/examples and `nest check --strict` on std + tests, both at
 #       zero — because a checker change is judged by what it says about std/: ADR-341's
 #       second cut landed with `math/clamp` red in strict (2026-09-13).
 #
@@ -143,10 +143,10 @@ if [ "$types_touched" -gt 0 ] || [ "$std_changed" -eq 1 ]; then
         printf '%s\n' "$out" | grep -E 'warning|error' | head -10 | sed 's/^/  /' >&2
         fail "nest check would fail CI (zero warnings over std/ tests/ examples/)"
     fi
-    set -- $(find std -name '*.blsp' 2>/dev/null | sort)
+    set -- $(find std tests -name '*.blsp' 2>/dev/null | sort)
     if ! out=$("$nest_bin" check --strict "$@" 2>&1); then
         printf '%s\n' "$out" | grep -E 'warning|error' | head -10 | sed 's/^/  /' >&2
-        fail "nest check --strict over std/ would fail CI"
+        fail "nest check --strict over std/ tests/ would fail CI"
     fi
 fi
 if [ -n "$tests" ]; then

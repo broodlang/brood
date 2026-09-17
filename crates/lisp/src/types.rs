@@ -1858,6 +1858,19 @@ impl Ty {
         })
     }
 
+    /// The type a truthy `(pred x)` PROVES of `x` when the predicate is not biconditional:
+    /// every value it accepts has this type, but so do values it rejects, so only the
+    /// then-branch may narrow. `record?` holds for a `defrecord` value — a map — and fails
+    /// for a plain map, so a guard on it narrows `number | usd` to `usd` and its else
+    /// branch to nothing; read as `tested_by` it would have `(seq/reject xs record?)` drop
+    /// every map. `None` for a name [`tested_by`](Ty::tested_by) answers, or no predicate.
+    pub fn implied_by(predicate: &str) -> Option<Ty> {
+        Some(match predicate {
+            "record?" => Ty::of(Tag::Map),
+            _ => return None,
+        })
+    }
+
     /// `self ∪ other` — values in either. A refinement survives only where it's
     /// unambiguous: if just one side contributes the relevant members (functions
     /// for `arrow`, sequences for `elem`), that side's refinement carries; if both

@@ -797,3 +797,32 @@ fn a_bare_path_test_narrows_the_path_by_truthiness() {
         "the else branch reads the falsy half — {ws:?}"
     );
 }
+
+// `record?` holds for a `defrecord` value — a map — and FAILS for a plain map, so it
+// narrows the then-branch to `map` and its negation proves nothing: a guard whose else
+// branch read `¬map` made `(map? x)` there "never true", and `(seq/reject xs record?)`
+// dropped every map. `Ty::implied_by` is the one-sided table beside `tested_by`.
+#[test]
+fn a_record_guard_narrows_the_then_branch_only() {
+    let ws = file_warnings_mode(
+        "\
+         (defmodule t)\n\
+         (defrecord usd ((cents int)))\n\
+         (sig f ((or number map) -> int))\n\
+         (defn f (x) (if (record? x) (get x :cents 0) 0))\n\
+         (sig g ((or number map) -> int))\n\
+         (defn g (x) (if (record? x) 1 (if (map? x) 2 3)))\n\
+         (sig h ((list (or number map)) -> (list (or number map))))\n\
+         (defn h (xs) (seq/reject xs record?))",
+        true,
+    );
+    assert!(ws.is_empty(), "{ws:?}");
+    assert_eq!(
+        ty_str("(seq/filter (list 1 {:a 1}) record?)"),
+        "nil | list<{a: 1}>"
+    );
+    assert_eq!(
+        ty_str("(seq/reject (list 1 {:a 1}) record?)"),
+        "nil | list<1 | {a: 1}>"
+    );
+}

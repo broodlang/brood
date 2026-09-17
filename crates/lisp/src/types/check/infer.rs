@@ -1,6 +1,6 @@
 //! Type inference over expressions — expr_ty + result-typing helpers
 //! (extracted from guards.rs, file-organization split).
-use super::ctx::{resolve_overload_ret, Ctx};
+use super::ctx::{resolve_clause_overload_ret, resolve_overload_ret, Ctx};
 use super::guards::path_of;
 use super::sigs::{declared_heap_overload, sig_of};
 use super::walk::{is_fn_head, list_items};
@@ -196,11 +196,19 @@ fn expr_ty_inner(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                 // All feed the gradual relation, so it's reload-safe. A name this
                 // file redefines skips the heap read — the image's binding is the
                 // OLD value (the file is checked pre-load; a def always wins).
+                // …and a value sig declared in ANOTHER file, read from the same heap store
+                // a cross-module arrow sig comes from: `(sig *test-wait-ms* int)` beside
+                // the `defdyn` types a deadline built from it in every test file, where a
+                // dynamic is otherwise unknown — the declaration is the author's contract
+                // on every `binding` of it (ADR-259), as it is on a `def`.
                 ctx.declared_value_ty(s)
                     .or_else(|| ctx.inferred_value_ty(s))
                     .or_else(|| {
                         (!ctx.is_file_global(s))
-                            .then(|| global_value_ty(heap, s))
+                            .then(|| {
+                                super::sigs::declared_heap_value_ty(heap, s)
+                                    .or_else(|| global_value_ty(heap, s))
+                            })
                             .flatten()
                     })
             }
@@ -1010,6 +1018,19 @@ fn numeric_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
         }
         return acc;
     }
+    // A MASK bounds the conjunction whatever the other operand is: `m ∈ [0, hi]` makes
+    // `(bit/and x m)` lie in `[0, hi]` (a non-negative `m` has no sign bit to keep, and
+    // clearing bits never raises a value). The slot-index idiom `(bit/and i 1)` is then
+    // `int[0..1]`, which is what lets `(nth [10 20] k)` read as present.
+    if value::symbol_is(head, "bit/and") && items.len() == 3 {
+        let bound = items[1..]
+            .iter()
+            .filter_map(|&arg| expr_ty(heap, arg, ctx)?.int_range())
+            .filter(|r| r.lo.is_some_and(|lo| lo >= 0))
+            .filter_map(|r| r.hi)
+            .min()?;
+        return Some(Ty::int_in(Range::new(Some(0), Some(bound))));
+    }
     numeric_op_kind(head)?;
     // Every operand must be a known numeric type; one non-numeric / unknown defers.
     // (Zero operands — e.g. a bare `(+)` — also defers, leaving the curated sig.)
@@ -1472,6 +1493,22 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
                     None => Ty::of(Tag::Nil),
                 });
             }
+            // A computed `nth` index whose INTERVAL lies inside the arity reads the union
+            // of the positions it can name — `(nth [10 20] (bit/and i 1))` is `10 | 20`,
+            // present (ADR-350's interval, applied to a shape rather than a length).
+            if value::symbol_is(head, "nth") && items.len() == 3 {
+                if let Some(r) = expr_ty(heap, items[2], ctx).and_then(|t| t.int_range()) {
+                    if let (Some(lo), Some(hi)) = (r.lo, r.hi) {
+                        if lo >= 0 && (hi as usize) < elems.len() {
+                            let mut out = elems[lo as usize].clone();
+                            for t in &elems[lo as usize + 1..=hi as usize] {
+                                out = out.union(t.clone());
+                            }
+                            return Some(out);
+                        }
+                    }
+                }
+            }
         }
         // Over a UNION of shapes and sequences — `(tuple :error string) | (tuple :ok
         // map)`, the tagged pair every parser returns — the read is answered term by
@@ -1527,16 +1564,20 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
             || (value::symbol_is(head, "nth") && items.len() >= 3 && {
                 match items[2] {
                     Value::Int(k) => k >= 0 && at_least(k + 1),
-                    Value::Sym(i) if ctx.is_lexical_local(i) => {
-                        let index = ctx.get(i).and_then(|t| t.int_range());
+                    // A local, or any computed index with an interval — `(bit/and i 1)`
+                    // is `int[0..1]`; only a local can be bounded by a guard.
+                    index_form => {
+                        let index = expr_ty(heap, index_form, ctx).and_then(|t| t.int_range());
                         let non_negative = index.is_some_and(|r| r.lo.is_some_and(|lo| lo >= 0));
-                        let bounded_by_guard =
-                            matches!(arg, Value::Sym(xs) if ctx.is_index_bound(i, xs));
+                        let bounded_by_guard = matches!(
+                            (index_form, arg),
+                            (Value::Sym(i), Value::Sym(xs))
+                                if ctx.is_lexical_local(i) && ctx.is_index_bound(i, xs)
+                        );
                         let bounded_by_interval =
                             index.and_then(|r| r.hi).is_some_and(|hi| at_least(hi + 1));
                         non_negative && (bounded_by_guard || bounded_by_interval)
                     }
-                    _ => false,
                 }
             });
         let absent = if value::symbol_is(head, "nth") && items.len() == 4 {
@@ -1568,7 +1609,7 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         // `(or (second (seq/filter (map parts string/->number) int?)) 1)` still carried
         // `failure`, so the remedy the diagnostic recommends did not silence it. Found on
         // bedit, where it reddened the downstream CI gate.
-        let a = match (a, items.get(2).and_then(|p| predicate_tested_ty(*p))) {
+        let a = match (a, items.get(2).and_then(|p| predicate_kept_ty(*p))) {
             (Some(elem), Some(tested)) => Some(elem.intersect(tested)),
             (None, tested @ Some(_)) => tested,
             (elem, None) => elem,
@@ -1586,7 +1627,7 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     if value::symbol_is(head, "seq/find") && items.len() == 3 {
         let coll_ty = expr_ty(heap, items[1], ctx)?;
         let a = coll_ty.elem_ty();
-        let a = match (a, predicate_tested_ty(items[2])) {
+        let a = match (a, predicate_kept_ty(items[2])) {
             (Some(elem), Some(tested)) => Some(elem.intersect(tested)),
             (None, tested @ Some(_)) => tested,
             (elem, None) => elem,
@@ -1704,8 +1745,14 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
                 .map(|r| Range::new(Some(r.lo.unwrap_or(0).max(0)), r.hi.map(|h| h.max(0)))),
             _ => None,
         };
+        // The length is kept EITHER way: a literal `(range 1000)` used to read as a
+        // non-empty list of unknown length, and `(nth (into [] (map (range 1000) f)) 999)`
+        // as possibly absent.
         return if all_int && non_empty {
-            Some(Ty::list_of(int))
+            Some(match length {
+                Some(r) => Ty::list_of(int).with_len(r),
+                None => Ty::list_of(int),
+            })
         } else if all_int {
             match length {
                 Some(r) => Some(list_with_len(int, r)),
@@ -1740,9 +1787,22 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
             _ => None,
         };
         if target.is_subtype(&Ty::of(Tag::Vector)) {
-            return Some(match joined {
+            let out = match joined {
                 Some(e) => Ty::vector_of(e),
                 None => Ty::of(Tag::Vector),
+            };
+            // The length is the target's plus the source's, when both are known — so
+            // `(nth (into [] (map (range 1000) f)) 999)` is present, as it is.
+            let grown = match (
+                target.count_range(),
+                expr_ty(heap, items[2], ctx).and_then(|t| t.count_range()),
+            ) {
+                (Some(a), Some(b)) => Some(Range::plus(a, b)),
+                _ => None,
+            };
+            return Some(match grown {
+                Some(r) => out.with_len(r),
+                None => out,
             });
         }
         if target.is_subtype(&Ty::LIST) {
@@ -2545,6 +2605,16 @@ fn predicate_tested_ty(pred: Value) -> Option<Ty> {
     Ty::tested_by(&value::symbol_name(sym))
 }
 
+/// The same for the items a predicate KEEPS (`filter`, `find`): a one-sided predicate
+/// (`Ty::implied_by` — `record?` proves `map`) narrows what passes it, where it must not
+/// narrow what `reject` drops.
+fn predicate_kept_ty(pred: Value) -> Option<Ty> {
+    predicate_tested_ty(pred).or_else(|| match pred {
+        Value::Sym(s) => Ty::implied_by(&value::symbol_name(s)),
+        _ => None,
+    })
+}
+
 fn list_result(elem: Option<Ty>) -> Option<Ty> {
     elem.map(|e| Ty::list_of(e).union(Ty::of(Tag::Nil)))
 }
@@ -2600,7 +2670,9 @@ fn list_result_over(input: Option<&Ty>, elem: Option<Ty>) -> Option<Ty> {
         } else {
             r
         };
-        return elem.map(|e| list_with_len(e, r));
+        // The length is a fact about the INPUT, so it holds with an unknown element too:
+        // `(map (range 1000) mk)` over an untyped `mk` is 1000 of something.
+        return Some(list_with_len(elem.unwrap_or(Ty::ANY), r));
     }
     if input.is_some_and(provably_non_empty) {
         elem.map(Ty::list_of)
@@ -2680,7 +2752,7 @@ pub(super) fn callback_ret(heap: &Heap, f: Value, inputs: &[Option<Ty>], ctx: &C
                     return Some(sg.ret);
                 }
                 if let Some(sigs) = ctx.inferred_overload(s) {
-                    return specialize(Some(resolve_overload_ret(&sigs, inputs)));
+                    return specialize(Some(resolve_clause_overload_ret(&sigs, inputs)));
                 }
                 if let Some(sg) = ctx.inferred_fn_sig(s) {
                     return specialize(Some(sg.ret));

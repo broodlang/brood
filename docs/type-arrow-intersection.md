@@ -142,7 +142,7 @@ pub(super) fn resolve_overload_ret(sigs: &[Sig], arg_tys: &[Option<Ty>]) -> Ty {
         });
         if compatible {
             matched = Some(match matched {
-                Some(acc) => acc.union(sig.ret.clone()),
+                Some(acc) => acc.intersect(sig.ret.clone()), // the MEET — see below
                 None => sig.ret.clone(),
             });
         }
@@ -151,11 +151,29 @@ pub(super) fn resolve_overload_ret(sigs: &[Sig], arg_tys: &[Option<Ty>]) -> Ty {
 }
 ```
 
-Exactly one matching arm → the precise per-clause return type. Several match
-(ambiguous, e.g. some args unknown) → the union of their return types — still
-a sound superset, still an improvement over the old total-information-loss
-fallback. Zero match → widens to `Ty::ANY` rather than ever fabricating a
-return type for a call that fits no declared arm.
+Exactly one matching arm → the precise per-clause return type. Zero match → widens to
+`Ty::ANY` rather than ever fabricating a return type for a call that fits no declared
+arm. Several match → **the meet of their return types (2026-09-17).** The declaration
+is an intersection — the function satisfies every arm at once — so an argument inside
+two arms' domains yields a value inside *both* results. The first cut unioned them,
+which is also sound but made a catch-all arm cancel every sharper arm it overlapped:
+`math/pow` declares
+
+```lisp
+(sig pow (and (int (int 0 _) -> int)
+           ((or (int -1 -1) (int 1 1)) int -> int)
+           (float int -> float)
+           (number int -> number)))
+```
+
+and `(pow b 3)` on an int fits the first arm and the last; the union read `number` at
+every call the catch-all admitted, which is every call, so the sharp arms were dead
+weight. With the meet it reads `int`, `(pow 2.0 b)` reads `float`, and `(pow 2 b)` with
+a possibly negative `b` reads `number` — only the catch-all fits. The clause-inferred
+overload (`infer_overload_from_clauses`) keeps the union, through
+`resolve_clause_overload_ret`: the runtime takes the *first* clause whose pattern admits
+the value, so statically the result is in the union of every clause the argument types
+admit, not their meet.
 
 ### Cross-module resolution
 

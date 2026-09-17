@@ -218,7 +218,7 @@ fn precision_rules_give_the_exact_type_where_it_is_provable() {
         ("'(1 2)", "(list 1, 2)"),
         ("(vec '(1 2))", "vector<1 | 2>"),
         // a range is a range of integers, carrying its bounds' interval (never reaching 5)
-        ("(range 5)", "list<int[0..4]>"),
+        ("(range 5)", "list<int[0..4]>[5]"),
         // a numeric operator as a callback / a fold / spread — the same closure rules
         // a two-element vector literal is a TUPLE, whose arity is part of its type — so
         // it is provably non-empty and `map` keeps that (the `nil` arm is the empty case)
@@ -229,8 +229,23 @@ fn precision_rules_give_the_exact_type_where_it_is_provable() {
         ("(reduce [1 2] 0.5 +)", "float"),
         // reshapers with no signature at all used to be `any`
         ("(vec [1 2])", "vector<1 | 2>"),
-        ("(into [] (list 1))", "vector<1>"),
+        ("(into [] (list 1))", "vector<1>[1]"),
+        // …and onto a vector the length is the target's plus the source's, with an
+        // unknown element too: the length is a fact about the input
+        ("(into [0] (range 3))", "vector<int[0..2]>[4]"),
+        (
+            "(into [] (map (range 1000) (fn (i) (list i))))",
+            "vector<(list int[0..999])>[1000]",
+        ),
         ("(into {} [[:a 1]])", "map"),
+        // a non-negative MASK bounds the conjunction whatever the other operand is
+        ("(bit/and 7 1)", "int[0..1]"),
+        ("(bit/and (- 7 20) 3)", "int[0..3]"),
+        ("(bit/and (- 0 7) (- 0 1))", "int"),
+        // a computed index whose interval fits a shape reads the positions it can name
+        ("(nth [10 20] (bit/and 7 1))", "10 | 20"),
+        ("(nth [10 20 30] (bit/and 7 1))", "10 | 20"),
+        ("(nth (into [] (range 1000)) (bit/and 7 1))", "int[0..999]"),
         ("(conj [1] 2)", "vector<1 | 2>[2]"),
         ("(conj (list 1) 2)", "list<1 | 2>"),
         ("(conj #{1} 2)", "set<1 | 2>"),
@@ -244,6 +259,37 @@ fn precision_rules_give_the_exact_type_where_it_is_provable() {
     ] {
         assert_eq!(ty_str(src), want, "{src}");
     }
+}
+
+// The two shapes the `tests/` strict sweep of 2026-09-17 closed: a vector built by `into`
+// from a counted source is exactly that long whatever its elements (an untyped callback
+// used to drop the length with the element), and a `:keys`/`:or` binder is the default
+// where the key is absent, never `nil` — the pattern lowers to `(get m k default)`, the one
+// lookup the `get` rule reads exactly (the `(if (contains? …) …)` around it read `40 | nil`).
+#[test]
+fn a_counted_build_and_an_or_default_are_present() {
+    let ws = file_warnings_mode(
+        "(defmodule t)\n\
+         (sig f ((int -> bytes) -> int))\n\
+         (defn f (mk) (let (xs (into [] (map (range 1000) mk))) (bytes/at (nth xs 999) 2)))\n\
+         (defn g () (let ({:keys [a b] :or {b 40}} {:a 2}) (+ a b)))\n\
+         (sig h ((map keyword int) -> int))\n\
+         (defn h (m) (let ({:keys [b] :or {b 40}} m) (+ 1 b)))",
+        true,
+    );
+    assert!(ws.is_empty(), "{ws:?}");
+    // …and an `:or` default does not paper over a PRESENT nil: the key is there, its value
+    // is nil, and `get` answers it.
+    let ws = file_warnings_mode(
+        "(defmodule t)\n\
+         (defn g () (let ({:keys [b] :or {b 40}} {:b nil}) (+ 1 b)))",
+        true,
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("+: argument 2 expects number, got nil")),
+        "{ws:?}"
+    );
 }
 
 // The expanded path too: `try` becomes `(%try (fn () a b) (fn (e) h))`, and a multi-form

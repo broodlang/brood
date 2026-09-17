@@ -534,11 +534,12 @@
   (test "a read and a save stamp the file's mtime; a later write on disk shows as changed"
     (let (path (str (temp-dir "brood-buf-") ".txt"))
       (file/spit path "v1\n")
-      (let (b (buffer-from-file path))
-        (assert= (get b :file-mtime) (file/mtime path))
+      (let (b (buffer-from-file path)
+            stamp (or (get b :file-mtime) (error "buffer-from-file did not stamp :file-mtime")))
+        (assert= stamp (file/mtime path))
         (is (not (buffer-file-changed? b)))
         ;; the file written since (an older stamp stands in for the clock having moved)
-        (is (buffer-file-changed? (assoc b :file-mtime (dec (get b :file-mtime)))))
+        (is (buffer-file-changed? (assoc b :file-mtime (dec stamp))))
         ;; a save re-stamps: the returned buffer agrees with the file again
         (let (saved (save-buffer (-> (assoc b :file-mtime 1) end-of-buffer (insert "v2\n"))))
           (assert= (get saved :file-mtime) (file/mtime path))

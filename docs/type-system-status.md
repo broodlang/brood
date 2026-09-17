@@ -643,8 +643,9 @@ key it does not declare reads as unknown — `(get date :hour 0)` on a `date` is
 the honest form is a declared accessor. `datetime?`-style user predicates did not narrow
 at the time (the checker knew the built-in `tested_by` predicates only) — the **type-guard
 signature** `(sig datetime? (any -> (is datetime)))` shipped the same day as this section's
-sweep (ADR-301, 2026-08-30) and is the general answer. `tests/` is not held to strict on
-purpose: a test hands a sig the literals it must reject.
+sweep (ADR-301, 2026-08-30) and is the general answer. `tests/` was not held to strict at
+the time (a test hands a sig the literals it must reject); it joined the gate on
+2026-09-17 — the deliberate mismatch says so with `(check-allow :type-mismatch …)`.
 
 **Measured on the way.** The demand walk consulting a loaded module's inferred sig costs
 nothing (the zero-warning gate over 342 files: 5.0 s with it and without). `nest check`
@@ -1143,11 +1144,92 @@ same commit with the reason. That is bedit's commit to make, and `BEDIT_REF` mov
 (the smoke target's `--bump`).
 
 **What is left**, deliberately:
-- `tests/ --strict` holds 37 findings (not a gate): test code that assumes non-emptiness
-  or handles nil later than the read. A sweep like the 2026-08-30 one over std.
+- ~~`tests/ --strict` holds 37 findings (not a gate)~~ — swept to zero and gated on
+  2026-09-17 (the entry below: half were the checker's, one was `math/pow`'s).
 - A relation between two locals beyond `i < |xs|`; a `float` interval; a runtime contract
   for an interval or a property; effect inference as a displayed property; totality across
   calls and mutual recursion; a `:total` coverage proof over destructuring patterns (only
   literal patterns are proven today). Each is listed in its ADR's *Deferred* and none has a
   consumer asking.
 - Items 5 and 7 above (return-type dispatch, tier-2 monomorphization): unchanged, large.
+
+## `tests/` to zero strict, and the checker gaps it named (2026-09-17)
+
+The 32 strict findings over `tests/` (the "37, not a gate" of the review above) read as
+test code that assumes non-emptiness or handles nil later than the read — and only
+about half of them were. The other half were checker gaps a test corpus exposes because
+tests hand functions literals, and one stdlib defect no gate could see:
+
+- **`math/pow` had declared nothing for nineteen days.** The adoption batch of
+  2026-08-29 inserted its `sig` after the first line of the `defn` — the first line of
+  its DOCSTRING — so the file read as declared, `(doc math/pow)` printed the sig as
+  prose, and every `(pow int int)` inferred `number` (the chudnovsky port's four
+  `math/quot` findings). No gate fails on an absent declaration; `sig_placement.rs`
+  now reads every docstring with the real reader (escaped quotes fool a textual count)
+  and fails on a column-0 `(sig …)` line — an indented one is a doc example.
+- **A declared overload's matching arms now MEET** (ADR-116 addendum,
+  `docs/type-arrow-intersection.md`). `pow` declares four arms; under the union the
+  `number` catch-all cancelled the `int` arm at every call. `(pow b 3)` reads `int`,
+  `(pow 2.0 b)` `float`, `(pow 2 b)` with a possibly negative `b` `number`. A unit base
+  is exact under any exponent, and the grammar can say it: `((or (int -1 -1) (int 1
+  1)) int -> int)`.
+- **A quoted datum handed to `pr-str`/`str` is not an escape.** Every assertion macro
+  expands to `(pr-str (quote (assert= … (drive 3000 0))))`, and the derivation read
+  `drive` there as a value use — so no private function called from a test was ever
+  derived, and a driver derived from its own recursion alone reported `number` on
+  `(- i 1)`. Printing a datum cannot call anything; a quoted datum anywhere else still
+  escapes (it may be `eval`ed).
+- **`record?` is a one-sided guard** (`Ty::implied_by` beside `tested_by`): it holds for
+  a record — a map — and fails for a plain map, so the then-branch narrows to `map` and
+  the else-branch to nothing; `filter`/`find` keep the narrowing, `reject` does not.
+- **Lengths that were dropped.** A literal `(range 1000)` was "non-empty" and lost its
+  exact length; `into` onto a vector lost the target's plus the source's; `map` over a
+  counted input lost it when the callback's result was unknown (the length is a fact
+  about the input). `(nth (into [] (map (range 1000) mk)) 999)` is present now.
+- **A mask bounds a conjunction**: `(bit/and x m)` with `m ∈ [0, hi]` is `int[0..hi]`,
+  and a computed `nth` index whose interval fits a shape reads the positions it can
+  name — `(nth [10 20] (bit/and i 1))` is `10 | 20`.
+- **A `:keys`/`:or` binder** lowers to `(get m k default)` — the same semantics as the
+  `(if (contains? …) (get …) default)` it replaced (a present nil stays nil), one lookup
+  instead of two, and the shape the `get` rule reads exactly: `40 | nil` → `40`.
+- **A value sig declared in another file** (`(sig *test-wait-ms* int)` beside the
+  `defdyn`) is read by inference through the same heap store a cross-module arrow sig
+  comes from; the checking walk already did.
+
+The test-side residue was written honestly: `(or (first rs) (error …))` where a test
+assumes a non-empty result, `(get index k {})` where it assumes a key, a tuple compared
+whole (`(assert= r [#b"…" #b"…"])`) instead of read position by position, and
+`(check-allow :type-mismatch …)` on the one function a test hands `"abc"` on purpose.
+`tests/` is a strict gate now, beside `std/` (CI, `make green`, the pre-push hook).
+
+## The site walk, memoised — and the fixpoint that was not one (2026-09-17)
+
+The handoff's "checker cost" item, measured before it was touched. `BROOD_DERIVE_DBG`
+now prints per file where the time went: over `std/` (debug), 11.0 s in all, **7.1 s in
+the joint fixpoint** (Pass 2.9's derivation walks and return re-inference), and of the
+walks' 4.4 s only 0.2 s was typing the sites they collected — the rest was the walk
+itself, which builds the scope each site is typed in by re-typing every `let` binding
+and every guard in the file, whole, on every round of every joint round.
+
+**`sigs::SiteCache`.** A form's walk depends on exactly two moving things: its own
+derived parameters (bound by the `fn` arm) and, through the scope, the returns and
+derived parameters of the candidates its body reaches — transitively, because typing a
+call re-types the callee's body (`specialize_call`). So the cache keeps each top-level
+form's last walk with the own-parameter types it was walked under, and hands it back
+when those are unchanged and nothing in the form's reference closure moved; the joint
+round reports what moved (returns re-read, parameters re-derived, floors lifted), and
+the inner rounds report the parameters they moved. A cached site's captured scope is
+re-based on the current file facts when it is read (`Ctx::with_file_of`). Over `std/`,
+73% of form walks are reuses; 11.0 → 8.8 s, `tests/` 13.5 → 12.3 s. `BROOD_NO_DERIVE_CACHE=1`
+is the A/B lever.
+
+**KI-158, found by the cache's differential.** The first differential disagreed in both
+directions, and the disagreement turned out to predate the cache: the joint fixpoint was
+not a function of its inputs. The specialization memo outlived the round it was typed
+under (a body re-typed under floored returns answered every later round), and the
+returns were re-read in `HashMap` order with each applied at once, so the
+history-dependent widening landed on either side — the same file settled on `(int 0 2)`
+five runs out of six and `0 | 1 | 2` on the sixth. Fixed (the memo cleared per round; the
+returns in definition order; the derivation's names sorted), and
+`nest::derivation_cache_differential` holds both: `nest check --strict --suggest-sigs`
+over `std/` and `tests/`, cache on and off, byte for byte.

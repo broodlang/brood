@@ -95,6 +95,9 @@ reader, exactly as the Scheme harness's repeated `(read)` drops them."
       (if (nil? d)
         (error "hex->int: not a hex digit: " (string/char-at s i))
         (corpus-hex-at s (inc i) n (+ (* acc 16) d))))))
+;; The accumulator is an int from its seed — a fact the loader's inferencer cannot read
+;; from this file's callers, so a test that uses `hex->int` cross-module read `number`.
+(sig corpus-hex-at (string int int int -> int))
 
 (defn hex->int (s)
   "The non-negative integer with hexadecimal spelling `s` (either case), promoting

@@ -363,14 +363,16 @@ jobs:
       # handed to a string function, is a warning. std reached zero on 2026-08-30 (from
       # 336) by declaring ~350 signatures and making every nil source honest; six
       # checker gaps closed on the way. Keep it at zero — a new strict warning is either
-      # an undeclared function or a real maybe-nil. `tests/` is deliberately not held to
-      # strict: a test passes literals the sig would not admit on purpose.
-      - name: Type-checker STRICT gate over std (nest check --strict — zero warnings)
+      # an undeclared function or a real maybe-nil. `tests/` joined the gate on
+      # 2026-09-17 (from 32 findings): a test that hands a function what its sig would
+      # not admit ON PURPOSE says so with `(check-allow :type-mismatch …)`, and a read
+      # that assumes non-emptiness spells it `(or (first xs) (error …))`, which narrows.
+      - name: Type-checker STRICT gate over std + tests (nest check --strict — zero warnings)
         shell: bash
         run: |
           shopt -s globstar nullglob
           cargo run -q -p nest --features brood/treesit-grammars -- \
-            check --strict std/**/*.blsp
+            check --strict std/**/*.blsp tests/**/*.blsp
 
   # The ADR-076 differential gate — the whole suite through the tree-walker
   # escape hatch (`BROOD_VM=0`), the second half of `make test-both`. The VM is

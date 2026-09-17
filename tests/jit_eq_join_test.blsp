@@ -183,7 +183,10 @@
 ;; activation and was latched on `http`. The non-pair path now calls
 ;; `brood_rt_first`/`_rest`, which answer nil / vector / range / bytes / set and the type
 ;; error, and deopt only for a record or a seq-view.
-(defn ej-second (v) (second v))
+;; One test hands it "abc" ON PURPOSE (the type error must be the VM's from native code),
+;; and the checker reads that site into `v`.
+(check-allow :type-mismatch
+  (defn ej-second (v) (second v)))
 (defn ej-first-range (r) (first r))
 (defn ej-rest-vec-sum (v) (+ (first (rest v)) (first (rest (rest v)))))
 ;; `rest` of a vector ALLOCATES a list, which can grow the pair slab and move its base —

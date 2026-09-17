@@ -78,12 +78,16 @@
   which operation produced it rather than as a type error inside the primitive."
   (if (decimal? x) (decimal/->string x) (error "dt-str: not a decimal: " x)))
 
-(defn- dt-apply (op a b)
+(defn- dt-apply-binary (op a b)
   (cond
     (= op "add") (dt-str (+ a b))
     (= op "subtract") (dt-str (- a b))
     (= op "multiply") (dt-str (* a b))
     (= op "compare") (str (cond (< a b) -1 (= a b) 0 else 1))
+    else nil))
+
+(defn- dt-apply-unary (op a)
+  (cond
     (= op "minus") (dt-str (* (decimal/of "-1") a))
     (= op "plus") (dt-str a)
     (= op "abs") (dt-str (abs a))
@@ -102,7 +106,7 @@
       (let (id (nth words 0)
             op (string/lower (nth words 1))
             args (map (seq/subvec (into [] words) 2 arrow) dt-unquote)
-            want (dt-unquote (nth words (inc arrow)))
+            want (dt-unquote (nth words (inc arrow) ""))
             conditions (- n (+ arrow 2))
             unary (get dt-ops-unary op)
             binary (get dt-ops-binary op))
@@ -117,8 +121,9 @@
               (first (seq/reject args dt-in-range?)))
           nil
           (let (a (decimal/of (or (first args) ""))
-                b (if binary (decimal/of (or (nth args 1) "")) nil)
-                got (dt-apply op a b)
+                got (if binary
+                      (dt-apply-binary op a (decimal/of (or (nth args 1) "")))
+                      (dt-apply-unary op a))
                 expect (dt-expected op want))
             (if (= got expect) [:ok] [id op args expect got])))))))
 

@@ -226,6 +226,65 @@ fn overload_resolves_cross_module_via_the_heap_store() {
 }
 
 #[test]
+fn overlapping_overload_arms_meet_at_a_call() {
+    // A declared `(and …)` of arrows is an INTERSECTION: an argument inside two arms'
+    // domains yields a value inside BOTH results. `math/pow`'s shape — a sharp int arm
+    // beside a `number` catch-all — used to read the UNION, `number`, at every call the
+    // catch-all admitted, which is every call.
+    let sharp = "
+(defmodule t)
+(defn f (b e) (if (< e 0) (/ 1 b) (* b b)))
+(sig f (and (int (int 0 _) -> int) (float int -> float) (number int -> number)))
+(defn g (b) (bit/and (f b 3) 1))
+(sig g (int -> int))
+(defn h () (math/floor (f 2.0 3)))
+";
+    let w = file_warnings_mode(sharp, true);
+    assert!(
+        w.is_empty(),
+        "an int base to a literal exponent is int, got {w:?}"
+    );
+
+    // …and only the arms the arguments fit: a possibly negative exponent leaves the
+    // catch-all alone, a float base meets `float`.
+    let wide = "
+(defmodule t)
+(defn f (b e) (if (< e 0) (/ 1 b) (* b b)))
+(sig f (and (int (int 0 _) -> int) (float int -> float) (number int -> number)))
+(defn g (e) (bit/and (f 2 e) 1))
+(sig g (int -> int))
+(defn h (e) (bit/and (f 2.0 e) 1))
+(sig h (int -> int))
+";
+    let w = file_warnings_mode(wide, true);
+    assert_eq!(w.len(), 2, "{w:?}");
+    assert!(w[0].contains("got number"), "{w:?}");
+    assert!(w[1].contains("got float"), "{w:?}");
+}
+
+#[test]
+fn a_value_sig_on_a_dynamic_is_read_cross_module() {
+    // `(sig *w* int)` beside a `defdyn` in module A types A's reads in the same file
+    // (`Ctx::declared_value_ty`); module B — a fresh `Ctx` — read the dynamic as unknown
+    // and every arithmetic on it as `number`. The heap store every cross-module arrow
+    // sig comes from carries the value sig too.
+    use super::infer::expr_ty;
+
+    let mut interp = crate::Interp::new();
+    interp
+        .eval_str("(defdyn *w* 20) (sig *w* int)")
+        .expect("module A loads cleanly");
+    for src in ["*w*", "(+ 1 *w*)", "(- *w* 1)"] {
+        let read = reader::read_one(&mut interp.heap, src).expect("parse");
+        let t = expr_ty(&interp.heap, read, &Ctx::default()).expect("typed");
+        assert!(
+            t.is_subtype(&Ty::of(Tag::Int)),
+            "{src}: expected int, got {t}"
+        );
+    }
+}
+
+#[test]
 fn int_literal_return_type_flows_through_checker() {
     // (sig f ((or 200 404 500) -> …)): f's declared return type is an
     // int-literal set (ADR-117), not flat `int` — feeding a call to

@@ -1825,6 +1825,14 @@ fn check_forms(
     // runs under `catch_unwind`; the restores below run on BOTH paths, and a
     // panic degrades to one "checker internal error" diagnostic.
     let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Where a file's check spends its time, under `BROOD_DERIVE_DBG`: the joint
+        // fixpoint (Pass 2.9's derivation walks + return re-inference) against the whole.
+        let file_started = std::time::Instant::now();
+        let derive_dbg = std::env::var_os("BROOD_DERIVE_DBG").is_some();
+        let joint_elapsed: std::time::Duration;
+        let mut joint_derive_elapsed = std::time::Duration::ZERO;
+        let mut joint_rounds = 0u32;
+        let mut site_walks = (0u32, 0u32);
         for &f in forms {
             heap.push_root(f);
         }
@@ -2265,6 +2273,7 @@ fn check_forms(
             // privacy expansion, for the site walk's `%mark-private` skip.
             let _ = &private;
             let candidates: HashMap<Symbol, Value> = all_candidates.iter().copied().collect();
+            let joint_started = std::time::Instant::now();
             if !candidates.is_empty() {
                 // A JOINT least fixpoint of the derived parameters and the candidates'
                 // returns. Pass 2.8's returns were read under the demands alone — `number`
@@ -2309,7 +2318,18 @@ fn check_forms(
                 // Each return's value from the round before last, for the fold (a value
                 // that recurses through another function grows every other round).
                 let mut older_returns: HashMap<Symbol, Ty> = HashMap::new();
+                // The site walks, memoised per form across every round below
+                // (`sigs::SiteCache`), with the names whose return or derived parameters
+                // moved since the last derivation — `None` before the first, which walks
+                // everything.
+                let mut site_cache = sigs::SiteCache::new(heap, &expanded, &candidates);
+                let mut moved: Option<HashSet<Symbol>> = None;
                 for round in 0..32 {
+                    let round_started = std::time::Instant::now();
+                    let derivation_ran = inputs_moved;
+                    // A specialization is typed under the round's returns and derived
+                    // parameters; the memo of them must not outlive the round.
+                    sigs::clear_specializations();
                     let derived = if inputs_moved {
                         sigs::caller_derived_params(
                             heap,
@@ -2318,13 +2338,28 @@ fn check_forms(
                             &live,
                             &ctx,
                             &previous,
+                            &mut site_cache,
+                            moved.as_ref(),
                         )
                     } else {
                         previous.clone()
                     };
+                    joint_derive_elapsed += round_started.elapsed();
+                    joint_rounds += 1;
+                    let mut moved_now: HashSet<Symbol> = derived
+                        .keys()
+                        .chain(previous.keys())
+                        .copied()
+                        .filter(|name| derived.get(name) != previous.get(name))
+                        .collect();
                     ctx.set_derived_params(derived.clone());
                     let mut returns_moved = false;
-                    for (&name, &rhs) in &candidates {
+                    // In DEFINITION order, never the map's: a return re-read here is
+                    // applied at once, so a later name reads an earlier one's new value,
+                    // and the widening below is history-dependent — iterated in hash
+                    // order the same file settled at `(int 0 2)` on five runs and
+                    // `0 | 1 | 2` on the sixth (2026-09-17).
+                    for &(name, rhs) in &all_candidates {
                         let Some(Some(base)) = original.get(&name) else {
                             continue;
                         };
@@ -2375,6 +2410,7 @@ fn check_forms(
                             sig.ret = ret;
                             ctx.add_inferred_fn_sig(name, sig);
                             returns_moved = true;
+                            moved_now.insert(name);
                         }
                     }
                     if derived == previous && !returns_moved {
@@ -2391,6 +2427,7 @@ fn check_forms(
                                 {
                                     ctx.add_inferred_fn_sig(name, sig.clone());
                                     lifted = true;
+                                    moved_now.insert(name);
                                 }
                             }
                         }
@@ -2402,8 +2439,19 @@ fn check_forms(
                     } else {
                         inputs_moved = returns_moved;
                     }
+                    // What the next derivation must re-walk: everything that moved since
+                    // the cache's last walk — this round's movers, plus the earlier ones
+                    // when this round skipped the derivation.
+                    moved = Some(match moved.take() {
+                        Some(mut earlier) if !derivation_ran => {
+                            earlier.extend(moved_now);
+                            earlier
+                        }
+                        _ => moved_now,
+                    });
                     previous = derived;
                 }
+                site_walks = (site_cache.walks, site_cache.reuses);
                 if !converged {
                     for (&name, sig) in &original {
                         if let Some(sig) = sig {
@@ -2436,6 +2484,7 @@ fn check_forms(
                     refresh_returns(heap, &undecided, &mut ctx);
                 }
             }
+            joint_elapsed = joint_started.elapsed();
         }
         // Pass 2.85 (ADR-259): **the declaration must be readable, and it must match what it
         // annotates.** A `(sig …)` is trusted ahead of every other signature source, so
@@ -2597,6 +2646,18 @@ fn check_forms(
         // `--` name is a convention, not enforced privacy, so the editor legitimately
         // references it from other modules and tests by its qualified name, which a
         // single-file pass can't see. A per-file check produced false positives.)
+        if derive_dbg {
+            eprintln!(
+                "[derive] {}: joint fixpoint {} ms ({} ms deriving over {} rounds, {} form walks, {} reused) of {} ms",
+                file_ns_name.as_deref().unwrap_or("<no module>"),
+                joint_elapsed.as_millis(),
+                joint_derive_elapsed.as_millis(),
+                joint_rounds,
+                site_walks.0,
+                site_walks.1,
+                file_started.elapsed().as_millis(),
+            );
+        }
     }));
     // Balance the GC roots pushed for pass 1 (input forms + their expansions) and
     // restore the compile-namespace state — on the clean AND the panic path.

@@ -142,7 +142,7 @@
   (test "dragging a divider moves the boundary to the pointer"
     (let (tree (pane-split (pane-single {:buf 0}) :col {:buf 1})
           l (pane-layout tree [0 0 80 24])
-          dv (divider-at l [10 40])
+          dv (or (divider-at l [10 40]) (error "no divider at the split"))
           tree2 (pane-set-ratio tree (get dv :path) (pane-ratio-for dv [10 20]))
           rects (map (get (pane-layout tree2 [0 0 80 24]) :panes) (fn (p) (get p :rect))))
       (assert= rects (list [0 0 20 24] [21 0 59 24]))))

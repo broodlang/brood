@@ -1042,6 +1042,9 @@ the test rather than hanging the run."
 ;; 120s per-test ceiling, so a genuinely stuck test is still reported with its own
 ;; message rather than by the hard kill.
 (defdyn *test-wait-ms* 20000)
+;; Milliseconds, so a deadline a test builds from it (`(+ (os/now) *test-wait-ms*)`) is an
+;; int an `after` clause accepts — a dynamic is otherwise unknown to the checker.
+(sig *test-wait-ms* int)
 
 ;; When set, print `▶ group › name` as each test STARTS — live progress so you can
 ;; see which test is running (and spot the slow/hung one) before it finishes. Off by

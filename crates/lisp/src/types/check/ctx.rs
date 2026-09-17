@@ -170,13 +170,28 @@ impl SigWithVars {
 /// the per-clause counterpart of [`SigWithVars::resolve_ret`]. A candidate
 /// `sig` matches when every argument whose type is *known* is a subtype of
 /// `sig`'s parameter at that position (`Sig::param`, which already folds a
-/// variadic `rest` in); an unknown arg never rules a candidate out. Every
-/// matching candidate's `ret` is unioned — exactly one match gives the exact
-/// per-clause return type, several gives a sound (if less precise) superset,
-/// and **zero matches widens to `Ty::ANY`** rather than ever fabricating a
-/// return type for a call that fits no declared arm. See
-/// `docs/type-arrow-intersection.md`.
+/// variadic `rest` in); an unknown arg never rules a candidate out. A declared
+/// `(and (A -> B) (C -> D))` is an INTERSECTION: the function satisfies every
+/// arm at once, so an argument inside both domains yields a value inside both
+/// results — the matching candidates' `ret`s are **met**. That is what lets
+/// `math/pow` declare `(and (int (int 0 _) -> int) (number int -> number))` and
+/// have `(pow b 3)` read `int` beside the catch-all (the union read `number`,
+/// which made the catch-all arm cancel every sharper one it overlapped). **Zero
+/// matches widens to `Ty::ANY`** rather than ever fabricating a return type for
+/// a call that fits no declared arm. See `docs/type-arrow-intersection.md`.
 pub(super) fn resolve_overload_ret(sigs: &[Sig], arg_tys: &[Option<Ty>]) -> Ty {
+    resolve_overload_with(sigs, arg_tys, Ty::intersect)
+}
+
+/// The same resolution for an **inferred** clause overload
+/// (`sigs::infer_overload_from_clauses`): the runtime takes the FIRST clause
+/// whose pattern admits the value, so statically the result is in the UNION of
+/// every clause the argument types admit, not their meet.
+pub(super) fn resolve_clause_overload_ret(sigs: &[Sig], arg_tys: &[Option<Ty>]) -> Ty {
+    resolve_overload_with(sigs, arg_tys, Ty::union)
+}
+
+fn resolve_overload_with(sigs: &[Sig], arg_tys: &[Option<Ty>], combine: fn(Ty, Ty) -> Ty) -> Ty {
     let mut matched: Option<Ty> = None;
     for sig in sigs {
         let compatible = arg_tys.iter().enumerate().all(|(i, arg_ty)| {
@@ -190,7 +205,7 @@ pub(super) fn resolve_overload_ret(sigs: &[Sig], arg_tys: &[Option<Ty>]) -> Ty {
         });
         if compatible {
             matched = Some(match matched {
-                Some(acc) => acc.union(sig.ret.clone()),
+                Some(acc) => combine(acc, sig.ret.clone()),
                 None => sig.ret.clone(),
             });
         }
@@ -668,6 +683,15 @@ impl Ctx {
     /// single copy otherwise (`Arc::make_mut`), which keeps the pre-split value semantics.
     fn file_mut(&mut self) -> &mut FileFacts {
         Arc::make_mut(&mut self.file)
+    }
+    /// This scope's local bindings over `other`'s file-level facts — a scope captured in
+    /// an earlier derivation round (`sigs::SiteCache`) read against the returns and
+    /// derived parameters as they stand now.
+    pub(super) fn with_file_of(&self, other: &Ctx) -> Ctx {
+        Ctx {
+            file: other.file.clone(),
+            ..self.clone()
+        }
     }
     /// The locally-known type for `sym`, or `None` if it isn't tracked.
     pub(super) fn get(&self, sym: Symbol) -> Option<Ty> {

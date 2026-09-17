@@ -59,7 +59,7 @@
     (let (t1 (rest xs)
           _ (alloc-pressure 32)
           t2 (rest xs))
-      (if (= (nil? t1) (nil? t2))
+      (if (= t1 t2)
         (check-rest-stable xs (- iter 1))
         false))))
 

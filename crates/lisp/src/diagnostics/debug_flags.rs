@@ -537,7 +537,12 @@ pub const FLAGS: &[DebugFlag] = &[
     f(
         "BROOD_DERIVE_DBG",
         DIAG,
-        "trace the checker's caller-derived parameter fixpoint (ADR-341): each round's moved candidates, or NO FIXPOINT",
+        "trace the checker's caller-derived parameter fixpoint (ADR-341): each round's moved candidates, an OPAQUE macro, NO FIXPOINT, and per file where the time went",
+    ),
+    f(
+        "BROOD_NO_DERIVE_CACHE",
+        DIAG,
+        "opt OUT of memoising the checker's site walk per form across the derivation's rounds (the A/B and bisect lever; identical verdicts by construction, gated by the differential)",
     ),
     f(
         "BROOD_CHECK_CACHE_MAX",

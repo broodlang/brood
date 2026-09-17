@@ -211,7 +211,7 @@
             (tcp/close c)
             (tcp/close s)
             (tcp/close ls)
-            (assert= (string/bytes-> (nth r2 0)) "z"))))))
+            (assert= r2 [#b"z" #b""]))))))
   ;; A near-miss that shares a prefix with the delimiter must not be reported: the
   ;; straddle window carries "\r\n\r" forward, so a following "x" has to reject.
   (test "read-until does not match a partial delimiter carried across chunks"
@@ -276,8 +276,7 @@
           (tcp/close c)
           (tcp/close s)
           (tcp/close ls)
-          (assert= (string/bytes-> (nth r 0)) "0123456789")
-          (assert= (string/bytes-> (nth r 1)) "EXTRA")))))
+          (assert= r [#b"0123456789" #b"EXTRA"])))))
   (test "read-n accumulates across chunks"
     (let (ls (tcp/listen "127.0.0.1" 0)
           port (listen-port ls))
@@ -291,8 +290,7 @@
           (tcp/close c)
           (tcp/close s)
           (tcp/close ls)
-          (assert= (string/bytes-> (nth r 0)) "aaabbb")
-          (assert= (string/bytes-> (nth r 1)) "bb")))))
+          (assert= r [#b"aaabbb" #b"bb"])))))
   (test "read-n returns [:closed acc] on early EOF"
     (let (ls (tcp/listen "127.0.0.1" 0)
           port (listen-port ls))
@@ -410,8 +408,7 @@
           (tcp/close c)
           (tcp/close s)
           (tcp/close ls)
-          (assert= (string/bytes-> (nth r 0)) "0123456789")
-          (assert= (string/bytes-> (nth r 1)) "EXTRA"))))))
+          (assert= r [#b"0123456789" #b"EXTRA"]))))))
 
 ;; The bound the other two leave open. A peer that drip-feeds — one byte, just inside
 ;; the idle timeout, forever — defeats `:timeout-ms` (every chunk re-arms it) and is

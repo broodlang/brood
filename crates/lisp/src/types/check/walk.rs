@@ -876,7 +876,7 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
             && author_wrote_it
             && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
         {
-            if let Some(tested) = super::guards::predicate_guard_ty(heap, Some(ctx), s) {
+            if let Some((tested, _)) = super::guards::predicate_guard_ty(heap, Some(ctx), s) {
                 let bound = gradual_of(heap, items[1], ctx).bound;
                 // A parameter bound to what its in-file callers pass (Pass 2.9) is not
                 // judged here: the guard may be there for callers that do not exist yet.

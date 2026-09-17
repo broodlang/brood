@@ -325,22 +325,31 @@ impl Renderer {
     /// are floor divisions, so an arbitrary window leaves up to one cell of sub-cell
     /// remainder per axis that doesn't fill a whole cell. The two axes place it
     /// differently:
-    ///   - **horizontal**: HALF the remainder, so the left/right margins stay
-    ///     symmetric (the grid is centred between them).
+    ///   - **horizontal**: at the inset. The grid is LEFT-ALIGNED and the remainder
+    ///     sits on the right.
     ///   - **vertical**: the FULL remainder above the grid — anchoring the leftover
     ///     at the *top* pushes the grid down so its bottom row (the editor's mode
     ///     line / status bar) sits flush against the window's bottom edge (modulo the
     ///     inset), instead of floating on half a cell. The slack reads as headroom up
     ///     top, where the eye expects it.
+    ///
+    /// The horizontal half-remainder (`rem_w / 2`) that used to centre the grid is gone,
+    /// and the reason is worth keeping. `rem_w` is `width % cell_w`, so it depends on the
+    /// CELL SIZE: change the font size by one pixel and the remainder jumps somewhere else
+    /// in `0..cell_w`, moving the whole grid sideways by up to half a cell. At rest nobody
+    /// sees it — it is a fixed margin. During a font-size zoom it is the text sliding left
+    /// and right under your eyes on every step, and the widest thing on screen (an editor's
+    /// full-width status bar) is where it reads worst. Symmetric margins are not worth a
+    /// grid that moves; the cost is a right margin up to one cell wider than the left.
+    ///
     /// WM-independent (no window resize, so it works where `request_inner_size` is
     /// ignored), and the mouse hit-test (`px_to_cell`) shares it so clicks stay
     /// aligned with what's painted.
     pub(crate) fn grid_origin(&self, w_px: usize, h_px: usize) -> (usize, usize) {
         let inset = self.inset();
-        let (cw, ch) = (self.cell_w.max(1), self.cell_h.max(1));
-        let rem_w = w_px.saturating_sub(2 * inset) % cw;
+        let ch = self.cell_h.max(1);
         let rem_h = h_px.saturating_sub(2 * inset) % ch;
-        (inset + rem_w / 2, inset + rem_h)
+        (inset, inset + rem_h)
     }
 
     /// Recompute the px size + cell metrics by shaping a reference glyph ('M') in
@@ -394,11 +403,17 @@ impl Renderer {
     /// then recompute the grid: the row count changes, so the caller re-derives
     /// `(cols, rows)` and re-renders — the same path as `set_font`.
     pub(super) fn set_line_height(&mut self, mult: f32) {
-        self.line_height = if mult.is_finite() {
+        let next = if mult.is_finite() {
             mult.clamp(0.8, 3.0)
         } else {
             LINE_HEIGHT
         };
+        // Unchanged is free — see `set_font`. This is the one that bit: a caller writing
+        // font and line height together re-rasterised the window twice per change.
+        if next == self.line_height {
+            return;
+        }
+        self.line_height = next;
         self.recompute();
     }
 
@@ -444,13 +459,20 @@ impl Renderer {
 
     /// Set the global default cell font — family and/or pixel size — then
     /// recompute the grid. The whole-window knob behind `gui-font!`.
+    /// Set the default family and/or base px size (behind `gui-font`). A call that changes
+    /// NEITHER returns without touching anything: `recompute` drops the whole glyph cache
+    /// and the retained frame, so a redundant set costs a full re-rasterisation of the
+    /// window — and a caller that writes its font settings together (an editor applying a
+    /// size step, which also writes the line height) paid that twice per step for a value
+    /// that had not moved.
     pub(super) fn set_font(&mut self, family: Option<u32>, px: Option<f32>) {
-        if let Some(f) = family {
-            self.default_family = f;
+        let new_family = family.unwrap_or(self.default_family);
+        let new_px = px.map(|p| p.max(1.0)).unwrap_or(self.base_px);
+        if new_family == self.default_family && new_px == self.base_px {
+            return;
         }
-        if let Some(p) = px {
-            self.base_px = p.max(1.0);
-        }
+        self.default_family = new_family;
+        self.base_px = new_px;
         self.recompute();
     }
 
@@ -1309,5 +1331,72 @@ mod text_contrast_tests {
         let (_, a) = ink(&mut r, 1.0, [0; 3], 0xffffff);
         let (_, b) = ink(&mut r, 1.8, [0; 3], 0xffffff);
         assert_eq!(a, b, "dark on light must be untouched by the lift");
+    }
+}
+
+#[cfg(test)]
+mod grid_stability_tests {
+    use super::*;
+
+    /// A size change must not move the grid sideways. The origin used to centre the
+    /// horizontal remainder (`width % cell_w`), which depends on the cell size — so every
+    /// pixel of a font-size zoom slid the whole grid left or right by up to half a cell,
+    /// and the widest band on screen (an editor's status bar) is where that reads worst.
+    #[test]
+    fn the_grid_does_not_slide_sideways_as_the_font_size_changes() {
+        let mut r = Renderer::new(1.0, default_families(), 15.0);
+        let (w, h) = (1913, 1077); // deliberately not a multiple of any cell size
+        let xs: Vec<usize> = (10..=30)
+            .map(|px| {
+                r.set_font(None, Some(px as f32));
+                r.grid_origin(w, h).0
+            })
+            .collect();
+        assert!(
+            xs.windows(2).all(|p| p[0] == p[1]),
+            "the grid's x origin moved across sizes 10..30: {xs:?}"
+        );
+    }
+
+    /// The bottom row stays flush against the bottom inset at every size — that is what
+    /// the vertical remainder going ABOVE the grid buys, and it is why a status bar on the
+    /// last row does not float.
+    #[test]
+    fn the_bottom_row_stays_flush_at_every_size() {
+        let mut r = Renderer::new(1.0, default_families(), 15.0);
+        let (w, h) = (1913, 1077);
+        for px in 10..=30 {
+            r.set_font(None, Some(px as f32));
+            let (_, y) = r.grid_origin(w, h);
+            let rows = (h - 2 * r.inset()) / r.cell_h.max(1);
+            assert_eq!(
+                y + rows * r.cell_h.max(1),
+                h - r.inset(),
+                "bottom not flush at {px} px"
+            );
+        }
+    }
+
+    /// Setting a font or line height to what it already is must not touch anything:
+    /// `recompute` drops the glyph cache and the retained frame, so a redundant set costs a
+    /// full re-rasterisation of the window. A caller that writes its type settings together
+    /// paid that twice per change for a value that had not moved.
+    #[test]
+    fn setting_the_same_font_or_line_height_is_free() {
+        let mut r = Renderer::new(1.0, default_families(), 15.0);
+        r.set_font(None, Some(20.0));
+        let mut buf = vec![0u32; 32 * 32];
+        let mut canvas = Canvas::full(&mut buf, 32, 32);
+        r.draw_cluster(&mut canvas, 0, 0, "M", None, false, false, 1, [0xff; 3], 0);
+        let warm = r.cache.len();
+        assert!(warm > 0, "the cluster cache should have an entry to lose");
+
+        r.set_font(None, Some(20.0)); // same size
+        r.set_font(Some(r.default_family), None); // same family
+        r.set_line_height(r.line_height); // same line height
+        assert_eq!(r.cache.len(), warm, "an unchanged set cleared the cache");
+
+        r.set_font(None, Some(21.0)); // a real change still does
+        assert_eq!(r.cache.len(), 0);
     }
 }

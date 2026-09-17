@@ -645,6 +645,32 @@ fn a_function_reached_only_through_itself_is_not_derived() {
     assert!(ws.is_empty(), "{ws:?}");
 }
 
+/// A quoted datum handed straight to `pr-str`/`str` is text: nothing can call what it
+/// names. Every assertion macro expands to `(pr-str (quote (assert= … (drive 3000 0))))`
+/// for its failure message, and reading `drive` there as an ESCAPE excluded every private
+/// function under a test from derivation — a driver called only from its tests derived
+/// from its own recursion alone, and reported `number` on `(- i 1)`. A quoted datum
+/// anywhere else is still an escape: it may be `eval`ed.
+#[test]
+fn a_quoted_datum_printed_is_not_an_escape() {
+    let driver = "(defmodule t)\n\
+         (defn- drive (i acc) (if (= i 0) acc (drive (- i 1) (+ acc (bit/and i 1)))))\n";
+    let ws = file_warnings_mode(
+        &format!("{driver}(defn run () (str (pr-str (quote (drive 3000 0))) (drive 3000 0)))"),
+        true,
+    );
+    assert!(ws.is_empty(), "{ws:?}");
+    let ws = file_warnings_mode(
+        &format!("{driver}(defn run () (list (quote (drive 3000 0)) (drive 3000 0)))"),
+        true,
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("drive: argument 1 expects int, got number")),
+        "quoted elsewhere, the name escapes and the driver is not derived — {ws:?}"
+    );
+}
+
 #[test]
 fn a_private_functions_return_is_read_under_its_callers() {
     // Ten-deep in `json`, three-deep here: the index stays `int` through the chain and
