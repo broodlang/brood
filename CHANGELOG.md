@@ -6,6 +6,12 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**The tagged-result idiom holds through inference**: a union past its four-term cap
+merges same-tag shapes first (five `[:error …]` arms no longer hull the `[:ok …]` one),
+`[:ok claims]` beside `[:error status why]` stays two shapes across arities (a keyword
+tells them apart), and the inference's `let` follows a path alias the way the walk does —
+so a function that re-tags a matched result infers each arm's own positions.
+
 **`std/fuzzy.blsp` is strict-clean** (14 → 0): the bounded fold's state starts from
 scalars rather than `nil`s, the ranked list is a list of sort keys (the candidate rides in
 the key, so the `[key cand]` wrapper and its `second` are gone), and `top` binds a non-nil
@@ -17,6 +23,7 @@ score the checker can only prove `number` (the scorer is a dynamic) and is gone.
 cannot derive, but `brood file`'s pre-flight check paid ~30 M instructions inferring them on
 every run of a program that touches `encoding`. `scripts/redundant-sigs.blsp` honours the
 marker, so the next sweep leaves them.
+
 
 ## v0.30.0 — ranking is bounded and sharded, text composites in sRGB space, and the checker derives what bedit had declared
 
@@ -91,12 +98,8 @@ path alias, and the checker follows it. **A callback over `(range (count xs))` r
 `xs`'s elements**: its parameter is an index of `xs`, and a range carries its bounds'
 interval (`(range 5)` is `list<int[0..4]>`).
 
-**The tagged-result idiom holds through inference**: a union past its four-term cap
-merges same-tag shapes first (five `[:error …]` arms no longer hull the `[:ok …]` one),
-`[:ok claims]` beside `[:error status why]` stays two shapes across arities (a keyword
-tells them apart), and the inference's `let` follows a path alias the way the walk does —
-so a function that re-tags a matched result infers each arm's own positions. `dolist`'s
-loop variable is an element.
+**`dolist`'s loop variable is an element**, not the collection it walks (`%dolist-loop`
+seeds its callback the way `each` does).
 
 **A `deftype` past the lattice's node budget is reported, not silently flattened.** The
 budget (`MAX_TY_NODES`) bounded declared shapes too: bedit's `model` record crossed it by
