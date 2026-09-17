@@ -1067,7 +1067,7 @@ pub(crate) fn compile_node(
                 // 3-arg inlinable primitive (`table-put`): same guard discipline as the
                 // 2-arg prims, and the same thin-wrapper following — `head` stays the
                 // ORIGINAL head, so a deopt dispatches the real wrapper unchanged. The two
-                // map ops (ADR-367) are NOT lowered here: the linear-map rewrite and its
+                // map ops (ADR-368) are NOT lowered here: the linear-map rewrite and its
                 // probe (`linmap_probe`, run from the `def` expander) match `(get acc k 0)`
                 // and `(assoc acc k …)` as CALL shapes, so they stay calls through every
                 // Node pass and become `Prim3` last, in `inline::lower_map_prim3`.

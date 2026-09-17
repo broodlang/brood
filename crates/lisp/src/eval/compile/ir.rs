@@ -80,7 +80,7 @@ pub enum PrimOp {
 
 /// A 3-ary inlinable primitive — the `PrimOp` family's arity-3 sibling. Three members:
 /// `table-put` (the write half of the Table workhorses — `sieve`'s 2.5M marks), and the
-/// two map ops process-shaped code lives on (ADR-367): `(get m k default)` and
+/// two map ops process-shaped code lives on (ADR-368): `(get m k default)` and
 /// `(assoc coll k v)`, head-keyed like `PrimOp::MapGet` and accepted only while the head
 /// is the PRELUDE closure. Same discipline as `PrimOp`: the op needs the heap so it runs in
 /// the exec arm; a receiver the inline rule does not cover (or a redefined head, via the

@@ -2132,7 +2132,7 @@ fn type_predicate_inline_is_structural_not_nominal() {
 /// *required* rather than applied: `Node::Prim3` carries no argument permutation (unlike
 /// `Node::Prim2`'s `map`), so a wrapper that reorders its parameters must decline. Inlining
 /// one would silently store the value under the wrong key.
-/// The two map ops (ADR-367) inline by HEAD — `get` at three arguments and `assoc` — only
+/// The two map ops (ADR-368) inline by HEAD — `get` at three arguments and `assoc` — only
 /// while the head is the PRELUDE closure, exactly as `resolve_prim`'s `get`/`nth` do. If
 /// either stops resolving here, nothing errors: every record read-with-default and every
 /// record update is a full call again, which is the KI-58 shape this pin exists for.

@@ -49,7 +49,7 @@ pub(crate) fn mapget_enabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("BROOD_NO_MAPGET").is_none())
 }
 
-/// Is the `(assoc m k v)` → [`PrimOp3::MapAssoc`] lowering enabled (ADR-367)? Default ON;
+/// Is the `(assoc m k v)` → [`PrimOp3::MapAssoc`] lowering enabled (ADR-368)? Default ON;
 /// `BROOD_NO_MAPASSOC=1` opts out — its own lever, apart from `BROOD_NO_MAPGET`, because
 /// this one ALLOCATES from native code (a fresh trie path per call) where the reads do not,
 /// so a suspected fault in either can be bisected without losing the other. Cached once.
@@ -58,7 +58,7 @@ pub(crate) fn mapassoc_enabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("BROOD_NO_MAPASSOC").is_none())
 }
 
-/// ADR-367: the LAST Node pass — `(get m k default)` and `(assoc m k v)` calls whose head
+/// ADR-368: the LAST Node pass — `(get m k default)` and `(assoc m k v)` calls whose head
 /// `resolve_prim3` recognises become `Node::Prim3` here, after the linear-map rewrite and
 /// its probe have matched them as calls (`LinIdiom` reads `Node::Call` shapes: a body that
 /// fuses into `%table-add` never reaches this with those calls intact, and one that does

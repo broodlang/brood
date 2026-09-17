@@ -294,7 +294,7 @@ fn force(heap: &mut Heap, step: Step) -> LispResult {
 /// must decline rather than silently compile the arguments in the wrong order.
 fn resolve_prim3(heap: &Heap, h: Symbol) -> Option<PrimOp3> {
     let v = heap.env_get(heap.global(), h)?;
-    // The two map ops (ADR-367), by head — the 3-ary twins of `PrimOp::MapGet`'s `get`
+    // The two map ops (ADR-368), by head — the 3-ary twins of `PrimOp::MapGet`'s `get`
     // rule: accepted only while the head still resolves to the PRELUDE closure, so a user
     // `(def get …)` cleanly disables the inline and the epoch guard re-validates on a
     // redefinition. `get`'s 3-arity is `%map-get` then `%lookup-miss` on a nil, which

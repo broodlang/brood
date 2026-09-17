@@ -10,7 +10,23 @@ needing one is queued in [`perf-handoff.md`](perf-handoff.md) instead — curren
 high-priority item: whether KI-114's `as_f64_pair` holds the closure KI-109 got from the
 promotion it constrained.
 
-## 2026-09-17 later — C9–C12 closed, KI-162 fixed, and the pre-push hook was inert; next is C13
+## 2026-09-17 later — C9–C13 closed, KI-162 fixed, and the pre-push hook was inert; next is C14
+
+**C13 — a float interval — is DECLINED (ADR-367), and the finding is worth more than the
+feature.** The item said "cheap on the int one's machinery"; it is not, because **floats in
+this language are not totally ordered and NaN is reachable**. Measured: `(* 1.0e200
+1.0e200)` and `(math/pow 10.0 400)` give `inf` with no raise; `(- inf inf)`, `(* inf 0.0)`
+and `(/ inf inf)` give `nan` — while `(math/sqrt -1.0)`, `(/ 0.0 0.0)` and `(math/asin 2.0)`
+all raise, which is why this is easy to miss. And `(< nan 1.0)` and `(>= nan 1.0)` are
+**both false**, so the else-branch rule the int interval rests on (`¬(L < R) ⟹ L ≥ R`) is
+unsound for floats.
+
+Today is sound because floats do NOT participate: `int_guard_ty` narrows to "an int in
+range, *or not an int*", so a float and its NaN survive both branches. That property is now
+pinned and sabotage-verified, so the next person to want float intervals meets the ADR
+rather than the shortcut. **Reconsider only if** every NaN-producing operation comes to
+raise (the three that matter already do — then floats ARE totally ordered here), or if a
+corpus shows float ranges doing work rather than sitting in docstrings.
 
 **C12 — the index a scan writes, and a fact that reached two of its three consumers.** The
 item's own advice decided the scope: the corpora were surveyed BEFORE anything was built,
@@ -110,9 +126,9 @@ float argument makes that false — the declaration is part of the claim. Three 
 `check/tests/declarations.rs`, sabotage-verified three ways. **C13 lost its rationale** with
 it (it was "do it with C10 if C10 needs it"; C10 did not) — it now needs a case of its own.
 
-**Next, in order:** **C12** (relations between two locals beyond `i < |xs|` — a relational
-domain, so do the shapes the corpora show rather than the domain) and C13–C17 in list order
-(`docs/type-system-status.md` § "The remaining list"). **KI-150** is
+**Next, in order:** **C14** (a named recursive alias — `(deftype json (rec …))` so a `sig`
+names it once), then C15–C17 in list order (`docs/type-system-status.md` § "The remaining
+list"); C12 and C13 are closed above. **KI-150** is
 reopened by the column refresh below (the checker costs ~10% more per file and every `brood
 file` pays it) and is the other live thread; its first candidate is caching inferred
 signatures in the stdlib image.
@@ -198,7 +214,7 @@ flat except for the checker's own cost; `c9428cba` had reached `std/regex`/`std/
 
 **Then, the perf queue, in value order** (all from the supervisor decomposition in the
 afternoon section below; each is general, none is supervisor-specific). **Item 1 is DONE
-(ADR-367, night of 2026-09-17):** `(get m k d)` 281 → 43 ns a read, `(assoc m k v)` 460 →
+(ADR-368, night of 2026-09-17):** `(get m k d)` 281 → 43 ns a read, `(assoc m k v)` 460 →
 295 ns, both instructions at both tiers, differential-guarded. Two things found doing it: a
 **map literal inside a hot arm bails the arm** — `MakeMap` is not in the JIT subset, only
 `MakeVector` is — so `(get {:a 1} …)` in a loop runs interpreted for good (a cheap, general

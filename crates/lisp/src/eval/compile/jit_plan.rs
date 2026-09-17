@@ -356,7 +356,7 @@ pub(super) fn jit_ckpt_depth(
                     _ => false,
                 }
             }
-            // The pure 3-ary map ops (ADR-367): pop three, push one, no effect to journal —
+            // The pure 3-ary map ops (ADR-368): pop three, push one, no effect to journal —
             // a deopt re-run recomputes a read or a fresh map, never a second store.
             Inst::Prim3 {
                 op: PrimOp3::MapGet3 | PrimOp3::MapAssoc,
@@ -812,7 +812,7 @@ pub(super) mod codegen {
             }
             Inst::MakeVector(_) | Inst::MakeMap(_) | Inst::MakeClosure { .. } => true,
             // `(assoc m k v)` allocates a fresh trie path per call — a hot loop of them is a
-            // GC-quiet builder only if the back-edge safepoint can fire (ADR-367).
+            // GC-quiet builder only if the back-edge safepoint can fire (ADR-368).
             Inst::Prim3 {
                 op: PrimOp3::MapAssoc,
                 ..

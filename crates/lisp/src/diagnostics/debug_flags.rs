@@ -413,12 +413,12 @@ pub const FLAGS: &[DebugFlag] = &[
     f(
         "BROOD_NO_MAPGET",
         OPTOUT,
-        "opt OUT of lowering `(get m k)` — and, since ADR-367, `(get m k default)` — to an inline map probe (ADR-296; default ON since 2026-09-17)",
+        "opt OUT of lowering `(get m k)` — and, since ADR-368, `(get m k default)` — to an inline map probe (ADR-296; default ON since 2026-09-17)",
     ),
     f(
         "BROOD_NO_MAPASSOC",
         OPTOUT,
-        "opt OUT of lowering `(assoc m k v)` on a map to an inline path-copy (ADR-367; default ON since 2026-09-17) — its own lever because it ALLOCATES from native code where the reads do not",
+        "opt OUT of lowering `(assoc m k v)` on a map to an inline path-copy (ADR-368; default ON since 2026-09-17) — its own lever because it ALLOCATES from native code where the reads do not",
     ),
     // ---- optimizer opt-outs (added when the catalogue was completed) ----
     f(

@@ -1,5 +1,5 @@
 //! **`PrimOp3::MapGet3` and `PrimOp3::MapAssoc` must answer exactly what `get` and `assoc`
-//! answer** (ADR-367; `BROOD_NO_MAPGET=1` / `BROOD_NO_MAPASSOC=1` are the plain-call baselines
+//! answer** (ADR-368; `BROOD_NO_MAPGET=1` / `BROOD_NO_MAPASSOC=1` are the plain-call baselines
 //! every case below is compared against).
 //!
 //! The 3-arity `(get m k default)` is every record read-with-default in the language, and

@@ -1077,7 +1077,7 @@ fn jit_lower_arm_inner(
         .declare_function("brood_rt_table_put", Linkage::Import, &tput_sig)
         .ok()
         .or_bail("cranelift-declare-function")?;
-    // brood_rt_map_get3 / brood_rt_map_assoc (ADR-367): the same (heap, out, 3w, 3w, 3w) ->
+    // brood_rt_map_get3 / brood_rt_map_assoc (ADR-368): the same (heap, out, 3w, 3w, 3w) ->
     // status shape as table_put — receiver, key, default-or-value.
     let mget3_id = m
         .declare_function("brood_rt_map_get3", Linkage::Import, &tput_sig)
@@ -2182,7 +2182,7 @@ fn jit_lower_arm_inner(
                 } => {
                     prim::emit_prim3_table_put(&mut b, &mut stack, frame, funcs)?;
                 }
-                // The two map ops (ADR-367): one callback each, status 1 deopts to the VM,
+                // The two map ops (ADR-368): one callback each, status 1 deopts to the VM,
                 // which owns every branch the inline rule declines.
                 Inst::Prim3 {
                     op: PrimOp3::MapGet3,

@@ -709,6 +709,64 @@ fn an_index_bounded_by_the_count_is_in_range() {
     assert!(ws[0].contains("nil | int ((nth xs i))"), "{ws:?}");
 }
 
+/// C13 / ADR-367 (2026-09-17) — why there is no float interval, pinned so a later attempt
+/// has to face it. Floats here are NOT totally ordered: NaN is reachable (`(- inf inf)`,
+/// `(* inf 0.0)`, `(/ inf inf)`, with `inf` itself from `(* 1.0e200 1.0e200)`, which does
+/// not raise), and `(< nan 1.0)` and `(>= nan 1.0)` are BOTH false. So the else-branch rule
+/// the int interval rests on — `¬(L < R) ⟹ L ≥ R` — does not hold for a float.
+///
+/// The current design is sound by NOT PARTICIPATING: `int_guard_ty` narrows to "an int
+/// within the range, or not an int at all", so a float — NaN included — survives both
+/// branches. Break that (narrow to the bare interval) and the second case below starts
+/// claiming `int`, which is the unsound shortcut a float interval would invite.
+#[test]
+fn a_float_comparison_narrows_nothing_because_nan_fails_both() {
+    // The else-branch of a float comparison proves nothing, so a float body is a float.
+    let ws = file_warnings_mode(
+        "(defmodule t)\n\
+         (sig a (float -> float))\n\
+         (defn a (x) (if (< x 1.0) 0.0 x))",
+        true,
+    );
+    assert!(ws.is_empty(), "{ws:?}");
+    // Over `number`, the else-branch must NOT be read as "then it is an int ≥ 1": the
+    // value may be a float (or a NaN) that failed the comparison for another reason.
+    let ws = file_warnings_mode(
+        "(defmodule t)\n\
+         (sig b (number -> int))\n\
+         (defn b (x) (if (< x 1) 0 x))",
+        true,
+    );
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert!(
+        ws[0].contains("float"),
+        "the else-branch must keep the non-int members: {ws:?}"
+    );
+    // …while the same comparison over a declared INT does narrow — the sound case the
+    // interval exists for, and the one this must not cost.
+    let ws = file_warnings_mode(
+        "(defmodule t)\n\
+         (sig c (int -> int))\n\
+         (defn c (x) (if (< x 1) 0 x))",
+        true,
+    );
+    assert!(ws.is_empty(), "{ws:?}");
+    // And an int interval refuses a float outright — `(int 0 10)` is not "a number in
+    // 0..10", which is the confusion a float interval would have to resolve.
+    let ws = file_warnings_mode(
+        "(defmodule t)\n\
+         (sig d ((int 0 10) -> (int 0 10)))\n\
+         (defn d (x) x)\n\
+         (defn e () (d 5.0))",
+        true,
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("expects int[0..10], got float")),
+        "{ws:?}"
+    );
+}
+
 /// C12 (2026-09-17) — the index a SCAN writes: `(nth s (+ i 1))` under `(< (+ i 1) n)`.
 /// The shape the corpora actually contain (`std/json.blsp` ×4, `std/ansi.blsp` ×2,
 /// `std/url.blsp`), and before this a guard over `(+ i 1)` produced no facts at all — the

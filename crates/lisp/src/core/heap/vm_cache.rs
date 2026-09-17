@@ -693,7 +693,7 @@ impl Heap {
     /// non-nil `v`), and a nil `v` — absent with a nil default, or a stored nil — is
     /// `%lookup-miss`: nil for a plain map, DECLINED (`None`) for a record, whose miss the
     /// `Lookup` ability may resolve. Shared by the VM's `Inst::Prim3` arm and
-    /// `brood_rt_map_get3`, so the two cannot disagree (ADR-367).
+    /// `brood_rt_map_get3`, so the two cannot disagree (ADR-368).
     pub fn map_get3_inline(&self, mid: MapId, k: Value, default: Value) -> Option<Value> {
         let v = self.map_get(mid, k).unwrap_or(default);
         if !matches!(v, Value::Nil) {

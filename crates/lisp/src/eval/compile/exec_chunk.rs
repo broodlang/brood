@@ -381,7 +381,7 @@ pub(crate) fn exec_chunk(
                                 );
                             }
                         }
-                        // `(get m k default)` on a map (ADR-367): `Heap::map_get3_inline`
+                        // `(get m k default)` on a map (ADR-368): `Heap::map_get3_inline`
                         // is the rule; a record's nil result and every non-map receiver
                         // defer to the real `get` below.
                         PrimOp3::MapGet3 => {
@@ -392,7 +392,7 @@ pub(crate) fn exec_chunk(
                                 }
                             }
                         }
-                        // `(assoc m k v)` on a map (ADR-367): the kernel path-copy directly;
+                        // `(assoc m k v)` on a map (ADR-368): the kernel path-copy directly;
                         // a vector (or anything else) defers to the wrapper's own branches.
                         // The operands stay rooted at n-3..n across the allocation.
                         PrimOp3::MapAssoc => {

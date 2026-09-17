@@ -524,7 +524,7 @@ pub(super) fn emit_make_vector(
 }
 
 /// A 3-operand primitive lowered as ONE runtime callback of `table_put`'s shape —
-/// `(heap, out, recv 3w, a 3w, b 3w) -> status` — for the map ops (ADR-367). Operands are
+/// `(heap, out, recv 3w, a 3w, b 3w) -> status` — for the map ops (ADR-368). Operands are
 /// on the stack in source order (`b` on top). Status 0: the answer rides back in `out`; 1:
 /// deopt (the receiver, or the case, is one the VM's real wrapper owns); 2: an error is
 /// parked in `jit_pending_error` → the arm's error block. The callbacks may allocate

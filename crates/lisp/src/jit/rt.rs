@@ -683,7 +683,7 @@ pub unsafe extern "C" fn brood_rt_global_epoch(heap: *mut Heap) -> i64 {
     (*heap).global_epoch() as i64
 }
 
-/// `(get m k default)` on a CHAMP map — the native half of `PrimOp3::MapGet3` (ADR-367).
+/// `(get m k default)` on a CHAMP map — the native half of `PrimOp3::MapGet3` (ADR-368).
 /// Status 0 = the answer is in `*out`; 1 = decline (a non-map receiver, or a record's nil
 /// result, which `get`'s `%lookup-miss` owns). The rule is `Heap::map_get3_inline`, shared
 /// with the VM's `Inst::Prim3` arm. Pure: a CHAMP probe allocates nothing.
@@ -718,7 +718,7 @@ pub unsafe extern "C" fn brood_rt_map_get3(
     }
 }
 
-/// `(assoc m k v)` on a CHAMP map — the native half of `PrimOp3::MapAssoc` (ADR-367).
+/// `(assoc m k v)` on a CHAMP map — the native half of `PrimOp3::MapAssoc` (ADR-368).
 /// Status 0 = the fresh map is in `*out`; 1 = decline (a non-map receiver — the wrapper's
 /// `%vector-assoc` branch and its errors stay in Brood). `Heap::map_assoc` path-copies the
 /// touched nodes: it ALLOCATES (the planner's `inst_may_allocate`/`inst_allocates_hot` say
