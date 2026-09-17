@@ -10,7 +10,29 @@ needing one is queued in [`perf-handoff.md`](perf-handoff.md) instead — curren
 high-priority item: whether KI-114's `as_f64_pair` holds the closure KI-109 got from the
 promotion it constrained.
 
-## 2026-09-17 later — C9, C10 and C11 closed, KI-162 fixed, and the pre-push hook was inert; next is C12
+## 2026-09-17 later — C9–C12 closed, KI-162 fixed, and the pre-push hook was inert; next is C13
+
+**C12 — the index a scan writes, and a fact that reached two of its three consumers.** The
+item's own advice decided the scope: the corpora were surveyed BEFORE anything was built,
+and they show one shape — a computed index `(+ i k)`/`(inc i)` guarded by exactly that
+expression (`std/json.blsp` ×4, `std/ansi.blsp` ×2, `std/url.blsp`). `i < j` between two
+locals appears nowhere as an index guard, so no relational domain was built and none should
+be until something asks. `index_bounds` is `i → {xs → k}` now (`i + k < (count xs)`), a
+proved offset covering every smaller one, which reads json's `\uXXXX` scan: guarded at
+`+10`, reads `+4`/`+5`. Before it, a guard over `(+ i 1)` produced **no facts at all** —
+`cmp_side` returned `None` and the whole comparison was discarded, so it narrowed nothing
+either.
+
+**The find worth carrying forward:** a `let` is bound in **three** places — the walk
+(`binders::let_bind_scope`), inference (`infer::expr_ty`) and the return check
+(`calls::gradual_of_compound`) — and each recorded a different subset of the facts. Only
+the walk recorded the ADR-350 count alias, so `(let (n (count words)) (if (>= n 4) (nth
+words 3) ""))` was clean passed into a `(string -> int)` and warned `nil | string` as a
+declared return. One shared `guards::count_alias_target` now. **The path alias is still
+recorded in only two of the three** — that is the same bug shape, unexercised so far, and
+the next person here should either wire it or prove it cannot matter. And the lesson for
+any future fact: the pre-existing alias test passes with the fix removed, because it tests
+an argument position; a fact is not wired until a RETURN-position test says so.
 
 **C11 (ADR-365) — `(seqable T)`.** A sequence of `T` whichever shape carries it:
 `nil | list<T> | vector<T> | set<T>`, which is exactly what `stats/median` and

@@ -637,10 +637,17 @@ pub(super) struct Ctx {
     /// index of `xs`. Sound under immutability: `xs` never changes, so `n` is its count
     /// for the whole scope. `bind` on either name drops it.
     count_aliases: HashMap<Symbol, Symbol>,
-    /// **Index bounds** (ADR-350): `i → {xs, …}` when a guard established `i < (count
-    /// xs)` on this path — the relational fact `(nth xs i)` reads (with `i ≥ 0` from its
-    /// interval) to drop the `nil` arm. `bind` on either name drops it.
-    index_bounds: HashMap<Symbol, HashSet<Symbol>>,
+    /// **Index bounds** (ADR-350, offsets 2026-09-17): `i → {xs → k}` when a guard
+    /// established `i + k < (count xs)` on this path — the relational fact `(nth xs i)`
+    /// reads (with `i ≥ 0` from its interval) to drop the `nil` arm. `bind` on either name
+    /// drops it.
+    ///
+    /// `k` is the **largest** offset proved below the count, and every smaller one follows:
+    /// from `i + k < n` and `b ≤ k` comes `i + b ≤ i + k < n`. That is what lets
+    /// `(and (<= (+ i 10) n) … (nth s (+ i 4)))` — `std/json.blsp`'s `\uXXXX` escape scan —
+    /// read an element rather than `nil | element`. The plain `i < (count xs)` is `k = 0`,
+    /// so the original rule is the offset rule at zero (C12).
+    index_bounds: HashMap<Symbol, HashMap<Symbol, i64>>,
     /// **Let-binding aliases.** `(let (a b) …)` aliases `a` and `b` — they
     /// name the same value through the scope, so narrowing either propagates
     /// to the other. Stored as an undirected adjacency map (each name maps
@@ -1002,13 +1009,21 @@ impl Ctx {
     pub(super) fn count_alias(&self, n: Symbol) -> Option<Symbol> {
         self.count_aliases.get(&n).copied()
     }
-    /// Record that `i < (count xs)` holds on this path.
-    pub(super) fn add_index_bound(&self, i: Symbol, xs: Symbol) -> Ctx {
+    /// Record that `i + offset < (count xs)` holds on this path. The LARGEST offset wins:
+    /// a bigger one implies every smaller one, so two guards on the same pair keep the
+    /// stronger fact.
+    pub(super) fn add_index_bound(&self, i: Symbol, xs: Symbol, offset: i64) -> Ctx {
         if i == xs {
             return self.clone();
         }
         let mut c = self.clone();
-        c.index_bounds.entry(i).or_default().insert(xs);
+        let slot = c
+            .index_bounds
+            .entry(i)
+            .or_default()
+            .entry(xs)
+            .or_insert(offset);
+        *slot = (*slot).max(offset);
         c
     }
     /// Does `i < (count xs)` hold on this path?
@@ -1018,10 +1033,13 @@ impl Ctx {
     pub(super) fn is_index_bound_by_any(&self, i: Symbol) -> bool {
         self.index_bounds.get(&i).is_some_and(|set| !set.is_empty())
     }
-    pub(super) fn is_index_bound(&self, i: Symbol, xs: Symbol) -> bool {
+    /// Does `i + offset < (count xs)` hold on this path? True when a guard proved it for
+    /// `offset` or for any LARGER one (`i + offset ≤ i + k < count xs`).
+    pub(super) fn is_index_bound_at(&self, i: Symbol, xs: Symbol, offset: i64) -> bool {
         self.index_bounds
             .get(&i)
-            .is_some_and(|set| set.contains(&xs))
+            .and_then(|m| m.get(&xs))
+            .is_some_and(|&k| offset <= k)
     }
     /// Record `(let (sym target) …)` — an undirected alias. Each side gets
     /// the other added to its neighbour-set, so a later `narrow` on either

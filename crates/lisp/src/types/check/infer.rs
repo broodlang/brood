@@ -803,6 +803,13 @@ fn control_flow_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
                             scope = scope.add_path_alias(name, base, keys);
                         }
                     }
+                    // …and the COUNT alias (`guards::count_alias_target`, ADR-350): two
+                    // symbol compares per binding, so it is not the re-inferring half of
+                    // the walk's rule the note above rules out on cost.
+                    if let Some(xs) = super::guards::count_alias_target(heap, binds[i + 1], &scope)
+                    {
+                        scope = scope.add_count_alias(name, xs);
+                    }
                 }
                 // A destructuring binding: each positional binder takes the element type
                 // (`super::walk::pattern_bindings`), unknown where it can't be pinned.
@@ -1605,11 +1612,17 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
                     index_form => {
                         let index = expr_ty(heap, index_form, ctx).and_then(|t| t.int_range());
                         let non_negative = index.is_some_and(|r| r.lo.is_some_and(|lo| lo >= 0));
-                        let bounded_by_guard = matches!(
-                            (index_form, arg),
-                            (Value::Sym(i), Value::Sym(xs))
-                                if ctx.is_lexical_local(i) && ctx.is_index_bound(i, xs)
-                        );
+                        // A guard bounded this index: the bare local (`i < (count xs)`) or
+                        // the offset expression a scan writes (`(nth s (+ i 1))` under
+                        // `(< (+ i 1) n)`, C12). The fact is keyed on the base local and
+                        // the offset, and a larger proved offset covers a smaller one.
+                        let bounded_by_guard = match arg {
+                            Value::Sym(xs) => {
+                                super::guards::local_plus_offset(heap, index_form, ctx)
+                                    .is_some_and(|(i, k)| ctx.is_index_bound_at(i, xs, k))
+                            }
+                            _ => false,
+                        };
                         let bounded_by_interval =
                             index.and_then(|r| r.hi).is_some_and(|hi| at_least(hi + 1));
                         non_negative && (bounded_by_guard || bounded_by_interval)

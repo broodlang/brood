@@ -1353,9 +1353,27 @@ each lands; this section is the working list, `handoff.md` points at it.
       `check/tests/declarations.rs`, `tests/contract_test.blsp`); sabotage-verified five
       ways. Also fixed on the way: `set` was missing from `TYPE_HEADS`, so `(set)` reported
       "unknown type constructor" instead of an arity mistake.
-- [ ] **C12. Relations between two locals beyond `i < |xs|`** (`i < j`, `i + 1 ≤ |xs|`).
-      A relational domain is a different lattice; do the shapes the corpora show, not the
-      domain.
+- [x] **C12. Relations between two locals beyond `i < |xs|`** (2026-09-17). Its own advice
+      followed: the corpora were surveyed first, and they show **one** shape — a computed
+      index `(+ i k)` / `(inc i)` guarded by exactly that expression (`std/json.blsp` ×4,
+      `std/ansi.blsp` ×2, `std/url.blsp`). `i < j` between two locals appears nowhere as an
+      index guard, so it is NOT built. What shipped:
+      - **The offset index bound.** `index_bounds` is `i → {xs → k}` — `i + k < (count xs)`
+        — and a proved offset covers every smaller one (`i + b ≤ i + k < n`), which is what
+        reads `std/json.blsp`'s `\uXXXX` scan: guarded at `+10`, reads `+4` and `+5`. A
+        non-strict guard gives `k − 1` (`i + k ≤ n ⟹ i + (k−1) < n`) and says nothing at
+        `k = 0`. Before this a guard over `(+ i 1)` produced **no facts at all** — the
+        comparison was discarded whole, so it narrowed nothing either.
+      - **The count alias reaches every consumer.** A `let` is bound in THREE places — the
+        walk, inference, and the return check's `gradual_of_compound` — and only the walk
+        recorded `(let (n (count xs)) …)`, so the fact reached an argument check and not a
+        return one: the identical read was clean inside `(want-str …)` and warned
+        `nil | string` as a declared return. One shared `guards::count_alias_target`, called
+        from all three. The pre-existing alias test passes with the fix removed, which is
+        why the gap survived — the new pin fails.
+      Four pins in `check/tests/inference_precision.rs`, sabotage-verified three ways
+      (offsets unrecognised; a larger offset no longer covering a smaller; the return
+      check's alias dropped — each reds its own pin alone).
 - [ ] **C13. A `float` interval.** Cheap on the int one's machinery. C10 turned out not to
       need it (it closed without a checker change), so this one now wants its own case: a
       shape a float bound would decide that nothing decides today.
