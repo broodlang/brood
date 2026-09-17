@@ -227,6 +227,12 @@ impl Heap {
         self.proc_limit_hit.take()
     }
 
+    /// Is a per-process heap-limit breach waiting to be raised? A peek for the native
+    /// loop's poll, which must not consume it — the VM raises it at its own safepoint.
+    pub fn proc_limit_pending(&self) -> bool {
+        self.proc_limit_hit.is_some()
+    }
+
     /// Post-collection heap-limit check: called at the end of both collection
     /// paths (legacy flip + generational), where the slabs hold exactly the
     /// survivors — so the figure is *live* data, never reclaimable garbage.

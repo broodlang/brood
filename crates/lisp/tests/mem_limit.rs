@@ -35,6 +35,30 @@ fn parse_size_handles_suffixes() {
 /// When the safepoint works (the normal case) it trips after the 4 MiB headroom,
 /// long before the cap. (The retained `acc` list means live bytes only grow, so
 /// GC can't reclaim it — the safepoint check is what stops the build.)
+/// The same runaway as a top-level `defn` — a loop the JIT runs NATIVE, whose back-edge
+/// never returns to the VM's safepoints. Its batched poll (`brood_rt_tick_n`) must report a
+/// pending limit so the loop deopts and the VM raises; without that the loop built every
+/// cell and returned (2026-09-17 — the day letrec loops started running native too, KI-156,
+/// which is how the sibling test above caught it).
+#[test]
+fn soft_limit_trips_inside_a_native_loop() {
+    let mut interp = Interp::new();
+    interp
+        .eval_str("(defn ml-build (n acc) (if (= n 0) acc (ml-build (- n 1) (cons n acc))))")
+        .expect("define the loop");
+    // Warm it past the tier threshold with a small, cheap run so the big one runs native.
+    interp.eval_str("(ml-build 5000 nil)").expect("warm-up run");
+    let headroom = 4 * 1024 * 1024;
+    alloc::set_soft_limit(alloc::live_bytes() + headroom);
+    let err = interp
+        .eval_str("(ml-build 1000000 nil)")
+        .expect_err("a native consing loop must hit the soft memory limit");
+    assert_eq!(err.code, Some("E0043"));
+    alloc::set_soft_limit(0);
+    let v = interp.eval_str("(+ 1 2)").expect("usable after");
+    assert_eq!(interp.print(v), "3");
+}
+
 #[test]
 fn soft_limit_turns_runaway_into_catchable_error() {
     // Build the prelude with no limit, *then* cap just above current usage so

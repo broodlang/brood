@@ -46,6 +46,9 @@ pub(crate) struct Scope {
     /// for an ordinary closure (and unset while compiling a nested `(fn …)`, which
     /// gets its own scope).
     pub(crate) self_call: Option<(Symbol, usize)>,
+    /// The capture slot holding this closure's own self-name (a letrec loop's binding to
+    /// itself), so the self-call rule can tell that slot from a shadowing local.
+    pub(crate) self_slot: Option<usize>,
     /// Per-arm call-site IC counter (ADR-175 Phase A): sites number from 0 within the
     /// arm being compiled, so the compiled arm is position-independent — each process
     /// resolves its own IC block for the arm and indexes `base + site`. Replaces the
@@ -71,6 +74,7 @@ impl Scope {
             unsafe_slots: Vec::new(),
             letrec_self: None,
             self_call: None,
+            self_slot: None,
             sites: 0,
             gsites: 0,
             site_pos: Vec::new(),
@@ -1067,9 +1071,22 @@ pub(crate) fn compile_node(
             // trampoline without resolving the callee or dispatching. A non-tail
             // self-call, a shadowed name, or a mismatched arity falls through to the
             // regular env-resolved path below (still correct).
+            //
+            // "Not shadowed by a local" must admit the self-name's OWN capture slot: a
+            // letrec closure captures the frame that binds its name to itself, and `#3
+            // lexical addressing` binds every capture to a frame slot — so `lookup` found
+            // the name bound and this rule declined every letrec loop in the language
+            // (`(letrec (lp (fn (i acc) … (lp …))))` compiled to a `Call` through the
+            // captured closure: 100 ns per iteration against a `defn` loop's 2.3 ns,
+            // found 2026-09-17). A `let` that rebinds the name inside the body still
+            // resolves to ITS slot, not `self_slot`, and still declines.
             if tail {
                 if let (ValueRef::Sym(h), Some((name, arity))) = (head.unpack(), scope.self_call) {
-                    if h == name && scope.lookup(h).is_none() && items.len() - 1 == arity {
+                    let bound = scope.lookup(h);
+                    if h == name
+                        && (bound.is_none() || bound == scope.self_slot)
+                        && items.len() - 1 == arity
+                    {
                         let mut args = Vec::with_capacity(arity);
                         for &a in &items[1..] {
                             args.push(compile_node(heap, a, scope, false)?);

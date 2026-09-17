@@ -2362,6 +2362,73 @@ fn the_vector_base_hoist_is_off_for_any_allocating_arm() {
 /// for 3000 iterations and asserts the arm left the untried state. Sabotage-verified: with
 /// the weight at 1 the same loop has counted 11 of 128 and `jit_code` is still null.
 #[cfg(feature = "jit")]
+/// A `letrec`-bound loop's tail self-call is a `SelfCall`, not a call through the
+/// captured closure. `#3 lexical addressing` binds every capture to a frame slot — and the
+/// self-name IS a capture (the frame binds it to the closure) — so the self-call rule's
+/// "not shadowed by a local" check saw the name bound and declined every letrec loop in
+/// the language: `(letrec (lp (fn (i acc) … (lp …))))` ran at 100 ns per iteration
+/// against a `defn` loop's 2.3 ns (found 2026-09-17). The rule now admits the self-name's
+/// own capture slot; a `let` that rebinds the name inside the body still declines.
+#[cfg(feature = "jit")]
+#[test]
+fn a_letrec_loop_is_a_self_call_and_a_shadowed_name_is_not() {
+    let mut interp = crate::Interp::new();
+    let chunk_of = |interp: &mut crate::Interp, src: &str| -> Vec<String> {
+        let f = interp.eval_str(src).expect("build the closure");
+        let id = match f.unpack() {
+            crate::core::value::ValueRef::Fn(id) => id,
+            other => panic!("not a closure: {other:?}"),
+        };
+        let handle = super::closure::compiled_arm_for(&interp.heap, id, 2).expect("a VM arm");
+        let arm = handle.arc().clone();
+        arm.chunk
+            .as_ref()
+            .expect("a flat chunk")
+            .code
+            .iter()
+            .map(|i| super::jit_plan::codegen::inst_opcode_name(i).to_string())
+            .collect()
+    };
+    // The plain loop, with a captured `n`: the back-edge is a SelfCall.
+    let plain = chunk_of(
+        &mut interp,
+        "(let (n 10) (letrec (lp (fn (i acc) (if (>= i n) acc (lp (+ i 1) (+ acc i))))) lp))",
+    );
+    assert!(
+        plain.iter().any(|i| i.starts_with("SelfCall")),
+        "no SelfCall in the letrec loop: {plain:?}"
+    );
+    assert!(
+        !plain.iter().any(|i| i.starts_with("Call")),
+        "the letrec loop still calls through its capture: {plain:?}"
+    );
+    // A `let` inside the body rebinding the loop's own name: that call is the shadow's.
+    let shadowed = chunk_of(
+        &mut interp,
+        "(letrec (lp (fn (i acc) (if (>= i 3) acc (let (lp (fn (a b) :inner)) (lp (+ i 1) acc))))) lp)",
+    );
+    assert!(
+        !shadowed.iter().any(|i| i.starts_with("SelfCall")),
+        "a shadowed self-name became a SelfCall: {shadowed:?}"
+    );
+    // …and it means what it says at runtime.
+    let v = interp
+        .eval_str("(letrec (lp (fn (i acc) (if (>= i 3) acc (let (lp (fn (a b) :inner)) (lp (+ i 1) acc))))) (lp 0 0))")
+        .expect("run");
+    assert!(
+        matches!(v.unpack(), crate::core::value::ValueRef::Keyword(k) if crate::core::value::symbol_is(k, "inner")),
+        "the shadowing let must win: {v:?}"
+    );
+    // The loop runs to its answer with the captured bound.
+    let v = interp
+        .eval_str("(let (n 100000) (letrec (lp (fn (i acc) (if (>= i n) acc (lp (+ i 1) (+ acc i))))) (lp 0 0)))")
+        .expect("run");
+    assert!(
+        matches!(v.unpack(), crate::core::value::ValueRef::Int(4_999_950_000)),
+        "{v:?}"
+    );
+}
+
 #[test]
 fn a_self_tail_loop_is_elected_for_tiering_within_one_activation() {
     use std::sync::atomic::Ordering::Acquire;

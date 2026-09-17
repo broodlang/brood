@@ -608,6 +608,12 @@ impl Mailbox {
     /// catches E0046 gets a guaranteed window to drain or re-set the bound, where before
     /// every further enqueue re-armed and killed it mid-recovery. Setting the bound again
     /// (`set_max_mailbox`) clears the latch and re-arms the protection.
+    /// Is an overflow waiting to be raised? A peek (`take_overflow_hit` takes and latches).
+    pub(super) fn overflow_pending(&self) -> bool {
+        let v = self.overflow_hit.load(Ordering::Relaxed);
+        v != 0 && v != Self::OVERFLOW_LATCHED
+    }
+
     pub(super) fn take_overflow_hit(&self) -> Option<(usize, usize)> {
         // Take AND latch in one compare-exchange: a plain `swap(LATCHED)` would latch a
         // mailbox that never breached, and a `swap(0)` is the race this replaced.

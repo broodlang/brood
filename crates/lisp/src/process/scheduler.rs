@@ -539,6 +539,16 @@ pub(crate) fn tick_reporting_hard_kill() -> bool {
 /// Probed beside `take_proc_limit_hit` at the same loop-top safepoints; one borrow +
 /// one relaxed load when clean, `None` always on the root thread (CURRENT unset),
 /// matching the kill probe's root rule.
+/// Is the current process's mailbox overflow waiting to be raised? A peek for the native
+/// loop's poll; `take_current_mailbox_overflow` is what raises it.
+pub(crate) fn current_mailbox_overflow_pending() -> bool {
+    CURRENT.with(|c| {
+        c.borrow()
+            .as_ref()
+            .is_some_and(|ctx| ctx.mailbox.overflow_pending())
+    })
+}
+
 pub(crate) fn take_current_mailbox_overflow() -> Option<(usize, usize)> {
     CURRENT.with(|c| {
         c.borrow()

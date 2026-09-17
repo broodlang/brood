@@ -889,10 +889,42 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-17** — `inc`, `dec` and `(- (get m k 0) e)` fuse like `+` (ADR-360 §5, `%table-sub`); the fuzzer draws the four spellings and an i64::MIN seed.
 - **2026-09-17** — ADR-360 §6: the tally through a `fold`/`reduce` LITERAL builds in place too (957 → 98 ms on 750k keys), and `seq/frequencies` is written as that idiom (523 → 96 ms); a shadowed name anywhere in the form declines the rewrite; the fuzzer gained a fold arm against a named-function reference.
 - **2026-09-17** — call convention rung A4, first half: the callee nils its own locals (unrolled, before the stack guard) and the inline call's fill loop is gone — 380 → 321 instructions per call on a six-local callee, `bintree` −4.5%, everything else inside its floor.
+- **2026-09-17** — KI-156: no `letrec` loop in the language had its `SelfCall` — the self-name's own capture slot read as a shadowing local — 300 → 4–13 ms on a 3M-iteration local loop; every named local loop, `defseq`'s, and the `for` macro's pipeline were running through a full dispatch per iteration.
+- **2026-09-17** — KI-157: a native loop never saw a pending memory limit (E0043, the process heap limit, a mailbox overflow are VM-safepoint checks) — the back-edge poll now reports one and the loop deopts to raise it; found the moment letrec loops went native.
 
 ---
 
 ## Recent — full entries
+
+## 2026-09-17 — the limits reach a native loop (KI-157)
+
+KI-156's suite run had one red: `mem_limit.rs`'s runaway — a `let`-bound consing loop —
+built its million cells and returned. Its loop had just started running native, and a
+native loop's back-edge returns to the VM only on preempt or deopt; the soft ceiling, the
+per-process heap limit and the mailbox overflow are all raised at the VM's safepoints. A
+`defn` loop had been immune all along. The batched poll (`brood_rt_tick_n`, one FFI per
+`TICK_BATCH` iterations) now answers `2` when any of the three is pending — peeks, never
+takes — and the lowering deopts on it; at the back-edge the frame is the next iteration's
+arguments and the checkpoint was just reset, so the VM re-runs that iteration and raises.
+Guarded on a warmed `defn` loop; sabotage-verified.
+
+## 2026-09-17 — a local loop is a loop again (KI-156)
+
+Measuring what a fused pipeline could reach through a local loop gave a number that made
+no sense: a `letrec` loop at 100 ns per iteration against a `defn` loop's 2.3 ns, on the
+same body. The IR dump said why — the letrec closure's chunk ends in `Local Call`, the
+defn's in `SelfCall`. The self-call rule requires the head "not shadowed by a local", and
+since `#3 lexical addressing` every capture is a frame slot — including the self-name,
+which the closure's frame binds to itself so the recursion can resolve. The rule saw the
+name bound and declined. Every letrec loop in the language, `defseq`'s `--loop`, every
+hand-written named loop, the `for` macro's `fold`-with-literal pipeline: one full dispatch
+per iteration, and an arm the JIT could lower only with a real call at its back-edge.
+`Scope::self_slot` and one extra disjunct in the rule; a `let` that rebinds the name still
+resolves to its own slot and still declines. 300 → 4–13 ms on the loop that found it.
+
+`make ab --floor --all`: no row moved outside its floor — none of the rows writes a local
+loop. `pingpong` read +2.5…+5% across three solo runs and the instruction counts on both
+binaries are 2.027 G to four digits: scheduling drift on a two-process row.
 
 ## 2026-09-17 — rung A4, first half: the callee nils its own frame
 

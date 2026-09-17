@@ -46,8 +46,26 @@ fn jit_cb_trace_enabled() -> bool {
 /// Batched preemption poll: burn `n` reductions in one call — the back-edge's
 /// in-register countdown calls this once per batch (see `tick_capture_n`), so a
 /// tight JIT'd loop pays ~one sub+branch per iteration instead of an FFI.
+///
+/// The batched back-edge poll. `1` = preempt (the reduction budget ran out); `2` = leave
+/// the loop for the VM: a limit is waiting to be RAISED — the soft memory ceiling (E0043),
+/// a per-process heap limit, a mailbox overflow — and native code cannot raise, so the
+/// loop deopts at its back-edge (the frame holds the next iteration's arguments, the
+/// checkpoint was just reset) and the VM's own safepoint at that iteration raises it, the
+/// way the VM's self-tail path always did. Before this a native consing loop under a soft
+/// limit never saw the limit at all — `mem_limit.rs`'s runaway built its million cells
+/// and returned (2026-09-17, the day letrec loops started running native: KI-156).
+///
+/// # Safety
+/// `heap` is a live heap; the limit peeks read it only.
 #[no_mangle]
-pub extern "C" fn brood_rt_tick_n(_heap: *mut Heap, n: i64) -> u8 {
+pub unsafe extern "C" fn brood_rt_tick_n(heap: *mut Heap, n: i64) -> u8 {
+    if crate::core::alloc::soft_limit_hit().is_some()
+        || (*heap).proc_limit_pending()
+        || crate::process::current_mailbox_overflow_pending()
+    {
+        return 2;
+    }
     if crate::process::in_capture_run() {
         crate::process::tick_capture_n(n as u32) as u8
     } else {

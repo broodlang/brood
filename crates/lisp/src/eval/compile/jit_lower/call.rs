@@ -947,6 +947,16 @@ pub(super) fn emit_self_call(
     let batch = b.ins().iconst(types::I64, TICK_BATCH);
     let tc = b.ins().call(funcs.tickn, &[heap, batch]);
     let yld = b.inst_results(tc)[0];
-    b.ins().brif(yld, preempt, &[], loop_top, &[]);
+    // 0 → next iteration; 1 → preempt; 2 → a limit is waiting to be raised, which only
+    // the VM can do: deopt at the back-edge (the frame holds the next iteration's args
+    // and the checkpoint was just reset, so the VM re-runs exactly this fresh iteration
+    // and raises at its own safepoint).
+    let go_on = b.create_block();
+    b.ins().brif(yld, go_on, &[], loop_top, &[]);
+    b.switch_to_block(go_on);
+    let is_limit = b.ins().icmp_imm_s(IntCC::Equal, yld, 2);
+    let __dr = b.ins().iconst(types::I32, 37);
+    b.ins()
+        .brif(is_limit, deopt, &[BlockArg::Value(__dr)], preempt, &[]);
     Some(())
 }

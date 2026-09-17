@@ -95,6 +95,13 @@ pub(crate) fn compile_arm(
         }
     }
     let capture_names = capture_names.into_boxed_slice();
+    // The self-name rides in as a capture too (the frame binds it to the closure); mark
+    // its slot so a tail self-call through that name is a `SelfCall`, not a shadowed call.
+    if let Some(name) = self_name {
+        if capture_names.contains(&name) {
+            scope.self_slot = scope.lookup(name);
+        }
+    }
     let mut body = compile_body(heap, body, &mut scope, true)?;
     // Escape-analysis scalar replacement (lever 2): eliminate non-escaping `(let (p […]) …)`
     // vector allocations, binding their elements to fresh slots `[scope.max ..]` and rewriting
