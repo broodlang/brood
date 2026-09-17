@@ -82,10 +82,26 @@
   (test "a body error is the body's error"
     (assert-error "+: expected number" (fold (range 3) 0 (fn (acc x) (+ acc (str x))))))
 
-  (test "a non-literal reducer and a non-range collection take the ordinary fold"
+  (test "a non-literal reducer takes the ordinary fold; a vector and a list loop too"
     (assert= 45 (fold (range 10) 0 +))
     (assert= 6 (fold '(1 2 3) 0 (fn (acc x) (+ acc x))))
-    (assert= 6 (fold [1 2 3] 0 (fn (acc x) (+ acc x)))))
+    (assert= 6 (fold [1 2 3] 0 (fn (acc x) (+ acc x))))
+    (assert= 0 (fold nil 0 (fn (acc x) (+ acc x))))
+    (assert= 0 (fold [] 0 (fn (acc x) (+ acc x))))
+    (assert= '(3 2 1) (fold '(1 2 3) nil (fn (acc x) (cons x acc))))
+    (assert= [1 2 3] (fold [1 2 3] [] (fn (acc x) (conj acc x))))
+    ;; a map folds as its [k v] pairs, through the ordinary fold
+    (assert= 3 (fold {:a 1 :b 2} 0 (fn (acc kv) (+ acc (nth kv 1)))))
+    ;; a string is not seqable here either way
+    (assert-error "expected" (fold "abc" 0 (fn (acc x) (+ acc 1)))))
+
+  (test "a list fold stops at a failure accumulator (ADR-315), a vector fold does not"
+    (let (f (failure "stop"))
+      (assert= f (fold '(1 2 3) 0 (fn (acc x) (if (= x 2) f (if (int? acc) (+ acc x) acc)))))
+      ;; the step after the failure never runs
+      (let (seen (table/new))
+        (fold '(1 2 3) 0 (fn (acc x) (table/incr seen x) (if (= x 2) f acc)))
+        (assert= nil (table/get seen 3)))))
 
   (test "a shadowed name anywhere in the form declines the rewrite, and the shadow wins"
     (assert= 9 (let (range (fn (n) (list 9))) (fold (range 3) 0 (fn (acc x) x))))))

@@ -18,7 +18,7 @@ a list, and elements that make a stage raise mid-way.
 import random, sys
 
 BASES = ["(range 7)", "(range 0)", "(range 2 9)", "(range 9 2 -3)", "(range 0 20 5)", "(range -3 3)",
-         "(list 1 2 3 4 5)", "[3 1 4 1 5]", "nil", "(range 40)"]
+         "(list 1 2 3 4 5)", "[3 1 4 1 5]", "nil", "(range 40)", "[]", "(list 3)", "{:k 1}"]
 # stage function forms; `x` in a body may be shadowed by the stage's own param
 STAGE_FNS = {
     "seq/lmap": ["(fn (v) (* v v))", "(fn (v) (+ v x))", "(fn (x) (+ x 1))", "(fn (x) (let (x (* x 2)) x))",
@@ -42,6 +42,15 @@ def program(seed):
     rf = rng.choice(RFS)
     init = rng.choice(INITS)
     head = rng.choice(["fold", "reduce"])
+    plain = ""
+    if rng.random() < 0.4:
+        # A plain fold with a literal over the base — the collection dispatch alone —
+        # against the same body as a NAMED function, which the rewrite leaves to `fold`.
+        body = rng.choice(["(+ a v)", "(cons v a)", "(if (= v 3) (failure \"stop\") (if (int? a) (+ a v) a))", "(+ a (* v x))"])
+        plain = f"""(defn pf-step (a v) {body})
+(def c (try (show (fold {base} {init} (fn (a v) {body}))) (catch e (str "E:" (error-message e)))))
+(def d (try (show (fold {base} {init} pf-step)) (catch e (str "E:" (error-message e)))))
+(io/puts (if (= c d) "fold-ok" (str "BAD fold=" c " ref=" d)))"""
     return f"""(def x 7)
 (def x2 4)
 (defn pf-sq (v) (* v v))
@@ -52,6 +61,7 @@ def program(seed):
 (def view {chain})
 (def b (try (show ({head} view {init} {rf})) (catch e (str "E:" (error-message e)))))
 (io/puts (if (= a b) a (str "BAD fused=" a " ref=" b)))
+{plain}
 """
 
 if __name__ == "__main__":

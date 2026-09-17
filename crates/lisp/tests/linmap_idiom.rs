@@ -314,13 +314,14 @@ fn a_stage_chain_under_reduce_fuses_into_one_literal_and_a_range_base_into_a_loo
             "unexpected `{f}` (the stage survived) in:\n{out}"
         );
     }
-    // Over a list, the fused literal is handed to the ordinary `fold`; no loop, no range check.
+    // Over any other base, the fused literal gets the same dispatch (the range check, then
+    // the ordinary fold).
     let out = expansion("(defn go (xs) (reduce (seq/lmap xs (fn (i) (* i i))) 0 +))");
-    assert!(out.contains("(fold ") && out.contains("(* pipe-e"), "{out}");
     assert!(
-        !out.contains("%range-bounds") && !out.contains("seq/lmap"),
+        out.contains("(fold ") && out.contains("(* pipe-e") && out.contains("(range? "),
         "{out}"
     );
+    assert!(!out.contains("seq/lmap"), "{out}");
 }
 
 #[test]
@@ -360,11 +361,27 @@ fn a_fold_over_a_range_with_a_literal_is_a_counted_loop() {
     ] {
         assert!(out.contains(w), "expected `{w}` in:\n{out}");
     }
-    // Not a literal reducer, not a range, a shadowed `range`: the ordinary fold stays.
+    // Any collection: the range check and the range loop ride along, the ordinary fold
+    // behind them. (The vector and list loops are parked — `FOLD_LOOP_SMALL_ATOMS` — so a
+    // vector or list fold pays no copies beyond the range loop's.)
+    let out = expansion("(defn go (xs) (fold xs 0 (fn (acc x) (+ acc x))))");
+    for w in ["(range? ", "%range-bounds", ":generated"] {
+        assert!(out.contains(w), "expected `{w}` in:\n{out}");
+    }
+    assert!(
+        !out.contains("(vector? "),
+        "the vector loop is parked:\n{out}"
+    );
+    // Not a literal reducer, a shadowed `range`, or a body over the copy budget: the
+    // ordinary fold stays.
+    let big = format!(
+        "(defn go (n) (fold (range n) 0 (fn (acc x) (+ acc {}))))",
+        "(+ 1 1) ".repeat(40)
+    );
     for src in [
         "(defn go (n) (fold (range n) 0 +))",
-        "(defn go (xs) (fold xs 0 (fn (acc x) (+ acc x))))",
         "(defn go (n) (let (range (fn (n) (list 9))) (fold (range n) 0 (fn (acc x) x))))",
+        big.as_str(),
     ] {
         let out = expansion(src);
         assert!(

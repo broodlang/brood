@@ -2104,7 +2104,7 @@ impl Drop for NoSourceRewrites {
 // the whole form when a local binder anywhere in it shadows a name they read.
 
 /// The names the pipeline rewrites read by spelling.
-const PIPELINE_HEADS: [&str; 14] = [
+const PIPELINE_HEADS: [&str; 21] = [
     "fold",
     "reduce",
     "range",
@@ -2119,6 +2119,13 @@ const PIPELINE_HEADS: [&str; 14] = [
     "seq/lfilter",
     "seq/lreject",
     "seq/lkeep",
+    "vector?",
+    "pair?",
+    "count",
+    "empty?",
+    "first",
+    "rest",
+    "type-of",
 ];
 
 fn pipeline_names() -> Vec<value::Symbol> {
@@ -2449,8 +2456,8 @@ fn pipeline_fuse_call(heap: &mut Heap, form: Value, items: &[Value]) -> Option<V
     let ValueRef::Sym(e0_sym) = elems[0].unpack() else {
         return None;
     };
-    let call = if is_range_call(heap, base) {
-        range_or_fold(
+    let call = if form_atoms(heap, body, 0) <= FOLD_LOOP_MAX_ATOMS {
+        coll_or_fold(
             heap,
             form,
             c_val,
@@ -2490,10 +2497,6 @@ fn range_fold_rewrite(heap: &mut Heap, form: Value) -> Value {
     })
 }
 
-fn is_range_call(heap: &Heap, form: Value) -> bool {
-    (1..=3).any(|n| call_of(heap, form, &["range"], n).is_some())
-}
-
 fn form_has_range_fold(heap: &Heap, form: Value, depth: usize) -> bool {
     if depth > 256 {
         return false;
@@ -2507,7 +2510,6 @@ fn form_has_range_fold(heap: &Heap, form: Value, depth: usize) -> bool {
         }
         if value::symbol_is(h, "fold")
             && items.len() == 4
-            && is_range_call(heap, items[1])
             && plain_fn_literal(heap, items[3]).is_some_and(|(p, _)| p.len() == 2)
         {
             return true;
@@ -2576,8 +2578,87 @@ fn counted_range_loop(
     heap.list(vec![value::sym(kw::LET), b_binds, letrec])
 }
 
-/// `(if (range? r) <counted loop> (%lint-allow :generated (fold r init lambda)))`.
-fn range_or_fold(
+/// The counted loop over the vector bound to `r`: `(nth r i)` per element, `count` once.
+fn counted_vector_loop(
+    heap: &mut Heap,
+    r: Value,
+    init: Value,
+    acc_name: value::Symbol,
+    elem_name: value::Symbol,
+    body: &[Value],
+) -> Value {
+    let n = value::gensym("vec-n");
+    let loop_name = value::gensym("vec-loop");
+    let i = value::gensym("vec-i");
+    let acc = value::gensym("vec-acc");
+    let done = heap.list(vec![value::sym(">="), i, n]);
+    let next_i = heap.list(vec![value::sym("+"), i, Value::int(1)]);
+    let elem = heap.list(vec![value::sym("nth"), r, i]);
+    let rebind = heap.list(vec![
+        Value::symbol(acc_name),
+        acc,
+        Value::symbol(elem_name),
+        elem,
+    ]);
+    let mut step_body = vec![value::sym(kw::LET), rebind];
+    step_body.extend_from_slice(body);
+    let step_form = heap.list(step_body);
+    let recur = heap.list(vec![loop_name, next_i, step_form]);
+    let branch = heap.list(vec![value::sym(kw::IF), done, acc, recur]);
+    let loop_params = heap.list(vec![i, acc]);
+    let loop_fn = heap.list(vec![value::sym(kw::FN), loop_params, branch]);
+    let loop_binds = heap.list(vec![loop_name, loop_fn]);
+    let start = heap.list(vec![loop_name, Value::int(0), init]);
+    let letrec = heap.list(vec![value::sym(kw::LETREC), loop_binds, start]);
+    let count = heap.list(vec![value::sym("count"), r]);
+    let n_binds = heap.list(vec![n, count]);
+    heap.list(vec![value::sym(kw::LET), n_binds, letrec])
+}
+
+/// The walk over the list bound to `r` — `%fold-loop` in place: a failure accumulator
+/// stops the fold before the emptiness test (ADR-315), `first`/`rest` per element.
+fn list_loop(
+    heap: &mut Heap,
+    r: Value,
+    init: Value,
+    acc_name: value::Symbol,
+    elem_name: value::Symbol,
+    body: &[Value],
+) -> Value {
+    let loop_name = value::gensym("list-loop");
+    let xs = value::gensym("list-xs");
+    let acc = value::gensym("list-acc");
+    let ty = heap.list(vec![value::sym("type-of"), acc]);
+    let failed = heap.list(vec![value::sym("="), ty, value::kw("failure")]);
+    let done = heap.list(vec![value::sym("empty?"), xs]);
+    let next_xs = heap.list(vec![value::sym("rest"), xs]);
+    let elem = heap.list(vec![value::sym("first"), xs]);
+    let rebind = heap.list(vec![
+        Value::symbol(acc_name),
+        acc,
+        Value::symbol(elem_name),
+        elem,
+    ]);
+    let mut step_body = vec![value::sym(kw::LET), rebind];
+    step_body.extend_from_slice(body);
+    let step_form = heap.list(step_body);
+    let recur = heap.list(vec![loop_name, next_xs, step_form]);
+    let inner = heap.list(vec![value::sym(kw::IF), done, acc, recur]);
+    let branch = heap.list(vec![value::sym(kw::IF), failed, acc, inner]);
+    let loop_params = heap.list(vec![xs, acc]);
+    let loop_fn = heap.list(vec![value::sym(kw::FN), loop_params, branch]);
+    let loop_binds = heap.list(vec![loop_name, loop_fn]);
+    let start = heap.list(vec![loop_name, r, init]);
+    heap.list(vec![value::sym(kw::LETREC), loop_binds, start])
+}
+
+/// `(if (range? r) <range loop> (if (vector? r) <vector loop> (if (pair? r) <list loop>
+/// (%lint-allow :generated (fold r init lambda)))))` — the three collection kinds `fold`
+/// dispatches to a Rust loop with a per-element gateway, each as a `letrec` loop with the
+/// literal's body in place; everything else (nil, a map, a set, a view, a string) takes
+/// the ordinary `fold` with the literal as written.
+#[allow(clippy::too_many_arguments)]
+fn coll_or_fold(
     heap: &mut Heap,
     form: Value,
     r: Value,
@@ -2587,31 +2668,74 @@ fn range_or_fold(
     elem_name: value::Symbol,
     body: &[Value],
 ) -> Value {
-    let looped = counted_range_loop(heap, r, init, acc_name, elem_name, body);
-    let is_range = heap.list(vec![value::sym("range?"), r]);
+    let ranged = counted_range_loop(heap, r, init, acc_name, elem_name, body);
     let slow = rebuild_list(heap, form, vec![value::sym("fold"), r, init, lambda]);
     let slow = heap.list(vec![
         value::sym("%lint-allow"),
         value::kw("generated"),
         slow,
     ]);
-    heap.list(vec![value::sym(kw::IF), is_range, looped, slow])
+    // The vector and list loops are PARKED (`FOLD_LOOP_SMALL_ATOMS` is `None`): each is one more
+    // copy of the body, and a copy costs ~1–3M instructions wherever the fold is compiled
+    // (a closure template promoted, an arm compiled, the JIT's share) — including the std
+    // functions a program materialises at boot, where a fold of a few elements pays the
+    // copies and never the loop. Measured 2026-09-17: the three-loop dispatch on every
+    // literal fold read +7.7M instructions on `(io/puts 0)` (+10%) and +16% on the
+    // `pipeline` row (whose fused body is small, so it got all three) for a 1.6× win on a
+    // vector or list fold (141 → 42 → 25 ms on 1M elements; the range loop alone is 20×
+    // on its row). Set the constant to bring them back once a copy is cheaper.
+    let atoms = body.iter().map(|&f| form_atoms(heap, f, 0)).sum::<usize>();
+    let want_more = FOLD_LOOP_SMALL_ATOMS.is_some_and(|small| atoms <= small);
+    let rest = if want_more {
+        let vectored = counted_vector_loop(heap, r, init, acc_name, elem_name, body);
+        let listed = list_loop(heap, r, init, acc_name, elem_name, body);
+        let is_pair = heap.list(vec![value::sym("pair?"), r]);
+        let c3 = heap.list(vec![value::sym(kw::IF), is_pair, listed, slow]);
+        let is_vec = heap.list(vec![value::sym("vector?"), r]);
+        heap.list(vec![value::sym(kw::IF), is_vec, vectored, c3])
+    } else {
+        slow
+    };
+    let is_range = heap.list(vec![value::sym("range?"), r]);
+    heap.list(vec![value::sym(kw::IF), is_range, ranged, rest])
+}
+
+/// A literal body this rewrite copies: bounded so a large body does not multiply the
+/// compiled code for a fold it barely speeds up. Up to `MAX` gets the range loop (one
+/// copy beside the fold); up to `SMALL`, when set, the vector and list loops too (two more).
+const FOLD_LOOP_MAX_ATOMS: usize = 96;
+const FOLD_LOOP_SMALL_ATOMS: Option<usize> = None; // parked — see `coll_or_fold`
+
+fn form_atoms(heap: &Heap, form: Value, depth: usize) -> usize {
+    if depth > 256 {
+        return usize::MAX / 2;
+    }
+    match heap.list_to_vec(form) {
+        Ok(items) => items
+            .iter()
+            .map(|&it| form_atoms(heap, it, depth + 1))
+            .sum(),
+        Err(_) => 1,
+    }
 }
 
 fn range_fold_call(heap: &mut Heap, form: Value, items: &[Value]) -> Option<Value> {
     let ValueRef::Sym(h) = items[0].unpack() else {
         return None;
     };
-    if !value::symbol_is(h, "fold") || items.len() != 4 || !is_range_call(heap, items[1]) {
+    if !value::symbol_is(h, "fold") || items.len() != 4 {
         return None;
     }
     let (params, body) = plain_fn_literal(heap, items[3])?;
     if params.len() != 2 {
         return None;
     }
-    let r = value::gensym("rng");
-    let init = value::gensym("rng-init");
-    let choose = range_or_fold(heap, form, r, init, items[3], params[0], params[1], &body);
+    if body.iter().map(|&f| form_atoms(heap, f, 0)).sum::<usize>() > FOLD_LOOP_MAX_ATOMS {
+        return None;
+    }
+    let r = value::gensym("coll");
+    let init = value::gensym("coll-init");
+    let choose = coll_or_fold(heap, form, r, init, items[3], params[0], params[1], &body);
     let outer = heap.list(vec![r, items[1], init, items[2]]);
     Some(rebuild_list(
         heap,
