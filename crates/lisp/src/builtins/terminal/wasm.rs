@@ -48,6 +48,7 @@ wasm_unsupported_builtins!(
     gui_drag_resize,
     gui_maximize,
     gui_size,
+    gui_cell_size,
     gui_held_key,
     gui_draw,
     gui_font,

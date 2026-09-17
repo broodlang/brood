@@ -121,7 +121,9 @@ How many region cells fit the rect is a question only the renderer can answer �
 `gui/cell-size` for the cell size at `px` and at the window's own size, and divide. Scoped
 and self-restoring like `scroll-region`, and regions nest (an inner one wins). GUI-only — the
 terminal frontend SKIPS it (like `frect` and `vspans`): a terminal cell is whatever the
-terminal says it is, and flattening the ops would paint them in the wrong place."
+terminal says it is, and flattening the ops would paint them in the wrong place.
+
+    (editor/display/cell-region 0 4 40 6 21 [[:text 0 0 \"big\"]])   → [:cell-region 0 4 40 6 21 [[:text 0 0 \"big\"]]]"
   [:cell-region x y w h px ops])
 
 (defn frect (x y w h face &optional (opacity 1.0) (radius 0.0))

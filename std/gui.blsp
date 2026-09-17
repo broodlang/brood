@@ -56,7 +56,9 @@
   (%gui-size id))
 
 (defn cell-size (id &optional px)
-  "Window id's cell size as [cell-w cell-h] in PHYSICAL pixels — for the font size the window is using, or, given px (a logical font size), for the size a `cell-region` of that px would paint with. The question an app must answer before laying a region out at another size: how many of THAT size's cells fit the rect it has. It is not derivable from px — a cell is whatever shaping the reference glyph produces, rounded to whole pixels — so it is measured (on the GUI thread, memoised there). Errors when the window is not open, when this brood has no gui feature, and headless (no font engine to measure with), so a caller that also runs headless falls back to the size ratio."
+  "Window id's cell size as [cell-w cell-h] in PHYSICAL pixels — for the font size the window is using, or, given px (a logical font size), for the size a `cell-region` of that px would paint with. The question an app must answer before laying a region out at another size: how many of THAT size's cells fit the rect it has. It is not derivable from px — a cell is whatever shaping the reference glyph produces, rounded to whole pixels — so it is measured (on the GUI thread, memoised there). Errors when the window is not open, when this brood has no gui feature, and headless (no font engine to measure with), so a caller that also runs headless falls back to the size ratio.
+
+    (try (gui/cell-size 0) (catch e :no-window))   → :no-window   ; no window 0 is open"
   (if (nil? px)
     (%gui-cell-size id)
     (%gui-cell-size id px)))
