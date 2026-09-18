@@ -420,3 +420,49 @@ fn mutual_aliases_collapse_to_one_binder_and_nested_binders_stay_sound() {
     let ws = file_warnings_mode(src, true);
     assert!(ws.is_empty(), "the widening must not reject: {ws:?}");
 }
+
+/// A μ is only a type when it is CONTRACTIVE — the recursive reference occurring guarded,
+/// under a constructor, not as a bare alternative of the body. Each shape below is
+/// writable and denotes nothing, and each used to **crash the checker**: unrolling
+/// substitutes the body for the reference and reproduces a bare reference, forever, so one
+/// call site was a stack overflow. The explicit `(rec X (or nil X))` has been reachable
+/// from any sig since ADR-349; the alias forms arrived with C14 and were found the same
+/// hour, which is how the older one surfaced.
+///
+/// Each answers `any` — the type with no content — so the relation terminates and nothing
+/// is claimed. This test exists to fail by TIMING OUT or aborting if the guard goes, which
+/// nextest contains to the one case.
+#[test]
+fn a_non_contractive_recursive_type_is_not_built() {
+    for src in [
+        // the explicit binder, ADR-349's own grammar
+        "(sig f ((rec X X) -> int))\n(defn f (x) 1)\n(defn g () (f 42))",
+        "(sig f ((rec X (or nil X)) -> int))\n(defn f (x) 1)\n(defn g () (f nil))",
+        // an alias that is only itself
+        "(deftype loop loop)\n(sig f (loop -> int))\n(defn f (x) 1)\n(defn g () (f 42))",
+        // two aliases that are only each other — a one-member `or` IS its member
+        "(deftype a (or b))\n(deftype b (or a))\n\
+         (sig f (a -> int))\n(defn f (x) 1)\n(defn g () (f 42))",
+        // content beside the reference, but the reference still unguarded
+        "(deftype nilish (or nil nilish))\n\
+         (sig f (nilish -> int))\n(defn f (x) 1)\n(defn g () (f nil))",
+    ] {
+        let ws = file_warnings_mode(&format!("(defmodule t)\n{src}"), true);
+        assert!(
+            !ws.iter().any(|w| w.contains("argument 1")),
+            "a type with no content claims nothing about its argument: {src}\n{ws:?}"
+        );
+    }
+    // The neighbour that must still be built: the reference is inside the record, so a
+    // value has to be consumed to reach it, and the μ is a real type.
+    let ws = file_warnings_mode(
+        "(defmodule t)\n\
+         (deftype tree (or nil (record :v int :l tree :r tree)))\n\
+         (sig f (tree -> int))\n\
+         (defn f (t) 1)\n\
+         (defn g () (f {:v 1 :l {:v \"bad\" :l nil :r nil} :r nil}))",
+        true,
+    );
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert!(ws[0].contains("expects tree"), "{ws:?}");
+}

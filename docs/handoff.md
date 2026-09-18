@@ -10,7 +10,7 @@ needing one is queued in [`perf-handoff.md`](perf-handoff.md) instead — curren
 high-priority item: whether KI-114's `as_f64_pair` holds the closure KI-109 got from the
 promotion it constrained.
 
-## 2026-09-18 — C9–C14 closed, KI-162 fixed, KI-165 filed, and the pre-push hook was inert; next is C15
+## 2026-09-18 — C9–C14 closed, KI-162/165 fixed, a `(rec …)` checker crash fixed, and the pre-push hook was inert; next is C15
 
 **C14 (ADR-369) — a self-referential `deftype` is a μ type.** `(rec X …)` was always exact
 at any depth; the bare self-referential spelling — the one an author actually reaches for —
@@ -28,14 +28,32 @@ writes — neither `std/` nor bedit has a self-referential alias today, which is
 before anyone spends a week on it. Mutual recursion needed nothing extra: it collapses to
 the single binder by substitution when each name occurs once.
 
-**KI-165 filed, not fixed — read it before trusting a `sig!` over an alias.** No `deftype`
-alias is enforced at RUNTIME: `type-matches?` has no case for an alias name, so it hits the
-"unknown compound → accept" default and `(sig! take-point (point -> int))` passes `"nope"`.
-Every alias since ADR-327, not just recursive ones. Found by asking C14's work the question
-C11 taught (does the contract enforce what the grammar lets a declaration say?) — which is
-now two for two, so **ask it of every grammar addition**. The fix needs the registry to keep
-the alias FORM (it keeps a string today) plus a binder so a self-referential lookup
-terminates.
+**KI-165 (FIXED the same day) — a `deftype` alias is enforced at runtime now.** It was not:
+`type-matches?` had no case for an alias name, so it hit the "unknown compound → accept"
+default and `(sig! take-point (point -> int))` passed `"nope"` — every alias since ADR-327.
+Found by asking C14's work the question C11 taught (does the contract enforce what the
+grammar lets a declaration say?), now two for two, so **ask it of every grammar addition**.
+`%type-alias` is the keyed lookup the contract uses; `%type-aliases` walks every declared
+sig and is the wrong shape for a per-value check.
+
+Three things in it are worth knowing before touching that function:
+- **The `seen` split is not decoration.** A recursion that CONSUMES VALUE always terminates
+  (a Brood value is finite and acyclic), so element/field/position calls start with a FRESH
+  `seen`; only the same-value ones — `or`/`and`/`not`/`len`/`rec` and the expansion itself —
+  thread it. Threading it everywhere was the first cut, and it accepted a bad leaf at
+  depth 2: `tree`'s `:l` field is `tree`, so legitimate descent looked like a cycle.
+- **A contract runs where the VALUE is, not where the alias was declared.** After the two
+  keyed lookups comes the checker's unique-suffix rule, because a `test` body's green
+  process does not resolve a bare `c-point` to the `contract-test/c-point` that registered.
+- **Removing the cycle guard HANGS rather than fails** — which is why the termination case
+  is in the suite and why it is a `seen` path rather than a depth counter.
+
+**And a crash it turned up, older than any of this: `(rec X (or nil X))` overflowed the
+checker's stack.** A non-contractive μ — the recursive reference unguarded at the body's top
+level — reproduces a bare reference on every unroll, and a single call site was enough.
+Writable from any sig since ADR-349, and C14's alias binder would have added three more
+shapes of it (`(deftype loop loop)`, a two-alias ring, `(or nil nilish)`). Both spellings go
+through `mu_if_contractive` now and answer `any`, the type with no content.
 
 **C13 — a float interval — is DECLINED (ADR-367), and the finding is worth more than the
 feature.** The item said "cheap on the int one's machinery"; it is not, because **floats in

@@ -741,12 +741,15 @@ no-op; the marker is read only by the type checker (`nest check`)."
     else body))
 
 ; unknown base name → accept
-(defn type-matches? (t v)
+(defn type-matches? (t v &optional seen)
   "True if value `v` inhabits the (sig …) type-expression `t`. Unknown type
 names accept anything, so a contract never throws on a type it can't interpret.
 
     (type-matches? 'int 5)      → true
-    (type-matches? 'string 5)   → false"
+    (type-matches? 'string 5)   → false
+
+`seen` is internal: the `deftype` aliases already being expanded on this path, so a
+cyclic alias (`(deftype a b)` `(deftype b a)`) stops instead of looping."
   (cond
     (nil? t) (nil? v)
     ; the `nil` type reads as the nil literal
@@ -762,9 +765,9 @@ names accept anything, so a contract never throws on a type it can't interpret.
           ;; `(is T)` — a type guard's result (ADR-301): the VALUE is a bool; what it
           ;; proves about the argument is the checker's business, not the contract's.
           (%eq h 'is) (bool? v)
-          (%eq h 'or) (any? (rest t) (fn (s) (type-matches? s v)))
-          (%eq h 'and) (every? (rest t) (fn (s) (type-matches? s v)))
-          (%eq h 'not) (not (any? (rest t) (fn (s) (type-matches? s v))))
+          (%eq h 'or) (any? (rest t) (fn (s) (type-matches? s v seen)))
+          (%eq h 'and) (every? (rest t) (fn (s) (type-matches? s v seen)))
+          (%eq h 'not) (not (any? (rest t) (fn (s) (type-matches? s v seen))))
           ;; `(int lo hi)` — an int within the interval, `_` an open end (ADR-350). The
           ;; contract checked the tag alone until 2026-09-17, so a declaration the checker
           ;; trusted could lie at runtime.
@@ -776,11 +779,11 @@ names accept anything, so a contract never throws on a type it can't interpret.
           (%eq h 'len)
             (and (or (nil? v) (list? v) (vector? v) (map? v) (set? v) (string? v) (bytes? v))
               (%interval-admits? (third t) (nth t 3) (count v))
-              (type-matches? (second t) v))
+              (type-matches? (second t) v seen))
           ;; `(rec X body)` — a recursive type (ADR-349): `X` inside `body` is the whole,
           ;; so the body is matched with `X` standing for this very form — one level of
           ;; unrolling per level of the value, an inner `(rec X …)` closing its own name.
-          (%eq h 'rec) (type-matches? (%rec-unroll (third t) (second t) t) v)
+          (%eq h 'rec) (type-matches? (%rec-unroll (third t) (second t) t) v seen)
           ;; `(list T)` is the uniform list; `(list T U …)` — two or more types — a
           ;; positional SHAPE, the list sibling of `tuple`: exact arity, each position
           ;; against its own type. What the checker means by `(list a b)`'s type.
@@ -888,6 +891,30 @@ names accept anything, so a contract never throws on a type it can't interpret.
     (%eq t 'fn) (fn? v)
     (%eq t 'list) (list? v)
     (%eq t 'vector) (vector? v)
+    ;; A `deftype` ALIAS name (ADR-327): match the type it names, in its place. Until
+    ;; 2026-09-18 an alias was just an unknown symbol here, so it fell to the `else true`
+    ;; below and a `sig!` over one accepted ANY value — every alias since ADR-327, while
+    ;; the checker enforced all of them statically (KI-165).
+    ;;
+    ;; Termination has two halves, and the split between them is why `seen` is threaded
+    ;; through some recursive calls and not others.
+    ;;
+    ;;   • A recursion that CONSUMES VALUE always terminates, because a Brood value is
+    ;;     finite and acyclic (data is immutable, so there are no cycles to walk). Every
+    ;;     call that descends into an element, a field or a position therefore starts with
+    ;;     a FRESH `seen` — passing the accumulated one instead was the first cut of this
+    ;;     fix, and it accepted a bad leaf at depth 2: `tree`'s `:l` field is `tree`, so
+    ;;     the legitimate descent looked exactly like a cycle and the guard swallowed it.
+    ;;   • A recursion that does NOT consume value — `or`/`and`/`not`/`len`/`rec` and an
+    ;;     alias expansion, all of which re-ask about the SAME `v` — is where a cycle can
+    ;;     live: `(deftype a b)` with `(deftype b a)`, or `(deftype loop loop)`. Those
+    ;;     thread `seen`, and re-entering a name already on the path accepts, which is the
+    ;;     direction this function's unknown-type default already takes.
+    (symbol? t)
+      (let (expansion (%type-alias t))
+        (if (or (nil? expansion) (includes? (or seen []) t))
+          true
+          (type-matches? expansion v (conj (or seen []) t))))
     else true))
 (defn- %contract-check-args (name ptypes args i)
   "Throw if any argument fails its declared type. Pairwise over the overlap —

@@ -217,7 +217,10 @@ fn alias_ty(heap: &Heap, name: &str) -> Option<Ty> {
     });
     // `Ty::mu` normalises itself away when the body holds no reference, so a
     // non-recursive alias is untouched by this.
-    let ty = ty.map(|t| if bind_self { Ty::mu(t) } else { t });
+    //
+    // …and the μ must be CONTRACTIVE — see [`mu_if_contractive`], which both this and the
+    // explicit `(rec X …)` go through.
+    let ty = ty.map(|t| if bind_self { mu_if_contractive(t) } else { t });
     if let Some(t) = &ty {
         // remembered under the name as WRITTEN (`model`, not `bedit/model/model`): that is
         // the spelling the reader of the diagnostic has in front of them
@@ -228,6 +231,33 @@ fn alias_ty(heap: &Heap, name: &str) -> Option<Ty> {
         });
     }
     ty
+}
+
+/// `μ body`, when that is a type at all — else `any`.
+///
+/// A μ is only meaningful when it is **contractive**: the recursive reference must occur
+/// GUARDED, under a constructor, never as a bare alternative of the body itself. Three
+/// writable shapes are not, and each denotes nothing:
+///
+/// ```text
+/// (rec X X)                                μX.X          — the reference alone
+/// (deftype loop loop)                      μX.X
+/// (deftype a (or b)) (deftype b (or a))    μX.X          — a one-member `or` IS its member
+/// (rec X (or nil X))                       μX.(nil | X)  — an unguarded alternative
+/// ```
+///
+/// Each diverges the moment a relation unrolls it: substituting the body for the reference
+/// reproduces a bare reference, forever. A call site took the checker to a **stack
+/// overflow** — `(sig f ((rec X (or nil X)) -> int))` with one caller was enough, which is
+/// a crash any sig could reach since ADR-349 shipped `(rec …)`. So the test is on the
+/// body's top-level terms, and `any` — the type with no content — is the answer for one
+/// that fails it. `μX.(nil | {v: int, l: X, r: X})` passes: its reference is inside the
+/// record, where a value must be consumed to reach it.
+fn mu_if_contractive(body: Ty) -> Ty {
+    if body.terms_vec().iter().any(|term| term.is_rec_ref()) {
+        return Ty::ANY;
+    }
+    Ty::mu(body)
 }
 
 /// Does this type-expression contain a `(rec …)` form anywhere? A syntactic scan, used to
@@ -701,7 +731,10 @@ pub fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
                 REC_BOUND.with(|b| {
                     b.borrow_mut().pop();
                 });
-                return body.map(Ty::mu);
+                // `mu_if_contractive`, not `Ty::mu`: `(rec X X)` and `(rec X (or nil X))`
+                // are writable and denote nothing, and a single call site on one took the
+                // checker to a stack overflow — since ADR-349, independent of aliases.
+                return body.map(mu_if_contractive);
             }
             // (record :k1 T1 :k2 T2 …) — a keyword-keyed heterogeneous map
             // shape. A field's type may be wrapped `(optional T)` to allow
