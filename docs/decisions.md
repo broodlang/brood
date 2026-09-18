@@ -23751,3 +23751,70 @@ was written, before ADR-349.
 `type-matches?` has no case for an alias name, so under `sig!` a declared alias accepts any
 value — every alias since ADR-327, not just recursive ones.
 
+
+## ADR-370 — A std module's signatures ride in the stdlib image, so a check need not load it
+
+**Status:** **decided 2026-09-18, not yet implemented** — recorded here because the design
+is settled and two documents already cite it; the code is the next session's. **Context:**
+KI-150, whose remaining half is a per-run tax on every checked program.
+
+**Context.** `types::check::materialise_referenced_modules` (ADR-340) is whole-world by
+construction: once a module is loaded for a check, the bodies of EVERY function in it are
+scanned for qualified names and those modules loaded too, to a fixpoint. The need is real —
+without it a derivation stops at an unmaterialised name, and bedit's `buffer-current-line`
+read `any` though `text/char->line` DECLARES `(rope int -> int)`.
+
+**The unit is wrong, not the need.** Measured with callgrind (image `:state :live`, boot
+cache warm), `(io/puts (str (os/env "HOME")))`:
+
+| | instructions | modules materialised |
+|---|---|---|
+| `--check` only | 110.3M | 9 |
+| run, with the pre-flight | 133.9M | 9 |
+| run, `BROOD_NO_CHECK=1` | 80.6M | **2** |
+
+The check loads `os`, the scan meets `path/…` inside `os/which`, and `path` and `file` come
+along for a program that calls neither. Every new std function does this to every program
+naming its module, and every checker change moves the short benchmark rows. The checker's
+own Rust is ~3% of samples; the cost is the loading.
+
+**Decision: the image footer carries each imaged module's signatures** — declared or
+inferred at build time — and the checker reads a callee's type from the image instead of
+loading its module and walking its body. This removes the *reason* to load rather than
+narrowing *which* modules load: ADR-340's need is then met by construction.
+
+1. **Builder** (`std/tool/stdimage.blsp` `build`, where every module is loaded for real):
+   per module, `(reflect/source-signatures <module source>)` — `{:name :sig :declared?}` per
+   function, the same checker at its most-informed, deterministic per stdlib id since B8 —
+   handed to `%image-write`, written in the footer after the v6 macro names as a v7 list of
+   (name, sig text). Read at open like the kind index, never from the payload.
+2. **Reader**: `%image-index` parses the list → `derive::register_image_sigs` beside
+   `register_image_kinds`; `Sig`s parsed lazily from the text with `annot`'s parser, memoised
+   per symbol.
+3. **Checker**: `sigs::sig_of` consults the image table after `declared_heap_sig` and before
+   `infer_sig` — a declared sig still wins, the image's inferred one replaces the body walk;
+   `materialise_referenced_modules` collects no prefix for a name the image has a signature
+   for, so a check loads only what the FILE names (the drain, for the unbound verdict) and
+   never the transitive std closure. `BROOD_NO_IMAGE_SIGS=1` is the lever (catalogue +
+   CLAUDE.md row).
+4. **Gates**: the `check_order_differential` shape — `nest check --strict` over `std/` +
+   `tests/` with image sigs on and off must agree byte for byte, the fallback being today's
+   path; an ADR-280-style construction gate that every imaged function's footer signature
+   equals `source-signatures` of its module in a fully-loaded process; and `make ab --floor`
+   must read the short rows DOWN (`pipeline`'s check is 151M, ~70M of it this).
+5. Then the pre-flight can stop loading std modules for the unbound verdict too — the kind
+   index already knows an imaged module's names. A follow-up, not this step.
+
+**Not chosen.** A **reachability closure** seeded from the checked file's own qualified
+names — load a name's module, walk that name's body, repeat — was built and measured on
+2026-09-18: 110.3M → 82.6M on the check, 133.9M → 83.7M on the run, materialising exactly
+the two modules the program needs. It is declined as the short-term shape: it narrows which
+modules load where this removes the reason, it would have to be scoped to the single-file
+path (`nest check`'s whole-world preload is deliberate — one fully-loaded state is what
+makes a verdict independent of file ORDER, KI-137), and it leaves ADR-340's need met by a
+narrower traversal rather than by construction. The measurement stands as the "before".
+
+**Consequence when it lands.** A checked program loads what it names, not the std closure
+behind it; a new std function stops taxing every program that names its module; and the
+checker's own growth stops being a per-run cost, which is what has moved the short rows on
+every column refresh since `084060fb`.
