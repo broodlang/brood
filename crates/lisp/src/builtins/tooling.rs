@@ -92,6 +92,13 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "The type expression a `(sig …)` DECLARED for global `name`, as written — `(model any -> model)` — or nil when none was declared (a `deftype` alias is not a signature and answers nil too). Symbol or string arg; a `mod/name` reference is rooted to its package like any other.",
         declared_sig);
     primitives.def(
+        "%type-alias",
+        Arity::exact(1),
+        Sig::new(vec![sym.union(string)], any),
+        &["name"],
+        "The type expression a `(deftype name T)` alias declares, as written, or nil when `name` is not an alias. The single-name counterpart of `%type-aliases`, which builds the whole list — this is a keyed lookup, because the runtime contract (`type-matches?`) asks it per checked value (KI-165). Symbol or string arg; a bare name resolves in the current namespace like a def head, as `%declared-sig` does.",
+        type_alias);
+    primitives.def(
         "%type-aliases",
         Arity::exact(0),
         Sig::new(vec![], list_ty),
@@ -309,6 +316,85 @@ pub(super) fn declared_sig(args: &[Value], _env: EnvId, heap: &mut Heap) -> Lisp
         matches!(items.first(), Some(Value::Sym(h)) if value::symbol_is(*h, crate::builtins::modules::TYPE_ALIAS_MARKER))
     });
     Ok(if is_alias { Value::nil() } else { form })
+}
+
+/// `(%type-alias name)` — the type expression `(deftype name T)` declared, or nil.
+///
+/// The keyed counterpart of [`type_aliases`], which walks every declared sig in the
+/// runtime: the runtime contract asks this per checked value, so it must be a lookup
+/// rather than a scan (KI-165). Resolution mirrors [`declared_sig`] exactly — the rooted
+/// qualified reference first, the bare symbol second — because an alias is registered
+/// under the name a def head would take.
+pub(super) fn type_alias(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let sym = match arg(args, 0) {
+        Value::Sym(s) => s,
+        Value::Str(id) => {
+            let name = heap.string(id).to_string();
+            match value::intern_existing(&name) {
+                Some(s) => s,
+                None => return Ok(Value::nil()),
+            }
+        }
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "type-alias",
+                "symbol or string",
+                other,
+            ))
+        }
+    };
+    let rooted = heap
+        .root_qualified_ref(sym)
+        .unwrap_or_else(|| crate::eval::macros::resolve_reference(heap, sym));
+    for key in [rooted, sym] {
+        if let Some(inner) = alias_form_at(heap, key) {
+            return Ok(inner);
+        }
+    }
+    // Neither exact key hit. A contract runs wherever the VALUE is checked, which is not
+    // where the alias was declared — a `test` body runs in its own green process, and the
+    // bare `c-point` there does not resolve to the `contract-test/c-point` the `deftype`
+    // registered. So fall back to the rule the checker's own `alias_ty` ends with: the ONE
+    // alias whose qualified name ends in `/name`, declining when two could answer. This
+    // scans the declared sigs, so it sits behind both keyed lookups — and it is only ever
+    // reached by a symbol that is not a base type, which is an alias or a typo.
+    let name = value::symbol_name(sym);
+    if name.contains('/') {
+        return Ok(Value::nil());
+    }
+    let suffix = format!("/{name}");
+    let mut found = None;
+    for (key, _) in heap.declared_sigs_everywhere() {
+        if !value::symbol_name(key).ends_with(&suffix) {
+            continue;
+        }
+        if alias_form_at(heap, key).is_some() {
+            if found.is_some() {
+                return Ok(Value::nil()); // ambiguous: two modules declare it
+            }
+            found = Some(key);
+        }
+    }
+    Ok(found
+        .and_then(|key| alias_form_at(heap, key))
+        .unwrap_or_else(Value::nil))
+}
+
+/// The type expression of the alias stored under exactly `key`, or `None`. An alias rides
+/// the declared-sig store wrapped as `(%type T)` so no reader can mistake it for a
+/// signature (ADR-327); this unwraps that marker and nothing else.
+fn alias_form_at(heap: &Heap, key: value::Symbol) -> Option<Value> {
+    let form = heap.declared_sig_value(key)?;
+    let items = heap.list_to_vec(form).ok()?;
+    match items.as_slice() {
+        [Value::Sym(head), inner]
+            if value::symbol_is(*head, crate::builtins::modules::TYPE_ALIAS_MARKER) =>
+        {
+            Some(*inner)
+        }
+        _ => None,
+    }
 }
 
 /// `(%type-aliases)` — every `deftype` alias in the declared-sig store, as

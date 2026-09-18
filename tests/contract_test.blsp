@@ -95,6 +95,50 @@
     (assert-error (c-seq-count {:a 1}))
     (assert-error (c-seq-count (bytes [1 2])))))
 
+;; --- `deftype` alias contracts (KI-165) ----------------------------------------
+;; An alias name was not a case in `type-matches?` until 2026-09-18, so it reached the
+;; "unknown compound → accept" default and a `sig!` over one checked NOTHING — every alias
+;; since ADR-327, while the checker enforced all of them statically. `%type-alias` is the
+;; keyed lookup the contract asks per value.
+
+(deftype c-point (record :x int :y int))
+(defn c-take-point (p) 1)
+(sig! c-take-point (c-point -> int))
+
+(deftype c-tree (or nil (record :v int :l c-tree :r c-tree)))
+(defn c-take-tree (t) 1)
+(sig! c-take-tree (c-tree -> int))
+
+;; Aliases that denote NOTHING: each would loop the matcher, so each must terminate and
+;; accept — the direction this function's unknown-type default already takes.
+(deftype c-loop c-loop)
+(deftype c-ring-a (or c-ring-b))
+(deftype c-ring-b (or c-ring-a))
+(defn c-take-loop (x) 1)
+(sig! c-take-loop (c-loop -> int))
+(defn c-take-ring (x) 1)
+(sig! c-take-ring (c-ring-a -> int))
+
+(describe "deftype alias contracts"
+  (test "a plain alias is enforced, not waved through"
+    (assert= (c-take-point {:x 1 :y 2}) 1)
+    (assert-error (c-take-point "nope"))
+    (assert-error (c-take-point {:x 1})))
+  ;; The value shrinks as a recursive alias unfolds, so the match terminates on its own —
+  ;; and it must check the whole way down, not only the top.
+  (test "a recursive alias is enforced at every depth"
+    (assert= (c-take-tree nil) 1)
+    (assert= (c-take-tree {:v 1 :l nil :r nil}) 1)
+    (assert= (c-take-tree {:v 1 :l {:v 2 :l nil :r nil} :r nil}) 1)
+    (assert-error (c-take-tree "nope"))
+    (assert-error (c-take-tree {:v "bad" :l nil :r nil}))
+    (assert-error (c-take-tree {:v 1 :l {:v 1 :l {:v "bad" :l nil :r nil} :r nil} :r nil})))
+  ;; If the cycle guard goes, these hang instead of failing — the reason it is a `seen`
+  ;; path and not a depth counter.
+  (test "an alias cycle terminates rather than looping"
+    (assert= (c-take-loop 42) 1)
+    (assert= (c-take-ring 42) 1)))
+
 ;; --- keyword-literal (singleton) types ----------------------------------------
 ;; A bare keyword in a sig is a *literal* type — the value must be exactly that
 ;; keyword. `(or :a :b …)` enumerates the allowed values (set-theoretic literals).
