@@ -10,7 +10,74 @@ needing one is queued in [`perf-handoff.md`](perf-handoff.md) instead — curren
 high-priority item: whether KI-114's `as_f64_pair` holds the closure KI-109 got from the
 promotion it constrained.
 
+## 2026-09-18 night — KI-150's coverage half landed; the machine owner's in-flight work is still uncommitted
+
+**Pushed and green at `517b8a1c`.** Two commits went out this session: `80f9b51b` (the
+clippy `let_and_return` that had CI **red** on `3cc912b8` — `--all-features` arms the lint, a
+plain `cargo clippy --all-targets` does not) and `517b8a1c` (KI-150's coverage increment).
+`make prepush` is clean: zero checker warnings over `std/`+`tests/`+`examples/`, 633 tests.
+
+### Read this before you touch the working tree
+
+1. **There is uncommitted work in the tree and it is the machine owner's, not a session's.**
+   `std/editor/evalsession.blsp` + `tests/evalsession_test.blsp` (untracked), its registration
+   hunk in `crates/lisp/src/builtins/modules.rs`, the `doc-catalog` entries beside it, the
+   `treesit` work (`std/editor/treesit.blsp`, `crates/lisp/src/{builtins,host}/treesit.rs`,
+   `tests/treesit_module_test.blsp`, `docs/bare-names.md`), `std/editor/buffer.blsp` +
+   `tests/buffer_test.blsp`, `std/string.blsp`'s `fold-case`/`has-upper?`,
+   `std/prelude/control.blsp`, `std/tool/project-release.blsp`, `tests/project_test.blsp`,
+   `tests/strings_test.blsp`. **Do not commit, format, stash or discard it.** This session's
+   own changes to `std/string.blsp` were staged hunk by hunk around the owner's, and the
+   pushed state was then verified in a throwaway worktree *without* the owner's work, because
+   a green run on the combined tree says nothing about the commit.
+2. **One edit of this session's is still uncommitted, deliberately: `tests/buffer_test.blsp`.**
+   Its last test bound `buffer-search-forward`'s `nil | int` result and indexed with it, which
+   is six real warnings and was the whole of the pre-push gate's red. It now reads each offset
+   under an `if` (the checker narrows on `if` — verified), so a missed match fails the
+   assertion by name instead of indexing with nil. 178 tests pass. It sits in the owner's file,
+   so it is left in the working tree for them rather than committed.
+3. **`/tmp` on this box is a 31 GB tmpfs and the scratchpad lives on it.** A
+   `cargo nextest run --no-run` in a scratch worktree fills it; the failure is
+   `Disk quota exceeded (os error 122)` plus `ld terminated with signal 7`, and **once it is
+   full the Bash tool itself stops working** — every command returns exit 1 with no output,
+   which reads exactly like a dead session. Point `CARGO_TARGET_DIR` at real disk
+   (`/home` had 116 GB free) and delete the worktree's `target/` when done. Three scratch
+   worktrees were registered and are now removed; `git worktree list` should show only the
+   repo and the owner's `brood-wt`.
+4. **The pre-push gate picks `target/release-fast/nest` first, and the pick can be STALE.**
+   `pick_bin` matches on the version string's git sha, which is `<sha>-dirty` for every
+   build off a dirty tree — so a `release-fast` binary built hours ago "matches" and a
+   `target/release` one built a minute ago never gets looked at. The symptom is the
+   stale-binary refusal (`this binary's baked-in std/ is OLDER than …`), which is the guard
+   working. `make release` refreshes it.
+
+### What is left of KI-150
+
+Still the same shape, now with one increment measured. The signature index carries **150**
+authoritative types (was 124); `path` and `string` are out of the transitive scan entirely,
+and the `os/env` one-liner's pre-flight materialises **zero** modules transitively. **The
+saving was below the instruction floor** — 107.23–107.27M against 107.25–107.36M, interleaved
+— so what coverage buys is a smaller heap and a verdict independent of what else loaded, not
+a faster check. Read that before spending on the next module.
+
+The ranked list of what to declare next is a tool now rather than a probe:
+
+```text
+cargo test -p brood --lib untyped_names_that_force_a_module_load -- --ignored --nocapture
+```
+
+It prints, per std module, the names other std modules reference that the index has no type
+for. `BROOD_IMAGE_TRACE=1` still answers the same question one name per run (a module once
+loaded hides every later name in it), which is why the list took days by experiment before.
+
+Two traps when writing the declarations: `nest check --suggest-sigs` proposes a NON-variadic
+arrow for a variadic function (`string/format` — every real call would become an arity
+error), so read each suggestion against the parameter list; and a new declaration can expose
+a **true** warning at a call site, which is a find, not a regression (`path/absolute`'s did).
+
 ## 2026-09-18 late — HANDOVER (the type-system list is EMPTY; read the four traps first)
+
+> **Superseded by the section above.** Its traps 1 and 2 are resolved: the tree fast-forwarded to `883dfef5` with the owner's two overlapping hunks preserved byte for byte, and no `ki150-verify` worktree remains registered. Trap 3 (the global `core.hooksPath`) and trap 4 (callgrind, and the two rig traps) still hold.
 
 **Everything below is pushed and green at `3cc912b8`.** Nothing is half-done, nothing is
 parked in a branch, and there is no uncommitted work of this session's anywhere.

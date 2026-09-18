@@ -919,6 +919,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-18** — `MakeMap` joins the JIT subset: a `{…}` literal in a hot arm no longer bails the whole arm to the interpreter (it did, for good — found writing ADR-368's native check). Lowered as the variadic `MakeVector` is, one `brood_rt_make_map_n` callback over `map_from_pairs`, so both engines build the identical map; capped at 32 values. Guard `tests/jit_makemap_test.blsp` (value + tier, sabotage-verified).
 - **2026-09-18** — the multi-pair `(assoc coll k1 v1 k2 v2 …)` is unrolled at compile time into nested single-pair `assoc`s, each a `MapAssoc` instruction (handoff item 2): no rest list, no `%assoc-map-pairs` loop; wrapper semantics kept (map, vector, last-wins, source-order evaluation), guarded by `tests/assoc_unroll_test.blsp` incl. the compiled shape. A three-pair `assoc` loop, 1M iterations, release-fast: **1285 → 531 ms** (1.28 → 0.53 µs per iteration), 612 ms at the VM ceiling; `make ab --floor` against `fac63929`: **`supervisor` −5.8%** (floor 0.3%), every other row inside its floor.
 - **2026-09-18** — benchmark column refreshed at `a6a0d934` (brood-benchmarks): `supervisor` 584 → 553 ms (−5.3%), the unroll; 2.1× Elixir. Short rows +3–4% = the checker's per-file cost growing 4–7M with today's checker work, plus `os/which`'s `path` reference now materialising `path`+`file` under every checked `os/`-naming program (~18M) — KI-150, two more data points.
+- **2026-09-18** — KI-150's coverage half: `&optional` was missing from `std_index::every_symbol_is_a_type_word`, so 14 declarations spelled entirely in the type grammar declined to ride in the image footer for a reason the grammar does not have (`string/pad-left`, `string/fields`, `reflect/type-aliases`, …) — both markers of `annot::arrow_of`, neither a name to resolve. Its gate asserts on the SOURCE SCAN first, because a footer-only assertion passes vacuously against an image built before the fix (which is how it first went green under sabotage). Then the gap was made readable rather than probed one name per run: `untyped_names_that_force_a_module_load` (an `#[ignore]`d triage test) reads the embedded sources and ranks, per module, the names other std modules reference and the index has no type for. Five `path` and eleven `string` signatures declared off that list — `string` is referenced by 32 std modules — and both modules drop out of the transitive scan: the `os/env` one-liner's pre-flight went 3 materialisations → **0**, the index 124 → 150 authoritative types. **And the saving is below the floor**: 107.23–107.27M instructions against a base of 107.25–107.36M, interleaved. Materialising from the image is cheap on this box, so what coverage buys is the smaller heap and a verdict that no longer depends on what else happened to load — not a faster check. (A first reading of +63% on the SOURCE path did not reproduce — the same invocation read 226M/336M/367M. The rig, not the code.)
 - **2026-09-17** — the pre-push hook has been INERT on this machine: a global `core.hooksPath` *replaces* `.git/hooks`, so `make hooks` installs a gate git never consults — and the override directory holds a deliberate `commit-msg` (which chains to a repo-local one for exactly this reason) and no `pre-push`. Found when an unformatted commit reached `main` through a gate that reported "installed". `make hooks` now WARNS with the path, `scripts/git-hooks/global-pre-push` is the chaining fix, and CLAUDE.md records the second half of it: `make prepush | tail` reports the PIPE's exit status, not the gate's.
 - **2026-09-17** — C10 answered by probe and closed with no checker change: ADR-350's intervals and the int-closed/float-contagion rules had already taken the merely-wider residue, and the answer is a **mode split** neither mode shows alone — a *precise* mismatch (float contagion, exact division, an interval arithmetic cannot fit) is named in both modes; an *over-approximated* one (a call's result) is named under `--strict` and deferred in plain, the gradual valve. The residue itself lands there: `(sig f (number -> int))` over `(+ x 1)` IS reported under strict, because the declaration is part of the claim — a parameter admitting floats makes the promise false with no analysis of the body. Fourteen provable shapes silent in both modes, so the false positive it was left silent for does not occur. Three pins, sabotage-verified three ways (strict never/always applies reds the split in opposite directions; the return check disabled reds both warning pins).
 - **2026-09-17** — KI-162: `nest check --fix-sigs` wrote every `sig` ABOVE its `defn`, the one placement `sig_placement.rs` forbids tree-wide. The locator reads the CST now (`sig-defn-sites`: root children, each node's newlines counted for the extent), so the sig lands one past the form's last line, a head laid out across lines is located instead of skipped, and "top level" is *root child* rather than *column 0* — a `check-allow`-wrapped `defn` still declines. Recorded beside the fix: the load failure the rule exists for **did not reproduce** (forward sigs over `defn`, `defn-` and a wrapped pair all loaded under contracts and enforced the contract), so the rule is what is verified, not the breakage.
@@ -14492,3 +14493,61 @@ about: decoding 3104 footer entries at image open cost every boot 8.2M instructi
 footer is now handed over as bytes and decoded by the first query; boot reads 57.6M against
 59.0M before the change, `startup` +0.0% solo.
 
+
+## 2026-09-18 — KI-150's coverage half: a grammar word that was missing, a list that replaces a probe, and a saving below the floor
+
+ADR-370 put a std module's signatures in the stdlib image so the checker's transitive body
+scan (`materialise_referenced_modules`) can answer a callee's type without loading its
+module. What it left open was **coverage**: 124 authoritative types out of 3104 names, so
+the walk still materialised a module for the next name it had none for.
+
+**`&optional` is a word of the type grammar, and was not listed.**
+`std_index::every_symbol_is_a_type_word` decides which declarations may be read as-is: every
+symbol must belong to the type grammar itself, so that reading one cannot depend on which
+modules a process has loaded. `&` was there and `&optional` was not — both are parameter-list
+MARKERS of `annot::arrow_of`, neither is a name to resolve — so 14 declarations spelled
+*entirely* in the grammar declined: `string/pad-left`, `string/pad-right`, `string/fields`,
+`string/number->`, `markdown/->html`, `reflect/type-aliases` among them.
+
+**The gate for it had to be anchored to the source scan.** Written against the image footer
+alone it passed under sabotage, because the footer on disk was built before the fix and the
+test read the cache. It asserts the SOURCE SCAN first (what the writer stores, and what a
+process with no image computes on demand) and the footer second (what a call site actually
+reads). The other four image-signature gates stayed green throughout, which is why the 14
+declined silently in the first place.
+
+**Then the remaining gap was made readable instead of probed.** `BROOD_IMAGE_TRACE=1` answers
+"which name forced this load?" one name per run — a module once loaded hides every later name
+in it, so the list took days to assemble by experiment. `untyped_names_that_force_a_module_load`
+(in `std_index`'s `triage` module, `#[ignore]`d, run by name) reads the embedded sources and
+answers it whole: per module, the names that other std modules reference and the index carries
+no type for, ranked by how many modules want each. It asserts nothing — it is a tool, and
+`known-issues.md` says to read the measurement before spending on its list.
+
+**Two modules declared their way out.** Five `path` signatures and eleven `string` ones, each
+read off its own body; `string` is referenced by 32 std modules. Both now drop out of the
+transitive scan entirely — the `(io/puts (str (os/env "HOME")))` pre-flight went from 3
+transitive materialisations to **zero**, and the index from 124 to **150** authoritative types.
+
+Two things surfaced writing them. The checker's own `--suggest-sigs` output is
+verdict-neutral except where it is wrong: it proposes `(sig string/format (string -> string))`
+for a **variadic** function, which would make every real call an arity error — written by
+hand instead. And `path/absolute`'s new declaration exposed a true warning at a call site in
+`tests/support/corpus.blsp` (a `nil | string` fed to it), fixed there.
+
+**The measurement is the finding.** On an IMAGED run the removed loads are below the floor:
+107.23–107.27M instructions against a base of 107.25–107.36M, interleaved, same binary pair.
+Materialising a module from the image is cheap on this box, so what coverage buys is the
+smaller heap and the removed dependence of a verdict on what else happened to load — not a
+faster check. Worth recording with it: a first attempt to read this on the SOURCE path (no
+stdlib image) showed **+63%**, and did not reproduce — the same invocation read 226M, 336M
+and 367M. Per `perf-handoff.md`'s rule, if a revert does not reproduce the number you started
+from, the rig is wrong and not the code; warming that configuration first made the two sides
+overlap.
+
+**One trap of this box, learned by hitting it:** `/tmp` here is a **31 GB tmpfs**, and the
+scratchpad lives on it. A `cargo nextest run --no-run` in a scratch worktree fills it — the
+failure is `Disk quota exceeded (os error 122)` and `ld terminated with signal 7`, and once
+it is full *the shell itself stops working* (every command returns exit 1 with no output,
+which reads exactly like a dead session). Build a scratch worktree with `CARGO_TARGET_DIR`
+pointed at real disk.
