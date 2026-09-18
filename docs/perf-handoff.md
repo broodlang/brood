@@ -501,3 +501,36 @@ a result — that is the single most common way this repo has been wrong about p
 
 If a task here is settled, say so in this file and in the relevant `docs/known-issues.md`
 entry, and delete the task rather than leaving it to be re-derived.
+
+## Instruction counts CAN be taken on this box — `callgrind`, not `perf` (2026-09-18)
+
+`perf` is unusable here: `/proc/sys/kernel/perf_event_paranoid` is **4**, so
+`perf stat -e instructions:u` refuses without root. That is why this file says the box
+cannot measure, and for wall-clock it still cannot. But **instruction counts do not need
+`perf`**:
+
+```sh
+valgrind --tool=callgrind --callgrind-out-file=/dev/null <cmd> 2>&1 | grep -oE "refs: *[0-9,]+"
+```
+
+`callgrind` counts instructions **deterministically** — no thermal drift, no governor, no
+core pinning, and it reproduces to the instruction across runs — which is exactly the
+measurement this file's wall-clock warnings are about. It costs ~50× wall time, so it suits
+a 100M-instruction `--check` or a short row, not a benchmark sweep. `valgrind 3.26` and
+`callgrind_annotate` are installed.
+
+**Two traps that made three contradictory readings of the SAME code in one session** —
+read these before quoting any number from this box:
+
+1. **A rebuild colds the prelude image** (ADR-314 keys it on the binary's own mtime), so the
+   first runs after `cargo build` boot the prelude from SOURCE. On a one-line file that is
+   **1.5 BILLION instructions against 78M** — a 19× difference that looks exactly like a
+   catastrophic regression in whatever you just changed. Run the binary two or three times
+   after every build before measuring (what `scripts/warm-boot-cache.sh` does for nextest).
+2. **A `std/` edit or a new COMMIT moves the stdlib image id**, and the runtime then reads
+   std from source until a `nest` invocation rebuilds it. Print `(stdimage/status)` and
+   assert `:state :live` in the same shell as the measurement — not once at the start.
+
+Both were hit here while measuring KI-150, and the second only surfaced because reverting
+the change did not restore the baseline. **If a revert does not reproduce the number you
+started from, the rig is wrong, not the code.**

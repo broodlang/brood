@@ -9918,6 +9918,47 @@ body names `path/…`, and the eager policy loads what a materialised module's b
 **one new std function costs every checked program that names any `os/` function ~18M
 instructions**. That is the transitive-load half of this entry, with a date and a name.
 
+**Attempted 2026-09-18, NOT landed — the mechanism is now pinned down, with numbers.** The
+loader is `types::check::materialise_referenced_modules`: it scans every function of every
+loaded module, loads every module their bodies name, to a fixpoint. Measured with
+`callgrind` (deterministic, no `perf` needed — see `perf-handoff.md`), image `:state :live`,
+boot cache warm:
+
+| `(io/puts (str (os/env "HOME")))` | instructions | modules materialised |
+|---|---|---|
+| `--check` only | 110.3M | 9 (`io os file string math path reflect map seq`) |
+| run, with the pre-flight | 133.9M | 9 |
+| run, `BROOD_NO_CHECK=1` | 80.6M | **2** (`io os`) |
+
+So the check costs **53M on a program whose whole no-check run is 80M**, and it loads seven
+modules the program never touches — because `os`'s OTHER functions name `path` and `file`
+(`os/which`, landed that week), and those modules' bodies name more.
+
+**The scope constraint, which is the part to get right.** That whole-world pass is
+DELIBERATE for `nest check`: `project-preload!` brings the heap to one fully-loaded state
+before any file is checked, which is what makes a verdict independent of the order files are
+checked in (KI-137). A SINGLE-file check has no such order, so the fix belongs to that path
+only — `check_forms`' call site, not the primitive `project-preload!` uses.
+
+**The shape that worked:** seed from the checked file's own qualified NAMES, load the module
+a name needs, walk THAT NAME's body for further names, repeat — a reachability closure
+instead of the whole world. It measured **110.3M → 82.6M on `--check`, 133.9M → 83.7M on the
+run**, materialising exactly the two modules the program needs, with `iocheck`/`seqcheck`
+flat. Two rules it needs, each found by measuring:
+- a name already BOUND loads nothing (the eager drain's own rule — `seq/lmap` is a prelude
+  binding; loading `std/seq.blsp` for it cost 14M on a one-line file);
+- only a MATERIALISED module's names are walked — following a prelude binding's references
+  walks the whole prelude call graph for nothing.
+
+**Why it was not landed.** The rig produced three different baselines for the same reverted
+code (110M, 133M, 110M) before the two traps in `perf-handoff.md` were understood, and a
+checker-loading-policy change decided on numbers that unstable is how this repo has been
+wrong about performance before. What the next session needs is not new analysis but a stable
+rig: warm after every build, assert `:state :live` in the same shell, and re-take the four
+readings above. The precision check is a `--suggest-sigs` diff over `std/` + `tests/` (3452
+inferred signatures at `34467e8a`) — the closure must still reach every leaf that declares a
+type, which is what the whole-world pass exists for.
+
 ## KI-161 — Tier 1 monomorphization's rebind guard refused every module constructor and admitted the module-less rebind ✅ FIXED 2026-09-17
 
 **Symptom.** `BROOD_MONO=1 BROOD_MONO_DBG=1` on `(defmodule mp) (defrecord circle (r)) … (area
