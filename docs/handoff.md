@@ -277,6 +277,10 @@ embedded sources; a process with no image scans one module on demand, so
 which read a prelude function's inferred signature differently per cell). Gates: footer ==
 fresh scan, every arity == the loaded closure's, plus the two directions above.
 
+`make ab --floor`: `pipeline` −7%, `strings` −14%, `reduce` −21%, `startup` flat once the
+footer decode moved to the first query (it had cost every boot 8.2M instructions, `startup`
++6%, and only the wall-clock gate saw it).
+
 **Read ADR-370's "Measured" before touching this again.** The one-liner's check materialises
 7 modules instead of 9 and its instruction count is UNCHANGED (105.5M either way, release,
 `perf stat`): materialising from the image is cheap on this box, and the pre-flight's cost

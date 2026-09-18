@@ -579,6 +579,29 @@ pub(crate) fn boot_source_prim(_args: &[Value], _: EnvId, heap: &mut Heap) -> Li
     )))
 }
 
+/// Decode the v7 signature index from the footer bytes `image_index` set aside — `(name,
+/// type text, min arity, max arity)` per function; a truncated tail ends the list.
+pub(crate) fn decode_sig_index(bytes: Vec<u8>) -> Vec<(String, String, u32, u32)> {
+    let mut dr = Cursor::new(bytes);
+    let mut out: Vec<(String, String, u32, u32)> = Vec::new();
+    let Some(count) = get_u32(&mut dr) else {
+        return out;
+    };
+    out.reserve(count as usize);
+    for _ in 0..count {
+        match (
+            get_str(&mut dr),
+            get_str(&mut dr),
+            get_u32(&mut dr),
+            get_u32(&mut dr),
+        ) {
+            (Some(name), Some(text), Some(min), Some(max)) => out.push((name, text, min, max)),
+            _ => break,
+        }
+    }
+    out
+}
+
 pub(crate) fn image_index(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let path = need_str(heap, arg(args, 0), "%image-index")?;
     let want = need_str(heap, arg(args, 1), "%image-index")?;
@@ -680,25 +703,13 @@ pub(crate) fn image_index(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
         }
     }
     crate::eval::derive::register_image_kinds(&section_names, &macro_names);
-    // v7 (ADR-370): the signature index — kept as text here (no heap work at open), turned
-    // into forms by the first check that needs them.
-    let mut sig_entries: Vec<(String, String, u32, u32)> = Vec::new();
-    if let Some(sig_count) = get_u32(&mut dr) {
-        for _ in 0..sig_count {
-            match (
-                get_str(&mut dr),
-                get_str(&mut dr),
-                get_u32(&mut dr),
-                get_u32(&mut dr),
-            ) {
-                (Some(name), Some(text), Some(min), Some(max)) => {
-                    sig_entries.push((name, text, min, max))
-                }
-                _ => break,
-            }
-        }
-    }
-    crate::eval::derive::register_image_sigs(sig_entries);
+    // v7 (ADR-370): the signature index — handed over as the footer's remaining BYTES and
+    // decoded by the first check that asks. Decoding 3104 names here (two strings and two
+    // interns each) cost every boot 8.2M instructions, `startup` +6%, for an index a run
+    // that never checks never reads.
+    let pos = dr.position() as usize;
+    let raw = dr.into_inner().split_off(pos);
+    crate::eval::derive::register_image_sigs_raw(raw);
     Ok(heap.map_from_pairs(pairs))
 }
 

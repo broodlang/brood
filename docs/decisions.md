@@ -23856,7 +23856,13 @@ with the checked FILE's size, not with what loads. The 53M-on-an-80M-run reading
 carries from the other box did not reproduce here. A SOURCE boot (`BROOD_NO_STDIMAGE=1`),
 where the index is scanned per module on demand, reads 300–326M for the one-liner's check
 with the index and 310–322M without (min/max of 7) — inside that path's own ±30M spread,
-which a `BROOD_NO_CHECK=1` run shows with the lever set or not.
+which a `BROOD_NO_CHECK=1` run shows with the lever set or not. **Wall clock** (`make ab
+--floor` against the parent, best of 7, then the suspect row solo at 15): `pipeline` −7.1%,
+`strings` −14.3%, `reduce` −21.4% (0.0% floors), `base64`/`json`/`errors-deep` noise — and
+`startup` **+6.2%** on the first run, which was real: decoding the 3104 footer entries at
+image open cost every boot 8.2M instructions (59.0M → 67.2M on `nil`). The footer is now
+set aside as bytes and decoded by the first query, so a run that never checks never pays;
+boot reads 57.6M against the parent's 59.0M and `startup` +0.0% solo.
 
 **So what this buys, honestly:** the checker's answer about a std callee no longer depends on
 which modules happened to load — a verdict is a function of the file and the footer, which

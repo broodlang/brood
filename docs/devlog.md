@@ -14484,3 +14484,9 @@ predicate became syntactic for the same reason — every symbol a word of the ty
 which is 124 authoritative declarations rather than 136. Two more gates: the footer equals
 a fresh scan byte for byte, and every indexed arity equals the loaded closure's.
 
+`make ab --floor` against the parent: `pipeline` −7.1%, `strings` −14.3%, `reduce` −21.4%,
+and `startup` +6.2% — real, and the one thing the instruction counts had not been asked
+about: decoding 3104 footer entries at image open cost every boot 8.2M instructions. The
+footer is now handed over as bytes and decoded by the first query; boot reads 57.6M against
+59.0M before the change, `startup` +0.0% solo.
+

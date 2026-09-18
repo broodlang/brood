@@ -664,6 +664,9 @@ struct ImageSigs {
     filled: bool,
     /// Modules a process with no image has scanned on demand (`ensure_module_indexed`).
     scanned: std::collections::HashSet<String>,
+    /// An opened image's index, still as footer bytes: decoded by the first query, so a
+    /// boot that never checks never pays for it.
+    raw: Option<Vec<u8>>,
 }
 
 fn image_sigs() -> &'static std::sync::RwLock<ImageSigs> {
@@ -673,6 +676,7 @@ fn image_sigs() -> &'static std::sync::RwLock<ImageSigs> {
             texts: Default::default(),
             filled: false,
             scanned: Default::default(),
+            raw: None,
         })
     })
 }
@@ -705,6 +709,25 @@ pub fn register_image_sigs(entries: Vec<(String, String, u32, u32)>) {
     }
 }
 
+/// Set aside an opened image's index as the footer bytes it came in (`image::decode_sig_index`
+/// reads them on the first query). Replaces an earlier image's bytes; a later `stdimage/build`
+/// in the same process re-registers.
+pub fn register_image_sigs_raw(bytes: Vec<u8>) {
+    let mut sigs = image_sigs().write().unwrap_or_else(|e| e.into_inner());
+    sigs.raw = Some(bytes);
+}
+
+/// Decode the set-aside footer bytes into the index, once — the first query pays it.
+fn settle_raw() {
+    let raw = {
+        let mut sigs = image_sigs().write().unwrap_or_else(|e| e.into_inner());
+        sigs.raw.take()
+    };
+    if let Some(bytes) = raw {
+        register_image_sigs(crate::boot::image::decode_sig_index(bytes));
+    }
+}
+
 /// The index is a fact about std's SOURCE; the image only caches it. A process that booted
 /// without an image computes it here from the sources baked into the binary — ONE module at
 /// a time, the module a question is about, so a source-boot check pays for the modules it
@@ -713,6 +736,7 @@ pub fn register_image_sigs(entries: Vec<(String, String, u32, u32)>) {
 /// signature differently in the two cells before this). On a scratch heap sharing this
 /// one's regions, like `image_heap_sig`.
 fn ensure_module_indexed(heap: &Heap, sym: Symbol) {
+    settle_raw();
     let name = value::symbol_name(sym);
     let Some(slash) = name.rfind('/') else {
         return;
@@ -747,6 +771,7 @@ fn ensure_module_indexed(heap: &Heap, sym: Symbol) {
 
 /// The whole index, for a process with no image: every embedded source scanned once.
 fn ensure_std_index(heap: &Heap) {
+    settle_raw();
     if image_sigs()
         .read()
         .unwrap_or_else(|e| e.into_inner())
