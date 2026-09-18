@@ -1,0 +1,40 @@
+;;; A literal multi-pair `(assoc coll k1 v1 k2 v2 …)` is unrolled at compile time into
+;;; nested single-pair `assoc`s, each a `PrimOp3::MapAssoc` instruction (2026-09-18,
+;;; handoff item 2 after ADR-368). The wrapper's variadic arm built a rest list and looped
+;;; `%assoc-map-pairs` over it — 1.1 µs of a supervised child's 16 µs was one three-pair
+;;; `(assoc st :children … :ids …)`. The VALUE cases pin the wrapper's semantics — a map,
+;;; a vector (the single-pair arm's `%vector-assoc` per pair), last-wins on a duplicate key,
+;;; source-order evaluation of the operands — and the SHAPE case pins the unroll itself,
+;;; through `%vm-arm-ops`: three `MapAssoc` instructions and no call to `assoc`. Sabotage-
+;;; verified: with the unroll removed the shape case sees one `Call(argc=7 …)` and no prim.
+
+(defmodule assoc-unroll-test (:use test))
+
+(defn- three (m i) (assoc m :n i :c (+ i 1) :d i))
+(defn- vec3 (v) (assoc v 0 :a 1 :b 2 :c))
+
+(describe "a literal multi-pair assoc"
+  (test "means what the wrapper means: map, vector, duplicate key, evaluation order"
+    (assert= {:x 1 :n 5 :c 6 :d 5} (three {:x 1} 5))
+    (assert= [:a :b :c 4] (vec3 [1 2 3 4]))
+    (assert= {:a 2} (assoc {} :a 1 :a 2))
+    (assert= {:a 1 :b 2 :a 3 :c 4} {:a 3 :b 2 :c 4})
+    ;; every operand evaluates, in source order, before the result is used
+    (let (log (table/new))
+      (table/put log :seen [])
+      (let (m (assoc {}
+                :a (do (table/put log :seen (conj (table/get log :seen) :a)) 1)
+                :b (do (table/put log :seen (conj (table/get log :seen) :b)) 2)
+                :c (do (table/put log :seen (conj (table/get log :seen) :c)) 3)))
+        (assert= {:a 1 :b 2 :c 3} m)
+        (assert= [:a :b :c] (table/get log :seen)))))
+
+  (test "an out-of-range vector index still raises, as the wrapper's would"
+    (is (string? (try (do (assoc [1 2] 0 :a 5 :b) "no error") (catch e (error-message e)))))
+    (is (not (= "no error"
+               (try (do (assoc [1 2] 0 :a 5 :b) "no error") (catch e (error-message e)))))))
+
+  (test "compiles to nested MapAssoc instructions, not a variadic call"
+    (let (ops (%vm-arm-ops three 2))
+      (assert= 3 (count (seq/filter ops (fn (o) (includes? o "Prim3(MapAssoc")))))
+      (assert= 0 (count (seq/filter ops (fn (o) (includes? o "Call(argc=7"))))))))

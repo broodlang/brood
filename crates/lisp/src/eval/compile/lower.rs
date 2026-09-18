@@ -1124,6 +1124,42 @@ pub(crate) fn compile_node(
                         }
                     }
                 }
+                // Multi-pair `(assoc coll k1 v1 k2 v2 …)` (ADR-368 follow-up, handoff item 2):
+                // unrolled at compile time into nested single-pair calls, `(assoc (assoc coll
+                // k1 v1) k2 v2)`, each of which `inline::lower_map_prim3` then makes a
+                // `PrimOp3::MapAssoc`. The wrapper's variadic arm built a rest list and looped
+                // `%assoc-map-pairs` over it — 1.1 µs of a supervised child's 16 µs was the
+                // three-pair `(assoc st :children … :ids …)`. Semantics are the wrapper's: a
+                // map path-copies per pair, a vector goes through the single-pair arm's
+                // `%vector-assoc` branch per pair, a duplicate key is last-wins, the
+                // operands evaluate in source order and each pair's assoc happens before the
+                // next pair evaluates — an intermediate map is unobservable, so the one
+                // difference (the wrapper evaluates every operand first) cannot be seen. Only
+                // while `assoc` is the PRELUDE closure (`resolve_prim3`'s rule), so a user
+                // `(def assoc …)` gets its own semantics untouched.
+                if items.len() >= 6
+                    && items.len() % 2 == 0
+                    && scope.lookup(h).is_none()
+                    && resolve_prim3(heap, h) == Some(PrimOp3::MapAssoc)
+                {
+                    let pos = heap.form_pos_only(form);
+                    let file = heap.form_pos(form).and_then(|(_, f)| f);
+                    let mut acc = compile_node(heap, items[1], scope, false)?;
+                    for pair in items[2..].chunks(2) {
+                        let k = compile_node(heap, pair[0], scope, false)?;
+                        let v = compile_node(heap, pair[1], scope, false)?;
+                        acc = Node::Call {
+                            callee: Box::new(Node::Global(h)),
+                            args: Box::new([acc, k, v]),
+                            tail: false,
+                            pos,
+                            file: file.clone(),
+                            site: NO_SITE,
+                            staged: false,
+                        };
+                    }
+                    return Some(acc);
+                }
             }
             // Direct `letrec` self-recursive tail call (the self-call optimization):
             // a tail call whose head is this closure's own self-name, not shadowed by

@@ -270,9 +270,9 @@ afternoon section below; each is general, none is supervisor-specific). **Item 1
    the JIT's vector-base hoist must stand aside around it; the VM half is trivial. Measure
    with `scratchpad`-style loops (`(assoc m8 :k v)` reads 259 ns against 162 for
    `%map-assoc`; `(get m :k d)` 307 against 63) and `make ab --floor --all`.
-2. **The multi-pair `(assoc st :children x :ids y)`** — 1.1 µs: a rest list + the
-   `%assoc-map-pairs` loop. A compile-time unroll of a literal pair count into nested
-   single-pair `assoc`s (PRELUDE-guarded head, `lower.rs`) removes the rest list entirely.
+2. **The multi-pair `(assoc st :children x :ids y)`** — **DONE 2026-09-18**: unrolled in
+   `lower.rs` into nested single-pair calls that become `MapAssoc` instructions; a three-pair loop 1285 → 531 ms per 1M (1.28 → 0.53 µs), `supervisor` −5.8% on `make ab --floor`;
+   `tests/assoc_unroll_test.blsp`.
 3. **`gen/call`'s own interpreted body** — 1.2 µs over a hand-rolled ref+monitor+after+flush
    (2.9 µs). The `receive` with `after` keeps it off the JIT; the win is fewer forms, not a
    new mechanism. Measure before touching: `scratchpad/gencall.blsp`'s decomposition.
