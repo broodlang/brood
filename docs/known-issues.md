@@ -9907,6 +9907,17 @@ the image (the checker's inference is deterministic per stdlib id), and the pre-
 then load nothing it does not run. That is the first candidate named above, now with a
 number on it: ~70M of `pipeline`'s 145M check is this.
 
+**Read again 2026-09-18 midday, at the `a6a0d934` column refresh.** Against the `04958398`
+binary, every `BROOD_NO_CHECK=1` run is flat (+0.1–1%) and `brood --check` alone grew
+**4–7M instructions per file** on every row measured (`fib` 134 → 138, `pipeline` 145 → 151,
+`strings` 131 → 138, `errors-deep` 167 → 175) — today's checker work: KI-164's guard
+narrowing, KI-165's runtime enforcement, C13, C14. And a second mechanism, exact this time:
+the CHECKED `pipeline` run grew 24M where its check grew 6M, because the check now
+materialises `path` and `file` that it did not before — `os/which` landed this morning, its
+body names `path/…`, and the eager policy loads what a materialised module's body names, so
+**one new std function costs every checked program that names any `os/` function ~18M
+instructions**. That is the transitive-load half of this entry, with a date and a name.
+
 ## KI-161 — Tier 1 monomorphization's rebind guard refused every module constructor and admitted the module-less rebind ✅ FIXED 2026-09-17
 
 **Symptom.** `BROOD_MONO=1 BROOD_MONO_DBG=1` on `(defmodule mp) (defrecord circle (r)) … (area

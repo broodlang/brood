@@ -261,6 +261,15 @@ flat except for the checker's own cost; `c9428cba` had reached `std/regex`/`std/
 guards, and the redundant-sig sweep exempting guard sigs. bedit's ten remaining `:trusted`
 acknowledgements can now each become a `(sig p? (any -> (is T)))`.
 
+**Benchmark column refreshed again at `a6a0d934` (2026-09-18 midday):** `supervisor`
+584 → 553 ms (−5.3%), the `assoc` unroll's reading; 2.2× Elixir → 2.1×. The short rows
+read +3–4% and it is the checker's again — `brood --check` grew 4–7M instructions per file
+with today's checker work, and `os/which`'s reference to `path` now costs every checked
+program that names an `os/` function ~18M (`path` + `file` materialised under the eager
+policy). KI-150's entry has both readings. **Do not refresh again until the runtime moves;
+and the next runtime-neutral checker change WILL move the short rows a few percent — that is
+the structural KI-150 decision knocking.**
+
 **Benchmark column refreshed at `04958398` (2026-09-18 morning, brood-benchmarks):**
 `supervisor` 614 → 584 ms (−4.9%, spread 0.4%) — the ADR-368 primitives, matching their
 `make ab --floor` reading; 2.3× Elixir → 2.2×; every other row inside its spread. Do not
