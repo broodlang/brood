@@ -826,3 +826,86 @@ fn a_record_guard_narrows_the_then_branch_only() {
         "nil | list<1 | {a: 1}>"
     );
 }
+
+// --- KI-164: a DECLARED type guard narrows, in every shape a user writes one ------------
+//
+// `(sig p? (any -> (is T)))` (ADR-301) promises that a truthy `(p? x)` proves `x` is `T`. The
+// declaration parsed and was recorded, and nothing applied it: `predicate_guard_ty` bailed on
+// `ctx.is_local(head)`, which is also true of this FILE's own globals — and a same-file
+// `(defn p? …)` is exactly where a user guard lives. Every case here has a control with the
+// guard removed (`-> bool`), so a green run cannot be the checker having gone silent.
+
+const KI164_GUARD: &str = "(sig myint? (any -> (is int)))\n(defn myint? (x) (int? x))\n";
+const KI164_NO_GUARD: &str = "(sig myint? (any -> bool))\n(defn myint? (x) (int? x))\n";
+
+fn ki164_strict(preamble: &str, body: &str) -> Vec<String> {
+    file_warnings_mode(&format!("(defmodule probe)\n{preamble}{body}"), true)
+}
+
+#[test]
+fn a_declared_guard_narrows_a_bare_local_over_a_known_union() {
+    let body = "(sig g ((or int string) -> int))\n(defn g (x) (if (myint? x) x 0))\n";
+    let with = ki164_strict(KI164_GUARD, body);
+    assert!(
+        !with.iter().any(|m| m.contains("probe/g")),
+        "a declared guard must narrow `x` to int in the then-branch: {with:?}"
+    );
+    let without = ki164_strict(KI164_NO_GUARD, body);
+    assert!(
+        without
+            .iter()
+            .any(|m| m.contains("probe/g") && m.contains("int | string")),
+        "control: with a plain bool predicate the union must survive: {without:?}"
+    );
+}
+
+#[test]
+fn a_declared_guard_narrows_the_unknown_behind_an_access_path() {
+    // The downstream shape (bedit): a value off an open map, unknown to the checker, and a
+    // declared return that read `trusted, not verified` because the guard did not apply.
+    let body = "(sig h (any -> int))\n(defn h (m) (let (v (:top m)) (if (myint? v) v 0)))\n";
+    let with = ki164_strict(KI164_GUARD, body);
+    assert!(
+        !with.iter().any(|m| m.contains("probe/h")),
+        "a declared guard must prove the unknown `v` is int: {with:?}"
+    );
+    let without = ki164_strict(KI164_NO_GUARD, body);
+    assert!(
+        without
+            .iter()
+            .any(|m| m.contains("probe/h") && m.contains("trusted, not verified")),
+        "control: without the guard the declaration is trusted, not verified: {without:?}"
+    );
+}
+
+#[test]
+fn a_declared_guard_from_another_module_narrows_too() {
+    // The predicate lives in a LOADED module, not this file: the fallback is `sig_of` over
+    // the heap rather than the file's declarations.
+    let mut interp = crate::Interp::new();
+    interp
+        .eval_str("(defmodule pm) (defn pm/myint? (x) (int? x)) (sig pm/myint? (any -> (is int)))")
+        .expect("define the guarded predicate in a module");
+    let src = "(defmodule probe)\n(sig g ((or int string) -> int))\n(defn g (x) (if (pm/myint? x) x 0))\n";
+    let forms = crate::syntax::reader::read_all(&mut interp.heap, src).expect("parse");
+    let with: Vec<String> = check_file_mode(&mut interp.heap, &forms, &[], true)
+        .into_iter()
+        .map(|(_, m)| m)
+        .collect();
+    assert!(
+        !with.iter().any(|m| m.contains("probe/g")),
+        "a guard declared in another module must narrow here: {with:?}"
+    );
+}
+
+#[test]
+fn a_lexical_shadow_of_a_guard_name_is_not_the_predicate() {
+    // The early return's one legitimate job: a `let`-bound `myint?` is whatever it is, not
+    // the declared guard — the then-branch must NOT narrow.
+    let body = "(sig g ((or int string) -> int))\n(defn g (x) (let (myint? (fn (_) true)) (if (myint? x) x 0)))\n";
+    let with = ki164_strict(KI164_GUARD, body);
+    assert!(
+        with.iter().any(|m| m.contains("probe/g")),
+        "a lexical shadow must not borrow the global's guard: {with:?}"
+    );
+}

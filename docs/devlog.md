@@ -911,6 +911,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-17** — KI-150 measured, not guessed: the checker's Rust is ~3% of a `brood --check`; the cost is eager MATERIALISATION — `(seq/lmap …)`, a prelude binding, loaded `seq` + `map`/`math`/`reflect`/`string` (138M vs 75M). The eager drain now skips a module whose recorded names are all bound (138 → 82M; verdicts unchanged, both directions guarded). What remains (`math/rem`'s module pulling four more in, ~70M of `pipeline`'s 145M check) is the structural option: inferred std signatures carried in the image. Also: KI-162 was already closed by `3fd89869`; B7's std-tree hash costs ~10% of a check run INSIDE the checkout.
 - **2026-09-17** — ADR-368: `(get m k default)` and `(assoc m k v)` on a map are instructions (`PrimOp3::MapGet3`/`MapAssoc`, VM arm + one JIT callback each): a loop of two reads 1124 → 172 ms per 2M (281 → 43 ns a read), an `assoc` loop 921 → 590 ms (460 → 295 ns). Differential over every branch at every tier + a settle-to-native check; `BROOD_NO_MAPASSOC` is the allocating op's own lever. Found on the way: a map literal inside a hot arm bails the arm (`MakeMap` is not in the JIT subset).
 - **2026-09-18** — benchmark column refreshed at `04958398` (brood-benchmarks): `supervisor` 614 → 584 ms (−4.9%), the ADR-368 primitives' reading; 2.3× → 2.2× Elixir; every other row inside its spread.
+- **2026-09-18** — KI-164 fixed: a declared `(is T)` guard never narrowed because `predicate_guard_ty` treated the file's own `defn` as a shadowing local (`is_local` includes file globals); `is_local && !is_file_global` now. Four guards with controls; the redundant-sig sweep exempts guard sigs, which it rendered as `bool` and would have stripped.
 - **2026-09-17** — the pre-push hook has been INERT on this machine: a global `core.hooksPath` *replaces* `.git/hooks`, so `make hooks` installs a gate git never consults — and the override directory holds a deliberate `commit-msg` (which chains to a repo-local one for exactly this reason) and no `pre-push`. Found when an unformatted commit reached `main` through a gate that reported "installed". `make hooks` now WARNS with the path, `scripts/git-hooks/global-pre-push` is the chaining fix, and CLAUDE.md records the second half of it: `make prepush | tail` reports the PIPE's exit status, not the gate's.
 - **2026-09-17** — C10 answered by probe and closed with no checker change: ADR-350's intervals and the int-closed/float-contagion rules had already taken the merely-wider residue, and the answer is a **mode split** neither mode shows alone — a *precise* mismatch (float contagion, exact division, an interval arithmetic cannot fit) is named in both modes; an *over-approximated* one (a call's result) is named under `--strict` and deferred in plain, the gradual valve. The residue itself lands there: `(sig f (number -> int))` over `(+ x 1)` IS reported under strict, because the declaration is part of the claim — a parameter admitting floats makes the promise false with no analysis of the body. Fourteen provable shapes silent in both modes, so the false positive it was left silent for does not occur. Three pins, sabotage-verified three ways (strict never/always applies reds the split in opposite directions; the return check disabled reds both warning pins).
 - **2026-09-17** — KI-162: `nest check --fix-sigs` wrote every `sig` ABOVE its `defn`, the one placement `sig_placement.rs` forbids tree-wide. The locator reads the CST now (`sig-defn-sites`: root children, each node's newlines counted for the extent), so the sig lands one past the form's last line, a head laid out across lines is located instead of skipped, and "top level" is *root child* rather than *column 0* — a `check-allow`-wrapped `defn` still declines. Recorded beside the fix: the load failure the rule exists for **did not reproduce** (forward sigs over `defn`, `defn-` and a wrapped pair all loaded under contracts and enforced the contract), so the rule is what is verified, not the breakage.
@@ -14372,3 +14373,21 @@ found to bail the whole arm (`MakeMap` is outside the JIT subset; `nbody`'s lite
 lower, its map twin would not). Also met on the way: the disk filled (`target/debug/deps`
 at 72 GB, 4143 generations of test binaries — the memory note's number, now measured) and
 truncated a test file to zero bytes mid-write; deleted, rebuilt.
+
+## 2026-09-18 — KI-164: the declared guard that proved nothing
+
+One line. `predicate_guard_ty` (guards.rs) returns the built-in table first, then a declared
+`(is T)` — after declining when `ctx.is_local(head)`, so that a `let`-bound `myint?` is not
+mistaken for the global predicate. `is_local` also includes the file's own globals, and a
+same-file `(defn myint? …)` is where every user guard lives: the fallback was unreachable
+for exactly the guards users write, while the prelude's (globals of another file) worked,
+which is why the feature read as alive. `is_local && !is_file_global` is the fix; the
+probe from the entry checks clean and the strict gate over the tree is unchanged.
+
+The entry's second worry was real too: `scripts/redundant-sigs.blsp` compares the sig
+`reflect/source-signatures` renders with the one inferred after the sig is blanked, and a
+guard's declared arrow renders as `(any -> bool)` — the guard is not in the return — so it
+was listed as redundant and would have been stripped, narrowing and all. The sweep now
+skips any span whose text carries `(is `. Four checker tests pin the narrowing (bare
+local, unknown behind an access path, another module's predicate, and the lexical-shadow
+case the early return exists for), the first two with `-> bool` controls.

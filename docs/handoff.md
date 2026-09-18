@@ -212,6 +212,11 @@ green yet**, and what remains is not this session's — it is the B6–B8 checke
 **(Superseded — see the night section above: the column was refreshed at `a406f9a6` and read
 flat except for the checker's own cost; `c9428cba` had reached `std/regex`/`std/json`.)**
 
+**KI-164 (a declared `(is T)` guard did not narrow) is FIXED, 2026-09-18** — one line in
+`predicate_guard_ty` (`is_local` counted the file's own globals as shadowing locals), four
+guards, and the redundant-sig sweep exempting guard sigs. bedit's ten remaining `:trusted`
+acknowledgements can now each become a `(sig p? (any -> (is T)))`.
+
 **Benchmark column refreshed at `04958398` (2026-09-18 morning, brood-benchmarks):**
 `supervisor` 614 → 584 ms (−4.9%, spread 0.4%) — the ADR-368 primitives, matching their
 `make ab --floor` reading; 2.3× Elixir → 2.2×; every other row inside its spread. Do not

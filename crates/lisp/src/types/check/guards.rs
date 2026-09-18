@@ -540,7 +540,11 @@ pub(super) fn predicate_guard_ty(
     if let Some(t) = Ty::implied_by(&head_name) {
         return Some((t, true));
     }
-    if ctx.is_some_and(|c| c.is_local(head)) {
+    // A LEXICAL binder shadowing the name is not the predicate. `is_local` also answers true
+    // for this file's own globals, and a same-file `(defn myint? …)` is exactly where a
+    // declared guard lives — so that test returned `None` here for every user guard, and
+    // ADR-301 narrowed nothing but the prelude's (KI-164).
+    if ctx.is_some_and(|c| c.is_local(head) && !c.is_file_global(head)) {
         return None;
     }
     ctx.and_then(|c| c.declared_sig(head))

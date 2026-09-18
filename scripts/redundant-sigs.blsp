@@ -96,12 +96,17 @@ A sig under a `kept for cost` comment (KI-150) is not a candidate."
       (let ([start end name] span
             before (entry-for declared name)
             after (entry-for (reflect/source-signatures (blank-span text start end)) name))
+        ;; A type guard — `(sig p? (any -> (is T)))` (ADR-301) — is NEVER redundant: its
+        ;; information is what a truthy call proves about the argument, which is not in the
+        ;; return, and the return alone (`bool`) is exactly what the checker infers. Judged by
+        ;; the arrow it would be listed and stripped, and the narrowing with it (KI-164).
         (when (and before
                 after
                 (:declared? before)
                 (not (:declared? after))
                 (not (nil? (:sig before)))
-                (= (:sig before) (:sig after)))
+                (= (:sig before) (:sig after))
+                (not (includes? (string/substring text start end) "(is ")))
           (io/puts (str path ":" (line-of text start) " " name " " (:sig before))))))))
 
 (when (not (= (first (system/script-args)) "--remove"))
