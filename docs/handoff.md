@@ -261,6 +261,44 @@ flat except for the checker's own cost; `c9428cba` had reached `std/regex`/`std/
 guards, and the redundant-sig sweep exempting guard sigs. bedit's ten remaining `:trusted`
 acknowledgements can now each become a `(sig p? (any -> (is T)))`.
 
+**KI-150, the long-term fix — DECIDED 2026-09-18 (the user: respect why ADR-340 exists;
+prefer the structural fix over a short-term one). Signatures ride in the stdlib image.**
+The mechanism that costs every checked program is `materialise_referenced_modules`
+(ADR-340): once a module is loaded for a check, the bodies of EVERY function in it are
+scanned for qualified names and those modules loaded too, to a fixpoint, so inference can
+follow a body to the leaf that declares its type — the need is real (bedit's
+`buffer-current-line` read `any` because `text` was never loaded). The unit is wrong, not
+the need: `(os/env …)` loads `os`, the scan meets `path/…` inside `os/which`, and `path`
+and `file` come along (~18M) for a program that calls neither; every new std function does
+this to every program naming its module, and every checker change moves the short rows.
+The fix that removes the reason to load: **the image footer carries each imaged module's
+signatures** — declared or inferred at build time — and the checker reads a callee's type
+from the image instead of loading its module and walking its body.
+
+Plan (ADR-370 when it lands; the pieces are all in place today):
+1. **Builder** (`std/tool/stdimage.blsp` `build`, where every module is loaded for real):
+   for each module, `(reflect/source-signatures <module source>)` — the sweep's own tool,
+   `{:name :sig :declared?}` per function, the same checker at its most-informed (everything
+   loaded, deterministic per stdlib id since B8) — handed to `%image-write` and written in
+   the footer after the v6 macro names: a v7 list of (name, sig text). Read at open like the
+   kind index, never from the payload.
+2. **Reader**: `%image-index` parses the list → `derive::register_image_sigs` beside
+   `register_image_kinds`; `Sig`s parsed lazily from the text with `annot`'s parser and
+   memoised per symbol.
+3. **Checker**: `sigs::sig_of` consults the image table after `declared_heap_sig` and before
+   `infer_sig` (a declared sig still wins; the image's inferred one replaces the body walk);
+   `materialise_referenced_modules` collects no prefix for a name the image has a signature
+   for — so a check loads only what the FILE names (the drain, for the unbound verdict) and
+   never the transitive std closure. `BROOD_NO_IMAGE_SIGS=1` is the lever (catalogue +
+   CLAUDE.md row).
+4. **Gates**: the `check_order_differential` shape — `nest check --strict` over `std/` +
+   `tests/` with the image sigs on and off must agree byte for byte (the fallback IS today's
+   path); an ADR-280-style construction gate that every imaged function's footer signature
+   equals `source-signatures` of its module in a fully-loaded process; `make ab --floor`
+   must read the short rows DOWN (`pipeline`'s check is 151M, ~70M of it this).
+5. Then the pre-flight can stop loading std modules for the unbound verdict too (the kind
+   index already knows an imaged module's names) — a follow-up, not this step.
+
 **Benchmark column refreshed again at `a6a0d934` (2026-09-18 midday):** `supervisor`
 584 → 553 ms (−5.3%), the `assoc` unroll's reading; 2.2× Elixir → 2.1×. The short rows
 read +3–4% and it is the checker's again — `brood --check` grew 4–7M instructions per file
