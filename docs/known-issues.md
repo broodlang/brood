@@ -9918,6 +9918,24 @@ body names `path/…`, and the eager policy loads what a materialised module's b
 **one new std function costs every checked program that names any `os/` function ~18M
 instructions**. That is the transitive-load half of this entry, with a date and a name.
 
+**Measured after ADR-370 landed (2026-09-18, callgrind, image `:state :live`, cache warm).**
+The check's cost is the run WITH the pre-flight minus the run without it:
+
+| file | check cost before | after ADR-370 |
+|---|---|---|
+| `(io/puts (str (os/env "HOME")))` | 53.4M | **13.2M** (−75%) |
+| `(io/puts "hi")` | ~2M | 2.1M |
+| `(seq/lmap inc [1 2 3])` | — | 19.8M |
+| `(math/rem 7 3)` | — | 26.6M |
+
+**What remains is visible in the trace, and it is not the checker's Rust.** The signature
+index carries **124 authoritative types out of 3104 names**, so the walk still materialises
+a module for every name it has none for — `BROOD_IMAGE_TRACE` names them one by one:
+`check materialises string for string/trim`, `… math for math/max`, `… reflect for
+reflect/read-string`. Those five modules are the whole of `oscheck`'s remaining 13.2M. So
+the next increment of this entry is COVERAGE of the index, not a new mechanism: every name
+that gains an authoritative type removes the load behind it.
+
 **Attempted 2026-09-18, NOT landed — the mechanism is now pinned down, with numbers.** The
 loader is `types::check::materialise_referenced_modules`: it scans every function of every
 loaded module, loads every module their bodies name, to a fixpoint. Measured with
