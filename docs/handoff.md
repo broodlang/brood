@@ -10,6 +10,104 @@ needing one is queued in [`perf-handoff.md`](perf-handoff.md) instead — curren
 high-priority item: whether KI-114's `as_f64_pair` holds the closure KI-109 got from the
 promotion it constrained.
 
+## 2026-09-18 late — HANDOVER (the type-system list is EMPTY; read the four traps first)
+
+**Everything below is pushed and green at `3cc912b8`.** Nothing is half-done, nothing is
+parked in a branch, and there is no uncommitted work of this session's anywhere.
+
+### Read this before you touch the working tree
+
+1. **`main` in `/home/wilhelm/src/broodlang/brood` is BEHIND origin and cannot
+   fast-forward**, because `crates/lisp/src/builtins/modules.rs` carries an uncommitted hunk
+   (registering `editor/evalsession` as a CORE module) that the incoming ADR-370 commits also
+   touch. Two more files of the same in-flight work are untracked: `std/editor/evalsession.blsp`
+   and `tests/evalsession_test.blsp`. **That work is the machine owner's, not this session's
+   — do not commit, format, stash or discard it.** Commit or park it, then `git merge
+   --ff-only origin/main`.
+2. **A git WORKTREE may still be registered.** This session worked in one (at
+   `/tmp/claude-1000/…/wt`, branch `ki150-verify`) precisely to avoid touching that tree.
+   Everything in it is pushed. If `git worktree list` shows it and the path is gone, run
+   `git worktree prune`.
+3. **The pre-push hook was INERT and is now live — but only because a hook was installed
+   OUTSIDE this repo.** A global `core.hooksPath` (`~/.config/git/hooks`) replaces
+   `.git/hooks` wholesale, so `make hooks` installed a gate git never consulted.
+   `scripts/git-hooks/global-pre-push` is now in that directory and chains to the repo's.
+   The first version of it did NOT work: `git rev-parse --git-path hooks/pre-push` *honours*
+   `core.hooksPath`, so it resolved to itself, hit its own self-loop guard and exited 0 —
+   reporting success having run nothing. It uses `--git-common-dir` now. **The machine's own
+   global `commit-msg` has the same bug**, so its "chain to a repo-local hook" branch cannot
+   fire; not this repo's file to change.
+4. **Instruction counts CAN be measured on this box** — `perf` is blocked by
+   `perf_event_paranoid=4`, but `valgrind --tool=callgrind` counts deterministically with no
+   privileges. `perf-handoff.md` has the invocation and, more importantly, **the two traps
+   that produced three contradictory readings of the same code in one session**: a rebuild
+   colds the prelude image (first runs boot std from SOURCE — 1.5 BILLION instructions
+   against 78M, which reads exactly like a catastrophic regression in whatever you just
+   changed), and a `std/` edit or new commit moves the stdlib image id. Warm after every
+   build, assert `(stdimage/status)` `:state :live` in the same shell, and remember: **if a
+   revert does not reproduce the number you started from, the rig is wrong, not the code.**
+
+### What the type-system list looks like now
+
+**Empty of open work.** C9–C16 are closed (C13 declined with reasons — ADR-367; C16's three
+"holes" were one real bug, one already fixed by C12, and one that described a shape `into`
+does not accept). What is left on that list is not work:
+
+- **A3** (`:pure`/`:total` at runtime) — decided static-only.
+- **C17** (dispatch on a type designator) — waiting on its first caller. Swept `std/` and
+  bedit on 2026-09-18: no table keyed on `:int` as a TYPE, no `defmulti` over `type-of`, no
+  `zero-of`-shaped generic. ADR-361 names this as the shape ADR-011 waits for; building it
+  now is the thing both say not to do.
+- **C15's second half** — totality across CALLS and mutual recursion. The display half
+  shipped; this is a call graph with a measure per edge, and it is a different problem from
+  the per-function `:total` (`non_decreasing_self_call`). The honest next step is a use case,
+  not a lattice.
+
+### The one open bug, and exactly what is left of it
+
+**KI-150.** ADR-370 (yours) closed the loading half by construction. Measured after it
+landed, callgrind, image live, cache warm — the pre-flight's cost is the run with it minus
+the run without:
+
+| file | before | after |
+|---|---|---|
+| `(io/puts (str (os/env "HOME")))` | 53.4M | **13.2M** |
+| `(io/puts "hi")` | ~2M | 2.1M |
+| `(seq/lmap inc [1 2 3])` | — | 19.8M |
+| `(math/rem 7 3)` | — | 26.6M |
+
+**What remains is index COVERAGE, not a mechanism.** The signature index carries **124
+authoritative types out of 3104 names**, so the walk still materialises a module for every
+name it has none for, and `BROOD_IMAGE_TRACE` names them one at a time: `check materialises
+string for string/trim`, `… math for math/max`, `… reflect for reflect/read-string`. Those
+five modules are the whole of the `os/env` program's remaining 13.2M. Every name that gains
+an authoritative type removes the load behind it.
+
+### Also open, and off this box
+
+**perf Task 2** is half-answered: its check needs the bail trace rather than wall-clock, and
+there are **zero `deopt-thrash-latched` arms across all five in-tree float programs**, so no
+NEW one can exist here whatever the pre-KI-114 binary had. Only the published float rows
+(`brood-benchmarks`, not checked out on this machine) remain. **The bedit `--bump` smoke**
+still needs a box that runs the full suite.
+
+### What this session landed, in order
+
+C9 finished (ADR-364) · the two checker differentials split per claim · KI-162 (`--fix-sigs`
+writes below the definition, off the CST) · C10 closed by probe with the mode split pinned ·
+C11 `(seqable T)` (ADR-365), which found `(set T)` had no runtime contract arm at all · C12
+(the offset index bound, and a fact that reached two of its three `let` binders) · C13
+declined (ADR-367: floats are not totally ordered — NaN is reachable, and `(< nan 1.0)` and
+`(>= nan 1.0)` are BOTH false) · C14 (ADR-369, a self-referential `deftype` is a μ type),
+which turned up a **pre-existing checker stack overflow** on the writable `(rec X (or nil
+X))` · KI-165 (a `deftype` alias is enforced at runtime) · C16 · C15's display half · the
+doc catalogue's `*fuzzy-scorer*` red · and the KI-150 measurements above.
+
+**The habit worth keeping from it:** ask of every grammar addition, *does the runtime
+contract enforce what this lets a declaration say?* It was two for two — `(set T)` and every
+`deftype` alias were both silently unenforced — and both were found by asking, not by a test
+failing.
+
 ## 2026-09-18 — C9–C14 closed, KI-162/165 fixed, a `(rec …)` checker crash fixed, and the pre-push hook was inert; next is C15
 
 **C14 (ADR-369) — a self-referential `deftype` is a μ type.** `(rec X …)` was always exact
