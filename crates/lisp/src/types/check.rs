@@ -130,6 +130,7 @@ mod properties;
 mod protocol;
 mod recursion;
 mod sigs;
+pub(crate) use properties::effect_of;
 pub(crate) use sigs::cover_name_of;
 mod std_index;
 pub(crate) use std_index::{module_signature_index, std_signature_index};

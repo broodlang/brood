@@ -131,6 +131,15 @@ bare-surface (prelude) name, whose references are bare already."
         ;; check-allow :discarded-catch — a name nothing can type / describe / locate is simply omitted from the docs
         arrow (check-allow :discarded-catch (try (reflect/type-signature sym) (catch _ nil)))
         type-line (if (nil? arrow) "" (str "`" arrow "`\n\n"))
+        ;; The EFFECT the body reaches, when the checker's purity walk finds one (C15) —
+        ;; the analysis that until now only ever graded a `:pure` DECLARATION, asked as a
+        ;; question. Printed only when there IS one: the effectful-primitive list is a
+        ;; deny-list, so a described effect is one the body reaches, while nothing found
+        ;; means *not known to perform one* — which is not the same as pure, and these docs
+        ;; must not say it is.
+        ;; check-allow :discarded-catch — a name nothing can type / describe / locate is simply omitted from the docs
+        effect (check-allow :discarded-catch (try (%function-effect sym) (catch _ nil)))
+        effect-line (if (nil? effect) "" (str "*Effects:* " effect "\n\n"))
         ;; Stability metadata (ADR-283), where a `(meta …)` recorded any: when the name
         ;; appeared, whether it is going away, whether the surface is settled. `:since` is
         ;; documentation and this is the place it is spent.
@@ -160,6 +169,7 @@ bare-surface (prelude) name, whose references are bare already."
       "\n\n"
       stability
       type-line
+      effect-line
       (if (nil? d) "_Undocumented._\n" (str (docs-links d (docs-module-prefix sym)) "\n")))))
 
 ;; The "Definitions" section: every public function/macro the module added.

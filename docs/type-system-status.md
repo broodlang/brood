@@ -1413,9 +1413,21 @@ each lands; this section is the working list, `handoff.md` points at it.
       the one that pinned the old bound), each sabotage-verified. **Filed, not closed:**
       KI-165 — no `deftype` alias is enforced at RUNTIME (`type-matches?` has no alias case,
       so `sig!` over one accepts anything), which is every alias since ADR-327.
-- [ ] **C15. Effects displayed; totality across calls.** The walk computes a function's
-      effects and shows them nowhere (`nest docs`, hover). Totality across calls and mutual
-      recursion is a call graph with a measure per edge.
+- [x] **C15. Effects DISPLAYED** (2026-09-18) — the first half, which was the whole of what
+      was already computed. The purity walk (ADR-351) only ever graded a `:pure`
+      DECLARATION; `properties::effect_of` asks it as a question instead, `%function-effect`
+      exposes it, and `nest docs` prints an *Effects:* line: `(io/puts …)` for a direct one,
+      `calls f, which performs an effect: …` through a call.
+      **It reports an effect and never claims purity**, which is the whole design constraint:
+      `effectful_head` is a DENY-LIST, so a described effect is one the body reaches, while
+      finding none means only *not known to perform one*. So the line appears only when
+      there is one, and no page ever says "pure" — the absence is not a claim. An effectful
+      PRIMITIVE is described by name (`proc/send` has no Brood body to walk), which the
+      first cut missed. `tests/docs_test.blsp` § rendering one definition, three cases
+      including the absence.
+      **Totality across calls is NOT done and is a different problem** — a call graph with a
+      measure per edge, across mutual recursion; `:total` today is per-function
+      (`non_decreasing_self_call`). Left as its own item rather than folded in here.
 - [x] **C16. The small holes the 2026-09-17 sweep noticed** (2026-09-18). Probed one by one;
       of the three, **one was real, one was already closed, and one was wrong as written**.
       - **A closed record's `count` — REAL, fixed.** The shape declares every key the value
@@ -1435,9 +1447,16 @@ each lands; this section is the working list, `handoff.md` points at it.
         the checker's `expects seqable, got string` is correct, not a precision hole
         (`seqable` excludes `string` deliberately — bridge with `string->list`). Nothing to
         fix; the note was about a shape that does not exist.
-- [ ] **C17. Dispatch on a type designator** — the door ADR-361 leaves open: a multimethod
-      keyed on `(zero-of :int)`'s argument as a designator. Language-side; this one IS a
-      use-case item.
+- [~] **C17. Dispatch on a type designator — WAITING ON A NEED, and the need has not
+      appeared** (checked 2026-09-18). The door ADR-361 leaves open: a multimethod keyed on
+      `(zero-of :int)`'s argument as a designator, which that ADR names as the shape ADR-011
+      waits for a *concrete* need on. Swept `std/` and bedit for one — a dispatch table keyed
+      on `:int`/`:string` as a TYPE, a `defmulti` over `type-of`, a `zero-of`-shaped generic:
+      **none**, the only textual hit being a doc comment. So this is not open work that
+      nobody has done; it is a feature correctly waiting for its first caller, and building
+      it now would be the thing ADR-011 and ADR-361 both say not to do. Re-check when a
+      generic library wants it; the shape to build is then the small dynamic one ADR-361
+      names, never return-type dispatch.
 
 ### Off this box
 

@@ -40,6 +40,50 @@ use super::walk::{fn_params, is_fn_head, list_items};
 
 /// Entry: the declared properties of every `(def name (fn …))` in the expanded forms, and
 /// every `ui-memo` thunk.
+/// The effect a call to the loaded global `name` reaches, described — or `None` when the
+/// walk finds none (C15).
+///
+/// **This reports an effect; it never claims purity.** `effectful_head` is a DENY-LIST, so
+/// the walk is sound in the direction the checker promises — a reported effect is one the
+/// body reaches — and silent about anything the list does not name. So a caller may say
+/// "performs an effect: …" and must not say "pure": `None` here means *not known to perform
+/// one*, which is why `nest docs` prints a line only when there is an effect to print.
+///
+/// The query form of the walk `check_properties` runs for a `:pure` DECLARATION. It takes
+/// no file: `defs` is empty, so every callee is read from the heap as a loaded closure, and
+/// `Ctx::default()` means a `:pure` declaration is still trusted through the heap's sig
+/// store (where a loaded module registered it).
+pub(crate) fn effect_of(heap: &Heap, name: Symbol) -> Option<String> {
+    let defs: HashMap<Symbol, Value> = HashMap::new();
+    let ctx = Ctx::default();
+    let mut purity = Purity {
+        heap,
+        ctx: &ctx,
+        defs: &defs,
+        memo: HashMap::new(),
+        trail: HashSet::new(),
+    };
+    // The name itself first: an effectful PRIMITIVE has no Brood body to walk, so reading
+    // only the closure answered `None` for `proc/send` — an effect by definition.
+    let spelled = value::symbol_name(name);
+    if effectful_head(&spelled) {
+        return Some(format!("({spelled} …)"));
+    }
+    // Then the global's OWN body — not `effect_of_global`, which trusts a `:pure`
+    // declaration on the name itself and would answer `None` for exactly the functions a
+    // reader most wants described.
+    let Some(Value::Fn(cid)) = super::deps::obs_global(heap, name) else {
+        return None;
+    };
+    let bodies: Vec<Value> = heap
+        .closure(cid)
+        .arms
+        .iter()
+        .flat_map(|arm| arm.body.iter().copied())
+        .collect();
+    purity.effect_in_forms(&bodies)
+}
+
 pub(super) fn check_properties(
     heap: &Heap,
     expanded: &[Value],

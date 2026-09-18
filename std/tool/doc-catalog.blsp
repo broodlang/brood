@@ -648,6 +648,16 @@
    ;; `fuzzy`'s knobs are `defdyn`s, so they are bare while the module's functions are
    ;; `fuzzy/…` and catalogued with it. `*fuzzy-scorer*` holds a FUNCTION (the default
    ;; rules), which is what brings it into the catalogue's remit at all.
+   ;;
+   ;; The four `fuzzy/…` below are what make that sentence true, and the reason is
+   ;; mechanical: `docs_test`'s "no catalogue entry is a name the runtime cannot resolve"
+   ;; loads a module for every PREFIX it sees among the keys, and a bare key contributes
+   ;; none — so with no `fuzzy/…` key the module was never loaded and the bare
+   ;; `*fuzzy-scorer*` read as a stale entry. Catalogued 2026-09-18.
+   "fuzzy/match" :strings
+   "fuzzy/scorer" :strings
+   "fuzzy/top" :strings
+   "fuzzy/filter" :strings
    "*fuzzy-scorer*" :strings
    "then" :control})
 

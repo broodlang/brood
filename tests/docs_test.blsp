@@ -42,6 +42,12 @@
 ;; whatever namespace is current there rather than this module's.
 (defn doc-kept (x) "The new way." x)
 (defn doc-gone (x) "The old way." x)
+;; C15's subjects, at module level because the effect is read from the GLOBAL the name
+;; resolves to — a `defn` inside a `test` body is not the same binding a docs build sees.
+(defn doc-shouts (s) "Say it." (io/puts s))
+(defn doc-inner (s) (io/puts s))
+(defn doc-outer (s) "Wrap it." (doc-inner s))
+(defn doc-adds (a b) "Add." (+ a b))
 (meta doc-gone :deprecated "0.19.0" :use 'doc-kept)
 
 (describe "docs: rendering one definition"
@@ -55,6 +61,21 @@
   (test "an undocumented function gets a placeholder"
     (defn doc-bare (x) (* x x))
     (assert= (docs/docs-entry 'doc-bare doc-bare) "### `(doc-bare x)`\n\n_Undocumented._\n"))
+  ;; C15: the checker's purity walk graded a `:pure` DECLARATION and showed nothing
+  ;; anywhere. An entry now carries the effect its body REACHES — and only that: the
+  ;; effectful-primitive list is a deny-list, so finding none means "not known to perform
+  ;; one", never "pure", and a docs page must not claim what the analysis cannot.
+  (test "an effectful definition says what effect it reaches"
+    (let (entry (docs/docs-entry 'docs-test/doc-shouts docs-test/doc-shouts))
+      (is (includes? entry "*Effects:* (io/puts …)"))
+      (is (includes? entry "Say it."))))
+  (test "an effect through a CALL is described through it"
+    (is (includes? (docs/docs-entry 'docs-test/doc-outer docs-test/doc-outer)
+          "which performs an effect")))
+  (test "a function with no effect gets no Effects line — the absence is not a purity claim"
+    (let (entry (docs/docs-entry 'docs-test/doc-adds docs-test/doc-adds))
+      (refute (includes? entry "Effects:"))
+      (is (includes? entry "Add."))))
   (test "a deprecated definition is STRUCK THROUGH, not merely annotated"
     ;; The note tells a reader who already opened the entry; the strikethrough is what
     ;; tells one who is skimming the module not to reach for the name at all.

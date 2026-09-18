@@ -92,6 +92,13 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "The type expression a `(sig …)` DECLARED for global `name`, as written — `(model any -> model)` — or nil when none was declared (a `deftype` alias is not a signature and answers nil too). Symbol or string arg; a `mod/name` reference is rooted to its package like any other.",
         declared_sig);
     primitives.def(
+        "%function-effect",
+        Arity::exact(1),
+        Sig::new(vec![sym.union(string)], string.union(nil_ty)),
+        &["name"],
+        "The effect a call to the loaded global `name` REACHES, described — `(io/puts …)`, or `calls f, which performs an effect: …` — or nil when the walk finds none. The checker's own purity walk (ADR-351), asked as a question instead of against a `:pure` declaration. It REPORTS an effect and never claims purity: the effectful-primitive list is a deny-list, so a described effect is one the body reaches, while nil means only *not known to perform one*. Backs the Effects line in `nest docs`.",
+        function_effect);
+    primitives.def(
         "%type-alias",
         Arity::exact(1),
         Sig::new(vec![sym.union(string)], any),
@@ -316,6 +323,43 @@ pub(super) fn declared_sig(args: &[Value], _env: EnvId, heap: &mut Heap) -> Lisp
         matches!(items.first(), Some(Value::Sym(h)) if value::symbol_is(*h, crate::builtins::modules::TYPE_ALIAS_MARKER))
     });
     Ok(if is_alias { Value::nil() } else { form })
+}
+
+/// `(%function-effect name)` — the effect a call to the loaded global `name` reaches, or
+/// nil. See the registration's docstring for why this reports rather than certifies.
+pub(super) fn function_effect(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let sym = match arg(args, 0) {
+        Value::Sym(s) => s,
+        Value::Str(id) => {
+            let name = heap.string(id).to_string();
+            match value::intern_existing(&name) {
+                Some(s) => s,
+                None => return Ok(Value::nil()),
+            }
+        }
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "function-effect",
+                "symbol or string",
+                other,
+            ))
+        }
+    };
+    // Rooted like every other name query here (`%declared-sig`), so a bare reference means
+    // in the current namespace what a def head would mean.
+    let rooted = heap
+        .root_qualified_ref(sym)
+        .unwrap_or_else(|| crate::eval::macros::resolve_reference(heap, sym));
+    let described = crate::types::check::effect_of(heap, rooted)
+        .or_else(|| crate::types::check::effect_of(heap, sym));
+    Ok(match described {
+        Some(text) => {
+            let s = heap.alloc_string(&text);
+            s
+        }
+        None => Value::nil(),
+    })
 }
 
 /// `(%type-alias name)` — the type expression `(deftype name T)` declared, or nil.

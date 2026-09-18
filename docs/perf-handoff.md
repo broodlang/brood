@@ -249,6 +249,21 @@ On a benchmark box with real float workloads, the thing to look for is **new**
 A new one on a float-heavy row means the pair gate is refusing a genuinely mixed
 float/int operation somewhere the guard test does not reach.
 
+**Half-answered 2026-09-18, on this box, without a benchmark corpus.** The check the task
+describes does not need wall-clock — only the bail trace — so it was run over every
+float-heavy program in the tree: `unbox_torture_test`, `jit_float_global_test`,
+`jit_float_eq_test`, `float_roundtrip_test`, `jit_eq_join_test`. **Zero
+`deopt-thrash-latched` arms in all five.** The bails that do occur are the ordinary
+profitability and subset ones — `call-mediated-boxed` ×7, `chunk-outside-jit-subset` ×2,
+`call-spill-exhausted` ×1 — none of which is the pair gate's signature.
+
+That closes the comparison for this corpus by construction: with zero latched arms on the
+current binary there can be no NEW one, whatever the pre-KI-114 binary had, so no second
+build is needed to rule it out here. What is left is the part this box genuinely cannot do —
+the published float rows (`nbody` and friends live in `brood-benchmarks`, which is not
+checked out here). Run the same grep there; if it is zero too, this task is done and should
+be deleted.
+
 ---
 
 ## Task 3 — re-take KI-100's re-baseline if the runtime has moved ✅ ANSWERED 2026-09-11
