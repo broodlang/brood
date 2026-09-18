@@ -172,7 +172,7 @@ it (it was "do it with C10 if C10 needs it"; C10 did not) — it now needs a cas
 **Next, in order:** **C15** (effects displayed — the walk computes a function's effects and
 shows them nowhere; totality across calls is a call graph with a measure per edge), then
 C16–C17 in list order (`docs/type-system-status.md` § "The remaining list"); C12–C14 are
-closed above, and **KI-165** is the open one this work filed. **KI-150** is
+closed above, and KI-165 was fixed the same day it was filed. **KI-150** is
 reopened by the column refresh below (the checker costs ~10% more per file and every `brood
 file` pays it) and is the other live thread; its first candidate is caching inferred
 signatures in the stdlib image.
