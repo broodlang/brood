@@ -21,14 +21,23 @@
 # answer — but check what else lives in that directory first.
 set -u
 
-local_hook="$(git rev-parse --git-path hooks/pre-push 2>/dev/null)"
+# `--git-common-dir`, NOT `--git-path hooks/pre-push`. `--git-path` HONOURS `core.hooksPath`,
+# so under the very setting this hook exists for it resolves to THIS file — the first cut
+# did that, saw itself, hit the self-loop guard below and exited 0, and the repository's
+# gate was never reached. A hook that reports success without running anything is worse
+# than no hook, and it looked like it worked. `--git-common-dir` is the repository, and it
+# is the worktree-safe spelling (a linked worktree's own `.git` is a file, and its hooks
+# live in the common dir).
+common_dir="$(git rev-parse --git-common-dir 2>/dev/null)" || exit 0
+[ -n "$common_dir" ] || exit 0
+local_hook="$common_dir/hooks/pre-push"
 
-# `-ef` guards the case where this file IS the repo hook (a symlinked or copied setup):
+# `-ef` still guards a setup where this file IS the repository's hook (symlinked or copied):
 # exec'ing it would loop forever.
-if [ -n "$local_hook" ] && [ -x "$local_hook" ] && [ "$local_hook" -ef "$0" ] 2>/dev/null; then
+if [ -x "$local_hook" ] && [ "$local_hook" -ef "$0" ] 2>/dev/null; then
   exit 0
 fi
-if [ -n "$local_hook" ] && [ -x "$local_hook" ]; then
+if [ -x "$local_hook" ]; then
   exec "$local_hook" "$@"
 fi
 exit 0
