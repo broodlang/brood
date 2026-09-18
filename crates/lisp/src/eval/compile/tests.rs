@@ -1278,13 +1278,14 @@ fn jit_tier_compiles_a_hot_arm_then_runs_native() {
     }
     assert!(ran_native > 0, "the hot arm should tier up to native code");
 
-    // An out-of-subset arm is marked BAILED and never runs native. `MakeMap` has no
-    // JIT lowering path (there's no map-build codegen), so a map-building arm is
-    // always out of subset. (Scalar `Const`s — `Int`/`Nil`/`Float`/`Bool` — and a
-    // bare `Global` now *are* in subset, so neither is the bail example any more.)
+    // An out-of-subset arm is marked BAILED and never runs native. A coverage-instrumented
+    // arm (`RecordLine`) is the one shape the lowering refuses BY DESIGN and always will:
+    // native code would run without the recording. (Every earlier example here stopped
+    // being one — scalar `Const`s, a bare `Global`, and on 2026-09-18 `MakeMap`, which
+    // lowers like `MakeVector` now.)
     let bailing = Arc::new(mk_arm(
         Chunk {
-            code: vec![Inst::MakeMap(0)],
+            code: vec![Inst::RecordLine(1)],
         },
         0,
         1,

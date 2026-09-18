@@ -455,6 +455,7 @@ fn jit_lower_arm_inner(
             i,
             Inst::Call { .. }
                 | Inst::MakeVector(_)
+                | Inst::MakeMap(_)
                 | Inst::Prim2 {
                     op: PrimOp::Cons,
                     ..
@@ -835,6 +836,12 @@ fn jit_lower_arm_inner(
         .declare_function("brood_rt_make_vector_n", Linkage::Import, &makevecn_sig)
         .ok()
         .or_bail("cranelift-declare-function")?;
+    // brood_rt_make_map_n(heap, out, elems: *const Value, npairs) — the map literal's twin
+    // of the above: `2·npairs` staged `Value`s, key/value alternating, in source order.
+    let makemapn_id = m
+        .declare_function("brood_rt_make_map_n", Linkage::Import, &makevecn_sig)
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // brood_rt_gc_safepoint(heap): collect if due (bounds the nursery for cons loops).
     let mut sp_sig = m.make_signature();
     sp_sig.params.push(AbiParam::new(ptr_ty));
@@ -1196,6 +1203,7 @@ fn jit_lower_arm_inner(
     let vec2room_ref = m.declare_func_in_func(vec2room_id, b.func);
     let mkclo_ref = m.declare_func_in_func(mkclo_id, b.func);
     let makevecn_ref = m.declare_func_in_func(makevecn_id, b.func);
+    let makemapn_ref = m.declare_func_in_func(makemapn_id, b.func);
     let sp_ref = m.declare_func_in_func(sp_id, b.func);
     #[cfg(debug_assertions)]
     let dbg_staging_ref = m.declare_func_in_func(dbg_staging_id, b.func);
@@ -1853,6 +1861,7 @@ fn jit_lower_arm_inner(
         vec2room: vec2room_ref,
         mkclo: mkclo_ref,
         makevecn: makevecn_ref,
+        makemapn: makemapn_ref,
         thas: thas_ref,
         tget: tget_ref,
         mget: mget_ref,
@@ -2172,6 +2181,9 @@ fn jit_lower_arm_inner(
                 }
                 Inst::MakeVector(n) => {
                     prim::emit_make_vector(&mut b, &mut stack, *n, frame, funcs)?;
+                }
+                Inst::MakeMap(n) => {
+                    prim::emit_make_map(&mut b, &mut stack, *n, frame, funcs)?;
                 }
                 Inst::Prim2 { op, map, .. } => {
                     prim::emit_prim2(&mut b, &mut stack, op, *map, has_float_slot, frame, funcs)?;

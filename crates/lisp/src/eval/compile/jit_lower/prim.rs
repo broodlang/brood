@@ -523,6 +523,58 @@ pub(super) fn emit_make_vector(
     Some(())
 }
 
+/// `Inst::MakeMap(npairs)` — a `{k v …}` literal. The variadic `MakeVector` shape verbatim:
+/// pop the `2·npairs` operands (pushed in source order, key before value, last value on
+/// top), stage each as a `Value` word-triple in a per-site stack slot, and call
+/// `brood_rt_make_map_n(heap, out, stage, npairs)`, whose `map_from_pairs` allocates (a
+/// GC-quiet in-place CHAMP build) and never collects, so the staged bytes stay live across
+/// the call. Read the fresh handle back out of `out_slot`.
+pub(super) fn emit_make_map(
+    b: &mut FunctionBuilder,
+    stack: &mut Vec<Op>,
+    npairs: usize,
+    frame: Frame,
+    funcs: Funcs,
+) -> Option<()> {
+    let ptr_ty = funcs.ptr_ty;
+    let heap = funcs.heap;
+    let out_slot = funcs.out_slot;
+    let n = 2 * npairs;
+    let mut ops = Vec::with_capacity(n);
+    for _ in 0..n {
+        ops.push(stack.pop().or_bail("operand-stack-underflow")?);
+    }
+    ops.reverse(); // ops[2i] = key i, ops[2i+1] = value i, in source order
+    let stage = b.create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot,
+        STRIDE as u32 * n.max(1) as u32,
+        3,
+    ));
+    for (i, op) in ops.into_iter().enumerate() {
+        let w = read_words(b, op, frame);
+        let off = i as i32 * STRIDE as i32;
+        b.ins().stack_store(types::I64, w[0], stage, off);
+        b.ins()
+            .stack_store(types::I64, w[1], stage, off + PAYLOAD_OFFSET as i32);
+        b.ins()
+            .stack_store(types::I64, w[2], stage, off + PAYLOAD_OFFSET as i32 + 8);
+    }
+    let stage_addr = b.ins().stack_addr(ptr_ty, stage, 0);
+    let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
+    let n_val = b.ins().iconst(types::I64, npairs as i64);
+    b.ins()
+        .call(funcs.makemapn, &[heap, out_addr, stage_addr, n_val]);
+    let w0 = b.ins().stack_load(types::I64, types::I64, out_slot, 0);
+    let w1 = b
+        .ins()
+        .stack_load(types::I64, types::I64, out_slot, PAYLOAD_OFFSET as i32);
+    let w2 = b
+        .ins()
+        .stack_load(types::I64, types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+    stack.push(Op::Handle(w0, w1, w2));
+    Some(())
+}
+
 /// A 3-operand primitive lowered as ONE runtime callback of `table_put`'s shape —
 /// `(heap, out, recv 3w, a 3w, b 3w) -> status` — for the map ops (ADR-368). Operands are
 /// on the stack in source order (`b` on top). Status 0: the answer rides back in `out`; 1:

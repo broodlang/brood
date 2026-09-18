@@ -1,0 +1,77 @@
+;;; A map literal in a hot arm no longer bails the arm (2026-09-18).
+;;;
+;;; `Inst::MakeMap(n)` was not in the JIT subset — only `MakeVector` was — so one `{…}`
+;;; anywhere in a hot body put the WHOLE arm outside the subset and it ran interpreted for
+;;; the rest of the process: `(get {:a 1} :zz 2)` in a loop bailed `chunk-outside-jit-subset`
+;;; (found writing ADR-368's native check). It lowers now exactly as the variadic vector does:
+;;; the `2n` operands staged into a stack slot, one `brood_rt_make_map_n` callback, whose
+;;; `map_from_pairs` is the VM's own constructor — so the two engines build the identical
+;;; map (last-wins de-dup included). Capped at 32 values like the vector.
+;;;
+;;; The VALUE cases pin engine agreement (the suite runs them on both); the TIER case pins
+;;; that the arm reaches `:native` with no deopts, through `%jit-arm-state` — the right
+;;; answer slowly is what this used to produce. Sabotage-verified: with the `MakeMap`
+;;; admission removed from `in_subset`, the tier case reads `:bailed`.
+
+(defmodule jit-makemap-test (:use test))
+
+(defn- settle (f argc batch rounds)
+  (batch)
+  (let (st (get (%jit-arm-state f argc) :state))
+    (if (or (= st :native) (= st :bailed) (= rounds 0))
+      st
+      (settle f argc batch (- rounds 1)))))
+
+;; A literal with a duplicate key (last wins), a nested literal and a computed key, all
+;; inside the loop body.
+(defn- lit-loop (i acc)
+  (if (= i 0)
+    acc
+    (lit-loop (- i 1)
+      (+ acc (get {:a i :b 2 :a (+ i 1)} :a 0) (count {:x 1 :y {:z i}})))))
+
+(defn- keyed-loop (i acc)
+  (if (= i 0)
+    acc
+    (keyed-loop (- i 1) (+ acc (count (let (k (if (math/odd? i) :p :q)) {k i :w k}))))))
+
+(describe "a map literal in a hot arm"
+  (test "builds the same map on every engine — last-wins, nested, computed key"
+    (assert= 1800210000 (lit-loop 60000 0))
+    (assert= 120000 (keyed-loop 60000 0))
+    (assert= {:a 2} {:a 1 :a 2})
+    (assert= {:z 1 :w :z} (let (k :z) {k 1 :w k})))
+
+  (test "keeps the arm native, with no deopts"
+    (when (%native-tier?)
+      (let (st (settle lit-loop 2 (fn () (lit-loop 20000 0)) 40))
+        (assert= :native st)
+        (assert= 0 (get (%jit-arm-state lit-loop 2) :deopts)))
+      (let (st (settle keyed-loop 2 (fn () (keyed-loop 20000 0)) 40))
+        (assert= :native st))))
+
+  (test "a literal past the cap bails the arm by name, never wrongly"
+    ;; 17 pairs = 34 values > 32: the VM runs it; the answer is the same.
+    (defn- wide (i acc)
+      (if (= i 0)
+        acc
+        (wide (- i 1)
+          (+ acc
+            (count {:a 1
+                    :b 2
+                    :c 3
+                    :d 4
+                    :e 5
+                    :f 6
+                    :g 7
+                    :h 8
+                    :i 9
+                    :j 10
+                    :k 11
+                    :l 12
+                    :m 13
+                    :n 14
+                    :o 15
+                    :p 16
+                    :q 17})))))
+    (assert= 17000 (wide 1000 0))))

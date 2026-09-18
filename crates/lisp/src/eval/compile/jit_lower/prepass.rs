@@ -119,6 +119,8 @@ pub(crate) fn block_analysis_checked(
                 Inst::MakeClosure { names, .. } => cur += 1 - names.len() as i32,
                 // `[a b …]`: pops its `n` elements, pushes the vector.
                 Inst::MakeVector(n) => cur += 1 - *n as i32,
+                // `{k v …}`: pops its `2n` operands, pushes the map.
+                Inst::MakeMap(n) => cur += 1 - 2 * *n as i32,
                 // `(table-put t k v)`: pops three, pushes the table handle.
                 Inst::Prim3 { .. } => cur -= 2,
                 other => {

@@ -913,6 +913,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-17** — ADR-368: `(get m k default)` and `(assoc m k v)` on a map are instructions (`PrimOp3::MapGet3`/`MapAssoc`, VM arm + one JIT callback each): a loop of two reads 1124 → 172 ms per 2M (281 → 43 ns a read), an `assoc` loop 921 → 590 ms (460 → 295 ns). Differential over every branch at every tier + a settle-to-native check; `BROOD_NO_MAPASSOC` is the allocating op's own lever. Found on the way: a map literal inside a hot arm bails the arm (`MakeMap` is not in the JIT subset).
 - **2026-09-18** — benchmark column refreshed at `04958398` (brood-benchmarks): `supervisor` 614 → 584 ms (−4.9%), the ADR-368 primitives' reading; 2.3× → 2.2× Elixir; every other row inside its spread.
 - **2026-09-18** — KI-164 fixed: a declared `(is T)` guard never narrowed because `predicate_guard_ty` treated the file's own `defn` as a shadowing local (`is_local` includes file globals); `is_local && !is_file_global` now. Four guards with controls; the redundant-sig sweep exempts guard sigs, which it rendered as `bool` and would have stripped.
+- **2026-09-18** — `MakeMap` joins the JIT subset: a `{…}` literal in a hot arm no longer bails the whole arm to the interpreter (it did, for good — found writing ADR-368's native check). Lowered as the variadic `MakeVector` is, one `brood_rt_make_map_n` callback over `map_from_pairs`, so both engines build the identical map; capped at 32 values. Guard `tests/jit_makemap_test.blsp` (value + tier, sabotage-verified).
 - **2026-09-17** — the pre-push hook has been INERT on this machine: a global `core.hooksPath` *replaces* `.git/hooks`, so `make hooks` installs a gate git never consults — and the override directory holds a deliberate `commit-msg` (which chains to a repo-local one for exactly this reason) and no `pre-push`. Found when an unformatted commit reached `main` through a gate that reported "installed". `make hooks` now WARNS with the path, `scripts/git-hooks/global-pre-push` is the chaining fix, and CLAUDE.md records the second half of it: `make prepush | tail` reports the PIPE's exit status, not the gate's.
 - **2026-09-17** — C10 answered by probe and closed with no checker change: ADR-350's intervals and the int-closed/float-contagion rules had already taken the merely-wider residue, and the answer is a **mode split** neither mode shows alone — a *precise* mismatch (float contagion, exact division, an interval arithmetic cannot fit) is named in both modes; an *over-approximated* one (a call's result) is named under `--strict` and deferred in plain, the gradual valve. The residue itself lands there: `(sig f (number -> int))` over `(+ x 1)` IS reported under strict, because the declaration is part of the claim — a parameter admitting floats makes the promise false with no analysis of the body. Fourteen provable shapes silent in both modes, so the false positive it was left silent for does not occur. Three pins, sabotage-verified three ways (strict never/always applies reds the split in opposite directions; the return check disabled reds both warning pins).
 - **2026-09-17** — KI-162: `nest check --fix-sigs` wrote every `sig` ABOVE its `defn`, the one placement `sig_placement.rs` forbids tree-wide. The locator reads the CST now (`sig-defn-sites`: root children, each node's newlines counted for the extent), so the sig lands one past the form's last line, a head laid out across lines is located instead of skipped, and "top level" is *root child* rather than *column 0* — a `check-allow`-wrapped `defn` still declines. Recorded beside the fix: the load failure the rule exists for **did not reproduce** (forward sigs over `defn`, `defn-` and a wrapped pair all loaded under contracts and enforced the contract), so the rule is what is verified, not the breakage.
@@ -14392,3 +14393,19 @@ was listed as redundant and would have been stripped, narrowing and all. The swe
 skips any span whose text carries `(is `. Four checker tests pin the narrowing (bare
 local, unknown behind an access path, another module's predicate, and the lexical-shadow
 case the early return exists for), the first two with `-> bool` controls.
+
+## 2026-09-18 — a map literal in a hot arm no longer bails the arm
+
+The variadic `MakeVector` lowering had a twin waiting: `Inst::MakeMap(n)` was modelled in the
+depth prepass and in both allocation predicates but never ADMITTED to the subset, so a single
+`{:a 1}` in a hot body put the whole arm outside it — `chunk-outside-jit-subset`, interpreted
+for the rest of the process, no deopt, no counter, only `BROOD_JIT_BAIL_TRACE` naming it.
+ADR-368's native check tripped over it with `(get {:a 1} :zz 2)` in the loop; the test moved
+the literal to a `def` and the entry recorded the lever. Taken today: the `2n` operands are
+staged into a per-site stack slot exactly as the vector's are and `brood_rt_make_map_n` calls
+`map_from_pairs` — the VM's own constructor, GC-quiet, allocating and never collecting — so
+the engines cannot disagree on de-dup or order. Admitted at the same 32-value cap; the
+producers list (KI-49's spill bound) and the hoist's stand-aside list know it. A loop with a
+duplicate-key, nested, computed-key literal settles `:native` with 0 deopts and agrees with
+the VM; the 17-pair literal bails by name. `tests/jit_makemap_test.blsp` pins value and tier;
+removing the admission reds the tier case with `:bailed`.

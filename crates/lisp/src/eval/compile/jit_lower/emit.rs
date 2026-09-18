@@ -63,6 +63,9 @@ pub(super) struct Funcs {
     /// closure (exec_chunk's arm verbatim; captures staged on `roots`).
     pub mkclo: FuncRef,
     pub makevecn: FuncRef,
+    /// `brood_rt_make_map_n(heap, out, elems, npairs)` — a `{k v …}` literal from `2·npairs`
+    /// staged `Value`s (`makevecn`'s shape; the map build allocates and never collects).
+    pub makemapn: FuncRef,
     /// `brood_rt_table_has` / `_get2` / `_put` — the table primitives (FFI fallback).
     pub thas: FuncRef,
     pub tget: FuncRef,
