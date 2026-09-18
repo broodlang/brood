@@ -23617,3 +23617,72 @@ has to face this entry first.
 does carry over), or if a corpus appears where float ranges are load-bearing rather than
 documented in prose.
 
+## ADR-368 — A self-referential `deftype` is a μ type, and there is exactly one binder
+
+**Status:** accepted (2026-09-18). **Context:** type-system list item C14 — "a named
+recursive alias, so a `sig` names it once".
+
+**Context.** Two spellings of a recursive shape existed and disagreed about how deep they
+checked. `(rec X …)` (ADR-349) builds a real μ type: `Ty` carries a `mu` flag and a
+`rec_ref`, and every relation unrolls on demand, so it is exact at any depth. A
+self-referential **alias** (ADR-327) was different — `alias_ty` counted its own expansions
+and read `any` past `RECURSIVE_UNROLL`:
+
+```lisp
+(deftype tree (or nil (record :v int :l tree :r tree)))
+(:v t)              ; typed
+(:v (:l t))         ; typed — the one unrolled level
+(:v (:l (:l t)))    ; `any`: nothing provable past the bound
+```
+
+Sound (a wider type accepts more) and incomplete — and the incompleteness was arbitrary:
+the identical shape written `(rec X …)` by hand checked every level. The author's choice of
+spelling decided how much the checker knew.
+
+**Decision: an alias binds its own name.** At expansion, `alias_ty` pushes the alias's name
+onto the same `REC_BOUND` stack `(rec X …)` uses, so a self-reference in the body parses as
+the recursive reference, and wraps the result in `Ty::mu`. The two spellings now agree, and
+nothing in the element or relation machinery is new — `Ty::mu` normalises itself away when
+the body holds no reference, so a non-recursive alias is untouched.
+
+**There is exactly one binder, and that is the whole constraint.** A `Ty`'s recursion is a
+`mu` flag plus a BOOLEAN `rec_ref` — no de Bruijn index — so a reference nested inside two
+binders cannot say which one it means. So the alias binds only at the **outermost**
+expansion (nothing else holding a binder) and only when the body has no `(rec …)` of its
+own; anything nested keeps the old unrolling, which is sound. This is exactly the "nested
+self-reference across binders stays out" the item reserved, and it is a representation
+limit, not an oversight — giving the lattice indices would change every relation.
+
+**What falls out for free: mutual recursion, one level of it.** `jval` → `jarr` → `jval`
+collapses to a single binder by substitution, because each name occurs once: the inner
+`jval` binds to the outer alias's binder and the result is `(rec X nil | number | string |
+vector<X>)`, exact at any depth. A cycle needing two live binders still unrolls. So mutual
+aliases are not a separate feature here — they are the single-binder case when substitution
+reaches a fixed point.
+
+**Not chosen.** (1) De Bruijn indices on `rec_ref` — the honest general answer, and it
+touches every relation, display and round-trip in the lattice for shapes no corpus writes
+(neither `std/` nor bedit has a self-referential alias at all today; this closes an
+incompleteness in a spelling people *can* write). (2) Raising `RECURSIVE_UNROLL` — buys a
+level and keeps the arbitrariness. (3) Requiring `(rec X …)` and reporting a bare
+self-reference as an error — the bare spelling is the one an author reaches for, and it
+already worked to depth two.
+
+**Consequence.** `(deftype tree (or nil (record :v int :l tree :r tree)))` is checked at
+every depth, in both directions: a deep valid tree is accepted and a bad leaf four levels
+down is refused. Pinned by
+`check::tests::names_as_types::{a_self_referential_alias_is_typed_at_every_depth,
+a_self_referential_alias_accepts_a_deep_value_and_refuses_a_deep_leaf,
+mutual_aliases_collapse_to_one_binder_and_nested_binders_stay_sound}`; the third carries the
+exclusion (an alias with its own `(rec …)` must stay sound under the widening) and a
+four-level mutual case that the old unrolling passed, which is what makes the collapse claim
+non-vacuous. Sabotage: skipping the self-binding reds all three.
+
+This replaces the test that pinned the old bound (`a_recursive_alias_unrolls_one_level_
+then_reads_as_any`), whose comment said "the checker has no recursive types" — true when it
+was written, before ADR-349.
+
+**The gap this did NOT close, filed as KI-164:** no `deftype` alias is enforced at RUNTIME.
+`type-matches?` has no case for an alias name, so under `sig!` a declared alias accepts any
+value — every alias since ADR-327, not just recursive ones.
+

@@ -10,7 +10,32 @@ needing one is queued in [`perf-handoff.md`](perf-handoff.md) instead — curren
 high-priority item: whether KI-114's `as_f64_pair` holds the closure KI-109 got from the
 promotion it constrained.
 
-## 2026-09-17 later — C9–C13 closed, KI-162 fixed, and the pre-push hook was inert; next is C14
+## 2026-09-18 — C9–C14 closed, KI-162 fixed, KI-164 filed, and the pre-push hook was inert; next is C15
+
+**C14 (ADR-368) — a self-referential `deftype` is a μ type.** `(rec X …)` was always exact
+at any depth; the bare self-referential spelling — the one an author actually reaches for —
+was unrolled once and read `any` below that, so the CHOICE OF SPELLING decided how deep the
+checker saw. `alias_ty` pushes the alias's own name onto the same `REC_BOUND` stack and
+wraps in `Ty::mu`; `Ty::mu` normalises away with no reference, so nothing non-recursive
+changed.
+
+**One binder, and know why before touching it:** `Ty` has a `mu` flag and a BOOLEAN
+`rec_ref` — no de Bruijn index — so a reference nested inside two binders cannot say which
+one it means. The alias therefore binds only at the outermost expansion, and only over a
+body with no `(rec …)` of its own; everything nested keeps the sound unrolling. Giving the
+lattice indices would touch every relation, display and round-trip, for shapes no corpus
+writes — neither `std/` nor bedit has a self-referential alias today, which is worth knowing
+before anyone spends a week on it. Mutual recursion needed nothing extra: it collapses to
+the single binder by substitution when each name occurs once.
+
+**KI-164 filed, not fixed — read it before trusting a `sig!` over an alias.** No `deftype`
+alias is enforced at RUNTIME: `type-matches?` has no case for an alias name, so it hits the
+"unknown compound → accept" default and `(sig! take-point (point -> int))` passes `"nope"`.
+Every alias since ADR-327, not just recursive ones. Found by asking C14's work the question
+C11 taught (does the contract enforce what the grammar lets a declaration say?) — which is
+now two for two, so **ask it of every grammar addition**. The fix needs the registry to keep
+the alias FORM (it keeps a string today) plus a binder so a self-referential lookup
+terminates.
 
 **C13 — a float interval — is DECLINED (ADR-367), and the finding is worth more than the
 feature.** The item said "cheap on the int one's machinery"; it is not, because **floats in
@@ -126,9 +151,10 @@ float argument makes that false — the declaration is part of the claim. Three 
 `check/tests/declarations.rs`, sabotage-verified three ways. **C13 lost its rationale** with
 it (it was "do it with C10 if C10 needs it"; C10 did not) — it now needs a case of its own.
 
-**Next, in order:** **C14** (a named recursive alias — `(deftype json (rec …))` so a `sig`
-names it once), then C15–C17 in list order (`docs/type-system-status.md` § "The remaining
-list"); C12 and C13 are closed above. **KI-150** is
+**Next, in order:** **C15** (effects displayed — the walk computes a function's effects and
+shows them nowhere; totality across calls is a call graph with a measure per edge), then
+C16–C17 in list order (`docs/type-system-status.md` § "The remaining list"); C12–C14 are
+closed above, and **KI-164** is the open one this work filed. **KI-150** is
 reopened by the column refresh below (the checker costs ~10% more per file and every `brood
 file` pays it) and is the other live thread; its first candidate is caching inferred
 signatures in the stdlib image.
