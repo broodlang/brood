@@ -1416,9 +1416,25 @@ each lands; this section is the working list, `handoff.md` points at it.
 - [ ] **C15. Effects displayed; totality across calls.** The walk computes a function's
       effects and shows them nowhere (`nest docs`, hover). Totality across calls and mutual
       recursion is a call graph with a measure per edge.
-- [ ] **C16. The small holes the 2026-09-17 sweep noticed.** A string source gives `into`
-      no length; a closed record's `count` is not its field count; a computed `nth` index
-      can be bounded by its interval but not by a guard (only a local can).
+- [x] **C16. The small holes the 2026-09-17 sweep noticed** (2026-09-18). Probed one by one;
+      of the three, **one was real, one was already closed, and one was wrong as written**.
+      - **A closed record's `count` — REAL, fixed.** The shape declares every key the value
+        carries, so `(count p)` over `(record :x int :y int)` is exactly 2 where it read
+        `int[0..]`; an optional field may be absent, hence `[required, declared]`; an OPEN
+        shape declines, since a value may carry keys it does not declare. The part worth
+        knowing is where it does NOT go: putting the count in the type's `len` slot — the
+        obvious one-line change — broke the gradual relation, because a length there is a
+        refinement every RELATION reads, and a bare `map` (the unknown shape, which must fit
+        any shape) stopped being a consistent subtype of a closed record: `[0, ∞)` does not
+        fit `[2, 2]`. Two existing tests caught it. It is read at the `count` CALL instead
+        (`Ty::record_field_count`), and the pin asserts the relation is unchanged.
+      - **A computed `nth` index bounded by a guard — already closed** by C12's offset index
+        bound; `(nth v (bit/and i 3))` under a length-4 vector was already silent.
+      - **"A string source gives `into` no length" — wrong as written.** `into` does not
+        accept a string at all: `(into [] "abc")` RAISES (`expected a list or vector`), and
+        the checker's `expects seqable, got string` is correct, not a precision hole
+        (`seqable` excludes `string` deliberately — bridge with `string->list`). Nothing to
+        fix; the note was about a shape that does not exist.
 - [ ] **C17. Dispatch on a type designator** — the door ADR-361 leaves open: a multimethod
       keyed on `(zero-of :int)`'s argument as a designator. Language-side; this one IS a
       use-case item.

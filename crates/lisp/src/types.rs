@@ -1473,6 +1473,23 @@ impl Ty {
     /// The interval `(count x)` lies in for every value of this type: the length of the
     /// countable members (a `pair` is at least 1), `0` for `nil`, the hull over a union.
     /// `None` when the type has no countable member and no `nil` (nothing to count).
+    /// The number of keys a CLOSED record shape has — `[required, declared]`, a point when
+    /// every field is required (C16). Deliberately NOT part of [`Ty::count_range`] or the
+    /// `len` slot: a length there is a refinement every RELATION reads, and giving a closed
+    /// record one made a bare `map` — the unknown shape, which must fit any shape under the
+    /// gradual relation — stop being a consistent subtype of it, because `[0, ∞)` does not
+    /// fit `[2, 2]`. The field count is an answer about a `(count r)` CALL, not a fact about
+    /// the type's length, so it is read where that call is typed.
+    pub fn record_field_count(&self) -> Option<Range> {
+        let shape = self.single()?.fields.as_deref()?;
+        if shape.is_open() {
+            return None;
+        }
+        let declared = shape.fields.len() as i64;
+        let required = shape.fields.values().filter(|(_, req)| *req).count() as i64;
+        Some(Range::new(Some(required), Some(declared)))
+    }
+
     pub fn count_range(&self) -> Option<Range> {
         let mut out: Option<Range> = None;
         let mut fold = |r: Range| {

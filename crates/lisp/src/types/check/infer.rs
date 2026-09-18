@@ -1746,7 +1746,17 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         || value::symbol_is(head, "vector-length"))
         && items.len() == 2
     {
-        let r = expr_ty(heap, items[1], ctx)?.count_range()?;
+        let arg_ty = expr_ty(heap, items[1], ctx)?;
+        // A CLOSED record is its field count (C16): the shape declares every key the value
+        // has, so `(count p)` over `(record :x int :y int)` is exactly 2 where the length
+        // slot says `int[0..]` — an optional field may be absent, hence `[required,
+        // declared]`. An OPEN shape declines, since a value may carry keys it does not
+        // declare. This is read here rather than from `count_range`, because a length in
+        // the type is a refinement every RELATION consults and a bare `map` must still fit
+        // a record shape under the gradual relation (`Ty::record_field_count`).
+        let r = arg_ty
+            .record_field_count()
+            .or_else(|| arg_ty.count_range())?;
         return Some(Ty::int_in(r));
     }
     // `(range …)` is "a range of integers" (its own docstring): every argument an int

@@ -2383,3 +2383,49 @@ fn a_seqable_of_is_recognised_back_for_display_and_source() {
         Some("(seqable (vector string))")
     );
 }
+
+/// C16 (2026-09-18) — a CLOSED record shape knows how many keys it has, the way a tuple
+/// knows its arity: the shape declares every key the value carries, so `(count p)` over
+/// `(record :x int :y int)` is exactly 2 where the length slot says `int[0..]`. An OPEN
+/// shape declines (a value may carry keys it does not declare) and an OPTIONAL field may be
+/// absent, so the bound is `[required, declared]`.
+///
+/// Read at the `count` CALL, never put in the type's `len`: a length there is a refinement
+/// every RELATION consults, and giving a closed record one made a bare `map` — the unknown
+/// shape, which must fit any shape under the gradual relation — stop being a consistent
+/// subtype of it, since `[0, ∞)` does not fit `[2, 2]`. That is pinned below too, because it
+/// is the reason this is not the obvious one-line change.
+#[test]
+fn a_closed_record_knows_its_field_count() {
+    let field = |t: Ty, required: bool| (t, required);
+    let closed = Ty::record_of(BTreeMap::from([
+        (value::intern("x"), field(Ty::of(Tag::Int), true)),
+        (value::intern("y"), field(Ty::of(Tag::Int), true)),
+    ]));
+    assert_eq!(
+        closed.record_field_count(),
+        Some(Range::point(2)),
+        "{closed}"
+    );
+    // An optional field may be absent: [required, declared].
+    let optional = Ty::record_of(BTreeMap::from([
+        (value::intern("x"), field(Ty::of(Tag::Int), true)),
+        (value::intern("y"), field(Ty::of(Tag::Int), false)),
+    ]));
+    assert_eq!(
+        optional.record_field_count(),
+        Some(Range::new(Some(1), Some(2))),
+        "{optional}"
+    );
+    // An OPEN shape declines — a value may carry keys it does not declare.
+    let open = Ty::record_shape(
+        BTreeMap::from([(value::intern("x"), field(Ty::of(Tag::Int), true))]),
+        Ty::ANY,
+    );
+    assert_eq!(open.record_field_count(), None, "{open}");
+    assert_eq!(Ty::of(Tag::Map).record_field_count(), None);
+    // The count stays OUT of the length slot, so the gradual relation is unchanged: a bare
+    // `map` still fits a closed record shape.
+    assert_eq!(closed.count_range(), Some(Range::at_least(0)), "{closed}");
+    assert!(Ty::of(Tag::Map).is_consistent_subtype(&closed));
+}
