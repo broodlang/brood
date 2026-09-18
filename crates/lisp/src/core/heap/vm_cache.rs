@@ -686,6 +686,26 @@ impl Heap {
         }
     }
 
+    /// `(get m k default)` on a map — the 3-arity twin of [`Self::map_get_inline`], and
+    /// exactly `get`'s own arm: `(let (v (%map-get m k default)) (if (nil? v) (%lookup-miss
+    /// m k v) v))`. So a present non-nil value is answered, an absent key answers the
+    /// default when that is non-nil (a record's too — `get` never consults `Lookup` for a
+    /// non-nil `v`), and a nil `v` — absent with a nil default, or a stored nil — is
+    /// `%lookup-miss`: nil for a plain map, DECLINED (`None`) for a record, whose miss the
+    /// `Lookup` ability may resolve. Shared by the VM's `Inst::Prim3` arm and
+    /// `brood_rt_map_get3`, so the two cannot disagree (ADR-368).
+    pub fn map_get3_inline(&self, mid: MapId, k: Value, default: Value) -> Option<Value> {
+        let v = self.map_get(mid, k).unwrap_or(default);
+        if !matches!(v, Value::Nil) {
+            return Some(v);
+        }
+        let key = Value::keyword(crate::core::value::intern(kw::RECORD_ID));
+        match self.map_get(mid, key) {
+            Some(id) if crate::eval::truthy(id) => None,
+            _ => Some(Value::nil()),
+        }
+    }
+
     /// The pure resolution `impl-for` does: `impls[op-key][id]`, else `[:default]`, else nil.
     fn dispatch_resolve(&self, impls: Value, op_key: Value, id: Value) -> Value {
         let impls_id = match impls {

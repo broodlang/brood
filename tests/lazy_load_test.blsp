@@ -295,9 +295,14 @@
           exe (first (seq/filter [(path/join dir "brood") (path/join dir ".." "brood")]
                        file/exists?))
           prog (path/temp "eagerbound-")
+          ;; `before=` is read FIRST: on the source boot path (`BROOD_NO_STDIMAGE=1`, the
+          ;; tree-walker job) the prelude's own boot already lists `seq` in `*features*`, and
+          ;; then there is nothing this reference could add — the assertion is that it adds
+          ;; nothing, which is vacuous there and load-bearing on an imaged boot.
           _ (file/spit prog
-              (string/join ["(defn go (xs) (seq/lmap xs inc))"
-                             "(io/puts (str \"loaded=\" (contains? *features* \"seq\") \" v=\" (first (go [1 2]))))"]
+              (string/join ["(io/puts (str \"before=\" (contains? *features* \"seq\")))"
+                             "(defn go (xs) (seq/lmap xs inc))"
+                             "(io/puts (str \"after=\" (contains? *features* \"seq\") \" v=\" (first (go [1 2]))))"]
                 "\n"))
           result (if exe (os/cmd "env" ["BROOD_NO_CHECK=1" "BROOD_NO_LAZY_LOAD=1" exe prog]) nil))
       (is (or (nil? exe) (string? exe)))
@@ -305,7 +310,12 @@
         (assert= "" (if (= (get result :exit) 0) "" (get result :stderr "")))
         (let (out (os/cmd-out result))
           (is (includes? out "v=2"))
-          (is (includes? out "loaded=false"))))))
+          ;; A reference the prelude already satisfies loads nothing: whatever the boot
+          ;; path left in `*features*`, this file's compile pass added no `seq`.
+          (is (or (and (includes? out "before=false") (includes? out "after=false"))
+                (and (includes? out "before=true") (includes? out "after=true"))))
+          (when (includes? out "before=false")
+            (is (includes? out "after=false")))))))
   (test "and an UNBOUND qualified name still loads its module under the eager policy"
     (let (dir (path/dirname (or (os/exe-path) ""))
           exe (first (seq/filter [(path/join dir "brood") (path/join dir ".." "brood")]

@@ -67,6 +67,10 @@ pub(super) struct Funcs {
     pub thas: FuncRef,
     pub tget: FuncRef,
     pub tput: FuncRef,
+    /// `brood_rt_map_get3` / `brood_rt_map_assoc` — `(get m k default)` and `(assoc m k v)`
+    /// on a CHAMP map (ADR-368), `table_put`'s `(heap, out, 3w, 3w, 3w) -> status` shape.
+    pub mget3: FuncRef,
+    pub massoc: FuncRef,
     /// `brood_rt_map_get` — the CHAMP probe behind [`PrimOp::MapGet`]. Same
     /// `(heap, out, 3 words, 3 words) -> status` shape as the table reads, and the same
     /// `table_prim` helper drives it: status 0 hands back the value, status 1 deopts to the

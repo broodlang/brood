@@ -2132,6 +2132,25 @@ fn type_predicate_inline_is_structural_not_nominal() {
 /// *required* rather than applied: `Node::Prim3` carries no argument permutation (unlike
 /// `Node::Prim2`'s `map`), so a wrapper that reorders its parameters must decline. Inlining
 /// one would silently store the value under the wrong key.
+/// The two map ops (ADR-368) inline by HEAD — `get` at three arguments and `assoc` — only
+/// while the head is the PRELUDE closure, exactly as `resolve_prim`'s `get`/`nth` do. If
+/// either stops resolving here, nothing errors: every record read-with-default and every
+/// record update is a full call again, which is the KI-58 shape this pin exists for.
+#[test]
+fn map_prim3_call_sites_inline_the_prelude_get_and_assoc() {
+    let interp = crate::Interp::new();
+    assert_eq!(
+        resolve_prim3(&interp.heap, value::intern("get")),
+        Some(PrimOp3::MapGet3),
+        "`get` at three arguments no longer inlines to PrimOp3::MapGet3"
+    );
+    assert_eq!(
+        resolve_prim3(&interp.heap, value::intern("assoc")),
+        Some(PrimOp3::MapAssoc),
+        "`assoc` no longer inlines to PrimOp3::MapAssoc"
+    );
+}
+
 #[test]
 fn table_put_call_site_inline_recognizes_the_namespaced_wrapper() {
     let mut interp = crate::Interp::new();

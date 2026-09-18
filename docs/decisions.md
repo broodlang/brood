@@ -23616,6 +23616,71 @@ has to face this entry first.
 `sqrt`/`asin`/`0.0÷0` already do — then floats ARE totally ordered here and the machinery
 does carry over), or if a corpus appears where float ranges are load-bearing rather than
 documented in prose.
+## ADR-368 — The 3-arity `get` and `assoc` are instructions: `PrimOp3::MapGet3` and `PrimOp3::MapAssoc`
+
+**Status.** Accepted (2026-09-17). Extends ADR-296 (`MapGet`) and ADR-362 (the VM gets the
+instructions process-shaped code dispatches on).
+
+**Context.** ADR-296 gave the 2-arity map read a primitive. Its two siblings stayed calls:
+`(get m k default)` — every record read-with-default in the language — and `(assoc m k v)` —
+every record update. The supervisor decomposition (ADR-362, handoff 2026-09-17) priced them
+at ~1.5 µs of the 16.4 µs left per supervised child: `(get m :k d)` 307 ns against 63 for the
+kernel `%map-get`, `(assoc m8 :k v)` 259 against 162 for `%map-assoc`. Both go through the
+prelude wrapper's `cond`, a full Brood→Brood call each, and — the larger cost — a body that
+contains either is not call-free, so `leaf_body_qualifies` refuses to leaf-inline it: no
+`defrecord` update helper and no read-with-default accessor could be spliced into its caller.
+
+**Decision.** Two members join `PrimOp3` beside `TablePut`, recognised by HEAD in
+`resolve_prim3` while the head is the PRELUDE closure (a user `(def get …)` disables the
+inline; the epoch guard re-validates on a redefinition), and only for the receiver the inline
+rule covers — everything else defers to the real wrapper, so every other branch and every
+error stays in Brood:
+
+- **`MapGet3`** — `(get m k default)` on a map. `Heap::map_get3_inline` is exactly `get`'s
+  own arm, `(let (v (%map-get m k default)) (if (nil? v) (%lookup-miss m k v) v))`: a
+  present non-nil value, or a non-nil default when absent, is answered (a record's too —
+  `get` never consults `Lookup` for a non-nil `v`); a nil result is `%lookup-miss`, answered
+  nil for a plain map and DECLINED for a record, whose miss the `Lookup` ability may resolve.
+  Pure: it allocates nothing, so the planner leaves it off `inst_may_allocate`.
+- **`MapAssoc`** — `(assoc m k v)` on a map: `Heap::map_assoc`, the path-copying CHAMP
+  update; a vector receiver declines to the wrapper's `%vector-assoc`. It ALLOCATES (a fresh
+  trie path per call) and, like every allocation reached from native code, never collects —
+  `alloc_slot!` only grows the slab — so the JIT callback is sound; the planner lists it under
+  `inst_may_allocate` (the vector-base hoist stands aside) and `inst_allocates_hot` (the
+  back-edge safepoint can fire in a loop of them).
+
+The VM runs both in `exec_chunk`'s `Prim3` arm; the JIT lowers each as one runtime callback
+of `table_put`'s `(heap, out, 3w, 3w, 3w) -> status` shape (`brood_rt_map_get3`,
+`brood_rt_map_assoc`; status 1 deopts to the VM), through one shared `emit_prim3_callback`.
+Both ops are pure from the checkpoint journal's point of view (a deopt re-run recomputes a
+read or a fresh map, never a second store), so the `TablePut` journal sites do not apply.
+`MapGet3` rides `BROOD_NO_MAPGET`; `MapAssoc` has its own `BROOD_NO_MAPASSOC`, because it is
+the one that allocates from native code and a suspected fault in either should be bisectable
+without losing the other.
+
+**Measured** (release-fast, 2M iterations, one process, warm): a loop of two 3-arity reads
+**1124 → 172 ms** (281 → 43 ns per read), a loop of one `assoc` **921 → 590 ms** (460 → 295 ns);
+at the VM ceiling 956 → 296 and 943 → 645. `make ab --floor` against the base commit
+(`9565d911`): **`supervisor` −4.6%** (floor 1.9%) and −4.5% at the VM ceiling (floor 0.8%) —
+the row the decomposition priced this at; `json`, `persistent-map`, `spawn`, `pipeline`,
+`sort`, `nqueens`, `nbody`, `fib` all inside their floors.
+
+**Rejected.** Inlining `assoc`'s vector branch too (`%vector-assoc` copies the whole vector —
+a different cost class, and no hot row does it); inlining the multi-pair `(assoc st :a x :b y)`
+here (that is a compile-time unroll into nested single pairs, handoff item 2, and belongs in
+`lower.rs`, not in this op); a `Prim3` recogniser through the wrapper's body as `TablePut`'s
+does (both wrappers dispatch on the receiver's type, so the head-keyed PRELUDE rule `get` and
+`nth` already use is the honest one).
+
+**Guards.** `crates/cli/tests/mapprim3_differential.rs`: every branch of both wrappers — hit,
+stored nil, absent with and without a default, vector, string, set, nil, record hit and miss,
+a `Lookup` record's miss with a non-nil default (answered) and with nil (reaches
+`%lookup-miss`), map/vector/record `assoc`, out-of-range and non-collection errors — compared
+with the prims on and off and at every tier, plus a settle-to-`:native` check on the two hot
+arms (a callback declining every activation would latch the arm BAILED — KI-132's class);
+`eval::compile::tests::map_prim3_call_sites_inline_the_prelude_get_and_assoc` pins the
+recognition. Found writing the native check: a map LITERAL inside a hot arm puts the whole
+arm outside the JIT subset (`MakeMap` is not lowered) — recorded in the handoff, not this ADR's.
 
 ## ADR-368 — A self-referential `deftype` is a μ type, and there is exactly one binder
 

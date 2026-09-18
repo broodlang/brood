@@ -158,6 +158,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-163 | **a body compiled before its module lazily loaded kept its pre-load shape for the whole process — `pipeline` at 2.8× under `BROOD_NO_CHECK=1`, `(math/rem i 3)` in a loop ~1450 instructions per call over the eager compile** — `resolve_prim*`/the thin-wrapper elision/the JIT leaf splice all read the global table at bytecode-compile time (first activation), the head into an unloaded module is unbound then, the miss loads the module and the chunk stays generic; the tier-up pre-load stamped the compile epoch BEFORE loading, so the inlined upgrade read `leaf-derivation-stale` forever | ✅ **FIXED 2026-09-17 (ADR-366)** — a load that a miss triggers marks the arm `stale_bindings` and advances a runtime `stale_gen`; the per-process cache sync drops marked entries so the next lookup recompiles, a stale shared entry is never installed, and a running `SelfCall` loop adopts the recompile through the hot-reload guard's tail transition (a frame whose arm the process marked enters with a sentinel epoch, because the frame re-enters after every non-tail call and a re-read hid the load). `pipeline` no-check 591M → 183M instructions, equal to eager. Found attributing the column refresh: the pre-flight check loads eagerly, so `brood file` never showed it. Guards in `tests/lazy_load_test.blsp` (two, each sabotage-verified) via the new dev probes `%vm-arm-ops` / `%vm-arm-stale?` |
 | KI-164 | **no `deftype` alias is enforced at runtime: under `sig!`/`BROOD_CONTRACTS=1` a declared alias type accepts ANY value** — `type-matches?` has no case for an alias name, so it falls to the "unknown compound → accept" default, and `(sig! take-point (point -> int))` passed `"nope"` for `(deftype point (record :x int :y int))`. Not recursion-specific and not new: it is every alias since ADR-327, and the checker enforces all of them statically | 🔶 **OPEN 2026-09-18** — found asking the C11 question of C14's work (does the contract enforce what the grammar lets a declaration say?). The registry exists — `reflect/type-aliases` enumerates them — but stores the type as a STRING, so the fix is either to keep the FORM beside it or to `read` the string in `type-matches?`, plus a binder for a self-referential alias so the lookup cannot loop (`%rec-unroll`'s job for `(rec X …)`). Scope note: a `sig` is advice and a `sig!` is a contract, so this is the trusted-declaration problem (A5) for the whole alias grammar |
 | KI-162 | **`nest check --fix-sigs` writes each `sig` ABOVE its `defn`** — the placement `sig_placement.rs` forbids tree-wide, because under `BROOD_CONTRACTS=1` a `sig` is a rebinding of a name that must already exist | ✅ **FIXED 2026-09-17** — the locator reads the CST, not the lines: a site is a top-level `defn` ROOT CHILD and its insertion point is one past the form's last line (`sig-defn-sites`, extent from `parse-source`), so the sig lands below and a head laid out across lines is located rather than skipped. `tests/project_test.blsp` pins "directly below" (sabotage: inserting at the form's start line reds 2). Recorded with it: the **load failure did not reproduce** — a forward `sig` over a `defn`, a `defn-` and a `check-allow`-wrapped pair all loaded under contracts and enforced the contract, so what is verified today is the RULE, not the breakage the rule was written for |
+| KI-164 | **a declared `(is T)` type guard does not narrow — ADR-301's signature proves nothing** — `(sig myint? (any -> (is int)))` then `(if (myint? x) x 0)` leaves `x` as it was: a known union stays the union, the unknown stays unknown, where the built-in `(int? x)` narrows both. No `(is …)` signature survives anywhere in `std/` (the ADR's devlog line records six declared) and no test asserts the narrowing, so the feature has neither a live instance nor a gate | **open** (filed 2026-09-17) |
 | KI-133 | **a preempted native loop resumed on the interpreter for up to 256 iterations — via its callee's frame** — a native self-tail loop that makes a call is preempted every ~1 500 iterations (the 2 000-reduction quantum); the driver handed the preempted frame to the interpreter "until its loop-top noticed", but the first safepoint that run reached was the CALLEE's entry, so the capture landed on the callee at ip 0, the resume ran the callee natively and returned into the loop MID-BODY, and the loop interpreted to its next 256th back-edge before re-tiering. A 5M-iteration loop with one call: 3 252 preempts, **839 607 interpreted iterations**, −36% instructions with preemption disabled; the leaf-spliced variant −72%. Invisible on the benchmark rows (±1–4%: they are short, or their loops are gate-refused anyway) — this is the cost of every long-running native loop that calls anything, and a candidate for why §7.1's admission experiments read as losses | ✅ **FIXED 2026-09-12** — `vm_run_bc`'s outcome-2 arm yields at once: the budget IS spent, and the frame is at ip 0 (or the journal's resume point, applied first), which is exactly what a resume re-tiers. Guarded by `a_native_preempt_captures_the_loop_frame_not_its_callee`, which drives the capture-mode driver with a 300-reduction budget and asserts every capture after the loop goes native is the loop's frame at ip 0 (sabotage-verified: removing the yield puts the captures on the callee). Found from the call-cost probe: 640 instructions per native→native call read as the call ceremony and was 40% preemption churn |
 | KI-132 | **the JIT latches the syntax highlighter's walk onto the VM — every helper of `editor/highlight/hl-spans` deopt-thrashes** — `BROOD_JIT_BAIL_TRACE=1` over one fontify pass of a 111-line band: `hl-head?`, `hl-advance`, `hl-name`, `hl-doc?` each `reason=deopt-thrash-latched … deopts=16`, `hl-spans` itself 56 deopts at `resume_ip=0` and `108`. The pass runs interpreted: 1.1 ms for 421 tokens (2.4 µs a token), re-lexed on every keystroke in bedit — the single largest cost of a typed character there | ✅ **FIXED 2026-09-15 (ADR-353)** — and the hypothesis was wrong on both counts: no re-lowering happens after a deopt (the same native runs again and the sixteenth latches it), and neither cause was the `head` slot. Two mechanisms, found by bisecting the helpers down to one-line arms with `BROOD_JIT_BAIL_TRACE`: (1) **`=` with a string operand deopted per activation** — `eq_dispatch` compared Int×Int and Sym/Keyword inline and deopted for EVERY other tag, so `hl-head?`'s `(= open "(")` fell out of native code on every call; the residual case now calls `brood_rt_equal` (`Heap::equal`, exactly `%eq`), and only a seq-view deopts. (2) **a type-mixed join was an unconditional deopt** — a join's block params were typed by the FIRST edge emitted, and a later edge whose repr disagreed (`(or p X)`: `p` a boxed slot, `X` a scalar) was compiled as a jump to `deopt`, so `hl-advance` deopted on every frame where `p` was false; edges are now deferred and a join is typed with every predecessor in hand, a disagreement widening to a spill slot or to three tagged words in extra block params (ADR-353). Also found en route: the prepass depth model had no stack effect for `MakeVector`/`Prim3`, so every arm with a `[…]` literal ahead of a join was refused with a Cranelift verifier error (`%match-splice-fail-in`) — modelled, and any future gap bails by name (`prepass-unmodelled-inst`). Measured: the 300-line highlighter pass 7.7 → 4.0 ms; both `[jit-bail]` lines gone. Guard `tests/jit_eq_join_test.blsp`, whose tier cases read the arm's state through the new `%jit-arm-state` probe (sabotage-verified both ways: each restored bug reds its own guard with `:bailed`) |
 | KI-131 | **lazy module loading (ADR-335) made the test runner's driver die on `unbound symbol: math/max` one run in three** — any file with an `:isolated` unit; `process 2 died` from `test/collect-loop`, the same with the JIT off. The unit was the first to use `math`, so `math` loaded INSIDE its `%isolate` snapshot and was rolled back with it, while the driver running beside it had started depending on it. Before ADR-335 the runner's closure loaded at the runner's load, before any isolate — an invariant that held by accident and was never stated | ✅ **FIXED 2026-09-12**, the same day it landed. Stated and pinned: a fourth `defmodule` header clause `(:load a b …)` loads modules at the file's load and refers nothing (the explicit eager request), `std/tool/test.blsp` `:load`s its sixteen-module closure, and `crates/cli/tests/test_framework_closure.rs` measures the real closure (a source load under the eager policy) and fails naming any module the clause lacks — sabotage-verified by dropping `math`. `%isolate`'s restore also waits for another process's in-flight load (`wait_for_inflight_loads`, the `*features-loading*` claim) so a load straddling the swap cannot leave KI-89's record-without-bindings asymmetry. Verified 25/25 + 6/6 (`BROOD_NO_JIT=1`) + 4/4 (`BROOD_NO_STDIMAGE=1`) on the reproducing file and 15/15 on `startup_image_test.blsp`, against 3/20 and 4/12 failing before. Worth recording how the first diagnosis went wrong: the wait alone was written first, on the define→`provide` theory, and the loop still failed — the mechanism was a module *consistently* loaded and unloaded by the unit, not a torn load |
@@ -11102,6 +11103,63 @@ and both sabotage-verified: the call-site shape flips from `Call(head=math/rem)`
 disabled → red on `warm=true`), and a loop whose first iteration loaded a fixture returns
 with its cached arm present and current (`%vm-arm-stale?` answers `false`, not `nil`; the
 entry sentinel disabled → `nil`, red).
+## KI-164 — a declared `(is T)` type guard does not narrow: ADR-301's signature proves nothing
+
+**Symptom.** A user predicate declared as a type guard narrows neither branch. Over a
+KNOWN union the checker reports the union unchanged; over the unknown — the case a
+downstream actually hits — the value stays unknown, so the enclosing declaration reads as
+A5's `trusted, not verified`. The built-in predicate in the same position narrows both.
+Reproduced 2026-09-17 on `nest 0.30.1 (cd87c8c1-dirty)`, `nest check --strict` on one file:
+
+```lisp
+(defmodule probe)
+(sig myint? (any -> (is int)))
+(defn myint? (x) (int? x))
+
+(sig g ((or int string) -> int))
+(defn g (x) (if (myint? x) x 0))
+;; warning: probe/g: declared return type int but the body yields int | string
+;;          — with (int? x) in its place, clean
+
+(sig h (any -> int))
+(defn h (m) (let (v (:top m)) (if (myint? v) v 0)))
+;; warning: probe/h: declared return type int is trusted, not verified
+;;          — with (int? v) in its place, clean
+```
+
+**Cause — NOT diagnosed; this entry is the symptom and the ground work.** The declaration
+is parsed (`annot::guard_ret` reads `(is T)`) and recorded (`Sig.guard`), and the lookup
+path exists: `guards::guard_ty_of_head` falls back through `ctx.declared_sig(head)` /
+`sigs::sig_of(heap, head)` to `sig.guard`. So a guard is *known* and not *applied*. The
+first thing to check is the early return immediately above that fallback —
+`if ctx.is_some_and(|c| c.is_local(head)) { return None }` — which a same-file `defn` may
+satisfy; a cross-module predicate was not isolated here, because there is no longer one to
+test with (below).
+
+**Why it survived.** The feature has no live instance and no end-to-end gate.
+`grep -rn -- "-> (is " std/` is **empty** today, though ADR-301's devlog line (2026-08-30)
+records "the prelude's six record predicates declared", and no test in `crates/` or
+`tests/` asserts that a declared guard narrows — what is gated is the *grammar* (the parse)
+and the *display* (`Sig`'s `-> (is g)`). Both halves can be green with the narrowing dead.
+Worth checking as the remover: the 323-redundant-`sig` sweep (2026-09-16) drops a `sig`
+whose return the checker can infer, and a guard's return infers as `bool` — the information
+it carries is not in the return, so a guard sig looks redundant and is not.
+
+**Fix.** Open.
+
+**Guard.** None yet. The fix owes a narrowing test per shape — bare local, access path,
+cross-module, and the unknown (the shape downstream hits) — and, if a guard signature goes
+back into `std/`, a `scripts/redundant-sigs.blsp` exemption so the next sweep cannot strip
+it again silently.
+
+**Who wants it.** bedit, immediately. Its trusted-sig acknowledgements went 24 → 10 on
+2026-09-17 by guarding each read with a *built-in* predicate instead of declaring its type
+(`(if (int? top) top 0)` where `(or … 0)` read unknown). The ten that remain are exactly
+the ones a built-in cannot prove: a `(tuple int int int int)` off an open widget context,
+a record off the open model, and seven late-bound `reflect/eval` command results. Each is
+one `(sig p? (any -> (is T)))` away from being proved at the read — once a declared guard
+narrows.
+
 
 ## KI-162 — `nest check --fix-sigs` writes each `sig` ABOVE its `defn`, which `sig_placement.rs` forbids tree-wide ✅ FIXED 2026-09-17
 

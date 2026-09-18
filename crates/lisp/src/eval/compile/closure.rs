@@ -108,6 +108,9 @@ pub(crate) fn compile_arm(
     // `(nth p K)` to direct reads. Bumps `scope.max` for the element slots; makes the arm
     // simpler (fewer allocs, no `nth`), so it JITs better. No-op for arms without the pattern.
     ea_scalar_replace(&mut body, &mut scope.max);
+    // ADR-368: the 3-arity map read and the single-pair `assoc` become instructions LAST,
+    // once the linear-map machinery has seen them as the calls it matches.
+    inline::lower_map_prim3(heap, &mut body);
     let optional_defaults = optional_defaults.into_boxed_slice();
     let has_runtime_handles =
         node_has_rt_handles(&body) || optional_defaults.iter().flatten().any(node_has_rt_handles);

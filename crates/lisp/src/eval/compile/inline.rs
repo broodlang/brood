@@ -49,6 +49,51 @@ pub(crate) fn mapget_enabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("BROOD_NO_MAPGET").is_none())
 }
 
+/// Is the `(assoc m k v)` → [`PrimOp3::MapAssoc`] lowering enabled (ADR-368)? Default ON;
+/// `BROOD_NO_MAPASSOC=1` opts out — its own lever, apart from `BROOD_NO_MAPGET`, because
+/// this one ALLOCATES from native code (a fresh trie path per call) where the reads do not,
+/// so a suspected fault in either can be bisected without losing the other. Cached once.
+pub(crate) fn mapassoc_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BROOD_NO_MAPASSOC").is_none())
+}
+
+/// ADR-368: the LAST Node pass — `(get m k default)` and `(assoc m k v)` calls whose head
+/// `resolve_prim3` recognises become `Node::Prim3` here, after the linear-map rewrite and
+/// its probe have matched them as calls (`LinIdiom` reads `Node::Call` shapes: a body that
+/// fuses into `%table-add` never reaches this with those calls intact, and one that does
+/// not gets the primitive). Same guard discipline as the `Prim3` `compile_node` emits for
+/// `table-put`; `head` stays the original head so a deopt dispatches the real wrapper.
+pub(crate) fn lower_map_prim3(heap: &Heap, node: &mut Node) {
+    walk_children_mut(node, |child| lower_map_prim3(heap, child));
+    let hit = match &*node {
+        Node::Call { callee, args, .. } if args.len() == 3 => call_head_sym(callee)
+            .and_then(|h| resolve_prim3(heap, h).map(|op| (h, op)))
+            .filter(|(_, op)| matches!(op, PrimOp3::MapGet3 | PrimOp3::MapAssoc)),
+        _ => None,
+    };
+    let Some((head, op)) = hit else {
+        return;
+    };
+    let Node::Call { args, pos, .. } = node else {
+        unreachable!("matched a Call above");
+    };
+    let pos = *pos;
+    let mut taken = std::mem::take(args).into_vec();
+    let c = taken.pop().expect("three args");
+    let b = taken.pop().expect("three args");
+    let a = taken.pop().expect("three args");
+    *node = Node::Prim3 {
+        op,
+        a: Box::new(a),
+        b: Box::new(b),
+        c: Box::new(c),
+        head,
+        guard: AtomicU64::new(heap.global_epoch()),
+        pos,
+    };
+}
+
 /// A global whose value is a CHAMP map (`*op-ability*`, `*impls*`), or `None`.
 fn global_map(heap: &Heap, name: &str) -> Option<MapId> {
     match heap.env_get(heap.global(), value::intern(name))? {

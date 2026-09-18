@@ -523,6 +523,67 @@ pub(super) fn emit_make_vector(
     Some(())
 }
 
+/// A 3-operand primitive lowered as ONE runtime callback of `table_put`'s shape —
+/// `(heap, out, recv 3w, a 3w, b 3w) -> status` — for the map ops (ADR-368). Operands are
+/// on the stack in source order (`b` on top). Status 0: the answer rides back in `out`; 1:
+/// deopt (the receiver, or the case, is one the VM's real wrapper owns); 2: an error is
+/// parked in `jit_pending_error` → the arm's error block. The callbacks may allocate
+/// (`assoc` path-copies) but never collect, so live register handles stay valid.
+pub(super) fn emit_prim3_callback(
+    b: &mut FunctionBuilder,
+    stack: &mut Vec<Op>,
+    frame: Frame,
+    funcs: Funcs,
+    fref: cranelift_codegen::ir::FuncRef,
+    deopt_code: i64,
+) -> Option<()> {
+    let bv = stack.pop().or_bail("operand-stack-underflow")?;
+    let av = stack.pop().or_bail("operand-stack-underflow")?;
+    let recv = stack.pop().or_bail("operand-stack-underflow")?;
+    let r = read_words(b, recv, frame);
+    let a = read_words(b, av, frame);
+    let v = read_words(b, bv, frame);
+    let out_addr = b.ins().stack_addr(funcs.ptr_ty, funcs.out_slot, 0);
+    let c = b.ins().call(
+        fref,
+        &[
+            funcs.heap, out_addr, r[0], r[1], r[2], a[0], a[1], a[2], v[0], v[1], v[2],
+        ],
+    );
+    let status = b.inst_results(c)[0];
+    let cont = b.create_block();
+    let slow = b.create_block();
+    b.ins().brif(status, slow, &[], cont, &[]);
+    b.switch_to_block(slow);
+    let is_err = b.ins().icmp_imm_s(IntCC::Equal, status, 2);
+    let __dr = b.ins().iconst(types::I32, deopt_code);
+    b.ins().brif(
+        is_err,
+        funcs.error,
+        &[],
+        frame.deopt,
+        &[BlockArg::Value(__dr)],
+    );
+    b.switch_to_block(cont);
+    let w0 = b
+        .ins()
+        .stack_load(types::I64, types::I64, funcs.out_slot, 0);
+    let w1 = b.ins().stack_load(
+        types::I64,
+        types::I64,
+        funcs.out_slot,
+        PAYLOAD_OFFSET as i32,
+    );
+    let w2 = b.ins().stack_load(
+        types::I64,
+        types::I64,
+        funcs.out_slot,
+        PAYLOAD_OFFSET as i32 + 8,
+    );
+    stack.push(Op::Handle(w0, w1, w2));
+    Some(())
+}
+
 /// `Inst::Prim3 { op: TablePut, .. }` — `(table-put t k v)`. A hoisted dense table does
 /// one atomic xchg on the key's slot (every guard failure routes to the FFI, never a
 /// deopt); otherwise the FFI callback runs. Status 0 → the table handle rides back, 1 →

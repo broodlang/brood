@@ -78,16 +78,26 @@ pub enum PrimOp {
     MapGet,
 }
 
-/// A 3-ary inlinable primitive — the `PrimOp` family's arity-3 sibling. One member
-/// today: `table-put` (the write half of the Table workhorses — `sieve`'s 2.5M marks).
-/// Same discipline as `PrimOp`: the op needs the heap so it runs in the exec arm; a
-/// non-Table first operand (or a redefined head, via the epoch guard) defers to the
-/// dispatched native so errors stay bit-identical; the JIT lowers it as one runtime
-/// callback. Kept a separate enum (not `PrimOp`) so every existing 2-ary match stays
-/// exhaustive without dead arms.
+/// A 3-ary inlinable primitive — the `PrimOp` family's arity-3 sibling. Three members:
+/// `table-put` (the write half of the Table workhorses — `sieve`'s 2.5M marks), and the
+/// two map ops process-shaped code lives on (ADR-368): `(get m k default)` and
+/// `(assoc coll k v)`, head-keyed like `PrimOp::MapGet` and accepted only while the head
+/// is the PRELUDE closure. Same discipline as `PrimOp`: the op needs the heap so it runs in
+/// the exec arm; a receiver the inline rule does not cover (or a redefined head, via the
+/// epoch guard) defers to the dispatched wrapper so every other branch and every error
+/// stays in Brood; the JIT lowers each as one runtime callback. Kept a separate enum (not
+/// `PrimOp`) so every existing 2-ary match stays exhaustive without dead arms.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrimOp3 {
     TablePut,
+    /// `(get m k default)` on a CHAMP map — `Heap::map_get3_inline` is the rule: a present
+    /// non-nil value, or the default when absent, is answered; a nil result on a RECORD
+    /// declines to `get` (its `%lookup-miss` → the `Lookup` ability). Pure: never allocates.
+    MapGet3,
+    /// `(assoc m k v)` on a CHAMP map — `Heap::map_assoc`, a fresh path-copied trie. A
+    /// vector receiver declines to the wrapper's `%vector-assoc` branch. ALLOCATES (never
+    /// collects), so the planner lists it under `inst_may_allocate`/`inst_allocates_hot`.
+    MapAssoc,
 }
 
 impl PrimOp3 {

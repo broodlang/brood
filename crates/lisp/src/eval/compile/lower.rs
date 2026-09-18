@@ -1066,9 +1066,13 @@ pub(crate) fn compile_node(
                 }
                 // 3-arg inlinable primitive (`table-put`): same guard discipline as the
                 // 2-arg prims, and the same thin-wrapper following — `head` stays the
-                // ORIGINAL head, so a deopt dispatches the real wrapper unchanged.
+                // ORIGINAL head, so a deopt dispatches the real wrapper unchanged. The two
+                // map ops (ADR-368) are NOT lowered here: the linear-map rewrite and its
+                // probe (`linmap_probe`, run from the `def` expander) match `(get acc k 0)`
+                // and `(assoc acc k …)` as CALL shapes, so they stay calls through every
+                // Node pass and become `Prim3` last, in `inline::lower_map_prim3`.
                 if items.len() == 4 && scope.lookup(h).is_none() {
-                    if let Some(op3) = resolve_prim3(heap, h) {
+                    if let Some(op3 @ PrimOp3::TablePut) = resolve_prim3(heap, h) {
                         let a = compile_node(heap, items[1], scope, false)?;
                         let b = compile_node(heap, items[2], scope, false)?;
                         let c = compile_node(heap, items[3], scope, false)?;

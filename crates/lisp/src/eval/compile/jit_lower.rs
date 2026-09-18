@@ -1077,6 +1077,16 @@ fn jit_lower_arm_inner(
         .declare_function("brood_rt_table_put", Linkage::Import, &tput_sig)
         .ok()
         .or_bail("cranelift-declare-function")?;
+    // brood_rt_map_get3 / brood_rt_map_assoc (ADR-368): the same (heap, out, 3w, 3w, 3w) ->
+    // status shape as table_put — receiver, key, default-or-value.
+    let mget3_id = m
+        .declare_function("brood_rt_map_get3", Linkage::Import, &tput_sig)
+        .ok()
+        .or_bail("cranelift-declare-function")?;
+    let massoc_id = m
+        .declare_function("brood_rt_map_assoc", Linkage::Import, &tput_sig)
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // brood_rt_vector_base(heap, vec 3 words, out_len: *mut i64) -> *const Value: resolve
     // an invariant vector's element (data_ptr, len) once for the LICM hoist; null ptr ⇒
     // not a vector (the hoist deopts at entry). Only declared/used when `hoist_slots`.
@@ -1213,6 +1223,8 @@ fn jit_lower_arm_inner(
     let vlen_ref = m.declare_func_in_func(vlen_id, b.func);
     let equal_ref = m.declare_func_in_func(equal_id, b.func);
     let tput_ref = m.declare_func_in_func(tput_id, b.func);
+    let mget3_ref = m.declare_func_in_func(mget3_id, b.func);
+    let massoc_ref = m.declare_func_in_func(massoc_id, b.func);
     let vbase_ref = m.declare_func_in_func(vbase_id, b.func);
     let tdbase_ref = m.declare_func_in_func(tdbase_id, b.func);
     let gepochptr_ref = m.declare_func_in_func(gepochptr_id, b.func);
@@ -1847,6 +1859,8 @@ fn jit_lower_arm_inner(
         vlen: vlen_ref,
         equal: equal_ref,
         tput: tput_ref,
+        mget3: mget3_ref,
+        massoc: massoc_ref,
         globic: globic_ref,
         pushroom: pushroom_ref,
         callslow: callslow_ref,
@@ -2167,6 +2181,20 @@ fn jit_lower_arm_inner(
                     ..
                 } => {
                     prim::emit_prim3_table_put(&mut b, &mut stack, frame, funcs)?;
+                }
+                // The two map ops (ADR-368): one callback each, status 1 deopts to the VM,
+                // which owns every branch the inline rule declines.
+                Inst::Prim3 {
+                    op: PrimOp3::MapGet3,
+                    ..
+                } => {
+                    prim::emit_prim3_callback(&mut b, &mut stack, frame, funcs, funcs.mget3, 38)?;
+                }
+                Inst::Prim3 {
+                    op: PrimOp3::MapAssoc,
+                    ..
+                } => {
+                    prim::emit_prim3_callback(&mut b, &mut stack, frame, funcs, funcs.massoc, 39)?;
                 }
                 Inst::Prim2SlotSlot {
                     op,
