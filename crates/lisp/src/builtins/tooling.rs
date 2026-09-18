@@ -354,10 +354,7 @@ pub(super) fn function_effect(args: &[Value], _env: EnvId, heap: &mut Heap) -> L
     let described = crate::types::check::effect_of(heap, rooted)
         .or_else(|| crate::types::check::effect_of(heap, sym));
     Ok(match described {
-        Some(text) => {
-            let s = heap.alloc_string(&text);
-            s
-        }
+        Some(text) => heap.alloc_string(&text),
         None => Value::nil(),
     })
 }
