@@ -288,3 +288,24 @@ twice — for a test whose answer arrived in milliseconds."
       ;; the echo of what was typed is itself the proof of a terminal: a pipe has no
       ;; echo, because there is no line discipline to do it
       (is (includes? out "forty-two")))))
+
+;; The question every one of the spawns above has BEFORE it spawns: is this program
+;; installed? Without an answer, "not installed" reaches the user as a raised
+;; `proc-spawn <name>: No such file or directory` from inside whatever process did the
+;; spawning — a crash trace where a sentence belongs (bedit's LSP, 2026-09-18).
+(describe "os/which: where a spawn would find a program"
+  (test "a program on PATH answers its path; one that is not answers nil"
+    (let (sh (os/which "sh"))
+      (is (not (nil? sh)))
+      (is (includes? sh "/sh"))
+      ;; and what it answers is spawnable — the whole point of asking
+      (let (p (os/spawn sh ["-c" "exit 0"])) (os/close p))
+      (is (nil? (os/which "no-such-program-brood-test")))))
+  (test "a name with a separator is used as given, never searched for"
+    ;; execvp's rule: `./x` means `./x`, so a hit here can only come from the path given
+    (is (nil? (os/which "./no-such-program-brood-test")))
+    (is (= "/bin/sh" (os/which "/bin/sh"))))
+  (test "a directory on PATH is not a program, however executable it looks"
+    ;; every directory has its execute (search) bit set, so `:exec?` alone would say yes
+    (is (nil? (os/which "/tmp")))
+    (is (nil? (os/which "/")))))

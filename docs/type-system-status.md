@@ -1394,9 +1394,25 @@ each lands; this section is the working list, `handoff.md` points at it.
       ADR-367 rather than quietly take the shortcut. **Reconsider if** every NaN-producing
       operation comes to raise (floats would then be totally ordered here), or if float
       ranges turn out load-bearing rather than documentation.
-- [ ] **C14. A named recursive alias** — `(deftype json (rec …))` so a `sig` names it once.
-      Nested self-reference across binders stays out (de Bruijn for a shape inference
-      never produces).
+- [x] **C14. A named recursive alias** (2026-09-18, ADR-369). `(deftype json (rec …))`
+      already worked; what did not was the spelling an author actually reaches for — a
+      **self-referential alias** was UNROLLED `RECURSIVE_UNROLL` times and read `any` below
+      that, so `(:v (:l t))` was typed and `(:v (:l (:l t)))` was not, while the identical
+      shape written `(rec X …)` by hand was exact at every depth. The choice of spelling
+      decided how much the checker knew. `alias_ty` now pushes the alias's own name onto the
+      same `REC_BOUND` stack `(rec X …)` uses and wraps in `Ty::mu`, so the two agree;
+      `Ty::mu` normalises itself away with no reference, so a non-recursive alias is
+      untouched. **One binder only** — `Ty` has a `mu` flag and a BOOLEAN `rec_ref`, no de
+      Bruijn index, so a reference inside two binders could not say which it meant: the
+      alias binds at the outermost expansion only, and only when the body has no `(rec …)`
+      of its own. That is the reserved exclusion, and it is a representation limit rather
+      than an oversight. Falls out free: **mutual recursion collapses to one binder** by
+      substitution when each name occurs once (`jval` → `jarr` → `jval` becomes
+      `(rec X nil | number | string | vector<X>)`), exact at any depth; a cycle needing two
+      live binders still unrolls. Three pins in `check/tests/names_as_types.rs` (replacing
+      the one that pinned the old bound), each sabotage-verified. **Filed, not closed:**
+      KI-165 — no `deftype` alias is enforced at RUNTIME (`type-matches?` has no alias case,
+      so `sig!` over one accepts anything), which is every alias since ADR-327.
 - [ ] **C15. Effects displayed; totality across calls.** The walk computes a function's
       effects and shows them nowhere (`nest docs`, hover). Totality across calls and mutual
       recursion is a call graph with a measure per edge.

@@ -175,11 +175,49 @@ fn alias_ty(heap: &Heap, name: &str) -> Option<Ty> {
     if depth > RECURSIVE_UNROLL {
         return Some(Ty::ANY);
     }
+    // A SELF-REFERENTIAL alias becomes a real μ type (C14): bind its own name the way
+    // `(rec X …)` binds `X`, so the self-reference inside the body parses as the recursive
+    // reference and the whole is `Ty::mu` of it. Without this the alias merely UNROLLED
+    // `RECURSIVE_UNROLL` times and read `any` below that, so `(deftype tree (or nil (record
+    // :v int :l tree :r tree)))` caught a bad `:v` at depth 0 and 1 and missed it at depth
+    // 2 — sound (a wider type accepts more) and incomplete, where the explicit `(rec …)`
+    // spelling of the same shape checked every depth.
+    //
+    // Two conditions, and both are about the ONE binder this lattice has: `Ty` carries a
+    // single `mu` flag and a boolean `rec_ref`, not de Bruijn indices, so a reference
+    // inside two binders cannot say which one it means. So bind only at the OUTERMOST
+    // expansion (nothing else holding a binder), and only when the body has no `(rec …)`
+    // of its own. Anything nested keeps the old unrolling, which is sound. This is exactly
+    // the "nested self-reference across binders stays out" the item reserved.
+    let bind_self = ALIASES_EXPANDING.with(|v| v.borrow().is_empty())
+        && REC_BOUND.with(|b| b.borrow().is_empty())
+        && !form_mentions_rec(heap, form);
+    // The body writes the self-reference however the author spelled it — bare (`tree`)
+    // inside a module whose alias is stored as `m/tree` — so bind both spellings.
+    let bound: Vec<Symbol> = if bind_self {
+        let bare = name.rsplit('/').next().unwrap_or(name);
+        let mut syms = vec![value::intern(name)];
+        if bare != name {
+            syms.push(value::intern(bare));
+        }
+        syms
+    } else {
+        Vec::new()
+    };
+    REC_BOUND.with(|b| b.borrow_mut().extend(bound.iter().copied()));
     ALIASES_EXPANDING.with(|v| v.borrow_mut().push(qualified));
     let ty = parse_type(heap, form);
     ALIASES_EXPANDING.with(|v| {
         v.borrow_mut().pop();
     });
+    REC_BOUND.with(|b| {
+        let mut b = b.borrow_mut();
+        let keep = b.len() - bound.len();
+        b.truncate(keep);
+    });
+    // `Ty::mu` normalises itself away when the body holds no reference, so a
+    // non-recursive alias is untouched by this.
+    let ty = ty.map(|t| if bind_self { Ty::mu(t) } else { t });
     if let Some(t) = &ty {
         // remembered under the name as WRITTEN (`model`, not `bedit/model/model`): that is
         // the spelling the reader of the diagnostic has in front of them
@@ -190,6 +228,23 @@ fn alias_ty(heap: &Heap, name: &str) -> Option<Ty> {
         });
     }
     ty
+}
+
+/// Does this type-expression contain a `(rec …)` form anywhere? A syntactic scan, used to
+/// keep [`alias_ty`]'s self-binding away from a body that already carries a binder of its
+/// own — with one `mu` flag and a boolean `rec_ref` per [`Ty`], two nested binders cannot
+/// be told apart (C14).
+fn form_mentions_rec(heap: &Heap, form: Value) -> bool {
+    match form {
+        Value::Pair(_) => match list_items(heap, form) {
+            Some(items) => {
+                matches!(items.first(), Some(&Value::Sym(h)) if value::symbol_is(h, "rec"))
+                    || items.iter().any(|&it| form_mentions_rec(heap, it))
+            }
+            None => false,
+        },
+        _ => false,
+    }
 }
 
 /// Install this file's records' declared field types (see [`RECORD_FIELD_TYPES`]).

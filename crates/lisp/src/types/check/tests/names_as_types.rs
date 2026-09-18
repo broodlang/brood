@@ -316,40 +316,107 @@ fn deftype_names_a_structural_type_for_sigs() {
     assert_eq!(strict.len(), 3, "{strict:?}");
 }
 
-// A recursive alias is UNROLLED one level (2026-09-12): a name met on its own expansion
-// path expands once more, and only the occurrence past that reads as `any`. So the field
-// read a tree walk writes — `(:v (:l t))` — is typed, where it was the unknown; the level
-// past the unrolling is pinned as the unknown, which is the sound answer and the bound
-// that keeps a `k`-way recursive shape at `k` copies. The checker has no recursive types
-// (deferred: coinductive subtyping, display, round-trip); this is what is decidable now.
+// A SELF-REFERENTIAL alias is a μ type (C14, 2026-09-18) — typed at EVERY depth, not one.
+//
+// It used to be unrolled `RECURSIVE_UNROLL` times and read `any` below that, which was
+// sound and incomplete: a tree walk's `(:v (:l t))` was typed and `(:v (:l (:l t)))` was
+// the unknown, so the same shape written `(rec X …)` by hand checked deeper than the same
+// shape written as a self-referential alias. `alias_ty` now binds the alias's own name the
+// way `(rec X …)` binds `X`, so the two spellings agree.
 #[test]
-fn a_recursive_alias_unrolls_one_level_then_reads_as_any() {
+fn a_self_referential_alias_is_typed_at_every_depth() {
     let src = "\
          (defmodule t)\n\
          (deftype tree (or nil (record :v int :l tree :r tree)))\n\
+         (sig root (tree -> int))\n\
+         (defn root (t) (string/length (:v t)))\n\
          (sig one-deep (tree -> int))\n\
          (defn one-deep (t) (string/length (:v (:l t))))\n\
          (sig two-deep (tree -> int))\n\
          (defn two-deep (t) (string/length (:v (:l (:l t)))))\n\
-         (sig root (tree -> int))\n\
-         (defn root (t) (string/length (:v t)))";
+         (sig four-deep (tree -> int))\n\
+         (defn four-deep (t) (string/length (:v (:l (:l (:l (:l t)))))))";
     let ws = file_warnings_mode(src, false);
-    // the root and the unrolled level both see `:v` as `nil | int`, disjoint from string
-    assert!(
-        ws.iter().any(|w| w.contains("root")
-            || w.contains("string/length: argument 1 expects string, got nil | int ((:v t))")),
-        "{ws:?}"
-    );
-    assert!(
-        ws.iter()
-            .any(|w| w
-                .contains("string/length: argument 1 expects string, got nil | int ((:v (:l t)))")),
-        "the unrolled level must type the field read: {ws:?}"
-    );
-    // past the unrolling the occurrence is the unknown, so nothing is provable there
-    assert!(
-        !ws.iter().any(|w| w.contains("(:l (:l t))")),
-        "the level past the unrolling reads as any: {ws:?}"
-    );
+    // Every level sees `:v` as `nil | int`, disjoint from string — including the ones past
+    // the old unrolling bound, which is the whole point.
+    for read in [
+        "(:v t)",
+        "(:v (:l t))",
+        "(:v (:l (:l t)))",
+        "(:v (:l (:l (:l (:l t)))))",
+    ] {
+        assert!(
+            ws.iter()
+                .any(|w| w.contains("expects string, got nil | int") && w.contains(read)),
+            "depth {read} must be typed: {ws:?}"
+        );
+    }
+    assert_eq!(ws.len(), 4, "{ws:?}");
+}
+
+/// The value side, both ways, at a depth the old unrolling could not reach: a valid tree is
+/// accepted however deep it nests (the false-positive direction, which is what a μ type
+/// that is too NARROW would break), and a bad leaf is caught however deep it sits.
+#[test]
+fn a_self_referential_alias_accepts_a_deep_value_and_refuses_a_deep_leaf() {
+    let head = "(defmodule t)\n\
+                (deftype tree (or nil (record :v int :l tree :r tree)))\n\
+                (sig take (tree -> int))\n\
+                (defn take (t) 1)\n";
+    // Valid to depth 4.
+    let deep_ok = "(defn ok () (take {:v 1 :l {:v 2 :l {:v 3 :l {:v 4 :l nil :r nil} \
+                   :r nil} :r nil} :r nil}))";
+    let ws = file_warnings_mode(&format!("{head}{deep_ok}"), true);
+    assert!(ws.is_empty(), "a deep valid tree must pass: {ws:?}");
+    // A string `:v` at depth 2 — past the old bound — is refused.
+    let deep_bad = "(defn bad () (take {:v 1 :l {:v 1 :l {:v \"bad\" :l nil :r nil} \
+                    :r nil} :r nil}))";
+    let ws = file_warnings_mode(&format!("{head}{deep_bad}"), true);
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert!(ws[0].contains("expects tree"), "{ws:?}");
+}
+
+/// Mutually recursive aliases collapse to ONE binder by substitution, which the lattice can
+/// hold: `jval` references `jarr` references `jval`, and the inner reference binds to the
+/// outer alias's binder. Deeper mutual cycles still unroll, because `Ty` carries one `mu`
+/// flag and a boolean `rec_ref` — no de Bruijn index — so a reference inside two binders
+/// could not say which it meant. That is the "nested self-reference across binders stays
+/// out" the item reserved, and the pin below is that it stays SOUND there, not precise:
+/// an alias whose body has a `(rec …)` of its own keeps the unrolling and must not reject
+/// a valid value.
+#[test]
+fn mutual_aliases_collapse_to_one_binder_and_nested_binders_stay_sound() {
+    let src = "(defmodule t)\n\
+               (deftype jarr (or nil (vector jval)))\n\
+               (deftype jval (or nil number string jarr))\n\
+               (sig take (jval -> int))\n\
+               (defn take (v) 1)\n\
+               (defn ok () (take [1 \"a\" [2 [3]]]))\n\
+               (defn bad () (take (fn () 1)))\n\
+               (defn deep-bad () (take [[[[(fn () 1)]]]]))";
+    let ws = file_warnings_mode(src, true);
     assert_eq!(ws.len(), 2, "{ws:?}");
+    assert!(
+        ws.iter().any(|w| w.contains("got a function")),
+        "the shallow one: {ws:?}"
+    );
+    // The DEEP one is what needs the single binder: under the old unrolling the fourth
+    // level read `any` and this passed, so it is the assertion that makes the collapse
+    // claim non-vacuous.
+    assert!(
+        ws.iter().any(
+            |w| w.contains("deep-bad") || w.contains("(tuple (tuple (tuple (tuple () -> 1))))")
+        ),
+        "a bad leaf four levels down must be caught: {ws:?}"
+    );
+    // An alias whose body carries its own `(rec …)` is left to the unrolling — no second
+    // binder is created — and a valid value must still pass.
+    let src = "(defmodule t)\n\
+               (deftype nested (or nil (rec Y (or nil (vector nested)))))\n\
+               (sig take (nested -> int))\n\
+               (defn take (n) 1)\n\
+               (defn ok () (take nil))\n\
+               (defn ok2 () (take [nil]))";
+    let ws = file_warnings_mode(src, true);
+    assert!(ws.is_empty(), "the widening must not reject: {ws:?}");
 }
