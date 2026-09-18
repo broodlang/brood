@@ -277,6 +277,34 @@ pub unsafe extern "C" fn brood_rt_make_vector_n(
     *out = h.alloc_vector(items);
 }
 
+/// Build a map from `npairs` key/value `Value` pairs staged contiguously at `elems`
+/// (key `i` at `2i`, value at `2i+1` — the JIT wrote each as 3 words into a stack slot it
+/// owns), writing the fresh map to `*out`. The `{k v …}` literal's twin of
+/// [`brood_rt_make_vector_n`] (`Inst::MakeMap(npairs)`). `map_from_pairs` is the VM's own
+/// constructor — last-wins de-dup, a GC-quiet in-place CHAMP build — so the two engines
+/// build the identical map; it allocates and never collects, so the staged bytes stay live.
+///
+/// # Safety
+/// `heap`/`out` live; `elems` points at `2·npairs` consecutive, fully-initialised `Value`s.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_make_map_n(
+    heap: *mut Heap,
+    out: *mut crate::core::value::Value,
+    elems: *const crate::core::value::Value,
+    npairs: i64,
+) {
+    let h = &mut *heap;
+    let npairs = npairs as usize;
+    let mut pairs = Vec::with_capacity(npairs);
+    for i in 0..npairs {
+        pairs.push((
+            std::ptr::read(elems.add(2 * i)),
+            std::ptr::read(elems.add(2 * i + 1)),
+        ));
+    }
+    *out = h.map_from_pairs(pairs);
+}
+
 /// `first` of a `Value` (by word-triple), writing its car to `*out`. The JIT **tag-checks
 /// for `Pair` and deopts before calling**, so a non-pair (impossible by that contract)
 /// yields `nil` rather than UB.

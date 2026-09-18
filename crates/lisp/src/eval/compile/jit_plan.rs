@@ -100,6 +100,7 @@ pub(crate) fn jit_spill_reserve(code: &[Inst]) -> usize {
                 i,
                 Inst::Call { tail: false, .. }
                     | Inst::MakeVector(_)
+                    | Inst::MakeMap(_)
                     | Inst::MakeClosure { .. }
                     | Inst::Prim1 {
                         op: PrimOp1::First | PrimOp1::Rest,
@@ -489,6 +490,13 @@ pub(super) fn chunk_in_jit_subset(code: &[Inst]) -> bool {
         // variadic `brood_rt_make_vector_n`. Capped at 32 so the per-site staging slot
         // stays small (a huge literal in a hot arm is unheard-of; it bails to the VM).
         Inst::MakeVector(n) => *n <= 32,
+        // A map literal `{k v …}` — `MakeVector`'s variadic shape exactly: the `2n` operands
+        // are staged into a stack slot and `brood_rt_make_map_n` builds the map (a GC-quiet
+        // in-place CHAMP build that allocates and never collects). Until 2026-09-18 this was
+        // NOT admitted, so one `{…}` in a hot arm put the whole arm on the interpreter for
+        // good — `(get {:a 1} :zz 2)` in a loop bailed `chunk-outside-jit-subset` (found
+        // writing ADR-368's native check). Same cap as the vector, in values.
+        Inst::MakeMap(n) => 2 * *n <= 32,
         // A `(fn …)` literal — lowered as one `brood_rt_make_closure` callback that runs
         // `exec_chunk`'s own arm verbatim (captures staged on `roots` exactly as the VM
         // leaves them on its operand stack). Capped like `MakeVector`. NOTE the `%receive`
