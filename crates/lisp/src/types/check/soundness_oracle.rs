@@ -244,8 +244,12 @@ fn expr_ty_is_a_sound_overapproximation_of_runtime_values() {
         "(assoc (assoc {} :a 1) :b :k)",
         // tuple-producing and literal-producing forms — the two refinements the
         // membership check above was blind to until 2026-08-28.
-        "(seq/split-at 1 [1 2 3])",
-        "(seq/split-at 0 [])",
+        // Collection first (ADR-307). These two carried the pre-reorder order for a week
+        // without failing: `seq` is not loaded in a fresh heap, so `expr_ty` made no claim
+        // and the eval never ran. ADR-370 types `seq/split-at` from the image footer, the
+        // claim is made, and the stale case evaluated for the first time (2026-09-18).
+        "(seq/split-at [1 2 3] 1)",
+        "(seq/split-at [] 0)",
         // sequence rules that reshape rather than construct — each one carries an
         // element refinement through an operation, the shape ADR-269 showed is where
         // an under-approximation hides.

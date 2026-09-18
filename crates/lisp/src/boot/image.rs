@@ -105,7 +105,10 @@ pub(crate) fn register(primitives: &mut crate::builtins::Primitives) {
 /// runtime knows the head is not a macro, and the kind is a fact only the image has without
 /// materialising the section. A v5 reader would read the list as trailing garbage and a v6
 /// reader would mis-read a v5 footer, so the bump is required.
-const MAGIC: &[u8] = b"brood-image-v6\n";
+/// v7 (ADR-370) appends, after the macro names, the SIGNATURES of every imaged module's
+/// functions — `(qualified name, type-form text)` pairs, declared or inferred at build time —
+/// so a checker can read a callee's type from the footer without materialising its module.
+const MAGIC: &[u8] = b"brood-image-v7\n";
 
 /// Entry kinds inside a section.
 const KIND_GLOBAL: u8 = 0;
@@ -438,6 +441,23 @@ pub(crate) fn image_write(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     for name in &macro_names {
         put_str(&mut body, name);
     }
+    // v7 (ADR-370): the signature index of the baked-in std — the output of
+    // `check::std_signature_index`, the ONE scanner a process booted without an image also
+    // runs on the same embedded sources, so what an imaged process reads from this footer is
+    // byte for byte what an un-imaged one computes (the artifact matrix requires it). Kept
+    // as text: no heap work at open, a form only when a check first asks.
+    let sig_entries: Vec<(String, String, u32, u32)> =
+        crate::types::check::std_signature_index(heap)
+            .into_iter()
+            .map(|e| (e.name, e.text, e.min, e.max))
+            .collect();
+    put_u32(&mut body, sig_entries.len() as u32);
+    for (name, text, min, max) in &sig_entries {
+        put_str(&mut body, name);
+        put_str(&mut body, text);
+        put_u32(&mut body, *min);
+        put_u32(&mut body, *max);
+    }
     put_u64(&mut body, dir_off);
 
     let t_io = std::time::Instant::now();
@@ -660,6 +680,25 @@ pub(crate) fn image_index(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
         }
     }
     crate::eval::derive::register_image_kinds(&section_names, &macro_names);
+    // v7 (ADR-370): the signature index — kept as text here (no heap work at open), turned
+    // into forms by the first check that needs them.
+    let mut sig_entries: Vec<(String, String, u32, u32)> = Vec::new();
+    if let Some(sig_count) = get_u32(&mut dr) {
+        for _ in 0..sig_count {
+            match (
+                get_str(&mut dr),
+                get_str(&mut dr),
+                get_u32(&mut dr),
+                get_u32(&mut dr),
+            ) {
+                (Some(name), Some(text), Some(min), Some(max)) => {
+                    sig_entries.push((name, text, min, max))
+                }
+                _ => break,
+            }
+        }
+    }
+    crate::eval::derive::register_image_sigs(sig_entries);
     Ok(heap.map_from_pairs(pairs))
 }
 

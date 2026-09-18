@@ -14427,3 +14427,60 @@ source order, and the one difference — the wrapper evaluated every operand bef
 assoc — is unobservable because an intermediate map is. Only while `assoc` is the PRELUDE
 closure. A three-pair `assoc` loop, 1M iterations, release-fast: **1285 → 531 ms** (1.28 → 0.53 µs per iteration), 612 ms at the VM ceiling; `make ab --floor` against `fac63929`: **`supervisor` −5.8%** (floor 0.3%), every other row inside its floor. `tests/assoc_unroll_test.blsp` pins the semantics and the compiled shape
 (three `Prim3(MapAssoc …)`, no `Call(argc=7 …)`); the unroll disabled reds the shape case.
+
+## 2026-09-18 — signatures ride in the stdlib image (ADR-370), and the tax they were meant to remove was not where KI-150 said
+
+The owner's direction on KI-150 was to respect why ADR-340 exists and fix it long-term:
+the checker's transitive scan loads every module a loaded module's bodies name so that
+inference reaches the leaf that declares a type, and a one-line `(os/env …)` program
+materialised nine modules for a run that needs two. The footer of the stdlib image now
+carries, per imaged function, existence and arity — and the declaration itself for the 136
+the checker reads as-is (`check::image_carried_sig`: public, one arrow, a return that is
+neither `any` nor a bare collection, the same parse with every alias table empty). The scan
+loads a module only for a name that is neither bound nor typed by the footer, and
+`BROOD_IMAGE_TRACE=1` now prints which reference made a check load which module.
+
+Three shapes the gates caught before landing, each a real rule now: an INFERRED signature
+re-rendered from source is wider than the live inference (eleven new `nil | string`
+warnings, so only declarations ride); a declared `-> any` is "no declaration" to the
+call-site typing, which re-types the loaded body (`observer/observe-order` read `-> any` for
+`proctree/tree-order` where the body says `(list any)`); and skipping the FILE's own
+references at the drain moves `encoding`'s load to `base64`'s first call, where the body is
+recompiled (ADR-366) — the check read −37M and the run +37M, so the drain still loads what
+the file names and only the transitive scan reads the footer. `nest check --strict
+--suggest-sigs` over `std/` and `tests/` agrees byte for byte with the lever set and unset
+(3379 inferred signatures), and `check/tests/image_sigs.rs` holds both construction
+directions.
+
+The measurement corrects the issue: the one-liner's check materialises 7 modules, not 9,
+and costs 105.5M instructions either way — materialising from the image is cheap here, and
+the pre-flight's cost (3.7M on the one-liner, 24M on `pipeline`, 47M on `errors-deep`)
+scales with the checked file. `stdlib_tree_hash` is the top symbol of a debug `--check`
+(14%); that is KI-150's next item. Also fixed alongside: two ADR-335 guards in
+`tests/lazy_load_test.blsp` compared the child's `imaged=` against `true` while the probe
+printed a section count — vacuous since 2026-09-04.
+
+Two more things the footer surfaced, both fixed. The checker's soundness oracle
+(`check/soundness_oracle.rs`) carried `(seq/split-at 1 [1 2 3])` — the pre-ADR-307 argument
+order — for a week without failing: `seq` is not loaded in a fresh heap, so `expr_ty` made no
+claim and the eval never ran; with `seq/split-at` typed from the footer the claim is made and
+the stale case evaluated for the first time (a runtime error in `%split-at-acc`). The cases
+now read collection-first — and the same mechanism means `nest check` now flags that call
+where it used to say nothing. And the ADR-366 guard's child read `warm=false` under
+`BROOD_TIER=0` with an image present, at HEAD too (a worktree build): `%vm-arm-ops` is a VM
+probe and the recompile happens at the VM's next lookup, which the tree-walker never makes;
+CI's tree-walker job boots from source, where `math` is loaded before `go` compiles, and never
+saw it. The child is pinned to `BROOD_TIER=2`.
+
+Then the artifact matrix said the first shape was wrong in principle: with the index living
+only in the image's footer, the prelude's `%crash-reporter-shim` inferred `(any) -> nil` in
+the imaged cell and `nil` in the source cell — the checker knew more when a cache file was
+present. So the index is now a fact about std's SOURCE: `check::std_signature_index` scans
+the embedded module sources (forms, not the checker — 3104 functions, arity by the
+evaluator's parameter grammar), the writer stores its output, and a process with no image
+scans the one module a question is about on demand (`os`: 26 names, no measurable cost on a
+400M source-boot check; the whole scan would have been +376M on a debug binary). The
+predicate became syntactic for the same reason — every symbol a word of the type grammar —
+which is 124 authoritative declarations rather than 136. Two more gates: the footer equals
+a fresh scan byte for byte, and every indexed arity equals the loaded closure's.
+

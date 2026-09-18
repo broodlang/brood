@@ -113,7 +113,13 @@ pub(super) fn lint_allow_mask(category: Option<Value>) -> u16 {
 /// file-local defs). The single predicate behind **both** the call-head and the
 /// operand unbound diagnostics, so the two never drift apart.
 pub(in crate::types::check) fn is_unbound(heap: &Heap, ctx: &Ctx, s: Symbol) -> bool {
-    if ctx.is_local(s) || is_globally_bound(heap, s) || curated_sig(s).is_some() {
+    // An imaged module's function the check did not load is BOUND for this question: the
+    // stdlib image's footer names it and carries its signature (ADR-370).
+    if ctx.is_local(s)
+        || is_globally_bound(heap, s)
+        || curated_sig(s).is_some()
+        || crate::eval::derive::image_sig_arity(heap, s).is_some()
+    {
         return false;
     }
     // A name the enclosing top-level form tests with `(bound? 'name)` is *meant* to be

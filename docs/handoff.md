@@ -173,9 +173,9 @@ it (it was "do it with C10 if C10 needs it"; C10 did not) — it now needs a cas
 shows them nowhere; totality across calls is a call graph with a measure per edge), then
 C16–C17 in list order (`docs/type-system-status.md` § "The remaining list"); C12–C14 are
 closed above, and KI-165 was fixed the same day it was filed. **KI-150** is
-reopened by the column refresh below (the checker costs ~10% more per file and every `brood
-file` pays it) and is the other live thread; its first candidate is caching inferred
-signatures in the stdlib image.
+the other live thread: ADR-370 landed (signatures ride in the stdlib image, the transitive
+load is gone by construction) and measured FLAT, so what the column refresh below read is
+the checker's per-file walk — `stdlib_tree_hash` first (see the ADR-370 block below).
 
 ## 2026-09-17 night — the two CI reds are closed; the column was refreshed on request and is FLAT; KI-150 reopened by its own trigger
 
@@ -261,52 +261,50 @@ flat except for the checker's own cost; `c9428cba` had reached `std/regex`/`std/
 guards, and the redundant-sig sweep exempting guard sigs. bedit's ten remaining `:trusted`
 acknowledgements can now each become a `(sig p? (any -> (is T)))`.
 
-**KI-150, the long-term fix — DECIDED 2026-09-18 (the user: respect why ADR-340 exists;
-prefer the structural fix over a short-term one). Signatures ride in the stdlib image.**
-The mechanism that costs every checked program is `materialise_referenced_modules`
-(ADR-340): once a module is loaded for a check, the bodies of EVERY function in it are
-scanned for qualified names and those modules loaded too, to a fixpoint, so inference can
-follow a body to the leaf that declares its type — the need is real (bedit's
-`buffer-current-line` read `any` because `text` was never loaded). The unit is wrong, not
-the need: `(os/env …)` loads `os`, the scan meets `path/…` inside `os/which`, and `path`
-and `file` come along (~18M) for a program that calls neither; every new std function does
-this to every program naming its module, and every checker change moves the short rows.
-The fix that removes the reason to load: **the image footer carries each imaged module's
-signatures** — declared or inferred at build time — and the checker reads a callee's type
-from the image instead of loading its module and walking its body.
+**KI-150, the long-term fix — LANDED 2026-09-18 as ADR-370 (decided that morning: respect
+why ADR-340 exists; prefer the structural fix over a short-term one).** The stdlib image's
+footer carries every imaged function's existence and arity, and the declaration itself for
+the 136 the checker reads as-is (`check::image_carried_sig` — public, one arrow, a refined
+return, self-contained without the module's alias tables); `materialise_referenced_modules`
+loads a module only for a name that is neither bound nor typed by the footer, so the
+transitive std closure behind a loaded module stays out. `BROOD_NO_IMAGE_SIGS=1` is the
+lever; `BROOD_IMAGE_TRACE=1` prints `[image] check materialises <module> for <name>` — the
+reference behind every remaining load, i.e. the name to declare a signature for.
 
-Plan (ADR-370 when it lands; the pieces are all in place today):
-1. **Builder** (`std/tool/stdimage.blsp` `build`, where every module is loaded for real):
-   for each module, `(reflect/source-signatures <module source>)` — the sweep's own tool,
-   `{:name :sig :declared?}` per function, the same checker at its most-informed (everything
-   loaded, deterministic per stdlib id since B8) — handed to `%image-write` and written in
-   the footer after the v6 macro names: a v7 list of (name, sig text). Read at open like the
-   kind index, never from the payload.
-2. **Reader**: `%image-index` parses the list → `derive::register_image_sigs` beside
-   `register_image_kinds`; `Sig`s parsed lazily from the text with `annot`'s parser and
-   memoised per symbol.
-3. **Checker**: `sigs::sig_of` consults the image table after `declared_heap_sig` and before
-   `infer_sig` (a declared sig still wins; the image's inferred one replaces the body walk);
-   `materialise_referenced_modules` collects no prefix for a name the image has a signature
-   for — so a check loads only what the FILE names (the drain, for the unbound verdict) and
-   never the transitive std closure. `BROOD_NO_IMAGE_SIGS=1` is the lever (catalogue +
-   CLAUDE.md row).
-4. **Gates**: the `check_order_differential` shape — `nest check --strict` over `std/` +
-   `tests/` with the image sigs on and off must agree byte for byte (the fallback IS today's
-   path); an ADR-280-style construction gate that every imaged function's footer signature
-   equals `source-signatures` of its module in a fully-loaded process; `make ab --floor`
-   must read the short rows DOWN (`pipeline`'s check is 151M, ~70M of it this).
-5. Then the pre-flight can stop loading std modules for the unbound verdict too (the kind
-   index already knows an imaged module's names) — a follow-up, not this step.
+**The index is a SOURCE fact, cached by the image** — `check::std_signature_index` over the
+embedded sources; a process with no image scans one module on demand, so
+`BROOD_NO_STDIMAGE=1` is not a different checker (the artifact matrix caught the first shape,
+which read a prelude function's inferred signature differently per cell). Gates: footer ==
+fresh scan, every arity == the loaded closure's, plus the two directions above.
+
+**Read ADR-370's "Measured" before touching this again.** The one-liner's check materialises
+7 modules instead of 9 and its instruction count is UNCHANGED (105.5M either way, release,
+`perf stat`): materialising from the image is cheap on this box, and the pre-flight's cost
+(3.7M on the one-liner, 24M on `pipeline`, 47M on `errors-deep`) is the checker's own walk
+over the checked FILE, with `cli_support::stdlib_tree_hash` (B7) the top symbol of a debug
+`--check` at 14%. So the row movement KI-150 was reopened on is the checker's per-file cost,
+not loading — the entry says so now. Three things the gates taught, kept as rules: only
+DECLARATIONS ride (an inferred text re-rendered from source is wider than the live
+inference); a declared `-> any` or bare collection does not ride (the call-site typing
+re-types the loaded body for it); and the eager DRAIN still loads the file's own references
+(deferring `encoding` to `base64`'s first call cost the run +37M through ADR-366's recompile).
+Gates: `crates/nest/tests/image_sigs_differential.rs` (strict + `--suggest-sigs` over `std/`
+and `tests/`, byte for byte), `check/tests/image_sigs.rs` (both construction directions),
+`tests/lazy_load_test.blsp` (the `os/env` child: `os` loaded, `file`/`path` not, lever
+restores). Queue from it: (a) declare authoritative sigs where the trace names a puller
+(`string/trim`, `math/max`, `reflect/read-string` on the one-liner) — in-language, one load
+each; (b) carry `deftype` aliases in the footer so the 55 alias-dependent declarations
+qualify; (c) `stdlib_tree_hash`'s share of every `--check`.
 
 **Benchmark column refreshed again at `a6a0d934` (2026-09-18 midday):** `supervisor`
 584 → 553 ms (−5.3%), the `assoc` unroll's reading; 2.2× Elixir → 2.1×. The short rows
 read +3–4% and it is the checker's again — `brood --check` grew 4–7M instructions per file
 with today's checker work, and `os/which`'s reference to `path` now costs every checked
 program that names an `os/` function ~18M (`path` + `file` materialised under the eager
-policy). KI-150's entry has both readings. **Do not refresh again until the runtime moves;
-and the next runtime-neutral checker change WILL move the short rows a few percent — that is
-the structural KI-150 decision knocking.**
+policy). KI-150's entry has both readings. **Do not refresh again until the runtime moves.** ADR-370
+landed the same afternoon and did NOT move the instruction counts (see above): the short
+rows' drift is the checker's per-file walk, and the next lever is `stdlib_tree_hash`, not
+loading.
 
 **Benchmark column refreshed at `04958398` (2026-09-18 morning, brood-benchmarks):**
 `supervisor` 614 → 584 ms (−4.9%, spread 0.4%) — the ADR-368 primitives, matching their

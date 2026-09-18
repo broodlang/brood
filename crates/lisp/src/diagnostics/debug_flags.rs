@@ -416,6 +416,11 @@ pub const FLAGS: &[DebugFlag] = &[
         "opt OUT of lowering `(get m k)` — and, since ADR-368, `(get m k default)` — to an inline map probe (ADR-296; default ON since 2026-09-17)",
     ),
     f(
+        "BROOD_NO_IMAGE_SIGS",
+        OPTOUT,
+        "opt OUT of reading function signatures from the stdlib image (ADR-370; default ON since 2026-09-18): the checker then infers loaded bodies and materialises every module they name, as before — the A/B, bisect and differential lever",
+    ),
+    f(
         "BROOD_NO_MAPASSOC",
         OPTOUT,
         "opt OUT of lowering `(assoc m k v)` on a map to an inline path-copy (ADR-368; default ON since 2026-09-17) — its own lever because it ALLOCATES from native code where the reads do not",

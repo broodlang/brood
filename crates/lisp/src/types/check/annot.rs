@@ -106,6 +106,33 @@ pub(crate) fn display_ty(ty: &Ty) -> String {
     ALIAS_DISPLAY.with(|m| m.borrow().get(&shown).cloned().unwrap_or(shown))
 }
 
+/// Run `f` with EVERY per-file table above empty — no aliases, records, abilities or
+/// sealed domains in scope — and the tables restored after. The reading a type form gets in
+/// a process that has not loaded the module declaring those names: what an image-carried
+/// signature (ADR-370) must parse to identically, at write time and at read time, so the
+/// footer never carries a form whose meaning depends on which modules a check happens to
+/// have loaded.
+pub(super) fn without_tables<R>(f: impl FnOnce() -> R) -> R {
+    let ability = ABILITY_TYPES.with(|t| std::mem::take(&mut *t.borrow_mut()));
+    let sealed = SEALED_OP_DOMAINS.with(|t| std::mem::take(&mut *t.borrow_mut()));
+    let records = RECORD_IDS.with(|t| std::mem::take(&mut *t.borrow_mut()));
+    let fields = RECORD_FIELD_TYPES.with(|t| std::mem::take(&mut *t.borrow_mut()));
+    let aliases = TYPE_ALIASES.with(|t| std::mem::take(&mut *t.borrow_mut()));
+    let ns = ALIAS_FILE_NS.with(|t| std::mem::take(&mut *t.borrow_mut()));
+    let imports = ALIAS_IMPORTS.with(|t| std::mem::take(&mut *t.borrow_mut()));
+    let display = ALIAS_DISPLAY.with(|t| std::mem::take(&mut *t.borrow_mut()));
+    let out = f();
+    ABILITY_TYPES.with(|t| *t.borrow_mut() = ability);
+    SEALED_OP_DOMAINS.with(|t| *t.borrow_mut() = sealed);
+    RECORD_IDS.with(|t| *t.borrow_mut() = records);
+    RECORD_FIELD_TYPES.with(|t| *t.borrow_mut() = fields);
+    TYPE_ALIASES.with(|t| *t.borrow_mut() = aliases);
+    ALIAS_FILE_NS.with(|t| *t.borrow_mut() = ns);
+    ALIAS_IMPORTS.with(|t| *t.borrow_mut() = imports);
+    ALIAS_DISPLAY.with(|t| *t.borrow_mut() = display);
+    out
+}
+
 /// Install the type-alias table for this file (see [`TYPE_ALIASES`]).
 pub(super) fn set_type_aliases(
     map: HashMap<String, Value>,
@@ -777,6 +804,48 @@ pub fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
         }
         _ => None,
     }
+}
+
+/// The base type names [`parse_type`]'s symbol arm accepts — kept beside it for the same
+/// reason [`TYPE_HEADS`] is; `base_type_names_all_parse` pins the two together.
+pub(super) const BASE_TYPE_NAMES: [&str; 30] = [
+    "any",
+    "never",
+    "int",
+    "float",
+    "number",
+    "string",
+    "symbol",
+    "keyword",
+    "bool",
+    "nil",
+    "pair",
+    "vector",
+    "list",
+    "map",
+    "set",
+    "seqable",
+    "countable",
+    "numeric",
+    "ordered",
+    "bytes",
+    "decimal",
+    "ratio",
+    "failure",
+    "fn",
+    "rope",
+    "pid",
+    "ref",
+    "socket",
+    "subprocess",
+    "table",
+];
+
+/// Is `name` a word of the type grammar itself — a base type or a constructor head — as
+/// opposed to a name that resolves only where some module is loaded (an alias, a record,
+/// an ability)? What an image-carried signature may be spelled from (ADR-370).
+pub(super) fn is_type_word(name: &str) -> bool {
+    BASE_TYPE_NAMES.contains(&name) || TYPE_HEADS.contains(&name)
 }
 
 /// The type constructors the grammar knows, by head symbol — the vocabulary

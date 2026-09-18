@@ -805,6 +805,15 @@ fn embedded_module(key: &str) -> Option<&'static EmbeddedModule> {
         .find(|m| m.key == key)
 }
 
+/// Every baked-in std module as `(key, source)`, core table first — the scanner behind the
+/// stdlib image's signature index reads them all (ADR-370, `check::std_signature_index`).
+pub(crate) fn embedded_modules() -> impl Iterator<Item = (&'static str, &'static str)> {
+    CORE_MODULES
+        .iter()
+        .chain(DEV_MODULES.iter())
+        .map(|m| (m.key, m.source))
+}
+
 /// The source of the baked-in std module registered under `key`, or `None` when there is
 /// none — for the checker, which closes a file's require set through std (B8).
 pub(crate) fn embedded_module_source(key: &str) -> Option<&'static str> {

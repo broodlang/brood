@@ -2618,7 +2618,53 @@ pub(super) fn sig_of(heap: &Heap, sym: Symbol) -> Option<Sig> {
         .or_else(|| declared_heap_sig(heap, sym))
         .or_else(|| primitive_sig(heap, sym))
         .or_else(|| curated_sig(sym))
+        .or_else(|| image_heap_sig(heap, sym))
         .or_else(|| infer_sig(heap, sym))
+}
+
+/// The stdlib image's signature for `sym` (ADR-370): what the checker derived for the
+/// function at image-build time, declared or inferred, read from the promoted form the
+/// runtime store holds — the same `parse_type` a declared sig goes through. Consulted after
+/// every authored source and before inferring a body, so an imaged callee's type is known
+/// without its module in the heap; `None` when the image has none (an un-imaged module, or
+/// `BROOD_NO_IMAGE_SIGS=1`).
+pub(super) fn image_heap_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
+    use std::collections::HashMap;
+    use std::sync::{OnceLock, RwLock};
+    // Parsed once per process per name — `Ty` is `Arc`-backed plain data, so the cache is
+    // shared by every checking process; a name with no rendering caches its `None` too.
+    static CACHE: OnceLock<RwLock<HashMap<Symbol, Option<Sig>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+    if let Some(hit) = cache.read().unwrap_or_else(|e| e.into_inner()).get(&sym) {
+        return hit.clone();
+    }
+    let text = crate::eval::derive::image_sig_text(heap, sym)?;
+    // The text is read into a form on a SCRATCH heap of this thread — `sig_of` has only a
+    // shared borrow of the caller's — sharing the prelude and runtime regions, so the type
+    // parser resolves record and alias names exactly as it would on the caller's heap. The
+    // scratch forms are never collected; there are at most as many as the footer has names.
+    thread_local! {
+        static SCRATCH: std::cell::RefCell<Option<Heap>> = const { std::cell::RefCell::new(None) };
+    }
+    let parsed = SCRATCH.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let scratch = slot.get_or_insert_with(|| {
+            let mut h = Heap::with_regions(heap.prelude_arc(), heap.runtime_arc());
+            h.set_global(crate::core::value::EnvId::GLOBAL);
+            h
+        });
+        let form = crate::syntax::reader::read_one(scratch, &text).ok()?;
+        // With every per-file table empty — the reading the writer proved self-contained
+        // (`check::image_carried_sig`), so the checked file's own aliases cannot bend it.
+        annot::without_tables(|| annot::parse_type(scratch, form))?
+            .as_arrow()
+            .cloned()
+    });
+    cache
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(sym, parsed.clone());
+    parsed
 }
 
 /// The arity of the callable bound to `sym` — `NativeFn.arity` for primitives,
@@ -2631,7 +2677,14 @@ pub(super) fn sig_of(heap: &Heap, sym: Symbol) -> Option<Sig> {
 /// optional + an optional rest tail (`Symbol`). So min = required, max =
 /// required + optional unless there's a rest (then no max).
 pub(super) fn arity_of(heap: &Heap, sym: Symbol) -> Option<Arity> {
-    match super::deps::obs_global(heap, sym)? {
+    let Some(global) = super::deps::obs_global(heap, sym) else {
+        // Not in the heap — an imaged module's function the check did not load (ADR-370):
+        // the arity the image recorded from the live closure at build time (the signature
+        // TEXT is not it: an inferred sig carries no rest parameter).
+        let (min, max) = crate::eval::derive::image_sig_arity(heap, sym)?;
+        return Some(Arity { min, max });
+    };
+    match global {
         Value::Native(id) => Some(heap.native(id).arity),
         Value::Fn(cid) => {
             // Across arms: smallest min, largest max (unbounded if any has rest).

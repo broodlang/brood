@@ -131,6 +131,8 @@ mod protocol;
 mod recursion;
 mod sigs;
 pub(crate) use sigs::cover_name_of;
+mod std_index;
+pub(crate) use std_index::{module_signature_index, std_signature_index};
 mod walk;
 
 use std::cell::RefCell;
@@ -272,6 +274,7 @@ pub(crate) fn materialise_referenced_modules(heap: &mut Heap) {
             .map(|m| format!("{}/", value::symbol_name(*m)))
             .collect();
         let mut wanted: HashSet<Symbol> = HashSet::new();
+        let mut names: HashSet<Symbol> = HashSet::new();
         let global_env = heap.global();
         for g in heap.global_symbols() {
             let name = value::symbol_name(g);
@@ -288,7 +291,44 @@ pub(crate) fn materialise_referenced_modules(heap: &mut Heap) {
                 .flat_map(|arm| arm.body.iter().copied())
                 .collect();
             for body in bodies {
-                collect_qualified_prefixes(heap, body, &mut wanted);
+                collect_qualified_names(heap, body, &mut names);
+            }
+        }
+        // ADR-370: a name whose DECLARED signature the image carries asks for no load — the
+        // checker reads its type from the footer. A name without one (an undeclared
+        // function, a value, a module no image describes) still brings its module in, so
+        // the body walk that infers it has the leaf.
+        let trace = std::env::var_os("BROOD_IMAGE_TRACE").is_some();
+        let mut names: Vec<Symbol> = names.into_iter().collect();
+        names.sort_by_key(|s| value::symbol_name(*s));
+        for name in names {
+            // A name already BOUND — a native registered under a module's prefix
+            // (`string/split`, `file/stat`), a prelude binding, a loaded module's def — is
+            // read from its binding; loading `std/string.blsp` for `string/split` gives the
+            // checker nothing it does not have. The eager drain's own rule (KI-150). Both
+            // skips sit under the one lever, so `BROOD_NO_IMAGE_SIGS=1` is exactly the
+            // pre-ADR-370 whole-module scan and the differential covers both.
+            if crate::eval::derive::image_sigs_enabled()
+                && (heap.env_get(global_env, name).is_some()
+                    || crate::eval::derive::image_sig_text(heap, name).is_some())
+            {
+                continue;
+            }
+            let text = value::symbol_name_ref(name);
+            if let Some(slash) = text.rfind('/') {
+                if slash > 0 {
+                    let module = value::intern(&text[..slash]);
+                    // The question KI-150 took days to answer by experiment — WHICH
+                    // reference made the check load a module — printed per module, first
+                    // name in sorted order: the name to declare a signature for.
+                    if trace
+                        && wanted.insert(module)
+                        && heap.env_get(global_env, module).is_none()
+                        && !feature_loaded(heap, &text[..slash])
+                    {
+                        eprintln!("[image] check materialises {} for {text}", &text[..slash]);
+                    }
+                }
             }
         }
         let mut loaded_any = false;
@@ -326,20 +366,18 @@ fn loaded_feature_modules(heap: &Heap) -> Vec<Symbol> {
         .collect()
 }
 
-/// Every module prefix named by a qualified symbol anywhere in `form` — `math` for
-/// `math/quot`, `editor/buffer` for `editor/buffer/point` — descending through lists, vectors
-/// and maps. The root escape `/name` and a bare name contribute nothing. Over-approximate on
-/// purpose (quoted data counts): the only cost of a spurious prefix is one swallowed load.
-fn collect_qualified_prefixes(heap: &Heap, form: Value, out: &mut HashSet<Symbol>) {
+/// Every qualified symbol anywhere in `form` — `math/quot`, `editor/buffer/point` — descending
+/// through lists, vectors and maps. The root escape `/name` and a bare name contribute nothing.
+/// Over-approximate on purpose (quoted data counts): the only cost of a spurious name is one
+/// swallowed load of its module.
+fn collect_qualified_names(heap: &Heap, form: Value, out: &mut HashSet<Symbol>) {
     let mut work = vec![form];
     while let Some(v) = work.pop() {
         match v {
             Value::Sym(s) => {
                 let name = value::symbol_name_ref(s);
-                if let Some(slash) = name.rfind('/') {
-                    if slash > 0 {
-                        out.insert(value::intern(&name[..slash]));
-                    }
+                if name.rfind('/').is_some_and(|slash| slash > 0) {
+                    out.insert(s);
                 }
             }
             Value::Pair(_) => {

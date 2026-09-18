@@ -184,7 +184,7 @@
                              "  (let (after-ref (contains? *features* \"url\")"
                              "        v (run-fixture lazyprobe-head/go)"
                              "        after-call (contains? *features* \"url\"))"
-                             "    (io/puts (str \"before=\" before \" imaged=\" (%std-image-installed)"
+                             "    (io/puts (str \"before=\" before \" imaged=\" (if (%std-image-installed) true false)"
                              "               \" after-ref=\" after-ref \" v=\" v \" after-call=\" after-call))))"]
                 "\n"))
           ;; Through `env`: `os/cmd` takes no environment, and without `BROOD_NO_CHECK` the
@@ -228,13 +228,18 @@
           _ (file/spit prog
               (string/join ["(defn go (i acc) (if (< i 3) (go (inc i) (+ acc (math/rem i 3))) acc))"
                              "(defn rem-inlined? () (any? (%vm-arm-ops go 2) (fn (op) (includes? op \"Rem\"))))"
-                             "(io/puts (str \"before=\" (contains? *features* \"math\") \" imaged=\" (%std-image-installed)))"
+                             "(io/puts (str \"before=\" (contains? *features* \"math\") \" imaged=\" (if (%std-image-installed) true false)))"
                              "(io/puts (str \"cold=\" (rem-inlined?)))"
                              "(io/puts (str \"v=\" (go 0 0)))"
                              "(io/puts (str \"warm=\" (rem-inlined?)))"
                              "(io/puts (str \"after=\" (contains? *features* \"math\")))"]
                 "\n"))
-          result (if exe (os/cmd "env" ["BROOD_NO_CHECK=1" exe prog]) nil))
+          ;; The child is pinned to the VM: `%vm-arm-ops` reads a VM arm, and the recompile
+          ;; happens at the VM's next lookup — on the tree-walker the arm is never entered,
+          ;; so `warm=` read false under `BROOD_TIER=0` with an image (found 2026-09-18; CI's
+          ;; tree-walker job boots from source, where `math` is already loaded when `go`
+          ;; compiles, and never saw it).
+          result (if exe (os/cmd "env" ["BROOD_NO_CHECK=1" "BROOD_TIER=2" exe prog]) nil))
       (is (or (nil? exe) (string? exe)))
       (when result
         (assert= "" (if (= (get result :exit) 0) "" (get result :stderr "")))
@@ -334,6 +339,61 @@
         (let (out (os/cmd-out result))
           (is (includes? out "v=42"))
           (is (includes? out "loaded=true")))))))
+
+;; --- ADR-370: the check reads a callee's type from the image instead of loading it --------
+;;
+;; The checker's transitive scan (ADR-340) loads every module a LOADED module's bodies name,
+;; so the inference can follow a body to the leaf that declares its type. `(os/env …)` loads
+;; `os`; `os/which`'s body names `file/stat` and `path/join`, so `file` and `path` came along
+;; for a program that calls neither — nine modules for a run that needs two (KI-150). The
+;; stdlib image's footer now carries every imaged function's existence and arity, and the
+;; declaration itself where the checker reads it as-is (`path/join` declares
+;; `(& string -> string)`), and `file/stat` is a native bound at boot — so the scan asks
+;; nothing of either load. The FILE's own references still load at the drain (the program is
+;; about to call them; a load deferred to the first call is a recompile, ADR-366).
+;; `BROOD_NO_IMAGE_SIGS=1` restores the whole-module scan — the lever.
+;;
+;; The observable is the child's `BROOD_IMAGE_TRACE=1` stderr — one `[image] <module>` line
+;; per module materialised — because the pre-flight's loads are not the program's: the
+;; check runs on a globals snapshot the runner restores, so `*features*` inside the program
+;; says nothing about what the check loaded (the first shape of this guard read it and was
+;; wrong in both directions). Children WITH the pre-flight (no `BROOD_NO_CHECK`); the skip is
+;; only asserted when the child materialised an image (the source-boot job has no footer).
+(defn- adr370-probe (extra-env)
+  (let (dir (path/dirname (or (os/exe-path) ""))
+        exe (first (seq/filter [(path/join dir "brood") (path/join dir ".." "brood")] file/exists?))
+        prog (path/temp "imagesig-")
+        _ (file/spit prog
+            (string/join ["(defn go (x) (io/puts (str \"v=\" (string? (os/env x)))))"
+                           "(go \"HOME\")"]
+              "\n")))
+    (if exe (os/cmd "env" (append ["BROOD_IMAGE_TRACE=1"] extra-env [exe prog])) nil)))
+
+(defn- adr370-materialised? (result module)
+  "Did the child's trace name `module` as materialised — a line that is exactly `[image] <module>`?"
+  (includes? (str "\n" (get result :stderr "") "\n") (str "\n[image] " module "\n")))
+
+(describe "the check reads a callee's type from the image instead of loading its module (ADR-370)"
+  (test "a loaded module's body naming a bound native or an image-typed function pulls neither module"
+    (let (result (adr370-probe ["BROOD_TIER=2"]))
+      (when result
+        (assert= 0 (get result :exit))
+        (is (includes? (os/cmd-out result) "v=true"))
+        (when (includes? (get result :stderr "") "[image] install")
+          ;; The file's OWN reference loaded at the drain, as before…
+          (is (adr370-materialised? result "os"))
+          ;; …and what `os`'s bodies name did not follow it in.
+          (is (not (adr370-materialised? result "file")))
+          (is (not (adr370-materialised? result "path")))))))
+  (test "and BROOD_NO_IMAGE_SIGS=1 restores the whole-module scan — the lever"
+    (let (result (adr370-probe ["BROOD_TIER=2" "BROOD_NO_IMAGE_SIGS=1"]))
+      (when result
+        (assert= 0 (get result :exit))
+        (is (includes? (os/cmd-out result) "v=true"))
+        (when (includes? (get result :stderr "") "[image] install")
+          (is (adr370-materialised? result "os"))
+          (is (adr370-materialised? result "file"))
+          (is (adr370-materialised? result "path")))))))
 
 ;; --- ADR-335 follow-up: a load path the FILE sets up ---------------------------
 ;;

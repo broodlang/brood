@@ -369,6 +369,14 @@ pub fn drain_pending(heap: &mut Heap, env: EnvId) -> LispResult {
     // loaded, because `json/prase` is unbound. What this removes is the load that could not
     // change the answer, which on a one-line `(seq/lmap …)` file was five modules and 63M
     // instructions of a 138M check (KI-150).
+    //
+    // A name the stdlib image carries a signature for (ADR-370) is deliberately NOT skipped
+    // here: these are the FILE's own references, and the program is about to call them. The
+    // pre-flight's load is the run's load brought forward; skipping it moved the load to
+    // the first call, where a body compiled before the module arrived is recompiled
+    // (ADR-366) — `base64`'s run read +37M instructions for a check that read −37M. What
+    // the footer removes is the TRANSITIVE load — what a loaded module's bodies name
+    // (`materialise_referenced_modules`), which the program never asked for.
     let global = heap.global();
     let mut modules: Vec<Symbol> = Vec::new();
     for (module, name) in &pending {
@@ -636,6 +644,186 @@ pub fn register_image_kinds(modules: &[String], macros: &[String]) {
     for name in macros {
         kinds.macros.insert(value::intern(name));
     }
+}
+
+// ===== The image's signature index (ADR-370) ===============================================
+//
+// The v7 footer carries, for every imaged module's function, the signature the checker
+// derives for it at image-build time — declared or inferred, with every module loaded. Read at
+// open as TEXT (the footer is read before any heap work) and kept here; `sigs::image_heap_sig`
+// parses one on demand, into a process-wide cache, so a check pays only for the callees it
+// meets and a run that never checks pays nothing. The module set is what
+// `materialise_referenced_modules` and the image's edge replay consult: a module the image
+// has signatures for is never loaded for the sake of a body walk.
+
+struct ImageSigs {
+    /// `name -> (type-form text, min arity, max arity or u32::MAX)`.
+    texts: std::collections::HashMap<Symbol, (String, u32, u32)>,
+    /// Filled whole — from an image's footer at open, or by `image_sig_entries` scanning
+    /// every embedded source in a process that has no image.
+    filled: bool,
+    /// Modules a process with no image has scanned on demand (`ensure_module_indexed`).
+    scanned: std::collections::HashSet<String>,
+}
+
+fn image_sigs() -> &'static std::sync::RwLock<ImageSigs> {
+    static SIGS: std::sync::OnceLock<std::sync::RwLock<ImageSigs>> = std::sync::OnceLock::new();
+    SIGS.get_or_init(|| {
+        std::sync::RwLock::new(ImageSigs {
+            texts: Default::default(),
+            filled: false,
+            scanned: Default::default(),
+        })
+    })
+}
+
+/// `BROOD_NO_IMAGE_SIGS=1` — opt OUT of the std signature index (ADR-370): the checker
+/// infers loaded bodies and materialises what they name, as before. The A/B, bisect and
+/// differential lever. Cached once.
+pub fn image_sigs_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BROOD_NO_IMAGE_SIGS").is_none())
+}
+
+/// Record the signature index an opened image holds — `(qualified name, type text, min
+/// arity, max arity)` per function. Additive like the kind index.
+pub fn register_image_sigs(entries: Vec<(String, String, u32, u32)>) {
+    if std::env::var_os("BROOD_IMAGE_TRACE").is_some() {
+        let typed = entries
+            .iter()
+            .filter(|(_, text, _, _)| !text.is_empty())
+            .count();
+        eprintln!(
+            "[image] signature index: {} names, {typed} with an authoritative type",
+            entries.len()
+        );
+    }
+    let mut sigs = image_sigs().write().unwrap_or_else(|e| e.into_inner());
+    sigs.filled = true;
+    for (name, text, min, max) in entries {
+        sigs.texts.insert(value::intern(&name), (text, min, max));
+    }
+}
+
+/// The index is a fact about std's SOURCE; the image only caches it. A process that booted
+/// without an image computes it here from the sources baked into the binary — ONE module at
+/// a time, the module a question is about, so a source-boot check pays for the modules it
+/// meets — and so the checker knows the same about a std callee whether or not
+/// `~/.cache/brood` holds an image (the artifact matrix read a prelude function's inferred
+/// signature differently in the two cells before this). On a scratch heap sharing this
+/// one's regions, like `image_heap_sig`.
+fn ensure_module_indexed(heap: &Heap, sym: Symbol) {
+    let name = value::symbol_name(sym);
+    let Some(slash) = name.rfind('/') else {
+        return;
+    };
+    let key = &name[..slash];
+    {
+        let sigs = image_sigs().read().unwrap_or_else(|e| e.into_inner());
+        if sigs.filled || sigs.scanned.contains(key) {
+            return;
+        }
+    }
+    let Some(source) = crate::builtins::modules::embedded_module_source(key) else {
+        return; // not a std module — nothing to index
+    };
+    let mut scratch = Heap::with_regions(heap.prelude_arc(), heap.runtime_arc());
+    scratch.set_global(EnvId::GLOBAL);
+    let entries = crate::types::check::module_signature_index(&mut scratch, key, source);
+    if std::env::var_os("BROOD_IMAGE_TRACE").is_some() {
+        eprintln!(
+            "[image] signature index: no image — {key} scanned from its embedded source ({} names)",
+            entries.len()
+        );
+    }
+    let mut sigs = image_sigs().write().unwrap_or_else(|e| e.into_inner());
+    sigs.scanned.insert(key.to_string());
+    for e in entries {
+        sigs.texts
+            .entry(value::intern(&e.name))
+            .or_insert((e.text, e.min, e.max));
+    }
+}
+
+/// The whole index, for a process with no image: every embedded source scanned once.
+fn ensure_std_index(heap: &Heap) {
+    if image_sigs()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .filled
+    {
+        return;
+    }
+    let mut scratch = Heap::with_regions(heap.prelude_arc(), heap.runtime_arc());
+    scratch.set_global(EnvId::GLOBAL);
+    let entries: Vec<(String, String, u32, u32)> =
+        crate::types::check::std_signature_index(&mut scratch)
+            .into_iter()
+            .map(|e| (e.name, e.text, e.min, e.max))
+            .collect();
+    if std::env::var_os("BROOD_IMAGE_TRACE").is_some() {
+        eprintln!("[image] signature index: no image — computed from the embedded sources");
+    }
+    register_image_sigs(entries);
+}
+
+/// The index's recorded arity for `sym` — `(min, max)`, `None` max for a rest parameter.
+pub fn image_sig_arity(heap: &Heap, sym: Symbol) -> Option<(usize, Option<usize>)> {
+    if !image_sigs_enabled() {
+        return None;
+    }
+    ensure_module_indexed(heap, sym);
+    image_sigs()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .texts
+        .get(&sym)
+        .map(|(_, min, max)| (*min as usize, (*max != u32::MAX).then_some(*max as usize)))
+}
+
+/// The index's AUTHORITATIVE signature text for `sym`, if it has one — an undeclared
+/// function has an entry (existence, arity) but no text, and answers `None` here so its
+/// callers keep loading the module and inferring the body.
+pub fn image_sig_text(heap: &Heap, sym: Symbol) -> Option<String> {
+    if !image_sigs_enabled() {
+        return None; // the lever: every consumer falls back to loading and inferring
+    }
+    ensure_module_indexed(heap, sym);
+    image_sigs()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .texts
+        .get(&sym)
+        .filter(|(text, _, _)| !text.is_empty())
+        .map(|(text, _, _)| text.clone())
+}
+
+/// Every indexed name that carries an authoritative type (ADR-370), sorted — the
+/// construction gate walks these against the loaded modules' declarations. Empty when
+/// disabled.
+pub fn image_sig_typed_names(heap: &Heap) -> Vec<Symbol> {
+    image_sig_entries(heap)
+        .into_iter()
+        .filter(|(_, text, _, _)| !text.is_empty())
+        .map(|(name, _, _, _)| value::intern(&name))
+        .collect()
+}
+
+/// The whole index as the footer spells it, sorted by name. Empty when disabled.
+pub fn image_sig_entries(heap: &Heap) -> Vec<(String, String, u32, u32)> {
+    if !image_sigs_enabled() {
+        return Vec::new();
+    }
+    ensure_std_index(heap);
+    let mut out: Vec<(String, String, u32, u32)> = image_sigs()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .texts
+        .iter()
+        .map(|(sym, (text, min, max))| (value::symbol_name(*sym), text.clone(), *min, *max))
+        .collect();
+    out.sort();
+    out
 }
 
 /// Does an opened image vouch that `qualified` (in `module`) is NOT a macro? True only for

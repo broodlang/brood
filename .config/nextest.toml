@@ -265,8 +265,8 @@ slow-timeout = { period = "60s", terminate-after = 6 }
 filter = 'binary(image_registrations_match_source)'
 slow-timeout = { period = "60s", terminate-after = 6 }
 
-# `check_order_differential` (B8) and `derivation_cache_differential` (nest/tests/) are the
-# checker's whole-tree differentials, the same class as `image_matches_source` above and by
+# `check_order_differential` (B8), `derivation_cache_differential` and `image_sigs_differential`
+# (ADR-370; nest/tests/) are the checker's whole-tree differentials, the same class as `image_matches_source` above and by
 # the same reasoning ("why the tree rather than a fixture" is in each file's header): the one
 # runs `nest check --strict --suggest-sigs` over all of `tests/` three times (two processes
 # plus the reversed order), the other over `std/` and `tests/` twice each (cache on, cache off).
@@ -285,7 +285,7 @@ slow-timeout = { period = "60s", terminate-after = 6 }
 # 21-29 s per case, from 42-51 s. That is the fix; this budget is the backstop behind it, and
 # if it ever goes red again the question is what the per-case work grew into, not the number.
 [[profile.default.overrides]]
-filter = 'binary(check_order_differential) | binary(derivation_cache_differential)'
+filter = 'binary(check_order_differential) | binary(derivation_cache_differential) | binary(image_sigs_differential)'
 slow-timeout = { period = "60s", terminate-after = 6 }
 
 # `artifact_matrix` (cli/tests/artifact_matrix.rs) is the same class of case as

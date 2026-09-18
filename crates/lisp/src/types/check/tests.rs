@@ -19,6 +19,7 @@ mod domains;
 mod effective_signatures;
 mod element_types;
 mod gradual_checks;
+mod image_sigs;
 mod inference_precision;
 mod lints;
 mod match_lints;

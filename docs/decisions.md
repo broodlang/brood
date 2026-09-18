@@ -23754,56 +23754,122 @@ value — every alias since ADR-327, not just recursive ones.
 
 ## ADR-370 — A std module's signatures ride in the stdlib image, so a check need not load it
 
-**Status:** **decided 2026-09-18, not yet implemented** — recorded here because the design
-is settled and two documents already cite it; the code is the next session's. **Context:**
-KI-150, whose remaining half is a per-run tax on every checked program.
+**Status:** **implemented 2026-09-18** (decided the same morning; the plan below is kept as
+written and the deltas from it are called out). **Context:** KI-150, whose remaining half
+is a per-run tax on every checked program; the owner's direction: *respect why ADR-340
+exists — prefer the long-term fix over a short-term one.*
 
 **Context.** `types::check::materialise_referenced_modules` (ADR-340) is whole-world by
 construction: once a module is loaded for a check, the bodies of EVERY function in it are
 scanned for qualified names and those modules loaded too, to a fixpoint. The need is real —
 without it a derivation stops at an unmaterialised name, and bedit's `buffer-current-line`
-read `any` though `text/char->line` DECLARES `(rope int -> int)`.
+read `any` though `text/char->line` DECLARES `(rope int -> int)`. The unit is wrong, not the
+need: `(io/puts (str (os/env "HOME")))` loads `os`, the scan meets `file/stat` and
+`path/join` inside `os/which`, and `file` and `path` come along for a program that calls
+neither — nine modules materialised for a run that needs two.
 
-**The unit is wrong, not the need.** Measured with callgrind (image `:state :live`, boot
-cache warm), `(io/puts (str (os/env "HOME")))`:
+**Decision: the image footer carries what the checker asks of a callee — existence, arity
+and, where the declaration is the whole answer, the declaration — so the transitive scan
+has no reason to load.** This removes the *reason* to load rather than narrowing *which*
+modules load: ADR-340's need is then met by construction.
 
-| | instructions | modules materialised |
-|---|---|---|
-| `--check` only | 110.3M | 9 |
-| run, with the pre-flight | 133.9M | 9 |
-| run, `BROOD_NO_CHECK=1` | 80.6M | **2** |
+**What landed.**
 
-The check loads `os`, the scan meets `path/…` inside `os/which`, and `path` and `file` come
-along for a program that calls neither. Every new std function does this to every program
-naming its module, and every checker change moves the short benchmark rows. The checker's
-own Rust is ~3% of samples; the cost is the loading.
+1. **The index is a fact about std's SOURCE, and the image only caches it.**
+   `check::std_signature_index` (`types/check/std_index.rs`) scans the sources baked into
+   the binary — every `defn`/`defn-` (and `def` of a `fn`), through `defmodule`,
+   `check-allow` and `do` wrappers — for `(qualified name, type text, min arity, max
+   arity)`: 3104 functions at this commit, arity by the evaluator's parameter grammar
+   (required, `&optional`, `&`/`&rest`; multi-clause takes the smallest minimum and the
+   largest maximum). The **writer** (`boot/image.rs` `image_write`) stores that output after
+   the v6 macro names as the v7 footer; a process that booted **without an image** runs the
+   same scanner on the ONE module a question is about, on demand
+   (`derive::ensure_module_indexed`, a scratch heap sharing the process's regions — `os`'s
+   26 names cost nothing measurable on a 400M source-boot check). This is what the artifact
+   matrix (`cli/tests/artifact_matrix.rs`) demanded: with the footer only in the image, the
+   prelude's `%crash-reporter-shim` inferred `(any) -> nil` in the imaged cell and `nil` in
+   the source cell — `infer_sig` could type its callee in an unloaded module in one and not
+   the other — a checker verdict that depended on a cache file. The TYPE text rides only for
+   a declaration the checker reads **as-is** — `std_index::image_carried_sig`, one predicate
+   for both paths: public (a private name's cross-module call is a warning only the loaded
+   privacy mark can raise), a single arrow (an overload resolves per arm from the heap), a
+   return that is neither `any` nor a bare collection (`infer.rs` reads either as "no
+   declaration" and re-types the LOADED body under the call's own argument types), and
+   spelled from the type grammar alone (`annot::is_type_word` — a `deftype` alias, a record
+   or an ability name resolves only where its module is loaded, so `datetime/year (datetime
+   -> int)` stays a load). 124 of the 535 declared sigs qualify; the text is the declaration
+   form printed by `printer::print`, so the reader's parse is the loaded module's parse by
+   construction. **Delta from the plan:** the plan said "declared or inferred", via
+   `file_signatures` in the build process; an INFERRED signature re-rendered from source is
+   not verdict-neutral — the strict gate over `std/` read eleven new warnings from `nil |
+   string` where the live inference said `string` — so an undeclared function carries
+   existence and arity only and still loads, and the scanner reads forms rather than running
+   the checker so that a source boot can afford it.
+2. **Reader**: `%image-index` parses the list → `derive::register_image_sigs`
+   (`image_sig_text`, `image_sig_arity`, `image_sig_typed_names`); `sigs::image_heap_sig`
+   parses a text on first use into a process-wide cache, on a scratch heap sharing the
+   prelude and runtime regions, under `annot::without_tables` — the reading the writer
+   proved self-contained, so a checked file's own aliases cannot bend it.
+3. **Checker**: `sigs::sig_of` consults the footer after `curated_sig` and before
+   `infer_sig` (a loaded declaration still wins first); `arity_of` reads the footer's arity
+   for a name not in the heap; `is_unbound` reads existence. `materialise_referenced_modules`
+   collects qualified NAMES (not prefixes) and loads a module only for a name that is
+   neither bound (`file/stat` is a native under a module prefix — the eager drain's own
+   KI-150 rule) nor typed by the footer; `BROOD_IMAGE_TRACE=1` prints `[image] check
+   materialises <module> for <name>` — the reference that made a check load a module, i.e.
+   the name to declare a signature for, the question KI-150 took days to answer by
+   experiment. `BROOD_NO_IMAGE_SIGS=1` is the lever (catalogue + CLAUDE.md row); both skips
+   sit under it, so the off state is exactly the pre-ADR-370 whole-module scan.
+   **Delta from the plan:** the eager DRAIN and the compile-time head load do NOT skip a typed
+   name. They were built to and measured: those are the FILE's own references, which the
+   program is about to call, and the pre-flight's load is the run's load brought forward —
+   skipping it moved `encoding`'s load to `base64`'s first call, where a body compiled before
+   the module arrived is recompiled (ADR-366): the check read −37M instructions and the run
+   +37M. What the footer removes is the transitive load the program never asked for.
+4. **Gates**, both of which found a real shape before landing: `crates/nest/tests/
+   image_sigs_differential.rs` — `nest check --strict --suggest-sigs` over `std/` and over
+   `tests/`, footer read and `BROOD_NO_IMAGE_SIGS=1`, byte for byte (3379 inferred
+   signatures and every strict warning unchanged; the inferred-text and the declared-`any`
+   shapes each failed it first); `check/tests/image_sigs.rs` — every carried type equals the
+   loaded module's declaration as `sig_of` reads it, every authoritative public declaration
+   of an imaged module IS carried (the direction a writer that stopped writing would fail),
+   the footer equals a fresh scan of the embedded sources byte for byte, and every indexed
+   arity equals the loaded closure's across 1000+ closures (sabotage: dropping the
+   bare-collection rule reds the first on `audit/exampleless :: seqable`); the artifact
+   matrix, which is what made the index a source fact; `tests/lazy_load_test.blsp` — a child
+   with the pre-flight naming `os/env` ends with `os` loaded and `file`/`path` not (read from
+   the child's `BROOD_IMAGE_TRACE` stderr — the pre-flight's loads are rolled back from the
+   program's globals, so `*features*` inside it says nothing), and the lever brings both
+   back. Writing them also found the two ADR-335 guards comparing against `imaged=true`
+   while the probe printed a section COUNT — vacuous since 2026-09-04 — and a stale
+   pre-ADR-307 case in the checker's soundness oracle that had never been evaluated because
+   `seq` was never loaded in its heap; both fixed alongside.
 
-**Decision: the image footer carries each imaged module's signatures** — declared or
-inferred at build time — and the checker reads a callee's type from the image instead of
-loading its module and walking its body. This removes the *reason* to load rather than
-narrowing *which* modules load: ADR-340's need is then met by construction.
+**Measured (release, `perf stat -e instructions:u`, min of 3, images live).** The one-line
+program's check materialises **7 modules, not 9**, and its instruction count does **not**
+move: 105.5M footer read, 105.5M with the lever set; `pipeline` 156.9M / 157.0M. Materialising
+a module from the image is cheap on this box, and the checker's cost sits elsewhere —
+`cli_support::stdlib_tree_hash` (B7's stale-binary check) is the top symbol of a debug
+`--check` at 14%, `Heap::env_get` and hashing next. The run's pre-flight here is small —
+`osenv` 3.7M over its `BROOD_NO_CHECK=1` run, `pipeline` 24M, `errors-deep` 47M — and scales
+with the checked FILE's size, not with what loads. The 53M-on-an-80M-run reading KI-150
+carries from the other box did not reproduce here. A SOURCE boot (`BROOD_NO_STDIMAGE=1`),
+where the index is scanned per module on demand, reads 300–326M for the one-liner's check
+with the index and 310–322M without (min/max of 7) — inside that path's own ±30M spread,
+which a `BROOD_NO_CHECK=1` run shows with the lever set or not.
 
-1. **Builder** (`std/tool/stdimage.blsp` `build`, where every module is loaded for real):
-   per module, `(reflect/source-signatures <module source>)` — `{:name :sig :declared?}` per
-   function, the same checker at its most-informed, deterministic per stdlib id since B8 —
-   handed to `%image-write`, written in the footer after the v6 macro names as a v7 list of
-   (name, sig text). Read at open like the kind index, never from the payload.
-2. **Reader**: `%image-index` parses the list → `derive::register_image_sigs` beside
-   `register_image_kinds`; `Sig`s parsed lazily from the text with `annot`'s parser, memoised
-   per symbol.
-3. **Checker**: `sigs::sig_of` consults the image table after `declared_heap_sig` and before
-   `infer_sig` — a declared sig still wins, the image's inferred one replaces the body walk;
-   `materialise_referenced_modules` collects no prefix for a name the image has a signature
-   for, so a check loads only what the FILE names (the drain, for the unbound verdict) and
-   never the transitive std closure. `BROOD_NO_IMAGE_SIGS=1` is the lever (catalogue +
-   CLAUDE.md row).
-4. **Gates**: the `check_order_differential` shape — `nest check --strict` over `std/` +
-   `tests/` with image sigs on and off must agree byte for byte, the fallback being today's
-   path; an ADR-280-style construction gate that every imaged function's footer signature
-   equals `source-signatures` of its module in a fully-loaded process; and `make ab --floor`
-   must read the short rows DOWN (`pipeline`'s check is 151M, ~70M of it this).
-5. Then the pre-flight can stop loading std modules for the unbound verdict too — the kind
-   index already knows an imaged module's names. A follow-up, not this step.
+**So what this buys, honestly:** the checker's answer about a std callee no longer depends on
+which modules happened to load — a verdict is a function of the file and the footer, which
+is what ADR-340's need was really about; the heap a check leaves behind is the program's own
+modules plus what their bodies genuinely require; and every new std function stops taxing
+every program naming its module *by construction*. It does not, at this commit, make a check
+faster, and the docs that predicted a short-row drop (handoff, KI-150) are corrected.
+
+**Follow-ups, each measured by the trace line:** (a) declare authoritative signatures where
+`[image] check materialises` names a puller (`string/trim`, `math/max`, `reflect/read-string`
+on the one-liner) — each declaration removes one transitive load, and it is in-language work;
+(b) carry `deftype` aliases in the footer so the 55 alias-dependent declarations qualify;
+(c) the pre-flight's actual cost — `stdlib_tree_hash` and the walk — is the next KI-150 item.
 
 **Not chosen.** A **reachability closure** seeded from the checked file's own qualified
 names — load a name's module, walk that name's body, repeat — was built and measured on
@@ -23813,8 +23879,3 @@ modules load where this removes the reason, it would have to be scoped to the si
 path (`nest check`'s whole-world preload is deliberate — one fully-loaded state is what
 makes a verdict independent of file ORDER, KI-137), and it leaves ADR-340's need met by a
 narrower traversal rather than by construction. The measurement stands as the "before".
-
-**Consequence when it lands.** A checked program loads what it names, not the std closure
-behind it; a new std function stops taxing every program that names its module; and the
-checker's own growth stops being a per-run cost, which is what has moved the short rows on
-every column refresh since `084060fb`.
