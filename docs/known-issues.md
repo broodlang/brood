@@ -9950,14 +9950,25 @@ flat. Two rules it needs, each found by measuring:
 - only a MATERIALISED module's names are walked — following a prelude binding's references
   walks the whole prelude call graph for nothing.
 
-**Why it was not landed.** The rig produced three different baselines for the same reverted
-code (110M, 133M, 110M) before the two traps in `perf-handoff.md` were understood, and a
-checker-loading-policy change decided on numbers that unstable is how this repo has been
-wrong about performance before. What the next session needs is not new analysis but a stable
-rig: warm after every build, assert `:state :live` in the same shell, and re-take the four
-readings above. The precision check is a `--suggest-sigs` diff over `std/` + `tests/` (3452
-inferred signatures at `34467e8a`) — the closure must still reach every leaf that declares a
-type, which is what the whole-world pass exists for.
+**Why it was not landed, and what supersedes it.** Two reasons, and the second is the one
+that decides it. The rig produced three different baselines for the same reverted code
+(110M, 133M, 110M) before the two traps in `perf-handoff.md` were understood — and a
+checker-loading policy decided on numbers that unstable is how this repo has been wrong
+about performance before. Then the owner **decided the structural fix the same day**
+(handoff 2026-09-18, ADR-370 when it lands): the stdlib image carries each imaged module's
+SIGNATURES, and the checker reads a callee's type from the image instead of loading its
+module and walking its body. A reachability closure is the short-term fix that decision
+explicitly declines — it narrows *which* modules get loaded, where carrying signatures
+removes the reason to load them at all, and it keeps ADR-340's need (a derivation must
+still reach the leaf that declares its type) satisfied by construction rather than by a
+narrower traversal.
+
+So what stands from the attempt is the measurement, not the patch: the nine-modules-for-two
+shape, the 53M-on-an-80M-run figure, and the confirmation that the cost is transitive
+loading rather than the checker's own Rust (~3% of samples). Whoever builds ADR-370 can use
+those as the before, and the precision check is a `--suggest-sigs` diff over `std/` +
+`tests/` (3452 inferred signatures at `34467e8a`): the image's signatures must leave every
+one of them unchanged.
 
 ## KI-161 — Tier 1 monomorphization's rebind guard refused every module constructor and admitted the module-less rebind ✅ FIXED 2026-09-17
 
