@@ -10,9 +10,9 @@ needing one is queued in [`perf-handoff.md`](perf-handoff.md) instead — curren
 high-priority item: whether KI-114's `as_f64_pair` holds the closure KI-109 got from the
 promotion it constrained.
 
-## 2026-09-18 — C9–C14 closed, KI-162 fixed, KI-164 filed, and the pre-push hook was inert; next is C15
+## 2026-09-18 — C9–C14 closed, KI-162 fixed, KI-165 filed, and the pre-push hook was inert; next is C15
 
-**C14 (ADR-368) — a self-referential `deftype` is a μ type.** `(rec X …)` was always exact
+**C14 (ADR-369) — a self-referential `deftype` is a μ type.** `(rec X …)` was always exact
 at any depth; the bare self-referential spelling — the one an author actually reaches for —
 was unrolled once and read `any` below that, so the CHOICE OF SPELLING decided how deep the
 checker saw. `alias_ty` pushes the alias's own name onto the same `REC_BOUND` stack and
@@ -28,7 +28,7 @@ writes — neither `std/` nor bedit has a self-referential alias today, which is
 before anyone spends a week on it. Mutual recursion needed nothing extra: it collapses to
 the single binder by substitution when each name occurs once.
 
-**KI-164 filed, not fixed — read it before trusting a `sig!` over an alias.** No `deftype`
+**KI-165 filed, not fixed — read it before trusting a `sig!` over an alias.** No `deftype`
 alias is enforced at RUNTIME: `type-matches?` has no case for an alias name, so it hits the
 "unknown compound → accept" default and `(sig! take-point (point -> int))` passes `"nope"`.
 Every alias since ADR-327, not just recursive ones. Found by asking C14's work the question
@@ -154,7 +154,7 @@ it (it was "do it with C10 if C10 needs it"; C10 did not) — it now needs a cas
 **Next, in order:** **C15** (effects displayed — the walk computes a function's effects and
 shows them nowhere; totality across calls is a call graph with a measure per edge), then
 C16–C17 in list order (`docs/type-system-status.md` § "The remaining list"); C12–C14 are
-closed above, and **KI-164** is the open one this work filed. **KI-150** is
+closed above, and **KI-165** is the open one this work filed. **KI-150** is
 reopened by the column refresh below (the checker costs ~10% more per file and every `brood
 file` pays it) and is the other live thread; its first candidate is caching inferred
 signatures in the stdlib image.

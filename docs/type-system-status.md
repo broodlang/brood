@@ -1394,7 +1394,7 @@ each lands; this section is the working list, `handoff.md` points at it.
       ADR-367 rather than quietly take the shortcut. **Reconsider if** every NaN-producing
       operation comes to raise (floats would then be totally ordered here), or if float
       ranges turn out load-bearing rather than documentation.
-- [x] **C14. A named recursive alias** (2026-09-18, ADR-368). `(deftype json (rec …))`
+- [x] **C14. A named recursive alias** (2026-09-18, ADR-369). `(deftype json (rec …))`
       already worked; what did not was the spelling an author actually reaches for — a
       **self-referential alias** was UNROLLED `RECURSIVE_UNROLL` times and read `any` below
       that, so `(:v (:l t))` was typed and `(:v (:l (:l t)))` was not, while the identical
@@ -1411,7 +1411,7 @@ each lands; this section is the working list, `handoff.md` points at it.
       `(rec X nil | number | string | vector<X>)`), exact at any depth; a cycle needing two
       live binders still unrolls. Three pins in `check/tests/names_as_types.rs` (replacing
       the one that pinned the old bound), each sabotage-verified. **Filed, not closed:**
-      KI-164 — no `deftype` alias is enforced at RUNTIME (`type-matches?` has no alias case,
+      KI-165 — no `deftype` alias is enforced at RUNTIME (`type-matches?` has no alias case,
       so `sig!` over one accepts anything), which is every alias since ADR-327.
 - [ ] **C15. Effects displayed; totality across calls.** The walk computes a function's
       effects and shows them nowhere (`nest docs`, hover). Totality across calls and mutual

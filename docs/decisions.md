@@ -23682,7 +23682,7 @@ arms (a callback declining every activation would latch the arm BAILED — KI-13
 recognition. Found writing the native check: a map LITERAL inside a hot arm puts the whole
 arm outside the JIT subset (`MakeMap` is not lowered) — recorded in the handoff, not this ADR's.
 
-## ADR-368 — A self-referential `deftype` is a μ type, and there is exactly one binder
+## ADR-369 — A self-referential `deftype` is a μ type, and there is exactly one binder
 
 **Status:** accepted (2026-09-18). **Context:** type-system list item C14 — "a named
 recursive alias, so a `sig` names it once".
@@ -23747,7 +23747,7 @@ This replaces the test that pinned the old bound (`a_recursive_alias_unrolls_one
 then_reads_as_any`), whose comment said "the checker has no recursive types" — true when it
 was written, before ADR-349.
 
-**The gap this did NOT close, filed as KI-164:** no `deftype` alias is enforced at RUNTIME.
+**The gap this did NOT close, filed as KI-165:** no `deftype` alias is enforced at RUNTIME.
 `type-matches?` has no case for an alias name, so under `sig!` a declared alias accepts any
 value — every alias since ADR-327, not just recursive ones.
 
