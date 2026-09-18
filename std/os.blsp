@@ -79,6 +79,11 @@ started an operating-system process while the bare `spawn` special form started 
   (let (st (file/stat p))
     (and st (not (:dir? st)) (or (:exec? st) (= (type) :windows)))))
 
+(defn- path-separator ()
+  ;; What separates PATH's entries: `;` on Windows, `:` everywhere else. Splitting on `:`
+  ;; unconditionally would make every Windows entry one unsplit string beginning `C`.
+  (if (= (type) :windows) ";" ":"))
+
 (defn- which-in (dirs program)
   ;; The first PATH entry holding a runnable `program`, as the path to it. Recursive
   ;; rather than `keep` + `first` so the walk STOPS at the hit: this runs before a spawn,
@@ -102,14 +107,17 @@ Follows the `execvp` rule: a `program` containing a path separator is **not** se
 for — it is used as given, and answered only if it is executable — and otherwise each
 `PATH` entry is tried in order, an empty entry meaning the current directory. A
 directory, or a file with no execute bit for anyone, is not a match (`file/stat`'s
-`:exec?`; off unix there are no permission bits, so existence is the whole test).
+`:exec?`; Windows has no permission bits, so there existence is the whole test).
+
+**Windows:** the entry separator is `;` and `\\` counts as a path separator, but `PATHEXT`
+is not applied — name the extension you mean (`\"cargo.exe\"`), as a spawn would.
 
     (os/which \"ls\")           ;; => \"/usr/bin/ls\"
     (os/which \"no-such-cmd\")  ;; => nil
     (os/which \"./build.sh\")   ;; => \"./build.sh\" if it is executable, else nil"
-  (if (includes? program "/")
+  (if (or (includes? program "/") (and (= (type) :windows) (includes? program "\\")))
     (when (runnable? program) program)
-    (which-in (string/split (or (env "PATH") "") ":") program)))
+    (which-in (string/split (or (env "PATH") "") (path-separator)) program)))
 
 (defn cmd (prog & rest)
   "Run `prog` (a string) and return `{:stdout s :stderr s :exit n}`.
