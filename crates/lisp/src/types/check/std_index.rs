@@ -111,6 +111,11 @@ pub(crate) fn image_carried_sig(heap: &Heap, form: Value) -> Option<Sig> {
     (!sig.ret.is_any() && !sig.ret.is_unrefined_collection()).then_some(sig)
 }
 
+/// Whether every symbol in `form` is a word of the type grammar itself, so that reading it
+/// cannot depend on which modules a process has loaded. `&` and `&optional` are parameter-list
+/// MARKERS of the arrow grammar (`annot::arrow_of`), not names to resolve — `&optional` was
+/// missing here, so 14 declarations spelled entirely in the grammar (`string/pad-left`,
+/// `string/fields`, `reflect/type-aliases`, …) declined for a reason the grammar does not have.
 fn every_symbol_is_a_type_word(heap: &Heap, form: Value) -> bool {
     let mut work = vec![form];
     while let Some(v) = work.pop() {
@@ -118,7 +123,7 @@ fn every_symbol_is_a_type_word(heap: &Heap, form: Value) -> bool {
             Value::Sym(s) => {
                 let name = value::symbol_name(s);
                 let word = name.starts_with('?')
-                    || matches!(name.as_str(), "->" | "&" | "_")
+                    || matches!(name.as_str(), "->" | "&" | "&optional" | "_")
                     || annot::is_type_word(&name);
                 if !word {
                     return false;
@@ -277,4 +282,96 @@ fn count_params(_heap: &Heap, params: &[Value]) -> (u32, u32) {
         }
     }
     (required, required + optional)
+}
+
+#[cfg(test)]
+mod triage {
+    use super::*;
+
+    /// **A triage tool, not a gate** — run it by name:
+    ///
+    /// ```text
+    /// cargo test -p brood --lib untyped_names_that_force_a_module_load -- --ignored --nocapture
+    /// ```
+    ///
+    /// It prints, for each std module, the names some OTHER std module references and the
+    /// index carries no type for. Declare all of one module's names and the transitive scan
+    /// (`check::materialise_referenced_modules`) stops loading that module at all — which is
+    /// how `path` and `string` left the trace on 2026-09-18.
+    ///
+    /// `BROOD_IMAGE_TRACE=1` answers the same question one name per run, because a module
+    /// once loaded hides every later name in it; this reads the sources and answers it whole.
+    /// Read the measurement in `known-issues.md` (KI-150) before spending on the list: on an
+    /// IMAGED run the loads it removes are below the instruction-count floor.
+    #[test]
+    #[ignore = "triage tool: prints a ranked list, asserts nothing"]
+    fn untyped_names_that_force_a_module_load() {
+        let mut interp = crate::Interp::new();
+        let index = std_signature_index(&mut interp.heap);
+        let typed: HashSet<&str> = index
+            .iter()
+            .filter(|e| !e.text.is_empty())
+            .map(|e| e.name.as_str())
+            .collect();
+        let indexed: HashSet<&str> = index.iter().map(|e| e.name.as_str()).collect();
+        let mut referenced_by: HashMap<String, HashSet<&'static str>> = HashMap::new();
+        for (key, source) in crate::builtins::modules::embedded_modules() {
+            let Ok(forms) = crate::syntax::reader::read_all(&mut interp.heap, source) else {
+                continue;
+            };
+            let mut names = Vec::new();
+            for form in forms {
+                every_symbol(&interp.heap, form, &mut names);
+            }
+            for name in names {
+                let Some((module, _)) = name.rsplit_once('/') else {
+                    continue;
+                };
+                // A self-reference needs no other module; `%`-prefixed names are primitives.
+                if module == key || name.starts_with('%') || module.is_empty() {
+                    continue;
+                }
+                referenced_by.entry(name).or_default().insert(key);
+            }
+        }
+        let mut per_module: HashMap<&str, Vec<(usize, &str)>> = HashMap::new();
+        for (name, modules) in &referenced_by {
+            if !indexed.contains(name.as_str()) || typed.contains(name.as_str()) {
+                continue; // a native, a project name, or one the index already types
+            }
+            let module = name.rsplit_once('/').map(|(m, _)| m).unwrap();
+            per_module
+                .entry(module)
+                .or_default()
+                .push((modules.len(), name.as_str()));
+        }
+        let mut modules: Vec<(&str, Vec<(usize, &str)>)> = per_module.into_iter().collect();
+        modules.sort_by_key(|(m, names)| (std::cmp::Reverse(names.len()), *m));
+        println!("\n=== names that force a std module to load, by module ===");
+        for (module, mut names) in modules {
+            names.sort_by_key(|(n, name)| (std::cmp::Reverse(*n), *name));
+            let rendered: Vec<String> = names
+                .iter()
+                .map(|(n, name)| format!("{name}({n})"))
+                .collect();
+            println!("  {module}: {}  {}", names.len(), rendered.join(" "));
+        }
+    }
+
+    /// Every symbol in `form`, in no particular order.
+    fn every_symbol(heap: &Heap, form: Value, out: &mut Vec<String>) {
+        let mut work = vec![form];
+        while let Some(v) = work.pop() {
+            match v {
+                Value::Sym(s) => out.push(value::symbol_name(s)),
+                Value::Pair(_) => {
+                    if let Some(items) = list_items(heap, v) {
+                        work.extend(items)
+                    }
+                }
+                Value::Vector(id) => work.extend(heap.vector(id).iter().copied()),
+                _ => {}
+            }
+        }
+    }
 }

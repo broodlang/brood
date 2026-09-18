@@ -65,6 +65,7 @@ ignored so `(basename \"/usr/bin/\")` returns `\"bin\"`. `(basename \"/\")` retu
       (= e 1) "/"
       ;; path is exactly "/"
       else (string/substring p (+ i 1) e))))
+(sig basename (string -> string))
 
 (defn dirname (p)
   "The directory part of `p` — everything up to but not including the final /.
@@ -78,6 +79,7 @@ Returns `\".\"` for a bare name, `\"/\"` for the root.
       (< i 0) "."
       (= i 0) "/"
       else (string/substring p 0 i))))
+(sig dirname (string -> string))
 
 (defn extension (p)
   "The extension of `p`'s basename including the dot (e.g. `\".txt\"`), or `\"\"`.
@@ -87,6 +89,7 @@ Returns `\".\"` for a bare name, `\"/\"` for the root.
         n (string/length b)
         i (path-last-dot b (- n 1)))
     (if (<= i 0) "" (string/substring b i n))))
+(sig extension (string -> string))
 
 (defn stem (p)
   "The basename of `p` without its extension (`\"foo.tar.gz\"` → `\"foo.tar\"`).
@@ -232,6 +235,7 @@ is. Makes a path absolute, not canonical — it does not collapse `.`/`..` segme
     (string/starts-with? path "~/")
       (str (or (%getenv "HOME") "~") (string/substring path 1 (string/length path)))
     else (path/join (or base (file/cwd)) path)))
+(sig absolute (string &optional string -> string))
 
 (defn temp (prefix)
   "A fresh, unpredictable path under `/tmp`: `<prefix><32 hex chars>`, NOT created —
@@ -246,3 +250,4 @@ of file with your privileges. Neither is possible with a name they cannot predic
   ;; `%random-token`, not the `rand/token` wrapper: this is prelude code, so it must
   ;; not depend on a module the caller may never have required.
   (path/join "/tmp" (str prefix (%random-token 16))))
+(sig temp (string -> string))

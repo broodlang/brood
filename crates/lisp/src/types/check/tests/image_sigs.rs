@@ -185,3 +185,51 @@ fn every_indexed_arity_is_the_loaded_closures_arity() {
         "only {checked} closures compared — the index or the load is short"
     );
 }
+
+#[test]
+fn a_declaration_whose_only_marker_is_optional_rides() {
+    // `&optional` is a parameter-list MARKER of the arrow grammar (`annot::arrow_of`), the
+    // same as `&` — not a name whose meaning depends on a loaded module. It was missing from
+    // `std_index::every_symbol_is_a_type_word`, so every declaration using one was read as
+    // naming a record or alias and declined: `string/pad-left`, `string/fields`,
+    // `markdown/->html`, `reflect/type-aliases` and `string/number->` all stayed loads for a
+    // reason the grammar does not have.
+    //
+    // Asserted on the SOURCE SCAN first, because that is what the writer stores and it holds
+    // whatever the cache contains — a footer-only assertion passes vacuously against an image
+    // built before the fix (which is how this test first went green under sabotage). The
+    // footer assertion follows it: that is what a call site actually reads.
+    const NAMES: [&str; 4] = [
+        "string/pad-left",
+        "string/pad-right",
+        "string/fields",
+        "string/number->",
+    ];
+    let mut interp = interp_with_image();
+    let scanned = check::std_signature_index(&mut interp.heap);
+    for name in NAMES {
+        let entry = scanned
+            .iter()
+            .find(|e| e.name == name)
+            .unwrap_or_else(|| panic!("{name}: not indexed at all"));
+        assert!(
+            entry.text.contains("&optional"),
+            "{name}: the scan carries `{}`, so an `&optional` declaration declined",
+            entry.text
+        );
+    }
+    let heap = &interp.heap;
+    for name in NAMES {
+        let sym = value::intern(name);
+        let text = derive::image_sig_text(heap, sym)
+            .unwrap_or_else(|| panic!("{name}: the scan carries a type and the footer does not"));
+        assert!(
+            text.contains("&optional"),
+            "{name}: the footer carries `{text}`, which is not the declaration under test"
+        );
+        assert!(
+            sigs::image_heap_sig(heap, sym).is_some(),
+            "{name}: the carried text does not parse back to an arrow"
+        );
+    }
+}

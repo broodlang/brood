@@ -19,8 +19,14 @@
 because half the corpora encode their expectations as hex.")
 
 ;; tests/support/corpus.blsp -> tests/corpus
+;; `reflect/current-file` is nil when this module is not being loaded from a file (an
+;; `eval` of the source, a REPL paste), and `path/absolute` declares a string — so the
+;; fallback is this file's own path relative to the repo root, which is what a runner
+;; started there would have got anyway.
 (def- corpus-root
-  (path/join (path/dirname (path/dirname (path/absolute (reflect/current-file)))) "corpus"))
+  (path/join (path/dirname (path/dirname (path/absolute (or (reflect/current-file)
+                                                          "tests/support/corpus.blsp"))))
+    "corpus"))
 
 (defn corpus-dir (suite)
   "The directory holding the vendored corpus `suite`."
