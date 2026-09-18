@@ -72,6 +72,45 @@ started an operating-system process while the bare `spawn` special form started 
   "The current OS as a keyword: `:linux`, `:macos`, or `:windows`."
   (%os-type))
 
+(defn- runnable? (p)
+  ;; A path `spawn` could actually execute: it exists, it is not a directory, and someone
+  ;; has an execute bit. Windows has no permission bits (`file/stat` reports `:mode` 0 and
+  ;; `:exec?` false there), so existence is the whole test — as much as it will say.
+  (let (st (file/stat p))
+    (and st (not (:dir? st)) (or (:exec? st) (= (type) :windows)))))
+
+(defn- which-in (dirs program)
+  ;; The first PATH entry holding a runnable `program`, as the path to it. Recursive
+  ;; rather than `keep` + `first` so the walk STOPS at the hit: this runs before a spawn,
+  ;; and a stat per remaining entry for an answer already found is pure waste.
+  (if (empty? dirs)
+    nil
+    (let (dir (first dirs)
+          candidate (str (if (= dir "") "." dir) "/" program))
+      (if (runnable? candidate) candidate (which-in (rest dirs) program)))))
+
+(defn which (program)
+  "Where [[spawn]] would find `program`, as an absolute-or-given path — or **nil** when
+nothing on `PATH` can be executed under that name.
+
+The question every caller of [[spawn]] / [[cmd]] / [[run-process]] has *before* it
+spawns, because the answer to \"it is not installed\" should be a sentence the user can
+act on (`elixir-ls is not on PATH`), not the raised error a failed spawn gives it. Asking
+is opportunistic, so this answers nil rather than raising, like [[exe-path]].
+
+Follows the `execvp` rule: a `program` containing a path separator is **not** searched
+for — it is used as given, and answered only if it is executable — and otherwise each
+`PATH` entry is tried in order, an empty entry meaning the current directory. A
+directory, or a file with no execute bit for anyone, is not a match (`file/stat`'s
+`:exec?`; off unix there are no permission bits, so existence is the whole test).
+
+    (os/which \"ls\")           ;; => \"/usr/bin/ls\"
+    (os/which \"no-such-cmd\")  ;; => nil
+    (os/which \"./build.sh\")   ;; => \"./build.sh\" if it is executable, else nil"
+  (if (includes? program "/")
+    (when (runnable? program) program)
+    (which-in (string/split (or (env "PATH") "") ":") program)))
+
 (defn cmd (prog & rest)
   "Run `prog` (a string) and return `{:stdout s :stderr s :exit n}`.
 An optional second argument is a list or vector of string arguments, and an optional
