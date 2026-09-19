@@ -43,7 +43,8 @@ fn main() {
     // `brood`, `nest` and `brood-lsp` from one tree get three different ids and each would
     // write its own ~2 MB stdlib startup image. This id depends only on what is baked in,
     // so they share one. Computed here rather than as a `const fn` because const-eval hits
-    // its step limit hashing ~1 MB, and at runtime it would cost ~1 ms of a ~23 ms boot.
+    // its step limit hashing ~1 MB, and recomputing it at runtime costs 2.2M instructions
+    // (`mix_chunk` below — it was 13.6M, 14.5% of a `brood --check`, a byte at a time).
     let root = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default())
         .join("../..")
         .canonicalize()
@@ -60,10 +61,7 @@ fn main() {
                 .as_bytes(),
             &std::fs::read(f).unwrap_or_default(),
         ] {
-            for b in chunk {
-                hash ^= *b as u64;
-                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-            }
+            mix_chunk(&mut hash, chunk);
         }
         println!("cargo:rerun-if-changed={}", f.display());
     }
@@ -110,5 +108,29 @@ fn collect_blsp(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
                 out.push(p);
             }
         }
+    }
+}
+
+/// FNV-1a over 8-byte WORDS, the chunk's length mixed in first, a byte tail for the
+/// remainder. **Mirrored verbatim in `crates/lisp/src/cli_support.rs`**, which recomputes
+/// this hash from the tree to tell a developer their binary is older than their edits; a
+/// build script cannot share code with the crate it builds, so the algorithm lives twice and
+/// `the_runtime_and_build_time_stdlib_hashes_agree` is the gate that keeps the copies equal.
+///
+/// A byte at a time cost 13.6M instructions over 3 MB of `std/` — 14.5% of a release
+/// `brood --check` (callgrind, 2026-09-19, KI-150). The comment above used to estimate "~1 ms
+/// of a ~23 ms boot" for it, unmeasured.
+fn mix_chunk(hash: &mut u64, chunk: &[u8]) {
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    *hash ^= chunk.len() as u64;
+    *hash = hash.wrapping_mul(PRIME);
+    let (words, tail) = chunk.as_chunks::<8>();
+    for w in words {
+        *hash ^= u64::from_le_bytes(*w);
+        *hash = hash.wrapping_mul(PRIME);
+    }
+    for b in tail {
+        *hash ^= *b as u64;
+        *hash = hash.wrapping_mul(PRIME);
     }
 }

@@ -66,6 +66,16 @@ fn run(file: &PathBuf, prims: bool, extra: &[(&str, &str)]) -> String {
 
 /// Every branch of the 3-arity `get` and of the single-pair `assoc`, plus two loops long
 /// enough to reach the native tier.
+///
+/// **The map cases are compared by VALUE, never by rendering.** A map's iteration order
+/// follows the interned ids of its keys, so `pr-str` of a multi-key map can differ between
+/// two processes of the SAME binary whose preludes arrived differently — reproduce with
+/// `BROOD_NO_PRELUDE_IMAGE=1`, which prints `{:c 3, :b nil, :a 1}` where an image boot
+/// prints `{:a 1, :c 3, :b nil}`. This line used to compare renderings, and on 2026-09-19 it
+/// failed a full-suite run with "a prim changed an ANSWER" when no answer had changed and
+/// only the order had moved. `=` on maps is content-exact and order-free, and it separates a
+/// STORED nil from an absent key — the one distinction this file exists for — so pinning the
+/// expected map is strictly stronger than the rendering was.
 const EVERY_BRANCH: &str = "\
 (defrecord cir (r))\n\
 (def m {:a 1 :b nil})\n\
@@ -87,7 +97,7 @@ const EVERY_BRANCH: &str = "\
 (io/puts (str \"lookup-hit \" (get v :seed :d)))\n\
 (io/puts (str \"lookup-miss-default \" (pr-str (get v :zz :d))))\n\
 (io/puts (str \"lookup-miss-nil \" (pr-str (get v :zz nil))))\n\
-(io/puts (str \"assoc-map \" (pr-str (assoc m :c 3)) \" \" (pr-str (assoc m :a 9)) \" \" (pr-str (assoc {} :k nil))))\n\
+(io/puts (str \"assoc-map \" (= (assoc m :c 3) {:a 1 :b nil :c 3}) \" \" (= (assoc m :a 9) {:a 9 :b nil}) \" \" (= (assoc {} :k nil) {:k nil})))\n\
 (io/puts (str \"assoc-vector \" (pr-str (assoc [10 20 30] 1 99))))\n\
 (io/puts (str \"assoc-record \" (get (assoc rec :r 5) :r 0) \" \" (record? (assoc rec :r 5))))\n\
 (io/puts (str \"assoc-vector-oob \" (try (assoc [1 2] 5 0) (catch e :error))))\n\
@@ -118,6 +128,13 @@ fn the_map_prim3_ops_answer_what_get_and_assoc_answer() {
     assert!(
         on.contains("lookup-miss-default :d"),
         "a non-nil default is answered without consulting `Lookup`, as `get` does:\n{on}"
+    );
+    // The three `assoc` results are compared in-language against their expected maps (see
+    // EVERY_BRANCH), so this is what makes those comparisons a PIN rather than a pair of
+    // booleans that could read `false` in both arms and still agree.
+    assert!(
+        on.contains("assoc-map true true true"),
+        "an `assoc` answered a map other than the one pinned in the fixture:\n{on}"
     );
     assert_eq!(off, on, "a prim changed an ANSWER");
 

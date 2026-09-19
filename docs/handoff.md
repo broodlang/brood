@@ -10,7 +10,63 @@ needing one is queued in [`perf-handoff.md`](perf-handoff.md) instead — curren
 high-priority item: whether KI-114's `as_f64_pair` holds the closure KI-109 got from the
 promotion it constrained.
 
+## 2026-09-19 — the staleness guard is 6.8× cheaper; KI-150's remaining half is now the checker's own per-file walk
+
+**Green at the commit below.** `make test` 1651/1651, `make prepush` clean, and the change is one
+function's stride.
+
+`cli_support::stdlib_tree_hash` — the guard that re-hashes `std/**/*.blsp` so a binary older
+than your edits refuses to check — was **15.0M instructions, 16% of a release
+`brood --check`** (callgrind; the 14% on record was a *debug* profile and turned out right).
+FNV-1a a byte at a time over 3.0 MB is 4.4 instructions per byte on a serial multiply chain.
+`mix_chunk` runs the same FNV over 8-byte words with a byte tail: **2.2M**.
+
+**The A/B to reuse:** the guard is skipped outside a checkout (`repo_root()` → `None`), so
+one binary measures both arms by changing directory — inside 93.88M → 80.61M, outside
+78.92M → 78.93M as the control. No instrumentation, no second build.
+
+**A `stat`-keyed cache was refused on purpose.** It would take the remaining 2.2M and it can
+miss an edit in the direction where a stale verdict "reads exactly like a right one" (B7).
+Don't reach for it later without re-reading why.
+
+**Scope:** `brood file.blsp` does not call this guard, so **the `base64` row KI-150 opened on
+did not move**. The win is every `--check`/`--test`/`nest` invocation.
+
+### A flake found and fixed on the way: KI-166
+
+The full suite came back 1650/1651 once. `cli::mapprim3_differential` compared two processes'
+RENDERED output, and a map's iteration order follows its keys' interned ids — which differ
+between an image boot and a source boot, deterministically (`BROOD_NO_PRELUDE_IMAGE=1`
+reproduces it; so does deleting the prelude image and running twice). The gate now compares
+by `=` with a pin and is stronger than it was; the open language question — should the image
+restore the interner — is argued both ways in KI-166. **The lesson: a differential must
+compare the ANSWER, not a rendering of it.**
+
+### What is left of KI-150
+
+The pre-flight's own per-file walk: **3.7M** on a one-liner, **24M** on `pipeline`, **47M**
+on `errors-deep` — it scales with the file being checked, not with what loads, and that is
+the checker doing its job rather than an obvious waste. The entry stays OPEN until a column
+refresh reads `base64` again; no benchmarks run on this box, so that reading is off-box work
+(`perf-handoff.md`).
+
+Index coverage is the other half and is **measured as not worth grinding**: the loads it
+removes are below the instruction floor (107.2M either way). The ranked list of what to
+declare next is still `cargo test -p brood --lib untyped_names_that_force_a_module_load --
+--ignored --nocapture`, if coverage is wanted for the *heap* and verdict-independence rather
+than for speed.
+
+### Still in the working tree, and still the machine owner's
+
+Unchanged from yesterday: `evalsession` (+ its registration and doc-catalog entries), the
+`treesit` work, `std/editor/buffer.blsp`, `std/string.blsp`'s `fold-case`/`has-upper?`,
+`std/prelude/control.blsp`, `std/tool/project-release.blsp` and their tests — plus **one edit
+of a session's inside `tests/buffer_test.blsp`** (the `nil | int` offsets now read under an
+`if`; it was the pre-push gate's red). All green under the gates; none of it committed.
+
 ## 2026-09-18 night — KI-150's coverage half landed; the machine owner's in-flight work is still uncommitted
+
+> **Superseded by the section above**, which carries the traps forward: the tmpfs scratchpad, the stale `release-fast` pick, and the owner's uncommitted work are all still live.
 
 **Pushed and green at `517b8a1c`.** Two commits went out this session: `80f9b51b` (the
 clippy `let_and_return` that had CI **red** on `3cc912b8` — `--all-features` arms the lint, a

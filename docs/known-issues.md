@@ -143,7 +143,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-147 | **`nest release` refused every hive bundle since v0.28.0: `circular `(:use http/util)`: `http/util` is still loading` on a module with no `:use` at all** — the bundle boot loop loads in one process while a supervisor a module starts at load pulls modules in from another (under lazy loading, ADR-335, a load starting in a spawned process is ordinary), and `%refer`'s cycle check read the OTHER process's `*features-loading*` claim as a cycle. `require-one` had already waited for that load and returned on its `provide`, which lands a few instructions before the loader clears its marker | ✅ **FIXED 2026-09-16 (v0.29.1)** — `module_is_loading` is true only when THIS process holds the claim; a cycle back into a module is only possible in the process loading it, and another process's finished load has a complete public set by the time `require-one` returns. Found by `BROOD_TRACE_GLOBAL='*features-loading*'` over the kept bundle (`nest release --no-smoke`); hive boots 3/3. Guard in `tests/modules_test.blsp` (another process's claim over a provided module refers; our own claim is the cycle), sabotage-verified. Neither v0.28.0 nor v0.29.0 can release an app whose modules spawn at load |
 | KI-148 | **two more arms latched off the native tier, found by running every benchmark row under `BROOD_JIT_BAIL_TRACE` after ADR-353: `second` deopt-thrashed on `http` and `supervisor` (the inline `first`/`rest` tag-checked for a pair and DEOPTED for every other shape, so `(first (rest v))` over a vector deopted per activation), and `json/num-end` + `json/object-acc` had never lowered at all — `join-depth-mismatch … edges=[0, 1]`: the bytecode compiler's jump-past-the-`else` after a then-branch ending in a tail `SelfCall` is dead, the prepass never reaches it, and the emit loop still translated it with an empty stack into a live join** | ✅ **FIXED 2026-09-16** — the non-pair path of `first`/`rest` calls `brood_rt_first`/`_rest` (nil / vector / range / bytes / set and the type error answered in the kernel; a record or seq-view still deopts, they need the evaluator), and because `rest` of a vector ALLOCATES, the hoisted pair-slab bases are held in Cranelift `Variable`s and re-fetched after that call — the first cut read a LOCAL pair through the stale base and segfaulted (`ej-rest-then-pair`, sabotage-verified to SIGSEGV without the re-fetch). A leader the prepass never reached is terminated as unreachable (`jump deopt`) instead of emitted. Guards in `tests/jit_eq_join_test.blsp` §3; **`make tier-audit`** (`scripts/tier-audit.sh`) now runs every benchmark row under the trace and fails on any latch or lowering bug — red on the 0.29.0 binary (json, supervisor), green after; in `make green-all`. `make ab --floor` over the list and message rows: every one inside its floor |
 | KI-149 | **the unused-private-function verdict depends on the file LIST: a bare project-wide `nest check` warns `unused private function: use-a` in `tests/lazy_load_test.blsp`, while CI's explicit-file invocation over `std/**/*.blsp tests/**/*.blsp examples/**/*.blsp` — the same files — reports zero on the same tree, and so does the single file alone** | ✅ **FIXED 2026-09-16** — not the KI-137 class at all: the unused-private and duplicate-defs lints were WHOLE-PROJECT passes that only the bare `nest check` ran, so CI's explicit-list form had never run them, and the bare form threw their counts away, so neither form had ever failed the gate on one. `project-whole-lints` now runs both over the project's every file for either form, reported for the files asked about and counted; `use-a` was dead (the child program defines its own) and is gone. Guard `crates/nest/tests/whole_project_lints_listed.rs`, sabotage-verified. Was: present at `c1647db8` (origin's tip before the day's JIT work), so not a regression of anything that day. The KI-137 class — a verdict that differs between two lists, never between two runs of one — on the unused-private lint this time: `use-a` is a private helper whose only *call* is inside a string the test hands to a child process, so the honest answer is "unused", and the question is why one list reaches it and the other does not (the ADR-340 materialisation fixpoint, or the site collector's scope under a project-wide walk). Repro: `nest check` vs `nest check tests/lazy_load_test.blsp` at `df47aeb4`. Not a gate failure today — CI runs the explicit list — but a checker whose verdict moves with the list is the thing KI-137 was filed for |
-| KI-150 | **`base64` +6.6% at the 0.29.2 column refresh, ~5% of it the pre-run CHECK: `1a8759fb` removed `encoding`'s nine declared sigs and `brood file`'s pre-flight now infers them on every run** — bisected with fixed baselines and instruction counts (the row's wall is bimodal): `d464e9ed` 0.632G → `1a8759fb` 0.664G (+5%) → head 0.671G; with `BROOD_NO_CHECK=1` the wave's delta is +1%; A0/A1's own share is +1.6% (`a4b79219` 0.642G) | 🔶 **OPEN — loading half CLOSED BY CONSTRUCTION 2026-09-18 (ADR-370)**: the image footer carries each imaged function's existence, arity and (136) as-is declarations, so the transitive scan loads 7 modules not 9 for the one-liner (and 0 of `path`/`string` since `517b8a1c` declared them, index 124 → 150 — measured BELOW the instruction floor, 107.2M either way) — and the count is UNCHANGED (105.5M either way): loading was cheap, the cost is the checker's own walk (`stdlib_tree_hash` 14% of a debug `--check`). Was: **REOPENED 2026-09-17** — read again at the `a406f9a6` refresh: `pipeline` +7.3%, and the split is exact — `brood --check` alone 131M → 144M instructions (the whole delta), the run +0.8%; `fib`'s check grew 124M → 133M on an untouched file, so the checker costs ~10% more per file since `084060fb` (A4/A5/B6/C9, not bisected) and every `brood file` pays it. The trigger the mitigation named; first candidate: inferred signatures cached in the stdlib image. Was: **MITIGATED 2026-09-16** — the ten codec sigs the bisect named (`encoding`'s nine, `bytes/length`) are back, each marked as kept for COST, not for a fact: a declared sig is a lookup where inferring the decoder's body is the ~30 M instructions measured. The wave's owner's call on the options: this one, because it is the measured row and ten lines; the structural ones — inferred signatures cached in the stdlib image, or a pre-flight that skips inference for imaged std modules — stay open as a watch until the benchmark refresh reads the row again (no benchmarks run on the development box). The KI-138/139 class: a checker cost is a runtime cost on this system because `brood file` checks before it runs, and the wave's premise ("the checker infers each verbatim without it") is true of the *verdict* and false of the *cost*. Repro: `perf stat -e instructions:u brood bench/brood/base64.blsp` at the two commits, images live on both |
+| KI-150 | **`base64` +6.6% at the 0.29.2 column refresh, ~5% of it the pre-run CHECK: `1a8759fb` removed `encoding`'s nine declared sigs and `brood file`'s pre-flight now infers them on every run** — bisected with fixed baselines and instruction counts (the row's wall is bimodal): `d464e9ed` 0.632G → `1a8759fb` 0.664G (+5%) → head 0.671G; with `BROOD_NO_CHECK=1` the wave's delta is +1%; A0/A1's own share is +1.6% (`a4b79219` 0.642G) | 🔶 **OPEN — loading half CLOSED BY CONSTRUCTION 2026-09-18 (ADR-370)**: the image footer carries each imaged function's existence, arity and (136) as-is declarations, so the transitive scan loads 7 modules not 9 for the one-liner (and 0 of `path`/`string` since `517b8a1c` declared them, index 124 → 150 — measured BELOW the instruction floor, 107.2M either way) — and the count is UNCHANGED (105.5M either way): loading was cheap, the cost is the checker's own walk — of which `stdlib_tree_hash` (15.0M, 16% of a RELEASE `brood --check`) is FIXED 2026-09-19, word-wise FNV, 2.2M; it is a dev-entry-point cost only, so the `base64` row is untouched. Was: **REOPENED 2026-09-17** — read again at the `a406f9a6` refresh: `pipeline` +7.3%, and the split is exact — `brood --check` alone 131M → 144M instructions (the whole delta), the run +0.8%; `fib`'s check grew 124M → 133M on an untouched file, so the checker costs ~10% more per file since `084060fb` (A4/A5/B6/C9, not bisected) and every `brood file` pays it. The trigger the mitigation named; first candidate: inferred signatures cached in the stdlib image. Was: **MITIGATED 2026-09-16** — the ten codec sigs the bisect named (`encoding`'s nine, `bytes/length`) are back, each marked as kept for COST, not for a fact: a declared sig is a lookup where inferring the decoder's body is the ~30 M instructions measured. The wave's owner's call on the options: this one, because it is the measured row and ten lines; the structural ones — inferred signatures cached in the stdlib image, or a pre-flight that skips inference for imaged std modules — stay open as a watch until the benchmark refresh reads the row again (no benchmarks run on the development box). The KI-138/139 class: a checker cost is a runtime cost on this system because `brood file` checks before it runs, and the wave's premise ("the checker infers each verbatim without it") is true of the *verdict* and false of the *cost*. Repro: `perf stat -e instructions:u brood bench/brood/base64.blsp` at the two commits, images live on both |
 | KI-151 | **the tally a Brood user writes — `(assoc m k (+ (get m k 0) e))` — ran 8× slower than the undocumented `%map-int-add`: the linear-map rewrite admitted only the kernel spelling, so the idiomatic fold stayed a path-copying CHAMP update with two prelude calls per element and its loop arm gate-refused** — brood-benchmarks `wordcount` 848 ms idiomatic vs 99 ms with the primitive, `persistent-map` 561 vs 109. Found when the benchmark ports were reviewed for idiom and the primitive was ruled out as "not code a user would write" | ✅ **FIXED 2026-09-16** (ADR-360) — `LinIdiom` (`eval/compile/inline.rs`) admits the prelude `get` on the accumulator as a read and the fused `assoc`/`+`/`get` shape as an update; the source rewrite emits `%table-get`/`%table-add`. `%table-add` adds exactly as `+` does, and `%map-int-add` now does too (it promoted nowhere and read a float as 0 — the new fuzzer `scripts/fuzz/generators/linmap.py` found the float case diverging between the arms), so the rewrite is unobservable on every input. `wordcount` 857 → 66 ms, `persistent-map` 535 → 79 (`make ab --floor`, no other row moved). Guards: `crates/lisp/tests/linmap_idiom.rs` pins the expansion (fuses / declines by shape), `tests/linmap_soundness_test.blsp` the values under both arms and every tier, `tests/numeric_overflow_test.blsp` §2 promotion at the boundary |
 | KI-152 | **the linear-map rewrite was observable on its SEED: a tally seeded with a map holding a rope raised `cannot send a rope in a message` with the rewrite on and returned the map with it off** — the wrapper copies the accumulator's input map into its private table, and a table cannot hold every value a map can (a rope, a builtin, a lazy view, a self-referential closure), nor stand in for a record whose misses go through `Lookup`. Pre-dates ADR-360 (the `%map-int-add` shape had it too) but the idiomatic shape made it reachable from ordinary code | ✅ **FIXED 2026-09-17** — `%table-from-map` answers nil for such a seed (moved to `process.blsp`, after the `try` macro it needs: from `predicates.blsp` its body could not compile and deferred to the tree-walker per call), and the split keeps the loop AS WRITTEN as a third def the wrapper runs instead; that copy is wrapped in `(%lint-allow :generated …)`, a new category the checker does not walk (the pre-run check paid ~12M instructions per definition otherwise — measured, KI-150's class). Guards: `tests/linmap_soundness_test.blsp` seeds with a rope, a builtin, a seq-view and a `Lookup` record; `crates/lisp/tests/linmap_idiom.rs` pins the copy; `check/tests/lints.rs` pins the skip; `scripts/fuzz/generators/linmap.py` draws those seeds. `make ab --floor --all`: every row noise |
 | KI-153 | **a function whose only call sites are its own self-calls was checked as dead code — nothing in its body was ever reported, not even `(string/length 5)`** — Pass 2.9 (ADR-341) counted a self-call as a site, so the function was "live", its parameters started at ⊥ for the least fixpoint, and a self-call's arguments typed under those parameters kept them at ⊥; the same body with one outside caller, or with no self-call, was reported | ✅ **FIXED 2026-09-17** — `live_private_functions` requires a site that is NOT a self-call (`Site::Call(_, _, Some(self))`); a function reached only through itself is site-less and walked with unknown parameters. Found while checking whether ADR-360's rewritten loop kept its warnings. Guard: `types::check::tests::closure_inference::a_function_reached_only_through_itself_is_not_derived` (three shapes + a seeded control); `nest check` over std/tests/examples and `--strict` over std stay at zero. In the same commit: the linear-map rewrite's rebuilt forms carry their source positions (`rebuild_list`), so a warning inside a rewritten loop points at its line instead of the `def`'s |
@@ -157,6 +157,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-161 | **`BROOD_MONO=1`'s KI-90 guard never guarded: inside a `defmodule` it refused every record-constructor receiver (the registry records the BARE name, the call head is module-qualified), so Tier 1 never fired in real code — and module-less it always agreed, so a constructor rebound to a plain fn was devirtualized to the record's impl (`rebound: REC7` vs the dynamic `DEFAULT`)** | ✅ **FIXED 2026-09-17** — the guard is structural: the head's bound closure must build the map literal carrying this `:__id__` (`closure_constructs_record`). `mono_differential::a_stale_record_id…` runs both spellings and asserts the record call devirtualized; sabotage (the name comparison back) reds both. Found taking perf-handoff Task 5's numbers |
 | KI-163 | **a body compiled before its module lazily loaded kept its pre-load shape for the whole process — `pipeline` at 2.8× under `BROOD_NO_CHECK=1`, `(math/rem i 3)` in a loop ~1450 instructions per call over the eager compile** — `resolve_prim*`/the thin-wrapper elision/the JIT leaf splice all read the global table at bytecode-compile time (first activation), the head into an unloaded module is unbound then, the miss loads the module and the chunk stays generic; the tier-up pre-load stamped the compile epoch BEFORE loading, so the inlined upgrade read `leaf-derivation-stale` forever | ✅ **FIXED 2026-09-17 (ADR-366)** — a load that a miss triggers marks the arm `stale_bindings` and advances a runtime `stale_gen`; the per-process cache sync drops marked entries so the next lookup recompiles, a stale shared entry is never installed, and a running `SelfCall` loop adopts the recompile through the hot-reload guard's tail transition (a frame whose arm the process marked enters with a sentinel epoch, because the frame re-enters after every non-tail call and a re-read hid the load). `pipeline` no-check 591M → 183M instructions, equal to eager. Found attributing the column refresh: the pre-flight check loads eagerly, so `brood file` never showed it. Guards in `tests/lazy_load_test.blsp` (two, each sabotage-verified) via the new dev probes `%vm-arm-ops` / `%vm-arm-stale?` |
 | KI-165 | **no `deftype` alias is enforced at runtime: under `sig!`/`BROOD_CONTRACTS=1` a declared alias type accepts ANY value** — `type-matches?` has no case for an alias name, so it falls to the "unknown compound → accept" default, and `(sig! take-point (point -> int))` passed `"nope"` for `(deftype point (record :x int :y int))`. Not recursion-specific and not new: it is every alias since ADR-327, and the checker enforces all of them statically | ✅ **FIXED 2026-09-18** — `type-matches?` resolves an alias through the new `%type-alias` (a KEYED lookup; `%type-aliases` walks every declared sig, which a per-value contract cannot afford), and matches the type it names. Terminates on two arguments: a value is finite and acyclic, so a recursive alias descends WITH it — which is why the element/field/position calls start with a fresh `seen` and only the same-value ones (`or`/`and`/`not`/`len`/`rec`, the expansion itself) thread it; the first cut threaded everywhere and swallowed a bad leaf at depth 2, mistaking legitimate descent for a cycle. Cycles that consume no value (`(deftype loop loop)`, `(deftype a (or b))` + `(deftype b (or a))`) are caught by `seen` and accept. Resolution falls back to the checker's own unique-suffix rule after the two keyed lookups, because a contract runs where the VALUE is — a `test` body's green process does not resolve the bare name to the module that declared it. Three cases in `tests/contract_test.blsp`; sabotage-verified twice (the lookup disabled reds 2 tests; the cycle guard removed HANGS the file, which is the failure the guard exists to prevent) |
+| KI-166 | **a map's ITERATION ORDER depends on how the prelude arrived, so `pr-str` of a multi-key map is not stable across two processes of the same binary** — `{:a 1 :b nil}` with `:c 3` assoc'd prints `{:a 1, :c 3, :b nil}` after an image boot and `{:c 3, :b nil, :a 1}` under `BROOD_NO_PRELUDE_IMAGE=1`, deterministically, same binary and program. Order follows the keys' interned ids, and the two boot paths intern in different orders. Found when `cli::mapprim3_differential` failed a full-suite run with *"a prim changed an ANSWER"* — the two arms straddled the boundary and no answer had changed | 🔶 **WATCH — the gate is fixed, the language question is open (2026-09-19)**. The test compared RENDERINGS across processes and now compares by `=` (content-exact, order-free, and it separates a stored nil from an absent key), with an `assoc-map true true true` pin so a wrong map in BOTH arms still reds; sabotage-verified. `mapget_differential` renders only scalars and is not exposed; the doctests compare parsed VALUES, so the eight docstring examples pinning a multi-key map's rendering are safe — verified by running `doc_examples`/`doctest` under both boot paths. **Not yet decided:** whether the prelude image should restore the interner so ids match a source boot. Iteration order is unspecified (CHAMP, as in Clojure), but a user's first run after a rebuild printing a different order from every run after it is a wart, and it is the ADR-314 class — state the evaluation RECORDS rather than binds, which that image has now missed six times. No `hash` primitive is exposed to the language, so the blast radius today is rendering only |
 | KI-162 | **`nest check --fix-sigs` writes each `sig` ABOVE its `defn`** — the placement `sig_placement.rs` forbids tree-wide, because under `BROOD_CONTRACTS=1` a `sig` is a rebinding of a name that must already exist | ✅ **FIXED 2026-09-17** — the locator reads the CST, not the lines: a site is a top-level `defn` ROOT CHILD and its insertion point is one past the form's last line (`sig-defn-sites`, extent from `parse-source`), so the sig lands below and a head laid out across lines is located rather than skipped. `tests/project_test.blsp` pins "directly below" (sabotage: inserting at the form's start line reds 2). Recorded with it: the **load failure did not reproduce** — a forward `sig` over a `defn`, a `defn-` and a `check-allow`-wrapped pair all loaded under contracts and enforced the contract, so what is verified today is the RULE, not the breakage the rule was written for |
 | KI-164 | **a declared `(is T)` type guard does not narrow — ADR-301's signature proves nothing** — `(sig myint? (any -> (is int)))` then `(if (myint? x) x 0)` leaves `x` as it was: a known union stays the union, the unknown stays unknown, where the built-in `(int? x)` narrows both. No `(is …)` signature survives anywhere in `std/` (the ADR's devlog line records six declared) and no test asserts the narrowing, so the feature has neither a live instance nor a gate | ✅ **FIXED 2026-09-18** — `predicate_guard_ty` bailed on `is_local(head)`, which is also true of the file's own globals, so a same-file guard never reached the declared-sig fallback; now `is_local && !is_file_global`. Four narrowing guards in `scope_and_guards` (two with `-> bool` controls); `redundant-sigs.blsp` exempts `(is T)` sigs, which it rendered as `bool` and would have stripped |
 | KI-133 | **a preempted native loop resumed on the interpreter for up to 256 iterations — via its callee's frame** — a native self-tail loop that makes a call is preempted every ~1 500 iterations (the 2 000-reduction quantum); the driver handed the preempted frame to the interpreter "until its loop-top noticed", but the first safepoint that run reached was the CALLEE's entry, so the capture landed on the callee at ip 0, the resume ran the callee natively and returned into the loop MID-BODY, and the loop interpreted to its next 256th back-edge before re-tiering. A 5M-iteration loop with one call: 3 252 preempts, **839 607 interpreted iterations**, −36% instructions with preemption disabled; the leaf-spliced variant −72%. Invisible on the benchmark rows (±1–4%: they are short, or their loops are gate-refused anyway) — this is the cost of every long-running native loop that calls anything, and a candidate for why §7.1's admission experiments read as losses | ✅ **FIXED 2026-09-12** — `vm_run_bc`'s outcome-2 arm yields at once: the budget IS spent, and the frame is at ip 0 (or the journal's resume point, applied first), which is exactly what a resume re-tiers. Guarded by `a_native_preempt_captures_the_loop_frame_not_its_callee`, which drives the capture-mode driver with a 300-reduction budget and asserts every capture after the loop goes native is the loop's frame at ip 0 (sabotage-verified: removing the yield puts the captures on the callee). Found from the call-cost probe: 640 instructions per native→native call read as the call ceremony and was 40% preemption churn |
@@ -9817,7 +9818,7 @@ slowly and a value test passed against them. Sabotage-verified: restoring the de
 `eq_dispatch`'s residual reds "string `=` keeps the arm native" with `:bailed`; restoring
 first-edge-wins reds the join tier case the same way.
 
-## KI-150 — `base64` +6.6%: the sig wave moved work from a declaration into every run's pre-flight check 🔶 OPEN — the loading half is CLOSED BY CONSTRUCTION 2026-09-18 (ADR-370); what remains is the checker's own walk — coverage's first increment landed the same evening (`517b8a1c`, 124 → 150 types) and measured BELOW THE FLOOR (was 🔶 REOPENED 2026-09-17, 🩹 MITIGATED 2026-09-16)
+## KI-150 — `base64` +6.6%: the sig wave moved work from a declaration into every run's pre-flight check 🔶 OPEN — the loading half is CLOSED BY CONSTRUCTION 2026-09-18 (ADR-370); what remains is the checker's own walk — `stdlib_tree_hash` 15.0M → 2.2M 2026-09-19 (dev entry points only — NOT the `base64` row); coverage's first increment landed 2026-09-18 (`517b8a1c`, 124 → 150 types) and measured BELOW THE FLOOR (was 🔶 REOPENED 2026-09-17, 🩹 MITIGATED 2026-09-16)
 
 **Symptom.** The 0.29.2 column refresh (`brood-benchmarks`, min of 3): `base64` 65.2 → 69.5 ms
 (+6.6%, spread 1.4%) against the 0.29.0 column at `d464e9ed`.
@@ -10043,6 +10044,57 @@ not reproduce here. What is left of this issue is the checker's own per-file wal
 that is the next item, with `[image] check materialises <module> for <name>` (under
 `BROOD_IMAGE_TRACE=1`) naming any transitive load that does remain.
 
+**The item this entry named next is done — 2026-09-19: `stdlib_tree_hash` was 15.0M
+instructions, 16% of a release `brood --check`, and is now 2.2M.** The 14% figure above was
+read off a *debug* profile, which is usually a reason to distrust it; callgrind on the
+RELEASE binary says the same thing, and the A/B is clean because the guard is skipped
+outside a checkout (`repo_root()` → `None`), so the same binary measures both arms:
+
+| release `brood --check` on a one-line file | inside the checkout | outside | the hash |
+|---|---|---|---|
+| before | 93.88M | 78.92M | **15.0M** |
+| after | 80.61M | 78.43M | **2.2M** |
+
+(Each arm twice; the *outside* arm is the control, and its 0.5M shift between the two
+binaries is build-to-build codegen drift — which is why the guard is read as the difference
+*within* one binary, 14.96M then 2.19M, rather than across them.) `cli_support::stdlib_tree_hash` was the top symbol of the profile at 14.5% and is now
+absent from it; `Heap::env_get` is the new head at 12.3%.
+
+**The cause was the loop, not the I/O.** FNV-1a a byte at a time over 3.0 MB of `std/` is
+4.4 instructions per byte — load, xor, multiply, increment, compare, branch, with a serial
+dependency on `hash` that cannot vectorise. The fix keeps FNV's shape and runs it over 8-byte
+WORDS with a byte tail (`mix_chunk`, mirrored verbatim in `crates/lisp/build.rs` and
+`cli_support.rs`), plus each chunk's length mixed in first — a word tail makes concatenation
+ambiguity easier to reach than a pure byte stream did, and the length costs one multiply per
+chunk. Same file set, same order, same prime.
+
+**What was NOT done, and why.** A cache keyed on `stat` metadata would take the remaining
+2.2M, and it was rejected: this guard exists because a stale binary's verdict "reads exactly
+like a right one" (B7), and an mtime-keyed cache reintroduces exactly that failure in the
+dangerous direction. The word loop has no such risk — it is the same function computed
+faster.
+
+**Both guards sabotage-verified**, because a staleness guard that cannot fail is the bug it
+is meant to catch: (1) appending a line to `std/uuid.blsp` makes `brood --check` AND `nest
+check` refuse with exit 2 (the entry points a caller reaches, not the hash function); (2)
+drifting one copy of `mix_chunk` by a single `^ 1` reds
+`the_runtime_and_build_time_stdlib_hashes_agree`.
+
+**Note for anyone bisecting across this commit:** the algorithm change moves
+`BROOD_STDLIB_HASH`, which keys the stdlib startup image — every cached
+`~/.cache/brood/std-image-*.bin` from before it is orphaned and rebuilt once. That is the
+image id moving for a *Rust* edit, the trap `perf-handoff.md` trap 2 describes.
+
+
+**Scope, stated plainly: this does NOT move the `base64` row this entry opened on.** The
+staleness guard is called from `brood --check`, `brood --test`, `nest` and `nest check` — the
+development entry points — and **not** from `brood file.blsp`, which is the benchmark's path.
+So the ~12.8M is won by every checker and test invocation (a single-file `--check` is ~14%
+faster) and by nothing the published rows measure. What is still open for the row is the
+pre-flight's own per-file walk — 3.7M on the one-liner, 24M on `pipeline`, 47M on
+`errors-deep` — which scales with the file being checked and is the checker doing its job.
+This entry stays OPEN until a column refresh reads `base64` again; no benchmarks run on this
+box.
 ## KI-161 — Tier 1 monomorphization's rebind guard refused every module constructor and admitted the module-less rebind ✅ FIXED 2026-09-17
 
 **Symptom.** `BROOD_MONO=1 BROOD_MONO_DBG=1` on `(defmodule mp) (defrecord circle (r)) … (area
@@ -11166,6 +11218,74 @@ bundles 3/3.
 one process, and hive's own suite runs the installed `nest`, not a bundle (its `bin/ci` says
 so). The boot check itself was the gate that worked — it refused to ship the artifact.
 
+
+## KI-166 — a map's iteration order depends on how the prelude arrived 🔶 WATCH — the gate is fixed, the language question is open (2026-09-19)
+
+**Symptom.** `cli::mapprim3_differential` failed one full-suite run on 2026-09-19 with
+`a prim changed an ANSWER`, and the only difference between the two arms was the order of one
+map's entries:
+
+```text
+left:  assoc-map {:b nil, :c 3, :a 1} …
+right: assoc-map {:a 1, :b nil, :c 3} …
+```
+
+Every other line of a twenty-line differential matched, including the hot loops. The test
+passed 5/5 when re-run alone, and two earlier full-suite runs of the same day were 1651/1651.
+
+**Cause, reproduced deterministically** — the same binary, the same program, one variable:
+
+```sh
+$ echo '(io/puts (pr-str (assoc {:a 1 :b nil} :c 3)))' > /tmp/mp.blsp
+$ brood /tmp/mp.blsp
+{:a 1, :c 3, :b nil}
+$ BROOD_NO_PRELUDE_IMAGE=1 brood /tmp/mp.blsp
+{:c 3, :b nil, :a 1}
+```
+
+Deleting `~/.cache/brood/prelude-expanded-*.img` and running twice shows it without any flag
+at all: the first run boots the prelude from SOURCE and prints one order, the second boots
+from the image it just wrote and prints the other. A map is a CHAMP trie, so iteration order
+follows the keys' hashes, a keyword's hash follows its interned id, and the two boot paths
+intern in different orders. Nothing is random — it is two deterministic orders, and a test
+that spawns two processes can straddle them.
+
+**What is fixed.** The differential compared *renderings* of a multi-key map across two
+processes, which is not the thing it exists to test. It now compares by `=` in-language —
+content-exact, order-free, and it separates a STORED nil from an absent key, which is the one
+distinction that file is about — with an `assoc-map true true true` assertion so that a wrong
+map in BOTH arms reds rather than agreeing. Sabotage-verified: changing the expected map to
+`{:a 1 :b nil :c 4}` fails the test. That makes the gate strictly stronger than it was, since
+the rendering was never pinned against an expected value at all.
+
+**What is NOT exposed, checked rather than assumed.** `mapget_differential`'s `pr-str` calls
+all render scalars. The doctest harness compares parsed VALUES, not strings, so the eight
+docstring examples that pin a multi-key map's rendering are safe — confirmed by running
+`tests/doc_examples_test.blsp` and `tests/doctest_test.blsp` under both boot paths, 3/3 and
+13/13 each way. No value-`hash` primitive is exposed to the language, so the blast radius
+today is rendering only.
+
+**What is open.** Whether the prelude image should restore the symbol interner so that ids
+match a source boot. Arguments both ways, recorded so the next person does not have to
+rediscover them:
+
+- *Leave it.* Map iteration order is unspecified here as it is in Clojure; no program should
+  depend on it, and making the image reproduce an evaluation's interning order is more state
+  for the artifact to carry — the exact class that has bitten ADR-314 twice already (KI-105,
+  KI-106), each time because the image restores BINDINGS and something the evaluation merely
+  *recorded* was missed.
+- *Fix it.* A user's first run after a rebuild printing a different order from every run
+  afterwards is a wart that looks like a bug, and "unspecified" is a weaker promise than
+  "deterministic for a given binary and program", which is what people will assume. It is
+  also the same argument the boot differential already makes for registry marks.
+
+**If it is ever fixed**, the gate is the existing boot differential: add the rendering of a
+multi-key map to what it compares between an image boot and a source boot, which reds today.
+
+**The transferable lesson**, and the reason this has an entry rather than a commit message:
+**a differential must compare the answer, not a rendering of it.** A rendering carries
+incidental state — order here, but equally a float's formatting, a path, a pid, a timestamp —
+and when it drifts, the failure accuses the feature under test by name.
 ## KI-165 — no `deftype` alias is enforced at runtime: an alias type accepts any value under `sig!` ✅ FIXED 2026-09-18
 
 **Symptom.** `type-matches?` (`std/prelude/core.blsp`) dispatches on base names and type

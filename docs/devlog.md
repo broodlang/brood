@@ -920,6 +920,8 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-18** — the multi-pair `(assoc coll k1 v1 k2 v2 …)` is unrolled at compile time into nested single-pair `assoc`s, each a `MapAssoc` instruction (handoff item 2): no rest list, no `%assoc-map-pairs` loop; wrapper semantics kept (map, vector, last-wins, source-order evaluation), guarded by `tests/assoc_unroll_test.blsp` incl. the compiled shape. A three-pair `assoc` loop, 1M iterations, release-fast: **1285 → 531 ms** (1.28 → 0.53 µs per iteration), 612 ms at the VM ceiling; `make ab --floor` against `fac63929`: **`supervisor` −5.8%** (floor 0.3%), every other row inside its floor.
 - **2026-09-18** — benchmark column refreshed at `a6a0d934` (brood-benchmarks): `supervisor` 584 → 553 ms (−5.3%), the unroll; 2.1× Elixir. Short rows +3–4% = the checker's per-file cost growing 4–7M with today's checker work, plus `os/which`'s `path` reference now materialising `path`+`file` under every checked `os/`-naming program (~18M) — KI-150, two more data points.
 - **2026-09-18** — KI-150's coverage half: `&optional` was missing from `std_index::every_symbol_is_a_type_word`, so 14 declarations spelled entirely in the type grammar declined to ride in the image footer for a reason the grammar does not have (`string/pad-left`, `string/fields`, `reflect/type-aliases`, …) — both markers of `annot::arrow_of`, neither a name to resolve. Its gate asserts on the SOURCE SCAN first, because a footer-only assertion passes vacuously against an image built before the fix (which is how it first went green under sabotage). Then the gap was made readable rather than probed one name per run: `untyped_names_that_force_a_module_load` (an `#[ignore]`d triage test) reads the embedded sources and ranks, per module, the names other std modules reference and the index has no type for. Five `path` and eleven `string` signatures declared off that list — `string` is referenced by 32 std modules — and both modules drop out of the transitive scan: the `os/env` one-liner's pre-flight went 3 materialisations → **0**, the index 124 → 150 authoritative types. **And the saving is below the floor**: 107.23–107.27M instructions against a base of 107.25–107.36M, interleaved. Materialising from the image is cheap on this box, so what coverage buys is the smaller heap and a verdict that no longer depends on what else happened to load — not a faster check. (A first reading of +63% on the SOURCE path did not reproduce — the same invocation read 226M/336M/367M. The rig, not the code.)
+- **2026-09-19** — KI-150's named next item, done and scoped: `cli_support::stdlib_tree_hash` — the staleness guard that re-hashes every `std/**/*.blsp` to tell you your binary predates your edits — cost **15.0M instructions, 16% of a release `brood --check`** on a one-line file. The 14% on record was a *debug* profile; callgrind on RELEASE agrees, and the A/B is clean because the guard is skipped outside a checkout, so one binary measures both arms (inside 93.88M → 80.61M, outside 78.92M → 78.43M as the control (the 0.5M baseline shift is build-to-build codegen, which is why the guard is read as the WITHIN-binary difference)). The cause was the loop and not the I/O: FNV-1a a byte at a time over 3.0 MB is 4.4 instructions per byte on a serial dependency that cannot vectorise. Same function over 8-byte WORDS with a byte tail and the chunk length mixed in first (`mix_chunk`, mirrored in `build.rs` and `cli_support.rs`): **2.2M, 6.8×**, and the symbol left the profile's top entirely (`Heap::env_get` is the new head at 12.3%). A `stat`-keyed cache would take the rest and was REFUSED — this guard exists because a stale verdict "reads exactly like a right one" (B7), and an mtime cache reintroduces that in the dangerous direction; the word loop is the same function computed faster, with no such risk. Both guards sabotage-verified (a line appended to `std/uuid.blsp` reds `brood --check` *and* `nest check` at exit 2; one `^ 1` of drift reds the agreement gate). **Scope stated in the entry: `brood file.blsp` does not call this, so the `base64` row KI-150 opened on is untouched** — the win is every checker and test invocation. Note for bisects: `BROOD_STDLIB_HASH` moves, so every cached stdlib image is re-keyed once.
+- **2026-09-19** — KI-166 filed and its gate fixed: `cli::mapprim3_differential` failed one full-suite run with *"a prim changed an ANSWER"* and no answer had changed — the two arms printed the same map in different ORDERS. Reproduced deterministically: a map is a CHAMP trie, iteration order follows the keys' hashes, a keyword's hash follows its interned id, and an image boot interns in a different order from a source boot, so `(assoc {:a 1 :b nil} :c 3)` prints `{:a 1, :c 3, :b nil}` warm and `{:c 3, :b nil, :a 1}` under `BROOD_NO_PRELUDE_IMAGE=1` — same binary, same program. Delete `~/.cache/brood/prelude-expanded-*.img` and run twice to see it with no flag at all. The differential compared RENDERINGS across two processes; it compares by `=` now (content-exact, order-free, and it separates a stored nil from an absent key) with an `assoc-map true true true` pin so a wrong map in BOTH arms reds — strictly stronger than before, since the rendering was never pinned against an expected value. Sabotage-verified. Checked rather than assumed: `mapget_differential` renders only scalars, and the doctests compare parsed values, so the eight docstring examples pinning a multi-key map's rendering are safe (`doc_examples` 3/3 and `doctest` 13/13 under BOTH boot paths). Left open in the entry: whether the prelude image should restore the interner so ids match a source boot — unspecified order is a weaker promise than people assume, but it is the ADR-314 class that has bitten twice. **The transferable lesson: a differential must compare the ANSWER, not a rendering of it** — a rendering carries incidental state (order, float formatting, a pid, a timestamp), and when that drifts the failure accuses the feature under test by name.
 - **2026-09-17** — the pre-push hook has been INERT on this machine: a global `core.hooksPath` *replaces* `.git/hooks`, so `make hooks` installs a gate git never consults — and the override directory holds a deliberate `commit-msg` (which chains to a repo-local one for exactly this reason) and no `pre-push`. Found when an unformatted commit reached `main` through a gate that reported "installed". `make hooks` now WARNS with the path, `scripts/git-hooks/global-pre-push` is the chaining fix, and CLAUDE.md records the second half of it: `make prepush | tail` reports the PIPE's exit status, not the gate's.
 - **2026-09-17** — C10 answered by probe and closed with no checker change: ADR-350's intervals and the int-closed/float-contagion rules had already taken the merely-wider residue, and the answer is a **mode split** neither mode shows alone — a *precise* mismatch (float contagion, exact division, an interval arithmetic cannot fit) is named in both modes; an *over-approximated* one (a call's result) is named under `--strict` and deferred in plain, the gradual valve. The residue itself lands there: `(sig f (number -> int))` over `(+ x 1)` IS reported under strict, because the declaration is part of the claim — a parameter admitting floats makes the promise false with no analysis of the body. Fourteen provable shapes silent in both modes, so the false positive it was left silent for does not occur. Three pins, sabotage-verified three ways (strict never/always applies reds the split in opposite directions; the return check disabled reds both warning pins).
 - **2026-09-17** — KI-162: `nest check --fix-sigs` wrote every `sig` ABOVE its `defn`, the one placement `sig_placement.rs` forbids tree-wide. The locator reads the CST now (`sig-defn-sites`: root children, each node's newlines counted for the extent), so the sig lands one past the form's last line, a head laid out across lines is located instead of skipped, and "top level" is *root child* rather than *column 0* — a `check-allow`-wrapped `defn` still declines. Recorded beside the fix: the load failure the rule exists for **did not reproduce** (forward sigs over `defn`, `defn-` and a wrapped pair all loaded under contracts and enforced the contract), so the rule is what is verified, not the breakage.
@@ -14551,3 +14553,120 @@ failure is `Disk quota exceeded (os error 122)` and `ld terminated with signal 7
 it is full *the shell itself stops working* (every command returns exit 1 with no output,
 which reads exactly like a dead session). Build a scratch worktree with `CARGO_TARGET_DIR`
 pointed at real disk.
+
+## 2026-09-19 — the staleness guard was 16% of a `brood --check`, and the 14% on record was a debug profile that happened to be right
+
+KI-150 named its own next item: `cli_support::stdlib_tree_hash`, "the top symbol of a debug
+`--check` at 14%". A debug profile is usually a reason to re-measure rather than to act —
+debug builds have no inlining and bounds-check every index, so a tight byte loop is
+flattered *against* the rest of the program. Re-measured on the release binary with
+callgrind, it was **15.0M instructions, 16.0% of a `brood --check`** on a one-line file. The
+debug reading was right.
+
+**The A/B needs no instrumentation**, which is what makes it trustworthy: the guard is
+skipped when the process is not inside a brood checkout (`repo_root()` returns `None`), so
+the *same binary* measures both arms by changing directory.
+
+| release `brood --check`, one-line file | inside | outside | the guard |
+|---|---|---|---|
+| before | 93,884,829 / 93,877,914 | 78,921,043 / 78,924,765 | **15.0M** |
+| after | 80,623,275 / 80,604,655 | 78,429,132 / 78,424,129 | **2.2M** |
+
+The outside arm is the control: 78.92M before, 78.43M after. That 0.5M is build-to-build
+codegen drift and not the change — which is exactly why the guard is read as the difference
+*within* one binary (14.96M, then 2.19M) rather than across the two.
+
+**The cost was the loop, not the I/O.** `callgrind_annotate` put `stdlib_tree_hash` itself at
+13.6M (14.5%) with `__memcpy` and the reads far below it: FNV-1a a byte at a time over 3.0 MB
+of `std/` is 4.4 instructions per byte — load, xor, multiply, increment, compare, branch —
+and the multiply chains on `hash`, so nothing vectorises.
+
+**The fix keeps the function and changes its stride.** `mix_chunk` runs the same FNV over
+8-byte words with a byte tail, and mixes each chunk's length in first (a word tail makes
+concatenation ambiguity easier to reach than a pure byte stream did; the length costs one
+multiply per chunk). Same file set, same sort order, same prime. **2.2M — 6.8×** — and the
+symbol is gone from the profile's top, where `Heap::env_get` now sits at 12.3%.
+
+**What was refused, and why it is the interesting half.** A cache keyed on `stat` metadata
+would take the remaining 2.2M. This guard exists precisely because a stale binary's verdict
+"reads exactly like a right one" (B7 — a checker resolves `:use`d std from the baked-in copy,
+so the edit that should turn a file red leaves it green). An mtime-keyed cache can miss an
+edit, and it misses in the *dangerous* direction. A faster loop computes the same answer and
+cannot.
+
+**Both guards sabotage-verified**, on the entry points a caller reaches rather than the
+function just written: appending one line to `std/uuid.blsp` makes `brood --check` *and*
+`nest check` refuse with exit 2; drifting one copy of `mix_chunk` by a single `^ 1` reds
+`the_runtime_and_build_time_stdlib_hashes_agree`, the gate that exists because a build script
+cannot share code with the crate it builds.
+
+**Scope, recorded with the win rather than after it.** `brood file.blsp` does not call this —
+only `brood --check`, `brood --test`, `nest` and `nest check` do — so **the `base64` row
+KI-150 opened on is untouched**. What this buys is every checker and test invocation, a
+single-file `--check` being ~14% faster. What is still open for the row is the pre-flight's
+own per-file walk (3.7M on a one-liner, 24M on `pipeline`, 47M on `errors-deep`), which
+scales with the file checked and is the checker doing its work.
+
+One consequence worth knowing before bisecting across this: the algorithm moves
+`BROOD_STDLIB_HASH`, which keys the stdlib startup image, so every cached
+`~/.cache/brood/std-image-*.bin` older than this commit is orphaned and rebuilt once — the
+image id moving for a *Rust* edit, which is `perf-handoff.md`'s trap 2 from the other side.
+
+## 2026-09-19 (2) — the differential that accused the feature under test, and the map order behind it
+
+The full suite came back 1650/1651 on the commit above. The one failure was
+`cli::mapprim3_differential`, whose message is `a prim changed an ANSWER` — and no prim had
+changed an answer:
+
+```text
+left:  assoc-map {:b nil, :c 3, :a 1} …
+right: assoc-map {:a 1, :b nil, :c 3} …
+```
+
+Twenty lines of differential, nineteen identical, one map's entries in a different order.
+Re-run alone it passed 5/5, and two earlier full runs that day were 1651/1651 — the shape of
+a flake, which this repo's rules say *is* the work rather than something to re-run past.
+
+**The cause took one experiment, because the right question was "what differs between two
+processes of the same binary?" rather than "what is random?"** Nothing is random here:
+
+```sh
+$ brood /tmp/mp.blsp                          # (assoc {:a 1 :b nil} :c 3)
+{:a 1, :c 3, :b nil}
+$ BROOD_NO_PRELUDE_IMAGE=1 brood /tmp/mp.blsp
+{:c 3, :b nil, :a 1}
+```
+
+A map is a CHAMP trie, so iteration order follows the keys' hashes; a keyword's hash follows
+its interned id; and the two boot paths intern in different orders. Delete
+`~/.cache/brood/prelude-expanded-*.img` and run twice and it shows with no flag at all — run
+one boots from source and prints one order, run two boots from the image run one wrote and
+prints the other. A test that spawns two processes can straddle that boundary.
+
+**The fix is to the test, and it makes the gate stronger.** It compared renderings; it now
+compares the maps by `=` in-language — content-exact, order-free, and it separates a STORED
+nil from an absent key, which is the distinction that file exists for — plus an
+`assoc-map true true true` assertion, because three printed booleans that read `false` in
+both arms would otherwise agree. The rendering was never pinned against an expected value at
+all, so this is strictly more than it caught before. Sabotaged with `{:a 1 :b nil :c 4}`: red.
+
+**Then the same question was asked of everything else that could be exposed, and answered by
+running it rather than by reading it.** `mapget_differential`'s `pr-str` calls all render
+scalars. The doctest harness compares parsed *values*, not strings — so the eight docstring
+examples that pin a multi-key map's rendering are safe, confirmed by running
+`doc_examples_test` and `doctest_test` under both boot paths (3/3 and 13/13 each way). No
+value-`hash` primitive is exposed to the language, so today this is a rendering issue only.
+
+**What was deliberately not done.** Making the prelude image restore the interner so ids
+match a source boot. It is defensible — "unspecified iteration order" is a weaker promise
+than users will assume, and a first run after a rebuild printing differently from every run
+after it looks like a bug — but it is also the ADR-314 class that has been reverted twice
+(KI-105, KI-106), each time because the image restores *bindings* and something the
+evaluation merely recorded was missed. Both arguments are in KI-166 with the gate to use if
+anyone takes it: extend the boot differential to compare a rendered multi-key map, which
+reds today.
+
+**The lesson worth carrying past this bug:** a differential must compare the **answer**, not
+a rendering of it. A rendering carries incidental state — order here, but equally a float's
+formatting, a path, a pid, a timestamp — and when that drifts, the failure arrives wearing
+the name of the feature under test.

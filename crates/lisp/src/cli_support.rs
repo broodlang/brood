@@ -463,13 +463,39 @@ fn stdlib_tree_hash(root: &Path) -> Option<String> {
                 .as_bytes(),
             &std::fs::read(f).unwrap_or_default(),
         ] {
-            for b in chunk {
-                hash ^= *b as u64;
-                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-            }
+            mix_chunk(&mut hash, chunk);
         }
     }
     Some(format!("{hash:x}"))
+}
+
+/// FNV-1a, but over 8-byte WORDS rather than bytes, with the chunk's length mixed in first
+/// and a byte tail for the remainder. **Mirrored verbatim in `crates/lisp/build.rs`** — see
+/// `stdlib_tree_hash`'s note above; `the_runtime_and_build_time_stdlib_hashes_agree` is the
+/// gate that keeps the two honest.
+///
+/// A byte at a time cost 4.4 instructions per byte over 3 MB of `std/`, which callgrind put
+/// at **13.6M instructions — 14.5% of a release `brood --check`** on a one-line file, with
+/// the whole guard at 15.0M (measured 2026-09-19, KI-150; the estimate it replaced, in
+/// `build.rs`'s comment, was "~1 ms of a ~23 ms boot" and had never been checked). Same
+/// function shape over 1/8 the iterations, measured back at **2.2M**.
+///
+/// The length is mixed in first because a word tail makes concatenation
+/// ambiguity easier to reach than a pure byte stream did (a path's last partial word and a
+/// file's first bytes no longer simply run together), and it costs one multiply per chunk.
+fn mix_chunk(hash: &mut u64, chunk: &[u8]) {
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    *hash ^= chunk.len() as u64;
+    *hash = hash.wrapping_mul(PRIME);
+    let (words, tail) = chunk.as_chunks::<8>();
+    for w in words {
+        *hash ^= u64::from_le_bytes(*w);
+        *hash = hash.wrapping_mul(PRIME);
+    }
+    for b in tail {
+        *hash ^= *b as u64;
+        *hash = hash.wrapping_mul(PRIME);
+    }
 }
 
 /// Read a source file or exit non-zero with a uniform `"{prog}: cannot read
