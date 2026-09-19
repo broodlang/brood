@@ -11282,6 +11282,28 @@ rediscover them:
 **If it is ever fixed**, the gate is the existing boot differential: add the rendering of a
 multi-key map to what it compares between an image boot and a source boot, which reds today.
 
+**A live instance, found the same day in another file's in-flight work (2026-09-19).**
+`eval-server`'s request encoders return `(pr-str {…})`, so their *result is a rendered map
+inside a string*:
+
+```text
+image boot:   {:specs [], :timeout-ms nil, :test true, :id 1}
+source boot:  {:id 1, :specs [], :timeout-ms nil, :test true}
+```
+
+This matters because the surface audit's ratchet (`tests/audit_test.blsp`, "no more public
+names lack a `form → result` example than yesterday") pushes every new public function toward
+an executed example, and the obvious example for an encoder pins its string — which is a
+latent flake, not documentation. **Write the example through the DECODER instead**:
+`(evsrv-decode-request (evsrv-encode-test 1 [] nil))` yields a map, and the doctest harness
+compares parsed values, so the order never enters it. That the harness does so is not assumed
+here: the eight existing docstring examples pinning a multi-key map's rendering all pass under
+*both* boot paths, which they could not if the comparison were textual.
+
+The general rule for a docstring example, same shape as the differential's: **pin the value,
+not its rendering** — and where a function's value genuinely *is* a rendering, pin what
+parsing it back gives you.
+
 **The transferable lesson**, and the reason this has an entry rather than a commit message:
 **a differential must compare the answer, not a rendering of it.** A rendering carries
 incidental state — order here, but equally a float's formatting, a path, a pid, a timestamp —
