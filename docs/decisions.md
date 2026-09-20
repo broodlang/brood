@@ -22936,7 +22936,7 @@ the module's presence on every runtime (`reflect/builtin-modules`) beside its re
 
 ## ADR-357 — Ranking a candidate set is bounded by what it shows, and shards across processes
 
-**Status:** accepted (2026-09-16). **Context:** bedit's project find-file on a 27k-file repo.
+**Status:** accepted (2026-09-16); **amended by ADR-374** (2026-09-20), which gives the default rules a native pass gated on nobody having replaced them. **Context:** bedit's project find-file on a 27k-file repo.
 
 **Context.** `C-x p f` over a 27,310-file project took ~1.1 s **per keystroke**. `std/fuzzy`
 was not obviously wrong — it lowers the query once, sorts by a precomputed key, and the
@@ -24131,3 +24131,83 @@ depends on the runtime's seam and never on `std/editor`. Not done here, delibera
 Windows runtime port (nine Unix-bound files, no CI job), a wasm build of the GUI thread,
 rounded corners and cursors on the GPU target, and a pixel-space text op — a HUD uses the
 cell grid, which the GPU target draws through the atlas.
+
+## ADR-374 — The default fuzzy rules get a native pass, gated on nobody having replaced them
+
+**Status:** accepted (2026-09-20). **Amends ADR-357.** **Context:** bedit's project
+find-file, again, and this time with the loop measured rather than the library.
+
+**Context.** ADR-357 took `std/fuzzy` from ~1.1 s per keystroke to ~100 ms on a 27,310-file
+project by bounding the work to what a UI shows and sharding it across eight processes, and
+it **rejected a native kernel** — written, tested against a Brood reference, and turned down
+on two grounds that this repo exists to defend: a kernel freezes the scoring rules into the
+binary, where a system meant to be reprogrammed from inside itself cannot reach them; and it
+states the rules twice, in Brood for `match`'s positions and in Rust for ranking, with only
+a test holding them together.
+
+Both grounds still stand. What has changed is the measurement around them. Profiling the
+editor's loop rather than the library (`bedit/tools/profile-find-file.blsp`) put the
+remaining ~100 ms where it actually hurts: `C-x p f` on that project costs 133 ms on the
+first keystroke, 163 ms on the idle beat, and **210 ms on a single ↓** — a selection move
+forces a fresh ranking, so holding ↓ to scroll the list runs at five frames a second. The
+100 ms is not a number in a benchmark; it is the frame budget, twelve times over, on the
+most ordinary thing the editor does.
+
+Two further facts about the shard that ADR-357's own measurement hid. Eight workers and
+sixteen measure the same (81 ms vs 82 ms), because what the fan-out actually costs is
+copying 27k strings across process boundaries — **on every keystroke**, since a shard is
+spawned per ranking and cannot be pooled. And the parallel path is the one that must live
+beside an editor's mailbox, so it carries a `ref`, a sweep, a deadline and a kill: real
+machinery, paid per keystroke, to hide a constant factor.
+
+**Decision.** Add `%fuzzy-top` — the walk, the score and the ordering, natively — and call
+it from `fuzzy/top` **only while `*fuzzy-scorer*` is still `fuzzy/scorer`**
+(`fuzzy/default-rules?`). Bind your own scorer and every ranking in the image goes back
+through the Brood walk, the fold and the shard, exactly as ADR-357 left them.
+
+That gate is the whole of the first objection answered, and answered better than a kernel
+without one: the rules are not frozen into the binary, they are *cached* there for the case
+where nobody has changed them. The seam was always wholesale — `fuzzy-bonus` is `defn-`, so
+what a caller can replace is the scorer, not a constant inside it — and the gate is exactly
+as wide as that seam.
+
+The second objection is **not** answered, and is accepted as the price:
+`crates/lisp/src/builtins/fuzzy.rs` is a second statement of the rules. It is paid for by
+`tests/fuzzy_native_test.blsp`, which is written as the contract rather than as coverage:
+every query in a corpus chosen to hit each term of the score — boundaries, camelCase humps,
+contiguous runs, gaps, the lead penalty, both tie-breaks, a query that matches nothing —
+compared against the Brood paths, bounded, unbounded and sharded. If the two ever disagree,
+that test says so before a user does.
+
+One deliberate divergence, and it is a repair. The walk indexes the ORIGINAL candidate (case
+is what a camelCase hump is made of) with positions found in its LOWERED form, which is
+sound only while lowering preserves length. `string/lower` is full Unicode lowering, where a
+few codepoints expand (`İ` → `i̇`) and the two fall out of step; the native pass lowers per
+character, so they cannot. On the paths, module names and symbols anything ranks, the two
+agree exactly — which the corpus test is what pins.
+
+**Consequences.** Identical results on every query tried over the real 27k corpus, at 21–28
+ms in a *debug* build against 83–240 ms for the Brood paths; ADR-357's own measurement of a
+release kernel on that corpus was 2 ms. `fuzzy/filter` rides the same primitive (an
+unbounded `top`). The shard stays, reachable and tested, for a custom scorer — it is no
+longer on the path an editor takes, so its per-keystroke copy is no longer paid.
+
+This does not make ADR-357 wrong, and its work is what makes this small: the bounded `top`,
+the single walk, the scorer-as-a-value. What it revises is one judgement — that the kernel's
+cost falls on redefinability. Gated, it falls only on having the rules written down twice.
+
+### ADR-374 addendum (2026-09-20, later) — the GPU target is the default of a `gui-gpu` build
+
+The runtime gate went the other way round: a `--with-gui-gpu` build now draws on the GPU
+unless `BROOD_GUI_GPU=0`, and a GPU that cannot be brought up (no adapter, no surface)
+falls back to the CPU painter with one line on stderr rather than refusing the window.
+What made that possible is parity: the GPU op walk is now `paint::render_ops` arm for arm
+— scroll regions (the shift, and the clip at the grid top), cell regions (their metrics
+through `metrics_at`/`set_metrics`, their origin, a clip band the fragment shader
+discards outside of, glyphs keyed by px), the three cursor styles with the CPU geometry,
+text underline, tabs, and rounded / sub-cell rects as a signed-distance field in the
+fragment shader with `snap_hairline` applied first. bedit's README on both targets
+differs in 3% of bytes, nearly all of it the one difference that remains by design: the
+GPU samples grey AA where the CPU path renders subpixel text at 1×, and the contrast lift
+is not applied. Every op kind is now drawn on both targets; the GPU target is no longer
+"experimental" anywhere in the tree.

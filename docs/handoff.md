@@ -26,20 +26,19 @@ collision, a demo. `wasm-bindgen` pin 0.2.100 → 0.2.128 (wgpu's lockfile floor
 
 **How to look at it.** A `gui-gpu` runtime lives in `target/gpu/release-fast/{brood,nest}`
 (its own target dir — `make ab`'s binary is untouched); `./configure --with-gui-gpu &&
-make install` is the real thing. `BROOD_GUI_GPU=1 BROOD_GUI_DUMP=/tmp/f.ppm nest run
+make install` is the real thing. `BROOD_GUI_DUMP=/tmp/f.ppm nest run
 --for 2s` in `b2d`, then `ffmpeg -i /tmp/f.ppm f.png` — GNOME refuses screenshots to an
 unprivileged process, the readback is the way.
 
-**Traps.** The GPU target is still runtime-gated (`BROOD_GUI_GPU=1`) even when built in;
-`bedit` and `pong` run on the CPU target unless it is set. Vector patterns in `match` are
+**Traps.** A `--with-gui-gpu` build draws on the GPU by default now; `BROOD_GUI_GPU=0` is
+the A/B lever back to the CPU painter. Vector patterns in `match` are
 fixed-length — a `[:mouse …]` message is 6 or 7 long, dispatch on `(first m)`. `/` is
 exact: the frame parser now reads a ratio as a float, but the Brood side should `->float`
 its geometry. The pixel-input mode is exercised by `b2d`'s demo, not by a test — a real
 pointer is needed.
 
-**Open, in order.** (1) Drop the `BROOD_GUI_GPU` runtime gate once the GPU target draws
-what the CPU one does (cursor, zones, regions, rounded corners) — then `--with-gui-gpu`
-alone selects it. (2) A pixel-space text op, or leave HUD text to the cell grid. (3) The
+**Open, in order.** (1) ✅ the gate is gone (2026-09-20 later): the GPU target draws every
+op and is the default of a `--with-gui-gpu` build. (2) A pixel-space text op, or leave HUD text to the cell grid. (3) The
 frontend as its own process over the ADR-090 link (the ops already reference no in-process
 memory). (4) Windows: nine Unix-bound files, no CI job — a separate track the user wants
 later. (5) wasm: the GUI thread's single-threaded variant for the playground.

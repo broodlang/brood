@@ -14918,3 +14918,13 @@ a build that never enables its wasm side. Tests: the pure `gui/*` layer and the 
 hostile-argument parsing in `gui_test` / `gui_robustness_test` (the byte-count guard
 sabotaged and seen red), the batcher and the format/present-mode choices as Rust unit
 tests in `gpu.rs`.
+
+## 2026-09-20 (6) — the GPU target reaches parity and becomes the default (ADR-374 addendum)
+
+Regions, cursors, underline, tabs, rounded and hairline rects on the wgpu target —
+`gpu.rs`'s op walk mirrors `paint::render_ops` arm for arm, with a per-instance clip rect
+and an SDF edge in the shader where the CPU painter bands and ramps per pixel. Verified by
+`BROOD_GUI_DUMP` of bedit on both targets (3% of bytes differ: text AA, the cursor's blink
+phase, an async status segment). `BROOD_GUI_GPU` flips from opt-in to opt-out
+(`=0` keeps the CPU painter), with a CPU fallback when the device cannot be created. b2d
+no longer needs the env var.

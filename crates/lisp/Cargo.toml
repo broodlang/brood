@@ -57,11 +57,11 @@ gui = ["dep:winit", "dep:softbuffer", "dep:cosmic-text", "dep:swash", "clipboard
 audio = ["dep:rodio"]
 # GPU rendering for the GUI window (wgpu: Vulkan / Metal / DX12 / WebGPU), behind its
 # OWN feature so the default `gui` build stays on the CPU softbuffer path, byte-for-byte
-# unchanged. Built in AND opted in (`BROOD_GUI_GPU=1`), it replaces softbuffer as the
-# window's render target: every solid-fill op becomes an instanced quad, glyphs and
-# textures are textured quads, and the swapchain presents without vsync. Text shaping
-# (cosmic-text) is unchanged. wgpu rather than OpenGL because the runtime is meant to
-# run on Windows and macOS too: the GLES 3.0 context the first prototype requested
+# unchanged. Built in, it replaces softbuffer as the window's render target (BROOD_GUI_GPU=0
+# keeps the CPU painter, the A/B lever): every solid-fill op becomes an instanced quad,
+# glyphs and textures are textured quads, and the swapchain presents without vsync
+# unless the window asked for it. Text shaping (cosmic-text) is unchanged. wgpu rather
+# than OpenGL because the runtime is meant to run on Windows and macOS too: the GLES 3.0 context the first prototype requested
 # does not exist on macOS (CGL is desktop-GL only, and deprecated) and needs ANGLE on
 # Windows, while wgpu picks the native API per platform behind one code path — and is
 # the same API the in-browser playground would draw with (WebGPU).
