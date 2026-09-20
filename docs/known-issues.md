@@ -11801,7 +11801,7 @@ mm-cmp …)` is in scope"), deterministic through the scoped runner and latent f
 `require`d module of that shape. The staged registry branch bumps the code epoch as the
 staged define branch already did.
 
-## KI-171 — `spawn` then `monitor` on a child that dies at once: the monitor delivers `:noproc`, and five tests waited 20 s for a reason that never came ✅ FIXED 2026-09-20
+## KI-172 — `spawn` then `monitor` on a child that dies at once: the monitor delivers `:noproc`, and five tests waited 20 s for a reason that never came ✅ FIXED 2026-09-20
 
 **Symptom.** `brood::suite` failed try 1 of a full `make test` (passed on retry, nextest
 `FLAKY`): `tests/try_catch_test.blsp:455` "a crash escaping a finally in a process is the
