@@ -15056,6 +15056,15 @@ declaration would have replaced `seq/find`'s rule (`elem ∩ what the predicate 
 with the wider `elem | nil`. It reads beside the other heap readers now. Pinned in its own
 process: `(seq/vector-ref [1 2] 0)` is an int with `seq` never loaded.
 
+**…and two of the three were WRONG, caught by the downstream smoke within the hour.**
+`(seqable ?A)` excludes `map` by design (ADR-365), and `find` walks anything `first`/`rest`
+accept — bedit calls `(seq/find notes …)` on a map, and CI's `downstream-bedit` job went
+red on a false positive that `std/`+`tests/` cannot show (neither passes `find` a map).
+`find` and `distinct` are back on bare `seqable`, which admits every collection the
+combinators walk; `vector-ref` stays. The lesson is the one the rename-wave section
+already states — **a domain declaration on a combinator ends downstream, not in this repo**
+— and `make smoke-bedit` is the gate to run before pushing one.
+
 **3 — gate the image's writer: it found a bug.** Two images of the same std — one written
 by `brood`, one by `nest test` — gave the checker different answers: `debug/hits`
 `(map any number)` under one, `(or map table)` under the other, and the images differed by
@@ -15083,3 +15092,18 @@ older than KI-171's fix.
 **5 — tooling declarations.** `project/find-root`, `abs-paths`, `collect-sources`, `setup`,
 `project-check/project-cache-dir`, `reflect/parse-source`(`-positioned`), `renames/ledger`
 — the cross-references only `nest` pays for.
+
+## 2026-09-20 (8) — the first game's five asks (ADR-374 addendum 3)
+
+`swarm` built test-first on b2d, then its five findings in order: (1) `[:text-px …]` with
+`:align`, both painters + the JS painter, robustness tests, a CPU paint test at pixel
+positions; (2) sound as a frame op — `%gui-sound` upload, `[:sound snd vol]` played on
+`Draw`, rodio `Play`, `display-sound`, `[:sound-data]` over the wire, WebAudio in the tab,
+`b2d-test/sounds`; swarm synthesises its three effects in Brood; (3) `b2d-assets`: images
+via `gui/image-thumb`, a WAV reader/writer in Brood over `bytes/*`, `embed!` → a generated
+module so `nest release` ships assets, and `nest release` now mirrors its `nest`'s
+features into the lean runtime (it hardcoded `gui`, so a released game drew nothing);
+(4) `b2d-camera/fit` (integer zoom for pixel art); (5) `b2d-test/step`→`tick`,
+`steps`→`ticks` (a game's own `step` stays bare), `b2d-sheet/load`. Two wrong test
+expectations of mine caught by the code (a wall count, a zoom): the tests were right to
+exist either way.
