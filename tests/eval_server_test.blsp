@@ -464,3 +464,86 @@
   (test "a clean source checks to an empty list; a source that does not parse too"
     (assert= (get (answer {:id 12 :src "(+ 1 2)" :check true}) :diagnostics) ())
     (assert= (get (answer {:id 13 :src "(+ 1" :check true}) :diagnostics) ())))
+
+;; ---- the test request: this project's suite, in the session ----------------------
+;; The third request kind, and the one that STREAMS: a suite has something to say per
+;; test, and holding it all until the end would turn the only part a reader watches into
+;; a wait. Worth having in a session because a one-shot run of a single file in a project
+;; of sixty modules spends most of its time loading the project, not running tests.
+
+(describe "eval-server test requests"
+  (test "a test request round-trips, carrying files rather than source"
+    ;; `:specs` and not `:src`: what it names is FILES — the tests already exist on disk,
+    ;; and sending their text would evaluate a copy rather than run the thing you are
+    ;; looking at
+    (let (line (evsrv-encode-test 4 [["tests/a_test.blsp" nil] ["tests/b_test.blsp" 12]] 60000)
+          req (evsrv-decode-request line))
+      (assert= (get req :id) 4)
+      (assert= (get req :test) true)
+      (assert= (get req :timeout-ms) 60000)
+      (assert= (count (get req :specs)) 2)
+      (assert= (second (second (get req :specs))) 12)
+      ;; …and it carries no :src at all, which the decoder must not insist on
+      (is (nil? (get req :src)))))
+
+  (test "the whole project suite is an empty spec list"
+    (let (req (evsrv-decode-request (evsrv-encode-test 1 [] nil)))
+      (assert= (get req :specs) [])
+      (assert= (get req :test) true)))
+
+  (test "a test request with non-vector specs fails decode like any other bad line"
+    (assert= (evsrv-decode-request "{:id 1 :test true :specs \"tests/\"}") nil)
+    ;; and a non-test request still has to carry a string :src
+    (assert= (evsrv-decode-request "{:id 1 :specs []}") nil))
+
+  ;; The reason a session may run tests at all. `describe`/`test` REGISTER by consing onto
+  ;; `*units*`, so an image that loads the same file twice registers every unit twice —
+  ;; measured before the reset was called here: a 27-test file answered 27, then 54, then
+  ;; 81. A runner that is wrong in a way that looks like a passing suite.
+  ;; `:isolated` because these two CLEAR THE TEST REGISTRY, and the suite running them is
+  ;; itself in it — without a private copy of the globals they empty the run they are part
+  ;; of, and the count they then measure is whatever the parallel batch happened to leave.
+  :isolated (test "loading the same file twice does not double the registry"
+    (let (f (str (test/temp-dir "evsrv-test-") "/x_test.blsp"))
+      (file/mkdir (path/dirname f))
+      (file/spit f "(defmodule x-test (:use test))\n(describe \"x\" (test \"one\" (is true)))\n")
+      (let (once (do (evsrv-test-load [[f nil]]) (count *units*))
+            twice (do (evsrv-test-load [[f nil]]) (count *units*)))
+        (assert= once twice)
+        ;; …and the reset is total: what was registered before this run is gone too, which
+        ;; is what makes each run own its registry
+        (is (<= once 1)))
+      (file/rm f)))
+
+  :isolated (test "the lines a spec carries become the runner's filter, and a bare file none"
+    (let (f (str (test/temp-dir "evsrv-test-") "/y_test.blsp"))
+      (file/mkdir (path/dirname f))
+      (file/spit f "(defmodule y-test (:use test))\n(describe \"y\" (test \"one\" (is true)))\n")
+      (assert= (evsrv-test-load [[f nil]]) [])
+      (assert= (evsrv-test-load [[f 7]]) [[f 7]])
+      (file/rm f)))
+
+  (test "a broken test file is a reply, not a dead server"
+    ;; the sink is cleared on the way out either way, or the NEXT run would stream its
+    ;; verdicts into a request that has already been answered
+    (let (r (answer-test {:id 9 :test true :specs [["/no/such/file_test.blsp" nil]]}))
+      (assert= (get r :id) 9)
+      (assert= (get r :ok) false)
+      (is (includes? (get r :error) "test run failed"))
+      (is (nil? *test-report-sink*)))))
+
+;; The channel is shared with whatever the evaluated code prints, and a print with no
+;; trailing newline does not get a line of its own — it gets the front of the next one.
+(describe "a reply that something prefixed"
+  (test "is salvaged from its first brace"
+    (let (r (evsrv-decode-reply "....{:id 3 :ok true :value \"7\"}"))
+      (assert= (get r :id) 3)
+      (assert= (get r :value) "7")))
+  (test "an unprefixed reply still reads as it always did"
+    (assert= (get (evsrv-decode-reply "{:id 1 :ok true}") :id) 1))
+  (test "and a line with no map in it is still nil"
+    (is (nil? (evsrv-decode-reply "hello from a spawned process")))
+    (is (nil? (evsrv-decode-reply "....")))
+    (is (nil? (evsrv-decode-reply "")))
+    ;; a brace that opens nothing readable is not a reply either
+    (is (nil? (evsrv-decode-reply "note: {unclosed")))))

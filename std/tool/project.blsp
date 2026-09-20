@@ -605,7 +605,66 @@ only; `tests/` files come from `project-collect-tests`."
               ;; or an imaged start restores its functions and never loads what they
               ;; call. `project-install-image` replays the `""` edges.
               (binding (*require-parent* "")
-                (reflect/load f)))))))))
+                (reflect/load f)))
+            ;; Remember the mtime this image holds for EVERY source the walk visits, not
+            ;; only the ones it loaded itself ([[reload-changed]] reads these).
+            ;;
+            ;; Outside the `when` deliberately: most files in a real project are pulled in
+            ;; by an earlier file's `require` and then skipped here, yet the image holds
+            ;; their current content just the same. Recorded only on the branch that
+            ;; loaded them, a sixty-file project reported forty-four "changed" sources on
+            ;; its first run and reloaded every one of them — correct in the end, and
+            ;; needless work announced to the reader as if something had happened.
+            (note-loaded f)))))))
+
+;; ═══ Keeping a loaded image CURRENT ════════════════════════════════════════
+;; `load-sources` gets a project into an image once. A long-lived image — an editor's
+;; warm test session, a `nest mcp` session (ADR-013), a REPL you have had open all
+;; afternoon — then holds the code it loaded while the files on disk move on, and
+;; nothing in it notices.
+;;
+;; That is not merely stale, it is WRONG in the direction that costs you most: a suite
+;; run in such an image reports green for a function you have already broken, and red
+;; for one you have already fixed. Measured in bedit's warm runner before this existed —
+;; edit the source, ask again, get the previous answer.
+;;
+;; Reloading is cheap and Brood is built for it (`reflect/load` re-`def`s a file's
+;; globals — the hot-reload contract). The only missing piece was knowing WHICH files
+;; moved, which is one mtime per source file.
+
+(defdyn *loaded-mtimes* {})
+;; `path -> mtime at the moment this image last loaded it`. In the image rather than in
+;; the project cache dir, because the question is "what does THIS process hold?" — two
+;; sessions on one project hold different things, and a shared file on disk would have
+;; them answering for each other.
+
+(defn note-loaded (path)
+  "Record `path`'s current mtime as what this image holds."
+  (def *loaded-mtimes* (assoc *loaded-mtimes* path (or (file/mtime path) 0))))
+
+(defn changed-sources (root)
+  "The project source files under `root` whose mtime has moved since this image loaded
+them — and every source file it has never loaded at all.
+
+Never-loaded counts as changed on purpose: a file added since boot is exactly the kind of
+thing a long-lived image is most likely to be wrong about."
+  (into []
+    (seq/filter (apply append (map (abs-paths root *project-source-paths*) collect-sources))
+      (fn (f) (not (= (get *loaded-mtimes* f) (or (file/mtime f) 0)))))))
+
+(defn reload-changed (root)
+  "Reload every project source under `root` that has changed since this image loaded it,
+and answer the paths reloaded (empty when the image is already current).
+
+What a long-lived image calls before it acts on the project's behalf. A no-op costs one
+`stat` per source file — about a millisecond for a sixty-file project — and the common
+case IS the no-op, so an image stays current for roughly nothing."
+  (let (changed (changed-sources root))
+    (doseq (f changed)
+      ;; the load-time requires belong to the root section, exactly as in `load-sources`
+      (binding (*require-parent* "") (reflect/load f))
+      (note-loaded f))
+    changed))
 
 ;; ═══ Startup image (ADR-218) ═══════════════════════════════════════════════
 ;; Loading a big project from source costs ~1.1 ms per FILE, almost all of it

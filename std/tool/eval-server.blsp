@@ -77,22 +77,54 @@ display-bounded. What an editor sends for a buffer's diagnostics: the check runs
 child — its image, its project — and nothing of that project is loaded into the editor."
   (pr-str {:id id :src src :timeout-ms timeout-ms :check true}))
 
+(defn evsrv-encode-test (id specs timeout-ms)
+  "One TEST request line: `{:id :specs :timeout-ms :test true}` — run this project's tests
+in the session's own image and stream the verdicts back.
+
+`specs` is a vector of `[file line-or-nil]` pairs; empty means the whole project suite.
+The server answers a `{:id :more true :test {…}}` line per finished test as it lands and
+then one final `{:id :ok true :summary {…}}`, which is `editor/evalsession`'s streaming
+protocol — so a caller watches a suite go by rather than waiting for it.
+
+Worth having in a SESSION rather than a fresh process for one measured reason: a one-shot
+`nest test` of a single file in a project of sixty modules spends most of its second
+loading the project, not running tests. Held open, that is paid once — the same trade the
+`:check` request makes for the type checker."
+  (pr-str {:id id :specs (into [] specs) :timeout-ms timeout-ms :test true}))
+
+(defn evsrv-encode-teststop (id)
+  "One TESTSTOP request line: `{:id :teststop true}` — abandon the test run in flight.
+
+Answered `{:id :ok true :stopped true|false}`, and the ABANDONED run is answered too
+(`:ok false :stopped true`), because a client that has recorded it as in flight is
+otherwise waiting on a reply that is never coming. Two replies for one keystroke, and both
+are owed."
+  (pr-str {:id id :teststop true}))
+
 (defn evsrv-decode-request (line)
   "The request map in `line`, or nil when the line isn't one (garbage, blank, a
-stray print). A request must carry an int `:id` and a string `:src`; a present
-`:timeout-ms` must be an int (a malformed field is a nil, never a raise later —
-one bad line must not kill the server), a present `:trace` a vector, and a present
-`:check` a boolean."
+stray print). A request must carry an int `:id` and, unless it is a `:test`, a string
+`:src`; a present `:timeout-ms` must be an int (a malformed field is a nil, never a raise
+later — one bad line must not kill the server), a present `:trace` a vector, a present
+`:check` a boolean, and a `:test`'s `:specs` a vector.
+
+A `:test` carries `:specs` instead of `:src` because what it names is FILES, not source:
+the tests already exist on disk, and sending their text would evaluate a copy rather than
+run the thing you are looking at."
   ;; check-allow :discarded-catch — a line that is not the expected map, or a not-yet-defined trace target, is skipped
   (check-allow :discarded-catch
     (try
       (let (v (reflect/read-string line))
         (if (and (map? v)
               (int? (get v :id))
-              (string? (get v :src))
+              (if (or (get v :test) (get v :teststop))
+                (or (nil? (get v :specs)) (vector? (get v :specs)))
+                (string? (get v :src)))
               (let (t (get v :timeout-ms)) (or (nil? t) (int? t)))
               (let (tr (get v :trace)) (or (nil? tr) (vector? tr) (= tr :all)))
-              (let (c (get v :check)) (or (nil? c) (bool? c))))
+              (let (c (get v :check)) (or (nil? c) (bool? c)))
+              (let (tt (get v :test)) (or (nil? tt) (bool? tt)))
+              (let (ts (get v :teststop)) (or (nil? ts) (bool? ts))))
           v
           nil))
       (catch _ nil))))
@@ -102,15 +134,26 @@ one bad line must not kill the server), a present `:trace` a vector, and a prese
 `{:ready true}` and the per-request replies all travel through here."
   (pr-str reply))
 
-(defn evsrv-decode-reply (line)
-  "The reply map in `line`, or nil when the line isn't one — a client skips nil
-lines (see the module preamble on stray output)."
-  ;; check-allow :discarded-catch — a line that is not the expected map, or a not-yet-defined trace target, is skipped
+(defn- evsrv-read-map (s)
+  ;; check-allow :discarded-catch — a line that is not a map is the documented nil case
   (check-allow :discarded-catch
     (try
-      (let (v (reflect/read-string line))
+      (let (v (reflect/read-string s))
         (if (map? v) v nil))
       (catch _ nil))))
+
+(defn evsrv-decode-reply (line)
+  "The reply map in `line`, or nil when the line isn't one — a client skips nil
+lines (see the module preamble on stray output).
+
+A reply that something PREFIXED is salvaged from its first `{`. The child's stdout is
+shared with whatever the evaluated code prints, and a print without a trailing newline
+does not get a line of its own — it gets the front of the next one. That cost six of
+twenty-seven streamed test verdicts before the runner's progress marks were silenced, and
+silencing them fixes the runner rather than the case: a test is still free to print."
+  (or (evsrv-read-map line)
+    (let (i (index-of line "{"))
+      (when (> i 0) (evsrv-read-map (string/substring line i (string/length line)))))))
 
 ;; ---- the evaluation core ------------------------------------------------------
 
@@ -145,7 +188,9 @@ looking identical to a round-trip that cleaned up after itself."
     {:alive (count (seq/filter after (fn (p) (not (includes? before p)))))}))
 
 (defn- eval-server-spy-entry (e)
-  ;; One collected `*spy-sink*` entry, display-bounded for the wire.
+  ;; One collected `*spy-sink*` entry, display-bounded for the wire. Shared by the eval
+  ;; path (collected into a reply's `:spy`) and the test path (streamed as chunks of the
+  ;; run) — one shape, so the *Spy* pane reads the same whichever produced it.
   {:kind (->string (or (get e :spy) :event))
    :fn (when (get e :fn) (str (get e :fn)))
    :args (when (get e :args) (pr-str-bounded (get e :args)))
@@ -468,16 +513,210 @@ process died without answering."
           (release-holds-of child)
           {:id id :ok false :timeout true :ms timeout})))))
 
+;; ---- running this project's tests in the session ------------------------------
+;; The third request kind, and the one that streams. `:check` and an ordinary eval each
+;; answer once; a suite has something to say per test, and holding it all until the end
+;; would turn the only part a reader watches into a wait.
+
+(defn- evsrv-test-result (r)
+  "One finished test in the structured shape a client renders — the same fields
+`*test-report-sink*`'s consumers already read."
+  {:group (test/r-group r)
+   :name (test/r-name r)
+   :passed (not (test/r-failed? r))
+   :skipped (test/r-skipped? r)
+   :ms (test/r-ms r)
+   :where (test/r-where r)
+   :failures (or (map (test/r-fails r) (fn (f) {:loc (first f) :details (second f)})) [])})
+
+(defn evsrv-test-load (specs)
+  "Clear the registry and (re)load each spec's file, answering the `[file line]` pairs that
+carry a line.
+
+The reset is what makes a session legitimate for this at all: `describe`/`test` REGISTER by
+consing onto `*units*`, so a long-lived image that loads the same file twice reports every
+unit twice. Measured before it was called here: a 27-test file answered 27, then 54, then
+81 — a runner that is wrong in a way that looks like a passing suite."
+  (test/reset-units)
+  (doseq (s specs) (reflect/load (first s)))
+  (into [] (seq/keep specs (fn (s) (when (second s) [(first s) (second s)])))))
+
+(defn- evsrv-refresh-project ()
+  "Reload the project sources that have changed since this image loaded them, answering how
+many — so a warm session tests the code on disk rather than the code it booted with.
+
+Without this the session is wrong in the direction that costs most: green for a function
+you have already broken, red for one you have already fixed. The no-op case is one `stat`
+per source file, which is what makes doing it on every run affordable."
+  ;; check-allow :discarded-catch — a project that cannot be re-read should still run the
+  ;; tests it has, rather than turning a stale image into no image at all
+  (check-allow :discarded-catch
+    (try
+      (let (root (project/find-root (file/cwd)))
+        (if (nil? root) 0 (count (project/reload-changed root))))
+      (catch e
+        (do (log/warn (str "eval-server: could not refresh the project: " (error-message e))) 0)))))
+
+(defn- evsrv-run-tests (id specs)
+  "Run `specs` (empty = the whole project suite), streaming one `:more` line per finished
+test, and answer the summary. Runs in THIS process: `run-tests-structured` isolates each
+unit itself, so a test's `def`s roll back without the session having to."
+  (let (reloaded (evsrv-refresh-project)
+        lines (evsrv-test-load specs)
+        ;; Silence the live progress marks for the duration. They are one character per
+        ;; result, flushed WITHOUT a newline, onto the same stdout the replies travel on —
+        ;; so a batch of them lands as a `....` prefix on the next reply line and the
+        ;; client's reader, seeing dots where a map should start, drops that reply. Six of
+        ;; twenty-seven verdicts went missing that way before this line, and the six were
+        ;; whichever ones happened to follow a flush.
+        ;;
+        ;; `*test-formatter*` is the documented switch for exactly this: "a machine
+        ;; formatter, whose output must stay parseable" (`test/progress-mark`). This is one.
+        _ (def *test-formatter* :evsrv)
+        ;; a `defdyn` set outside any `%isolate`, so it survives into the isolated units —
+        ;; which is the whole reason a verdict can be reported as it lands
+        _ (def *test-report-sink*
+            (fn (r) (io/puts (evsrv-encode-reply {:id id :more true :test (evsrv-test-result r)}))))
+        ;; …and `spy` INSIDE a test streams the same way. A one-shot runner gets this for
+        ;; free by printing to a stdout nobody else is using; here the channel is a
+        ;; protocol, so the entries travel as chunks of the run like the verdicts do.
+        ;; Without it the warm runner and the cold one disagree about what `spy` does in a
+        ;; test — the same project, the same key, different output — which is exactly the
+        ;; drift a shared runner exists to prevent.
+        _ (def *spy-sink*
+            (fn (e)
+              (io/puts (evsrv-encode-reply {:id id :more true :spy (eval-server-spy-entry e)}))))
+        summary (if (empty? specs)
+                  (project-run/run-tests-structured)
+                  (if (empty? lines)
+                    (test/run-tests-structured)
+                    (test/run-tests-structured :filter {:lines lines}))))
+    (def *test-report-sink* nil)
+    (def *test-formatter* nil)
+    {:id id
+     :ok true
+     :summary {:total (get summary :total 0)
+               :passed (get summary :passed 0)
+               :failed (get summary :failed 0)
+               :ms (get summary :ms 0)
+               ;; how many sources this run had to pick up first — what lets a client say
+               ;; "warm · 2 reloaded" instead of leaving the reader to wonder whether the
+               ;; answer is about the code they are looking at
+               :reloaded reloaded}}))
+
+(defn evsrv-clear-sinks ()
+  "Put the reporting seams back. Called on every way out of a test run — finished, raised,
+or killed — because they are ROOT globals: left installed, the next run's verdicts would be
+streamed against an id that has already been answered."
+  (def *test-report-sink* nil)
+  (def *spy-sink* nil)
+  (def *test-formatter* nil))
+
+(defn answer-test (req)
+  "The reply map for a `:test` request — see [[evsrv-encode-test]]. The per-test lines have
+already gone out by the time this returns; this is the final one.
+
+Run in a spawned process by [[eval-server-loop]] rather than called inline, so the suite
+can be ABANDONED: a run is the one request that legitimately lasts minutes, and a server
+that cannot be interrupted during one is a server you can only escape by killing the image
+that made it worth keeping."
+  (let (id (get req :id))
+    (try
+      (evsrv-run-tests id (or (get req :specs) []))
+      (catch e
+        (do
+          (evsrv-clear-sinks)
+          {:id id :ok false :error (str "test run failed: " (error-message e))})))))
+
 ;; ---- the server loop ----------------------------------------------------------
 
-(defn- eval-server-loop ()
+;; The loop is a RECEIVE loop over two sources, not a read-line loop, and that is entirely
+;; so a test run can be stopped.
+;;
+;; `read-line` blocks the process that calls it, so a server that reads its own stdin is
+;; deaf for as long as it is busy. For an eval that is right — they are milliseconds, and
+;; the deadline belongs to the client. For a suite it is not: a run lasts minutes by
+;; design, and a stop request sent during one would sit unread in the pipe until the thing
+;; it was meant to abandon had finished.
+;;
+;; So a READER process owns `read-line` and forwards each line, and the server selects
+;; between "a line arrived" and "the run I spawned finished". While a run is in flight
+;; every request except a stop is QUEUED rather than answered: the session is one image,
+;; the runner swaps globals under `%isolate`, and answering an eval in the middle of that
+;; is the unsoundness this module's preamble already refuses to have.
+
+(defn- eval-server-reader (server)
   (let (line (read-line))
-    (when line
-      ; nil = EOF: the parent closed stdin — done
-      (let (req (evsrv-decode-request line))
-        (when req
-          (io/puts (evsrv-encode-reply (answer req)))))
-      (eval-server-loop))))
+    (if (nil? line)
+      (send server [:evsrv-eof])
+      (do (send server [:evsrv-line line]) (eval-server-reader server)))))
+
+(defn- evsrv-stop-run (state id)
+  "Abandon the run in flight when `id` names it (or names nothing in particular), answering
+the stop request. A stop for a run that has already finished is answered `false` rather
+than ignored: the client asked a question and is owed the answer, not a timeout."
+  (let (run (:run state))
+    (if (nil? run)
+      (do (io/puts (evsrv-encode-reply {:id id :ok true :stopped false})) state)
+      (do
+        (exit (:child run) :kill)
+        (demonitor (:ref run))
+        ;; the killed runner never reached its own teardown, so the parent does it
+        (evsrv-clear-sinks)
+        ;; …and the run it abandoned is still owed a final reply, or the client waits for
+        ;; one that is never coming
+        (io/puts (evsrv-encode-reply {:id (:id run) :ok false :stopped true}))
+        (io/puts (evsrv-encode-reply {:id id :ok true :stopped true}))
+        (assoc state :run nil)))))
+
+(defn- evsrv-start-run (state req)
+  (let (me (self)
+        id (get req :id)
+        child (spawn (send me [:evsrv-test-done id (answer-test req)]))
+        ref (monitor child))
+    (assoc state :run {:id id :child child :ref ref})))
+
+(defn- evsrv-handle (state req)
+  "Dispatch one decoded request: a stop is always answered, a test starts a run, and
+anything arriving while a run is in flight waits its turn."
+  (cond
+    (get req :teststop) (evsrv-stop-run state (get req :id))
+    (:run state) (update state :queue (fn (q) (into [] (append (or q []) [req]))))
+    (get req :test) (evsrv-start-run state req)
+    else (do (io/puts (evsrv-encode-reply (answer req))) state)))
+
+(defn- evsrv-drain (state)
+  "Take the next queued request now that nothing is in flight."
+  ;; `into []` at both ends so the queue is a VECTOR and says so. `append` answers a list
+  ;; and `(or … [])` a union of the two, which leaves `first`/`rest` here taking something
+  ;; the checker cannot call seqable — a finding rather than a bug, and one the shape
+  ;; should not have had in the first place.
+  (let (q (into [] (or (:queue state) [])))
+    (if (or (empty? q) (:run state))
+      state
+      (evsrv-drain (evsrv-handle (assoc state :queue (into [] (rest q))) (first q))))))
+
+(defn- eval-server-loop (state)
+  (receive
+    ([:evsrv-line line] (let (req (evsrv-decode-request line))
+                          (eval-server-loop (if req (evsrv-drain (evsrv-handle state req)) state))))
+    ([:evsrv-test-done id reply] (do
+                                   (when (:run state) (demonitor (get (:run state) :ref)))
+                                   (io/puts (evsrv-encode-reply reply))
+                                   (eval-server-loop (evsrv-drain (assoc state :run nil)))))
+    ;; the runner died without answering — a crash, or the kill in `evsrv-stop-run` racing
+    ;; its own demonitor. Either way the id is owed a reply, and only if it is still ours.
+    ([:down ref child reason] (if (and (:run state) (= ref (get (:run state) :ref)))
+                                (do
+                                  (evsrv-clear-sinks)
+                                  (io/puts (evsrv-encode-reply {:id (get (:run state) :id)
+                                                                :ok false
+                                                                :error (str "the test runner died: "
+                                                                         (pr-str reason))}))
+                                  (eval-server-loop (evsrv-drain (assoc state :run nil))))
+                                (eval-server-loop state)))
+    ;; nil from read-line = EOF: the parent closed stdin — done
+    ([:evsrv-eof] nil)))
 
 (defn run ()
   "Run the eval server: print the `{:ready true}` banner, then answer one request
@@ -486,4 +725,6 @@ per stdin line until EOF. This is the child's whole program — a client spawns
 `(run)`, and drives it over stdin/stdout."
   (baseline-globals) ; before the banner: nothing of the user's has run yet
   (io/puts (evsrv-encode-reply {:ready true}))
-  (eval-server-loop))
+  (let (me (self))
+    (spawn (eval-server-reader me)))
+  (eval-server-loop {:run nil :queue []}))

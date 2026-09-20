@@ -28,6 +28,7 @@
 (purge-stale-temp "brood-enhancer-")
 (purge-stale-temp "brood-feat-")
 (purge-stale-temp "brood-fmt-plugin-")
+(purge-stale-temp "brood-incl-")
 (purge-stale-temp "brood-manifest-")
 (purge-stale-temp "brood-p2-")
 (purge-stale-temp "brood-skip-")
@@ -540,6 +541,62 @@
         (let (bundle (project-release/bundle-collect root))
           (is (any? bundle (fn (s) (and (string? s) (includes? s "defn shipped")))))
           (is (not (any? bundle (fn (s) (and (string? s) (includes? s "describe"))))))))))
+  ;; ---- include-str: the file travels as a literal, not as a path ------------
+  ;; A bundle carries module source and no asset files (ADR-038), so a program that
+  ;; needs a foreign file has to carry its TEXT. These two tests are the two halves of
+  ;; that: the macro reads it where the program is built, and the collector resolves it
+  ;; where the program is archived — and the second is the one a release depends on.
+  (test "include-str splices a file's text verbatim, escapes and all"
+    (let (root (temp-dir "brood-incl-"))
+      (file/mkdir root)
+      (let (data (path/join (or root "") "sample.txt")
+            ;; quotes, a backslash and a close paren — everything that goes wrong when
+            ;; a file is pasted into a string literal by hand
+            contents "say \"hi\" \\ then )\n")
+        (file/spit data contents)
+        ;; absolute path, so the test does not depend on where it is run from
+        (assert= (reflect/eval (list 'include-str data)) contents))))
+  (test "include-str is resolved into the source nest release archives"
+    (let (root (temp-dir "brood-incl-"))
+      (file/mkdir root)
+      (let (data (path/join (or root "") "agent.exs")
+            contents "IO.puts(\"hello\")\n")
+        (file/spit data contents)
+        (let (source (str "(def *agent* (include-str " (pr-str data) "))\n")
+              out (project-release/inline-includes source))
+          ;; the form is gone and the contents are there, as a literal the reader can
+          ;; take back apart — which is what makes the archived module self-contained
+          (is (not (includes? out "include-str")))
+          (is (includes? out "IO.puts"))
+          (assert= (last (reflect/read-first out)) contents)))))
+  (test "inline-includes leaves a source with no include-str byte-identical"
+    (let (source "(defmodule m)\n(defn f () 1)\n")
+      (assert= (project-release/inline-includes source) source)))
+  ;; The release path does not go through `project/setup`, so it has no `*project-root*`
+  ;; bound — it is handed the root instead. Without passing it through, every embedded
+  ;; file resolved against the working directory, which is the project root only when
+  ;; `nest release` happens to be run from there.
+  (test "a relative include-str resolves against the root it is given, not the cwd"
+    (let (root (temp-dir "brood-incl-"))
+      (file/mkdir root)
+      (file/mkdir (path/join (or root "") "priv"))
+      (file/spit (path/join (or root "") "priv/schema.sql") "SELECT 1;\n")
+      (let (source "(def *schema* (include-str \"priv/schema.sql\"))\n"
+            out (project-release/inline-includes source root))
+        (assert= (last (reflect/read-first out)) "SELECT 1;\n"))))
+  (test "a dependency's include-str resolves against that dependency, not the root project"
+    ;; `_deps/foo/src/x.blsp` naming `priv/x.sql` means `_deps/foo/priv/x.sql`; resolved
+    ;; against the release's own root it would read the wrong file, or none.
+    (let (root (temp-dir "brood-incl-"))
+      (file/mkdir root)
+      (let (dep (path/join (or root "") "_deps/foo"))
+        (file/mkdir (path/join dep "src"))
+        (assert= (project-release/bundle-dep-root (path/join dep "src/x.blsp")
+                   (list (path/join dep "src")))
+          dep)
+        ;; a path under no dep dir belongs to the root project
+        (is (nil? (project-release/bundle-dep-root "/elsewhere/src/x.blsp"
+                    (list (path/join dep "src"))))))))
   (test "an empty describe warns; a describe with a test does not"
     (is (includes? (with-err-str (describe "empty group")) "has no tests"))
     (is (not (includes? (with-err-str (describe "full group" (test "t" (is true)))) "has no tests")))))
@@ -1116,3 +1173,44 @@
         (is (string/starts-with? (nth lines 4 "") "(sig odd "))
         (assert= (nth lines 3 "") "  (string/length s))"))
       (is (> (count (reflect/read-all (file/slurp path))) 0)))))
+
+;; ---- keeping a loaded image current ---------------------------------------------
+;; `load-sources` gets a project in once; a long-lived image then holds what it loaded
+;; while the files move on. That is wrong in the direction that costs most — green for a
+;; function you have broken, red for one you have fixed.
+(describe "project: reloading what changed under a long-lived image"
+  (defn- pt-fixture ()
+    (let (root (test/temp-dir "proj-reload-"))
+      (file/mkdir root)
+      (file/mkdir (path/join root "src"))
+      (file/spit (path/join root "project.blsp") "(project :name \"reloadfix\" :version \"0.0.1\")")
+      (file/spit (path/join root "src/thing.blsp")
+        "(defmodule thing \"f\")\n(defn thing-answer () 41)\n")
+      root))
+
+  :isolated (test "a source that moved is reloaded; one that did not is left alone"
+    (let (root (pt-fixture)
+          src (path/join root "src/thing.blsp"))
+      (project/setup root)
+      (project/load-sources root)
+      (assert= (thing/thing-answer) 41)
+      ;; nothing has moved, so nothing is reloaded — the common case, and the reason
+      ;; asking on every run is affordable
+      (assert= (project/reload-changed root) [])
+      ;; …now it has
+      (file/spit src "(defmodule thing \"f\")\n(defn thing-answer () 42)\n")
+      (assert= (project/changed-sources root) [src])
+      (assert= (project/reload-changed root) [src])
+      (assert= (thing/thing-answer) 42) ; the image now holds what is on disk
+      (assert= (project/reload-changed root) []))) ; and is current again
+  :isolated (test "a source added since boot counts as changed"
+    ;; a file the image has never loaded is exactly what a long-lived one is most likely
+    ;; to be wrong about
+    (let (root (pt-fixture))
+      (project/setup root)
+      (project/load-sources root)
+      (assert= (project/reload-changed root) [])
+      (let (added (path/join root "src/later.blsp"))
+        (file/spit added "(defmodule later \"f\")\n(defn later-answer () 7)\n")
+        (assert= (project/reload-changed root) [added])
+        (assert= (later/later-answer) 7)))))
