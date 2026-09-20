@@ -221,7 +221,7 @@ pub(super) fn bytes_to_list(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
 
 /// Extract raw bytes from a `Value`: a `bytes` value, or (leniently) a vector
 /// or list of byte ints (0–255).
-pub(super) fn collect_bytes(
+pub(in crate::builtins) fn collect_bytes(
     name: &'static str,
     bv: Value,
     heap: &mut Heap,

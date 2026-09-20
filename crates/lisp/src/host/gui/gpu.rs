@@ -1,137 +1,374 @@
-//! GPU rendering backend for the GUI window (the `gui-gpu` feature).
+//! GPU render target for the GUI window (the `gui-gpu` feature), on wgpu.
 //!
-//! Replaces the CPU softbuffer present + per-pixel blit with an OpenGL (ES 3.0)
-//! instanced-quad pipeline: every solid-fill op (Clear / Rect / VSpans / Cells) becomes
-//! a coloured quad uploaded once and drawn with a single instanced draw call, then the
-//! swapchain is presented. The window's swap interval is set to *immediate* (no vsync),
-//! so the frame rate is bounded by work, not the monitor refresh — the two things that
-//! made the CPU path slow for high-cell-count sims (Game of Life).
+//! Replaces the CPU softbuffer present + per-pixel blit with two instanced-quad
+//! pipelines. Every op becomes quads: a solid-fill op (Clear / Rect / FRect / VSpans /
+//! Cells / CellsRgb / Quad, plus a text op's cell background) a coloured quad, a glyph or
+//! a `Sprite` a textured one. The quads are drawn in op order in **batches** — a run of
+//! consecutive solids is one instanced draw, a run of consecutive textured quads from the
+//! same texture another — so a frame costs a handful of draw calls whatever its op
+//! count, and a sprite drawn after a rect lands on top of it, as the CPU painter's op
+//! order promises. Glyphs share one texture (an atlas the rasterised clusters are packed
+//! into as they first appear), so a page of text is one batch, not one draw per glyph.
+//! The swapchain presents without vsync unless the window asked for it, so a sim's frame
+//! rate is bounded by work, not the monitor refresh.
 //!
-//! Scope (prototype): solid quads only. Text (`Op::Text`) is not yet drawn — glyphs will
-//! upload to a GL texture atlas in a later increment. Shaping (cosmic-text) is untouched;
-//! this module only owns the *render target*. winit, input, and the draw-op protocol are
-//! all unchanged.
+//! This module is MECHANISM only. It knows a quad, a texture, a UV rect, a tint and an
+//! angle; what a sprite sheet is, how a line is a thin quad at an angle, which frame an
+//! animation is on, are Brood (`std/gui.blsp` and the engine above it).
+//!
+//! wgpu, not OpenGL: the runtime is meant to run on Windows and macOS as well as Linux,
+//! and the GLES 3.0 context the first prototype requested exists on neither (CGL is
+//! desktop-GL only and deprecated; Windows needs ANGLE). wgpu picks Vulkan / Metal / DX12
+//! per platform behind one code path — and is what an in-browser build would draw with.
+//!
+//! Scope: `Cursor`, `CursorZone`, `ScrollRegion` and `CellRegion` are not drawn
+//! (unimplemented GPU features, like the CPU path's rounded corners — a `Rect` radius
+//! renders square here). Shaping (cosmic-text) is untouched; this module only owns the
+//! *render target*. winit, input, and the draw-op protocol are all unchanged.
 
-use std::num::NonZeroU32;
+use std::collections::HashMap;
 use std::rc::Rc;
 
-use glow::HasContext;
-use glutin::config::ConfigTemplateBuilder;
-use glutin::context::{ContextApi, ContextAttributesBuilder, PossiblyCurrentContext, Version};
-use glutin::display::{Display, DisplayApiPreference};
-use glutin::prelude::*;
-use glutin::surface::{Surface, SurfaceAttributesBuilder, SwapInterval, WindowSurface};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::window::Window;
 
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::host::gui::backend::Renderer;
 use crate::host::gui::Op;
 use crate::host::text_width::cluster_cells;
 
 const DEFAULT_FG: [u8; 3] = [0xe5, 0xe5, 0xe5];
 const DEFAULT_BG_RGB: [u8; 3] = [12, 12, 16];
 
-const DEFAULT_BG: [f32; 3] = [12.0 / 255.0, 12.0 / 255.0, 16.0 / 255.0];
+/// Both pipelines. A quad is four vertices of a triangle strip generated from the vertex
+/// index (no vertex buffer): `corner` is (0,0) (1,0) (0,1) (1,1), and every per-quad
+/// value rides in the instance buffer. Pixel coordinates, top-left origin, mapped to NDC
+/// through the viewport uniform — the CPU painter's coordinate contract. A quad turns
+/// about its own centre by `rot` radians (clockwise on screen, since y points down).
+const SHADER_SRC: &str = r#"
+struct Viewport { size: vec2<f32>, _pad: vec2<f32> };
+@group(0) @binding(0) var<uniform> viewport: Viewport;
 
-const VERT_SRC: &str = r#"#version 300 es
-layout(location = 0) in vec2 corner;   // unit quad 0..1
-layout(location = 1) in vec4 rect;     // x, y, w, h in pixels (top-left origin)
-layout(location = 2) in vec3 color;
-uniform vec2 viewport;                 // framebuffer size in px
-out vec3 v_color;
-void main() {
-    vec2 px = rect.xy + corner * rect.zw;
-    vec2 ndc = vec2(px.x / viewport.x * 2.0 - 1.0,
-                    1.0 - px.y / viewport.y * 2.0);
-    gl_Position = vec4(ndc, 0.0, 1.0);
-    v_color = color;
+fn corner(vi: u32) -> vec2<f32> {
+    return vec2<f32>(f32(vi & 1u), f32(vi >> 1u));
+}
+
+// The screen position of a quad corner: the corner's offset from the quad's centre,
+// rotated, plus the centre.
+fn place(rect: vec4<f32>, c: vec2<f32>, rot: f32) -> vec2<f32> {
+    let centre = rect.xy + rect.zw * 0.5;
+    let offset = (c - vec2<f32>(0.5, 0.5)) * rect.zw;
+    let s = sin(rot);
+    let co = cos(rot);
+    return centre + vec2<f32>(offset.x * co - offset.y * s, offset.x * s + offset.y * co);
+}
+
+fn to_ndc(px: vec2<f32>) -> vec4<f32> {
+    return vec4<f32>(px.x / viewport.size.x * 2.0 - 1.0,
+                     1.0 - px.y / viewport.size.y * 2.0, 0.0, 1.0);
+}
+
+// --- solid quads -------------------------------------------------------------------
+
+struct SolidInst {
+    @location(0) rect: vec4<f32>,   // x, y, w, h in pixels
+    @location(1) color: vec4<f32>,  // straight rgba, 0..1
+    @location(2) rot: f32,          // radians about the centre
+};
+struct SolidOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) color: vec4<f32>,
+};
+
+@vertex
+fn vs_solid(@builtin(vertex_index) vi: u32, inst: SolidInst) -> SolidOut {
+    var out: SolidOut;
+    out.pos = to_ndc(place(inst.rect, corner(vi), inst.rot));
+    out.color = inst.color;
+    return out;
+}
+
+@fragment
+fn fs_solid(in: SolidOut) -> @location(0) vec4<f32> {
+    return in.color;
+}
+
+// --- textured quads ------------------------------------------------------------------
+
+struct TexInst {
+    @location(0) rect: vec4<f32>,   // x, y, w, h in pixels
+    @location(1) uv: vec4<f32>,     // u0, v0, du, dv in texture space (a negative extent mirrors)
+    @location(2) tint: vec4<f32>,   // straight rgba, 0..1
+    @location(3) mode: u32,         // 1 = coverage mask recoloured with tint, 0 = colour
+    @location(4) rot: f32,          // radians about the centre
+};
+struct TexOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) tint: vec4<f32>,
+    @location(2) @interpolate(flat) mode: u32,
+};
+
+@group(1) @binding(0) var tex: texture_2d<f32>;
+@group(1) @binding(1) var samp: sampler;
+
+@vertex
+fn vs_tex(@builtin(vertex_index) vi: u32, inst: TexInst) -> TexOut {
+    var out: TexOut;
+    let c = corner(vi);
+    out.pos = to_ndc(place(inst.rect, c, inst.rot));
+    out.uv = inst.uv.xy + c * inst.uv.zw;
+    out.tint = inst.tint;
+    out.mode = inst.mode;
+    return out;
+}
+
+@fragment
+fn fs_tex(in: TexOut) -> @location(0) vec4<f32> {
+    let t = textureSample(tex, samp, in.uv);
+    if (in.mode == 1u) {
+        return vec4<f32>(in.tint.rgb, t.a * in.tint.a);
+    }
+    return t * in.tint;
 }
 "#;
 
-const FRAG_SRC: &str = r#"#version 300 es
-precision mediump float;
-in vec3 v_color;
-out vec4 frag;
-void main() { frag = vec4(v_color, 1.0); }
-"#;
+/// One solid instance: rect (4) + rgba (4) + rot (1), as the shader's `SolidInst`.
+const SOLID_FLOATS: usize = 9;
+/// One textured instance: rect (4) + uv (4) + tint (4) + mode (1 u32 as its bits) + rot (1).
+const TEX_WORDS: usize = 14;
 
-// Glyph pipeline: one textured quad per glyph (the corner doubles as the UV).
-const GVERT_SRC: &str = r#"#version 300 es
-layout(location = 0) in vec2 corner;
-uniform vec4 rect;      // x, y, w, h in pixels
-uniform vec2 viewport;
-out vec2 v_uv;
-void main() {
-    vec2 px = rect.xy + corner * rect.zw;
-    gl_Position = vec4(px.x / viewport.x * 2.0 - 1.0, 1.0 - px.y / viewport.y * 2.0, 0.0, 1.0);
-    v_uv = corner;
-}
-"#;
-const GFRAG_SRC: &str = r#"#version 300 es
-precision mediump float;
-in vec2 v_uv;
-uniform sampler2D tex;
-uniform vec3 tint;
-uniform int mono;       // 1 = monochrome coverage (recolour with tint), 0 = colour glyph
-out vec4 frag;
-void main() {
-    vec4 t = texture(tex, v_uv);
-    frag = (mono == 1) ? vec4(tint, t.a) : t;
-}
-"#;
+/// The glyph atlas page size. 2048² RGBA is 16 MB — a few thousand cells' worth of
+/// glyphs at an editor size, and every device wgpu runs on allows at least 8192².
+const ATLAS_SIZE: u32 = 2048;
 
-/// A rasterised cluster uploaded to a GL texture (cached per cluster+face).
+/// Which texture a run of textured quads samples: a glyph-atlas page, or a texture the
+/// app uploaded for its sprites.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TexKey {
+    Atlas(usize),
+    User(u32),
+}
+
+/// A texture the app uploaded, bound for the textured pipeline.
+struct GpuTexture {
+    bind_group: wgpu::BindGroup,
+}
+
+/// One page of the glyph atlas: the texture plus a shelf packer's cursor. Glyphs are
+/// packed left to right along a shelf whose height is the tallest glyph on it; a glyph
+/// that does not fit starts a new shelf below, and one that does not fit the page starts
+/// a new page. Simple, and enough: every glyph of one font size is about the same height.
+struct AtlasPage {
+    texture: wgpu::Texture,
+    bind_group: wgpu::BindGroup,
+    next_x: u32,
+    next_y: u32,
+    shelf_h: u32,
+}
+
+/// Where a rasterised cluster sits in the atlas: page + pixel rect + whether it is a
+/// coverage mask (`mode` 1 in the shader) rather than a colour bitmap.
 #[derive(Clone, Copy)]
-struct GlGlyph {
-    tex: glow::Texture,
-    w: i32,
-    h: i32,
-    color: bool,
+struct AtlasGlyph {
+    page: usize,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    mono: bool,
 }
 
-/// A deferred glyph draw collected during op iteration (so glyphs paint over the
-/// solid backgrounds, and `cluster_glyph`'s `&mut Renderer` borrow happens after).
-struct GlyphReq {
-    left: f32,
-    top: f32,
-    g: String,
-    family: Option<u32>,
-    bold: bool,
-    italic: bool,
-    scale: u16,
-    tint: [u8; 3],
+/// A growable instance buffer: re-created (never mapped) when a frame outgrows it.
+struct InstanceBuffer {
+    buffer: wgpu::Buffer,
+    capacity_bytes: u64,
 }
 
-/// One open window's GL state: the glutin context/surface + the glow instanced-quad
-/// pipeline. Lives on the GUI thread; the context is kept current (one window).
-pub struct GlWindow {
+impl InstanceBuffer {
+    fn new(device: &wgpu::Device, label: &str, capacity_bytes: u64) -> InstanceBuffer {
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: capacity_bytes,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        InstanceBuffer {
+            buffer,
+            capacity_bytes,
+        }
+    }
+
+    /// Upload `data`, growing (doubling) the buffer first when it does not fit.
+    fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, label: &str, data: &[u8]) {
+        let needed = data.len() as u64;
+        if needed > self.capacity_bytes {
+            let mut capacity = self.capacity_bytes.max(1);
+            while capacity < needed {
+                capacity *= 2;
+            }
+            *self = InstanceBuffer::new(device, label, capacity);
+        }
+        if !data.is_empty() {
+            queue.write_buffer(&self.buffer, 0, data);
+        }
+    }
+}
+
+/// A run of consecutive quads drawn with one pipeline state: `count` instances starting
+/// at `first` in that pipeline's instance buffer.
+enum Batch {
+    Solid { first: u32, count: u32 },
+    Tex { key: TexKey, first: u32, count: u32 },
+}
+
+/// The frame under construction: both instance buffers' contents and the batch list, in
+/// op order. Solids and textured quads keep separate buffers (different strides) and the
+/// batch list says in which order to draw runs of each.
+struct FrameBuilder {
+    solids: Vec<f32>,
+    texs: Vec<u32>,
+    batches: Vec<Batch>,
+    fw: f32,
+    fh: f32,
+}
+
+impl FrameBuilder {
+    fn new(fw: f32, fh: f32) -> FrameBuilder {
+        FrameBuilder {
+            solids: Vec::new(),
+            texs: Vec::new(),
+            batches: Vec::new(),
+            fw,
+            fh,
+        }
+    }
+
+    /// Whether a quad can put a pixel on screen. A rotated quad is judged by the disc
+    /// its rotation sweeps, so a long thin quad turned across the viewport's corner is
+    /// kept rather than culled by its unrotated rect.
+    fn visible(&self, x: f32, y: f32, w: f32, h: f32, rot: f32) -> bool {
+        if rot == 0.0 {
+            return quad_visible(x, y, w, h, self.fw, self.fh);
+        }
+        let radius = (w * w + h * h).sqrt() * 0.5;
+        let (cx, cy) = (x + w * 0.5, y + h * 0.5);
+        quad_visible(
+            cx - radius,
+            cy - radius,
+            radius * 2.0,
+            radius * 2.0,
+            self.fw,
+            self.fh,
+        )
+    }
+
+    /// A solid quad; `rgba[3]` is its alpha.
+    fn solid(&mut self, x: f32, y: f32, w: f32, h: f32, rgba: [u8; 4], rot: f32) {
+        if !self.visible(x, y, w, h, rot) {
+            return;
+        }
+        let index = (self.solids.len() / SOLID_FLOATS) as u32;
+        self.solids.extend_from_slice(&[
+            x,
+            y,
+            w,
+            h,
+            rgba[0] as f32 / 255.0,
+            rgba[1] as f32 / 255.0,
+            rgba[2] as f32 / 255.0,
+            rgba[3] as f32 / 255.0,
+            rot,
+        ]);
+        match self.batches.last_mut() {
+            Some(Batch::Solid { count, .. }) => *count += 1,
+            _ => self.batches.push(Batch::Solid {
+                first: index,
+                count: 1,
+            }),
+        }
+    }
+
+    /// A textured quad sampling `uv` (`[u0 v0 du dv]`, texture space) of `key`.
+    #[allow(clippy::too_many_arguments)]
+    fn textured(
+        &mut self,
+        key: TexKey,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        uv: [f32; 4],
+        tint: [u8; 4],
+        mono: bool,
+        rot: f32,
+    ) {
+        if !self.visible(x, y, w, h, rot) {
+            return;
+        }
+        let index = (self.texs.len() / TEX_WORDS) as u32;
+        self.texs.extend_from_slice(&[
+            x.to_bits(),
+            y.to_bits(),
+            w.to_bits(),
+            h.to_bits(),
+            uv[0].to_bits(),
+            uv[1].to_bits(),
+            uv[2].to_bits(),
+            uv[3].to_bits(),
+            (tint[0] as f32 / 255.0).to_bits(),
+            (tint[1] as f32 / 255.0).to_bits(),
+            (tint[2] as f32 / 255.0).to_bits(),
+            (tint[3] as f32 / 255.0).to_bits(),
+            u32::from(mono),
+            rot.to_bits(),
+        ]);
+        match self.batches.last_mut() {
+            Some(Batch::Tex { key: k, count, .. }) if *k == key => *count += 1,
+            _ => self.batches.push(Batch::Tex {
+                key,
+                first: index,
+                count: 1,
+            }),
+        }
+    }
+}
+
+/// One open window's GPU state: the wgpu surface + device, the two instanced-quad
+/// pipelines, the glyph atlas and the app's textures. Lives on the GUI thread. Field
+/// order matters: the surface was created from the window's raw handles, so it must
+/// drop before the window — Rust drops fields in declaration order.
+pub struct GpuWindow {
+    surface: wgpu::Surface<'static>,
     window: Rc<Window>,
-    surface: Surface<WindowSurface>,
-    context: PossiblyCurrentContext,
-    gl: glow::Context,
-    program: glow::Program,
-    vao: glow::VertexArray,
-    inst_vbo: glow::Buffer,
-    u_viewport: Option<glow::UniformLocation>,
-    // glyph (textured-quad) pipeline + the per-cluster texture cache
-    glyph_program: glow::Program,
-    glyph_vao: glow::VertexArray,
-    gu_viewport: Option<glow::UniformLocation>,
-    gu_rect: Option<glow::UniformLocation>,
-    gu_tint: Option<glow::UniformLocation>,
-    gu_mono: Option<glow::UniformLocation>,
-    glyphs: std::collections::HashMap<u64, GlGlyph>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    config: wgpu::SurfaceConfiguration,
+    configured: (u32, u32),
+    viewport_buffer: wgpu::Buffer,
+    viewport_bind_group: wgpu::BindGroup,
+    solid_pipeline: wgpu::RenderPipeline,
+    solid_instances: InstanceBuffer,
+    tex_pipeline: wgpu::RenderPipeline,
+    tex_layout: wgpu::BindGroupLayout,
+    tex_instances: InstanceBuffer,
+    sampler: wgpu::Sampler,
+    atlas: Vec<AtlasPage>,
+    /// Cluster+face key → its atlas slot; `None` for a cluster that rasterised to
+    /// nothing (or was too big for a page), remembered so it is not retried each frame.
+    glyphs: HashMap<u64, Option<AtlasGlyph>>,
+    textures: HashMap<u32, GpuTexture>,
 }
 
 /// Whether a quad at `(x, y)` sized `w x h` could put any pixel inside a `fw x fh`
 /// viewport.
 ///
-/// GL would clip an off-screen quad away for free, but this path **buffers** every quad
-/// before drawing — unlike the CPU painter, whose fills clip against the framebuffer and
-/// cost nothing when off-screen. `Op::Cells` pushes one quad per live bit of a
+/// The GPU would clip an off-screen quad away for free, but this path **buffers** every
+/// quad before drawing — unlike the CPU painter, whose fills clip against the framebuffer
+/// and cost nothing when off-screen. `Op::Cells` pushes one quad per live bit of a
 /// caller-supplied bitboard, so without a cull a board far larger than the window grows
-/// the instance buffer (28 bytes a quad) without bound instead of drawing nothing.
+/// the instance buffer (36 bytes a quad) without bound instead of drawing nothing.
 ///
 /// Written as a **positive** test on purpose: a frame is ordinary Brood data, so a
 /// coordinate can be NaN, and every comparison against NaN is false. Phrased this way
@@ -140,140 +377,426 @@ fn quad_visible(x: f32, y: f32, w: f32, h: f32, fw: f32, fh: f32) -> bool {
     w > 0.0 && h > 0.0 && x + w > 0.0 && y + h > 0.0 && x < fw && y < fh
 }
 
-impl GlWindow {
-    /// Create a GL context + surface on an existing winit window, compile the quad
-    /// pipeline, and switch the swapchain to immediate (non-vsync) present.
-    pub fn new(window: Rc<Window>) -> Result<GlWindow, String> {
-        let rdh = window
+/// Pick the swapchain format. A **non-sRGB** 8-bit format is preferred so the shader's
+/// raw colour bytes land on screen as given — the same bytes the CPU painter writes —
+/// rather than being re-encoded as if they were linear light. Every desktop backend
+/// offers one; the first supported format is the fallback when none does.
+fn pick_format(formats: &[wgpu::TextureFormat]) -> Option<wgpu::TextureFormat> {
+    formats
+        .iter()
+        .copied()
+        .find(|f| {
+            matches!(
+                f,
+                wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm
+            )
+        })
+        .or_else(|| formats.first().copied())
+}
+
+/// The present mode: with `vsync`, FIFO (always available, and IS vsync). Without, the
+/// platform's immediate/mailbox mode when it has one, else FIFO — the only mode some
+/// compositors offer, so then the choice is theirs, not ours.
+fn pick_present_mode(modes: &[wgpu::PresentMode], vsync: bool) -> wgpu::PresentMode {
+    if vsync {
+        wgpu::PresentMode::Fifo
+    } else if modes.contains(&wgpu::PresentMode::Immediate) {
+        wgpu::PresentMode::Immediate
+    } else if modes.contains(&wgpu::PresentMode::Mailbox) {
+        wgpu::PresentMode::Mailbox
+    } else {
+        wgpu::PresentMode::Fifo
+    }
+}
+
+impl GpuWindow {
+    /// Create a wgpu surface + device on an existing winit window, build the two quad
+    /// pipelines, and configure the swapchain (vsync as the window asked).
+    pub fn new(window: Rc<Window>, vsync: bool) -> Result<GpuWindow, String> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let raw_display_handle = window
             .display_handle()
             .map_err(|e| format!("display handle: {e}"))?
             .as_raw();
-        let rwh = window
+        let raw_window_handle = window
             .window_handle()
             .map_err(|e| format!("window handle: {e}"))?
             .as_raw();
+        // SAFETY: the handles stay valid for as long as `window` lives, and `GpuWindow`
+        // holds the `Rc<Window>` and declares `surface` before it, so the surface is
+        // dropped first.
+        let surface = unsafe {
+            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                raw_display_handle: Some(raw_display_handle),
+                raw_window_handle,
+            })
+        }
+        .map_err(|e| format!("gpu surface: {e}"))?;
 
-        // EGL works on both Wayland and X11/Mesa — the platforms this runtime targets.
-        let display = unsafe { Display::new(rdh, DisplayApiPreference::Egl) }
-            .map_err(|e| format!("egl display: {e}"))?;
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+            compatible_surface: Some(&surface),
+        }))
+        .map_err(|e| format!("gpu adapter: {e}"))?;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("brood gui"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
+            memory_hints: wgpu::MemoryHints::default(),
+            trace: wgpu::Trace::Off,
+        }))
+        .map_err(|e| format!("gpu device: {e}"))?;
 
-        let template = ConfigTemplateBuilder::new()
-            .compatible_with_native_window(rwh)
-            .with_alpha_size(0)
-            .build();
-        let config = unsafe { display.find_configs(template) }
-            .map_err(|e| format!("gl configs: {e}"))?
-            .next()
-            .ok_or_else(|| "no gl config".to_string())?;
-
-        // Request GLES 3.0 (the shader version above); falls within Mesa's support.
-        let ctx_attrs = ContextAttributesBuilder::new()
-            .with_context_api(ContextApi::Gles(Some(Version::new(3, 0))))
-            .build(Some(rwh));
-        let not_current = unsafe { display.create_context(&config, &ctx_attrs) }
-            .map_err(|e| format!("gl context: {e}"))?;
-
+        let caps = surface.get_capabilities(&adapter);
+        let format = pick_format(&caps.formats).ok_or("gpu surface: no supported format")?;
         let size = window.inner_size();
         let (w, h) = (size.width.max(1), size.height.max(1));
-        let surf_attrs = SurfaceAttributesBuilder::<WindowSurface>::new().build(
-            rwh,
-            NonZeroU32::new(w).unwrap(),
-            NonZeroU32::new(h).unwrap(),
-        );
-        let surface = unsafe { display.create_window_surface(&config, &surf_attrs) }
-            .map_err(|e| format!("gl surface: {e}"))?;
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | if dump_path().is_some() {
+                    wgpu::TextureUsages::COPY_SRC
+                } else {
+                    wgpu::TextureUsages::empty()
+                },
+            format,
+            color_space: wgpu::SurfaceColorSpace::Auto,
+            width: w,
+            height: h,
+            present_mode: pick_present_mode(&caps.present_modes, vsync),
+            desired_maximum_frame_latency: 2,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+        };
+        surface.configure(&device, &config);
 
-        let context = not_current
-            .make_current(&surface)
-            .map_err(|e| format!("make current: {e}"))?;
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("brood gui quads"),
+            source: wgpu::ShaderSource::Wgsl(SHADER_SRC.into()),
+        });
 
-        // Immediate present — no vsync, so frame rate is work-bound, not refresh-bound.
-        let _ = surface.set_swap_interval(&context, SwapInterval::DontWait);
+        let viewport_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("viewport"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let viewport_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("viewport"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let viewport_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("viewport"),
+            layout: &viewport_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: viewport_buffer.as_entire_binding(),
+            }],
+        });
+        let tex_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("texture"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        // Nearest: a glyph is drawn at the size it was rasterised, pixel for pixel, and
+        // a sprite scaled up stays crisp (pixel art) rather than blurring.
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("nearest"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
 
-        let gl = unsafe {
-            // `_cstr` hands us the `&CStr` glow already has and glutin wants — no
-            // round-trip through `CString` (which the plain `from_loader_function`
-            // would force, since it converts to `&str` and back).
-            glow::Context::from_loader_function_cstr(|c| display.get_proc_address(c).cast())
+        let blend = Some(wgpu::BlendState::ALPHA_BLENDING);
+        let target = [Some(wgpu::ColorTargetState {
+            format,
+            blend,
+            write_mask: wgpu::ColorWrites::ALL,
+        })];
+        let primitive = wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleStrip,
+            ..Default::default()
         };
 
-        let (program, vao, inst_vbo, u_viewport) = unsafe { build_pipeline(&gl)? };
-        let (glyph_program, glyph_vao, gu_viewport, gu_rect, gu_tint, gu_mono) =
-            unsafe { build_glyph_pipeline(&gl)? };
-        unsafe {
-            gl.enable(glow::BLEND);
-            gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
-        }
+        let solid_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("solid"),
+            bind_group_layouts: &[Some(&viewport_layout)],
+            immediate_size: 0,
+        });
+        let solid_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("solid quads"),
+            layout: Some(&solid_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_solid"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: (SOLID_FLOATS * 4) as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x4, 1 => Float32x4, 2 => Float32
+                    ],
+                })],
+            },
+            primitive,
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_solid"),
+                compilation_options: Default::default(),
+                targets: &target,
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
 
-        Ok(GlWindow {
-            window,
+        let tex_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("textured"),
+            bind_group_layouts: &[Some(&viewport_layout), Some(&tex_layout)],
+            immediate_size: 0,
+        });
+        let tex_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("textured quads"),
+            layout: Some(&tex_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_tex"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: (TEX_WORDS * 4) as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Uint32, 4 => Float32
+                    ],
+                })],
+            },
+            primitive,
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_tex"),
+                compilation_options: Default::default(),
+                targets: &target,
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let solid_instances = InstanceBuffer::new(&device, "solid instances", 64 * 1024);
+        let tex_instances = InstanceBuffer::new(&device, "textured instances", 64 * 1024);
+
+        Ok(GpuWindow {
             surface,
-            context,
-            gl,
-            program,
-            vao,
-            inst_vbo,
-            u_viewport,
-            glyph_program,
-            glyph_vao,
-            gu_viewport,
-            gu_rect,
-            gu_tint,
-            gu_mono,
-            glyphs: std::collections::HashMap::new(),
+            window,
+            device,
+            queue,
+            config,
+            configured: (w, h),
+            viewport_buffer,
+            viewport_bind_group,
+            solid_pipeline,
+            solid_instances,
+            tex_pipeline,
+            tex_layout,
+            tex_instances,
+            sampler,
+            atlas: Vec::new(),
+            glyphs: HashMap::new(),
+            textures: HashMap::new(),
         })
     }
 
-    /// Match the GL surface to the current window size (call on resize).
-    pub fn resize(&self, w: u32, h: u32) {
-        if let (Some(w), Some(h)) = (NonZeroU32::new(w.max(1)), NonZeroU32::new(h.max(1))) {
-            self.surface.resize(&self.context, w, h);
+    /// Match the swapchain to the current window size (called before each paint).
+    pub fn resize(&mut self, w: u32, h: u32) {
+        let (w, h) = (w.max(1), h.max(1));
+        if self.configured != (w, h) {
+            self.config.width = w;
+            self.config.height = h;
+            self.surface.configure(&self.device, &self.config);
+            self.configured = (w, h);
         }
     }
 
-    /// Draw one frame: clear, expand the solid-fill ops to quads, one instanced draw,
-    /// then present. `cw`/`ch` are the cell pixel size, `inset` the content margin —
-    /// the same coordinate contract the CPU `paint` uses, so positions agree.
-    pub(crate) fn paint(
-        &mut self,
-        frame: &[Op],
-        renderer: &mut crate::host::gui::backend::Renderer,
-    ) {
-        let (cw, ch, inset) = (
-            renderer.cell_w.max(1),
-            renderer.cell_h.max(1),
-            renderer.inset(),
-        );
-        let size = self.window.inner_size();
-        let (fw, fh) = (size.width.max(1), size.height.max(1));
-        self.resize(fw, fh);
+    /// An empty `w`×`h` RGBA8 texture on the device, with the bind group the textured
+    /// pipeline samples it through.
+    fn create_texture(&self, w: u32, h: u32) -> (wgpu::Texture, wgpu::BindGroup) {
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.tex_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+        (texture, bind_group)
+    }
 
-        let mut insts: Vec<f32> = Vec::new();
-        let mut glyph_reqs: Vec<GlyphReq> = Vec::new();
-        let (fwf, fhf) = (fw as f32, fh as f32);
-        let mut push = |x: f32, y: f32, w: f32, h: f32, c: [u8; 3]| {
-            if !quad_visible(x, y, w, h, fwf, fhf) {
-                return;
+    /// Write a straight-alpha RGBA bitmap into `texture` at `(x, y)`.
+    fn write_rgba(&self, texture: &wgpu::Texture, x: u32, y: u32, rgba: &[u8], w: u32, h: u32) {
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x, y, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * w),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    /// `gui-texture`: keep `rgba` (`w*h*4` bytes) on the device as texture `tex`. A
+    /// re-upload under a live handle replaces it; a size that does not match the bytes
+    /// is dropped (the Brood side validates, this is the backstop).
+    pub fn upload_texture(&mut self, tex: u32, rgba: &[u8], w: u32, h: u32) {
+        if w == 0 || h == 0 || rgba.len() as u64 != w as u64 * h as u64 * 4 {
+            return;
+        }
+        let (texture, bind_group) = self.create_texture(w, h);
+        self.write_rgba(&texture, 0, 0, rgba, w, h);
+        self.textures.insert(tex, GpuTexture { bind_group });
+    }
+
+    /// `gui-texture-free`: drop texture `tex` (a later `:sprite` naming it draws nothing).
+    pub fn free_texture(&mut self, tex: u32) {
+        self.textures.remove(&tex);
+    }
+
+    /// Pack a rasterised `w`×`h` cluster into the atlas, opening a new shelf or page as
+    /// needed, and return where it landed. `None` for a glyph larger than a page.
+    fn pack_glyph(&mut self, rgba: &[u8], w: u32, h: u32, mono: bool) -> Option<AtlasGlyph> {
+        if w == 0 || h == 0 || w > ATLAS_SIZE || h > ATLAS_SIZE {
+            return None;
+        }
+        let mut page_index = self.atlas.len().saturating_sub(1);
+        loop {
+            if page_index >= self.atlas.len() {
+                let (texture, bind_group) = self.create_texture(ATLAS_SIZE, ATLAS_SIZE);
+                self.atlas.push(AtlasPage {
+                    texture,
+                    bind_group,
+                    next_x: 0,
+                    next_y: 0,
+                    shelf_h: 0,
+                });
             }
-            insts.extend_from_slice(&[
+            let page = &mut self.atlas[page_index];
+            if page.next_x + w > ATLAS_SIZE {
+                page.next_y += page.shelf_h;
+                page.next_x = 0;
+                page.shelf_h = 0;
+            }
+            if page.next_y + h > ATLAS_SIZE {
+                page_index += 1;
+                continue;
+            }
+            let (x, y) = (page.next_x, page.next_y);
+            page.next_x += w;
+            page.shelf_h = page.shelf_h.max(h);
+            let texture = &self.atlas[page_index].texture;
+            self.write_rgba(texture, x, y, rgba, w, h);
+            return Some(AtlasGlyph {
+                page: page_index,
                 x,
                 y,
                 w,
                 h,
-                c[0] as f32 / 255.0,
-                c[1] as f32 / 255.0,
-                c[2] as f32 / 255.0,
-            ]);
-        };
+                mono,
+            });
+        }
+    }
+
+    /// Draw one frame: expand the ops to quads in op order, upload, draw the batches,
+    /// present. The cell pixel size and the grid origin come from the renderer — the
+    /// same coordinate contract the CPU `paint` uses, so cell ops land on the same pixels
+    /// whichever target paints them. Pixel-space ops (`Sprite`/`Quad`) are window
+    /// coordinates as given.
+    pub(crate) fn paint(&mut self, frame: &[Op], renderer: &mut Renderer) {
+        let (cw, ch) = (renderer.cell_w.max(1), renderer.cell_h.max(1));
+        let size = self.window.inner_size();
+        let (fw, fh) = (size.width.max(1), size.height.max(1));
+        self.resize(fw, fh);
+
+        let (fwf, fhf) = (fw as f32, fh as f32);
+        let mut fb = FrameBuilder::new(fwf, fhf);
         let cwf = cw as f32;
         let chf = ch as f32;
-        let insetf = inset as f32;
+        // The grid origin, not the bare inset: the CPU painter centres the vertical
+        // remainder (the rows that do not divide into whole cells), and a frame must land
+        // on the same pixels whichever target paints it.
+        let (ox, oy) = renderer.grid_origin(fw as usize, fh as usize);
+        let (oxf, oyf) = (ox as f32, oy as f32);
+        let opaque = |c: [u8; 3]| [c[0], c[1], c[2], 255];
+        let atlas_size = ATLAS_SIZE as f32;
 
         for op in frame {
             match op {
                 // `radius` is ignored here for the same reason `FRect`'s is: this GPU
                 // path has no rounded-quad shader yet, so a rounded panel renders
-                // square. The active CPU painter rounds it properly.
+                // square. The CPU painter rounds it properly.
                 Op::Rect {
                     row,
                     col,
@@ -283,34 +806,48 @@ impl GlWindow {
                     radius: _,
                 } => {
                     if let Some(bg) = face.bg {
-                        push(
-                            insetf + *col as f32 * cwf,
-                            insetf + *row as f32 * chf,
+                        fb.solid(
+                            oxf + *col as f32 * cwf,
+                            oyf + *row as f32 * chf,
                             *w as f32 * cwf,
                             *h as f32 * chf,
-                            bg,
+                            opaque(bg),
+                            0.0,
                         );
                     }
                 }
-                // Sub-cell rounded rect. This GPU path (a later increment) has no
-                // AA/alpha/round quad yet, so approximate with a solid opaque quad at
-                // the cell-unit float position; the active CPU painter does it properly.
+                // Sub-cell rect: alpha-blended at the cell-unit float position; the
+                // corner radius is not rounded here (the CPU painter does it properly).
                 Op::FRect {
-                    x, y, w, h, face, ..
+                    x,
+                    y,
+                    w,
+                    h,
+                    face,
+                    opacity,
+                    ..
                 } => {
                     if let Some(bg) = face.bg {
-                        push(insetf + *x * cwf, insetf + *y * chf, *w * cwf, *h * chf, bg);
+                        let alpha = (opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+                        fb.solid(
+                            oxf + *x * cwf,
+                            oyf + *y * chf,
+                            *w * cwf,
+                            *h * chf,
+                            [bg[0], bg[1], bg[2], alpha],
+                            0.0,
+                        );
                     }
                 }
                 Op::VSpans { row0, col0, cols } => {
-                    let top0 = insetf + *row0 as f32 * chf;
+                    let top0 = oyf + *row0 as f32 * chf;
                     for (i, segs) in cols.iter().enumerate() {
-                        let left = insetf + (*col0 as usize + i) as f32 * cwf;
+                        let left = oxf + (*col0 as usize + i) as f32 * cwf;
                         let mut y = top0;
                         for (sh, color) in segs {
                             let span_h = *sh as f32 * chf;
                             if let Some(rgb) = color {
-                                push(left, y, cwf, span_h, *rgb);
+                                fb.solid(left, y, cwf, span_h, opaque(*rgb), 0.0);
                             }
                             y += span_h;
                         }
@@ -335,12 +872,13 @@ impl GlWindow {
                                 let bit = base + b.trailing_zeros() as usize;
                                 let x = (bit % wmod) as f32;
                                 let y = (bit / wmod) as f32;
-                                push(
-                                    insetf + (*col0 as f32 + x * asp as f32) * cwf,
-                                    insetf + (*row0 as f32 + y) * chf,
+                                fb.solid(
+                                    oxf + (*col0 as f32 + x * asp as f32) * cwf,
+                                    oyf + (*row0 as f32 + y) * chf,
                                     cell_w,
                                     chf,
-                                    *rgb,
+                                    opaque(*rgb),
+                                    0.0,
                                 );
                                 b &= b - 1;
                             }
@@ -367,20 +905,23 @@ impl GlWindow {
                             let rgb = colors.get(&(bit as u64)).copied().unwrap_or(*default);
                             let x = (bit % wmod) as f32;
                             let y = (bit / wmod) as f32;
-                            push(
-                                insetf + (*col0 as f32 + x * asp as f32) * cwf,
-                                insetf + (*row0 as f32 + y) * chf,
+                            fb.solid(
+                                oxf + (*col0 as f32 + x * asp as f32) * cwf,
+                                oyf + (*row0 as f32 + y) * chf,
                                 cell_w,
                                 chf,
-                                rgb,
+                                opaque(rgb),
+                                0.0,
                             );
                             b &= b - 1;
                         }
                     }
                 }
-                // Text: the cell BACKGROUND as a solid quad (a coloured Life cell is a space
-                // + `:bg`), plus a deferred textured quad per non-space cluster (the glyph
-                // coverage — footer letters). Mirrors the CPU `paint` per-cluster walk.
+                // Text: the cell BACKGROUNDS as solid quads (a coloured Life cell is a
+                // space + `:bg`) — all of the op's cells first, so they form one solid
+                // batch — then a textured quad per non-space cluster out of the atlas,
+                // which together form one textured batch. Mirrors the CPU `paint`
+                // per-cluster walk.
                 Op::Text { row, col, s, face } => {
                     let (mut fg, mut bg) = (
                         face.fg.unwrap_or(DEFAULT_FG),
@@ -393,333 +934,461 @@ impl GlWindow {
                     }
                     let scale = face.scale.max(1) as usize;
                     let ch_s = scale as f32 * chf;
-                    let top = insetf + *row as f32 * chf;
+                    let top = oyf + *row as f32 * chf;
+                    let mut clusters: Vec<(f32, &str)> = Vec::new();
                     let mut cx = *col as usize;
                     for g in s.graphemes(true) {
                         let cells = cluster_cells(g);
                         if cells == 0 {
                             continue;
                         }
-                        let left = insetf + cx as f32 * cwf;
+                        let left = oxf + cx as f32 * cwf;
                         if paint_bg {
-                            push(left, top, (cells * scale) as f32 * cwf, ch_s, bg);
-                        }
-                        if g != " " {
-                            glyph_reqs.push(GlyphReq {
+                            fb.solid(
                                 left,
                                 top,
-                                g: g.to_string(),
-                                family: face.family,
-                                bold: face.bold,
-                                italic: face.italic,
-                                scale: face.scale,
-                                tint: fg,
-                            });
+                                (cells * scale) as f32 * cwf,
+                                ch_s,
+                                opaque(bg),
+                                0.0,
+                            );
+                        }
+                        if g != " " {
+                            clusters.push((left, g));
                         }
                         cx += cells * scale;
                     }
+                    for (left, g) in clusters {
+                        let key = glyph_key(g, face.family, face.bold, face.italic, face.scale);
+                        if !self.glyphs.contains_key(&key) {
+                            let cg = renderer.cluster_glyph(
+                                g,
+                                face.family,
+                                face.bold,
+                                face.italic,
+                                face.scale,
+                            );
+                            let (rgba, w, h, color) =
+                                (cg.rgba.clone(), cg.width as u32, cg.height as u32, cg.color);
+                            let packed = self.pack_glyph(&rgba, w, h, !color);
+                            self.glyphs.insert(key, packed);
+                        }
+                        let Some(Some(glyph)) = self.glyphs.get(&key) else {
+                            continue;
+                        };
+                        fb.textured(
+                            TexKey::Atlas(glyph.page),
+                            left,
+                            top,
+                            glyph.w as f32,
+                            glyph.h as f32,
+                            [
+                                glyph.x as f32 / atlas_size,
+                                glyph.y as f32 / atlas_size,
+                                glyph.w as f32 / atlas_size,
+                                glyph.h as f32 / atlas_size,
+                            ],
+                            opaque(fg),
+                            glyph.mono,
+                            0.0,
+                        );
+                    }
                 }
-                // Cursor / zones: not drawn in the GPU prototype.
+                Op::Sprite {
+                    tex,
+                    x,
+                    y,
+                    w,
+                    h,
+                    uv,
+                    tint,
+                    rot,
+                } => {
+                    if self.textures.contains_key(tex) {
+                        fb.textured(TexKey::User(*tex), *x, *y, *w, *h, *uv, *tint, false, *rot);
+                    }
+                }
+                Op::Quad {
+                    x,
+                    y,
+                    w,
+                    h,
+                    color,
+                    rot,
+                } => {
+                    fb.solid(*x, *y, *w, *h, *color, *rot);
+                }
+                // Cursor / zones / regions: not drawn on the GPU path.
                 _ => {}
             }
         }
 
-        unsafe {
-            let gl = &self.gl;
-            gl.viewport(0, 0, fw as i32, fh as i32);
-            gl.clear_color(DEFAULT_BG[0], DEFAULT_BG[1], DEFAULT_BG[2], 1.0);
-            gl.clear(glow::COLOR_BUFFER_BIT);
+        self.queue
+            .write_buffer(&self.viewport_buffer, 0, as_bytes(&[fwf, fhf, 0.0, 0.0]));
+        self.solid_instances.upload(
+            &self.device,
+            &self.queue,
+            "solid instances",
+            as_bytes(&fb.solids),
+        );
+        self.tex_instances.upload(
+            &self.device,
+            &self.queue,
+            "textured instances",
+            as_bytes_u32(&fb.texs),
+        );
 
-            let n = insts.len() / 7;
-            if n > 0 {
-                gl.use_program(Some(self.program));
-                gl.uniform_2_f32(self.u_viewport.as_ref(), fw as f32, fh as f32);
-                gl.bind_vertex_array(Some(self.vao));
-                gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.inst_vbo));
-                gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, as_bytes(&insts), glow::DYNAMIC_DRAW);
-                gl.draw_arrays_instanced(glow::TRIANGLE_STRIP, 0, 4, n as i32);
+        let frame_texture = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
+                // The swapchain went stale (a resize the OS has not told winit about yet,
+                // a display change): reconfigure and skip this frame; the next paint draws.
+                self.surface.configure(&self.device, &self.config);
+                return;
             }
-        }
-
-        // Glyph pass: one textured (blended) quad per cluster, over the backgrounds.
-        if !glyph_reqs.is_empty() {
-            unsafe {
-                self.gl.use_program(Some(self.glyph_program));
-                self.gl
-                    .uniform_2_f32(self.gu_viewport.as_ref(), fw as f32, fh as f32);
-                self.gl.bind_vertex_array(Some(self.glyph_vao));
-                self.gl.active_texture(glow::TEXTURE0);
-            }
-            for req in &glyph_reqs {
-                let key = glyph_key(req);
-                if !self.glyphs.contains_key(&key) {
-                    let cg =
-                        renderer.cluster_glyph(&req.g, req.family, req.bold, req.italic, req.scale);
-                    if cg.width == 0 || cg.height == 0 {
-                        continue;
+            wgpu::CurrentSurfaceTexture::Timeout
+            | wgpu::CurrentSurfaceTexture::Occluded
+            | wgpu::CurrentSurfaceTexture::Validation => return,
+        };
+        let view = frame_texture
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let bg = renderer.bg();
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("frame"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("frame"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: bg[0] as f64 / 255.0,
+                            g: bg[1] as f64 / 255.0,
+                            b: bg[2] as f64 / 255.0,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_bind_group(0, &self.viewport_bind_group, &[]);
+            for batch in &fb.batches {
+                match batch {
+                    Batch::Solid { first, count } => {
+                        pass.set_pipeline(&self.solid_pipeline);
+                        pass.set_vertex_buffer(0, self.solid_instances.buffer.slice(..));
+                        pass.draw(0..4, *first..first + count);
                     }
-                    let tex = unsafe {
-                        upload_rgba(&self.gl, &cg.rgba, cg.width as i32, cg.height as i32)
-                    };
-                    self.glyphs.insert(
-                        key,
-                        GlGlyph {
-                            tex,
-                            w: cg.width as i32,
-                            h: cg.height as i32,
-                            color: cg.color,
-                        },
-                    );
-                }
-                let Some(gph) = self.glyphs.get(&key).copied() else {
-                    continue;
-                };
-                unsafe {
-                    self.gl.uniform_4_f32(
-                        self.gu_rect.as_ref(),
-                        req.left,
-                        req.top,
-                        gph.w as f32,
-                        gph.h as f32,
-                    );
-                    self.gl.uniform_3_f32(
-                        self.gu_tint.as_ref(),
-                        req.tint[0] as f32 / 255.0,
-                        req.tint[1] as f32 / 255.0,
-                        req.tint[2] as f32 / 255.0,
-                    );
-                    self.gl
-                        .uniform_1_i32(self.gu_mono.as_ref(), if gph.color { 0 } else { 1 });
-                    self.gl.bind_texture(glow::TEXTURE_2D, Some(gph.tex));
-                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                    Batch::Tex { key, first, count } => {
+                        let bind_group = match key {
+                            TexKey::Atlas(page) => self.atlas.get(*page).map(|p| &p.bind_group),
+                            TexKey::User(tex) => self.textures.get(tex).map(|t| &t.bind_group),
+                        };
+                        let Some(bind_group) = bind_group else {
+                            continue;
+                        };
+                        pass.set_pipeline(&self.tex_pipeline);
+                        pass.set_vertex_buffer(0, self.tex_instances.buffer.slice(..));
+                        pass.set_bind_group(1, bind_group, &[]);
+                        pass.draw(0..4, *first..first + count);
+                    }
                 }
             }
         }
-        let _ = self.surface.swap_buffers(&self.context);
+        self.queue.submit(std::iter::once(encoder.finish()));
+        if let Some(path) = dump_path() {
+            dump_frame(
+                &self.device,
+                &self.queue,
+                &frame_texture.texture,
+                self.config.format,
+                fw,
+                fh,
+                path,
+            );
+        }
+        self.queue.present(frame_texture);
     }
 }
 
-fn glyph_key(r: &GlyphReq) -> u64 {
+/// The atlas key of a cluster under a face: what it is drawn from depends on the
+/// cluster, the family, the weight/slant and the scale — not the colour, which is a
+/// per-instance tint.
+fn glyph_key(g: &str, family: Option<u32>, bold: bool, italic: bool, scale: u16) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    r.g.hash(&mut h);
-    r.family.hash(&mut h);
-    r.bold.hash(&mut h);
-    r.italic.hash(&mut h);
-    r.scale.hash(&mut h);
+    g.hash(&mut h);
+    family.hash(&mut h);
+    bold.hash(&mut h);
+    italic.hash(&mut h);
+    scale.hash(&mut h);
     h.finish()
 }
 
-unsafe fn make_program(
-    gl: &glow::Context,
-    vert: &str,
-    frag: &str,
-) -> Result<glow::Program, String> {
-    let program = gl.create_program().map_err(|e| format!("program: {e}"))?;
-    for (kind, src) in [(glow::VERTEX_SHADER, vert), (glow::FRAGMENT_SHADER, frag)] {
-        let sh = gl.create_shader(kind).map_err(|e| format!("shader: {e}"))?;
-        gl.shader_source(sh, src);
-        gl.compile_shader(sh);
-        if !gl.get_shader_compile_status(sh) {
-            return Err(format!("shader compile: {}", gl.get_shader_info_log(sh)));
-        }
-        gl.attach_shader(program, sh);
-        gl.delete_shader(sh);
-    }
-    gl.link_program(program);
-    if !gl.get_program_link_status(program) {
-        return Err(format!("link: {}", gl.get_program_info_log(program)));
-    }
-    Ok(program)
-}
-
-#[allow(clippy::type_complexity)]
-unsafe fn build_glyph_pipeline(
-    gl: &glow::Context,
-) -> Result<
-    (
-        glow::Program,
-        glow::VertexArray,
-        Option<glow::UniformLocation>,
-        Option<glow::UniformLocation>,
-        Option<glow::UniformLocation>,
-        Option<glow::UniformLocation>,
-    ),
-    String,
-> {
-    let program = make_program(gl, GVERT_SRC, GFRAG_SRC)?;
-    let vao = gl
-        .create_vertex_array()
-        .map_err(|e| format!("glyph vao: {e}"))?;
-    gl.bind_vertex_array(Some(vao));
-    let quad: [f32; 8] = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
-    let vbo = gl.create_buffer().map_err(|e| format!("glyph vbo: {e}"))?;
-    gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-    gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, as_bytes(&quad), glow::STATIC_DRAW);
-    gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, 8, 0);
-    gl.enable_vertex_attrib_array(0);
-    let v = gl.get_uniform_location(program, "viewport");
-    let r = gl.get_uniform_location(program, "rect");
-    let t = gl.get_uniform_location(program, "tint");
-    let m = gl.get_uniform_location(program, "mono");
-    Ok((program, vao, v, r, t, m))
-}
-
-// Upload a straight-alpha RGBA bitmap to a fresh GL texture (NEAREST, clamp).
-unsafe fn upload_rgba(gl: &glow::Context, rgba: &[u8], w: i32, h: i32) -> glow::Texture {
-    let tex = gl.create_texture().unwrap();
-    gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-    gl.tex_parameter_i32(
-        glow::TEXTURE_2D,
-        glow::TEXTURE_MIN_FILTER,
-        glow::NEAREST as i32,
-    );
-    gl.tex_parameter_i32(
-        glow::TEXTURE_2D,
-        glow::TEXTURE_MAG_FILTER,
-        glow::NEAREST as i32,
-    );
-    gl.tex_parameter_i32(
-        glow::TEXTURE_2D,
-        glow::TEXTURE_WRAP_S,
-        glow::CLAMP_TO_EDGE as i32,
-    );
-    gl.tex_parameter_i32(
-        glow::TEXTURE_2D,
-        glow::TEXTURE_WRAP_T,
-        glow::CLAMP_TO_EDGE as i32,
-    );
-    gl.tex_image_2d(
-        glow::TEXTURE_2D,
-        0,
-        glow::RGBA8 as i32,
-        w,
-        h,
-        0,
-        glow::RGBA,
-        glow::UNSIGNED_BYTE,
-        glow::PixelUnpackData::Slice(Some(rgba)),
-    );
-    tex
-}
-
 fn as_bytes(v: &[f32]) -> &[u8] {
+    // SAFETY: `f32` has no padding or invalid bit patterns; the slice covers exactly the
+    // floats' storage.
     unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) }
 }
 
-unsafe fn build_pipeline(
-    gl: &glow::Context,
-) -> Result<
-    (
-        glow::Program,
-        glow::VertexArray,
-        glow::Buffer,
-        Option<glow::UniformLocation>,
-    ),
-    String,
-> {
-    let program = make_program(gl, VERT_SRC, FRAG_SRC)?;
-
-    let vao = gl.create_vertex_array().map_err(|e| format!("vao: {e}"))?;
-    gl.bind_vertex_array(Some(vao));
-
-    // Static unit-quad corners drawn as a triangle strip.
-    let quad: [f32; 8] = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
-    let quad_vbo = gl.create_buffer().map_err(|e| format!("quad vbo: {e}"))?;
-    gl.bind_buffer(glow::ARRAY_BUFFER, Some(quad_vbo));
-    gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, as_bytes(&quad), glow::STATIC_DRAW);
-    gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, 8, 0);
-    gl.enable_vertex_attrib_array(0);
-
-    // Per-instance buffer: rect (vec4) + colour (vec3), stride 28 bytes, divisor 1.
-    let inst_vbo = gl.create_buffer().map_err(|e| format!("inst vbo: {e}"))?;
-    gl.bind_buffer(glow::ARRAY_BUFFER, Some(inst_vbo));
-    gl.vertex_attrib_pointer_f32(1, 4, glow::FLOAT, false, 28, 0);
-    gl.enable_vertex_attrib_array(1);
-    gl.vertex_attrib_divisor(1, 1);
-    gl.vertex_attrib_pointer_f32(2, 3, glow::FLOAT, false, 28, 16);
-    gl.enable_vertex_attrib_array(2);
-    gl.vertex_attrib_divisor(2, 1);
-
-    let u_viewport = gl.get_uniform_location(program, "viewport");
-    Ok((program, vao, inst_vbo, u_viewport))
+fn as_bytes_u32(v: &[u32]) -> &[u8] {
+    // SAFETY: as `as_bytes`.
+    unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) }
 }
 
-/// The GPU painter's cull, which no in-language test can reach: `quad_visible` runs
-/// inside a closure that needs a live GL context, and `BROOD_GUI_HEADLESS=1` makes every
-/// draw op a no-op. Extracted to a free function precisely so the decision it encodes is
-/// testable on its own.
-///
-/// These run under `--features gui-gpu` only, so CI reaches them through the dedicated
-/// gui step, not the default nextest run.
+/// `BROOD_GUI_DUMP=<path.ppm>`: the GPU path's half of the CPU painter's dump flag
+/// (`paint::dump_canvas`) — read the presented frame back and write it as a binary PPM
+/// after every paint, so what the GPU drew can be LOOKED at from a script (the desktop
+/// forbids a screenshot to an unprivileged process). Read once; off by default. The
+/// readback is a full round trip through a mapped buffer every frame, so it is a debug
+/// aid, not a path anything else runs on.
+fn dump_path() -> Option<&'static str> {
+    static PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| std::env::var("BROOD_GUI_DUMP").ok())
+        .as_deref()
+}
+
+/// Copy `texture` (the frame just drawn, `w`×`h`, `format`) into a mapped buffer and
+/// write it to `path` as a PPM. Rows are padded to wgpu's 256-byte copy alignment and
+/// unpadded on the way out; a BGRA surface is swizzled to RGB.
+fn dump_frame(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    format: wgpu::TextureFormat,
+    w: u32,
+    h: u32,
+    path: &str,
+) {
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let padded_row = (4 * w).div_ceil(align) * align;
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("frame dump"),
+        size: padded_row as u64 * h as u64,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("frame dump"),
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_row),
+                rows_per_image: Some(h),
+            },
+        },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(std::iter::once(encoder.finish()));
+    let slice = buffer.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    if device.poll(wgpu::PollType::wait_indefinitely()).is_err() {
+        return;
+    }
+    let bgra = matches!(
+        format,
+        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+    );
+    let Ok(data) = slice.get_mapped_range() else {
+        return;
+    };
+    let mut out = Vec::with_capacity((w * h * 3) as usize + 32);
+    out.extend_from_slice(format!("P6\n{w} {h}\n255\n").as_bytes());
+    for row in data.chunks(padded_row as usize).take(h as usize) {
+        for px in row[..(4 * w) as usize].chunks(4) {
+            if bgra {
+                out.extend_from_slice(&[px[2], px[1], px[0]]);
+            } else {
+                out.extend_from_slice(&[px[0], px[1], px[2]]);
+            }
+        }
+    }
+    drop(data);
+    buffer.unmap();
+    let _ = std::fs::write(path, out);
+}
+
 #[cfg(test)]
-mod cull_tests {
-    use super::quad_visible;
+mod tests {
+    use super::*;
 
     const FW: f32 = 800.0;
     const FH: f32 = 600.0;
 
     #[test]
     fn an_on_screen_quad_is_kept() {
-        assert!(quad_visible(0.0, 0.0, 10.0, 10.0, FW, FH));
-        assert!(quad_visible(799.0, 599.0, 10.0, 10.0, FW, FH)); // straddles the far edge
-        assert!(quad_visible(-5.0, -5.0, 10.0, 10.0, FW, FH)); // straddles the near edge
+        assert!(quad_visible(10.0, 10.0, 5.0, 5.0, FW, FH));
+        // Partly off each edge still touches the viewport.
+        assert!(quad_visible(-2.0, -2.0, 5.0, 5.0, FW, FH));
+        assert!(quad_visible(798.0, 598.0, 5.0, 5.0, FW, FH));
     }
 
     #[test]
     fn a_quad_entirely_outside_the_viewport_is_culled() {
-        assert!(!quad_visible(-10.0, 0.0, 10.0, 10.0, FW, FH)); // exactly left of x=0
-        assert!(!quad_visible(0.0, -10.0, 10.0, 10.0, FW, FH)); // exactly above y=0
-        assert!(!quad_visible(FW, 0.0, 10.0, 10.0, FW, FH)); // exactly right of the edge
-        assert!(!quad_visible(0.0, FH, 10.0, 10.0, FW, FH)); // exactly below the edge
-        assert!(!quad_visible(1.0e9, 1.0e9, 10.0, 10.0, FW, FH));
+        assert!(!quad_visible(-10.0, 10.0, 5.0, 5.0, FW, FH)); // left
+        assert!(!quad_visible(10.0, -10.0, 5.0, 5.0, FW, FH)); // above
+        assert!(!quad_visible(FW, 10.0, 5.0, 5.0, FW, FH)); // right
+        assert!(!quad_visible(10.0, FH, 5.0, 5.0, FW, FH)); // below
+                                                            // A bitboard cell far past the window: the `Op::Cells` case the cull exists for.
+        assert!(!quad_visible(1_000_000.0, 1_000_000.0, 8.0, 16.0, FW, FH));
     }
 
-    /// A degenerate extent draws nothing, so buffering it is pure waste. `Op::Cells`
-    /// with a zero width is the ordinary way to reach this.
     #[test]
     fn a_degenerate_quad_is_culled() {
-        assert!(!quad_visible(10.0, 10.0, 0.0, 10.0, FW, FH));
-        assert!(!quad_visible(10.0, 10.0, 10.0, 0.0, FW, FH));
-        assert!(!quad_visible(10.0, 10.0, -5.0, 10.0, FW, FH));
+        assert!(!quad_visible(10.0, 10.0, 0.0, 5.0, FW, FH));
+        assert!(!quad_visible(10.0, 10.0, 5.0, 0.0, FW, FH));
+        assert!(!quad_visible(10.0, 10.0, -5.0, 5.0, FW, FH));
     }
 
-    /// The case the positive phrasing exists for. Every comparison against NaN is
-    /// false, so a NaN anywhere must fall out as "not visible" — a negated predicate
-    /// would buffer it instead, one quad per bit, for a whole bitboard.
     #[test]
     fn a_nan_coordinate_is_culled_not_buffered() {
-        assert!(!quad_visible(f32::NAN, 0.0, 10.0, 10.0, FW, FH));
-        assert!(!quad_visible(0.0, f32::NAN, 10.0, 10.0, FW, FH));
-        assert!(!quad_visible(0.0, 0.0, f32::NAN, 10.0, FW, FH));
-        assert!(!quad_visible(0.0, 0.0, 10.0, f32::NAN, FW, FH));
-        // NaN in the *viewport* extent is not reachable from Brood data, but the same
-        // rule has to hold: nothing is visible in a viewport of unknown size.
-        assert!(!quad_visible(0.0, 0.0, 10.0, 10.0, f32::NAN, FH));
-        assert!(!quad_visible(0.0, 0.0, 10.0, 10.0, FW, f32::NAN));
+        // Every comparison against NaN is false, so a positively-phrased test culls; a
+        // negatively-phrased one (`!(x + w <= 0.0 || …)`) would have buffered the quad.
+        assert!(!quad_visible(f32::NAN, 10.0, 5.0, 5.0, FW, FH));
+        assert!(!quad_visible(10.0, f32::NAN, 5.0, 5.0, FW, FH));
+        assert!(!quad_visible(10.0, 10.0, f32::NAN, 5.0, FW, FH));
+        assert!(!quad_visible(10.0, 10.0, 5.0, f32::NAN, FW, FH));
     }
 
-    /// An infinity is not automatically garbage, and the cull deliberately does not
-    /// treat it as such: a quad of infinite *width* anchored on screen genuinely covers
-    /// the viewport, so it is kept and GL clips it — and keeping it costs one quad, not
-    /// a bitboard's worth. What must be culled is an infinity that puts the quad
-    /// somewhere it cannot be seen.
     #[test]
     fn an_infinity_is_judged_by_where_it_puts_the_quad() {
-        assert!(quad_visible(0.0, 0.0, f32::INFINITY, 10.0, FW, FH)); // covers the viewport
-        assert!(quad_visible(0.0, 0.0, 10.0, f32::INFINITY, FW, FH));
-        assert!(!quad_visible(0.0, 0.0, f32::NEG_INFINITY, 10.0, FW, FH)); // no extent
-        assert!(!quad_visible(0.0, 0.0, 10.0, f32::NEG_INFINITY, FW, FH));
-        assert!(!quad_visible(f32::INFINITY, 0.0, 10.0, 10.0, FW, FH)); // past the far edge
-        assert!(!quad_visible(0.0, f32::INFINITY, 10.0, 10.0, FW, FH));
-        assert!(!quad_visible(f32::NEG_INFINITY, 0.0, 10.0, 10.0, FW, FH)); // ends off-screen
-        assert!(!quad_visible(0.0, f32::NEG_INFINITY, 10.0, 10.0, FW, FH));
+        // A quad starting at -inf with finite width never reaches the viewport: culled.
+        assert!(!quad_visible(f32::NEG_INFINITY, 10.0, 5.0, 5.0, FW, FH));
+        // A quad starting at +inf is past the right edge: culled.
+        assert!(!quad_visible(f32::INFINITY, 10.0, 5.0, 5.0, FW, FH));
+        // An infinitely wide quad from an on-screen x covers the viewport: kept.
+        assert!(quad_visible(10.0, 10.0, f32::INFINITY, 5.0, FW, FH));
     }
 
-    /// `x + w` overflowing to infinity must not read as "extends into view".
     #[test]
     fn a_saturating_extent_does_not_wrap_into_view() {
-        assert!(!quad_visible(-f32::MAX, 0.0, f32::MAX, 10.0, FW, FH));
-        assert!(!quad_visible(0.0, -f32::MAX, 10.0, f32::MAX, FW, FH));
+        // `x + w` overflowing to +inf must not read as "on screen" from the left.
+        assert!(!quad_visible(f32::MAX, 10.0, f32::MAX, 5.0, FW, FH));
+    }
+
+    #[test]
+    fn a_rotated_quad_is_judged_by_the_disc_it_sweeps() {
+        let fb = FrameBuilder::new(FW, FH);
+        // A 400-wide, 4-tall bar whose unrotated rect sits wholly below the viewport,
+        // turned a quarter turn about its centre: it stands up through the bottom edge, so
+        // it is kept …
+        assert!(!fb.visible(100.0, FH + 10.0, 400.0, 4.0, 0.0));
+        assert!(fb.visible(100.0, FH + 10.0, 400.0, 4.0, std::f32::consts::FRAC_PI_2));
+        // … while a small quad far away stays culled whatever its angle.
+        assert!(!fb.visible(FW + 500.0, 100.0, 4.0, 4.0, 1.0));
+    }
+
+    #[test]
+    fn consecutive_quads_of_one_kind_form_one_batch_and_a_kind_change_starts_another() {
+        let mut fb = FrameBuilder::new(FW, FH);
+        fb.solid(0.0, 0.0, 10.0, 10.0, [255, 0, 0, 255], 0.0);
+        fb.solid(20.0, 0.0, 10.0, 10.0, [255, 0, 0, 255], 0.0);
+        let uv = [0.0, 0.0, 1.0, 1.0];
+        fb.textured(
+            TexKey::User(7),
+            0.0,
+            0.0,
+            8.0,
+            8.0,
+            uv,
+            [255; 4],
+            false,
+            0.0,
+        );
+        fb.textured(
+            TexKey::User(7),
+            8.0,
+            0.0,
+            8.0,
+            8.0,
+            uv,
+            [255; 4],
+            false,
+            0.0,
+        );
+        fb.textured(
+            TexKey::User(9),
+            16.0,
+            0.0,
+            8.0,
+            8.0,
+            uv,
+            [255; 4],
+            false,
+            0.0,
+        );
+        fb.solid(40.0, 0.0, 10.0, 10.0, [0, 255, 0, 255], 0.0);
+        let shape: Vec<(bool, u32, u32)> = fb
+            .batches
+            .iter()
+            .map(|b| match b {
+                Batch::Solid { first, count } => (true, *first, *count),
+                Batch::Tex { first, count, .. } => (false, *first, *count),
+            })
+            .collect();
+        // Two solids → one batch; two sprites of texture 7 → one; texture 9 → its own;
+        // the trailing solid a fourth, continuing the solid buffer at index 2.
+        assert_eq!(
+            shape,
+            vec![(true, 0, 2), (false, 0, 2), (false, 2, 1), (true, 2, 1)]
+        );
+        assert_eq!(fb.solids.len(), 3 * SOLID_FLOATS);
+        assert_eq!(fb.texs.len(), 3 * TEX_WORDS);
+    }
+
+    #[test]
+    fn a_culled_quad_leaves_no_instance_and_no_batch() {
+        let mut fb = FrameBuilder::new(FW, FH);
+        fb.solid(-100.0, -100.0, 10.0, 10.0, [255; 4], 0.0);
+        assert!(fb.batches.is_empty());
+        assert!(fb.solids.is_empty());
+    }
+
+    #[test]
+    fn a_non_srgb_format_is_preferred_over_an_srgb_one() {
+        use wgpu::TextureFormat::{Bgra8Unorm, Bgra8UnormSrgb, Rgba16Float};
+        assert_eq!(
+            pick_format(&[Bgra8UnormSrgb, Rgba16Float, Bgra8Unorm]),
+            Some(Bgra8Unorm)
+        );
+        // Only sRGB on offer: the first supported one, rather than no window at all.
+        assert_eq!(pick_format(&[Bgra8UnormSrgb]), Some(Bgra8UnormSrgb));
+        assert_eq!(pick_format(&[]), None);
+    }
+
+    #[test]
+    fn no_vsync_takes_immediate_then_mailbox_then_fifo_and_vsync_is_fifo() {
+        use wgpu::PresentMode::{Fifo, Immediate, Mailbox};
+        assert_eq!(
+            pick_present_mode(&[Fifo, Mailbox, Immediate], false),
+            Immediate
+        );
+        assert_eq!(pick_present_mode(&[Fifo, Mailbox], false), Mailbox);
+        assert_eq!(pick_present_mode(&[Fifo], false), Fifo);
+        assert_eq!(pick_present_mode(&[Fifo, Mailbox, Immediate], true), Fifo);
     }
 }

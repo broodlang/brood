@@ -15,7 +15,7 @@ path = "src/lib.rs"
 # wasm target sections). default-features drops dev-tools/jit/treesit/wasmtime.
 brood = { path = "../lisp", default-features = false }
 # Pinned to the installed wasm-bindgen CLI — the crate and CLI versions must match.
-wasm-bindgen = "=0.2.100"
+wasm-bindgen = "=0.2.128"
 
 # NOTE: no `[profile.*]` here, deliberately. `brood-playground` is a workspace *member*,
 # and cargo ignores a non-root package's profiles — it said so on every build of the

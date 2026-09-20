@@ -598,7 +598,7 @@ pub const FLAGS: &[DebugFlag] = &[
     f(
         "BROOD_GUI_GPU",
         HOST,
-        "select the experimental OpenGL render backend at runtime (build with --with-gui-gpu)",
+        "select the GPU (wgpu: Vulkan / Metal / DX12) render target at runtime (build with --with-gui-gpu); the only target that draws the pixel-space `:quad` / `:sprite` ops",
     ),
     f(
         "BROOD_GUI_DAMAGE",
@@ -623,7 +623,7 @@ pub const FLAGS: &[DebugFlag] = &[
     f(
         "BROOD_GUI_DUMP",
         HOST,
-        "`=<path.ppm>`: write the retained canvas as a PPM after every paint — look at the raster (text AA, hairlines) from a script",
+        "`=<path.ppm>`: write the painted frame as a PPM after every paint (the CPU canvas, or a readback of the GPU frame under BROOD_GUI_GPU) — look at the raster (text AA, hairlines, sprites) from a script",
     ),
     f(
         "BROOD_AUDIO",

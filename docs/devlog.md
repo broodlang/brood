@@ -14887,3 +14887,34 @@ What is left on the row after this: the reduce closure and `safe?` are native an
 `(reduce (range n) …)`), `solve` itself is still gate-refused and interpreted (~15% in
 `exec_chunk` + `vm_run_bc`), and a closure is captured per node. The next lever is the
 range fold's per-element entry (§3f), not the gate.
+
+## 2026-09-20 (5) — Pixel space on the display seam; the GPU target on wgpu; b2d (ADR-374)
+
+The question was how to build a 2D game engine in Brood. The answer (ADR-374) is the
+repo's own rule: the runtime grows the smallest mechanism — `[:quad x y w h color rot]`
+and `[:sprite tex x y w h uv tint rot]` in pixel space, `%gui-texture` under a
+Brood-allocated handle, `{:input :pixels}` / `{:vsync true}` window options,
+`gui/size-px` — and everything else is Brood: `gui/sprite` (a `:src` rect + flips → a UV
+rect), `gui/line` (a thin quad at an angle), `gui/texture` (allocates the handle, keeps
+the size), and the engine itself, **`b2d`** (`broodlang/b2d`, private): a fixed-timestep
+loop over `(receive)` + `(after)` with bounded catch-up, a per-frame input record, sprite
+sheets, time-driven animation, a camera, AABB collision, and a demo that draws every op
+kind the seam has. A general C FFI and a break-out of `std/editor` were both considered
+and rejected (the ADR says why); the frontend-as-its-own-process over ADR-090 stays open.
+
+**`host/gui/gpu.rs` is rewritten on wgpu 30** (from glow/glutin): the GLES 3.0 context
+the prototype asked for does not exist on macOS and needs ANGLE on Windows, both targets
+the runtime is to reach later. Same seam (`Backend::Gpu`, `new`/`resize`/`paint`), now with
+draw-order batching (one instanced draw per run of solids / per texture), a glyph atlas
+(the roadmap's item — text on the GPU was one draw per glyph), the renderer's grid origin
+(the GPU path drew from the bare inset and sat 6 px above the CPU path), a non-sRGB
+swapchain so face bytes reproduce, and `BROOD_GUI_DUMP` honoured on the GPU path through a
+readback — which is how the port was verified, since GNOME refuses a screenshot to an
+unprivileged process: `pong`'s menu from both targets, a red rect measured pixel by pixel.
+The `gui-gpu` feature stays off by default and runtime-gated by `BROOD_GUI_GPU=1`; the
+default `gui` build is unchanged. `wasm-bindgen` moved 0.2.100 → 0.2.128 (playground pin,
+CI install, local CLI) because wgpu's lockfile floor collided with the exact pin even for
+a build that never enables its wasm side. Tests: the pure `gui/*` layer and the two ops'
+hostile-argument parsing in `gui_test` / `gui_robustness_test` (the byte-count guard
+sabotaged and seen red), the batcher and the format/present-mode choices as Rust unit
+tests in `gpu.rs`.

@@ -24052,3 +24052,82 @@ five prose warnings in `std/` are now backed by a mechanism; `index-of`'s docstr
 outright rather than leaving each caller to find out. The rule is not about `index-of`: it
 catches any never-falsy test, so `(if (count xs) …)` and `(when (str a b) …)` are the same
 finding, and a future function that answers a sentinel gets the same guard for free.
+
+## ADR-374 — Pixel space on the display seam: two quad ops on a wgpu render target, and the game engine as a Brood package
+
+**Status:** implemented 2026-09-20. The mechanism for `b2d` (the 2D game engine,
+`broodlang/b2d`), and the `gui-gpu` render target rewritten from OpenGL to wgpu.
+
+**Context.** The display protocol (ADR-046) is a vector of render ops in *character
+cells* — the grain an editor lives at, and one two games (`pong`, `brood-life`) had already
+pushed to its limit through `:vspans` and `:cells`. A sprite lives at a sub-cell position,
+moves by pixels, is a texture, turns. None of that is expressible, and no Brood policy
+could add it: a textured quad is GPU mechanism. Three ways to get it were on the table.
+A general C FFI, so an engine could bind SDL from outside the runtime: rejected — it
+punches through every property the runtime is built on (a moving GC that would need
+pinning, the sandbox a wasm component cannot escape, signed packages that would then
+`dlopen` anything, the wasm playground), and it does not even buy graphics, because
+per-sprite calls across an FFI are too slow and every FFI engine ends up with batched
+command lists — which is what the seam already is. Breaking the frontend out into its own
+process over the ADR-090 link: the right eventual shape, and orthogonal — nothing here
+references in-process memory, so it stays open. Extending the seam: this.
+
+The GPU path itself could not be extended as it stood. `gui/gpu.rs` requested a **GLES
+3.0** context through glutin, which macOS cannot provide at all (CGL is desktop-GL only,
+and deprecated) and Windows only through ANGLE — and the runtime is to run on both. wgpu
+(Vulkan / Metal / DX12, WebGPU in a browser) sits on the same `raw-window-handle` 0.6 line
+winit 0.30 does, so the window layer is untouched; the 725-line render target was
+rewritten rather than ported later with a sprite pipeline on top.
+
+**Decision.**
+
+1. **Two pixel-space ops, and only two, in Rust.** `[:quad x y w h color rot]` — a solid
+   rotated quad, straight rgba — and `[:sprite tex x y w h uv tint rot]` — a textured one
+   sampling a UV rect (a negative extent mirrors). Physical pixels from the window's
+   top-left. The renderer needs a rect, a UV rect, a tint and an angle; that is what the op
+   carries. **What a sprite sheet is, which frame an animation shows, a flip, a line, are
+   Brood** — `gui/sprite` turns a `:src` rect in texture pixels plus flips into the UV rect,
+   `gui/line` IS a thin quad turned to the segment's angle, and the engine's sheets,
+   animation, camera and collision are `b2d`'s modules. The first draft had `Line` and
+   `src`/`flip` in the Rust vocabulary; the user asked for more of it in Brood, and the
+   repo's own rule agrees (Rust is mechanism). The rule that keeps the split honest is the
+   `:vspans` one: **O(entities) on the Brood side, O(pixels) natively.**
+2. **Textures by a Brood-allocated handle.** `%gui-texture id tex rgba w h` uploads under a
+   handle the CALLER chose; `gui/texture` allocates it from a counter in a shared table and
+   records the size beside it, so a source rect can become a UV rect without a round trip to
+   the GUI thread, and the upload is fire-and-forget like `gui-icon!`. Validated against the
+   byte count before any narrowing cast (the `gui-icon!` discipline). Both ops and the
+   textures are **GPU-target only**: the CPU painter and the terminal skip them, as they
+   skip `:frect`'s alpha.
+3. **Pixel input is a window option, not a new message shape.** `{:input :pixels}` puts the
+   pointer's pixel y/x in a `[:mouse …]` message's row/col slots, fires `:move`/`:drag` per
+   pixel of motion rather than per cell crossed, and reports `[:resize w h]` in pixels;
+   `gui/size-px` is the same size on demand. Every message keeps its shape, so `ui-run` and
+   the key dispatch do not care; only the unit changes, and a window that asked for pixels
+   knows. `{:vsync true}` presents in step with the refresh on the GPU target.
+4. **The render target draws in op order, batched.** Solids and textured quads keep
+   separate instance buffers; a run of consecutive solids is one instanced draw, a run of
+   textured quads from one texture another, and the batch list is walked in op order — so a
+   sprite drawn after a rect lands on it, as the CPU painter promises, and a frame costs a
+   handful of draw calls whatever its op count. Glyphs pack into an **atlas** (shelf packer,
+   2048² pages) as they first appear, so a page of text is one batch rather than one draw
+   per glyph — the roadmap's "GPU glyph atlas" item, closed en route. The swapchain prefers a
+   non-sRGB format so the bytes a face names land on screen as the CPU path paints them,
+   and the grid origin is the renderer's (`grid_origin`, with its centred remainder), so a
+   cell op lands on the same pixels whichever target paints it.
+5. **`BROOD_GUI_DUMP` reads the GPU frame back.** The CPU path's dump flag now works on
+   the GPU path too (a mapped-buffer readback to the same PPM), because the desktop
+   forbids a screenshot to an unprivileged process and a render target nobody can look at
+   from a script cannot be verified. The wgpu port was checked that way: `pong`'s menu
+   from both targets, then a known red rect measured pixel by pixel on both.
+
+**Consequences.** `wgpu` 30 + `pollster` replace `glow` + `glutin` under the `gui-gpu`
+feature; the feature stays off by default and runtime-gated by `BROOD_GUI_GPU=1`, so the
+default `gui` build is byte-for-byte unchanged. wgpu's lockfile floor on `wasm-bindgen`
+(a dependency Cargo resolves even for the optional, non-wasm build) collided with the
+playground crate's exact pin, so the pin moved 0.2.100 → 0.2.128 together with the CLI CI
+installs and the one this box runs. The engine is a separate package, bedit's pattern: it
+depends on the runtime's seam and never on `std/editor`. Not done here, deliberately: the
+Windows runtime port (nine Unix-bound files, no CI job), a wasm build of the GUI thread,
+rounded corners and cursors on the GPU target, and a pixel-space text op — a HUD uses the
+cell grid, which the GPU target draws through the atlas.

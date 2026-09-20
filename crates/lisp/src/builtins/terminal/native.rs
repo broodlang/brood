@@ -2,6 +2,7 @@ use crate::core::heap::Heap;
 use crate::core::value::{self, EnvId, Value};
 use crate::error::{LispError, LispResult};
 
+use crate::builtins::bytes::collect_bytes;
 use crate::builtins::io::capture_write;
 use crate::builtins::numeric::{arg, expect_bigint, expect_int, expect_string, num_to_f64};
 // The thin crossterm seam: enter/leave the alternate screen, read keys, and
@@ -813,15 +814,93 @@ pub(in crate::builtins) fn gui_open(args: &[Value], _: EnvId, heap: &mut Heap) -
             Some(name)
         }
     };
+    //   :input :pixels     — mouse messages carry the pointer in physical pixels and
+    //     `[:resize w h]` the pixel size; `:move`/`:drag` fire per pixel of motion.
+    //   :vsync true        — present in step with the monitor (the GPU target only).
+    let pixel_input = matches!(
+        opts.and_then(|id| heap.map_get(id, value::kw("input"))),
+        Some(Value::Keyword(s)) if s == value::intern("pixels")
+    );
+    let vsync = match opts.and_then(|id| heap.map_get(id, value::kw("vsync"))) {
+        Some(v) => crate::eval::truthy(v),
+        None => false,
+    };
     let spec = crate::host::gui::WindowSpec {
         title,
         size,
         decorations,
         app_id,
+        pixel_input,
+        vsync,
     };
     let id =
         crate::host::gui::open(crate::process::self_pid(), spec).map_err(LispError::runtime)?;
     Ok(Value::int(id as i64))
+}
+
+/// `(%gui-size-px id)` — window `id`'s inner size as `[w h]` in PHYSICAL pixels.
+pub(in crate::builtins) fn gui_size_px(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = gui_window_id(heap, "%gui-size-px", arg(args, 0))?;
+    let (w, h) = crate::host::gui::size_px(id).map_err(LispError::runtime)?;
+    Ok(heap.alloc_vector(vec![Value::int(w as i64), Value::int(h as i64)]))
+}
+
+/// `(%gui-texture id tex rgba w h)` — upload `rgba` (`w*h*4` bytes, row-major straight
+/// alpha, a bytes value or a vector of ints) as texture `tex` of window `id`. The handle
+/// is the CALLER's (Brood allocates it — `gui/texture` — so a sprite sheet's size can be
+/// remembered beside it without a round trip here), which is why this takes it rather
+/// than returns it. The dimensions are validated against the byte count before any
+/// narrowing cast, as `gui-icon!` does: a mismatch is a clean error, never a texture
+/// that lies about its size.
+pub(in crate::builtins) fn gui_texture(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = gui_window_id(heap, "%gui-texture", arg(args, 0))?;
+    let tex_i = expect_int(heap, "%gui-texture", arg(args, 1))?;
+    let rgba = collect_bytes("%gui-texture", arg(args, 2), heap)?;
+    let w_i = expect_int(heap, "%gui-texture", arg(args, 3))?;
+    let h_i = expect_int(heap, "%gui-texture", arg(args, 4))?;
+    let Ok(tex) = u32::try_from(tex_i) else {
+        return Err(LispError::runtime(format!(
+            "gui-texture: texture handle must be a non-negative int, got {tex_i}"
+        )));
+    };
+    let (w, h) = match (u32::try_from(w_i), u32::try_from(h_i)) {
+        (Ok(w), Ok(h))
+            if w > 0
+                && h > 0
+                && (w as u64)
+                    .checked_mul(h as u64)
+                    .and_then(|n| n.checked_mul(4))
+                    == Some(rgba.len() as u64) =>
+        {
+            (w, h)
+        }
+        _ => {
+            return Err(LispError::runtime(format!(
+                "gui-texture: {w_i}x{h_i} needs {} bytes of rgba, got {}",
+                (w_i.max(0) as u64)
+                    .saturating_mul(h_i.max(0) as u64)
+                    .saturating_mul(4),
+                rgba.len()
+            )))
+        }
+    };
+    crate::host::gui::texture(id, tex, rgba, w, h).map_err(LispError::runtime)?;
+    Ok(Value::nil())
+}
+
+/// `(%gui-texture-free id tex)` — release texture `tex` of window `id`.
+pub(in crate::builtins) fn gui_texture_free(
+    args: &[Value],
+    _: EnvId,
+    heap: &mut Heap,
+) -> LispResult {
+    let id = gui_window_id(heap, "%gui-texture-free", arg(args, 0))?;
+    let tex_i = expect_int(heap, "%gui-texture-free", arg(args, 1))?;
+    let Ok(tex) = u32::try_from(tex_i) else {
+        return Ok(Value::nil());
+    };
+    crate::host::gui::texture_free(id, tex).map_err(LispError::runtime)?;
+    Ok(Value::nil())
 }
 
 /// `(audio-beep freq-hz ms [vol])` — play a short tone of `freq-hz` for `ms`
@@ -1060,6 +1139,8 @@ struct GuiOpTags {
     cell_region_t: value::Symbol,
     rect_t: value::Symbol,
     frect_t: value::Symbol,
+    quad_t: value::Symbol,
+    sprite_t: value::Symbol,
 }
 impl GuiOpTags {
     fn new() -> Self {
@@ -1078,6 +1159,8 @@ impl GuiOpTags {
             cell_region_t: value::intern("cell-region"),
             rect_t: value::intern("rect"),
             frect_t: value::intern("frect"),
+            quad_t: value::intern("quad"),
+            sprite_t: value::intern("sprite"),
         }
     }
 }
@@ -1089,10 +1172,17 @@ fn parse_gui_ops(
     parsed: Vec<(value::Symbol, Vec<Value>)>,
     tags: &GuiOpTags,
 ) -> Vec<crate::host::gui::Op> {
+    // A ratio or decimal reads as its float — `/` is exact in Brood (ADR-196), so a
+    // frame built with `(/ w 2)` carries a ratio, which must not silently read as 0.
     let num = |v: Value| -> f32 {
         match v {
             Value::Int(n) => n as f32,
             Value::Float(f) => f as f32,
+            Value::Ratio(_) | Value::Decimal(_) | Value::BigInt(_) => {
+                num_to_f64(heap, "%gui-draw", v)
+                    .map(|f| f as f32)
+                    .unwrap_or(0.0)
+            }
             _ => 0.0,
         }
     };
@@ -1381,9 +1471,84 @@ fn parse_gui_ops(
                     ops: inner_ops,
                 });
             }
+        } else if tag == tags.quad_t {
+            // `[:quad x y w h color]` / `[:quad x y w h color rot]` — pixel space.
+            let x = num(arg(&parts, 1));
+            let y = num(arg(&parts, 2));
+            let w = num(arg(&parts, 3));
+            let h = num(arg(&parts, 4));
+            let Some(color) = rgba_of(heap, arg(&parts, 5)) else {
+                continue;
+            };
+            let rot = num(parts.get(6).copied().unwrap_or(Value::nil()));
+            ops.push(crate::host::gui::Op::Quad {
+                x,
+                y,
+                w,
+                h,
+                color,
+                rot,
+            });
+        } else if tag == tags.sprite_t {
+            // `[:sprite tex x y w h]` with optional `uv` (`[u0 v0 du dv]`, default the
+            // whole texture), `tint` (default opaque white) and `rot` (default 0) —
+            // pixel space. A texture handle that is not a non-negative int is not a
+            // sprite; a `uv` of the wrong shape means the whole texture.
+            let Value::Int(tex) = arg(&parts, 1) else {
+                continue;
+            };
+            let Ok(tex) = u32::try_from(tex) else {
+                continue;
+            };
+            let x = num(arg(&parts, 2));
+            let y = num(arg(&parts, 3));
+            let w = num(arg(&parts, 4));
+            let h = num(arg(&parts, 5));
+            let uv = match parts.get(6).copied() {
+                Some(Value::Vector(vid)) if heap.vector(vid).len() == 4 => {
+                    let xs = heap.vector(vid);
+                    [num(xs[0]), num(xs[1]), num(xs[2]), num(xs[3])]
+                }
+                _ => [0.0, 0.0, 1.0, 1.0],
+            };
+            let tint = parts
+                .get(7)
+                .copied()
+                .and_then(|v| rgba_of(heap, v))
+                .unwrap_or([255, 255, 255, 255]);
+            let rot = num(parts.get(8).copied().unwrap_or(Value::nil()));
+            ops.push(crate::host::gui::Op::Sprite {
+                tex,
+                x,
+                y,
+                w,
+                h,
+                uv,
+                tint,
+                rot,
+            });
         }
     }
     ops
+}
+
+/// A pixel-space op's colour: a face colour (`:red`, `[r g b]`, `"#rrggbb"`, via the
+/// shared `face_rgb`) read as opaque, or an explicit `[r g b a]` vector (each channel
+/// clamped to 0..255) for a translucent quad. `None` for anything else — the op is
+/// skipped, the frame's forward-compatibility rule.
+pub(in crate::builtins) fn rgba_of(heap: &Heap, v: Value) -> Option<[u8; 4]> {
+    if let Value::Vector(id) = v {
+        let xs = heap.vector(id);
+        if xs.len() == 4 {
+            let chan = |k: usize| match xs[k] {
+                Value::Int(n) => n.clamp(0, 255) as u8,
+                Value::Float(f) => f.clamp(0.0, 255.0) as u8,
+                _ => 0,
+            };
+            return Some([chan(0), chan(1), chan(2), chan(3)]);
+        }
+    }
+    face_rgb(heap, v).map(|[r, g, b]| [r, g, b, 255])
 }
 
 pub(in crate::builtins) fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {

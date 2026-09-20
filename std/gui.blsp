@@ -4,7 +4,7 @@
   "Native windows: open a window, draw into it, and read input events.")
 
 (defn open (&optional title width height opts)
-  "Open a new native window and return its integer id (needs the runtime built with --features gui; errors otherwise). An optional `title` string sets the OS title-bar text (default `Brood`); change it later with gui/title. Optional `width` `height` (logical pixels, both required together) set the initial window size (default 840x560). Optional `opts` map, the attributes fixed when the window is built: `{:decorations false}` opens a **borderless** window — no OS title bar or frame — for an app that draws its own chrome (a browser's tab strip and toolbar) and would otherwise sit under a redundant second title; `{:app-id \"my-app\"}` sets the desktop application id (Wayland `app_id`, X11 `WM_CLASS`), which the desktop matches against the installed `my-app.desktop` entry to give the window its real icon and name in the dash / alt-tab — without one it is unidentifiable and draws the desktop's generic fallback icon (on Wayland a client cannot supply icon pixels at all, so this, not gui/icon, is how a window gets an icon there). Its key/mouse input is delivered to the CALLING process's mailbox as messages — a key as a 1-char string / keyword (`:up`, `:ctrl-c`), the mouse as `[:mouse action button row col mods]` (action `:press`/`:release`/`:drag`/`:move`/`:scroll-up`/`:scroll-down` — `:drag` is motion with a button held and `:move` is bare motion with none (button nil), both delivered once per cell crossed (so mouse-look / hover need no click); `mods` a vector of held modifier keywords in `:ctrl :alt :shift` order, `[]` when none, so Ctrl+wheel / Ctrl+drag are bindable; a `:press` carries a trailing 7th element, its click-chain count `[… mods n]` — 1 single, 2 double, 3 triple, … for repeated presses of the same button in the same cell within the double-click window, so double-click-to-select-word and triple-click-to-select-line are bindable; the terminal reports 1), a resize as `[:resize cols rows]` (the new cell grid, so the loop re-renders at the new size) — so the consumer parks in `(receive)` instead of polling (ADR-058). Clicking the window's close button delivers a dedicated `:close` message — distinct from the Escape *key* (`:escape`), so an app can quit on the X without conflating it with Escape (which an editor binds to cancel/normal-mode); `ui-run` quits on `:close` automatically. Starts the GUI thread on the first call; each call is an independent window, so several observers can run at once. Pass the id to the other gui/* functions; pair with gui/close."
+  "Open a new native window and return its integer id (needs the runtime built with --features gui; errors otherwise). An optional `title` string sets the OS title-bar text (default `Brood`); change it later with gui/title. Optional `width` `height` (logical pixels, both required together) set the initial window size (default 840x560). Optional `opts` map, the attributes fixed when the window is built: `{:decorations false}` opens a **borderless** window — no OS title bar or frame — for an app that draws its own chrome (a browser's tab strip and toolbar) and would otherwise sit under a redundant second title; `{:input :pixels}` delivers the window's mouse input in PHYSICAL PIXELS instead of cells — the row/col slots of a `[:mouse …]` message carry the pointer's y and x in pixels, `:move`/`:drag` fire on every pixel of motion, and `[:resize w h]` reports the pixel size — the grain a game drawing with the pixel-space ops needs (gui/size-px is the same size on demand); `{:vsync true}` presents in step with the monitor refresh on the GPU render target (the CPU target presents synchronously regardless); `{:app-id \"my-app\"}` sets the desktop application id (Wayland `app_id`, X11 `WM_CLASS`), which the desktop matches against the installed `my-app.desktop` entry to give the window its real icon and name in the dash / alt-tab — without one it is unidentifiable and draws the desktop's generic fallback icon (on Wayland a client cannot supply icon pixels at all, so this, not gui/icon, is how a window gets an icon there). Its key/mouse input is delivered to the CALLING process's mailbox as messages — a key as a 1-char string / keyword (`:up`, `:ctrl-c`), the mouse as `[:mouse action button row col mods]` (action `:press`/`:release`/`:drag`/`:move`/`:scroll-up`/`:scroll-down` — `:drag` is motion with a button held and `:move` is bare motion with none (button nil), both delivered once per cell crossed (so mouse-look / hover need no click); `mods` a vector of held modifier keywords in `:ctrl :alt :shift` order, `[]` when none, so Ctrl+wheel / Ctrl+drag are bindable; a `:press` carries a trailing 7th element, its click-chain count `[… mods n]` — 1 single, 2 double, 3 triple, … for repeated presses of the same button in the same cell within the double-click window, so double-click-to-select-word and triple-click-to-select-line are bindable; the terminal reports 1), a resize as `[:resize cols rows]` (the new cell grid, so the loop re-renders at the new size) — so the consumer parks in `(receive)` instead of polling (ADR-058). Clicking the window's close button delivers a dedicated `:close` message — distinct from the Escape *key* (`:escape`), so an app can quit on the X without conflating it with Escape (which an editor binds to cancel/normal-mode); `ui-run` quits on `:close` automatically. Starts the GUI thread on the first call; each call is an independent window, so several observers can run at once. Pass the id to the other gui/* functions; pair with gui/close."
   (%gui-open title width height opts))
 
 (defn available? ()
@@ -68,7 +68,7 @@
   (%gui-held-key id))
 
 (defn draw (id frame)
-  "Paint a frame (the same render-op vector term/draw takes) to window id; returns nil. Unknown ops are skipped (forward-compatible). A text op's face may carry :scale n (GUI only, integer >=1, capped at 16): the text is drawn n× larger in an n×n block of cells anchored at its row/col — the per-pane/per-buffer font knob; the terminal frontend renders scale 1. A `[:cursor row col]` op may carry an optional `style` keyword (`[:cursor row col style]`) — :block (default, a 50% overlay), :bar (a thin caret on the cell's left edge), or :underline (a rule along the cell bottom). A `[:rect row col w h face]` op fills a w×h cell block with the face's background colour — a solid panel painted directly (no glyphs), the multi-row generalisation of a status bar. A `[:cursor-zone x y w h shape]` op marks a hover hot-zone: while the pointer is over it the window shows the resize cursor `shape` (:col-resize ↔ / :row-resize ↕), hit-tested on the GUI thread (ADR-080); it draws nothing and the terminal ignores it. A `[:vspans row0 col0 cols]` op is the column-renderer fast path (raycasters, spectrum bars): `cols` is a vector with one entry per cell-column (`col0`, `col0+1`, …), each a top-to-bottom stack of `[height colour]` segments painted from `row0` down — `colour` a face keyword (`:red`), an `[r g b]` triple (0..255), or nil (transparent). The per-cell fill happens natively here, so a wide scene costs the Brood side O(columns), not O(cells); GUI-only (the terminal ignores it)."
+  "Paint a frame (the same render-op vector term/draw takes) to window id; returns nil. Unknown ops are skipped (forward-compatible). A text op's face may carry :scale n (GUI only, integer >=1, capped at 16): the text is drawn n× larger in an n×n block of cells anchored at its row/col — the per-pane/per-buffer font knob; the terminal frontend renders scale 1. A `[:cursor row col]` op may carry an optional `style` keyword (`[:cursor row col style]`) — :block (default, a 50% overlay), :bar (a thin caret on the cell's left edge), or :underline (a rule along the cell bottom). A `[:rect row col w h face]` op fills a w×h cell block with the face's background colour — a solid panel painted directly (no glyphs), the multi-row generalisation of a status bar. A `[:cursor-zone x y w h shape]` op marks a hover hot-zone: while the pointer is over it the window shows the resize cursor `shape` (:col-resize ↔ / :row-resize ↕), hit-tested on the GUI thread (ADR-080); it draws nothing and the terminal ignores it. A `[:vspans row0 col0 cols]` op is the column-renderer fast path (raycasters, spectrum bars): `cols` is a vector with one entry per cell-column (`col0`, `col0+1`, …), each a top-to-bottom stack of `[height colour]` segments painted from `row0` down — `colour` a face keyword (`:red`), an `[r g b]` triple (0..255), or nil (transparent). The per-cell fill happens natively here, so a wide scene costs the Brood side O(columns), not O(cells); GUI-only (the terminal ignores it). Two ops live in PIXEL space rather than cells — physical pixels from the window's top-left, GPU render target only (a `gui-gpu` build with BROOD_GUI_GPU=1; the CPU target and the terminal skip them): `[:quad x y w h color]` / `[:quad x y w h color rot]` fills a w×h rect with color (a face colour, or an [r g b a] vector for a translucent one) turned `rot` radians about its centre, and `[:sprite tex x y w h]` / `[:sprite tex x y w h uv tint rot]` draws texture `tex` (a handle from gui/texture) there, sampling `uv` (`[u0 v0 du dv]`, texture space, a negative extent mirrors; the whole texture by default) multiplied by `tint` (opaque white by default). Build them with gui/sprite and gui/line rather than by hand — the runtime knows only the quad; a sheet frame, a flip, a line are Brood over it."
   (%gui-draw id frame))
 
 (defn font (id-or-spec &optional spec)
@@ -104,3 +104,87 @@
 (defn image-thumb (bytes max-w max-h)
   "Decode an encoded image (PNG/JPEG/GIF/WebP/BMP) from a byte sequence and downscale it to fit within max-w×max-h pixels (aspect ratio preserved), returning {:width :height :rgba} where :rgba is a width*height*4 bytes value (row-major RGBA8). nil when the bytes aren't a decodable image or the dims are non-positive. Per-call decode limits bound a decompression bomb. The one image primitive; rendering (half-block cells, a GUI texture) is Brood policy over the decoded buffer."
   (%image-thumb bytes max-w max-h))
+
+;; --- pixel space: the sprite / quad layer ---------------------------------------------
+;;
+;; The runtime knows two pixel-space ops, and only those: `[:quad x y w h color rot]`, a
+;; solid quad, and `[:sprite tex x y w h uv tint rot]`, a textured one sampling a UV rect
+;; of a texture uploaded with %gui-texture. Everything a game builds on them — which
+;; part of a sheet a frame is, a flip, a line, an animation — is policy, and lives here
+;; and in the engine above, not in Rust. Physical pixels, the window's top-left as the
+;; origin; both ops are GPU-only (a `gui-gpu` build with BROOD_GUI_GPU=1).
+
+(def *textures* nil)
+
+(defn- textures ()
+  "The texture registry — handle → [w h] — shared by every process, created on first use
+(so a stdlib image never snapshots a live table). The counter under :next allocates
+handles from 1, process-wide, so a handle can never name another window's texture."
+  (when (nil? *textures*) (def *textures* (table/new)))
+  *textures*)
+
+(defn size-px (id)
+  "Window id's inner size as [w h] in PHYSICAL pixels (tracks resize / HiDPI) — the frame a pixel-space app lays itself out in, where gui/size is the cell grid. Under `{:input :pixels}` the window's [:resize w h] message carries the same numbers.
+
+    (try (gui/size-px 0) (catch e :no-window))   → :no-window   ; no window 0 is open"
+  (%gui-size-px id))
+
+(defn texture "Upload an image as a texture of window id for its [:sprite …] ops and return its handle (an int). Either `(gui/texture id image)` with the {:width :height :rgba} map gui/image-thumb decodes, or `(gui/texture id rgba w h)` with raw bytes — w*h*4 of them, row-major, straight alpha (a bytes value or a vector of 0-255 ints). The handle is allocated HERE, in Brood, and the texture's size remembered beside it, which is what lets gui/sprite turn a source rect in texture pixels into the UV rect the renderer wants without asking the GUI thread. Errors when the byte count is not w*h*4; on the CPU render target (no `gui-gpu`, or BROOD_GUI_GPU unset) the upload is a silent no-op and a sprite naming the handle draws nothing. Pair with gui/texture-free.
+
+    (try (gui/texture 0 {:width 1 :height 1 :rgba [1 2 3]}) (catch e :bad-size))   → :bad-size   ; 1×1 needs 4 bytes"
+  ((id image) (texture id (get image :rgba) (get image :width) (get image :height)))
+  ((id rgba w h) (let (registry (textures)
+                       tex (table/incr registry :next))
+                   (%gui-texture id tex rgba w h)
+                   (table/put registry tex [w h])
+                   tex)))
+
+(defn texture-size (tex)
+  "The [w h] in texture pixels a handle from gui/texture was uploaded with, or nil for an unknown handle (one this process never uploaded, or already freed).
+
+    (gui/texture-size 0)   → nil"
+  (table/get (textures) tex))
+
+(defn texture-free (id tex)
+  "Release texture tex of window id and forget its size; a later [:sprite …] naming it draws nothing. Idempotent. Returns nil.
+
+    (try (do (gui/texture-free 0 1) (gui/texture-size 1)) (catch e nil))   → nil   ; forgotten, whether or not a window/backend exists"
+  (table/delete (textures) tex)
+  (%gui-texture-free id tex))
+
+(defn line (x0 y0 x1 y1 color &optional width)
+  "The op that draws a line segment from (x0 y0) to (x1 y1) in physical pixels, `width` pixels thick (1 by default), in color — a keyword (:red), an [r g b] triple, an [r g b a] quad for a translucent line, or a \"#rrggbb\" string. A line IS a thin quad at an angle, so this is a [:quad …] whose centre is the segment's midpoint, turned to the segment's angle: put it in a frame like any other op.
+
+    (gui/line 0 0 10 0 :red)   → [:quad 0.0 -0.5 10.0 1.0 :red 0.0]"
+  (let (dx (->float (- x1 x0))
+        dy (->float (- y1 y0))
+        len (math/sqrt (+ (* dx dx) (* dy dy)))
+        w (->float (math/max 1 (or width 1)))
+        cx (/ (+ (->float x0) (->float x1)) 2)
+        cy (/ (+ (->float y0) (->float y1)) 2))
+    [:quad (- cx (/ len 2)) (- cy (/ w 2)) len w color (math/atan2 dy dx)]))
+
+(defn sprite (tex x y w h &optional opts)
+  "The op that draws texture tex (a handle from gui/texture) with its top-left at (x y) physical pixels, w×h pixels large. `opts`, a map, picks the part and the look: `:src [sx sy sw sh]` the source rect in texture pixels (default the whole texture; needs the size gui/texture recorded, so an unknown handle draws the whole texture), `:flip-x` / `:flip-y` to mirror it, `:tint` a colour multiplied in (default opaque white, so [r g b 128] fades the sprite to half), `:rot` radians clockwise about the sprite's centre. Sheets and animation are one call: the frame is a `:src`. Returns the [:sprite …] op — which carries a UV rect, because that is all the renderer knows.
+
+    (gui/sprite 0 10 20 32 32)   → [:sprite 0 10 20 32 32 [0.0 0.0 1.0 1.0] [255 255 255 255] 0.0]"
+  (let (opts (or opts {})
+        src (get opts :src)
+        size (texture-size tex)
+        [tw th] (or size [1 1])
+        [sx sy sw sh] (if (and src size) src [0 0 tw th])
+        u0 (/ (->float sx) tw)
+        v0 (/ (->float sy) th)
+        du (/ (->float sw) tw)
+        dv (/ (->float sh) th)
+        [u0 du] (if (get opts :flip-x) [(+ u0 du) (- du)] [u0 du])
+        [v0 dv] (if (get opts :flip-y) [(+ v0 dv) (- dv)] [v0 dv]))
+    [:sprite
+      tex
+      x
+      y
+      w
+      h
+      [u0 v0 du dv]
+      (or (get opts :tint) [255 255 255 255])
+      (->float (or (get opts :rot) 0))]))

@@ -28,7 +28,7 @@ use std::num::NonZeroU32;
 
 use std::rc::Rc;
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use std::sync::mpsc::{self, Sender};
 
@@ -228,6 +228,21 @@ enum UserEvent {
         w: u32,
         h: u32,
     },
+    /// Upload a texture for window `id`'s `:sprite` ops: `rgba` is `w*h*4` bytes,
+    /// row-major straight alpha, and `tex` the handle the Brood side already returned
+    /// for it (allocated there from a counter, so `gui-texture` needs no round trip).
+    /// The GPU target keeps it on the device; the CPU target has no sprite arm and
+    /// drops it. Behind `gui-texture`.
+    Texture {
+        id: u64,
+        tex: u32,
+        rgba: Vec<u8>,
+        w: u32,
+        h: u32,
+    },
+    /// Release texture `tex` of window `id` (a later `:sprite` naming it draws nothing).
+    /// Behind `gui-texture-free`.
+    TextureFree { id: u64, tex: u32 },
     /// Raise window `id` to the front and give it OS keyboard focus (un-
     /// minimising it first). Behind `gui-focus` — surfaces an already-open
     /// singleton window instead of opening a duplicate.
@@ -314,6 +329,7 @@ enum UserEvent {
 struct OpenReply {
     id: u64,
     size: Arc<Mutex<(u16, u16)>>,
+    size_px: Arc<Mutex<(u32, u32)>>,
     held_key: Arc<Mutex<Option<Key>>>,
 }
 
@@ -322,6 +338,9 @@ struct OpenReply {
 /// so there is no receiver to keep here (ADR-058).
 struct WinHandle {
     size: Arc<Mutex<(u16, u16)>>,
+    /// The window's inner size in PHYSICAL pixels, republished on every resize, for
+    /// `gui-size-px` — the frame a pixel-space app lays itself out in.
+    size_px: Arc<Mutex<(u32, u32)>>,
     /// The key the window currently sees as physically held (set on press,
     /// cleared on release / focus loss), so `gui-held-key` can be polled as the
     /// source of truth for a held key — immune to a missed key-up (ADR-086).
@@ -369,6 +388,13 @@ fn headless() -> bool {
 fn headless_cells(size: Option<(f64, f64)>) -> (u16, u16) {
     let (w, h) = size.unwrap_or((840.0, 560.0));
     (((w / 8.0) as u16).max(1), ((h / 16.0) as u16).max(1))
+}
+
+/// The pixel size a headless window reports for a requested logical `size` (default
+/// 840×560), at a nominal scale of 1.
+fn headless_px(size: Option<(f64, f64)>) -> (u32, u32) {
+    let (w, h) = size.unwrap_or((840.0, 560.0));
+    ((w.max(1.0)) as u32, (h.max(1.0)) as u32)
 }
 
 /// Can the event loop live on a thread we choose, or must it own the **process main
@@ -539,6 +565,7 @@ pub fn open(subscriber: u64, spec: WindowSpec) -> Result<u64, String> {
             id,
             WinHandle {
                 size: Arc::new(Mutex::new(headless_cells(spec.size))),
+                size_px: Arc::new(Mutex::new(headless_px(spec.size))),
                 held_key: Arc::new(Mutex::new(None)),
             },
         );
@@ -556,13 +583,22 @@ pub fn open(subscriber: u64, spec: WindowSpec) -> Result<u64, String> {
             reply: reply_tx,
         })
         .map_err(|_| "gui thread is gone".to_string())?;
-    let OpenReply { id, size, held_key } = reply_rx
+    let OpenReply {
+        id,
+        size,
+        size_px,
+        held_key,
+    } = reply_rx
         .recv()
         .map_err(|_| "gui thread did not reply".to_string())??;
-    windows()
-        .lock()
-        .unwrap()
-        .insert(id, WinHandle { size, held_key });
+    windows().lock().unwrap().insert(
+        id,
+        WinHandle {
+            size,
+            size_px,
+            held_key,
+        },
+    );
     Ok(id)
 }
 
@@ -899,6 +935,55 @@ pub fn icon(id: u64, rgba: Vec<u8>, w: u32, h: u32) -> Result<(), String> {
     Ok(())
 }
 
+/// `(gui-texture id tex rgba w h)` — upload `rgba` (`w*h*4` bytes) as texture `tex` of
+/// window `id`, for its `:sprite` ops. The handle was allocated by the caller
+/// (`next_texture_id`), so this is fire-and-forget like `icon`: no reply to wait for.
+pub fn texture(id: u64, tex: u32, rgba: Vec<u8>, w: u32, h: u32) -> Result<(), String> {
+    if headless() {
+        return Ok(());
+    }
+    if let Ok(g) = gui() {
+        let _ = g.lock().unwrap().send_event(UserEvent::Texture {
+            id,
+            tex,
+            rgba,
+            w,
+            h,
+        });
+    }
+    Ok(())
+}
+
+/// `(gui-texture-free id tex)` — release texture `tex` of window `id`.
+pub fn texture_free(id: u64, tex: u32) -> Result<(), String> {
+    if headless() {
+        return Ok(());
+    }
+    if let Ok(g) = gui() {
+        let _ = g
+            .lock()
+            .unwrap()
+            .send_event(UserEvent::TextureFree { id, tex });
+    }
+    Ok(())
+}
+
+/// The next texture handle. Process-wide rather than per window so a handle can never
+/// name a different texture in another window by accident; starts at 1 so 0 is never a
+/// live texture (a `:sprite` naming it draws nothing).
+pub fn next_texture_id() -> u32 {
+    static NEXT: AtomicU32 = AtomicU32::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// `(gui-size-px id)` — window `id`'s inner size in PHYSICAL pixels.
+pub fn size_px(id: u64) -> Result<(u32, u32), String> {
+    let w = windows().lock().unwrap();
+    let h = w.get(&id).ok_or("gui window not open")?;
+    let size = *h.size_px.lock().unwrap();
+    Ok(size)
+}
+
 /// `(gui-font-register …)` — register a font family (interned `name`) from raw
 /// TTF bytes per style; the GUI thread parses + shares it so `:family` can pick
 /// it. Starts the GUI thread if needed (so a family can be registered up front).
@@ -937,11 +1022,11 @@ enum Backend {
         _context: softbuffer::Context<Rc<Window>>,
         surface: softbuffer::Surface<Rc<Window>, Rc<Window>>,
     },
-    // Boxed: `GlWindow` is ~6 KB (GL context + programs + glyph cache), which
+    // Boxed: `GpuWindow` is large (device, queue, pipelines, glyph cache), which
     // would bloat every `Backend` — including the common `Cpu` one — to that
     // size. The box keeps the enum a couple of words; the GPU path is cold.
     #[cfg(feature = "gui-gpu")]
-    Gpu(Box<crate::host::gui::gpu::GlWindow>),
+    Gpu(Box<crate::host::gui::gpu::GpuWindow>),
 }
 
 #[cfg(feature = "gui-gpu")]
@@ -967,11 +1052,18 @@ struct Win {
     backend: Backend,
     renderer: Renderer,
     size: Arc<Mutex<(u16, u16)>>,
+    /// The inner size in physical pixels, shared with the Brood side for `gui-size-px`.
+    size_px: Arc<Mutex<(u32, u32)>>,
     /// The process this window's input is delivered to (its mailbox).
     subscriber: u64,
+    /// Mouse input in pixels rather than cells (`WindowSpec::pixel_input`).
+    pixel_input: bool,
     frame: Vec<Op>,
     mods: ModifiersState,
     cursor: (u16, u16),
+    /// The pointer's last physical pixel position `(x, y)` — what a pixel-input
+    /// window reports in place of the cell, and the position a press/release carries.
+    cursor_px: (u16, u16),
     /// The button currently held down (set on press, cleared on release), so a
     /// `CursorMoved` while it's held can be reported as a `:drag` carrying that
     /// button. Deliberately one button at a time — all a drag gesture needs: a
@@ -1110,9 +1202,10 @@ fn build_window(
     // default build, or no env) is the CPU softbuffer — so other apps stay on CPU.
     #[cfg(feature = "gui-gpu")]
     let backend = if gpu_enabled() {
-        eprintln!("brood gui: GPU (OpenGL) backend active");
-        Backend::Gpu(Box::new(crate::host::gui::gpu::GlWindow::new(
+        eprintln!("brood gui: GPU (wgpu) backend active");
+        Backend::Gpu(Box::new(crate::host::gui::gpu::GpuWindow::new(
             window.clone(),
+            spec.vsync,
         )?))
     } else {
         cpu_backend(&window)?
@@ -1129,15 +1222,19 @@ fn build_window(
     renderer.set_line_height(defaults.line_height);
     renderer.set_text_aa(defaults.text_aa);
     renderer.set_text_contrast(defaults.text_contrast);
+    let inner = window.inner_size();
     Ok(Win {
         window,
         backend,
         renderer,
         size: Arc::new(Mutex::new((80, 24))),
+        size_px: Arc::new(Mutex::new((inner.width, inner.height))),
         subscriber,
+        pixel_input: spec.pixel_input,
         frame: Vec::new(),
         mods: ModifiersState::empty(),
         cursor: (0, 0),
+        cursor_px: (0, 0),
         held: None,
         last_click: None,
         held_key: Arc::new(Mutex::new(None)),
@@ -1207,6 +1304,7 @@ impl GuiApp {
                 let _ = reply.send(Ok(OpenReply {
                     id,
                     size: win.size.clone(),
+                    size_px: win.size_px.clone(),
                     held_key: win.held_key.clone(),
                 }));
                 self.ids.insert(id, wid);
@@ -1278,6 +1376,32 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 if let Some(win) = self.ids.get(&id).and_then(|wid| self.wins.get(wid)) {
                     if let Ok(ic) = Icon::from_rgba(rgba, iw, ih) {
                         win.window.set_window_icon(Some(ic));
+                    }
+                }
+            }
+            // A sprite texture lives on the GPU target; the CPU target has no sprite
+            // arm, so for it the upload is a no-op (the `:sprite` op is skipped there too).
+            UserEvent::Texture {
+                id,
+                tex,
+                rgba,
+                w: tw,
+                h: th,
+            } => {
+                if let Some(win) = self.ids.get(&id).and_then(|wid| self.wins.get_mut(wid)) {
+                    match &mut win.backend {
+                        Backend::Cpu { .. } => {}
+                        #[cfg(feature = "gui-gpu")]
+                        Backend::Gpu(gpu) => gpu.upload_texture(tex, &rgba, tw, th),
+                    }
+                }
+            }
+            UserEvent::TextureFree { id, tex } => {
+                if let Some(win) = self.ids.get(&id).and_then(|wid| self.wins.get_mut(wid)) {
+                    match &mut win.backend {
+                        Backend::Cpu { .. } => {}
+                        #[cfg(feature = "gui-gpu")]
+                        Backend::Gpu(gpu) => gpu.free_texture(tex),
                     }
                 }
             }
@@ -1424,9 +1548,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     w.renderer.set_line_height(mult);
                     // The cell height moved, so the grid did: the same path as a font
                     // change — new (cols, rows) to the app, then a repaint.
-                    update_cells(&w.window, &w.renderer, &w.size);
-                    let (cols, rows) = *w.size.lock().unwrap();
-                    deliver(w.subscriber, resize_message(cols, rows));
+                    publish_size(w);
                     w.window.request_redraw();
                 }
             }
@@ -1491,14 +1613,12 @@ impl ApplicationHandler<UserEvent> for GuiApp {
             }
             WindowEvent::ModifiersChanged(m) => w.mods = m.state(),
             WindowEvent::Resized(_) => {
-                update_cells(&w.window, &w.renderer, &w.size);
                 // The sub-cell remainder is placed at paint time (`grid_origin`:
                 // centred horizontally, anchored top vertically), so there's no
                 // window-resize snap to do here — it works on every WM.
                 // Wake the app loop so it re-renders at the new (cols, rows)
                 // now, rather than after its (possibly long) poll timeout.
-                let (cols, rows) = *w.size.lock().unwrap();
-                deliver(w.subscriber, resize_message(cols, rows));
+                publish_size(w);
                 w.window.request_redraw();
             }
             // We deliberately ignore 0.30's `inner_size_writer` (which could
@@ -1507,9 +1627,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
             // recompute (cols, rows) from the current `inner_size()`.
             WindowEvent::ScaleFactorChanged { .. } => {
                 w.renderer.set_scale(w.window.scale_factor());
-                update_cells(&w.window, &w.renderer, &w.size);
-                let (cols, rows) = *w.size.lock().unwrap();
-                deliver(w.subscriber, resize_message(cols, rows));
+                publish_size(w);
                 w.window.request_redraw();
             }
             WindowEvent::KeyboardInput {
@@ -1616,9 +1734,19 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     psz.width as usize,
                     psz.height as usize,
                 );
-                if cell != w.cursor {
-                    w.cursor = cell;
-                    let (col, row) = w.cursor;
+                let px = px_clamped(position);
+                // A pixel-input window (a game) reports every pixel of motion — that IS
+                // the grain it asked for, and winit already coalesces motion per frame —
+                // where a cell-grid window reports only a cell crossing.
+                let moved = if w.pixel_input {
+                    px != w.cursor_px
+                } else {
+                    cell != w.cursor
+                };
+                w.cursor = cell;
+                w.cursor_px = px;
+                if moved {
+                    let (col, row) = w.pointer();
                     // While a button is held this is a `:drag`; otherwise it's a
                     // bare `:move` (button nil). Either way it's cell-granular (only
                     // on crossing into a new cell), so it stays bounded — no per-pixel
@@ -1674,7 +1802,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
             } => {
                 if let Some(b) = translate_button(button) {
                     w.held = Some(b);
-                    let (col, row) = w.cursor;
+                    let (col, row) = w.pointer();
                     // Click-chain count: a fresh press in the same cell, with the same
                     // button, within MULTI_CLICK_MS of the previous extends the chain
                     // (double/triple-click); anything else restarts at 1.
@@ -1713,7 +1841,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
             } => {
                 if let Some(b) = translate_button(button) {
                     w.held = None;
-                    let (col, row) = w.cursor;
+                    let (col, row) = w.pointer();
                     deliver(
                         w.subscriber,
                         mouse_message(&Mouse {
@@ -1839,8 +1967,8 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                         paint(surface, &w.window, &mut w.renderer, &w.frame)
                     }
                     #[cfg(feature = "gui-gpu")]
-                    Backend::Gpu(gl) => {
-                        gl.paint(&w.frame, &mut w.renderer);
+                    Backend::Gpu(gpu) => {
+                        gpu.paint(&w.frame, &mut w.renderer);
                     }
                 }
             }
@@ -1948,15 +2076,29 @@ fn run_gui(ready: Sender<Result<EventLoopProxy<UserEvent>, String>>) {
 /// global-default and per-window arms of `UserEvent::Font`.
 fn apply_font(w: &mut Win, family: Option<u32>, px: Option<f32>) {
     w.renderer.set_font(family, px);
-    update_cells(&w.window, &w.renderer, &w.size);
     // A new font changes the cell size, hence the (cols, rows) grid — exactly like a
     // window resize. Wake the app loop with the new grid so it RE-RENDERS its content at
     // the new size; without this the redraw below only repaints the stale old frame and
     // the buffer body goes blank until the next unrelated input/timer (the font-switch UI
     // break). The sub-cell remainder is re-placed at paint time (`grid_origin`).
-    let (cols, rows) = *w.size.lock().unwrap();
-    deliver(w.subscriber, resize_message(cols, rows));
+    publish_size(w);
     w.window.request_redraw();
+}
+
+/// Republish a window's size to the Brood side and wake its app loop with the
+/// `[:resize …]` it expects: cells for a cell-grid window, PIXELS for a pixel-input
+/// one (`WindowSpec::pixel_input`) — the unit every other message of that window uses.
+/// Shared by the resize, scale-change and font arms so the three cannot disagree.
+fn publish_size(w: &Win) {
+    update_cells(&w.window, &w.renderer, &w.size);
+    let inner = w.window.inner_size();
+    *w.size_px.lock().unwrap() = (inner.width, inner.height);
+    if w.pixel_input {
+        deliver(w.subscriber, resize_message_px(inner.width, inner.height));
+    } else {
+        let (cols, rows) = *w.size.lock().unwrap();
+        deliver(w.subscriber, resize_message(cols, rows));
+    }
 }
 
 /// Recompute `(cols, rows)` from the window's physical size and the cell
@@ -1971,6 +2113,27 @@ fn update_cells(window: &winit::window::Window, r: &Renderer, size: &Arc<Mutex<(
     let cols = (usable_w / r.cell_w.max(1)).max(1).min(u16::MAX as usize) as u16;
     let rows = (usable_h / r.cell_h.max(1)).max(1).min(u16::MAX as usize) as u16;
     *size.lock().unwrap() = (cols, rows);
+}
+
+impl Win {
+    /// The pointer position a mouse message carries, as `(col, row)` — the cell for a
+    /// cell-grid window, the physical pixel `(x, y)` for a pixel-input one. One place,
+    /// so press, release and motion cannot disagree about the unit.
+    fn pointer(&self) -> (u16, u16) {
+        if self.pixel_input {
+            self.cursor_px
+        } else {
+            self.cursor
+        }
+    }
+}
+
+/// A window pixel position clamped to the `(x, y)` a mouse message can carry (u16 —
+/// wider than any display). Negative coordinates (a pointer dragged past the window's
+/// top-left while a button is held) clamp to the edge, like `px_to_cell`.
+fn px_clamped(pos: PhysicalPosition<f64>) -> (u16, u16) {
+    let clamp = |v: f64| v.max(0.0).min(u16::MAX as f64) as u16;
+    (clamp(pos.x), clamp(pos.y))
 }
 
 /// A window pixel position to a (col, row) character cell, clamped to u16. The grid

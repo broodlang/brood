@@ -84,8 +84,10 @@ day: tab stops in the display seam (ADR-342), the scroll blit (ADR-343),
   fold it in and delete its walker.
 - ⬜ **`collab.blsp`'s file registry onto `editor/buffer-registry`** — keyed by path with a
   text mirror; the registry's `:meta` can carry the path, the mirror is the one thing to add.
-- ⬜ **The GPU glyph atlas** (`gui.rs` still draws no text) — the scroll blit made the CPU
-  path 2.3 ms at 1080p, so this is a 4K item now, not a 1080p one.
+- ✅ **The GPU glyph atlas** — shipped 2026-09-20 with the wgpu render target (ADR-374):
+  clusters pack into 2048² atlas pages as they first appear, so a page of text is one
+  batch. The GPU path also draws the pixel-space `:quad` / `:sprite` ops now; still not
+  drawn there: cursors, cursor zones, scroll/cell regions, rounded corners.
 
 ### Argument order + error conventions — ✅ COMPLETE (2026-08-30)
 
@@ -2679,8 +2681,10 @@ both, but the untrusted path is necessarily thinner; document the gap. Versioned
 
 - ⬜ **Major/minor modes** — how a buffer selects which keymaps are active.
 - ⬜ **Mouse / resize input events** — deferred until a feature needs them.
-- ⬜ **GPU-window frontend** — a later additive path speaking the same display
-  protocol; arbitrary per-px buffer sizing rides with it.
+- 🟡 **GPU-window frontend** — the wgpu render target (ADR-374, 2026-09-20) speaks the
+  same display protocol behind `--with-gui-gpu` + `BROOD_GUI_GPU=1`, with the pixel-space
+  `:quad` / `:sprite` ops and pixel input for games (`b2d`). Still ⬜: the frontend as its
+  own process over the ADR-090 link, and the cell-op features the GPU path skips.
 - 🟡 **Telemetry** (ADR-106) — core landed; the kernel event *sources* shipped
   2026-07-19 (ADR-137: `system-monitor` → `telemetry/watch-runtime`, GC/spawn/exit/
   deopt as `[:runtime kind]` events). ✅ **Metric aggregators + sampling** shipped

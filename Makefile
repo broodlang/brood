@@ -15,7 +15,7 @@ WITH_GUI ?= 0
 # `WITH_GUI` anything but 0/empty → compile the native window backend into the
 # binaries that run user code (brood, nest); the LSP never opens a UI.
 GUI_FEATURES := $(if $(filter-out 0,$(WITH_GUI)),--features brood/gui,)
-# `./configure --with-gui-gpu` (WITH_GUI_GPU) builds the EXPERIMENTAL OpenGL backend
+# `./configure --with-gui-gpu` (WITH_GUI_GPU) builds the wgpu render target
 # alongside `gui`. The `gui-gpu` feature implies `gui`, and cargo unions repeated
 # `--features`, so this composes with GUI_FEATURES above.
 WITH_GUI_GPU ?= 0
@@ -361,7 +361,7 @@ wasm-test: ## Run the wasm32 cooperative scheduler BEHAVIOURALLY (build + wasm-b
 	# IS `Instant::now()`, so every gate agrees whether or not the wasm path works. This
 	# runs the real artifact (the profile the site serves) under node.
 	# Needs: rustup target add wasm32-unknown-unknown; cargo install wasm-bindgen-cli
-	# --version 0.2.100; node.
+	# --version 0.2.128; node.
 	@./scripts/wasm-suite.sh
 
 smoke-bedit: ## Run bedit's gates (nest check, --check-boot, nest test) against THIS tree's nest — the downstream smoke CI's `downstream-bedit` job runs
