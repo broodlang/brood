@@ -1302,3 +1302,60 @@ suite run. `*test-wait-ms*` is a failure deadline, reached only if a relay never
           i (editor/buffer/buffer-search-forward b "stanbul" 0 true))
       (assert= (if at (string/substring text at (+ at 5)) :no-match) "there")
       (assert= (if i (string/substring text i (+ i 7)) :no-match) "stanbul"))))
+
+;; ---- search streams the ROPE; nothing whole-buffer is built -----------------
+;; `buffer-search-forward` used to read `(index-of (string/fold-case (buffer-text buf)) …)`
+;; — flatten the rope, fold the flattening, scan — per call, and incremental search calls it
+;; on every keystroke: 148 ms a character on a 5,700-line file, growing with the document.
+;; It streams the rope now (`%rope-find`). These pin the SEMANTICS across that change, since
+;; the whole risk of a native scan is that it lands a match somewhere subtly different.
+(describe "buffer search — offsets, folding and edges"
+  (test "forward finds the first occurrence at or after `from`"
+    (let (b (make-buffer "abc abc abc"))
+      (assert= 0 (buffer-search-forward b "abc" 0))
+      (assert= 4 (buffer-search-forward b "abc" 1))
+      (assert= 4 (buffer-search-forward b "abc" 4))
+      (assert= 8 (buffer-search-forward b "abc" 5))
+      (is (nil? (buffer-search-forward b "abc" 9)))))
+
+  (test "backward finds the last occurrence starting strictly BEFORE `before`"
+    (let (b (make-buffer "abc abc abc"))
+      (assert= 8 (buffer-search-backward b "abc" 11))
+      (assert= 4 (buffer-search-backward b "abc" 8))
+      (assert= 0 (buffer-search-backward b "abc" 4))
+      (is (nil? (buffer-search-backward b "abc" 0)))))
+
+  (test "folding is off by default and on by request"
+    (let (b (make-buffer "Hello World"))
+      (is (nil? (buffer-search-forward b "hello" 0)))
+      (assert= 0 (buffer-search-forward b "hello" 0 true))
+      (assert= 6 (buffer-search-forward b "WORLD" 0 true))
+      (assert= 6 (buffer-search-backward b "world" 11 true))))
+
+  (test "a folded match's offset indexes the ORIGINAL text"
+    ;; the reason the fold is one-character-per-character: `İ` lowercases to two characters,
+    ;; so folding it would shift every offset after it and land the match on the wrong chars
+    (let (b (make-buffer "aİb needle"))
+      (assert= 4 (buffer-search-forward b "needle" 0 true))
+      (assert= "needle" (string/substring (buffer-text b) 4 10))))
+
+  (test "an empty needle answers where it was asked from"
+    (let (b (make-buffer "abc"))
+      (assert= 0 (buffer-search-forward b "" 0))
+      (assert= 2 (buffer-search-forward b "" 2))))
+
+  (test "a needle longer than the buffer, and searching an empty buffer"
+    (is (nil? (buffer-search-forward (make-buffer "ab") "abcdef" 0)))
+    (is (nil? (buffer-search-forward (make-buffer "") "a" 0)))
+    (is (nil? (buffer-search-backward (make-buffer "") "a" 0))))
+
+  (test "overlapping occurrences are found at every start"
+    (let (b (make-buffer "aaaa"))
+      (assert= 0 (buffer-search-forward b "aa" 0))
+      (assert= 1 (buffer-search-forward b "aa" 1))
+      (assert= 2 (buffer-search-backward b "aa" 4))))
+
+  (test "a match spanning the newlines a rope is chunked on"
+    (let (b (make-buffer (str (string/repeat "filler line\n" 400) "the needle here")))
+      (assert= (index-of (buffer-text b) "the needle")
+        (buffer-search-forward b "THE NEEDLE" 0 true)))))

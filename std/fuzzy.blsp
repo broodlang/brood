@@ -5,15 +5,19 @@
 ;; "foo-bar". Matches are scored so the best rise first: contiguous runs, matches at
 ;; word boundaries (string start, after a `- _ / . space`, or a camelCase upper), and
 ;; early matches all score higher. Greedy left-to-right (flx/fzf-lite — not the optimal
-;; DP, but cheap and good in practice). Pure Brood, tail-recursive; zero kernel surface.
+;; DP, but cheap and good in practice). Brood, tail-recursive, everything below readable.
 ;;
 ;; The rules live in ONE place — `fuzzy-bonus`, what one matched char is worth — and one
 ;; walk applies them, whether the caller wants a single candidate's positions (`match`, to
 ;; highlight a row) or a whole set ranked (`top`, on every keystroke). They are also
 ;; REPLACEABLE at runtime: bind `*fuzzy-scorer*` and every completion UI in the image ranks
-;; by your rules instead. That is the point of a self-editing system, and it is why the hot
-;; path stayed Brood instead of becoming a native primitive — `top` says what that costs
-;; and what the shape of the code does about it (ADR-357).
+;; by your rules instead. That is the point of a self-editing system, and `top` says what
+;; keeping the shape of the work honest bought without a kernel (ADR-357).
+;;
+;; Ranking by the DEFAULT rules is now also a native pass (`%fuzzy-top`, ADR-375), taken
+;; only while `*fuzzy-scorer*` has not been rebound — so the code below is what a ranking
+;; MEANS and the primitive is what an unmodified one costs. Replace the scorer and every
+;; ranking comes back here. `tests/fuzzy_native_test.blsp` is the contract between them.
 
 (defmodule fuzzy
   "Fuzzy (subsequence) matching + ranking.
@@ -199,11 +203,25 @@ chars) happens out here, once.
     (fn (cand) (let (r (fuzzy-run qchars qlow qn cand)) (if (nil? r) nil (first r))))))
 (sig scorer (string -> fn))
 
-(defdyn *fuzzy-scorer* scorer)
+(defdyn *fuzzy-scorer* :default)
 ;; How ranking scores a candidate: a `(query) -> (cand) -> score | nil`. Bind it to rank by
 ;; your own rules — weight the boundary bonus differently, score a path's basename above
 ;; its directories, prefer what you opened recently — and `top`/`filter` follow, live,
 ;; everywhere in the image. `scorer` is the default and composes: wrap it, don't restate it.
+;;
+;; The default is the KEYWORD `:default`, not `scorer` itself, and that is load-bearing:
+;; `top` must be able to ask "has anybody replaced these rules?" to decide whether the
+;; native pass applies (ADR-375), and it cannot ask that of a function. `=` on two fn values
+;; is identity, and the stdlib image rehydrates the dynvar's default and the global `scorer`
+;; as separate objects — so comparing them answered "replaced" in a fresh image, which would
+;; have silently left every ranking on the slow path. A keyword compares exactly.
+;; `scorer-in-force` is what reads it; nothing else should.
+
+(defn- scorer-in-force ()
+  "The scorer to rank with: whatever `*fuzzy-scorer*` is bound to, or `scorer` when that is
+still `:default`. The one place the sentinel is resolved."
+  (let (s *fuzzy-scorer*) (if (= s :default) scorer s)))
+(sig scorer-in-force (-> fn))
 
 ;; ---- ranking a whole set ----------------------------------------------------
 ;; This is the per-keystroke pass, and at project scale (tens of thousands of paths, where
@@ -381,6 +399,14 @@ made, which is what makes discarding it safe. Cost: one zero-wait receive per sh
 ranking; benefit: strays can never accumulate in a caller that lives for a whole session."
   (fuzzy-discard-loop 0))
 
+(defn- default-rules? ()
+  "Whether ranking is still scoring by the built-in rules — i.e. `*fuzzy-scorer*` has not
+been rebound. The gate on the native pass (`%fuzzy-top`, ADR-375): the primitive implements
+`fuzzy-bonus`/`fuzzy-walk`/`fuzzy-key` and nothing else, so it is only ever correct while
+those are what a ranking means. A custom scorer takes the Brood paths, unchanged."
+  (= *fuzzy-scorer* :default))
+(sig default-rules? (-> bool))
+
 (defn- fuzzy-parallel (score-of cands k)
   "The best `k` of `cands`, ranked across `*fuzzy-workers*` processes and merged here."
   (let (_ (fuzzy-discard-stale)
@@ -413,16 +439,21 @@ Prefer this over `filter` whenever the caller shows a fixed number of rows: the 
         n (if bounded (count cands) 0))
     (cond
       (= query "") (if bounded (take cands k) cands)
-      (not bounded) (fuzzy-all (*fuzzy-scorer* query) cands)
-      (> n *fuzzy-parallel-min*) (fuzzy-parallel (*fuzzy-scorer* query) cands k)
+      ;; The default rules, natively (ADR-375). Same walk, same ordering, no shard fan-out
+      ;; — and no copy of the candidate set across process boundaries per keystroke. Gated
+      ;; on the scorer still BEING the default: bind `*fuzzy-scorer*` and every ranking
+      ;; falls back to the Brood paths below, which is the whole of ADR-357 kept intact.
+      (default-rules?) (%fuzzy-top query cands limit)
+      (not bounded) (fuzzy-all ((scorer-in-force) query) cands)
+      (> n *fuzzy-parallel-min*) (fuzzy-parallel ((scorer-in-force) query) cands k)
       ;; The bounded fold only pays once the sort it replaces is mostly waste. Measured
       ;; (sort+take vs fold, best-20 of a repo-like corpus): 200 → 1.7/3.2 ms, 1000 →
       ;; 7.4/11.0, 2000 → 14.1/16.8, 4000 → 29.6/27.5, 16000 → 118.7/93.7 ms. So the
       ;; crossover is around a hundred candidates per row shown — under that the native
       ;; sort beats an interpreted fold, over it the fold pulls away. A ratio, not a size:
       ;; what matters is how many candidates get sorted per row actually displayed.
-      (> n (* 100 k)) (fuzzy-fold (*fuzzy-scorer* query) cands k)
-      :else (take (fuzzy-all (*fuzzy-scorer* query) cands) k))))
+      (> n (* 100 k)) (fuzzy-fold ((scorer-in-force) query) cands k)
+      :else (take (fuzzy-all ((scorer-in-force) query) cands) k))))
 (sig top (string seqable &optional (or nil int) -> seqable))
 
 (defn filter (query cands)
@@ -434,3 +465,83 @@ shorter candidate, then lexicographic). An empty `query` returns `cands` unchang
 ;; `cands` and the result are `seqable` (empty query returns `cands` as-is, else a ranked
 ;; list) — the domain checks the argument without false-flagging a vector caller.
 (sig filter (string seqable -> seqable))
+
+;; ---- a ranking session: the set is sent once, the loop never waits ------------
+;; `top` answers where it is called, which is the wrong place when the caller is an event
+;; loop. However fast ranking gets, a set can always be big enough to miss a frame — and
+;; the caller that hurts is the one that must also be drawing at the time. A `ranker` moves
+;; the work to a process that OWNS the candidate set: a query costs the query, the loop
+;; sends and returns, and the answer arrives as an ordinary message it folds like any other.
+;;
+;; Two properties are the whole point, and neither is available to a caller rolling this by
+;; hand around `top`:
+;;
+;;   * The set crosses the process boundary ONCE, at `ranker`. The shard path
+;;     (`fuzzy-parallel`) copies it per ranking, which is why eight workers and sixteen
+;;     measure the same on 27k candidates — the copy is the ceiling, not the scoring.
+;;   * A superseded query is DROPPED, not queued. Typing five characters quickly enqueues
+;;     five rankings, four of which nobody will ever see; `ranker-latest` takes the newest
+;;     already in the mailbox before ranking, so a burst ranks once, at the last keystroke.
+;;     Without that the session is worse than the synchronous call: it falls further behind
+;;     the faster you type.
+;;
+;; The scorer is resolved in the CALLER at `ranker` and re-bound in the child around each
+;; ranking, because a dynamic binding does not reach a spawned process — same reason
+;; `fuzzy-parallel` ships its closure. So a session created under a custom `*fuzzy-scorer*`
+;; keeps it for its lifetime, and one created under the default takes the native pass.
+
+(defn- ranker-latest (msg)
+  "The newest `[:rank from query limit]` already in this process's mailbox, or `msg` when
+there is none — a non-blocking selective receive, so a burst of keystrokes ranks once."
+  (let (next (receive ([:rank from query limit] [:rank from query limit]) (after 0 nil)))
+    (if (nil? next) msg (ranker-latest next))))
+
+(defn- ranker-loop (cands score-of)
+  "The session process: rank the newest pending query against `cands` and reply, replace the
+candidate set on `[:candidates …]`, exit on `[:stop]`."
+  (receive
+    ([:rank from query limit] (let ([_ to q k] (ranker-latest [:rank from query limit])
+                                    hits (binding (*fuzzy-scorer* score-of) (top q cands k)))
+                                (do
+                                  (send to [:fuzzy-ranked (self) q hits])
+                                  (ranker-loop cands score-of))))
+    ([:candidates replacement] (ranker-loop replacement score-of))
+    ([:stop] nil)))
+
+(defn ranker (cands)
+  "A ranking **session** over `cands`: a process that holds the candidate set, so each query
+costs only the query and the asking process never blocks. Returns its pid — `rank-async` to
+ask, `ranker-candidates` to replace the set, `ranker-stop` when done.
+
+For a caller that ranks repeatedly from an event loop (an editor's minibuffer, a REPL
+completer) rather than once. The rules are whatever `*fuzzy-scorer*` is **here, now**: a
+dynamic binding does not reach a spawned process, so the session captures it at creation and
+keeps it.
+
+    (let (r (fuzzy/ranker project-files))
+      (fuzzy/rank-async r \"view\" 20)
+      (receive ([:fuzzy-ranked ^r query hits] hits)))"
+  (let (score-of *fuzzy-scorer*)
+    (spawn (fn () (ranker-loop cands score-of)))))
+(sig ranker (seqable -> pid))
+
+(defn rank-async (session query &optional (limit nil))
+  "Ask `session` for the best `limit` candidates for `query`. Returns immediately; the answer
+arrives in the calling process's mailbox as `[:fuzzy-ranked <session> query hits]`. A query
+sent while an older one is still queued REPLACES it — only the newest is ever answered, so a
+caller that sends one per keystroke gets one reply per burst, not one per key."
+  (send session [:rank (self) query limit]))
+(sig rank-async (pid string &optional (or nil int) -> any))
+
+(defn ranker-candidates (session cands)
+  "Replace `session`'s candidate set with `cands` — the one thing about a session that is
+not the query. Queries already queued are answered against whichever set has arrived first,
+so a caller that cares should re-ask after replacing."
+  (send session [:candidates cands]))
+(sig ranker-candidates (pid seqable -> any))
+
+(defn ranker-stop (session)
+  "End `session`. The process exits once it reaches the message; anything queued behind it
+is dropped with the mailbox."
+  (send session [:stop]))
+(sig ranker-stop (pid -> any))

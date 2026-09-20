@@ -1,0 +1,83 @@
+;; `%fuzzy-top` (ADR-375) against the Brood walk it replaces — THE contract between them.
+;;
+;; The native pass is a second statement of `std/fuzzy`'s rules, which is the cost ADR-357
+;; named when it rejected a kernel and ADR-375 accepted with this test as the price. So the
+;; assertions here are not spot checks of the ranking (tests/fuzzy_test.blsp is that): they
+;; are "the two implementations answer the same thing", over queries and candidates chosen
+;; to hit every term of the score — boundaries, camelCase humps, contiguous runs, gaps, the
+;; lead penalty, ties on length and then lexicographic, and a query that matches nothing.
+;;
+;; The Brood side is reached by binding `*fuzzy-scorer*` to a wrapper of `scorer`: same
+;; rules, but the native gate is then closed, so `top` takes the interpreted paths. That is
+;; how a caller with custom rules reaches them too, which makes this a test of the GATE as
+;; much as of the port.
+(defmodule fuzzy-native-test
+  (:use fuzzy :exclude [filter match])
+  (:use test))
+
+(defn fnt-brood-top (query cands limit)
+  "`top` forced down the Brood paths — the same rules behind a custom scorer."
+  (binding (*fuzzy-scorer* (fn (q) (scorer q))) (top query cands limit)))
+
+(def fnt-corpus
+  ;; paths, module names and symbols — the shapes a completion UI actually ranks, plus the
+  ;; pairs that exercise each tie-break (same score different length, same both)
+  ["lib/moneyclub/accounts/limits.ex"
+    "lib/moneyclub/limits.ex" "lib/mc/reports/it3b/submission.ex"
+    "test/moneyclub/accounts/limits_test.exs" "src/view.blsp" "src/model.blsp" "src/commands.blsp"
+    "tests/view_scroll_test.blsp" "MoneyClubWeb.PageController" "MoneyClubWeb.PageHTML"
+    "priv/repo/migrations/20240101_add_limits.exs" "mix.exs" "README.md" "a-b-c" "a_b_c" "a.b.c"
+    "abc" "ABC" "aXbXc" "xxabcxx" "" "z"])
+
+(def fnt-queries
+  ["a"
+    "ab" "abc" "ABC" "aB" "v" "vi" "view" "view.b" "limits" "limits.ex" "mc/lim" "lib/mc" "PageC"
+    "pc" "mixexs" "md" "zzqq" "x" "." "/" "-" "b.c" "20240101" "tvst"])
+
+(describe "%fuzzy-top agrees with the Brood ranking"
+  (test "bounded: the best 5 are the same list for every query over the corpus"
+    (doseq (q fnt-queries)
+      (assert= (fnt-brood-top q fnt-corpus 5) (top q fnt-corpus 5))))
+  (test "bounded past the match count, and bounded to one"
+    (doseq (q fnt-queries)
+      (assert= (fnt-brood-top q fnt-corpus 1) (top q fnt-corpus 1))
+      (assert= (fnt-brood-top q fnt-corpus 500) (top q fnt-corpus 500))))
+  (test "unbounded: `filter` ranks every match identically"
+    (doseq (q fnt-queries)
+      (assert= (fnt-brood-top q fnt-corpus nil) (fuzzy/filter q fnt-corpus))))
+  (test "the sharded path answers the same too — the corpus forced past the shard floor"
+    ;; `*fuzzy-parallel-min*` 0 makes every ranking shard, so the merge is compared against
+    ;; the native pass rather than only against the serial Brood fold
+    (doseq (q (take fnt-queries 8))
+      (assert= (binding (*fuzzy-parallel-min* 0) (fnt-brood-top q fnt-corpus 5))
+        (top q fnt-corpus 5)))))
+
+(describe "%fuzzy-top edge cases"
+  (test "an empty query keeps the candidates in their given order, capped"
+    (assert= (list "a" "b") (top "" ["a" "b" "c"] 2))
+    (assert= ["a" "b" "c"] (top "" ["a" "b" "c"] nil)))
+  (test "an empty candidate set ranks to nothing"
+    (assert= '() (top "a" [] 5))
+    (assert= '() (top "a" '() 5)))
+  (test "a list of candidates ranks like a vector of them"
+    (assert= (top "ab" ["axb" "ab" "zz"] 5) (top "ab" (list "axb" "ab" "zz") 5)))
+  (test "a non-string candidate is a type error, not a silent skip"
+    (is (not (nil? (try (do (top "a" ["ok" 42] 5) nil) (catch e e))))))
+  (test "ties break on length, then lexicographically"
+    ;; "ab" matches both at the same score; the shorter wins, and equal lengths sort by name
+    (assert= (list "ab" "abb") (top "ab" ["abb" "ab"] 5))
+    (assert= (list "aba" "abb") (top "ab" ["abb" "aba"] 5))))
+
+(describe "the native gate"
+  ;; Tested by what it DOES, not by reading the private predicate: the gate exists so that
+  ;; rebinding `*fuzzy-scorer*` still decides every ranking (ADR-357's whole point), and
+  ;; that is an observable, not an implementation detail.
+  (test "a custom scorer decides the ranking, native pass or not"
+    ;; rank by length alone — shortest first — which the built-in rules would never do, and
+    ;; which no candidate here even matches under them (`q` is in none of them)
+    (let (by-length (fn (q) (fn (cand) (- 0 (string/length cand)))))
+      (assert= (list "z" "yy" "xxx")
+        (binding (*fuzzy-scorer* by-length) (top "q" ["xxx" "z" "yy"] 3)))
+      (assert= '() (top "q" ["xxx" "z" "yy"] 3))))
+  (test "the custom scorer is put back: the default rules rank the same as before"
+    (assert= (fnt-brood-top "ab" fnt-corpus 5) (top "ab" fnt-corpus 5))))

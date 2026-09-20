@@ -62,10 +62,15 @@ back offsets into a string that does not exist, and land its match on the wrong
 characters. Every character whose lowercase is not a single character is left as it is,
 which is the *simple* case fold — what a text editor's case-insensitive search means.
 
+Native (`%fold-case`): this is a per-character transform over a WHOLE string, and the
+string is routinely a whole document — incremental search folded the buffer on every
+keystroke, and the interpreted `map` + `join` below was most of the 148 ms that cost on a
+5,700-line file. (Search no longer folds the buffer at all — `buffer-search-forward` streams
+the rope through `%rope-find` — but every other caller gets the same fold for a pass instead
+of a per-character interpreted loop.)
+
     (string/fold-case \"AbÇ\")   → \"abç\""
-  (string/join (map (string/->list s)
-                 (fn (c) (let (l (string/lower c)) (if (= (string/length l) 1) l c))))
-    ""))
+  (%fold-case s))
 (sig fold-case (string -> string))
 
 (defn has-upper? (s)
