@@ -65,6 +65,91 @@ load with the list rather than at the keypress that needed it."
   (seq/filter (get language-contract :required) (fn (k) (nil? (get layer k)))))
 (sig missing-services (any -> list))
 
+;; ---- is this text finished? -------------------------------------------------
+;; The question a LIVE evaluator asks before it sends anything, and the one thing a
+;; parser must answer carefully: text that is merely *unfinished* is not text that is
+;; *wrong*. Every form passes through unfinished on its way to being typed, so a tool
+;; that reports the two the same way spends most of its time calling you mistaken.
+;;
+;; Brood's own reader makes the distinction with two error codes (E0002 "this could
+;; still become valid" vs E0001 "it could not"). A tree-sitter grammar makes it with
+;; the shape of its repair, and until `%tree-sitter-errors` there was no way to read
+;; that from Brood: `%tree-sitter-chain` reports `:broken` on the root, which says only
+;; that something, somewhere, is wrong.
+
+(deftype parse-state (or :blank :ok (tuple :incomplete string) (tuple :err string)))
+
+(defn- error-token (text)
+  "The one token an error node is worth naming: its leading word (`do`, `fn`, `end`) when
+it begins with one, else its first character (`(`, `*`, `\"`).
+
+An ERROR node's text runs from where the parser lost its footing to wherever it
+regained it, which for an unclosed construct is the rest of the buffer — the node for a
+half-written `Enum.map([1,2], fn x ->` is all fifteen characters of it. What the reader
+needs from that is the one token that opened, and that token is at the front."
+  (let (t (string/triml text))
+    (if (= t "")
+      ""
+      (let (word (regex/find "^[A-Za-z_][A-Za-z_0-9]*" t))
+        (if word (get word :text) (string/substring t 0 1))))))
+
+(defn parse-state (text lang)
+  "Is `text` blank, mid-form, broken, or ready to evaluate? — `:blank`, `[:incomplete
+reason]`, `[:err msg]` or `:ok`, for any language with a tree-sitter grammar.
+
+The classification that matters is the middle one, and it is read from WHERE the parse
+came apart rather than from the kind of repair alone:
+
+  - a **MISSING** node is a token the grammar expected and inserted for you (an
+    unterminated string's closing quote) — unfinished, by construction;
+  - an **ERROR** node that runs to the end of the text is an unclosed construct: there
+    is nothing after it because you have not typed it yet — unfinished;
+  - an **ERROR** with good code after it is a real mistake, because no amount of further
+    typing at the cursor will explain the text that already follows it.
+
+The tail test is what makes this work for a grammar that repairs an unclosed `do` with
+an ERROR rather than a MISSING `end` — which tree-sitter-elixir does, so the kind alone
+would call every half-written `defmodule` a syntax error. Trailing whitespace is not
+text: an error is at the tail if nothing but blanks follows it.
+
+Where it is wrong it is wrong in the safe direction. A stray closing delimiter typed at
+the end of a buffer reads as `[:incomplete \"unclosed `)`\"]` rather than as an error,
+which shows a reader a dim, pending note instead of a confident red verdict about
+something they are in the middle of fixing. The reverse mistake — a verdict on text
+someone is still writing — is the one worth engineering against.
+
+Blank text is answered without parsing at all, which is why the example below needs no
+grammar; `\"1 +* 2\"` in Elixir is `[:err \"unexpected `*`\"]`, and the suite's cases are in
+`tests/treesit_module_test.blsp`.
+
+    (editor/treesit/parse-state \"   \\n \" :elixir)   → :blank"
+  (cond
+    (= (string/trim text) "") :blank
+    else
+      (let (errs (%tree-sitter-errors text lang))
+        (if (empty? errs)
+          :ok
+          ;; A MISSING node is never the broken case, whatever its position: it IS the
+          ;; grammar saying "you have not typed this yet".
+          (let (tail (string/length (string/trimr text))
+                broken (seq/find errs
+                         (fn (e) (and (not (get e :missing?)) (< (get e :end) tail)))))
+            (cond
+              broken [:err (str "unexpected `" (error-token (get broken :text)) "`")]
+              (get (first errs) :missing?)
+                [:incomplete (str "missing `" (->string (get (first errs) :kind)) "`")]
+              else [:incomplete (str "unclosed `" (error-token (get (first errs) :text)) "`")]))))))
+(sig parse-state (string keyword -> parse-state))
+
+(defn parse-tag (state)
+  "The classification alone — `:blank`, `:ok`, `:incomplete` or `:err` — for a caller that
+does not need the reason. The full state is a `match` subject; this is the `first` of it
+that a keyword state has no `first` of.
+
+    (editor/treesit/parse-tag [:incomplete \"missing `end`\"])   → :incomplete"
+  (if (vector? state) (first state) state))
+(sig parse-tag (parse-state -> keyword))
+
 ;; ---- fontify ----------------------------------------------------------------
 
 (defn face-of-kinds (kind->face-name)

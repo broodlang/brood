@@ -273,6 +273,93 @@ pub fn kids(heap: &mut Heap, src: &str, lang: &str, offset: i64) -> LispResult {
     Ok(heap.alloc_vector(vals))
 }
 
+/// The most error nodes one call reports. A buffer someone is halfway through
+/// rewriting can hold hundreds; a caller only ever reads the first few, and the
+/// point of this query is to be cheap enough to run on a keystroke.
+#[cfg(feature = "treesit")]
+const ERROR_CAP: usize = 32;
+
+/// The most source characters an error node carries back as `:text` — enough to name
+/// what is unclosed (`do`, `fn`, `"`) without putting a runaway region on the wire.
+#[cfg(feature = "treesit")]
+const ERROR_TEXT_CAP: usize = 40;
+
+/// Collect the ERROR and MISSING nodes under `node`, outermost first.
+#[cfg(feature = "treesit")]
+fn errors_into(
+    heap: &mut Heap,
+    node: tree_sitter::Node,
+    src: &str,
+    b2c: &[u32],
+    out: &mut Vec<Value>,
+) {
+    if out.len() >= ERROR_CAP {
+        return;
+    }
+    if node.is_error() || node.is_missing() {
+        let kw = |k: &str| Value::keyword(value::intern(k));
+        // A MISSING node is zero-width and its kind IS the token the grammar wanted,
+        // so its text is empty and the kind carries the meaning. An ERROR node spans
+        // the text the parser could not place, and there the text is the meaning.
+        let text: String = src[node.start_byte()..node.end_byte()]
+            .chars()
+            .take(ERROR_TEXT_CAP)
+            .collect();
+        let s = heap.alloc_string(&text);
+        let v = heap.map_from_pairs(vec![
+            (kw("kind"), kw(node.kind())),
+            (kw("start"), Value::int(b2c[node.start_byte()] as i64)),
+            (kw("end"), Value::int(b2c[node.end_byte()] as i64)),
+            (kw("missing?"), Value::boolean(node.is_missing())),
+            (kw("text"), s),
+        ]);
+        out.push(v);
+        // Do not descend into an ERROR: its children are the tokens the parser
+        // salvaged out of the unparsable region, and reporting them would bury the
+        // one fact the caller wants — where the parse came apart — under its debris.
+        return;
+    }
+    // Only subtrees that contain an error can contain an error node, and `has_error`
+    // is O(1) from the tree. That is what keeps this a walk of the broken part rather
+    // than of the buffer.
+    let mut cursor = node.walk();
+    let children: Vec<tree_sitter::Node> = node.children(&mut cursor).collect();
+    for c in children {
+        if c.has_error() || c.is_missing() {
+            errors_into(heap, c, src, b2c, out);
+        }
+    }
+}
+
+/// `(tree-sitter-errors source lang)` — where the parse came apart: the ERROR and
+/// MISSING nodes as `{:kind :start :end :missing? :text}`, outermost first.
+///
+/// **Why the kernel has to answer this.** `chain` already reports `:broken` on the root,
+/// which says only *that* the tree has an error somewhere. That is not enough to tell a
+/// person typing from a person who is wrong, and the difference is the whole contract of
+/// a live evaluator: a form you are still writing must not be shown as a mistake. The
+/// tree knows — a MISSING node is a token the grammar expected and inserted for you, an
+/// ERROR node is text it could not place, and where each one SITS says the rest (an
+/// error running to the end of the buffer is an unclosed construct; one with good code
+/// after it is a real mistake). None of that is reachable from Brood today, and building
+/// it out of `%tree-sitter-parse` means projecting every node in the file to find the
+/// handful that are broken.
+///
+/// An empty vector means the parse is clean, which is the common answer and costs one
+/// `has_error` on the root.
+#[cfg(feature = "treesit")]
+pub fn errors(heap: &mut Heap, src: &str, lang: &str) -> LispResult {
+    let tree = parse_cached(src, lang)?;
+    let root = tree.root_node();
+    if !root.has_error() && !root.is_missing() {
+        return Ok(heap.alloc_vector(Vec::new()));
+    }
+    let b2c = byte_to_char_offsets(src);
+    let mut out: Vec<Value> = Vec::new();
+    errors_into(heap, root, src, &b2c, &mut out);
+    Ok(heap.alloc_vector(out))
+}
+
 /// Collect `[start end kind]` for the OUTERMOST nodes whose kind is wanted.
 #[cfg(feature = "treesit")]
 fn spans_into(
@@ -641,5 +728,10 @@ pub fn chain(heap: &mut crate::core::heap::Heap, src: &str, lang: &str, _o: i64)
 
 #[cfg(not(feature = "treesit"))]
 pub fn kids(heap: &mut crate::core::heap::Heap, src: &str, lang: &str, _o: i64) -> LispResult {
+    parse(heap, src, lang)
+}
+
+#[cfg(not(feature = "treesit"))]
+pub fn errors(heap: &mut crate::core::heap::Heap, src: &str, lang: &str) -> LispResult {
     parse(heap, src, lang)
 }

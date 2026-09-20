@@ -42,6 +42,13 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "The named children of the deepest node STRICTLY containing char `offset`, each as {:kind :start :end :named :container} without its own children — the sibling list every structural motion needs (forward-sexp is the next one starting at or after point). Strict containment is what makes a point at a node's start belong to its parent, so forward-sexp steps over the form at point rather than into it. Same grammar rules and errors as %tree-sitter-parse.",
         tree_sitter_kids);
     primitives.def(
+        "%tree-sitter-errors",
+        Arity::exact(2),
+        Sig::new(vec![string, kw], vec_ty),
+        &["source", "lang"],
+        "Where the parse came apart: the ERROR and MISSING nodes as {:kind :start :end :missing? :text}, outermost first, [] for a clean parse. A MISSING node is a token the grammar expected and inserted (its :kind IS that token, and it is zero-width); an ERROR node spans text the parser could not place. The distinction a live evaluator needs — text someone is still typing must not be reported as a mistake — which %tree-sitter-chain's :broken flag cannot make, since it says only that the tree has an error somewhere. Capped at 32 nodes, each :text at 40 chars. Same grammar rules and errors as %tree-sitter-parse.",
+        tree_sitter_errors);
+    primitives.def(
         "%tree-sitter-spans",
         Arity::exact(4),
         Sig::new(vec![string, kw, list_ty.union(vec_ty), any], vec_ty),
@@ -97,6 +104,12 @@ pub(super) fn tree_sitter_kids(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
     let lang = ts_lang(heap, "tree-sitter-kids", arg(args, 1))?;
     let offset = expect_int(heap, "tree-sitter-kids", arg(args, 2))?;
     crate::host::treesit::kids(heap, &src, &lang, offset)
+}
+
+pub(super) fn tree_sitter_errors(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let src = expect_string(heap, "tree-sitter-errors", arg(args, 0))?;
+    let lang = ts_lang(heap, "tree-sitter-errors", arg(args, 1))?;
+    crate::host::treesit::errors(heap, &src, &lang)
 }
 
 pub(super) fn tree_sitter_spans(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {

@@ -249,4 +249,52 @@
 
     (test "motions are no-ops with nothing to move to"
       ;; past the end, forward stays put
-      (assert= (editor/treesit/point-forward rb :ruby (string/length rb)) (string/length rb)))))
+      (assert= (editor/treesit/point-forward rb :ruby (string/length rb)) (string/length rb))))
+
+  ;; ---- parse-state: unfinished is not wrong -----------------------------------
+  ;; The whole contract of a live evaluator sits on this distinction, so each case
+  ;; below is one shape a reader passes through while typing — or one they do not.
+  (describe "treesit parse-state"
+    (test "blank text is :blank, and complete text is :ok"
+      (assert= (editor/treesit/parse-state "   \n  " :elixir) :blank)
+      (assert= (editor/treesit/parse-state "1 + 2" :elixir) :ok)
+      (assert= (editor/treesit/parse-state "defmodule A do\n  def f, do: 1\nend" :elixir) :ok))
+
+    (test "an unclosed construct is :incomplete, naming what opened"
+      ;; tree-sitter-elixir repairs an unclosed `do` with an ERROR node, not a MISSING
+      ;; `end` — which is exactly why the rule reads the error's POSITION and not its
+      ;; kind alone. Called an error, this would put a red verdict on every `defmodule`
+      ;; the moment its first line was typed.
+      (assert= (editor/treesit/parse-state "defmodule Foo do" :elixir)
+        [:incomplete "unclosed `do`"])
+      (assert= (editor/treesit/parse-state "IO.puts(" :elixir) [:incomplete "unclosed `(`"])
+      (assert= (editor/treesit/parse-state "Enum.map([1, 2], fn x ->" :elixir)
+        [:incomplete "unclosed `(`"]))
+
+    (test "a MISSING node is :incomplete, naming the token the grammar wanted"
+      ;; the grammar inserts the closer itself here, so the reason is what is missing
+      ;; rather than what opened
+      (assert= (editor/treesit/parse-state "x = \"hello" :elixir) [:incomplete "missing `\"`"])
+      (assert= (editor/treesit/parse-state "defmodule Foo do\n" :elixir)
+        [:incomplete "missing `end`"]))
+
+    (test "an error with good code after it is :err"
+      ;; no further typing at the cursor explains the text that already follows, so this
+      ;; is a mistake rather than an unfinished thought
+      (assert= (editor/treesit/parse-state "1 +* 2" :elixir) [:err "unexpected `*`"])
+      (assert= (editor/treesit/parse-state "defmodule A do\nend\n1 +* 2\nIO.puts(\"ok\")" :elixir)
+        [:err "unexpected `*`"]))
+
+    (test "trailing whitespace does not make an unclosed construct look broken"
+      ;; the tail test measures against the TRIMMED end; without that, pressing space
+      ;; after `fn ->` flipped a pending note into a verdict
+      (assert= (editor/treesit/parse-state "Enum.map([1, 2], fn x ->   \n\n" :elixir)
+        [:incomplete "unclosed `(`"]))
+
+    (test "the rule is language-agnostic: Ruby classifies the same way"
+      (assert= (editor/treesit/parse-state "def foo\n  1\nend" :ruby) :ok)
+      (assert= (editor/treesit/parse-tag (editor/treesit/parse-state "def foo" :ruby)) :incomplete))
+
+    (test "parse-tag drops the reason"
+      (assert= (editor/treesit/parse-tag :ok) :ok)
+      (assert= (editor/treesit/parse-tag [:err "boom"]) :err))))
