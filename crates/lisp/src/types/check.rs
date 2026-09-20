@@ -132,6 +132,13 @@ mod recursion;
 mod sigs;
 pub(crate) use properties::effect_of;
 pub(crate) use sigs::cover_name_of;
+
+/// Whether `name` has a curated signature (`sigs::curated_sig`) — read ahead of the stdlib
+/// image's footer and of inference, so its module is never loaded on its account. For
+/// `tests/curated_names_load_nothing.rs`.
+pub fn is_curated(name: &str) -> bool {
+    sigs::curated_sig(value::intern(name)).is_some()
+}
 mod std_index;
 pub(crate) use std_index::{module_signature_index, std_signature_index};
 mod walk;
@@ -256,7 +263,11 @@ fn ensure_loaded(heap: &mut Heap, mod_sym: Symbol) {
 /// the ones not yet loaded, and go again while something new loaded. A prefix is tried once
 /// per thread; a name that is not a module (a load error) is swallowed like every other
 /// advisory load. Runs under the check's `EagerLoadScope`, and before the passes that infer.
-pub(crate) fn materialise_referenced_modules(heap: &mut Heap) {
+///
+/// `pub` for `tests/curated_names_load_nothing.rs`, which observes this scan's decision in
+/// a process of its own (whether a std module is loaded is process-wide state once an image
+/// is installed, so the in-crate suite cannot hold the precondition).
+pub fn materialise_referenced_modules(heap: &mut Heap) {
     thread_local! {
         static SCANNED: RefCell<HashSet<Symbol>> = RefCell::new(HashSet::new());
         static TRIED: RefCell<HashSet<Symbol>> = RefCell::new(HashSet::new());

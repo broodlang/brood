@@ -466,21 +466,14 @@ fn expr_ty_inner(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                                 items[1..].iter().map(|&a| expr_ty(heap, a, ctx)).collect();
                             return Some(sv.resolve_ret(&arg_tys));
                         }
-                        // …and the same for a sig a LOADED module declared (the live image:
-                        // hover, `reflect/expr-type`, a cross-module call). Skipped for a
-                        // name this file redefines — the heap describes the old binding
-                        // (ADR-123: a def always wins).
-                        // …or that the stdlib image carries for a module this check never
-                        // loaded (ADR-370): the same declaration, resolved the same way.
-                        if !ctx.is_file_global(s) {
-                            if let Some(sv) = super::sigs::declared_heap_sig_with_vars(heap, s)
-                                .or_else(|| super::sigs::image_heap_sig_with_vars(heap, s))
-                            {
-                                let arg_tys: Vec<Option<Ty>> =
-                                    items[1..].iter().map(|&a| expr_ty(heap, a, ctx)).collect();
-                                return Some(sv.resolve_ret(&arg_tys));
-                            }
-                        }
+                        // A sig a LOADED module (or the stdlib image) declared with type
+                        // variables is read further down, beside the other heap readers —
+                        // AFTER the by-name rules, as a plain heap declaration always was.
+                        // It used to be read here, ahead of them, so a declaration with a
+                        // variable outranked a rule while one without did not: declaring
+                        // `seq/find` `((seqable ?A) (?A -> any) -> (or ?A nil))` would have
+                        // replaced the rule's `elem ∩ what the predicate tests | nil` with
+                        // the wider `elem | nil` (2026-09-20).
                         // An overloaded sig (ADR-116) — `(and (int -> int)
                         // (bool -> bool))` — resolves per matching arm instead
                         // of a single flat `ret`.
@@ -587,6 +580,20 @@ fn expr_ty_inner(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                     // own `defn check` typed as the `check` builtin's list return).
                     if ctx.is_file_global(s) {
                         return None;
+                    }
+                    // A sig a LOADED module declared with type variables (the live image:
+                    // hover, `reflect/expr-type`, a cross-module call), or one the stdlib
+                    // image carries for a module this check never loaded (ADR-370) — the
+                    // same declaration, resolved the same way from the arguments. After
+                    // the by-name rules above, like every other heap reader: a rule is the
+                    // checker's sharper knowledge of the same function. Skipped for a name
+                    // this file redefines — the heap describes the old binding (ADR-123).
+                    if let Some(sv) = super::sigs::declared_heap_sig_with_vars(heap, s)
+                        .or_else(|| super::sigs::image_heap_sig_with_vars(heap, s))
+                    {
+                        let arg_tys: Vec<Option<Ty>> =
+                            items[1..].iter().map(|&a| expr_ty(heap, a, ctx)).collect();
+                        return Some(sv.resolve_ret(&arg_tys));
                     }
                     if let Some(sigs) = declared_heap_overload(heap, s) {
                         let arg_tys: Vec<Option<Ty>> =

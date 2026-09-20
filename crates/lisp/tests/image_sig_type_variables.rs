@@ -38,3 +38,42 @@ fn a_planted_type_variable_declaration_resolves_from_the_arguments() {
         "(image-sig-probe/pick 1 2) reads `{ty}` — the footer's declaration was not resolved"
     );
 }
+
+#[test]
+fn a_std_type_variable_declaration_types_the_element_with_its_module_unloaded() {
+    // `seq/vector-ref` declares `((vector ?A) int -> ?A)` (2026-09-20): the element type
+    // comes from the argument, through the footer, with `seq` never loaded. Its own process
+    // for the same reason as the planted case — whether `seq` is loaded is process-wide
+    // state once an image is installed.
+    if std::env::var_os("BROOD_NO_IMAGE_SIGS").is_some() {
+        eprintln!("BROOD_NO_IMAGE_SIGS set — the footer is off by request, nothing to gate");
+        return;
+    }
+    let mut interp = Interp::new();
+    let installed = interp
+        .eval_str("(or (%std-image-installed) (%std-image-install) (do (stdimage/build) (%std-image-install)))")
+        .map(|v| interp.print(v))
+        .expect("install the stdlib image");
+    assert_ne!(
+        installed, "nil",
+        "no stdlib image could be installed even after building one"
+    );
+    let loaded = |interp: &mut Interp| -> bool {
+        let v = interp
+            .eval_str("(contains? *features* \"seq\")")
+            .expect("read *features*");
+        interp.print(v) == "true"
+    };
+    assert!(
+        !loaded(&mut interp),
+        "seq is loaded in a fresh process — the footer is not what answers"
+    );
+    let form = brood::syntax::reader::read_one(&mut interp.heap, "(seq/vector-ref [1 2] 0)")
+        .expect("parse");
+    let ty = expr_ty_of(&interp.heap, form).expect("the call has a type");
+    assert!(
+        ty.is_subtype(&Ty::of(Tag::Int)),
+        "(seq/vector-ref [1 2] 0) reads `{ty}` with seq unloaded — the declaration's `?A` was not bound"
+    );
+    assert!(!loaded(&mut interp), "typing the call loaded seq");
+}

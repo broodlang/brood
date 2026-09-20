@@ -247,6 +247,7 @@ vector comes FIRST here, unlike the rest of this module — see the note above.
 (defn vector-ref (v i)
   "The element at index i of vector v."
   (%vector-ref v i))
+(sig vector-ref ((vector ?A) int -> ?A))
 
 (defn vector-length (v)
   "The number of elements in vector v."
@@ -296,6 +297,7 @@ when the caller needs indexed access. The complement of [[filterv]].
 
     (seq/find [1 3 4] math/even?)   → 4"
   (cond (empty? coll) nil (pred (first coll)) (first coll) else (seq/find (rest coll) pred)))
+(sig find ((seqable ?A) (?A -> any) -> (or ?A nil)))
 
 ;; distinct: keep the first occurrence of each item. A map carried alongside the result
 ;; acts as the "seen" set, so membership is O(1)-ish rather than the O(n²) a
@@ -318,7 +320,7 @@ when the caller needs indexed access. The complement of [[filterv]].
 
     (seq/distinct [1 1 2])     → (1 2)"
   (reverse (nth (fold coll [{} nil] distinct-step) 1)))
-(sig distinct (seqable -> (list any)))
+(sig distinct ((seqable ?A) -> (list ?A)))
 
 ;; flatten: splice nested lists into one flat list. Descends through `pair?`/`nil` (so
 ;; empty sub-lists and nils vanish); vectors and maps are leaf items. The outer walk is
