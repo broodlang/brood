@@ -7,9 +7,73 @@ option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 
 **Perf work needing a quiet, pinned box is queued in [`perf-handoff.md`](perf-handoff.md)**
 — but a *within-session* `make ab --floor` on this laptop is trustworthy (that file says
-how), and `perf stat` instruction counts are load-immune, so most perf questions are
-answerable here; check that file's "what this box CAN answer" before deferring anything.
+how), and `callgrind` instruction counts are deterministic and load-immune (`perf` is
+locked down here — that file's last section carries the measured state and the one-line
+check), so most perf questions are answerable here; check that file's "what this box CAN
+answer" before deferring anything.
 
+## 2026-09-20 later still — `main`'s red fixed, and `tier-audit` has a local verdict after all
+
+**`main` was red at `d35cbdde`** — but the defect entered two commits earlier, at `1b9befd0`,
+which is where the test was written. `1b9befd0` and `8710f4a0` were both **cancelled by the
+next push**, so `d35cbdde` (ADR-373, whose nine other jobs are green and whose rule is fine) is
+merely where it first got a completed verdict. *This is `make green`'s reason for existing,
+live: a cancelled run is not evidence, and the red sat in the tree for an hour wearing a later
+commit's name.* CI's `differential (tree-walker)` job, one test: `cli::run_check_cache
+a_hit_replays_the_loads_the_walk_made`, ADR-371's own guard, failing on its **control**
+assertion rather than on its claim. What that control waits for is a COMPILE — a form compiled
+before `io` loaded is marked stale and recompiles (ADR-366), which `BROOD_TRACE_COMPILE`
+prints — and the tree-walker compiles no chunk, so at `BROOD_VM=0` the line cannot appear for
+any of the three runs. The control asserts its own absence and the test panics before testing
+anything. Pinned to `BROOD_TIER=2` with the reason in the comment; the sandbox's stdlib image
+is built on the same engine now.
+
+**Fourth sighting of the week's shape, and the variant worth naming on its own: a gate must not
+assert an artifact of an ENGINE it is not about.** KI-166 was a rendering, the stranded-work
+watchdog was the clock, `stale_loop_handoff` was this exact one — same CI job, same week. When
+a test's setup step is what fails, read which engine printed the thing it is waiting for.
+
+Sabotage-verified in the configuration that matters, not just the convenient one: with
+`run_check_cache_replay_loads` returning early, the test fails **under `BROOD_VM=0` as well as
+at the default ceiling** — so the pin removed the vacuity without making the gate vacuous in
+the job that runs it.
+
+### The section below's three "cannot be done here" items: two were wrong, one was already done
+
+- **`tier-audit` runs on this box, and it is GREEN** — 29 rows, every hot arm stayed native, no
+  latch, no lowering bug. Benchmark-row work was never what blocked it: the corpus **is**
+  checked out here, as `../brood-benchmark` (**singular**), while every tool hard-coded
+  `../brood-benchmarks`, the upstream *repository's* name. `scripts/bench-dir.sh` resolves
+  either spelling now and `ab-bench.sh`, `tier-audit.sh`, `jit-lower-witness.sh` and the
+  Makefile all default through it.
+  **The failure mode is the part to remember:** all three tools treat a missing checkout as a
+  *skip, not a failure* — deliberately, so a machine without the corpus still runs
+  `make green-all`. That is right, and it means a **directory name silently deleted a whole
+  gate**, with the skip line read as a fact about the machine for as long as nobody checked.
+  A tool allowed to skip has to be sure about what it is skipping.
+  Guard: `crates/cli/tests/bench_dir_resolves.rs`, both halves sabotage-verified — the
+  resolver (drop the singular candidate → red) and the *structural* half, that no tool
+  re-introduces a hard-coded default (restore `tier-audit.sh`'s old line → red), which is how
+  the class would re-open: the next tool copies the line it sees in the tool beside it. It
+  deliberately does NOT assert that the corpus exists — that would fail on a machine which has
+  legitimately not cloned it, the case the skip is for.
+- **`perf-handoff.md` Task 2 is ANSWERED** by the same unblocking, and needed no wall-clock —
+  the task only ever wanted the bail trace. Zero `deopt-thrash-latched` arms on the published
+  float rows (`nbody`, `mandelbrot`, `matmul`, `sort`, `primes`); the bails that do occur are
+  the by-design ones (`call-mediated-boxed`, `call-spill-exhausted`,
+  `chunk-outside-jit-subset`). With zero latched arms on the current binary there can be no
+  NEW one against any older binary, so the comparison closes by construction.
+- **Task 6 and KI-150** were answered and closed at `8710f4a0`, *before* the section below was
+  written; and the **surface-audit ratchet** it calls "the one thing left, and it is the machine
+  owner's call" was resolved at `4d962e75` (the internal helpers went private, the API got its
+  examples, ceiling green at 1138). Three of that section's four claims had gone stale within
+  the day — which is the cost of a handoff section written about work in flight.
+
+### Still not run here
+
+`make ab` wall-clock rows (the machine owner's standing instruction), and `make green-all`'s
+`smoke-bedit` (out of scope this session). `make test` and `make prepush` are green at the
+commit below.
 ## 2026-09-20 later — a full green sweep: three gates fixed, no runtime defect
 
 **Green and confirmed**: `make green` exits 0 at `4fb3e1cd` (CI all ten jobs), and locally ten
@@ -88,8 +152,16 @@ What landed, each with a sabotage-verified guard:
 
 ### Rig notes that would have cost the next session an hour
 
-- **`perf stat` works here now; `valgrind` does not exist** — `perf-handoff.md` said the
-  reverse and carries a correction.
+- **`perf stat` does NOT work here and `valgrind` DOES — re-measured 2026-09-20, and this
+  bullet said the opposite.** `/proc/sys/kernel/perf_event_paranoid` is **4** (so `perf stat -e
+  instructions true` prints the "Disallow CPU event access" refusal), while `/usr/bin/valgrind`
+  and `/usr/bin/callgrind_annotate` are both installed. The box has not rebooted since
+  2026-08-29, so nothing reset a sysctl underneath the note — it was simply taken in a window
+  that did not survive, or not taken at all. `perf-handoff.md` §"Instruction counts CAN be
+  taken on this box — callgrind, not perf" is the one that is right; the correction it carries
+  is now correcting nothing, since the claim it corrects is this one. **Check the two commands
+  before believing either document** — they cost one line:
+  `cat /proc/sys/kernel/perf_event_paranoid; perf stat -e instructions true`.
 - **`make release` overwrites `release-fast/brood` with the dev-tools build** (it embeds
   brood into nest). Run `make release-brood` after it, before any timing — and `make
   release` again before `make prepush`: the gate's `nest` spawns the `brood` beside it,

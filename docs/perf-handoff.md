@@ -227,7 +227,7 @@ and check whether the *gap between the arms* moves, not just whether each arm go
 
 ---
 
-## Task 2 — two lowerings the KI-114 fix changed with no test reaching them
+## Task 2 — two lowerings the KI-114 fix changed with no test reaching them ✅ ANSWERED 2026-09-20 — zero latched arms, in-tree and on the published rows
 
 **Priority: low. Correctness is argued, not tested; perf is unmeasured.**
 
@@ -259,10 +259,28 @@ profitability and subset ones — `call-mediated-boxed` ×7, `chunk-outside-jit-
 
 That closes the comparison for this corpus by construction: with zero latched arms on the
 current binary there can be no NEW one, whatever the pre-KI-114 binary had, so no second
-build is needed to rule it out here. What is left is the part this box genuinely cannot do —
-the published float rows (`nbody` and friends live in `brood-benchmarks`, which is not
-checked out here). Run the same grep there; if it is zero too, this task is done and should
-be deleted.
+build is needed to rule it out here.
+
+**✅ ANSWERED 2026-09-20 — on this box, on the published rows.** The remaining half was
+recorded as "the part this box genuinely cannot do: `nbody` and friends live in
+`brood-benchmarks`, which is not checked out here". It is checked out — as
+`../brood-benchmark` (singular), which is why every tool defaulting to the plural reported it
+missing (`scripts/bench-dir.sh` resolves either now). Same grep, release-fast binary,
+`BROOD_JIT_BAIL_TRACE=1`:
+
+| row | `deopt-thrash-latched` | the bails that do occur |
+|---|---|---|
+| `nbody` | **0** | `call-mediated-boxed` ×8, `call-spill-exhausted` ×1, `chunk-outside-jit-subset` ×1 |
+| `mandelbrot` | **0** | ×7, ×1, ×1 |
+| `matmul` | **0** | ×10, ×2, ×3 |
+| `sort` | **0** | ×7, ×1, ×1 |
+| `primes` | **0** | ×7, ×1, ×1 |
+
+Every one is the profitability gate or the subset rule doing its job; none is the pair gate's
+signature. `make tier-audit` says the same thing over all 29 rows in one command, and is green.
+**Kept rather than deleted** (the task said to delete it on a zero) because the method is the
+reusable part: the question "did this change refuse an operation somewhere no test reaches?"
+is answered by the bail trace and not by a clock, which is why it was answerable here all along.
 
 ---
 
@@ -585,10 +603,16 @@ entry, and delete the task rather than leaving it to be re-derived.
 
 ## Instruction counts CAN be taken on this box — `callgrind`, not `perf` (2026-09-18)
 
-> **Reversed on 2026-09-20: `perf stat -e instructions:u` WORKS here now**
-> (`/proc/sys/kernel/perf_event_paranoid` reads **1**), and `valgrind` is **not installed**
-> (`valgrind: command not found`). Use `perf stat -e instructions:u -x, -r 3 <cmd>`; it is
-> what measured ADR-371/372 and KI-167. The traps below still apply to either tool.
+> **That reversal was itself reversed, re-measured 2026-09-20 later — the section title is
+> right and the blockquote that contradicted it was wrong.** Taken directly:
+> `/proc/sys/kernel/perf_event_paranoid` reads **4**, `perf stat -e instructions true` prints
+> the "Disallow CPU event access" refusal, and `/usr/bin/valgrind` + `/usr/bin/callgrind_annotate`
+> are both present. The box has not rebooted since 2026-08-29, so no reboot reset a sysctl
+> between the two readings. Whichever way it drifts next, **the check is one line and settles
+> it — run it instead of trusting either paragraph**:
+> `cat /proc/sys/kernel/perf_event_paranoid; perf stat -e instructions true; command -v valgrind`.
+> (The measurements the reversal attributes to `perf stat` — ADR-371/372, KI-167 — are not in
+> doubt; only the instrument named for them is.)
 
 `perf` is unusable here: `/proc/sys/kernel/perf_event_paranoid` is **4**, so
 `perf stat -e instructions:u` refuses without root. That is why this file says the box
