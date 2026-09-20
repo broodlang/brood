@@ -157,6 +157,13 @@ fn a_hit_replays_the_loads_the_walk_made() {
             .env("XDG_CACHE_HOME", sb.cache_home())
             .env("BROOD_NO_CRASH_REPORT", "1")
             .env("BROOD_TRACE_COMPILE", "1")
+            // Pin the engine to the shipped ceiling: the observable is the VM COMPILER's
+            // stale mark, and under `BROOD_VM=0` nothing is compiled, so CI's
+            // `differential (tree-walker)` job read the control's silence as a failure
+            // (2026-09-20, red on `d35cbdde`). Same fix as `stale_loop_handoff.rs`.
+            .env("BROOD_TIER", "2")
+            .env_remove("BROOD_VM")
+            .env_remove("BROOD_NO_JIT")
             .env_remove("BROOD_NO_CHECK")
             .env_remove("BROOD_NO_CHECK_CACHE")
             .env_remove("BROOD_NO_STDIMAGE")
