@@ -1319,6 +1319,19 @@ that parks for 4.5 s under the fault, and does NOT appear in the same program wi
 Sabotage-verified: commenting out the `stranded_probe()` call fails the fault run and passes
 the control. One defect found while building it: the reporting worker holds its own queue
 lock, so `try_lock` on its own row printed a phantom `<locked>` — the reporter's row now
+
+**The watchdog's own test was fixed 2026-09-20 — it asserted the machine's speed.** It
+required the report to appear exactly once, which is really the assumption "the 4.5 s program
+took about 4.5 s". The latch re-arms in `run_one` the moment anything is pulled to run, so the
+contract is *one report per starvation EPISODE*, not one per run: a process starved of CPU
+long enough to cross several 3 s windows reports several times, correctly. Under a loaded box
+one full-suite run in three took **19.6 s** and reported twice, and the gate read that as a
+latch failure.
+
+It is bounded by what the mechanism allows now — a run of T seconds cannot contain more than
+`T/3 + 1` episodes — which is a weaker claim than `== 1` and still a decisive one:
+sabotage-verified, with the latch removed the same run reports **4146 times against a ceiling
+of 2**. The watchdog itself was right on both occasions; only the test was wrong.
 reads its (known-empty) queue directly.
 
 **What this does and does not buy.** It does not reproduce KI-88 or explain it. It turns the
@@ -7213,7 +7226,7 @@ are required, and nothing enforces index completeness. Row added with this close
 **Next step if it recurs:** get the case name, then decide. Until then this entry exists so a
 second sighting is recognised as a second sighting rather than a first.
 
-## KI-83 — the mono differential failed over a slow-test timing line ✅ FIXED 2026-08-29
+## KI-83 — the mono differential failed over load-dependent progress chatter ✅ FIXED 2026-08-29, RECURRED and fixed again 2026-09-20 (a blank line, where the first was a duration)
 
 **Symptom.** One `make test` run: `cli::mono_differential monomorphization_computes_what_the_
 dynamic_path_computes` failed with `the two arms disagree — monomorphization changed an ANSWER`.
@@ -7247,6 +7260,31 @@ equal; and mutating one arm's summary `92 passed` → `91 passed` still diverges
 filter — so it cannot mask a real answer change in the summary. `cargo test -p cli --release
 --test mono_differential` green after the fix.
 
+
+**RECURRED 2026-09-20 — same species, a different survivor. ✅ FIXED again.** One full-suite
+run in three failed with the same `monomorphization changed an ANSWER`, both arms again
+reporting `94 tests, 94 passed, 0 failed`, and the entire diff one **blank line**:
+
+```text
+left:  …dots…\n\n94 tests, 94 passed…
+right: …dots…\n94 tests, 94 passed…
+```
+
+The 2026-08-29 fix dropped the "Slow tests" header and any line ending in a duration — and
+left the **empty line that precedes the block**. So whichever arm crossed a second grew a
+blank line the filter could not see, which is the original defect exactly: a filter written
+against the outputs its author had in front of them.
+
+`without_timings` now also drops blank lines, which is the general form rather than another
+instance-by-instance patch: this differential compares answers, and whitespace is not one.
+Sabotage-verified — mutating one arm's `94 tests` → `93 tests` still diverges.
+
+**The lesson this entry keeps re-teaching, now stated as a rule:** a differential must compare
+the ANSWER, not a rendering of it. A rendering carries incidental state — a duration, a blank
+line, a map's iteration order (KI-166, the same week), a pid, a path — and when the incidental
+thing moves, the gate accuses the feature under test by name. Two sightings of this one entry
+have both been progress-chatter; the third will be something else, and the filter is the wrong
+place to keep fighting it.
 **Numbering note:** filed as KI-82 in the fixing commit's message (`4d6c8ceb`); renumbered here the same day — a parallel session's KI-82 (the wasm playground recursion) was already cited upstream, and the process renumbers the newer entry. **Same species as [KI-80](#ki-80)** (a nested suite emitting load-dependent output that an
 outer gate reads as signal), one gate over — and the general rule both point at: **a
 differential must compare answers, not transcripts.** Anything a harness prints conditionally

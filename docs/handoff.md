@@ -10,6 +10,43 @@ option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 how), and `perf stat` instruction counts are load-immune, so most perf questions are
 answerable here; check that file's "what this box CAN answer" before deferring anything.
 
+## 2026-09-20 later — a full green sweep: three gates fixed, no runtime defect
+
+**Green and confirmed**: `make green` exits 0 at `4fb3e1cd` (CI all ten jobs), and locally ten
+full-suite runs (1657/1657), `gcstress`, the tree-walker path, wasm 10/10, the bedit smoke and
+every static gate are clean with zero warnings.
+
+Three reds, none in the runtime — all three were gates asserting something incidental:
+
+1. **`stale_loop_handoff` reddened `main`** under CI's tree-walker job. Two independent causes
+   for one symptom, found in parallel: the engine (its property is the VM's `SelfCall` →
+   `ChunkExit::Tail`, which does not exist at `BROOD_VM=0` — now pinned to `BROOD_TIER=2`),
+   and the shape (a std module's call head loads at EXPANSION under a source boot, so
+   `math/max` never lazily loaded — now a load-path module). Both fixes are in the file.
+2. **KI-83 recurred** — the mono differential over a *blank line* this time, where 2026-08-29
+   was a duration line. `without_timings` drops blank lines now, the general form.
+3. **The stranded-watchdog test asserted the machine's speed** (`== 1` report). The latch
+   re-arms whenever anything runs, so the contract is one report per starvation EPISODE;
+   bounded by `T/3 + 1` now. Sabotage: latch removed → 4146 reports against a ceiling of 2.
+
+**The rule all three point at, and the third sighting this week after KI-166: a gate must
+compare the ANSWER, not a rendering of it or the clock.** A rendering carries incidental state
+— a duration, a blank line, a map's iteration order, a pid — and when that moves, the failure
+arrives wearing the name of the feature under test.
+
+### What is NOT done, and cannot be done here
+
+- **`tier-audit`** has never run in this sweep: it needs `../brood-benchmarks`, which is not
+  checked out, and it is benchmark-row work. It is the one `make green-all` component with no
+  local verdict.
+- **`perf-handoff.md` Task 6** — the wall-clock verification of the symbol-hash change
+  (KI-166). Only instruction counts were taken, and the machine owner has asked that no
+  performance work happen on this box; note that the top of this file now argues a
+  within-session `make ab --floor` IS trustworthy here, so the two should be reconciled before
+  anyone defers on that basis again.
+- **KI-150** stays open on its own terms: what remains is the pre-flight's per-file walk, and
+  the entry cannot close until a column refresh reads `base64`.
+
 ## 2026-09-20 — three perf leads taken; KI-150's per-file walk is a cache now, and two JIT deopt classes and a scheduler-fairness hole went with it
 
 **Green at the commit below** — the full suite on the combined tree (after the fast-forward
