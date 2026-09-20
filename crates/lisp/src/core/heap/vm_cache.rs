@@ -849,6 +849,8 @@ impl Heap {
         }
         let (code, active_ns, env, callee_bases) =
             self.fast_link_from_entry(abs, sym, argc, epoch)?;
+        #[cfg(debug_assertions)]
+        record_published_fast_link(code as usize, active_ns);
         // Fully validated + installed at this epoch — publish into the one flat table that
         // both this probe's hot path (above) and JIT'd code (an epoch-guarded raw load)
         // read. One representation, one write.
@@ -955,6 +957,21 @@ impl Heap {
         let abs = (self.cur_ic_base.get() + site) as usize;
         let t = self.vm_call_ics.borrow();
         t.get(abs)?.as_ref().map(|e| e.epoch)
+    }
+
+    /// Whether a `(code, nslots)` pair was ever PUBLISHED into a fast-link mirror — by this
+    /// process or any peer — i.e. was once the authoritative answer for some arm. The debug
+    /// cross-check's tolerance for a mirror that is an EARLIER self-consistent snapshot of a
+    /// shared arm: the two-stage swap (small → inlined, `nslots` → `inline_nslots`) and the
+    /// §7.5 xcall re-lowering re-point only the swapping process's links, so a peer sharing
+    /// the arm (ADR-175) keeps `(old code, old frame)` — valid by construction (the old native
+    /// is correct, just thinner, and its frame is the one it wants), and exactly what
+    /// `d7600bea`'s entry-side comparison read as a desync (`mirror=(…, nslots=1)` against
+    /// `auth=Some((…, 3, …))`, twice in one suite run). A pair NO publish ever produced —
+    /// `mirror_check_still_fires_on_a_real_desync`'s `nslots + 1` — is still refused.
+    #[cfg(all(feature = "jit", debug_assertions))]
+    pub fn fast_link_snapshot_was_published(code: usize, nslots: usize) -> bool {
+        crate::core::sync::lock(&PUBLISHED_FAST_LINKS).get(&code) == Some(&nslots)
     }
 
     /// Whether call-site `site`'s entry names an arm whose native code is INSTALLED right
@@ -1271,4 +1288,17 @@ mod fast_link_tests {
         assert_eq!(fl.nslots, u32::MAX);
         assert_eq!(fl.code, 0xdead_beef);
     }
+}
+
+/// Every `(code, nslots)` pair a fast-link mirror was ever published with, runtime-wide —
+/// see [`Heap::fast_link_snapshot_was_published`]. Debug builds only; bounded by the number
+/// of natives ever installed.
+#[cfg(all(feature = "jit", debug_assertions))]
+static PUBLISHED_FAST_LINKS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<usize, usize>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(all(feature = "jit", debug_assertions))]
+fn record_published_fast_link(code: usize, nslots: usize) {
+    crate::core::sync::lock(&PUBLISHED_FAST_LINKS).insert(code, nslots);
 }

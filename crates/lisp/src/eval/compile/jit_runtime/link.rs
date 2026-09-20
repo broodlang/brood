@@ -507,8 +507,17 @@ pub(crate) fn debug_check_fast_link_mirror(
     };
     let auth = heap.vm_fast_link_authoritative(site, head, argc as u32, mirror_epoch);
     match auth {
+        // The env and the callee's IC cursors must agree outright. The `(code, nslots)` pair
+        // may instead be an EARLIER snapshot the arm was published with: a shared arm's
+        // small → inlined swap or xcall re-lowering re-points only the swapping process's
+        // links, and a peer's mirror keeps `(old code, old frame)` — self-consistent, and
+        // what the old code wants (KI-174 addendum; seen as `nslots=1` against the entry's
+        // `3` in two suite runs). A pair no publish ever produced is still a desync.
         Some((c, ns, e, b)) => debug_assert!(
-            c as usize == code && ns == nslots && e == callee_env && b == callee_bases,
+            e == callee_env
+                && b == callee_bases
+                && ((c as usize == code && ns == nslots)
+                    || Heap::fast_link_snapshot_was_published(code, nslots)),
             "fast-link mirror desynced from the call IC (site {site}, head {head}, epoch {mirror_epoch}): \
              mirror=(code={code:#x}, nslots={nslots}, env={:#x}, bases={callee_bases:?}) \
              auth={auth:?} — the IR's epoch+sym+argc guard should make this unreachable \
