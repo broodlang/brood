@@ -638,11 +638,11 @@ only; `tests/` files come from `project-collect-tests`."
 ;; sessions on one project hold different things, and a shared file on disk would have
 ;; them answering for each other.
 
-(defn note-loaded (path)
+(defn- note-loaded (path)
   "Record `path`'s current mtime as what this image holds."
   (def *loaded-mtimes* (assoc *loaded-mtimes* path (or (file/mtime path) 0))))
 
-(defn changed-sources (root)
+(defn- changed-sources (root)
   "The project source files under `root` whose mtime has moved since this image loaded
 them — and every source file it has never loaded at all.
 
@@ -658,7 +658,12 @@ and answer the paths reloaded (empty when the image is already current).
 
 What a long-lived image calls before it acts on the project's behalf. A no-op costs one
 `stat` per source file — about a millisecond for a sixty-file project — and the common
-case IS the no-op, so an image stays current for roughly nothing."
+case IS the no-op, so an image stays current for roughly nothing.
+
+The example is the no-op, because it is the only answer that does not depend on the
+machine: a root holding no project sources has nothing to reload.
+
+    (project/reload-changed \"/nonexistent\")   → []"
   (let (changed (changed-sources root))
     (doseq (f changed)
       ;; the load-time requires belong to the root section, exactly as in `load-sources`

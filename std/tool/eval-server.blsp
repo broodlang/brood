@@ -89,8 +89,36 @@ protocol — so a caller watches a suite go by rather than waiting for it.
 Worth having in a SESSION rather than a fresh process for one measured reason: a one-shot
 `nest test` of a single file in a project of sixty modules spends most of its second
 loading the project, not running tests. Held open, that is paid once — the same trade the
-`:check` request makes for the type checker."
+`:check` request makes for the type checker.
+
+Shown through the decoder rather than as the line itself, deliberately: the line is a
+rendered map, and a map's rendering is not the thing to pin (KI-166). What a caller cares
+about is the request that comes back out.
+
+    (:specs (eval-server/evsrv-decode-request (eval-server/evsrv-encode-test 4 [[\"a_test.blsp\" 12]] 60000)))   → [[\"a_test.blsp\" 12]]"
   (pr-str {:id id :specs (into [] specs) :timeout-ms timeout-ms :test true}))
+
+(defn evsrv-encode-attach (id spec cookie)
+  "One ATTACH request line: `{:id :attach spec :cookie}` — route every later evaluation to
+the node `spec` names rather than running it here.
+
+`spec` is `node/connect`'s: `\"name\"` for a local node over its Unix socket,
+`\"name@host:port\"` over TCP. The target must have called `(node/serve-spawns)`, which is
+the opt-in — an editor cannot reach into a program that has not said it may be reached
+into, and that is the right default for the feature.
+
+Answered `{:id :ok true :node \"…\"}`, or `:ok false` with `:error`. The editor must show
+which: an attach that silently did not happen leaves you evaluating locally while believing
+you are not.
+
+    (:attach (eval-server/evsrv-decode-request (eval-server/evsrv-encode-attach 6 \"worker\" nil)))   → \"worker\""
+  (pr-str {:id id :attach spec :cookie cookie}))
+
+(defn evsrv-encode-detach (id)
+  "One DETACH request line: `{:id :detach true}` — route evaluation back to this runtime.
+
+    (:detach (eval-server/evsrv-decode-request (eval-server/evsrv-encode-detach 7)))   → true"
+  (pr-str {:id id :detach true}))
 
 (defn evsrv-encode-teststop (id)
   "One TESTSTOP request line: `{:id :teststop true}` — abandon the test run in flight.
@@ -98,7 +126,9 @@ loading the project, not running tests. Held open, that is paid once — the sam
 Answered `{:id :ok true :stopped true|false}`, and the ABANDONED run is answered too
 (`:ok false :stopped true`), because a client that has recorded it as in flight is
 otherwise waiting on a reply that is never coming. Two replies for one keystroke, and both
-are owed."
+are owed.
+
+    (:teststop (eval-server/evsrv-decode-request (eval-server/evsrv-encode-teststop 5)))   → true"
   (pr-str {:id id :teststop true}))
 
 (defn evsrv-decode-request (line)
@@ -117,9 +147,12 @@ run the thing you are looking at."
       (let (v (reflect/read-string line))
         (if (and (map? v)
               (int? (get v :id))
-              (if (or (get v :test) (get v :teststop))
-                (or (nil? (get v :specs)) (vector? (get v :specs)))
-                (string? (get v :src)))
+              (cond
+                (or (get v :test) (get v :teststop))
+                  (or (nil? (get v :specs)) (vector? (get v :specs)))
+                (get v :attach) (string? (get v :attach))
+                (get v :detach) true
+                else (string? (get v :src)))
               (let (t (get v :timeout-ms)) (or (nil? t) (int? t)))
               (let (tr (get v :trace)) (or (nil? tr) (vector? tr) (= tr :all)))
               (let (c (get v :check)) (or (nil? c) (bool? c)))
@@ -450,7 +483,7 @@ path — the per-request evaluator process dies — but worth knowing when embed
     ([:down _ _ _] (eval-server-flush-stale))
     (after 0 nil)))
 
-(defn answer (req)
+(defn answer (req &optional (attached nil))
   "The reply map for request map `req` (`:id` `:src`, optional `:timeout-ms` and
 `:trace`), evaluating in a spawned green process: the eval's own result on
 completion, `{:id id :ok false :timeout true}` after the deadline (the evaluator
@@ -478,7 +511,13 @@ process died without answering."
         _ (eval-server-flush-stale)
         ;; a `:check` request asks the checker, not the evaluator: the same child,
         ;; deadline and kill, a structured reply
-        work (if (get req :check) (fn () (check-structured src)) (fn () (eval-capturing src trace)))
+        ;; …and when this session is ATTACHED, the evaluation happens on the peer instead.
+        ;; Still inside the same spawned child with the same deadline and kill, so a node
+        ;; that stops answering costs one request rather than the session.
+        work (cond
+               (get req :check) (fn () (check-structured src))
+               attached (fn () (evsrv-remote-eval attached src trace))
+               else (fn () (eval-capturing src trace)))
         child (spawn (do
                        (%restore-compile-context session-ctx)
                        (send me [:evsrv-result id (work) (%compile-context)])))
@@ -513,6 +552,53 @@ process died without answering."
           (release-holds-of child)
           {:id id :ok false :timeout true :ms timeout})))))
 
+;; ---- attaching to a node that is already running ------------------------------
+;; The session is an ordinary Brood runtime, so the thing that turns an editor from a view
+;; of a PROJECT into a view of a RUNNING SYSTEM is `node/connect`: evaluation routes to the
+;; peer with `node/spawn-sync`, and everything built on evaluation — a playground buffer,
+;; a scratch expression, whatever reads the reply — follows it there.
+;;
+;; The peer must have called `(node/serve-spawns)`. That is the opt-in, and it is the right
+;; default: an editor cannot reach into a program that has not said it may be reached into.
+
+;; How long a peer gets to answer work it has accepted. Generous: an attached node is a
+;; real system doing real work, and the request's own deadline is the outer bound.
+(def *remote-eval-timeout-ms* 60000)
+
+(defn- evsrv-attach (spec cookie)
+  "Connect to the node `spec` names, starting distribution here first if this runtime is
+not yet a node. Answers its authoritative name, or raises with why not."
+  (when (= (node/name) :nonode)
+    ;; A name of our own is needed before anyone can be dialled, and it is not taken at
+    ;; boot: an unnamed runtime costs nothing and cannot be reached, which is what a child
+    ;; that usually only talks to its editor should be.
+    (node/start (keyword (str "bedit-sandbox-" (os/now)))
+      nil
+      (when (and cookie (not (= cookie ""))) cookie)))
+  (node/connect spec))
+
+(defn- evsrv-remote-eval (target src trace)
+  "Run `src` ON `target`, captured there, and bring the reply map back.
+
+`eval-capturing` itself is what travels: a free global re-resolves on the receiver, so the
+peer runs its OWN copy and what crosses the wire is the finished map of strings and
+numbers. Rendering remotely is not an optimisation — a value holding a pid or a handle
+means nothing once copied, and the peer is the only place it can be read.
+
+The reply comes back by MESSAGE rather than as the spawn's return: `node/spawn-sync`
+answers the remote child's PID (it is synchronous about the spawn, not about the work), so
+the pid of this process rides along in the closure and the child sends its map here. This
+process is freshly spawned per request by [[answer]], so its mailbox holds nothing else."
+  (let (me (self))
+    (node/spawn-sync (keyword target) (fn () (send me (eval-server/eval-capturing src trace))))
+    (receive
+      (r r)
+      ;; Bounded so a peer that accepts the spawn and then never answers is a failed
+      ;; request rather than a wedged session. The request's own deadline would eventually
+      ;; kill this child anyway; saying WHY is better than being killed.
+      (after *remote-eval-timeout-ms*
+        {:ok false :error (str "the node accepted the work but did not answer: " target)}))))
+
 ;; ---- running this project's tests in the session ------------------------------
 ;; The third request kind, and the one that streams. `:check` and an ordinary eval each
 ;; answer once; a suite has something to say per test, and holding it all until the end
@@ -529,7 +615,7 @@ process died without answering."
    :where (test/r-where r)
    :failures (or (map (test/r-fails r) (fn (f) {:loc (first f) :details (second f)})) [])})
 
-(defn evsrv-test-load (specs)
+(defn- evsrv-test-load (specs)
   "Clear the registry and (re)load each spec's file, answering the `[file line]` pairs that
 carry a line.
 
@@ -604,7 +690,7 @@ unit itself, so a test's `def`s roll back without the session having to."
                ;; answer is about the code they are looking at
                :reloaded reloaded}}))
 
-(defn evsrv-clear-sinks ()
+(defn- evsrv-clear-sinks ()
   "Put the reporting seams back. Called on every way out of a test run — finished, raised,
 or killed — because they are ROOT globals: left installed, the next run's verdicts would be
 streamed against an id that has already been answered."
@@ -619,7 +705,13 @@ already gone out by the time this returns; this is the final one.
 Run in a spawned process by [[eval-server-loop]] rather than called inline, so the suite
 can be ABANDONED: a run is the one request that legitimately lasts minutes, and a server
 that cannot be interrupted during one is a server you can only escape by killing the image
-that made it worth keeping."
+that made it worth keeping.
+
+The example is the failure, because it is the one answer that does not depend on which
+project the image holds: a spec naming a file that is not there comes back as a REPLY,
+never as a dead server.
+
+    (:ok (eval-server/answer-test {:id 9 :test true :specs [[\"/no/such/file_test.blsp\" nil]]}))   → false"
   (let (id (get req :id))
     (try
       (evsrv-run-tests id (or (get req :specs) []))
@@ -683,7 +775,26 @@ anything arriving while a run is in flight waits its turn."
     (get req :teststop) (evsrv-stop-run state (get req :id))
     (:run state) (update state :queue (fn (q) (into [] (append (or q []) [req]))))
     (get req :test) (evsrv-start-run state req)
-    else (do (io/puts (evsrv-encode-reply (answer req))) state)))
+    (get req :attach)
+    ;; Reported rather than assumed, and the model of this is `beam-attach`: an attach
+    ;; that silently did not happen leaves you evaluating locally while believing you
+    ;; are not, which is the one failure the feature must never have.
+      (let (r (check-allow :discarded-catch
+                (try
+                  {:node (->string (evsrv-attach (get req :attach) (get req :cookie)))}
+                  (catch e {:error (error-message e)}))))
+        (if (get r :error)
+          (do
+            (io/puts (evsrv-encode-reply {:id (get req :id) :ok false :error (get r :error)}))
+            state)
+          (do
+            (io/puts (evsrv-encode-reply {:id (get req :id) :ok true :node (get r :node)}))
+            (assoc state :attached (get r :node)))))
+    (get req :detach)
+      (do
+        (io/puts (evsrv-encode-reply {:id (get req :id) :ok true :node nil}))
+        (assoc state :attached nil))
+    else (do (io/puts (evsrv-encode-reply (answer req (:attached state)))) state)))
 
 (defn- evsrv-drain (state)
   "Take the next queued request now that nothing is in flight."
@@ -727,4 +838,4 @@ per stdin line until EOF. This is the child's whole program — a client spawns
   (io/puts (evsrv-encode-reply {:ready true}))
   (let (me (self))
     (spawn (eval-server-reader me)))
-  (eval-server-loop {:run nil :queue []}))
+  (eval-server-loop {:run nil :queue [] :attached nil}))

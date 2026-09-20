@@ -503,26 +503,36 @@
   ;; `:isolated` because these two CLEAR THE TEST REGISTRY, and the suite running them is
   ;; itself in it — without a private copy of the globals they empty the run they are part
   ;; of, and the count they then measure is whatever the parallel batch happened to leave.
+  ;; Both go through `answer-test`, the public seam, rather than the private loader
+  ;; underneath it: `evsrv-test-load` resets the registry, so it can have no `form → result`
+  ;; example (one executed inside the suite would empty the run it is part of) and is
+  ;; therefore private — which is the right shape anyway, since what a client can reach is
+  ;; a request.
   :isolated (test "loading the same file twice does not double the registry"
     (let (f (str (test/temp-dir "evsrv-test-") "/x_test.blsp"))
       (file/mkdir (path/dirname f))
       (file/spit f "(defmodule x-test (:use test))\n(describe \"x\" (test \"one\" (is true)))\n")
-      (let (once (do (evsrv-test-load [[f nil]]) (count *units*))
-            twice (do (evsrv-test-load [[f nil]]) (count *units*)))
+      (let (once (do (answer-test {:id 1 :test true :specs [[f nil]]}) (count *units*))
+            twice (do (answer-test {:id 2 :test true :specs [[f nil]]}) (count *units*)))
         (assert= once twice)
         ;; …and the reset is total: what was registered before this run is gone too, which
         ;; is what makes each run own its registry
         (is (<= once 1)))
       (file/rm f)))
 
+  ;; The filter is asserted by what it RUNS, not by the pair list the private loader
+  ;; returns — two tests on known lines, so a line-spec is observably narrower than the
+  ;; bare file. That is the property the pair list existed to produce.
   :isolated (test "the lines a spec carries become the runner's filter, and a bare file none"
     (let (f (str (test/temp-dir "evsrv-test-") "/y_test.blsp"))
       (file/mkdir (path/dirname f))
-      (file/spit f "(defmodule y-test (:use test))\n(describe \"y\" (test \"one\" (is true)))\n")
-      (assert= (evsrv-test-load [[f nil]]) [])
-      (assert= (evsrv-test-load [[f 7]]) [[f 7]])
+      (file/spit f
+        "(defmodule y-test (:use test))\n(describe \"y\"\n  (test \"one\" (is true))\n  (test \"two\" (is true)))\n")
+      (let (whole (answer-test {:id 3 :test true :specs [[f nil]]})
+            just-one (answer-test {:id 4 :test true :specs [[f 3]]}))
+        (assert= (get (get whole :summary) :total) 2)
+        (assert= (get (get just-one :summary) :total) 1))
       (file/rm f)))
-
   (test "a broken test file is a reply, not a dead server"
     ;; the sink is cleared on the way out either way, or the NEXT run would stream its
     ;; verdicts into a request that has already been answered

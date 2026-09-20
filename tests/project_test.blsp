@@ -1199,7 +1199,8 @@
       (assert= (project/reload-changed root) [])
       ;; …now it has
       (file/spit src "(defmodule thing \"f\")\n(defn thing-answer () 42)\n")
-      (assert= (project/changed-sources root) [src])
+      ;; `changed-sources` is private (it is `reload-changed`'s first step and has no
+      ;; caller of its own); what it detects is exactly what the next line reloads.
       (assert= (project/reload-changed root) [src])
       (assert= (thing/thing-answer) 42) ; the image now holds what is on disk
       (assert= (project/reload-changed root) []))) ; and is current again
