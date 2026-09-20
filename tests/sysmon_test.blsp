@@ -181,6 +181,37 @@ worker's mailbox so it can't satisfy a later test's receive."
           ([:system :exit ^clean _] :clean-was-reported)
           (after *test-wait-ms* :timeout)))
       (assert= :quiet (receive ([:system :exit ^clean _] :clean-was-reported) (after 100 :quiet))))
+    (sysmon-done))
+
+  ;; `:exit-abnormal` means a CRASH, and the kernel filters the deliberate exits before
+  ;; building a message — the same table `crash-report-crash?` keeps. Until 2026-09-21
+  ;; only `:normal` was filtered, so every `exit :kill` a supervisor issued fed the
+  ;; default crash reporter a message it would read and discard: a parent killing
+  ;; 100 000 children left it a 90 000-message backlog that never drained (measured as
+  ;; a per-process leak). A `:exit` subscriber still sees every one of them.
+  (test ":exit-abnormal filters a kill and a shutdown in the kernel; :exit still reports them"
+    (proc/system-monitor (self) {:exit-abnormal true})
+    (let (killed (spawn (receive (:never nil)))
+          shut (spawn (receive (:never nil)))
+          shut2 (spawn (receive (:never nil)))
+          crasher (spawn (do (receive (:go nil)) (error "boom"))))
+      (exit killed :kill)
+      (exit shut :shutdown)
+      (exit shut2 [:shutdown :because])
+      (send crasher :go)
+      (assert= :crashed
+        (receive
+          ([:system :exit ^crasher [:error _]] :crashed)
+          ([:system :exit ^killed r] [:kill-was-reported r])
+          ([:system :exit ^shut r] [:shutdown-was-reported r])
+          ([:system :exit ^shut2 r] [:shutdown-vec-was-reported r])
+          (after *test-wait-ms* :timeout)))
+      (assert= :quiet (receive ([:system :exit _ _] :deliberate-exit-was-reported) (after 100 :quiet))))
+    (sysmon-done)
+    (proc/system-monitor (self) {:exit true})
+    (let (killed (spawn (receive (:never nil))))
+      (exit killed :kill)
+      (assert= :seen (receive ([:system :exit ^killed _] :seen) (after *test-wait-ms* :timeout))))
     (sysmon-done)))
 
 (describe "telemetry watch-runtime"

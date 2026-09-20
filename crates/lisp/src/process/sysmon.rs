@@ -29,9 +29,11 @@
 //! - `[:system :exit pid reason]` — a green process exited; `reason` is the
 //!   same structured value monitors see (`[:error {… :trace}]` and friends).
 //!   A subscriber may select `:exit` (every exit) or `:exit-abnormal` (only a
-//!   reason other than `:normal`) — the latter is what a default crash reporter
-//!   wants, and it is filtered *before* any lock or message build, so 100k
-//!   clean exits cost 100k relaxed loads and nothing else.
+//!   CRASH: a reason other than `:normal`, `:kill`/`:killed`, `:shutdown` and
+//!   `[:shutdown x]` — the deliberate exits a supervisor produces are not faults)
+//!   — the latter is what a default crash reporter wants, and it is filtered
+//!   *before* any lock or message build, so 100k clean exits, or 100k children
+//!   killed on shutdown, cost 100k relaxed loads and nothing else.
 //! - `[:system :deopt pid fn-name]` — a JIT'd arm deopted to the VM
 //!   (`fn-name` is a string, or nil for an anonymous arm).
 //!
@@ -267,15 +269,38 @@ pub fn emit_spawn(child: u64, parent: u64) {
     }
 }
 
-fn is_normal(reason: &Message) -> bool {
-    matches!(reason, Message::Keyword(k) if *k == value::intern(pk::NORMAL))
+/// A reason that is NOT a crash: `:normal`, the hard kill (`:kill`/`:killed`), a
+/// supervisor's `:shutdown` and `[:shutdown x]`. The same table as
+/// `crash-report-crash?` in `std/proc/crash-report.blsp`, kept here so the
+/// `:exit-abnormal` selection filters these BEFORE a message is built, as its doc says.
+/// Until 2026-09-21 only `:normal` was filtered: every `exit :kill` — the reason a
+/// supervisor tears a subtree down with — built a `[:system :exit pid :kill]` and
+/// delivered it to the default crash reporter, which read it and discarded it at
+/// ~14 µs a message; a parent killing 100 000 children in 80 ms left the reporter a
+/// 90 000-message backlog (~180 B each) that never drained faster than the next
+/// round refilled it — 309 000 queued after four rounds, read as a per-process leak.
+fn is_clean(reason: &Message) -> bool {
+    match reason {
+        Message::Keyword(k) => {
+            *k == value::intern(pk::NORMAL)
+                || *k == value::intern(pk::KILL)
+                || *k == value::intern(pk::KILLED)
+                || *k == value::intern("shutdown")
+        }
+        Message::Vector(items) => {
+            items.len() == 2
+                && matches!(&items[0], Message::Keyword(k) if *k == value::intern("shutdown"))
+        }
+        _ => false,
+    }
 }
 
 /// A green process exited; `reason` is the structured monitor-visible reason.
 pub fn emit_exit(subject: u64, reason: &Message) {
-    // The default crash reporter selects only abnormal exits, so the common
-    // clean exit must cost nothing past this load — no lock, no message.
-    let normal = is_normal(reason);
+    // The default crash reporter selects only crashes, so the common clean exit —
+    // and a supervisor's kill or shutdown — must cost nothing past this load: no
+    // lock, no message.
+    let normal = is_clean(reason);
     if !wants(if normal {
         WANT_EXIT_ALL
     } else {
