@@ -303,9 +303,17 @@ const ENTRY_DEOPT_RELOWER: u32 = 16;
 /// deopt-watched, because a loop's deopt normally follows productive native iterations;
 /// an entry deopt has had none.
 pub(crate) fn jit_any_deopt_feedback(heap: &Heap, arm: &CompiledArm) {
-    use std::sync::atomic::Ordering::{Relaxed, Release};
+    use std::sync::atomic::Ordering::Relaxed;
     arm.jit_deopts_total.fetch_add(1, Relaxed);
     let reason = heap.jit_deopt_reason();
+    // Reasons 20/21 ride in bits 8.. with the observed tag in the low byte (the entry
+    // reason below is the other way round: reason low, slot high).
+    if matches!(reason >> 8, SLOT_INT_DEOPT_REASON | HANDLE_INT_DEOPT_REASON)
+        && reason & 0xff == u32::from(crate::core::value::jit_layout::TAG_FLOAT)
+    {
+        float_deopt_feedback(heap, arm);
+        return;
+    }
     if reason & 0xff != ENTRY_DEOPT_REASON {
         return;
     }
@@ -319,17 +327,72 @@ pub(crate) fn jit_any_deopt_feedback(heap: &Heap, arm: &CompiledArm) {
     // at least one more, and a boxed slot has no entry check to deopt on.
     let n = arm.jit_entry_deopts.fetch_add(1, Relaxed) + 1;
     if n.is_multiple_of(ENTRY_DEOPT_RELOWER) {
-        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
-            let name = arm
-                .dbg_name
-                .map(crate::core::value::symbol_name_ref)
-                .unwrap_or("<closure>");
+        if bail_trace_enabled() {
             eprintln!(
-                "[jit-relower] arm={name} reason=polymorphic-param slots={:#b}: {n} entry-tag deopts; re-tiering with those slots boxed",
+                "[jit-relower] arm={} reason=polymorphic-param slots={:#b}: {n} entry-tag deopts; re-tiering with those slots boxed",
+                arm_name(arm),
                 arm.jit_poly_slots.load(Relaxed)
             );
         }
+        reset_arm_untried(heap, arm);
+    }
+}
+
+/// The deopt-site ids of the integer-path arithmetic tag guards: a frame slot read as an
+/// int (`load_slot_int`) and a `Handle` read as an int (`as_int`). Both ride in bits 8..
+/// of the reason word with the OBSERVED tag in the low byte (KI-49), which is what lets a
+/// deopt on a `Float` be told apart from one on a string.
+pub(crate) const SLOT_INT_DEOPT_REASON: u32 = 20;
+pub(crate) const HANDLE_INT_DEOPT_REASON: u32 = 21;
+
+/// Integer-guard deopts on a `Float` an arm may take before it is re-lowered in float
+/// context. Fewer than the thrash latch's sixteen, so the re-tier lands first: four
+/// activations that each computed on a float is not a one-off.
+const FLOAT_DEOPT_RELOWER: u32 = 4;
+
+/// An integer-path arithmetic guard saw a `Float`: the arm does float arithmetic on values
+/// its param profile could not type (they arrive through `nth`/`get`, not as params — a
+/// vector library's `(dot a b)`). After `FLOAT_DEOPT_RELOWER` of these, flag the arm
+/// float-context and reset it to untried, so its next tier-up routes `Handle` arithmetic
+/// through the float path (`has_float_slot`) — the same optimism a profiled `Float` param
+/// buys, kept sound by the same `as_f64` guards. Once per arm: a flagged arm that still
+/// deopts is genuinely polymorphic and the thrash latch takes it as before.
+fn float_deopt_feedback(heap: &Heap, arm: &CompiledArm) {
+    use std::sync::atomic::Ordering::Relaxed;
+    if arm.jit_float_context.load(Relaxed) {
+        return;
+    }
+    let n = arm.jit_float_deopts.fetch_add(1, Relaxed) + 1;
+    if n == FLOAT_DEOPT_RELOWER {
+        arm.jit_float_context.store(true, Relaxed);
+        if bail_trace_enabled() {
+            eprintln!(
+                "[jit-relower] arm={} reason=float-through-erased-reads: {n} integer-guard deopts on a Float; re-tiering in float context",
+                arm_name(arm)
+            );
+        }
+        reset_arm_untried(heap, arm);
+    }
+}
+
+fn bail_trace_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some())
+}
+
+fn arm_name(arm: &CompiledArm) -> &'static str {
+    arm.dbg_name
+        .map(crate::core::value::symbol_name_ref)
+        .unwrap_or("<closure>")
+}
+
+/// Drop an arm's installed code and put it back at the tier threshold so its next call
+/// re-profiles and re-lowers — the reset the operator-rebind and depth-cap paths use.
+fn reset_arm_untried(heap: &Heap, arm: &CompiledArm) {
+    use std::sync::atomic::Ordering::{Relaxed, Release};
+    // A fresh deopt-feedback trial for the recompile, as the inline upgrade grants itself.
+    arm.jit_deopts.store(0, Relaxed);
+    {
         // The published copy IS the code being replaced: retract it, or the reset arm
         // simply adopts it back at its next call (measured: it did).
         if let Some(key) = arm.share_key {
@@ -366,7 +429,7 @@ pub(crate) fn profile_slot_tags(heap: &Heap, arm: &CompiledArm, base: usize) -> 
         .collect()
 }
 
-pub(crate) fn jit_deopt_feedback(arm: &CompiledArm) {
+pub(crate) fn jit_deopt_feedback(heap: &Heap, arm: &CompiledArm) {
     use std::sync::atomic::Ordering::{Relaxed, Release};
     const DEOPT_BAIL_CONSECUTIVE: u32 = 16;
     let d = arm.jit_deopts.fetch_add(1, Relaxed) + 1;
@@ -391,14 +454,22 @@ pub(crate) fn jit_deopt_feedback(arm: &CompiledArm) {
                 .collect();
             eprintln!(
                 "[jit-bail] arm={name} reason=deopt-thrash-latched nslots={} deopts={d} \
-                 inline_installed={} ops=[{}]",
+                 last-deopt={:#x} inline_installed={} ops=[{}]",
                 arm.nslots,
+                heap.jit_deopt_reason(),
                 arm.inline_installed
                     .load(std::sync::atomic::Ordering::Acquire),
                 ops.join(" ")
             );
         }
         arm.jit_code.store(crate::jit::BAILED, Release);
+        // The callers' fast-link mirror never re-reads `jit_code` (see
+        // `vm_fast_link_clear_site`), so a JIT'd caller holding a link would keep
+        // entering the latched native — and deopting — on every call. Clear them, as the
+        // untried reset does; the callers re-probe and find BAILED.
+        if let Some(sym) = arm.dbg_name {
+            heap.invalidate_fast_links_for(sym);
+        }
     }
 }
 

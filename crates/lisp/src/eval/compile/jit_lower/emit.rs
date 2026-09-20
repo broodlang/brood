@@ -160,6 +160,10 @@ pub(super) struct Frame<'a> {
     /// carried as [`ParamRepr::Slot`] instead of being forced through `as_int` — which is
     /// KI-49, where a matcher's message vector deopted at every merge.
     pub slot_int_profile: &'a [bool],
+    /// The arm is float-context (`has_float_slot`): a profiled `Float` param, or deopt
+    /// feedback that found it computing on floats read out of vectors. Licenses the
+    /// optimistic float path for arithmetic on operands nothing else types.
+    pub float_context: bool,
     /// Base frame slot of the **block-argument spill** region (KI-49). An operand that must
     /// cross a block boundary but is not a profiled `Int` is stored at
     /// `blockarg_spill_base + <its operand-stack index>` and carried as `ParamRepr::Slot`.
@@ -249,6 +253,30 @@ pub(super) fn op_is_float(op: Op, f: Frame) -> bool {
         Op::Slot(k) => f.slot_float.borrow().get(k).copied().unwrap_or(false),
         _ => false,
     }
+}
+
+/// Could `op` hold a float at runtime? An unboxed `Op::Int`/`Op::Bool` or a hoisted
+/// global never can (and `as_f64_pair` deopts on one unconditionally), nor can a slot the
+/// profile typed `Int` — its carry is an i64 register. Everything else is a tag-checked read.
+pub(super) fn op_maybe_float(op: Op, f: Frame) -> bool {
+    match op {
+        Op::Float(_) | Op::Handle(..) => true,
+        Op::Slot(k) => {
+            !matches!(f.carry_vars.get(k).copied().flatten(), Some((_, false)))
+                && !f.slot_bool.borrow().get(k).copied().unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
+/// Nothing the lowering knows types slot `k`: not a profiled `Int` (no unboxed carry), not
+/// flagged float or bool by a store — a let-bound `nth`/`get` result, typically. In a
+/// float-context arm such a slot is read optimistically as a float (tag-guarded).
+pub(super) fn slot_untyped(k: usize, f: Frame) -> bool {
+    f.carry_vars.get(k).copied().flatten().is_none()
+        && !f.slot_int_profile.get(k).copied().unwrap_or(false)
+        && !f.slot_float.borrow().get(k).copied().unwrap_or(false)
+        && !f.slot_bool.borrow().get(k).copied().unwrap_or(false)
 }
 
 /// Mark frame slot `dst` as holding (or not) a `Value::Float`.
@@ -437,7 +465,12 @@ pub(super) fn load_slot_int(
     let tag = b.ins().load(types::I8, MemFlagsData::trusted(), addr, 0);
     let is_int = b.ins().icmp_imm_s(IntCC::Equal, tag, TAG_INT as i64);
     let cont = b.create_block();
-    let __dr = b.ins().iconst(types::I32, 20);
+    // The reason rides in bits 8.. with the observed tag in the low byte (as `as_int`'s
+    // reason 21 does, KI-49): a deopt on
+    // a `Float` here is the arm's float-context feedback (`float_deopt_feedback`).
+    let __base = b.ins().iconst(types::I32, 20 << 8);
+    let __t32 = b.ins().uextend(types::I32, tag);
+    let __dr = b.ins().bor(__base, __t32);
     b.ins()
         .brif(is_int, cont, &[], f.deopt, &[BlockArg::Value(__dr)]);
     b.switch_to_block(cont);

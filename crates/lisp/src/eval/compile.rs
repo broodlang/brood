@@ -530,6 +530,8 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                 jit_deopts_total: AtomicU32::new(0),
                 jit_poly_slots: AtomicU32::new(0),
                 jit_entry_deopts: AtomicU32::new(0),
+                jit_float_context: std::sync::atomic::AtomicBool::new(false),
+                jit_float_deopts: std::sync::atomic::AtomicU32::new(0),
                 float_globals: std::sync::OnceLock::new(),
                 self_global_ok: std::sync::atomic::AtomicBool::new(false),
                 ckpt_slot: u32::MAX,

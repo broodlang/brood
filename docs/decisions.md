@@ -24345,3 +24345,55 @@ case, and the checker types its accumulator through the fold rule — which is h
 work found KI-175 (the fold callback's accumulator was seeded from the fold's result and so
 lost `init`): `fold-for`'s own docstring example, `(fold-for (best nil x [3 9 4]) (if (or
 (nil? best) …) …))`, was flagged `nil?: this can never be true`.
+
+## ADR-378 — Deopt feedback re-tiers an arm in float context when its floats arrive through vector reads
+
+**Status:** accepted (2026-09-20, night). Found building `b2d-physics`.
+
+**Context.** The tier-time profile types an arm's *params* (and, since 2026-07-29, the
+floats it reads from globals), and that is all the float context rests on: an arm with a
+profiled `Float` param routes arithmetic on a type-erased `Handle` (a `nth`/`get` read)
+through the float path, tag-guarded; any other arm lowers that arithmetic on the integer
+path, whose `as_int` guard deopts on a `Float`. A 2D vector library is the shape that
+falls through: `(defn dot (a b) (+ (* (nth a 0) (nth b 0)) …))` has no float param and no
+float literal, so every call deopted, sixteen in a row latched it `BAILED`, and `dot`,
+`add`, `sub`, `scale`, `cross` all ran interpreted for the whole process — 410 ns a call
+for 6 ns of arithmetic, in the code a physics step calls a hundred thousand times.
+
+Measured on the physics engine's 500-body pile: 176 ms a step before, of which the
+interpreted vector calls were the largest single line.
+
+**Decision.** The same mechanism the polymorphic-param feedback uses (`jit_any_deopt_feedback`,
+reason 106), for a second signal. The two integer-path guards — `load_slot_int` (reason 20)
+and `as_int` on a `Handle` (21) — carry the tag they observed in the reason word (21 already
+did, KI-49; 20 now does). Four such deopts on a `Float` flag the arm `jit_float_context`
+and reset it to untried (`reset_arm_untried`, the reset every relower path now shares);
+its next lowering takes `has_float_slot` as if a param had profiled `Float`. The
+optimism is the one the profiled-param case already relies on, kept sound by the same
+`as_f64` guards: a wrong guess deopts, never miscompiles, and `(dot [1 2] [3 4])` still
+answers `11`, not `11.0`. Once per arm — a flagged arm that still thrashes is genuinely
+polymorphic and the latch takes it as before.
+
+Three things the first version got wrong, each now pinned by the test:
+
+- **The latch did not hold.** `jit_deopt_feedback` stored `BAILED` but never cleared the
+  callers' fast-link mirror, which "never re-reads `jit_code`" by design — so a JIT'd
+  caller kept entering the latched native and deopting on every call, a million times in
+  the microbenchmark. The initial tier had hidden it by timing (the caller had no link yet
+  when the callee latched). The latch now invalidates the arm's fast links, as the resets do.
+- **The background compiler's dedupe cache answered the re-lower with the code it was
+  replacing.** Keyed on the polymorphic-slot mask (the fix for the same bug in the param
+  relower); the float flag now rides in the mask's top bit.
+- **Comparisons.** The float context covered `+ - * /` on a `Handle`; `overlaps?`'s
+  `(<= ax0 bx1)` on four destructured slots stayed on the integer path and thrashed. Now
+  `Lt`/`Le` join, for `Handle` operands (`Prim2`) and for two slots nothing else types
+  (`Prim2SlotSlot`, `slot_untyped`) — but not when the other operand can never be a float
+  (`op_maybe_float`): `(< (count xs) 4)` in a float-context arm is an integer compare, and
+  routing it through `as_f64_pair` deopted unconditionally on the literal.
+
+**Consequences.** `b2d-vec/dot` 410 → 89 ns; the physics step's arms all lower.
+`BROOD_JIT_BAIL_TRACE=1` prints the re-tier as `[jit-relower] … reason=float-through-erased-reads`
+and the thrash latch now names its `last-deopt` reason, which is what found the third
+point. `crates/cli/tests/float_through_erased_reads.rs` is the gate. Not done: the same
+optimism for `Prim2SlotInt` (an untyped slot against an int literal) — a loop counter
+bound from `(count …)` is exactly that shape and would deopt on every iteration.

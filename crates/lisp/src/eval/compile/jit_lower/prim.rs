@@ -7,7 +7,8 @@
 #![cfg(feature = "jit")]
 use super::emit::{
     as_f64_guarded, as_f64_pair, as_int, call_handle, emit_arith, emit_float_arith, eq_dispatch,
-    inline_vec_ref, load_slot_int, op_is_float, read_words, table_prim, vector_ref, Frame, Funcs,
+    inline_vec_ref, load_slot_int, op_is_float, op_maybe_float, read_words, slot_untyped,
+    table_prim, vector_ref, Frame, Funcs,
 };
 use super::Op;
 use super::OrBail;
@@ -1061,8 +1062,15 @@ pub(super) fn emit_prim2(
     } else if op_is_float(aa_op, frame)
         || op_is_float(bb_op, frame)
         || (has_float_slot
-            && matches!(op, PrimOp::Add | PrimOp::Sub | PrimOp::Mul | PrimOp::Div)
-            && (matches!(aa_op, Op::Handle(..)) || matches!(bb_op, Op::Handle(..))))
+            && matches!(
+                op,
+                PrimOp::Add | PrimOp::Sub | PrimOp::Mul | PrimOp::Div | PrimOp::Lt | PrimOp::Le
+            )
+            && (matches!(aa_op, Op::Handle(..)) || matches!(bb_op, Op::Handle(..)))
+            // … unless the other operand can never be a float (an int literal: `(< (count
+            // xs) 4)`), which the float path would deopt on unconditionally
+            && op_maybe_float(aa_op, frame)
+            && op_maybe_float(bb_op, frame))
     {
         // Float arith/compare (an operand is a float, or — in a float-context arm — a
         // type-erased `Op::Handle` optimistically treated as float, e.g. `(- (nth bi 0)
@@ -1182,9 +1190,20 @@ pub(super) fn emit_prim2_slot_slot(
         let wa = read_words(b, Op::Slot(slot_a), frame);
         let wb = read_words(b, Op::Slot(slot_b), frame);
         stack.push(Op::Int(eq_dispatch(b, wa, wb, frame, funcs)));
-    } else if op_is_float(Op::Slot(slot_a), frame) || op_is_float(Op::Slot(slot_b), frame) {
+    } else if op_is_float(Op::Slot(slot_a), frame)
+        || op_is_float(Op::Slot(slot_b), frame)
+        || (frame.float_context
+            && matches!(
+                op,
+                PrimOp::Add | PrimOp::Sub | PrimOp::Mul | PrimOp::Div | PrimOp::Lt | PrimOp::Le
+            )
+            && slot_untyped(slot_a, frame)
+            && slot_untyped(slot_b, frame))
+    {
         // Float arith/compare on two slots (e.g. `(+ xx yy)`, `(* x y)`). Both operands
-        // are slots, so the float context rests entirely on `slot_float`'s guess: read them
+        // are slots, so the float context rests entirely on `slot_float`'s guess — or, in a
+        // float-context arm, on two slots nothing typed at all (`[ax0 ay0 ax1 ay1]`
+        // destructured from a vector of floats, then `(<= ax0 bx1)`): read them
         // as a pair, so one being a float is what licenses promoting the other and two ints
         // deopt to the integer operation they are (KI-114).
         let (sa, sb) = as_f64_pair(b, Op::Slot(slot_a), Op::Slot(slot_b), frame);

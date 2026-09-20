@@ -313,7 +313,7 @@ pub(crate) fn jit_dispatch_call(
                 if arm.deopt_watch {
                     use std::sync::atomic::Ordering::Relaxed;
                     if outcome == 1 {
-                        jit_deopt_feedback(&arm);
+                        jit_deopt_feedback(heap, &arm);
                     } else if arm.jit_deopts.load(Relaxed) != 0 {
                         arm.jit_deopts.store(0, Relaxed);
                     }

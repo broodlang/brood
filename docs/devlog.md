@@ -942,6 +942,23 @@ Every session, oldest first. Early sessions' full text is in
 
 ## Recent — full entries
 
+## 2026-09-20 — a vector library that never went native (ADR-378)
+
+The physics engine's profile said `dot` cost 410 ns. `(+ (* (nth a 0) (nth b 0)) …)` on
+two float vectors — six nanoseconds of arithmetic. `BROOD_JIT_BAIL_TRACE=1` said why:
+`deopt-thrash-latched`, every function of `b2d-vec`. The float context comes from the param
+profile, and a function of two vectors has no float param, so its `*` went to the integer
+path and its guard deopted on every call until the latch put it on the interpreter for good.
+
+The fix is the polymorphic-param relower's twin: an integer guard deopting on a `Float`
+four times re-tiers the arm in float context. Getting it to *hold* took three more finds,
+each a mechanism that had been correct by accident: the thrash latch never cleared the
+callers' fast links (so a latched arm kept being entered natively — the trace read
+`deopts=995909`), the compile cache handed the re-lower its old code back, and comparisons
+were outside the float context entirely. `dot` is 89 ns now, every arm of the physics step
+lowers, and the thrash trace names its last deopt reason, which is how the comparison case
+was found in minutes rather than by reading IR.
+
 ## 2026-09-17 — the zones a region swallowed
 
 `cell-region` (ADR-363) landed the day before and took something with it that nobody
