@@ -28,7 +28,7 @@
 #   scripts/jit-lower-witness.sh > /tmp/after.txt      # after the change
 #   diff /tmp/before.txt /tmp/after.txt                # must be empty
 #
-# Env: BROOD (binary under test), ROWS_DIR (brood-benchmarks rows).
+# Env: BROOD (binary under test), ROWS_DIR (benchmark rows; default: scripts/bench-dir.sh).
 set -u
 
 # `make release-brood` writes to target/release-fast (RELEASE_DIR), NOT target/release —
@@ -56,7 +56,10 @@ if [ -n "$newest_src" ]; then
   echo "jit-lower-witness: measuring a stale binary reproduces the baseline set, so the diff would come back empty." >&2
 fi
 echo "jit-lower-witness: using $BROOD" >&2
-ROWS_DIR=${ROWS_DIR:-../brood-benchmarks/bench/brood}
+# Resolve from THIS script's location, not the cwd: the witness is run from anywhere, and
+# bench-dir.sh falling back to `git rev-parse` would then answer about another checkout.
+WITNESS_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROWS_DIR=${ROWS_DIR:-$("$WITNESS_ROOT/scripts/bench-dir.sh" "$WITNESS_ROOT")/bench/brood}
 
 # row:BENCH_N — sized so every hot arm clears the tiering threshold and the background
 # compiler has time to install, while the whole sweep stays ~15s. Rows chosen to span the

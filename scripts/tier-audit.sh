@@ -22,11 +22,11 @@
 # subset rule doing their job. Rows needing a server (`http`) or measuring boot
 # (`startup`) are skipped; `http` is covered by hand with `bench/httpserver.py` up.
 #
-# Uses ../brood-benchmarks (or BENCH_DIR) and the newest release brood under target/
-# (or BROOD=...); a missing checkout is a note, not a failure, the way smoke-bedit does.
+# Uses the benchmark checkout scripts/bench-dir.sh finds (or BENCH_DIR) and the newest
+# release brood under target/ (or BROOD=); a missing checkout is a note, not a failure.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BENCH="${BENCH_DIR:-$ROOT/../brood-benchmarks}"
+BENCH="${BENCH_DIR:-$("$ROOT/scripts/bench-dir.sh" "$ROOT")}"
 BIN="${BROOD:-$ROOT/target/release-fast/brood}"
 if [ ! -d "$BENCH/bench/brood" ]; then
   echo "tier-audit: no benchmark checkout at $BENCH — skipped (set BENCH_DIR)"; exit 0

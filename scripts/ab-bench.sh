@@ -20,7 +20,8 @@
 #   scripts/ab-bench.sh --json /tmp/ab.json    # + machine-readable rows
 #   scripts/ab-bench.sh --tier 1 pfib          # measure on the VM (see `ab_tier` below)
 #
-# Env: BROOD_BENCH_DIR (default ../brood-benchmarks), AB_PIN_CPU (default 2),
+# Env: BROOD_BENCH_DIR (default: scripts/bench-dir.sh — ../brood-benchmarks or
+#      ../brood-benchmark, whichever is checked out), AB_PIN_CPU (default 2),
 #      AB_TIER (default: the binary's own default ceiling).
 #
 # ---------------------------------------------------------------------------
@@ -68,7 +69,7 @@ set -euo pipefail
 root="$(git rev-parse --show-toplevel)"
 cd "$root"
 
-bench_dir="${BROOD_BENCH_DIR:-$root/../brood-benchmarks}"
+bench_dir="${BROOD_BENCH_DIR:-$("$root/scripts/bench-dir.sh" "$root")}"
 pin_cpu="${AB_PIN_CPU:-2}"
 # Execution-tier ceiling to measure at (ADR-222), or empty for the default. `--tier 1` is
 # how a VM-path regression becomes visible: at the default ceiling a hot arm lowers to

@@ -350,7 +350,7 @@ green-all: check-examples check-stress check-imaged smoke-bedit tier-audit wasm-
 tier-audit: release-brood ## Every benchmark row under BROOD_JIT_BAIL_TRACE — fail on any arm latched off the native tier or any lowering bug (KI-132's class)
 	# Every other gate is a value gate, and the KI-132 class is right-but-slow: an arm that
 	# deopts per activation is latched onto the interpreter after sixteen, and nothing but a
-	# benchmark ever noticed. Uses ../brood-benchmarks (BENCH_DIR) like smoke-bedit.
+	# benchmark ever noticed. Finds the benchmark checkout with scripts/bench-dir.sh (BENCH_DIR overrides).
 	@./scripts/tier-audit.sh
 
 wasm-test: ## Run the wasm32 cooperative scheduler BEHAVIOURALLY (build + wasm-bindgen + node)
