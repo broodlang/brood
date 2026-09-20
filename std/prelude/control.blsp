@@ -74,6 +74,65 @@ processes `body` spawns is captured too; nested `with-out-str`s compose.
            (%table-get ~sink :text ""))
          (catch e (do (%table-drop ~sink) (throw e)))))))
 
+;; ---- embedding a file's text in the source that ships ------------------------
+;; A Brood program that needs a file it did not write — an SQL schema, a shader, a
+;; template, a helper program in another language — has two bad options today. Read it
+;; at run time and the program now depends on a path that a release does not carry: a
+;; bundle is CODE ONLY (ADR-038), so nothing follows the binary but module source.
+;; Paste it into a string literal and every quote and backslash in it has to be escaped
+;; by hand, which un-runs it — the file can no longer be formatted, linted, or executed
+;; by its own language's tools, and it drifts from whatever it was copied out of.
+;;
+;; `include-str` is the third option: the file stays a file on disk, and its TEXT is
+;; spliced into the program as a string literal before the program runs. In development
+;; that happens at macro-expansion time, here; in a release it happens when
+;; `nest release` collects the module source (`project-release/inline-includes`), so
+;; the bundle carries the contents and the bundle is still nothing but code.
+
+(defn %include-str-path (rel &optional (root nil))
+  "The absolute path `include-str` reads `rel` from: `rel` itself when it is absolute, else
+`rel` under `root` — which defaults to the project root, then to the working directory.
+
+Project-relative rather than file-relative, because the two readers of this — macro
+expansion here, and `nest release`'s source collection — must agree on the answer, and
+only one of them is expanding a form inside a known file.
+
+`root` is passed explicitly by the release path, which knows the project it is collecting
+but does not go through `project/setup` and so has no `*project-root*` bound. Without it a
+release run from a subdirectory resolved every embedded file against the wrong place.
+
+    (%include-str-path \"/etc/hostname\")   → \"/etc/hostname\""
+  (cond
+    (string/starts-with? rel "/") rel
+    else
+      (let (base (or root
+                   (when (and (bound? '*project-root*) *project-root*) *project-root*)
+                   (file/cwd)))
+        (if (string/ends-with? base "/") (/str base rel) (/str base "/" rel)))))
+
+(defmacro include-str (rel)
+  "Splice the contents of the file at `rel` into the program as a string literal, read
+at expansion time — `rel` relative to the project root (see [[%include-str-path]]).
+
+    (def *schema* (include-str \"priv/schema.sql\"))
+
+The file is read once, where the program is built, and nothing looks for it when the
+program runs. That is the whole point: a released bundle carries module source and no
+asset files, so a string literal is the only form in which a foreign file can travel
+with an application — and writing that literal by hand means escaping a file that then
+cannot be run by the tools that understand it.
+
+A missing file is an error at expansion, not a nil at run time: the program cannot be
+built without it, and the failure should say so where it can still be fixed.
+
+`(include-str \"priv/schema.sql\")` → that file's text, verbatim, as a string. (Not written
+as an indented example, because the answer is whatever the file says — the case that can
+be asserted lives in `tests/project_test.blsp`.)"
+  (let (path (%include-str-path rel))
+    (unless (file/exists? path)
+      (error "include-str: no file at " path))
+    (file/slurp path)))
+
 ;; ---- threading macros (demonstrate that macros compute at expansion time) ----
 ;; (-> x (f a) (g b))  =>  (g (f x a) b)   ; thread as FIRST argument
 

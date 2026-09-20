@@ -243,6 +243,7 @@ Core vocabulary — the language's own words: special-form companions, sequence 
 - `if-let`
 - `impl`
 - `inc`
+- `include-str`
 - `index-of`
 - `inspect`
 - `into`

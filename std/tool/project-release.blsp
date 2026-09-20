@@ -38,14 +38,16 @@ written binary stay in the `nest` binary, which hosts the runtime it embeds.")
           (or (= name "describe") (= name "deftest")))))))
 
 ;; `source` with each half-open [start end) span in `spans` (ascending,
-;; non-overlapping) removed — the kept gaps concatenated.
-(defn- string-drop-spans (source spans)
+;; non-overlapping) replaced by that span's own text — the kept gaps and the
+;; replacements concatenated. A `""` replacement is a deletion, which is what
+;; `strip-test-forms` asks for; `inline-includes` asks for a substitution.
+(defn- string-splice-spans (source spans)
   (let (n (string/length source))
     (letrec (go (fn (pos spans acc)
                   (if (empty? spans)
                     (str acc (string/substring source pos n))
-                    (let ([s e] (first spans))
-                      (go e (rest spans) (str acc (string/substring source pos s)))))))
+                    (let ([s e text] (first spans))
+                      (go e (rest spans) (str acc (string/substring source pos s) text))))))
       (go 0 spans ""))))
 
 ;; A source string with its co-located `deftest`/`describe` forms excised (ADR-225).
@@ -55,11 +57,103 @@ written binary stay in the `nest` binary, which hosts the runtime it embeds.")
                 nil
                 (fn (acc n)
                   (if (test-form-node? n source)
-                    (cons [(get n :start) (get n :end)] acc)
+                    (cons [(get n :start) (get n :end) ""] acc)
                     acc))))
     (if (empty? spans)
       source
-      (string-drop-spans source (reverse spans)))))
+      (string-splice-spans source (reverse spans)))))
+
+;; ---- include-str, resolved before the source is archived ---------------------
+;; `(include-str "priv/schema.sql")` is a macro that reads the file at EXPANSION time
+;; (std/prelude/control.blsp), which is the right answer everywhere a program is run
+;; from its own source tree. A bundle is not: it carries module source and no asset
+;; files (ADR-038), so by the time that source expands, on another machine, the file
+;; the form names is not there.
+;;
+;; So the form is resolved HERE instead — where `nest release` reads each module — and
+;; the bundle carries the contents as an ordinary string literal. The bundle stays
+;; code-only, and the two paths give the same program: one reads the file when the
+;; module loads, the other when the module is archived, and neither leaves a runtime
+;; dependency on a path.
+
+;; The `(include-str "…")` nodes in a positioned CST, outermost first and in source
+;; order. Iterative rather than recursive: a source file is a tree of unbounded depth
+;; and this walks all of it, where `strip-test-forms` only ever looks at the top level.
+(defn- include-str-nodes (roots)
+  (letrec (go (fn (todo acc)
+                (if (empty? todo)
+                  (reverse acc)
+                  (let (node (first todo)
+                        later (rest todo))
+                    ;; A matched node is not descended into: an `include-str` inside an
+                    ;; `include-str` is not a thing, and stopping keeps the spans
+                    ;; non-overlapping, which is what the splice requires.
+                    (if (include-str-node? node)
+                      (go later (cons node acc))
+                      (go (append (sexp/forms-of node) later) acc))))))
+    (go (append '() roots) nil)))
+
+(defn- include-str-node? (node)
+  (and (= (get node :kind) :list)
+    (let (head (first (sexp/forms-of node)))
+      (and (not (nil? head))
+        (= (get head :kind) :symbol)
+        (= (get head :text) "include-str")))))
+
+;; The path an `include-str` node names, or nil when its argument is not a plain string
+;; literal — a computed path cannot be resolved at archive time, and saying nothing here
+;; leaves the form in the bundle to fail at load with its own message rather than being
+;; silently mangled into one.
+(defn- include-str-arg (node)
+  (let (parts (sexp/forms-of node)
+        arg (second parts))
+    (when (and arg (= (get arg :kind) :str))
+      ;; check-allow :discarded-catch — an unreadable literal is the "not a plain string" case
+      (check-allow :discarded-catch
+        (try
+          (let (v (reflect/read-string (get arg :text))) (when (string? v) v))
+          (catch _ nil))))))
+
+(defn- inline-includes (source &optional (root nil))
+  "`source` with every `(include-str \"path\")` form replaced by the contents of that
+file as a string literal. Unchanged when it holds none, so the ordinary module pays one
+parse and nothing else."
+  (let (nodes (include-str-nodes (sexp/top-level-forms source))
+        spans (seq/keep nodes
+                (fn (node)
+                  (let (rel (include-str-arg node))
+                    (when rel
+                      (let (path (%include-str-path rel root))
+                        (unless (file/exists? path)
+                          (error "release: include-str: no file at "
+                            path " (named by " rel ")"))
+                        [(get node :start) (get node :end) (pr-str (file/slurp path))]))))))
+    (if (empty? spans) source (string-splice-spans source spans))))
+
+;; What one module contributes to the bundle: its source with the tests taken out and
+;; every `include-str` resolved. Both halves are the same idea — the archived text is
+;; what the program MEANS rather than what its file happens to say — so they are applied
+;; in one place and every collector goes through it.
+;;
+;; `root` is the package the module belongs to, not the release's root project: an
+;; `include-str "priv/schema.sql"` inside a DEPENDENCY names that dependency's `priv/`,
+;; and resolving it against the root project would quietly read the wrong file (or, with
+;; better luck, fail to find one).
+(defn- bundle-source (path root)
+  (inline-includes (strip-test-forms (file/slurp path)) root))
+
+(defn- bundle-dep-root (path dep-dirs)
+  "The package root of the dependency whose source dir `path` lives under — the parent of
+that source dir (`_deps/foo/src/x.blsp` → `_deps/foo`), so a dep's own project-relative
+paths resolve the way they do when that dep is the project being built."
+  (let (dir (seq/find dep-dirs
+              (fn (d) (string/starts-with? path (if (string/ends-with? d "/") d (str d "/"))))))
+    (when dir
+      ;; `path/dirname` of a trailing-slash path answers the path itself, so the slash
+      ;; has to come off before the parent can be taken.
+      (path/dirname (if (string/ends-with? dir "/")
+                      (string/substring dir 0 (dec (string/length dir)))
+                      dir)))))
 
 (defn- project-bundle-name (dir path)
   (let (prefix (if (string/ends-with? dir "/") dir (str dir "/"))
@@ -115,8 +209,7 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
                               (fold (project/collect-sources d)
                                 acc
                                 (fn (a f)
-                                  (cons (list (project-bundle-name d f)
-                                          (strip-test-forms (file/slurp f)))
+                                  (cons (list (project-bundle-name d f) (bundle-source f root))
                                     a)))))
             ;; DEPENDENCY modules are embedded by their ROOTED name (`foo/parser`) so two deps
             ;; each providing a `parser` coexist in one flat bundle — dev/release parity for
@@ -130,7 +223,10 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
                         (fn (acc kv)
                           (let (rooted-key (first kv) path (second kv))
                             (if (bundle-dep-file? path dep-dirs)
-                              (cons (list rooted-key (strip-test-forms (file/slurp path))) acc)
+                              (cons (list rooted-key
+                                      (bundle-source path
+                                        (or (bundle-dep-root path dep-dirs) root)))
+                                acc)
                               acc))))
             pairs (append project-pairs dep-pairs)
             ;; The FULL set of dependency packages rooted in this bundle (transitive included):
