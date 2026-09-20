@@ -652,6 +652,13 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // analogue of `sexp`+`highlight`. Pure UI a shipped editor `require`s for its
     // ruby/elixir/… modes (ROADMAP §C), so it stays in CORE; opt-in, never prelude.
     embedded_module!("editor/treesit", "std/editor/treesit.blsp"),
+    // A supervised evaluation session in a child process: spawn, a line protocol,
+    // queue-until-ready, id-matched replies, a watchdog, generations, respawn. The
+    // supervision is language-agnostic — a backend supplies how to spawn its child
+    // and how to encode/decode a request — so an editor that evaluates a buffer of
+    // Brood, Elixir or Python differs only in the backend. CORE, like the rest of
+    // the editor framework; opt-in, never prelude.
+    embedded_module!("editor/evalsession", "std/editor/evalsession.blsp"),
     // Lexical Markdown highlighter — the `highlight` analogue for `.md` buffers
     // (`markdown-spans` → `[start end face]` spans, ADR-092). Pure UI a shipped app
     // may `require` (bedit's markdown-mode), so it stays in CORE alongside

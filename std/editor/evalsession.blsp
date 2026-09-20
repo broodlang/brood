@@ -1,0 +1,393 @@
+(defmodule editor/evalsession
+  "A **supervised evaluation session in a child process** — the thing between
+`reflect/eval-string` (fast, but a stray definition rewrites the live image) and
+spawn-a-process-per-run (safe, but a whole runtime start per evaluation).
+
+One long-lived named process owns a `os/spawn`ed child, speaks a **line protocol** to it
+over stdin/stdout, and keeps the session alive between requests: definitions made in
+request 1 are still there in request 7, because the child is one live image. `std/tool/
+eval-server` is the Brood-speaking child this was written for; the child of a session
+need not be Brood at all, and the interesting ones are not — an editor that can evaluate
+a buffer of Elixir, Ruby or Python is one backend away.
+
+**What is here and what is the backend's.** Everything below is the SUPERVISION, and
+none of it is about a language:
+
+  - requests sent before the child's ready banner QUEUE and flush on ready, so a
+    caller never has to know whether the child has finished booting;
+  - a reply is matched out of `:inflight` by id, and anything that does not decode —
+    a late print from something the evaluated code spawned — is dropped;
+  - a reply carrying `:more` is a CHUNK of a still-running request: forwarded at once and
+    the request left in flight, so a child can stream (a test run's per-test verdicts, a
+    build's progress, a trace) instead of holding everything until it is finished;
+  - a request whose reply never arrives (a wedged child: a native loop the child's own
+    timeout cannot interrupt) trips the WATCHDOG, and the child is killed, respawned,
+    and every inflight id answered `{:timeout true}`;
+  - a child that dies on its own respawns after a pause, so an externally killed
+    session heals;
+  - a child that keeps dying, or never announces itself, takes three STRIKES and then
+    the worker gives up loudly rather than respawn-looping forever;
+  - every event is stamped with a GENERATION, bumped on each spawn, so a superseded
+    child's stragglers are droppable by whoever folds them;
+  - RESET is respawn — a fresh image, an empty session.
+
+The backend supplies four things (see [[session-spec]]): how to spawn its child, how to
+put a request on the wire, how to take a reply off it, and how to hand an event to
+whoever is listening. Nothing here knows what a request MEANS.
+
+**The protocol contract**, which is what makes a backend's decoder the only foreign
+part: a decoded reply is a map; `{:ready true}` is the boot banner; a map carrying an
+int `:id` is the answer to that request, unless it also carries `:more`, which makes it one
+chunk of an answer still being produced; anything else — including nil — is noise and is
+dropped. Both ends should use unique, monotonic ids, since a session's child can print
+whatever it likes and a client must never mis-attribute a late or forged line to a live
+request.")
+;; No imports: `os/spawn` / `os/write` / `os/close` / `os/now` / `proc/whereis` / `log/warn`
+;; are all prelude or auto-loading qualified references. A module that reached for the
+;; editor would make this a layer rather than the mechanism it is.
+
+;; ---- the backend spec ---------------------------------------------------------
+
+(deftype session-spec
+  (record &open
+    :spawn any ; (root attempt) -> a proc handle, or nil when no child can be started
+    :encode any ; (id timeout-ms payload) -> one protocol line, without its newline
+    :decode any ; (line) -> a reply map, or nil for a line that is not one
+    :emit any)) ; (sink kind payload gen name) -> (), kind :ready | :reply | :down
+;; `:emit` is told the session's own NAME, and that is what lets one emit serve every
+;; backend a program has. Without it each backend must carry its own event vocabulary
+;; purely so its listener can tell whose event it is holding — which is per-session
+;; boilerplate for a fact the session already knows about itself.
+;;
+;; `:spawn` is told which ATTEMPT this is — 0 for a fresh start, rising with each respawn
+;; that follows a failure — so a backend can start its child differently once the
+;; optimistic way has been shown not to work. Without it, a child that cannot boot in the
+;; configuration asked for can only be retried identically until the strikes run out, which
+;; is three failures and then nothing.
+;;
+;; A user-initiated reset, and a reroot to a different project, both start again at 0: they
+;; are someone saying "try properly", not evidence that the optimistic way is broken.
+
+;; Each of the four is a SYMBOL, resolved late (`reflect/eval`) rather than a closure.
+;; Late binding is what lets a backend's decoder be redefined under a running session —
+;; the editor's whole hot-reload story — and, more prosaically, what lets a spec be a
+;; plain map that a test can write down.
+
+(def *default-timeout-ms* 5000) ; applied when a request carries none
+;; How long past a request's expected completion the watchdog waits before declaring the
+;; child wedged. Generous on purpose: a child that implements its own per-request timeout
+;; answers the common case in milliseconds, and this backstop exists only for the
+;; evaluations no in-child kill can stop.
+(def *default-grace-ms* 1500)
+(def *default-poll-ms* 250) ; mailbox-poll cadence while the watchdog has something to watch
+(def *default-respawn-pause-ms* 500) ; bounds the loop when a child keeps dying
+(def *default-fast-death-ms* 3000) ; a death sooner than this is the CHILD's fault, not the load's
+(def *default-boot-timeout-ms* 20000) ; a spawned child that never announces itself
+(def *default-max-strikes* 3) ; consecutive child failures before the worker gives up
+(defn- spec-opt (spec key fallback)
+  (or (get spec key) fallback))
+
+(defn- spec-call (spec key args)
+  (apply (reflect/eval (get spec key)) args))
+
+;; ---- the worker ----------------------------------------------------------------
+;; State is one map threaded through the tail-recursive loop:
+;;   :spec        the backend (above)
+;;   :proc        the child handle
+;;   :buf         the stdout partial (line assembly)
+;;   :ready       seen the banner yet?
+;;   :queue       requests received before ready, newest first (flushed oldest first)
+;;   :inflight    {id -> deadline-epoch-ms} — the watchdog's view
+;;   :gen         the child generation, bumped every spawn, stamped on every event
+;;   :spawned-at  when this child was spawned (fast-death / boot-timeout clock)
+;;   :root        the child's working directory
+;;   :name        the session's registered name, stamped on every event
+;;   :sink        who the events go to, handed to the spec's `:emit` untouched
+;;   :strikes     consecutive child failures (reset by a ready banner)
+
+(defn- session-emit (state kind payload)
+  (spec-call (:spec state) :emit (list (:sink state) kind payload (:gen state) (:name state))))
+
+(defn- session-deadline (spec inflight timeout-ms t)
+  "The watchdog deadline for a request sent at time `t` while `inflight` (id → deadline)
+is outstanding.
+
+Accounts for QUEUE POSITION, and has to: the child answers strictly one request at a
+time, so this one cannot even start until every earlier inflight deadline could have
+passed. Measured from `t` alone, one legitimately slow request pushed the next past its
+deadline and the watchdog killed a perfectly healthy child."
+  (let (base (fold inflight t (fn (acc kv) (math/max acc (second kv)))))
+    (+ base
+      (or timeout-ms (spec-opt spec :default-timeout-ms *default-timeout-ms*))
+      (spec-opt spec :grace-ms *default-grace-ms*))))
+
+(defn- session-send-request (state id timeout-ms payload)
+  (os/write (:proc state) (str (spec-call (:spec state) :encode (list id timeout-ms payload)) "\n"))
+  (update state
+    :inflight assoc
+    id
+    (session-deadline (:spec state) (:inflight state) timeout-ms (os/now))))
+
+(defn- session-refresh-deadline (state id)
+  "Push `id`'s watchdog deadline out from now — what a streamed chunk earns. A no-op for
+an id that is not in flight (a chunk that arrived after the final reply, or after a
+respawn), which must not resurrect it as an outstanding request."
+  (if (nil? (get (:inflight state) id))
+    state
+    (update state
+      :inflight assoc
+      id
+      (+ (os/now)
+        (spec-opt (:spec state) :default-timeout-ms *default-timeout-ms*)
+        (spec-opt (:spec state) :grace-ms *default-grace-ms*)))))
+
+(defn- session-flush-queue (state)
+  ;; Oldest first: the queue was consed, so fold over its reverse.
+  (fold (reverse (:queue state))
+    (assoc state :queue ())
+    (fn (st req)
+      (let ([id timeout-ms payload] req) (session-send-request st id timeout-ms payload)))))
+
+(defn- session-handle-line (state line)
+  "Fold one complete stdout line: the ready banner flips `:ready` (flushing the queue and
+forgiving the strikes), a map carrying an int `:id` settles its inflight entry and is
+forwarded, and anything else is a stray print — dropped.
+
+Dropping the undecodable is not laxity. The child's stdout is shared with whatever the
+evaluated code prints, including from processes it spawned that print after their
+request was answered; a session that died on the first of those would be useless for the
+concurrency its own docstring advertises."
+  (let (reply (spec-call (:spec state) :decode (list line)))
+    (cond
+      (nil? reply) state
+      (get reply :ready)
+        (do
+          ;; The whole banner travels, not just the fact of it: a child that had to be
+          ;; started differently from the way it was asked for is the only thing that
+          ;; knows, and the banner is where it says so.
+          (session-emit state :ready reply)
+          (session-flush-queue (assoc state :ready true :strikes 0)))
+      ;; a CHUNK of an answer still being made: forwarded now, and the request left in
+      ;; flight. The deadline moves out with it, because a chunk is proof of life — a test
+      ;; run that streams for ten minutes is working, and a watchdog that killed it at the
+      ;; request timeout would make streaming useless for the long jobs that want it.
+      (and (int? (get reply :id)) (get reply :more))
+        (do
+          (session-emit state :reply reply)
+          (session-refresh-deadline state (get reply :id)))
+      (int? (get reply :id))
+        (do
+          (session-emit state :reply reply)
+          (update state :inflight dissoc (get reply :id)))
+      else state)))
+
+(defn- session-feed (state data)
+  "Assemble stdout chunks into lines — the trailing partial carries over — and fold each
+complete line through [[session-handle-line]]."
+  (let (parts (string/split (str (:buf state) data) "\n")
+        complete (take parts (dec (count parts))))
+    (assoc (fold complete state session-handle-line) :buf (last parts))))
+
+(defn- session-fail-inflight (state why)
+  "Answer every inflight id with a failure reply (`why` merged in) — the obligation of
+every respawn path, because a request that vanishes without an answer leaves its caller
+waiting on one that is never coming, and a caller that thinks an answer is in flight
+does not re-send."
+  (doseq (kv (:inflight state))
+    (let ([id _] kv)
+      (session-emit state :reply (merge {:id id :ok false} why))))
+  (assoc state :inflight {}))
+
+(defn- session-close-child (state)
+  (try
+    (os/close (:proc state))
+    (catch e (log/warn (str "evalsession: close failed: " (error-message e))))))
+
+(defn- session-respawn (state)
+  "A fresh child and a new generation; inflight requests are answered `{:timeout true}`
+first, since they died with the old session. `:session-stopped` (after a `:spawn-failed`
+event) when a new child cannot be spawned at all."
+  (let (st (session-fail-inflight state {:timeout true}))
+    (session-close-child st)
+    ;; Each respawn is a later ATTEMPT, and the backend is told so: this one is happening
+    ;; because the last child did not work out, and it may want to start the next one
+    ;; differently.
+    (let (attempt (inc (or (:attempt st) 0))
+          child (spec-call (:spec st) :spawn (list (:root st) attempt)))
+      (if (nil? child)
+        (do (session-emit st :down :spawn-failed) :session-stopped)
+        (merge st
+          {:proc child
+           :buf ""
+           :ready false
+           :inflight {}
+           :gen (inc (:gen st))
+           :attempt attempt
+           :spawned-at (os/now)})))))
+
+(defn- session-strike (state)
+  "One consecutive child failure — a fast death, a boot that never announced itself:
+respawn, unless this is the last permitted strike, in which case give up loudly (one
+final `:gave-up` event) rather than respawn-loop forever. A broken image must not spam
+its listener every half second until the machine is rebooted."
+  (let (strikes (inc (or (:strikes state) 0)))
+    (if (>= strikes (spec-opt (:spec state) :max-strikes *default-max-strikes*))
+      (do
+        (session-emit state :down :gave-up)
+        (let (st (session-fail-inflight state {:timeout true}))
+          (session-close-child st)
+          :session-stopped))
+      (let (st (session-respawn state))
+        (if (= st :session-stopped) st (assoc st :strikes strikes))))))
+
+(defn- session-wedged? (state)
+  "Whether any inflight request has outlived its deadline — the child stopped answering
+entirely. A child with its own per-request timeout should have replied long before this
+trips, so reaching it means the child could not stop what it was doing."
+  (let (t (os/now))
+    (not (empty? (seq/filter (:inflight state) (fn (kv) (let ([_ deadline] kv) (> t deadline))))))))
+
+(defn- session-boot-overdue? (state)
+  "Whether a spawned child has gone past its boot budget without announcing itself."
+  (and (not (:ready state))
+    (> (os/now)
+      (+ (or (:spawned-at state) 0)
+        (spec-opt (:spec state) :boot-timeout-ms *default-boot-timeout-ms*)))))
+
+(defn- session-watchdog (state)
+  (if (or (session-wedged? state) (session-boot-overdue? state))
+    (session-strike state)
+    state))
+
+(defn- session-step (state msg)
+  "Fold one mailbox message into the worker state; `:session-stopped` ends the loop."
+  (match msg
+    ([:request id timeout-ms payload] (if (:ready state)
+                                        (session-send-request state id timeout-ms payload)
+                                        (update state
+                                          :queue (fn (q) (cons [id timeout-ms payload] q)))))
+    ;; A client wants the child rooted somewhere else: respawn there (the old session
+    ;; ends exactly as a reset ends it), and a no-op when it is already there.
+    ([:reroot root] (if (= root (:root state))
+                      state
+                      (let (st (session-respawn (assoc state :root root)))
+                        (if (= st :session-stopped) st (merge st {:strikes 0 :attempt 0})))))
+    ([:proc p data] (if (= p (:proc state)) (session-feed state data) state))
+    ;; Child stderr is not protocol — but it is the only trace a child that failed to
+    ;; boot leaves behind, so it is logged rather than discarded.
+    ([:proc-err p data] (do
+                          (when (and (= p (:proc state)) (not (string/blank? data)))
+                            (log/warn (str "evalsession child: " (string/trimr data))))
+                          state))
+    ([:proc-closed p code]
+      (if (= p (:proc state))
+        (do
+          (session-emit state :down code)
+          ;; A death soon after spawn means the child itself is broken — strike, and
+          ;; possibly give up. A late death is something external killing it, and that
+          ;; just respawns.
+          (if (< (- (os/now) (or (:spawned-at state) 0))
+                (spec-opt (:spec state) :fast-death-ms *default-fast-death-ms*))
+            (session-strike state)
+            (do
+              (sleep (spec-opt (:spec state) :respawn-pause-ms *default-respawn-pause-ms*))
+              (session-respawn state))))
+        state))
+    ;; User-initiated, so the strikes are forgiven: asking for a restart is not evidence
+    ;; that the child is broken.
+    ([:reset] (let (st (session-respawn state))
+                (if (= st :session-stopped) st (merge st {:strikes 0 :attempt 0}))))
+    ([:shutdown] (do (session-close-child state) :session-stopped))
+    (_ state)))
+
+(defn- session-loop (state)
+  (cond
+    (= state :session-stopped) :session-stopped
+    ;; Nothing to watch: park until a message arrives, rather than waking on a timer to
+    ;; discover there is still nothing to do.
+    (and (:ready state) (empty? (:inflight state)))
+      (session-loop (session-step state (receive (msg msg))))
+    else
+      (receive
+        (msg (session-loop (session-step state msg)))
+        (after (spec-opt (:spec state) :poll-ms *default-poll-ms*)
+          (session-loop (session-watchdog state))))))
+
+(defn- session-worker (name spec root sink)
+  "The session process body: spawn the child in `root` and serve until `[:shutdown]` —
+or until a `:spawn-failed` / `:gave-up` stop. Reached through [[session-start]], which is
+what gives it a name to be addressed by.
+
+`name` is carried so every event can say which session it is FROM ([[session-emit]]) — a
+program with two of these has to tell a fact about one child from the same fact about the
+other, and the session is the thing that knows."
+  (let (child (spec-call spec :spawn (list root 0)))
+    (if (nil? child)
+      (do (spec-call spec :emit (list sink :down :spawn-failed 1 name)) :session-stopped)
+      (session-loop {:spec spec
+                     :name name
+                     :proc child
+                     :buf ""
+                     :ready false
+                     :queue ()
+                     :inflight {}
+                     :gen 1
+                     :spawned-at (os/now)
+                     :root root
+                     :sink sink
+                     :attempt 0
+                     :strikes 0}))))
+
+;; ---- the client API -------------------------------------------------------------
+
+(defn session-running? (name)
+  "Whether the session process registered as `name` is alive.
+
+    (editor/evalsession/session-running? :no-such-session)   → false"
+  (not (nil? (proc/whereis name))))
+
+(defn session-start (name spec root sink)
+  "Ensure the session `name` is up (a named spawn is idempotent) and answer its pid, its
+child rooted in `root`. A session already running in a different root is re-rooted — a
+respawn there, ending the old session the way a reset does — and a nil `root` means any
+root will do, so a running session is left where it is.
+
+The child starts spawning immediately, so call this as early as the feature knows it
+will want one: a runtime's startup then happens while the reader is still reading.
+
+`(editor/evalsession/session-start :brood-eval spec project-root (self))` → that session's
+pid, its child already spawning. (Prose rather than an indented example, since running one
+would leave a child process behind; [[session-running?]] is the half that can be asserted.)"
+  (let (running (proc/whereis name))
+    (if running
+      (do (when root (send running [:reroot root])) running)
+      (spawn name (session-worker name spec root sink)))))
+
+(defn session-request (name id timeout-ms payload)
+  "Fire-and-forget: put request `id` on session `name`'s wire, `payload` being whatever
+its backend's `:encode` understands. The reply reaches the session's sink as a `:reply`
+event carrying that `:id`. Queued, not lost, while the child is still booting.
+
+Answers whether the request was ACCEPTED. False means the session is not running — it
+gave up, or never started — and **no reply for this id will ever arrive**, which the
+caller must not record as in flight: a request whose answer is already coming is never
+re-sent, so a promise recorded against a session that is gone waits forever.
+
+    (editor/evalsession/session-request :no-such-session 1 2000 nil)   → false"
+  (let (p (proc/whereis name))
+    (if (nil? p) false (do (send p [:request id timeout-ms payload]) true))))
+
+(defn session-reset (name)
+  "Restart session `name`: respawn its child, fresh image and empty session, answering
+any inflight requests `{:timeout true}`. A no-op when it is not running.
+
+    (editor/evalsession/session-reset :no-such-session)   → nil"
+  (let (p (proc/whereis name))
+    (when p (send p [:reset]))))
+
+(defn session-shutdown (name)
+  "Kill the child and stop the worker. A no-op when it is not running.
+
+    (editor/evalsession/session-shutdown :no-such-session)   → nil"
+  (let (p (proc/whereis name))
+    (when p (send p [:shutdown]))))

@@ -1,0 +1,244 @@
+;; std/editor/evalsession.blsp — the supervised child-process evaluation session.
+;;
+;; Everything below drives the worker's state machine as PURE FOLDS: line assembly,
+;; the ready gate and its queue, inflight settlement, the watchdog's two predicates,
+;; and the strike counter. No child is spawned — `:proc` is a token, and the backend
+;; spec's four hooks are this file's own functions — which is the point: the
+;; supervision is language-agnostic, so it can be tested without a language.
+
+(defmodule evalsession-test
+  (:use test)
+  (:use-internals editor/evalsession))
+
+;; ---- a backend made of paper --------------------------------------------------
+;; The smallest spec that satisfies the contract: `pr-str`ed maps on the wire (any
+;; encoding would do — the session never looks inside), and an `:emit` that sends the
+;; event to the sink as a plain tuple, so a test process can `receive` it.
+
+(defn es-encode (id timeout-ms payload) (pr-str {:id id :timeout-ms timeout-ms :payload payload}))
+
+(defn es-decode (line)
+  ;; check-allow :discarded-catch — a line that is not a map is the documented nil case
+  (check-allow :discarded-catch
+    (try (let (v (reflect/read-string line)) (if (map? v) v nil)) (catch _ nil))))
+
+(defn es-emit (sink kind payload gen name) (send sink [:event kind payload gen name]))
+
+(defn es-spawn-nothing (root attempt) nil) ; a backend that cannot start a child
+(def es-spec
+  {:spawn 'evalsession-test/es-spawn-nothing
+   :encode 'evalsession-test/es-encode
+   :decode 'evalsession-test/es-decode
+   :emit 'evalsession-test/es-emit})
+
+;; A worker state with no live child. `:proc` is a token: every path exercised here
+;; either never writes to it, or is asserted to have stopped before it would.
+(defn es-state (& overrides)
+  (merge {:spec es-spec
+          :proc :fake-proc
+          :sink (self)
+          :buf ""
+          :ready false
+          :queue ()
+          :inflight {}
+          :gen 1
+          :spawned-at 0
+          :root "/tmp"
+          :name :es
+          :strikes 0}
+    (if (empty? overrides) {} (first overrides))))
+
+(defn es-line (m) (str (pr-str m) "\n"))
+
+;; Every event now in the mailbox, oldest first, drained so nothing leaks into the
+;; next test's `receive`.
+(defn es-events ()
+  (letrec (drain (fn (acc)
+                   (receive
+                     ([:event kind payload gen name] (drain (cons [kind payload gen name] acc)))
+                     (after 0 (reverse acc)))))
+    (drain '())))
+
+(describe "evalsession line assembly"
+  (test "a reply split across two chunks is folded once, whole"
+    (let (s1 (editor/evalsession/session-feed (es-state) "{:id 1 :ok tr")
+          s2 (editor/evalsession/session-feed s1 "ue :value \"3\"}\n"))
+      ;; nothing complete in the first chunk, so nothing was emitted and the partial
+      ;; is held
+      (assert= (:buf s2) "")
+      (let (evs (es-events))
+        (assert= (count evs) 1)
+        (assert= (first (first evs)) :reply)
+        (assert= (get (second (first evs)) :value) "3"))))
+
+  (test "a line that does not decode is dropped, not fatal"
+    ;; the child's stdout is shared with whatever the evaluated code prints
+    (let (s (editor/evalsession/session-feed (es-state {:ready true})
+              "hello from a spawned process\n"))
+      (assert= (:inflight s) {})
+      (assert= (es-events) '())))
+
+  (test "a reply settles its inflight entry and leaves the others"
+    (let (s (editor/evalsession/session-feed (es-state {:ready true :inflight {1 99 2 99}})
+              (es-line {:id 1 :ok true})))
+      (assert= (keys (:inflight s)) '(2))
+      (assert= (count (es-events)) 1)))
+
+  ;; A child that streams — a test run reporting each verdict as it lands, a build
+  ;; reporting progress — is not finished when its first line arrives, and a session that
+  ;; settled the request there would stop guarding it halfway through.
+  (test "a chunk is forwarded and leaves the request in flight"
+    (let (s (editor/evalsession/session-feed (es-state {:ready true :inflight {1 99}})
+              (es-line {:id 1 :more true :test "one"})))
+      (assert= (keys (:inflight s)) '(1))
+      (let (evs (es-events))
+        (assert= (count evs) 1)
+        (assert= (get (second (first evs)) :test) "one"))))
+
+  (test "a chunk pushes the deadline out — progress is proof of life"
+    ;; a run streaming for ten minutes is working; a watchdog that killed it at the
+    ;; request timeout would make streaming useless for the long jobs that want it
+    (let (s (editor/evalsession/session-feed (es-state {:ready true :inflight {1 1}})
+              (es-line {:id 1 :more true})))
+      (is (> (get (:inflight s) 1) (os/now)))
+      ;; …and the wedged check, which was true a moment ago, is not any more
+      (is (not (editor/evalsession/session-wedged? s)))))
+
+  (test "the final reply settles what the chunks kept alive"
+    (let (s1 (editor/evalsession/session-feed (es-state {:ready true :inflight {1 99}})
+               (es-line {:id 1 :more true}))
+          s2 (editor/evalsession/session-feed s1 (es-line {:id 1 :ok true})))
+      (assert= (:inflight s2) {})
+      (assert= (count (es-events)) 2)))
+
+  (test "a chunk for an id nothing is waiting on does not resurrect it"
+    ;; one that arrived after the final reply, or after a respawn
+    (let (s (editor/evalsession/session-feed (es-state {:ready true :inflight {}})
+              (es-line {:id 9 :more true})))
+      (assert= (:inflight s) {})
+      (assert= (count (es-events)) 1)))
+
+  (test "a reply for an id nobody is waiting on is forwarded anyway"
+    ;; the session does not own the question of whose reply this is — a client that
+    ;; did not send it drops it, and that is where the knowledge lives
+    (let (s (editor/evalsession/session-feed (es-state {:ready true :inflight {}})
+              (es-line {:id 7 :ok true})))
+      (assert= (:inflight s) {})
+      (assert= (count (es-events)) 1))))
+
+(describe "evalsession ready gating"
+  (test "requests before the banner queue, and flush in order when it arrives"
+    (let (s1 (editor/evalsession/session-step (es-state) [:request 1 2000 {:src "a"}])
+          s2 (editor/evalsession/session-step s1 [:request 2 2000 {:src "b"}]))
+      ;; queued newest-first, and nothing is in flight until the child says it is up
+      (assert= (count (:queue s2)) 2)
+      (assert= (:inflight s2) {})
+      (assert= (es-events) '())))
+
+  (test "the ready banner announces itself and forgives the strikes"
+    (let (s (editor/evalsession/session-feed (es-state {:strikes 2}) (es-line {:ready true})))
+      (assert= (:ready s) true)
+      (assert= (:strikes s) 0)
+      (assert= (map (es-events) first) '(:ready))))
+
+  (test "a message the worker does not understand leaves it untouched"
+    (assert= (editor/evalsession/session-step (es-state) [:nonsense]) (es-state)))
+
+  (test "stdout from a proc that is not ours is ignored"
+    (assert= (editor/evalsession/session-step (es-state)
+               [:proc :someone-else (es-line {:ready true})])
+      (es-state))))
+
+(describe "evalsession watchdog"
+  (test "a deadline accounts for the requests queued ahead of it"
+    ;; the child answers one at a time, so a request sent now cannot START until every
+    ;; earlier deadline could have passed — without this, one slow request killed a
+    ;; healthy child by making the next one look wedged
+    (let (alone (editor/evalsession/session-deadline es-spec {} 1000 0)
+          behind (editor/evalsession/session-deadline es-spec {1 10000} 1000 0))
+      (assert= alone 2500) ; 1000 timeout + 1500 grace
+      (assert= behind 12500))) ; the same, measured from the deadline ahead of it
+  (test "a request past its deadline is wedged; one within it is not"
+    (is (editor/evalsession/session-wedged? (es-state {:inflight {1 1}})))
+    (is (not (editor/evalsession/session-wedged? (es-state {:inflight {1 (+ (os/now) 60000)}}))))
+    (is (not (editor/evalsession/session-wedged? (es-state)))))
+
+  (test "a child that never announced itself goes overdue; a ready one never does"
+    (is (editor/evalsession/session-boot-overdue? (es-state {:spawned-at 0})))
+    (is (not (editor/evalsession/session-boot-overdue? (es-state {:spawned-at (os/now)}))))
+    (is (not (editor/evalsession/session-boot-overdue? (es-state {:ready true :spawned-at 0})))))
+
+  (test "the boot budget is the backend's to set"
+    ;; a child that compiles a project before it can answer needs longer than one that
+    ;; loads an image, and that is a fact about the backend rather than about the session
+    (let (patient (merge es-spec {:boot-timeout-ms 600000}))
+      (is (not (editor/evalsession/session-boot-overdue? (es-state {:spec patient
+                                                                    :spawned-at (- (os/now) 60000)})))))))
+
+(describe "evalsession giving up"
+  (test "a child that cannot be spawned stops the worker after saying so"
+    ;; the strike path respawns, the respawn cannot spawn, and the worker stops rather
+    ;; than looping on a child that will never exist
+    (let (s (editor/evalsession/session-step (es-state {:ready true :spawned-at (os/now)})
+              [:proc-closed :fake-proc 1]))
+      (assert= s :session-stopped)
+      ;; both the death and the failure to replace it are reported
+      (assert= (map (es-events) first) '(:down :down))))
+
+  (test "an inflight request is answered when its session dies"
+    ;; no request may vanish without an answer: a caller that believes an answer is
+    ;; coming never re-sends, so silence here wedges that caller forever
+    (let (_ (editor/evalsession/session-step (es-state {:ready true
+                                                        :spawned-at (os/now)
+                                                        :inflight {5 99}})
+              [:proc-closed :fake-proc 1])
+          evs (es-events)
+          replies (seq/filter evs (fn (e) (= (first e) :reply))))
+      (assert= (count replies) 1)
+      (assert= (get (second (first replies)) :id) 5)
+      (is (get (second (first replies)) :timeout)))))
+
+(describe "evalsession attempts"
+  ;; A backend is told which attempt a spawn is, so it can start its child differently once
+  ;; the optimistic way has been shown not to work. Without it, a child that cannot boot in
+  ;; the configuration asked for is retried identically until the strikes run out — which is
+  ;; what a Phoenix app whose `Application.start/2` raises did to the Elixir playground:
+  ;; three dead boots and then nothing, where `mix run --no-start` would have worked.
+  (test "a spawn is told which attempt it is, and a respawn is a later one"
+    ;; the attempts this backend was asked for, in order, collected in a table
+    (let (seen (%table)
+          record-attempt (fn (root attempt)
+                           (do
+                             (%table-put seen :n (append (%table-get seen :n []) [attempt]))
+                             :a-child))
+          spec (merge es-spec {:spawn record-attempt})
+          st (editor/evalsession/session-step (es-state {:spec spec
+                                                         :ready true
+                                                         :spawned-at (os/now)})
+               [:proc-closed :fake-proc 1]))
+      (is (not (= st :session-stopped)))
+      (assert= (into [] (%table-get seen :n [])) [1])
+      ;; and again, higher
+      (let (_ (editor/evalsession/session-step (assoc st :spawned-at (os/now))
+                [:proc-closed :a-child 1]))
+        (assert= (into [] (%table-get seen :n [])) [1 2]))))
+
+  ;; A reset and a reroot are someone saying "try properly", not evidence that the
+  ;; optimistic way is broken — so both start again at attempt 0.
+  (test "a user-initiated reset goes back to the optimistic attempt"
+    (let (seen (%table)
+          record-attempt (fn (root attempt)
+                           (do
+                             (%table-put seen :n (append (%table-get seen :n []) [attempt]))
+                             :a-child))
+          spec (merge es-spec {:spawn record-attempt})
+          st (editor/evalsession/session-step (es-state {:spec spec :ready true :attempt 4})
+               [:reset]))
+      (assert= (:attempt st) 0)))
+
+  (test "a reroot to another project starts optimistic there too"
+    (let (spec (merge es-spec {:spawn (fn (root attempt) :a-child)})
+          st (editor/evalsession/session-step (es-state {:spec spec :ready true :attempt 4})
+               [:reroot "/somewhere/else"]))
+      (assert= (:attempt st) 0)
+      (assert= (:root st) "/somewhere/else"))))
