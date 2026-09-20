@@ -134,17 +134,28 @@ handles from 1, process-wide, so a handle can never name another window's textur
 
     (try (gui/texture 0 {:width 1 :height 1 :rgba [1 2 3]}) (catch e :bad-size))   → :bad-size   ; 1×1 needs 4 bytes"
   ((id image) (texture id (get image :rgba) (get image :width) (get image :height)))
-  ((id rgba w h) (let (registry (textures)
-                       tex (table/incr registry :next))
-                   (%gui-texture id tex rgba w h)
-                   (table/put registry tex [w h])
-                   tex)))
+  ((id rgba w h) (let (tex (alloc-texture w h)) (%gui-texture id tex rgba w h) tex)))
+
+(defn alloc-texture (w h)
+  "Allocate a texture handle for a `w`×`h` upload and remember the size under it — the Brood half of gui/texture, on its own for an app that uploads through a DISPLAY map's `:texture` (a window it did not open, or a thin client's over the wire — `editor/ui/display-texture`) rather than a window id. The handle is process-wide and never reused, so it can name a texture in any window.
+
+    (gui/texture-size (gui/alloc-texture 4 2))   → [4 2]"
+  (let (registry (textures)
+        tex (table/incr registry :next))
+    (table/put registry tex [w h])
+    tex))
 
 (defn texture-size (tex)
   "The [w h] in texture pixels a handle from gui/texture was uploaded with, or nil for an unknown handle (one this process never uploaded, or already freed).
 
     (gui/texture-size 0)   → nil"
   (table/get (textures) tex))
+
+(defn input (id mode)
+  "Deliver window id's mouse input in :pixels or :cells from now on — the `{:input …}` gui/open option, switchable after the window exists. The window then reports its size in that unit: a [:resize w h] in pixels follows a switch to :pixels, [:resize cols rows] a switch back. How a window a generic thin client opened (`nest attach --gui`) is told, by the app it attached to, which unit it wants.
+
+    (try (gui/input :w :pixels) (catch e :bad-id))   → :bad-id   ; a window id is an int"
+  (%gui-input! id mode))
 
 (defn texture-free (id tex)
   "Release texture tex of window id and forget its size; a later [:sprite …] naming it draws nothing. Idempotent. Returns nil.

@@ -187,8 +187,8 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
    "observe" {:about "Open a live process observer — a full-screen TUI of processes, status, mailbox and memory (Erlang-observer style, ADR-046). With no `--connect`, a standalone demo over a fresh runtime's own processes; with `--connect name@host:port`, attach to a RUNNING program over the node link (it must have called `node-start` + `observe-serve`). `q`/Esc/Ctrl-C quits."
               :flags {"--connect" "NODE" "--cookie" "COOKIE"}
               :run (fn (o) (run-observe o))}
-   "attach" {:about "Attach this terminal to a `ui-run` app served by a running daemon — the `emacsclient` to its `--daemon` (ADR-090). SPEC is the served node: a bare `name` over the local Unix socket, or `name@host:port` over TCP. The cookie comes from `--cookie`, `$BROOD_COOKIE`, else the shared `~/.config/brood/cookie`. The app's own quit key detaches."
-             :flags {"--cookie" "COOKIE"}
+   "attach" {:about "Attach this terminal — or, with `--gui`, a native window — to a `ui-run` app served by a running daemon — the `emacsclient` to its `--daemon` (ADR-090). SPEC is the served node: a bare `name` over the local Unix socket, or `name@host:port` over TCP. The cookie comes from `--cookie`, `$BROOD_COOKIE`, else the shared `~/.config/brood/cookie`. The app's own quit key detaches; the window's X does too. `--gui` is the frontend as its own process: the app runs headless in the daemon and this window is all the display it has (a game served by b2d, an editor served by bedit)."
+             :flags {"--cookie" "COOKIE" "--gui" :bool}
              :positional ["spec" nil]
              :arity 1
              :run (fn (o) (run-attach o))}
@@ -986,10 +986,20 @@ so a matching local setup needs no flag."
           0))))
 
 (defn- run-attach (o)
-  (let (spec (first (get o :positionals)) cookie (link-cookie (get (get o :flags) "--cookie")))
-    (if (require-terminal "attach")
-      (do (if cookie (editor/serve/attach spec cookie) (editor/serve/attach spec)) 0)
-      2)))
+  (let (spec (first (get o :positionals))
+        cookie (link-cookie (get (get o :flags) "--cookie")))
+    (cond
+      ;; A window needs no terminal: the frontend is its own process, and the app it
+      ;; attaches to tells it what kind of window it wants (`[:window …]`, ADR-374).
+      (get (get o :flags) "--gui")
+        (do
+          (editor/serve/attach-display spec
+            (editor/ui/gui-display {:title (str "brood — " spec)})
+            cookie)
+          0)
+      (require-terminal "attach")
+        (do (if cookie (editor/serve/attach spec cookie) (editor/serve/attach spec)) 0)
+      else 2)))
 
 ;; ── entry points ─────────────────────────────────────────────────────────────────────
 

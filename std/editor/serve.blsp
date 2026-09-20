@@ -70,6 +70,13 @@ consumes them), leaving a served app deaf to everything but keys."
    :leave (fn () (send client [:bye]))
    :size (fn () [cols rows])
    :draw (fn (f) (send client [:frame f]))
+   ;; The pixel-space seam (ADR-374) over the wire: a texture, its release, and the
+   ;; window options an app asks for after attaching (`:input :pixels`, a title) each
+   ;; go to the client as a message its loop applies to its own display — so a game
+   ;; written against a display map serves to a thin client's window unchanged.
+   :texture (fn (tex rgba w h) (send client [:texture tex rgba w h]))
+   :texture-free (fn (tex) (send client [:texture-free tex]))
+   :configure (fn (o) (send client [:window o]))
    :poll (fn (ms)
            (receive
              ([:key k] k)
@@ -241,6 +248,17 @@ ends the loop; `:close` (the window's X button) ships a `[:detach]` and ends; an
 else is a key/mouse input shipped to the daemon `session` as `[:key …]`. Tail-recursive."
   (receive
     ([:frame f] (do ((get display :draw) f) (attach-display-loop peer session display)))
+    ;; The pixel-space seam: applied to the local display when it has the entry (a
+    ;; window), dropped when it does not (a terminal cannot show a sprite anyway).
+    ([:texture tex rgba w h] (do
+                               (when (get display :texture) ((get display :texture) tex rgba w h))
+                               (attach-display-loop peer session display)))
+    ([:texture-free tex] (do
+                           (when (get display :texture-free) ((get display :texture-free) tex))
+                           (attach-display-loop peer session display)))
+    ([:window o] (do
+                   (when (get display :configure) ((get display :configure) o))
+                   (attach-display-loop peer session display)))
     ([:bye] nil)
     ([:nodedown ^peer] nil)
     ([:down _ _ _] nil)

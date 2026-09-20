@@ -226,6 +226,13 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "Release texture tex of window id; a later [:sprite …] naming it draws nothing. Idempotent. Returns nil.",
         gui_texture_free);
     primitives.def(
+        "%gui-input!",
+        Arity::exact(2),
+        Sig::new(vec![int, kw], nil_ty),
+        &["id", "mode"],
+        "Deliver window id's mouse input in :pixels or :cells from now on — the `{:input …}` gui-open option, switchable after the window exists (how a window a generic thin client opened is told by the app it attached to which unit it wants). The window then reports its size in that unit ([:resize w h] in pixels, or [:resize cols rows]). Returns nil.",
+        gui_input);
+    primitives.def(
         "%gui-cell-size",
         Arity::range(1, 2),
         Sig::with_optional(vec![int], vec![Ty::of_tags(&[Tag::Int, Tag::Float])], vec_ty),

@@ -24211,3 +24211,22 @@ differs in 3% of bytes, nearly all of it the one difference that remains by desi
 GPU samples grey AA where the CPU path renders subpixel text at 1×, and the contrast lift
 is not applied. Every op kind is now drawn on both targets; the GPU target is no longer
 "experimental" anywhere in the tree.
+
+### ADR-374 addendum 2 (2026-09-20, later still) — the window as its own process
+
+The frontend break-out (ADR-090's shape, for a game) turned out to be three messages
+and one primitive, all policy: `remote-display` gained `:texture`, `:texture-free` and
+`:configure`, each one client-bound message (`[:texture tex rgba w h]`, `[:texture-free
+tex]`, `[:window opts]`) the thin client's `attach-display-loop` applies to its own display
+— which is why a texture handle is Brood-allocated (`gui/alloc-texture`): the app names
+the texture, both windows agree. `gui-display` carries the same three entries for the
+local case, so a game written against a display map (`editor/ui/display-texture`,
+`:configure`) runs unchanged in its own window or in a client's. The one mechanism added
+is `%gui-input!`: a window a generic client opened (`nest attach --gui NAME`) cannot know
+what the app it is about to serve wants, so the app tells it after the fact and the
+window republishes its size in the new unit. `b2d/run-on` runs the loop over any display;
+`b2d/serve` registers a session per attaching client under `editor/serve`'s name. Cost
+measured on the demo at 60 fps: ~3% of a core for the headless daemon, ~6% for the
+window. Not done: live vsync over the wire (the client's window decides), and a
+frontend that is not a Brood runtime at all — a browser painting the same ops, which is
+the wasm route.
