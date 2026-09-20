@@ -4014,7 +4014,9 @@ pub(super) fn live_private_functions(
 }
 
 /// Every curated name, for the construction gate that holds the curated skip sound
-/// (`check/tests/image_sigs.rs::a_curated_name_reads_the_same_loaded_or_not`).
+/// (`check/tests/image_sigs.rs::a_curated_name_reads_the_same_loaded_or_not`). Test-only:
+/// nothing but that gate reads it, and `-D dead-code` under `--all-features` is CI's clippy.
+#[cfg(test)]
 pub(super) fn curated_names() -> Vec<Symbol> {
     CURATED_SIGS.keys().copied().collect()
 }
