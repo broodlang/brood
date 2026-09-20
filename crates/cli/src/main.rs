@@ -334,7 +334,10 @@ fn check_one_file_ext(
         .then(|| brood::cli_support::run_check_cache_read(src))
         .flatten()
     {
-        Some(w) => w,
+        Some(entry) => {
+            brood::cli_support::run_check_cache_replay_loads(interp, &entry.loads);
+            entry.warnings
+        }
         None => {
             let forms = match brood::syntax::reader::read_all_positioned(&mut interp.heap, src) {
                 Ok(forms) => forms,
@@ -344,9 +347,14 @@ fn check_one_file_ext(
                 }
             };
             let just_forms: Vec<_> = forms.into_iter().map(|(f, _)| f).collect();
+            let before = if cached {
+                brood::cli_support::run_check_features_before(&interp.heap)
+            } else {
+                Vec::new()
+            };
             let w = brood::types::check::check_file(&mut interp.heap, &just_forms);
             if cached {
-                brood::cli_support::run_check_cache_write(&interp.heap, src, &w);
+                brood::cli_support::run_check_cache_write(&interp.heap, src, &before, &w);
             }
             w
         }

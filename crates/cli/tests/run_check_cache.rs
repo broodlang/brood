@@ -113,6 +113,95 @@ fn a_hit_replays_the_recorded_verdict_and_a_miss_records_one() {
     );
 }
 
+/// A hit replays the walk's LOADS, not only its warnings. The pre-flight loads the file's
+/// own references eagerly and those loads survive into the run; replaying only the warnings
+/// left the run to load them lazily at first use — correct, and since KI-167 no slower, but
+/// the body compiled before the load recompiles (ADR-366) and that churn measured +4 MB
+/// peak RSS on `(io/puts 0)` (50.7 MB against 44.7 with the walk; 44.3 with the replay).
+/// Observable as the churn itself: `BROOD_TRACE_COMPILE=1` prints `[compile] stale-bindings
+/// arm=<closure>: a miss on io/puts loaded its module` when the program's top-level form was
+/// compiled before `io` loaded — the no-check control shows the line, the walk does not, and
+/// the hit must not either. Sabotage: skip the replay → the hit prints it.
+#[test]
+fn a_hit_replays_the_loads_the_walk_made() {
+    let sb = Sandbox::new("loads");
+    // A std reference defers only under an IMAGED boot (the kind index that says a head is
+    // not a macro is the image's — ADR-335); a source boot loads it at expansion and the
+    // control below could not tell a replay from that. The sandbox cache starts empty, so
+    // build this binary's stdlib image into it first, the way `stdimage_reporting.rs` does.
+    std::fs::write(
+        sb.dir.join("build-image.blsp"),
+        "(require-one 'stdimage) (stdimage/build)\n",
+    )
+    .unwrap();
+    let built = Command::new(env!("CARGO_BIN_EXE_brood"))
+        .current_dir(&sb.dir)
+        .env("XDG_CACHE_HOME", sb.cache_home())
+        .env("BROOD_NO_CHECK", "1")
+        .env_remove("BROOD_NO_STDIMAGE")
+        .env_remove("BROOD_NO_PRELUDE_IMAGE")
+        .arg("build-image.blsp")
+        .output()
+        .expect("build the stdlib image");
+    assert!(
+        built.status.success(),
+        "building the sandbox's stdlib image failed:\n{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let prog = sb.write("loads.blsp", "(io/puts (str \"hello \" 1))\n");
+    let p = prog.to_str().unwrap();
+    const STALE: &str = "[compile] stale-bindings arm=<closure>: a miss on io/puts";
+    let run = |extra: &[(&str, &str)]| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_brood"));
+        cmd.current_dir(&sb.dir)
+            .env("XDG_CACHE_HOME", sb.cache_home())
+            .env("BROOD_NO_CRASH_REPORT", "1")
+            .env("BROOD_TRACE_COMPILE", "1")
+            .env_remove("BROOD_NO_CHECK")
+            .env_remove("BROOD_NO_CHECK_CACHE")
+            .env_remove("BROOD_NO_STDIMAGE")
+            .env_remove("BROOD_NO_PRELUDE_IMAGE")
+            .arg(p);
+        for (k, v) in extra {
+            cmd.env(k, v);
+        }
+        let out = cmd.output().expect("run brood");
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    };
+    // The control: with no check at all, `io` loads lazily at the call and the form that
+    // was compiled before it is marked stale — the churn the replay exists to prevent.
+    let control = run(&[("BROOD_NO_CHECK", "1")]);
+    assert!(
+        control.contains(STALE),
+        "without a check `io` must load lazily and mark the form stale, or this test cannot \
+         see a replay:\n{control}"
+    );
+    let miss = run(&[]);
+    assert!(
+        miss.contains("hello 1") && !miss.contains(STALE),
+        "the walk loads `io` before the form compiles:\n{miss}"
+    );
+    let entries = sb.entries();
+    assert_eq!(entries.len(), 1);
+    let text = std::fs::read_to_string(&entries[0]).unwrap();
+    assert!(
+        text.lines()
+            .nth(1)
+            .is_some_and(|l| l.starts_with("loads") && l.contains("io")),
+        "the entry must record that the walk loaded `io`:\n{text}"
+    );
+    let hit = run(&[]);
+    assert!(
+        hit.contains("hello 1") && !hit.contains(STALE),
+        "the hit did not replay the walk's load of `io` — the form compiled before the lazy \
+         load and was marked stale:\n{hit}"
+    );
+}
+
 #[test]
 fn a_check_that_loaded_a_load_path_module_is_not_cached_and_follows_its_edit() {
     let sb = Sandbox::new("loadpath");

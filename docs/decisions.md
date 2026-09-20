@@ -23933,6 +23933,23 @@ module declines the write and the verdict follows the module's edit; the off swi
 reads nor writes; `--check` ignores a doctored entry. Sabotage-verified: disabling the
 load-path decline reds the second.
 
+**Addendum, the same evening — a hit replays the walk's LOADS too (entry format v2).** The
+first column refresh on the cache read `startup`'s base RSS **43.6 → 50.5 MB**. The walk
+loads the file's own references eagerly (ADR-370's drain) and those loads survive into the
+run (ADR-339); a hit that replayed only the warnings left the run to load `io` lazily at
+first use — correct, and since KI-167 no slower, but the top-level form compiled before the
+load is marked stale and recompiled (ADR-366), and that churn is the memory: `(io/puts 0)`
+peaks at 44.7 MB after a walk, 50.7 MB with no check, 44.3 MB on a hit that first
+`require`s what the walk loaded (`BROOD_NO_LAZY_LOAD=1` closed the gap, which attributed it).
+The entry now carries a `loads` line — the embedded modules `*features*` gained during the
+walk — and a hit replays them from the image before the program runs. **Two traps met on the
+way:** an entry written under a STALE stdlib image records source-path loads (six modules
+for that one-liner) and replaying those cost 64 MB, so measure hits with `(stdimage/status)`
+live; and the key had hashed every `BROOD_*` variable, which made a hit unobservable under
+any trace flag — it hashes an explicit list of the flags that change a walk's verdict or
+loads now (`run_check_cache_path`). Guard: `a_hit_replays_the_loads_the_walk_made`, on the
+stale-recompile line itself (sabotage: skip the replay → the hit prints it).
+
 ## ADR-372 — A polymorphic register-carried param re-lowers boxed instead of deopting forever
 
 **Status:** implemented 2026-09-20.

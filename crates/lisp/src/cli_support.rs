@@ -568,6 +568,17 @@ impl Drop for RawTermGuard {
 // the checking mode. The same shape as `nest run`'s own pre-flight manifest
 // (`project-check.blsp`, `"checks-run"`), which reuses on the file's mtime.
 //
+// A hit replays the check's LOADS as well as its warnings. The pre-flight loads the file's
+// own references eagerly (ADR-370's drain), and those loads survive into the run (ADR-339:
+// a module load is a runtime-wide fact); a run that skipped the walk would instead load
+// them lazily at first use, which is correct and — since KI-167 — no slower, but the body
+// compiled before the load is marked stale and recompiled (ADR-366), and that churn
+// measured **+4 MB peak RSS** on the `startup` row (`(io/puts 0)`: 46.0 MB with the walk,
+// 49.9 MB replaying only the warnings; `BROOD_NO_LAZY_LOAD=1` closed the gap, which is how
+// it was attributed). So the entry records the embedded modules `*features*` gained during
+// the walk, and a hit `require`s them first — from the image, a millisecond — leaving the
+// runtime in the state a walk would have left it.
+//
 // What it will NOT cache: a check that loaded a module from OUTSIDE the binary — a
 // `(:use foo)` found on the load-path — because that file's content is not in the key
 // and an edit to it must re-derive the verdict. `*features*` after the check names every
@@ -575,15 +586,28 @@ impl Drop for RawTermGuard {
 // program pays the walk it always did. `BROOD_NO_CHECK_CACHE=1` bypasses the cache both
 // ways, as it does `nest check`'s.
 
+/// A cached run pre-flight: the modules the walk loaded (to replay) and its warnings.
+pub struct RunCheckEntry {
+    pub loads: Vec<String>,
+    pub warnings: Vec<(Option<crate::error::Pos>, String)>,
+}
+
 /// The cached verdict of the run pre-flight for `src` under this binary and mode, or
 /// `None` on a miss (no cache dir, the flag, an unreadable or malformed entry).
-pub fn run_check_cache_read(src: &str) -> Option<Vec<(Option<crate::error::Pos>, String)>> {
+pub fn run_check_cache_read(src: &str) -> Option<RunCheckEntry> {
     let path = run_check_cache_path(src)?;
     let text = std::fs::read_to_string(&path).ok()?;
     let mut lines = text.lines();
     if lines.next()? != RUN_CHECK_CACHE_MAGIC {
         return None;
     }
+    let loads: Vec<String> = lines
+        .next()?
+        .strip_prefix("loads")?
+        .split('\t')
+        .filter(|m| !m.is_empty())
+        .map(str::to_string)
+        .collect();
     let mut out = Vec::new();
     for line in lines {
         let mut parts = line.splitn(3, '\t');
@@ -600,7 +624,27 @@ pub fn run_check_cache_read(src: &str) -> Option<Vec<(Option<crate::error::Pos>,
         };
         out.push((pos, msg));
     }
-    Some(out)
+    Some(RunCheckEntry {
+        loads,
+        warnings: out,
+    })
+}
+
+/// The modules loaded BEFORE the walk — `run_check_cache_write` subtracts these from the
+/// modules loaded after it to learn what the walk itself loaded.
+pub fn run_check_features_before(heap: &crate::core::heap::Heap) -> Vec<String> {
+    crate::builtins::provided_features(heap)
+}
+
+/// Replay a hit's loads: `require` each module the walk had loaded, so the run starts from
+/// the state a walk leaves. Best-effort — a module that will not load now fails the same
+/// way at the program's own first use of it, with the program's own error.
+pub fn run_check_cache_replay_loads(interp: &mut Interp, loads: &[String]) {
+    for m in loads {
+        if crate::builtins::is_embedded_module(m) {
+            let _ = interp.eval_str(&format!("(require-one '{m})"));
+        }
+    }
 }
 
 /// Record the pre-flight's verdict for `src` — unless the check loaded a module from
@@ -609,6 +653,7 @@ pub fn run_check_cache_read(src: &str) -> Option<Vec<(Option<crate::error::Pos>,
 pub fn run_check_cache_write(
     heap: &crate::core::heap::Heap,
     src: &str,
+    features_before: &[String],
     warnings: &[(Option<crate::error::Pos>, String)],
 ) {
     let Some(path) = run_check_cache_path(src) else {
@@ -617,7 +662,17 @@ pub fn run_check_cache_write(
     if !crate::builtins::every_provided_feature_is_embedded(heap) {
         return;
     }
+    let loads: Vec<String> = crate::builtins::provided_features(heap)
+        .into_iter()
+        .filter(|m| features_before.binary_search(m).is_err())
+        .collect();
     let mut text = String::from(RUN_CHECK_CACHE_MAGIC);
+    text.push('\n');
+    text.push_str("loads");
+    for m in &loads {
+        text.push('\t');
+        text.push_str(m);
+    }
     text.push('\n');
     for (pos, msg) in warnings {
         match pos {
@@ -642,7 +697,7 @@ pub fn run_check_cache_write(
     run_check_cache_prune(dir, &path);
 }
 
-const RUN_CHECK_CACHE_MAGIC: &str = "brood-run-check-v1";
+const RUN_CHECK_CACHE_MAGIC: &str = "brood-run-check-v2";
 
 /// `~/.cache/brood/run-check/<hash>` for `src` under this binary and checking mode; `None`
 /// under `BROOD_NO_CHECK_CACHE`, or with no cache base to write under.
@@ -661,24 +716,28 @@ fn run_check_cache_path(src: &str) -> Option<std::path::PathBuf> {
     crate::builtins::build_id_string().hash(&mut h);
     crate::builtins::stdlib_id_string().hash(&mut h);
     crate::types::strict_checking().hash(&mut h);
-    // Every `BROOD_*` variable set, name and value, sorted: a flag the checker reads changes
-    // what a walk does (`BROOD_NO_IMAGE_SIGS`, `BROOD_NO_DERIVE_CACHE`, …) and the catalogue
-    // grows, so the key takes them all rather than naming the ones that matter today. A
-    // harness sets none, or the same ones every run; an A/B under a flag gets its own entries.
-    // `vars_os`, never `vars`: that one PANICS on a non-UTF-8 value, and a hostile
-    // environment is a test (`builtin_robustness_test`) — a lossy spelling keys just as well.
-    let prefix = concat!("BROOD", "_"); // spelled apart: the flag catalogue's drift gate greps for `BROOD_*` names
-    let mut flags: Vec<(String, String)> = std::env::vars_os()
-        .map(|(k, v)| {
-            (
-                k.to_string_lossy().into_owned(),
-                v.to_string_lossy().into_owned(),
-            )
-        })
-        .filter(|(k, _)| k.starts_with(prefix))
-        .collect();
-    flags.sort();
-    flags.hash(&mut h);
+    // The flags that change what a walk DOES — its verdict or its loads — name and value.
+    // An explicit list, not every `BROOD_*` set: the first version hashed them all, and then
+    // no hit could be observed under any trace flag (`BROOD_IMAGE_TRACE=1` was its own key),
+    // which is how a +4 MB RSS question about the hit path went unanswerable for an hour. A
+    // new checker or loader flag belongs here; a trace flag does not.
+    // `var_os`, never `var`: that one errors on a non-UTF-8 value and a hostile environment
+    // is a test (`builtin_robustness_test`) — a lossy spelling keys just as well.
+    for name in [
+        "BROOD_NO_IMAGE_SIGS",
+        "BROOD_NO_DERIVE_CACHE",
+        "BROOD_NO_LAZY_LOAD",
+        "BROOD_NO_STDIMAGE",
+        "BROOD_NO_PRELUDE_IMAGE",
+        "BROOD_CONTRACTS",
+        "BROOD_COVERAGE",
+        "BROOD_TIER",
+        "BROOD_VM",
+        "BROOD_NO_JIT",
+    ] {
+        let v = std::env::var_os(name).map(|v| v.to_string_lossy().into_owned());
+        (name, v).hash(&mut h);
+    }
     src.hash(&mut h);
     Some(
         base.join("brood")

@@ -80,7 +80,9 @@ pub use io::{arm_mcp_progress, begin_stdout_capture, disarm_mcp_progress, take_c
 // The checker specializes `(string/->number "1")` to the literal `1`, and may only do so by
 // deciding parseability exactly as the runtime does — so it calls the runtime's own
 // classifier rather than growing a second one that could drift (`types::check::infer`).
-pub(crate) use modules::every_provided_feature_is_embedded;
+pub(crate) use modules::{
+    every_provided_feature_is_embedded, is_embedded_module, provided_features,
+};
 pub(crate) use numeric::{classify_numeric_text, NumericText};
 pub use os::set_script_args;
 #[cfg(feature = "jit")]

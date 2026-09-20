@@ -1394,6 +1394,29 @@ pub(crate) fn is_embedded_module(key: &str) -> bool {
 /// module, never a file found on the load-path or a mounted bundle? The run pre-flight's
 /// verdict cache (`cli_support`) writes an entry only when this holds, because a load-path
 /// file's content is not in its key. Read-only.
+/// The names in `*features*` — every module this runtime has `provide`d — sorted. The run
+/// pre-flight's verdict cache diffs this before and after the walk to learn which modules
+/// the CHECK loaded, and replays those loads on a hit (`cli_support::run_check_cache_*`).
+pub(crate) fn provided_features(heap: &Heap) -> Vec<String> {
+    let map_id = match heap
+        .env_get(value::EnvId::GLOBAL, value::intern("*features*"))
+        .map(|v| v.unpack())
+    {
+        Some(crate::core::value::ValueRef::Map(id)) => id,
+        _ => return Vec::new(),
+    };
+    let mut out: Vec<String> = heap
+        .map_entries(map_id)
+        .iter()
+        .filter_map(|(k, _)| match *k {
+            Value::Str(s) => Some(heap.string(s).to_string()),
+            _ => None,
+        })
+        .collect();
+    out.sort();
+    out
+}
+
 pub(crate) fn every_provided_feature_is_embedded(heap: &Heap) -> bool {
     let map_id = match heap
         .env_get(value::EnvId::GLOBAL, value::intern("*features*"))
