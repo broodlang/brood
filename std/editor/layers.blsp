@@ -469,9 +469,7 @@ It is derived from the same shallow-merge rule `active-keymap` dispatches throug
 its own answer is help that drifts from the dispatcher and then lies — and a lying keymap
 help is worse than none, because it is believed.
 
-    (editor/layers/scope-bindings
-      (list {:layers (list {:name :mode :keymap {:a 'go}})}))
-      → [{:sequence [:a] :command go :layer :mode :shadowed-by nil}]"
+    (editor/layers/scope-bindings (list {:layers (list {:name :mode :keymap {:a 'go}})}))   → [{:sequence [:a] :command go :layer :mode :shadowed-by nil}]"
   (let (layers (map (compose-layers ctxs) layers-resolve))
     (into []
       (mapcat (range (count layers))
