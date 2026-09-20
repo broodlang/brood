@@ -53,8 +53,130 @@ pub(crate) enum Watcher {
 /// so the local-monitor path and the cross-node-monitor path share the same
 /// "is the target alive? add or fire :noproc" logic and the same fan-out from
 /// `deregister`.
-pub(super) static MONITORS: LazyLock<Mutex<HashMap<u64, Vec<Watcher>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+///
+/// Indexed from BOTH ends, as Erlang keeps both sides' monitor lists on the process:
+/// `by_target` answers a target's death (fan the downs out), `by_watcher` answers a
+/// watcher's death and its `demonitor` — each touching only that process's own entries.
+/// Until 2026-09-20 there was only the first index, and a watcher's death or a
+/// `demonitor` walked the WHOLE table ("cold death path, so the full-table walk is
+/// fine") — fine at ten monitors and O(n²) for a fleet: a supervisor holding 200 000
+/// monitored children paid **1.2 ms per child death** (200 000 entries walked each time)
+/// against 0.7 µs for an unmonitored one, 1 500× — the whole of `exit :kill`'s cost on the
+/// process-lifecycle probe was this walk. `demonitor` had the same shape.
+pub(super) static MONITORS: LazyLock<Mutex<MonitorTable>> =
+    LazyLock::new(|| Mutex::new(MonitorTable::default()));
+
+/// The two-ended monitor index behind [`MONITORS`].
+#[derive(Default)]
+pub(super) struct MonitorTable {
+    /// watched pid → its watchers, in monitor order (the `[:down …]` fan-out order).
+    by_target: HashMap<u64, Vec<Watcher>>,
+    /// LOCAL watcher pid → {its mref → the pid it watches}. Remote watchers are not
+    /// indexed here: they are retired by node-down and `Frame::Demonitor`, both cold and
+    /// both already full walks (`drop_monitor`).
+    by_watcher: HashMap<u64, HashMap<u64, u64>>,
+}
+
+impl MonitorTable {
+    /// Register `watcher` on a live `target` — both indexes.
+    fn insert(&mut self, target: u64, watcher: Watcher) {
+        if let Watcher::Local { pid, mref } = watcher {
+            self.by_watcher.entry(pid).or_default().insert(mref, target);
+        }
+        self.by_target.entry(target).or_default().push(watcher);
+    }
+
+    /// `target` died: take its watchers (the caller fires the downs) and retire each local
+    /// watcher's reverse entry.
+    pub(super) fn take_target(&mut self, target: u64) -> Vec<Watcher> {
+        let watchers = self.by_target.remove(&target).unwrap_or_default();
+        for w in &watchers {
+            if let Watcher::Local { pid, mref } = *w {
+                self.forget_watch(pid, mref);
+            }
+        }
+        watchers
+    }
+
+    /// Drop the reverse entry `(watcher pid, mref)`, pruning the watcher's map when empty.
+    fn forget_watch(&mut self, pid: u64, mref: u64) {
+        if let Some(m) = self.by_watcher.get_mut(&pid) {
+            m.remove(&mref);
+            if m.is_empty() {
+                self.by_watcher.remove(&pid);
+            }
+        }
+    }
+
+    /// Drop the one monitor `(watcher pid, mref)` from the target it watches — `demonitor`.
+    /// O(watchers of that one target), never a table walk. False if no such monitor.
+    fn remove_local(&mut self, pid: u64, mref: u64) -> bool {
+        let Some(target) = self
+            .by_watcher
+            .get(&pid)
+            .and_then(|m| m.get(&mref).copied())
+        else {
+            return false;
+        };
+        self.forget_watch(pid, mref);
+        self.retain_target(
+            target,
+            |w| !matches!(*w, Watcher::Local { pid: p, mref: r } if p == pid && r == mref),
+        );
+        true
+    }
+
+    /// Keep only `target`'s watchers passing `keep`, pruning the target's key when empty.
+    fn retain_target(&mut self, target: u64, keep: impl Fn(&Watcher) -> bool) {
+        if let Some(ws) = self.by_target.get_mut(&target) {
+            ws.retain(keep);
+            if ws.is_empty() {
+                self.by_target.remove(&target);
+            }
+        }
+    }
+
+    /// Watcher `pid` died: retire every monitor it held, each from its own target only.
+    fn remove_watcher(&mut self, pid: u64) {
+        let Some(held) = self.by_watcher.remove(&pid) else {
+            return;
+        };
+        for (mref, target) in held {
+            self.retain_target(
+                target,
+                |w| !matches!(*w, Watcher::Local { pid: p, mref: r } if p == pid && r == mref),
+            );
+        }
+    }
+
+    /// How many watchers `target` has.
+    fn watcher_count(&self, target: u64) -> usize {
+        self.by_target.get(&target).map_or(0, Vec::len)
+    }
+
+    /// Remove every watcher matching `pred` from every target — the cold full walk the
+    /// REMOTE retirements need (node-down, `Frame::Demonitor`); a local watcher it happens
+    /// to match is retired from both indexes.
+    fn retain_all(&mut self, pred: impl Fn(&Watcher) -> bool) {
+        let mut dropped_local: Vec<(u64, u64)> = Vec::new();
+        self.by_target.retain(|_, watchers| {
+            watchers.retain(|w| {
+                if pred(w) {
+                    if let Watcher::Local { pid, mref } = *w {
+                        dropped_local.push((pid, mref));
+                    }
+                    false
+                } else {
+                    true
+                }
+            });
+            !watchers.is_empty()
+        });
+        for (pid, mref) in dropped_local {
+            self.forget_watch(pid, mref);
+        }
+    }
+}
 
 /// **Pending remote monitors** — the *sender* side of `(monitor remote-pid)`.
 /// Keyed by the peer's node-name, valued by the local triples we'd need to
@@ -148,9 +270,7 @@ pub fn next_ref() -> u64 {
 /// How many watchers are currently monitoring `pid` (the `:monitored-by` count
 /// in `process-info`). Takes only the MONITORS lock; 0 for an unwatched/dead pid.
 pub fn monitored_by(pid: u64) -> usize {
-    crate::core::sync::lock(&MONITORS)
-        .get(&pid)
-        .map_or(0, |watchers| watchers.len())
+    crate::core::sync::lock(&MONITORS).watcher_count(pid)
 }
 
 /// Deliver a `[:down …]` to one watcher — the single fan-out point both
@@ -236,7 +356,7 @@ pub fn monitor(target: u64) -> Value {
 pub(crate) fn add_monitor(target: u64, watcher: Watcher) {
     let mut mons = crate::core::sync::lock(&MONITORS);
     if REGISTRY.contains_key(target) {
-        mons.entry(target).or_default().push(watcher);
+        mons.insert(target, watcher);
         return;
     }
     drop(mons); // release before delivering — `fire_down` may need other locks
@@ -244,43 +364,31 @@ pub(crate) fn add_monitor(target: u64, watcher: Watcher) {
 }
 
 /// `(demonitor mref)` — drop the calling process's monitor with that ref. Best
-/// effort: a `[:down …]` already queued is not recalled.
+/// effort: a `[:down …]` already queued is not recalled. Indexed by `(self, mref)`, so
+/// it touches the one target's list — never the table.
 pub fn demonitor(mref: u64) {
     let me = self_pid();
-    drop_monitor(|w| matches!(*w, Watcher::Local { pid, mref: r } if pid == me && r == mref));
+    crate::core::sync::lock(&MONITORS).remove_local(me, mref);
 }
 
-/// Remove every `Watcher` matching `pred` from `MONITORS`. The shared dropper
-/// behind local `(demonitor mref)`, remote `Frame::Demonitor`, and the
-/// node-down cleanup that flushes a peer's remote watchers from every target's
-/// list.
+/// Remove every `Watcher` matching `pred` from `MONITORS` — a full table walk, for the
+/// REMOTE retirements only: `Frame::Demonitor` from a peer, and the node-down cleanup
+/// that flushes a peer's remote watchers from every target's list. (A local `demonitor`
+/// used to route through here too; it is indexed now.)
 pub(crate) fn drop_monitor(pred: impl Fn(&Watcher) -> bool) {
-    let mut mons = crate::core::sync::lock(&MONITORS);
-    for watchers in mons.values_mut() {
-        watchers.retain(|w| !pred(w));
-    }
+    crate::core::sync::lock(&MONITORS).retain_all(pred);
 }
 
 /// A local process died: drop every monitor it was the *watcher* of (kernel
 /// audit). Without this, a dead watcher's entries lingered in [`MONITORS`]
 /// (and [`PENDING_REMOTE`]) until the *watched* target died — a leak for
 /// watchers of long-lived targets (a supervisor of a never-dying server,
-/// restarted in a loop). Cold death path, so the full-table walk is fine;
-/// emptied keys are pruned so the map itself doesn't accumulate. (A peer node
-/// holding our dead pid as a `Watcher::Remote` cleans up when *its* target
-/// dies — the `[:down …]` send to a dead pid is dropped harmlessly.)
+/// restarted in a loop). Indexed by watcher, so a death costs the monitors IT
+/// held and nothing else — see [`MONITORS`] for what the full walk this used to be
+/// cost. (A peer node holding our dead pid as a `Watcher::Remote` cleans up when
+/// *its* target dies — the `[:down …]` send to a dead pid is dropped harmlessly.)
 pub(super) fn sweep_dead_watcher(pid: u64) {
-    // Early-out on the common case (no monitors anywhere): deregister runs
-    // once per spawned process, so a spawn-churn workload must not pay a
-    // table walk per death when the tables are empty.
-    let mut mons = crate::core::sync::lock(&MONITORS);
-    if !mons.is_empty() {
-        mons.retain(|_, watchers| {
-            watchers.retain(|w| !matches!(*w, Watcher::Local { pid: p, .. } if p == pid));
-            !watchers.is_empty()
-        });
-    }
-    drop(mons);
+    crate::core::sync::lock(&MONITORS).remove_watcher(pid);
     let mut pending = crate::core::sync::lock(&PENDING_REMOTE);
     if !pending.is_empty() {
         pending.retain(|_, ps| {

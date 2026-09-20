@@ -259,7 +259,38 @@
     (let (w (spawn (receive (:go nil))) mr (monitor w))
       (demonitor mr)
       (send w :go)
-      (assert= (receive ([:down ^mr _ _] :got-down) (after 150 :no-down)) :no-down))))
+      (assert= (receive ([:down ^mr _ _] :got-down) (after 150 :no-down)) :no-down)))
+  ;; The monitor table is indexed from the watcher's side too (2026-09-20): a
+  ;; `demonitor` and a watcher's death retire exactly their own entries, so these pin
+  ;; that the index and the target-side list stay in step — a demonitor of ONE of a
+  ;; watcher's monitors leaves its siblings (on other targets, and a second one on the
+  ;; SAME target) firing, and the count a target reports follows both.
+  (test "demonitor of one monitor leaves the watcher's others on other targets"
+    (let (a (spawn (receive (:go nil))) b (spawn (receive (:go nil)))
+          ma (monitor a) mb (monitor b))
+      (demonitor ma)
+      (send a :go) (send b :go)
+      (assert= (receive ([:down ^mb _ r] r)) :normal)
+      (assert= (receive ([:down ^ma _ _] :got-down) (after 100 :no-down)) :no-down)))
+  (test "two monitors on the same target from one watcher: demonitor one, the other fires"
+    (let (w (spawn (receive (:go nil))) m1 (monitor w) m2 (monitor w))
+      (assert= (get (%process-info w) :monitored-by) 2)
+      (demonitor m1)
+      (assert= (get (%process-info w) :monitored-by) 1)
+      (send w :go)
+      (assert= (receive ([:down ^m2 _ r] r)) :normal)
+      (assert= (receive ([:down ^m1 _ _] :got-down) (after 100 :no-down)) :no-down)))
+  (test "a watcher's death releases the monitors it held"
+    (let (t (spawn (receive (:go nil)))
+          me (self)
+          w (spawn (do (monitor t) (monitor t) (send me :armed) (receive (:die nil)))))
+      (receive (:armed nil))
+      (assert= (get (%process-info t) :monitored-by) 2)
+      (let (mw (monitor w))
+        (send w :die)
+        (receive ([:down ^mw _ _] nil)))
+      (assert= (get (%process-info t) :monitored-by) 0)
+      (send t :go))))
 
 ;; ---- sending closures: mobile code (the spawn-to-node foundation, ADR-033) --
 ;; A closure can be sent like any other value: it travels as data (its body is

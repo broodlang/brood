@@ -101,9 +101,7 @@ fn retire_pid_tail(pid: u64, reason: Message) {
     // (a name lives only as long as its process). Without this, named-spawn
     // would see the stale entry as "already running" and never respawn.
     crate::dist::unregister_dead_pid(pid);
-    let watchers = crate::core::sync::lock(&monitor::MONITORS)
-        .remove(&pid)
-        .unwrap_or_default();
+    let watchers = crate::core::sync::lock(&monitor::MONITORS).take_target(pid);
     for w in watchers {
         monitor::fire_down(w, pid, reason.clone());
     }
