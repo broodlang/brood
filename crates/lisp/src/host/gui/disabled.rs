@@ -61,6 +61,12 @@ pub fn texture_free(_id: u64, _tex: u32) -> Result<(), String> {
 pub fn input_mode(_id: u64, _pixels: bool) -> Result<(), String> {
     Err(NOT_COMPILED.into())
 }
+pub fn sound(_id: u64, _snd: u32, _rate: u32, _channels: u16, _pcm: Vec<u8>) -> Result<(), String> {
+    Err(NOT_COMPILED.into())
+}
+pub fn sound_free(_id: u64, _snd: u32) -> Result<(), String> {
+    Err(NOT_COMPILED.into())
+}
 pub fn next_texture_id() -> u32 {
     0
 }

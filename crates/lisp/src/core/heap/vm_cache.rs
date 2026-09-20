@@ -765,6 +765,46 @@ impl Heap {
     /// (~30M times). Returns `None` when not fast-linkable; the caller falls back to the
     /// cloning [`Self::vm_call_ic_probe`] / slow path (which also covers deopt). Mirrors
     /// `jit_dispatch_call`'s native-link guard — the two must stay in sync.
+    ///
+    /// The epoch the flat mirror at `site` was published under, or `None` for an empty
+    /// slot. For the debug cross-check in `jit_dispatch_fast_frame`: the IR validated the
+    /// mirror against the global epoch with a raw load, and a concurrent `def` can bump
+    /// the epoch before the callback re-reads it — the authoritative probe then answers
+    /// for the NEW epoch, and a mirror that was valid when the IR read it looks desynced.
+    /// Every published mirror slot with its ABSOLUTE index — for the test that rebuilds
+    /// the race's state around one.
+    #[cfg(all(feature = "jit", test))]
+    pub fn vm_fast_links_published(&self) -> Vec<(usize, FastLink)> {
+        self.vm_fast_links
+            .borrow()
+            .iter()
+            .enumerate()
+            .filter(|(_, fl)| fl.code != 0 && fl.nslots != u32::MAX)
+            .map(|(i, fl)| (i, *fl))
+            .collect()
+    }
+
+    #[cfg(all(feature = "jit", debug_assertions))]
+    pub fn vm_fast_link_epoch(&self, site: u32) -> Option<u64> {
+        let abs = (self.cur_ic_base.get() + site) as usize;
+        let fls = self.vm_fast_links.borrow();
+        fls.get(abs).filter(|fl| fl.code != 0).map(|fl| fl.epoch)
+    }
+
+    /// [`Self::fast_link_from_entry`] by site id — the debug cross-check's view of the
+    /// authoritative entry, bypassing the mirror.
+    #[cfg(all(feature = "jit", debug_assertions))]
+    pub fn vm_fast_link_authoritative(
+        &self,
+        site: u32,
+        sym: Symbol,
+        argc: u32,
+        epoch: u64,
+    ) -> Option<(*const u8, usize, EnvId, (u32, u32))> {
+        let abs = (self.cur_ic_base.get() + site) as usize;
+        self.fast_link_from_entry(abs, sym, argc, epoch)
+    }
+
     #[cfg(feature = "jit")]
     pub fn vm_call_ic_fast_link(
         &self,
@@ -773,7 +813,6 @@ impl Heap {
         argc: u32,
         epoch: u64,
     ) -> Option<(*const u8, usize, EnvId, (u32, u32))> {
-        use std::sync::atomic::Ordering::Acquire;
         let abs = (self.cur_ic_base.get() + site) as usize;
         // Memoised hot path — read the [`FastLink`] mirror *alone*. It already carries
         // everything the guard needs (`sym`/`argc`/`epoch`) plus the validated result, so
@@ -808,6 +847,45 @@ impl Heap {
                 }
             }
         }
+        let (code, active_ns, env, callee_bases) =
+            self.fast_link_from_entry(abs, sym, argc, epoch)?;
+        // Fully validated + installed at this epoch — publish into the one flat table that
+        // both this probe's hot path (above) and JIT'd code (an epoch-guarded raw load)
+        // read. One representation, one write.
+        if let Some(slot) = self.fastlink_slot_grown(abs).get_mut(abs) {
+            *slot = FastLink {
+                epoch,
+                code: code as u64,
+                env: env.0,
+                nslots: active_ns as u32,
+                // `sym`/`argc` matched `e.sym`/`e.argc` in `fast_link_from_entry`, so they
+                // identify exactly the callee this slot links to — the IR re-checks them
+                // against its baked head/argc so a reused site id (ADR-096) can never read
+                // another arm's link. See [`FastLink`].
+                sym,
+                argc,
+                callee_ic_base: callee_bases.0,
+                callee_gic_base: callee_bases.1,
+            };
+        }
+        Some((code, active_ns, env, callee_bases))
+    }
+
+    /// The AUTHORITATIVE half of [`Self::vm_call_ic_fast_link`]: resolve site `abs`'s
+    /// fast-link from the fat `CallIcEntry` at `epoch`, publishing nothing. Split out so
+    /// the debug cross-check in `jit_dispatch_fast_frame` can compare the flat mirror
+    /// against the entry it mirrors — the probe above reads the mirror FIRST, so probing
+    /// through it compared the mirror with itself (and only ever reached the entry when
+    /// the epoch had moved, which is when it was wrong to compare at all).
+    #[cfg(feature = "jit")]
+    pub fn fast_link_from_entry(
+        &self,
+        abs: usize,
+        sym: Symbol,
+        argc: u32,
+        epoch: u64,
+    ) -> Option<(*const u8, usize, EnvId, (u32, u32))> {
+        use std::sync::atomic::Ordering::Acquire;
         let t = self.vm_call_ics.borrow();
         let e = t.get(abs)?.as_ref()?;
         if e.sym != sym || e.argc != argc || e.epoch != epoch {
@@ -866,26 +944,17 @@ impl Heap {
         // at `base+nslots` and read back at `base+inline_nslots`. Same KI-48 family as the
         // `jit_tier` torn read, in the one place that was still spelled the old way.
         let active_ns = crate::eval::compile::frame_size_for_code(arm, code);
-        // Fully validated + installed at this epoch — publish into the one flat table that
-        // both this probe's hot path (above) and JIT'd code (an epoch-guarded raw load)
-        // read. One representation, one write.
-        if let Some(slot) = self.fastlink_slot_grown(abs).get_mut(abs) {
-            *slot = FastLink {
-                epoch,
-                code: code as u64,
-                env: env.0,
-                nslots: active_ns as u32,
-                // `sym`/`argc` matched `e.sym`/`e.argc` at the top of this fn (the early
-                // `return None`), so they identify exactly the callee this slot links to —
-                // the IR re-checks them against its baked head/argc so a reused site id
-                // (ADR-096) can never read another arm's link. See [`FastLink`].
-                sym,
-                argc,
-                callee_ic_base: callee_bases.0,
-                callee_gic_base: callee_bases.1,
-            };
-        }
         Some((code as *const u8, active_ns, *env, callee_bases))
+    }
+
+    /// The epoch the fat `CallIcEntry` at `site` is installed for — for the debug
+    /// cross-check: an entry whose epoch moved past the mirror's is a rebind that landed
+    /// between the IR's raw epoch load and the callback, not a desync.
+    #[cfg(all(feature = "jit", debug_assertions))]
+    pub fn vm_call_ic_entry_epoch(&self, site: u32) -> Option<u64> {
+        let abs = (self.cur_ic_base.get() + site) as usize;
+        let t = self.vm_call_ics.borrow();
+        t.get(abs)?.as_ref().map(|e| e.epoch)
     }
 
     /// Grow the IR-readable [`FastLink`] mirror far enough to hold absolute site `abs`,

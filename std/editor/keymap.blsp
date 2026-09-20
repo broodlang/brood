@@ -97,6 +97,44 @@ Pure apart from the symbol resolution; testable without a terminal."
 
 ;; check-allow: deliberately non-tail — depth = the keymap's chord nesting, a few levels.
 (check-allow :non-tail-recursion
+  (defn keymap-index (keymap)
+    "Every binding in `keymap` at once — `{command -> (key-sequence …)}`, prefixes walked,
+  each sequence a key vector. One walk.
+
+  `keymap-where-is` answers the same question for ONE command, and walking the map per
+  command is what a caller reaches for without thinking: a completion UI that shows the key
+  beside each row (`M-x`) then walks the whole keymap once per visible row, twice if it also
+  asks `keymap-commands`. Measured in bedit that was 48 ms per keystroke in `M-x` — for
+  fifteen rows of marginalia. Build this once and each row is a lookup.
+
+  Pure over the keymap data — no dispatch, no eval, no load; a command whose module has not
+  been loaded appears here like any other, since a keymap names commands by symbol."
+    (fold (keymap-bindings keymap)
+      {}
+      (fn (acc pair)
+        (let ([command seq] pair)
+          (assoc acc command (cons seq (or (get acc command) '()))))))))
+(sig keymap-index (map -> map))
+
+;; check-allow: deliberately non-tail — depth = the keymap's chord nesting, a few levels.
+(check-allow :non-tail-recursion
+  (defn keymap-bindings (keymap)
+    "Every binding in `keymap` as a flat list of `[command key-sequence]` pairs — prefixes
+  walked, in no particular order. The walk `keymap-index` groups; separate because the flat
+  form is what a caller listing a whole keymap (a `describe-bindings`, a cheat sheet) wants,
+  and because grouping with `append` per binding is what made a first cut of `keymap-index`
+  nine times slower than this walk."
+    (mapcat keymap
+      (fn (kv)
+        (let ([k v] kv)
+          (cond
+            (map? v) (map (keymap-bindings v) (fn (pair) (let ([c s] pair) [c (into [k] s)])))
+            (symbol? v) (list [v [k]])
+            else '()))))))
+(sig keymap-bindings (map -> seqable))
+
+;; check-allow: deliberately non-tail — depth = the keymap's chord nesting, a few levels.
+(check-allow :non-tail-recursion
   (defn keymap-commands (keymap)
     "Every command symbol `keymap` binds, anywhere in it — prefixes walked, deduplicated, in
   no particular order. The other inverse of `keymap-bind`: [[keymap-where-is]] asks \"which

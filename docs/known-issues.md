@@ -163,7 +163,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-167 | **a loop handed to its recompiled body (ADR-366) ran the rest of its life NESTED** — the hot-reload guard's tail transition was a nested `apply_value`, so every `receive` under it parked the OS worker dirty (20 000 of 20 000 in a self-tail server whose first iteration lazily loaded a module) and a native preempt fell to the interpreter for up to 256 iterations (`collatz` +6.5% instructions under lazy loading) | ✅ **FIXED 2026-09-20** — the transition is a `ChunkExit::Tail` the driver reuses the frame for; nothing runs nested. Guard `crates/cli/tests/stale_loop_handoff.rs`, sabotage-verified (the nested call reads 20 000 dirty parks) |
 | KI-168 | **`make tier-audit` red: `bench-supervisor/fill` lowered, hosted a parking `receive` three named hops away, dirty-parked its worker once and was latched** — the direct `%receive` fence sees only the arm's own chunk | ✅ **FIXED 2026-09-20** — `arm_hosts_receive` follows an arm's NON-tail call sites through named compiled callees and refuses it as `hosts-receive` before the compile. Guard `crates/cli/tests/hosts_receive_fence.rs`, sabotage-verified; `make tier-audit` 29 rows clean |
 | KI-169 | **`(stdimage/status)`'s `:installed` reported the PRELUDE snapshot's count on an opted-out warm boot** — `%std-image-reinstall!` cleared every registry the snapshot carries except `*std-image-installed*`, the snapshot's own answer | ✅ **FIXED 2026-09-20** — one reset beside the others. Guard `stdimage_reporting.rs` case 4, sabotage-verified |
-| KI-174 | **the JIT's fast-frame cross-check aborted a debug build on a concurrent `def`** — `jit_dispatch_fast_frame` re-read the global epoch after the IR had validated the fast-link slot at the old one, asked the IC at the NEW epoch, got `None` and reported `fast-link mirror desynced from the call IC` (SIGABRT, `concurrency_race::fanout_with_concurrent_global_rebind_matches_serial` on CI at `b63401d7`, whose writer `def`s 72 000 times per run) | ✅ **FIXED 2026-09-20** — the dispatch takes the slot's own `epoch` from `brood_rt_fast_frame` (the value the IR's guard matched) instead of re-reading; reproduced by bumping the counter at that line (CI's message byte for byte), and the same bump passes with the fix. Release builds were never wrong: the link the IR validated is the one that runs, as a VM `Inst::Call` runs the callee its IC probe resolved before a rebind landed |
+| KI-174 | **the JIT fast-frame's debug cross-check fired on a rebind that landed between the IR's epoch load and the callback** — `fast-link mirror desynced from the call IC … auth=None` aborted `concurrency_race::fanout_with_concurrent_global_rebind_matches_serial` once on CI (2026-09-20, run 35532017776). The IR validates the flat mirror against the global epoch with a raw load; `jit_dispatch_fast_frame` re-read the epoch and asked the IC at the NEW one after a concurrent `def` bumped it, so a mirror that was valid when read looked desynced. Debug builds only; the release path re-validates and falls through. The check was also weaker than it read: it probed through `vm_call_ic_fast_link`, which reads the mirror first — comparing the mirror with itself, and reaching the entry only when the epoch had moved | ✅ **FIXED 2026-09-20** — `debug_check_fast_link_mirror` compares the mirror against the fat `CallIcEntry` (`fast_link_from_entry`, the authoritative half factored out of the probe) at the mirror's OWN epoch, and a `None` there is legitimate exactly when the entry's epoch has moved. Two unit tests rebuild the race's state deterministically (a published mirror, then a `def`): the tolerant case, sabotage-verified by probing at the current epoch; and a real desync at the same epoch, which must still fire |
 | KI-173 | **a module the pre-flight check loaded ran WITHOUT the optimiser's source rewrites, and an image written by that process carried the unrewritten bodies** — the checker holds `NoSourceRewrites` across a compile pass that itself performs the file's `require`s and the ADR-340 scan's loads, so every std module a `brood file.blsp` check brought in was expanded as "the author's code": `seq/frequencies` over 750k keys 860 ms against 343 ms with `BROOD_NO_CHECK=1`, the same as `BROOD_LINMAP=0`; and `stdimage/build` from such a process wrote those bodies, so `debug/hits` read `(map any number)` under one writer's image and `(or map table)` under another's | ✅ **FIXED 2026-09-20** — the loader holds `SourceRewritesOn` (`load`, `%load-module-source`): a module's bodies are the runtime's whoever triggers the load; and the checker narrows on `(= :table (type-of x))` — the test the tally rewrite emits — so a rewritten body types as `map`. Guards: `tests/check_loads_run_rewritten.rs` (the loaded body carries the rewrite's marker), `cli/tests/image_writer_differential.rs` (an image written after a check reads as one written without), both sabotage-verified. Found by the writer differential item 3 of the coverage session asked for |
 | KI-171 | **the checker's transitive materialisation (ADR-340) was a no-op unless `BROOD_IMAGE_TRACE` was set** — ADR-370's rewrite of `materialise_referenced_modules` put the load set's insert behind the trace flag (`trace && wanted.insert(module)`), so from 2026-09-18 every untraced check inferred a loaded module's body only down to its first unmaterialised qualified name (`-> any` below it, the bedit `git-scan-rows` shape ADR-340 fixed), and the one test of the scan ran its child WITH the trace | ✅ **FIXED 2026-09-20** — the insert is unconditional; guard `transitive_scan_loads_without_the_trace` (a planted fixture edge on `table/get`, untraced, refuses to run traced), sabotage-verified. Found while ranking what checks load: the trace named a module the untraced run never touched |
 | KI-170 | **a direct `reflect/load` of a module file could leave the module LOADED WITH NOTHING BOUND, permanently** — `defmodule` provides the key at the top of a directly loaded file, and that load ran in neither the staging frame nor the load journal, so an `%isolate` snapshot between the provide and the definitions kept the provide and lost the defs, and `require-one` short-circuits on `*features*` so nothing ever repairs it. Seen as `unbound symbol: set` + `[refer] imported NOTHING` (also `sexp`, `sse`) in a loaded suite run — the end state of KI-119/KI-120 by a third mechanism | ✅ **FIXED 2026-09-20** — `load` wraps a `defmodule` file in the ADR-344 frame `require-one` already uses: one publish, journalled. Guard `crates/cli/tests/load_provide_window.rs` (a `require-one` control in the same test), sabotage-verified: `features=true bound=false` with the frame removed |
@@ -11702,34 +11702,46 @@ alongside: `lazy_load_test`'s ADR-370 probes guarded on the substring `[image] i
 which a stale image prints too (`install: nil sections`), so with no live image for the
 binary they asserted on an empty trace; `adr370-imaged?` now requires a section count.
 
-## KI-174 — the fast-frame cross-check re-read the epoch the IR had already matched ✅ FIXED 2026-09-20
+## KI-174 — the JIT fast-frame's debug cross-check fired on a rebind between the IR's epoch load and the callback ✅ FIXED 2026-09-20
 
-**Seen:** CI `test` job on `b63401d7`, once: `brood::concurrency_race
-fanout_with_concurrent_global_rebind_matches_serial` SIGABRT — `fast-link mirror desynced from
-the call IC (site 0, head 2160): mirror=(code=…, nslots=3, env=0xffffffffffffffff, bases=(0,
-0)) auth=None`, from `jit_dispatch_fast_frame` (`jit_runtime/link.rs`) under `brood_rt_fast_frame`.
-Twelve local runs passed; the mirror-desync hypothesis (ADR-372's relower nulling a shared arm's
-`jit_code` while peers' mirrors kept the old pointer) was tried first — an epoch bump on the
-relower — and dropped: it did not reproduce, and a relower without the bump produces a *stale but
-consistent* answer (the mirror and the IC agree on the old code), never `None`.
+**Symptom.** CI run 35532017776 (`b63401d7`, 2026-09-20): `test` red on ONE case,
+`concurrency_race::fanout_with_concurrent_global_rebind_matches_serial`, aborted with
+`fast-link mirror desynced from the call IC (site 0, head 2160): mirror=(code=…, nslots=3,
+env=0xffff…, bases=(0, 0)) auth=None — the IR's epoch+sym+argc guard should make this
+unreachable` from `jit_dispatch_fast_frame` (`link.rs:521`), a `debug_assert!` inside a
+`panic in a function that cannot unwind` — so SIGABRT. Twelve local runs passed; the race
+needs the runner's interleaving. The commit under test changed two `seq.blsp` declarations.
 
-**Mechanism:** the IR's guard reads the `FastLink` slot and compares its `epoch` against the
-live counter, then calls the callback; the callback read the counter AGAIN (`heap.global_epoch()`)
-and asked `vm_call_ic_fast_link` at that value. A `def` landing between the two reads — the
-test's writer `def`s `*spin*` 600 times per trial, 120 trials — makes the mirror's stamp and the
-`CallIcEntry`'s stamp both stale at the new epoch, so the probe answers `None` and the
-debug-only cross-check calls the IR's values a desync. The window is a few instructions; the test
-makes 1–40 fast-frame calls per run, which is why it was seen once.
+**Cause.** A TOCTOU in the cross-check, not in the mechanism. JIT'd code validates a call
+site's flat mirror (`FastLink`) against the global epoch with a raw load, then calls
+`brood_rt_fast_frame` → `jit_dispatch_fast_frame`, which read `heap.global_epoch()` AGAIN and
+asked `vm_call_ic_fast_link` at that epoch. The test rebinds a global from other workers
+while the fan-out runs; a `def` landing between the IR's load and the callback bumps
+`code_epoch`, the probe answers `None` for the new epoch, and a mirror that was valid when
+the IR read it is reported as desynced. The release path is unaffected —
+`jit_run_fast_link` re-validates against its `epoch` and falls through to the slow path on
+a move; that is the documented "IC moved under us" outcome.
 
-**Proof:** bumping the counter at that line (`(*global_epoch_ptr()).fetch_add(1)`) reproduces CI's
-message byte for byte on the first run; with the fix the same bump passes, and the race test is
-green ×5 without it.
+The check was also weaker than it read: `vm_call_ic_fast_link` reads the mirror FIRST, so
+probing through it compared the mirror with itself and reached the authoritative
+`CallIcEntry` only when the epoch had moved — exactly when the comparison was wrong.
 
-**Fix:** `brood_rt_fast_frame` passes `fl.epoch` — the stamp the IR matched — and the dispatch
-uses it for the cross-check and for `jit_run_fast_link`, whose doc already called `epoch` "the
-caller's already-computed value". Release semantics unchanged: the link the IR validated runs,
-exactly as the VM's `Inst::Call` runs the callee its IC resolved before a rebind landed (late
-binding is "at the next lookup", and the guard was this call's lookup).
+**Fix.** `debug_check_fast_link_mirror` (`link.rs`): compare the mirror against the fat
+entry — `fast_link_from_entry`, the authoritative half factored out of the probe, publishing
+nothing — at the mirror's OWN epoch (`vm_fast_link_epoch`). A `None` there is legitimate
+exactly when the entry's epoch has moved past the mirror's (`vm_call_ic_entry_epoch`) or the
+slot was cleared; an entry at the same epoch that the rules refuse is still a desync.
+
+**Guards.** `link::tests::mirror_check_tolerates_a_rebind_between_the_irs_load_and_the_callback`
+rebuilds the race's state deterministically — tier a caller/callee pair until the site's
+mirror is published, `def` the callee (the epoch moves), run the check with the values the
+IR would hold — and must not fire; sabotage (probe at `heap.global_epoch()`, the old shape)
+reds it. `mirror_check_still_fires_on_a_real_desync` hands it a frame size the entry does
+not resolve to at the same epoch and must fire, so the check stays a check.
+
+**Lesson.** A guard that compares "what I read" against "what is true now" is only a guard
+under a lock; without one it must compare against "what was true when I read". And a
+cross-check that goes through the cache it is checking checks nothing.
 
 ## KI-173 — a module the pre-flight check loaded ran without the optimiser's source rewrites ✅ FIXED 2026-09-20
 

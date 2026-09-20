@@ -9,6 +9,7 @@ mod paint;
 mod render;
 
 use input::*;
+pub(crate) use paint::text_px_width;
 use paint::*;
 pub use render::TextAa;
 use render::*;
@@ -248,6 +249,15 @@ enum UserEvent {
     /// in the new unit so the app re-lays itself out. Behind `gui-input!` — how a window a
     /// generic thin client opened is told, by the app it attached to, which unit it wants.
     InputMode { id: u64, pixels: bool },
+    /// Keep a decoded sound for window `id`'s `[:sound …]` ops under handle `snd`
+    /// (allocated on the Brood side, like a texture handle). Behind `gui-sound`.
+    Sound {
+        id: u64,
+        snd: u32,
+        data: std::sync::Arc<crate::host::audio::SoundData>,
+    },
+    /// Forget sound `snd` of window `id`. Behind `gui-sound-free`.
+    SoundFree { id: u64, snd: u32 },
     /// Raise window `id` to the front and give it OS keyboard focus (un-
     /// minimising it first). Behind `gui-focus` — surfaces an already-open
     /// singleton window instead of opening a duplicate.
@@ -973,6 +983,38 @@ pub fn texture_free(id: u64, tex: u32) -> Result<(), String> {
     Ok(())
 }
 
+/// `(gui-sound id snd rate channels pcm)` — keep a PCM16 sound under handle `snd` for
+/// window `id`'s `[:sound …]` ops. Fire-and-forget like `texture`.
+pub fn sound(id: u64, snd: u32, rate: u32, channels: u16, pcm: Vec<u8>) -> Result<(), String> {
+    if headless() {
+        return Ok(());
+    }
+    let data = std::sync::Arc::new(crate::host::audio::SoundData::from_pcm16(
+        rate, channels, &pcm,
+    ));
+    if let Ok(g) = gui() {
+        let _ = g
+            .lock()
+            .unwrap()
+            .send_event(UserEvent::Sound { id, snd, data });
+    }
+    Ok(())
+}
+
+/// `(gui-sound-free id snd)` — forget sound `snd` of window `id`.
+pub fn sound_free(id: u64, snd: u32) -> Result<(), String> {
+    if headless() {
+        return Ok(());
+    }
+    if let Ok(g) = gui() {
+        let _ = g
+            .lock()
+            .unwrap()
+            .send_event(UserEvent::SoundFree { id, snd });
+    }
+    Ok(())
+}
+
 /// `(gui-input! id mode)` — deliver window `id`'s mouse input in pixels (`pixels`) or
 /// cells from now on; the window then reports its size in that unit.
 pub fn input_mode(id: u64, pixels: bool) -> Result<(), String> {
@@ -1083,6 +1125,8 @@ struct Win {
     subscriber: u64,
     /// Mouse input in pixels rather than cells (`WindowSpec::pixel_input`).
     pixel_input: bool,
+    /// The sounds uploaded for this window's `[:sound …]` ops, by handle.
+    sounds: HashMap<u32, std::sync::Arc<crate::host::audio::SoundData>>,
     frame: Vec<Op>,
     mods: ModifiersState,
     cursor: (u16, u16),
@@ -1259,6 +1303,7 @@ fn build_window(
         size_px: Arc::new(Mutex::new((inner.width, inner.height))),
         subscriber,
         pixel_input: spec.pixel_input,
+        sounds: HashMap::new(),
         frame: Vec::new(),
         mods: ModifiersState::empty(),
         cursor: (0, 0),
@@ -1441,6 +1486,16 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     }
                 }
             }
+            UserEvent::Sound { id, snd, data } => {
+                if let Some(win) = self.ids.get(&id).and_then(|wid| self.wins.get_mut(wid)) {
+                    win.sounds.insert(snd, data);
+                }
+            }
+            UserEvent::SoundFree { id, snd } => {
+                if let Some(win) = self.ids.get(&id).and_then(|wid| self.wins.get_mut(wid)) {
+                    win.sounds.remove(&snd);
+                }
+            }
             UserEvent::Draw { id, ops } => {
                 if let Some(w) = self.ids.get(&id).and_then(|wid| self.wins.get_mut(wid)) {
                     // Brood finished rendering; the next momentum step may fire.
@@ -1450,6 +1505,16 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     // repaint at all. The op vocabulary is plain data, so equality is exact.
                     if ops == w.frame {
                         return;
+                    }
+                    // Sounds are ops of the frame: each `[:sound …]` plays once, here, as
+                    // the frame arrives — not on repaints, and (by the equality above) not
+                    // for a frame that repeats the last one verbatim.
+                    for op in &ops {
+                        if let Op::Sound { id: snd, vol } = op {
+                            if let Some(data) = w.sounds.get(snd) {
+                                crate::host::audio::play(data, *vol);
+                            }
+                        }
                     }
                     // Refresh the cursor hot-zones from this frame, then store it. The walk
                     // goes INTO the regions (`ScrollRegion`, `CellRegion`), resolving each

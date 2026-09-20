@@ -68,7 +68,7 @@
   (%gui-held-key id))
 
 (defn draw (id frame)
-  "Paint a frame (the same render-op vector term/draw takes) to window id; returns nil. Unknown ops are skipped (forward-compatible). A text op's face may carry :scale n (GUI only, integer >=1, capped at 16): the text is drawn n× larger in an n×n block of cells anchored at its row/col — the per-pane/per-buffer font knob; the terminal frontend renders scale 1. A `[:cursor row col]` op may carry an optional `style` keyword (`[:cursor row col style]`) — :block (default, a 50% overlay), :bar (a thin caret on the cell's left edge), or :underline (a rule along the cell bottom). A `[:rect row col w h face]` op fills a w×h cell block with the face's background colour — a solid panel painted directly (no glyphs), the multi-row generalisation of a status bar. A `[:cursor-zone x y w h shape]` op marks a hover hot-zone: while the pointer is over it the window shows the resize cursor `shape` (:col-resize ↔ / :row-resize ↕), hit-tested on the GUI thread (ADR-080); it draws nothing and the terminal ignores it. A `[:vspans row0 col0 cols]` op is the column-renderer fast path (raycasters, spectrum bars): `cols` is a vector with one entry per cell-column (`col0`, `col0+1`, …), each a top-to-bottom stack of `[height colour]` segments painted from `row0` down — `colour` a face keyword (`:red`), an `[r g b]` triple (0..255), or nil (transparent). The per-cell fill happens natively here, so a wide scene costs the Brood side O(columns), not O(cells); GUI-only (the terminal ignores it). Two ops live in PIXEL space rather than cells — physical pixels from the window's top-left, GPU render target only (a `--with-gui-gpu` build, which draws on the GPU unless BROOD_GUI_GPU=0; the CPU target and the terminal skip them): `[:quad x y w h color]` / `[:quad x y w h color rot]` fills a w×h rect with color (a face colour, or an [r g b a] vector for a translucent one) turned `rot` radians about its centre, and `[:sprite tex x y w h]` / `[:sprite tex x y w h uv tint rot]` draws texture `tex` (a handle from gui/texture) there, sampling `uv` (`[u0 v0 du dv]`, texture space, a negative extent mirrors; the whole texture by default) multiplied by `tint` (opaque white by default). Build them with gui/sprite and gui/line rather than by hand — the runtime knows only the quad; a sheet frame, a flip, a line are Brood over it."
+  "Paint a frame (the same render-op vector term/draw takes) to window id; returns nil. Unknown ops are skipped (forward-compatible). A text op's face may carry :scale n (GUI only, integer >=1, capped at 16): the text is drawn n× larger in an n×n block of cells anchored at its row/col — the per-pane/per-buffer font knob; the terminal frontend renders scale 1. A `[:cursor row col]` op may carry an optional `style` keyword (`[:cursor row col style]`) — :block (default, a 50% overlay), :bar (a thin caret on the cell's left edge), or :underline (a rule along the cell bottom). A `[:rect row col w h face]` op fills a w×h cell block with the face's background colour — a solid panel painted directly (no glyphs), the multi-row generalisation of a status bar. A `[:cursor-zone x y w h shape]` op marks a hover hot-zone: while the pointer is over it the window shows the resize cursor `shape` (:col-resize ↔ / :row-resize ↕), hit-tested on the GUI thread (ADR-080); it draws nothing and the terminal ignores it. A `[:vspans row0 col0 cols]` op is the column-renderer fast path (raycasters, spectrum bars): `cols` is a vector with one entry per cell-column (`col0`, `col0+1`, …), each a top-to-bottom stack of `[height colour]` segments painted from `row0` down — `colour` a face keyword (`:red`), an `[r g b]` triple (0..255), or nil (transparent). The per-cell fill happens natively here, so a wide scene costs the Brood side O(columns), not O(cells); GUI-only (the terminal ignores it). Two ops live in PIXEL space rather than cells — physical pixels from the window's top-left, GPU render target only (a `--with-gui-gpu` build, which draws on the GPU unless BROOD_GUI_GPU=0; the CPU target and the terminal skip them): `[:quad x y w h color]` / `[:quad x y w h color rot]` fills a w×h rect with color (a face colour, or an [r g b a] vector for a translucent one) turned `rot` radians about its centre, and `[:sprite tex x y w h]` / `[:sprite tex x y w h uv tint rot]` draws texture `tex` (a handle from gui/texture) there, sampling `uv` (`[u0 v0 du dv]`, texture space, a negative extent mirrors; the whole texture by default) multiplied by `tint` (opaque white by default). Build them with gui/sprite and gui/line rather than by hand — the runtime knows only the quad; a sheet frame, a flip, a line are Brood over it. Text joins them with `[:text-px x y s face]`: the run shaped as a `:text` op would be (the same face keys), its top at y and its left edge at x in physical pixels — or its centre / right edge, with `:align :center` / `:align :right` in the face — so a HUD caption or a title sits where a game wants it, not on a cell row; both window painters draw it, the terminal skips it. And a frame can carry SOUND: `[:sound snd]` / `[:sound snd vol]` plays the sound gui/sound (or editor/ui/display-sound) kept under handle snd, once, when the frame is drawn — on whichever window draws it, so it crosses the wire to a thin client and a browser tab with the frame, and a headless test sees it in the frame; `vol` is the peak amplitude 0..1 (default ~0.18)."
   (%gui-draw id frame))
 
 (defn font (id-or-spec &optional spec)
@@ -150,6 +150,53 @@ handles from 1, process-wide, so a handle can never name another window's textur
 
     (gui/texture-size 0)   → nil"
   (table/get (textures) tex))
+
+(def *sounds* nil)
+
+(defn- sounds ()
+  "The sound registry — handle → seconds of audio — shared by every process, created
+on first use; the counter under :next allocates handles from 1."
+  (when (nil? *sounds*) (def *sounds* (table/new)))
+  *sounds*)
+
+(defn alloc-sound (seconds)
+  "Allocate a sound handle and remember how long the sound runs — the Brood half of
+gui/sound, on its own for an app that uploads through a DISPLAY map's `:sound`
+(`editor/ui/display-sound`). Process-wide, never reused.
+
+    (gui/sound-seconds (gui/alloc-sound 0.25))   → 0.25"
+  (let (registry (sounds)
+        snd (table/incr registry :next))
+    (table/put registry snd seconds)
+    snd))
+
+(defn sound-seconds (snd)
+  "How long the sound under handle `snd` runs, in seconds, or nil for an unknown handle.
+
+    (gui/sound-seconds 0)   → nil"
+  (table/get (sounds) snd))
+
+(defn sound (id pcm rate &optional channels)
+  "Keep a sound for window id's `[:sound snd vol]` frame ops and return its handle:
+`pcm` is interleaved PCM16 little-endian samples (a bytes value or a vector of 0-255
+ints) at `rate` Hz, `channels` 1 (the default) or 2. The handle is allocated in Brood
+(gui/alloc-sound) beside the sound's length, so a game can time an effect. A sound
+rides the display seam like a texture: it plays on the window that draws the frame
+carrying its op. Errors on a bad rate, channel count or an odd byte count.
+
+    (try (gui/sound 0 [1 2 3] 22050) (catch e :odd))   → :odd   ; PCM16 is two bytes a sample"
+  (let (ch (or channels 1)
+        n (if (bytes? pcm) (bytes/length pcm) (count pcm))
+        snd (alloc-sound (->float (/ (math/quot n 2) (* rate ch)))))
+    (%gui-sound id snd rate ch pcm)
+    snd))
+
+(defn sound-free (id snd)
+  "Forget sound snd of window id. Idempotent. Returns nil.
+
+    (try (do (gui/sound-free 0 1) (gui/sound-seconds 1)) (catch e nil))   → nil"
+  (table/delete (sounds) snd)
+  (%gui-sound-free id snd))
 
 (defn input (id mode)
   "Deliver window id's mouse input in :pixels or :cells from now on — the `{:input …}` gui/open option, switchable after the window exists. The window then reports its size in that unit: a [:resize w h] in pixels follows a switch to :pixels, [:resize cols rows] a switch back. How a window a generic thin client opened (`nest attach --gui`) is told, by the app it attached to, which unit it wants.

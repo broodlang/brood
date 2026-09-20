@@ -1,0 +1,70 @@
+;; `fuzzy/ranker` — ranking as a session, so the asking process never waits (ADR-375).
+;;
+;; The session exists for a caller that is also drawing: an editor's minibuffer sends a
+;; query per keystroke and folds the answer when it lands. So what is tested here is not
+;; the ranking (tests/fuzzy_test.blsp and fuzzy_native_test.blsp are that) but the three
+;; things a session promises: the answer comes back tagged with who answered and what was
+;; asked, a superseded query is dropped rather than queued, and the candidate set can be
+;; replaced without rebuilding the session.
+(defmodule fuzzy-ranker-test
+  (:use fuzzy :exclude [filter match])
+  (:use test))
+
+(def frt-cands ["src/view.blsp" "src/model.blsp" "src/commands.blsp" "README.md" "mix.exs"])
+
+(defn frt-await (session)
+  "The next `[:fuzzy-ranked session query hits]` for `session`, or `:timeout`. Selective on
+the session's pid, so other traffic in this mailbox is neither consumed nor reordered —
+which is the property an editor's loop depends on."
+  (receive ([:fuzzy-ranked ^session query hits] [query hits]) (after 5000 :timeout)))
+
+(describe "fuzzy/ranker"
+  (test "answers a query with the same ranking `top` would give, tagged with the query"
+    (let (session (ranker frt-cands))
+      (rank-async session "view" 3)
+      (assert= ["view" (top "view" frt-cands 3)] (frt-await session))
+      (ranker-stop session)))
+  (test "an unbounded query ranks every match"
+    (let (session (ranker frt-cands))
+      (rank-async session "blsp")
+      (assert= ["blsp" (fuzzy/filter "blsp" frt-cands)] (frt-await session))
+      (ranker-stop session)))
+  (test "a burst of queries is answered ONCE, at the newest — the point of the session"
+    ;; five keystrokes' worth sent back to back. A session that queued them would answer
+    ;; five times and fall further behind the faster you type; this answers "comma" and
+    ;; nothing else, so a second await times out.
+    (let (session (ranker frt-cands))
+      (do
+        (rank-async session "c" 3)
+        (rank-async session "co" 3)
+        (rank-async session "com" 3)
+        (rank-async session "comm" 3)
+        (rank-async session "comma" 3)
+        (let (answer (frt-await session))
+          (do
+            (assert= "comma" (first answer))
+            (assert= (top "comma" frt-cands 3) (second answer))
+            (assert= :timeout (receive ([:fuzzy-ranked ^session q h] [q h]) (after 200 :timeout)))))
+        (ranker-stop session))))
+  (test "the candidate set can be replaced without a new session"
+    (let (session (ranker frt-cands))
+      (do
+        (ranker-candidates session ["lib/other.ex" "lib/thing.ex"])
+        (rank-async session "thing" 3)
+        (assert= ["thing" (list "lib/thing.ex")] (frt-await session))
+        (ranker-stop session))))
+  (test "the session keeps the scorer that was in force when it was created"
+    ;; a dynamic binding does not reach a spawned process, so `ranker` captures it — without
+    ;; that, a session made under custom rules would quietly rank by the default ones
+    (let (by-length (fn (q) (fn (cand) (- 0 (string/length cand))))
+          session (binding (*fuzzy-scorer* by-length) (ranker ["xxx" "z" "yy"])))
+      (do
+        (rank-async session "q" 3)
+        (assert= ["q" (list "z" "yy" "xxx")] (frt-await session))
+        (ranker-stop session))))
+  (test "a stopped session answers nothing further"
+    (let (session (ranker frt-cands))
+      (do
+        (ranker-stop session)
+        (rank-async session "view" 3)
+        (assert= :timeout (receive ([:fuzzy-ranked ^session q h] [q h]) (after 200 :timeout)))))))

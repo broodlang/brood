@@ -139,6 +139,17 @@ pub enum CursorShape {
     Pointer,
 }
 
+/// Where a pixel-space text op's `x` lands on its run: its left edge (the default), its
+/// centre, or its right edge — so a HUD centres a caption without knowing the cell
+/// metrics the frontend will shape it with.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum Align {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
 /// How the text cursor is drawn at its cell. `Block` (the default) overlays the
 /// whole cell — the terminal-style caret; `Bar` is a thin vertical line on the
 /// cell's left edge (a modern GUI insertion caret); `Underline` a thin rule along
@@ -334,6 +345,29 @@ pub enum Op {
         color: [u8; 4],
         rot: f32,
     },
+    /// Text in PIXEL space: the run `s` shaped in `face` (the same face a `Text` op
+    /// takes — colours, bold, italic, underline, `:scale`) with its top at `y` and its
+    /// left, centre or right edge at `x` per `align`, physical pixels from the window's
+    /// corner. What a game's HUD and title screens need, since a cell row is the wrong
+    /// place for a caption over a sprite. Drawn by both window painters; the terminal
+    /// skips it (like `Quad`).
+    TextPx {
+        x: f32,
+        y: f32,
+        s: String,
+        face: Face,
+        align: Align,
+    },
+    /// Play sound `id` (a handle `gui-sound` uploaded under) once, at peak amplitude
+    /// `vol` (0..1). A sound is an op of the frame that carries it, so it rides the display
+    /// seam like a texture does: the window that draws the frame plays it — the app's own
+    /// window, a thin client's over the wire, or a browser tab — and a headless test sees
+    /// it in the frame. Fired when the frame is DRAWN (once per `gui-draw`), not on
+    /// every repaint. Draws nothing; the terminal ignores it.
+    Sound {
+        id: u32,
+        vol: f32,
+    },
 }
 
 /// A keystroke, in a backend-neutral shape the Brood side turns into the same
@@ -483,14 +517,14 @@ pub(crate) mod gpu; // the wgpu render target behind `BROOD_GUI_GPU=1`
 pub use disabled::{
     bg, cell_size, close, drag_move, drag_resize, draw, focus, font, fullscreen, grab, held_key,
     host_main_thread, icon, input_mode, inset, line_height, maximize, minimize, next_texture_id,
-    open, register_family, size, size_px, text_aa, text_contrast, texture, texture_free, title,
-    TextAa,
+    open, register_family, size, size_px, sound, sound_free, text_aa, text_contrast, texture,
+    texture_free, title, TextAa,
 };
 
 #[cfg(feature = "gui")]
 pub use backend::{
     bg, cell_size, close, drag_move, drag_resize, draw, focus, font, fullscreen, grab, held_key,
     host_main_thread, icon, input_mode, inset, line_height, maximize, minimize, next_texture_id,
-    open, register_family, size, size_px, text_aa, text_contrast, texture, texture_free, title,
-    TextAa,
+    open, register_family, size, size_px, sound, sound_free, text_aa, text_contrast, texture,
+    texture_free, title, TextAa,
 };

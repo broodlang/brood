@@ -701,3 +701,16 @@
   (test "a display without :texture (the terminal) still hands back a sized handle"
     (let (tex (display-texture {} [1 2 3 4] 1 1))
       (assert= (gui/texture-size tex) [1 1]))))
+
+(describe "editor/ui — display-sound (a sound through a display map)"
+  (test "the handle knows the sound's length and the upload goes through the display"
+    (let (log (table/new)
+          display {:sound (fn (snd pcm rate ch) (table/put log :upload [snd rate ch]))}
+          snd (display-sound display [0 0 0 0 0 0 0 0] 4))
+      ;; four PCM16 mono samples at 4 Hz: one second
+      (assert= (gui/sound-seconds snd) 1.0)
+      (assert= (table/get log :upload) [snd 4 1])))
+
+  (test "stereo halves the seconds per byte; a display without :sound still hands back a handle"
+    (let (snd (display-sound {} [0 0 0 0 0 0 0 0] 4 2))
+      (assert= (gui/sound-seconds snd) 0.5))))

@@ -154,3 +154,28 @@
                 (%gui-texture 999999 1 (bytes 1 2 3 4) 1 1)
                 :no-error (catch e (error-message e))))
       (is (or (= msg :no-error) (not (includes? msg "bytes of rgba")))))))
+
+(describe "%gui-draw: :text-px parses under hostile arguments"
+  (test "a non-string text is skipped, not a panic"
+    (assert-error (%gui-draw 999999 [[:text-px 0 0 42]])))
+
+  (test "an unknown :align is left; a NaN position is read as 0"
+    (assert-error (%gui-draw 999999 [[:text-px "x" "y" "hi" {:align :sideways}]])))
+
+  (test "a huge scale and a huge position are clean"
+    (assert-error (%gui-draw 999999 [[:text-px 1e30 -1e30 "hi" {:scale 9999999 :align :center}]]))))
+
+(describe "%gui-sound and the :sound op: validated before the backend"
+  (test "an odd byte count is a clean error — PCM16 is two bytes a sample"
+    (let (msg (try (%gui-sound 999999 1 22050 1 [1 2 3]) :no-error (catch e (error-message e))))
+      (is (includes? msg "even byte count"))))
+
+  (test "a bad rate or channel count is a clean error"
+    (assert-error (%gui-sound 999999 1 0 1 [1 2]))
+    (assert-error (%gui-sound 999999 1 22050 3 [1 2])))
+
+  (test "a negative handle is a clean error"
+    (assert-error (%gui-sound 999999 -1 22050 1 [1 2])))
+
+  (test "a :sound op with a garbage handle or volume is skipped, not a panic"
+    (assert-error (%gui-draw 999999 [[:sound "x"] [:sound 4294967296] [:sound 1 "loud"]]))))

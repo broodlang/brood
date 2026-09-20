@@ -46,7 +46,9 @@ mod dynamic;
 mod errors;
 mod evaluation;
 mod filesystem;
+mod fuzzy;
 mod io;
+mod text_search;
 // `pub(crate)` for `eval::unbound_error`'s KI-120 diagnostic, which asks whether a missing
 // qualified name belongs to a baked-in module that `*features*` records as loaded.
 mod editor_native;
@@ -74,6 +76,7 @@ mod treesit;
 mod wasm;
 
 // The boot cache (`lib.rs`) keys its expanded-prelude file on the build id.
+pub use build_info::compiled_features;
 pub(crate) use build_info::{build_id_string, stdlib_id_string};
 
 pub use io::{arm_mcp_progress, begin_stdout_capture, disarm_mcp_progress, take_captured_stdout};
@@ -169,6 +172,9 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     nodes::register(&mut primitives);
     // Last: registration order feeds the intern table (see `syntax_scan::register`).
     editor_native::register(&mut primitives);
+    // Appended after it, for the same order reason: `%fuzzy-top` is the newest primitive.
+    fuzzy::register(&mut primitives);
+    text_search::register(&mut primitives);
 }
 
 // (The doc comment and `#[rustfmt::skip]` that used to sit here belonged to the

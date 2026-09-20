@@ -52,6 +52,8 @@ wasm_unsupported_builtins!(
     gui_texture,
     gui_texture_free,
     gui_input,
+    gui_sound,
+    gui_sound_free,
     gui_cell_size,
     gui_held_key,
     gui_draw,

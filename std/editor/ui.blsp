@@ -87,6 +87,20 @@ not open needs."
                         (when (get display :texture) ((get display :texture) tex rgba w h))
                         tex)))
 
+(defn display-sound (display pcm rate &optional channels)
+  "Keep a sound through `display` — a `gui-display` or a served app's `remote-display`
+(the thin client's window, over the wire) — and return its handle, for a `[:sound snd vol]`
+frame op. `pcm` is interleaved PCM16 little-endian samples at `rate` Hz, `channels` 1
+(default) or 2. The handle comes from `gui/alloc-sound`; a display without a `:sound`
+entry (the terminal) accepts and ignores the upload.
+
+    (gui/sound-seconds (editor/ui/display-sound {} [0 0 0 0] 2))   → 1.0"
+  (let (ch (or channels 1)
+        n (if (bytes? pcm) (bytes/length pcm) (count pcm))
+        snd (gui/alloc-sound (->float (/ (math/quot n 2) (* rate ch)))))
+    (when (get display :sound) ((get display :sound) snd pcm rate ch))
+    snd))
+
 (defn gui-display (&optional (opts nil))
   "Open a **new** native window and return a display (the `{:enter :leave :size
 :draw :poll}` map) bound to it — each call is a separate window, so several
@@ -126,6 +140,8 @@ their input. Both are deferred trade-offs (ADR-059), fine for the observer."
      ;; unchanged in its own window or in a thin client's.
      :texture (fn (tex rgba w h) (%gui-texture id tex rgba w h))
      :texture-free (fn (tex) (%gui-texture-free id tex))
+     :sound (fn (snd pcm rate channels) (%gui-sound id snd rate channels pcm))
+     :sound-free (fn (snd) (%gui-sound-free id snd))
      :configure (fn (o) (display-configure-window id o))
      ;; Input arrives as mailbox messages (gui/open delivers to this process), so
      ;; `:poll` is a `receive` that parks the process — it holds no scheduler worker

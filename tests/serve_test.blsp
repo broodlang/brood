@@ -250,7 +250,12 @@
       ((get d :texture-free) 7)
       (assert= (receive ([:texture-free tex] tex) (after 5000 :none)) 7)
       ((get d :configure) {:input :pixels :title "game"})
-      (assert= (receive ([:window o] o) (after 5000 :none)) {:input :pixels :title "game"})))
+      (assert= (receive ([:window o] o) (after 5000 :none)) {:input :pixels :title "game"})
+      ((get d :sound) 5 [0 0 0 0] 8000 1)
+      (assert= (receive ([:sound-data snd pcm rate ch] [snd pcm rate ch]) (after 5000 :none))
+        [5 [0 0 0 0] 8000 1])
+      ((get d :sound-free) 5)
+      (assert= (receive ([:sound-free snd] snd) (after 5000 :none)) 5)))
 
   (test "attach-display-loop applies a shipped texture and window options to the local display"
     ;; A fake display records what the loop hands it; a display WITHOUT the entries (the

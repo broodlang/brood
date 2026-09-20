@@ -938,7 +938,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-17** — and the two differentials split along the claim each already made (process vs order; `std/` vs `tests/`), since nextest's cap is per case and each was doing three or four whole-tree checks in one: 21–29 s per case under the tree-walker job's own environment, from 42–51 s, sabotage-verified (a per-call marker in `check()`'s output reds all four). The tier pin's 1.6× and the ~17% measured on the release binary are the same comparison against different binaries — a ratio is read with its profile.
 - **2026-09-20** — "what is left to do?", answered by reading the queue and finding `main` RED: CI's `differential (tree-walker)` job at `d35cbdde` — where the defect ENTERED is `1b9befd0` two commits earlier, and the two runs between were cancelled by the next push, so a later commit wore the red (`make green`'s founding trap, live), one test — `cli::run_check_cache a_hit_replays_the_loads_the_walk_made`, ADR-371's own guard, failing on its **control** rather than its claim. The control waits for `[compile] stale-bindings` (a form compiled before `io` loaded, ADR-366) and the tree-walker compiles no chunk, so at `BROOD_VM=0` the line cannot appear for any of the three runs; the setup assertion fails and the test panics before testing anything. Pinned to `BROOD_TIER=2`, the sandbox's stdlib image built on the same engine, sabotage-verified **under `BROOD_VM=0` as well as the default** (replay stubbed → red both ways), which is the check that says the pin removed the vacuity without making the gate vacuous in the job that runs it. **Fourth sighting of the week's shape and the variant worth its own name: a gate must not assert an artifact of an ENGINE it is not about** — KI-166 was a rendering, the stranded-work watchdog was the clock, `stale_loop_handoff` was this one, same CI job. Then three things the handoff had recorded as impossible here turned out not to be. **`make tier-audit` ran, and it is green — 29 rows, every hot arm native.** What blocked it was never benchmark-row work: the corpus IS checked out, as `../brood-benchmark` (SINGULAR), while `ab-bench.sh`, `tier-audit.sh`, `jit-lower-witness.sh` and the Makefile all hard-coded `../brood-benchmarks`, the upstream repository's name. `scripts/bench-dir.sh` resolves either now. **The failure mode is the lesson: all three tools treat a missing checkout as a skip, not a failure — by design — so a directory name silently deleted a whole gate and the skip line was read as a fact about the machine.** A tool allowed to skip has to be sure what it is skipping. With the corpus reachable, **perf-handoff Task 2 is ANSWERED** (it never needed wall-clock, only the bail trace): zero `deopt-thrash-latched` arms on `nbody`/`mandelbrot`/`matmul`/`sort`/`primes`, only the by-design `call-mediated-boxed`/`call-spill-exhausted`/`chunk-outside-jit-subset` — and with zero on the current binary there can be no NEW one against any older one, so the KI-114 comparison closes by construction. Also settled, because it is a rig fact that costs an hour in whichever direction it is wrong: **`perf_event_paranoid` MOVES on this box** — the same day's `ring`/`pingpong` bisect was taken with `perf stat` at paranoid **1**, and measured later (ordinary user, outside any sandbox) it reads **4** and `perf stat -e instructions true` refuses, with no reboot in between (uptime from 2026-08-29), so something in userspace sets it and `sudo sysctl -w kernel.perf_event_paranoid=1` is the lever that does not stay. `valgrind` and `callgrind_annotate` ARE installed, whatever an earlier `command not found` reported — so callgrind is the instrument always available here and perf the one to CHECK for, never remember: `cat /proc/sys/kernel/perf_event_paranoid; perf stat -e instructions true; command -v valgrind`, and a number quoted from this box should name which took it. Three of the previous handoff section's four "not done / cannot be done here" claims had gone stale within the same day (the ratchet at `4d962e75`, KI-150 and Task 6 at `8710f4a0`) — the cost of a handoff written about work still in flight.
 - **2026-09-20** — **KI-170**, the third mechanism behind the KI-119/KI-120 end state (`[refer] (:use set) imported NOTHING`, `unbound symbol: set` in a spawned child, `sexp`/`sse` alike, one loaded suite run): a module file reached by a DIRECT `reflect/load` — every test file the runner loads, every `load` from a tool — had `defmodule` `provide` its key at the top of the file and then ran in neither the ADR-344 staging frame nor the ADR-339 journal, so a concurrent `%isolate` snapshot between the provide and the definitions kept the provide and the restore lost the defs, and `require-one` short-circuits on `*features*`, so the one path that could repair it declines to. `require-one` was hardened three times against this window; the direct load kept "the immediate provide it always had" each time, documented as harmless because no *requirer* raced it — the racer was the isolate. `load` now wraps a `defmodule` file in the frame `require-one` uses: one publish, journalled; a plain script is untouched. Guard `crates/cli/tests/load_provide_window.rs` (a 700 ms gap between provide and def, an isolate across it, a `require-one` control in the same test), sabotage-verified: `features=true bound=false` with the frame removed. Every load/module/isolate file green, the `nest test` scoped runner green on four files, clippy clean.
-- **2026-09-20** — **KI-174**: CI's `test` job on `b63401d7` aborted once in `concurrency_race::fanout_with_concurrent_global_rebind_matches_serial` — `fast-link mirror desynced from the call IC … auth=None`. Not a desync: `jit_dispatch_fast_frame`'s debug cross-check RE-READ the global epoch after the IR had matched the slot's stamp against it, and the test's writer `def`s 72 000 times per run. Twelve clean local runs; the first hypothesis (ADR-372's relower nulling a shared arm's code under peers' mirrors) was implemented and dropped — it produces a stale-but-consistent answer, never `None`. Bumping the counter at that line reproduced CI's message byte for byte; the callback now hands down `fl.epoch` and the same bump passes. Also answered in-session: the `reduce` benchmark row is 4 ms against Elixir's 31 ms because `%range-reduce` resolves the prelude `+` to a raw `i64` loop with no callback (5 ms at `BROOD_TIER=1` too — Rust, not the JIT); the row's C port documents that as the row's contract. What it hides: a reducer that must be CALLED costs ~33 ns/element (`defn` reducer 165 ms, 5.5× the BEAM), and `reduce` with a literal lambda is 130–139 ms where `fold` with the same lambda is 32 ms — ADR-360's fusion sees `fold` and not `reduce`, whose `& more` hides the literal. Both recorded for the owner's call.
+- **2026-09-20** — KI-174 diagnosed in parallel with the fix that landed (`d7600bea`): twelve clean local runs; the first hypothesis (ADR-372's relower nulling a shared arm's code under peers' mirrors) was implemented and dropped — a stale mirror and a stale entry AGREE on the old code, so that shape can never answer `None`; bumping the epoch counter inside `jit_dispatch_fast_frame` reproduced CI's message byte for byte on the first run, which is the construction that named the TOCTOU. The landed fix (compare at the mirror's epoch, against the fat entry, with two deterministic unit tests) supersedes the one written here (hand `fl.epoch` down), which was dropped in the merge. Also answered in-session: the `reduce` benchmark row is 4 ms against Elixir's 31 ms because `%range-reduce` resolves the prelude `+` to a raw `i64` loop with no callback (5 ms at `BROOD_TIER=1` too — Rust, not the JIT); the row's C port documents that as the row's contract. What it hides: a reducer that must be CALLED costs ~33 ns/element (`defn` reducer 165 ms, 5.5× the BEAM), and `reduce` with a literal lambda is 130–139 ms where `fold` with the same lambda is 32 ms — ADR-360's fusion sees `fold` and not `reduce`, whose `& more` hides the literal. Both recorded for the owner's call.
 
 ---
 
@@ -15109,3 +15109,48 @@ features into the lean runtime (it hardcoded `gui`, so a released game drew noth
 `steps`→`ticks` (a game's own `step` stays bare), `b2d-sheet/load`. Two wrong test
 expectations of mine caught by the code (a wall count, a zoom): the tests were right to
 exist either way.
+
+## 2026-09-20 (8) — KI-174: the fast-frame cross-check raced the rebind it was guarding against
+
+Green-first, before `reduced`: CI on `b63401d7` (two `seq.blsp` declarations) reddened `test`
+on one case, `concurrency_race::fanout_with_concurrent_global_rebind_matches_serial` — a
+`debug_assert!` in `jit_dispatch_fast_frame`, `fast-link mirror desynced … auth=None`, inside
+a non-unwinding frame, so SIGABRT. Twelve local runs passed; the runner's two cores
+interleave differently.
+
+The mechanism is fine; the CHECK raced. JIT'd code validates a call site's flat mirror against
+the global epoch with a raw load; the callback re-read the epoch and asked the IC at the new
+one, and this test's whole business is `def`ing a global from other workers while a fan-out
+runs — a bump between the two reads makes a valid mirror look desynced. Worse, the check
+probed through `vm_call_ic_fast_link`, which reads the mirror first: it compared the mirror
+with itself and only reached the authoritative entry when the epoch had moved, i.e. exactly
+when comparing was wrong. Now it compares against the fat `CallIcEntry` (the authoritative
+half factored out of the probe, publishing nothing) at the mirror's OWN epoch, and a `None`
+there is legitimate only when the entry has moved on. Two unit tests rebuild the race's state
+without the race — tier a pair, `def` the callee, run the check — one that must stay quiet
+(reds under the old shape) and one that must still fire.
+
+`make check-cost`-class lesson, restated for guards: compare against what was true when you
+read, not what is true now, unless you hold the lock.
+
+## 2026-09-20 (9) — `reduced` (ADR-376): early termination as a throw
+
+ROADMAP item 5, taken first because it was a correctness gap dressed as a feature: the
+docstring's own `xtake-while` example kept being called for every remaining input and
+ignored it, so a stop was not a stop.
+
+The shape was decided by three numbers, not by Clojure. `transduce` is `fold` under a
+composed reducer, and `fold`'s loops are native (`%range-reduce`, `%vector-reduce`,
+`%fold-loop`) or rewritten into counted `letrec`s (ADR-360) — a returned box would need a
+per-element test in all of them, for every fold. Measured: a `try` around the fold costs
+**~100 ns per `transduce` call**, a throw out of a native fold **~1.1 µs once**, a
+Brood-side loop that could test a box **89 ms per million elements** on top of the stage
+calls, and a scratch `table` per run (what a stateful `xtake` would want) **829 ns per
+call** — and it leaks unless something releases it. So `(seq/reduced acc)` throws a
+`%reduced` record and `transduce` catches exactly that; the loops are untouched, and a
+million-wide range stops at the fourth stage call (the test counts them).
+
+`xtake-while` shipped; `xtake` did not: state across inputs needs a completion arity to
+release it — Clojure's `(rf acc)` — which is a protocol change every stage would carry.
+Recorded in the ADR, deferred until a stage needs it. `docs/language.md` §Transducers has
+the exit and the deferral.

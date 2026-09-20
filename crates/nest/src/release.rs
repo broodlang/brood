@@ -108,10 +108,11 @@ pub(crate) fn runtime_cache_path(triple: &str) -> Option<std::path::PathBuf> {
     Some(base.join("brood/runtimes").join(triple).join(bin))
 }
 
-/// Build the single lean+gui `brood` runtime from the workspace this `nest` was
+/// Build the single lean `brood` runtime from the workspace this `nest` was
 /// built in — the fallback when no runtime was embedded at install time (a plain
 /// `cargo build` of `nest`). `--no-default-features` (no test/observer/MCP/doc/
-/// reload/REPL/GC-debug) `+ --features brood/gui`, under the `release-lean`
+/// reload/REPL/GC-debug) plus this `nest`'s own features (`lean_runtime_features`:
+/// `gui`, and `gui-gpu` / `audio` / … when it has them), under the `release-lean`
 /// profile (strip + LTO + one codegen unit). Cached under `target/release-lean/`
 /// (never clobbering the dev `target/release/`); returns the binary's path.
 fn build_lean_runtime() -> std::path::PathBuf {
@@ -127,7 +128,15 @@ fn build_lean_runtime() -> std::path::PathBuf {
         std::process::exit(2);
     }
     let lean_bin = workspace.join("target/release-lean/brood");
-    eprintln!("nest release: building the lean+gui runtime (stripped + LTO; one-time)…");
+    // The runtime mirrors the features THIS `nest` was built with (minus the dev
+    // tooling): a shipped app draws on the GPU and plays sound exactly when the `nest`
+    // that shipped it does, rather than always getting the bare `gui` build, which
+    // draws none of the pixel-space ops a game is made of.
+    let features = lean_runtime_features();
+    eprintln!(
+        "nest release: building the lean runtime (stripped + LTO; one-time) with {}…",
+        features
+    );
     let status = std::process::Command::new("cargo")
         .args([
             "build",
@@ -135,7 +144,7 @@ fn build_lean_runtime() -> std::path::PathBuf {
             "release-lean",
             "--no-default-features",
             "--features",
-            "brood/gui",
+            &features,
         ])
         .arg("--manifest-path")
         .arg(&cli_manifest)
@@ -154,6 +163,25 @@ fn build_lean_runtime() -> std::path::PathBuf {
             std::process::exit(1);
         }
     }
+}
+
+/// The `--features` list for the lean runtime: this `nest`'s own brood features, minus
+/// the dev tooling (`dev-tools`, `perf-stats`) a shipped app must not carry, and always
+/// at least `gui` (the historical baseline). `brood/`-qualified, comma-joined, as cargo
+/// wants them for the `cli` package.
+fn lean_runtime_features() -> String {
+    let mut names: Vec<&str> = brood::builtins::compiled_features()
+        .into_iter()
+        .filter(|f| !matches!(*f, "dev-tools" | "perf-stats"))
+        .collect();
+    if !names.contains(&"gui") {
+        names.push("gui");
+    }
+    names
+        .iter()
+        .map(|f| format!("brood/{f}"))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// The brood workspace root, as baked in at *this* `nest`'s build time

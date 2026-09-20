@@ -124,3 +124,36 @@
           km (fold seqs {} (fn (acc s) (keymap-bind acc s 'target))))
       (assert= (count (keymap-where-is km 'target)) 3)
       (doseq (s seqs) (is (includes? (keymap-where-is km 'target) s))))))
+
+;; ---- the keymap inverted in ONE walk ----------------------------------------
+;; `keymap-where-is` answers for one command and walks the whole map to do it. A UI showing
+;; the key beside every row of a command list therefore walked the map per row — 48 ms a
+;; keystroke in bedit's `M-x`, for fifteen rows. `keymap-index` is that walk done once; these
+;; pin it against the two inverses it has to agree with.
+(describe "keymap-index / keymap-bindings"
+  (test "every binding, grouped by command, agreeing with keymap-where-is"
+    (let (km (keymap-bind (keymap-bind (keymap-bind (keymap-bind {} [:ctrl-n] 'a/next)
+                                         [:ctrl-x :ctrl-e]
+                                         'a/eval)
+                            [:ctrl-x "o"]
+                            'a/other)
+               [:down]
+               'a/next)
+          idx (keymap-index km))
+      (doseq (c (keymap-commands km))
+        (assert= (sort (keymap-where-is km c)) (sort (get idx c))))
+      ;; a command bound twice appears once, with both sequences
+      (assert= 2 (count (get idx 'a/next)))
+      (assert= (sort (keymap-commands km)) (sort (keys idx)))))
+
+  (test "the flat form carries the same pairs"
+    (let (km (keymap-bind (keymap-bind {} [:ctrl-x :ctrl-e] 'a/eval) [:ctrl-n] 'a/next)
+          pairs (keymap-bindings km))
+      (assert= 2 (count pairs))
+      (is (includes? pairs ['a/eval [:ctrl-x :ctrl-e]]))
+      (is (includes? pairs ['a/next [:ctrl-n]]))))
+
+  (test "an empty keymap indexes to nothing, and a prefix alone binds nothing"
+    (assert= {} (keymap-index {}))
+    (assert= '() (keymap-bindings {}))
+    (assert= {} (keymap-index {:ctrl-x {}}))))
