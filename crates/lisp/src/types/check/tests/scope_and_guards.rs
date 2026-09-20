@@ -909,3 +909,32 @@ fn a_lexical_shadow_of_a_guard_name_is_not_the_predicate() {
         "a lexical shadow must not borrow the global's guard: {with:?}"
     );
 }
+
+#[test]
+fn a_type_of_equality_guards_like_the_predicate() {
+    // `(= :table (type-of x))` is the tag test the optimiser's tally rewrite emits on the
+    // way out of every in-place fold (ADR-360 §6 — `type-of` is a total PrimOp1, a predicate
+    // call is not), and it is exactly `(table? x)`: both branches narrow, the else branch to
+    // the complement. Without it a LOADED `seq/frequencies` read `map | table` at every call
+    // site (KI-172). Either operand order, and a keyword naming no tag asserts nothing.
+    assert_eq!(
+        ty_str("(let (r (if (rand/float) {} (table/new))) (if (= :table (type-of r)) (table/snapshot r) r))"),
+        "map<any, any>"
+    );
+    assert_eq!(
+        ty_str("(let (r (if (rand/float) {} (table/new))) (if (= (type-of r) :table) :t r))"),
+        ":t | {}"
+    );
+    // The else branch is the complement: after the test fails, `r` cannot be a table.
+    assert!(
+        file_warnings("(defn f (r) (if (= :table (type-of r)) nil (table/snapshot r)))")
+            .iter()
+            .any(|w| w.contains("table/snapshot")),
+        "the else branch of a type-of test must exclude the tag"
+    );
+    // A keyword naming no tag is not a type guard.
+    assert_eq!(
+        ty_str("(let (r (if (rand/float) {} (table/new))) (if (= :foo (type-of r)) r r))"),
+        "table | {}"
+    );
+}

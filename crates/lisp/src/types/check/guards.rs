@@ -435,6 +435,23 @@ fn guard_assertion_inner(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Guard> {
     // with two operands it IS `%eq` — so a `cond` clause `(= item :done)` narrows the
     // clauses below it exactly as the primitive spelling does.
     if items.len() == 3 && (head_name == kw::EQ_PRIM || head_name == "=") {
+        // `(= :table (type-of x))` — a tag test spelled through `type-of`, which the
+        // optimiser's tally rewrite emits on the way out of every in-place fold (ADR-360
+        // §6: `type-of` is a total PrimOp1, a predicate call is not). Exactly the guard
+        // `(table? x)` is, both branches: `type-of` answers one keyword per tag, so the
+        // else branch is the complement. Without it a LOADED `seq/frequencies` read
+        // `map | table` at every call (KI-172, 2026-09-20).
+        if let Some((sym, ty)) = type_of_eq_guard(heap, ctx, items[1], items[2])
+            .or_else(|| type_of_eq_guard(heap, ctx, items[2], items[1]))
+        {
+            return Some(Guard {
+                sym,
+                ty,
+                then_only: false,
+                else_only: false,
+                else_ty: None,
+            });
+        }
         if let Some((sym, ty)) = literal_eq_guard(heap, items[1], items[2])
             .or_else(|| literal_eq_guard(heap, items[2], items[1]))
         {
@@ -832,6 +849,24 @@ pub(super) fn or_disjunct_guards(heap: &Heap, test: Value, ctx: &Ctx) -> Vec<Gua
         }
     }
     out
+}
+
+/// If `a` is `(type-of sym)` and `b` a keyword naming a tag, the guard `(sym, that tag)`.
+/// `None` for a keyword that names no tag (`(= :foo (type-of x))` asserts nothing a type
+/// can say) and for any other shape.
+fn type_of_eq_guard(heap: &Heap, ctx: &Ctx, a: Value, b: Value) -> Option<(Symbol, Ty)> {
+    let Value::Keyword(keyword) = b else {
+        return None;
+    };
+    let call = list_items(heap, a)?;
+    let [Value::Sym(head), Value::Sym(sym)] = call[..] else {
+        return None;
+    };
+    if !value::symbol_is(head, "type-of") || ctx.is_lexical_local(head) || ctx.is_file_global(head)
+    {
+        return None;
+    }
+    Ty::of_type_keyword(keyword).map(|ty| (sym, ty))
 }
 
 /// If `a` is a symbol and `b` is a self-evaluating literal, return the guard

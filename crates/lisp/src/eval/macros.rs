@@ -2079,6 +2079,32 @@ impl Drop for NoSourceRewrites {
     }
 }
 
+/// The inverse, held by the MODULE LOADER (`load`, `%load-module-source`): while alive,
+/// `macroexpand_all` applies the rewrites whatever the caller holds. A module's bodies are
+/// the runtime's, never "the author's code under check" — but the checker's compile pass
+/// holds a [`NoSourceRewrites`] while `compile` itself infers and performs the file's
+/// `require`s (ADR-227), and the transitive scan (ADR-340) loads more from inside the same
+/// check. Without this every module a `brood file.blsp` pre-flight loaded ran UNREWRITTEN
+/// for the rest of the program: `seq/frequencies` over 750k keys 860 ms against 343 ms with
+/// `BROOD_NO_CHECK=1`, the same as `BROOD_LINMAP=0` (KI-172, 2026-09-20) — and a stdlib
+/// image written by such a process carried the unrewritten bodies to every later run.
+pub struct SourceRewritesOn {
+    was: bool,
+}
+
+impl SourceRewritesOn {
+    pub fn enter() -> Self {
+        let was = SOURCE_REWRITES_OFF.with(|c| c.replace(false));
+        SourceRewritesOn { was }
+    }
+}
+
+impl Drop for SourceRewritesOn {
+    fn drop(&mut self) {
+        SOURCE_REWRITES_OFF.with(|c| c.set(self.was));
+    }
+}
+
 // ===================== pipeline fusion + the counted range loop (ADR-360 §7) ==============
 //
 // `(-> (range n) (seq/lfilter p) (seq/lmap f) (reduce 0 +))` is what the pocket reference and

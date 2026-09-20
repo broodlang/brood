@@ -996,6 +996,16 @@ impl Ty {
         Ty::flat(1u32 << bit(tag))
     }
 
+    /// The tag type named by a `type-of` keyword — `:table` is `table`, `:pair` is
+    /// `pair` — or `None` for a keyword that names no tag. What lets `(= :table (type-of
+    /// x))` guard `x` exactly as `(table? x)` does (`guards::type_of_eq_guard`).
+    pub fn of_type_keyword(keyword: Symbol) -> Option<Ty> {
+        ALL_TAGS
+            .iter()
+            .find(|tag| tag.keyword() == keyword)
+            .map(|&tag| Ty::of(tag))
+    }
+
     /// The flat union of several tags — `const`, so callers can build named
     /// shorthands (e.g. `seq = nil | pair | vector`) as `const` items without the
     /// non-`const` [`union`](Ty::union). Unrefined (every flat type is).

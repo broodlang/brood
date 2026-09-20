@@ -163,6 +163,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-167 | **a loop handed to its recompiled body (ADR-366) ran the rest of its life NESTED** — the hot-reload guard's tail transition was a nested `apply_value`, so every `receive` under it parked the OS worker dirty (20 000 of 20 000 in a self-tail server whose first iteration lazily loaded a module) and a native preempt fell to the interpreter for up to 256 iterations (`collatz` +6.5% instructions under lazy loading) | ✅ **FIXED 2026-09-20** — the transition is a `ChunkExit::Tail` the driver reuses the frame for; nothing runs nested. Guard `crates/cli/tests/stale_loop_handoff.rs`, sabotage-verified (the nested call reads 20 000 dirty parks) |
 | KI-168 | **`make tier-audit` red: `bench-supervisor/fill` lowered, hosted a parking `receive` three named hops away, dirty-parked its worker once and was latched** — the direct `%receive` fence sees only the arm's own chunk | ✅ **FIXED 2026-09-20** — `arm_hosts_receive` follows an arm's NON-tail call sites through named compiled callees and refuses it as `hosts-receive` before the compile. Guard `crates/cli/tests/hosts_receive_fence.rs`, sabotage-verified; `make tier-audit` 29 rows clean |
 | KI-169 | **`(stdimage/status)`'s `:installed` reported the PRELUDE snapshot's count on an opted-out warm boot** — `%std-image-reinstall!` cleared every registry the snapshot carries except `*std-image-installed*`, the snapshot's own answer | ✅ **FIXED 2026-09-20** — one reset beside the others. Guard `stdimage_reporting.rs` case 4, sabotage-verified |
+| KI-172 | **a module the pre-flight check loaded ran WITHOUT the optimiser's source rewrites, and an image written by that process carried the unrewritten bodies** — the checker holds `NoSourceRewrites` across a compile pass that itself performs the file's `require`s and the ADR-340 scan's loads, so every std module a `brood file.blsp` check brought in was expanded as "the author's code": `seq/frequencies` over 750k keys 860 ms against 343 ms with `BROOD_NO_CHECK=1`, the same as `BROOD_LINMAP=0`; and `stdimage/build` from such a process wrote those bodies, so `debug/hits` read `(map any number)` under one writer's image and `(or map table)` under another's | ✅ **FIXED 2026-09-20** — the loader holds `SourceRewritesOn` (`load`, `%load-module-source`): a module's bodies are the runtime's whoever triggers the load; and the checker narrows on `(= :table (type-of x))` — the test the tally rewrite emits — so a rewritten body types as `map`. Guards: `tests/check_loads_run_rewritten.rs` (the loaded body carries the rewrite's marker), `cli/tests/image_writer_differential.rs` (an image written after a check reads as one written without), both sabotage-verified. Found by the writer differential item 3 of the coverage session asked for |
 | KI-171 | **the checker's transitive materialisation (ADR-340) was a no-op unless `BROOD_IMAGE_TRACE` was set** — ADR-370's rewrite of `materialise_referenced_modules` put the load set's insert behind the trace flag (`trace && wanted.insert(module)`), so from 2026-09-18 every untraced check inferred a loaded module's body only down to its first unmaterialised qualified name (`-> any` below it, the bedit `git-scan-rows` shape ADR-340 fixed), and the one test of the scan ran its child WITH the trace | ✅ **FIXED 2026-09-20** — the insert is unconditional; guard `transitive_scan_loads_without_the_trace` (a planted fixture edge on `table/get`, untraced, refuses to run traced), sabotage-verified. Found while ranking what checks load: the trace named a module the untraced run never touched |
 | KI-170 | **a direct `reflect/load` of a module file could leave the module LOADED WITH NOTHING BOUND, permanently** — `defmodule` provides the key at the top of a directly loaded file, and that load ran in neither the staging frame nor the load journal, so an `%isolate` snapshot between the provide and the definitions kept the provide and lost the defs, and `require-one` short-circuits on `*features*` so nothing ever repairs it. Seen as `unbound symbol: set` + `[refer] imported NOTHING` (also `sexp`, `sse`) in a loaded suite run — the end state of KI-119/KI-120 by a third mechanism | ✅ **FIXED 2026-09-20** — `load` wraps a `defmodule` file in the ADR-344 frame `require-one` already uses: one publish, journalled. Guard `crates/cli/tests/load_provide_window.rs` (a `require-one` control in the same test), sabotage-verified: `features=true bound=false` with the frame removed |
 | KI-133 | **a preempted native loop resumed on the interpreter for up to 256 iterations — via its callee's frame** — a native self-tail loop that makes a call is preempted every ~1 500 iterations (the 2 000-reduction quantum); the driver handed the preempted frame to the interpreter "until its loop-top noticed", but the first safepoint that run reached was the CALLEE's entry, so the capture landed on the callee at ip 0, the resume ran the callee natively and returned into the loop MID-BODY, and the loop interpreted to its next 256th back-edge before re-tiering. A 5M-iteration loop with one call: 3 252 preempts, **839 607 interpreted iterations**, −36% instructions with preemption disabled; the leaf-spliced variant −72%. Invisible on the benchmark rows (±1–4%: they are short, or their loops are gate-refused anyway) — this is the cost of every long-running native loop that calls anything, and a candidate for why §7.1's admission experiments read as losses | ✅ **FIXED 2026-09-12** — `vm_run_bc`'s outcome-2 arm yields at once: the budget IS spent, and the frame is at ip 0 (or the journal's resume point, applied first), which is exactly what a resume re-tiers. Guarded by `a_native_preempt_captures_the_loop_frame_not_its_callee`, which drives the capture-mode driver with a 300-reduction budget and asserts every capture after the loop goes native is the loop's frame at ip 0 (sabotage-verified: removing the yield puts the captures on the callee). Found from the call-cost probe: 640 instructions per native→native call read as the call ceremony and was 40% preemption churn |
@@ -11699,6 +11700,50 @@ count, so the probe is not vacuously nil). Sabotage: dropping the line reds it. 
 alongside: `lazy_load_test`'s ADR-370 probes guarded on the substring `[image] install`,
 which a stale image prints too (`install: nil sections`), so with no live image for the
 binary they asserted on an empty trace; `adr370-imaged?` now requires a section count.
+
+## KI-172 — a module the pre-flight check loaded ran without the optimiser's source rewrites ✅ FIXED 2026-09-20
+
+**Symptom.** Two stdlib images of the SAME std, written by two processes, disagreed with the
+checker: `debug/hits` read `(map any number)` under an image `brood build.blsp` wrote and
+`(or map table)` under one `nest test` wrote (the writer differential, 2026-09-20). The
+images differed in size (3 927 195 vs 3 948 977 bytes), and `BROOD_LINMAP=0` wrote a
+3 525 629-byte one — the `brood`-written image sat between "rewritten" and "unrewritten".
+Then, on the source path with no image at all: `seq/frequencies` over 750k keys took
+**860 ms** under `brood file.blsp` and **343 ms** with `BROOD_NO_CHECK=1`, and 920 ms with
+the rewrite switched off.
+
+**Cause.** `macroexpand_all` applies three semantics-preserving source rewrites (ADR-360
+§6/§7: the tally, the pipeline fusion, the counted range loop). The checker holds
+`NoSourceRewrites` so it reads the file under check as the author wrote it — but it holds
+it across `macros::compile`, which is also what infers and performs the file's `require`s
+(ADR-227), and the transitive scan (ADR-340) loads more from inside the same check. Every
+module those loads brought in was expanded WITHOUT the rewrites, stayed loaded, and the
+program then ran the unrewritten bodies. `stdimage/build` from such a process captured
+them, and every later run that installed that image ran them too.
+
+**Fix.** The loader holds the inverse guard, `SourceRewritesOn`, in `load` and
+`%load-module-source` (`builtins/evaluation.rs`): a module's bodies are the runtime's,
+whoever triggers the load. That makes the loaded `frequencies` body the rewritten one in
+every process — whose out-of-fold shape `(if (= :table (type-of R)) (%table-snapshot R) R)`
+the checker typed as `map | table`. So `guards::type_of_eq_guard` now reads
+`(= :tag (type-of x))` as the type guard it is (both branches; the tally rewrite spells the
+test through `type-of` because it is a total PrimOp1), and `debug/hits` reads `map`.
+One precision residue: the source form gave `(map any number)`; the snapshot of the
+in-place table is `(map any any)`.
+
+**Guards.** `crates/lisp/tests/check_loads_run_rewritten.rs` — a check whose file names
+`seq/frequencies` loads `seq` (source path, own process), and the loaded closure's body
+must carry the rewrite's marker `%table-from-map`; sabotage (the loader guard removed)
+reds it. `crates/cli/tests/image_writer_differential.rs` — an image written by a `brood`
+that checked first and one by a `brood` that did not must give `reflect/file-signatures`
+the same answer over the modules that reach a rewritten body; the same sabotage reds it on
+`debug/hits` exactly as first seen. `scope_and_guards::a_type_of_equality_guards_like_the_predicate`
+pins the guard in both operand orders, the else-branch complement, and a keyword naming no
+tag.
+
+**Lesson.** A thread-local "mode" held across a call that can recurse into the loader is
+held by the loader too. `NoSourceRewrites` was documented as "the evaluator never holds
+one" — true, and beside the point: the checker holds it while the evaluator runs under it.
 
 ## KI-171 — the checker's transitive materialisation was a no-op unless `BROOD_IMAGE_TRACE` was set ✅ FIXED 2026-09-20
 
