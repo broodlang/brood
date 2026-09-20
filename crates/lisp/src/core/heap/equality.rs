@@ -257,6 +257,17 @@ impl Heap {
             ValueRef::Int(i) => return Self::hash_int(i),
             ValueRef::Bool(b) => return Self::mix64(b as u64 ^ 0xD1B5_4A32_D192_ED03),
             ValueRef::Nil => return Self::mix64(0xA0761D6478BD642F),
+            // A keyword is the most common map key in the language — every record field
+            // and every map literal — and a symbol is the next. Both took the SipHash
+            // path until 2026-09-20; `value::symbol_hash` is already a well-distributed
+            // `u64` of the SPELLING (KI-166), so one mix64 finishes the job, and
+            // `sip::Hasher::write` leaves the profile for map-keyed work.
+            ValueRef::Sym(s) => {
+                return Self::mix64(crate::core::value::symbol_hash(s) ^ 0x2F72_B4C1_0E33_9A57)
+            }
+            ValueRef::Keyword(s) => {
+                return Self::mix64(crate::core::value::symbol_hash(s) ^ 0x8E1B_6A93_C705_D2F1)
+            }
             _ => {}
         }
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -364,13 +375,16 @@ impl Heap {
                     f.to_bits().hash(h);
                 }
             }
+            // The SPELLING's hash, never the interned id: an id records when a name was
+            // first seen in this process, so feeding it here made the hash of any value
+            // CONTAINING a symbol depend on boot order too (KI-166).
             ValueRef::Sym(s) => {
                 4u8.hash(h);
-                s.hash(h);
+                crate::core::value::symbol_hash(s).hash(h);
             }
             ValueRef::Keyword(s) => {
                 5u8.hash(h);
-                s.hash(h);
+                crate::core::value::symbol_hash(s).hash(h);
             }
             ValueRef::Str(id) => {
                 6u8.hash(h);

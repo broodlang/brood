@@ -10,6 +10,64 @@ needing one is queued in [`perf-handoff.md`](perf-handoff.md) instead — curren
 high-priority item: whether KI-114's `as_f64_pair` holds the closure KI-109 got from the
 promotion it constrained.
 
+## 2026-09-20 — KI-166 fixed at the root: a symbol hashes its spelling
+
+**The open bug list is empty.** KI-150 is the only entry still open and what remains of it is
+off-box (below).
+
+**KI-166 ✅** — a symbol's hash is a function of its SPELLING now (`value::symbol_hash`), not
+of its interned id, so a map's iteration order no longer depends on whether the prelude came
+from the image or from source. The image was never the right place to fix this: an id is an
+index into an append-only table, i.e. a record of when a name was first seen in this process.
+
+**The part to remember if you touch it:** the table is read through a **per-thread `Vec`**,
+and that is not tuning — reading the `boxcar::Vec` directly cost **+15.8M instructions on
+boot** (63.4M against 47.6M with the lookup stubbed out). boxcar is segmented: a bucket
+computation and an atomic load per read, right for the cold intern path and wrong for
+something every map and env op pays. The interner already had this exact cache for name→id,
+with a comment saying why. `hash_name` never returns 0 because 0 is the cache's empty slot.
+
+Gated by `cli::prelude_image_matches_source::an_imaged_boot_and_a_source_boot_render_a_map_the_same_way`
+(four rendered maps, image arm vs source arm), sabotage-verified.
+
+**No wall-clock here — no benchmark work runs on this box.** Callgrind said boot +1.0% (the
+interning FNV) and a map-heavy loop −15% (a keyword now skips `DefaultHasher`).
+**`perf-handoff.md` Task 6** carries the row-level verification. Two rig traps are written up
+there and in the devlog; the short version is that a baseline binary built in a worktree
+*refuses* to check in the main tree and has no stdlib image, so two of the first three
+readings were measuring neither the change nor the same thing.
+
+### The one thing left, and it is the machine owner's call
+
+**The surface-audit ratchet is red: 1146 against a ceiling of 1138.** Eight new public names
+carry a docstring and no `form → result` example — `eval-server/answer-test`,
+`evsrv-clear-sinks`, `evsrv-encode-test`, `evsrv-encode-teststop`, `evsrv-test-load`, and
+`project/changed-sources`, `note-loaded`, `reload-changed`. Not written here for two reasons
+worth stating rather than working around:
+
+1. Five are in `std/tool/eval-server.blsp`, which was being edited while this ran.
+2. Three are **I/O-bound** — they stat and load project files — so an executed example is
+   environment-dependent. That is not a special case: the existing 1138 debt is largely
+   exactly those functions, which is a fact about the ratchet worth a decision. The options
+   are a temp-dir example, making the internal two (`note-loaded`, `changed-sources`, both
+   called only by `reload-changed`) private, or a deliberate rule for I/O-bound names. The
+   test's own comment forbids raising the ceiling, and that rule should hold.
+
+The **encoders** have a clean answer already verified: document them through the decoder —
+`(evsrv-decode-request (evsrv-encode-test 1 [] nil))` yields a map, and the doctest harness
+compares parsed values, so no rendering is pinned (KI-166's live instance).
+
+**Two other gates were red from the same in-flight work and are fixed here:**
+`nest format --check` (two files rewritten) and `bare_names_test` (`*loaded-mtimes*` recorded
+in `docs/bare-names.md` under `dynamic`, which the ledger's own rule covers — an earmuffed
+`defdyn` is bare by convention and needs no argument).
+
+### What is left of KI-150, unchanged
+
+The pre-flight's own per-file walk — 3.7M on a one-liner, 24M on `pipeline`, 47M on
+`errors-deep`. It scales with the file being checked and is the checker doing its job. The
+entry cannot close until a column refresh reads `base64` again, which is off-box.
+
 ## 2026-09-19 — the staleness guard is 6.8× cheaper; KI-150's remaining half is now the checker's own per-file walk
 
 **Green at the commit below.** `make test` 1651/1651, `make prepush` clean, and the change is one

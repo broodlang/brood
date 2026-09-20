@@ -37,6 +37,20 @@ pub type Symbol = u32;
 static NAMES: LazyLock<boxcar::Vec<String>> = LazyLock::new(boxcar::Vec::new);
 static IDS: LazyLock<Mutex<HashMap<String, Symbol>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
+// `NAME_HASHES[id]` is a hash of that id's SPELLING, pushed in lockstep with `NAMES`
+// under the same `IDS` lock, so the two tables always agree (KI-166).
+//
+// It exists because an id is an index into an append-only table — it says *when* a name
+// was first interned, not what it is. Hashing the id made a map's iteration order depend
+// on intern order, which differs between a prelude image boot and a source boot: the same
+// binary printed `{:a 1, :c 3, :b nil}` warm and `{:c 3, :b nil, :a 1}` cold, and a
+// differential comparing two processes' rendered output failed accusing the feature under
+// test. Hashing the spelling instead makes the order a property of the program.
+//
+// Computed once per NEW name, on the cold path beside the two `String` allocations the
+// id already costs, so the hot path is an indexed load of a `u64` where it was a `u32`.
+static NAME_HASHES: LazyLock<boxcar::Vec<u64>> = LazyLock::new(boxcar::Vec::new);
+
 // Recover from a poisoned `IDS` lock rather than letting one panicking thread
 // wedge symbol interning everywhere (the tables are append-only, so a recovered
 // guard is consistent).
@@ -56,6 +70,11 @@ thread_local! {
     // waits behind it), not the heap allocator. Bounded memory: the symbol set is
     // finite, so each thread caches at most every name it ever interns.
     static CACHE: RefCell<HashMap<String, Symbol>> = RefCell::new(HashMap::new());
+
+    // Per-thread id→spelling-hash cache in front of `NAME_HASHES`, indexed by the id
+    // itself: `0` means "not cached here yet", which is why `hash_name` never returns 0.
+    // See `symbol_hash` for why the global table alone was too slow to read.
+    static HASH_CACHE: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }
 
 pub fn intern(name: &str) -> Symbol {
@@ -81,8 +100,68 @@ fn intern_global(name: &str) -> Symbol {
     // — only on the cold intern-a-new-name path.
     let owned = name.to_string();
     let id = NAMES.push(owned.clone()) as Symbol;
+    // In lockstep with `NAMES`, under the same lock, so `NAME_HASHES[id]` is always the
+    // hash of `NAMES[id]` — see the table's own note (KI-166).
+    let hashed = NAME_HASHES.push(hash_name(&owned)) as Symbol;
+    debug_assert_eq!(id, hashed, "NAMES and NAME_HASHES must stay in lockstep");
     ids.insert(owned, id);
     id
+}
+
+/// FNV-1a over the spelling's bytes. Deterministic across processes and builds — which is
+/// the whole point, so it is spelled out here rather than taken from `DefaultHasher`
+/// (fixed-seed today, but nothing promises that) or from any seeded hasher.
+fn hash_name(name: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in name.as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    // Never 0: the per-thread cache uses 0 as its "not cached yet" slot. One name in 2^64
+    // is nudged, which changes nothing — this is a distribution function, not an identity.
+    if hash == 0 {
+        1
+    } else {
+        hash
+    }
+}
+
+/// A hash of `sym`'s SPELLING — stable across processes, boot paths and runs, where the
+/// id is stable only within one process's intern order (KI-166). This is what the value
+/// hasher feeds for a symbol or a keyword; it never leaves the runtime, so it is an
+/// internal distribution function, not a promise about `pr-str`.
+/// Read through a per-thread `Vec` in front of the global table, for the same reason
+/// `intern` caches name→id: **`boxcar::Vec::get` is too slow for a per-hash lookup.** It is
+/// segmented, so a read computes a bucket from the index and takes an atomic load — fine for
+/// the cold intern path it was chosen for, and measured at **+15.8M instructions on boot
+/// alone** here (63.4M against 47.6M with the lookup stubbed out, callgrind), because every
+/// map and env operation that hashes a symbol pays it. A plain `Vec` index is two
+/// instructions, and the entries are immutable once written, so a per-thread copy can never
+/// go stale.
+#[inline]
+pub fn symbol_hash(sym: Symbol) -> u64 {
+    let idx = sym as usize;
+    if let Some(h) = HASH_CACHE.with(|c| c.borrow().get(idx).copied()) {
+        if h != 0 {
+            return h;
+        }
+    }
+    symbol_hash_slow(idx, sym)
+}
+
+#[cold]
+fn symbol_hash_slow(idx: usize, sym: Symbol) -> u64 {
+    // A sentinel / non-symbolic head can reach here through a compound hash; fall back to
+    // the id rather than panicking in a hash function.
+    let h = NAME_HASHES.get(idx).copied().unwrap_or(sym as u64);
+    HASH_CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() <= idx {
+            c.resize(idx + 1, 0);
+        }
+        c[idx] = h;
+    });
+    h
 }
 
 pub fn symbol_name(sym: Symbol) -> String {

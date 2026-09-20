@@ -196,3 +196,75 @@ fn an_imaged_boot_and_a_source_boot_agree_on_every_global() {
         );
     }
 }
+
+/// **A map's RENDERING must not depend on how the prelude arrived** (KI-166).
+///
+/// Iteration order follows the keys' hashes, and those hashed the interned symbol *id*
+/// until 2026-09-20 — an index into an append-only table, i.e. a record of when a name was
+/// first seen in this process. The two boot paths intern in different orders, so the same
+/// binary printed the same map two ways:
+///
+/// ```text
+/// image boot:   {:a 1, :c 3, :b nil}
+/// source boot:  {:c 3, :b nil, :a 1}
+/// ```
+///
+/// Nothing was random about it and nothing was watching, so it surfaced as
+/// `cli::mapprim3_differential` failing a full-suite run with "a prim changed an ANSWER"
+/// when that differential's own two arms straddled the boundary — a gate accusing the
+/// feature under test. `value::symbol_hash` hashes the spelling now, so the order is a
+/// property of the program rather than of the process.
+///
+/// It lives beside the globals differential because it asks the same question — what does
+/// the image fail to reproduce — and because these arms are already the two boot paths,
+/// warmed, with private caches. Deliberately about the RENDERING and not the hash: the hash
+/// is internal, and the rendering is what a user, a doctest and a differential all see.
+#[test]
+fn an_imaged_boot_and_a_source_boot_render_a_map_the_same_way() {
+    let program = std::env::temp_dir().join(format!("brood-map-order-{}.blsp", std::process::id()));
+    // Three shapes, so a fix that only covers one key kind cannot pass: keywords (with a
+    // stored nil, and one key assoc'd after the literal so the answer is not accidentally
+    // insertion order), plain symbols, and strings — whose hash was content-based already
+    // and is the control.
+    std::fs::write(
+        &program,
+        "(io/puts (pr-str (assoc {:a 1 :b nil} :c 3)))\n\
+         (io/puts (pr-str {:zz 1 :aa 2 :mm 3 :bb 4}))\n\
+         (io/puts (pr-str {'alpha 1 'beta 2 'gamma 3 'delta 4}))\n\
+         (io/puts (pr-str {\"k1\" 1 \"k2\" 2 \"k3\" 3 \"k4\" 4}))\n",
+    )
+    .expect("write map-order program");
+    let (image_cache, text_cache) = (arm_cache("map-image"), arm_cache("map-text"));
+    let (image_out, image_err) = dump(&program, &image_cache, true);
+    let (text_out, text_err) = dump(&program, &text_cache, false);
+
+    // Claim the output, never merely that the arms agree — two empty strings agree, and a
+    // program that failed to run would pass this silently. That is this file's own lesson,
+    // and it caught a bad `seq/map` in the first draft of this very test.
+    for (label, out, err) in [
+        ("image", &image_out, &image_err),
+        ("source", &text_out, &text_err),
+    ] {
+        assert_eq!(
+            out.lines().filter(|l| l.starts_with('{')).count(),
+            4,
+            "the {label} arm did not print four maps, so this test can conclude nothing.\n\
+             stdout:\n{out}\nstderr:\n{err}"
+        );
+    }
+    // And that the arms really took different paths, or this compares one path with itself.
+    assert!(
+        image_err.contains("(prelude image)"),
+        "the image arm did not boot from the prelude image. Boot trace was:\n{image_err}"
+    );
+    assert!(
+        text_err.contains("cache hit") || text_err.contains("source boot"),
+        "the source arm did not take the source path. Boot trace was:\n{text_err}"
+    );
+
+    assert_eq!(
+        image_out, text_out,
+        "a map renders differently depending on how the prelude arrived (KI-166): a key's \
+         hash depends on intern order again. `value::symbol_hash` must hash the SPELLING."
+    );
+}

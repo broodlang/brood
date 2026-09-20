@@ -479,6 +479,43 @@ extended differential is green under sabotage (a wrong id in the side table must
 
 ---
 
+
+## Task 6 — symbols hash by spelling now (KI-166): confirm the rows on a box that benchmarks
+
+**Landed 2026-09-20, correctness-motivated, instruction counts only.** `value::symbol_hash`
+makes a symbol's hash a function of its SPELLING rather than of its interned id, so a map's
+iteration order stops depending on whether the prelude came from the image or from source
+(KI-166 — a differential failed a full-suite run accusing the feature under test because of
+it). The change is not optional tuning; the question here is only what it cost and what it
+bought, in wall-clock, on rows this box cannot run.
+
+**What was measured here** (callgrind, both arms from outside a checkout so the staleness
+guard is skipped on each; `2fc5e13e` as the baseline):
+
+| | baseline | after |
+|---|---|---|
+| boot — `(def x 1)` | 46.44M | 46.90M (+1.0%) |
+| map-heavy loop — 200k `assoc` of four keyword keys + 400k `get` | 1414.6M | ~1.20G (−15%) |
+
+The +1.0% is the FNV over each newly interned name, paid once per name at intern time. The
+−15% is a keyword skipping `DefaultHasher`: it now takes the same scalar fast path `Int`
+already had.
+
+**What to ask on the benchmark box:**
+
+1. `make ab --floor --all` against `2fc5e13e`. The rows to watch are the map-shaped ones
+   (`persistent-map`, `json`, `base64`) for the win, and `startup` for the +1.0% — which is
+   an instruction count on a boot, so it may well be inside that row's floor.
+2. Whether the map-heavy −15% survives at the native tier. It was measured at the default
+   ceiling, and the keyword hash reaches native code through `brood_rt_map_assoc` /
+   `brood_rt_map_get`, so the callback boundary may dominate what the fast path saves.
+3. The map figure is the soft number in that table — readings spread ~3% where boot's spread
+   0.1%. If a row disagrees with the sign, trust the row, not the micro-benchmark.
+
+**Not a blocker for anything.** The change is in for correctness and is gated by
+`cli::prelude_image_matches_source::an_imaged_boot_and_a_source_boot_render_a_map_the_same_way`
+(sabotage-verified). This task is bookkeeping: put a wall-clock number against a change that
+only ever had an instruction count.
 ## How far back the bench corpus can measure (2026-09-11)
 
 **`8a2aaa01` is no longer a fully usable baseline, and neither is any pre-2026-09-02 commit.**
