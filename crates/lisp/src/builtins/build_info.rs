@@ -64,37 +64,44 @@ pub(super) fn register(primitives: &mut super::Primitives) {
 /// environment — and the only alternative was provoking the error and matching on
 /// its prose, which silently breaks whenever the message is reworded.
 pub(super) fn features(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    // Order is stable (declaration order, not cfg order) so a printed value diffs
-    // cleanly between builds.
+    let out = compiled_features().iter().map(|f| value::kw(f)).collect();
+    Ok(heap.alloc_vector(out))
+}
+
+/// The cargo features this runtime was compiled with, by name — what `(system/features)`
+/// reports, and what `nest release` mirrors into the lean runtime it builds, so a shipped
+/// app draws and sounds as the `nest` that shipped it does. Order is stable (declaration
+/// order, not cfg order) so a printed value diffs cleanly between builds.
+pub fn compiled_features() -> Vec<&'static str> {
     let mut out = Vec::new();
     if cfg!(feature = "gui") {
-        out.push(value::kw("gui"));
+        out.push("gui");
     }
     if cfg!(feature = "gui-gpu") {
-        out.push(value::kw("gui-gpu"));
+        out.push("gui-gpu");
     }
     if cfg!(feature = "audio") {
-        out.push(value::kw("audio"));
+        out.push("audio");
     }
     if cfg!(feature = "clipboard") {
-        out.push(value::kw("clipboard"));
+        out.push("clipboard");
     }
     if cfg!(feature = "jit") {
-        out.push(value::kw("jit"));
+        out.push("jit");
     }
     if cfg!(feature = "treesit") {
-        out.push(value::kw("treesit"));
+        out.push("treesit");
     }
     if cfg!(feature = "wasm") {
-        out.push(value::kw("wasm"));
+        out.push("wasm");
     }
     if cfg!(feature = "dev-tools") {
-        out.push(value::kw("dev-tools"));
+        out.push("dev-tools");
     }
     if cfg!(feature = "perf-stats") {
-        out.push(value::kw("perf-stats"));
+        out.push("perf-stats");
     }
-    Ok(heap.alloc_vector(out))
+    out
 }
 
 /// `(system/build-id)` — this `brood` build's identity, `"<version>+<git-sha>+<binary-

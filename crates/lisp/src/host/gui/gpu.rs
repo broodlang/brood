@@ -38,8 +38,8 @@ use winit::window::Window;
 
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::host::gui::backend::{snap_hairline, Renderer, CURSOR_FG};
-use crate::host::gui::{CursorStyle, Op};
+use crate::host::gui::backend::{snap_hairline, text_px_width, Renderer, CURSOR_FG};
+use crate::host::gui::{Align, CursorStyle, Op};
 use crate::host::text_width::{cluster_cells, cluster_cells_at, TAB_WIDTH};
 
 const DEFAULT_FG: [u8; 3] = [0xe5, 0xe5, 0xe5];
@@ -1149,6 +1149,8 @@ impl GpuWindow {
                 }
                 // Hover metadata, hit-tested in the event loop (ADR-080); nothing to draw.
                 Op::CursorZone { .. } => {}
+                // Played when the frame arrived (`UserEvent::Draw`); nothing to draw.
+                Op::Sound { .. } => {}
                 Op::VSpans { row0, col0, cols } => {
                     let top0 = g.oy + *row0 as f32 * g.ch - g.scroll_dy;
                     for (i, segs) in cols.iter().enumerate() {
@@ -1249,6 +1251,85 @@ impl GpuWindow {
                     rot,
                 } => {
                     fb.solid(*x, *y, *w, *h, *color, *rot, Edge::Plain);
+                }
+                // Pixel-space text: the `Text` walk from a pixel top-left (after the
+                // alignment's shift by the run's shaped width), untouched by grid or scroll.
+                Op::TextPx {
+                    x,
+                    y,
+                    s,
+                    face,
+                    align,
+                } => {
+                    let (mut fg, mut bg) = (
+                        face.fg.unwrap_or(DEFAULT_FG),
+                        face.bg.unwrap_or(DEFAULT_BG_RGB),
+                    );
+                    let mut paint_bg = face.bg.is_some();
+                    if face.reverse {
+                        std::mem::swap(&mut fg, &mut bg);
+                        paint_bg = true;
+                    }
+                    let scale = face.scale.max(1) as usize;
+                    let ch_s = scale as f32 * g.ch;
+                    let width = text_px_width(s, g.cw as usize, scale) as f32;
+                    let left0 = match align {
+                        Align::Left => *x,
+                        Align::Center => *x - width / 2.0,
+                        Align::Right => *x - width,
+                    };
+                    let top = *y;
+                    let mut clusters: Vec<(f32, f32, &str)> = Vec::new();
+                    let mut cx = 0.0f32;
+                    for cluster in s.graphemes(true) {
+                        let cells = cluster_cells(cluster);
+                        if cells == 0 {
+                            continue;
+                        }
+                        let block_w = (cells * scale) as f32 * g.cw;
+                        let left = left0 + cx;
+                        if paint_bg {
+                            fb.fill(left, top, block_w, ch_s, bg);
+                        }
+                        if cluster != " " {
+                            clusters.push((left, block_w, cluster));
+                        }
+                        cx += block_w;
+                    }
+                    for (left, _, cluster) in &clusters {
+                        let Some(glyph) = self.glyph_slot(
+                            renderer,
+                            cluster,
+                            face.family,
+                            face.bold,
+                            face.italic,
+                            face.scale,
+                        ) else {
+                            continue;
+                        };
+                        fb.textured(
+                            TexKey::Atlas(glyph.page),
+                            *left,
+                            top,
+                            glyph.w as f32,
+                            glyph.h as f32,
+                            [
+                                glyph.x as f32 / atlas_size,
+                                glyph.y as f32 / atlas_size,
+                                glyph.w as f32 / atlas_size,
+                                glyph.h as f32 / atlas_size,
+                            ],
+                            [fg[0], fg[1], fg[2], 255],
+                            glyph.mono,
+                            0.0,
+                        );
+                    }
+                    if face.underline {
+                        let uy = top + ch_s - 2.0 * scale as f32;
+                        for (left, block_w, _) in &clusters {
+                            fb.fill(*left, uy, *block_w, scale as f32, fg);
+                        }
+                    }
                 }
             }
         }

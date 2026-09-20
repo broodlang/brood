@@ -74,6 +74,7 @@ mod treesit;
 mod wasm;
 
 // The boot cache (`lib.rs`) keys its expanded-prelude file on the build id.
+pub use build_info::compiled_features;
 pub(crate) use build_info::{build_id_string, stdlib_id_string};
 
 pub use io::{arm_mcp_progress, begin_stdout_capture, disarm_mcp_progress, take_captured_stdout};

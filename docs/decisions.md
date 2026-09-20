@@ -24230,3 +24230,32 @@ measured on the demo at 60 fps: ~3% of a core for the headless daemon, ~6% for t
 window. Not done: live vsync over the wire (the client's window decides), and a
 frontend that is not a Brood runtime at all — a browser painting the same ops, which is
 the wasm route.
+
+### ADR-374 addendum 3 (2026-09-20, night) — what the first game asked for: pixel text, sound on the seam, a release that mirrors its `nest`
+
+`swarm` (the first game on b2d) surfaced three runtime gaps, each closed the same way
+as the rest of the seam — as data on the frame, drawn or played by whichever window
+holds the frame.
+
+- **`[:text-px x y s face]`** — a text run at a pixel position, the face as `:text`'s plus
+  `:align` (`:left` / `:center` / `:right`), so a title or a HUD caption is centred by the
+  renderer that knows the cell metrics, not by the app guessing them. Both painters walk
+  it as they walk `:text` (the GPU through the atlas, the CPU through `draw_cluster`),
+  from a pixel top-left shifted by the run's shaped width; the terminal skips it.
+- **`[:sound snd vol]`** — a sound is an OP of the frame that carries it. Sounds upload
+  like textures (`%gui-sound`, PCM16 under a Brood-allocated handle, `gui/sound` /
+  `editor/ui/display-sound`; over the wire as `[:sound-data …]`), and the window that
+  draws a frame plays the sounds in it, once, as the frame arrives. That puts sound on
+  the display seam for free: a served game's effects play in the thin client's window or
+  the browser tab (WebAudio), and a headless test sees `(b2d-test/sounds frame)`. The
+  audio thread gained a `Play` command over rodio's `SamplesBuffer` beside `Beep`.
+- **`nest release` mirrors its own features into the lean runtime.** The fallback build
+  (no runtime embedded at install) was hardcoded to `brood/gui`, so a released game drew
+  nothing: none of the pixel-space ops exist on the CPU target. `lean_runtime_features`
+  now takes the building `nest`'s compiled features minus the dev tooling
+  (`brood::builtins::compiled_features`, the same list `(system/features)` reports).
+
+Assets stayed Brood: a bundle carries source only, so `b2d-assets/embed!` writes a module
+that registers files as base64 and `read` prefers the embedded bytes to the file. No
+runtime change for that, deliberately — an archive format for binaries in the bundle is a
+real design (ADR-038 territory) and the game did not need it.

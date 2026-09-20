@@ -117,7 +117,12 @@ fn op_band(op: &Op, dy: isize, oy: usize, ch: usize) -> Option<(isize, isize)> {
         Op::CursorZone { .. } => None,
         // Pixel-space ops are GPU-only; the CPU painter never paints them, so they have
         // no band to re-rasterise.
-        Op::Sprite { .. } | Op::Quad { .. } => None,
+        Op::Sprite { .. } | Op::Quad { .. } | Op::Sound { .. } => None,
+        // Pixel text sits where it says, whatever the grid or scroll: its band is its own.
+        Op::TextPx { y, face, .. } => {
+            let top = y.round() as isize;
+            band(top, px_h(face.scale.max(1) as usize))
+        }
         Op::Text { row, face, .. } => band(cell_top(*row), px_h(face.scale.max(1) as usize)),
         Op::Cursor { row, .. } => band(cell_top(*row), ch_i),
         Op::Rect { row, h, .. } => band(cell_top(*row), px_h(*h as usize)),
@@ -1022,7 +1027,75 @@ pub(super) fn render_ops(
             Op::CursorZone { .. } => {}
             // GPU-only (a textured / rotated quad needs the GPU target); skipped here
             // like a `VSpans` is skipped by the terminal.
-            Op::Sprite { .. } | Op::Quad { .. } => {}
+            Op::Sprite { .. } | Op::Quad { .. } | Op::Sound { .. } => {}
+            // Pixel-space text: the `Text` walk with the run's top-left given in
+            // pixels (after the alignment's shift by the run's shaped width) rather
+            // than derived from a cell; unaffected by grid origin and scroll.
+            Op::TextPx {
+                x,
+                y,
+                s,
+                face,
+                align,
+            } => {
+                let (mut fg, mut bg) =
+                    (face.fg.unwrap_or(DEFAULT_FG), face.bg.unwrap_or(DEFAULT_BG));
+                let mut paint_bg = face.bg.is_some();
+                if face.reverse {
+                    std::mem::swap(&mut fg, &mut bg);
+                    paint_bg = true;
+                }
+                let scale = face.scale.max(1) as usize;
+                let ch_s = ch * scale;
+                let width = text_px_width(s, cw, scale) as f32;
+                let left0 = match align {
+                    crate::host::gui::Align::Left => *x,
+                    crate::host::gui::Align::Center => *x - width / 2.0,
+                    crate::host::gui::Align::Right => *x - width,
+                };
+                let top_signed = y.round() as isize;
+                let clip_skip = (-top_signed).max(0) as usize;
+                if clip_skip >= ch_s {
+                    continue;
+                }
+                let render_top = top_signed.max(0) as usize;
+                let visible_h = ch_s - clip_skip;
+                let mut cx = 0usize;
+                let bg_packed = pack(bg);
+                for g in s.graphemes(true) {
+                    let cells = cluster_cells(g);
+                    if cells == 0 {
+                        continue;
+                    }
+                    let block_w = cells * cw * scale;
+                    let left_signed = left0.round() as isize + cx as isize;
+                    if left_signed >= 0 {
+                        let left = left_signed as usize;
+                        if paint_bg {
+                            fill_cell(canvas, left, render_top, block_w, visible_h, bg_packed);
+                        }
+                        r.draw_cluster(
+                            canvas,
+                            left,
+                            render_top,
+                            g,
+                            face.family,
+                            face.bold,
+                            face.italic,
+                            face.scale,
+                            fg,
+                            clip_skip,
+                        );
+                        if face.underline {
+                            let uy = top_signed + ch_s as isize - 2 * scale as isize;
+                            if uy >= 0 {
+                                fill_cell(canvas, left, uy as usize, block_w, scale, pack(fg));
+                            }
+                        }
+                    }
+                    cx += block_w;
+                }
+            }
             Op::VSpans { row0, col0, cols } => {
                 let top0 = oy + *row0 as usize * ch;
                 for (i, segs) in cols.iter().enumerate() {
@@ -2246,6 +2319,88 @@ mod cell_region_tests {
 
     /// Wild geometry and sizes come straight from an app's render op. None of it may
     /// panic (an overflow under debug-assertions, an out-of-bounds write) or hang.
+
+    #[test]
+    fn text_px_width_counts_cells_times_scale() {
+        assert_eq!(text_px_width("ab", 9, 1), 18);
+        assert_eq!(text_px_width("ab", 9, 2), 36);
+        assert_eq!(text_px_width("", 9, 1), 0);
+        // a wide (two-cell) cluster spans two cells
+        assert_eq!(text_px_width("日", 9, 1), 18);
+    }
+
+    #[test]
+    fn pixel_text_paints_where_it_says_and_survives_wild_geometry() {
+        use crate::host::gui::Align;
+        let mut r = Renderer::new(1.0, default_families(), 14.0);
+        let (cw, ch) = (r.cell_w.max(1), r.cell_h.max(1));
+        let (fb_w, fb_h) = (96usize, 64usize);
+        let mut buf = vec![0u32; fb_w * fb_h];
+        let mut canvas = Canvas::full(&mut buf, fb_w, fb_h);
+        let face = Face {
+            bg: Some([10, 20, 30]),
+            ..Face::default()
+        };
+        let op = |x: f32, y: f32, align: Align| Op::TextPx {
+            x,
+            y,
+            s: "ab".into(),
+            face,
+            align,
+        };
+        // Left-aligned at (10, 5): the background fills [10, 10 + 2cw) × [5, 5 + ch).
+        render_ops(
+            &[op(10.0, 5.0, Align::Left)],
+            &mut canvas,
+            &mut r,
+            0,
+            0,
+            cw,
+            ch,
+            0,
+            0,
+        );
+        let bg = pack([10, 20, 30]);
+        assert_eq!(buf[5 * fb_w + 10], bg);
+        assert_eq!(buf[5 * fb_w + 10 + 2 * cw - 1], bg);
+        assert_ne!(buf[5 * fb_w + 10 + 2 * cw], bg);
+        assert_ne!(buf[4 * fb_w + 10], bg);
+        // Centred at x = 50: the run starts at 50 - cw.
+        let mut buf2 = vec![0u32; fb_w * fb_h];
+        let mut canvas2 = Canvas::full(&mut buf2, fb_w, fb_h);
+        render_ops(
+            &[op(50.0, 5.0, Align::Center)],
+            &mut canvas2,
+            &mut r,
+            0,
+            0,
+            cw,
+            ch,
+            0,
+            0,
+        );
+        assert_eq!(buf2[5 * fb_w + 50 - cw], bg);
+        assert_ne!(buf2[5 * fb_w + 50 - cw - 1], bg);
+        // Off the top, off the left, and absurd: no panic, nothing out of bounds.
+        let mut buf3 = vec![0u32; fb_w * fb_h];
+        let mut canvas3 = Canvas::full(&mut buf3, fb_w, fb_h);
+        render_ops(
+            &[
+                op(-5.0, -3.0, Align::Left),
+                op(1.0e9, -1.0e9, Align::Right),
+                op(f32::NAN, f32::NAN, Align::Center),
+            ],
+            &mut canvas3,
+            &mut r,
+            0,
+            0,
+            cw,
+            ch,
+            0,
+            0,
+        );
+    }
+
     #[test]
     fn wild_region_geometry_does_not_overflow_the_coordinate_math() {
         for px in [1.0f32, 3.5, 1e9, f32::MAX] {
@@ -2266,4 +2421,12 @@ mod cell_region_tests {
             }
         }
     }
+}
+
+/// The pixel width of a text run shaped at cell width `cw` and face scale `scale` —
+/// what a `TextPx` op's alignment shifts by. Grapheme clusters, like the painters walk.
+pub(crate) fn text_px_width(s: &str, cw: usize, scale: usize) -> usize {
+    s.graphemes(true)
+        .map(|g| cluster_cells(g) * cw * scale)
+        .sum()
 }

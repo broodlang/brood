@@ -20,6 +20,50 @@ pub fn beep(freq: f32, ms: u64, vol: f32) {
     backend::beep(freq, ms, vol);
 }
 
+/// A decoded sound: interleaved f32 samples at `rate` Hz with `channels` channels —
+/// what a `[:sound …]` op plays. Shared (`Arc`) so a window keeps one copy and each
+/// play hands the mixer a reference, never the samples again.
+#[derive(Debug)]
+pub struct SoundData {
+    pub rate: u32,
+    pub channels: u16,
+    pub samples: std::sync::Arc<[f32]>,
+}
+
+impl SoundData {
+    /// From PCM16 little-endian bytes, the shape a Brood-side synthesiser or a WAV
+    /// reader hands over; a stray trailing byte is dropped. Rate and channel counts of
+    /// zero are normalised to something playable rather than refused.
+    pub fn from_pcm16(rate: u32, channels: u16, pcm: &[u8]) -> SoundData {
+        let samples: Vec<f32> = pcm
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| i16::from_le_bytes(*c) as f32 / 32768.0)
+            .collect();
+        SoundData {
+            rate: rate.clamp(1, 384_000),
+            channels: channels.clamp(1, 2),
+            samples: samples.into(),
+        }
+    }
+
+    /// How long the sound plays, in seconds.
+    pub fn seconds(&self) -> f32 {
+        self.samples.len() as f32 / (self.rate as f32 * self.channels as f32)
+    }
+}
+
+/// Play `sound` once at peak amplitude `vol` (0..1). Fire-and-forget like `beep`;
+/// overlapping plays mix. No-op without `--features audio`.
+#[cfg(not(feature = "audio"))]
+pub fn play(_sound: &SoundData, _vol: f32) {}
+
+#[cfg(feature = "audio")]
+pub fn play(sound: &SoundData, vol: f32) {
+    backend::play(sound, vol);
+}
+
 /// The longest a single `audio-beep` may run. `audio-beep` is fire-and-forget:
 /// nothing ever stops a tone early, and the mixer holds each one until it ends.
 /// So an unbounded duration is not "a long beep", it is a source that never
@@ -53,10 +97,9 @@ mod backend {
     /// Default peak amplitude (0..1) — modest so stacked tones don't clip.
     const VOLUME: f32 = 0.18;
 
-    struct Beep {
-        freq: f32,
-        ms: u64,
-        vol: f32,
+    enum Cmd {
+        Beep { freq: f32, ms: u64, vol: f32 },
+        Play { sound: super::SoundData, vol: f32 },
     }
 
     fn muted() -> bool {
@@ -74,13 +117,13 @@ mod backend {
     /// The channel to the audio thread, started on first use. `None` when muted or
     /// the thread couldn't start; the audio thread itself exits quietly if there's
     /// no output device, after which sends are harmless no-ops.
-    fn sender() -> Option<&'static Sender<Beep>> {
-        static S: OnceLock<Option<Sender<Beep>>> = OnceLock::new();
+    fn sender() -> Option<&'static Sender<Cmd>> {
+        static S: OnceLock<Option<Sender<Cmd>>> = OnceLock::new();
         S.get_or_init(|| {
             if muted() {
                 return None;
             }
-            let (tx, rx) = mpsc::channel::<Beep>();
+            let (tx, rx) = mpsc::channel::<Cmd>();
             let started = std::thread::Builder::new()
                 .name("brood-audio".into())
                 .spawn(move || {
@@ -90,12 +133,31 @@ mod backend {
                         Err(_) => return,
                     };
                     let mixer = stream.mixer();
-                    while let Ok(b) = rx.recv() {
-                        let tone = SineWave::new(b.freq)
-                            .take_duration(Duration::from_millis(b.ms))
-                            .amplify(b.vol);
-                        // `add` mixes concurrently, so overlapping beeps stack.
-                        mixer.add(tone);
+                    while let Ok(cmd) = rx.recv() {
+                        // `add` mixes concurrently, so overlapping sounds stack.
+                        match cmd {
+                            Cmd::Beep { freq, ms, vol } => {
+                                let tone = SineWave::new(freq)
+                                    .take_duration(Duration::from_millis(ms))
+                                    .amplify(vol);
+                                mixer.add(tone);
+                            }
+                            Cmd::Play { sound, vol } => {
+                                let (Some(channels), Some(rate)) = (
+                                    std::num::NonZeroU16::new(sound.channels),
+                                    std::num::NonZeroU32::new(sound.rate),
+                                ) else {
+                                    continue;
+                                };
+                                let buffer = rodio::buffer::SamplesBuffer::new(
+                                    channels,
+                                    rate,
+                                    sound.samples.to_vec(),
+                                )
+                                .amplify(vol);
+                                mixer.add(buffer);
+                            }
+                        }
                     }
                 });
             match started {
@@ -125,7 +187,31 @@ mod backend {
         let freq = freq.clamp(MIN_BEEP_HZ, MAX_BEEP_HZ);
         let ms = ms.min(MAX_BEEP_MS);
         if let Some(tx) = sender() {
-            let _ = tx.send(Beep { freq, ms, vol });
+            let _ = tx.send(Cmd::Beep { freq, ms, vol });
+        }
+    }
+
+    /// A decoded sound to the mixer, once. The samples are shared, so this is a
+    /// reference count, not a copy, per play; a non-finite or non-positive `vol` takes
+    /// the default; an empty sound is nothing to play.
+    pub fn play(sound: &super::SoundData, vol: f32) {
+        let vol = if vol.is_finite() && vol > 0.0 {
+            vol.min(1.0)
+        } else {
+            VOLUME
+        };
+        if sound.samples.is_empty() {
+            return;
+        }
+        if let Some(tx) = sender() {
+            let _ = tx.send(Cmd::Play {
+                sound: super::SoundData {
+                    rate: sound.rate,
+                    channels: sound.channels,
+                    samples: sound.samples.clone(),
+                },
+                vol,
+            });
         }
     }
 }

@@ -76,6 +76,8 @@ consumes them), leaving a served app deaf to everything but keys."
    ;; written against a display map serves to a thin client's window unchanged.
    :texture (fn (tex rgba w h) (send client [:texture tex rgba w h]))
    :texture-free (fn (tex) (send client [:texture-free tex]))
+   :sound (fn (snd pcm rate channels) (send client [:sound-data snd pcm rate channels]))
+   :sound-free (fn (snd) (send client [:sound-free snd]))
    :configure (fn (o) (send client [:window o]))
    :poll (fn (ms)
            (receive
@@ -259,6 +261,13 @@ else is a key/mouse input shipped to the daemon `session` as `[:key …]`. Tail-
     ([:window o] (do
                    (when (get display :configure) ((get display :configure) o))
                    (attach-display-loop peer session display)))
+    ([:sound-data snd pcm rate channels] (do
+                                           (when (get display :sound)
+                                             ((get display :sound) snd pcm rate channels))
+                                           (attach-display-loop peer session display)))
+    ([:sound-free snd] (do
+                         (when (get display :sound-free) ((get display :sound-free) snd))
+                         (attach-display-loop peer session display)))
     ([:bye] nil)
     ([:nodedown ^peer] nil)
     ([:down _ _ _] nil)

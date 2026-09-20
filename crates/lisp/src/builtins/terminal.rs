@@ -233,6 +233,20 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "Deliver window id's mouse input in :pixels or :cells from now on — the `{:input …}` gui-open option, switchable after the window exists (how a window a generic thin client opened is told by the app it attached to which unit it wants). The window then reports its size in that unit ([:resize w h] in pixels, or [:resize cols rows]). Returns nil.",
         gui_input);
     primitives.def(
+        "%gui-sound",
+        Arity::exact(5),
+        Sig::new(vec![int, int, int, int, Ty::of_tags(&[Tag::Bytes, Tag::Vector])], nil_ty),
+        &["id", "snd", "rate", "channels", "pcm"],
+        "Keep pcm — interleaved PCM16 little-endian bytes (a bytes value or a vector of 0-255 ints) at rate Hz (1..384000) with channels (1 or 2) — as sound snd of window id, for its [:sound snd vol] frame ops. The handle snd is the caller's (gui/sound allocates it), as a texture's is. Errors on a bad rate/channel count or an odd byte count; a silent no-op headless. Returns nil.",
+        gui_sound);
+    primitives.def(
+        "%gui-sound-free",
+        Arity::exact(2),
+        Sig::new(vec![int, int], nil_ty),
+        &["id", "snd"],
+        "Forget sound snd of window id; a later [:sound snd] op plays nothing. Idempotent. Returns nil.",
+        gui_sound_free);
+    primitives.def(
         "%gui-cell-size",
         Arity::range(1, 2),
         Sig::with_optional(vec![int], vec![Ty::of_tags(&[Tag::Int, Tag::Float])], vec_ty),

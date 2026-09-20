@@ -888,6 +888,48 @@ pub(in crate::builtins) fn gui_texture(args: &[Value], _: EnvId, heap: &mut Heap
     Ok(Value::nil())
 }
 
+/// `(%gui-sound id snd rate channels pcm)` — keep `pcm` (interleaved PCM16 little-endian
+/// bytes: a bytes value or a vector of 0-255 ints) at `rate` Hz with `channels` channels as
+/// sound `snd` of window `id`, for its `[:sound …]` ops. The handle is the caller's
+/// (`gui/sound` allocates it in Brood beside the sound's length), as `%gui-texture`'s is.
+pub(in crate::builtins) fn gui_sound(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = gui_window_id(heap, "%gui-sound", arg(args, 0))?;
+    let snd_i = expect_int(heap, "%gui-sound", arg(args, 1))?;
+    let rate_i = expect_int(heap, "%gui-sound", arg(args, 2))?;
+    let channels_i = expect_int(heap, "%gui-sound", arg(args, 3))?;
+    let pcm = collect_bytes("%gui-sound", arg(args, 4), heap)?;
+    let Ok(snd) = u32::try_from(snd_i) else {
+        return Err(LispError::runtime(format!(
+            "gui-sound: sound handle must be a non-negative int, got {snd_i}"
+        )));
+    };
+    if !(1..=384_000).contains(&rate_i) || !(1..=2).contains(&channels_i) {
+        return Err(LispError::runtime(format!(
+            "gui-sound: rate must be 1..384000 Hz and channels 1 or 2, got {rate_i} Hz × {channels_i}"
+        )));
+    }
+    if pcm.len() % 2 != 0 {
+        return Err(LispError::runtime(format!(
+            "gui-sound: PCM16 needs an even byte count, got {}",
+            pcm.len()
+        )));
+    }
+    crate::host::gui::sound(id, snd, rate_i as u32, channels_i as u16, pcm)
+        .map_err(LispError::runtime)?;
+    Ok(Value::nil())
+}
+
+/// `(%gui-sound-free id snd)` — forget sound `snd` of window `id`.
+pub(in crate::builtins) fn gui_sound_free(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = gui_window_id(heap, "%gui-sound-free", arg(args, 0))?;
+    let snd_i = expect_int(heap, "%gui-sound-free", arg(args, 1))?;
+    let Ok(snd) = u32::try_from(snd_i) else {
+        return Ok(Value::nil());
+    };
+    crate::host::gui::sound_free(id, snd).map_err(LispError::runtime)?;
+    Ok(Value::nil())
+}
+
 /// `(%gui-input! id mode)` — deliver window `id`'s mouse input in `:pixels` or `:cells`
 /// from now on (the `{:input …}` open option, switchable); the window then reports its
 /// size in that unit. Anything but `:pixels` means cells.
@@ -1151,6 +1193,8 @@ struct GuiOpTags {
     frect_t: value::Symbol,
     quad_t: value::Symbol,
     sprite_t: value::Symbol,
+    text_px_t: value::Symbol,
+    sound_t: value::Symbol,
 }
 impl GuiOpTags {
     fn new() -> Self {
@@ -1171,6 +1215,8 @@ impl GuiOpTags {
             frect_t: value::intern("frect"),
             quad_t: value::intern("quad"),
             sprite_t: value::intern("sprite"),
+            text_px_t: value::intern("text-px"),
+            sound_t: value::intern("sound"),
         }
     }
 }
@@ -1499,6 +1545,48 @@ fn parse_gui_ops(
                 color,
                 rot,
             });
+        } else if tag == tags.text_px_t {
+            // `[:text-px x y s face]` — pixel space; the face may carry `:align`.
+            let x = num(arg(&parts, 1));
+            let y = num(arg(&parts, 2));
+            let Ok(s) = expect_string(heap, "%gui-draw", arg(&parts, 3)) else {
+                continue;
+            };
+            let face_v = parts.get(4).copied().unwrap_or(Value::nil());
+            let face = gui_face(heap, face_v);
+            let align = match face_v {
+                Value::Map(id) => match heap.map_get(id, value::kw("align")) {
+                    Some(Value::Keyword(k)) if k == value::intern("center") => {
+                        crate::host::gui::Align::Center
+                    }
+                    Some(Value::Keyword(k)) if k == value::intern("right") => {
+                        crate::host::gui::Align::Right
+                    }
+                    _ => crate::host::gui::Align::Left,
+                },
+                _ => crate::host::gui::Align::Left,
+            };
+            ops.push(crate::host::gui::Op::TextPx {
+                x,
+                y,
+                s,
+                face,
+                align,
+            });
+        } else if tag == tags.sound_t {
+            // `[:sound id]` / `[:sound id vol]` — a handle that is not a non-negative int
+            // is not a sound; an absent or non-number volume is the default (0).
+            let Value::Int(snd) = arg(&parts, 1) else {
+                continue;
+            };
+            let Ok(id) = u32::try_from(snd) else {
+                continue;
+            };
+            let vol = match parts.get(2).copied() {
+                Some(v @ (Value::Int(_) | Value::Float(_))) => num(v),
+                _ => 0.0,
+            };
+            ops.push(crate::host::gui::Op::Sound { id, vol });
         } else if tag == tags.sprite_t {
             // `[:sprite tex x y w h]` with optional `uv` (`[u0 v0 du dv]`, default the
             // whole texture), `tint` (default opaque white) and `rot` (default 0) —
