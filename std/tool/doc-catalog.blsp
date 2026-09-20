@@ -608,6 +608,16 @@
    "proc/whereis" :processes
    "with-err-str" :io
    "with-out-str" :io
+   ;; Case folding for COMPARISON — one character per character, so an index into the
+   ;; result indexes the original. Catalogued with the strings, which is where someone
+   ;; looking for "compare these ignoring case" will look.
+   "string/fold-case" :strings
+   "string/has-upper?" :strings
+   ;; Reads a file, but at EXPANSION time, and what it leaves behind is a string
+   ;; literal — so it is catalogued with the file surface it draws on rather than
+   ;; with the macros, which is where someone looking for "how do I ship this file
+   ;; with my program" will look for it.
+   "include-str" :filesystem
    "math/zero?" :predicates
    "%zip-acc" :collections
    "hash-map" :maps
