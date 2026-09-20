@@ -2086,7 +2086,7 @@ impl Drop for NoSourceRewrites {
 /// `require`s (ADR-227), and the transitive scan (ADR-340) loads more from inside the same
 /// check. Without this every module a `brood file.blsp` pre-flight loaded ran UNREWRITTEN
 /// for the rest of the program: `seq/frequencies` over 750k keys 860 ms against 343 ms with
-/// `BROOD_NO_CHECK=1`, the same as `BROOD_LINMAP=0` (KI-172, 2026-09-20) — and a stdlib
+/// `BROOD_NO_CHECK=1`, the same as `BROOD_LINMAP=0` (KI-173, 2026-09-20) — and a stdlib
 /// image written by such a process carried the unrewritten bodies to every later run.
 pub struct SourceRewritesOn {
     was: bool,

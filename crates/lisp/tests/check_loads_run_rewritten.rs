@@ -1,4 +1,4 @@
-//! KI-172: a module the CHECKER loads is the runtime's module. The checker holds
+//! KI-173: a module the CHECKER loads is the runtime's module. The checker holds
 //! `NoSourceRewrites` across its compile pass so the file under check is read as the author
 //! wrote it — but that pass is also what infers and performs the file's `require`s
 //! (ADR-227), and the transitive scan (ADR-340) loads more from inside the same check. Those

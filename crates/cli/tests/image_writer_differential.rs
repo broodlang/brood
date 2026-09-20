@@ -1,4 +1,4 @@
-//! The stdlib image's WRITER is not part of the checker's answer (KI-172). Two images of the
+//! The stdlib image's WRITER is not part of the checker's answer (KI-173). Two images of the
 //! same std, written by two `brood` processes in different states — one that ran its
 //! pre-flight check first (which loads modules), one that skipped it — must give the checker
 //! the same signature for every function of the modules the optimiser's source rewrites

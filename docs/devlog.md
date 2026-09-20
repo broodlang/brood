@@ -15037,7 +15037,7 @@ function body — `unbound symbol: w` at a call site far away; the doc example n
 keyword. Tests: `remote-display`'s three messages and the client loop applying them
 (`serve_test`), `display-texture` (`ui_test`), `run-on` against a fake display (b2d).
 
-## 2026-09-20 (7) — the five follow-ups, and the one that found KI-172
+## 2026-09-20 (7) — the five follow-ups, and the one that found KI-173
 
 The list from the coverage session, taken in order.
 
@@ -15059,7 +15059,7 @@ process: `(seq/vector-ref [1 2] 0)` is an int with `seq` never loaded.
 **3 — gate the image's writer: it found a bug.** Two images of the same std — one written
 by `brood`, one by `nest test` — gave the checker different answers: `debug/hits`
 `(map any number)` under one, `(or map table)` under the other, and the images differed by
-21 KB. The cause is **KI-172**: the checker holds `NoSourceRewrites` across a compile pass
+21 KB. The cause is **KI-173**: the checker holds `NoSourceRewrites` across a compile pass
 that performs the file's `require`s and the ADR-340 scan's loads, so every std module a
 `brood file.blsp` pre-flight brought in was expanded WITHOUT the optimiser's rewrites and
 then RUN that way — `seq/frequencies` over 750k keys **860 ms** against **343 ms** with the

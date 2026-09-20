@@ -386,7 +386,7 @@ pub(super) fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     if module_load {
         heap.enter_journalled_load(true);
     }
-    // Expanded WITH the optimiser's rewrites whoever triggered the load (KI-172) — a file
+    // Expanded WITH the optimiser's rewrites whoever triggered the load (KI-173) — a file
     // loaded from inside a check is still the runtime's code.
     let _rewrites = crate::eval::macros::SourceRewritesOn::enter();
     let mut result = Ok(Value::nil());
@@ -523,7 +523,7 @@ pub(super) fn load_module_source(args: &[Value], env: EnvId, heap: &mut Heap) ->
     let previous_file = name.map(|n| heap.set_current_file(Some(n)));
     heap.enter_module_load();
     // A module's bodies are expanded WITH the optimiser's rewrites whoever triggered the
-    // load — the checker holds `NoSourceRewrites` across a compile pass that loads (KI-172).
+    // load — the checker holds `NoSourceRewrites` across a compile pass that loads (KI-173).
     let rewrites = crate::eval::macros::SourceRewritesOn::enter();
     let result = eval_string_inner(heap, env, &src, true);
     drop(rewrites);

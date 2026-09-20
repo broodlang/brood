@@ -916,7 +916,7 @@ fn a_type_of_equality_guards_like_the_predicate() {
     // way out of every in-place fold (ADR-360 §6 — `type-of` is a total PrimOp1, a predicate
     // call is not), and it is exactly `(table? x)`: both branches narrow, the else branch to
     // the complement. Without it a LOADED `seq/frequencies` read `map | table` at every call
-    // site (KI-172). Either operand order, and a keyword naming no tag asserts nothing.
+    // site (KI-173). Either operand order, and a keyword naming no tag asserts nothing.
     assert_eq!(
         ty_str("(let (r (if (rand/float) {} (table/new))) (if (= :table (type-of r)) (table/snapshot r) r))"),
         "map<any, any>"

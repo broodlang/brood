@@ -440,7 +440,7 @@ fn guard_assertion_inner(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Guard> {
         // §6: `type-of` is a total PrimOp1, a predicate call is not). Exactly the guard
         // `(table? x)` is, both branches: `type-of` answers one keyword per tag, so the
         // else branch is the complement. Without it a LOADED `seq/frequencies` read
-        // `map | table` at every call (KI-172, 2026-09-20).
+        // `map | table` at every call (KI-173, 2026-09-20).
         if let Some((sym, ty)) = type_of_eq_guard(heap, ctx, items[1], items[2])
             .or_else(|| type_of_eq_guard(heap, ctx, items[2], items[1]))
         {

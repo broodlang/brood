@@ -12,14 +12,14 @@ sysctl that moves under you — that file's last section has the one-line check)
 questions are answerable here; check that file's "what this box CAN answer" before deferring
 anything.
 
-## 2026-09-20 later — the five follow-ups: KI-172, the writer gate, the rig, three type-variable sigs
+## 2026-09-20 later — the five follow-ups: KI-173, the writer gate, the rig, three type-variable sigs
 
 **Green on every gate that names the change** (devlog 2026-09-20 (7) has the detail): the
 checker unit suite, `nest::image_sigs_differential`, the strict gate over `std/`+`tests/`,
 the new `cli::image_writer_differential`, `check_loads_run_rewritten`,
 `image_sig_type_variables` (2), `curated_names_load_nothing`, the named `.blsp` suites.
 
-**KI-172 is the one to know about.** A module the pre-flight check loaded ran WITHOUT the
+**KI-173 is the one to know about.** A module the pre-flight check loaded ran WITHOUT the
 optimiser's source rewrites — `seq/frequencies` over 750k keys 860 ms vs 343 ms — because
 the checker's `NoSourceRewrites` was held across the compile pass that performs the loads;
 and a stdlib image written by such a process carried the unrewritten bodies. The loader
