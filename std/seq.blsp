@@ -444,6 +444,84 @@ contradiction; it is public here, where its callers can reach it.
   (repeatedly-acc n f nil))
 (sig repeatedly (int any -> any))
 
+;; ---- ADR-378: cycle, the walkers, pmap ---------------------------------------
+(defn- cycle-acc (items left n acc)
+  (cond
+    (<= n 0) (reverse acc)
+    (empty? left) (cycle-acc items items n acc)
+    else (cycle-acc items (rest left) (- n 1) (cons (first left) acc))))
+(defn cycle (coll n)
+  "The first `n` items of `coll` repeated end to end: `(cycle [1 2] 5)` is `(1 2 1 2 1)`.
+Bounded by `n`, not infinite — Brood has no lazy cons (ADR-111); `nil` for an empty `coll`
+or an `n` of zero or less.
+
+    (seq/cycle [1 2] 5)    → (1 2 1 2 1)
+    (seq/cycle [:a] 3)     → (:a :a :a)
+    (seq/cycle [] 3)       → nil"
+  (let (items (seq coll)) (if (empty? items) nil (cycle-acc items items n nil))))
+(sig cycle (seqable int -> (list any)))
+
+;; Walk a nested value — lists, vectors, sets, maps (as `[k v]` entries) — rebuilding each
+;; container from its walked children; anything else is a leaf. `%walk-children` is the
+;; one-level step both walkers share.
+;; check-allow: deliberately non-tail — depth = the value's nesting, not its size.
+(check-allow :non-tail-recursion
+  (defn- %walk-children (form inner)
+    (cond
+      (vector? form) (mapv form inner)
+      (map? form) (into {} (map (seq form) inner))
+      (set? form) (into #{} (map (seq form) inner))
+      (list? form) (map form inner)
+      else form)))
+(check-allow :non-tail-recursion
+  (defn postwalk (form f)
+    "Rebuild `form` bottom-up: every sub-value — the leaves, then each container of already
+walked children, then `form` itself — is replaced by `(f x)`. A map's entries pass through
+`f` as `[k v]` vectors. Depth-first, so an `f` that turns a leaf into a container does not
+see inside the container it made; [[prewalk]] is the top-down twin that does.
+
+    (seq/postwalk [1 [2 3]] (fn (x) (if (int? x) (* x 10) x)))   → [10 [20 30]]
+    (seq/postwalk {:a 1} (fn (x) (if (vector? x) [(first x) (inc (second x))] x)))   → {:a 2}"
+    (f (%walk-children form (fn (x) (postwalk x f))))))
+(check-allow :non-tail-recursion
+  (defn prewalk (form f)
+    "Rebuild `form` top-down: `form` is replaced by `(f form)` FIRST, then each child of
+the result is walked the same way. A map's entries pass through `f` as `[k v]` vectors.
+What `f` returns is what gets descended into, so a rewrite that produces a container is
+walked inside; [[postwalk]] is the bottom-up twin.
+
+    (seq/prewalk [1 [2 3]] (fn (x) (if (int? x) (* x 10) x)))   → [10 [20 30]]
+    (seq/prewalk '(a (b)) (fn (x) (if (= x 'b) 'c x)))           → (a (c))"
+    (%walk-children (f form) (fn (x) (prewalk x f)))))
+
+(defn pmap (coll f)
+  "`map`, with `(f x)` for every item running in its own process at once; the results come
+back in `coll`'s order as a list. For work that is expensive per item and independent
+across items — a parse per file, a request per host. A worker that raises re-raises here,
+in the caller, once every worker has reported. Each `x` is sent to its worker and each
+result sent back, so both cross a process boundary as copies (a pid or a closure in `x`
+travels as a handle; a view must be realised first).
+
+    (seq/pmap [1 2 3] (fn (n) (* n n)))   → (1 4 9)
+    (seq/pmap [] inc)                     → nil"
+  (let (items (seq coll)
+        me (self)
+        tag (ref)
+        n (count items))
+    (doseq ([i x] (enumerate items))
+      (spawn (send me [:pmap tag i (try [:ok (f x)] (catch e [:raised e]))])))
+    (pmap-collect tag n 0 {})))
+(sig pmap (seqable any -> (list any)))
+
+(defn- pmap-collect (tag n got acc)
+  ;; Gather `n` replies keyed by index, whatever order they arrive in, then read them out
+  ;; in order; a raised worker error is thrown here after every worker has reported, so
+  ;; no reply is left in the mailbox to surprise the next receive.
+  (if (= got n)
+    (map (range n) (fn (i) (let ([status v] (get acc i)) (if (= status :ok) v (throw v)))))
+    (receive
+      ([:pmap ^tag i r] (pmap-collect tag n (+ got 1) (assoc acc i r))))))
+
 (defn sample (seed coll)
   "Returns `[item next-seed]`: one uniformly random element of non-empty `coll` (list, vector, or a map read as its `[k v]` entries)."
   (let (items (into [] coll)

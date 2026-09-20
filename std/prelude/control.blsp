@@ -289,6 +289,47 @@ The steps after a failure never run, so a pipe does not have to end in `(if (fai
   (let (name (first binding) expr (second binding) v (gensym "v"))
     `(let (~v ~expr) (when ~v (let (~name ~v) ~@body)))))
 
+;; `if-some`/`when-some` — the same shapes testing for PRESENCE (`nil`) rather than truth,
+;; so a bound `false` takes the then-branch: the binding form for a lookup whose value may
+;; legitimately be `false` (a flag in a config map, a boolean field). ADR-378.
+(defmacro if-some (binding then & else)
+  "Bind `(name expr)`; if `expr` is not `nil`, evaluate `then` with `name` bound to it, else `else` (or `nil`). Unlike [[if-let]], a `false` value is PRESENT and takes the then-branch.
+
+    (if-some (x false) x :absent)   → false
+    (if-some (x nil) x :absent)     → :absent"
+  (let (name (first binding) expr (second binding) v (gensym "v"))
+    `(let (~v ~expr) (if (nil? ~v) (do ~@else) (let (~name ~v) ~then)))))
+(defmacro when-some (binding & body)
+  "Bind `(name expr)`; when `expr` is not `nil`, evaluate `body` with `name` bound to it, else `nil`. The presence-testing [[when-let]]: a `false` value runs the body.
+
+    (when-some (x false) [:got x])   → [:got false]
+    (when-some (x nil) [:got x])     → nil"
+  (let (name (first binding) expr (second binding) v (gensym "v"))
+    `(let (~v ~expr) (if (nil? ~v) nil (let (~name ~v) ~@body)))))
+
+;; `condp` — `cond` with the test factored out: `(condp pred expr t1 r1 t2 r2 … [default])`
+;; evaluates `expr` once and takes the first clause whose `(pred t expr)` is truthy. The
+;; shape `case` cannot be — `case` compares literals, `condp` asks a predicate: `(condp <
+;; n 10 :small 100 :medium :large)`, `(condp string/starts-with? line "#" :heading "-"
+;; :item :text)`. A lone trailing form is the default; with none, no match raises, as
+;; `case` and `match` do. ADR-378.
+;; check-allow: deliberately non-tail — expansion-time recursion over the clause list.
+(check-allow :non-tail-recursion
+  (defn- %condp-clauses (p e clauses)
+    (cond
+      (empty? clauses) `(error "condp: no clause matched " (pr-str ~e))
+      (empty? (rest clauses)) (first clauses)
+      else
+        `(if (~p ~e ~(first clauses)) ~(second clauses) ~(%condp-clauses p e (rest (rest clauses)))))))
+(defmacro condp (pred expr & clauses)
+  "Evaluate `expr` once, then take the first `test result` pair whose `(pred expr test)` is truthy — the value FIRST, as every data-first predicate reads (`(string/starts-with? line \"#\")`), which is the opposite of Clojure's `(pred test expr)`; a lone trailing form is the default, and with none a miss raises. `cond` with the predicate factored out — `case` compares literals, this asks a function.
+
+    (condp < 15 10 :small 100 :medium :large)   → :medium
+    (condp = :b :a 1 :b 2)                      → 2
+    (condp string/starts-with? \"# Title\" \"#\" :heading \"-\" :item :text)   → :heading"
+  (let (e (gensym "e") p (gensym "p"))
+    `(let (~e ~expr ~p ~pred) ~(%condp-clauses p e (map clauses identity)))))
+
 ;; ---- with: sequential match-binding with fall-through -----------------------
 ;; `with` — the FAILURE let. Bindings read exactly like `let`'s; the first value that is a
 ;; failure short-circuits the whole form to that failure, so the steps after it never run.

@@ -15191,3 +15191,21 @@ Also on `main`, from the day's pushes past the inert hook: four `fuzzy/ranker` n
 against its 1138 ceiling; six one-line examples, each a real session or keymap, bring it
 back. (Two of the keymap examples are written order-free — a single-binding map, a set —
 because the walk's order is the map's.)
+
+## 2026-09-20 (11) — the small library gaps (ADR-378)
+
+ROADMAP item 9, built as the design discussion settled it: `memoize` is a `table` the
+returned closure captures — no cell exists, a process would serialise the calls it is
+meant to make cheap — with the consequences stated on it (structural keys, a copy per hit,
+one cache across processes, no finalizer so bind it with `def`). `condp` asks `(pred expr
+test)`, value first like every data-first predicate — deliberately not Clojure's order.
+`seq/cycle` is bounded (no lazy cons). `seq/pmap` is a process per item, replies tagged by a
+`ref`, collected by index; a worker's error re-raises after every worker has reported so
+the mailbox is clean. `seq/prewalk`/`postwalk` walk maps as `[k v]` entries. `string/format`
+gains `-` and widths on `%s`/`%f`. `partition-by` was already `seq/chunk-by`.
+
+Two housekeeping facts on the way: `fold-for` (ADR-377) had reached `main` unledgered —
+`bare_names_test` is not among the tests the pre-push hook names for a `std/prelude/`
+change, so the ledger gate never ran — and is ledgered now with the six new bare names.
+And `seq/pmap`'s callback parameter reads as `any` to the checker (`(seqable ?A)` would
+exclude maps, the lesson of (7)), so its test sleeps by `nth` rather than arithmetic on `n`.

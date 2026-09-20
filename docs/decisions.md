@@ -24397,3 +24397,56 @@ and the thrash latch now names its `last-deopt` reason, which is what found the 
 point. `crates/cli/tests/float_through_erased_reads.rs` is the gate. Not done: the same
 optimism for `Prim2SlotInt` (an untyped slot against an int literal) — a loop counter
 bound from `(count …)` is exactly that shape and would deopt on every iteration.
+
+## ADR-378 — The small library gaps: `juxt`, `fnil`, `memoize`, `condp`, `if-some`/`when-some`, `seq/cycle`, the walkers, `seq/pmap`, `string/format` justification
+
+**Status:** accepted (2026-09-20). **ROADMAP "what the other Lisps have" item 9.**
+
+**Context.** Each of these is a few lines any Clojure or Racket user reaches for and finds
+missing; each was listed in ROADMAP as "a few prelude lines". The decisions worth recording
+are the ones where Brood's rules make the obvious port wrong.
+
+**Decisions.**
+
+- **`memoize` is a `table` the returned closure captures** — not a process. Brood has no
+  cell (ADR-026), and the only mutable structure is the table; a process would serialise
+  every call through one mailbox, which is the opposite of what a memoized hot function
+  wants. Consequences the docstring states: keys are the argument list compared
+  structurally (so memoize over values, never a pid or a closure); every hit is a fresh
+  copy, as a table read is; the cache is shared by every process that calls the function;
+  and a table has no finalizer, so `memoize` belongs under a `def` — inside a loop it leaks
+  a table per call. Written over the kernel prims (`%table`, `%table-put`, …) because the
+  prelude cannot require `std/table`. A memoized global is an anonymous `(& args)` closure,
+  so a `(sig …)` beside the `def` is what gives its callers a type.
+- **`condp` asks `(pred expr test)`, value first** — the opposite of Clojure's `(pred test
+  expr)`, because Brood's predicates are data-first (`(string/starts-with? line "#")`,
+  ADR-308) and a `condp` over one must read the same way. `(condp < 15 10 :small 100
+  :medium :large)` is `:medium`. A lone trailing form is the default; no match raises, as
+  `case` and `match` do.
+- **`if-some`/`when-some` test presence, not truth**: the `if-let` shapes for a lookup whose
+  value may be `false`.
+- **`seq/cycle` is bounded** — `(cycle coll n)`, the first `n` items repeated — because
+  Brood has no lazy cons (ADR-111) and an infinite `cycle` has nowhere to live.
+- **`partition-by` is not added: it is `seq/chunk-by`**, which has been here since the seq
+  helpers arrived. One name.
+- **`seq/prewalk`/`seq/postwalk`** walk lists, vectors, sets and maps — a map's entries pass
+  through `f` as `[k v]` vectors, which is what makes "rename every key" a one-liner — and
+  rebuild each container of the same kind. Records are walked as the maps they are and come
+  back as plain maps: a walk is a rewrite, and a rewrite of a record's fields is not the
+  record.
+- **`seq/pmap`** spawns a process per item, tags replies with a `ref` so it never consumes
+  another message, collects by index and answers in `coll`'s order. A worker that raises is
+  re-raised in the caller — after every worker has reported, so the mailbox is clean. It is
+  `map`'s parallel sibling, not an executor: no pool, no batching, no bound (ADR-011; a
+  bounded variant is a `partition` away).
+- **`string/format`** gains the `-` flag (left-align) and a width on `%s` and `%f`
+  (`%10s`, `%8.2f`); `%N.Mf` combines a width with a precision. Octal stays out.
+
+**Bare names.** `juxt`, `fnil`, `memoize`, `condp`, `if-some`, `when-some` join the core
+group of the ledger (`docs/bare-names.md`): combinators and binding forms read only bare,
+beside `comp`/`partial` and `if-let`/`when-let`. Everything sequence-shaped is `seq/`.
+
+**Consequences.** Seven bare names (with `fold-for` from ADR-377, which had reached `main`
+unledgered — the gate only runs when a changed module names it, which is a hole the
+pre-push hook should close). `tests/library_gaps_test.blsp` covers the lot, including
+`memoize` across processes and `pmap`'s ordering under adversarial timing.

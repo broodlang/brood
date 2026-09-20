@@ -244,10 +244,11 @@ needs a Brood-specific form to respect an ADR.
   x xs :when p) body)` makes the body the step — both prelude macros over `for`'s one
   expander. Building it found KI-175 (the checker seeded a fold callback's accumulator from
   the fold's result, losing `init`).
-- ⬜ **9. Small library gaps** — each a few prelude lines: `juxt`, `fnil`, `memoize` (table-
-  or process-backed; there is no atom), `cycle`, `partition-by`, `condp`, `when-some`,
-  `postwalk`/`prewalk`, `pmap` (spawn + fan-in), and `format` width/justification
-  (`%5d`, `%-10s`).
+- ✅ **9. Small library gaps** (2026-09-20, ADR-378): `juxt`, `fnil`, `memoize` (a table the
+  closure captures — bind it with `def`), `condp` (value first, data-first like every Brood
+  predicate), `if-some`/`when-some`, `seq/cycle` (bounded), `seq/prewalk`/`seq/postwalk`,
+  `seq/pmap` (a process per item, replies tagged by `ref`, in order), and `string/format`'s
+  `-` flag and widths on `%s`/`%f`. `partition-by` was already here as `seq/chunk-by`.
 - ⬜ **10. Contract blame.** `BROOD_CONTRACTS=1` reports the mismatch but not the party. The
   checking shim in `std/prelude/core.blsp` knows the signature's module and the call site;
   attach `:blame :caller | :callee` to the error map.

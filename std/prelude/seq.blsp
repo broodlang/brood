@@ -606,6 +606,50 @@ for a higher-order op that wants a fixed answer.
     ((constantly 7) 1 2)   → 7"
   (fn (& _ignored) x))
 
+;; The rest of the combinator family (ADR-378): `juxt`, `fnil`, `memoize`.
+(defn juxt (& fns)
+  "A function that applies each of `fns` to its arguments and returns the results as a
+vector, in order: `((juxt f g) x)` is `[(f x) (g x)]`. The named form of \"the same
+arguments, several views\" — a sort key of two fields, a split of a value into parts.
+
+    ((juxt first count) [7 8 9])                 → [7 3]
+    (sort-by [\"bb\" \"a\" \"ab\"] (juxt count identity))   → (\"a\" \"ab\" \"bb\")"
+  (fn (& args) (mapv fns (fn (f) (apply f args)))))
+
+(defn fnil (f default)
+  "`f` with a `nil` FIRST argument replaced by `default` — the other arguments pass
+through. Reads a map's missing entry as a starting value without spelling the `or` at every
+call: `(update m :n (fnil inc 0))`.
+
+    ((fnil inc 0) nil)              → 1
+    ((fnil inc 0) 5)                → 6
+    ((fnil conj []) nil :a)         → [:a]"
+  (fn (x & more) (apply f (if (nil? x) default x) more)))
+
+(defn memoize (f)
+  "`f` remembering every answer: the first call with given arguments runs `f`, every later
+call with `=` arguments returns the remembered value. The cache is a [[table]] the returned
+function captures (ADR-378): shared by every process that calls it, keys compared
+structurally — so memoize over values (numbers, strings, keywords, maps), never over a pid
+or a closure, which have no structural equality — and each hit hands back a fresh copy of
+the value, as a table read does.
+
+Bind the result with `def`. The table lives as long as the function does and has nothing
+to release it, so a `memoize` inside a loop or a `let` leaks a table per call. And the
+memoized function is an anonymous closure: a `(sig …)` beside the `def` is what gives its
+callers a type.
+
+    (let (m (memoize (fn (n) (* n n)))) [(m 4) (m 4)])   → [16 16]"
+  ;; The kernel prims, not `table/new` & co.: the prelude cannot require `std/table`, and
+  ;; these are what those wrappers forward to.
+  (let (cache (%table))
+    (fn (& args)
+      (if (%table-has? cache args)
+        (%table-get cache args)
+        (let (v (apply f args))
+          (%table-put cache args v)
+          v)))))
+
 ;; Internal stateless transducer constructors — the fused stages behind the
 ;; `l*` combinators. A transducer is `(xf rf) -> rf'`; composing them (`comp`)
 ;; fuses a pipeline into one per-step reducing function. Named `%x*` because they

@@ -1,0 +1,150 @@
+;;; ADR-378 — the small library gaps (ROADMAP "what the other Lisps have" item 9): the
+;;; combinators `juxt`/`fnil`/`memoize`, the control forms `condp`/`if-some`/`when-some`,
+;;; `seq/cycle`, the walkers, `seq/pmap`, and `string/format`'s justification.
+(defmodule library-gaps-test (:use test) (:use math))
+
+(describe "juxt / fnil"
+  (test "juxt applies each function to the same arguments, as a vector in order"
+    (assert= [7 3] ((juxt first count) [7 8 9]))
+    (assert= [3 1] ((juxt + -) 2 1))
+    (assert= [] ((juxt) 1 2)))
+  (test "juxt is the two-field sort key"
+    (assert= (list "a" "ab" "bb") (sort-by ["bb" "a" "ab"] (juxt count identity))))
+  (test "fnil patches a nil FIRST argument only"
+    (assert= 1 ((fnil inc 0) nil))
+    (assert= 6 ((fnil inc 0) 5))
+    (assert= [:a] ((fnil conj []) nil :a))
+    (assert= {:n 1} (update {} :n (fnil inc 0)))
+    ;; a `false` is a value, not an absence
+    (assert= false ((fnil identity :d) false))))
+
+(describe "memoize — a table the function captures"
+  (test "the first call computes, the next with = arguments remembers"
+    (let (t (table/new)
+          slow (memoize (fn (n) (table/incr t :calls) (* n n))))
+      (assert= 16 (slow 4))
+      (assert= 16 (slow 4))
+      (assert= 25 (slow 5))
+      (assert= 2 (table/get t :calls))
+      (table/drop t)))
+  (test "keys are the whole argument list, compared structurally"
+    (let (t (table/new)
+          f (memoize (fn (a b) (table/incr t :calls) [a b])))
+      (assert= [1 {:k 2}] (f 1 {:k 2}))
+      (assert= [1 {:k 2}] (f 1 {:k 2}))
+      (assert= [2 {:k 2}] (f 2 {:k 2}))
+      (assert= 2 (table/get t :calls))
+      (table/drop t)))
+  (test "a nil answer is remembered too — absence is not a miss"
+    (let (t (table/new)
+          f (memoize (fn (x) (table/incr t :calls) nil)))
+      (assert= nil (f 1))
+      (assert= nil (f 1))
+      (assert= 1 (table/get t :calls))
+      (table/drop t)))
+  :isolated (test "across processes: the cache is one, so a spawned caller hits what the parent computed"
+    (def gaps-memo-calls (table/new))
+    (def gaps-memo (memoize (fn (n) (table/incr gaps-memo-calls :calls) (* 2 n))))
+    (assert= 10 (gaps-memo 5))
+    (let (me (self))
+      (spawn (send me [:memo (gaps-memo 5)]))
+      (assert= [:memo 10] (receive ([:memo v] [:memo v]) (after 2000 :timeout))))
+    (assert= 1 (table/get gaps-memo-calls :calls))
+    (table/drop gaps-memo-calls)))
+
+(describe "condp / if-some / when-some"
+  (test "condp asks (pred expr test), value first, and takes the first truthy clause"
+    (assert= :medium (condp < 15 10 :small 100 :medium :large))
+    (assert= :small (condp < 5 10 :small 100 :medium :large))
+    (assert= :large (condp < 500 10 :small 100 :medium :large))
+    (assert= 2 (condp = :b :a 1 :b 2))
+    (assert= :heading (condp string/starts-with? "# Title" "#" :heading "-" :item :text)))
+  (test "condp evaluates the expression once"
+    (let (t (table/new))
+      (assert= :yes (condp = (do (table/incr t :n) :k) :zz :no :k :yes :other))
+      (assert= 1 (table/get t :n))
+      (table/drop t)))
+  (test "no clause and no default raises, naming the value"
+    (is (includes? (error-message (try (condp = :zz :a 1) (catch e e))) ":zz")))
+  (test "if-some / when-some test presence, so false is a value"
+    (assert= false (if-some (x false) x :absent))
+    (assert= :absent (if-some (x nil) x :absent))
+    (assert= nil (if-some (x nil) x))
+    (assert= [:got false] (when-some (x false) [:got x]))
+    (assert= nil (when-some (x nil) [:got x]))
+    (assert= 3 (if-some ([a b] [1 2]) (+ a b) :absent))))
+
+(describe "seq/cycle"
+  (test "repeats the items end to end, bounded by n"
+    (assert= (list 1 2 1 2 1) (seq/cycle [1 2] 5))
+    (assert= (list :a :a :a) (seq/cycle '(:a) 3))
+    (assert= (list 1 2) (seq/cycle [1 2 3] 2)))
+  (test "an empty source or a non-positive n is nil"
+    (assert= nil (seq/cycle [] 3))
+    (assert= nil (seq/cycle [1 2] 0))
+    (assert= nil (seq/cycle [1 2] -1))))
+
+(describe "seq/prewalk / seq/postwalk"
+  (test "postwalk rebuilds bottom-up through vectors, lists, maps and sets"
+    (assert= [10 [20 30]] (seq/postwalk [1 [2 3]] (fn (x) (if (int? x) (* x 10) x))))
+    (assert= (list 10 (list 20)) (seq/postwalk '(1 (2)) (fn (x) (if (int? x) (* x 10) x))))
+    (assert= {:a 2} (seq/postwalk {:a 1} (fn (x) (if (vector? x) [(first x) (inc (second x))] x))))
+    (assert= #{2 3} (seq/postwalk #{1 2} (fn (x) (if (int? x) (inc x) x)))))
+  (test "postwalk sees the leaves before their container; prewalk the container first"
+    (let (seen (table/new)
+          order (fn (tag) (fn (x) (table/put seen tag (conj (or (table/get seen tag) []) x)) x)))
+      (seq/postwalk [1 [2]] (order :post))
+      (seq/prewalk [1 [2]] (order :pre))
+      (assert= [1 2 [2] [1 [2]]] (table/get seen :post))
+      (assert= [[1 [2]] 1 [2] 2] (table/get seen :pre))
+      (table/drop seen)))
+  (test "prewalk descends into what f produced; postwalk does not"
+    (let (expand (fn (x) (if (= x :k) [:a :k2] x)))
+      (assert= [[:a :k2]] (seq/prewalk [:k] expand))
+      (assert= [[:a :k2]] (seq/postwalk [:k] expand)))
+    ;; only prewalk revisits the container it just made
+    (let (grow (fn (x) (if (= x 1) [2] (if (= x 2) 3 x))))
+      (assert= [[3]] (seq/prewalk [1] grow))
+      (assert= [[2]] (seq/postwalk [1] grow))))
+  (test "a leaf that is not a collection is handed to f as itself"
+    (assert= "X" (seq/postwalk "x" string/upper))
+    (assert= 5 (seq/prewalk 5 identity))))
+
+(describe "seq/pmap"
+  (test "maps in parallel and returns the results in order"
+    (assert= (list 1 4 9) (seq/pmap [1 2 3] (fn (n) (* n n))))
+    (assert= nil (seq/pmap [] inc))
+    (assert= (list 2 3) (seq/pmap '(1 2) inc)))
+  (test "order holds whatever the workers' timing"
+    ;; the later items finish first
+    (assert= (list 30 20 10) (seq/pmap [3 2 1] (fn (n) (sleep (nth [0 20 40 60] n)) (* n 10)))))
+  (test "each item really runs in its own process"
+    (let (pids (seq/pmap [1 2 3] (fn (_) (self))))
+      (assert= 3 (count (into #{} pids)))
+      (refute (includes? pids (self)))))
+  (test "a worker that raises re-raises in the caller, after every worker reported"
+    (is (includes? (error-message (try
+                                    (seq/pmap [1 2 3] (fn (n) (if (= n 2) (error "boom " n) n)))
+                                    (catch e e)))
+          "boom 2"))
+    ;; …and the mailbox is clean: no stray reply is waiting
+    (assert= :quiet (receive (_ :stray) (after 100 :quiet)))))
+
+(describe "string/format — widths and justification (ADR-378)"
+  (test "a width right-aligns any specifier; - left-aligns; 0 zero-fills"
+    (assert= "    ab|" (string/format "%6s|" "ab"))
+    (assert= "ab    |" (string/format "%-6s|" "ab"))
+    (assert= "   42|" (string/format "%5d|" 42))
+    (assert= "42   |" (string/format "%-5d|" 42))
+    (assert= "00042" (string/format "%05d" 42))
+    (assert= "  3.14" (string/format "%6.2f" 3.14159))
+    (assert= "3.14  |" (string/format "%-6.2f|" 3.14159))
+    (assert= "3.141590" (string/format "%f" 3.14159))
+    (assert= "  3.141590" (string/format "%10f" 3.14159))
+    (assert= "ab    |  3.14|007" (string/format "%-6s|%6.2f|%03d" "ab" 3.14159 7)))
+  (test "a field narrower than its value never truncates"
+    (assert= "abcdef" (string/format "%3s" "abcdef"))
+    (assert= "abcdef" (string/format "%-3s" "abcdef")))
+  (test "the width forms still reject what they cannot format"
+    (assert-error (string/format "%5q" 1))
+    (assert-error (string/format "%5." 1))))

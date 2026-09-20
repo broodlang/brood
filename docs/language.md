@@ -1481,6 +1481,20 @@ rejected with a hint naming `match`. With no default, no match raises
 [exhaustiveness lint](#type-annotations) covers a `case` over a declared literal
 type just as it covers a `match`.
 
+**`condp`** is `cond` with the predicate factored out — `case` compares literals, this
+asks a function (ADR-378). It evaluates the expression once and takes the first clause
+whose `(pred expr test)` is truthy — **value first**, the way every data-first Brood
+predicate reads, which is the opposite of Clojure's `(pred test expr)`:
+
+```clojure
+(condp < 15 10 :small 100 :medium :large)                            ;=> :medium
+(condp string/starts-with? line "#" :heading "-" :item :text)        ; a lone trailing form is the default
+```
+
+**`if-some` / `when-some`** are `if-let` / `when-let` testing for *presence* rather than
+truth, so a bound `false` takes the then-branch — the binding forms for a lookup whose
+value may legitimately be `false`: `(if-some (flag (get config :verbose)) flag :unset)`.
+
 ### Refutable / destructuring `let`
 
 A `let` binding target may be a pattern; it's a refutable bind (Brood's `=`) that
@@ -2692,7 +2706,13 @@ In the `math` module: `math/mod`  `math/rem`  `math/quot`  `math/floor`  `math/m
 `range`  `take`  `drop`  `split-at`  `take-last`  `drop-last`  `take-while`  `drop-while`
 `includes?`  `any?`  `every?`  `find`  `index-of`  `zip`
 `partition`  `sort`  `sort-by`  `subvec`  `remove`  `remove-nth`  `keep`
-`distinct`  `flatten`  `repeat`  `repeatedly`
+`distinct`  `flatten`  `repeat`  `repeatedly`  `seq/cycle`  `seq/prewalk`  `seq/postwalk`
+
+- **`seq/cycle`** is bounded — `(seq/cycle [1 2] 5)` is `(1 2 1 2 1)` — because there is no
+  lazy cons to make it infinite (ADR-111). **`seq/postwalk`/`seq/prewalk`** rebuild a nested
+  value bottom-up / top-down through lists, vectors, sets and maps (a map's entries pass
+  through `f` as `[k v]` vectors); `prewalk` descends into what `f` produced, `postwalk`
+  does not (ADR-378).
 
 > **The `seq` namespace (ADR-227; renamed from `enum` in ADR-234).** The higher-level,
 > *derived* sequence helpers live in the `seq` module rather than the bare prelude: `dedupe`, `distinct-by`,
@@ -2855,7 +2875,21 @@ kernel primitive), so neither walks nor materialises the entries.
 
 ### Higher-order
 `map`  `seq/filter`  `seq/reject`  `mapv`  `seq/filterv`  `seq/rejectv`  `reduce`  `fold`  `apply`
-`comp`  `partial`  `complement`  `constantly`  `identity`
+`comp`  `partial`  `complement`  `constantly`  `identity`  `juxt`  `fnil`  `memoize`  `seq/pmap`
+
+`juxt` applies several functions to the same arguments and returns the results as a
+vector (`((juxt first count) [7 8 9])` is `[7 3]` — the two-field sort key); `fnil`
+patches a `nil` first argument with a default (`(update m :n (fnil inc 0))`); `seq/pmap`
+is `map` with `(f x)` for every item in its own process, results in order, a worker's
+error re-raised in the caller (ADR-378).
+
+**`memoize`** returns `f` remembering every answer. Its cache is a `table` the returned
+function captures — the one mutable structure, and the reason the rest of this list can
+stay pure — so: keys are the argument list compared structurally (memoize over values,
+never a pid or closure); every hit is a fresh copy, as a table read is; the cache is
+shared across processes; and a table has no finalizer, so bind the result with `def` — a
+`memoize` inside a loop leaks a table per call. A memoized global is an anonymous
+closure: put a `(sig …)` beside the `def` to give its callers a type.
 
 ```clojure
 (map (list 1 2 3) inc)                      ;=> (2 3 4)
@@ -2994,10 +3028,12 @@ another type, so they are **not** string-library ops:
   — the float→text op `str`/`pr-str` can't do, since they print the shortest
   round-tripping form. Together they handle tabular/console output. `->fixed` is
   a Rust primitive (Rust's float formatter); the rest are Brood.
-- `format` is a small `printf`-style wrapper: `(format "x = %d, y = %.2f" 42 3.14)`
+- `string/format` is a small `printf`-style wrapper: `(string/format "x = %d, y = %.2f" 42 3.14)`
   → `"x = 42, y = 3.14"`. Specifiers: `%s` (any, via `str`), `%d` (number),
-  `%f` (float, 6 decimals), `%.Nf` (float, N decimals — uses `->fixed`), `%%` (literal
-  `%`). Width/justification isn't built in (compose with `string/pad-left`/`string/pad-right`).
+  `%f` (float, 6 decimals), `%.Nf` (float, N decimals — uses `->fixed`), `%x`/`%X` (hex),
+  `%%` (literal `%`). A width before any of them right-aligns in a field (`%8d`, `%10s`,
+  `%8.2f`), `0` zero-fills (`%02x`), and `-` left-aligns (`%-10s`) — ADR-378:
+  `(string/format "%-6s|%6.2f|%03d" "ab" 3.14159 7)` → `"ab    |  3.14|007"`.
 - `fmt` is **string interpolation** (a macro): `(fmt "x = {x}, y = {(math/->fixed y 2)}")`
   splices each `{expr}` hole's value between the literal text, lowering to a plain
   `(str …)` — zero runtime cost, so it is just a terser `str`. `{{`/`}}` are literal
