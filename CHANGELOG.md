@@ -4,7 +4,50 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
-## Unreleased
+## v0.31.0 — a run replays its type-check, the JIT stops deopting on shapes it can handle, and the like-for-like score passes Node
+
+**`brood file` replays its pre-flight verdict for an unchanged program** (ADR-371). The
+checker's walk scaled with the file and was paid on every run — 34M of `pipeline`'s 217M
+instructions, a fifth of the row — and grew with every checker feature. The verdict
+(warnings and the modules the walk loaded) is recorded under `~/.cache/brood/run-check/`,
+keyed on the text, the binary, the stdlib and the flags that change a walk, and replayed; a
+verdict that depended on a load-path module is not recorded, `brood --check` never reads
+the cache, and `BROOD_NO_CHECK_CACHE=1` bypasses it. Closes KI-150: `reduce` −21%,
+`strings` −17%, `pipeline` −14% on the published column, and a checker change can no
+longer move a benchmark row.
+
+**A loop handed to its recompiled body keeps its `receive`s clean** (KI-167). ADR-366's
+handoff after a lazy module load ran the rest of the loop nested: every `receive` in it
+parked its OS worker dirty (20 000 of 20 000 on a server loop whose first iteration
+touched a lazily-loaded module), and a native preempt interpreted up to 256 iterations
+per preempt (`collatz` +6.5%, `sort` +5.7%). It is a frame-level tail transition now.
+
+**The JIT keeps three shapes native that it used to deopt out of.** The inline `empty?`
+deopted for anything but nil or a pair, so `any?`/`every?` over a vector or string ran on
+the VM — `json`'s `needs-escape?` 7 910 times per encode; it falls back to a callback now,
+as `first`/`rest` do. A register-carried param profiled `Int` on one activation deopted on
+every other, forever (`json/emit`, 4 819 per run; a `SelfCall` arm had no deopt feedback):
+sixteen entry-tag deopts re-lower the arm with that slot boxed (ADR-372). And the
+profitability gate's float-slot veto, which refused exactly one arm in the benchmark corpus
+and protected none, is gone (`mandelbrot` −4.7% cycles; `BROOD_FLOAT_VETO=1` restores it).
+
+**Unary `(- x)` and `(/ x)` lower to the primitive** over the identity — the prelude's
+one-argument arms exactly — instead of a call to the variadic wrapper. The call was a GC
+safepoint that kept `nqueens`'s `safe?` from reading its list inline: **`nqueens` −29%**,
+and the like-for-like benchmark score is 7.55, ahead of Node's 7.62 for the first time.
+
+**An arm whose callee `receive`s is refused the native tier by name** (KI-168,
+`hosts-receive`) instead of compiled, parked dirty once and latched; `make tier-audit` is
+clean. **`(stdimage/status)`'s `:installed` no longer reports the prelude snapshot's count**
+on an opted-out warm boot (KI-169). **A directly loaded module file publishes in one
+journalled frame** (KI-170) — scoped to the isolate that loaded it, so a test file's defs
+still stay its own, and a staged registry op bumps the code epoch so a second `defmulti`
+in one file is visible to its `defmethod`.
+
+**Diagnostics:** `BROOD_DEOPT_TRACE` prints each deopt's site id (`reason#N`);
+`%jit-arm-state` gains `:deopts-total`, which counts for a loop arm where `:deopts` never
+moves; `BROOD_JIT_BAIL_TRACE` reports `hosts-receive` and `[jit-relower]`.
+
 **`nest check` catches a test that is always true** (ADR-373). Brood's falsy set is exactly `nil` and
 `false`, so a condition whose type admits neither is true every time it runs — the branch is
 not a branch. The class this exists for is the SENTINEL return: `index-of` answers `-1` for
