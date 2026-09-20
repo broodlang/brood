@@ -44,6 +44,10 @@ journalled frame** (KI-170) — scoped to the isolate that loaded it, so a test 
 still stay its own, and a staged registry op bumps the code epoch so a second `defmulti`
 in one file is visible to its `defmethod`.
 
+**The non-tail-recursion lint reads a docstring'd multi-arity `defn` arm by arm.** The
+docstring made the arms read as one single-arity body, so a 2-arity arm delegating to its
+own 4-arity arm (`gui/texture`) was flagged for a recursion it does not perform.
+
 **Diagnostics:** `BROOD_DEOPT_TRACE` prints each deopt's site id (`reason#N`);
 `%jit-arm-state` gains `:deopts-total`, which counts for a loop arm where `:deopts` never
 moves; `BROOD_JIT_BAIL_TRACE` reports `hosts-receive` and `[jit-relower]`.
