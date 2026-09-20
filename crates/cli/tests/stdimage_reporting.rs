@@ -71,7 +71,6 @@ fn run_suite_env(
         // with the code. Owning `XDG_CACHE_HOME` is only half of owning the state; the
         // other half is the environment, and the prelude differential beside this one
         // already says so in as many words.
-        .env_remove("BROOD_PRELUDE_IMAGE")
         .env_remove("BROOD_NO_PRELUDE_IMAGE");
     for (k, v) in extra {
         cmd.env(k, v);

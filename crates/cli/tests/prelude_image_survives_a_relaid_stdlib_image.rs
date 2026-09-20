@@ -89,7 +89,6 @@ fn brood(
         .env_remove("BROOD_NO_JIT")
         .env_remove("BROOD_NO_STDIMAGE")
         .env_remove("BROOD_COVERAGE")
-        .env_remove("BROOD_PRELUDE_IMAGE")
         .env_remove("BROOD_NO_PRELUDE_IMAGE");
     // The image is the default (ADR-314); the control arm opts out. Both spellings are
     // cleared above so an ambient one cannot silently turn either arm into the other.

@@ -100,7 +100,6 @@ fn base_command(cache: &Path, cell: &Cell) -> Command {
         .env_remove("BROOD_COVERAGE")
         // Clear BOTH spellings of every artifact switch before setting any, so an ambient
         // value from the developer's shell cannot decide which cell this is.
-        .env_remove("BROOD_PRELUDE_IMAGE")
         .env_remove("BROOD_NO_PRELUDE_IMAGE")
         .env_remove("BROOD_NO_STDIMAGE");
     match cell.prelude {
