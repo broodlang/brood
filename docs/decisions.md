@@ -24303,3 +24303,163 @@ change every stage and `transduce` would carry. Deferred until a stage needs it 
 any depth of the stack — a stop below a `map` stage is a stop. The `%reduced` record is the
 only new value shape, sendable and printable like any record; `seq/reduced?` is the only
 new predicate. `docs/language.md` §Transducers documents the exit and the deferred half.
+
+## ADR-377 — Accumulating comprehensions: `:into` on `for`, and `fold-for`
+
+**Status:** accepted (2026-09-20). **ROADMAP "what the other Lisps have" item 8.**
+
+**Context.** `for` built a list and nothing else; a vector, a map or a set wanted
+`(into [] (for …))` — a second pass over a value the walk already had in hand — and an
+accumulation over a walk had no comprehension shape at all, only a `fold` with a hand-written
+callback or a `letrec`. Racket has `for/vector`, `for/hash`, `for/set` and `for/fold`;
+Clojure's `for` has `:into` in the wild as `(into … (for …))` and `reduce` for the rest.
+
+**Decision.** Two prelude macros over `for`'s existing expander (`%for-fold` — a nested
+`fold` per binding, an `if` per `:when`), which now takes the innermost form as a
+parameter instead of assuming `(cons body acc)`:
+
+- **`:into coll`**, accepted only as the LAST pair of `for`'s bindings: the accumulator
+  starts as `coll` and each body value is `conj`ed onto it, so the target's kind decides
+  the result — a vector appends, a map takes `[k v]` pairs, a set drops duplicates, a list
+  (or `nil`) prepends. No final `reverse`. `:into nil` is a list built by `conj`, i.e. in
+  reverse; it is told apart from "no `:into`" by carrying the target in a one-element list
+  through the splitter — the first cut read `nil` as absent and took the list path.
+- **`(fold-for (acc init x xs …) body…)`**: the first pair names the accumulator and its
+  start, the rest are `for`'s bindings and guards, and the body — evaluated with both in
+  scope — is the next accumulator. The last one is the result. The accumulator is the
+  user's symbol threaded through every nested `fold`'s callback, which is exactly what
+  makes the body read naturally and what `%for-fold` already did with a gensym.
+
+Both are position-checked at expansion with `for`'s own messages: `:into` anywhere but
+last, without a collection, or inside `fold-for` (where the accumulator IS the result) is
+a clear error naming the syntax.
+
+**Not decided.** A `:while` clause (stop the walk) — `for` is a fold and stopping is
+ADR-376's throw; the shape that makes sense is a `reduced` from the body, which works
+today under `fold-for` inside a `transduce`, and is not spelled as a clause until someone
+needs one.
+
+**Consequences.** `(for (x xs :into []) …)` is one pass where `(into [] (for …))` was two.
+`fold-for` replaces the `fold`-with-callback spelling for the "accumulate over a walk"
+case, and the checker types its accumulator through the fold rule — which is how this
+work found KI-175 (the fold callback's accumulator was seeded from the fold's result and so
+lost `init`): `fold-for`'s own docstring example, `(fold-for (best nil x [3 9 4]) (if (or
+(nil? best) …) …))`, was flagged `nil?: this can never be true`.
+
+## ADR-378 — Deopt feedback re-tiers an arm in float context when its floats arrive through vector reads
+
+**Status:** accepted (2026-09-20, night). Found building `b2d-physics`.
+
+**Context.** The tier-time profile types an arm's *params* (and, since 2026-07-29, the
+floats it reads from globals), and that is all the float context rests on: an arm with a
+profiled `Float` param routes arithmetic on a type-erased `Handle` (a `nth`/`get` read)
+through the float path, tag-guarded; any other arm lowers that arithmetic on the integer
+path, whose `as_int` guard deopts on a `Float`. A 2D vector library is the shape that
+falls through: `(defn dot (a b) (+ (* (nth a 0) (nth b 0)) …))` has no float param and no
+float literal, so every call deopted, sixteen in a row latched it `BAILED`, and `dot`,
+`add`, `sub`, `scale`, `cross` all ran interpreted for the whole process — 410 ns a call
+for 6 ns of arithmetic, in the code a physics step calls a hundred thousand times.
+
+Measured on the physics engine's 500-body pile: 176 ms a step before, of which the
+interpreted vector calls were the largest single line.
+
+**Decision.** The same mechanism the polymorphic-param feedback uses (`jit_any_deopt_feedback`,
+reason 106), for a second signal. The two integer-path guards — `load_slot_int` (reason 20)
+and `as_int` on a `Handle` (21) — carry the tag they observed in the reason word (21 already
+did, KI-49; 20 now does). Four such deopts on a `Float` flag the arm `jit_float_context`
+and reset it to untried (`reset_arm_untried`, the reset every relower path now shares);
+its next lowering takes `has_float_slot` as if a param had profiled `Float`. The
+optimism is the one the profiled-param case already relies on, kept sound by the same
+`as_f64` guards: a wrong guess deopts, never miscompiles, and `(dot [1 2] [3 4])` still
+answers `11`, not `11.0`. Once per arm — a flagged arm that still thrashes is genuinely
+polymorphic and the latch takes it as before.
+
+Three things the first version got wrong, each now pinned by the test:
+
+- **The latch did not hold.** `jit_deopt_feedback` stored `BAILED` but never cleared the
+  callers' fast-link mirror, which "never re-reads `jit_code`" by design — so a JIT'd
+  caller kept entering the latched native and deopting on every call, a million times in
+  the microbenchmark. The initial tier had hidden it by timing (the caller had no link yet
+  when the callee latched). The latch now invalidates the arm's fast links, as the resets do.
+- **The background compiler's dedupe cache answered the re-lower with the code it was
+  replacing.** Keyed on the polymorphic-slot mask (the fix for the same bug in the param
+  relower); the float flag now rides in the mask's top bit.
+- **Comparisons.** The float context covered `+ - * /` on a `Handle`; `overlaps?`'s
+  `(<= ax0 bx1)` on four destructured slots stayed on the integer path and thrashed. Now
+  `Lt`/`Le` join, for `Handle` operands (`Prim2`) and for two slots nothing else types
+  (`Prim2SlotSlot`, `slot_untyped`) — but not when the other operand can never be a float
+  (`op_maybe_float`): `(< (count xs) 4)` in a float-context arm is an integer compare, and
+  routing it through `as_f64_pair` deopted unconditionally on the literal.
+
+**Consequences.** `b2d-vec/dot` 410 → 89 ns; the physics step's arms all lower.
+`BROOD_JIT_BAIL_TRACE=1` prints the re-tier as `[jit-relower] … reason=float-through-erased-reads`
+and the thrash latch now names its `last-deopt` reason, which is what found the third
+point. `crates/cli/tests/float_through_erased_reads.rs` is the gate. Not done: the same
+optimism for `Prim2SlotInt` (an untyped slot against an int literal) — a loop counter
+bound from `(count …)` is exactly that shape and would deopt on every iteration.
+
+## ADR-379 — The small library gaps: `juxt`, `fnil`, `memoize`, `condp`, `if-some`/`when-some`, `seq/cycle`, the walkers, `seq/pmap`, `string/format` justification
+
+**Status:** accepted (2026-09-20). **ROADMAP "what the other Lisps have" item 9.**
+
+**Context.** Each of these is a few lines any Clojure or Racket user reaches for and finds
+missing; each was listed in ROADMAP as "a few prelude lines". The decisions worth recording
+are the ones where Brood's rules make the obvious port wrong.
+
+**Decisions.**
+
+- **`memoize` is a `table` the returned closure captures** — not a process. Brood has no
+  cell (ADR-026), and the only mutable structure is the table; a process would serialise
+  every call through one mailbox, which is the opposite of what a memoized hot function
+  wants. Consequences the docstring states: keys are the argument list compared
+  structurally (so memoize over values, never a pid or a closure); every hit is a fresh
+  copy, as a table read is; the cache is shared by every process that calls the function;
+  and a table has no finalizer, so `memoize` belongs under a `def` — inside a loop it leaks
+  a table per call. Written over the kernel prims (`%table`, `%table-put`, …) because the
+  prelude cannot require `std/table`. A memoized global is an anonymous `(& args)` closure,
+  so a `(sig …)` beside the `def` is what gives its callers a type.
+- **`condp` asks `(pred expr test)`, value first** — the opposite of Clojure's `(pred test
+  expr)`, because Brood's predicates are data-first (`(string/starts-with? line "#")`,
+  ADR-308) and a `condp` over one must read the same way. `(condp < 15 10 :small 100
+  :medium :large)` is `:medium`. A lone trailing form is the default; no match raises, as
+  `case` and `match` do.
+- **`if-some`/`when-some` test presence, not truth**: the `if-let` shapes for a lookup whose
+  value may be `false`.
+- **`seq/cycle` is bounded** — `(cycle coll n)`, the first `n` items repeated — because
+  Brood has no lazy cons (ADR-111) and an infinite `cycle` has nowhere to live.
+- **`partition-by` is not added: it is `seq/chunk-by`**, which has been here since the seq
+  helpers arrived. One name.
+- **`seq/prewalk`/`seq/postwalk`** walk lists, vectors, sets and maps — a map's entries pass
+  through `f` as `[k v]` vectors, which is what makes "rename every key" a one-liner — and
+  rebuild each container of the same kind. Records are walked as the maps they are and come
+  back as plain maps: a walk is a rewrite, and a rewrite of a record's fields is not the
+  record.
+- **`seq/pmap`** spawns a process per item, tags replies with a `ref` so it never consumes
+  another message, collects by index and answers in `coll`'s order. A worker that raises is
+  re-raised in the caller — after every worker has reported, so the mailbox is clean. It is
+  `map`'s parallel sibling, not an executor: no pool, no batching, no bound (ADR-011; a
+  bounded variant is a `partition` away).
+- **`string/format`** gains the `-` flag (left-align) and a width on `%s` and `%f`
+  (`%10s`, `%8.2f`); `%N.Mf` combines a width with a precision. Octal stays out.
+
+**Bare names.** `juxt`, `fnil`, `memoize`, `condp`, `if-some`, `when-some` join the core
+group of the ledger (`docs/bare-names.md`): combinators and binding forms read only bare,
+beside `comp`/`partial` and `if-let`/`when-let`. Everything sequence-shaped is `seq/`.
+
+**Consequences.** Seven bare names (with `fold-for` from ADR-377, which had reached `main`
+unledgered — the gate only runs when a changed module names it, which is a hole the
+pre-push hook should close). `tests/library_gaps_test.blsp` covers the lot, including
+`memoize` across processes and `pmap`'s ordering under adversarial timing.
+
+### ADR-378 addendum (2026-09-20, later) — comparisons dispatch by tag instead of guessing
+
+The float context's comparison half was a guess with a known bad case: two let-bound ints
+compared inside a float-context arm (`(< j (count xs))`) took the float path and deopted on
+every call — a regression the first cut introduced for arms that used to work on the integer
+path. A comparison's answer is a bool whichever way it is computed, so nothing has to be
+boxed afterwards and no guess is needed: `<`/`<=` on a `Handle` operand, or on two slots
+nothing types, now lower as `cmp_dispatch` — the shape of `eq_dispatch` — both `Int` compare
+as ints, anything else as floats with an int promoted beside a float (the VM's rule), a
+non-number deopts (reason 38). In every arm, not only float-context ones: `overlaps?` lowers
+right on its first tier and never needs the re-tier. The float guess stays for `+ - * /`,
+where the result's type is the guess. Pinned by `both-ints` in the test.

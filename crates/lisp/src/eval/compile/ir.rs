@@ -614,6 +614,18 @@ pub struct CompiledArm {
     /// Entry-tag deopts (reason 106) this arm has taken, cumulative, toward
     /// `ENTRY_DEOPT_RELOWER`. Never reset on the hot path — the count is cold on purpose.
     pub jit_entry_deopts: std::sync::atomic::AtomicU32,
+    /// Set once `FLOAT_DEOPT_RELOWER` integer-path arithmetic guards (reasons 20/21) have
+    /// deopted on a `Float` operand: the arm computes on floats that arrive through
+    /// type-erased reads — `(nth a 0)` on a vector of floats — with no float param or
+    /// literal to say so, which is every function of a 2D vector library (`(dot a b)`,
+    /// `(add a b)`). The tier-time profile types only params, so such an arm lowered its
+    /// `*` on the integer path, deopted on every call and latched BAILED at sixteen: a
+    /// 400 ns interpreted call for 6 ns of arithmetic. The next lowering takes the float
+    /// context as if a param had profiled `Float` (`has_float_slot`), which is a guess the
+    /// `as_f64` tag guards keep sound.
+    pub jit_float_context: std::sync::atomic::AtomicBool,
+    /// Integer-path guard deopts on a `Float` (toward `FLOAT_DEOPT_RELOWER`), cumulative.
+    pub jit_float_deopts: std::sync::atomic::AtomicU32,
     /// Free globals this arm reads that held a `Value::Float` when the arm was
     /// enqueued for tiering — the global-read counterpart of the tier-time
     /// `slot_tags` param profile. The profile snapshots the live *frame*, so it

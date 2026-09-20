@@ -606,6 +606,50 @@ for a higher-order op that wants a fixed answer.
     ((constantly 7) 1 2)   → 7"
   (fn (& _ignored) x))
 
+;; The rest of the combinator family (ADR-379): `juxt`, `fnil`, `memoize`.
+(defn juxt (& fns)
+  "A function that applies each of `fns` to its arguments and returns the results as a
+vector, in order: `((juxt f g) x)` is `[(f x) (g x)]`. The named form of \"the same
+arguments, several views\" — a sort key of two fields, a split of a value into parts.
+
+    ((juxt first count) [7 8 9])                 → [7 3]
+    (sort-by [\"bb\" \"a\" \"ab\"] (juxt count identity))   → (\"a\" \"ab\" \"bb\")"
+  (fn (& args) (mapv fns (fn (f) (apply f args)))))
+
+(defn fnil (f default)
+  "`f` with a `nil` FIRST argument replaced by `default` — the other arguments pass
+through. Reads a map's missing entry as a starting value without spelling the `or` at every
+call: `(update m :n (fnil inc 0))`.
+
+    ((fnil inc 0) nil)              → 1
+    ((fnil inc 0) 5)                → 6
+    ((fnil conj []) nil :a)         → [:a]"
+  (fn (x & more) (apply f (if (nil? x) default x) more)))
+
+(defn memoize (f)
+  "`f` remembering every answer: the first call with given arguments runs `f`, every later
+call with `=` arguments returns the remembered value. The cache is a [[table]] the returned
+function captures (ADR-379): shared by every process that calls it, keys compared
+structurally — so memoize over values (numbers, strings, keywords, maps), never over a pid
+or a closure, which have no structural equality — and each hit hands back a fresh copy of
+the value, as a table read does.
+
+Bind the result with `def`. The table lives as long as the function does and has nothing
+to release it, so a `memoize` inside a loop or a `let` leaks a table per call. And the
+memoized function is an anonymous closure: a `(sig …)` beside the `def` is what gives its
+callers a type.
+
+    (let (m (memoize (fn (n) (* n n)))) [(m 4) (m 4)])   → [16 16]"
+  ;; The kernel prims, not `table/new` & co.: the prelude cannot require `std/table`, and
+  ;; these are what those wrappers forward to.
+  (let (cache (%table))
+    (fn (& args)
+      (if (%table-has? cache args)
+        (%table-get cache args)
+        (let (v (apply f args))
+          (%table-put cache args v)
+          v)))))
+
 ;; Internal stateless transducer constructors — the fused stages behind the
 ;; `l*` combinators. A transducer is `(xf rf) -> rf'`; composing them (`comp`)
 ;; fuses a pipeline into one per-step reducing function. Named `%x*` because they
@@ -712,15 +756,42 @@ iterating for side effects.
 ;; final `reverse` restores order in one extra O(n) pass. `fold` is tail-
 ;; recursive, so deep comprehensions don't grow the stack.
 ;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
+;;
+;; `leaf` is the innermost form — what one iteration does to `acc`: `(cons body acc)` for
+;; `for`, `(conj acc body)` under `:into`, the body itself for `fold-for` (ADR-377). The
+;; walk over the bindings is the same for all three.
 (check-allow :non-tail-recursion
-  (defn- %for-fold (acc binds body)
+  (defn- %for-fold (acc binds leaf)
     (cond
-      (empty? binds) `(cons ~body ~acc)
-      (= (first binds) :when) `(if ~(second binds) ~(%for-fold acc (rest (rest binds)) body) ~acc)
+      (empty? binds) leaf
+      (= (first binds) :when) `(if ~(second binds) ~(%for-fold acc (rest (rest binds)) leaf) ~acc)
       else
         `(fold ~(second binds)
            ~acc
-           (fn (~acc ~(first binds)) ~(%for-fold acc (rest (rest binds)) body))))))
+           (fn (~acc ~(first binds)) ~(%for-fold acc (rest (rest binds)) leaf))))))
+
+;; `(x xs :when p :into coll)` → `[(x xs :when p) (coll)]`; without `:into`, `[binds nil]`.
+;; The target rides in a one-element list so that `:into nil` — a list built by `conj`,
+;; i.e. in reverse — is told apart from no `:into` at all. `:into` is accepted only as the
+;; LAST pair: it names the result, not a binding, and a guard after it would read as a
+;; guard on nothing.
+;; check-allow: deliberately non-tail — expansion-time recursion over the binding list.
+(check-allow :non-tail-recursion
+  (defn- %for-split-into (binds)
+    (cond
+      (empty? binds) [nil nil]
+      (%eq (first binds) :into)
+        (cond
+          (empty? (rest binds))
+            (error "for: :into has no collection. Syntax: (for (x xs :into coll) body)")
+          (empty? (rest (rest binds))) [nil (list (second binds))]
+          else
+            (error "for: :into must be the last clause of the bindings, got "
+              (pr-str binds)
+              ". Syntax: (for (x xs :when p :into coll) body)"))
+      else
+        (let (r (%for-split-into (rest (rest binds))))
+          [(cons (first binds) (cons (second binds) (first r))) (second r)]))))
 
 ;; Validate that binding pairs are complete — each variable has a collection, and each
 ;; :when has a guard expression. An odd-count suffix silently produces an empty result
@@ -732,6 +803,8 @@ iterating for side effects.
       (if (empty? (rest binds))
         (error "for: :when at end of bindings has no guard expression")
         (%for-check-binds (rest (rest binds))))
+    ;; `:into coll` is checked by `%for-split-into` (last clause, has a value).
+    (%eq (first binds) :into) (%for-check-binds (rest (rest binds)))
     (empty? (rest binds))
       (error "for: binding '"
         (pr-str (first binds))
@@ -741,20 +814,53 @@ iterating for side effects.
 (defmacro for (binds & body)
   "List comprehension: `(for (x xs) expr)` yields `expr` for each `x`; supports `:when guard` filters and multiple bindings (last varies fastest). Bindings may destructure. Multiple body forms are evaluated in order and the LAST one is collected (like `let`/`when`/`doseq`) — `for` took exactly one body form until 2026-07-26, the only iteration form that did.
 
+A trailing `:into coll` collects with `conj` onto `coll` instead of building a list, so the target's kind decides the result — a vector appends, a map takes `[k v]` pairs, a set drops duplicates (ADR-377).
+
     (for (x [1 2 3]) (* x x))                  → (1 4 9)
     (for (x (range 5) :when (math/even? x)) x)   → (0 2 4)
-    (for (x '(1 2) y '(:a :b)) [x y])          → ([1 :a] [1 :b] [2 :a] [2 :b])"
+    (for (x '(1 2) y '(:a :b)) [x y])          → ([1 :a] [1 :b] [2 :a] [2 :b])
+    (for (x [1 2 3] :into []) (* x x))         → [1 4 9]
+    (for (x [1 2] :into {}) [x (* x x)])       → {1 1, 2 4}"
   (do
     (when (vector? binds)
       (error "for: bindings must be a list, not a vector: write (for (x xs) expr)."
         " Brood is lists-for-code, vectors-for-data (unlike Clojure) — a vector"
         " *inside* a binding position is still destructuring: (for ([k v] pairs) k)."))
     (%for-check-binds binds)
-    (let (acc (gensym "acc"))
-      `(/reverse (let (~acc nil)
-                   ~(%for-fold acc
-                      (map binds identity)
-                      (if (empty? (rest body)) (first body) (cons 'do body))))))))
+    (let (split (%for-split-into (map binds identity))
+          binds (first split)
+          into (second split)
+          acc (gensym "acc")
+          body (if (empty? (rest body)) (first body) (cons 'do body)))
+      (if (nil? into)
+        `(/reverse (let (~acc nil) ~(%for-fold acc binds `(cons ~body ~acc))))
+        `(let (~acc ~(first into)) ~(%for-fold acc binds `(conj ~acc ~body)))))))
+
+;; (fold-for (acc init x xs …) body…) — the accumulating comprehension: `for`'s walk
+;; with the body as the STEP. The first pair names the accumulator and its start; the
+;; rest are `for`'s bindings and guards; the body's value is the next accumulator, and
+;; the last one is the result. Racket's `for/fold`, on the same expander as `for`.
+(defmacro fold-for (binds & body)
+  "Accumulate over one or more bindings: the FIRST pair of `binds` names the accumulator and its initial value, the rest are [[for]] bindings (with `:when` guards); `body` is evaluated with both in scope and its value is the next accumulator. The last accumulator is the result (ADR-377).
+
+    (fold-for (sum 0 x [1 2 3]) (+ sum x))                          → 6
+    (fold-for (m {} x [:a :b] :when (not (= x :b))) (assoc m x 1))   → {:a 1}
+    (fold-for (best nil x [3 9 4]) (if (or (nil? best) (> x best)) x best))   → 9"
+  (do
+    (when (vector? binds)
+      (error "fold-for: bindings must be a list, not a vector: write (fold-for (acc init x xs) body)."))
+    (when (or (empty? binds) (empty? (rest binds)) (not (symbol? (first binds))))
+      (error "fold-for: the first pair must name the accumulator and its start, got "
+        (pr-str binds)
+        ". Syntax: (fold-for (acc init x xs :when p) body)"))
+    (%for-check-binds (rest (rest binds)))
+    (when (second (%for-split-into (map (rest (rest binds)) identity)))
+      (error "fold-for: :into is for's clause — the accumulator IS the result here."
+        " Syntax: (fold-for (acc init x xs :when p) body)"))
+    (let (acc (first binds)
+          init (second binds)
+          body (if (empty? (rest body)) (first body) (cons 'do body)))
+      `(let (~acc ~init) ~(%for-fold acc (map (rest (rest binds)) identity) body)))))
 
 ;; (doseq (pat coll) body...) — run `body` for its side effects over each item,
 ;; returning nil. Just `for` run for effect (the result list is discarded). The

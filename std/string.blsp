@@ -427,14 +427,16 @@ can be without exceeding `width`. A single word longer than `width` keeps its ow
 ;;   %.Nf  float with N fractional digits, rounded — uses `->fixed`
 ;;   %%    a literal `%`
 ;;   %x %X a non-negative integer in hex, lower/upper case (`string/number->`)
-;;   %Nd %0Nx … a WIDTH before `d`/`x`/`X`, right-aligned, zero-filled with the `0` flag
-;;         (`%02x` → `0f`, `%8d` → `      42`); other widths stay with `pad-left` / `pad-right`
-;; Justification and octal aren't built in — `pad-left` / `pad-right` and
-;; `string/number->` cover those explicitly. Errors on an
+;;   %Nd %Ns %Nf %N.Mf %0Nx … a WIDTH before the specifier, right-aligned, zero-filled with
+;;         the `0` flag (`%02x` → `0f`, `%8d` → `      42`, `%8.2f` → `    3.14`)
+;;   %-Ns %-Nd … the `-` flag left-aligns in the field (`%-6s|` → `ab    |`) — ADR-379
+;; Octal isn't built in — `string/number->` covers it explicitly. Errors on an
 ;; unknown spec or a format string that ends inside one; a missing arg renders
 ;; as `nil` (debuggable), extra args are ignored.
 (defn string/format (template & args)
-  "Render `template`, replacing each %-specifier with the next of `args`. Supports `%s` `%d` `%f` `%.Nf` `%x` `%X` `%%`, and a zero-fillable width on `d`/`x`/`X` (`%02x`, `%8d`); use `pad-left`/`pad-right` for anything else.
+  "Render `template`, replacing each %-specifier with the next of `args`. Supports `%s` `%d` `%f` `%.Nf` `%x` `%X` `%%`; a width before any of them right-aligns in a field (`%8d`, `%10s`, `%8.2f`), zero-filled with the `0` flag (`%02x`), and the `-` flag left-aligns (`%-10s`).
+
+    (string/format \"%-6s|%6.2f|%03d\" \"ab\" 3.14159 7)   → \"ab    |  3.14|007\"
 
 The runtime half of the pair with [[string/interp]], which is a MACRO: `(string/interp \"x={x}\")` reads its
 values from the surrounding scope and expands to a plain `(str …)` at compile time, so its
@@ -469,9 +471,11 @@ things in the same image is a name worth spending to fix.
       (format-loop template (inc i) n (rest args) (str acc (format-hex (first args) false)))
     (= (string/char-at template i) "X")
       (format-loop template (inc i) n (rest args) (str acc (format-hex (first args) true)))
-    ;; a width: `%8d`, `%02x` — digits (a leading 0 asks for zero fill) then d/x/X
+    ;; a width: `%8d`, `%02x`, `%10s`, `%8.2f` — digits (a leading 0 asks for zero fill)
+    ;; then the specifier; `%-10s` left-justifies instead (ADR-379).
     (format-digit? (string/char-at template i))
-      (format-width template i n args acc (= (string/char-at template i) "0") 0)
+      (format-width template i n args acc (= (string/char-at template i) "0") false 0)
+    (= (string/char-at template i) "-") (format-width template (inc i) n args acc false true 0)
     (= (string/char-at template i) "f")
       (format-loop template
         (inc i)
@@ -492,23 +496,50 @@ wrong), the way `%d` passes a float through."
     (let (h (string/number-> v 16)) (if upper? (string/upper h) h))
     (str v)))
 
-(defn- format-width (template i n args acc zero? w)
-  ;; called with `i` at a width digit; accumulates the width in `w`, then applies it to
-  ;; the `d`/`x`/`X` that ends the specifier
+(defn- format-width (template i n args acc zero? left? w)
+  ;; called with `i` at a width digit (or just past a `-`); accumulates the width in `w`,
+  ;; then applies it to the specifier that ends it: `d`/`x`/`X`/`s` right-aligned (`0`
+  ;; fills with zeros), `-` left-aligned, and `f`/`.Nf` for a float in a field
   (cond
     (>= i n) (error "format: unterminated width specifier")
     (format-digit? (string/char-at template i))
       (let (d (string/->number (string/char-at template i)))
-        (format-width template (inc i) n args acc zero? (if (int? d) (+ (* w 10) d) w)))
+        (format-width template (inc i) n args acc zero? left? (if (int? d) (+ (* w 10) d) w)))
+    (= (string/char-at template i) ".")
+      (format-width-prec template (inc i) n args acc zero? left? w 0)
     else
       (let (c (string/char-at template i)
             body (cond
                    (= c "d") (str (first args))
+                   (= c "s") (str (first args))
+                   (= c "f") (math/->fixed (first args) 6)
                    (= c "x") (format-hex (first args) false)
                    (= c "X") (format-hex (first args) true)
-                   else (error (str "format: a width takes d, x or X, got '" c "' at column " i)))
-            padded (string/pad-left body w (if zero? "0" " ")))
-        (format-loop template (inc i) n (rest args) (str acc padded)))))
+                   else
+                     (error (str "format: a width takes d, s, f, x or X, got '" c "' at column " i))))
+        (format-loop template (inc i) n (rest args) (str acc (format-pad body w zero? left?))))))
+
+(defn- format-width-prec (template i n args acc zero? left? w p)
+  ;; `%8.2f` — a precision after a width; `i` is one past the `.`
+  (cond
+    (>= i n) (error "format: unterminated %W.Nf specifier")
+    (format-digit? (string/char-at template i))
+      (let (d (string/->number (string/char-at template i)))
+        (format-width-prec template (inc i) n args acc zero? left? w (if (int? d) (+ (* p 10) d) p)))
+    (= (string/char-at template i) "f")
+      (format-loop template
+        (inc i)
+        n
+        (rest args)
+        (str acc (format-pad (math/->fixed (first args) p) w zero? left?)))
+    else
+      (error (str "format: a precision takes f, got '" (string/char-at template i) "' at column " i))))
+
+(defn- format-pad (body w zero? left?)
+  (cond
+    left? (string/pad-right body w)
+    zero? (string/pad-left body w "0")
+    else (string/pad-left body w)))
 
 (defn- format-prec (template i n args acc p)
   ;; called with `i` pointing one past the `.`, accumulating precision in `p`

@@ -99,7 +99,11 @@
   (if (>= i 4) acc (lm-sub (+ i 1) (assoc acc :k (- (get acc :k 0) (* 2 i))))))
 
 ;; The same tally through a `fold` / `reduce` literal (ADR-360 §6) — no defn threads the map.
-(defn lm-fold (xs seed) (fold xs seed (fn (m x) (assoc m x (inc (get m x 0))))))
+;; `check-allow`: one caller below hands `lm-fold` the seed `5` on purpose (the runtime
+;; error is the assertion), and since the fold callback's accumulator is seeded from `init`
+;; (2026-09-20) the checker sees that `m` can be `5` at the `assoc` — it is right.
+(check-allow :type-mismatch
+  (defn lm-fold (xs seed) (fold xs seed (fn (m x) (assoc m x (inc (get m x 0)))))))
 (defn lm-reduce (xs seed) (reduce xs seed (fn (m x) (assoc m x (+ 2 (get m x 0))))))
 (defn lm-fold-read (xs seed) (fold xs seed (fn (m x) (assoc m x (+ (get m x 0) (get m :w 0))))))
 (check-allow :type-mismatch

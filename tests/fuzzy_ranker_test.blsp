@@ -13,10 +13,14 @@
 (def frt-cands ["src/view.blsp" "src/model.blsp" "src/commands.blsp" "README.md" "mix.exs"])
 
 (defn frt-await (session)
-  "The next `[:fuzzy-ranked session query hits]` for `session`, or `:timeout`. Selective on
-the session's pid, so other traffic in this mailbox is neither consumed nor reordered —
-which is the property an editor's loop depends on."
-  (receive ([:fuzzy-ranked ^session query hits] [query hits]) (after 5000 :timeout)))
+  "The next `[:fuzzy-ranked session query hits]` for `session`, as `[query hits]`. Selective
+on the session's pid, so other traffic in this mailbox is neither consumed nor reordered —
+which is the property an editor's loop depends on. A session that answers nothing in five
+seconds fails the test BY NAME here, rather than handing `first` a `:timeout` — the shape
+the strict checker flagged on `main` (2026-09-20), and rightly."
+  (receive
+    ([:fuzzy-ranked ^session query hits] [query hits])
+    (after 5000 (/error "frt-await: no [:fuzzy-ranked …] from the session in 5 s"))))
 
 (describe "fuzzy/ranker"
   (test "answers a query with the same ranking `top` would give, tagged with the query"

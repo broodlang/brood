@@ -424,7 +424,7 @@ pub(super) fn jit_fast_link_cold_outcome(
                 if outcome == 1 {
                     jit_any_deopt_feedback(heap, &arm);
                     if arm.deopt_watch {
-                        jit_deopt_feedback(&arm);
+                        jit_deopt_feedback(heap, &arm);
                     }
                 }
                 // Deopt-resume (see `CompiledArm::ckpt_slot`): resume AT the

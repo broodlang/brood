@@ -160,6 +160,10 @@ pub(super) struct Frame<'a> {
     /// carried as [`ParamRepr::Slot`] instead of being forced through `as_int` — which is
     /// KI-49, where a matcher's message vector deopted at every merge.
     pub slot_int_profile: &'a [bool],
+    /// The arm is float-context (`has_float_slot`): a profiled `Float` param, or deopt
+    /// feedback that found it computing on floats read out of vectors. Licenses the
+    /// optimistic float path for arithmetic on operands nothing else types.
+    pub float_context: bool,
     /// Base frame slot of the **block-argument spill** region (KI-49). An operand that must
     /// cross a block boundary but is not a profiled `Int` is stored at
     /// `blockarg_spill_base + <its operand-stack index>` and carried as `ParamRepr::Slot`.
@@ -249,6 +253,30 @@ pub(super) fn op_is_float(op: Op, f: Frame) -> bool {
         Op::Slot(k) => f.slot_float.borrow().get(k).copied().unwrap_or(false),
         _ => false,
     }
+}
+
+/// Could `op` hold a float at runtime? An unboxed `Op::Int`/`Op::Bool` or a hoisted
+/// global never can (and `as_f64_pair` deopts on one unconditionally), nor can a slot the
+/// profile typed `Int` — its carry is an i64 register. Everything else is a tag-checked read.
+pub(super) fn op_maybe_float(op: Op, f: Frame) -> bool {
+    match op {
+        Op::Float(_) | Op::Handle(..) => true,
+        Op::Slot(k) => {
+            !matches!(f.carry_vars.get(k).copied().flatten(), Some((_, false)))
+                && !f.slot_bool.borrow().get(k).copied().unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
+/// Nothing the lowering knows types slot `k`: not a profiled `Int` (no unboxed carry), not
+/// flagged float or bool by a store — a let-bound `nth`/`get` result, typically. In a
+/// float-context arm such a slot is read optimistically as a float (tag-guarded).
+pub(super) fn slot_untyped(k: usize, f: Frame) -> bool {
+    f.carry_vars.get(k).copied().flatten().is_none()
+        && !f.slot_int_profile.get(k).copied().unwrap_or(false)
+        && !f.slot_float.borrow().get(k).copied().unwrap_or(false)
+        && !f.slot_bool.borrow().get(k).copied().unwrap_or(false)
 }
 
 /// Mark frame slot `dst` as holding (or not) a `Value::Float`.
@@ -437,7 +465,12 @@ pub(super) fn load_slot_int(
     let tag = b.ins().load(types::I8, MemFlagsData::trusted(), addr, 0);
     let is_int = b.ins().icmp_imm_s(IntCC::Equal, tag, TAG_INT as i64);
     let cont = b.create_block();
-    let __dr = b.ins().iconst(types::I32, 20);
+    // The reason rides in bits 8.. with the observed tag in the low byte (as `as_int`'s
+    // reason 21 does, KI-49): a deopt on
+    // a `Float` here is the arm's float-context feedback (`float_deopt_feedback`).
+    let __base = b.ins().iconst(types::I32, 20 << 8);
+    let __t32 = b.ins().uextend(types::I32, tag);
+    let __dr = b.ins().bor(__base, __t32);
     b.ins()
         .brif(is_int, cont, &[], f.deopt, &[BlockArg::Value(__dr)]);
     b.switch_to_block(cont);
@@ -1467,6 +1500,55 @@ pub(super) fn eq_dispatch(
     b.ins().jump(done, &[BlockArg::Value(keq)]);
     b.switch_to_block(done);
     b.block_params(done)[0]
+}
+
+/// `<` / `<=` on two operands nothing types (`Handle`s, or slots with no profile and no
+/// store's flag) — dispatched at RUNTIME by tag, the way `eq_dispatch` does `=`: both
+/// `Int` compares as ints, anything else reads both as floats (an `Int` beside a `Float`
+/// promoted, the VM's own rule; a non-number deopts). A comparison's answer is a bool
+/// whichever path took it, so nothing has to be boxed afterwards, and no guess is made:
+/// `(< j (count xs))` on two let-bound ints in a float-context arm stays native and exact
+/// where the optimistic float path deopted on every call. `map` orders the operands as
+/// for `emit_arith`. Costs the int×int case two tag tests, as `eq_dispatch` does.
+pub(super) fn cmp_dispatch(
+    b: &mut FunctionBuilder,
+    op: PrimOp,
+    wa: [cranelift_codegen::ir::Value; 3],
+    wb: [cranelift_codegen::ir::Value; 3],
+    map: [u8; 2],
+    f: Frame,
+) -> Option<cranelift_codegen::ir::Value> {
+    let ta = b.ins().band_imm_s(wa[0], 0xff);
+    let tb = b.ins().band_imm_s(wb[0], 0xff);
+    let done = b.create_block();
+    b.append_block_param(done, types::I8);
+    let a_int = b.ins().icmp_imm_s(IntCC::Equal, ta, TAG_INT as i64);
+    let b_int = b.ins().icmp_imm_s(IntCC::Equal, tb, TAG_INT as i64);
+    let both_int = b.ins().band(a_int, b_int);
+    let intb = b.create_block();
+    let floatb = b.create_block();
+    b.ins().brif(both_int, intb, &[], floatb, &[]);
+    b.switch_to_block(intb);
+    let (x, y) = if map[0] == 0 {
+        (wa[1], wb[1])
+    } else {
+        (wb[1], wa[1])
+    };
+    let ir = emit_arith(b, op, x, y, f.deopt)?;
+    b.ins().jump(done, &[BlockArg::Value(ir)]);
+    b.switch_to_block(floatb);
+    // Not both ints: each is a float or an int promoted beside one, or it deopts (a
+    // string compared with a number is the VM's type error to raise).
+    let fa = float_or_promoted_int(b, ta, wa[1], f, 38, true);
+    let fb = float_or_promoted_int(b, tb, wb[1], f, 38, true);
+    let (x, y) = if map[0] == 0 { (fa, fb) } else { (fb, fa) };
+    let fr = match emit_float_arith(b, op, x, y, f.deopt)? {
+        Op::Int(v) => v,
+        _ => return super::bail("cmp-dispatch-not-a-comparison"),
+    };
+    b.ins().jump(done, &[BlockArg::Value(fr)]);
+    b.switch_to_block(done);
+    Some(b.block_params(done)[0])
 }
 
 /// Inline read of `(nth v <const idx>)` for a LOCAL small (inline) vector, the analog of

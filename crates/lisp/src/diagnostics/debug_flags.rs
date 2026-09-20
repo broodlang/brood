@@ -149,7 +149,7 @@ pub const FLAGS: &[DebugFlag] = &[
     f(
         "BROOD_JIT_BAIL_TRACE",
         JIT,
-        "name each arm the profitability gate refuses, and why — the complement of DUMP_IR. Also reports what HOT ADMISSION (BROOD_XADMIT=1) then did with a refused arm (`[jit-xadmit] … admitted` / `declined: …`), which is the difference between a lever that ran and one that silently skipped the case under test",
+        "name each arm the profitability gate refuses, and why — the complement of DUMP_IR; `[jit-relower]` lines say when deopt feedback re-tiers an arm (a polymorphic param boxed, or float context for floats read out of vectors, ADR-378), and a `deopt-thrash-latched` line carries its `last-deopt` reason. Also reports what HOT ADMISSION (BROOD_XADMIT=1) then did with a refused arm (`[jit-xadmit] … admitted` / `declined: …`), which is the difference between a lever that ran and one that silently skipped the case under test",
     ),
     f(
         "BROOD_DEOPT_TRACE",

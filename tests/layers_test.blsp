@@ -307,3 +307,42 @@
     (register-system-layer 'layers-test/layer-b)
     (let (b (init-buffer-layers (set-buffer-type {} :t-sys)))
       (assert= (map (active-layers b) (fn (l) (get l :name))) (list 'a 'b)))))
+
+;; ---- scope-bindings: the keymap with its provenance kept --------------------
+;; The point of these is the SHADOW rule. `active-keymap` merges layers shallowly, so a
+;; layer that binds one key under a prefix takes the whole prefix with it — and help that
+;; tested shadowing per leaf would report a binding that dispatch will never reach.
+
+(def layer-low
+  {:name 'low :keymap {"a" 'layers-test/cmd-x :ctrl-x {"k" 'layers-test/cmd-x}}})
+
+(def layer-high
+  {:name 'high :keymap {"b" 'layers-test/cmd-y :ctrl-x {"s" 'layers-test/cmd-y}}})
+
+(defn- sb-for (sequence)
+  "The `scope-bindings` entry for key `sequence` in the high-over-low fixture stack."
+  (seq/find (scope-bindings (list {:layers (list 'layers-test/layer-high 'layers-test/layer-low)}))
+    (fn (e) (= (get e :sequence) sequence))))
+
+(describe "scope-bindings keeps the layer a binding came from"
+  (test "an unshadowed binding names its layer and nothing shadows it"
+    (let (e (sb-for ["a"]))
+      (assert= [(get e :command) (get e :layer) (get e :shadowed-by)]
+        ['layers-test/cmd-x 'low nil])))
+  (test "the higher layer's own binding is in force"
+    (assert= (get (sb-for ["b"]) :shadowed-by) nil))
+  (test "a whole CHORD is shadowed, not just the leaf the higher layer bound"
+    ;; low binds C-x k and high binds C-x s: nothing overlaps at the leaf, yet the shallow
+    ;; merge hands the entire :ctrl-x sub-map to high, so C-x k is unreachable and says so
+    (assert= (get (sb-for [:ctrl-x "k"]) :shadowed-by) 'high))
+  (test "the shadowing layer's own chord binding is in force"
+    (assert= (get (sb-for [:ctrl-x "s"]) :shadowed-by) nil))
+  (test "what is in force agrees with what scope-keymap dispatches"
+    ;; the property that matters: every unshadowed binding is reachable through the merged
+    ;; keymap, and every shadowed one is not — help derived from dispatch, not beside it
+    (let (ctxs (list {:layers (list 'layers-test/layer-high 'layers-test/layer-low)})
+          km (scope-keymap ctxs))
+      (assert= (get-in km [:ctrl-x "k"]) nil)
+      (assert= (get-in km [:ctrl-x "s"]) 'layers-test/cmd-y)))
+  (test "a layer with no keymap contributes nothing and breaks nothing"
+    (assert= (count (scope-bindings (list {:layers (list {:name 'bare})}))) 0)))

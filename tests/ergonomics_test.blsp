@@ -241,6 +241,42 @@
   (test "a single body form still behaves"
     (assert= (list 10 30) (for (x [1 2 3] :when (odd? x)) (* x 10)))))
 
+;; ADR-377: the accumulating comprehensions — `:into` on `for`, and `fold-for`.
+(describe "for :into — the target's kind decides the result"
+  (test "a vector appends, in order"
+    (assert= [1 4 9] (for (x [1 2 3] :into []) (* x x)))
+    (assert= [10 30] (for (x [1 2 3] :when (odd? x) :into []) (* x 10))))
+  (test "a map takes [k v] pairs; a set drops duplicates; a list prepends like conj"
+    (assert= {1 1 2 4} (for (x [1 2] :into {}) [x (* x x)]))
+    (assert= #{1 4} (for (x [1 2 -1 -2] :into #{}) (* x x)))
+    (assert= (list 3 2 1) (for (x [1 2 3] :into nil) x)))
+  (test "the target may be non-empty and an expression; nested bindings still nest"
+    (assert= [0 1 2] (for (x [1 2] :into (vec [0])) x))
+    (assert= [[1 :a] [1 :b] [2 :a] [2 :b]] (for (x [1 2] y [:a :b] :into []) [x y])))
+  (test ":into anywhere but last, or without a collection, is a clear expansion error"
+    (assert-error (macroexpand '(for (x xs :into [] :when true) x)))
+    (assert-error (macroexpand '(for (x xs :into) x)))))
+
+(describe "fold-for — the body is the step"
+  (test "the first pair is the accumulator; the rest are for's bindings"
+    (assert= 6 (fold-for (sum 0 x [1 2 3]) (+ sum x)))
+    (assert= {:a 1} (fold-for (m {} x [:a :b] :when (not (= x :b))) (assoc m x 1)))
+    (assert= 9 (fold-for (best nil x [3 9 4]) (if (or (nil? best) (> x best)) x best))))
+  (test "nested bindings, destructuring, and multiple body forms"
+    ;; (1+10)+(1+20)+(2+10)+(2+20): the inner binding varies fastest and the
+    ;; accumulator threads through every step.
+    (assert= 66 (fold-for (s 0 x [1 2] y [10 20]) (+ s x y)))
+    (assert= 10 (fold-for (s 0 [k v] {:a 4 :b 6}) (+ s v)))
+    (let (t (table/new))
+      (assert= 3 (fold-for (n 0 x [:a :b :c]) (table/put t x n) (+ n 1)))
+      (assert= 2 (table/get t :c))))
+  (test "an empty source is the initial value"
+    (assert= :start (fold-for (acc :start x []) :never)))
+  (test "a malformed head or a stray :into is a clear expansion error"
+    (assert-error (macroexpand '(fold-for (0 x xs) x)))
+    (assert-error (macroexpand '(fold-for (acc) acc)))
+    (assert-error (macroexpand '(fold-for (acc 0 x xs :into []) acc)))))
+
 ;; ---- cross-process: the new forms survive send/spawn like any Brood code ----
 (describe "ergonomics across processes"
   :isolated (test "a closure using fmt + a letrec loop deep-copies across a send and runs on the receiver"

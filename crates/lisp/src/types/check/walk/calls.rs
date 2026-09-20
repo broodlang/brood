@@ -418,10 +418,25 @@ fn fold_callback_seed(
     if !fits(f, 2) {
         return None;
     }
-    let acc = expr_ty(heap, form, ctx)?;
-    let elem = expr_ty(heap, coll_arg, ctx)
-        .and_then(|t| t.elem_ty())
-        .unwrap_or(Ty::ANY);
+    // The fold's RESULT is what the accumulator is after the last step — and over a
+    // provably non-empty input the result rule (rightly) leaves `init` out of it. The
+    // callback's accumulator is what it is handed on EVERY step, and the first step is
+    // handed `init`: `(fold [3 9 4] nil (fn (b x) (if (nil? b) x …)))` read `b` as
+    // `3 | 9 | 4` and flagged its own `nil?` as never true (2026-09-20). Seed with
+    // `init ∪ result` for the with-init forms, and with the first element — the seed of
+    // a no-init `(reduce coll f)` — otherwise.
+    let result = expr_ty(heap, form, ctx)?;
+    let coll_ty = expr_ty(heap, coll_arg, ctx);
+    let elem_union = coll_ty.as_ref().and_then(|t| t.elem_ty_union());
+    let seed = match items.len() {
+        4 => expr_ty(heap, items[2], ctx),
+        _ => elem_union.clone(),
+    };
+    let acc = match seed {
+        Some(seed) => seed.union(result),
+        None => result,
+    };
+    let elem = coll_ty.and_then(|t| t.elem_ty()).unwrap_or(Ty::ANY);
     Some((items.len() - 1, Sig::new(vec![acc, elem], Ty::ANY)))
 }
 

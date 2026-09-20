@@ -217,10 +217,13 @@ chars) happens out here, once.
 ;; have silently left every ranking on the slow path. A keyword compares exactly.
 ;; `scorer-in-force` is what reads it; nothing else should.
 
-(defn- scorer-in-force ()
-  "The scorer to rank with: whatever `*fuzzy-scorer*` is bound to, or `scorer` when that is
+;; check-allow: the dynvar's value is whatever a caller bound — the checker cannot see that
+;; it is a scorer, and the declaration is the author saying so (strict: trusted, not verified).
+(check-allow :trusted
+  (defn- scorer-in-force ()
+    "The scorer to rank with: whatever `*fuzzy-scorer*` is bound to, or `scorer` when that is
 still `:default`. The one place the sentinel is resolved."
-  (let (s *fuzzy-scorer*) (if (= s :default) scorer s)))
+    (let (s *fuzzy-scorer*) (if (= s :default) scorer s))))
 (sig scorer-in-force (-> fn))
 
 ;; ---- ranking a whole set ----------------------------------------------------
@@ -520,7 +523,9 @@ keeps it.
 
     (let (r (fuzzy/ranker project-files))
       (fuzzy/rank-async r \"view\" 20)
-      (receive ([:fuzzy-ranked ^r query hits] hits)))"
+      (receive ([:fuzzy-ranked ^r query hits] hits)))
+
+    (let (r (fuzzy/ranker [\"view.blsp\" \"model.blsp\"])) (fuzzy/rank-async r \"view\" 1) (receive ([:fuzzy-ranked ^r _ hits] (do (fuzzy/ranker-stop r) (count hits)))))   → 1"
   (let (score-of *fuzzy-scorer*)
     (spawn (fn () (ranker-loop cands score-of)))))
 (sig ranker (seqable -> pid))
@@ -529,19 +534,25 @@ keeps it.
   "Ask `session` for the best `limit` candidates for `query`. Returns immediately; the answer
 arrives in the calling process's mailbox as `[:fuzzy-ranked <session> query hits]`. A query
 sent while an older one is still queued REPLACES it — only the newest is ever answered, so a
-caller that sends one per keystroke gets one reply per burst, not one per key."
+caller that sends one per keystroke gets one reply per burst, not one per key.
+
+    (let (r (fuzzy/ranker [\"alpha\" \"beta\"])) (fuzzy/rank-async r \"bet\") (receive ([:fuzzy-ranked ^r q hits] (do (fuzzy/ranker-stop r) [q (count hits)]))))   → [\"bet\" 1]"
   (send session [:rank (self) query limit]))
 (sig rank-async (pid string &optional (or nil int) -> any))
 
 (defn ranker-candidates (session cands)
   "Replace `session`'s candidate set with `cands` — the one thing about a session that is
 not the query. Queries already queued are answered against whichever set has arrived first,
-so a caller that cares should re-ask after replacing."
+so a caller that cares should re-ask after replacing.
+
+    (let (r (fuzzy/ranker [])) (fuzzy/ranker-candidates r [\"only\"]) (fuzzy/rank-async r \"on\") (receive ([:fuzzy-ranked ^r _ hits] (do (fuzzy/ranker-stop r) (count hits)))))   → 1"
   (send session [:candidates cands]))
 (sig ranker-candidates (pid seqable -> any))
 
 (defn ranker-stop (session)
   "End `session`. The process exits once it reaches the message; anything queued behind it
-is dropped with the mailbox."
+is dropped with the mailbox.
+
+    (let (r (fuzzy/ranker [\"a\"]) m (monitor r)) (fuzzy/ranker-stop r) (receive ([:down ^m _ reason] reason)))   → :normal"
   (send session [:stop]))
 (sig ranker-stop (pid -> any))

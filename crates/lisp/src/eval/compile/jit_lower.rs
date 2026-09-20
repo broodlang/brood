@@ -546,7 +546,12 @@ fn jit_lower_arm_inner(
     // miscompile — a wrong guess just deopts (the same outcome as today's int-path
     // `as_int`-on-a-float). When the guess is right the result is `Op::Float`, which
     // `store_op` marks float, so the whole `(nth …)`-fed arithmetic chain stays unboxed.
-    let has_float_slot = slot_tags.contains(&profile_tag_float);
+    // Or the arm's deopt feedback found it computing on floats that no param carried
+    // (`jit_float_context`: integer guards deopting on `Float`s read out of vectors).
+    let has_float_slot = slot_tags.contains(&profile_tag_float)
+        || arm
+            .jit_float_context
+            .load(std::sync::atomic::Ordering::Relaxed);
     // Free globals observed holding a `Value::Float` when this arm was elected for
     // tiering — the global-read counterpart of the `slot_tags` param profile. Empty when
     // unset (an arm lowered through a path that had no `Heap`, or `BROOD_NO_FLOAT_GLOBAL`),
@@ -1359,6 +1364,7 @@ fn jit_lower_arm_inner(
         slot_float: &slot_float,
         slot_bool: &slot_bool,
         slot_int_profile: &slot_int_profile,
+        float_context: has_float_slot,
         blockarg_spill_base,
         blockarg_spill_len,
         slot_f64_cache: &slot_f64_cache,

@@ -327,8 +327,9 @@ pub(crate) static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::La
             // by construction (this closure never escapes), so no locking. Entries
             // for a dropped runtime are inert garbage (a few words each; the code
             // itself lives forever in GLOBAL_JIT regardless — see the keepalive).
-            // Keyed on the arm's polymorphic-slot mask too (`jit_any_deopt_feedback`): a
-            // re-lowering the arm asked for after entry deopts must not be answered with the
+            // Keyed on the arm's polymorphic-slot mask too (`jit_any_deopt_feedback`), and
+            // on its float-context flag (`float_deopt_feedback`, in the mask's top bit): a
+            // re-lowering the arm asked for after deopts must not be answered with the
             // code it is replacing — the first version of that feedback re-installed the
             // same pointer from here and `json/emit` went on deopting.
             let mut published: std::collections::HashMap<(u64, (u64, u16), u32), (usize, u64)> =
@@ -389,7 +390,11 @@ pub(crate) static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::La
                 // keepalive push: the first copy's push owns the code's chunk.
                 let poly = arm
                     .jit_poly_slots
-                    .load(std::sync::atomic::Ordering::Relaxed);
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    | (u32::from(
+                        arm.jit_float_context
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                    ) << 31);
                 if let Some(key) = arm.share_key {
                     let map = if inlined {
                         &published_inline

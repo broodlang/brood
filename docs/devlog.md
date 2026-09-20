@@ -944,6 +944,23 @@ Every session, oldest first. Early sessions' full text is in
 
 ## Recent — full entries
 
+## 2026-09-20 — a vector library that never went native (ADR-378)
+
+The physics engine's profile said `dot` cost 410 ns. `(+ (* (nth a 0) (nth b 0)) …)` on
+two float vectors — six nanoseconds of arithmetic. `BROOD_JIT_BAIL_TRACE=1` said why:
+`deopt-thrash-latched`, every function of `b2d-vec`. The float context comes from the param
+profile, and a function of two vectors has no float param, so its `*` went to the integer
+path and its guard deopted on every call until the latch put it on the interpreter for good.
+
+The fix is the polymorphic-param relower's twin: an integer guard deopting on a `Float`
+four times re-tiers the arm in float context. Getting it to *hold* took three more finds,
+each a mechanism that had been correct by accident: the thrash latch never cleared the
+callers' fast links (so a latched arm kept being entered natively — the trace read
+`deopts=995909`), the compile cache handed the re-lower its old code back, and comparisons
+were outside the float context entirely. `dot` is 89 ns now, every arm of the physics step
+lowers, and the thrash trace names its last deopt reason, which is how the comparison case
+was found in minutes rather than by reading IR.
+
 ## 2026-09-17 — the zones a region swallowed
 
 `cell-region` (ADR-363) landed the day before and took something with it that nobody
@@ -15154,3 +15171,43 @@ million-wide range stops at the fourth stage call (the test counts them).
 release it — Clojure's `(rf acc)` — which is a protocol change every stage would carry.
 Recorded in the ADR, deferred until a stage needs it. `docs/language.md` §Transducers has
 the exit and the deferral.
+
+## 2026-09-20 (10) — `:into` and `fold-for` (ADR-377), and the false positive they found (KI-175)
+
+ROADMAP item 8: `for` gains a trailing `:into coll` (collect with `conj`, so the target's
+kind decides — a vector appends, a map takes `[k v]`, a set dedups) and `fold-for` names an
+accumulator as its first pair and makes the body the step. Both are prelude macros over the
+one `%for-fold` expander, which now takes its innermost form as a parameter. One trap on the
+way: `:into nil` (a list built by `conj`, i.e. reversed) was indistinguishable from no
+`:into` — the splitter now carries the target in a one-element list.
+
+Writing `fold-for`'s docstring example was worth the feature: `(fold-for (best nil x [3 9 4])
+(if (or (nil? best) …) …))` came back `nil?: this can never be true — best is 3 | 4 | 9`, in
+plain mode. The fold callback's accumulator was seeded from the fold's RESULT, which over a
+provably non-empty input rightly excludes `init` — but the callback's first step is handed
+`init`. KI-175: the seed is `init ∪ result` now, pinned both ways. The one strict finding
+the fix uncovered was the checker being right (`lm-fold` is handed `5` on purpose).
+
+Also on `main`, from the day's pushes past the inert hook: four `fuzzy/ranker` names and two
+`keymap` names had docstrings and no executed example, which put the audit ratchet at 1144
+against its 1138 ceiling; six one-line examples, each a real session or keymap, bring it
+back. (Two of the keymap examples are written order-free — a single-binding map, a set —
+because the walk's order is the map's.)
+
+## 2026-09-20 (11) — the small library gaps (ADR-379)
+
+ROADMAP item 9, built as the design discussion settled it: `memoize` is a `table` the
+returned closure captures — no cell exists, a process would serialise the calls it is
+meant to make cheap — with the consequences stated on it (structural keys, a copy per hit,
+one cache across processes, no finalizer so bind it with `def`). `condp` asks `(pred expr
+test)`, value first like every data-first predicate — deliberately not Clojure's order.
+`seq/cycle` is bounded (no lazy cons). `seq/pmap` is a process per item, replies tagged by a
+`ref`, collected by index; a worker's error re-raises after every worker has reported so
+the mailbox is clean. `seq/prewalk`/`postwalk` walk maps as `[k v]` entries. `string/format`
+gains `-` and widths on `%s`/`%f`. `partition-by` was already `seq/chunk-by`.
+
+Two housekeeping facts on the way: `fold-for` (ADR-377) had reached `main` unledgered —
+`bare_names_test` is not among the tests the pre-push hook names for a `std/prelude/`
+change, so the ledger gate never ran — and is ledgered now with the six new bare names.
+And `seq/pmap`'s callback parameter reads as `any` to the checker (`(seqable ?A)` would
+exclude maps, the lesson of (7)), so its test sleeps by `nth` rather than arithmetic on `n`.
