@@ -11746,6 +11746,21 @@ in the wrong order.
 always had" — documented in the code as the harmless case, because no requirer was in
 flight to race it. The racer was never a requirer; it was `%isolate`'s snapshot, which
 races every unjournalled write in the runtime.
+**Addendum, the same evening — the frame broke two gates on landing, both fixed and pinned
+(`crates/nest/tests/direct_load_frame.rs`, sabotage-verified each way).** (1) The journal
+replayed the file's own defs over its OWN isolate's restore, so every test file's top-level
+def leaked into the next (`nest::named_files_scoped`, `bare_names_test` — red on
+`c8c58c41`). A direct frame's journal entries carry a `direct` tag now: replayed for a
+bystander's restore (the window this entry closes), discarded — and dropped from the
+journal, or a later bystander restore would resurrect them — by the loading isolate's own;
+a `load` reached from inside a `require`'s frame is that require's and stays a runtime-wide
+fact. (2) A staged REGISTRY op bumped `version` but not `code_epoch`, so a compiled arm that
+had read the registry through a `GlobalIc` kept serving the earlier map — the second
+`defmulti` of `multimethod_test.blsp` was invisible to its `defmethod` ("no `(defmulti
+mm-cmp …)` is in scope"), deterministic through the scoped runner and latent for any
+`require`d module of that shape. The staged registry branch bumps the code epoch as the
+staged define branch already did.
+
 ## KI-171 — `spawn` then `monitor` on a child that dies at once: the monitor delivers `:noproc`, and five tests waited 20 s for a reason that never came ✅ FIXED 2026-09-20
 
 **Symptom.** `brood::suite` failed try 1 of a full `make test` (passed on retry, nextest

@@ -112,6 +112,11 @@ pub(crate) enum LoadWrite {
 pub(crate) struct LoadStage {
     pub(crate) bindings: HashMap<Symbol, Value>,
     pub(crate) writes: Vec<LoadWrite>,
+    /// The frame is a DIRECT `load` of a module file (KI-170), not a `require`: its
+    /// publish is journalled like any load so a bystander's restore replays it whole, but
+    /// the loading isolate's OWN restore discards it — the file was loaded for that
+    /// isolate's run (the scoped test runner's per-file load), not as a runtime-wide fact.
+    pub(crate) direct: bool,
 }
 
 /// The module-load journal (see [`LoadWrite`]). `outstanding` counts the runtime's live
@@ -129,8 +134,10 @@ pub(crate) struct LoadStage {
 pub(super) struct LoadJournal {
     pub(super) outstanding: usize,
     pub(super) next_seq: u64,
-    /// `(seq, writer's isolate scope, write)`.
-    pub(super) entries: Vec<(u64, u64, LoadWrite)>,
+    /// `(seq, writer's isolate scope, written by a DIRECT load frame, write)`. The third
+    /// field is what lets a restore replay a bystander's direct load (KI-170's window) while
+    /// discarding its own isolate's (the per-file scoping `nest test` promises).
+    pub(super) entries: Vec<(u64, u64, bool, LoadWrite)>,
 }
 
 /// read-modify-write has to happen inside one kernel call (KI-22).

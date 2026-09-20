@@ -419,12 +419,12 @@ fn nested_globals_snapshots_suppress_then_re_enable_compaction() {
         interp.heap.runtime_collect().is_none(),
         "compaction must be a no-op while globals snapshots are outstanding",
     );
-    interp.heap.restore_globals(inner, None); // LIFO: inner first — the depth assert must hold
+    interp.heap.restore_globals(inner, None, 0); // LIFO: inner first — the depth assert must hold
     assert!(
         interp.heap.runtime_collect().is_none(),
         "still suppressed while the outer snapshot is outstanding",
     );
-    interp.heap.restore_globals(outer, None);
+    interp.heap.restore_globals(outer, None, 0);
     assert!(
         interp.heap.runtime_collect().is_some(),
         "compaction must be re-enabled once every snapshot is restored",

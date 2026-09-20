@@ -314,9 +314,16 @@ impl Heap {
     /// [`Self::discard_module_load`] drops it when the load throws. RUNTIME compaction is
     /// held off for the frame's life, as `snapshot_globals` holds it off for a snapshot: the
     /// frame holds promoted handles that are not yet on the shared graph.
-    pub fn enter_journalled_load(&mut self) {
+    pub fn enter_journalled_load(&mut self, direct: bool) {
         self.begin_rt_collect_block();
-        self.cold_mut().load_stages.push(LoadStage::default());
+        // A `load` reached from inside a `require`'s frame IS that require's load — the
+        // module is a runtime-wide fact whichever primitive read the file — so only an
+        // outermost frame can be direct.
+        let outermost = self.cold().is_none_or(|c| c.load_stages.is_empty());
+        self.cold_mut().load_stages.push(LoadStage {
+            direct: direct && outermost,
+            ..LoadStage::default()
+        });
     }
 
     /// A load threw: drop its frame. Nothing it defined or registered ever reaches the
@@ -377,6 +384,7 @@ impl Heap {
         let Some(stage) = self.cold_mut().load_stages.pop() else {
             return;
         };
+        let direct = stage.direct;
         let rt = self.runtime.clone();
         let _registry = rt.registry_lock.lock().unwrap_or_else(|e| e.into_inner());
         // Resolve every write to the value it will bind. A registry op reads the LIVE
@@ -420,7 +428,7 @@ impl Heap {
         };
         if pre {
             for (_, _, w) in &pending {
-                self.journal_load_write(w.clone());
+                self.journal_load_write(w.clone(), direct);
             }
         }
         let mut rebind = false;
@@ -443,7 +451,7 @@ impl Heap {
             // may predate these writes. A replayed define is idempotent, so the rare double
             // entry costs nothing.
             for (_, _, w) in &pending {
-                if !self.journal_load_write(w.clone()) {
+                if !self.journal_load_write(w.clone(), direct) {
                     break;
                 }
             }
@@ -469,7 +477,7 @@ impl Heap {
     /// while there is a restore that could discard the write; returns whether it did. One
     /// step under the journal's lock, so it cannot interleave with a snapshot's
     /// begin-and-clear or a restore's replay-and-clear (see `LoadJournal`).
-    fn journal_load_write(&self, w: LoadWrite) -> bool {
+    fn journal_load_write(&self, w: LoadWrite, direct: bool) -> bool {
         let mut j = self
             .runtime
             .load_journal
@@ -497,7 +505,7 @@ impl Heap {
             }
         }
         j.entries
-            .push((seq, crate::process::self_isolate_scope(), w));
+            .push((seq, crate::process::self_isolate_scope(), direct, w));
         true
     }
 
@@ -776,6 +784,16 @@ impl Heap {
             st.writes.push(LoadWrite::Registry { sym, op, path, val });
             st.bindings.insert(sym, next);
             self.runtime.version.fetch_add(1, Ordering::Relaxed);
+            // And `code_epoch`, as the staged DEFINE branch of `env_define` does for a
+            // rebind: a registry op is always a rebind of a live name, and a compiled arm
+            // that read the registry through a `GlobalIc` before this op keys that cache on
+            // the epoch, not on `version`. Without the bump `%register-method`'s
+            // `(contains? *multi-algebra* mname)` served the map from the FIRST `defmulti`
+            // of a file to every later `defmethod` — "no `(defmulti mm-cmp …)` is in
+            // scope" for the second multimethod of `multimethod_test.blsp`, deterministic,
+            // once KI-170 put a directly loaded file in this frame (a `require`d module of
+            // that shape had the same latent bug).
+            self.runtime.code_epoch.fetch_add(1, Ordering::Relaxed);
             return true;
         }
         let was_private = self.runtime.is_private_recorded(sym);
@@ -1105,10 +1123,11 @@ impl Heap {
                 // attempt (nothing outstanding, so nothing journalled) and the insert — its
                 // clone may predate the write. A replayed define is idempotent, so the rare
                 // double entry costs nothing.
-                let pre = journal && h.journal_load_write(LoadWrite::Define { sym, val: shared });
+                let pre =
+                    journal && h.journal_load_write(LoadWrite::Define { sym, val: shared }, false);
                 let was = h.runtime.globals_write().insert(sym, shared).is_some();
                 if journal && !pre {
-                    h.journal_load_write(LoadWrite::Define { sym, val: shared });
+                    h.journal_load_write(LoadWrite::Define { sym, val: shared }, false);
                 }
                 was
             });
@@ -1504,6 +1523,7 @@ impl Heap {
         &mut self,
         snapshot: GlobalsSnapshot,
         discard_scope: Option<u64>,
+        own_scope: u64,
     ) -> Vec<Symbol> {
         // LIFO check: the live suppression depth must still equal what this snapshot set,
         // or snapshots were restored out of order and we'd release the wrong scope's
@@ -1569,16 +1589,27 @@ impl Heap {
                 .unwrap_or_else(|e| e.into_inner());
             let mark = snapshot.journal_mark;
             let mine = |scope: u64| discard_scope == Some(scope);
+            // A DIRECT load frame's writes (KI-170) belong to the isolate that loaded the
+            // file: replayed for everyone else's restore, so a bystander cannot roll the
+            // loader's module back mid-use, and discarded — dropped from the journal too, or
+            // a later bystander restore would resurrect them — by the loader's own. Without
+            // this, the scoped test runner's per-file `%isolate` replayed the file's own
+            // `defmodule` defs over its restore, and every test file's top-level def leaked
+            // into the next (`nest::named_files_scoped`, `bare_names_test` — red on
+            // `c8c58c41`).
+            let own_direct = |scope: u64, direct: bool| direct && scope == own_scope;
             if let Some(t) = Self::global_trace_target() {
                 let hits: Vec<String> = j
                     .entries
                     .iter()
-                    .filter(|(_, _, w)| match w {
+                    .filter(|(_, _, _, w)| match w {
                         LoadWrite::Define { sym, .. } | LoadWrite::Registry { sym, .. } => {
                             *sym == t
                         }
                     })
-                    .map(|(seq, scope, _)| format!("seq={seq}/scope={scope}"))
+                    .map(|(seq, scope, direct, _)| {
+                        format!("seq={seq}/scope={scope}/direct={direct}")
+                    })
                     .collect();
                 eprintln!(
                     "[global] pid={:?} scope={} RESTORE journal: mark={} outstanding={} entries={} discard={:?} target-entries=[{}]",
@@ -1594,14 +1625,19 @@ impl Heap {
             let writes = j
                 .entries
                 .iter()
-                .filter(|(seq, scope, _)| *seq >= mark && !mine(*scope))
-                .map(|(_, _, w)| w.clone())
+                .filter(|(seq, scope, direct, _)| {
+                    *seq >= mark && !mine(*scope) && !own_direct(*scope, *direct)
+                })
+                .map(|(_, _, _, w)| w.clone())
                 .collect();
             if discard_scope.is_some() {
                 // The scratch window's own loads are gone for good: nobody may replay them.
                 j.entries
-                    .retain(|(seq, scope, _)| !(*seq >= mark && mine(*scope)));
+                    .retain(|(seq, scope, _, _)| !(*seq >= mark && mine(*scope)));
             }
+            // This isolate's own direct loads are over with its run: nobody may replay them.
+            j.entries
+                .retain(|(seq, scope, direct, _)| !(*seq >= mark && own_direct(*scope, *direct)));
             j.outstanding = j.outstanding.saturating_sub(1);
             if j.outstanding == 0 {
                 j.entries.clear();
