@@ -452,8 +452,13 @@
       (assert= (list :r1) (finally-notes 1 ()))))
 
   (test "a crash escaping a finally in a process is the original reason"
-    (let (p (spawn (try (error "worker failed") (finally nil)))
-          m (monitor p))
+    ;; `spawn-monitor`, not `spawn` then `monitor`: under a loaded suite the child can die
+    ;; before the parent's `(monitor p)` runs, and a monitor on a dead pid delivers
+    ;; `:noproc` — which this pattern does not match, so the test waited the full 20 s and
+    ;; read a runtime race that was only ever its own (flaked once in a full run,
+    ;; 2026-09-20, passed on retry). The atomic form establishes the monitor before the
+    ;; child can run.
+    (let ([p m] (spawn-monitor (try (error "worker failed") (finally nil))))
       (assert= "worker failed"
         (receive ([:down ^m _ [:error e]] (get e :message)) (after *test-wait-ms* :timeout)))))
 

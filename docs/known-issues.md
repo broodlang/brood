@@ -11694,3 +11694,23 @@ count, so the probe is not vacuously nil). Sabotage: dropping the line reds it. 
 alongside: `lazy_load_test`'s ADR-370 probes guarded on the substring `[image] install`,
 which a stale image prints too (`install: nil sections`), so with no live image for the
 binary they asserted on an empty trace; `adr370-imaged?` now requires a section count.
+
+## KI-171 — `spawn` then `monitor` on a child that dies at once: the monitor delivers `:noproc`, and five tests waited 20 s for a reason that never came ✅ FIXED 2026-09-20
+
+**Symptom.** `brood::suite` failed try 1 of a full `make test` (passed on retry, nextest
+`FLAKY`): `tests/try_catch_test.blsp:455` "a crash escaping a finally in a process is the
+original reason" — `expect: :timeout` after the full `*test-wait-ms*` (20 s), the suite's
+slowest test that run.
+
+**Cause.** The test did `(spawn (try (error …) (finally nil)))` and THEN `(monitor p)`.
+Under a loaded suite the child ran and died before the parent's `monitor` call, and a
+monitor on a dead pid delivers `[:down m p :noproc]` (Erlang's `noproc`, and the right
+answer — reproduced deterministically with a 300 ms wait between the spawn and the
+monitor), which the pattern `[:down ^m _ [:error e]]` does not match. Not a runtime defect:
+a test that measured the scheduler's ordering. `tests/chaos_test.blsp` had the same shape
+four times (`(spawn nil)`, `(spawn 42)`, two crashing bodies), each a latent 20 s flake.
+
+**Fix.** `spawn-monitor` in all five — the prelude's atomic form establishes the monitor
+before the child can run. Other spawn-then-monitor pairs in the suite park the child on a
+`receive` or an `ex-*` loop first, or observe through a system monitor subscribed
+beforehand, and are not exposed.
