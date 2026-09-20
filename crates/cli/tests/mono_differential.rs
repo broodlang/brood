@@ -85,6 +85,14 @@ fn without_timings(text: &str) -> String {
     }
     text.lines()
         .filter(|l| !l.contains("ms wall") && !l.contains("Slow tests") && !ends_with_duration(l))
+        // …and BLANK lines, which is not tidiness: a "Slow tests (> 1.0s):" block appears in
+        // whichever arm happened to cross a second, and the filters above remove the block's
+        // lines while leaving the blank that preceded it. The two arms then differed by one
+        // empty line and the assertion said "monomorphization changed an ANSWER" — a gate
+        // accusing the feature under test, on a run where both arms reported
+        // `94 tests, 94 passed, 0 failed` (2026-09-20, one full-suite run in three).
+        // What this differential compares is answers; whitespace is not one.
+        .filter(|l| !l.trim().is_empty())
         .collect::<Vec<_>>()
         .join("\n")
 }

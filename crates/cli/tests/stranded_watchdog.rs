@@ -27,7 +27,11 @@ fn script(name: &str, source: &str) -> std::path::PathBuf {
     path
 }
 
-fn run(path: &std::path::Path, fault: bool) -> (String, String, bool) {
+/// Returns the run's wall time alongside its output: the latch assertion below is stated
+/// per STARVATION EPISODE, and how many episodes a run can contain is a function of how
+/// long it took (see there).
+fn run(path: &std::path::Path, fault: bool) -> (String, String, bool, std::time::Duration) {
+    let started = std::time::Instant::now();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_brood"));
     cmd.env("BROOD_NO_CHECK", "1")
         .env("BROOD_NO_CRASH_REPORT", "1");
@@ -39,6 +43,7 @@ fn run(path: &std::path::Path, fault: bool) -> (String, String, bool) {
         String::from_utf8_lossy(&output.stdout).into_owned(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
         output.status.success(),
+        started.elapsed(),
     )
 }
 
@@ -56,7 +61,7 @@ const REPORT: &str = "[sched] STRANDED WORK (KI-88 signature)";
 #[test]
 fn an_idle_pool_with_nothing_queued_is_not_reported() {
     let path = script("control", WORKLOAD);
-    let (stdout, stderr, ok) = run(&path, false);
+    let (stdout, stderr, ok, _elapsed) = run(&path, false);
     assert!(
         ok,
         "control run failed.\nstdout:\n{stdout}\nstderr:\n{stderr}"
@@ -75,7 +80,7 @@ fn an_idle_pool_with_nothing_queued_is_not_reported() {
 #[test]
 fn queued_work_no_worker_can_find_is_reported_within_the_window() {
     let path = script("fault", WORKLOAD);
-    let (stdout, stderr, ok) = run(&path, true);
+    let (stdout, stderr, ok, elapsed) = run(&path, true);
     assert!(
         ok,
         "fault run failed.\nstdout:\n{stdout}\nstderr:\n{stderr}"
@@ -95,10 +100,24 @@ fn queued_work_no_worker_can_find_is_reported_within_the_window() {
         stderr.contains("w0: parked="),
         "the report did not name the workers' queues.\nstderr:\n{stderr}"
     );
-    // Latched: one report per starvation episode, not one per parked cycle.
-    assert_eq!(
-        stderr.matches(REPORT).count(),
-        1,
-        "the report should latch after firing once.\nstderr:\n{stderr}"
+    // Latched: one report per starvation EPISODE, not one per parked cycle. An episode ends
+    // the moment anything is pulled to run (`run_one` re-arms both the window and the latch),
+    // so a run that is starved of CPU for long enough to cross several 3 s windows may
+    // legitimately report more than once — and this asserted `== 1`, which is really the
+    // assumption "the 4.5 s program took about 4.5 s". Under a loaded machine it did not: one
+    // full-suite run in three took 19.6 s here and reported twice (2026-09-20). The watchdog
+    // was right both times; the test was measuring the machine.
+    //
+    // Bounded by what the mechanism allows instead: each report needs its own fresh 3 s
+    // window, so a run of T seconds cannot hold more than T/3 + 1 of them. That still fails
+    // hard if the latch is removed, which is the property under test — without it every
+    // parked cycle past the window reports, hundreds of times over the same run.
+    let reports = stderr.matches(REPORT).count();
+    let ceiling = (elapsed.as_secs() / 3) as usize + 1;
+    assert!(
+        reports <= ceiling,
+        "{reports} reports in a {:.1} s run, which allows at most {ceiling} starvation \
+         episode(s) — the report is not latching.\nstderr:\n{stderr}",
+        elapsed.as_secs_f64()
     );
 }
