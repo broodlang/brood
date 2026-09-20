@@ -86,7 +86,7 @@ pointer is needed.
 **Open, in order.** (1) ✅ the gate is gone (2026-09-20 later): the GPU target draws every
 op and is the default of a `--with-gui-gpu` build. (2) A pixel-space text op, or leave HUD text to the cell grid. (3) ✅ the
 frontend as its own process (2026-09-20 later still): `b2d/serve` + `nest attach --gui`. (4) Windows: nine Unix-bound files, no CI job — a separate track the user wants
-later. (5) wasm: with (3) done, the natural route is a BROWSER frontend painting the same ops (a canvas/WebGPU client of the display protocol over a WebSocket), not a port of the winit thread.
+later. (5) ✅ the browser frontend (2026-09-20, b2d `dc791ae`): `b2d-web`, an HTTP+SSE bridge in Brood over `editor/serve`'s attach protocol + a canvas painter — generic over any served app, so bedit could get a tab client by the same route. Running the RUNTIME in the tab (wasm) remains open and would reuse that painter.
 
 ## 2026-09-20 evening — KI-170: a directly loaded module could be "loaded" with nothing bound
 
