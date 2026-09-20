@@ -163,6 +163,8 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-167 | **a loop handed to its recompiled body (ADR-366) ran the rest of its life NESTED** — the hot-reload guard's tail transition was a nested `apply_value`, so every `receive` under it parked the OS worker dirty (20 000 of 20 000 in a self-tail server whose first iteration lazily loaded a module) and a native preempt fell to the interpreter for up to 256 iterations (`collatz` +6.5% instructions under lazy loading) | ✅ **FIXED 2026-09-20** — the transition is a `ChunkExit::Tail` the driver reuses the frame for; nothing runs nested. Guard `crates/cli/tests/stale_loop_handoff.rs`, sabotage-verified (the nested call reads 20 000 dirty parks) |
 | KI-168 | **`make tier-audit` red: `bench-supervisor/fill` lowered, hosted a parking `receive` three named hops away, dirty-parked its worker once and was latched** — the direct `%receive` fence sees only the arm's own chunk | ✅ **FIXED 2026-09-20** — `arm_hosts_receive` follows an arm's NON-tail call sites through named compiled callees and refuses it as `hosts-receive` before the compile. Guard `crates/cli/tests/hosts_receive_fence.rs`, sabotage-verified; `make tier-audit` 29 rows clean |
 | KI-169 | **`(stdimage/status)`'s `:installed` reported the PRELUDE snapshot's count on an opted-out warm boot** — `%std-image-reinstall!` cleared every registry the snapshot carries except `*std-image-installed*`, the snapshot's own answer | ✅ **FIXED 2026-09-20** — one reset beside the others. Guard `stdimage_reporting.rs` case 4, sabotage-verified |
+| KI-176 | **killing a MONITORED process cost 1.2 ms — 1 500× an unmonitored one — because every death walked the whole monitor table** — `sweep_dead_watcher` (every exit) and `demonitor` retained over every target's watcher list ("cold death path, so the full-table walk is fine"); a supervisor holding 200 000 monitored children paid O(n) per child death, O(n²) for the fleet, and that walk was the whole of `exit :kill`'s cost on the lifecycle probe | ✅ **FIXED 2026-09-21** — `MonitorTable` keeps the watcher-side index Erlang keeps (`by_watcher`: pid → {mref → target}); add/take/demonitor/watcher-death touch only their own entries, the cold REMOTE retirements keep the walk. 1 236 022 → 1 266 ns per monitored kill (unmonitored 800); `monitor` 265 → 420 ns. Guards: `concurrency_test` pins the two indexes in step; `crates/lisp/tests/monitor_scaling.rs` pins monitored/unmonitored kill as a ratio (< 8×; the walk reads 38× at 20k) |
+| KI-177 | **every `exit :kill` fed the default crash reporter a message it discarded, and the reporter fell behind without bound** — `sysmon::emit_exit` filtered only `:normal` from `:exit-abnormal`, so a supervisor's kills and shutdowns each built and delivered `[:system :exit pid :kill]`; the reporter read them at ~14 µs each against a parent killing 100 000 children in 80 ms — backlog 91 714 after one round, 309 458 after four, measured as ~180 B of live bytes accruing per killed process | ✅ **FIXED 2026-09-21** — the kernel filters the reporter's own non-crash table (`:normal`, `:kill`/`:killed`, `:shutdown`, `[:shutdown x]`) before any message is built, as the subscription's doc already said; a `:exit` subscriber still sees every one. Backlog 0 on every round. `tests/sysmon_test.blsp` pins both halves |
 | KI-175 | **the checker seeded a fold callback's accumulator from the fold's RESULT, losing `init`** — over a provably non-empty input the result rule leaves `init` out (the step ran at least once), but the callback's first step is handed `init`; `(fold [3 9 4] nil (fn (b x) (if (nil? b) x …)))` read `b` as `3 \| 9 \| 4` and flagged the callback's own `nil?` guard as never true — a PLAIN-mode false positive (the one thing the checker must never do). Found by `fold-for`'s docstring example the day ADR-377 was written | ✅ **FIXED 2026-09-20** — `walk::calls::fold_callback_seed` seeds the accumulator with `init ∪ result` (the first element ∪ result for a no-init `reduce`). Pinned in `closure_inference.rs` both ways (the `nil` seed is quiet; a `0` seed still makes the `nil?` dead), sabotage-verified. One strict finding it uncovered was right: `linmap_soundness_test`'s `lm-fold` is handed `5` on purpose by one caller, so its `assoc` can see a `5` — `check-allow`ed like its sibling |
 | KI-174 | **the JIT fast-frame's debug cross-check fired on a rebind that landed between the IR's epoch load and the callback** — `fast-link mirror desynced from the call IC … auth=None` aborted `concurrency_race::fanout_with_concurrent_global_rebind_matches_serial` once on CI (2026-09-20, run 35532017776). The IR validates the flat mirror against the global epoch with a raw load; `jit_dispatch_fast_frame` re-read the epoch and asked the IC at the NEW one after a concurrent `def` bumped it, so a mirror that was valid when read looked desynced. Debug builds only; the release path re-validates and falls through. The check was also weaker than it read: it probed through `vm_call_ic_fast_link`, which reads the mirror first — comparing the mirror with itself, and reaching the entry only when the epoch had moved | ✅ **FIXED 2026-09-20** — `debug_check_fast_link_mirror` compares the mirror against the fat `CallIcEntry` (`fast_link_from_entry`, the authoritative half factored out of the probe) at the mirror's OWN epoch, and a `None` there is legitimate exactly when the entry's epoch has moved. Two unit tests rebuild the race's state deterministically (a published mirror, then a `def`): the tolerant case, sabotage-verified by probing at the current epoch; and a real desync at the same epoch, which must still fire |
 | KI-173 | **a module the pre-flight check loaded ran WITHOUT the optimiser's source rewrites, and an image written by that process carried the unrewritten bodies** — the checker holds `NoSourceRewrites` across a compile pass that itself performs the file's `require`s and the ADR-340 scan's loads, so every std module a `brood file.blsp` check brought in was expanded as "the author's code": `seq/frequencies` over 750k keys 860 ms against 343 ms with `BROOD_NO_CHECK=1`, the same as `BROOD_LINMAP=0`; and `stdimage/build` from such a process wrote those bodies, so `debug/hits` read `(map any number)` under one writer's image and `(or map table)` under another's | ✅ **FIXED 2026-09-20** — the loader holds `SourceRewritesOn` (`load`, `%load-module-source`): a module's bodies are the runtime's whoever triggers the load; and the checker narrows on `(= :table (type-of x))` — the test the tally rewrite emits — so a rewritten body types as `map`. Guards: `tests/check_loads_run_rewritten.rs` (the loaded body carries the rewrite's marker), `cli/tests/image_writer_differential.rs` (an image written after a check reads as one written without), both sabotage-verified. Found by the writer differential item 3 of the coverage session asked for |
@@ -11702,6 +11704,57 @@ count, so the probe is not vacuously nil). Sabotage: dropping the line reds it. 
 alongside: `lazy_load_test`'s ADR-370 probes guarded on the substring `[image] install`,
 which a stale image prints too (`install: nil sections`), so with no live image for the
 binary they asserted on an empty trace; `adr370-imaged?` now requires a section count.
+
+## KI-176 — killing a monitored process walked the whole monitor table ✅ FIXED 2026-09-21
+
+**Seen:** a 200k-process lifecycle probe (spawn+exit, hold, kill), the first step of the
+"processes must be super cheap to spin up, hold and kill" thread. `exit :kill` on a parked
+UNMONITORED child: 0.7–0.8 µs. On a child whose parent held a monitor on each of the 200k:
+**1.2 ms** — 1 500×, and the probe's whole kill phase.
+
+**Cause:** `process/monitor.rs` indexed monitors by TARGET only. A target's death fans its
+watchers out in O(watchers) — fine — but a WATCHER's death (`sweep_dead_watcher`, run on
+every exit) and a `demonitor` had to find their entries by walking every target's list:
+O(all monitors) per death, O(n²) for a fleet. The comment said "cold death path, so the
+full-table walk is fine", true at ten monitors. Erlang keeps both sides' monitor lists on
+the process, so both are O(own entries).
+
+**Fix:** `MONITORS` is a `MonitorTable` with `by_target` (the fan-out) and `by_watcher`
+(local pid → {mref → target}); `insert`/`take_target`/`remove_local`/`remove_watcher` each
+touch their own entries; the cold REMOTE retirements (node-down, `Frame::Demonitor`) keep
+the walk and retire both indexes. Monitored kill 1 236 022 → 1 266 ns per process
+(unmonitored 800 — the remainder is the `[:down …]` delivery); `monitor` 265 → 420 ns for
+the reverse insert.
+
+**Guards:** `tests/concurrency_test.blsp` pins the two indexes in step (demonitor one of
+many across targets and on one target; a watcher's death releases its monitors —
+sabotage-verified with `remove_watcher` stubbed), and `crates/lisp/tests/monitor_scaling.rs`
+pins monitored/unmonitored kill of 20k children as a RATIO under 8× (measured ~1×; the
+pre-index walk reads 38× at that n, sabotage-verified).
+
+## KI-177 — the default crash reporter was fed every `exit :kill` and fell behind without bound ✅ FIXED 2026-09-21
+
+**Seen:** the same probe, counting allocator armed: ~180 B of live bytes accruing per KILLED
+process, round after round (290 → 496 → 690 → 813 B/proc over four rounds of 100k), none
+for a normal exit, none with `BROOD_NO_CRASH_REPORT=1`. `%mailbox-size` on the reporter:
+91 714 queued after round one, 165 000, 237 873, 309 458.
+
+**Cause:** `sysmon::emit_exit` filtered only `:normal` from the `:exit-abnormal` selection,
+so every `exit :kill` — the reason a supervisor tears a subtree down with — built a
+`[:system :exit pid :kill]` and delivered it to the reporter, which read it and discarded it
+(`crash-report-crash?` says `:kill` is not a crash) at ~14 µs a message. The parent killed
+100 000 children in 80 ms; the reporter never drained faster than the next round refilled it.
+The subscription's doc said the filter ran "before any message is built" — for `:normal`
+it did.
+
+**Fix:** `is_clean` mirrors the reporter's table (`:normal`, `:kill`/`:killed`,
+`:shutdown`, `[:shutdown x]`), so `:exit-abnormal` means a CRASH and a deliberate exit costs
+one relaxed load. A `:exit` subscriber still sees every exit. Backlog 0 on every round, live
+bytes flat. `tests/sysmon_test.blsp` pins both halves (sabotage-verified: the old
+`:normal`-only filter reports the kill first).
+
+**Lesson:** a "leak" measured in live bytes can be a mailbox. Read `%mailbox-size` on every
+long-lived subscriber before reading the allocator.
 
 ## KI-175 — the checker seeded a fold callback's accumulator from the fold's result, losing `init` ✅ FIXED 2026-09-20
 
