@@ -15152,3 +15152,25 @@ million-wide range stops at the fourth stage call (the test counts them).
 release it — Clojure's `(rf acc)` — which is a protocol change every stage would carry.
 Recorded in the ADR, deferred until a stage needs it. `docs/language.md` §Transducers has
 the exit and the deferral.
+
+## 2026-09-20 (10) — `:into` and `fold-for` (ADR-377), and the false positive they found (KI-175)
+
+ROADMAP item 8: `for` gains a trailing `:into coll` (collect with `conj`, so the target's
+kind decides — a vector appends, a map takes `[k v]`, a set dedups) and `fold-for` names an
+accumulator as its first pair and makes the body the step. Both are prelude macros over the
+one `%for-fold` expander, which now takes its innermost form as a parameter. One trap on the
+way: `:into nil` (a list built by `conj`, i.e. reversed) was indistinguishable from no
+`:into` — the splitter now carries the target in a one-element list.
+
+Writing `fold-for`'s docstring example was worth the feature: `(fold-for (best nil x [3 9 4])
+(if (or (nil? best) …) …))` came back `nil?: this can never be true — best is 3 | 4 | 9`, in
+plain mode. The fold callback's accumulator was seeded from the fold's RESULT, which over a
+provably non-empty input rightly excludes `init` — but the callback's first step is handed
+`init`. KI-175: the seed is `init ∪ result` now, pinned both ways. The one strict finding
+the fix uncovered was the checker being right (`lm-fold` is handed `5` on purpose).
+
+Also on `main`, from the day's pushes past the inert hook: four `fuzzy/ranker` names and two
+`keymap` names had docstrings and no executed example, which put the audit ratchet at 1144
+against its 1138 ceiling; six one-line examples, each a real session or keymap, bring it
+back. (Two of the keymap examples are written order-free — a single-binding map, a set —
+because the walk's order is the map's.)

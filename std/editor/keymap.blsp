@@ -108,7 +108,9 @@ Pure apart from the symbol resolution; testable without a terminal."
   fifteen rows of marginalia. Build this once and each row is a lookup.
 
   Pure over the keymap data — no dispatch, no eval, no load; a command whose module has not
-  been loaded appears here like any other, since a keymap names commands by symbol."
+  been loaded appears here like any other, since a keymap names commands by symbol.
+
+    (editor/keymap/keymap-index {:x {:s 'save :q 'quit}})   → {save ([:x :s]), quit ([:x :q])}"
     (fold (keymap-bindings keymap)
       {}
       (fn (acc pair)
@@ -123,7 +125,9 @@ Pure apart from the symbol resolution; testable without a terminal."
   walked, in no particular order. The walk `keymap-index` groups; separate because the flat
   form is what a caller listing a whole keymap (a `describe-bindings`, a cheat sheet) wants,
   and because grouping with `append` per binding is what made a first cut of `keymap-index`
-  nine times slower than this walk."
+  nine times slower than this walk.
+
+    (into #{} (editor/keymap/keymap-bindings {:a 'save :x {:q 'quit}}))   → #{[save [:a]] [quit [:x :q]]}"
     (mapcat keymap
       (fn (kv)
         (let ([k v] kv)

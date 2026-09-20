@@ -163,6 +163,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-167 | **a loop handed to its recompiled body (ADR-366) ran the rest of its life NESTED** — the hot-reload guard's tail transition was a nested `apply_value`, so every `receive` under it parked the OS worker dirty (20 000 of 20 000 in a self-tail server whose first iteration lazily loaded a module) and a native preempt fell to the interpreter for up to 256 iterations (`collatz` +6.5% instructions under lazy loading) | ✅ **FIXED 2026-09-20** — the transition is a `ChunkExit::Tail` the driver reuses the frame for; nothing runs nested. Guard `crates/cli/tests/stale_loop_handoff.rs`, sabotage-verified (the nested call reads 20 000 dirty parks) |
 | KI-168 | **`make tier-audit` red: `bench-supervisor/fill` lowered, hosted a parking `receive` three named hops away, dirty-parked its worker once and was latched** — the direct `%receive` fence sees only the arm's own chunk | ✅ **FIXED 2026-09-20** — `arm_hosts_receive` follows an arm's NON-tail call sites through named compiled callees and refuses it as `hosts-receive` before the compile. Guard `crates/cli/tests/hosts_receive_fence.rs`, sabotage-verified; `make tier-audit` 29 rows clean |
 | KI-169 | **`(stdimage/status)`'s `:installed` reported the PRELUDE snapshot's count on an opted-out warm boot** — `%std-image-reinstall!` cleared every registry the snapshot carries except `*std-image-installed*`, the snapshot's own answer | ✅ **FIXED 2026-09-20** — one reset beside the others. Guard `stdimage_reporting.rs` case 4, sabotage-verified |
+| KI-175 | **the checker seeded a fold callback's accumulator from the fold's RESULT, losing `init`** — over a provably non-empty input the result rule leaves `init` out (the step ran at least once), but the callback's first step is handed `init`; `(fold [3 9 4] nil (fn (b x) (if (nil? b) x …)))` read `b` as `3 \| 9 \| 4` and flagged the callback's own `nil?` guard as never true — a PLAIN-mode false positive (the one thing the checker must never do). Found by `fold-for`'s docstring example the day ADR-377 was written | ✅ **FIXED 2026-09-20** — `walk::calls::fold_callback_seed` seeds the accumulator with `init ∪ result` (the first element ∪ result for a no-init `reduce`). Pinned in `closure_inference.rs` both ways (the `nil` seed is quiet; a `0` seed still makes the `nil?` dead), sabotage-verified. One strict finding it uncovered was right: `linmap_soundness_test`'s `lm-fold` is handed `5` on purpose by one caller, so its `assoc` can see a `5` — `check-allow`ed like its sibling |
 | KI-174 | **the JIT fast-frame's debug cross-check fired on a rebind that landed between the IR's epoch load and the callback** — `fast-link mirror desynced from the call IC … auth=None` aborted `concurrency_race::fanout_with_concurrent_global_rebind_matches_serial` once on CI (2026-09-20, run 35532017776). The IR validates the flat mirror against the global epoch with a raw load; `jit_dispatch_fast_frame` re-read the epoch and asked the IC at the NEW one after a concurrent `def` bumped it, so a mirror that was valid when read looked desynced. Debug builds only; the release path re-validates and falls through. The check was also weaker than it read: it probed through `vm_call_ic_fast_link`, which reads the mirror first — comparing the mirror with itself, and reaching the entry only when the epoch had moved | ✅ **FIXED 2026-09-20** — `debug_check_fast_link_mirror` compares the mirror against the fat `CallIcEntry` (`fast_link_from_entry`, the authoritative half factored out of the probe) at the mirror's OWN epoch, and a `None` there is legitimate exactly when the entry's epoch has moved. Two unit tests rebuild the race's state deterministically (a published mirror, then a `def`): the tolerant case, sabotage-verified by probing at the current epoch; and a real desync at the same epoch, which must still fire |
 | KI-173 | **a module the pre-flight check loaded ran WITHOUT the optimiser's source rewrites, and an image written by that process carried the unrewritten bodies** — the checker holds `NoSourceRewrites` across a compile pass that itself performs the file's `require`s and the ADR-340 scan's loads, so every std module a `brood file.blsp` check brought in was expanded as "the author's code": `seq/frequencies` over 750k keys 860 ms against 343 ms with `BROOD_NO_CHECK=1`, the same as `BROOD_LINMAP=0`; and `stdimage/build` from such a process wrote those bodies, so `debug/hits` read `(map any number)` under one writer's image and `(or map table)` under another's | ✅ **FIXED 2026-09-20** — the loader holds `SourceRewritesOn` (`load`, `%load-module-source`): a module's bodies are the runtime's whoever triggers the load; and the checker narrows on `(= :table (type-of x))` — the test the tally rewrite emits — so a rewritten body types as `map`. Guards: `tests/check_loads_run_rewritten.rs` (the loaded body carries the rewrite's marker), `cli/tests/image_writer_differential.rs` (an image written after a check reads as one written without), both sabotage-verified. Found by the writer differential item 3 of the coverage session asked for |
 | KI-171 | **the checker's transitive materialisation (ADR-340) was a no-op unless `BROOD_IMAGE_TRACE` was set** — ADR-370's rewrite of `materialise_referenced_modules` put the load set's insert behind the trace flag (`trace && wanted.insert(module)`), so from 2026-09-18 every untraced check inferred a loaded module's body only down to its first unmaterialised qualified name (`-> any` below it, the bedit `git-scan-rows` shape ADR-340 fixed), and the one test of the scan ran its child WITH the trace | ✅ **FIXED 2026-09-20** — the insert is unconditional; guard `transitive_scan_loads_without_the_trace` (a planted fixture edge on `table/get`, untraced, refuses to run traced), sabotage-verified. Found while ranking what checks load: the trace named a module the untraced run never touched |
@@ -11701,6 +11702,35 @@ count, so the probe is not vacuously nil). Sabotage: dropping the line reds it. 
 alongside: `lazy_load_test`'s ADR-370 probes guarded on the substring `[image] install`,
 which a stale image prints too (`install: nil sections`), so with no live image for the
 binary they asserted on an empty trace; `adr370-imaged?` now requires a section count.
+
+## KI-175 — the checker seeded a fold callback's accumulator from the fold's result, losing `init` ✅ FIXED 2026-09-20
+
+**Symptom.** `nest check --strict` on `fold-for`'s docstring example — `(fold-for (best nil
+x [3 9 4]) (if (or (nil? best) (> x best)) x best))`, which expands to a `fold` seeded with
+`nil` — reported `nil?: this can never be true — best is 3 | 4 | 9`. The same on a bare
+`(fold [3 9 4] nil (fn (b x) (if (or (nil? b) (> x b)) x b)))`, in PLAIN mode: a false
+positive, the one class the checker's invariant forbids (ADR-123/124).
+
+**Cause.** `walk::calls::fold_callback_seed` typed the callback's accumulator parameter as
+`expr_ty(form)` — the type of the whole fold. The fold RESULT rule (`infer.rs`) is right to
+drop `init` over a provably non-empty input: the step ran, so the result is a step result.
+But the accumulator the callback is HANDED includes `init` on the first step, whatever the
+input's length. The two questions were answered with one type.
+
+**Fix.** The seed is `init ∪ result` for the with-init `fold`/`reduce`, and `first element
+∪ result` for the no-init `(reduce coll f)`. Every other consumer of the result type is
+unchanged.
+
+**Guards.** `closure_inference::a_fold_callbacks_accumulator_is_handed_init_on_its_first_step`:
+the `nil` seed is quiet; the same guard over a `0` seed still reports `nil?` as dead (the
+finding stays a finding); the no-init `reduce` is quiet. Sabotage (seed from the result
+alone) reds the first. One strict finding the fix uncovered was the checker being right —
+`linmap_soundness_test`'s `lm-fold` is called with the seed `5` on purpose by one assertion,
+so the caller-derived `seed` includes `5` and the `assoc` in its callback can see it; opted
+out with `check-allow :type-mismatch` beside its sibling.
+
+**Lesson.** "What does this expression evaluate to" and "what is this parameter handed"
+are different questions when the first excludes a case the second must include.
 
 ## KI-174 — the JIT fast-frame's debug cross-check fired on a rebind between the IR's epoch load and the callback ✅ FIXED 2026-09-20
 

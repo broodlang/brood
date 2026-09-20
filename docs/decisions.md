@@ -24303,3 +24303,45 @@ change every stage and `transduce` would carry. Deferred until a stage needs it 
 any depth of the stack — a stop below a `map` stage is a stop. The `%reduced` record is the
 only new value shape, sendable and printable like any record; `seq/reduced?` is the only
 new predicate. `docs/language.md` §Transducers documents the exit and the deferred half.
+
+## ADR-377 — Accumulating comprehensions: `:into` on `for`, and `fold-for`
+
+**Status:** accepted (2026-09-20). **ROADMAP "what the other Lisps have" item 8.**
+
+**Context.** `for` built a list and nothing else; a vector, a map or a set wanted
+`(into [] (for …))` — a second pass over a value the walk already had in hand — and an
+accumulation over a walk had no comprehension shape at all, only a `fold` with a hand-written
+callback or a `letrec`. Racket has `for/vector`, `for/hash`, `for/set` and `for/fold`;
+Clojure's `for` has `:into` in the wild as `(into … (for …))` and `reduce` for the rest.
+
+**Decision.** Two prelude macros over `for`'s existing expander (`%for-fold` — a nested
+`fold` per binding, an `if` per `:when`), which now takes the innermost form as a
+parameter instead of assuming `(cons body acc)`:
+
+- **`:into coll`**, accepted only as the LAST pair of `for`'s bindings: the accumulator
+  starts as `coll` and each body value is `conj`ed onto it, so the target's kind decides
+  the result — a vector appends, a map takes `[k v]` pairs, a set drops duplicates, a list
+  (or `nil`) prepends. No final `reverse`. `:into nil` is a list built by `conj`, i.e. in
+  reverse; it is told apart from "no `:into`" by carrying the target in a one-element list
+  through the splitter — the first cut read `nil` as absent and took the list path.
+- **`(fold-for (acc init x xs …) body…)`**: the first pair names the accumulator and its
+  start, the rest are `for`'s bindings and guards, and the body — evaluated with both in
+  scope — is the next accumulator. The last one is the result. The accumulator is the
+  user's symbol threaded through every nested `fold`'s callback, which is exactly what
+  makes the body read naturally and what `%for-fold` already did with a gensym.
+
+Both are position-checked at expansion with `for`'s own messages: `:into` anywhere but
+last, without a collection, or inside `fold-for` (where the accumulator IS the result) is
+a clear error naming the syntax.
+
+**Not decided.** A `:while` clause (stop the walk) — `for` is a fold and stopping is
+ADR-376's throw; the shape that makes sense is a `reduced` from the body, which works
+today under `fold-for` inside a `transduce`, and is not spelled as a clause until someone
+needs one.
+
+**Consequences.** `(for (x xs :into []) …)` is one pass where `(into [] (for …))` was two.
+`fold-for` replaces the `fold`-with-callback spelling for the "accumulate over a walk"
+case, and the checker types its accumulator through the fold rule — which is how this
+work found KI-175 (the fold callback's accumulator was seeded from the fold's result and so
+lost `init`): `fold-for`'s own docstring example, `(fold-for (best nil x [3 9 4]) (if (or
+(nil? best) …) …))`, was flagged `nil?: this can never be true`.

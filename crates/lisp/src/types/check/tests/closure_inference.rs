@@ -1139,3 +1139,35 @@ fn a_fold_accumulator_keeps_its_fields_through_the_ascent() {
         "vector<string>[1..]"
     );
 }
+
+#[test]
+fn a_fold_callbacks_accumulator_is_handed_init_on_its_first_step() {
+    // The fold's RESULT over a provably non-empty input leaves `init` out (the step ran);
+    // the callback's accumulator is what every step is handed, and the first is handed
+    // `init`. Seeding the callback from the result alone read `b` as `3 | 9 | 4` and
+    // flagged the callback's own `nil?` guard as never true — a plain-mode false positive
+    // (2026-09-20, found by `fold-for`'s docstring example).
+    let quiet = file_warnings(
+        "(defn best (xs) (fold [3 9 4] nil (fn (b x) (if (or (nil? b) (> x b)) x b))))",
+    );
+    assert!(
+        quiet.iter().all(|w| !w.contains("never")),
+        "`b` is `nil` on the first step — {quiet:?}"
+    );
+    // …and with a non-nil seed the guard IS dead, so the finding stays a finding.
+    let dead = file_warnings(
+        "(defn best (xs) (fold [3 9 4] 0 (fn (b x) (if (or (nil? b) (> x b)) x b))))",
+    );
+    assert!(
+        dead.iter()
+            .any(|w| w.contains("nil?") && w.contains("never")),
+        "a `nil?` on an accumulator seeded with 0 is never true — {dead:?}"
+    );
+    // The no-init `reduce` seeds from the first element.
+    let quiet =
+        file_warnings("(defn total (xs) (reduce [1 2 3] (fn (a x) (if (int? a) (+ a x) x))))");
+    assert!(
+        quiet.iter().all(|w| !w.contains("never")),
+        "the seed of a no-init reduce is the first element — {quiet:?}"
+    );
+}

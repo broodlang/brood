@@ -1033,6 +1033,25 @@ For purely side-effecting iteration, two prelude macros wrap the common patterns
 Both are tail-recursive and return `nil` (they're for effects). `doseq` (over
 `for`) is the alternative when destructuring or `:when` filters are wanted.
 
+**Comprehensions** build a value from the same walk. `for` collects a list of its
+body's values over one or more bindings (the last varies fastest), with `:when`
+guards; a trailing **`:into coll`** collects with `conj` onto `coll` instead, so the
+target's kind decides the result; and **`fold-for`** names an accumulator as its first
+pair and makes the body the step (ADR-377 — Racket's `for/fold`):
+
+```clojure
+(for (x (range 5) :when (math/even? x)) (* x x))   ;=> (0 4 16)
+(for (x [1 2 3] :into []) (* x x))                  ;=> [1 4 9]        ; a vector appends
+(for (x [1 2] :into {}) [x (* x x)])                ;=> {1 1, 2 4}     ; a map takes [k v]
+(for (x [1 2 -1] :into #{}) (* x x))                ;=> #{1 4}         ; a set dedups
+(fold-for (sum 0 x [1 2 3]) (+ sum x))              ;=> 6
+(fold-for (m {} x [:a :b] :when (not (= x :b))) (assoc m x 1))   ;=> {:a 1}
+```
+
+All three are macros over one expander — a nested `fold` per binding, an `if` per
+guard — so a comprehension is one pass and tail-recursive; `for` without `:into`
+builds in reverse and reverses once at the end.
+
 Recursive **locals** — a helper fn that only exists inside one expression —
 use `letrec`, which makes every binding name visible in every RHS:
 

@@ -239,8 +239,11 @@ needs a Brood-specific form to respect an ADR.
   ability-owner > default) has the ordering but no way for the winner to call the impl it
   shadowed, so an app override copies the type-owner's body. A `(next-impl)` form valid only
   inside an `impl` body, resolving one rung down. No `:before/:after` combination (ADR-011).
-- ⬜ **8. Accumulating comprehensions.** A `:into coll` clause on `for` (reuses `conj`'s
-  kind preservation) and a `for/fold`-shaped `(fold-for (acc init x xs) body)`. Prelude macros.
+- ✅ **8. Accumulating comprehensions** (2026-09-20, ADR-377). A trailing `:into coll` on
+  `for` collects with `conj` (the target's kind decides the result) and `(fold-for (acc init
+  x xs :when p) body)` makes the body the step — both prelude macros over `for`'s one
+  expander. Building it found KI-175 (the checker seeded a fold callback's accumulator from
+  the fold's result, losing `init`).
 - ⬜ **9. Small library gaps** — each a few prelude lines: `juxt`, `fnil`, `memoize` (table-
   or process-backed; there is no atom), `cycle`, `partition-by`, `condp`, `when-some`,
   `postwalk`/`prewalk`, `pmap` (spawn + fan-in), and `format` width/justification
