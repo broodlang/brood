@@ -286,6 +286,24 @@ apples to oranges), and **`target/ab` reached 24 GB and filled the root filesyst
 then fail with `failed to create directory` inside cargo, which does not say "disk full".
 `make ab-clean` after every A/B session.
 
+### v0.31.0 — cut from a tree whose tip had moved four times while it was being gated
+
+The release commit (`chore(release): v0.31.0`, `1375e47d`) sits under three merges of the
+owner's same-evening pushes, each re-gated (`make test` + the tree-walker differential +
+clippy + prepush + doc-refs) before the tag. What the merges brought and what had to be
+fixed to tag: KI-170's frame (two gates, fixed in `6a9ef2fa` with `nest::direct_load_frame`),
+`gui/texture`'s false non-tail-recursion warning (a docstring'd multi-arity `fn` read as
+one body — `210dff38`, unit-tested), `curated_names` dead under CI's clippy (test-only now),
+a duplicated ADR-374 and KI-171 (renumbered: the fuzzy native pass is ADR-375, the
+spawn-then-monitor race KI-172). CI on the owner's tip `b3f2367b` was red in four jobs for
+exactly these; the tag is on `136b14d7`.
+
+Rig: an rustc ICE in `brood-lsp`'s incremental state took `cargo clean -p brood-lsp`, and the
+partial clean then left `brood`'s lib-test linking against a stale `GLOBAL` symbol —
+`cargo clean -p brood` fixed it and removed **82 GB** of `target/` (every profile). Budget
+~10 minutes of rebuilds after such a clean, and read `df` before assuming a build error is
+a build error.
+
 ### Rig notes that would have cost the next session an hour
 
 - **`perf_event_paranoid` MOVES on this box — read it, never remember it.** This bullet has
