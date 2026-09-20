@@ -11743,6 +11743,23 @@ not resolve to at the same epoch and must fire, so the check stays a check.
 under a lock; without one it must compare against "what was true when I read". And a
 cross-check that goes through the cache it is checking checks nothing.
 
+**Addendum (same day, `2c1e6cf4`).** The fix's second assertion — a mirror at epoch E whose
+entry at E does not fast-link — fired deterministically (4/4) on `jit::type_mixed_join_edges_
+stay_exact`: `code` deopts sixteen times in a row on its int/bool parameter and latches
+`BAILED`, while `work`'s site 0 still mirrors its old native. That is by design
+(`vm_fast_link_clear_site`'s doc: a demotion leaves the mirror, the old native is valid code
+that only deopts — the raw-load hit path never consults `jit_code`), and ADR-372's re-lowering
+(`jit_code` → null, then `QUEUED`) has the same shape for a shared arm's peers. The `None`
+branch now also accepts an entry whose arm has no installed native
+(`Heap::vm_call_ic_entry_native_installed`); the `Some` branch — a live entry disagreeing with
+the mirror — is untouched, so `mirror_check_still_fires_on_a_real_desync` still fires.
+Attribution note for the record: the same bug was diagnosed in parallel in another session
+(bumping the epoch inside `jit_dispatch_fast_frame` reproduced CI's message byte for byte on
+the first run; the first hypothesis, the ADR-372 relower desyncing peers' mirrors, was
+implemented and dropped because a stale mirror and a stale entry AGREE on the old code and so
+can never answer `None`); that fix passed `fl.epoch` down and was dropped at the merge in
+favour of this one, which compares against the entry rather than the mirror.
+
 ## KI-173 — a module the pre-flight check loaded ran without the optimiser's source rewrites ✅ FIXED 2026-09-20
 
 **Symptom.** Two stdlib images of the SAME std, written by two processes, disagreed with the
