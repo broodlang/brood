@@ -321,8 +321,7 @@
 
 (defn- sb-for (sequence)
   "The `scope-bindings` entry for key `sequence` in the high-over-low fixture stack."
-  (seq/find
-    (scope-bindings (list {:layers (list 'layers-test/layer-high 'layers-test/layer-low)}))
+  (seq/find (scope-bindings (list {:layers (list 'layers-test/layer-high 'layers-test/layer-low)}))
     (fn (e) (= (get e :sequence) sequence))))
 
 (describe "scope-bindings keeps the layer a binding came from"

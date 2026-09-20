@@ -1,4 +1,4 @@
-;;; ADR-378 — the small library gaps (ROADMAP "what the other Lisps have" item 9): the
+;;; ADR-379 — the small library gaps (ROADMAP "what the other Lisps have" item 9): the
 ;;; combinators `juxt`/`fnil`/`memoize`, the control forms `condp`/`if-some`/`when-some`,
 ;;; `seq/cycle`, the walkers, `seq/pmap`, and `string/format`'s justification.
 (defmodule library-gaps-test (:use test) (:use math))
@@ -130,7 +130,7 @@
     ;; …and the mailbox is clean: no stray reply is waiting
     (assert= :quiet (receive (_ :stray) (after 100 :quiet)))))
 
-(describe "string/format — widths and justification (ADR-378)"
+(describe "string/format — widths and justification (ADR-379)"
   (test "a width right-aligns any specifier; - left-aligns; 0 zero-fills"
     (assert= "    ab|" (string/format "%6s|" "ab"))
     (assert= "ab    |" (string/format "%-6s|" "ab"))

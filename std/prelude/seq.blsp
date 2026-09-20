@@ -606,7 +606,7 @@ for a higher-order op that wants a fixed answer.
     ((constantly 7) 1 2)   → 7"
   (fn (& _ignored) x))
 
-;; The rest of the combinator family (ADR-378): `juxt`, `fnil`, `memoize`.
+;; The rest of the combinator family (ADR-379): `juxt`, `fnil`, `memoize`.
 (defn juxt (& fns)
   "A function that applies each of `fns` to its arguments and returns the results as a
 vector, in order: `((juxt f g) x)` is `[(f x) (g x)]`. The named form of \"the same
@@ -629,7 +629,7 @@ call: `(update m :n (fnil inc 0))`.
 (defn memoize (f)
   "`f` remembering every answer: the first call with given arguments runs `f`, every later
 call with `=` arguments returns the remembered value. The cache is a [[table]] the returned
-function captures (ADR-378): shared by every process that calls it, keys compared
+function captures (ADR-379): shared by every process that calls it, keys compared
 structurally — so memoize over values (numbers, strings, keywords, maps), never over a pid
 or a closure, which have no structural equality — and each hit hands back a fresh copy of
 the value, as a table read does.

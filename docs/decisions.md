@@ -24398,7 +24398,7 @@ point. `crates/cli/tests/float_through_erased_reads.rs` is the gate. Not done: t
 optimism for `Prim2SlotInt` (an untyped slot against an int literal) — a loop counter
 bound from `(count …)` is exactly that shape and would deopt on every iteration.
 
-## ADR-378 — The small library gaps: `juxt`, `fnil`, `memoize`, `condp`, `if-some`/`when-some`, `seq/cycle`, the walkers, `seq/pmap`, `string/format` justification
+## ADR-379 — The small library gaps: `juxt`, `fnil`, `memoize`, `condp`, `if-some`/`when-some`, `seq/cycle`, the walkers, `seq/pmap`, `string/format` justification
 
 **Status:** accepted (2026-09-20). **ROADMAP "what the other Lisps have" item 9.**
 

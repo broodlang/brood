@@ -429,7 +429,7 @@ can be without exceeding `width`. A single word longer than `width` keeps its ow
 ;;   %x %X a non-negative integer in hex, lower/upper case (`string/number->`)
 ;;   %Nd %Ns %Nf %N.Mf %0Nx … a WIDTH before the specifier, right-aligned, zero-filled with
 ;;         the `0` flag (`%02x` → `0f`, `%8d` → `      42`, `%8.2f` → `    3.14`)
-;;   %-Ns %-Nd … the `-` flag left-aligns in the field (`%-6s|` → `ab    |`) — ADR-378
+;;   %-Ns %-Nd … the `-` flag left-aligns in the field (`%-6s|` → `ab    |`) — ADR-379
 ;; Octal isn't built in — `string/number->` covers it explicitly. Errors on an
 ;; unknown spec or a format string that ends inside one; a missing arg renders
 ;; as `nil` (debuggable), extra args are ignored.
@@ -472,7 +472,7 @@ things in the same image is a name worth spending to fix.
     (= (string/char-at template i) "X")
       (format-loop template (inc i) n (rest args) (str acc (format-hex (first args) true)))
     ;; a width: `%8d`, `%02x`, `%10s`, `%8.2f` — digits (a leading 0 asks for zero fill)
-    ;; then the specifier; `%-10s` left-justifies instead (ADR-378).
+    ;; then the specifier; `%-10s` left-justifies instead (ADR-379).
     (format-digit? (string/char-at template i))
       (format-width template i n args acc (= (string/char-at template i) "0") false 0)
     (= (string/char-at template i) "-") (format-width template (inc i) n args acc false true 0)

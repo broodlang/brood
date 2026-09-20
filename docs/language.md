@@ -1482,7 +1482,7 @@ rejected with a hint naming `match`. With no default, no match raises
 type just as it covers a `match`.
 
 **`condp`** is `cond` with the predicate factored out — `case` compares literals, this
-asks a function (ADR-378). It evaluates the expression once and takes the first clause
+asks a function (ADR-379). It evaluates the expression once and takes the first clause
 whose `(pred expr test)` is truthy — **value first**, the way every data-first Brood
 predicate reads, which is the opposite of Clojure's `(pred test expr)`:
 
@@ -2712,7 +2712,7 @@ In the `math` module: `math/mod`  `math/rem`  `math/quot`  `math/floor`  `math/m
   lazy cons to make it infinite (ADR-111). **`seq/postwalk`/`seq/prewalk`** rebuild a nested
   value bottom-up / top-down through lists, vectors, sets and maps (a map's entries pass
   through `f` as `[k v]` vectors); `prewalk` descends into what `f` produced, `postwalk`
-  does not (ADR-378).
+  does not (ADR-379).
 
 > **The `seq` namespace (ADR-227; renamed from `enum` in ADR-234).** The higher-level,
 > *derived* sequence helpers live in the `seq` module rather than the bare prelude: `dedupe`, `distinct-by`,
@@ -2881,7 +2881,7 @@ kernel primitive), so neither walks nor materialises the entries.
 vector (`((juxt first count) [7 8 9])` is `[7 3]` — the two-field sort key); `fnil`
 patches a `nil` first argument with a default (`(update m :n (fnil inc 0))`); `seq/pmap`
 is `map` with `(f x)` for every item in its own process, results in order, a worker's
-error re-raised in the caller (ADR-378).
+error re-raised in the caller (ADR-379).
 
 **`memoize`** returns `f` remembering every answer. Its cache is a `table` the returned
 function captures — the one mutable structure, and the reason the rest of this list can
@@ -3032,7 +3032,7 @@ another type, so they are **not** string-library ops:
   → `"x = 42, y = 3.14"`. Specifiers: `%s` (any, via `str`), `%d` (number),
   `%f` (float, 6 decimals), `%.Nf` (float, N decimals — uses `->fixed`), `%x`/`%X` (hex),
   `%%` (literal `%`). A width before any of them right-aligns in a field (`%8d`, `%10s`,
-  `%8.2f`), `0` zero-fills (`%02x`), and `-` left-aligns (`%-10s`) — ADR-378:
+  `%8.2f`), `0` zero-fills (`%02x`), and `-` left-aligns (`%-10s`) — ADR-379:
   `(string/format "%-6s|%6.2f|%03d" "ab" 3.14159 7)` → `"ab    |  3.14|007"`.
 - `fmt` is **string interpolation** (a macro): `(fmt "x = {x}, y = {(math/->fixed y 2)}")`
   splices each `{expr}` hole's value between the literal text, lowering to a plain

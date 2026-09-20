@@ -15192,7 +15192,7 @@ against its 1138 ceiling; six one-line examples, each a real session or keymap, 
 back. (Two of the keymap examples are written order-free — a single-binding map, a set —
 because the walk's order is the map's.)
 
-## 2026-09-20 (11) — the small library gaps (ADR-378)
+## 2026-09-20 (11) — the small library gaps (ADR-379)
 
 ROADMAP item 9, built as the design discussion settled it: `memoize` is a `table` the
 returned closure captures — no cell exists, a process would serialise the calls it is

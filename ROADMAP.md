@@ -244,7 +244,7 @@ needs a Brood-specific form to respect an ADR.
   x xs :when p) body)` makes the body the step — both prelude macros over `for`'s one
   expander. Building it found KI-175 (the checker seeded a fold callback's accumulator from
   the fold's result, losing `init`).
-- ✅ **9. Small library gaps** (2026-09-20, ADR-378): `juxt`, `fnil`, `memoize` (a table the
+- ✅ **9. Small library gaps** (2026-09-20, ADR-379): `juxt`, `fnil`, `memoize` (a table the
   closure captures — bind it with `def`), `condp` (value first, data-first like every Brood
   predicate), `if-some`/`when-some`, `seq/cycle` (bounded), `seq/prewalk`/`seq/postwalk`,
   `seq/pmap` (a process per item, replies tagged by `ref`, in order), and `string/format`'s

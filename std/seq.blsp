@@ -444,7 +444,7 @@ contradiction; it is public here, where its callers can reach it.
   (repeatedly-acc n f nil))
 (sig repeatedly (int any -> any))
 
-;; ---- ADR-378: cycle, the walkers, pmap ---------------------------------------
+;; ---- ADR-379: cycle, the walkers, pmap ---------------------------------------
 (defn- cycle-acc (items left n acc)
   (cond
     (<= n 0) (reverse acc)

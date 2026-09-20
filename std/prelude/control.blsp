@@ -291,7 +291,7 @@ The steps after a failure never run, so a pipe does not have to end in `(if (fai
 
 ;; `if-some`/`when-some` — the same shapes testing for PRESENCE (`nil`) rather than truth,
 ;; so a bound `false` takes the then-branch: the binding form for a lookup whose value may
-;; legitimately be `false` (a flag in a config map, a boolean field). ADR-378.
+;; legitimately be `false` (a flag in a config map, a boolean field). ADR-379.
 (defmacro if-some (binding then & else)
   "Bind `(name expr)`; if `expr` is not `nil`, evaluate `then` with `name` bound to it, else `else` (or `nil`). Unlike [[if-let]], a `false` value is PRESENT and takes the then-branch.
 
@@ -312,7 +312,7 @@ The steps after a failure never run, so a pipe does not have to end in `(if (fai
 ;; shape `case` cannot be — `case` compares literals, `condp` asks a predicate: `(condp <
 ;; n 10 :small 100 :medium :large)`, `(condp string/starts-with? line "#" :heading "-"
 ;; :item :text)`. A lone trailing form is the default; with none, no match raises, as
-;; `case` and `match` do. ADR-378.
+;; `case` and `match` do. ADR-379.
 ;; check-allow: deliberately non-tail — expansion-time recursion over the clause list.
 (check-allow :non-tail-recursion
   (defn- %condp-clauses (p e clauses)
