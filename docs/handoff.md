@@ -32,10 +32,16 @@ What landed, each with a sabotage-verified guard:
 
 ### What is left, in order
 
-1. **§7.9 — `row-sum`'s float-slot carve-out** was the third lead and was not started. Its
-   state in `compute-frontier.md` is exact: measurable now (`BROOD_XADMIT` reports what it
-   did), price on icache misses with `nbody`/`reduce`/`pipeline`/`spawn` as the rows to
-   protect.
+1. ~~**§7.9 — `row-sum`'s float-slot carve-out**~~ — **DONE, same day**: measured neutral
+   on every protected row and −4.7% cycles on `mandelbrot` at N=1400; the clause is removed,
+   `BROOD_FLOAT_VETO=1` restores it. See §7.9's closing note.
+1b. **`make tier-audit` is RED and was before this session**: `bench-supervisor/fill`
+   `reason=suspend-latched` on the `supervisor` row — reproduced on the `5fa10170` and
+   `0dc79768` baseline binaries too. `fill` lowers and hosts a parking `receive` (§7.13's
+   shape: `fill` → `start-child` → `gen/call` → `receive`), so it is latched off the native
+   tier after its first park. Not in CI (`make green-all` only). Attributed, not fixed:
+   either `fill` should not lower (its body suspends) or the latch is the right answer and
+   the audit should know a receive-hosting arm from a thrasher.
 2. **`json/emit` and friends still take up to 16 entry deopts per arm** before ADR-372
    re-lowers them — by design (the thrash latch's number). If a row shows an arm flipping
    late, `ENTRY_DEOPT_RELOWER` is the knob; measure before touching it.

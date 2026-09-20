@@ -318,3 +318,23 @@
         ;; At most the sixteen that earned the re-lowering; the 600+ list activations
         ;; after it run the boxed native. (Sabotage: never reset the arm → hundreds.)
         (is (<= (get st :deopts-total) 16))))))
+
+;; --- 6. A float-carrying self-tail loop with a non-tail call lowers (§7.9) ---------------
+
+;; `plan_general_lowering` used to refuse a named self-tail arm with non-tail calls whenever
+;; its profile showed a `Float` param — `mandelbrot`'s `row-sum`, the one arm in the corpus
+;; the clause reached. The premise (its floats arrive boxed from a thrash-latched callee)
+;; ended with KI-109; the clause is gone, and `BROOD_FLOAT_VETO=1` restores it (sabotage:
+;; run this file under it and this test reads `:bailed`).
+(defn ej-scale (x) (* x 1.5))
+(defn ej-float-loop (i y0 acc)
+  (if (>= i 200) acc (ej-float-loop (+ i 1) y0 (+ acc (ej-scale y0)))))
+
+(describe "JIT admits a float-carrying self-tail loop with a non-tail call"
+  (test "the answer is the VM's"
+    (assert= 300.0 (ej-float-loop 0 1.0 0.0)))
+
+  (test "the arm lowers (was: refused as call-mediated-boxed for its float slot)"
+    (when (%native-tier?)
+      (assert= :native
+        (settle ej-float-loop 3 (fn () (times 40 (fn () (ej-float-loop 0 1.0 0.0)))) 40)))))

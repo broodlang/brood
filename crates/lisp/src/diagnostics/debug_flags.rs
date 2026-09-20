@@ -177,6 +177,11 @@ pub const FLAGS: &[DebugFlag] = &[
         "alias for BROOD_TIER=1 — no native tiering, interpret on the VM; rules a JIT-only miscompile in or out",
     ),
     f(
+        "BROOD_FLOAT_VETO",
+        JIT,
+        "restore the pre-2026-09-20 profitability veto on a named self-tail arm with a profiled float slot and non-tail calls (`row-sum`) — the bisect lever",
+    ),
+    f(
         "BROOD_NO_JIT_COMPUTED",
         JIT,
         "bail only arms containing a computed jump — narrower bisect than NO_JIT",

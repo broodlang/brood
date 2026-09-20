@@ -948,18 +948,34 @@ pub(super) mod codegen {
         //
         // The unboxing signals that earn the general lowering:
         //   * a `VectorRef`/`MakeVector` (rules bintree/matmul back in — they lower and win), or
-        //   * a self-tail loop, UNLESS the profile shows a `Float` slot (a recursive `f64`
-        //     accumulator like `newvel`, whose floats still arrive boxed from calls — no win),
-        // so a self-tail loop over *non-float* boxed values (`fold--loop`, hence
-        // `reduce`/`pipeline`) is preserved.
+        //   * a self-tail loop (`fold--loop`, hence `reduce`/`pipeline`; `row-sum`).
+        //
+        // Until 2026-09-20 a self-tail loop was vetoed when the profile showed a `Float` slot
+        // ("a recursive `f64` accumulator like `newvel`, whose floats still arrive boxed from
+        // calls — no win"). That was priced under a runtime where `->float` deopt-thrashed and
+        // every float such a loop received came boxed from the VM (KI-109); lead 1 of KI-109
+        // ended that, and re-measured (`docs/compute-frontier.md` §7.9) the clause vetoed
+        // exactly ONE arm in the benchmark corpus — `mandelbrot`'s `row-sum` — and protected
+        // none: `nbody`'s refused arms fail the self-loop test, not this one. Admitting it:
+        // `mandelbrot` −4.3% instructions / −4.7% cycles at `BENCH_N=1400` (three reps,
+        // ±0.24%), −2.2% wall at the default N; every other row inside its floor. The
+        // per-op icache price the veto's author asked for is +17% of a 2.8M-miss total —
+        // nothing against 4.5G cycles. `BROOD_FLOAT_VETO=1` restores the clause, for a bisect.
         if arm.dbg_name.is_some()
             && non_tail_call_count(code) >= 1
             && !has_inline_vec
-            && (!has_self_loop || has_float_slot)
+            && (!has_self_loop || (has_float_slot && float_veto_enabled()))
         {
             return Err(trace_bail(arm, BailReason::CallMediatedBoxed));
         }
         Ok(())
+    }
+
+    /// `BROOD_FLOAT_VETO=1` restores the pre-2026-09-20 float-slot veto on a named self-tail
+    /// arm with non-tail calls (see the gate above) — the bisect lever, off by default.
+    fn float_veto_enabled() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var_os("BROOD_FLOAT_VETO").is_some())
     }
 
     /// Report a refusal under `BROOD_JIT_BAIL_TRACE=1` and hand it back. One `var_os` behind a

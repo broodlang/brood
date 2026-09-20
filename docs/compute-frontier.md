@@ -1605,7 +1605,22 @@ The same audit's correctness findings are KI-91–97; the mailbox slot-table sca
 the same family as 5) was already fixed with KI-92 (`MsgRoots.free`).
 
 
-### 7.9 `row-sum`'s `call-mediated-boxed` bail — the deciding clause, isolated (2026-09-05, NOT measured)
+### 7.9 `row-sum`'s `call-mediated-boxed` bail — CLOSED 2026-09-20: the float-slot clause is removed
+
+> **Measured and decided 2026-09-20.** The clause was lifted behind a lever and A/B'd
+> against a fixed baseline binary (`make ab --floor`, best-of-7, both images live): every
+> row inside its floor — `mandelbrot` −2.2%, `nbody` −1.1%, `reduce` −4.8%, `pipeline`,
+> `spawn`, `collatz`, `matmul`, `fib`, `json`, `supervisor` 0 to −1%. At `BENCH_N=1400`
+> (`perf stat`, `taskset -c 2`, three reps, ±0.24%): `mandelbrot` **−4.3% instructions,
+> −4.7% cycles, −4.2% wall**; L1-icache misses 2.77M → 3.25M (+17%) against 4.5G cycles —
+> the price this entry asked to be read, and it is nothing. Across the corpus the clause
+> vetoed exactly ONE arm (`row-sum`; `nbody`'s four refusals fail the self-loop test, not
+> this one), so it protected nothing it was written for and cost the one row it reached.
+> Removed rather than narrowed (ADR-011 — a dynamic "are the float callees native"
+> condition would be machinery with no measured case); `BROOD_FLOAT_VETO=1` restores it for
+> a bisect. Guard: `tests/jit_eq_join_test.blsp` §6 (sabotage under the lever: `:bailed`).
+> Lever 3's "arm with an inline variant" question below is moot for `row-sum` — it lowers
+> through the ordinary gate now, inline swap and all. The original entry follows.
 
 KI-109 closed without needing this: `mandelbrot` came back to the 0.19.1 column when lead 1
 stopped `->float` deopt-thrashing. That entry hands this on as an improvement candidate and
