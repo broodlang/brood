@@ -33,9 +33,18 @@ fn a_curated_name_asks_for_no_load() {
         ("math/nan?", "math"),
         ("reflect/read-string", "reflect"),
     ];
+    // Build the image, when the cache holds none for this std, in a THROWAWAY runtime:
+    // `stdimage/build` loads every module into the runtime that runs it, and this test's
+    // precondition is that the probe modules are not loaded in the runtime under test.
+    {
+        let mut builder = Interp::new();
+        builder
+            .eval_str("(or (%std-image-installed) (%std-image-install) (stdimage/build))")
+            .expect("build the stdlib image");
+    }
     let mut interp = Interp::new();
     let installed = interp
-        .eval_str("(or (%std-image-installed) (%std-image-install) (do (stdimage/build) (%std-image-install)))")
+        .eval_str("(or (%std-image-installed) (%std-image-install))")
         .map(|v| interp.print(v))
         .expect("install the stdlib image");
     assert_ne!(

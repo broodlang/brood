@@ -49,9 +49,19 @@ fn a_std_type_variable_declaration_types_the_element_with_its_module_unloaded() 
         eprintln!("BROOD_NO_IMAGE_SIGS set — the footer is off by request, nothing to gate");
         return;
     }
+    // Build the image, when the cache holds none for this std, in a THROWAWAY runtime:
+    // `stdimage/build` loads every module into the runtime that runs it, and this test's
+    // precondition is that `seq` is not loaded in the runtime under test. (First seen the
+    // first run after a `std/` edit moved the image id, 2026-09-20.)
+    {
+        let mut builder = Interp::new();
+        builder
+            .eval_str("(or (%std-image-installed) (%std-image-install) (stdimage/build))")
+            .expect("build the stdlib image");
+    }
     let mut interp = Interp::new();
     let installed = interp
-        .eval_str("(or (%std-image-installed) (%std-image-install) (do (stdimage/build) (%std-image-install)))")
+        .eval_str("(or (%std-image-installed) (%std-image-install))")
         .map(|v| interp.print(v))
         .expect("install the stdlib image");
     assert_ne!(
