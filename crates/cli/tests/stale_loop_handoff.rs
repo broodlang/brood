@@ -73,6 +73,19 @@ fn a_loop_recompiled_after_a_lazy_load_never_parks_its_receives_dirty() {
         .env("BROOD_NO_CRASH_REPORT", "1")
         .env("BROOD_JIT_BAIL_TRACE", "1")
         .env("BROOD_TRACE_COMPILE", "1")
+        // Pin the engine to the shipped ceiling. The property under test is the VM's —
+        // `SelfCall`'s hot-reload guard taking a `ChunkExit::Tail` instead of a nested
+        // `apply_value` — and under `BROOD_VM=0` there is no chunk, no guard and no such
+        // transition, so CI's `differential (tree-walker)` job ran this against an engine it
+        // was never about and read 1 dirty park as a failure (2026-09-20, red on `2c1596c0`).
+        // Ceiling 2 rather than 1 so the DEFAULT configuration is what is exercised; `drive`
+        // stays on the VM there regardless, because its `try` keeps the chunk out of the JIT
+        // subset — which is the same reason the assertion below can attribute a dirty park to
+        // the transition at all. Same fix, and the same reason, as `mapprim3_differential`
+        // and `prelude_image_matches_source`.
+        .env("BROOD_TIER", "2")
+        .env_remove("BROOD_VM")
+        .env_remove("BROOD_NO_JIT")
         .env_remove("BROOD_NO_LAZY_LOAD")
         .arg(&path)
         .output()
