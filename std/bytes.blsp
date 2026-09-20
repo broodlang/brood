@@ -23,12 +23,14 @@
 
     (bytes/slice #b\"abcd\" 1 3)  → #b\"bc\""
   (if (empty? more) (%subbytes b start) (%subbytes b start (first more))))
+(sig slice (bytes int & int -> bytes))
 
 (defn concat (& more)
   "One bytes value joining all arguments, each an iolist (ADR-139): a string (UTF-8), a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those. The in-memory materialiser of the iolist model.
 
     (bytes/concat #b\"a\" #b\"b\") → #b\"ab\""
   (apply %bytes-concat more))
+(sig concat (& any -> bytes))
 
 (defn index-of (haystack needle & more)
   "The first index of the needle bytes within haystack at or after from (default 0), or -1 if absent. The byte-protocol workhorse (locate a \\r\\n\\r\\n, a frame delimiter, …).
@@ -37,6 +39,7 @@
   (if (empty? more)
     (%bytes-index-of haystack needle)
     (%bytes-index-of haystack needle (first more))))
+(sig index-of (bytes bytes & int -> int))
 
 ; `bytes/append` lived here and took a PATH: it appended an iolist to a FILE, which is not a
 ; bytes operation at all — it is `file/spit-bytes`'s append counterpart, and the name also

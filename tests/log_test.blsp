@@ -35,7 +35,11 @@
 
   The capture helpers answer `:timeout | vector`, so `first`/`second` on the result are unchecked. A `:timeout` here means the exchange did not happen, which is worth failing on
   by name rather than reading `nil` out of a keyword."
-  (if (vector? r) r (error "captured: expected a vector, got " r)))
+  ;; `/error`, the prelude's: under `(:use log)` a bare `error` is `log/error`, which LOGS
+  ;; and returns nil — so this helper never failed by name at all, and a `:timeout` read
+  ;; `nil` out of `first` exactly as the docstring says it must not. Found the day
+  ;; `log/error` declared its meta parameter a map (2026-09-20).
+  (if (vector? r) r (/error "captured: expected a vector, got " r)))
 
 (describe "log: delivery and levels"
   :isolated (test "a log call delivers a formatted line to a backend"

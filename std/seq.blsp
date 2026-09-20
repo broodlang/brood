@@ -251,6 +251,7 @@ vector comes FIRST here, unlike the rest of this module — see the note above.
 (defn vector-length (v)
   "The number of elements in vector v."
   (%vector-length v))
+(sig vector-length (vector -> int))
 
 (defn transduce (coll xform rf init)
   "Reduce `coll` with `rf`/`init` through the transducer `xform` — one pass, no
@@ -317,6 +318,7 @@ when the caller needs indexed access. The complement of [[filterv]].
 
     (seq/distinct [1 1 2])     → (1 2)"
   (reverse (nth (fold coll [{} nil] distinct-step) 1)))
+(sig distinct (seqable -> (list any)))
 
 ;; flatten: splice nested lists into one flat list. Descends through `pair?`/`nil` (so
 ;; empty sub-lists and nils vanish); vectors and maps are leaf items. The outer walk is

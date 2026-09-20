@@ -16,10 +16,12 @@
 (defn name ()
   "This runtime's node name (:nonode until node/start)."
   (%node-name))
+(sig name (-> (or symbol keyword)))
 
 (defn list ()
   "A list of currently connected peer node names."
   (%nodes))
+(sig list (-> (list (or symbol keyword))))
 
 (defn disconnect (nm)
   "Tear down the link to peer node `nm` now, without exiting this process — fires [:nodedown nm] on both sides and prunes `nm` from (node/list). Returns true if a link existed, false otherwise. Use it to leave a node/cluster cleanly while staying alive."
@@ -28,6 +30,7 @@
 (defn monitor (nm)
   "Get [:nodedown nm] when the link to node `nm` goes down (heartbeat timeout or close)."
   (%monitor-node nm))
+(sig monitor ((or symbol keyword) -> ref))
 
 (defn demonitor (nm)
   "Cancel this process's node monitor for node `nm` (undo node/monitor); a no-op if none is registered. Returns nil."
