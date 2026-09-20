@@ -476,6 +476,56 @@ pub(super) fn jit_fast_link_cold_outcome(
     }
 }
 
+/// The debug cross-check behind [`jit_dispatch_fast_frame`]: the flat-mirror values the IR
+/// handed us must equal what the authoritative `CallIcEntry` resolves **at the epoch the
+/// mirror was published under** — a mismatch is a mirror desync and a silent-wrong-answer
+/// risk. Fires in the gate (debug assertions), costs nothing in release.
+///
+/// At THAT epoch, not the current one: the IR validated the mirror against the global epoch
+/// with a raw load, and a `def` on another worker can bump the epoch between that load and
+/// this callback (`concurrency_race::fanout_with_concurrent_global_rebind_matches_serial` is
+/// exactly that race). Probing at the new epoch answered `None` for a mirror that was valid
+/// when the IR read it, which fired this assertion once on CI (2026-09-20, `auth=None`). The
+/// release path is unaffected — `jit_run_fast_link` re-validates and falls through on a
+/// move. And the ENTRY, not the probe: `vm_call_ic_fast_link` reads the mirror first, so
+/// probing through it compared the mirror with itself. `tests::mirror_check_tolerates_a_
+/// rebind_between_the_irs_load_and_the_callback` drives it with the race's exact state.
+#[cfg(all(feature = "jit", debug_assertions))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn debug_check_fast_link_mirror(
+    heap: &Heap,
+    site: u32,
+    head: Symbol,
+    argc: usize,
+    nslots: usize,
+    code: usize,
+    callee_env: EnvId,
+    callee_bases: (u32, u32),
+) {
+    let Some(mirror_epoch) = heap.vm_fast_link_epoch(site) else {
+        return; // cleared meanwhile: nothing to compare against
+    };
+    let auth = heap.vm_fast_link_authoritative(site, head, argc as u32, mirror_epoch);
+    match auth {
+        Some((c, ns, e, b)) => debug_assert!(
+            c as usize == code && ns == nslots && e == callee_env && b == callee_bases,
+            "fast-link mirror desynced from the call IC (site {site}, head {head}, epoch {mirror_epoch}): \
+             mirror=(code={code:#x}, nslots={nslots}, env={:#x}, bases={callee_bases:?}) \
+             auth={auth:?} — the IR's epoch+sym+argc guard should make this unreachable \
+             (see FastLink)",
+            callee_env.0
+        ),
+        // No authoritative link at the mirror's epoch: legitimate only when the entry has
+        // moved on (a rebind landed after the IR's raw load) or is gone (a clear).
+        None => debug_assert!(
+            heap.vm_call_ic_entry_epoch(site).is_none_or(|e| e != mirror_epoch),
+            "fast-link mirror at epoch {mirror_epoch} (site {site}, head {head}) has an entry at the \
+             same epoch that does not fast-link: mirror=(code={code:#x}, nslots={nslots}) — a \
+             mirror published for an entry the authoritative rules refuse"
+        ),
+    }
+}
+
 /// The JIT's **in-IR** fast call path (Track B / Technique A). The arm's IR has already
 /// validated this elided call site's flat-table fast-link (`site < len` && `epoch ==
 /// global_epoch` && the slot's `sym`/`argc` match this site's baked head/arity — the last
@@ -513,20 +563,28 @@ pub(crate) fn jit_dispatch_fast_frame(
     }
     let callee_env = EnvId(env);
     // Cross-check (debug only, fires in the gate): the flat-table values the IR handed us
-    // must equal what the authoritative IC fast-link resolves at this epoch — a mismatch is
-    // a mirror desync and a silent-wrong-answer risk.
+    // must equal what the authoritative IC fast-link resolves at the epoch the mirror was
+    // published under — a mismatch is a mirror desync and a silent-wrong-answer risk.
+    //
+    // At THAT epoch, not the one read above: the IR validated the mirror against the
+    // global epoch with a raw load, and a `def` on another worker can bump the epoch
+    // between that load and this callback (`concurrency_race::fanout_with_concurrent_
+    // global_rebind_matches_serial` is exactly that race). Probing at the new epoch then
+    // answers `None` for a mirror that was valid when the IR read it — which fired this
+    // assertion once on CI (2026-09-20) with `auth=None`. The release path is unaffected:
+    // `jit_run_fast_link` re-validates against `epoch` and falls through on a move. A slot
+    // whose mirror was cleared meanwhile has nothing to compare against and stands down.
     #[cfg(debug_assertions)]
-    {
-        let auth = heap.vm_call_ic_fast_link(site, head, argc as u32, epoch);
-        debug_assert!(
-            matches!(auth, Some((c, ns, e, b)) if c as usize == code && ns == nslots && e == callee_env && b == callee_bases),
-            "fast-link mirror desynced from the call IC (site {site}, head {head}): \
-             mirror=(code={code:#x}, nslots={nslots}, env={:#x}, bases={callee_bases:?}) \
-             auth={auth:?} — the IR's epoch+sym+argc guard should make this unreachable \
-             (see FastLink)",
-            callee_env.0
-        );
-    }
+    debug_check_fast_link_mirror(
+        heap,
+        site,
+        head,
+        argc,
+        nslots,
+        code,
+        callee_env,
+        callee_bases,
+    );
     jit_run_fast_link(
         heap,
         argc,
@@ -540,4 +598,138 @@ pub(crate) fn jit_dispatch_fast_frame(
         callee_bases,
         out,
     )
+}
+
+#[cfg(all(test, feature = "jit"))]
+mod tests {
+    use super::*;
+    use crate::core::value;
+
+    /// Tier `caller`/`callee` up until the caller's call site has PUBLISHED a flat mirror
+    /// for `callee`, and hand that slot back with its absolute index. `None` when the pair
+    /// never tiered in the rounds given (the background compiler decides when).
+    fn published_mirror_for(
+        interp: &mut crate::Interp,
+        callee: value::Symbol,
+    ) -> Option<(usize, crate::core::heap::FastLink)> {
+        for _ in 0..60 {
+            interp.eval_str("(caller 20000 0)").expect("run the pair");
+            if let Some(hit) = interp
+                .heap
+                .vm_fast_links_published()
+                .into_iter()
+                .find(|(_, fl)| fl.sym == callee)
+            {
+                return Some(hit);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn mirror_check_tolerates_a_rebind_between_the_irs_load_and_the_callback() {
+        // The race `concurrency_race::fanout_with_concurrent_global_rebind_matches_serial`
+        // hit once on CI (2026-09-20), rebuilt deterministically: a mirror published at epoch
+        // E (the IR's raw load validated it), a `def` of the callee bumps the epoch, and THEN
+        // the callback's cross-check runs with the values the IR already holds. It must not
+        // fire — the mirror was valid when read, and the release path re-validates and
+        // falls through. Probing at the CURRENT epoch (the shape before the fix) answers
+        // `None` and fired it: sabotage by passing `heap.global_epoch()` to
+        // `vm_fast_link_authoritative` in `debug_check_fast_link_mirror` and this reds.
+        if std::env::var_os("BROOD_NO_JIT").is_some()
+            || std::env::var("BROOD_TIER").is_ok_and(|t| t != "2")
+        {
+            eprintln!("JIT off by request — nothing to gate");
+            return;
+        }
+        let mut interp = crate::Interp::new();
+        interp
+            .eval_str(
+                "(do (defn callee (x) (+ x 1)) \
+                     (defn caller (n acc) (if (= n 0) acc (caller (- n 1) (callee acc)))))",
+            )
+            .expect("define the pair");
+        let callee = value::intern("callee");
+        let Some((abs, mirror)) = published_mirror_for(&mut interp, callee) else {
+            eprintln!("the pair never fast-linked in 60 rounds — the compiler thread was slow; nothing to gate");
+            return;
+        };
+        let epoch_before = interp.heap.global_epoch();
+        assert_eq!(
+            mirror.epoch, epoch_before,
+            "the mirror is at the current epoch before the rebind"
+        );
+        // The race's second half: a rebind lands after the IR's raw load.
+        interp
+            .eval_str("(def callee (fn (x) (+ x 2)))")
+            .expect("rebind the callee");
+        assert!(
+            interp.heap.global_epoch() > epoch_before,
+            "the rebind did not move the epoch — the state under test is not the race's"
+        );
+        // Address the slot the way the IR does: site-relative to the current IC base.
+        let old_bases = interp
+            .heap
+            .set_ic_bases((abs as u32, interp.heap.ic_bases().1));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            debug_check_fast_link_mirror(
+                &interp.heap,
+                0,
+                callee,
+                mirror.argc as usize,
+                mirror.nslots as usize,
+                mirror.code as usize,
+                EnvId(mirror.env),
+                (mirror.callee_ic_base, mirror.callee_gic_base),
+            );
+        }));
+        interp.heap.set_ic_bases(old_bases);
+        assert!(
+            outcome.is_ok(),
+            "the cross-check fired on a mirror that was valid when the IR read it — a rebind between \
+             the IR's epoch load and the callback is not a desync"
+        );
+    }
+
+    #[test]
+    fn mirror_check_still_fires_on_a_real_desync() {
+        // The check must remain a check: a mirror whose values disagree with the entry at the
+        // SAME epoch is the silent-wrong-answer case it exists for.
+        if std::env::var_os("BROOD_NO_JIT").is_some()
+            || std::env::var("BROOD_TIER").is_ok_and(|t| t != "2")
+        {
+            return;
+        }
+        let mut interp = crate::Interp::new();
+        interp
+            .eval_str(
+                "(do (defn callee (x) (+ x 1)) \
+                     (defn caller (n acc) (if (= n 0) acc (caller (- n 1) (callee acc)))))",
+            )
+            .expect("define the pair");
+        let callee = value::intern("callee");
+        let Some((abs, mirror)) = published_mirror_for(&mut interp, callee) else {
+            return;
+        };
+        let old_bases = interp
+            .heap
+            .set_ic_bases((abs as u32, interp.heap.ic_bases().1));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            debug_check_fast_link_mirror(
+                &interp.heap,
+                0,
+                callee,
+                mirror.argc as usize,
+                mirror.nslots as usize + 1, // a frame size the entry does not resolve to
+                mirror.code as usize,
+                EnvId(mirror.env),
+                (mirror.callee_ic_base, mirror.callee_gic_base),
+            );
+        }));
+        interp.heap.set_ic_bases(old_bases);
+        assert!(
+            outcome.is_err(),
+            "a mirror disagreeing with its entry at the same epoch must fire"
+        );
+    }
 }

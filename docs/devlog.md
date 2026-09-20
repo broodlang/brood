@@ -15107,3 +15107,26 @@ features into the lean runtime (it hardcoded `gui`, so a released game drew noth
 `steps`→`ticks` (a game's own `step` stays bare), `b2d-sheet/load`. Two wrong test
 expectations of mine caught by the code (a wall count, a zoom): the tests were right to
 exist either way.
+
+## 2026-09-20 (8) — KI-174: the fast-frame cross-check raced the rebind it was guarding against
+
+Green-first, before `reduced`: CI on `b63401d7` (two `seq.blsp` declarations) reddened `test`
+on one case, `concurrency_race::fanout_with_concurrent_global_rebind_matches_serial` — a
+`debug_assert!` in `jit_dispatch_fast_frame`, `fast-link mirror desynced … auth=None`, inside
+a non-unwinding frame, so SIGABRT. Twelve local runs passed; the runner's two cores
+interleave differently.
+
+The mechanism is fine; the CHECK raced. JIT'd code validates a call site's flat mirror against
+the global epoch with a raw load; the callback re-read the epoch and asked the IC at the new
+one, and this test's whole business is `def`ing a global from other workers while a fan-out
+runs — a bump between the two reads makes a valid mirror look desynced. Worse, the check
+probed through `vm_call_ic_fast_link`, which reads the mirror first: it compared the mirror
+with itself and only reached the authoritative entry when the epoch had moved, i.e. exactly
+when comparing was wrong. Now it compares against the fat `CallIcEntry` (the authoritative
+half factored out of the probe, publishing nothing) at the mirror's OWN epoch, and a `None`
+there is legitimate only when the entry has moved on. Two unit tests rebuild the race's state
+without the race — tier a pair, `def` the callee, run the check — one that must stay quiet
+(reds under the old shape) and one that must still fire.
+
+`make check-cost`-class lesson, restated for guards: compare against what was true when you
+read, not what is true now, unless you hold the lock.
