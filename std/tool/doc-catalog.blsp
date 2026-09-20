@@ -669,6 +669,28 @@
    "fuzzy/top" :strings
    "fuzzy/filter" :strings
    "*fuzzy-scorer*" :strings
+   "fuzzy/rank-async" :strings
+   "fuzzy/ranker" :strings
+   "fuzzy/ranker-candidates" :strings
+   "fuzzy/ranker-stop" :strings
+   ;; ADR-376/377/378 (2026-09-20): early-terminating transduce, `for`'s `:into`, and the
+   ;; small library gaps.
+   "seq/reduced" :collections
+   "seq/reduced?" :collections
+   "seq/%reduced" :collections
+   "seq/%reduced-value" :collections
+   "seq/xtake-while" :collections
+   "seq/cycle" :collections
+   "seq/pmap" :collections
+   "seq/prewalk" :collections
+   "seq/postwalk" :collections
+   "fold-for" :control
+   "condp" :control
+   "if-some" :control
+   "when-some" :control
+   "juxt" :functions
+   "fnil" :functions
+   "memoize" :functions
    "then" :control})
 
 (defn category-of (function-name)
