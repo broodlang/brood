@@ -217,10 +217,13 @@ chars) happens out here, once.
 ;; have silently left every ranking on the slow path. A keyword compares exactly.
 ;; `scorer-in-force` is what reads it; nothing else should.
 
-(defn- scorer-in-force ()
-  "The scorer to rank with: whatever `*fuzzy-scorer*` is bound to, or `scorer` when that is
+;; check-allow: the dynvar's value is whatever a caller bound — the checker cannot see that
+;; it is a scorer, and the declaration is the author saying so (strict: trusted, not verified).
+(check-allow :trusted
+  (defn- scorer-in-force ()
+    "The scorer to rank with: whatever `*fuzzy-scorer*` is bound to, or `scorer` when that is
 still `:default`. The one place the sentinel is resolved."
-  (let (s *fuzzy-scorer*) (if (= s :default) scorer s)))
+    (let (s *fuzzy-scorer*) (if (= s :default) scorer s))))
 (sig scorer-in-force (-> fn))
 
 ;; ---- ranking a whole set ----------------------------------------------------
