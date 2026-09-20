@@ -115,6 +115,9 @@ fn op_band(op: &Op, dy: isize, oy: usize, ch: usize) -> Option<(isize, isize)> {
     match op {
         Op::Clear => Some((isize::MIN, isize::MAX)),
         Op::CursorZone { .. } => None,
+        // Pixel-space ops are GPU-only; the CPU painter never paints them, so they have
+        // no band to re-rasterise.
+        Op::Sprite { .. } | Op::Quad { .. } => None,
         Op::Text { row, face, .. } => band(cell_top(*row), px_h(face.scale.max(1) as usize)),
         Op::Cursor { row, .. } => band(cell_top(*row), ch_i),
         Op::Rect { row, h, .. } => band(cell_top(*row), px_h(*h as usize)),
@@ -1017,6 +1020,9 @@ pub(super) fn render_ops(
             // Not painted — a cursor zone is hover metadata, hit-tested on
             // pointer-move in the window event handler (ADR-080).
             Op::CursorZone { .. } => {}
+            // GPU-only (a textured / rotated quad needs the GPU target); skipped here
+            // like a `VSpans` is skipped by the terminal.
+            Op::Sprite { .. } | Op::Quad { .. } => {}
             Op::VSpans { row0, col0, cols } => {
                 let top0 = oy + *row0 as usize * ch;
                 for (i, segs) in cols.iter().enumerate() {

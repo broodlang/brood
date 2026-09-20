@@ -12,6 +12,38 @@ sysctl that moves under you — that file's last section has the one-line check)
 questions are answerable here; check that file's "what this box CAN answer" before deferring
 anything.
 
+## 2026-09-20 night — pixel space on the display seam, the GPU target on wgpu, and `b2d` (ADR-374)
+
+**What landed.** `host/gui/gpu.rs` is now wgpu 30 (was glow/glutin GLES 3.0, which macOS
+cannot provide): op-order batching, a glyph atlas, the renderer's grid origin, a non-sRGB
+swapchain, and `BROOD_GUI_DUMP` readback. Two new ops, `[:quad x y w h color rot]` and
+`[:sprite tex x y w h uv tint rot]`, drawn only there; `%gui-texture` / `%gui-texture-free`
+/ `%gui-size-px`; `{:input :pixels}` and `{:vsync true}` on `gui/open`. Brood policy in
+`std/gui.blsp`: `gui/texture` (allocates the handle, records the size), `gui/sprite`
+(`:src` + flips → UV), `gui/line` (a rotated quad). The engine is the separate, private
+`broodlang/b2d` (`~/src/broodlang/b2d`): loop, input, sheets, animation, camera,
+collision, a demo. `wasm-bindgen` pin 0.2.100 → 0.2.128 (wgpu's lockfile floor).
+
+**How to look at it.** A `gui-gpu` runtime lives in `target/gpu/release-fast/{brood,nest}`
+(its own target dir — `make ab`'s binary is untouched); `./configure --with-gui-gpu &&
+make install` is the real thing. `BROOD_GUI_GPU=1 BROOD_GUI_DUMP=/tmp/f.ppm nest run
+--for 2s` in `b2d`, then `ffmpeg -i /tmp/f.ppm f.png` — GNOME refuses screenshots to an
+unprivileged process, the readback is the way.
+
+**Traps.** The GPU target is still runtime-gated (`BROOD_GUI_GPU=1`) even when built in;
+`bedit` and `pong` run on the CPU target unless it is set. Vector patterns in `match` are
+fixed-length — a `[:mouse …]` message is 6 or 7 long, dispatch on `(first m)`. `/` is
+exact: the frame parser now reads a ratio as a float, but the Brood side should `->float`
+its geometry. The pixel-input mode is exercised by `b2d`'s demo, not by a test — a real
+pointer is needed.
+
+**Open, in order.** (1) Drop the `BROOD_GUI_GPU` runtime gate once the GPU target draws
+what the CPU one does (cursor, zones, regions, rounded corners) — then `--with-gui-gpu`
+alone selects it. (2) A pixel-space text op, or leave HUD text to the cell grid. (3) The
+frontend as its own process over the ADR-090 link (the ops already reference no in-process
+memory). (4) Windows: nine Unix-bound files, no CI job — a separate track the user wants
+later. (5) wasm: the GUI thread's single-threaded variant for the playground.
+
 ## 2026-09-20 evening — KI-170: a directly loaded module could be "loaded" with nothing bound
 
 The KI-119/KI-120 end state — `[refer] (:use set) imported NOTHING … *features* lists it:

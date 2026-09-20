@@ -55,13 +55,17 @@ gui = ["dep:winit", "dep:softbuffer", "dep:cosmic-text", "dep:swash", "clipboard
 # builds that want it. Without it `audio-beep` is a graceful no-op. A dedicated
 # audio thread owns the device (rodio's stream is !Send), fed over a channel.
 audio = ["dep:rodio"]
-# GPU rendering for the GUI window (OpenGL via glutin + glow), behind its OWN feature
-# so the default `gui` build stays on the CPU softbuffer path, byte-for-byte unchanged.
-# When on, it REPLACES softbuffer: instanced GPU quads for the cell/rect ops + an
-# immediate (non-vsync) swapchain — the win for high-cell-count sims (Game of Life),
-# where the CPU full-framebuffer present is the bottleneck. Text shaping (cosmic-text)
-# is unchanged; glyphs upload to a GL texture atlas (later increment).
-gui-gpu = ["gui", "dep:glow", "dep:glutin", "dep:raw-window-handle"]
+# GPU rendering for the GUI window (wgpu: Vulkan / Metal / DX12 / WebGPU), behind its
+# OWN feature so the default `gui` build stays on the CPU softbuffer path, byte-for-byte
+# unchanged. Built in AND opted in (`BROOD_GUI_GPU=1`), it replaces softbuffer as the
+# window's render target: every solid-fill op becomes an instanced quad, glyphs and
+# textures are textured quads, and the swapchain presents without vsync. Text shaping
+# (cosmic-text) is unchanged. wgpu rather than OpenGL because the runtime is meant to
+# run on Windows and macOS too: the GLES 3.0 context the first prototype requested
+# does not exist on macOS (CGL is desktop-GL only, and deprecated) and needs ANGLE on
+# Windows, while wgpu picks the native API per platform behind one code path — and is
+# the same API the in-browser playground would draw with (WebGPU).
+gui-gpu = ["gui", "dep:wgpu", "dep:pollster", "dep:raw-window-handle"]
 # OS clipboard access (the `clipboard-get` / `clipboard-set!` builtins), via `arboard`.
 # Pulled in by `gui` (a windowed editor wants copy/paste with other apps), but its own
 # feature so it can be enabled alone. Without it the builtins are graceful no-ops
@@ -281,12 +285,17 @@ softbuffer = { version = "0.4", optional = true }
 # default-features off drops the format decoders (symphonia/flac/mp3/…); we keep
 # only `playback` (the cpal output path) — all we need to play synthesised tones.
 rodio = { version = "0.22", optional = true, default-features = false, features = ["playback"] }
-# Optional GPU backend (the `gui-gpu` feature). glutin creates a GL context on the
-# existing winit window via raw-window-handle 0.6 directly (the same rwh line winit
-# 0.30 speaks), and glow is the thin GL function loader. No vsync coupling: the
-# surface is set to an immediate swap interval. CPU `gui` builds link none of these.
-glow = { version = "0.17", optional = true }
-glutin = { version = "0.32", optional = true }
+# Optional GPU backend (the `gui-gpu` feature). wgpu creates its surface on the existing
+# winit window through raw-window-handle 0.6 directly — the same rwh line winit 0.30
+# speaks — so nothing in the window layer changes when the render target does. `pollster`
+# blocks on wgpu's two async setup calls (adapter + device) on the GUI thread; there is
+# no executor to hand them to and nothing else to do until the device exists. `wgsl`
+# only — `default-features = false` drops the SPIR-V/GLSL front-ends and the `wgsl`
+# feature re-adds the one shader language the shaders here are written in. COUPLING: a
+# wgpu major that moves off raw-window-handle 0.6 must move with winit (see the winit
+# note above). CPU `gui` builds link none of these.
+wgpu = { version = "30", optional = true, default-features = false, features = ["wgsl", "std", "dx12", "metal", "vulkan"] }
+pollster = { version = "0.4", optional = true }
 raw-window-handle = { version = "0.6", optional = true }
 # OS clipboard (text only). `default-features = false` drops the `image-data` default
 # (no `image` crate pulled in); `wayland-data-control` adds Wayland support alongside the

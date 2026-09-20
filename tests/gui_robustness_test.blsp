@@ -108,3 +108,49 @@
       ;; raising at all, which is the same verdict this test wants — the size check did not
       ;; reject a buffer that matches. Guarding it also keeps `includes?` off a keyword.
       (is (or (= msg :no-error) (not (includes? msg "w*h*4")))))))
+
+;;
+;; --- %gui-draw: the pixel-space ops --------------------------------------------
+;;
+
+(describe "%gui-draw: :quad and :sprite parse under hostile arguments"
+  ;; Both ops read their numbers leniently (a non-number is 0, like :frect) and a
+  ;; colour that is not one is the op skipped — the forward-compatibility rule, never
+  ;; a panic. The backend then declines (no such window), which is the error caught.
+  (test "a :quad with garbage numbers and colour is skipped, not a panic"
+    (assert-error (%gui-draw 999999 [[:quad "x" nil :k [] 42]])))
+
+  (test "a :quad rotation of NaN-ish text is read as 0"
+    (assert-error (%gui-draw 999999 [[:quad 0 0 1 1 :red "spin"]])))
+
+  (test "a :sprite whose handle is not an int is skipped"
+    (assert-error (%gui-draw 999999 [[:sprite "tex" 0 0 1 1]])))
+
+  (test "a :sprite handle past u32 is skipped, not a truncated cast"
+    (assert-error (%gui-draw 999999 [[:sprite 4294967296 0 0 1 1]])))
+
+  (test "a :sprite uv of the wrong length means the whole texture"
+    (assert-error (%gui-draw 999999 [[:sprite 1 0 0 1 1 [0 0 1]]])))
+
+  (test "ratio coordinates parse (/ is exact in Brood)"
+    (assert-error (%gui-draw 999999 [[:quad (/ 1 2) (/ 3 4) 10 10 :red]]))))
+
+(describe "%gui-texture: the size is validated against the bytes"
+  (test "a byte count that is not w*h*4 is a clean error"
+    (let (msg (try (%gui-texture 999999 1 [1 2 3] 1 1) :no-error (catch e (error-message e))))
+      (is (includes? msg "bytes of rgba"))))
+
+  (test "dimensions whose product overflows do not wrap into a false match"
+    (let (msg (try
+                (%gui-texture 999999 1 [0 0 0 0] 4294967295 4294967295)
+                :no-error (catch e (error-message e))))
+      (is (includes? msg "bytes of rgba"))))
+
+  (test "a negative handle is a clean error"
+    (assert-error (%gui-texture 999999 -1 [1 2 3 4] 1 1)))
+
+  (test "a bytes value is accepted as the rgba"
+    (let (msg (try
+                (%gui-texture 999999 1 (bytes 1 2 3 4) 1 1)
+                :no-error (catch e (error-message e))))
+      (is (or (= msg :no-error) (not (includes? msg "bytes of rgba")))))))

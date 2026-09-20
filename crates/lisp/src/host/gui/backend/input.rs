@@ -111,6 +111,16 @@ pub(super) fn resize_message(cols: u16, rows: u16) -> Message {
     ])
 }
 
+/// The `[:resize w h]` a PIXEL-input window gets: the same shape as `resize_message`,
+/// in physical pixels — the unit every other message of that window uses.
+pub(super) fn resize_message_px(w: u32, h: u32) -> Message {
+    Message::Vector(vec![
+        Message::Keyword(value::intern("resize")),
+        Message::Int(w as i64),
+        Message::Int(h as i64),
+    ])
+}
+
 /// Deliver a scroll event to a window's subscriber. `dy > 0` is scroll-up, `dy < 0` is
 /// scroll-down. Modifiers come from the window's current modifier state. Used both for
 /// live gesture events and the kinetic-momentum synthetic events fired after gesture end.

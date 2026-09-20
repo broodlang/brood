@@ -49,6 +49,18 @@ pub fn fullscreen(_id: u64, _on: bool) -> Result<(), String> {
 pub fn size(_id: u64) -> Result<(u16, u16), String> {
     Err(NOT_COMPILED.into())
 }
+pub fn size_px(_id: u64) -> Result<(u32, u32), String> {
+    Err(NOT_COMPILED.into())
+}
+pub fn texture(_id: u64, _tex: u32, _rgba: Vec<u8>, _w: u32, _h: u32) -> Result<(), String> {
+    Err(NOT_COMPILED.into())
+}
+pub fn texture_free(_id: u64, _tex: u32) -> Result<(), String> {
+    Err(NOT_COMPILED.into())
+}
+pub fn next_texture_id() -> u32 {
+    0
+}
 pub fn cell_size(_id: u64, _px: Option<f32>) -> Result<(u16, u16), String> {
     Err(NOT_COMPILED.into())
 }

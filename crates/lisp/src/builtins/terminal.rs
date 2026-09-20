@@ -205,6 +205,27 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "Window id's size as [cols rows] in character cells (tracks resize / HiDPI), same shape as term-size.",
         gui_size);
     primitives.def(
+        "%gui-size-px",
+        Arity::exact(1),
+        Sig::new(vec![int], vec_ty),
+        &["id"],
+        "Window id's inner size as [w h] in PHYSICAL pixels (tracks resize / HiDPI) — the frame a pixel-space app (`:sprite` / `:quad` ops, `{:input :pixels}`) lays itself out in, where gui-size is the cell grid.",
+        gui_size_px);
+    primitives.def(
+        "%gui-texture",
+        Arity::exact(5),
+        Sig::new(vec![int, int, Ty::of_tags(&[Tag::Bytes, Tag::Vector]), int, int], nil_ty),
+        &["id", "tex", "rgba", "w", "h"],
+        "Upload rgba — w*h*4 bytes (a bytes value or a vector of 0-255 ints), row-major, straight alpha — as texture tex of window id, for its [:sprite …] ops. The handle tex is the caller's (gui/texture allocates it), so a sheet's size can be kept beside it; re-uploading under a live handle replaces the texture. Errors when the byte count is not w*h*4 or tex is negative; a silent no-op headless or on the CPU render target, which has no sprite arm. Returns nil.",
+        gui_texture);
+    primitives.def(
+        "%gui-texture-free",
+        Arity::exact(2),
+        Sig::new(vec![int, int], nil_ty),
+        &["id", "tex"],
+        "Release texture tex of window id; a later [:sprite …] naming it draws nothing. Idempotent. Returns nil.",
+        gui_texture_free);
+    primitives.def(
         "%gui-cell-size",
         Arity::range(1, 2),
         Sig::with_optional(vec![int], vec![Ty::of_tags(&[Tag::Int, Tag::Float])], vec_ty),

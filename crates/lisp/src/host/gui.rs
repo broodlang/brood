@@ -95,6 +95,20 @@ pub struct WindowSpec {
     /// cannot hand the compositor pixels at all, so on Wayland *this* is the icon
     /// mechanism and `gui-icon!` does nothing.
     pub app_id: Option<String>,
+    /// True when the window delivers its mouse input in PIXELS rather than cells (the
+    /// `{:input :pixels}` open option): a `[:mouse action button y x mods …]` message
+    /// carries the pointer's physical pixel position in the row/col slots, `:move` and
+    /// `:drag` fire on every pixel of motion (not once per cell crossed), and `[:resize
+    /// w h]` reports the window's pixel size. The shape of every message is unchanged, so
+    /// `ui-run` and the key dispatch do not care; only the numbers' unit does. What a
+    /// game drawing with the pixel-space ops (`:sprite`, `:px-rect`, `:line`) needs — a
+    /// cell is the wrong grain for a sprite under the pointer.
+    pub pixel_input: bool,
+    /// True to present in step with the monitor refresh (the `{:vsync true}` open
+    /// option). Only the GPU render target honours it: the CPU path presents
+    /// synchronously whatever this says. Off by default, as the GPU path always was —
+    /// a sim measuring its own frame rate wants the work-bound rate.
+    pub vsync: bool,
 }
 
 impl Default for WindowSpec {
@@ -106,6 +120,8 @@ impl Default for WindowSpec {
             size: None,
             decorations: true,
             app_id: None,
+            pixel_input: false,
+            vsync: false,
         }
     }
 }
@@ -283,6 +299,41 @@ pub enum Op {
         px: f32,
         ops: Vec<Op>,
     },
+    /// A textured quad in PIXEL space — the sprite mechanism. Texture `tex` (a handle
+    /// `gui-texture` uploaded under) is drawn with its top-left at `(x, y)` physical
+    /// pixels from the window's corner, `w`×`h` pixels large, sampling the texture-space
+    /// rect `uv` (`[u0 v0 du dv]`, 0..1; a negative extent mirrors), multiplied by `tint`
+    /// (straight rgba; opaque white leaves the texel as is) and turned `rot` radians about
+    /// its centre. Deliberately the bare quad: which part of a sprite sheet a frame is,
+    /// a flip, an animation are Brood policy over this (`gui/sprite` and the engine
+    /// above it) — the renderer only needs a rect, a UV rect, a tint and an angle.
+    /// Pixel space, not cells, because a sprite lives at a sub-cell position and moves
+    /// by pixels. Consecutive sprites from one texture are one draw, so the Brood side
+    /// is O(sprites) and the per-pixel work is native, the `VSpans` rule. GPU-only: the
+    /// terminal and the CPU painter skip it (like `FRect`'s alpha).
+    Sprite {
+        tex: u32,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        uv: [f32; 4],
+        tint: [u8; 4],
+        rot: f32,
+    },
+    /// A solid quad in PIXEL space: `w`×`h` pixels at `(x, y)`, filled with `color`
+    /// (straight rgba, so `[r g b 128]` is a half-transparent overlay) and turned `rot`
+    /// radians about its centre. The pixel-space sibling of `Rect`, and the one solid
+    /// primitive a game needs: a line is a thin quad at an angle (`gui/line`, Brood), a
+    /// health bar two of them. GPU-only.
+    Quad {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        color: [u8; 4],
+        rot: f32,
+    },
 }
 
 /// A keystroke, in a backend-neutral shape the Brood side turns into the same
@@ -426,18 +477,18 @@ mod disabled;
 pub(crate) mod backend;
 
 #[cfg(feature = "gui-gpu")]
-pub(crate) mod gpu; // the experimental OpenGL render path behind `BROOD_GUI_GPU=1`
+pub(crate) mod gpu; // the wgpu render target behind `BROOD_GUI_GPU=1`
 
 #[cfg(not(feature = "gui"))]
 pub use disabled::{
     bg, cell_size, close, drag_move, drag_resize, draw, focus, font, fullscreen, grab, held_key,
-    host_main_thread, icon, inset, line_height, maximize, minimize, open, register_family, size,
-    text_aa, text_contrast, title, TextAa,
+    host_main_thread, icon, inset, line_height, maximize, minimize, next_texture_id, open,
+    register_family, size, size_px, text_aa, text_contrast, texture, texture_free, title, TextAa,
 };
 
 #[cfg(feature = "gui")]
 pub use backend::{
     bg, cell_size, close, drag_move, drag_resize, draw, focus, font, fullscreen, grab, held_key,
-    host_main_thread, icon, inset, line_height, maximize, minimize, open, register_family, size,
-    text_aa, text_contrast, title, TextAa,
+    host_main_thread, icon, inset, line_height, maximize, minimize, next_texture_id, open,
+    register_family, size, size_px, text_aa, text_contrast, texture, texture_free, title, TextAa,
 };

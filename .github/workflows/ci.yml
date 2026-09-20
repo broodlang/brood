@@ -118,7 +118,7 @@ jobs:
       # advance the logical clock hangs. A hang is reported as its own verdict, because that
       # is this scheduler's signature failure and a bare non-zero exit would hide it.
       - name: wasm-bindgen CLI (pinned to the crate version in crates/playground)
-        run: cargo install wasm-bindgen-cli --version 0.2.100 --locked
+        run: cargo install wasm-bindgen-cli --version 0.2.128 --locked
       - name: wasm32 behavioural suite (the cooperative scheduler actually runs)
         run: ./scripts/wasm-suite.sh
 
