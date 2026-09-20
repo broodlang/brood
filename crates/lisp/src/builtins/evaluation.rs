@@ -362,6 +362,30 @@ pub(super) fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     // stack via `root_at` rather than the stale `forms` Vec. (Living in `load`,
     // the core, means every entry path — `brood`, `nest`, MCP `eval`, the future
     // editor — inherits the bound for free.)
+    // **A direct load of a MODULE file gets the frame a required one has (KI-170).**
+    // `defmodule` `provide`s the file's feature key at the TOP of the file when no `require`
+    // is driving the load (`%defmodule-provide`) — before a single definition exists. Outside
+    // a load frame those writes land in the live table one at a time, journalled by nobody,
+    // so a globals snapshot taken in that window records the module as **loaded with nothing
+    // bound**, and the `%isolate` restore that follows makes it permanent: the provide was in
+    // the saved table, the definitions came after it and nothing replays them (ADR-339), and
+    // `require-one` short-circuits on `*features*` so the module is never repaired. Every
+    // later `(:use m)` then imports nothing and each bare use dies `unbound symbol` in some
+    // other process — the shape `[refer] … imported NOTHING` reports, and the end state
+    // KI-119/KI-120 both landed in.
+    //
+    // A frame gives the file the contract `require-one` already provides: everything the
+    // module defines and registers publishes in ONE write (ADR-344), so no snapshot can fall
+    // between the provide and the definitions, and the whole batch is journalled, so a
+    // concurrent restore replays it rather than discarding it. Only for a file that declares
+    // a module: a plain script has no feature key, nothing to be half-published, and staging
+    // its defs would change when another process can see them.
+    let module_load = forms
+        .first()
+        .is_some_and(|(f, _)| crate::eval::macros::defmodule_form_name(heap, *f).is_some());
+    if module_load {
+        heap.enter_journalled_load();
+    }
     let mut result = Ok(Value::nil());
     let base = heap.roots_len();
     for (form, _) in &forms {
@@ -383,6 +407,16 @@ pub(super) fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
             .map_err(|e| e.or_pos(pos).or_file(path.clone()));
         if result.is_err() {
             break;
+        }
+    }
+    if module_load {
+        // ADR-344's two exits: a completed module publishes whole, a throwing one leaves no
+        // half-module behind — and either way the frame is released, since a leaked one would
+        // stage the CALLER's later defs as if they were this module's.
+        if result.is_ok() {
+            heap.publish_module_load();
+        } else {
+            heap.discard_module_load();
         }
     }
     heap.truncate_roots(base);

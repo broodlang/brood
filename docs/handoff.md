@@ -7,10 +7,44 @@ option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 
 **Perf work needing a quiet, pinned box is queued in [`perf-handoff.md`](perf-handoff.md)**
 — but a *within-session* `make ab --floor` on this laptop is trustworthy (that file says
-how), and `callgrind` instruction counts are deterministic and load-immune (`perf` is
-locked down here — that file's last section carries the measured state and the one-line
-check), so most perf questions are answerable here; check that file's "what this box CAN
-answer" before deferring anything.
+how), and `callgrind` instruction counts are deterministic and load-immune (`perf` needs a
+sysctl that moves under you — that file's last section has the one-line check), so most perf
+questions are answerable here; check that file's "what this box CAN answer" before deferring
+anything.
+
+## 2026-09-20 evening — KI-170: a directly loaded module could be "loaded" with nothing bound
+
+The KI-119/KI-120 end state — `[refer] (:use set) imported NOTHING … *features* lists it:
+true`, a spawned child dying `unbound symbol: set` — showed a third time, on a tree carrying
+both fixes (one loaded suite run; `sexp` and `sse` in the same shape). Third mechanism, and
+the simplest: a module file reached by a **direct** `reflect/load` (every test file the
+runner loads, every `load` from a tool or a REPL) has `defmodule` `provide` its key at the TOP
+of the file, and the load ran in neither the ADR-344 staging frame nor the ADR-339 journal.
+An `%isolate` snapshot taken between the provide and the definitions records "loaded, nothing
+bound"; the restore keeps the provide (it was in the saved table) and drops the definitions
+(nothing journalled them); `require-one` short-circuits on `*features*`, so the one path that
+could repair the module is exactly the one that declines to. Permanent for the runtime's life,
+and the death lands in whichever process reaches a bare use, far from the cause.
+
+`require-one` had been hardened against this window three times (ADR-339, ADR-344, KI-134),
+and each time the direct load kept "the immediate provide it always had", documented in the
+code as the harmless case because no *requirer* was in flight to race it. The racer was never
+a requirer: `%isolate`'s snapshot races every unjournalled write in the runtime. **Two load
+paths, one contract** — `load` now wraps a `defmodule` file in the frame `require-one` uses
+(one publish, journalled; a throw discards the frame; a plain script is untouched since it
+has no key to half-publish). Guard `crates/cli/tests/load_provide_window.rs`: a 700 ms gap
+between provide and def, an isolate across it, the invariant every caller relies on (if
+`*features*` says loaded, the names are bound), and the same race through `require-one` as a
+control so a red is the window and not sleep ordering. Sabotage-verified —
+`features=true bound=false` with the frame removed. Verified alongside: `isolate_load`,
+`hot_reload`, `lazy_load`, `module_publish`, `modules`, `registry_isolate_race`,
+`reload_watch`, `check_preload`, `isolate_load_journal`, `autoload_race`, `run_check_cache`,
+and the `nest test` scoped runner (whose per-file load is exactly this path) on four files.
+
+If the `[refer] imported NOTHING` shape shows a fourth time, the three known mechanisms are
+now: a stale image read (KI-119), a straggler's post-restore provide (KI-120), and this
+window — and the remaining question would be which write to `*features*` is still made
+outside a frame (`grep -n provide std/prelude/tools.blsp`).
 
 ## 2026-09-20 later still — `main`'s red fixed, and `tier-audit` has a local verdict after all
 
@@ -152,16 +186,18 @@ What landed, each with a sabotage-verified guard:
 
 ### Rig notes that would have cost the next session an hour
 
-- **`perf stat` does NOT work here and `valgrind` DOES — re-measured 2026-09-20, and this
-  bullet said the opposite.** `/proc/sys/kernel/perf_event_paranoid` is **4** (so `perf stat -e
-  instructions true` prints the "Disallow CPU event access" refusal), while `/usr/bin/valgrind`
-  and `/usr/bin/callgrind_annotate` are both installed. The box has not rebooted since
-  2026-08-29, so nothing reset a sysctl underneath the note — it was simply taken in a window
-  that did not survive, or not taken at all. `perf-handoff.md` §"Instruction counts CAN be
-  taken on this box — callgrind, not perf" is the one that is right; the correction it carries
-  is now correcting nothing, since the claim it corrects is this one. **Check the two commands
-  before believing either document** — they cost one line:
-  `cat /proc/sys/kernel/perf_event_paranoid; perf stat -e instructions true`.
+- **`perf_event_paranoid` MOVES on this box — read it, never remember it.** This bullet has
+  said both things within a day, and both readings were real. Measured 2026-09-20 later, as an
+  ordinary user and outside any sandbox: the sysctl reads **4** and `perf stat -e instructions
+  true` prints the "Disallow CPU event access" refusal — while the same day's `ring`/`pingpong`
+  bisect four sections down was taken *with* `perf stat`, and the note beneath it read **1**.
+  Nothing rebooted in between (uptime runs from 2026-08-29), so something in userspace sets it:
+  if you need `perf`, `sudo sysctl -w kernel.perf_event_paranoid=1` is the lever, and it does
+  not stay. **`valgrind` is installed** (`/usr/bin/valgrind`, `/usr/bin/callgrind_annotate`),
+  whatever an earlier `command not found` reported — so `callgrind` is the instrument that is
+  *always* available here, and `perf` the one to check for first:
+  `cat /proc/sys/kernel/perf_event_paranoid; perf stat -e instructions true; command -v valgrind`.
+  A number quoted from this box should name which of the two took it.
 - **`make release` overwrites `release-fast/brood` with the dev-tools build** (it embeds
   brood into nest). Run `make release-brood` after it, before any timing — and `make
   release` again before `make prepush`: the gate's `nest` spawns the `brood` beside it,

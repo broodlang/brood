@@ -603,16 +603,22 @@ entry, and delete the task rather than leaving it to be re-derived.
 
 ## Instruction counts CAN be taken on this box — `callgrind`, not `perf` (2026-09-18)
 
-> **That reversal was itself reversed, re-measured 2026-09-20 later — the section title is
-> right and the blockquote that contradicted it was wrong.** Taken directly:
-> `/proc/sys/kernel/perf_event_paranoid` reads **4**, `perf stat -e instructions true` prints
-> the "Disallow CPU event access" refusal, and `/usr/bin/valgrind` + `/usr/bin/callgrind_annotate`
-> are both present. The box has not rebooted since 2026-08-29, so no reboot reset a sysctl
-> between the two readings. Whichever way it drifts next, **the check is one line and settles
-> it — run it instead of trusting either paragraph**:
+> **Reversed on 2026-09-20: `perf stat -e instructions:u` WORKS here now**
+> (`/proc/sys/kernel/perf_event_paranoid` reads **1**), and `valgrind` is **not installed**
+> (`valgrind: command not found`). Use `perf stat -e instructions:u -x, -r 3 <cmd>`; it is
+> what measured ADR-371/372 and KI-167. The traps below still apply to either tool.
+
+> **Read the sysctl; do not remember it. Both readings above have been true.** That
+> reversal recorded `perf_event_paranoid` at **1**, and on 2026-09-20 later it reads
+> **4** again — `perf stat -e instructions true` refuses, as an ordinary user and outside any
+> sandbox — with no reboot in between (uptime from 2026-08-29), so something in userspace
+> moves it and `sudo sysctl -w kernel.perf_event_paranoid=1` is the lever that does not stay.
+> `valgrind` and `callgrind_annotate` ARE installed, whatever an earlier `command not found`
+> reported, which makes `callgrind` the instrument always available here and `perf` the one to
+> check for first:
 > `cat /proc/sys/kernel/perf_event_paranoid; perf stat -e instructions true; command -v valgrind`.
-> (The measurements the reversal attributes to `perf stat` — ADR-371/372, KI-167 — are not in
-> doubt; only the instrument named for them is.)
+> Quote a number from this box with the instrument that took it; the measurements above
+> (ADR-371/372, KI-167) are not in doubt either way.
 
 `perf` is unusable here: `/proc/sys/kernel/perf_event_paranoid` is **4**, so
 `perf stat -e instructions:u` refuses without root. That is why this file says the box
