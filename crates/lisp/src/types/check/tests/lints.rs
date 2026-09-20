@@ -531,3 +531,79 @@ fn the_duplicate_lint_stays_silent_where_a_second_binding_is_legitimate() {
         1
     );
 }
+
+// ---- the constant-condition lint -------------------------------------------------
+//
+// Brood's falsy set is exactly `nil` and `false`. A test whose type admits neither is
+// therefore true every time it runs, and the branch is not a branch. The class this
+// exists for is the SENTINEL return: `index-of` answers -1 for "not found", -1 is
+// truthy, and `(when (index-of hay needle) …)` reads as "when it is there" while meaning
+// "always". Five files in std carried a prose comment warning about that one function,
+// which is what a trap looks like when only documentation guards it.
+
+#[test]
+fn a_sentinel_returning_call_used_as_a_condition_is_warned_about() {
+    let w = warnings("(defn f (hay needle) (if (index-of hay needle) :found :missing))");
+    assert!(
+        w.iter().any(|m| m.contains("always true")),
+        "expected a constant-condition warning for `index-of`, got {w:?}"
+    );
+}
+
+#[test]
+fn any_never_falsy_call_counts_not_just_index_of() {
+    // `count` is the same shape: an int is never falsy, so the test cannot fail.
+    let w = warnings("(defn f (xs) (if (count xs) :yes :no))");
+    assert!(
+        w.iter().any(|m| m.contains("always true")),
+        "expected a constant-condition warning for `count`, got {w:?}"
+    );
+}
+
+#[test]
+fn testing_the_sentinel_silences_it() {
+    // The fix the message names must actually work, or the warning is unactionable.
+    let w = warnings(
+        "(defn f (hay needle) (let (i (index-of hay needle)) (if (>= i 0) :found :missing)))",
+    );
+    assert!(
+        !w.iter().any(|m| m.contains("always true")),
+        "comparing against the sentinel must silence it: {w:?}"
+    );
+}
+
+#[test]
+fn a_genuinely_nullable_result_is_not_flagged() {
+    let w = warnings("(defn f (xs) (if (seq/find xs (fn (x) (= x 1))) :found :missing))");
+    assert!(
+        !w.iter().any(|m| m.contains("always true")),
+        "a nil-able result is a real test: {w:?}"
+    );
+}
+
+#[test]
+fn a_literal_condition_is_left_alone() {
+    // `:else` is how `cond` spells its default and `(if true …)` is how a test pins a
+    // branch. Both are deliberate, and flagging them fired 70-odd times in this repo.
+    let w = warnings("(defn f () (if true :yes :no))");
+    assert!(
+        !w.iter().any(|m| m.contains("always true")),
+        "a literal test is deliberate: {w:?}"
+    );
+}
+
+#[test]
+fn a_failure_condition_is_left_to_the_truthy_failure_lint() {
+    // Both would fire; the other one names the actual mistake, so this must not repeat it
+    // in vaguer words.
+    let w = warnings("(defn f (s) (if (string/->number s) :parsed :nope))");
+    assert_eq!(
+        w.iter().filter(|m| m.contains("always true")).count(),
+        0,
+        "the failure lint owns this case: {w:?}"
+    );
+    assert!(
+        w.iter().any(|m| m.contains("TRUTHY")),
+        "…and it must still fire: {w:?}"
+    );
+}

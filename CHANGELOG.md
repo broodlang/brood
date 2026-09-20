@@ -5,6 +5,16 @@ recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
+**`nest check` catches a test that is always true** (ADR-373). Brood's falsy set is exactly `nil` and
+`false`, so a condition whose type admits neither is true every time it runs — the branch is
+not a branch. The class this exists for is the SENTINEL return: `index-of` answers `-1` for
+"not found", `-1` is truthy, and `(when (index-of hay x) …)` reads as "when it is there"
+while meaning "always". Five files in `std/` carried a prose comment warning about that one
+function, which is what a trap looks like when only documentation guards it; `index-of`'s
+own docstring now says it too. Literal tests are left alone (`:else` is how `cond` spells its
+default), a `failure` condition is left to the truthy-failure lint that words it better, and
+`(check-allow :constant-condition …)` covers a test whose whole point IS the constancy.
+
 **A frame carries more than one text size** (ADR-363). `[:cell-region x y w h px ops]` /
 `editor/display`'s `cell-region` paints its ops with the cell metrics of font size `px` inside a
 rect given in the parent's cells, positioned in the region's own cell space — scoped and

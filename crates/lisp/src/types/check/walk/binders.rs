@@ -643,6 +643,55 @@ pub(super) fn check_if(
         }
     }
 
+    // **Constant-condition lint** (ADR-373). Brood's falsy set is exactly `nil` and `false`, so a test
+    // whose type admits NEITHER is true every time it runs — the branch is not a branch.
+    //
+    // The class this exists for is the sentinel return: `index-of` answers -1 for "not
+    // found", and -1 is truthy, so `(when (index-of hay needle) …)` reads as "when it is
+    // there" and means "always". Five files in std carry a comment warning about that one
+    // function, which is what a trap looks like when only prose guards it. The same shape
+    // catches `(if (count xs) …)` and `(when (str a b) …)`.
+    //
+    // Positively-known types only, the ADR-310 rule the truthy-failure lint above follows:
+    // a bound known merely by exclusion (`any`, or a guard's `(not nil)`) is exactly the
+    // `truthy` type itself, and re-testing a value an outer guard already narrowed is
+    // ordinary defensive code, not a mistake.
+    if !ctx.is_suppressed(crate::types::check::ctx::SUPPRESS_CONSTANT_COND) {
+        if let Some(ty) = crate::types::check::infer::expr_ty(heap, test, ctx) {
+            // A LITERAL test is deliberate, not a slip: `:else` is how `cond` spells its
+            // default and `(if true …)` is how a test pins a branch. Only a COMPUTED test
+            // — a CALL — is the bug this looks for.
+            //
+            // That also means `or` and `and` are out of scope, deliberately: they desugar to
+            // a `let` whose `if` tests the BINDING, so admitting bare symbols would reach
+            // them — and would then flag every defensive `(or x "")` on a value the checker
+            // already knows is non-nil. That is a true statement (the fallback is dead) and
+            // a useless one (the value is used either way): it fired 33 times in this
+            // repo's own tests against 2 real findings. A dead `or` fallback is a weaker
+            // claim than a constant BRANCH and wants its own lint, not this one.
+            // A `failure` is truthy too, but the lint above says so far better — this one
+            // would only repeat it in vaguer words.
+            if matches!(test, Value::Pair(_))
+                && !ty.contains_tag(crate::types::Tag::Failure)
+                && !ty.is_never()
+                && !ty.is_known_only_by_exclusion()
+                && ty.is_subtype(&crate::types::Ty::truthy())
+            {
+                let pos = heap
+                    .form_pos_only(test)
+                    .or_else(|| heap.form_pos_only(form));
+                out.push((
+                    pos,
+                    format!(
+                        "this test is always true — only nil and false are falsy, and \
+                         {ty} is neither. A function answering a SENTINEL (-1 for \
+                         \"not found\") needs the sentinel tested for, not the value"
+                    ),
+                ));
+            }
+        }
+    }
+
     let (then_ctx, else_ctx) = match guard_assertion(heap, test, ctx) {
         Some(g) => {
             // An `else_only` guard (`(empty? xs)`) asserts nothing when true: the
