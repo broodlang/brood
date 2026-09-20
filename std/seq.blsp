@@ -297,7 +297,12 @@ when the caller needs indexed access. The complement of [[filterv]].
 
     (seq/find [1 3 4] math/even?)   → 4"
   (cond (empty? coll) nil (pred (first coll)) (first coll) else (seq/find (rest coll) pred)))
-(sig find ((seqable ?A) (?A -> any) -> (or ?A nil)))
+;; No `(seqable ?A)` here: `find` walks anything `first`/`rest` accept — a MAP included, as
+;; `[k v]` entries — and `(seqable T)` excludes maps by design (ADR-365). Declared that way
+;; it false-positived on bedit's `(seq/find notes …)` over a map the day it landed
+;; (2026-09-20). The element-precise result comes from the checker's by-name rule; the
+;; bare `seqable` domain admits every collection the combinators walk.
+(sig find (seqable (any -> any) -> any))
 
 ;; distinct: keep the first occurrence of each item. A map carried alongside the result
 ;; acts as the "seen" set, so membership is O(1)-ish rather than the O(n²) a
@@ -320,7 +325,8 @@ when the caller needs indexed access. The complement of [[filterv]].
 
     (seq/distinct [1 1 2])     → (1 2)"
   (reverse (nth (fold coll [{} nil] distinct-step) 1)))
-(sig distinct ((seqable ?A) -> (list ?A)))
+;; Bare `seqable`, not `(seqable ?A)`, for `find`'s reason: a map folds as its entries.
+(sig distinct (seqable -> (list any)))
 
 ;; flatten: splice nested lists into one flat list. Descends through `pair?`/`nil` (so
 ;; empty sub-lists and nils vanish); vectors and maps are leaf items. The outer walk is
