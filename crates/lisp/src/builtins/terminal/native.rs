@@ -888,6 +888,16 @@ pub(in crate::builtins) fn gui_texture(args: &[Value], _: EnvId, heap: &mut Heap
     Ok(Value::nil())
 }
 
+/// `(%gui-input! id mode)` — deliver window `id`'s mouse input in `:pixels` or `:cells`
+/// from now on (the `{:input …}` open option, switchable); the window then reports its
+/// size in that unit. Anything but `:pixels` means cells.
+pub(in crate::builtins) fn gui_input(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = gui_window_id(heap, "%gui-input!", arg(args, 0))?;
+    let pixels = matches!(arg(args, 1), Value::Keyword(s) if s == value::intern("pixels"));
+    crate::host::gui::input_mode(id, pixels).map_err(LispError::runtime)?;
+    Ok(Value::nil())
+}
+
 /// `(%gui-texture-free id tex)` — release texture `tex` of window `id`.
 pub(in crate::builtins) fn gui_texture_free(
     args: &[Value],

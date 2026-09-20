@@ -682,3 +682,22 @@
           saw (drain-saw ()))
       (assert= (count (seq/filter saw (fn (x) (= x :key)))) 10)
       (assert= (count (seq/filter saw (fn (x) (= x :tick)))) 0))))
+
+(describe "editor/ui — display-texture (the pixel-space seam through a display map)"
+  (test "the handle comes from gui/alloc-texture and the upload goes through the display"
+    (let (log (table/new)
+          display {:texture (fn (tex rgba w h) (table/put log :upload [tex rgba w h]))}
+          tex (display-texture display [9 9 9 9] 1 1))
+      (assert= (gui/texture-size tex) [1 1])
+      (assert= (table/get log :upload) [tex [9 9 9 9] 1 1])))
+
+  (test "the image-map form unpacks width, height and rgba"
+    (let (log (table/new)
+          display {:texture (fn (tex rgba w h) (table/put log :upload [w h]))}
+          tex (display-texture display {:width 2 :height 1 :rgba [0 0 0 0 0 0 0 0]}))
+      (assert= (gui/texture-size tex) [2 1])
+      (assert= (table/get log :upload) [2 1])))
+
+  (test "a display without :texture (the terminal) still hands back a sized handle"
+    (let (tex (display-texture {} [1 2 3 4] 1 1))
+      (assert= (gui/texture-size tex) [1 1]))))

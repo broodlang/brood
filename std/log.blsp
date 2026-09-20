@@ -220,6 +220,10 @@ line falls back to stderr so a log is never lost. Returns nil."
   nil)
 
 (defn debug (msg & meta) "Log `msg` at `:debug`." (apply log :debug msg meta))
+(sig debug (any & map -> nil))
 (defn info (msg & meta) "Log `msg` at `:info`." (apply log :info msg meta))
+(sig info (any & map -> nil))
 (defn warn (msg & meta) "Log `msg` at `:warn`." (apply log :warn msg meta))
+(sig warn (any & map -> nil))
 (defn error (msg & meta) "Log `msg` at `:error`." (apply log :error msg meta))
+(sig error (any & map -> nil))

@@ -844,7 +844,7 @@ code paints to a terminal or a GUI window unchanged.
   as deps everything the thunk reads, preferring values the model keeps between turns
   (`=` is O(1) on the same cell). Outside a loop it is just the thunk.
 - **Pixel space (games)** = two more ops the GPU render target draws (a `--with-gui-gpu`
-  build, `BROOD_GUI_GPU=1`): `[:quad x y w h color rot]` and `[:sprite tex x y w h uv tint
+  build): `[:quad x y w h color rot]` and `[:sprite tex x y w h uv tint
   rot]`, physical pixels from the window's corner. Build them with `gui/line` and
   `gui/sprite` over a `gui/texture` handle; open the window with `{:input :pixels}` so
   mouse messages carry pixels. The engine above them is the `b2d` package (ADR-374).

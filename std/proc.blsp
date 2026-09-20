@@ -26,6 +26,7 @@ scheduling unit, updated every quantum; exact for spawned processes, coarse for 
 root). nil for a remote/dead pid. The process-introspection snapshot the observer reads;
 see std/tool/observer.blsp."
   (%process-info pid))
+(sig info (pid -> (or (map keyword any) nil)))
 
 ;; `& more`, not `&optional value`: for this primitive an ABSENT value reads the flag
 ;; while an explicit `nil` CLEARS it, and `&optional` collapses the two (both arrive as
@@ -49,6 +50,7 @@ reconnector."
 unspecified — sort if you need stability. For agents/tools enumerating spawned
 processes."
   (%list-processes))
+(sig list (-> (list pid)))
 
 (defn mailbox-size (pid)
   "How many messages are queued in pid's mailbox (its receive backlog), or nil if pid is

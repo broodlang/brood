@@ -22,6 +22,7 @@ started an operating-system process while the bare `spawn` special form started 
 (defn run-process (prog args)
   "Run external program prog with an args list, inheriting stdio; returns its exit code."
   (%run-process prog args))
+(sig run-process (string (or list vector) -> int))
 
 (defn exe-path ()
   "The absolute path of the running executable, or nil when the platform won't say (a sandbox with no /proc/self/exe equivalent). For locating something installed ALONGSIDE this binary: a shipped app cannot assume PATH — a desktop launch inherits the session's, which routinely lacks ~/.local/bin — so \"the runtime that installed me is my sibling\" is the reliable lookup. Nil rather than an error, because asking where you live is opportunistic."
@@ -38,14 +39,17 @@ started an operating-system process while the bare `spawn` special form started 
 (defn stdout-tty? ()
   "True when stdout is an interactive terminal (false when piped or captured)."
   (%stdout-tty?))
+(sig stdout-tty? (-> bool))
 
 (defn now ()
   "Wall-clock milliseconds since the Unix epoch."
   (%now))
+(sig now (-> int))
 
 (defn now-ns ()
   "Wall-clock nanoseconds since the Unix epoch (finer-grained than os/now)."
   (%now-ns))
+(sig now-ns (-> int))
 
 (defn clipboard-get ()
   "The OS clipboard's text, or nil when empty / non-text / unavailable (no display server, or a build without the clipboard feature)."
@@ -63,6 +67,7 @@ started an operating-system process while the bare `spawn` special form started 
     (os/env \"PATH\")        ;; => \"/usr/bin:/bin\"
     (os/env \"NO_SUCH_VAR\")  ;; => nil"
   (%getenv name))
+(sig env (string -> (or string nil)))
 
 (defn env-all ()
   "All environment variables as a `{string → string}` map."
@@ -140,10 +145,12 @@ did not want."
       (and (nil? args) (nil? dir)) (%os-cmd prog)
       (nil? dir) (%os-cmd prog args)
       else (%os-cmd prog (or args []) dir))))
+(sig cmd (string & any -> (record :stdout string :stderr string :exit int)))
 
 (defn cmd-ok? (result)
   "True if the command result has exit code 0."
   (= (get result :exit) 0))
+(sig cmd-ok? (map -> bool))
 
 (defn cmd-out (result)
   "The stdout string from a `cmd` result, trimmed."

@@ -22,10 +22,10 @@ Options:
   --with-gui        Build the native GUI window backend (winit/softbuffer/fontdue),
                     so `(observe)` can open a window. Off by default.
   --without-gui     Disable the GUI backend (the default).
-  --with-gui-gpu    Build the GPU render target (wgpu: Vulkan / Metal / DX12) beside the
-                    CPU softbuffer one (implies --with-gui); BROOD_GUI_GPU=1 selects it at
-                    run time. Instanced quads, a glyph atlas, and the pixel-space
-                    :quad / :sprite ops (only this target draws them). Off by default.
+  --with-gui-gpu    Build the GPU render target (wgpu: Vulkan / Metal / DX12) and draw on
+                    it (implies --with-gui; BROOD_GUI_GPU=0 falls back to the CPU painter).
+                    Instanced quads, a glyph atlas, and the pixel-space :quad / :sprite
+                    ops (only this target draws them). Off by default.
   --without-gui-gpu Use the CPU softbuffer backend (the default).
   --with-audio      Build the audio backend (the `audio-beep` builtin, via rodio).
                     OFF by default and independent of --with-gui: on Linux it links

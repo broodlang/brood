@@ -58,6 +58,9 @@ pub fn texture(_id: u64, _tex: u32, _rgba: Vec<u8>, _w: u32, _h: u32) -> Result<
 pub fn texture_free(_id: u64, _tex: u32) -> Result<(), String> {
     Err(NOT_COMPILED.into())
 }
+pub fn input_mode(_id: u64, _pixels: bool) -> Result<(), String> {
+    Err(NOT_COMPILED.into())
+}
 pub fn next_texture_id() -> u32 {
     0
 }

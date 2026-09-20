@@ -206,10 +206,10 @@ pub(super) const MAX_FONT_PX: f32 = 512.0;
 /// `Op::CellRegion` swaps in another for the span of its ops — which is how ONE FRAME
 /// carries two text sizes (a per-buffer zoom).
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub(super) struct CellMetrics {
-    pub(super) px: f32,
-    pub(super) cell_w: usize,
-    pub(super) cell_h: usize,
+pub(crate) struct CellMetrics {
+    pub(crate) px: f32,
+    pub(crate) cell_w: usize,
+    pub(crate) cell_h: usize,
     pub(super) baseline: i32,
 }
 
@@ -446,7 +446,7 @@ impl Renderer {
     }
 
     /// The metrics currently in effect — what a scoped change restores.
-    pub(super) fn metrics(&self) -> CellMetrics {
+    pub(crate) fn metrics(&self) -> CellMetrics {
         CellMetrics {
             px: self.px,
             cell_w: self.cell_w,
@@ -459,7 +459,7 @@ impl Renderer {
     /// rounded to whole pixels for the same reason `recompute` rounds). Memoised: shaping
     /// the reference glyph is not free and a frame with per-buffer zoom asks for the same
     /// handful of sizes on every paint.
-    pub(super) fn metrics_at(&self, logical_px: f32) -> CellMetrics {
+    pub(crate) fn metrics_at(&self, logical_px: f32) -> CellMetrics {
         // Clamped to a sane range before anything is shaped: the size comes from an app's
         // render op, and a 1e9-px cell would ask the shaper for a line box no machine has
         // the memory to lay out. NaN falls through `clamp` to the low end.
@@ -490,7 +490,7 @@ impl Renderer {
     /// Install `metrics` for the ops that follow — the caller restores what `metrics()`
     /// gave it. Nothing else is touched: the cluster cache is keyed by px, so both sizes'
     /// glyphs coexist and neither region's work throws the other's away.
-    pub(super) fn set_metrics(&mut self, metrics: CellMetrics) {
+    pub(crate) fn set_metrics(&mut self, metrics: CellMetrics) {
         self.px = metrics.px;
         self.cell_w = metrics.cell_w;
         self.cell_h = metrics.cell_h;
@@ -1181,7 +1181,7 @@ pub(super) fn fill_rrect(
 /// radius on a 1 px line only fades it). Both axes are checked independently, so a
 /// thin vertical and a thin horizontal rule both snap. Returns the (possibly)
 /// adjusted `(x, w, y, h, radius)`; a rect that isn't a hairline passes through.
-pub(super) fn snap_hairline(
+pub(crate) fn snap_hairline(
     fx: f32,
     fw: f32,
     fy: f32,

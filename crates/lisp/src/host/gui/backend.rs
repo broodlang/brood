@@ -10,9 +10,9 @@ mod render;
 
 use input::*;
 use paint::*;
-pub(crate) use render::Renderer;
 pub use render::TextAa;
 use render::*;
+pub(crate) use render::{snap_hairline, Renderer};
 
 use super::{CursorShape, Key, Mouse, MouseAction, MouseButton, Op, WindowSpec};
 
@@ -201,7 +201,7 @@ const DEFAULT_FG: [u8; 3] = [0xcd, 0xd6, 0xf4];
 
 // The solid colour of a thin (bar / underline) cursor caret — crisp near-white,
 // since the cursor op carries no face to colour it from.
-const CURSOR_FG: [u8; 3] = [0xf5, 0xf5, 0xf5];
+pub(super) const CURSOR_FG: [u8; 3] = [0xf5, 0xf5, 0xf5];
 
 /// Messages the Brood side pushes to the single GUI thread via the event-loop
 /// proxy. Each carries the window id it targets: winit allows only one event
@@ -243,6 +243,11 @@ enum UserEvent {
     /// Release texture `tex` of window `id` (a later `:sprite` naming it draws nothing).
     /// Behind `gui-texture-free`.
     TextureFree { id: u64, tex: u32 },
+    /// Switch window `id`'s mouse input between cells and PIXELS at runtime (the
+    /// `{:input :pixels}` open option, after the fact). The window republishes its size
+    /// in the new unit so the app re-lays itself out. Behind `gui-input!` — how a window a
+    /// generic thin client opened is told, by the app it attached to, which unit it wants.
+    InputMode { id: u64, pixels: bool },
     /// Raise window `id` to the front and give it OS keyboard focus (un-
     /// minimising it first). Behind `gui-focus` — surfaces an already-open
     /// singleton window instead of opening a duplicate.
@@ -968,6 +973,21 @@ pub fn texture_free(id: u64, tex: u32) -> Result<(), String> {
     Ok(())
 }
 
+/// `(gui-input! id mode)` — deliver window `id`'s mouse input in pixels (`pixels`) or
+/// cells from now on; the window then reports its size in that unit.
+pub fn input_mode(id: u64, pixels: bool) -> Result<(), String> {
+    if headless() {
+        return Ok(());
+    }
+    if let Ok(g) = gui() {
+        let _ = g
+            .lock()
+            .unwrap()
+            .send_event(UserEvent::InputMode { id, pixels });
+    }
+    Ok(())
+}
+
 /// The next texture handle. Process-wide rather than per window so a handle can never
 /// name a different texture in another window by accident; starts at 1 so 0 is never a
 /// live texture (a `:sprite` naming it draws nothing).
@@ -1029,11 +1049,16 @@ enum Backend {
     Gpu(Box<crate::host::gui::gpu::GpuWindow>),
 }
 
+/// Whether a `gui-gpu` build draws on the GPU: yes unless `BROOD_GUI_GPU=0` asks for the
+/// CPU painter (the A/B lever, and the escape hatch on a box whose GPU driver misbehaves).
+/// Until 2026-09-20 the GPU target was OPT-IN (`=1`), because it drew no cursor, region
+/// or rounded corner; it now draws every op the CPU painter does, so the build flag alone
+/// selects it. A GPU whose device cannot be created falls back to the CPU painter.
 #[cfg(feature = "gui-gpu")]
 fn gpu_enabled() -> bool {
     std::env::var("BROOD_GUI_GPU")
-        .map(|v| v != "0" && !v.is_empty())
-        .unwrap_or(false)
+        .map(|v| v != "0")
+        .unwrap_or(true)
 }
 
 fn cpu_backend(window: &Rc<Window>) -> Result<Backend, String> {
@@ -1198,15 +1223,18 @@ fn build_window(
         .create_window(attributes)
         .map_err(|e| format!("window: {e}"))?;
     let window = Rc::new(window);
-    // The GPU backend only when built AND opted-in via the env; everything else (the
-    // default build, or no env) is the CPU softbuffer — so other apps stay on CPU.
+    // A `gui-gpu` build draws on the GPU unless BROOD_GUI_GPU=0; a GPU that cannot be
+    // brought up (no adapter, no surface) is reported once and the window falls back to
+    // the CPU painter rather than failing to open.
     #[cfg(feature = "gui-gpu")]
     let backend = if gpu_enabled() {
-        eprintln!("brood gui: GPU (wgpu) backend active");
-        Backend::Gpu(Box::new(crate::host::gui::gpu::GpuWindow::new(
-            window.clone(),
-            spec.vsync,
-        )?))
+        match crate::host::gui::gpu::GpuWindow::new(window.clone(), spec.vsync) {
+            Ok(gpu) => Backend::Gpu(Box::new(gpu)),
+            Err(e) => {
+                eprintln!("brood gui: GPU render target unavailable ({e}); using the CPU painter");
+                cpu_backend(&window)?
+            }
+        }
     } else {
         cpu_backend(&window)?
     };
@@ -1402,6 +1430,14 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                         Backend::Cpu { .. } => {}
                         #[cfg(feature = "gui-gpu")]
                         Backend::Gpu(gpu) => gpu.free_texture(tex),
+                    }
+                }
+            }
+            UserEvent::InputMode { id, pixels } => {
+                if let Some(win) = self.ids.get(&id).and_then(|wid| self.wins.get_mut(wid)) {
+                    if win.pixel_input != pixels {
+                        win.pixel_input = pixels;
+                        publish_size(win);
                     }
                 }
             }

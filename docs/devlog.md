@@ -14920,3 +14920,119 @@ a build that never enables its wasm side. Tests: the pure `gui/*` layer and the 
 hostile-argument parsing in `gui_test` / `gui_robustness_test` (the byte-count guard
 sabotaged and seen red), the batcher and the format/present-mode choices as Rust unit
 tests in `gpu.rs`.
+
+## 2026-09-20 (6) — the GPU target reaches parity and becomes the default (ADR-374 addendum)
+
+Regions, cursors, underline, tabs, rounded and hairline rects on the wgpu target —
+`gpu.rs`'s op walk mirrors `paint::render_ops` arm for arm, with a per-instance clip rect
+and an SDF edge in the shader where the CPU painter bands and ramps per pixel. Verified by
+`BROOD_GUI_DUMP` of bedit on both targets (3% of bytes differ: text AA, the cursor's blink
+phase, an async status segment). `BROOD_GUI_GPU` flips from opt-in to opt-out
+(`=0` keeps the CPU painter), with a CPU fallback when the device cannot be created. b2d
+no longer needs the env var.
+
+## 2026-09-20 (6) — coverage for the signature footer, and the scan it turned out to be feeding was dead
+
+The ask was "get coverage in" — the 2026-09-18 handover left the stdlib image's signature
+footer (ADR-370) carrying 124 authoritative types of 3104 names, every missing one a module
+the checker materialises — "and check performance for checking". Three of the four things
+that landed are mechanism, found by ranking rather than by writing declarations.
+
+**KI-171 — the transitive scan (ADR-340) was a no-op unless `BROOD_IMAGE_TRACE` was set.**
+ADR-370's rewrite of `materialise_referenced_modules` wrote the load-set insert into the
+trace condition (`trace && wanted.insert(module)`), so in every untraced process since
+2026-09-18 the checker read a loaded body down to its first unmaterialised qualified name
+and `any` below it — the bedit `git-scan-rows` shape ADR-340 exists to fix. The one test of
+the scan ran its child traced. Found because the trace named modules an untraced run never
+touched. Fixed (the insert is unconditional; the trace now prints every name that holds a
+load open, not the first per module), guarded by a planted fixture edge on `table/get` that
+refuses to run traced, sabotage-verified.
+
+**Ranking, not sampling.** A throwaway probe over the embedded sources — for every std module,
+the qualified names its bodies reach in OTHER modules that are neither bound at boot nor
+typed by the footer — is the load graph every check pays, and it ranked three things above
+any declaration:
+
+- `seq/filter` (named by 38 modules), `seq/keep` (11), `seq/reject` (7), `io/puts` (26),
+  `io/write`, `math/nan?`, `reflect/read-string` (9) are all in the checker's **curated**
+  table, which `sig_of` reads ahead of the footer and of inference. Their verdict never
+  depended on the load; the scan loaded `seq`, `io`, `math` and `reflect` for a type it had.
+  A curated name asks for no load now (guard: a fixture naming four curated names in four
+  modules; none may load; sabotage-verified).
+- `math/max` (behind 47 of 100 corpus checks) IS declared — `(& ?A -> ?A)` — and the writer
+  declined it because a type variable parses to `any` in the flat reading. A
+  variable-bearing declaration is resolved per call from the arguments, the first thing a
+  call site consults for a declared name, so it rides now, and `image_heap_sig_with_vars`
+  reads it back at both call-typing sites (the callback position had no variable reader
+  even for a LOADED module — `(reduce xs math/max)` re-typed a body it might not have).
+  Guarded in its own process (`tests/image_sig_type_variables.rs`), which PLANTS a footer
+  entry: std's only variable-bearing declarations are the extrema, whose by-name rule
+  answers the verdict with no declaration at all — the first guard, on `math/max`, passed
+  with the fallback removed.
+- `seq/filter`/`reject`/`keep` are `%defseq` forms and the index scanner did not descend
+  the macro: no entry, not even an arity, for the most-referenced name in std.
+
+**`sig_of`'s order.** The footer read after the curated table, but a loaded module's
+DECLARATION outranks a curated entry — `math/even?` is curated `(number -> bool)` and
+declared `(int -> bool)` — so a check with and without `math` loaded could disagree. The
+footer sits ahead of the curated table now, and after the primitives (a native is never in
+it, and putting the footer first cost every native's `sig_of` a cache probe).
+
+**Declarations, 54 of them,** on the names the ranking put next: `os/now`, `os/env`,
+`os/cmd` (a closed record), `os/run-process`, `table/*`, `tcp/*`, `bytes/*`, `hash/*`
+(hex digests and HMACs), `rand/token`, `node/name`/`list`/`monitor`, `proc/list`/`info`,
+`humanize/byte-size`, `log/debug`…`error`, `json/encode`, `seq/distinct`,
+`seq/vector-length`, `math/mod`. Each read from its body and the native it wraps. `log/error
+(any & map -> nil)` found a real test defect the day it landed: `tests/log_test.blsp` has
+`(:use log)`, so the `error` in its `captured` helper was `log/error` — it LOGGED and
+returned nil where the docstring promises a failure by name (`/error` now).
+
+**Measured** (callgrind, `BROOD_TIER=1` so the background compiler's timing-dependent work
+stays out — traced HEAD runs varied ±20% at tier 2, untraced ones reproduced to 0.03%; both
+arms built from the same base in worktrees, each image written ONCE by its own release
+binary — a debug-written image of the same std moved the same binary's count by +2.3%, the
+KI-166 class; `brood --check`, verdict cache off):
+
+| program | HEAD, scan dead (shipped) | HEAD, scan alive (traced) | this tree | vs alive | modules |
+|---|---|---|---|---|---|
+| `(io/puts (str (os/env "HOME")))` | 89.4M | 89.5M | 88.9M | −0.7% | 2→2 |
+| `(io/puts (str (datetime/utc-now)))` | 105.1M | 112.1M | 104.5M | −6.7% | 4→2 |
+| `(io/puts (json/encode {:a [1 2 3]}))` | 137.7M | 152.8M | 107.1M | **−29.9%** | 6→4 |
+| `base64` | 125.0M | 125.2M | 125.2M | 0.0% | 4→4 |
+| `pipeline` | 116.2M | 116.3M | 116.3M | 0.0% | 3→3 |
+| `errors-deep` | 114.4M | 114.6M | 114.4M | −0.2% | 3→3 |
+| `json` | 171.0M | 181.6M | 145.9M | **−19.7%** | 7→6 |
+| `strings` | 102.2M | 117.9M | 102.0M | **−13.5%** | 7→3 |
+| `http` | 165.0M | 194.8M | 174.4M | **−10.5%** | 11→6 |
+| `wordcount` | 130.1M | 130.3M | 130.3M | 0.0% | 4→4 |
+| `supervisor` | 569.7M | 584.2M | 576.5M | −1.3% | 7→5 |
+
+Against the CORRECT baseline (the scan alive) nothing regresses and the load-heavy rows drop
+by 7–30%. Against the shipped binary — whose scan did nothing — `http` is +5.7% and
+`supervisor` +1.2%: that is the cost of ADR-340 doing its job on `tcp`/`tls`/`url`, which
+the dead scan never loaded, and it is smaller than the coverage win on the json rows
+(−22%, −15%) taken the same way. Two traps for the next measurement: **the image's writer
+is part of the measurement** (rebuild it with the binary under test, once, and never between
+arms), and **the tree moved under this session** — the owner's `gui.blsp` edits changed the
+stdlib hash between two builds of "the same" binary, which read as a 2.8% regression until
+both arms were built from one commit.
+
+**What the index carries now:** 196 authoritative types over 2788 names (146 over 2785
+before — the three new names are the `%defseq` trio), and the load graph's
+residue is `seq/find` (an element — `any` by nature), `reflect/read-string` (curated;
+`any`), `table/get`, tooling modules referencing each other (`project/*`, `project-check`,
+`package`), and `os/env`-style wrappers in modules nobody has declared yet. The probe that
+ranks them is not kept — `BROOD_IMAGE_TRACE=1 brood --check <file>` prints the same list for
+the program in front of you, and that is the shipped tool.
+
+## 2026-09-20 (7) — the window as its own process (ADR-374 addendum 2)
+
+`remote-display` / `gui-display` gain `:texture`, `:texture-free`, `:configure`; the thin
+client applies them; `%gui-input!` switches a window's input unit after it exists; `nest
+attach --gui NAME` opens a window as the client. `b2d/run-on` + `b2d/serve`: the demo
+served headless (`nest run --name b2d -- --serve`) and played in a `nest attach --gui`
+window, textures and pixel input across the link, ~3%/~6% of a core. One trap found on
+the way: a docstring containing `"w"` unescaped ended the string and made `w` the
+function body — `unbound symbol: w` at a call site far away; the doc example now uses a
+keyword. Tests: `remote-display`'s three messages and the client loop applying them
+(`serve_test`), `display-texture` (`ui_test`), `run-on` against a fake display (b2d).

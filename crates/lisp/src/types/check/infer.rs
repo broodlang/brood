@@ -470,8 +470,12 @@ fn expr_ty_inner(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                         // hover, `reflect/expr-type`, a cross-module call). Skipped for a
                         // name this file redefines — the heap describes the old binding
                         // (ADR-123: a def always wins).
+                        // …or that the stdlib image carries for a module this check never
+                        // loaded (ADR-370): the same declaration, resolved the same way.
                         if !ctx.is_file_global(s) {
-                            if let Some(sv) = super::sigs::declared_heap_sig_with_vars(heap, s) {
+                            if let Some(sv) = super::sigs::declared_heap_sig_with_vars(heap, s)
+                                .or_else(|| super::sigs::image_heap_sig_with_vars(heap, s))
+                            {
                                 let arg_tys: Vec<Option<Ty>> =
                                     items[1..].iter().map(|&a| expr_ty(heap, a, ctx)).collect();
                                 return Some(sv.resolve_ret(&arg_tys));
@@ -2819,6 +2823,16 @@ pub(super) fn callback_ret(heap: &Heap, f: Value, inputs: &[Option<Ty>], ctx: &C
             }
             if ctx.is_file_global(s) {
                 return specialize(None);
+            }
+            // A type-variable declaration — a loaded module's, or one the stdlib image
+            // carries for a module this check never loaded (ADR-370) — resolves from
+            // `inputs` exactly as it does in call position: `(reduce xs math/max)` is the
+            // element type, not the body re-typed (and there is no body to re-type for an
+            // unloaded module — this used to read `any` there).
+            if let Some(sv) = super::sigs::declared_heap_sig_with_vars(heap, s)
+                .or_else(|| super::sigs::image_heap_sig_with_vars(heap, s))
+            {
+                return Some(sv.resolve_ret(inputs));
             }
             // An overloaded callback (ADR-116) — resolve per matching arm from
             // `inputs` instead of a single flat `ret`, same as the call-form case.

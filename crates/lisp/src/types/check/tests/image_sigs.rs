@@ -62,21 +62,40 @@ fn every_type_the_image_carries_is_the_loaded_declaration_as_the_checker_reads_i
             carried, declared,
             "{name}: the carried type is not the loaded declaration"
         );
-        assert!(
-            !carried.ret.is_any() && !carried.ret.is_unrefined_collection(),
-            "{name}: a return of `{}` is re-typed from the body at a call site and may not ride",
-            carried.ret
-        );
+        // A variable-bearing declaration is read through its own reader, and the footer's
+        // must be the loaded module's — its flat return is `any` by construction (`?A`
+        // parses to `any`), which is why it is checked apart.
+        match sigs::declared_heap_sig_with_vars(heap, sym) {
+            Some(declared_vars) => {
+                let carried_vars = sigs::image_heap_sig_with_vars(heap, sym).unwrap_or_else(|| {
+                    panic!("{name}: the declaration carries type variables and the footer's reading has none")
+                });
+                assert_eq!(
+                    format!("{carried_vars:?}"),
+                    format!("{declared_vars:?}"),
+                    "{name}: the carried type-variable reading is not the loaded declaration"
+                );
+            }
+            None => assert!(
+                !carried.ret.is_any() && !carried.ret.is_unrefined_collection(),
+                "{name}: a return of `{}` is re-typed from the body at a call site and may not ride",
+                carried.ret
+            ),
+        }
         assert!(
             !heap.is_private(sym),
             "{name}: a private name's cross-module call is a warning only the loaded module can raise"
         );
-        // What a call site reads, with the module loaded, is what it read from the footer alone.
-        assert_eq!(
-            sigs::sig_of(heap, sym),
-            Some(carried),
-            "{name}: sig_of disagrees with the footer"
-        );
+        // What a call site reads, with the module loaded, is what it read from the footer
+        // alone — except for an extremum, whose `sig_of` is the registry-derived operator
+        // domain (ADR-299) ahead of every declaration, loaded or carried alike.
+        if !matches!(name.as_str(), "math/max" | "math/min") {
+            assert_eq!(
+                sigs::sig_of(heap, sym),
+                Some(carried),
+                "{name}: sig_of disagrees with the footer"
+            );
+        }
         assert!(
             matches!(
                 heap.env_get(heap.global(), sym),
@@ -230,6 +249,238 @@ fn a_declaration_whose_only_marker_is_optional_rides() {
         assert!(
             sigs::image_heap_sig(heap, sym).is_some(),
             "{name}: the carried text does not parse back to an arrow"
+        );
+    }
+}
+
+#[test]
+fn transitive_scan_loads_without_the_trace() {
+    // KI-171. ADR-370's first shape of `materialise_referenced_modules` wrote
+    // `trace && wanted.insert(module)`, so the load set was only ever filled when
+    // `BROOD_IMAGE_TRACE` was set — and the one test of the scan (`tests/lazy_load_test.blsp`
+    // § ADR-370) ran its child WITH the trace, observing the loads through it. In every
+    // ordinary process the transitive scan (ADR-340) was a no-op for two days.
+    //
+    // This calls the scan itself, with no trace, on an edge nothing can remove: a fixture
+    // module whose body names `table/get`, whose result is `any` by nature — a fresh copy
+    // of whatever was stored — so no declaration rides for it (`image_carried_sig`
+    // declines a `-> any`) and no curated entry stands in for it. `std` edges were tried
+    // first and each went away as coverage improved (`json` → `reflect` for the curated
+    // `reflect/read-string`), which is the point of planting one. The test is only as good
+    // as the environment it runs in: with `BROOD_IMAGE_TRACE` set it would have passed
+    // against the bug, so it refuses to run traced.
+    assert!(
+        std::env::var_os("BROOD_IMAGE_TRACE").is_none(),
+        "this test observes the untraced path; unset BROOD_IMAGE_TRACE"
+    );
+    let mut interp = interp_with_image();
+    let dir = std::env::temp_dir().join(format!("ki171-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("ki171-probe.blsp");
+    std::fs::write(
+        &file,
+        "(defmodule ki171-probe)\n(defn read-it (t k) (table/get t k))\n",
+    )
+    .expect("write the fixture");
+    interp
+        .eval_str(&format!("(reflect/load {:?})", file.display().to_string()))
+        .expect("load the fixture");
+    let loaded = |interp: &mut crate::Interp, m: &str| -> bool {
+        let v = interp
+            .eval_str(&format!("(contains? *features* \"{m}\")"))
+            .expect("read *features*");
+        interp.print(v) == "true"
+    };
+    assert!(
+        loaded(&mut interp, "ki171-probe"),
+        "loading the fixture file did not register its module as a feature"
+    );
+    assert!(
+        !loaded(&mut interp, "table"),
+        "table is already loaded — the probe edge is gone, pick another"
+    );
+    check::materialise_referenced_modules(&mut interp.heap);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        loaded(&mut interp, "table"),
+        "the transitive scan did not load `table` for the fixture's `table/get`"
+    );
+}
+
+#[test]
+fn a_defseq_definition_is_indexed() {
+    // `seq/filter`, `seq/reject` and `seq/keep` are `(%defseq name (params…) doc step)`
+    // forms — a macro over `defn` — and the scanner read past them: no entry, so no arity
+    // for a check that never loads `seq`, and a whole-module load for the name 38 std
+    // modules' bodies reach for. The construction gate beside this
+    // (`every_indexed_arity_is_the_loaded_closures_arity`) holds the arity to the closure.
+    let mut interp = interp_with_image();
+    let scanned = check::std_signature_index(&mut interp.heap);
+    for (name, min, max) in [
+        ("seq/filter", 2, 2),
+        ("seq/reject", 2, 2),
+        ("seq/keep", 2, 2),
+    ] {
+        let entry = scanned
+            .iter()
+            .find(|e| e.name == name)
+            .unwrap_or_else(|| panic!("{name}: not indexed — the scanner did not descend %defseq"));
+        assert_eq!((entry.min, entry.max), (min, max), "{name}: arity");
+    }
+}
+
+#[test]
+fn a_type_variable_declaration_rides() {
+    // `math/max` declares `(& ?A -> ?A)`. Its flat reading has an `any` return (`?A` parses
+    // to `any`), so the writer declined it and the checker loaded `math` for it — behind 47
+    // of 100 corpus checks (2026-09-20). A variable-bearing declaration is resolved per call
+    // from the arguments, which is the reading a call site takes FIRST for a declared name;
+    // the footer now carries it and `image_heap_sig_with_vars` reads it back.
+    //
+    // The VERDICT is not asserted here on purpose: an extremum has a by-name rule
+    // (`is_extremum`) that answers `(math/max 1 2)` from its operands with no declaration
+    // at all, so a verdict on it passed with the footer fallback removed (sabotage,
+    // 2026-09-20) — and std declares no other variable-bearing signature. The call-site
+    // reader is gated in its own process by `tests/image_sig_type_variables.rs`, which
+    // plants a footer entry no rule knows.
+    let interp = interp_with_image();
+    let sym = value::intern("math/max");
+    assert!(
+        derive::image_sig_text(&interp.heap, sym).is_some(),
+        "the footer carries no type for math/max"
+    );
+    assert!(
+        sigs::image_heap_sig_with_vars(&interp.heap, sym).is_some(),
+        "the footer's text does not read as a type-variable declaration"
+    );
+}
+
+#[test]
+fn a_curated_name_asks_for_no_load() {
+    // A name in the checker's curated table (`sigs::curated_sig`) is read from the table
+    // ahead of the footer and ahead of inference — so whether its module is loaded changes
+    // nothing the checker says about a call to it. The transitive scan loaded it anyway: 26
+    // std modules' bodies name `io/puts`, 38 name `seq/filter`, and every check that loaded
+    // any of them materialised `io` and `seq` for a type it already had (2026-09-20).
+    //
+    // Four curated names in four modules, because a test earlier in this process can leave
+    // a module materialised for every later `Interp` (the image install shares the prelude
+    // region): the fixture names all four, the scan runs once, and every module that was
+    // NOT loaded before it must still not be — with at least one such module, else the
+    // scan's decision was unobservable and the test says so instead of passing.
+    assert!(
+        std::env::var_os("BROOD_IMAGE_TRACE").is_none(),
+        "this test observes the untraced path; unset BROOD_IMAGE_TRACE"
+    );
+    const PROBES: [(&str, &str); 4] = [
+        ("io/puts", "io"),
+        ("seq/filter", "seq"),
+        ("math/nan?", "math"),
+        ("reflect/read-string", "reflect"),
+    ];
+    let mut interp = interp_with_image();
+    let dir = std::env::temp_dir().join(format!("curated-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("curated-probe.blsp");
+    std::fs::write(
+        &file,
+        "(defmodule curated-probe)\n\
+         (defn say (x) (io/puts x))\n\
+         (defn evens (xs) (seq/filter xs (fn (x) (math/nan? x))))\n\
+         (defn read (s) (reflect/read-string s))\n",
+    )
+    .expect("write the fixture");
+    interp
+        .eval_str(&format!("(reflect/load {:?})", file.display().to_string()))
+        .expect("load the fixture");
+    let loaded = |interp: &mut crate::Interp, m: &str| -> bool {
+        let v = interp
+            .eval_str(&format!("(contains? *features* \"{m}\")"))
+            .expect("read *features*");
+        interp.print(v) == "true"
+    };
+    assert!(loaded(&mut interp, "curated-probe"));
+    for (name, _) in PROBES {
+        assert!(
+            sigs::curated_sig(value::intern(name)).is_some(),
+            "{name} is no longer curated — the probe needs another curated, unbound name"
+        );
+    }
+    let observable: Vec<&str> = PROBES
+        .iter()
+        .map(|(_, module)| *module)
+        .filter(|module| !loaded(&mut interp, module))
+        .collect();
+    assert!(
+        !observable.is_empty(),
+        "every probe module is already loaded — the scan's decision cannot be observed"
+    );
+    check::materialise_referenced_modules(&mut interp.heap);
+    let _ = std::fs::remove_dir_all(&dir);
+    for module in observable {
+        assert!(
+            !loaded(&mut interp, module),
+            "the transitive scan loaded `{module}` for a curated name"
+        );
+    }
+}
+
+#[test]
+fn a_curated_name_reads_the_same_loaded_or_not() {
+    // The curated skip (a curated name asks the transitive scan for no load) is sound only
+    // if `sig_of` answers the same for the name whether or not its module is in the heap.
+    // The hole it could hide: a name that is curated AND declared with a declaration the
+    // footer declines (`-> any`, an overload) — loaded, `sig_of` reads the declaration;
+    // unloaded it reads the curated entry, and the skip means nothing ever loads the module
+    // to close the gap. The tree differential says no such name is EXERCISED; this says
+    // none EXISTS: for every curated name that is an imaged function, `sig_of` before its
+    // module loads equals `sig_of` after.
+    let mut interp = interp_with_image();
+    let mut names: Vec<(String, value::Symbol)> = sigs::curated_names()
+        .into_iter()
+        .filter(|&sym| derive::image_sig_arity(&interp.heap, sym).is_some())
+        .map(|sym| (value::symbol_name(sym), sym))
+        .collect();
+    names.sort();
+    assert!(
+        names.len() >= 10,
+        "only {} curated names are imaged functions — the probe is not looking at std",
+        names.len()
+    );
+    let before: Vec<Option<crate::types::Sig>> = names
+        .iter()
+        .map(|&(_, sym)| sigs::sig_of(&interp.heap, sym))
+        .collect();
+    let mut modules: Vec<String> = names.iter().map(|(_, sym)| module_of(*sym)).collect();
+    modules.sort();
+    modules.dedup();
+    for module in &modules {
+        interp
+            .eval_str(&format!("(require-one '{module})"))
+            .unwrap_or_else(|e| panic!("load {module}: {e:?}"));
+    }
+    for ((name, sym), before) in names.iter().zip(before) {
+        let after = sigs::sig_of(&interp.heap, *sym);
+        assert_eq!(
+            before, after,
+            "{name}: sig_of answers differently with its module loaded — the curated skip \
+             would hide a declaration the footer does not carry"
+        );
+        // A call site reads an OVERLOAD (`declared_heap_overload`) and a type-variable
+        // declaration (`declared_heap_sig_with_vars`) ahead of `sig_of`, and neither goes
+        // through `as_arrow`, so `sig_of` agreeing proves nothing about them: the first
+        // shape of this gate passed with `math/pow` — a four-arm overload — curated
+        // (sabotage, 2026-09-20). Loaded, those readers must find nothing the footer does
+        // not also carry.
+        assert!(
+            sigs::declared_heap_overload(&interp.heap, *sym).is_none(),
+            "{name}: curated AND declared as an overload — loaded, a call resolves per arm; \
+             unloaded, it reads the curated entry, and the skip never loads the module"
+        );
+        assert!(
+            sigs::declared_heap_sig_with_vars(&interp.heap, *sym).is_none()
+                || sigs::image_heap_sig_with_vars(&interp.heap, *sym).is_some(),
+            "{name}: curated AND declared with type variables the footer does not carry"
         );
     }
 }

@@ -2,15 +2,24 @@
 //!
 //! Replaces the CPU softbuffer present + per-pixel blit with two instanced-quad
 //! pipelines. Every op becomes quads: a solid-fill op (Clear / Rect / FRect / VSpans /
-//! Cells / CellsRgb / Quad, plus a text op's cell background) a coloured quad, a glyph or
-//! a `Sprite` a textured one. The quads are drawn in op order in **batches** — a run of
-//! consecutive solids is one instanced draw, a run of consecutive textured quads from the
-//! same texture another — so a frame costs a handful of draw calls whatever its op
-//! count, and a sprite drawn after a rect lands on top of it, as the CPU painter's op
-//! order promises. Glyphs share one texture (an atlas the rasterised clusters are packed
-//! into as they first appear), so a page of text is one batch, not one draw per glyph.
-//! The swapchain presents without vsync unless the window asked for it, so a sim's frame
-//! rate is bounded by work, not the monitor refresh.
+//! Cells / CellsRgb / Quad, a text op's cell background, a cursor, an underline) a
+//! coloured quad, a glyph or a `Sprite` a textured one. The quads are drawn in op order
+//! in **batches** — a run of consecutive solids is one instanced draw, a run of textured
+//! quads from the same texture another — so a frame costs a handful of draw calls
+//! whatever its op count, and a sprite drawn after a rect lands on top of it, as the CPU
+//! painter's op order promises. Glyphs share one texture (an atlas the rasterised
+//! clusters are packed into as they first appear), so a page of text is one batch, not
+//! one draw per glyph. The swapchain presents without vsync unless the window asked for
+//! it, so a sim's frame rate is bounded by work, not the monitor refresh.
+//!
+//! The op walk mirrors the CPU painter's (`paint::render_ops`) arm for arm — the same
+//! grid origin, the same scroll shift, the same region metrics and clip band, the same
+//! cursor geometry — so a frame lands on the same pixels whichever target paints it. A
+//! rounded or sub-cell rect is a signed-distance field in the fragment shader, the same
+//! 1 px coverage ramp `fill_rrect` computes per pixel; a clip band is a per-instance rect
+//! the fragment shader discards outside of. The one visible difference is text
+//! anti-aliasing: the GPU samples one coverage per pixel (grey AA) where the CPU path
+//! can render subpixel (LCD) text at 1×, and the contrast lift is not applied.
 //!
 //! This module is MECHANISM only. It knows a quad, a texture, a UV rect, a tint and an
 //! angle; what a sprite sheet is, how a line is a thin quad at an angle, which frame an
@@ -20,11 +29,6 @@
 //! and the GLES 3.0 context the first prototype requested exists on neither (CGL is
 //! desktop-GL only and deprecated; Windows needs ANGLE). wgpu picks Vulkan / Metal / DX12
 //! per platform behind one code path — and is what an in-browser build would draw with.
-//!
-//! Scope: `Cursor`, `CursorZone`, `ScrollRegion` and `CellRegion` are not drawn
-//! (unimplemented GPU features, like the CPU path's rounded corners — a `Rect` radius
-//! renders square here). Shaping (cosmic-text) is untouched; this module only owns the
-//! *render target*. winit, input, and the draw-op protocol are all unchanged.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -34,18 +38,24 @@ use winit::window::Window;
 
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::host::gui::backend::Renderer;
-use crate::host::gui::Op;
-use crate::host::text_width::cluster_cells;
+use crate::host::gui::backend::{snap_hairline, Renderer, CURSOR_FG};
+use crate::host::gui::{CursorStyle, Op};
+use crate::host::text_width::{cluster_cells, cluster_cells_at, TAB_WIDTH};
 
 const DEFAULT_FG: [u8; 3] = [0xe5, 0xe5, 0xe5];
 const DEFAULT_BG_RGB: [u8; 3] = [12, 12, 16];
+
+/// The most a scroll region shifts its ops, in pixels — the CPU painter's cap, so a
+/// runaway `dy_frac` moves a region off-screen rather than to infinity.
+const MAX_SCROLL_PX: f32 = 16384.0;
 
 /// Both pipelines. A quad is four vertices of a triangle strip generated from the vertex
 /// index (no vertex buffer): `corner` is (0,0) (1,0) (0,1) (1,1), and every per-quad
 /// value rides in the instance buffer. Pixel coordinates, top-left origin, mapped to NDC
 /// through the viewport uniform — the CPU painter's coordinate contract. A quad turns
 /// about its own centre by `rot` radians (clockwise on screen, since y points down).
+/// Every quad carries a clip rect `[x0 y0 x1 y1]` the fragment stage discards outside
+/// of — how a cell region's band and a scroll region's grid-top clip are honoured.
 const SHADER_SRC: &str = r#"
 struct Viewport { size: vec2<f32>, _pad: vec2<f32> };
 @group(0) @binding(0) var<uniform> viewport: Viewport;
@@ -69,29 +79,64 @@ fn to_ndc(px: vec2<f32>) -> vec4<f32> {
                      1.0 - px.y / viewport.size.y * 2.0, 0.0, 1.0);
 }
 
+fn clipped(pos: vec2<f32>, clip: vec4<f32>) -> bool {
+    return pos.x < clip.x || pos.y < clip.y || pos.x >= clip.z || pos.y >= clip.w;
+}
+
 // --- solid quads -------------------------------------------------------------------
 
 struct SolidInst {
     @location(0) rect: vec4<f32>,   // x, y, w, h in pixels
     @location(1) color: vec4<f32>,  // straight rgba, 0..1
     @location(2) rot: f32,          // radians about the centre
+    @location(3) radius: f32,       // corner radius in pixels (with `aa`)
+    @location(4) aa: f32,           // 1 = SDF edge (rounded / fractional), 0 = plain fill
+    @location(5) clip: vec4<f32>,   // x0, y0, x1, y1 in pixels
 };
 struct SolidOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) color: vec4<f32>,
+    @location(1) local: vec2<f32>,  // the fragment's offset from the quad's top-left, px
+    @location(2) @interpolate(flat) half: vec2<f32>,
+    @location(3) @interpolate(flat) radius: f32,
+    @location(4) @interpolate(flat) aa: f32,
+    @location(5) @interpolate(flat) clip: vec4<f32>,
 };
 
 @vertex
 fn vs_solid(@builtin(vertex_index) vi: u32, inst: SolidInst) -> SolidOut {
     var out: SolidOut;
-    out.pos = to_ndc(place(inst.rect, corner(vi), inst.rot));
+    let c = corner(vi);
+    out.pos = to_ndc(place(inst.rect, c, inst.rot));
     out.color = inst.color;
+    out.local = c * inst.rect.zw;
+    out.half = inst.rect.zw * 0.5;
+    out.radius = inst.radius;
+    out.aa = inst.aa;
+    out.clip = inst.clip;
     return out;
 }
 
 @fragment
 fn fs_solid(in: SolidOut) -> @location(0) vec4<f32> {
-    return in.color;
+    if (clipped(in.pos.xy, in.clip)) {
+        discard;
+    }
+    if (in.aa == 0.0) {
+        return in.color;
+    }
+    // The rounded-box signed distance from the pixel centre to the rect's rounded core
+    // (the rect inset by the radius), as `fill_rrect` computes it: a 1 px coverage ramp
+    // at the edge, so corners and fractional edges read smooth.
+    let p = in.local - in.half;
+    let r = min(in.radius, min(in.half.x, in.half.y));
+    let q = abs(p) - (in.half - vec2<f32>(r, r));
+    let d = length(max(q, vec2<f32>(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - r;
+    let coverage = clamp(0.5 - d, 0.0, 1.0);
+    if (coverage <= 0.0) {
+        discard;
+    }
+    return vec4<f32>(in.color.rgb, in.color.a * coverage);
 }
 
 // --- textured quads ------------------------------------------------------------------
@@ -102,12 +147,14 @@ struct TexInst {
     @location(2) tint: vec4<f32>,   // straight rgba, 0..1
     @location(3) mode: u32,         // 1 = coverage mask recoloured with tint, 0 = colour
     @location(4) rot: f32,          // radians about the centre
+    @location(5) clip: vec4<f32>,   // x0, y0, x1, y1 in pixels
 };
 struct TexOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) tint: vec4<f32>,
     @location(2) @interpolate(flat) mode: u32,
+    @location(3) @interpolate(flat) clip: vec4<f32>,
 };
 
 @group(1) @binding(0) var tex: texture_2d<f32>;
@@ -121,11 +168,15 @@ fn vs_tex(@builtin(vertex_index) vi: u32, inst: TexInst) -> TexOut {
     out.uv = inst.uv.xy + c * inst.uv.zw;
     out.tint = inst.tint;
     out.mode = inst.mode;
+    out.clip = inst.clip;
     return out;
 }
 
 @fragment
 fn fs_tex(in: TexOut) -> @location(0) vec4<f32> {
+    if (clipped(in.pos.xy, in.clip)) {
+        discard;
+    }
     let t = textureSample(tex, samp, in.uv);
     if (in.mode == 1u) {
         return vec4<f32>(in.tint.rgb, t.a * in.tint.a);
@@ -134,10 +185,11 @@ fn fs_tex(in: TexOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// One solid instance: rect (4) + rgba (4) + rot (1), as the shader's `SolidInst`.
-const SOLID_FLOATS: usize = 9;
-/// One textured instance: rect (4) + uv (4) + tint (4) + mode (1 u32 as its bits) + rot (1).
-const TEX_WORDS: usize = 14;
+/// One solid instance: rect (4) + rgba (4) + rot (1) + radius (1) + aa (1) + clip (4).
+const SOLID_FLOATS: usize = 15;
+/// One textured instance: rect (4) + uv (4) + tint (4) + mode (1 u32 as its bits) + rot (1)
+/// + clip (4).
+const TEX_WORDS: usize = 18;
 
 /// The glyph atlas page size. 2048² RGBA is 16 MB — a few thousand cells' worth of
 /// glyphs at an editor size, and every device wgpu runs on allows at least 8192².
@@ -223,15 +275,25 @@ enum Batch {
     Tex { key: TexKey, first: u32, count: u32 },
 }
 
+/// A solid quad's edge treatment: a plain fill, or the SDF ramp (with a corner radius in
+/// pixels) a rounded or sub-cell rect wants.
+#[derive(Clone, Copy)]
+enum Edge {
+    Plain,
+    Rounded(f32),
+}
+
 /// The frame under construction: both instance buffers' contents and the batch list, in
 /// op order. Solids and textured quads keep separate buffers (different strides) and the
-/// batch list says in which order to draw runs of each.
+/// batch list says in which order to draw runs of each. `clip` is the rect every quad
+/// pushed while it is set is clipped to — the whole viewport outside any region.
 struct FrameBuilder {
     solids: Vec<f32>,
     texs: Vec<u32>,
     batches: Vec<Batch>,
     fw: f32,
     fh: f32,
+    clip: [f32; 4],
 }
 
 impl FrameBuilder {
@@ -242,15 +304,24 @@ impl FrameBuilder {
             batches: Vec::new(),
             fw,
             fh,
+            clip: [0.0, 0.0, fw, fh],
         }
     }
 
-    /// Whether a quad can put a pixel on screen. A rotated quad is judged by the disc
-    /// its rotation sweeps, so a long thin quad turned across the viewport's corner is
-    /// kept rather than culled by its unrotated rect.
+    /// Whether a quad can put a pixel on screen and inside the clip. A rotated quad is
+    /// judged by the disc its rotation sweeps, so a long thin quad turned across the
+    /// viewport's corner is kept rather than culled by its unrotated rect.
     fn visible(&self, x: f32, y: f32, w: f32, h: f32, rot: f32) -> bool {
+        let [cx0, cy0, cx1, cy1] = self.clip;
+        if cx1 <= cx0 || cy1 <= cy0 {
+            return false;
+        }
         if rot == 0.0 {
-            return quad_visible(x, y, w, h, self.fw, self.fh);
+            return quad_visible(x, y, w, h, self.fw, self.fh)
+                && x < cx1
+                && y < cy1
+                && x + w > cx0
+                && y + h > cy0;
         }
         let radius = (w * w + h * h).sqrt() * 0.5;
         let (cx, cy) = (x + w * 0.5, y + h * 0.5);
@@ -265,10 +336,14 @@ impl FrameBuilder {
     }
 
     /// A solid quad; `rgba[3]` is its alpha.
-    fn solid(&mut self, x: f32, y: f32, w: f32, h: f32, rgba: [u8; 4], rot: f32) {
+    fn solid(&mut self, x: f32, y: f32, w: f32, h: f32, rgba: [u8; 4], rot: f32, edge: Edge) {
         if !self.visible(x, y, w, h, rot) {
             return;
         }
+        let (radius, aa) = match edge {
+            Edge::Plain => (0.0, 0.0),
+            Edge::Rounded(r) => (r.max(0.0), 1.0),
+        };
         let index = (self.solids.len() / SOLID_FLOATS) as u32;
         self.solids.extend_from_slice(&[
             x,
@@ -280,6 +355,12 @@ impl FrameBuilder {
             rgba[2] as f32 / 255.0,
             rgba[3] as f32 / 255.0,
             rot,
+            radius,
+            aa,
+            self.clip[0],
+            self.clip[1],
+            self.clip[2],
+            self.clip[3],
         ]);
         match self.batches.last_mut() {
             Some(Batch::Solid { count, .. }) => *count += 1,
@@ -288,6 +369,11 @@ impl FrameBuilder {
                 count: 1,
             }),
         }
+    }
+
+    /// A plain opaque solid — the common cell-aligned fill.
+    fn fill(&mut self, x: f32, y: f32, w: f32, h: f32, rgb: [u8; 3]) {
+        self.solid(x, y, w, h, [rgb[0], rgb[1], rgb[2], 255], 0.0, Edge::Plain);
     }
 
     /// A textured quad sampling `uv` (`[u0 v0 du dv]`, texture space) of `key`.
@@ -323,6 +409,10 @@ impl FrameBuilder {
             (tint[3] as f32 / 255.0).to_bits(),
             u32::from(mono),
             rot.to_bits(),
+            self.clip[0].to_bits(),
+            self.clip[1].to_bits(),
+            self.clip[2].to_bits(),
+            self.clip[3].to_bits(),
         ]);
         match self.batches.last_mut() {
             Some(Batch::Tex { key: k, count, .. }) if *k == key => *count += 1,
@@ -333,6 +423,19 @@ impl FrameBuilder {
             }),
         }
     }
+}
+
+/// Where the ops being expanded land: the grid origin and cell size in effect (a
+/// `CellRegion` installs its own), the scroll shift an enclosing `ScrollRegion` applies,
+/// and the clip rect to restore when a region ends. The CPU painter threads the same
+/// values through `render_ops`.
+#[derive(Clone, Copy)]
+struct Grid {
+    ox: f32,
+    oy: f32,
+    cw: f32,
+    ch: f32,
+    scroll_dy: f32,
 }
 
 /// One open window's GPU state: the wgpu surface + device, the two instanced-quad
@@ -355,7 +458,7 @@ pub struct GpuWindow {
     tex_instances: InstanceBuffer,
     sampler: wgpu::Sampler,
     atlas: Vec<AtlasPage>,
-    /// Cluster+face key → its atlas slot; `None` for a cluster that rasterised to
+    /// Cluster+face+px key → its atlas slot; `None` for a cluster that rasterised to
     /// nothing (or was too big for a page), remembered so it is not retried each frame.
     glyphs: HashMap<u64, Option<AtlasGlyph>>,
     textures: HashMap<u32, GpuTexture>,
@@ -368,7 +471,7 @@ pub struct GpuWindow {
 /// quad before drawing — unlike the CPU painter, whose fills clip against the framebuffer
 /// and cost nothing when off-screen. `Op::Cells` pushes one quad per live bit of a
 /// caller-supplied bitboard, so without a cull a board far larger than the window grows
-/// the instance buffer (36 bytes a quad) without bound instead of drawing nothing.
+/// the instance buffer (60 bytes a quad) without bound instead of drawing nothing.
 ///
 /// Written as a **positive** test on purpose: a frame is ordinary Brood data, so a
 /// coordinate can be NaN, and every comparison against NaN is false. Phrased this way
@@ -409,9 +512,44 @@ fn pick_present_mode(modes: &[wgpu::PresentMode], vsync: bool) -> wgpu::PresentM
     }
 }
 
+/// A scroll region's shift in pixels for a `dy_frac` of the cell height, capped — the
+/// CPU painter's `scroll_px`.
+fn scroll_px(dy_frac: f32, ch: f32) -> f32 {
+    (dy_frac * ch).round().clamp(-MAX_SCROLL_PX, MAX_SCROLL_PX)
+}
+
+/// The cursor's quads for one cell: `(x, y, w, h, colour)` each. Block is a 50% white
+/// overlay plus a solid rim `t` thick; Bar a caret on the left edge; Underline a rule
+/// along the bottom — the CPU `cursor_cell`'s geometry, thickness scaled with the cell so
+/// it stays proportional on HiDPI (never under 2 px).
+fn cursor_quads(
+    left: f32,
+    top: f32,
+    cw: f32,
+    ch: f32,
+    style: CursorStyle,
+) -> Vec<(f32, f32, f32, f32, [u8; 4])> {
+    let fg = [CURSOR_FG[0], CURSOR_FG[1], CURSOR_FG[2], 255];
+    match style {
+        CursorStyle::Block => {
+            let t = (cw / 10.0).floor().max(2.0);
+            vec![
+                (left, top, cw, ch, [255, 255, 255, 128]),
+                (left, top, t, ch, fg),
+                (left + cw - t, top, t, ch, fg),
+                (left, top, cw, t, fg),
+                (left, top + ch - t, cw, t, fg),
+            ]
+        }
+        CursorStyle::Bar => vec![(left, top, (cw / 8.0).floor().max(2.0), ch, fg)],
+        CursorStyle::Underline => {
+            let t = (ch / 10.0).floor().max(2.0);
+            vec![(left, top + ch - t, cw, t, fg)]
+        }
+    }
+}
+
 impl GpuWindow {
-    /// Create a wgpu surface + device on an existing winit window, build the two quad
-    /// pipelines, and configure the swapchain (vsync as the window asked).
     pub fn new(window: Rc<Window>, vsync: bool) -> Result<GpuWindow, String> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let raw_display_handle = window
@@ -565,7 +703,8 @@ impl GpuWindow {
                     array_stride: (SOLID_FLOATS * 4) as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x4, 1 => Float32x4, 2 => Float32
+                        0 => Float32x4, 1 => Float32x4, 2 => Float32, 3 => Float32,
+                        4 => Float32, 5 => Float32x4
                     ],
                 })],
             },
@@ -598,7 +737,8 @@ impl GpuWindow {
                     array_stride: (TEX_WORDS * 4) as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Uint32, 4 => Float32
+                        0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Uint32,
+                        4 => Float32, 5 => Float32x4
                     ],
                 })],
             },
@@ -769,55 +909,203 @@ impl GpuWindow {
         }
     }
 
-    /// Draw one frame: expand the ops to quads in op order, upload, draw the batches,
-    /// present. The cell pixel size and the grid origin come from the renderer — the
-    /// same coordinate contract the CPU `paint` uses, so cell ops land on the same pixels
-    /// whichever target paints them. Pixel-space ops (`Sprite`/`Quad`) are window
-    /// coordinates as given.
-    pub(crate) fn paint(&mut self, frame: &[Op], renderer: &mut Renderer) {
-        let (cw, ch) = (renderer.cell_w.max(1), renderer.cell_h.max(1));
-        let size = self.window.inner_size();
-        let (fw, fh) = (size.width.max(1), size.height.max(1));
-        self.resize(fw, fh);
+    /// The atlas slot for cluster `g` under a face at the renderer's current metrics,
+    /// rasterising and packing it on first sight. `None` when it has no pixels.
+    fn glyph_slot(
+        &mut self,
+        renderer: &mut Renderer,
+        g: &str,
+        family: Option<u32>,
+        bold: bool,
+        italic: bool,
+        scale: u16,
+    ) -> Option<AtlasGlyph> {
+        let key = glyph_key(g, family, bold, italic, scale, renderer.metrics().px);
+        if let Some(slot) = self.glyphs.get(&key) {
+            return *slot;
+        }
+        let cg = renderer.cluster_glyph(g, family, bold, italic, scale);
+        let (rgba, w, h, color) = (cg.rgba.clone(), cg.width as u32, cg.height as u32, cg.color);
+        let packed = self.pack_glyph(&rgba, w, h, !color);
+        self.glyphs.insert(key, packed);
+        packed
+    }
 
-        let (fwf, fhf) = (fw as f32, fh as f32);
-        let mut fb = FrameBuilder::new(fwf, fhf);
-        let cwf = cw as f32;
-        let chf = ch as f32;
-        // The grid origin, not the bare inset: the CPU painter centres the vertical
-        // remainder (the rows that do not divide into whole cells), and a frame must land
-        // on the same pixels whichever target paints it.
-        let (ox, oy) = renderer.grid_origin(fw as usize, fh as usize);
-        let (oxf, oyf) = (ox as f32, oy as f32);
-        let opaque = |c: [u8; 3]| [c[0], c[1], c[2], 255];
+    /// Expand `ops` into quads on `fb`, in order, on grid `g` — the CPU painter's
+    /// `render_ops`, arm for arm. Recursion is the two region ops: a scroll region
+    /// re-enters with its shift (and clips at the grid top, as the CPU path clips every
+    /// shifted op there); a cell region re-enters with its own metrics, origin and clip
+    /// band, restoring the renderer's metrics after.
+    fn expand(&mut self, fb: &mut FrameBuilder, renderer: &mut Renderer, ops: &[Op], g: Grid) {
         let atlas_size = ATLAS_SIZE as f32;
-
-        for op in frame {
+        let scale_factor = renderer.scale() as f32;
+        for op in ops {
             match op {
-                // `radius` is ignored here for the same reason `FRect`'s is: this GPU
-                // path has no rounded-quad shader yet, so a rounded panel renders
-                // square. The CPU painter rounds it properly.
+                // The frame was cleared to the background before any op.
+                Op::Clear => {}
+                Op::ScrollRegion { dy_frac, ops } => {
+                    let saved_clip = fb.clip;
+                    // A shifted op is clipped at the grid origin, never painted into the
+                    // inset above it — the CPU path's `clip_skip`.
+                    fb.clip[1] = fb.clip[1].max(g.oy);
+                    let inner = Grid {
+                        scroll_dy: scroll_px(*dy_frac, g.ch),
+                        ..g
+                    };
+                    self.expand(fb, renderer, ops, inner);
+                    fb.clip = saved_clip;
+                }
+                Op::CellRegion {
+                    x, y, h, px, ops, ..
+                } => {
+                    // The rect is in the PARENT's cells (and moves with an enclosing
+                    // scroll); everything inside is on the region's own grid from its
+                    // top-left. The clip band is narrowed to the rect's rows, so an op that
+                    // overruns the region vertically is clipped rather than painted over
+                    // its neighbour. Width is not clipped (the CPU bands rows, not columns).
+                    let region = renderer.metrics_at(*px);
+                    if region.cell_w == 0 || region.cell_h == 0 {
+                        continue;
+                    }
+                    let top = g.oy + *y as f32 * g.ch - g.scroll_dy;
+                    let bottom = top + *h as f32 * g.ch;
+                    let saved_clip = fb.clip;
+                    fb.clip[1] = fb.clip[1].max(top).max(0.0);
+                    fb.clip[3] = fb.clip[3].min(bottom);
+                    if fb.clip[3] > fb.clip[1] {
+                        let saved = renderer.metrics();
+                        renderer.set_metrics(region);
+                        let inner = Grid {
+                            ox: g.ox + *x as f32 * g.cw,
+                            oy: top.max(0.0),
+                            cw: region.cell_w as f32,
+                            ch: region.cell_h as f32,
+                            scroll_dy: 0.0,
+                        };
+                        self.expand(fb, renderer, ops, inner);
+                        renderer.set_metrics(saved);
+                    }
+                    fb.clip = saved_clip;
+                }
+                // Text: the cell BACKGROUNDS as solid quads (a coloured Life cell is a
+                // space + `:bg`) — all of the op's cells first, so they form one solid
+                // batch — then a textured quad per non-space cluster out of the atlas,
+                // which together form one textured batch, then any underline.
+                Op::Text { row, col, s, face } => {
+                    let (mut fg, mut bg) = (
+                        face.fg.unwrap_or(DEFAULT_FG),
+                        face.bg.unwrap_or(DEFAULT_BG_RGB),
+                    );
+                    // A face with no `:bg` is transparent: the glyph composites over
+                    // whatever is under it (an hl-line band), exactly like Emacs.
+                    let mut paint_bg = face.bg.is_some();
+                    if face.reverse {
+                        std::mem::swap(&mut fg, &mut bg);
+                        paint_bg = true;
+                    }
+                    let scale = face.scale.max(1) as usize;
+                    let ch_s = scale as f32 * g.ch;
+                    let top = g.oy + *row as f32 * g.ch - g.scroll_dy;
+                    let mut clusters: Vec<(f32, f32, &str)> = Vec::new();
+                    let mut cx = *col as usize;
+                    for cluster in s.graphemes(true) {
+                        // A raw tab advances to the next SCREEN stop, background only.
+                        if cluster == "\t" {
+                            let cells = cluster_cells_at(cluster, cx, TAB_WIDTH);
+                            if paint_bg {
+                                fb.fill(
+                                    g.ox + cx as f32 * g.cw,
+                                    top,
+                                    cells as f32 * g.cw,
+                                    ch_s,
+                                    bg,
+                                );
+                            }
+                            cx += cells;
+                            continue;
+                        }
+                        let cells = cluster_cells(cluster);
+                        if cells == 0 {
+                            continue;
+                        }
+                        let block_w = (cells * scale) as f32 * g.cw;
+                        let left = g.ox + cx as f32 * g.cw;
+                        if paint_bg {
+                            fb.fill(left, top, block_w, ch_s, bg);
+                        }
+                        if cluster != " " {
+                            clusters.push((left, block_w, cluster));
+                        }
+                        cx += cells * scale;
+                    }
+                    for (left, _, cluster) in &clusters {
+                        let Some(glyph) = self.glyph_slot(
+                            renderer,
+                            cluster,
+                            face.family,
+                            face.bold,
+                            face.italic,
+                            face.scale,
+                        ) else {
+                            continue;
+                        };
+                        fb.textured(
+                            TexKey::Atlas(glyph.page),
+                            *left,
+                            top,
+                            glyph.w as f32,
+                            glyph.h as f32,
+                            [
+                                glyph.x as f32 / atlas_size,
+                                glyph.y as f32 / atlas_size,
+                                glyph.w as f32 / atlas_size,
+                                glyph.h as f32 / atlas_size,
+                            ],
+                            [fg[0], fg[1], fg[2], 255],
+                            glyph.mono,
+                            0.0,
+                        );
+                    }
+                    if face.underline {
+                        // A rule near the block bottom in the text colour, scaled with
+                        // the glyph so it stays proportional.
+                        let uy = top + ch_s - 2.0 * scale as f32;
+                        for (left, block_w, _) in &clusters {
+                            fb.fill(*left, uy, *block_w, scale as f32, fg);
+                        }
+                    }
+                }
                 Op::Rect {
                     row,
                     col,
                     w,
                     h,
                     face,
-                    radius: _,
+                    radius,
                 } => {
-                    if let Some(bg) = face.bg {
-                        fb.solid(
-                            oxf + *col as f32 * cwf,
-                            oyf + *row as f32 * chf,
-                            *w as f32 * cwf,
-                            *h as f32 * chf,
-                            opaque(bg),
-                            0.0,
+                    let bg = if face.reverse { face.fg } else { face.bg };
+                    if let Some(bg) = bg {
+                        let (x, y, pw, ph) = (
+                            g.ox + *col as f32 * g.cw,
+                            g.oy + *row as f32 * g.ch - g.scroll_dy,
+                            *w as f32 * g.cw,
+                            *h as f32 * g.ch,
                         );
+                        if *radius > 0.0 {
+                            fb.solid(
+                                x,
+                                y,
+                                pw,
+                                ph,
+                                [bg[0], bg[1], bg[2], 255],
+                                0.0,
+                                Edge::Rounded(*radius * g.cw),
+                            );
+                        } else {
+                            fb.fill(x, y, pw, ph, bg);
+                        }
                     }
                 }
-                // Sub-cell rect: alpha-blended at the cell-unit float position; the
-                // corner radius is not rounded here (the CPU painter does it properly).
                 Op::FRect {
                     x,
                     y,
@@ -825,29 +1113,51 @@ impl GpuWindow {
                     h,
                     face,
                     opacity,
-                    ..
+                    radius,
                 } => {
-                    if let Some(bg) = face.bg {
+                    // Sub-cell rect: cell-unit floats → px via the same origin and
+                    // metrics every op shares, then an AA, alpha-blended fill. A hairline
+                    // snaps to whole device pixels first, as on the CPU path.
+                    let bg = if face.reverse { face.fg } else { face.bg };
+                    if let Some(bg) = bg {
+                        let (fx, fw, fy, fh, r) = snap_hairline(
+                            g.ox + *x * g.cw,
+                            *w * g.cw,
+                            g.oy + *y * g.ch - g.scroll_dy,
+                            *h * g.ch,
+                            *radius * g.cw,
+                            scale_factor,
+                        );
                         let alpha = (opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
                         fb.solid(
-                            oxf + *x * cwf,
-                            oyf + *y * chf,
-                            *w * cwf,
-                            *h * chf,
+                            fx,
+                            fy,
+                            fw,
+                            fh,
                             [bg[0], bg[1], bg[2], alpha],
                             0.0,
+                            Edge::Rounded(r),
                         );
                     }
                 }
+                Op::Cursor { row, col, style } => {
+                    let left = g.ox + *col as f32 * g.cw;
+                    let top = g.oy + *row as f32 * g.ch - g.scroll_dy;
+                    for (x, y, w, h, rgba) in cursor_quads(left, top, g.cw, g.ch, *style) {
+                        fb.solid(x, y, w, h, rgba, 0.0, Edge::Plain);
+                    }
+                }
+                // Hover metadata, hit-tested in the event loop (ADR-080); nothing to draw.
+                Op::CursorZone { .. } => {}
                 Op::VSpans { row0, col0, cols } => {
-                    let top0 = oyf + *row0 as f32 * chf;
+                    let top0 = g.oy + *row0 as f32 * g.ch - g.scroll_dy;
                     for (i, segs) in cols.iter().enumerate() {
-                        let left = oxf + (*col0 as usize + i) as f32 * cwf;
+                        let left = g.ox + (*col0 as usize + i) as f32 * g.cw;
                         let mut y = top0;
                         for (sh, color) in segs {
-                            let span_h = *sh as f32 * chf;
+                            let span_h = *sh as f32 * g.ch;
                             if let Some(rgb) = color {
-                                fb.solid(left, y, cwf, span_h, opaque(*rgb), 0.0);
+                                fb.fill(left, y, g.cw, span_h, *rgb);
                             }
                             y += span_h;
                         }
@@ -863,7 +1173,7 @@ impl GpuWindow {
                 } => {
                     if let Some(rgb) = color {
                         let asp = (*aspect).max(1) as usize;
-                        let cell_w = (asp as f32) * cwf;
+                        let cell_w = (asp as f32) * g.cw;
                         let wmod = (*w).max(1) as usize;
                         for (bi, &byte) in bytes.iter().enumerate() {
                             let mut b = byte;
@@ -872,13 +1182,12 @@ impl GpuWindow {
                                 let bit = base + b.trailing_zeros() as usize;
                                 let x = (bit % wmod) as f32;
                                 let y = (bit / wmod) as f32;
-                                fb.solid(
-                                    oxf + (*col0 as f32 + x * asp as f32) * cwf,
-                                    oyf + (*row0 as f32 + y) * chf,
+                                fb.fill(
+                                    g.ox + (*col0 as f32 + x * asp as f32) * g.cw,
+                                    g.oy + (*row0 as f32 + y) * g.ch - g.scroll_dy,
                                     cell_w,
-                                    chf,
-                                    opaque(*rgb),
-                                    0.0,
+                                    g.ch,
+                                    *rgb,
                                 );
                                 b &= b - 1;
                             }
@@ -895,7 +1204,7 @@ impl GpuWindow {
                     default,
                 } => {
                     let asp = (*aspect).max(1) as usize;
-                    let cell_w = (asp as f32) * cwf;
+                    let cell_w = (asp as f32) * g.cw;
                     let wmod = (*w).max(1) as usize;
                     for (bi, &byte) in bytes.iter().enumerate() {
                         let mut b = byte;
@@ -905,95 +1214,18 @@ impl GpuWindow {
                             let rgb = colors.get(&(bit as u64)).copied().unwrap_or(*default);
                             let x = (bit % wmod) as f32;
                             let y = (bit / wmod) as f32;
-                            fb.solid(
-                                oxf + (*col0 as f32 + x * asp as f32) * cwf,
-                                oyf + (*row0 as f32 + y) * chf,
+                            fb.fill(
+                                g.ox + (*col0 as f32 + x * asp as f32) * g.cw,
+                                g.oy + (*row0 as f32 + y) * g.ch - g.scroll_dy,
                                 cell_w,
-                                chf,
-                                opaque(rgb),
-                                0.0,
+                                g.ch,
+                                rgb,
                             );
                             b &= b - 1;
                         }
                     }
                 }
-                // Text: the cell BACKGROUNDS as solid quads (a coloured Life cell is a
-                // space + `:bg`) — all of the op's cells first, so they form one solid
-                // batch — then a textured quad per non-space cluster out of the atlas,
-                // which together form one textured batch. Mirrors the CPU `paint`
-                // per-cluster walk.
-                Op::Text { row, col, s, face } => {
-                    let (mut fg, mut bg) = (
-                        face.fg.unwrap_or(DEFAULT_FG),
-                        face.bg.unwrap_or(DEFAULT_BG_RGB),
-                    );
-                    let mut paint_bg = face.bg.is_some();
-                    if face.reverse {
-                        std::mem::swap(&mut fg, &mut bg);
-                        paint_bg = true;
-                    }
-                    let scale = face.scale.max(1) as usize;
-                    let ch_s = scale as f32 * chf;
-                    let top = oyf + *row as f32 * chf;
-                    let mut clusters: Vec<(f32, &str)> = Vec::new();
-                    let mut cx = *col as usize;
-                    for g in s.graphemes(true) {
-                        let cells = cluster_cells(g);
-                        if cells == 0 {
-                            continue;
-                        }
-                        let left = oxf + cx as f32 * cwf;
-                        if paint_bg {
-                            fb.solid(
-                                left,
-                                top,
-                                (cells * scale) as f32 * cwf,
-                                ch_s,
-                                opaque(bg),
-                                0.0,
-                            );
-                        }
-                        if g != " " {
-                            clusters.push((left, g));
-                        }
-                        cx += cells * scale;
-                    }
-                    for (left, g) in clusters {
-                        let key = glyph_key(g, face.family, face.bold, face.italic, face.scale);
-                        if !self.glyphs.contains_key(&key) {
-                            let cg = renderer.cluster_glyph(
-                                g,
-                                face.family,
-                                face.bold,
-                                face.italic,
-                                face.scale,
-                            );
-                            let (rgba, w, h, color) =
-                                (cg.rgba.clone(), cg.width as u32, cg.height as u32, cg.color);
-                            let packed = self.pack_glyph(&rgba, w, h, !color);
-                            self.glyphs.insert(key, packed);
-                        }
-                        let Some(Some(glyph)) = self.glyphs.get(&key) else {
-                            continue;
-                        };
-                        fb.textured(
-                            TexKey::Atlas(glyph.page),
-                            left,
-                            top,
-                            glyph.w as f32,
-                            glyph.h as f32,
-                            [
-                                glyph.x as f32 / atlas_size,
-                                glyph.y as f32 / atlas_size,
-                                glyph.w as f32 / atlas_size,
-                                glyph.h as f32 / atlas_size,
-                            ],
-                            opaque(fg),
-                            glyph.mono,
-                            0.0,
-                        );
-                    }
-                }
+                // Pixel space: window coordinates as given, untouched by grid or scroll.
                 Op::Sprite {
                     tex,
                     x,
@@ -1016,12 +1248,36 @@ impl GpuWindow {
                     color,
                     rot,
                 } => {
-                    fb.solid(*x, *y, *w, *h, *color, *rot);
+                    fb.solid(*x, *y, *w, *h, *color, *rot, Edge::Plain);
                 }
-                // Cursor / zones / regions: not drawn on the GPU path.
-                _ => {}
             }
         }
+    }
+
+    /// Draw one frame: expand the ops to quads in op order, upload, draw the batches,
+    /// present. The cell pixel size and the grid origin come from the renderer — the
+    /// same coordinate contract the CPU `paint` uses, so cell ops land on the same pixels
+    /// whichever target paints them.
+    pub(crate) fn paint(&mut self, frame: &[Op], renderer: &mut Renderer) {
+        let (cw, ch) = (renderer.cell_w.max(1), renderer.cell_h.max(1));
+        let size = self.window.inner_size();
+        let (fw, fh) = (size.width.max(1), size.height.max(1));
+        self.resize(fw, fh);
+
+        let (fwf, fhf) = (fw as f32, fh as f32);
+        let mut fb = FrameBuilder::new(fwf, fhf);
+        // The grid origin, not the bare inset: the CPU painter centres the vertical
+        // remainder (the rows that do not divide into whole cells), and a frame must land
+        // on the same pixels whichever target paints it.
+        let (ox, oy) = renderer.grid_origin(fw as usize, fh as usize);
+        let grid = Grid {
+            ox: ox as f32,
+            oy: oy as f32,
+            cw: cw as f32,
+            ch: ch as f32,
+            scroll_dy: 0.0,
+        };
+        self.expand(&mut fb, renderer, frame, grid);
 
         self.queue
             .write_buffer(&self.viewport_buffer, 0, as_bytes(&[fwf, fhf, 0.0, 0.0]));
@@ -1122,10 +1378,10 @@ impl GpuWindow {
     }
 }
 
-/// The atlas key of a cluster under a face: what it is drawn from depends on the
-/// cluster, the family, the weight/slant and the scale — not the colour, which is a
-/// per-instance tint.
-fn glyph_key(g: &str, family: Option<u32>, bold: bool, italic: bool, scale: u16) -> u64 {
+/// The atlas key of a cluster under a face at a font size: what it is drawn from depends
+/// on the cluster, the family, the weight/slant, the scale and the pixel size (a cell
+/// region rasterises at its own px) — not the colour, which is a per-instance tint.
+fn glyph_key(g: &str, family: Option<u32>, bold: bool, italic: bool, scale: u16, px: f32) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     g.hash(&mut h);
@@ -1133,6 +1389,7 @@ fn glyph_key(g: &str, family: Option<u32>, bold: bool, italic: bool, scale: u16)
     bold.hash(&mut h);
     italic.hash(&mut h);
     scale.hash(&mut h);
+    px.to_bits().hash(&mut h);
     h.finish()
 }
 
@@ -1305,8 +1562,8 @@ mod tests {
     #[test]
     fn consecutive_quads_of_one_kind_form_one_batch_and_a_kind_change_starts_another() {
         let mut fb = FrameBuilder::new(FW, FH);
-        fb.solid(0.0, 0.0, 10.0, 10.0, [255, 0, 0, 255], 0.0);
-        fb.solid(20.0, 0.0, 10.0, 10.0, [255, 0, 0, 255], 0.0);
+        fb.solid(0.0, 0.0, 10.0, 10.0, [255, 0, 0, 255], 0.0, Edge::Plain);
+        fb.solid(20.0, 0.0, 10.0, 10.0, [255, 0, 0, 255], 0.0, Edge::Plain);
         let uv = [0.0, 0.0, 1.0, 1.0];
         fb.textured(
             TexKey::User(7),
@@ -1341,7 +1598,7 @@ mod tests {
             false,
             0.0,
         );
-        fb.solid(40.0, 0.0, 10.0, 10.0, [0, 255, 0, 255], 0.0);
+        fb.solid(40.0, 0.0, 10.0, 10.0, [0, 255, 0, 255], 0.0, Edge::Plain);
         let shape: Vec<(bool, u32, u32)> = fb
             .batches
             .iter()
@@ -1361,9 +1618,47 @@ mod tests {
     }
 
     #[test]
+    fn a_clip_band_culls_what_lies_outside_it_and_rides_on_every_quad() {
+        let mut fb = FrameBuilder::new(FW, FH);
+        fb.clip = [0.0, 100.0, FW, 200.0];
+        // Wholly above the band: culled. Straddling it: kept, carrying the band.
+        fb.solid(10.0, 10.0, 10.0, 10.0, [255; 4], 0.0, Edge::Plain);
+        assert!(fb.batches.is_empty());
+        fb.solid(10.0, 95.0, 10.0, 10.0, [255; 4], 0.0, Edge::Plain);
+        assert_eq!(fb.solids.len(), SOLID_FLOATS);
+        assert_eq!(&fb.solids[SOLID_FLOATS - 4..], &[0.0, 100.0, FW, 200.0]);
+        // A rounded edge is flagged for the SDF path with its radius.
+        fb.solid(10.0, 120.0, 10.0, 10.0, [255; 4], 0.0, Edge::Rounded(3.0));
+        assert_eq!(&fb.solids[SOLID_FLOATS + 9..SOLID_FLOATS + 11], &[3.0, 1.0]);
+    }
+
+    #[test]
+    fn cursor_quads_follow_the_cpu_geometry() {
+        // Block: the overlay plus four rim bars, 2 px thick for a 10 px cell.
+        let block = cursor_quads(100.0, 50.0, 10.0, 20.0, CursorStyle::Block);
+        assert_eq!(block.len(), 5);
+        assert_eq!(block[0], (100.0, 50.0, 10.0, 20.0, [255, 255, 255, 128]));
+        assert_eq!(block[2].0, 108.0); // the right rim at cw - t
+                                       // Bar: one caret on the left edge, at least 2 px.
+        let bar = cursor_quads(100.0, 50.0, 10.0, 20.0, CursorStyle::Bar);
+        assert_eq!(bar.len(), 1);
+        assert_eq!((bar[0].2, bar[0].3), (2.0, 20.0));
+        // Underline: one rule along the cell bottom.
+        let under = cursor_quads(100.0, 50.0, 10.0, 20.0, CursorStyle::Underline);
+        assert_eq!(under[0].1, 68.0);
+    }
+
+    #[test]
+    fn a_scroll_shift_is_whole_pixels_and_capped() {
+        assert_eq!(scroll_px(0.5, 16.0), 8.0);
+        assert_eq!(scroll_px(-0.26, 16.0), -4.0);
+        assert_eq!(scroll_px(1.0e9, 16.0), MAX_SCROLL_PX);
+    }
+
+    #[test]
     fn a_culled_quad_leaves_no_instance_and_no_batch() {
         let mut fb = FrameBuilder::new(FW, FH);
-        fb.solid(-100.0, -100.0, 10.0, 10.0, [255; 4], 0.0);
+        fb.solid(-100.0, -100.0, 10.0, 10.0, [255; 4], 0.0, Edge::Plain);
         assert!(fb.batches.is_empty());
         assert!(fb.solids.is_empty());
     }

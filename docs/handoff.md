@@ -12,7 +12,53 @@ sysctl that moves under you — that file's last section has the one-line check)
 questions are answerable here; check that file's "what this box CAN answer" before deferring
 anything.
 
-## 2026-09-20 night — pixel space on the display seam, the GPU target on wgpu, and `b2d` (ADR-374)
+## 2026-09-20 late — footer coverage: three mechanism gaps and 54 declarations; KI-171
+
+**Green at the commit below** on every gate that names the change: the checker unit suite
+(507), `nest::image_sigs_differential` over `std/` and `tests/`, `nest check --strict` over
+both (only the owner's in-flight `gui/texture` advisory), the pre-push's named tests (455),
+`sig_placement`, `type_grammar_agreement`. The three unformatted files and the
+`gui/texture` warning belong to the owner's uncommitted ADR-374 work, not to this.
+
+**What it is.** The 2026-09-18 handover's last item — "index COVERAGE, not a mechanism" —
+was wrong by three mechanisms, found by ranking every std module's cross-module references
+against what the footer types (devlog 2026-09-20 (6) has the table):
+
+1. **KI-171.** The transitive scan (ADR-340) had been a no-op untraced since ADR-370 landed
+   — `trace && wanted.insert(module)`. Every "modules materialised" number taken with
+   `BROOD_IMAGE_TRACE=1`, including the 13.2M, was of a scan the shipped binary did not run.
+2. **Curated names loaded their modules for nothing** (`seq/filter` ×38 modules, `io/puts`
+   ×26): the table is read ahead of the footer and of inference. They skip now.
+3. **A type-variable declaration could not ride** (`math/max`, 47 of 100 corpus checks):
+   `?A` parses to `any` flat. It rides, with its own footer reader at both call-typing
+   sites; and the `%defseq` trio had no index entry at all.
+
+Then `sig_of` reads the footer AFTER the primitives (a native is never in it) and BEFORE the
+curated table (a declaration outranks a curated entry either way it arrives), and 54
+declarations on the names the ranking put next. Footer: 146 → 196 authoritative types.
+
+**Measured** (callgrind, `BROOD_TIER=1`, both arms from one commit, images self-written):
+against the scan-ALIVE baseline nothing regresses and the load-heavy rows drop 7–30%
+(`json/encode` one-liner −29.9%, `json` −19.7%, `strings` −13.5%, `http` −10.5%); against
+the shipped scan-dead binary `http` is +5.7% — ADR-340 loading `tcp`/`tls`/`url` as it
+should — and the json rows −15%/−22%.
+
+**Two rig traps, both hit here.** (a) The stdlib image's WRITER is part of the measurement:
+a debug-written image moved the same release binary's count +2.3% (KI-166's class — the
+interner order changes the checker's iteration order). Build the image with the binary
+under test, once, never between arms. (b) The tree moved under the session: the owner's
+`std/gui.blsp` edits changed the stdlib hash between two builds of "the same" binary,
+which read as +2.8% until both arms were built from one commit in worktrees. `BROOD_TIER=1`
+for any count that loads modules — at tier 2 the background compiler's work is
+timing-dependent even under callgrind (±20% on traced runs).
+
+**Open, from the ranking** (`BROOD_IMAGE_TRACE=1 brood --check <file>` prints it per
+program, every name now): `seq/find` and `table/get` return `any` by nature and will
+always load; the tool modules (`project*`, `package`, `reflect/parse-source`) reference each
+other undeclared — only `nest` pays; `proc/info`'s and `os/cmd`'s callers in std that are
+still undeclared.
+
+## 2026-09-20 night — pixel space on the display seam, the GPU target on wgpu, and `b2d` (ADR-374 + addenda)
 
 **What landed.** `host/gui/gpu.rs` is now wgpu 30 (was glow/glutin GLES 3.0, which macOS
 cannot provide): op-order batching, a glyph atlas, the renderer's grid origin, a non-sRGB
@@ -26,23 +72,21 @@ collision, a demo. `wasm-bindgen` pin 0.2.100 → 0.2.128 (wgpu's lockfile floor
 
 **How to look at it.** A `gui-gpu` runtime lives in `target/gpu/release-fast/{brood,nest}`
 (its own target dir — `make ab`'s binary is untouched); `./configure --with-gui-gpu &&
-make install` is the real thing. `BROOD_GUI_GPU=1 BROOD_GUI_DUMP=/tmp/f.ppm nest run
+make install` is the real thing. `BROOD_GUI_DUMP=/tmp/f.ppm nest run
 --for 2s` in `b2d`, then `ffmpeg -i /tmp/f.ppm f.png` — GNOME refuses screenshots to an
 unprivileged process, the readback is the way.
 
-**Traps.** The GPU target is still runtime-gated (`BROOD_GUI_GPU=1`) even when built in;
-`bedit` and `pong` run on the CPU target unless it is set. Vector patterns in `match` are
+**Traps.** A `--with-gui-gpu` build draws on the GPU by default now; `BROOD_GUI_GPU=0` is
+the A/B lever back to the CPU painter. Vector patterns in `match` are
 fixed-length — a `[:mouse …]` message is 6 or 7 long, dispatch on `(first m)`. `/` is
 exact: the frame parser now reads a ratio as a float, but the Brood side should `->float`
 its geometry. The pixel-input mode is exercised by `b2d`'s demo, not by a test — a real
 pointer is needed.
 
-**Open, in order.** (1) Drop the `BROOD_GUI_GPU` runtime gate once the GPU target draws
-what the CPU one does (cursor, zones, regions, rounded corners) — then `--with-gui-gpu`
-alone selects it. (2) A pixel-space text op, or leave HUD text to the cell grid. (3) The
-frontend as its own process over the ADR-090 link (the ops already reference no in-process
-memory). (4) Windows: nine Unix-bound files, no CI job — a separate track the user wants
-later. (5) wasm: the GUI thread's single-threaded variant for the playground.
+**Open, in order.** (1) ✅ the gate is gone (2026-09-20 later): the GPU target draws every
+op and is the default of a `--with-gui-gpu` build. (2) A pixel-space text op, or leave HUD text to the cell grid. (3) ✅ the
+frontend as its own process (2026-09-20 later still): `b2d/serve` + `nest attach --gui`. (4) Windows: nine Unix-bound files, no CI job — a separate track the user wants
+later. (5) wasm: with (3) done, the natural route is a BROWSER frontend painting the same ops (a canvas/WebGPU client of the display protocol over a WebSocket), not a port of the winit thread.
 
 ## 2026-09-20 evening — KI-170: a directly loaded module could be "loaded" with nothing bound
 

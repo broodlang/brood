@@ -239,6 +239,43 @@
       (assert= ((get d :poll) 500) [:note 9])
       ;; nothing waiting ⇒ nil after the timeout (ui-run treats it as :tick)
       (assert= ((get d :poll) 1) nil)))
+  (test "remote-display: the pixel-space seam ships a texture, its release and the window options"
+    ;; The three entries a game's `run-on` uses (ADR-374): each becomes one client-bound
+    ;; message the thin client's loop applies to its own display — so a served game's
+    ;; sprite sheet lands in the client's window and the window is told to report pixels.
+    (let (d (remote-display (self) 80 24))
+      ((get d :texture) 7 [1 2 3 4] 1 1)
+      (assert= (receive ([:texture tex rgba w h] [tex rgba w h]) (after 5000 :none))
+        [7 [1 2 3 4] 1 1])
+      ((get d :texture-free) 7)
+      (assert= (receive ([:texture-free tex] tex) (after 5000 :none)) 7)
+      ((get d :configure) {:input :pixels :title "game"})
+      (assert= (receive ([:window o] o) (after 5000 :none)) {:input :pixels :title "game"})))
+
+  (test "attach-display-loop applies a shipped texture and window options to the local display"
+    ;; A fake display records what the loop hands it; a display WITHOUT the entries (the
+    ;; terminal) must not be asked — the message is dropped, not a crash. `[:bye]` ends
+    ;; the loop, as the app quitting does.
+    (let (log (table/new)
+          display {:draw (fn (f) (table/put log :frame f))
+                   :texture (fn (tex rgba w h) (table/put log :texture [tex w h]))
+                   :configure (fn (o) (table/put log :window o))
+                   :leave (fn () nil)}
+          bare {:draw (fn (f) nil) :leave (fn () nil)})
+      (send (self) [:texture 3 [0 0 0 0] 1 1])
+      (send (self) [:window {:input :pixels}])
+      (send (self) [:frame [:clear]])
+      (send (self) [:bye])
+      (editor/serve/attach-display-loop nil (self) display)
+      (assert= (table/get log :texture) [3 1 1])
+      (assert= (table/get log :window) {:input :pixels})
+      (assert= (table/get log :frame) [:clear])
+      ;; the bare display: the same messages, nothing to apply them to, no error
+      (send (self) [:texture 3 [0 0 0 0] 1 1])
+      (send (self) [:texture-free 3])
+      (send (self) [:window {:input :pixels}])
+      (send (self) [:bye])
+      (assert= (editor/serve/attach-display-loop nil (self) bare) nil)))
 
   (test "an async (non-key) mailbox message reaches a served app's update — the event bus"
     ;; The editor pattern: a spawned task / buffer process sends `[:tag …]` straight to the

@@ -108,6 +108,14 @@ pub(crate) fn image_carried_sig(heap: &Heap, form: Value) -> Option<Sig> {
     let sig = annot::without_tables(|| annot::parse_type(heap, form))?
         .as_arrow()
         .cloned()?;
+    // A VARIABLE-bearing arrow — `(& ?A -> ?A)` — is resolved per call from the
+    // arguments (`SigWithVars::resolve_ret`), the first thing a call site consults
+    // for a declared name, whatever its flat return reads as: the variable parses to
+    // `any` in the flat reading, which is what declined `math/max` and made it the
+    // load behind 47 of 100 corpus checks (2026-09-20).
+    if annot::without_tables(|| annot::parse_arrow_type_with_vars(heap, form)).is_some() {
+        return Some(sig);
+    }
     (!sig.ret.is_any() && !sig.ret.is_unrefined_collection()).then_some(sig)
 }
 
@@ -193,6 +201,23 @@ fn collect(
             if let Some(arity) = fn_arity(heap, &items[2..]) {
                 fns.push((name, arity, head == "defn-"));
             }
+        }
+        // `(%defseq name (params…) docstring step)` expands to `(defn name (coll params…) …)`
+        // (`std/prelude/predicates.blsp`): `seq/filter`, `seq/reject` and `seq/keep` are
+        // defined this way, and the scanner did not see them at all — no arity, no
+        // entry — while `seq/filter` is the name 38 std modules' bodies reach for.
+        "%defseq" => {
+            let (Some(name), Some(&params)) =
+                (items.get(1).and_then(|&n| qualify(n)), items.get(2))
+            else {
+                return;
+            };
+            let Some(params) = list_items(heap, params) else {
+                return;
+            };
+            let (min, max) = count_params(heap, &params);
+            let max = if max == NO_MAX { NO_MAX } else { max + 1 };
+            fns.push((name, (min + 1, max), false));
         }
         "def" => {
             let (Some(name), Some(&rhs)) = (items.get(1).and_then(|&n| qualify(n)), items.get(2))

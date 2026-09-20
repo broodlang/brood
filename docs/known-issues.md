@@ -163,6 +163,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-167 | **a loop handed to its recompiled body (ADR-366) ran the rest of its life NESTED** — the hot-reload guard's tail transition was a nested `apply_value`, so every `receive` under it parked the OS worker dirty (20 000 of 20 000 in a self-tail server whose first iteration lazily loaded a module) and a native preempt fell to the interpreter for up to 256 iterations (`collatz` +6.5% instructions under lazy loading) | ✅ **FIXED 2026-09-20** — the transition is a `ChunkExit::Tail` the driver reuses the frame for; nothing runs nested. Guard `crates/cli/tests/stale_loop_handoff.rs`, sabotage-verified (the nested call reads 20 000 dirty parks) |
 | KI-168 | **`make tier-audit` red: `bench-supervisor/fill` lowered, hosted a parking `receive` three named hops away, dirty-parked its worker once and was latched** — the direct `%receive` fence sees only the arm's own chunk | ✅ **FIXED 2026-09-20** — `arm_hosts_receive` follows an arm's NON-tail call sites through named compiled callees and refuses it as `hosts-receive` before the compile. Guard `crates/cli/tests/hosts_receive_fence.rs`, sabotage-verified; `make tier-audit` 29 rows clean |
 | KI-169 | **`(stdimage/status)`'s `:installed` reported the PRELUDE snapshot's count on an opted-out warm boot** — `%std-image-reinstall!` cleared every registry the snapshot carries except `*std-image-installed*`, the snapshot's own answer | ✅ **FIXED 2026-09-20** — one reset beside the others. Guard `stdimage_reporting.rs` case 4, sabotage-verified |
+| KI-171 | **the checker's transitive materialisation (ADR-340) was a no-op unless `BROOD_IMAGE_TRACE` was set** — ADR-370's rewrite of `materialise_referenced_modules` put the load set's insert behind the trace flag (`trace && wanted.insert(module)`), so from 2026-09-18 every untraced check inferred a loaded module's body only down to its first unmaterialised qualified name (`-> any` below it, the bedit `git-scan-rows` shape ADR-340 fixed), and the one test of the scan ran its child WITH the trace | ✅ **FIXED 2026-09-20** — the insert is unconditional; guard `transitive_scan_loads_without_the_trace` (a planted fixture edge on `table/get`, untraced, refuses to run traced), sabotage-verified. Found while ranking what checks load: the trace named a module the untraced run never touched |
 | KI-170 | **a direct `reflect/load` of a module file could leave the module LOADED WITH NOTHING BOUND, permanently** — `defmodule` provides the key at the top of a directly loaded file, and that load ran in neither the staging frame nor the load journal, so an `%isolate` snapshot between the provide and the definitions kept the provide and lost the defs, and `require-one` short-circuits on `*features*` so nothing ever repairs it. Seen as `unbound symbol: set` + `[refer] imported NOTHING` (also `sexp`, `sse`) in a loaded suite run — the end state of KI-119/KI-120 by a third mechanism | ✅ **FIXED 2026-09-20** — `load` wraps a `defmodule` file in the ADR-344 frame `require-one` already uses: one publish, journalled. Guard `crates/cli/tests/load_provide_window.rs` (a `require-one` control in the same test), sabotage-verified: `features=true bound=false` with the frame removed |
 | KI-133 | **a preempted native loop resumed on the interpreter for up to 256 iterations — via its callee's frame** — a native self-tail loop that makes a call is preempted every ~1 500 iterations (the 2 000-reduction quantum); the driver handed the preempted frame to the interpreter "until its loop-top noticed", but the first safepoint that run reached was the CALLEE's entry, so the capture landed on the callee at ip 0, the resume ran the callee natively and returned into the loop MID-BODY, and the loop interpreted to its next 256th back-edge before re-tiering. A 5M-iteration loop with one call: 3 252 preempts, **839 607 interpreted iterations**, −36% instructions with preemption disabled; the leaf-spliced variant −72%. Invisible on the benchmark rows (±1–4%: they are short, or their loops are gate-refused anyway) — this is the cost of every long-running native loop that calls anything, and a candidate for why §7.1's admission experiments read as losses | ✅ **FIXED 2026-09-12** — `vm_run_bc`'s outcome-2 arm yields at once: the budget IS spent, and the frame is at ip 0 (or the journal's resume point, applied first), which is exactly what a resume re-tiers. Guarded by `a_native_preempt_captures_the_loop_frame_not_its_callee`, which drives the capture-mode driver with a 300-reduction budget and asserts every capture after the loop goes native is the loop's frame at ip 0 (sabotage-verified: removing the yield puts the captures on the callee). Found from the call-cost probe: 640 instructions per native→native call read as the call ceremony and was 40% preemption churn |
 | KI-132 | **the JIT latches the syntax highlighter's walk onto the VM — every helper of `editor/highlight/hl-spans` deopt-thrashes** — `BROOD_JIT_BAIL_TRACE=1` over one fontify pass of a 111-line band: `hl-head?`, `hl-advance`, `hl-name`, `hl-doc?` each `reason=deopt-thrash-latched … deopts=16`, `hl-spans` itself 56 deopts at `resume_ip=0` and `108`. The pass runs interpreted: 1.1 ms for 421 tokens (2.4 µs a token), re-lexed on every keystroke in bedit — the single largest cost of a typed character there | ✅ **FIXED 2026-09-15 (ADR-353)** — and the hypothesis was wrong on both counts: no re-lowering happens after a deopt (the same native runs again and the sixteenth latches it), and neither cause was the `head` slot. Two mechanisms, found by bisecting the helpers down to one-line arms with `BROOD_JIT_BAIL_TRACE`: (1) **`=` with a string operand deopted per activation** — `eq_dispatch` compared Int×Int and Sym/Keyword inline and deopted for EVERY other tag, so `hl-head?`'s `(= open "(")` fell out of native code on every call; the residual case now calls `brood_rt_equal` (`Heap::equal`, exactly `%eq`), and only a seq-view deopts. (2) **a type-mixed join was an unconditional deopt** — a join's block params were typed by the FIRST edge emitted, and a later edge whose repr disagreed (`(or p X)`: `p` a boxed slot, `X` a scalar) was compiled as a jump to `deopt`, so `hl-advance` deopted on every frame where `p` was false; edges are now deferred and a join is typed with every predecessor in hand, a disagreement widening to a spill slot or to three tagged words in extra block params (ADR-353). Also found en route: the prepass depth model had no stack effect for `MakeVector`/`Prim3`, so every arm with a `[…]` literal ahead of a join was refused with a Cranelift verifier error (`%match-splice-fail-in`) — modelled, and any future gap bails by name (`prepass-unmodelled-inst`). Measured: the 300-line highlighter pass 7.7 → 4.0 ms; both `[jit-bail]` lines gone. Guard `tests/jit_eq_join_test.blsp`, whose tier cases read the arm's state through the new `%jit-arm-state` probe (sabotage-verified both ways: each restored bug reds its own guard with `:bailed`) |
@@ -11698,6 +11699,45 @@ count, so the probe is not vacuously nil). Sabotage: dropping the line reds it. 
 alongside: `lazy_load_test`'s ADR-370 probes guarded on the substring `[image] install`,
 which a stale image prints too (`install: nil sections`), so with no live image for the
 binary they asserted on an empty trace; `adr370-imaged?` now requires a section count.
+
+## KI-171 — the checker's transitive materialisation was a no-op unless `BROOD_IMAGE_TRACE` was set ✅ FIXED 2026-09-20
+
+**Symptom.** None a gate saw — which is the entry. Ranking which names make a check load a
+module (2026-09-20), the trace run of `brood --check` on a `datetime`-using program named
+`math`, `os` and `reflect` as materialised, and the same run untraced materialised none of
+them. ADR-340's whole point — a loaded module's body inferred down to the leaf that
+declares its type, `buffer-current-line` reading `int` through `text/char->line` — had been
+off in every ordinary process since ADR-370 landed (eb7a0977, 2026-09-18): the checker read
+each loaded body up to its first unmaterialised qualified name and `any` below it.
+
+**Cause.** ADR-370 rewrote the scan from "collect module prefixes" to "collect names, skip
+the ones the footer types, load the rest", and wrote the load-set insert into the trace
+condition: `if trace && wanted.insert(module) && … { eprintln!(…) }`. `&&` short-circuits,
+so with the flag unset `wanted` stayed empty and the loop below it loaded nothing.
+
+**Why no gate saw it.** The one test of the scan (`tests/lazy_load_test.blsp` § ADR-370)
+observes the loads THROUGH the trace — its child runs with `BROOD_IMAGE_TRACE=1` — so it
+exercised the only configuration in which the scan worked. `nest::image_sigs_differential`
+compares the footer arm against `BROOD_NO_IMAGE_SIGS=1`, and both arms went through the same
+dead insert, so they agreed. The KI-150 measurements of 2026-09-18 ("13.2M after") were
+taken traced, and are therefore the cost of a scan that the shipped binary did not run.
+
+**Fix.** `types/check.rs`: `wanted.insert(module)` unconditionally; the trace prints beside
+it, now once per NAME rather than once per module, so the whole list of references that hold
+a load open is readable from one run (the tool the coverage work below needed).
+
+**Guard.** `check/tests/image_sigs.rs::transitive_scan_loads_without_the_trace`: a fixture
+module whose body names `table/get` — a result that is `any` by nature, so no declaration
+can ride for it and no curated entry stands in — loaded through `reflect/load`, then the
+scan called directly with the trace UNSET (the test refuses to run traced: traced, it would
+have passed against the bug). Sabotage-verified: with `if trace { wanted.insert(module) }`
+restored it fails on `the transitive scan did not load table`. The first shape of this guard
+used a std edge (`json` → `reflect`), which the same session's curated-skip removed; a
+planted edge is the point.
+
+**Lesson.** A trace flag must never be on the path of the thing it traces. And a
+differential whose two arms share the broken code agrees on the broken answer — the
+`lazy_load_test` case is now documented as observing the traced path, which is what it does.
 
 ## KI-170 — a direct `reflect/load` of a module file could leave the module LOADED WITH NOTHING BOUND, permanently ✅ FIXED 2026-09-20
 

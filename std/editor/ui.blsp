@@ -67,6 +67,26 @@ replies / the other kind untouched — and return the last. A `:move` never swal
         (after 0 msg)))
     msg))
 
+(defn- display-configure-window (id o)
+  "Apply the runtime-switchable window options in `o` to window `id`: `:input`
+(`:pixels` / `:cells`) and `:title`. The subset of `gui/open`'s options an app can still
+ask for after the window exists — which is what an app that attached to a window it did
+not open needs."
+  (when (get o :input) (gui/input id (get o :input)))
+  (when (get o :title) (gui/title id (get o :title)))
+  nil)
+
+(defn display-texture "Upload an image as a texture through `display` — a `gui-display` (the window it owns) or the `remote-display` a served app draws to (the thin client's window, over the wire) — and return its handle, for `gui/sprite`. Either `(display-texture d image)` with the {:width :height :rgba} map `gui/image-thumb` decodes, or `(display-texture d rgba w h)` with raw bytes. The handle comes from `gui/alloc-texture`, so `gui/texture-size` knows it; a display without a `:texture` entry (the terminal) accepts and ignores the upload.
+
+    (gui/texture-size (editor/ui/display-texture {} {:width 2 :height 1 :rgba [0 0 0 0 0 0 0 0]}))   → [2 1]"
+  ((display image) (display-texture display
+                     (get image :rgba)
+                     (get image :width)
+                     (get image :height)))
+  ((display rgba w h) (let (tex (gui/alloc-texture w h))
+                        (when (get display :texture) ((get display :texture) tex rgba w h))
+                        tex)))
+
 (defn gui-display (&optional (opts nil))
   "Open a **new** native window and return a display (the `{:enter :leave :size
 :draw :poll}` map) bound to it — each call is a separate window, so several
@@ -78,7 +98,8 @@ runtime built with `--features gui` (`./configure --with-gui && make install`), 
 `gui/open` errors. The map also carries the raw `:window` id.
 
 `opts` is passed through to `gui/open`, so a frontend can ask for a window that
-suits it: `:title` names it, and `{:decorations false}` drops the OS title bar and
+suits it: `:title` names it, `:width`/`:height` size it (logical pixels), `:input :pixels`
+and `:vsync true` are the game options (ADR-374), and `{:decorations false}` drops the OS title bar and
 frame for an app that draws its own chrome (a browser's tab strip and toolbar) and
 would otherwise sit under a redundant second title. A shipped app should also pass
 `:app-id` — the desktop application id the installed `<app-id>.desktop` entry is
@@ -93,11 +114,19 @@ hand it to another process to run. And because the delivered key/mouse messages
 carry no window id, one process should drive **one** window (which is why
 `(observe)` spawns a process per window) — two windows in one process would mix
 their input. Both are deferred trade-offs (ADR-059), fine for the observer."
-  (let (id (gui/open (get opts :title) nil nil opts))
+  (let (id (gui/open (get opts :title) (get opts :width) (get opts :height) opts))
     {:enter (fn () nil)
      :leave (fn () (gui/close id))
      :size (fn () (gui/size id))
      :draw (fn (f) (gui/draw id f))
+     ;; The pixel-space seam (ADR-374), for a game: a texture under a handle the app
+     ;; allocated (`gui/alloc-texture`), released again, and the window told which
+     ;; input unit / title the app wants — the three things that also cross the wire
+     ;; in `editor/serve/remote-display`, so an app written against a display runs
+     ;; unchanged in its own window or in a thin client's.
+     :texture (fn (tex rgba w h) (%gui-texture id tex rgba w h))
+     :texture-free (fn (tex) (%gui-texture-free id tex))
+     :configure (fn (o) (display-configure-window id o))
      ;; Input arrives as mailbox messages (gui/open delivers to this process), so
      ;; `:poll` is a `receive` that parks the process — it holds no scheduler worker
      ;; while waiting (ADR-058), unlike a blocking poll. Returns the next key/mouse

@@ -2614,11 +2614,20 @@ pub(super) fn declared_heap_value_ty(heap: &Heap, sym: Symbol) -> Option<Ty> {
 pub(super) fn sig_of(heap: &Heap, sym: Symbol) -> Option<Sig> {
     // The operator sugar's registry-derived domain (ADR-299) wins over the widest reading
     // the native declares, whichever registry that reading arrives through.
+    // The footer sits AHEAD of the curated table, not after it: it carries declarations only
+    // (`check::image_carried_sig`), and a loaded module's declaration outranks a curated
+    // entry — `math/even?` is curated `(number -> bool)` and declared `(int -> bool)`, and a
+    // check that never loads `math` must read what a check that did would (the ADR-370
+    // invariant; `nest::image_sigs_differential` holds it). It sits AFTER the primitives
+    // because a native is never in the footer (the scan indexes `defn`s), and `sig_of` is
+    // asked about natives far more than anything else: with the footer first every one of
+    // those paid a cache probe for nothing — +1.7% instructions on a `--check` (callgrind,
+    // 2026-09-20).
     operator_sig(heap, sym)
         .or_else(|| declared_heap_sig(heap, sym))
         .or_else(|| primitive_sig(heap, sym))
-        .or_else(|| curated_sig(sym))
         .or_else(|| image_heap_sig(heap, sym))
+        .or_else(|| curated_sig(sym))
         .or_else(|| infer_sig(heap, sym))
 }
 
@@ -2638,15 +2647,60 @@ pub(super) fn image_heap_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
     if let Some(hit) = cache.read().unwrap_or_else(|e| e.into_inner()).get(&sym) {
         return hit.clone();
     }
+    let parsed = with_image_sig_form(heap, sym, |scratch, form| {
+        annot::parse_type(scratch, form)?.as_arrow().cloned()
+    });
+    cache
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(sym, parsed.clone());
+    parsed
+}
+
+/// The image's signature for `sym` when its declaration carries type variables — the
+/// footer's counterpart of [`declared_heap_sig_with_vars`], resolved per call from the
+/// arguments exactly as the loaded declaration is. Before this reader existed a
+/// variable-bearing declaration could not ride at all: its flat reading has an `any`
+/// return (`?A` parses to `any`), which is "no declaration" to the call-site typing.
+pub(super) fn image_heap_sig_with_vars(
+    heap: &Heap,
+    sym: Symbol,
+) -> Option<super::ctx::SigWithVars> {
+    use std::collections::HashMap;
+    use std::sync::{OnceLock, RwLock};
+    static CACHE: OnceLock<RwLock<HashMap<Symbol, Option<super::ctx::SigWithVars>>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+    if let Some(hit) = cache.read().unwrap_or_else(|e| e.into_inner()).get(&sym) {
+        return hit.clone();
+    }
+    let parsed = with_image_sig_form(heap, sym, |scratch, form| {
+        annot::parse_arrow_type_with_vars(scratch, form)
+    });
+    cache
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(sym, parsed.clone());
+    parsed
+}
+
+/// Read the footer's signature text for `sym` into a form and hand it to `read`. The text
+/// is read into a form on a SCRATCH heap of this thread — `sig_of` has only a shared
+/// borrow of the caller's — sharing the prelude and runtime regions, so the type parser
+/// resolves record and alias names exactly as it would on the caller's heap. The scratch
+/// forms are never collected; there are at most as many as the footer has names. `read`
+/// runs with every per-file table empty — the reading the writer proved self-contained
+/// (`check::image_carried_sig`), so the checked file's own aliases cannot bend it.
+fn with_image_sig_form<T>(
+    heap: &Heap,
+    sym: Symbol,
+    read: impl FnOnce(&mut Heap, Value) -> Option<T>,
+) -> Option<T> {
     let text = crate::eval::derive::image_sig_text(heap, sym)?;
-    // The text is read into a form on a SCRATCH heap of this thread — `sig_of` has only a
-    // shared borrow of the caller's — sharing the prelude and runtime regions, so the type
-    // parser resolves record and alias names exactly as it would on the caller's heap. The
-    // scratch forms are never collected; there are at most as many as the footer has names.
     thread_local! {
         static SCRATCH: std::cell::RefCell<Option<Heap>> = const { std::cell::RefCell::new(None) };
     }
-    let parsed = SCRATCH.with(|slot| {
+    SCRATCH.with(|slot| {
         let mut slot = slot.borrow_mut();
         let scratch = slot.get_or_insert_with(|| {
             let mut h = Heap::with_regions(heap.prelude_arc(), heap.runtime_arc());
@@ -2654,17 +2708,8 @@ pub(super) fn image_heap_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
             h
         });
         let form = crate::syntax::reader::read_one(scratch, &text).ok()?;
-        // With every per-file table empty — the reading the writer proved self-contained
-        // (`check::image_carried_sig`), so the checked file's own aliases cannot bend it.
-        annot::without_tables(|| annot::parse_type(scratch, form))?
-            .as_arrow()
-            .cloned()
-    });
-    cache
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(sym, parsed.clone());
-    parsed
+        annot::without_tables(|| read(scratch, form))
+    })
 }
 
 /// The arity of the callable bound to `sym` — `NativeFn.arity` for primitives,
@@ -3966,4 +4011,10 @@ pub(super) fn live_private_functions(
             })
             .collect(),
     )
+}
+
+/// Every curated name, for the construction gate that holds the curated skip sound
+/// (`check/tests/image_sigs.rs::a_curated_name_reads_the_same_loaded_or_not`).
+pub(super) fn curated_names() -> Vec<Symbol> {
+    CURATED_SIGS.keys().copied().collect()
 }
