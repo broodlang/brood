@@ -35,35 +35,27 @@ What landed, each with a sabotage-verified guard:
 1. ~~**§7.9 — `row-sum`'s float-slot carve-out**~~ — **DONE, same day**: measured neutral
    on every protected row and −4.7% cycles on `mandelbrot` at N=1400; the clause is removed,
    `BROOD_FLOAT_VETO=1` restores it. See §7.9's closing note.
-1b. **`make tier-audit` is RED and was before this session**: `bench-supervisor/fill`
-   `reason=suspend-latched` on the `supervisor` row — reproduced on the `5fa10170` and
-   `0dc79768` baseline binaries too. `fill` lowers and hosts a parking `receive` (§7.13's
-   shape: `fill` → `start-child` → `gen/call` → `receive`), so it is latched off the native
-   tier after its first park. Not in CI (`make green-all` only). Attributed, not fixed:
-   either `fill` should not lower (its body suspends) or the latch is the right answer and
-   the audit should know a receive-hosting arm from a thrasher.
+1b. ~~**`make tier-audit` is RED**~~ — **FIXED (KI-168)**: `arm_hosts_receive`, a transitive
+   receive fence asked at tier-up; 29 rows clean.
 2. **`json/emit` and friends still take up to 16 entry deopts per arm** before ADR-372
    re-lowers them — by design (the thrash latch's number). If a row shows an arm flipping
    late, `ENTRY_DEOPT_RELOWER` is the knob; measure before touching it.
 3. **KI-150 can close** once a column refresh reads the short rows: the loading half is
    ADR-370, the walk is ADR-371. The refresh is off-box work.
-4. **`tests/lazy_load_test.blsp`'s ADR-370 probes guard on the substring `[image] install`,
-   which a STALE image also prints (`install: nil sections`) — so with no live image for the
-   binary they assert on an empty trace and fail, reading like a checker regression. Seen
-   here with a debug binary whose `target/debug/nest` was older than the tree; `cargo build
-   -p nest && scripts/build-std-image.sh debug` cured it. A guard on a live section count
-   would make that a skip. (They also run their children with `BROOD_NO_CHECK_CACHE=1` now —
-   they observe the walk's loads, which a cache hit does not perform.)
-5. **Two dead-code warnings in the LEAN build** (`cached_arm_stale`, `vec_or_nil`,
-   `bool_or_nil` — used only under `dev-tools`), pre-existing; CI's `--all-features` clippy
-   never sees them. Cosmetic.
+4. ~~`lazy_load_test`'s ADR-370 probes' image guard~~ — **FIXED**, and the failure it hid
+   behind was a real one: **KI-169**, `:installed` reporting the prelude snapshot's count on
+   an opted-out warm boot.
+5. ~~Two dead-code warnings in the LEAN build~~ — gated `#[cfg(feature = "dev-tools")]`.
 
 ### Rig notes that would have cost the next session an hour
 
 - **`perf stat` works here now; `valgrind` does not exist** — `perf-handoff.md` said the
   reverse and carries a correction.
 - **`make release` overwrites `release-fast/brood` with the dev-tools build** (it embeds
-  brood into nest). Run `make release-brood` after it, before any timing.
+  brood into nest). Run `make release-brood` after it, before any timing — and `make
+  release` again before `make prepush`: the gate's `nest` spawns the `brood` beside it,
+  and `lazy_load_test`'s ADR-366 case calls `%vm-arm-ops` (dev-tools) in that child, so a
+  LEAN brood beside nest reds the gate with `unbound symbol: %vm-arm-ops`.
 - **Every uncommitted `std/` edit AND every commit moves the stdlib id**, so the image you
   built is stale the moment you edit — `(stdimage/status)` in the same shell as the count,
   every time. Rebuild with `make release && make release-brood && scripts/build-std-image.sh

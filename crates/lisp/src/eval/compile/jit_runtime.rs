@@ -373,6 +373,21 @@ pub(crate) fn jit_tier_in_frame(
                 return None;
             }
         }
+        // An arm whose non-tail callees reach a `receive` would host a parking receive under
+        // its gateway — `jit_latch_suspend_host` would latch it after the first dirty park.
+        // Refuse it here, by name, instead (`arm_hosts_receive`'s doc has the shape).
+        if crate::eval::compile::arm_hosts_receive(heap, arm, heap.read_root_env(env)) {
+            static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+                let name = arm
+                    .dbg_name
+                    .map(crate::core::value::symbol_name_ref)
+                    .unwrap_or("<closure>");
+                eprintln!("[jit-bail] arm={name} reason=hosts-receive");
+            }
+            arm.jit_code.store(crate::jit::BAILED, Release);
+            return None;
+        }
         arm.compile_epoch.store(heap.global_epoch(), Release);
         if arm
             .jit_code

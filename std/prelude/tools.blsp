@@ -1108,7 +1108,15 @@ same-path-still-readable condition that makes the garbage read possible.
 
 So clear the registry to the values `def-` gives it on a source boot, then install. Sound
 because nothing else can have installed yet: this runs during boot, before any project
-image and before any `require`."
+image and before any `require`.
+
+`*std-image-installed*` is cleared with the rest — it is the snapshot's ANSWER to \"what did
+this process install\", and until 2026-09-20 it survived: a warm boot under
+`BROOD_NO_STDIMAGE=1` declined the install and still reported the count the writing process
+had, so `(%std-image-installed)` said imaged while `require` read source (a `url/` head loaded
+at the referencing load, undeferred). `stdimage_reporting.rs` guards the summary line, which
+reads `:state` from disk; the in-process probe had no guard until `lazy_load_test`'s head
+deferral case, which skips its deferral assertion on `imaged=false`, failed under the flag."
   (def- *image-sources* (list))
   (def- *image-path* nil)
   (def- *image-sections* {})
@@ -1117,6 +1125,7 @@ image and before any `require`."
   (def- *std-require-edges* nil)
   (def- *std-impls* nil)
   (def- *std-regs* nil)
+  (def- *std-image-installed* nil)
   (when (%std-image-wanted?) (%std-image-install)))
 
 (defn- %require-record-edge! (key)

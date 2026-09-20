@@ -11587,3 +11587,60 @@ restoring the nested `apply_value` reads 20 000.
 handoff that never returns — a loop — makes the frame's *properties* (capturable? can it
 yield?) the loop's properties for its whole life. Check what runs under a frame, not how
 many frames there are.
+
+## KI-168 — `make tier-audit` red: `bench-supervisor/fill` lowered, hosted a parking `receive`, parked its worker dirty once and was latched ✅ FIXED 2026-09-20
+
+**Symptom.** `make tier-audit` (not in CI; `make green-all`) reported the `supervisor` row:
+`[jit-bail] arm=bench-supervisor/fill reason=suspend-latched`. Reproduced on the `5fa10170`
+and `0dc79768` baseline binaries, so it predates the day it was noticed.
+
+**Cause.** `fill` — `(defn fill (i) (if (>= i n) nil (do (start-child …) (fill (+ i 1)))))`,
+a named self-tail loop with one non-tail call — passes the profitability gate (self-loop,
+no float slot), so it lowered (twice: the small native and its xcall re-lowering). Its
+first `start-child` → `gen/call` → `receive` ran nested under the native gateway, where a
+receive cannot be state-captured; it dirty-parked the OS worker, and `jit_latch_suspend_host`
+latched the arm `BAILED` — the designed safety net, and the right steady state (the VM's
+frame path suspends cleanly). The route to it was two wasted compiles and one dirty park,
+and the audit could not tell it from a thrasher. The direct `%receive` fence
+(`chunk_in_jit_subset`) sees only the arm's own chunk; `fill`'s receive is three named hops
+away.
+
+**Fix.** `compile::arm_hosts_receive` — asked in `jit_tier_in_frame` before the enqueue —
+follows the arm's NON-tail call sites through named, already-compiled callees
+(`cached_arm_for`, read-only; a visited set of 64) and refuses the arm by name
+(`[jit-bail] arm=fill reason=hosts-receive`) when any reaches `%receive`. A tail site is not
+followed: a native arm's staged tail call is dispatched by the driver at frame level, where
+a receive suspends cleanly — `vm_direct_call.rs`'s `via` is that shape and still lowers. An
+uncompiled callee or a computed head reads as "no receive"; the latch remains the net for
+what the walk cannot see. On the `supervisor` row four other arms now read `hosts-receive`
+where they read `chunk-outside-jit-subset` before (a direct `%receive`, refused earlier
+and by the more specific name); `make tier-audit`: 29 rows clean.
+
+**Guard.** `crates/cli/tests/hosts_receive_fence.rs`: `fill`'s shape must be refused by
+that name with zero `suspend-latched` and zero dirty parks; skipping the fence puts both
+back (sabotage-verified).
+
+## KI-169 — `(stdimage/status)`'s `:installed` reported the PRELUDE snapshot's count on an opted-out warm boot ✅ FIXED 2026-09-20
+
+**Symptom.** `tests/lazy_load_test.blsp` "a function head into an imaged module loads at
+first call" failed under `BROOD_NO_STDIMAGE=1` on a warm prelude image: the child printed
+`imaged=true after-ref=true` — the probe said the stdlib image was installed while
+`require` demonstrably read source (the `url/` head loaded at the referencing load,
+undeferred). A cold boot under the same flag printed `imaged=false` and passed. CI never
+saw it: its no-image job sets `BROOD_NO_PRELUDE_IMAGE=1` too.
+
+**Cause.** ADR-314's boot restores the prelude's bindings from a snapshot of the boot that
+wrote the image. `%std-image-reinstall!` clears every registry that snapshot carries —
+sources, path, sections, edges, impls, regs — then re-decides the install through
+`%std-image-wanted?`. It did not clear `*std-image-installed*`, the snapshot's ANSWER to
+"what did this process install", so a boot that declined the install kept the writing
+boot's count. `stdimage_reporting.rs` guards the suite's summary line, which reads `:state`
+from disk and never asked the probe.
+
+**Fix.** One line: `(def- *std-image-installed* nil)` beside the other resets. **Guard:**
+`stdimage_reporting.rs` case 4 — a fresh prelude image written over a live stdlib image,
+then an opted-out warm boot must report `:installed nil` (and the default warm boot a
+count, so the probe is not vacuously nil). Sabotage: dropping the line reds it. Also fixed
+alongside: `lazy_load_test`'s ADR-370 probes guarded on the substring `[image] install`,
+which a stale image prints too (`install: nil sections`), so with no live image for the
+binary they asserted on an empty trace; `adr370-imaged?` now requires a section count.

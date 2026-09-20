@@ -17,21 +17,31 @@
 //! (`process::dirty_receive_block_count`, printed by `BROOD_JIT_BAIL_TRACE` as
 //! `dirty-receive-block`), and refusing to be vacuous: the loop must have been marked stale
 //! (`BROOD_TRACE_COMPILE`'s `[compile] stale-bindings arm=drive` line), or the transition
-//! under test never ran. Sabotage-verified: restoring the nested `apply_value` in
+//! under test never ran — which it does not for a STD module under a source boot (the first
+//! shape of this file used `math/max`, and CI's no-image job would have failed its vacuity
+//! guard); the lazily-loaded module is a load-path one, which loads at its first lookup miss
+//! under every boot. Sabotage-verified: restoring the nested `apply_value` in
 //! `exec_chunk`'s `SelfCall` guard turns the count into thousands.
 
 use std::process::Command;
 
 const PROGRAM: &str = r#"
+(reflect/add-load-path "LOAD_PATH")
 (def root (self))
 (defn echo () (receive ([:ping from] (do (send from :pong) (echo)))))
 (def e (spawn (echo)))
 (defn rpc (v) (do (send e [:ping (self)]) (receive (:pong v))))
 ;; `drive` stays on the VM (the `try` keeps its chunk out of the JIT subset), so the only
 ;; way a receive down its body can park dirty is the transition under test. Its FIRST
-;; iteration misses on `math/max`, which lazily loads `math` and marks `drive` stale.
+;; iteration misses on `lazymod/mx`, which lazily loads `lazymod` and marks `drive` stale.
+;; A LOAD-PATH module REFERENCED as a value, not a std one called by name: a call head into
+;; a module the stdlib image does not describe loads at expansion (the kind index that says
+;; it is not a macro is the image's — ADR-335), so under a source boot a `(math/max …)`
+;; here never lazily loaded and the shape under test never arose; a function reference to
+;; a load-path module loads at its first lookup miss under every boot (checked: image, no
+;; image, no prelude image).
 (defn drive (i acc)
-  (if (= i 0) acc (drive (- i 1) (math/max acc (+ (rpc i) (try 0 (catch _ 0)))))))
+  (if (= i 0) acc (drive (- i 1) (apply lazymod/mx (list acc (+ (rpc i) (try 0 (catch _ 0))))))))
 ;; Run in a spawned process: only a green process in a capture run can be parked cleanly
 ;; (or dirtily) at all — the root thread's receive always blocks.
 (defn run (n)
@@ -42,11 +52,20 @@ const PROGRAM: &str = r#"
 
 #[test]
 fn a_loop_recompiled_after_a_lazy_load_never_parks_its_receives_dirty() {
-    let path = std::env::temp_dir().join(format!(
-        "brood-stale-loop-handoff-{}.blsp",
-        std::process::id()
-    ));
-    std::fs::write(&path, PROGRAM).expect("write program");
+    let dir = std::env::temp_dir().join(format!("brood-stale-loop-handoff-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("sandbox dir");
+    std::fs::write(
+        dir.join("lazymod.blsp"),
+        "(defmodule lazymod)\n(defn mx (a b) (if (> a b) a b))\n",
+    )
+    .expect("write module");
+    let path = dir.join("drive.blsp");
+    std::fs::write(
+        &path,
+        PROGRAM.replace("LOAD_PATH", &dir.display().to_string()),
+    )
+    .expect("write program");
     let out = Command::new(env!("CARGO_BIN_EXE_brood"))
         // The runner's pre-flight check loads the file's references eagerly, which is
         // exactly the load that must instead happen INSIDE the loop here.
@@ -58,7 +77,7 @@ fn a_loop_recompiled_after_a_lazy_load_never_parks_its_receives_dirty() {
         .arg(&path)
         .output()
         .expect("run brood");
-    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir_all(&dir);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(

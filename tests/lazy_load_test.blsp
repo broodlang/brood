@@ -373,6 +373,14 @@
       (os/cmd "env" (append ["BROOD_IMAGE_TRACE=1" "BROOD_NO_CHECK_CACHE=1"] extra-env [exe prog]))
       nil)))
 
+(defn- adr370-imaged? (result)
+  "Did the child boot with a LIVE stdlib image? `[image] install: N sections` — a stale or
+absent image prints `install: nil sections` on the same line, and then no module can be
+materialised whatever the checker did, so the assertions below would read an empty trace
+as a checker regression (seen with a debug binary whose `nest` predated the tree)."
+  (let (err (get result :stderr ""))
+    (and (includes? err "[image] install: ") (not (includes? err "install: nil sections")))))
+
 (defn- adr370-materialised? (result module)
   "Did the child's trace name `module` as materialised — a line that is exactly `[image] <module>`?"
   (includes? (str "\n" (get result :stderr "") "\n") (str "\n[image] " module "\n")))
@@ -383,7 +391,7 @@
       (when result
         (assert= 0 (get result :exit))
         (is (includes? (os/cmd-out result) "v=true"))
-        (when (includes? (get result :stderr "") "[image] install")
+        (when (adr370-imaged? result)
           ;; The file's OWN reference loaded at the drain, as before…
           (is (adr370-materialised? result "os"))
           ;; …and what `os`'s bodies name did not follow it in.
@@ -394,7 +402,7 @@
       (when result
         (assert= 0 (get result :exit))
         (is (includes? (os/cmd-out result) "v=true"))
-        (when (includes? (get result :stderr "") "[image] install")
+        (when (adr370-imaged? result)
           (is (adr370-materialised? result "os"))
           (is (adr370-materialised? result "file"))
           (is (adr370-materialised? result "path")))))))

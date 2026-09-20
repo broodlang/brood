@@ -671,11 +671,81 @@ pub(crate) fn arm_calls_receive(arm: &CompiledArm) -> bool {
     })
 }
 
+/// Does a NON-tail call site of this arm reach `%receive` through NAMED callees — is this
+/// the arm that would HOST a parking receive if it went native? A native arm's non-tail
+/// callee runs nested under its gateway, and everything the callee reaches (its own calls,
+/// tail or not) runs there too, where a `receive` cannot be state-captured and dirty-blocks
+/// the OS worker; `jit_latch_suspend_host` then latches the arm BAILED on the first such
+/// park. This is that latch asked BEFORE the lowering, so the arm is refused with a name
+/// (`hosts-receive`) instead of compiled, parked dirty once, and latched — the state
+/// `make tier-audit` reported for `bench-supervisor/fill` (`fill` → `start-child` →
+/// `gen/call` → `%receive`, three named hops). The direct `%receive` fence
+/// (`chunk_in_jit_subset`) and [`arm_calls_receive`] see only the arm's own chunk.
+///
+/// A tail site is NOT followed: a native arm's staged tail call is dispatched by the
+/// driver at frame level (`jit_dispatch_tail`), where a receive down that chain suspends
+/// cleanly — `vm_direct_call.rs`'s `via` is that shape and must keep lowering. Only callees
+/// this process has already compiled are read (`cached_arm_for`, no compile here); a
+/// computed head, an unbound name or an uncompiled callee reads as "no receive", and the
+/// latch stays the safety net for what this cannot see. Bounded by a visited set of 64.
+pub(crate) fn arm_hosts_receive(heap: &Heap, arm: &CompiledArm, env: EnvId) -> bool {
+    let receive_sym = crate::core::value::intern("%receive");
+    let Some(chunk) = arm.chunk.as_ref() else {
+        return false;
+    };
+    let mut seen: Vec<u64> = vec![arm.uid];
+    let mut work: Vec<(crate::core::value::Symbol, usize)> = chunk
+        .code
+        .iter()
+        .filter_map(|inst| match inst {
+            Inst::Call {
+                head: Some(h),
+                argc,
+                tail: false,
+                ..
+            } => Some((*h, *argc)),
+            _ => None,
+        })
+        .collect();
+    while let Some((sym, argc)) = work.pop() {
+        if sym == receive_sym {
+            return true;
+        }
+        let Some(Value::Fn(id)) = heap.env_get(env, sym) else {
+            continue;
+        };
+        let Some(callee) = cached_arm_for(heap, id, argc) else {
+            continue;
+        };
+        if seen.contains(&callee.uid) {
+            continue;
+        }
+        if seen.len() >= 64 {
+            return false;
+        }
+        seen.push(callee.uid);
+        if let Some(c) = callee.chunk.as_ref() {
+            for inst in &c.code {
+                if let Inst::Call {
+                    head: Some(h),
+                    argc,
+                    ..
+                } = inst
+                {
+                    work.push((*h, *argc));
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Does this process's cached `argc` arm of `id` carry the ADR-366 stale mark? `None` when
 /// nothing is cached — which after a stale mark means "dropped by the lookup sync and not
 /// yet recompiled", a state a guard must tell apart from "recompiled" (`Some(false)`). A pure
 /// read of the per-process cache — nothing is compiled, evicted, synced or installed — for
 /// the `%vm-arm-stale?` probe.
+#[cfg(feature = "dev-tools")]
 pub(crate) fn cached_arm_stale(heap: &Heap, id: ClosureId, argc: usize) -> Option<bool> {
     let key = cache_key(heap, id)?;
     heap.vm_cache_arm_raw(key, argc).map(|arm| {

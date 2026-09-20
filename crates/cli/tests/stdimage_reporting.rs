@@ -150,6 +150,67 @@ fn the_suite_summary_says_whether_this_run_used_the_stdlib_image() {
         text.contains("SOURCE"),
         "BROOD_NO_STDIMAGE=1 must report the source path even with a live image on disk:\n{text}"
     );
+
+    // 4. The in-process probe must agree with the summary. The PRELUDE image (ADR-314)
+    //    restores bindings from a snapshot of the boot that wrote it, and until 2026-09-20
+    //    `%std-image-reinstall!` cleared every registry that snapshot carried EXCEPT
+    //    `*std-image-installed*`: a warm boot under `BROOD_NO_STDIMAGE=1` declined the
+    //    install and still answered with the writing boot's count — `(stdimage/status)` read
+    //    `:installed 120` while `require` read source (a `url/` head loaded at the
+    //    referencing load, undeferred), and `lazy_load_test`'s head-deferral case, which
+    //    skips its deferral assertion on `imaged=false`, failed under the flag. Case 3 never
+    //    saw it: the summary line does not read the probe. The shape needs the prelude image
+    //    WRITTEN by a boot with the stdlib image live, so the one runs 1–3 left (written by
+    //    run 1, before any stdlib image existed, count nil) is removed and a cold default
+    //    boot writes a fresh one over the live stdlib image; then the opted-out warm boot.
+    for entry in std::fs::read_dir(cold.join("brood"))
+        .expect("cache dir")
+        .flatten()
+    {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with("prelude-expanded-") {
+            std::fs::remove_file(entry.path()).expect("remove the prelude image");
+        }
+    }
+    std::fs::write(
+        dir.path.join("probe.blsp"),
+        "(io/puts (str \"installed=\" (pr-str (get (stdimage/status) :installed))))\n",
+    )
+    .expect("write probe");
+    // The cold default boot first — it writes the prelude image with the count in it, and
+    // must itself report a count (the probe is not vacuously nil).
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_brood"));
+    cmd.arg("probe.blsp")
+        .current_dir(&dir.path)
+        .env("XDG_CACHE_HOME", &cold)
+        .env("BROOD_NO_CHECK", "1")
+        .env_remove("BROOD_NO_STDIMAGE")
+        .env_remove("BROOD_NO_PRELUDE_IMAGE");
+    support::dies_with_parent(&mut cmd);
+    let out = cmd.output().expect("run the probe");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        text.contains("installed=") && !text.contains("installed=nil"),
+        "the same warm boot WITH the image must report a section count:\n{text}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Now the opted-out WARM boot: the snapshot carries a count; the answer must not.
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_brood"));
+    cmd.arg("probe.blsp")
+        .current_dir(&dir.path)
+        .env("XDG_CACHE_HOME", &cold)
+        .env("BROOD_NO_CHECK", "1")
+        .env("BROOD_NO_STDIMAGE", "1")
+        .env_remove("BROOD_NO_PRELUDE_IMAGE");
+    support::dies_with_parent(&mut cmd);
+    let out = cmd.output().expect("run the probe");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        text.contains("installed=nil"),
+        "a warm boot under BROOD_NO_STDIMAGE=1 must report NOTHING installed — the prelude \
+         snapshot's count leaked through `%std-image-reinstall!`:\n{text}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// **A run must also say how its PRELUDE arrived**, which is the other half of "which
