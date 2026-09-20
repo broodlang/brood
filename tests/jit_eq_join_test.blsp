@@ -302,6 +302,21 @@
     (drive-poly (- i 1)
       (+ acc (ej-poly (if (= (math/rem i 32) 0) (list 7) i) 0)))))
 
+;; Two polymorphic params, each mixed on a different activation: the mask must gather BOTH
+;; (`slots=0b11`) and the arm must not need more than two re-lowerings' worth of deopts.
+(defn ej-poly2 (a b acc)
+  (if (int? a)
+    (if (int? b) (+ acc a b) (ej-poly2 a (first b) (+ acc 1)))
+    (ej-poly2 (first a) b (+ acc 1))))
+(defn- drive-poly2 (i acc)
+  (if (= i 0)
+    acc
+    (drive-poly2 (- i 1)
+      (+ acc
+        (ej-poly2 (if (= (math/rem i 64) 0) (list 7) i)
+          (if (= (math/rem i 64) 32) (list 5) i)
+          0)))))
+
 (describe "JIT polymorphic param on a self-tail arm"
   (test "the answer is the VM's throughout"
     (assert= 2 (ej-poly (list 1) 0))
@@ -317,7 +332,16 @@
         (assert= :native (get st :state))
         ;; At most the sixteen that earned the re-lowering; the 600+ list activations
         ;; after it run the boxed native. (Sabotage: never reset the arm → hundreds.)
-        (is (<= (get st :deopts-total) 16))))))
+        (is (<= (get st :deopts-total) 16)))))
+
+  (test "two polymorphic params both end up boxed (the relower fires per sixteen, not once)"
+    (when (%native-tier?)
+      (assert= :native (settle ej-poly2 3 (fn () (drive-poly2 4000 0)) 40))
+      (drive-poly2 40000 0)
+      (let (st (%jit-arm-state ej-poly2 3))
+        (assert= :native (get st :state))
+        ;; two slots, at most two firings' worth; 1 250 mixed activations follow them
+        (is (<= (get st :deopts-total) 32))))))
 
 ;; --- 6. A float-carrying self-tail loop with a non-tail call lowers (§7.9) ---------------
 

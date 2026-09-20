@@ -36,19 +36,23 @@
     (let (w (spawn :not-a-fn))
       (is (pid? w))))
 
+  ;; `spawn-monitor`, not `spawn` then `monitor`, throughout: these children die at once,
+  ;; and under a loaded suite one can be dead before the parent's `(monitor w)` runs — a
+  ;; monitor on a dead pid delivers `:noproc`, not the reason under test (the race that
+  ;; flaked `try_catch_test`'s finally case, 2026-09-20).
   (test "a spawned-nil process exits with :normal"
-    (let (w (spawn nil) _ref (monitor w))
+    (let ([_w _ref] (spawn-monitor nil))
       (assert= :normal (receive ([:down _ _ reason] reason) (after *test-wait-ms* :timeout)))))
 
   (test "a spawned-integer process exits with :normal"
-    (let (w (spawn 42) _ref (monitor w))
+    (let ([_w _ref] (spawn-monitor 42))
       (assert= :normal (receive ([:down _ _ reason] reason) (after *test-wait-ms* :timeout)))))
 
   (test "a crashing spawned process propagates its error as the monitor down reason"
     ;; Post-1a63eb7 `(spawn (fn () body))` runs `body` (no longer the silent
     ;; no-op footgun), so a crash here surfaces — its monitor sees the error
     ;; reason, not :normal.
-    (let (w (spawn (fn () (/ 1 0))) _ref (monitor w))
+    (let ([_w _ref] (spawn-monitor (/ 1 0)))
       ;; the reason carries the structured error map (BEAM {Reason, Stacktrace}
       ;; parity): [:error {:kind :message :code …}], not a flattened string
       (let (reason (receive ([:down _ _ r] r) (after *test-wait-ms* :timeout)))
@@ -60,7 +64,7 @@
     ;; :trace deep-copies with the reason (message.rs error_reason), so a
     ;; monitor learns not just WHAT killed the child but WHERE — the frame
     ;; names survive into the receiver's heap
-    (let (w (spawn (fn () (chaos-crash-helper 5))) _ref (monitor w))
+    (let ([_w _ref] (spawn-monitor (chaos-crash-helper 5)))
       (let (reason (receive ([:down _ _ r] r) (after *test-wait-ms* :timeout)))
         (assert= "chaos-test/chaos-crash-helper"
           (get (first (get (first (rest reason)) :trace)) :fn)))))

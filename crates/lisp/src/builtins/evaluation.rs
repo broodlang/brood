@@ -384,7 +384,7 @@ pub(super) fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
         .first()
         .is_some_and(|(f, _)| crate::eval::macros::defmodule_form_name(heap, *f).is_some());
     if module_load {
-        heap.enter_journalled_load();
+        heap.enter_journalled_load(true);
     }
     // Expanded WITH the optimiser's rewrites whoever triggered the load (KI-172) — a file
     // loaded from inside a check is still the runtime's code.
@@ -911,7 +911,7 @@ pub(super) fn scope_live_pids(_args: &[Value], _env: EnvId, heap: &mut Heap) -> 
 /// defs as if they were a module's, and they would then survive their isolate.
 pub(super) fn with_load_journal(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let thunk = arg(args, 0);
-    heap.enter_journalled_load();
+    heap.enter_journalled_load(false);
     let result = apply_engine(heap, thunk, &[], env);
     // ADR-344: a completed load is published whole; a throwing one is discarded, so a broken
     // module leaves no half-module behind and never leaks the mark (a leaked one would stage
@@ -1095,7 +1095,7 @@ fn isolate_impl(args: &[Value], env: EnvId, heap: &mut Heap, replay_loads: bool)
     // (ADR-339) made its `defn-`/`defdyn` marks live in here, and only here.
     let live_dynamics = crate::core::value::dynamic_syms();
     let live_private = heap.private_names_snapshot();
-    let kept = heap.restore_globals(saved, if replay_loads { None } else { Some(scope) });
+    let kept = heap.restore_globals(saved, if replay_loads { None } else { Some(scope) }, scope);
     // Both registries are restored on the error path too — `result` is returned below
     // rather than `?`-propagated, so a throwing thunk rolls back exactly as a clean one
     // does. Replaces rather than unions, so a mark *added* inside the thunk is dropped —

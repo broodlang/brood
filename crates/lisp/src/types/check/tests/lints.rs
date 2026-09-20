@@ -39,6 +39,24 @@ fn no_warning_for_tail_recursion_or_higher_order() {
 }
 
 #[test]
+fn a_docstringd_multi_arity_fn_is_read_arm_by_arm() {
+    // `(defn f "doc" ((a) …) ((a b) …))` expands to `(fn "doc" ((a) …) ((a b) …))`, and the
+    // docstring used to make the analyser read the arms as one single-arity BODY — so the
+    // first arm's tail self-call sat in "non-tail" position and was flagged. `gui/texture`
+    // (a 2-arity arm delegating to its own 4-arity arm) tripped the std zero-warning gate.
+    assert!(recursion_warnings("(defn tx \"doc\" ((a) (tx a 1)) ((a b) (+ a b)))").is_empty());
+    // …and the docstring does not hide a REAL non-tail self-call in an arm.
+    assert!(
+        !recursion_warnings("(defn tx \"doc\" ((a) (* 2 (tx a 1))) ((a b) (+ a b)))").is_empty()
+    );
+    // A single-arity docstring'd fn is unchanged either way.
+    assert!(recursion_warnings("(defn go \"doc\" (n) (if (= n 0) 0 (go (- n 1))))").is_empty());
+    assert!(
+        !recursion_warnings("(defn go \"doc\" (n) (if (= n 0) 0 (+ 1 (go (- n 1)))))").is_empty()
+    );
+}
+
+#[test]
 fn unused_let_binding_lint() {
     // Basic unused binding — warned.
     let w = file_warnings("(let (x 1) 2)");

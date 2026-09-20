@@ -101,6 +101,20 @@ fn analyze_fn(
     let Some(items) = list_items(heap, fnval) else {
         return;
     };
+    // A docstring rides along as the element after `fn` — `(defn f "doc" ((a) …) ((a b)
+    // …))` expands to `(fn "doc" ((a) …) ((a b) …))` — and until 2026-09-20 it made every
+    // docstring'd multi-arity fn read as SINGLE-arity here: the arms became the "body", the
+    // first arm a non-tail form, and its tail self-call was flagged. `gui/texture` (a
+    // 2-arity arm delegating to its own 4-arity arm, the first such shape in `std/`) was
+    // refused by the zero-warning gate for a recursion it does not perform.
+    let items: Vec<Value> = match items.get(1) {
+        Some(Value::Str(_)) if items.len() > 2 => {
+            let mut v = vec![items[0]];
+            v.extend_from_slice(&items[2..]);
+            v
+        }
+        _ => items.to_vec(),
+    };
     // items = [fn, params-or-arm, ...]. Multi-arity iff the element after `fn`
     // is a clause `((params) body…)` — i.e. its own first element is a list.
     // (Pattern clauses are already lowered to `match*`, so post-expansion arms

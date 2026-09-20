@@ -313,8 +313,12 @@ pub(crate) fn jit_any_deopt_feedback(heap: &Heap, arm: &CompiledArm) {
     if slot < 32 {
         arm.jit_poly_slots.fetch_or(1 << slot, Relaxed);
     }
+    // Every sixteenth, not the sixteenth: an arm with TWO polymorphic params sampled on
+    // ints re-lowers with the first boxed and then deopts on the second, and a one-shot
+    // trigger would leave it there. Bounded by the arm's carried slots — each firing boxes
+    // at least one more, and a boxed slot has no entry check to deopt on.
     let n = arm.jit_entry_deopts.fetch_add(1, Relaxed) + 1;
-    if n == ENTRY_DEOPT_RELOWER {
+    if n.is_multiple_of(ENTRY_DEOPT_RELOWER) {
         static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
             let name = arm
@@ -322,7 +326,7 @@ pub(crate) fn jit_any_deopt_feedback(heap: &Heap, arm: &CompiledArm) {
                 .map(crate::core::value::symbol_name_ref)
                 .unwrap_or("<closure>");
             eprintln!(
-                "[jit-relower] arm={name} reason=polymorphic-param slots={:#b}: {n} entry-tag                  deopts; re-tiering with those slots boxed",
+                "[jit-relower] arm={name} reason=polymorphic-param slots={:#b}: {n} entry-tag deopts; re-tiering with those slots boxed",
                 arm.jit_poly_slots.load(Relaxed)
             );
         }

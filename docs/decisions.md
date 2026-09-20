@@ -22936,7 +22936,7 @@ the module's presence on every runtime (`reflect/builtin-modules`) beside its re
 
 ## ADR-357 — Ranking a candidate set is bounded by what it shows, and shards across processes
 
-**Status:** accepted (2026-09-16); **amended by ADR-374** (2026-09-20), which gives the default rules a native pass gated on nobody having replaced them. **Context:** bedit's project find-file on a 27k-file repo.
+**Status:** accepted (2026-09-16); **amended by ADR-375** (2026-09-20), which gives the default rules a native pass gated on nobody having replaced them. **Context:** bedit's project find-file on a 27k-file repo.
 
 **Context.** `C-x p f` over a 27,310-file project took ~1.1 s **per keystroke**. `std/fuzzy`
 was not obviously wrong — it lowers the query once, sorts by a precomputed key, and the
@@ -24132,7 +24132,7 @@ Windows runtime port (nine Unix-bound files, no CI job), a wasm build of the GUI
 rounded corners and cursors on the GPU target, and a pixel-space text op — a HUD uses the
 cell grid, which the GPU target draws through the atlas.
 
-## ADR-374 — The default fuzzy rules get a native pass, gated on nobody having replaced them
+## ADR-375 — The default fuzzy rules get a native pass, gated on nobody having replaced them
 
 **Status:** accepted (2026-09-20). **Amends ADR-357.** **Context:** bedit's project
 find-file, again, and this time with the loop measured rather than the library.
