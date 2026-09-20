@@ -1,0 +1,51 @@
+;;; Unary `(- x)` and `(/ x)` lower to the 2-arg primitive with the identity as the left
+;;; operand — `Prim2(Sub …)` over `0`, `Prim2(Div …)` over `1` — which is exactly what the
+;;; prelude's one-argument arms are (`(%sub 0 x)`, `(%div 1 x)`), instead of a generic
+;;; `Call` to the variadic wrapper (2026-09-20). The call was one native→native link per
+;;; negation and, being a NON-tail call, a GC safepoint that stopped the arm from hoisting
+;;; its pair-slab bases: `nqueens`'s `safe?` walked `placed` through `brood_rt_car`/`_cdr`
+;;; callbacks (16% of the row) because of the `(- dist)` beside it — 1 507M → 1 111M
+;;; instructions, −28.5% wall. The VALUE cases pin the wrapper's semantics on every number
+;;; kind, the overflow promotion and the type error; the SHAPE case pins the lowering through
+;;; `%vm-arm-ops`. Sabotage-verified: with the rewrite removed the shape case sees
+;;; `Call(argc=1 …)` and no `Sub` primitive.
+
+(defmodule unary-minus-test (:use test))
+
+(defn- neg (x) (- x))
+(defn- recip (x) (/ x))
+;; `safe?`'s shape: a self-tail list walk with a negation beside the reads.
+(defn- walk (placed dist acc)
+  (if (empty? placed)
+    acc
+    (walk (rest placed) (+ dist 1) (+ acc (- (first placed)) (- dist)))))
+
+(describe "unary minus and reciprocal"
+  (test "mean what the wrapper's one-argument arms mean"
+    (assert= -5 (neg 5))
+    (assert= 5 (neg -5))
+    (assert= 0 (neg 0))
+    (assert= -5.5 (neg 5.5))
+    (assert= -1/3 (neg 1/3))
+    (assert= 3 (neg (neg 3)))
+    ;; i64::MIN negates past the machine range: the same BigInt promotion `%sub` does
+    (assert= 9223372036854775808 (neg -9223372036854775808))
+    (assert= -9223372036854775807 (neg 9223372036854775807))
+    (assert= 1/4 (recip 4))
+    (assert= 2.0 (recip 0.5))
+    (assert= 3 (recip 1/3))
+    (assert= -12 (walk (list 1 2 3) 1 0)))
+
+  (test "the type error and the division by zero are the wrapper's"
+    (is (includes? (or (error-of (neg "a")) "") "expected number"))
+    (is (string? (error-of (recip 0)))))
+
+  (test "compiles to the primitive over the identity, not a call to the wrapper"
+    (let (ops (%vm-arm-ops neg 1))
+      (assert= 1 (count (seq/filter ops (fn (o) (includes? o "(Sub,")))))
+      (assert= 0 (count (seq/filter ops (fn (o) (string/starts-with? o "Call("))))))
+    (let (ops (%vm-arm-ops recip 1))
+      (assert= 1 (count (seq/filter ops (fn (o) (includes? o "(Div,")))))
+      (assert= 0 (count (seq/filter ops (fn (o) (string/starts-with? o "Call("))))))
+    ;; and the list walk keeps NO call, which is what lets it hoist its pair reads
+    (assert= 0 (count (seq/filter (%vm-arm-ops walk 3) (fn (o) (string/starts-with? o "Call(")))))))

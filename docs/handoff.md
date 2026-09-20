@@ -86,6 +86,14 @@ What landed, each with a sabotage-verified guard:
    an opted-out warm boot.
 5. ~~Two dead-code warnings in the LEAN build~~ — gated `#[cfg(feature = "dev-tools")]`.
 
+### `nqueens` −28.5%: unary minus is a `Prim2` now (2026-09-20, evening)
+
+`(- x)` / `(/ x)` lower to `Prim2(Sub|Div)` over the identity (`lower.rs`, beside the
+`resolve_prim1` case). The generic call was a GC safepoint that kept `safe?` from hoisting
+its pair-slab bases — 16% of the row in `car`/`cdr` callbacks. Next on the row: the
+`hof_apply_step`/`range_reduce_slow` per-element entry (~12%), then `solve` on the VM
+(~15%). Guard `tests/unary_minus_test.blsp`.
+
 ### The `ring`/`pingpong` movement in the 1b9befd0 column — attributed, not a runtime regression
 
 Fixed-baseline A/B (`2c1596c0` vs `1b9befd0`, both images live, base-vs-base floor <1%):

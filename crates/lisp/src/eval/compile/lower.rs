@@ -1038,6 +1038,38 @@ pub(crate) fn compile_node(
                             pos: heap.form_pos_only(form),
                         });
                     }
+                    // Unary `(- x)` / `(/ x)`: the prelude's one-argument arms are exactly
+                    // `(%sub 0 x)` and `(%div 1 x)`, so lower them as that `Prim2` with the
+                    // identity as the left operand. Before this a negation was a generic
+                    // `Call` to the variadic wrapper — one native→native link per call,
+                    // and, being a NON-tail call, a GC safepoint that kept the arm from
+                    // hoisting its pair-slab bases: `nqueens`'s `safe?` walked `placed`
+                    // through `brood_rt_car`/`_cdr` callbacks (16% of the row) because of
+                    // the `(- dist)` beside it. Same guard discipline as the 2-arg case —
+                    // `head` stays `-`, so a deopt dispatches the real wrapper with
+                    // `(0 x)`, which is the same answer the 1-arg arm gives.
+                    if let Some((op @ (PrimOp::Sub | PrimOp::Div), [0, 1])) = resolve_prim(heap, h)
+                    {
+                        let identity = if matches!(op, PrimOp::Sub) { 0 } else { 1 };
+                        let b = compile_node(heap, items[1], scope, false)?;
+                        let broot = !matches!(
+                            b,
+                            Node::Const(_)
+                                | Node::Local(_)
+                                | Node::Global(_)
+                                | Node::GlobalIc { .. }
+                        );
+                        return Some(Node::Prim2 {
+                            op,
+                            a: Box::new(Node::Const(ConstVal::new(Value::int(identity)))),
+                            b: Box::new(b),
+                            map: [0, 1],
+                            head: h,
+                            guard: AtomicU64::new(heap.global_epoch()),
+                            pos: heap.form_pos_only(form),
+                            broot,
+                        });
+                    }
                 }
                 if items.len() == 3 && scope.lookup(h).is_none() {
                     if let Some((op, map)) = resolve_prim(heap, h) {
