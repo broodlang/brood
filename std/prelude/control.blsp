@@ -298,14 +298,14 @@ The steps after a failure never run, so a pipe does not have to end in `(if (fai
     (if-some (x false) x :absent)   → false
     (if-some (x nil) x :absent)     → :absent"
   (let (name (first binding) expr (second binding) v (gensym "v"))
-    `(let (~v ~expr) (if (nil? ~v) (do ~@else) (let (~name ~v) ~then)))))
+    `(let (~v ~expr) (if (/nil? ~v) (do ~@else) (let (~name ~v) ~then)))))
 (defmacro when-some (binding & body)
   "Bind `(name expr)`; when `expr` is not `nil`, evaluate `body` with `name` bound to it, else `nil`. The presence-testing [[when-let]]: a `false` value runs the body.
 
     (when-some (x false) [:got x])   → [:got false]
     (when-some (x nil) [:got x])     → nil"
   (let (name (first binding) expr (second binding) v (gensym "v"))
-    `(let (~v ~expr) (if (nil? ~v) nil (let (~name ~v) ~@body)))))
+    `(let (~v ~expr) (if (/nil? ~v) nil (let (~name ~v) ~@body)))))
 
 ;; `condp` — `cond` with the test factored out: `(condp pred expr t1 r1 t2 r2 … [default])`
 ;; evaluates `expr` once and takes the first clause whose `(pred t expr)` is truthy. The

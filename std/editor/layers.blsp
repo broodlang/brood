@@ -452,7 +452,6 @@ layer\". A shadow test done per leaf would report that `C-x k` still works. It d
   (let (above (seq/find (take layers i) (fn (l) (contains? (or (:keymap l) {}) k))))
     (if (nil? above) nil (:name above))))
 
-(sig scope-bindings (seqable -> vector))
 (defn scope-bindings (ctxs)
   "Every binding the scopes `ctxs` make (first scope = highest precedence), each WITH the
 layer it came from and what shadows it: a vector of
@@ -482,6 +481,7 @@ help is worse than none, because it is believed.
                    :command command
                    :layer (:name layer)
                    :shadowed-by (scope-shadow-of layers i (first sequence))})))))))))
+(sig scope-bindings (seqable -> vector))
 
 (defn scope-dispatch (ctxs state pending key fallback)
   "Dispatch `key` through the merged keymap of `ctxs` (precedence by order), running

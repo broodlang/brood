@@ -266,10 +266,13 @@
   ;; watcher's monitors leaves its siblings (on other targets, and a second one on the
   ;; SAME target) firing, and the count a target reports follows both.
   (test "demonitor of one monitor leaves the watcher's others on other targets"
-    (let (a (spawn (receive (:go nil))) b (spawn (receive (:go nil)))
-          ma (monitor a) mb (monitor b))
+    (let (a (spawn (receive (:go nil)))
+          b (spawn (receive (:go nil)))
+          ma (monitor a)
+          mb (monitor b))
       (demonitor ma)
-      (send a :go) (send b :go)
+      (send a :go)
+      (send b :go)
       (assert= (receive ([:down ^mb _ r] r)) :normal)
       (assert= (receive ([:down ^ma _ _] :got-down) (after 100 :no-down)) :no-down)))
   (test "two monitors on the same target from one watcher: demonitor one, the other fires"

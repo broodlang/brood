@@ -206,7 +206,8 @@ worker's mailbox so it can't satisfy a later test's receive."
           ([:system :exit ^shut r] [:shutdown-was-reported r])
           ([:system :exit ^shut2 r] [:shutdown-vec-was-reported r])
           (after *test-wait-ms* :timeout)))
-      (assert= :quiet (receive ([:system :exit _ _] :deliberate-exit-was-reported) (after 100 :quiet))))
+      (assert= :quiet
+        (receive ([:system :exit _ _] :deliberate-exit-was-reported) (after 100 :quiet))))
     (sysmon-done)
     (proc/system-monitor (self) {:exit true})
     (let (killed (spawn (receive (:never nil))))
