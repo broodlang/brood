@@ -141,7 +141,8 @@
     (is (not '())))
 
   (test "non-empty list is truthy"
-    (assert= :yes (if '(1) :yes :no)))
+    ;; pinning the falsy set: the lint proving this test constant is the point of it
+    (check-allow :constant-condition (assert= :yes (if '(1) :yes :no))))
 
   (test "0 is truthy — unlike Python and JS"
     (assert= :yes (if 0 :yes :no))

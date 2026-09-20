@@ -374,6 +374,11 @@ pub(super) const SUPPRESS_PURE: u16 = 1 << 7;
 /// the return where the checker cannot see it — narrower than `:type-mismatch`, which
 /// also silences a body that provably contradicts its declaration.
 pub(super) const SUPPRESS_TRUSTED: u16 = 1 << 8;
+/// `(check-allow :constant-condition …)` — a test the checker can prove is always true,
+/// because its type admits neither `nil` nor `false`. Suppressed where the constancy IS
+/// the point: a test asserting that an empty record or a non-empty list is truthy is
+/// pinning the language's falsy set, and the lint restating it is noise.
+pub(super) const SUPPRESS_CONSTANT_COND: u16 = 1 << 9;
 
 /// One step of a narrowable access path: a keyword field (`(get x :k)`) or a
 /// fixed integer index (`(nth x 0)` / `(first x)` / `(second x)` / `(third x)`).

@@ -23991,3 +23991,64 @@ test asserting on it was vacuous (checked: sabotage read `:deopts 0, :deopts-tot
 **Guard.** `tests/jit_eq_join_test.blsp` §5: a self-tail arm driven 31 ints to one list
 settles native with `:deopts-total ≤ 16` after 20 000 more activations; raising the
 threshold out of reach reds it at 1 242.
+
+## ADR-373 — A condition the checker can prove is always true is a finding
+
+**Context.** Brood's falsy set is exactly `nil` and `false`. Everything else — `0`, `""`,
+`[]`, `{}`, `-1` — is truthy. That rule is simple, documented and taught, and it still
+produces a specific, repeating bug, because a function is free to answer a SENTINEL:
+
+```brood
+(when (index-of haystack needle) …)   ; runs its body when the needle is ABSENT, too
+```
+
+`index-of` answers `-1` for "not found". `-1` is truthy. So the test reads as "when it is
+there" and means "always". The shape is invisible at the call site: nothing about
+`(when (index-of …) …)` looks wrong, and the body is usually still *correct* for the found
+case, so it passes every test that has the needle in the haystack.
+
+The evidence that this is a class and not an accident: **five files in `std/` carry a prose
+comment warning about this one function** — `reflect`, `tool/nest`, `tool/project-check`
+(twice), `prelude/tools`. A trap that each author has to rediscover and then annotate is a
+trap only documentation guards, and documentation is not in the loop when the code is
+written. It bit again in `bedit` (`(or (index-of enabled cur) 0)`, whose fallback could
+never fire) while this very ADR's work was going on.
+
+**The alternative considered and rejected: change `index-of` to answer `nil`.** It is the
+idiomatic Brood return, and it would make `(when (index-of …) …)` correct by construction.
+It is also 307 call sites across `brood` and `bedit`, many of them correct today
+(`(>= i 0)`, `(< i 0)`), and it trades a quiet wrong answer for a loud breaking change
+across the ecosystem to fix a mistake the checker can simply *see*. The sentinel is not the
+defect; the unexamined truthiness of the sentinel is.
+
+**Decision.** `nest check` reports a conditional whose test has a type that admits neither
+`nil` nor `false`. The checker already computes that type (`infer::expr_ty`) and already
+owns the falsy set (`Ty::truthy()`), so the rule is one subtype test at the site that
+already hosts the truthy-failure lint (ADR-310's descendant): same shape, same
+positively-known-types discipline.
+
+Four scope limits, each paid for by measurement rather than taste:
+
+- **Literal tests are left alone.** `:else` is how `cond` spells its default and
+  `(if true …)` is how a test pins a branch. Including them fired 77 times in this repo
+  against 2 real findings.
+- **`or` and `and` are out.** They desugar to a `let` whose `if` tests the *binding*, so
+  reaching them means admitting bare symbols — which then flags every defensive
+  `(or root "")` on a value the checker knows is non-nil. That is a true statement (the
+  fallback is dead) and a useless one (the value is used either way): 33 instances in this
+  repo's own tests. A dead `or` fallback is a weaker claim than a constant BRANCH and wants
+  its own lint.
+- **A `failure` condition stays with the truthy-failure lint**, which names the actual
+  mistake; this one would only repeat it in vaguer words.
+- **A type known only by exclusion is not a finding.** `any`, or a guard's `(not nil)`, IS
+  the `truthy` type; re-testing a value an outer guard narrowed is ordinary defensive code.
+
+`(check-allow :constant-condition …)` covers the case where the constancy is the point — a
+test asserting that an empty record or a non-empty list is truthy is pinning the falsy set,
+and the lint restating it is noise. Two such sites exist and now say so.
+
+**Consequences.** `nest check` is at zero across `brood` and `bedit` with the rule on. The
+five prose warnings in `std/` are now backed by a mechanism; `index-of`'s docstring says it
+outright rather than leaving each caller to find out. The rule is not about `index-of`: it
+catches any never-falsy test, so `(if (count xs) …)` and `(when (str a b) …)` are the same
+finding, and a future function that answers a sentinel gets the same guard for free.

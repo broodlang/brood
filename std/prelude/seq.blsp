@@ -99,7 +99,13 @@ what incremental search rides on (formerly the separate `index-of`).
     (index-of \"hello\" \"ll\")     → 2
     (index-of \"hello\" \"zz\")     → -1
     (index-of [:a :b :c] :b)     → 1
-    (index-of \"abab\" \"ab\" 1)    → 2   ; search resumes at `from`"
+    (index-of \"abab\" \"ab\" 1)    → 2   ; search resumes at `from`
+
+**-1 is TRUTHY.** Only `nil` and `false` are falsy in Brood, so `(when (index-of hay x) …)`
+runs its body every time, including when `x` is absent — test the sentinel, as
+`(>= (index-of hay x) 0)` or `(includes? hay x)`, and never the value. `nest check` reports
+the shape (`this test is always true`); this line is here because the checker is advisory
+and the reader is not."
   (let (start (or from 0))
     (cond
       ;; Strings ride on the `%str-index-of` kernel primitive — linear; a pure-Brood

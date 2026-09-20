@@ -473,7 +473,13 @@ it as *trusted, not verified* and this is the author saying so. Wrap the whole `
 the return check runs at the definition, not inside the body. Narrower than
 `:type-mismatch`, which also silences a body that provably contradicts its declaration —
 prefer fixing the leaf where one exists: a record's field types, a `(map K V)` where a
-bare `map` stood, a value sig on a `defdyn`). An unrecognised
+bare `map` stood, a value sig on a `defdyn`), and
+**`:constant-condition`** (2026-09-20 — a test the checker can prove is always true,
+because its type admits neither `nil` nor `false`. The class it exists for is the
+SENTINEL return: `index-of` answers `-1` for "not found", `-1` is truthy, and
+`(when (index-of hay x) …)` reads as "when it is there" while meaning "always". Suppress it
+only where the constancy IS the assertion — a test pinning that an empty record or a
+non-empty list is truthy). An unrecognised
 category suppresses nothing — a typo is a
 no-op that still lints, never a silent blanket opt-out. This is what lets
 `nest check` stay at **zero** warnings project-wide without weakening any lint.

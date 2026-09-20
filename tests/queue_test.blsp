@@ -133,7 +133,9 @@
   ;; An EMPTY pq used to be `nil` (a bare list), and `()` is the one falsy collection in
   ;; Brood — so `(if pq …)` took the else branch on an empty queue. A record is truthy.
   (test "an empty pq is truthy, unlike the bare list it used to be"
-    (is (if (pq/empty) true false))
+    ;; the constancy IS the assertion here — that is what the falsy set being exactly
+    ;; {nil, false} means for a record
+    (check-allow :constant-condition (is (if (pq/empty) true false)))
     (is (empty? (pq/empty))))
   (test "a queue displays as a summary and inspects as its contents"
     (assert= (->string (queue/empty)) "#<queue empty>")
