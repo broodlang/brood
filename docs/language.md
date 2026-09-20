@@ -2776,7 +2776,7 @@ In the `math` module: `math/mod`  `math/rem`  `math/quot`  `math/floor`  `math/m
   live view.
 
 ### Transducers
-`seq/transduce`  `seq/xmap`  `seq/xfilter`  `seq/xreject`  `seq/xkeep`
+`seq/transduce`  `seq/xmap`  `seq/xfilter`  `seq/xreject`  `seq/xkeep`  `seq/xtake-while`  `seq/reduced`  `seq/reduced?`
 
 The `l*` combinators above are the ergonomic front end; `transduce` is the same
 machinery with the stages exposed, for when the pipeline is **computed, reused, or
@@ -2792,15 +2792,34 @@ A **transducer** is a function `(rf) -> rf'`, where a **reducing function** `rf`
 input. So a stage of your own is a plain `fn` — no protocol to implement:
 
 ```clojure
-(defn xtake-while (pred)
-  (fn (rf) (fn (acc x) (if (pred x) (rf acc x) acc))))
+(defn xdrop-while (pred)
+  (fn (rf) (fn (acc x) (if (pred x) acc (rf acc x)))))
 
-(seq/transduce (range 6) (xtake-while (fn (n) (< n 3))) conj [])  ;=> [0 1 2]
+(seq/transduce (range 6) (xdrop-while (fn (n) (< n 3))) conj [])  ;=> [3 4 5]
 ```
 
 Stages compose **left to right in data-flow order** under `comp` — the reverse of
 ordinary function composition — because each stage wraps the *next* one's reducer.
 `(comp (seq/xfilter p) (seq/xmap f))` filters, then maps.
+
+**Early termination (ADR-376).** A stage that knows the rest of the input cannot matter
+ends the run with `(seq/reduced acc)`: `transduce` returns `acc` at once, and the source
+is not walked further. `seq/xtake-while` is the built-in stopping stage:
+
+```clojure
+(seq/transduce (range 1000000) (seq/xtake-while (fn (n) (< n 3))) conj [])   ;=> [0 1 2], four stage calls
+(seq/transduce (range 10) (fn (rf) (fn (acc x) (if (= x 4) (seq/reduced :early) (rf acc x)))) conj [])
+;=> :early
+```
+
+`reduced` is a **non-local exit**, not a returned box: it throws a `%reduced` record
+that `transduce` catches and unwraps (`seq/reduced?` recognises the payload). That keeps
+`fold`'s native loops free of a per-element test — a `try` costs ~100 ns per `transduce`
+call and the throw ~1 µs once, where a box test would cost every element of every fold —
+and it means `reduced` is a *transducer* protocol: outside a `transduce` it is an
+unhandled throw with a clear payload. A stage that needs state across inputs (`xtake`'s
+counter) has no place to release it yet — the `(rf) -> rf'` contract has no completion
+arity — and is deliberately not provided.
 
 ### Maps
 `hash-map`  `get`  `assoc`  `dissoc`  `contains?`  `keys`  `vals`  `reduce-kv`

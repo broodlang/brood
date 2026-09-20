@@ -15130,3 +15130,25 @@ without the race — tier a pair, `def` the callee, run the check — one that m
 
 `make check-cost`-class lesson, restated for guards: compare against what was true when you
 read, not what is true now, unless you hold the lock.
+
+## 2026-09-20 (9) — `reduced` (ADR-376): early termination as a throw
+
+ROADMAP item 5, taken first because it was a correctness gap dressed as a feature: the
+docstring's own `xtake-while` example kept being called for every remaining input and
+ignored it, so a stop was not a stop.
+
+The shape was decided by three numbers, not by Clojure. `transduce` is `fold` under a
+composed reducer, and `fold`'s loops are native (`%range-reduce`, `%vector-reduce`,
+`%fold-loop`) or rewritten into counted `letrec`s (ADR-360) — a returned box would need a
+per-element test in all of them, for every fold. Measured: a `try` around the fold costs
+**~100 ns per `transduce` call**, a throw out of a native fold **~1.1 µs once**, a
+Brood-side loop that could test a box **89 ms per million elements** on top of the stage
+calls, and a scratch `table` per run (what a stateful `xtake` would want) **829 ns per
+call** — and it leaks unless something releases it. So `(seq/reduced acc)` throws a
+`%reduced` record and `transduce` catches exactly that; the loops are untouched, and a
+million-wide range stops at the fourth stage call (the test counts them).
+
+`xtake-while` shipped; `xtake` did not: state across inputs needs a completion arity to
+release it — Clojure's `(rf acc)` — which is a protocol change every stage would carry.
+Recorded in the ADR, deferred until a stage needs it. `docs/language.md` §Transducers has
+the exit and the deferral.

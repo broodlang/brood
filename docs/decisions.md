@@ -24259,3 +24259,47 @@ Assets stayed Brood: a bundle carries source only, so `b2d-assets/embed!` writes
 that registers files as base64 and `read` prefers the embedded bytes to the file. No
 runtime change for that, deliberately — an archive format for binaries in the bundle is a
 real design (ADR-038 territory) and the game did not need it.
+
+## ADR-376 — `reduced` ends a `transduce` by throwing, not by boxing
+
+**Status:** accepted (2026-09-20). **Extends ADR-161** (transducers as public surface).
+**ROADMAP "what the other Lisps have" item 5.**
+
+**Context.** A transducer stage had no way to stop a run: the docstring's own
+`xtake-while` example kept being called for every remaining input and merely ignored it,
+so `take`/`take-while`/`first`/`some` could not be stages, and a pipeline over a wide source
+walked all of it for the first three items. Clojure's answer is `reduced`: a box the stage
+returns, which every reducing loop tests for per element and unwraps at the end.
+
+Brood's `transduce` is `(fold coll init (xform rf))`, and `fold` dispatches to native
+counted walks — `%range-reduce`, `%vector-reduce`, the `%fold-loop` list walk — plus the
+ADR-360 rewrites that turn a fold literal into a counted `letrec`. A per-element box test
+would sit in every one of them, for every fold, transducer or not; the cheapest sentinel
+that could be told apart in O(1) (a pair with a reserved head) is still a tag-and-car test
+on the hottest loop in the library. Measured instead (release, 2026-09-20): a `try` around
+a body costs **~100 ns per `transduce` call**, a throw out of a native fold **~1.1 µs
+once**, and a Brood-side loop that could test a box costs 89 ms per million elements on
+top of the stage calls. Table-backed state per run (the other thing `xtake` would need)
+costs 829 ns per call and leaks unless something releases it.
+
+**Decision.** `(seq/reduced acc)` is a **non-local exit**: it throws a `%reduced` record
+(`defrecord`, private by its `%` name) carrying `acc`, and `transduce` runs its fold inside
+a `try` that catches exactly that payload (`seq/reduced?`) and returns the value; any
+other throw propagates. The native loops are untouched; nothing costs per element.
+`seq/xtake-while` is the built-in stopping stage. Outside a `transduce`, `reduced` is an
+unhandled throw with a recognisable payload — it is a transducer protocol, and the
+`fold`/`reduce` contract does not change.
+
+**Not decided, on purpose.** A STATEFUL stage — `xtake`'s counter, a windower, a
+de-duplicator — needs somewhere to keep state across inputs and something to release it
+when the run ends. Brood has no cell to keep it in (ADR-026); a `table` per run works but
+the `(rf) -> rf'` contract has no completion arity to drop it from, and a table dropped
+only when the stage fires `reduced` leaks whenever the input runs out first. The honest
+shape is Clojure's completing arity — `(rf acc)` once at the end — which is a protocol
+change every stage and `transduce` would carry. Deferred until a stage needs it (ADR-011);
+`xtake-while` covers the stopping case without state.
+
+**Consequences.** `transduce` pays one `try` frame per call. A stage may stop a run from
+any depth of the stack — a stop below a `map` stage is a stop. The `%reduced` record is the
+only new value shape, sendable and printable like any record; `seq/reduced?` is the only
+new predicate. `docs/language.md` §Transducers documents the exit and the deferred half.

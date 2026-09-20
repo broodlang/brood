@@ -254,6 +254,35 @@ vector comes FIRST here, unlike the rest of this module — see the note above.
   (%vector-length v))
 (sig vector-length (vector -> int))
 
+;; ---- early termination (ADR-376) ---------------------------------------------------
+;; `(reduced acc)` ends a `transduce` at once with `acc` as its result. It is a NON-LOCAL
+;; EXIT, not a returned box: the stage throws a `%reduced` record and `transduce` catches
+;; it. Clojure returns a box and has every reducing loop test for it per element; here
+;; the loops are `fold`'s native counted walks (`%range-reduce`, `%vector-reduce`), and a
+;; per-element test in them was measured against a throw: a `try` costs ~100 ns per
+;; `transduce` CALL and a throw out of a fold ~1 µs ONCE, where a box test would cost
+;; every element of every fold, transducer or not. So the loops stay as they are, and a
+;; `reduced` outside a `transduce` is an unhandled throw with a clear payload — it is a
+;; transducer protocol, not a `fold` one.
+(defrecord %reduced (value))
+
+(defn reduced (acc)
+  "End the enclosing [[transduce]] at once with `acc` as its result — the early exit a
+stage reaches for when it knows the rest of the input cannot matter. Never returns:
+it throws a `%reduced` record that `transduce` catches and unwraps.
+
+    (seq/transduce (range 100) (seq/xtake-while (fn (n) (< n 3))) conj [])   → [0 1 2]"
+  (throw (%reduced acc)))
+(sig reduced (any -> never))
+
+(defn reduced? (x)
+  "Is `x` the payload of a [[reduced]] exit — what `transduce` catches.
+
+    (seq/reduced? (try (seq/reduced 1) (catch e e)))   → true
+    (seq/reduced? [:reduced 1])                         → false"
+  (and (record? x) (= (record-id x) :seq/%reduced)))
+(sig reduced? (any -> bool))
+
 (defn transduce (coll xform rf init)
   "Reduce `coll` with `rf`/`init` through the transducer `xform` — one pass, no
 intermediate collections. `(transduce (range 10) (comp (seq/xfilter odd?) (seq/xmap sq)) + 0)`
@@ -261,14 +290,29 @@ sums the squares of the odd numbers, allocating nothing in between.
 
 `xform` is any `(rf) -> rf'` function, so a stage of your own is a plain `fn`:
 
-  (defn xtake-while (pred)          ; stop-at-first-failure, as a stage
-    (fn (rf) (fn (acc x) (if (pred x) (rf acc x) acc))))
+  (defn xdrop-while (pred)          ; skip a leading run, as a stage
+    (fn (rf) (fn (acc x) (if (pred x) acc (rf acc x)))))
 
-Stages compose LEFT to RIGHT in data-flow order under `comp` — `(comp (xfilter p)
-(xmap f))` filters before mapping — because each stage wraps the next one's reducer.
-`seq/lmap`/`seq/lfilter`/… are the ergonomic front end over the same machinery; use
-`transduce` when the stage stack is computed, reused, or your own."
-  (fold coll init (xform rf)))
+A stage that knows the rest of the input cannot matter ends the run with [[reduced]] —
+`(reduced acc)` throws, `transduce` catches, and `acc` is the result. [[xtake-while]] is
+the built-in one. Stages compose LEFT to RIGHT in data-flow order under `comp` —
+`(comp (xfilter p) (xmap f))` filters before mapping — because each stage wraps the next
+one's reducer. `seq/lmap`/`seq/lfilter`/… are the ergonomic front end over the same
+machinery; use `transduce` when the stage stack is computed, reused, or your own.
+
+    (seq/transduce (range 10) (comp (seq/xfilter math/odd?) (seq/xmap inc)) + 0)   → 30"
+  (try
+    (fold coll init (xform rf))
+    (catch e
+      (if (reduced? e) (%reduced-value e) (throw e)))))
+
+(defn xtake-while (pred)
+  "The `take-while` stage as a transducer: pass inputs while `(pred x)` holds, and end the
+run at the first that fails — through [[reduced]], so a long input stops there instead
+of being walked to its end with every later element ignored.
+
+    (seq/transduce (range 1000000) (seq/xtake-while (fn (n) (< n 3))) conj [])   → [0 1 2]"
+  (fn (rf) (fn (acc x) (if (pred x) (rf acc x) (reduced acc)))))
 
 (defn filterv (coll pred)
   "A VECTOR of the items of `coll` for which `(pred x)` is truthy — [[filter]]

@@ -223,9 +223,12 @@ needs a Brood-specific form to respect an ADR.
   (ADR-285). A persistent balanced tree in `std/sorted.blsp` implementing `Seqable`/`Conjable`
   so `conj`/`into`/`get` dispatch through the collection protocol (ADR-156); the natural home
   for a range query, which `pq`/`multimap` do not cover.
-- ⬜ **5. `reduced` early termination for transducers.** Without it `take`/`take-while`/
-  `first`/`some` cannot be transducers. A wrapped-value sentinel checked by `transduce`'s
-  loop, Clojure's exact contract; unblocks `xtake`/`xtake-while`.
+- ✅ **5. `reduced` early termination for transducers** (2026-09-20, ADR-376). Not
+  Clojure's box: a NON-LOCAL EXIT — the stage throws a `%reduced` record and `transduce`
+  catches it — because the alternative was a per-element test in every native fold loop
+  (measured: a `try` is ~100 ns per `transduce` call, the throw ~1 µs once). `xtake-while`
+  shipped with it; `xtake` did not — a stateful stage needs a completion arity to release
+  its state, a protocol change deferred until a stage needs it (the ADR has the design).
 - ⬜ **6. Declarative macro argument grammars** *(shape)*. Racket's `syntax-parse` is the
   best macro-error story in any Lisp; Brood has the philosophy (ADR-152) and the match
   compiler but each prelude macro hand-rolls its checks (`%for-check-binds`). Multi-pattern
