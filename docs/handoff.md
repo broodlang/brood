@@ -306,6 +306,16 @@ apples to oranges), and **`target/ab` reached 24 GB and filled the root filesyst
 then fail with `failed to create directory` inside cargo, which does not say "disk full".
 `make ab-clean` after every A/B session.
 
+### The message path, profiled (2026-09-20, night) — read `compute-frontier.md` §7.3's new subsection
+
+`pingpong`/`ring` per message: ~180 ns interpreting the receive loop's body (the arm is
+refused because it hosts the receive), ~95 ns in `receive_match`'s scan, ~110 ns in one
+matcher activation, ~45 ns re-resolving the matcher's arm per receive, ~150 ns in the
+park/wake round trip, ~35 ns copying, ~50 ns sending. No 20% item. The structural lever is
+the receive as a native deopt point (a session); the cheap one is a one-slot `hof_resolve`
+memo (3–5%, declined over the ADR-366/hot-reload staleness question). M2 is NOT a lever for
+these rows — that was wrong in an earlier handoff line and is corrected in §7.3.
+
 ### v0.31.0 — cut from a tree whose tip had moved four times while it was being gated
 
 The release commit (`chore(release): v0.31.0`, `1375e47d`) sits under three merges of the

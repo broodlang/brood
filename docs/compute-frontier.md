@@ -1356,6 +1356,41 @@ Beside it on those rows: `receive_match` 8–9%, `pool::run_one` 5–8% — the 
 cost `runtime-frontier.md` names, whose next concrete step is **M2 shared IC tables**
 (largest remaining per-process item, 664 B + a warm start; lock-free design + TSAN/loom).
 
+#### 7.3, profiled again 2026-09-20 (`perf record` on an unstripped release-fast, `BROOD_PERF_STATS` for the per-message arithmetic) — no single lever; the floor is the design, and here is what it is made of
+
+`pingpong` (200k messages, ~850 ns per message all-in) and `ring` (1M messages, ~790 ns)
+agree to the percentage point on where a message's time goes, self time:
+
+| share | symbol | per message | what it is |
+|---|---|---|---|
+| 21–25% | `exec_chunk` (+ `dispatch` 2.5, `vm_run_bc` 2) | ~180 ns | the receive loop's body, INTERPRETED — `ping`/`responder`/`node` are refused (`hosts-receive`, a direct `%receive`), so every iteration is VM |
+| 11–12% | `receive_match` (self) | ~95 ns | the scan: lock, pop the head optimistically, `msg_root_peek`, the tag pre-filter, the `Ok(None)` bookkeeping |
+| 8% | `ns_match_run` | 80–110 ns | one native matcher activation (`hof_apply_step`, the `(fn (msg) …)` literal) |
+| 4–5% | `ns_match_resolve` | 40–46 ns | `hof_resolve` per `receive` CALL — the matcher is a fresh closure each time, so `compiled_arm_for` + `vm_arm_block` probe twice per receive |
+| ~17% | `run_one` 7, `enqueue` 3.5, `Ctx` drop/save/install ~5, `worker_loop` 1.4, `drive` 1.2 | ~150 ns | the park/wake round trip — every receive on these rows finds an empty mailbox and parks |
+| 3.5% | `mailbox::send` | ~30 ns | |
+| 2.5% | `Registry::get` | ~20 ns | pid → process handle, per send |
+| ~4% | `memmove` + `alloc` + `copy_cross_heap` | ~35 ns | the message copy |
+| 1.8% | `code_gen_pinned` | | per-quantum pin |
+
+`ns_receive` (the whole `receive_match` including the matcher) is 310–350 ns of it; the
+rest is the loop body and the scheduler.
+
+**What that means.** Nothing here is a 20% item, and the two biggest are structural:
+(1) the loop body interprets because the arm hosts a `receive` — making the receive a
+native *deopt point* (lower `%receive` as an unconditional deopt whose checkpoint resumes
+AT the call, so the VM runs the receive and parks cleanly, and the back-edge re-tiers the
+next iteration) would move the ~180 ns to native, but these loop bodies are almost nothing
+BUT the receive and a send, so the row-level gain is well under the 21% and the design is
+§7.3's original "receive as an exit point" — a session, not a tweak; (2) the park/wake
+round trip is the scheduler's contract (direct handoff already took 1.9× here) and ~150 ns
+is close to what a futex-free handoff costs. The one cheap candidate is the per-receive
+`hof_resolve` (4–5%): a one-slot memo keyed on the matcher's AST identity — but a memo
+across receives must be invalidated by ADR-366's stale mark and by hot reload, and the
+arm's own `compile_epoch` guard only covers the second; declined for now as 3–5% against
+a staleness class this repo has paid for three times. Recorded so the next reading starts
+here rather than at "profile it".
+
 ### 7.4 `sort` is a GC row and the kernel is 5.6% of it — the cheap question is ANSWERED (2026-08-29)
 
 > **The page-fault theory is dead; don't re-chase it.** `perf stat -e page-faults` on the
