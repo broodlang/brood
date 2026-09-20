@@ -957,6 +957,24 @@ impl Heap {
         t.get(abs)?.as_ref().map(|e| e.epoch)
     }
 
+    /// Whether call-site `site`'s entry names an arm whose native code is INSTALLED right
+    /// now — `false` for one demoted since the mirror was published (`BAILED` by the
+    /// deopt-thrash latch, `null`/`QUEUED` by ADR-372's re-lowering), `None` with no entry.
+    /// The debug cross-check's third legitimate reason for a mirror the entry refuses: a
+    /// demotion never clears the mirror (`vm_fast_link_clear_site`'s doc — the old native is
+    /// still valid code, it only deopts), so the mirror outlives the entry's willingness to
+    /// link it until an epoch bump or a targeted invalidation.
+    #[cfg(all(feature = "jit", debug_assertions))]
+    pub fn vm_call_ic_entry_native_installed(&self, site: u32) -> Option<bool> {
+        use std::sync::atomic::Ordering::Acquire;
+        let abs = (self.cur_ic_base.get() + site) as usize;
+        let t = self.vm_call_ics.borrow();
+        let e = t.get(abs)?.as_ref()?;
+        let (arm, _) = e.arm.as_ref()?;
+        let code = arm.jit_code.load(Acquire);
+        Some(!(code.is_null() || code == crate::jit::BAILED || code == crate::jit::QUEUED))
+    }
+
     /// Grow the IR-readable [`FastLink`] mirror far enough to hold absolute site `abs`,
     /// then hand back a mutable slot. **The only place that grows it.**
     ///

@@ -516,9 +516,16 @@ pub(crate) fn debug_check_fast_link_mirror(
             callee_env.0
         ),
         // No authoritative link at the mirror's epoch: legitimate only when the entry has
-        // moved on (a rebind landed after the IR's raw load) or is gone (a clear).
+        // moved on (a rebind landed after the IR's raw load), is gone (a clear), or names an
+        // arm DEMOTED since the mirror was published — `BAILED` by the deopt-thrash latch,
+        // `null`/`QUEUED` by ADR-372's re-lowering. A demotion leaves the mirror in place by
+        // design (`vm_fast_link_clear_site`: the old native is still valid code, it only
+        // deopts), so the entry refusing to link it is not a desync. Without this clause the
+        // check fired deterministically on `jit::type_mixed_join_edges_stay_exact`, whose
+        // `code` arm latches after sixteen deopts while `work`'s site still mirrors it.
         None => debug_assert!(
-            heap.vm_call_ic_entry_epoch(site).is_none_or(|e| e != mirror_epoch),
+            heap.vm_call_ic_entry_epoch(site).is_none_or(|e| e != mirror_epoch)
+                || heap.vm_call_ic_entry_native_installed(site) != Some(true),
             "fast-link mirror at epoch {mirror_epoch} (site {site}, head {head}) has an entry at the \
              same epoch that does not fast-link: mirror=(code={code:#x}, nslots={nslots}) — a \
              mirror published for an entry the authoritative rules refuse"
