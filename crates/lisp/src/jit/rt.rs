@@ -1500,6 +1500,9 @@ pub unsafe extern "C" fn brood_rt_fast_frame(
     let fl: FastLink = std::ptr::read(slot);
     let (head, argc, nslots, code, env) = (fl.sym, fl.argc, fl.nslots, fl.code, fl.env);
     let bases = (fl.callee_ic_base, fl.callee_gic_base);
+    // The slot's stamp is the epoch the IR's guard validated; the dispatch must not re-read
+    // the live counter (see `jit_dispatch_fast_frame`).
+    let epoch = fl.epoch;
     // `out` goes straight down to the native callee, which writes the result into it
     // directly — no store/load round trip through `roots[base]` and no copy here. This is
     // the path that made the change worth making; see `crate::jit::JitArmFn`.
@@ -1512,6 +1515,7 @@ pub unsafe extern "C" fn brood_rt_fast_frame(
         code as usize,
         env,
         bases,
+        epoch,
         out,
     ) {
         FastLinkOutcome::Done => 0,

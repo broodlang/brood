@@ -487,6 +487,19 @@ pub(super) fn jit_fast_link_cold_outcome(
 /// [`FastLinkOutcome`] the caller maps to a status: `Done` (result), `Error` (parked), or
 /// `Fallthrough` — over the native-recursion cap, or the IC moved — which sends the IR to
 /// the `brood_rt_call_slow` miss path with the args left staged.
+///
+/// `epoch` is the slot's own stamp — the epoch the IR's guard just matched against the live
+/// counter — not a re-read of the counter. The two differ exactly when a peer's `def` lands
+/// between the IR's load and this call, and the difference used to abort a debug build: the
+/// cross-check below re-read the counter, asked the IC at the NEW epoch, got `None` (the
+/// mirror and the entry both carry the old stamp) and reported a mirror desync that was
+/// really its own TOCTOU (`concurrency_race::fanout_with_concurrent_global_rebind_matches_
+/// serial`, SIGABRT on CI 2026-09-20 with the test's writer `def`ing 72 000 times per run;
+/// reproduced by bumping the counter at this line). Running the link the IR validated is
+/// what the VM's `Inst::Call` does too when a rebind lands after its IC probe — late binding
+/// is "at the next lookup", and this call's lookup was the guard. What the stamp then feeds
+/// (`jit_run_fast_link`'s deopt/dirty-park probes) is documented there as "the caller's
+/// already-computed value", which it now is.
 #[cfg(feature = "jit")]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn jit_dispatch_fast_frame(
@@ -498,10 +511,10 @@ pub(crate) fn jit_dispatch_fast_frame(
     code: usize,
     env: u64,
     callee_bases: (u32, u32),
+    epoch: u64,
     out: *mut Value,
 ) -> FastLinkOutcome {
     let n = heap.roots_len();
-    let epoch = heap.global_epoch();
     // Elided (free-global) head: the args are the top `argc` operands; the frame starts there.
     let stage_base = n - argc;
     // Over the native-recursion cap → don't link (would overflow the native stack); the args
@@ -513,8 +526,8 @@ pub(crate) fn jit_dispatch_fast_frame(
     }
     let callee_env = EnvId(env);
     // Cross-check (debug only, fires in the gate): the flat-table values the IR handed us
-    // must equal what the authoritative IC fast-link resolves at this epoch — a mismatch is
-    // a mirror desync and a silent-wrong-answer risk.
+    // must equal what the authoritative IC fast-link resolves at the slot's epoch — a
+    // mismatch is a mirror desync and a silent-wrong-answer risk.
     #[cfg(debug_assertions)]
     {
         let auth = heap.vm_call_ic_fast_link(site, head, argc as u32, epoch);
