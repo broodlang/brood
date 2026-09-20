@@ -9856,7 +9856,19 @@ slowly and a value test passed against them. Sabotage-verified: restoring the de
 `eq_dispatch`'s residual reds "string `=` keeps the arm native" with `:bailed`; restoring
 first-edge-wins reds the join tier case the same way.
 
-## KI-150 — `base64` +6.6%: the sig wave moved work from a declaration into every run's pre-flight check 🔶 OPEN — the loading half is CLOSED BY CONSTRUCTION 2026-09-18 (ADR-370); what remains is the checker's own walk — `stdlib_tree_hash` 15.0M → 2.2M 2026-09-19 (dev entry points only — NOT the `base64` row); coverage's first increment landed 2026-09-18 (`517b8a1c`, 124 → 150 types) and measured BELOW THE FLOOR (was 🔶 REOPENED 2026-09-17, 🩹 MITIGATED 2026-09-16)
+## KI-150 — `base64` +6.6%: the sig wave moved work from a declaration into every run's pre-flight check ✅ CLOSED 2026-09-20 — the walk is replayed from a verdict cache (ADR-371); the `1b9befd0` column read `base64` 65.7 → 62.2 ms, `reduce` −21%, `strings` −17%, `pipeline` −14% (was 🔶 OPEN with the loading half closed by ADR-370 2026-09-18)
+
+**Closed 2026-09-20.** The remaining half — the checker's own per-file walk, paid on every
+run of an unchanged program — is gone from the column: ADR-371 records the pre-flight's
+verdict (warnings and the loads it made) keyed on the text, the binary, the stdlib and the
+flags that change a walk, and replays it. The trigger this entry set for itself was the next
+column refresh reading the short rows: `brood-benchmarks` at `1b9befd0` (min of three
+interleaved invocations) reads `base64` 65.7 → 62.2 ms (−5.3%, spread 0.8%), `reduce` 21.2
+→ 16.7 (−21%), `strings` 28.5 → 23.5 (−17%), `pipeline` 23.9 → 20.6 (−14%), `errors-deep`
+−6.8% — the per-file walk's share of each. A checker feature can no longer move a benchmark
+row, which is the property the wave's owner asked for; the cost of a checker change is now
+paid once per program text, at the first run. The original entry follows.
+
 
 **Symptom.** The 0.29.2 column refresh (`brood-benchmarks`, min of 3): `base64` 65.2 → 69.5 ms
 (+6.6%, spread 1.4%) against the 0.29.0 column at `d464e9ed`.

@@ -480,7 +480,36 @@ extended differential is green under sabotage (a wrong id in the side table must
 ---
 
 
-## Task 6 — symbols hash by spelling now (KI-166): confirm the rows on a box that benchmarks
+## Task 6 — symbols hash by spelling now (KI-166): confirm the rows on a box that benchmarks ✅ ANSWERED 2026-09-20 — neutral on every row; the micro's win survives at the native tier
+
+**Answered on this box, the way this file says to: two fixed baseline binaries, adjacent
+commits (`2fc5e13e` → `65598226`, the hash change alone), both stdlib images confirmed
+`:live` in the same shell, interleaved best-of-7 pinned to cpu 2, with a base-vs-base
+control (`A2`) as each row's floor:**
+
+| row | before | before again (floor) | after | after vs before |
+|---|---|---|---|---|
+| `startup` | 15.5 ms | 15.1 (−2.7%) | 15.4 | −0.7% |
+| `persistent-map` | 76.8 | 77.0 (+0.3%) | 77.2 | +0.5% |
+| `json` | 172.1 | 170.8 (−0.8%) | 169.5 | −1.5% |
+| `base64` | 78.3 | 77.4 (−1.3%) | 77.4 | −1.2% |
+| `wordcount` | 65.9 | 65.3 (−0.9%) | 65.6 | −0.5% |
+| `sort` | 111.8 | 111.6 (−0.2%) | 113.1 | +1.2% |
+| `strings` | 29.1 | 28.9 (−1.0%) | 29.4 | +0.9% |
+| `reduce` | 21.9 | 21.6 (−1.2%) | 22.3 | +1.7% |
+
+Every delta is inside its own row's floor. The +1.0% boot instruction count does not reach
+`startup`'s wall, and the map-heavy −15% reaches no row — none is keyword-hash-bound enough.
+
+**Question 2, the micro at the native tier** (200k four-key `assoc` + 400k `get`, default
+ceiling, `perf stat -e instructions:u -r 3` and five pinned wall samples): **1 054M → 876M
+instructions (−17%), 133 → 123 ms wall (−8%)**. The win survives the `brood_rt_map_assoc` /
+`brood_rt_map_get` callback boundary; the boundary halves it in wall terms.
+
+The change is in the `1b9befd0` column refresh in `brood-benchmarks` (with five other
+changes from the same day — which is why the isolated A/B above was needed to answer this
+task rather than the column).
+
 
 **Landed 2026-09-20, correctness-motivated, instruction counts only.** `value::symbol_hash`
 makes a symbol's hash a function of its SPELLING rather than of its interned id, so a map's

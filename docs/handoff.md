@@ -77,8 +77,10 @@ What landed, each with a sabotage-verified guard:
 2. **`json/emit` and friends still take up to 16 entry deopts per arm** before ADR-372
    re-lowers them — by design (the thrash latch's number). If a row shows an arm flipping
    late, `ENTRY_DEOPT_RELOWER` is the knob; measure before touching it.
-3. **KI-150 can close** once a column refresh reads the short rows: the loading half is
-   ADR-370, the walk is ADR-371. The refresh is off-box work.
+3. ~~**KI-150 can close** once a column refresh reads the short rows~~ — **CLOSED**: the
+   `1b9befd0` refresh reads `base64` −5.3%, `reduce` −21%, `strings` −17%, `pipeline` −14%.
+   `perf-handoff.md` Task 6 (the symbol-hash change) is ANSWERED the same day: neutral on
+   every row, the micro's win survives at the native tier.
 4. ~~`lazy_load_test`'s ADR-370 probes' image guard~~ — **FIXED**, and the failure it hid
    behind was a real one: **KI-169**, `:installed` reporting the prelude snapshot's count on
    an opted-out warm boot.
