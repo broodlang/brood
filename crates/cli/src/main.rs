@@ -279,7 +279,7 @@ fn run_test_files(interp: &mut Interp, files: &[String]) {
     for path in files {
         let src = brood::cli_support::read_source_or_exit("brood", Path::new(path));
         if !no_check_env() {
-            check_one_file(interp, path, &src, CheckSink::Stderr);
+            check_one_file_for_run(interp, path, &src);
         }
         if let Err(e) = brood::cli_support::eval_file(interp, path, &src) {
             // Restore the terminal first: a TUI program that entered raw mode and
@@ -311,15 +311,46 @@ enum CheckSink {
 /// error here is reported but signalled by the bool, so the caller can choose
 /// whether to continue (regular run) or fail fast (`--check`).
 fn check_one_file(interp: &mut Interp, path: &str, src: &str, sink: CheckSink) -> bool {
-    let forms = match brood::syntax::reader::read_all_positioned(&mut interp.heap, src) {
-        Ok(forms) => forms,
-        Err(e) => {
-            report_error(&e.clone().or_file(path.to_string()));
-            return true;
+    check_one_file_ext(interp, path, src, sink, false)
+}
+
+/// [`check_one_file`] for the RUN pre-flight: the verdict is served from the run-check
+/// cache when this binary has checked this exact text before, and recorded otherwise
+/// (`cli_support::run_check_cache_read`/`_write` — what it keys on, what it declines).
+/// `brood --check` never reads the cache: it is the authoritative entry point, and a
+/// verdict it prints must be the walk it just did.
+fn check_one_file_for_run(interp: &mut Interp, path: &str, src: &str) -> bool {
+    check_one_file_ext(interp, path, src, CheckSink::Stderr, true)
+}
+
+fn check_one_file_ext(
+    interp: &mut Interp,
+    path: &str,
+    src: &str,
+    sink: CheckSink,
+    cached: bool,
+) -> bool {
+    let warnings = match cached
+        .then(|| brood::cli_support::run_check_cache_read(src))
+        .flatten()
+    {
+        Some(w) => w,
+        None => {
+            let forms = match brood::syntax::reader::read_all_positioned(&mut interp.heap, src) {
+                Ok(forms) => forms,
+                Err(e) => {
+                    report_error(&e.clone().or_file(path.to_string()));
+                    return true;
+                }
+            };
+            let just_forms: Vec<_> = forms.into_iter().map(|(f, _)| f).collect();
+            let w = brood::types::check::check_file(&mut interp.heap, &just_forms);
+            if cached {
+                brood::cli_support::run_check_cache_write(&interp.heap, src, &w);
+            }
+            w
         }
     };
-    let just_forms: Vec<_> = forms.into_iter().map(|(f, _)| f).collect();
-    let warnings = brood::types::check::check_file(&mut interp.heap, &just_forms);
     let warned = warnings
         .iter()
         .any(|(_, msg)| !msg.starts_with("checker gave up:"));
@@ -371,9 +402,10 @@ fn run_files(interp: &mut Interp, files: &[String]) {
     for path in files {
         let src = brood::cli_support::read_source_or_exit("brood", Path::new(path));
         // Auto-run the advisory checker before eval (stderr so it doesn't muddle
-        // program stdout). `BROOD_NO_CHECK=1` opts out.
+        // program stdout). `BROOD_NO_CHECK=1` opts out; an unchanged program replays its
+        // last verdict from the run-check cache instead of walking again.
         if !no_check_env() {
-            check_one_file(interp, path, &src, CheckSink::Stderr);
+            check_one_file_for_run(interp, path, &src);
         }
         // Run the whole program as one green process (ADR-135): a top-level driver
         // talking to a spawned worker then uses the userspace direct-handoff path (no

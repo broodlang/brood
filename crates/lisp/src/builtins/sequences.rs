@@ -521,6 +521,19 @@ pub(crate) fn rest_without_eval(heap: &mut Heap, v: Value) -> Option<LispResult>
     Some(rest(&[v], genv, heap))
 }
 
+/// `empty?` for the JIT's non-nil/non-pair fallback (`brood_rt_is_empty`) — see
+/// [`first_without_eval`], whose split this mirrors: a vector, string, set, bytes, range,
+/// rope or table answers from its own length; a map (a record's `Seqable` view decides,
+/// and a record IS a map) and a lazy seq-view (it realises) need the evaluator and deopt.
+#[cfg(feature = "jit")]
+pub(crate) fn is_empty_without_eval(heap: &mut Heap, v: Value) -> Option<LispResult> {
+    if matches!(v, Value::Map(_) | Value::SeqView(_)) {
+        return None;
+    }
+    let genv = heap.global();
+    Some(is_empty(&[v], genv, heap))
+}
+
 pub(super) fn first(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let v0 = arg(args, 0);
     // a record dispatches to its `Seqable` view first (custom collection or fields).

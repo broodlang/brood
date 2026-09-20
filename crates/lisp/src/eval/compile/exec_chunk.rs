@@ -955,15 +955,41 @@ pub(crate) fn exec_chunk(
                         };
                         if !still_us {
                             // The self-call is in TAIL position, so the rebound callee's
-                            // value IS this frame's result — apply it and finish. One native
-                            // frame for the transition only; the new function does its own
-                            // tail-call elimination internally.
+                            // value IS this frame's result. Hand it to the DRIVER as a tail
+                            // call (this frame is reused, as for any `Inst::Call` in tail
+                            // position) — never applied nested here. This used to be a
+                            // nested `apply_value`, "one native frame for the transition
+                            // only", and the frame was not the cost: the recompiled body ran
+                            // the rest of the loop's life under it, where a `receive` cannot
+                            // be state-captured (20 000 of 20 000 receives parked their OS
+                            // worker dirty on an ADR-366 loop whose first iteration lazily
+                            // loaded a module) and a native preempt has no driver to yield
+                            // to, so the loop fell to the interpreter for up to 256
+                            // iterations per preempt (`collatz` +6.5% and `sort` +5.7%
+                            // instructions under lazy loading). A VM closure comes back
+                            // un-run as `Step::Tail`; a native or tree-walked callee ran to
+                            // `Done`, exactly as a tail `Inst::Call` resolves.
                             let callee = heap
                                 .env_get(env, name)
                                 .ok_or_else(|| crate::eval::unbound_error(heap, name))?;
                             heap.truncate_roots(base + arm.nslots);
-                            let out = super::apply_value(heap, callee, &argv, env)?;
-                            return Ok(ChunkExit::Done(out));
+                            return Ok(match dispatch(heap, callee, argv, true, env) {
+                                Ok(Step::Tail {
+                                    compiled,
+                                    args,
+                                    genv,
+                                    bases,
+                                }) => ChunkExit::Tail {
+                                    arm: compiled,
+                                    args,
+                                    genv,
+                                    bases,
+                                },
+                                Ok(Step::Done(v)) => ChunkExit::Done(v),
+                                // A closure applied with `tail = true` is never RUN here, so
+                                // no suspend can arrive; a kill unwinds untouched.
+                                Err(e) => return Err(e),
+                            });
                         }
                     }
                 }

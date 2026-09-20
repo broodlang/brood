@@ -5,10 +5,63 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
-**Perf work does not belong in this queue.** This box does not run benchmarks, so anything
-needing one is queued in [`perf-handoff.md`](perf-handoff.md) instead — currently one
-high-priority item: whether KI-114's `as_f64_pair` holds the closure KI-109 got from the
-promotion it constrained.
+**Perf work needing a quiet, pinned box is queued in [`perf-handoff.md`](perf-handoff.md)**
+— but a *within-session* `make ab --floor` on this laptop is trustworthy (that file says
+how), and `perf stat` instruction counts are load-immune, so most perf questions are
+answerable here; check that file's "what this box CAN answer" before deferring anything.
+
+## 2026-09-20 — three perf leads taken; KI-150's per-file walk is a cache now, and two JIT deopt classes and a scheduler-fairness hole went with it
+
+**Green at the commit below** — the full suite on the combined tree (after the fast-forward
+to `0dc79768`), `make prepush` clean; see the devlog entry for the measurements.
+
+What landed, each with a sabotage-verified guard:
+
+- **KI-167** (`exec_chunk.rs`): ADR-366's stale-loop handoff ran the recompiled body nested
+  for the loop's life — dirty-parked receives, and a native preempt interpreting 256
+  iterations per preempt. Now `ChunkExit::Tail`. `crates/cli/tests/stale_loop_handoff.rs`.
+- **`empty?` fallback** (`jit_lower/prim.rs`, `brood_rt_is_empty`): the inline `empty?`
+  deopted for anything but nil/pair, so `any?`/`every?` over a vector deopted at entry on
+  every call. `tests/jit_eq_join_test.blsp` §4.
+- **ADR-371** (`cli_support::run_check_cache_*`): `brood file` replays its pre-flight
+  verdict for unchanged text. `crates/cli/tests/run_check_cache.rs`. `BROOD_NO_CHECK_CACHE=1`
+  is its off switch too.
+- **ADR-372** (`jit_runtime/deopt.rs`): a register-carried param that deopts at entry
+  sixteen times re-lowers boxed. `tests/jit_eq_join_test.blsp` §5. `%jit-arm-state` has
+  `:deopts-total`; `BROOD_DEOPT_TRACE` prints `reason#N`.
+
+### What is left, in order
+
+1. **§7.9 — `row-sum`'s float-slot carve-out** was the third lead and was not started. Its
+   state in `compute-frontier.md` is exact: measurable now (`BROOD_XADMIT` reports what it
+   did), price on icache misses with `nbody`/`reduce`/`pipeline`/`spawn` as the rows to
+   protect.
+2. **`json/emit` and friends still take up to 16 entry deopts per arm** before ADR-372
+   re-lowers them — by design (the thrash latch's number). If a row shows an arm flipping
+   late, `ENTRY_DEOPT_RELOWER` is the knob; measure before touching it.
+3. **KI-150 can close** once a column refresh reads the short rows: the loading half is
+   ADR-370, the walk is ADR-371. The refresh is off-box work.
+4. **`tests/lazy_load_test.blsp`'s ADR-370 probes guard on the substring `[image] install`,
+   which a STALE image also prints (`install: nil sections`) — so with no live image for the
+   binary they assert on an empty trace and fail, reading like a checker regression. Seen
+   here with a debug binary whose `target/debug/nest` was older than the tree; `cargo build
+   -p nest && scripts/build-std-image.sh debug` cured it. A guard on a live section count
+   would make that a skip. (They also run their children with `BROOD_NO_CHECK_CACHE=1` now —
+   they observe the walk's loads, which a cache hit does not perform.)
+5. **Two dead-code warnings in the LEAN build** (`cached_arm_stale`, `vec_or_nil`,
+   `bool_or_nil` — used only under `dev-tools`), pre-existing; CI's `--all-features` clippy
+   never sees them. Cosmetic.
+
+### Rig notes that would have cost the next session an hour
+
+- **`perf stat` works here now; `valgrind` does not exist** — `perf-handoff.md` said the
+  reverse and carries a correction.
+- **`make release` overwrites `release-fast/brood` with the dev-tools build** (it embeds
+  brood into nest). Run `make release-brood` after it, before any timing.
+- **Every uncommitted `std/` edit AND every commit moves the stdlib id**, so the image you
+  built is stale the moment you edit — `(stdimage/status)` in the same shell as the count,
+  every time. Rebuild with `make release && make release-brood && scripts/build-std-image.sh
+  release-fast`.
 
 ## 2026-09-20 — KI-166 fixed at the root: a symbol hashes its spelling
 

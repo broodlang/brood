@@ -384,9 +384,7 @@ pub(crate) fn jit_tier_in_frame(
             // type-specialize float arms; let-binder slots read nil here and get their type
             // from the body's writes during lowering. Sent with the arm — empty Vec is fine
             // (the lowerer treats absent/non-float profiles as integer-only).
-            let slot_tags: Vec<u8> = (0..arm.nslots)
-                .map(|i| crate::core::value::tag(heap.root_at(base + i)) as u8)
-                .collect();
+            let slot_tags = profile_slot_tags(heap, arm, base);
             // The frame profile types only *params*; record the arm's float-valued free
             // globals too, so a float-context arm whose floats arrive from a `def`'d
             // constant isn't lowered onto the integer path (see `record_float_globals`).
@@ -524,9 +522,7 @@ pub(crate) fn jit_tier_in_frame(
             }
             // Not shared yet. Elect a single enqueuer via the queued flag.
             if !arm.inline_queued.swap(true, AcqRel) {
-                let slot_tags: Vec<u8> = (0..arm.nslots)
-                    .map(|i| crate::core::value::tag(heap.root_at(base + i)) as u8)
-                    .collect();
+                let slot_tags = profile_slot_tags(heap, arm, base);
                 // Deferred (low-priority). On a full queue, un-set `inline_queued` so a
                 // later call re-attempts — but DON'T disturb the running small native.
                 if JIT_COMPILER
@@ -736,6 +732,9 @@ pub(crate) fn jit_tier_in_frame(
     // Deopt feedback (watched arms only — a plain bool test for the rest): a
     // type-deopt bumps the consecutive counter (bailing a persistent thrasher);
     // any other outcome resets it.
+    if outcome == 1 {
+        jit_any_deopt_feedback(heap, arm);
+    }
     if arm.deopt_watch {
         if outcome == 1 {
             jit_deopt_feedback(arm);

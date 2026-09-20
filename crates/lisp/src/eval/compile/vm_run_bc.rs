@@ -472,15 +472,20 @@ fn settle_native_frame(
                 } else {
                     -1
                 };
+                // `reason#` is the lowering's deopt-site id (the `__dr` constant each
+                // guard passes to the deopt block) — grep `iconst(types::I32, N)` under
+                // `jit_lower/` for the guard. Without it a persistent deopt names its arm
+                // and nothing else (`json/emit`, 4 819 per run, was found this way).
                 eprintln!(
-                    "[deopt] arm={} watch={} resume_ip={} depth={}",
+                    "[deopt] arm={} watch={} resume_ip={} depth={} reason#{}",
                     cur_arm
                         .dbg_name
                         .map(crate::core::value::symbol_name_ref)
                         .unwrap_or("<closure>"),
                     cur_arm.deopt_watch,
                     ckpt >> 16,
-                    ckpt & 0xffff
+                    ckpt & 0xffff,
+                    heap.jit_deopt_reason()
                 );
             }
         }

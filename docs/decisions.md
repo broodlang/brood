@@ -23885,3 +23885,92 @@ modules load where this removes the reason, it would have to be scoped to the si
 path (`nest check`'s whole-world preload is deliberate — one fully-loaded state is what
 makes a verdict independent of file ORDER, KI-137), and it leaves ADR-340's need met by a
 narrower traversal rather than by construction. The measurement stands as the "before".
+
+## ADR-371 — `brood file` replays its pre-flight verdict for an unchanged program
+
+**Status:** implemented 2026-09-20. **Context:** KI-150's remaining half.
+
+**Context.** `brood file.blsp` type-checks the program before running it, and the checker's
+own walk scales with the file: measured with `perf stat -e instructions:u` on the benchmark
+rows, the check is **34M instructions on `pipeline` (18.7% of the run)**, 20M on `reduce`
+(13.8%), 21M on `strings` (8.3%), 60M on `errors-deep` (7.7%), 48M on `nqueens` — paid on
+every run of a program whose text has not changed, and growing with every checker feature
+(the 0.30.1 column refresh read the short rows "carrying today's checker cost"). ADR-370
+closed the *loading* half of that tax; this is the walk itself.
+
+**Decision.** The run pre-flight (`brood file`, `brood --test file`) records its verdict —
+the warning list, positions and text — under `~/.cache/brood/run-check/<key>` and replays it
+on the next run of the same text. The key is a hash of the source, `system/build-id` (the
+executable's own mtime, so any rebuild), `system/stdlib-id` (every baked-in `.blsp`) and
+the checking mode (`BROOD_CHECK_STRICT`). A hit prints the recorded lines and skips the
+walk; a miss walks and records.
+
+**What it refuses to cache.** A verdict that depends on anything outside the key: after the
+walk, `*features*` names every module the check loaded, and if any of them is not an
+embedded std module — a `(:use foo)` found on the load-path, a bundle's module — the entry
+is not written and the program pays the walk it always did. That file's content is not in
+the key, and its edit must re-derive the verdict; the guard proves the verdict follows the
+dependency's edit. `brood --check` never reads the cache: it is the authoritative entry
+point (it already refuses a stale binary, B7), and a verdict it prints is the walk it just
+did. `BROOD_NO_CHECK_CACHE=1` — the `nest check` cache's off switch — bypasses this one both
+ways too.
+
+**Why a content hash and not the mtime `nest run`'s pre-flight reuses on.** The `checks-run`
+manifest is a per-project file keyed by path; this cache is global and keyed by text, so
+the same program run from two directories, or copied, hits, and a rebuilt binary can never
+serve a verdict from the old one. Entries are tiny; a prune on the write path drops
+anything a week old, so a scratch-heavy box does not accumulate them forever.
+
+**Measured** (`make ab --floor` against `5fa10170`, best-of-7, warm cache): `pipeline`
+**−10.7%**, `reduce` −8.3%, `strings` −6.5%, `errors-deep` −6.5%, `json` −5.0% (with
+ADR-372's share), `supervisor` −7.6%; instruction counts on the checked runs `pipeline`
+−15.2%, `reduce` −11.5%. The unchecked runs are unchanged, as they must be. A benchmark
+harness's discarded warm-up run is what warms this, exactly as it warms the boot cache.
+
+**Guards.** `crates/cli/tests/run_check_cache.rs`: a hit really replays (a hand-doctored
+entry is what the next run prints — a re-walk cannot produce that string); a load-path
+module declines the write and the verdict follows the module's edit; the off switch neither
+reads nor writes; `--check` ignores a doctored entry. Sabotage-verified: disabling the
+load-path decline reds the second.
+
+## ADR-372 — A polymorphic register-carried param re-lowers boxed instead of deopting forever
+
+**Status:** implemented 2026-09-20.
+
+**Context.** The tier-time profile is ONE activation's snapshot of the frame (`slot_tags`).
+A `SelfCall` arm whose param is sometimes an int and sometimes not, sampled on an int,
+register-carries the slot as an i64 and deopts at the entry tag check (deopt site 106) on
+every activation that hands it anything else. `json/emit (v acc)` sampled with `v = 1`
+deopted on every map — **4 819 times per `json` row**, each a native entry, a deopt and a
+full VM re-run of the activation — and nothing latched it, because a `SelfCall` arm is
+deliberately not deopt-watched: a loop's deopt normally follows productive native
+iterations (an overflow at the end of a long int loop), so the consecutive-activation
+feedback would mis-bail it. An entry deopt has had no productive iteration at all, which is
+the distinction the feedback lacked. (Found with the `reason#` id now on
+`BROOD_DEOPT_TRACE`; the arm could be named before and nothing else.)
+
+**Decision.** Every type-deopt, watched arm or not, reports to `jit_any_deopt_feedback`. An
+entry-tag deopt (reason 106, which now carries the slot index in its upper bits) marks that
+slot in the arm's `jit_poly_slots` and counts toward `ENTRY_DEOPT_RELOWER` (16 — the thrash
+latch's number, so an arm whose param is polymorphic once in a while keeps its unboxed
+carry). At sixteen the arm is reset exactly as the operator-rebind and depth-bail paths
+reset it — code dropped, calls at the threshold, shared copy unpublished — and its next
+tier-up profiles with the marked slots reported as `Nil`, which the lowering never
+specialises on, so they stay boxed on the frame. One recompile per polymorphic slot, never
+a bail: the boxed param is still native for everything else the arm does.
+
+**Three places had to stop handing the old code back**, each found by the probe rather than
+by reading: the runtime's shared code caches (`jit_shared_retract` on the reset — the reset
+arm re-*adopted* its own pointer at the next call); the compile thread's per-runtime dedupe
+(keyed on the poly mask now — it installed the same pointer for the "new" request); and this
+process's native→native fast links (`invalidate_fast_links_for`, the inline swap's
+mechanism — callers never consult `jit_code`). Peers' links are theirs to drop, as the swap's
+soundness note argues: the old code is correct, only slower.
+
+**Also:** `%jit-arm-state` gains `:deopts-total`, every deopt the arm took; its `:deopts` is
+the feedback's consecutive count and reads 0 for exactly the arms this ADR is about — a
+test asserting on it was vacuous (checked: sabotage read `:deopts 0, :deopts-total 19751`).
+
+**Guard.** `tests/jit_eq_join_test.blsp` §5: a self-tail arm driven 31 ints to one list
+settles native with `:deopts-total ≤ 16` after 20 000 more activations; raising the
+threshold out of reach reds it at 1 242.

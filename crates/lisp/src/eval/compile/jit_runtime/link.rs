@@ -421,8 +421,11 @@ pub(super) fn jit_fast_link_cold_outcome(
                 // Deopt feedback (see `jit_deopt_feedback`): the fast-link hot path
                 // carries no arm reference, so runs go uncounted here — only deopts.
                 // Undercounted runs only make a mixed arm bail sooner (conservative).
-                if outcome == 1 && arm.deopt_watch {
-                    jit_deopt_feedback(&arm);
+                if outcome == 1 {
+                    jit_any_deopt_feedback(heap, &arm);
+                    if arm.deopt_watch {
+                        jit_deopt_feedback(&arm);
+                    }
                 }
                 // Deopt-resume (see `CompiledArm::ckpt_slot`): resume AT the
                 // checkpoint, frame intact — never re-running its side effects.

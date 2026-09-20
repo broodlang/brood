@@ -227,3 +227,94 @@
       ;; one-call forwarder to it and never becomes the hot arm.
       (assert= :native (settle second 1 (fn () (times 4000 (fn () (ej-second [1 2 3])))) 40))
       (assert= :native (settle ej-rest-then-pair 2 (fn () (drive-rest-pair 4000 0)) 40)))))
+
+;; --- 4. `empty?` beyond nil / pair -----------------------------------------------------
+
+;; The inline `empty?` tag-checked for nil or a pair and DEOPTED for anything else — so
+;; every prelude loop of the shape `(cond (empty? coll) … (first coll) … (rest coll))`
+;; deopted AT ENTRY on each activation handed a vector, a string, a set or bytes, and ran
+;; its whole scan on the VM. `json`'s `needs-escape?` is `(any? (string/->codepoints s)
+;; …)`: 7 910 entry deopts per encode, and nothing latched it, because a `SelfCall` arm is
+;; never deopt-watched — which is also why `:deopts` (the feedback's consecutive count)
+;; reads 0 for it and only `:deopts-total` can see this class. The non-nil/non-pair path
+;; now calls `brood_rt_is_empty`, which sizes a vector / string / set / bytes / range /
+;; rope / table itself and deopts only for a map or a seq-view.
+(def ej-cps (string/->codepoints "a plain ascii string, nothing to escape"))
+(defn- ej-any-ctrl? (v) (any? v (fn (c) (< c 32))))
+(defn- ej-every-small? (v) (every? v (fn (c) (< c 128))))
+(defn- ej-empty-str (s) (empty? s))
+(defn- ej-empty-set (s) (empty? s))
+(defn- ej-empty-bytes (b) (empty? b))
+(defn- drive-any (i acc)
+  (if (= i 0) acc (drive-any (- i 1) (if (ej-any-ctrl? ej-cps) acc (+ acc 1)))))
+
+(describe "JIT `empty?` beyond nil and pairs"
+  (test "empty? on strings, sets, bytes, vectors and ranges computes the VM's answer"
+    (times 3000
+      (fn ()
+        (ej-empty-str "")
+        (ej-empty-str "x")
+        (ej-empty-set #{})
+        (ej-empty-set #{1})
+        (ej-empty-bytes (bytes))
+        (ej-empty-bytes (bytes 1))))
+    (assert= true (ej-empty-str ""))
+    (assert= false (ej-empty-str "x"))
+    (assert= true (ej-empty-set #{}))
+    (assert= false (ej-empty-set #{1}))
+    (assert= true (ej-empty-bytes (bytes)))
+    (assert= false (ej-empty-bytes (bytes 1)))
+    (assert= false (ej-any-ctrl? ej-cps))
+    (assert= true (ej-every-small? ej-cps))
+    (assert= false (ej-any-ctrl? [65 66]))
+    (assert= false (ej-any-ctrl? []))
+    (assert= true (ej-every-small? [])))
+
+  (test "`any?` over a vector keeps the arm native with NO entry deopts (was: one per call)"
+    (when (%native-tier?)
+      (assert= 4000 (drive-any 4000 0))
+      (assert= :native (settle any? 2 (fn () (drive-any 4000 0)) 40))
+      ;; `:deopts` is the feedback's and never moves for a `SelfCall` loop; the class
+      ;; this guards is only visible in the cumulative count (sabotage: deopt a vector in
+      ;; `is_empty_without_eval` → ~20 000 here, `:deopts` still 0).
+      (assert= 0 (get (%jit-arm-state any? 2) :deopts-total)))))
+
+;; --- 5. A polymorphic param on a `SelfCall` arm ---------------------------------------
+
+;; The tier-time profile is ONE activation's snapshot of the frame. An arm whose param is
+;; sometimes an int and sometimes not, sampled on an int, register-carries the slot as an
+;; i64 and deopts AT ENTRY (reason 106) on every activation that hands it anything else —
+;; `json/emit (v acc)` sampled with `v = 1` deopted on every map, 4 819 times per `json`
+;; row, forever: a `SelfCall` arm has no deopt feedback (a loop's deopt normally follows
+;; productive iterations, so counting activations would mis-bail it). Now every deopt
+;; feeds `jit_any_deopt_feedback`: sixteen entry-tag deopts mark the slot polymorphic and
+;; reset the arm, and it re-tiers with that slot boxed — one recompile, never a bail, and
+;; the compile thread's dedupe and the shared code cache both know not to hand the old
+;; code back (both did, in the first cut).
+(defn ej-poly (v acc)
+  (if (int? v)
+    (+ acc v)
+    (if (empty? v) acc (ej-poly (first v) (+ acc 1)))))
+;; 31 int activations per list activation, so the profile almost surely samples an int.
+(defn- drive-poly (i acc)
+  (if (= i 0)
+    acc
+    (drive-poly (- i 1)
+      (+ acc (ej-poly (if (= (math/rem i 32) 0) (list 7) i) 0)))))
+
+(describe "JIT polymorphic param on a self-tail arm"
+  (test "the answer is the VM's throughout"
+    (assert= 2 (ej-poly (list 1) 0))
+    (assert= 5 (ej-poly 5 0))
+    (assert= 0 (ej-poly nil 0)))
+
+  (test "sixteen entry deopts re-lower the arm with the slot boxed (was: one per call, forever)"
+    (when (%native-tier?)
+      (drive-poly 4000 0)
+      (assert= :native (settle ej-poly 2 (fn () (drive-poly 4000 0)) 40))
+      (drive-poly 20000 0)
+      (let (st (%jit-arm-state ej-poly 2))
+        (assert= :native (get st :state))
+        ;; At most the sixteen that earned the re-lowering; the 600+ list activations
+        ;; after it run the boxed native. (Sabotage: never reset the arm → hundreds.)
+        (is (<= (get st :deopts-total) 16))))))

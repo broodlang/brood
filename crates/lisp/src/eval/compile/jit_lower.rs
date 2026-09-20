@@ -765,6 +765,10 @@ fn jit_lower_arm_inner(
         .declare_function("brood_rt_rest", Linkage::Import, &seq1_sig)
         .ok()
         .or_bail("cranelift-declare-function")?;
+    let is_empty_id = m
+        .declare_function("brood_rt_is_empty", Linkage::Import, &seq1_sig)
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // Inline `first`/`rest` support: expose LOCAL pair-slab base pointers once per arm entry
     // so the JIT can emit `ptr + idx*48 + {0,24}` loads instead of per-element FFI calls.
     let mut pbase_sig = m.make_signature();
@@ -1194,6 +1198,7 @@ fn jit_lower_arm_inner(
     let car_ref = m.declare_func_in_func(car_id, b.func);
     let first_ref = m.declare_func_in_func(first_id, b.func);
     let rest_ref = m.declare_func_in_func(rest_id, b.func);
+    let is_empty_ref = m.declare_func_in_func(is_empty_id, b.func);
     let cdr_ref = m.declare_func_in_func(cdr_id, b.func);
     let pnbase_ref = m.declare_func_in_func(pnbase_id, b.func);
     let pobase_ref = m.declare_func_in_func(pobase_id, b.func);
@@ -1696,7 +1701,12 @@ fn jit_lower_arm_inner(
         };
         let ok = b.ins().icmp_imm_s(IntCC::Equal, tag, expected_tag);
         let cont = b.create_block();
-        let __dr = b.ins().iconst(types::I32, 106);
+        // Reason 106 carries the SLOT in its upper bits (`ENTRY_DEOPT_REASON`), so the
+        // feedback can mark exactly the polymorphic param (`jit_entry_deopt_feedback`).
+        let __dr = b.ins().iconst(
+            types::I32,
+            crate::eval::compile::jit_runtime::ENTRY_DEOPT_REASON as i64 | ((k as i64) << 8),
+        );
         b.ins().brif(ok, cont, &[], deopt, &[BlockArg::Value(__dr)]);
         b.switch_to_block(cont);
         let bits = b.ins().load(
@@ -1854,6 +1864,7 @@ fn jit_lower_arm_inner(
         car: car_ref,
         first: first_ref,
         rest: rest_ref,
+        is_empty: is_empty_ref,
         pnbase: pnbase_ref,
         pobase: pobase_ref,
         cdr: cdr_ref,

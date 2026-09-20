@@ -553,3 +553,185 @@ impl Drop for RawTermGuard {
         crate::builtins::restore_raw();
     }
 }
+
+// ── the run pre-flight's verdict cache ────────────────────────────────────────────────
+//
+// `brood file.blsp` type-checks the program before it runs it, and the checker's own walk
+// scales with the file: 34M instructions on the `pipeline` benchmark row (18.7% of the
+// run), 20M on `reduce` (13.8%), 60M on `errors-deep`, 48M on `nqueens` — paid on EVERY
+// run of an unchanged program, and growing with every checker feature (KI-150: the 0.30.1
+// column refresh read the short rows "carrying today's checker cost"). A verdict is a
+// function of the program's text and the binary that checks it, so the second run of the
+// same text needs no walk: the warnings are replayed from
+// `~/.cache/brood/run-check/<key>`, keyed on a hash of the source, `system/build-id` (the
+// executable's own mtime — any rebuild), `system/stdlib-id` (every baked-in `.blsp`) and
+// the checking mode. The same shape as `nest run`'s own pre-flight manifest
+// (`project-check.blsp`, `"checks-run"`), which reuses on the file's mtime.
+//
+// What it will NOT cache: a check that loaded a module from OUTSIDE the binary — a
+// `(:use foo)` found on the load-path — because that file's content is not in the key
+// and an edit to it must re-derive the verdict. `*features*` after the check names every
+// module loaded; one that is not an embedded std module declines the write, and the
+// program pays the walk it always did. `BROOD_NO_CHECK_CACHE=1` bypasses the cache both
+// ways, as it does `nest check`'s.
+
+/// The cached verdict of the run pre-flight for `src` under this binary and mode, or
+/// `None` on a miss (no cache dir, the flag, an unreadable or malformed entry).
+pub fn run_check_cache_read(src: &str) -> Option<Vec<(Option<crate::error::Pos>, String)>> {
+    let path = run_check_cache_path(src)?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    let mut lines = text.lines();
+    if lines.next()? != RUN_CHECK_CACHE_MAGIC {
+        return None;
+    }
+    let mut out = Vec::new();
+    for line in lines {
+        let mut parts = line.splitn(3, '\t');
+        let l = parts.next()?;
+        let c = parts.next()?;
+        let msg = run_check_unescape(parts.next()?);
+        let pos = if l == "-" {
+            None
+        } else {
+            Some(crate::error::Pos {
+                line: l.parse().ok()?,
+                col: c.parse().ok()?,
+            })
+        };
+        out.push((pos, msg));
+    }
+    Some(out)
+}
+
+/// Record the pre-flight's verdict for `src` — unless the check loaded a module from
+/// outside the binary (see the module comment), or there is nowhere to write. Best-effort:
+/// a cache that cannot be written is a check that runs next time, never an error.
+pub fn run_check_cache_write(
+    heap: &crate::core::heap::Heap,
+    src: &str,
+    warnings: &[(Option<crate::error::Pos>, String)],
+) {
+    let Some(path) = run_check_cache_path(src) else {
+        return;
+    };
+    if !crate::builtins::every_provided_feature_is_embedded(heap) {
+        return;
+    }
+    let mut text = String::from(RUN_CHECK_CACHE_MAGIC);
+    text.push('\n');
+    for (pos, msg) in warnings {
+        match pos {
+            Some(p) => text.push_str(&format!("{}\t{}\t", p.line, p.col)),
+            None => text.push_str("-\t-\t"),
+        }
+        text.push_str(&run_check_escape(msg));
+        text.push('\n');
+    }
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    // Write-then-rename, so a reader never sees a torn entry (two runs of the same
+    // program can race on the first write).
+    let tmp = dir.join(format!(".{}.tmp", std::process::id()));
+    if std::fs::write(&tmp, text).is_ok() && std::fs::rename(&tmp, &path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    run_check_cache_prune(dir, &path);
+}
+
+const RUN_CHECK_CACHE_MAGIC: &str = "brood-run-check-v1";
+
+/// `~/.cache/brood/run-check/<hash>` for `src` under this binary and checking mode; `None`
+/// under `BROOD_NO_CHECK_CACHE`, or with no cache base to write under.
+fn run_check_cache_path(src: &str) -> Option<std::path::PathBuf> {
+    use std::hash::{Hash, Hasher};
+    use std::path::PathBuf;
+    if std::env::var_os("BROOD_NO_CHECK_CACHE").is_some() {
+        return None;
+    }
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    RUN_CHECK_CACHE_MAGIC.hash(&mut h);
+    crate::builtins::build_id_string().hash(&mut h);
+    crate::builtins::stdlib_id_string().hash(&mut h);
+    crate::types::strict_checking().hash(&mut h);
+    // Every `BROOD_*` variable set, name and value, sorted: a flag the checker reads changes
+    // what a walk does (`BROOD_NO_IMAGE_SIGS`, `BROOD_NO_DERIVE_CACHE`, …) and the catalogue
+    // grows, so the key takes them all rather than naming the ones that matter today. A
+    // harness sets none, or the same ones every run; an A/B under a flag gets its own entries.
+    // `vars_os`, never `vars`: that one PANICS on a non-UTF-8 value, and a hostile
+    // environment is a test (`builtin_robustness_test`) — a lossy spelling keys just as well.
+    let prefix = concat!("BROOD", "_"); // spelled apart: the flag catalogue's drift gate greps for `BROOD_*` names
+    let mut flags: Vec<(String, String)> = std::env::vars_os()
+        .map(|(k, v)| {
+            (
+                k.to_string_lossy().into_owned(),
+                v.to_string_lossy().into_owned(),
+            )
+        })
+        .filter(|(k, _)| k.starts_with(prefix))
+        .collect();
+    flags.sort();
+    flags.hash(&mut h);
+    src.hash(&mut h);
+    Some(
+        base.join("brood")
+            .join("run-check")
+            .join(format!("{:016x}", h.finish())),
+    )
+}
+
+/// Best-effort prune of stale entries — every distinct program text a box ever ran leaves
+/// one small file, and an old binary's entries can never hit again. Runs only on a write
+/// (a miss), never on the hit path, and never touches `keep`.
+fn run_check_cache_prune(dir: &Path, keep: &Path) {
+    const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for e in entries.flatten() {
+        let p = e.path();
+        if p == keep {
+            continue;
+        }
+        let stale = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|m| now.duration_since(m).ok())
+            .is_some_and(|age| age > MAX_AGE);
+        if stale {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+}
+
+/// One warning per line: a message may span lines (a hint under the finding), so its
+/// newlines and backslashes are escaped on the way out and restored on the way in.
+fn run_check_escape(msg: &str) -> String {
+    msg.replace('\\', "\\\\").replace('\n', "\\n")
+}
+
+fn run_check_unescape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some(other) => out.push(other),
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}

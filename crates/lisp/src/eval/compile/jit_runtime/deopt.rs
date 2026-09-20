@@ -281,6 +281,87 @@ pub(super) fn jit_suspend_feedback(heap: &mut Heap, arm: &CompiledArm, outcome: 
 }
 
 #[cfg(feature = "jit")]
+/// The deopt-site id of the register-carry ENTRY tag check (`jit_lower_arm_inner`'s carry
+/// initialisation): a param the profile typed `Int`/`Float` arrived as something else. The
+/// slot index rides in bits 8.. of the reason word.
+pub(crate) const ENTRY_DEOPT_REASON: u32 = 106;
+
+/// Entry-tag deopts an arm may take before it is re-lowered with the offending slot boxed.
+/// Sixteen, like the thrash latch: an arm whose param is polymorphic once in a while keeps
+/// its unboxed carry; one deopting per activation flips after sixteen and stops paying a
+/// native entry + deopt + full VM re-run per call.
+const ENTRY_DEOPT_RELOWER: u32 = 16;
+
+/// Feedback for EVERY type-deopt, watched arm or not (`jit_deopt_feedback` below is the
+/// watched arms' consecutive-count latch): count it, and if the reason was the entry tag
+/// check of a register-carried param, record the slot as polymorphic and — once
+/// `ENTRY_DEOPT_RELOWER` such deopts have accrued — reset the arm to untried so its next
+/// tier-up re-profiles with that slot left on the frame (`profile_slot_tags`). The reset
+/// is the one the operator-rebind and depth-cap paths already use: drop the installed
+/// code, put the call count at the threshold so it re-tiers promptly, unpublish the
+/// shared copy. A `SelfCall` loop is exactly the arm this exists for — it is never
+/// deopt-watched, because a loop's deopt normally follows productive native iterations;
+/// an entry deopt has had none.
+pub(crate) fn jit_any_deopt_feedback(heap: &Heap, arm: &CompiledArm) {
+    use std::sync::atomic::Ordering::{Relaxed, Release};
+    arm.jit_deopts_total.fetch_add(1, Relaxed);
+    let reason = heap.jit_deopt_reason();
+    if reason & 0xff != ENTRY_DEOPT_REASON {
+        return;
+    }
+    let slot = reason >> 8;
+    if slot < 32 {
+        arm.jit_poly_slots.fetch_or(1 << slot, Relaxed);
+    }
+    let n = arm.jit_entry_deopts.fetch_add(1, Relaxed) + 1;
+    if n == ENTRY_DEOPT_RELOWER {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+            let name = arm
+                .dbg_name
+                .map(crate::core::value::symbol_name_ref)
+                .unwrap_or("<closure>");
+            eprintln!(
+                "[jit-relower] arm={name} reason=polymorphic-param slots={:#b}: {n} entry-tag                  deopts; re-tiering with those slots boxed",
+                arm.jit_poly_slots.load(Relaxed)
+            );
+        }
+        // The published copy IS the code being replaced: retract it, or the reset arm
+        // simply adopts it back at its next call (measured: it did).
+        if let Some(key) = arm.share_key {
+            heap.jit_shared_retract(key);
+        }
+        arm.jit_code.store(std::ptr::null_mut(), Release);
+        arm.jit_calls.store(super::TIER_THRESHOLD, Release);
+        arm.shared_published.store(false, Relaxed);
+        // This process's native→native links to the arm still hold the old pointer and
+        // never consult `jit_code` (the inline swap's situation exactly): drop them, so
+        // the callers re-probe. A peer's links are its own to drop — see the swap's
+        // soundness note in `jit_tier`; the old code is valid, only slower.
+        if let Some(sym) = arm.dbg_name {
+            heap.invalidate_fast_links_for(sym);
+        }
+    }
+}
+
+/// The tier-time param profile of the live frame at `base`: each slot's tag, with a slot
+/// `jit_any_deopt_feedback` found polymorphic reported as `Nil` — a tag the lowering never
+/// specialises on — so it stays boxed on the frame.
+pub(crate) fn profile_slot_tags(heap: &Heap, arm: &CompiledArm, base: usize) -> Vec<u8> {
+    let poly = arm
+        .jit_poly_slots
+        .load(std::sync::atomic::Ordering::Relaxed);
+    (0..arm.nslots)
+        .map(|i| {
+            if i < 32 && poly & (1 << i) != 0 {
+                crate::core::value::Tag::Nil as u8
+            } else {
+                crate::core::value::tag(heap.root_at(base + i)) as u8
+            }
+        })
+        .collect()
+}
+
 pub(crate) fn jit_deopt_feedback(arm: &CompiledArm) {
     use std::sync::atomic::Ordering::{Relaxed, Release};
     const DEOPT_BAIL_CONSECUTIVE: u32 = 16;

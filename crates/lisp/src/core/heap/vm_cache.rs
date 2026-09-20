@@ -1116,6 +1116,22 @@ impl Heap {
         }
     }
 
+    /// Retract an arm's published native from BOTH shared caches, so no process adopts it
+    /// again: for a re-lowering the arm itself asked for (`jit_any_deopt_feedback`'s
+    /// polymorphic-param reset), where the published code is exactly the code being
+    /// replaced. Without this the reset arm re-tiered by ADOPTING its own stale pointer —
+    /// `json/emit` re-adopted the Int-carried body and went on deopting. The code stays
+    /// alive (its compiler's keepalive), so a peer still running it is unaffected.
+    #[cfg(feature = "jit")]
+    pub(crate) fn jit_shared_retract(&self, key: (u64, u16)) {
+        if let Ok(mut cache) = self.runtime.jit_code_cache.write() {
+            cache.remove(&key);
+        }
+        if let Ok(mut cache) = self.runtime.jit_inline_cache.write() {
+            cache.remove(&key);
+        }
+    }
+
     /// Shared-JIT lookup for the **inlined** upgrade — the [`Self::jit_shared_lookup`]
     /// counterpart over `jit_inline_cache`. Lets a process install another process's
     /// already-compiled inlined native for the same `(closure_id, argc)` instead of

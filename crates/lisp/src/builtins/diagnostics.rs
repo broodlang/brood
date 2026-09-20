@@ -163,7 +163,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(2),
         Sig::new(vec![callable, int], map_ty),
         &["f", "argc"],
-        "The JIT tier of `f`'s `argc`-ary arm, as a map: `:state` one of `:native` (its native code is installed), `:queued` (hot, compile in flight), `:bailed` (refused, or latched off the native tier by deopt thrash / a suspend), `:untried` (not hot yet), `:no-arm` (nothing compiled — `f` was never called with `argc` args, or is not a VM-compiled closure), or `:no-jit` (this binary/ceiling has no native tier); plus `:deopts`, the arm's consecutive type-deopt count. Reads the shared arm's own atomics, so it says what the runtime DID — the probe a test needs to assert an arm stayed native (or was latched) rather than infer it from a timing. Dev-tools only.",
+        "The JIT tier of `f`'s `argc`-ary arm, as a map: `:state` one of `:native` (its native code is installed), `:queued` (hot, compile in flight), `:bailed` (refused, or latched off the native tier by deopt thrash / a suspend), `:untried` (not hot yet), `:no-arm` (nothing compiled — `f` was never called with `argc` args, or is not a VM-compiled closure), or `:no-jit` (this binary/ceiling has no native tier); plus `:deopts`, the arm's consecutive type-deopt count (the feedback's, which moves only for a deopt-watched arm — never a `SelfCall` loop), and `:deopts-total`, every type-deopt the arm ever took, watched or not — the one to assert on for a loop arm. Reads the shared arm's own atomics, so it says what the runtime DID — the probe a test needs to assert an arm stayed native (or was latched) rather than infer it from a timing. Dev-tools only.",
         jit_arm_state);
     #[cfg(feature = "dev-tools")]
     primitives.def(
@@ -602,6 +602,7 @@ pub(super) fn jit_arm_state(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
     };
     let state = |s: &str| value::kw(s);
     let mut deopts: i64 = 0;
+    let mut deopts_total: i64 = 0;
     let st = match f {
         Value::Fn(id) => {
             #[cfg(feature = "jit")]
@@ -618,6 +619,7 @@ pub(super) fn jit_arm_state(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
                         Some(arm) => {
                             use std::sync::atomic::Ordering::Acquire;
                             deopts = arm.jit_deopts.load(Acquire) as i64;
+                            deopts_total = arm.jit_deopts_total.load(Acquire) as i64;
                             let p = arm.jit_code.load(Acquire);
                             if p == crate::jit::BAILED {
                                 state("bailed")
@@ -643,6 +645,7 @@ pub(super) fn jit_arm_state(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
     Ok(heap.map_from_pairs(vec![
         (value::kw("state"), st),
         (value::kw("deopts"), Value::int(deopts)),
+        (value::kw("deopts-total"), Value::int(deopts_total)),
     ]))
 }
 

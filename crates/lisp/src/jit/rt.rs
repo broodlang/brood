@@ -386,6 +386,39 @@ pub unsafe extern "C" fn brood_rt_rest(
     }
 }
 
+/// `empty?` of a non-nil, non-pair — the inline `empty?`'s tag-check miss, as a
+/// **fallback instead of a deopt** (the [`brood_rt_first`] protocol: 0 = `*out` holds the
+/// answer, 1 = deopt, 2 = error parked). The inline path used to deopt for anything but
+/// nil or a pair, so every prelude loop of the shape `(cond (empty? coll) … (first coll) …
+/// (rest coll))` — `any?`, `every?`, `seq/index-where`, … — deopted AT ENTRY on each
+/// activation handed a vector, a string, a set or bytes, and ran the whole scan on the VM:
+/// `json`'s `needs-escape?` is `(any? (string/->codepoints s) …)`, 7 910 entry deopts per
+/// run, and a `SelfCall` arm is never deopt-watched, so nothing ever latched it.
+///
+/// # Safety
+/// `heap`/`out` live; the word triple is bytes the JIT read out of a real `Value`.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_is_empty(
+    heap: *mut Heap,
+    out: *mut crate::core::value::Value,
+    w0: i64,
+    w1: i64,
+    w2: i64,
+) -> i64 {
+    let h = &mut *heap;
+    match crate::builtins::is_empty_without_eval(h, words_to_val(w0, w1, w2)) {
+        None => 1,
+        Some(Ok(v)) => {
+            *out = v;
+            0
+        }
+        Some(Err(e)) => {
+            h.jit_pending_error = Some(e);
+            2
+        }
+    }
+}
+
 /// Byte pointer to the LOCAL nursery pair slab (`Vec<(Value, Value)>`). Called once at JIT
 /// function entry so inline `first`/`rest` can compute `base + idx * 48 + {0,24}` directly
 /// instead of calling `brood_rt_car`/`cdr` per element. Valid only while no `cons` can grow

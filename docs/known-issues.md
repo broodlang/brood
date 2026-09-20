@@ -11540,3 +11540,50 @@ whether the loader still fails a forward sig, and in what shape, is unverified �
 it cites (KI-81's 211 sigs, KI-113's eleven modules) is real, and the loader's reserved-name
 exemption may have since covered the simple case. Either way a writer that emits what the
 project's own gate rejects is a bug, which is what this fixed.
+
+## KI-167 — a loop handed to its recompiled body (ADR-366) ran the rest of its life NESTED: every `receive` parked the worker dirty, and a native preempt fell to the interpreter ✅ FIXED 2026-09-20
+
+**Symptom.** Two, found from opposite ends on the same day.
+
+1. **Perf.** `collatz` cost **80M more instructions (+6.5%)** under the default lazy loading
+   than under `BROOD_NO_LAZY_LOAD=1`, `sort` **+5.7%** — same binary, same program. The
+   checked run (the benchmark harness's) did not show it, because the pre-flight loads
+   `math` eagerly; `BROOD_NO_CHECK=1` did. `BROOD_PERF_STATS` put the difference in the
+   VM: `self_tail` 86 799 against 24 574, `vm_native_link` 30 408 against 3 665 —
+   `sweep`'s loop ran ~3.5× more iterations interpreted before settling native.
+2. **Fairness.** A self-tail server loop whose first iteration misses on a lazily-loaded
+   module — `(defn drive (i acc) … (drive (- i 1) (math/max acc (rpc i))))` — parked
+   **20 000 of 20 000** of its receives dirty (`dirty-receive-block gateway-token=0` under
+   `BROOD_JIT_BAIL_TRACE`): the OS worker blocked instead of the process being captured
+   and migrated. `(defn serve (state) … (receive …) (serve next))` whose first iteration
+   touches `log/`, `json/` or any other lazily-loaded module is exactly this shape. (Forty
+   such servers on twelve workers did not deadlock — checked — but the unfairness is real
+   and the class is the one §7.13 removed from the VM→native direct call.)
+
+**Cause.** ADR-366's handoff. A `SelfCall` loop adopts its recompiled body through the
+hot-reload guard's tail transition, and that transition was a NESTED `apply_value` — "one
+native frame for the transition only". The frame was not the cost: the recompiled body ran
+**the rest of the loop's life** under it. Under a nested (non-capture) driver a `receive`
+cannot be state-captured, so it blocks the worker; and a native preempt has no driver to
+yield to, so `vm_run_bc` hands the frame to `exec_chunk`, which interprets **up to 256
+iterations** before its back-edge boundary re-tiers — the mechanism the capture path's
+preempt fix (2026-09-12) documented and fixed for the top-level driver only. 919 preempts
+on `collatz` × up to 256 iterations is the 62 000 extra interpreted iterations the counters
+showed. The pre-existing `def`-of-a-running-loop transition had the same shape; it is rare.
+A lazy load on the first iteration is not.
+
+**Fix.** The transition is a `ChunkExit::Tail` — `dispatch(callee, argv, tail = true)`, the
+un-run `Step::Tail` handed to the driver, which reuses the frame exactly as a tail
+`Inst::Call` does. Nothing runs nested. `collatz` 1 299M → 1 221M instructions unchecked,
+`sort` 827M → 782M; the lazy path now equals the eager one on both, and the probe parks
+zero receives dirty.
+
+**Guard.** `crates/cli/tests/stale_loop_handoff.rs`: the probe program, pinned at zero
+dirty parks by the runtime's own counter, refusing to be vacuous (the `[compile]
+stale-bindings arm=drive` line must appear, or the transition never ran). Sabotage:
+restoring the nested `apply_value` reads 20 000.
+
+**Lesson.** "One frame for the transition" is only true when the transition returns. A
+handoff that never returns — a loop — makes the frame's *properties* (capturable? can it
+yield?) the loop's properties for its whole life. Check what runs under a frame, not how
+many frames there are.

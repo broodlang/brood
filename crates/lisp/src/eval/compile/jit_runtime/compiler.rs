@@ -235,9 +235,7 @@ pub(crate) fn jit_compile_now(heap: &Heap, arm: &Arc<CompiledArm>, base: usize) 
     }
     // Snapshot the live frame's slot tags exactly as jit_tier's enqueuer does
     // (used to type-specialize float arms).
-    let slot_tags: Vec<u8> = (0..arm.nslots)
-        .map(|i| crate::core::value::tag(heap.root_at(base + i)) as u8)
-        .collect();
+    let slot_tags = super::profile_slot_tags(heap, arm, base);
     let mut jit = crate::jit::GLOBAL_JIT
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -329,14 +327,20 @@ pub(crate) static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::La
             // by construction (this closure never escapes), so no locking. Entries
             // for a dropped runtime are inert garbage (a few words each; the code
             // itself lives forever in GLOBAL_JIT regardless — see the keepalive).
-            let mut published: std::collections::HashMap<(u64, (u64, u16)), (usize, u64)> =
+            // Keyed on the arm's polymorphic-slot mask too (`jit_any_deopt_feedback`): a
+            // re-lowering the arm asked for after entry deopts must not be answered with the
+            // code it is replacing — the first version of that feedback re-installed the
+            // same pointer from here and `json/emit` went on deopting.
+            let mut published: std::collections::HashMap<(u64, (u64, u16), u32), (usize, u64)> =
                 std::collections::HashMap::new();
             // The inlined-upgrade counterpart (the deferred queue has the same
             // per-process-copy flood shape). Separate map: a small-arm pointer
             // must never install into `inline_code` (different frame sizing —
             // `inline_nslots`), and vice versa.
-            let mut published_inline: std::collections::HashMap<(u64, (u64, u16)), (usize, u64)> =
-                std::collections::HashMap::new();
+            let mut published_inline: std::collections::HashMap<
+                (u64, (u64, u16), u32),
+                (usize, u64),
+            > = std::collections::HashMap::new();
             // Lower one work item: `inlined=false` → the small original arm, store into
             // `jit_code`; `inlined=true` → the re-derived inlined body, store into
             // `inline_code` (jit_tier swaps it into `jit_code` later, epoch-bumped).
@@ -383,13 +387,16 @@ pub(crate) static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::La
                 // a stale entry never installs (and the runner's live-epoch guard
                 // in `jit_tier` re-checks on every native entry regardless). No
                 // keepalive push: the first copy's push owns the code's chunk.
+                let poly = arm
+                    .jit_poly_slots
+                    .load(std::sync::atomic::Ordering::Relaxed);
                 if let Some(key) = arm.share_key {
                     let map = if inlined {
                         &published_inline
                     } else {
                         &published
                     };
-                    if let Some(&(ptr, epoch)) = map.get(&(rt_tag, key)) {
+                    if let Some(&(ptr, epoch)) = map.get(&(rt_tag, key, poly)) {
                         if epoch == arm.compile_epoch.load(std::sync::atomic::Ordering::Acquire) {
                             slot.store(ptr as *mut u8, Release);
                             return;
@@ -449,7 +456,7 @@ pub(crate) static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::La
                                 &mut published
                             };
                             map.insert(
-                                (rt_tag, key),
+                                (rt_tag, key, poly),
                                 (
                                     ptr as usize,
                                     arm.compile_epoch.load(std::sync::atomic::Ordering::Acquire),

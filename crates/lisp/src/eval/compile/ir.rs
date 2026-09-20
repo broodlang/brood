@@ -595,6 +595,25 @@ pub struct CompiledArm {
     /// arms pay a single bool test; watched healthy arms one relaxed load.
     pub deopt_watch: bool,
     pub jit_deopts: std::sync::atomic::AtomicU32,
+    /// Every type-deopt of this arm, CUMULATIVE and watched or not — the probe
+    /// `%jit-arm-state` reports as `:deopts-total`. `jit_deopts` above is the feedback's
+    /// consecutive count and only moves for a watched arm, so a `SelfCall` loop that
+    /// deopted at entry on every activation (`any?` over a vector, before its `empty?`
+    /// fallback) read `:deopts 0` — a test asserting on it was vacuous. One relaxed
+    /// increment on the deopt path, which is cold by definition.
+    pub jit_deopts_total: std::sync::atomic::AtomicU32,
+    /// Param slots the tier-time profile typed `Int`/`Float` that activations have since
+    /// contradicted AT ENTRY (deopt reason 106, the register-carry tag check): bit `k` set
+    /// means slot `k` is polymorphic and the next lowering must leave it boxed on the frame
+    /// (`profile_slot_tags` masks it). A profile is one activation's snapshot — `json/emit
+    /// (v acc)` sampled with `v = 1` carried `v` as an i64 and deopted on every map it was
+    /// handed, 4 819 times per run, and a `SelfCall` arm has no deopt feedback to latch
+    /// it. After `ENTRY_DEOPT_RELOWER` such deopts the arm is reset to untried and re-tiers
+    /// with the slot boxed: one recompile per polymorphic slot, never a bail.
+    pub jit_poly_slots: std::sync::atomic::AtomicU32,
+    /// Entry-tag deopts (reason 106) this arm has taken, cumulative, toward
+    /// `ENTRY_DEOPT_RELOWER`. Never reset on the hot path — the count is cold on purpose.
+    pub jit_entry_deopts: std::sync::atomic::AtomicU32,
     /// Free globals this arm reads that held a `Value::Float` when the arm was
     /// enqueued for tiering — the global-read counterpart of the tier-time
     /// `slot_tags` param profile. The profile snapshots the live *frame*, so it

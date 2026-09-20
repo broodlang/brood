@@ -239,22 +239,61 @@ pub(super) fn emit_prim1(
             stack.push(Op::Int(is_pair));
         }
         PrimOp1::IsEmpty => {
-            // nil → true, pair → false, everything else → deopt. Vectors/maps/strings
-            // need a heap-length check — let the native handle them. nqueens `safe?`
-            // only ever sees nil/pair.
-            let [w0, _, _] = read_words(b, operand, frame);
+            // nil → true, pair → false, inline; anything else takes the
+            // `brood_rt_is_empty` FALLBACK, which sizes a vector / string / set / bytes /
+            // range / rope / table itself and deopts only for a map (a record's `Seqable`
+            // view decides) or a seq-view (it realises). This used to deopt for every
+            // non-nil/non-pair, and a `(cond (empty? coll) … (first coll) … (rest coll))`
+            // loop — `any?`, `every?`, `seq/index-where` — handed a vector deopted AT ENTRY
+            // on every activation and ran its whole scan on the VM (`json`'s
+            // `needs-escape?` is `(any? (string/->codepoints s) …)`: 7 910 entry deopts per
+            // run, never latched because a `SelfCall` arm is not deopt-watched). The two
+            // paths meet at `merge` with the boolean as an `i8`.
+            let [w0, w1, w2] = read_words(b, operand, frame);
             let tagb = b.ins().band_imm_s(w0, 0xff);
             let is_nil = b.ins().icmp_imm_s(IntCC::Equal, tagb, 0);
             let is_pair = b.ins().icmp_imm_s(IntCC::Equal, tagb, TAG_PAIR as i64);
             let is_nil_or_pair = b.ins().bor(is_nil, is_pair);
             let cont = b.create_block();
-            let __dr = b.ins().iconst(types::I32, 5);
-            b.ins()
-                .brif(is_nil_or_pair, cont, &[], deopt, &[BlockArg::Value(__dr)]);
+            let slow = b.create_block();
+            let merge = b.create_block();
+            b.append_block_param(merge, types::I8);
+            b.ins().brif(is_nil_or_pair, cont, &[], slow, &[]);
+            b.switch_to_block(slow);
+            {
+                let out_addr = b.ins().stack_addr(funcs.ptr_ty, funcs.out_slot, 0);
+                let c = b
+                    .ins()
+                    .call(funcs.is_empty, &[funcs.heap, out_addr, w0, w1, w2]);
+                let status = b.inst_results(c)[0];
+                let ok = b.create_block();
+                let not_ok = b.create_block();
+                b.ins().brif(status, not_ok, &[], ok, &[]);
+                b.switch_to_block(not_ok);
+                let is_err = b.ins().icmp_imm_s(IntCC::Equal, status, 2);
+                let __dr = b.ins().iconst(types::I32, 5);
+                b.ins()
+                    .brif(is_err, funcs.error, &[], deopt, &[BlockArg::Value(__dr)]);
+                b.switch_to_block(ok);
+                // `*out` is a `Value::Bool`: only the payload's low byte is the `bool`
+                // (the upper bytes are uninitialised padding — see `emit_jump_if_false`).
+                let pl = b.ins().stack_load(
+                    types::I64,
+                    types::I64,
+                    funcs.out_slot,
+                    PAYLOAD_OFFSET as i32,
+                );
+                let pl_byte = b.ins().band_imm_s(pl, 0xff);
+                let is_true = b.ins().icmp_imm_s(IntCC::NotEqual, pl_byte, 0);
+                b.ins().jump(merge, &[is_true.into()]);
+            }
             b.switch_to_block(cont);
-            // After the guard: is_nil is 1 for nil, 0 for pair — exactly the boolean
+            // Past the tag test: is_nil is 1 for nil, 0 for pair — exactly the boolean
             // result we want.
-            stack.push(Op::Int(is_nil));
+            b.ins().jump(merge, &[is_nil.into()]);
+            b.switch_to_block(merge);
+            let r = b.block_params(merge)[0];
+            stack.push(Op::Int(r));
         }
         PrimOp1::Sqrt => {
             // Prelude `sqrt`, x > 0 only: one IEEE `fsqrt` (correctly rounded —

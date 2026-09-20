@@ -556,6 +556,11 @@ entry, and delete the task rather than leaving it to be re-derived.
 
 ## Instruction counts CAN be taken on this box — `callgrind`, not `perf` (2026-09-18)
 
+> **Reversed on 2026-09-20: `perf stat -e instructions:u` WORKS here now**
+> (`/proc/sys/kernel/perf_event_paranoid` reads **1**), and `valgrind` is **not installed**
+> (`valgrind: command not found`). Use `perf stat -e instructions:u -x, -r 3 <cmd>`; it is
+> what measured ADR-371/372 and KI-167. The traps below still apply to either tool.
+
 `perf` is unusable here: `/proc/sys/kernel/perf_event_paranoid` is **4**, so
 `perf stat -e instructions:u` refuses without root. That is why this file says the box
 cannot measure, and for wall-clock it still cannot. But **instruction counts do not need

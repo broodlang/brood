@@ -1390,6 +1390,24 @@ pub(crate) fn is_embedded_module(key: &str) -> bool {
     embedded_module(key).is_some()
 }
 
+/// Did every module this runtime has `provide`d come out of this binary — an embedded std
+/// module, never a file found on the load-path or a mounted bundle? The run pre-flight's
+/// verdict cache (`cli_support`) writes an entry only when this holds, because a load-path
+/// file's content is not in its key. Read-only.
+pub(crate) fn every_provided_feature_is_embedded(heap: &Heap) -> bool {
+    let map_id = match heap
+        .env_get(value::EnvId::GLOBAL, value::intern("*features*"))
+        .map(|v| v.unpack())
+    {
+        Some(crate::core::value::ValueRef::Map(id)) => id,
+        _ => return false,
+    };
+    heap.map_entries(map_id).iter().all(|(k, _)| match *k {
+        Value::Str(s) => is_embedded_module(&heap.string(s)),
+        _ => false,
+    })
+}
+
 /// Is `mod_name` mid-load **in this process** — the only way a `(:use mod)` can be a cycle
 /// back into the module being loaded? `*features-loading*` maps a key to the pid that
 /// claimed its load, and the claim is what a refer-all must not run under: the public set

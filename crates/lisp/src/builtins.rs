@@ -74,16 +74,17 @@ mod treesit;
 mod wasm;
 
 // The boot cache (`lib.rs`) keys its expanded-prelude file on the build id.
-pub(crate) use build_info::build_id_string;
+pub(crate) use build_info::{build_id_string, stdlib_id_string};
 
 pub use io::{arm_mcp_progress, begin_stdout_capture, disarm_mcp_progress, take_captured_stdout};
 // The checker specializes `(string/->number "1")` to the literal `1`, and may only do so by
 // deciding parseability exactly as the runtime does — so it calls the runtime's own
 // classifier rather than growing a second one that could drift (`types::check::infer`).
+pub(crate) use modules::every_provided_feature_is_embedded;
 pub(crate) use numeric::{classify_numeric_text, NumericText};
 pub use os::set_script_args;
 #[cfg(feature = "jit")]
-pub(crate) use sequences::{first_without_eval, rest_without_eval};
+pub(crate) use sequences::{first_without_eval, is_empty_without_eval, rest_without_eval};
 pub use terminal::{restore_raw, restore_terminal, restore_terminal_on_exit};
 pub use tooling::{DOC_FORMS, SPECIAL_FORMS};
 

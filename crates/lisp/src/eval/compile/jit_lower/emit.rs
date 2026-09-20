@@ -49,6 +49,9 @@ pub(super) struct Funcs {
     /// path's tag-check miss): status 0 answers, 1 deopts, 2 parks an error.
     pub first: FuncRef,
     pub rest: FuncRef,
+    /// `brood_rt_is_empty` — `empty?` of a non-nil, non-pair (the inline tag check's
+    /// miss), same status protocol.
+    pub is_empty: FuncRef,
     /// `brood_rt_pair_nursery_base` / `_old_base` — re-fetched after a `rest` fallback
     /// that may have grown the pair slab (see `pair_bases` in `jit_lower_arm_inner`).
     pub pnbase: FuncRef,

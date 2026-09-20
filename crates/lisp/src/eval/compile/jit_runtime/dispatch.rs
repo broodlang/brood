@@ -307,6 +307,9 @@ pub(crate) fn jit_dispatch_call(
                 heap.jit_call_env = saved;
                 heap.jit_dbg_fn = saved_fn;
                 // Deopt feedback (see `jit_deopt_feedback`) for the native→native link.
+                if outcome == 1 {
+                    jit_any_deopt_feedback(heap, &arm);
+                }
                 if arm.deopt_watch {
                     use std::sync::atomic::Ordering::Relaxed;
                     if outcome == 1 {

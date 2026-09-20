@@ -367,7 +367,11 @@
             (string/join ["(defn go (x) (io/puts (str \"v=\" (string? (os/env x)))))"
                            "(go \"HOME\")"]
               "\n")))
-    (if exe (os/cmd "env" (append ["BROOD_IMAGE_TRACE=1"] extra-env [exe prog])) nil)))
+    ;; The pre-flight's verdict cache (ADR-371) would replay a previous run's warnings and do
+    ;; no walk — and this probe observes the WALK's loads, so the child runs with it off.
+    (if exe
+      (os/cmd "env" (append ["BROOD_IMAGE_TRACE=1" "BROOD_NO_CHECK_CACHE=1"] extra-env [exe prog]))
+      nil)))
 
 (defn- adr370-materialised? (result module)
   "Did the child's trace name `module` as materialised — a line that is exactly `[image] <module>`?"

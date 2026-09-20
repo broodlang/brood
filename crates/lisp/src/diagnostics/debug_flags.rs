@@ -542,7 +542,7 @@ pub const FLAGS: &[DebugFlag] = &[
     f(
         "BROOD_NO_CHECK_CACHE",
         DIAG,
-        "bypass `nest check`'s incremental result cache — recheck everything from scratch",
+        "bypass `nest check`'s incremental result cache AND `brood file`'s run pre-flight verdict cache — recheck everything from scratch",
     ),
     f(
         "BROOD_DERIVE_DBG",

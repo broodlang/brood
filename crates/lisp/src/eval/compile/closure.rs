@@ -283,6 +283,9 @@ pub(crate) fn compile_arm(
                                     jit_calls: AtomicU32::new(0),
                                     deopt_watch: false,
                                     jit_deopts: AtomicU32::new(0),
+                                    jit_deopts_total: AtomicU32::new(0),
+                                    jit_poly_slots: AtomicU32::new(0),
+                                    jit_entry_deopts: AtomicU32::new(0),
                                     float_globals: std::sync::OnceLock::new(),
                                     self_global_ok: std::sync::atomic::AtomicBool::new(false),
                                     ckpt_slot: d.ckpt_slot,
@@ -370,6 +373,9 @@ pub(crate) fn compile_arm(
         jit_calls: AtomicU32::new(0),
         deopt_watch,
         jit_deopts: AtomicU32::new(0),
+        jit_deopts_total: AtomicU32::new(0),
+        jit_poly_slots: AtomicU32::new(0),
+        jit_entry_deopts: AtomicU32::new(0),
         float_globals: std::sync::OnceLock::new(),
         self_global_ok: std::sync::atomic::AtomicBool::new(false),
         ckpt_slot,
@@ -1077,6 +1083,9 @@ pub(crate) fn hof_apply_native(
                 ),
             }
         }
+    }
+    if outcome == 1 {
+        jit_runtime::jit_any_deopt_feedback(heap, arm);
     }
     if arm.deopt_watch {
         use std::sync::atomic::Ordering::Relaxed;
