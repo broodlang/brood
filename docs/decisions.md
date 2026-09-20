@@ -24450,3 +24450,16 @@ beside `comp`/`partial` and `if-let`/`when-let`. Everything sequence-shaped is `
 unledgered — the gate only runs when a changed module names it, which is a hole the
 pre-push hook should close). `tests/library_gaps_test.blsp` covers the lot, including
 `memoize` across processes and `pmap`'s ordering under adversarial timing.
+
+### ADR-378 addendum (2026-09-20, later) — comparisons dispatch by tag instead of guessing
+
+The float context's comparison half was a guess with a known bad case: two let-bound ints
+compared inside a float-context arm (`(< j (count xs))`) took the float path and deopted on
+every call — a regression the first cut introduced for arms that used to work on the integer
+path. A comparison's answer is a bool whichever way it is computed, so nothing has to be
+boxed afterwards and no guess is needed: `<`/`<=` on a `Handle` operand, or on two slots
+nothing types, now lower as `cmp_dispatch` — the shape of `eq_dispatch` — both `Int` compare
+as ints, anything else as floats with an int promoted beside a float (the VM's rule), a
+non-number deopts (reason 38). In every arm, not only float-context ones: `overlaps?` lowers
+right on its first tier and never needs the re-tier. The float guess stays for `+ - * /`,
+where the result's type is the guess. Pinned by `both-ints` in the test.

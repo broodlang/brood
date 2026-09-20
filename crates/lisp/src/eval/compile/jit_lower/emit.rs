@@ -1502,6 +1502,55 @@ pub(super) fn eq_dispatch(
     b.block_params(done)[0]
 }
 
+/// `<` / `<=` on two operands nothing types (`Handle`s, or slots with no profile and no
+/// store's flag) — dispatched at RUNTIME by tag, the way `eq_dispatch` does `=`: both
+/// `Int` compares as ints, anything else reads both as floats (an `Int` beside a `Float`
+/// promoted, the VM's own rule; a non-number deopts). A comparison's answer is a bool
+/// whichever path took it, so nothing has to be boxed afterwards, and no guess is made:
+/// `(< j (count xs))` on two let-bound ints in a float-context arm stays native and exact
+/// where the optimistic float path deopted on every call. `map` orders the operands as
+/// for `emit_arith`. Costs the int×int case two tag tests, as `eq_dispatch` does.
+pub(super) fn cmp_dispatch(
+    b: &mut FunctionBuilder,
+    op: PrimOp,
+    wa: [cranelift_codegen::ir::Value; 3],
+    wb: [cranelift_codegen::ir::Value; 3],
+    map: [u8; 2],
+    f: Frame,
+) -> Option<cranelift_codegen::ir::Value> {
+    let ta = b.ins().band_imm_s(wa[0], 0xff);
+    let tb = b.ins().band_imm_s(wb[0], 0xff);
+    let done = b.create_block();
+    b.append_block_param(done, types::I8);
+    let a_int = b.ins().icmp_imm_s(IntCC::Equal, ta, TAG_INT as i64);
+    let b_int = b.ins().icmp_imm_s(IntCC::Equal, tb, TAG_INT as i64);
+    let both_int = b.ins().band(a_int, b_int);
+    let intb = b.create_block();
+    let floatb = b.create_block();
+    b.ins().brif(both_int, intb, &[], floatb, &[]);
+    b.switch_to_block(intb);
+    let (x, y) = if map[0] == 0 {
+        (wa[1], wb[1])
+    } else {
+        (wb[1], wa[1])
+    };
+    let ir = emit_arith(b, op, x, y, f.deopt)?;
+    b.ins().jump(done, &[BlockArg::Value(ir)]);
+    b.switch_to_block(floatb);
+    // Not both ints: each is a float or an int promoted beside one, or it deopts (a
+    // string compared with a number is the VM's type error to raise).
+    let fa = float_or_promoted_int(b, ta, wa[1], f, 38, true);
+    let fb = float_or_promoted_int(b, tb, wb[1], f, 38, true);
+    let (x, y) = if map[0] == 0 { (fa, fb) } else { (fb, fa) };
+    let fr = match emit_float_arith(b, op, x, y, f.deopt)? {
+        Op::Int(v) => v,
+        _ => return super::bail("cmp-dispatch-not-a-comparison"),
+    };
+    b.ins().jump(done, &[BlockArg::Value(fr)]);
+    b.switch_to_block(done);
+    Some(b.block_params(done)[0])
+}
+
 /// Inline read of `(nth v <const idx>)` for a LOCAL small (inline) vector, the analog of
 /// the pair `first`/`rest` inline. Fetches the vector-slab base *per read* (a trivial
 /// FFI, not the hoist used for pairs) so it is safe even in arms with GC safepoints (a

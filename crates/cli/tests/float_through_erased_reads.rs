@@ -11,8 +11,10 @@
 //! Three assertions, on the real `brood` entry point, because the seam is the lowering:
 //! the result matches the VM's (`BROOD_NO_JIT=1`), `BROOD_JIT_BAIL_TRACE=1` names the
 //! re-tier, and it names no `deopt-thrash-latched` for the arm afterwards. The comparison
-//! arm (`inside?`) covers the slot×slot and Handle-vs-int-literal cases: a float-context
-//! arm must still compare a `count` against a literal on the integer path.
+//! arms need no re-tier at all: `<`/`<=` on operands nothing types dispatch by tag at
+//! runtime (`cmp_dispatch`), so `inside?` (four destructured floats, and a `count` against
+//! a literal) and `both-ints` (two let-bound ints compared inside a float-context arm — the
+//! shape an optimistic float guess deopted on every call) lower once and stay native.
 
 use std::process::Command;
 
@@ -20,11 +22,15 @@ const PROGRAM: &str = r#"
 (defn dot (a b) (+ (* (nth a 0) (nth b 0)) (* (nth a 1) (nth b 1))))
 (defn inside? ([ax0 ay0 ax1 ay1] [bx0 by0 bx1 by1])
   (and (<= ax0 bx1) (>= ax1 bx0) (<= ay0 by1) (>= ay1 by0) (< (count [ax0]) 4)))
+(defn both-ints (v k)
+  (let (n (count v) j (nth v 0) s (* 0.5 k))
+    (if (< j n) (+ s 1.0) s)))
 (defn loop-sum (i acc)
   (if (>= i 20000)
     acc
     (loop-sum (+ i 1)
       (+ acc (dot [1.5 (* 1.0 i)] [2.0 0.5])
+         (both-ints [1 2 3] 2.0)
          (if (inside? [0.0 0.0 10.0 10.0] [(* 0.001 i) 5.0 15.0 15.0]) 1.0 0.0)))))
 (io/puts (loop-sum 0 0.0))
 (io/puts (dot [1 2] [3 4]))
@@ -65,16 +71,21 @@ fn float_arithmetic_on_vector_reads_retiers_in_float_context_and_matches_the_vm(
         jit_out.lines().nth(1) == Some("11"),
         "int vectors must dot to an int:\n{jit_out}"
     );
-    for arm in ["dot", "inside?"] {
-        assert!(
-            jit_err.contains(&format!(
-                "[jit-relower] arm={arm} reason=float-through-erased-reads"
-            )),
-            "`{arm}` was never re-tiered in float context. Bail trace:\n{jit_err}"
-        );
+    assert!(
+        jit_err.contains("[jit-relower] arm=dot reason=float-through-erased-reads"),
+        "`dot` was never re-tiered in float context. Bail trace:\n{jit_err}"
+    );
+    for arm in ["dot", "inside?", "both-ints"] {
         assert!(
             !jit_err.contains(&format!("arm={arm} reason=deopt-thrash-latched")),
-            "`{arm}` deopt-thrashed to BAILED after its float re-tier. Bail trace:\n{jit_err}"
+            "`{arm}` deopt-thrashed to BAILED. Bail trace:\n{jit_err}"
+        );
+    }
+    // The comparisons dispatch at runtime, so neither comparison arm needs a re-tier.
+    for arm in ["inside?", "both-ints"] {
+        assert!(
+            !jit_err.contains(&format!("[jit-relower] arm={arm}")),
+            "`{arm}` should lower once, its comparisons dispatched by tag. Bail trace:\n{jit_err}"
         );
     }
 }

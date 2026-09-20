@@ -6,9 +6,9 @@
 //! the whole arm to the VM.
 #![cfg(feature = "jit")]
 use super::emit::{
-    as_f64_guarded, as_f64_pair, as_int, call_handle, emit_arith, emit_float_arith, eq_dispatch,
-    inline_vec_ref, load_slot_int, op_is_float, op_maybe_float, read_words, slot_untyped,
-    table_prim, vector_ref, Frame, Funcs,
+    as_f64_guarded, as_f64_pair, as_int, call_handle, cmp_dispatch, emit_arith, emit_float_arith,
+    eq_dispatch, inline_vec_ref, load_slot_int, op_is_float, op_maybe_float, read_words,
+    slot_untyped, table_prim, vector_ref, Frame, Funcs,
 };
 use super::Op;
 use super::OrBail;
@@ -1059,15 +1059,25 @@ pub(super) fn emit_prim2(
         let wa = read_words(b, aa_op, frame);
         let wb = read_words(b, bb_op, frame);
         stack.push(Op::Int(eq_dispatch(b, wa, wb, frame, funcs)));
+    } else if matches!(op, PrimOp::Lt | PrimOp::Le)
+        && !op_is_float(aa_op, frame)
+        && !op_is_float(bb_op, frame)
+        && (matches!(aa_op, Op::Handle(..)) || matches!(bb_op, Op::Handle(..)))
+        && op_maybe_float(aa_op, frame)
+        && op_maybe_float(bb_op, frame)
+    {
+        // `<` / `<=` with a type-erased operand and nothing proven float: dispatched by
+        // tag at runtime (int×int as ints, else as floats) — a bool either way, so no
+        // guess is needed and none is made. See `cmp_dispatch`.
+        let wa = read_words(b, aa_op, frame);
+        let wb = read_words(b, bb_op, frame);
+        stack.push(Op::Int(cmp_dispatch(b, *op, wa, wb, map, frame)?));
     } else if op_is_float(aa_op, frame)
         || op_is_float(bb_op, frame)
         || (has_float_slot
-            && matches!(
-                op,
-                PrimOp::Add | PrimOp::Sub | PrimOp::Mul | PrimOp::Div | PrimOp::Lt | PrimOp::Le
-            )
+            && matches!(op, PrimOp::Add | PrimOp::Sub | PrimOp::Mul | PrimOp::Div)
             && (matches!(aa_op, Op::Handle(..)) || matches!(bb_op, Op::Handle(..)))
-            // … unless the other operand can never be a float (an int literal: `(< (count
+            // … unless the other operand can never be a float (an int literal: `(+ (count
             // xs) 4)`), which the float path would deopt on unconditionally
             && op_maybe_float(aa_op, frame)
             && op_maybe_float(bb_op, frame))
@@ -1190,13 +1200,21 @@ pub(super) fn emit_prim2_slot_slot(
         let wa = read_words(b, Op::Slot(slot_a), frame);
         let wb = read_words(b, Op::Slot(slot_b), frame);
         stack.push(Op::Int(eq_dispatch(b, wa, wb, frame, funcs)));
+    } else if matches!(op, PrimOp::Lt | PrimOp::Le)
+        && slot_untyped(slot_a, frame)
+        && slot_untyped(slot_b, frame)
+    {
+        // `(< a b)` on two slots nothing typed — let-bound `nth`/`count` results: by tag at
+        // runtime, ints as ints and anything else as floats (`cmp_dispatch`), a bool either
+        // way. Neither the integer guess nor the float one: each deopted on every call for
+        // the other kind.
+        let wa = read_words(b, Op::Slot(slot_a), frame);
+        let wb = read_words(b, Op::Slot(slot_b), frame);
+        stack.push(Op::Int(cmp_dispatch(b, *op, wa, wb, map, frame)?));
     } else if op_is_float(Op::Slot(slot_a), frame)
         || op_is_float(Op::Slot(slot_b), frame)
         || (frame.float_context
-            && matches!(
-                op,
-                PrimOp::Add | PrimOp::Sub | PrimOp::Mul | PrimOp::Div | PrimOp::Lt | PrimOp::Le
-            )
+            && matches!(op, PrimOp::Add | PrimOp::Sub | PrimOp::Mul | PrimOp::Div)
             && slot_untyped(slot_a, frame)
             && slot_untyped(slot_b, frame))
     {
