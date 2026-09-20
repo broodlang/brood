@@ -492,12 +492,18 @@ fn curated_helper_sigs_catch_misuse() {
     // and the bare spelling is now unbound without `(:use math)`. Asserting the bare form
     // here was testing a dead key — and worse, the bare entry it relied on is what
     // suppressed the unbound lint on a name that no longer exists (see `sigs.rs`).
+    //
+    // `even?`/`odd?` are reported against `int`, not the curated `number`: `std/math.blsp`
+    // DECLARES them `(int -> bool)`, and a declaration outranks the curated table whether
+    // it is read from the loaded module or from the stdlib image's footer (ADR-370 —
+    // `sig_of` reads the footer in the declaration's slot since 2026-09-20, so a check
+    // that never loads `math` says what one that did always said).
     assert!(warnings("(math/even? \"x\")")
         .iter()
-        .any(|w| w.contains("even?") && w.contains("number")));
+        .any(|w| w.contains("even?") && w.contains("int")));
     assert!(warnings("(math/odd? :k)")
         .iter()
-        .any(|w| w.contains("odd?") && w.contains("number")));
+        .any(|w| w.contains("odd?") && w.contains("int")));
     assert!(warnings("(math/abs :k)")
         .iter()
         .any(|w| w.contains("abs") && w.contains("number")));

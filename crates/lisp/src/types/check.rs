@@ -309,9 +309,16 @@ pub(crate) fn materialise_referenced_modules(heap: &mut Heap) {
             // checker nothing it does not have. The eager drain's own rule (KI-150). Both
             // skips sit under the one lever, so `BROOD_NO_IMAGE_SIGS=1` is exactly the
             // pre-ADR-370 whole-module scan and the differential covers both.
+            //
+            // A CURATED name (`sigs::curated_sig`) is read from the table ahead of the
+            // footer and ahead of inference (`sig_of`'s order), so its verdict never depends
+            // on the load either: `seq/filter` is curated and named by 38 std modules'
+            // bodies, `io/puts` by 26, and each check materialised `seq` and `io` for a type
+            // it already had (2026-09-20).
             if crate::eval::derive::image_sigs_enabled()
                 && (heap.env_get(global_env, name).is_some()
-                    || crate::eval::derive::image_sig_text(heap, name).is_some())
+                    || crate::eval::derive::image_sig_text(heap, name).is_some()
+                    || sigs::curated_sig(name).is_some())
             {
                 continue;
             }
@@ -319,11 +326,17 @@ pub(crate) fn materialise_referenced_modules(heap: &mut Heap) {
             if let Some(slash) = text.rfind('/') {
                 if slash > 0 {
                     let module = value::intern(&text[..slash]);
+                    // The insert is the LOAD SET — it must not sit behind the trace flag.
+                    // ADR-370's first shape wrote `trace && wanted.insert(module)`, and the
+                    // short-circuit made the whole transitive scan a no-op in every process
+                    // that did not set `BROOD_IMAGE_TRACE` (KI-171): the one test of it ran its
+                    // child WITH the trace. `transitive_scan_loads_without_the_trace` pins it.
+                    wanted.insert(module);
                     // The question KI-150 took days to answer by experiment — WHICH
-                    // reference made the check load a module — printed per module, first
-                    // name in sorted order: the name to declare a signature for.
+                    // references made the check load a module — printed per name in sorted
+                    // order: every one is a name to declare a signature for, and the load
+                    // stays until the LAST of them has one.
                     if trace
-                        && wanted.insert(module)
                         && heap.env_get(global_env, module).is_none()
                         && !feature_loaded(heap, &text[..slash])
                     {
