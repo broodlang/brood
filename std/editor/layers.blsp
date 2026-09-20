@@ -440,6 +440,51 @@ the composite layer list for multi-scope dispatch, e.g. (focused-buffer app-mode
 precedence; a layer still owns its chord)."
   (active-keymap {:layers (compose-layers ctxs)}))
 
+(defn- scope-shadow-of (layers i k)
+  "The `:name` of the highest-precedence layer BEFORE index `i` whose keymap owns first
+key `k`, or nil when nothing above binds it.
+
+`k` is the FIRST key of a sequence, not the whole sequence, and that is the whole
+subtlety: `active-keymap` merges layers **shallowly**, so a layer that binds `C-x s`
+takes the entire `C-x` sub-map with it and shadows a lower layer's `C-x k` as well —
+the semantics note at the top of this file calls it \"a chord is owned by its winning
+layer\". A shadow test done per leaf would report that `C-x k` still works. It does not."
+  (let (above (seq/find (take layers i) (fn (l) (contains? (or (:keymap l) {}) k))))
+    (if (nil? above) nil (:name above))))
+
+(sig scope-bindings (seqable -> vector))
+(defn scope-bindings (ctxs)
+  "Every binding the scopes `ctxs` make (first scope = highest precedence), each WITH the
+layer it came from and what shadows it: a vector of
+`{:sequence :command :layer :shadowed-by}` in precedence order, `:shadowed-by` nil for the
+bindings actually in force.
+
+`scope-keymap` answers the same question with the answer thrown away — it merges the stack
+into one keymap, after which no caller can say which layer won a key, or what that win cost.
+That is what help needs and cannot reconstruct: `describe-bindings` groups by layer,
+`describe-key` names the layer a key came from, and a which-key popup dims what is shadowed.
+
+It is derived from the same shallow-merge rule `active-keymap` dispatches through
+(`scope-shadow-of`), rather than re-deriving precedence beside it. Help that computes
+its own answer is help that drifts from the dispatcher and then lies — and a lying keymap
+help is worse than none, because it is believed.
+
+    (editor/layers/scope-bindings
+      (list {:layers (list {:name :mode :keymap {:a 'go}})}))
+      → [{:sequence [:a] :command go :layer :mode :shadowed-by nil}]"
+  (let (layers (map (compose-layers ctxs) layers-resolve))
+    (into []
+      (mapcat (range (count layers))
+        (fn (i)
+          (let (layer (nth layers i))
+            (map (keymap-bindings (or (:keymap layer) {}))
+              (fn (pair)
+                (let ([command sequence] pair)
+                  {:sequence sequence
+                   :command command
+                   :layer (:name layer)
+                   :shadowed-by (scope-shadow-of layers i (first sequence))})))))))))
+
 (defn scope-dispatch (ctxs state pending key fallback)
   "Dispatch `key` through the merged keymap of `ctxs` (precedence by order), running
 the resolved command on `state` — typically the app model, which may itself be one
