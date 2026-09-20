@@ -557,3 +557,26 @@
     (is (nil? (evsrv-decode-reply "")))
     ;; a brace that opens nothing readable is not a reply either
     (is (nil? (evsrv-decode-reply "note: {unclosed")))))
+
+;; ---- the requests that move or stop work ----------------------------------------
+(describe "eval-server: stopping, and attaching elsewhere"
+  (test "a teststop round-trips and needs no payload"
+    ;; the bug this shape had: an empty payload made the request line three fields, and a
+    ;; three-field line was dropped — so a stop cost the full timeout and a respawn
+    (let (req (evsrv-decode-request (evsrv-encode-teststop 4)))
+      (assert= (get req :id) 4)
+      (assert= (get req :teststop) true)
+      (is (nil? (get req :src)))))
+
+  (test "an attach carries the node and its cookie; a detach carries neither"
+    (let (a (evsrv-decode-request (evsrv-encode-attach 7 "app@host:4370" "secret"))
+          d (evsrv-decode-request (evsrv-encode-detach 8)))
+      (assert= (get a :attach) "app@host:4370")
+      (assert= (get a :cookie) "secret")
+      (assert= (get d :detach) true)
+      (is (nil? (get d :attach)))))
+
+  (test "a malformed attach is dropped like any other bad line"
+    (assert= (evsrv-decode-request "{:id 1 :attach 42}") nil)
+    ;; …and an ordinary request still has to carry a string :src
+    (assert= (evsrv-decode-request "{:id 1}") nil)))
