@@ -1266,3 +1266,39 @@ suite run. `*test-wait-ms*` is a failure deadline, reached only if a relay never
     (assert= (delete-rectangle (make-buffer grid)) (make-buffer grid))
     (let (e (try (do (delete-rectangle (set-read-only (rect grid 1 15) true)) nil) (catch e e)))
       (assert= (:kind e) :read-only))))
+
+;; A case-insensitive search must report offsets into the REAL text — folding is
+;; length-preserving (`string/fold-case`), so it does.
+(describe "buffer search: case folding"
+  (defn bsc () (editor/buffer/make-buffer "hello World\nHELLO there\nİstanbul"))
+
+  (test "without folding, case matters"
+    (assert= (editor/buffer/buffer-search-forward (bsc) "hello" 0) 0)
+    ;; `World` is in the text and `world` is not, so a case-sensitive search misses it
+    (assert= (editor/buffer/buffer-search-forward (bsc) "World" 0) 6)
+    (is (nil? (editor/buffer/buffer-search-forward (bsc) "world" 0 false)))
+    ;; and `HELLO` is only at 12, never at 0
+    (assert= (editor/buffer/buffer-search-forward (bsc) "HELLO" 0 false) 12))
+
+  (test "with folding, either case finds either"
+    (assert= (editor/buffer/buffer-search-forward (bsc) "HELLO" 0 true) 0)
+    (assert= (editor/buffer/buffer-search-forward (bsc) "hello" 12 true) 12)
+    (assert= (editor/buffer/buffer-search-forward (bsc) "world" 0 true) 6))
+
+  (test "backward folds too, and still answers the LAST match before the bound"
+    (assert= (editor/buffer/buffer-search-backward (bsc) "hello" 99 true) 12)
+    (assert= (editor/buffer/buffer-search-backward (bsc) "hello" 12 true) 0))
+
+  ;; The offset property, asserted against text whose lowercase is longer than itself:
+  ;; the match must still be where the character actually is.
+  (test "a folded match's offset indexes the real text, not the folded copy"
+    ;; Each offset is read under an `if`, because the search answers `nil | int`: a
+    ;; missed match then fails the assertion by name rather than indexing the text
+    ;; with nil (which is also what the checker reads here).
+    (let (b (bsc)
+          text (editor/buffer/buffer-text b)
+          at (editor/buffer/buffer-search-forward b "there" 0 true)
+          ;; and past the İ, which is one character here and two when lowercased
+          i (editor/buffer/buffer-search-forward b "stanbul" 0 true))
+      (assert= (if at (string/substring text at (+ at 5)) :no-match) "there")
+      (assert= (if i (string/substring text i (+ i 7)) :no-match) "stanbul"))))

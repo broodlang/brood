@@ -51,6 +51,36 @@ another type live here too, module-rooted: `string/->number`, `string/->symbol`.
     (str (string/upper (string/substring s 0 1)) (string/lower (string/substring s 1)))))
 (sig capitalize (string -> string))
 
+(defn fold-case (s)
+  "`s` case-folded for comparison, **one character per character** — so an index into the
+result is an index into `s`.
+
+That property is the whole point, and `string/lower` does not have it: full Unicode
+lowercasing is not a function on characters. `\"İ\"` (U+0130, one character) lowercases to
+two, so a caller that folded a whole document to search it case-insensitively would get
+back offsets into a string that does not exist, and land its match on the wrong
+characters. Every character whose lowercase is not a single character is left as it is,
+which is the *simple* case fold — what a text editor's case-insensitive search means.
+
+    (string/fold-case \"AbÇ\")   → \"abç\""
+  (string/join (map (string/->list s)
+                 (fn (c) (let (l (string/lower c)) (if (= (string/length l) 1) l c))))
+    ""))
+(sig fold-case (string -> string))
+
+(defn has-upper? (s)
+  "Does `s` contain a character that case-folds to something else — i.e. did someone type
+an upper-case letter?
+
+The question an editor's search asks to decide whether to be case-sensitive (Emacs'
+`isearch-no-upper-case-p`): a lower-case pattern matches anything, and the moment you
+type a capital you meant it. Asked by FOLDING rather than by comparing against
+`string/upper`, so a character with no case — a digit, a bracket, CJK — answers no.
+
+    (string/has-upper? \"foo\")   → false"
+  (not (= s (fold-case s))))
+(sig has-upper? (string -> bool))
+
 ;; ---- char access & content conversions --------------------------------------
 
 (defn char-at (s i)

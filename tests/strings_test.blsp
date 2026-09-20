@@ -727,3 +727,31 @@
     (assert= (string/format "%4d|%s" 42 "x") "  42|x")
     ;; a float through %x is not an error, it is rendered readably
     (assert= (string/format "%x" 1.5) "1.5")))
+
+;; ---- case folding for comparison ---------------------------------------------
+;; The property that matters is LENGTH: an index into the folded string has to be an
+;; index into the original, or a case-insensitive search reports offsets into a string
+;; that does not exist.
+(describe "string/fold-case"
+  (test "folds for comparison"
+    (assert= (string/fold-case "AbÇ") "abç")
+    (assert= (string/fold-case "already") "already")
+    (assert= (string/fold-case "") ""))
+
+  (test "one character in, one character out — which `string/lower` does NOT guarantee"
+    ;; `İ` (U+0130) lowercases to two characters in full Unicode. A search that folded a
+    ;; document with `string/lower` would land every match after it one column left.
+    (assert= (string/length (string/lower "İ")) 2)
+    (assert= (string/length (string/fold-case "İ")) 1)
+    (doseq (s (list "İstanbul" "ÅNGSTRÖM" "straße" "ΣΟΦΟΣ" "日本語" "a1[]"))
+      (assert= (string/length (string/fold-case s)) (string/length s)))))
+
+(describe "string/has-upper?"
+  (test "true only when a character actually has a lower-case form it is not in"
+    (is (not (string/has-upper? "foo")))
+    (is (string/has-upper? "Foo"))
+    (is (string/has-upper? "fooBar"))
+    ;; characters with no case are not a decision about case
+    (is (not (string/has-upper? "foo123[]")))
+    (is (not (string/has-upper? "日本語")))
+    (is (not (string/has-upper? "")))))

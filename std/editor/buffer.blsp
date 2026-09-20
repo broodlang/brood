@@ -465,18 +465,35 @@ A no-op when the ring is empty."
 
 ;; ---- search (pure position queries; the caller moves point) -----------------
 
-(defn buffer-search-forward (buf needle from)
-  "The char index of the first occurrence of `needle` in `buf`'s text at or after
-`from`, or nil if there is none. Pure — it does not move point; the caller composes
-`goto-char`/`set-mark`. The forward primitive incremental search rides on."
-  (let (i (index-of (buffer-text buf) needle from))
-    (if (< i 0) nil i)))
+;; `fold?` is the case-insensitive switch, and it is a parameter rather than a mode
+;; because WHEN to fold is the editor's policy, not the buffer's: Emacs folds by default
+;; and stops the moment the pattern contains an upper-case letter. What belongs here is
+;; only that folding can be done at all, and done without moving the answer — both the
+;; haystack and the needle go through `string/fold-case`, which is one character per
+;; character, so an index into the folded text is an index into the real text. Folding
+;; with `string/lower` instead would shift every offset after the first `İ`.
 
-(defn buffer-search-backward (buf needle before)
+(defn- buffer-haystack (buf fold?)
+  (let (text (buffer-text buf)) (if fold? (string/fold-case text) text)))
+
+(defn buffer-search-forward (buf needle from &optional (fold? false))
+  "The char index of the first occurrence of `needle` in `buf`'s text at or after
+`from`, or nil if there is none. With `fold?`, the comparison ignores case. Pure — it
+does not move point; the caller composes `goto-char`/`set-mark`. The forward primitive
+incremental search rides on."
+  (let (i (index-of (buffer-haystack buf fold?)
+            (if fold? (string/fold-case needle) needle)
+            from))
+    (if (< i 0) nil i)))
+(sig buffer-search-forward (any string any -> (or int nil)))
+
+(defn buffer-search-backward (buf needle before &optional (fold? false))
   "The char index of the last occurrence of `needle` in `buf`'s text whose start is
-strictly before `before`, or nil if there is none. The backward counterpart of
-`buffer-search-forward`."
-  (let (i (string/last-index-of (buffer-text buf) needle before))
+strictly before `before`, or nil if there is none. With `fold?`, the comparison ignores
+case. The backward counterpart of `buffer-search-forward`."
+  (let (i (string/last-index-of (buffer-haystack buf fold?)
+            (if fold? (string/fold-case needle) needle)
+            before))
     (if (< i 0) nil i)))
 (sig buffer-search-backward (any string any -> (or int nil)))
 
