@@ -86,6 +86,24 @@ What landed, each with a sabotage-verified guard:
    an opted-out warm boot.
 5. ~~Two dead-code warnings in the LEAN build~~ — gated `#[cfg(feature = "dev-tools")]`.
 
+### The `ring`/`pingpong` movement in the 1b9befd0 column — attributed, not a runtime regression
+
+Fixed-baseline A/B (`2c1596c0` vs `1b9befd0`, both images live, base-vs-base floor <1%):
+`ring` +9.5%, `pingpong` +7.9%, the same under `BROOD_NO_CHECK=1`. Bisected with `perf
+stat` over the four commits between: instructions +1.4% (at `ce39ad45`) then +0.2%, cycles
++4%, L1-icache misses 67M → 75M; the `BROOD_PERF_STATS` VM counters are identical to the
+last few hundred across the commits. It is the release-fast (no-LTO) codegen-partitioning
+class — the same one that moved `strings` +8.8% on +1.4% instructions on 2026-09-17 — and
+nothing in the message path changed. Published as measured in `brood-benchmarks` FRONTIER.
+**If this class should stop moving the message rows, the lever is a deterministic-codegen
+build for measurement (LTO / one codegen unit, `release-lean`) — a harness decision.**
+Two rig traps met on the way, both now in `perf-handoff.md`'s spirit: a manually-built
+baseline worktree needs `config.mk` copied in (`ab-bench.sh` does it; a bare `make
+release-brood` there built a 25 MB binary without the GUI/grammar features and A/B'd
+apples to oranges), and **`target/ab` reached 24 GB and filled the root filesystem** — builds
+then fail with `failed to create directory` inside cargo, which does not say "disk full".
+`make ab-clean` after every A/B session.
+
 ### Rig notes that would have cost the next session an hour
 
 - **`perf stat` works here now; `valgrind` does not exist** — `perf-handoff.md` said the
