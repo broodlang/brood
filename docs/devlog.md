@@ -15034,3 +15034,50 @@ the way: a docstring containing `"w"` unescaped ended the string and made `w` th
 function body — `unbound symbol: w` at a call site far away; the doc example now uses a
 keyword. Tests: `remote-display`'s three messages and the client loop applying them
 (`serve_test`), `display-texture` (`ui_test`), `run-on` against a fake display (b2d).
+
+## 2026-09-20 (7) — the five follow-ups, and the one that found KI-172
+
+The list from the coverage session, taken in order.
+
+**1 — carry `-> any` declarations for their domain: dropped.** A `-> any` name's RESULT is
+re-typed from the loaded body, so the footer declining it is what keeps the two arms of
+ADR-370's differential equal; carrying it for the domain alone helps only a name whose
+module is not loaded, and the transitive scan loads exactly those modules for the result.
+Nothing to gain; the asymmetry noted on 2026-09-20 (6) exists only in a state the scan
+prevents.
+
+**2 — type variables on the residue.** `seq/find ((seqable ?A) (?A -> any) -> (or ?A nil))`,
+`seq/vector-ref ((vector ?A) int -> ?A)`, `seq/distinct ((seqable ?A) -> (list ?A))`. First
+an ordering fix it would have exposed: the heap/image type-variable reader ran AHEAD of the
+by-name rules while a plain heap declaration ran after them, so a variable-bearing
+declaration would have replaced `seq/find`'s rule (`elem ∩ what the predicate tests | nil`)
+with the wider `elem | nil`. It reads beside the other heap readers now. Pinned in its own
+process: `(seq/vector-ref [1 2] 0)` is an int with `seq` never loaded.
+
+**3 — gate the image's writer: it found a bug.** Two images of the same std — one written
+by `brood`, one by `nest test` — gave the checker different answers: `debug/hits`
+`(map any number)` under one, `(or map table)` under the other, and the images differed by
+21 KB. The cause is **KI-172**: the checker holds `NoSourceRewrites` across a compile pass
+that performs the file's `require`s and the ADR-340 scan's loads, so every std module a
+`brood file.blsp` pre-flight brought in was expanded WITHOUT the optimiser's rewrites and
+then RUN that way — `seq/frequencies` over 750k keys **860 ms** against **343 ms** with the
+check skipped, the same as `BROOD_LINMAP=0`. An image written by such a process carried
+those bodies to every later run. The loader holds `SourceRewritesOn` now; and because the
+rewritten tally ends in `(if (= :table (type-of R)) (%table-snapshot R) R)`, the checker
+learned that `(= :tag (type-of x))` is the type guard it is — `debug/hits` reads `map`. The
+gate that stays: `cli/tests/image_writer_differential.rs` (an image written after a check
+reads as one written without; reds on `debug/hits` under sabotage), beside
+`tests/check_loads_run_rewritten.rs` (the loaded body carries the rewrite's marker).
+Whole-tree verdicts under a `brood`-written and a `nest`-written image are byte-identical
+now (4 050 lines each). The `brood` images still differ from each other in byte ORDER and
+from `nest`'s by 102 bytes — KI-166's open question, not a verdict.
+
+**4 — `scripts/check-cost.sh` / `make check-cost BASE=<ref>`.** The three-arm callgrind rig
+with the four disciplines built in: a detached worktree for the base, each arm's image
+written once by its own release binary and asserted live in the same shell, three warm runs
+after every build, `BROOD_TIER=1`. `--scan-alive` adds the traced base column for a base
+older than KI-171's fix.
+
+**5 — tooling declarations.** `project/find-root`, `abs-paths`, `collect-sources`, `setup`,
+`project-check/project-cache-dir`, `reflect/parse-source`(`-positioned`), `renames/ledger`
+— the cross-references only `nest` pays for.

@@ -470,10 +470,12 @@ manifest is read, naming the key, not later inside whoever consumes the map."
     (file/exists? (path/join dir "project.blsp")) dir
     (= dir (path/dirname dir)) nil
     else (find-root (path/dirname dir))))
+(sig find-root (string -> (or string nil)))
 
 (defn abs-paths (root rels)
   "Resolve each relative path in `rels` against `root`, returning the list of absolute paths."
   (map rels (fn (r) (path/join root r))))
+(sig abs-paths (string (seqable string) -> (list string)))
 
 ;; Recursively collect every <name>_test.blsp path under `dir` (skipping nothing
 ;; else). Returns a list of full paths; nil if `dir` isn't a directory.
@@ -510,6 +512,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
             (string/ends-with? entry ".blsp") (cons p acc)
             else acc))))
     nil))
+(sig collect-sources (string -> (list string)))
 
 ;; A source file that carries co-located tests (ADR-225): it has a top-level
 ;; `deftest` or `describe` form. Detection is by FORM — not filename, not module
@@ -878,6 +881,7 @@ rules merged in declaration order, then this project's own `:format-headers` on 
   ;; any stale value from a prior setup in a long-lived tooling image).
   (def *format-headers-extra* (project-effective-format-headers root))
   root)
+(sig setup (string -> string))
 
 ;; Register the project's OWN modules as package-rooted under its `:name`, and set the
 ;; ambient package context so every source loaded from here on roots (ADR-070). A no-op

@@ -917,6 +917,7 @@ check-result cache and the `--failed`/`--stale` records live in; created on dema
         (file/mkdir dir)
         (project-cache-prune checks dir)
         dir))))
+(sig project-cache-dir (string -> (or string nil)))
 
 ;; `name` selects which on-disk manifest under the project's cache dir — Phase 1's
 ;; parse extracts (`"extracts"`) and Phase 2's check results (`"checks"`) are

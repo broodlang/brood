@@ -151,10 +151,12 @@ anything."
 (defn parse-source (s)
   "Parse s into a lossless CST tree as nested vectors (mechanism for std/format.blsp)."
   (%parse-source s))
+(sig parse-source (string -> (vector any)))
 
 (defn parse-source-positioned (s)
   "Parse s into a CST of maps, each `{:kind :start :end}` (leaves add :text, containers/wrappers add :kids) with half-open character offsets — for structural navigation (std/sexp)."
   (%parse-source-positioned s))
+(sig parse-source-positioned (string -> (map keyword any)))
 
 (defn scan-form-start (s pos)
   "The greatest char offset <= pos of a top-level (bracket depth 0) open bracket in s lying OUTSIDE any string or ; comment, else 0 — depth-tracked, not the Emacs column-0 heuristic, so a mis-indented open bracket at column 0 inside an unclosed form is not a form start — the string/comment-aware beginning-of-defun behind highlight/safe-restart and tool/sexp narrowing. The required forward lexical pass (a backward scan cannot know string state) runs natively: O(pos) at native speed instead of interpreted per-char cost on every eldoc/fontify-restart in a large buffer."

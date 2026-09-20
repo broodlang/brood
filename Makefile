@@ -406,6 +406,9 @@ ab-clean: ## Remove the baseline worktrees + builds that `make ab` created under
 	@git worktree prune
 	@echo "removed target/ab"
 
+check-cost: ## Instruction cost of `brood --check` per program, this tree vs BASE (callgrind, deterministic): make check-cost BASE=<ref> [SCAN_ALIVE=1]
+	@./scripts/check-cost.sh --base $(or $(BASE),HEAD) $(if $(SCAN_ALIVE),--scan-alive,)
+
 suite: ## Run the in-language suite via the project runner (discovers tests/**/*_test.blsp)
 	$(NEST) test
 
