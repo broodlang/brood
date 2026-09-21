@@ -613,8 +613,43 @@ fn dense_idx(key: Value) -> Option<usize> {
 /// exactly as map keys do). Buckets are size 0–1 except on a genuine hash collision.
 fn find_idx(heap: &mut Heap, bucket: &[(Message, Message)], key: Value) -> Option<usize> {
     bucket.iter().position(|(km, _)| {
+        // A scalar key compares without being rebuilt in the heap first — the common
+        // table key (an index, an id, a keyword), on every get/put/has?.
+        if let Some(eq) = scalar_key_eq(km, key) {
+            return eq;
+        }
         let k = from_message(heap, km);
         heap.equal(key, k)
+    })
+}
+
+/// Whether the stored key `km` equals `key`, decided without reconstructing it when
+/// both are immediate scalars; `None` when either is not (a compound key resolves
+/// through `from_message` + `equal`, exactly as before). Structural equality's rules
+/// for scalars: an int and a float are never equal, NaN is refused as a key upstream.
+fn scalar_key_eq(km: &Message, key: Value) -> Option<bool> {
+    Some(match (km, key) {
+        (Message::Int(a), Value::Int(b)) => *a == b,
+        (Message::Float(a), Value::Float(b)) => *a == b,
+        (Message::Keyword(a), Value::Keyword(b)) => *a == b,
+        (Message::Sym(a), Value::Sym(b)) => *a == b,
+        (Message::Bool(a), Value::Bool(b)) => *a == b,
+        (Message::Nil, Value::Nil) => true,
+        (
+            Message::Int(_)
+            | Message::Float(_)
+            | Message::Keyword(_)
+            | Message::Sym(_)
+            | Message::Bool(_)
+            | Message::Nil,
+            Value::Int(_)
+            | Value::Float(_)
+            | Value::Keyword(_)
+            | Value::Sym(_)
+            | Value::Bool(_)
+            | Value::Nil,
+        ) => false,
+        _ => return None,
     })
 }
 
@@ -677,13 +712,16 @@ pub fn get(heap: &mut Heap, id: u64, key: Value, default: Value) -> LispResult {
         let mut guard = store.hashed.lock().expect("table store mutex");
         let map = store.hashed_or_migrate(&mut guard);
         let hash = heap.hash_value(key);
+        // Rebuilt in the heap under the lock, straight from the stored form: the clone
+        // this used to take first (to release the lock sooner) cost an allocation and a
+        // deep copy per read of a compound value — a six-float vector read 200 ns, an
+        // int 50 — for a lock no other process holds in the common case.
         match map.get(&hash) {
-            Some(bucket) => find_idx(heap, bucket, key).map(|i| bucket[i].1.clone()),
+            Some(bucket) => find_idx(heap, bucket, key).map(|i| from_message(heap, &bucket[i].1)),
             None => None,
         }
-        // Reconstruct after releasing the store lock (keeps the lock hold minimal).
     };
-    Ok(found.map_or(default, |vm| from_message(heap, &vm)))
+    Ok(found.unwrap_or(default))
 }
 
 /// `(%table-has? t k)` — whether `k` is present.
