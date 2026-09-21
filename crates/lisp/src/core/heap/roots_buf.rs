@@ -115,8 +115,18 @@ impl RootsBuf {
 
     #[cold]
     fn grow(&mut self, needed: usize) {
-        // Amortized doubling with `Vec`'s small-first policy for a 24-byte element.
-        let new_cap = needed.max(self.cap * 2).max(4);
+        // Amortized doubling — but by steps of four below sixteen slots. A parked
+        // `receive` holds ~7 slots of frame and pushes two more (matcher, tags) on the way
+        // in, so plain doubling took every parked process from 8 to 16 slots (384 B) for a
+        // transient ninth; 8 → 12 keeps it at 288 B. Above sixteen the doubling is the
+        // amortization deep recursion needs, and a process that gets there pays one extra
+        // realloc, ever. Measured 2026-09-21 on the parked-process floor.
+        let step = if self.cap < 16 {
+            self.cap + 4
+        } else {
+            self.cap * 2
+        };
+        let new_cap = needed.max(step).max(4);
         self.realloc_to(new_cap);
     }
 
