@@ -650,3 +650,31 @@ read these before quoting any number from this box:
 Both were hit here while measuring KI-150, and the second only surfaced because reverting
 the change did not restore the baseline. **If a revert does not reproduce the number you
 started from, the rig is wrong, not the code.**
+
+## Task 7 — three 2026-09-21 runtime changes, measured on micros only: confirm the rows
+
+**The situation.** Three commits on `main` (`62201c68`/`4492d313` the JIT, `d19ec13f` the
+prelude, `93b7440d` the table) each earned their place on a microbenchmark and a downstream
+game's step; none was run on the rows. Each touches something every row does:
+
+- **JIT (ADR-378 + addendum).** Every `Prim2` `<`/`<=` with a `Handle` operand now lowers as
+  `cmp_dispatch` (two tag tests, a branch each way) where it was one `as_int` guard; every
+  `Prim2SlotSlot` comparison on two untyped slots likewise. The re-tier itself only fires on
+  arms that used to latch BAILED, so it can only help — the dispatch cost on int-only arms is
+  the question. Expect flat; `nqueens`/`bintree`/`json` are the comparison-heavy rows.
+- **Prelude (`d19ec13f`).** `seq` gained one `type-of` + `%eq` before its old chain (a vector
+  returns at once, everything else pays the two calls — a list ~60 ns more per `seq`); `reverse`
+  gained a `type-of` and two predicate calls on the list path. `conj`/`into` on a vector
+  copy once. `pipeline`, `reduce`, `wordcount`, `strings`, `persistent-map` are the rows.
+- **Table (`93b7440d`).** `get` rebuilds under the lock; scalar keys compare without a rebuild.
+  `sieve` (dense ints, untouched path) should be flat; anything hashed-path with compound
+  values should not be slower.
+
+**Run this.** `make ab BASE=a61d7762 --floor` (the commit before the JIT change), then the
+three commits individually only if a row moves past its floor — `make ab BASE=<prev> --floor`
+per commit. Unpinned as well for the JIT one (it does not change compile volume, but the
+rule is the rule).
+
+**A pass looks like:** every row inside `max(5%, 2 × floor)`; a `map`-heavy row a little
+better. **A fail:** a list-heavy row (`reduce`, `pipeline`) past the floor — then the fix is
+to fold `reverse`'s two predicate calls into one kind check, not to revert.

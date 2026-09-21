@@ -32,6 +32,7 @@ arg silently becoming `nil`.
 | | `vector-ref` | 2 | index |
 | | `vector-length` | 1 | length |
 | | `vector-assoc` | 3 | a fresh vector with index `i` (in `[0, len)`) replaced — the vector counterpart of `%map-assoc`; the polymorphic `assoc`/`update` are Brood over it |
+| | `vector-concat` | 2 | a fresh vector of `v`'s elements followed by those of `xs` (a vector, list, range, set or nil), one allocation — the kernel op behind `conj` on a vector and `into` onto one, which built the result as a list twice and re-vectorised it (7.7 µs for four items, 2026-09-21) |
 | | `subvec` | 2–3 | a fresh vector slice `[start, end)`; `end` defaults to the length — the vector-preserving counterpart of the list-returning `take`/`drop`; `remove-nth` is Brood over it |
 | **Ordering** | `compare` | 2 | `(compare a b)` → `-1`/`0`/`1` by the structural total order (numbers numerically; strings/keywords/symbols by text; vectors/lists lexicographically; cross-kind by stable tag rank). The binary form of `sort`'s order — `sort-by` and custom comparators build on it |
 | **Map** (immutable; data type) | `hash-map` | n | construct a map from `k v k v …` args (the `{ }` literal's programmatic form); last-wins on dup keys |
