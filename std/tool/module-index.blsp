@@ -1,0 +1,178 @@
+;; std/tool/module-index.blsp
+
+(defmodule module-index
+  "The project's file → modules index (ADR-380): which `(defmodule NAME …)` forms each
+source file declares, cached on disk at `.brood/module-index` and keyed per file by size
+and mtime, so a warm start reads NO source file to learn the module graph.
+
+Before this, every `nest` invocation re-parsed every source file — whole, every form built
+as a value — to find its `defmodule` header, and did so twice (package rooting and the
+package-identity map). At 180 lines a file that was 80 µs and invisible; at 3 000 lines it
+was 3 ms a file and the entire warm start of a 1 000-file project (3.0 s, measured 2026-09-21,
+`docs/large-project-scaling.md`). The contract of a warm run is O(what it reaches); a
+module graph that costs O(source bytes) broke it.
+
+The index is a fact about source TEXT — which forms are module headers — so it is keyed by
+its own format version, never by the binary: a rebuild does not invalidate it (unlike the
+startup image, whose bindings are binary-specific). A changed file re-indexes itself alone.
+One index per project root holds the project's own files and its dependencies' (both are
+absolute paths). Best-effort on disk: a read-only tree costs a parse, never a wrong answer.")
+
+;; Where a project's index lives, under the same `.brood/` the startup image uses (gitignored
+;; by the scaffold).
+(def *index-file* ".brood/module-index")
+
+;; The on-disk format: bump when the entry shape changes; an older file is simply ignored and
+;; rebuilt. Line 1 is `(brood-module-index VERSION)`, then one `("path" size mtime (mods…))`
+;; per file.
+(def *index-version* 1)
+
+;; The in-process view of each root's index: `root -> {path -> [size mtime modules]}`. A
+;; root's map is read from disk the first time that root is asked about and written back
+;; whenever a query parsed anything. A cache and nothing more — every answer is
+;; stat-validated, so a lost update between two processes (or two green processes of one
+;; tooling image) costs a re-parse, never a stale module list. Keyed by root so a tooling
+;; image serving two projects (or a test suite driving several roots at once) never
+;; thrashes one memo between them.
+(def- *indexes* {})
+;; What the most recent query did — `{:files n :hits h :parsed p}` — for the trace line and
+;; for the tests that gate "a warm run parses nothing".
+(def- *last-scan* {:files 0 :hits 0 :parsed 0})
+
+(defn index-path (root)
+  "Where the module index of the project at `root` lives; nil for a nil root (no persistence).
+
+    (module-index/index-path \"/proj\")   → \"/proj/.brood/module-index\"
+    (module-index/index-path nil)   → nil"
+  (when root (path/join root *index-file*)))
+(sig index-path ((or string nil) -> (or string nil)))
+
+;; Every `(defmodule NAME …)` a file declares, in source order, as symbols; nil when the file
+;; cannot be read or parsed — the file is then treated as declaring nothing and the load
+;; surfaces the real error, which is `project-file-feature`'s tolerance too.
+(defn- scan-file (file)
+  ;; check-allow :discarded-catch — a file that does not read or parse declares nothing; the load reports the real error
+  (check-allow :discarded-catch
+    (try
+      (map (seq/filter (reflect/read-all (file/slurp file))
+             (fn (form) (and (pair? form) (= (first form) 'defmodule) (symbol? (second form)))))
+        second)
+      (catch _ nil))))
+
+;; The index file as the memo map, or `{}` when absent, unreadable, corrupt or of another
+;; version — every one of those is "start empty", and the next write repairs it.
+(defn- read-index (path)
+  ;; check-allow :discarded-catch — a missing or corrupt index is an empty one
+  (check-allow :discarded-catch
+    (try
+      (let (forms (reflect/read-all (file/slurp path)))
+        (if (= (first forms) (list 'brood-module-index *index-version*))
+          (fold (rest forms)
+            {}
+            (fn (m e)
+              (if (and (pair? e) (string? (first e)) (int? (nth e 1)) (int? (nth e 2)))
+                (assoc m (first e) [(nth e 1) (nth e 2) (nth e 3)])
+                m)))
+          {}))
+      (catch _ {}))))
+
+;; One line per entry, sorted by path so the file is stable and diffable. Entries whose file
+;; is gone are dropped here — a write happens only after a parse, so this stat per entry is
+;; paid on a run that already read source, never on a warm one.
+(defn- index-text (entries)
+  (str (pr-str (list 'brood-module-index *index-version*))
+    "\n"
+    (string/join (map (seq/filter (sort (keys entries)) file/exists?)
+                   (fn (f)
+                     (let (e (get entries f))
+                       (pr-str (list f (get e 0) (get e 1) (get e 2))))))
+      "\n")
+    "\n"))
+
+;; ATOMIC and best-effort: a sibling temp file renamed over the target, so a reader never sees
+;; a half-written index and two concurrent writers (an LSP beside a `nest test`) each leave a
+;; whole one — last rename wins, both are valid. A failure (read-only tree, full disk) is
+;; swallowed: the cost is a parse next time, not a wrong answer.
+(defn- write-index! (root entries)
+  (let (path (index-path root))
+    (when path
+      ;; check-allow :discarded-catch — a best-effort cache write: a read-only tree costs a parse next run
+      (check-allow :discarded-catch
+        (try
+          (let (dir (path/dirname path)
+                tmp (str path "." (os/now-ns) ".tmp"))
+            (when (not (file/dir? dir)) (file/mkdir dir))
+            (file/spit tmp (index-text entries))
+            (file/rename tmp path)
+            true)
+          (catch _ nil))))))
+
+;; `root`'s memo, read from disk the first time this process asks about that root. A nil root
+;; has no file and starts empty every time.
+(defn- entries-of (root)
+  (or (get *indexes* root)
+    (let (e (let (p (index-path root)) (if p (read-index p) {})))
+      (def *indexes* (assoc *indexes* root e))
+      e)))
+
+(defn index-files (root files)
+  "The modules each of `files` declares — a map `file -> (list of module symbols)`, every
+key present (a file with no `defmodule` maps to nil). Served from `root`'s module index for
+every file whose size and mtime still match its entry; the rest are parsed, recorded, and
+the index rewritten. `root` nil keeps the memo in this process and writes nothing. A file that
+no longer exists maps to nil and is neither counted nor recorded. `(module-index/last-scan)`
+says how many took each path.
+
+    (module-index/index-files nil (list \"/no/such/file.blsp\"))   → {\"/no/such/file.blsp\" nil}"
+  (let (r (fold files
+            [{} (entries-of root) 0 0]
+            (fn (acc file)
+              (let ([result entries hits parsed] acc
+                    st (file/stat file))
+                (if (nil? st)
+                  ;; No such file: nothing to key on — answer nil and record nothing (the
+                  ;; caller's listing said it existed a moment ago; the load reports the rest).
+                  [(assoc result file nil) entries hits parsed]
+                  (let (size (get st :size)
+                        mtime (get st :mtime)
+                        e (get entries file))
+                    (if (and e (= (get e 0) size) (= (get e 1) mtime))
+                      [(assoc result file (get e 2)) entries (+ hits 1) parsed]
+                      (let (mods (scan-file file))
+                        [(assoc result file mods)
+                          (assoc entries file [size mtime mods])
+                          hits
+                          (+ parsed 1)])))))))
+        [result entries hits parsed] r)
+    (def *last-scan* {:files (count files) :hits hits :parsed parsed})
+    (when (os/env "BROOD_IMAGE_TRACE")
+      (io/puts (str "[index] "
+                 (count files)
+                 " files: "
+                 hits
+                 " from the module index, "
+                 parsed
+                 " parsed")
+        :to *err*))
+    (when (> parsed 0)
+      (def *indexes* (assoc *indexes* root entries))
+      (write-index! root entries))
+    result))
+(sig index-files ((or string nil) (list string) -> (map string (or (list symbol) nil))))
+
+(defn modules-of (root file)
+  "Every `(defmodule NAME …)` the source file declares, in source order, as symbols — from
+`root`'s module index when current, parsed and recorded otherwise. nil for a file that
+declares none or cannot be read.
+
+    (module-index/modules-of nil \"/no/such/file.blsp\")   → nil"
+  (get (index-files root (list file)) file))
+(sig modules-of ((or string nil) string -> (or (list symbol) nil)))
+
+(defn last-scan ()
+  "What the most recent `index-files` did: `{:files n :hits h :parsed p}` — `:hits` answered
+from the index, `:parsed` read from source. A warm run of an unchanged project reads
+`:parsed 0`; that is the gate `crates/nest/tests/module_index.rs` holds.
+
+    (sort (keys (module-index/last-scan)))   → (:files :hits :parsed)"
+  *last-scan*)

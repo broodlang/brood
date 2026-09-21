@@ -24479,3 +24479,73 @@ correct at any size, and the same picture: the physics demo and pong dump the sa
 under `BROOD_GUI_GPU=0`. The strip diff has a band for them (the bounding box, whatever the
 angle), so a moving quad repaints its old rows too. `b2d/run` prints one line when the
 runtime has no `:gui-gpu` feature, which is how this will be noticed next time.
+
+## ADR-380 — The module index is a per-file cache on disk, keyed by size and mtime, never by the binary
+
+**Status:** accepted (2026-09-21). Item 1 of `docs/large-project-scaling.md`'s queue.
+
+**Context.** Every `nest` invocation learned the project's module graph — which file declares
+which `(defmodule …)` — by reading every source file whole (`reflect/read-all` of
+`file/slurp`, every form built as a value) and filtering for module headers, and did so
+twice: `package/module-files` for package rooting (ADR-070) and `package-provided-modules`
+for the package-identity map (ADR-172); a cold load added a third pass (`project-file-feature`,
+per file loaded). At the calibrated shape (16 300 files × 180 lines) this was 80 µs a file and
+invisible inside a 1.3 s warm start. At 1 000 files × 3 000 lines it was 3 ms a file and **the
+entire warm start**: `nest run` 3.0 s, of which the image install and the entry's two modules
+were a rounding error; `strace` counted 2 000 `openat` of `src/mod*.blsp`, and `perf` put the
+time in the reader. The contract of a warm run is O(what the entry reaches); a module graph
+costing O(source bytes) broke it, and it would have been five minutes at 100k files.
+
+**Decision.** A new CORE tool module, `std/tool/module-index.blsp`, owns the file → modules
+question. It keeps one index per project root at `.brood/module-index` (beside the startup
+image, in the directory the scaffold already gitignores): a version line, then one
+`("path" size mtime (modules…))` per file, sorted by path, written atomically (sibling temp
+file + `file/rename`, the image's own discipline) and best-effort (a read-only tree costs a
+parse, never a wrong answer). A query (`index-files root files`) stats each file once and
+answers from the entry when size and mtime both match; the rest are parsed, recorded, and
+the index rewritten. `package` and `project` read the graph through it; nothing else parses
+a file for its header any more.
+
+Three choices worth recording:
+
+1. **Keyed per file, not per project.** The startup image is keyed by one fingerprint over
+   every file, because its contents are one interdependent snapshot of bindings — an edit
+   anywhere invalidates the whole. The module index is a set of independent facts, one per
+   file, so a changed file re-indexes itself alone and the other 999 stay served. This is
+   what every build tool does with its module graph, and it is the difference between
+   "warm after any edit" and "warm only when nothing changed".
+2. **Not keyed by the binary.** The index records a fact about source TEXT — which forms are
+   module headers — and the reader's answer to that does not change with a rebuild, so a
+   `system/build-id` in the key would only make the first run after every rebuild a full
+   re-parse for no soundness gain (the image needs the build id because its bindings are
+   binary-specific). A format version guards the shape of the file instead; an older or
+   corrupt file is ignored and rebuilt.
+3. **A separate file, not a section of the image** — although the scaling doc's first sketch
+   said "in the project image". The image's own fingerprint needs the dependency files, which
+   come from `*module-files*`, which the index produces: the index has to exist before the
+   image's key can be computed, and it has to work on every run the image misses. The two
+   artifacts have different keys and different lifetimes; sharing a file would have tied the
+   cheaper one to the more fragile one's invalidation.
+
+What it does NOT do: `project-file-has-tests?` (`nest test`'s co-located-test scan, ADR-225)
+still reads every source file — a whole-project command, so O(project) is its contract
+anyway, but the same entry could carry a `tests?` flag if that ever matters.
+
+**Consequences.** Measured on the 1 000 × 3k rig, release-fast `nest`, same tree, the
+2026-09-21 09:37 build against this change (`docs/large-project-scaling.md` has the table):
+warm `nest run` **3.0 s → 0.15 s**, peak RSS 282 → 145 MB; warm `--no-check` 2.99 → 0.12 s;
+source files opened on a warm run **2 000 → 0**; the cold run 45.8 → 39.2 s, since the two
+extra passes are gone from that path too. A rename or a same-size edit within the same
+millisecond as the previous index write would be served stale — the mtime resolution is the
+same exposure the image fingerprint already accepts, and any later edit repairs it.
+
+**Gates.** `crates/nest/tests/module_index.rs` runs a generated project twice under
+`BROOD_IMAGE_TRACE=1` and requires the second run's `[index] … P parsed` to read 0 for every
+query (and an edited project to read exactly the edited count); `tests/module_index_test.blsp`
+pins the answers (a renamed module is what a re-parse reports, a corrupt or foreign-version
+file is ignored, a nil root persists nothing, the on-disk file is what another process would
+read). Both were sabotage-verified in both directions — the comparison forced true reds the
+edit cases, forced false reds the warm case. The trace line is a print of a count the code
+keeps regardless (KI-171). `scripts/bench/image-scale.sh` gained `FNS=` (the 3k-line shape)
+and two warm columns, and its stale ADR-325 names were fixed.
+

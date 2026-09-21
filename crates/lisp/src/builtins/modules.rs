@@ -313,6 +313,9 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // The project tool, split by concern (all CORE: a released bundle boots through
     // `project-release/run-bundle`, and `nest run --check-boot` through `project-run`).
     embedded_module!("project", "std/tool/project.blsp"),
+    // The file → modules index `project`/`package` read the module graph from (ADR-380):
+    // a warm start learns which file declares which module without opening a source file.
+    embedded_module!("module-index", "std/tool/module-index.blsp"),
     embedded_module!("project-image", "std/tool/project-image.blsp"),
     embedded_module!("project-check", "std/tool/project-check.blsp"),
     embedded_module!("project-run", "std/tool/project-run.blsp"),

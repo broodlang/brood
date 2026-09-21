@@ -316,7 +316,8 @@ std/                     standard library written in Brood, grouped (ADR-085):
                          grammar, mcp, observer, proctree, nest, repl, scaffold, sexp,
                          reload, renames, stdimage, audit, codemod, workspace, and the
                          project tool split by concern: project (the model), project-image,
-                         project-check, project-run, project-release) — grouping
+                         module-index (the file → modules index, ADR-380), project-check,
+                         project-run, project-release) — grouping
                          on disk is by what a module is FOR, not by feature gate: `dev`,
                          `docsite` and `doc-catalog` are CORE modules that live under
                          `tool/` because they are tooling. `std/editor/*` is the one

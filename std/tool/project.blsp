@@ -541,10 +541,11 @@ only; `tests/` files come from `project-collect-tests`."
     project-file-has-tests?))
 
 ;; The feature a source file provides — the name of its top-level `(defmodule NAME …)`
-;; as a string, or nil when it declares none. Parses the file read-only (never
-;; evaluates it), so the loader can tell whether a file is already loaded (its module
-;; on `*features*`) without running it. A parse error yields nil → the file is loaded,
-;; and the load surfaces the real error.
+;; as a string, or nil when it declares none. Read from the project's module index
+;; (ADR-380) — which `setup`'s rooting scan has just brought current, so this is a lookup,
+;; not a second parse of every file the walk loads — and never evaluated, so the loader can
+;; tell whether a file is already loaded (its module on `*features*`) without running it. A
+;; parse error yields nil → the file is loaded, and the load surfaces the real error.
 (defn- project-file-feature (path)
   ;; ROOTED (ADR-070): the key `defmodule` will `provide` is the rooted name when the
   ;; project is rooted (`(defmodule interactive)` in project `bedit` provides
@@ -554,16 +555,8 @@ only; `tests/` files come from `project-collect-tests`."
   ;; any registry it builds by rebinding a global (`(def *commands* (assoc *commands* …))`
   ;; starts over, silently emptying it). `%root-module-name` is a no-op for a nameless
   ;; project, so the short name is still the answer there.
-  ;; check-allow :discarded-catch — a best-effort cache, manifest or git read/write: absence is the answer
-  (check-allow :discarded-catch
-    (try
-      (fold (reflect/read-all (file/slurp path))
-        nil
-        (fn (acc f)
-          (if (and (nil? acc) (pair? f) (= (first f) 'defmodule) (symbol? (second f)))
-            (->string (%root-module-name (second f)))
-            acc)))
-      (catch e nil))))
+  (let (m (first (module-index/modules-of *project-root* path)))
+    (when m (->string (%root-module-name m)))))
 
 ;; Whether to (re-)load a source file that provides feature `feat`, given the
 ;; `*features*` snapshot `before` taken at the start of this walk:

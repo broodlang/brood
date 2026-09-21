@@ -298,6 +298,9 @@ before working in any Rust component:
 - **Owns:** `project` — the `project.blsp` manifest and its dependencies, `find-root`,
   source/test discovery, `setup`, the user config (`~/.config/brood/config.blsp`);
   `project-image` — the project startup image (fingerprint, write, materialise);
+  `module-index` — the file → modules index (`.brood/module-index`, keyed per file by size
+  and mtime, ADR-380) that `package`'s rooting and `project`'s loader read the module graph
+  from, so a warm start opens no source file to learn which file declares which module;
   `project-check` — the `nest check` driver, its result cache, the whole-project lints
   and the `--fix-renames` / `--suggest-sigs` aids; `project-run` — `run-tests` (with
   `--failed`, `--stale`, coverage), `run` and `check-boot`; `project-release` — bundle

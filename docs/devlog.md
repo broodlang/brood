@@ -940,6 +940,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-20** — **KI-170**, the third mechanism behind the KI-119/KI-120 end state (`[refer] (:use set) imported NOTHING`, `unbound symbol: set` in a spawned child, `sexp`/`sse` alike, one loaded suite run): a module file reached by a DIRECT `reflect/load` — every test file the runner loads, every `load` from a tool — had `defmodule` `provide` its key at the top of the file and then ran in neither the ADR-344 staging frame nor the ADR-339 journal, so a concurrent `%isolate` snapshot between the provide and the definitions kept the provide and the restore lost the defs, and `require-one` short-circuits on `*features*`, so the one path that could repair it declines to. `require-one` was hardened three times against this window; the direct load kept "the immediate provide it always had" each time, documented as harmless because no *requirer* raced it — the racer was the isolate. `load` now wraps a `defmodule` file in the frame `require-one` uses: one publish, journalled; a plain script is untouched. Guard `crates/cli/tests/load_provide_window.rs` (a 700 ms gap between provide and def, an isolate across it, a `require-one` control in the same test), sabotage-verified: `features=true bound=false` with the frame removed. Every load/module/isolate file green, the `nest test` scoped runner green on four files, clippy clean.
 - **2026-09-20** — KI-174 diagnosed in parallel with the fix that landed (`d7600bea`): twelve clean local runs; the first hypothesis (ADR-372's relower nulling a shared arm's code under peers' mirrors) was implemented and dropped — a stale mirror and a stale entry AGREE on the old code, so that shape can never answer `None`; bumping the epoch counter inside `jit_dispatch_fast_frame` reproduced CI's message byte for byte on the first run, which is the construction that named the TOCTOU. The landed fix (compare at the mirror's epoch, against the fat entry, with two deterministic unit tests) supersedes the one written here (hand `fl.epoch` down), which was dropped in the merge. Also answered in-session: the `reduce` benchmark row is 4 ms against Elixir's 31 ms because `%range-reduce` resolves the prelude `+` to a raw `i64` loop with no callback (5 ms at `BROOD_TIER=1` too — Rust, not the JIT); the row's C port documents that as the row's contract. What it hides: a reducer that must be CALLED costs ~33 ns/element (`defn` reducer 165 ms, 5.5× the BEAM), and `reduce` with a literal lambda is 130–139 ms where `fold` with the same lambda is 32 ms — ADR-360's fusion sees `fold` and not `reduce`, whose `& more` hides the literal. Both recorded for the owner's call.
 - **2026-09-21** — "processes must be super cheap to spin up, hold and kill": measured first (200k processes, release): spawn+exit **1.66 µs** issue / 2.06 µs to dead, hold **4.4–4.6 KB RSS** per parked process, kill 0.7 µs unmonitored — and **1.2 ms MONITORED** (KI-176: every death walked the whole monitor table; a watcher-side index makes it 1.27 µs). Then a ~180 B/killed-process "leak" that was the default crash reporter's mailbox (KI-177: `:exit-abnormal` filtered only `:normal`, so every supervisor kill fed the reporter a message it discarded at 14 µs each and it fell behind without bound; the kernel now filters the reporter's own non-crash table). On the way: `main` was red twice — `d7600bea`'s strengthened mirror cross-check fired on a BAILED arm's mirror (`type_mixed_join_edges_stay_exact`, deterministic) and on a peer's earlier `(code, nslots)` snapshot of a swapped shared arm (twice per full suite) — both by-design states, both now tolerated by construction (a demoted entry; a debug ledger of every published pair), and twenty new public names were uncatalogued. Then the hold floor by histogram: every block of a parked process NAMED (`runtime-frontier.md` §B, refreshed) — and the first name was a two-month regression: `spawn` allocated a 328 B `ColdHeap` on every child to record an EMPTY package context (`spawn-live` peak RSS 1.73 → 1.62 GB, −6.6%, from a three-line guard), now ratcheted by `process_floor.rs`. Then the two structural items the histogram named: the four per-process maps became `SmallMap`s (one entry costs one entry, not hashbrown's four buckets — −388 B) and the root stack grows by four below sixteen slots (a parked receive's transient ninth root no longer doubles it — −96 B). **Parked process 4 690 → 3 868 B counted (−17.5%), `spawn-live` peak 1.73 → 1.52 GB**, every row within its floor (instructions flat on the two that read a few percent of wall). Still to do on this thread: spawn (1.66 µs vs ~1), the `Process` struct's 168 B of growth since July, and the reporter's own 14 µs/message. Then the day's last question — 100k files × 3k lines — measured on a 1 000 × 3k rig and written up in `docs/large-project-scaling.md`: warm `nest run` 3.0 s is O(source bytes) (the module index `read-all`s every file, twice — 2 000 opens on a warm run), whole-project `nest check` 161 s / 3.8 GB on one thread; running is fine at any size, the whole-project check is not; six-item queue, the module-index cache first.
+- **2026-09-21** — large-project scaling, item 1 (ADR-380): the module graph is a per-file cache on disk. A warm `nest run` re-parsed every source file WHOLE to find its `defmodule` header — twice (rooting, package identity), three times cold — which at 3 000-line files was the entire warm start (3.0 s at 1 000 files, 2 000 `openat`, the reader in `perf`). `std/tool/module-index.blsp` keeps `.brood/module-index` (one `("path" size mtime (mods))` line per file, atomic write, format-versioned, NOT build-id-keyed — it is a fact about source text) and `package`/`project` read the graph through it. Same rig, release: **warm run 3.0 → 0.15 s**, RSS 282 → 145 MB, source opens 2 000 → 0, cold 45.8 → 39.2 s. Gates: `nest::module_index` (the `[index] … 0 parsed` trace on a second run; an edit re-parses exactly its files) and `tests/module_index_test.blsp` (the answers), both sabotage-verified both ways. Found on the way: `scripts/bench/image-scale.sh` had driven ADR-325's OLD names for a month — fixed, plus `FNS=` for the 3k shape and warm columns. Next in the queue: incremental `nest check`.
 
 ---
 
@@ -15263,3 +15264,37 @@ months is that no gate read the per-process figure, so `process_floor.rs` now do
 ratchet with a margin sized to see a 328 B step (a first bound of 4 600 let the sabotage
 through; 4 300 catches it). The tree-walker cannot be ratcheted — its `spawn` copies the
 whole env frame, O(n) per process against a growing accumulator — and is skipped by name.
+
+## 2026-09-21 (3) — large-project scaling, item 1: the module graph stops costing O(source bytes)
+
+The morning's measurement said a warm `nest run` on 1 000 files × 3 000 lines took 3.0 s,
+and that the time was the READER: two scans of every source file — whole, every form built —
+to find each file's `(defmodule …)`. The fix is the one the doc asked for, done the way the
+doc did not quite say: a per-file cache, not a section of the image (ADR-380 records why —
+the image's own key needs the module graph first, and the two have different lifetimes).
+`std/tool/module-index.blsp` is 170 lines of Brood; `package.blsp` lost its own scanner and
+`project-file-feature` became a lookup.
+
+The numbers, release-fast `nest`, the 09:37 build of this tree against the change:
+
+| | before | after |
+|---|---|---|
+| warm `nest run` | 3.0–3.16 s / 282 MB | **0.15 s / 145 MB** |
+| warm `nest run --no-check` | 2.99 s / 275 MB | 0.12 s / 120 MB |
+| `src/` files opened on a warm run | 2 000 | **0** |
+| cold `nest run` | 45.8 s | 39.2 s |
+
+Two things learned while gating it. First, the sabotage of "entry always trusted" did NOT
+fail the run I expected it to: a module renamed away from its filename still resolved,
+because a cold load evaluates every file and `require` early-returns on `*features*` — the
+registry the index feeds is load-bearing for collision detection and package identity, not
+for whether a cold run finds its modules. The gate holds through the parse COUNT (and the
+unit test through the answered NAMES), and the test's comment says so instead of claiming a
+failure mode it does not have. Second, `scripts/bench/image-scale.sh` — the row the queue's
+item 6 wanted this shape added to — had been calling `project/project-setup` and
+`project/project-load-sources` since ADR-325 renamed them, with nothing running it; the first
+row it printed today was `0.00 / 0` for every column, because a relative `BROOD=` broke
+under its `cd` as well. Both fixed; it now takes `FNS=` and prints `warm all` (materialise
+everything: the `nest test` start) and `warm lazy` (image install only: the `nest run` start)
+beside the cold columns.
+

@@ -1,7 +1,8 @@
 # Large-project scaling — 100k files × 3k lines: what was measured, what it means, what to do
 
-**Status: OPEN — measured 2026-09-21, nothing fixed yet.** The queue is at the end, in order.
-Reproduce every number here with the generator before believing any of them changed.
+**Status: OPEN — measured 2026-09-21; item 1 (Finding 1) FIXED the same day, ADR-380.** The
+queue is at the end, in order. Reproduce every number here with the generator before
+believing any of them changed.
 
 ## The question
 
@@ -61,7 +62,37 @@ So: **reasonable for running, at any size; not reasonable for `nest check` / `ne
 the LSP over the whole thing at 100k × 3k.** The 100k × 180-line shape (the calibrated one
 ×6) is fine today on every row but the whole-project check's memory.
 
-## Finding 1 — the warm run reads every source file, twice
+## Finding 1 — the warm run reads every source file, twice — FIXED (ADR-380)
+
+**After the fix, same rig, release-fast `nest`, the 09:37 build of the tree against it:**
+
+| | before | after |
+|---|---|---|
+| warm `nest run` | 3.0–3.16 s / 282 MB | **0.15 s / 145 MB** |
+| warm `nest run --no-check` | 2.99 s / 275 MB | 0.12 s / 120 MB |
+| `src/mod*.blsp` opened on a warm run (`strace`) | 2 000 | **0** |
+| cold `nest run` | 45.8 s / 3.2 GB | 39.2 s / 3.3 GB |
+
+The warm start is O(files) now — one `stat` per file plus a 152 KB index read — not O(bytes),
+and both gates named below hold. `FNS=340 scripts/bench/image-scale.sh 250 500 1000` (release
+`brood`, the loader alone, same day) shows the shape across N — `warm lazy` is the `nest run`
+start (image install, nothing materialised), `warm all` the `nest test`/`nest check` start
+(everything materialised, O(project) by design):
+
+| N (× 3k lines) | load only | load + image write | image | warm all | warm lazy |
+|---|---|---|---|---|---|
+| 250 | 6.8 s / 707 MB | 9.7 s / 822 MB | 37 MB | 0.86 s / 477 MB | **0.07 s / 126 MB** |
+| 500 | 14.4 s / 1 226 MB | 19.4 s / 1 400 MB | 74 MB | 1.75 s / 797 MB | **0.09 s / 132 MB** |
+| 1 000 | 27.6 s / 2 286 MB | 55.1 s / 2 803 MB | 149 MB | 4.23 s / 1 471 MB | **0.14 s / 134 MB** |
+
+One reading in that table to attribute before believing: at N=1000 the image WRITE costs
+27 s under `brood` (55.1 − 27.6) where `nest run`'s cold build on the same tree reported
+`+4.2s image` minutes earlier — reproduced twice under the script. Not this item's; it is a
+cold-path (Finding 3) question.
+
+The rest of this section is the finding as measured, kept because it is the shape to
+recognise if a scan over every file is ever added to the warm path again.
+
 
 `strace` on a warm `nest run --no-check`: **2 000 `openat` of `src/mod*.blsp` for 1 000
 files**, and `perf` puts the 3.0 s in the READER (`Parser::read_seq`, `Scanner`, `FormPos`
@@ -78,19 +109,23 @@ At 180 lines a file this was 80 µs/file and invisible inside ADR-218's 1.3 s. A
 it is 3 ms/file and the whole warm start. Both are O(total source bytes) on a path whose
 contract is O(closure).
 
-**The fix (the right one, not the fast one):** cache the file → modules index in the project
-image, keyed by the `(path, size, mtime)` fingerprint `project-fingerprint-of` ALREADY
-computes for every file on every run. A warm start then reads zero source files; a changed
-file re-indexes itself alone. This is what every build tool does with its module graph. A
-`%read-first`/header-only scan would cut the constant (the reader still has to find form
-boundaries) but leaves the shape O(bytes); do the cache. `project-image.blsp` owns the image
-and the fingerprint; the index belongs beside the section directory.
+**The fix (the right one, not the fast one):** cache the file → modules index, keyed per file
+by the `(path, size, mtime)` the fingerprint already stats. A warm start then reads zero
+source files; a changed file re-indexes itself alone. This is what every build tool does
+with its module graph. A `%read-first`/header-only scan would cut the constant (the reader
+still has to find form boundaries) but leaves the shape O(bytes); do the cache. **Done as
+ADR-380** — `std/tool/module-index.blsp`, a separate `.brood/module-index` beside the image
+rather than a section of it, because the image's own fingerprint needs the dependency file
+list the index produces, and because the two have different keys (per file vs whole
+project) and different lifetimes (a fact about source text vs binary-specific bindings).
 
-Verify: the `strace` count above must read **0** on a warm run (the gate: a Rust test in
-`crates/nest/tests/` that generates a small project with `--fns 340`, runs twice, and asserts
-the second run's `openat` set contains no `src/` file — `strace` is not on CI, so count opens
-through `BROOD_IMAGE_TRACE` or a `%file-reads` counter instead), and the warm run on the
-3k-line rig must fall to the 16k-file figure (~1.3 s), i.e. independent of file size.
+Verified: the `strace` count reads **0** on a warm run, and the gate is
+`crates/nest/tests/module_index.rs` — a generated project run twice under
+`BROOD_IMAGE_TRACE=1`, asserting every `[index] N files: H from the module index, P parsed`
+line of the second run has `P == 0` (and an edited project re-parses exactly the edited
+files). The count is kept whether or not the trace prints it (KI-171). The warm run fell
+from 3.0 s to 0.15 s — below the 16k-file figure, as it should: O(files), independent of
+file size.
 
 ## Finding 2 — `nest check` is single-threaded and whole-project-resident
 
@@ -123,13 +158,16 @@ three — it is paid once — but at 300M lines an hour becomes five minutes on 
 
 ## The queue
 
-1. **Module-index cache in the project image** (Finding 1). Warm start O(closure). Gate: zero
-   source opens on a warm run; 3k-line rig warm ≈ 1.3 s.
+1. ~~**Module-index cache** (Finding 1)~~ — **DONE 2026-09-21, ADR-380.** Warm start O(files);
+   zero source opens on a warm run; the 3k-line rig warm-runs in 0.15 s.
 2. **`nest check` incremental** (Finding 2, option 1). Gate: unchanged project re-checks in
    ≤ 2× its fingerprint time; one edited file re-derives its dependents only (count the walks
    under `BROOD_DERIVE_DBG=1`).
 3. **`nest check` parallel walk** (Finding 2, option 2). Gate: user/wall ≥ 6 on 12 cores.
 4. **Check memory** (Finding 2, option 3). Gate: peak RSS at 1 000 × 3k under 1 GB.
 5. **Parallel cold load** (Finding 3). Last; paid once.
-6. Add the 3k-line shape to `scripts/bench/image-scale.sh` so the constants above are a row
-   somebody runs, not a doc somebody reads.
+6. ~~Add the 3k-line shape to `scripts/bench/image-scale.sh`~~ — **DONE 2026-09-21**:
+   `FNS=340 scripts/bench/image-scale.sh 250 500 1000`, with `warm all` (materialise
+   everything — the `nest test` start) and `warm lazy` (image install only — the `nest run`
+   start) columns. The script had driven ADR-325's OLD function names for a month with
+   nothing running it; fixed with the row.

@@ -12,29 +12,41 @@ sysctl that moves under you — that file's last section has the one-line check)
 questions are answerable here; check that file's "what this box CAN answer" before deferring
 anything.
 
-## 2026-09-21 — NEXT: large-project scaling (100k files × 3k lines) — read `large-project-scaling.md`
+## 2026-09-21 — NEXT: large-project scaling, items 2–6 — read `large-project-scaling.md`
 
-**The question asked, measured, and queued.** `docs/large-project-scaling.md` has the rig,
-the numbers and the plan; this is the summary so the next session can start on item 1 cold.
+**Item 1 is DONE (ADR-380, this session): the module graph is a per-file cache.** A warm
+`nest run` re-parsed every source file whole to find its `defmodule` header — twice — and at
+3k-line files that was the whole warm start. `std/tool/module-index.blsp` keeps
+`.brood/module-index` (one `("path" size mtime (mods))` per file; atomic; format-versioned;
+NOT keyed by the binary) and `package`/`project` read the graph through it. On the 1 000 ×
+3k rig (release): **warm run 3.0 → 0.15 s**, RSS 282 → 145 MB, `src/` opens 2 000 → 0, cold
+45.8 → 39.2 s. Gates: `crates/nest/tests/module_index.rs` (the `[index] … 0 parsed` trace on
+a second run under `BROOD_IMAGE_TRACE=1`) and `tests/module_index_test.blsp`, both
+sabotage-verified both ways. If a warm run ever reads source again, the trace line names
+how many files and the unit test names which answers moved.
 
-Measured on 1 000 files × 3 067 lines (3.07M lines, `scripts/bench/gen-project.py 1000 DIR
---fns 340`): cold `nest run` 39 s / 3.3 GB; **warm `nest run` 3.0 s** — O(source bytes),
-because the module index re-parses every file twice (`package-module-names-of`,
-`project-file-module`: `read-all` of the whole file to find its `defmodule`; 2 000 opens for
-1 000 files on a warm run, `perf` puts the time in the reader); **whole-project `nest check`
-161 s / 3.8 GB, one thread of twelve**; unchanged re-check 16 s. Extrapolated ×100: running
-is fine (closure-scoped), whole-project check is ~4.4 h and ~380 GB — not reasonable.
+**Measured on 1 000 files × 3 067 lines** (3.07M lines, `scripts/bench/gen-project.py 1000 DIR
+--fns 340`): cold `nest run` 39 s / 3.3 GB, one thread; **whole-project `nest check` 161 s /
+3.8 GB, one thread of twelve**; unchanged re-check 16 s (the ADR-129 cache re-verifies
+everything). Extrapolated ×100: running is fine (closure-scoped, and now O(files) at warm
+start rather than O(bytes)); whole-project check is ~4.4 h and ~380 GB — not reasonable.
 
 **The queue, in order (details and gates in the doc):**
-1. Module-index cache in the project image, keyed by the `(path, size, mtime)` fingerprint
-   `project-fingerprint-of` already computes — warm start O(closure). Gate: zero `src/`
-   opens on a warm run; the 3k-line rig warm ≈ the 16k-file figure (1.3 s).
+1. ~~Module-index cache~~ — done, above.
 2. `nest check` incremental for real (ADR-129 finished): unchanged re-check ≈ fingerprint
-   time; an edit re-derives changed files + dependents only (ADR-119 edges).
-3. `nest check` parallel per-file walk after the Pass 2.9 fixpoint.
-4. Check memory: drop forms after the walk / shard.
+   time; an edit re-derives changed files + dependents only (ADR-119 edges). Gate: count the
+   walks under `BROOD_DERIVE_DBG=1`.
+3. `nest check` parallel per-file walk after the Pass 2.9 fixpoint. Gate: user/wall ≥ 6.
+4. Check memory: drop forms after the walk / shard. Gate: peak RSS at 1 000 × 3k under 1 GB.
 5. Parallel cold load (paid once; last).
-6. The 3k-line shape as a row in `scripts/bench/image-scale.sh`.
+6. ~~The 3k-line shape as a row in `scripts/bench/image-scale.sh`~~ — done: `FNS=340
+   scripts/bench/image-scale.sh 250 500 1000`, with `warm all` / `warm lazy` columns. The
+   script had been calling ADR-325's OLD names for a month with nothing running it, and a
+   relative `BROOD=` silently produced `0.00 / 0` rows; both fixed. **One reading to attribute
+   before believing (reproduced twice):** its `load+write` at N=1000 reads 55 s against 28 s
+   load-only — a 27 s image write under `brood`'s `load-sources-cached` — where `nest run`'s
+   cold build reported `+4.2s image` on the same tree minutes earlier. A Finding 3 (cold
+   path) question, not a warm-start one.
 
 Also from 2026-09-21, done and pushed: KI-174 ×2 (mirror check), KI-176 (monitor table
 walk), KI-177 (crash reporter backlog), the parked-process floor 4 690 → 3 868 B (ColdHeap on
