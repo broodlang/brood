@@ -54,6 +54,62 @@ every spawn, SmallMap, roots step), `process_floor.rs` ratchet, `monitor_scaling
 Process thread still open: spawn 1.66 µs vs the BEAM's ~1, the `Process` struct's +168 B
 since July, the crash reporter's 14 µs/message.
 
+## 2026-09-21 — the physics engine's session: ADR-378, the software painter, and what a game frame pays
+
+**What landed (brood).** Four commits, all pushed, all on `main`:
+
+- **ADR-378 + addendum.** Deopt feedback re-tiers an arm in float context when its floats
+  arrive through vector reads (`float_deopt_feedback`, four integer-guard deopts on a
+  `Float`); comparisons on untyped operands dispatch by tag (`cmp_dispatch`, a bool either
+  way). Three latent bugs went with it: the thrash latch never cleared callers' fast links
+  (a latched arm was entered natively forever — `deopts=995909` in the trace), the compile
+  cache answered a re-lower with the code it replaced, and comparisons were outside the
+  float context. `b2d-vec/dot` 410 → 89 ns. Gate: `crates/cli/tests/float_through_erased_reads.rs`.
+  `BROOD_JIT_BAIL_TRACE=1` now prints `[jit-relower]` lines and the latch's `last-deopt` reason.
+- **ADR-374 addendum 4.** The CPU painter draws `[:quad]`/`[:sprite]` in software
+  (`paint::paint_quad`/`paint_sprite`, textures kept on the `Renderer`). A `nest` installed
+  without `--with-gui-gpu` showed pong's score and nothing else; now it draws, slowly.
+- **Prelude.** `%vector-concat` behind `conj` on a vector and `into` onto one (7.7 → 1.2 µs);
+  `seq` answers a vector first (586 → 190 ns); `reverse` reduces a vector natively and skips
+  `seq` for a plain list. Devlog 2026-09-21.
+- **Table.** `get` rebuilds under the lock instead of cloning first; scalar keys compare
+  without a rebuild; `to_message` reads a vector off the slab. Six-float read 204 → 144 ns.
+
+**What landed downstream.** `b2d` (private): `b2d-physics` (rigid bodies, SAT manifolds,
+warm-started sequential impulses; 500 bodies ~24 ms/step, 200 at 9 ms — 176 before, and
+the rewrite's style is in `b2d/CLAUDE.md`), `b2d/serve-shared` (one match for every
+window and tab, input stamped per player), `run` defaults `:vsync true` (an `Immediate`
+present tears — a fast ball drawn as two halves is what "a trail" looks like), and the
+harness keeps frames on the session (a table copies its value whole; a match run to its end
+through it took minutes). `pong2` (private, `~/src/broodlang/pong2`): the sample game —
+physics court, three-level AI, local and online PvP, a disc sprite ball, 35 tests.
+
+**The installed toolchain** is `./configure --with-gui-gpu --with-audio && make install`
+now (`configure` resets audio to OFF when the flag is omitted — the first reinstall lost it).
+
+**Traps found today.**
+- An address-space cap in front of the test runner caps the BUILD too, and the build scope
+  is killed at 20 G: build with `--no-run` uncapped first, then run capped (CLAUDE.md says
+  so; it bit anyway).
+- A shared tree: `make install` compiled my half-edited `sequences.rs` from another
+  session's command. Build from a clean worktree for anything that installs.
+- Test groups: `:serial` orders a group's tests, not two groups against each other — two
+  `describe`s both registering `editor/serve/serve-name` raced 1-in-3.
+- `%vector-reduce` is `(f acc coll)`, not `(coll acc f)`.
+
+**Open, in order.**
+1. **Measure the three runtime commits on the rows** (`perf-handoff.md` Task 7): the prelude
+   change touches `seq`/`reverse`/`conj` on every row that builds sequences; the JIT change
+   touches every arm's Prim2 comparison lowering (two tag tests where one was); the table
+   change is `sieve`/`wordcount`-shaped. All three were measured on micros only.
+2. The per-call floor — ~60 ns per small prelude function, ~30 per native — is what remains
+   under a game's frame; that is the JIT's to lower (inlining small callees into the arms
+   that lower), not another kernel op. `map`/`mapv` still carry ~2.5 µs of dispatch per call.
+3. `Prim2SlotInt` with an untyped slot in a float-context arm stays on the integer path
+   (documented in ADR-378) — the one shape the float context does not cover.
+4. The engine's own list: "use the graphics card fully" — a `[:particles …]` compute op,
+   post-processing, 2D lighting — then Windows/macOS, the runtime in the tab.
+
 ## 2026-09-20 later — the five follow-ups: KI-173, the writer gate, the rig, three type-variable sigs
 
 **Green on every gate that names the change** (devlog 2026-09-20 (7) has the detail): the

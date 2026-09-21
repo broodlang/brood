@@ -2694,10 +2694,13 @@ both, but the untrusted path is necessarily thinner; document the gap. Versioned
 
 - ⬜ **Major/minor modes** — how a buffer selects which keymaps are active.
 - ⬜ **Mouse / resize input events** — deferred until a feature needs them.
-- 🟡 **GPU-window frontend** — the wgpu render target (ADR-374, 2026-09-20) speaks the
-  same display protocol behind `--with-gui-gpu` + `BROOD_GUI_GPU=1`, with the pixel-space
-  `:quad` / `:sprite` ops and pixel input for games (`b2d`). Still ⬜: the frontend as its
-  own process over the ADR-090 link, and the cell-op features the GPU path skips.
+- ✅ **GPU-window frontend** — the wgpu render target (ADR-374, 2026-09-20) speaks the
+  same display protocol (the default of a `--with-gui-gpu` build; `BROOD_GUI_GPU=0` the
+  CPU painter), with the pixel-space `:quad` / `:sprite` / `:text-px` / `:sound` ops and
+  pixel input for games (`b2d`); the frontend as its own process (`nest attach --gui`) and
+  a browser tab (`b2d-web`) shipped the same day, and the CPU painter draws the pixel-space
+  ops in software since 2026-09-21 (addendum 4), so every GUI build plays. Still ⬜: the
+  runtime in the tab (wasm), Windows/macOS.
 - 🟡 **Telemetry** (ADR-106) — core landed; the kernel event *sources* shipped
   2026-07-19 (ADR-137: `system-monitor` → `telemetry/watch-runtime`, GC/spawn/exit/
   deopt as `[:runtime kind]` events). ✅ **Metric aggregators + sampling** shipped
