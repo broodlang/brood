@@ -9,23 +9,45 @@
 ;;;
 ;;; A wrong line number in an error is a debugging tax that scales with codebase size, and
 ;;; it is silent: nothing fails, you just look in the wrong place.
+;;;
+;;; The probe calls the RAW primitive `%table-has?`. It used to call `table/has?` and rely
+;;; on the thin-wrapper elision to run the primitive inline; under `nest test` every
+;;; `(sig …)`'d function is a contract shim (ADR-381), `table/has?` is one, and a shim is
+;;; not thin — the primitive then runs in the shim's positionless frame, and this guard
+;;; measured the shim instead of the fused arm it exists for (red armed, 2026-09-21).
 
 (defmodule vm-prim-error-pos-test (:use test))
 
 (def pep-t (table/new))
 
-;; NOTE: the assertion below pins the line of the `table/has?` form. If you insert or
+;; NOTE: the assertion below pins the line of the `%table-has?` form. If you insert or
 ;; remove lines above it, update the expected number to match.
 (defn pep-probe (k)
-  (table/has? pep-t k))
+  (%table-has? pep-t k))
+
+;; A contracted wrapper (`sig!` forces the shim whatever the mode) and a probe that calls
+;; it in NON-tail position, so the probe's own frame — and its call site — survive.
+(defn pep-wrapped (t k) (table/has? t k))
+(sig! pep-wrapped (table any -> bool))
+(defn pep-through-shim (k)
+  (let (r (pep-wrapped pep-t k)) r))
 
 (describe "inline-prim errors carry the failing form's position"
   (test "a table/has? type error reports the prim's line, not the call site"
     (let (line (try (pep-probe (fn (x) x)) (catch e (get e :line))))
-      ;; The `(table/has? pep-t k)` form inside `pep-probe`, NOT the `(pep-probe …)`
+      ;; The `(%table-has? pep-t k)` form inside `pep-probe`, NOT the `(pep-probe …)`
       ;; call a few lines below — which is what an untagged error reported.
-      (assert= 20 line)))
+      (assert= 26 line)))
 
   (test "the message still describes the real failure"
     (let (msg (try (pep-probe (fn (x) x)) (catch e (get e :message))))
-      (is (> (count msg) 0)))))
+      (is (> (count msg) 0))))
+
+  ;; An error raised in code that carries no positions — a contract shim's, the prelude's —
+  ;; takes the innermost call site that HAS one (`attach_vm_trace`), which for a non-tail
+  ;; call is the caller's own form. Before 2026-09-21 it took the CATCH site: the `try` below,
+  ;; two frames away. (A TAIL call into the shim reuses the caller's frame, so there the
+  ;; nearest positioned site is the caller's caller — the BEAM's answer too.)
+  (test "an error escaping a contract shim reports the innermost positioned call site, not the catch site"
+    (let (line (try (pep-through-shim (fn (x) x)) (catch e (get e :line))))
+      (assert= 33 line))))

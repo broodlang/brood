@@ -103,3 +103,30 @@
                 ""
                 (catch e (error-message e))))
       (is (not (includes? msg "expected"))))))
+
+(describe "gui/alloc-texture and gui/alloc-sound — one registry, however many processes allocate first"
+  ;; The registries used to be created on first use by `(when (nil? *textures*) (def …))`:
+  ;; N processes allocating their first handle at once each saw nil and each `def`'d a
+  ;; table, so all but the last table's handles were orphaned — `texture-size` answered nil
+  ;; for a handle just allocated, or another process's size when the two counters collided
+  ;; (`ui_test`, full suite only, 2026-09-21). Every process must find its own handle's size.
+  (test "forty processes each allocate a texture and a sound and read back their own"
+    (let (me (self)
+          n 40)
+      (doseq (i (range n))
+        (spawn (fn ()
+                 (let (tex (gui/alloc-texture (+ i 1) 7)
+                       snd (gui/alloc-sound (->float (+ i 1))))
+                   (send me [:got i (gui/texture-size tex) (gui/sound-seconds snd)])))))
+      (letrec (collect (fn (k acc)
+                         (if (= k 0)
+                           acc
+                           (receive
+                             ([:got i size secs] (collect (- k 1) (conj acc [i size secs])))
+                             (after 5000 (collect 0 (conj acc [:timeout k])))))))
+        (let (got (collect n []))
+          (assert= n (count got))
+          (doseq (r got)
+            (let ([i size secs] r)
+              (assert= [(+ i 1) 7] size)
+              (assert= (->float (+ i 1)) secs))))))))

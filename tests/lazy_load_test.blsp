@@ -239,7 +239,13 @@
           ;; so `warm=` read false under `BROOD_TIER=0` with an image (found 2026-09-18; CI's
           ;; tree-walker job boots from source, where `math` is already loaded when `go`
           ;; compiles, and never saw it).
-          result (if exe (os/cmd "env" ["BROOD_NO_CHECK=1" "BROOD_TIER=2" exe prog]) nil))
+          ;; Unarmed: under `nest test` the child would inherit BROOD_CONTRACTS=1 (ADR-381),
+          ;; and a contracted `math/rem` is a shim closure, not a primitive — the inlined
+          ;; `Rem` this case looks for cannot exist by design. The subject here is ADR-366's
+          ;; recompile, which contracts do not touch.
+          result (if exe
+                   (os/cmd "env" ["BROOD_NO_CHECK=1" "BROOD_TIER=2" "BROOD_CONTRACTS=0" exe prog])
+                   nil))
       (is (or (nil? exe) (string? exe)))
       (when result
         (assert= "" (if (= (get result :exit) 0) "" (get result :stderr "")))

@@ -80,7 +80,7 @@
       (assert= {:files 1 :hits 0 :parsed 0} (last-scan))
       (is (not (file/exists? (idx-file root))))))
 
-  (test "the index on disk is what a fresh process would read: another root's file answers without a parse"
+  :isolated (test "the index on disk is what a fresh process would read: another root's file answers without a parse"
     (let (root (fixture-root!)
           a (write-mod! root "a" (list "alpha"))
           other (fixture-root!)
@@ -96,7 +96,7 @@
         (is (includes? text (pr-str a)))
         (is (includes? text "(alpha)")))))
 
-  (test "a corrupt or foreign-version index is ignored, not trusted"
+  :isolated (test "a corrupt or foreign-version index is ignored, not trusted"
     (let (root (fixture-root!)
           a (write-mod! root "a" (list "alpha")))
       (file/mkdir (path/join root ".brood"))
@@ -108,7 +108,7 @@
       (%isolate (fn () (module-index/modules-of root a)))
       (assert= (list 'alpha) (modules-of root a))))
 
-  (test "an entry carries the file's own module and its requires, so the checker's graph needs no parse"
+  :isolated (test "an entry carries the file's own module and its requires, so the checker's graph needs no parse"
     (let (root (fixture-root!)
           a (write-mod! root "a" (list "alpha"))
           b (path/join root "src" "b.blsp"))

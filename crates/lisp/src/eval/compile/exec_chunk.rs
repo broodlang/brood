@@ -1188,6 +1188,27 @@ pub(crate) fn attach_vm_trace(e: &mut LispError, cur_arm: &CompiledArm, frames: 
         file,
         pos,
     });
+    // An error raised in code that carries no positions — the prelude's, and so every
+    // contract shim's (ADR-381) — used to escape UNTAGGED and take the position of whatever
+    // frame caught it: `(try (probe …) (catch e (get e :line)))` named the `try`'s line, two
+    // frames away from the `(table/has? t k)` that failed. Unarmed, the thin-wrapper elision
+    // hid this (the prim ran inline in the caller's frame, tagged there); a shim is not thin.
+    // Give it the innermost call site that HAS a position — the user form whose call led
+    // into the positionless code — which is what the elided shape reported and what the
+    // `:trace` already records. `or_pos`: a position a prim already tagged is never moved.
+    if e.pos.is_none() {
+        let inner = frames
+            .iter()
+            .rev()
+            .map(call_site)
+            .find(|(_, p)| p.is_some());
+        if let Some((f, Some(p))) = inner {
+            e.pos = Some(p);
+            if e.file.is_none() {
+                e.file = f.map(|s| s.to_string());
+            }
+        }
+    }
     attach_vm_trace_callers(e, frames);
 }
 
