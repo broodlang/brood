@@ -24463,3 +24463,19 @@ as ints, anything else as floats with an int promoted beside a float (the VM's r
 non-number deopts (reason 38). In every arm, not only float-context ones: `overlaps?` lowers
 right on its first tier and never needs the re-tier. The float guess stays for `+ - * /`,
 where the result's type is the guess. Pinned by `both-ints` in the test.
+
+### ADR-374 addendum 4 (2026-09-21) — the CPU painter draws the pixel-space ops too
+
+`[:quad …]` and `[:sprite …]` were GPU-only, and the CPU painter skipped them "silently
+(forward-compatible)". The first person to run pong from an installed `nest` saw the score
+and nothing else: `make install` had built without `--with-gui-gpu`, and there is no
+message. A frame vocabulary that half the builds cannot draw is not forward-compatible,
+it is a trap. The CPU painter now paints both — each pixel of a quad's bounding box turned
+back into the quad's frame and filled, or the texture's UV rect sampled nearest-neighbour
+and blended by alpha × tint (`paint::paint_quad` / `paint_sprite`); the `Renderer` keeps
+the uploaded textures for the CPU window as the GPU window keeps them on the device. Slow
+next to the GPU (a 500-body pile paints in software at a few frames a second at 800×600),
+correct at any size, and the same picture: the physics demo and pong dump the same frame
+under `BROOD_GUI_GPU=0`. The strip diff has a band for them (the bounding box, whatever the
+angle), so a moving quad repaints its old rows too. `b2d/run` prints one line when the
+runtime has no `:gui-gpu` feature, which is how this will be noticed next time.

@@ -6,6 +6,7 @@
 //! Runs on the GUI thread, where a panic takes the event loop with it — so
 //! `render_ops` is fuzzed against wild inputs here.
 
+use super::render::CpuTexture;
 use super::*;
 
 // Paint-breakdown diagnostics (BROOD_STALL_MS): single GUI thread, so Relaxed is
@@ -115,9 +116,23 @@ fn op_band(op: &Op, dy: isize, oy: usize, ch: usize) -> Option<(isize, isize)> {
     match op {
         Op::Clear => Some((isize::MIN, isize::MAX)),
         Op::CursorZone { .. } => None,
-        // Pixel-space ops are GPU-only; the CPU painter never paints them, so they have
-        // no band to re-rasterise.
-        Op::Sprite { .. } | Op::Quad { .. } | Op::Sound { .. } => None,
+        // A sound paints nothing.
+        Op::Sound { .. } => None,
+        // A pixel-space quad turned about its centre: the band of its bounding box —
+        // the centre plus or minus half the diagonal, whatever the angle (conservative).
+        Op::Sprite { y, w, h, .. } | Op::Quad { y, w, h, .. } => {
+            let (cy, half) = quad_extent(*y, *w, *h);
+            if !cy.is_finite() || !half.is_finite() {
+                return Some((isize::MIN, isize::MAX));
+            }
+            let top = (cy - half)
+                .floor()
+                .clamp(isize::MIN as f32, isize::MAX as f32) as isize;
+            let bottom = (cy + half)
+                .ceil()
+                .clamp(isize::MIN as f32, isize::MAX as f32) as isize;
+            Some((top, bottom.max(top)))
+        }
         // Pixel text sits where it says, whatever the grid or scroll: its band is its own.
         Op::TextPx { y, face, .. } => {
             let top = y.round() as isize;
@@ -1025,9 +1040,35 @@ pub(super) fn render_ops(
             // Not painted — a cursor zone is hover metadata, hit-tested on
             // pointer-move in the window event handler (ADR-080).
             Op::CursorZone { .. } => {}
-            // GPU-only (a textured / rotated quad needs the GPU target); skipped here
-            // like a `VSpans` is skipped by the terminal.
-            Op::Sprite { .. } | Op::Quad { .. } | Op::Sound { .. } => {}
+            // A sound is played by the window, not painted.
+            Op::Sound { .. } => {}
+            // The pixel-space ops, in software: the GPU target draws them instanced; here
+            // each pixel of the quad's bounding box is turned back into the quad's own
+            // frame and filled or sampled if it lands inside. Slow next to the GPU, but
+            // a game on a build without one (or under `BROOD_GUI_GPU=0`) draws instead of
+            // showing its text alone.
+            Op::Quad {
+                x,
+                y,
+                w,
+                h,
+                color,
+                rot,
+            } => paint_quad(canvas, *x, *y, *w, *h, *color, *rot),
+            Op::Sprite {
+                tex,
+                x,
+                y,
+                w,
+                h,
+                uv,
+                tint,
+                rot,
+            } => {
+                if let Some(t) = r.textures.get(tex) {
+                    paint_sprite(canvas, t, *x, *y, *w, *h, *uv, *tint, *rot);
+                }
+            }
             // Pixel-space text: the `Text` walk with the run's top-left given in
             // pixels (after the alignment's shift by the run's shaped width) rather
             // than derived from a cell; unaffected by grid origin and scroll.
@@ -1180,6 +1221,138 @@ pub(super) fn render_ops(
 /// Records the frame as the new previous one and returns the pixel bands `[y0, y1)`
 /// whose pixels changed — drawn or copied — for the present. `Renderer::blit_rows` counts
 /// the copied rows for the trace.
+// ---- the pixel-space ops, in software ----------------------------------------------
+
+/// The vertical centre and the half-diagonal of a `w`×`h` quad at `(x, y)` — the extent
+/// its rotated bounding box can reach in y, whatever the angle.
+fn quad_extent(y: f32, w: f32, h: f32) -> (f32, f32) {
+    (y + h / 2.0, (w * w + h * h).sqrt() / 2.0)
+}
+
+/// `src` over `dst` (both 0x00RRGGBB) with straight alpha `a` (0..=255).
+fn over(dst: u32, src: [u8; 3], a: u32) -> u32 {
+    if a >= 255 {
+        return pack(src);
+    }
+    if a == 0 {
+        return dst;
+    }
+    let inv = 255 - a;
+    let ch = |d: u32, s: u8| (d * inv + s as u32 * a + 127) / 255;
+    let dr = (dst >> 16) & 0xff;
+    let dg = (dst >> 8) & 0xff;
+    let db = dst & 0xff;
+    (ch(dr, src[0]) << 16) | (ch(dg, src[1]) << 8) | ch(db, src[2])
+}
+
+/// Walk every pixel of the `w`×`h` quad at `(x, y)` turned `rot` radians about its
+/// centre, clipped to the canvas band: `f(px, py, u, v)` gets the pixel and where in the
+/// quad it lies (`u`, `v` in 0..1 from the top-left corner). A non-finite or empty quad
+/// walks nothing, however wild the geometry a frame carries.
+fn each_quad_pixel(
+    canvas: &Canvas,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    rot: f32,
+    mut f: impl FnMut(usize, usize, f32, f32),
+) {
+    if !(x.is_finite() && y.is_finite() && w.is_finite() && h.is_finite() && rot.is_finite())
+        || w <= 0.0
+        || h <= 0.0
+    {
+        return;
+    }
+    let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+    let half = (w * w + h * h).sqrt() / 2.0;
+    let x0 = (cx - half).floor().max(0.0) as usize;
+    let x1 = ((cx + half).ceil().max(0.0) as usize).min(canvas.w);
+    let y0 = (cy - half).floor().max(0.0) as usize;
+    let y1 = ((cy + half).ceil().max(0.0) as usize).min(canvas.h);
+    let (s, c) = if rot == 0.0 {
+        (0.0, 1.0)
+    } else {
+        rot.sin_cos()
+    };
+    for py in canvas.rows(y0, y1.saturating_sub(y0)) {
+        for px in x0..x1 {
+            // the pixel centre, in the quad's own frame: undo the rotation about the centre
+            let dx = px as f32 + 0.5 - cx;
+            let dy = py as f32 + 0.5 - cy;
+            let lx = dx * c + dy * s;
+            let ly = -dx * s + dy * c;
+            let u = lx / w + 0.5;
+            let v = ly / h + 0.5;
+            if (0.0..1.0).contains(&u) && (0.0..1.0).contains(&v) {
+                f(px, py, u, v);
+            }
+        }
+    }
+}
+
+/// A solid `[:quad …]`: the colour blended over the canvas by its alpha.
+fn paint_quad(canvas: &mut Canvas, x: f32, y: f32, w: f32, h: f32, color: [u8; 4], rot: f32) {
+    let rgb = [color[0], color[1], color[2]];
+    let a = color[3] as u32;
+    let fb_w = canvas.w;
+    let mut hits: Vec<usize> = Vec::new();
+    each_quad_pixel(canvas, x, y, w, h, rot, |px, py, _, _| {
+        hits.push(py * fb_w + px)
+    });
+    for i in hits {
+        canvas.buf[i] = over(canvas.buf[i], rgb, a);
+    }
+}
+
+/// A `[:sprite …]`: the texture's `uv` rect (`[u0 v0 du dv]`, a negative extent mirrors)
+/// sampled nearest-neighbour across the quad, multiplied by `tint`, blended by the
+/// texel's alpha times the tint's.
+#[allow(clippy::too_many_arguments)]
+fn paint_sprite(
+    canvas: &mut Canvas,
+    t: &CpuTexture,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    uv: [f32; 4],
+    tint: [u8; 4],
+    rot: f32,
+) {
+    if t.w == 0 || t.h == 0 || t.rgba.len() < (t.w as usize * t.h as usize * 4) {
+        return;
+    }
+    let fb_w = canvas.w;
+    let (tw, th) = (t.w as f32, t.h as f32);
+    let mut hits: Vec<(usize, u32)> = Vec::new();
+    each_quad_pixel(canvas, x, y, w, h, rot, |px, py, u, v| {
+        let tu = uv[0] + u * uv[2];
+        let tv = uv[1] + v * uv[3];
+        let sx = ((tu * tw).floor().clamp(0.0, tw - 1.0)) as usize;
+        let sy = ((tv * th).floor().clamp(0.0, th - 1.0)) as usize;
+        let i = (sy * t.w as usize + sx) * 4;
+        let texel = [t.rgba[i], t.rgba[i + 1], t.rgba[i + 2], t.rgba[i + 3]];
+        let mul = |c: u8, k: u8| ((c as u32 * k as u32 + 127) / 255) as u8;
+        let rgb = [
+            mul(texel[0], tint[0]),
+            mul(texel[1], tint[1]),
+            mul(texel[2], tint[2]),
+        ];
+        let a = mul(texel[3], tint[3]) as u32;
+        hits.push((py * fb_w + px, (a << 24) | pack(rgb)));
+    });
+    for (i, packed) in hits {
+        let a = packed >> 24;
+        let rgb = [
+            ((packed >> 16) & 0xff) as u8,
+            ((packed >> 8) & 0xff) as u8,
+            (packed & 0xff) as u8,
+        ];
+        canvas.buf[i] = over(canvas.buf[i], rgb, a);
+    }
+}
+
 pub(super) fn raster_frame(
     r: &mut Renderer,
     frame: &[Op],
@@ -2327,6 +2500,150 @@ mod cell_region_tests {
         assert_eq!(text_px_width("", 9, 1), 0);
         // a wide (two-cell) cluster spans two cells
         assert_eq!(text_px_width("日", 9, 1), 18);
+    }
+
+    #[test]
+    fn quads_and_sprites_paint_in_software_and_survive_wild_geometry() {
+        let mut r = Renderer::new(1.0, default_families(), 14.0);
+        let (cw, ch) = (r.cell_w.max(1), r.cell_h.max(1));
+        let (fb_w, fb_h) = (64usize, 48usize);
+        let mut buf = vec![0u32; fb_w * fb_h];
+        let mut canvas = Canvas::full(&mut buf, fb_w, fb_h);
+        // A 2×2 checker texture: red, transparent / transparent, blue.
+        r.textures.insert(
+            7,
+            CpuTexture {
+                w: 2,
+                h: 2,
+                rgba: vec![
+                    255, 0, 0, 255, 0, 0, 0, 0, //
+                    0, 0, 0, 0, 0, 0, 255, 255,
+                ],
+            },
+        );
+        let ops = vec![
+            // an opaque 10×6 quad at (4, 4)
+            Op::Quad {
+                x: 4.0,
+                y: 4.0,
+                w: 10.0,
+                h: 6.0,
+                color: [10, 200, 30, 255],
+                rot: 0.0,
+            },
+            // a half-transparent white one over black at (30, 4): mid grey
+            Op::Quad {
+                x: 30.0,
+                y: 4.0,
+                w: 4.0,
+                h: 4.0,
+                color: [255, 255, 255, 128],
+                rot: 0.0,
+            },
+            // a 10×10 square turned 45°: its corners reach past the box, the box's own
+            // corners are outside it
+            Op::Quad {
+                x: 40.0,
+                y: 20.0,
+                w: 10.0,
+                h: 10.0,
+                color: [200, 200, 200, 255],
+                rot: std::f32::consts::FRAC_PI_4,
+            },
+            // the checker, 8×8 at (4, 20): top-left quadrant red, bottom-right blue,
+            // the others untouched (alpha 0)
+            Op::Sprite {
+                tex: 7,
+                x: 4.0,
+                y: 20.0,
+                w: 8.0,
+                h: 8.0,
+                uv: [0.0, 0.0, 1.0, 1.0],
+                tint: [255, 255, 255, 255],
+                rot: 0.0,
+            },
+            // an unknown texture paints nothing; wild geometry paints nothing and
+            // does not panic
+            Op::Sprite {
+                tex: 99,
+                x: 0.0,
+                y: 0.0,
+                w: 20.0,
+                h: 20.0,
+                uv: [0.0, 0.0, 1.0, 1.0],
+                tint: [255, 255, 255, 255],
+                rot: 0.0,
+            },
+            Op::Quad {
+                x: f32::NAN,
+                y: 0.0,
+                w: f32::MAX,
+                h: f32::INFINITY,
+                color: [255, 0, 0, 255],
+                rot: f32::NAN,
+            },
+            Op::Quad {
+                x: -1.0e30,
+                y: 1.0e30,
+                w: 1.0e30,
+                h: 1.0e30,
+                color: [255, 0, 0, 255],
+                rot: 1.0e30,
+            },
+        ];
+        render_ops(&ops, &mut canvas, &mut r, 0, 0, cw, ch, 0, 0);
+        let at = |x: usize, y: usize| buf[y * fb_w + x];
+        let green = pack([10, 200, 30]);
+        assert_eq!(at(4, 4), green);
+        assert_eq!(at(13, 9), green);
+        assert_eq!(at(14, 4), 0);
+        assert_eq!(at(4, 10), 0);
+        // half white over black: every channel near 128
+        let grey = at(31, 5);
+        for shift in [16, 8, 0] {
+            let c = (grey >> shift) & 0xff;
+            assert!((126..=129).contains(&c), "channel {c}");
+        }
+        // the diamond: its centre is filled, the box's corner is not, a point along the
+        // diagonal past the box's edge is (the square's corner reaches sqrt(2)/2 × 10 out)
+        let light = pack([200, 200, 200]);
+        assert_eq!(at(45, 25), light);
+        assert_eq!(at(40, 20), 0);
+        assert_eq!(at(45, 19), light);
+        assert_eq!(at(45, 31), light);
+        // the checker's quadrants
+        assert_eq!(at(5, 21), pack([255, 0, 0]));
+        assert_eq!(at(10, 26), pack([0, 0, 255]));
+        assert_eq!(at(10, 21), 0);
+        assert_eq!(at(5, 26), 0);
+    }
+
+    #[test]
+    fn a_quad_changing_rows_is_repainted_by_the_strip_diff() {
+        // The band of a rotated quad is its bounding box, so moving one across rows marks
+        // both the old and the new rows: after the move the old pixels are the clear colour.
+        let mut r = Renderer::new(1.0, default_families(), 14.0);
+        let (fb_w, fb_h) = (64usize, 48usize);
+        let quad = |y: f32| Op::Quad {
+            x: 10.0,
+            y,
+            w: 8.0,
+            h: 8.0,
+            color: [255, 255, 255, 255],
+            rot: 0.3,
+        };
+        raster_frame(&mut r, &[Op::Clear, quad(4.0)], fb_w, fb_h, false);
+        assert_eq!(r.canvas[8 * fb_w + 14], pack([255, 255, 255]));
+        // the incremental raster must agree with a full one after the move
+        raster_frame(&mut r, &[Op::Clear, quad(30.0)], fb_w, fb_h, false);
+        let mut full = Renderer::new(1.0, default_families(), 14.0);
+        raster_frame(&mut full, &[Op::Clear, quad(30.0)], fb_w, fb_h, true);
+        assert_ne!(r.canvas[8 * fb_w + 14], pack([255, 255, 255]));
+        assert_eq!(r.canvas[34 * fb_w + 14], pack([255, 255, 255]));
+        assert!(
+            r.canvas == full.canvas,
+            "incremental raster of a moved quad differs from a full one"
+        );
     }
 
     #[test]

@@ -261,6 +261,17 @@ pub(crate) struct Renderer {
     /// The pixel rows the last `raster_frame` copied from the old canvas instead of
     /// drawing (the scroll blit) — a per-paint stat for the trace and the tests.
     pub(super) blit_rows: usize,
+    /// The textures a game uploaded (`gui/texture`), by handle, for the CPU painter's
+    /// `[:sprite …]`: straight-alpha RGBA rows. The GPU target keeps its own copies on
+    /// the device; a window has one or the other.
+    pub(super) textures: HashMap<u32, CpuTexture>,
+}
+
+/// A texture as the CPU painter samples it: `w`×`h` straight-alpha RGBA bytes.
+pub(super) struct CpuTexture {
+    pub(super) w: u32,
+    pub(super) h: u32,
+    pub(super) rgba: Vec<u8>,
 }
 
 impl Renderer {
@@ -287,6 +298,7 @@ impl Renderer {
             prev_ops: Vec::new(),
             damage_ring: Vec::new(),
             blit_rows: 0,
+            textures: HashMap::new(),
         };
         r.recompute();
         r

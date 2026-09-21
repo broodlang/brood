@@ -1463,7 +1463,12 @@ impl ApplicationHandler<UserEvent> for GuiApp {
             } => {
                 if let Some(win) = self.ids.get(&id).and_then(|wid| self.wins.get_mut(wid)) {
                     match &mut win.backend {
-                        Backend::Cpu { .. } => {}
+                        // The CPU painter samples it from memory (`paint::paint_sprite`).
+                        Backend::Cpu { .. } => {
+                            win.renderer
+                                .textures
+                                .insert(tex, render::CpuTexture { w: tw, h: th, rgba });
+                        }
                         #[cfg(feature = "gui-gpu")]
                         Backend::Gpu(gpu) => gpu.upload_texture(tex, &rgba, tw, th),
                     }
@@ -1472,7 +1477,9 @@ impl ApplicationHandler<UserEvent> for GuiApp {
             UserEvent::TextureFree { id, tex } => {
                 if let Some(win) = self.ids.get(&id).and_then(|wid| self.wins.get_mut(wid)) {
                     match &mut win.backend {
-                        Backend::Cpu { .. } => {}
+                        Backend::Cpu { .. } => {
+                            win.renderer.textures.remove(&tex);
+                        }
                         #[cfg(feature = "gui-gpu")]
                         Backend::Gpu(gpu) => gpu.free_texture(tex),
                     }

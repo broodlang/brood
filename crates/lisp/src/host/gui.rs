@@ -320,8 +320,9 @@ pub enum Op {
     /// above it) — the renderer only needs a rect, a UV rect, a tint and an angle.
     /// Pixel space, not cells, because a sprite lives at a sub-cell position and moves
     /// by pixels. Consecutive sprites from one texture are one draw, so the Brood side
-    /// is O(sprites) and the per-pixel work is native, the `VSpans` rule. GPU-only: the
-    /// terminal and the CPU painter skip it (like `FRect`'s alpha).
+    /// is O(sprites) and the per-pixel work is native, the `VSpans` rule. Instanced on the
+    /// GPU target, sampled per pixel in software by the CPU painter (`paint::paint_sprite`);
+    /// the terminal skips it.
     Sprite {
         tex: u32,
         x: f32,
@@ -336,7 +337,7 @@ pub enum Op {
     /// (straight rgba, so `[r g b 128]` is a half-transparent overlay) and turned `rot`
     /// radians about its centre. The pixel-space sibling of `Rect`, and the one solid
     /// primitive a game needs: a line is a thin quad at an angle (`gui/line`, Brood), a
-    /// health bar two of them. GPU-only.
+    /// health bar two of them. Drawn by both window painters (the CPU one per pixel).
     Quad {
         x: f32,
         y: f32,

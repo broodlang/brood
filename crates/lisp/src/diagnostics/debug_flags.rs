@@ -598,7 +598,7 @@ pub const FLAGS: &[DebugFlag] = &[
     f(
         "BROOD_GUI_GPU",
         HOST,
-        "`=0`: paint on the CPU (softbuffer) in a `--with-gui-gpu` build instead of the GPU (wgpu) render target it selects by default — the A/B lever, and the escape hatch for a misbehaving GPU driver; the pixel-space `:quad` / `:sprite` ops draw only on the GPU",
+        "`=0`: paint on the CPU (softbuffer) in a `--with-gui-gpu` build instead of the GPU (wgpu) render target it selects by default — the A/B lever, and the escape hatch for a misbehaving GPU driver; the pixel-space `:quad` / `:sprite` ops draw on both (in software here)",
     ),
     f(
         "BROOD_GUI_DAMAGE",
