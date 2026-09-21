@@ -1451,7 +1451,61 @@ impl Heap {
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(sym, shared);
+            h.runtime
+                .declared_sigs_version
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
         });
+    }
+
+    /// The qualified key of the ONE alias (`deftype`) whose name ends in `/name` — the
+    /// contract's fallback for a bare alias name checked away from where it was declared
+    /// (KI-165) — or `None` when no alias, or two, answer. `is_alias` decides whether a
+    /// store entry is an alias (the `%type` marker is the builtins layer's vocabulary).
+    ///
+    /// Memoised per process, keyed on the store's version: this is asked per checked VALUE
+    /// under contracts, and the scan it answers with walks every declared signature in the
+    /// runtime — 76 M instructions of a 1.3 G callgrind run were this scan, three times per
+    /// `conj` (2026-09-21). A `deftype` (a store insert) bumps the version and drops the
+    /// memo. Keys only, never handles: a compaction relocates the store's values, and the
+    /// caller re-reads the form through the live store by this key.
+    pub fn alias_key_by_suffix(
+        &self,
+        name: Symbol,
+        is_alias: impl Fn(&Heap, Symbol) -> bool,
+    ) -> Option<Symbol> {
+        let version = self
+            .runtime
+            .declared_sigs_version
+            .load(std::sync::atomic::Ordering::Acquire);
+        {
+            let cache = self.type_alias_cache.borrow();
+            if cache.0 == version {
+                if let Some(hit) = cache.1.get(&name) {
+                    return *hit;
+                }
+            }
+        }
+        let suffix = format!("/{}", crate::core::value::symbol_name(name));
+        let mut found = None;
+        for (key, _) in self.declared_sigs_everywhere() {
+            if !crate::core::value::symbol_name(key).ends_with(&suffix) {
+                continue;
+            }
+            if is_alias(self, key) {
+                if found.is_some() {
+                    found = None;
+                    break;
+                }
+                found = Some(key);
+            }
+        }
+        let mut cache = self.type_alias_cache.borrow_mut();
+        if cache.0 != version {
+            cache.0 = version;
+            cache.1.clear();
+        }
+        cache.1.insert(name, found);
+        found
     }
 
     /// Every `(sig …)` declared so far, as `(qualified-name, type-expression)`.

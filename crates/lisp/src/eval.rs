@@ -624,6 +624,23 @@ fn eval_tail_loop(
                     {
                         heap.reserve_global(name);
                     }
+                    // A closure whose name carries a declared signature is offered to the
+                    // contract policy (ADR-381): armed, the binding becomes a checking
+                    // shim; unarmed, this is one store lookup. Order-free — a `sig` above
+                    // its `defn` is enforced here, one below it at `%register-sig` — and
+                    // a hot reload re-wraps, since it is a `def`. Whole-module batches
+                    // (an embedded std module, the prelude at boot) are swept from Brood
+                    // instead, so the stdlib image never carries a shim.
+                    if matches!(val.unpack(), ValueRef::Fn(_))
+                        && !heap.in_module_load()
+                        && heap.declared_sig_value(name).is_some()
+                    {
+                        crate::builtins::contracts::contract_apply(
+                            heap,
+                            name,
+                            crate::builtins::contracts::OnShim::Rewrap,
+                        )?;
+                    }
                     return Ok(Value::symbol(name));
                 }
                 Some(SpecialForm::Fn) => {

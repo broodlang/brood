@@ -1905,8 +1905,8 @@ provably wrong call against it (both the argument and the result type flow):
 (string/length (area 2))  ; warning: string/length: argument 1 expects string, got number
 ```
 
-**Below the definition, always** — see "Placement" below. A `sig` above its `defn` reads
-better and is fine as a declaration, but it breaks the module under `BROOD_CONTRACTS=1`.
+**Either side of the definition** — see "Placement" below. A `sig` is a declaration
+wherever it stands; enforcement (when armed) attaches to the binding, not to the form.
 
 The type grammar: base names — `int float number decimal string symbol keyword
 bool nil pair vector list map set bytes fn rope pid ref table socket subprocess`,
@@ -1959,12 +1959,11 @@ fires on any hand-written same-symbol `%eq`-literal `if`-chain too, not just
 [type-match-redundancy.md](type-match-redundancy.md)).
 
 `(sig! name (params… -> ret))` declares the **same** signature *and enforces it at
-run time*: it wraps `name` so each argument and the result are checked on every
-call, throwing on a mismatch (an opt-in "strong arrow"). Place it **after** the
-definition — it rebinds the name, preserving arity. (One exception: an `&optional`
-signature installs a *variadic* shim, so it passes through only the arguments it was
-given and the callee's own defaults still apply — `arity-of` then reads `2+` where the
-function reads `2-3`.)
+run time*, whatever the mode: each argument and the result are checked on every call,
+and a mismatch throws a **blamed** contract error (an opt-in "strong arrow"). The error
+is a map — `{:kind :contract :blame :caller :function 'area :argument 1 :expected number
+:got "circle" :message …}` for an argument (the caller's fault), `:blame :callee` for a
+result (the callee's) — so `(get e :blame)` names the party and `error-message` reads it.
 
 ```clojure
 (defn area (r) (* 3.14159 r r))
@@ -1972,29 +1971,26 @@ function reads `2-3`.)
 (area "circle")   ;=> throws — area: argument 1 expected number, got string
 ```
 
-`sig` is checker-only (zero runtime cost); `sig!` adds the runtime guarantee
-exactly where you want soundness.
+**Enforcement is a property of the binding, not of the declaring form** (ADR-381). The
+kernel offers a name's binding to the contract policy when the binding comes to exist — at
+its `def`, at a `sig`/`sig!` landing on an already-defined name, and when a std module's
+bindings arrive (from source or from the stdlib image) — and binds a checking shim in its
+place when the declaration is armed. So placement is free (above the definition, where
+documentation goes, or below), a hot reload re-wraps the new definition, and a shim keeps
+the function's name, docstring, privacy, `meta` and — for a fixed-arity definition — its
+arity. An `&optional`/`&` definition gets a variadic shim that checks the declared prefix
+and passes the rest through, so the callee's own defaults still apply.
 
-**Placement: put a `sig` *below* its definition.** As a declaration it works
-anywhere, but `BROOD_CONTRACTS=1` makes every `sig` behave like `sig!` — which
-*rebinds* the name — so a `sig` above its `defn` fails under that flag (it says so,
-naming the fix, instead of dying with `unbound symbol`), and takes the whole module
-load down with it.
+**Dev mode arms every `sig`.** `nest run` and `nest test` set `BROOD_CONTRACTS=1`, so
+every declaration in the project and in std is enforced while you develop and test;
+`BROOD_CONTRACTS=0` opts a run out, and a released bundle never arms. The prelude's own
+sixteen declarations (`nth`, `conj`, `assoc`, …) are enforced only under
+`BROOD_CONTRACTS=all` — they are the hottest names in the language, each a thin wrapper
+over a native that already raises the precise error. `sig` alone is checker-only (zero
+runtime cost) in a release; `sig!` adds the runtime guarantee everywhere.
 
-This is the rule most likely to be broken by someone doing the right thing: a
-signature reads as documentation, and documentation goes above. It has been broken in
-bulk twice — `defrecord` emitted its constructor `sig` above the `defn` (KI-81), and
-the adoption sweep wrote 218 of them above (KI-81's recurrence entry). So it is
-asserted over the **whole tree**, not by convention:
-`crates/lisp/tests/sig_placement.rs` scans every `.blsp` and fails on any
-`(sig NAME …)` preceding a same-file definition of `NAME`, naming the line to move.
-(`tests/sig_adoption_test.blsp` pins the *semantics* — that a declaration is
-placement-independent in default mode.)
-
-**The prelude carries signatures too**, ~20 of them. It could not before KI-81: the
-contract shim was `(let (orig name) (fn …))`, a closure over a local frame, and the
-prelude freeze requires a shared closure to capture only globals. The shim now holds
-the original in a gensym'd *global*, so a prelude `sig` arms like any other.
+**The prelude carries signatures too**, ~16 of them, enforced per runtime at boot under
+`all` (the shared prelude is frozen; a shim is an ordinary runtime rebinding).
 
 Adoption is broad — **613 declarations across 79 std modules** (ADR-153 started it in
 `std/path`, `std/json` and `std/set`). The checker enforces them at every call site, in

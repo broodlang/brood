@@ -397,26 +397,15 @@ pub(super) fn type_alias(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispRe
     // where the alias was declared — a `test` body runs in its own green process, and the
     // bare `c-point` there does not resolve to the `contract-test/c-point` the `deftype`
     // registered. So fall back to the rule the checker's own `alias_ty` ends with: the ONE
-    // alias whose qualified name ends in `/name`, declining when two could answer. This
-    // scans the declared sigs, so it sits behind both keyed lookups — and it is only ever
-    // reached by a symbol that is not a base type, which is an alias or a typo.
-    let name = value::symbol_name(sym);
-    if name.contains('/') {
+    // alias whose qualified name ends in `/name`, declining when two could answer. That is
+    // a scan of every declared sig, so it sits behind both keyed lookups AND behind a
+    // per-process memo (`Heap::alias_key_by_suffix`): it is reached by every symbol that
+    // is not a base type — an alias, an ability name, a `?A` type variable — per checked
+    // value, and unmemoised it was three full scans per `conj` under contracts.
+    if value::symbol_name_ref(sym).contains('/') {
         return Ok(Value::nil());
     }
-    let suffix = format!("/{name}");
-    let mut found = None;
-    for (key, _) in heap.declared_sigs_everywhere() {
-        if !value::symbol_name(key).ends_with(&suffix) {
-            continue;
-        }
-        if alias_form_at(heap, key).is_some() {
-            if found.is_some() {
-                return Ok(Value::nil()); // ambiguous: two modules declare it
-            }
-            found = Some(key);
-        }
-    }
+    let found = heap.alias_key_by_suffix(sym, |heap, key| alias_form_at(heap, key).is_some());
     Ok(found
         .and_then(|key| alias_form_at(heap, key))
         .unwrap_or_else(Value::nil))

@@ -1405,6 +1405,14 @@ pub(crate) mod jit_layout {
     /// small-vector element read (`Range`/`SeqView` share the backing slab but
     /// carry their own tags, so they deopt to the VM). Pinned by the layout test.
     pub const TAG_VECTOR: u8 = 10;
+    /// `Value::Range`'s and `Value::SeqView`'s discriminants (`… Vector=10, Range=11,
+    /// SeqView=12`). Both are `pair` to the language (`tag`, `pair?`, `type-of`), so the
+    /// JIT's inline `pair?` (`PrimOp1::IsPair`) must accept all three bytes — it compared
+    /// against `TAG_PAIR` alone from the day it was written, on the strength of a comment
+    /// saying ranges "also carry TAG_PAIR", and `(pair? (range 3))` was `false` in native
+    /// code and `true` everywhere else (KI-178). Pinned by the layout test.
+    pub const TAG_RANGE: u8 = 11;
+    pub const TAG_SEQVIEW: u8 = 12;
 
     /// Discriminant-byte → `type-of` keyword id, for the JIT's `PrimOp1::TypeOf`
     /// lowering: one `u32` load indexed by a value's tag byte replaces the whole
@@ -1663,6 +1671,28 @@ mod jit_layout_tests {
             jit_layout::TAG_VECTOR,
             "Value::Vector discriminant drifted"
         );
+        // `Value::Range` / `Value::SeqView` must match `TAG_RANGE` / `TAG_SEQVIEW`: the
+        // JIT's inline `pair?` accepts exactly these three bytes (KI-178).
+        for (v, expected, what) in [
+            (
+                Value::Range(VecId::local_gen(0, 0)),
+                jit_layout::TAG_RANGE,
+                "Value::Range",
+            ),
+            (
+                Value::SeqView(VecId::local_gen(0, 0)),
+                jit_layout::TAG_SEQVIEW,
+                "Value::SeqView",
+            ),
+        ] {
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    &v as *const Value as *const u8,
+                    std::mem::size_of::<Value>(),
+                )
+            };
+            assert_eq!(bytes[0], expected, "{what} discriminant drifted");
+        }
         // `Value::Sym` / `Value::Keyword` discriminants must match `TAG_SYM` /
         // `TAG_KEYWORD` (the JIT's inline interned-immediate `=`); a reorder breaks them.
         let sy = Value::Sym(0);

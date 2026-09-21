@@ -436,6 +436,9 @@ pub struct RuntimeCode {
     /// layer must not depend on `types` (the checker parses it on read). Shared
     /// across the runtime's processes via `Arc`, like `globals`.
     pub(super) declared_sigs: RwLock<SymbolMap<Value>>,
+    /// Bumped on every `declared_sigs` insert. What a per-process cache over the store
+    /// (`Heap::type_alias_cache`, the contract's alias lookup) checks before trusting itself.
+    pub(super) declared_sigs_version: AtomicU64,
     /// **RUNTIME collector — Stage 3b (cooperative drain coordination, ADR-091).**
     /// When an aged-out generation is being reclaimed, each of the runtime's
     /// processes cooperatively reports — at its safepoint / before parking —
@@ -660,6 +663,7 @@ impl Default for RuntimeCode {
             shared_closures: RwLock::new(HashMap::new()),
             jit_inline_cache: RwLock::new(HashMap::new()),
             declared_sigs: RwLock::new(SymbolMap::default()),
+            declared_sigs_version: AtomicU64::new(0),
             drain_active: AtomicBool::new(false),
             rt_dirty: AtomicBool::new(true),
             drain_gen: AtomicUsize::new(0),
@@ -796,6 +800,7 @@ impl RuntimeCode {
             shared_closures: RwLock::new(HashMap::new()),
             jit_inline_cache: RwLock::new(HashMap::new()),
             declared_sigs: RwLock::new(SymbolMap::default()),
+            declared_sigs_version: AtomicU64::new(0),
             drain_active: AtomicBool::new(false),
             rt_dirty: AtomicBool::new(true),
             drain_gen: AtomicUsize::new(0),

@@ -1,0 +1,40 @@
+;; KI-178: `pair?` and `list?` on a RANGE or a SEQ-VIEW, once the caller has tiered up.
+;;
+;; Both values are `pair` to the language — `type-of` says so, and the native `pair?`
+;; accepts `Pair | Range | SeqView` — but they carry their own discriminant bytes, and the
+;; JIT's inline `pair?` compared against the pair byte alone. So the answer depended on the
+;; tier the asking arm happened to be on: `true` on the VM and the tree-walker, `false` in
+;; native code — which a contract over `seqable` turned into "into: argument 2 expected
+;; seqable, got :pair" on the two-thousandth call and not before. The loops below run long
+;; enough to tier (20 000 activations; the miscompile answered wrong on ~19 500 of them) and
+;; count the wrong answers, which must be zero on every tier.
+(defmodule jit-pair-predicate-test (:use test))
+
+(def jpp-range (range 100))
+(def jpp-view (rest [1 2 3]))
+
+(defn- jpp-pair? (v) (pair? v))
+(defn- jpp-list? (v) (list? v))
+(defn- jpp-both? (v) (or (list? v) (vector? v)))
+
+(defn- jpp-wrong (i wrong)
+  (if (= i 0)
+    wrong
+    (jpp-wrong (dec i)
+      (if (and (jpp-pair? jpp-range)
+            (jpp-list? jpp-range)
+            (jpp-both? jpp-range)
+            (jpp-pair? jpp-view)
+            (jpp-list? jpp-view)
+            (jpp-pair? (range 3)))
+        wrong
+        (inc wrong)))))
+
+(describe "pair? and list? on a range and a seq-view, on every tier (KI-178)"
+  (test "twenty thousand activations answer true every time"
+    (assert= 0 (jpp-wrong 20000 0)))
+  (test "the plain answers, for the record"
+    (is (pair? jpp-range))
+    (is (list? jpp-range))
+    (is (pair? jpp-view))
+    (assert= :pair (type-of jpp-range))))

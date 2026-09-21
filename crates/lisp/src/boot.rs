@@ -323,7 +323,9 @@ fn boot_from_source() -> SharedBundle {
         // macro defined by one form is visible to the next.
         let t_e = web_time::Instant::now();
         let form = eval::macros::compile(&mut heap, form, root)
-            .unwrap_or_else(|e| panic!("prelude expand: {}", e));
+            // Name the form: a prelude that fails to expand is a prelude being edited, and
+            // "unbound symbol: x" without the form that reached `x` is a bisection.
+            .unwrap_or_else(|e| panic!("prelude expand: {} (form at {:?})", e, pos));
         let d = t_e.elapsed();
         if d.as_micros() > 300 && std::env::var_os("BROOD_BOOT_TRACE").is_some() {
             eprintln!("[boot-form] {:?} at {:?}", d, pos);
@@ -393,6 +395,10 @@ pub const PRELUDE: &str = concat!(
     include_str!("../../../std/prelude/seq.blsp"),
     include_str!("../../../std/prelude/string.blsp"),
     include_str!("../../../std/prelude/tools.blsp"),
+    // Runtime contracts (ADR-381) come LAST among the prelude files: a prelude closure whose
+    // body calls a macro defined after it is deferred to the tree-walker for good, and this
+    // machinery — every contract check — sat above `and`/`or`/`cond` in core.blsp for a year.
+    include_str!("../../../std/prelude/contracts.blsp"),
     // Behaviour contracts are CORE (defbehaviour / %register-protocol / ops / *protocols*).
     // After tools.blsp, which defines the `swap-registry!` macro protocol uses.
     include_str!("../../../std/protocol.blsp"),
@@ -580,6 +586,10 @@ mod prelude_hygiene {
             (
                 "tools.blsp",
                 include_str!("../../../std/prelude/tools.blsp"),
+            ),
+            (
+                "contracts.blsp",
+                include_str!("../../../std/prelude/contracts.blsp"),
             ),
             ("protocol.blsp", include_str!("../../../std/protocol.blsp")),
         ];

@@ -37,14 +37,13 @@ keyword-headed list, unusable as a form head). The arrow marker `->` reads as an
 ordinary symbol, so `(number -> number)` is a plain list the parser splits on
 `->`.
 
-**Write it BELOW the definition.** The examples above are shown alone; in a real file
-each `(sig …)` goes immediately *after* the `defn` it describes. As a pure declaration
-the placement is free — but `BROOD_CONTRACTS=1` turns every `sig` into a `sig!`, which
-**rebinds** the name, so a forward one fails and takes the module's whole load with it.
-This is the rule most likely to be broken by someone doing the right thing (a signature
-reads as documentation, and documentation goes above), and it has been broken in bulk
-twice — see KI-81 and its 2026-08-30 recurrence. `crates/lisp/tests/sig_placement.rs`
-asserts it over every `.blsp` in the tree and names the line to move.
+**Placement is free** (ADR-381). A `(sig …)` may stand above the definition it
+describes — where std writes it, since a signature reads as documentation — or below
+it; `sig!` too. A declaration is only ever a declaration; whether it is *enforced* is
+decided when the name's **binding** comes to exist, whichever side the form is on. (Until
+2026-09-21, `BROOD_CONTRACTS=1` turned every `sig` into a rebinding and a forward one
+took the module's whole load with it — KI-81, KI-113, and a tree-wide placement gate that
+existed only to police that. The gate is gone; the rule it enforced has no failure left.)
 
 ### Type-expression grammar (slice 1)
 
@@ -295,12 +294,29 @@ checker reads `(sig! …)` exactly like `(sig …)`, so the static trust is now
 **sound** — the reported type holds unless the program throws (the paper's
 (i)/(ii)/(iii) guarantee).
 
-It's **all policy in Brood** (no new primitive): the `sig!` macro generates the
-wrapper, `type-matches?` decides membership over `type-of`/predicates, and
-`%contract-check-args` does the per-argument check (all in `std/prelude/core.blsp`).
-Place `(sig! …)` **after** the definition (it rebinds the name). The wrapper
-preserves arity, so introspection and the reload-arity diagnostic are
-undisturbed (the one cost: `arglist` of a wrapped fn reflects the wrapper).
+**Enforcement is binding-time policy (ADR-381).** The kernel offers a binding to ONE
+Brood function, `%contract-wrap` (`std/prelude/contracts.blsp`), at the three moments a
+name with a declared arrow comes to hold a closure — a `def` (either engine, `load`, the
+REPL), a `%register-sig` landing on a bound name, and the sweep after a module's bindings
+arrive (from source or from the stdlib image; the prelude's own root names at runtime
+boot under `BROOD_CONTRACTS=all`) — and binds what it returns: the closure itself when
+nothing is to be enforced, or a checking shim. `type-matches?` (end of `core.blsp`)
+decides membership over `type-of`/predicates; `%contract-check-args`/`-rest`/`-ret` do
+the checks and raise the blamed error. The kernel's part is three primitives
+(`builtins/contracts.rs`) and the carry of what a `def` records beside a binding — the
+closure's name and docstring, `defn-` privacy, `meta` — so a contracted name introspects
+like the plain one. A shim is recognised by construction (its captured frame binds the
+original as `%contract-orig`), so a second offer never stacks one on another, and a hot
+reload — a `def` — re-wraps the new definition instead of dropping the contract.
+Fixed arities up to eight keep the function's arity; `arglist` reads the shim's
+parameters (`a b …`).
+
+**Blame.** A mismatch raises a structured error naming the party at fault
+(ROADMAP item 10): an argument that fails its type is the CALLER's — `{:kind :contract
+:blame :caller :function 'name :argument 2 :expected int :got "two" :message …}` — and a
+result that fails is the CALLEE's (`:blame :callee`, `:argument nil`). `error-message`
+reads `:message`; `(get e :blame)` reads the verdict. A callback argument is checked for
+callability only, so no blame swaps sides through a higher-order argument.
 
 **`&optional` is the one shape that cannot preserve arity.** A wrapper has no way to
 tell "not supplied" from "supplied `nil`", so passing an explicit `nil` through would
@@ -314,21 +330,38 @@ over a 2-3-arity function and made every `(string/pad-left s 10)` an arity error
 Design decisions, as built:
 - **Where the check lives** — the wrapper rebinds the **global**, so every call
   is checked, including indirect / `apply`.
-- **Opt-in** — `(sig! …)` always enforces; plain `(sig …)` is static-only and free
-  *unless* `BROOD_CONTRACTS=1`, which arms every one of them (slice 3, below). Writing
-  a *type* never changes behaviour; opting into *enforcement* does — and note that the
-  second opt-in is a whole-run switch, not a per-declaration one, which is exactly why
-  placement matters for `sig` and not only for `sig!`.
+- **Dev mode enforces, a release does not** — `(sig! …)` always enforces; plain
+  `(sig …)` is enforced when `BROOD_CONTRACTS=1` is set, which **`nest run` and
+  `nest test` set by default** (ADR-381); `BROOD_CONTRACTS=0` opts a run out, and a
+  released bundle (the `brood` runtime) never arms. `BROOD_CONTRACTS=all` also enforces
+  the prelude's own sixteen declarations, which plain `1` leaves alone: they are the
+  language's hottest names, each a thin wrapper over a native that already raises the
+  precise error, and a shim on `nth` makes a 0.4 µs call a 4.5 µs one.
 - **Unknown types accept** — a type-expr `type-matches?` can't interpret (an
   unknown base name, an arrow param) accepts any value, so a contract never
-  throws on a type it doesn't understand (no spurious runtime failure).
-- **Hot reload** — re-`def`ing `name` drops the contract (it's the binding);
-  re-run `(sig! …)` to reinstall. The wrapper's preserved arity keeps the
-  reload-arity check quiet.
+  throws on a type it doesn't understand (no spurious runtime failure). Every base name
+  of the grammar IS interpreted, including `set`, `bytes`, `seqable`, `countable`,
+  `nil`, `never`, `table`, `pid`, `ref`, `rope`, `failure` (added 2026-09-21 — they used
+  to fall to the alias lookup and accept).
+- **Hot reload** — re-`def`ing `name` re-wraps the new definition: the contract is a
+  property of the binding, and a `def` is where a binding comes to exist.
+- **Cost** (release, 2026-09-21, prelude exempt): a contracted call pays ~3.5 µs over
+  the plain one — `string/starts-with?` 0.9 → 4.3 µs, a `(string int -> string)` user
+  function 3.4 → 6.9 µs. Per-character helpers with a sig (`string/char-at` under
+  `string/format`) make their callers ×6; a recursive descent over a collection with a
+  `(list T)` sig re-walks the collection at every level. Whole test files: `json_test`
+  ×1.5, `resolver_test` ×3.5, `format_test` ×35 (0.2 → 8 s). Before the prelude was
+  moved out from under its own macros the same shim cost ~600 µs (`type-matches?` was
+  tree-walked; see contracts.blsp's header). The principled next step, not taken: a
+  contract as a MODULE BOUNDARY, with a module's calls to its own functions unchecked.
 
 Verified by `tests/contract_test.blsp`: a correct call passes; a bad argument,
 a bad *result* (a fn that lies about its return type), and a union-type
-non-member all throw.
+non-member all throw; the error blames the right party; a `sig!` above its definition
+and a redefinition are both enforced. `crates/nest/tests/contracts_default.rs` proves
+the default-on run enforces the project's own and a std declaration reached through the
+stdlib image, that `BROOD_CONTRACTS=0` opts out, and that the image writer refuses to
+run armed (an image built with contracts on would carry every shim into unarmed runs).
 
 **Also shipped (slices 3–8):** `BROOD_CONTRACTS=1` enforces every `(sig …)` as
 a runtime contract (same as `sig!`) for a dev/test run; element-level checks

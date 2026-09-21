@@ -40,6 +40,7 @@ mod build_info;
 mod bytes;
 mod clipboard;
 mod compress;
+pub(crate) mod contracts;
 mod crypto;
 mod diagnostics;
 mod dynamic;
@@ -164,6 +165,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     selfhost_macros::register(&mut primitives);
     errors::register(&mut primitives);
     dynamic::register(&mut primitives);
+    contracts::register(&mut primitives);
     processes::register(&mut primitives);
     offload::register(&mut primitives);
     #[cfg(feature = "wasm")]

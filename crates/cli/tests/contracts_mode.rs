@@ -47,6 +47,10 @@ const PROGRAM: &str = "\
 (sig bad-result (int -> int))\n\
 (defn good (n) n)\n\
 (sig good (int -> int))\n\
+(sig above (int -> int))\n\
+(defn above (n) n)\n\
+(defn optional-arity (a &optional b) a)\n\
+(sig optional-arity (int -> int))\n\
 (defability Size (size [self] :-> int) (tag [self]))\n\
 (impl Size :string (size [s] \"not an int\") (tag [s] :anything))\n\
 (impl Size :int (size [n] n) (tag [n] :fine))\n\
@@ -61,7 +65,10 @@ const PROGRAM: &str = "\
 (report \"op-undeclared: \" (fn () (tag \"x\")))\n\
 (report \"opt-absent: \" (fn () (padded \"x\" 3)))\n\
 (report \"opt-given: \" (fn () (padded \"x\" 3 \"*\")))\n\
-(report \"opt-bad: \" (fn () (padded \"x\" \"three\")))\n";
+(report \"opt-bad: \" (fn () (padded \"x\" \"three\")))\n\
+(report \"above-bad: \" (fn () (above \"x\")))\n\
+(report \"above-blame: \" (fn () (try (above \"x\") (catch e (get e :blame)))))\n\
+(report \"opt-arity: \" (fn () (optional-arity 1 2)))\n";
 
 /// Run the program with a **fresh** cache dir, so the prelude is expanded from source rather
 /// than replayed — the only configuration in which either KI-81 cause is reachable.
@@ -150,12 +157,29 @@ fn contracts_mode_boots_on_a_cold_cache_and_enforces_both_kinds() {
         text.contains("opt-bad: RAISED") && text.contains("argument 2 expected int"),
         "a contract must still fire on a fixed argument of an &optional signature:\n{text}"
     );
+
+    // ADR-381: a `sig` ABOVE its definition is enforced too (it used to fail the load),
+    // the error names the party, and a declaration that says less than the definition
+    // accepts (`(int -> int)` over an `&optional`) keeps the definition's arity.
+    assert!(
+        text.contains("above-bad: RAISED") && text.contains("above: argument 1 expected int"),
+        "a `sig` above its definition must be enforced:\n{text}"
+    );
+    assert!(
+        text.contains("above-blame: :caller"),
+        "a bad argument must blame the caller:\n{text}"
+    );
+    assert!(
+        text.contains("opt-arity: 1"),
+        "a shim must keep the DEFINITION's arity, not the declaration's:\n{text}"
+    );
 }
 
 #[test]
 fn without_the_flag_nothing_is_enforced() {
-    // The default build must be untouched: the shim is decided at expansion time, so with
-    // the flag unset it is never emitted and every wrong value flows through as before.
+    // The default `brood` run must be untouched: with the flag unset the policy hook returns
+    // every binding as it is (ADR-381), and every wrong value flows through as before. (The
+    // dev-mode default lives in `nest run`/`nest test`, not in `brood file`.)
     let (text, ok) = run(false);
     assert!(ok, "the program should run to completion:\n{text}");
     assert!(

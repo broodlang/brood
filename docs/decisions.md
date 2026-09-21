@@ -24549,3 +24549,113 @@ edit cases, forced false reds the warm case. The trace line is a print of a coun
 keeps regardless (KI-171). `scripts/bench/image-scale.sh` gained `FNS=` (the 3k-line shape)
 and two warm columns, and its stale ADR-325 names were fixed.
 
+## ADR-381 — Contracts are binding-time policy: blame, placement-free `sig`, the prelude reached, on by default under `nest run`/`nest test`
+
+**Context.** ROADMAP items 10 and 11. `BROOD_CONTRACTS=1` reported a mismatch but not
+the party; and the mode was built on the reinterpretation ADR-152 removed elsewhere — the
+`sig` *declaration* became a *rebinding* under the flag — which is why three of ADR-153's
+four problems existed and kept recurring: a `sig` above its `defn` failed the module
+(KI-81, KI-113, a tree-wide placement gate), a `provide`-time queue patched that for
+modules only, a module materialised from the stdlib image never evaluated its sigs and so
+was never contracted (the mode was "barely exercised" with an image present), the prelude
+could not carry a contract, and a hot reload of a contracted function silently dropped it.
+ADR-153 left the shape open: (a) `sig` pure and `sig!` the only enforcement, or (b) a
+kernel hook applying registered signatures at `def` time.
+
+**Decision: (b), generalised.** Whether a declaration is enforced is a property of the
+**binding**, decided when the binding comes to exist. The kernel owns three moments and
+consults ONE Brood function at each — `%contract-wrap`, the policy:
+
+1. a global `def` of a closure whose name has a declared arrow (`eval.rs`'s `def` arm —
+   every `def` routes through it, both engines, `load`, `eval`, the REPL);
+2. a `%register-sig` landing on a name already bound to a closure (the `sig` below its
+   definition) — and `sig!`, which is now `(%register-sig …)` plus `%contract-force!`;
+3. a batch: an embedded module's bindings at `provide`, whichever way they arrived
+   (source, or the image) — the sweep `%contracts-sweep!` — and the prelude's own root
+   names at runtime boot (`Interp::new`), where a rebinding is an ordinary global and the
+   freeze's no-frame rule no longer applies.
+
+The hook returns the closure to bind: the original (unarmed and not forced, or exempt) or
+a checking shim built from a fixed-arity TEMPLATE closing over the name, the original and
+the parsed spec. The kernel carries what a `def` records beside a binding — closure name
+and docstring, `defn-` privacy, `meta` — and recognises a shim **by construction**: its
+captured frame binds the original under `%contract-orig`, evidence the value carries
+itself, so a second offer never stacks (a `sig!` after a `sig`, a changed declaration, a
+sweep over a module whose defs already fired the hook), and it survives an `%isolate`
+restore and a compaction, which a side table of handles would not. A reload is a `def`,
+so it re-wraps. `sig` is a declaration in every mode; the placement gate
+(`sig_placement.rs`) is gone, its docstring half kept as `sig_in_docstring.rs`.
+
+**Blame (item 10).** A mismatch is a structured error naming the party (Findler &
+Felleisen): an argument that fails its type is the caller's — `{:kind :contract :blame
+:caller :function 'f :argument 2 :expected int :got "two" :message …}` — a result that
+fails is the callee's (`:blame :callee`). An ability op's declared `:->` return raises the
+same shape. A callback is checked for callability only, so no blame swaps sides through a
+higher-order argument.
+
+**On by default in dev mode (item 11).** `nest run` and `nest test` set
+`BROOD_CONTRACTS=1` before the runtime boots (`arm_contracts_default`, beside the coverage
+flags and for the same timing reason); `BROOD_CONTRACTS=0` opts out; a released bundle
+never arms. The stdlib image is mode-independent by construction — the `def` hook and
+`%register-sig` stand down inside an embedded module's load, the sweep at `provide` is
+what contracts std, and `stdimage/build` **refuses** to run armed (`nest` spawns its image
+child with the variable removed), since an image is keyed on the stdlib's content alone and
+one carrying shims would enforce contracts in every unarmed run.
+
+**What the measurement found (item 11c), and what it changed.**
+- Every contract check was **tree-walked**: the machinery sat in `core.blsp` above
+  `and`/`or`/`cond`, a prelude closure keeps a forward macro call unexpanded, and the VM
+  defers such a closure for good. `(type-matches? 'string "x")` cost 210 µs; a contracted
+  call ~600 µs; the contracts-mode suite needed a 5× timeout. Moved (`type-matches?` to
+  the end of `core.blsp` — after those macros, before `tools.blsp`, whose `->string` reaches
+  it during the prelude's own expansion; everything else to a new last prelude file,
+  `contracts.blsp`): 0.9 µs and ~3.5 µs.
+- `%type-alias` scanned every declared signature (allocating) for each symbol that is not
+  a base name — and eleven base names (`set`, `seqable`, `bytes`, `nil`, `never`,
+  `countable`, `table`, `pid`, `ref`, `rope`, `failure`) were not interpreted, so `conj`'s
+  `(or list vector set map)` paid three scans per call and admitted a string. All base
+  names are interpreted now, and the suffix scan is memoised per process on a
+  declared-sigs version (`Heap::alias_key_by_suffix`).
+- **KI-178.** A contract over `seqable` rejected `(range 100)` on the two-thousandth call:
+  the JIT's inline `pair?` compared the discriminant byte against `TAG_PAIR` alone, on the
+  strength of a comment saying ranges "also carry TAG_PAIR". `(pair? (range 3))` and
+  `list?` were `false` in native code and `true` on every other tier, since the day the
+  lowering was written. Fixed (`TAG_RANGE`/`TAG_SEQVIEW`, pinned by the layout test;
+  `tests/jit_pair_predicate_test.blsp` counts wrong answers over 20 000 activations).
+- **The prelude is exempt under plain `1`** (`BROOD_CONTRACTS=all` includes it). Its
+  sixteen signed names are the language's hottest vocabulary, each a thin wrapper over a
+  native that already raises the precise error: with them contracted `nth` went 0.4 →
+  4.5 µs, `assoc` 0.7 → 6.8, `for` ×2.6, `json/decode` ×16; without, those rows are flat.
+  Mechanism kept and gated, policy declines by default.
+- Remaining cost, release, prelude exempt: ~3.5 µs per contracted call; `json_test` ×1.5,
+  `resolver_test` ×3.5, `prng_test` ×3, `format_test` ×35 (0.2 → 8 s: `string/char-at`
+  is contracted and called per character). The old "five times the ceiling" four now
+  peak at 8 s. The nextest suite wrapper runs the in-language suite in-process and
+  unarmed; CI's `nest test` runs — the examples and bedit — run armed.
+
+**Alternatives.** (a) `sig` pure, `sig!` the only enforcement — keeps the placement
+problem for `sig!` and gives the prelude and the image nothing. A per-call-path check in
+the VM dispatcher (a contract bit on the closure) — Rust policy on the hottest path, the
+KI-40 class. Module-boundary contracts (a module's calls to its own functions unchecked,
+the Racket shape) — the principled answer to the `char-at` cost, and the follow-up: it
+needs the compile pass to resolve same-module references past the shim.
+
+**Consequences.** `crates/lisp/src/builtins/contracts.rs` (three primitives:
+`%contracts-armed?`, `%contract-install!`, `%contracts-sweep!`); `std/prelude/contracts.blsp`;
+`tests/contract_test.blsp` (blame, both placements, reload, arity and docstring kept),
+`crates/nest/tests/contracts_default.rs` (default-on through the image; opt-out; the image
+writer refuses), `crates/cli/tests/contracts_mode.rs` unchanged in intent. Deleted:
+`%contract-defer!`/`%contracts-apply-pending!`, the `%sig-*` expansion helpers, the
+`sig_placement` rule. `BROOD_CONTRACTS` values: `1`, `all`, anything else off.
+
+**Downstream (bedit).** The first armed run of bedit's suite reported 189 failures, every
+one a declaration saying less than the code does — `bool` where `(:gui m)`'s nil arrives,
+`(list diagnostic)` where the LSP path stores a vector, a `model` alias with `:status` and
+`:done` required when a save `dissoc`s one and only quit sets the other, a test handing
+`0` to `make-buffer` as a NAME. Seven sigs and one test fixed in bedit `68e74c6f` (its
+commit message cites "ADR-380"; this ADR was renumbered to 381 after the push, when
+`origin` took 380 for the module-graph cache). What remains armed — six tests — is the std
+`pane` record's required fields against the pane payloads bedit hands its twenty-four
+`(pane …)`-declared functions, bedit's reconciliation to do. Until it is green armed,
+`scripts/smoke-bedit.sh` runs the downstream gates with `BROOD_CONTRACTS=0`
+(`SMOKE_CONTRACTS=1` arms them), so a brood push is not red for bedit's declarations.

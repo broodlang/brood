@@ -173,8 +173,12 @@ fn ensure_stdimage_now(interp: &mut Interp) {
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
+    // Unarmed, whatever this process is: an image is keyed on the stdlib's content alone and
+    // read by every run, and a build with contracts armed would bind every sig'd function
+    // to its checking shim and image THAT (ADR-381; `stdimage/build` refuses outright).
     let ok = std::process::Command::new(exe)
         .arg("stdimage")
+        .env_remove("BROOD_CONTRACTS")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -334,6 +338,26 @@ fn arm_test_env(argv: &[String]) {
     );
 }
 
+/// Runtime contracts are ON by default in dev mode (ADR-381): `nest run` and `nest test`
+/// arm `BROOD_CONTRACTS=1` unless the environment already says otherwise, so every `(sig …)`
+/// in the project and in std is enforced while the code is being developed and tested, and
+/// never in a released bundle (a bundle runs the `brood` runtime, which reads the variable
+/// and defaults it off). `BROOD_CONTRACTS=0` — or any value but `1` — opts out explicitly.
+///
+/// Set here, in Rust, for the same timing reason as the coverage flags above: the kernel
+/// reads the variable once, and the prelude's own contracts are installed by `Interp::new`,
+/// which runs before `std/tool/nest.blsp` could say anything. The policy — which commands
+/// are dev mode — is this list and nothing else.
+fn arm_contracts_default(argv: &[String]) {
+    if !matches!(argv.first().map(String::as_str), Some("run" | "test")) {
+        return;
+    }
+    if std::env::var_os("BROOD_CONTRACTS").is_none() {
+        // SAFETY: called before any thread or interpreter is created.
+        unsafe { std::env::set_var("BROOD_CONTRACTS", "1") };
+    }
+}
+
 /// Run a Brood-implemented subcommand: `(nest/main argv)` returns the exit code.
 fn run_blsp(max_parallel: Option<usize>, argv: Vec<String>) {
     if let Some(n) = max_parallel {
@@ -350,6 +374,7 @@ fn run_blsp(max_parallel: Option<usize>, argv: Vec<String>) {
         brood::cli_support::refuse_if_stdlib_is_stale("nest check");
     }
     arm_test_env(&argv);
+    arm_contracts_default(&argv);
     let mut interp = Interp::new();
     // `complete` runs on a keypress: read an image if there is one, never spend the
     // keypress building it.

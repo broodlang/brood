@@ -594,11 +594,11 @@ disabled snippets. The body is still *read*, so it must be balanced sexps; use
 
 ;; `(sig name (params… -> ret))` — a type-signature declaration the advisory
 ;; checker reads (it parses the type-expression and treats it as `name`'s
-;; authoritative signature, ahead of inferred/curated ones). Normally a runtime
-;; no-op (expands to `nil`); set BROOD_CONTRACTS=1 to enforce every `(sig …)`
-;; as a runtime contract (same as `(sig! …)`) for a dev/test run. See
-;; `docs/type-annotations.md`. NOTE: the checker reads the *un-expanded* form, so
-;; this macro intentionally discards its arguments.
+;; authoritative signature, ahead of inferred/curated ones). At runtime it only
+;; registers; enforcement is the binding's business (ADR-381, `%contract-wrap`
+;; below) — armed by `BROOD_CONTRACTS=1`, which `nest run`/`nest test` set by
+;; default. See `docs/type-annotations.md`. NOTE: the checker reads the
+;; *un-expanded* form, so this macro intentionally discards its arguments.
 (defmacro meta (name & clauses)
   "Record stability metadata for `name` (ADR-283) — three independent facts, each optional:
 
@@ -620,8 +620,10 @@ Written beside the definition, like `(sig …)`, and cleared if the name is rede
 
 (defmacro sig (name & spec)
   "Declare a type signature for `name`, e.g. `(sig area (number -> number))`.
-Read by the advisory type checker; a runtime no-op unless `BROOD_CONTRACTS=1`
-is set, in which case it installs a runtime contract like `(sig! …)`. Type
+Read by the advisory type checker. At runtime a declaration only: under
+`BROOD_CONTRACTS=1` — which `nest run` and `nest test` set by default — every
+declared arrow is ALSO enforced at each call, whichever side of the definition
+it is written on (ADR-381); `(sig! …)` enforces one whatever the mode. Type
 grammar: base names (`int` `string` `number` `list` `vector` `map` `fn` `any` …),
 arrows `(p… -> r)`, `(list E)`/`(vector E)`, `(or A B)`, and `(& rest-type)`
 for variadic tails.
@@ -633,65 +635,26 @@ self-call decreases an argument, and no `match` in the body can fail).
 
     (sig area (number -> number) :pure)
     (sig walk :total)"
-  ;; Always register the declaration on the heap (keyed by the module-qualified
-  ;; global name, resolved as `def` would) so the checker treats it as `name`'s
-  ;; authoritative signature everywhere — intra-module and cross-module — not just
-  ;; in a bare file's per-file ctx. Then keep the existing semantics: a runtime
-  ;; no-op, or a `sig!` runtime contract under BROOD_CONTRACTS=1.
-  ;; ---- the expander's own functions are declaration-only, even under contracts ----
-  ;; `sig!` rebinds `name` to a wrapper. For most functions that costs a few frames per
-  ;; call. For a function the MACRO EXPANDER itself calls at every level of its recursive
-  ;; descent it costs those frames per level of expansion depth, and prelude expansion is
-  ;; already deep: wrapping `reverse` alone took the cold contracts boot from under 6 MB of
-  ;; stack to over the 12 MB budget, and it died in `prelude expand` naming no `sig` at all.
-  ;; `append` is the same shape. Raising the budget is not the fix — the thread's stack is
-  ;; 16 MB, so a bigger budget just trades a clean error for a real overflow.
-  ;;
-  ;; Declaration-only here means the CHECKER still gets the signature (`(reverse "ab")` is
-  ;; still caught statically, which is why these were declared); only the runtime contract
-  ;; stands down, in the one mode where installing it makes the language unable to boot.
+  ;; Register the declaration on the heap (keyed by the module-qualified global name,
+  ;; resolved as `def` would) so the checker treats it as `name`'s authoritative
+  ;; signature everywhere — intra-module and cross-module — not just in a bare file's
+  ;; per-file ctx.
+  ;; A DECLARATION, in every mode (ADR-381). Whether it is enforced is decided when the
+  ;; name's binding comes to exist — the kernel offers the binding to `%contract-wrap`
+  ;; (below) at the `def`, at a `%register-sig` landing on a bound name, and in the sweep
+  ;; after a module's bindings arrive — so this macro never rebinds anything and its
+  ;; placement is free: above the definition (documentation, where std writes it) or below.
   ;; Nested `if` and `%`-prims rather than `and`/`or`/`cond` on purpose: this macro body is
   ;; expanded where it is defined, and those macros are defined further down the file.
   ;; The type-form is the first item of `spec` unless it is a keyword; every item after
   ;; it is a property keyword, recorded beside the type (`%register-sig-props`). A
-  ;; properties-only `(sig f :pure)` registers no type and installs no contract.
+  ;; properties-only `(sig f :pure)` registers no type.
   (let (typed (if (pair? spec) (if (%eq (type-of (first spec)) :keyword) false true) false)
         type (if typed (first spec) nil)
         props (if typed (rest spec) spec))
     `(do
-       ~(if typed
-          (if (= (%getenv "BROOD_CONTRACTS") "1")
-            (if (%le 0 (%sig-pos '(reverse append) name 0)) `(%register-sig '~name '~type) nil)
-            `(%register-sig '~name '~type))
-          nil)
-       ~(if (pair? props) `(%register-sig-props '~name '~props) nil)
-       ~(if (if typed (= (%getenv "BROOD_CONTRACTS") "1") false)
-          ;; Contracts mode turns this *declaration* into an *action*: `sig!` rebinds
-          ;; `name` to a checking wrapper, so the definition must already exist. A
-          ;; `sig` written above its `defn` — the natural place, since a signature is
-          ;; documentation, and the style the strict sweep adopted across std/ — used
-          ;; to abort the whole module load here. It now DEFERS instead: the pending
-          ;; contract is queued and installed at the next `provide`, when the module's
-          ;; defs all exist (`%contract-defer!` / `%contracts-apply-pending!` in
-          ;; tools.blsp — late-bound, so this expansion referencing them from an
-          ;; earlier prelude file is fine). In a bare file with no module (no provide)
-          ;; an above-defn sig stays a pure declaration, which is what it was before
-          ;; contracts mode existed.
-          ;; `bound?` on a QUOTED symbol is not namespace-resolved — inside
-          ;; `(defmodule path)` it would ask about bare `basename` while the
-          ;; definition is `path/basename`, and report "not defined yet" for a
-          ;; perfectly-placed sig. `%register-sig` already returns the qualified
-          ;; symbol it keyed the declaration under, so ask about *that*. NO `let`
-          ;; around this — `sig!` expands to `def`s of a shim `fn`, and a binding
-          ;; frame here makes that shim capture a local env, which the prelude
-          ;; freeze hard-rejects (KI-81's other half). The defer branch calls
-          ;; `%register-sig` a second time instead: cold, idempotent.
-          (if (%le 0 (%sig-pos '(reverse append) name 0))
-            nil
-            `(if (bound? (%register-sig '~name '~type))
-               (sig! ~name ~type)
-               (%contract-defer! (%register-sig '~name '~type) '~type)))
-          nil))))
+       ~(if typed `(%register-sig '~name '~type) nil)
+       ~(if (pair? props) `(%register-sig-props '~name '~props) nil))))
 
 (defmacro deftype (name type)
   "Name a type for the checker — `(deftype pane (record &open :rect (tuple int int int int)))`
@@ -734,12 +697,117 @@ signature — which `--strict` otherwise reports as trusted, not verified). A ru
 no-op; the marker is read only by the type checker (`nest check`)."
   `(%lint-allow ~category (do ~@body)))
 
-;; ---- runtime contracts: `(sig! …)` enforces a signature at call time --------
-;; The opt-in *sound* half of the type system (the paper's "strong arrow", done
-;; Brood-side). `(sig …)` informs only the checker; `(sig! …)` *also* wraps the
-;; function so each argument and the result are checked at run time and a
-;; mismatch throws — so a value the static checker trusted can never silently
-;; slip through. All policy, no new primitive. See `docs/type-annotations.md`.
+;; `and`/`or` short-circuit left-to-right and return the deciding value, with
+;; each subexpression evaluated at most once (a gensym holds it across the test).
+(defmacro and (& xs)
+  "Logical AND: evaluate left-to-right, short-circuiting on the first falsy value (which it returns); `true` if none. Each argument is evaluated at most once.
+
+    (and 1 2)       → 2      ; the last value, when nothing is falsy
+    (and 1 nil 3)   → nil    ; the falsy value itself — 3 is never evaluated
+    (and)           → true"
+  (if (empty? xs)
+    true
+    (if (empty? (rest xs))
+      (first xs)
+      (let (g (gensym "and")) `(let (~g ~(first xs)) (if ~g (and ~@(rest xs)) ~g))))))
+
+(defmacro or (& xs)
+  "Logical OR: evaluate left-to-right, short-circuiting on the first truthy value (which it returns); `nil` if none. Each argument is evaluated at most once.
+
+    (or nil :fallback)   → :fallback
+    (or false 0)         → 0     ; 0 is truthy — only nil and false are falsy
+    (or nil nil)         → nil"
+  (if (empty? xs)
+    nil
+    (if (empty? (rest xs))
+      (first xs)
+      (let (g (gensym "or")) `(let (~g ~(first xs)) (if ~g ~g (or ~@(rest xs))))))))
+
+;; cond: flat test/expr pairs (ADR-004); a final `else` is the catch-all.
+;;
+;; `else` needs the special case below: a bare symbol would otherwise be an unbound
+;; reference. `:else` never did — a keyword is self-evaluating and truthy, so it
+;; already worked the way `true` or any other truthy test does. Special-casing it
+;; too made the language carry a second blessed spelling for no gain, so that case
+;; is gone (2026-07-26). `(cond … :else x)` still returns `x` — as an ordinary
+;; truthy test, via `if` — but `else` is the spelling the language knows.
+;; Bootstrap helper for cond's guard: walks clauses two at a time, returning
+;; the orphan last element when count is odd, nil when even. Uses only
+;; `if`/`empty?`/`first`/`rest` — all kernel primitives — so it's safe to call
+;; during prelude loading before `odd?`/`count`/`last` are defined.
+(defn- %cond-orphan (clauses)
+  (if (empty? clauses)
+    nil
+    (if (empty? (rest clauses))
+      (first clauses)
+      (%cond-orphan (rest (rest clauses))))))
+
+(defmacro cond (& clauses)
+  "Multi-way branch over `test expr` pairs: return the `expr` of the first truthy `test`. A final `else` test always matches; `nil` if none do.
+
+    (cond (> 2 1) :yes else :no)   → :yes
+    (cond false :a else :b)        → :b
+    (cond false :a)                → nil   ; nothing matched, and no else"
+  (let (orphan (%cond-orphan clauses))
+    (if (and (not (nil? orphan)) (not (%eq orphan 'else)))
+      (error "cond: odd number of clauses — expected test/expression pairs. "
+        "Did you forget an expression for '"
+        (pr-str orphan)
+        "'?")
+      (if (empty? clauses)
+        nil
+        (let (test (first clauses) expr (first (rest clauses)) more (rest (rest clauses)))
+          ;; compare with the `%eq` primitive, not the variadic `=` — `=` builds a
+          ;; lambda, and doing that *at expansion time* during the prelude's own
+          ;; compile pass would strand a local-env closure (breaks the freeze).
+          (if (%eq test 'else) expr `(if ~test ~expr (cond ~@more))))))))
+
+;; ---- macro expansion --------------------------------------------------------
+;; Fully expand `form`'s head macro by iterating the single-step `macroexpand-1`
+;; primitive to a fixpoint. Written in Brood, not Rust (ADR-064): the loop's state
+;; is an env-bound local the evaluator already roots, so it can't strand a handle
+;; across a GC safepoint the way a hand-rooted Rust loop could. `macroexpand-1` is
+;; the irreducible single-shot primitive (one expansion, holding nothing across
+;; its `apply`); this just drives it. Tail-recursive, so it is O(1) stack.
+;; Bounded (kernel audit): a macro that forever expands to another macro call
+;; would otherwise spin here. Mirrors the kernel expander's own cap
+;; (`MAX_EXPAND_ROUNDS` in eval/macros.rs) — keep the two in step.
+(def- %macroexpand-max-rounds 256)
+
+(defn- %macroexpand-loop (form n)
+  (if (= n 0)
+    (error "macroexpand: no fixpoint after "
+      %macroexpand-max-rounds " rounds (a macro that expands to itself?)")
+    (let (stepped (macroexpand-1 form))
+      (if (= stepped form) form (%macroexpand-loop stepped (- n 1))))))
+
+(defn macroexpand (form)
+  "Repeatedly expand `form`'s head macro until the head is no longer a macro call.
+
+    (macroexpand '(when true 1))   → (if true (do 1) nil)"
+  (%macroexpand-loop form %macroexpand-max-rounds))
+
+;; ---- signatures for the core functions defined ABOVE `sig` itself ----------
+;; These cannot sit next to their `defn`s: `sig` is defined partway down this file
+;; (the `defmacro sig` below the arithmetic), and a `sig` form before that point is
+;; an unbound symbol that panics the prelude boot. Domains are the ones the runtime
+;; actually enforces, established by probing every value kind rather than read off
+;; the implementation: both reject a string (`(reverse "ab")` raises — reverse its
+;; `string/->list`) and every scalar, and both accept a record, which is a `map` to
+;; the type system and IS indexable through its Seqable view.
+(sig reverse (seqable -> any))
+
+;; ---- `type-matches?` — the runtime meaning of a type-expression -------------------------
+;; Defined HERE, at the end of core.blsp, and not in contracts.blsp with the rest of the
+;; contract machinery, for two reasons that pull in opposite directions. It must come AFTER
+;; `and`/`or`/`cond` (above): a prelude closure keeps a call to a macro defined after it
+;; unexpanded, and the VM then defers the whole closure to the tree-walker for good — this
+;; function sat above those macros for a year and `(type-matches? 'string "x")` cost 210 µs
+;; (2026-09-21). And it must come BEFORE tools.blsp: an ability op with a declared `:->`
+;; return checks its result through this function whenever contracts are armed, and the
+;; prelude's own `->string` is called while later prelude forms EXPAND — with this defined
+;; in the last file, an armed source boot died at `(defability Inspect …)` with `unbound
+;; symbol: type-matches?`.
 
 ;; `lo`/`hi` are ints or the open end `_`, as the interval grammar spells them (ADR-350).
 (defn- %interval-admits? (lo hi n)
@@ -907,6 +975,27 @@ cyclic alias (`(deftype a b)` `(deftype b a)`) stops instead of looping."
     (%eq t 'fn) (fn? v)
     (%eq t 'list) (list? v)
     (%eq t 'vector) (vector? v)
+    ;; The rest of the grammar's base names (`types/check/annot.rs`), each the tag set the
+    ;; checker gives it. Until 2026-09-21 the eleven below were not here: they fell to the
+    ;; alias lookup, which answered "not an alias" after scanning EVERY declared signature
+    ;; (allocating as it went), and then to `else true` — so `(conj (or list vector set map)
+    ;; …)` cost three such scans per call and admitted a string, while the checker rejected
+    ;; it. `seqable` and `countable` are the checker's unions exactly: a string is NOT
+    ;; seqable (it is countable).
+    (%eq t 'set) (set? v)
+    (%eq t 'bytes) (bytes? v)
+    (%eq t 'nil) (nil? v)
+    (%eq t 'never) false
+    (%eq t 'seqable) (or (list? v) (vector? v) (set? v) (map? v) (bytes? v))
+    (%eq t 'countable)
+      (or (list? v) (vector? v) (set? v) (map? v) (bytes? v) (string? v) (rope? v) (table? v))
+    (%eq t 'failure) (failure? v)
+    (%eq t 'rope) (rope? v)
+    (%eq t 'pid) (pid? v)
+    (%eq t 'ref) (ref? v)
+    (%eq t 'table) (table? v)
+    (%eq t 'socket) (%eq (type-of v) :socket)
+    (%eq t 'subprocess) (%eq (type-of v) :subprocess)
     ;; A `deftype` ALIAS name (ADR-327): match the type it names, in its place. Until
     ;; 2026-09-18 an alias was just an unknown symbol here, so it fell to the `else true`
     ;; below and a `sig!` over one accepted ANY value — every alias since ADR-327, while
@@ -932,36 +1021,6 @@ cyclic alias (`(deftype a b)` `(deftype b a)`) stops instead of looping."
           true
           (type-matches? expansion v (conj (or seen []) t))))
     else true))
-(defn- %contract-check-args (name ptypes args i)
-  "Throw if any argument fails its declared type. Pairwise over the overlap —
-arity itself is the static checker's job."
-  (when (and (pair? ptypes) (pair? args))
-    (unless (type-matches? (first ptypes) (first args))
-      (throw (str name
-               ": argument "
-               i
-               " expected "
-               (first ptypes)
-               ", got "
-               (type-of (first args))
-               " ("
-               (pr-str (first args))
-               ")")))
-    (%contract-check-args name (rest ptypes) (rest args) (inc i))))
-
-(defn- %contract-check-rest (name rtype args)
-  "Throw if any rest argument fails its declared rest type."
-  (when (pair? args)
-    (unless (type-matches? rtype (first args))
-      (throw (str name
-               ": rest argument expected "
-               rtype
-               ", got "
-               (type-of (first args))
-               " ("
-               (pr-str (first args))
-               ")")))
-    (%contract-check-rest name rtype (rest args))))
 
 (defn- %sig-pos (xs x n)
   "Position of `x` in the list `xs` (from index `n`), or -1 — also -1 when `xs` is not a
@@ -977,311 +1036,3 @@ materialised modules never evaluate their sigs)."
     (nil? xs) -1
     (pair? xs) (if (%eq (first xs) x) n (%sig-pos (rest xs) x (%add n 1)))
     else -1))
-
-(defn- %sig-doc-forms (qualified)
-  "The docstring of the function bound to `qualified` as a one-element list to splice into a
-shim's body, or nil when there is no binding or no docstring. Expansion-time helper for
-`sig!`; `qualified` is the symbol `%register-sig` returns."
-  (if (/bound? qualified)
-    ;; `type-of`, not `string?`: this runs while the PRELUDE's own sigs expand, before
-    ;; `predicates.blsp` has defined `string?` (core → predicates → …).
-    (let (d (/doc (reflect/eval qualified))) (if (%eq (/type-of d) :string) (/list d) nil))
-    nil))
-
-(defn- %sig-private-forms (qualified name)
-  "`((%mark-private 'name))` when the function bound to `qualified` is module-private, else
-nil — the re-mark a contract shim's `def` needs, spliced after it. Expansion-time helper for
-`sig!`."
-  (if (reflect/private? qualified) (/list (/list '%mark-private (/list 'quote name))) nil))
-
-(defn- %sig-rev (xs acc)
-  "`xs` reversed onto `acc`. Expansion-time helper — see `%sig-take`."
-  (if (nil? xs) acc (%sig-rev (rest xs) (cons (first xs) acc))))
-
-(defn- %sig-take-acc (n xs acc)
-  (if (or (%le n 0) (nil? xs))
-    (%sig-rev acc nil)
-    (%sig-take-acc (%sub n 1) (rest xs) (cons (first xs) acc))))
-
-(defn- %sig-take (n xs)
-  "The first `n` elements of `xs`. Expansion-time helper for `sig!`, for the same
-reason `%sig-pos` is one: this runs while the PRELUDE is being expanded, and
-`take` is defined in `seq.blsp`, which the prelude concatenates AFTER this file
-(`core → predicates → map → control → match → process → seq → string → tools`).
-So the name is perfectly ordinary at run time and simply does not exist yet here.
-Calling it made `BROOD_CONTRACTS=1` panic — `prelude expand: unbound symbol:
-take` — on every COLD boot cache, i.e. the first run after any rebuild, while a
-warm cache skipped expansion and looked fine (KI-81)."
-  (%sig-take-acc n xs nil))
-
-(defn- %sig-drop (n xs)
-  "`xs` without its first `n` elements. Expansion-time helper for `sig!` — see
-`%sig-take` for why the general `drop` cannot be called here."
-  (if (or (%le n 0) (nil? xs)) xs (%sig-drop (%sub n 1) (rest xs))))
-
-(defn- %sig-nth (xs n)
-  "The `n`th element of `xs`, or nil. Expansion-time helper for `sig!` — see
-`%sig-take` for why the general `nth` cannot be called here."
-  (cond
-    (nil? xs) nil
-    (%le n 0) (first xs)
-    else (%sig-nth (rest xs) (%sub n 1))))
-
-(defn- %sig-gensyms-acc (n acc)
-  (if (%le n 0) acc (%sig-gensyms-acc (%sub n 1) (cons (gensym "arg") acc))))
-
-(defn- %sig-gensyms (n)
-  "A list of `n` fresh argument symbols. Expansion-time helper for `sig!`,
-replacing `(map (fn (_) (gensym \"arg\")) (range (count ptypes)))` — `map`,
-`range` and `count` are all as unreachable during prelude expansion as `take`
-was."
-  (%sig-gensyms-acc n nil))
-
-(defmacro sig! (name type)
-  "Like `(sig …)` but also installs a *runtime* contract: each argument and the
-result are checked at every call and a mismatch throws (an opt-in 'strong
-arrow'). Place it AFTER the function's definition — it rebinds `name`, preserving
-arity (so introspection and the reload-arity check are undisturbed). The checker
-reads it exactly like `(sig …)`. Supports a `&` rest marker:
-`(sig! f (int & number -> string))` checks fixed args then every rest arg, and an
-`&optional` marker: `(sig! f (string int &optional string -> string))` checks each
-optional that was actually supplied and leaves the callee's own defaults alone. That
-one shim IS variadic, so `arity-of` reports `2+` where the function reads `2-3`."
-  ;; Register the declaration on the heap for the checker (keyed by the
-  ;; module-qualified global name) — same as `(sig …)` — then install the runtime
-  ;; contract. The `(do …)` keeps both effects at top level.
-  ;;
-  ;; The held original is `def-` (private): it is a gensym global the module never wrote, and
-  ;; public it showed up in `reflect/global-names` for every contracted function — apropos,
-  ;; completion and the doc catalogue's "nothing falls through to :other" all saw them.
-  ;;
-  ;; Every prelude FUNCTION the shim calls is root-scoped (`/list`, `/str`, …): the shim is
-  ;; expanded INSIDE the module being contracted, where a bare name resolves to that module's
-  ;; own definition first — so in `(defmodule proc)` the argument list `(list ~@params)` called
-  ;; `proc/list` and every contracted `proc/*` call died with `expected 0 arguments, got 1`
-  ;; (KI-113). Special forms and `unless` are safe; no module can shadow them.
-  `(do
-     (%register-sig '~name '~type)
-     ~(let (i (%sig-pos type '-> 0))
-        (if (%lt i 0)
-          ; not a (… -> …) type — nothing to enforce
-          nil
-          (let (ptypes (%sig-take i type)
-                rtype (%sig-nth type (%add i 1))
-                amp-pos (%sig-pos ptypes '& 0)
-                opt-pos (%sig-pos ptypes '&optional 0)
-                ;; The original's docstring, read NOW (the binding exists — a `sig` below its
-                ;; definition, or the deferred install at `provide`) and spliced into the shim,
-                ;; so `doc`/`apropos` keep answering under contracts. A docstring lives on the
-                ;; closure, and a fresh `(fn …)` had none: every contracted function went
-                ;; undocumented in the one mode meant for careful reading (KI-113). Asked by the
-                ;; QUALIFIED name `%register-sig` returns, not the bare one (see `sig`).
-                docf (%sig-doc-forms (%register-sig name type))
-                ;; A `defn-` stays private: the shim's `def` is a plain global definition, and
-                ;; `env_define` CLEARS the private mark on every one (ADR-146) — so every signed
-                ;; private helper went public under contracts, into apropos and the doc
-                ;; catalogue (KI-113). Re-mark right after, the way `def-` itself does.
-                privf (%sig-private-forms (%register-sig name type) name))
-            (cond
-              ;; `(fixed… &optional o… -> ret)`. Checked before the two below because an
-              ;; `&optional` list has neither an `&` nor a fixed count: read as fixed it
-              ;; counts the MARKER as a parameter, which is how `(sig pad-left (string int
-              ;; &optional string -> string))` armed a 4-arity shim over a 2-3-arity
-              ;; function and made every `(string/pad-left s 10)` an arity error under
-              ;; BROOD_CONTRACTS=1. The shim is variadic and `apply`s only the arguments it
-              ;; actually received, so the callee's own defaults still apply — passing an
-              ;; explicit `nil` for an absent optional would override them. The cost is that
-              ;; `arity-of` reports `2+` rather than `2-3` for the wrapped name, which the
-              ;; reload check notes on stderr; contracts mode is a dev switch and the
-              ;; alternative (a sentinel default per optional) buys accuracy nothing reads.
-              (%le 0 opt-pos)
-                (let (fixed-ptypes (%sig-take opt-pos ptypes)
-                      opt-ptypes (%sig-drop (%add opt-pos 1) ptypes)
-                      fixed-params (%sig-gensyms opt-pos)
-                      more (gensym "more")
-                      orig (gensym "orig")
-                      r (gensym "ret"))
-                  `(do
-                     (def- ~orig ~name)
-                     (def ~name
-                       (fn (~@fixed-params & ~more)
-                         ~@docf
-                         (%contract-check-args '~name '~fixed-ptypes (/list ~@fixed-params) 1)
-                         (%contract-check-args '~name '~opt-ptypes ~more ~(%add opt-pos 1))
-                         ;; `apply` splices its trailing list, so the leading arguments go
-                         ;; through as themselves. It USED to build the argument list with
-                         ;; `(append (/list …) ~more)` — which broke the whole mode the day
-                         ;; `append` was itself given a signature: the shim `append` expands
-                         ;; to calls `append`, so arming contracts over the prelude recursed
-                         ;; until the stack guard fired, during EXPANSION, with no clue which
-                         ;; `sig` did it. The shim must not call a function a `sig` can wrap.
-                         (let (~r (/apply ~orig ~@fixed-params ~more))
-                           (unless (/type-matches? '~rtype ~r)
-                             (throw (/str '~name
-                                      ": result expected "
-                                      '~rtype
-                                      ", got "
-                                      (/type-of ~r)
-                                      " ("
-                                      (/pr-str ~r)
-                                      ")")))
-                           ~r)))
-                     ~@privf))
-              (%lt amp-pos 0)
-              ;; fixed arity
-                (let (params (%sig-gensyms i)
-                      orig (gensym "orig")
-                      r (gensym "ret"))
-                  ;; Hold the original in a GLOBAL, not a `let`-bound local. A shim written
-                  ;; as `(let (orig name) (fn …))` closes over a local frame, and the prelude's
-                  ;; freeze step rejects exactly that ("shared closures must capture the global
-                  ;; env") — so arming contracts over the prelude's own sigs aborted the boot
-                  ;; before this could check anything. The name is a gensym, so nothing can
-                  ;; reach or rebind it, and the shim now captures only globals (KI-81).
-                  `(do
-                     (def- ~orig ~name)
-                     (def ~name
-                       (fn (~@params)
-                         ~@docf
-                         (%contract-check-args '~name '~ptypes (/list ~@params) 1)
-                         (let (~r (~orig ~@params))
-                           (unless (/type-matches? '~rtype ~r)
-                             (throw (/str '~name
-                                      ": result expected "
-                                      '~rtype
-                                      ", got "
-                                      (/type-of ~r)
-                                      " ("
-                                      (/pr-str ~r)
-                                      ")")))
-                           ~r)))
-                     ~@privf))
-              ;; variadic: (fixed… & rest-type -> ret)
-              else
-                (let (fixed-ptypes (%sig-take amp-pos ptypes)
-                      rest-ptype (%sig-nth ptypes (%add amp-pos 1))
-                      fixed-params (%sig-gensyms amp-pos)
-                      rest-param (gensym "rest")
-                      orig (gensym "orig")
-                      r (gensym "ret"))
-                  ;; Same global-capture reasoning as the fixed-arity shim above.
-                  `(do
-                     (def- ~orig ~name)
-                     (def ~name
-                       (fn (~@fixed-params & ~rest-param)
-                         ~@docf
-                         (%contract-check-args '~name '~fixed-ptypes (/list ~@fixed-params) 1)
-                         (%contract-check-rest '~name '~rest-ptype ~rest-param)
-                         ;; No `append` here either — see the `&optional` arm above.
-                         (let (~r (/apply ~orig ~@fixed-params ~rest-param))
-                           (unless (/type-matches? '~rtype ~r)
-                             (throw (/str '~name
-                                      ": result expected "
-                                      '~rtype
-                                      ", got "
-                                      (/type-of ~r)
-                                      " ("
-                                      (/pr-str ~r)
-                                      ")")))
-                           ~r)))
-                     ~@privf))))))))
-
-;; `and`/`or` short-circuit left-to-right and return the deciding value, with
-;; each subexpression evaluated at most once (a gensym holds it across the test).
-(defmacro and (& xs)
-  "Logical AND: evaluate left-to-right, short-circuiting on the first falsy value (which it returns); `true` if none. Each argument is evaluated at most once.
-
-    (and 1 2)       → 2      ; the last value, when nothing is falsy
-    (and 1 nil 3)   → nil    ; the falsy value itself — 3 is never evaluated
-    (and)           → true"
-  (if (empty? xs)
-    true
-    (if (empty? (rest xs))
-      (first xs)
-      (let (g (gensym "and")) `(let (~g ~(first xs)) (if ~g (and ~@(rest xs)) ~g))))))
-
-(defmacro or (& xs)
-  "Logical OR: evaluate left-to-right, short-circuiting on the first truthy value (which it returns); `nil` if none. Each argument is evaluated at most once.
-
-    (or nil :fallback)   → :fallback
-    (or false 0)         → 0     ; 0 is truthy — only nil and false are falsy
-    (or nil nil)         → nil"
-  (if (empty? xs)
-    nil
-    (if (empty? (rest xs))
-      (first xs)
-      (let (g (gensym "or")) `(let (~g ~(first xs)) (if ~g ~g (or ~@(rest xs))))))))
-
-;; cond: flat test/expr pairs (ADR-004); a final `else` is the catch-all.
-;;
-;; `else` needs the special case below: a bare symbol would otherwise be an unbound
-;; reference. `:else` never did — a keyword is self-evaluating and truthy, so it
-;; already worked the way `true` or any other truthy test does. Special-casing it
-;; too made the language carry a second blessed spelling for no gain, so that case
-;; is gone (2026-07-26). `(cond … :else x)` still returns `x` — as an ordinary
-;; truthy test, via `if` — but `else` is the spelling the language knows.
-;; Bootstrap helper for cond's guard: walks clauses two at a time, returning
-;; the orphan last element when count is odd, nil when even. Uses only
-;; `if`/`empty?`/`first`/`rest` — all kernel primitives — so it's safe to call
-;; during prelude loading before `odd?`/`count`/`last` are defined.
-(defn- %cond-orphan (clauses)
-  (if (empty? clauses)
-    nil
-    (if (empty? (rest clauses))
-      (first clauses)
-      (%cond-orphan (rest (rest clauses))))))
-
-(defmacro cond (& clauses)
-  "Multi-way branch over `test expr` pairs: return the `expr` of the first truthy `test`. A final `else` test always matches; `nil` if none do.
-
-    (cond (> 2 1) :yes else :no)   → :yes
-    (cond false :a else :b)        → :b
-    (cond false :a)                → nil   ; nothing matched, and no else"
-  (let (orphan (%cond-orphan clauses))
-    (if (and (not (nil? orphan)) (not (%eq orphan 'else)))
-      (error "cond: odd number of clauses — expected test/expression pairs. "
-        "Did you forget an expression for '"
-        (pr-str orphan)
-        "'?")
-      (if (empty? clauses)
-        nil
-        (let (test (first clauses) expr (first (rest clauses)) more (rest (rest clauses)))
-          ;; compare with the `%eq` primitive, not the variadic `=` — `=` builds a
-          ;; lambda, and doing that *at expansion time* during the prelude's own
-          ;; compile pass would strand a local-env closure (breaks the freeze).
-          (if (%eq test 'else) expr `(if ~test ~expr (cond ~@more))))))))
-
-;; ---- macro expansion --------------------------------------------------------
-;; Fully expand `form`'s head macro by iterating the single-step `macroexpand-1`
-;; primitive to a fixpoint. Written in Brood, not Rust (ADR-064): the loop's state
-;; is an env-bound local the evaluator already roots, so it can't strand a handle
-;; across a GC safepoint the way a hand-rooted Rust loop could. `macroexpand-1` is
-;; the irreducible single-shot primitive (one expansion, holding nothing across
-;; its `apply`); this just drives it. Tail-recursive, so it is O(1) stack.
-;; Bounded (kernel audit): a macro that forever expands to another macro call
-;; would otherwise spin here. Mirrors the kernel expander's own cap
-;; (`MAX_EXPAND_ROUNDS` in eval/macros.rs) — keep the two in step.
-(def- %macroexpand-max-rounds 256)
-
-(defn- %macroexpand-loop (form n)
-  (if (= n 0)
-    (error "macroexpand: no fixpoint after "
-      %macroexpand-max-rounds " rounds (a macro that expands to itself?)")
-    (let (stepped (macroexpand-1 form))
-      (if (= stepped form) form (%macroexpand-loop stepped (- n 1))))))
-
-(defn macroexpand (form)
-  "Repeatedly expand `form`'s head macro until the head is no longer a macro call.
-
-    (macroexpand '(when true 1))   → (if true (do 1) nil)"
-  (%macroexpand-loop form %macroexpand-max-rounds))
-
-;; ---- signatures for the core functions defined ABOVE `sig` itself ----------
-;; These cannot sit next to their `defn`s: `sig` is defined partway down this file
-;; (the `defmacro sig` below the arithmetic), and a `sig` form before that point is
-;; an unbound symbol that panics the prelude boot. Domains are the ones the runtime
-;; actually enforces, established by probing every value kind rather than read off
-;; the implementation: both reject a string (`(reverse "ab")` raises — reverse its
-;; `string/->list`) and every scalar, and both accept a record, which is a `map` to
-;; the type system and IS indexable through its Seqable view.
-(sig reverse (seqable -> any))
