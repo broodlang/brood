@@ -201,6 +201,16 @@ impl Heap {
         prefix: Option<Symbol>,
         modules: HashSet<Symbol>,
     ) -> (Option<Symbol>, HashSet<Symbol>) {
+        // Setting the EMPTY context on a heap that has no cold state is a no-op — and
+        // `cold_mut` would allocate the whole `ColdHeap` (328 B) to record it. `spawn`
+        // propagates the spawner's context to every child, so outside a package this
+        // put a `ColdHeap` on every process ever spawned: the exact allocation M1 moved
+        // off the worker floor (`runtime-frontier.md` §B), back on it. Measured 2026-09-21
+        // by the allocation histogram of a parked process: one 328 B block from
+        // `set_package_context <- spawn_impl_timed`, on every one of 100 000 processes.
+        if prefix.is_none() && modules.is_empty() && self.cold().is_none() {
+            return (None, HashSet::new());
+        }
         let cold = self.cold_mut();
         let prev_prefix = std::mem::replace(&mut cold.package_prefix, prefix);
         let prev_modules = std::mem::replace(&mut cold.package_modules, modules);
