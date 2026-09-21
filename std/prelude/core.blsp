@@ -184,47 +184,54 @@ this by implementing the `Display` ability, which takes over this name below.
     (seq {:a 1})      → ([:a 1])    ; a map becomes its [k v] pairs
     (seq [1 2 3])     → [1 2 3]     ; already a sequence — passes through
     (seq nil)         → nil"
-  (if (range? coll)
-    (%range->list coll)
-    (if (seqview? coll)
-      (%seqview-realize coll)
-      (let (t (type-of coll))
-        ;; A `bytes` value is realised to a list ONCE here: without this, fold/map/
-        ;; filter/reduce would walk it with `first`/`rest`, and `(rest bytes)` copies
-        ;; all-but-the-first byte — O(n) per step, O(n^2) total (a 50k-byte reduce
-        ;; spiked ~1.3 GB RSS). `bytes->list` is a single O(n) native pass.
-        (if (%eq t :map)
-          ;; A record (a map carrying `:__id__`) takes its `Seqable` view — the fields,
-          ;; id-free, by default — so it never leaks `:__id__` into map/fold/keys and a
-          ;; custom collection can define its own iteration. `->seq` is only reached for
-          ;; records (never at boot, which has none), so its late definition is fine.
-          (if (%map-get coll :__id__ nil)
-            (->seq coll)
-            (%map-pairs coll))
-          (if (%eq t :bytes)
-            (%bytes->list coll)
-            ;; Lists and nil ARE their own seq view and take the hot path untouched. Any
-            ;; other kind reaching here is one `seq` has no native view of — a rope, a
-            ;; table — and used to be returned UNCHANGED, so `(seq rope)` silently answered
-            ;; the rope itself. Consult `Seqable`, but only where an impl exists for that
-            ;; kind SPECIFICALLY: its `:default` is a record's fields, meaningless here.
-            ;;
-            ;; ONLY what is available at line 106 of the prelude. `get` and `%identity-of`
-            ;; re-enter `seq` (they are built on the protocol `seq` provides), and `or` is a
-            ;; MACRO defined 550 lines further down — used here it compiles as a call to a
-            ;; not-yet-macro and recurses until the stack budget trips, during prelude
-            ;; expansion, before anything can report which function did it. So: `if`, `%eq`,
-            ;; `bound?` and `%map-get`, nothing else. (ADR-253)
-            (if (%eq t :pair)
-              coll
-              (if (%eq t :nil)
+  ;; DISPATCH ORDER IS LOAD-BEARING, as in `fold`: a vector IS its own seq view and
+  ;; answers first, before the two predicate calls, the three `%eq`s, `bound?` and the
+  ;; `%map-get` keyed by a vector that the chain below costs — 586 ns of dispatch to
+  ;; return itself (measured 2026-09-21: `(mapv [1 2 3 4] f)` was 4.3 µs, most of it here
+  ;; and in `reverse`'s own `seq`). Every eager sequence op calls `seq` once.
+  (if (%eq (type-of coll) :vector)
+    coll
+    (if (range? coll)
+      (%range->list coll)
+      (if (seqview? coll)
+        (%seqview-realize coll)
+        (let (t (type-of coll))
+          ;; A `bytes` value is realised to a list ONCE here: without this, fold/map/
+          ;; filter/reduce would walk it with `first`/`rest`, and `(rest bytes)` copies
+          ;; all-but-the-first byte — O(n) per step, O(n^2) total (a 50k-byte reduce
+          ;; spiked ~1.3 GB RSS). `bytes->list` is a single O(n) native pass.
+          (if (%eq t :map)
+            ;; A record (a map carrying `:__id__`) takes its `Seqable` view — the fields,
+            ;; id-free, by default — so it never leaks `:__id__` into map/fold/keys and a
+            ;; custom collection can define its own iteration. `->seq` is only reached for
+            ;; records (never at boot, which has none), so its late definition is fine.
+            (if (%map-get coll :__id__ nil)
+              (->seq coll)
+              (%map-pairs coll))
+            (if (%eq t :bytes)
+              (%bytes->list coll)
+              ;; Lists and nil ARE their own seq view and take the hot path untouched. Any
+              ;; other kind reaching here is one `seq` has no native view of — a rope, a
+              ;; table — and used to be returned UNCHANGED, so `(seq rope)` silently answered
+              ;; the rope itself. Consult `Seqable`, but only where an impl exists for that
+              ;; kind SPECIFICALLY: its `:default` is a record's fields, meaningless here.
+              ;;
+              ;; ONLY what is available at line 106 of the prelude. `get` and `%identity-of`
+              ;; re-enter `seq` (they are built on the protocol `seq` provides), and `or` is a
+              ;; MACRO defined 550 lines further down — used here it compiles as a call to a
+              ;; not-yet-macro and recurses until the stack budget trips, during prelude
+              ;; expansion, before anything can report which function did it. So: `if`, `%eq`,
+              ;; `bound?` and `%map-get`, nothing else. (ADR-253)
+              (if (%eq t :pair)
                 coll
-                (if (bound? (quote *impls*))
-                  (let (methods (%map-get *impls* (quote [Seqable ->seq]) nil))
-                    (if methods
-                      (if (%map-get methods t nil) (->seq coll) coll)
-                      coll))
-                  coll)))))))))
+                (if (%eq t :nil)
+                  coll
+                  (if (bound? (quote *impls*))
+                    (let (methods (%map-get *impls* (quote [Seqable ->seq]) nil))
+                      (if methods
+                        (if (%map-get methods t nil) (->seq coll) coll)
+                        coll))
+                    coll))))))))))
 
 ;; ---- folding (the workhorse; tail-recursive, so it is stack-safe) ----
 ;; The public entry coerces once via `seq`; the inner `%fold-loop` then stays in
@@ -298,7 +305,16 @@ this by implementing the `Display` ability, which takes over this name below.
     (reverse nil)      → nil
 
 A string is not a sequence here — reverse its `string/->list` if you need that."
-  (%reverse-acc (seq coll) nil))
+  ;; A vector reduces natively (`fold`'s own vector path): walking it with `rest` built a
+  ;; view per step, 88 ns each, where the list walk is one `cons`.
+  ;; A plain list skips `seq`'s dispatch too — it is the shape every `%defseq` op
+  ;; reverses at the end.
+  (let (t (type-of coll))
+    (if (%eq t :vector)
+      (%vector-reduce %flip-cons nil coll)
+      (if (if (%eq t :pair) (if (range? coll) false (if (seqview? coll) false true)) false)
+        (%reverse-acc coll nil)
+        (%reverse-acc (seq coll) nil)))))
 
 ;; `but-last` lives HERE, in core, rather than with the rest of the sequence library —
 ;; the position is load-bearing. `receive`'s macro body calls it, and `sleep` (in

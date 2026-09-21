@@ -301,9 +301,13 @@ Always true for `n` <= 0.
     ;; vector `from` is the answer itself — vectors are immutable, so there is nothing to
     ;; copy. Only a non-empty `to` still needs the concatenation.
     (vector? to)
-      (if (empty? to)
-        (if (vector? from) from (apply vector (seq from)))
-        (apply vector (append to from)))
+      (cond
+        (empty? to) (if (vector? from) from (apply vector (seq from)))
+        ;; the kernel copies once for the shapes it walks; a map (its entries) or any
+        ;; other seqable still goes through `append`
+        (or (vector? from) (pair? from) (nil? from) (range? from) (set? from))
+          (%vector-concat to from)
+        else (apply vector (append to from)))
     else (append to from)))
 (sig into (seqable seqable -> any))
 
@@ -311,7 +315,8 @@ Always true for `n` <= 0.
 (defn- %conj-one (coll x)
   (cond
     (nil? coll) (list x)
-    (vector? coll) (into coll [x])
+    ;; a flat copy plus one: the kernel op (going through `into`/`append` cost 7.7 µs)
+    (vector? coll) (%vector-concat coll [x])
     (set? coll) (%set-add coll x)
     ;; a record dispatches to its `Conjable` impl (default: the map behaviour below); a
     ;; custom-collection record defines its own insertion. `%map-get` distinguishes it from

@@ -223,6 +223,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         vector_assoc,
     );
     primitives.def(
+        "%vector-concat",
+        Arity::exact(2),
+        Sig::new(vec![vec_ty, seqable], vec_ty),
+        &["v", "xs"],
+        "A fresh vector of v's elements followed by those of xs (a vector, list, range, set or nil), in one allocation. The kernel op behind conj on a vector and into onto one.",
+        vector_concat,
+    );
+    primitives.def(
         "%subvec",
         Arity::range(2, 3),
         Sig::with_rest(vec![vec_ty, int], int, vec_ty),
@@ -1182,6 +1190,27 @@ pub(super) fn vector_assoc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
         .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE)),
         _ => Err(LispError::wrong_type(heap, "vector-assoc", "vector", v)),
     }
+}
+
+/// `(%vector-concat v xs)` — a fresh vector of `v`'s items followed by `xs`'s (a
+/// vector, a list, a range, a set or nil): one allocation, one copy. The kernel op
+/// behind `conj` on a vector and `into` onto one — a vector is flat, so the fresh copy
+/// IS the append. Going through `append` built the result as a list, twice reversed, and
+/// re-vectorised it: 7.7 µs to `conj` onto four items (measured 2026-09-21), in the code
+/// every game frame runs. No GC safepoint runs inside a builtin, so the handles stay valid
+/// across `alloc_vector`.
+pub(super) fn vector_concat(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let v = arg(args, 0);
+    let id = match v {
+        Value::Vector(id) => id,
+        _ => return Err(LispError::wrong_type(heap, "vector-concat", "vector", v)),
+    };
+    let tail = heap.seq_items(arg(args, 1))?;
+    let head = heap.vector(id);
+    let mut items = Vec::with_capacity(head.len() + tail.len());
+    items.extend_from_slice(&head);
+    items.extend(tail);
+    Ok(heap.alloc_vector(items))
 }
 
 /// `(subvec v start)` / `(subvec v start end)` — a fresh vector of the elements
