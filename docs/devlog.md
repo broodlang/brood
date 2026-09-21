@@ -15458,3 +15458,14 @@ tokens` lexer over the chunk (one rule per sequence kind, which would have moved
 scan into the DFA) cost ~240 ms for an 11 KB frame where the hand-written grapheme scan
 costs 27 — the per-character cost of the bitset DFA is not yet a lexer's. Both are the
 language's to fix; neither is the module's.
+
+## 2026-09-21 (4) — a pty child inherited its own master
+
+Found by bedit's terminal driver: an `sh -i` started under `os/spawn-pty` outlived the
+editor that closed it, and held a build lock's descriptor with it. `ls -l /proc/self/fd`
+from the child showed `3 -> /dev/ptmx`: `posix_openpt` and the slave `open` were made
+without `O_CLOEXEC`, so every pty child carried the MASTER across `exec`, and closing ours
+never hung the program up — a REPL killed with its buffer kept running. Both ends are
+close-on-exec now (the child's stdio comes through `stdio_dup`, which is what should cross);
+`proc_test` asserts the master is not among the child's descriptors, and fails on the old
+binary.
