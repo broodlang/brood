@@ -42,6 +42,26 @@ session needs to know:
   worktree's `target/debug` filled it and every shell command failed with exit 1 and no
   output.
 
+## 2026-09-21 — the ARMED full suite is red at the merge of ADR-381 and ADR-382: four cases, attributed, not fixed
+
+`nest test` over the merged tree (`0256d6f9`, contracts armed by default per ADR-381):
+**6153 tests, 4 failed.** Attributed by re-running each file three ways on the same binary
+(`brood --test`, `BROOD_CONTRACTS=0 nest test FILE`, `nest test FILE`):
+
+- `tests/vm_prim_error_pos_test.blsp` "a table/has? type error reports the prim's line" —
+  passes unarmed, **fails armed only** (expected line 24, got 20: the contract shim's frame
+  is now where the prim error is positioned).
+- `tests/lazy_load_test.blsp` ADR-366 "the call into the module becomes the inlined
+  primitive at the next activation" — passes unarmed, **fails armed only** (`warm=true`
+  never printed: the callee the recompile sees is the `sig` shim, not the primitive).
+- `tests/ui_test.blsp` display-sound / display-texture — **pass all three ways alone**
+  (62/62 ×3); red only inside the full run. Full-run-only, `gui/*` handles; not new code.
+
+The first two are ADR-381's (its own handoff line says the armed suite "has NOT been run on
+this box"); none touch the module index, the image's def sites or the check driver. Pushed
+past them because they are on `main` already and this work's own gates are green (below);
+they are the tree's first open item before anything new.
+
 ## 2026-09-21 — NEXT: large-project scaling, items 3–5 — read `large-project-scaling.md`
 
 **Item 2 is DONE (ADR-382, KI-179, this session): `nest check` is incremental for real.**
