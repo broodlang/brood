@@ -98,6 +98,7 @@ arg silently becoming `nil`.
 | | `check-string-structured` | 1 | Advisory type-check the source string `src`, returning a list of `{:line :col :message}` maps (1-based positions), or `()` when `src` doesn't parse (e.g. incomplete input) — the string-source counterpart of check-file-structured, for live editor-buffer diagnostics. |
 | | `check-file-deps` | 1–2 | Incremental-cache check (ADR-119): returns [warnings dep-keys fingerprint] — the GNU warning strings, the set of global observations the check made, and a fingerprint of them against the current image. Store dep-keys+fingerprint; |
 | | `check-deps-fp` | 1 | Recompute the fingerprint of a file's dep-keys (from check-file-deps) against the current global image. The incremental check cache reuses a file's warnings iff this equals the stored fingerprint. |
+| | `%check-walk-flags` | 0 | the names of the `BROOD_*` flags that change what a checker walk does (`cli_support::WALK_FLAGS`), as a vector of strings — `nest check`'s manifests and `brood file`'s pre-flight verdict cache key on their values from this one list (ADR-371/381) |
 | **Value ↔ text & I/O** | `str` | n | concatenate the *display* forms of args → string |
 | | `pr-str` | 1 | *readable* form of a value → string |
 | | `print` | n | write display forms to stdout → nil (`println`, which adds a newline, is Brood over it) |

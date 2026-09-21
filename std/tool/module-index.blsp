@@ -23,11 +23,15 @@ absolute paths). Best-effort on disk: a read-only tree costs a parse, never a wr
 (def *index-file* ".brood/module-index")
 
 ;; The on-disk format: bump when the entry shape changes; an older file is simply ignored and
-;; rebuilt. Line 1 is `(brood-module-index VERSION)`, then one `("path" size mtime (mods…))`
-;; per file.
-(def *index-version* 1)
+;; rebuilt. Line 1 is `(brood-module-index VERSION)`, then one
+;; `("path" size mtime (mods…) own-or-nil (requires…))` per file — every `defmodule` the file
+;; opens, its own module name as the checker reads it, and the modules it directly requires
+;; (v2: the requires joined the entry so `nest check` learns the require graph from the
+;; index too, where it used to re-parse every file for it — 2.9 s of a 15 s warm check at
+;; 1 000 × 3k lines).
+(def *index-version* 2)
 
-;; The in-process view of each root's index: `root -> {path -> [size mtime modules]}`. A
+;; The in-process view of each root's index: `root -> {path -> [size mtime modules own requires]}`. A
 ;; root's map is read from disk the first time that root is asked about and written back
 ;; whenever a query parsed anything. A cache and nothing more — every answer is
 ;; stat-validated, so a lost update between two processes (or two green processes of one
@@ -47,17 +51,18 @@ absolute paths). Best-effort on disk: a read-only tree costs a parse, never a wr
   (when root (path/join root *index-file*)))
 (sig index-path ((or string nil) -> (or string nil)))
 
-;; Every `(defmodule NAME …)` a file declares, in source order, as symbols; nil when the file
-;; cannot be read or parsed — the file is then treated as declaring nothing and the load
-;; surfaces the real error, which is `project-file-feature`'s tolerance too.
+;; One parse of a file, as the entry's tail `[modules own requires]`: every `(defmodule NAME …)`
+;; it declares in source order (symbols), its own module name (a string, as the checker
+;; reads it) and the modules it directly requires (strings, sorted). `[nil nil []]` when the
+;; file cannot be read or parsed — the file is then treated as declaring nothing and the
+;; load surfaces the real error, which is `project-file-feature`'s tolerance too.
 (defn- scan-file (file)
   ;; check-allow :discarded-catch — a file that does not read or parse declares nothing; the load reports the real error
   (check-allow :discarded-catch
     (try
-      (map (seq/filter (reflect/read-all (file/slurp file))
-             (fn (form) (and (pair? form) (= (first form) 'defmodule) (symbol? (second form)))))
-        second)
-      (catch _ nil))))
+      (let (info (%module-direct-requires file))
+        [(seq (get info :modules)) (get info :module) (vec (get info :requires))])
+      (catch _ [nil nil []]))))
 
 ;; The index file as the memo map, or `{}` when absent, unreadable, corrupt or of another
 ;; version — every one of those is "start empty", and the next write repairs it.
@@ -71,7 +76,7 @@ absolute paths). Best-effort on disk: a read-only tree costs a parse, never a wr
             {}
             (fn (m e)
               (if (and (pair? e) (string? (first e)) (int? (nth e 1)) (int? (nth e 2)))
-                (assoc m (first e) [(nth e 1) (nth e 2) (nth e 3)])
+                (assoc m (first e) [(nth e 1) (nth e 2) (nth e 3) (nth e 4) (vec (nth e 5))])
                 m)))
           {}))
       (catch _ {}))))
@@ -85,7 +90,7 @@ absolute paths). Best-effort on disk: a read-only tree costs a parse, never a wr
     (string/join (map (seq/filter (sort (keys entries)) file/exists?)
                    (fn (f)
                      (let (e (get entries f))
-                       (pr-str (list f (get e 0) (get e 1) (get e 2))))))
+                       (pr-str (list f (get e 0) (get e 1) (get e 2) (get e 3) (seq (get e 4)))))))
       "\n")
     "\n"))
 
@@ -115,15 +120,16 @@ absolute paths). Best-effort on disk: a read-only tree costs a parse, never a wr
       (def *indexes* (assoc *indexes* root e))
       e)))
 
-(defn index-files (root files)
-  "The modules each of `files` declares — a map `file -> (list of module symbols)`, every
-key present (a file with no `defmodule` maps to nil). Served from `root`'s module index for
-every file whose size and mtime still match its entry; the rest are parsed, recorded, and
-the index rewritten. `root` nil keeps the memo in this process and writes nothing. A file that
-no longer exists maps to nil and is neither counted nor recorded. `(module-index/last-scan)`
-says how many took each path.
+(defn index-entries (root files)
+  "The index entry of each of `files` — a map `file -> [modules own requires]`: every module
+symbol the file declares (nil for none), its own module name as a string (nil for none) and
+the module names it directly requires (a vector of strings). Every key present. Served from
+`root`'s module index for every file whose size and mtime still match its entry; the rest are
+parsed, recorded, and the index rewritten. `root` nil keeps the memo in this process and
+writes nothing. A file that no longer exists maps to nil and is neither counted nor recorded.
+`(module-index/last-scan)` says how many took each path.
 
-    (module-index/index-files nil (list \"/no/such/file.blsp\"))   → {\"/no/such/file.blsp\" nil}"
+    (module-index/index-entries nil (list \"/no/such/file.blsp\"))   → {\"/no/such/file.blsp\" nil}"
   (let (r (fold files
             [{} (entries-of root) 0 0]
             (fn (acc file)
@@ -137,10 +143,13 @@ says how many took each path.
                         mtime (get st :mtime)
                         e (get entries file))
                     (if (and e (= (get e 0) size) (= (get e 1) mtime))
-                      [(assoc result file (get e 2)) entries (+ hits 1) parsed]
-                      (let (mods (scan-file file))
-                        [(assoc result file mods)
-                          (assoc entries file [size mtime mods])
+                      [(assoc result file [(get e 2) (get e 3) (get e 4)])
+                        entries
+                        (+ hits 1)
+                        parsed]
+                      (let ([mods own reqs] (scan-file file))
+                        [(assoc result file [mods own reqs])
+                          (assoc entries file [size mtime mods own reqs])
                           hits
                           (+ parsed 1)])))))))
         [result entries hits parsed] r)
@@ -158,7 +167,32 @@ says how many took each path.
       (def *indexes* (assoc *indexes* root entries))
       (write-index! root entries))
     result))
-(sig index-files ((or string nil) (list string) -> (map string (or (list symbol) nil))))
+(sig index-entries ((or string nil) (or (list string) (vector string) nil) -> (map string (or vector nil))))
+
+(defn index-files (root files)
+  "The modules each of `files` declares — a map `file -> (list of module symbols)`, every key
+present (a file with no `defmodule` maps to nil) — through `index-entries`.
+
+    (module-index/index-files nil (list \"/no/such/file.blsp\"))   → {\"/no/such/file.blsp\" nil}"
+  (fold (%map-pairs (index-entries root files))
+    {}
+    (fn (m kv) (let ([f e] kv) (assoc m f (if e (get e 0) nil))))))
+(sig index-files ((or string nil) (or (list string) (vector string) nil) -> (map string (or (list symbol) nil))))
+
+(defn infos-of (root files)
+  "The checker's view of each of `files` — a map `file -> {:module own :requires [dep …]}`
+(the shape `%module-direct-requires` answers, for the whole list, from the index), every key
+present; a file that cannot be read reads `{:module nil :requires []}`. What
+`project-check` closes into each file's reachability set (KI-17), with no source file
+opened for an unchanged one.
+
+    (module-index/infos-of nil (list \"/no/such/file.blsp\"))   → {\"/no/such/file.blsp\" {:module nil :requires []}}"
+  (fold (%map-pairs (index-entries root files))
+    {}
+    (fn (m kv)
+      (let ([f e] kv)
+        (assoc m f {:module (if e (get e 1) nil) :requires (if e (get e 2) [])})))))
+(sig infos-of ((or string nil) (or (list string) (vector string) nil) -> (map string map)))
 
 (defn modules-of (root file)
   "Every `(defmodule NAME …)` the source file declares, in source order, as symbols — from

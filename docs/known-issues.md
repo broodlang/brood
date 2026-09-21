@@ -165,6 +165,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-169 | **`(stdimage/status)`'s `:installed` reported the PRELUDE snapshot's count on an opted-out warm boot** — `%std-image-reinstall!` cleared every registry the snapshot carries except `*std-image-installed*`, the snapshot's own answer | ✅ **FIXED 2026-09-20** — one reset beside the others. Guard `stdimage_reporting.rs` case 4, sabotage-verified |
 | KI-176 | **killing a MONITORED process cost 1.2 ms — 1 500× an unmonitored one — because every death walked the whole monitor table** — `sweep_dead_watcher` (every exit) and `demonitor` retained over every target's watcher list ("cold death path, so the full-table walk is fine"); a supervisor holding 200 000 monitored children paid O(n) per child death, O(n²) for the fleet, and that walk was the whole of `exit :kill`'s cost on the lifecycle probe | ✅ **FIXED 2026-09-21** — `MonitorTable` keeps the watcher-side index Erlang keeps (`by_watcher`: pid → {mref → target}); add/take/demonitor/watcher-death touch only their own entries, the cold REMOTE retirements keep the walk. 1 236 022 → 1 266 ns per monitored kill (unmonitored 800); `monitor` 265 → 420 ns. Guards: `concurrency_test` pins the two indexes in step; `crates/lisp/tests/monitor_scaling.rs` pins monitored/unmonitored kill as a ratio (< 8×; the walk reads 38× at 20k) |
 | KI-177 | **every `exit :kill` fed the default crash reporter a message it discarded, and the reporter fell behind without bound** — `sysmon::emit_exit` filtered only `:normal` from `:exit-abnormal`, so a supervisor's kills and shutdowns each built and delivered `[:system :exit pid :kill]`; the reporter read them at ~14 µs each against a parent killing 100 000 children in 80 ms — backlog 91 714 after one round, 309 458 after four, measured as ~180 B of live bytes accruing per killed process | ✅ **FIXED 2026-09-21** — the kernel filters the reporter's own non-crash table (`:normal`, `:kill`/`:killed`, `:shutdown`, `[:shutdown x]`) before any message is built, as the subscription's doc already said; a `:exit` subscriber still sees every one. Backlog 0 on every round. `tests/sysmon_test.blsp` pins both halves |
+| KI-179 | **the ADR-119 incremental check cache hit only image → image: every `nest check` after a cold build, and every one after an edit, re-checked the whole project** — a user global's fingerprint fact is its definition site, and a module materialised from the project image had none, so the fact read `F` from the image and `D<file>@<mtime>` from source; no cached fingerprint matched across the flip. Measured 1 000 × 3k files: cold 186 s, unchanged 154 s, unchanged again 15 s, one-function edit 188 s | ✅ **FIXED 2026-09-21 (ADR-382)** — the image carries def sites (`KIND_DEF_SITE`); an unchanged project replays its recorded verdict without loading; listed paths absolutised (they never hit either). Gate `nest::check_incremental`, sabotage-verified both ways |
 | KI-175 | **the checker seeded a fold callback's accumulator from the fold's RESULT, losing `init`** — over a provably non-empty input the result rule leaves `init` out (the step ran at least once), but the callback's first step is handed `init`; `(fold [3 9 4] nil (fn (b x) (if (nil? b) x …)))` read `b` as `3 \| 9 \| 4` and flagged the callback's own `nil?` guard as never true — a PLAIN-mode false positive (the one thing the checker must never do). Found by `fold-for`'s docstring example the day ADR-377 was written | ✅ **FIXED 2026-09-20** — `walk::calls::fold_callback_seed` seeds the accumulator with `init ∪ result` (the first element ∪ result for a no-init `reduce`). Pinned in `closure_inference.rs` both ways (the `nil` seed is quiet; a `0` seed still makes the `nil?` dead), sabotage-verified. One strict finding it uncovered was right: `linmap_soundness_test`'s `lm-fold` is handed `5` on purpose by one caller, so its `assoc` can see a `5` — `check-allow`ed like its sibling |
 | KI-174 | **the JIT fast-frame's debug cross-check fired on a rebind that landed between the IR's epoch load and the callback** — `fast-link mirror desynced from the call IC … auth=None` aborted `concurrency_race::fanout_with_concurrent_global_rebind_matches_serial` once on CI (2026-09-20, run 35532017776). The IR validates the flat mirror against the global epoch with a raw load; `jit_dispatch_fast_frame` re-read the epoch and asked the IC at the NEW one after a concurrent `def` bumped it, so a mirror that was valid when read looked desynced. Debug builds only; the release path re-validates and falls through. The check was also weaker than it read: it probed through `vm_call_ic_fast_link`, which reads the mirror first — comparing the mirror with itself, and reaching the entry only when the epoch had moved | ✅ **FIXED 2026-09-20** — `debug_check_fast_link_mirror` compares the mirror against the fat `CallIcEntry` (`fast_link_from_entry`, the authoritative half factored out of the probe) at the mirror's OWN epoch, and a `None` there is legitimate exactly when the entry's epoch has moved. Two unit tests rebuild the race's state deterministically (a published mirror, then a `def`): the tolerant case, sabotage-verified by probing at the current epoch; and a real desync at the same epoch, which must still fire |
 | KI-173 | **a module the pre-flight check loaded ran WITHOUT the optimiser's source rewrites, and an image written by that process carried the unrewritten bodies** — the checker holds `NoSourceRewrites` across a compile pass that itself performs the file's `require`s and the ADR-340 scan's loads, so every std module a `brood file.blsp` check brought in was expanded as "the author's code": `seq/frequencies` over 750k keys 860 ms against 343 ms with `BROOD_NO_CHECK=1`, the same as `BROOD_LINMAP=0`; and `stdimage/build` from such a process wrote those bodies, so `debug/hits` read `(map any number)` under one writer's image and `(or map table)` under another's | ✅ **FIXED 2026-09-20** — the loader holds `SourceRewritesOn` (`load`, `%load-module-source`): a module's bodies are the runtime's whoever triggers the load; and the checker narrows on `(= :table (type-of x))` — the test the tally rewrite emits — so a rewritten body types as `map`. Guards: `tests/check_loads_run_rewritten.rs` (the loaded body carries the rewrite's marker), `cli/tests/image_writer_differential.rs` (an image written after a check reads as one written without), both sabotage-verified. Found by the writer differential item 3 of the coverage session asked for |
@@ -11731,6 +11732,41 @@ many across targets and on one target; a watcher's death releases its monitors �
 sabotage-verified with `remove_watcher` stubbed), and `crates/lisp/tests/monitor_scaling.rs`
 pins monitored/unmonitored kill of 20k children as a RATIO under 8× (measured ~1×; the
 pre-index walk reads 38× at that n, sabotage-verified).
+
+## KI-179 — the incremental check cache hit only image → image: a cold build or an edit re-checked the whole project ✅ FIXED 2026-09-21 (ADR-382)
+
+**Seen:** measuring `docs/large-project-scaling.md`'s "unchanged re-check 16 s" on the 1 000 ×
+3k rig from a cleared cache (release `nest`): cold `nest check` 186 s; the next check of the
+UNCHANGED project **154 s**; only the one after that 15 s. A one-function edit: **188 s** —
+the whole project again. The doc's 16 s was the third run's number.
+
+**Cause:** `types::check::deps::fact_of_sym` reads `heap.def_site(sym)` and answers
+`D<file>@<mtime>` for a user global; with no def site it answers `F`. `%image-write` never
+encoded def sites (bindings, sigs and privacy only), and materialising evaluates no `def`, so
+a project module from the image had none. The first check after a build ran from source
+(`D…`), the next from the image (`F`): every fingerprint differed. After an edit the image is
+stale, so the check runs from source (`D…`) against a cache written from the image (`F`): every
+fingerprint differed again. The only pairing that matched was image → image, i.e. a second
+unchanged run. A comment in `project-check.blsp` described exactly this flip as the reason
+`nest run`'s pre-flight has its own manifest, and read it as the manifests' problem.
+
+Found on the way: `nest check FILE…` keyed the per-file manifest by the path AS SPELLED, so a
+relative listed path never matched the absolute key the whole check wrote — CI's explicit-list
+invocation re-checked every listed file every time.
+
+**Fix:** the image carries def sites (`boot/image.rs` `KIND_DEF_SITE`, a name-and-no-value
+entry like privacy); the fact is a function of the source tree whichever way a module arrived.
+On top of it, an unchanged project replays its recorded verdict without loading anything
+(ADR-382), and listed paths are absolutised at the door. Rig, release: unchanged `nest check` **154 s / 15 s → 0.12 s, 118 MB** (a replay); one-function edit **188 s → 40 s**, of which 33 s is the image rebuild and 2.7 s the check (1 file re-checked); `nest check` over three listed files 9.3 s with 0 re-checked (4 s materialise + 4.6 s lints — the lints still scan every file); the require-graph parse 2.9 s → 0.04 s.
+
+**Gate:** `crates/nest/tests/check_incremental.rs` — after a cold build the listed form reuses
+every verdict (`[check] reuse-test (0 to re-check)`), a leaf edit re-checks 1, a dependency's
+arity change re-checks 2 and reports the dependent's new warning. Sabotage: def-site entries
+not written → `8 to re-check`; replay key forced true → the stale, warning-free replay.
+
+**Lesson:** a cache that "works" on the second identical run and nothing else reads as
+working in every quick check. Measure the transition the user actually makes — build → check,
+edit → check — not the steady state.
 
 ## KI-177 — the default crash reporter was fed every `exit :kill` and fell behind without bound ✅ FIXED 2026-09-21
 

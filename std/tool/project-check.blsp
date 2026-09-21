@@ -6,6 +6,14 @@ the parallel fold over file chunks, the whole-project lints (duplicate globals, 
 module-private defns) and the two migration aids, `--fix-renames` (ADR-304) and
 `--suggest-sigs`.")
 
+;; Phase attribution for a check run, under `BROOD_DERIVE_DBG` (the flag that already says
+;; where a check's time went, per file, in the Rust checker): `[check] <phase> <ms> ms`.
+;; Computed only when the flag is set; nothing here is on the path of what it measures.
+(defn- project-check-trace? () (not (nil? (os/env "BROOD_DERIVE_DBG"))))
+(defn- project-check-trace (phase t0)
+  (when (project-check-trace?)
+    (io/puts (str "[check] " phase " " (math/quot (- (os/now-ns) t0) 1000000) " ms") :to *err*)))
+
 (defn all-files (root)
   "Every `.blsp` file the project at `root` owns — its source files plus its test files.
 The set the advisory type-checker walks for `(check)`; the sibling of [[source-files]],
@@ -29,16 +37,14 @@ the fifth, and it hid inside a map literal until the checker learned to walk one
 ;; header, so it builds the module→direct-deps graph (one native `%module-direct-requires`
 ;; parse per file) and closes it per file, then hands each file's set to `check-file`.
 
-;; {file -> {:module name :requires [dep …]}} for every file — one native parse each.
+;; {file -> {:module name :requires [dep …]}} for every file — from the module index (ADR-380),
+;; so an unchanged file is stat'd and not parsed. Was one native `%module-direct-requires`
+;; parse per file per run: 2.9 s of a 15 s warm check at 1 000 × 3k lines.
 (defn project-module-infos (files)
-  "`{file -> {:module name :requires [dep …]}}` for every file in `files` — one native
-`%module-direct-requires` parse each; the graph `project-require-closures` closes."
-  (fold files
-    {}
-    (fn (acc f)
-      (%map-assoc acc
-        f
-        (try (%module-direct-requires f) (catch e {:module nil :requires []}))))))
+  "`{file -> {:module name :requires [dep …]}}` for every file in `files`, read from the
+project's module index (a file is parsed only when its size or mtime moved); the graph
+`project-require-closures` closes."
+  (module-index/infos-of *project-root* files))
 
 ;; The transitive set of module names reachable from `seeds` (a list/vector of module
 ;; names) over `module->deps` (module-name -> [direct-dep …]). Breadth-first; a module
@@ -418,12 +424,15 @@ module included), built from the whole `files` universe — the KI-17 reachabili
 
 (defn- project-check-files-cached (files root closures manifest strict?)
   ;; `manifest` names the on-disk verdict manifest: `"checks"` for `nest check`,
-  ;; `"checks-run"` for `nest run`'s pre-flight. Separate because the two commands see
-  ;; the same global through different facts — a module `nest run` materialised from
-  ;; the startup image has no definition site, so its fact reads `F` where `nest
-  ;; check`'s reads `D<file>@<mtime>` — and one manifest had each command rewriting
-  ;; the other's entries on every invocation (2026-08-30). Each command is warm
-  ;; against itself.
+  ;; `"checks-run"` for `nest run`'s pre-flight. Separate because the two commands check
+  ;; different file sets against differently-populated heaps (the pre-flight materialises
+  ;; only the entry's closure), and one manifest had each command rewriting the other's
+  ;; entries on every invocation (2026-08-30). Each command is warm against itself.
+  ;; (Until 2026-09-21 a module materialised from the startup image also carried no
+  ;; definition site, so a global's fact read `F` from the image and `D<file>@<mtime>`
+  ;; from source — which made EVERY check after a cold build or an edit a full re-check,
+  ;; whatever the manifest. The image carries def sites now: `boot/image.rs`
+  ;; `KIND_DEF_SITE`, gated by `crates/nest/tests/check_incremental.rs`.)
   ;;
   ;; `strict?` selects the reuse test. `nest check` (true) reuses an entry only when
   ;; the file's mtime, its dependency FINGERPRINT and its closure are all unchanged —
@@ -434,7 +443,10 @@ module included), built from the whole `files` universe — the KI-17 reachabili
   ;; and the pre-flight cost the whole launch — 2.2 s of 2.5 s on bedit. A dependent's
   ;; verdict that shifts without its own file changing is `nest check`'s to report;
   ;; the pre-flight is advisory and scoped to what is about to run.
-  (let (cache (project-read-cache root manifest)
+  (let (t0 (os/now-ns)
+        cache (project-read-cache root manifest)
+        _ (project-check-trace "read-cache" t0)
+        t1 (os/now-ns)
         parts (fold files
                 [{} nil]
                 ; else re-check
@@ -455,16 +467,20 @@ module included), built from the whole `files` universe — the KI-17 reachabili
                       [(%map-assoc reuse p c) recheck]
                       [reuse (cons [p cl] recheck)]))))
         [reuse recheck] parts
+        _ (project-check-trace (str "reuse-test (" (count recheck) " to re-check)") t1)
+        t2 (os/now-ns)
         _ (when (not (empty? recheck)) (project-preload! (map recheck first) closures))
+        _ (project-check-trace "preload" t2)
+        t3 (os/now-ns)
         ;; re-check the dirty set in PARALLEL across the worker pool — safe now that
         ;; the dependency recorder is per-process (Heap::check_dep_rec). Each entry is
         ;; [mtime warnings dep-keys fp closure].
         ;; Each fresh entry's fingerprint is re-stamped HERE, in this process, from the
         ;; dep-keys the worker returned: the reuse test above runs here too, and a
-        ;; worker's view of the heap can differ from ours (a module the launcher
-        ;; materialised from the startup image carries no definition site, so the same
-        ;; global's fact reads `F` in one and `D<file>@<mtime>` in the other). Stamped in
-        ;; the worker, `nest run`'s pre-flight re-checked every file on every launch.
+        ;; worker's view of the heap can differ from ours (a module a worker lazily
+        ;; loaded mid-check is bound there and not here, and before 2026-09-21 an imaged
+        ;; module carried no definition site in either). Stamped in the worker, `nest
+        ;; run`'s pre-flight re-checked every file on every launch.
         fresh (fold (project-pcheck-deps recheck)
                 {}
                 (fn (m pair)
@@ -476,16 +492,28 @@ module included), built from the whole `files` universe — the KI-17 reachabili
                                     (reflect/check-deps-fp keys)
                                     (nth e 4 nil)])
                     (%map-assoc m p restamped))))
+        _ (project-check-trace "re-check" t3)
         entries (fold fresh reuse (fn (m kv) (let ([p e] kv) (%map-assoc m p e))))
-        ;; print every file's warnings (reused + fresh) and tally them
-        n (fold entries
+        ;; print every file's warnings (reused + fresh) and tally them — in FILE order, so
+        ;; a replayed run (ADR-382) prints what this one printed
+        n (fold files
             *project-tally-zero*
-            (fn (n kv) (let ([_ e] kv) (fold (nth e 1) n project-tally-warning)))))
+            (fn (n p)
+              (let (e (%map-get entries p nil))
+                (if e (fold (nth e 1) n project-tally-warning) n))))
+        lines (fold files
+                nil
+                (fn (acc p)
+                  (let (e (%map-get entries p nil))
+                    (if e (%append-two (or (nth e 1) nil) acc) acc)))))
     (when (not (empty? recheck))
-      (project-write-cache root
-        manifest
-        (fold entries cache (fn (m kv) (let ([p e] kv) (%map-assoc m p e))))))
-    n))
+      (let (t4 (os/now-ns))
+        (project-write-cache root
+          manifest
+          (fold entries cache (fn (m kv) (let ([p e] kv) (%map-assoc m p e)))))
+        (project-check-trace "write-cache" t4)))
+    ;; a vector, so "no warnings" (`[]`) stays distinct from the fresh path's "no lines" (nil)
+    [n (vec lines)]))
 
 (defn- project-preload! (files closures)
   "Bring the heap to ONE state before any of `files` is checked: require every module in
@@ -536,22 +564,27 @@ every file against the fully-loaded state is also what a live image would see. R
     nil))
 (sig project-preload! (any map -> nil))
 
+;; `[tally lines]`: the gating tally, and the per-file warning lines in file order when the
+;; cached path produced them (nil from the fresh path, whose workers print for themselves).
 (defn- project-check-files (files root)
   (if (= (os/env "BROOD_NO_CHECK") "1")
-    *project-tally-zero*
+    [*project-tally-zero* nil]
     ;; Build the KI-17 reachability closures from the WHOLE project (every file's
     ;; header), not just `files` — a `nest check FILE` still needs the full graph to
     ;; resolve `FILE`'s transitive requires, else a transitively-reached module would
     ;; false-positive. Outside a project (no root) the checked files are the universe;
     ;; there the lint is inert anyway (only the file's own requires are loaded).
-    (let (closures (project-require-closures (if root (all-files root) files)))
+    (let (t0 (os/now-ns)
+          closures (project-require-closures (if root (all-files root) files))
+          _ (project-check-trace "require-closures" t0))
       (cond
         ;; No cache when it's disabled, there's no project root, or the project is over
         ;; the file cap (the manifest read would rival re-checking) — parallel fresh path.
         (or (project-cache-off?) (nil? root) (>= (count files) (project-cache-max-files)))
           (do
             (project-preload! files closures)
-            (project-check-files-fresh files closures))
+            ;; workers print in-process here, so there are no lines to record
+            [(project-check-files-fresh files closures) nil])
         else (project-check-files-cached files root closures (project-check-manifest "checks") true)))))
 
 ;; Make sure the project is set up and all its sources are loaded — the
@@ -864,8 +897,17 @@ Returns nil when there is nothing to report."
 ;; extract depends on the Rust `parse-source`, so it isn't portable across binaries).
 ;; Opt out with `BROOD_NO_CHECK_CACHE=1`.
 ; v2: check-result entries gained a 5th field, the KI-17 require-closure (ADR-189).
-(def *check-cache-version* "v2")
-(defn- project-cache-stamp () (str (system/build-id) "|" *check-cache-version*))
+(def *check-cache-version* "v3")
+;; The stamp every manifest carries: the binary, the manifest format, and the values of
+;; the flags that change what a walk does (`%check-walk-flags`, the list `brood file`'s
+;; pre-flight cache keys on too, ADR-371) — a verdict taken under `BROOD_NO_IMAGE_SIGS=1`
+;; is not one taken without it, and before v3 the manifests did not know that.
+(defn- project-cache-stamp ()
+  (str (system/build-id)
+    "|"
+    *check-cache-version*
+    "|"
+    (string/join (map (%check-walk-flags) (fn (n) (str n "=" (or (os/env n) "")))) ",")))
 (defn- project-cache-off? () (= (os/env "BROOD_NO_CHECK_CACHE") "1"))
 
 ;; The cache directory for `root` (created if absent), or nil if no cache base is
@@ -1054,10 +1096,11 @@ check-result cache and the `--failed`/`--stale` records live in; created on dema
 ;; reported for the paths asked about. Before this the listed form ran neither lint —
 ;; `nest check` warned `unused private function: use-a` where CI's explicit-list invocation
 ;; over the same files said nothing (KI-149) — and the bare form THREW THE COUNTS AWAY, so
-;; the lints had never failed a gate in either form. Returns the count printed.
+;; the lints had never failed a gate in either form. Returns `[count lines]` — the count
+;; printed, and the lines themselves (newest first) for the verdict record.
 (defn- project-whole-lints (root paths)
   (if (= (os/env "BROOD_NO_CHECK") "1")
-    0
+    [0 nil]
     (let (files (all-files root)
           listed (map paths path/absolute)
           ;; a duplicate-def warning names its files mid-message; an unused-private one
@@ -1070,20 +1113,96 @@ check-result cache and the `--failed`/`--stale` records live in; created on dema
       (fold (seq/filter (append (project-duplicate-def-warnings extracts source-set)
                           (project-unused-private-warnings extracts))
               keep?)
-        0
-        (fn (n w) (io/puts w :to *err*) (+ n 1))))))
+        [0 nil]
+        (fn (acc w)
+          (io/puts w :to *err*)
+          [(+ (first acc) 1) (cons w (second acc))])))))
 
 (defn check ()
   "Advisory type-check the whole project (every source + test file), printing GNU-style `FILE:LINE:COL:` warnings to stderr. Errors if not in a Brood project. Backs `nest check`."
   (let (root (project/find-root (file/cwd)))
     (when (nil? root)
       (error "check: not in a Brood project (no project.blsp found from " (file/cwd) ")"))
-    (project-ensure-loaded root)
-    (let (files (all-files root))
-      ;; Phase 1: the whole-project lints. Phase 2 (per-file type-check): the EXPENSIVE
-      ;; pass — disk-cached per file (dep-fingerprint) so a warm re-check reuses
-      ;; everything unchanged. Both count: a warning from either fails the gate.
-      (+ (project-whole-lints root files) (first (project-check-files files root))))))
+    (project-check-or-replay root nil)))
+
+;; ── whole-project verdict replay (ADR-382) ───────────────────────────────────
+;; The per-file cache (below) needs the heap: a verdict is reused only when every global
+;; fact it observed still holds, and a fact is read from a loaded module. So an UNCHANGED
+;; project still paid to materialise every module, parse every file's requires, scan every
+;; file for the lints and re-fingerprint every entry — 15 s at 1 000 × 3k-line files, of
+;; which the answer was 0 s (measured 2026-09-21, phase trace). Every one of those inputs is
+;; a function of the same things the startup image is keyed on: the source and test files
+;; (path, size, mtime), the dependency files, the binary — plus the checking mode and the
+;; walk flags the stamp carries, and the LIST of files asked about. When that key is the one
+;; the previous run recorded, its printed lines ARE this run's verdict; print them and stop.
+;; The record holds only the lines (never dep-keys), so it stays small and reads in ms.
+;; `brood file`'s pre-flight has the same shape at file granularity (ADR-371).
+(defn- project-verdict-key (root paths)
+  (str (project-cache-stamp)
+    "\n"
+    (project-check-manifest "checks")
+    "\n"
+    (string/join (sort (map (or paths nil) path/absolute)) "\n")
+    "\n"
+    (project-image/fingerprint-of (all-files root))))
+
+(defn- project-verdict-record (root)
+  ;; check-allow :discarded-catch — a best-effort cache read: absence is the answer
+  (check-allow :discarded-catch
+    (try
+      (let (f (project-cache-file root (project-check-manifest "verdict")))
+        (if (and f (file/exists? f)) (reflect/read-string (file/slurp f)) nil))
+      (catch _ nil))))
+
+(defn- project-verdict-write! (root key lines gating)
+  (when (not (project-cache-off?))
+    (let (f (project-cache-file root (project-check-manifest "verdict")))
+      (when f
+        ;; check-allow :discarded-catch — a best-effort cache write: the next run recomputes
+        (check-allow :discarded-catch
+          (try (file/spit f (pr-str {:key key :lines (vec lines) :gating gating})) (catch _ nil)))))))
+
+;; `check` / `check-files` behind one door: replay the recorded verdict when the project,
+;; the binary, the mode and the asked-about files are all as they were; otherwise run the
+;; two passes and record what they printed. `paths` nil means the whole project.
+(defn- project-check-or-replay (root paths)
+  (project/setup root)
+  (let (t0 (os/now-ns)
+        key (if (project-cache-off?) nil (project-verdict-key root paths))
+        rec (if key (project-verdict-record root) nil)
+        _ (project-check-trace "verdict-key" t0))
+    (if (and rec (= (%map-get rec :key nil) key))
+      (do
+        (doseq (w (%map-get rec :lines nil)) (io/puts w :to *err*))
+        (when (project-check-trace?)
+          (io/puts (str "[check] replayed "
+                     (count (%map-get rec :lines nil))
+                     " lines (project unchanged)")
+            :to *err*))
+        (%map-get rec :gating 0))
+      (let (t1 (os/now-ns)
+            _ (project-ensure-loaded root)
+            _ (project-check-trace "ensure-loaded" t1)
+            ;; ABSOLUTE, as `all-files` spells them: the per-file manifest is keyed by the
+            ;; path string, so `nest check src/a.blsp` never reused the verdict `nest check`
+            ;; had just recorded for `/…/src/a.blsp` (every listed file re-checked, 2026-09-21).
+            files (if paths (map paths path/absolute) (all-files root))
+            t2 (os/now-ns)
+            ;; Phase 1: the whole-project lints. Phase 2 (per-file type-check): the
+            ;; EXPENSIVE pass — disk-cached per file (dep-fingerprint) so a warm re-check
+            ;; reuses everything unchanged. Both count: a warning from either fails the gate.
+            [lint-n lint-lines] (project-whole-lints root files)
+            _ (project-check-trace "whole-lints" t2)
+            t3 (os/now-ns)
+            [tally file-lines] (project-check-files files root)
+            _ (project-check-trace "check-files" t3)
+            gating (+ lint-n (first tally)))
+        ;; Recorded only when the per-file pass produced its lines (the fresh path prints in
+        ;; its workers, so it has none to record) — and only under a key, i.e. not with the
+        ;; cache off. Advisory lines are recorded as printed, so a replay prints them too.
+        (when (and key file-lines)
+          (project-verdict-write! root key (append (reverse lint-lines) (seq file-lines)) gating))
+        gating))))
 
 ;; (check-files paths) — advisory-check a specific list of files, the entry
 ;; behind `nest check FILE…`. Loads the project image *first* (same
@@ -1099,12 +1218,8 @@ check-result cache and the `--failed`/`--stale` records live in; created on dema
   "Advisory type-check the listed files with the project image loaded first (so cross-module/namespace imports resolve), printing GNU `FILE:LINE:COL:` warnings to stderr and returning the total count. The entry behind `nest check FILE…`; shares its loader and per-file walk with `check`. Outside a project, checks against the prelude alone."
   (let (root (project/find-root (file/cwd)))
     (if (nil? root)
-      (first (project-check-files paths nil))
-      (do
-        (project-ensure-loaded root)
-        ;; the whole-project lints too, reported for the listed files (KI-149): CI's
-        ;; explicit-list invocation is this form, and it had never run them
-        (+ (project-whole-lints root paths) (first (project-check-files paths root)))))))
+      (first (first (project-check-files paths nil)))
+      (project-check-or-replay root paths))))
 
 ;; Sources-only variant for `run`'s auto pre-flight: skip `tests/`,
 ;; because test files depend on the test-framework macros (`describe`/`test`/
@@ -1123,7 +1238,7 @@ check-result cache and the `--failed`/`--stale` records live in; created on dema
           extracts (project-gather-extracts srcs)
           source-set (fold srcs {} (fn (m p) (%map-assoc m p true))))
       (project-check-duplicate-defs extracts source-set)
-      (first (project-check-files srcs root)))))
+      (first (first (project-check-files srcs root))))))
 
 ;; `nest run`'s pre-flight, scaled to what is actually about to run.
 ;;
@@ -1184,9 +1299,7 @@ and the pre-flight would 'check' the manifest and warn on it."
                             p (project-feature-file m srcdirs))
                         (if (nil? p)
                           (go (rest frontier) seen2 files)
-                          (let (info (try
-                                       (%module-direct-requires p)
-                                       (catch e {:module nil :requires []})))
+                          (let (info (%map-get (project-module-infos (list p)) p nil))
                             (go (append (rest frontier) (or (%map-get info :requires nil) []))
                               seen2
                               (conj files p))))))))))
@@ -1220,11 +1333,12 @@ reaches is `nest check`/`nest test`'s business."
         (project-check-duplicate-defs extracts source-set)
         (if (or (project-cache-off?) (>= (count want) (project-cache-max-files)))
           (project-check-files-shared want reach)
-          (project-check-files-cached want
-            root
-            (project-require-closures want)
-            (project-check-manifest "checks-run")
-            false))))))
+          ;; `[tally lines]` — the launch gate wants the tally
+          (first (project-check-files-cached want
+                   root
+                   (project-require-closures want)
+                   (project-check-manifest "checks-run")
+                   false)))))))
 
 ;; --- `nest check --fix-renames` — the migration aid --------------------------
 ;; A rename wave breaks every downstream repo, and the recovery was a manual loop: run

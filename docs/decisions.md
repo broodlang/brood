@@ -24549,3 +24549,76 @@ edit cases, forced false reds the warm case. The trace line is a print of a coun
 keeps regardless (KI-171). `scripts/bench/image-scale.sh` gained `FNS=` (the 3k-line shape)
 and two warm columns, and its stale ADR-325 names were fixed.
 
+## ADR-382 — `nest check` is incremental for real: definition sites ride the image, and an unchanged project replays its verdict
+
+**Status:** accepted (2026-09-21). Item 2 of `docs/large-project-scaling.md`'s queue.
+
+**Context.** ADR-119's per-file verdict cache reuses a file's warnings when its text and its
+dependency FINGERPRINT are unchanged, and a user global's fact in that fingerprint is its
+definition site — `D<file>@<mtime>` (`types::check::deps::fact_of_sym`). A module
+materialised from the project image carried no definition sites: `%image-write` encoded
+bindings, sigs and privacy, and `def_site` is recorded by *evaluating* a `def`, which
+materialising does not do. So the fact of every project global read `F` after an imaged start
+and `D…` after a source load, and no cached fingerprint could match across the flip. The cache
+hit only image → image: **every `nest check` after a cold build re-checked the whole project,
+and so did every check after an edit** (the edit makes the image stale, so that check loads
+from source). Measured on 1 000 × 3 000-line files (release `nest`, 2026-09-21): cold check
+186 s, the next unchanged check **154 s**, only the one after that 15 s; a one-function edit
+**188 s**. The doc's "unchanged re-check 16 s" was the third run's number, the best case of
+a cache that mostly did not work.
+
+The 15 s that remained on the true warm path was all fixed cost, attributed by a phase trace
+(`[check] …` under `BROOD_DERIVE_DBG`): materialising every module from the image 3.7 s,
+the whole-project lints' scan of every file 4.5 s, one full parse of every file for its
+requires 2.9 s, re-fingerprinting every entry 1.0 s — for an answer that was 0 s of new
+information.
+
+**Decisions.**
+
+1. **The image carries definition sites** (`boot/image.rs` `KIND_DEF_SITE`: name, file, line,
+   column — a name-and-no-value entry like privacy, so it round-trips for a binding that is
+   not encodable). A global answers `def_site` the same whichever way its module arrived, so
+   the fingerprint's fact is a function of the source tree alone. This also lights up
+   `(source-location 'name)` and the LSP's go-to-definition for imaged project modules,
+   which had gone dark on every warm start. The prelude image already carried def sites as a
+   side fact (ADR-320); its root section now holds them twice, idempotently.
+2. **An unchanged project replays its verdict without loading it.** Every input to a check —
+   the per-file text, every fact in every fingerprint, the require graph, the lints — is a
+   function of the source and test files (path, size, mtime), the dependency files, the
+   binary, the checking mode, the walk-changing flags and the list of files asked about.
+   `project-check-or-replay` keys the run's printed lines and gating count on exactly that
+   (`project-image/fingerprint-of` over `all-files`, now public, plus the stamp and the
+   sorted absolute list) and, when the key recurs, prints them and stops: no image
+   installed, no file parsed, no fingerprint recomputed. The record holds only lines, never
+   dep-keys, so it is small and reads in milliseconds. `brood file`'s pre-flight has the same
+   shape at file granularity (ADR-371); the two now share one list of walk-changing flags
+   (`cli_support::WALK_FLAGS`, exposed as `%check-walk-flags`), which the per-file manifests'
+   stamp also carries — before v3 a verdict taken under `BROOD_NO_IMAGE_SIGS=1` was reused
+   without it.
+3. **The require graph comes from the module index.** `%module-direct-requires` answers
+   `:modules` beside `:module`/`:requires`, and the index's entry (format v2) records all
+   three, so `project-module-infos` and `nest run`'s entry-closure walk parse a file only
+   when its size or mtime moved (ADR-380's contract extended to the checker's question).
+4. **Listed paths are absolutised at the door.** The per-file manifest is keyed by the path
+   string, so `nest check src/a.blsp` had never reused a verdict `nest check` recorded for
+   `/…/src/a.blsp` — every listed file re-checked, on every CI invocation of the explicit-list
+   form. Whole-project output was already absolute; the listed form now prints the same way.
+
+**What this does NOT change.** An edit still rebuilds the whole startup image from source
+before the check — 30 s at 1 000 × 3k — because the image is keyed as one snapshot. The
+CHECK after that edit re-derives the edited file and its dependents only, as ADR-119 always
+intended; the load is now the edit loop's cost, and it is Finding 3's question (a module-level
+image staleness would make it O(changed)).
+
+**Consequences.** Release `nest`, the same rig: unchanged `nest check` **154 s / 15 s → 0.12 s, 118 MB** (a replay); one-function edit **188 s → 40 s**, of which 33 s is the image rebuild and 2.7 s the check (1 file re-checked); `nest check` over three listed files 9.3 s with 0 re-checked (4 s materialise + 4.6 s lints — the lints still scan every file); the require-graph parse 2.9 s → 0.04 s. `nest check FILE…` prints absolute
+paths. The check-cache manifest version is v3 (v2 entries are dropped once).
+
+**Gates.** `crates/nest/tests/check_incremental.rs`: after a cold build, a whole check
+REPLAYS (no `[check] ensure-loaded`), and the same files listed take the per-file cache and
+re-check 0; a leaf edit re-checks 1; a dependency's arity change re-checks 2 and reports the
+dependent's new warning (exit 1), which the next unchanged run replays with the same exit;
+`BROOD_NO_IMAGE_SIGS=1` defeats the replay. Sabotage-verified both ways: the def-site
+entries not written reds the listed case with `N == files`; the key comparison forced true
+reds the edit case with the stale, warning-free replay. `tests/module_index_test.blsp`
+covers the v2 entry (own module, requires, the file's own spelling).
+

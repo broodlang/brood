@@ -101,12 +101,29 @@
           a (write-mod! root "a" (list "alpha")))
       (file/mkdir (path/join root ".brood"))
       (file/spit (idx-file root)
-        (str "(brood-module-index 999)\n" (pr-str (list a 1 1 (list 'stale))) "\n"))
+        (str "(brood-module-index 999)\n" (pr-str (list a 1 1 (list 'stale) "stale" nil)) "\n"))
       (assert= (list 'alpha) (modules-of root a))
       (assert= {:files 1 :hits 0 :parsed 1} (last-scan))
       (file/spit (idx-file root) "this is not an index at all (")
       (%isolate (fn () (module-index/modules-of root a)))
       (assert= (list 'alpha) (modules-of root a))))
+
+  (test "an entry carries the file's own module and its requires, so the checker's graph needs no parse"
+    (let (root (fixture-root!)
+          a (write-mod! root "a" (list "alpha"))
+          b (path/join root "src" "b.blsp"))
+      (file/spit b "(defmodule beta (:use alpha) (:use string))\n(defn g () (alpha/f))\n")
+      (let (infos (infos-of root (list a b)))
+        (assert= {:module "alpha" :requires []} (get infos a))
+        (assert= {:module "beta" :requires ["alpha" "string"]} (get infos b)))
+      (assert= {:files 2 :hits 0 :parsed 2} (last-scan))
+      ;; the same answer from the index, and from the file on disk after the memo is dropped
+      (%isolate (fn () (module-index/infos-of root (list a b))))
+      (assert= ["alpha" "string"] (get (get (infos-of root (list a b)) b) :requires))
+      (assert= {:files 2 :hits 2 :parsed 0} (last-scan))
+      (let (text (file/slurp (idx-file root)))
+        (is (includes? text "(brood-module-index 2)"))
+        (is (includes? text "\"beta\" [\"alpha\" \"string\"]")))))
 
   (test "a nil root remembers within the process and writes nothing"
     (let (root (fixture-root!)

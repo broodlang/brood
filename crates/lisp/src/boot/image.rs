@@ -128,6 +128,19 @@ const KIND_TABLE: u8 = 3;
 /// name whose value is not encodable (a `Table`, a closure `to_message` refuses): the
 /// privacy fact survives even when the binding itself is skipped.
 const KIND_PRIVATE: u8 = 4;
+/// Where a name was DEFINED — file, line, column — the fact `(source-location 'name)`, the
+/// LSP's go-to-definition and the incremental checker's dependency fingerprint all read
+/// (`types::check::deps::fact_of_sym`: a user global's fact is `D<file>@<mtime>`). Recorded
+/// by *evaluating* the `def`, so a materialised module had none — and that made the fact of
+/// every project global depend on HOW its module arrived: `D…` after a source load, `F` after
+/// an imaged one. Every `nest check` following a cold build (source → image) re-checked the
+/// whole project, and so did every check after an edit (image → source), because no cached
+/// fingerprint could match across the flip; the ADR-119 cache only ever hit image → image
+/// (measured 2026-09-21 at 1 000 × 3k-line files: unchanged re-check 154 s, then 15 s; a
+/// one-function edit 188 s). Carried like privacy — a name and no value — so it round-trips
+/// for a name whose binding is not encodable. The prelude image carries the same fact
+/// through `Heap::side_facts` (ADR-320); its root section now holds it twice, idempotently.
+const KIND_DEF_SITE: u8 = 5;
 
 /// `BROOD_IMAGE_TRACE=1` — report where image time goes, split by phase. Both sides run
 /// through an intermediate `process::Message` tree before or after the byte codec, and the
@@ -192,6 +205,17 @@ fn get_u32(r: &mut Cursor<Vec<u8>>) -> Option<u32> {
     };
     r.set_position((p + 4) as u64);
     Some(n)
+}
+
+/// The payload of a `KIND_DEF_SITE` entry (after its name): file, line, column.
+fn get_def_site(r: &mut Cursor<Vec<u8>>) -> Option<crate::core::heap::SourceLoc> {
+    let file = get_str(r)?;
+    let line = get_u32(r)?;
+    let col = get_u32(r)?;
+    Some(crate::core::heap::SourceLoc {
+        file,
+        pos: crate::error::Pos { line, col },
+    })
 }
 
 fn get_str(r: &mut Cursor<Vec<u8>>) -> Option<String> {
@@ -349,6 +373,21 @@ fn encode_section(
         if heap.is_private(sym) {
             entries.push(KIND_PRIVATE);
             put_str(&mut entries, &value::symbol_name(sym));
+            count += 1;
+        }
+    }
+    // Def sites, for every name in this section the runtime recorded one for — so a global
+    // materialised from the image answers `def_site` exactly as one loaded from source.
+    for nv in syms {
+        let value::ValueRef::Sym(sym) = nv.unpack() else {
+            continue;
+        };
+        if let Some(loc) = heap.def_site(sym) {
+            entries.push(KIND_DEF_SITE);
+            put_str(&mut entries, &value::symbol_name(sym));
+            put_str(&mut entries, &loc.file);
+            put_u32(&mut entries, loc.pos.line);
+            put_u32(&mut entries, loc.pos.col);
             count += 1;
         }
     }
@@ -862,6 +901,15 @@ pub(crate) fn image_load_section(args: &[Value], _: EnvId, heap: &mut Heap) -> L
             done += 1;
             continue;
         }
+        // So does a def-site entry: file, line, column.
+        if kind == KIND_DEF_SITE {
+            let Some(loc) = get_def_site(&mut r) else {
+                return Ok(Value::Nil);
+            };
+            heap.set_def_site(value::intern(&name), loc);
+            done += 1;
+            continue;
+        }
         let t0 = std::time::Instant::now();
         let Ok(msg) = decode_msg(&mut r) else {
             return Ok(Value::Nil);
@@ -1186,6 +1234,11 @@ pub(crate) fn load_prelude_image(
         let name = get_str(&mut r)?;
         if kind == KIND_PRIVATE {
             heap.mark_private(value::intern(&name));
+            done += 1;
+            continue;
+        }
+        if kind == KIND_DEF_SITE {
+            heap.set_def_site(value::intern(&name), get_def_site(&mut r)?);
             done += 1;
             continue;
         }

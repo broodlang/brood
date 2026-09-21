@@ -300,7 +300,8 @@ before working in any Rust component:
   `project-image` — the project startup image (fingerprint, write, materialise);
   `module-index` — the file → modules index (`.brood/module-index`, keyed per file by size
   and mtime, ADR-380) that `package`'s rooting and `project`'s loader read the module graph
-  from, so a warm start opens no source file to learn which file declares which module;
+  from, and `project-check` the require graph (ADR-382), so a warm start opens no source
+  file to learn which file declares, or requires, which module;
   `project-check` — the `nest check` driver, its result cache, the whole-project lints
   and the `--fix-renames` / `--suggest-sigs` aids; `project-run` — `run-tests` (with
   `--failed`, `--stale`, coverage), `run` and `check-boot`; `project-release` — bundle

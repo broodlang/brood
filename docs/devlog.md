@@ -942,6 +942,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-21** — "processes must be super cheap to spin up, hold and kill": measured first (200k processes, release): spawn+exit **1.66 µs** issue / 2.06 µs to dead, hold **4.4–4.6 KB RSS** per parked process, kill 0.7 µs unmonitored — and **1.2 ms MONITORED** (KI-176: every death walked the whole monitor table; a watcher-side index makes it 1.27 µs). Then a ~180 B/killed-process "leak" that was the default crash reporter's mailbox (KI-177: `:exit-abnormal` filtered only `:normal`, so every supervisor kill fed the reporter a message it discarded at 14 µs each and it fell behind without bound; the kernel now filters the reporter's own non-crash table). On the way: `main` was red twice — `d7600bea`'s strengthened mirror cross-check fired on a BAILED arm's mirror (`type_mixed_join_edges_stay_exact`, deterministic) and on a peer's earlier `(code, nslots)` snapshot of a swapped shared arm (twice per full suite) — both by-design states, both now tolerated by construction (a demoted entry; a debug ledger of every published pair), and twenty new public names were uncatalogued. Then the hold floor by histogram: every block of a parked process NAMED (`runtime-frontier.md` §B, refreshed) — and the first name was a two-month regression: `spawn` allocated a 328 B `ColdHeap` on every child to record an EMPTY package context (`spawn-live` peak RSS 1.73 → 1.62 GB, −6.6%, from a three-line guard), now ratcheted by `process_floor.rs`. Then the two structural items the histogram named: the four per-process maps became `SmallMap`s (one entry costs one entry, not hashbrown's four buckets — −388 B) and the root stack grows by four below sixteen slots (a parked receive's transient ninth root no longer doubles it — −96 B). **Parked process 4 690 → 3 868 B counted (−17.5%), `spawn-live` peak 1.73 → 1.52 GB**, every row within its floor (instructions flat on the two that read a few percent of wall). Still to do on this thread: spawn (1.66 µs vs ~1), the `Process` struct's 168 B of growth since July, and the reporter's own 14 µs/message. Then the day's last question — 100k files × 3k lines — measured on a 1 000 × 3k rig and written up in `docs/large-project-scaling.md`: warm `nest run` 3.0 s is O(source bytes) (the module index `read-all`s every file, twice — 2 000 opens on a warm run), whole-project `nest check` 161 s / 3.8 GB on one thread; running is fine at any size, the whole-project check is not; six-item queue, the module-index cache first.
 - **2026-09-21** — the game engine's day, and what it asked of the runtime. `b2d-physics` (private) went from 176 to 24 ms a step at 500 bodies, and every gain but one was the language's: **ADR-378** — an arm computing on floats it reads out of vectors (`(dot a b)`) never went native, because the float context came from the param profile alone; deopt feedback re-tiers it after four integer-guard deopts on a `Float`, and on the way the thrash latch turned out never to clear callers' fast links (a latched arm entered natively forever), the compile cache handed re-lowers their old code, and comparisons sat outside the float context (they dispatch by tag now, a bool either way). `dot` 410 → 89 ns. Then the prelude: `conj` on a vector cost **7.7 µs** (`into` → `append` → two reverses → `apply vector`; `%vector-concat` copies once, 1.2 µs), `seq` 586 ns to return a vector itself (answers first now, as `fold` does), `reverse` reduces a vector natively; and the table: `get` rebuilds under the lock instead of cloning first, scalar keys compare as they are (six floats 204 → 144 ns). **ADR-374 addendum 4**: pong from an installed `nest` showed its score and nothing else — the CPU painter skipped `[:quad]`/`[:sprite]` silently; it draws them in software now, the same picture, and `b2d/run` says when there is no GPU target. "A trail behind the ball" was an `Immediate` present tearing; games default `:vsync true`. Downstream: `b2d/serve-shared` (one match for every window and tab, input stamped per player) and `pong2` (private) — physics court, three-level AI, online PvP, a disc sprite ball, 35 tests. Not measured on the rows: the three runtime commits (`perf-handoff.md` Task 7).
 - **2026-09-21** — large-project scaling, item 1 (ADR-380): the module graph is a per-file cache on disk. A warm `nest run` re-parsed every source file WHOLE to find its `defmodule` header — twice (rooting, package identity), three times cold — which at 3 000-line files was the entire warm start (3.0 s at 1 000 files, 2 000 `openat`, the reader in `perf`). `std/tool/module-index.blsp` keeps `.brood/module-index` (one `("path" size mtime (mods))` line per file, atomic write, format-versioned, NOT build-id-keyed — it is a fact about source text) and `package`/`project` read the graph through it. Same rig, release: **warm run 3.0 → 0.15 s**, RSS 282 → 145 MB, source opens 2 000 → 0, cold 45.8 → 39.2 s. Gates: `nest::module_index` (the `[index] … 0 parsed` trace on a second run; an edit re-parses exactly its files) and `tests/module_index_test.blsp` (the answers), both sabotage-verified both ways. Found on the way: `scripts/bench/image-scale.sh` had driven ADR-325's OLD names for a month — fixed, plus `FNS=` for the 3k shape and warm columns. Next in the queue: incremental `nest check`.
+- **2026-09-21** — large-project scaling, item 2 (ADR-382, KI-179): `nest check` incremental for real. Measuring the doc's "unchanged re-check 16 s" from a cleared cache showed the ADR-119 cache hit only image → image — a user global's fingerprint fact is its DEF SITE, and a module from the project image had none (`F` vs `D<file>@<mtime>`), so the check after a cold build re-checked everything (154 s of 186 s) and so did the check after any edit (188 s). Three moves: the image carries def sites (`KIND_DEF_SITE`, the privacy-entry shape — also relights `source-location` / LSP go-to-def for imaged modules); an unchanged project REPLAYS its recorded lines without loading (keyed on the ADR-380 fingerprint + mode + `WALK_FLAGS`, now shared with ADR-371 through `%check-walk-flags`, + the listed files); the require graph and the lints' inputs no longer parse unchanged files (`%module-direct-requires` answers `:modules`, the index entry is v2). Also: `nest check FILE…` had never reused a verdict — relative keys against absolute ones. Rig, release: unchanged `nest check` **154 s / 15 s → 0.12 s, 118 MB** (a replay); one-function edit **188 s → 40 s**, of which 33 s is the image rebuild and 2.7 s the check (1 file re-checked); `nest check` over three listed files 9.3 s with 0 re-checked (4 s materialise + 4.6 s lints — the lints still scan every file); the require-graph parse 2.9 s → 0.04 s. Gate `nest::check_incremental`, sabotage-verified both ways. Left for the edit loop: the whole-image rebuild an edit still pays (30 s at 1 000 × 3k) — Finding 3.
 ---
 
 ## Recent — full entries
@@ -15327,4 +15328,41 @@ row it printed today was `0.00 / 0` for every column, because a relative `BROOD=
 under its `cd` as well. Both fixed; it now takes `FNS=` and prints `warm all` (materialise
 everything: the `nest test` start) and `warm lazy` (image install only: the `nest run` start)
 beside the cold columns.
+
+## 2026-09-21 (4) — large-project scaling, item 2: the cache that only hit on the second identical run
+
+The queue said "`nest check` incremental for real (ADR-129 finished): unchanged re-check ≈
+fingerprint time". Measuring the unchanged re-check from a cleared cache said something else
+first: cold 186 s, unchanged **154 s**, unchanged **15 s**, one-function edit **188 s**. The
+16 s in the doc was the third run. The ADR-119 cache compares a per-file dependency
+fingerprint whose user-global fact is the definition site, and the project image did not carry
+definition sites — so the fact flipped between `D<file>@<mtime>` and `F` with every change of
+arrival, and the two transitions a developer actually makes (build → check, edit → check) both
+crossed it. KI-179 has the mechanism; a comment in `project-check.blsp` had described the flip
+in 2026-08-30 as the reason for a second manifest, and stopped there.
+
+The fix is one image entry kind (`KIND_DEF_SITE`, written like privacy), after which the
+small rig reads: cold 42 re-checked, then 0, an isolated edit 1, a dependency edit 2 (the
+dependent's new arity warning appears). On top of it the phase trace of the true warm path
+(ensure-loaded 3.7 s, lints 4.5 s, require parse 2.9 s, re-fingerprint 1.0 s at 1 000 × 3k)
+was all fixed cost for zero new information, so an unchanged project now replays its recorded
+lines keyed on the ADR-380 fingerprint — the same key the image trusts — plus the mode, the
+walk flags and the file list; 40 ms in a debug build. The require graph moved into the module
+index (v2 entries carry own module and requires), and listed paths are absolutised, which
+closed a fourth thing nobody had measured: `nest check FILE…` had never hit the cache at all.
+
+Release rig, after:
+
+| operation | before | after |
+|---|---|---|
+| `nest check`, unchanged, right after a cold build | 154 s / 3.2 GB | **0.12 s / 118 MB** (replay) |
+| `nest check`, unchanged, steady state | 14.7 s / 3.0 GB | **0.12 s / 118 MB** (replay) |
+| `nest check` after a one-function edit | 188 s / 3.8 GB | **40.2 s** — image rebuild 32.6 s, the check 2.7 s (1 file re-checked) |
+| `nest check FILE FILE FILE` (listed, unchanged) | every listed file re-checked | 9.3 s, 0 re-checked (4.0 s materialise + 4.6 s lints, both O(project)) |
+| require-graph parse per run | 2.9 s | 0.04 s (module index) |
+| cold `nest check` | 186 s | 191 s (unchanged in kind: load 37 s + check 146 s, one thread of the check pool aside) |
+
+What an edit still pays is the whole-image rebuild from source (30 s here) before a check
+that then re-derives two files in 20 ms. That is the next item, and it is a LOAD question
+(Finding 3), not a checker one.
 

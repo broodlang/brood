@@ -76,8 +76,16 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(1),
         Sig::new(vec![string], any),
         &["path"],
-        "Parse the file at path (no eval) and return `{:module <name-or-nil> :requires [<module-name> …]}` — its own module name and the modules it directly `:use`s / `:use-internals`. The edge list `project.blsp` closes transitively into each file's check-file reachability set (KI-17).",
+        "Parse the file at path (no eval) and return `{:module <name-or-nil> :requires [<module-name> …] :modules (<sym> …)}` — its own module name, the modules it directly `:use`s / `:use-internals` / `(require …)`s, and every `(defmodule …)` it opens in source order (ADR-223). The edge list `project.blsp` closes transitively into each file's check-file reachability set (KI-17); the module index (ADR-380) caches the whole answer per file.",
         module_direct_requires);
+    primitives.def(
+        "%check-walk-flags",
+        Arity::exact(0),
+        Sig::new(vec![], any),
+        &[],
+        "The names of the `BROOD_*` flags that change what a checker walk does — its verdict or its loads — as a vector of strings (`cli_support::WALK_FLAGS`). A cached verdict is reusable only under the same values of these, so `nest check`'s manifests key on them (ADR-382) exactly as `brood file`'s pre-flight verdict cache does (ADR-371); one list, so the two cannot disagree.",
+        check_walk_flags,
+    );
     primitives.def(
         "%check-strict?",
         Arity::exact(0),
@@ -417,6 +425,10 @@ pub(super) fn module_direct_requires(args: &[Value], _env: EnvId, heap: &mut Hea
     let forms = reader::read_all_positioned(heap, &src).map_err(|e| e.or_file(path.clone()))?;
     let just_forms: Vec<Value> = forms.into_iter().map(|(f, _)| f).collect();
     let (own, deps) = crate::types::check::module_direct_requires(heap, &just_forms);
+    // Every `(defmodule …)` the file opens, in source order (ADR-223) — the module index
+    // (ADR-380) records these beside the requires, so one parse of a changed file answers
+    // both the loader's and the checker's questions about it.
+    let modules = crate::eval::macros::file_modules(heap, &just_forms);
     // No GC safepoint fires inside a single builtin, so these handles stay live without
     // rooting (same discipline as `check_file_structured`).
     let dep_vals: Vec<Value> = deps.iter().map(|d| heap.alloc_string(d)).collect();
@@ -425,9 +437,15 @@ pub(super) fn module_direct_requires(args: &[Value], _env: EnvId, heap: &mut Hea
         Some(n) => heap.alloc_string(&n),
         None => Value::Nil,
     };
+    let modules_val = heap.list(modules.into_iter().map(Value::symbol).collect());
     let module_kw = Value::keyword(value::intern("module"));
     let requires_kw = Value::keyword(value::intern("requires"));
-    Ok(heap.map_from_pairs(vec![(module_kw, module_val), (requires_kw, requires_val)]))
+    let modules_kw = Value::keyword(value::intern("modules"));
+    Ok(heap.map_from_pairs(vec![
+        (module_kw, module_val),
+        (requires_kw, requires_val),
+        (modules_kw, modules_val),
+    ]))
 }
 
 /// `(check-file-deps path)` — the incremental-cache counterpart of `check-file`
@@ -486,6 +504,14 @@ pub(super) fn check_materialise_referenced(
 ) -> LispResult {
     crate::types::check::materialise_referenced_modules(heap);
     Ok(Value::Nil)
+}
+
+pub(super) fn check_walk_flags(_args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let names: Vec<Value> = crate::cli_support::WALK_FLAGS
+        .iter()
+        .map(|n| heap.alloc_string(n))
+        .collect();
+    Ok(heap.alloc_vector(names))
 }
 
 pub(super) fn check_strict(_args: &[Value], _env: EnvId, _heap: &mut Heap) -> LispResult {
