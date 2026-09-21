@@ -167,7 +167,8 @@ writes nothing. A file that no longer exists maps to nil and is neither counted 
       (def *indexes* (assoc *indexes* root entries))
       (write-index! root entries))
     result))
-(sig index-entries ((or string nil) (or (list string) (vector string) nil) -> (map string (or vector nil))))
+(sig index-entries
+  ((or string nil) (or (list string) (vector string) nil) -> (map string (or vector nil))))
 
 (defn index-files (root files)
   "The modules each of `files` declares — a map `file -> (list of module symbols)`, every key
@@ -177,7 +178,8 @@ present (a file with no `defmodule` maps to nil) — through `index-entries`.
   (fold (%map-pairs (index-entries root files))
     {}
     (fn (m kv) (let ([f e] kv) (assoc m f (if e (get e 0) nil))))))
-(sig index-files ((or string nil) (or (list string) (vector string) nil) -> (map string (or (list symbol) nil))))
+(sig index-files
+  ((or string nil) (or (list string) (vector string) nil) -> (map string (or (list symbol) nil))))
 
 (defn infos-of (root files)
   "The checker's view of each of `files` — a map `file -> {:module own :requires [dep …]}`
