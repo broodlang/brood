@@ -1,0 +1,256 @@
+;; std/vt — the virtual terminal. A pure fold over program output, so every case here
+;; is `feed` then look: the screen's lines, the cursor, a mode, a reply.
+
+(defmodule vt-test (:use test))
+
+(defn- lines-of (vt) (vt/lines vt))
+
+(defn- fed (cols rows & chunks)
+  "A `cols`×`rows` terminal after each of `chunks`."
+  (fold chunks (vt/make cols rows) vt/feed))
+
+(describe "vt: plain text"
+  (test "text prints at the cursor and the cursor advances"
+    (let (v (fed 10 3 "hello"))
+      (assert= (lines-of v) ["hello" "" ""])
+      (assert= (vt/cursor v) [0 5])))
+  (test "LF moves down, CR returns to column 0, CRLF does both"
+    (let (v (fed 10 3 "ab\ncd\r\nef"))
+      (assert= (lines-of v) ["ab" "  cd" "ef"])
+      (assert= (vt/cursor v) [2 2])))
+  (test "a lone LF keeps the column (the tty's onlcr is the pty's job, not ours)"
+    (assert= (lines-of (fed 10 3 "ab\ncd")) ["ab" "  cd" ""]))
+  (test "CR then text overwrites the line — a progress bar"
+    (assert= (lines-of (fed 10 2 "50%\r99%")) ["99%" ""]))
+  (test "backspace steps back, tab goes to the next stop"
+    (assert= (lines-of (fed 20 1 "abc\x08X")) ["abX"])
+    (assert= (vt/cursor (fed 20 1 "a\tb")) [0 9]))
+  (test "text wraps at the right edge"
+    (let (v (fed 4 3 "abcdef"))
+      (assert= (lines-of v) ["abcd" "ef" ""])
+      (assert= (vt/cursor v) [1 2])))
+  (test "the last column fills without wrapping until the next character (pending wrap)"
+    (let (v (fed 4 3 "abcd"))
+      (assert= (vt/cursor v) [0 3])
+      (assert= (lines-of (vt/feed v "\r\nx")) ["abcd" "x" ""])))
+  (test "output past the bottom scrolls, the top row leaving as history"
+    (let (v (fed 5 2 "one\r\ntwo\r\nthree"))
+      (assert= (lines-of v) ["two" "three"])
+      (assert= (map (:evicted v) (fn (row) (first (vt/line row nil)))) (list "one"))))
+  (test "a wide grapheme takes two cells and one text position"
+    (let (v (fed 6 1 "a中b"))
+      (assert= (vt/cursor v) [0 4])
+      (assert= (lines-of v) ["a中b"])))
+  (test "a wide grapheme that does not fit wraps whole"
+    (assert= (lines-of (fed 3 2 "ab中")) ["ab" "中"]))
+  (test "a combining mark joins the cell before the cursor"
+    (assert= (lines-of (fed 5 1 (str "e" "́" "x"))) [(str "e" "́" "x")])))
+
+(describe "vt: cursor motion"
+  (test "CUP positions 1-based, CUU/CUD/CUF/CUB move relative, all clamped"
+    (let (v (fed 10 5 "\e[3;4Hx"))
+      (assert= (vt/cursor v) [2 4])
+      (assert= (vt/cursor (vt/feed v "\e[A\e[2D")) [1 2])
+      (assert= (vt/cursor (vt/feed v "\e[99B\e[99C")) [4 9])
+      (assert= (vt/cursor (vt/feed v "\e[H")) [0 0])))
+  (test "CHA / VPA set a column / row; CNL / CPL move by lines to column 0"
+    (assert= (vt/cursor (fed 10 5 "\e[3;4H\e[7G")) [2 6])
+    (assert= (vt/cursor (fed 10 5 "\e[3;4H\e[2d")) [1 3])
+    (assert= (vt/cursor (fed 10 5 "\e[3;4H\e[E")) [3 0])
+    (assert= (vt/cursor (fed 10 5 "\e[3;4H\e[2F")) [0 0]))
+  (test "DECSC / DECRC save and restore the cursor and attributes"
+    (let (v (fed 10 3 "\e[1m\e7\e[0m\e[3;1Hzzz\e8y"))
+      (assert= (lines-of v) ["y" "" "zzz"])
+      (assert= (:bold (:attr v)) true)))
+  (test "CSI s / CSI u are the same pair"
+    (assert= (lines-of (fed 10 3 "\e[s\e[3;1Hzzz\e[uy")) ["y" "" "zzz"]))
+  (test "the line editor's redraw: up one, erase below, reprint"
+    ;; iex echoes the input, moves up and erases to reprint it with its prompt
+    (let (v (fed 20 4 "iex> 1 +\r\n\e[A\e[Jiex(1)> 1 + 1"))
+      (assert= (lines-of v) ["iex(1)> 1 + 1" "" "" ""]))))
+
+(describe "vt: erasing"
+  (test "EL 0 / 1 / 2: to the end, to the start, the whole line"
+    (assert= (lines-of (fed 10 1 "abcdef\e[3D\e[K")) ["abc"])
+    (assert= (lines-of (fed 10 1 "abcdef\e[3D\e[1K")) ["    ef"])
+    (assert= (lines-of (fed 10 1 "abcdef\e[2K")) [""]))
+  (test "ED 0 / 1 / 2: below, above, everything"
+    (assert= (lines-of (fed 4 3 "aaaa\r\nbbbb\r\ncccc\e[2;3H\e[J")) ["aaaa" "bb" ""])
+    (assert= (lines-of (fed 4 3 "aaaa\r\nbbbb\r\ncccc\e[2;3H\e[1J")) ["" "   b" "cccc"])
+    (assert= (lines-of (fed 4 3 "aaaa\r\nbbbb\r\ncccc\e[2J")) ["" "" ""]))
+  (test "ECH erases n cells in place, DCH pulls the rest left, ICH pushes it right"
+    (assert= (lines-of (fed 10 1 "abcdef\e[2G\e[2X")) ["a  def"])
+    (assert= (lines-of (fed 10 1 "abcdef\e[2G\e[2P")) ["adef"])
+    (assert= (lines-of (fed 10 1 "abcdef\e[2G\e[2@")) ["a  bcdef"]))
+  (test "an erase keeps the current background (BCE), as a status bar relies on"
+    (let (v (fed 4 1 "\e[44m\e[2K")
+          s (vt/screen v nil))
+      (assert= (:text s) "    ")
+      (assert= (count (:spans s)) 1)
+      (assert= (nth (first (:spans s)) 2) {:bg [0 0 238]}))))
+
+(describe "vt: lines, scroll regions and the alternate screen"
+  (test "IL opens blank rows at the cursor, DL closes them"
+    (assert= (lines-of (fed 3 4 "a\r\nb\r\nc\r\nd\e[2;1H\e[L")) ["a" "" "b" "c"])
+    (assert= (lines-of (fed 3 4 "a\r\nb\r\nc\r\nd\e[2;1H\e[2M")) ["a" "d" "" ""]))
+  (test "deleted lines are not history"
+    (assert= (:evicted (fed 3 4 "a\r\nb\r\nc\r\nd\e[1;1H\e[M")) []))
+  (test "DECSTBM confines scrolling to the region; rows above and below stay"
+    (let (v (fed 3 4 "a\r\nb\r\nc\r\nd\e[2;3r\e[3;1H\nX"))
+      ;; LF at the region's bottom scrolled only rows 2–3: b left, c moved up, X on a blank row
+      (assert= (lines-of v) ["a" "c" "X" "d"])
+      (assert= (:evicted v) [])))
+  (test "SU / SD scroll the region by n"
+    (assert= (lines-of (fed 3 3 "a\r\nb\r\nc\e[2S")) ["c" "" ""])
+    (assert= (lines-of (fed 3 3 "a\r\nb\r\nc\e[T")) ["" "a" "b"]))
+  (test "RI at the top scrolls down"
+    (assert= (lines-of (fed 3 3 "a\r\nb\e[H\eMz")) ["z" "a" "b"]))
+  (test "1049 switches to a blank screen and back to the main one, cursor restored"
+    (let (main (fed 5 2 "hi")
+          alt (vt/feed main "\e[?1049h\e[Hfull")
+          back (vt/feed alt "\e[?1049l"))
+      (assert= (lines-of alt) ["full" ""])
+      (assert= (vt/mode alt :alt-screen) true)
+      (assert= (lines-of back) ["hi" ""])
+      (assert= (vt/cursor back) [0 2])
+      (assert= (vt/mode back :alt-screen) false)))
+  (test "nothing scrolled off the alternate screen is history"
+    (assert= (:evicted (fed 3 2 "\e[?1049h" "a\nb\nc\nd")) [])))
+
+(describe "vt: attributes and the screen a buffer shows"
+  (test "SGR sets faces; spans cover exactly the coloured cells"
+    (let (s (vt/screen (fed 10 1 "a\e[31mred\e[0mb") nil))
+      (assert= (:text s) "aredb")
+      (assert= (:spans s) [[1 4 {:fg [205 0 0]}]])))
+  (test "bold, italic, underline, strike, dim stack and 22/23/24/29 clear them"
+    (let (v (fed 10 1 "\e[1;3;4;9;2m"))
+      (assert= (:attr v) {:bold true :italic true :underline true :strike true :dim true})
+      (assert= (:attr (vt/feed v "\e[22;23;24;29m")) nil)))
+  (test "256-colour and true-colour, in both the ; and : spellings"
+    (assert= (:fg (:attr (fed 4 1 "\e[38;5;196m"))) 196)
+    (assert= (:fg (:attr (fed 4 1 "\e[38;2;1;2;3m"))) [1 2 3])
+    (assert= (:bg (:attr (fed 4 1 "\e[48:2::9:8:7m"))) [9 8 7])
+    (assert= (vt/colour 196 vt/xterm-palette) [255 0 0])
+    (assert= (vt/colour 232 vt/xterm-palette) [8 8 8]))
+  (test "bright colours are palette 8–15, resolved through the caller's palette"
+    (let (s (vt/screen (fed 4 1 "\e[91mx") {:colors (into [] (repeat 16 [1 1 1]))}))
+      (assert= (:spans s) [[0 1 {:fg [1 1 1]}]])))
+  (test "inverse swaps fg and bg, falling back to the palette's defaults"
+    (assert= (vt/face {:inverse true :fg 1} {:fg [9 9 9] :bg [0 0 0]}) {:fg [0 0 0] :bg [205 0 0]}))
+  (test "the cursor is a char offset into the joined text, its row padded to reach it"
+    (let (s (vt/screen (fed 10 3 "ab\r\n\e[5Cx\e[2D") nil))
+      (assert= (:text s) "ab\n     x\n")
+      (assert= (:cursor s) 7)))
+  (test "a cursor past the trimmed end of its row still has a position"
+    (let (s (vt/screen (fed 10 2 "ab\e[8G") nil))
+      (assert= (:text s) "ab     \n")
+      (assert= (:cursor s) 7)))
+  (test "the screen carries cursor visibility, shape and the title"
+    (let (s (vt/screen (fed 10 1 "\e[?25l\e[5 q\e]0;bedit\x07") nil))
+      (assert= (:cursor-visible s) false)
+      (assert= (:cursor-style s) :bar)
+      (assert= (:title s) "bedit")))
+  (test "a wide grapheme's continuation cell adds no text"
+    (let (s (vt/screen (fed 6 1 "\e[32m中\e[0mx") nil))
+      (assert= (:text s) "中x")
+      (assert= (:spans s) [[0 1 {:fg [0 205 0]}]]))))
+
+(describe "vt: what the program asks, and what it must be told"
+  (test "DSR 6 answers the cursor position, 1-based"
+    (assert= (:replies (fed 10 3 "\e[2;5H\e[6n")) ["\e[2;5R"]))
+  (test "DA answers, so a program probing its terminal does not hang"
+    (assert= (:replies (fed 10 3 "\e[c")) ["\e[?62;22c"])
+    (assert= (:replies (fed 10 3 "\e[>c")) ["\e[>0;0;0c"]))
+  (test "CSI 18 t reports the size in cells"
+    (assert= (:replies (fed 80 24 "\e[18t")) ["\e[8;24;80t"]))
+  (test "replies belong to one feed only"
+    (assert= (:replies (vt/feed (fed 10 3 "\e[6n") "x")) []))
+  (test "the modes a program switches"
+    (let (v (fed 10 3 "\e[?1h\e[?2004h\e[?7l\e[4h"))
+      (assert= (vt/mode v :app-cursor) true)
+      (assert= (vt/mode v :bracketed-paste) true)
+      (assert= (vt/mode v :autowrap) false)
+      (assert= (vt/mode v :insert) true)
+      (assert= (vt/mode (vt/feed v "\e[?1l\e[?2004l\e[4l") :app-cursor) false)))
+  (test "insert mode pushes the rest of the line right"
+    (assert= (lines-of (fed 10 1 "abc\e[1G\e[4hX")) ["Xabc"]))
+  (test "autowrap off pins the cursor at the last column"
+    (assert= (lines-of (fed 3 2 "\e[?7labcdef")) ["abf" ""]))
+  (test "RIS resets everything"
+    (let (v (fed 5 2 "\e[31mxx\ec"))
+      (assert= (lines-of v) ["" ""])
+      (assert= (:attr v) nil))))
+
+(describe "vt: the parser"
+  (test "a sequence split across chunks is carried and completed"
+    (let (v (fed 10 1 "a\e[3" "1mb"))
+      (assert= (lines-of v) ["ab"])
+      (assert= (:fg (:attr v)) 1)))
+  (test "a split OSC waits for its terminator"
+    (let (v (fed 10 1 "\e]0;ti" "tle\x07x"))
+      (assert= (:title v) "title")
+      (assert= (lines-of v) ["x"])))
+  (test "OSC ends at BEL or ST, and an OSC 8 hyperlink prints only its text"
+    (assert= (lines-of (fed 20 1 "\e]8;;http://x\e\\link\e]8;;\e\\!")) ["link!"]))
+  (test "unknown sequences are swallowed, never printed"
+    (assert= (lines-of (fed 20 1 "a\e[?u\e[>4;2m\e(B\e=\e[?1004hb")) ["ab"]))
+  (test "a DCS / APC string is swallowed to its terminator"
+    (assert= (lines-of (fed 20 1 "a\ePq...\e\\b\e_G...\e\\c")) ["abc"]))
+  (test "an incomplete final ESC is carried, not printed"
+    (let (v (fed 10 1 "ab\e"))
+      (assert= (lines-of v) ["ab"])
+      (assert= (:carry v) "\e"))))
+
+(describe "vt: resizing"
+  (test "growing pads, shrinking drops rows at the top into history"
+    (let (v (vt/resize (fed 4 3 "a\r\nb\r\nc") 6 2))
+      (assert= (lines-of v) ["b" "c"])
+      (assert= (map (:evicted v) (fn (row) (first (vt/line row nil)))) (list "a"))
+      (assert= (vt/cursor v) [1 1])
+      (assert= (lines-of (vt/resize v 6 3)) ["b" "c" ""])))
+  (test "narrowing clips rows and clamps the cursor"
+    (let (v (vt/resize (fed 6 1 "abcdef") 3 1))
+      (assert= (lines-of v) ["abc"])
+      (assert= (vt/cursor v) [0 2]))))
+
+(describe "vt: keys to bytes"
+  (test "printables pass, named keys take their xterm sequence"
+    (let (v (vt/make 10 2))
+      (assert= (vt/key->bytes "a" v) "a")
+      (assert= (vt/key->bytes :enter v) "\r")
+      (assert= (vt/key->bytes :backspace v) "\x7f")
+      (assert= (vt/key->bytes :up v) "\e[A")
+      (assert= (vt/key->bytes :delete v) "\e[3~")
+      (assert= (vt/key->bytes :f5 v) "\e[15~")
+      (assert= (vt/key->bytes :escape v) "\e")))
+  (test "application cursor mode switches the arrows to SS3"
+    (assert= (vt/key->bytes :up (fed 10 2 "\e[?1h")) "\eOA"))
+  (test "ctrl chords are C0 bytes, alt chords are ESC-prefixed"
+    (let (v (vt/make 10 2))
+      (assert= (vt/key->bytes :ctrl-c v) (string/int->char 3))
+      (assert= (vt/key->bytes :ctrl-space v) (string/int->char 0))
+      (assert= (vt/key->bytes :alt-f v) "\ef")
+      (assert= (vt/key->bytes :ctrl-meta-a v) (str "\e" (string/int->char 1)))))
+  (test "modified named keys take the CSI 1;m form"
+    (let (v (vt/make 10 2))
+      (assert= (vt/key->bytes :shift-right v) "\e[1;2C")
+      (assert= (vt/key->bytes :ctrl-left v) "\e[1;5D")
+      (assert= (vt/key->bytes :alt-shift-up v) "\e[1;4A")))
+  (test "shift-enter and alt-enter are distinguishable from enter"
+    (let (v (vt/make 10 2))
+      (assert= (vt/key->bytes :shift-enter v) "\e[13;2u")
+      (assert= (vt/key->bytes :alt-enter v) "\e\r")
+      (assert= (vt/key->bytes :back-tab v) "\e[Z")))
+  (test "a key with no terminal spelling is nil"
+    (assert= (vt/key->bytes :f13 (vt/make 10 2)) nil))
+  (test "a paste is bracketed only when asked for"
+    (assert= (vt/paste->bytes "hi" (vt/make 10 2)) "hi")
+    (assert= (vt/paste->bytes "hi" (fed 10 2 "\e[?2004h")) "\e[200~hi\e[201~")))
+
+(describe "vt: history keeps its colour"
+  (test "an evicted row reads back with its spans, from offset 0"
+    (let (v (fed 6 1 "\e[31mred\e[0m!\r\nnext")
+          row (first (:evicted v)))
+      (assert= (vt/line row nil) ["red!" [[0 3 {:fg [205 0 0]}]]])))
+  (test "a screen row can be read the same way"
+    (assert= (vt/line (nth (:grid (fed 6 1 "ab   ")) 0) nil) ["ab" []])))

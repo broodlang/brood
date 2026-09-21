@@ -24804,3 +24804,56 @@ checked; bare references — the norm — qualify to the full name and cross the
 `boundary_resolve`, `bind_frame_module`); `derive::global_miss`'s alias fallback;
 `tests/contract_test.blsp` "a contract guards the module boundary" (sabotage-verified with
 the flag: 3 of 5 red); `contracts_default.rs` gains the inside/outside pair.
+## ADR-383 — `std/vt`: a virtual terminal as pure data, so an editor can host a full-screen program
+
+**Status:** accepted (2026-09-21). Prompted by bedit: running `claude` — an Ink TUI — in a
+buffer, where `ansi/render` had said of itself that a full-screen program "should be given
+a real emulator rather than a better guess".
+
+**Context.** `std/term` is the terminal seam in one direction: a Brood program taking over
+the terminal it runs in. Nothing covered the other direction — Brood *being* the terminal
+for a program it runs under `os/spawn-pty`. `ansi/strip` drops the escapes (right for a
+build log), `ansi/render` applies the handful a line editor uses (right for `iex`), and a
+program that positions the cursor absolutely, scrolls a region, switches to the alternate
+screen or *waits on a query* (`CSI 6 n`, `CSI c`) had nowhere to run.
+
+**Decisions.**
+
+- **The terminal is a value.** `(vt/feed vt chunk)` is a pure fold from a terminal and a
+  chunk of output to the next terminal: a grid of `[grapheme attr]` cells, the cursor, the
+  scroll region, the alternate screen with the main one kept aside, the DEC/ANSI modes and
+  the SGR state. No IO and no process, so a host puts it wherever it likes (bedit keeps one
+  per buffer in the worker that owns the pty) and a test is `feed` then look.
+- **What the program asked comes back as data on the same value.** `:replies` holds the
+  answers a query needs (a cursor-position report, primary/secondary device attributes,
+  the size report) and `:evicted` the rows that scrolled off the top of the main screen —
+  both reset per `feed`, so the host reads them once and writes / appends them. The host
+  owns the scrollback: a row leaves the screen as its cells, and `(vt/line row palette)`
+  reads it back with its colour, so history is not flattened to text on the way out.
+- **Reading back is in the editor's own vocabulary.** `(vt/screen vt palette)` is
+  `{:text :spans :cursor …}` — rows joined by newlines, trailing blanks trimmed (the cursor
+  row padded to the cursor so its offset exists), spans in the `highlight-spans` shape
+  faces already paint, colours resolved through the caller's 16-entry palette (a theme),
+  the 256-colour cube and grey ramp computed. Nothing in the module knows a buffer.
+- **Input goes the other way through the same value.** `(vt/key->bytes key vt)` encodes the
+  editor's key vocabulary (`:ctrl-c`, `:alt-shift-up`, `:enter`, `"a"`) as the bytes a
+  program reads — application-cursor aware, modifiers in the xterm `CSI 1;m X` form, the
+  kitty-style `CSI 13;2u` for a shift-enter a program wants to tell from enter — and
+  `paste->bytes` brackets a paste when the program asked for it.
+- **Partial sequences carry.** A pipe cuts anywhere; a chunk ending inside a sequence
+  leaves its tail in `:carry` for the next feed, and a bare trailing ESC never prints.
+- **Graphemes, not codepoints, are the unit**, so a wide glyph is one cell pair and a
+  combining mark joins the cell before the cursor. `CR LF` is one grapheme cluster and is
+  handled as the two controls it is.
+- **Pure Brood, and the cost is known.** An 11 KB forty-row redraw with four hundred SGRs
+  folds in ~27 ms on the dev profile. The print loop threads the cursor's row and column
+  as loop arguments — copying the terminal map per grapheme had cost half the frame — and
+  writes each cell with `assoc`, because splicing a run in with `into` measured *slower*
+  (`into` on two vectors is ~20 µs for a hundred cells against 1 µs per `assoc`; a `regex/
+  tokens` lexer over the chunk was ten times slower again). Both are the language's to fix,
+  and the module says so where it chose the loop.
+
+**Not done.** No mouse reporting (the mode is recorded, nothing is encoded), no DEC line
+drawing charset (a program draws boxes in Unicode today), no `HTS`-set tab stops (every 8),
+no sixel/kitty graphics, no reflow on resize (rows are clipped or padded; a program that
+handles `SIGWINCH` redraws anyway).

@@ -15441,3 +15441,20 @@ Sabotage: `BROOD_NO_CONTRACT_BOUNDARY=1` reds 3 of the 5 new cases. Two fixtures
 it: `contracts_default.rs` now calls `lies` across a module (and asserts the inside call is
 NOT checked), and `ability_test` compares what a constructor builds, not the closure — inside
 a module a contracted function is two bindings of one closure.
+## 2026-09-21 (3) — `std/vt`: the terminal emulator bedit needed to run `claude`
+
+bedit wanted to run `claude` in a buffer. It is an Ink TUI — absolute cursor moves, erase
+below, the alternate screen, colour everywhere, and a `CSI 6 n` it blocks on — and
+`ansi/render` had already said a full-screen program "should be given a real emulator
+rather than a better guess". `std/vt.blsp` is that emulator, as a value (ADR-383): `feed`
+is a pure fold, `screen` reads the grid back in the `highlight-spans` shape, `key->bytes`
+goes the other way, and the answers a program waits on come back as `:replies`. Sixty-one
+tests, `nest check --strict` clean.
+
+Two measurements worth keeping. Splicing a printed run into a row with `into` was *slower*
+than an `assoc` per cell — `into` on two vectors costs ~20 µs for a hundred cells against
+1 µs for one `assoc` — so the print loop stays per grapheme and says why. And a `regex/
+tokens` lexer over the chunk (one rule per sequence kind, which would have moved the whole
+scan into the DFA) cost ~240 ms for an 11 KB frame where the hand-written grapheme scan
+costs 27 — the per-character cost of the bitset DFA is not yet a lexer's. Both are the
+language's to fix; neither is the module's.
