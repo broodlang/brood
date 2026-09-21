@@ -504,27 +504,28 @@ session's scratchpad, redo it the same way), 100 000 processes parked in
 | bytes | what | reducible? |
 |---|---|---|
 | 1352 | `Box<Process>` (the `Heap` inline; 1184 in July — +168 B of fields since) | shave, 1:1 |
-| 384 | `RootsBuf` — `receive_match_timed`'s `push_root` crossed 8 slots, the buffer doubled to 16 × 24 B | shrink on park (a realloc per park — cost it on `pingpong` first) |
+| ~~384~~ 288 | `RootsBuf` — `receive_match_timed`'s `push_root` crossed 8 slots for a transient ninth (matcher + tags over a 7-slot frame) and the buffer doubled to 16 × 24 B. **Steps of four below sixteen since `2fe58eb4`**: 12 slots. A shrink at park was rejected unmeasured — it is a realloc pair per message on a busy responder | done |
 | 328 | ~~`ColdHeap` — `spawn` → `set_package_context` → `cold_mut()`, on EVERY child, outside any package~~ **GONE 2026-09-21** (`7ce1ae1e`): the empty context on a cold-less heap is a no-op. `spawn-live` peak RSS 1.73 → 1.62 GB | done |
 | 304 | `Arc<Mailbox>` (184 in July: the receive-mark, tag pre-filter, max-mailbox, isolate stamps since) | ~100 B of atomics is the PCB; `kill: Option<Message>` could box |
-| 276 | `vm_cache` — hashbrown's 4-bucket minimum for ONE `VmCacheEntry` (56 B) | a small-map (linear ≤ 8) for the three per-process maps: ~500 B |
+| ~~276~~ 64 | `vm_cache` — was hashbrown's 4-bucket minimum for ONE `VmCacheEntry`; **a `SmallMap` since `2ae9f22d`** (exact-capacity vector to eight entries, then a hash map): one entry costs one entry | done |
 | 256 | `vm_call_ics` — 4 × 64 B `Option<CallIcEntry>` on the first publish | |
 | 256 | `alloc_closure_pre` — the closure slab's first touch | |
-| 180 | `global_ic` — hashbrown minimum for one entry | (small-map, above) |
+| ~~180~~ 24 | `global_ic` — `SmallMap` (above) | done |
 | 160 | `promote_closure` — the spawn thunk into the child | |
 | 160 | `parse_closure_template` | |
 | 136 | `Suspended` (`store_resume`) | |
 | 116 | `store_closure_template` | |
 | 84 | `Registry::insert` — this pid's registry entry | |
-| 84 | `arm_ic_blocks` — hashbrown minimum for one entry | (small-map, above) |
+| ~~84~~ 16 | `arm_ic_blocks` — `SmallMap` (above) | done |
 | ~270 | small blocks: 3 × 24, 56, 32, 16 | |
 
-The reducible remainder, in order of bytes per unit of risk: the three hashbrown minimums
-(~540 B — a linear small-map is FASTER than hashing at ≤ 8 entries, so this is a floor win
-with no hot-path tax to argue about, but it touches `vm_cache`/`global_ic`/`arm_ic_blocks`'s
-probe paths), `RootsBuf` at park (a realloc pair per park on the message rows — measure),
-and the 168 B `Process` grew since July. `crates/lisp/tests/process_floor.rs` is the ratchet
-on the counted figure (4 120 in the test profile; bound 4 300).
+**Where it stands after the day (2026-09-21): 4 690 → 3 868 B counted per parked process
+(−17.5%), release; 4 439 → 3 718 in the test profile, ratcheted at 4 000 by
+`crates/lisp/tests/process_floor.rs`.** `spawn-live` peak RSS 1.73 → 1.52 GB. What is left
+is the `Box<Process>` itself (1352 — 168 B of fields grew since July; shave 1:1), the
+`Mailbox` (304 — ~100 B of atomics is the PCB; `kill: Option<Message>` could box), the
+first-touch slabs, and the closure template/promote pair — each 100–250 B and each a
+design question rather than a fix.
 
 **Not the shipped floor:** under the tree-walker (`BROOD_VM=0`) a `spawn` copies the
 spawner's whole env frame into the child, so a process holding a growing accumulator costs
