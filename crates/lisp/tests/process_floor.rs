@@ -10,15 +10,16 @@
 //! figure and refuses a step up. Move the bound DOWN when a shaving lands; move it up
 //! only with a sentence saying what the bytes buy.
 //!
-//! Measured in the `test` profile (opt-level 2, debug assertions): 4 120 B/proc on
-//! 2026-09-21 after the ColdHeap fix, 4 439 before it (release: 4 345 / 4 690 — the
-//! release `Process` is larger). The bound sits ~4% above the measured figure, which is
-//! the only way a 328 B step reads as a step: at 4 600 the sabotage passed.
-//! Sabotage-verified: restoring the unconditional `cold_mut()` reads 4 439 and reds this.
+//! Measured in the `test` profile (opt-level 2, debug assertions): 4 439 B/proc before the
+//! ColdHeap fix, 4 120 after it, 3 824 after the per-process maps became `SmallMap`s
+//! (release: 4 690 / 4 345 / 3 957). The bound sits ~4% above the measured figure, which
+//! is the only way a 328 B step reads as a step: at 4 600 the sabotage passed.
+//! Sabotage-verified: restoring the unconditional `cold_mut()` read 4 439 against a 4 300
+//! bound and reds this.
 
 use brood::Interp;
 
-const FLOOR_BYTES: i64 = 4300;
+const FLOOR_BYTES: i64 = 4000;
 
 #[test]
 fn a_parked_process_costs_no_more_than_the_floor() {

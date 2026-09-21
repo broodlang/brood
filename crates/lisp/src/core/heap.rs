@@ -534,7 +534,9 @@ pub struct Heap {
     /// PRELUDE/RUNTIME handles (globals are `promote`d before binding), so an entry
     /// survives a local GC untouched and needs no rooting. `RefCell` because
     /// `env_get` is `&self`; per-process, so never shared across threads.
-    global_ic: RefCell<SymbolMap<(u64, Value)>>,
+    global_ic: RefCell<
+        SmallMap<Symbol, (u64, Value), std::hash::BuildHasherDefault<runtime_code::SymbolHasher>>,
+    >,
     /// Memoized `mod/name` → `prefix/mod/name` rooting for intra-package *qualified
     /// references* (ADR-070). A miss in the global table falls back to the rooted name
     /// (see [`root_qualified_ref`](Self::root_qualified_ref)); this caches the symbol→symbol answer —
@@ -543,7 +545,9 @@ pub struct Heap {
     /// Keyed only by symbol, which is safe because [`set_package_context`] clears it:
     /// the mapping is a property of the *active* package context, and that's the one
     /// place the context changes. `RefCell` because `env_get` is `&self`; per-process.
-    rooted_ref_ic: RefCell<SymbolMap<Option<Symbol>>>,
+    rooted_ref_ic: RefCell<
+        SmallMap<Symbol, Option<Symbol>, std::hash::BuildHasherDefault<runtime_code::SymbolHasher>>,
+    >,
     /// Cached `mod/` prefix → that module's public exports (`(bare, qualified)` pairs).
     /// Used ONLY by the advisory whole-project checker's direct import setup
     /// (`types::check::setup_check_imports`): a whole-project check resolves every file's
@@ -759,7 +763,13 @@ pub struct Heap {
     /// entry is simply never looked up again. Empty unless `BROOD_VM` is on. `Arc`
     /// so the trampoline can hold the compiled body across a call without borrowing
     /// the cache.
-    vm_cache: RefCell<VmCacheMap<vm_cache::VmCacheEntry>>,
+    vm_cache: RefCell<
+        SmallMap<
+            VmCacheKey,
+            vm_cache::VmCacheEntry,
+            std::hash::BuildHasherDefault<runtime_code::SymbolHasher>,
+        >,
+    >,
     /// The [`RuntimeCode::free_epoch`] this process last synced its [`Self::vm_cache`]
     /// to (ADR-091 Stage 4). When the shared free-epoch advances (a generation was
     /// freed and its slot may be reused with bit-identical handles), the `vm_cache`
@@ -929,7 +939,7 @@ pub struct Heap {
     /// the tables above. Blocks are contiguous, lazily allocated on first activation
     /// ([`Heap::vm_arm_block`]), and never individually freed — a `runtime_collect`
     /// table clear drops the whole map in lockstep with the tables.
-    arm_ic_blocks: RefCell<std::collections::HashMap<u64, (u32, u32)>>,
+    arm_ic_blocks: RefCell<SmallMap<u64, (u32, u32), std::hash::RandomState>>,
     /// The **currently executing arm's** IC block bases (call sites / global sites).
     /// Set by the VM/JIT drivers at every arm transition; every site-indexed IC
     /// method resolves `base + arm-relative site` through these. Plain `Cell`s: the
@@ -1258,12 +1268,14 @@ pub use self::runtime_code::{
     VmCacheMap,
 };
 mod slabs;
+mod small_map;
 pub use self::slabs::SlabRef;
 use self::slabs::{
     park_trim_probe, shrink_slabs, slab_bytes, slab_capacity_bytes, slab_live_count, CodeSlabs,
     Slabs, PARK_TRIM_GROWTH_SLOTS,
 };
 pub(crate) use self::slabs::{VecStore, INLINE_VEC_CAP};
+pub(crate) use self::small_map::SmallMap;
 mod vm_cache;
 // `stall_guard` is used by the RUNTIME compactor (`gc_runtime`) and the GUI paint
 // path, so it's re-exported unconditionally; `stall_guard_pid` by the scheduler.
@@ -1454,8 +1466,8 @@ impl Heap {
             trace_context: None,
             #[cfg(feature = "dev-tools")]
             trace_context_own: false,
-            global_ic: RefCell::new(SymbolMap::default()),
-            rooted_ref_ic: RefCell::new(SymbolMap::default()),
+            global_ic: RefCell::new(SmallMap::new()),
+            rooted_ref_ic: RefCell::new(SmallMap::new()),
             msg_roots: None,
             cold: None,
             check: RefCell::new(None),
@@ -1481,7 +1493,7 @@ impl Heap {
             proc_limit_hit: None,
             proc_send_errors: false,
             gc_trace: gc_trace_default(),
-            vm_cache: RefCell::new(VmCacheMap::default()),
+            vm_cache: RefCell::new(SmallMap::new()),
             seen_free_epoch: Cell::new(0),
             seen_stale_gen: Cell::new(0),
             stale_arm_uid: Cell::new(0),
@@ -1503,7 +1515,7 @@ impl Heap {
             #[cfg(debug_assertions)]
             dbg_site_pos: RefCell::new(Vec::new()),
             vm_global_ics: RefCell::new(Vec::new()),
-            arm_ic_blocks: RefCell::new(std::collections::HashMap::new()),
+            arm_ic_blocks: RefCell::new(SmallMap::new()),
             cur_ic_base: Cell::new(0),
             cur_gic_base: Cell::new(0),
             dispatch_ics: RefCell::new(HashMap::default()),
@@ -1541,8 +1553,8 @@ impl Heap {
             trace_context: None,
             #[cfg(feature = "dev-tools")]
             trace_context_own: false,
-            global_ic: RefCell::new(SymbolMap::default()),
-            rooted_ref_ic: RefCell::new(SymbolMap::default()),
+            global_ic: RefCell::new(SmallMap::new()),
+            rooted_ref_ic: RefCell::new(SmallMap::new()),
             msg_roots: None,
             cold: None,
             check: RefCell::new(None),
@@ -1568,7 +1580,7 @@ impl Heap {
             proc_limit_hit: None,
             proc_send_errors: false,
             gc_trace: gc_trace_default(),
-            vm_cache: RefCell::new(VmCacheMap::default()),
+            vm_cache: RefCell::new(SmallMap::new()),
             seen_free_epoch: Cell::new(0),
             seen_stale_gen: Cell::new(0),
             stale_arm_uid: Cell::new(0),
@@ -1590,7 +1602,7 @@ impl Heap {
             #[cfg(debug_assertions)]
             dbg_site_pos: RefCell::new(Vec::new()),
             vm_global_ics: RefCell::new(Vec::new()),
-            arm_ic_blocks: RefCell::new(std::collections::HashMap::new()),
+            arm_ic_blocks: RefCell::new(SmallMap::new()),
             cur_ic_base: Cell::new(0),
             cur_gic_base: Cell::new(0),
             dispatch_ics: RefCell::new(HashMap::default()),
