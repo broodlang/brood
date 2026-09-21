@@ -21,11 +21,17 @@ fn killing_a_monitored_process_costs_no_more_than_an_unmonitored_one() {
     let prog = r#"
         (def n 20000)
         (defn parked () (receive ([:go] nil)))
-        (defn spawn-hold (i acc) (if (>= i n) acc (spawn-hold (+ i 1) (cons (spawn (parked)) acc))))
+        ;; NOT `(spawn-hold (+ i 1) (cons (spawn (parked)) acc))`: under the tree-walker
+        ;; (`BROOD_VM=0`, CI's differential job) a spawn copies the spawner's whole env
+        ;; frame into the child, and a frame holding the growing `acc` makes the fleet
+        ;; O(n²) — 20k children asked for a 7 GiB block and a 7 GB GitHub runner was
+        ;; shut down rather than failed, three pushes running (2026-09-21). A `mapv`
+        ;; frame holds one index and nothing that grows.
+        (defn spawn-all () (mapv (range n) (fn (_) (spawn (parked)))))
         (defn live () (let (s (%sched-stats)) (- (get s :spawned) (get s :exited))))
         (defn wait-dead (base) (if (> (live) base) (do (sleep 1) (wait-dead base)) nil))
-        (defn kill-all (l) (if (empty? l) nil (do (exit (first l) :kill) (kill-all (rest l)))))
-        (defn mon-all (l) (if (empty? l) nil (do (monitor (first l)) (mon-all (rest l)))))
+        (defn kill-all (kids) (fold kids nil (fn (_ p) (exit p :kill))))
+        (defn mon-all (kids) (fold kids nil (fn (_ p) (monitor p))))
         (defn timed-kill (kids base)
           (let (t0 (os/now-ns))
             (kill-all kids)
@@ -33,10 +39,10 @@ fn killing_a_monitored_process_costs_no_more_than_an_unmonitored_one() {
             (- (os/now-ns) t0)))
         (def base (live))
         ;; Interleave so drift cannot favour one arm: plain, monitored, plain, monitored.
-        (def p1 (timed-kill (spawn-hold 0 nil) base))
-        (def m1 (let (k (spawn-hold 0 nil)) (mon-all k) (timed-kill k base)))
-        (def p2 (timed-kill (spawn-hold 0 nil) base))
-        (def m2 (let (k (spawn-hold 0 nil)) (mon-all k) (timed-kill k base)))
+        (def p1 (timed-kill (spawn-all) base))
+        (def m1 (let (k (spawn-all)) (mon-all k) (timed-kill k base)))
+        (def p2 (timed-kill (spawn-all) base))
+        (def m2 (let (k (spawn-all)) (mon-all k) (timed-kill k base)))
         [(math/min p1 p2) (math/min m1 m2)]
     "#;
     let v = interp.eval_str(prog).expect("the probe ran");

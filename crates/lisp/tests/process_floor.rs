@@ -41,9 +41,15 @@ fn a_parked_process_costs_no_more_than_the_floor() {
     let prog = r#"
         (def n 20000)
         (defn parked () (receive ([:go] nil)))
-        (defn spawn-hold (i acc) (if (>= i n) acc (spawn-hold (+ i 1) (cons (spawn (parked)) acc))))
+        ;; NOT `(spawn-hold (+ i 1) (cons (spawn (parked)) acc))`: under the tree-walker
+        ;; (`BROOD_VM=0`, CI's differential job) a spawn copies the spawner's whole env
+        ;; frame into the child, and a frame holding the growing `acc` makes the fleet
+        ;; O(n²) — 20k children asked for a 7 GiB block and a 7 GB GitHub runner was
+        ;; shut down rather than failed, three pushes running (2026-09-21). A `mapv`
+        ;; frame holds one index and nothing that grows.
+        (defn spawn-all () (mapv (range n) (fn (_) (spawn (parked)))))
         (def b0 (%mem-bytes))
-        (def kids (spawn-hold 0 nil))
+        (def kids (spawn-all))
         (sleep 200)
         (def per (math/quot (- (%mem-bytes) b0) n))
         ;; Release them so the runtime tears down cleanly.
