@@ -945,6 +945,24 @@ Every session, oldest first. Early sessions' full text is in
 
 ## Recent — full entries
 
+## 2026-09-21 — what a game frame pays the prelude
+
+The physics engine's profile named `seq` and `into` as half its self time and the
+microbenchmarks said why: `(conj v x)` on a four-element vector cost **7.7 µs** — `%conj-one`
+went through `into`, which went through `append`, which reversed the vector into a list twice
+and `apply vector`ed the result — and `(seq v)` cost 586 ns to return the vector itself, after
+two predicate calls, `type-of`, three `%eq`s, `bound?` and a `%map-get` keyed by a quoted
+vector. Every eager sequence op calls `seq` once and `reverse` (another `seq`) once, so
+`(mapv [1 2 3 4] f)` was 4.3 µs.
+
+Three changes, none of them a new escape hatch: a kernel `%vector-concat` — a vector is flat,
+so its append IS one fresh copy, the `%vector-assoc` precedent — behind `conj` on a vector and
+`into` onto one (7.7 → 1.2 µs, the rest is `conj`'s own variadic dispatch); `seq` answers a
+vector first, the way `fold` has since 2026-08-10 ("dispatch order is load-bearing", 586 →
+190 ns); and `reverse` reduces a vector natively and skips `seq` for a plain list. `mapv` of
+four is 3.2 µs from 4.3, `into v xs` 0.4 from 7.7 per element. The per-call floor — ~60 ns
+for a prelude function, ~30 for a native — is what remains, and it is the JIT's to lower.
+
 ## 2026-09-20 — a vector library that never went native (ADR-378)
 
 The physics engine's profile said `dot` cost 410 ns. `(+ (* (nth a 0) (nth b 0)) …)` on
