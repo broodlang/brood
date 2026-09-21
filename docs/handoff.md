@@ -12,6 +12,19 @@ sysctl that moves under you — that file's last section has the one-line check)
 questions are answerable here; check that file's "what this box CAN answer" before deferring
 anything.
 
+## 2026-09-21 evening — the benchmark column is refreshed at 422c92a5; KI-182 is the open item
+
+brood-benchmarks has the Brood column at `422c92a5` (min of three, `ab-bench --floor` against
+`136b14d7` on every row that moved): **`mandelbrot` −52%** (ADR-378), `spawn-live` −6.6% wall
+and 1.75 → 1.56 GB (the process-floor commits), like-for-like 7.54 → 7.20 and ahead of Elixir.
+Perf-handoff Task 7 is answered: the list rows are flat. **One regression, published as measured
+and open: `startup` +6% (KI-182)** — `contract_apply` offers every declared `def` to the Brood
+hook even unarmed, `not` tiers up while `io` materialises, and Cranelift is instantiated on
+every short run. Fix shape and the rig are in the KI; it is a ~10-line early return plus a
+`BROOD_JIT_DUMP_IR` guard, and the tree rule says it comes before new work. The KI-180/181
+fixes are committed (`422c92a5`); CI's bedit smoke stays red on bedit's own `elixir_playground_test`,
+which asserts an `elixir` on PATH the runner does not have — bedit's to guard, not brood's.
+
 ## 2026-09-21 — runtime contracts are binding-time policy and ON under `nest run`/`nest test` (ADR-381); KI-178
 
 ROADMAP 10 and 11 are done; read ADR-381 for the shape and the measurements. What the next

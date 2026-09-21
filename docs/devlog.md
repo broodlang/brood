@@ -2,6 +2,15 @@
 
 Chronological record of work sessions. Newest at the bottom.
 
+## 2026-09-21 — the 422c92a5 benchmark column, and KI-182
+
+Brood column refreshed in brood-benchmarks at `422c92a5`: `mandelbrot` 161 → 77 ms (ADR-378,
+−50.9% under `ab-bench --floor` against `136b14d7`), `spawn-live` 1.23 → 1.15 s and 1.75 →
+1.56 GB peak, like-for-like 7.54 → 7.20. Task 7's list rows byte-flat. `startup` 16 → 17 ms
+against a 0.0% floor is real: attributed on unstripped binaries to the unarmed per-`def`
+contract offer tiering `not` at boot (Cranelift instantiated on every short run, 1.55M
+instructions) plus the prelude image's new def sites and a larger prelude — KI-182, open.
+
 ## How to navigate
 
 The session history is split so this file stays loadable:

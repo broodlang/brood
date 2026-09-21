@@ -168,6 +168,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-179 | **the ADR-119 incremental check cache hit only image → image: every `nest check` after a cold build, and every one after an edit, re-checked the whole project** — a user global's fingerprint fact is its definition site, and a module materialised from the project image had none, so the fact read `F` from the image and `D<file>@<mtime>` from source; no cached fingerprint matched across the flip. Measured 1 000 × 3k files: cold 186 s, unchanged 154 s, unchanged again 15 s, one-function edit 188 s | ✅ **FIXED 2026-09-21 (ADR-382)** — the image carries def sites (`KIND_DEF_SITE`); an unchanged project replays its recorded verdict without loading; listed paths absolutised (they never hit either). Gate `nest::check_incremental`, sabotage-verified both ways |
 | KI-180 | **`gui`'s texture and sound registries were created on FIRST USE by `(when (nil? *textures*) (def …))` — a check-then-define race across processes** — two processes allocating their first handle at once each saw nil and each `def`'d a table; the second `def` orphaned the first's handles, so `texture-size` answered nil, or another test's size when the two counters collided. Red in `ui_test` in the FULL suite only (passed 3× alone), 2026-09-21 | ✅ **FIXED 2026-09-21** — both registries are created at load (a table global images by value); guard `gui_test` "forty processes each allocate…", red 2 of 3 with the lazy init restored |
 | KI-181 | **an error raised in positionless code — a contract shim's (ADR-381), the prelude's — escaped untagged and was reported at the CATCH site**, two frames from the failing form; unarmed, the thin-wrapper elision had hidden it (the prim ran inline in the caller's frame, tagged there). Surfaced as the armed suite's `vm_prim_error_pos_test` red; also the `lazy_load_test` ADR-366 case, whose inlined primitive a shim makes impossible by design | ✅ **FIXED 2026-09-21** — `attach_vm_trace` gives an untagged error the innermost call site that HAS a position (a tail call reuses the caller's frame, so there it is the caller's caller — the BEAM's answer); the two tests exercise their actual subjects (the raw primitive; an unarmed child). Guard: the shim case in `vm_prim_error_pos_test`, sabotage-verified |
+| KI-182 | **the `startup` row +6% at the 422c92a5 benchmark refresh (16 → 17 ms, `ab-bench --floor` 0.0% floor; 74.4M → 81.3M instructions on `(io/puts 0)`) — the largest piece is the JIT compiling at BOOT: `contract_apply` offers every declared `def` to the Brood hook `%contract-wrap` whether or not contracts are armed, the hook's `(not (or (%contracts-armed?) …))` runs once per declared name as `io`'s sections materialise, `not` crosses the tier threshold and every `brood file` run instantiates Cranelift to compile it** — `BROOD_JIT_DUMP_IR=1` shows one arm (`not`) on 422c92a5, none on 136b14d7, none on an empty file; `BROOD_NO_JIT=1` gives 1.55M back. The remaining ~4.8M is diffuse and expected: the prelude image carries def sites (ADR-382; 802 → 1328 entries, +0.6M in `FormPos` inserts), and the prelude grew by `contracts.blsp` and ADR-377/379 (+0.3M freeze, +0.4M image load, +0.3M interning) | 🔶 **OPEN 2026-09-21** — fix shape: `contract_apply` returns before `apply_engine` when `!contracts_armed()` and the name is not in `%*contract-forced*` (the sweep already gates on `(%contracts-armed?)`; the per-`def` offer does not), so the policy runs only when it can wrap; then re-measure `startup` with the same rig (`make ab BASE=136b14d7 ROWS=startup ARGS=--floor N=15`) and look at the def-site half separately (lazy decode, or a section that loads on the first `def-site` question). Published as measured in brood-benchmarks |
 
 | KI-178 | **the JIT's inline `pair?` answered `false` for a RANGE and a SEQ-VIEW** — `PrimOp1::IsPair` compared the discriminant byte against `TAG_PAIR` alone, on the strength of a comment saying ranges "also carry TAG_PAIR"; they carry their own bytes (11, 12), so `(pair? (range 3))` and `list?` were `true` on the VM and the tree-walker and `false` once the asking arm tiered up — since the lowering was written; found by a contract over `seqable` rejecting `(range 100)` on the two-thousandth `into` | ✅ **FIXED 2026-09-21** — the lowering accepts `TAG_PAIR | TAG_RANGE | TAG_SEQVIEW`, the two new constants pinned by the layout test; `tests/jit_pair_predicate_test.blsp` counts wrong answers over 20 000 activations (19 841 before the fix) |
 | KI-175 | **the checker seeded a fold callback's accumulator from the fold's RESULT, losing `init`** — over a provably non-empty input the result rule leaves `init` out (the step ran at least once), but the callback's first step is handed `init`; `(fold [3 9 4] nil (fn (b x) (if (nil? b) x …)))` read `b` as `3 \| 9 \| 4` and flagged the callback's own `nil?` guard as never true — a PLAIN-mode false positive (the one thing the checker must never do). Found by `fold-for`'s docstring example the day ADR-377 was written | ✅ **FIXED 2026-09-20** — `walk::calls::fold_callback_seed` seeds the accumulator with `init ∪ result` (the first element ∪ result for a no-init `reduce`). Pinned in `closure_inference.rs` both ways (the `nil` seed is quiet; a `0` seed still makes the `nil?` dead), sabotage-verified. One strict finding it uncovered was right: `linmap_soundness_test`'s `lm-fold` is handed `5` on purpose by one caller, so its `assoc` can see a `5` — `check-allow`ed like its sibling |
@@ -11761,6 +11762,55 @@ two of three runs (a race), green ×3 with the fix.
 
 **Lesson:** `(when (nil? x) (def x …))` is not `defonce` and `defonce` is not atomic either;
 a shared registry is created at load or not at all.
+
+## KI-182 — the `startup` row +6% at the 422c92a5 refresh: the unarmed contract offer tiers `not` at boot, and the prelude image carries def sites 🔶 OPEN 2026-09-21
+
+**Seen:** the brood-benchmarks Brood-column refresh at `422c92a5` (min of three interleaved
+invocations) read `startup` 12.9 → 13.6 ms. `make ab BASE=136b14d7 ROWS=startup ARGS=--floor
+N=15`, std image live on both arms: **16 → 17 ms, +6.2% against a 0.0% floor**, reproduced
+alone. `perf stat -e instructions:u` on `bench/brood/startup.blsp` (`(io/puts 0)`, the run
+pre-flight cached): **74.4M → 81.3M**; on an empty file 58.6M → 62.2M; `--version` unchanged.
+
+**Attributed** on unstripped `release-fast` builds of both commits (`CARGO_PROFILE_RELEASE_FAST_STRIP=false`),
+`perf record -e instructions:u` over 60 invocations each, symbols summed by family:
+
+| family | 136b14d7 | 422c92a5 | delta |
+|---|---|---|---|
+| Cranelift / JIT compile | 0.5M | 4.6M | **+4.1M** (sampled; `BROOD_NO_JIT=1` measures 1.55M of it) |
+| `FormPos` table inserts | 1.7M | 2.3M | +0.6M |
+| image load | 5.4M | 5.8M | +0.4M |
+| freeze | 5.4M | 5.7M | +0.3M |
+| interning | 10.5M | 10.8M | +0.3M |
+
+**The JIT half — the mechanism.** `BROOD_JIT_DUMP_IR=1` prints exactly one lowered arm on the
+new binary — `not` (`Local JumpIfFalse Const Jump Const`) — none on the old, and none on an
+empty file, so it is `io`'s materialisation that makes `not` hot. `contract_apply`
+(`builtins/contracts.rs`) is called at every `def` of a name with a declared arrow and applies
+the Brood hook `%contract-wrap` unconditionally; the hook (`std/prelude/contracts.blsp`)
+decides `(if (or (%contract-exempt? name) (not (or (%contracts-armed?) (%table-has?
+%*contract-forced* name)))) orig …)`. Under `brood file` contracts are unarmed, so every one
+of those calls declines — after running `not` once. `io` and its chain declare enough names to
+put `not` past `TIER_THRESHOLD`, the background compiler instantiates `CraneliftBackend` and
+lowers it, and that is ~1.5M instructions (~0.3 ms) on every short run. The `provide`-time
+sweep already stands aside unarmed (`(when (%contracts-armed?) (%contracts-sweep! key))`,
+`tools.blsp`); the per-`def` offer is the path that does not.
+
+**The other half** is not a bug: ADR-382 put def sites in the prelude image (`[boot] … (802
+entries)` → `(1328 entries)`, each a `set_def_site` insert with two decoded strings), and the
+prelude grew by `contracts.blsp` (287 lines) and the ADR-377/379 additions, which the freeze
+and the image load pay per binding. Worth a look at whether def sites can decode lazily, but
+the JIT half is the one to fix first.
+
+**Fix shape:** `contract_apply` returns before `apply_engine` when `!contracts_armed()` and
+`name` is not in the forced table (the kernel can read the `%*contract-forced*` global and
+`table_has` it) — the hook's own first test, hoisted into the mechanism so the policy is only
+consulted when it can wrap. Guard: `BROOD_JIT_DUMP_IR=1 brood startup.blsp` lowers no arm;
+`sig!` still forces unarmed (`tests/contracts_test.blsp` covers it). Then re-measure with the
+rig above.
+
+**Lesson:** a hook called per definition is a hot loop at load time, and the JIT's tier
+threshold turns a cheap decline into a Cranelift instantiation per process. Gate policy calls
+on the fact that decides them when the kernel already holds that fact.
 
 ## KI-181 — an error raised in positionless code took the CATCH site's position, two frames from the failing form ✅ FIXED 2026-09-21
 
