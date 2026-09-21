@@ -13,7 +13,7 @@ use super::emit::{
 use super::Op;
 use super::OrBail;
 use crate::core::value::jit_layout::{
-    PAYLOAD_OFFSET, TAG_BOOL, TAG_FLOAT, TAG_INT, TAG_KEYWORD, TAG_PAIR,
+    PAYLOAD_OFFSET, TAG_BOOL, TAG_FLOAT, TAG_INT, TAG_KEYWORD, TAG_PAIR, TAG_RANGE, TAG_SEQVIEW,
 };
 use crate::eval::compile::ir::{PrimOp, PrimOp1};
 use cranelift_codegen::ir::{
@@ -231,13 +231,21 @@ pub(super) fn emit_prim1(
             stack.push(Op::Int(is_nil));
         }
         PrimOp1::IsPair => {
-            // Tag-only pair check: compare the tag byte to TAG_PAIR. Ranges and
-            // SeqViews also carry TAG_PAIR — matching nil?/pair? semantics from
-            // builtins.rs.
+            // Tag-only pair check, over the THREE discriminants the native `pair?` accepts:
+            // a `Range` and a `SeqView` are `pair` to the language (`tag`, `type-of`) but
+            // carry their own bytes. This compared against `TAG_PAIR` alone from the day it
+            // was written — the comment beside it claimed ranges "also carry TAG_PAIR" —
+            // so `(pair? (range 3))` was `false` in native code and `true` on the VM and
+            // the tree-walker, and `list?` with it (KI-178; found by a contract over
+            // `seqable` that rejected a range once its caller tiered up).
             let [w0, _, _] = read_words(b, operand, frame);
             let tagb = b.ins().band_imm_s(w0, 0xff);
             let is_pair = b.ins().icmp_imm_s(IntCC::Equal, tagb, TAG_PAIR as i64);
-            stack.push(Op::Int(is_pair));
+            let is_range = b.ins().icmp_imm_s(IntCC::Equal, tagb, TAG_RANGE as i64);
+            let is_view = b.ins().icmp_imm_s(IntCC::Equal, tagb, TAG_SEQVIEW as i64);
+            let either = b.ins().bor(is_pair, is_range);
+            let any = b.ins().bor(either, is_view);
+            stack.push(Op::Int(any));
         }
         PrimOp1::IsEmpty => {
             // nil → true, pair → false, inline; anything else takes the

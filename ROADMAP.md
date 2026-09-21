@@ -249,19 +249,24 @@ needs a Brood-specific form to respect an ADR.
   predicate), `if-some`/`when-some`, `seq/cycle` (bounded), `seq/prewalk`/`seq/postwalk`,
   `seq/pmap` (a process per item, replies tagged by `ref`, in order), and `string/format`'s
   `-` flag and widths on `%s`/`%f`. `partition-by` was already here as `seq/chunk-by`.
-- ⬜ **10. Contract blame.** `BROOD_CONTRACTS=1` reports the mismatch but not the party. The
-  checking shim in `std/prelude/core.blsp` knows the signature's module and the call site;
-  attach `:blame :caller | :callee` to the error map.
-
-- ⬜ **11. Contracts on by default in dev mode** — asked 2026-08-30. Blocked on three
-  recorded things, in order: (a) the open ADR-153 design question — `BROOD_CONTRACTS=1`
-  turns a *declaration* into a *rebinding* (placement-sensitive, wraps identity/`arglist`);
-  the better shape is a kernel `def`-time hook applying registered signatures, which is
-  placement-independent and reaches the prelude; (b) the prelude cannot carry contracts at
-  all today (a shim captures a local frame; the freeze forbids it); (c) unmeasured JIT cost —
-  a shim in front of every `sig`'d std function defeats leaf splicing and the IC on the
-  hottest calls. Then: default-on under `nest run`/`nest test` only, never in a bundle
-  (Racket's model). KI-81 made the flag reliable only on 2026-08-29.
+- ✅ **10. Contract blame** (2026-09-21, ADR-381). A mismatch is a structured error naming
+  the party: `{:kind :contract :blame :caller :function 'f :argument 2 :expected int :got
+  …}` for an argument, `:blame :callee` for a result (and for an ability op's declared
+  `:->` return).
+- ✅ **11. Contracts on by default in dev mode** (2026-09-21, ADR-381). (a) Enforcement is
+  binding-time policy: the kernel offers a binding to `%contract-wrap` at a `def`, at a
+  `%register-sig` on a bound name, and in the sweep after a module's bindings arrive from
+  source OR the stdlib image — so `sig` is a declaration in every mode, placement is free,
+  a reload re-wraps, and the placement gate is gone. (b) The prelude is reached (its root
+  names are swept per runtime at boot) and exempt under plain `BROOD_CONTRACTS=1` —
+  `BROOD_CONTRACTS=all` includes it — because its sixteen names are the hottest in the
+  language (`nth` 0.4 → 4.5 µs). (c) Measured: every check was tree-walked (~600 µs a
+  call; moved out from under its own macros, ~3.5 µs), `%type-alias` scanned every sig per
+  non-base symbol (memoised, and eleven base names now interpreted), and the sweep found
+  **KI-178**, the JIT's `pair?` on a range. `nest run`/`nest test` arm it; `0` opts out; a
+  bundle never arms; `stdimage/build` refuses to run armed. Residual cost: `json_test` ×1.5,
+  `format_test` ×35 (`string/char-at` per character). Follow-up, not taken:
+  module-boundary contracts (a module's calls to its own functions unchecked).
 
 **Doc drift found on the way** (fix with the first item that lands nearby): the ADR-170
 freeze table still reads "Multiple dispatch — refused" against ADR-179's `defmulti`;

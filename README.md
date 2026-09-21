@@ -315,8 +315,9 @@ Where you want more, `(sig …)` adds function **arrows** (`(sig area (number ->
 checker re-derives on every reload; it warns rather than blocks, and it does not warn on a
 use that is valid for the image's current state. The hard reject is **batch/CI only**:
 `nest check` exits nonzero on any warning (`std/` and `tests/` sit at zero). If you want
-the same discipline at runtime, `BROOD_CONTRACTS=1` turns `sig` declarations into checking
-shims — implemented in Brood, not Rust.
+the same discipline at runtime, `nest run` and `nest test` enforce every `sig` as a
+contract by default (`BROOD_CONTRACTS=1`; a mismatch blames the caller or the callee) —
+the policy is Brood, the kernel only offers each binding to it (ADR-381).
 
 Full detail: [`docs/types.md`](docs/types.md) (the model and its compatibility contract),
 [`docs/type-annotations.md`](docs/type-annotations.md) (`sig`), and

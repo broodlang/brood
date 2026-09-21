@@ -190,6 +190,16 @@ ON ITS OWN, and a root global goes to the SMALLEST such set containing it — th
 that defines it, never one that merely depends on that module. All 95 probes cost ~0.7 s,
 paid once per build. A root global no probe claims belongs to the prelude and is skipped,
 since the prelude is always present."
+  ;; An image is a snapshot of what loading binds, keyed on the stdlib's CONTENT alone — so
+  ;; it must be written by a process in which loading binds the same thing every process
+  ;; will want. With contracts armed it does not: every sig'd function is bound to its
+  ;; checking shim at `provide` (ADR-381), and an image carrying those would enforce
+  ;; contracts in every unarmed run that read it. Refuse rather than write a wrong image;
+  ;; `nest` builds in a child process with the variable removed for exactly this reason.
+  (when (%contracts-armed?)
+    (error "stdimage/build: refusing to write a stdlib image with runtime contracts armed "
+      "(BROOD_CONTRACTS=1) — the image would carry every contract shim into unarmed runs. "
+      "Build with the variable unset: `env -u BROOD_CONTRACTS nest stdimage`."))
   (let (path (image-path))
     (when path
       (let (dir (path/dirname path)

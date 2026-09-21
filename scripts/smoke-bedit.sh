@@ -127,9 +127,20 @@ run_step() {
 
 # The order is fast-and-precise first: a rename that `check` can see fails in seconds and
 # names the site; the suite would fail on the same thing minutes later and less clearly.
-run_step "nest check (zero warnings)" "$NEST" check
-run_step "nest run --check-boot (headless)" env BROOD_GUI_HEADLESS=1 "$NEST" run --check-boot
-run_step "nest test" env BROOD_GUI_HEADLESS=1 "$NEST" test
+#
+# Runtime contracts OFF for these gates (ADR-381 made them `nest run`/`nest test`'s default).
+# This smoke exists to catch what a brood change does to bedit — a rename, a moved name, a
+# checker verdict — and under contracts bedit's suite reports its OWN declarations instead:
+# the first armed run found seven sigs that said `bool` where nil arrives and `list` where a
+# vector does (fixed in bedit 2026-09-21), and then the std `pane` record's required
+# fields against the pane payloads bedit hands its `(pane …)`-declared functions — bedit's
+# reconciliation to do, not a brood regression. Until bedit's own `nest test` is green
+# armed, arming it here would make every brood push red for bedit's reasons. Set
+# `SMOKE_CONTRACTS=1` to run the gates armed and see what is left.
+smoke_contracts=${SMOKE_CONTRACTS:-0}
+run_step "nest check (zero warnings)" env BROOD_CONTRACTS="$smoke_contracts" "$NEST" check
+run_step "nest run --check-boot (headless)" env BROOD_GUI_HEADLESS=1 BROOD_CONTRACTS="$smoke_contracts" "$NEST" run --check-boot
+run_step "nest test" env BROOD_GUI_HEADLESS=1 BROOD_CONTRACTS="$smoke_contracts" "$NEST" test
 
 if [ "$fail" = 0 ]; then
   echo "smoke-bedit: green — bedit @ $bedit_sha checks, boots and tests against $nest_version"

@@ -248,7 +248,8 @@ runtime presence-check of a declared event.
                 :doc doc})
     `(do
        (register-event ~event ~schema)
-       ;; `defn` first: under BROOD_CONTRACTS=1 a `sig` is an action on an existing binding.
+       ;; `defn` then `sig` — either order enforces since ADR-381; this one reads as
+       ;; definition-then-documentation.
        (defn ~fname (~@all-names) (emit ~event ~meas-map ~meta-map))
        (sig ~fname (~@all-types -> any))
        nil)))

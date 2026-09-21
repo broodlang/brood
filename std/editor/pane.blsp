@@ -365,10 +365,8 @@ from the geometry `pane-layout` already computed."
          :dividers (cons {:path path :dir (get node :dir) :rect drect :split-rect rect}
                      (append (get la :dividers) (get lb :dividers)))}))))
 
-;; BELOW its definition, outside the wrapper. Indented above it, this sig was invisible to
-;; `sig_placement.rs` and, under BROOD_CONTRACTS=1 from source, its deferred contract landed
-;; at `provide` — after the loader's reserved-name exemption — and was refused, failing the
-;; module (2026-09-06). The gate now reads indented sigs too.
+;; Outside the `check-allow` wrapper, so the declaration is a top-level form the checker and
+;; the runtime both read plainly (its placement relative to the `defn-` is free, ADR-381).
 (sig pane-layout-go (any list rect -> layout))
 
 (defn pane-layout (tree rect)

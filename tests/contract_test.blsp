@@ -573,3 +573,60 @@
         ;; the negation of the whole `=` chain.
         (assert= true (not= 1 2 1))
         (assert= (not (= 1 2)) (not= 1 2))))))
+
+;; ---- blame, and placement-free enforcement (ADR-381, ROADMAP items 10 and 11) -----------
+;; A contract error is a structured map that names the PARTY at fault: an argument that
+;; fails its type is the caller's (`:blame :caller`), a result that fails is the callee's
+;; (`:blame :callee`). And a `sig!` — like a `sig` under contracts — is installed when the
+;; BINDING comes to exist, so it may stand above the definition, and a redefinition is
+;; wrapped again as it lands.
+
+(sig! c-forward (int -> int))
+(defn c-forward (n) n)
+
+(check-allow :type-mismatch
+  (defn c-reloaded (n) n))
+(sig! c-reloaded (int -> int))
+;; The second definition is the point of the case: it must be wrapped again.
+(check-allow :duplicate-def
+  (check-allow :type-mismatch
+    (defn c-reloaded (n) "a string now")))
+
+(defn c-blame (a b) (+ a b))
+(sig! c-blame (int int -> int))
+
+(describe "contract errors carry blame"
+  (test "a bad argument blames the caller, with its position and the declaration"
+    (let (e (try (c-blame 1 "two") (catch e e)))
+      (assert= :contract (get e :kind))
+      (assert= :caller (get e :blame))
+      (assert= 2 (get e :argument))
+      (assert= 'int (get e :expected))
+      (assert= "two" (get e :got))
+      (is (includes? (error-message e) "argument 2 expected int"))))
+  (test "a bad result blames the callee"
+    (let (e (try (c-bad-ret 1) (catch e e)))
+      (assert= :callee (get e :blame))
+      (assert= nil (get e :argument))
+      (assert= "not an int" (get e :got))
+      (is (includes? (error-message e) "result expected int"))))
+  (test "the function is named as the checker resolves it"
+    (let (e (try (c-blame "x" 2) (catch e e)))
+      (is (string/ends-with? (->string (get e :function)) "c-blame")))))
+
+(describe "a contract is a property of the binding, not of the declaring form"
+  (test "a sig! above its definition is enforced"
+    (assert= (c-forward 3) 3)
+    (assert-error (c-forward "x")))
+  (test "a redefinition of a contracted function is contracted too"
+    (let (e (try (c-reloaded 1) (catch e e)))
+      (assert= :callee (get e :blame))))
+  (test "a shim keeps the function's arity and docstring"
+    (assert= 2 (count (arglist c-blame)))
+    (assert= "Entry: the docstring survives the shim." (doc c-documented))
+    (assert= 4 (c-documented 2))))
+
+(defn c-documented (n)
+  "Entry: the docstring survives the shim."
+  (* n 2))
+(sig! c-documented (int -> int))

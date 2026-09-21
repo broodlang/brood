@@ -12,6 +12,36 @@ sysctl that moves under you — that file's last section has the one-line check)
 questions are answerable here; check that file's "what this box CAN answer" before deferring
 anything.
 
+## 2026-09-21 — runtime contracts are binding-time policy and ON under `nest run`/`nest test` (ADR-381); KI-178
+
+ROADMAP 10 and 11 are done; read ADR-381 for the shape and the measurements. What the next
+session needs to know:
+
+- **`nest test` now runs armed.** Every `(sig …)` in the project and in std is enforced; a
+  mismatch is `{:kind :contract :blame :caller|:callee …}`. `BROOD_CONTRACTS=0` opts a run
+  out; `all` also arms the prelude's sixteen (exempt by default: `nth` 0.4 → 4.5 µs). The
+  cost is ~3.5 µs per contracted call — `json_test` ×1.5, `format_test` ×35 (a contracted
+  `string/char-at` per character). The nextest suite wrapper (`brood_suite_passes`) runs
+  in-process and unarmed, so `make test`'s time is unchanged; the brood suite armed end to
+  end has NOT been run on this box (the no-full-suite rule) — CI's examples and bedit jobs
+  are the armed runs, and bedit's smoke is pinned unarmed (below).
+- **bedit.** bedit `68e74c6f` fixes the seven declarations the first armed run found (and
+  a test passing `0` as a buffer name); `BEDIT_REF` is bumped to it. Armed, six of its
+  tests still fail on the std `pane` record's required fields (`:path :selected :rect`)
+  against the pane payloads bedit's twenty-four `(pane …)`-declared functions receive —
+  bedit's reconciliation (declare what those functions read, or widen `pane`), not a brood
+  regression. `scripts/smoke-bedit.sh` runs its gates with `BROOD_CONTRACTS=0` until then;
+  `SMOKE_CONTRACTS=1 make smoke-bedit` shows what is left.
+- **The follow-up worth doing:** contracts as a MODULE BOUNDARY — a module's calls to its
+  own functions unchecked (the Racket shape). It is what makes `format_test`'s ×35 go away
+  without touching a sig, and it needs the compile pass to resolve same-module references
+  past the shim (a second binding, or a resolve-time rewrite). Not started.
+- **Two traps found on the way, both in the memory too:** a prelude closure that calls a
+  macro defined AFTER it is tree-walked for good (`BROOD_DEFER_DBG=1` shows it; that was
+  the whole "contracts are 5× slower" story), and `/tmp` is a 31 GB RAM tmpfs — a scratch
+  worktree's `target/debug` filled it and every shell command failed with exit 1 and no
+  output.
+
 ## 2026-09-21 — NEXT: large-project scaling, items 3–5 — read `large-project-scaling.md`
 
 **Item 2 is DONE (ADR-382, KI-179, this session): `nest check` is incremental for real.**

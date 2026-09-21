@@ -1134,13 +1134,25 @@ pub(super) fn register_sig(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     // Properties already registered for the name (a `(sig f :pure)` above the typed one)
     // ride along in the wrapped entry; a name with none keeps the bare type-form, so
     // nothing that never asked for a property sees a wrapper.
-    let props = sig_props_of(heap, heap.declared_sig_value(qualified));
+    let previous = heap.declared_sig_value(qualified);
+    let props = sig_props_of(heap, previous);
+    // A declaration that says what the store already says (the same `sig` re-evaluated
+    // on a reload, the second `%register-sig` of a `sig!`) is not a change: the binding —
+    // possibly already the contract shim for exactly this type — is left alone below.
+    let unchanged = sig_type_of(heap, previous).is_some_and(|t| heap.equal(t, type_value));
     let stored = if props.is_empty() {
         type_value
     } else {
         wrap_sig(heap, type_value, &props)
     };
     heap.set_declared_sig(qualified, stored);
+    // The declaration landed on a name already bound to a closure — the `sig` written
+    // below its definition — so this is the binding's moment (ADR-381): the `def` ran
+    // with no signature to consult. Not inside an embedded module's load, whose bindings
+    // are swept once when it has finished.
+    if !unchanged && !heap.in_module_load() {
+        super::contracts::contract_apply(heap, qualified, super::contracts::OnShim::Rewrap)?;
+    }
     Ok(Value::symbol(qualified))
 }
 

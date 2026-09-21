@@ -448,72 +448,21 @@ for the re-read; the resolution is what keeps those two naming the same global."
   `(%registry-swap! '~(%registry-global-name registry) (fn () ~registry) ~f))
 
 ;; (provide 'foo) — mark a feature loaded (idempotent). Returns its name.
-;; ---- deferred runtime contracts (BROOD_CONTRACTS=1) --------------------------
-;; std writes `(sig …)` ABOVE the definition wholesale (the strict sweep,
-;; 483288cd): a signature is documentation, so that is its natural place. Contracts
-;; mode used to abort the whole module load on exactly that placement — `sig!`
-;; rebinds the name, so it must already exist (KI-81's shape; the contracts_mode
-;; test caught std/string doing it on the merged tree). Instead of forcing 200+
-;; sigs below their defns, the `sig` macro now records the not-yet-defined case
-;; here, and `provide` — which runs precisely when a module's defs all exist —
-;; installs every pending shim whose name has materialised. A kernel table, not a
-;; registry map: concurrent `require`s race this. Entries whose names never
-;; materialise (a sig for a name defined elsewhere, or a typo) stay parked; the
-;; checker's own diagnostics cover those, and a parked declaration enforces
-;; exactly as much as it did before contracts mode existed: nothing.
-(def- %*pending-contracts* (%table))
-(defn %contract-defer! (qname type)
-  "Queue `(sig! qname type)` until `qname` is defined — installed when the
-OWNING module provides (see the block comment above). The runtime side of a
-`sig` written above its definition under BROOD_CONTRACTS=1."
-  (%table-put %*pending-contracts* (->string qname) [qname type])
-  nil)
-(defn- %contract-owner (qname-str)
-  ;; \"path/path-last-sep\" → \"path\"; a root name (no slash) owns itself nowhere,
-  ;; so it applies at whichever provide first finds it bound. Kernel primitives
-  ;; only — a `string/last-index-of` here would infer a require of std/string in
-  ;; the middle of someone else's provide.
-  ;; `%str-last-index-of` answers -1 for absent (not nil) — checking `nil?` here made a
-  ;; ROOT name (no slash) slice `[0, -1)` and abort the provide that applied it, the
-  ;; moment the first root-named pending contract existed (found by contracts_mode on
-  ;; the ADR-301 merge).
-  (let (i (%str-last-index-of qname-str "/" (string/length qname-str)))
-    ;; `(< i 0)` alone — `%str-last-index-of` answers -1, never nil, which is exactly what
-    ;; the note above records. The `nil?` was vestigial from the version that had the bug.
-    (if (< i 0) nil (string/substring qname-str 0 i))))
-(defn- %contracts-apply-pending! (key)
-  ;; Apply only THIS module's entries, and apply them AS the module: `sig!` on a
-  ;; `defn-` name is a private reference, legal only when the compile namespace is
-  ;; the owner itself (ADR-146 — applying another module's pending sig from a
-  ;; foreign ns tripped the privacy check, correctly, and `provide` runs after the
-  ;; loader restored the requiring module's ns). So bracket each application in
-  ;; the owner's namespace via `%in-ns`, restoring what was current — including
-  ;; ROOT, which is what `(%in-ns nil)` exists for. The rethrow keeps a contract
-  ;; error surfacing while the bracket still restores.
-  (when (> (%table-count %*pending-contracts*) 0)
-    (reduce (%map-pairs (%table-snapshot %*pending-contracts*))
-      nil
-      (fn (_ kv)
-        (let (entry (second kv))
-          (let ([qname type] entry
-                owner (%contract-owner (first kv)))
-            (when (and (or (nil? owner) (= owner key)) (bound? qname))
-              (%table-delete %*pending-contracts* (first kv))
-              (let (prev (reflect/current-ns))
-                (when owner (%in-ns (symbol owner)))
-                (let (r (try
-                          (reflect/eval (list 'sig! qname type))
-                          (catch e (do (%in-ns prev) (throw e)))))
-                  (%in-ns prev)
-                  r)))))))))
-
 (defn provide (mod)
   "Mark feature `mod` (a symbol or string) as loaded (idempotent); returns its name.
 
     (provide 'already-here)   → \"already-here\""
   (let (key (->string mod))
     (%registry-update! '*features* :assoc-new [key] true)
-    (%contracts-apply-pending! key)
+    ;; Runtime contracts, moment 3 (ADR-381): a module's bindings now exist, whichever way
+    ;; they arrived — evaluated from source, where an embedded module's `def`s stood down
+    ;; from the per-binding hook, or materialised from the stdlib image, which evaluates
+    ;; nothing and so never registered a sig's enforcement. `provide` is where both paths
+    ;; meet (and where `require-one` publishes the module to every other process), so the
+    ;; declarations this module owns are offered to `%contract-wrap` here, once. A name
+    ;; whose binding is already a shim is left alone. Armed only: the sweep walks every
+    ;; declaration in the runtime, and an unarmed process has nothing to install.
+    (when (%contracts-armed?) (%contracts-sweep! key))
     key))
 
 ;; A module declares itself at the top with `defmodule`: its name, an optional
@@ -2312,23 +2261,36 @@ prelude implements abilities of its own (`(impl Port :native …)`)."
         (if (%eq (first tail) :->) (first (rest tail)) nil))
     else (%op-declared-ret (rest specs) op-name)))
 
+;; Defined HERE rather than in contracts.blsp with the rest of the contract machinery: the
+;; `impl` expansion below names it, and the prelude's own impls (`(impl Port :native …)`)
+;; are compiled before the last prelude file exists, which the compile pass reports as an
+;; unbound head. Self-contained for the same reason — a literal error map, not
+;; `%contract-error`.
 (defn- %contract-check-op-result (aname op ret value)
-  "Enforce an ability op's declared return at run time, under `BROOD_CONTRACTS=1`. The
-checker reports a *statically* visible violation already; this catches the ones it cannot
-see — an impl whose body only yields the wrong type for some inputs, and an impl registered
-at run time from a value the checker never read. Returns `value` so it can wrap a body."
-  (if (type-matches? ret value)
+  "Enforce an ability op's declared return at run time, when contracts are armed
+(`BROOD_CONTRACTS=1`, the `nest run`/`nest test` default). The checker reports a
+*statically* visible violation already; this catches the ones it cannot see — an impl
+whose body only yields the wrong type for some inputs, and an impl registered at run
+time from a value the checker never read. Returns `value` so it can wrap a body. The
+error is a `:blame :callee` contract error, like a function's own result mismatch."
+  (if (or (not (%contracts-armed?)) (type-matches? ret value))
     value
-    (throw (str aname
-             "/"
-             op
-             ": result expected "
-             ret
-             ", got "
-             (type-of value)
-             " ("
-             (pr-str value)
-             ")"))))
+    (throw {:kind :contract
+            :message (str aname
+                       "/"
+                       op
+                       ": result expected "
+                       ret
+                       ", got "
+                       (type-of value)
+                       " ("
+                       (pr-str value)
+                       ")")
+            :blame :callee
+            :function (symbol (str aname "/" op))
+            :argument nil
+            :expected ret
+            :got value})))
 
 (defmacro impl (aname key & methods)
   "Register implementations of ability `aname` for dispatch id `key` — a `type-of`
@@ -2340,11 +2302,14 @@ at run time from a value the checker never read. Returns `value` so it can wrap 
     (impl Size geometry/circle  (size [c] (get c :r)))"
   ; the dispatch id is a KEYWORD: a record id written as a symbol (`geometry/circle`) is
   ; keyworded to match what `%identity-of` produces; a built-in id (`:int`) is already one.
-  ; Under BROOD_CONTRACTS=1, an op with a declared `:-> RET` gets its result checked at every
-  ; call (ADR-180 deferred item c). Decided at EXPANSION time, like `sig`'s own contract
-  ; switch, so an unset flag costs a default build nothing at all — the shim is not emitted.
+  ; An op with a declared `:-> RET` gets its result checked at every call when contracts
+  ; are armed (ADR-180 deferred item c). The check is ALWAYS emitted and asks the runtime
+  ; (`%contract-check-op-result` reads `%contracts-armed?`): the flag used to be read at
+  ; expansion time, which cost an unarmed build nothing — and cost an armed one every impl
+  ; std ships, since a std module materialised from the image was expanded once, unarmed,
+  ; when the image was written (ADR-381). One cached bool per call under a declared return.
   (let (id-kw (%ability-id-kw key)
-        specs (if (%eq (%getenv "BROOD_CONTRACTS") "1") (%ability-ops aname) nil))
+        specs (%ability-ops aname))
     (cons 'do
       (map methods
         (fn (m)

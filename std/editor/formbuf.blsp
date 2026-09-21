@@ -95,7 +95,14 @@ the region functions below."
   "The region containing `pos` (boundaries inclusive, so the caret at either edge
 counts as inside), or nil."
   (seq/find regions (fn (r) (and (>= pos (get r :start)) (<= pos (get r :end))))))
-(sig region-at ((or nil (list region)) int -> (or nil region)))
+;; The parameter asks for what the body READS — `:start` and `:end` — not the whole
+;; `region` record: a caller may pass any span-shaped map (bedit's shell hands it
+;; `{:start 7 :end 7}`), and the runtime contract (ADR-381) held it to the four-field
+;; record until 2026-09-21. The result is an element of the input, so it is the same shape.
+(sig region-at
+  ((or nil (list (record &open :start int :end int))) int
+    ->
+    (or nil (record &open :start int :end int))))
 
 (defn region-index (regions pos)
   "The 0-based index of the region containing `pos`, or nil."

@@ -69,23 +69,16 @@
     ;; whose module a single-file check may not have loaded (ADR-181/186).
     (assert= (warns-of "(sig w (Shape -> int)) (defn w (x) 1) (defn p () (w 42))") nil)))
 
-(describe "sig: placement is load-bearing under BROOD_CONTRACTS=1"
-  ;; `sig` is a pure declaration by default, so placement is free. With contracts
-  ;; on it expands to `sig!`, which REBINDS the name — so the definition has to
-  ;; exist first. A misplaced sig used to die with a bare `unbound symbol: mod/name`
-  ;; that took the whole module load with it; now it names the fix.
-  (test "the declaration itself is placement-independent (default mode)"
+(describe "sig: placement is free in every mode"
+  ;; `sig` is a pure declaration (ADR-381): enforcement is decided when the BINDING comes
+  ;; to exist, whichever side of the definition the declaration stands on. Before that,
+  ;; contracts mode turned the form into a rebinding and a `sig` above its `defn` took
+  ;; the module load down (KI-81, KI-113; `crates/lisp/tests/sig_placement.rs` policed the
+  ;; order over every `.blsp` until the rule itself went away). The runtime half —
+  ;; both orders enforced — is `tests/contract_test.blsp`.
+  (test "the declaration is placement-independent for the checker"
     (assert= (warns-of "(sig ab (string -> string)) (defn ab (s) s)") nil)
-    (assert= (warns-of "(defn ba (s) s) (sig ba (string -> string))") nil))
-
-  ;; The STRUCTURAL invariant is not checked here any more, and deliberately so. This
-  ;; block used to scan three baked-in modules (`path`, `json`, `set`) for a `(sig …)`
-  ;; line directly above a `(defn …)`/`(def …)` of the same name — 3 files of 79, exact
-  ;; adjacency only, and blind to `defn-`/`defmacro`/`defdyn` and to a definition nested
-  ;; in a `(check-allow …)`. It passed while 218 misplaced sigs sat in the tree, which is
-  ;; worse than no check: it read as coverage. `crates/lisp/tests/sig_placement.rs` now
-  ;; asserts it over EVERY `.blsp`, and names the line to move.
-)
+    (assert= (warns-of "(defn ba (s) s) (sig ba (string -> string))") nil)))
 
 ;; ---- occurrence typing: inferred params check callers, zero annotations (ADR-190) ----
 ;; Pass 2.8 now carries each same-file function's inferred PARAMETER demands (not just its

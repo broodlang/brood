@@ -142,6 +142,17 @@ impl Interp {
         heap.set_global(EnvId::GLOBAL);
         // Abilities + the Display protocol are core — defined in the shared prelude
         // (`*show*` is wired on there), so nothing to load per runtime here.
+        //
+        // The prelude's own contracts (ADR-381): the shared prelude is built and frozen
+        // once, and a checking shim closes over a frame the freeze forbids — so under
+        // `BROOD_CONTRACTS=all` its declared root names are swept HERE, per runtime, where
+        // a rebinding is an ordinary global. Sixteen names; a failure names itself. Plain
+        // `1` leaves them alone (see `prelude_contracts_armed` for the measurement).
+        if builtins::contracts::prelude_contracts_armed() {
+            if let Err(e) = builtins::contracts::sweep(&mut heap, None) {
+                eprintln!("[contracts] the prelude's contracts could not be installed: {e}");
+            }
+        }
         Interp {
             heap,
             root: EnvId::GLOBAL,

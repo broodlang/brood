@@ -825,9 +825,8 @@ the loop spawns so its `def`s are in place for the first prompt."
 ;; ADR-070); it is rooted through the ambient package context in the loop process. A
 ;; plain `def` (not a `defdyn`) so it reaches the spawned loop across `spawn`.
 (def *repl-start-ns* nil)
-;; `(or symbol nil)`, declared rather than inferred, and BELOW the `def` — a `sig` above its
-;; own definition breaks the module under `BROOD_CONTRACTS=1`, which `sig_placement.rs` gates
-;; tree-wide. `nest repl` rebinds it through `start-in!` below (ADR-322; it used to be a
+;; `(or symbol nil)`, declared rather than inferred (placement is free since ADR-381).
+;; `nest repl` rebinds it through `start-in!` below (ADR-322; it used to be a
 ;; `(def repl/*repl-start-ns* …)` evaluated from Rust, which no static reading could see), so
 ;; inference would otherwise pin it to its initializer and call the `symbol?` guard dead.
 (sig *repl-start-ns* (or symbol nil))

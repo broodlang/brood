@@ -464,6 +464,9 @@ pub struct Heap {
     /// map (`closure_const_ver` starts at `u64::MAX` so the first use populates).
     closure_const_cache: RefCell<ConstClosureMap>,
     closure_const_ver: Cell<u64>,
+    /// The contract's alias-by-suffix memo — `(declared_sigs_version, name → alias key)`;
+    /// see [`Heap::alias_key_by_suffix`]. Keys only, so a relocation cannot strand it.
+    type_alias_cache: RefCell<(u64, HashMap<Symbol, Option<Symbol>>)>,
     /// This process's global scope. For a real runtime this is [`EnvId::GLOBAL`]
     /// (routing to `runtime.globals`); for the prelude *builder* it's a real
     /// local root frame (so the prelude can be evaluated, then frozen).
@@ -1458,6 +1461,7 @@ impl Heap {
             closure_tpl_ver: Cell::new(u64::MAX),
             closure_const_cache: RefCell::new(ConstClosureMap::default()),
             closure_const_ver: Cell::new(u64::MAX),
+            type_alias_cache: RefCell::new((u64::MAX, HashMap::new())),
             prelude: Arc::default(),
             runtime: Arc::default(),
             global: EnvId::local(0),
@@ -1545,6 +1549,7 @@ impl Heap {
             closure_tpl_ver: Cell::new(u64::MAX),
             closure_const_cache: RefCell::new(ConstClosureMap::default()),
             closure_const_ver: Cell::new(u64::MAX),
+            type_alias_cache: RefCell::new((u64::MAX, HashMap::new())),
             prelude,
             runtime,
             global: EnvId::local(0),
