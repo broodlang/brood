@@ -325,7 +325,7 @@ a float for a float `x` unless the rounded value is an integer, exact for an exa
     (math/clamp 12 0 10)   → 10
     (math/clamp -1 0 10)   → 0"
   (math/max lo (math/min hi x)))
-(sig clamp (number number number -> number))
+(sig clamp (?A ?A ?A -> ?A))
 
 ;; ---- transcendental functions -----------------------------------------------
 ;; Thin policy over the `%`-prefixed f64 primitives (mechanism), so they live in the

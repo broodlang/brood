@@ -228,7 +228,7 @@
   (test "ctrl chords are C0 bytes, alt chords are ESC-prefixed"
     (let (v (vt/make 10 2))
       (assert= (vt/key->bytes :ctrl-c v) (string/int->char 3))
-      (assert= (vt/key->bytes :ctrl-space v) (string/int->char 0))
+      (assert= (vt/key->bytes (keyword "ctrl- ") v) (string/int->char 0)) ; C-SPC, as the GUI spells it
       (assert= (vt/key->bytes :alt-f v) "\ef")
       (assert= (vt/key->bytes :ctrl-meta-a v) (str "\e" (string/int->char 1)))))
   (test "modified named keys take the CSI 1;m form"
@@ -254,3 +254,11 @@
       (assert= (vt/line row nil) ["red!" [[0 3 {:fg [205 0 0]}]]])))
   (test "a screen row can be read the same way"
     (assert= (vt/line (nth (:grid (fed 6 1 "ab   ")) 0) nil) ["ab" []])))
+
+(describe "vt: the edges of a row"
+  (test "a wide grapheme pinned at the last column with autowrap off keeps its glyph"
+    (assert= (lines-of (fed 3 1 "\e[?7lab中")) ["ab中"]))
+  (test "a CSI with a private marker and no parameters is not an SGR"
+    (assert= (:attr (fed 3 1 "\e[31m\e[?m")) {:fg 1}))
+  (test "an unknown ED selector erases nothing that a 2 would not"
+    (assert= (lines-of (fed 3 1 "abc\e[9J")) [""])))

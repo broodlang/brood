@@ -237,6 +237,21 @@ is. Makes a path absolute, not canonical — it does not collapse `.`/`..` segme
     else (path/join (or base (file/cwd)) path)))
 (sig absolute (string &optional string -> string))
 
+(defn abbreviate (path)
+  "`path` with a leading `$HOME` shortened to `~` — the inverse of [[absolute]]'s `~`
+expansion, the way a shell prompt shows a directory. A path outside the home, or one
+that merely starts with the home's text (`/home/me2` under `/home/me`), is unchanged.
+
+    (path/abbreviate (str (%getenv \"HOME\") \"/src\"))   → \"~/src\""
+  (let (home (%getenv "HOME"))
+    (cond
+      (or (nil? home) (= home "")) path
+      (= path home) "~"
+      (string/starts-with? path (str home "/"))
+        (str "~" (string/substring path (string/length home) (string/length path)))
+      else path)))
+(sig abbreviate (string -> string))
+
 (defn temp (prefix)
   "A fresh, unpredictable path under `/tmp`: `<prefix><32 hex chars>`, NOT created —
 `file/spit` a file there or `file/mkdir` a directory. The name comes from the OS CSPRNG, so
