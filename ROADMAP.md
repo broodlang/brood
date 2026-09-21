@@ -473,6 +473,10 @@ family of per-type functions. ADR-250 through ADR-253 carry the decisions.
 
 **Still open:**
 
+- [ ] **Large-project scaling at 3k-line files** — `docs/large-project-scaling.md` (2026-09-21):
+      warm `nest run` is O(source bytes) (module index re-parses every file); whole-project
+      `nest check` is single-threaded and O(project) in memory. Six-item queue in the doc.
+
 > Numbers below **re-measured 2026-08-29** with `scripts/stdlib-audit.blsp` rather than
 > carried forward. Three of this list's claims had gone stale in the reader's favour — an
 > item recorded as open can be *fixed* and still read as work, which is its own cost.

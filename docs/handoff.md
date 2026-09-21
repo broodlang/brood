@@ -12,6 +12,36 @@ sysctl that moves under you — that file's last section has the one-line check)
 questions are answerable here; check that file's "what this box CAN answer" before deferring
 anything.
 
+## 2026-09-21 — NEXT: large-project scaling (100k files × 3k lines) — read `large-project-scaling.md`
+
+**The question asked, measured, and queued.** `docs/large-project-scaling.md` has the rig,
+the numbers and the plan; this is the summary so the next session can start on item 1 cold.
+
+Measured on 1 000 files × 3 067 lines (3.07M lines, `scripts/bench/gen-project.py 1000 DIR
+--fns 340`): cold `nest run` 39 s / 3.3 GB; **warm `nest run` 3.0 s** — O(source bytes),
+because the module index re-parses every file twice (`package-module-names-of`,
+`project-file-module`: `read-all` of the whole file to find its `defmodule`; 2 000 opens for
+1 000 files on a warm run, `perf` puts the time in the reader); **whole-project `nest check`
+161 s / 3.8 GB, one thread of twelve**; unchanged re-check 16 s. Extrapolated ×100: running
+is fine (closure-scoped), whole-project check is ~4.4 h and ~380 GB — not reasonable.
+
+**The queue, in order (details and gates in the doc):**
+1. Module-index cache in the project image, keyed by the `(path, size, mtime)` fingerprint
+   `project-fingerprint-of` already computes — warm start O(closure). Gate: zero `src/`
+   opens on a warm run; the 3k-line rig warm ≈ the 16k-file figure (1.3 s).
+2. `nest check` incremental for real (ADR-129 finished): unchanged re-check ≈ fingerprint
+   time; an edit re-derives changed files + dependents only (ADR-119 edges).
+3. `nest check` parallel per-file walk after the Pass 2.9 fixpoint.
+4. Check memory: drop forms after the walk / shard.
+5. Parallel cold load (paid once; last).
+6. The 3k-line shape as a row in `scripts/bench/image-scale.sh`.
+
+Also from 2026-09-21, done and pushed: KI-174 ×2 (mirror check), KI-176 (monitor table
+walk), KI-177 (crash reporter backlog), the parked-process floor 4 690 → 3 868 B (ColdHeap on
+every spawn, SmallMap, roots step), `process_floor.rs` ratchet, `monitor_scaling.rs`.
+Process thread still open: spawn 1.66 µs vs the BEAM's ~1, the `Process` struct's +168 B
+since July, the crash reporter's 14 µs/message.
+
 ## 2026-09-20 later — the five follow-ups: KI-173, the writer gate, the rig, three type-variable sigs
 
 **Green on every gate that names the change** (devlog 2026-09-20 (7) has the detail): the

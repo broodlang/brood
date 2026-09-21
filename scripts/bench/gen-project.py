@@ -19,6 +19,9 @@ import sys
 
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 16300
 ROOT = sys.argv[2] if len(sys.argv) > 2 else "/tmp/brood-big"
+# Functions per module: 20 is the ~180-line calibration shape; `--fns 340` gives the
+# ~3 000-line module a "big files" question asks about (each defn is ~9 lines).
+FNS = int(sys.argv[sys.argv.index("--fns") + 1]) if "--fns" in sys.argv else 20
 
 SRC = os.path.join(ROOT, "src")
 os.makedirs(SRC, exist_ok=True)
@@ -31,7 +34,7 @@ with open(os.path.join(SRC, "app.blsp"), "w") as f:
     f.write(
         '(defmodule app (:use mod0) (:use helper))\n\n'
         '(defn main ()\n'
-        '  (println (str "ANSWER: " (+ (mod0-total 3) (helper-scale 4)))))\n'
+        '  (io/puts (str "ANSWER: " (+ (mod0-total 3) (helper-scale 4)))))\n'
     )
 
 with open(os.path.join(SRC, "helper.blsp"), "w") as f:
@@ -48,7 +51,7 @@ def body(i):
     L.append("")
     L.append(f"(defrecord rec{i} (a b))")
     L.append("")
-    for k in range(20):
+    for k in range(FNS):
         L.append(f"(defn m{i}-f{k} (x)")
         L.append(f'  "Compute variant {k} of module {i}."')
         L.append(f"  (let (y (+ x {k + 1})")
@@ -58,9 +61,11 @@ def body(i):
         L.append(f"      (= z {k}) (- z 1)")
         L.append("      else (+ z 1))))")
         L.append("")
+    # `(fold coll acc f)` since ADR-302/307 — the generator emitted the pre-wave order
+    # for a year and nothing ran it (the CLAUDE.md "two files no gate can see" trap).
     L.append(f"(defn mod{i}-total (x)")
-    L.append(f"  (fold (fn (acc f) (+ acc (f x))) 0")
-    L.append("    (list " + " ".join(f"m{i}-f{k}" for k in range(20)) + ")))")
+    L.append("  (fold (list " + " ".join(f"m{i}-f{k}" for k in range(FNS)) + ")")
+    L.append("    0 (fn (acc f) (+ acc (f x)))))")
     L.append("")
     return "\n".join(L)
 
