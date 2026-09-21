@@ -76,6 +76,7 @@ host owns the pty and the scrollback."
    :insert false
    :alt-screen false
    :mouse nil
+   :mouse-sgr false
    :focus-events false})
 
 (defn make (cols rows)
@@ -107,7 +108,9 @@ the scroll region the whole screen, every mode at its reset value."
 
 (defn mode (vt k)
   "The value of mode `k` — `:autowrap`, `:cursor-visible`, `:app-cursor`,
-`:bracketed-paste`, `:origin`, `:insert`, `:alt-screen`, `:mouse`, `:focus-events`."
+`:bracketed-paste`, `:origin`, `:insert`, `:alt-screen`, `:mouse` (the reporting mode
+asked for — 1000 clicks, 1002 drags too, 1003 all motion — or nil), `:mouse-sgr`,
+`:focus-events`."
   (get (:modes vt) k))
 (sig mode (terminal keyword -> any))
 
@@ -473,6 +476,7 @@ entry while already there does nothing."
     (= n 1004) (set-mode vt :focus-events on)
     (= n 2004) (set-mode vt :bracketed-paste on)
     (includes? [1000 1002 1003] n) (set-mode vt :mouse (if on n nil))
+    (= n 1006) (set-mode vt :mouse-sgr on)
     else vt))
 (sig set-private-mode (terminal int bool -> terminal))
 
@@ -902,7 +906,7 @@ offset 0, faces through `palette` (see [[face]]). What a host appends to its scr
 
 (defn screen (vt palette)
   "The screen as a buffer would show it: `{:text :spans :cursor :cursor-visible
-:cursor-style :title}` — rows joined by newlines with trailing blanks trimmed, `:spans`
+:cursor-style :title :mouse :alt-screen}` — rows joined by newlines with trailing blanks trimmed, `:spans`
 the `[start end face]` faces over that text (the `highlight-spans` shape, ascending and
 non-overlapping) through `palette` (see [[face]]), and `:cursor` the char offset of the
 cursor in it (its row is padded out to the cursor, so the offset always exists)."
@@ -913,7 +917,11 @@ cursor in it (its row is padded out to the cursor, so the offset always exists).
                    :cursor cursor
                    :cursor-visible (mode vt :cursor-visible)
                    :cursor-style (:cursor-style vt)
-                   :title (:title vt)}
+                   :title (:title vt)
+                   ;; what the host needs to route a mouse: whether the program asked for
+                   ;; it, and whether it is full-screen (a wheel there is arrow keys)
+                   :mouse (mode vt :mouse)
+                   :alt-screen (mode vt :alt-screen)}
                   (let (row (row-at vt r)
                         at-cursor? (= r (:row vt))
                         shown (shown-cells row (if at-cursor? (:col vt) 0))
@@ -1033,3 +1041,41 @@ when the program asked for them, so it can tell a paste from typing."
     (str "\e[200~" text "\e[201~")
     text))
 (sig paste->bytes (string terminal -> string))
+
+;; ---- input: the mouse -------------------------------------------------------------------------
+
+(defn- x10-byte (n)
+  "An X10 mouse coordinate or button: a byte, 32 up, capped at what a byte holds."
+  (string/int->char (+ 32 (min n 223))))
+(sig x10-byte (int -> string))
+
+(defn mouse->bytes (action button row col mods vt)
+  "The bytes a mouse event becomes for a program that asked for mouse reporting (`(mode
+vt :mouse)`), else nil: `action` one of `:press` `:release` `:drag` `:scroll-up`
+`:scroll-down`, `button` `:left` `:middle` `:right` or nil, `row`/`col` 0-based cells of
+the SCREEN, `mods` the held modifiers. SGR encoding (`CSI < b ; x ; y M`) when the program
+switched it on — the only form that reaches past column 223 — else X10's three bytes. A
+drag is reported only under 1002 / 1003, and never a motion with no button (1003 asks for
+it; this host has no such events)."
+  (let (reporting (mode vt :mouse)
+        code (cond
+               (= action :scroll-up) 64
+               (= action :scroll-down) 65
+               else (case button :left 0 :middle 1 :right 2 nil)))
+    (cond
+      (nil? reporting) nil
+      (nil? code) nil
+      (and (= action :drag) (= reporting 1000)) nil
+      else
+        (let (b (+ code
+                  (if (= action :drag) 32 0)
+                  (if (includes? mods :shift) 4 0)
+                  (if (includes? mods :alt) 8 0)
+                  (if (includes? mods :ctrl) 16 0))
+              x (inc col)
+              y (inc row))
+          (if (mode vt :mouse-sgr)
+            (str "\e[<" b ";" x ";" y (if (= action :release) "m" "M"))
+            ;; X10: a release is button 3 whichever it was, and every field is a byte
+            (str "\e[M" (x10-byte (if (= action :release) (+ b 3) b)) (x10-byte x) (x10-byte y)))))))
+(sig mouse->bytes (keyword any int int seqable terminal -> (or nil string)))

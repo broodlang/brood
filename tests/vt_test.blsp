@@ -262,3 +262,24 @@
     (assert= (:attr (fed 3 1 "\e[31m\e[?m")) {:fg 1}))
   (test "an unknown ED selector erases nothing that a 2 would not"
     (assert= (lines-of (fed 3 1 "abc\e[9J")) [""])))
+
+(describe "vt: the mouse"
+  (test "nothing is reported unless the program asked"
+    (assert= (vt/mouse->bytes :press :left 0 0 [] (vt/make 10 2)) nil))
+  (test "SGR reporting: press, release, wheel, modifiers, 1-based cells"
+    (let (v (fed 10 2 "\e[?1000h\e[?1006h"))
+      (assert= (vt/mouse->bytes :press :left 2 4 [] v) "\e[<0;5;3M")
+      (assert= (vt/mouse->bytes :release :left 2 4 [] v) "\e[<0;5;3m")
+      (assert= (vt/mouse->bytes :scroll-up nil 0 0 [] v) "\e[<64;1;1M")
+      (assert= (vt/mouse->bytes :press :right 0 0 [:ctrl :shift] v) "\e[<22;1;1M")))
+  (test "a drag is reported under 1002, not 1000"
+    (assert= (vt/mouse->bytes :drag :left 1 1 [] (fed 10 2 "\e[?1000h\e[?1006h")) nil)
+    (assert= (vt/mouse->bytes :drag :left 1 1 [] (fed 10 2 "\e[?1002h\e[?1006h")) "\e[<32;2;2M"))
+  (test "without 1006 the X10 bytes are used, a release being button 3"
+    (let (v (fed 10 2 "\e[?1000h"))
+      (assert= (vt/mouse->bytes :press :left 0 0 [] v) (str "\e[M" (string/int->char 32) "!!"))
+      (assert= (vt/mouse->bytes :release :left 0 0 [] v) (str "\e[M#!!"))))
+  (test "the screen says whether the program wants the mouse and is full-screen"
+    (let (s (vt/screen (fed 10 2 "\e[?1002h\e[?1049h") nil))
+      (assert= (:mouse s) 1002)
+      (assert= (:alt-screen s) true))))

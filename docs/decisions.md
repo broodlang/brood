@@ -24839,7 +24839,10 @@ screen or *waits on a query* (`CSI 6 n`, `CSI c`) had nowhere to run.
   editor's key vocabulary (`:ctrl-c`, `:alt-shift-up`, `:enter`, `"a"`) as the bytes a
   program reads — application-cursor aware, modifiers in the xterm `CSI 1;m X` form, the
   kitty-style `CSI 13;2u` for a shift-enter a program wants to tell from enter — and
-  `paste->bytes` brackets a paste when the program asked for it.
+  `paste->bytes` brackets a paste when the program asked for it. `mouse->bytes` reports a click, drag or wheel notch in the
+  program's screen cells when it switched reporting on — SGR (1006) when asked, else X10.
+  The `screen` says whether the program wants the mouse and whether it is full-screen, so
+  a host can route a wheel to the program as arrow keys where a terminal would.
 - **Partial sequences carry.** A pipe cuts anywhere; a chunk ending inside a sequence
   leaves its tail in `:carry` for the next feed, and a bare trailing ESC never prints.
 - **Graphemes, not codepoints, are the unit**, so a wide glyph is one cell pair and a
@@ -24853,7 +24856,7 @@ screen or *waits on a query* (`CSI 6 n`, `CSI c`) had nowhere to run.
   tokens` lexer over the chunk was ten times slower again). Both are the language's to fix,
   and the module says so where it chose the loop.
 
-**Not done.** No mouse reporting (the mode is recorded, nothing is encoded), no DEC line
+**Not done.** No DEC line
 drawing charset (a program draws boxes in Unicode today), no `HTS`-set tab stops (every 8),
 no sixel/kitty graphics, no reflow on resize (rows are clipped or padded; a program that
 handles `SIGWINCH` redraws anyway).
