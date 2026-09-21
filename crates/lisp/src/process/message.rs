@@ -374,9 +374,11 @@ fn to_message_rec(
             Message::List(out, pos)
         }
         Value::Vector(id) => {
-            let items = heap.vector(id).to_vec();
+            // Read straight off the slab: `heap` is borrowed shared here and the recursion
+            // takes it shared too, so the items need no copy of their own first.
+            let items = heap.vector(id);
             let mut out = Vec::with_capacity(items.len());
-            for item in items {
+            for &item in items.iter() {
                 out.push(to_message_rec(
                     heap,
                     item,
