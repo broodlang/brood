@@ -546,3 +546,63 @@ fn contracts_sweep_prim(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
     let n = sweep(heap, owner.as_deref())?;
     Ok(Value::int(n as i64))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Interp;
+
+    /// Replace the policy hook with a closure that throws, so any consultation is loud.
+    /// `env_define` is the raw kernel store: the reserved-name refusal a user `def` meets
+    /// does not apply, which is the point — the test wants to observe the kernel's call.
+    fn arm_tripwire(interp: &mut Interp) {
+        let tripwire = interp
+            .eval_str("(fn (name orig type) (throw :contract-hook-consulted))")
+            .expect("tripwire closure");
+        let tripwire = interp.heap.promote(tripwire);
+        interp
+            .heap
+            .env_define(EnvId::GLOBAL, value::intern(HOOK), tripwire);
+    }
+
+    /// KI-182: unarmed, a declared `def` must not consult the policy at all — the hook's
+    /// first test is the kernel's own fact, and asking anyway ran `not` past the tier
+    /// threshold on every short run. The sabotage is deleting `contract_apply`'s early
+    /// return: this test then fails with `:contract-hook-consulted` from the `defn`.
+    #[test]
+    fn an_unarmed_def_never_consults_the_policy() {
+        if contracts_armed() {
+            return; // the guard is about the unarmed default; an armed process is not it
+        }
+        let mut interp = Interp::new();
+        arm_tripwire(&mut interp);
+        interp
+            .eval_str("(sig ki182-f (int -> int)) (defn ki182-f (x) x)")
+            .expect("an unarmed declared def binds without consulting the hook");
+        interp
+            .eval_str("(defn ki182-g (x) x) (sig ki182-g (int -> int))")
+            .expect("a sig landing on a bound name binds without consulting the hook");
+        assert_eq!(
+            interp.eval_str("(ki182-f 3)").expect("call").as_int(),
+            Some(3)
+        );
+    }
+
+    /// The other side of the same gate: `sig!` forces the name, and a forced name consults
+    /// the policy whatever the mode — so the tripwire fires.
+    #[test]
+    fn a_forced_name_still_consults_the_policy_unarmed() {
+        if contracts_armed() {
+            return;
+        }
+        let mut interp = Interp::new();
+        arm_tripwire(&mut interp);
+        let err = interp
+            .eval_str("(defn ki182-h (x) x) (sig! ki182-h (int -> int))")
+            .expect_err("sig! must reach the policy unarmed");
+        assert!(
+            format!("{err:?}").contains("contract-hook-consulted"),
+            "the policy was not what raised: {err:?}"
+        );
+    }
+}

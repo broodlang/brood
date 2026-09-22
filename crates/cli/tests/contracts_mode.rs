@@ -256,3 +256,60 @@ fn every_baked_in_module_loads_under_contracts_from_source() {
         failed.join("\n")
     );
 }
+
+/// KI-182: an UNARMED short run must not reach the contract policy at all. It did, twice
+/// over — `contract_apply` offered every declared `def` to the Brood hook before asking
+/// whether contracts were armed, and every ability-op call under a declared return ran a
+/// Brood wrapper that tested `(not (%contracts-armed?))` itself — and `(io/puts 0)`'s
+/// port ops and `io`'s declarations together ran `not` past the tier threshold, so every
+/// short `brood file` instantiated Cranelift to compile it (`startup` +6%). The probe is
+/// the KI's own: `BROOD_JIT_DUMP_IR=1` names every arm that lowers, and this program
+/// lowers none. The REAL cache, on purpose, and the second run measured: the stdlib image
+/// (which only `nest` writes — the nextest setup script does) and a warm prelude image
+/// are the configuration the row runs in; `io` loaded from source expands enough to tier
+/// arms of its own, so a run without the image proves nothing and is reported as such.
+#[test]
+fn an_unarmed_startup_run_lowers_no_arm() {
+    let dir = temp_dir("ki182");
+    let run = |name: &str, source: &str| -> (String, String) {
+        std::fs::write(dir.path.join(name), source).expect("write program");
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_brood"));
+        cmd.arg(name)
+            .current_dir(&dir.path)
+            .env("BROOD_JIT_DUMP_IR", "1")
+            .env_remove("BROOD_CONTRACTS");
+        support::dies_with_parent(&mut cmd);
+        let out = cmd.output().expect("run brood");
+        assert!(out.status.success(), "the program should run");
+        (
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    };
+    // The configuration first, in its own run: asking `stdimage/status` is itself enough
+    // work to tier arms, so it must not share a run with the probe.
+    let (status, _) = run(
+        "status.blsp",
+        "(io/puts \"image:\" (get (stdimage/status) :installed))\n",
+    );
+    assert!(
+        !status.contains("image: nil"),
+        "no stdlib image for this binary — the run loaded std from source and the probe \
+         proves nothing (run under nextest, whose setup builds it):\n{status}"
+    );
+    // The probe, warm (the first run may write the prelude image; the second is the row).
+    let mut lowered = Vec::new();
+    for _ in 0..2 {
+        let (_, stderr) = run("startup.blsp", "(io/puts 0)\n");
+        lowered = stderr
+            .lines()
+            .filter(|l| l.starts_with("[jit-ir] ====="))
+            .map(str::to_string)
+            .collect();
+    }
+    assert!(
+        lowered.is_empty(),
+        "an unarmed `(io/puts 0)` must tier nothing up; lowered:\n{}",
+        lowered.join("\n")
+    );
+}

@@ -15504,3 +15504,18 @@ never hung the program up — a REPL killed with its buffer kept running. Both e
 close-on-exec now (the child's stdio comes through `stdio_dup`, which is what should cross);
 `proc_test` asserts the master is not among the child's descriptors, and fails on the old
 binary.
+
+## 2026-09-22 (2) — KI-182's second half moved into the op function; the same fix landed twice
+
+The parallel cut of KI-182 (this file's top entry) and this one met in a merge with the same
+kernel gate and different op-check shapes. The `impl`-side `(let (%op-result …) (if
+(%contracts-armed?) …))` keeps `not` cold but makes every impl a real activation: `(impl Port
+:native (write [p s] (%port-write p s)))` had not been the pass-through the dispatcher elides
+since ADR-381 — a per-op-call cost in every mode — and the wrapped closure tiers itself at 128
+calls (`<closure>` lowered beside `not` on a run with one more `io/puts`). The check now lives
+in the op function `defability` generates, behind an inline native ask with the resolved call
+in tail position unarmed; `impl` registers methods as written, and an impl registered through
+`%register-impl` directly is checked too. Two more guards, each red when its half is
+sabotaged: `builtins::contracts::tests` (a hook bound to throw when consulted) and
+`cli::contracts_mode::an_unarmed_startup_run_lowers_no_arm` (the probe on the real cache,
+the image confirmed live in its own run — asking `stdimage/status` tiers arms by itself).

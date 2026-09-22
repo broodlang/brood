@@ -34,6 +34,13 @@ replay re-ran the arity diagnostic per impl and `nth`'s guard called `not` (devl
 benchmark column at 422c92a5 carries the +5% startup as measured; the next refresh takes it
 back. (d) CI's bedit smoke: bedit's `elixir_playground_test` asserts an `elixir` on PATH.
 
+**Same fix, twice, merged (later on 2026-09-22):** the second half's shape moved into the op
+function `defability` generates — the `impl`-side wrapper kept `not` cold but un-elided every
+thin impl (a per-op-call cost in every mode since ADR-381) and tiered itself at 128 calls.
+`impl` registers methods as written again. Two more guards beside `contract_offer_unarmed.rs`:
+`builtins::contracts::tests` and `cli::contracts_mode::an_unarmed_startup_run_lowers_no_arm`.
+The residual and the two levers above stand; the design call is still the owner's.
+
 ## 2026-09-21 evening — the benchmark column is refreshed at 422c92a5; KI-182 is the open item
 
 brood-benchmarks has the Brood column at `422c92a5` (min of three, `ab-bench --floor` against

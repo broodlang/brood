@@ -11858,6 +11858,22 @@ vacuously); each half sabotage-verified.
 threshold turns a cheap decline into a Cranelift instantiation per process. Gate policy calls
 on the fact that decides them when the kernel already holds that fact.
 
+**Addendum (2026-09-22, the same fix reached twice in parallel):** the second half's shape
+moved once more. Wrapping the method body in `(let (%op-result …) (if (%contracts-armed?) …))`
+inside `impl` keeps `not` cold but makes every impl a real activation — `(impl Port :native
+(write [p s] (%port-write p s)))` is no longer the pass-through the dispatcher elides to its
+primitive, a per-op-call cost in every mode since ADR-381 — and the wrapped closure itself
+tiers at 128 calls (`<closure>` lowered beside `not` on a run with one more `io/puts`). The
+check now lives in the OP FUNCTION `defability` generates — `(if (%contracts-armed?)
+(%contract-check-op-result 'A 'op 'ret (impl …)) (impl …))`, the resolved call in tail
+position unarmed — and `impl` registers methods as written; an impl registered through
+`%register-impl` directly is checked too, since every call goes through the op. Guards beside
+`contract_offer_unarmed.rs`: `builtins::contracts::tests` (a hook bound to THROW when
+consulted, via `env_define` — no loader exemption needed in-process) and
+`cli::contracts_mode::an_unarmed_startup_run_lowers_no_arm` (the `BROOD_JIT_DUMP_IR` probe
+on the real cache, the image confirmed live in a separate run: asking `stdimage/status` is
+itself enough work to tier `not` and `%identity-of`). Each half alone reds its guard.
+
 ## KI-181 — an error raised in positionless code took the CATCH site's position, two frames from the failing form ✅ FIXED 2026-09-21
 
 **Seen:** the armed suite (ADR-381 turns contracts on under `nest test`): `vm_prim_error_pos_test`
