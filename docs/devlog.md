@@ -15607,3 +15607,21 @@ it was restoring the *pre-ADR-385* prelude and re-running — three minutes, and
 the change rather than the symptom. Prefer it to a bisect build whenever the suspect is one
 file. And the rule underneath: a kernel hook called at a binding moment may allocate, but it
 must not load.
+
+## 2026-09-22 (7) — item 4 measured before it was built: the premise was wrong twice over
+
+Five arms on the 302 × 3 067 rig split `nest check`'s peak RSS, and the queue's option —
+"drop a file's forms after its walk" — turns out to name the smallest term. Loading the
+project's own code is 0.54 GB, setup and preload bring it to 0.88 GB, and the walk adds
+**0.15 GB**. The gate ("under 1 GB at 1 000 × 3k") is therefore unreachable by checker-side
+work at all: the code the check is about is ~1.8 GB at that size before a file is walked.
+The pool's +1.11 GB is not what it looks like either — ~0.5 GB is mimalloc holding freed
+pages (`MIMALLOC_PURGE_DELAY=0` recovers it for +7% wall), and the remaining ~0.6 GB does
+not shrink with fewer live workers (group `cores/4` reads the same for 2.4× the wall, tested
+both with and without retention) and is not promotion into the shared region (105 226
+promotions sequential against 105 332 parallel). It accumulates per chunk in the driver and
+I have not found what it is.
+
+Two hours of measurement against a week of building the wrong thing. The habit that paid:
+take the cheap decomposition FIRST — `--check-boot` and `BROOD_NO_CHECK=1` are already
+there, and between them they priced every stage of the run before a line was changed.
