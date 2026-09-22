@@ -11863,6 +11863,20 @@ consulted, via `env_define` — no loader exemption needed in-process) and
 on the real cache, the image confirmed live in a separate run: asking `stdimage/status` is
 itself enough work to tier `not` and `%identity-of`). Each half alone reds its guard.
 
+
+**Lever 1 taken (2026-09-22, ADR-385) — the shim machinery is no longer prelude.**
+`std/contract.blsp` is a CORE module the hook loads with `require-one` at its first ARMED
+call; the prelude keeps `%contract-wrap`, `%contract-exempt?` and `sig!` (278 → 69 lines).
+So an unarmed boot no longer localizes, freezes or images 200 lines it never reaches.
+Callgrind, debug, image live: empty file **80.84M → 78.99M**, `(io/puts 0)` **101.06M →
+99.29M**; deleting the machinery outright reads 78.68M, so the lazy load captures 86% of the
+available. The hook resolves through `reflect/eval` (a NATIVE under a module prefix, so not a
+module reference) rather than a literal `contract/shim` head, which on a cold boot would have
+to resolve while the prelude is still being built — this area's recurring shape (KI-81,
+KI-113). Guard: `cli::contracts_mode::the_contract_machinery_loads_only_when_armed` reads
+`BROOD_IMAGE_TRACE` both ways in one test. **Still open:** lever 2 (lazy def-site decode) and
+the `io`-load half (+3.2M, diffuse), so the row is not expected back in full; re-measure with
+the KI's rig on a box that can.
 ## KI-181 — an error raised in positionless code took the CATCH site's position, two frames from the failing form ✅ FIXED 2026-09-21
 
 **Seen:** the armed suite (ADR-381 turns contracts on under `nest test`): `vm_prim_error_pos_test`

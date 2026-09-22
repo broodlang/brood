@@ -24873,3 +24873,50 @@ screen or *waits on a query* (`CSI 6 n`, `CSI c`) had nowhere to run.
 drawing charset (a program draws boxes in Unicode today), no `HTS`-set tab stops (every 8),
 no sixel/kitty graphics, no reflow on resize (rows are clipped or padded; a program that
 handles `SIGWINCH` redraws anyway).
+
+## ADR-385 — The contract shim machinery is a module loaded on first armed use, not prelude
+
+**Context.** KI-182's residual. ADR-381 put ~290 lines of contract machinery in the prelude
+(`std/prelude/contracts.blsp`), and every prelude binding is localized and frozen into the
+shared region at each runtime's boot and written into the prelude image. An unarmed run —
+`brood file`, a released bundle, every process a program spawns — never reaches a line of it
+and pays for it anyway: `localize_for_freeze` was the largest single symbol in the startup
+row's +6% (+0.70M instructions of a +2.8M empty-file delta, `release-fast`).
+
+**Decision.** Only what the kernel or the expander needs in every mode stays in the prelude:
+`%contract-wrap` (the hook the kernel calls at a binding), `%contract-exempt?`, and the
+`sig!` macro. The spec parsing, the argument/result checks and the fourteen shim templates
+move to **`std/contract.blsp`**, a CORE module (not DEV — `sig!` enforces in a released
+bundle too), and the hook reaches it with `require-one` at its **first armed call**:
+
+```lisp
+(defn- %contract-machinery (name orig type)
+  (require-one 'contract)
+  ((reflect/eval 'contract/shim) name orig type))
+```
+
+Two things about that shape are load-bearing. It is reached **once per contracted binding**,
+never on a call path — the shim it returns calls the module's checks directly thereafter — so
+a `require-one` plus a symbol resolution per binding is free at the scale that exists (~800
+declared names in an armed std). And it names `reflect/eval`, a **native** under a module
+prefix, rather than writing the head `contract/shim`: a bound name is not a module reference,
+where the literal head would have to resolve *while the prelude is being built* on a cold
+boot, which is the KI-81/KI-113 class this whole area keeps rediscovering.
+
+`%contract-check-op-result` (an ability op's declared return) stays in `tools.blsp` for the
+same reason from the other side: `defability` names it in the op functions it generates, and
+the prelude defines abilities of its own.
+
+**Measured** (debug, image live, callgrind — deterministic on this box where `perf` is not):
+an empty file **80.84M → 78.99M** instructions, `(io/puts 0)` **101.06M → 99.29M**. A crude
+upper bound — deleting the machinery outright — was 78.68M, so the lazy load captures 86% of
+what moving it can buy. Unchanged armed: one module load before the first contracted binding.
+
+**Guard.** `cli::contracts_mode::the_contract_machinery_loads_only_when_armed` reads
+`BROOD_IMAGE_TRACE=1` both ways in one test — zero `[image] contract` lines unarmed, at
+least one armed — so "not loaded" cannot pass because the trace stopped naming anything.
+
+**Consequences.** `std/contract.blsp` (new, CORE); `std/prelude/contracts.blsp` 278 → 69
+lines; two stale `%contract-check-*` entries dropped from `doc-catalog.blsp`. The residual's
+other lever (decoding def sites lazily) is untouched, and the `io`-load half of KI-182's
++5.9M — "more of everything, no new thing" — is not addressed by either.

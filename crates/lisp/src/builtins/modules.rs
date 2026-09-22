@@ -453,6 +453,11 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // CSV parsing and emitting: csv-parse, csv-parse-maps, csv-emit,
     // csv-emit-maps. Handles quoted fields, escaped quotes, \r\n endings.
     embedded_module!("csv", "std/csv.blsp"),
+    // The runtime-contract machinery a `sig` shim is made of — spec parsing, the
+    // argument/result checks, the shim templates (ADR-385). Loaded by the prelude's
+    // `%contract-wrap` at its first ARMED call, so an unarmed run never carries it. CORE
+    // rather than DEV because `sig!` enforces in a released bundle too.
+    embedded_module!("contract", "std/contract.blsp"),
     // RFC 4122 version-4 UUID generation via the OS CSPRNG (random-token).
     // uuid-v4, uuid-nil, uuid?.
     embedded_module!("uuid", "std/uuid.blsp"),

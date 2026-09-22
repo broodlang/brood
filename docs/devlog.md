@@ -15504,3 +15504,16 @@ in tail position unarmed; `impl` registers methods as written, and an impl regis
 sabotaged: `builtins::contracts::tests` (a hook bound to throw when consulted) and
 `cli::contracts_mode::an_unarmed_startup_run_lowers_no_arm` (the probe on the real cache,
 the image confirmed live in its own run — asking `stdimage/status` tiers arms by itself).
+
+## 2026-09-22 (3) — KI-182's first lever: the shim machinery leaves the prelude (ADR-385)
+
+The residual's largest single symbol was `localize_for_freeze`, and the reason was 290 lines
+of contract machinery that an unarmed run never reaches being frozen into the shared region
+at every boot. `std/contract.blsp` is a CORE module now; the prelude keeps the hook, the
+exemption and `sig!` (69 lines), and reaches the rest with `require-one` at the hook's first
+ARMED call — once per contracted binding, never on a call path. The one subtlety is that the
+hook names `reflect/eval` (a native under a module prefix, so not a module reference) instead
+of writing the head `contract/shim`, which on a cold boot would have to resolve while the
+prelude is still being built — the KI-81 shape. Callgrind, debug, image live: empty file
+80.84M → 78.99M, `(io/puts 0)` 101.06M → 99.29M, against a 78.68M upper bound from deleting
+the machinery outright. Guard reads `BROOD_IMAGE_TRACE` both ways in one test.

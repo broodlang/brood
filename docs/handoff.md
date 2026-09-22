@@ -21,10 +21,15 @@ function's `not` crossed the tier threshold during `io`'s load. No arm lowers at
 reads 16 → 16 ms only because it rounds to the millisecond; interleaved pinned task-clock is
 12.85 → 13.68 ms (+6.4%), 75.0M → 80.9M instructions, and the profile is diffuse (KI-182 has the
 table). It is the data ADR-381 and ADR-382 added — a 287-line prelude file localized and frozen
-at every boot, 526 def-site entries — not a mechanism. Two levers are written up in the KI;
-the first (move the shim machinery out of the prelude, now that the hook is never entered
-unarmed) is the one I would take. A design call, so left for the owner. Guard:
-`crates/cli/tests/contract_offer_unarmed.rs` (both halves sabotage-verified).
+at every boot, 526 def-site entries — not a mechanism. Two levers were written up in the KI.
+**The first is taken (2026-09-22, ADR-385)**: the shim machinery is `std/contract.blsp`, a
+CORE module the hook loads at its first ARMED call, so an unarmed boot stops localizing and
+freezing it — empty file 80.84M → 78.99M instructions, `(io/puts 0)` 101.06M → 99.29M
+(callgrind, debug, image live). The second — decode def sites on the first `def-site`
+question rather than at boot — is untouched, and so is the `io`-load half (+3.2M, "more of
+everything"). Guards:
+`crates/cli/tests/contract_offer_unarmed.rs` (both halves sabotage-verified) and
+`cli::contracts_mode::the_contract_machinery_loads_only_when_armed`.
 
 **What this leaves.** (a) The residual above, +5.9M instructions on the startup row against 136b14d7:
 +2.8M on an empty file (ADR-382's def sites in the prelude image, 802 → 1328 entries, plus a
