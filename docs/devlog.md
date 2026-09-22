@@ -15638,3 +15638,22 @@ I have not found what it is.
 Two hours of measurement against a week of building the wrong thing. The habit that paid:
 take the cheap decomposition FIRST — `--check-boot` and `BROOD_NO_CHECK=1` are already
 there, and between them they priced every stage of the run before a line was changed.
+
+## 2026-09-22 (8) — KI-184 for real: a shim must SAY it is a shim, and BROOD_VM=0 is not the tree-walker
+
+CI stayed red in both jobs after the first KI-184 fix. That fix skips a contract shim's own
+position by the arm's authoring module — but a shim built by a TREE-WALKED template has no
+module: `Closure::module` comes from the building frame, the frame carries one only once a
+boundary alias exists, and the first shim is what creates the first alias. So the very first
+contracted binding reported line 135 of `std/contract.blsp` as the user's error site.
+`contract_bind` stamps the module now; the kernel is building a shim and knows it.
+
+Two things worth keeping. **`BROOD_VM=0` did not mean the tree-walker here** — the shim runs
+through `vm_apply` on the ADR-318 router, so `exec_chunk::tag_pos` tagged it at the
+instruction level, which is why a fix written in the tree-walker's own `or_form_pos` changed
+nothing and only the backtrace said so. Instrument the single funnel (`or_pos`) rather than
+reason about which engine "should" be running. And the hunt turned up a real defect beside
+the bug: a module materialised from the stdlib image carried **positions with no file**
+(`from_message` re-stamps through `set_form_pos`, which takes the ambient `current_file`),
+so imaged code reported a line from one file under another file's name —
+`%image-load-section` now stamps the section's own module path.

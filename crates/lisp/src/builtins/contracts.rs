@@ -248,6 +248,16 @@ fn contract_bind(heap: &mut Heap, name: Symbol, shim: Value) {
             let mut c = heap.closure(shim_id).clone();
             c.name = Some(name);
             c.doc = doc;
+            // Say what this closure IS, rather than leaving it to be inferred (KI-184). The
+            // error-position rule never reports a shim's own code, and it recognises one by
+            // the authoring module — which a shim built by a TREE-WALKED template did not
+            // carry: `Closure::module` comes from the building frame, and the frame only
+            // carries one once a boundary alias exists, which the FIRST shim is what
+            // creates. The kernel is building a contract shim here and knows it, so it
+            // stamps the module instead of hoping the construction path supplied it. With
+            // the name set just above, the inference would otherwise fall back to the
+            // module of the WRAPPED name — the user's — which is the wrong answer twice.
+            c.module = Some(value::intern(crate::eval::compile::CONTRACT_MODULE));
             // Own arms for the named copy — the same invariant `name_value` keeps: two live
             // LOCAL closures must not share one arms allocation across a collection.
             c.arms = c.arms.iter().cloned().collect();

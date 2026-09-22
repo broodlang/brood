@@ -11847,6 +11847,33 @@ name over; the file is read from the body's first positioned form), so neither m
 `exec_call`), so "skip shim frames in the search" alone never fires — the position is already
 set by the time the search runs; hence "treat a shim-owned position as untagged".
 
+
+**Reopened and properly fixed 2026-09-22 (the first fix was VM-shaped and half the story).**
+CI stayed red on `b3253e0e` in BOTH jobs, on this same assertion. Two things were wrong:
+
+1. **The skip never fired for a shim built by a tree-walked template.** `attach_vm_trace`
+   recognises a shim frame by its arm's authoring module (`CompiledArm::module`, ADR-383),
+   and that comes from the frame the closure was BUILT in — which carries a module only
+   once a boundary alias exists, and the first shim is what creates one. So the very first
+   contracted binding produced a shim whose module was `None`, the skip declined, and the
+   shim's own instruction position was reported. `contract_bind` now STAMPS the module —
+   the kernel is building a contract shim and knows it, rather than hoping the construction
+   path supplied it. (With `c.name` set to the wrapped name just above, the inference would
+   otherwise have fallen back to the module of the USER's name: wrong twice over.)
+   Sabotage-verified: `c.module = None` reds the tree-walker case.
+2. **`BROOD_VM=0` was never the tree-walker here.** The shim runs through `vm_apply` on the
+   tree-walker→VM router (ADR-318), so `exec_chunk::tag_pos` tags it at the instruction
+   level — which is why a fix written in the tree-walker's own `or_form_pos` had no effect
+   on the failing case and the backtrace, not the config name, is what said so.
+
+Beside it, a real defect the hunt turned up and which is fixed in the same commit: a module
+**materialised from the stdlib image carried positions with no file**. `from_message`
+re-stamps each rebuilt form through `set_form_pos`, which takes the file from
+`current_file` — during a materialise that is whatever the process happens to be loading,
+so imaged code reported a line from one file under another file's name. `%image-load-section`
+now takes the module key and stamps the section's own source path, the trap
+`set_form_pos_in_file` documents for the expander. Verified in all six combinations of
+engine × contracts × image.
 ## KI-183 — `:monitored-by` read 2 after a watcher's death, once, in CI 🔍 WATCH 2026-09-22
 
 **Seen:** CI run for `653d41d9`, tree-walker job, `brood_suite_passes` TRY 1:

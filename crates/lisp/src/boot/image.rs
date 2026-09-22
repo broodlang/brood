@@ -80,10 +80,10 @@ pub(crate) fn register(primitives: &mut crate::builtins::Primitives) {
         image_index);
     primitives.def(
         "%image-load-section",
-        Arity::range(3, 4),
-        Sig::new(vec![any, any, any, any], any),
-        &["path", "offset", "len", "reserve?"],
-        "Materialise one section of a startup image: define its globals (rebuilding macros as macros) and register its declared sigs. Returns how many entries were defined, or nil if the bytes could not be read or decoded. Seeks straight to the section, so loading one module never reads the rest of the image (ADR-218). With `reserve?` truthy, function-valued globals join the reserved set as an embedded module's own defs do when it loads from source (ADR-166).",
+        Arity::range(3, 5),
+        Sig::new(vec![any, any, any, any, any], any),
+        &["path", "offset", "len", "reserve?", "module"],
+        "Materialise one section of a startup image: define its globals (rebuilding macros as macros) and register its declared sigs. Returns how many entries were defined, or nil if the bytes could not be read or decoded. Seeks straight to the section, so loading one module never reads the rest of the image (ADR-218). With `reserve?` truthy, function-valued globals join the reserved set as an embedded module's own defs do when it loads from source (ADR-166). `module` names the std module this section holds, so the positions its forms carry are stamped with THAT module's source file rather than whatever the process is loading (KI-184).",
         image_load_section);
 }
 
@@ -867,6 +867,21 @@ pub(crate) fn image_load_section(args: &[Value], _: EnvId, heap: &mut Heap) -> L
     let Some(count) = get_u32(&mut r) else {
         return Ok(Value::Nil);
     };
+    // The module whose section this is, when the caller named it (the std loader does).
+    // Its forms' positions were read from that module's source, so the file must be stamped
+    // WITH them: `from_message` re-stamps each rebuilt list through `set_form_pos`, which
+    // takes the file from `current_file` — during a materialise that is whatever the process
+    // happens to be loading, so an imaged module's code came back carrying a line from one
+    // file under another file's name. That is not a cosmetic mismatch: it is how a contract
+    // shim's line 135 was reported against the user's own script (KI-184), and the same
+    // trap `set_form_pos_in_file` documents for the expander. Restored below.
+    let section_file = match arg(args, 4) {
+        Value::Nil => None,
+        v => need_str(heap, v, "%image-load-section")
+            .ok()
+            .and_then(|key| crate::builtins::modules::embedded_module_path(&key)),
+    };
+    let prior_file = heap.set_current_file(section_file.map(str::to_string));
     let global = heap.global();
     let mut done: i64 = 0;
     let (mut ns_decode, mut ns_from_msg, mut ns_define) = (0u64, 0u64, 0u64);
@@ -891,12 +906,18 @@ pub(crate) fn image_load_section(args: &[Value], _: EnvId, heap: &mut Heap) -> L
     for _ in 0..count {
         let p = r.position() as usize;
         if p >= r.get_ref().len() {
-            return Ok(Value::Nil);
+            {
+                heap.set_current_file(prior_file);
+                return Ok(Value::Nil);
+            }
         }
         let kind = r.get_ref()[p];
         r.set_position((p + 1) as u64);
         let Some(name) = get_str(&mut r) else {
-            return Ok(Value::Nil);
+            {
+                heap.set_current_file(prior_file);
+                return Ok(Value::Nil);
+            }
         };
         // A privacy entry carries a name and no value — branch before decoding one.
         if kind == KIND_PRIVATE {
@@ -907,7 +928,10 @@ pub(crate) fn image_load_section(args: &[Value], _: EnvId, heap: &mut Heap) -> L
         // So does a def-site entry: file, line, column.
         if kind == KIND_DEF_SITE {
             let Some(loc) = get_def_site(&mut r) else {
-                return Ok(Value::Nil);
+                {
+                    heap.set_current_file(prior_file);
+                    return Ok(Value::Nil);
+                }
             };
             heap.set_def_site(value::intern(&name), loc);
             done += 1;
@@ -915,7 +939,10 @@ pub(crate) fn image_load_section(args: &[Value], _: EnvId, heap: &mut Heap) -> L
         }
         let t0 = std::time::Instant::now();
         let Ok(msg) = decode_msg(&mut r) else {
-            return Ok(Value::Nil);
+            {
+                heap.set_current_file(prior_file);
+                return Ok(Value::Nil);
+            }
         };
         ns_decode += t0.elapsed().as_nanos() as u64;
         let t1 = std::time::Instant::now();
@@ -977,6 +1004,7 @@ pub(crate) fn image_load_section(args: &[Value], _: EnvId, heap: &mut Heap) -> L
             ns_define / 1_000_000
         );
     }
+    heap.set_current_file(prior_file);
     Ok(Value::int(done))
 }
 

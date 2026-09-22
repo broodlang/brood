@@ -13,7 +13,7 @@ pub(crate) fn tag_pos(e: LispError, pos: Option<Pos>) -> LispError {
 
 /// The module the contract shim templates live in (ADR-385) — the one module whose code
 /// positions the error-position rule in [`attach_vm_trace`] never reports (KI-184).
-const CONTRACT_MODULE: &str = "contract";
+pub(crate) const CONTRACT_MODULE: &str = "contract";
 
 /// Run a [`Chunk`] frame from `*ip`, returning a [`ChunkExit`] to the driver
 /// ([`vm_run_bc`]). `*ip` is **resumed and updated in place**, so after a non-tail

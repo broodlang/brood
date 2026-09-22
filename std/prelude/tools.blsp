@@ -1229,7 +1229,7 @@ deferral case, which skips its deferral assertion on `imaged=false`, failed unde
                          nimpls
                          " impls\n"))))
           ;; Bindings last — the moment the module becomes reachable by a global hit.
-          (%image-load-section img-path (first sec) (second sec) (not (nil? src)))
+          (%image-load-section img-path (first sec) (second sec) (not (nil? src)) (->string key))
           (when (%getenv "BROOD_IMAGE_TRACE") (%eprint (str "[image] " (->string key) "\n")))
           ;; `provide` after all of it: it is what makes `require-one` return immediately for
           ;; every other process, so providing earlier publishes a module whose dependencies

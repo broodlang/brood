@@ -1641,6 +1641,15 @@ pub(super) fn alias(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(Value::nil())
 }
 
+/// The repo-relative source PATH of the baked-in std module registered under `key`
+/// (`"std/contract.blsp"`), or `None` when there is none. Used when a section of the
+/// startup image is materialised: the forms it rebuilds carry positions from that file,
+/// and a position must travel with the file it was derived from (see
+/// `Heap::set_form_pos_in_file`'s note — the same class of bug, in the image path).
+pub(crate) fn embedded_module_path(key: &str) -> Option<&'static str> {
+    embedded_module(key).map(|m| m.path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CORE_MODULES, DEV_MODULES};
