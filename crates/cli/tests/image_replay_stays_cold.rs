@@ -38,8 +38,25 @@ const PROGRAM: &str = "\
 (def %after-math %not-total)\n\
 (%write-out (str \"not-calls-during-math-load: \" %after-math \"\\n\"))\n";
 
+/// A job that deliberately runs without the stdlib image — CI's `differential
+/// (tree-walker)`, which sets `BROOD_NO_STDIMAGE=1`/`BROOD_NO_PRELUDE_IMAGE=1` so the
+/// source path keeps coverage — has no image path to measure, and a test ABOUT the image
+/// path cannot pass or fail there meaningfully. Skip, saying so: the alternative is either
+/// a red that is really a configuration mismatch (what CI reported) or a silent pass that
+/// would also cover a genuinely missing image.
+fn no_image_configured() -> bool {
+    if std::env::var_os("BROOD_NO_STDIMAGE").is_some() {
+        eprintln!("skipped: BROOD_NO_STDIMAGE is set — there is no image path to measure");
+        return true;
+    }
+    false
+}
+
 #[test]
 fn materialising_math_from_the_image_keeps_not_cold() {
+    if no_image_configured() {
+        return;
+    }
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")

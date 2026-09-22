@@ -24660,7 +24660,7 @@ commit message cites "ADR-380"; this ADR was renumbered to 381 after the push, w
 `scripts/smoke-bedit.sh` runs the downstream gates with `BROOD_CONTRACTS=0`
 (`SMOKE_CONTRACTS=1` arms them), so a brood push is not red for bedit's declarations.
 
-## ADR-381 addendum (2026-09-22) — the mechanism never asks the policy a question it can answer itself
+### ADR-381 addendum (2026-09-22) — the mechanism never asks the policy a question it can answer itself
 
 KI-182. Two of ADR-381's paths entered a Brood function on every event unarmed — the per-`def`
 offer (`contract_apply` → `%contract-wrap`) and the per-op-result check (`impl` →
