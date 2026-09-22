@@ -553,7 +553,10 @@ mod pty {
                     libc::close(master);
                     return Err(e);
                 }
-                libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC)
+                libc::open(
+                    name.as_ptr(),
+                    libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
+                )
             };
             #[cfg(not(target_os = "linux"))]
             let slave = {
