@@ -49,6 +49,10 @@ run 3.0 → **0.15 s**, RSS 282 → 145 MB, source files opened 2 000 → 0.
 full-screen program: a declared record, SGR as a table, CSI by name, and mouse reporting as
 the program asked for it.
 
+**`humanize/duration`** — an elapsed time as a person reads it (`847ms`, `1.5s`, `2m 05s`),
+the sibling of `humanize/byte-size` and for the same reason: bedit's git journal wanted it,
+and the alternative was a seventh private copy of one sentence.
+
 **Performance.** A spawn no longer allocates a cold heap per child and the four per-process
 maps are small-maps, with a counted per-process memory floor as a ratchet; a `table` read
 rebuilds straight from the store and a scalar key compares without a rebuild; `conj`/`into`

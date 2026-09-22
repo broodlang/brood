@@ -70,3 +70,34 @@ units or more — the spelling for a column where every character costs.
         (if (>= tenths 100)
           (str (math/quot tenths 10) short)
           (str (math/quot tenths 10) "." (math/rem tenths 10) short))))))
+
+;; ---- durations -------------------------------------------------------------------------
+;; The same argument as the byte scale, for elapsed time: "how long did that take" is
+;; written wherever a command reports on itself, and the spellings disagree. Integer math
+;; again — a duration is a count of milliseconds, and `(/ ms 1000.0)` would print
+;; `0.8999999999999999` for a number a person calls 0.9.
+
+(defn duration (ms)
+  "`ms` milliseconds as a short human string: milliseconds below a second, one decimal of
+seconds below a minute, then `m` and `s` — the spelling a command uses to say how long it
+took. Negative input reads as `0ms` (a clock that went backwards is not a duration).
+
+    (humanize/duration 0)        → \"0ms\"
+    (humanize/duration 847)      → \"847ms\"
+    (humanize/duration 1500)     → \"1.5s\"
+    (humanize/duration 59900)    → \"59.9s\"
+    (humanize/duration 60000)    → \"1m 00s\"
+    (humanize/duration 125000)   → \"2m 05s\"
+    (humanize/duration 3725000)  → \"62m 05s\""
+  (cond
+    (< ms 1) "0ms"
+    (< ms 1000) (str ms "ms")
+    (< ms 60000)
+      (let (tenths (math/quot (+ ms 50) 100))
+        (str (math/quot tenths 10) "." (math/rem tenths 10) "s"))
+    ;; Seconds zero-padded to two digits, so a column of durations lines up and `2m 05s`
+    ;; never reads as `2m 5s` beside `2m 50s`.
+    else
+      (let (secs (math/quot (math/rem ms 60000) 1000))
+        (str (math/quot ms 60000) "m " (if (< secs 10) "0" "") secs "s"))))
+(sig duration (int -> string))
