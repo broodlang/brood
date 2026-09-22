@@ -540,6 +540,11 @@ pub const FLAGS: &[DebugFlag] = &[
         "turn every `sig` into a runtime checking shim — the static checker's runtime counterpart",
     ),
     f(
+        "BROOD_NO_CONTRACT_BOUNDARY",
+        OPTOUT,
+        "opt OUT of the contract MODULE BOUNDARY (ADR-383): a module's calls to its own contracted functions go through the shim too, instead of the uncontracted binding",
+    ),
+    f(
         "BROOD_CHECK_STRICT",
         DIAG,
         "run the advisory checker in --strict mode; the check cache keys its manifest on this",

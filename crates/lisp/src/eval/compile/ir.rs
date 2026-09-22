@@ -440,6 +440,9 @@ pub enum Node {
         /// ordinary (non-self-recursive) nested closure. A `Symbol` (interned
         /// `u32`), not a heap handle, so `rewrite_node` needn't touch it.
         self_name: Option<Symbol>,
+        /// The module the enclosing arm was compiled under (`Scope::module`), which
+        /// the built closure inherits as its contract boundary (ADR-383). A symbol.
+        module: Option<Symbol>,
     },
     /// An inlined 2-ary primitive (perf #1) — `(+ a b)`, `(< a b)`, `(= a b)`, etc.
     /// `a`/`b` are the operands in **source order**; `map` routes them to the
@@ -1120,6 +1123,7 @@ pub(super) fn rewrite_node(node: &Node, f: &mut dyn FnMut(Value) -> Value) {
             fn_rest,
             captures,
             self_name: _,
+            module: _,
         } => {
             fn_rest.rewrite(f);
             for (_, n) in captures.iter() {
@@ -1347,6 +1351,8 @@ pub enum Inst {
         fn_rest: ConstVal,
         names: Box<[Symbol]>,
         self_name: Option<Symbol>,
+        /// The built closure's contract boundary — see `Node::MakeClosure::module`.
+        module: Option<Symbol>,
     },
     /// Inline try/catch: run body via exec_value; on non-control error write
     /// the caught value to bind_slot and run handler; push result. NodePtrs

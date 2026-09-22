@@ -1069,6 +1069,7 @@ pub(crate) fn exec_chunk(
                 fn_rest,
                 names,
                 self_name,
+                module,
             } => {
                 // Mirrors `exec_value`'s `Node::MakeClosure`. The capture values are on
                 // the operand stack (pushed by preceding leaf insts — safepoint-free,
@@ -1089,7 +1090,7 @@ pub(crate) fn exec_chunk(
                     frame
                 };
                 heap.truncate_roots(n - ncap); // drop the capture values
-                let closure = crate::eval::make_closure_cached(heap, fn_rest.load(), env)?;
+                let closure = crate::eval::make_closure_cached(heap, fn_rest.load(), env, *module)?;
                 // Direct `letrec` self-recursion: bind the binder name to the closure
                 // in its own captured env (the env↔closure cycle the tracing GC owns).
                 if let Some(name) = self_name {

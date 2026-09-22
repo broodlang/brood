@@ -170,6 +170,10 @@ pub struct ClosureMsg {
     /// [`guard_form`]). Almost always empty (a bare-name body) or one element. See
     /// [`ModuleNeed`].
     pub(crate) modules: Vec<ModuleNeed>,
+    /// The module whose source the closure's code was written in — its contract boundary
+    /// (`Closure::module`, ADR-383). Carried so a shipped closure keeps the boundary it
+    /// was authored under; a copy that lost it would be contracted like a stranger's.
+    pub(crate) module: Option<Symbol>,
 }
 
 /// One module a shipped closure's body needs on the receiver (KI-55).
@@ -624,6 +628,7 @@ fn closure_to_message(
         doc: cl.doc.clone(),
         captured,
         modules,
+        module: cl.module,
     })
 }
 
@@ -1114,6 +1119,7 @@ fn closure_from_message(heap: &mut Heap, c: &ClosureMsg) -> Value {
         arms,
         doc: c.doc.clone(),
         env,
+        module: c.module,
     });
     Value::func(id)
 }

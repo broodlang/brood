@@ -327,9 +327,26 @@ instead, the `&optional` marker counts as a parameter: that is how
 `(sig pad-left (string int &optional string -> string))` once armed a **4-arity** shim
 over a 2-3-arity function and made every `(string/pad-left s 10)` an arity error.
 
+**A contract guards the module boundary (ADR-383).** A module's calls to its OWN
+contracted functions are not checked — direct, through a thin wrapper, from a nested
+`fn` or a named loop, or with the function handed over as a value. The checker holds
+those calls to the declaration statically; the check is owed to callers *outside* the
+module, which is where the shim meets them (Racket's `contract-out` shape). Beside the
+shim the kernel binds the original under a private alias (`string/%orig%char-at`), and
+the module's own code reads that: compiled code resolves it at compile time from the
+closure's authoring module (`Closure::module`, inherited by every closure an arm builds),
+the pass-through redirect and the tree-walker by value at the call. The alias follows
+every `def` of the public name, so a reload lands on the module's own calls too, and it
+resolves to the public name on a miss, so it can only ever check more. `sig!` has no
+boundary: the module's own calls to a forced name are checked, which is how a module
+tests its own contracts. A root name (a script's, the prelude's under `all`) has no
+module and no boundary. Measured on `string/format`, whose `char-at` is per character:
+armed ×5.9 → ×1.5. `BROOD_NO_CONTRACT_BOUNDARY=1` pins every call to the shim.
+
 Design decisions, as built:
-- **Where the check lives** — the wrapper rebinds the **global**, so every call
-  is checked, including indirect / `apply`.
+- **Where the check lives** — the wrapper rebinds the **global**, so every call from
+  outside the module is checked, including indirect / `apply`; the module's own calls
+  read the uncontracted alias (above).
 - **Dev mode enforces, a release does not** — `(sig! …)` always enforces; plain
   `(sig …)` is enforced when `BROOD_CONTRACTS=1` is set, which **`nest run` and
   `nest test` set by default** (ADR-381); `BROOD_CONTRACTS=0` opts a run out, and a

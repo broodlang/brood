@@ -24659,3 +24659,74 @@ commit message cites "ADR-380"; this ADR was renumbered to 381 after the push, w
 `(pane …)`-declared functions, bedit's reconciliation to do. Until it is green armed,
 `scripts/smoke-bedit.sh` runs the downstream gates with `BROOD_CONTRACTS=0`
 (`SMOKE_CONTRACTS=1` arms them), so a brood push is not red for bedit's declarations.
+
+## ADR-383 — A contract guards the module boundary: a module's calls to its own contracted functions are unchecked
+
+**Context.** ADR-381 put a checking shim on every `sig`-declared binding, and every call
+paid for it — the module's own included. `string/format` reaches `string/char-at` once per
+character and `format_test` ran ×35 armed; the cost was not the check (~3.5 µs) but WHERE
+it was charged: a module's author owes the check to callers *outside* the module — the
+checker already holds the module's own calls to the declaration statically, and a check on
+them buys nothing a static warning did not. Racket's `contract-out` is the shape: the
+contract attaches to the export, and the module's internal references bind the raw value.
+
+**Decision.** A contract is a property of the module boundary. Beside the shim, the kernel
+binds the ORIGINAL under a second, private name — `string/char-at`'s under
+`string/%orig%char-at` (unreadable as a call: no source spells a `%orig%` leaf) — and a
+reference from the module's OWN code to a contracted sibling reads that name:
+
+- **Compiled code** resolves it at compile time, once per site (`lower::module_boundary_ref`):
+  a free symbol whose module is the compiling closure's, whose alias is bound, compiles to
+  the alias — a call head, a value reference (`(map xs f)`), a nested `(fn …)`'s body, a
+  named loop's. The closure's module is `Closure::module`, a new field: inherited from the
+  arm that built it (`Node`/`Inst::MakeClosure` carry the compiling arm's module) and from
+  a module's top level while it loads; a `def`'d closure that recorded nothing uses the
+  module of its own qualified name. Carried across promote/freeze/message/image (the wire
+  record's v8 field; image v8, prelude image v4). A pass-through wrapper — `(defn g (x)
+  (f x))`, the callback `(fn (x) (f x))` — never runs its compiled body, so the dispatcher's
+  redirect does the same by VALUE: a head that resolves to a shim of the wrapper's own
+  module forwards to the original (`contracts::boundary_redirect`).
+- **The tree-walker** carries the module in the frame (`%contract-module`, bound by
+  `bind_params`) and unwraps a shim of that module at symbol resolution
+  (`contracts::boundary_resolve`); a closure it builds inherits the frame's module. All
+  three tiers answer alike (`tests/contract_test.blsp` runs at each).
+- **The alias tracks the public name.** It is bound with the shim, rebound by every `def`
+  of the public name before the hook re-wraps (`mirror_alias` — so a same-module site
+  compiled against it never calls a superseded body, and a redefinition to a non-closure
+  fails the same way through either name), private, reserved with its public name, and
+  resolved by the public name on a miss (`derive::global_miss`) — an `%isolate` restore can
+  roll the globals back under an arm the shared body cache kept, and the reference's
+  meaning is the sibling's binding either way. So a stale alias can only ever check MORE.
+- **`sig!` has no boundary.** Its shim is what the alias holds, so the module's own calls
+  are checked too: the explicit "strong arrow" is enforced at every call, which is also how
+  a module tests its own contracts. The forced set moved into the kernel
+  (`RuntimeCode::contract_forced`; `%contract-force!`/`%contract-forced?` replace the
+  Brood table and `%contract-install!`), since the kernel now decides at bind time.
+- **A root name has no module and so no boundary**: a script's `sig`s, and the prelude's
+  under `=all`, are enforced at every call as before.
+- `BROOD_NO_CONTRACT_BOUNDARY=1` pins every call to the shim — the A/B and bisect lever,
+  and the sabotage of every boundary test.
+
+**Measured** (debug binary, image live): 20 000 `(string/format "%s=%d;" "key" n)` armed
+1 312 ms without the boundary, **338 ms** with it, 223 ms unarmed — the armed overhead
+from 5.9× to 1.5×, the remainder the outer call's own check and `str`. Unarmed cost: one
+static load per free symbol at compile time and per pass-through redirect.
+
+**What changes for a program.** Inside a module, a contracted function is two bindings of
+one closure: the module's own references and the public name are not `=` armed
+(`tests/ability_test.blsp` compared a constructor to its `reflect/eval`'d name and now
+compares what they build). `BROOD_MONO`'s constructor identity reads the public name of an
+alias head. A test asserting that its own module's `(sig …)` raises must call from another
+module or use `sig!` (`crates/nest/tests/contracts_default.rs`'s fixture moved `lies` into
+its own module and asserts the inside call is NOT checked).
+
+**Not done.** An explicitly-qualified reference inside an ADR-070 rooted package
+(`commands/cmd-open` written inside `bedit/commands`) is compared unrooted and stays
+checked; bare references — the norm — qualify to the full name and cross the boundary.
+
+**Consequences.** `Closure::module`; `Node`/`Inst::MakeClosure::module`; `Scope::module`;
+`make_closure`/`make_closure_cached` take the module; `contracts.rs` (`uncontracted_alias`,
+`alias_public`, `uncontracted_sibling`, `mirror_alias`, `boundary_redirect`,
+`boundary_resolve`, `bind_frame_module`); `derive::global_miss`'s alias fallback;
+`tests/contract_test.blsp` "a contract guards the module boundary" (sabotage-verified with
+the flag: 3 of 5 red); `contracts_default.rs` gains the inside/outside pair.

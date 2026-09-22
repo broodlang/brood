@@ -284,6 +284,18 @@ impl Heap {
         self.runtime.seal(sym);
     }
 
+    /// Force `sym`'s declared contract (`sig!`, ADR-381/382): enforced whatever the mode
+    /// and at every call, its own module's included. Runtime-level, so a globals restore
+    /// does not roll it back.
+    pub fn force_contract(&self, sym: Symbol) {
+        self.runtime.force_contract(sym);
+    }
+
+    /// Was `sym`'s contract forced by a `sig!`?
+    pub fn is_contract_forced(&self, sym: Symbol) -> bool {
+        self.runtime.is_contract_forced(sym)
+    }
+
     /// True while this process is loading an embedded std module.
     pub fn in_module_load(&self) -> bool {
         self.cold().is_some_and(|c| c.module_load_depth > 0)

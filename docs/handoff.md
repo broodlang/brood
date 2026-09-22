@@ -32,10 +32,18 @@ session needs to know:
   bedit's reconciliation (declare what those functions read, or widen `pane`), not a brood
   regression. `scripts/smoke-bedit.sh` runs its gates with `BROOD_CONTRACTS=0` until then;
   `SMOKE_CONTRACTS=1 make smoke-bedit` shows what is left.
-- **The follow-up worth doing:** contracts as a MODULE BOUNDARY — a module's calls to its
-  own functions unchecked (the Racket shape). It is what makes `format_test`'s ×35 go away
-  without touching a sig, and it needs the compile pass to resolve same-module references
-  past the shim (a second binding, or a resolve-time rewrite). Not started.
+- **DONE later the same day: contracts as a MODULE BOUNDARY (ADR-383).** A module's calls
+  to its own contracted functions are unchecked; the original lives under a private alias
+  (`M/%orig%f`) the compiler resolves same-module references to, the pass-through redirect
+  and the tree-walker unwrap a same-module shim by value, `sig!` keeps every call.
+  `format` ×20 000 armed 1 312 → 338 ms. **What to know:** inside a module a contracted
+  function is two bindings of one closure (a test comparing `f` to `(reflect/eval 'M/f)`
+  by identity breaks armed — compare behaviour); a test that wants its own module's
+  `(sig …)` to raise must call from another module or use `sig!`. bedit's armed run has
+  NOT been re-measured with the boundary — its six `pane` failures are declaration
+  mismatches at real boundaries, so expect them to stand. The full suite armed has still
+  not run on this box; CI's `nest test` jobs are the armed runs. `Closure::module` is a
+  new field carried through the wire (v8), the image (v8) and the prelude image (v4).
 - **Two traps found on the way, both in the memory too:** a prelude closure that calls a
   macro defined AFTER it is tree-walked for good (`BROOD_DEFER_DBG=1` shows it; that was
   the whole "contracts are 5× slower" story), and `/tmp` is a 31 GB RAM tmpfs — a scratch

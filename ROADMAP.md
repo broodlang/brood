@@ -412,6 +412,10 @@ surface feeding it — and each turned out to need a different kind of fix. Deta
       write — checked from `guard_effects.rs`'s effectful-head detection. Its consumer already
       exists: `ui-memo` (ADR-336) caches view fragments on the assumption the render function
       is pure, and nothing checks it.
+- [x] **14. Contracts guard the module boundary** (ADR-383, 2026-09-21). A module's calls to
+      its own contracted functions are unchecked — the original lives under a private alias
+      the module's own code resolves to; `sig!` keeps every call. The armed `format_test` ×35
+      was `string/format` paying for its own `char-at` per character: ×5.9 → ×1.5.
 
 
 ### Standard-library surface audit — the bare namespace (2026-08-26)

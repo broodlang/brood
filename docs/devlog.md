@@ -15356,3 +15356,21 @@ prelude's own sixteen sigs are exempt under plain `1` (`nth` 0.4 → 4.5 µs, `j
 ×16 with them); `all` includes them. Residual: `json_test` ×1.5, `format_test` ×35 — a
 contracted `string/char-at` per character — recorded, with module-boundary contracts as
 the follow-up.
+
+- **2026-09-21 (later)** — **the contract MODULE BOUNDARY (ADR-383).** The `format_test` ×35
+was not the check's cost but where it was charged: `string/format` calling its own
+`string/char-at` per character paid a check the module owed only to outsiders. Now a module's
+calls to its own contracted functions are unchecked, the Racket `contract-out` shape: beside
+the shim the kernel binds the original under `M/%orig%f`, the compiler resolves a same-module
+reference to that alias once per site (the closure's authoring module is a new
+`Closure::module`, inherited from the building arm through `MakeClosure` and carried across
+promote/message/image — wire v8, image v8, prelude image v4), the pass-through redirect and
+the tree-walker unwrap a same-module shim by value, and every `def` of the public name
+re-points the alias before the hook re-wraps. `sig!` keeps every call (its alias IS the
+shim; the forced set moved into `RuntimeCode`, `%contract-force!`/`%contract-forced?` replace
+the Brood table). All three tiers agree; the alias resolves to the public name on a miss, so
+a stale one can only check more. `format` ×20 000 armed: 1 312 → 338 ms (223 unarmed).
+Sabotage: `BROOD_NO_CONTRACT_BOUNDARY=1` reds 3 of the 5 new cases. Two fixtures moved with
+it: `contracts_default.rs` now calls `lies` across a module (and asserts the inside call is
+NOT checked), and `ability_test` compares what a constructor builds, not the closure — inside
+a module a contracted function is two bindings of one closure.

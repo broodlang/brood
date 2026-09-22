@@ -141,7 +141,12 @@ fn mono_arg_identity(heap: &Heap, arg: &Node) -> Option<Value> {
                 Node::Global(s) | Node::GlobalIc { sym: s, .. } => *s,
                 _ => return None,
             };
-            let id = Value::keyword(ctor);
+            // Inside the constructor's own module a contracted constructor is reached
+            // through its uncontracted alias (ADR-383): the record id is the PUBLIC name,
+            // and the structural check below reads the head as compiled — the alias holds
+            // the constructor itself, where the public name holds the shim.
+            let public = crate::builtins::contracts::alias_public(ctor).unwrap_or(ctor);
+            let id = Value::keyword(public);
             let records = global_map(heap, "*record-ids*")?;
             heap.map_get(records, id)?;
             // The constructor this id names must still exist AND still be the record's
@@ -805,6 +810,7 @@ pub(crate) fn shift_slots(node: &Node, delta: usize) -> Node {
             fn_rest,
             captures,
             self_name,
+            module,
         } => Node::MakeClosure {
             fn_rest: ConstVal::new(fn_rest.load()),
             captures: captures
@@ -812,6 +818,7 @@ pub(crate) fn shift_slots(node: &Node, delta: usize) -> Node {
                 .map(|(sym, n)| (*sym, shift_slots(n, delta)))
                 .collect(),
             self_name: *self_name,
+            module: *module,
         },
         Node::Prim2 {
             op,

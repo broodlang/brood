@@ -468,9 +468,12 @@
   ;; (docs/dispatch-speculation.md): a guard compares this identity and then calls an impl
   ;; directly, so a divergence is a silently wrong impl rather than a slow path.
   (test "a record's identity round-trips to its own constructor"
+    ;; Behaviourally, not by closure identity: under armed contracts the module's own
+    ;; `circle` is the uncontracted binding and the public name holds the shim (ADR-383) —
+    ;; two bindings of one constructor, which build the same record.
     (let (id (%identity-of (circle 1)))
       (is (contains? *record-ids* id))
-      (assert= circle (reflect/eval (symbol (->string id))))))
+      (assert= (circle 1) ((reflect/eval (symbol (->string id))) 1))))
 
   (test "every registered record id names a bound constructor"
     ;; Over the whole image, not just this file's records — the property has to hold for

@@ -1983,6 +1983,7 @@ fn flush_rt_closure(
         arms,
         doc: cl.doc,
         env,
+        module: cl.module,
     });
     ClosureId::runtime_gen(new_idx, dest)
 }

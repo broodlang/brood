@@ -62,6 +62,12 @@ pub(crate) struct Scope {
     /// (not debug-gated) so every construction site stays cfg-free; the cost is a few
     /// hundred bytes per compiled arm, shared per-runtime once arms are shared.
     pub(crate) site_pos: Vec<Option<(crate::error::Pos, Option<std::sync::Arc<str>>)>>,
+    /// The module the closure being compiled was written in (`Closure::module`, or the
+    /// module of its own qualified name) — the contract boundary (ADR-383): a reference
+    /// from this arm to a CONTRACTED sibling of that module compiles to the sibling's
+    /// uncontracted binding ([`module_boundary_ref`]), and a nested `(fn …)` inherits
+    /// it. `None` compiles every reference as written.
+    pub(crate) module: Option<Symbol>,
 }
 
 impl Scope {
@@ -78,6 +84,7 @@ impl Scope {
             sites: 0,
             gsites: 0,
             site_pos: Vec::new(),
+            module: None,
         }
     }
     /// Allocate the next arm-relative call-site id (see the `sites` field).
@@ -558,7 +565,30 @@ pub(crate) fn compile_make_closure(heap: &Heap, form: Value, scope: &Scope) -> O
         fn_rest: ConstVal::new(fn_rest),
         captures: captures.into_boxed_slice(),
         self_name,
+        module: scope.module,
     })
+}
+
+/// The global a free symbol in this arm compiles to (ADR-383): the symbol itself, unless
+/// it names a CONTRACTED function of the arm's own module, in which case the sibling's
+/// uncontracted binding. A module's calls to its own functions are inside the boundary
+/// the contract guards — the checker holds them to the declaration statically, and the
+/// shim would charge every internal call for a check the module's author owes only to
+/// callers outside it (`string/format` reached `string/char-at` per character: ×35).
+///
+/// Decided at COMPILE time, once per site, from the binding that exists then: the
+/// uncontracted alias is bound exactly while a shim is (`contracts::contract_bind`), so
+/// an arm compiled before its module's sweep keeps the public name and is merely
+/// checked. A stale alias reference — the globals rolled back under an arm the shared
+/// body cache kept — resolves to the public name on the miss path, so it can only ever
+/// check more. Free of cost with no shim bound: one static load.
+fn module_boundary_ref(heap: &Heap, scope: &Scope, sym: Symbol) -> Symbol {
+    match scope.module {
+        Some(module) if crate::builtins::contracts::boundary_active() => {
+            crate::builtins::contracts::uncontracted_sibling(heap, module, sym).unwrap_or(sym)
+        }
+        _ => sym,
+    }
 }
 
 /// Resolve a 2-arg call head `h` to a core inlinable [`PrimOp`] plus the arg-map
@@ -898,11 +928,11 @@ pub(crate) fn compile_node(
         | ValueRef::Keyword(_) => Some(const_node(heap, form)),
 
         // A name: a local frame slot if bound, else a global reference with a
-        // read IC (ADR-096).
+        // read IC (ADR-096) — through the module boundary (ADR-383).
         ValueRef::Sym(s) => match scope.lookup(s) {
             Some(slot) => Some(Node::Local(slot)),
             None => Some(Node::GlobalIc {
-                sym: s,
+                sym: module_boundary_ref(heap, scope, s),
                 site: scope.gsite_alloc(),
             }),
         },
@@ -1231,7 +1261,9 @@ pub(crate) fn compile_node(
             // `GlobalIc`): the call's own site IC below caches the head's full
             // resolution, so a read IC there would be redundant (and waste a site).
             let mut callee = match head.unpack() {
-                ValueRef::Sym(h) if scope.lookup(h).is_none() => Node::Global(h),
+                ValueRef::Sym(h) if scope.lookup(h).is_none() => {
+                    Node::Global(module_boundary_ref(heap, scope, h))
+                }
                 _ => compile_node(heap, head, scope, false)?,
             };
             let mut args = Vec::with_capacity(items.len() - 1);
