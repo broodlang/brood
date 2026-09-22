@@ -12,6 +12,19 @@ sysctl that moves under you — that file's last section has the one-line check)
 questions are answerable here; check that file's "what this box CAN answer" before deferring
 anything.
 
+## 2026-09-22 — KI-182 FIXED; next is the scaling queue (items 3–5) and a `startup` re-measure
+
+**KI-182 is closed, but the row is not re-measured** — do that first on a box that can run
+`make ab BASE=136b14d7 ROWS=startup ARGS=--floor N=15` (this one cannot, by rule), and expect
+most of the +6% back: the JIT half is gone (`BROOD_JIT_DUMP_IR=1 brood startup.blsp` lowers
+nothing), the def-site half (+0.6M instructions) is the design. The fix had two halves where
+the KI named one — the `contract_apply` early return, and the ability-op return check, which
+ADR-381 had wrapped around every `impl` method: that wrapper both tiered `not` and un-elided
+every thin impl for every mode since 09-21. The check is in the op function now; `impl`
+registers methods as written. If bedit's armed run changes shape, this is why.
+
+Then `docs/large-project-scaling.md` items 3–5, in order (below).
+
 ## 2026-09-21 evening — the benchmark column is refreshed at 422c92a5; KI-182 is the open item
 
 brood-benchmarks has the Brood column at `422c92a5` (min of three, `ab-bench --floor` against

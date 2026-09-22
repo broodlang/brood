@@ -2212,7 +2212,28 @@ which is meaningless for a rope, so falling through unconditionally would swap a
                           op-key (list 'quote [aname op-name])
                           ; gensym'd temporaries so an op arg named `k`/`f` can't be captured
                           id-sym (gensym)
-                          impl-sym (gensym))
+                          impl-sym (gensym)
+                          ; the declared `:-> RET`, checked at every call when contracts are
+                          ; armed — HERE, in the op, not around each impl (KI-182): an impl
+                          ; stays the thin closure it was written as, so `(impl Port :native
+                          ; (write [p s] (%port-write p s)))` is still elided to its primitive,
+                          ; and an unarmed call pays one native `(%contracts-armed?)`. The
+                          ; wrapper the first shape put around every impl body made each one
+                          ; a real activation and its own `not` a hot closure: `(io/puts 0)`'s
+                          ; port ops tiered `not` up and instantiated Cranelift on every short
+                          ; run. Mode-independent, so an imaged std ability checks too.
+                          declared-ret (%op-declared-ret (list op) op-name)
+                          resolved-call (%defability-op-call impl-sym arg-syms)
+                          checked-call (if (nil? declared-ret)
+                                         resolved-call
+                                         (list 'if
+                                           (list '%contracts-armed?)
+                                           (list '%contract-check-op-result
+                                             (list 'quote aname)
+                                             (list 'quote op-name)
+                                             (list 'quote declared-ret)
+                                             resolved-call)
+                                           resolved-call)))
                       ; A generic op dispatches on its FIRST argument, so a zero-arg op has
                       ; nothing to dispatch on — every value would route to the `:nil` impl.
                       ; Reject it at expansion rather than silently degrade.
@@ -2241,15 +2262,16 @@ which is meaningless for a rope, so falling through unconditionally would swap a
                           (list 'if
                             impl-sym
                             ; the resolved call — direct for a fixed arity, `apply` for a
-                            ; variadic op (`%defability-op-call`)
-                            (%defability-op-call impl-sym arg-syms)
+                            ; variadic op (`%defability-op-call`) — under the declared
+                            ; return's check when contracts are armed
+                            checked-call
                             (list '%no-impl op-key id-sym))))))))
     (cons 'do (append reg (append op-defs provided-defs)))))
 
 (defn- %op-declared-ret (specs op-name)
   "The `:-> RET` form `defability` declared for `op-name` among `specs`, or nil when the op
-declares no return. Read at `impl` EXPANSION time — the ability is registered by the time an
-`impl` for it expands — so the shim below can check what the ability promised.
+declares no return. Read at `defability` EXPANSION time, so the op function it generates can
+check what the ability promised at every call when contracts are armed (KI-182).
 
 Written as explicit recursion over `first`/`rest` rather than with `filter`, for the same
 load-order reason `%sig-pos` exists: this runs while the prelude is being expanded, and the
@@ -2267,13 +2289,14 @@ prelude implements abilities of its own (`(impl Port :native …)`)."
 ;; unbound head. Self-contained for the same reason — a literal error map, not
 ;; `%contract-error`.
 (defn- %contract-check-op-result (aname op ret value)
-  "Enforce an ability op's declared return at run time, when contracts are armed
-(`BROOD_CONTRACTS=1`, the `nest run`/`nest test` default). The checker reports a
-*statically* visible violation already; this catches the ones it cannot see — an impl
-whose body only yields the wrong type for some inputs, and an impl registered at run
-time from a value the checker never read. Returns `value` so it can wrap a body. The
+  "Enforce an ability op's declared return at run time — reached only when contracts are
+armed (`BROOD_CONTRACTS=1`, the `nest run`/`nest test` default): the op function `defability`
+generates tests `(%contracts-armed?)` inline and skips this call unarmed (KI-182). The checker
+reports a *statically* visible violation already; this catches the ones it cannot see —
+an impl whose body only yields the wrong type for some inputs, and an impl registered at
+run time from a value the checker never read. Returns `value` so it can wrap a body. The
 error is a `:blame :callee` contract error, like a function's own result mismatch."
-  (if (or (not (%contracts-armed?)) (type-matches? ret value))
+  (if (type-matches? ret value)
     value
     (throw {:kind :contract
             :message (str aname
@@ -2302,34 +2325,26 @@ error is a `:blame :callee` contract error, like a function's own result mismatc
     (impl Size geometry/circle  (size [c] (get c :r)))"
   ; the dispatch id is a KEYWORD: a record id written as a symbol (`geometry/circle`) is
   ; keyworded to match what `%identity-of` produces; a built-in id (`:int`) is already one.
-  ; An op with a declared `:-> RET` gets its result checked at every call when contracts
-  ; are armed (ADR-180 deferred item c). The check is ALWAYS emitted and asks the runtime
-  ; (`%contract-check-op-result` reads `%contracts-armed?`): the flag used to be read at
-  ; expansion time, which cost an unarmed build nothing — and cost an armed one every impl
-  ; std ships, since a std module materialised from the image was expanded once, unarmed,
-  ; when the image was written (ADR-381). One cached bool per call under a declared return.
-  (let (id-kw (%ability-id-kw key)
-        specs (%ability-ops aname))
+  ; A method is registered as the thin closure it was written as. An op's declared `:-> RET`
+  ; is checked by the OP function (`defability`), at every call when contracts are armed —
+  ; it used to be a wrapper around each method body here, decided at expansion time
+  ; (ADR-293), then always emitted and asking the runtime (ADR-381, for the image's sake),
+  ; and either way it made every impl a real activation: `(impl Port :native (write [p s]
+  ; (%port-write p s)))` stopped being elided to its primitive, and the wrapper's own `not`
+  ; tiered up on `(io/puts 0)` alone (KI-182).
+  (let (id-kw (%ability-id-kw key))
     (cons 'do
       (map methods
         (fn (m)
           (let (op-name (first m)
                 ; arg vector → list
                 arg-syms (map (second m) (fn (s) s))
-                body (rest (rest m))
-                ret (%op-declared-ret specs op-name)
-                checked (if (nil? ret)
-                          body
-                          (list (list '%contract-check-op-result
-                                  (list 'quote aname)
-                                  (list 'quote op-name)
-                                  (list 'quote ret)
-                                  (cons 'do body)))))
+                body (rest (rest m)))
             (list '%register-impl
               (list 'quote aname)
               (list 'quote op-name)
               id-kw
-              (cons 'fn (cons arg-syms checked))
+              (cons 'fn (cons arg-syms body))
               (list 'quote (reflect/current-ns)))))))))
 
 (defmacro %unimpl (aname key & ops)

@@ -15469,3 +15469,18 @@ never hung the program up — a REPL killed with its buffer kept running. Both e
 close-on-exec now (the child's stdio comes through `stdio_dup`, which is what should cross);
 `proc_test` asserts the master is not among the child's descriptors, and fails on the old
 binary.
+
+## 2026-09-22 — KI-182 fixed: the unarmed run never reaches the contract policy
+
+Two halves, and the KI had named one. `contract_apply` now returns before the Brood hook
+unless contracts are armed or the name is `sig!`-forced — the fact that decided the hook's
+first test, hoisted into the kernel. That alone still lowered `not` on `(io/puts 0)`: the
+ability-op return check ADR-381 wrapped around every `impl` method was the second caller,
+and it had also un-elided every thin impl since 09-21 (a wrapped `(%port-write p s)` is not
+a pass-through). The check moved into the op function `defability` generates, behind an
+inline native `(%contracts-armed?)`, with the resolved call in tail position unarmed; `impl`
+registers methods as written, and an impl registered through `%register-impl` directly is
+checked too. `(io/puts 0)` lowers no arm. Guards: a tripwire hook that throws when consulted
+(`builtins::contracts::tests`) and the KI's own `BROOD_JIT_DUMP_IR` probe on the real cache
+(`cli::contracts_mode`), each red when its half is sabotaged. The `startup` row is not
+re-measured on this box; the def-site half of the KI is the design and stays.
