@@ -159,13 +159,17 @@ start rather than O(bytes)); whole-project check is ~4.4 h and ~380 GB — not r
 1. ~~Module-index cache~~ — done, above.
 2. ~~`nest check` incremental for real~~ — done, above (ADR-382).
 3. ~~`nest check` parallel per-file walk after the Pass 2.9 fixpoint. Gate: user/wall ≥ 6.~~ — **DONE 2026-09-22 (ADR-386)**: the walk was already parallel; the gate counted FILES (2000) where the rig is 1 000 big ones. It now also takes the pool on 7 MB of source. 302 × 3 067 rig, debug: 55.9 s wall / 66.0 s user → 8.8 s / 98.3 s, user/wall **11.1**.
-4. Check memory: drop forms after the walk / shard. Gate: peak RSS at 1 000 × 3k under 1 GB.
-   **Now the top item, and one option is ruled out.** ADR-386 took peak RSS on the 302 × 3k
-   rig from 1.19 GB to 2.20 GB (the pool's price), so at 1 000 × 3k expect ~7 GB against the
-   3.8 GB the queue recorded. Bounding concurrent workers does NOT help: at group size
-   `cores/4` the rig reads 2.26 GB — unchanged — for 3× the wall. The peak is the DRIVER's
-   (every file's forms + derived facts live for the run, because the Pass 2.9 fixpoint wants
-   them at once), so this is the Rust surgery the option describes and nothing cheaper.
+4. Check memory. **Measured 2026-09-22 (`large-project-scaling.md` has the table); the
+   queue's premise was wrong and the gate is unreachable as written.** On the 302 × 3k rig:
+   loading the project alone is 0.54 GB (≈1.8 GB at 1 000 × 3k, so "under 1 GB" cannot be
+   met by checker-side work at all), setup+preload 0.88 GB, the WALK adds only 0.15 GB —
+   so "drop forms after the walk" is the small lever, not the big one — and the pool adds
+   1.11 GB, of which ~0.5 GB is the allocator holding freed pages
+   (`MIMALLOC_PURGE_DELAY=0` recovers it for +7% wall). The other ~0.6 GB is NOT live
+   worker heaps (group `cores/4` reads the same for 2.4× the wall, measured both with and
+   without retention) and NOT the shared region (105 226 promotions sequential against
+   105 332 parallel): it accumulates per CHUNK in the driver and has not been identified.
+   Start there, and restate the gate against the load floor.
 5. The cold load — now the EDIT LOOP's cost too, since an edit invalidates the whole image
    and the check that follows loads everything from source (30 s at 1 000 × 3k) before
    re-deriving two files in 20 ms. Two shapes: parallel loading (divides by cores, paid on

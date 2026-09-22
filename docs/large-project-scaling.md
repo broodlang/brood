@@ -178,6 +178,42 @@ worker heaps live at once, and the obvious lever is to shrink that group. Measur
 DRIVER's: every file's forms, positions and derived facts, live for the run because the
 fixpoint wants them all at once. Item 4 is the surgery the option describes (drop a file's
 forms after its walk; shard the fixpoint over signatures only) and nothing cheaper.
+
+### Item 4 (memory), measured — the queue's premise was wrong, and the gate is unreachable as written
+
+Five arms on the 302 × 3 067 rig (18 MB of source, debug binary, verdict cache off):
+
+| arm | wall | peak RSS |
+|---|---|---|
+| `nest run --check-boot` — load every module, check nothing | 1.2 s | **0.54 GB** |
+| `nest check` under `BROOD_NO_CHECK=1` — setup + preload, no walk | 16.2 s | 0.88 GB |
+| `nest check`, sequential | 55.5 s | 1.03 GB |
+| `nest check`, parallel | 9.7 s | **2.14 GB** |
+| `nest check`, parallel, `MIMALLOC_PURGE_DELAY=0` | 10.3 s | 1.64 GB |
+
+Three things follow, and two of them contradict the option above.
+
+1. **The walk is 0.15 GB of the 1.03.** "Drop a file's forms after its walk" is the small
+   lever, not the big one: everything before the walk — loading the project and levelling
+   the heap for it — is 0.88 GB, six times what the walk adds.
+2. **The floor is the project's own loaded code: 0.54 GB here, ~1.8 GB at 1 000 × 3k.** The
+   gate as written ("peak RSS at 1 000 × 3k under 1 GB") cannot be met by checker-side work
+   at all — loading the code the check is about already exceeds it. Either the gate moves,
+   or the question becomes whether a whole-project check must hold the whole project
+   (ADR-382's replay already answers the *unchanged* case by not loading at all).
+3. **The pool's +1.11 GB is not concurrent worker heaps.** ~0.5 GB is the allocator holding
+   freed pages (`MIMALLOC_PURGE_DELAY=0` recovers it for +7% wall — the documented
+   trade-off in `runtime-frontier.md` A8). The remaining ~0.6 GB does **not** shrink when
+   fewer workers are live: group size `cores/4` reads 2.26 GB retained / 1.69 GB purged
+   against `cores`' 2.14 / 1.64, for 2.4–3× the wall. Measured twice, once each way.
+   Promotion into the append-only shared region is not it either — 105 226 promotions
+   sequential against 105 332 parallel. So it accumulates per CHUNK in the driver, and what
+   it is has not been found.
+
+**Where to start**, then, is not "drop forms after the walk": it is (a) restate the gate
+against the load floor, (b) find the per-chunk driver accumulation in 3, and (c) decide
+whether `nest check` should set the allocator's purge delay for itself — a global policy
+question, since the default is a deliberate "spend memory for speed" choice.
 ## Finding 3 — cold load is one thread
 
 39 s for 3M lines, single-threaded (`Building bigproj … Built in …`). Files in different
