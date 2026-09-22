@@ -8,7 +8,7 @@
 ;; emulator rather than a better guess". This is that emulator: a grid of cells, a cursor,
 ;; the scroll region, the alternate screen, the modes a program switches and the replies it
 ;; waits on, all as a value — so `(vt/feed vt chunk)` is a pure fold and an editor can
-;; paint the result with the spans vocabulary it already has (ADR-383).
+;; paint the result with the spans vocabulary it already has (ADR-384).
 ;;
 ;; The vocabulary is what interactive programs actually emit: ECMA-48 / xterm cursor
 ;; motion and erase, insert/delete lines and characters, DECSTBM scroll regions, the

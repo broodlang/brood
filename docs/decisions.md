@@ -24804,7 +24804,7 @@ checked; bare references — the norm — qualify to the full name and cross the
 `boundary_resolve`, `bind_frame_module`); `derive::global_miss`'s alias fallback;
 `tests/contract_test.blsp` "a contract guards the module boundary" (sabotage-verified with
 the flag: 3 of 5 red); `contracts_default.rs` gains the inside/outside pair.
-## ADR-383 — `std/vt`: a virtual terminal as pure data, so an editor can host a full-screen program
+## ADR-384 — `std/vt`: a virtual terminal as pure data, so an editor can host a full-screen program
 
 **Status:** accepted (2026-09-21). Prompted by bedit: running `claude` — an Ink TUI — in a
 buffer, where `ansi/render` had said of itself that a full-screen program "should be given

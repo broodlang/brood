@@ -15446,7 +15446,7 @@ a module a contracted function is two bindings of one closure.
 bedit wanted to run `claude` in a buffer. It is an Ink TUI — absolute cursor moves, erase
 below, the alternate screen, colour everywhere, and a `CSI 6 n` it blocks on — and
 `ansi/render` had already said a full-screen program "should be given a real emulator
-rather than a better guess". `std/vt.blsp` is that emulator, as a value (ADR-383): `feed`
+rather than a better guess". `std/vt.blsp` is that emulator, as a value (ADR-384): `feed`
 is a pure fold, `screen` reads the grid back in the `highlight-spans` shape, `key->bytes`
 goes the other way, and the answers a program waits on come back as `:replies`. Sixty-one
 tests, `nest check --strict` clean.
