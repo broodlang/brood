@@ -270,6 +270,12 @@ fn every_baked_in_module_loads_under_contracts_from_source() {
 /// arms of its own, so a run without the image proves nothing and is reported as such.
 #[test]
 fn an_unarmed_startup_run_lowers_no_arm() {
+    // CI's tree-walker job runs the source path on purpose (`BROOD_NO_STDIMAGE=1`); there
+    // the probe proves nothing, by the reasoning above, and says so by standing aside
+    // rather than by failing that job (it did, 2026-09-22).
+    if std::env::var_os("BROOD_NO_STDIMAGE").is_some() {
+        return;
+    }
     let dir = temp_dir("ki182");
     let run = |name: &str, source: &str| -> (String, String) {
         std::fs::write(dir.path.join(name), source).expect("write program");
@@ -320,6 +326,12 @@ fn an_unarmed_startup_run_lowers_no_arm() {
 /// so "not loaded" can never pass because the trace stopped naming anything.
 #[test]
 fn the_contract_machinery_loads_only_when_armed() {
+    // `[image] contract` is a materialisation line; on the source path (CI's tree-walker
+    // job, `BROOD_NO_STDIMAGE=1`) nothing materialises and the armed half reads 0 for the
+    // wrong reason. The fact itself holds there too, but this probe cannot see it.
+    if std::env::var_os("BROOD_NO_STDIMAGE").is_some() {
+        return;
+    }
     let dir = temp_dir("ki182-lazy");
     std::fs::write(dir.path.join("p.blsp"), "(io/puts 0)\n").expect("write program");
     let loads = |armed: bool| -> usize {

@@ -40,6 +40,11 @@ const PROGRAM: &str = "\
 
 #[test]
 fn materialising_math_from_the_image_keeps_not_cold() {
+    // No replay without an image: CI's tree-walker job sets `BROOD_NO_STDIMAGE=1` to cover
+    // the source path, and there this test has nothing to measure.
+    if std::env::var_os("BROOD_NO_STDIMAGE").is_some() {
+        return;
+    }
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
