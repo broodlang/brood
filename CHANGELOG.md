@@ -4,6 +4,66 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## v0.32.0 — a declaration is enforced at the module boundary, and `nest check` stops re-checking what has not changed
+
+**Runtime contracts are binding-time policy, on by default in dev mode** (ADR-381). Whether
+a `(sig …)` is *enforced* is now a property of the **binding**, decided when the binding
+comes to exist — a `def`, a `sig` landing on a bound name, a module's bindings arriving from
+source or from the stdlib image — not of the form that declared it. So a `sig` may stand on
+either side of its definition, a module materialised from the image is contracted like one
+loaded from source, and a hot reload re-wraps. A mismatch names the party at fault: `{:kind
+:contract :blame :caller|:callee :function :argument :expected :got :message}`. `nest run`
+and `nest test` arm it by default; `BROOD_CONTRACTS=0` opts a run out, `=all` also enforces
+the prelude's own sixteen declarations, and a released bundle never arms.
+
+**A contract guards the module boundary** (ADR-383). A module's calls to its own contracted
+functions are not checked — direct, through a thin wrapper, from a nested `fn` or a named
+loop, or with the function passed as a value. The checker already holds those calls to the
+declaration statically; the check is owed to callers *outside* the module, which is where
+the shim meets them (Racket's `contract-out` shape). `sig!` has no boundary — the module's
+own calls to a forced name are checked, which is how a module tests its own contracts.
+Measured on `string/format`, whose `char-at` runs per character: armed ×5.9 → ×1.5.
+`BROOD_NO_CONTRACT_BOUNDARY=1` charges every call, as before.
+
+**The shim machinery is a module, loaded only when armed** (ADR-385). `std/contract.blsp`
+holds the spec parsing, the checks and the templates; the prelude keeps the hook, the
+exemption and `sig!`. An unarmed boot no longer localizes, freezes and images 200 lines it
+never reaches: an empty file 80.8M → 79.0M instructions.
+
+**`nest check` is incremental for real** (ADR-382). The ADR-119 cache hit only image →
+image, so the check after a cold build — and after any edit — re-checked everything. The
+project image carries definition sites now, the require graph reads from the module index,
+and an unchanged project replays its recorded verdict. On a 1 000 × 3 067-line rig: an
+unchanged re-check 154 s → **0.12 s**, listed files 9.3 s with nothing re-checked.
+
+**…and it uses the worker pool on projects that are big rather than numerous** (ADR-386).
+The gate counted FILES (2 000), and a project of 1 000 × 3 000 lines read as small. It now
+also parallelises on 7 MB of source — the same calibration in the quantity that drives the
+cost. On a 302 × 3 067 rig: 55.9 s wall / 66.0 s user → **8.8 s / 98.3 s**.
+
+**The module graph is a per-file cache on disk** (ADR-380). A warm `nest run` re-parsed
+every source file whole to find its `defmodule` header, twice. On the 1 000-file rig: warm
+run 3.0 → **0.15 s**, RSS 282 → 145 MB, source files opened 2 000 → 0.
+
+**`std/vt` — a virtual terminal as pure data** (ADR-384), so an editor can host a
+full-screen program: a declared record, SGR as a table, CSI by name, and mouse reporting as
+the program asked for it.
+
+**Performance.** A spawn no longer allocates a cold heap per child and the four per-process
+maps are small-maps, with a counted per-process memory floor as a ratchet; a `table` read
+rebuilds straight from the store and a scalar key compares without a rebuild; `conj`/`into`
+on a vector copy once; the image replay registers impls without re-running the arity
+diagnostic.
+
+**Fixed.** KI-178 (the JIT's inline `pair?` answered `false` for a range and a seq-view —
+wrong on every tiered arm since the lowering was written); KI-179; KI-180/181; KI-182 (an
+unarmed run reached the contract policy and tiered `not` at boot, instantiating Cranelift on
+every short run); KI-183; KI-184 (an error escaping a contract shim reported the shim's own
+line — and, found with it, a module materialised from the image carried positions with no
+file, so imaged code reported a line from one file under another file's name); KI-185 (a
+module load inside the contract hook tripped the use-after-GC wire).
+
+
 ## v0.31.0 — a run replays its type-check, the JIT stops deopting on shapes it can handle, and the like-for-like score passes Node
 
 **`brood file` replays its pre-flight verdict for an unchanged program** (ADR-371). The
