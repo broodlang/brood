@@ -2,6 +2,18 @@
 
 Chronological record of work sessions. Newest at the bottom.
 
+## 2026-09-22 — KI-182 closed on the measurement; brood-benchmarks at 653d41d9
+
+Interleaved pinned task-clock on `(io/puts 0)`, the 136b14d7 column's binary against the
+installed 653d41d9, both images live: 13.06 vs 13.05 ms over three rounds (76.3M vs 78.4M
+instructions). The +6% CPU residual after the first KI-182 fix is gone with the replay + `nth`
+change and ADR-383's op-function check, so the prelude-slimming lever stays untaken. The
+Brood column is refreshed at 653d41d9: `startup` 13.6 → 13.1 ms, `errors` −3.9%,
+`strings`/`pipeline` −3.7%, `pingpong` −3.5%, `json` −3.3%, nothing past its spread the other
+way; like-for-like 7.20 → 7.12. One trap on the way: the 136b14d7 rig binary had lost its
+std image to the four-newest prune and read 333M instructions (source path) — `BROOD_IMAGE_TRACE`
+before every control, as the benchmark repo's CLAUDE.md says.
+
 ## 2026-09-22 — the image replay re-ran the arity diagnostic per impl, and `nth` called `not` on every call
 
 KI-182's watch item. `(math/max 1 2)` compiled `not` on the previous column's binary too, so it

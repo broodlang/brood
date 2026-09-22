@@ -12,18 +12,17 @@ sysctl that moves under you — that file's last section has the one-line check)
 questions are answerable here; check that file's "what this box CAN answer" before deferring
 anything.
 
-## 2026-09-22 — KI-182: the JIT-at-boot half is FIXED; a diffuse +6% CPU residual on `startup` stays open
+## 2026-09-22 — KI-182 FIXED, residual included; the benchmark column is at 653d41d9; the tree has no open regression
 
 Both callers closed (devlog 2026-09-22): the per-`def` contract offer and the per-op-result
 check each entered a Brood function unarmed to learn that contracts were off, and the
 function's `not` crossed the tier threshold during `io`'s load. No arm lowers at boot and
-`BROOD_NO_JIT=1` no longer moves the instruction count. **But the row is not back:** `make ab`
-reads 16 → 16 ms only because it rounds to the millisecond; interleaved pinned task-clock is
-12.85 → 13.68 ms (+6.4%), 75.0M → 80.9M instructions, and the profile is diffuse (KI-182 has the
-table). It is the data ADR-381 and ADR-382 added — a 287-line prelude file localized and frozen
-at every boot, 526 def-site entries — not a mechanism. Two levers are written up in the KI;
-the first (move the shim machinery out of the prelude, now that the hook is never entered
-unarmed) is the one I would take. A design call, so left for the owner. Guard:
+`BROOD_NO_JIT=1` no longer moves the instruction count. After the first fix alone the row was
+NOT back (interleaved task-clock 12.85 → 13.68 ms); after the same day's replay + `nth` change
+and the ADR-383 op-function check it is: **13.06 vs 13.05 ms** against 136b14d7, three rounds,
+76.3M vs 78.4M instructions. The prelude-slimming lever stays written up in the KI, untaken.
+**brood-benchmarks is refreshed at 653d41d9:** `startup` 13.1 ms, every other row inside its
+spread, like-for-like 7.12. Guard:
 `crates/cli/tests/contract_offer_unarmed.rs` (both halves sabotage-verified).
 
 **What this leaves.** (a) The residual above, +5.9M instructions on the startup row against 136b14d7:
