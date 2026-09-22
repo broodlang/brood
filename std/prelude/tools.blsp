@@ -2303,11 +2303,16 @@ error is a `:blame :callee` contract error, like a function's own result mismatc
   ; the dispatch id is a KEYWORD: a record id written as a symbol (`geometry/circle`) is
   ; keyworded to match what `%identity-of` produces; a built-in id (`:int`) is already one.
   ; An op with a declared `:-> RET` gets its result checked at every call when contracts
-  ; are armed (ADR-180 deferred item c). The check is ALWAYS emitted and asks the runtime
-  ; (`%contract-check-op-result` reads `%contracts-armed?`): the flag used to be read at
-  ; expansion time, which cost an unarmed build nothing — and cost an armed one every impl
-  ; std ships, since a std module materialised from the image was expanded once, unarmed,
-  ; when the image was written (ADR-381). One cached bool per call under a declared return.
+  ; are armed (ADR-180 deferred item c). The check is ALWAYS emitted and asks the runtime:
+  ; the flag used to be read at expansion time, which cost an unarmed build nothing — and
+  ; cost an armed one every impl std ships, since a std module materialised from the image
+  ; was expanded once, unarmed, when the image was written (ADR-381). The ASK is the one
+  ; cached-bool primitive, inline, and the checking function is only entered armed: it used
+  ; to be entered on every call and test `(not (%contracts-armed?))` itself, which was a
+  ; Brood call plus a `not` per ability-op result — enough, over a `require`'s worth of op
+  ; calls, to push `not` past the JIT's tier threshold and instantiate Cranelift at boot in
+  ; every short unarmed run (KI-182: `startup` +6%). `%op-result` cannot collide with the
+  ; body: the body has already been evaluated when it binds.
   (let (id-kw (%ability-id-kw key)
         specs (%ability-ops aname))
     (cons 'do
@@ -2320,11 +2325,16 @@ error is a `:blame :callee` contract error, like a function's own result mismatc
                 ret (%op-declared-ret specs op-name)
                 checked (if (nil? ret)
                           body
-                          (list (list '%contract-check-op-result
-                                  (list 'quote aname)
-                                  (list 'quote op-name)
-                                  (list 'quote ret)
-                                  (cons 'do body)))))
+                          (list (list 'let
+                                  (list '%op-result (cons 'do body))
+                                  (list 'if
+                                    (list '%contracts-armed?)
+                                    (list '%contract-check-op-result
+                                      (list 'quote aname)
+                                      (list 'quote op-name)
+                                      (list 'quote ret)
+                                      '%op-result)
+                                    '%op-result)))))
             (list '%register-impl
               (list 'quote aname)
               (list 'quote op-name)

@@ -12,6 +12,29 @@ sysctl that moves under you — that file's last section has the one-line check)
 questions are answerable here; check that file's "what this box CAN answer" before deferring
 anything.
 
+## 2026-09-22 — KI-182: the JIT-at-boot half is FIXED; a diffuse +6% CPU residual on `startup` stays open
+
+Both callers closed (devlog 2026-09-22): the per-`def` contract offer and the per-op-result
+check each entered a Brood function unarmed to learn that contracts were off, and the
+function's `not` crossed the tier threshold during `io`'s load. No arm lowers at boot and
+`BROOD_NO_JIT=1` no longer moves the instruction count. **But the row is not back:** `make ab`
+reads 16 → 16 ms only because it rounds to the millisecond; interleaved pinned task-clock is
+12.85 → 13.68 ms (+6.4%), 75.0M → 80.9M instructions, and the profile is diffuse (KI-182 has the
+table). It is the data ADR-381 and ADR-382 added — a 287-line prelude file localized and frozen
+at every boot, 526 def-site entries — not a mechanism. Two levers are written up in the KI;
+the first (move the shim machinery out of the prelude, now that the hook is never entered
+unarmed) is the one I would take. A design call, so left for the owner. Guard:
+`crates/cli/tests/contract_offer_unarmed.rs` (both halves sabotage-verified).
+
+**What this leaves.** (a) The residual above, +5.9M instructions on the startup row against 136b14d7:
++2.8M on an empty file (ADR-382's def sites in the prelude image, 802 → 1328 entries, plus a
+larger prelude) and +3.1M across `io`'s load — under the wall's resolution, recorded in KI-182,
+worth a lazy def-site decode if boot ever matters more. (b) `(math/max 1 2)` lowers `not` on
+the OLD binary too: a pre-existing caller in `math`'s load, one probe away
+(`BROOD_JIT_DUMP_IR=1`, then rebind `not` under `%load-module-source` for a trace). (c) The
+benchmark column at 422c92a5 carries the +5% startup as measured; the next refresh takes it
+back. (d) CI's bedit smoke: bedit's `elixir_playground_test` asserts an `elixir` on PATH.
+
 ## 2026-09-21 evening — the benchmark column is refreshed at 422c92a5; KI-182 is the open item
 
 brood-benchmarks has the Brood column at `422c92a5` (min of three, `ab-bench --floor` against

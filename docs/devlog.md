@@ -2,6 +2,26 @@
 
 Chronological record of work sessions. Newest at the bottom.
 
+## 2026-09-22 — KI-182 fixed: contracts are not consulted unarmed, in either of their two per-call shapes
+
+The `startup` row's +6% at the 422c92a5 column was two callers of `not` with one shape — a
+Brood policy function entered on every event so it could decide, itself, that contracts are
+off. (1) `contract_apply` applied `%contract-wrap` at every declared `def`; it now returns
+first when `!contracts_armed()` and the name is not `sig!`-forced (`%*contract-forced*`, read
+with `table::has`). (2) `impl` wrapped every op body under a declared `:->` return in
+`%contract-check-op-result`, whose first test was `(not (%contracts-armed?))` — a call plus a
+`not` per ability-op RESULT in every program, armed or not; `io` declares no sigs, and this
+was its caller. The emission is now `(let (%op-result (do body…)) (if (%contracts-armed?)
+(%contract-check-op-result … %op-result) %op-result))`. Guard
+`crates/cli/tests/contract_offer_unarmed.rs` rebinds both functions under
+`%load-module-source`'s reserved-name exemption to record what reaches them, unarmed and
+armed; each half sabotage-verified. Result: no arm lowers on `(io/puts 0)` and `BROOD_NO_JIT=1`
+no longer moves the count. Not the whole row, though: interleaved pinned task-clock is still
+12.85 → 13.68 ms against 136b14d7 (+6.4%; `make ab`'s 16 → 16 ms is the millisecond rounding),
+and the unstripped profile is diffuse — a larger prelude localized and frozen at every boot,
+526 def-site entries, more of everything in `io`'s load. Recorded in KI-182 with two levers.
+Pre-existing and separate: `(math/max 1 2)` lowers `not` on the old binary too.
+
 ## 2026-09-21 — the 422c92a5 benchmark column, and KI-182
 
 Brood column refreshed in brood-benchmarks at `422c92a5`: `mandelbrot` 161 → 77 ms (ADR-378,
