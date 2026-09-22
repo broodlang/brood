@@ -24920,3 +24920,57 @@ least one armed — so "not loaded" cannot pass because the trace stopped naming
 lines; two stale `%contract-check-*` entries dropped from `doc-catalog.blsp`. The residual's
 other lever (decoding def sites lazily) is untouched, and the `io`-load half of KI-182's
 +5.9M — "more of everything, no new thing" — is not addressed by either.
+
+## ADR-386 — `nest check` takes the worker pool on BYTES of source, not on file count
+
+**Context.** `docs/large-project-scaling.md`'s Finding 2 measured the whole-project check at
+"161 s wall against 178 s user: one core of twelve" and queued a parallel per-file walk as
+item 3. The walk was already parallel — ADR-119's dependency recorder moved onto the heap
+(per green process) and both the fresh and the cached paths fan across the pool. What was
+wrong was the gate in front of it: `*check-min-parallel*` is **2000 FILES**, and the rig is
+1 000 files. A project of 1 000 × 3 000 lines is 60 MB of exactly the work the pool exists
+for and reads as "small".
+
+The threshold was not careless — it was calibrated in 2026-07 when a huge project meant
+100 000 files averaging ~180 lines, where the file count *is* the work. It measures the
+wrong quantity the moment files stop being uniform.
+
+**Decision.** Parallelise on either test: `*check-min-parallel*` files (unchanged), **or**
+`*check-min-parallel-bytes*` = 7 MB of source. Seven megabytes is the old calibration
+expressed in the quantity that drives the cost — 2000 files × ~3.6 KB — so the shape the
+threshold was tuned on still decides the same way, and the big-file shape stops being
+invisible. The byte sum is one `file/size` per entry, asked only after the count test has
+declined, so an already-parallel project pays nothing for it; an entry that is not a path
+(the `[path closure]` pairs the cached path folds) counts zero, which can only decline the
+pool, never engage it wrongly.
+
+`BROOD_CHECK_SEQUENTIAL=1` pins the check in-process whatever the size: the A/B lever, the
+bisect switch, and the control arm of the differential below.
+
+**Measured**, 302 files × 3 067 lines (18 MB, debug binary, project image warm, verdict
+cache off on both arms):
+
+| | wall | user | user/wall |
+|---|---|---|---|
+| sequential (`BROOD_CHECK_SEQUENTIAL=1`) | 55.9 s | 66.0 s | 1.18 |
+| parallel | **8.8 s** | 98.3 s | **11.1** |
+
+6.3× wall, and the queue's gate for this item — user/wall ≥ 6 — is cleared. The extra user
+time is the documented per-worker cost: each worker's first file rebuilds the checker's
+per-heap caches (`known_ns_prefixes` / `module_public_exports`, each O(globals)), which is
+why chunks are sized to the core count rather than to files.
+
+**Guard: `crates/nest/tests/check_parallel.rs`.** Both paths over one warning-heavy 7.6 MB
+fixture must report the same warnings. The fixture matters as much as the assertion: every
+module carries three planted warnings *and* a qualified reference into a different std
+module reached only from its body — the lazy-load-mid-check shape whose ordering made a
+verdict depend on which file was checked first (KI-137). Sabotage-verified by deleting the
+`project-preload!` that levels the heap before any file is checked: the differential goes
+red. Without those std references it did **not** — a clean or self-contained fixture passes
+this test whatever the pool does, which is the vacuity this file exists to avoid.
+
+**Consequences.** `std/tool/project-check.blsp` (`project-parallel-worth-it?`,
+`project-entry-bytes`); `BROOD_CHECK_SEQUENTIAL` catalogued; `crates/nest/tests/check_parallel.rs`.
+The repo's own checker gate (std/ + tests/ + examples/, ~12 MB) now runs on the pool.
+Item 4 (memory) and item 5 (the single-threaded cold load, which is the other 9 s of the
+rig's 8.8 s+load) are untouched.

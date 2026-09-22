@@ -142,8 +142,8 @@ a second run under `BROOD_IMAGE_TRACE=1`) and `tests/module_index_test.blsp`, bo
 sabotage-verified both ways. If a warm run ever reads source again, the trace line names
 how many files and the unit test names which answers moved.
 
-**Measured on 1 000 files × 3 067 lines** (3.07M lines, `scripts/bench/gen-project.py 1000 DIR
---fns 340`): cold `nest run` 39 s / 3.3 GB, one thread; **whole-project `nest check` 161 s /
+**Measured on 1 000 files × 3 067 lines** (3.07M lines, `brood scripts/bench/gen-project.blsp -- 1000 DIR 340`):
+cold `nest run` 39 s / 3.3 GB, one thread; **whole-project `nest check` 161 s /
 3.8 GB, one thread of twelve**; unchanged re-check 16 s (the ADR-129 cache re-verifies
 everything). Extrapolated ×100: running is fine (closure-scoped, and now O(files) at warm
 start rather than O(bytes)); whole-project check is ~4.4 h and ~380 GB — not reasonable.
@@ -151,7 +151,7 @@ start rather than O(bytes)); whole-project check is ~4.4 h and ~380 GB — not r
 **The queue, in order (details and gates in the doc):**
 1. ~~Module-index cache~~ — done, above.
 2. ~~`nest check` incremental for real~~ — done, above (ADR-382).
-3. `nest check` parallel per-file walk after the Pass 2.9 fixpoint. Gate: user/wall ≥ 6.
+3. ~~`nest check` parallel per-file walk after the Pass 2.9 fixpoint. Gate: user/wall ≥ 6.~~ — **DONE 2026-09-22 (ADR-386)**: the walk was already parallel; the gate counted FILES (2000) where the rig is 1 000 big ones. It now also takes the pool on 7 MB of source. 302 × 3 067 rig, debug: 55.9 s wall / 66.0 s user → 8.8 s / 98.3 s, user/wall **11.1**.
 4. Check memory: drop forms after the walk / shard. Gate: peak RSS at 1 000 × 3k under 1 GB.
 5. The cold load — now the EDIT LOOP's cost too, since an edit invalidates the whole image
    and the check that follows loads everything from source (30 s at 1 000 × 3k) before
@@ -3296,7 +3296,7 @@ files × closure. Shipping it once per chunk fixes it. See §9.
 - **The loader is linear**: ~130 KB and ~1.6 ms per module, flat 500 → 8 000, image size exactly
   linear; 16 302 modules load and image in **30 s / 2.6 GB**. There is *no* per-module memory
   defect — an earlier "~1.6 MB/module" reading was a `nest run` figure wrongly attributed to the
-  loader. Reproduce with `scripts/bench/gen-project.py` + `scripts/bench/image-scale.sh`.
+  loader. Reproduce with `scripts/bench/gen-project.blsp` + `scripts/bench/image-scale.sh`.
 - **ADR-218's headline lazy row reproduces but measured the wrong mechanism.** An entry point
   reaching two of N modules pays about the same to source-load two files as to materialise two
   sections, so 1.30 s looked right while the image was dead. The row that was genuinely broken is
@@ -4139,7 +4139,7 @@ distribution. If you are timing a boot, state which path you measured, and use
 Startup / project-scale measurement lives in **`scripts/bench/`** (added 2026-08-07, because the
 last session's ladder was left uncommitted and its figures could not be re-derived):
 
-- **`gen-project.py N DIR`** — a synthetic project of N modules × ~180 lines, with an entry point
+- **`gen-project.blsp N DIR`** — a synthetic project of N modules × ~180 lines, with an entry point
   that reaches exactly TWO of them (the case the lazy image exists for). The 10x-moneyclub shape
   is `16300`.
 - **`image-scale.sh [sizes…]`** — per N: cold load alone, cold load + image write, image size, so

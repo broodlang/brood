@@ -3,7 +3,7 @@
 # and, since ADR-380, what a WARM start costs, which is the row that used to hide an
 # O(source bytes) re-parse of every file behind the image hit.
 #
-#   scripts/bench/gen-project.py 4000 /tmp/brood-n4000     # generate a fixture first (or let this do it)
+#   brood scripts/bench/gen-project.blsp -- 4000 /tmp/brood-n4000   # generate a fixture first (or let this do it)
 #   scripts/bench/image-scale.sh 500 1000 2000 4000 8000   # then sweep it — the ~180-line shape
 #   FNS=340 scripts/bench/image-scale.sh 250 500 1000      # the ~3 000-line shape (docs/large-project-scaling.md)
 #
@@ -44,7 +44,7 @@ sizes=${@:-500 1000 2000 4000 8000}
 until [ "$(cut -d' ' -f1 /proc/loadavg | cut -d. -f1)" -lt 2 ]; do sleep 20; done
 
 for n in $sizes; do
-  [ -d "/tmp/brood-n$n$suffix/src" ] || "$(dirname "$0")/gen-project.py" "$n" "/tmp/brood-n$n$suffix" --fns "$FNS" >/dev/null
+  [ -d "/tmp/brood-n$n$suffix/src" ] || "${BROOD:-brood}" "$(dirname "$0")/gen-project.blsp" -- "$n" "/tmp/brood-n$n$suffix" "$FNS" >/dev/null
 done
 # Warm the boot cache; this result is discarded.
 (cd "/tmp/brood-n$(echo $sizes | cut -d' ' -f1)$suffix" && "$B" -e '(+ 1 1)' >/dev/null 2>&1) || true

@@ -17,7 +17,7 @@ noise at 3 000, and everything that is O(source bytes) becomes the whole cost.
 ## The rig
 
 ```
-python3 scripts/bench/gen-project.py 1000 /tmp/brood-big3k --fns 340   # 1 002 files, 3 067 lines each, 59 MB
+brood scripts/bench/gen-project.blsp -- 1000 /tmp/brood-big3k 340   # 1 002 files, 3 067 lines each, 59 MB
 cd /tmp/brood-big3k
 ( ulimit -v 32000000; /usr/bin/time -f "wall %es peak %M KB" nest run )            # cold, then warm
 ( ulimit -v 32000000; /usr/bin/time -f "wall %es user %Us peak %M KB" nest check )

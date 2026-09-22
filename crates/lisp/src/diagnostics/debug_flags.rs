@@ -550,6 +550,11 @@ pub const FLAGS: &[DebugFlag] = &[
         "run the advisory checker in --strict mode; the check cache keys its manifest on this",
     ),
     f(
+        "BROOD_CHECK_SEQUENTIAL",
+        OPTOUT,
+        "opt OUT of fanning `nest check`'s per-file walk across the worker pool: check every file in this process, whatever the project's size (the A/B and bisect lever; the control arm of the parallel/sequential warning differential)",
+    ),
+    f(
         "BROOD_NO_CHECK_CACHE",
         DIAG,
         "bypass `nest check`'s incremental result cache AND `brood file`'s run pre-flight verdict cache — recheck everything from scratch",

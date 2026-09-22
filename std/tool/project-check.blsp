@@ -147,6 +147,17 @@ module included), built from the whole `files` universe — the KI-17 reachabili
 ;; spawn overhead, no pool warm-up, stable (filename-sorted) output order.
 ; below this many files, check in-process
 (def *check-min-parallel* 2000)
+;; …or this many BYTES of source, whichever comes first. The file count alone was the
+;; whole test until 2026-09-22, and it measures the wrong thing: it was calibrated when a
+;; "huge project" meant 100 000 files averaging ~180 lines, so 2000 files ≈ 7 MB of source
+;; ≈ the point where the per-worker setup below amortises. A project of 1 000 files × 3 000
+;; lines is 60 MB of exactly that work and reads as "small" — measured on a 302-file ×
+;; 3 067-line rig (18 MB): `nest check` 60.3 s wall against 70.0 s user, one core of
+;; twelve, because 302 < 2000. This threshold is the same calibration expressed in the
+;; quantity that drives the cost, so the old shape still decides the same way (2000 × 180
+;; lines is ~7 MB) and the big-file shape stops being invisible.
+(def *check-min-parallel-bytes* 7000000)
+(sig *check-min-parallel-bytes* int)
 ; chunks per core (load-balancing headroom)
 (def *check-oversample* 2)
 (sig *check-oversample* int)
@@ -258,9 +269,33 @@ module included), built from the whole `files` universe — the KI-17 reachabili
 ;; `project-pfold-files` where every file shares one payload (`shared`), which is prepended
 ;; to each chunk instead of being paired with each file — so a worker's captured body carries
 ;; it once, not once per file. The op sees `(shared file …)`.
+;; Is this file set worth the pool? Enough FILES, or enough BYTES of them — see
+;; `*check-min-parallel-bytes*`. The byte sum is one `file/size` per file, which is a stat
+;; against a check that reads and walks the same file; it is only asked when the count test
+;; has already declined, so an already-parallel project pays nothing for it.
+;;
+;; An entry is a path, or `[path closure]` (what `project-with-closures` and the cached
+;; path's re-check list hand the fold) — the size of anything else counts as zero, which
+;; can only decline the pool, never engage it wrongly.
+(defn- project-entry-bytes (f)
+  (let (p (if (string? f) f (first f)))
+    (if (string? p) (or (file/size p) 0) 0)))
+(sig project-entry-bytes (any -> int))
+
+;; `BROOD_CHECK_SEQUENTIAL=1` pins every check in-process whatever its size: the A/B lever
+;; for what the pool is worth, the bisect switch if a worker is ever suspected of reading a
+;; different heap than the driver, and the control arm of the differential that requires
+;; both paths to report the same warnings (`crates/nest/tests/check_parallel.rs`).
+(defn- project-parallel-worth-it? (files)
+  (and (nil? (os/env "BROOD_CHECK_SEQUENTIAL"))
+    (or (>= (count files) *check-min-parallel*)
+      (>= (fold files 0 (fn (acc f) (+ acc (project-entry-bytes f))))
+        *check-min-parallel-bytes*))))
+(sig project-parallel-worth-it? (any -> bool))
+
 (defn- project-pfold-files-shared (files shared op combine on-death init)
   (let (n (count files))
-    (if (< n *check-min-parallel*)
+    (if (not (project-parallel-worth-it? files))
       (combine init (project-pfold-run op (cons shared files)))
       (let (cores (project-pool-size)
             nchunks (math/min n (* cores *check-oversample*))
@@ -275,7 +310,7 @@ module included), built from the whole `files` universe — the KI-17 reachabili
 
 (defn- project-pfold-files (files op combine on-death init)
   (let (n (count files))
-    (if (< n *check-min-parallel*)
+    (if (not (project-parallel-worth-it? files))
       (combine init (project-pfold-run op files))
       (let (cores (project-pool-size)
             nchunks (math/min n (* cores *check-oversample*))

@@ -53,7 +53,7 @@ fail=0
 
 for tree in $trees; do
   case "$tree" in
-    scripts) files=(scripts/*.blsp) ;;
+    scripts) files=(scripts/**/*.blsp) ;;  # **/: `scripts/bench/` too — a generator that EMITS Brood is Brood, and the one that was not could not be checked (ADR-386)
     *)       files=("$tree"/**/*.blsp) ;;
   esac
   if [ "${#files[@]}" -eq 0 ]; then

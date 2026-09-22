@@ -15532,3 +15532,20 @@ of writing the head `contract/shim`, which on a cold boot would have to resolve 
 prelude is still being built — the KI-81 shape. Callgrind, debug, image live: empty file
 80.84M → 78.99M, `(io/puts 0)` 101.06M → 99.29M, against a 78.68M upper bound from deleting
 the machinery outright. Guard reads `BROOD_IMAGE_TRACE` both ways in one test.
+
+## 2026-09-22 (4) — scaling item 3: the check was already parallel; the gate in front of it counted files (ADR-386)
+
+Finding 2's "one core of twelve" was not a missing mechanism. The per-file walk fans across
+the pool on both paths and has since the dependency recorder moved onto the heap; the gate
+is `*check-min-parallel*` = **2000 files**, and the rig is 1 000 — so 60 MB of work read as
+"small project, check in-process". The threshold was calibrated when huge meant 100 000
+files of ~180 lines, where file count *is* work. It now also parallelises on 7 MB of source,
+the same calibration in the quantity that drives the cost. On a 302 × 3 067 rig (debug):
+55.9 s wall / 66.0 s user sequential → **8.8 s / 98.3 s**, user/wall 1.18 → **11.1**, which
+clears the queue's ≥ 6 gate. The guard is a differential over a warning-heavy fixture, and
+the fixture is the interesting half: it only catches anything because each module reaches a
+*different* std module from its body, the lazy-load shape of KI-137 — deleting
+`project-preload!` reds it now and did not before those references existed. Also replaced
+`scripts/bench/gen-project.py` with `gen-project.blsp`: a generator that emits Brood cannot
+be static-checked while it is written in another language, which is how the Python one came
+to emit a pre-ADR-302 argument order for a year (CLAUDE.md's "two files no gate can see").
