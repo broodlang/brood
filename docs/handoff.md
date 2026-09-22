@@ -34,9 +34,8 @@ everything"). Guards:
 **What this leaves.** (a) The residual above, +5.9M instructions on the startup row against 136b14d7:
 +2.8M on an empty file (ADR-382's def sites in the prelude image, 802 → 1328 entries, plus a
 larger prelude) and +3.1M across `io`'s load — under the wall's resolution, recorded in KI-182,
-worth a lazy def-site decode if boot ever matters more. (b) `(math/max 1 2)` lowers `not` on
-the OLD binary too: a pre-existing caller in `math`'s load, one probe away
-(`BROOD_JIT_DUMP_IR=1`, then rebind `not` under `%load-module-source` for a trace). (c) The
+worth a lazy def-site decode if boot ever matters more. (b) ~~`(math/max 1 2)` lowers `not` on the OLD binary too~~ — CLOSED later the same day: the image
+replay re-ran the arity diagnostic per impl and `nth`'s guard called `not` (devlog 2026-09-22). (c) The
 benchmark column at 422c92a5 carries the +5% startup as measured; the next refresh takes it
 back. (d) CI's bedit smoke: bedit's `elixir_playground_test` asserts an `elixir` on PATH.
 

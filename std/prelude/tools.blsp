@@ -883,7 +883,12 @@ dispatch: `(json/encode r)` does not fail to load, it fails to find an impl. Mea
 boot-installed image and the require race already fixed, 97 of the suite\'s 167 failures were
 exactly this, `ability Response/send-response: no impl for :http/response` and its kind."
   (let (regs (or (get (or *std-impls* {}) key) []))
-    (doseq (r regs) (%register-impl (get r 0) (get r 1) (get r 2) (get r 3) (get r 4)))
+    ;; The registration proper, not `%register-impl`: the arity diagnostic ran when the
+    ;; `impl` form did, as the image was written. Re-running it here cost every load of a
+    ;; module with impls ~13 `not` calls per impl through `take-while`/`nth`, which put `not`
+    ;; past the JIT's tier threshold on `math`'s twelve — Cranelift instantiated to compile
+    ;; `not` in every short run that touched `math` or `datetime` (found under KI-182).
+    (doseq (r regs) (%install-impl (get r 0) (get r 1) (get r 2) (get r 3) (get r 4)))
     (count regs)))
 
 (def- *std-regs* nil)
@@ -1906,6 +1911,13 @@ resolution; `%impl-for` is what picks the winner."
   hot-reload (silent); a strictly lower-tier registration is ignored (a higher tier holds the
   slot). Read-modify-write of `*impls*` — register at load time, as top-level `impl` does."
   (%register-impl-check-arity aname op f)
+  (%install-impl aname op key f from))
+
+(defn- %install-impl (aname op key f from)
+  "The registration itself — precedence, the cross-module conflict warning, the two registry
+writes — without `%register-impl`'s arity diagnostic. `%register-impl` is the entry an `impl`
+form takes; this is what a replay from the stdlib image takes, whose impls were checked when
+the image was written."
   (let (op-key [aname op]
         prov-key [aname op key]
         ; presence, not truthiness: a root/REPL/app incumbent records `from` = nil, so a

@@ -353,23 +353,29 @@ front of an accumulated remainder wants; a vector last is converted."
   ;; inlines to a slab read — whereas the variadic-only definition deferred the
   ;; whole thing to the tree-walker. The `& default` arm keeps the explicit-default
   ;; behaviour for the rarer 3-arg call.
-  ((coll i) (cond
-              (not (int? i)) (%nth-bad-index coll i)
-              (vector? coll)
-                (if (and (>= i 0) (< i (%vector-length coll))) (%vector-ref coll i) nil)
-              (bytes? coll) (if (and (>= i 0) (< i (%byte-length coll))) (%byte-at coll i) nil)
-              else (%nth-seq-or-fail coll i nil)))
-  ((coll i & default) (cond
-                        (not (int? i)) (%nth-bad-index coll i)
-                        (vector? coll)
-                          (if (and (>= i 0) (< i (%vector-length coll)))
-                            (%vector-ref coll i)
-                            (first default))
-                        (bytes? coll)
-                          (if (and (>= i 0) (< i (%byte-length coll)))
-                            (%byte-at coll i)
-                            (first default))
-                        else (%nth-seq-or-fail coll i (first default)))))
+  ;; The index guard is `(if (int? i) … bad)`, never `(not (int? i))` as a `cond` test:
+  ;; `not` is a prelude closure, so that spelling was a Brood call on EVERY `nth` — and
+  ;; enough of them in one module load (`for` over the image's impl records indexes with
+  ;; `nth`) to tier `not` and instantiate Cranelift at boot (KI-182's watch item).
+  ((coll i) (if (int? i)
+              (cond
+                (vector? coll)
+                  (if (and (>= i 0) (< i (%vector-length coll))) (%vector-ref coll i) nil)
+                (bytes? coll) (if (and (>= i 0) (< i (%byte-length coll))) (%byte-at coll i) nil)
+                else (%nth-seq-or-fail coll i nil))
+              (%nth-bad-index coll i)))
+  ((coll i & default) (if (int? i)
+                        (cond
+                          (vector? coll)
+                            (if (and (>= i 0) (< i (%vector-length coll)))
+                              (%vector-ref coll i)
+                              (first default))
+                          (bytes? coll)
+                            (if (and (>= i 0) (< i (%byte-length coll)))
+                              (%byte-at coll i)
+                              (first default))
+                          else (%nth-seq-or-fail coll i (first default)))
+                        (%nth-bad-index coll i))))
 ;; `seqable` rather than nth's exact domain, which `%nth-seq-or-fail` above closes at
 ;; vector / bytes / list / record: `seqable` additionally admits a set and a plain map,
 ;; both of which error at runtime. That over-approximation is deliberate — a RECORD is a
