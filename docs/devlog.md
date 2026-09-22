@@ -2,6 +2,21 @@
 
 Chronological record of work sessions. Newest at the bottom.
 
+## 2026-09-22 — the image replay re-ran the arity diagnostic per impl, and `nth` called `not` on every call
+
+KI-182's watch item. `(math/max 1 2)` compiled `not` on the previous column's binary too, so it
+was not the contracts regression. The uncaught-error probe (rebind `not` under
+`%load-module-source`, raise on the Nth call, read the top-level report's frames) named the
+callers: `%replay-std-impls!` registering each of `math`'s twelve impls through
+`%register-impl`, whose arity diagnostic walks the impl's arglist with `take-while` — a check
+the `impl` form ran when the image was written, repeated at every load — and `nth` from the
+replay's `for` loop, whose index guard was `(not (int? i))` as a `cond` test: a prelude closure
+call on every `nth` in the language. `%install-impl` is the registration without the
+diagnostic and the replay calls it; `nth` tests `int?` positively. `not` calls per load:
+`math` 164 → 20, `io` 127 → 16, `datetime` 291 → 14; no arm lowers on any module load, and a
+program that does load three modules now tiers `nth` (real work) rather than `not` (a guard).
+Guard `crates/cli/tests/image_replay_stays_cold.rs`, both halves sabotage-verified.
+
 ## 2026-09-22 — KI-182 fixed: contracts are not consulted unarmed, in either of their two per-call shapes
 
 The `startup` row's +6% at the 422c92a5 column was two callers of `not` with one shape — a

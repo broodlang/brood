@@ -11841,7 +11841,18 @@ loads on its first armed call, and every unarmed boot stops localizing and freez
 (2) def sites decode on the first `def-site` question rather than at boot. Until one is taken
 the row carries +6% CPU as a feature cost; wall at millisecond resolution reads flat.
 
-**Watch, not this KI:** `(math/max 1 2)` lowers `not` on the 136b14d7 binary as well — something in `math`'s load calls `not` past the threshold, pre-dating all of this. Same tool finds it (`BROOD_JIT_DUMP_IR=1`, then rebind `not` under `%load-module-source` to record a trace).
+**The watch item, closed 2026-09-22:** `(math/max 1 2)` lowered `not` on the 136b14d7 binary as
+well. Rebinding `not` under `%load-module-source` to raise an uncaught error on its Nth call
+named the chain from the top-level report: `%replay-std-impls!` → `%register-impl` →
+`%register-impl-check-arity` → `%impl-fn-arity` → `take-while` (the arity DIAGNOSTIC, re-run
+per impl at every replay from the image although the `impl` form ran it when the image was
+written), and beside it `nth` from the replay's `for` loop — whose first `cond` test was
+`(not (int? i))`, a Brood call on every `nth` in the language. Two changes: the replay takes
+the registration proper (`%install-impl`, split out of `%register-impl`), and `nth` tests
+`int?` positively. `not` calls during a load: `math` 164 → 20, `io` 127 → 16, `datetime`
+291 → 14; no arm lowers on any of them. Guard `crates/cli/tests/image_replay_stays_cold.rs`
+(count under 64 AND no lowered arm, `[image] math` required so a source load cannot pass it
+vacuously); each half sabotage-verified.
 
 **Lesson:** a hook called per definition is a hot loop at load time, and the JIT's tier
 threshold turns a cheap decline into a Cranelift instantiation per process. Gate policy calls
