@@ -135,6 +135,7 @@ fn rewrite_arm_handles_rewrites_every_embedded_handle() {
         shared_published: std::sync::atomic::AtomicBool::new(false),
         fn_name: None,
         src_file: None,
+        module: None,
         capture_names: Box::new([]),
         #[cfg(feature = "jit")]
         inline_name: None,
@@ -277,6 +278,7 @@ fn vm_run_bc_captures_and_resumes_a_suspend() {
         shared_published: std::sync::atomic::AtomicBool::new(false),
         fn_name: None,
         src_file: None,
+        module: None,
         capture_names: Box::new([]),
         #[cfg(feature = "jit")]
         inline_name: None,
@@ -468,6 +470,7 @@ fn jit_lowers_and_runs_a_straight_line_int_arm() {
         shared_published: std::sync::atomic::AtomicBool::new(false),
         fn_name: None,
         src_file: None,
+        module: None,
         capture_names: Box::new([]),
         #[cfg(feature = "jit")]
         inline_name: None,
@@ -560,6 +563,7 @@ fn jit_lowers_and_runs_an_if_with_comparison() {
         shared_published: std::sync::atomic::AtomicBool::new(false),
         fn_name: None,
         src_file: None,
+        module: None,
         capture_names: Box::new([]),
         #[cfg(feature = "jit")]
         inline_name: None,
@@ -663,6 +667,7 @@ fn jit_lowers_and_runs_a_self_recursive_int_loop() {
         shared_published: std::sync::atomic::AtomicBool::new(false),
         fn_name: None,
         src_file: None,
+        module: None,
         capture_names: Box::new([]),
         #[cfg(feature = "jit")]
         inline_name: None,
@@ -811,6 +816,7 @@ fn jit_lowers_an_arm_ending_in_a_tail_call() {
         shared_published: std::sync::atomic::AtomicBool::new(false),
         fn_name: None,
         src_file: None,
+        module: None,
         capture_names: Box::new([]),
         #[cfg(feature = "jit")]
         inline_name: None,
@@ -895,6 +901,7 @@ fn jit_lowers_an_arm_ending_in_a_tail_call() {
         shared_published: std::sync::atomic::AtomicBool::new(false),
         fn_name: None,
         src_file: None,
+        module: None,
         capture_names: Box::new([]),
         #[cfg(feature = "jit")]
         inline_name: None,
@@ -984,6 +991,7 @@ fn jit_lowers_an_arm_ending_in_a_tail_call() {
         shared_published: std::sync::atomic::AtomicBool::new(false),
         fn_name: None,
         src_file: None,
+        module: None,
         capture_names: Box::new([]),
         #[cfg(feature = "jit")]
         inline_name: None,
@@ -1065,6 +1073,7 @@ fn jit_lowers_fused_prims_map_and_overflow() {
         shared_published: std::sync::atomic::AtomicBool::new(false),
         fn_name: None,
         src_file: None,
+        module: None,
         capture_names: Box::new([]),
         #[cfg(feature = "jit")]
         inline_name: None,
@@ -1233,6 +1242,7 @@ fn jit_tier_compiles_a_hot_arm_then_runs_native() {
         shared_published: std::sync::atomic::AtomicBool::new(false),
         fn_name: None,
         src_file: None,
+        module: None,
         capture_names: Box::new([]),
         #[cfg(feature = "jit")]
         inline_name: None,
@@ -1443,6 +1453,7 @@ fn vm_run_bc_runs_a_tiered_arm_via_the_hook() {
         shared_published: std::sync::atomic::AtomicBool::new(false),
         fn_name: None,
         src_file: None,
+        module: None,
         capture_names: Box::new([]),
         #[cfg(feature = "jit")]
         inline_name: None,
@@ -1578,6 +1589,7 @@ fn jit_speedup_vs_vm() {
         shared_published: std::sync::atomic::AtomicBool::new(false),
         fn_name: None,
         src_file: None,
+        module: None,
         capture_names: Box::new([]),
         #[cfg(feature = "jit")]
         inline_name: None,
@@ -1707,6 +1719,7 @@ fn ki26_arm(nslots: usize, inline_nslots: usize) -> CompiledArm {
         shared_published: std::sync::atomic::AtomicBool::new(false),
         fn_name: None,
         src_file: None,
+        module: None,
         capture_names: Box::new([]),
         dbg_name: None,
         inline_name: None,
@@ -1855,6 +1868,7 @@ fn tiering_advisories_route_to_the_predicate_they_name() {
         shared_published: std::sync::atomic::AtomicBool::new(false),
         fn_name: None,
         src_file: None,
+        module: None,
         capture_names: Box::new([]),
         #[cfg(feature = "jit")]
         inline_name: None,
@@ -2370,6 +2384,7 @@ fn jit_tier_declines_the_inlined_body_when_the_frame_was_built_small() {
         shared_published: std::sync::atomic::AtomicBool::new(true),
         fn_name: None,
         src_file: None,
+        module: None,
         capture_names: Box::new([]),
         inline_name: Some(value::intern("peer-inlined")),
         dbg_name: Some(value::intern("peer-inlined")),

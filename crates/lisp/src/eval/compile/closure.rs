@@ -301,6 +301,7 @@ pub(crate) fn compile_arm(
                                     shared_published: std::sync::atomic::AtomicBool::new(false),
                                     fn_name: trace_name,
                                     src_file: src_file.clone(),
+                                    module: scope.module,
                                     capture_names: capture_names.clone(),
                                     dbg_name: defn_name,
                                     // The resume arm is the spliced body; it must not
@@ -394,6 +395,7 @@ pub(crate) fn compile_arm(
         // site's file (a fn's calls are in its own source). Cold: once per arm
         // compile.
         src_file,
+        module: scope.module,
         capture_names,
         #[cfg(feature = "jit")]
         inline_name,

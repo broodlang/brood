@@ -731,6 +731,10 @@ pub struct CompiledArm {
     /// The source file this arm's body was read from (via `Heap::form_pos` at
     /// compile time), for error stack traces. `None` for REPL/eval'd code.
     pub src_file: Option<std::sync::Arc<str>>,
+    /// The module whose code this arm compiles — the closure's authoring module (ADR-383),
+    /// carried here so the error-position rule can tell generated code from a user's
+    /// without touching the heap (KI-184: a contract shim's positions are never reported).
+    pub module: Option<Symbol>,
     /// Recursive self-inlining (Phase B, the two-stage tiering upgrade, devlog
     /// 2026-06-17). `Some(name)` when this arm qualifies as a top-level no-capture
     /// recursive `defn` whose body the JIT can splice depth-1 of into its own frame

@@ -11,6 +11,10 @@ pub(crate) fn tag_pos(e: LispError, pos: Option<Pos>) -> LispError {
     }
 }
 
+/// The module the contract shim templates live in (ADR-385) — the one module whose code
+/// positions the error-position rule in [`attach_vm_trace`] never reports (KI-184).
+const CONTRACT_MODULE: &str = "contract";
+
 /// Run a [`Chunk`] frame from `*ip`, returning a [`ChunkExit`] to the driver
 /// ([`vm_run_bc`]). `*ip` is **resumed and updated in place**, so after a non-tail
 /// `Call` returns `ChunkExit::Call`, the driver re-enters here at the instruction
@@ -1197,15 +1201,46 @@ pub(crate) fn attach_vm_trace(e: &mut LispError, cur_arm: &CompiledArm, frames: 
     // Give it the innermost call site that HAS a position — the user form whose call led
     // into the positionless code — which is what the elided shape reported and what the
     // `:trace` already records. `or_pos`: a position a prim already tagged is never moved.
-    if e.pos.is_none() {
+    // A contract shim's own code is never the answer (KI-184). Since ADR-385 the shim
+    // templates live in `std/contract.blsp`, a positioned module. The ORIGINAL is thin, so
+    // its primitive runs INLINE in the shim's frame and its error is tagged with the shim's
+    // `(%contract-orig …)` instruction — line 135 of a file the user never wrote; an original
+    // that is not thin comes back through the same call, tagged by it. A shim is generated
+    // code: an error whose position the shim's own chunk owns (the running arm is a shim and
+    // the position is one of its instructions', or a pending shim frame's call site equals it)
+    // is treated as untagged, and the site the user is told is the innermost positioned call
+    // OUTSIDE any shim frame — the call that entered it. A shim frame is known by its arm's
+    // authoring MODULE (`CompiledArm::module`, ADR-383): this runs after the driver unwound
+    // its roots, so a frame's env may not be read here; the arm's `src_file` and `fn_name`
+    // are the ORIGINAL's, carried over by `contract_bind`; the module is the shim's own.
+    // Ownership rather than the file:
+    // a primitive's error carries a position only, and a real error from a deeper user
+    // frame surfaces with that frame as the running arm, never through here.
+    let contract_module = value::intern(CONTRACT_MODULE);
+    let is_shim_arm = |arm: &CompiledArm| arm.module == Some(contract_module);
+    let chunk_owns = |arm: &CompiledArm, p: Pos| {
+        arm.chunk
+            .as_ref()
+            .is_some_and(|c| c.code.iter().any(|i| i.call_pos() == Some(p)))
+    };
+    let tagged_by_shim = e.pos.is_some_and(|ep| {
+        (is_shim_arm(cur_arm) && chunk_owns(cur_arm, ep))
+            || frames
+                .iter()
+                .rev()
+                .filter(|f| is_shim_arm(&f.arm))
+                .any(|f| call_site(f).1 == Some(ep))
+    });
+    if e.pos.is_none() || tagged_by_shim {
         let inner = frames
             .iter()
             .rev()
+            .filter(|f| !is_shim_arm(&f.arm))
             .map(call_site)
             .find(|(_, p)| p.is_some());
         if let Some((f, Some(p))) = inner {
             e.pos = Some(p);
-            if e.file.is_none() {
+            if e.file.is_none() || tagged_by_shim {
                 e.file = f.map(|s| s.to_string());
             }
         }

@@ -12,6 +12,13 @@ sysctl that moves under you — that file's last section has the one-line check)
 questions are answerable here; check that file's "what this box CAN answer" before deferring
 anything.
 
+## 2026-09-22 (later) — KI-184 fixed; the `(not …)` sweep is in; KI-183 is the only watch
+
+KI-184 (ADR-385's shim positions) is fixed in `attach_vm_trace` with `CompiledArm::module`
+(devlog 2026-09-22). The tree's only open item is the KI-183 watch (a monitor flake seen once
+in CI). Item 4 of the perf queue — dispatch of gate-refused arms, `compute-frontier.md` §7.12's
+leaf admission — is next and has not started.
+
 ## 2026-09-22 — KI-182 FIXED, residual included; the benchmark column is at 653d41d9; the tree has no open regression
 
 Both callers closed (devlog 2026-09-22): the per-`def` contract offer and the per-op-result

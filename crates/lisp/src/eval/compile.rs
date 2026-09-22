@@ -541,6 +541,7 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                 shared_published: std::sync::atomic::AtomicBool::new(false),
                 fn_name: None,
                 src_file: None,
+                module: None,
                 capture_names: Box::new([]),
                 #[cfg(feature = "jit")]
                 inline_name: None,

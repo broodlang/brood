@@ -2,6 +2,19 @@
 
 Chronological record of work sessions. Newest at the bottom.
 
+## 2026-09-22 — KI-184 fixed: a contract shim's own positions are never the reported one
+
+ADR-385 moved the shim templates into `std/contract.blsp`, a positioned module, so an error
+escaping a contracted function's ORIGINAL — thin, hence run inline in the shim's frame — was
+tagged with the shim's `(%contract-orig …)` instruction, line 135 of a file the user never
+wrote. `CompiledArm` now records the closure's authoring module (ADR-383's `Closure::module`),
+and `attach_vm_trace` treats a position owned by the `contract` module's code as untagged
+before applying KI-181's innermost-positioned-site rule outside shim frames. Keyed on the
+module because `contract_bind` gives the shim the original's name and the arm's file is the
+caller's; not on the frame's env, which the driver has already unwound (the first cut killed
+the test process, and the suite's summary line looks the same for a crash and a wrong value).
+`vm_prim_error_pos_test` reads 33 armed and unarmed, 135 with the rule disabled.
+
 ## 2026-09-22 — the `(not (pred x))` guard sweep in the prelude's hot paths: neutral on the rows, fewer `not` activations at load
 
 KI-182's lesson applied once more: `not` is a prelude closure, so `(not (pred x))` as a
