@@ -197,7 +197,7 @@ pub(crate) fn contract_apply(
     // nicety: the offer runs at every declared `def`, and a Brood call per definition put
     // `not` past the JIT's tier threshold while `io` materialised, so every short
     // `brood file` run instantiated Cranelift at boot to compile it (KI-182: `startup` +6%).
-    if !contracts_armed() && !forced(heap, name)? {
+    if !contracts_armed() && !heap.is_contract_forced(name) {
         return Ok(false);
     }
     let Some(hook) = heap.env_get(EnvId::GLOBAL, value::intern(HOOK)) else {
@@ -234,18 +234,6 @@ pub(crate) fn contract_apply(
     }
     contract_bind(heap, name, wrapped);
     Ok(true)
-}
-
-/// The table `%contract-force!` marks a name in — `sig!`'s runtime half, enforced whatever
-/// the mode. Unbound while the prelude is still being built, in which case nothing is forced.
-const FORCED: &str = "%*contract-forced*";
-
-/// Whether `name` is `sig!`-forced: present in the prelude's forced table.
-fn forced(heap: &mut Heap, name: Symbol) -> Result<bool, LispError> {
-    let Some(Value::Table(id)) = heap.env_get(EnvId::GLOBAL, value::intern(FORCED)) else {
-        return Ok(false);
-    };
-    crate::core::table::has(heap, id, Value::symbol(name))
 }
 
 /// Bind `shim` as the global `name`, carrying over what the current binding records beside

@@ -7,8 +7,8 @@ Chronological record of work sessions. Newest at the bottom.
 The `startup` row's +6% at the 422c92a5 column was two callers of `not` with one shape — a
 Brood policy function entered on every event so it could decide, itself, that contracts are
 off. (1) `contract_apply` applied `%contract-wrap` at every declared `def`; it now returns
-first when `!contracts_armed()` and the name is not `sig!`-forced (`%*contract-forced*`, read
-with `table::has`). (2) `impl` wrapped every op body under a declared `:->` return in
+first when `!contracts_armed()` and the name is not `sig!`-forced (`Heap::is_contract_forced`;
+ADR-383, merged under this, moved the forced names into the kernel). (2) `impl` wrapped every op body under a declared `:->` return in
 `%contract-check-op-result`, whose first test was `(not (%contracts-armed?))` — a call plus a
 `not` per ability-op RESULT in every program, armed or not; `io` declares no sigs, and this
 was its caller. The emission is now `(let (%op-result (do body…)) (if (%contracts-armed?)

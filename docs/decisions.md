@@ -24668,7 +24668,7 @@ offer (`contract_apply` → `%contract-wrap`) and the per-op-result check (`impl
 a load-time hot loop: the policy's `not` crossed the JIT's tier threshold while `io`
 materialised and every short `brood file` run instantiated Cranelift at boot (`startup` +6%
 at the 422c92a5 benchmark column). The rule now: the kernel reads the armed flag (a cached
-bool) and the forced table before calling the hook, and `impl` emits the armed test inline
+bool) and the forced set (`is_contract_forced`, ADR-383) before calling the hook, and `impl` emits the armed test inline
 around the call. Policy still owns WHAT a contract is and what a mismatch says; the mechanism
 owns WHETHER the question is asked, because it already holds the fact. `%contract-wrap` keeps
 its own unarmed test (a `sig!`-forced name still reaches it), so a direct call behaves as before.
