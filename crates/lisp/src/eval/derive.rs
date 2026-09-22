@@ -530,7 +530,7 @@ impl Drop for EagerLoadScope {
 /// package context, which during a dependency's load is that dependency's — a std `json/parse`
 /// missing while a dependency with its own `json` module is mid-load would otherwise be sent
 /// to `dep/json`. `/foo` (the root escape) and the bare `/` have no module.
-fn module_of_resolved(s: Symbol) -> Option<Symbol> {
+pub(crate) fn module_of_resolved(s: Symbol) -> Option<Symbol> {
     let name = value::symbol_name_ref(s);
     let last = name.rfind('/')?;
     if last == 0 {
@@ -558,6 +558,17 @@ fn module_of_resolved(s: Symbol) -> Option<Symbol> {
 /// are [`ensure_required`]'s: a module that cannot be found, or a `still loading` cycle,
 /// falls through to the plain unbound error; an error inside a found module propagates.
 pub(crate) fn global_miss(heap: &mut Heap, env: EnvId, sym: Symbol) -> LispResult {
+    // An UNCONTRACTED alias (ADR-383) with no binding: the arm was compiled while its
+    // module's sibling held a contract shim, and the globals have since been rolled back
+    // under it (an `%isolate` restore keeps the shared body cache). The public name is
+    // the reference's meaning either way — it resolves to whatever the sibling holds
+    // now, a shim or the plain closure, so a stale alias only ever checks more.
+    if let Some(public) = crate::builtins::contracts::alias_public(sym) {
+        return match heap.env_get(env, public) {
+            Some(v) => Ok(v),
+            None => global_miss(heap, env, public),
+        };
+    }
     if let Some(module) = module_of_resolved(sym) {
         // A module's reference to its OWN not-yet-defined name while it is mid-load:
         // never re-require it (mirrors `require_qualified_head`).

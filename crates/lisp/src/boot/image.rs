@@ -108,7 +108,10 @@ pub(crate) fn register(primitives: &mut crate::builtins::Primitives) {
 /// v7 (ADR-370) appends, after the macro names, the SIGNATURES of every imaged module's
 /// functions — `(qualified name, type-form text)` pairs, declared or inferred at build time —
 /// so a checker can read a callee's type from the footer without materialising its module.
-const MAGIC: &[u8] = b"brood-image-v7\n";
+/// v8 (ADR-383): the closure record — the wire codec's, shared with `dist` — carries the
+/// closure's authoring module, its contract boundary. A v7 reader would take the extra
+/// optional symbol for the next entry's kind byte.
+const MAGIC: &[u8] = b"brood-image-v8\n";
 
 /// Entry kinds inside a section.
 const KIND_GLOBAL: u8 = 0;
@@ -1185,7 +1188,8 @@ pub(crate) fn write_prelude_image(
 /// v3 (2026-09-12): the header gained the gensym floor. It used to live in the header of
 /// the ADR-138 text cache beside this file — the one fact that made the text cache
 /// impossible to delete without carrying it here first.
-const PRELUDE_MAGIC: &[u8] = b"brood-prelude-image-v3\n";
+/// v4 (ADR-383): the closure record carries its authoring module (the wire's v8 field).
+const PRELUDE_MAGIC: &[u8] = b"brood-prelude-image-v4\n";
 
 /// The image header: magic, the build fingerprint, and the gensym counter the writing boot
 /// reached. A reader must start its own `gensym` above that counter, or a fresh name could

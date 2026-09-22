@@ -630,3 +630,47 @@
   "Entry: the docstring survives the shim."
   (* n 2))
 (sig! c-documented (int -> int))
+
+;; --- the module boundary (ADR-383) ---------------------------------------------------
+;; A contract guards a MODULE's boundary, not every call: the fixture module's own calls
+;; to its contracted `f` — direct, through a thin wrapper, from a nested `fn`, from a named
+;; loop, with `f` handed over as a value — read the uncontracted binding, and only a call
+;; from OUTSIDE the module (this file is another module) meets the shim. `sig!` has no
+;; boundary. The fixture declares with `sig`, so the outside half depends on the mode
+;; (`nest test` arms; the in-process suite wrapper does not) — the inside half never does.
+(%load-string
+  "(defmodule contract-boundary-fixture)
+(sig f (int -> int))
+(check-allow :type-mismatch (defn f (x) (str \"f:\" x)))
+(defn direct (x) (let (y x) (f y)))
+(defn wrapper (x) (f x))
+(defn nested (xs) (map xs (fn (x) (f x))))
+(defn named-loop (n acc) (if (= n 0) acc (named-loop (- n 1) (f n))))
+(defn as-value (xs) (map xs f))
+(defn hot (n acc) (if (= n 0) acc (hot (- n 1) (+ acc (count (f \"z\"))))))
+(defn forced (x) (str \"forced:\" x))
+(sig! forced (int -> int))
+(defn via-forced (x) (forced x))")
+
+(defn- boundary-raises? (thunk)
+  (= :contract (try (do (thunk) :no-error) (catch e (get e :kind)))))
+
+(describe "a contract guards the module boundary"
+  (test "a module's own calls to its contracted function are not checked"
+    (assert= "f:x" (contract-boundary-fixture/direct "x"))
+    (assert= "f:x" (contract-boundary-fixture/wrapper "x"))
+    (assert= (list "f:x") (contract-boundary-fixture/nested ["x"]))
+    (assert= "f:1" (contract-boundary-fixture/named-loop 3 nil))
+    (assert= (list "f:x") (contract-boundary-fixture/as-value ["x"])))
+  (test "the boundary holds once the caller has tiered up"
+    (assert= 90000 (contract-boundary-fixture/hot 30000 0)))
+  (test "a call from outside the module is checked when contracts are armed"
+    (assert= (%contracts-armed?) (boundary-raises? (fn () (contract-boundary-fixture/f "x")))))
+  (test "sig! has no boundary: the module's own call is checked in every mode"
+    (is (boundary-raises? (fn () (contract-boundary-fixture/via-forced "x"))))
+    (is (boundary-raises? (fn () (contract-boundary-fixture/forced "x")))))
+  (test "a reload keeps the module's own calls on the new body"
+    (%load-string "(defmodule contract-boundary-fixture) (check-allow :type-mismatch (defn f (x) (str \"v2:\" x)))")
+    (assert= "v2:x" (contract-boundary-fixture/wrapper "x"))
+    (assert= "v2:x" (contract-boundary-fixture/direct "x"))
+    (assert= (%contracts-armed?) (boundary-raises? (fn () (contract-boundary-fixture/f "x"))))))

@@ -202,6 +202,17 @@
           out (pty-drain ""))
       (assert= "PIPE" (string/trim out)))))
 
+;; The child must NOT inherit the pty itself. A child holding the MASTER keeps its own
+;; terminal open, so closing ours never hangs it up: an `sh -i` spawned under the pty
+;; outlived the editor that closed it (2026-09-21), reading a terminal nobody could reach.
+;; The master and slave are opened close-on-exec; the child gets its stdio through dups.
+(describe "proc: a pty child holds only its own terminal"
+  :isolated (test "the master is not among the child's descriptors"
+    (let (_p (os/spawn-pty "sh" ["-c" "ls -l /proc/self/fd 2>/dev/null || echo nofd"])
+          out (pty-drain ""))
+      (when (not (includes? out "nofd"))
+        (is (not (includes? out "ptmx")))))))
+
 (describe "proc: a pty carries one channel, not two"
   ;; A terminal has no separate error stream — the child's stderr IS its terminal.
   ;; Anything expecting `[:proc-err …]` from a pty is expecting the wrong shape.

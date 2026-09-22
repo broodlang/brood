@@ -39,6 +39,7 @@ pub(crate) fn compile_arm(
     self_name: Option<Symbol>,
     defn_name: Option<Symbol>,
     trace_name: Option<Symbol>,
+    module: Option<Symbol>,
 ) -> Option<CompiledArm> {
     // Grab the first body form before `body` is shadowed by the compiled Node —
     // its recorded reader position carries the defining source file (`src_file`).
@@ -46,6 +47,7 @@ pub(crate) fn compile_arm(
     let nrequired = required.len();
     let noptional = optionals.len();
     let mut scope = Scope::with_params_enclosing(&[], enclosing);
+    scope.module = module;
     // The self-call optimization applies only to a plain fixed-arity closure (no
     // `&optional`/`&` rest), where a tail call passing exactly `nrequired` args
     // re-runs this arm verbatim. With optionals/rest the frame-fill differs per
@@ -487,6 +489,13 @@ pub(crate) fn compile_closure_timed(heap: &Heap, id: ClosureId) -> Option<Compil
     let defn_name: Option<Symbol> = if cl.env.is_none() { cl.name } else { None };
     // Any closure's name (top-level or not), for error stack traces (`fn_name`).
     let trace_name: Option<Symbol> = cl.name;
+    // The contract boundary (ADR-383): what the closure records of its authorship, else
+    // — for a `def`'d closure whose construction recorded nothing, the tree-walked
+    // `(def M/f (fn …))` at a module's top level — the module of its own qualified name.
+    let module: Option<Symbol> = cl.module.or_else(|| {
+        cl.name
+            .and_then(crate::builtins::contracts::module_of_qualified)
+    });
     // Snapshot every arm's shape + body (cloning ends the `cl` borrow), then compile
     // each via [`compile_arm`]. An arm is VM-eligible when its body — and every real
     // `&optional` default form — is core vocabulary; otherwise that arm defers
@@ -523,6 +532,7 @@ pub(crate) fn compile_closure_timed(heap: &Heap, id: ClosureId) -> Option<Compil
             self_name,
             defn_name,
             trace_name,
+            module,
         )
         .map(|mut arm| {
             // Shared-JIT identity (the spawn lever, ADR-101): a simple fixed-arity

@@ -64,9 +64,11 @@ fn nest(dir: &Path, cache: &Path, contracts: Option<&str>, args: &[&str]) -> Run
     }
 }
 
-/// A project whose `main` reports, for two calls, whether a contract raised: `lies` is
-/// declared `int -> int` and returns a string (the callee's fault); `string/pad-left` is
-/// handed an int where its declared `string` belongs (the caller's fault).
+/// A project whose `main` reports, for three calls, whether a contract raised: `liar/lies`
+/// is declared `int -> int` and returns a string (the callee's fault) — called from `main`,
+/// across the module boundary, and from `liar/inside`, within it, where a contract does not
+/// apply (ADR-383); `string/pad-left` is handed an int where its declared `string` belongs
+/// (the caller's fault).
 fn write_project(root: &Path) {
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::create_dir_all(root.join("tests")).unwrap();
@@ -76,21 +78,28 @@ fn write_project(root: &Path) {
     )
     .unwrap();
     std::fs::write(
-        root.join("src/main.blsp"),
-        "(defmodule main)\n\
+        root.join("src/liar.blsp"),
+        "(defmodule liar)\n\
          (sig lies (int -> int))\n\
          (check-allow :type-mismatch (defn lies (n) \"not an int\"))\n\
+         (defn inside (n) (lies n))\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/main.blsp"),
+        "(defmodule main (:use liar))\n\
          (defn- report (label thunk)\n\
          \x20\x20(io/puts label (try (thunk) (catch e (str \"RAISED blame=\" (get e :blame) \" :: \" (error-message e))))))\n\
          (defn main ()\n\
          \x20\x20(report \"own:\" (fn () (lies 1)))\n\
+         \x20\x20(report \"inside:\" (fn () (inside 1)))\n\
          \x20\x20(report \"std:\" (fn () (check-allow :type-mismatch (string/pad-left 5 \"x\"))))\n\
          \x20\x20(io/puts \"image:\" (get (stdimage/status) :installed)))\n",
     )
     .unwrap();
     std::fs::write(
         root.join("tests/main_test.blsp"),
-        "(defmodule main-test (:use test) (:use main))\n\
+        "(defmodule main-test (:use test) (:use liar))\n\
          (describe \"contracts in nest test\"\n\
          \x20\x20(test \"a lying sig raises under the default\"\n\
          \x20\x20\x20\x20(io/puts \"test-own:\" (try (lies 1) (catch e (str \"RAISED blame=\" (get e :blame)))))))\n",
@@ -121,8 +130,14 @@ fn nest_run_enforces_own_and_std_contracts_by_default() {
     );
     assert!(
         ran.out
-            .contains("own: RAISED blame=:callee :: cdef/main/lies: result expected int"),
+            .contains("own: RAISED blame=:callee :: cdef/liar/lies: result expected int"),
         "the project's own lying sig must raise, blaming the callee:\n{}",
+        ran.out
+    );
+    // …but not for the module's own call to it: a contract guards the boundary (ADR-383).
+    assert!(
+        ran.out.contains("inside: not an int"),
+        "a module's call to its own contracted function must not be checked:\n{}",
         ran.out
     );
     assert!(

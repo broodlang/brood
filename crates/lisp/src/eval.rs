@@ -214,7 +214,7 @@ fn eval_tail_loop(
         match expr.unpack() {
             ValueRef::Sym(s) => {
                 return match heap.env_get(env, s) {
-                    Some(v) => Ok(v),
+                    Some(v) => Ok(crate::builtins::contracts::boundary_resolve(heap, env, v)),
                     // A miss may autoload the name's module (ADR-335) — a collection — so
                     // the form is rooted across it for the position tag.
                     None => heap.root_scope(|heap| {
@@ -624,6 +624,10 @@ fn eval_tail_loop(
                     {
                         heap.reserve_global(name);
                     }
+                    // The name's uncontracted alias, if one is bound, follows every
+                    // rebinding (ADR-383) — before the hook below re-wraps a closure, and
+                    // for the rebindings the hook does not handle.
+                    crate::builtins::contracts::mirror_alias(heap, root, name, val);
                     // A closure whose name carries a declared signature is offered to the
                     // contract policy (ADR-381): armed, the binding becomes a checking
                     // shim; unarmed, this is one store lookup. Order-free — a `sig` above
@@ -654,7 +658,8 @@ fn eval_tail_loop(
                         expr = crate::eval::macros::macroexpand_all(heap, expr, env)?;
                         continue 'tail;
                     }
-                    return make_closure(heap, None, rest, env);
+                    let module = top_level_module(heap, env);
+                    return make_closure(heap, None, rest, env, module);
                 }
                 Some(SpecialForm::Quasiquote) => {
                     // One template, and no trailing tail — the same rule `quote`
@@ -817,7 +822,7 @@ fn eval_tail_loop(
                 // path roots `call_form` + `env` and re-derives the spine, exactly as
                 // the computed-head arm below does.
                 let v = match heap.env_get(env, s) {
-                    Some(v) => v,
+                    Some(v) => crate::builtins::contracts::boundary_resolve(heap, env, v),
                     None => {
                         let (v, new_call_form, new_env) = heap.root_scope(|heap| {
                             let call_form_r = heap.root(call_form);
@@ -964,6 +969,10 @@ fn eval_tail_loop(
                         // inner only), counts the reduction, and honours the deadline.
                         let inner =
                             eval(heap, head, cl_env).map_err(|e| e.or_form_pos(heap, call_form))?;
+                        // A wrapper forwarding to a contract shim of its own module
+                        // forwards to the original instead (the boundary, ADR-383).
+                        let inner = crate::builtins::contracts::boundary_redirect(heap, id, inner)
+                            .unwrap_or(inner);
                         // A redirect back to the *same* closure is direct self-recursion
                         // (`(defn hog () (hog))`), not a thin wrapper — fall through to
                         // the normal call path (which re-enters the `'tail:` loop, whose
@@ -1457,6 +1466,10 @@ fn bind_params(
     let n_opt = optionals.len();
 
     let scope = heap.new_env(Some(cl_env));
+    // The tree-walker's half of the contract boundary (ADR-383): a frame carries its
+    // closure's module, so a name this body resolves to a contract shim of that module
+    // reads the original (`boundary_resolve`), as a compiled arm's alias reference does.
+    crate::builtins::contracts::bind_frame_module(heap, scope, cl);
     for (i, &arg) in argv.iter().enumerate().take(required) {
         heap.env_define(scope, params[i], arg);
     }
@@ -2023,14 +2036,33 @@ fn arm_param_names(arm: &crate::core::value::ClosureArm) -> String {
     parts.join(" ")
 }
 
+/// Build a closure from a `(fn …)` form's cdr. `module` is the module whose source the
+/// form was written in (`Closure::module`, ADR-383): the tree-walker passes
+/// [`top_level_module`], a compiled arm the module it was itself compiled under.
 pub(crate) fn make_closure(
     heap: &mut Heap,
     name: Option<Symbol>,
     rest: Value,
     env: EnvId,
+    module: Option<Symbol>,
 ) -> LispResult {
     let tpl = parse_closure_template(heap, rest)?;
-    Ok(build_closure(heap, name, &tpl, env))
+    Ok(build_closure(heap, name, &tpl, env, module))
+}
+
+/// The module a `(fn …)` form the TREE-WALKER evaluates belongs to (ADR-383): the
+/// module being loaded, when the form is one of its top-level forms — `env` is the global
+/// scope and a `defmodule` file is open — else the module the enclosing tree-walked
+/// frame carries (`bind_frame_module`), else unknown. A tree-walked closure BODY runs in
+/// a frame, so a closure it builds at run time is never credited to whatever module
+/// happens to be loading then (a lazy load can open one mid-execution); unknown means
+/// contracted like a stranger's, which only ever checks more.
+pub(crate) fn top_level_module(heap: &Heap, env: EnvId) -> Option<Symbol> {
+    if heap.is_global(env) {
+        heap.compile_ns()
+    } else {
+        crate::builtins::contracts::frame_module(heap, env)
+    }
 }
 
 /// The hot closure-creation path: same as [`make_closure`] with `name = None`, but the
@@ -2040,8 +2072,14 @@ pub(crate) fn make_closure(
 /// creation. Each creation is then just the arm clone + env attach. The cache is
 /// gen-invalidated (see [`Heap::lookup_closure_template`]); a `fn_rest` with no stable
 /// handle key (never happens for a real `(fn …)` — its cdr is a pair) falls back to a
-/// plain parse.
-pub(crate) fn make_closure_cached(heap: &mut Heap, rest: Value, env: EnvId) -> LispResult {
+/// plain parse. `module` is the building arm's own (ADR-383): every closure a site builds
+/// is credited to it, including the memoised constant one — a site has one module.
+pub(crate) fn make_closure_cached(
+    heap: &mut Heap,
+    rest: Value,
+    env: EnvId,
+    module: Option<Symbol>,
+) -> LispResult {
     // Cache only a RUNTIME `fn_rest` handle: the cache is invalidated by the RUNTIME
     // `gen_version` (see `Heap::lookup_closure_template`), which tracks *only* RUNTIME
     // relocation. A LOCAL handle's slot can be reused for a different object by a minor
@@ -2052,7 +2090,7 @@ pub(crate) fn make_closure_cached(heap: &mut Heap, rest: Value, env: EnvId) -> L
         Some(p) if p.region() == crate::core::value::RUNTIME => p,
         _ => {
             let tpl = parse_closure_template(heap, rest)?;
-            return Ok(build_closure(heap, None, &tpl, env));
+            return Ok(build_closure(heap, None, &tpl, env, module));
         }
     };
     // A **capture-free** closure (`env == GLOBAL`: no lexical captures, no self-name — it
@@ -2086,13 +2124,13 @@ pub(crate) fn make_closure_cached(heap: &mut Heap, rest: Value, env: EnvId) -> L
     const PROMOTE_AFTER_SIGHTINGS: u32 = 8;
     let (closure, promote_now) = if let Some((tpl, seen)) = heap.lookup_closure_template(key) {
         (
-            build_closure(heap, None, &tpl, env),
+            build_closure(heap, None, &tpl, env, module),
             seen >= PROMOTE_AFTER_SIGHTINGS,
         )
     } else {
         let tpl = std::sync::Arc::new(parse_closure_template(heap, rest)?);
         heap.store_closure_template(key, std::sync::Arc::clone(&tpl));
-        (build_closure(heap, None, &tpl, env), false)
+        (build_closure(heap, None, &tpl, env, module), false)
     };
     if is_const && promote_now {
         let promoted = heap.promote(closure);
@@ -2112,6 +2150,7 @@ fn build_closure(
     name: Option<Symbol>,
     tpl: &ClosureTemplate,
     env: EnvId,
+    module: Option<Symbol>,
 ) -> Value {
     let captured = if heap.is_global(env) { None } else { Some(env) };
     let id = heap.alloc_closure_pre(Closure {
@@ -2119,6 +2158,7 @@ fn build_closure(
         arms: tpl.arms.clone(),
         doc: tpl.doc.clone(),
         env: captured,
+        module,
     });
     Value::func(id)
 }

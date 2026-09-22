@@ -571,6 +571,10 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // ANSI / VT100 escape-sequence stripping for pipe output (CSI sequences + CR).
     // Used by bshell and compile to clean subprocess output before display.
     embedded_module!("ansi", "std/ansi.blsp"),
+    // A virtual terminal as pure data: the screen a program under a pty writes to —
+    // cursor motion, erases, scroll regions, the alternate screen, SGR colour, the modes
+    // and queries an interactive program relies on. `ansi` strips; `vt` emulates.
+    embedded_module!("vt", "std/vt.blsp"),
     embedded_module!("editor/ui", "std/editor/ui.blsp"),
     // Serve a `ui-run` app to remote frontends — the Emacs `--daemon`/`emacsclient`
     // model (ADR-090): the app runs on the daemon, a thin `attach` client paints

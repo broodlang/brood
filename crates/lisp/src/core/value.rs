@@ -1171,6 +1171,16 @@ pub struct Closure {
     /// resolved per-process at call time, so a (shared) top-level closure works
     /// in any process. `Some(id)` is a specific local enclosing scope.
     pub env: Option<EnvId>,
+    /// The module whose SOURCE this closure's code was written in (ADR-383) — the
+    /// contract boundary: a call from this code to a contracted function of the same
+    /// module reads the uncontracted binding. Inherited from the compiled arm that
+    /// built it (a nested `(fn …)`, a named loop, a callback) and from a module's
+    /// top-level forms while the module loads; `None` when the origin is unknown, in
+    /// which case a `def`'d closure's own qualified name stands in at compile time and
+    /// an anonymous one is contracted like a stranger's — more checking, never less.
+    /// Carried verbatim across promote/freeze/message/image copies: a symbol, so it is
+    /// region-independent.
+    pub module: Option<Symbol>,
 }
 
 impl Closure {
@@ -1196,6 +1206,7 @@ impl Closure {
             }]),
             doc,
             env,
+            module: None,
         }
     }
 

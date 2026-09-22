@@ -1,0 +1,1119 @@
+;; std/vt.blsp — a virtual terminal: the screen a program writes to, as pure data.
+;;
+;; `std/term` is the terminal seam in one direction — a Brood program taking over the
+;; terminal it runs IN. This is the other direction: Brood BEING the terminal for a
+;; program it runs, under a pseudo-terminal (`os/spawn-pty`). `ansi/strip` throws the
+;; escapes away, which is right for a build log; `ansi/render` applies the handful a line
+;; editor uses and says of itself that a full-screen program "should be given a real
+;; emulator rather than a better guess". This is that emulator: a grid of cells, a cursor,
+;; the scroll region, the alternate screen, the modes a program switches and the replies it
+;; waits on, all as a value — so `(vt/feed vt chunk)` is a pure fold and an editor can
+;; paint the result with the spans vocabulary it already has (ADR-384).
+;;
+;; The vocabulary is what interactive programs actually emit: ECMA-48 / xterm cursor
+;; motion and erase, insert/delete lines and characters, DECSTBM scroll regions, the
+;; alternate screen (1047/1049), DECSC/DECRC, SGR with 16 / 256 / true colour, cursor
+;; visibility and shape, bracketed paste, application cursor keys, the DSR and DA queries
+;; a program blocks on, and the OSC title. Everything else parses (so a sequence never
+;; leaks into the text) and does nothing.
+;;
+;; A chunk may end mid-sequence — a pipe cuts wherever it likes — so the unfinished tail
+;; is carried (`:carry`) into the next `feed`. Wide graphemes (CJK, emoji) take two cells,
+;; the second an empty continuation, so a row's text is the concatenation of its cells.
+
+(defmodule vt
+  "A virtual terminal as pure data: `(vt/feed vt chunk)` folds a program's output — cursor
+motion, erases, scroll regions, the alternate screen, SGR colour, the modes and queries an
+interactive program relies on — into a screen of cells, and `(vt/screen vt palette)` reads
+it back as `{:text :spans :cursor …}` for a buffer to show. `(vt/key->bytes key vt)`
+encodes an editor key as the bytes the program expects. Pure: no IO, no process — the
+host owns the pty and the scrollback."
+  (:use math))
+
+;; ---- the shape -----------------------------------------------------------------
+;; A cell is `[grapheme attr]`; `attr` is nil for the default face, else the SGR map
+;; `{:fg :bg :bold :dim :italic :underline :inverse :strike}` with colours as a palette
+;; index (0–255) or an `[r g b]` vector. A wide grapheme's second cell is `["" attr]`.
+;; The terminal itself is the record below — declared, so the checker knows its cursor
+;; and bounds are ints wherever the arithmetic reads them.
+
+(deftype attr (or nil map))
+(deftype cell (tuple string attr))
+(deftype row (vector cell))
+(deftype terminal
+  (record &open
+    :cols int
+    :rows int
+    :grid (vector row)
+    :row int
+    :col int
+    :attr attr
+    :top int
+    :bottom int
+    :modes map
+    :wrap-pending bool
+    :carry string
+    :replies (vector string)
+    :evicted (vector row)))
+
+(def- blank-cell [" " nil])
+
+(defn- row-of (cols cell)
+  (into [] (repeat cols cell)))
+(sig row-of (int cell -> row))
+
+(defn- blank-grid (cols rows)
+  (into [] (repeat rows (row-of cols blank-cell))))
+(sig blank-grid (int int -> (vector row)))
+
+(def default-modes
+  ;; the DEC private + ANSI modes a program can switch, at their reset values
+  {:autowrap true
+   :cursor-visible true
+   :app-cursor false
+   :bracketed-paste false
+   :origin false
+   :insert false
+   :alt-screen false
+   :mouse nil
+   :mouse-sgr false
+   :focus-events false})
+
+(defn make (cols rows)
+  "A fresh terminal of `cols` × `rows` cells: blank, cursor home, default attributes,
+the scroll region the whole screen, every mode at its reset value.
+
+    (:cols (vt/make 80 24))   → 80
+    (vt/cursor (vt/make 80 24))   → [0 0]"
+  {:cols cols
+   :rows rows
+   :grid (blank-grid cols rows)
+   :row 0
+   :col 0
+   :attr nil
+   :top 0
+   :bottom (dec rows)
+   :modes default-modes
+   :wrap-pending false
+   :saved nil
+   :main nil
+   :carry ""
+   :replies []
+   :evicted []
+   :title nil
+   :cursor-style :block})
+(sig make (int int -> terminal))
+
+(defn cursor (vt)
+  "The cursor as `[row col]`, 0-based cells.
+
+    (vt/cursor (vt/feed (vt/make 10 2) \"ab\"))   → [0 2]"
+  [(:row vt) (:col vt)])
+(sig cursor (terminal -> (tuple int int)))
+
+(defn mode (vt k)
+  "The value of mode `k` — `:autowrap`, `:cursor-visible`, `:app-cursor`,
+`:bracketed-paste`, `:origin`, `:insert`, `:alt-screen`, `:mouse` (the reporting mode
+asked for — 1000 clicks, 1002 drags too, 1003 all motion — or nil), `:mouse-sgr`,
+`:focus-events`.
+
+    (vt/mode (vt/feed (vt/make 10 2) \"\\e[?2004h\") :bracketed-paste)   → true
+    (vt/mode (vt/make 10 2) :autowrap)   → true"
+  (get (:modes vt) k))
+(sig mode (terminal keyword -> any))
+
+(defn- set-mode (vt k v)
+  (assoc vt :modes (assoc (:modes vt) k v)))
+(sig set-mode (terminal keyword any -> terminal))
+
+;; ---- rows and cells --------------------------------------------------------------
+
+(defn- splice (v from to items)
+  "`v` with `[from, to)` replaced by `items` — the one row/grid edit everything below is."
+  (into (into (seq/subvec v 0 from) items) (seq/subvec v to)))
+(sig splice (vector int int seqable -> vector))
+
+(defn- erase-cell (vt)
+  "What an erase leaves behind: a blank in the current background (BCE), so a status
+bar drawn as a coloured strip stays coloured."
+  (let (bg (:bg (:attr vt)))
+    (if (nil? bg) blank-cell [" " {:bg bg}])))
+(sig erase-cell (terminal -> cell))
+
+(defn- row-at (vt r)
+  (nth (:grid vt) r []))
+(sig row-at (terminal int -> row))
+
+(defn- set-row (vt r row)
+  (assoc vt :grid (assoc (:grid vt) r row)))
+(sig set-row (terminal int row -> terminal))
+
+(defn- cursor-row (vt)
+  (row-at vt (:row vt)))
+(sig cursor-row (terminal -> row))
+
+(defn- set-cursor-row (vt row)
+  (set-row vt (:row vt) row))
+(sig set-cursor-row (terminal row -> terminal))
+
+;; ---- the cursor --------------------------------------------------------------------
+
+(defn- move-to (vt r c)
+  "The cursor at (`r`, `c`), clamped into the screen, the pending wrap dropped — every
+explicit motion cancels it, as on a real terminal."
+  (assoc vt
+    :row (clamp r 0 (dec (:rows vt)))
+    :col (clamp c 0 (dec (:cols vt)))
+    :wrap-pending false))
+(sig move-to (terminal int int -> terminal))
+
+(defn- carriage-return (vt)
+  (assoc vt :col 0 :wrap-pending false))
+(sig carriage-return (terminal -> terminal))
+
+;; ---- scrolling -----------------------------------------------------------------------
+;; Within a region `[top, bottom]` — the scroll region for a line feed, the rows under the
+;; cursor for an IL/DL. A row that scrolls off the top of the MAIN screen, with the region
+;; starting at row 0, is history and goes to `:evicted` for the host to keep. The alternate
+;; screen has no history, a region below row 0 is a pane inside the program, and a
+;; deleted line was never scrolled: those rows are simply gone.
+
+(defn- scroll-up (vt top bottom n history?)
+  "Rows `[top, bottom]` scrolled up `n`: the top `n` leave, `n` blank rows enter at the
+bottom; with `history?` the leaving rows are kept when they are history."
+  (let (n (min n (inc (- bottom top)))
+        grid (:grid vt)
+        leaving (seq/subvec grid top (+ top n))
+        fresh (repeat n (row-of (:cols vt) (erase-cell vt)))
+        region (into (seq/subvec grid (+ top n) (inc bottom)) fresh)
+        keep? (and history? (= top 0) (not (mode vt :alt-screen))))
+    (assoc vt
+      :grid (splice grid top (inc bottom) region)
+      :evicted (if keep? (into (:evicted vt) leaving) (:evicted vt)))))
+(sig scroll-up (terminal int int int any -> terminal))
+
+(defn- scroll-down (vt top bottom n)
+  "Rows `[top, bottom]` scrolled down `n`: blanks enter at the top, the bottom `n` leave."
+  (let (n (min n (inc (- bottom top)))
+        grid (:grid vt)
+        fresh (repeat n (row-of (:cols vt) (erase-cell vt)))
+        region (into (into [] fresh) (seq/subvec grid top (inc (- bottom n)))))
+    (assoc vt :grid (splice grid top (inc bottom) region))))
+(sig scroll-down (terminal int int int -> terminal))
+
+(defn- linefeed (vt)
+  "LF / IND: down a row; at the region's bottom the region scrolls instead."
+  (let (r (:row vt))
+    (cond
+      (= r (:bottom vt)) (assoc (scroll-up vt (:top vt) r 1 true) :wrap-pending false)
+      (< r (dec (:rows vt))) (assoc vt :row (inc r) :wrap-pending false)
+      else (assoc vt :wrap-pending false))))
+(sig linefeed (terminal -> terminal))
+
+(defn- reverse-index (vt)
+  "RI: up a row; at the region's top the region scrolls down instead."
+  (let (r (:row vt))
+    (cond
+      (= r (:top vt)) (assoc (scroll-down vt r (:bottom vt) 1) :wrap-pending false)
+      (> r 0) (assoc vt :row (dec r) :wrap-pending false)
+      else (assoc vt :wrap-pending false))))
+(sig reverse-index (terminal -> terminal))
+
+(defn- in-region? (vt)
+  (and (>= (:row vt) (:top vt)) (<= (:row vt) (:bottom vt))))
+(sig in-region? (terminal -> bool))
+
+(defn- insert-lines (vt n)
+  "IL: `n` blank rows at the cursor, the rows below pushed down out of the region."
+  (if (in-region? vt)
+    (assoc (scroll-down vt (:row vt) (:bottom vt) n) :col 0 :wrap-pending false)
+    vt))
+(sig insert-lines (terminal int -> terminal))
+
+(defn- delete-lines (vt n)
+  "DL: `n` rows at the cursor removed, the rows below pulled up, blanks entering at the
+region's bottom — never history."
+  (if (in-region? vt)
+    (assoc (scroll-up vt (:row vt) (:bottom vt) n false) :col 0 :wrap-pending false)
+    vt))
+(sig delete-lines (terminal int -> terminal))
+
+;; ---- printing ----------------------------------------------------------------------------
+
+(defn- put-cell (vt row col cell)
+  "`row` with `cell` at `col` — overwriting, or inserted with the rest shifted right (IRM)."
+  (if (mode vt :insert)
+    (seq/subvec (splice row col col [cell]) 0 (:cols vt))
+    (assoc row col cell)))
+(sig put-cell (terminal row int cell -> row))
+
+(defn- wrap (vt row)
+  "Commit `row` and start the next line: the autowrap a full row takes."
+  (linefeed (carriage-return (set-cursor-row vt row))))
+(sig wrap (terminal row -> terminal))
+
+(defn- print-graphemes (vt gs i n row col pending)
+  "Write graphemes `gs[i..n)` at the cursor with autowrap. The cursor's row (`row`, its
+cells), column and pending-wrap flag are held OUT of the terminal while the run stays on
+one row — one grid write and one cursor write per row, not a copy of the whole terminal
+per grapheme, which is what a frame used to cost."
+  (if (>= i n)
+    (assoc (set-cursor-row vt row) :col col :wrap-pending pending)
+    (let (g (nth gs i)
+          w (string/display-width g)
+          last (dec (:cols vt))
+          attr (:attr vt))
+      (cond
+        ;; a combining mark on its own joins the cell before the cursor
+        (= w 0)
+          (let (c (max 0 (dec col))
+                [text cell-attr] (nth row c))
+            (print-graphemes vt gs (inc i) n (assoc row c [(str text g) cell-attr]) col pending))
+        ;; the last column is taken and another grapheme arrived: wrap first (or, with
+        ;; autowrap off, overwrite the last column)
+        pending
+          (if (mode vt :autowrap)
+            (let (vt2 (wrap vt row)) (print-graphemes vt2 gs i n (cursor-row vt2) 0 false))
+            (print-graphemes vt gs i n row col false))
+        ;; a wide grapheme that does not fit: blank the last cell, then wrap and print it
+        (and (= w 2) (= col last) (mode vt :autowrap))
+          (let (vt2 (wrap vt (assoc row col [" " attr])))
+            (print-graphemes vt2 gs i n (cursor-row vt2) 0 false))
+        else
+          (let (row2 (put-cell vt row col [g attr])
+                ;; a wide glyph's continuation — unless it is pinned at the last column
+                row3 (if (and (= w 2) (< col last)) (put-cell vt row2 (inc col) ["" attr]) row2)
+                next (+ col w))
+            (if (> next last)
+              (print-graphemes vt gs (inc i) n row3 last true)
+              (print-graphemes vt gs (inc i) n row3 next false)))))))
+(sig print-graphemes (terminal vector int int row int bool -> terminal))
+
+(defn- print-run (vt gs)
+  ;; Grapheme by grapheme, on purpose: splicing the run into the row as one vector
+  ;; operation measured SLOWER — `into` on two vectors costs ~20 µs for a hundred cells
+  ;; where an `assoc` per cell costs 1 µs — so the loop wins until `into` is fixed.
+  (print-graphemes vt gs 0 (count gs) (cursor-row vt) (:col vt) (:wrap-pending vt)))
+(sig print-run (terminal vector -> terminal))
+
+;; ---- tabs: every eight columns --------------------------------------------------------------
+
+(defn- next-tab (col)
+  (* 8 (inc (quot col 8))))
+(sig next-tab (int -> int))
+
+(defn- prev-tab (col)
+  (if (<= col 0) 0 (* 8 (quot (dec col) 8))))
+(sig prev-tab (int -> int))
+
+;; ---- erasing --------------------------------------------------------------------------------
+
+(defn- fill (row from to cell)
+  "`row` with cells `[from, to)` set to `cell`."
+  (splice row from to (repeat (- to from) cell)))
+(sig fill (row int int cell -> row))
+
+(defn- erase-line (vt what)
+  "EL: 0 to the end of the line, 1 to its start, 2 the whole line."
+  (let (row (cursor-row vt)
+        cols (:cols vt)
+        col (:col vt)
+        cell (erase-cell vt))
+    (set-cursor-row vt
+      (case what
+        0 (fill row col cols cell)
+        1 (fill row 0 (min cols (inc col)) cell)
+        2 (row-of cols cell)
+        row))))
+(sig erase-line (terminal int -> terminal))
+
+(defn- erase-rows (vt from to)
+  "Rows `[from, to)` blanked."
+  (let (blank (row-of (:cols vt) (erase-cell vt)))
+    (assoc vt :grid (splice (:grid vt) from to (repeat (- to from) blank)))))
+(sig erase-rows (terminal int int -> terminal))
+
+(defn- erase-display (vt what)
+  "ED: 0 from the cursor down, 1 from the top to the cursor, 2 (and 3) everything."
+  (case what
+    0 (erase-rows (erase-line vt 0) (inc (:row vt)) (:rows vt))
+    1 (erase-rows (erase-line vt 1) 0 (:row vt))
+    (erase-rows vt 0 (:rows vt))))
+(sig erase-display (terminal int -> terminal))
+
+(defn- erase-chars (vt n)
+  "ECH: `n` cells from the cursor blanked in place."
+  (let (col (:col vt))
+    (set-cursor-row vt (fill (cursor-row vt) col (min (:cols vt) (+ col n)) (erase-cell vt)))))
+(sig erase-chars (terminal int -> terminal))
+
+(defn- delete-chars (vt n)
+  "DCH: `n` cells at the cursor removed, the rest pulled left, blanks entering at the end."
+  (let (col (:col vt)
+        n (min n (- (:cols vt) col)))
+    (set-cursor-row vt
+      (into (splice (cursor-row vt) col (+ col n) []) (repeat n (erase-cell vt))))))
+(sig delete-chars (terminal int -> terminal))
+
+(defn- insert-chars (vt n)
+  "ICH: `n` blanks at the cursor, the rest pushed right off the end."
+  (let (col (:col vt)
+        n (min n (- (:cols vt) col)))
+    (set-cursor-row vt
+      (seq/subvec (splice (cursor-row vt) col col (repeat n (erase-cell vt))) 0 (:cols vt)))))
+(sig insert-chars (terminal int -> terminal))
+
+;; ---- SGR: the attribute state ------------------------------------------------------------
+
+(def- sgr-flags
+  ;; parameter -> the `[key value]` pairs it sets (nil clears); 22 clears bold AND dim
+  {1 [[:bold true]]
+   2 [[:dim true]]
+   3 [[:italic true]]
+   4 [[:underline true]]
+   7 [[:inverse true]]
+   9 [[:strike true]]
+   22 [[:bold nil] [:dim nil]]
+   23 [[:italic nil]]
+   24 [[:underline nil]]
+   27 [[:inverse nil]]
+   29 [[:strike nil]]
+   39 [[:fg nil]]
+   49 [[:bg nil]]})
+
+(defn- attr-set (attr k v)
+  "`attr` with `k` set (removed when `v` is nil), nil once empty — the default face has no map."
+  (let (a (if (nil? v) (dissoc (or attr {}) k) (assoc (or attr {}) k v)))
+    (if (empty? a) nil a)))
+(sig attr-set (attr keyword any -> attr))
+
+(defn- extended-colour (params i)
+  "The colour after a 38 / 48 at `params[i]`: `[colour next-index]` — `5;n` an index,
+`2;r;g;b` a true colour (the ITU `2::r:g:b` form carries an empty colourspace slot
+first); anything else is skipped with the colour unset."
+  (let (channel (fn (j) (clamp (or (nth params j nil) 0) 0 255))
+        kind (nth params i nil))
+    (cond
+      (= kind 5) [(channel (inc i)) (+ i 2)]
+      (= kind 2)
+        (let (j (if (nil? (nth params (inc i) nil)) (+ i 2) (inc i)))
+          [[(channel j) (channel (inc j)) (channel (+ j 2))] (+ j 3)])
+      else [nil (inc i)])))
+(sig extended-colour (vector int -> (tuple any int)))
+
+(defn- sgr-step (attr params i)
+  "One SGR parameter applied: `[attr next-index]`."
+  (let (p (or (nth params i nil) 0)
+        one (fn (a) [a (inc i)]))
+    (cond
+      (= p 0) (one nil)
+      (= p 38) (let ([c j] (extended-colour params (inc i))) [(attr-set attr :fg c) j])
+      (= p 48) (let ([c j] (extended-colour params (inc i))) [(attr-set attr :bg c) j])
+      (<= 30 p 37) (one (attr-set attr :fg (- p 30)))
+      (<= 40 p 47) (one (attr-set attr :bg (- p 40)))
+      (<= 90 p 97) (one (attr-set attr :fg (- p 82)))
+      (<= 100 p 107) (one (attr-set attr :bg (- p 92)))
+      else (one (fold (get sgr-flags p) attr (fn (a kv) (attr-set a (first kv) (second kv))))))))
+(sig sgr-step (attr vector int -> (tuple attr int)))
+
+(defn- sgr (vt params)
+  "SGR: `params` folded into the current attributes; an empty list is a reset."
+  (letrec (go (fn (attr i)
+                (if (>= i (count params))
+                  attr
+                  (let ([attr2 j] (sgr-step attr params i)) (go attr2 j)))))
+    (assoc vt :attr (if (empty? params) nil (go (:attr vt) 0)))))
+(sig sgr (terminal vector -> terminal))
+
+;; ---- the saved cursor and the alternate screen ------------------------------------------------
+
+(defn- save-cursor (vt)
+  (assoc vt :saved {:row (:row vt) :col (:col vt) :attr (:attr vt)}))
+(sig save-cursor (terminal -> terminal))
+
+(defn- restore-cursor (vt)
+  (let (s (:saved vt))
+    (if (nil? s) vt (assoc (move-to vt (:row s) (:col s)) :attr (:attr s)))))
+(sig restore-cursor (terminal -> terminal))
+
+(defn- whole-screen (vt)
+  "The scroll region reset to the whole screen, no wrap pending — a screen switch."
+  (assoc vt :top 0 :bottom (dec (:rows vt)) :wrap-pending false))
+(sig whole-screen (terminal -> terminal))
+
+(defn- enter-alt-screen (vt)
+  "1047/1049: a blank screen the program owns, the main one kept aside — a second
+entry while already there does nothing."
+  (if (mode vt :alt-screen)
+    vt
+    (whole-screen (assoc (set-mode vt :alt-screen true)
+                    :main
+                      {:grid (:grid vt)
+                       :row (:row vt)
+                       :col (:col vt)
+                       :attr (:attr vt)
+                       :saved (:saved vt)}
+                    :grid (blank-grid (:cols vt) (:rows vt))))))
+(sig enter-alt-screen (terminal -> terminal))
+
+(defn- leave-alt-screen (vt)
+  "Back to the main screen exactly as it was left."
+  (if (not (mode vt :alt-screen))
+    vt
+    (let (main (:main vt))
+      (whole-screen (move-to (assoc (set-mode vt :alt-screen false)
+                               :main nil
+                               :grid (:grid main)
+                               :attr (:attr main)
+                               :saved (:saved main))
+                      (:row main)
+                      (:col main))))))
+(sig leave-alt-screen (terminal -> terminal))
+
+;; ---- modes (CSI ? n h / l, CSI n h / l) -------------------------------------------------------
+
+(defn- set-private-mode (vt n on)
+  (cond
+    (= n 1) (set-mode vt :app-cursor on)
+    (= n 6) (move-to (set-mode vt :origin on) (if on (:top vt) 0) 0)
+    (= n 7) (set-mode vt :autowrap on)
+    (= n 25) (set-mode vt :cursor-visible on)
+    (includes? [47 1047] n) (if on (enter-alt-screen vt) (leave-alt-screen vt))
+    (= n 1048) (if on (save-cursor vt) (restore-cursor vt))
+    (= n 1049) (if on (enter-alt-screen (save-cursor vt)) (restore-cursor (leave-alt-screen vt)))
+    (= n 1004) (set-mode vt :focus-events on)
+    (= n 2004) (set-mode vt :bracketed-paste on)
+    (includes? [1000 1002 1003] n) (set-mode vt :mouse (if on n nil))
+    (= n 1006) (set-mode vt :mouse-sgr on)
+    else vt))
+(sig set-private-mode (terminal int bool -> terminal))
+
+(defn- set-ansi-mode (vt n on)
+  (if (= n 4) (set-mode vt :insert on) vt))
+(sig set-ansi-mode (terminal int bool -> terminal))
+
+(defn- set-modes (vt params private? on)
+  (fold params
+    vt
+    (fn (v n)
+      (cond
+        (nil? n) v
+        private? (set-private-mode v n on)
+        else (set-ansi-mode v n on)))))
+(sig set-modes (terminal vector bool bool -> terminal))
+
+;; ---- replies: what the program asked and waits for ----------------------------------------------
+
+(defn- reply (vt s)
+  (assoc vt :replies (into (:replies vt) [s])))
+(sig reply (terminal string -> terminal))
+
+(defn- device-status (vt n)
+  (cond
+    (= n 6) (reply vt (str "\e[" (inc (:row vt)) ";" (inc (:col vt)) "R"))
+    (= n 5) (reply vt "\e[0n")
+    else vt))
+(sig device-status (terminal int -> terminal))
+
+;; ---- CSI ------------------------------------------------------------------------------------------
+
+(defn- parse-params (s)
+  "The numeric parameters of `s` (`\"1;5\"`) as a vector of ints, an empty slot nil.
+`:` sub-parameters are read as `;` — enough for the `38:2::r:g:b` colour form."
+  (if (= s "")
+    []
+    (into []
+      (map (string/split (if (includes? s ":") (string/replace s ":" ";") s) ";")
+        (fn (p) (if (= p "") nil (let (n (string/->number p)) (if (int? n) n nil))))))))
+(sig parse-params (string -> (vector (or nil int))))
+
+(defn- param (params i default)
+  "Parameter `i`, `default` when absent or 0 — `CSI A` and `CSI 0 A` both mean 1."
+  (let (v (nth params i nil))
+    (if (or (nil? v) (= v 0)) default v)))
+(sig param ((vector (or nil int)) int int -> int))
+
+(defn- selector (params)
+  "The first parameter as a selector, where 0 is a value of its own (`CSI 0 J`)."
+  (or (nth params 0 nil) 0))
+(sig selector ((vector (or nil int)) -> int))
+
+(defn- origin-row (vt r)
+  "A 1-based row from the program made absolute — relative to the scroll region in origin mode."
+  (if (mode vt :origin)
+    (clamp (+ (:top vt) (dec r)) (:top vt) (:bottom vt))
+    (dec r)))
+(sig origin-row (terminal int -> int))
+
+(defn- set-scroll-region (vt params)
+  "DECSTBM: the region `[top, bottom]`, cursor home; a degenerate region is ignored."
+  (let (top (dec (param params 0 1))
+        bottom (dec (param params 1 (:rows vt))))
+    (if (and (>= top 0) (< top bottom) (< bottom (:rows vt)))
+      (move-to (assoc vt :top top :bottom bottom) (if (mode vt :origin) top 0) 0)
+      vt)))
+(sig set-scroll-region (terminal vector -> terminal))
+
+(defn- cursor-up (vt n)
+  "CUU stops at the scroll region's top when the cursor is inside it (xterm)."
+  (let (limit (if (>= (:row vt) (:top vt)) (:top vt) 0))
+    (move-to vt (max limit (- (:row vt) n)) (:col vt))))
+(sig cursor-up (terminal int -> terminal))
+
+(defn- cursor-style-of (n)
+  (cond
+    (<= n 2) :block
+    (<= n 4) :underline
+    else :bar))
+(sig cursor-style-of (int -> keyword))
+
+(defn- csi-parts (body)
+  "`[prefix digits intermediate]` of a CSI body: a leading private marker (`?` `>` `=`
+`<`), the parameter bytes, a trailing intermediate (a space before `q`). Only the first
+and last byte are inspected — an SGR, most of what a program emits, is digits and `;`."
+  (let (len (string/length body)
+        first-code (if (= len 0) 0 (string/char->int body))
+        last-code (if (= len 0) 0 (string/char->int (string/char-at body (dec len))))
+        prefix (if (<= 0x3c first-code 0x3f) (string/char-at body 0) "")
+        intermediate (if (and (> len 0) (<= 0x20 last-code 0x2f))
+                       (string/char-at body (dec len))
+                       "")
+        from (string/length prefix)
+        to (- len (string/length intermediate))
+        digits (if (and (= from 0) (= to len)) body (string/substring body from (max from to))))
+    [prefix digits intermediate]))
+(sig csi-parts (string -> (tuple string string string)))
+
+(defn- csi (vt body final)
+  "Apply one CSI whose parameter/intermediate bytes are `body` and final byte `final`.
+Dispatched on the prefix + intermediate + final together, so `?h`, `>c` and ` q` are
+their own sequences rather than flags on `h`, `c` and `q`."
+  (let ([prefix digits intermediate] (csi-parts body)
+        params (parse-params digits)
+        n1 (param params 0 1)
+        row (:row vt)
+        col (:col vt))
+    (case (str prefix intermediate final)
+      ;; SGR first: colour changes outnumber every other sequence a program emits
+      "m" (sgr vt params)
+      "A" (cursor-up vt n1)
+      "B" (move-to vt (+ row n1) col)
+      "C" (move-to vt row (+ col n1))
+      "D" (move-to vt row (- col n1))
+      "E" (move-to vt (+ row n1) 0)
+      "F" (move-to vt (- row n1) 0)
+      "G" (move-to vt row (dec n1))
+      "`" (move-to vt row (dec n1))
+      "d" (move-to vt (origin-row vt n1) col)
+      "H" (move-to vt (origin-row vt n1) (dec (param params 1 1)))
+      "f" (move-to vt (origin-row vt n1) (dec (param params 1 1)))
+      "I" (move-to vt row (next-tab (+ col (* 8 (dec n1)))))
+      "Z" (move-to vt row (prev-tab (- col (* 8 (dec n1)))))
+      "J" (erase-display vt (selector params))
+      "K" (erase-line vt (selector params))
+      "L" (insert-lines vt n1)
+      "M" (delete-lines vt n1)
+      "P" (delete-chars vt n1)
+      "@" (insert-chars vt n1)
+      "X" (erase-chars vt n1)
+      "S" (scroll-up vt (:top vt) (:bottom vt) n1 true)
+      "T" (scroll-down vt (:top vt) (:bottom vt) n1)
+      "r" (set-scroll-region vt params)
+      "h" (set-modes vt params false true)
+      "l" (set-modes vt params false false)
+      "?h" (set-modes vt params true true)
+      "?l" (set-modes vt params true false)
+      "n" (device-status vt (selector params))
+      "c" (reply vt "\e[?62;22c")
+      ;; secondary DA: an xterm-like answer, the version nothing checks
+      ">c" (reply vt "\e[>0;0;0c")
+      "s" (save-cursor vt)
+      "u" (restore-cursor vt)
+      " q" (assoc vt :cursor-style (cursor-style-of (selector params)))
+      ;; window report: `CSI 18 t` asks the size in cells
+      "t" (if (= (selector params) 18) (reply vt (str "\e[8;" (:rows vt) ";" (:cols vt) "t")) vt)
+      vt)))
+(sig csi (terminal string string -> terminal))
+
+;; ---- OSC: the title, and nothing else ---------------------------------------------------------
+
+(defn- osc (vt body)
+  (let (sep (index-of body ";"))
+    (if (< sep 0)
+      vt
+      (let (code (string/substring body 0 sep)
+            arg (string/substring body (inc sep) (string/length body)))
+        (if (includes? ["0" "2"] code) (assoc vt :title arg) vt)))))
+(sig osc (terminal string -> terminal))
+
+;; ---- the parser ------------------------------------------------------------------------------------
+;; Over a GRAPHEME vector, so a wide glyph is one unit and a combining mark never splits a
+;; sequence. The `*-end` scanners return the index just past a sequence, or nil when the
+;; chunk ends inside it — the tail is then carried into the next feed.
+
+(defn- code-of (g)
+  "The first codepoint of grapheme `g` (`char->int` reads the first character)."
+  (string/char->int g))
+(sig code-of (string -> int))
+
+(defn- control-code? (k)
+  (or (< k 0x20) (= k 0x7f) (<= 0x80 k 0x9f)))
+(sig control-code? (int -> bool))
+
+(defn- csi-end (v i n)
+  "Past the final byte (0x40–0x7E) of a CSI whose parameters start at `i`."
+  (if (>= i n)
+    nil
+    (let (c (code-of (nth v i)))
+      (cond
+        (<= 0x40 c 0x7e) (inc i)
+        (<= 0x20 c 0x3f) (csi-end v (inc i) n)
+        ;; a control byte inside a CSI aborts it (xterm executes it; we drop the sequence)
+        else (inc i)))))
+(sig csi-end (vector int int -> (or nil int)))
+
+(defn- string-end (v i n)
+  "Past the terminator of an OSC / DCS / APC string starting at `i`: BEL, or ESC `\\`."
+  (if (>= i n)
+    nil
+    (let (c (nth v i))
+      (cond
+        (= c "\x07") (inc i)
+        (not (= c "\e")) (string-end v (inc i) n)
+        (>= (inc i) n) nil
+        (= (nth v (inc i)) "\\") (+ i 2)
+        else (string-end v (inc i) n)))))
+(sig string-end (vector int int -> (or nil int)))
+
+(defn- sequence-end (v i n)
+  "Past the escape sequence whose byte after ESC is at `i`."
+  (if (>= i n)
+    nil
+    (let (c (nth v i))
+      (cond
+        (= c "[") (csi-end v (inc i) n)
+        (includes? "]PX^_" c) (string-end v (inc i) n)
+        ;; charset designations and the like: ESC, a selector, one more byte
+        (includes? "()*+#%" c) (if (< (inc i) n) (+ i 2) nil)
+        else (inc i)))))
+(sig sequence-end (vector int int -> (or nil int)))
+
+(defn- text-of (v from to)
+  (string/join (seq/subvec v from to) ""))
+(sig text-of (vector int int -> string))
+
+(defn- escape (vt v i end)
+  "Apply the escape sequence `v[i..end)` (the bytes after ESC)."
+  (let (c (nth v i))
+    (cond
+      (= c "[") (csi vt (text-of v (inc i) (dec end)) (nth v (dec end)))
+      (= c "]")
+        (let (stop (if (= (nth v (dec end)) "\x07") (dec end) (- end 2)))
+          (osc vt (text-of v (inc i) (max (inc i) stop))))
+      (= c "7") (save-cursor vt)
+      (= c "8") (restore-cursor vt)
+      (= c "D") (linefeed vt)
+      (= c "E") (linefeed (carriage-return vt))
+      (= c "M") (reverse-index vt)
+      (= c "c") (make (:cols vt) (:rows vt))
+      else vt)))
+(sig escape (terminal vector int int -> terminal))
+
+(defn- control (vt k)
+  "A C0 control code."
+  (cond
+    (includes? [10 11 12] k) (linefeed vt)
+    (= k 13) (carriage-return vt)
+    (= k 8) (move-to vt (:row vt) (dec (:col vt)))
+    (= k 9) (move-to vt (:row vt) (min (dec (:cols vt)) (next-tab (:col vt))))
+    else vt))
+(sig control (terminal int -> terminal))
+
+(defn- run-end (v i n)
+  "Past the printable run starting at `i`."
+  (if (or (>= i n) (control-code? (code-of (nth v i)))) i (run-end v (inc i) n)))
+(sig run-end (vector int int -> int))
+
+(defn- run (v i n vt)
+  (if (>= i n)
+    vt
+    (let (c (nth v i)
+          k (code-of c))
+      (cond
+        (= k 0x1b)
+          (let (end (sequence-end v (inc i) n))
+            (if (nil? end)
+              (assoc vt :carry (text-of v i n))
+              (run v end n (escape vt v (inc i) end))))
+        ;; CR LF is ONE grapheme cluster
+        (= c "\r\n") (run v (inc i) n (linefeed (carriage-return vt)))
+        (control-code? k) (run v (inc i) n (control vt k))
+        else (let (j (run-end v (inc i) n)) (run v j n (print-run vt (seq/subvec v i j))))))))
+(sig run (vector int int terminal -> terminal))
+
+(defn feed (vt chunk)
+  "`vt` with `chunk` — a run of program output — applied. `:replies` holds what the
+program asked the terminal to answer during THIS chunk (a cursor-position report, a
+device attributes query): write them to the program, it is blocked on them. `:evicted`
+holds the rows that scrolled off the top of the main screen during this chunk, oldest
+first, as rows of cells — `(vt/line row palette)` reads one; the host keeps the scrollback.
+A chunk ending mid-sequence carries its tail into the next.
+
+    (vt/lines (vt/feed (vt/make 6 2) \"hi\\r\\nthere\"))   → [\"hi\" \"there\"]
+    (vt/lines (vt/feed (vt/make 10 2) \"1 + 41\\e[2Dx\"))   → [\"1 + x1\" \"\"]
+    (:replies (vt/feed (vt/make 6 2) \"\\e[6n\"))   → [\"\\e[1;1R\"]"
+  (let (v (string/->graphemes (str (:carry vt) chunk)))
+    (run v 0 (count v) (assoc vt :carry "" :replies [] :evicted []))))
+(sig feed (terminal string -> terminal))
+
+;; ---- resizing ----------------------------------------------------------------------------------------
+
+(defn- fit-row (row cols)
+  (let (n (count row))
+    (cond
+      (= n cols) row
+      (> n cols) (seq/subvec row 0 cols)
+      else (into row (repeat (- cols n) blank-cell)))))
+(sig fit-row (row int -> row))
+
+(defn- fit-grid (grid cols rows)
+  "`grid` made `rows` tall: rows leave at the TOP when it shrinks (the cursor is usually
+near the bottom), blanks enter at the bottom when it grows."
+  (let (n (count grid)
+        fitted (into [] (map grid (fn (r) (fit-row r cols)))))
+    (cond
+      (= n rows) fitted
+      (> n rows) (seq/subvec fitted (- n rows))
+      else (into fitted (repeat (- rows n) (row-of cols blank-cell))))))
+(sig fit-grid ((vector row) int int -> (vector row)))
+
+(defn resize (vt cols rows)
+  "`vt` at `cols` × `rows`: rows that leave at the top of the main screen go to
+`:evicted`, the cursor is clamped, the scroll region is reset to the whole screen.
+
+    (vt/lines (vt/resize (vt/feed (vt/make 6 2) \"abcdef\") 3 2))   → [\"abc\" \"\"]"
+  (let (lost (max 0 (- (count (:grid vt)) rows))
+        history? (and (> lost 0) (not (mode vt :alt-screen)))
+        main (:main vt))
+    (whole-screen (move-to (assoc vt
+                             :cols cols
+                             :rows rows
+                             :grid (fit-grid (:grid vt) cols rows)
+                             :main
+                               (if (nil? main)
+                                 nil
+                                 (assoc main :grid (fit-grid (:grid main) cols rows)))
+                             :evicted
+                               (if history?
+                                 (into (:evicted vt) (seq/subvec (:grid vt) 0 lost))
+                                 (:evicted vt)))
+                    (- (:row vt) lost)
+                    (:col vt)))))
+(sig resize (terminal int int -> terminal))
+
+;; ---- reading the screen back ------------------------------------------------------------------------
+
+(def xterm-palette
+  ;; the 16 ANSI colours as xterm draws them — the default palette
+  [[0 0 0]
+    [205 0 0]
+    [0 205 0]
+    [205 205 0]
+    [0 0 238]
+    [205 0 205]
+    [0 205 205]
+    [229 229 229]
+    [127 127 127]
+    [255 0 0]
+    [0 255 0]
+    [255 255 0]
+    [92 92 255]
+    [255 0 255]
+    [0 255 255]
+    [255 255 255]])
+
+(defn- cube-level (n)
+  (if (= n 0) 0 (+ 55 (* n 40))))
+(sig cube-level (int -> int))
+
+(defn colour (c palette)
+  "Colour `c` — a palette index or `[r g b]` — as a colour: 0–15 from `palette` (16
+entries, each `[r g b]` or a hex string), 16–231 the 6×6×6 cube, 232–255 the grey ramp.
+
+    (vt/colour 1 vt/xterm-palette)   → [205 0 0]
+    (vt/colour 196 vt/xterm-palette)   → [255 0 0]
+    (vt/colour [1 2 3] vt/xterm-palette)   → [1 2 3]"
+  (cond
+    (not (int? c)) c
+    (< c 16) (nth palette c)
+    (< c 232)
+      (let (i (- c 16))
+        [(cube-level (quot i 36)) (cube-level (mod (quot i 6) 6)) (cube-level (mod i 6))])
+    else (let (g (+ 8 (* 10 (- c 232)))) [g g g])))
+(sig colour (any vector -> any))
+
+(defn face (attr palette)
+  "The SGR `attr` of a cell as a display face `{:fg [r g b] :bg … :bold …}`, colours
+through `palette` — `{:colors <16 entries> :fg <default fg> :bg <default bg>}`, the
+defaults used when inverse video needs a colour the cell never set. Nil for a default cell.
+
+    (vt/face {:fg 1 :bold true} nil)   → {:bold true, :fg [205 0 0]}
+    (vt/face nil nil)   → nil"
+  (if (nil? attr)
+    nil
+    (let (colors (or (:colors palette) xterm-palette)
+          fg (if (nil? (:fg attr)) nil (colour (:fg attr) colors))
+          bg (if (nil? (:bg attr)) nil (colour (:bg attr) colors))
+          [fg2 bg2] (if (:inverse attr) [(or bg (:bg palette)) (or fg (:fg palette))] [fg bg])
+          flags (dissoc attr :fg :bg :inverse)
+          styled (attr-set (attr-set flags :fg fg2) :bg bg2))
+      styled)))
+(sig face (attr any -> attr))
+
+(defn- shown-cells (row keep)
+  "How many leading cells of `row` are shown: through the last non-blank cell, and never
+fewer than `keep` (the cursor's column, so its position exists in the text)."
+  (letrec (last-visible (fn (i)
+                          (cond
+                            (< i 0) -1
+                            (= (nth row i) blank-cell) (last-visible (dec i))
+                            (= (first (nth row i)) "") (last-visible (dec i))
+                            else i)))
+    (max keep (inc (last-visible (dec (count row)))))))
+(sig shown-cells (row int -> int))
+
+(defn- text-length (cells)
+  "The chars the graphemes of `cells` take in a string (a continuation cell takes none)."
+  (fold cells 0 (fn (n cell) (+ n (string/length (first cell))))))
+(sig text-length (seqable -> int))
+
+(defn- cells-line (cells base palette)
+  "`[text spans end]` for `cells` whose text starts at buffer offset `base`: the graphemes
+concatenated, `spans` the `[start end face]` runs of one attribute (reversed, consed),
+`end` the offset past the text."
+  (letrec (go (fn (i pos cur start texts spans)
+                (if (>= i (count cells))
+                  [(string/join (reverse texts) "")
+                    (if (nil? cur) spans (cons [start pos (face cur palette)] spans))
+                    pos]
+                  (let ([g attr] (nth cells i)
+                        next (+ pos (string/length g))
+                        texts2 (cons g texts))
+                    (cond
+                      (= attr cur) (go (inc i) next cur start texts2 spans)
+                      (nil? cur) (go (inc i) next attr pos texts2 spans)
+                      else
+                        (go (inc i)
+                          next
+                          attr
+                          pos
+                          texts2
+                          (cons [start pos (face cur palette)] spans)))))))
+    (go 0 base nil base () ())))
+(sig cells-line (row int any -> (tuple string list int)))
+
+(defn line (row palette)
+  "A row of cells — one of `:evicted`, or `(nth (:grid vt) r)` — as `[text spans]`:
+its text with trailing blanks trimmed and the `[start end face]` spans over it from
+offset 0, faces through `palette` (see [[face]]). What a host appends to its scrollback.
+
+    (vt/line (nth (:grid (vt/feed (vt/make 6 1) \"\\e[32mok\")) 0) nil)   → [\"ok\" [[0 2 {:fg [0 205 0]}]]]"
+  (let ([text spans _] (cells-line (seq/subvec row 0 (shown-cells row 0)) 0 palette))
+    [text (into [] (reverse spans))]))
+(sig line (row any -> (tuple string vector)))
+
+(defn lines (vt)
+  "The screen as a vector of strings, one per row, trailing blanks trimmed.
+
+    (vt/lines (vt/feed (vt/make 4 2) \"a\\e[31mb\"))   → [\"ab\" \"\"]"
+  (into [] (map (:grid vt) (fn (row) (first (line row nil))))))
+(sig lines (terminal -> (vector string)))
+
+(defn screen (vt palette)
+  "The screen as a buffer would show it: `{:text :spans :cursor :cursor-visible
+:cursor-style :title :mouse :alt-screen}` — rows joined by newlines with trailing blanks trimmed, `:spans`
+the `[start end face]` faces over that text (the `highlight-spans` shape, ascending and
+non-overlapping) through `palette` (see [[face]]), and `:cursor` the char offset of the
+cursor in it (its row is padded out to the cursor, so the offset always exists).
+
+    (:text (vt/screen (vt/feed (vt/make 4 2) \"ab\\r\\ncd\") nil))   → \"ab\\ncd\"
+    (:cursor (vt/screen (vt/feed (vt/make 4 2) \"ab\\r\\ncd\") nil))   → 5"
+  (letrec (go (fn (r pos texts spans cursor)
+                (if (>= r (:rows vt))
+                  {:text (string/join (reverse texts) "\n")
+                   :spans (into [] (reverse spans))
+                   :cursor cursor
+                   :cursor-visible (mode vt :cursor-visible)
+                   :cursor-style (:cursor-style vt)
+                   :title (:title vt)
+                   ;; what the host needs to route a mouse: whether the program asked for
+                   ;; it, and whether it is full-screen (a wheel there is arrow keys)
+                   :mouse (mode vt :mouse)
+                   :alt-screen (mode vt :alt-screen)}
+                  (let (row (row-at vt r)
+                        at-cursor? (= r (:row vt))
+                        shown (shown-cells row (if at-cursor? (:col vt) 0))
+                        [text spans2 end] (cells-line (seq/subvec row 0 shown) pos palette)
+                        cursor2 (if at-cursor?
+                                  (+ pos (text-length (seq/subvec row 0 (:col vt))))
+                                  cursor))
+                    (go (inc r) (inc end) (cons text texts) (append (reverse spans2) spans) cursor2)))))
+    (go 0 0 () () 0)))
+(sig screen (terminal any -> map))
+
+;; ---- input: an editor key as the bytes a program expects ---------------------------------------------
+
+(def- named-keys
+  ;; the xterm sequence of each named key
+  {:up "\e[A"
+   :down "\e[B"
+   :right "\e[C"
+   :left "\e[D"
+   :home "\e[H"
+   :end "\e[F"
+   :enter "\r"
+   :tab "\t"
+   :back-tab "\e[Z"
+   :backspace "\x7f"
+   :escape "\e"
+   :delete "\e[3~"
+   :insert "\e[2~"
+   :page-up "\e[5~"
+   :page-down "\e[6~"
+   :f1 "\eOP"
+   :f2 "\eOQ"
+   :f3 "\eOR"
+   :f4 "\eOS"
+   :f5 "\e[15~"
+   :f6 "\e[17~"
+   :f7 "\e[18~"
+   :f8 "\e[19~"
+   :f9 "\e[20~"
+   :f10 "\e[21~"
+   :f11 "\e[23~"
+   :f12 "\e[24~"})
+
+(def- application-keys
+  ;; what changes under DECCKM (application cursor keys): SS3 instead of CSI
+  {:up "\eOA" :down "\eOB" :right "\eOC" :left "\eOD" :home "\eOH" :end "\eOF"})
+
+(defn- modified (sequence modifier)
+  "xterm's modified form of a named key's `sequence`: `ESC [ 3 ~` → `ESC [ 3 ; m ~`,
+`ESC [ A` / `ESC O A` → `ESC [ 1 ; m A`."
+  (let (len (string/length sequence)
+        params (string/substring sequence 2 (dec len))
+        final (string/substring sequence (dec len) len))
+    (str "\e[" (if (= params "") "1" params) ";" modifier final)))
+(sig modified (string int -> string))
+
+(defn- split-modifiers (name)
+  "`[ctrl alt shift base]` from a key name spelled `[ctrl-meta-|ctrl-|alt-][shift-]<base>`."
+  (let (after (fn (prefix) (string/substring name (string/length prefix) (string/length name)))
+        [ctrl alt rest] (cond
+                          (string/starts-with? name "ctrl-meta-") [true true (after "ctrl-meta-")]
+                          (string/starts-with? name "ctrl-") [true false (after "ctrl-")]
+                          (string/starts-with? name "alt-") [false true (after "alt-")]
+                          else [false false name])
+        shifted? (and (string/starts-with? rest "shift-") (> (string/length rest) 6)))
+    [ctrl alt shifted? (if shifted? (string/substring rest 6 (string/length rest)) rest)]))
+(sig split-modifiers (string -> (tuple bool bool bool string)))
+
+(defn- control-byte (ch)
+  "The C0 byte ctrl+`ch` produces, or nil for a character that has none."
+  (let (k (string/char->int ch))
+    (cond
+      (<= 97 k 122) (string/int->char (- k 96))
+      (<= 64 k 95) (string/int->char (- k 64))
+      (= k 32) (string/int->char 0)
+      (= k 63) (string/int->char 127)
+      else nil)))
+(sig control-byte (string -> (or nil string)))
+
+(defn key->bytes (key vt)
+  "The bytes to write to the program for editor `key` — a 1-char string for a printable,
+or a keyword: a named key (`:enter` `:up` `:f5` …, application-mode aware) or a chord
+(`:ctrl-c` `:alt-f` `:ctrl-shift-right` `:alt-enter`). A ctrl chord on a character is its
+C0 byte, alt prefixes ESC, a modified named key takes the xterm `CSI 1;m X` form, and a
+modified enter / tab / backspace the `CSI code;m u` form a program reads to tell
+shift-enter from enter. Nil for a key with no terminal spelling.
+
+    (vt/key->bytes :up (vt/make 10 2))   → \"\\e[A\"
+    (vt/key->bytes :ctrl-c (vt/make 10 2))   → \"\\x03\"
+    (vt/key->bytes :shift-right (vt/make 10 2))   → \"\\e[1;2C\""
+  (cond
+    (string? key) key
+    (not (keyword? key)) nil
+    else
+      (let (name (let (s (str key)) (string/substring s 1 (string/length s)))
+            [ctrl alt shift base] (split-modifiers name)
+            k (keyword base)
+            modifier (+ 1 (if shift 1 0) (if alt 2 0) (if ctrl 4 0))
+            plain (or (and (mode vt :app-cursor) (get application-keys k)) (get named-keys k)))
+        (cond
+          (= modifier 1) plain
+          (and plain (> (string/length plain) 1)) (modified plain modifier)
+          (= k :enter) (if alt "\e\r" (str "\e[13;" modifier "u"))
+          (= k :tab) (if shift "\e[Z" (str "\e[9;" modifier "u"))
+          (= k :backspace) (if alt "\e\x7f" (str "\e[127;" modifier "u"))
+          (= k :escape) "\e"
+          (not (= (string/length base) 1)) nil
+          else
+            (let (ch (if shift (string/upper base) base)
+                  byte (if ctrl (control-byte ch) ch))
+              (cond
+                (nil? byte) nil
+                alt (str "\e" byte)
+                else byte))))))
+(sig key->bytes (any terminal -> any))
+
+(defn paste->bytes (text vt)
+  "`text` as the program should receive a paste: wrapped in the bracketed-paste markers
+when the program asked for them, so it can tell a paste from typing.
+
+    (vt/paste->bytes \"hi\" (vt/make 10 2))   → \"hi\"
+    (vt/paste->bytes \"hi\" (vt/feed (vt/make 10 2) \"\\e[?2004h\"))   → \"\\e[200~hi\\e[201~\""
+  (if (mode vt :bracketed-paste)
+    (str "\e[200~" text "\e[201~")
+    text))
+(sig paste->bytes (string terminal -> string))
+
+;; ---- input: the mouse -------------------------------------------------------------------------
+
+(defn- x10-byte (n)
+  "An X10 mouse coordinate or button: a byte, 32 up, capped at what a byte holds."
+  (string/int->char (+ 32 (min n 223))))
+(sig x10-byte (int -> string))
+
+(defn mouse->bytes (action button row col mods vt)
+  "The bytes a mouse event becomes for a program that asked for mouse reporting (`(mode
+vt :mouse)`), else nil: `action` one of `:press` `:release` `:drag` `:scroll-up`
+`:scroll-down`, `button` `:left` `:middle` `:right` or nil, `row`/`col` 0-based cells of
+the SCREEN, `mods` the held modifiers. SGR encoding (`CSI < b ; x ; y M`) when the program
+switched it on — the only form that reaches past column 223 — else X10's three bytes. A
+drag is reported only under 1002 / 1003, and never a motion with no button (1003 asks for
+it; this host has no such events).
+
+    (vt/mouse->bytes :press :left 2 4 [] (vt/feed (vt/make 10 5) \"\\e[?1000h\\e[?1006h\"))   → \"\\e[<0;5;3M\"
+    (vt/mouse->bytes :press :left 2 4 [] (vt/make 10 5))   → nil"
+  (let (reporting (mode vt :mouse)
+        code (cond
+               (= action :scroll-up) 64
+               (= action :scroll-down) 65
+               else (case button :left 0 :middle 1 :right 2 nil)))
+    (cond
+      (nil? reporting) nil
+      (nil? code) nil
+      (and (= action :drag) (= reporting 1000)) nil
+      else
+        (let (b (+ code
+                  (if (= action :drag) 32 0)
+                  (if (includes? mods :shift) 4 0)
+                  (if (includes? mods :alt) 8 0)
+                  (if (includes? mods :ctrl) 16 0))
+              x (inc col)
+              y (inc row))
+          (if (mode vt :mouse-sgr)
+            (str "\e[<" b ";" x ";" y (if (= action :release) "m" "M"))
+            ;; X10: a release is button 3 whichever it was, and every field is a byte
+            (str "\e[M" (x10-byte (if (= action :release) (+ b 3) b)) (x10-byte x) (x10-byte y)))))))
+(sig mouse->bytes (keyword any int int seqable terminal -> (or nil string)))

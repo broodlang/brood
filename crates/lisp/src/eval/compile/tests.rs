@@ -98,6 +98,7 @@ fn rewrite_arm_handles_rewrites_every_embedded_handle() {
                 fn_rest: ConstVal::new(Value::pair(PairId::runtime(3))),
                 captures: Box::new([]),
                 self_name: None,
+                module: None,
             }),
         ),
     ]));

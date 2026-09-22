@@ -15441,3 +15441,51 @@ a shimmed `math/rem` cannot produce; its child runs unarmed. CI's red, for three
 the isolate gate's spelling of `:isolated` and my describe-level mark. Nothing here is a
 retry; each has a guard that went red on sabotage.
 
+
+## 2026-09-21 (6) — the contract module boundary (ADR-383)
+
+The `format_test` ×35
+was not the check's cost but where it was charged: `string/format` calling its own
+`string/char-at` per character paid a check the module owed only to outsiders. Now a module's
+calls to its own contracted functions are unchecked, the Racket `contract-out` shape: beside
+the shim the kernel binds the original under `M/%orig%f`, the compiler resolves a same-module
+reference to that alias once per site (the closure's authoring module is a new
+`Closure::module`, inherited from the building arm through `MakeClosure` and carried across
+promote/message/image — wire v8, image v8, prelude image v4), the pass-through redirect and
+the tree-walker unwrap a same-module shim by value, and every `def` of the public name
+re-points the alias before the hook re-wraps. `sig!` keeps every call (its alias IS the
+shim; the forced set moved into `RuntimeCode`, `%contract-force!`/`%contract-forced?` replace
+the Brood table). All three tiers agree; the alias resolves to the public name on a miss, so
+a stale one can only check more. `format` ×20 000 armed: 1 312 → 338 ms (223 unarmed).
+Sabotage: `BROOD_NO_CONTRACT_BOUNDARY=1` reds 3 of the 5 new cases. Two fixtures moved with
+it: `contracts_default.rs` now calls `lies` across a module (and asserts the inside call is
+NOT checked), and `ability_test` compares what a constructor builds, not the closure — inside
+a module a contracted function is two bindings of one closure.
+## 2026-09-21 (3) — `std/vt`: the terminal emulator bedit needed to run `claude`
+
+bedit wanted to run `claude` in a buffer. It is an Ink TUI — absolute cursor moves, erase
+below, the alternate screen, colour everywhere, and a `CSI 6 n` it blocks on — and
+`ansi/render` had already said a full-screen program "should be given a real emulator
+rather than a better guess". `std/vt.blsp` is that emulator, as a value (ADR-384): `feed`
+is a pure fold, `screen` reads the grid back in the `highlight-spans` shape, `key->bytes`
+goes the other way, and the answers a program waits on come back as `:replies`. Sixty-one
+tests, `nest check --strict` clean.
+
+Two measurements worth keeping. Splicing a printed run into a row with `into` was *slower*
+than an `assoc` per cell — `into` on two vectors costs ~20 µs for a hundred cells against
+1 µs for one `assoc` — so the print loop stays per grapheme and says why. And a `regex/
+tokens` lexer over the chunk (one rule per sequence kind, which would have moved the whole
+scan into the DFA) cost ~240 ms for an 11 KB frame where the hand-written grapheme scan
+costs 27 — the per-character cost of the bitset DFA is not yet a lexer's. Both are the
+language's to fix; neither is the module's.
+
+## 2026-09-21 (4) — a pty child inherited its own master
+
+Found by bedit's terminal driver: an `sh -i` started under `os/spawn-pty` outlived the
+editor that closed it, and held a build lock's descriptor with it. `ls -l /proc/self/fd`
+from the child showed `3 -> /dev/ptmx`: `posix_openpt` and the slave `open` were made
+without `O_CLOEXEC`, so every pty child carried the MASTER across `exec`, and closing ours
+never hung the program up — a REPL killed with its buffer kept running. Both ends are
+close-on-exec now (the child's stdio comes through `stdio_dup`, which is what should cross);
+`proc_test` asserts the master is not among the child's descriptors, and fails on the old
+binary.

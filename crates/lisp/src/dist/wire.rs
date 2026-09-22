@@ -170,8 +170,10 @@ const MAX_GOSSIP_PEERS: usize = 4096;
 /// ordinary `Send`, so the watcher's node can retire its `PENDING_REMOTE` entry
 /// when the one-shot delivers (KI-96) — to a v6 peer the new tag is a decode
 /// error that tears the whole link down on the first monitor to fire, so the
-/// byte bumps.
-pub(super) const PROTOCOL_MAGIC: [u8; 4] = *b"BRD\x07";
+/// byte bumps; **v8** appends a shipped closure's authoring module — its contract
+/// boundary (ADR-383) — to the `M_CLOSURE` record, one optional symbol a v7 peer
+/// would read as the next frame's bytes, so the byte bumps.
+pub(super) const PROTOCOL_MAGIC: [u8; 4] = *b"BRD\x08";
 pub(super) const NONCE_LEN: usize = 32;
 pub(super) const MAC_LEN: usize = 32;
 /// Length of an X25519 public key (the ephemeral DH key in `Hello`, ADR-089).
@@ -684,6 +686,9 @@ fn encode_closure(w: &mut Vec<u8>, c: &crate::process::ClosureMsg) -> io::Result
         put_sym(w, *s);
         encode_msg(w, m)?;
     }
+    // The authoring module — the contract boundary (ADR-383). Last, after everything a v7
+    // record held, so the record reads as v7 plus one optional symbol.
+    put_opt_sym(w, c.module);
     Ok(())
 }
 
@@ -832,12 +837,14 @@ fn decode_closure_at(
         let m = decode_msg_at(r, depth)?;
         captured.push((s, m));
     }
+    let module = get_opt_sym(r)?;
     Ok(crate::process::ClosureMsg {
         name,
         arms,
         doc,
         captured,
         modules,
+        module,
     })
 }
 

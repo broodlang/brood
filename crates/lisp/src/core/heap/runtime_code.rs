@@ -312,6 +312,12 @@ pub struct RuntimeCode {
     /// re-`eval`ed). Shared through the runtime `Arc`, so every inner process sees one
     /// set.
     pub(super) private: RwLock<std::collections::HashSet<Symbol>>,
+    /// Names whose declared signature `sig!` FORCED (ADR-381/382): contracted whatever
+    /// the mode, and at EVERY call — the module boundary does not exempt the name's own
+    /// module. Runtime-level like the private set, and deliberately not a global: a
+    /// globals restore (`%isolate`) must not roll a force back, and a stale entry only
+    /// means a redefinition of that name is contracted again.
+    pub(super) contract_forced: RwLock<std::collections::HashSet<Symbol>>,
     /// **Stability metadata** per global (ADR-283): when a name appeared, whether it is
     /// deprecated and what replaces it, whether it is beta. Recorded by the `%register-meta`
     /// primitive a `(meta …)` form emits, and cleared by `env_define` on any redefinition —
@@ -655,6 +661,7 @@ impl Default for RuntimeCode {
             sealed: RwLock::new(std::collections::HashSet::new()),
             // Likewise no private names until the prelude has been seeded.
             private: RwLock::new(std::collections::HashSet::new()),
+            contract_forced: RwLock::new(std::collections::HashSet::new()),
             version: AtomicU64::new(0),
             code_epoch: AtomicU64::new(0),
             def_sites: RwLock::new(HashMap::new()),
@@ -787,6 +794,7 @@ impl RuntimeCode {
             // builder heap's runtime) and threaded in here, the same way the
             // bindings themselves are.
             private: RwLock::new(prelude_private.iter().copied().collect()),
+            contract_forced: RwLock::new(std::collections::HashSet::new()),
             globals: RwLock::new(globals),
             global_generations: RwLock::new(SymbolMap::default()),
             registry_lock: Mutex::new(HashSet::new()),
@@ -873,6 +881,19 @@ impl RuntimeCode {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&sym);
+    }
+    /// Force `sym`'s contract (`sig!`): enforced whatever the mode, at every call.
+    pub(super) fn force_contract(&self, sym: Symbol) {
+        self.contract_forced
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(sym);
+    }
+    pub(super) fn is_contract_forced(&self, sym: Symbol) -> bool {
+        self.contract_forced
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&sym)
     }
     /// Replace the whole private set (the `%isolate` restore — see
     /// [`Heap::restore_private_names`]). Set-level because the caller cannot enumerate

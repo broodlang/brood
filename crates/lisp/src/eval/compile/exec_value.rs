@@ -467,6 +467,7 @@ pub(crate) fn exec_value(
             fn_rest,
             captures,
             self_name,
+            module,
         } => {
             // Build the captured env: a flat snapshot of the enclosing lexicals
             // (parent = the process global, so true globals + dynamics still resolve
@@ -485,7 +486,7 @@ pub(crate) fn exec_value(
                 }
                 frame
             };
-            let closure = crate::eval::make_closure_cached(heap, fn_rest.load(), env)?;
+            let closure = crate::eval::make_closure_cached(heap, fn_rest.load(), env, *module)?;
             // Direct `letrec` self-recursion: bind the binder name to the closure
             // we just built, in the closure's own captured env. The recursive call
             // then resolves through that env (uncached — a local-capturing frame

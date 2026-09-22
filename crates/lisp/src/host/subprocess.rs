@@ -529,7 +529,11 @@ mod pty {
         // SAFETY: each call is the documented POSIX sequence, and every return is
         // checked before the next step uses it.
         unsafe {
-            let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+            // `O_CLOEXEC` on both ends is load-bearing: a child that inherits the MASTER holds
+            // its own terminal open, so closing ours never hangs it up — an `sh -i` spawned
+            // under the pty outlived the editor that closed it, still reading a terminal
+            // nobody else could reach. The child gets its stdio through `stdio_dup`.
+            let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC);
             if master < 0 {
                 return Err(std::io::Error::last_os_error());
             }
@@ -549,7 +553,10 @@ mod pty {
                     libc::close(master);
                     return Err(e);
                 }
-                libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY)
+                libc::open(
+                    name.as_ptr(),
+                    libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
+                )
             };
             #[cfg(not(target_os = "linux"))]
             let slave = {
@@ -559,7 +566,7 @@ mod pty {
                     libc::close(master);
                     return Err(e);
                 }
-                libc::open(name, libc::O_RDWR | libc::O_NOCTTY)
+                libc::open(name, libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC)
             };
             if slave < 0 {
                 let e = std::io::Error::last_os_error();

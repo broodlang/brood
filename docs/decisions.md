@@ -24746,3 +24746,130 @@ entries not written reds the listed case with `N == files`; the key comparison f
 reds the edit case with the stale, warning-free replay. `tests/module_index_test.blsp`
 covers the v2 entry (own module, requires, the file's own spelling).
 
+
+## ADR-383 — A contract guards the module boundary: a module's calls to its own contracted functions are unchecked
+
+**Context.** ADR-381 put a checking shim on every `sig`-declared binding, and every call
+paid for it — the module's own included. `string/format` reaches `string/char-at` once per
+character and `format_test` ran ×35 armed; the cost was not the check (~3.5 µs) but WHERE
+it was charged: a module's author owes the check to callers *outside* the module — the
+checker already holds the module's own calls to the declaration statically, and a check on
+them buys nothing a static warning did not. Racket's `contract-out` is the shape: the
+contract attaches to the export, and the module's internal references bind the raw value.
+
+**Decision.** A contract is a property of the module boundary. Beside the shim, the kernel
+binds the ORIGINAL under a second, private name — `string/char-at`'s under
+`string/%orig%char-at` (unreadable as a call: no source spells a `%orig%` leaf) — and a
+reference from the module's OWN code to a contracted sibling reads that name:
+
+- **Compiled code** resolves it at compile time, once per site (`lower::module_boundary_ref`):
+  a free symbol whose module is the compiling closure's, whose alias is bound, compiles to
+  the alias — a call head, a value reference (`(map xs f)`), a nested `(fn …)`'s body, a
+  named loop's. The closure's module is `Closure::module`, a new field: inherited from the
+  arm that built it (`Node`/`Inst::MakeClosure` carry the compiling arm's module) and from
+  a module's top level while it loads; a `def`'d closure that recorded nothing uses the
+  module of its own qualified name. Carried across promote/freeze/message/image (the wire
+  record's v8 field; image v8, prelude image v4). A pass-through wrapper — `(defn g (x)
+  (f x))`, the callback `(fn (x) (f x))` — never runs its compiled body, so the dispatcher's
+  redirect does the same by VALUE: a head that resolves to a shim of the wrapper's own
+  module forwards to the original (`contracts::boundary_redirect`).
+- **The tree-walker** carries the module in the frame (`%contract-module`, bound by
+  `bind_params`) and unwraps a shim of that module at symbol resolution
+  (`contracts::boundary_resolve`); a closure it builds inherits the frame's module. All
+  three tiers answer alike (`tests/contract_test.blsp` runs at each).
+- **The alias tracks the public name.** It is bound with the shim, rebound by every `def`
+  of the public name before the hook re-wraps (`mirror_alias` — so a same-module site
+  compiled against it never calls a superseded body, and a redefinition to a non-closure
+  fails the same way through either name), private, reserved with its public name, and
+  resolved by the public name on a miss (`derive::global_miss`) — an `%isolate` restore can
+  roll the globals back under an arm the shared body cache kept, and the reference's
+  meaning is the sibling's binding either way. So a stale alias can only ever check MORE.
+- **`sig!` has no boundary.** Its shim is what the alias holds, so the module's own calls
+  are checked too: the explicit "strong arrow" is enforced at every call, which is also how
+  a module tests its own contracts. The forced set moved into the kernel
+  (`RuntimeCode::contract_forced`; `%contract-force!`/`%contract-forced?` replace the
+  Brood table and `%contract-install!`), since the kernel now decides at bind time.
+- **A root name has no module and so no boundary**: a script's `sig`s, and the prelude's
+  under `=all`, are enforced at every call as before.
+- `BROOD_NO_CONTRACT_BOUNDARY=1` pins every call to the shim — the A/B and bisect lever,
+  and the sabotage of every boundary test.
+
+**Measured** (debug binary, image live): 20 000 `(string/format "%s=%d;" "key" n)` armed
+1 312 ms without the boundary, **338 ms** with it, 223 ms unarmed — the armed overhead
+from 5.9× to 1.5×, the remainder the outer call's own check and `str`. Unarmed cost: one
+static load per free symbol at compile time and per pass-through redirect.
+
+**What changes for a program.** Inside a module, a contracted function is two bindings of
+one closure: the module's own references and the public name are not `=` armed
+(`tests/ability_test.blsp` compared a constructor to its `reflect/eval`'d name and now
+compares what they build). `BROOD_MONO`'s constructor identity reads the public name of an
+alias head. A test asserting that its own module's `(sig …)` raises must call from another
+module or use `sig!` (`crates/nest/tests/contracts_default.rs`'s fixture moved `lies` into
+its own module and asserts the inside call is NOT checked).
+
+**Not done.** An explicitly-qualified reference inside an ADR-070 rooted package
+(`commands/cmd-open` written inside `bedit/commands`) is compared unrooted and stays
+checked; bare references — the norm — qualify to the full name and cross the boundary.
+
+**Consequences.** `Closure::module`; `Node`/`Inst::MakeClosure::module`; `Scope::module`;
+`make_closure`/`make_closure_cached` take the module; `contracts.rs` (`uncontracted_alias`,
+`alias_public`, `uncontracted_sibling`, `mirror_alias`, `boundary_redirect`,
+`boundary_resolve`, `bind_frame_module`); `derive::global_miss`'s alias fallback;
+`tests/contract_test.blsp` "a contract guards the module boundary" (sabotage-verified with
+the flag: 3 of 5 red); `contracts_default.rs` gains the inside/outside pair.
+## ADR-384 — `std/vt`: a virtual terminal as pure data, so an editor can host a full-screen program
+
+**Status:** accepted (2026-09-21). Prompted by bedit: running `claude` — an Ink TUI — in a
+buffer, where `ansi/render` had said of itself that a full-screen program "should be given
+a real emulator rather than a better guess".
+
+**Context.** `std/term` is the terminal seam in one direction: a Brood program taking over
+the terminal it runs in. Nothing covered the other direction — Brood *being* the terminal
+for a program it runs under `os/spawn-pty`. `ansi/strip` drops the escapes (right for a
+build log), `ansi/render` applies the handful a line editor uses (right for `iex`), and a
+program that positions the cursor absolutely, scrolls a region, switches to the alternate
+screen or *waits on a query* (`CSI 6 n`, `CSI c`) had nowhere to run.
+
+**Decisions.**
+
+- **The terminal is a value.** `(vt/feed vt chunk)` is a pure fold from a terminal and a
+  chunk of output to the next terminal: a grid of `[grapheme attr]` cells, the cursor, the
+  scroll region, the alternate screen with the main one kept aside, the DEC/ANSI modes and
+  the SGR state. No IO and no process, so a host puts it wherever it likes (bedit keeps one
+  per buffer in the worker that owns the pty) and a test is `feed` then look.
+- **What the program asked comes back as data on the same value.** `:replies` holds the
+  answers a query needs (a cursor-position report, primary/secondary device attributes,
+  the size report) and `:evicted` the rows that scrolled off the top of the main screen —
+  both reset per `feed`, so the host reads them once and writes / appends them. The host
+  owns the scrollback: a row leaves the screen as its cells, and `(vt/line row palette)`
+  reads it back with its colour, so history is not flattened to text on the way out.
+- **Reading back is in the editor's own vocabulary.** `(vt/screen vt palette)` is
+  `{:text :spans :cursor …}` — rows joined by newlines, trailing blanks trimmed (the cursor
+  row padded to the cursor so its offset exists), spans in the `highlight-spans` shape
+  faces already paint, colours resolved through the caller's 16-entry palette (a theme),
+  the 256-colour cube and grey ramp computed. Nothing in the module knows a buffer.
+- **Input goes the other way through the same value.** `(vt/key->bytes key vt)` encodes the
+  editor's key vocabulary (`:ctrl-c`, `:alt-shift-up`, `:enter`, `"a"`) as the bytes a
+  program reads — application-cursor aware, modifiers in the xterm `CSI 1;m X` form, the
+  kitty-style `CSI 13;2u` for a shift-enter a program wants to tell from enter — and
+  `paste->bytes` brackets a paste when the program asked for it. `mouse->bytes` reports a click, drag or wheel notch in the
+  program's screen cells when it switched reporting on — SGR (1006) when asked, else X10.
+  The `screen` says whether the program wants the mouse and whether it is full-screen, so
+  a host can route a wheel to the program as arrow keys where a terminal would.
+- **Partial sequences carry.** A pipe cuts anywhere; a chunk ending inside a sequence
+  leaves its tail in `:carry` for the next feed, and a bare trailing ESC never prints.
+- **Graphemes, not codepoints, are the unit**, so a wide glyph is one cell pair and a
+  combining mark joins the cell before the cursor. `CR LF` is one grapheme cluster and is
+  handled as the two controls it is.
+- **Pure Brood, and the cost is known.** An 11 KB forty-row redraw with four hundred SGRs
+  folds in ~27 ms on the dev profile. The print loop threads the cursor's row and column
+  as loop arguments — copying the terminal map per grapheme had cost half the frame — and
+  writes each cell with `assoc`, because splicing a run in with `into` measured *slower*
+  (`into` on two vectors is ~20 µs for a hundred cells against 1 µs per `assoc`; a `regex/
+  tokens` lexer over the chunk was ten times slower again). Both are the language's to fix,
+  and the module says so where it chose the loop.
+
+**Not done.** No DEC line
+drawing charset (a program draws boxes in Unicode today), no `HTS`-set tab stops (every 8),
+no sixel/kitty graphics, no reflow on resize (rows are clipped or padded; a program that
+handles `SIGWINCH` redraws anyway).

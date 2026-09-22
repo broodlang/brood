@@ -119,3 +119,16 @@
     (assert= "foo" (path/with-extension "foo.txt" "")))
   (test "add extension"
     (assert= "Makefile.bak" (path/with-extension "Makefile" ".bak"))))
+
+(describe "path/abbreviate"
+  (test "a path under the home starts with ~, the home itself is ~"
+    (let (home (or (%getenv "HOME") ""))
+      (assert= (path/abbreviate (str home "/src/x")) "~/src/x")
+      (assert= (path/abbreviate home) "~")))
+  (test "a path outside the home is unchanged — even one that starts with its text"
+    (let (home (%getenv "HOME"))
+      (assert= (path/abbreviate "/tmp/x") "/tmp/x")
+      (assert= (path/abbreviate (str home "2/x")) (str home "2/x"))))
+  (test "round-trips with absolute"
+    (let (home (%getenv "HOME"))
+      (assert= (path/absolute (path/abbreviate (str home "/a"))) (str home "/a")))))

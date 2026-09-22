@@ -285,6 +285,9 @@ fn closure_roundtrips_through_the_wire() {
                 probe: value::intern("json/encode"),
             },
         ],
+        // The authoring module (ADR-383) — the record's last field, so a mis-sized
+        // `captured` list ahead of it would misread this too.
+        module: Some(value::intern("pool")),
     };
     let f = Frame::Send {
         target: Target::Pid(1),
@@ -327,6 +330,8 @@ fn closure_roundtrips_through_the_wire() {
             assert_eq!(value::symbol_name(c.modules[1].probe), "json/encode");
             assert_eq!(c.captured.len(), 1);
             assert!(matches!(&c.captured[0].1, Message::Int(42)));
+            // The authoring module — the contract boundary — rode along (ADR-383).
+            assert_eq!(value::symbol_name(c.module.unwrap()), "pool");
         }
         other => panic!(
             "wrong frame after round-trip: {:?}",
@@ -352,6 +357,7 @@ fn closure_with_all_options_absent_roundtrips() {
         doc: None,
         captured: vec![],
         modules: vec![],
+        module: None,
     };
     let f = Frame::Send {
         target: Target::Pid(1),
@@ -365,6 +371,7 @@ fn closure_with_all_options_absent_roundtrips() {
             assert!(c.name.is_none());
             assert!(c.doc.is_none());
             assert!(c.captured.is_empty());
+            assert!(c.module.is_none());
             assert_eq!(c.arms.len(), 1);
             assert!(c.arms[0].rest.is_none());
             assert!(c.arms[0].optionals.is_empty());

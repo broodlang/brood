@@ -211,6 +211,7 @@ pub unsafe extern "C" fn brood_rt_make_closure(
         fn_rest,
         names,
         self_name,
+        module,
     } = &*inst
     else {
         // Emitted only for MakeClosure sites; anything else is a lowering bug, and parking
@@ -233,7 +234,7 @@ pub unsafe extern "C" fn brood_rt_make_closure(
         frame
     };
     h.truncate_roots(n - ncap); // drop the staged captures
-    match crate::eval::make_closure_cached(h, fn_rest.load(), env) {
+    match crate::eval::make_closure_cached(h, fn_rest.load(), env, *module) {
         Ok(closure) => {
             if let Some(name) = self_name {
                 h.env_define(env, *name, closure);

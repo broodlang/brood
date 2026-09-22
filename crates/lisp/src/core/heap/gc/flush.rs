@@ -710,6 +710,7 @@ pub(super) fn flush_closure(
         arms,
         doc: cl.doc,
         env,
+        module: cl.module,
     };
     fwd.mint_closure(new_idx)
 }

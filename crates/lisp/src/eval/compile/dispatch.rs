@@ -238,6 +238,10 @@ pub(crate) fn dispatch(
                 _ => Some(head),
             };
             let Some(inner) = inner else { break };
+            // A wrapper forwarding to a contract shim of its own module forwards to the
+            // original instead (the boundary, ADR-383).
+            let inner =
+                crate::builtins::contracts::boundary_redirect(heap, id, inner).unwrap_or(inner);
             // A redirect back to the *same* closure is direct self-recursion
             // (`(defn hog () (hog))`), not a thin wrapper: looping it here would spin
             // un-preemptibly (this redirect path has no captureable safepoint). Break

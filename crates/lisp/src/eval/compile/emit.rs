@@ -284,6 +284,7 @@ pub(crate) fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
             fn_rest,
             captures,
             self_name,
+            module,
         } => {
             // Capture sources are leaf reads (an enclosing lexical → `Local`, or a
             // global → `Global`), so emitting them is safepoint-free; their values
@@ -298,6 +299,7 @@ pub(crate) fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
                 fn_rest: ConstVal::new(fn_rest.load()),
                 names,
                 self_name: *self_name,
+                module: *module,
             });
         }
         Node::TryCatch {

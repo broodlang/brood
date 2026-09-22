@@ -8,7 +8,10 @@
 ;; landing on a bound name, in the sweep after a module's bindings arrive from source or
 ;; from the stdlib image, and over the prelude's own root names at runtime boot. Armed by
 ;; `BROOD_CONTRACTS=1` (the `nest run`/`nest test` default) or forced per name by `sig!`.
-;; All policy, no new primitive beyond the three in `builtins/contracts.rs`. See
+;; All policy, no new primitive beyond the four in `builtins/contracts.rs`. The MODULE
+;; BOUNDARY (ADR-383) is the kernel's: beside a shim it binds the original under a
+;; private alias, and a module's own compiled references to the name read that — a
+;; module's calls to its own functions are unchecked; `sig!` has no boundary. See
 ;; `docs/type-annotations.md`.
 ;;
 ;; The LAST prelude file, deliberately. A prelude closure keeps any macro call its body
@@ -114,10 +117,6 @@ type; `i` is the position of the first rest argument."
 ;; keep the wrapped name's arity (`arity-of`, the reload-arity check); beyond that, and
 ;; for an `&optional` declaration, the shim is variadic and `apply`s only the arguments
 ;; it received, so the callee's own defaults still apply.
-
-;; Names `sig!` forced, in every mode. A kernel table: a globals restore does not roll it
-;; back, and a stale entry only means a redefinition of that name is contracted again.
-(def- %*contract-forced* (%table))
 
 ;; Two names the MACRO EXPANDER calls at every level of its recursive descent, where a shim
 ;; costs its frames per level of expansion depth: wrapping `reverse` alone took a cold
@@ -258,30 +257,22 @@ type; `i` is the position of the first rest argument."
 arrow), comes to hold the closure `orig` (ADR-381): the checking shim to bind instead,
 or `orig` itself when nothing is to be enforced — contracts unarmed and the name not
 `sig!`-forced, or the name exempt. Called by the kernel, not by programs."
-  (if (or (%contract-exempt? name)
-        (not (or (%contracts-armed?) (%table-has? %*contract-forced* name))))
+  (if (or (%contract-exempt? name) (not (or (%contracts-armed?) (%contract-forced? name))))
     orig
     (%contract-shim name orig (%contract-spec type))))
 
-(defn %contract-force! (name)
-  "Enforce `name`'s declared signature at every call whatever the mode — `sig!`'s runtime
-half. Installs the shim now if the name is bound, and marks the name so a later or
-re-`def`inition is wrapped when it lands. Returns the qualified name."
-  (%table-put %*contract-forced* name true)
-  (%contract-install! name)
-  name)
-
 (defmacro sig! (name type)
-  "Like `(sig …)` but ENFORCED whatever the mode: each argument and the result are checked
-at every call and a mismatch throws a blamed contract error (an opt-in 'strong arrow').
-The checker reads it exactly like `(sig …)`, and like `(sig …)` it may stand on either
-side of the definition — the contract is installed when the binding exists (ADR-381).
-Supports a `&` rest marker: `(sig! f (int & number -> string))` checks fixed args then
-every rest arg, and an `&optional` marker: `(sig! f (string int &optional string ->
-string))` checks each optional that was actually supplied and leaves the callee's own
-defaults alone. That one shim IS variadic, so `arity-of` reports `2+` where the function
-reads `2-3`."
+  "Like `(sig …)` but ENFORCED whatever the mode and at EVERY call — the module's own
+calls included, where an armed `(sig …)` guards only the module boundary (ADR-383): each
+argument and the result are checked and a mismatch throws a blamed contract error (an
+opt-in 'strong arrow'). The checker reads it exactly like `(sig …)`, and like `(sig …)`
+it may stand on either side of the definition — the contract is installed when the
+binding exists (ADR-381). Supports a `&` rest marker: `(sig! f (int & number ->
+string))` checks fixed args then every rest arg, and an `&optional` marker: `(sig! f
+(string int &optional string -> string))` checks each optional that was actually supplied
+and leaves the callee's own defaults alone. That one shim IS variadic, so `arity-of`
+reports `2+` where the function reads `2-3`."
   ;; The declaration first, then the force: `%register-sig` returns the qualified name,
-  ;; which is the key the forced table and the kernel's binding both use. Root-scoped
+  ;; which is the key the kernel's forced set and its binding both use. Root-scoped
   ;; call, since this expands inside the module being contracted (KI-113).
   `(/%contract-force! (%register-sig '~name '~type)))
