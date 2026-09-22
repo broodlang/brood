@@ -44,12 +44,21 @@ or `orig` itself when nothing is to be enforced — contracts unarmed and the na
 
 ;; The `std/contract.blsp` half, reached only when a binding IS to be enforced — once per
 ;; contracted binding, never on a call path, so the resolution can be as plain as this.
-;; `require-one` is a no-op after the first; `reflect/eval` is a NATIVE under a module
-;; prefix, so naming it here loads nothing (a bound name is not a module reference), which
-;; a literal `contract/shim` head would not be: with no stdlib image to vouch for the name
-;; — the cold prelude build — that head would resolve while the prelude is being built.
+;;
+;; **It must not LOAD here.** The module is loaded once at runtime boot when contracts are
+;; armed (`Interp::new`), because this hook runs wherever a binding comes to exist — inside
+;; a `def`, inside a module's sweep, inside whatever evaluation reached them — and a module
+;; load is arbitrary evaluation, hence a collection, at a point those callers are not
+;; GC-safe across: it tripped the use-after-GC wire on the tree-walker within a day. The
+;; `require-one` below is therefore a no-op in every armed process and a last resort for the
+;; one path that arms LATER than boot — a `sig!` in an otherwise unarmed run.
+;;
+;; `reflect/eval` is a NATIVE under a module prefix, so naming it here loads nothing (a
+;; bound name is not a module reference), which a literal `contract/shim` head would not be:
+;; with no stdlib image to vouch for the name — the cold prelude build — that head would
+;; resolve while the prelude is being built.
 (defn- %contract-machinery (name orig type)
-  (require-one 'contract)
+  (unless (bound? 'contract/shim) (require-one 'contract))
   ((reflect/eval 'contract/shim) name orig type))
 
 (defmacro sig! (name type)

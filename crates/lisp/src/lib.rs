@@ -148,15 +148,30 @@ impl Interp {
         // `BROOD_CONTRACTS=all` its declared root names are swept HERE, per runtime, where
         // a rebinding is an ordinary global. Sixteen names; a failure names itself. Plain
         // `1` leaves them alone (see `prelude_contracts_armed` for the measurement).
+        let mut interp = Interp {
+            heap,
+            root: EnvId::GLOBAL,
+        };
+        // The shim machinery lives in `std/contract.blsp` so an UNARMED boot never carries
+        // it (ADR-385). An armed one does need it, and it is loaded HERE rather than at the
+        // hook's first call: the hook runs wherever a binding comes to exist — inside a
+        // `def`, inside a module's sweep, inside whatever evaluation reached them — and a
+        // module load is arbitrary evaluation, hence a collection, at a point those callers
+        // are not GC-safe across. It tripped the use-after-GC wire on the tree-walker within
+        // a day (a `bytes` handle staged for a native across the load). Loading once at boot
+        // keeps the whole win — an unarmed run still never reads the module — and puts the
+        // collection where every boot already has one.
+        if builtins::contracts::contracts_armed() {
+            if let Err(e) = interp.eval_str("(require-one 'contract)") {
+                eprintln!("[contracts] the contract machinery could not be loaded: {e}");
+            }
+        }
         if builtins::contracts::prelude_contracts_armed() {
-            if let Err(e) = builtins::contracts::sweep(&mut heap, None) {
+            if let Err(e) = builtins::contracts::sweep(&mut interp.heap, None) {
                 eprintln!("[contracts] the prelude's contracts could not be installed: {e}");
             }
         }
-        Interp {
-            heap,
-            root: EnvId::GLOBAL,
-        }
+        interp
     }
 
     /// Run a whole top-level program (`brood file.blsp`) as a single green process

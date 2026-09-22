@@ -15589,3 +15589,21 @@ the rig reads **2.26 GB, unchanged, for 3× the wall**. The peak belongs to the 
 holds every file's forms and derived facts for the run because the Pass 2.9 fixpoint wants
 them at once. Whoever takes item 4 can skip the tuning and go straight to dropping a file's
 forms after its walk, or sharding the fixpoint over signatures only.
+
+## 2026-09-22 (6) — KI-185: the contract hook must not LOAD (ADR-385's first casualty)
+
+CI went red on the tree-walker within hours of ADR-385: `nest test` armed tripped the
+per-deref use-after-GC wire on a `bytes` handle staged for a native. The cause was the call
+SITE, not the module — `%contract-wrap` reached `std/contract.blsp` with `require-one` at
+its first armed call, and the hook runs wherever a binding comes to exist, so a module load
+(arbitrary evaluation, hence a collection) landed in the middle of whatever evaluation had
+reached the `def`. The module is loaded once at boot now, under the same condition that
+makes contracts live at all; the hook's `require-one` is behind a `bound?` test and only
+covers arming later than boot (a `sig!` in an unarmed run). The win is intact: unarmed runs
+still never load it, empty-file 78.9M.
+
+Worth keeping: the step that named the cause was not reading the stack for the missing root,
+it was restoring the *pre-ADR-385* prelude and re-running — three minutes, and it identifies
+the change rather than the symptom. Prefer it to a bisect build whenever the suspect is one
+file. And the rule underneath: a kernel hook called at a binding moment may allocate, but it
+must not load.
