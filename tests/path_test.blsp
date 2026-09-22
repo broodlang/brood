@@ -122,7 +122,7 @@
 
 (describe "path/abbreviate"
   (test "a path under the home starts with ~, the home itself is ~"
-    (let (home (%getenv "HOME"))
+    (let (home (or (%getenv "HOME") ""))
       (assert= (path/abbreviate (str home "/src/x")) "~/src/x")
       (assert= (path/abbreviate home) "~")))
   (test "a path outside the home is unchanged — even one that starts with its text"

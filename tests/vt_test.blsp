@@ -250,10 +250,10 @@
 (describe "vt: history keeps its colour"
   (test "an evicted row reads back with its spans, from offset 0"
     (let (v (fed 6 1 "\e[31mred\e[0m!\r\nnext")
-          row (first (:evicted v)))
+          row (nth (:evicted v) 0 []))
       (assert= (vt/line row nil) ["red!" [[0 3 {:fg [205 0 0]}]]])))
   (test "a screen row can be read the same way"
-    (assert= (vt/line (nth (:grid (fed 6 1 "ab   ")) 0) nil) ["ab" []])))
+    (assert= (vt/line (nth (:grid (fed 6 1 "ab   ")) 0 []) nil) ["ab" []])))
 
 (describe "vt: the edges of a row"
   (test "a wide grapheme pinned at the last column with autowrap off keeps its glyph"
