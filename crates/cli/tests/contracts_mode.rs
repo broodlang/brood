@@ -21,19 +21,6 @@ use std::process::Command;
 
 mod support;
 
-/// CI's `differential (tree-walker)` job sets `BROOD_NO_STDIMAGE=1` so the source path
-/// keeps deliberate coverage; a probe about what a run does WITH the image has nothing to
-/// measure there. Skip, saying so — the alternative is a red that is really a configuration
-/// mismatch (what CI reported for this test), or the silent pass that would also hide a
-/// genuinely missing image.
-fn no_image_configured() -> bool {
-    if std::env::var_os("BROOD_NO_STDIMAGE").is_some() {
-        eprintln!("skipped: BROOD_NO_STDIMAGE is set — there is no image path to measure");
-        return true;
-    }
-    false
-}
-
 struct TempDir {
     path: PathBuf,
 }
@@ -281,10 +268,12 @@ fn every_baked_in_module_loads_under_contracts_from_source() {
 /// (which only `nest` writes — the nextest setup script does) and a warm prelude image
 /// are the configuration the row runs in; `io` loaded from source expands enough to tier
 /// arms of its own, so a run without the image proves nothing and is reported as such.
-
 #[test]
 fn an_unarmed_startup_run_lowers_no_arm() {
-    if no_image_configured() {
+    // CI's tree-walker job runs the source path on purpose (`BROOD_NO_STDIMAGE=1`); there
+    // the probe proves nothing, by the reasoning above, and says so by standing aside
+    // rather than by failing that job (it did, 2026-09-22).
+    if std::env::var_os("BROOD_NO_STDIMAGE").is_some() {
         return;
     }
     let dir = temp_dir("ki182");
@@ -337,9 +326,10 @@ fn an_unarmed_startup_run_lowers_no_arm() {
 /// so "not loaded" can never pass because the trace stopped naming anything.
 #[test]
 fn the_contract_machinery_loads_only_when_armed() {
-    // The probe counts `[image] …` lines, which exist only when the module comes from the
-    // image; without one it loads from source and names nothing.
-    if no_image_configured() {
+    // `[image] contract` is a materialisation line; on the source path (CI's tree-walker
+    // job, `BROOD_NO_STDIMAGE=1`) nothing materialises and the armed half reads 0 for the
+    // wrong reason. The fact itself holds there too, but this probe cannot see it.
+    if std::env::var_os("BROOD_NO_STDIMAGE").is_some() {
         return;
     }
     let dir = temp_dir("ki182-lazy");
