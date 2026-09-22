@@ -55,9 +55,13 @@ the example above."
 (defn- %take-while-acc (pred coll acc)
   ;; `empty?`, not `pair?` — the guard `take`/`drop` use. `pair?` is false for a VECTOR and
   ;; a STRING, so this used to walk zero items of either and answer `nil`.
-  (if (and (not (empty? coll)) (pred (first coll)))
-    (%take-while-acc pred (rest coll) (cons (first coll) acc))
-    (reverse acc)))
+  ;; Two `if`s, not `(and (not (empty? …)) …)`: `not` is a prelude closure, a call per
+  ;; element on this path (KI-182's lesson, swept).
+  (if (empty? coll)
+    (reverse acc)
+    (if (pred (first coll))
+      (%take-while-acc pred (rest coll) (cons (first coll) acc))
+      (reverse acc))))
 
 ;; (any? pred coll) -> true if pred holds for any element; (every? pred coll) ->
 ;; true if it holds for all (vacuously true on the empty list). Booleans, by the
@@ -895,7 +899,8 @@ A trailing `:into coll` collects with `conj` onto `coll` instead of building a l
 ;; The list-only counterpart to `dotimes`: lean and tail-recursive, no discard
 ;; list built. Use `doseq` when you need destructuring or `:when` filters; reach
 ;; for `dolist` for the common "do this for each item" loop.
-(defn- %dolist-loop (xs f) (when (not (nil? xs)) (f (first xs)) (%dolist-loop (rest xs) f)))
+(defn- %dolist-loop (xs f)
+  (if (nil? xs) nil (do (f (first xs)) (%dolist-loop (rest xs) f))))
 (defmacro dolist (bind & body)
   "Run `body` with the bound name set to each element of the collection for side effect; returns `nil`. `bind` is `(var coll)`.
 
@@ -927,7 +932,9 @@ See `take-while`: the `pair?` guard was false for a vector, so this used to hand
 whole collection whatever the predicate said."
   (%drop-while-from pred coll))
 (defn- %drop-while-from (pred coll)
-  (if (and (not (empty? coll)) (pred (first coll))) (%drop-while-from pred (rest coll)) coll))
+  (if (empty? coll)
+    coll
+    (if (pred (first coll)) (%drop-while-from pred (rest coll)) coll)))
 
 (%defseq mapcat
   (f)

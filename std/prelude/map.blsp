@@ -216,7 +216,7 @@ can.)
     (%set-has? m k)
     (let (a (%map-get m k :%contains-miss-a))
       (if (= a :%contains-miss-a)
-        (not (= (%map-get m k :%contains-miss-b) :%contains-miss-b))
+        (if (= (%map-get m k :%contains-miss-b) :%contains-miss-b) false true)
         true))))
 
 ;; ---- map: merge / update / nested access -----------------------------------
