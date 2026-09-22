@@ -12,18 +12,35 @@ sysctl that moves under you — that file's last section has the one-line check)
 questions are answerable here; check that file's "what this box CAN answer" before deferring
 anything.
 
-## 2026-09-22 — KI-182 FIXED; next is the scaling queue (items 3–5) and a `startup` re-measure
+## 2026-09-22 — KI-182: the JIT-at-boot half is FIXED; a diffuse +6% CPU residual on `startup` stays open
 
-**KI-182 is closed, but the row is not re-measured** — do that first on a box that can run
-`make ab BASE=136b14d7 ROWS=startup ARGS=--floor N=15` (this one cannot, by rule), and expect
-most of the +6% back: the JIT half is gone (`BROOD_JIT_DUMP_IR=1 brood startup.blsp` lowers
-nothing), the def-site half (+0.6M instructions) is the design. The fix had two halves where
-the KI named one — the `contract_apply` early return, and the ability-op return check, which
-ADR-381 had wrapped around every `impl` method: that wrapper both tiered `not` and un-elided
-every thin impl for every mode since 09-21. The check is in the op function now; `impl`
-registers methods as written. If bedit's armed run changes shape, this is why.
+Both callers closed (devlog 2026-09-22): the per-`def` contract offer and the per-op-result
+check each entered a Brood function unarmed to learn that contracts were off, and the
+function's `not` crossed the tier threshold during `io`'s load. No arm lowers at boot and
+`BROOD_NO_JIT=1` no longer moves the instruction count. **But the row is not back:** `make ab`
+reads 16 → 16 ms only because it rounds to the millisecond; interleaved pinned task-clock is
+12.85 → 13.68 ms (+6.4%), 75.0M → 80.9M instructions, and the profile is diffuse (KI-182 has the
+table). It is the data ADR-381 and ADR-382 added — a 287-line prelude file localized and frozen
+at every boot, 526 def-site entries — not a mechanism. Two levers are written up in the KI;
+the first (move the shim machinery out of the prelude, now that the hook is never entered
+unarmed) is the one I would take. A design call, so left for the owner. Guard:
+`crates/cli/tests/contract_offer_unarmed.rs` (both halves sabotage-verified).
 
-Then `docs/large-project-scaling.md` items 3–5, in order (below).
+**What this leaves.** (a) The residual above, +5.9M instructions on the startup row against 136b14d7:
++2.8M on an empty file (ADR-382's def sites in the prelude image, 802 → 1328 entries, plus a
+larger prelude) and +3.1M across `io`'s load — under the wall's resolution, recorded in KI-182,
+worth a lazy def-site decode if boot ever matters more. (b) `(math/max 1 2)` lowers `not` on
+the OLD binary too: a pre-existing caller in `math`'s load, one probe away
+(`BROOD_JIT_DUMP_IR=1`, then rebind `not` under `%load-module-source` for a trace). (c) The
+benchmark column at 422c92a5 carries the +5% startup as measured; the next refresh takes it
+back. (d) CI's bedit smoke: bedit's `elixir_playground_test` asserts an `elixir` on PATH.
+
+**Same fix, twice, merged (later on 2026-09-22):** the second half's shape moved into the op
+function `defability` generates — the `impl`-side wrapper kept `not` cold but un-elided every
+thin impl (a per-op-call cost in every mode since ADR-381) and tiered itself at 128 calls.
+`impl` registers methods as written again. Two more guards beside `contract_offer_unarmed.rs`:
+`builtins::contracts::tests` and `cli::contracts_mode::an_unarmed_startup_run_lowers_no_arm`.
+The residual and the two levers above stand; the design call is still the owner's.
 
 ## 2026-09-21 evening — the benchmark column is refreshed at 422c92a5; KI-182 is the open item
 

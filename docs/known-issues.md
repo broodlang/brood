@@ -168,7 +168,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-179 | **the ADR-119 incremental check cache hit only image → image: every `nest check` after a cold build, and every one after an edit, re-checked the whole project** — a user global's fingerprint fact is its definition site, and a module materialised from the project image had none, so the fact read `F` from the image and `D<file>@<mtime>` from source; no cached fingerprint matched across the flip. Measured 1 000 × 3k files: cold 186 s, unchanged 154 s, unchanged again 15 s, one-function edit 188 s | ✅ **FIXED 2026-09-21 (ADR-382)** — the image carries def sites (`KIND_DEF_SITE`); an unchanged project replays its recorded verdict without loading; listed paths absolutised (they never hit either). Gate `nest::check_incremental`, sabotage-verified both ways |
 | KI-180 | **`gui`'s texture and sound registries were created on FIRST USE by `(when (nil? *textures*) (def …))` — a check-then-define race across processes** — two processes allocating their first handle at once each saw nil and each `def`'d a table; the second `def` orphaned the first's handles, so `texture-size` answered nil, or another test's size when the two counters collided. Red in `ui_test` in the FULL suite only (passed 3× alone), 2026-09-21 | ✅ **FIXED 2026-09-21** — both registries are created at load (a table global images by value); guard `gui_test` "forty processes each allocate…", red 2 of 3 with the lazy init restored |
 | KI-181 | **an error raised in positionless code — a contract shim's (ADR-381), the prelude's — escaped untagged and was reported at the CATCH site**, two frames from the failing form; unarmed, the thin-wrapper elision had hidden it (the prim ran inline in the caller's frame, tagged there). Surfaced as the armed suite's `vm_prim_error_pos_test` red; also the `lazy_load_test` ADR-366 case, whose inlined primitive a shim makes impossible by design | ✅ **FIXED 2026-09-21** — `attach_vm_trace` gives an untagged error the innermost call site that HAS a position (a tail call reuses the caller's frame, so there it is the caller's caller — the BEAM's answer); the two tests exercise their actual subjects (the raw primitive; an unarmed child). Guard: the shim case in `vm_prim_error_pos_test`, sabotage-verified |
-| KI-182 | **the `startup` row +6% at the 422c92a5 benchmark refresh (16 → 17 ms, `ab-bench --floor` 0.0% floor; 74.4M → 81.3M instructions on `(io/puts 0)`) — the largest piece is the JIT compiling at BOOT: `contract_apply` offers every declared `def` to the Brood hook `%contract-wrap` whether or not contracts are armed, the hook's `(not (or (%contracts-armed?) …))` runs once per declared name as `io`'s sections materialise, `not` crosses the tier threshold and every `brood file` run instantiates Cranelift to compile it** — `BROOD_JIT_DUMP_IR=1` shows one arm (`not`) on 422c92a5, none on 136b14d7, none on an empty file; `BROOD_NO_JIT=1` gives 1.55M back. The remaining ~4.8M is diffuse and expected: the prelude image carries def sites (ADR-382; 802 → 1328 entries, +0.6M in `FormPos` inserts), and the prelude grew by `contracts.blsp` and ADR-377/379 (+0.3M freeze, +0.4M image load, +0.3M interning) | ✅ **FIXED 2026-09-22** (the JIT half; the def-site half is the design and stays) — two gates, both the kernel's own fact: `contract_apply` returns before the hook unless armed or the name is `sig!`-forced (`RuntimeCode::contract_forced`), and an op's declared `:->` return is checked by the OP FUNCTION `defability` generates, behind an inline native `(%contracts-armed?)`, instead of a Brood wrapper around every impl body — which had also un-elided every thin impl (`(impl Port :native (write [p s] (%port-write p s)))` was no longer a pass-through) since ADR-381. `(io/puts 0)` lowers no arm now; guards: `builtins::contracts::tests` (a tripwire hook that throws when consulted — unarmed `def` and `sig` must not reach it, `sig!` must) and `cli::contracts_mode::an_unarmed_startup_run_lowers_no_arm` (the KI's probe), both red on sabotage. `startup` NOT re-measured on this box — the rig is `make ab BASE=136b14d7 ROWS=startup ARGS=--floor N=15` |
+| KI-182 | **the `startup` row +6% at the 422c92a5 benchmark refresh (16 → 17 ms, `ab-bench --floor` 0.0% floor; 74.4M → 81.3M instructions on `(io/puts 0)`) — the largest piece is the JIT compiling at BOOT: `contract_apply` offers every declared `def` to the Brood hook `%contract-wrap` whether or not contracts are armed, the hook's `(not (or (%contracts-armed?) …))` runs once per declared name as `io`'s sections materialise, `not` crosses the tier threshold and every `brood file` run instantiates Cranelift to compile it** — `BROOD_JIT_DUMP_IR=1` shows one arm (`not`) on 422c92a5, none on 136b14d7, none on an empty file; `BROOD_NO_JIT=1` gives 1.55M back. The remaining ~4.8M is diffuse and expected: the prelude image carries def sites (ADR-382; 802 → 1328 entries, +0.6M in `FormPos` inserts), and the prelude grew by `contracts.blsp` and ADR-377/379 (+0.3M freeze, +0.4M image load, +0.3M interning) | 🔶 **JIT HALF FIXED 2026-09-22; a +6% CPU residual stays open** — the Cranelift-at-boot mechanism is closed (no arm lowers on `(io/puts 0)`, `BROOD_NO_JIT=1` moves nothing) but the row is not back: interleaved pinned task-clock 12.85 → 13.68 ms against 136b14d7, 75.0M → 80.9M instructions, diffuse — `localize_for_freeze` +0.7M, `env_get` +0.7M, alloc +0.7M, `FormPos`/`SourceLoc` inserts +0.7M, `list_with_tail` +0.5M, `decode_msg`/`from_message` +0.6M; +2.8M on an empty file (ADR-381's 287-line `contracts.blsp` localized and frozen at every boot, ADR-382's 526 def-site entries) and +3.2M inside `io`'s load. Two levers, neither taken: move the shim machinery out of the prelude into a module the hook loads on first ARMED use (only `sig!`, `%contracts-armed?` and the hook itself need to be prelude), and decode def sites lazily. TWO callers, the same shape: (1) `contract_apply` returns before `apply_engine` when `!contracts_armed()` and the name is not `sig!`-forced (`Heap::is_contract_forced`, the kernel set ADR-383 introduced; the hook's own first test, hoisted into the mechanism — the `provide` sweep already gated on `(%contracts-armed?)`, the per-`def` offer did not); (2) `impl` wrapped every op body under a declared `:->` return in `%contract-check-op-result`, a Brood function whose first test was `(not (%contracts-armed?))` — a call plus a `not` per ability-op RESULT, armed or not, and `io` declares no sigs at all, so this was the startup row's caller once (1) was in and the arm still lowered; the emission now asks the cached-bool primitive inline and enters the checker only armed. Guard `crates/cli/tests/contract_offer_unarmed.rs`: the hook and the op checker are rebound under `%load-module-source`'s reserved-name exemption to record what reaches them — unarmed only the `sig!` name reaches the hook (and still enforces) and no op result reaches the checker; armed all three names and the op do; each half sabotage-verified (`if false &&` on the early return reads `offered f=true above=true`; the old emission reads `op-checked=true` unarmed). Re-measured below. The def-site half (ADR-382) stays as a note, not a bug. Was published as measured in brood-benchmarks at 422c92a5 |
 
 | KI-178 | **the JIT's inline `pair?` answered `false` for a RANGE and a SEQ-VIEW** — `PrimOp1::IsPair` compared the discriminant byte against `TAG_PAIR` alone, on the strength of a comment saying ranges "also carry TAG_PAIR"; they carry their own bytes (11, 12), so `(pair? (range 3))` and `list?` were `true` on the VM and the tree-walker and `false` once the asking arm tiered up — since the lowering was written; found by a contract over `seqable` rejecting `(range 100)` on the two-thousandth `into` | ✅ **FIXED 2026-09-21** — the lowering accepts `TAG_PAIR | TAG_RANGE | TAG_SEQVIEW`, the two new constants pinned by the layout test; `tests/jit_pair_predicate_test.blsp` counts wrong answers over 20 000 activations (19 841 before the fix) |
 | KI-175 | **the checker seeded a fold callback's accumulator from the fold's RESULT, losing `init`** — over a provably non-empty input the result rule leaves `init` out (the step ran at least once), but the callback's first step is handed `init`; `(fold [3 9 4] nil (fn (b x) (if (nil? b) x …)))` read `b` as `3 \| 9 \| 4` and flagged the callback's own `nil?` guard as never true — a PLAIN-mode false positive (the one thing the checker must never do). Found by `fold-for`'s docstring example the day ADR-377 was written | ✅ **FIXED 2026-09-20** — `walk::calls::fold_callback_seed` seeds the accumulator with `init ∪ result` (the first element ∪ result for a no-init `reduce`). Pinned in `closure_inference.rs` both ways (the `nil` seed is quiet; a `0` seed still makes the `nil?` dead), sabotage-verified. One strict finding it uncovered was right: `linmap_soundness_test`'s `lm-fold` is handed `5` on purpose by one caller, so its `assoc` can see a `5` — `check-allow`ed like its sibling |
@@ -11763,7 +11763,7 @@ two of three runs (a race), green ×3 with the fix.
 **Lesson:** `(when (nil? x) (def x …))` is not `defonce` and `defonce` is not atomic either;
 a shared registry is created at load or not at all.
 
-## KI-182 — the `startup` row +6% at the 422c92a5 refresh: the unarmed contract offer tiers `not` at boot, and the prelude image carries def sites ✅ FIXED 2026-09-22 (the JIT half)
+## KI-182 — the `startup` row +6% at the 422c92a5 refresh: the unarmed contract offer tiers `not` at boot, and the prelude image carries def sites 🔶 JIT HALF FIXED 2026-09-22 — a diffuse +6% CPU residual stays open
 
 **Seen:** the brood-benchmarks Brood-column refresh at `422c92a5` (min of three interleaved
 invocations) read `startup` 12.9 → 13.6 ms. `make ab BASE=136b14d7 ROWS=startup ARGS=--floor
@@ -11801,37 +11801,67 @@ prelude grew by `contracts.blsp` (287 lines) and the ADR-377/379 additions, whic
 and the image load pay per binding. Worth a look at whether def sites can decode lazily, but
 the JIT half is the one to fix first.
 
-**Fix shape:** `contract_apply` returns before `apply_engine` when `!contracts_armed()` and
-`name` is not in the forced table (the kernel can read the `%*contract-forced*` global and
-`table_has` it) — the hook's own first test, hoisted into the mechanism so the policy is only
-consulted when it can wrap. Guard: `BROOD_JIT_DUMP_IR=1 brood startup.blsp` lowers no arm;
-`sig!` still forces unarmed (`tests/contracts_test.blsp` covers it). Then re-measure with the
-rig above.
+**The second caller, found when the first fix left the arm lowering.** With the offer gated,
+`BROOD_JIT_DUMP_IR=1` still printed `not` on `(io/puts 0)` — and `io` declares no sigs at all,
+so the hook was never its caller. Rebinding `not` under the loader exemption to throw-and-catch
+for a trace named it: `%contract-check-op-result` from `require-one`. ADR-381 made `impl` wrap
+every op body under a declared `:->` return in that Brood function, whose first test is
+`(not (%contracts-armed?))` — a closure call plus a `not` per ability-op RESULT, whatever the
+mode, on every op call in the program, not only at load. A `require`'s worth of op calls is
+past the threshold on its own. The `impl` macro now emits
+`(let (%op-result (do body…)) (if (%contracts-armed?) (%contract-check-op-result … %op-result) %op-result))`:
+the ask is the cached-bool primitive inline, the checker is entered only armed, and the body
+is evaluated once. `(math/max 1 2)` lowers `not` on the 136b14d7 binary too — a pre-existing
+caller in `math`'s load, not this regression; left as the watch item below.
+
+**Fix (2026-09-22), first half:** `contract_apply` returns before `apply_engine` when `!contracts_armed()`
+and `name` is not `sig!`-forced (`Heap::is_contract_forced` — the kernel set ADR-383 moved the
+forced names into, merged under this fix; the first cut read the prelude's `%*contract-forced*`
+table, which that merge deleted, and the guard's `sig!` case is what would have caught it) — the hook's own first test, hoisted into the mechanism so the policy is
+only consulted when it can wrap. **Guard:** `crates/cli/tests/contract_offer_unarmed.rs`. The
+hook is a reserved prelude name, so the probe rebinds it through `%load-module-source` (the
+loader that holds the reserved-name exemption) to a closure that records each name offered and
+delegates to the original. Unarmed it reads `offered f=false above=false g=true` — a `sig`
+above or below its `defn` never reaches the policy, `sig!` does and still raises `:contract`;
+armed (`BROOD_CONTRACTS=1`) all three are offered and all three enforce, which is what keeps the
+unarmed half from passing on a hook that was never wired. Sabotage: `if false &&` on the early
+return reads `offered f=true above=true g=true` and fails. **Re-measured** (same rig, both fixes in): `BROOD_JIT_DUMP_IR=1` on `(io/puts 0)` lowers **no arm** (was `not`), and `BROOD_NO_JIT=1` no longer moves the instruction count (80.91M vs 80.95M — it was a 1.55M gap), so the Cranelift instantiation at boot is gone. `make ab BASE=136b14d7 ROWS=startup ARGS=--floor N=15`: **16 → 16 ms, +0.0%** (was 16 → 17, +6.2%); interleaved pinned `perf stat -r 40 -e task-clock`, three rounds: **12.85 → 13.68 ms CPU (+6.4%)**, so the wall's flat reading is the millisecond's rounding, not recovery. What remains is the non-JIT half, 74.97M → 80.91M (+5.9M): +2.8M on an empty file (the prelude image's def sites and the larger prelude — boot 7.5 → 7.9 ms in `BROOD_BOOT_TRACE`) and +3.1M across `io`'s load and the run. Not a regression the row can see; the def-site half is the watch below.
+
+**The residual, profiled on unstripped builds of both commits** (`perf record`, 60 runs each,
+`(def x io/puts)` — the load alone — and an empty file): no symbol moves more than 0.75M.
+Empty file +2.8M: `localize_for_freeze` +0.70 (a bigger prelude: `contracts.blsp`'s 287 lines,
+the ADR-377/379 additions, 969 → 998 globals), `load_prelude_image` +0.33, `FormPos` inserts +
+`set_def_site` + the `SourceLoc` map +0.4 (526 def-site entries), interning and mimalloc the
+rest. `io` load +3.2M: `env_get` +0.73, alloc +0.67, `list_with_tail` +0.50, `FormPos` +0.65,
+`decode_msg_at` + `from_message` +0.63, `exec_chunk` +0.27 — more of everything, no new thing.
+Levers, both design calls rather than fixes: (1) the shim machinery does not need to be prelude
+now that the hook is never entered unarmed — `sig!`, `%contracts-armed?`, `%contract-force!`
+and the hook stay, the `%contract-shim-*` templates and spec parsing move to a module the hook
+loads on its first armed call, and every unarmed boot stops localizing and freezing them;
+(2) def sites decode on the first `def-site` question rather than at boot. Until one is taken
+the row carries +6% CPU as a feature cost; wall at millisecond resolution reads flat.
+
+**Watch, not this KI:** `(math/max 1 2)` lowers `not` on the 136b14d7 binary as well — something in `math`'s load calls `not` past the threshold, pre-dating all of this. Same tool finds it (`BROOD_JIT_DUMP_IR=1`, then rebind `not` under `%load-module-source` to record a trace).
 
 **Lesson:** a hook called per definition is a hot loop at load time, and the JIT's tier
 threshold turns a cheap decline into a Cranelift instantiation per process. Gate policy calls
 on the fact that decides them when the kernel already holds that fact.
 
-**Fixed 2026-09-22 — and the fix shape above was half of it.** With `contract_apply`
-returning early, `BROOD_JIT_DUMP_IR=1 brood startup.blsp` still lowered `not`. The second
-caller was the ability-op check: ADR-381 made every `impl` method with a declared `:->`
-return a Brood wrapper `(%contract-check-op-result … (do body))`, whose first line was `(or
-(not (%contracts-armed?)) …)` — one `not` per op call, unarmed, and `(io/puts 0)`'s port
-ops alone reach the threshold. Worse than the tier-up: the wrapper made every impl a real
-activation, so `(impl Port :native (write [p s] (%port-write p s)))` had stopped being a
-pass-through the dispatcher elides — a per-op-call cost in every mode since ADR-381. The
-check now lives in the OP FUNCTION `defability` generates (`(if (%contracts-armed?)
-(%contract-check-op-result 'A 'op 'ret (impl …)) (impl …))` — a native ask inline, the
-resolved call in tail position unarmed), and `impl` registers the method as written. An
-impl registered through `%register-impl` directly is checked too now, since every call goes
-through the op. Both gates are guarded by construction — `builtins::contracts::tests` binds a
-hook that THROWS when consulted (an unarmed `def` and `sig` must not reach it; `sig!` must),
-and `cli::contracts_mode::an_unarmed_startup_run_lowers_no_arm` is the probe above, on the
-real cache with the image confirmed live in a separate run (asking `stdimage/status` is
-itself enough work to tier `not` and `%identity-of`, which is also why the row is a
-borderline probe: 128 activations of any prelude closure is one Cranelift instantiation).
-Sabotage: each half alone reds its guard. The def-site half stands as designed. The row is
-not re-measured here (the no-benchmarks rule); the rig is unchanged.
+**Addendum (2026-09-22, the same fix reached twice in parallel):** the second half's shape
+moved once more. Wrapping the method body in `(let (%op-result …) (if (%contracts-armed?) …))`
+inside `impl` keeps `not` cold but makes every impl a real activation — `(impl Port :native
+(write [p s] (%port-write p s)))` is no longer the pass-through the dispatcher elides to its
+primitive, a per-op-call cost in every mode since ADR-381 — and the wrapped closure itself
+tiers at 128 calls (`<closure>` lowered beside `not` on a run with one more `io/puts`). The
+check now lives in the OP FUNCTION `defability` generates — `(if (%contracts-armed?)
+(%contract-check-op-result 'A 'op 'ret (impl …)) (impl …))`, the resolved call in tail
+position unarmed — and `impl` registers methods as written; an impl registered through
+`%register-impl` directly is checked too, since every call goes through the op. Guards beside
+`contract_offer_unarmed.rs`: `builtins::contracts::tests` (a hook bound to THROW when
+consulted, via `env_define` — no loader exemption needed in-process) and
+`cli::contracts_mode::an_unarmed_startup_run_lowers_no_arm` (the `BROOD_JIT_DUMP_IR` probe
+on the real cache, the image confirmed live in a separate run: asking `stdimage/status` is
+itself enough work to tier `not` and `%identity-of`). Each half alone reds its guard.
 
 ## KI-181 — an error raised in positionless code took the CATCH site's position, two frames from the failing form ✅ FIXED 2026-09-21
 

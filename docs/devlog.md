@@ -2,6 +2,26 @@
 
 Chronological record of work sessions. Newest at the bottom.
 
+## 2026-09-22 — KI-182 fixed: contracts are not consulted unarmed, in either of their two per-call shapes
+
+The `startup` row's +6% at the 422c92a5 column was two callers of `not` with one shape — a
+Brood policy function entered on every event so it could decide, itself, that contracts are
+off. (1) `contract_apply` applied `%contract-wrap` at every declared `def`; it now returns
+first when `!contracts_armed()` and the name is not `sig!`-forced (`Heap::is_contract_forced`;
+ADR-383, merged under this, moved the forced names into the kernel). (2) `impl` wrapped every op body under a declared `:->` return in
+`%contract-check-op-result`, whose first test was `(not (%contracts-armed?))` — a call plus a
+`not` per ability-op RESULT in every program, armed or not; `io` declares no sigs, and this
+was its caller. The emission is now `(let (%op-result (do body…)) (if (%contracts-armed?)
+(%contract-check-op-result … %op-result) %op-result))`. Guard
+`crates/cli/tests/contract_offer_unarmed.rs` rebinds both functions under
+`%load-module-source`'s reserved-name exemption to record what reaches them, unarmed and
+armed; each half sabotage-verified. Result: no arm lowers on `(io/puts 0)` and `BROOD_NO_JIT=1`
+no longer moves the count. Not the whole row, though: interleaved pinned task-clock is still
+12.85 → 13.68 ms against 136b14d7 (+6.4%; `make ab`'s 16 → 16 ms is the millisecond rounding),
+and the unstripped profile is diffuse — a larger prelude localized and frozen at every boot,
+526 def-site entries, more of everything in `io`'s load. Recorded in KI-182 with two levers.
+Pre-existing and separate: `(math/max 1 2)` lowers `not` on the old binary too.
+
 ## 2026-09-21 — the 422c92a5 benchmark column, and KI-182
 
 Brood column refreshed in brood-benchmarks at `422c92a5`: `mandelbrot` 161 → 77 ms (ADR-378,
@@ -15470,17 +15490,17 @@ close-on-exec now (the child's stdio comes through `stdio_dup`, which is what sh
 `proc_test` asserts the master is not among the child's descriptors, and fails on the old
 binary.
 
-## 2026-09-22 — KI-182 fixed: the unarmed run never reaches the contract policy
+## 2026-09-22 (2) — KI-182's second half moved into the op function; the same fix landed twice
 
-Two halves, and the KI had named one. `contract_apply` now returns before the Brood hook
-unless contracts are armed or the name is `sig!`-forced — the fact that decided the hook's
-first test, hoisted into the kernel. That alone still lowered `not` on `(io/puts 0)`: the
-ability-op return check ADR-381 wrapped around every `impl` method was the second caller,
-and it had also un-elided every thin impl since 09-21 (a wrapped `(%port-write p s)` is not
-a pass-through). The check moved into the op function `defability` generates, behind an
-inline native `(%contracts-armed?)`, with the resolved call in tail position unarmed; `impl`
-registers methods as written, and an impl registered through `%register-impl` directly is
-checked too. `(io/puts 0)` lowers no arm. Guards: a tripwire hook that throws when consulted
-(`builtins::contracts::tests`) and the KI's own `BROOD_JIT_DUMP_IR` probe on the real cache
-(`cli::contracts_mode`), each red when its half is sabotaged. The `startup` row is not
-re-measured on this box; the def-site half of the KI is the design and stays.
+The parallel cut of KI-182 (this file's top entry) and this one met in a merge with the same
+kernel gate and different op-check shapes. The `impl`-side `(let (%op-result …) (if
+(%contracts-armed?) …))` keeps `not` cold but makes every impl a real activation: `(impl Port
+:native (write [p s] (%port-write p s)))` had not been the pass-through the dispatcher elides
+since ADR-381 — a per-op-call cost in every mode — and the wrapped closure tiers itself at 128
+calls (`<closure>` lowered beside `not` on a run with one more `io/puts`). The check now lives
+in the op function `defability` generates, behind an inline native ask with the resolved call
+in tail position unarmed; `impl` registers methods as written, and an impl registered through
+`%register-impl` directly is checked too. Two more guards, each red when its half is
+sabotaged: `builtins::contracts::tests` (a hook bound to throw when consulted) and
+`cli::contracts_mode::an_unarmed_startup_run_lowers_no_arm` (the probe on the real cache,
+the image confirmed live in its own run — asking `stdimage/status` tiers arms by itself).

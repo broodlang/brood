@@ -184,22 +184,20 @@ fn declared_arrow(heap: &Heap, name: Symbol) -> Option<Value> {
 /// they arrived, so the stdlib image, written from such a load, never carries a shim; the
 /// sweep itself runs inside an enclosing load when modules nest, which is why that guard
 /// is theirs and not this function's.
-///
-/// **Never consults the policy when it cannot wrap** (KI-182): unarmed and not forced,
-/// the hook's answer is the closure it was given, and asking it once per declared `def`
-/// was a hot loop at load time — `io`'s chain of declarations ran the hook's `not` past the
-/// tier threshold, so every short `brood file` run instantiated Cranelift to compile `not`
-/// (~1.5M instructions, `startup` +6%). The fact that decides the hook's first test is the
-/// kernel's own, so it is tested here, before any Brood runs.
 pub(crate) fn contract_apply(
     heap: &mut Heap,
     name: Symbol,
     on_shim: OnShim,
 ) -> Result<bool, LispError> {
-    if !contracts_armed() && !heap.is_contract_forced(name) {
+    if heap.global() != EnvId::GLOBAL {
         return Ok(false);
     }
-    if heap.global() != EnvId::GLOBAL {
+    // Unarmed and not `sig!`-forced, the hook can only decline — that is its own first test
+    // (`%contract-wrap`) — so it is not consulted. This is a load-time hot loop, not a
+    // nicety: the offer runs at every declared `def`, and a Brood call per definition put
+    // `not` past the JIT's tier threshold while `io` materialised, so every short
+    // `brood file` run instantiated Cranelift at boot to compile it (KI-182: `startup` +6%).
+    if !contracts_armed() && !heap.is_contract_forced(name) {
         return Ok(false);
     }
     let Some(hook) = heap.env_get(EnvId::GLOBAL, value::intern(HOOK)) else {

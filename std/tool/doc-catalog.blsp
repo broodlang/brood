@@ -31,6 +31,7 @@
    "string/->number" :convert
    "string/->symbol" :convert
    "math/abs" :math
+   "path/abbreviate" :filesystem
    "path/absolute" :filesystem
    "path/absolute?" :predicates
    "math/acos" :math

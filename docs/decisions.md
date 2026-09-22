@@ -24660,6 +24660,19 @@ commit message cites "ADR-380"; this ADR was renumbered to 381 after the push, w
 `scripts/smoke-bedit.sh` runs the downstream gates with `BROOD_CONTRACTS=0`
 (`SMOKE_CONTRACTS=1` arms them), so a brood push is not red for bedit's declarations.
 
+## ADR-381 addendum (2026-09-22) — the mechanism never asks the policy a question it can answer itself
+
+KI-182. Two of ADR-381's paths entered a Brood function on every event unarmed — the per-`def`
+offer (`contract_apply` → `%contract-wrap`) and the per-op-result check (`impl` →
+`%contract-check-op-result`) — so that the POLICY could decide contracts were off. Correct, and
+a load-time hot loop: the policy's `not` crossed the JIT's tier threshold while `io`
+materialised and every short `brood file` run instantiated Cranelift at boot (`startup` +6%
+at the 422c92a5 benchmark column). The rule now: the kernel reads the armed flag (a cached
+bool) and the forced set (`is_contract_forced`, ADR-383) before calling the hook, and `impl` emits the armed test inline
+around the call. Policy still owns WHAT a contract is and what a mismatch says; the mechanism
+owns WHETHER the question is asked, because it already holds the fact. `%contract-wrap` keeps
+its own unarmed test (a `sig!`-forced name still reaches it), so a direct call behaves as before.
+
 ## ADR-382 — `nest check` is incremental for real: definition sites ride the image, and an unchanged project replays its verdict
 
 **Status:** accepted (2026-09-21). Item 2 of `docs/large-project-scaling.md`'s queue.
