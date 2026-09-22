@@ -1,7 +1,7 @@
 # Large-project scaling — 100k files × 3k lines: what was measured, what it means, what to do
 
-**Status: OPEN — measured 2026-09-21; item 1 (Finding 1) FIXED the same day, ADR-380.** The
-queue is at the end, in order. Reproduce every number here with the generator before
+**Status: OPEN — measured 2026-09-21; items 1 (Finding 1, ADR-380) and 2 (Finding 2 option 1,
+ADR-382 / KI-179) FIXED the same day.** The queue is at the end, in order. Reproduce every number here with the generator before
 believing any of them changed.
 
 ## The question
@@ -41,7 +41,7 @@ unless stated; the shape of each is what matters, not the digit.
 | warm `nest run` (image hit; entry reaches 2 modules) | **3.0 s** | 288 MB | **source bytes** — a defect (§ below) |
 | warm `nest run --no-check` | 2.9 s | 279 MB | the pre-flight is scoped and cheap |
 | `nest check`, whole project, cold | **161 s** | **3.8 GB** | lines, ~53 µs/line, ONE thread (user 178 s on 12 cores) |
-| `nest check` again, nothing changed | **16 s** | 3.7 GB | should be ~0 — the ADR-129 cache re-verifies everything |
+| `nest check` again, nothing changed | **16 s** — and that was the THIRD run: the second read 154 s (KI-179) | 3.7 GB | now a replay: 0.12 s / 118 MB |
 
 For scale: the same tree at the 180-line shape (16 300 files, 2.9M lines) warm-runs in 1.3 s.
 Same line count, 2.3× the warm time, because of the item below.
@@ -138,11 +138,24 @@ positions and derived facts stay live for the run. Both are design, not bugs:
 - Memory is O(project) because the fixpoint wants every file's derived state at once.
 
 **Options, in order:**
-1. **Incremental for real (ADR-129 finished).** An unchanged project must re-verify from the
-   cache in the time it takes to fingerprint it — seconds, not 16 s per 3M lines — and a
-   change must re-derive only the changed files plus the files whose verdict depends on them
-   (the ADR-119 dep recorder already knows the edges). This is the one that makes the
-   day-to-day loop right at any size and is worth doing first.
+1. ~~**Incremental for real (ADR-129 finished).**~~ **DONE 2026-09-21, ADR-382 / KI-179.**
+   Measuring it from a cleared cache found the real defect first: the per-file cache hit only
+   image → image (a global's fingerprint fact is its def site; the image carried none), so
+   the check after a cold build re-checked everything (154 s) and so did the check after
+   any edit (188 s). The image carries def sites now; an unchanged project replays its
+   recorded verdict without loading; the require graph reads from the module index; listed
+   paths are absolutised. After (release, same rig):
+
+| operation | before | after |
+|---|---|---|
+| `nest check`, unchanged, right after a cold build | 154 s / 3.2 GB | **0.12 s / 118 MB** (replay) |
+| `nest check`, unchanged, steady state | 14.7 s / 3.0 GB | **0.12 s / 118 MB** (replay) |
+| `nest check` after a one-function edit | 188 s / 3.8 GB | **40.2 s** — image rebuild 32.6 s, the check 2.7 s (1 file re-checked) |
+| `nest check FILE FILE FILE` (listed, unchanged) | every listed file re-checked | 9.3 s, 0 re-checked (4.0 s materialise + 4.6 s lints, both O(project)) |
+| require-graph parse per run | 2.9 s | 0.04 s (module index) |
+| cold `nest check` | 186 s | 191 s (unchanged in kind: load 37 s + check 146 s, one thread of the check pool aside) |
+ What an edit still pays is the whole-image REBUILD
+   (Finding 3): 30 s of load before a check that re-derives two files in 20 ms.
 2. **Parallel per-file walk** after the fixpoint: 12 cores → ~12× on the 90% of the time that
    is the walk. Needs the checker's per-file state to be `Send`, or a process-per-file model
    with the fixpoint's signatures handed in as data.
@@ -160,12 +173,17 @@ three — it is paid once — but at 300M lines an hour becomes five minutes on 
 
 1. ~~**Module-index cache** (Finding 1)~~ — **DONE 2026-09-21, ADR-380.** Warm start O(files);
    zero source opens on a warm run; the 3k-line rig warm-runs in 0.15 s.
-2. **`nest check` incremental** (Finding 2, option 1). Gate: unchanged project re-checks in
-   ≤ 2× its fingerprint time; one edited file re-derives its dependents only (count the walks
-   under `BROOD_DERIVE_DBG=1`).
+2. ~~**`nest check` incremental** (Finding 2, option 1)~~ — **DONE 2026-09-21, ADR-382.**
+   Gate `crates/nest/tests/check_incremental.rs`: an unchanged project replays (no load, no
+   parse); a leaf edit re-checks 1 file, a dependency edit 2 (`[check] reuse-test (N to
+   re-check)` under `BROOD_DERIVE_DBG=1`).
 3. **`nest check` parallel walk** (Finding 2, option 2). Gate: user/wall ≥ 6 on 12 cores.
 4. **Check memory** (Finding 2, option 3). Gate: peak RSS at 1 000 × 3k under 1 GB.
-5. **Parallel cold load** (Finding 3). Last; paid once.
+5. **The cold load** (Finding 3) — no longer "paid once": since ADR-382 it is what an EDIT
+   costs, because the edit invalidates the whole image and the next check loads everything
+   from source before re-deriving two files. Parallel loading divides it by cores; module-level
+   image staleness (materialise the unchanged modules, load the changed ones) makes it
+   O(changed), which is the real fix and the harder one.
 6. ~~Add the 3k-line shape to `scripts/bench/image-scale.sh`~~ — **DONE 2026-09-21**:
    `FNS=340 scripts/bench/image-scale.sh 250 500 1000`, with `warm all` (materialise
    everything — the `nest test` start) and `warm lazy` (image install only — the `nest run`

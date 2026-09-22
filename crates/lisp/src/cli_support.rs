@@ -699,6 +699,27 @@ pub fn run_check_cache_write(
 
 const RUN_CHECK_CACHE_MAGIC: &str = "brood-run-check-v2";
 
+/// The `BROOD_*` flags that change what a checker walk DOES — its verdict or its loads —
+/// so a cached verdict is reusable only under the same values. An explicit list, not every
+/// `BROOD_*` set: the first version hashed them all, and then no hit could be observed under
+/// any trace flag (`BROOD_IMAGE_TRACE=1` was its own key), which is how a +4 MB RSS question
+/// about the hit path went unanswerable for an hour. A new checker or loader flag belongs
+/// here; a trace flag does not. Read by `brood file`'s pre-flight verdict cache (ADR-371)
+/// and, through `(%check-walk-flags)`, by `nest check`'s manifests (ADR-382), so the two
+/// cannot disagree about what a verdict depends on.
+pub const WALK_FLAGS: &[&str] = &[
+    "BROOD_NO_IMAGE_SIGS",
+    "BROOD_NO_DERIVE_CACHE",
+    "BROOD_NO_LAZY_LOAD",
+    "BROOD_NO_STDIMAGE",
+    "BROOD_NO_PRELUDE_IMAGE",
+    "BROOD_CONTRACTS",
+    "BROOD_COVERAGE",
+    "BROOD_TIER",
+    "BROOD_VM",
+    "BROOD_NO_JIT",
+];
+
 /// `~/.cache/brood/run-check/<hash>` for `src` under this binary and checking mode; `None`
 /// under `BROOD_NO_CHECK_CACHE`, or with no cache base to write under.
 fn run_check_cache_path(src: &str) -> Option<std::path::PathBuf> {
@@ -716,25 +737,10 @@ fn run_check_cache_path(src: &str) -> Option<std::path::PathBuf> {
     crate::builtins::build_id_string().hash(&mut h);
     crate::builtins::stdlib_id_string().hash(&mut h);
     crate::types::strict_checking().hash(&mut h);
-    // The flags that change what a walk DOES — its verdict or its loads — name and value.
-    // An explicit list, not every `BROOD_*` set: the first version hashed them all, and then
-    // no hit could be observed under any trace flag (`BROOD_IMAGE_TRACE=1` was its own key),
-    // which is how a +4 MB RSS question about the hit path went unanswerable for an hour. A
-    // new checker or loader flag belongs here; a trace flag does not.
+    // The flags that change what a walk DOES — `WALK_FLAGS`, name and value.
     // `var_os`, never `var`: that one errors on a non-UTF-8 value and a hostile environment
     // is a test (`builtin_robustness_test`) — a lossy spelling keys just as well.
-    for name in [
-        "BROOD_NO_IMAGE_SIGS",
-        "BROOD_NO_DERIVE_CACHE",
-        "BROOD_NO_LAZY_LOAD",
-        "BROOD_NO_STDIMAGE",
-        "BROOD_NO_PRELUDE_IMAGE",
-        "BROOD_CONTRACTS",
-        "BROOD_COVERAGE",
-        "BROOD_TIER",
-        "BROOD_VM",
-        "BROOD_NO_JIT",
-    ] {
+    for name in WALK_FLAGS {
         let v = std::env::var_os(name).map(|v| v.to_string_lossy().into_owned());
         (name, v).hash(&mut h);
     }

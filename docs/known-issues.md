@@ -143,7 +143,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-147 | **`nest release` refused every hive bundle since v0.28.0: `circular `(:use http/util)`: `http/util` is still loading` on a module with no `:use` at all** — the bundle boot loop loads in one process while a supervisor a module starts at load pulls modules in from another (under lazy loading, ADR-335, a load starting in a spawned process is ordinary), and `%refer`'s cycle check read the OTHER process's `*features-loading*` claim as a cycle. `require-one` had already waited for that load and returned on its `provide`, which lands a few instructions before the loader clears its marker | ✅ **FIXED 2026-09-16 (v0.29.1)** — `module_is_loading` is true only when THIS process holds the claim; a cycle back into a module is only possible in the process loading it, and another process's finished load has a complete public set by the time `require-one` returns. Found by `BROOD_TRACE_GLOBAL='*features-loading*'` over the kept bundle (`nest release --no-smoke`); hive boots 3/3. Guard in `tests/modules_test.blsp` (another process's claim over a provided module refers; our own claim is the cycle), sabotage-verified. Neither v0.28.0 nor v0.29.0 can release an app whose modules spawn at load |
 | KI-148 | **two more arms latched off the native tier, found by running every benchmark row under `BROOD_JIT_BAIL_TRACE` after ADR-353: `second` deopt-thrashed on `http` and `supervisor` (the inline `first`/`rest` tag-checked for a pair and DEOPTED for every other shape, so `(first (rest v))` over a vector deopted per activation), and `json/num-end` + `json/object-acc` had never lowered at all — `join-depth-mismatch … edges=[0, 1]`: the bytecode compiler's jump-past-the-`else` after a then-branch ending in a tail `SelfCall` is dead, the prepass never reaches it, and the emit loop still translated it with an empty stack into a live join** | ✅ **FIXED 2026-09-16** — the non-pair path of `first`/`rest` calls `brood_rt_first`/`_rest` (nil / vector / range / bytes / set and the type error answered in the kernel; a record or seq-view still deopts, they need the evaluator), and because `rest` of a vector ALLOCATES, the hoisted pair-slab bases are held in Cranelift `Variable`s and re-fetched after that call — the first cut read a LOCAL pair through the stale base and segfaulted (`ej-rest-then-pair`, sabotage-verified to SIGSEGV without the re-fetch). A leader the prepass never reached is terminated as unreachable (`jump deopt`) instead of emitted. Guards in `tests/jit_eq_join_test.blsp` §3; **`make tier-audit`** (`scripts/tier-audit.sh`) now runs every benchmark row under the trace and fails on any latch or lowering bug — red on the 0.29.0 binary (json, supervisor), green after; in `make green-all`. `make ab --floor` over the list and message rows: every one inside its floor |
 | KI-149 | **the unused-private-function verdict depends on the file LIST: a bare project-wide `nest check` warns `unused private function: use-a` in `tests/lazy_load_test.blsp`, while CI's explicit-file invocation over `std/**/*.blsp tests/**/*.blsp examples/**/*.blsp` — the same files — reports zero on the same tree, and so does the single file alone** | ✅ **FIXED 2026-09-16** — not the KI-137 class at all: the unused-private and duplicate-defs lints were WHOLE-PROJECT passes that only the bare `nest check` ran, so CI's explicit-list form had never run them, and the bare form threw their counts away, so neither form had ever failed the gate on one. `project-whole-lints` now runs both over the project's every file for either form, reported for the files asked about and counted; `use-a` was dead (the child program defines its own) and is gone. Guard `crates/nest/tests/whole_project_lints_listed.rs`, sabotage-verified. Was: present at `c1647db8` (origin's tip before the day's JIT work), so not a regression of anything that day. The KI-137 class — a verdict that differs between two lists, never between two runs of one — on the unused-private lint this time: `use-a` is a private helper whose only *call* is inside a string the test hands to a child process, so the honest answer is "unused", and the question is why one list reaches it and the other does not (the ADR-340 materialisation fixpoint, or the site collector's scope under a project-wide walk). Repro: `nest check` vs `nest check tests/lazy_load_test.blsp` at `df47aeb4`. Not a gate failure today — CI runs the explicit list — but a checker whose verdict moves with the list is the thing KI-137 was filed for |
-| KI-150 | **`base64` +6.6% at the 0.29.2 column refresh, ~5% of it the pre-run CHECK: `1a8759fb` removed `encoding`'s nine declared sigs and `brood file`'s pre-flight now infers them on every run** — bisected with fixed baselines and instruction counts (the row's wall is bimodal): `d464e9ed` 0.632G → `1a8759fb` 0.664G (+5%) → head 0.671G; with `BROOD_NO_CHECK=1` the wave's delta is +1%; A0/A1's own share is +1.6% (`a4b79219` 0.642G) | 🔶 **OPEN — loading half CLOSED BY CONSTRUCTION 2026-09-18 (ADR-370)**: the image footer carries each imaged function's existence, arity and (136) as-is declarations, so the transitive scan loads 7 modules not 9 for the one-liner (and 0 of `path`/`string` since `517b8a1c` declared them, index 124 → 150 — measured BELOW the instruction floor, 107.2M either way) — and the count is UNCHANGED (105.5M either way): loading was cheap, the cost is the checker's own walk — of which `stdlib_tree_hash` (15.0M, 16% of a RELEASE `brood --check`) is FIXED 2026-09-19, word-wise FNV, 2.2M; it is a dev-entry-point cost only, so the `base64` row is untouched. Was: **REOPENED 2026-09-17** — read again at the `a406f9a6` refresh: `pipeline` +7.3%, and the split is exact — `brood --check` alone 131M → 144M instructions (the whole delta), the run +0.8%; `fib`'s check grew 124M → 133M on an untouched file, so the checker costs ~10% more per file since `084060fb` (A4/A5/B6/C9, not bisected) and every `brood file` pays it. The trigger the mitigation named; first candidate: inferred signatures cached in the stdlib image. Was: **MITIGATED 2026-09-16** — the ten codec sigs the bisect named (`encoding`'s nine, `bytes/length`) are back, each marked as kept for COST, not for a fact: a declared sig is a lookup where inferring the decoder's body is the ~30 M instructions measured. The wave's owner's call on the options: this one, because it is the measured row and ten lines; the structural ones — inferred signatures cached in the stdlib image, or a pre-flight that skips inference for imaged std modules — stay open as a watch until the benchmark refresh reads the row again (no benchmarks run on the development box). The KI-138/139 class: a checker cost is a runtime cost on this system because `brood file` checks before it runs, and the wave's premise ("the checker infers each verbatim without it") is true of the *verdict* and false of the *cost*. Repro: `perf stat -e instructions:u brood bench/brood/base64.blsp` at the two commits, images live on both |
+| KI-150 | **`base64` +6.6% at the 0.29.2 column refresh, ~5% of it the pre-run CHECK: `1a8759fb` removed `encoding`'s nine declared sigs and `brood file`'s pre-flight now infers them on every run** — bisected with fixed baselines and instruction counts (the row's wall is bimodal): `d464e9ed` 0.632G → `1a8759fb` 0.664G (+5%) → head 0.671G; with `BROOD_NO_CHECK=1` the wave's delta is +1%; A0/A1's own share is +1.6% (`a4b79219` 0.642G) | ✅ **CLOSED 2026-09-20 (ADR-371)** — the run pre-flight walk is replayed from a verdict cache; the `1b9befd0` column read `base64` 65.7 → 62.2 ms (the section below has the history; this row read 🔶 OPEN a day after the section closed it — fixed 2026-09-21) |
 | KI-151 | **the tally a Brood user writes — `(assoc m k (+ (get m k 0) e))` — ran 8× slower than the undocumented `%map-int-add`: the linear-map rewrite admitted only the kernel spelling, so the idiomatic fold stayed a path-copying CHAMP update with two prelude calls per element and its loop arm gate-refused** — brood-benchmarks `wordcount` 848 ms idiomatic vs 99 ms with the primitive, `persistent-map` 561 vs 109. Found when the benchmark ports were reviewed for idiom and the primitive was ruled out as "not code a user would write" | ✅ **FIXED 2026-09-16** (ADR-360) — `LinIdiom` (`eval/compile/inline.rs`) admits the prelude `get` on the accumulator as a read and the fused `assoc`/`+`/`get` shape as an update; the source rewrite emits `%table-get`/`%table-add`. `%table-add` adds exactly as `+` does, and `%map-int-add` now does too (it promoted nowhere and read a float as 0 — the new fuzzer `scripts/fuzz/generators/linmap.py` found the float case diverging between the arms), so the rewrite is unobservable on every input. `wordcount` 857 → 66 ms, `persistent-map` 535 → 79 (`make ab --floor`, no other row moved). Guards: `crates/lisp/tests/linmap_idiom.rs` pins the expansion (fuses / declines by shape), `tests/linmap_soundness_test.blsp` the values under both arms and every tier, `tests/numeric_overflow_test.blsp` §2 promotion at the boundary |
 | KI-152 | **the linear-map rewrite was observable on its SEED: a tally seeded with a map holding a rope raised `cannot send a rope in a message` with the rewrite on and returned the map with it off** — the wrapper copies the accumulator's input map into its private table, and a table cannot hold every value a map can (a rope, a builtin, a lazy view, a self-referential closure), nor stand in for a record whose misses go through `Lookup`. Pre-dates ADR-360 (the `%map-int-add` shape had it too) but the idiomatic shape made it reachable from ordinary code | ✅ **FIXED 2026-09-17** — `%table-from-map` answers nil for such a seed (moved to `process.blsp`, after the `try` macro it needs: from `predicates.blsp` its body could not compile and deferred to the tree-walker per call), and the split keeps the loop AS WRITTEN as a third def the wrapper runs instead; that copy is wrapped in `(%lint-allow :generated …)`, a new category the checker does not walk (the pre-run check paid ~12M instructions per definition otherwise — measured, KI-150's class). Guards: `tests/linmap_soundness_test.blsp` seeds with a rope, a builtin, a seq-view and a `Lookup` record; `crates/lisp/tests/linmap_idiom.rs` pins the copy; `check/tests/lints.rs` pins the skip; `scripts/fuzz/generators/linmap.py` draws those seeds. `make ab --floor --all`: every row noise |
 | KI-153 | **a function whose only call sites are its own self-calls was checked as dead code — nothing in its body was ever reported, not even `(string/length 5)`** — Pass 2.9 (ADR-341) counted a self-call as a site, so the function was "live", its parameters started at ⊥ for the least fixpoint, and a self-call's arguments typed under those parameters kept them at ⊥; the same body with one outside caller, or with no self-call, was reported | ✅ **FIXED 2026-09-17** — `live_private_functions` requires a site that is NOT a self-call (`Site::Call(_, _, Some(self))`); a function reached only through itself is site-less and walked with unknown parameters. Found while checking whether ADR-360's rewritten loop kept its warnings. Guard: `types::check::tests::closure_inference::a_function_reached_only_through_itself_is_not_derived` (three shapes + a seeded control); `nest check` over std/tests/examples and `--strict` over std stay at zero. In the same commit: the linear-map rewrite's rebuilt forms carry their source positions (`rebuild_list`), so a warning inside a rewritten loop points at its line instead of the `def`'s |
@@ -165,6 +165,11 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-169 | **`(stdimage/status)`'s `:installed` reported the PRELUDE snapshot's count on an opted-out warm boot** — `%std-image-reinstall!` cleared every registry the snapshot carries except `*std-image-installed*`, the snapshot's own answer | ✅ **FIXED 2026-09-20** — one reset beside the others. Guard `stdimage_reporting.rs` case 4, sabotage-verified |
 | KI-176 | **killing a MONITORED process cost 1.2 ms — 1 500× an unmonitored one — because every death walked the whole monitor table** — `sweep_dead_watcher` (every exit) and `demonitor` retained over every target's watcher list ("cold death path, so the full-table walk is fine"); a supervisor holding 200 000 monitored children paid O(n) per child death, O(n²) for the fleet, and that walk was the whole of `exit :kill`'s cost on the lifecycle probe | ✅ **FIXED 2026-09-21** — `MonitorTable` keeps the watcher-side index Erlang keeps (`by_watcher`: pid → {mref → target}); add/take/demonitor/watcher-death touch only their own entries, the cold REMOTE retirements keep the walk. 1 236 022 → 1 266 ns per monitored kill (unmonitored 800); `monitor` 265 → 420 ns. Guards: `concurrency_test` pins the two indexes in step; `crates/lisp/tests/monitor_scaling.rs` pins monitored/unmonitored kill as a ratio (< 8×; the walk reads 38× at 20k) |
 | KI-177 | **every `exit :kill` fed the default crash reporter a message it discarded, and the reporter fell behind without bound** — `sysmon::emit_exit` filtered only `:normal` from `:exit-abnormal`, so a supervisor's kills and shutdowns each built and delivered `[:system :exit pid :kill]`; the reporter read them at ~14 µs each against a parent killing 100 000 children in 80 ms — backlog 91 714 after one round, 309 458 after four, measured as ~180 B of live bytes accruing per killed process | ✅ **FIXED 2026-09-21** — the kernel filters the reporter's own non-crash table (`:normal`, `:kill`/`:killed`, `:shutdown`, `[:shutdown x]`) before any message is built, as the subscription's doc already said; a `:exit` subscriber still sees every one. Backlog 0 on every round. `tests/sysmon_test.blsp` pins both halves |
+| KI-179 | **the ADR-119 incremental check cache hit only image → image: every `nest check` after a cold build, and every one after an edit, re-checked the whole project** — a user global's fingerprint fact is its definition site, and a module materialised from the project image had none, so the fact read `F` from the image and `D<file>@<mtime>` from source; no cached fingerprint matched across the flip. Measured 1 000 × 3k files: cold 186 s, unchanged 154 s, unchanged again 15 s, one-function edit 188 s | ✅ **FIXED 2026-09-21 (ADR-382)** — the image carries def sites (`KIND_DEF_SITE`); an unchanged project replays its recorded verdict without loading; listed paths absolutised (they never hit either). Gate `nest::check_incremental`, sabotage-verified both ways |
+| KI-180 | **`gui`'s texture and sound registries were created on FIRST USE by `(when (nil? *textures*) (def …))` — a check-then-define race across processes** — two processes allocating their first handle at once each saw nil and each `def`'d a table; the second `def` orphaned the first's handles, so `texture-size` answered nil, or another test's size when the two counters collided. Red in `ui_test` in the FULL suite only (passed 3× alone), 2026-09-21 | ✅ **FIXED 2026-09-21** — both registries are created at load (a table global images by value); guard `gui_test` "forty processes each allocate…", red 2 of 3 with the lazy init restored |
+| KI-181 | **an error raised in positionless code — a contract shim's (ADR-381), the prelude's — escaped untagged and was reported at the CATCH site**, two frames from the failing form; unarmed, the thin-wrapper elision had hidden it (the prim ran inline in the caller's frame, tagged there). Surfaced as the armed suite's `vm_prim_error_pos_test` red; also the `lazy_load_test` ADR-366 case, whose inlined primitive a shim makes impossible by design | ✅ **FIXED 2026-09-21** — `attach_vm_trace` gives an untagged error the innermost call site that HAS a position (a tail call reuses the caller's frame, so there it is the caller's caller — the BEAM's answer); the two tests exercise their actual subjects (the raw primitive; an unarmed child). Guard: the shim case in `vm_prim_error_pos_test`, sabotage-verified |
+| KI-182 | **the `startup` row +6% at the 422c92a5 benchmark refresh (16 → 17 ms, `ab-bench --floor` 0.0% floor; 74.4M → 81.3M instructions on `(io/puts 0)`) — the largest piece is the JIT compiling at BOOT: `contract_apply` offers every declared `def` to the Brood hook `%contract-wrap` whether or not contracts are armed, the hook's `(not (or (%contracts-armed?) …))` runs once per declared name as `io`'s sections materialise, `not` crosses the tier threshold and every `brood file` run instantiates Cranelift to compile it** — `BROOD_JIT_DUMP_IR=1` shows one arm (`not`) on 422c92a5, none on 136b14d7, none on an empty file; `BROOD_NO_JIT=1` gives 1.55M back. The remaining ~4.8M is diffuse and expected: the prelude image carries def sites (ADR-382; 802 → 1328 entries, +0.6M in `FormPos` inserts), and the prelude grew by `contracts.blsp` and ADR-377/379 (+0.3M freeze, +0.4M image load, +0.3M interning) | 🔶 **OPEN 2026-09-21** — fix shape: `contract_apply` returns before `apply_engine` when `!contracts_armed()` and the name is not in `%*contract-forced*` (the sweep already gates on `(%contracts-armed?)`; the per-`def` offer does not), so the policy runs only when it can wrap; then re-measure `startup` with the same rig (`make ab BASE=136b14d7 ROWS=startup ARGS=--floor N=15`) and look at the def-site half separately (lazy decode, or a section that loads on the first `def-site` question). Published as measured in brood-benchmarks |
+
 | KI-178 | **the JIT's inline `pair?` answered `false` for a RANGE and a SEQ-VIEW** — `PrimOp1::IsPair` compared the discriminant byte against `TAG_PAIR` alone, on the strength of a comment saying ranges "also carry TAG_PAIR"; they carry their own bytes (11, 12), so `(pair? (range 3))` and `list?` were `true` on the VM and the tree-walker and `false` once the asking arm tiered up — since the lowering was written; found by a contract over `seqable` rejecting `(range 100)` on the two-thousandth `into` | ✅ **FIXED 2026-09-21** — the lowering accepts `TAG_PAIR | TAG_RANGE | TAG_SEQVIEW`, the two new constants pinned by the layout test; `tests/jit_pair_predicate_test.blsp` counts wrong answers over 20 000 activations (19 841 before the fix) |
 | KI-175 | **the checker seeded a fold callback's accumulator from the fold's RESULT, losing `init`** — over a provably non-empty input the result rule leaves `init` out (the step ran at least once), but the callback's first step is handed `init`; `(fold [3 9 4] nil (fn (b x) (if (nil? b) x …)))` read `b` as `3 \| 9 \| 4` and flagged the callback's own `nil?` guard as never true — a PLAIN-mode false positive (the one thing the checker must never do). Found by `fold-for`'s docstring example the day ADR-377 was written | ✅ **FIXED 2026-09-20** — `walk::calls::fold_callback_seed` seeds the accumulator with `init ∪ result` (the first element ∪ result for a no-init `reduce`). Pinned in `closure_inference.rs` both ways (the `nil` seed is quiet; a `0` seed still makes the `nil?` dead), sabotage-verified. One strict finding it uncovered was right: `linmap_soundness_test`'s `lm-fold` is handed `5` on purpose by one caller, so its `assoc` can see a `5` — `check-allow`ed like its sibling |
 | KI-174 | **the JIT fast-frame's debug cross-check fired on a rebind that landed between the IR's epoch load and the callback** — `fast-link mirror desynced from the call IC … auth=None` aborted `concurrency_race::fanout_with_concurrent_global_rebind_matches_serial` once on CI (2026-09-20, run 35532017776). The IR validates the flat mirror against the global epoch with a raw load; `jit_dispatch_fast_frame` re-read the epoch and asked the IC at the NEW one after a concurrent `def` bumped it, so a mirror that was valid when read looked desynced. Debug builds only; the release path re-validates and falls through. The check was also weaker than it read: it probed through `vm_call_ic_fast_link`, which reads the mirror first — comparing the mirror with itself, and reaching the entry only when the epoch had moved | ✅ **FIXED 2026-09-20** — `debug_check_fast_link_mirror` compares the mirror against the fat `CallIcEntry` (`fast_link_from_entry`, the authoritative half factored out of the probe) at the mirror's OWN epoch, and a `None` there is legitimate exactly when the entry's epoch has moved. Two unit tests rebuild the race's state deterministically (a published mirror, then a `def`): the tolerant case, sabotage-verified by probing at the current epoch; and a real desync at the same epoch, which must still fire |
@@ -11732,6 +11737,144 @@ many across targets and on one target; a watcher's death releases its monitors �
 sabotage-verified with `remove_watcher` stubbed), and `crates/lisp/tests/monitor_scaling.rs`
 pins monitored/unmonitored kill of 20k children as a RATIO under 8× (measured ~1×; the
 pre-index walk reads 38× at that n, sabotage-verified).
+
+## KI-180 — `gui`'s handle registries were created on first use: a check-then-define race across processes ✅ FIXED 2026-09-21
+
+**Seen:** the merged tree's armed full suite (`nest test`, 6153 tests): `ui_test` "stereo
+halves the seconds per byte" read `nil` for `(gui/sound-seconds snd)` of a handle just
+allocated, and "a display without :texture still hands back a sized handle" read `[2 1]` —
+the size the NEIGHBOURING test uploaded — for its 1×1. Both passed three times run alone.
+
+**Cause:** `std/gui.blsp`'s `textures`/`sounds` did `(when (nil? *textures*) (def *textures*
+(table/new)))` — lazily, "so a stdlib image never snapshots a live table". Globals are shared
+by every process and `def` is not atomic with the read: two processes allocating their first
+handle in the same window each saw nil and each defined a table. The second `def` replaced the
+table the first process had just written to, so its handle was unknown (nil), and the two
+tables' `:next` counters both started at 1, so handle 1's size was whichever table survived
+(`[2 1]`). The full suite runs `ui_test`'s display tests beside dozens of other first-uses;
+alone, one process wins by default.
+
+**Fix:** both registries are `(def … (table/new))` at load. The image concern was stale: a
+table global images by value (`KIND_TABLE`) and restores as a fresh table — empty, since
+nothing uploads at build. **Guard:** `tests/gui_test.blsp` "forty processes each allocate a
+texture and a sound and read back their own" — with the lazy init restored it reads red on
+two of three runs (a race), green ×3 with the fix.
+
+**Lesson:** `(when (nil? x) (def x …))` is not `defonce` and `defonce` is not atomic either;
+a shared registry is created at load or not at all.
+
+## KI-182 — the `startup` row +6% at the 422c92a5 refresh: the unarmed contract offer tiers `not` at boot, and the prelude image carries def sites 🔶 OPEN 2026-09-21
+
+**Seen:** the brood-benchmarks Brood-column refresh at `422c92a5` (min of three interleaved
+invocations) read `startup` 12.9 → 13.6 ms. `make ab BASE=136b14d7 ROWS=startup ARGS=--floor
+N=15`, std image live on both arms: **16 → 17 ms, +6.2% against a 0.0% floor**, reproduced
+alone. `perf stat -e instructions:u` on `bench/brood/startup.blsp` (`(io/puts 0)`, the run
+pre-flight cached): **74.4M → 81.3M**; on an empty file 58.6M → 62.2M; `--version` unchanged.
+
+**Attributed** on unstripped `release-fast` builds of both commits (`CARGO_PROFILE_RELEASE_FAST_STRIP=false`),
+`perf record -e instructions:u` over 60 invocations each, symbols summed by family:
+
+| family | 136b14d7 | 422c92a5 | delta |
+|---|---|---|---|
+| Cranelift / JIT compile | 0.5M | 4.6M | **+4.1M** (sampled; `BROOD_NO_JIT=1` measures 1.55M of it) |
+| `FormPos` table inserts | 1.7M | 2.3M | +0.6M |
+| image load | 5.4M | 5.8M | +0.4M |
+| freeze | 5.4M | 5.7M | +0.3M |
+| interning | 10.5M | 10.8M | +0.3M |
+
+**The JIT half — the mechanism.** `BROOD_JIT_DUMP_IR=1` prints exactly one lowered arm on the
+new binary — `not` (`Local JumpIfFalse Const Jump Const`) — none on the old, and none on an
+empty file, so it is `io`'s materialisation that makes `not` hot. `contract_apply`
+(`builtins/contracts.rs`) is called at every `def` of a name with a declared arrow and applies
+the Brood hook `%contract-wrap` unconditionally; the hook (`std/prelude/contracts.blsp`)
+decides `(if (or (%contract-exempt? name) (not (or (%contracts-armed?) (%table-has?
+%*contract-forced* name)))) orig …)`. Under `brood file` contracts are unarmed, so every one
+of those calls declines — after running `not` once. `io` and its chain declare enough names to
+put `not` past `TIER_THRESHOLD`, the background compiler instantiates `CraneliftBackend` and
+lowers it, and that is ~1.5M instructions (~0.3 ms) on every short run. The `provide`-time
+sweep already stands aside unarmed (`(when (%contracts-armed?) (%contracts-sweep! key))`,
+`tools.blsp`); the per-`def` offer is the path that does not.
+
+**The other half** is not a bug: ADR-382 put def sites in the prelude image (`[boot] … (802
+entries)` → `(1328 entries)`, each a `set_def_site` insert with two decoded strings), and the
+prelude grew by `contracts.blsp` (287 lines) and the ADR-377/379 additions, which the freeze
+and the image load pay per binding. Worth a look at whether def sites can decode lazily, but
+the JIT half is the one to fix first.
+
+**Fix shape:** `contract_apply` returns before `apply_engine` when `!contracts_armed()` and
+`name` is not in the forced table (the kernel can read the `%*contract-forced*` global and
+`table_has` it) — the hook's own first test, hoisted into the mechanism so the policy is only
+consulted when it can wrap. Guard: `BROOD_JIT_DUMP_IR=1 brood startup.blsp` lowers no arm;
+`sig!` still forces unarmed (`tests/contracts_test.blsp` covers it). Then re-measure with the
+rig above.
+
+**Lesson:** a hook called per definition is a hot loop at load time, and the JIT's tier
+threshold turns a cheap decline into a Cranelift instantiation per process. Gate policy calls
+on the fact that decides them when the kernel already holds that fact.
+
+## KI-181 — an error raised in positionless code took the CATCH site's position, two frames from the failing form ✅ FIXED 2026-09-21
+
+**Seen:** the armed suite (ADR-381 turns contracts on under `nest test`): `vm_prim_error_pos_test`
+"a table/has? type error reports the prim's line, not the call site" read line 24 — the test's
+own `try` — where line 20, the `(table/has? pep-t k)` inside `pep-probe`, was pinned. Unarmed
+it passed.
+
+**Cause:** `table/has?` carries a `sig`, so armed it is a contract shim — a closure built by
+`%contract-shim-2` in the prelude, whose code carries no source positions. Its call to the
+original `has?` (thin, so elided) ran the primitive inline in the shim's positionless frame:
+the error was tagged nowhere and "picks up the position of whatever frame catches it", the
+`try`. Unarmed, the elision ran the primitive inline in `pep-probe`'s frame and tagged it there
+— which is why the guard never saw the class before. Under `nest run`/`nest test` every error
+escaping any `sig`'d function's callee was reported at its catch site.
+
+**Fix:** `attach_vm_trace` gives an error with no position the innermost pending call site
+that HAS one — the user form whose call led into the positionless code, the same site the
+`:trace` already records. `or`-semantics: a position a primitive tagged is never moved. A
+TAIL call into a shim reuses the caller's frame, so there the nearest positioned site is the
+caller's caller (the BEAM's answer too); a non-tail call reports its own line. The two tests
+then had to say what they test: `vm_prim_error_pos_test` calls the raw `%table-has?` (the
+fused arm the guard exists for — a shim is not the inline path, by design), and gains a
+`sig!`-forced non-tail shim case pinning the new rule (sabotage-verified: the rule disabled
+reads the `try`'s line); `lazy_load_test`'s ADR-366 child runs `BROOD_CONTRACTS=0`, because a
+contracted `math/rem` is a closure and the inlined `Rem` it looks for cannot exist.
+
+**Lesson:** a diagnostics guard that measured a fast path through an elision measured the
+elision. Pin the primitive the guard is about.
+
+## KI-179 — the incremental check cache hit only image → image: a cold build or an edit re-checked the whole project ✅ FIXED 2026-09-21 (ADR-382)
+
+**Seen:** measuring `docs/large-project-scaling.md`'s "unchanged re-check 16 s" on the 1 000 ×
+3k rig from a cleared cache (release `nest`): cold `nest check` 186 s; the next check of the
+UNCHANGED project **154 s**; only the one after that 15 s. A one-function edit: **188 s** —
+the whole project again. The doc's 16 s was the third run's number.
+
+**Cause:** `types::check::deps::fact_of_sym` reads `heap.def_site(sym)` and answers
+`D<file>@<mtime>` for a user global; with no def site it answers `F`. `%image-write` never
+encoded def sites (bindings, sigs and privacy only), and materialising evaluates no `def`, so
+a project module from the image had none. The first check after a build ran from source
+(`D…`), the next from the image (`F`): every fingerprint differed. After an edit the image is
+stale, so the check runs from source (`D…`) against a cache written from the image (`F`): every
+fingerprint differed again. The only pairing that matched was image → image, i.e. a second
+unchanged run. A comment in `project-check.blsp` described exactly this flip as the reason
+`nest run`'s pre-flight has its own manifest, and read it as the manifests' problem.
+
+Found on the way: `nest check FILE…` keyed the per-file manifest by the path AS SPELLED, so a
+relative listed path never matched the absolute key the whole check wrote — CI's explicit-list
+invocation re-checked every listed file every time.
+
+**Fix:** the image carries def sites (`boot/image.rs` `KIND_DEF_SITE`, a name-and-no-value
+entry like privacy); the fact is a function of the source tree whichever way a module arrived.
+On top of it, an unchanged project replays its recorded verdict without loading anything
+(ADR-382), and listed paths are absolutised at the door. Rig, release: unchanged `nest check` **154 s / 15 s → 0.12 s, 118 MB** (a replay); one-function edit **188 s → 40 s**, of which 33 s is the image rebuild and 2.7 s the check (1 file re-checked); `nest check` over three listed files 9.3 s with 0 re-checked (4 s materialise + 4.6 s lints — the lints still scan every file); the require-graph parse 2.9 s → 0.04 s.
+
+**Gate:** `crates/nest/tests/check_incremental.rs` — after a cold build the listed form reuses
+every verdict (`[check] reuse-test (0 to re-check)`), a leaf edit re-checks 1, a dependency's
+arity change re-checks 2 and reports the dependent's new warning. Sabotage: def-site entries
+not written → `8 to re-check`; replay key forced true → the stale, warning-free replay.
+
+**Lesson:** a cache that "works" on the second identical run and nothing else reads as
+working in every quick check. Measure the transition the user actually makes — build → check,
+edit → check — not the steady state.
 
 ## KI-178 — the JIT's inline `pair?` answered `false` for a range and a seq-view ✅ FIXED 2026-09-21
 

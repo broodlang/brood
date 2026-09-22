@@ -115,13 +115,16 @@
 ;; origin; both window painters draw them — the GPU render target instanced (a
 ;; `--with-gui-gpu` build, unless BROOD_GUI_GPU=0), the CPU painter in software.
 
-(def *textures* nil)
+(def *textures* (table/new))
 
 (defn- textures ()
-  "The texture registry — handle → [w h] — shared by every process, created on first use
-(so a stdlib image never snapshots a live table). The counter under :next allocates
-handles from 1, process-wide, so a handle can never name another window's texture."
-  (when (nil? *textures*) (def *textures* (table/new)))
+  "The texture registry — handle → [w h] — shared by every process; the counter under
+:next allocates handles from 1, process-wide, so a handle can never name another window's
+texture. Created at LOAD (`*textures*`), never on first use: the lazy `(when (nil? …)
+(def …))` it replaced was a check-then-define race — two processes allocating their first
+texture at once each saw nil and each `def`'d a table, the second `def` orphaned the first's
+handles, and `texture-size` answered nil or another test's size (ui_test, in the full
+suite only, 2026-09-21). A table global images by value (`KIND_TABLE`), empty at build."
   *textures*)
 
 (defn size-px (id)
@@ -151,12 +154,12 @@ handles from 1, process-wide, so a handle can never name another window's textur
     (gui/texture-size 0)   → nil"
   (table/get (textures) tex))
 
-(def *sounds* nil)
+(def *sounds* (table/new))
 
 (defn- sounds ()
-  "The sound registry — handle → seconds of audio — shared by every process, created
-on first use; the counter under :next allocates handles from 1."
-  (when (nil? *sounds*) (def *sounds* (table/new)))
+  "The sound registry — handle → seconds of audio — shared by every process, created at
+load like `textures` (and for the same race); the counter under :next allocates handles
+from 1."
   *sounds*)
 
 (defn alloc-sound (seconds)

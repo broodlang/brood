@@ -483,10 +483,11 @@ family of per-type functions. ADR-250 through ADR-253 carry the decisions.
 **Still open:**
 
 - [ ] **Large-project scaling at 3k-line files** — `docs/large-project-scaling.md` (2026-09-21):
-      item 1 DONE the same day (ADR-380: the module index is cached per file in
-      `.brood/module-index`, so a warm `nest run` opens no source file; 3.0 s → see the doc);
-      whole-project `nest check` is still single-threaded and O(project) in memory. Five
-      items left in the doc's queue, incremental `nest check` first.
+      items 1 and 2 DONE the same day (ADR-380: the module index is a per-file cache, a warm
+      `nest run` opens no source file, 3.0 s → 0.15 s; ADR-382 / KI-179: the check cache had
+      hit only image → image, the image carries def sites now and an unchanged project
+      replays its verdict); whole-project `nest check` is still single-threaded and
+      O(project) in memory, and an edit still rebuilds the whole image. Three items left.
 
 > Numbers below **re-measured 2026-08-29** with `scripts/stdlib-audit.blsp` rather than
 > carried forward. Three of this list's claims had gone stale in the reader's favour — an

@@ -2,6 +2,15 @@
 
 Chronological record of work sessions. Newest at the bottom.
 
+## 2026-09-21 — the 422c92a5 benchmark column, and KI-182
+
+Brood column refreshed in brood-benchmarks at `422c92a5`: `mandelbrot` 161 → 77 ms (ADR-378,
+−50.9% under `ab-bench --floor` against `136b14d7`), `spawn-live` 1.23 → 1.15 s and 1.75 →
+1.56 GB peak, like-for-like 7.54 → 7.20. Task 7's list rows byte-flat. `startup` 16 → 17 ms
+against a 0.0% floor is real: attributed on unstripped binaries to the unarmed per-`def`
+contract offer tiering `not` at boot (Cranelift instantiated on every short run, 1.55M
+instructions) plus the prelude image's new def sites and a larger prelude — KI-182, open.
+
 ## How to navigate
 
 The session history is split so this file stays loadable:
@@ -943,6 +952,9 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-21** — the game engine's day, and what it asked of the runtime. `b2d-physics` (private) went from 176 to 24 ms a step at 500 bodies, and every gain but one was the language's: **ADR-378** — an arm computing on floats it reads out of vectors (`(dot a b)`) never went native, because the float context came from the param profile alone; deopt feedback re-tiers it after four integer-guard deopts on a `Float`, and on the way the thrash latch turned out never to clear callers' fast links (a latched arm entered natively forever), the compile cache handed re-lowers their old code, and comparisons sat outside the float context (they dispatch by tag now, a bool either way). `dot` 410 → 89 ns. Then the prelude: `conj` on a vector cost **7.7 µs** (`into` → `append` → two reverses → `apply vector`; `%vector-concat` copies once, 1.2 µs), `seq` 586 ns to return a vector itself (answers first now, as `fold` does), `reverse` reduces a vector natively; and the table: `get` rebuilds under the lock instead of cloning first, scalar keys compare as they are (six floats 204 → 144 ns). **ADR-374 addendum 4**: pong from an installed `nest` showed its score and nothing else — the CPU painter skipped `[:quad]`/`[:sprite]` silently; it draws them in software now, the same picture, and `b2d/run` says when there is no GPU target. "A trail behind the ball" was an `Immediate` present tearing; games default `:vsync true`. Downstream: `b2d/serve-shared` (one match for every window and tab, input stamped per player) and `pong2` (private) — physics court, three-level AI, online PvP, a disc sprite ball, 35 tests. Not measured on the rows: the three runtime commits (`perf-handoff.md` Task 7).
 - **2026-09-21** — large-project scaling, item 1 (ADR-380): the module graph is a per-file cache on disk. A warm `nest run` re-parsed every source file WHOLE to find its `defmodule` header — twice (rooting, package identity), three times cold — which at 3 000-line files was the entire warm start (3.0 s at 1 000 files, 2 000 `openat`, the reader in `perf`). `std/tool/module-index.blsp` keeps `.brood/module-index` (one `("path" size mtime (mods))` line per file, atomic write, format-versioned, NOT build-id-keyed — it is a fact about source text) and `package`/`project` read the graph through it. Same rig, release: **warm run 3.0 → 0.15 s**, RSS 282 → 145 MB, source opens 2 000 → 0, cold 45.8 → 39.2 s. Gates: `nest::module_index` (the `[index] … 0 parsed` trace on a second run; an edit re-parses exactly its files) and `tests/module_index_test.blsp` (the answers), both sabotage-verified both ways. Found on the way: `scripts/bench/image-scale.sh` had driven ADR-325's OLD names for a month — fixed, plus `FNS=` for the 3k shape and warm columns. Next in the queue: incremental `nest check`.
 - **2026-09-21** — ROADMAP 10 + 11, **ADR-381**: runtime contracts are BINDING-time policy. The kernel offers a binding to `%contract-wrap` at a `def`, at a `%register-sig` on a bound name, and in the sweep at `provide` (source and image alike; the prelude's root names at boot) — so `sig` is a declaration in every mode, placement is free (the tree-wide gate is gone), the stdlib image path is contracted, and a reload re-wraps; errors carry `:blame :caller | :callee`; `nest run`/`nest test` arm it (`0` opts out, a bundle never arms, `stdimage/build` refuses armed). Measuring it: every check ran TREE-WALKED (the machinery sat above its own macros in core.blsp — 600 µs a contracted call; now 3.5), `%type-alias` scanned every sig per non-base symbol (eleven base names were not interpreted; memoised), and **KI-178** — the JIT's inline `pair?` false on a range/seq-view since it was written. Prelude exempt under plain `1` (`nth` ×10 otherwise), `all` includes it. Residual `format_test` ×35 (`char-at` per char); module-boundary contracts recorded as the follow-up.
+
+- **2026-09-21** — large-project scaling, item 2 (ADR-382, KI-179): `nest check` incremental for real. Measuring the doc's "unchanged re-check 16 s" from a cleared cache showed the ADR-119 cache hit only image → image — a user global's fingerprint fact is its DEF SITE, and a module from the project image had none (`F` vs `D<file>@<mtime>`), so the check after a cold build re-checked everything (154 s of 186 s) and so did the check after any edit (188 s). Three moves: the image carries def sites (`KIND_DEF_SITE`, the privacy-entry shape — also relights `source-location` / LSP go-to-def for imaged modules); an unchanged project REPLAYS its recorded lines without loading (keyed on the ADR-380 fingerprint + mode + `WALK_FLAGS`, now shared with ADR-371 through `%check-walk-flags`, + the listed files); the require graph and the lints' inputs no longer parse unchanged files (`%module-direct-requires` answers `:modules`, the index entry is v2). Also: `nest check FILE…` had never reused a verdict — relative keys against absolute ones. Rig, release: unchanged `nest check` **154 s / 15 s → 0.12 s, 118 MB** (a replay); one-function edit **188 s → 40 s**, of which 33 s is the image rebuild and 2.7 s the check (1 file re-checked); `nest check` over three listed files 9.3 s with 0 re-checked (4 s materialise + 4.6 s lints — the lints still scan every file); the require-graph parse 2.9 s → 0.04 s. Gate `nest::check_incremental`, sabotage-verified both ways. Left for the edit loop: the whole-image rebuild an edit still pays (30 s at 1 000 × 3k) — Finding 3.
+- **2026-09-21** — "make 1000% sure we have stable ground": the merged tree's ARMED suite had four reds, and CI had been red for three commits. **KI-180**: `gui`'s handle registries were lazily `def`'d on first use — a check-then-define race that orphaned handles when two processes allocated at once (both `ui_test` reds; full suite only). Created at load; a 40-process guard. **KI-181**: an error raised in a contract shim's positionless code was reported at the CATCH site; `attach_vm_trace` now gives an untagged error the innermost positioned call site (non-tail: the caller's form; tail: the caller's caller). `vm_prim_error_pos_test` measured the thin-wrapper elision rather than the fused prim arm it guards — it calls `%table-has?` now, plus a `sig!`-forced shim case; `lazy_load_test`'s ADR-366 child runs unarmed. **CI**: `isolate_tests_run_alone` reads only the per-test `:isolated (test` spelling; the module-index test had it on the describe. Every guard sabotage-verified.
 ---
 
 ## Recent — full entries
@@ -15357,7 +15369,62 @@ prelude's own sixteen sigs are exempt under plain `1` (`nth` 0.4 → 4.5 µs, `j
 contracted `string/char-at` per character — recorded, with module-boundary contracts as
 the follow-up.
 
-- **2026-09-21 (later)** — **the contract MODULE BOUNDARY (ADR-383).** The `format_test` ×35
+## 2026-09-21 (4) — large-project scaling, item 2: the cache that only hit on the second identical run
+
+The queue said "`nest check` incremental for real (ADR-129 finished): unchanged re-check ≈
+fingerprint time". Measuring the unchanged re-check from a cleared cache said something else
+first: cold 186 s, unchanged **154 s**, unchanged **15 s**, one-function edit **188 s**. The
+16 s in the doc was the third run. The ADR-119 cache compares a per-file dependency
+fingerprint whose user-global fact is the definition site, and the project image did not carry
+definition sites — so the fact flipped between `D<file>@<mtime>` and `F` with every change of
+arrival, and the two transitions a developer actually makes (build → check, edit → check) both
+crossed it. KI-179 has the mechanism; a comment in `project-check.blsp` had described the flip
+in 2026-08-30 as the reason for a second manifest, and stopped there.
+
+The fix is one image entry kind (`KIND_DEF_SITE`, written like privacy), after which the
+small rig reads: cold 42 re-checked, then 0, an isolated edit 1, a dependency edit 2 (the
+dependent's new arity warning appears). On top of it the phase trace of the true warm path
+(ensure-loaded 3.7 s, lints 4.5 s, require parse 2.9 s, re-fingerprint 1.0 s at 1 000 × 3k)
+was all fixed cost for zero new information, so an unchanged project now replays its recorded
+lines keyed on the ADR-380 fingerprint — the same key the image trusts — plus the mode, the
+walk flags and the file list; 40 ms in a debug build. The require graph moved into the module
+index (v2 entries carry own module and requires), and listed paths are absolutised, which
+closed a fourth thing nobody had measured: `nest check FILE…` had never hit the cache at all.
+
+Release rig, after:
+
+| operation | before | after |
+|---|---|---|
+| `nest check`, unchanged, right after a cold build | 154 s / 3.2 GB | **0.12 s / 118 MB** (replay) |
+| `nest check`, unchanged, steady state | 14.7 s / 3.0 GB | **0.12 s / 118 MB** (replay) |
+| `nest check` after a one-function edit | 188 s / 3.8 GB | **40.2 s** — image rebuild 32.6 s, the check 2.7 s (1 file re-checked) |
+| `nest check FILE FILE FILE` (listed, unchanged) | every listed file re-checked | 9.3 s, 0 re-checked (4.0 s materialise + 4.6 s lints, both O(project)) |
+| require-graph parse per run | 2.9 s | 0.04 s (module index) |
+| cold `nest check` | 186 s | 191 s (unchanged in kind: load 37 s + check 146 s, one thread of the check pool aside) |
+
+What an edit still pays is the whole-image rebuild from source (30 s here) before a check
+that then re-derives two files in 20 ms. That is the next item, and it is a LOAD question
+(Finding 3), not a checker one.
+
+## 2026-09-21 (5) — stable ground: two races and a diagnostics rule behind the armed suite's four reds
+
+The two `ui_test` reds were one bug: a registry created by `(when (nil? x) (def x (table/new)))`
+is a race the moment two processes reach it together, and the full suite is exactly that. The
+`vm_prim_error_pos_test` red was more interesting than a test to relax: under contracts,
+`table/has?` is a shim whose code has no positions, so the primitive's error escaped untagged
+and was reported at the `try` — and that had always been the behaviour for errors out of the
+prelude; the guard had only ever measured the thin-wrapper elision, which ran the primitive
+inline in the caller's frame. The VM now gives an untagged error the innermost positioned call
+site, which is the user's own form for a non-tail call and the caller's caller for a tail call
+(the frame is gone — the BEAM's answer). The `lazy_load` case looked for an inlined `Rem` that
+a shimmed `math/rem` cannot produce; its child runs unarmed. CI's red, for three commits, was
+the isolate gate's spelling of `:isolated` and my describe-level mark. Nothing here is a
+retry; each has a guard that went red on sabotage.
+
+
+## 2026-09-21 (6) — the contract module boundary (ADR-383)
+
+The `format_test` ×35
 was not the check's cost but where it was charged: `string/format` calling its own
 `string/char-at` per character paid a check the module owed only to outsiders. Now a module's
 calls to its own contracted functions are unchecked, the Racket `contract-out` shape: beside

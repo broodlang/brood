@@ -58,11 +58,20 @@ takes; everything else is the mechanism behind it.")
           (fn (acc dir) (%append-two (project/collect-sources dir) acc)))))
 
 (defn- project-image-fingerprint (root)
-  (project-fingerprint-of (source-files root)))
+  (fingerprint-of (source-files root)))
 
 ;; Split from `project-image-fingerprint` so a caller that already has the file list
 ;; (the loader, which wants to report the count) does not walk and stat the tree twice.
-(defn- project-fingerprint-of (files)
+;; Public: `nest check`'s whole-project verdict replay (ADR-382) keys on the same string
+;; over the project's source AND test files, so "nothing changed" means one thing.
+(defn fingerprint-of (files)
+  "The staleness key of the project as `files` plus its dependency files describe it: the
+running binary's build id, then each file's path, size and mtime, one per line. Equal
+strings mean nothing an image or a cached verdict depends on has changed; any edit, add,
+delete or rebuild changes it. Requires `project/setup` to have run (the dependency files
+come from `*module-files*`).
+
+    (string/starts-with? (project-image/fingerprint-of nil) (system/build-id))   → true"
   ;; Not hashed: the fingerprint is only ever compared for equality, and hashing
   ;; would pull `hash` into the loader's dependencies for nothing. Even 16 000 files
   ;; make ~1.5 MB, which is noise beside the image itself.
@@ -74,7 +83,7 @@ takes; everything else is the mechanism behind it.")
   ;; populates before any fingerprint is taken, on the cold and warm paths alike.
   (str (system/build-id)
     "\n"
-    (string/join (map (%append-two files (project-dep-module-files))
+    (string/join (map (%append-two (or files nil) (project-dep-module-files))
                    (fn (f) (str f ":" (file/size f) ":" (file/mtime f))))
       "\n")))
 
@@ -395,7 +404,7 @@ program's and the LSP's protocol channel stays clean."
   (let (t-a (os/now-ns)
         files (source-files root)
         t-b (os/now-ns)
-        fp (project-fingerprint-of files)
+        fp (fingerprint-of files)
         t-c (os/now-ns)
         hit (cond
               (image-usable?)

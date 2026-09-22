@@ -651,7 +651,33 @@ Both were hit here while measuring KI-150, and the second only surfaced because 
 the change did not restore the baseline. **If a revert does not reproduce the number you
 started from, the rig is wrong, not the code.**
 
-## Task 7 — three 2026-09-21 runtime changes, measured on micros only: confirm the rows
+## Task 7 — three 2026-09-21 runtime changes, measured on micros only: confirm the rows ✅ ANSWERED 2026-09-21 — the list rows are flat; `mandelbrot` −51%; `startup` +6% is real and attributed (KI-182)
+
+**Answered with the benchmark refresh at `422c92a5`.** `make ab BASE=136b14d7 --floor` (the
+previous column's commit, which brackets the three commits plus ADR-380/381/382), std image
+live on both arms, best-of-7, then `startup` alone at N=15:
+
+| row | base | new | delta | floor | verdict |
+|---|---|---|---|---|---|
+| reduce | 21 ms | 21 ms | +0.0% | 0.0% | noise |
+| pipeline | 25 ms | 25 ms | +0.0% | 0.0% | noise |
+| strings | 28 ms | 28 ms | +0.0% | 0.0% | noise |
+| persistent-map | 69 ms | 72 ms | +4.3% | 0.0% | noise (rule) |
+| wordcount | 60 ms | 62 ms | +3.3% | 1.7% | noise (rule) |
+| nqueens | 103 ms | 107 ms | +3.9% | 1.0% | noise (rule) |
+| mandelbrot | 175 ms | 86 ms | **−50.9%** | 1.1% | improved (ADR-378) |
+| startup | 16 ms | 17 ms | **+6.2%** | 0.0% | regressed → **KI-182** |
+
+The prelude change's fail signal (a list-heavy row past its floor) did not fire: `reduce`,
+`pipeline` and `strings` are byte-flat, so `reverse`'s two predicate calls stay as they are.
+Three rows read +3–4% in the same direction against sub-2% floors — under the rule, and noted
+as a watch: re-check `persistent-map` and `nqueens` unpinned before the next refresh. The
+`startup` movement is not the three commits at all; it is attributed on unstripped binaries
+in KI-182 (the unarmed contract offer tiers `not` at boot; the prelude image's def sites).
+
+The original brief, kept for the method:
+
+### Task 7 as posed
 
 **The situation.** Three commits on `main` (`62201c68`/`4492d313` the JIT, `d19ec13f` the
 prelude, `93b7440d` the table) each earned their place on a microbenchmark and a downstream

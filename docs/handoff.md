@@ -12,6 +12,19 @@ sysctl that moves under you — that file's last section has the one-line check)
 questions are answerable here; check that file's "what this box CAN answer" before deferring
 anything.
 
+## 2026-09-21 evening — the benchmark column is refreshed at 422c92a5; KI-182 is the open item
+
+brood-benchmarks has the Brood column at `422c92a5` (min of three, `ab-bench --floor` against
+`136b14d7` on every row that moved): **`mandelbrot` −52%** (ADR-378), `spawn-live` −6.6% wall
+and 1.75 → 1.56 GB (the process-floor commits), like-for-like 7.54 → 7.20 and ahead of Elixir.
+Perf-handoff Task 7 is answered: the list rows are flat. **One regression, published as measured
+and open: `startup` +6% (KI-182)** — `contract_apply` offers every declared `def` to the Brood
+hook even unarmed, `not` tiers up while `io` materialises, and Cranelift is instantiated on
+every short run. Fix shape and the rig are in the KI; it is a ~10-line early return plus a
+`BROOD_JIT_DUMP_IR` guard, and the tree rule says it comes before new work. The KI-180/181
+fixes are committed (`422c92a5`); CI's bedit smoke stays red on bedit's own `elixir_playground_test`,
+which asserts an `elixir` on PATH the runner does not have — bedit's to guard, not brood's.
+
 ## 2026-09-21 — runtime contracts are binding-time policy and ON under `nest run`/`nest test` (ADR-381); KI-178
 
 ROADMAP 10 and 11 are done; read ADR-381 for the shape and the measurements. What the next
@@ -50,7 +63,39 @@ session needs to know:
   worktree's `target/debug` filled it and every shell command failed with exit 1 and no
   output.
 
-## 2026-09-21 — NEXT: large-project scaling, items 2–6 — read `large-project-scaling.md`
+## 2026-09-21 — stable ground: the four armed-suite reds fixed (KI-180, KI-181), CI's red attributed and fixed
+
+The merged tree's ARMED `nest test` (6153 tests) was red on four cases; all four are closed
+with a mechanism, not a retry:
+
+- **KI-180** — `gui`'s texture/sound registries were created on first use by a
+  check-then-define; N processes racing to their first handle each `def`'d a table. Both
+  `ui_test` reds. Created at load now; guard in `gui_test` (red 2/3 with the race restored).
+- **KI-181** — an error raised in positionless code (a contract shim's) took the CATCH site's
+  position. `attach_vm_trace` gives it the innermost positioned call site. The
+  `vm_prim_error_pos_test` guard now pins the raw primitive it is about, plus the new rule;
+  `lazy_load_test`'s ADR-366 child runs unarmed (a shimmed `math/rem` cannot inline).
+- **CI was red before any of this** (`c930f023` and the two commits before it): the
+  `isolate_tests_run_alone` gate wants the PER-TEST `:isolated (test …` spelling and does not
+  read a `describe`-level `:isolated`; `tests/module_index_test.blsp` (ADR-380) had the
+  latter. Marked per test. The tree-walker job also logged `brood_suite_passes` TRY 1 FAIL
+  then pass (flaky) on that run — not reproduced here; watch it.
+
+Proof on this tree (below in the gate log summary): the armed suite ×3, `nextest` for the
+`brood`, `nest` and `cli` crates, clippy with CI's flags, `make prepush`.
+
+## 2026-09-21 — NEXT: large-project scaling, items 3–5 — read `large-project-scaling.md`
+
+**Item 2 is DONE (ADR-382, KI-179, this session): `nest check` is incremental for real.**
+The ADR-119 cache had hit only image → image — a project global's fingerprint fact is its
+def site and the image carried none — so the check after a cold build (154 s) and after any
+edit (188 s) re-checked everything; the doc's "16 s" was the third identical run. The image
+carries def sites now (`KIND_DEF_SITE`), an unchanged project replays its recorded verdict
+without loading (keyed on the ADR-380 fingerprint + mode + `WALK_FLAGS` + file list), the
+require graph reads from the module index (v2), and listed paths are absolutised (they had
+never hit). Rig, release: unchanged `nest check` **154 s / 15 s → 0.12 s, 118 MB** (a replay); one-function edit **188 s → 40 s**, of which 33 s is the image rebuild and 2.7 s the check (1 file re-checked); `nest check` over three listed files 9.3 s with 0 re-checked (4 s materialise + 4.6 s lints — the lints still scan every file); the require-graph parse 2.9 s → 0.04 s. Gate `nest::check_incremental`, sabotage-verified both ways.
+**The edit loop's remaining cost is the whole-image rebuild an edit forces (30 s here) —
+a load question, listed under item 5 below.**
 
 **Item 1 is DONE (ADR-380, this session): the module graph is a per-file cache.** A warm
 `nest run` re-parsed every source file whole to find its `defmodule` header — twice — and at
@@ -71,12 +116,15 @@ start rather than O(bytes)); whole-project check is ~4.4 h and ~380 GB — not r
 
 **The queue, in order (details and gates in the doc):**
 1. ~~Module-index cache~~ — done, above.
-2. `nest check` incremental for real (ADR-129 finished): unchanged re-check ≈ fingerprint
-   time; an edit re-derives changed files + dependents only (ADR-119 edges). Gate: count the
-   walks under `BROOD_DERIVE_DBG=1`.
+2. ~~`nest check` incremental for real~~ — done, above (ADR-382).
 3. `nest check` parallel per-file walk after the Pass 2.9 fixpoint. Gate: user/wall ≥ 6.
 4. Check memory: drop forms after the walk / shard. Gate: peak RSS at 1 000 × 3k under 1 GB.
-5. Parallel cold load (paid once; last).
+5. The cold load — now the EDIT LOOP's cost too, since an edit invalidates the whole image
+   and the check that follows loads everything from source (30 s at 1 000 × 3k) before
+   re-deriving two files in 20 ms. Two shapes: parallel loading (divides by cores, paid on
+   every edit), or module-level image staleness (materialise the unchanged modules, load
+   only the changed ones — O(changed), the real fix, and the harder one: a section's bindings
+   can depend on a changed module's macros).
 6. ~~The 3k-line shape as a row in `scripts/bench/image-scale.sh`~~ — done: `FNS=340
    scripts/bench/image-scale.sh 250 500 1000`, with `warm all` / `warm lazy` columns. The
    script had been calling ADR-325's OLD names for a month with nothing running it, and a
