@@ -444,8 +444,10 @@ fewer than two items.
 ;; closure on every call. `<` and `=` reuse the `%lt`/`%eq` primitives directly;
 ;; the swapped/negated ones get a named Brood helper (still policy in Brood).
 (defn- %cmp-gt (a b) (%lt b a))
-(defn- %cmp-le (a b) (not (%lt b a)))
-(defn- %cmp-ge (a b) (not (%lt a b)))
+;; `(if … false true)` rather than `(not …)`: `not` is a prelude closure, so the negation
+;; was a Brood call on every `<=`/`>=` that reaches the fallback (KI-182's lesson, swept).
+(defn- %cmp-le (a b) (if (%lt b a) false true))
+(defn- %cmp-ge (a b) (if (%lt a b) false true))
 
 ;; Multi-arity like arithmetic above: a direct 2-argument clause (the common
 ;; case — `(< a b)`, `(= a b)`) calls the primitive with one env frame; the
@@ -851,7 +853,7 @@ cyclic alias (`(deftype a b)` `(deftype b a)`) stops instead of looping."
           (%eq h 'is) (bool? v)
           (%eq h 'or) (any? (rest t) (fn (s) (type-matches? s v seen)))
           (%eq h 'and) (every? (rest t) (fn (s) (type-matches? s v seen)))
-          (%eq h 'not) (not (any? (rest t) (fn (s) (type-matches? s v seen))))
+          (%eq h 'not) (if (any? (rest t) (fn (s) (type-matches? s v seen))) false true)
           ;; `(int lo hi)` — an int within the interval, `_` an open end (ADR-350). The
           ;; contract checked the tag alone until 2026-09-17, so a declaration the checker
           ;; trusted could lie at runtime.

@@ -2,6 +2,23 @@
 
 Chronological record of work sessions. Newest at the bottom.
 
+## 2026-09-22 — the `(not (pred x))` guard sweep in the prelude's hot paths: neutral on the rows, fewer `not` activations at load
+
+KI-182's lesson applied once more: `not` is a prelude closure, so `(not (pred x))` as a
+`cond`/`if`/`when` test is a Brood call per evaluation, and on a per-element or per-call path
+it is both a cost on the VM tier and a step toward the JIT's tier threshold for `not` itself
+(the class that instantiated Cranelift at boot twice this week). Eight sites rewritten as
+positive tests with swapped branches: `%cmp-le`/`%cmp-ge` (the `<=`/`>=` fallback),
+`contains?` on a map, `%take-while-acc`, `%drop-while-from`, `%dolist-loop`, `%impl-exact?`,
+`append`'s range check, and `type-matches?`'s `not` clause. The other thirty-two sites in the
+grep are expansion-time or load-time and stay as written. `make ab --floor` against HEAD, both
+images live: every row inside its floor (`sort`/`pipeline`/`wordcount`/`startup` +0.0%,
+`persistent-map` −1.4%, `json` −0.6%, `strings` +3.1% and `reduce` +3.8% on 26–33 ms rows) —
+a native arm splices `not` away, so the rows cannot see this; the VM tier and load paths do.
+Both suites green. Filed alongside: KI-184 (ADR-385 moved the shim templates into a positioned
+module, so KI-181's "innermost positioned site" is now the shim's own line — red on `main`,
+attributed on a clean worktree, three options written up).
+
 ## 2026-09-22 — KI-182 closed on the measurement; brood-benchmarks at 653d41d9
 
 Interleaved pinned task-clock on `(io/puts 0)`, the 136b14d7 column's binary against the

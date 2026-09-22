@@ -266,7 +266,7 @@ front of an accumulated remainder wants; a vector last is converted."
           ;; a pair chain (or nil) is shared as it is; a vector or a range — `list?` and
           ;; `pair?` too, standing in for its list — is materialised, so the result is a
           ;; plain list rather than a chain ending in a range
-          tail (if (or (nil? last) (and (pair? last) (not (range? last))))
+          tail (if (or (nil? last) (and (pair? last) (if (range? last) false true)))
                  last
                  (%reverse-onto (reverse last) nil)))
       (fold (rest rl) tail (fn (acc l) (%reverse-onto (reverse l) acc))))))
