@@ -10,6 +10,18 @@
 //! the two runs differ in nothing but the pool. The fixture is deliberately WARNING-HEAVY:
 //! a differential over a clean project passes vacuously, which is exactly how a parallel
 //! path that silently reported nothing would look.
+//!
+//! **What this test does NOT catch, stated so nobody reads more into a green run.** It does
+//! not fail if `project-preload!` is deleted. An earlier fixture did — it padded each module
+//! with ~400 `defn`s, and the resulting minute-long check left enough room for the lazy std
+//! loads to interleave differently between the two arms — but that fixture also timed out at
+//! nextest's 120 s cap on CI, and this file's own config says to shrink the work rather than
+//! raise the budget. The padding is comment now (bytes for the threshold, seconds for the
+//! run), and with it the two arms agree whether or not the heap was levelled first. The
+//! property that levelling exists for — a verdict is a function of the file, not of the
+//! order or the process it was checked in — is `check_order_differential`'s, which gates it
+//! directly and cheaply. This test's job is narrower and still worth having: the byte gate
+//! engages the pool at all, and the pool reports what this process reports.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -37,6 +49,15 @@ fn tempdir(tag: &str) -> TempDir {
 /// that cannot type, and a `match` clause no value reaches — padded past
 /// `*check-min-parallel-bytes*` (7 MB) so the byte test engages the pool. Each module is
 /// its own file so the fan-out has something to fan.
+///
+/// **The padding is COMMENT, not code, and that is deliberate.** What this test needs from
+/// the fixture is bytes — it exists to prove that the byte gate engages the pool and that
+/// the pool does not change a verdict — and the property it asserts comes from the three
+/// real warnings and the std reference in every module, not from the padding. Padding with
+/// ~400 `defn`s each instead makes the same 7.6 MB cost two full whole-project checks of
+/// real work: 40 s here and **over nextest's 120 s cap on CI**, where it timed out on its
+/// first run. Source bytes are source bytes to `file/size`, so the gate sees what it is
+/// meant to see and the run costs seconds.
 fn write_project(root: &Path, modules: usize, pad_lines: usize) {
     let src = root.join("src");
     std::fs::create_dir_all(&src).unwrap();
@@ -47,10 +68,10 @@ fn write_project(root: &Path, modules: usize, pad_lines: usize) {
     .unwrap();
     for i in 0..modules {
         let mut body = format!("(defmodule m{i})\n\n");
-        // The padding is ordinary checkable code, so the walk has real work per file.
         for k in 0..pad_lines {
             body.push_str(&format!(
-                "(defn m{i}-f{k} (x)\n  (let (y (+ x {k}))\n    (cond (< y 0) 0 else (+ y 1))))\n"
+                ";; padding line {k} of module {i} — bytes for the threshold, not work for \
+                 the walk; the warnings below are what the differential compares.\n"
             ));
         }
         // A qualified reference into a DIFFERENT std module per file, reached only from
@@ -112,12 +133,14 @@ fn warnings(root: &Path, sequential: bool) -> Vec<String> {
 
 #[test]
 fn the_pool_and_this_process_report_the_same_warnings() {
-    // 250 modules × 400 padded functions ≈ 7.6 MB — just past the byte threshold, which is
-    // the point of the test: this project has far fewer than `*check-min-parallel*` files
-    // and must still take the pool.
+    // 250 modules × 220 padding lines ≈ 7.2 MB — just past the byte threshold, which is the
+    // point of the test: this project has far fewer than `*check-min-parallel*` files and
+    // must still take the pool. The byte total is asserted below, so a change to either
+    // number that drops the fixture under the gate fails loudly instead of quietly
+    // measuring the sequential path twice.
     let tmp = tempdir("checkpar");
     let root = tmp.path.join("par");
-    write_project(&root, 250, 400);
+    write_project(&root, 250, 220);
     let total: u64 = std::fs::read_dir(root.join("src"))
         .unwrap()
         .filter_map(|e| e.ok()?.metadata().ok())
