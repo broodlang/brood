@@ -1,0 +1,235 @@
+;; Runtime contract machinery — the shims themselves (ADR-385)
+;; -----------------------------------------------------------
+;; A `(sig …)` is a declaration; whether it is ENFORCED is decided when the name's binding
+;; comes to exist (ADR-381), by the kernel offering the binding to the prelude's
+;; `%contract-wrap`. That hook decides WHETHER — armed, or `sig!`-forced, and not exempt —
+;; and this module is WHAT: the spec parsing, the argument/result checks and the shim
+;; templates a contracted binding is built from.
+;;
+;; **Here rather than in the prelude, because an unarmed boot must not carry it.** Every
+;; prelude binding is localized and frozen into the shared region at each runtime's boot and
+;; written into the prelude image; 200 lines of machinery that a `brood file` run never
+;; reaches is boot cost paid by every process to hold code for a mode that is off (KI-182's
+;; residual — the prelude half of the startup row's +6%). The hook reaches this module by
+;; `require-one` at its first ARMED call, so an unarmed run never loads it, and an armed one
+;; pays one module load before its first contracted binding.
+;;
+;; Nothing here is reached unarmed, so nothing here needs to be cheap when contracts are off.
+;; What still lives in the prelude is what the kernel or the expander needs whatever the
+;; mode: `%contract-wrap` (the hook), `%contract-exempt?`, `sig!`, and
+;; `%contract-check-op-result` (an ability op's declared return — `defability` names it in
+;; generated code that the prelude's own abilities compile, so it cannot be a qualified
+;; reference into a module that is not loaded yet).
+(defmodule contract)
+
+(defn- %contract-error (name blame message argument expected got)
+  (throw {:kind :contract
+          :message message
+          :blame blame
+          :function name
+          :argument argument
+          :expected expected
+          :got got}))
+
+(defn- %contract-check-args (name ptypes args i)
+  "Throw a `:blame :caller` contract error if any argument fails its declared type.
+Pairwise over the overlap — arity itself is the static checker's job."
+  (when (and (pair? ptypes) (pair? args))
+    (unless (type-matches? (first ptypes) (first args))
+      (%contract-error name
+        :caller (str name
+          ": argument "
+          i
+          " expected "
+          (first ptypes)
+          ", got "
+          (type-of (first args))
+          " ("
+          (pr-str (first args))
+          ")")
+        i
+        (first ptypes)
+        (first args)))
+    (%contract-check-args name (rest ptypes) (rest args) (inc i))))
+
+(defn- %contract-check-rest (name rtype args i)
+  "Throw a `:blame :caller` contract error if any rest argument fails its declared rest
+type; `i` is the position of the first rest argument."
+  (when (pair? args)
+    (unless (type-matches? rtype (first args))
+      (%contract-error name
+        :caller (str name
+          ": rest argument "
+          i
+          " expected "
+          rtype
+          ", got "
+          (type-of (first args))
+          " ("
+          (pr-str (first args))
+          ")")
+        i
+        rtype
+        (first args)))
+    (%contract-check-rest name rtype (rest args) (inc i))))
+
+(defn- %contract-check-ret (name rtype r)
+  "`r`, or a `:blame :callee` contract error when it fails the declared result type."
+  (if (type-matches? rtype r)
+    r
+    (%contract-error name
+      :callee (str name ": result expected " rtype ", got " (type-of r) " (" (pr-str r) ")")
+      nil
+      rtype
+      r)))
+
+;; ---- the policy: `%contract-wrap`, what the kernel binds (ADR-381) ------------------------
+;; The kernel offers a binding to `%contract-wrap` at the three moments a name with a
+;; declared arrow comes to hold a closure — a `def`, a `%register-sig` landing on a bound
+;; name, the sweep after a module's bindings arrive (source or image) and over the
+;; prelude's root names at runtime boot — and binds what it returns. Everything decided
+;; here is policy: WHETHER to enforce (armed, or forced by `sig!`, and not exempt), and
+;; WHAT a checking shim is. The kernel keeps the closure's name, docstring, privacy and
+;; `meta` across the rebind, and recognises a shim by the lexical name `%contract-orig` its
+;; captured frame binds — the convention the templates below and
+;; `builtins/contracts.rs` share — so a second offer never stacks a shim on a shim.
+;;
+;; A shim is a closure a TEMPLATE returns: `(fn (a b) …)` closing over the name, the
+;; original and the parsed spec. Fixed arities up to eight and rest arities up to three
+;; keep the wrapped name's arity (`arity-of`, the reload-arity check); beyond that, and
+;; for an `&optional` declaration, the shim is variadic and `apply`s only the arguments
+
+;; `[fixed optional rest ret]` for an arrow type-form: the fixed parameter types, the
+;; `&optional` types, the `&` rest type (or nil), the result type.
+(defn- %contract-spec (type)
+  (let (i (%sig-pos type '-> 0)
+        ptypes (take type i)
+        ret (first (drop type (inc i)))
+        opt (%sig-pos ptypes '&optional 0)
+        amp (%sig-pos ptypes '& 0))
+    (cond
+      (%le 0 opt) [(take ptypes opt) (drop ptypes (inc opt)) nil ret]
+      (%le 0 amp) [(take ptypes amp) nil (first (drop ptypes (inc amp))) ret]
+      else [ptypes nil nil ret])))
+
+(defn- %contract-args! (%contract-name spec args)
+  (%contract-check-args %contract-name (first spec) args 1)
+  (let (n (count (first spec)))
+    (when (second spec)
+      (%contract-check-args %contract-name (second spec) (drop args n) (inc n)))
+    (when (third spec)
+      (%contract-check-rest %contract-name (third spec) (drop args n) (inc n)))))
+
+;; The templates. Each parameter is named for the kernel's shim test (`%contract-orig`) and
+;; for the trace a contract error prints; the bodies are deliberately alike.
+(defn- %contract-shim-0 (%contract-name %contract-orig %contract-spec %contract-ret)
+  (fn ()
+    (%contract-check-ret %contract-name %contract-ret (%contract-orig))))
+(defn- %contract-shim-1 (%contract-name %contract-orig %contract-spec %contract-ret)
+  (fn (a)
+    (%contract-args! %contract-name %contract-spec (list a))
+    (%contract-check-ret %contract-name %contract-ret (%contract-orig a))))
+(defn- %contract-shim-2 (%contract-name %contract-orig %contract-spec %contract-ret)
+  (fn (a b)
+    (%contract-args! %contract-name %contract-spec (list a b))
+    (%contract-check-ret %contract-name %contract-ret (%contract-orig a b))))
+(defn- %contract-shim-3 (%contract-name %contract-orig %contract-spec %contract-ret)
+  (fn (a b c)
+    (%contract-args! %contract-name %contract-spec (list a b c))
+    (%contract-check-ret %contract-name %contract-ret (%contract-orig a b c))))
+(defn- %contract-shim-4 (%contract-name %contract-orig %contract-spec %contract-ret)
+  (fn (a b c d)
+    (%contract-args! %contract-name %contract-spec (list a b c d))
+    (%contract-check-ret %contract-name %contract-ret (%contract-orig a b c d))))
+(defn- %contract-shim-5 (%contract-name %contract-orig %contract-spec %contract-ret)
+  (fn (a b c d e)
+    (%contract-args! %contract-name %contract-spec (list a b c d e))
+    (%contract-check-ret %contract-name
+      %contract-ret
+      (%contract-orig a b c d e))))
+(defn- %contract-shim-6 (%contract-name %contract-orig %contract-spec %contract-ret)
+  (fn (a b c d e f)
+    (%contract-args! %contract-name %contract-spec (list a b c d e f))
+    (%contract-check-ret %contract-name
+      %contract-ret
+      (%contract-orig a b c d e f))))
+(defn- %contract-shim-7 (%contract-name %contract-orig %contract-spec %contract-ret)
+  (fn (a b c d e f g)
+    (%contract-args! %contract-name %contract-spec (list a b c d e f g))
+    (%contract-check-ret %contract-name
+      %contract-ret
+      (%contract-orig a b c d e f g))))
+(defn- %contract-shim-8 (%contract-name %contract-orig %contract-spec %contract-ret)
+  (fn (a b c d e f g h)
+    (%contract-args! %contract-name %contract-spec (list a b c d e f g h))
+    (%contract-check-ret %contract-name
+      %contract-ret
+      (%contract-orig a b c d e f g h))))
+(defn- %contract-shim-rest-0 (%contract-name %contract-orig %contract-spec %contract-ret)
+  (fn (& more)
+    (%contract-args! %contract-name %contract-spec more)
+    (%contract-check-ret %contract-name
+      %contract-ret
+      (apply %contract-orig more))))
+(defn- %contract-shim-rest-1 (%contract-name %contract-orig %contract-spec %contract-ret)
+  (fn (a & more)
+    (%contract-args! %contract-name %contract-spec (cons a more))
+    (%contract-check-ret %contract-name
+      %contract-ret
+      (apply %contract-orig a more))))
+(defn- %contract-shim-rest-2 (%contract-name %contract-orig %contract-spec %contract-ret)
+  (fn (a b & more)
+    (%contract-args! %contract-name %contract-spec (cons a (cons b more)))
+    (%contract-check-ret %contract-name
+      %contract-ret
+      (apply %contract-orig a b more))))
+(defn- %contract-shim-rest-3 (%contract-name %contract-orig %contract-spec %contract-ret)
+  (fn (a b c & more)
+    (%contract-args! %contract-name %contract-spec (cons a (cons b (cons c more))))
+    (%contract-check-ret %contract-name
+      %contract-ret
+      (apply %contract-orig a b c more))))
+
+;; `get`, not `nth`, to read the spec: `nth` is a contracted prelude name, and a template
+;; that reached it through its own shim would recurse without end.
+;; The shim's SHAPE follows the function's own parameter list, not the declaration's: a
+;; `(sig f (-> int))` over a `(defn f (&optional x) …)` is legal (the checker holds
+;; callers to the definition's arity and the declaration's types), and a zero-arity shim
+;; over it turned every `(f x)` into an arity error — 37 of bedit's tests, the first time
+;; the mode ran by default. So a function with an `&optional` or `&` parameter, or more
+;; fixed parameters than the declaration types, gets a variadic shim that checks the
+;; declared prefix and passes the rest through; only an exact fixed match keeps the
+;; fixed-arity template (and with it `arity-of`).
+(defn- %contract-shim (name orig spec)
+  (let (declared (count (first spec))
+        params (arglist orig)
+        fixed (count (take-while params (fn (s) (not (or (= s '&) (= s '&optional))))))
+        variadic (or (second spec)
+                   (third spec)
+                   (includes? params '&)
+                   (includes? params '&optional)
+                   (not (= fixed declared)))
+        n (if (and variadic (< fixed declared)) fixed declared)
+        ret (get spec 3))
+    (cond
+      (and (not variadic) (%eq n 0)) (%contract-shim-0 name orig spec ret)
+      (and (not variadic) (%eq n 1)) (%contract-shim-1 name orig spec ret)
+      (and (not variadic) (%eq n 2)) (%contract-shim-2 name orig spec ret)
+      (and (not variadic) (%eq n 3)) (%contract-shim-3 name orig spec ret)
+      (and (not variadic) (%eq n 4)) (%contract-shim-4 name orig spec ret)
+      (and (not variadic) (%eq n 5)) (%contract-shim-5 name orig spec ret)
+      (and (not variadic) (%eq n 6)) (%contract-shim-6 name orig spec ret)
+      (and (not variadic) (%eq n 7)) (%contract-shim-7 name orig spec ret)
+      (and (not variadic) (%eq n 8)) (%contract-shim-8 name orig spec ret)
+      (%eq n 1) (%contract-shim-rest-1 name orig spec ret)
+      (%eq n 2) (%contract-shim-rest-2 name orig spec ret)
+      (%eq n 3) (%contract-shim-rest-3 name orig spec ret)
+      else (%contract-shim-rest-0 name orig spec ret))))
+
+(defn shim (name orig type)
+  "The checking shim to bind for the global `name` declared `type` (an arrow), wrapping
+`orig`. The prelude's `%contract-wrap` — the kernel's policy hook — calls this once per
+contracted binding, having already decided the binding is to be enforced.
+
+    ((contract/shim 'f (fn (x) x) '(int -> int)) 3)   → 3"
+  (%contract-shim name orig (%contract-spec type)))

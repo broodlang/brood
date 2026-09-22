@@ -313,3 +313,40 @@ fn an_unarmed_startup_run_lowers_no_arm() {
         lowered.join("\n")
     );
 }
+
+/// ADR-385: the shim machinery is a MODULE, loaded at the hook's first armed call — so an
+/// unarmed run must not load it at all, and an armed one must. `BROOD_IMAGE_TRACE=1` names
+/// every module materialised, which is the probe; the assertion runs both ways in one test
+/// so "not loaded" can never pass because the trace stopped naming anything.
+#[test]
+fn the_contract_machinery_loads_only_when_armed() {
+    let dir = temp_dir("ki182-lazy");
+    std::fs::write(dir.path.join("p.blsp"), "(io/puts 0)\n").expect("write program");
+    let loads = |armed: bool| -> usize {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_brood"));
+        cmd.arg("p.blsp")
+            .current_dir(&dir.path)
+            .env("BROOD_IMAGE_TRACE", "1");
+        if armed {
+            cmd.env("BROOD_CONTRACTS", "1");
+        } else {
+            cmd.env_remove("BROOD_CONTRACTS");
+        }
+        support::dies_with_parent(&mut cmd);
+        let out = cmd.output().expect("run brood");
+        assert!(out.status.success(), "the program should run");
+        String::from_utf8_lossy(&out.stderr)
+            .lines()
+            .filter(|l| l.trim_end() == "[image] contract")
+            .count()
+    };
+    assert_eq!(
+        loads(false),
+        0,
+        "an unarmed run must not materialise the contract module"
+    );
+    assert!(
+        loads(true) > 0,
+        "an armed run must materialise it — otherwise the unarmed half proves nothing"
+    );
+}

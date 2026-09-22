@@ -7,7 +7,7 @@ Chronological record of work sessions. Newest at the bottom.
 Interleaved pinned task-clock on `(io/puts 0)`, the 136b14d7 column's binary against the
 installed 653d41d9, both images live: 13.06 vs 13.05 ms over three rounds (76.3M vs 78.4M
 instructions). The +6% CPU residual after the first KI-182 fix is gone with the replay + `nth`
-change and ADR-383's op-function check, so the prelude-slimming lever stays untaken. The
+change and ADR-383's op-function check, measured before ADR-385, which took the prelude-slimming lever the same day on its own merits. The
 Brood column is refreshed at 653d41d9: `startup` 13.6 → 13.1 ms, `errors` −3.9%,
 `strings`/`pipeline` −3.7%, `pingpong` −3.5%, `json` −3.3%, nothing past its spread the other
 way; like-for-like 7.20 → 7.12. One trap on the way: the 136b14d7 rig binary had lost its
@@ -15531,3 +15531,16 @@ in tail position unarmed; `impl` registers methods as written, and an impl regis
 sabotaged: `builtins::contracts::tests` (a hook bound to throw when consulted) and
 `cli::contracts_mode::an_unarmed_startup_run_lowers_no_arm` (the probe on the real cache,
 the image confirmed live in its own run — asking `stdimage/status` tiers arms by itself).
+
+## 2026-09-22 (3) — KI-182's first lever: the shim machinery leaves the prelude (ADR-385)
+
+The residual's largest single symbol was `localize_for_freeze`, and the reason was 290 lines
+of contract machinery that an unarmed run never reaches being frozen into the shared region
+at every boot. `std/contract.blsp` is a CORE module now; the prelude keeps the hook, the
+exemption and `sig!` (69 lines), and reaches the rest with `require-one` at the hook's first
+ARMED call — once per contracted binding, never on a call path. The one subtlety is that the
+hook names `reflect/eval` (a native under a module prefix, so not a module reference) instead
+of writing the head `contract/shim`, which on a cold boot would have to resolve while the
+prelude is still being built — the KI-81 shape. Callgrind, debug, image live: empty file
+80.84M → 78.99M, `(io/puts 0)` 101.06M → 99.29M, against a 78.68M upper bound from deleting
+the machinery outright. Guard reads `BROOD_IMAGE_TRACE` both ways in one test.

@@ -20,10 +20,16 @@ function's `not` crossed the tier threshold during `io`'s load. No arm lowers at
 `BROOD_NO_JIT=1` no longer moves the instruction count. After the first fix alone the row was
 NOT back (interleaved task-clock 12.85 → 13.68 ms); after the same day's replay + `nth` change
 and the ADR-383 op-function check it is: **13.06 vs 13.05 ms** against 136b14d7, three rounds,
-76.3M vs 78.4M instructions. The prelude-slimming lever stays written up in the KI, untaken.
-**brood-benchmarks is refreshed at 653d41d9:** `startup` 13.1 ms, every other row inside its
-spread, like-for-like 7.12. Guard:
-`crates/cli/tests/contract_offer_unarmed.rs` (both halves sabotage-verified).
+76.3M vs 78.4M instructions — measured BEFORE ADR-385 landed, so the residual had already
+closed on the mechanism fixes alone. **ADR-385 takes lever 1 on top (2026-09-22)**: the shim
+machinery is `std/contract.blsp`, a CORE module the hook loads at its first ARMED call, so an
+unarmed boot stops localizing and freezing it — empty file 80.84M → 78.99M instructions,
+`(io/puts 0)` 101.06M → 99.29M (callgrind, debug, image live). Lever 2 — decode def sites on
+the first `def-site` question rather than at boot — is untouched, and so is the `io`-load
+half (+3.2M, "more of everything"). **brood-benchmarks is refreshed at 653d41d9** (before
+ADR-385): `startup` 13.1 ms, every other row inside its spread, like-for-like 7.12. Guards:
+`crates/cli/tests/contract_offer_unarmed.rs` (both halves sabotage-verified) and
+`cli::contracts_mode::the_contract_machinery_loads_only_when_armed`.
 
 **What this leaves.** (a) The residual above, +5.9M instructions on the startup row against 136b14d7:
 +2.8M on an empty file (ADR-382's def sites in the prelude image, 802 → 1328 entries, plus a
