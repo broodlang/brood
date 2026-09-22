@@ -1,0 +1,171 @@
+;; std/editor/transient — transient menus: a keymap, a value, and a rendering. Pure, so
+;; every one of these is a plain fold with no display, no buffer and no editor in sight.
+;; Register-only — run by `nest test` (and cargo test, via crates/lisp/tests/suite.rs).
+
+(defmodule transient-test (:use test) (:use editor/transient))
+
+;; A spec shaped like the one it was designed against: Magit's push menu. Two switches
+;; with two-key chords, an option, two commands, and a sub-menu.
+
+(def tt-remote-spec
+  {:name 'push-remote
+   :title "another remote"
+   :groups [{:title "Remote"
+             :suffixes [{:key "o" :kind :command :command 'tt/push-origin :label "origin"}
+                         {:key "u" :kind :command :command 'tt/push-upstream :label "upstream"}]}]})
+
+(def tt-spec
+  {:name 'push
+   :title "Push"
+   :groups [{:title "Arguments"
+             :suffixes [{:key "-f"
+                         :kind :switch
+                         :arg "--force-with-lease"
+                         :label "Force with lease"}
+                         {:key "-n" :kind :switch :arg "--dry-run" :label "Dry run"}
+                         {:key "=u"
+                          :kind :option
+                          :arg "--set-upstream="
+                          :label "Set upstream"
+                          :prompt "Upstream"}]}
+             {:title "Push to"
+              :suffixes [{:key "p" :kind :command :command 'tt/push-current :label "current"}
+                          {:key "e" :kind :menu :menu tt-remote-spec :label "elsewhere…"}]}]})
+
+(defn tt-open () (transient-open tt-spec))
+
+;; Thread a whole key sequence in, answering the final [state outcome].
+(defn tt-press* (st keys last-outcome)
+  (if (empty? keys)
+    [st last-outcome]
+    (let (r (transient-press st (first keys)))
+      (tt-press* (first r) (rest keys) (second r)))))
+(defn tt-press (st keys) (tt-press* st keys [:stay]))
+
+(describe "a suffix's key is a chord, not a key named \"-f\""
+  (test "a string key splits per grapheme"
+    (assert= (suffix-keys {:key "-f"}) ["-" "f"]))
+  (test "a one-character key is a one-key sequence"
+    (assert= (suffix-keys {:key "p"}) ["p"]))
+  (test "a vector key is taken as it stands, so a suffix can bind a non-character key"
+    (assert= (suffix-keys {:key [:ctrl-c "p"]}) [:ctrl-c "p"]))
+  (test "the first key of a chord only arms it — nothing is toggled yet"
+    (let ([st out] (tt-press (tt-open) ["-"]))
+      (assert= out [:stay])
+      (assert= (transient-args st) [])))
+  (test "the second key completes it"
+    (let ([st _] (tt-press (tt-open) ["-" "f"]))
+      (assert= (transient-args st) ["--force-with-lease"])))
+  (test "a dead end mid-chord drops the key rather than letting it out as unbound"
+    ;; the whole point: a mistyped `-x` must not escape the menu as an `x`
+    (let ([st out] (tt-press (tt-open) ["-" "x"]))
+      (assert= out [:stay])
+      (assert= (transient-args st) [])))
+  (test "…and the chord has reset, so the next key resolves at the top"
+    (let ([st _] (tt-press (tt-open) ["-" "x" "-" "n"]))
+      (assert= (transient-args st) ["--dry-run"]))))
+
+(describe "switches toggle and the value is the spec's order"
+  (test "a switch toggles on"
+    (let ([st _] (tt-press (tt-open) ["-" "n"]))
+      (assert= (transient-args st) ["--dry-run"])))
+  (test "and off again"
+    (let ([st _] (tt-press (tt-open) ["-" "n" "-" "n"]))
+      (assert= (transient-args st) [])))
+  (test "two switches emit in SPEC order, not the order they were pressed"
+    ;; --dry-run pressed first, --force-with-lease second; the spec lists force first
+    (let ([st _] (tt-press (tt-open) ["-" "n" "-" "f"]))
+      (assert= (transient-args st) ["--force-with-lease" "--dry-run"])))
+  (test "a menu opens with the value it was given, so it reopens where it was left"
+    (let (st (transient-open tt-spec {"--dry-run" true}))
+      (assert= (transient-args st) ["--dry-run"]))))
+
+(describe "an option is read by the HOST, never here"
+  (test "pressing it asks for a value and changes nothing"
+    (let ([st out] (tt-press (tt-open) ["=" "u"]))
+      (assert= out [:read "--set-upstream=" "Upstream" nil])
+      (assert= (transient-args st) [])))
+  (test "the value the host read is appended to the arg, Magit's trailing-= convention"
+    (let ([st _] (tt-press (tt-open) ["=" "u"])
+          set (transient-set st "--set-upstream=" "origin"))
+      (assert= (transient-args set) ["--set-upstream=origin"])))
+  (test "the prompt carries the current value, so the host can offer it"
+    (let (st (transient-set (tt-open) "--set-upstream=" "origin")
+          [_ out] (tt-press st ["=" "u"]))
+      (assert= out [:read "--set-upstream=" "Upstream" "origin"])))
+  (test "an empty value CLEARS it — cancelling and clearing are one gesture"
+    (let (st (transient-set (tt-open) "--set-upstream=" "origin"))
+      (assert= (transient-args (transient-set st "--set-upstream=" "")) [])
+      (assert= (transient-args (transient-set st "--set-upstream=" nil)) [])))
+  (test "a cleared option never sits in the value as a bare `--set-upstream=`"
+    (let (st (transient-set (transient-set (tt-open) "--set-upstream=" "x") "--set-upstream=" nil))
+      (assert= (includes? (str (transient-args st)) "--set-upstream") false))))
+
+(describe "a command carries the arguments built so far"
+  (test "the outcome names the command and the value"
+    (let ([_ out] (tt-press (tt-open) ["-" "f" "p"]))
+      (assert= out [:run 'tt/push-current ["--force-with-lease"]])))
+  (test "with nothing toggled it still runs, with an empty vector"
+    (let ([_ out] (tt-press (tt-open) ["p"]))
+      (assert= out [:run 'tt/push-current []])))
+  (test "an option's value reaches the command"
+    (let (st (transient-set (tt-open) "--set-upstream=" "origin")
+          [_ out] (tt-press st ["p"]))
+      (assert= out [:run 'tt/push-current ["--set-upstream=origin"]]))))
+
+(describe "sub-menus"
+  (test "a :menu suffix enters it and the keys become the sub-menu's"
+    (let ([st out] (tt-press (tt-open) ["e"]))
+      (assert= out [:stay])
+      (assert= (:title (:spec st)) "another remote")))
+  (test "a key bound only in the sub-menu now resolves"
+    (let ([_ out] (tt-press (tt-open) ["e" "o"]))
+      (assert= out [:run 'tt/push-origin []])))
+  (test "the title carries the trail, so a reader is never lost"
+    (let ([st _] (tt-press (tt-open) ["e"]))
+      (assert= (transient-title st) "Push → another remote")))
+  (test "popping answers the menu it was entered from"
+    (let ([st _] (tt-press (tt-open) ["e"])
+          back (transient-pop st))
+      (assert= (transient-title back) "Push")))
+  (test "popping at the top answers nil — the host's cue to dismiss"
+    (assert= (transient-pop (tt-open)) nil))
+  (test "a half-typed chord is not carried back out by a pop"
+    (let ([st _] (tt-press (tt-open) ["-" "e"]))
+      ;; `-e` is a dead end, so this is really about the pushed state being clean
+      (assert= (:pending st) nil))))
+
+(describe "an unbound key is the host's to decide"
+  (test "a key bound to nothing reports itself"
+    (let ([_ out] (tt-press (tt-open) ["z"]))
+      (assert= out [:unbound "z"])))
+  (test "and changes nothing"
+    (let ([st _] (tt-press (tt-open) ["z"]))
+      (assert= (transient-args st) []))))
+
+(describe "the rendering is data"
+  (test "a heading per group, a row per suffix, in spec order"
+    (let (rows (transient-rows (tt-open)))
+      (assert= (map rows :kind)
+        '(:heading :suffix :suffix :suffix :heading :suffix :suffix))))
+  (test "a heading carries its group's title"
+    (assert= (:label (first (transient-rows (tt-open)))) "Arguments"))
+  (test "a suffix row carries its keys, label and argument"
+    (let (row (nth (transient-rows (tt-open)) 1))
+      (assert= (:keys row) ["-" "f"])
+      (assert= (:label row) "Force with lease")
+      (assert= (:arg row) "--force-with-lease")
+      (assert= (:on? row) false)))
+  (test "a toggled switch reads as on"
+    (let ([st _] (tt-press (tt-open) ["-" "f"])
+          row (nth (transient-rows st) 1))
+      (assert= (:on? row) true)))
+  (test "an option row carries its value; a switch row does not"
+    (let (st (transient-set (tt-open) "--set-upstream=" "origin")
+          option (nth (transient-rows st) 3))
+      (assert= (:value option) "origin")
+      (assert= (:suffix-kind option) :option)))
+  (test "a command row has no argument to be on or off"
+    (let (row (nth (transient-rows (tt-open)) 5))
+      (assert= (:suffix-kind row) :command)
+      (assert= (:on? row) false))))

@@ -24974,3 +24974,56 @@ this test whatever the pool does, which is the vacuity this file exists to avoid
 The repo's own checker gate (std/ + tests/ + examples/, ~12 MB) now runs on the pool.
 Item 4 (memory) and item 5 (the single-threaded cold load, which is the other 9 s of the
 rig's 8.8 s+load) are untouched.
+
+## ADR-387 — `std/editor/transient`: a menu that builds a VALUE, and `keymap-resolve` under it
+
+**Status:** implemented (2026-09-22). New module `std/editor/transient`; `std/editor/keymap`
+gains `keymap-resolve`, and `keymap-step` is re-expressed on it.
+
+**Context.** bedit's git porcelain has the commands Magit has and none of the reach, and the
+gap is not forty missing commands — it is that `git push --force-with-lease` is untypeable.
+A keymap binds a key to a command; there is nowhere to put a *flag*. Emacs solved this with
+`transient.el`: `P` opens a menu listing `-f --force-with-lease`, `-n --dry-run`, `-u
+--set-upstream` and the things you might push to; you toggle what you want, see it, and then
+choose the action. That is the layer which makes the other forty commands findable, and it
+is what a which-key panel structurally cannot be — which-key *describes a keymap*, and the
+thing a transient builds is a VALUE.
+
+A transient is three things a keymap already almost is: a keymap (the keys it binds, chords
+included — `-f` is `-` then `f`), a value (the arguments toggled so far), and a rendering
+(rows naming each key, what it does, whether it is on). None of those three is about git,
+or about bedit; an editor built on this toolkit wants all of them. So it belongs beside
+`keymap.blsp`, `layers.blsp` and `formbuf.blsp` rather than in an application.
+
+**Decision.** `std/editor/transient` holds the mechanism and nothing else — no display, no
+buffer, no model. A spec is plain data (groups of suffixes, each `:switch` / `:option` /
+`:command` / `:menu`); `transient-press` folds one key into `[state' outcome]`, where the
+outcome is `[:stay]`, `[:run command args]`, `[:read arg prompt current]` or `[:unbound
+key]`; `transient-args` is the argument vector in the spec's own order; `transient-rows` is
+the rendering as data.
+
+The `:read` outcome is the load-bearing part of that split. An option's value needs a
+prompt, and a prompt is the host's — a minibuffer, a completion UI, a dialog. Returning a
+request instead of performing one is what keeps this module free of an editor, and it is why
+the module is testable as thirty-three plain folds with no display in sight.
+
+Two conventions are taken from Magit rather than invented: an option's `:arg` ends in `=`,
+so emitting it is `(str arg value)` and nothing needs to know how a flag joins its value;
+and clearing an option and cancelling its prompt are the same gesture, so a menu can never
+carry a bare `--depth=`.
+
+**`keymap-resolve`.** A transient's bindings are switches and options, not `(state key)`
+commands, so `keymap-step` cannot serve them: its only way to tell a caller what it found is
+to *call* it. Rather than re-implement chord resolution — a second implementation of chords
+is a second set of chord bugs — `keymap.blsp` gains `keymap-resolve`, the walk on its own:
+`(keymap-resolve keymap pending key)` → `[binding pending']`, no eval. `keymap-step` is now
+that plus `reflect/eval`, unchanged in behaviour. It has two other callers waiting: a
+`describe-key` reports what a key sequence WOULD run without running it, and a which-key
+panel names the command under a pending prefix — both of which applications currently
+hand-roll.
+
+**Consequences.** `std/editor/transient.blsp`, `tests/transient_test.blsp` (33),
+`keymap-resolve` + its re-expressed `keymap-step` (`tests/keymap_test.blsp` unchanged and
+green), the module registered in `crates/lisp/src/builtins/modules.rs`. A host still owns
+persistence: reopening a menu where the reader left it is `transient-open` with the value it
+last produced, which every editor already has somewhere to put.
