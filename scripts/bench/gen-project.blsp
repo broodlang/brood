@@ -1,0 +1,82 @@
+;; Generate a large synthetic project for the scaling / startup-image measurements.
+;;
+;;     brood scripts/bench/gen-project.blsp 1000 /tmp/brood-big 340
+;;
+;; `N` modules of `FNS` functions each (~9 lines per function), plus an entry point that
+;; reaches exactly TWO of them — the case the lazy image exists for: an entry should pay
+;; for what it reaches, not for the codebase. `--fns 20` is the ~180-line calibration
+;; shape (a project 10× `~/src/flt/moneyclub`: 16 300 files averaging ~180 lines, real
+;; files average ~180 lines and synthetic 1000-line modules flatter the runtime, so the
+;; per-file constant is what dominates); 340 gives the ~3 000-line module the
+;; large-project questions ask about. Pair with `image-scale.sh`.
+;;
+;; In BROOD, not Python (the rewrite of `gen-project.py`, 2026-09-22): a generator that
+;; emits Brood cannot be static-checked while it is written in another language, and this
+;; one silently emitted a pre-ADR-302 `(map f coll)` for three days while `check-corpora`
+;; reported the corpus clean — CLAUDE.md's "two files no gate can see". As a `.blsp` the
+;; emitted shapes are the checker's business like any other source.
+(defmodule gen-project)
+
+(defn- arg (i default)
+  (let (v (nth (%script-args) i nil)) (if (nil? v) default v)))
+
+;; `string/->number` answers `number | failure`, so the `int?` guard is what makes the
+;; count an int for `range`/`<` — the checker holds this file to that like any other.
+(defn- arg-int (i default)
+  (let (v (string/->number (arg i (->string default)))) (if (int? v) v default)))
+
+(defn- fn-lines (i k)
+  (let (m (str "m" i "-f" k))
+    (list (str "(defn " m " (x)")
+      (str "  \"Compute variant " k " of module " i ".\"")
+      (str "  (let (y (+ x " (+ k 1) ")")
+      (str "        z (* y " (+ (math/rem i 7) 2) "))")
+      "    (cond"
+      "      (< z 0) 0"
+      (str "      (= z " k ") (- z 1)")
+      "      else (+ z 1))))"
+      "")))
+
+;; `(fold coll acc f)` since ADR-302/307 — the Python generator emitted the pre-wave
+;; argument order for a year and nothing ran it, which is the reason this file is Brood.
+(defn- module-source (i fns)
+  (let (names (map (range fns) (fn (k) (str "m" i "-f" k))))
+    (string/join (%append-two (list (str "(defmodule mod"
+                                      i " \"Generated module " i " — measurement fixture.\")")
+                                ""
+                                (str "(defrecord rec" i " (a b))")
+                                "")
+                   (%append-two (mapcat (range fns) (fn (k) (fn-lines i k)))
+                     (list (str "(defn mod" i "-total (x)")
+                       (str "  (fold (list " (string/join names " ") ")")
+                       "    0 (fn (acc f) (+ acc (f x)))))"
+                       "")))
+      "\n")))
+
+(defn- write-modules (src n fns i)
+  (when (< i n)
+    (file/spit (path/join src (str "mod" i ".blsp")) (module-source i fns))
+    (write-modules src n fns (inc i))))
+
+(defn main ()
+  (let (n (arg-int 0 16300)
+        root (arg 1 "/tmp/brood-big")
+        fns (arg-int 2 20)
+        src (path/join root "src"))
+    (file/mkdir src)
+    (file/spit (path/join root "project.blsp") "(project\n  :name big\n  :main app)\n")
+    (file/spit (path/join src "app.blsp")
+      (str "(defmodule app (:use mod0) (:use helper))\n\n"
+        "(defn main ()\n" "  (io/puts (str \"ANSWER: \" (+ (mod0-total 3) (helper-scale 4)))))\n"))
+    (file/spit (path/join src "helper.blsp")
+      (str "(defmodule helper \"A small module the entry point reaches.\")\n\n"
+        "(defn helper-scale (x) (* x 10))\n"))
+    (write-modules src n fns 0)
+    (io/puts (str root
+               ": "
+               (count (file/ls src))
+               " source files, "
+               (count (string/split (or (file/slurp (path/join src "mod0.blsp")) "") "\n"))
+               " lines each (module 0)"))))
+
+(main)

@@ -17,7 +17,7 @@ noise at 3 000, and everything that is O(source bytes) becomes the whole cost.
 ## The rig
 
 ```
-python3 scripts/bench/gen-project.py 1000 /tmp/brood-big3k --fns 340   # 1 002 files, 3 067 lines each, 59 MB
+brood scripts/bench/gen-project.blsp -- 1000 /tmp/brood-big3k 340   # 1 002 files, 3 067 lines each, 59 MB
 cd /tmp/brood-big3k
 ( ulimit -v 32000000; /usr/bin/time -f "wall %es peak %M KB" nest run )            # cold, then warm
 ( ulimit -v 32000000; /usr/bin/time -f "wall %es user %Us peak %M KB" nest check )
@@ -162,6 +162,22 @@ positions and derived facts stay live for the run. Both are design, not bugs:
 3. **Memory:** drop a file's forms after its walk, keep only its derived facts; and/or
    check in shards (the fixpoint over signatures only, then walks per shard).
 
+
+**Item 3 is done (ADR-386, 2026-09-22) — and it made item 4 more urgent, not less.** The
+walk was already parallel; the gate counted FILES. On a 302 × 3 067 rig (18 MB, debug,
+verdict cache off on both arms):
+
+| | wall | user | user/wall | peak RSS |
+|---|---|---|---|---|
+| sequential | 55.9 s | 66.0 s | 1.18 | 1.19 GB |
+| parallel | **8.8 s** | 98.3 s | **11.1** | **2.20 GB** |
+
+**Where the memory is NOT: the worker heaps.** Group size is `cores`, so at most `cores`
+worker heaps live at once, and the obvious lever is to shrink that group. Measured at
+`cores/4`: wall 25.8 s (3× worse) and peak RSS **2.26 GB — unchanged**. So the peak is the
+DRIVER's: every file's forms, positions and derived facts, live for the run because the
+fixpoint wants them all at once. Item 4 is the surgery the option describes (drop a file's
+forms after its walk; shard the fixpoint over signatures only) and nothing cheaper.
 ## Finding 3 — cold load is one thread
 
 39 s for 3M lines, single-threaded (`Building bigproj … Built in …`). Files in different
