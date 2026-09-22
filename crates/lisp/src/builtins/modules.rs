@@ -595,6 +595,11 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // todo. Region algebra + `splice` (re-render, keep what the user typed) + the two
     // `:post-key` guard policies (`:veto` / `:clamp`). Pure over text; opt-in.
     embedded_module!("editor/formbuf", "std/editor/formbuf.blsp"),
+    // Transient menus: a prefix that opens a menu of switches, options and commands and
+    // builds an argument vector you can see (Magit's `transient.el`). A keymap, a value
+    // and a rendering — the keys go through `editor/keymap`, the rendering comes out as
+    // plain rows, and the host services `:run` / `:read`. Pure; opt-in.
+    embedded_module!("editor/transient", "std/editor/transient.blsp"),
     // Bare ANSI escape *strings* for simple terminal scripts (`print` them
     // directly) — the lightweight counterpart to the `display` render-op
     // protocol. Opt-in, never in the prelude.

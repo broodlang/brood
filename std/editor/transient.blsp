@@ -1,0 +1,242 @@
+;; std/editor/transient.blsp — TRANSIENT MENUS: a prefix that opens a menu of switches,
+;; options and commands, showing the arguments it is building as you build them.
+;;
+;; Magit's `transient.el` is the reason anyone can drive git from Emacs without learning
+;; git's command line: `P` opens a push menu listing `-f --force-with-lease`, `-n
+;; --dry-run`, `-u --set-upstream` and the four things you might push to. You toggle what
+;; you want, see it, and then choose the action — instead of recalling a flag's spelling
+;; and typing it into a prompt. The keymap-plus-which-key model cannot express it, because
+;; the thing being built is a VALUE, not a key sequence.
+;;
+;; A transient is three things that keymaps already almost are:
+;;
+;;   a KEYMAP      the keys the menu binds, chords included (`-f` is `-` then `f`)
+;;   a VALUE       the arguments toggled so far
+;;   a RENDERING   rows naming each key, what it does, and whether it is on
+;;
+;; This module is those three and nothing else: no display, no buffer, no model, no
+;; editor. `transient-press` folds one key into `[state' outcome]` and the caller services
+;; the outcome — which is what keeps the reading of an option's value (a minibuffer, a
+;; completion prompt, whatever the host has) out of here.
+;;
+;; The keys go through `editor/keymap`: a suffix's key is bound with `keymap-bind` and
+;; resolved with `keymap-resolve`, so a transient's chords are the editor's chords, with
+;; one implementation and one set of bugs. `keymap-resolve` was added for this — a
+;; transient's bindings are switches and options rather than `(state key)` commands, so
+;; `keymap-step`, whose only way to report a binding is to call it, cannot serve them.
+;;
+;; WHAT A SPEC LOOKS LIKE (plain data — a caller declares it, this module never builds one):
+;;
+;;   {:name 'git-push
+;;    :title "Push"
+;;    :groups [{:title "Arguments"
+;;              :suffixes [{:key "-f" :kind :switch :arg "--force-with-lease"
+;;                          :label "Force with lease"}
+;;                         {:key "-n" :kind :switch :arg "--dry-run" :label "Dry run"}
+;;                         {:key "=u" :kind :option :arg "--set-upstream="
+;;                          :label "Set upstream" :prompt "Upstream"}]}
+;;             {:title "Push to"
+;;              :suffixes [{:key "p" :kind :command :command 'git/cmd-push-current
+;;                          :label "current"}
+;;                         {:key "o" :kind :menu :menu other-remote-spec
+;;                          :label "another remote…"}]}]}
+;;
+;; An option's `:arg` ends in `=` (Magit's convention), so emitting it is `(str arg value)`
+;; and `--depth=` with value `5` is `--depth=5`. A switch emits its `:arg` as it stands.
+;; Order is the SPEC's order, in groups then suffixes, so the argument vector a menu
+;; produces is deterministic and reviewable rather than hash-ordered.
+
+(defmodule editor/transient
+  "Transient menus — a prefix command that opens a menu of switches, options and commands
+and builds an argument vector you can see. `transient-open` starts one, `transient-press`
+folds a key into `[state' outcome]` (`[:stay]` / `[:quit]` / `[:run command args]` /
+`[:read arg prompt current]` / `[:unbound key]`), `transient-set` stores a value the host
+read, `transient-args` is the argument vector, and `transient-rows` is the rendering as
+plain data. Keys (chords included) go through `editor/keymap`; nothing here knows about a
+display, a buffer or a model."
+  (:use editor/keymap))
+
+;; ---- the shapes ---------------------------------------------------------------------
+;; All `&open`: a host tags a suffix with whatever else it needs (bedit hangs a `:face` and
+;; a `:doc` on them) and still has a `suffix`.
+
+(deftype suffix
+  (record &open :key any :kind (or :switch :option :command :menu) :label string))
+(deftype group (record &open :title string :suffixes seqable))
+(deftype spec (record &open :name any :title string :groups seqable))
+(deftype state (record &open :spec spec :args map :keymap map :pending any :stack list))
+
+;; What `transient-press` answers. The host services it; this module never performs one.
+(deftype outcome
+  (or (tuple :stay)
+    (tuple :quit)
+    (tuple :run any vector)
+    (tuple :read string string any)
+    (tuple :unbound any)))
+
+;; ---- keys ------------------------------------------------------------------------------
+
+(defn suffix-keys (s)
+  "A suffix's key sequence as a VECTOR of keys. A string is split per grapheme, so the
+terse `\"-f\"` in a spec means `-` then `f` — Magit's spelling, and a real two-key chord
+rather than a key named `\"-f\"`. A vector is taken as it stands, which is how a suffix
+binds a key that is not a character: `{:key [:ctrl-c \"p\"] …}`.
+
+    (editor/transient/suffix-keys {:key \"-f\"})        → [\"-\" \"f\"]
+    (editor/transient/suffix-keys {:key [:ctrl-c]})   → [:ctrl-c]"
+  (let (k (:key s))
+    (if (string? k) (into [] (string/->graphemes k)) (into [] k))))
+(sig suffix-keys (any -> vector))
+
+(defn spec-suffixes (sp)
+  "Every suffix in `sp`, groups in order then suffixes in order — the order that decides
+what [[transient-args]] emits and what [[transient-rows]] shows.
+
+    (count (editor/transient/spec-suffixes {:groups [{:suffixes [{:key \"a\"} {:key \"b\"}]}]}))   → 2"
+  (fold (:groups sp) [] (fn (acc g) (into acc (or (:suffixes g) [])))))
+(sig spec-suffixes (any -> vector))
+
+(defn- spec-keymap (sp)
+  "The keymap of `sp`'s keys, each bound to its suffix's INDEX in `spec-suffixes`. An
+index, not the suffix itself: a keymap's values must not be maps, since a map there is
+what means `prefix` (`keymap-resolve`), and a suffix is a map."
+  (let (suffixes (spec-suffixes sp))
+    (fold (range (count suffixes))
+      {}
+      (fn (km i) (keymap-bind km (suffix-keys (nth suffixes i)) i)))))
+
+;; ---- opening, and the value --------------------------------------------------------
+
+(defn transient-open (sp &optional (args {}))
+  "A menu over spec `sp`, its arguments starting at `args` — pass the value this menu had
+last time and it opens where the reader left it, which is most of why a transient is
+pleasant to use. The keymap is built once, here, rather than per keystroke.
+
+    (:stack (editor/transient/transient-open {:groups []}))   → ()"
+  {:spec sp :args args :keymap (spec-keymap sp) :pending nil :stack '()})
+(sig transient-open (any -> map))
+
+(defn transient-args (st)
+  "The argument vector the menu currently describes, in the spec's own order: a switch
+that is on contributes its `:arg`, an option with a value contributes `(str arg value)`.
+This is what a `:run` outcome hands the command, and what a host persists to reopen the
+menu where it was.
+
+    (editor/transient/transient-args (editor/transient/transient-open {:groups [{:suffixes [{:key \"-n\" :kind :switch :arg \"--dry-run\"}]}]} {\"--dry-run\" true}))   → [\"--dry-run\"]"
+  (fold (spec-suffixes (:spec st))
+    []
+    (fn (acc s)
+      (let (v (get (:args st) (:arg s)))
+        (cond
+          (or (nil? v) (= v false)) acc
+          (= (:kind s) :switch) (into acc [(:arg s)])
+          (= (:kind s) :option) (into acc [(str (:arg s) v)])
+          else acc)))))
+(sig transient-args (any -> vector))
+
+(defn transient-set (st arg value)
+  "`st` with `arg` set to `value` — what a host calls after servicing a `:read` outcome.
+A nil or empty value CLEARS the argument, so cancelling the prompt and clearing the option
+are the same gesture, and an option never sits in the value as `--depth=`.
+
+    (editor/transient/transient-args (editor/transient/transient-set (editor/transient/transient-open {:groups [{:suffixes [{:key \"=d\" :kind :option :arg \"--depth=\"}]}]}) \"--depth=\" 5))   → [\"--depth=5\"]"
+  (if (or (nil? value) (= value ""))
+    (assoc st :args (dissoc (:args st) arg))
+    (assoc st :args (assoc (:args st) arg value))))
+(sig transient-set (any string any -> map))
+
+(defn- toggle (st s)
+  "`st` with switch `s` flipped."
+  (let (arg (:arg s))
+    (if (get (:args st) arg)
+      (assoc st :args (dissoc (:args st) arg))
+      (assoc st :args (assoc (:args st) arg true)))))
+
+;; ---- the fold ------------------------------------------------------------------------
+
+(defn transient-pop (st)
+  "The menu one level out — the state a `:menu` suffix was entered from, or **nil** at the
+top level, which is the host's cue to dismiss. Separate from [[transient-press]] because
+the key that means \"back\" is the host's to choose (`C-g`, Escape, both), not this
+module's to name.
+
+    (editor/transient/transient-pop (editor/transient/transient-open {:groups []}))   → nil"
+  (if (empty? (:stack st)) nil (first (:stack st))))
+(sig transient-pop (any -> any))
+
+(defn- enter-menu (st s)
+  "`st` pushed one level into sub-menu `s`, remembering where it came from."
+  (assoc (transient-open (:menu s) (or (:args s) {}))
+    :stack (cons (assoc st :pending nil) (:stack st))))
+
+(defn- act (st s)
+  "Suffix `s` chosen: `[state' outcome]`."
+  (case (:kind s)
+    :switch [(toggle st s) [:stay]]
+    :option [st [:read (:arg s) (or (:prompt s) (:label s)) (get (:args st) (:arg s))]]
+    :command [st [:run (:command s) (transient-args st)]]
+    :menu [(enter-menu st s) [:stay]]
+    [st [:stay]]))
+
+(defn transient-press (st key)
+  "Fold one keystroke into the menu: `[state' outcome]`, where outcome is
+
+  - `[:stay]`        — the menu absorbed it (a switch toggled, a chord half-typed, a
+                       sub-menu entered). Re-render and wait.
+  - `[:run c args]`  — run command `c` with `args`, then dismiss.
+  - `[:read a p v]`  — read a value for argument `a`, prompting `p`, currently `v`; the
+                       host prompts however it likes and calls [[transient-set]].
+  - `[:unbound k]`   — `k` is bound to nothing here. The host decides: most dismiss the
+                       menu and let the key through, which is what Magit does.
+
+A key mid-chord that leads nowhere is `[:stay]`, not `[:unbound]`: the chord resets and
+the key is dropped, so a mistyped `-x` never escapes the menu as an `x`.
+
+    (second (editor/transient/transient-press (editor/transient/transient-open {:groups [{:suffixes [{:key \"p\" :kind :command :command 'go}]}]}) \"p\"))   → [:run go []]"
+  (let ([binding entered] (keymap-resolve (:keymap st) (:pending st) key)
+        stepped (assoc st :pending entered))
+    (cond
+      (not (nil? entered)) [stepped [:stay]]
+      (nil? binding) (if (nil? (:pending st)) [stepped [:unbound key]] [stepped [:stay]])
+      else (act stepped (nth (spec-suffixes (:spec st)) binding)))))
+(sig transient-press (any any -> vector))
+
+;; ---- the rendering, as data ------------------------------------------------------------
+
+(defn- suffix-row (st s)
+  "One suffix as a row: its keys, its label, and — for a switch or an option — the
+argument it controls and whether it is currently on."
+  (let (v (get (:args st) (:arg s)))
+    {:kind :suffix
+     :keys (suffix-keys s)
+     :label (:label s)
+     :suffix-kind (:kind s)
+     :arg (:arg s)
+     :value (if (= (:kind s) :option) v nil)
+     :on? (not (or (nil? v) (= v false)))}))
+
+(defn transient-rows (st)
+  "The menu as rows to paint, in spec order: a `{:kind :heading :label}` per group
+followed by a `{:kind :suffix …}` per suffix, each carrying `:keys`, `:label`,
+`:suffix-kind`, `:arg`, `:value` and `:on?`.
+
+Data, not render ops — this module has no display and no theme. A host turns a row into
+whatever it paints with, and decides how to label `:keys` in its own key vocabulary.
+
+    (count (editor/transient/transient-rows (editor/transient/transient-open {:groups [{:title \"G\" :suffixes [{:key \"a\" :kind :command :label \"A\"}]}]})))   → 2"
+  (fold (:groups (:spec st))
+    []
+    (fn (acc g)
+      (into (into acc [{:kind :heading :label (:title g)}])
+        (map (or (:suffixes g) []) (fn (s) (suffix-row st s)))))))
+(sig transient-rows (any -> vector))
+
+(defn transient-title (st)
+  "The menu's title, with the trail of the sub-menus it was reached through — `\"Push\"`
+at the top, `\"Push → another remote\"` one level in, so a reader is never lost in a
+sub-menu wondering what it belongs to.
+
+    (editor/transient/transient-title (editor/transient/transient-open {:title \"Push\" :groups []}))   → \"Push\""
+  (let (titles (into [] (map (reverse (:stack st)) (fn (s) (:title (:spec s))))))
+    (string/join (into titles [(:title (:spec st))]) " → ")))
+(sig transient-title (any -> string))

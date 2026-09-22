@@ -50,12 +50,48 @@ testable without a terminal."
       (fallback state key)
       (try ((reflect/eval sym) state key) (catch e state)))))
 
+(defn keymap-resolve (keymap pending key)
+  "One keystroke through a (possibly chorded) `keymap`, resolved to its BINDING and
+**not run**: `[binding pending']`. The chord walk on its own, with no opinion about
+what a binding means or how it is invoked.
+
+  - a nested **keymap** → `[nil <sub-keymap>]`: `key` entered a prefix, and the
+    caller threads `pending'` back in on the next keystroke;
+  - any other value → `[binding nil]`: the chord completed on that binding;
+  - **unbound** → `[nil nil]`.
+
+\"Unbound\" and \"entered a prefix\" are told apart by `pending'`, and a caller that
+needs to distinguish an unbound key at the TOP from a dead-end after a prefix has its
+own `pending` to compare against — which is exactly what [[keymap-step]] does.
+
+This is the part of dispatch that is not about calling: [[keymap-step]] is this plus
+`reflect/eval`, and it exists separately because several callers want the binding
+itself. `describe-key` reports what a key sequence WOULD run without running it; a
+`which-key` panel names the command under a pending prefix; and a dispatcher with a
+different calling convention — `std/editor/transient`, whose bindings are switches and
+options rather than `(state key)` commands — cannot use `keymap-step` at all, because
+`keymap-step`'s only way to tell you what it found is to call it. Each of those
+otherwise re-implements this six-line walk, and a second implementation of chord
+resolution is a second set of chord bugs.
+
+Pure — no eval, no state, nothing to mock.
+
+    (editor/keymap/keymap-resolve {:a 'save} nil :a)   → [save nil]
+    (editor/keymap/keymap-resolve {:a 'save} nil :zz)  → [nil nil]"
+  (let (active (if (nil? pending) keymap pending)
+        binding (get active key))
+    (cond
+      (map? binding) [nil binding]
+      (nil? binding) [nil nil]
+      else [binding nil])))
+(sig keymap-resolve (map any any -> vector))
+
 (defn keymap-step (keymap pending state key fallback)
   "One keystroke through a (possibly chorded) `keymap`, returning `[state' pending']`
 — the threaded counterpart to `keymap-dispatch`. `pending` is the prefix sub-keymap
 a prior key left us mid-chord in, or `nil` for a fresh chord; thread the returned
-`pending'` back in on the next keystroke. Resolution looks `key` up in `pending`
-when mid-chord, else in `keymap`:
+`pending'` back in on the next keystroke. Resolution ([[keymap-resolve]]) looks `key`
+up in `pending` when mid-chord, else in `keymap`:
   - binds to a nested **keymap** → enter that prefix: `[state <sub-keymap>]` (state
     unchanged; we wait for the next key);
   - binds to a **command symbol** → run it and reset: `[(command state key) nil]`
@@ -65,10 +101,9 @@ when mid-chord, else in `keymap`:
     dropped and the chord resets (Emacs-style \"undefined\"), so a partial chord
     never self-inserts via the fallback.
 Pure apart from the symbol resolution; testable without a terminal."
-  (let (active (if (nil? pending) keymap pending)
-        binding (get active key))
+  (let ([binding entered] (keymap-resolve keymap pending key))
     (cond
-      (map? binding) [state binding]
+      (not (nil? entered)) [state entered]
       (nil? binding)
         (if (nil? pending)
           [(fallback state key) nil]
