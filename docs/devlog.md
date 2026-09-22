@@ -15561,3 +15561,14 @@ the fixture is the interesting half: it only catches anything because each modul
 `scripts/bench/gen-project.py` with `gen-project.blsp`: a generator that emits Brood cannot
 be static-checked while it is written in another language, which is how the Python one came
 to emit a pre-ADR-302 argument order for a year (CLAUDE.md's "two files no gate can see").
+
+## 2026-09-22 (5) — item 4's cheapest option is ruled out before it is tried
+
+ADR-386's pool costs memory: the 302 × 3 067 rig reads 1.19 GB sequential against 2.20 GB
+parallel, so item 4 (peak RSS under 1 GB at 1 000 × 3k) is now the top of the scaling queue
+rather than the bottom. The obvious lever — fewer worker heaps live at once, by shrinking
+`project-pfold-groups`' group below `cores` — was measured and does nothing: at `cores/4`
+the rig reads **2.26 GB, unchanged, for 3× the wall**. The peak belongs to the driver, which
+holds every file's forms and derived facts for the run because the Pass 2.9 fixpoint wants
+them at once. Whoever takes item 4 can skip the tuning and go straight to dropping a file's
+forms after its walk, or sharding the fixpoint over signatures only.
