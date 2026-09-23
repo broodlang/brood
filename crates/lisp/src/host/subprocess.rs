@@ -294,6 +294,15 @@ pub fn spawn(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Its own process group, so `close` can end the program AND everything it started:
+    // `sh -c "make"` killed alone left `make` and its compilers running, holding the output
+    // pipes. (A pty child already leads its own session — `spawn_pty` — and the same
+    // `killpg` covers it.)
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     if let Some(dir) = cwd {
         command.current_dir(dir);
     }
@@ -423,6 +432,14 @@ pub fn close(id: u64) {
         // than holding this mutex across a blocking `wait()`, so we never contend.
         {
             let mut c = crate::core::sync::lock(&p.child.child);
+            // the whole group — the child leads it (`spawn` / `spawn_pty`), and a grandchild
+            // left behind keeps running and keeps the pipes open. SAFETY: the child is not yet
+            // reaped (the reaper removes the entry first, and we hold it), so its pid — the
+            // group id — cannot have been reused.
+            #[cfg(unix)]
+            unsafe {
+                libc::killpg(c.id() as libc::pid_t, libc::SIGKILL);
+            }
             let _ = c.kill();
         }
         // Rouse the reaper so it reaps *now* instead of at its next backoff tick, and the

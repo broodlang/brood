@@ -320,3 +320,21 @@ twice — for a test whose answer arrived in milliseconds."
     ;; every directory has its execute (search) bit set, so `:exec?` alone would say yes
     (is (nil? (os/which "/tmp")))
     (is (nil? (os/which "/")))))
+
+(describe "proc: close ends the program AND what it started"
+  ;; A spawned child leads its own process group and `os/close` kills the group. Killing
+  ;; the direct child alone left `sh -c "make"`'s make and compilers running, holding the
+  ;; output pipes.
+  :isolated (test "a grandchild dies with the child it was started by"
+    (let (p (os/spawn "sh" ["-c" "sleep 30 & echo $!; wait"]))
+      (let (grandchild (receive ([:proc ^p out] (string/trim out)) (after 5000 nil)))
+        (is (string? grandchild))
+        (os/close p)
+        (receive ([:proc-closed ^p _] nil) (after 5000 nil))
+        ;; `kill -0` asks whether the pid exists: it must not, a moment after the close
+        (letrec (gone? (fn (n)
+                         (cond
+                           (not (= 0 (:exit (os/cmd "kill" ["-0" grandchild])))) true
+                           (= n 0) false
+                           else (do (sleep 20) (gone? (dec n))))))
+          (is (gone? 100)))))))
