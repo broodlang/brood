@@ -82,7 +82,8 @@ docs/testing.md for the full guide."
   ;; three. This list is the transitive closure a source load of this module pulls in, and
   ;; `crates/cli/tests/test_framework_closure.rs` fails when the two drift apart.
   (:load bit
-    dev file humanize io json map math os path proc reflect seq stdimage string system))
+    dev file humanize io json map math os path proc reflect regex seq set stdimage string system
+    table))
 
 (defdyn *units* nil)
 ; all registered units, newest first

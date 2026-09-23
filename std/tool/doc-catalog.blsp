@@ -76,6 +76,8 @@
    "io/file-port-path" :io
    "reflect/file-signatures" :meta
    "string/fill" :strings
+   "string/fill-prefix" :strings
+   "string/clip-cells" :strings
    "seq/filterv" :collections
    "seq/rejectv" :collections
    "seq/find" :collections
@@ -446,6 +448,7 @@
    "%ord-compare" :meta
    "string/pad-left" :strings
    "string/pad-right" :strings
+   "string/pad-right-cells" :strings
    "pair?" :predicates
    "partial" :functions
    "%partition-acc" :collections
