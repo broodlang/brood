@@ -245,8 +245,8 @@ Maps are immutable — every operation returns a **fresh** map:
 | `(map/update-vals m f)` / `(map/update-keys m f)` | a new map with `f` applied to every value / key — the `map` module |
 | `(map/select-keys m ks)` | a new map of just the entries whose key is in `ks` — the `map` module |
 | `(map/zipmap ks vs)` | a map pairing `ks` with `vs` positionally (stops at the shorter) |
-| `(get-in m path)` / `(get-in m path default)` | the value at a nested key `path`, or `default`/`nil` |
-| `(assoc-in m path v)` | a nested copy with `v` stored at `path` (intermediate maps created) |
+| `(get-in m path)` / `(get-in m path default)` | the value at a nested key `path`, or `default`/`nil`; each step looks up like `get`, so a vector (or list/string) along the path is indexed by position — `(get-in {:a [1 2]} [:a 1])` is `2` |
+| `(assoc-in m path v)` | a nested copy with `v` stored at `path` (intermediate maps created); a vector along the path with an integer key is updated at that index (in range, as for `assoc`) — `(assoc-in [[1]] [0 0] 9)` is `[[9]]` — and any other non-map node becomes a fresh map |
 | `(dissoc-in m path)` | a nested copy with `path` removed (a missing path is a no-op; empty branches are left in place) |
 | `(update-in m path f args…)` | a nested copy with `path`'s value replaced by `(f current args…)` |
 | `(count m)` / `(empty? m)` | number of entries / whether there are none |

@@ -249,40 +249,59 @@ Works on maps (by key) and vectors (by integer index, which must be in range).
     (update [1 2 3] 0 inc)       → [2 2 3]"
   (assoc coll k (apply f (get coll k) args)))
 
-;; Nested-map access along a `path` (a sequence of keys). `get-in` walks; missing
-;; key → default. `assoc-in` rebuilds, coercing a non-map node to `{}` so it can
-;; create intermediate maps; `update-in` is `get-in` then `assoc-in`.
+;; Nested access along a `path` (a sequence of keys). `get-in` walks; missing
+;; key → default. `assoc-in` rebuilds, coercing a node it cannot store into to `{}`
+;; so it can create intermediate maps; `update-in` is `get-in` then `assoc-in`.
+;;
+;; A step answers the way `get` does, so a vector along the path is indexed by
+;; position: `(get-in {:a [1 2]} [:a 1])` used to be nil because the walk stepped
+;; into maps only, while `(get (get m :a) 1)` was 2 — and `assoc-in` turned the
+;; vector into `{1 …}`, so `update-in` on a vector path built a map.
+(defn- %get-in-has? (m k)
+  (cond
+    (map? m) (contains? m k)
+    (set? m) (%set-has? m k)
+    (int? k)
+      (if (or (vector? m) (pair? m) (string? m) (bytes? m))
+        (and (>= k 0) (< k (count m)))
+        false)
+    else false))
 (defn- %get-in-walk (m path default)
   (cond
     (empty? path) m
-    (and (map? m) (contains? m (first path)))
+    (%get-in-has? m (first path))
       (%get-in-walk (get m (first path))
         (rest path)
         default)
     else default))
 (defn get-in (m path & default)
-  "The value in nested maps `m` at the key sequence `path`, or `default` (else `nil`) if any key along the way is absent. `(get-in m ())` is `m`.
+  "The value in nested collections `m` at the key sequence `path`, or `default` (else `nil`) if any key along the way is absent. Each step looks up the way `get` does — a map by key, a vector, list or string by integer position. `(get-in m ())` is `m`.
 
     (get-in {:a {:b 1}} [:a :b])   → 1
+    (get-in {:a [10 20]} [:a 1])   → 20
     (get-in {:a 1} [:z :y])        → nil"
   (%get-in-walk m path (first default)))
 
 ;; check-allow: deliberately non-tail — depth = (count path) — a few keys, never data scale.
 (check-allow :non-tail-recursion
   (defn assoc-in (m path v)
-    "A nested copy of `m` with `v` stored at the key sequence `path`, creating intermediate maps as needed (a non-map node along the path becomes a fresh map).
+    "A nested copy of `m` with `v` stored at the key sequence `path`, creating intermediate maps as needed. A vector along the path with an integer key is updated in place of that index (which must be in range, as for `assoc`); any other non-map node becomes a fresh map.
 
     (assoc-in {:a {:b 1}} [:a :b] 2)   → {:a {:b 2}}
-    (assoc-in {} [:a :b] 1)            → {:a {:b 1}}"
-    (let (m (if (map? m) m {}) k (first path) ks (rest path))
+    (assoc-in {} [:a :b] 1)            → {:a {:b 1}}
+    (assoc-in [[1 2]] [0 1] 9)         → [[1 9]]"
+    (let (k (first path)
+          m (if (or (map? m) (and (vector? m) (int? k))) m {})
+          ks (rest path))
       (if (empty? ks)
         (assoc m k v)
         (assoc m k (assoc-in (get m k) ks v))))))
 
 (defn update-in (m path f & args)
-  "A nested copy of `m` with the value at the key sequence `path` replaced by `(apply f current args)` (creating intermediate maps as needed).
+  "A nested copy of `m` with the value at the key sequence `path` replaced by `(apply f current args)` (creating intermediate maps as needed; a vector along the path is updated by index, as in `assoc-in`).
 
-    (update-in {:a {:b 1}} [:a :b] inc)   → {:a {:b 2}}"
+    (update-in {:a {:b 1}} [:a :b] inc)   → {:a {:b 2}}
+    (update-in {:a [1 2]} [:a 0] inc)     → {:a [2 2]}"
   (assoc-in m path (apply f (get-in m path) args)))
 
 ;; The nested-access family was `get-in`/`assoc-in`/`update-in` with no removal —

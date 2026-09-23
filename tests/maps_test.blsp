@@ -206,7 +206,26 @@
       (assert= m {:a {:b 1}})))
   (test "update-in applies f at a path, creating as needed"
     (assert= (update-in {:a {:b 1}} (list :a :b) inc) {:a {:b 2}})
-    (assert= (update-in {} (list :x) (fn (v) (if (nil? v) 1 (inc v)))) {:x 1})))
+    (assert= (update-in {} (list :x) (fn (v) (if (nil? v) 1 (inc v)))) {:x 1}))
+  ;; The walk used to step into maps only, so a vector along the path read as absent
+  ;; while `(get v i)` answered — and assoc-in replaced the vector with `{i …}`.
+  (test "get-in indexes a vector, list or string along the path the way get does"
+    (assert= (get-in {:a [1 2]} [:a 1]) 2)
+    (assert= (get-in [[1 2] [3 4]] [1 0]) 3)
+    (assert= (get-in {:a (list :x :y)} [:a 1]) :y)
+    (assert= (get-in {:a "xy"} [:a 1]) "y")
+    (assert= (get-in {:a [1 2]} [:a 5] :none) :none)
+    (assert= (get-in {:a [1 2]} [:a -1] :none) :none)
+    (assert= (get-in {:a [1 2]} [:a :b] :none) :none)
+    (assert= (get-in {:a nil} [:a] :none) nil))
+  (test "assoc-in and update-in update a vector along the path by index"
+    (assert= (assoc-in [[1]] [0 0] 9) [[9]])
+    (assert= (assoc-in {:a [1 2]} [:a 1] :b) {:a [1 :b]})
+    (assert= (update-in [[1]] [0 0] inc) [[2]])
+    (assert= (update-in {:a [1 2]} [:a 0] + 10) {:a [11 2]})
+    (assert-error (assoc-in [[1]] [0 3] 9))
+    ;; a non-integer key still turns a non-map node into a fresh map
+    (assert= (assoc-in {:a [1]} [:a :k] 2) {:a {:k 2}})))
 
 (describe "keys & equality"
   (test "any value can be a key, compared structurally"
