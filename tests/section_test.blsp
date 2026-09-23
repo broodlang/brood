@@ -1,0 +1,96 @@
+;; std/editor/section — foldable section trees. Pure: a tree in, lines and rows out, and
+;; every navigation question answered by index over the rows.
+
+(defmodule section-test (:use test) (:use editor/section))
+
+;; A status buffer in miniature: two top-level sections, the first holding two files,
+;; one of which holds a hunk with body lines.
+(def st-tree
+  (section :root
+    nil
+    nil
+    [(section :unstaged
+       nil
+       "Unstaged changes (2)"
+       [(section :file
+          "a"
+          "modified a"
+          [(section :hunk "@@ -1 +1 @@" "@@ -1 +1 @@" ["-x" "+y"])])
+         (section :file "b" "modified b" [] {:hidden true})]
+       {:separator true})
+      (section :staged
+        nil
+        "Staged changes (1)"
+        [(section :file "c" "new file c" ["+z"] {:hidden true})])]))
+
+(describe "section-render"
+  (test "headings and open bodies render in order, folded ones stop at the heading"
+    (assert= ["Unstaged changes (2)"
+               "modified a" "@@ -1 +1 @@" "-x" "+y" "modified b" "" "Staged changes (1)"
+               "new file c…"]
+      (:lines (section-render st-tree))))
+  (test "rows run parallel to the lines, a separator's row is nil"
+    (let (r (section-render st-tree))
+      (assert= (count (:lines r)) (count (:rows r)))
+      (is (nil? (nth (:rows r) 6)))))
+  (test "a folded section with no children gets no ellipsis — there is nothing to open"
+    (is (includes? (:lines (section-render st-tree)) "modified b")))
+  (test "a body line knows its section and its index in it"
+    (let (row (nth (:rows (section-render st-tree)) 4))
+      (assert= :hunk (:type row))
+      (assert= 1 (:line row))
+      (is (not (:heading? row)))))
+  (test "visibility overrides the default either way"
+    (let (hunk-id [[:root nil] [:unstaged nil] [:file "a"] [:hunk "@@ -1 +1 @@"]]
+          c-id [[:root nil] [:staged nil] [:file "c"]]
+          lines (:lines (section-render st-tree {hunk-id :hide c-id :show})))
+      (is (includes? lines "@@ -1 +1 @@…"))
+      (is (not (includes? lines "-x")))
+      (is (includes? lines "+z"))))
+  (test "extents cover a section's heading and body"
+    (assert= [1 5]
+      (get (:extents (section-render st-tree)) [[:root nil] [:unstaged nil] [:file "a"]])))
+  (test "a key stands in for the value as identity"
+    (let (r (section-render (section :root nil nil [(section :hunk {:big 1} "h" [] {:key "h1"})])))
+      (assert= [[:root nil] [:hunk "h1"]] (:id (first (:rows r)))))))
+
+(describe "navigation"
+  (test "next and prev walk headings, skipping body lines and separators"
+    (let (rows (:rows (section-render st-tree)))
+      (assert= 5 (section-next rows 2))
+      (assert= 7 (section-next rows 5))
+      (assert= 2 (section-prev rows 5))
+      (is (nil? (section-next rows 8)))))
+  (test "up climbs from a body line to its heading, then to the parent"
+    (let (rows (:rows (section-render st-tree)))
+      (assert= 2 (section-up rows 3))
+      (assert= 1 (section-up rows 2))
+      (assert= 0 (section-up rows 1))
+      (is (nil? (section-up rows 0)))))
+  (test "siblings stay within their parent"
+    (let (rows (:rows (section-render st-tree)))
+      (assert= 5 (section-next-sibling rows 1))
+      (assert= 1 (section-prev-sibling rows 5))
+      (is (nil? (section-next-sibling rows 5)))
+      (assert= 7 (section-next-sibling rows 0))))
+  (test "ancestor finds the enclosing section of a type"
+    (let (rows (:rows (section-render st-tree)))
+      (assert= "a" (:value (section-ancestor rows 3 :file)))
+      (is (nil? (section-ancestor rows 3 :commit))))))
+
+(describe "visibility"
+  (test "toggle folds an open section and opens a folded one"
+    (let (rows (:rows (section-render st-tree))
+          v1 (section-toggle {} (nth rows 1)))
+      (assert= :hide (get v1 (:id (nth rows 1))))
+      (assert= :show (get (section-toggle {} (nth rows 8)) (:id (nth rows 8))))))
+  (test "toggle on a body line folds its section"
+    (let (rows (:rows (section-render st-tree)))
+      (assert= :hide (get (section-toggle {} (nth rows 3)) (:id (nth rows 3))))))
+  (test "level 1 shows only the top headings"
+    (assert= ["Unstaged changes (2)…" "" "Staged changes (1)…"]
+      (:lines (section-render st-tree (section-level-visibility st-tree 1)))))
+  (test "level 2 opens them to their files"
+    (assert= ["Unstaged changes (2)"
+               "modified a…" "modified b" "" "Staged changes (1)" "new file c…"]
+      (:lines (section-render st-tree (section-level-visibility st-tree 2))))))

@@ -1,0 +1,304 @@
+;; std/editor/section.blsp — SECTIONS: a buffer as a tree you can fold and walk.
+;;
+;; Magit's `magit-section` is why its buffers feel like one thing and not five: the status
+;; buffer, a log, a commit, a diff are all the same TREE — a section has a heading line, a
+;; body, and children — and TAB folds any of them, `n`/`p` walk the headings, `^` climbs
+;; to the parent, `M-n`/`M-p` step between siblings and `1`–`4` show the tree to a depth.
+;; Every command asks "what section is point in?" and gets a typed VALUE back (a file, a
+;; hunk, a commit) instead of re-parsing the text under the cursor.
+;;
+;; This module is that tree and nothing else: no buffer, no display, no model. A caller
+;; builds sections as plain data, [[section-render]] flattens them into LINES plus a ROWS
+;; vector parallel to those lines (what each line belongs to), and the navigation
+;; functions answer questions about rows by index. The host shows the lines however it
+;; shows text and keeps the rows beside them.
+;;
+;; A SECTION:
+;;
+;;   {:type :file :value "src/a.blsp" :heading "modified   src/a.blsp"
+;;    :children [hunk-section …]      ; sections, or plain strings (body lines)
+;;    :key "src/a.blsp"               ; identity across re-renders (default: :value)
+;;    :hidden true                    ; folded until someone opens it (default: open)
+;;    :separator true}                ; a blank line after it, folded or not
+;;
+;; A section with a nil `:heading` has no line of its own: its children render in its
+;; place. That is how a root holds the top-level sections, and how a caller groups
+;; sections without adding a line.
+;;
+;; IDENTITY. A section's id is the path of `[type key]` pairs from the root, so the file
+;; `a.blsp` in the unstaged section and the same file in the staged section are
+;; different sections — which is right, because folding one should not fold the other.
+;; Visibility is a map `id -> :show | :hide` over those ids; it survives a re-render
+;; because the ids do, which is what lets a refresh keep what you had open.
+
+(defmodule editor/section
+  "Foldable section trees (Magit's `magit-section`): build sections as data,
+[[section-render]] them into lines plus parallel rows, and walk the rows with
+[[section-next]] / [[section-prev]] / [[section-up]] / [[section-next-sibling]] /
+[[section-prev-sibling]]. Visibility is a map `id -> :show | :hide` that
+[[section-toggle]] and [[section-level-visibility]] produce and a re-render keeps.")
+
+(deftype section (record &open :type any :value any :heading any :children seqable))
+
+(deftype row (record &open :id vector :type any :value any :heading? bool :depth int))
+
+;; ---- building ---------------------------------------------------------------------
+
+(defn section (type value heading &optional (children []) (opts {}))
+  "A section of `type` carrying `value`, headed by the line `heading` (nil for none), with
+`children` — sections or plain body-line strings. `opts` adds `:key` (its identity, when
+the value is too big or too unstable to be one), `:hidden` (folded by default) and
+`:separator` (a blank line after it, shown folded or not).
+
+    (:type (editor/section/section :file \"a\" \"a\"))   → :file"
+  (merge {:type type :value value :heading heading :children children} opts))
+(sig section (any any any &optional seqable map -> map))
+
+(defn section-ident (parent-id s)
+  "The id of section `s` whose parent's id is `parent-id`: the parent's path with `[type
+key]` appended, `key` being `:key` when given and the value otherwise.
+
+    (editor/section/section-ident [] {:type :file :value \"a\"})   → [[:file \"a\"]]"
+  (into parent-id [[(:type s) (if (contains? s :key) (:key s) (:value s))]]))
+(sig section-ident (vector map -> vector))
+
+(defn- visible? (s id visibility)
+  "Whether `s` is unfolded: its entry in `visibility`, else open unless it is `:hidden`."
+  (case (get visibility id)
+    :show true
+    :hide false
+    (not (:hidden s))))
+
+;; ---- rendering --------------------------------------------------------------------
+;; One walk, accumulating lines and rows as LISTS (consed, reversed once at the end) and
+;; the line count alongside, so a ten-thousand-line diff renders in time linear in its
+;; length. The depth of nesting is the depth of the tree — a handful — so the walk
+;; recurses on it and folds across siblings.
+
+(defn- emit (acc line row)
+  "`acc` with one more line and its row."
+  (assoc acc
+    :lines (cons line (:lines acc))
+    :rows (cons row (:rows acc))
+    :n (inc (:n acc))))
+
+(defn- render-into (acc s parent-id depth visibility ellipsis)
+  "`acc` with section `s` (a child of `parent-id`, at `depth`) rendered into it."
+  (let (id (section-ident parent-id s)
+        start (:n acc)
+        open? (visible? s id visibility)
+        heading (:heading s)
+        children (or (:children s) [])
+        kid-depth (if (nil? heading) depth (inc depth))
+        acc1 (if (nil? heading)
+               acc
+               (emit acc
+                 (if (and (not open?) (not (empty? children))) (str heading ellipsis) heading)
+                 {:id id
+                  :type (:type s)
+                  :value (:value s)
+                  :heading? true
+                  :depth depth
+                  :hidden? (not open?)
+                  :children? (not (empty? children))}))
+        acc2 (if (and (not open?) (not (nil? heading)))
+               acc1
+               (:acc (fold children
+                       {:acc acc1 :i 0}
+                       (fn (st child)
+                         {:i (inc (:i st))
+                          :acc (if (string? child)
+                                 (emit (:acc st)
+                                   child
+                                   {:id id
+                                    :type (:type s)
+                                    :value (:value s)
+                                    :heading? false
+                                    :depth kid-depth
+                                    :line (:i st)})
+                                 (render-into (:acc st) child id kid-depth visibility ellipsis))}))))
+        acc3 (assoc acc2 :extents (assoc (:extents acc2) id [start (:n acc2)])))
+    (if (:separator s) (emit acc3 "" nil) acc3)))
+
+(defn section-render (root &optional (visibility {}) (ellipsis "…"))
+  "Flatten section `root` into `{:lines :rows :extents}`.
+
+`:lines` is a vector of strings; `:rows` a vector parallel to it — for each line, a row
+`{:id :type :value :heading? :depth}` naming the section it belongs to (a heading row
+adds `:hidden?` and `:children?`; a body line adds `:line`, its index among its
+section's children), or nil for a separator line. `:extents` maps each section id to the
+`[start end)` line span it covers.
+
+A folded section shows its heading with `ellipsis` appended when it has anything to hide.
+
+    (:lines (editor/section/section-render (editor/section/section :root nil nil [(editor/section/section :file \"a\" \"a\" [\"x\"])])))   → [\"a\" \"x\"]"
+  (let (acc (render-into {:lines '() :rows '() :n 0 :extents {}} root [] 0 visibility ellipsis))
+    {:lines (into [] (reverse (:lines acc)))
+     :rows (into [] (reverse (:rows acc)))
+     :extents (:extents acc)}))
+(sig section-render (map &optional map string -> map))
+
+(defn section-text (rendered)
+  "A rendering's lines joined into buffer text.
+
+    (editor/section/section-text {:lines [\"a\" \"b\"]})   → \"a\\nb\""
+  (string/join (:lines rendered) "\n"))
+(sig section-text (map -> string))
+
+;; ---- asking about a row -------------------------------------------------------------
+
+(defn section-row (rows i)
+  "The row at line `i`, or nil past either end or on a separator.
+
+    (editor/section/section-row [] 3)   → nil"
+  (if (and (>= i 0) (< i (count rows))) (nth rows i) nil))
+(sig section-row (vector int -> any))
+
+(defn section-heading-index (rows id)
+  "The line of the heading of section `id`, or nil when it has none shown.
+
+    (editor/section/section-heading-index [{:id [[:a 1]] :heading? true}] [[:a 1]])   → 0"
+  (let (i (seq/index-where rows (fn (r) (and r (:heading? r) (= (:id r) id)))))
+    (if (< i 0) nil i)))
+(sig section-heading-index (vector vector -> any))
+
+(defn section-parent-id (id)
+  "The id of the section containing section `id` — its path less the last step.
+
+    (editor/section/section-parent-id [[:a 1] [:b 2]])   → [[:a 1]]"
+  (into [] (take id (math/max 0 (dec (count id))))))
+(sig section-parent-id (vector -> vector))
+
+(defn section-ancestor (rows i type)
+  "The row of the nearest section of `type` enclosing line `i` (the section of line `i`
+itself included), or nil. How a command on a hunk's body line finds its file.
+
+    (:value (editor/section/section-ancestor [{:id [[:file \"a\"]] :type :file :value \"a\" :heading? true}] 0 :file))   → \"a\""
+  (let (row (section-row rows i))
+    (if (nil? row)
+      nil
+      (let (id (:id row)
+            ;; the DEEPEST step of that type: a hunk inside a file inside a section
+            k (letrec (go (fn (j)
+                            (cond
+                              (< j 0) -1
+                              (= (first (nth id j)) type) j
+                              :else (go (dec j)))))
+                (go (dec (count id)))))
+        (if (< k 0)
+          nil
+          (let (hi (section-heading-index rows (into [] (take id (inc k)))))
+            (if (nil? hi) nil (nth rows hi))))))))
+(sig section-ancestor (vector int any -> any))
+
+;; ---- moving -------------------------------------------------------------------------
+
+(defn- scan-heading (rows i step)
+  "The first heading row index strictly past `i` in direction `step`, or nil."
+  (let (j (+ i step))
+    (cond
+      (or (< j 0) (>= j (count rows))) nil
+      (let (r (nth rows j)) (and r (:heading? r))) j
+      :else (scan-heading rows j step))))
+
+(defn section-next (rows i)
+  "The line of the next section heading after line `i`, or nil (Magit's `n`).
+
+    (editor/section/section-next [{:heading? true} nil {:heading? true}] 0)   → 2"
+  (scan-heading rows i 1))
+(sig section-next (vector int -> any))
+
+(defn section-prev (rows i)
+  "The line of the previous section heading before line `i`, or nil (Magit's `p`).
+
+    (editor/section/section-prev [{:heading? true} nil {:heading? true}] 2)   → 0"
+  (scan-heading rows i -1))
+(sig section-prev (vector int -> any))
+
+(defn section-up (rows i)
+  "The line of the heading to climb to from line `i` (Magit's `^`): from a body line its
+own section's heading, from a heading its parent's. Nil at the top.
+
+    (editor/section/section-up [{:id [[:a 1]] :heading? true} {:id [[:a 1]] :heading? false}] 1)   → 0"
+  (let (row (section-row rows i))
+    (cond
+      (nil? row) nil
+      (not (:heading? row)) (section-heading-index rows (:id row))
+      (<= (count (:id row)) 1) nil
+      :else (section-heading-index rows (section-parent-id (:id row))))))
+(sig section-up (vector int -> any))
+
+(defn- scan-sibling (rows i step parent len)
+  "The next heading in direction `step` that is a sibling (same `parent`, id of `len`),
+stopping at nil once the walk leaves the parent."
+  (let (j (+ i step))
+    (if (or (< j 0) (>= j (count rows)))
+      nil
+      (let (r (nth rows j))
+        (cond
+          (or (nil? r) (not (:heading? r))) (scan-sibling rows j step parent len)
+          (< (count (:id r)) len) nil
+          (= (count (:id r)) len) (if (= (section-parent-id (:id r)) parent) j nil)
+          :else (scan-sibling rows j step parent len))))))
+
+(defn- sibling (rows i step)
+  "The sibling heading of line `i`'s section in direction `step`."
+  (let (row (section-row rows i))
+    (if (nil? row)
+      nil
+      (let (id (:id row)
+            from (if (:heading? row) i (or (section-heading-index rows id) i)))
+        (scan-sibling rows from step (section-parent-id id) (count id))))))
+
+(defn section-next-sibling (rows i)
+  "The line of the next sibling of line `i`'s section, or nil (Magit's `M-n`).
+
+    (editor/section/section-next-sibling [{:id [[:a 1]] :heading? true} {:id [[:a 2]] :heading? true}] 0)   → 1"
+  (sibling rows i 1))
+(sig section-next-sibling (vector int -> any))
+
+(defn section-prev-sibling (rows i)
+  "The line of the previous sibling of line `i`'s section, or nil (Magit's `M-p`).
+
+    (editor/section/section-prev-sibling [{:id [[:a 1]] :heading? true} {:id [[:a 2]] :heading? true}] 1)   → 0"
+  (sibling rows i -1))
+(sig section-prev-sibling (vector int -> any))
+
+;; ---- visibility ---------------------------------------------------------------------
+
+(defn section-toggle (visibility row)
+  "`visibility` with the section of `row` folded if it is open, opened if it is folded —
+TAB. A body line's section is open (its line is showing), so TAB there folds it.
+
+    (editor/section/section-toggle {} {:id [[:a 1]] :heading? true :hidden? true})   → {[[:a 1]] :show}"
+  (if (nil? row)
+    visibility
+    (assoc visibility (:id row) (if (and (:heading? row) (:hidden? row)) :show :hide))))
+(sig section-toggle (map any -> map))
+
+(defn section-set (visibility id show?)
+  "`visibility` with section `id` forced open (`show?` true) or folded.
+
+    (editor/section/section-set {} [[:a 1]] false)   → {[[:a 1]] :hide}"
+  (assoc visibility id (if show? :show :hide)))
+(sig section-set (map vector any -> map))
+
+(defn- level-into (acc s parent-id depth level)
+  "`acc` with every headed section under `s` set by `level`."
+  (let (id (section-ident parent-id s)
+        headed? (not (nil? (:heading s)))
+        d (if headed? (inc depth) depth)
+        acc1 (if headed? (assoc acc id (if (< d level) :show :hide)) acc))
+    (fold (seq/reject (or (:children s) []) string?)
+      acc1
+      (fn (a child) (level-into a child id d level)))))
+(sig level-into (map map vector int int -> map))
+
+(defn section-level-visibility (root level)
+  "The visibility that shows `root` to `level` (Magit's `1`–`4`): headings at depth 1 are
+the top-level sections, and every section shallower than `level` is open while the rest
+are folded — `1` shows only the top headings, `2` opens them one level, and so on.
+
+    (editor/section/section-level-visibility (editor/section/section :root nil nil [(editor/section/section :s 1 \"S\")]) 1)   → {[[:root nil] [:s 1]] :hide}"
+  (level-into {} root [] 0 level))
+(sig section-level-visibility (map int -> map))

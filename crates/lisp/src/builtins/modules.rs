@@ -600,6 +600,9 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // and a rendering — the keys go through `editor/keymap`, the rendering comes out as
     // plain rows, and the host services `:run` / `:read`. Pure; opt-in.
     embedded_module!("editor/transient", "std/editor/transient.blsp"),
+    // Foldable section trees (Magit's `magit-section`): sections as data, rendered to lines
+    // plus parallel rows, walked by index. Pure; opt-in.
+    embedded_module!("editor/section", "std/editor/section.blsp"),
     // Bare ANSI escape *strings* for simple terminal scripts (`print` them
     // directly) — the lightweight counterpart to the `display` render-op
     // protocol. Opt-in, never in the prelude.

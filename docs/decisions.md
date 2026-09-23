@@ -25027,3 +25027,42 @@ hand-roll.
 green), the module registered in `crates/lisp/src/builtins/modules.rs`. A host still owns
 persistence: reopening a menu where the reader left it is `transient-open` with the value it
 last produced, which every editor already has somewhere to put.
+
+## ADR-388 — `std/editor/section` and reading a unified diff: the two things Magit is built on
+
+**Status:** implemented (2026-09-23). New module `std/editor/section`; `std/diff` gains
+`parse-unified`, `hunk-header`, `hunk-patch`, `hunk-select`, `hunk-new-line` and
+`hunk-old-line`.
+
+**Context.** bedit's git porcelain had Magit's menus (ADR-387 gave them flags) and not its
+feel, and the gap came down to two missing abstractions. First, every Magit buffer — the
+status, a log, a commit, a diff, blame — is the same TREE of sections: TAB folds any node,
+`n`/`p` walk headings, `^` climbs, `M-n`/`M-p` step siblings, `1`–`4` show the tree to a
+depth, and every command asks "what section is point in?" and gets a typed value. bedit had
+this for the status buffer only, hand-rolled as a vector of per-line maps with its own
+collapse set; its log, commit and diff buffers were text dumps, because building the
+machinery again for each was too much. Second, a diff is something you ACT on — stage a
+hunk, stage three lines of it, jump from a `+` line to the file line it became — and each of
+those needs the diff parsed with line numbers and a hunk turned back into a patch. std/diff
+could produce a diff and not read one.
+
+**Decision.** `std/editor/section` is the tree and nothing else, like `editor/transient`:
+sections are plain data (`:type :value :heading :children`, children being sections or
+body-line strings), `section-render` flattens a tree into lines plus a parallel ROWS vector
+naming what each line belongs to, and navigation is functions of `(rows, line)`. A section's
+identity is its path of `[type key]` pairs, and visibility is a map `id -> :show | :hide` over
+those ids, which is what lets a re-render keep what the reader had open. The host decides
+how to show the lines, how to colour them and what TAB means on a lazily-loaded section.
+
+`std/diff` reads a unified diff by COUNTS, not by pattern: a hunk ends when its header's line
+counts are spent, because `--- a/x` is a legal removed line and only the counts tell it from
+the next file's header. `hunk-select` is Magit's line-level staging as a pure function —
+changes outside the chosen range are neutralised so the patch still applies (forward: drop
+unchosen additions, keep unchosen removals as context; reverse, for unstaging and
+discarding: the other way round), and the header's counts are recomputed.
+
+**Consequences.** `tests/section_test.blsp` (15), `tests/diff_test.blsp` (+14). Parsing is
+~20 µs a line on the dev build — a 600-line commit in 13 ms — which is fast enough to run
+off the loop on every refresh and not fast enough to run on it for a large diff; bedit
+parses in the status buffer's collection task. Other list-shaped editor buffers (dired,
+*Tests*, occur) can adopt `editor/section` for folding and navigation without new code.

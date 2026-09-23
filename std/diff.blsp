@@ -136,3 +136,251 @@ each prefixed with ` ` (keep), `-` (delete), or `+` (insert)."
           (= tag :keep) (str " " val)
           (= tag :delete) (str "-" val)
           else (str "+" val))))))
+
+;; ---- reading a unified diff -------------------------------------------------
+;; The other direction: git (or `diff -u`) PRODUCES the text, and a tool wants to act on
+;; it — stage one hunk, stage three lines of a hunk, jump from a `+` line to the line of
+;; the file it became. Each of those needs the same three things: the diff parsed into
+;; files and hunks with their line numbers, a hunk turned back into a patch `git apply`
+;; accepts, and a hunk CUT DOWN to a chosen run of its lines with its counts recomputed.
+;; Magit's line-level staging is the last of those, and it is a pure function of the hunk.
+;;
+;; A hunk ends when its counts are used up, not at the next line that looks like a
+;; header: `--- a/x` is a legal REMOVED line (the text `-- a/x` deleted), and only the
+;; counts can tell the two apart.
+
+(defn- header-int (x default)
+  "`x` as an int — a string is read, an int passes — or `default` when it is neither."
+  (let (n (if (string? x) (string/->number x) x)) (if (int? n) n default)))
+(sig header-int (any int -> int))
+
+(defn- header-range (s)
+  "`[start count]` from a hunk header range like `-12,5` or `+3` (count 1 when absent)."
+  (let (body (string/substring s 1 (string/length s))
+        parts (string/split body ","))
+    [(header-int (first parts) 0)
+      (if (> (count parts) 1) (header-int (second parts) 0) 1)]))
+
+(defn hunk-header (line)
+  "The numbers of a hunk header line: `{:old-start :old-count :new-start :new-count
+:context}` (the text after the closing `@@`, usually the enclosing function), or nil when
+`line` is not a two-way hunk header.
+
+    (:new-start (diff/hunk-header \"@@ -10,3 +12,4 @@ defn f\"))   → 12"
+  (if (not (string/starts-with? line "@@ -"))
+    nil
+    (let (parts (string/split line " "))
+      (if (or (< (count parts) 4) (not (= (nth parts 3) "@@")))
+        nil
+        (let ([os oc] (header-range (nth parts 1))
+              [ns nc] (header-range (nth parts 2))
+              close (index-of (string/substring line 2 (string/length line)) "@@"))
+          {:old-start os
+           :old-count oc
+           :new-start ns
+           :new-count nc
+           :context (string/trim (string/substring line (+ close 4) (string/length line)))})))))
+(sig hunk-header (string -> any))
+
+(defn- strip-prefix-path (s)
+  "A path from a `--- a/x` / `+++ b/x` line: the `a/` or `b/` dropped, nil for /dev/null."
+  (let (p (string/trimr (string/substring s 4 (string/length s)))
+        ;; `diff -u` appends a tab and a timestamp to the path
+        tab (index-of p "\t")
+        p (if (< tab 0) p (string/substring p 0 tab)))
+    (cond
+      (= p "/dev/null") nil
+      (or (string/starts-with? p "a/") (string/starts-with? p "b/"))
+        (string/substring p 2 (string/length p))
+      :else p)))
+
+(defn- git-header-paths (line)
+  "`[old new]` from a `diff --git a/x b/y` line (the split is at ` b/`, so a path with a
+space survives when the two sides are equal, which is every case but a rename)."
+  (let (body (string/substring line 11 (string/length line))
+        i (index-of body " b/"))
+    (if (< i 0)
+      [nil nil]
+      [(string/substring body 0 i) (string/substring body (+ i 3) (string/length body))])))
+
+(defn- close-file (st)
+  "The parse state with the file in progress (if any) finished onto `:files`."
+  (if (nil? (:file st))
+    st
+    (assoc st
+      :files (cons (assoc (:file st) :hunks (into [] (reverse (:hunks (:file st))))) (:files st))
+      :file nil)))
+
+(defn- file-line (st line)
+  "Fold a line that is not inside a hunk: a `diff ` line starts a file; `---`/`+++` name
+its sides; `@@` opens a hunk; anything else is a header line of the current file. A line
+before any file (a commit message above `git show`'s diff) or after a file's last hunk
+(the blank a trailing newline leaves) belongs to no file and is dropped — kept, it would
+become a header line and corrupt every patch built from that file."
+  (let (file (:file st)
+        hunks? (and file (not (empty? (:hunks file)))))
+    (cond
+      (string/starts-with? line "diff ")
+        (let ([o n] (if (string/starts-with? line "diff --git ") (git-header-paths line) [nil nil]))
+          (assoc (close-file st) :file {:headers [line] :hunks '() :old-path o :new-path n}))
+      ;; `---` with no file open, or after a file's hunks with no `diff ` line between: a
+      ;; plain `diff -u`, where the next file starts here
+      (and (string/starts-with? line "--- ") (or (nil? file) hunks?))
+        (assoc (close-file st)
+          :file {:headers [line] :hunks '() :old-path (strip-prefix-path line) :new-path nil})
+      (nil? file) st
+      (string/starts-with? line "--- ")
+        (assoc st
+          :file
+            (assoc file :headers (into (:headers file) [line]) :old-path (strip-prefix-path line)))
+      (and (string/starts-with? line "+++ ") (not hunks?))
+        (assoc st
+          :file
+            (assoc file :headers (into (:headers file) [line]) :new-path (strip-prefix-path line)))
+      (not (nil? (hunk-header line)))
+        (let (h (hunk-header line))
+          (assoc st
+            :file (assoc file :hunks (cons (assoc h :header line :lines '()) (:hunks file)))
+            :old-left (:old-count h)
+            :new-left (:new-count h)))
+      hunks? st
+      :else (assoc st :file (assoc file :headers (into (:headers file) [line]))))))
+
+(defn- push-hunk-line (st line old? new?)
+  "The parse state with `line` appended to the open hunk, spending its counts."
+  (let (file (or (:file st) {:hunks '()})
+        h (first (:hunks file)))
+    (assoc st
+      :file (assoc file :hunks (cons (assoc h :lines (cons line (:lines h))) (rest (:hunks file))))
+      :old-left (if old? (dec (:old-left st)) (:old-left st))
+      :new-left (if new? (dec (:new-left st)) (:new-left st)))))
+
+(defn- in-hunk? (st)
+  "Whether the open hunk still has lines to come."
+  (and (:file st) (or (> (:old-left st) 0) (> (:new-left st) 0))))
+
+(defn- parse-line (st line)
+  "Fold one line of a unified diff into the parse state."
+  (cond
+    ;; `\ No newline at end of file` annotates the line before it, whichever side
+    (and (string/starts-with? line "\\") (:file st) (not (empty? (:hunks (:file st)))))
+      (push-hunk-line st line false false)
+    (not (in-hunk? st)) (file-line st line)
+    (string/starts-with? line "+") (push-hunk-line st line false true)
+    (string/starts-with? line "-") (push-hunk-line st line true false)
+    ;; a context line; an EMPTY one is a context line whose trailing space was stripped
+    :else (push-hunk-line st line true true)))
+
+(defn- finish-hunks (file)
+  "A parsed file with each hunk's lines put back in order as a vector."
+  (assoc file
+    :hunks (into [] (map (:hunks file) (fn (h) (assoc h :lines (into [] (reverse (:lines h)))))))))
+
+(defn parse-unified (text)
+  "Parse unified-diff `text` — git's, one file or many, or `diff -u`'s — into a vector of
+files `{:old-path :new-path :headers :hunks}`. `:headers` are the lines before the first
+hunk (`diff --git`, `index`, `---`, `+++`, mode and rename lines); each hunk is
+`{:header :old-start :old-count :new-start :new-count :context :lines}`, `:lines` its
+body lines with their ` `/`+`/`-` prefix. A path is nil on the /dev/null side of an added
+or deleted file.
+
+    (count (:hunks (first (diff/parse-unified \"--- a/f\\n+++ b/f\\n@@ -1 +1 @@\\n-a\\n+b\\n\"))))   → 1"
+  (if (or (nil? text) (= (string/trim text) ""))
+    []
+    (let (st (fold (string/split text "\n")
+               {:files '() :file nil :old-left 0 :new-left 0}
+               parse-line))
+      (into [] (map (reverse (:files (close-file st))) finish-hunks)))))
+(sig parse-unified (any -> vector))
+
+;; ---- writing one back -----------------------------------------------------------
+
+(defn hunk-patch (file hunk)
+  "A patch of `hunk` alone: `file`'s header lines, the hunk's header and its lines,
+newline-terminated — `git apply` calls a patch whose last line has no newline corrupt.
+Hand it to `git apply --cached` to stage the hunk, add `--reverse` to unstage it.
+
+    (diff/hunk-patch {:headers [\"--- a/f\" \"+++ b/f\"]} {:header \"@@ -1 +1 @@\" :lines [\"-a\" \"+b\"]})   → \"--- a/f\\n+++ b/f\\n@@ -1 +1 @@\\n-a\\n+b\\n\""
+  (str (string/join (append (:headers file) [(:header hunk)] (:lines hunk)) "\n") "\n"))
+(sig hunk-patch (map map -> string))
+
+(defn- header-line (os oc ns nc context)
+  "A hunk header from its four numbers and trailing context."
+  (str "@@ -"
+    os
+    (if (= oc 1) "" (str "," oc))
+    " +"
+    ns
+    (if (= nc 1) "" (str "," nc))
+    " @@"
+    (if (or (nil? context) (= context "")) "" (str " " context))))
+
+(defn hunk-select (hunk from to &optional (reverse? false))
+  "`hunk` cut down to the changes in its body lines `[from, to)` — Magit's line-level
+staging. Every change outside the range is neutralised so the patch still applies:
+applied FORWARD (staging), an unselected `+` is dropped and an unselected `-` becomes
+context; for a patch applied in REVERSE (`reverse?` — unstaging, discarding) the roles
+swap, an unselected `-` dropped and an unselected `+` kept as context. The header's
+counts are recomputed; nil when the range holds no change at all.
+
+    (:lines (diff/hunk-select {:header \"@@ -1,2 +1,2 @@\" :old-start 1 :new-start 1 :lines [\"-a\" \"-b\" \"+c\"]} 1 3))   → [\" a\" \"-b\" \"+c\"]"
+  (let (lines (:lines hunk)
+        kept (fold (range (count lines))
+               {:out '() :dropped? false :changes 0}
+               (fn (acc i)
+                 (let (line (nth lines i)
+                       tag (if (= line "") " " (string/substring line 0 1))
+                       inside? (and (>= i from) (< i to))
+                       body (string/substring line
+                              (math/min 1 (string/length line))
+                              (string/length line)))
+                   (cond
+                     ;; the no-newline marker follows its line in or out
+                     (= tag "\\") (if (:dropped? acc) acc (assoc acc :out (cons line (:out acc))))
+                     (= tag " ") (assoc acc :out (cons line (:out acc)) :dropped? false)
+                     inside?
+                       (assoc acc
+                         :out (cons line (:out acc))
+                         :dropped? false
+                         :changes (inc (:changes acc)))
+                     ;; outside the range: the side the patch ADDS is dropped, the side it
+                     ;; would REMOVE stays as it is, i.e. as context
+                     (= tag (if reverse? "-" "+")) (assoc acc :dropped? true)
+                     :else (assoc acc :out (cons (str " " body) (:out acc)) :dropped? false)))))
+        out (into [] (reverse (:out kept)))
+        old-n (count (seq/filter out
+                       (fn (l)
+                         (or (string/starts-with? l " ") (string/starts-with? l "-") (= l "")))))
+        new-n (count (seq/filter out
+                       (fn (l)
+                         (or (string/starts-with? l " ") (string/starts-with? l "+") (= l ""))))))
+    (if (= (:changes kept) 0)
+      nil
+      (assoc hunk
+        :lines out
+        :old-count old-n
+        :new-count new-n
+        :header (header-line (:old-start hunk) old-n (:new-start hunk) new-n (:context hunk))))))
+(sig hunk-select (map int int &optional any -> any))
+
+(defn- side-line (hunk i start-key skip-tag)
+  "The line number on one side of body line `i`: that side's start plus the lines before
+`i` that exist on it (every line but `skip-tag` ones and no-newline markers)."
+  (+ (header-int (get hunk start-key) 0)
+    (count (seq/filter (take (:lines hunk) i)
+             (fn (l) (not (or (string/starts-with? l skip-tag) (string/starts-with? l "\\"))))))))
+
+(defn hunk-new-line (hunk i)
+  "The line of the NEW file that body line `i` of `hunk` is, or sits at — for a removed
+line, the line after which it was removed. What a jump from a diff to its file lands on.
+
+    (diff/hunk-new-line {:new-start 10 :lines [\" a\" \"-b\" \"+c\"]} 2)   → 11"
+  (side-line hunk i :new-start "-"))
+(sig hunk-new-line (map int -> int))
+
+(defn hunk-old-line (hunk i)
+  "The line of the OLD file that body line `i` of `hunk` is, or sits at.
+
+    (diff/hunk-old-line {:old-start 10 :lines [\" a\" \"-b\" \"+c\"]} 1)   → 11"
+  (side-line hunk i :old-start "+"))
+(sig hunk-old-line (map int -> int))
