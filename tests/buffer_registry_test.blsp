@@ -8,8 +8,9 @@
 (defn- drain (acc)
   "Every `[:registry-…]` notification already in the mailbox, oldest first."
   (receive
-    ([:registry-added n p meta] (drain (cons [:added n meta] acc)))
-    ([:registry-removed n why] (drain (cons [:removed n why] acc)))
+    ([:registry-added k n p meta] (drain (cons [:added k meta] acc)))
+    ([:registry-renamed old k n meta] (drain (cons [:renamed old k n] acc)))
+    ([:registry-removed k why] (drain (cons [:removed k why] acc)))
     (after 0 (reverse acc))))
 
 (describe "buffer-registry"
@@ -24,6 +25,7 @@
       (let (entries (registry-entries reg))
         (assert= (count entries) 1)
         (assert= (:name (first entries)) "notes")
+        (assert= (:key (first entries)) "/tmp/notes")
         (assert= (:proc (first entries)) a)
         (assert= (get-in (first entries) [:meta :type]) :text))
       (registry-stop reg)))
@@ -90,4 +92,44 @@
         (is (not (= a b)))
         (is (not (nil? (proc/info b))))
         (assert= (buffer-query b buffer-text) "again"))
+      (registry-stop reg))))
+
+(describe "buffer-registry — a document is its file, not its name"
+  (test "two files with the same display name are two processes"
+    (let (reg (registry-start)
+          a (registry-share reg "README.md" "project a" {:file "/a/README.md"})
+          b (registry-share reg "README.md" "project b" {:file "/b/README.md"}))
+      (is (not (= a b)))
+      (assert= (buffer-query a buffer-text) "project a")
+      (assert= (buffer-query b buffer-text) "project b")
+      (assert= (count (registry-entries reg)) 2)
+      (registry-stop reg)))
+  (test "a buffer with no file is keyed by its name"
+    (let (reg (registry-start)
+          a (registry-share reg "*scratch*" "" {})
+          b (registry-share reg "*scratch*" "other" {}))
+      (assert= a b)
+      (assert= (map (registry-entries reg) :key) (list "*scratch*"))
+      (registry-stop reg)))
+  (test "rekey follows a write to another file, keeps the process, and tells watchers"
+    (let (reg (registry-start))
+      (registry-watch reg (self))
+      (let (a (registry-share reg "a.txt" "x" {:file "/p/a.txt"})
+            k (registry-rekey reg "/p/a.txt" "b.txt" {:file "/p/b.txt"}))
+        (assert= k "/p/b.txt")
+        (assert= (map (registry-entries reg) :key) (list "/p/b.txt"))
+        (assert= (:name (first (registry-entries reg))) "b.txt")
+        ;; the old identity is free again, the new one is the same process
+        (assert= (registry-share reg "b.txt" "" {:file "/p/b.txt"}) a)
+        (is (not (= (registry-share reg "a.txt" "" {:file "/p/a.txt"}) a)))
+        (assert= (take (drain '()) 2)
+          (list [:added "/p/a.txt" {:file "/p/a.txt"}] [:renamed "/p/a.txt" "/p/b.txt" "b.txt"])))
+      (registry-stop reg)))
+  (test "rekey onto a live document's identity is refused; an unknown key answers nil"
+    (let (reg (registry-start)
+          _ (registry-share reg "a" "" {:file "/a"})
+          _ (registry-share reg "b" "" {:file "/b"}))
+      (assert= (registry-rekey reg "/a" "b" {:file "/b"}) :taken)
+      (assert= (registry-rekey reg "/nope" "c" {:file "/c"}) nil)
+      (assert= (count (registry-entries reg)) 2)
       (registry-stop reg))))

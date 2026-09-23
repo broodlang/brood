@@ -577,7 +577,9 @@ query-replace-all, a transpose — so undo never stops in the half-done state be
 It works by running `f` against an empty history and looking at what `f` left there: if
 `f` recorded nothing, `f` changed nothing and `buf`'s history comes back untouched; if it
 recorded anything, all of it is replaced by one snapshot of `buf`. O(1) either way — the
-history is never walked. An armed `amalgamate-undo` still applies to the group as a whole."
+history is never walked. An armed `amalgamate-undo` still applies to the group as a whole.
+
+    (count (get (editor/buffer/undo-group (editor/buffer/make-buffer \"ab\") (fn (b) (editor/buffer/insert (editor/buffer/insert b \"x\") \"y\"))) :undo))   → 1"
   (let (after (f (assoc buf :undo () :undo-amalgamate false))
         history (or (get buf :undo) ()))
     (cond
@@ -601,19 +603,26 @@ history is never walked. An armed `amalgamate-undo` still applies to the group a
 ;; runs per undo step and never per keystroke or per frame.
 
 (defn buffer-modified? (buf)
-  "True when `buf`'s text has changed since it was read, created or last saved."
+  "True when `buf`'s text has changed since it was read, created or last saved.
+
+    (editor/buffer/buffer-modified? (editor/buffer/make-buffer \"a\"))   → false
+    (editor/buffer/buffer-modified? (editor/buffer/insert (editor/buffer/make-buffer \"a\") \"b\"))   → true"
   (= true (get buf :modified)))
 (sig buffer-modified? (buffer -> bool))
 
 (defn mark-buffer-saved (buf)
   "`buf` with its current text as the saved baseline — unmodified. `save-buffer` and
-`buffer-from-file` do this; call it after writing the text out some other way."
+`buffer-from-file` do this; call it after writing the text out some other way.
+
+    (editor/buffer/buffer-modified? (editor/buffer/mark-buffer-saved (editor/buffer/insert (editor/buffer/make-buffer \"a\") \"b\")))   → false"
   (assoc buf :modified false :saved-rope (get buf :rope)))
 (sig mark-buffer-saved (buffer -> buffer))
 
 (defn mark-buffer-modified (buf)
   "`buf` flagged as differing from its file even though no edit made it so — a buffer
-whose file vanished, or whose text came from somewhere other than its file."
+whose file vanished, or whose text came from somewhere other than its file.
+
+    (editor/buffer/buffer-modified? (editor/buffer/mark-buffer-modified (editor/buffer/make-buffer \"a\")))   → true"
   (assoc buf :modified true))
 (sig mark-buffer-modified (buffer -> buffer))
 

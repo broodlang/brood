@@ -396,7 +396,10 @@ rather than closed after a body. An identity check on the record, not a key snif
 
 (defn loopback-host? (hostport)
   "Whether a `Host` header value (`localhost:8080`, `127.0.0.1`, `[::1]:80`) names the
-loopback interface."
+loopback interface.
+
+    (http/loopback-host? \"localhost:5000\")   → true
+    (http/loopback-host? \"evil.example\")   → false"
   (includes? *http-loopback-hosts* (string/lower (http-host-name (or hostport "")))))
 (sig loopback-host? ((or string nil) -> bool))
 
@@ -412,7 +415,9 @@ loopback interface."
   "Wrap `handler` so it answers only requests a page served FROM this loopback server
 could make: 403 unless the `Host` header is `localhost` / `127.0.0.1` / `[::1]` (any
 port), and — when the browser sends an `Origin` — that origin is loopback too. See the
-section comment for the attacks each check stops."
+section comment for the attacks each check stops.
+
+    (:status ((http/loopback-only (fn (req) (http/text-response \"in\"))) {:headers {\"host\" \"evil.example:80\"}}))   → 403"
   (fn (req)
     (let (headers (/get req :headers)
           origin (/get headers "origin"))
@@ -423,7 +428,9 @@ section comment for the attacks each check stops."
 
 (defn random-token ()
   "A fresh secret for `require-token`: 128 bits from the OS CSPRNG, as 32 hex chars —
-safe to put in a URL."
+safe to put in a URL.
+
+    (string/length (http/random-token))   → 32"
   (encoding/hex-encode-bytes (crypto/random-bytes 16)))
 (sig random-token (-> string))
 
@@ -434,7 +441,10 @@ safe to put in a URL."
 (defn require-token (token handler)
   "Wrap `handler` so it answers only a request carrying `token` — as the `token` query
 parameter or an `X-Token` header — and 403s everything else. Compared in constant time,
-so the response time says nothing about how much of a guess was right."
+so the response time says nothing about how much of a guess was right.
+
+    (:status ((http/require-token \"t\" (fn (req) (http/text-response \"in\"))) {:query \"token=t\" :headers {}}))   → 200
+    (:status ((http/require-token \"t\" (fn (req) (http/text-response \"in\"))) {:query \"\" :headers {}}))   → 403"
   (let (want (string/->bytes token))
     (fn (req)
       (let (given (http-request-token req))
