@@ -2,6 +2,29 @@
 
 Chronological record of work sessions. Newest at the bottom.
 
+## 2026-09-23 — CI green again after three red commits: KI-186, KI-187 and the day's follow-ups
+
+CI had failed on every commit since `4c2807f3` (editor/section), and the red run list hid it
+behind cancellations until `make green` said so. Two real checker bugs and five stale tests.
+
+- **KI-187** — the order differential's red. `vt` and `editor/section` both declare a `row`,
+  and a bare type name inside `vt`'s own declarations was resolved from the checked file, so
+  once `editor/section` was loaded `vt`'s `terminal` read as `any`. Bare names in an alias
+  body or a loaded module's `sig` now resolve in the declaring module first.
+- **KI-186** — `nest check bin/tool.blsp` replayed its previous verdict after an edit,
+  because the whole-project verdict key named listed files outside the source trees but did
+  not fingerprint them.
+- **Follow-ups.** `string/fill-prefix` (d077b195) calls `regex/find`, so a source load of
+  `string` now pulls in `regex` and `table`. That moved `test`'s eager `:load` closure and
+  the artifact-matrix state dump, and the three new `string` names had no catalogue
+  category. http's `parse-request` splits the query off `:path` (08195edb), which the
+  registry mock in `package_test` still matched on. `image_sigs` built its image inside the
+  interpreter under test when none was on disk (CI's tree-walker job), which loaded
+  everything and so hid the transitive load it asserts. It now builds in a throwaway one.
+
+Both KI guards are sabotage-verified. The first KI-187 guard was a unit test that could not
+fail, because its helper installs no alias table. It was replaced by a `brood --check` test.
+
 ## 2026-09-23 — `*ui-loop*`: an app can ask whether it is running inside a loop
 
 The companion to `evalsession` routing by request. Before firing work at another process an

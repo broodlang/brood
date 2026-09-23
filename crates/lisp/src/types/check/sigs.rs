@@ -2560,12 +2560,14 @@ pub(super) fn declared_heap_sig_with_vars(
     sym: Symbol,
 ) -> Option<super::ctx::SigWithVars> {
     let type_value = super::deps::obs_declared_sig_value(heap, sym)?;
-    annot::parse_arrow_type_with_vars(heap, type_value)
+    annot::in_declaring_scope(sym, || annot::parse_arrow_type_with_vars(heap, type_value))
 }
 
 pub(super) fn declared_heap_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
     let type_value = super::deps::obs_declared_sig_value(heap, sym)?;
-    annot::parse_type(heap, type_value)?.as_arrow().cloned()
+    annot::in_declaring_scope(sym, || annot::parse_type(heap, type_value))?
+        .as_arrow()
+        .cloned()
 }
 
 /// The **overload** counterpart of [`declared_heap_sig`] (ADR-116) — the
@@ -2578,7 +2580,7 @@ pub(super) fn declared_heap_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
 /// form). `None` for a plain single-arrow sig or no declaration at all.
 pub(super) fn declared_heap_overload(heap: &Heap, sym: Symbol) -> Option<Vec<Sig>> {
     let type_value = super::deps::obs_declared_sig_value(heap, sym)?;
-    annot::parse_type(heap, type_value)?
+    annot::in_declaring_scope(sym, || annot::parse_type(heap, type_value))?
         .overload_sigs()
         .cloned()
 }
@@ -2597,7 +2599,7 @@ pub(super) fn declared_heap_overload(heap: &Heap, sym: Symbol) -> Option<Vec<Sig
 /// (that's `declared_heap_sig`'s) or no declaration at all.
 pub(super) fn declared_heap_value_ty(heap: &Heap, sym: Symbol) -> Option<Ty> {
     let type_value = super::deps::obs_declared_sig_value(heap, sym)?;
-    let ty = annot::parse_type(heap, type_value)?;
+    let ty = annot::in_declaring_scope(sym, || annot::parse_type(heap, type_value))?;
     if ty.as_arrow().is_some() {
         return None;
     }

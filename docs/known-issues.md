@@ -172,6 +172,8 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-183 | **`concurrency_test` "a watcher's death releases the monitors it held" read `:monitored-by` 2 where 0 was expected, once, in CI's suite wrapper at `653d41d9` (tree-walker job, `brood_suite_passes` TRY 1)** — the day after KI-176 gave the monitor table its watcher-side index (`by_watcher`), which is exactly the path a watcher's death now takes to release its monitors | ✅ **FIXED 2026-09-23** — the first reading was right: `retire_pid_tail` fired the dying process's downs BEFORE `sweep_dead_watcher`, so a reader woken by the down could still count the dead watcher's monitors. It reproduces on demand (1–5 stale reads in 8000 looped rounds). The sweep now runs first. The guard is a looped test in `concurrency_test`, red 3/3 with the old order |
 | KI-184 | **`vm_prim_error_pos_test` "an error escaping a contract shim reports the innermost positioned call site" is red on `main` since ADR-385: the error now reports `std/contract.blsp:135` — the body of `%contract-shim-2` — instead of the user's call at line 33** — KI-181's rule gives an untagged error the innermost call site that HAS a position, and the shim templates moved from the prelude (positionless) into a CORE module the reader positions, so the innermost positioned site is now the shim's own `(%contract-check-ret … (%contract-orig a b))` | ✅ **FIXED 2026-09-22** — option (b), made exact: `CompiledArm` carries the closure's authoring MODULE (ADR-383's `Closure::module`, already flowing into `compile_arm`), and `attach_vm_trace` treats a position the `contract` module's own code owns as untagged — the running arm is a shim and the position is one of its instructions', or a pending shim frame's call site equals it — then takes the innermost positioned call outside any shim frame. Keyed on the module, not the file or the name: `contract_bind` carries the ORIGINAL's `fn_name` and the arm's `src_file` came out as the caller's file, so neither marks a shim; and not on the frame's env, which cannot be read there — the driver has unwound its roots (the first cut killed the test process). Guard: the existing `vm_prim_error_pos_test` case reads 33 armed and unarmed, 135 with the rule disabled. Was: attributed on a clean worktree at `cf8c2821` without any other change (3 tests, 1 failed, `actual 33 expect 135`; both suites read the same on the day's other tree). Not a sweep or contracts-kernel regression: the shim's code moved, its positions came with it. Options, the owner's call: (a) build the shim closures without positions (they are generated code — a user reading `contract.blsp:135` learns nothing), e.g. strip form positions in `%contract-shim-*` or load that module with positions off; (b) `attach_vm_trace` prefers the innermost positioned site OUTSIDE the frame that raised when that frame is a contract shim (`shim_original` already recognises one); (c) accept and re-pin the test at 135. (a) keeps KI-181's rule and the user-facing answer |
 | KI-185 | **a module LOAD inside the contract policy hook tripped the use-after-GC wire** — ADR-385 moved the shim machinery into `std/contract.blsp` and had `%contract-wrap` `require-one` it at its first armed call. The hook runs wherever a BINDING comes to exist — inside a `def`, inside a module's `provide` sweep, inside whatever evaluation reached them — and a module load is arbitrary evaluation, hence a collection, at a point those callers are not GC-safe across. `BROOD_VM=0` + `nest test` with contracts armed (CI's `differential (tree-walker)` job) panicked on the per-deref tripwire: `use-after-GC: bytes handle (nursery slot 5) is from epoch 6, but that generation is now epoch 7`, in `bytes_to_list ← call_native ← eval_tail_loop` | ✅ **FIXED 2026-09-22** — the module is loaded once at runtime boot when `contracts_armed()` (`Interp::new`), where every boot already collects; the hook's `require-one` is now behind `(unless (bound? 'contract/shim) …)`, a no-op in every armed process and a last resort for the one path that arms after boot (a `sig!` in an otherwise unarmed run). ADR-385's win is untouched — an unarmed run still never loads the module (`BROOD_IMAGE_TRACE` reads 0 lines) and the empty-file count is unchanged at 78.9M. Bisected by restoring the pre-ADR-385 prelude: the case passes there and fails with the lazy load, which is what named the cause |
+| KI-186 | **`nest check <file>` replayed a stale verdict for a listed file outside the source and test trees** — the ADR-382 whole-project verdict key fingerprinted `all-files` (the source and test trees) and only NAMED the listed paths, so an edit to `bin/tool.blsp` left the key unchanged and the previous run's lines were printed as this run's: an unbound call added there checked clean, exit 0 | ✅ **FIXED 2026-09-23** — `project-verdict-key` fingerprints the listed files beside `all-files`. Guard `nest::check_incremental` "an edit to a listed file outside the source paths is not replayed" (exit code + warning, not the key), red with the listed files left out of the fingerprint |
+| KI-187 | **what `nest check` inferred from `vt` depended on which files it had checked before — a loaded module's bare type names were resolved from the CHECKED file** — `vt` and `editor/section` (4c2807f3) each declare a `row`; `vt`'s `terminal` (`:grid (vector row)`) and `(sig line (row any -> …))` were read in the checked file's namespace, where two loaded `row`s leave the unique-suffix rule ambiguous. Once a file referencing `editor/section` had been checked, `terminal` widened to `any` (`(vt/lines 7)` went unreported) and `row` to `vector`. CI's `check_order_differential` red since 4c2807f3 | ✅ **FIXED 2026-09-23** — a bare name inside an alias body resolves in the ALIAS's module first, and a loaded module's heap-declared `sig` is parsed in the declaring module's scope (`annot::in_declaring_scope`, wrapped around the four parse sites in `sigs.rs`). Guard `cli::deftype_through_imports` "a loaded module's alias means what it meant where it was declared" (`brood --check` on a file using both modules), red with the declaring-scope lookup disabled |
 
 | KI-178 | **the JIT's inline `pair?` answered `false` for a RANGE and a SEQ-VIEW** — `PrimOp1::IsPair` compared the discriminant byte against `TAG_PAIR` alone, on the strength of a comment saying ranges "also carry TAG_PAIR"; they carry their own bytes (11, 12), so `(pair? (range 3))` and `list?` were `true` on the VM and the tree-walker and `false` once the asking arm tiered up — since the lowering was written; found by a contract over `seqable` rejecting `(range 100)` on the two-thousandth `into` | ✅ **FIXED 2026-09-21** — the lowering accepts `TAG_PAIR | TAG_RANGE | TAG_SEQVIEW`, the two new constants pinned by the layout test; `tests/jit_pair_predicate_test.blsp` counts wrong answers over 20 000 activations (19 841 before the fix) |
 | KI-175 | **the checker seeded a fold callback's accumulator from the fold's RESULT, losing `init`** — over a provably non-empty input the result rule leaves `init` out (the step ran at least once), but the callback's first step is handed `init`; `(fold [3 9 4] nil (fn (b x) (if (nil? b) x …)))` read `b` as `3 \| 9 \| 4` and flagged the callback's own `nil?` guard as never true — a PLAIN-mode false positive (the one thing the checker must never do). Found by `fold-for`'s docstring example the day ADR-377 was written | ✅ **FIXED 2026-09-20** — `walk::calls::fold_callback_seed` seeds the accumulator with `init ∪ result` (the first element ∪ result for a no-init `reduce`). Pinned in `closure_inference.rs` both ways (the `nil` seed is quiet; a `0` seed still makes the `nil?` dead), sabotage-verified. One strict finding it uncovered was right: `linmap_soundness_test`'s `lm-fold` is handed `5` on purpose by one caller, so its `assoc` can see a `5` — `check-allow`ed like its sibling |
@@ -11874,6 +11876,58 @@ so imaged code reported a line from one file under another file's name. `%image-
 now takes the module key and stamps the section's own source path, the trap
 `set_form_pos_in_file` documents for the expander. Verified in all six combinations of
 engine × contracts × image.
+
+## KI-187 — a loaded module's bare type names were resolved from the checked file ✅ FIXED 2026-09-23
+
+**Seen:** CI's `check_order_differential` (`a_files_verdict_does_not_depend_on_the_order_the_files_were_given_in`)
+red from `4c2807f3` on: over `tests/`, `vt_test.blsp`'s verdict lost precision in forward
+order and not in reverse. Bisected over the files sorting before it to
+`tests/section_test.blsp`, i.e. to `editor/section` being loaded.
+
+**Cause:** `vt` declares `(deftype row (vector cell))`, and `editor/section` declares a record
+`row`. A bare alias name is resolved in the checked file's namespace, then through its
+imports, then to the one loaded module declaring it (ADR-327). That is right for the checked
+file's own `sig`s, but it was also applied INSIDE `vt`'s declarations: `terminal`'s
+`:grid (vector row)` and `(sig line (row any -> …))`. Once both modules were loaded the
+suffix rule saw two `row`s and declined, so `terminal` read as `any` and `row` as `vector`. A
+file calling `(vt/lines 7)` checked clean if and only if the process had already loaded
+`editor/section`.
+
+**Repro:** `brood --check` on
+`(defmodule p) (defn- s () (editor/section/section-render (editor/section/section :root nil nil []))) (defn- a () (vt/line 5 nil)) (defn- b () (vt/lines 7))`:
+one warning (`expects vector`) instead of two (`expects row`, `expects terminal`). Drop the
+`s` line and both appear.
+
+**Fix:** `annot::alias_ty` resolves a bare name in the DECLARING module first. That module is
+the innermost alias being expanded (`ALIASES_EXPANDING`), or the function whose heap-declared
+signature is being parsed (`DECLARING`). `sigs.rs`'s four parse sites (`declared_heap_sig`,
+`_with_vars`, `_overload`, `_value_ty`) run under `annot::in_declaring_scope(sym, …)`. The
+checked file's own names are unaffected, since neither stack is set there.
+
+**Guard:** `crates/cli/tests/deftype_through_imports.rs`
+`a_loaded_modules_alias_means_what_it_meant_where_it_was_declared` runs the repro above
+through `brood --check`. It is red with the declaring-scope lookup disabled. A unit test
+through `warnings_with` was tried first and could not fail: that helper checks one form with
+no alias table installed, so `vt/lines` gets no warning with or without the fix.
+
+## KI-186 — `nest check` replayed a stale verdict for a listed file outside the source paths ✅ FIXED 2026-09-23
+
+**Seen:** `nest check bin/tool.blsp` in a project, then an edit to `bin/tool.blsp` that calls
+an unbound function, then the same command: the second run printed the first run's (clean)
+verdict and exited 0.
+
+**Cause:** the ADR-382 whole-project verdict record (`project-verdict-key`,
+`std/tool/project-check.blsp`) is keyed on the cache stamp, the manifest, the sorted listed
+paths and `(project-image/fingerprint-of (all-files root))`. `all-files` walks the source and
+test trees only, so a listed file outside them contributed its PATH and never its content.
+Stale warnings replayed the same way as a stale clean did.
+
+**Fix:** the fingerprint covers `(append (all-files root) listed)`. **Guard:**
+`crates/nest/tests/check_incremental.rs`
+`an_edit_to_a_listed_file_outside_the_source_paths_is_not_replayed` asserts the exit code and
+the warning, the two things a gate reads. With the listed files taken back out of the
+fingerprint it goes red and its two neighbours stay green.
+
 ## KI-183 — `:monitored-by` read 2 after a watcher's death, once, in CI ✅ FIXED 2026-09-23
 
 **Fixed (2026-09-23).** The ordering hole the "next sighting" note suspected is real.
