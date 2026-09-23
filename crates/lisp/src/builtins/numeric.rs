@@ -12,7 +12,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
     use crate::types::Sig;
     use crate::types::Ty;
     // numeric primitives — `%add`..`%div` accept and return the wider NUMBER
-    // (int + int may overflow into Float; the others always do on a Float arg).
+    // (int + int may overflow into a bignum; a Float argument makes the result a Float).
     // `%lt` is comparison → bool; `%eq` accepts anything and returns bool.
     primitives.def(
         "%add",
@@ -1501,6 +1501,14 @@ pub(crate) enum NumericText {
 /// argument; out-of-range radices are the caller's problem (the runtime raises, and the
 /// checker simply declines to specialize).
 pub(crate) fn classify_numeric_text(s: &str, radix: Option<u32>) -> NumericText {
+    // Brood has no digit separators (the reader refuses `1_000` as reserved syntax), but
+    // `num_bigint`'s parsers accept `_` between digits where `i64`'s and `f64`'s do not.
+    // Left to them, `"1_000"` classified as an over-range `Big` and the runtime built a
+    // bignum holding 1000: a debug-build panic, and in release an `Int`/`BigInt` pair that
+    // compared unequal at the same value. Refuse it once here, for runtime and checker both.
+    if s.contains('_') {
+        return NumericText::NotANumber;
+    }
     if let Some(radix) = radix {
         if !(2..=36).contains(&radix) {
             return NumericText::NotANumber;
@@ -1540,7 +1548,7 @@ pub(super) fn string_to_number(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
             NumericText::Int(i) => Value::int(i),
             NumericText::Big | NumericText::Float => {
                 match num_bigint::BigInt::parse_bytes(s.as_bytes(), radix) {
-                    Some(n) => heap.alloc_bigint(n),
+                    Some(n) => heap.int_from_bigint(n),
                     None => heap.alloc_failure(&format!(
                         "string/->number: not a base-{radix} integer: {s:?}"
                     )),
@@ -1564,9 +1572,10 @@ pub(super) fn string_to_number(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
         // An integer too big for i64 is a bignum — mirroring the reader's
         // over-range literal path — NOT a lossy f64 (which silently rounded
         // `(str big)` away from round-tripping, kernel audit).
-        // Reaching here means the i64 parse failed, so `n` is out of range
-        // and `alloc_bigint`'s no-demotion invariant holds.
-        Ok(heap.alloc_bigint(n))
+        // Reaching here means the i64 parse failed, so `n` should be out of range;
+        // `int_from_bigint` normalizes anyway, so a parser that accepts more than
+        // `i64`'s (it once took `_` separators) cannot build an in-range bignum.
+        Ok(heap.int_from_bigint(n))
     } else if let Ok(f) = s.parse::<f64>() {
         Ok(Value::float(f))
     } else {

@@ -112,4 +112,12 @@
     (assert= (string/->number "1e3") 1000.0)
     (is (failure? (string/->number "nope")))
     (is (failure? (string/->number "1.5.6")))
-    (is (failure? (string/->number "0x10")))))
+    (is (failure? (string/->number "0x10"))))
+  ;; `num_bigint` accepts `_` separators that the reader, `i64` and `f64` all refuse, so
+  ;; "1_000" used to classify as an over-range bignum holding 1000 — a panic in a debug
+  ;; build, an in-range BigInt (unequal to the Int 1000) in release.
+  (test "string/->number refuses digit separators, as the reader does"
+    (is (failure? (string/->number "1_000")))
+    (is (failure? (string/->number "100000000000000000000_0")))
+    (is (failure? (string/->number "1_0" 16)))
+    (assert= (string/->number "10" 16) 16)))
