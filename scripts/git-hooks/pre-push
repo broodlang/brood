@@ -56,7 +56,10 @@ types_touched=$(printf '%s\n' "$changed" | grep -c '^crates/lisp/src/types/')
 # ---- 3. the BROOD_* flag catalogue -------------------------------------------------
 catalogue=crates/lisp/src/diagnostics/debug_flags.rs
 missing=""
-for f in $(printf '%s\n' "$changed" | grep -E '\.(rs|blsp)$'); do
+# The Rust test's scope exactly: `crates/` and `std/`, minus the test/bench/example trees,
+# whose `"BROOD_…"` literals are fixtures (an env var a test sets), not runtime flags.
+for f in $(printf '%s\n' "$changed" | grep -E '^(crates|std)/.*\.(rs|blsp)$' \
+                                    | grep -vE '(^|/)(target|tests|benches|examples)/'); do
     [ -f "$f" ] || continue
     [ "$f" = "$catalogue" ] && continue
     for flag in $(grep -oE '"BROOD_[A-Z0-9_]+"' "$f" 2>/dev/null | sort -u); do
