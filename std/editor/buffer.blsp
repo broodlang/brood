@@ -77,8 +77,9 @@ Where `end-of-line` lands and the rightmost column point can hold on that line."
 
 (defn make-buffer (text &optional (name "*scratch*") (file nil))
   "A fresh buffer holding `text`, with point at 0, no mark, and an empty undo history.
-`name` is a label (default `\"*scratch*\"`); `file` is the backing path or nil."
-  (buffer (text/from-string text) 0 nil name file () ()))
+`name` is a label (default `\"*scratch*\"`); `file` is the backing path or nil. It starts
+unmodified: `text` is its baseline (`buffer-modified?`)."
+  (mark-buffer-saved (buffer (text/from-string text) 0 nil name file () ())))
 
 (defn buffer? (x)
   "True if `x` is a buffer value — by record identity, not by shape."
@@ -128,12 +129,12 @@ unsaved buffer rather than erroring."
 
 (defn save-buffer (buf)
   "Write `buf`'s text to its `:file`; raise if it has none. Returns `buf` stamped with
-the file's new mtime (`buffer-stamp-file`), so a caller that keeps the result knows the
-file and the text agree again."
+the file's new mtime (`buffer-stamp-file`) and unmodified (`mark-buffer-saved`), so a caller
+that keeps the result knows the file and the text agree again."
   (let (f (get buf :file))
     (if (nil? f)
       (error "save-buffer: buffer has no file: " (get buf :name))
-      (do (file/spit f (buffer-text buf)) (buffer-stamp-file buf)))))
+      (do (file/spit f (buffer-text buf)) (mark-buffer-saved (buffer-stamp-file buf))))))
 
 (defn buffer-file-changed? (buf)
   "True when the file behind `buf` has been written since the buffer last agreed with it
@@ -542,23 +543,79 @@ command) into one undo, the Emacs way — keeping this primitive's default simpl
   (assoc buf :undo-amalgamate true))
 
 (sig amalgamate-undo (buffer -> buffer))
-(defn- buffer-push-undo (buf)
-  "Record `buf`'s pre-edit state for undo — called by an editing op before it changes the
-text. Normally conses a fresh snapshot onto `:undo` (each op its own undo step); when
-`amalgamate-undo` armed the one-shot `:undo-amalgamate` (and there's a group to merge
-into) it drops this op's snapshot so the run undoes as one. A no-op when undo is disabled
-(`disable-undo`). (Does not touch `:pending-undo`: the next undo run starts fresh anyway —
-the editor restarts it whenever the previous command wasn't an undo.)"
-  (cond
-    (get buf :undo-disabled) buf
-    (and (get buf :undo-amalgamate) (not (empty? (get buf :undo))))
-      (assoc buf
-        :undo-amalgamate false)
-    else
-      (assoc buf
-        :undo (cons (buffer-snapshot buf) (or (get buf :undo) ()))
-        :undo-amalgamate false)))
-(sig buffer-push-undo (buffer -> buffer))
+(defn- buffer-record-change (buf)
+  "Record that `buf`'s text is about to change — called by EVERY editing op, and only by
+one that really changes the text. Two facts follow from a change, and this is the one place
+both are kept, so no op can record one and forget the other:
+
+  - the buffer is now modified (`buffer-modified?`);
+  - its pre-edit state goes on `:undo`. Normally a fresh snapshot (each op its own undo
+    step); when `amalgamate-undo` armed the one-shot `:undo-amalgamate` (and there's a group
+    to merge into) this op's snapshot is dropped so the run undoes as one. Nothing is
+    recorded when undo is disabled (`disable-undo`).
+
+(Does not touch `:pending-undo`: the next undo run starts fresh anyway — the editor
+restarts it whenever the previous command wasn't an undo.)"
+  (let (buf (assoc buf :modified true))
+    (cond
+      (get buf :undo-disabled) buf
+      (and (get buf :undo-amalgamate) (not (empty? (get buf :undo))))
+        (assoc buf
+          :undo-amalgamate false)
+      else
+        (assoc buf
+          :undo (cons (buffer-snapshot buf) (or (get buf :undo) ()))
+          :undo-amalgamate false))))
+(sig buffer-record-change (buffer -> buffer))
+
+(defn undo-group (buf f)
+  "Apply `f` (`buffer -> buffer`) to `buf` as ONE undo step, however many edits it makes:
+a single `undo` restores `buf` exactly as it was, point included. The way to write a
+command that is several edits — a replace that is a delete then an insert, a
+query-replace-all, a transpose — so undo never stops in the half-done state between them.
+
+It works by running `f` against an empty history and looking at what `f` left there: if
+`f` recorded nothing, `f` changed nothing and `buf`'s history comes back untouched; if it
+recorded anything, all of it is replaced by one snapshot of `buf`. O(1) either way — the
+history is never walked. An armed `amalgamate-undo` still applies to the group as a whole."
+  (let (after (f (assoc buf :undo () :undo-amalgamate false))
+        history (or (get buf :undo) ()))
+    (cond
+      (empty? (get after :undo))
+        (assoc after :undo history :undo-amalgamate (get buf :undo-amalgamate))
+      (get buf :undo-disabled) (assoc after :undo history)
+      (and (get buf :undo-amalgamate) (not (empty? history)))
+        (assoc after :undo history :undo-amalgamate false)
+      else (assoc after :undo (cons (buffer-snapshot buf) history) :undo-amalgamate false))))
+(sig undo-group (buffer (buffer -> buffer) -> buffer))
+
+;; ---- modified: does the text differ from the file? ---------------------------
+;; The buffer owns this, because only the buffer sees every change: an editor that kept the
+;; flag itself had to set it in each command, and the commands that forgot (kill, yank,
+;; query-replace — a dozen of them) lost unsaved work silently on close.
+;;
+;; Every editing op passes through `buffer-record-change`, which sets `:modified`. The
+;; baseline is `:saved-rope` — the text as it was read or last written — and an undo step
+;; compares against it, so undoing back to the saved text makes the buffer unmodified again
+;; (Emacs does the same). That comparison is by content (O(n) worst case), which is why it
+;; runs per undo step and never per keystroke or per frame.
+
+(defn buffer-modified? (buf)
+  "True when `buf`'s text has changed since it was read, created or last saved."
+  (= true (get buf :modified)))
+(sig buffer-modified? (buffer -> bool))
+
+(defn mark-buffer-saved (buf)
+  "`buf` with its current text as the saved baseline — unmodified. `save-buffer` and
+`buffer-from-file` do this; call it after writing the text out some other way."
+  (assoc buf :modified false :saved-rope (get buf :rope)))
+(sig mark-buffer-saved (buffer -> buffer))
+
+(defn mark-buffer-modified (buf)
+  "`buf` flagged as differing from its file even though no edit made it so — a buffer
+whose file vanished, or whose text came from somewhere other than its file."
+  (assoc buf :modified true))
+(sig mark-buffer-modified (buffer -> buffer))
 
 (defn disable-undo (buf)
   "Turn off undo recording for `buf` and drop any existing history. For a log / output
@@ -593,13 +650,17 @@ walks the *reverse* direction — i.e. it redoes."
 (defn undo-next (buf)
   "One step of the current undo run: restore the next snapshot in `:pending-undo`,
 recording the current state onto `:undo` (so this very step is itself reversible) and
-advancing `:pending-undo`. A no-op (returns `buf`) when the run is exhausted."
+advancing `:pending-undo`. A no-op (returns `buf`) when the run is exhausted. The
+restored text is compared with the saved baseline, so undoing back to what is on disk
+leaves the buffer unmodified."
   (let (p (get buf :pending-undo))
     (if (empty? p)
       buf
-      (assoc (buffer-restore buf (first p))
-        :undo (cons (buffer-snapshot buf) (or (get buf :undo) ()))
-        :pending-undo (rest p)))))
+      (let (restored (buffer-restore buf (first p)))
+        (assoc restored
+          :undo (cons (buffer-snapshot buf) (or (get buf :undo) ()))
+          :pending-undo (rest p)
+          :modified (not (= (get restored :rope) (get buf :saved-rope))))))))
 (sig undo-next (buffer -> buffer))
 
 ;; ---- undo in a region: undo only the lines you selected ----------------------
@@ -754,7 +815,7 @@ whole thing back."
           ;; record the pre-state (so this is itself undoable), then swap the text.
           ;; Point is clamped; the MARK is kept so the region stays live for a repeat.
           (let ([undone tail] found
-                pushed (buffer-push-undo buf)
+                pushed (buffer-record-change buf)
                 rope (text/from-string undone))
             (assoc pushed
               :rope rope
@@ -1047,7 +1108,7 @@ insertion point shift with the text. Throws if `buf` is read-only."
     buf
     (let (p (get buf :point)
           _ (buffer-barf-if-protected-insert buf p)
-          buf (buffer-push-undo buf))
+          buf (buffer-record-change buf))
       (buffer-adjust-editable (buffer-adjust-markers (assoc buf
                                                        :rope (text/insert (get buf :rope) p s)
                                                        :point (+ p (string/length s))
@@ -1067,7 +1128,7 @@ no-op at end-of-buffer is not recorded). Throws if `buf` is read-only."
     (if (= p end)
       buf
       (let (_ (buffer-barf-if-protected-delete buf p end)
-            buf (buffer-push-undo buf))
+            buf (buffer-record-change buf))
         (buffer-adjust-editable (buffer-adjust-markers (assoc buf
                                                          :rope (text/delete (get buf :rope) p end)
                                                          :mark nil)
@@ -1084,7 +1145,7 @@ Recorded for undo (a no-op at point 0 is not recorded). Throws if `buf` is read-
     (if (= p start)
       buf
       (let (_ (buffer-barf-if-protected-delete buf start p)
-            buf (buffer-push-undo buf))
+            buf (buffer-record-change buf))
         (buffer-adjust-editable (buffer-adjust-markers (assoc buf
                                                          :rope (text/delete (get buf :rope) start p)
                                                          :point start
@@ -1105,7 +1166,8 @@ both, else `buf` unchanged. The backspace half of an electric bracket key: what 
 `(` put there, one backspace takes away, so a pair is never left half-deleted. Callers
 fall through to `delete-backward-char` on the unchanged buffer."
   (if (and (= (buffer-char-before buf) open) (= (buffer-char-after buf) close))
-    (delete-char (delete-backward-char buf (string/length open)) (string/length close))
+    (undo-group buf
+      (fn (b) (delete-char (delete-backward-char b (string/length open)) (string/length close))))
     buf))
 (sig delete-empty-pair (buffer string string -> buffer))
 
@@ -1122,7 +1184,7 @@ region is empty. Recorded for undo (restoring it brings back the mark too). Thro
         (if (= lo hi)
           (assoc buf :mark nil)
           (let (_ (buffer-barf-if-protected-delete buf lo hi)
-                buf (buffer-push-undo buf))
+                buf (buffer-record-change buf))
             (buffer-adjust-editable (buffer-adjust-markers (assoc buf
                                                              :rope
                                                                (text/delete (get buf :rope) lo hi)
@@ -1135,8 +1197,10 @@ region is empty. Recorded for undo (restoring it brings back the mark too). Thro
   "Replace the characters in `[start, end)` with string `s`, leaving point just after
 the inserted text. The splice primitive: completion-at-point, comment toggling,
 query-replace, re-indentation, and transpose are all this. Composes `delete-char` +
-`insert`, so range clamping and undo behave exactly as those do."
-  (insert (delete-char (goto-char buf start) (- end start)) s))
+`insert` (so range clamping and read-only behave exactly as those do) inside one
+`undo-group`: a single undo puts the old text back, never the half-way state with the
+range deleted and nothing inserted."
+  (undo-group buf (fn (b) (insert (delete-char (goto-char b start) (- end start)) s))))
 (sig replace-region (buffer int int string -> buffer))
 
 ;; ---- rectangles: column-block ops (Emacs C-x r r/k/d/o/c/t/y) ---------------

@@ -1359,3 +1359,74 @@ suite run. `*test-wait-ms*` is a failure deadline, reached only if a relay never
     (let (b (make-buffer (str (string/repeat "filler line\n" 400) "the needle here")))
       (assert= (index-of (buffer-text b) "the needle")
         (buffer-search-forward b "THE NEEDLE" 0 true)))))
+
+(describe "undo-group: several edits, one undo"
+  (test "replace-region undoes in one step, back to the text AND point before it"
+    (let (b (goto-char (make-buffer "foo bar") 2)
+          r (replace-region b 0 3 "FOO")
+          u (undo r))
+      (assert= (buffer-text r) "FOO bar")
+      (assert= (buffer-text u) "foo bar")
+      (assert= (buffer-point u) 2)))
+  (test "a group of many edits is one step, and the edit before it is the next"
+    (let (b (-> (make-buffer "a a a") (goto-char 5) (insert "!"))
+          all (undo-group b
+                (fn (x)
+                  (-> x (replace-region 0 1 "b") (replace-region 2 3 "b") (replace-region 4 5 "b"))))
+          back1 (undo-next (undo-start all))
+          back2 (undo-next back1))
+      (assert= (buffer-text all) "b b b!")
+      (assert= (buffer-text back1) "a a a!")
+      (assert= (buffer-text back2) "a a a")))
+  (test "a group that changes nothing records nothing and keeps the history"
+    (let (b (-> (make-buffer "ab") (insert "X"))
+          g (undo-group b (fn (x) (end-of-buffer x))))
+      (assert= (count (get g :undo)) 1)
+      (assert= (buffer-text (undo g)) "ab")))
+  (test "a group honours an armed amalgamate — it merges into the running step"
+    (let (b (-> (make-buffer "") (insert "a") amalgamate-undo)
+          g (undo-group b (fn (x) (insert (insert x "b") "c"))))
+      (assert= (buffer-text g) "abc")
+      (assert= (buffer-text (undo g)) "")))
+  (test "a group on an undo-disabled buffer records nothing"
+    (let (g (undo-group (disable-undo (make-buffer "x")) (fn (x) (replace-region x 0 1 "y"))))
+      (assert= (buffer-text g) "y")
+      (is (empty? (get g :undo)))))
+  (test "delete-empty-pair is one step"
+    (let (b (-> (make-buffer "") (insert-pair "(" ")"))
+          d (delete-empty-pair b "(" ")"))
+      (assert= (buffer-text d) "")
+      (assert= (buffer-text (undo d)) "()"))))
+
+(describe "buffer-modified?: the buffer, not its caller, knows it changed"
+  (test "a fresh buffer is unmodified; any edit modifies it"
+    (let (b (make-buffer "abc"))
+      (refute (buffer-modified? b))
+      (is (buffer-modified? (insert b "x")))
+      (is (buffer-modified? (delete-char b)))
+      (is (buffer-modified? (delete-backward-char (end-of-buffer b))))
+      (is (buffer-modified? (replace-region b 0 1 "z")))
+      (is (buffer-modified? (delete-region (goto-char (set-mark b) 2))))))
+  (test "a no-op edit leaves it unmodified"
+    (let (b (make-buffer "abc"))
+      (refute (buffer-modified? (delete-char (end-of-buffer b))))
+      (refute (buffer-modified? (insert b "")))
+      (refute (buffer-modified? (undo-group b (fn (x) x))))))
+  (test "undoing back to the saved text makes it unmodified again; redo modifies it"
+    (let (e (insert (make-buffer "abc") "x")
+          u (undo e))
+      (refute (buffer-modified? u))
+      (is (buffer-modified? (undo u)))))
+  (test "undoing PAST the save point is a modification"
+    (let (path (str (temp-dir "brood-buf-") ".txt")
+          _ (file/spit path "v0")
+          e (insert (buffer-from-file path) "1")
+          saved (save-buffer e)
+          e2 (insert saved "2"))
+      (refute (buffer-modified? saved))
+      (refute (buffer-modified? (undo e2))) ; back to what is on disk
+      (is (buffer-modified? (-> e2 undo-start undo-next undo-next))))) ; older than disk
+  (test "mark-buffer-saved and mark-buffer-modified set the baseline explicitly"
+    (let (e (insert (make-buffer "a") "b"))
+      (refute (buffer-modified? (mark-buffer-saved e)))
+      (is (buffer-modified? (mark-buffer-modified (make-buffer "a")))))))

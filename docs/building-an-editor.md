@@ -308,7 +308,12 @@ Everything except the loop is pure, so test it like any other Brood code:
 - **Undo — nearly free.** A buffer is an immutable value, so undo is just a
   *stack of past buffers*: keep `{:buffer b :history (list …)}`, push the old
   buffer before each edit, pop to undo. No diffing, no special data structure —
-  this falls straight out of the immutable design.
+  this falls straight out of the immutable design. `std/editor/buffer` does exactly
+  this, and adds the two things a real editor needs on top: `undo-group` makes a
+  command that is several edits (a replace, a transpose, a query-replace-all) one undo
+  step, and `buffer-modified?` is kept by the buffer itself — every edit passes one
+  choke point that sets it, and undoing back to the saved text clears it — so no
+  command can change the text and forget to say so.
 - **Multiple buffers / windows.** Either hold a list of buffers in editor state,
   or give each its own process via `spawn-buffer` and render the *views* it
   replies with. The reply-with-views boundary is the same one a remote frontend
