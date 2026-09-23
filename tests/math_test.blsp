@@ -34,6 +34,24 @@
     (assert-error (math/floor "x"))
     (assert-error (ceil :k))
     (assert-error (round nil)))
+  ;; `ceil` was `(- (floor (- x)))`, so its overflow error came from `floor` with the
+  ;; negated value: "floor: -1e300 is out of range".
+  (test "an out-of-range float names the rounder that was called, and its argument"
+    (assert= (try (ceil 1e300) (catch e (error-message e)))
+      "math/ceil: 1e300 has no integer value in the int range")
+    (assert= (try (ceil -1e300) (catch e (error-message e)))
+      "math/ceil: -1e300 has no integer value in the int range")
+    (assert= (try (round 1e300) (catch e (error-message e)))
+      "math/round: 1e300 has no integer value in the int range")
+    (assert= (try (round -1e300) (catch e (error-message e)))
+      "math/round: -1e300 has no integer value in the int range"))
+  (test "ceil and round agree with floor on exact and edge arguments"
+    (assert= (ceil 5/2) 3)
+    (assert= (ceil -5/2) -2)
+    (assert= (round -2.5) -3)
+    (assert= (round -3.4) -3)
+    (assert= (round 7/2) 4)
+    (assert= (ceil -9.223372036854775808e18) -9223372036854775808))
   (test "round-to keeps a fixed number of decimal places"
     (assert= (round-to 3.14159 2) 3.14)
     (assert= (round-to 0.015873015873 3) 0.016)

@@ -210,18 +210,35 @@ tower, not just the int `0`. A type with no impl RAISES rather than answering.
 ;; Rounding & roots, all Brood over the one Float->Int primitive `floor` (toward
 ;; -inf) plus `rem`/`/`/`*`. `floor` of an int is itself, so these pass ints
 ;; through unchanged.
+;;
+;; `floor` raises on a float with no i64 floor, and its message names `floor` and the
+;; value IT was given — so when `ceil` was `(- (floor (- x)))`, `(ceil 1e300)` said
+;; "floor: -1e300 is out of range": the wrong function and the wrong sign. The rounders
+;; check their own argument first, so the error names the call the user wrote. The
+;; window is floor's: a float in [-2^63, 2^63) (NaN fails both comparisons), and neither
+;; rounder negates its argument, so nothing in that window can step out of it.
+(defn- %rounding-arg (who x)
+  (if (and (float? x) (not (and (>= x -9.223372036854775808e18) (< x 9.223372036854775808e18))))
+    (error who ": " x " has no integer value in the int range")
+    x))
+
 (defn ceil (x)
-  "Round `x` toward positive infinity to an integer.
+  "Round `x` toward positive infinity to an integer. A float with no integer value in
+the int range (an infinity, NaN, or a magnitude past 2^63) is an error naming `math/ceil`.
 
-    (math/ceil 1.2)       → 2"
-  (- (math/floor (- x))))
+    (math/ceil 1.2)       → 2
+    (math/ceil -1.2)      → -1"
+  (let (x (%rounding-arg "math/ceil" x) f (math/floor x)) (if (< f x) (+ f 1) f)))
 
-;; round half away from zero: floor(x+0.5) for x>=0, mirrored for x<0.
+;; round half away from zero: floor(x+0.5) for x>=0, ceil(x-0.5) for x<0.
 (defn round (x)
-  "Round `x` to the nearest integer (halves away from zero).
+  "Round `x` to the nearest integer (halves away from zero). A float with no integer
+value in the int range is an error naming `math/round`.
 
-    (math/round 2.5)       → 3"
-  (if (< x 0) (- (math/floor (+ (- x) 0.5))) (math/floor (+ x 0.5))))
+    (math/round 2.5)       → 3
+    (math/round -2.5)      → -3"
+  (let (x (%rounding-arg "math/round" x))
+    (if (< x 0) (ceil (- x 0.5)) (math/floor (+ x 0.5)))))
 
 ;; (pow base exp) — `exp` must be an integer (use `sqrt` for roots). Int base +
 ;; non-negative exp stays an int (overflow raises, like `*`); a negative exp gives
