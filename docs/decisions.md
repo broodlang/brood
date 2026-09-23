@@ -25066,3 +25066,65 @@ discarding: the other way round), and the header's counts are recomputed.
 off the loop on every refresh and not fast enough to run on it for a large diff; bedit
 parses in the status buffer's collection task. Other list-shaped editor buffers (dired,
 *Tests*, occur) can adopt `editor/section` for folding and navigation without new code.
+
+## ADR-389 — Regex: Brood keeps the pattern LANGUAGE, a native engine does the matching
+
+**Status:** implemented (2026-09-23). New primitives `%regex-match?`, `%regex-find`,
+`%regex-find-all`, `%regex-tokens`, `%regex-paint` (`crates/lisp/src/builtins/regex_native.rs`,
+over `regex-automata`'s `meta::Regex`). `std/regex.blsp` keeps its parser and gains a
+translator; its Thompson NFA, bitset DFA, Pike VM and token scanner are deleted (1,486 → ~560
+lines). Supersedes ADR-352's engine; its `tokens` semantics stand.
+
+**Context.** The engine was written in Brood, on purpose (ADR-006): an NFA compiled once,
+a bitset lazy DFA for `match?`, a Pike VM for captures, and ADR-352's scanner for lexers.
+It was linear-time and correct, and it was slow for the one caller that matters most: an
+editor. bedit decides whether each visible row of a results buffer is a `file:line` link
+by trying a four-pattern table, and that cost ~0.5 ms a line (release build, 2026-09-23) —
+a 19-line *git-status* took 25 ms to paint, 96 ms under `nest run`, on every blink. The
+engine's per-character cost is the interpreter's, and making the interpreter 50× faster at
+bit-twiddling set simulation is not on any roadmap.
+
+**Decision.** Split along ADR-006's own line — Rust for mechanism, Brood for policy.
+
+- **Policy stays Brood.** The dialect is the parser's: a stray `*`/`{`/`)` and an
+  unterminated `[` are the characters they look like, `\n` is an `n`, `.` crosses newlines,
+  `^`/`$` are the whole string. The parser's AST is TRANSLATED into the engine's syntax with
+  every construct written out (`(?s:.)`, `\A`, `\z`, `[0-9]`, each quantified atom wrapped
+  in `(?:…)`, literals escaped by the engine's own metacharacter list — not "all
+  punctuation", since `\<` is a word boundary there). The engine's readings of the same
+  characters never leak through, and redefining the parser redefines every pattern.
+- **Mechanism is native.** `regex-automata` (lazy DFA + Pike VM, linear time, no
+  backtracking — the guarantees the Brood engine had). Leftmost-first for `find`; for the
+  lexer, an ANCHORED search under `MatchKind::All`, which is exactly "the longest match
+  here". Compiled patterns are cached process-wide by text, one `Arc` shared by every
+  worker thread (a `Regex` per call would rebuild its DFA each time).
+- **The primitives answer the language's values** — the match and token maps — not
+  offsets. Measured: the engine found a match in 0.8 µs and building its map in Brood took
+  another 6, so offsets gave most of the gain back. Constructing a result inside one
+  builtin is the `%map-into` precedent, not a mutable escape hatch.
+- **Offsets stay characters**, converted from the engine's bytes by the string's own char
+  index.
+
+**Semantics that changed**, deliberately, because the engine's are the better ones and
+matching them keeps `\b` consistent with `\w`:
+
+- `\w` is Unicode word characters (letters, marks, digits, `_`) — it was "a character
+  with an upper and a lower case", so `日本語` had no word characters. `\s` is Unicode
+  whitespace (it was space, tab, `\n`, `\r`). `\b` follows `\w`. `\d` stays ASCII `0-9`,
+  because a digit is something `string/->number` has to be able to read.
+- `\b` works anywhere in a `tokens` rule and in `paint`; both used to refuse one that the
+  bitset engine could not see.
+- A stray top-level `)` is a literal. It used to END the pattern: `a)x` parsed as `a`.
+
+**Measured** (release build, contracts off; before → after): a four-pattern `file:line`
+table over four lines 1,922 → 34 µs; `find-all` of 30 matches in 200 chars 1,055 → 14 µs;
+`replace` 176 → 22 µs; `tokens` over a 70-char line 61 → 9 µs; `match?` 7 → <1 µs.
+
+**Consequences.** `tests/regex_test.blsp` 66 → 77 (the dialect's translation, offsets past
+multi-byte characters, a cross-process run sharing the compiled patterns); the two tests
+that asserted the `\b` refusals now assert boundaries. `docs/primitives.md` gains a Regex
+row. The `regex` benchmark row now measures the native engine; it is no longer a
+dogfooding signal for the interpreter, and a bitset-heavy workload that wants one should
+be added in its place. A program that BUILDS patterns grows Brood's translation memo
+without bound, as it grew the old compile memo; the native cache is capped at 4,096 and
+cleared when full.

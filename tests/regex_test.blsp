@@ -1,4 +1,4 @@
-;; std/regex — the small backtracking regex engine (pure Brood). Register-only —
+;; std/regex — Brood's pattern dialect over the native engine (ADR-389). Register-only —
 ;; run by `nest test` (and cargo test, via crates/lisp/tests/suite.rs).
 
 (defmodule regex-test (:use test) (:use regex))
@@ -220,7 +220,7 @@
 ;; asserting is that they never disagree about whether there is a match at all.
 (defn- agree? (pattern s) (= (match? pattern s) (not (nil? (find pattern s)))))
 
-(describe "regex engines agree on the same patterns"
+(describe "match?, matches?, find and find-all agree on the same patterns"
   (test "across sets, quantifiers, alternation and anchors"
     (is (agree? "[a-z]+" "abc"))
     (is (agree? "[a-z]+" "123"))
@@ -235,7 +235,7 @@
     (is (agree? "\\d+" ""))
     (is (agree? "a*" ""))))
 
-(describe "\\b and \\B — word boundaries (zero-width, on both engines)"
+(describe "\\b and \\B — word boundaries (zero-width)"
   (test "find sees a whole word and not the same letters inside one"
     (assert= (map (regex/find-all "\\bfi\\b" "file fi fi_ x fi") (fn (m) (get m :start)))
       (list 5 14))
@@ -256,7 +256,7 @@
     (assert= (map (regex/find-all "(\\bin\\b)" "in inside in") (fn (m) (get m :start))) (list 0 10))
     (assert= (get (regex/find "\\b\\w+\\b(?:\\s+\\b\\w+\\b)*" "a bb ccc") :text) "a bb ccc")))
 
-;; `tokens` — the lexer's scan on the bitset engine (ADR-352): where a match begins and
+;; `tokens` — the lexer's scan (ADR-352, native since ADR-389): where a match begins and
 ;; how far it reaches, with the RULE as the token's identity instead of a capture group.
 (defn- toks (rules s)
   "`[tag text]` per token — the shape the assertions read."
@@ -278,14 +278,16 @@
     (assert= (toks [["^#.*" :c]] "#a b") (list [:c "#a b"]))
     (assert= (map (regex/tokens [["b$" :e]] "bab") (fn (t) (get t :start))) (list 2))
     (assert= (toks [["a+$" :e]] "aa aa") (list [:e "aa"])))
-  (test "a \\b at a rule's edge is a boundary guard on the scanner's side"
+  (test "a \\b at a rule's edge is a word boundary"
     (assert= (toks [["\\b\\d+\\b" :n]] "a1 22 3b 44") (list [:n "22"] [:n "44"]))
     (assert= (toks [["\\bfi" :k]] "file fi") (list [:k "fi"] [:k "fi"]))
     (assert= (toks [["fi\\b" :k]] "file fi") (list [:k "fi"]))
     ;; `\\\\b` is an escaped backslash then a `b`, not a boundary
     (assert= (toks [["x\\\\b" :k]] "x\\b") (list [:k "x\\b"])))
-  (test "a \\b inside a rule is refused, naming the rule"
-    (assert-error (regex/tokens [["a\\bb" :x]] "ab")))
+  (test "a \\b inside a rule is a boundary too — the old engine could only guard the edges"
+    (assert= (toks [["a\\b" :x]] "a ab") (list [:x "a"]))
+    (assert= (toks [["\\w+\\b-" :x]] "ab- a-b") (list [:x "ab-"] [:x "a-"]))
+    (assert= (regex/tokens [["a\\bb" :x]] "ab") []))
   (test "an empty match never makes a token; the empty string has none"
     (assert= (regex/tokens [["a*" :a]] "bbb") [])
     (assert= (toks [["a*" :a] ["b" :b]] "bab") (list [:b "b"] [:a "a"] [:b "b"]))
@@ -308,7 +310,7 @@
       (doseq (s lines)
         (assert= (toks rules s) (via-find s))))))
 
-(describe "regex find — the bitset prefilter finds the start, the VM runs from there"
+(describe "regex find — a start found far along a line"
   (test "results are unchanged where a match exists, including empty and end matches"
     (assert= (get (regex/find "a*" "bbb") :end) 0)
     (assert= (map (regex/find-all "\\d*" "a1") (fn (m) [(get m :start) (get m :end)]))
@@ -326,7 +328,7 @@
     (is (nil? (regex/find "#.*" (string/repeat "abcdefgh" 200))))
     (assert= (regex/find-all "\"[^\"]*\"" (string/repeat "no quotes " 100)) [])))
 
-(describe "regex paint — a line rule on the DFA: prefix, the painted text, suffix"
+(describe "regex paint — a line rule: prefix, the painted text, suffix"
   (test "paints the text between a prefix at the line's start and a suffix after it"
     (assert= (regex/paint "^\\s*" "\\[[^\\]]*\\]" "" "  [core] x") [2 8])
     (assert= (regex/paint "^" "[^\\s:#=][^:#=]*" ":(?:[^=]|$)" "build: x") [0 5])
@@ -341,8 +343,83 @@
       [4 9])
     (is (nil? (regex/paint "^" "[a-z]+" ":" "abc")))
     (is (nil? (regex/paint "^" "x" "" "")))
-    (assert-error (regex/paint "^" "\\bx" "" "x")))
+    ;; a boundary is allowed in a line rule now, as anywhere
+    (assert= (regex/paint "^" "\\bx\\b" "" "x y") [0 1]))
   (test "a tokenizer held in a def scans like its table"
     (let (tz (regex/tokenizer [["\\d+" :n] ["[a-z]+" :w]]))
       (assert= (map (regex/tokens tz "ab12") (fn (t) (get t :tag))) (list :w :n))
       (assert= (regex/tokens tz "ab12") (regex/tokens [["\\d+" :n] ["[a-z]+" :w]] "ab12")))))
+
+;; ---- the dialect is Brood's, the engine native (ADR-389) ------------------------------
+;; The parser translates every construct explicitly, so the engine's own readings of the
+;; same characters never leak through. Each of these is a place the two syntaxes differ.
+(describe "regex dialect — what the translation keeps from the engine's syntax"
+  (test ". crosses a newline; ^ and $ are the whole string, not a line"
+    (is (matches? "a.b" "a\nb"))
+    (is (not (match? "^b" "a\nb")))
+    (is (not (match? "a$" "a\nb"))))
+  (test "an escaped letter is that letter, and a newline is written as one"
+    (is (matches? "\\n" "n"))
+    (is (not (match? "\\n" "\n")))
+    (is (matches? "a\nb" "a\nb")))
+  (test "a character the engine reads as syntax is a literal where the dialect says so"
+    (is (matches? "a&&b" "a&&b"))
+    (is (matches? "[a&&b]+" "a&b"))
+    (is (matches? "[~-]+" "~-~"))
+    (is (matches? "x#y" "x#y"))
+    (is (matches? "\\<a\\>" "<a>")))
+  (test "a stray metacharacter is the character it looks like"
+    (is (matches? "a)" "a)"))
+    ;; a stray ) used to END the pattern: `a)x` was `a`, and matched "ay"
+    (is (not (match? "a)x" "ay")))
+    (is (matches? "(a))" "a)"))
+    (is (matches? "[)]" ")"))
+    (is (matches? "*a" "*a"))
+    (is (matches? "a**" "a*"))
+    (is (matches? "(a" "a")))
+  (test "an empty set matches nothing, a negated empty one anything, a backwards range nothing"
+    (is (not (match? "[]" "abc")))
+    (is (matches? "[^]" "\n"))
+    (is (not (match? "[z-a]" "m"))))
+  (test "\\d is ASCII — what string/->number reads — while \\w and \\s are Unicode"
+    (is (not (matches? "\\d" "٣")))
+    (is (matches? "\\w+" "日本語"))
+    (is (matches? "\\w+" "café"))
+    (is (matches? "\\s" "\u{a0}"))
+    (assert= (map (find-all "\\b\\w+\\b" "naïve café") (fn (m) (get m :text)))
+      (list "naïve" "café"))))
+
+(describe "regex offsets are characters, not bytes"
+  (test "find and its groups past multi-byte characters"
+    (let (m (find "(\\d+):(\\d+)" "héllo wörld 12:34"))
+      (assert= (get m :start) 12)
+      (assert= (get m :text) "12:34")
+      (assert= (get (second (get m :groups)) :start) 15)))
+  (test "find-all, including an empty match stepping over a multi-byte character"
+    (assert= (map (find-all "x*" "éxé") (fn (m) [(get m :start) (get m :end)]))
+      (list [0 0] [1 2] [2 2] [3 3])))
+  (test "tokens and paint"
+    (assert= (map (tokens [["[a-zé]+" :w]] "→ été ok") (fn (t) [(get t :start) (get t :end)]))
+      (list [2 5] [6 8]))
+    (assert= (paint "^·\\s*" "[a-z]+" ":" "· key: v") [2 5]))
+  (test "replace and split splice at the right characters"
+    (assert= (replace "ö" "föö" "o") "foo")
+    (assert= (split "→" "a→b→c") ["a" "b" "c"])))
+
+;; Every language feature runs across cores (CLAUDE.md): the compiled patterns are one
+;; process-wide cache the worker threads share, so many processes matching at once — the
+;; same pattern and different ones — must each get their own right answer.
+(describe "regex across processes"
+  (test "many processes matching at once, sharing the compiled patterns"
+    (let (me (self)
+          n 24
+          _ (doseq (i (range n))
+              (spawn (fn ()
+                       (let (line (str "file" i ".ex:" (* i 7) ": boom")
+                             m (find "([\\w.]+):(\\d+)" line)
+                             toks (tokens [["\\d+" :n] ["[a-z]+" :w]] line))
+                         (send me [i (get (second (get m :groups)) :text) (count toks)])))))
+          got (fold (range n) {} (fn (acc _) (receive ([i text k] (assoc acc i [text k]))))))
+      (doseq (i (range n))
+        (assert= (first (get got i)) (str (* i 7)))
+        (is (> (second (get got i)) 2))))))

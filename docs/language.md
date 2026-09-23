@@ -3571,7 +3571,8 @@ sse      ; Server-Sent Events helpers
 test         ; describe / test / assert= / is — the test framework
 format       ; printf-style string formatting
 json         ; json-encode / json-decode
-regex        ; re-match / re-find / re-replace (thin wrapper over the regex engine)
+regex        ; match? / matches? / find / find-all / replace / split / tokens / paint —
+             ;   Brood's pattern dialect, translated for the native engine (ADR-389)
 set          ; set-specific algebra: set / union / intersection / difference / subset?
              ;   (conj/disj/get/into/contains? on a set are prelude — no import needed)
 fuzzy        ; fuzzy string matching

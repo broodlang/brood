@@ -49,6 +49,7 @@ mod evaluation;
 mod filesystem;
 mod fuzzy;
 mod io;
+mod regex_native;
 mod text_search;
 // `pub(crate)` for `eval::unbound_error`'s KI-120 diagnostic, which asks whether a missing
 // qualified name belongs to a baked-in module that `*features*` records as loaded.
@@ -177,6 +178,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // Appended after it, for the same order reason: `%fuzzy-top` is the newest primitive.
     fuzzy::register(&mut primitives);
     text_search::register(&mut primitives);
+    regex_native::register(&mut primitives);
 }
 
 // (The doc comment and `#[rustfmt::skip]` that used to sit here belonged to the

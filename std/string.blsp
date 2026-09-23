@@ -409,8 +409,9 @@ the start of every line. Emacs's adaptive fill, for the common cases.
     (string/fill-prefix \"  ;; hello\")   → \"  ;; \"
     (string/fill-prefix \"    code\")   → \"    \"
     (string/fill-prefix \"plain\")   → \"\""
-  (let (m (regex/find "^\\s*(;+|#+|//+|--|>+|\\*)?\\s*" (first (split s "\n"))))
-    (if m (get m :text) "")))
+  (let (m (regex/find "^\\s*(;+|#+|//+|--|>+|\\*)?\\s*" (first (split s "\n")))
+        text (if m (get m :text) nil))
+    (if (string? text) text "")))
 (sig fill-prefix (string -> string))
 
 ;; (restored: this is string's repeat, not the sequence one)

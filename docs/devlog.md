@@ -2,6 +2,31 @@
 
 Chronological record of work sessions. Newest at the bottom.
 
+## 2026-09-23 — regex goes native: the dialect stays Brood, the matching moves to `regex-automata` (ADR-389)
+
+Found from bedit: its *git-status* buffer painted in 25 ms (96 ms under `nest run`) because
+every visible row was tried against a four-pattern `file:line` table, and the Brood engine
+cost ~0.5 ms a line for that. bedit stopped asking (its links are a map), but the engine
+was the real cost for every caller, so it moved.
+
+`std/regex.blsp` keeps the parser and translates its AST into `regex-automata` syntax, every
+construct spelled out so the engine's own readings never leak in; five primitives run the
+result (`regex_native.rs`). The NFA, bitset DFA, Pike VM and ADR-352 scanner are gone —
+1,486 lines to ~560. The lexer's "longest match at this position" is an anchored search
+under `MatchKind::All`, which is exactly that. The first cut had the primitives return
+offsets and Brood build the maps: the engine found a match in 0.8 µs and the map took 6,
+so they now return the maps.
+
+Before → after, release build, contracts off: the `file:line` table over four lines 1,922 →
+34 µs; `find-all` (30 matches) 1,055 → 14 µs; `replace` 176 → 22 µs; `tokens` (70 chars) 61
+→ 9 µs; `match?` 7 → <1 µs.
+
+Two findings on the way. A stray top-level `)` ENDED the pattern — `a)x` was `a` — in the
+old parser too; it is a literal now (sabotage-verified). And `vec_or_nil` was gated on
+`dev-tools`, so any always-built primitive that used it would have broken the lean
+`nest release` bundle; it is ungated. `\w`/`\s`/`\b` are Unicode now (`\d` stays ASCII), and
+`\b` works inside a `tokens` rule and in `paint`, both of which used to refuse one.
+
 ## 2026-09-23 — KI-183 fixed: a death is observable only after the monitors it held are released
 
 `retire_pid_tail` fired the dying process's `[:down …]` fan-out (`take_target`) and only then

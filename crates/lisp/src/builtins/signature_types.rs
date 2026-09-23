@@ -41,13 +41,15 @@ pub(crate) const bool_ty: Ty = Ty::of(Tag::Bool);
 pub(crate) const nil_ty: Ty = Ty::of(Tag::Nil);
 pub(crate) const pair: Ty = Ty::of(Tag::Pair);
 pub(crate) const vec_ty: Ty = Ty::of(Tag::Vector);
-/// A vector, or nil for "nothing to report" (`%vm-arm-ops`).
-#[cfg(feature = "dev-tools")]
+/// A vector, or nil for "nothing to report" (`%vm-arm-ops`, `%regex-paint`). Not gated on
+/// `dev-tools`: the regex primitives are in every build.
 pub(crate) const vec_or_nil: Ty = Ty::of_tags(&[Tag::Vector, Tag::Nil]);
 /// A bool, or nil for "nothing to report" (`%vm-arm-stale?`).
 #[cfg(feature = "dev-tools")]
 pub(crate) const bool_or_nil: Ty = Ty::of_tags(&[Tag::Bool, Tag::Nil]);
 pub(crate) const map_ty: Ty = Ty::of(Tag::Map);
+/// A map, or nil for "no answer" (`%regex-find`'s no match).
+pub(crate) const map_or_nil: Ty = Ty::of_tags(&[Tag::Map, Tag::Nil]);
 pub(crate) const set_ty: Ty = Ty::of(Tag::Set);
 pub(crate) const pid_ty: Ty = Ty::of(Tag::Pid);
 pub(crate) const ref_ty: Ty = Ty::of(Tag::Ref);

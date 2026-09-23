@@ -4,6 +4,16 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## Unreleased
+
+**Native regex matching** (ADR-389). `std/regex` keeps Brood's pattern dialect — its parser,
+and the forgiving rules for a stray metacharacter — and translates each pattern for
+`regex-automata`, which does the matching. `find`, `find-all`, `replace`, `match?`,
+`tokens` and `paint` are 7× to 60× faster: a four-pattern `file:line` table over a line
+went from ~0.5 ms to ~8 µs. Changed behaviour: `\w`, `\s` and `\b` are Unicode (`\d` stays
+ASCII `0-9`); `\b` works inside a `tokens` rule and in `paint`; a stray top-level `)` is a
+literal instead of silently ending the pattern.
+
 ## v0.33.0 — the pieces an editor's git porcelain is built on, and a subprocess that stops when told
 
 **`std/editor/transient` — a menu that builds a value, not a key sequence** (ADR-387). This
