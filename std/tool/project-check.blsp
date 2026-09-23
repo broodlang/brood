@@ -1172,14 +1172,20 @@ check-result cache and the `--failed`/`--stale` records live in; created on dema
 ;; the previous run recorded, its printed lines ARE this run's verdict; print them and stop.
 ;; The record holds only the lines (never dep-keys), so it stays small and reads in ms.
 ;; `brood file`'s pre-flight has the same shape at file granularity (ADR-371).
+;;
+;; The LISTED files are fingerprinted as well as named. `all-files` walks the source and
+;; test trees only, so a listed file outside them (`nest check bin/deploy.blsp`) was keyed
+;; by its path alone: an edit to it replayed the previous verdict, stale warnings and a
+;; stale CLEAN alike — an unbound symbol added there read 0 warnings (KI-186).
 (defn- project-verdict-key (root paths)
-  (str (project-cache-stamp)
-    "\n"
-    (project-check-manifest "checks")
-    "\n"
-    (string/join (sort (map (or paths nil) path/absolute)) "\n")
-    "\n"
-    (project-image/fingerprint-of (all-files root))))
+  (let (listed (sort (map (or paths nil) path/absolute)))
+    (str (project-cache-stamp)
+      "\n"
+      (project-check-manifest "checks")
+      "\n"
+      (string/join listed "\n")
+      "\n"
+      (project-image/fingerprint-of (append (all-files root) listed)))))
 
 (defn- project-verdict-record (root)
   ;; check-allow :discarded-catch — a best-effort cache read: absence is the answer
