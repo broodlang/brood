@@ -2,6 +2,16 @@
 
 Chronological record of work sessions. Newest at the bottom.
 
+## 2026-09-23 — `*ui-loop*`: an app can ask whether it is running inside a loop
+
+The companion to `evalsession` routing by request. Before firing work at another process an
+app has to know whether there is a loop to receive the answer; bedit answered it with
+`(whereis :editor)`, which is true of the first window only. A second frame and every
+`--serve` client's loop read as "no loop" and did the work inline in the wrong process — the
+playground evaluating in the daemon's own image with no timeout, a breakpoint freezing a
+second window's loop. `ui-run` now binds `*ui-loop*` to its own pid for the loop's whole
+life, `update` and `view` alike; nil outside one. Test in `ui_test`.
+
 ## 2026-09-23 — `editor/evalsession`: an answer goes to whoever asked
 
 Found from bedit (its issues.md L4): a playground opened in a second FRAME sent its forms and

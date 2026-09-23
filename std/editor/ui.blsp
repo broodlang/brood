@@ -374,6 +374,15 @@ already-open window instead of opening a duplicate (e.g. a repeated `(observe)`)
 ;; small. A fragment that is not emitted this turn is simply not in the next table:
 ;; the memo is bounded by the frame, and nothing needs evicting.
 
+(defdyn *ui-loop* nil)
+;; The pid of the `ui-run` loop this code is running inside — bound for the loop's whole
+;; life, `update` and `view` alike — or nil outside one: a test calling `update` directly, a
+;; batch run. The one question an app has to ask before it fires work at another process and
+;; waits for the answer to come back as an input: is there a loop here to receive it? An
+;; editor used to answer it with a registered name (`:editor`), which is true of exactly one
+;; loop — so a second window, or a daemon's per-client loop, read as "no loop" and did the
+;; work inline, in the wrong process, with nothing to time it out.
+
 (defdyn *ui-memo* nil)
 ;; The previous turn's memo table — `{key -> [deps ops]}` — while `view` runs inside
 ;; `ui-loop`; nil outside a loop (a test calling a view directly, a headless render),
@@ -663,7 +672,7 @@ non-blocking window. The shared loop behind the observer (and the editor)."
       (do
         ;; nil last-good: first render must succeed. {} clock: a fresh timer bookkeeping
         ;; map (last-input/armed/fired filled lazily on the first iteration).
-        (ui-loop model nil {} view update display)
+        (binding (*ui-loop* (self)) (ui-loop model nil {} view update display))
         ((get display :leave)))
       (catch e
         ; restore the terminal even on a frontend/startup error
