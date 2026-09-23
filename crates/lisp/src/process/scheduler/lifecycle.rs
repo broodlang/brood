@@ -101,14 +101,19 @@ fn retire_pid_tail(pid: u64, reason: Message) {
     // (a name lives only as long as its process). Without this, named-spawn
     // would see the stale entry as "already running" and never respawn.
     crate::dist::unregister_dead_pid(pid);
+    // The dead process's own watches: drop entries where *it* was the watcher,
+    // or they leak until each watched target dies (kernel audit). Takes
+    // MONITORS sequentially like everything in this function — never nested.
+    // **Before the downs fire, and the order is load-bearing (KI-183):** a
+    // `[:down …]` is what makes this death observable, so everything the death
+    // releases must be released by then. With the sweep after the fan-out, a
+    // watcher woken by the down could read a target's `:monitored-by` still
+    // counting the dead process's monitors — 1–5 reads in 8000 on a loaded box.
+    monitor::sweep_dead_watcher(pid);
     let watchers = crate::core::sync::lock(&monitor::MONITORS).take_target(pid);
     for w in watchers {
         monitor::fire_down(w, pid, reason.clone());
     }
-    // The dead process's own watches: drop entries where *it* was the watcher,
-    // or they leak until each watched target dies (kernel audit). Takes
-    // MONITORS sequentially like everything in this function — never nested.
-    monitor::sweep_dead_watcher(pid);
     // Links (ADR-067), after monitors and with no table lock held: notify every
     // linked peer — a trappable `[:EXIT pid reason]` if it traps, else an abnormal
     // reason propagates as a hard kill that cascades through *its* links. Mirrors

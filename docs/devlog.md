@@ -2,6 +2,21 @@
 
 Chronological record of work sessions. Newest at the bottom.
 
+## 2026-09-23 — KI-183 fixed: a death is observable only after the monitors it held are released
+
+`retire_pid_tail` fired the dying process's `[:down …]` fan-out (`take_target`) and only then
+swept the monitors the dying process itself held (`sweep_dead_watcher`). The down is what
+makes a death observable, so a watcher woken by it could read a target's `:monitored-by` still
+counting the dead watcher's monitors. That is exactly `concurrency_test`'s "a watcher's death
+releases the monitors it held", read 2 once in CI. It reproduces on demand: four processes
+running the test's round 2000 times each read a stale count 1, 5, 0 and 5 times in 8000
+(release, VM), and 5 under `BROOD_VM=0`. With the sweep moved ahead of the fan-out it read 0
+in 64 000. The window predates KI-176's `by_watcher` index; the old full-table walk was
+simply slower to reach. Guard: the looped test beside the one-shot one, which reads 3, 3 and 7
+with the order restored and 0 with the fix, under the VM, the tree-walker and
+`BROOD_GC_STRESS=1`. The 29 test files that touch monitors or links pass, and so do the Rust
+monitor/link/dist tests. Links still notify after monitors, which is unchanged.
+
 ## 2026-09-22 — KI-184 fixed: a contract shim's own positions are never the reported one
 
 ADR-385 moved the shim templates into `std/contract.blsp`, a positioned module, so an error

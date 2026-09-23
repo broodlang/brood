@@ -12,6 +12,16 @@ sysctl that moves under you — that file's last section has the one-line check)
 questions are answerable here; check that file's "what this box CAN answer" before deferring
 anything.
 
+## 2026-09-23 — KI-183 fixed; no open item; perf item 4 is next
+
+KI-183 was a real ordering hole, not a slow CI box: a dying process's `[:down …]` fired
+before the monitors it held were swept (devlog 2026-09-23). It reproduces on demand in a
+looped round, and the fix and a sabotage-verified looped guard are in. Verified with
+targeted runs only (the no-full-suite rule): the 29 monitor/link test files, the Rust
+monitor/link/dist tests, and `concurrency_test` under the VM, `BROOD_VM=0` and
+`BROOD_GC_STRESS=1`. CI's suite jobs are the full-suite proof, so read `make green` after
+the push. Next is item 4 of the perf queue (below), which has not started.
+
 ## 2026-09-22 (later) — KI-184 fixed; the `(not …)` sweep is in; KI-183 is the only watch
 
 KI-184 (ADR-385's shim positions) is fixed in `attach_vm_trace` with `CompiledArm::module`
