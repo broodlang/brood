@@ -187,9 +187,9 @@
                              "    (io/puts (str \"before=\" before \" imaged=\" (if (%std-image-installed) true false)"
                              "               \" after-ref=\" after-ref \" v=\" v \" after-call=\" after-call))))"]
                 "\n"))
-          ;; Through `env`: `os/cmd` takes no environment, and without `BROOD_NO_CHECK` the
-          ;; file runner's pre-flight checker loads `url` before the program's first line.
-          result (if exe (os/cmd "env" ["BROOD_NO_CHECK=1" exe prog]) nil))
+          ;; without `BROOD_NO_CHECK` the file runner's pre-flight checker loads `url`
+          ;; before the program's first line
+          result (if exe (os/cmd exe [prog] {:env {"BROOD_NO_CHECK" "1"}}) nil))
       (is (or (nil? exe) (string? exe)))
       (when result
         ;; The child's stderr IS the diagnosis when it fails; compare it, not just the code.
