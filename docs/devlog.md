@@ -2,6 +2,22 @@
 
 Chronological record of work sessions. Newest at the bottom.
 
+## 2026-09-23 — `editor/evalsession`: an answer goes to whoever asked
+
+Found from bedit (its issues.md L4): a playground opened in a second FRAME sent its forms and
+waited forever. A session had one sink — the process registered `:editor`, the first frame —
+so every answer went there, and the first frame dropped them as not its own. The same shape
+is behind a `--serve` daemon's clients.
+
+A session is shared, so it now says so. A request names where its answer goes
+(`session-request … reply-to`); `:ready` and `:down` go to every client that started or
+subscribed (a second `session-start` naming a sink subscribes it); and the wire ids are the
+session's own — each request is given the next one and a route back to `[client-id
+reply-to]`, because two clients counting from 1 would otherwise settle each other's
+watchdogs and receive each other's answers. A respawn answers every in-flight request at its
+own address. Five tests beside the existing twenty-one, the routing sabotage-verified (routes
+ignored: the two routing tests red).
+
 ## 2026-09-23 — regex goes native: the dialect stays Brood, the matching moves to `regex-automata` (ADR-389)
 
 Found from bedit: its *git-status* buffer painted in 25 ms (96 ms under `nest run`) because
