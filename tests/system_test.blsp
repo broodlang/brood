@@ -125,3 +125,11 @@
     (is (string? (os/hostname))))
   (test "is non-empty"
     (is (> (string/length (os/hostname)) 0))))
+
+(describe "os/shell-quote leaves a plain word readable"
+  (test "safe words are unquoted; anything else is quoted"
+    (assert= (os/shell-quote "mix") "mix")
+    (assert= (os/shell-quote "test/a_test.exs:12") "test/a_test.exs:12")
+    (assert= (os/shell-quote "a b") "'a b'")
+    (assert= (os/shell-quote "*.txt") "'*.txt'")
+    (assert= (os/shell-quote "~") "'~'")))

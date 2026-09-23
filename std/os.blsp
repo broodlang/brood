@@ -153,16 +153,26 @@ a `$` in it is one argument. `opts`:
   (= (get result :exit) 0))
 (sig cmd-ok? (map -> bool))
 
-(defn shell-quote (s)
-  "`s` as ONE word of POSIX shell: wrapped in single quotes, each `'` inside closed, escaped
-and reopened. The shell expands nothing inside single quotes — no `$`, no backquote, no
-glob — so a file name that is data stays data. For the rare place a command line must be a
-single string (`sh -c`, a git config value git runs through the shell); everywhere else,
-pass an argument vector to `os/cmd` / `os/spawn` and there is nothing to quote.
+(def- *shell-safe-chars*
+  ;; the characters no POSIX shell treats specially anywhere in a word
+  (set/set (string/->list "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-./:=@%+,")))
 
+(defn shell-quote (s)
+  "`s` as ONE word of POSIX shell. A word of only safe characters (letters, digits and
+`_-./:=@%+,`) comes back as it is, so a command line a person reads stays readable;
+anything else is wrapped in single quotes, each `'` inside closed, escaped and reopened.
+The shell expands nothing inside single quotes — no `$`, no backquote, no glob — so a
+file name that is data stays data. For the rare place a command line must be a single
+string (`sh -c`, a git config value git runs through the shell); everywhere else, pass an
+argument vector to `os/cmd` / `os/spawn` and there is nothing to quote.
+
+    (os/shell-quote \"test/a_test.exs:12\")   → \"test/a_test.exs:12\"
     (os/shell-quote \"My Project/a.py\")   → \"'My Project/a.py'\"
+    (os/shell-quote \"\")   → \"''\"
     (os/shell-quote \"it's\")   → \"'it'\\\\''s'\""
-  (str "'" (string/replace s "'" "'\\''") "'"))
+  (if (and (not (= s "")) (every? (string/->list s) (fn (c) (contains? *shell-safe-chars* c))))
+    s
+    (str "'" (string/replace s "'" "'\\''") "'")))
 (sig shell-quote (string -> string))
 
 (defn cmd-out (result)
