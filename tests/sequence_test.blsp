@@ -124,7 +124,15 @@
     (assert= (partition (range 9) 3) (list (list 0 1 2) (list 3 4 5) (list 6 7 8))))
   (test "partition of too-short input is empty"
     (assert= (partition (range 3) 5) nil)
-    (assert= (partition nil 1) nil)))
+    (assert= (partition nil 1) nil))
+  ;; A size <= 0 never consumes the input, so these used to run until memory ran out.
+  (test "a chunk size of zero or less is an error, not an endless loop"
+    (assert= (try (partition [1 2 3] 0) (catch e (error-message e)))
+      "partition: chunk size must be positive, got 0")
+    (assert= (try (partition nil 0) (catch e (error-message e)))
+      "partition: chunk size must be positive, got 0")
+    (assert= (try (partition [1 2 3] -2) (catch e (error-message e)))
+      "partition: chunk size must be positive, got -2")))
 
 (describe "sort / sort-by"
   (test "sort orders ascending by default"

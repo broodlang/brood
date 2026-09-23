@@ -143,10 +143,13 @@ running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
 ;; false-positive at call sites and is not what a reversed-args rename gets wrong.
 (defn chunk-every (coll n)
   "Split `coll` into consecutive `n`-item vectors; unlike `partition`, a
-trailing partial chunk is kept. `n` must be positive.
+trailing partial chunk is kept. `n` must be positive; zero or less is an error.
 
     (seq/chunk-every [1 2 3 4 5] 2)  → ([1 2] [3 4] [5])"
-  (chunk-every-acc n (seq coll) nil))
+  ;; A size <= 0 drops nothing, so the loop never reached the end of `coll`.
+  (if (> n 0)
+    (chunk-every-acc n (seq coll) nil)
+    (error "seq/chunk-every: chunk size must be positive, got " n)))
 (sig chunk-every (seqable int -> any))
 
 ;; (chunk-by f coll) — consecutive runs where (f x) returns the same value.

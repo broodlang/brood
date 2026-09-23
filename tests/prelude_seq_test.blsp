@@ -10,7 +10,13 @@
   (test "empty collection"
     (assert= nil (chunk-every nil 3)))
   (test "chunk size 1"
-    (assert= [[1] [2] [3]] (into [] (map (chunk-every [1 2 3] 1) (fn (x) (into [] x)))))))
+    (assert= [[1] [2] [3]] (into [] (map (chunk-every [1 2 3] 1) (fn (x) (into [] x))))))
+  ;; A size <= 0 drops nothing, so the loop never reached the end (a hang).
+  (test "a chunk size of zero or less is an error, not a hang"
+    (assert= (try (chunk-every [1 2 3] 0) (catch e (error-message e)))
+      "seq/chunk-every: chunk size must be positive, got 0")
+    (assert= (try (chunk-every nil -1) (catch e (error-message e)))
+      "seq/chunk-every: chunk size must be positive, got -1")))
 
 (describe "chunk-by"
   (test "groups consecutive equal values"

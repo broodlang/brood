@@ -953,11 +953,17 @@ indexed access or a vector literal shape (`(into [] (map coll f))`, named).
 
 (defn partition (coll n)
   "Split `coll` into consecutive `n`-sized chunks; a trailing partial chunk is dropped.
+`n` must be positive — a size of zero or less is an error, never an endless run of
+empty chunks.
 
     (partition [1 2 3 4] 2)    → ((1 2) (3 4))
     (partition [1 2 3] 2)      → ((1 2))          ; the odd 3 is dropped
     (partition [1 2] 5)        → nil"
-  (%partition-acc n coll nil))
+  ;; A size <= 0 never shrinks `coll` (`(drop coll 0)` is `coll`, and a zero-sized chunk
+  ;; always "fits"), so the accumulator used to grow until memory ran out.
+  (if (> n 0)
+    (%partition-acc n coll nil)
+    (error "partition: chunk size must be positive, got " n)))
 (sig partition (seqable number -> any))
 
 (defn sort-by (coll key-fn)
