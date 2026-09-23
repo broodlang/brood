@@ -312,6 +312,40 @@ incremental search rides on.
   (let (n (string/length s)) (if (>= n w) s (str s (repeat (or pad " ") (- w n))))))
 (sig pad-right (string int &optional string -> string))
 
+;; ---- fitting text to SCREEN CELLS --------------------------------------------
+;; `pad-*` and `length` count characters, and a character is not a column: an emoji or a
+;; CJK glyph takes two cells and a combining mark none. A mode line or a menu row laid out by
+;; character count pushed everything after a wide name out of line with what was painted,
+;; and the click zones with it. These measure with `display-width` and cut with
+;; `width->index`, so a wide glyph is either whole or gone — never split.
+
+(defn clip-cells (s w &optional (ellipsis nil))
+  "`s` cut to at most `w` display cells. With an `ellipsis` (say `\"…\"`), a string that had
+to be cut ends with it, the ellipsis's own cells counted inside `w`.
+
+    (string/clip-cells \"abcdef\" 3)   → \"abc\"
+    (string/clip-cells \"日本語\" 3)   → \"日\"
+    (string/clip-cells \"abcdef\" 4 \"…\")   → \"abc…\"
+    (string/clip-cells \"abc\" 4 \"…\")   → \"abc\""
+  (cond
+    (<= (string/display-width s) w) s
+    (nil? ellipsis) (string/substring s 0 (string/width->index s (math/max 0 w)))
+    else
+      (let (room (math/max 0 (- w (string/display-width ellipsis))))
+        (str (string/substring s 0 (string/width->index s room)) ellipsis))))
+(sig clip-cells (string int &optional (or string nil) -> string))
+
+(defn pad-right-cells (s w)
+  "`s` padded with spaces to exactly `w` display cells — or clipped to them (`clip-cells`)
+when it is wider, so a bar always spans its field.
+
+    (string/pad-right-cells \"日\" 4)   → \"日  \"
+    (string/pad-right-cells \"abcdef\" 3)   → \"abc\""
+  (let (fitted (clip-cells s w)
+        n (string/display-width fitted))
+    (if (>= n w) fitted (str fitted (repeat " " (- w n))))))
+(sig pad-right-cells (string int -> string))
+
 ;; ---- fill: greedy word-wrap (was std/text.blsp) -----------------------------
 
 (defn- fill-pack (acc word width)
@@ -338,19 +372,46 @@ returns at least one piece, and the checker leans on that.
   (seq/filter (map (split s sep) trim) (fn (piece) (not (= piece "")))))
 (sig fields (string &optional string -> (or nil (list string))))
 
-(defn fill (s width)
+(defn fill (s width &optional (prefix ""))
   "Greedily wrap `s` to `width` columns: collapse every run of whitespace (newlines, tabs,
 spaces) to a single space, then re-break on word boundaries so each line is as full as it
 can be without exceeding `width`. A single word longer than `width` keeps its own
 (over-long) line rather than being split. Returns the rewrapped text, lines joined by
 `\\n`; the empty string for blank input.
 
-    (string/fill \"abc\" 10)   → \"abc\"   ; already fits, so unchanged"
-  (let (flat (replace (replace s "\n" " ") "\t" " ")
+With a `prefix` — a comment's `;; `, a quote's `> `, an indent — it is taken off every input
+line that starts with it and put on every output line, inside `width`. Without it a
+commented paragraph came back as one line with the markers in the middle of it (`;; aa ;;
+bb`). [[fill-prefix]] finds the one a paragraph uses.
+
+    (string/fill \"abc\" 10)   → \"abc\"   ; already fits, so unchanged
+    (string/fill \";; aa\\n;; bb\" 20 \";; \")   → \";; aa bb\""
+  (let (body (if (= prefix "")
+               s
+               (join (map (split s "\n")
+                       (fn (line)
+                         (if (starts-with? line prefix)
+                           (substring line (length prefix) (length line))
+                           line)))
+                 "\n"))
+        flat (replace (replace body "\n" " ") "\t" " ")
         words (fields flat)
-        [cur done] (fold words ["" ()] (fn (acc w) (fill-pack acc w width))))
-    (join (reverse (if (= cur "") done (cons cur done))) "\n")))
-(sig fill (string any -> string))
+        room (math/max 1 (- width (length prefix)))
+        [cur done] (fold words ["" ()] (fn (acc w) (fill-pack acc w room))))
+    (join (map (reverse (if (= cur "") done (cons cur done))) (fn (line) (str prefix line))) "\n")))
+(sig fill (string any &optional string -> string))
+
+(defn fill-prefix (s)
+  "The fill prefix of paragraph `s`: its first line's indentation, plus a comment or quote
+marker (`;;`, `#`, `//`, `--`, `>`, `*`) and the space after it — what [[fill]] should keep at
+the start of every line. Emacs's adaptive fill, for the common cases.
+
+    (string/fill-prefix \"  ;; hello\")   → \"  ;; \"
+    (string/fill-prefix \"    code\")   → \"    \"
+    (string/fill-prefix \"plain\")   → \"\""
+  (let (m (regex/find "^\\s*(;+|#+|//+|--|>+|\\*)?\\s*" (first (split s "\n"))))
+    (if m (get m :text) "")))
+(sig fill-prefix (string -> string))
 
 ;; (restored: this is string's repeat, not the sequence one)
 (defn repeat (s n)

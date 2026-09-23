@@ -755,3 +755,29 @@
     (is (not (string/has-upper? "foo123[]")))
     (is (not (string/has-upper? "日本語")))
     (is (not (string/has-upper? "")))))
+
+(describe "string: fitting text to screen cells"
+  (test "clip-cells counts a wide glyph as two cells and never splits it"
+    (assert= (string/clip-cells "日本語" 4) "日本")
+    (assert= (string/clip-cells "日本語" 3) "日")
+    (assert= (string/clip-cells "abc" 3) "abc"))
+  (test "an ellipsis is counted inside the width"
+    (assert= (string/clip-cells "abcdef" 4 "…") "abc…")
+    (assert= (string/clip-cells "日本語x" 5 "…") "日本…"))
+  (test "pad-right-cells pads to cells, and clips what is too wide"
+    (assert= (string/display-width (string/pad-right-cells "日本" 7)) 7)
+    (assert= (string/pad-right-cells "abcdef" 3) "abc")))
+
+(describe "string: fill keeps a paragraph's prefix"
+  (test "a commented paragraph refills inside its comment"
+    (assert= (string/fill "  ;; aa\n  ;; bb\n" 70 "  ;; ") "  ;; aa bb"))
+  (test "the prefix counts toward the width"
+    (assert= (string/fill "# a b c d" 5 "# ") "# a b\n# c d"))
+  (test "fill-prefix finds indentation and comment markers"
+    (assert= (string/fill-prefix "  ;; hi\n  ;; there") "  ;; ")
+    (assert= (string/fill-prefix "> quoted") "> ")
+    (assert= (string/fill-prefix "  // x") "  // ")
+    (assert= (string/fill-prefix "\tindented") "\t")
+    (assert= (string/fill-prefix "plain") ""))
+  (test "no prefix is the old behaviour"
+    (assert= (string/fill "aa\nbb" 70) "aa bb")))
