@@ -44,10 +44,19 @@ pub(super) fn global_value_ty(heap: &Heap, s: Symbol) -> Option<Ty> {
         return None;
     }
     let v = super::deps::obs_global(heap, s)?;
-    let t = match v {
-        Value::Str(id) => Ty::str_lit(&heap.string(id)),
-        other => Ty::of_value(other),
-    };
+    // The value is what THIS process computed at load, not a fact about the program:
+    // `(def- dev? (env/dev?))` holds `true` in a dev checkout and `false` in production,
+    // and typing it `true` let the constant-condition lint prove `(when (dev?) …)` always
+    // true — through the inferred return of every function that reads it. So an
+    // observation contributes its KIND (`bool`, `int`, `string`), never the literal —
+    // the literal is the run-specific part, and it is what a truthiness or literal-set
+    // proof would rest on. An observed nil says nothing at all: it is the placeholder a
+    // global holds until something sets it (an unset env var reads nil too), exactly
+    // the case the earmuff rule above exists for.
+    if matches!(v, Value::Nil) {
+        return None;
+    }
+    let t = Ty::of(value::tag(v));
     if t.contains_tag(Tag::Fn) || t.contains_tag(Tag::Native) {
         return None;
     }

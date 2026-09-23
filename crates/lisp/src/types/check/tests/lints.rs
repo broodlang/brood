@@ -591,6 +591,23 @@ fn testing_the_sentinel_silences_it() {
 }
 
 #[test]
+fn a_global_computed_at_load_does_not_prove_a_test_true() {
+    // hatch's shape: `(def- *dev?* (web/env/dev?))` read once at load, returned by
+    // `(defn dev? () *dev?*)`, tested as `(when (web/audit/dev?) …)` in another file.
+    // The checker's process computed `true`, production computes `false` — the value
+    // is one run's, so it must not prove the branch constant. Not earmuffed here, so
+    // only the observation's widening to its kind can silence it.
+    let w = check_with_defs(
+        &["(def dev-flag (= 1 1))", "(defn dev? () dev-flag)"],
+        "(defn g () (when (dev?) :audit))",
+    );
+    assert!(
+        !w.iter().any(|m| m.contains("always true")),
+        "a load-time value must not prove a test constant: {w:?}"
+    );
+}
+
+#[test]
 fn a_genuinely_nullable_result_is_not_flagged() {
     let w = warnings("(defn f (xs) (if (seq/find xs (fn (x) (= x 1))) :found :missing))");
     assert!(

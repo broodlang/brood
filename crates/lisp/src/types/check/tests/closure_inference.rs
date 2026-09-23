@@ -361,9 +361,10 @@ fn earmuffed_global_types_as_unknown_not_its_default() {
         "earmuffed global must type as unknown, not its default nil: {:?}",
         w
     );
-    // A non-earmuffed global is still pinned to its value (unchanged behaviour): a
-    // real disjoint use is still caught.
-    let w = check_with_defs(&["(def plain-root nil)"], "(string/length plain-root)");
+    // A non-earmuffed global is still typed by its value's kind: a real disjoint use is
+    // still caught. (Not a nil one — an observed nil is the placeholder case whatever the
+    // name, an unset `(os/env …)` included, and stays unknown.)
+    let w = check_with_defs(&["(def plain-root 5)"], "(string/length plain-root)");
     assert!(
         w.iter().any(|s| s.contains("string/length")),
         "a plain (non-earmuffed) global is still typed by its value: {:?}",
