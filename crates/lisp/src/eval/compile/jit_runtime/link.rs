@@ -624,7 +624,9 @@ pub(crate) fn jit_dispatch_fast_frame(
     )
 }
 
-#[cfg(all(test, feature = "jit"))]
+// `debug_assertions` too: every test here drives `debug_check_fast_link_mirror`, a debug-build
+// cross-check that a release build does not compile — and `make asan` builds `--release`.
+#[cfg(all(test, feature = "jit", debug_assertions))]
 mod tests {
     use super::*;
     use crate::core::value;

@@ -95,10 +95,19 @@ fn queued_work_no_worker_can_find_is_reported_within_the_window() {
         "the pool sat for 4.5 s believing a process was queued and never said so — the \
          watchdog did not fire.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    // The report carries the per-worker state — the fact every KI-88 sighting lacked.
+    // The report carries the per-worker state — the fact every KI-88 sighting lacked. Every
+    // worker is LISTED, and the ones whose queue lock was free say what they were doing; a
+    // worker whose lock another thread held at that instant reads `<locked>` (the report
+    // uses `try_lock` so that it can never deadlock the pool it is diagnosing). Asserting
+    // `w0: parked=` in particular made this red whenever w0's lock was the busy one — once
+    // in three nightly suite runs (2026-09-24).
     assert!(
-        stderr.contains("w0: parked="),
-        "the report did not name the workers' queues.\nstderr:\n{stderr}"
+        stderr.contains("  w0: "),
+        "the report did not list the workers.\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(": parked="),
+        "the report named no worker's state.\nstderr:\n{stderr}"
     );
     // Latched: one report per starvation EPISODE, not one per parked cycle. An episode ends
     // the moment anything is pulled to run (`run_one` re-arms both the window and the latch),
