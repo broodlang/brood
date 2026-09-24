@@ -716,7 +716,6 @@ pub(super) fn str_splice_diff(args: &[Value], _: EnvId, heap: &mut Heap) -> Lisp
     let lo = old[..p].chars().count() as i64;
     let hi = lo + old[p..ob.len() - s].chars().count() as i64;
     let repl_str = new[p..nb.len() - s].to_string();
-    drop((old, new));
     let repl = heap.alloc_string(&repl_str);
     Ok(heap.alloc_vector(vec![Value::int(lo), Value::int(hi), repl]))
 }

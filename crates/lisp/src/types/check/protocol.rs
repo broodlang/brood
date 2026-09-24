@@ -19,6 +19,7 @@ use crate::core::value::{self, Value};
 use crate::error::Pos;
 
 use super::walk::list_items;
+use crate::core::registries as reg;
 
 /// One declared op: its name, its fixed arity (params before any `&`), and whether it
 /// is variadic (has a `&`-rest). A declared op spec is always fixed; an *impl method* may
@@ -64,7 +65,7 @@ fn from_registry(heap: &Heap) -> HashMap<String, Protocol> {
     // alone can't capture a later extension — the Phase-2 fingerprint hashes its
     // full content instead).
     super::deps::obs_protocols(heap);
-    let Some(Value::Map(id)) = heap.env_get(heap.global(), value::intern("*protocols*")) else {
+    let Some(Value::Map(id)) = heap.env_get(heap.global(), value::intern(reg::PROTOCOLS)) else {
         return out;
     };
     for (key, specs) in heap.map_entries(id) {
@@ -635,7 +636,7 @@ fn read_impls_registry(
     impls: &mut HashSet<(String, String, String)>,
     defaults: &mut HashSet<(String, String)>,
 ) {
-    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*impls*")) else {
+    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern(reg::IMPLS)) else {
         return;
     };
     for (op_key, inner) in heap.map_entries(mid) {
@@ -673,7 +674,7 @@ pub(super) fn is_ability_op(heap: &Heap, info: Option<&AbilityInfo>, sym: value:
     if info.is_some_and(|info| info.op_of(sym).is_some()) {
         return true;
     }
-    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*op-ability*")) else {
+    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern(reg::OP_ABILITY)) else {
         return false;
     };
     heap.map_get(mid, Value::Sym(sym)).is_some()
@@ -1146,7 +1147,7 @@ fn collect_register_ability_requires(
 /// Union in the runtime `*ability-requires*` registry — name → its required abilities (bare
 /// name symbols) — so a `:requires` declared in an imported module is visible here too.
 fn read_requires_registry(heap: &Heap, out: &mut HashMap<String, Vec<String>>) {
-    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*ability-requires*"))
+    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern(reg::ABILITY_REQUIRES))
     else {
         return;
     };
@@ -1171,7 +1172,7 @@ fn read_abilities_registry(
     params: &mut HashMap<(String, String), Vec<Option<crate::types::Ty>>>,
     provided: &mut HashSet<(String, String)>,
 ) {
-    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*abilities*")) else {
+    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern(reg::ABILITIES)) else {
         return;
     };
     for (name, specs) in heap.map_entries(mid) {
@@ -1213,7 +1214,7 @@ pub(super) fn record_id_names(
 ) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
     // Imported/already-loaded records: the runtime registry.
-    if let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*record-ids*")) {
+    if let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern(reg::RECORD_IDS)) {
         for (id, _) in heap.map_entries(mid) {
             if let Some(name) = sym_name(id) {
                 out.insert(name);
@@ -1335,7 +1336,7 @@ fn collect_record_registers(heap: &Heap, form: Value, out: &mut std::collections
 
 /// Union in the runtime `*sealed*` registry — name → member id keywords.
 fn read_sealed_registry(heap: &Heap, out: &mut HashMap<String, Vec<String>>) {
-    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*sealed*")) else {
+    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern(reg::SEALED)) else {
         return;
     };
     for (name, members) in heap.map_entries(mid) {
@@ -1762,14 +1763,15 @@ fn read_methods_registry(
     defaults: &mut HashSet<String>,
     visible: Option<&HashSet<String>>,
 ) {
-    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*methods*")) else {
+    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern(reg::METHODS)) else {
         return;
     };
     // `[mname key] → Some(ns)` for a registration made inside a namespace, `None` for one
     // made at the root (the prelude's).
     let mut from: HashMap<(String, Vec<String>), Option<String>> = HashMap::new();
     if visible.is_some() {
-        if let Some(Value::Map(fid)) = heap.env_get(heap.global(), value::intern("*method-from*")) {
+        if let Some(Value::Map(fid)) = heap.env_get(heap.global(), value::intern(reg::METHOD_FROM))
+        {
             for (prov, ns) in heap.map_entries(fid) {
                 let Value::Vector(pid) = prov else {
                     continue;
@@ -1881,7 +1883,7 @@ fn collect_register_multi(
 
 /// Union in the runtime `*multi-algebra*` registry — NAME → algebra keyword (or nil).
 fn read_multi_algebra_registry(heap: &Heap, algebras: &mut HashMap<String, String>) {
-    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*multi-algebra*"))
+    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern(reg::MULTI_ALGEBRA))
     else {
         return;
     };
@@ -1896,7 +1898,7 @@ fn read_multi_algebra_registry(heap: &Heap, algebras: &mut HashMap<String, Strin
 /// form — so a multimethod declared in another module is typed here too. The file's own
 /// `%register-multi` forms win, matching how the algebra registry is merged.
 fn read_multi_ret_registry(heap: &Heap, rets: &mut HashMap<String, crate::types::Ty>) {
-    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*multi-ret*")) else {
+    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern(reg::MULTI_RET)) else {
         return;
     };
     for (name_v, form) in heap.map_entries(mid) {
@@ -1972,7 +1974,7 @@ pub(super) fn build_multi_info(
 /// Union in the runtime `*record-ids*` registry — id-keyword → record name (ADR-182) — so a
 /// record type loaded from another module is known here too. Only the ids (keys) are needed.
 fn read_record_ids_registry(heap: &Heap, out: &mut HashSet<String>) {
-    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*record-ids*")) else {
+    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern(reg::RECORD_IDS)) else {
         return;
     };
     for (id, _name) in heap.map_entries(mid) {

@@ -1353,8 +1353,9 @@ pinning exaggerates (CLAUDE.md's ADR-175 note).
 `BROOD_JIT_BAIL_TRACE` — a `receive` suspends, so the arm is *structurally* outside the
 subset, not refused. Same partial-lowering family as §7.1 (the receive as an exit point).
 Beside it on those rows: `receive_match` 8–9%, `pool::run_one` 5–8% — the per-message fixed
-cost `runtime-frontier.md` names, whose next concrete step is **M2 shared IC tables**
-(largest remaining per-process item, 664 B + a warm start; lock-free design + TSAN/loom).
+cost `runtime-frontier.md` names, whose next concrete step was then taken to be **M2 shared
+IC tables** — superseded by the 2026-09-20 profile directly below, which found M2 is NOT a
+lever for these rows (the handoff says so too); read that subsection, not this sentence.
 
 #### 7.3, profiled again 2026-09-20 (`perf record` on an unstripped release-fast, `BROOD_PERF_STATS` for the per-message arithmetic) — no single lever; the floor is the design, and here is what it is made of
 

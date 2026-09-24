@@ -367,6 +367,13 @@ The primary source is consulted first, then `*image-sources*` in install order."
 ; called `mod/fn`, unbound. (Surfaced as a once-in-several-runs editor test flake
 ; the moment two test processes raced an inline load of `proctree`.)
 
+;; The registries a module load writes LIVE while everything else it writes is staged
+;; (ADR-344). They are how loads COORDINATE, so a staged copy would defeat them: a staged
+;; `*features-loading*` claim would let a second process start the same load, and a staged
+;; waiter entry would never be released. Read by the kernel (`reg::LIVE_REGISTRIES`); policy,
+;; so it lives here beside the registries it names rather than as a list inside Rust.
+(def- *live-registries* #{'*features-loading* '*features-waiting*})
+
 ;; ---- the general registry update: compare-and-swap + retry (KI-23) ------------
 ;;
 ;; `%registry-update!` names each shape it supports as a kernel op (`:assoc`,

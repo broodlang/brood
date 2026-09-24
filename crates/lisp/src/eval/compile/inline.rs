@@ -1,5 +1,6 @@
 //! Node→Node optimizer passes: linmap rewrite + self/leaf inlining (extracted from mod.rs).
 use super::*;
+use crate::core::registries as reg;
 
 // ===================== ability-dispatch monomorphization (BROOD_MONO, ADR-182) ==========
 //
@@ -147,7 +148,7 @@ fn mono_arg_identity(heap: &Heap, arg: &Node) -> Option<Value> {
             // the constructor itself, where the public name holds the shim.
             let public = crate::builtins::contracts::alias_public(ctor).unwrap_or(ctor);
             let id = Value::keyword(public);
-            let records = global_map(heap, "*record-ids*")?;
+            let records = global_map(heap, reg::RECORD_IDS)?;
             heap.map_get(records, id)?;
             // The constructor this id names must still exist AND still be the record's
             // constructor. The registry cannot say so: it records the name, and a name
@@ -222,7 +223,7 @@ pub(super) fn mono_devirtualize(
     // The dispatch identity of arg0, if statically certain.
     let id_kw = mono_arg_identity(heap, args.first()?)?;
     // The head global must be a registered ability op → its ability name symbol.
-    let op_ability = global_map(heap, "*op-ability*")?;
+    let op_ability = global_map(heap, reg::OP_ABILITY)?;
     let ability = match heap.map_get(op_ability, Value::Sym(op)) {
         Some(Value::Sym(a)) => a,
         _ => return None,
@@ -234,7 +235,7 @@ pub(super) fn mono_devirtualize(
     // Find the `[ability op]` method set, then resolve the id (then `:default`), as
     // `impl-for` does. Iterate rather than build a key — compile-time, not hot; and it
     // avoids depending on freshly-built-vector CHAMP equality.
-    let impls = global_map(heap, "*impls*")?;
+    let impls = global_map(heap, reg::IMPLS)?;
     let mut found = None;
     for (key, methods) in heap.map_entries(impls) {
         if let (Value::Vector(vid), Value::Map(mid)) = (key, methods) {
@@ -294,7 +295,7 @@ pub(super) fn mono_devirtualize(
     Some(Node::Call {
         callee: Box::new(Node::Global(value::intern("%dispatch"))),
         args: Box::new([
-            Node::Global(value::intern("*impls*")),
+            Node::Global(value::intern(reg::IMPLS)),
             Node::Const(ConstVal::new(op_key)),
             Node::Const(ConstVal::new(id_kw)),
         ]),

@@ -434,66 +434,43 @@ pub(super) struct CodeSlabs {
     pub(super) envs: boxcar::Vec<OnceLock<EnvFrame>>,
 }
 
-/// A borrow into a slab, valid for as long as the wrapper is held. It is either a
-/// **direct** `&self`-borrow (LOCAL / PRELUDE, or a compaction-time RUNTIME read) or
-/// a **pinned** borrow into an ArcSwap-managed RUNTIME generation, where the held
-/// `Arc<CodeSlabs>` keeps that generation's slab alive so a concurrent Stage-4 free
-/// ([`Heap::free_runtime_gen`], ADR-091) can swap the slab out without invalidating
-/// an in-flight read. `Deref`s to `T`, so call sites use it exactly like `&T`.
+/// A borrow into a slab, valid for as long as the wrapper is held — LOCAL / PRELUDE storage
+/// of `&self`, or a RUNTIME generation's slabs through the per-process generation cache
+/// ([`Heap::code_gen_ref`]), which keeps every `Arc<CodeSlabs>` it has handed out a borrow of
+/// alive until `&mut self`. So a concurrent Stage-4 free ([`Heap::free_runtime_gen`],
+/// ADR-091) can swap a generation out without invalidating an in-flight read, and a read
+/// costs no refcount traffic. `Deref`s to `T`, so call sites use it exactly like `&T`.
 ///
-/// The RUNTIME pin is a plain `Arc` clone obtained from a per-process **version-gated
-/// cache** ([`Heap::code_gen_pinned`]) rather than a fresh `ArcSwap::load` guard per
-/// deref: the latter's hybrid-strategy load dominated global-data-heavy hot loops (a
-/// read of a `def`'d matrix element in `matmul` derefs a RUNTIME handle, ~16 M times).
+/// It used to hold an `Arc` clone per RUNTIME borrow (and before that an `ArcSwap` guard):
+/// two atomic RMWs on a count every core shares, per trie level of a `def`'d map read.
 pub struct SlabRef<'a, T: ?Sized> {
-    /// Keeps the RUNTIME generation's `Arc<CodeSlabs>` alive while borrowed; `None`
-    /// for a direct borrow. Never read directly — held purely so its `Drop` (the
-    /// Arc release) runs no earlier than the pointer's last use.
-    _pin: Option<Arc<CodeSlabs>>,
-    /// Points into the borrowed slot — a direct `&'a T`, or into the slab the pin
-    /// keeps alive. Valid for the wrapper's whole lifetime either way.
+    /// Points into the borrowed slot. Valid for the wrapper's whole lifetime: LOCAL and
+    /// PRELUDE storage is `&'a self`'s, and a RUNTIME generation's slabs are kept alive for
+    /// any `&self`-borrow by the per-process generation cache (`Heap::code_gen_ref`).
     ptr: *const T,
     _life: std::marker::PhantomData<&'a T>,
 }
 
-// SAFETY: `SlabRef` is a plain shared borrow (a `&T` plus, optionally, the `Arc`
-// that keeps `T` alive). It is `Send`/`Sync` exactly when `&T` is — the pin is an
-// `Arc` clone (already `Send`+`Sync` for our `CodeSlabs`), and the raw pointer only
-// ever yields shared `&T` access.
+// SAFETY: `SlabRef` is a plain shared borrow; it is `Send`/`Sync` exactly when `&T` is.
 unsafe impl<T: ?Sized + Sync> Sync for SlabRef<'_, T> {}
 unsafe impl<T: ?Sized + Sync> Send for SlabRef<'_, T> {}
 
 impl<'a, T: ?Sized> SlabRef<'a, T> {
-    /// A direct `&self`-borrow (LOCAL / PRELUDE, or a compaction-time RUNTIME read).
+    /// A direct `&self`-borrow.
     #[inline]
     pub(super) fn direct(r: &'a T) -> Self {
         SlabRef {
-            _pin: None,
             ptr: r as *const T,
             _life: std::marker::PhantomData,
         }
     }
-    /// A pinned borrow into a RUNTIME generation the `pin` `Arc` keeps alive.
-    ///
-    /// SAFETY: `ptr` must point into the `CodeSlabs` held alive by `pin` (obtained
-    /// from `&*pin`), so it stays valid for the wrapper's whole lifetime.
-    #[inline]
-    pub(super) unsafe fn pinned(pin: Arc<CodeSlabs>, ptr: *const T) -> Self {
-        SlabRef {
-            _pin: Some(pin),
-            ptr,
-            _life: std::marker::PhantomData,
-        }
-    }
-    /// Re-project the borrow to a part of `T` (e.g. a field), carrying the same pin
-    /// so the underlying slab stays alive. Like `Ref::map`.
+    /// Re-project the borrow to a part of `T` (e.g. a field). Like `Ref::map`.
     #[inline]
     pub(crate) fn map<U: ?Sized>(self, f: impl FnOnce(&T) -> &U) -> SlabRef<'a, U> {
         // SAFETY: `self.ptr` is valid (invariant of `SlabRef`); the projected `&U`
         // points within the same slab the pin (moved below) keeps alive.
         let ptr = f(unsafe { &*self.ptr }) as *const U;
         SlabRef {
-            _pin: self._pin,
             ptr,
             _life: std::marker::PhantomData,
         }

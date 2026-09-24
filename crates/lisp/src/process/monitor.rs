@@ -279,6 +279,8 @@ pub fn monitored_by(pid: u64) -> usize {
 /// a routed `send`, so the wire-format `[:down …]` is exactly the message a
 /// peer's process would receive locally.
 pub(super) fn fire_down(w: Watcher, dying_pid: u64, reason: Message) {
+    #[cfg(test)]
+    down_order_probe::record(dying_pid);
     match w {
         Watcher::Local { pid, mref } => deliver(
             pid,
@@ -540,6 +542,36 @@ pub(crate) fn fire_noconnection(target_node: Symbol, target_pid: u64, watcher_pi
             Message::Keyword(value::intern(pk::NOCONNECTION)),
         ),
     );
+}
+
+/// KI-183: when a dying process's `[:down …]` fires, has it already released the monitors
+/// IT held? Records, per fire, whether the dying pid still had watcher entries — the
+/// ordering `retire_pid_tail` must get right, observed from inside the fan-out.
+#[cfg(test)]
+pub(super) mod down_order_probe {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static STILL_HELD: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(in crate::process) fn record(dying_pid: u64) {
+        let held = crate::core::sync::lock(&super::MONITORS)
+            .by_watcher
+            .contains_key(&dying_pid);
+        STILL_HELD.with(|s| s.borrow_mut().push(held));
+    }
+
+    pub(in crate::process) fn take() -> Vec<bool> {
+        STILL_HELD.with(|s| std::mem::take(&mut *s.borrow_mut()))
+    }
+}
+
+/// Test setup: register LOCAL watcher `watcher` (monitor ref `mref`) on `target`, without the
+/// liveness check `add_monitor` makes — for driving the death path with no live processes.
+#[cfg(test)]
+pub(super) fn test_insert_local(target: u64, watcher: u64, mref: u64) {
+    crate::core::sync::lock(&MONITORS).insert(target, Watcher::Local { pid: watcher, mref });
 }
 
 #[cfg(test)]

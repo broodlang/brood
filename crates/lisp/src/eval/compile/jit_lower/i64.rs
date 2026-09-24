@@ -47,20 +47,18 @@ impl Scalar {
 /// fixed args + no-capture + top-level (`dbg_name`) + recursive + not-previously-too-deep.
 #[cfg(feature = "jit")]
 fn arm_scalar_kind(arm: &CompiledArm) -> Option<Scalar> {
-    if !jit_i64_enabled()
-        || arm.nrequired < 1
-        || arm.noptional != 0
-        || arm.rest_slot.is_some()
-        || !arm.capture_names.is_empty()
-    {
+    if !jit_i64_enabled() {
         return super::bail("i64-worker-ineligible-shape");
     }
-    // Use `dbg_name` (every top-level defn has it) rather than `inline_name` (set only when the
-    // arm ALSO qualifies for the depth-2 inliner — which excludes e.g. Ackermann, whose inlined
-    // expansion is too big). The worker needs no inlining; it just needs the self symbol.
-    let self_sym = arm.dbg_name.or_bail("i64-anonymous-arm")?;
+    let kind = match *arm.scalar_kind.get_or_init(|| arm_scalar_kind_static(arm)) {
+        Ok(1) => Scalar::Int,
+        Ok(_) => Scalar::Float,
+        Err(reason) => return super::bail(reason),
+    };
+    // The dynamic half, re-read every time. `dbg_name` is `Some` (the static half required it).
+    let self_sym = arm.dbg_name?;
     // A prior depth-bail switched this fn to the boxed path (which drains deep recursion).
-    if i64_too_deep(self_sym) || !i64_has_self_call(&arm.body) {
+    if i64_too_deep(self_sym) {
         return super::bail("i64-no-self-call-or-latched-too-deep");
     }
     // The worker lowers a *non-tail* `(f …)` whose head is `dbg_name` to a direct call to
@@ -75,10 +73,33 @@ fn arm_scalar_kind(arm: &CompiledArm) -> Option<Scalar> {
     {
         return super::bail("i64-self-global-rebound");
     }
+    Some(kind)
+}
+
+/// The part of [`arm_scalar_kind`] that depends only on the arm itself — computed once per
+/// arm and cached in `CompiledArm::scalar_kind`.
+#[cfg(feature = "jit")]
+fn arm_scalar_kind_static(arm: &CompiledArm) -> Result<u8, &'static str> {
+    if arm.nrequired < 1
+        || arm.noptional != 0
+        || arm.rest_slot.is_some()
+        || !arm.capture_names.is_empty()
+    {
+        return Err("i64-worker-ineligible-shape");
+    }
+    // Use `dbg_name` (every top-level defn has it) rather than `inline_name` (set only when the
+    // arm ALSO qualifies for the depth-2 inliner — which excludes e.g. Ackermann, whose inlined
+    // expansion is too big). The worker needs no inlining; it just needs the self symbol.
+    let self_sym = arm.dbg_name.ok_or("i64-anonymous-arm")?;
+    if !i64_has_self_call(&arm.body) {
+        return Err("i64-no-self-call-or-latched-too-deep");
+    }
     let empty = std::collections::HashSet::new();
     [Scalar::Int, Scalar::Float]
         .into_iter()
         .find(|&kind| i64_value_ok(&arm.body, self_sym, arm.nrequired, &empty, kind))
+        .map(|k| if k == Scalar::Int { 1 } else { 2 })
+        .ok_or("i64-value-not-scalar")
 }
 
 /// Does this arm take an unboxed register worker? [`jit_tier`] consults this to **skip the
@@ -134,18 +155,30 @@ fn i64_has_self_call(node: &Node) -> bool {
 static I64_TOO_DEEP: std::sync::Mutex<Option<std::collections::HashSet<Symbol>>> =
     std::sync::Mutex::new(None);
 
+/// How many names `I64_TOO_DEEP` holds — the lock-free fast answer "none", which is the
+/// answer for nearly every process.
+#[cfg(feature = "jit")]
+static I64_TOO_DEEP_ANY: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Record that `sym`'s recursion overflowed the i64 worker's depth cap — switch it to boxed.
 #[cfg(feature = "jit")]
 pub(crate) fn i64_mark_too_deep(sym: Symbol) {
     if let Ok(mut g) = I64_TOO_DEEP.lock() {
-        g.get_or_insert_with(std::collections::HashSet::new)
-            .insert(sym);
+        if g.get_or_insert_with(std::collections::HashSet::new)
+            .insert(sym)
+        {
+            I64_TOO_DEEP_ANY.fetch_add(1, std::sync::atomic::Ordering::Release);
+        }
     }
 }
 
 /// Has `sym` been marked too-deep for the i64 worker?
 #[cfg(feature = "jit")]
 fn i64_too_deep(sym: Symbol) -> bool {
+    // Almost always empty — skip the lock (this is asked per VM→native entry).
+    if I64_TOO_DEEP_ANY.load(std::sync::atomic::Ordering::Acquire) == 0 {
+        return false;
+    }
     match I64_TOO_DEEP.lock() {
         Ok(g) => g.as_ref().is_some_and(|s| s.contains(&sym)),
         Err(_) => false,

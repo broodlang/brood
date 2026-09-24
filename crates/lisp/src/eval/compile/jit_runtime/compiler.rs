@@ -39,14 +39,35 @@ pub(crate) type JitWorkItem = (Arc<CompiledArm>, Vec<u8>, u64);
 
 #[cfg(feature = "jit")]
 pub(crate) struct JitCompiler {
-    /// Primary (initial-tier) queue: the small ORIGINAL arm. Drained first, always.
-    pub(crate) primary: std::sync::mpsc::SyncSender<JitWorkItem>,
+    /// Primary (initial-tier) queue: the small ORIGINAL arm. Drained first, always. A
+    /// `None` is not work — it is [`Self::defer`]'s wake-up, so the idle thread can block
+    /// on this one channel and still notice a deferred item (it used to poll every 1 ms,
+    /// forever, in every process that had ever tiered an arm).
+    primary: std::sync::mpsc::SyncSender<Option<JitWorkItem>>,
     /// Deferred (lower-priority) queue: the re-derived **inlined** upgrade. The bg thread
     /// pulls from it only when `primary` is empty — so under a spawn-style initial-tier
     /// storm (thousands of short-lived processes tiering their small arms) the inlined
     /// upgrades sit behind the backlog and never compete; a long-lived workload (fib 35)
     /// drains its primary, then the deferred inlined compile lands and the swap fires.
-    pub(crate) deferred: std::sync::mpsc::SyncSender<JitWorkItem>,
+    deferred: std::sync::mpsc::SyncSender<JitWorkItem>,
+}
+
+#[cfg(feature = "jit")]
+impl JitCompiler {
+    /// Queue an initial-tier compile. `Err` when the bounded queue is full.
+    pub(crate) fn enqueue(&self, item: JitWorkItem) -> Result<(), ()> {
+        self.primary.try_send(Some(item)).map_err(|_| ())
+    }
+
+    /// Queue a deferred (low-priority) compile and wake the thread if it is idle. The
+    /// wake-up may find the primary queue full — then the thread is busy and reaches the
+    /// deferred queue when primary drains, so dropping it loses nothing. Sent AFTER the
+    /// item: a wake-up that lands before the thread blocks stays queued, so none is lost.
+    pub(crate) fn defer(&self, item: JitWorkItem) -> Result<(), ()> {
+        self.deferred.try_send(item).map_err(|_| ())?;
+        let _ = self.primary.try_send(None);
+        Ok(())
+    }
 }
 
 /// Permanent keep-alive for every `CompiledArm` whose native code was installed into the
@@ -55,9 +76,37 @@ pub(crate) struct JitCompiler {
 /// code — i.e. forever. Without this, the arm's only other owners are the closure / call-IC,
 /// which are dropped when a closure is rebound or a green process exits, freeing the chunk
 /// out from under still-installed native code (bug #2: a dangling ConstVal → garbage const).
+///
+/// Keyed by the installed code pointer, which also makes it the one authoritative answer to
+/// "which arm does this native code belong to?" — asked on the cold paths where the arm's
+/// `jit_code` may already have moved on (a reset, an inline swap, a latch), so scanning
+/// for `jit_code == code` or re-resolving the callee by name can find the wrong arm or
+/// none. Code is never freed, so a key never comes back for a different arm.
 #[cfg(feature = "jit")]
-pub(crate) static JIT_ARM_KEEPALIVE: std::sync::Mutex<Vec<Arc<CompiledArm>>> =
-    std::sync::Mutex::new(Vec::new());
+pub(crate) static JIT_ARM_KEEPALIVE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<usize, Arc<CompiledArm>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Pin `arm` for as long as the native `code` installed for it exists — forever.
+#[cfg(feature = "jit")]
+pub(crate) fn jit_keep_alive(code: *const u8, arm: &Arc<CompiledArm>) {
+    JIT_ARM_KEEPALIVE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(code as usize, arm.clone());
+}
+
+/// The arm the installed native `code` was lowered from. Poison-tolerant like the insert:
+/// a codegen panic may have poisoned the mutex, and a cold-path lookup must not turn that
+/// into a worker-thread crash.
+#[cfg(feature = "jit")]
+pub(crate) fn jit_arm_for_code(code: *const u8) -> Option<Arc<CompiledArm>> {
+    JIT_ARM_KEEPALIVE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&(code as usize))
+        .cloned()
+}
 
 /// Is float-global unboxing enabled? **Default ON** (`BROOD_NO_FLOAT_GLOBAL` opts out —
 /// the A/B baseline lever). Read once: all processes of a runtime share an arm's compiled
@@ -216,8 +265,7 @@ pub(crate) fn jit_compile_now(heap: &Heap, arm: &Arc<CompiledArm>, base: usize) 
                 && ActiveBackend::may_adopt_shared_code(arm)
             {
                 {
-                    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-                    if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+                    if crate::diagnostics::debug_flags::jit_bail_trace() {
                         let name = arm
                             .dbg_name
                             .map(crate::core::value::symbol_name_ref)
@@ -248,13 +296,12 @@ pub(crate) fn jit_compile_now(heap: &Heap, arm: &Arc<CompiledArm>, base: usize) 
     drop(jit); // install the pointer outside the module lock
     match lowered {
         Ok(Some(ptr)) => {
-            arm.jit_code.store(ptr as *mut u8, Release);
             // Same keepalive contract as the background path: installed native code
             // bakes raw pointers into the arm's chunk ConstVals — keep the arm alive.
-            JIT_ARM_KEEPALIVE
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(arm.clone());
+            // Pinned BEFORE the pointer is published, so a cold-path lookup by code
+            // never misses an installed arm.
+            jit_keep_alive(ptr, arm);
+            arm.jit_code.store(ptr as *mut u8, Release);
         }
         Ok(None) | Err(_) => {
             trace_lower_declined(arm, false);
@@ -275,8 +322,7 @@ pub(super) fn trace_lower_declined(arm: &CompiledArm, inlined: bool) {
     let (reason, detail) =
         super::take_mid_emit_reason().unwrap_or(("lowering-returned-none", None));
     let detail = detail.map(|d| format!(":{d}")).unwrap_or_default();
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+    if crate::diagnostics::debug_flags::jit_bail_trace() {
         let name = arm
             .dbg_name
             .map(crate::core::value::symbol_name_ref)
@@ -301,7 +347,7 @@ pub(super) fn trace_lower_declined(arm: &CompiledArm, inlined: bool) {
 pub(crate) static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::LazyLock::new(|| {
     use std::sync::atomic::Ordering::Release;
     use std::sync::mpsc::{sync_channel, TryRecvError};
-    let (ptx, prx) = sync_channel::<JitWorkItem>(256);
+    let (ptx, prx) = sync_channel::<Option<JitWorkItem>>(256);
     let (dtx, drx) = sync_channel::<JitWorkItem>(256);
     // The bg thread's own handle to the deferred queue, for the §7.1 hot-admission
     // re-enqueue (a gate-refused arm handed straight to the hot stage). It must not
@@ -370,8 +416,7 @@ pub(crate) static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::La
                     // attempt — so one bad lowering silently disables the JIT for everything
                     // that follows, and the only visible symptom is code mysteriously running
                     // on the VM. Announce it (once) rather than leaving it to be deduced.
-                    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-                    if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+                    if crate::diagnostics::debug_flags::jit_bail_trace() {
                         let name = arm
                             .dbg_name
                             .map(crate::core::value::symbol_name_ref)
@@ -442,17 +487,15 @@ pub(crate) static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::La
                 drop(jit); // install the pointer outside the module lock
                 match lowered {
                     Ok(Some(ptr)) => {
-                        slot.store(ptr as *mut u8, Release);
                         // The installed native code lives forever in GLOBAL_JIT and bakes raw
                         // pointers into this arm's chunk `ConstVal`s. Keep the arm (hence its
                         // chunk) alive permanently so those pointers never dangle when the
                         // closure / call-IC that referenced it is dropped (e.g. a green process
                         // exits) — the bug-#2 use-after-free: a freed ConstVal chunk fed garbage
                         // consts (a garbage map_get key) into still-installed native code.
-                        JIT_ARM_KEEPALIVE
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .push(arm.clone());
+                        // Pinned before the pointer is published (see `jit_keep_alive`).
+                        jit_keep_alive(ptr, arm);
+                        slot.store(ptr as *mut u8, Release);
                         // Remember it for the queued copies still behind this one.
                         if let Some(key) = arm.share_key {
                             let map = if inlined {
@@ -541,10 +584,12 @@ pub(crate) static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::La
                 // 1. Drain the entire primary queue before touching deferred — the
                 //    initial-tier work always wins the compiler.
                 match prx.try_recv() {
-                    Ok((arm, tags, rt_tag)) => {
+                    Ok(Some((arm, tags, rt_tag))) => {
                         compile(&arm, &tags, rt_tag, false);
                         continue;
                     }
+                    Ok(None) => continue, // a `defer` wake-up: re-check both queues
+
                     Err(TryRecvError::Empty) => {}
                     Err(TryRecvError::Disconnected) => break,
                 }
@@ -557,14 +602,12 @@ pub(crate) static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::La
                     Err(TryRecvError::Empty) => {}
                     Err(TryRecvError::Disconnected) => {}
                 }
-                // 3. Both empty: block on the primary (initial tier latency matters), but
-                //    only briefly — so a deferred item enqueued while we slept is picked up
-                //    promptly once primary stays quiet. A 1ms idle poll is free (the thread
-                //    is otherwise sleeping) and never delays a primary send (which wakes it).
-                match prx.recv_timeout(std::time::Duration::from_millis(1)) {
-                    Ok((arm, tags, rt_tag)) => compile(&arm, &tags, rt_tag, false),
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                // 3. Both empty: block on the primary. A deferred item's `defer` sends a
+                //    `None` wake-up here after queueing it, so this needs no timeout.
+                match prx.recv() {
+                    Ok(Some((arm, tags, rt_tag))) => compile(&arm, &tags, rt_tag, false),
+                    Ok(None) => {}
+                    Err(_) => break,
                 }
             }
         })

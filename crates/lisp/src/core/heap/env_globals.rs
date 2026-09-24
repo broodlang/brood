@@ -11,6 +11,7 @@
 //! item 1): a `use super::*` child, so it reaches `Heap`'s private fields exactly as before.
 
 use super::*;
+use crate::core::registries as reg;
 
 impl Heap {
     // ===== Environment chain ====================================================
@@ -377,12 +378,18 @@ impl Heap {
             .flat_map(|st| st.bindings.values().copied())
     }
 
-    /// The two registries `require-one` and its waiters coordinate THROUGH while a load is
-    /// open. They must stay live: a staged `*features-loading*` claim would let a second
-    /// process start the same load, and a staged waiter entry would never be released.
-    fn is_live_coordination_registry(sym: Symbol) -> bool {
-        let n = crate::core::value::symbol_name(sym);
-        n == "*features-loading*" || n == "*features-waiting*"
+    /// Is `sym` one of the registries loads coordinate THROUGH, written live even while a
+    /// load is staged? Which ones is policy — the prelude's `*live-registries*` set, defined
+    /// beside them (`std/prelude/tools.blsp`) — so it is read from the table here, never
+    /// staged and never cached: it is a prelude binding and does not change.
+    fn is_live_coordination_registry(&self, sym: Symbol) -> bool {
+        static LIVE: std::sync::OnceLock<Symbol> = std::sync::OnceLock::new();
+        let live = *LIVE.get_or_init(|| crate::core::value::intern(reg::LIVE_REGISTRIES));
+        let set = self.runtime.globals_read().get(&live).copied();
+        match set.map(|v| v.unpack()) {
+            Some(ValueRef::Set(id)) => self.map_get(id, Value::Sym(sym)).is_some(),
+            _ => false,
+        }
     }
 
     /// A load completed: publish its frame (ADR-344). Under `registry_lock` — no registry
@@ -450,6 +457,8 @@ impl Heap {
                 .promote_lock
                 .read()
                 .unwrap_or_else(|e| e.into_inner());
+            #[cfg(test)]
+            super::table_swap_probe::begin(&self.runtime.version, &self.runtime.code_epoch);
             let mut table = self.runtime.globals_write();
             for (sym, val, _) in &pending {
                 let shared = self.rehome_to_current_locked(*val);
@@ -457,18 +466,14 @@ impl Heap {
                     rebind = true;
                 }
             }
-        }
-        if !pre {
-            // A snapshot may have begun between the check above and the insert; its clone
-            // may predate these writes. A replayed define is idempotent, so the rare double
-            // entry costs nothing.
-            for (_, _, w) in &pending {
-                if !self.journal_load_write(w.clone(), direct) {
-                    break;
-                }
-            }
-        }
-        {
+            // Bump `version` BEFORE the table lock drops (KI-193). Every process's global
+            // inline cache is keyed on it, so a reader that takes the table after this
+            // publish must also see the new version. Bumped after the unlock, a reader could
+            // see the module's names in the table (`bound?` reads it directly) and then
+            // serve `*features*` from its cache at the old version: the module visible and
+            // not yet provided, which is exactly what ADR-344 exists to rule out. The
+            // generations lock is only ever taken on its own, so nesting it here cannot
+            // invert an order.
             let mut generations = self
                 .runtime
                 .global_generations
@@ -478,9 +483,24 @@ impl Heap {
             for (sym, _, _) in &pending {
                 generations.insert(*sym, generation);
             }
+            self.features_audit_table(&table, "module publish");
+            // The VM's global-read cache and the JIT key on `code_epoch`, not `version`, and
+            // a load REBINDS at least `*features*`: the same window, through the other cache.
+            if rebind {
+                self.runtime.code_epoch.fetch_add(1, Ordering::Relaxed);
+            }
         }
-        if rebind {
-            self.runtime.code_epoch.fetch_add(1, Ordering::Relaxed);
+        #[cfg(test)]
+        super::table_swap_probe::end(&self.runtime.version, &self.runtime.code_epoch);
+        if !pre {
+            // A snapshot may have begun between the check above and the insert; its clone
+            // may predate these writes. A replayed define is idempotent, so the rare double
+            // entry costs nothing.
+            for (_, _, w) in &pending {
+                if !self.journal_load_write(w.clone(), direct) {
+                    break;
+                }
+            }
         }
         self.end_rt_collect_block();
     }
@@ -596,7 +616,7 @@ impl Heap {
                 }
             }
         }
-        if reg_trace_enabled() && crate::core::value::symbol_name(sym) == "*record-ids*" {
+        if reg_trace_enabled() && crate::core::value::symbol_name(sym) == reg::RECORD_IDS {
             let k1 = path.first().copied().unwrap_or(Value::nil());
             // Ancestry chain (up to 4 hops), so a leaked writer can be attributed to the
             // unit/driver that spawned it even after intermediates exited.
@@ -782,7 +802,7 @@ impl Heap {
         // the op to the live registry — never the map, which would clobber what a concurrent
         // process registered meanwhile — and journals it for the KI-134 replay. The two
         // registries loads coordinate through stay live (`is_live_coordination_registry`).
-        if journal && self.in_journalled_load() && !Self::is_live_coordination_registry(sym) {
+        if journal && self.in_journalled_load() && !self.is_live_coordination_registry(sym) {
             let path: Vec<Value> = path.iter().map(|v| self.promote(*v)).collect();
             let val = self.promote(val);
             let next = self.promote(next);
@@ -812,6 +832,7 @@ impl Heap {
         // The whole-map write-back goes to the live table (a live coordination registry, or
         // no load open); `journal_suppressed` keeps `env_define` from staging or journalling
         // a define whose OPERATION is the real record.
+        self.features_audit_write(sym, path, next);
         let prev_suppressed = std::mem::replace(&mut self.cold_mut().journal_suppressed, true);
         self.env_define(root, sym, next);
         self.cold_mut().journal_suppressed = prev_suppressed;
@@ -1137,7 +1158,12 @@ impl Heap {
                 // double entry costs nothing.
                 let pre =
                     journal && h.journal_load_write(LoadWrite::Define { sym, val: shared }, false);
-                let was = h.runtime.globals_write().insert(sym, shared).is_some();
+                let was = {
+                    let mut table = h.runtime.globals_write();
+                    let was = table.insert(sym, shared).is_some();
+                    h.features_audit_define(sym, &table);
+                    was
+                };
                 if journal && !pre {
                     h.journal_load_write(LoadWrite::Define { sym, val: shared }, false);
                 }
@@ -1742,12 +1768,26 @@ impl Heap {
         if let Some(t) = Self::global_trace_target() {
             self.global_trace(t, "restore: value after replay", table.get(&t).copied());
         }
-        *self.runtime.globals_write() = table;
         // Wholesale table swap — invalidate every stamped global inline cache. This one
         // bumps the code epoch too (ADR-217): a restore can *replace or remove* bindings
         // a compiled arm baked in, so it is a rebind in every sense that matters.
-        self.runtime.version.fetch_add(1, Ordering::Relaxed);
-        self.runtime.code_epoch.fetch_add(1, Ordering::Relaxed);
+        //
+        // The bumps happen while the write guard is still held (KI-193). Bumped after the
+        // unlock, a reader could take the restored table (a module's names gone) and then
+        // serve `*features*` from its cache at the old version, still listing the module:
+        // `require-one` short-circuits on it, the `:use` imports nothing, and every bare use
+        // in that file dies `unbound symbol`. That is the `[refer] imported NOTHING` shape.
+        #[cfg(test)]
+        super::table_swap_probe::begin(&self.runtime.version, &self.runtime.code_epoch);
+        {
+            let mut globals = self.runtime.globals_write();
+            *globals = table;
+            self.features_audit_table(&globals, "isolate restore");
+            self.runtime.version.fetch_add(1, Ordering::Relaxed);
+            self.runtime.code_epoch.fetch_add(1, Ordering::Relaxed);
+        }
+        #[cfg(test)]
+        super::table_swap_probe::end(&self.runtime.version, &self.runtime.code_epoch);
         // Release the compaction suppression `snapshot_globals` took: the snapshot is no
         // longer outstanding, so a relocation can no longer strand it (KI-6).
         self.end_rt_collect_block();

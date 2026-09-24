@@ -160,6 +160,7 @@ pub(crate) fn jit_run_fast_link(
         nslots,
         native_depth,
         callee_env,
+        code as *const u8,
         out,
     )
 }
@@ -185,8 +186,7 @@ pub(super) fn xadmit_enabled() -> bool {
 /// findings that an A/B cannot tell apart from the outside.
 #[cfg(feature = "jit")]
 pub(super) fn xadmit_trace(arm: &std::sync::Arc<CompiledArm>, inlined: bool) {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if !*ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+    if !crate::diagnostics::debug_flags::jit_bail_trace() {
         return;
     }
     let name = arm
@@ -260,16 +260,7 @@ pub(crate) fn jit_latch_dirty_blocked(
     // dirty forever. The IC bases were restored above, so `site` resolves against the
     // caller's block exactly as the lookup that entered here did.
     heap.vm_fast_link_clear_site(site);
-    let scanned = {
-        use std::sync::atomic::Ordering::Acquire;
-        // Poison-tolerant like the two push sites: a codegen panic (the
-        // CODEGEN-PANICKED path) may have poisoned this mutex, and the latch must
-        // not turn that into a worker-thread crash.
-        let reg = JIT_ARM_KEEPALIVE.lock().unwrap_or_else(|e| e.into_inner());
-        reg.iter()
-            .find(|a| std::ptr::eq(a.jit_code.load(Acquire), code as *mut u8))
-            .cloned()
-    };
+    let scanned = jit_arm_for_code(code as *const u8);
     if let Some(arm) = scanned.or_else(|| {
         heap.vm_call_ic_probe(site, head, argc as u32, epoch)
             .and_then(|(_, a)| a)
@@ -311,6 +302,9 @@ pub(crate) fn jit_xcall_cold_outcome(
         nslots,
         native_depth,
         EnvId::GLOBAL,
+        // The inline path does not carry the code pointer out of the IR; resolution
+        // falls back to the IC and then the callee's name.
+        std::ptr::null(),
         out,
     ) {
         FastLinkOutcome::Done => 0,
@@ -340,6 +334,7 @@ pub(super) fn jit_fast_link_cold_outcome(
     nslots: usize,
     native_depth: u32,
     callee_env: EnvId,
+    code: *const u8,
     out: *mut Value,
 ) -> FastLinkOutcome {
     // These arms produce their value in Rust (a re-entered `apply_value` / `vm_resume_deopt`),
@@ -404,10 +399,23 @@ pub(super) fn jit_fast_link_cold_outcome(
             // entered 50 016 times instead of 50 000, exactly 16 — the deopt-bail threshold
             // — before the arm bailed and the duplication stopped). On a miss, resolve the
             // arm the slow way by name and take the same checkpoint-resume path.
+            //
+            // Between the IC and the name comes the code pointer that actually ran: an IC
+            // miss means the epoch moved, and a `def` in that window rebinds the name to a
+            // DIFFERENT arm. The frame-shape check below compares sizes only, so two arms
+            // of equal `nslots` would pass it and the resume would read the new arm's
+            // journal slot out of the old arm's frame and interpret the new chunk from the
+            // old ip. The keep-alive registry names the arm the code belongs to.
             let resolved = heap
                 .vm_call_ic_probe(site, head, argc as u32, epoch)
                 .and_then(|(_, a)| a)
                 .map(|(arm, cenv, _)| (arm, cenv))
+                .or_else(|| {
+                    (!code.is_null())
+                        .then(|| jit_arm_for_code(code))
+                        .flatten()
+                        .map(|a| (ArmHandle::new(a), callee_env))
+                })
                 .or_else(|| {
                     let genv = heap.read_root_env(heap.jit_call_env);
                     match heap.env_get(genv, head) {

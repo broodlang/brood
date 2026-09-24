@@ -151,6 +151,8 @@ fn rewrite_arm_handles_rewrites_every_embedded_handle() {
         #[cfg(feature = "jit")]
         inline_installed: std::sync::atomic::AtomicBool::new(false),
         xcall_wanted: std::sync::OnceLock::new(),
+        scalar_kind: std::sync::OnceLock::new(),
+        calls_receive: std::sync::OnceLock::new(),
         #[cfg(feature = "jit")]
         leaf: None,
     };
@@ -294,6 +296,8 @@ fn vm_run_bc_captures_and_resumes_a_suspend() {
         #[cfg(feature = "jit")]
         inline_installed: std::sync::atomic::AtomicBool::new(false),
         xcall_wanted: std::sync::OnceLock::new(),
+        scalar_kind: std::sync::OnceLock::new(),
+        calls_receive: std::sync::OnceLock::new(),
         #[cfg(feature = "jit")]
         leaf: None,
     });
@@ -486,6 +490,8 @@ fn jit_lowers_and_runs_a_straight_line_int_arm() {
         #[cfg(feature = "jit")]
         inline_installed: std::sync::atomic::AtomicBool::new(false),
         xcall_wanted: std::sync::OnceLock::new(),
+        scalar_kind: std::sync::OnceLock::new(),
+        calls_receive: std::sync::OnceLock::new(),
         #[cfg(feature = "jit")]
         leaf: None,
     };
@@ -579,6 +585,8 @@ fn jit_lowers_and_runs_an_if_with_comparison() {
         #[cfg(feature = "jit")]
         inline_installed: std::sync::atomic::AtomicBool::new(false),
         xcall_wanted: std::sync::OnceLock::new(),
+        scalar_kind: std::sync::OnceLock::new(),
+        calls_receive: std::sync::OnceLock::new(),
         #[cfg(feature = "jit")]
         leaf: None,
     };
@@ -683,6 +691,8 @@ fn jit_lowers_and_runs_a_self_recursive_int_loop() {
         #[cfg(feature = "jit")]
         inline_installed: std::sync::atomic::AtomicBool::new(false),
         xcall_wanted: std::sync::OnceLock::new(),
+        scalar_kind: std::sync::OnceLock::new(),
+        calls_receive: std::sync::OnceLock::new(),
         #[cfg(feature = "jit")]
         leaf: None,
     };
@@ -832,6 +842,8 @@ fn jit_lowers_an_arm_ending_in_a_tail_call() {
         #[cfg(feature = "jit")]
         inline_installed: std::sync::atomic::AtomicBool::new(false),
         xcall_wanted: std::sync::OnceLock::new(),
+        scalar_kind: std::sync::OnceLock::new(),
+        calls_receive: std::sync::OnceLock::new(),
         #[cfg(feature = "jit")]
         leaf: None,
     };
@@ -917,6 +929,8 @@ fn jit_lowers_an_arm_ending_in_a_tail_call() {
         #[cfg(feature = "jit")]
         inline_installed: std::sync::atomic::AtomicBool::new(false),
         xcall_wanted: std::sync::OnceLock::new(),
+        scalar_kind: std::sync::OnceLock::new(),
+        calls_receive: std::sync::OnceLock::new(),
         #[cfg(feature = "jit")]
         leaf: None,
     };
@@ -1007,6 +1021,8 @@ fn jit_lowers_an_arm_ending_in_a_tail_call() {
         #[cfg(feature = "jit")]
         inline_installed: std::sync::atomic::AtomicBool::new(false),
         xcall_wanted: std::sync::OnceLock::new(),
+        scalar_kind: std::sync::OnceLock::new(),
+        calls_receive: std::sync::OnceLock::new(),
         #[cfg(feature = "jit")]
         leaf: None,
     };
@@ -1093,6 +1109,8 @@ fn jit_lowers_fused_prims_map_and_overflow() {
         #[cfg(feature = "jit")]
         inline_installed: std::sync::atomic::AtomicBool::new(false),
         xcall_wanted: std::sync::OnceLock::new(),
+        scalar_kind: std::sync::OnceLock::new(),
+        calls_receive: std::sync::OnceLock::new(),
         #[cfg(feature = "jit")]
         leaf: None,
     };
@@ -1262,6 +1280,8 @@ fn jit_tier_compiles_a_hot_arm_then_runs_native() {
         #[cfg(feature = "jit")]
         inline_installed: std::sync::atomic::AtomicBool::new(false),
         xcall_wanted: std::sync::OnceLock::new(),
+        scalar_kind: std::sync::OnceLock::new(),
+        calls_receive: std::sync::OnceLock::new(),
         #[cfg(feature = "jit")]
         leaf: None,
     };
@@ -1469,6 +1489,8 @@ fn vm_run_bc_runs_a_tiered_arm_via_the_hook() {
         #[cfg(feature = "jit")]
         inline_installed: std::sync::atomic::AtomicBool::new(false),
         xcall_wanted: std::sync::OnceLock::new(),
+        scalar_kind: std::sync::OnceLock::new(),
+        calls_receive: std::sync::OnceLock::new(),
         #[cfg(feature = "jit")]
         leaf: None,
     });
@@ -1605,6 +1627,8 @@ fn jit_speedup_vs_vm() {
         #[cfg(feature = "jit")]
         inline_installed: std::sync::atomic::AtomicBool::new(false),
         xcall_wanted: std::sync::OnceLock::new(),
+        scalar_kind: std::sync::OnceLock::new(),
+        calls_receive: std::sync::OnceLock::new(),
         #[cfg(feature = "jit")]
         leaf: None,
     };
@@ -1729,6 +1753,8 @@ fn ki26_arm(nslots: usize, inline_nslots: usize) -> CompiledArm {
         inline_queued: std::sync::atomic::AtomicBool::new(false),
         inline_installed: std::sync::atomic::AtomicBool::new(false),
         xcall_wanted: std::sync::OnceLock::new(),
+        scalar_kind: std::sync::OnceLock::new(),
+        calls_receive: std::sync::OnceLock::new(),
         leaf: None,
     }
 }
@@ -1884,6 +1910,8 @@ fn tiering_advisories_route_to_the_predicate_they_name() {
         #[cfg(feature = "jit")]
         inline_installed: std::sync::atomic::AtomicBool::new(false),
         xcall_wanted: std::sync::OnceLock::new(),
+        scalar_kind: std::sync::OnceLock::new(),
+        calls_receive: std::sync::OnceLock::new(),
         #[cfg(feature = "jit")]
         leaf: None,
     };
@@ -2395,6 +2423,8 @@ fn jit_tier_declines_the_inlined_body_when_the_frame_was_built_small() {
         inline_queued: std::sync::atomic::AtomicBool::new(true),
         inline_installed: std::sync::atomic::AtomicBool::new(true),
         xcall_wanted: std::sync::OnceLock::new(),
+        scalar_kind: std::sync::OnceLock::new(),
+        calls_receive: std::sync::OnceLock::new(),
         leaf: None,
     });
 

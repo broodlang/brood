@@ -35,6 +35,12 @@ pub(crate) fn exec_chunk(
     base: usize,
     genv: EnvRoot,
     capture: bool,
+    // The global epoch this FRAME's `SelfCall` hot-reload guard last validated at, owned by
+    // `vm_run_bc` and stored in `BcFrame`. It must outlive this call: the frame re-enters
+    // here after every non-tail call in its body, and a snapshot re-read on entry hid any
+    // `def` made before that call — `(do (def-self …) (loop (list 1)))` looped on the old
+    // body forever because `(list 1)` is a VM call (KI-190).
+    entry_epoch: &mut u64,
     // Back-edge tiering counter (jit only): persisted across exec_chunk re-entries for
     // the same frame so non-tail Brood calls (which exit and re-enter exec_chunk) don't
     // reset the SelfCall iteration count. Each SelfCall increments this; every 256th
@@ -48,22 +54,19 @@ pub(crate) fn exec_chunk(
     // the spinning-loop sync compile, which needs the Arc for the keepalive.
     let arm: &CompiledArm = arm_arc;
     let chunk = arm.chunk.as_ref().expect("exec_chunk: arm has no chunk");
-    // Global epoch as of entering this frame — the hot-reload guard for `Inst::SelfCall`
-    // (see there). A `def` bumps the epoch, so an unchanged value means no rebinding can
-    // have happened since, and the loop takes its zero-lookup fast path.
+    // The hot-reload guard for `Inst::SelfCall` (see there) compares against `entry_epoch`.
+    // A `def` bumps the epoch, so an unchanged value means no rebinding can have happened
+    // since the frame last validated, and the loop takes its zero-lookup fast path.
     //
-    // A stale arm (ADR-366) enters with the sentinel instead, so its FIRST `SelfCall` takes
-    // the slow path and hands the loop to the recompiled body. Needed because this frame
-    // re-enters here after every non-tail call in the loop body, and a plain re-read would
-    // hide the epoch the load moved: `(apply mod/f nil)` misses, loads, is then CALLED —
-    // and by the time the back-edge runs, the snapshot is fresh again. The test is against
-    // the heap's hot per-process hint (the uid the marking wrote), not the arm's flag, which
-    // sits on a cold line: reading that here cost `pipeline` 4% at the VM ceiling.
-    let mut self_epoch = if heap.stale_arm_hint() == arm.uid {
-        u64::MAX
-    } else {
-        heap.global_epoch()
-    };
+    // A stale arm (ADR-366) takes the sentinel instead, so its FIRST `SelfCall` takes the
+    // slow path and hands the loop to the recompiled body: the load that staled it happened
+    // inside this frame (`(apply mod/f nil)` misses, loads, is then CALLED), and it may have
+    // run before this frame last validated. The test is against the heap's hot per-process
+    // hint (the uid the marking wrote), not the arm's flag, which sits on a cold line:
+    // reading that here cost `pipeline` 4% at the VM ceiling.
+    if heap.stale_arm_hint() == arm.uid {
+        *entry_epoch = u64::MAX;
+    }
     while *ip < chunk.code.len() {
         let inst = &chunk.code[*ip];
         *ip += 1;
@@ -505,6 +508,9 @@ pub(crate) fn exec_chunk(
                     argv.push(heap.root_at(n - argc + k));
                 }
                 let mut fast: Option<(Arc<ArmHandle>, EnvId, (u32, u32))> = None;
+                // Set by the unstaged IC path when `vm_call_ic_self` proved this tail call
+                // targets THIS arm in THIS env — `fast` then stays `None` (no clone).
+                let mut self_tail = false;
                 // KI-19: a *staged* head was resolved before the args (it sits below them),
                 // so the callee is that value — not a fresh resolution, which would observe
                 // a `def` an argument performed. The call-site IC is still consulted for the
@@ -555,7 +561,18 @@ pub(crate) fn exec_chunk(
                     let drop_base = n - argc;
                     if *site != NO_SITE && heap.is_global(cur_env) {
                         let epoch = heap.global_epoch();
-                        if let Some((v, payload)) =
+                        let self_hit = if *tail {
+                            heap.vm_call_ic_self(*site, *sym, argc as u32, epoch, arm, cur_env)
+                        } else {
+                            None
+                        };
+                        if let Some(v) = self_hit {
+                            // Self-tail IC hit, answered without cloning the arm handle —
+                            // the inline self-tail reset below takes it.
+                            crate::perf_bump!(call_ic_hit);
+                            self_tail = true;
+                            (v, drop_base)
+                        } else if let Some((v, payload)) =
                             heap.vm_call_ic_probe(*site, *sym, argc as u32, epoch)
                         {
                             crate::perf_bump!(call_ic_hit);
@@ -773,45 +790,21 @@ pub(crate) fn exec_chunk(
                 // between, so the values are still valid. We skip the inline if GC is due
                 // so the outer loop can collect (and can't have stale off-heap SmallVec).
                 if *tail {
-                    if let Some((ref compiled, cenv, _)) = fast {
-                        if std::ptr::eq(Arc::as_ptr(compiled.arc()), arm)
+                    let is_self = self_tail
+                        || matches!(fast, Some((ref compiled, cenv, _))
+                            if std::ptr::eq(Arc::as_ptr(compiled.arc()), arm) && cur_env == cenv);
+                    {
+                        if is_self
                             && arm.noptional == 0
                             && arm.rest_slot.is_none()
-                            && cur_env == cenv
                             && !heap.gc_due()
                         {
                             crate::perf_bump!(self_tail);
                             heap.truncate_roots(base + arm.nslots);
                             reset_frame_keep_captures(heap, arm, base, &argv);
                             *ip = 0;
-                            if let Some(used) = crate::core::alloc::soft_limit_hit() {
-                                return Err(crate::eval::memory_limit_error(used));
-                            }
-                            if let Some(live) = heap.take_proc_limit_hit() {
-                                let limit = heap.proc_mem_limit().unwrap_or(0);
-                                return Err(crate::eval::proc_memory_limit_error(live, limit));
-                            }
-                            if let Some((len, limit)) =
-                                crate::process::take_current_mailbox_overflow()
-                            {
-                                return Err(crate::eval::proc_mailbox_limit_error(len, limit));
-                            }
-                            if capture {
-                                if crate::process::capture_hard_kill_pending() {
-                                    return Ok(ChunkExit::Killed);
-                                }
-                                if crate::process::tick_capture() {
-                                    return Ok(ChunkExit::Preempt);
-                                }
-                            } else if crate::process::tick_reporting_hard_kill() {
-                                // Nested (non-capture) run: no outcome can cross the
-                                // native frame, but a hard kill only needs to unwind —
-                                // the untrappable signal reaches the top-level driver,
-                                // which converts it to `VmOutcome::Killed`.
-                                return Err(crate::error::LispError::kill_signal());
-                            }
-                            if crate::process::deadline_exceeded() {
-                                return Err(crate::eval::deadline_error());
+                            if let Some(exit) = loop_safepoint(heap, capture)? {
+                                return Ok(exit);
                             }
                             continue;
                         }
@@ -940,8 +933,8 @@ pub(crate) fn exec_chunk(
                 // before. On a bump we re-resolve once and, if the name still names this arm,
                 // re-arm and keep looping.
                 let ep = heap.global_epoch();
-                if ep != self_epoch {
-                    self_epoch = ep;
+                if ep != *entry_epoch {
+                    *entry_epoch = ep;
                     if let Some(name) = arm.dbg_name {
                         let env = heap.read_root_env(genv);
                         // ADR-366: the epoch may also have moved because a miss IN THIS LOOP
@@ -976,7 +969,10 @@ pub(crate) fn exec_chunk(
                             let callee = heap
                                 .env_get(env, name)
                                 .ok_or_else(|| crate::eval::unbound_error(heap, name))?;
-                            heap.truncate_roots(base + arm.nslots);
+                            // The args stay on the operand stack across `dispatch`, as for
+                            // `Inst::Call`: a native callee can collect, and `argv` is a
+                            // copy the collector does not see. The driver drops the
+                            // leftover operands for a `Tail`/`Done`, as it does there.
                             return Ok(match dispatch(heap, callee, argv, true, env) {
                                 Ok(Step::Tail {
                                     compiled,
@@ -1001,30 +997,9 @@ pub(crate) fn exec_chunk(
                 heap.truncate_roots(base + arm.nslots);
                 reset_frame_keep_captures(heap, arm, base, &argv);
                 *ip = 0;
-                if let Some(used) = crate::core::alloc::soft_limit_hit() {
-                    return Err(crate::eval::memory_limit_error(used));
-                }
-                if let Some(live) = heap.take_proc_limit_hit() {
-                    let limit = heap.proc_mem_limit().unwrap_or(0);
-                    return Err(crate::eval::proc_memory_limit_error(live, limit));
-                }
-                if let Some((len, limit)) = crate::process::take_current_mailbox_overflow() {
-                    return Err(crate::eval::proc_mailbox_limit_error(len, limit));
-                }
-                if capture {
-                    if crate::process::capture_hard_kill_pending() {
-                        return Ok(ChunkExit::Killed);
-                    }
-                    if crate::process::tick_capture() {
-                        // Frame already reset; driver captures the continuation as-is.
-                        return Ok(ChunkExit::Preempt);
-                    }
-                } else if crate::process::tick_reporting_hard_kill() {
-                    // Nested (non-capture) run — see the sibling safepoint above.
-                    return Err(crate::error::LispError::kill_signal());
-                }
-                if crate::process::deadline_exceeded() {
-                    return Err(crate::eval::deadline_error());
+                // Frame already reset; on a `Preempt` the driver captures it as-is.
+                if let Some(exit) = loop_safepoint(heap, capture)? {
+                    return Ok(exit);
                 }
                 // Back-edge tiering: periodically hand a hot self-tail loop to the driver
                 // so it can tier. The frame is already reset (ip=0, args in slots), so the
@@ -1297,6 +1272,64 @@ pub(crate) fn attach_vm_trace_callers(e: &mut LispError, frames: &[BcFrame]) {
 /// ever run a captured arm: a `letrec` helper fills its captures on every `push_frame`,
 /// and the IC fast path's `cur_env == cenv` condition was, until then, only met by
 /// closures with nothing to capture.
+/// The safepoint of an inline self-tail loop iteration — the ONE copy shared by the
+/// `SelfCall` back-edge and the IC self-tail path (the driver's loop top in `vm_run_bc` is the
+/// frame-boundary twin, with the same split). They used to be two hand-kept copies of the
+/// driver's block, and had drifted: neither made the RUNTIME drain report, so an interpreted
+/// loop that never left `exec_chunk` (a nested run, whose rollover does not exit) never
+/// acked a drain and pinned the old generation for every process.
+///
+/// Per iteration: the process heap limit (a heap field) and the deadline (a `Cell` read).
+/// Once per quantum, at the reduction rollover: the soft memory limit (it sums 64 allocator
+/// shards when armed), the mailbox bound and a pending hard kill (each a thread-local
+/// `RefCell` borrow plus an atomic), and the drain report. They used to run every iteration;
+/// a kill or an overflow is now honoured within one quantum, which is the latency the
+/// capture-mode preempt already had and BEAM's model (checks at reduction boundaries).
+#[inline(always)]
+fn loop_safepoint(heap: &mut Heap, capture: bool) -> Result<Option<ChunkExit>, LispError> {
+    if let Some(live) = heap.take_proc_limit_hit() {
+        let limit = heap.proc_mem_limit().unwrap_or(0);
+        return Err(crate::eval::proc_memory_limit_error(live, limit));
+    }
+    if crate::process::tick_capture() {
+        quantum_checks(heap)?;
+        if crate::process::capture_hard_kill_pending() {
+            // Capture mode retires the process at the driver; a nested run cannot return an
+            // outcome across its native frame, so it unwinds with the untrappable signal and
+            // the top-level driver converts it to `VmOutcome::Killed`.
+            return if capture {
+                Ok(Some(ChunkExit::Killed))
+            } else {
+                Err(crate::error::LispError::kill_signal())
+            };
+        }
+        if capture {
+            return Ok(Some(ChunkExit::Preempt));
+        }
+        crate::process::refill_nested_quantum();
+    }
+    if crate::process::deadline_exceeded() {
+        return Err(crate::eval::deadline_error());
+    }
+    Ok(None)
+}
+
+/// The once-per-quantum half of [`loop_safepoint`] (and of the driver's loop top): the checks
+/// too costly to make per iteration, none of which needs finer latency.
+#[inline(never)]
+pub(super) fn quantum_checks(heap: &Heap) -> Result<(), LispError> {
+    if let Some(used) = crate::core::alloc::soft_limit_hit() {
+        return Err(crate::eval::memory_limit_error(used));
+    }
+    if let Some((len, limit)) = crate::process::take_current_mailbox_overflow() {
+        return Err(crate::eval::proc_mailbox_limit_error(len, limit));
+    }
+    if heap.drain_active() {
+        crate::process::report_drain_liveness(heap);
+    }
+    Ok(())
+}
+
 #[inline]
 fn reset_frame_keep_captures(heap: &mut Heap, arm: &CompiledArm, base: usize, argv: &[Value]) {
     let capture_lo = arm.nrequired;

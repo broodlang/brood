@@ -412,6 +412,10 @@ pub(crate) struct BcFrame {
     /// Persisted back-edge counter for this frame — see `exec_chunk`'s `back_edges` param.
     #[cfg(feature = "jit")]
     back_edges: u32,
+    /// The global epoch this frame's `Inst::SelfCall` hot-reload guard last validated at —
+    /// see `exec_chunk`'s `entry_epoch` param. Persisted for the same reason as
+    /// `back_edges`: the frame re-enters `exec_chunk` after every non-tail call.
+    entry_epoch: u64,
 }
 
 /// A captured VM continuation — the reified call stack of a green process parked at a
@@ -558,6 +562,9 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                 inline_installed: std::sync::atomic::AtomicBool::new(false),
                 #[cfg(feature = "jit")]
                 xcall_wanted: std::sync::OnceLock::new(),
+                #[cfg(feature = "jit")]
+                scalar_kind: std::sync::OnceLock::new(),
+                calls_receive: std::sync::OnceLock::new(),
                 #[cfg(feature = "jit")]
                 leaf: None,
             });

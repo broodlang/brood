@@ -55,6 +55,9 @@ impl Heap {
         // reports. Only recorded when a collection actually ran (`gc_runs`
         // moved) — a gated no-op call isn't a pause. Two `Instant` reads per
         // collection: noise against the collection itself.
+        // `&mut self`: no RUNTIME borrow can be live, so the generation `Arc`s the cache
+        // replaced can go (see `code_gen_ref`).
+        self.release_retired_gens();
         let runs_before = self.gc_runs;
         let t0 = web_time::Instant::now();
         self.collect_inner(extra_roots, extra_envs);
@@ -359,11 +362,13 @@ impl Heap {
             // builds a 375k-cell list and peaks at 191 MB against .NET's 30 MB and
             // Ruby's 25 MB, and this reservation is a large part of the difference.
             // `BROOD_GC_TENURE_RESERVE=1` restores the old behaviour for an A/B.
-            self.local = if std::env::var_os("BROOD_GC_TENURE_RESERVE").is_some() {
-                Slabs::with_capacity_like(&young)
-            } else {
-                Slabs::default()
-            };
+            static RESERVE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            self.local =
+                if *RESERVE.get_or_init(|| std::env::var_os("BROOD_GC_TENURE_RESERVE").is_some()) {
+                    Slabs::with_capacity_like(&young)
+                } else {
+                    Slabs::default()
+                };
         } else {
             self.local = dest;
         }

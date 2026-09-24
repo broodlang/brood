@@ -795,6 +795,16 @@ pub struct CompiledArm {
     /// fast links by callee name). Unset until first asked.
     #[cfg(feature = "jit")]
     pub xcall_wanted: std::sync::OnceLock<bool>,
+    /// The STATIC half of the i64/f64 register-worker eligibility (`arm_scalar_kind`):
+    /// the arm's shape and body walk, which never change for an arm. `Ok(1)` Int, `Ok(2)`
+    /// Float, `Err(reason)` refused. Cached because the eligibility is asked on every
+    /// VM→native entry of an arm awaiting its inline upgrade (`declines_inline_upgrade`),
+    /// and the walk used to sit behind a process-global mutex there.
+    #[cfg(feature = "jit")]
+    pub scalar_kind: std::sync::OnceLock<Result<u8, &'static str>>,
+    /// Does this arm's own chunk call `%receive` directly? Asked per tree-walker→VM route
+    /// (`tw_vm_route`), so computed once (`arm_calls_receive`).
+    pub calls_receive: std::sync::OnceLock<bool>,
     /// Leaf-callee inlining (default ON; `BROOD_NO_LEAF_INLINE=1` opts out): the body with
     /// each qualifying small non-recursive callee's body spliced in, derived ONCE at
     /// arm-compile time (the only moment a `&Heap` can resolve the callee symbols).

@@ -1495,6 +1495,9 @@ fn copy_cross_heap_rec(
                 && id.region() == crate::core::value::RUNTIME
                 && src.shares_runtime_with(dst) =>
         {
+            // The wire path's `FnShared` arm does the same: `dst` may have acked a drain
+            // of this handle's generation clean, and now holds a handle into it (KI-188).
+            dst.rearm_drain_ack();
             v
         }
         // Everything else — a closure we declined to share, ropes, macros, builtins,
@@ -1875,5 +1878,87 @@ mod message_fits_tests {
             Message::Int(2),
         ]);
         assert!(!message_fits(&m, 4096));
+    }
+}
+
+/// A shared closure handle crossing a same-runtime send can carry a handle into a RUNTIME
+/// generation that is DRAINING. A receiver that already acked that drain clean must lose
+/// its ack, or the drain completes on the sender's later ack and frees the generation
+/// under the receiver (the clean-stays-clean invariant assumes no old-gen handle can
+/// arrive by message — this is the one way one does). Both delivery paths: L1
+/// (`copy_cross_heap`, parked receiver) and the wire (`Message::FnShared`).
+#[cfg(test)]
+mod drain_ack_tests {
+    use super::{copy_cross_heap, from_message, to_message_to_runtime, L1_COPY_BUDGET};
+    use crate::core::heap::Heap;
+    use crate::core::value::Value;
+    use crate::Interp;
+
+    const MAIN: u64 = 1;
+    const SENDER: u64 = 2;
+    const RECEIVER: u64 = 3;
+
+    /// `(main, sender, receiver, f_gen0)` with a drain of gen 0 armed, the sender holding
+    /// the only gen-0 handle, and main + receiver already acked clean.
+    fn armed() -> (Interp, Heap, Heap, Value) {
+        let mut interp = Interp::new();
+        interp.heap.set_rt_auto_collect(false);
+        interp.eval_str("(defn f (x) (* x 2))").expect("define f");
+        let f_gen0 = interp.eval_str("f").expect("resolve f");
+        assert!(interp.heap.age_runtime(), "age to gen 1");
+        interp.eval_str("(defn f (x) (+ x 1))").expect("redefine f");
+        interp.heap.collect(&mut [], &mut []);
+        assert!(!interp.heap.runtime_gen_referenced(0));
+        let mut sender = Heap::with_regions(interp.heap.prelude_arc(), interp.heap.runtime_arc());
+        sender.push_root(f_gen0);
+        let receiver = Heap::with_regions(interp.heap.prelude_arc(), interp.heap.runtime_arc());
+        interp.heap.begin_gen_drain(0);
+        interp.heap.report_gen_liveness(MAIN);
+        receiver.report_gen_liveness(RECEIVER);
+        sender.report_gen_liveness(SENDER);
+        assert!(
+            !interp.heap.gen_drained(&[MAIN, SENDER, RECEIVER]),
+            "sender pins gen 0"
+        );
+        (interp, sender, receiver, f_gen0)
+    }
+
+    /// The sender lets go and acks; the receiver's retained handle must still pin.
+    fn sender_releases(interp: &Interp, mut sender: Heap, receiver: &Heap) {
+        sender.truncate_roots(0);
+        sender.report_gen_liveness(SENDER);
+        receiver.report_gen_liveness(RECEIVER);
+        assert!(
+            !interp.heap.gen_drained(&[MAIN, SENDER, RECEIVER]),
+            "the receiver holds a gen-0 handle it got by message — gen 0 is not dead",
+        );
+    }
+
+    #[test]
+    fn an_l1_shared_closure_withdraws_the_receivers_clean_ack() {
+        let (interp, sender, mut receiver, f_gen0) = armed();
+        let mut budget = L1_COPY_BUDGET;
+        let got = copy_cross_heap(&sender, &mut receiver, f_gen0, &mut budget).expect("copies");
+        assert!(
+            matches!((got, f_gen0), (Value::Fn(a), Value::Fn(b)) if a.0 == b.0),
+            "shared by handle, not copied"
+        );
+        receiver.push_root(got);
+        sender_releases(&interp, sender, &receiver);
+    }
+
+    #[test]
+    fn a_wire_shared_closure_withdraws_the_receivers_clean_ack() {
+        let (interp, sender, mut receiver, f_gen0) = armed();
+        let m =
+            to_message_to_runtime(&sender, f_gen0, Some(receiver.runtime_tag())).expect("encodes");
+        assert!(
+            matches!(m, super::Message::FnShared { .. }),
+            "shared by handle"
+        );
+        let got = from_message(&mut receiver, &m);
+        receiver.push_root(got);
+        drop(m); // the in-flight pin goes with the message
+        sender_releases(&interp, sender, &receiver);
     }
 }

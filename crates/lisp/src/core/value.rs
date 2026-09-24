@@ -1248,7 +1248,7 @@ impl Closure {
 /// varies between instantiations, so this is cached per `MakeClosure` site and
 /// cloned to build each closure, sparing the per-creation re-parse of the param
 /// lists and the RUNTIME-AST walk (`parse_params`/`list_to_vec`). Keyed and
-/// invalidated exactly like [`crate::core::heap::Heap::code_gen_pinned`]'s cache —
+/// invalidated exactly like [`crate::core::heap::Heap::code_gen_ref`]'s cache —
 /// a bump of the RUNTIME `gen_version` (the only event that moves the AST handles
 /// the arms hold) drops it. See `eval::make_closure_cached`.
 pub struct ClosureTemplate {

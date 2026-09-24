@@ -1091,6 +1091,7 @@ impl Heap {
             // Cache the clean ack locally so subsequent frames short-circuit at the
             // `Cell` check above without re-taking the `drain_acks` read lock.
             self.acked_drain_epoch.set(epoch);
+            self.acked_drain_pid.set(pid);
         }
         // Dirty → take no write lock. A process reaching here holds no current-epoch ack
         // (the fast path above returns if it did) and `begin_gen_drain` cleared the table

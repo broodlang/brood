@@ -8,6 +8,7 @@ use crate::core::value::{self, EnvId, Symbol, Value};
 use crate::error::{LispError, LispResult};
 
 use super::numeric::{arg, expect_symbol};
+use crate::core::registries as reg;
 
 /// Every primitive this file contributes: name, arity, signature, arglist, docstring.
 pub(super) fn register(primitives: &mut super::Primitives) {
@@ -1403,7 +1404,7 @@ fn refer_add(
 /// allocation), so it is usable from an error path holding `&Heap`.
 pub(crate) fn module_is_provided(heap: &Heap, mod_name: &str) -> bool {
     let map_id = match heap
-        .env_get(value::EnvId::GLOBAL, value::intern("*features*"))
+        .env_get(value::EnvId::GLOBAL, value::intern(reg::FEATURES))
         .map(|v| v.unpack())
     {
         Some(crate::core::value::ValueRef::Map(id)) => id,
@@ -1428,7 +1429,7 @@ pub(crate) fn is_embedded_module(key: &str) -> bool {
 /// the CHECK loaded, and replays those loads on a hit (`cli_support::run_check_cache_*`).
 pub(crate) fn provided_features(heap: &Heap) -> Vec<String> {
     let map_id = match heap
-        .env_get(value::EnvId::GLOBAL, value::intern("*features*"))
+        .env_get(value::EnvId::GLOBAL, value::intern(reg::FEATURES))
         .map(|v| v.unpack())
     {
         Some(crate::core::value::ValueRef::Map(id)) => id,
@@ -1448,7 +1449,7 @@ pub(crate) fn provided_features(heap: &Heap) -> Vec<String> {
 
 pub(crate) fn every_provided_feature_is_embedded(heap: &Heap) -> bool {
     let map_id = match heap
-        .env_get(value::EnvId::GLOBAL, value::intern("*features*"))
+        .env_get(value::EnvId::GLOBAL, value::intern(reg::FEATURES))
         .map(|v| v.unpack())
     {
         Some(crate::core::value::ValueRef::Map(id)) => id,
@@ -1475,7 +1476,7 @@ pub(crate) fn every_provided_feature_is_embedded(heap: &Heap) -> bool {
 /// (ADR-335) a load starting in a spawned process is the ordinary case, not a race to fix.
 fn module_is_loading(heap: &mut Heap, mod_name: &str) -> bool {
     let map_id = match heap
-        .env_get(value::EnvId::GLOBAL, value::intern("*features-loading*"))
+        .env_get(value::EnvId::GLOBAL, value::intern(reg::FEATURES_LOADING))
         .map(|v| v.unpack())
     {
         Some(crate::core::value::ValueRef::Map(id)) => id,

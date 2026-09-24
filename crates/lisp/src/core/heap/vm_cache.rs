@@ -732,6 +732,32 @@ impl Heap {
     /// callee value plus the VM fast-path payload. Sym + argc are validated (not
     /// just the epoch) so a site id recycled by [`Self::runtime_collect`]'s table
     /// clear can never serve a *different* call site a wrong resolution.
+    /// The self-tail question of [`Self::vm_call_ic_probe`], answered inside the borrow:
+    /// does `site` hold a current entry for exactly the arm `arm` running in `env`? Returns
+    /// the cached callee when it does. For the interpreter's inline self-tail loop, which
+    /// only compares identity — the cloning probe paid an `Arc` increment and decrement per
+    /// iteration for a handle it dropped at once.
+    #[inline]
+    pub(crate) fn vm_call_ic_self(
+        &self,
+        site: u32,
+        sym: Symbol,
+        argc: u32,
+        epoch: u64,
+        arm: *const crate::eval::compile::CompiledArm,
+        env: EnvId,
+    ) -> Option<Value> {
+        let t = self.vm_call_ics.borrow();
+        let e = t.get((self.cur_ic_base.get() + site) as usize)?.as_ref()?;
+        let (a, cenv) = e.arm.as_ref()?;
+        (e.sym == sym
+            && e.argc == argc
+            && e.epoch == epoch
+            && *cenv == env
+            && std::ptr::eq(Arc::as_ptr(a.arc()), arm))
+        .then_some(e.callee)
+    }
+
     pub fn vm_call_ic_probe(
         &self,
         site: u32,

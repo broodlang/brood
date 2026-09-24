@@ -31,8 +31,9 @@ use super::*;
 /// keeps deopting pays entry + deopt + a full VM re-run per call (nbody's
 /// `advance-body`: ~100% deopt rate across 248k activations). An arm with only
 /// occasional deopts never reaches 16 consecutive and keeps its native code.
-/// `BAILED` is sticky until the next epoch invalidation, which resets the
-/// counter so the recompiled arm gets a fresh trial.
+/// `BAILED` is sticky for the arm's LIFETIME: `jit_tier` returns on it before the
+/// epoch check, so a later `def` does not grant a fresh trial. A new trial comes
+/// only with a new arm (the closure recompiled).
 /// Could the frame of size `frame_nslots` at this call site belong to `arm`? A deopt may only
 /// be resumed when it can: the inline cache might have re-resolved the site to a *different*
 /// arm than the one whose native actually ran, and reading a foreign arm's `ckpt_slot` out of
@@ -195,6 +196,8 @@ pub(crate) fn vm_resume_deopt(
             arm_slot,
             ic_bases: heap.vm_arm_block(&arm),
             back_edges: 0,
+            // Resumed mid-arm: the first `SelfCall` re-checks the binding.
+            entry_epoch: u64::MAX,
         },
         entry_roots: base,
         entry_env: env_base,
@@ -246,8 +249,7 @@ pub(crate) fn vm_resume_deopt(
 #[cfg(feature = "jit")]
 pub(crate) fn jit_latch_suspend_host(arm: &CompiledArm) {
     use std::sync::atomic::Ordering::Release;
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+    if crate::diagnostics::debug_flags::jit_bail_trace() {
         let name = arm
             .dbg_name
             .map(crate::core::value::symbol_name_ref)
@@ -376,8 +378,7 @@ fn float_deopt_feedback(heap: &Heap, arm: &CompiledArm) {
 }
 
 fn bail_trace_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some())
+    crate::diagnostics::debug_flags::jit_bail_trace()
 }
 
 fn arm_name(arm: &CompiledArm) -> &'static str {
@@ -389,26 +390,46 @@ fn arm_name(arm: &CompiledArm) -> &'static str {
 /// Drop an arm's installed code and put it back at the tier threshold so its next call
 /// re-profiles and re-lowers — the reset the operator-rebind and depth-cap paths use.
 fn reset_arm_untried(heap: &Heap, arm: &CompiledArm) {
-    use std::sync::atomic::Ordering::{Relaxed, Release};
-    // A fresh deopt-feedback trial for the recompile, as the inline upgrade grants itself.
-    arm.jit_deopts.store(0, Relaxed);
-    {
-        // The published copy IS the code being replaced: retract it, or the reset arm
-        // simply adopts it back at its next call (measured: it did).
-        if let Some(key) = arm.share_key {
-            heap.jit_shared_retract(key);
-        }
-        arm.jit_code.store(std::ptr::null_mut(), Release);
-        arm.jit_calls.store(super::TIER_THRESHOLD, Release);
-        arm.shared_published.store(false, Relaxed);
-        // This process's native→native links to the arm still hold the old pointer and
-        // never consult `jit_code` (the inline swap's situation exactly): drop them, so
-        // the callers re-probe. A peer's links are its own to drop — see the swap's
-        // soundness note in `jit_tier`; the old code is valid, only slower.
-        if let Some(sym) = arm.dbg_name {
-            heap.invalidate_fast_links_for(sym);
-        }
+    // The published copy IS the code being replaced: retract it, or the reset arm simply
+    // adopts it back at its next call (measured: it did). Both caches — the inlined copy
+    // too, or a peer re-adopts the very upgrade whose deopts asked for this re-tier.
+    if let Some(key) = arm.share_key {
+        heap.jit_shared_retract(key);
     }
+    reset_native_state(arm);
+    // This process's native→native links to the arm still hold the old pointer and never
+    // consult `jit_code` (the inline swap's situation exactly): drop them, so the callers
+    // re-probe. A peer's links are its own to drop — see the swap's soundness note in
+    // `jit_tier`; the old code is valid, only slower.
+    if let Some(sym) = arm.dbg_name {
+        heap.invalidate_fast_links_for(sym);
+    }
+}
+
+/// Put an arm's native state back to "untried, already proven hot": the ONE reset, shared
+/// by the epoch invalidation in `jit_tier` and the deopt-feedback re-lowering above.
+///
+/// It must clear the inlined upgrade's state as well as `jit_code` (KI-189). The re-lowering
+/// used to clear only `jit_code`/`jit_calls`/`shared_published`, leaving `inline_installed`
+/// set: the next entry then sized the frame to `inline_nslots` while the recompiled SMALL
+/// native ran in it, journalling to the small layout's `ckpt_slot`; a deopt read the frame
+/// size as the leaf-spliced layout, found no journal in the leaf slot, and re-ran the arm
+/// from ip 0 — repeating every effect before the deopt (`tests/jit_effect_once_test.blsp`
+/// case 8). `jit_code` goes first, so a reader that still sees the inlined flags sees a
+/// null pointer and interprets.
+pub(super) fn reset_native_state(arm: &CompiledArm) {
+    use std::sync::atomic::Ordering::{Relaxed, Release};
+    arm.jit_code.store(std::ptr::null_mut(), Release);
+    arm.jit_calls.store(super::TIER_THRESHOLD, Release); // re-tier promptly (already proven hot)
+    arm.jit_deopts.store(0, Relaxed); // a fresh deopt-feedback trial for the recompile
+    arm.shared_published.store(false, Relaxed); // recompiled code must re-publish
+    arm.inline_installed.store(false, Release); // re-decide the inline swap
+    arm.inline_queued.store(false, Relaxed); // re-enqueue the inlined upgrade if still hot
+                                             // Drop the stale inlined native too: it was lowered for the state being reset (an old
+                                             // epoch's operators, or the profile the deopts disproved), so it must not be re-swapped
+                                             // as-is — nulling forces a clean re-fetch from the shared inline cache (epoch-checked)
+                                             // or a recompile.
+    arm.inline_code.store(std::ptr::null_mut(), Release);
 }
 
 /// The tier-time param profile of the live frame at `base`: each slot's tag, with a slot
@@ -438,8 +459,7 @@ pub(crate) fn jit_deopt_feedback(heap: &Heap, arm: &CompiledArm) {
         // onto the VM. Traced because the *consequence* (permanently interpreted code) is far
         // more visible than the cause, and `BROOD_DEOPT_TRACE` needs `perf-stats` while this
         // does not.
-        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+        if crate::diagnostics::debug_flags::jit_bail_trace() {
             let name = arm
                 .dbg_name
                 .map(crate::core::value::symbol_name_ref)

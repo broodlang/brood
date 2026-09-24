@@ -233,7 +233,7 @@ pub struct RuntimeCode {
     /// `Arc<CodeSlabs>` is *replaced* — a Stage-4 free or a compaction store, both rare
     /// (never on the `def`/`promote`/append hot path, which mutates a loaded slab's
     /// `boxcar` in place without swapping the `Arc`). It gates the per-process pinned
-    /// read cache ([`Heap::code_gen_pinned`]): a RUNTIME deref clones the *cached* `Arc`
+    /// read cache ([`Heap::code_gen_ref`]): a RUNTIME deref borrows the *cached* `Arc`
     /// when this version is unchanged, avoiding the `ArcSwap::load` hybrid-strategy cost
     /// that dominated global-data-heavy hot loops. An aging flip changes `current_gen`
     /// but not either slot's `Arc`, so it deliberately does **not** bump this — a cached
@@ -619,18 +619,36 @@ impl Heap {
         self.runtime.gen_inflight[gen].load(Ordering::Acquire) != 0
     }
 
-    /// Forget this process's cached "clean" drain ack, forcing it to re-walk on its next
-    /// safepoint.
+    /// Withdraw this process's "clean" ack of the current drain — the shared `drain_acks`
+    /// entry as well as the local cache — so it re-walks at its next safepoint and pins
+    /// the generation if it now holds a handle into it.
     ///
-    /// `report_gen_liveness` caches the ack for a whole epoch, justified by "an old-gen
-    /// handle can never arrive by message (messages deep-copy)". Materialising a
-    /// `Message::FnShared` breaks exactly that: this heap may now hold a handle into the
-    /// draining generation, and a stale clean ack would let the collector free it. Called
-    /// only on that path, so the fan-out drain cost the caching was introduced to fix is
-    /// unchanged for every other message.
+    /// `report_gen_liveness` treats a clean ack as final for the epoch ("clean stays
+    /// clean"), justified by "an old-gen handle can never arrive by message (messages
+    /// deep-copy)". A closure shared by handle — `Message::FnShared`, or the L1 path's
+    /// `copy_cross_heap` — breaks exactly that. Resetting only the local `Cell` was not
+    /// enough (KI-188): the re-walk finds the process dirty and takes no action, so the
+    /// table still said clean and the drain completed on the SENDER's later ack, freeing
+    /// the generation under the receiver. Called only on those two paths; the fast case
+    /// (no ack of the current epoch) is a `Cell` compare and takes no lock.
     pub fn rearm_drain_ack(&self) {
+        let acked = self.acked_drain_epoch.get();
         // `0` is the "never acked" sentinel the constructors use; a real epoch is >= 1.
         self.acked_drain_epoch.set(0);
+        let rt = &self.runtime;
+        if acked == 0
+            || !rt.drain_active.load(Ordering::Acquire)
+            || rt.drain_epoch.load(Ordering::Relaxed) != acked
+        {
+            // No ack of the CURRENT drain to withdraw: a newer drain cleared the table.
+            return;
+        }
+        let pid = self.acked_drain_pid.get();
+        let mut acks = rt.drain_acks.write().unwrap_or_else(|e| e.into_inner());
+        if acks.get(&pid) == Some(&acked) {
+            acks.remove(&pid);
+            rt.drain_acked.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 }
 

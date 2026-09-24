@@ -83,14 +83,13 @@ macro_rules! region_ref {
                     SlabRef::direct(&self.local.$field[id.index()])
                 }
                 PRELUDE => SlabRef::direct(&self.prelude.slabs.$field[id.index()]),
-                RUNTIME => {
-                    let pin = self.code_gen_pinned(id.code_gen());
-                    let r: &$t = pin.$field.get(id.index()).expect($what);
-                    let ptr = r as *const $t;
-                    // SAFETY: `ptr` points into `pin`'s CodeSlabs (stable `boxcar`
-                    // address), kept alive by the `Arc` moved into the `SlabRef`.
-                    unsafe { SlabRef::pinned(pin, ptr) }
-                }
+                RUNTIME => SlabRef::direct(
+                    &self
+                        .code_gen_ref(id.code_gen())
+                        .$field
+                        .get(id.index())
+                        .expect($what),
+                ),
                 _ => unreachable!("invalid handle region"),
             }
         }
@@ -422,16 +421,20 @@ pub struct Heap {
     /// other's exemption; incremented and decremented by `%load-module-source`,
     /// which restores it even when the load throws.
 
-    /// **Per-process pinned-read cache for the RUNTIME generations.** A RUNTIME handle
-    /// deref must pin `gens[g]`'s `Arc<CodeSlabs>` (so a concurrent Stage-4 free can't drop
-    /// it mid-read), but taking a fresh `ArcSwap::load` guard per deref dominated
-    /// global-data-heavy hot loops. Instead each slot caches the last-loaded `Arc` plus the
-    /// [`RuntimeCode::gen_version`] it was loaded at; [`code_gen_pinned`](Self::code_gen_pinned)
-    /// clones the cached `Arc` (a single refcount bump) when the version is unchanged and
-    /// only `load_full`s on a real generation replacement (Stage-4 free / compaction store —
-    /// rare). `RefCell`/`Cell`: the `Heap` is single-threaded (one worker owns a process at a
+    /// **Per-process read cache for the RUNTIME generations.** A RUNTIME handle deref must
+    /// keep `gens[g]`'s `Arc<CodeSlabs>` alive (so a concurrent Stage-4 free can't drop it
+    /// mid-read), but taking a fresh `ArcSwap::load` guard per deref dominated
+    /// global-data-heavy hot loops, and so did an `Arc` clone per deref. Instead each slot
+    /// caches the last-loaded `Arc` plus the [`RuntimeCode::gen_version`] it was loaded at;
+    /// [`code_gen_ref`](Self::code_gen_ref) borrows the cached `Arc`'s target when the version
+    /// is unchanged and only `load_full`s on a real generation replacement (Stage-4 free /
+    /// compaction store — rare), retiring the replaced `Arc` until `&mut self`. `RefCell`/`Cell`: the `Heap` is single-threaded (one worker owns a process at a
     /// time). `gen_cache_ver` starts at `u64::MAX` so the first read always populates.
     gen_cache: [RefCell<Option<Arc<CodeSlabs>>>; 2],
+    /// Generation `Arc`s the cache replaced, kept alive until `&mut self` — what makes
+    /// [`code_gen_ref`](Self::code_gen_ref)'s borrow sound. Pushed only on a generation
+    /// replacement (a Stage-4 free or a compaction store), so it stays tiny.
+    gen_cache_retired: RefCell<Vec<Arc<CodeSlabs>>>,
     gen_cache_ver: [Cell<u64>; 2],
     /// **Per-process parse cache for `(fn …)` literals**, keyed by the `MakeClosure`
     /// site's `fn_rest` AST handle. Building a closure re-parses its param
@@ -817,6 +820,10 @@ pub struct Heap {
     /// fresh drain bumps the epoch (≠ the cached value) so the process re-reports. Plain
     /// `Cell`: the `Heap` is single-threaded.
     acked_drain_epoch: Cell<u64>,
+    /// The pid `acked_drain_epoch` was acked under — what
+    /// [`rearm_drain_ack`](Self::rearm_drain_ack) removes from the shared `drain_acks`
+    /// table when a shared handle arrives after the ack (KI-188).
+    acked_drain_pid: Cell<u64>,
     /// Per-heap safepoint tick throttling the drain self-report to 1/[`DRAIN_REPORT_STRIDE`]
     /// (see the const). Plain `Cell` (the `Heap` is single-threaded), read/written with no
     /// shared atomic so a throttled frame is nearly free; a miscount only shifts *when* a
@@ -1243,6 +1250,7 @@ mod env_globals;
 mod equality;
 /// Side facts — what a definition RECORDS about a name rather than binds to it (ADR-320).
 mod facts;
+mod features_audit;
 pub use facts::{Fact, FactKind};
 mod freeze;
 mod gc;
@@ -1456,6 +1464,7 @@ impl Heap {
             local: Slabs::default(),
             old: None,
             gen_cache: [RefCell::new(None), RefCell::new(None)],
+            gen_cache_retired: RefCell::new(Vec::new()),
             gen_cache_ver: [Cell::new(u64::MAX), Cell::new(u64::MAX)],
             closure_tpl_cache: RefCell::new(ClosureTemplateMap::default()),
             closure_tpl_ver: Cell::new(u64::MAX),
@@ -1503,6 +1512,7 @@ impl Heap {
             stale_arm_uid: Cell::new(0),
             rt_drain_tick: Cell::new(0),
             acked_drain_epoch: Cell::new(0),
+            acked_drain_pid: Cell::new(0),
             drain_report_tick: Cell::new(0),
             p2_dirty_epoch: Cell::new(u64::MAX),
             p2_dirty_tick: Cell::new(0),
@@ -1544,6 +1554,7 @@ impl Heap {
             local: Slabs::default(),
             old: None,
             gen_cache: [RefCell::new(None), RefCell::new(None)],
+            gen_cache_retired: RefCell::new(Vec::new()),
             gen_cache_ver: [Cell::new(u64::MAX), Cell::new(u64::MAX)],
             closure_tpl_cache: RefCell::new(ClosureTemplateMap::default()),
             closure_tpl_ver: Cell::new(u64::MAX),
@@ -1591,6 +1602,7 @@ impl Heap {
             stale_arm_uid: Cell::new(0),
             rt_drain_tick: Cell::new(0),
             acked_drain_epoch: Cell::new(0),
+            acked_drain_pid: Cell::new(0),
             drain_report_tick: Cell::new(0),
             p2_dirty_epoch: Cell::new(u64::MAX),
             p2_dirty_tick: Cell::new(0),
@@ -2055,59 +2067,59 @@ impl Heap {
 
     // ===== Accessors — read LOCAL/PRELUDE/RUNTIME values =======================
 
-    /// Pin RUNTIME generation `g`'s `Arc<CodeSlabs>` for a read, via the per-process
-    /// version-gated cache ([`gen_cache`](Self::gen_cache)). Returns a cheap `Arc` clone
-    /// (one refcount bump) when the generation's identity is unchanged since this process
-    /// last read it, and `load_full`s only on a real replacement — a Stage-4 free or a
-    /// compaction store, both rare and both bumping [`RuntimeCode::gen_version`]. This
-    /// replaces the per-deref `ArcSwap::load` guard whose hybrid-strategy cost dominated
-    /// global-data-heavy hot loops (a `def`'d matrix element read in `matmul` derefs a
-    /// RUNTIME handle ~16 M times). Soundness: the returned `Arc` pins the slab exactly as
-    /// the old guard did, so a concurrent free can't drop it mid-read; and reading a stale
-    /// cached `Arc` is impossible to observe wrongly — a generation is freed only once every
-    /// process (this one included) has reported clean of it (ADR-091), so this process holds
-    /// no live handle into a generation whose `Arc` it might still have cached.
-    /// Run `f` against RUNTIME generation `g`'s slabs **without bumping its refcount**.
-    ///
-    /// [`code_gen_pinned`](Self::code_gen_pinned) returns an owned `Arc` so a caller can hold
-    /// the generation alive across a borrow — necessary when handing out a reference, but pure
-    /// overhead for a read that copies its value straight out. The clone and its matching drop
-    /// are two atomic RMWs on a path that runs once per element of every `def`'d structure,
-    /// and they dominated it: measured 2026-07-28, `first` on a RUNTIME pair cost **77 ns**
-    /// against **1 ns** for the identical code on a LOCAL one — a 70x cliff that every global
-    /// data structure fell off (`sort` walks a 375k-element `def`'d list; `matmul` derefs a
-    /// `def`'d matrix ~16 M times).
-    ///
-    /// Soundness is unchanged: the cache still owns the `Arc`, so the generation cannot be
-    /// freed while `f` borrows it. `f` must not itself take a *mutable* borrow of this same
-    /// generation's cache slot — every caller is a trivial copy-out read, which cannot.
+    /// Run `f` against RUNTIME generation `g`'s slabs — [`code_gen_ref`](Self::code_gen_ref)
+    /// for callers that copy a value straight out.
     #[inline]
     fn with_code_gen<R>(&self, g: usize, f: impl FnOnce(&CodeSlabs) -> R) -> R {
-        let ver = self.runtime.gen_version.load(Ordering::Acquire);
-        if self.gen_cache_ver[g].get() != ver {
-            *self.gen_cache[g].borrow_mut() = Some(self.runtime.gens[g].load_full());
-            self.gen_cache_ver[g].set(ver);
-        }
-        let cached = self.gen_cache[g].borrow();
-        f(cached
-            .as_ref()
-            .expect("gen cache populated on the version miss above"))
+        f(self.code_gen_ref(g))
     }
 
+    /// RUNTIME generation `g`'s slabs, borrowed for as long as `&self` — no refcount bump.
+    ///
+    /// ADR-224's reasoning, extended from `with_code_gen` to every RUNTIME read: a `get` on a
+    /// `def`'d map dereferences one trie node per level, and each used to clone and drop an
+    /// `Arc` whose count every core shares — two contended atomics per level.
+    ///
+    /// **Why the borrow is sound on its own terms** (not merely because ADR-091 says a
+    /// generation this process references is never freed): the only thing that ever drops the
+    /// cached `Arc` is this function's refresh, and it does not drop it — it moves the
+    /// replaced `Arc` to `gen_cache_retired`, which is emptied only by
+    /// [`release_retired_gens`](Self::release_retired_gens) under `&mut self`. A `&'a CodeSlabs`
+    /// handed out here borrows `&'a self`, so no `&mut self` can run while it lives, so the
+    /// `Arc` owning its target is alive for all of `'a` — whatever the drain protocol does.
+    /// A drain bug (KI-188's class) therefore still reads stale code, never freed memory.
     #[inline]
-    fn code_gen_pinned(&self, g: usize) -> Arc<CodeSlabs> {
+    fn code_gen_ref(&self, g: usize) -> &CodeSlabs {
         let ver = self.runtime.gen_version.load(Ordering::Acquire);
         if self.gen_cache_ver[g].get() != ver {
             // First read, or generation `g`'s `Arc` was replaced — reload and re-stamp.
-            *self.gen_cache[g].borrow_mut() = Some(self.runtime.gens[g].load_full());
+            let fresh = self.runtime.gens[g].load_full();
+            if let Some(old) = self.gen_cache[g].borrow_mut().replace(fresh) {
+                self.gen_cache_retired.borrow_mut().push(old);
+            }
             self.gen_cache_ver[g].set(ver);
         }
-        Arc::clone(
+        let ptr: *const CodeSlabs = Arc::as_ptr(
             self.gen_cache[g]
                 .borrow()
                 .as_ref()
                 .expect("gen cache populated on the version miss above"),
-        )
+        );
+        // SAFETY: `ptr` is the target of the `Arc` in `gen_cache[g]`, which is only ever
+        // replaced above, and a replaced `Arc` is kept in `gen_cache_retired` until
+        // `release_retired_gens(&mut self)` — impossible while the returned `&self`-borrow
+        // lives. So the target outlives the borrow.
+        unsafe { &*ptr }
+    }
+
+    /// Drop the generation `Arc`s the cache replaced since the last call. `&mut self` is the
+    /// whole soundness argument of [`code_gen_ref`](Self::code_gen_ref): no borrow it handed
+    /// out can be live here. Called at collection.
+    pub(crate) fn release_retired_gens(&mut self) {
+        let retired = self.gen_cache_retired.get_mut();
+        if !retired.is_empty() {
+            retired.clear();
+        }
     }
 
     /// Look up the parsed [`ClosureTemplate`] for a `MakeClosure` site's `fn_rest`
@@ -2214,15 +2226,9 @@ impl Heap {
         project: impl FnOnce(&CodeSlabs) -> &T,
     ) -> SlabRef<'_, T> {
         // A generation can be **freed concurrently** by the multi-process collector while
-        // other processes run (ADR-091), so the `SlabRef` must pin `gens[g]`'s `Arc<CodeSlabs>`
-        // to defer the freed `Arc`'s drop until this borrow ends. The `Arc` comes from the
-        // per-process version-gated cache ([`code_gen_pinned`]) — a cheap clone when the
-        // generation is unchanged — not a fresh `ArcSwap::load` guard per deref.
-        let pin = self.code_gen_pinned(g);
-        let ptr = project(&pin) as *const T;
-        // SAFETY: `ptr` points into `pin`'s `CodeSlabs` (stable `boxcar` address);
-        // the `Arc` moved into the `SlabRef` keeps that slab alive for the borrow.
-        unsafe { SlabRef::pinned(pin, ptr) }
+        // other processes run (ADR-091); the per-process cache keeps the slabs this borrow
+        // points into alive until `&mut self` — see `code_gen_ref`. No refcount bump.
+        SlabRef::direct(project(self.code_gen_ref(g)))
     }
 
     /// Resolve a closure handle to its `&Closure`. Hand-written (not via
@@ -2330,6 +2336,91 @@ mod def_publish_probe {
             if guarded { SAW_GUARDED } else { SAW_UNGUARDED },
             Ordering::Relaxed,
         );
+    }
+}
+
+/// KI-193: every multi-name swap of the globals table — a module load's publish, an
+/// `%isolate` restore — must bump `version` BEFORE its write guard drops, because every
+/// process's global inline cache is keyed on it. [`begin`](table_swap_probe::begin) reads
+/// `version` just before the guard is taken, [`end`](table_swap_probe::end) just after it
+/// drops; the tests below require every swap to have moved it in between.
+#[cfg(test)]
+pub(super) mod table_swap_probe {
+    use std::cell::RefCell;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// One swap: `(version, code_epoch)` before the guard, and at its unlock.
+    pub(crate) type Swap = ((u64, u64), (u64, u64));
+
+    thread_local! {
+        static SWAPS: RefCell<Vec<Swap>> = const { RefCell::new(Vec::new()) };
+    }
+
+    fn read(version: &AtomicU64, epoch: &AtomicU64) -> (u64, u64) {
+        (
+            version.load(Ordering::Relaxed),
+            epoch.load(Ordering::Relaxed),
+        )
+    }
+
+    pub(crate) fn begin(version: &AtomicU64, epoch: &AtomicU64) {
+        let v = read(version, epoch);
+        SWAPS.with(|s| s.borrow_mut().push((v, v)));
+    }
+
+    pub(crate) fn end(version: &AtomicU64, epoch: &AtomicU64) {
+        let v = read(version, epoch);
+        SWAPS.with(|s| {
+            if let Some(last) = s.borrow_mut().last_mut() {
+                last.1 = v;
+            }
+        });
+    }
+
+    /// Every swap this thread made since the last call.
+    pub(crate) fn take() -> Vec<Swap> {
+        SWAPS.with(|s| std::mem::take(&mut *s.borrow_mut()))
+    }
+}
+
+#[cfg(test)]
+mod table_swap_tests {
+    use super::table_swap_probe::{self, Swap};
+
+    /// Every swap moved `version` — and `code_epoch` too, since each swap here rebinds a
+    /// name a compiled arm may have cached — before its write guard dropped.
+    fn assert_swaps_bumped_under_the_lock(what: &str, swaps: &[Swap]) {
+        assert!(!swaps.is_empty(), "{what}: no table swap was observed");
+        for &((v0, e0), (v1, e1)) in swaps {
+            assert!(
+                v1 > v0 && e1 > e0,
+                "{what}: the globals write guard dropped before the caches' keys moved \
+                 (version {v0} -> {v1}, code_epoch {e0} -> {e1}), so a reader could pair \
+                 the new table with a stale cached global (KI-193)"
+            );
+        }
+    }
+
+    #[test]
+    fn a_module_publish_bumps_the_cache_keys_before_the_table_unlocks() {
+        let mut interp = crate::Interp::new();
+        // Bound first, so the publish is a REBIND — as a real load's `*features*` is.
+        interp.eval_str("(def ki191-published 0)").unwrap();
+        table_swap_probe::take();
+        interp
+            .eval_str("(%with-load-journal (fn () (def ki191-published 1)))")
+            .unwrap();
+        assert_swaps_bumped_under_the_lock("publish", &table_swap_probe::take());
+    }
+
+    #[test]
+    fn an_isolate_restore_bumps_the_cache_keys_before_the_table_unlocks() {
+        let mut interp = crate::Interp::new();
+        table_swap_probe::take();
+        interp
+            .eval_str("(%isolate (fn () (def ki191-restored 1)))")
+            .unwrap();
+        assert_swaps_bumped_under_the_lock("restore", &table_swap_probe::take());
     }
 }
 

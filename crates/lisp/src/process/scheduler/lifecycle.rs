@@ -101,14 +101,20 @@ fn retire_pid_tail(pid: u64, reason: Message) {
     // (a name lives only as long as its process). Without this, named-spawn
     // would see the stale entry as "already running" and never respawn.
     crate::dist::unregister_dead_pid(pid);
+    // The dead process's own watches: drop entries where *it* was the watcher,
+    // or they leak until each watched target dies (kernel audit). Takes
+    // MONITORS sequentially like everything in this function — never nested.
+    //
+    // BEFORE the downs fire (KI-183): a `[:down …]` is how a watcher learns this process
+    // is gone, so everything its death releases must already be released when one arrives.
+    // In the other order a watcher woken by the down could read a target's `:monitored-by`
+    // still counting the dead process's monitors — `concurrency_test` saw 2 for 0 under
+    // load, once in a CI suite and once on demand with the box saturated.
+    monitor::sweep_dead_watcher(pid);
     let watchers = crate::core::sync::lock(&monitor::MONITORS).take_target(pid);
     for w in watchers {
         monitor::fire_down(w, pid, reason.clone());
     }
-    // The dead process's own watches: drop entries where *it* was the watcher,
-    // or they leak until each watched target dies (kernel audit). Takes
-    // MONITORS sequentially like everything in this function — never nested.
-    monitor::sweep_dead_watcher(pid);
     // Links (ADR-067), after monitors and with no table lock held: notify every
     // linked peer — a trappable `[:EXIT pid reason]` if it traps, else an abnormal
     // reason propagates as a hard kill that cascades through *its* links. Mirrors
@@ -548,4 +554,29 @@ pub fn spawn_root_program(
         wake_a_parked_peer(worker_id);
     }
     Ok(exit)
+}
+
+#[cfg(test)]
+mod down_order_tests {
+    use super::*;
+
+    /// KI-183: a dying process releases the monitors IT held before any watcher of it is
+    /// told it died. The waiter a `[:down …]` wakes may read a target's `:monitored-by`
+    /// straight away, and it must not count the dead process. Fake pids, no processes: the
+    /// table is built directly and only the death path's ordering is under test.
+    #[test]
+    fn a_dying_process_has_released_its_own_monitors_when_its_down_fires() {
+        let (watcher, dying, target) = (u64::MAX - 30, u64::MAX - 31, u64::MAX - 32);
+        monitor::test_insert_local(dying, watcher, u64::MAX - 40); // watcher monitors dying
+        monitor::test_insert_local(target, dying, u64::MAX - 41); // dying monitors target
+        monitor::down_order_probe::take();
+        retire_pid_tail(dying, Message::Nil);
+        let still_held = monitor::down_order_probe::take();
+        crate::core::sync::lock(&monitor::MONITORS).take_target(target);
+        assert_eq!(
+            still_held,
+            vec![false],
+            "the down fired while the dying process still held its own monitors (KI-183)"
+        );
+    }
 }

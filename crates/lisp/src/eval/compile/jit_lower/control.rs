@@ -125,8 +125,7 @@ pub(super) fn resolve_edges(
     // rejection at `define_function` — name it, with the ip and both depths.
     let want = b.block_params(target).len();
     if edges.iter().any(|e| e.stack.len() != depth) || depth != want {
-        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+        if crate::diagnostics::debug_flags::jit_bail_trace() {
             let got: Vec<usize> = edges.iter().map(|e| e.stack.len()).collect();
             eprintln!("[jit-bail] join-depth-mismatch at ip={ip}: prepass={want} edges={got:?}");
         }
@@ -160,8 +159,7 @@ pub(super) fn resolve_edges(
         // Under the bail trace, name the join that widened: the arm now lowers where it
         // used to deopt-thrash, and a widened entry is read back through tag checks, so
         // this is the line to read when a row moves after a lowering change.
-        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+        if crate::diagnostics::debug_flags::jit_bail_trace() {
             eprintln!(
                 "[jit-widen] ip={ip} slots={widened_slots:?} words={words_extra} reprs={unified:?}"
             );

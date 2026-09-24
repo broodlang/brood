@@ -2422,8 +2422,7 @@ fn jit_lower_arm_inner(
     // sends the reader to the IR dump for something the verifier already named.
     let defined = m.define_function(id, &mut ctx);
     if let Err(e) = &defined {
-        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+        if crate::diagnostics::debug_flags::jit_bail_trace() {
             eprintln!("[jit-bail] cranelift-define-function: {e:?}");
         }
     }

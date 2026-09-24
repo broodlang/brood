@@ -15,6 +15,7 @@ use smallvec::SmallVec;
 
 use crate::core::heap::{Heap, Root, SymbolMap};
 use crate::core::keywords as kw;
+use crate::core::registries as reg;
 use crate::core::value::{
     self, Closure, ClosureId, ClosureTemplate, EnvId, NativeId, Symbol, Value, ValueRef,
 };
@@ -898,7 +899,8 @@ fn eval_tail_loop(
         // stack (env on the env stack) so a collection at ANY eval depth
         // relocates them in place (ADR-061). Returns the relocated callee /
         // call_form / env alongside `argv`.
-        let (argv, callee, call_form, env_r) = eval_arguments(heap, callee, call_form, spine, env)?;
+        let (argv, callee, mut call_form, env_r) =
+            eval_arguments(heap, callee, call_form, spine, env)?;
         env = env_r;
 
         // Inline `apply` unfolding: when the callee is the `apply` builtin,
@@ -963,12 +965,40 @@ fn eval_tail_loop(
                     // function; anything else falls through to the normal path.
                     if let Some((head, map)) = passthrough_arm(heap, id, cur_argv.len()) {
                         let cl_env = heap.closure(id).env.unwrap_or_else(|| heap.global());
-                        // Tree-walker inner-head resolution: a full `eval` (a symbol
-                        // lookup — no GC, so `cur_argv` stays valid). The shared
-                        // `passthrough_redirect_ok` then gates the redirect (callable
-                        // inner only), counts the reduction, and honours the deadline.
-                        let inner =
-                            eval(heap, head, cl_env).map_err(|e| e.or_form_pos(heap, call_form))?;
+                        // Tree-walker inner-head resolution. A bound, non-dynamic symbol is
+                        // a plain lookup, which cannot collect. Anything else goes through
+                        // a full `eval` — and that CAN collect: an unbound qualified head is
+                        // a lazy module load (ADR-335), i.e. arbitrary evaluation. It used
+                        // to be the only path, under a comment saying "a symbol lookup — no
+                        // GC", and the load relocated the unrooted `cur_argv`: the redirect
+                        // then bound stale handles into the inner call's frame (a `bytes`
+                        // arg reaching `seq` under `BROOD_VM=0 nest test`, deterministic with
+                        // `BROOD_GC_STRESS=1`). So the slow path roots the args across it.
+                        // The shared `passthrough_redirect_ok` then gates the redirect
+                        // (callable inner only), counts the reduction, and honours the
+                        // deadline.
+                        let fast = match head {
+                            Value::Sym(s) if !value::is_dynamic(s) => heap.env_get(cl_env, s),
+                            _ => None,
+                        };
+                        let inner = match fast {
+                            Some(v) => v,
+                            None => heap
+                                .root_scope(|heap| {
+                                    let arg_roots: SmallVec<[Root; 8]> =
+                                        cur_argv.iter().map(|&v| heap.root(v)).collect();
+                                    let form_r = heap.root(call_form);
+                                    let env_r = heap.root_env(env);
+                                    let inner = eval(heap, head, cl_env)?;
+                                    for (slot, &r) in cur_argv.iter_mut().zip(arg_roots.iter()) {
+                                        *slot = heap.read_root(r);
+                                    }
+                                    call_form = heap.read_root(form_r);
+                                    env = heap.read_root_env(env_r);
+                                    Ok(inner)
+                                })
+                                .map_err(|e: LispError| e.or_form_pos(heap, call_form))?,
+                        };
                         // A wrapper forwarding to a contract shim of its own module
                         // forwards to the original instead (the boundary, ADR-383).
                         let inner = crate::builtins::contracts::boundary_redirect(heap, id, inner)
@@ -2590,7 +2620,7 @@ fn reload_diagnostics_enabled(heap: &Heap, root: EnvId) -> bool {
     // turn the chatter off for its own scope without an env var (there is no
     // `setenv` primitive, and the env read above is cached process-wide anyway).
     // Unbound means on, so the default is unchanged.
-    let name = value::intern("*reload-diagnostics*");
+    let name = value::intern(reg::RELOAD_DIAGNOSTICS);
     match heap.env_get(root, name) {
         Some(v) => truthy(v),
         None => true,

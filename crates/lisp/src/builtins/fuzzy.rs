@@ -207,7 +207,6 @@ fn fuzzy_top(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         original.extend(text.chars());
         lowered.clear();
         lowered.extend(original.iter().copied().map(lower_char));
-        drop(text);
         if let Some(score) = score_candidate(&query, &lowered, &original) {
             ranked.push((score, original.len(), index));
         }

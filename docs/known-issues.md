@@ -147,7 +147,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-151 | **the tally a Brood user writes — `(assoc m k (+ (get m k 0) e))` — ran 8× slower than the undocumented `%map-int-add`: the linear-map rewrite admitted only the kernel spelling, so the idiomatic fold stayed a path-copying CHAMP update with two prelude calls per element and its loop arm gate-refused** — brood-benchmarks `wordcount` 848 ms idiomatic vs 99 ms with the primitive, `persistent-map` 561 vs 109. Found when the benchmark ports were reviewed for idiom and the primitive was ruled out as "not code a user would write" | ✅ **FIXED 2026-09-16** (ADR-360) — `LinIdiom` (`eval/compile/inline.rs`) admits the prelude `get` on the accumulator as a read and the fused `assoc`/`+`/`get` shape as an update; the source rewrite emits `%table-get`/`%table-add`. `%table-add` adds exactly as `+` does, and `%map-int-add` now does too (it promoted nowhere and read a float as 0 — the new fuzzer `scripts/fuzz/generators/linmap.py` found the float case diverging between the arms), so the rewrite is unobservable on every input. `wordcount` 857 → 66 ms, `persistent-map` 535 → 79 (`make ab --floor`, no other row moved). Guards: `crates/lisp/tests/linmap_idiom.rs` pins the expansion (fuses / declines by shape), `tests/linmap_soundness_test.blsp` the values under both arms and every tier, `tests/numeric_overflow_test.blsp` §2 promotion at the boundary |
 | KI-152 | **the linear-map rewrite was observable on its SEED: a tally seeded with a map holding a rope raised `cannot send a rope in a message` with the rewrite on and returned the map with it off** — the wrapper copies the accumulator's input map into its private table, and a table cannot hold every value a map can (a rope, a builtin, a lazy view, a self-referential closure), nor stand in for a record whose misses go through `Lookup`. Pre-dates ADR-360 (the `%map-int-add` shape had it too) but the idiomatic shape made it reachable from ordinary code | ✅ **FIXED 2026-09-17** — `%table-from-map` answers nil for such a seed (moved to `process.blsp`, after the `try` macro it needs: from `predicates.blsp` its body could not compile and deferred to the tree-walker per call), and the split keeps the loop AS WRITTEN as a third def the wrapper runs instead; that copy is wrapped in `(%lint-allow :generated …)`, a new category the checker does not walk (the pre-run check paid ~12M instructions per definition otherwise — measured, KI-150's class). Guards: `tests/linmap_soundness_test.blsp` seeds with a rope, a builtin, a seq-view and a `Lookup` record; `crates/lisp/tests/linmap_idiom.rs` pins the copy; `check/tests/lints.rs` pins the skip; `scripts/fuzz/generators/linmap.py` draws those seeds. `make ab --floor --all`: every row noise |
 | KI-153 | **a function whose only call sites are its own self-calls was checked as dead code — nothing in its body was ever reported, not even `(string/length 5)`** — Pass 2.9 (ADR-341) counted a self-call as a site, so the function was "live", its parameters started at ⊥ for the least fixpoint, and a self-call's arguments typed under those parameters kept them at ⊥; the same body with one outside caller, or with no self-call, was reported | ✅ **FIXED 2026-09-17** — `live_private_functions` requires a site that is NOT a self-call (`Site::Call(_, _, Some(self))`); a function reached only through itself is site-less and walked with unknown parameters. Found while checking whether ADR-360's rewritten loop kept its warnings. Guard: `types::check::tests::closure_inference::a_function_reached_only_through_itself_is_not_derived` (three shapes + a seeded control); `nest check` over std/tests/examples and `--strict` over std stay at zero. In the same commit: the linear-map rewrite's rebuilt forms carry their source positions (`rebuild_list`), so a warning inside a rewritten loop points at its line instead of the `def`'s |
-| KI-154 | **`cli::distribution duplicate_connect_is_deduplicated` failed once in a full-suite run: the client's `[:hi]` got no `[:welcome]` in 30 s (passed on retry)** — every server in that file registered `:echo` AFTER `node/start`, and the client starts the moment the port accepts, so a `[:hi]` landing between the listen and the register is dropped (a message to an unregistered name is silent, ADR-232) | 🔍 **WATCH 2026-09-17** — the window is closed by construction (every server registers first; 5 sites) and the test now prints the SERVER's stderr on failure, where ADR-232's drop warning would name the cause; 25 solo runs + 3 file runs clean. Not proven the cause: seen once, under the full suite, and the server's stderr was discarded. If it recurs, that stderr is the first thing to read |
+| KI-154 | **`cli::distribution duplicate_connect_is_deduplicated` failed once in a full-suite run: the client's `[:hi]` got no `[:welcome]` in 30 s (passed on retry)** — every server in that file registered `:echo` AFTER `node/start`, and the client starts the moment the port accepts, so a `[:hi]` landing between the listen and the register is dropped (a message to an unregistered name is silent, ADR-232) | ✅ **FIXED 2026-09-23** — recurred as `dual_listen_serves_tcp_and_unix_at_once` (`no pong over tcp`, passed on retry) in the review's full VM run: KI-154's fix had reached only the shared `echo_server_src`, and all twelve inline servers in `distribution.rs` still called `node/start` before `proc/register` (the helper's comment claimed otherwise). Every server now registers before it listens, and `dual_listen` prints the server's stderr on failure. Closed by construction, like the first site |
 | KI-155 | **`mcp_test` "the :filter selects only the requested kinds" saw 0 events on CI's `test` job (nextest, VM) at `a701f1e1`** — the helper's burst came 5 ms after its spawn and the watcher's 1500 ms window started when the test process was next scheduled; on a loaded runner that was after the burst had come and gone. KI-141's `(:load mcp)` had fixed the same shape once (the module load in the window) | 🔍 **WATCH 2026-09-17** — the burst is now spread over ~500 ms in 20 rounds 25 ms apart (`mcpt-spread`), so events land inside the window however late the subscription starts; both watch tests use it. A slow runner, not a lost event; if it recurs with the spread, the runtime's sysmon delivery is the next suspect |
 | KI-156 | **every `letrec`-bound loop in the language compiled its tail self-call as a `Call` through the captured closure, never a `SelfCall`** — `(letrec (lp (fn (i acc) … (lp …))))` ran at ~100 ns per iteration against a `defn` loop's 2.3 ns (3M iterations: 300 ms vs 7). The self-call rule requires the head "not shadowed by a local"; `#3 lexical addressing` binds every capture to a frame slot, and the self-name IS a capture (the frame binds it to the closure), so `scope.lookup` found it bound and the rule declined. Silent: right answers, an order of magnitude slowly, in `defseq`'s `--loop`, every hand-written named loop and the pipeline the `for` macro emits | ✅ **FIXED 2026-09-17** — `Scope::self_slot` records the self-name's capture slot and the rule admits it (a `let` rebinding the name inside the body still resolves to its own slot and still declines). The loops above: 300 → 4–13 ms (the JIT's `SelfCall` loop, leaf-spliced). Guard: `eval::compile::tests::a_letrec_loop_is_a_self_call_and_a_shadowed_name_is_not` (sabotage-verified: the rule without the slot reds it). `make ab --floor --all`: every row inside its floor; `pingpong` read +2.5…+5% across three solo runs with IDENTICAL instruction counts (2.027 G both arms) — scheduling drift, not code |
 | KI-157 | **a native loop never saw a pending memory limit: the soft ceiling (E0043), a per-process heap limit and a mailbox overflow are raised at the VM's safepoints, and a JIT'd self-tail loop's back-edge returns to none of them** — `mem_limit.rs`'s runaway built its million cells and returned the moment its `let`-bound loop started running native (KI-156); a `defn` loop had been doing that all along | ✅ **FIXED 2026-09-17** — the batched back-edge poll `brood_rt_tick_n` returns `2` when a limit is pending (peeks: `soft_limit_hit`, `Heap::proc_limit_pending`, `current_mailbox_overflow_pending`) and the loop deopts at its back-edge (frame = next iteration's args, checkpoint just reset), so the VM re-runs that iteration and raises at its own safepoint. Guard: `mem_limit::soft_limit_trips_inside_a_native_loop` (a warmed `defn` loop; sabotage — the poll returning 0 — reds it) beside the letrec case |
@@ -169,9 +169,16 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-180 | **`gui`'s texture and sound registries were created on FIRST USE by `(when (nil? *textures*) (def …))` — a check-then-define race across processes** — two processes allocating their first handle at once each saw nil and each `def`'d a table; the second `def` orphaned the first's handles, so `texture-size` answered nil, or another test's size when the two counters collided. Red in `ui_test` in the FULL suite only (passed 3× alone), 2026-09-21 | ✅ **FIXED 2026-09-21** — both registries are created at load (a table global images by value); guard `gui_test` "forty processes each allocate…", red 2 of 3 with the lazy init restored |
 | KI-181 | **an error raised in positionless code — a contract shim's (ADR-381), the prelude's — escaped untagged and was reported at the CATCH site**, two frames from the failing form; unarmed, the thin-wrapper elision had hidden it (the prim ran inline in the caller's frame, tagged there). Surfaced as the armed suite's `vm_prim_error_pos_test` red; also the `lazy_load_test` ADR-366 case, whose inlined primitive a shim makes impossible by design | ✅ **FIXED 2026-09-21** — `attach_vm_trace` gives an untagged error the innermost call site that HAS a position (a tail call reuses the caller's frame, so there it is the caller's caller — the BEAM's answer); the two tests exercise their actual subjects (the raw primitive; an unarmed child). Guard: the shim case in `vm_prim_error_pos_test`, sabotage-verified |
 | KI-182 | **the `startup` row +6% at the 422c92a5 benchmark refresh (16 → 17 ms, `ab-bench --floor` 0.0% floor; 74.4M → 81.3M instructions on `(io/puts 0)`) — the largest piece is the JIT compiling at BOOT: `contract_apply` offers every declared `def` to the Brood hook `%contract-wrap` whether or not contracts are armed, the hook's `(not (or (%contracts-armed?) …))` runs once per declared name as `io`'s sections materialise, `not` crosses the tier threshold and every `brood file` run instantiates Cranelift to compile it** — `BROOD_JIT_DUMP_IR=1` shows one arm (`not`) on 422c92a5, none on 136b14d7, none on an empty file; `BROOD_NO_JIT=1` gives 1.55M back. The remaining ~4.8M is diffuse and expected: the prelude image carries def sites (ADR-382; 802 → 1328 entries, +0.6M in `FormPos` inserts), and the prelude grew by `contracts.blsp` and ADR-377/379 (+0.3M freeze, +0.4M image load, +0.3M interning) | ✅ **FIXED 2026-09-22** — the JIT-at-boot mechanism first (below), then the residual closed by the same day's replay + `nth` change and the ADR-383 op-function check: interleaved pinned task-clock on `(io/puts 0)` against 136b14d7 **13.06 vs 13.05 ms** (three rounds, identical), 76.3M vs 78.4M instructions (+2.7%, under the wall), the benchmark column at 653d41d9 reads `startup` 13.1 ms against the 136b14d7 column's 12.9 — measured before ADR-385, which then took lever 1 (the shim machinery is a module loaded on first armed use) on top. Was, after the first fix alone: the row was not back — interleaved pinned task-clock 12.85 → 13.68 ms against 136b14d7, 75.0M → 80.9M instructions, diffuse — `localize_for_freeze` +0.7M, `env_get` +0.7M, alloc +0.7M, `FormPos`/`SourceLoc` inserts +0.7M, `list_with_tail` +0.5M, `decode_msg`/`from_message` +0.6M; +2.8M on an empty file (ADR-381's 287-line `contracts.blsp` localized and frozen at every boot, ADR-382's 526 def-site entries) and +3.2M inside `io`'s load. Two levers, neither taken: move the shim machinery out of the prelude into a module the hook loads on first ARMED use (only `sig!`, `%contracts-armed?` and the hook itself need to be prelude), and decode def sites lazily. TWO callers, the same shape: (1) `contract_apply` returns before `apply_engine` when `!contracts_armed()` and the name is not `sig!`-forced (`Heap::is_contract_forced`, the kernel set ADR-383 introduced; the hook's own first test, hoisted into the mechanism — the `provide` sweep already gated on `(%contracts-armed?)`, the per-`def` offer did not); (2) `impl` wrapped every op body under a declared `:->` return in `%contract-check-op-result`, a Brood function whose first test was `(not (%contracts-armed?))` — a call plus a `not` per ability-op RESULT, armed or not, and `io` declares no sigs at all, so this was the startup row's caller once (1) was in and the arm still lowered; the emission now asks the cached-bool primitive inline and enters the checker only armed. Guard `crates/cli/tests/contract_offer_unarmed.rs`: the hook and the op checker are rebound under `%load-module-source`'s reserved-name exemption to record what reaches them — unarmed only the `sig!` name reaches the hook (and still enforces) and no op result reaches the checker; armed all three names and the op do; each half sabotage-verified (`if false &&` on the early return reads `offered f=true above=true`; the old emission reads `op-checked=true` unarmed). Re-measured below. The def-site half (ADR-382) stays as a note, not a bug. Was published as measured in brood-benchmarks at 422c92a5 |
-| KI-183 | **`concurrency_test` "a watcher's death releases the monitors it held" read `:monitored-by` 2 where 0 was expected, once, in CI's suite wrapper at `653d41d9` (tree-walker job, `brood_suite_passes` TRY 1)** — the day after KI-176 gave the monitor table its watcher-side index (`by_watcher`), which is exactly the path a watcher's death now takes to release its monitors | 🔍 **WATCH 2026-09-22** — not reproduced locally (the armed and unarmed suites ×2 each were green on the same tree); the assertion reads the TARGET's `:monitored-by` right after the watcher's death, so either the watcher-death sweep runs after the exit is observable (a real ordering hole in `remove_watcher`'s caller) or the test reads before the exit has been processed. Next sighting: keep the log, and loop the file under `BROOD_GC_STRESS=1` on a loaded box (`nextest -j` high) — a race, not a value bug |
+| KI-183 | **`concurrency_test` "a watcher's death releases the monitors it held" read `:monitored-by` 2 where 0 was expected, once, in CI's suite wrapper at `653d41d9` (tree-walker job, `brood_suite_passes` TRY 1)** — the day after KI-176 gave the monitor table its watcher-side index (`by_watcher`), which is exactly the path a watcher's death now takes to release its monitors | ✅ **FIXED 2026-09-23** — the death path fired the dying process's `[:down …]` BEFORE releasing the monitors it held (`retire_pid_tail`: `take_target` + `fire_down`, then `sweep_dead_watcher`), so a watcher woken by the down could read the target's `:monitored-by` still counting them. Reproduced on demand once, under CPU load. The sweep now runs first. Guard: `process::scheduler::lifecycle::down_order_tests` — a probe inside `fire_down` records whether the dying pid still holds watcher entries when its down fires; deterministic, red 3/3 with the old order. (A 300-iteration `.blsp` loop was tried first and PASSED against the old order under two full-suite runs — discarded as coverage that cannot fail.) |
 | KI-184 | **`vm_prim_error_pos_test` "an error escaping a contract shim reports the innermost positioned call site" is red on `main` since ADR-385: the error now reports `std/contract.blsp:135` — the body of `%contract-shim-2` — instead of the user's call at line 33** — KI-181's rule gives an untagged error the innermost call site that HAS a position, and the shim templates moved from the prelude (positionless) into a CORE module the reader positions, so the innermost positioned site is now the shim's own `(%contract-check-ret … (%contract-orig a b))` | ✅ **FIXED 2026-09-22** — option (b), made exact: `CompiledArm` carries the closure's authoring MODULE (ADR-383's `Closure::module`, already flowing into `compile_arm`), and `attach_vm_trace` treats a position the `contract` module's own code owns as untagged — the running arm is a shim and the position is one of its instructions', or a pending shim frame's call site equals it — then takes the innermost positioned call outside any shim frame. Keyed on the module, not the file or the name: `contract_bind` carries the ORIGINAL's `fn_name` and the arm's `src_file` came out as the caller's file, so neither marks a shim; and not on the frame's env, which cannot be read there — the driver has unwound its roots (the first cut killed the test process). Guard: the existing `vm_prim_error_pos_test` case reads 33 armed and unarmed, 135 with the rule disabled. Was: attributed on a clean worktree at `cf8c2821` without any other change (3 tests, 1 failed, `actual 33 expect 135`; both suites read the same on the day's other tree). Not a sweep or contracts-kernel regression: the shim's code moved, its positions came with it. Options, the owner's call: (a) build the shim closures without positions (they are generated code — a user reading `contract.blsp:135` learns nothing), e.g. strip form positions in `%contract-shim-*` or load that module with positions off; (b) `attach_vm_trace` prefers the innermost positioned site OUTSIDE the frame that raised when that frame is a contract shim (`shim_original` already recognises one); (c) accept and re-pin the test at 135. (a) keeps KI-181's rule and the user-facing answer |
 | KI-185 | **a module LOAD inside the contract policy hook tripped the use-after-GC wire** — ADR-385 moved the shim machinery into `std/contract.blsp` and had `%contract-wrap` `require-one` it at its first armed call. The hook runs wherever a BINDING comes to exist — inside a `def`, inside a module's `provide` sweep, inside whatever evaluation reached them — and a module load is arbitrary evaluation, hence a collection, at a point those callers are not GC-safe across. `BROOD_VM=0` + `nest test` with contracts armed (CI's `differential (tree-walker)` job) panicked on the per-deref tripwire: `use-after-GC: bytes handle (nursery slot 5) is from epoch 6, but that generation is now epoch 7`, in `bytes_to_list ← call_native ← eval_tail_loop` | ✅ **FIXED 2026-09-22** — the module is loaded once at runtime boot when `contracts_armed()` (`Interp::new`), where every boot already collects; the hook's `require-one` is now behind `(unless (bound? 'contract/shim) …)`, a no-op in every armed process and a last resort for the one path that arms after boot (a `sig!` in an otherwise unarmed run). ADR-385's win is untouched — an unarmed run still never loads the module (`BROOD_IMAGE_TRACE` reads 0 lines) and the empty-file count is unchanged at 78.9M. Bisected by restoring the pre-ADR-385 prelude: the case passes there and fails with the lazy load, which is what named the cause |
+| KI-188 | **a closure shared by handle into a process that had acked a RUNTIME drain clean let the collector free the generation under it** — `gen_drained` frees when every live pid's `drain_acks` entry reads clean; the L1 `copy_cross_heap` arm withdrew nothing, and the wire path's `rearm_drain_ack` reset only the local `Cell`, leaving the table entry that the free reads | ✅ **FIXED 2026-09-23** — `rearm_drain_ack` withdraws the table entry (and the `drain_acked` count) as well as the cache, and the L1 arm calls it; the heap remembers the pid it acked under. Guard: `process::message::drain_ack_tests` (both paths), red before the fix |
+| KI-189 | **a deopt-feedback re-lowering of a leaf-spliced arm re-ran effects: `(eo-phases8)` put 100 464 times for 100 000 iterations** — `reset_arm_untried` cleared `jit_code` but not `inline_installed`/`inline_queued`/`inline_code`, so the recompiled small native ran in a leaf-sized frame and its deopt found no journal in the leaf slot | ✅ **FIXED 2026-09-23** — one `reset_native_state` shared with the epoch reset. Guard: `jit_effect_once_test` case 8, sabotage-verified |
+| KI-190 | **a loop that redefined itself and then made a non-tail VM call before its back-edge kept running the old body forever** — `exec_chunk` re-read its `SelfCall` epoch snapshot on every re-entry, and the frame re-enters after each non-tail call, so the `def` was already in the snapshot | ✅ **FIXED 2026-09-23** — the epoch lives in `BcFrame` (`entry_epoch`). Guard: `vm_selfcall_reload_test` "a redefinition before a non-tail call…", sabotage-verified |
+| KI-191 | **two JIT cold paths could run or resume the wrong arm across a concurrent rebind** — `jit_tier` read the code pointer and `compile_epoch` separately (a peer's reset + re-election in between passes the epoch check with the old pointer), and the fast-link deopt fallback re-resolved the callee by its CURRENT binding, whose frame-size-only shape check an equal-`nslots` arm passes | ✅ **FIXED 2026-09-23** — found by review, argued from the code rather than reproduced (both need a `def` landing inside a nanosecond window on another core): `jit_code` is re-loaded after the epoch check; `JIT_ARM_KEEPALIVE` is keyed by code pointer and the fallback resolves the arm that ran |
+| KI-192 | **the tree-walker's thin-wrapper elision staled its caller's arguments when the inner head was a lazily loaded module** — two `nest` tests (`stale_binary_refuses_to_check`, `project_image_registries`) failed once each under the tree-walker suite with KI-185's signature (`use-after-GC: bytes handle … bytes_to_list ← call_native`); deterministic under `BROOD_GC_STRESS=1` in any freshly scaffolded project's `BROOD_VM=0 nest test`, on HEAD as well | ✅ **FIXED 2026-09-23** — a bound non-dynamic head is a plain `env_get`; anything else is `eval`ed with the args rooted. Guard: `crates/cli/tests/passthrough_lazy_head.rs`, sabotage-verified |
+| KI-193 | **`brood_suite_passes` went TMT at 900 s with the `[refer] (:use sse) imported NOTHING` wave (then `editor/serve`, `set`, `sexp`, `text/…`) — 3 runs in 4 on the 2026-09-23 review tree, 0 in 1 on HEAD** — the fourth sighting of the KI-119/120/170 end state, at identical scope numbers across runs | 🔍 **ORDERING BUG FIXED; THE WAVE IS A WATCH, AUDIT ARMED 2026-09-23** — the wave recurred once more with this fix in (TRY 1, same scopes), then stopped: 3 of 3 full parallel runs red before ~14:50, **13 of 13 green after**, with no code change between the last red and the first green that could explain it (only no-op clippy edits), and HEAD 1/1 green. Not reproducible on demand since, under load, traced or not. What is known: the inconsistent state (`*features*` listing a module whose bindings are gone) is CREATED during `std_check_test`'s parallel checker workers (a cheap detector caught it once at scope 253), after the modules were loaded and kept by earlier files. The detector is now permanent: **`BROOD_FEATURES_AUDIT=1`** reports, with a backtrace, the publish / restore / live `*features*` write that produces the state (`crates/cli/tests/features_audit.rs`, sabotage-verified). **On the next sighting, re-run the full suite with it set and read the first `[features-audit]` line.** `%isolate`'s restore swapped the globals table and bumped `version`/`code_epoch` AFTER the write guard dropped (`*self.runtime.globals_write() = table;` drops it at the semicolon), and `publish_module_load` did the same after journalling. Every process's global caches key on those two counters, so a reader in the window paired the restored table with a cached `*features*` still listing the module: `require-one` short-circuits, the `:use` imports nothing. Both swaps now bump under the guard. The review's KI-192 fast path made the window hit (it shifts the tree-walker's timing); it did not open it. Guard: `core::heap::table_swap_tests` (a probe reads both counters just before the guard is taken and just after it drops), sabotage-verified by moving the bumps back out |
+| KI-194 | **`module_publish_test` "no name or registration of a loading module is visible before it is provided" read `seen` 1 — 1-6 runs in 40 standalone on the review tree, 0 in 40 on HEAD, 0 in 40 with `BROOD_NO_JIT=1`** | ✅ **FIXED 2026-09-23** — instrumenting the observer showed the names bound, the cached `*features*` false and the TABLE's true: two publishes, not a stale read. `load` opened a frame of its own for a `defmodule` file even inside `require-one`'s frame (KI-170's wrap), so the file's definitions published live when it ended and `%require-force`'s `provide` published with the outer frame afterwards. `load` now opens a frame only when none is open. Present since KI-170 (2026-09-20); the review's changes widened the window. Guard: `module_publish_test` "a module file loaded inside an open load (KI-194)" — deterministic (a frameless process probes the live table from inside the outer frame), sabotage-verified |
 
 | KI-178 | **the JIT's inline `pair?` answered `false` for a RANGE and a SEQ-VIEW** — `PrimOp1::IsPair` compared the discriminant byte against `TAG_PAIR` alone, on the strength of a comment saying ranges "also carry TAG_PAIR"; they carry their own bytes (11, 12), so `(pair? (range 3))` and `list?` were `true` on the VM and the tree-walker and `false` once the asking arm tiered up — since the lowering was written; found by a contract over `seqable` rejecting `(range 100)` on the two-thousandth `into` | ✅ **FIXED 2026-09-21** — the lowering accepts `TAG_PAIR | TAG_RANGE | TAG_SEQVIEW`, the two new constants pinned by the layout test; `tests/jit_pair_predicate_test.blsp` counts wrong answers over 20 000 activations (19 841 before the fix) |
 | KI-175 | **the checker seeded a fold callback's accumulator from the fold's RESULT, losing `init`** — over a provably non-empty input the result rule leaves `init` out (the step ran at least once), but the callback's first step is handed `init`; `(fold [3 9 4] nil (fn (b x) (if (nil? b) x …)))` read `b` as `3 \| 9 \| 4` and flagged the callback's own `nil?` guard as never true — a PLAIN-mode false positive (the one thing the checker must never do). Found by `fold-for`'s docstring example the day ADR-377 was written | ✅ **FIXED 2026-09-20** — `walk::calls::fold_callback_seed` seeds the accumulator with `init ∪ result` (the first element ∪ result for a no-init `reduce`). Pinned in `closure_inference.rs` both ways (the `nil` seed is quiet; a `0` seed still makes the `nil?` dead), sabotage-verified. One strict finding it uncovered was right: `linmap_soundness_test`'s `lm-fold` is handed `5` on purpose by one caller, so its `assoc` can see a `5` — `check-allow`ed like its sibling |
@@ -11766,6 +11773,253 @@ two of three runs (a race), green ×3 with the fix.
 **Lesson:** `(when (nil? x) (def x …))` is not `defonce` and `defonce` is not atomic either;
 a shared registry is created at load or not at all.
 
+## KI-194 — a module file loaded inside `require-one` published before its `provide` ✅ FIXED 2026-09-23
+
+**Seen:** `module_publish_test` "no name or registration of a loading module is visible before
+it is provided" read `seen` 1 once in a traced suite run, then 3/40 and 6/40 standalone on the
+2026-09-23 review tree (with KI-193 fixed) — against 0/40 on HEAD and 0/40 with
+`BROOD_NO_JIT=1`. The JIT is not on the path (the observer's arm never lowers); it only moves
+the timing.
+
+**How it was found.** A stale cache was the first theory — KI-193 had just been one — and it
+was wrong. A copy of the test printed, at the offending poll, the three names and `*features*`
+twice: through the ordinary read and through `%registry-member?`, which bypasses every cache.
+`early=true late=true rec=true cached-features=false table-features=true`: the names were in
+the table and `*features*` was not yet, then was a few microseconds later. Two writes.
+
+**Cause.** KI-170 wrapped a directly `load`ed `defmodule` file in an ADR-344 frame. It did so
+unconditionally — including when the load runs inside `require-one`'s own frame, which is
+every require (`%require-force` loads the file inside `%with-load-journal`). The inner frame
+published the file's definitions to the live table when the file ended; `%require-force`
+then made the `provide`, which went to the OUTER frame and published afterwards.
+`enter_journalled_load` already knew the rule — "a `load` reached from inside a `require`'s
+frame IS that require's load" — but applied it only to the frame's `direct` flag.
+
+**Fix.** `load` opens a frame only when none is open; a nested module load's writes join the
+enclosing frame and publish with its `provide`.
+
+**Guard:** `module_publish_test` "a module file loaded inside an open load (KI-194)": inside
+`%with-load-journal`, load a module file, then ask a freshly spawned process — which has no
+frame and so reads the live table — whether its name is bound. Deterministic: the probe sits
+in the window rather than racing it. Sabotaged by opening the frame unconditionally again:
+red; restored: green. The observer test went 6/40 → 0/40.
+
+## KI-193 — the table swaps bumped the cache keys after unlocking (fixed) — the `imported NOTHING` wave it was found under is a WATCH, `BROOD_FEATURES_AUDIT` armed
+
+**Seen:** `brood_suite_passes` TMT at 900 s in the review's full VM run (TRY 1; TRY 2 passed)
+with the `[refer] (:use sse) imported NOTHING` wave, then 2/2 solo — at the same scope numbers
+as the first (`sse` at 277, `editor/serve` at 305). HEAD passed. Removing the review's KI-192
+fast path passed 2/2, then 3/3 as "variant B" (the rooted slow path kept, the `env_get` fast
+path dropped) — but that fast path returns exactly what `eval` returns for a bound symbol, and
+no semantic difference could be found. So the fast path moved the timing onto an existing
+window; `BROOD_TRACE_GLOBAL=sse/frame` suppressed the wave in five traced runs.
+
+**Cause.** Every process caches globals twice: `global_lookup_cached` keys on
+`runtime.version`, the VM's `GlobalIc` (and the JIT) on `runtime.code_epoch`. The two
+multi-name table writers bumped both AFTER the write guard dropped:
+
+- `restore_globals` (`%isolate`): `*self.runtime.globals_write() = table;` — the guard is a
+  temporary and drops at the semicolon; the bumps follow.
+- `publish_module_load`: the insert block closes, the writes are journalled, then the bumps.
+
+A reader that took the restored table (a module's names gone) and then read `*features*`
+from its cache got the pre-restore map, still listing the module. `require-one` short-circuits
+on that, `%refer` imports nothing, and every bare use in the file dies `unbound symbol` in
+whatever process reaches it — the shape KI-119, KI-120 and KI-170 each ended in, by a fourth
+route. The single-name `def` path has the same order, but it promises nothing across names.
+
+**Fix.** Both swaps bump `version` and `code_epoch` while holding the write guard. A reader
+that acquires the table after the swap is then ordered after the bumps, so its caches miss.
+The generations lock is only ever taken on its own, so nesting it inside the globals guard
+in the publish cannot invert an order.
+
+**Guard:** `core::heap::table_swap_tests` — a `cfg(test)` probe (`heap::table_swap_probe`)
+reads both counters just before each swap takes the guard and just after it drops, and both
+must have moved (the publish case rebinds, as a real load's `*features*` does). Sabotaged by
+moving the bumps back past the unlock: both red with `version 2 -> 2, code_epoch 1 -> 1`.
+With it, the suite wrapper went 3/3 green solo with the fast path restored — and then failed
+again, same wave and scopes, inside the next full parallel `cargo nextest run`. So this was
+one route to the shape, not the only one.
+
+**The watch (2026-09-23 evening).** A detector run after every publish and restore caught the
+state being created once: `*features*` listed `text`, `term`, `repl`, `reload`, `scaffold`,
+`workspace`, `renames` and `sexp` with their bindings gone, first seen at a publish by one of
+`std_check_test`'s workers (scope 253) — modules that earlier files had loaded and kept. Every
+heavier instrument (`BROOD_TRACE_GLOBAL` with full values, a check on every live `def`)
+suppressed the race, and after ~14:50 it stopped reproducing at all: 13 full parallel runs
+green, across code states with and without each candidate change (KI-183's reorder included,
+confirmed by sabotage), with the check cache cold, and under synthetic load. Ruled out on the
+way: `reflect/check-file` does not provide the module it checks; `*features*` has no whole-map
+writer; the `%isolate` reap and in-flight wait key on registry liveness, not monitors. The
+detector is now `BROOD_FEATURES_AUDIT` (`core/heap/features_audit.rs`): cheap enough to leave
+armed in a full run, it remembers which modules were ever seen bound, so it is silent about
+modules that define nothing public, and names the event that leaves a listed module unbound.
+
+## KI-192 — a thin-wrapper elision whose inner head lazily loaded a module staled the caller's arguments ✅ FIXED 2026-09-23
+
+**Seen:** the tree-walker half of `make test-both` on the 2026-09-23 review's tree — two `nest`
+tests red once each, both `use-after-GC: bytes handle (nursery slot 1) is from epoch 3, but
+that generation is now epoch 4` in `bytes_to_list ← call_native ← eval_tail_loop`, the stack
+KI-185 had. Both passed 3/3 in isolation on that tree and once on HEAD, so under load it was a
+flake; with `BROOD_GC_STRESS=1` it failed on BOTH trees at the identical epoch, and in any
+`nest new` project's `BROOD_VM=0 nest test`. Not the review's changes — they were not on the
+path (every frame is the tree-walker's), and HEAD fails the same way under stress.
+
+**Cause.** `eval_tail_loop`'s thin-wrapper elision (`passthrough_arm`) resolves a wrapper's
+inner head and forwards the already-evaluated `cur_argv` to it. The resolution was a full
+`eval`, under a comment saying "a symbol lookup — no GC, so `cur_argv` stays valid". Lazy
+module loading (ADR-335) ended that: an unbound qualified head is a module LOAD — arbitrary
+evaluation and a collection — and `cur_argv` was not rooted across it. `BROOD_GC_VERIFY=1`
+named the store: the stale handle was bound into the inner call's frame (here `seq`'s `coll`).
+Contracts are not involved (`BROOD_CONTRACTS=0` fails the same way).
+
+**Why it survived.** The comment was true when written. The VM path resolves heads through its
+IC and was never affected, so every default-engine suite was green; the tree-walker job needs
+the load to land in the elision AND a collection to be due there, which is why it read as a
+one-in-many flake until stress made it deterministic.
+
+**Fix.** A bound, non-dynamic symbol takes `env_get`, which cannot collect (the hot case —
+this runs for every elided `+`); anything else goes through `eval` with the args, the call
+form and the env rooted, re-read after.
+
+**Guard:** `crates/cli/tests/passthrough_lazy_head.rs` — `(defn wrap-encode (x) (json/encode
+x))` applied to fresh LOCAL data under `BROOD_VM=0 BROOD_GC_STRESS=1`. Sabotaged by restoring
+the unrooted `eval`: the run reports `use-after-GC: pair handle …` (by hand) and the test goes
+red (timed out at the 120 s cap); restored: green.
+
+## KI-191 — two JIT cold paths could run or resume the wrong arm across a concurrent rebind ✅ FIXED 2026-09-23
+
+**Seen:** not observed — found in the 2026-09-23 VM/perf review (`handoff.md`), confirmed by
+reading. Both windows need a `def` on another core between two adjacent loads, so neither was
+reproduced; the fixes are argued from construction, which is recorded here so the next
+reader does not mistake the absence of a test for the absence of a mechanism.
+
+**Cause 1 — a torn read in `jit_tier`.** Thread B loads `arm.jit_code` (the old pointer).
+Thread A, sharing this `CompiledArm` (ADR-215), sees the stale epoch, resets the arm, and at
+its next call re-elects it — storing the NEW epoch into `compile_epoch` *before* its CAS
+`null → QUEUED`. B's `compile_epoch == global_epoch()` check now passes, and B enters the old
+pointer: native code whose inlined operators were validated at the old epoch.
+
+**Cause 2 — the fast-link deopt fallback resolved the callee by name.** On an IC miss (the
+epoch moved), `jit_fast_link_cold_outcome` looked the head up in the globals. A `def` in that
+window names a different arm; `jit_frame_shape_matches` compares frame sizes only, so an arm
+of equal `nslots` passed it and `jit_ckpt_resume` read the NEW arm's journal slot out of the
+OLD arm's frame and interpreted the new chunk from the old ip.
+
+**Fix.** (1) After the epoch check, `jit_code` is re-loaded and must still equal the pointer
+about to run: the peer's null store precedes its `compile_epoch` Release, so an Acquire
+re-load after seeing that epoch sees the reset, and native code is never freed, so an address
+cannot come back as another arm's. (2) `JIT_ARM_KEEPALIVE` is now a map keyed by installed
+code pointer (it pinned every arm already; now it also names them), and the fallback resolves
+IC → **the arm that code belongs to** → name. The suspend-host latch's linear
+`jit_code == code` scan became the same O(1) lookup, and it now finds the arm even after its
+`jit_code` moved. The inline xcall path carries no code pointer out of the IR and keeps the
+IC → name order.
+
+**Guard:** none by test. The dispatch and deopt paths are covered by the existing JIT suites,
+which pass unchanged.
+
+## KI-190 — a loop that redefined itself and then made a non-tail call ran the old body forever ✅ FIXED 2026-09-23
+
+**Seen:** while checking a review finding about the `SelfCall` rebind path. The probe
+
+```lisp
+(defn lp (xs n)
+  (if (= n 0)
+    (do (reflect/eval '(def lp (fn (xs n) [:new xs]))) (lp (list 1) 7))
+    (lp (list 2) (- n 1))))
+```
+
+returns `[:new (1)]` on the tree-walker and never returns on the VM or JIT: every pass
+through `n = 0` re-ran the `def`, and the source positions recorded for each re-evaluated
+form grew until `memory allocation of 5502926864 bytes failed`. The same probe with
+`(lp 1 7)` in place of `(lp (list 1) 7)` was correct.
+
+**Cause.** `Inst::SelfCall`'s hot-reload guard (ADR-013) compares the global epoch to a
+snapshot. The snapshot was a local of `exec_chunk`, taken on entry — and a frame re-enters
+`exec_chunk` after **every non-tail call** in its body. `(list 1)` is a VM call, so by the
+back-edge the snapshot had been re-read after the `def`, the epochs matched, and the loop
+took the zero-lookup path on the old body. ADR-366 had met the same re-entry with its
+stale-arm sentinel, which covered a module load but not a `def`.
+
+**Why it survived.** `vm_selfcall_reload_test` exercises a self-redefinition with a call in
+the loop body, but that call (`scr-swap`) is small enough to be inlined into the caller's
+node tree, so the frame never left `exec_chunk` between the `def` and the back-edge.
+
+**Fix.** The epoch belongs to the FRAME: `BcFrame::entry_epoch`, owned by `vm_run_bc` and
+threaded to `exec_chunk` as `&mut u64` like `back_edges`. A fresh frame starts at the current
+epoch; a frame resumed mid-arm (a deopt, a native run in place) starts at the sentinel, so its
+first back-edge re-checks. The stale-arm hint still forces the sentinel.
+
+**Guard:** `vm_selfcall_reload_test` "a redefinition before a non-tail call is still seen at
+the back-edge (KI-190)" — a table counter stops the old body after three passes so the red is
+`[:stuck (2)]`, not a hang. Sabotaged by re-reading the epoch on entry: red with exactly that
+value; restored: green.
+
+**Also changed in the same path.** The rebind branch truncated the root stack *before*
+`dispatch(…, argv, …)`, so the arguments were off the roots while a native callee could
+collect; `Inst::Call` dispatches with them still rooted and lets the driver drop them. It does
+the same now.
+
+## KI-189 — a deopt-feedback re-lowering of a leaf-spliced arm re-ran effects ✅ FIXED 2026-09-23
+
+**Seen:** found by review, then reproduced: a self-tail loop with a spliced leaf and a
+residual `table/put` call, tiered on an int param and then fed a float, counted
+**100 464 puts for 100 000 iterations** (`[jit-relower] arm=loop8 reason=polymorphic-param`
+just before). Correct with `BROOD_NO_LEAF_INLINE=1`.
+
+**Cause.** Two resets of an arm's native state existed and disagreed. The epoch
+invalidation in `jit_tier` cleared `inline_installed`, `inline_queued` and `inline_code`;
+`reset_arm_untried` — the deopt-feedback re-lowering, for a polymorphic param or floats
+arriving through erased reads — cleared only `jit_code`, `jit_calls` and
+`shared_published`. After it, the VM still sized the frame to `inline_nslots`, the recompiled
+SMALL native ran in that frame and journalled to the small layout's `ckpt_slot`, and a deopt
+took the frame size to mean the leaf-spliced layout, found no journal in the leaf slot, and
+re-ran the arm from ip 0 — repeating the put that had already happened.
+
+**Why it survived.** `jit_effect_once_test` covers leaf splicing and re-lowering separately;
+nothing drove one into the other. The reproducer has to keep both phases in one call: a
+top-level form between them (an `io/puts` that loads a module) bumps the epoch, and the epoch
+reset — the correct one — runs first.
+
+**Fix.** One `reset_native_state`, called by both. `jit_code` is cleared first so a reader
+that still sees the inline flags sees a null pointer.
+
+**Guard:** `jit_effect_once_test` case 8. Sabotaged by restoring the three inline fields after
+the reset: `7 passed, 1 failed`; restored: 8/8.
+
+## KI-188 — a closure shared by handle let the RUNTIME collector free a generation its receiver held ✅ FIXED 2026-09-23
+
+**Seen:** found by review (2026-09-23), then reproduced deterministically as a unit test:
+with a drain of generation 0 armed and the receiver already acked clean, handing it a gen-0
+closure by message and letting the sender drop its copy and ack left
+`gen_drained(&[main, sender, receiver]) == true` — generation 0 freeable while the receiver
+holds a handle into it. Both delivery paths.
+
+**Cause.** The drain completes when every live pid's entry in the shared `drain_acks` table
+reads the current epoch; a clean ack is final for the epoch because "an old-gen handle can
+never arrive by message". ADR-194's L1 path and the wire path's `Message::FnShared` both
+hand over a RUNTIME closure BY HANDLE, which is exactly that arrival:
+
+- L1 (`copy_cross_heap_rec`'s `Value::Fn` arm) withdrew nothing.
+- the wire path called `rearm_drain_ack`, which reset only the local `acked_drain_epoch`
+  cache. The re-walk then found the process dirty and — "a process reaching here holds no
+  current-epoch ack" — took no action, so the table still said clean. The message's `GenPin`
+  covered only the time in the mailbox.
+
+A freed generation's slot is reused, and the generation is one bit of the handle, so the
+receiver's closure would silently run different code.
+
+**Why it survived.** `runtime_collector.rs`'s drain tests move handles between heaps with
+`push_root`, never by message; the message-path tests never arm a drain.
+
+**Fix.** `rearm_drain_ack` withdraws the ack from the table (decrementing `drain_acked`) when
+this heap acked the CURRENT drain — the heap now records the pid it acked under — and the L1
+arm calls it. With no current ack it is a `Cell` compare and takes no lock.
+
+**Guard:** `process::message::drain_ack_tests::{an_l1_…, a_wire_…}_withdraws_the_receivers_clean_ack`
+— both red before the fix (the wire one against the `Cell`-only rearm), green after.
+
 ## KI-185 — a module load inside the contract policy hook tripped the use-after-GC wire ✅ FIXED 2026-09-22
 
 **Seen:** CI red on `dc1f547d`, job `differential (tree-walker)` (`BROOD_VM=0`), case
@@ -11874,7 +12128,7 @@ so imaged code reported a line from one file under another file's name. `%image-
 now takes the module key and stamps the section's own source path, the trap
 `set_form_pos_in_file` documents for the expander. Verified in all six combinations of
 engine × contracts × image.
-## KI-183 — `:monitored-by` read 2 after a watcher's death, once, in CI 🔍 WATCH 2026-09-22
+## KI-183 — a dying process announced its death before releasing the monitors it held ✅ FIXED 2026-09-23 (was: `:monitored-by` read 2 after a watcher's death, WATCH 2026-09-22)
 
 **Seen:** CI run for `653d41d9`, tree-walker job, `brood_suite_passes` TRY 1:
 `tests/concurrency_test.blsp:295: monitor: death notification › a watcher's death releases
@@ -11895,6 +12149,27 @@ changes scheduling density, and the CI box is slower.
 is decremented by the watcher's exit processing (`sweep_dead_watcher`) BEFORE the exit is
 observable to a monitor of the watcher — if a `receive` of the watcher's `:down` can run before
 the sweep, the test's read is legal and the sweep's placement is the bug.
+
+**Resolution (2026-09-23).**
+
+**Seen:** `concurrency_test` "a watcher's death releases the monitors it held" read
+`:monitored-by` 2 for 0 — once in CI (2026-09-22, tree-walker suite wrapper), and once on
+demand on 2026-09-23 with the suite wrapper run beside 8 CPU-bound processes on the 12-core box.
+
+**Cause.** `retire_pid_tail` took the dying process's watchers and fired their `[:down …]`,
+and only THEN swept the monitors the dying process itself held (`sweep_dead_watcher`). The
+test's watcher waits on exactly that down and reads the target's `:monitored-by` at once; in
+the gap the count still included the dead process's two monitors. A down is how anyone learns
+a process is gone, so everything its death releases must be released before it is sent.
+
+**Fix.** The sweep runs first. Both steps take `MONITORS` sequentially, so no lock order moves.
+
+**Guard:** `process::scheduler::lifecycle::down_order_tests` builds the table directly (fake
+pids, no processes: W watches D, D watches T), retires D, and a `cfg(test)` probe inside
+`fire_down` records whether D still held watcher entries when its down fired — red 3/3 with
+the old order, green with the fix. A first guard, the scenario looped 300 times in
+`concurrency_test.blsp`, passed against the old order in two full parallel runs and was
+removed: a guard that cannot fail reads as coverage.
 
 ## KI-182 — the `startup` row +6% at the 422c92a5 refresh: the unarmed contract offer tiers `not` at boot, and the prelude image carries def sites ✅ FIXED 2026-09-22
 

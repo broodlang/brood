@@ -277,6 +277,13 @@ pub fn deadline_exceeded() -> bool {
 /// reductions into `process-info`'s `:reductions` (if a process ctx exists) and refreshes
 /// the budget so the caller keeps running. (A long native callback thus runs as a "dirty"
 /// section — not preempted mid-call — the §7.4 carve-out.)
+/// A NESTED (non-capture) run's reduction rollover: book the quantum and refill the budget
+/// — [`preempt`] for the VM's loop safepoints, which test the rollover with
+/// [`tick_capture`] so they can run their once-per-quantum checks first.
+pub(crate) fn refill_nested_quantum() {
+    preempt();
+}
+
 fn preempt() {
     if let Some(c) = CURRENT.with(|c| c.borrow().clone()) {
         c.mailbox
@@ -381,7 +388,9 @@ impl Drop for DirtyBlockGuard {
 fn drain_worker_queue(wid: usize) {
     // Every queued process is stranded on this dirty worker (it won't return to its run
     // loop) and is migratable (no native stack), so re-route them all off it.
-    let stranded: Vec<Box<Process>> = crate::core::sync::lock(&WORKERS[wid].0).drain(..).collect();
+    let stranded: Vec<Box<Process>> = crate::core::sync::lock(&WORKERS[wid].0 .0)
+        .drain(..)
+        .collect();
     // These left a queue without going through `run_one` (the usual decrement site), so
     // account for the removal here; the `enqueue` below re-adds one each. Net zero — the
     // `STEALABLE` count stays equal to the processes actually sitting in queues.
@@ -645,8 +654,8 @@ pub fn isolate_owner_of(pid: u64) -> u64 {
         .unwrap_or(0)
 }
 
-static RUNNING: AtomicUsize = AtomicUsize::new(0); // processes inside `resume` right now
-static PEAK_RUNNING: AtomicUsize = AtomicUsize::new(0);
+static RUNNING: Padded<AtomicUsize> = Padded(AtomicUsize::new(0)); // processes inside `resume` right now
+static PEAK_RUNNING: Padded<AtomicUsize> = Padded(AtomicUsize::new(0));
 static WORKER_COUNT: AtomicUsize = AtomicUsize::new(0); // 0 = default (≈ nproc)
 static ACTIVE_WORKERS: AtomicUsize = AtomicUsize::new(0); // worker threads actually started
 static WORKERS_STARTED: Once = Once::new();
@@ -682,11 +691,30 @@ type WorkerQueue = (Mutex<VecDeque<Box<Process>>>, Condvar);
 /// same worker (keep a hot process local); a wake may migrate (`wake_enqueue`). The
 /// Vec is sized once at the first `ensure_workers` from `worker_count()`, then never
 /// resized.
-static WORKERS: LazyLock<Vec<WorkerQueue>> = LazyLock::new(|| {
+///
+/// Each queue sits on its own cache line ([`Padded`]): a queue is ~50 bytes, so unpadded two
+/// workers shared a line and every push/pop/steal on one invalidated the other's. Hence the
+/// `WORKERS[i].0.0.0` (the lock) / `.0.1` (the condvar) spelling at the use sites.
+static WORKERS: LazyLock<Vec<Padded<WorkerQueue>>> = LazyLock::new(|| {
     (0..worker_count())
-        .map(|_| (Mutex::new(VecDeque::new()), Condvar::new()))
+        .map(|_| Padded((Mutex::new(VecDeque::new()), Condvar::new())))
         .collect()
 });
+
+/// A value on its own cache line (128 bytes: two lines, for the adjacent-line prefetcher).
+/// For the scheduler's shared counters and per-worker flags, which every worker writes per
+/// quantum or per park: packed together, one worker's store invalidates the line its peers
+/// are reading an unrelated counter from.
+#[repr(align(128))]
+pub(crate) struct Padded<T>(pub(crate) T);
+
+impl<T> std::ops::Deref for Padded<T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
 
 /// Count of processes currently sitting in some worker's queue — i.e. the pool of
 /// stealable work. Incremented in `enqueue` (every queueing: spawn, wake, preempt)
@@ -697,7 +725,7 @@ static WORKERS: LazyLock<Vec<WorkerQueue>> = LazyLock::new(|| {
 /// instead of an O(workers) scan. May briefly over-count a process popped but
 /// not yet in `run_one` (a wasted scan, self-correcting) — it is a hint, never a
 /// correctness gate.
-static STEALABLE: AtomicUsize = AtomicUsize::new(0);
+static STEALABLE: Padded<AtomicUsize> = Padded(AtomicUsize::new(0));
 
 /// How long an idle worker parks before re-attempting a steal, when it has no
 /// work of its own. A backstop, not the primary wakeup: a worker is woken
@@ -792,8 +820,11 @@ fn now_nanos() -> u64 {
 /// a worker draining one CPU-bound process has an *empty queue* yet is saturated,
 /// and queue length alone would wrongly read it as idle. Set/cleared around the
 /// `resume` in `run_one`; read (lock-free) at spawn placement.
-static WORKER_BUSY: LazyLock<Vec<AtomicBool>> =
-    LazyLock::new(|| (0..WORKERS.len()).map(|_| AtomicBool::new(false)).collect());
+static WORKER_BUSY: LazyLock<Vec<Padded<AtomicBool>>> = LazyLock::new(|| {
+    (0..WORKERS.len())
+        .map(|_| Padded(AtomicBool::new(false)))
+        .collect()
+});
 
 /// Per-worker "is parked on its condvar" flag, and a count of how many are. Together they
 /// let [`enqueue`](crate::process::scheduler::pool::enqueue) hand a *steal opportunity* to
@@ -809,9 +840,12 @@ static WORKER_BUSY: LazyLock<Vec<AtomicBool>> =
 ///
 /// The count is the cheap gate — one relaxed load on the enqueue path — so a saturated
 /// pool (no one parked) pays nothing and never issues a wake.
-static WORKER_PARKED: LazyLock<Vec<AtomicBool>> =
-    LazyLock::new(|| (0..WORKERS.len()).map(|_| AtomicBool::new(false)).collect());
-static PARKED_COUNT: AtomicUsize = AtomicUsize::new(0);
+static WORKER_PARKED: LazyLock<Vec<Padded<AtomicBool>>> = LazyLock::new(|| {
+    (0..WORKERS.len())
+        .map(|_| Padded(AtomicBool::new(false)))
+        .collect()
+});
+static PARKED_COUNT: Padded<AtomicUsize> = Padded(AtomicUsize::new(0));
 
 /// Rotating start point for `assign_worker`'s least-loaded scan. Read +
 /// incremented under relaxed ordering — the only requirement is approximate
@@ -847,7 +881,7 @@ fn assign_worker() -> usize {
         if WORKER_DIRTY[i].load(Ordering::Relaxed) {
             return usize::MAX;
         }
-        match WORKERS[i].0.try_lock() {
+        match WORKERS[i].0 .0.try_lock() {
             Ok(q) => q
                 .len()
                 .saturating_add(WORKER_BUSY[i].load(Ordering::Relaxed) as usize),
@@ -902,7 +936,7 @@ fn pick_spawn_worker() -> usize {
             // nothing like the O(workers) scan `assign_worker` runs. A failed `try_lock`
             // reads as "no backlog" and keeps the child local: the only contender for that
             // lock is a thief, whose presence means the queue is being drained anyway.
-            let backlog = match WORKERS[w].0.try_lock() {
+            let backlog = match WORKERS[w].0 .0.try_lock() {
                 Ok(q) => q.len(),
                 Err(_) => 0,
             };

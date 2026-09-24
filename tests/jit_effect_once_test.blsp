@@ -125,6 +125,34 @@
       (check-allow :discarded-catch (try 0 (catch e nil)))
       (eo-drive7 t (- i 1) big))))
 
+;; --- 8. a deopt-feedback RE-LOWERING of a leaf-spliced arm (KI-189). The loop tiers on
+;; int `x`, the leaf upgrade swaps in, then a float `x` trips the entry tag check sixteen
+;; times and the arm is reset to re-tier with `x` boxed. The reset used to leave the
+;; upgrade's `inline_installed` set, so the recompiled SMALL native ran in a frame sized
+;; for the leaf-spliced layout and its overflow deopt — after the put — found no journal
+;; in the leaf slot and re-ran from ip 0. Both phases run in ONE call: an epoch bump in
+;; between (a top-level form loading a module) takes the full reset path instead.
+(def eo-t8 (table/new))
+(defn eo-leaf8 (x) (+ x 1))
+(defn eo-eff8 (t) (do (table/put t 0 (+ 1 (table/get t 0))) 1))
+;; check-allow: deliberately non-tail — the discarded overflow is the deopt trigger.
+(check-allow :non-tail-recursion
+  (defn eo-loop8 (t i acc x big)
+    (if (= i 0)
+      acc
+      (do
+        (eo-eff8 t)
+        (* big big)
+        (eo-loop8 t (- i 1) (+ acc (eo-leaf8 x)) x big)))))
+(defn eo-rep8 (n f) (if (= n 0) nil (do (f) (eo-rep8 (- n 1) f))))
+(defn eo-phases8 ()
+  (table/put eo-t8 0 0)
+  (eo-rep8 200 (fn () (eo-loop8 eo-t8 500 0 1 2)))
+  (let (a (table/get eo-t8 0))
+    (table/put eo-t8 0 0)
+    (eo-rep8 200 (fn () (eo-loop8 eo-t8 500 0 1.5 4000000000)))
+    [a (table/get eo-t8 0)]))
+
 (describe "a JIT deopt never re-runs a table/put"
   (test "effectful arm with no non-tail call"
     (table/put eo-t1 0 0)
@@ -170,4 +198,7 @@
   (test "effect before a deopt in a callee the VM entered directly"
     (table/put eo-t7 0 0)
     (eo-drive7 eo-t7 eo-n 4000000000)
-    (assert= eo-n (table/get eo-t7 0))))
+    (assert= eo-n (table/get eo-t7 0)))
+
+  (test "effect before a deopt after a re-lowering of a leaf-spliced arm (KI-189)"
+    (assert= [100000 100000] (eo-phases8))))

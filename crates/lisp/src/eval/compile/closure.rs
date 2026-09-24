@@ -321,6 +321,9 @@ pub(crate) fn compile_arm(
                                     #[cfg(feature = "jit")]
                                     xcall_wanted: std::sync::OnceLock::new(),
                                     #[cfg(feature = "jit")]
+                                    scalar_kind: std::sync::OnceLock::new(),
+                                    calls_receive: std::sync::OnceLock::new(),
+                                    #[cfg(feature = "jit")]
                                     leaf: None,
                                 };
                                 // Load-bearing for the deopt-resume swap in `vm_run_bc`,
@@ -426,6 +429,9 @@ pub(crate) fn compile_arm(
         inline_installed: std::sync::atomic::AtomicBool::new(false),
         #[cfg(feature = "jit")]
         xcall_wanted: std::sync::OnceLock::new(),
+        #[cfg(feature = "jit")]
+        scalar_kind: std::sync::OnceLock::new(),
+        calls_receive: std::sync::OnceLock::new(),
         #[cfg(feature = "jit")]
         leaf,
     })
@@ -679,11 +685,13 @@ pub(crate) fn probe_arm_for(heap: &Heap, id: ClosureId, argc: usize) -> Option<A
 /// fence (`chunk_in_jit_subset`) applied to the router; lifting either is §7.3's
 /// receive-as-exit design, not a predicate tweak.
 pub(crate) fn arm_calls_receive(arm: &CompiledArm) -> bool {
-    let receive_sym = crate::core::value::intern("%receive");
-    arm.chunk.as_ref().is_none_or(|c| {
-        c.code
-            .iter()
-            .any(|inst| matches!(inst, Inst::Call { head: Some(h), .. } if *h == receive_sym))
+    *arm.calls_receive.get_or_init(|| {
+        let receive_sym = crate::core::value::intern("%receive");
+        arm.chunk.as_ref().is_none_or(|c| {
+            c.code
+                .iter()
+                .any(|inst| matches!(inst, Inst::Call { head: Some(h), .. } if *h == receive_sym))
+        })
     })
 }
 
@@ -881,15 +889,9 @@ pub fn precompile(heap: &mut Heap, f: Value) -> bool {
 /// `nqueens`, ~19% on a light-closure `range-reduce` — for any Rust HOF driver folding a user
 /// closure. (It removes dispatch's self-overhead, not the per-call `push_frame`/`vm_run_bc`
 /// protocol — that's the separate lean-native-call lever.)
-#[cfg(feature = "jit")]
 pub(crate) fn hof_fast_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("BROOD_NO_HOF").is_none())
-}
-
-#[cfg(not(feature = "jit"))]
-pub(crate) fn hof_fast_enabled() -> bool {
-    std::env::var_os("BROOD_NO_HOF").is_none()
 }
 
 /// A step closure resolved once for the HOF fast path: the closure identity (re-checked per call
@@ -1017,8 +1019,7 @@ pub(crate) fn hof_apply_native(
             // tuple turned out to be exactly such an arm on 2026-08-20, invisible in every
             // other trace because it is refused somewhere that does not report.
             {
-                static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-                if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+                if crate::diagnostics::debug_flags::jit_bail_trace() {
                     static SEEN: std::sync::OnceLock<
                         std::sync::Mutex<std::collections::HashSet<usize>>,
                     > = std::sync::OnceLock::new();
@@ -1134,8 +1135,7 @@ pub(crate) fn hof_apply_native(
         // checkpoint slot packs the resume position as `ip = p >> 16`, so this maps a deopt
         // back to the bytecode instruction that produced it — the difference between "this
         // arm thrashes" and "this arm thrashes at instruction N, a Call to `vector-length`".
-        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+        if crate::diagnostics::debug_flags::jit_bail_trace() {
             let name = arm
                 .dbg_name
                 .map(crate::core::value::symbol_name_ref)

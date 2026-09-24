@@ -12,6 +12,103 @@ sysctl that moves under you — that file's last section has the one-line check)
 questions are answerable here; check that file's "what this box CAN answer" before deferring
 anything.
 
+## 2026-09-23 — a VM/perf review: four correctness bugs fixed, three measured wins, and what was left
+
+### STATE AT HANDOVER — read first (2026-09-23 evening)
+
+- **Nothing is committed.** ~45 files modified on `main` over `b42228a5`, plus new
+  `crates/cli/tests/{passthrough_lazy_head,features_audit}.rs`,
+  `crates/lisp/src/core/registries.rs`, `crates/lisp/src/core/heap/features_audit.rs`.
+  Formatted (`cargo fmt`, `nest format`). Nothing pushed.
+- **Gates on the final tree:** full VM nextest 1711/1711 and full tree-walker nextest
+  1711/1711 (one docs-only red, a duplicated KI-183 heading, fixed and re-run), **no flakes
+  in either**; clippy `--all-targets --all-features -D warnings` clean; `make prepush` clean.
+- **Fixed today, each with a sabotage-verified guard:** KI-188..190 (the morning), KI-193
+  (table swaps bumped the cache keys after unlocking), KI-194 (a module loaded inside
+  `require-one` published before its `provide`), KI-183 (a dying process fired its downs
+  before releasing its monitors), KI-154's recurrence (twelve servers listened before
+  registering).
+- **The `imported NOTHING` wave is a WATCH, diagnostic armed** (KI-193's entry has the whole
+  record): 3/3 full runs red before ~14:50, 13/13 green after, unexplained by any code change.
+  On the next sighting re-run the full suite with **`BROOD_FEATURES_AUDIT=1`** and read the
+  first `[features-audit]` line — it names the write that produced the state.
+- **Registry names (owner's request):** `core/registries.rs` replaces the kernel's 26 string
+  spellings of prelude registries; the live-coordination policy is the prelude's
+  `*live-registries*` set, guarded in `module_publish_test`.
+- **Concurrency gates, all clean:** `make gcstress` (12 files under GC_STRESS+GC_VERIFY),
+  the distribution tests ×5 (37/37 each), `scripts/fuzz/run.sh` over all 13 generators
+  (285 programs, 0 divergences / crashes / stale, armed release binary).
+- **Perf re-measured vs HEAD, no regression:** default ceiling all noise, `matmul` −21.6%;
+  VM ceiling `collatz` −5.2%; `ring` −5.0% solo (numbers in the devlog).
+- **Still to run:** only `make green`, which needs a push (CI's verdict).
+- **`origin/main` is 24 commits ahead** (seen 2026-09-23 evening) and took KI-186 and KI-187
+  for its own fixes, so this session's entries were renumbered KI-188..KI-194 throughout (code comments,
+  tests and docs). Fast-forward first
+  (`git merge --ff-only` will NOT apply: the tree is dirty and main moved), expect conflicts in
+  `docs/known-issues.md` / `handoff.md` / `devlog.md` (both sides added rows at the top), and
+  re-run the full suite on the combined tree before pushing.
+- **Then commit** — ask first. Natural split: KI-188, KI-189, KI-190(+rooting), KI-191,
+  KI-192, KI-193, KI-194, KI-183, the KI-154 test fix, registries + `*live-registries*`, the
+  features audit, the RUNTIME-read change, the loop safepoint + blocking-receive re-probe, the
+  cheap perf batch, docs.
+
+A review of the interpreter, JIT, heap/GC/scheduler and the benchmark standing (four
+parallel read-only reviewers), then the fixes. Everything below is in the working tree.
+
+**Fixed — correctness (each reproduced first, each guard sabotage-verified):**
+- **KI-188** — a closure shared by handle could let the RUNTIME collector free a generation
+  its receiver held (both the L1 and wire paths; the wire path's `rearm_drain_ack` reset only
+  the local cache, not the `drain_acks` entry the free reads).
+- **KI-189** — a deopt-feedback re-lowering of a leaf-spliced arm re-ran effects
+  (`reset_arm_untried` was half the epoch reset).
+- **KI-190** — found while checking a review item: a loop that redefined itself and then made
+  a non-tail VM call ran the old body forever (`SelfCall`'s epoch snapshot was re-read on
+  every `exec_chunk` re-entry). The rebind path's unrooted `argv` is fixed in the same place.
+- **KI-191** — two JIT windows argued from the code (a torn code-pointer/epoch read; the
+  fast-link deopt fallback resolving the callee by its current binding). `JIT_ARM_KEEPALIVE`
+  is now keyed by code pointer and answers "whose code is this".
+- **KI-192** — pre-existing, found by the tree-walker half of `test-both`: the tree-walker's
+  thin-wrapper elision `eval`ed a lazily loaded inner head (a module load, a collection) with
+  the forwarded args unrooted. Deterministic under `BROOD_GC_STRESS=1` on HEAD too.
+- A latent dependency the safepoint change exposed: a BLOCKING `receive` (inside `try`) never
+  re-checked the mailbox bound after a wake — it relied on the matcher's nested VM run
+  reaching a safepoint. It re-probes on every wake now (`process_limit_test` was the red).
+- The overflow-drainer spawner warns once at 64 live drainers (uncapped by design — a cap
+  converts the cost into a deadlock).
+
+**Fixed — performance (`make ab --floor` / `make ab-vm` vs HEAD, `scratchpad` logs in devlog):**
+- RUNTIME reads no longer clone an `Arc<CodeSlabs>` per access: the per-process cache
+  RETIRES a replaced `Arc` until `&mut self` instead of dropping it, so a plain borrow is
+  sound on its own terms (`Heap::code_gen_ref`). **`matmul` −18.7%**, `pingpong` −6.1%.
+- The interpreter's self-tail IC hit is answered inside the borrow (`vm_call_ic_self`) —
+  no `Arc<ArmHandle>` clone per iteration. **`collatz` −5.3% at the VM ceiling.**
+- The loop safepoint's kill / mailbox-bound / soft-limit / drain checks run once per quantum
+  (at the reduction rollover), in one shared `loop_safepoint` helper — the two inline copies
+  had drifted and neither made the drain report.
+- Cheap: the JIT compile thread blocks instead of polling at 1 kHz (`defer` sends a wake-up);
+  i64-worker eligibility is cached per arm and the global too-deep set is skipped when empty
+  (no mutex per VM→native entry); `arm_calls_receive` cached; `BROOD_GC_TENURE_RESERVE` and
+  `BROOD_NO_HOF` read once; scheduler counters, per-worker flags, run queues and registry
+  shards each on their own cache line, and the per-quantum stores that almost never change
+  are load-first; one `jit_bail_trace()` reader instead of twenty cached copies.
+
+**Deliberately NOT done, with the reason — pick up from here:**
+- **Settled-flag deletion.** The table records `BROOD_XADMIT`, `BROOD_XCALL` and
+  `BROOD_FLOAT_VETO` as kept on purpose (re-test / bisect levers), and the opt-out levers
+  earned their keep this session (`BROOD_NO_LEAF_INLINE=1` was KI-189's control). Kept.
+- **VM call path P1** (args copied roots → SmallVec → roots; `ChunkExit` carries them by
+  value): an in-place frame adoption changes the call protocol at every `Step::Tail`
+  producer. Measure the copy's share first (a counter + `ab-vm`), per the count-first rule.
+- **JIT int tag-guard cache** (`load_slot_int` re-checks a non-carried slot per read): the
+  f64 cache it would mirror leans on block-dominance invalidation, which is exactly where
+  KI-50/KI-64 lived. Needs a targeted row and a fuzz pass, not a drive-by.
+- **Structural, each an ADR:** the gate's `has_inline_vec` admits on vector-op *presence*
+  (earlier loosenings were reverted — a hotness-weighted rule needs a design); one
+  runtime-wide epoch invalidates every IC/native arm and `JIT_ARM_KEEPALIVE` never shrinks
+  (count epoch bumps in a long session first); thrash/`hosts-receive` latches are permanent
+  and shared; tenure-on-pressure (not survivor age) is a documented policy, and GC tuning for
+  `bintree`/`nbody` has been tried and reverted.
+
 ## 2026-09-22 (later) — KI-184 fixed; the `(not …)` sweep is in; KI-183 is the only watch
 
 KI-184 (ADR-385's shim positions) is fixed in `attach_vm_trace` with `CompiledArm::module`

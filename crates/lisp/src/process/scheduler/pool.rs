@@ -123,7 +123,7 @@ fn stranded_probe(reporter: usize) {
             .is_ok()
     {
         let mut lines = String::new();
-        for (wid, (lock, _)) in WORKERS.iter().enumerate() {
+        for (wid, Padded((lock, _))) in WORKERS.iter().enumerate() {
             // The reporter holds its own queue lock (the caller checked it empty), so
             // `try_lock` on it would report a phantom `<locked>`.
             let pids: Vec<u64> = if wid == reporter {
@@ -174,7 +174,7 @@ pub(crate) fn enqueue(mut proc: Box<Process>) {
                                             // this newly-queued work in the same total order as their `LIVE_EXECUTORS` updates —
                                             // the guarantee that work is never stranded with no live executor (see `dirty_block`).
     STEALABLE.fetch_add(1, Ordering::SeqCst);
-    let (lock, cv) = &WORKERS[wid];
+    let (lock, cv) = &WORKERS[wid].0;
     crate::core::sync::lock(lock).push_back(proc);
     // Elide the wake syscall when we're enqueueing onto the very worker running THIS
     // thread (the direct-handoff case: a `send` readying a receiver, run next on our own
@@ -273,7 +273,7 @@ pub(crate) fn wake_a_parked_peer(wid: usize) {
         if WORKER_PARKED[peer].load(Ordering::Relaxed) {
             // One `futex_wake`. The peer re-checks its own queue, then tries a steal; if it
             // loses the race (the owner drained it first) it simply parks again.
-            WORKERS[peer].1.notify_one();
+            WORKERS[peer].0 .1.notify_one();
             return;
         }
     }
@@ -327,7 +327,7 @@ fn try_steal(thief_wid: usize, saw_young: &mut bool) -> Option<Box<Process>> {
         // `try_lock`: never block a would-be thief on a contended victim — skip it
         // and try the next. A momentarily-locked queue just isn't probed this pass;
         // the `STEAL_BACKOFF` timeout brings us back.
-        let mut q = match WORKERS[victim].0.try_lock() {
+        let mut q = match WORKERS[victim].0 .0.try_lock() {
             Ok(q) => q,
             Err(_) => continue,
         };
@@ -369,7 +369,7 @@ fn try_steal_any() -> Option<Box<Process>> {
     let start = NEXT_WORKER.fetch_add(1, Ordering::Relaxed) % n;
     for off in 0..n {
         let victim = (start + off) % n;
-        let mut q = match WORKERS[victim].0.try_lock() {
+        let mut q = match WORKERS[victim].0 .0.try_lock() {
             Ok(q) => q,
             Err(_) => continue,
         };
@@ -388,6 +388,9 @@ fn try_steal_any() -> Option<Box<Process>> {
 /// under the deterministic `TEST_NO_WORKERS` driver (it starts no threads and can't
 /// dirty-block). The drainer is counted live (`LIVE_EXECUTORS`) **before** the thread
 /// starts, so a racing second exhaustion check sees it and doesn't spawn a redundant one.
+/// Live overflow drainers at which [`spawn_overflow_drainer`] warns (once per process).
+const OVERFLOW_DRAINER_WARN: usize = 64;
+
 pub(crate) fn spawn_overflow_drainer() {
     // No OS threads under the deterministic test driver or on wasm (the cooperative pump
     // drives stranded work instead of an overflow thread — which would trap under wasm).
@@ -395,7 +398,24 @@ pub(crate) fn spawn_overflow_drainer() {
         return;
     }
     LIVE_EXECUTORS.fetch_add(1, Ordering::SeqCst);
-    OVERFLOW_DRAINERS.fetch_add(1, Ordering::SeqCst);
+    let drainers = OVERFLOW_DRAINERS.fetch_add(1, Ordering::SeqCst) + 1;
+    // Deliberately NOT capped: a drainer is only started when every executor is
+    // dirty-blocked with work stranded, so refusing one converts a resource cost into a
+    // deadlock. But each is an OS thread with a `WORKER_STACK_BYTES` stack, and a workload
+    // that keeps blocking them (native-nested `receive`s) grows the count without bound
+    // and without a word — so say so, once, when it is clearly not transient.
+    if drainers == OVERFLOW_DRAINER_WARN {
+        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !WARNED.swap(true, Ordering::Relaxed) {
+            eprintln!(
+                "brood: warning — {drainers} overflow scheduler threads are live: processes \
+                 keep blocking their OS worker (a `receive` reached under a native call that \
+                 cannot park cleanly). Each thread reserves {} MB of stack; \
+                 `BROOD_JIT_BAIL_TRACE=1` names arms latched as `hosts-receive`.",
+                WORKER_STACK_BYTES >> 20
+            );
+        }
+    }
     let ok = std::thread::Builder::new()
         .stack_size(WORKER_STACK_BYTES)
         .spawn(overflow_drain)
@@ -464,7 +484,7 @@ pub fn set_test_no_workers(on: bool) {
 pub fn test_drive_quanta(max: usize) -> usize {
     let mut ran = 0;
     for _ in 0..max {
-        let next = crate::core::sync::lock(&WORKERS[0].0).pop_front();
+        let next = crate::core::sync::lock(&WORKERS[0].0 .0).pop_front();
         match next {
             Some(p) => {
                 run_one(p);
@@ -492,7 +512,7 @@ pub(crate) fn pump_until_quiescent() {
             loop {
                 // Bind the pop to a `let` so the queue guard drops before `run_one` — the
                 // running process's receive/preempt re-enqueue re-locks this same queue.
-                let next = crate::core::sync::lock(&WORKERS[wid].0).pop_front();
+                let next = crate::core::sync::lock(&WORKERS[wid].0 .0).pop_front();
                 match next {
                     Some(p) => {
                         run_one(p);
@@ -622,7 +642,7 @@ fn worker_loop(wid: usize) {
         //    `if let Some(p) = lock(..).pop_front() { run_one(p) }` would hold the
         //    queue lock across the run — and the running process's preempt/receive
         //    re-enqueue (which re-locks this same queue) would deadlock the worker.
-        let own = crate::core::sync::lock(&WORKERS[wid].0).pop_front();
+        let own = crate::core::sync::lock(&WORKERS[wid].0 .0).pop_front();
         if let Some(p) = own {
             idle_backoff = STEAL_BACKOFF;
             run_one(p);
@@ -641,7 +661,7 @@ fn worker_loop(wid: usize) {
         //    NOT when a peer's queue grows — so park with a `STEAL_BACKOFF`
         //    backstop and re-attempt the steal on timeout. Re-check our own queue
         //    under the lock first to close the enqueue/park lost-wakeup window.
-        let (lock, cv) = &WORKERS[wid];
+        let (lock, cv) = &WORKERS[wid].0;
         let q = crate::core::sync::lock(lock);
         if saw_young {
             // Work exists but is inside its owner's first-refusal window. Come back when
@@ -718,14 +738,23 @@ fn run_one_timed(mut proc: Box<Process>) {
     // `enqueue`, whether its owner drained it or a thief stole it.
     STEALABLE.fetch_sub(1, Ordering::Relaxed);
     // Progress: something is running, so the pool is not stranded. Re-arm the detector.
-    STRANDED_SINCE.store(0, Ordering::Relaxed);
-    STRANDED_LATCH.store(false, Ordering::Relaxed);
+    // Load first: both are almost always already clear, and an unconditional store dirties
+    // a line every worker shares on every quantum.
+    if STRANDED_SINCE.load(Ordering::Relaxed) != 0 {
+        STRANDED_SINCE.store(0, Ordering::Relaxed);
+    }
+    if STRANDED_LATCH.load(Ordering::Relaxed) {
+        STRANDED_LATCH.store(false, Ordering::Relaxed);
+    }
     set_status(&mailbox, ST_RUNNING); // about to resume on this worker
 
     // Pure diagnostics (`peak_threads()`): no invariant needs a total order with other
-    // atomics, so `Relaxed` is enough on this per-quantum path.
+    // atomics, so `Relaxed` is enough on this per-quantum path. The peak is read before
+    // the RMW for the same reason as above — it only moves when a new maximum is reached.
     let live = RUNNING.fetch_add(1, Ordering::Relaxed) + 1;
-    PEAK_RUNNING.fetch_max(live, Ordering::Relaxed);
+    if live > PEAK_RUNNING.load(Ordering::Relaxed) {
+        PEAK_RUNNING.fetch_max(live, Ordering::Relaxed);
+    }
     // Mark this worker busy for `assign_worker`'s load metric while we're inside the run
     // (cleared in `finish_quantum`).
     WORKER_BUSY[wid].store(true, Ordering::Relaxed);

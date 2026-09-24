@@ -59,7 +59,8 @@ pub(super) const ST_WAITING: u8 = 2;
 /// optimization — an over-count merely runs a scan that finds nothing (correct, slower),
 /// and every genuine park increments it before the parked process can matter, so it never
 /// under-counts a process that needs inspecting.
-static PARKED: AtomicUsize = AtomicUsize::new(0);
+static PARKED: super::scheduler::Padded<AtomicUsize> =
+    super::scheduler::Padded(AtomicUsize::new(0));
 
 /// Currently-parked process count — see [`PARKED`]. O(1) relaxed load.
 pub(super) fn parked_count() -> usize {
@@ -674,12 +675,14 @@ const REGISTRY_SHARDS: usize = 64;
 /// check-and-modify pairing resolves as before. Whole-registry walks (`pids`, `len`) take
 /// one shard at a time and never hold two at once.
 pub(super) struct Registry {
-    shards: Vec<Mutex<HashMap<u64, Arc<Mailbox>>>>,
+    /// Padded: sequential pids map to adjacent shards, and unpadded a spawn burst's
+    /// registrations bounced one line between every worker.
+    shards: Vec<super::scheduler::Padded<Mutex<HashMap<u64, Arc<Mailbox>>>>>,
 }
 
 impl Registry {
     fn shard(&self, pid: u64) -> &Mutex<HashMap<u64, Arc<Mailbox>>> {
-        &self.shards[(pid as usize) & (REGISTRY_SHARDS - 1)]
+        &self.shards[(pid as usize) & (REGISTRY_SHARDS - 1)].0
     }
 
     pub(super) fn get(&self, pid: u64) -> Option<Arc<Mailbox>> {
@@ -731,7 +734,7 @@ impl Registry {
 
 pub(super) static REGISTRY: LazyLock<Registry> = LazyLock::new(|| Registry {
     shards: (0..REGISTRY_SHARDS)
-        .map(|_| Mutex::new(HashMap::new()))
+        .map(|_| super::scheduler::Padded(Mutex::new(HashMap::new())))
         .collect(),
 });
 
@@ -1398,8 +1401,7 @@ fn receive_match_timed(
                     // Rust-native shape (a builtin HOF's `vm_apply` driver, a `try`
                     // callback), which no latch can heal. Distinguishing that from a
                     // latchable native host by silence cost a debugging round.
-                    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-                    if *TRACE.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+                    if crate::diagnostics::debug_flags::jit_bail_trace() {
                         eprintln!(
                             "[jit-bail] dirty-receive-block gateway-token={}",
                             heap.cur_native_gateway
@@ -1432,6 +1434,19 @@ fn receive_match_timed(
                 {
                     heap.truncate_roots(rbase);
                     return Err(LispError::kill_signal());
+                }
+                // The mailbox bound (ADR-307), re-probed on every wake of this BLOCKING
+                // path: the entry probe above ran once, and a flood that arrives while the
+                // receive is blocked (inside a `try`, say) is otherwise noticed only if the
+                // matcher's nested VM run happens to reach a quantum rollover — which is how
+                // it was noticed, at every frame boundary, until those checks moved to the
+                // rollover. Raised like the entry probe: catchable, flag taken.
+                if let Some((len, limit)) = ctx.mailbox.take_overflow_hit() {
+                    if capture && deadline.is_some() {
+                        crate::core::sync::lock(&ctx.mailbox.state).recv_deadline = None;
+                    }
+                    heap.truncate_roots(rbase);
+                    return Err(crate::eval::proc_mailbox_limit_error(len, limit));
                 }
             }
             Err(e) => {

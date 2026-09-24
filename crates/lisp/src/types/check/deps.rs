@@ -26,6 +26,7 @@
 //! verified by the differential battery, not by trust.
 
 use crate::core::heap::Heap;
+use crate::core::registries as reg;
 use crate::core::value::{self, Symbol, Value};
 
 // The recorder itself lives on the **heap** (`Heap::check_dep_rec` +
@@ -217,7 +218,7 @@ fn exports_fact(heap: &Heap, prefix: &str) -> String {
 /// Structural hash of the `*protocols*` table (accumulated across files, so its
 /// def-site alone can't capture a later `extend`).
 fn protocols_fact(heap: &Heap) -> String {
-    match heap.env_get(heap.global(), value::intern("*protocols*")) {
+    match heap.env_get(heap.global(), value::intern(reg::PROTOCOLS)) {
         Some(v) => heap.hash_value(v).to_string(),
         None => "none".to_string(),
     }

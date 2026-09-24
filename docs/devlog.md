@@ -2,6 +2,81 @@
 
 Chronological record of work sessions. Newest at the bottom.
 
+## 2026-09-23 — a VM/perf review: KI-188..189 fixed, RUNTIME reads borrow instead of pin, the loop safepoint per quantum
+
+Four read-only reviewers (interpreter, JIT, heap/GC/scheduler, benchmark standing), then the
+fixes; the itemised picture, including what was deliberately left, is `handoff.md`'s entry.
+
+**Correctness.** KI-188 (a shared closure handle let the drain free a generation its receiver
+held), KI-189 (a leaf-spliced arm's deopt-feedback re-lowering re-ran effects: 100 464 puts for
+100 000), KI-190 (found checking a review item: a self-redefining loop with a non-tail VM
+call before its back-edge never saw the `def` — `SelfCall`'s epoch snapshot now lives in
+`BcFrame`), KI-191 (two JIT cross-core windows, argued, not reproduced). KI-192 predates the
+review: the tree-walker half of `test-both` went red twice with KI-185's stack, a flake under
+load that `BROOD_GC_STRESS=1` made deterministic on HEAD as well — a thin-wrapper elision
+whose inner head lazily loaded a module collected with the forwarded args unrooted. Each of the first
+three was red before its fix and its guard was sabotage-verified.
+
+**RUNTIME reads.** Every accessor of a `def`'d value cloned and dropped the cached
+`Arc<CodeSlabs>` — two atomics on a count every core shares, per trie level of a map read.
+`with_code_gen` had already shown the clone was unnecessary for copy-out reads (ADR-224); a
+`SlabRef` could not use that argument because the borrow escapes. The cache now RETIRES a
+replaced `Arc` instead of dropping it, until `release_retired_gens(&mut self)` at collection:
+a `SlabRef<'a>` borrows `&'a self`, no `&mut self` runs while it lives, so its target is
+alive — sound on its own terms, not only by the drain protocol (a KI-188-class bug still
+reads stale code, never freed memory). The first attempt held a `RefCell` borrow in the
+`SlabRef`; its `Drop` extended the `&self` borrow past last use and broke NLL call sites
+(`map_ops.rs`), which is why the retire-list shape.
+
+**The loop safepoint.** The mailbox bound, the hard-kill flag (a TLS `RefCell` borrow and
+an atomic each) and the soft limit (64 allocator shards summed when armed) ran at every frame
+boundary — twice per non-tail call — and at every inline self-tail iteration, in two copies
+that had drifted from the driver (neither made the drain report). They run at the reduction
+rollover now, in one `loop_safepoint`. That exposed a real dependency: a blocking `receive`
+inside `try` noticed a mailbox breach only because its matcher's nested VM run hit a
+safepoint; `process_limit_test` went red (3 of 15), and the blocking path re-probes the bound
+on every wake now.
+
+**Measured** (`make ab -b HEAD --floor`, best-of-7, pinned; stdimage live on both arms):
+`matmul` 139 → 113 ms (**−18.7%**, floor 0.7%), `pingpong` 179 → 168 ms (−6.1%); every other
+row of fib/pfib/collatz/persistent-map/json/bintree/nqueens/sort/ring/spawn/spawn-live/
+supervisor/startup within noise (`ring` +2.1% against a 0.3% floor, under the 5% bar, and
++0.1% at the VM ceiling). `make ab-vm`: `collatz` 2787 → 2638 ms (**−5.3%**, the self-tail IC
+hit no longer clones its arm handle), pfib/spawn-live/fib/json/nqueens/pingpong/ring noise.
+That A/B predated the safepoint change. **Re-measured on the final tree** (evening, same
+`--floor` discipline, package 54 °C): default ceiling, all eleven default rows noise; `matmul`
+139 → 109 ms (**−21.6%**, floor 0.7%), `pingpong` −4.5% (under the 5% bar); VM ceiling
+(`--tier 1`), `collatz` **−5.2% improved**, every other row noise or better; `ring` solo
+(best-of-15) 760 → 722 ms (**−5.0% improved**, floor 0.7%) — the morning's +2.1% did not hold.
+
+**Afternoon: the gates found two more, and one stays open.** Re-running the owed gates, the
+suite wrapper's TRY 1 timed out with the `[refer] (:use sse) imported NOTHING` wave. Chasing
+it: KI-193 — both multi-name globals-table swaps (`%isolate`'s restore, a module publish)
+bumped `version`/`code_epoch`, the keys of every process's global caches, after the write
+guard dropped, so a reader could pair the new table with a stale cached `*features*` — and
+KI-194, found by instrumenting `module_publish_test`'s observer: `load` opened its own frame
+inside `require-one`'s, so a module's definitions published before its `provide`. Both fixed
+with sabotage-verified guards; the observer went 6/40 → 0/40. Also KI-154 again: its fix had
+reached one helper, and twelve inline servers in `distribution.rs` still listened before
+registering. **The wave itself recurred** in the next full parallel run with both fixes in,
+at the same scopes, so it has another route — attribution against HEAD under load is the first
+item in `handoff.md`. KI-183 reproduced on demand once under CPU load. Nothing committed.
+
+**Evening: KI-183 fixed, the wave parked with a real diagnostic, and the kernel stops spelling
+registry names.** KI-183 was an ordering bug in the death path: a dying process fired its
+`[:down …]` before releasing the monitors it held, so a woken watcher could count them; the
+sweep runs first now, pinned by a probe inside `fire_down` (red 3/3 on the old order). The
+`imported NOTHING` wave stopped reproducing at ~14:50 (13 full parallel runs green, 3 of 3
+red before, nothing in the code between to explain it); a cheap detector had caught the state
+being created once, in `std_check_test`'s workers, and it is now `BROOD_FEATURES_AUDIT` — armed
+cheaply in a full run, it names the publish / restore / live write that leaves a module listed
+without bindings. Also, at the owner's request: `core/registries.rs` holds the names of the
+sixteen Brood globals the kernel reads (`reg::FEATURES` …), replacing 26 string literals, and
+the one POLICY the kernel had hard-coded — which registries a staged load still writes live —
+is now the prelude's `*live-registries*` set, read by name; its guard (a claim made inside an
+open frame must be visible to another process at once) went red with the set emptied, which
+no existing test did.
+
 ## 2026-09-22 — KI-184 fixed: a contract shim's own positions are never the reported one
 
 ADR-385 moved the shim templates into `std/contract.blsp`, a positioned module, so an error

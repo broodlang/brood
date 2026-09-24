@@ -177,7 +177,8 @@ you're measuring before quoting a ratio.)
 
 ## The one rule: measure at two sizes and keep only what scales
 
-Boot is **~47 ms** on this tree, and it is macro-expansion-heavy. Anything shorter than about a
+Boot is **~13 ms** warm on this tree (the `startup` row, 2026-09-22 — it read ~47 ms when this
+section was written, before the prelude image), and a COLD boot is macro-expansion-heavy. Anything shorter than about a
 second is *substantially a profile of boot* — and boot does not look like boot. It looks like a
 plausible, specific, wrong answer:
 

@@ -29,6 +29,21 @@
       (if (= n 5) (scr-swap) nil)
       (scr-loop (- n 1) (+ acc 1)))))
 
+;; The redefinition, then a non-tail VM call before the back-edge (KI-190). The frame
+;; re-enters `exec_chunk` after that call, and the guard's epoch was a snapshot taken on
+;; entry — so the `def` before the call was invisible and the loop ran the old body forever
+;; (here: until the counter says so). `(list …)` is a real VM call, not an inlined leaf.
+(def scr-count (table/new))
+(defn scr-swap2 () (def scr-self2 (fn (xs n) [:new xs])) nil)
+(defn scr-self2 (xs n)
+  (if (= n 0)
+    (do
+      (table/put scr-count 0 (+ 1 (table/get scr-count 0)))
+      (if (> (table/get scr-count 0) 3)
+        [:stuck xs]
+        (do (scr-swap2) (scr-self2 (list 1) 7))))
+    (scr-self2 (list 2) (- n 1))))
+
 ;; A loop that is never redefined — it must keep looping at full speed and stay correct.
 (defn scr-plain (n acc) (if (= n 0) acc (scr-plain (- n 1) (+ acc 1))))
 
@@ -47,6 +62,10 @@
     (assert= :replaced (scr-loop 8 0))
     ;; And a later call goes straight to the new definition.
     (assert= :replaced (scr-loop 3 0)))
+
+  (test "a redefinition before a non-tail call is still seen at the back-edge (KI-190)"
+    (table/put scr-count 0 0)
+    (assert= [:new (list 1)] (scr-self2 (list 0) 300)))
 
   (test "an untouched loop is unaffected and still tail-recurses deeply"
     (assert= 100000 (scr-plain 100000 0)))

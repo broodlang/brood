@@ -86,3 +86,47 @@
         (assert= 2 (reflect/eval (sym "late")))
         (assert= true (contains? *record-ids* (keyword (str name "/thing"))))
         (assert= 5 (reflect/eval (list (sym "thing-n") (list (sym "thing") 5))))))))
+
+;; KI-194: a module file `load`ed INSIDE an open load frame — the shape of every `require-one`,
+;; whose `%require-force` loads the file inside `%with-load-journal` — is part of that load.
+;; It used to open a frame of its own and publish the definitions to the live table when the
+;; file ended, while the `provide` made after it waited in the outer frame: the window the
+;; observer above catches one run in ten on a loaded tree. Here the window is held open
+;; deterministically — the probe runs inside the outer frame, after the file has loaded, and
+;; asks a fresh process (which has no frame, so it reads the live table) what it can see.
+(defn- live-bound? (sym)
+  (let (me (self))
+    (spawn (send me [:bound (bound? sym)]))
+    (receive ([:bound b] b) (after 5000 :timeout))))
+
+(describe "a module file loaded inside an open load (KI-194)"
+  (test "publishes with the enclosing load, not when the file ends"
+    (let (name (str "modpub-nested-" (os/now-ns))
+          path (path/join *dir* (str name ".blsp"))
+          early (symbol (str name "/early")))
+      (file/spit path (str "(defmodule " name ")\n(def early 1)\n"))
+      (assert= false
+        (%with-load-journal (fn () (do (reflect/load path) (live-bound? early)))))
+      ;; …and the enclosing publish delivers the module whole.
+      (assert= true (live-bound? early))
+      (assert= true (contains? *features* name)))))
+
+;; `*live-registries*` (std/prelude/tools.blsp) is the policy that keeps the load-coordination
+;; registries LIVE while a load's other writes are staged. Staged, a `*features-loading*`
+;; claim is invisible to every other process, so a second requirer starts the same load. The
+;; probe claims a key from inside an open frame and asks a frameless process what it sees.
+(defn- live-member? (registry key)
+  (let (me (self))
+    (spawn (send me [:member (%registry-member? registry key)]))
+    (receive ([:member b] b) (after 5000 :timeout))))
+
+(describe "the load-coordination registries stay live inside a load"
+  (test "a claim made inside an open load frame is visible to other processes at once"
+    (let (key (str "modpub-claim-" (os/now-ns)))
+      (assert= true
+        (%with-load-journal (fn ()
+                              (do
+                                (%registry-update! '*features-loading* :assoc [key] (self))
+                                (let (seen (live-member? '*features-loading* key))
+                                  (%registry-update! '*features-loading* :dissoc [key] nil)
+                                  seen))))))))

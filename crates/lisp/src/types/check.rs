@@ -152,6 +152,7 @@ use crate::core::value::{self as value, Arity, Symbol, Value};
 use crate::error::Pos;
 use crate::types::{Sig, Ty};
 
+use crate::core::registries as reg;
 use ctx::Ctx;
 use walk::{check_into, collect_all_syms, collect_def_names, list_items};
 
@@ -219,7 +220,7 @@ fn feature_loaded(heap: &mut Heap, name: &str) -> bool {
     // between reading `mid` and using it (this runs under the checker's GC block, so
     // nothing collects here, but the ordering keeps that independent of the block).
     let key = heap.alloc_string(name);
-    let features = heap.env_get(heap.global(), value::intern("*features*"));
+    let features = heap.env_get(heap.global(), value::intern(reg::FEATURES));
     match features {
         Some(Value::Map(mid)) => heap.map_get(mid, key).is_some(),
         _ => false,
@@ -379,7 +380,7 @@ pub fn materialise_referenced_modules(heap: &mut Heap) {
 
 /// The names in the `*features*` registry — every module loaded in this process.
 fn loaded_feature_modules(heap: &Heap) -> Vec<Symbol> {
-    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*features*")) else {
+    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern(reg::FEATURES)) else {
         return Vec::new();
     };
     heap.map_entries(mid)
@@ -1887,7 +1888,7 @@ fn check_forms(
     // relative entry like "compiler" names a different directory from each file, so
     // leaking it is order-dependent in a way `require`'s idempotent module load is not.
     // Safe to hold across the check — GC is blocked for its whole duration above.
-    let load_path_sym = crate::core::value::intern("*load-path*");
+    let load_path_sym = crate::core::value::intern(reg::LOAD_PATH);
     let saved_load_path = heap.env_get(heap.global(), load_path_sym);
     let prev_ns = heap.set_compile_ns(file_ns);
     // Region model (ADR-223): a file may declare more than one `(defmodule …)`. Install the

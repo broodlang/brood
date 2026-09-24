@@ -255,8 +255,7 @@ pub(crate) fn jit_tier_in_frame(
                     heap.invalidate_fast_links_for(sym);
                 }
                 {
-                    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-                    if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+                    if crate::diagnostics::debug_flags::jit_bail_trace() {
                         let name = arm
                             .dbg_name
                             .map(crate::core::value::symbol_name_ref)
@@ -298,8 +297,7 @@ pub(crate) fn jit_tier_in_frame(
                     // absent from every IR dump — which is exactly the state the tagged-tuple
                     // receive matcher was found in.
                     {
-                        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-                        if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+                        if crate::diagnostics::debug_flags::jit_bail_trace() {
                             let name = arm
                                 .dbg_name
                                 .map(crate::core::value::symbol_name_ref)
@@ -338,8 +336,7 @@ pub(crate) fn jit_tier_in_frame(
             // stays on the VM. Silent until now, which is why a `receive` matcher for a
             // tagged tuple could sit permanently on the interpreter with no diagnostic
             // pointing at the reason.
-            static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-            if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+            if crate::diagnostics::debug_flags::jit_bail_trace() {
                 let name = arm
                     .dbg_name
                     .map(crate::core::value::symbol_name_ref)
@@ -377,8 +374,7 @@ pub(crate) fn jit_tier_in_frame(
         // its gateway — `jit_latch_suspend_host` would latch it after the first dirty park.
         // Refuse it here, by name, instead (`arm_hosts_receive`'s doc has the shape).
         if crate::eval::compile::arm_hosts_receive(heap, arm, heap.read_root_env(env)) {
-            static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-            if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+            if crate::diagnostics::debug_flags::jit_bail_trace() {
                 let name = arm
                     .dbg_name
                     .map(crate::core::value::symbol_name_ref)
@@ -407,8 +403,7 @@ pub(crate) fn jit_tier_in_frame(
             record_float_globals(arm, heap, genv);
             record_self_global_ok(arm, heap, genv);
             if JIT_COMPILER
-                .primary
-                .try_send((arm.clone(), slot_tags, heap.runtime_tag()))
+                .enqueue((arm.clone(), slot_tags, heap.runtime_tag()))
                 .is_err()
             {
                 // The background compile queue is full (a burst of distinct hot arms — e.g.
@@ -431,18 +426,17 @@ pub(crate) fn jit_tier_in_frame(
     // and run the VM this activation. The next call re-tiers, re-validating operators and
     // recompiling at the new epoch, or bailing if one was genuinely redefined.
     if arm.compile_epoch.load(Acquire) != heap.global_epoch() {
-        arm.jit_code.store(std::ptr::null_mut(), Release);
-        arm.jit_calls.store(TIER_THRESHOLD, Release); // re-tier promptly (already proven hot)
-        arm.jit_deopts.store(0, Relaxed); // fresh deopt-feedback trial for the recompile
-        arm.shared_published.store(false, Relaxed); // recompiled code must re-publish
-        arm.inline_installed.store(false, Relaxed); // re-decide the inline swap at the new epoch
-        arm.inline_queued.store(false, Relaxed); // re-enqueue the inlined upgrade if still hot
-                                                 // Drop the stale inlined native too: its inlined operators were validated at the
-                                                 // OLD epoch, so it must not be re-swapped as-is. Nulling forces a clean re-fetch
-                                                 // from the shared inline cache (epoch-checked) or a recompile at the new epoch —
-                                                 // load-bearing now that the inlined native is shared across processes (a stale
-                                                 // pointer left here would otherwise get re-published to the shared cache).
-        arm.inline_code.store(std::ptr::null_mut(), Release);
+        deopt::reset_native_state(arm);
+        return None;
+    }
+    // `code` and `compile_epoch` were read separately, and a peer (this `CompiledArm` is
+    // shared across the runtime's processes, ADR-215) may have reset the arm and re-elected
+    // it between the two: it stores the NEW epoch before its CAS, so the check above passes
+    // against a pointer lowered for the old one — stale inlined operators after a reload.
+    // The peer's null store precedes its `compile_epoch` Release store, so if we saw that
+    // epoch this Acquire re-load sees the reset (or later); JIT code is never freed, so a
+    // pointer cannot come back as a different arm's.
+    if arm.jit_code.load(Acquire) != code {
         return None;
     }
     // ---- Two-stage tiering (devlog 2026-06-17): the deferred inlined upgrade ----
@@ -519,10 +513,7 @@ pub(crate) fn jit_tier_in_frame(
                         && ptr != crate::jit::QUEUED
                     {
                         {
-                            static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-                            if *ON
-                                .get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some())
-                            {
+                            if crate::diagnostics::debug_flags::jit_bail_trace() {
                                 let name = arm
                                     .dbg_name
                                     .map(crate::core::value::symbol_name_ref)
@@ -541,8 +532,7 @@ pub(crate) fn jit_tier_in_frame(
                 // Deferred (low-priority). On a full queue, un-set `inline_queued` so a
                 // later call re-attempts — but DON'T disturb the running small native.
                 if JIT_COMPILER
-                    .deferred
-                    .try_send((arm.clone(), slot_tags, heap.runtime_tag()))
+                    .defer((arm.clone(), slot_tags, heap.runtime_tag()))
                     .is_err()
                 {
                     arm.inline_queued.store(false, Relaxed);
@@ -566,8 +556,7 @@ pub(crate) fn jit_tier_in_frame(
                     heap.invalidate_fast_links_for(sym);
                 }
                 {
-                    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-                    if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+                    if crate::diagnostics::debug_flags::jit_bail_trace() {
                         let name = arm
                             .dbg_name
                             .map(crate::core::value::symbol_name_ref)
@@ -617,18 +606,11 @@ pub(crate) fn jit_tier_in_frame(
             // exactly the KI-48 family, and why the frame-building callers now go through
             // `jit_tier_in_frame` / `frame_size_for_code`.
             //
-            // ⚠ One place still writes a snapshot whose halves are read independently:
-            // `vm_call_ic_fast_link` (`core/heap/vm_cache.rs`) Acquire-loads `code`, then takes
-            // `arm.frame_size_for_new_entry()` — a second, separately-racing read of
-            // `inline_installed`. In the window where this swap lands between those two reads it
-            // records `(small code, inline_nslots)`, and the small native's outcome-4 staging
-            // then lands at `base + nslots` while the link reads it back at
-            // `base + inline_nslots`. The fix is the same one applied here — size from the
-            // pointer you loaded, `frame_size_for_code(arm, code)` — but that file is outside
-            // this change's ownership, so it is recorded rather than done.
+            // `vm_call_ic_fast_link` (`core/heap/vm_cache.rs`) records such a snapshot too, and
+            // sizes it from the pointer it loaded (`frame_size_for_code(arm, code)`) rather
+            // than from a second read of `inline_installed` — the same rule.
             {
-                static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-                if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+                if crate::diagnostics::debug_flags::jit_bail_trace() {
                     let name = arm
                         .dbg_name
                         .map(crate::core::value::symbol_name_ref)

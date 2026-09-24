@@ -96,6 +96,11 @@ pub const FLAGS: &[DebugFlag] = &[
         "=<name>: narrate every root write to that ONE global (define / staged swap / live swap, with pid + isolate scope) and its value at every globals restore — the tool for a registry that is full in one test file and empty in the next (KI-141)",
     ),
     f(
+        "BROOD_FEATURES_AUDIT",
+        ATTRIBUTION,
+        "report (with a backtrace) the write that leaves *features* listing a module whose bindings are gone — checked after every module publish, %isolate restore and live *features* write; the cause of `[refer] … imported NOTHING` (KI-193). Cheap enough to leave armed in a full suite run",
+    ),
+    f(
         "BROOD_REG_TRACE",
         ATTRIBUTION,
         "trace *record-ids* registry writes (with the writer's ancestry chain AND the isolate scope it was spawned under) and every globals restore — the KI-89 orphan-attribution tool; trace LEAN, heavy tracing suppresses the race",
@@ -666,6 +671,13 @@ pub const FLAGS: &[DebugFlag] = &[
 const NON_FLAGS: &[&str] = &["BROOD_GIT_SHA", "BROOD_STDLIB_HASH", "BROOD_EMBED_RUNTIME"];
 
 /// Print the catalogue, grouped, for `brood --debug-flags`.
+/// `BROOD_JIT_BAIL_TRACE` is set — read once. The one reader: the trace is asked at twenty
+/// sites across the tiering code, which each used to carry its own cached copy.
+pub fn jit_bail_trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some())
+}
+
 pub fn print_catalogue() {
     println!(
         "BROOD_* environment flags — all {} the runtime reads, triage groups first.",

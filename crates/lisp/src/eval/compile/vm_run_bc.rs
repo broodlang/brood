@@ -563,6 +563,8 @@ pub(crate) fn vm_run_bc(
     // by non-tail Brood calls (which exit exec_chunk — a local counter would reset).
     #[cfg(feature = "jit")]
     let mut cur_back_edges: u32;
+    // The current frame's `SelfCall` hot-reload epoch (see `exec_chunk`'s `entry_epoch`).
+    let mut cur_entry_epoch: u64;
     // Fresh start (vs. resuming a parked continuation) — the JIT tiering hook fires only
     // on a fresh arm activation, never mid-receive resume.
     let fresh = match resume {
@@ -582,6 +584,7 @@ pub(crate) fn vm_run_bc(
             cur_env_base = cur.env_base;
             cur_arm_slot = cur.arm_slot;
             heap.set_ic_bases(cur.ic_bases);
+            cur_entry_epoch = cur.entry_epoch;
             #[cfg(feature = "jit")]
             {
                 cur_back_edges = cur.back_edges;
@@ -615,6 +618,7 @@ pub(crate) fn vm_run_bc(
                 return Err(e);
             }
             cur_ip = 0usize;
+            cur_entry_epoch = heap.global_epoch();
             #[cfg(feature = "jit")]
             {
                 cur_back_edges = 0;
@@ -725,12 +729,6 @@ pub(crate) fn vm_run_bc(
         if heap.drain_active() {
             crate::process::report_drain_liveness(heap);
         }
-        if let Some(used) = crate::core::alloc::soft_limit_hit() {
-            unwind(heap);
-            let mut e = crate::eval::memory_limit_error(used);
-            attach_vm_trace(&mut e, &cur_arm, &frames);
-            return Err(e);
-        }
         // Per-process heap limit (`(process-flag :max-heap n)`): the sticky flag
         // the loop-top collection armed raises here — catchable, and it kills
         // just this process, with the trace showing where the data was live.
@@ -741,23 +739,34 @@ pub(crate) fn vm_run_bc(
             attach_vm_trace(&mut e, &cur_arm, &frames);
             return Err(e);
         }
-        // Mailbox bound (ADR-307), same protocol as the heap limit above.
-        if let Some((len, limit)) = crate::process::take_current_mailbox_overflow() {
-            unwind(heap);
-            let mut e = crate::eval::proc_mailbox_limit_error(len, limit);
-            attach_vm_trace(&mut e, &cur_arm, &frames);
-            return Err(e);
-        }
-        if capture {
-            // State-capture preemption/kill (ADR-100 §8.1), in place of the coroutine
-            // yield: the frame boundary is the safepoint. A pending hard `:kill` stops
-            // now (no capture — the process is retired and its heap dropped); a hit
-            // reduction budget captures the continuation so `run_one` re-enqueues it
-            // (on any worker — live migration). Both fire only at this clean loop top.
-            if crate::process::capture_hard_kill_pending() {
-                return Ok(VmOutcome::Killed);
+        // Once per quantum, at the reduction rollover: the soft memory limit, the mailbox
+        // bound (ADR-307) and a pending hard kill — see `loop_safepoint` in `exec_chunk`,
+        // which splits the inline loop's safepoint the same way. They used to run at every
+        // frame boundary, i.e. twice per non-tail call.
+        if crate::process::tick_capture() {
+            if let Err(mut e) = super::quantum_checks(heap) {
+                unwind(heap);
+                attach_vm_trace(&mut e, &cur_arm, &frames);
+                return Err(e);
             }
-            if crate::process::tick_capture() {
+            // A pending hard `:kill` stops now: capture mode retires the process (no
+            // capture — its heap is dropped); a nested run cannot return an outcome across
+            // its native frame, so it unwinds with the untrappable signal, which the
+            // top-level driver's `Err` arm converts to `VmOutcome::Killed` (the
+            // tree-walker's loop top has the same contract).
+            if crate::process::capture_hard_kill_pending() {
+                if capture {
+                    return Ok(VmOutcome::Killed);
+                }
+                unwind(heap);
+                return Err(crate::error::LispError::kill_signal());
+            }
+            if !capture {
+                crate::process::refill_nested_quantum();
+            } else {
+                // State-capture preemption (ADR-100 §8.1), in place of the coroutine
+                // yield: the frame boundary is the safepoint. The spent budget captures the
+                // continuation so `run_one` re-enqueues it (on any worker — live migration).
                 let cur = BcFrame {
                     arm: cur_arm,
                     ip: cur_ip,
@@ -766,6 +775,7 @@ pub(crate) fn vm_run_bc(
                     env_base: cur_env_base,
                     arm_slot: cur_arm_slot,
                     ic_bases: heap.ic_bases(),
+                    entry_epoch: cur_entry_epoch,
                     #[cfg(feature = "jit")]
                     back_edges: cur_back_edges,
                 };
@@ -778,13 +788,6 @@ pub(crate) fn vm_run_bc(
                     deadline: None,
                 }));
             }
-        } else if crate::process::tick_reporting_hard_kill() {
-            // Nested (non-capture) run: no `Killed` outcome can cross the native
-            // boundary, but a hard kill only needs to STOP — unwind with the
-            // untrappable kill signal; the top-level driver's `Err` arm below converts
-            // it to `VmOutcome::Killed`. Same contract as the tree-walker's loop top.
-            unwind(heap);
-            return Err(crate::error::LispError::kill_signal());
         }
         if crate::process::deadline_exceeded() {
             unwind(heap);
@@ -942,6 +945,7 @@ pub(crate) fn vm_run_bc(
                                     cur_base,
                                     cur_env,
                                     capture,
+                                    &mut cur_entry_epoch,
                                     &mut cur_back_edges,
                                 )
                             }
@@ -955,6 +959,7 @@ pub(crate) fn vm_run_bc(
                         cur_base,
                         cur_env,
                         capture,
+                        &mut cur_entry_epoch,
                         #[cfg(feature = "jit")]
                         &mut cur_back_edges,
                     )
@@ -962,7 +967,15 @@ pub(crate) fn vm_run_bc(
             }
             #[cfg(not(feature = "jit"))]
             {
-                exec_chunk(heap, &cur_arm, &mut cur_ip, cur_base, cur_env, capture)
+                exec_chunk(
+                    heap,
+                    &cur_arm,
+                    &mut cur_ip,
+                    cur_base,
+                    cur_env,
+                    capture,
+                    &mut cur_entry_epoch,
+                )
             }
         };
         match exit {
@@ -983,6 +996,7 @@ pub(crate) fn vm_run_bc(
                         cur_env_base = caller.env_base;
                         cur_arm_slot = caller.arm_slot;
                         heap.set_ic_bases(caller.ic_bases);
+                        cur_entry_epoch = caller.entry_epoch;
                         #[cfg(feature = "jit")]
                         {
                             // Restore the caller's back-edge counter so SelfCall
@@ -1019,6 +1033,7 @@ pub(crate) fn vm_run_bc(
                     env_base: cur_env_base,
                     arm_slot: cur_arm_slot,
                     ic_bases: heap.ic_bases(),
+                    entry_epoch: cur_entry_epoch,
                     #[cfg(feature = "jit")]
                     back_edges: cur_back_edges,
                 });
@@ -1041,6 +1056,7 @@ pub(crate) fn vm_run_bc(
                 // native `Done`/`Tail`/error is then handled by the shared arms above —
                 // identical to the old inline call-site tiering, minus the duplication.
                 cur_ip = 0;
+                cur_entry_epoch = heap.global_epoch();
                 #[cfg(feature = "jit")]
                 {
                     try_jit = true;
@@ -1079,6 +1095,7 @@ pub(crate) fn vm_run_bc(
                     env_base: cur_env_base,
                     arm_slot: cur_arm_slot,
                     ic_bases: heap.ic_bases(),
+                    entry_epoch: cur_entry_epoch,
                     back_edges: cur_back_edges,
                 });
                 heap.set_ic_bases(bases);
@@ -1112,6 +1129,9 @@ pub(crate) fn vm_run_bc(
                 }
                 try_jit = false;
                 cur_back_edges = 0;
+                // Resumed mid-arm: when the frame's guard last validated is unknown, so the
+                // first `SelfCall` re-checks the binding.
+                cur_entry_epoch = u64::MAX;
                 if outcome == Some(2) && capture {
                     // A native PREEMPT: yield NOW with this frame, as the frame path's
                     // `Some(2)` arm does — see its comment for why it must not wait for
@@ -1124,6 +1144,7 @@ pub(crate) fn vm_run_bc(
                         env_base: cur_env_base,
                         arm_slot: cur_arm_slot,
                         ic_bases: heap.ic_bases(),
+                        entry_epoch: cur_entry_epoch,
                         back_edges: cur_back_edges,
                     };
                     return Ok(VmOutcome::Preempted(Suspended {
@@ -1161,6 +1182,7 @@ pub(crate) fn vm_run_bc(
                 }
                 cur_arm = arm;
                 cur_ip = 0;
+                cur_entry_epoch = heap.global_epoch();
                 // The tail callee occupies a fresh frame at ip 0 — give it a tier check
                 // too (whether the tail call came from the VM or a JIT'd arm). This is what
                 // lets mutually-recursive arms reached only via tail calls run natively.
@@ -1198,6 +1220,7 @@ pub(crate) fn vm_run_bc(
                     env_base: cur_env_base,
                     arm_slot: cur_arm_slot,
                     ic_bases: heap.ic_bases(),
+                    entry_epoch: cur_entry_epoch,
                     #[cfg(feature = "jit")]
                     back_edges: cur_back_edges,
                 };
@@ -1226,6 +1249,7 @@ pub(crate) fn vm_run_bc(
                     env_base: cur_env_base,
                     arm_slot: cur_arm_slot,
                     ic_bases: heap.ic_bases(),
+                    entry_epoch: cur_entry_epoch,
                     #[cfg(feature = "jit")]
                     back_edges: cur_back_edges,
                 };

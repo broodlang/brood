@@ -60,7 +60,10 @@ pub fn protocol_ops(interp: &Interp, proto: &str) -> Vec<(String, usize)> {
     // Search both interface registries: `*abilities*` (defability ops — for `impl`
     // op-completion) and `*protocols*` (defbehaviour ops — for `:implements` hovers).
     // Ability and behaviour names are distinct, so scanning both is safe.
-    for reg in ["*abilities*", "*protocols*"] {
+    for reg in [
+        crate::core::registries::ABILITIES,
+        crate::core::registries::PROTOCOLS,
+    ] {
         let Some(Value::Map(id)) = heap.env_get(heap.global(), value::intern(reg)) else {
             continue;
         };

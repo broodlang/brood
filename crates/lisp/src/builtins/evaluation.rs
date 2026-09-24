@@ -11,6 +11,7 @@ use crate::syntax::reader;
 
 use super::numeric::{arg, expect_string};
 use super::realize_seqview;
+use crate::core::registries as reg;
 
 /// Every primitive this file contributes: name, arity, signature, arglist, docstring.
 pub(super) fn register(primitives: &mut super::Primitives) {
@@ -380,9 +381,18 @@ pub(super) fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     // concurrent restore replays it rather than discarding it. Only for a file that declares
     // a module: a plain script has no feature key, nothing to be half-published, and staging
     // its defs would change when another process can see them.
-    let module_load = forms
-        .first()
-        .is_some_and(|(f, _)| crate::eval::macros::defmodule_form_name(heap, *f).is_some());
+    //
+    // Only when no frame is open already (KI-194). Under `require-one` the file is loaded
+    // INSIDE `%with-load-journal`'s frame, and a second frame here published the module's
+    // definitions to the live table when the file ended — while the `provide` that
+    // `%require-force` makes after it landed in the outer frame and published later. Between
+    // the two, another process saw the module's names bound and the module not provided
+    // (`module_publish_test`'s observer, 1-6 runs in 40 on a loaded tree). A load inside an
+    // open frame IS that frame's load, so its writes join it and publish with the provide.
+    let module_load = !heap.in_journalled_load()
+        && forms
+            .first()
+            .is_some_and(|(f, _)| crate::eval::macros::defmodule_form_name(heap, *f).is_some());
     if module_load {
         heap.enter_journalled_load(true);
     }
@@ -766,7 +776,7 @@ pub(super) fn apply_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> Lisp
 /// entire dependency closure in `std/tool/test.blsp`'s header, before any isolate opens,
 /// pinned by `crates/cli/tests/test_framework_closure.rs`.
 fn wait_for_inflight_loads(heap: &Heap) {
-    let marker = crate::core::value::intern("*features-loading*");
+    let marker = crate::core::value::intern(reg::FEATURES_LOADING);
     // A claim whose owner has died is not in flight — it is the stale marker
     // `%require-await` clears on the next require — so it must not hold the swap for
     // the whole bound on every isolate after a crashed loader.
