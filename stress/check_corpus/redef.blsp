@@ -1,9 +1,11 @@
 ;; redefinable globals are dynamic(): a def changing a global's type must not
 ;; make earlier or later uses warn (the reload contract, ADR-123..126).
+;; The redefinitions are the POINT of this program, so they are declared deliberate
+;; (`:duplicate-def`) — what this corpus asserts is that the TYPE checker stays quiet.
 (def cfg 42)
 (defn show () (str cfg))
 (io/puts (show))
-(def cfg "now a string")
+(check-allow :duplicate-def (def cfg "now a string"))
 (io/puts (show))
-(def cfg {:a 1})
+(check-allow :duplicate-def (def cfg {:a 1}))
 (io/puts (get cfg :a))

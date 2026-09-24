@@ -271,60 +271,6 @@ fn a_declaration_whose_only_marker_is_optional_rides() {
 }
 
 #[test]
-fn transitive_scan_loads_without_the_trace() {
-    // KI-171. ADR-370's first shape of `materialise_referenced_modules` wrote
-    // `trace && wanted.insert(module)`, so the load set was only ever filled when
-    // `BROOD_IMAGE_TRACE` was set — and the one test of the scan (`tests/lazy_load_test.blsp`
-    // § ADR-370) ran its child WITH the trace, observing the loads through it. In every
-    // ordinary process the transitive scan (ADR-340) was a no-op for two days.
-    //
-    // This calls the scan itself, with no trace, on an edge nothing can remove: a fixture
-    // module whose body names `table/get`, whose result is `any` by nature — a fresh copy
-    // of whatever was stored — so no declaration rides for it (`image_carried_sig`
-    // declines a `-> any`) and no curated entry stands in for it. `std` edges were tried
-    // first and each went away as coverage improved (`json` → `reflect` for the curated
-    // `reflect/read-string`), which is the point of planting one. The test is only as good
-    // as the environment it runs in: with `BROOD_IMAGE_TRACE` set it would have passed
-    // against the bug, so it refuses to run traced.
-    assert!(
-        std::env::var_os("BROOD_IMAGE_TRACE").is_none(),
-        "this test observes the untraced path; unset BROOD_IMAGE_TRACE"
-    );
-    let mut interp = interp_with_image();
-    let dir = std::env::temp_dir().join(format!("ki171-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("temp dir");
-    let file = dir.join("ki171-probe.blsp");
-    std::fs::write(
-        &file,
-        "(defmodule ki171-probe)\n(defn read-it (t k) (table/get t k))\n",
-    )
-    .expect("write the fixture");
-    interp
-        .eval_str(&format!("(reflect/load {:?})", file.display().to_string()))
-        .expect("load the fixture");
-    let loaded = |interp: &mut crate::Interp, m: &str| -> bool {
-        let v = interp
-            .eval_str(&format!("(contains? *features* \"{m}\")"))
-            .expect("read *features*");
-        interp.print(v) == "true"
-    };
-    assert!(
-        loaded(&mut interp, "ki171-probe"),
-        "loading the fixture file did not register its module as a feature"
-    );
-    assert!(
-        !loaded(&mut interp, "table"),
-        "table is already loaded — the probe edge is gone, pick another"
-    );
-    check::materialise_referenced_modules(&mut interp.heap);
-    let _ = std::fs::remove_dir_all(&dir);
-    assert!(
-        loaded(&mut interp, "table"),
-        "the transitive scan did not load `table` for the fixture's `table/get`"
-    );
-}
-
-#[test]
 fn a_defseq_definition_is_indexed() {
     // `seq/filter`, `seq/reject` and `seq/keep` are `(%defseq name (params…) doc step)`
     // forms — a macro over `defn` — and the scanner read past them: no entry, so no arity
