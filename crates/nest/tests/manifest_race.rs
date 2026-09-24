@@ -175,7 +175,9 @@ fn a_concurrent_remove_does_not_resurrect_or_erase_an_add() {
     // Start with d1 present, then remove it while adding d2 and d3 alongside.
     assert!(nest(&host, &["add", "d1", ":path", "../d1"]));
 
-    concurrently(
+    // The commands' own output goes into every failure message: this lost an add once on a CI
+    // runner and never here, and a manifest alone cannot say WHICH command gave up, or why.
+    let outputs = concurrently(
         &host,
         &[
             vec!["remove".into(), "d1".into()],
@@ -183,8 +185,9 @@ fn a_concurrent_remove_does_not_resurrect_or_erase_an_add() {
             vec!["add".into(), "d3".into(), ":path".into(), "../d3".into()],
         ],
     );
+    let said = outputs.join("\n---\n");
 
-    let text = manifest(&host);
+    let text = format!("{}\n--- what the commands said:\n{said}", manifest(&host));
     assert!(!has_dep(&host, "d1"), "the removal was lost:\n{text}");
     assert!(
         has_dep(&host, "d2"),

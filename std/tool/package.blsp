@@ -1256,8 +1256,15 @@ sha256 pin still holds."
 (defn- package-lockfile-path (root) (path/join root "project.lock.blsp"))
 
 (defn write-lockfile (root entries)
-  "Write project.lock.blsp under `root` from resolved `entries`."
-  (file/spit (package-lockfile-path root) (package-lockfile-content entries)))
+  "Write project.lock.blsp under `root` from resolved `entries` — whole or not at all: a
+sibling temp file renamed over the lock, so a concurrent `nest add` resolving against it
+never reads it half-written. A plain spit truncates first, and a `read-lockfile` landing in
+that window failed to parse, which made the add roll its own manifest edit back — the
+suspected cause of `manifest_race` losing an add on a CI runner (2026-09-24)."
+  (let (path (package-lockfile-path root)
+        tmp (str path "." (os/now-ns) ".tmp"))
+    (file/spit tmp (package-lockfile-content entries))
+    (file/rename tmp path)))
 
 (defn read-lockfile (root)
   "The :dependencies vector from project.lock.blsp under `root`, or nil if absent."
