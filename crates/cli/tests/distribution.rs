@@ -400,8 +400,8 @@ fn lambda_ships_across_nodes_and_runs() {
     // Worker on A: receive `[:run f x reply]`, apply `(f x)`, send the result back.
     let server = format!(
         r#"
-(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (proc/register :worker (self))
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (defn serve ()
   (receive
     ([:run f x reply] (do (send reply [:result (f x)]) (serve)))
@@ -465,8 +465,8 @@ fn source_positions_survive_a_cross_node_send() {
 
     let server = format!(
         r#"
-(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (proc/register :probe (self))
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (defn serve ()
   (receive
     ([:run f reply] (do (send reply [:pos (f)]) (serve)))
@@ -556,10 +556,10 @@ fn a_shipped_closure_requires_its_modules_on_the_receiver() {
     // have passed while proving nothing.
     let server = format!(
         r#"
-(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (when (bound? 'encoding/hex-encode) (throw "node A already had encoding loaded — the test proves nothing"))
 (when (bound? 'json/encode) (throw "node A already had json loaded — the test proves nothing"))
 (proc/register :calc (self))
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (defn serve ()
   (receive
     ([:run f x reply] (do (send reply [:result (f x)]) (serve)))
@@ -689,11 +689,11 @@ fn cross_node_pid_monitor_fires_down() {
     // pass to `monitor` — monitors take a pid, not a name.
     let server = format!(
         r#"
-(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (defn worker (parent)
   (do (send parent [:my-pid (self)])
       (receive (:stop nil) (_ nil))))
 (proc/register :work-bootstrap (self))
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (receive
   ([:hello from] (spawn (worker from)))
   (after 10000 nil))
@@ -758,11 +758,11 @@ fn remote_monitor_fires_noconnection_on_node_down() {
     // the "node down" trigger.
     let server = format!(
         r#"
-(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (defn worker (parent)
   (do (send parent [:my-pid (self)])
       (receive (after 60000 nil))))
 (proc/register :work-bootstrap (self))
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (receive
   ([:hello from] (spawn (worker from)))
   (after 10000 nil))
@@ -862,11 +862,11 @@ fn a_delivered_remote_monitor_does_not_fire_again_on_node_down() {
     // until the harness kills it (the node-down trigger).
     let server = format!(
         r#"
-(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (defn worker (parent)
   (do (send parent [:my-pid (self)])
       (receive (:stop nil) (after 60000 nil))))
 (proc/register :work-bootstrap (self))
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (receive
   ([:hello from] (spawn (worker from)))
   (after 60000 nil))
@@ -971,8 +971,8 @@ fn ensure_link_reconnects_across_a_node_restart() {
     // same node" coming back up after a crash, from the link's point of view.
     let server_src = format!(
         r#"
-(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (proc/register :probe (self))
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (defn serve ()
   (receive
     ([:ping from] (do (send from [:pong (self)]) (serve)))
@@ -1170,7 +1170,9 @@ fn mismatched_cookie_is_rejected() {
 /// message to an unregistered name is silent by design, ADR-232) — the client then waits
 /// its full 30 s for a welcome that never comes. Seen once in a full-suite run
 /// (2026-09-17, `duplicate_connect_is_deduplicated`); registering first closes that
-/// window by construction, and every server here does the same.
+/// window by construction. Every inline server in this file does the same since 2026-09-23 —
+/// the KI-154 fix reached only this helper, and `dual_listen_serves_tcp_and_unix_at_once`
+/// then failed the same way (`no pong over tcp`).
 fn echo_server_src(port: u16) -> String {
     format!(
         r#"
@@ -1474,13 +1476,13 @@ fn remote_link_death_delivers_exit_to_a_trapping_peer() {
     // node up so the link `Frame::Exit` is delivered over a live connection.
     let server = format!(
         r#"
-(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (defn worker-loop ()
   (receive
     ([:whoami from] (do (send from [:iam (self)]) (worker-loop)))
     ([:die-now] (error "boom"))
     (_ (worker-loop))))
 (proc/register :worker (spawn (worker-loop)))
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (receive (:never :x))
 "#
     );
@@ -1530,12 +1532,12 @@ fn remote_exit_kills_a_worker() {
 
     let server = format!(
         r#"
-(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (defn worker-loop ()
   (receive
     ([:whoami from] (do (send from [:iam (self)]) (worker-loop)))
     (_ (worker-loop))))    ; parks; only an external exit can stop it
 (proc/register :worker (spawn (worker-loop)))
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (receive (:never :x))      ; main parks so the node outlives the worker's kill
 "#
     );
@@ -1587,7 +1589,6 @@ fn supervisor_restarts_a_remote_child() {
     // worker announces `[:up (self)]` to the observer it's given, then crashes on :die.
     let server = format!(
         r#"
-(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (defn worker-loop (obs)
   (do (send obs [:up (self)])
       (receive (:die (error "boom")) (_ (worker-loop obs)))))
@@ -1596,6 +1597,7 @@ fn supervisor_restarts_a_remote_child() {
     ([:make reply obs] (do (send reply [:made (spawn (worker-loop obs))]) (factory)))
     (_ (factory))))
 (proc/register :factory (spawn (factory)))
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (receive (:never :x))
 "#
     );
@@ -1737,9 +1739,9 @@ fn dual_listen_serves_tcp_and_unix_at_once() {
     // Explicit `:ed@127.0.0.1` so the TCP dial host matches the node's identity.
     let server = format!(
         r#"
+(proc/register :echo (self))
 (node/start :ed@127.0.0.1 "127.0.0.1:{port}")
 (node/also-listen)                       ; + the local Unix socket "ed"
-(proc/register :echo (self))
 (defn serve () (receive ([:hi from] (do (send from [:pong (self)]) (serve))) (_ (serve))))
 (serve)
 "#
@@ -1764,13 +1766,16 @@ fn dual_listen_serves_tcp_and_unix_at_once() {
     let b = spawn_brood_env(&home, "dclient.blsp", &client, &env);
     let out = b.wait_with_output().expect("client finished");
     let _ = a.kill();
-    let _ = a.wait();
+    // The server's stderr is where ADR-232's drop warning would name a `[:hi]` that arrived
+    // before `:echo` existed (KI-154's window, which this server had until 2026-09-23).
+    let server = a.wait_with_output().expect("server reaped");
     let _ = std::fs::remove_dir_all(&home);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         out.status.success() && stdout.contains("DUAL-LISTEN-OK"),
-        "one node should be reachable over both TCP and the local Unix socket.\n--- stdout ---\n{stdout}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr)
+        "one node should be reachable over both TCP and the local Unix socket.\n--- stdout ---\n{stdout}\n--- stderr ---\n{}\n--- server stderr ---\n{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&server.stderr)
     );
 }
 
@@ -1789,8 +1794,8 @@ fn monitor_node_fires_on_every_reconnect_cycle() {
 
     let server_src = format!(
         r#"
-(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (proc/register :probe (self))
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (defn serve ()
   (receive
     ([:ping from] (do (send from [:pong]) (serve)))
