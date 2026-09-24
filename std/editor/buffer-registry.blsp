@@ -1,96 +1,131 @@
-;; std/editor/buffer-registry.blsp — a named directory of buffer processes.
+;; std/editor/buffer-registry.blsp — a directory of buffer processes, keyed by identity.
 ;;
 ;; A buffer process (`spawn-buffer`, `editor/buffer`) is what lets several holders — a
 ;; second frame, a remote session, a mirror, a service — edit and watch ONE document. What
-;; is missing between them is the directory: "the buffer process called `*scratch*`", the
-;; one process for that name, spawned by whoever asks first and handed to everyone after,
-;; plus the two things a holder that joins late or watches needs — an enumeration ("what
-;; buffers exist?") and membership notifications ("one was created, one was killed, one
-;; died"). An editor keeps buffers global by name (Emacs: every frame lists the same
-;; buffers), so the directory is keyed by name. The registry is a process: sharing is
-;; serialised inside it, so two askers cannot both spawn.
+;; is missing between them is the directory: "the buffer process for this document", the
+;; one process, spawned by whoever asks first and handed to everyone after, plus the two
+;; things a holder that joins late or watches needs — an enumeration ("what buffers
+;; exist?") and membership notifications ("one was created, renamed, killed, died"). The
+;; registry is a process: sharing is serialised inside it, so two askers cannot both spawn.
+;;
+;; WHAT a document is matters more than it looks. It is keyed by `registry-key`: the FILE
+;; for a buffer that has one, the name only for a buffer that has none (`*scratch*`,
+;; `*Messages*` — global by name, as in Emacs). It used to be keyed by the display name,
+;; and a display name is neither unique nor stable: two `README.md`s in two projects are
+;; both called `README.md`, so the second one opened was handed the FIRST one's process
+;; and its edits were spliced into the other file. The name is the entry's metadata; a
+;; `C-x C-w` that moves a buffer to another file is `registry-rekey`.
 ;;
 ;;     (def reg (registry-start))
-;;     (registry-watch reg (self))                      ; [:registry-added …] / [:registry-removed …]
+;;     (registry-watch reg (self))          ; [:registry-added …] / -renamed / -removed
 ;;     (def bp (registry-share reg "notes.txt" text {:file "/p/notes.txt" :type :text}))
-;;     (registry-entries reg)                           ; [{:name :proc :meta}]
-;;     (registry-remove reg "notes.txt")                ; stops the process — a kill is global
+;;     (registry-entries reg)               ; [{:key :name :proc :meta}]
+;;     (registry-remove reg "/p/notes.txt") ; stops the process — a kill is global
 ;;
-;; A process that crashes is dropped and announced as `[:registry-removed name :died]`; a
-;; holder that still has the text re-shares it (a fresh process under the same name) and
+;; A process that crashes is dropped and announced as `[:registry-removed key :died]`; a
+;; holder that still has the text re-shares it (a fresh process under the same key) and
 ;; every other holder relinks on the `[:registry-added …]` that follows. The registry keeps
 ;; no mirror of its own — the holders are the copies.
 
 (defmodule editor/buffer-registry
-  "A named directory of buffer processes: `registry-share` answers the ONE process for a
-buffer name (spawning it from text + meta on the first ask), `registry-entries` lists
-them, `registry-remove` kills one everywhere, and a `registry-watch`er is told of every
-buffer created, killed or died. The seam under a second frame, a remote session or a
-mirror sharing one buffer set — every holder links its own copy to the same process."
+  "A directory of buffer processes keyed by document identity (`registry-key`: the file,
+else the name): `registry-share` answers the ONE process for a document (spawning it from
+text + meta on the first ask), `registry-entries` lists them, `registry-rekey` follows a
+buffer to a new file or name, `registry-remove` kills one everywhere, and a
+`registry-watch`er is told of every buffer created, renamed, killed or died. The seam under
+a second frame, a remote session or a mirror sharing one buffer set — every holder links
+its own copy to the same process."
   (:use editor/buffer)) ; spawn-buffer / make-buffer / stop-buffer — the processes it directs
+(defn registry-key (name meta)
+  "The identity a buffer is shared under: its file (`:file` in `meta`) when it has one,
+else its `name`. Two buffers with the same name and different files are two documents.
+
+    (editor/buffer-registry/registry-key \"README.md\" {:file \"/a/README.md\"})   → \"/a/README.md\"
+    (editor/buffer-registry/registry-key \"*scratch*\" {})   → \"*scratch*\""
+  (let (file (get meta :file)) (if (string? file) file name)))
+(sig registry-key (string map -> string))
+
 ;; ---- the loop ---------------------------------------------------------------
 
 (defn- registry-entry-by-proc (entries pid)
-  "The `[name entry]` whose `:proc` is `pid`, or nil."
+  "The `[key entry]` whose `:proc` is `pid`, or nil."
   (seq/find (%map-pairs entries) (fn (kv) (= (:proc (second kv)) pid))))
 
 (defn- registry-notify (watchers msg)
   "Send `msg` to every watcher."
   (doseq (w watchers) (send w msg)))
 
+(defn- registry-live (entries key)
+  "The entry for `key` while its process is alive, else nil. A holder can re-share a died
+buffer before the loop has folded the `[:down]` for it: an entry whose process is gone
+counts as absent, so the answer is never a dead pid."
+  (let (e (get entries key))
+    (if (and e (nil? (proc/info (:proc e)))) nil e)))
+
 (defn- registry-loop (entries watchers)
-  ;; entries: {name {:proc <pid> :meta <map> :mref <monitor ref>}}; watchers: a list of pids
+  ;; entries: {key {:name <string> :proc <pid> :meta <map> :mref <monitor ref>}};
+  ;; watchers: a list of pids
   (receive
-    ;; a holder can re-share a died buffer before this loop has folded the `[:down]`
-    ;; for it: an entry whose process is gone counts as absent, so the answer is never
-    ;; a dead pid
     ([:share name text meta from r]
-      (let (existing (get entries name)
-            existing (if (and existing (nil? (proc/info (:proc existing))))
-                       nil
-                       existing))
+      (let (key (registry-key name meta)
+            existing (registry-live entries key))
         (if existing
           (do
             (send from [:reply r (:proc existing)])
             (registry-loop entries watchers))
           (let (bp (spawn-buffer (make-buffer text name (:file meta)))
                 mref (monitor bp))
-            ;; notify BEFORE replying: the reply is the barrier a
-            ;; caller that is also a watcher relies on ("every
-            ;; notification is queued by the time the call returns")
-            ;; — the other order let a `drain` after the reply miss
-            ;; the notice by a hair under load
-            (registry-notify watchers [:registry-added name bp meta])
+            ;; notify BEFORE replying: the reply is the barrier a caller that is also a
+            ;; watcher relies on ("every notification is queued by the time the call
+            ;; returns") — the other order let a `drain` after the reply miss the notice
+            ;; by a hair under load
+            (registry-notify watchers [:registry-added key name bp meta])
             (send from [:reply r bp])
-            (registry-loop (assoc entries name {:proc bp :meta meta :mref mref})
+            (registry-loop (assoc entries key {:name name :proc bp :meta meta :mref mref})
               watchers)))))
+    ([:rekey old name meta from r]
+      (let (e (get entries old)
+            key (registry-key name meta))
+        (cond
+          (nil? e) (do (send from [:reply r nil]) (registry-loop entries watchers))
+          ;; another live document already has the new identity: refuse rather than let
+          ;; two processes claim one file
+          (and (not (= key old)) (registry-live entries key))
+            (do (send from [:reply r :taken]) (registry-loop entries watchers))
+          else
+            (do
+              (registry-notify watchers [:registry-renamed old key name meta])
+              (send from [:reply r key])
+              (registry-loop (assoc (dissoc entries old) key (assoc e :name name :meta meta))
+                watchers)))))
     ([:entries from r] (do
                          (send from
                            [:reply
                              r
                              (into []
                                (map (%map-pairs entries)
-                                 (fn ([name e]) {:name name :proc (:proc e) :meta (:meta e)})))])
+                                 (fn ([key e])
+                                   {:key key :name (:name e) :proc (:proc e) :meta (:meta e)})))])
                          (registry-loop entries watchers)))
-    ([:remove name from r] (let (e (get entries name))
-                             (if (nil? e)
-                               (do (send from [:reply r nil]) (registry-loop entries watchers))
-                               (do
-                                 (demonitor (:mref e))
-                                 (stop-buffer (:proc e))
-                                 (registry-notify watchers [:registry-removed name :killed])
-                                 (send from [:reply r (:proc e)])
-                                 (registry-loop (dissoc entries name) watchers)))))
+    ([:remove key from r] (let (e (get entries key))
+                            (if (nil? e)
+                              (do (send from [:reply r nil]) (registry-loop entries watchers))
+                              (do
+                                (demonitor (:mref e))
+                                (stop-buffer (:proc e))
+                                (registry-notify watchers [:registry-removed key :killed])
+                                (send from [:reply r (:proc e)])
+                                (registry-loop (dissoc entries key) watchers)))))
     ([:watch pid] (registry-loop entries (if (includes? watchers pid) watchers (cons pid watchers))))
     ([:unwatch pid] (registry-loop entries (seq/reject watchers (fn (w) (= w pid)))))
-    ;; one of the directed processes died: it is no longer the process for its name;
-    ;; the holders still have the text and one of them will share it again
+    ;; one of the directed processes died: it is no longer the process for its key; the
+    ;; holders still have the text and one of them will share it again
     ([:down _ pid _] (let (hit (registry-entry-by-proc entries pid))
                        (if (nil? hit)
                          (registry-loop entries watchers)
-                         (let ([name _] hit)
-                           (registry-notify watchers [:registry-removed name :died])
-                           (registry-loop (dissoc entries name) watchers)))))
+                         (let ([key _] hit)
+                           (registry-notify watchers [:registry-removed key :died])
+                           (registry-loop (dissoc entries key) watchers)))))
     ([:stop from r] (do
                       (doseq (kv (%map-pairs entries)) (stop-buffer (:proc (second kv))))
                       (send from [:reply r (count entries)])))
@@ -112,44 +147,57 @@ mirror sharing one buffer set — every holder links its own copy to the same pr
     (receive ([:reply ^r v] v) (after timeout :no-reply))))
 
 (defn registry-share (reg name text meta &optional (timeout 2000))
-  "The ONE buffer process for `name`: spawned from `text` and `meta` (`{:file :type :dir}`
-— what a holder needs to build its own copy; `:file` backs the process's buffer) on the
-first ask, the existing pid after. Serialised in the registry, so two askers at once get
-the same process. `:no-reply` when the registry does not answer within `timeout` ms.
+  "The ONE buffer process for the document `name`/`meta` names (`registry-key`): spawned
+from `text` and `meta` (`{:file :type :dir}` — what a holder needs to build its own copy;
+`:file` backs the process's buffer) on the first ask, the existing pid after. Serialised
+in the registry, so two askers at once get the same process. `:no-reply` when the registry
+does not answer within `timeout` ms.
 
     (let (r (editor/buffer-registry/registry-start)) (let (p (editor/buffer-registry/registry-share r \"notes\" \"hello\" {})) (editor/buffer-registry/registry-stop r) (pid? p)))   → true"
   (registry-call reg (fn (me r) [:share name text meta me r]) timeout))
 (sig registry-share (pid string string map &optional int -> any))
 
+(defn registry-rekey (reg old-key name meta &optional (timeout 2000))
+  "Move the entry under `old-key` to the identity `name`/`meta` now give it — the buffer was
+written to another file (`C-x C-w`) or renamed — keeping its process. Watchers are told
+`[:registry-renamed old-key new-key name meta]`. Answers the new key, nil when `old-key` is
+not registered, or `:taken` when another live document already has that identity.
+
+    (let (r (editor/buffer-registry/registry-start)) (let (_ (editor/buffer-registry/registry-share r \"a\" \"\" {:file \"/a\"}) k (editor/buffer-registry/registry-rekey r \"/a\" \"b\" {:file \"/b\"})) (editor/buffer-registry/registry-stop r) k))   → \"/b\""
+  (registry-call reg (fn (me r) [:rekey old-key name meta me r]) timeout))
+(sig registry-rekey (pid string string map &optional int -> any))
+
 (defn registry-entries (reg &optional (timeout 2000))
-  "Every registered buffer as `{:name :proc :meta}`, a vector; `:no-reply` when the
+  "Every registered buffer as `{:key :name :proc :meta}`, a vector; `:no-reply` when the
 registry does not answer.
 
     (let (r (editor/buffer-registry/registry-start)) (let (es (editor/buffer-registry/registry-entries r)) (editor/buffer-registry/registry-stop r) es))   → []"
   (registry-call reg (fn (me r) [:entries me r]) timeout))
 (sig registry-entries (pid &optional int -> any))
 
-(defn registry-remove (reg name &optional (timeout 2000))
-  "Kill buffer `name` everywhere: stop its process and drop the entry; watchers are told
-`[:registry-removed name :killed]`. The pid stopped, nil when there was none.
+(defn registry-remove (reg key &optional (timeout 2000))
+  "Kill the buffer registered under `key` (`registry-key`) everywhere: stop its process
+and drop the entry; watchers are told `[:registry-removed key :killed]`. The pid stopped,
+nil when there was none.
 
     (let (r (editor/buffer-registry/registry-start)) (let (v (editor/buffer-registry/registry-remove r \"nope\")) (editor/buffer-registry/registry-stop r) v))   → nil"
-  (registry-call reg (fn (me r) [:remove name me r]) timeout))
+  (registry-call reg (fn (me r) [:remove key me r]) timeout))
 (sig registry-remove (pid string &optional int -> any))
 
 (defn registry-watch (reg pid)
-  "Have `pid` sent `[:registry-added name proc meta]` for every buffer shared from now on
-and `[:registry-removed name reason]` for every one removed (`:killed`) or died (`:died`).
+  "Have `pid` sent `[:registry-added key name proc meta]` for every buffer shared from now
+on, `[:registry-renamed old-key new-key name meta]` for every rekey, and
+`[:registry-removed key reason]` for every one removed (`:killed`) or died (`:died`).
 Idempotent. Asynchronous.
 
-    (let (r (editor/buffer-registry/registry-start)) (editor/buffer-registry/registry-watch r (self)) (editor/buffer-registry/registry-share r \"a\" \"\" {}) (editor/buffer-registry/registry-stop r) (receive ([:registry-added n _ _] n) (after 1000 :none)))   → \"a\""
+    (let (r (editor/buffer-registry/registry-start)) (editor/buffer-registry/registry-watch r (self)) (editor/buffer-registry/registry-share r \"a\" \"\" {}) (editor/buffer-registry/registry-stop r) (receive ([:registry-added k _ _ _] k) (after 1000 :none)))   → \"a\""
   (send reg [:watch pid]))
 (sig registry-watch (pid pid -> nil))
 
 (defn registry-unwatch (reg pid)
   "Stop the notifications to `pid`. Asynchronous.
 
-    (let (r (editor/buffer-registry/registry-start)) (editor/buffer-registry/registry-watch r (self)) (editor/buffer-registry/registry-unwatch r (self)) (editor/buffer-registry/registry-share r \"a\" \"\" {}) (editor/buffer-registry/registry-stop r) (receive ([:registry-added n _ _] n) (after 0 :none)))   → :none"
+    (let (r (editor/buffer-registry/registry-start)) (editor/buffer-registry/registry-watch r (self)) (editor/buffer-registry/registry-unwatch r (self)) (editor/buffer-registry/registry-share r \"a\" \"\" {}) (editor/buffer-registry/registry-stop r) (receive ([:registry-added k _ _ _] k) (after 0 :none)))   → :none"
   (send reg [:unwatch pid]))
 (sig registry-unwatch (pid pid -> nil))
 

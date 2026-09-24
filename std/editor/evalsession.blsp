@@ -102,11 +102,45 @@ request.")
 ;;   :spawned-at  when this child was spawned (fast-death / boot-timeout clock)
 ;;   :root        the child's working directory
 ;;   :name        the session's registered name, stamped on every event
-;;   :sink        who the events go to, handed to the spec's `:emit` untouched
+;;   :sinks       every client that started or subscribed — who hears :ready and :down
+;;   :routes      {wire-id -> [client-id reply-to]} — where each request's answer goes
+;;   :next-id     the next WIRE id; the session numbers requests itself (see below)
 ;;   :strikes     consecutive child failures (reset by a ready banner)
+;;
+;; ---- whose answer is this ----------------------------------------------------------
+;; A session is shared: an editor with two frames, or a daemon serving two clients, has two
+;; loops asking one child. So a request names where its answer goes (`reply-to`), and a
+;; LIFECYCLE event — the child is up, the child died — goes to every client that subscribed,
+;; since each of them has state that depends on it. Before this a session had one sink, the
+;; process registered `:editor`: a second frame's playground sent its forms and waited for
+;; answers that went to the first frame, which dropped them as not its own.
+;;
+;; The ids on the wire are the session's own. Each client numbers its requests from its own
+;; counter, so two of them sharing a child would collide on the wire — the second id 1
+;; settling the first's watchdog, its answer going to whoever asked first. A request is
+;; given the next wire id and a route back to `[client-id reply-to]`; the reply is handed to
+;; that address carrying the id its client knows it by.
+
+(defn- session-sinks (state) (or (:sinks state) []))
 
 (defn- session-emit (state kind payload)
-  (spec-call (:spec state) :emit (list (:sink state) kind payload (:gen state) (:name state))))
+  "A LIFECYCLE event (`:ready`, `:down`) — or a reply nobody routed — to every client."
+  (doseq (sink (session-sinks state))
+    (spec-call (:spec state) :emit (list sink kind payload (:gen state) (:name state)))))
+
+(defn- session-reply (state reply)
+  "Hand `reply` (its `:id` the WIRE id the child answered) to the client that asked,
+under that client's own id. A reply with no route — a line for an id this session never
+issued, or a request sent without a reply address — goes to every client, which is where
+the knowledge of whose it is lives."
+  (let (route (get (or (:routes state) {}) (get reply :id)))
+    (if (nil? route)
+      (session-emit state :reply reply)
+      (let ([client-id reply-to] route)
+        (if (nil? reply-to)
+          (session-emit state :reply (assoc reply :id client-id))
+          (spec-call (:spec state)
+            :emit (list reply-to :reply (assoc reply :id client-id) (:gen state) (:name state))))))))
 
 (defn- session-deadline (spec inflight timeout-ms t)
   "The watchdog deadline for a request sent at time `t` while `inflight` (id → deadline)
@@ -173,12 +207,13 @@ concurrency its own docstring advertises."
       ;; request timeout would make streaming useless for the long jobs that want it.
       (and (int? (get reply :id)) (get reply :more))
         (do
-          (session-emit state :reply reply)
+          (session-reply state reply)
           (session-refresh-deadline state (get reply :id)))
       (int? (get reply :id))
         (do
-          (session-emit state :reply reply)
-          (update state :inflight dissoc (get reply :id)))
+          (session-reply state reply)
+          (update (update state :inflight dissoc (get reply :id))
+            :routes (fn (r) (dissoc (or r {}) (get reply :id)))))
       else state)))
 
 (defn- session-feed (state data)
@@ -195,8 +230,10 @@ waiting on one that is never coming, and a caller that thinks an answer is in fl
 does not re-send."
   (doseq (kv (:inflight state))
     (let ([id _] kv)
-      (session-emit state :reply (merge {:id id :ok false} why))))
-  (assoc state :inflight {}))
+      (session-reply state (merge {:id id :ok false} why))))
+  (assoc state
+    :inflight {}
+    :routes (fold (keys (:inflight state)) (or (:routes state) {}) dissoc)))
 
 (defn- session-close-child (state)
   (try
@@ -262,10 +299,12 @@ trips, so reaching it means the child could not stop what it was doing."
 (defn- session-step (state msg)
   "Fold one mailbox message into the worker state; `:session-stopped` ends the loop."
   (match msg
-    ([:request id timeout-ms payload] (if (:ready state)
-                                        (session-send-request state id timeout-ms payload)
-                                        (update state
-                                          :queue (fn (q) (cons [id timeout-ms payload] q)))))
+    ([:request id timeout-ms payload reply-to] (session-accept state id timeout-ms payload reply-to))
+    ([:request id timeout-ms payload] (session-accept state id timeout-ms payload nil))
+    ;; another client of the same session: it hears the lifecycle from now on
+    ([:subscribe sink] (if (includes? (session-sinks state) sink)
+                         state
+                         (assoc state :sinks (into [] (append (session-sinks state) [sink])))))
     ;; A client wants the child rooted somewhere else: respawn there (the old session
     ;; ends exactly as a reset ends it), and a no-op when it is already there.
     ([:reroot root] (if (= root (:root state))
@@ -299,6 +338,17 @@ trips, so reaching it means the child could not stop what it was doing."
                 (if (= st :session-stopped) st (merge st {:strikes 0 :attempt 0}))))
     ([:shutdown] (do (session-close-child state) :session-stopped))
     (_ state)))
+
+(defn- session-accept (state id timeout-ms payload reply-to)
+  "Take request `id` from a client whose answer goes to `reply-to`: give it the next WIRE
+id, remember the route back, and send it — or queue it until the child is up."
+  (let (wire (or (:next-id state) 1)
+        st (assoc state
+             :next-id (inc wire)
+             :routes (assoc (or (:routes state) {}) wire [id reply-to])))
+    (if (:ready st)
+      (session-send-request st wire timeout-ms payload)
+      (update st :queue (fn (q) (cons [wire timeout-ms payload] q))))))
 
 (defn- session-loop (state)
   (cond
@@ -334,7 +384,9 @@ other, and the session is the thing that knows."
                      :gen 1
                      :spawned-at (os/now)
                      :root root
-                     :sink sink
+                     :sinks (if (nil? sink) [] [sink])
+                     :routes {}
+                     :next-id 1
                      :attempt 0
                      :strikes 0}))))
 
@@ -352,6 +404,10 @@ child rooted in `root`. A session already running in a different root is re-root
 respawn there, ending the old session the way a reset does — and a nil `root` means any
 root will do, so a running session is left where it is.
 
+`sink` is who hears the session's LIFECYCLE — ready, down — and it is a subscription: a
+second caller naming its own sink (a second frame, a second daemon client) is added beside
+the first, so each of them learns the child restarted.
+
 The child starts spawning immediately, so call this as early as the feature knows it
 will want one: a runtime's startup then happens while the reader is still reading.
 
@@ -360,13 +416,18 @@ pid, its child already spawning. (Prose rather than an indented example, since r
 would leave a child process behind; [[session-running?]] is the half that can be asserted.)"
   (let (running (proc/whereis name))
     (if running
-      (do (when root (send running [:reroot root])) running)
+      (do
+        (when sink (send running [:subscribe sink]))
+        (when root (send running [:reroot root]))
+        running)
       (spawn name (session-worker name spec root sink)))))
 
-(defn session-request (name id timeout-ms payload)
+(defn session-request (name id timeout-ms payload &optional (reply-to nil))
   "Fire-and-forget: put request `id` on session `name`'s wire, `payload` being whatever
-its backend's `:encode` understands. The reply reaches the session's sink as a `:reply`
-event carrying that `:id`. Queued, not lost, while the child is still booting.
+its backend's `:encode` understands. The reply reaches `reply-to` as a `:reply` event
+carrying that `:id` — or every subscribed sink, without one. `id` is the CALLER's: the
+session numbers the wire itself, so two clients counting from 1 never collide. Queued, not
+lost, while the child is still booting.
 
 Answers whether the request was ACCEPTED. False means the session is not running — it
 gave up, or never started — and **no reply for this id will ever arrive**, which the
@@ -375,7 +436,7 @@ re-sent, so a promise recorded against a session that is gone waits forever.
 
     (editor/evalsession/session-request :no-such-session 1 2000 nil)   → false"
   (let (p (proc/whereis name))
-    (if (nil? p) false (do (send p [:request id timeout-ms payload]) true))))
+    (if (nil? p) false (do (send p [:request id timeout-ms payload reply-to]) true))))
 
 (defn session-reset (name)
   "Restart session `name`: respawn its child, fresh image and empty session, answering

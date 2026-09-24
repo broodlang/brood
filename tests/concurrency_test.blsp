@@ -293,7 +293,35 @@
         (send w :die)
         (receive ([:down ^mw _ _] nil)))
       (assert= (get (%process-info t) :monitored-by) 0)
-      (send t :go))))
+      (send t :go)))
+  ;; KI-183: the test above is one shot at a race — the dying watcher's `[:down …]`
+  ;; used to fire BEFORE its own monitors were swept, so a reader woken by the down
+  ;; could still count them (1–5 in 8000 rounds on a loaded box). Four processes run
+  ;; the same round 2000 times each; with the sweep moved after the fan-out this reads
+  ;; a nonzero count every run.
+  (test "a watcher's death is observable only after its monitors are released (looped)"
+    (defn ki183-round ()
+      (let (t (spawn (receive (:go nil)))
+            me (self)
+            w (spawn (do (monitor t) (monitor t) (send me :armed) (receive (:die nil)))))
+        (receive (:armed nil))
+        (let (mw (monitor w))
+          (send w :die)
+          (receive ([:down ^mw _ _] nil)))
+        (let (n (get (%process-info t) :monitored-by))
+          (send t :go)
+          n)))
+    (defn ki183-rounds (i stale)
+      (if (= i 0) stale (ki183-rounds (- i 1) (if (= (ki183-round) 0) stale (+ stale 1)))))
+    (defn ki183-worker (parent) (send parent [:ki183 (ki183-rounds 2000 0)]))
+    (defn ki183-collect (k acc)
+      (if (= k 0) acc (ki183-collect (- k 1) (+ acc (receive ([:ki183 n] n))))))
+    (let (me (self))
+      (spawn (ki183-worker me))
+      (spawn (ki183-worker me))
+      (spawn (ki183-worker me))
+      (spawn (ki183-worker me))
+      (assert= (ki183-collect 4 0) 0))))
 
 ;; ---- sending closures: mobile code (the spawn-to-node foundation, ADR-033) --
 ;; A closure can be sent like any other value: it travels as data (its body is

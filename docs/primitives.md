@@ -264,6 +264,11 @@ literal — no constructor call.
 |  | `string/int->char` | 1 | A 1-char string for Unicode codepoint n. Errors on an invalid codepoint. |
 |  | `string->utf8-bytes` | 1 | The UTF-8 encoding of s as a bytes value. |
 |  | `utf8-bytes->string` | 1 | Decode UTF-8 bytes (a bytes value, vector, or list of ints 0–255) into a string. Errors on invalid UTF-8. |
+| **Regex** (the matching engine, ADR-389; `%`-internal — `std/regex.blsp` owns the pattern language and translates into these) | `%regex-match?` | 2 | Whether a pattern in the engine's syntax matches anywhere in s. |
+|  | `%regex-find` | 3 | The leftmost-first match at or after char index `from`: `{:start :end :text :groups [...]}` in CHAR offsets, or nil. |
+|  | `%regex-find-all` | 2 | Every non-overlapping match, as a vector of those maps; an empty match steps one character on. |
+|  | `%regex-tokens` | 3 | Lex s with a vector of patterns and their tags: at the earliest position any rule has a non-empty match, the first such rule takes its LONGEST match. A vector of `{:start :end :text :tag}`. |
+|  | `%regex-paint` | 5 | `[start end]` of the text a pattern matches between a prefix at the line's start and a suffix after it (longest first, shortest when lazy), or nil — a line rule's painted group. |
 | **Networking** (thin non-blocking socket mechanism, ADR-062; `std/net/*` is the Brood library) | `tcp-listen` | 2 | Bind a listening socket on host:port (port 0 = OS-assigned); connections arrive as [:tcp-accept lsock client] messages to the calling process. Returns a socket. |
 |  | `tcp-connect` | 2 | Connect to host:port; inbound data is delivered to the calling process as [:tcp sock data] / [:tcp-closed sock] messages. Returns a socket. Throws on failure. |
 |  | `tcp-send` | 2 | Write data to sock (blocking). data is any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139). A string leaf is always sent as its UTF-8 bytes, whatever the socket's mode (ADR-141); |

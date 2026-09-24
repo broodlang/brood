@@ -169,9 +169,11 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-180 | **`gui`'s texture and sound registries were created on FIRST USE by `(when (nil? *textures*) (def …))` — a check-then-define race across processes** — two processes allocating their first handle at once each saw nil and each `def`'d a table; the second `def` orphaned the first's handles, so `texture-size` answered nil, or another test's size when the two counters collided. Red in `ui_test` in the FULL suite only (passed 3× alone), 2026-09-21 | ✅ **FIXED 2026-09-21** — both registries are created at load (a table global images by value); guard `gui_test` "forty processes each allocate…", red 2 of 3 with the lazy init restored |
 | KI-181 | **an error raised in positionless code — a contract shim's (ADR-381), the prelude's — escaped untagged and was reported at the CATCH site**, two frames from the failing form; unarmed, the thin-wrapper elision had hidden it (the prim ran inline in the caller's frame, tagged there). Surfaced as the armed suite's `vm_prim_error_pos_test` red; also the `lazy_load_test` ADR-366 case, whose inlined primitive a shim makes impossible by design | ✅ **FIXED 2026-09-21** — `attach_vm_trace` gives an untagged error the innermost call site that HAS a position (a tail call reuses the caller's frame, so there it is the caller's caller — the BEAM's answer); the two tests exercise their actual subjects (the raw primitive; an unarmed child). Guard: the shim case in `vm_prim_error_pos_test`, sabotage-verified |
 | KI-182 | **the `startup` row +6% at the 422c92a5 benchmark refresh (16 → 17 ms, `ab-bench --floor` 0.0% floor; 74.4M → 81.3M instructions on `(io/puts 0)`) — the largest piece is the JIT compiling at BOOT: `contract_apply` offers every declared `def` to the Brood hook `%contract-wrap` whether or not contracts are armed, the hook's `(not (or (%contracts-armed?) …))` runs once per declared name as `io`'s sections materialise, `not` crosses the tier threshold and every `brood file` run instantiates Cranelift to compile it** — `BROOD_JIT_DUMP_IR=1` shows one arm (`not`) on 422c92a5, none on 136b14d7, none on an empty file; `BROOD_NO_JIT=1` gives 1.55M back. The remaining ~4.8M is diffuse and expected: the prelude image carries def sites (ADR-382; 802 → 1328 entries, +0.6M in `FormPos` inserts), and the prelude grew by `contracts.blsp` and ADR-377/379 (+0.3M freeze, +0.4M image load, +0.3M interning) | ✅ **FIXED 2026-09-22** — the JIT-at-boot mechanism first (below), then the residual closed by the same day's replay + `nth` change and the ADR-383 op-function check: interleaved pinned task-clock on `(io/puts 0)` against 136b14d7 **13.06 vs 13.05 ms** (three rounds, identical), 76.3M vs 78.4M instructions (+2.7%, under the wall), the benchmark column at 653d41d9 reads `startup` 13.1 ms against the 136b14d7 column's 12.9 — measured before ADR-385, which then took lever 1 (the shim machinery is a module loaded on first armed use) on top. Was, after the first fix alone: the row was not back — interleaved pinned task-clock 12.85 → 13.68 ms against 136b14d7, 75.0M → 80.9M instructions, diffuse — `localize_for_freeze` +0.7M, `env_get` +0.7M, alloc +0.7M, `FormPos`/`SourceLoc` inserts +0.7M, `list_with_tail` +0.5M, `decode_msg`/`from_message` +0.6M; +2.8M on an empty file (ADR-381's 287-line `contracts.blsp` localized and frozen at every boot, ADR-382's 526 def-site entries) and +3.2M inside `io`'s load. Two levers, neither taken: move the shim machinery out of the prelude into a module the hook loads on first ARMED use (only `sig!`, `%contracts-armed?` and the hook itself need to be prelude), and decode def sites lazily. TWO callers, the same shape: (1) `contract_apply` returns before `apply_engine` when `!contracts_armed()` and the name is not `sig!`-forced (`Heap::is_contract_forced`, the kernel set ADR-383 introduced; the hook's own first test, hoisted into the mechanism — the `provide` sweep already gated on `(%contracts-armed?)`, the per-`def` offer did not); (2) `impl` wrapped every op body under a declared `:->` return in `%contract-check-op-result`, a Brood function whose first test was `(not (%contracts-armed?))` — a call plus a `not` per ability-op RESULT, armed or not, and `io` declares no sigs at all, so this was the startup row's caller once (1) was in and the arm still lowered; the emission now asks the cached-bool primitive inline and enters the checker only armed. Guard `crates/cli/tests/contract_offer_unarmed.rs`: the hook and the op checker are rebound under `%load-module-source`'s reserved-name exemption to record what reaches them — unarmed only the `sig!` name reaches the hook (and still enforces) and no op result reaches the checker; armed all three names and the op do; each half sabotage-verified (`if false &&` on the early return reads `offered f=true above=true`; the old emission reads `op-checked=true` unarmed). Re-measured below. The def-site half (ADR-382) stays as a note, not a bug. Was published as measured in brood-benchmarks at 422c92a5 |
-| KI-183 | **`concurrency_test` "a watcher's death releases the monitors it held" read `:monitored-by` 2 where 0 was expected, once, in CI's suite wrapper at `653d41d9` (tree-walker job, `brood_suite_passes` TRY 1)** — the day after KI-176 gave the monitor table its watcher-side index (`by_watcher`), which is exactly the path a watcher's death now takes to release its monitors | ✅ **FIXED 2026-09-23** — the death path fired the dying process's `[:down …]` BEFORE releasing the monitors it held (`retire_pid_tail`: `take_target` + `fire_down`, then `sweep_dead_watcher`), so a watcher woken by the down could read the target's `:monitored-by` still counting them. Reproduced on demand once, under CPU load. The sweep now runs first. Guard: `process::scheduler::lifecycle::down_order_tests` — a probe inside `fire_down` records whether the dying pid still holds watcher entries when its down fires; deterministic, red 3/3 with the old order. (A 300-iteration `.blsp` loop was tried first and PASSED against the old order under two full-suite runs — discarded as coverage that cannot fail.) |
+| KI-183 | **`concurrency_test` "a watcher's death releases the monitors it held" read `:monitored-by` 2 where 0 was expected, once, in CI's suite wrapper at `653d41d9` (tree-walker job, `brood_suite_passes` TRY 1)** — the day after KI-176 gave the monitor table its watcher-side index (`by_watcher`), which is exactly the path a watcher's death now takes to release its monitors | ✅ **FIXED 2026-09-23** — the first reading was right: `retire_pid_tail` fired the dying process's downs BEFORE `sweep_dead_watcher`, so a reader woken by the down could still count the dead watcher's monitors. It reproduces on demand (1–5 stale reads in 8000 looped rounds). The sweep now runs first. The guard is a looped test in `concurrency_test`, red 3/3 with the old order |
 | KI-184 | **`vm_prim_error_pos_test` "an error escaping a contract shim reports the innermost positioned call site" is red on `main` since ADR-385: the error now reports `std/contract.blsp:135` — the body of `%contract-shim-2` — instead of the user's call at line 33** — KI-181's rule gives an untagged error the innermost call site that HAS a position, and the shim templates moved from the prelude (positionless) into a CORE module the reader positions, so the innermost positioned site is now the shim's own `(%contract-check-ret … (%contract-orig a b))` | ✅ **FIXED 2026-09-22** — option (b), made exact: `CompiledArm` carries the closure's authoring MODULE (ADR-383's `Closure::module`, already flowing into `compile_arm`), and `attach_vm_trace` treats a position the `contract` module's own code owns as untagged — the running arm is a shim and the position is one of its instructions', or a pending shim frame's call site equals it — then takes the innermost positioned call outside any shim frame. Keyed on the module, not the file or the name: `contract_bind` carries the ORIGINAL's `fn_name` and the arm's `src_file` came out as the caller's file, so neither marks a shim; and not on the frame's env, which cannot be read there — the driver has unwound its roots (the first cut killed the test process). Guard: the existing `vm_prim_error_pos_test` case reads 33 armed and unarmed, 135 with the rule disabled. Was: attributed on a clean worktree at `cf8c2821` without any other change (3 tests, 1 failed, `actual 33 expect 135`; both suites read the same on the day's other tree). Not a sweep or contracts-kernel regression: the shim's code moved, its positions came with it. Options, the owner's call: (a) build the shim closures without positions (they are generated code — a user reading `contract.blsp:135` learns nothing), e.g. strip form positions in `%contract-shim-*` or load that module with positions off; (b) `attach_vm_trace` prefers the innermost positioned site OUTSIDE the frame that raised when that frame is a contract shim (`shim_original` already recognises one); (c) accept and re-pin the test at 135. (a) keeps KI-181's rule and the user-facing answer |
 | KI-185 | **a module LOAD inside the contract policy hook tripped the use-after-GC wire** — ADR-385 moved the shim machinery into `std/contract.blsp` and had `%contract-wrap` `require-one` it at its first armed call. The hook runs wherever a BINDING comes to exist — inside a `def`, inside a module's `provide` sweep, inside whatever evaluation reached them — and a module load is arbitrary evaluation, hence a collection, at a point those callers are not GC-safe across. `BROOD_VM=0` + `nest test` with contracts armed (CI's `differential (tree-walker)` job) panicked on the per-deref tripwire: `use-after-GC: bytes handle (nursery slot 5) is from epoch 6, but that generation is now epoch 7`, in `bytes_to_list ← call_native ← eval_tail_loop` | ✅ **FIXED 2026-09-22** — the module is loaded once at runtime boot when `contracts_armed()` (`Interp::new`), where every boot already collects; the hook's `require-one` is now behind `(unless (bound? 'contract/shim) …)`, a no-op in every armed process and a last resort for the one path that arms after boot (a `sig!` in an otherwise unarmed run). ADR-385's win is untouched — an unarmed run still never loads the module (`BROOD_IMAGE_TRACE` reads 0 lines) and the empty-file count is unchanged at 78.9M. Bisected by restoring the pre-ADR-385 prelude: the case passes there and fails with the lazy load, which is what named the cause |
+| KI-186 | **`nest check <file>` replayed a stale verdict for a listed file outside the source and test trees** — the ADR-382 whole-project verdict key fingerprinted `all-files` (the source and test trees) and only NAMED the listed paths, so an edit to `bin/tool.blsp` left the key unchanged and the previous run's lines were printed as this run's: an unbound call added there checked clean, exit 0 | ✅ **FIXED 2026-09-23** — `project-verdict-key` fingerprints the listed files beside `all-files`. Guard `nest::check_incremental` "an edit to a listed file outside the source paths is not replayed" (exit code + warning, not the key), red with the listed files left out of the fingerprint |
+| KI-187 | **what `nest check` inferred from `vt` depended on which files it had checked before — a loaded module's bare type names were resolved from the CHECKED file** — `vt` and `editor/section` (4c2807f3) each declare a `row`; `vt`'s `terminal` (`:grid (vector row)`) and `(sig line (row any -> …))` were read in the checked file's namespace, where two loaded `row`s leave the unique-suffix rule ambiguous. Once a file referencing `editor/section` had been checked, `terminal` widened to `any` (`(vt/lines 7)` went unreported) and `row` to `vector`. CI's `check_order_differential` red since 4c2807f3 | ✅ **FIXED 2026-09-23** — a bare name inside an alias body resolves in the ALIAS's module first, and a loaded module's heap-declared `sig` is parsed in the declaring module's scope (`annot::in_declaring_scope`, wrapped around the four parse sites in `sigs.rs`). Guard `cli::deftype_through_imports` "a loaded module's alias means what it meant where it was declared" (`brood --check` on a file using both modules), red with the declaring-scope lookup disabled |
 | KI-188 | **a closure shared by handle into a process that had acked a RUNTIME drain clean let the collector free the generation under it** — `gen_drained` frees when every live pid's `drain_acks` entry reads clean; the L1 `copy_cross_heap` arm withdrew nothing, and the wire path's `rearm_drain_ack` reset only the local `Cell`, leaving the table entry that the free reads | ✅ **FIXED 2026-09-23** — `rearm_drain_ack` withdraws the table entry (and the `drain_acked` count) as well as the cache, and the L1 arm calls it; the heap remembers the pid it acked under. Guard: `process::message::drain_ack_tests` (both paths), red before the fix |
 | KI-189 | **a deopt-feedback re-lowering of a leaf-spliced arm re-ran effects: `(eo-phases8)` put 100 464 times for 100 000 iterations** — `reset_arm_untried` cleared `jit_code` but not `inline_installed`/`inline_queued`/`inline_code`, so the recompiled small native ran in a leaf-sized frame and its deopt found no journal in the leaf slot | ✅ **FIXED 2026-09-23** — one `reset_native_state` shared with the epoch reset. Guard: `jit_effect_once_test` case 8, sabotage-verified |
 | KI-190 | **a loop that redefined itself and then made a non-tail VM call before its back-edge kept running the old body forever** — `exec_chunk` re-read its `SelfCall` epoch snapshot on every re-entry, and the frame re-enters after each non-tail call, so the `def` was already in the snapshot | ✅ **FIXED 2026-09-23** — the epoch lives in `BcFrame` (`entry_epoch`). Guard: `vm_selfcall_reload_test` "a redefinition before a non-tail call…", sabotage-verified |
@@ -12128,7 +12130,80 @@ so imaged code reported a line from one file under another file's name. `%image-
 now takes the module key and stamps the section's own source path, the trap
 `set_form_pos_in_file` documents for the expander. Verified in all six combinations of
 engine × contracts × image.
-## KI-183 — a dying process announced its death before releasing the monitors it held ✅ FIXED 2026-09-23 (was: `:monitored-by` read 2 after a watcher's death, WATCH 2026-09-22)
+
+## KI-187 — a loaded module's bare type names were resolved from the checked file ✅ FIXED 2026-09-23
+
+**Seen:** CI's `check_order_differential` (`a_files_verdict_does_not_depend_on_the_order_the_files_were_given_in`)
+red from `4c2807f3` on: over `tests/`, `vt_test.blsp`'s verdict lost precision in forward
+order and not in reverse. Bisected over the files sorting before it to
+`tests/section_test.blsp`, i.e. to `editor/section` being loaded.
+
+**Cause:** `vt` declares `(deftype row (vector cell))`, and `editor/section` declares a record
+`row`. A bare alias name is resolved in the checked file's namespace, then through its
+imports, then to the one loaded module declaring it (ADR-327). That is right for the checked
+file's own `sig`s, but it was also applied INSIDE `vt`'s declarations: `terminal`'s
+`:grid (vector row)` and `(sig line (row any -> …))`. Once both modules were loaded the
+suffix rule saw two `row`s and declined, so `terminal` read as `any` and `row` as `vector`. A
+file calling `(vt/lines 7)` checked clean if and only if the process had already loaded
+`editor/section`.
+
+**Repro:** `brood --check` on
+`(defmodule p) (defn- s () (editor/section/section-render (editor/section/section :root nil nil []))) (defn- a () (vt/line 5 nil)) (defn- b () (vt/lines 7))`:
+one warning (`expects vector`) instead of two (`expects row`, `expects terminal`). Drop the
+`s` line and both appear.
+
+**Fix:** `annot::alias_ty` resolves a bare name in the DECLARING module first. That module is
+the innermost alias being expanded (`ALIASES_EXPANDING`), or the function whose heap-declared
+signature is being parsed (`DECLARING`). `sigs.rs`'s four parse sites (`declared_heap_sig`,
+`_with_vars`, `_overload`, `_value_ty`) run under `annot::in_declaring_scope(sym, …)`. The
+checked file's own names are unaffected, since neither stack is set there.
+
+**Guard:** `crates/cli/tests/deftype_through_imports.rs`
+`a_loaded_modules_alias_means_what_it_meant_where_it_was_declared` runs the repro above
+through `brood --check`. It is red with the declaring-scope lookup disabled. A unit test
+through `warnings_with` was tried first and could not fail: that helper checks one form with
+no alias table installed, so `vt/lines` gets no warning with or without the fix.
+
+## KI-186 — `nest check` replayed a stale verdict for a listed file outside the source paths ✅ FIXED 2026-09-23
+
+**Seen:** `nest check bin/tool.blsp` in a project, then an edit to `bin/tool.blsp` that calls
+an unbound function, then the same command: the second run printed the first run's (clean)
+verdict and exited 0.
+
+**Cause:** the ADR-382 whole-project verdict record (`project-verdict-key`,
+`std/tool/project-check.blsp`) is keyed on the cache stamp, the manifest, the sorted listed
+paths and `(project-image/fingerprint-of (all-files root))`. `all-files` walks the source and
+test trees only, so a listed file outside them contributed its PATH and never its content.
+Stale warnings replayed the same way as a stale clean did.
+
+**Fix:** the fingerprint covers `(append (all-files root) listed)`. **Guard:**
+`crates/nest/tests/check_incremental.rs`
+`an_edit_to_a_listed_file_outside_the_source_paths_is_not_replayed` asserts the exit code and
+the warning, the two things a gate reads. With the listed files taken back out of the
+fingerprint it goes red and its two neighbours stay green.
+
+## KI-183 — `:monitored-by` read 2 after a watcher's death, once, in CI ✅ FIXED 2026-09-23
+
+**Fixed (2026-09-23).** The ordering hole the "next sighting" note suspected is real.
+`retire_pid_tail` (`process/scheduler/lifecycle.rs`) ran `take_target` + `fire_down` for the
+dying pid's watchers, and only afterwards `sweep_dead_watcher` for the monitors the dying pid
+itself held. The down is what makes a death observable, so the test's `receive` of
+`[:down ^mw …]` could return, and `(%process-info t)` could run, inside the gap.
+
+**Reproduced on demand**, which the CI box's slowness had only made likelier. Four processes
+each ran the test's round 2000 times (the shape of the looped test below). The
+release VM read a stale count 1, 5 and 0 times in 8000; `BROOD_VM=0` read 5. With the sweep
+moved ahead of the fan-out it read 0 in 64 000 rounds.
+
+**Fix:** `sweep_dead_watcher(pid)` runs before `take_target(pid)`. The same sequential
+discipline applies: MONITORS then PENDING_REMOTE, each released, and never nested. A process
+monitoring itself is now swept before its own fan-out, so it sends no down to itself. That is
+correct, because it is dead. **Guard:** "a watcher's death is observable only after its
+monitors are released (looped)" in `tests/concurrency_test.blsp`. It reads 3, 3 and 7 with the
+old order restored, and passes under the VM, `BROOD_VM=0` and `BROOD_GC_STRESS=1`. The window
+predates KI-176. The index only made the sweep faster to reach, not wrong.
+
+### As filed
 
 **Seen:** CI run for `653d41d9`, tree-walker job, `brood_suite_passes` TRY 1:
 `tests/concurrency_test.blsp:295: monitor: death notification › a watcher's death releases
@@ -12150,26 +12225,12 @@ is decremented by the watcher's exit processing (`sweep_dead_watcher`) BEFORE th
 observable to a monitor of the watcher — if a `receive` of the watcher's `:down` can run before
 the sweep, the test's read is legal and the sweep's placement is the bug.
 
-**Resolution (2026-09-23).**
-
-**Seen:** `concurrency_test` "a watcher's death releases the monitors it held" read
-`:monitored-by` 2 for 0 — once in CI (2026-09-22, tree-walker suite wrapper), and once on
-demand on 2026-09-23 with the suite wrapper run beside 8 CPU-bound processes on the 12-core box.
-
-**Cause.** `retire_pid_tail` took the dying process's watchers and fired their `[:down …]`,
-and only THEN swept the monitors the dying process itself held (`sweep_dead_watcher`). The
-test's watcher waits on exactly that down and reads the target's `:monitored-by` at once; in
-the gap the count still included the dead process's two monitors. A down is how anyone learns
-a process is gone, so everything its death releases must be released before it is sent.
-
-**Fix.** The sweep runs first. Both steps take `MONITORS` sequentially, so no lock order moves.
-
-**Guard:** `process::scheduler::lifecycle::down_order_tests` builds the table directly (fake
-pids, no processes: W watches D, D watches T), retires D, and a `cfg(test)` probe inside
-`fire_down` records whether D still held watcher entries when its down fired — red 3/3 with
-the old order, green with the fix. A first guard, the scenario looped 300 times in
-`concurrency_test.blsp`, passed against the old order in two full parallel runs and was
-removed: a guard that cannot fail reads as coverage.
+**A second guard (2026-09-23, from the VM/perf review, which found the same hole
+independently):** `process::scheduler::lifecycle::down_order_tests` builds the monitor table
+with fake pids, retires one, and a `cfg(test)` probe inside `fire_down` records whether the
+dying pid still held watcher entries when its down fired. Deterministic where the looped test
+is statistical: red 3/3 with the old order. (That review's own first attempt, a 300-iteration
+loop, passed against the old order in two full parallel runs and was discarded.)
 
 ## KI-182 — the `startup` row +6% at the 422c92a5 refresh: the unarmed contract offer tiers `not` at boot, and the prelude image carries def sites ✅ FIXED 2026-09-22
 

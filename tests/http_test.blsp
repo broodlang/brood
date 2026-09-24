@@ -111,6 +111,60 @@
     (assert= (mime-type "a/b.png") "image/png")
     (assert= (mime-type "a/b.xyz") "application/octet-stream")))
 
+(describe "http: the request target splits into :path and :query"
+  (test "a query string is not part of the routed path"
+    (let (r (parse-request "GET /events?token=abc&x=1 HTTP/1.1\r\n\r\n"))
+      (assert= (get r :path) "/events")
+      (assert= (get r :query) "token=abc&x=1")))
+  (test "no query reads as the empty string"
+    (assert= (get (parse-request "GET / HTTP/1.1\r\n\r\n") :query) ""))
+  (test "the router matches a path that arrived with a query"
+    (let (h (router {"/events" (fn (req) (text-response "ev"))}))
+      (assert= (get (h (parse-request "GET /events?token=t HTTP/1.1\r\n\r\n")) :body) "ev"))))
+
+(defn- guard-req (host origin)
+  {:path "/"
+   :query ""
+   :headers (if (nil? origin) {"host" host} {"host" host "origin" origin})})
+
+(describe "http: loopback-only refuses rebound hosts and cross-site origins"
+  (test "loopback Host values, with and without a port"
+    (is (loopback-host? "localhost:5000"))
+    (is (loopback-host? "127.0.0.1"))
+    (is (loopback-host? "[::1]:8080"))
+    (is (loopback-host? "LOCALHOST:1"))
+    (is (not (loopback-host? "evil.example:5000")))
+    (is (not (loopback-host? "localhost.evil.example")))
+    (is (not (loopback-host? nil))))
+  (let (h (loopback-only (fn (req) (text-response "in"))))
+    (test "a same-origin request passes"
+      (assert= (get (h (guard-req "localhost:5000" "http://localhost:5000")) :status) 200)
+      (assert= (get (h (guard-req "127.0.0.1:5000" nil)) :status) 200))
+    (test "a DNS-rebound Host is refused"
+      (assert= (get (h (guard-req "attacker.example:5000" nil)) :status) 403))
+    (test "a cross-site Origin is refused even with a loopback Host"
+      (assert= (get (h (guard-req "localhost:5000" "https://attacker.example")) :status) 403)
+      (assert= (get (h (guard-req "localhost:5000" "null")) :status) 403)
+      (assert= (get (h (guard-req "localhost:5000" "http://[bad")) :status) 403))
+    (test "a request with no Host at all is refused"
+      (assert= (get (h {:path "/" :query "" :headers {}}) :status) 403))))
+
+(describe "http: require-token"
+  (let (h (require-token "s3cret" (fn (req) (text-response "in"))))
+    (test "the token as a query parameter or an X-Token header passes"
+      (assert= (get (h {:query "token=s3cret" :headers {}}) :status) 200)
+      (assert= (get (h {:query "" :headers {"x-token" "s3cret"}}) :status) 200))
+    (test "a missing, wrong or prefix token is refused"
+      (assert= (get (h {:query "" :headers {}}) :status) 403)
+      (assert= (get (h {:query "token=nope" :headers {}}) :status) 403)
+      (assert= (get (h {:query "token=s3cre" :headers {}}) :status) 403)
+      (assert= (get (h {:query "token=%zz" :headers {}}) :status) 403)))
+  (test "random-token is 32 hex chars and fresh each call"
+    (let (a (random-token)
+          b (random-token))
+      (assert= (string/length a) 32)
+      (is (not (= a b))))))
+
 (describe "http: streaming responses (the connection-handoff seam)"
   (test "render-head emits the status line + custom headers, no Content-Length"
     (let (h (string/bytes-> (bytes/concat (render-head 200 {"Content-Type" "text/event-stream"}))))

@@ -4,6 +4,59 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## Unreleased
+
+**Native regex matching** (ADR-389). `std/regex` keeps Brood's pattern dialect — its parser,
+and the forgiving rules for a stray metacharacter — and translates each pattern for
+`regex-automata`, which does the matching. `find`, `find-all`, `replace`, `match?`,
+`tokens` and `paint` are 7× to 60× faster: a four-pattern `file:line` table over a line
+went from ~0.5 ms to ~8 µs. Changed behaviour: `\w`, `\s` and `\b` are Unicode (`\d` stays
+ASCII `0-9`); `\b` works inside a `tokens` rule and in `paint`; a stray top-level `)` is a
+literal instead of silently ending the pattern.
+
+## v0.33.0 — the pieces an editor's git porcelain is built on, and a subprocess that stops when told
+
+**`std/editor/transient` — a menu that builds a value, not a key sequence** (ADR-387). This
+is Magit's `transient.el` as plain data. A spec is groups of `:switch`, `:option`,
+`:command` and `:menu` suffixes. `transient-press` folds one key into `[state' outcome]`,
+and `transient-args` is the argument vector in the spec's own order. An option's prompt is
+returned as a `:read` request for the host to perform, so the module carries no display. It
+brings `keymap-resolve`: chord resolution without evaluating the binding. `keymap-step` is
+now that plus `reflect/eval`.
+
+**`std/editor/section` and `std/diff`** (ADR-388). `section` provides foldable section trees
+whose identity survives a re-render. `diff` reads git's unified output by hunk counts.
+`hunk-select` cuts a hunk to a run of lines for line-level staging, forward and reverse.
+
+**Editor buffers.** `undo-group` makes several edits one undo step. `replace-region` used it
+from the start, so one undo after a fill or a transpose no longer leaves the text deleted.
+The buffer owns `:modified`: every edit passes `buffer-record-change`, and undoing back to
+the saved text is unmodified again. The buffer registry is keyed by the document's file, so
+two `README.md`s in two projects are two documents.
+
+**`os/cmd` takes `{:cwd :env :stdin :timeout-ms}`.** A timeout kills the child's whole
+process group, and every pipe drains on its own thread. `os/shell-quote` makes a string one
+POSIX shell word, and leaves a plain word bare. **Closing an `os/spawn` child ends
+everything it started**: children lead their own process group, and `close` kills the group.
+
+**`http/loopback-only` and `http/require-token`.** Binding 127.0.0.1 keeps other machines
+out, but not a web page on the same machine. These refuse a cross-site Origin or a
+non-loopback Host, and require a secret. `parse-request` splits `:path` from `:query`.
+
+**Strings.** `string/clip-cells` and `string/pad-right-cells` lay text out by display
+column, not character count. `fill` takes a comment prefix.
+
+**Breaking.** `os/cmd`'s positional working directory is gone (use `:cwd`), and
+`%os-cmd-stdin` is folded into `%os-cmd`'s options. `buffer-push-undo` is now
+`buffer-record-change`. Buffer-registry entries are `{:key :name :proc :meta}`, and their
+notifications carry the key.
+
+**Fixed.** KI-183: a dying process's `[:down …]` fired before the monitors it held were
+released, so a watcher woken by it could read a stale `:monitored-by`. (v0.32.0's notes
+listed KI-183 as fixed; it was only filed then.) The checker also no longer types a global
+by the literal the checking process happened to compute. hatch's
+`(when (web/audit/dev?) …)` warned "always true" in every dev checkout.
+
 ## v0.32.0 — a declaration is enforced at the module boundary, and `nest check` stops re-checking what has not changed
 
 **Runtime contracts are binding-time policy, on by default in dev mode** (ADR-381). Whether

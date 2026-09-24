@@ -736,11 +736,20 @@ fn cross_file_undeclared_global_gates_via_loaded_image() {
     // the image) is typed from its heap value where it's used elsewhere — the
     // same mechanism `infer_sig` uses for functions. `check_with_defs` evals
     // the def, then checks a separate form (the cross-context path).
+    // Typed by its KIND, not the literal: the value is what this process computed,
+    // and a literal would let a proof rest on one run.
     let w = check_with_defs(&["(def gg 5)"], "(string/length gg)");
     assert!(
         w.iter()
-            .any(|m| m.contains("string/length") && m.contains("got 5")),
+            .any(|m| m.contains("string/length") && m.contains("got int")),
         "a cross-file undeclared int global misused must warn: {w:?}"
+    );
+    // An observed nil is the placeholder case — an unset env var, a not-yet-set cache —
+    // and says nothing about what the global holds when the program runs.
+    let w = check_with_defs(&["(def tok nil)"], "(string/length tok)");
+    assert!(
+        w.iter().all(|m| !m.contains("expects")),
+        "a global observed as nil must stay unknown: {w:?}"
     );
     // A **dynamic variable** must be excluded — its heap value is only the
     // default; `binding` rebinds it to any type, so typing a use against the

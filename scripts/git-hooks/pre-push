@@ -34,6 +34,16 @@
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
 
+# ---- 0. the tests must not inherit git's view of THIS repository ------------------
+# git runs a hook with GIT_DIR (and, in a linked worktree, more) pointing at the repo being
+# pushed. The Brood tests below shell out to git in scratch directories — `package_test`
+# builds throwaway repos to resolve `:git` deps — and an inherited GIT_DIR sends every one of
+# those commands to the real repository instead: on 2026-09-23 a push from a worktree set
+# `core.bare = true` and a `Test <t@example.com>` identity in brood's shared `.git/config`,
+# stacked five `init` commits on the branch being pushed and created tags v1.0.0–v2.0.0.
+# Nothing below needs them: `cd` to the top level already made the cwd the repository.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_PREFIX
+
 fail() { echo "pre-push: $*" >&2; exit 1; }
 
 # ---- 1. rustfmt --------------------------------------------------------------------
@@ -56,7 +66,10 @@ types_touched=$(printf '%s\n' "$changed" | grep -c '^crates/lisp/src/types/')
 # ---- 3. the BROOD_* flag catalogue -------------------------------------------------
 catalogue=crates/lisp/src/diagnostics/debug_flags.rs
 missing=""
-for f in $(printf '%s\n' "$changed" | grep -E '\.(rs|blsp)$'); do
+# The Rust test's scope exactly: `crates/` and `std/`, minus the test/bench/example trees,
+# whose `"BROOD_…"` literals are fixtures (an env var a test sets), not runtime flags.
+for f in $(printf '%s\n' "$changed" | grep -E '^(crates|std)/.*\.(rs|blsp)$' \
+                                    | grep -vE '(^|/)(target|tests|benches|examples)/'); do
     [ -f "$f" ] || continue
     [ "$f" = "$catalogue" ] && continue
     for flag in $(grep -oE '"BROOD_[A-Z0-9_]+"' "$f" 2>/dev/null | sort -u); do

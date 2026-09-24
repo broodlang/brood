@@ -53,6 +53,24 @@
            :poll (fn (ms) (receive (m m) (after 0 :tick)))})
         :left)))
 
+  ;; An app asks "is there a loop to send my answer back to?" before it fires work at
+  ;; another process — the answer must hold in `update` (where the firing happens) and
+  ;; name THIS loop, so a second window's loop is not mistaken for the first's.
+  (test "update runs with *ui-loop* bound to the loop's own pid; outside a loop it is nil"
+    (let (me (self))
+      (is (nil? *ui-loop*))
+      (send me "x")
+      (ui-run {:done false}
+        (fn (m c r) [])
+        (fn (m input c r) (do (send me [:loop *ui-loop*]) (assoc m :done true)))
+        {:enter (fn () nil)
+         :leave (fn () nil)
+         :size (fn () [80 24])
+         :draw (fn (f) nil)
+         :poll (fn (ms) (receive (m m) (after 0 :tick)))})
+      (assert= (receive ([:loop p] p) (after 200 :none)) me)
+      (is (nil? *ui-loop*))))
+
   (test "a nil poll (timeout) is delivered to update as :tick"
     (let (me (self))
       ; nil ⇒ :tick

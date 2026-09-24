@@ -257,3 +257,41 @@ fn an_edit_re_derives_the_edited_file_and_its_dependents_only() {
         "the reused verdict names the call:\n{out}"
     );
 }
+
+/// KI-186: a listed file outside the source and test trees (`nest check bin/x.blsp`) was
+/// keyed by its PATH alone, so an edit to it replayed the previous verdict — here, a clean
+/// one over a file that now calls an unbound function. Asserted on the exit code and the
+/// warning, the two things a gate reads, not on the key.
+#[test]
+fn an_edit_to_a_listed_file_outside_the_source_paths_is_not_replayed() {
+    let dir = scratch("listed");
+    gen_project(&dir, 2);
+    std::fs::create_dir_all(dir.join("bin")).unwrap();
+    write(&dir, "bin/tool.blsp", "(defn tool () (+ 1 2))\n");
+    let (code, out) = nest_check_with(&dir, &["bin/tool.blsp"], &[]);
+    assert_eq!(code, 0, "the clean tool should check clean:\n{out}");
+    let (_, warm) = nest_check_with(&dir, &["bin/tool.blsp"], &[]);
+    assert!(
+        replayed(&warm),
+        "an unchanged listed file should replay:\n{warm}"
+    );
+
+    write(
+        &dir,
+        "bin/tool.blsp",
+        "(defn tool () (no-such-function 1 2))\n",
+    );
+    let (code, out) = nest_check_with(&dir, &["bin/tool.blsp"], &[]);
+    assert!(
+        !replayed(&out),
+        "an edited listed file must not be replayed:\n{out}"
+    );
+    assert_eq!(
+        code, 1,
+        "the new unbound call should fail the check:\n{out}"
+    );
+    assert!(
+        out.contains("no-such-function"),
+        "the warning names the unbound call:\n{out}"
+    );
+}

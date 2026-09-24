@@ -450,7 +450,10 @@ pub const STATE_DUMP: &str = r#"
 ;; a module wrongly — KI-105's stale section directory, KI-106's lost registry names — fails
 ;; exactly as before. Only "has not been loaded yet" is taken out of the diff. A drift in this
 ;; list is a loud test failure, not a silent hole, which is why it is spelled out.
-(doseq (m ['map 'seq 'io 'string 'math 'reflect 'path 'file]) (require-one m))
+;; `regex` and `table` since 2026-09-23: `string/fill-prefix` names `regex/find` (whose
+;; memos are tables), so a source load of `string` loads both at expansion and an imaged
+;; one defers them to the first call.
+(doseq (m ['map 'seq 'io 'string 'math 'reflect 'path 'file 'regex 'table]) (require-one m))
 
 (defn- dyn? (n)
   "Is `n` a dynamic variable? Asked behaviourally, through the primitive `binding` uses,

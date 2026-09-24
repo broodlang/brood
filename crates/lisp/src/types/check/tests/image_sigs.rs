@@ -15,9 +15,26 @@ use crate::eval::derive;
 use crate::types::check::{self, sigs, std_index};
 
 fn interp_with_image() -> crate::Interp {
+    // With no image on disk (`BROOD_NO_STDIMAGE=1` skips the nextest setup script that
+    // builds one — CI's tree-walker job) it is built here, in a THROWAWAY interpreter:
+    // `stdimage/build` loads every std module from source, and the interpreter it ran in
+    // would hand the tests a process where everything is already loaded — a transitive
+    // load could then never be observed.
+    let install = "(or (%std-image-installed) (%std-image-install))";
     let mut interp = crate::Interp::new();
+    if interp
+        .eval_str(install)
+        .map(|v| interp.print(v))
+        .expect("install the stdlib image")
+        == "nil"
+    {
+        crate::Interp::new()
+            .eval_str("(stdimage/build)")
+            .expect("build the stdlib image");
+        interp = crate::Interp::new();
+    }
     let installed = interp
-        .eval_str("(or (%std-image-installed) (%std-image-install) (do (stdimage/build) (%std-image-install)))")
+        .eval_str(install)
         .map(|v| interp.print(v))
         .expect("install the stdlib image");
     assert_ne!(

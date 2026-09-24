@@ -92,18 +92,10 @@ pub(super) fn register(primitives: &mut super::Primitives) {
     primitives.def(
         "%os-cmd",
         Arity::at_least(1),
-        Sig::new(vec![string, seq], map_ty),
-        &["prog", "&", "args", "dir"],
-        "Run prog (with optional args list, and an optional working directory) capturing stdout/stderr; returns {:stdout s :stderr s :exit n}.",
+        Sig::new(vec![string, seq, map_ty], map_ty),
+        &["prog", "&", "args", "opts"],
+        "Run prog (with optional args list and an opts map {:cwd :env :stdin :timeout-ms}) to completion; returns {:stdout s :stderr s :exit n}, plus :timed-out true when the timeout killed it.",
         os_cmd);
-    primitives.def(
-        "%os-cmd-stdin",
-        Arity::at_least(3),
-        Sig::new(vec![string, seq, string], map_ty),
-        &[],
-        "",
-        os_cmd_stdin,
-    );
     primitives.def(
         "%halt",
         Arity::exact(1),
@@ -246,96 +238,152 @@ pub(super) fn os_type_builtin(_: &[Value], _: EnvId, _heap: &mut Heap) -> LispRe
     return Ok(Value::keyword(value::intern("unknown")));
 }
 
-/// `(%os-cmd prog args)` — run `prog` with `args` (list or vector of strings),
-/// capturing stdout and stderr. Returns `{:stdout s :stderr s :exit n}`.
+/// `(%os-cmd prog args opts)` — run `prog` with `args` (list or vector of strings) to
+/// completion, capturing stdout and stderr: `{:stdout s :stderr s :exit n}`, plus
+/// `:timed-out true` when a timeout ended it. `opts` (a map, or absent) takes:
+///
+/// - `:cwd` — the working directory, passed to the child so this process's cwd is never
+///   touched and two calls in different directories cannot race (the alternative, `cd` in
+///   a `sh -c` string, re-introduces a shell and its quoting purely to change directory).
+/// - `:env` — `{"NAME" "value"}` added to the inherited environment; a nil value UNSETS
+///   the name. What makes a non-interactive child possible: `GIT_TERMINAL_PROMPT=0` keeps
+///   a background `git fetch` from asking for a password nobody can see.
+/// - `:stdin` — a string written to the child's stdin, then EOF. Without it the child's
+///   stdin is `/dev/null`, never ours.
+/// - `:timeout-ms` — kill the child after this long. The child runs in its own process
+///   group and the WHOLE group is killed, so a grandchild (`ssh` under `git`, `sleep`
+///   under `sh`) that still holds the output pipes cannot keep the call waiting.
+///
+/// Every pipe is drained on its own thread, so neither direction can fill and wedge the
+/// other: writing all of stdin before reading any output deadlocks the moment the child
+/// emits more than one pipe buffer (~64 KiB) while still being fed.
 pub(super) fn os_cmd(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use std::io::{Read, Write};
+    use std::process::{Command, Stdio};
     let prog = expect_string(heap, "%os-cmd", arg(args, 0))?;
-    let mut cmd = std::process::Command::new(&prog);
-    if args.len() > 1 {
-        let raw = heap.seq_items(arg(args, 1))?;
-        for a in &raw {
-            cmd.arg(expect_string(heap, "%os-cmd", *a)?);
+    let mut cmd = Command::new(&prog);
+    if args.len() > 1 && !matches!(arg(args, 1), Value::Nil) {
+        for a in heap.seq_items(arg(args, 1))? {
+            cmd.arg(expect_string(heap, "%os-cmd", a)?);
         }
     }
-    // Optional third argument: the working directory to run in. Without it a caller
-    // that needs one has to go through `sh -c "cd '<dir>' && ..."`, which re-introduces
-    // a shell (and its quoting) purely to change directory — `git` avoids that with
-    // `-C` and the async `proc-spawn` path already takes a root, so this was the one
-    // place with nowhere to put it. Nil means inherit, as before.
-    if args.len() > 2 && !matches!(arg(args, 2), Value::Nil) {
-        cmd.current_dir(expect_string(heap, "%os-cmd", arg(args, 2))?);
+    let mut stdin_text: Option<String> = None;
+    let mut timeout: Option<std::time::Duration> = None;
+    if let Value::Map(opts) = arg(args, 2) {
+        let key = |k: &'static str| Value::keyword(value::intern(k));
+        if let Some(v) = heap.map_get(opts, key("cwd")) {
+            if !matches!(v, Value::Nil) {
+                cmd.current_dir(expect_string(heap, "%os-cmd :cwd", v)?);
+            }
+        }
+        if let Some(Value::Map(e)) = heap.map_get(opts, key("env")) {
+            for (k, v) in heap.map_entries(e) {
+                let name = expect_string(heap, "%os-cmd :env key", k)?;
+                if matches!(v, Value::Nil) {
+                    cmd.env_remove(name);
+                } else {
+                    cmd.env(name, expect_string(heap, "%os-cmd :env value", v)?);
+                }
+            }
+        }
+        if let Some(v) = heap.map_get(opts, key("stdin")) {
+            if !matches!(v, Value::Nil) {
+                stdin_text = Some(expect_string(heap, "%os-cmd :stdin", v)?.to_string());
+            }
+        }
+        if let Some(v) = heap.map_get(opts, key("timeout-ms")) {
+            if !matches!(v, Value::Nil) {
+                let ms = expect_int(heap, "%os-cmd :timeout-ms", v)?;
+                timeout = Some(std::time::Duration::from_millis(ms.max(0) as u64));
+            }
+        }
     }
-    let output = cmd.output().map_err(|e| {
+    cmd.stdin(if stdin_text.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let fail = |e: std::io::Error| {
         LispError::runtime(format!("%os-cmd: {prog}: {e}"))
             .with_code(crate::error::error_codes::SUBPROCESS_FAILED)
-    })?;
-    let stdout = heap.alloc_string(&String::from_utf8_lossy(&output.stdout));
-    let stderr = heap.alloc_string(&String::from_utf8_lossy(&output.stderr));
-    let exit_code = output.status.code().unwrap_or(-1) as i64;
-    let kw = |k: &'static str| Value::keyword(value::intern(k));
-    Ok(heap.map_from_pairs(vec![
-        (kw("stdout"), stdout),
-        (kw("stderr"), stderr),
-        (kw("exit"), Value::int(exit_code)),
-    ]))
-}
-
-/// `(%os-cmd-stdin prog args stdin-str)` — like `%os-cmd` but writes `stdin-str` to the
-/// child's stdin (pipe closed after writing → EOF); used by the git porcelain to pipe
-/// patch text to `git apply -` instead of writing a temp file.
-///
-/// The write runs on its own thread so **both directions make progress**. Writing the
-/// whole input before reading any output deadlocks the moment the child emits more than
-/// one pipe buffer (~64 KiB) while still being fed: the child blocks writing stdout,
-/// we block writing stdin, and neither ever moves. That is not a slow call — it is a
-/// permanently pinned scheduler worker that no timeout or `try` can recover. `stdin-str`
-/// is therefore unbounded in size, and so is the child's output.
-pub(super) fn os_cmd_stdin(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use std::io::Write;
-    let prog = expect_string(heap, "%os-cmd-stdin", arg(args, 0))?;
-    let mut cmd = std::process::Command::new(&prog);
-    if args.len() > 1 {
-        let raw = heap.seq_items(arg(args, 1))?;
-        for a in &raw {
-            cmd.arg(expect_string(heap, "%os-cmd-stdin", *a)?);
-        }
-    }
-    let stdin_str = expect_string(heap, "%os-cmd-stdin", arg(args, 2))?.to_string();
-    cmd.stdin(std::process::Stdio::piped());
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-    let mut child = cmd.spawn().map_err(|e| {
-        LispError::runtime(format!("%os-cmd-stdin: {prog}: {e}"))
-            .with_code(crate::error::error_codes::SUBPROCESS_FAILED)
-    })?;
-    // Feed stdin from a separate thread; `wait_with_output` drains stdout and stderr
-    // concurrently, so all three pipes move at once. A child that exits early makes
-    // the write fail with EPIPE, which ends the thread — the same "we tried" outcome
-    // the inline write had.
-    let writer = child.stdin.take().map(|mut stdin_pipe| {
+    };
+    let mut child = cmd.spawn().map_err(fail)?;
+    let writer = match (child.stdin.take(), stdin_text) {
+        (Some(mut pipe), Some(text)) => Some(std::thread::spawn(move || {
+            // EPIPE from a child that exits early just ends the write
+            let _ = pipe.write_all(text.as_bytes());
+        })),
+        _ => None,
+    };
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
         std::thread::spawn(move || {
-            let _ = stdin_pipe.write_all(stdin_str.as_bytes());
-            // stdin_pipe dropped here → EOF sent to child
+            let mut buf = Vec::new();
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_end(&mut buf);
+            }
+            buf
         })
-    });
-    let output = child.wait_with_output().map_err(|e| {
-        LispError::runtime(format!("%os-cmd-stdin: {prog}: {e}"))
-            .with_code(crate::error::error_codes::SUBPROCESS_FAILED)
-    })?;
-    // The child is gone, so the write has either finished or hit EPIPE; joining is a
-    // formality that keeps the thread from outliving the call.
-    if let Some(handle) = writer {
-        let _ = handle.join();
+    };
+    let out = drain(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let err = drain(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let started = std::time::Instant::now();
+    let mut timed_out = false;
+    let status = loop {
+        let Some(limit) = timeout else {
+            break child.wait().map_err(fail)?;
+        };
+        if let Some(status) = child.try_wait().map_err(fail)? {
+            break status;
+        }
+        if started.elapsed() >= limit {
+            timed_out = true;
+            #[cfg(unix)]
+            // SAFETY: killpg on the group `process_group(0)` made for this child; the pid
+            // is ours until we reap it below, so the group id cannot have been reused.
+            unsafe {
+                libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+            }
+            #[cfg(not(unix))]
+            let _ = child.kill();
+            break child.wait().map_err(fail)?;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    };
+    if let Some(w) = writer {
+        let _ = w.join();
     }
-    let stdout = heap.alloc_string(&String::from_utf8_lossy(&output.stdout));
-    let stderr = heap.alloc_string(&String::from_utf8_lossy(&output.stderr));
-    let exit_code = output.status.code().unwrap_or(-1) as i64;
+    let stdout_bytes = out.join().unwrap_or_default();
+    let stderr_bytes = err.join().unwrap_or_default();
+    let stdout = heap.alloc_string(&String::from_utf8_lossy(&stdout_bytes));
+    let stderr = heap.alloc_string(&String::from_utf8_lossy(&stderr_bytes));
+    let exit_code = status.code().unwrap_or(-1) as i64;
     let kw = |k: &'static str| Value::keyword(value::intern(k));
-    Ok(heap.map_from_pairs(vec![
+    let mut pairs = vec![
         (kw("stdout"), stdout),
         (kw("stderr"), stderr),
         (kw("exit"), Value::int(exit_code)),
-    ]))
+    ];
+    if timed_out {
+        pairs.push((kw("timed-out"), Value::Bool(true)));
+    }
+    Ok(heap.map_from_pairs(pairs))
 }
 
 /// `(%halt code)` — terminate the process immediately with `code`, which must be a

@@ -16,14 +16,13 @@ anything.
 
 ### STATE AT HANDOVER — read first (2026-09-23 evening)
 
-- **Nothing is committed.** ~45 files modified on `main` over `b42228a5`, plus new
-  `crates/cli/tests/{passthrough_lazy_head,features_audit}.rs`,
-  `crates/lisp/src/core/registries.rs`, `crates/lisp/src/core/heap/features_audit.rs`.
-  Formatted (`cargo fmt`, `nest format`). Nothing pushed.
+- **Committed and pushed (2026-09-24)** as `7a237918` (the KI-154 test fix) and `73dc23cf`
+  (everything else), merged with `origin/main`'s 24 commits. Upstream had fixed KI-183 the
+  same way the same day; the merge keeps its looped guard AND this session's deterministic one.
 - **Gates on the final tree:** full VM nextest 1711/1711 and full tree-walker nextest
   1711/1711 (one docs-only red, a duplicated KI-183 heading, fixed and re-run), **no flakes
   in either**; clippy `--all-targets --all-features -D warnings` clean; `make prepush` clean.
-- **Fixed today, each with a sabotage-verified guard:** KI-188..190 (the morning), KI-193
+- **Fixed today, each with a sabotage-verified guard:** KI-188..192 (the morning), KI-193
   (table swaps bumped the cache keys after unlocking), KI-194 (a module loaded inside
   `require-one` published before its `provide`), KI-183 (a dying process fired its downs
   before releasing its monitors), KI-154's recurrence (twelve servers listened before
@@ -40,17 +39,9 @@ anything.
   (285 programs, 0 divergences / crashes / stale, armed release binary).
 - **Perf re-measured vs HEAD, no regression:** default ceiling all noise, `matmul` −21.6%;
   VM ceiling `collatz` −5.2%; `ring` −5.0% solo (numbers in the devlog).
-- **Still to run:** only `make green`, which needs a push (CI's verdict).
-- **`origin/main` is 24 commits ahead** (seen 2026-09-23 evening) and took KI-186 and KI-187
-  for its own fixes, so this session's entries were renumbered KI-188..KI-194 throughout (code comments,
-  tests and docs). Fast-forward first
-  (`git merge --ff-only` will NOT apply: the tree is dirty and main moved), expect conflicts in
-  `docs/known-issues.md` / `handoff.md` / `devlog.md` (both sides added rows at the top), and
-  re-run the full suite on the combined tree before pushing.
-- **Then commit** — ask first. Natural split: KI-188, KI-189, KI-190(+rooting), KI-191,
-  KI-192, KI-193, KI-194, KI-183, the KI-154 test fix, registries + `*live-registries*`, the
-  features audit, the RUNTIME-read change, the loop safepoint + blocking-receive re-probe, the
-  cheap perf batch, docs.
+- **Gates on the MERGED tree (before the push):** VM and tree-walker nextest 1714/1714 each,
+  no flakes; clippy on CI's flags; rustfmt; `make prepush` (970 tests). Read `make green` for
+  CI's verdict on the pushed commit.
 
 A review of the interpreter, JIT, heap/GC/scheduler and the benchmark standing (four
 parallel read-only reviewers), then the fixes. Everything below is in the working tree.
@@ -108,6 +99,16 @@ parallel read-only reviewers), then the fixes. Everything below is in the workin
   (count epoch bumps in a long session first); thrash/`hosts-receive` latches are permanent
   and shared; tenure-on-pressure (not survivor age) is a documented policy, and GC tuning for
   `bintree`/`nbody` has been tried and reverted.
+
+## 2026-09-23 — KI-183 fixed; no open item; perf item 4 is next
+
+KI-183 was a real ordering hole, not a slow CI box: a dying process's `[:down …]` fired
+before the monitors it held were swept (devlog 2026-09-23). It reproduces on demand in a
+looped round, and the fix and a sabotage-verified looped guard are in. Verified with
+targeted runs only (the no-full-suite rule): the 29 monitor/link test files, the Rust
+monitor/link/dist tests, and `concurrency_test` under the VM, `BROOD_VM=0` and
+`BROOD_GC_STRESS=1`. CI's suite jobs are the full-suite proof, so read `make green` after
+the push. Next is item 4 of the perf queue (below), which has not started.
 
 ## 2026-09-22 (later) — KI-184 fixed; the `(not …)` sweep is in; KI-183 is the only watch
 

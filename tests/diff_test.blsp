@@ -77,3 +77,90 @@
     (let (ops '([:keep "a"] [:delete "b"] [:insert "c"])
           lines (diff/unified ops 0))
       (assert= [" a" "-b" "+c"] (into [] lines)))))
+
+;; ---- reading a unified diff -------------------------------------------------------
+
+(def dt-git-diff
+  "diff --git a/src/a.txt b/src/a.txt
+index 1111111..2222222 100644
+--- a/src/a.txt
++++ b/src/a.txt
+@@ -1,4 +1,3 @@ top
+ one
+-two
++TWO
+ three
+--- four
+@@ -10,2 +10,3 @@
+ ten
++ten and a half
+ eleven
+diff --git a/new.txt b/new.txt
+new file mode 100644
+index 0000000..3333333
+--- /dev/null
++++ b/new.txt
+@@ -0,0 +1 @@
++hello
+")
+
+(describe "parse-unified"
+  (test "files, paths and hunks"
+    (let (files (diff/parse-unified dt-git-diff))
+      (assert= 2 (count files))
+      (assert= "src/a.txt" (:new-path (first files)))
+      (assert= 2 (count (:hunks (first files))))
+      (is (nil? (:old-path (second files))))
+      (assert= "new.txt" (:new-path (second files)))))
+  (test "a removed line that reads like a file header stays in its hunk"
+    (let (h (first (:hunks (first (diff/parse-unified dt-git-diff)))))
+      (assert= [" one" "-two" "+TWO" " three" "--- four"] (:lines h))
+      (assert= "top" (:context h))))
+  (test "a commit message above the diff belongs to no file"
+    (let (files (diff/parse-unified (str "commit abc\n\n    subject here\n\n" dt-git-diff)))
+      (assert= 2 (count files))
+      (assert= "diff --git a/src/a.txt b/src/a.txt" (first (:headers (first files))))))
+  (test "empty input is no files"
+    (assert= [] (diff/parse-unified "")))
+  (test "a plain diff -u with timestamps"
+    (let (files (diff/parse-unified "--- a.txt\t2026-01-01\n+++ b.txt\t2026-01-02\n@@ -1 +1 @@\n-a\n+b\n"))
+      (assert= "a.txt" (:old-path (first files)))
+      (assert= "b.txt" (:new-path (first files)))))
+  (test "no newline at end of file stays with its line"
+    (let (h (first (:hunks (first (diff/parse-unified "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n\\ No newline at end of file\n+a\n")))))
+      (assert= ["-a" "\\ No newline at end of file" "+a"] (:lines h)))))
+
+(describe "hunk-patch"
+  (test "headers, the one hunk, and a final newline"
+    (let (f (first (diff/parse-unified dt-git-diff))
+          p (diff/hunk-patch f (second (:hunks f))))
+      (is (string/starts-with? p "diff --git a/src/a.txt"))
+      (is (string/ends-with? p " eleven\n"))
+      (is (not (includes? p "@@ -1,4"))))))
+
+(describe "hunk-select"
+  (test "forward: unselected additions go, unselected removals become context"
+    (let (h (first (:hunks (first (diff/parse-unified dt-git-diff)))))
+      (let (s (diff/hunk-select h 2 3))
+        (assert= [" one" " two" "+TWO" " three" " -- four"] (:lines s))
+        (assert= "@@ -1,4 +1,5 @@ top" (:header s)))))
+  (test "reverse: unselected removals go, unselected additions become context"
+    (let (h (first (:hunks (first (diff/parse-unified dt-git-diff)))))
+      (let (s (diff/hunk-select h 1 2 true))
+        (assert= [" one" "-two" " TWO" " three"] (:lines s))
+        (assert= "@@ -1,4 +1,3 @@ top" (:header s)))))
+  (test "a range with no change in it is nil"
+    (let (h (first (:hunks (first (diff/parse-unified dt-git-diff)))))
+      (is (nil? (diff/hunk-select h 0 1))))))
+
+(describe "hunk lines"
+  (test "the new-file line of a body line"
+    (let (h (second (:hunks (first (diff/parse-unified dt-git-diff)))))
+      (assert= 10 (diff/hunk-new-line h 0))
+      (assert= 11 (diff/hunk-new-line h 1))
+      (assert= 12 (diff/hunk-new-line h 2))))
+  (test "a removed line sits where it was removed"
+    (let (h (first (:hunks (first (diff/parse-unified dt-git-diff)))))
+      (assert= 2 (diff/hunk-new-line h 1))
+      (assert= 2 (diff/hunk-old-line h 1))
+      (assert= 3 (diff/hunk-old-line h 2)))))

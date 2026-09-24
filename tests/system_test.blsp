@@ -49,30 +49,61 @@
       (is (contains? r :stderr))
       (is (contains? r :exit))))
 
-  ;; The optional third argument: the directory to run IN. Without it, a caller that
-  ;; needs one has to build a `sh -c "cd '<dir>' && ..."` string — a shell, and its
-  ;; quoting, purely to change directory. `git` sidesteps that with `-C` and
-  ;; `proc-spawn` already takes a root, so this was the one call with nowhere to put it.
+  ;; `:cwd` — the directory to run IN. Without it, a caller that needs one has to build a
+  ;; `sh -c "cd '<dir>' && ..."` string — a shell, and its quoting, purely to change directory.
   (test "an optional working directory runs the child there"
-    (assert= "/tmp" (string/trim (get (os/cmd "pwd" [] "/tmp") :stdout)))
-    (assert= "/usr" (string/trim (get (os/cmd "pwd" [] "/usr") :stdout))))
+    (assert= "/tmp" (string/trim (get (os/cmd "pwd" [] {:cwd "/tmp"}) :stdout)))
+    (assert= "/usr" (string/trim (get (os/cmd "pwd" [] {:cwd "/usr"}) :stdout))))
   (test "omitting it, or passing nil, inherits this process's directory"
     (let (here (string/trim (get (os/cmd "pwd") :stdout)))
       (assert= here (string/trim (get (os/cmd "pwd" []) :stdout)))
-      (assert= here (string/trim (get (os/cmd "pwd" [] nil) :stdout)))))
+      (assert= here (string/trim (get (os/cmd "pwd" [] {:cwd nil}) :stdout)))))
   ;; the child is told where to run; this process never moves, so two calls in
   ;; different directories cannot interfere
   (test "it does not change the caller's own directory"
     (let (before (file/cwd)
-          _ (os/cmd "pwd" [] "/tmp"))
+          _ (os/cmd "pwd" [] {:cwd "/tmp"}))
       (assert= before (file/cwd))))
   (test "arguments and a directory compose"
-    (assert= "tmp" (string/trim (get (os/cmd "sh" ["-c" "basename $(pwd)"] "/tmp") :stdout))))
+    (assert= "tmp" (string/trim (get (os/cmd "sh" ["-c" "basename $(pwd)"] {:cwd "/tmp"}) :stdout))))
   (test "a directory that does not exist is an ordinary failed command, not a crash"
     (let (r (check-allow :discarded-catch
-              (try (os/cmd "pwd" [] "/no/such/directory/anywhere") (catch e [:raised e]))))
+              (try (os/cmd "pwd" [] {:cwd "/no/such/directory/anywhere"}) (catch e [:raised e]))))
       (is (or (= (first r) :raised) (not (= 0 (get r :exit))))))))
 
+(describe "os/cmd options: :cwd :env :stdin :timeout-ms"
+  (test ":cwd runs the child there without moving this process"
+    (let (here (file/cwd))
+      (assert= (os/cmd-out (os/cmd "pwd" [] {:cwd "/"})) "/")
+      (assert= (file/cwd) here)))
+  (test ":env adds a variable; a nil value unsets one"
+    (assert= (os/cmd-out (os/cmd "sh" ["-c" "echo $BROOD_T"] {:env {"BROOD_T" "on"}})) "on")
+    (assert= (os/cmd-out (os/cmd "sh" ["-c" "echo ${HOME:-gone}"] {:env {"HOME" nil}})) "gone"))
+  (test ":stdin feeds the child, and more than a pipe buffer does not wedge it"
+    (let (big (string/repeat "x" 200000)
+          r (os/cmd "cat" [] {:stdin big}))
+      (assert= (string/length (:stdout r)) 200000)))
+  (test "without :stdin the child's stdin is empty, not ours"
+    (assert= (os/cmd-out (os/cmd "sh" ["-c" "cat; echo done"])) "done"))
+  (test ":timeout-ms kills the child and says so"
+    (let (t0 (os/now)
+          r (os/cmd "sleep" ["10"] {:timeout-ms 100}))
+      (is (:timed-out r))
+      (is (< (- (os/now) t0) 5000))))
+  (test ":timeout-ms kills the grandchildren too — they held the pipes open"
+    ;; `sh` forks `sleep` (the `; true` stops it exec'ing), and the sleep inherits the
+    ;; stdout pipe: killing only `sh` would leave the read waiting ten seconds
+    (let (t0 (os/now)
+          r (os/cmd "sh" ["-c" "sleep 10; true"] {:timeout-ms 100}))
+      (is (:timed-out r))
+      (is (< (- (os/now) t0) 5000))))
+  (test "a command that finishes in time is not marked"
+    (is (nil? (:timed-out (os/cmd "true" [] {:timeout-ms 5000}))))))
+
+(describe "os/shell-quote"
+  (test "a word with spaces, quotes and $ survives sh -c as ONE argument, unexpanded"
+    (doseq (s ["My Project/a.py" "it's" "$(touch /tmp/pwned)" "a\"b" "" "-rf"])
+      (assert= (os/cmd-out (os/cmd "sh" ["-c" (str "printf %s " (os/shell-quote s))])) s))))
 (describe "os/cmd-ok?"
   (test "true for exit 0"
     (is (os/cmd-ok? (os/cmd "true"))))
@@ -94,3 +125,11 @@
     (is (string? (os/hostname))))
   (test "is non-empty"
     (is (> (string/length (os/hostname)) 0))))
+
+(describe "os/shell-quote leaves a plain word readable"
+  (test "safe words are unquoted; anything else is quoted"
+    (assert= (os/shell-quote "mix") "mix")
+    (assert= (os/shell-quote "test/a_test.exs:12") "test/a_test.exs:12")
+    (assert= (os/shell-quote "a b") "'a b'")
+    (assert= (os/shell-quote "*.txt") "'*.txt'")
+    (assert= (os/shell-quote "~") "'~'")))

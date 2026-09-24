@@ -25027,3 +25027,104 @@ hand-roll.
 green), the module registered in `crates/lisp/src/builtins/modules.rs`. A host still owns
 persistence: reopening a menu where the reader left it is `transient-open` with the value it
 last produced, which every editor already has somewhere to put.
+
+## ADR-388 — `std/editor/section` and reading a unified diff: the two things Magit is built on
+
+**Status:** implemented (2026-09-23). New module `std/editor/section`; `std/diff` gains
+`parse-unified`, `hunk-header`, `hunk-patch`, `hunk-select`, `hunk-new-line` and
+`hunk-old-line`.
+
+**Context.** bedit's git porcelain had Magit's menus (ADR-387 gave them flags) and not its
+feel, and the gap came down to two missing abstractions. First, every Magit buffer — the
+status, a log, a commit, a diff, blame — is the same TREE of sections: TAB folds any node,
+`n`/`p` walk headings, `^` climbs, `M-n`/`M-p` step siblings, `1`–`4` show the tree to a
+depth, and every command asks "what section is point in?" and gets a typed value. bedit had
+this for the status buffer only, hand-rolled as a vector of per-line maps with its own
+collapse set; its log, commit and diff buffers were text dumps, because building the
+machinery again for each was too much. Second, a diff is something you ACT on — stage a
+hunk, stage three lines of it, jump from a `+` line to the file line it became — and each of
+those needs the diff parsed with line numbers and a hunk turned back into a patch. std/diff
+could produce a diff and not read one.
+
+**Decision.** `std/editor/section` is the tree and nothing else, like `editor/transient`:
+sections are plain data (`:type :value :heading :children`, children being sections or
+body-line strings), `section-render` flattens a tree into lines plus a parallel ROWS vector
+naming what each line belongs to, and navigation is functions of `(rows, line)`. A section's
+identity is its path of `[type key]` pairs, and visibility is a map `id -> :show | :hide` over
+those ids, which is what lets a re-render keep what the reader had open. The host decides
+how to show the lines, how to colour them and what TAB means on a lazily-loaded section.
+
+`std/diff` reads a unified diff by COUNTS, not by pattern: a hunk ends when its header's line
+counts are spent, because `--- a/x` is a legal removed line and only the counts tell it from
+the next file's header. `hunk-select` is Magit's line-level staging as a pure function —
+changes outside the chosen range are neutralised so the patch still applies (forward: drop
+unchosen additions, keep unchosen removals as context; reverse, for unstaging and
+discarding: the other way round), and the header's counts are recomputed.
+
+**Consequences.** `tests/section_test.blsp` (15), `tests/diff_test.blsp` (+14). Parsing is
+~20 µs a line on the dev build — a 600-line commit in 13 ms — which is fast enough to run
+off the loop on every refresh and not fast enough to run on it for a large diff; bedit
+parses in the status buffer's collection task. Other list-shaped editor buffers (dired,
+*Tests*, occur) can adopt `editor/section` for folding and navigation without new code.
+
+## ADR-389 — Regex: Brood keeps the pattern LANGUAGE, a native engine does the matching
+
+**Status:** implemented (2026-09-23). New primitives `%regex-match?`, `%regex-find`,
+`%regex-find-all`, `%regex-tokens`, `%regex-paint` (`crates/lisp/src/builtins/regex_native.rs`,
+over `regex-automata`'s `meta::Regex`). `std/regex.blsp` keeps its parser and gains a
+translator; its Thompson NFA, bitset DFA, Pike VM and token scanner are deleted (1,486 → ~560
+lines). Supersedes ADR-352's engine; its `tokens` semantics stand.
+
+**Context.** The engine was written in Brood, on purpose (ADR-006): an NFA compiled once,
+a bitset lazy DFA for `match?`, a Pike VM for captures, and ADR-352's scanner for lexers.
+It was linear-time and correct, and it was slow for the one caller that matters most: an
+editor. bedit decides whether each visible row of a results buffer is a `file:line` link
+by trying a four-pattern table, and that cost ~0.5 ms a line (release build, 2026-09-23) —
+a 19-line *git-status* took 25 ms to paint, 96 ms under `nest run`, on every blink. The
+engine's per-character cost is the interpreter's, and making the interpreter 50× faster at
+bit-twiddling set simulation is not on any roadmap.
+
+**Decision.** Split along ADR-006's own line — Rust for mechanism, Brood for policy.
+
+- **Policy stays Brood.** The dialect is the parser's: a stray `*`/`{`/`)` and an
+  unterminated `[` are the characters they look like, `\n` is an `n`, `.` crosses newlines,
+  `^`/`$` are the whole string. The parser's AST is TRANSLATED into the engine's syntax with
+  every construct written out (`(?s:.)`, `\A`, `\z`, `[0-9]`, each quantified atom wrapped
+  in `(?:…)`, literals escaped by the engine's own metacharacter list — not "all
+  punctuation", since `\<` is a word boundary there). The engine's readings of the same
+  characters never leak through, and redefining the parser redefines every pattern.
+- **Mechanism is native.** `regex-automata` (lazy DFA + Pike VM, linear time, no
+  backtracking — the guarantees the Brood engine had). Leftmost-first for `find`; for the
+  lexer, an ANCHORED search under `MatchKind::All`, which is exactly "the longest match
+  here". Compiled patterns are cached process-wide by text, one `Arc` shared by every
+  worker thread (a `Regex` per call would rebuild its DFA each time).
+- **The primitives answer the language's values** — the match and token maps — not
+  offsets. Measured: the engine found a match in 0.8 µs and building its map in Brood took
+  another 6, so offsets gave most of the gain back. Constructing a result inside one
+  builtin is the `%map-into` precedent, not a mutable escape hatch.
+- **Offsets stay characters**, converted from the engine's bytes by the string's own char
+  index.
+
+**Semantics that changed**, deliberately, because the engine's are the better ones and
+matching them keeps `\b` consistent with `\w`:
+
+- `\w` is Unicode word characters (letters, marks, digits, `_`) — it was "a character
+  with an upper and a lower case", so `日本語` had no word characters. `\s` is Unicode
+  whitespace (it was space, tab, `\n`, `\r`). `\b` follows `\w`. `\d` stays ASCII `0-9`,
+  because a digit is something `string/->number` has to be able to read.
+- `\b` works anywhere in a `tokens` rule and in `paint`; both used to refuse one that the
+  bitset engine could not see.
+- A stray top-level `)` is a literal. It used to END the pattern: `a)x` parsed as `a`.
+
+**Measured** (release build, contracts off; before → after): a four-pattern `file:line`
+table over four lines 1,922 → 34 µs; `find-all` of 30 matches in 200 chars 1,055 → 14 µs;
+`replace` 176 → 22 µs; `tokens` over a 70-char line 61 → 9 µs; `match?` 7 → <1 µs.
+
+**Consequences.** `tests/regex_test.blsp` 66 → 77 (the dialect's translation, offsets past
+multi-byte characters, a cross-process run sharing the compiled patterns); the two tests
+that asserted the `\b` refusals now assert boundaries. `docs/primitives.md` gains a Regex
+row. The `regex` benchmark row now measures the native engine; it is no longer a
+dogfooding signal for the interpreter, and a bitset-heavy workload that wants one should
+be added in its place. A program that BUILDS patterns grows Brood's translation memo
+without bound, as it grew the old compile memo; the native cache is capped at 4,096 and
+cleared when full.

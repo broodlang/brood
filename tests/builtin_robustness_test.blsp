@@ -153,17 +153,17 @@ that a megabyte of it costs seconds; doubling costs milliseconds."
       (file/rmdir dir))))
 
 ;;
-;; --- %os-cmd-stdin: both pipe directions make progress ----------------------
+;; --- %os-cmd :stdin: both pipe directions make progress ----------------------
 ;;
 
-(describe "%os-cmd-stdin: no pipe deadlock"
+(describe "%os-cmd :stdin: no pipe deadlock"
   :isolated (test "a child echoing back more than one pipe buffer completes"
     ;; Was: the whole of stdin was written before anything read stdout, so a
     ;; child that emits more than the ~64 KiB pipe buffer while being fed
     ;; deadlocked with us — a scheduler worker pinned forever, uninterruptible
     ;; and uncatchable. (2 MiB through `cat` hung indefinitely; killed at 15 s.)
     (let (big (grow "x" 2000000)
-          r (%os-cmd-stdin "/bin/cat" [] big))
+          r (%os-cmd "/bin/cat" [] {:stdin big}))
       (assert= 0 (get r :exit))
       (assert= (count big) (count (get r :stdout))))))
 

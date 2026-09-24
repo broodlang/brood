@@ -2,7 +2,7 @@
 
 Chronological record of work sessions. Newest at the bottom.
 
-## 2026-09-23 — a VM/perf review: KI-188..189 fixed, RUNTIME reads borrow instead of pin, the loop safepoint per quantum
+## 2026-09-23 — a VM/perf review: KI-188..191 fixed, RUNTIME reads borrow instead of pin, the loop safepoint per quantum
 
 Four read-only reviewers (interpreter, JIT, heap/GC/scheduler, benchmark standing), then the
 fixes; the itemised picture, including what was deliberately left, is `handoff.md`'s entry.
@@ -76,6 +76,95 @@ the one POLICY the kernel had hard-coded — which registries a staged load stil
 is now the prelude's `*live-registries*` set, read by name; its guard (a claim made inside an
 open frame must be visible to another process at once) went red with the set emptied, which
 no existing test did.
+
+## 2026-09-23 — CI green again after three red commits: KI-186, KI-187 and the day's follow-ups
+
+CI had failed on every commit since `4c2807f3` (editor/section), and the red run list hid it
+behind cancellations until `make green` said so. Two real checker bugs and five stale tests.
+
+- **KI-187** — the order differential's red. `vt` and `editor/section` both declare a `row`,
+  and a bare type name inside `vt`'s own declarations was resolved from the checked file, so
+  once `editor/section` was loaded `vt`'s `terminal` read as `any`. Bare names in an alias
+  body or a loaded module's `sig` now resolve in the declaring module first.
+- **KI-186** — `nest check bin/tool.blsp` replayed its previous verdict after an edit,
+  because the whole-project verdict key named listed files outside the source trees but did
+  not fingerprint them.
+- **Follow-ups.** `string/fill-prefix` (d077b195) calls `regex/find`, so a source load of
+  `string` now pulls in `regex` and `table`. That moved `test`'s eager `:load` closure and
+  the artifact-matrix state dump, and the three new `string` names had no catalogue
+  category. http's `parse-request` splits the query off `:path` (08195edb), which the
+  registry mock in `package_test` still matched on. `image_sigs` built its image inside the
+  interpreter under test when none was on disk (CI's tree-walker job), which loaded
+  everything and so hid the transitive load it asserts. It now builds in a throwaway one.
+
+Both KI guards are sabotage-verified. The first KI-187 guard was a unit test that could not
+fail, because its helper installs no alias table. It was replaced by a `brood --check` test.
+
+## 2026-09-23 — `*ui-loop*`: an app can ask whether it is running inside a loop
+
+The companion to `evalsession` routing by request. Before firing work at another process an
+app has to know whether there is a loop to receive the answer; bedit answered it with
+`(whereis :editor)`, which is true of the first window only. A second frame and every
+`--serve` client's loop read as "no loop" and did the work inline in the wrong process — the
+playground evaluating in the daemon's own image with no timeout, a breakpoint freezing a
+second window's loop. `ui-run` now binds `*ui-loop*` to its own pid for the loop's whole
+life, `update` and `view` alike; nil outside one. Test in `ui_test`.
+
+## 2026-09-23 — `editor/evalsession`: an answer goes to whoever asked
+
+Found from bedit (its issues.md L4): a playground opened in a second FRAME sent its forms and
+waited forever. A session had one sink — the process registered `:editor`, the first frame —
+so every answer went there, and the first frame dropped them as not its own. The same shape
+is behind a `--serve` daemon's clients.
+
+A session is shared, so it now says so. A request names where its answer goes
+(`session-request … reply-to`); `:ready` and `:down` go to every client that started or
+subscribed (a second `session-start` naming a sink subscribes it); and the wire ids are the
+session's own — each request is given the next one and a route back to `[client-id
+reply-to]`, because two clients counting from 1 would otherwise settle each other's
+watchdogs and receive each other's answers. A respawn answers every in-flight request at its
+own address. Five tests beside the existing twenty-one, the routing sabotage-verified (routes
+ignored: the two routing tests red).
+
+## 2026-09-23 — regex goes native: the dialect stays Brood, the matching moves to `regex-automata` (ADR-389)
+
+Found from bedit: its *git-status* buffer painted in 25 ms (96 ms under `nest run`) because
+every visible row was tried against a four-pattern `file:line` table, and the Brood engine
+cost ~0.5 ms a line for that. bedit stopped asking (its links are a map), but the engine
+was the real cost for every caller, so it moved.
+
+`std/regex.blsp` keeps the parser and translates its AST into `regex-automata` syntax, every
+construct spelled out so the engine's own readings never leak in; five primitives run the
+result (`regex_native.rs`). The NFA, bitset DFA, Pike VM and ADR-352 scanner are gone —
+1,486 lines to ~560. The lexer's "longest match at this position" is an anchored search
+under `MatchKind::All`, which is exactly that. The first cut had the primitives return
+offsets and Brood build the maps: the engine found a match in 0.8 µs and the map took 6,
+so they now return the maps.
+
+Before → after, release build, contracts off: the `file:line` table over four lines 1,922 →
+34 µs; `find-all` (30 matches) 1,055 → 14 µs; `replace` 176 → 22 µs; `tokens` (70 chars) 61
+→ 9 µs; `match?` 7 → <1 µs.
+
+Two findings on the way. A stray top-level `)` ENDED the pattern — `a)x` was `a` — in the
+old parser too; it is a literal now (sabotage-verified). And `vec_or_nil` was gated on
+`dev-tools`, so any always-built primitive that used it would have broken the lean
+`nest release` bundle; it is ungated. `\w`/`\s`/`\b` are Unicode now (`\d` stays ASCII), and
+`\b` works inside a `tokens` rule and in `paint`, both of which used to refuse one.
+
+## 2026-09-23 — KI-183 fixed: a death is observable only after the monitors it held are released
+
+`retire_pid_tail` fired the dying process's `[:down …]` fan-out (`take_target`) and only then
+swept the monitors the dying process itself held (`sweep_dead_watcher`). The down is what
+makes a death observable, so a watcher woken by it could read a target's `:monitored-by` still
+counting the dead watcher's monitors. That is exactly `concurrency_test`'s "a watcher's death
+releases the monitors it held", read 2 once in CI. It reproduces on demand: four processes
+running the test's round 2000 times each read a stale count 1, 5, 0 and 5 times in 8000
+(release, VM), and 5 under `BROOD_VM=0`. With the sweep moved ahead of the fan-out it read 0
+in 64 000. The window predates KI-176's `by_watcher` index; the old full-table walk was
+simply slower to reach. Guard: the looped test beside the one-shot one, which reads 3, 3 and 7
+with the order restored and 0 with the fix, under the VM, the tree-walker and
+`BROOD_GC_STRESS=1`. The 29 test files that touch monitors or links pass, and so do the Rust
+monitor/link/dist tests. Links still notify after monitors, which is unchanged.
 
 ## 2026-09-22 — KI-184 fixed: a contract shim's own positions are never the reported one
 
@@ -1107,6 +1196,7 @@ Every session, oldest first. Early sessions' full text is in
 
 - **2026-09-21** — large-project scaling, item 2 (ADR-382, KI-179): `nest check` incremental for real. Measuring the doc's "unchanged re-check 16 s" from a cleared cache showed the ADR-119 cache hit only image → image — a user global's fingerprint fact is its DEF SITE, and a module from the project image had none (`F` vs `D<file>@<mtime>`), so the check after a cold build re-checked everything (154 s of 186 s) and so did the check after any edit (188 s). Three moves: the image carries def sites (`KIND_DEF_SITE`, the privacy-entry shape — also relights `source-location` / LSP go-to-def for imaged modules); an unchanged project REPLAYS its recorded lines without loading (keyed on the ADR-380 fingerprint + mode + `WALK_FLAGS`, now shared with ADR-371 through `%check-walk-flags`, + the listed files); the require graph and the lints' inputs no longer parse unchanged files (`%module-direct-requires` answers `:modules`, the index entry is v2). Also: `nest check FILE…` had never reused a verdict — relative keys against absolute ones. Rig, release: unchanged `nest check` **154 s / 15 s → 0.12 s, 118 MB** (a replay); one-function edit **188 s → 40 s**, of which 33 s is the image rebuild and 2.7 s the check (1 file re-checked); `nest check` over three listed files 9.3 s with 0 re-checked (4 s materialise + 4.6 s lints — the lints still scan every file); the require-graph parse 2.9 s → 0.04 s. Gate `nest::check_incremental`, sabotage-verified both ways. Left for the edit loop: the whole-image rebuild an edit still pays (30 s at 1 000 × 3k) — Finding 3.
 - **2026-09-21** — "make 1000% sure we have stable ground": the merged tree's ARMED suite had four reds, and CI had been red for three commits. **KI-180**: `gui`'s handle registries were lazily `def`'d on first use — a check-then-define race that orphaned handles when two processes allocated at once (both `ui_test` reds; full suite only). Created at load; a 40-process guard. **KI-181**: an error raised in a contract shim's positionless code was reported at the CATCH site; `attach_vm_trace` now gives an untagged error the innermost positioned call site (non-tail: the caller's form; tail: the caller's caller). `vm_prim_error_pos_test` measured the thin-wrapper elision rather than the fused prim arm it guards — it calls `%table-has?` now, plus a `sig!`-forced shim case; `lazy_load_test`'s ADR-366 child runs unarmed. **CI**: `isolate_tests_run_alone` reads only the per-test `:isolated (test` spelling; the module-index test had it on the describe. Every guard sabotage-verified.
+- **2026-09-23** — a checker false positive: hatch's `(when (web/audit/dev?) …)` warned "this test is always true" in every dev checkout. `dev?` returns `(def- *dev?* (web/env/dev?))`, read once at load; cross-file Gap A (`infer::global_value_ty`) typed the global by the literal it held in the CHECKER's process (`true` — `HATCH_ENV` unset), `dev?`'s inferred return became `true`, and the constant-condition lint proved the branch constant. The observation was a literal singleton, which is exactly the run-specific part. An observed value now contributes its KIND (`bool`, `int`, `string`), and an observed nil contributes nothing (the placeholder case — an unset env var reads nil too, whatever the name; before, only an earmuffed name escaped it). Messages read `got int` where they read `got 5`. Not done, on purpose: `is_earmuffed` reads the whole qualified spelling, so a module's `*global*` referenced cross-module (`mod/*x*`) is still typed — making it dynamic as well put ~10 `number`-vs-`int` strict findings into bedit (`(dec *width*)` and friends) for no soundness gain once nil is unknown. Gates in `check/tests/lints.rs` + `gradual_checks.rs` + `closure_inference.rs`, sabotage-verified. Residual, deliberately left: a truthy-kind global computed from the environment (a string set at check time, nil in production) can still prove a test constant.
 ---
 
 ## Recent — full entries

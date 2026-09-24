@@ -36,7 +36,7 @@
 (defn es-state (& overrides)
   (merge {:spec es-spec
           :proc :fake-proc
-          :sink (self)
+          :sinks [(self)]
           :buf ""
           :ready false
           :queue ()
@@ -242,3 +242,76 @@
                [:reroot "/somewhere/else"]))
       (assert= (:attempt st) 0)
       (assert= (:root st) "/somewhere/else"))))
+
+;; ---- whose answer is this -------------------------------------------------------------
+;; A session is shared — two frames, two daemon clients — so a request names where its
+;; answer goes, lifecycle events reach every client, and the wire ids are the session's own
+;; so two clients counting from 1 never collide.
+
+(defn- es-forwarder (tag)
+  "A process that forwards every event it receives to this test process, tagged — a second
+client whose mail can be told from the first's."
+  (let (me (self))
+    (spawn (fn ()
+             (letrec (loop (fn ()
+                             (receive
+                               ([:event kind payload gen name] (do
+                                                                 (send me [:via tag kind payload])
+                                                                 (loop))))))
+               (loop))))))
+
+(defn- es-via (tag)
+  "The next event the forwarder tagged `tag` passed on, or nil within a second."
+  (receive
+    ([:via ^tag kind payload] [kind payload])
+    (after 1000 nil)))
+
+(describe "evalsession routes answers to whoever asked"
+  (test "a request gets a WIRE id of the session's, and its route back"
+    (let (s1 (editor/evalsession/session-step (es-state) [:request 7 2000 {:src "a"} :someone])
+          s2 (editor/evalsession/session-step s1 [:request 7 2000 {:src "b"} :someone-else]))
+      ;; the same client id twice, two different wire ids, each routed home
+      (assert= (map (reverse (:queue s2)) first) '(1 2))
+      (assert= (get (:routes s2) 1) [7 :someone])
+      (assert= (get (:routes s2) 2) [7 :someone-else])))
+
+  (test "a reply reaches the client that asked, under the client's own id"
+    (let (other (es-forwarder :b)
+          s (editor/evalsession/session-feed (es-state {:ready true
+                                                        :inflight {1 99 2 99}
+                                                        :routes {1 [7 (self)] 2 [7 other]}})
+              (str (es-line {:id 2 :ok true :value "b's"}) (es-line {:id 1 :ok true :value "mine"}))))
+      (let (mine (es-events))
+        (assert= (count mine) 1)
+        (assert= (get (second (first mine)) :id) 7)
+        (assert= (get (second (first mine)) :value) "mine"))
+      (let ([kind payload] (es-via :b))
+        (assert= kind :reply)
+        (assert= (get payload :id) 7)
+        (assert= (get payload :value) "b's"))
+      ;; settled: neither in flight nor routed any more
+      (assert= (:inflight s) {})
+      (assert= (:routes s) {})))
+
+  (test "the ready banner reaches every subscribed client"
+    (let (other (es-forwarder :c)
+          s (editor/evalsession/session-step (es-state) [:subscribe other])
+          _ (editor/evalsession/session-feed s (es-line {:ready true})))
+      (assert= (map (es-events) first) '(:ready))
+      (assert= (first (es-via :c)) :ready)))
+
+  (test "subscribing twice is one subscription"
+    (let (s (editor/evalsession/session-step (es-state) [:subscribe (self)]))
+      (assert= (:sinks s) [(self)])))
+
+  (test "a request that dies with its child is answered at its own address"
+    (let (other (es-forwarder :d)
+          _ (editor/evalsession/session-step (es-state {:ready true
+                                                        :spawned-at (os/now)
+                                                        :inflight {3 99}
+                                                        :routes {3 [42 other]}})
+              [:proc-closed :fake-proc 1])
+          [kind payload] (es-via :d))
+      (assert= kind :reply)
+      (assert= (get payload :id) 42)
+      (is (get payload :timeout)))))

@@ -133,6 +133,25 @@ pub(super) fn without_tables<R>(f: impl FnOnce() -> R) -> R {
     out
 }
 
+thread_local! {
+    /// The qualified names whose DECLARED signatures are being parsed, innermost last —
+    /// see [`in_declaring_scope`].
+    static DECLARING: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Run `f` — a parse of `sym`'s heap-declared signature — with bare alias names resolving
+/// in `sym`'s own module first. `vt`'s `(sig line (row any -> …))` means `vt/row` from
+/// every file that calls `vt/line`; read from the caller's namespace instead, a second
+/// loaded `row` (`editor/section`'s) made it ambiguous (KI-187).
+pub(super) fn in_declaring_scope<R>(sym: Symbol, f: impl FnOnce() -> R) -> R {
+    DECLARING.with(|d| d.borrow_mut().push(value::symbol_name(sym)));
+    let out = f();
+    DECLARING.with(|d| {
+        d.borrow_mut().pop();
+    });
+    out
+}
+
 /// Install the type-alias table for this file (see [`TYPE_ALIASES`]).
 pub(super) fn set_type_aliases(
     map: HashMap<String, Value>,
@@ -155,6 +174,20 @@ pub(super) fn set_type_aliases(
 fn alias_ty(heap: &Heap, name: &str) -> Option<Ty> {
     let (qualified, form) = TYPE_ALIASES.with(|m| {
         let aliases = m.borrow();
+        // Inside an alias's own body, a bare name means what it meant where the alias was
+        // DECLARED: `vt`'s `(deftype terminal (record … :grid (vector row)))` names `vt/row`
+        // whichever file is being checked. Resolved from the checked file instead, the
+        // name fell to the unique-suffix rule, and a second loaded module declaring a
+        // `row` (`editor/section`) made it ambiguous — `any` — so what a file inferred
+        // depended on which modules the check had loaded before it (KI-187).
+        // A loaded module's `(sig …)` is the same case one level out ([`in_declaring_scope`]).
+        let declaring = ALIASES_EXPANDING
+            .with(|v| v.borrow().last().cloned())
+            .or_else(|| DECLARING.with(|d| d.borrow().last().cloned()))
+            .and_then(|q| q.rsplit_once('/').map(|(ns, _)| format!("{ns}/{name}")));
+        if let Some(form) = declaring.as_ref().and_then(|id| aliases.get(id)) {
+            return Some((declaring.clone().unwrap_or_default(), *form));
+        }
         let own = ALIAS_FILE_NS.with(|n| n.borrow().as_ref().map(|ns| format!("{ns}/{name}")));
         if let Some(form) = own.as_ref().and_then(|own| aliases.get(own)) {
             return Some((own.clone().unwrap_or_default(), *form));
