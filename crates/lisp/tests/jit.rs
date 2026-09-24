@@ -239,6 +239,14 @@ fn deep_handle_spill_under_jit() {
 // (This note read the opposite until 2026-09-04: it named a `BROOD_JIT_INLINE=1` opt-in the
 // runtime stopped reading when the default flipped, i.e. it told you to arm nothing.)
 #[test]
+// Skipped under the sanitizer only: ~1.1 billion calls are seconds native and hours with every
+// runtime callback instrumented (it ran past the 2h30 job limit, 2026-09-24). What this checks —
+// the inlined result stays bit-identical — runs in every suite; the lighter JIT tests beside it
+// still give the sanitizer the codegen and deopt paths.
+#[cfg_attr(
+    brood_asan,
+    ignore = "~1e9 calls: hours under ASAN; checked in every suite run"
+)]
 fn inlined_recursive_fib_under_jit() {
     // Recursive self-inlining (`docs/jit-optimizing-tier.md` §6b, Phase B). The non-tail
     // self-calls in `fib`'s body are spliced depth-1 into the arm's own frame (shifted
@@ -291,6 +299,11 @@ fn inlined_self_call_with_tail_helper_does_not_drop_wrapper() {
 }
 
 #[test]
+// Skipped under the sanitizer only, like `inlined_recursive_fib_under_jit`: ~5 billion calls.
+#[cfg_attr(
+    brood_asan,
+    ignore = "~5e9 calls: hours under ASAN; checked in every suite run"
+)]
 fn inlined_two_stage_swap_then_deopt_stays_correct() {
     // Two-stage tiering (devlog 2026-06-17): a qualifying recursive arm tiers to the SMALL
     // original native first, then the deferred *inlined* upgrade compiles and swaps in (an
