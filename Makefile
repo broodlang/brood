@@ -439,14 +439,7 @@ asan: ## AddressSanitizer over the kernel-exercising Rust tests (needs nightly +
 	# dated from 2026-08-17. This gate could not pass from that day until 2026-09-02, and
 	# nothing noticed because ASAN is manual, not CI. No budget satisfies both constraints;
 	# the wrong constant was the stack.
-	#
-	# `RUST_MIN_STACK` gives the TEST threads the same headroom. `brood_asan` sizes the
-	# runtime's workers, but a test that drives an `Interp` on the harness's own thread gets
-	# Rust's 2 MiB default, and the doubled frames overflowed it: `image_matches_source`
-	# died of a stack-overflow in a recursive walk (2026-09-24) the moment this job compiled
-	# again. `suite.rs` escapes it by spawning its own `WORKER_STACK_BYTES` thread; this makes
-	# every test thread that size under ASAN instead of asking each test to remember.
-	RUST_MIN_STACK=67108864 RUSTFLAGS="-Zsanitizer=address --cfg brood_asan" cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu -p brood --release --features brood/system-alloc --tests
+	RUSTFLAGS="-Zsanitizer=address --cfg brood_asan" cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu -p brood --release --features brood/system-alloc --tests
 
 repl: ## Start the REPL
 	$(CLI)
