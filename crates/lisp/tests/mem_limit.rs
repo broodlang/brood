@@ -8,6 +8,18 @@ use brood::core::alloc;
 use brood::error::ErrorKind;
 use brood::Interp;
 
+/// The limit is ONE process-wide global, and the plain libtest harness runs this file's
+/// tests as parallel threads of one process: one test clearing or re-arming the limit while
+/// another was mid-runaway made whichever lost the race fail — a different one each run
+/// (the sanitizer job, which uses that harness, 2026-09-24; nextest's process-per-test never
+/// saw it). Every test that touches the limit holds this for its whole body.
+static LIMIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn limit_lock() -> std::sync::MutexGuard<'static, ()> {
+    // a test that panicked while holding it poisons it; the next one still gets its turn
+    LIMIT.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[test]
 fn parse_size_handles_suffixes() {
     assert_eq!(alloc::parse_size("1024"), Some(1024));
@@ -42,6 +54,7 @@ fn parse_size_handles_suffixes() {
 /// which is how the sibling test above caught it).
 #[test]
 fn soft_limit_trips_inside_a_native_loop() {
+    let _limit = limit_lock();
     let mut interp = Interp::new();
     interp
         .eval_str("(defn ml-build (n acc) (if (= n 0) acc (ml-build (- n 1) (cons n acc))))")
@@ -61,6 +74,7 @@ fn soft_limit_trips_inside_a_native_loop() {
 
 #[test]
 fn soft_limit_turns_runaway_into_catchable_error() {
+    let _limit = limit_lock();
     // Build the prelude with no limit, *then* cap just above current usage so
     // the next chunk of allocation trips it.
     let mut interp = Interp::new();

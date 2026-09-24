@@ -83,8 +83,20 @@ fn race_first_call(module: &str, call: &str, expected: &str) {
 /// a build these arms cannot install anything, so they must not exist rather than fail — a red
 /// test for a supported configuration is a red nobody can act on. `(%build-stdimage?)` is the
 /// runtime equivalent if this ever needs checking from Brood.
+/// One imaged race at a time in a process. With no image in the cache (every CI run starts
+/// that way) the first imaged case BUILDS one — `stdimage/build` loads every module — and the
+/// plain libtest harness runs its sibling on another thread of the same process, where the
+/// interpreters share the prelude: the second case's racing interpreter installed while the
+/// first was still building, and a child died of `unbound symbol: string/blank?` (half of
+/// fresh-cache runs, 2026-09-24; nextest's process-per-test never saw it). Serialized, the
+/// second case finds the first's image and races on a quiet process, which is the race
+/// these cases exist to observe.
+#[cfg(feature = "stdimage")]
+static IMAGED_RACE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(feature = "stdimage")]
 fn race_first_call_from_the_stdlib_image(module: &str, call: &str, expected: &str) {
+    let _one_at_a_time = IMAGED_RACE.lock().unwrap_or_else(|e| e.into_inner());
     // The id carries the git sha and a hash of every baked-in `.blsp`, so any commit or `std/`
     // edit makes the previous image stale. Build on demand rather than asking the developer to
     // remember — a test that needs a manual step is a test that skips itself in CI.
