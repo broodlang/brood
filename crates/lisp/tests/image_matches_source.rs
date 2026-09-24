@@ -107,6 +107,22 @@ fn own_the_cache() -> std::path::PathBuf {
 
 #[test]
 fn an_imaged_module_binds_what_its_source_binds() {
+    // On a thread the size of a runtime worker, as `suite.rs` runs: building and walking the
+    // image recurses deep enough that the harness's own 2 MiB thread overflowed under the
+    // sanitizer, whose redzones roughly double every frame (2026-09-24). The sanitizer
+    // build sizes `WORKER_STACK_BYTES` for exactly that (`--cfg brood_asan`); growing EVERY
+    // test thread instead (`RUST_MIN_STACK`) broke two JIT tests that read the stack's
+    // bounds, so the headroom goes where the recursion is.
+    std::thread::Builder::new()
+        .name("image-differential".into())
+        .stack_size(brood::process::WORKER_STACK_BYTES)
+        .spawn(compare_image_with_source)
+        .expect("spawn the differential thread")
+        .join()
+        .expect("the differential thread panicked");
+}
+
+fn compare_image_with_source() {
     let cache = own_the_cache();
     let from_source = snapshot(false);
     let from_image = snapshot(true);
