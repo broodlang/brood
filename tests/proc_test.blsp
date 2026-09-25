@@ -354,7 +354,11 @@ twice — for a test whose answer arrived in milliseconds."
       ;; never been lost (0 of 300). A resend may find the child already reaped (the first
       ;; one worked; its close is still in flight), which `os/signal` rightly refuses.
       (letrec (interrupt (fn (tries)
-                           (try (os/signal p :int) (catch e nil))
+                           (try (os/signal p :int)
+                             (catch e
+                               (if (includes? (error-message e) "unknown or closed")
+                                 nil
+                                 (throw e))))
                            (receive
                              ([:proc ^p out] [:printed out])
                              ([:proc-closed ^p _] :closed)
