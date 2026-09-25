@@ -61,9 +61,15 @@ fn reactor_death_errors_instead_of_hanging() {
     );
 
     // 2. The pre-death socket was swept out of the registry (failed at its owner),
-    //    so its id no longer resolves.
-    assert!(
-        brood::host::net::local_port(lid).is_none(),
-        "the death sweep must drain the registry"
-    );
+    //    so its id no longer resolves. `reactor_died` sets the flag BEFORE it drains
+    //    (so no socket can slip in behind the sweep), so seeing the gate up says the
+    //    sweep has started, not finished — wait for it under the same deadline. The
+    //    one-shot assert here failed once under a loaded full suite (2026-09-25).
+    while brood::host::net::local_port(lid).is_some() {
+        assert!(
+            Instant::now() < deadline,
+            "the death sweep must drain the registry"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }

@@ -1038,6 +1038,19 @@ pub(crate) enum ChunkExit {
         /// Callee IC block (see [`Step::Tail::bases`]).
         bases: (u32, u32),
     },
+    /// A non-tail call to a VM arm whose frame is its arguments (exactly `argc` required
+    /// params: no optionals, no rest) — the `argc` args ALREADY sit at the top of `roots`,
+    /// so the driver adopts them as the callee's first slots instead of `Call`'s round trip
+    /// (copy them into `args`, carry them out by value, `push_frame` them back to where they
+    /// were). The frame base is `roots_len() - argc`; the result lands there on `Done`,
+    /// exactly where `Call`'s would (`drop_base`).
+    CallInPlace {
+        arm: Arc<ArmHandle>,
+        argc: usize,
+        genv: EnvId,
+        /// Callee IC block (see [`Step::Tail::bases`]).
+        bases: (u32, u32),
+    },
     /// A native callee ran **in place** from `exec_chunk`'s non-tail `Inst::Call` (the
     /// VM→native direct call, `docs/compute-frontier.md` §7.12) through
     /// `jit_tier_in_frame`, and ended with an outcome only the driver can honour: a deopt

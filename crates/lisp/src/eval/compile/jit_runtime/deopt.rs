@@ -208,7 +208,7 @@ pub(crate) fn vm_resume_deopt(
     // Nested run: the caller's native frame continues with ITS block after this
     // returns, so restore the cursors like `vm_apply` does.
     let saved_bases = heap.ic_bases();
-    let out = vm_run_bc(heap, arm, &[], genv, Some(s), false);
+    let out = vm_run_bc(heap, arm, &[], genv, Some(Box::new(s)), false);
     heap.set_ic_bases(saved_bases);
     match out? {
         VmOutcome::Done(v) => Ok(v),

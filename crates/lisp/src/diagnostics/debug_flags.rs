@@ -218,6 +218,11 @@ pub const FLAGS: &[DebugFlag] = &[
         "disable unboxing float-valued global reads (nbody's silent-interpretation bug)",
     ),
     f(
+        "BROOD_NO_INT_SLOT_CACHE",
+        OPTOUT,
+        "disable the JIT's per-slot i64 cache (re-tag-check every read of a just-stored int slot)",
+    ),
+    f(
         "BROOD_LINMAP",
         OPTOUT,
         "`=0` disables the linear-map rewrite (in-place build of a provably-linear map accumulator)",

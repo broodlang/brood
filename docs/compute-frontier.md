@@ -1357,6 +1357,19 @@ cost `runtime-frontier.md` names, whose next concrete step was then taken to be 
 IC tables** — superseded by the 2026-09-20 profile directly below, which found M2 is NOT a
 lever for these rows (the handoff says so too); read that subsection, not this sentence.
 
+#### 7.3, the receive exit BUILT and measured (2026-09-25) — it loses; the lever is OSR
+
+The design two paragraphs below was implemented behind a flag: `%receive` joins the subset in
+a receive-bearing chunk (with its `MakeClosure` matcher), the lowering journals the operand
+stack at the call and deopts with a planned-exit reason that feeds no deopt counter, the VM
+resumes AT the call and parks cleanly, and the driver re-tiers at the next back edge. It is
+correct and **slower** — `pingpong` +8.6%, `ring` +10.2%, `supervisor` +4.6%, `spawn-live`
++2.8% — because these loops do almost nothing before the receive, so every iteration pays a
+native entry, a journal and a deopt to run a comparison and a `send` natively. What would pay
+is resuming INTO native code after the receive (a per-receive second entry point: OSR at the
+continuation, the journal re-read into the callee's typed stack). Not attempted; devlog
+2026-09-25 (later) has the pieces the attempt needed.
+
 #### 7.3, profiled again 2026-09-20 (`perf record` on an unstripped release-fast, `BROOD_PERF_STATS` for the per-message arithmetic) — no single lever; the floor is the design, and here is what it is made of
 
 `pingpong` (200k messages, ~850 ns per message all-in) and `ring` (1M messages, ~790 ns)

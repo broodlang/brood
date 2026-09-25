@@ -1133,6 +1133,10 @@ struct Win {
     /// The pointer's last physical pixel position `(x, y)` — what a pixel-input
     /// window reports in place of the cell, and the position a press/release carries.
     cursor_px: (u16, u16),
+    /// The pointer in FRACTIONAL window cells `(row, col)`, measured from the same grid origin
+    /// and cell as `cursor` — what a mouse message carries as `{:at [row col]}` so a zoomed
+    /// region can hit-test inside a window cell (`Mouse::at`).
+    cursor_at: (f64, f64),
     /// The button currently held down (set on press, cleared on release), so a
     /// `CursorMoved` while it's held can be reported as a `:drag` carrying that
     /// button. Deliberately one button at a time — all a drag gesture needs: a
@@ -1308,6 +1312,7 @@ fn build_window(
         mods: ModifiersState::empty(),
         cursor: (0, 0),
         cursor_px: (0, 0),
+        cursor_at: (0.0, 0.0),
         held: None,
         last_click: None,
         held_key: Arc::new(Mutex::new(None)),
@@ -1812,7 +1817,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     let (col, row) = w.cursor;
                     deliver(
                         w.subscriber,
-                        mouse_message(&release_of(b, col, row, &w.mods)),
+                        mouse_message(&release_of(b, col, row, w.pointer_at(), &w.mods)),
                     );
                 }
             }
@@ -1825,7 +1830,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     let (col, row) = w.cursor;
                     deliver(
                         w.subscriber,
-                        mouse_message(&release_of(b, col, row, &w.mods)),
+                        mouse_message(&release_of(b, col, row, w.pointer_at(), &w.mods)),
                     );
                 }
             }
@@ -1853,6 +1858,12 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 };
                 w.cursor = cell;
                 w.cursor_px = px;
+                w.cursor_at = px_to_cell_frac(
+                    position,
+                    &w.renderer,
+                    psz.width as usize,
+                    psz.height as usize,
+                );
                 if moved {
                     let (col, row) = w.pointer();
                     // While a button is held this is a `:drag`; otherwise it's a
@@ -1877,6 +1888,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                             shift: w.mods.shift_key(),
                             count: 0,
                             scroll_dy: 0.0,
+                            at: w.pointer_at(),
                         }),
                     );
                 }
@@ -1938,6 +1950,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                             shift: w.mods.shift_key(),
                             count,
                             scroll_dy: 0.0,
+                            at: w.pointer_at(),
                         }),
                     );
                 }
@@ -1962,6 +1975,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                             shift: w.mods.shift_key(),
                             count: 0,
                             scroll_dy: 0.0,
+                            at: w.pointer_at(),
                         }),
                     );
                 }
@@ -2234,6 +2248,16 @@ impl Win {
             self.cursor
         }
     }
+
+    /// The sub-cell position a mouse message carries beside [`Win::pointer`]: the fractional
+    /// cell for a cell-grid window, None for a pixel-input one (its pointer is already exact).
+    fn pointer_at(&self) -> Option<(f64, f64)> {
+        if self.pixel_input {
+            None
+        } else {
+            Some(self.cursor_at)
+        }
+    }
 }
 
 /// A window pixel position clamped to the `(x, y)` a mouse message can carry (u16 —
@@ -2248,6 +2272,21 @@ fn px_clamped(pos: PhysicalPosition<f64>) -> (u16, u16) {
 /// origin (`grid_origin` — inset plus the remainder placement, the same the grid is
 /// painted with) is subtracted first, so a click lands on the cell painted under it;
 /// a click in the surrounding margin clamps to the edge cell.
+/// [`px_to_cell`] without the floor: the pointer's `(row, col)` in fractional window cells,
+/// from the same grid origin and cell, so `floor` of it is exactly the cell `px_to_cell`
+/// gives. Clamped at 0 like it.
+fn px_to_cell_frac(
+    pos: PhysicalPosition<f64>,
+    r: &Renderer,
+    w_px: usize,
+    h_px: usize,
+) -> (f64, f64) {
+    let (ox, oy) = r.grid_origin(w_px, h_px);
+    let col = (pos.x - ox as f64).max(0.0) / r.cell_w.max(1) as f64;
+    let row = (pos.y - oy as f64).max(0.0) / r.cell_h.max(1) as f64;
+    (row, col)
+}
+
 fn px_to_cell(pos: PhysicalPosition<f64>, r: &Renderer, w_px: usize, h_px: usize) -> (u16, u16) {
     let (ox, oy) = r.grid_origin(w_px, h_px);
     let col =

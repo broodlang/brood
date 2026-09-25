@@ -497,6 +497,13 @@ pub struct Mouse {
     pub count: u8,
     /// Scroll delta in line units (positive = up); 0.0 for non-scroll actions.
     pub scroll_dy: f64,
+    /// The pointer's position in FRACTIONAL window cells, `(row, col)` — where in the cell
+    /// it is, which the whole-cell `row`/`col` throw away. A region painted at another cell
+    /// size (a zoomed `CellRegion`, ADR-363) needs it to hit-test: one window cell can hold
+    /// parts of two of its cells. Appended as a trailing `{:at [row col]}` (see
+    /// `mouse_message`); None where the frontend has no sub-cell position (a terminal) or
+    /// the window reports pixels already.
+    pub at: Option<(f64, f64)>,
 }
 
 #[cfg(not(feature = "gui"))]

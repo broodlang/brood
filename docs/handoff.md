@@ -12,6 +12,43 @@ sysctl that moves under you — that file's last section has the one-line check)
 questions are answerable here; check that file's "what this box CAN answer" before deferring
 anything.
 
+## 2026-09-25 — the stability/perf queue: KI-195, four measured wins, what is left
+
+**State:** no open bug. KI-193 stays a WATCH (four full suite runs with `BROOD_FEATURES_AUDIT=1`
+printed nothing); KI-195 (a test race) is fixed. Gates on the final tree: capped VM nextest ×2
++ tree-walker ×1 all 1714/1714, `make gcstress` clean, the fuzz generators clean (devlog).
+
+**Done this session** (numbers in the devlog 2026-09-25):
+- VM call: `jit_tier_declines` skips the tier check for a refused arm / sub-Native ceiling, and a
+  return into the caller skips the loop-top safepoint — interpreted call 1 117 → ~940
+  instructions; `ab-vm` `fib` −8.4%, `ackermann` −7.3%.
+- Messages: the registry hashes pids with splitmix64, not SipHash; a parked continuation is
+  boxed once at capture (`VmOutcome::Suspended(Box<…>)`) — `pingpong` −6.6%, `ring` −6.0%.
+- JIT: `slot_i64_cache` (the f64 cache's twin) — a `let`-heavy int loop 2× faster, rows flat.
+- `gen/call`: measured, nothing gen-specific left (one wrapper call over hand-rolled).
+
+**Update, later the same day:** `CallInPlace` shipped (`bc4162dc`, interpreted call ~790
+instructions); the non-atomic handle, the receive exit and frame switching inside
+`exec_chunk` were each BUILT, measured and dropped — numbers and reasons in the devlog's
+"(later)" entry. Items 1 and 2 below stand, with that evidence: item 1's cheap form loses,
+item 2's structural form regresses the LTO build. Also in the tree: a tracked junk file named
+`arning)" -A5|` at the repo root (since `e2acbf87`, a shell-redirect slip) — the owner's to
+remove.
+
+**Next, in value order:**
+1. **Receive loops run interpreted.** ~26% of `pingpong`'s instructions are `exec_chunk`
+   running the `ping`/`responder` bodies, which a `receive` keeps off the JIT. The general
+   lever for every process loop in the language; needs native frames that can suspend (or a
+   receive that returns to the driver from native code) — an ADR, not a patch.
+2. **The rest of the VM call** (~940 instructions): ~540 in `exec_chunk`'s `Call` + callee
+   entry, ~300 in `vm_run_bc`'s frame push/pop. The structural fix is pushing a VM frame
+   without leaving `exec_chunk` (the driver's `Call`/`Done` arms moved inside it). The two
+   locked refcount ops on `Arc<ArmHandle>` per call (~7% of the call's cycles) are the
+   smaller, riskier piece — a non-atomic per-process handle is `unsafe` in KI-188/191's area.
+3. **Per-message residue:** `receive_match` 7%, `run_one` 5%, allocation ~6%, `Ctx` install /
+   save TLS work — each small; count before touching.
+4. **Refresh the benchmark column** once 1 or 2 lands (protocol in brood-benchmarks' CLAUDE.md).
+
 ## 2026-09-23 — a VM/perf review: four correctness bugs fixed, three measured wins, and what was left
 
 ### STATE AT HANDOVER — read first (2026-09-23 evening)

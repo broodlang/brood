@@ -503,10 +503,9 @@ pub(crate) fn exec_chunk(
                 // head (`head = None`) is staged below the args (`callee` at `n - argc - 1`,
                 // `drop_base = n - argc - 1`) and takes no IC. This unifies callee resolution
                 // into the call IC — the head no longer has its own `Global`/`env_get`.
-                let mut argv: SmallVec<[Value; 4]> = SmallVec::with_capacity(argc);
-                for k in 0..argc {
-                    argv.push(heap.root_at(n - argc + k));
-                }
+                // The args, copied off the operand stack — built BELOW, after the in-place
+                // call path (which never needs them) has declined.
+                let mut argv: SmallVec<[Value; 4]>;
                 let mut fast: Option<(Arc<ArmHandle>, EnvId, (u32, u32))> = None;
                 // Set by the unstaged IC path when `vm_call_ic_self` proved this tail call
                 // targets THIS arm in THIS env — `fast` then stays `None` (no clone).
@@ -590,8 +589,6 @@ pub(crate) fn exec_chunk(
                                     )
                                     .map_err(|e| tag_pos(e, pos))?;
                                     cur_env = heap.read_root_env(genv);
-                                    argv.clear();
-                                    argv.extend((0..argc).map(|k| heap.root_at(drop_base + k)));
                                     v
                                 }
                             };
@@ -641,8 +638,6 @@ pub(crate) fn exec_chunk(
                                 )
                                 .map_err(|e| tag_pos(e, pos))?;
                                 cur_env = heap.read_root_env(genv);
-                                argv.clear();
-                                argv.extend((0..argc).map(|k| heap.root_at(drop_base + k)));
                                 v
                             }
                         };
@@ -651,6 +646,45 @@ pub(crate) fn exec_chunk(
                 } else {
                     (heap.root_at(n - argc - 1), n - argc - 1)
                 };
+                // In-place non-tail call (`ChunkExit::CallInPlace`): a VM callee whose frame
+                // is exactly its arguments takes them where they lie. Not for a callee with
+                // native code installed — the VM→native direct call below owns that — and a
+                // staged head's callee value (below the args) is dropped by shifting the args
+                // down one slot, so the frame starts at `drop_base` either way.
+                if !*tail {
+                    if let Some((ref farm, _, _)) = fast {
+                        #[cfg(feature = "jit")]
+                        let native = vm_direct_eligible(heap, farm, argc);
+                        #[cfg(not(feature = "jit"))]
+                        let native = false;
+                        if !native
+                            && farm.nrequired == argc
+                            && farm.noptional == 0
+                            && farm.rest_slot.is_none()
+                        {
+                            if drop_base + argc < n {
+                                for k in 0..argc {
+                                    let v = heap.root_at(drop_base + 1 + k);
+                                    heap.set_root_at(drop_base + k, v);
+                                }
+                                heap.truncate_roots(drop_base + argc);
+                            }
+                            // Move the IC's handle out rather than clone it (no refcount).
+                            let (arm, genv, bases) = fast.take().expect("matched Some above");
+                            return Ok(ChunkExit::CallInPlace {
+                                arm,
+                                argc,
+                                genv,
+                                bases,
+                            });
+                        }
+                    }
+                }
+                let n = heap.roots_len();
+                argv = SmallVec::with_capacity(argc);
+                for k in 0..argc {
+                    argv.push(heap.root_at(n - argc + k));
+                }
                 // VM→native DIRECT call (`docs/compute-frontier.md` §7.12). On the
                 // call-heavy rows the interpreter's dominant "call" is not a VM-level apply
                 // but an entry into a callee that is ALREADY native — a gate-refused arm's

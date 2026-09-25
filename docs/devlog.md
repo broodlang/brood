@@ -2,6 +2,131 @@
 
 Chronological record of work sessions. Newest at the bottom.
 
+## 2026-09-25 (later) — the call adopts its arguments in place; three structural levers measured and NOT taken
+
+**Shipped:** `ChunkExit::CallInPlace` (`bc4162dc`) — a non-tail call into an arm whose frame is
+exactly its arguments no longer copies them into a `SmallVec`, carries them out of
+`exec_chunk` by value and `push_frame`s them back: the driver adopts `roots[len-argc..]` as
+the callee's first slots. Interpreted call ~940 → ~790 instructions (1 876 → 1 726 per
+iteration of the `BROOD_TIER=1` call-only loop); in the shipped `release-lean` build at the
+default ceiling, parent vs commit, two rounds of best-of-7: `ring` 704/693 → 700/687,
+`pingpong` 178/177 → 173/176, `json` 129 → 127/129, `ackermann`/`fib`/`supervisor` flat.
+
+**Measured and dropped — each is the answer to a question the handoff left open:**
+
+- **A non-atomic `ArmHandle` count** (the two `lock inc/dec` per call). Built as an `ArmRef`
+  with a plain count, sound by the per-process ownership argument and debug-checked by pid.
+  Cycles per interpreted call did not move (470 either way): an uncontended locked op on a
+  core-local line is cheap on this machine, so the "~7% of the call's cycles" estimate was a
+  skid artefact. Not worth an `unsafe` type.
+- **The receive as a native exit** (compute-frontier §7.3, opt-in flag while measured): a
+  receive-bearing chunk joins the subset, journals the operand stack AT the `%receive` call
+  and deopts with a planned-exit reason that feeds no deopt counter, and the VM resumes at the
+  call, parks cleanly, and re-tiers on the next back edge. Correct (`ping`/`responder` lower,
+  checksums hold) and **slower**: `pingpong` +8.6%, `ring` +10.2%, `supervisor` +4.6%,
+  `spawn-live` +2.8% — these loops do almost nothing before their receive, so each iteration
+  pays a native entry + journal + deopt for a comparison and a `send`. The lever that would
+  pay is resuming INTO native code after the receive (a second entry point per receive —
+  OSR), a JIT feature of its own. Two things the attempt taught: a flag read on the VM's
+  back edge cost +32 instructions per iteration elsewhere (register pressure in the giant
+  dispatch loop), so a re-tier hint belongs in the driver (set the frame's back-edge counter
+  one short of the interval); and `hosts-receive` counts an arm's OWN `%receive`, which any
+  such design has to exempt.
+- **Frame push/pop inside `exec_chunk`** (the driver's `Call`/`Done` arms moved into the
+  dispatch loop for callees whose tier check would decline). Inlined: 1 682 → 1 536
+  instructions and −6% cycles per call at tier 1 (`fib` −7.2% at the VM ceiling), but in the
+  LTO build `ring` +2.6% and `ackermann` +2.5% at the default ceiling, with +22% L1i misses on
+  `ring`. Out of line: `ackermann` flat but `ring` still +3.2%, and the tier-1 gain gone (a
+  dozen register references cost what the switch saved). Same compiles and bails on both
+  sides. A regression on the rows users run is stop-the-world here, so neither variant
+  shipped; the interpreted call's residue is now spread across the dispatch loop itself.
+
+**Found by the column refresh: every program touching `string` loaded `regex` in its
+pre-flight check.** `strings` read +4.6% (23.7 → 24.8 ms) against a 2.4% spread; `make ab
+--floor` against the previous column's commit called it noise (+3.7% on a 3.7% floor, 1 ms
+resolution), but instructions said +7.9M in the program itself while startup had FALLEN.
+`BROOD_IMAGE_TRACE` named it: `regex` and `table` materialised, and `BROOD_NO_CHECK=1` made
+them vanish. `string/fill-prefix` calls `regex/find` (since `d077b195`), which was declared
+`(any string -> any)` — a `-> any` return is exactly what ADR-370's image signature index will
+not carry, so `brood file`'s pre-flight check loaded `regex` (and, through it, `table`) to type
+the call, for every run of every program using `string`, and a cached verdict replays those
+loads. Declaring what `find`/`find-all` return (`(or nil (map keyword any))`,
+`(vector (map keyword any))`) lets the image carry them: `strings` 263.2M → 255.9M
+instructions, back to the old column. The class is worth knowing: a `-> any` declaration on a
+widely reached std function is a per-run load cost for everything that reaches it.
+
+**Also:** upstream's new `os/signal` `:int` test lost its SIGINT in the shell's fork→exec
+window — reproduced in plain Python (10–13 of 200) and on a clean `origin/main` build under
+load; it re-sends after 500 ms now (0 lost in 300). My first version of that resend swallowed every
+error, which the `discarded-catch` lint flags, and CI's checker gate went red on `bc4162dc`;
+the owner's `f305a0fe` (a `check-allow` naming why) landed first and is what stands — my
+`c58e38c8` message still describes a narrower catch the merge superseded. `jit_int_slot_cache_test`'s tier checks
+sit behind `%native-tier?`. The disk filled mid-gate (build outputs; cleared with the owner's
+go-ahead) and that gate was discarded, not read.
+
+## 2026-09-25 — the VM's call and message paths, counted: four measured wins, one test race (KI-195)
+
+The handoff's stability/perf queue, taken in order. **Stability first:** three capped full VM
+runs and one tree-walker run with `BROOD_FEATURES_AUDIT=1` armed (KI-193's diagnostic). The
+audit printed nothing; one red — KI-195, `net_reactor_death` asserting the reactor's death
+sweep the instant it saw the death flag, which `reactor_died` deliberately sets first.
+Reproduced with a widened window, fixed in the test, sabotage-verified.
+
+**The VM call, counted** (`perf stat` on a call-only loop at `BROOD_TIER=1`, instructions per
+iteration differenced between N=2M and N=6M, so startup cancels): an interpreted non-tail
+call cost **~1 117 instructions** (2 056 with the call, 939 with its body inlined by hand) at
+~3.6 IPC — instruction-bound, not stall-bound (the first `perf annotate` pointed at a `lock
+decq` and a stack copy; that was sampling skid, and `instructions:upp` put it right). Two cuts:
+the driver skipped nothing for an arm the JIT had REFUSED — `jit_tier_in_frame`'s preamble and
+`settle_native_frame` ran on every call into a `BAILED` arm and at a ceiling below Native — so
+`jit_tier_declines` now answers that before the tier check; and a `Done` that returns into its
+caller no longer re-runs the loop-top safepoint (the call already ticked the reduction and ran
+the checks; a due collection or a pending heap-limit raise still takes the full path). **2 056
+→ 1 877** instructions per iteration; `make ab-vm`: `fib` −8.4%, `ackermann` −7.3%, `json`
+−4.2%; default ceiling noise (`json` read +5% in the sweep, +1.8% solo inside a 3.6% floor,
+and −1.7% in instructions). What is left of the call is spread thin: ~540 instructions in
+`exec_chunk`'s `Call` handling and the callee's entry, ~300 in `vm_run_bc`'s frame push/pop,
+~96 in `push_frame`. Two locked refcount ops per call on the (uncontended, per-process)
+`Arc<ArmHandle>` are ~7% of the call's cycles; removing them needs a non-atomic handle, i.e.
+`unsafe` in KI-188/191's territory — measured and deferred, not attempted.
+
+**`gen/call`** measured 3.6 µs against 3.0 for a hand-rolled ref+monitor+after+flush call and
+2.2 for a bare round trip; the `defserver` side adds ~100 ns. The client excess is one wrapper
+call (`call` → `call-timeout`) — the handoff's 1.2 µs has become ~0.2–0.4 µs through the
+earlier work, and there is nothing `gen`-specific left to take.
+
+**Per message.** `pingpong` is 193 ms at `BROOD_J=1` and at 12 workers — cross-core traffic
+is not the cost; ~9.3k instructions per message are. Two finds from `instructions:upp`: the
+process registry hashed every target pid with std's **SipHash** (~2.6% of the row) — it now
+uses the splitmix64 finalize the table path already uses for an int key (NOT the identity: a
+registry shard holds only pids agreeing in their low six bits, the bits hashbrown indexes
+with); and every park **copied the captured continuation by value** four times (out of
+`vm_run_bc`, through `catch_unwind`, into `handle_capture_outcome`, into `store_resume`, which
+then boxed it) — `VmOutcome::Suspended`/`Preempted` carry a `Box<Suspended>` from the capture
+on. `make ab --floor`: **`pingpong` −6.6%, `ring` −6.0%**, `spawn-live`/`supervisor` −2.5%/−3.6%
+(noise), `spawn`/`latency` noise. The rest of a message is spread: interpreting the receive
+loops themselves (~26% — a `receive` keeps its arm off the JIT), `receive_match` 7%,
+`run_one` 5%, allocation ~6%.
+
+**The JIT's int tag guard.** Read in the machine code, not argued: a loop with three `let`-bound
+ints stored the `Int` tag to a slot and reloaded it on the next instruction to compare it with
+`Int` — twice for `(+ a a)` — and reloaded the payload beside it; Cranelift does not forward
+the store. `Frame::slot_i64_cache` is the integer twin of the f64 cache, maintained in the same
+two places (`set_slot_flags`, the widened-join clear), so it rests on the same soundness
+argument (lexical scoping; parameter slots are never cached). On that loop **5.11G → 3.16G
+instructions, 314 → 157 ms**; on the benchmark rows flat (±1% — their hot arms already carry
+values in registers). Fuzz: all 13 generators ×25 plus `arithmetic`/`tier_transition`/`numeric`
+×200, 0 divergences, 0 stale. Guard `tests/jit_int_slot_cache_test.blsp` (sabotage: a handle
+store keeping the cached int reds it, 6 019 000 for 12 008 000). `BROOD_NO_INT_SLOT_CACHE=1`
+is the lever.
+
+**Gates on the final tree:** full capped VM nextest ×2 and tree-walker ×1, 1714/1714 each;
+`make gcstress` clean on all twelve files.
+
+**A trap re-met:** `json` reads 40% slower at the default ceiling than at tier 1 when pinned
+to one core, and 14% FASTER unpinned — the 125 background compiles share the pinned core.
+CLAUDE.md already says this; it is still the first thing a pinned tier comparison shows.
+
 ## 2026-09-25 — the three watch items re-hunted under load: KI-155 closed by construction
 
 KI-154, KI-155 and KI-127 were the only known issues not marked fixed, each seen once and
@@ -15925,3 +16050,23 @@ it never came back (bedit issues.md P5). `(proc/flag :no-break true)` marks a pr
 a breakpoint passes through; std's own editor infrastructure sets it — every
 `spawn-buffer` process, the buffer registry, the evalsession worker. Guards in
 `tests/debug_test.blsp`.
+
+## 2026-09-25 (evening) — a mouse event says where the pointer is exactly; the grid starts at the top
+
+**The bug (bedit):** in a zoomed pane, the line a click selected was not the line under the
+pointer. A zoomed pane is painted in a `cell-region` at its own cell size, and the editor
+hit-tests it by dividing the pointer's offset by the zoom ratio. It only ever received the
+WHOLE window cell, rounded down before that division. At 1.5× every second row of the
+pane was ambiguous, and the error grew with the distance from the pane's top.
+
+**Shipped:** a cell-grid window's `[:mouse …]` message ends with `{:at [row col]}`, the
+pointer's position in fractional cells. It is computed by the same `grid_origin` as
+`px_to_cell`, in `CursorMoved`, and carried on every press, release, drag, move and scroll.
+Slot 6 is nil when the event has no count or delta, so every consumer reading the slots by
+position reads what it did before. The terminal and `{:input :pixels}` windows send none.
+
+**Also:** `grid_origin` puts the vertical remainder BELOW the grid, not above it. Above it
+left up to a whole row of empty space over the first line of text. It also moved every row
+on each font-size step, the same fault the horizontal remainder had until it moved.
+`the_bottom_row_stays_flush_at_every_size` is replaced by
+`the_first_row_stays_at_the_top_at_every_size`.

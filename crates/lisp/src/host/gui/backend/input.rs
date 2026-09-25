@@ -79,13 +79,31 @@ pub(super) fn mouse_message(m: &Mouse) -> Message {
     } else if m.scroll_dy != 0.0 {
         v.push(Message::Float(m.scroll_dy));
     }
+    // The pointer's exact position, as a trailing `{:at [row col]}` in FRACTIONAL window
+    // cells — after the 7th slot, which is filled with nil when there is no count or delta
+    // so every consumer reading those slots by position reads what it always did.
+    if let Some((row, col)) = m.at {
+        if v.len() == 6 {
+            v.push(Message::Nil);
+        }
+        v.push(Message::Map(vec![(
+            Message::Keyword(value::intern("at")),
+            Message::Vector(vec![Message::Float(row), Message::Float(col)]),
+        )]));
+    }
     Message::Vector(v)
 }
 
 /// A synthetic release of held button `b` at cell `(col, row)` — delivered when the
 /// pointer leaves the window or focus is lost while a button is down, so its real
 /// (off-window) release can't strand the app thinking the button is still pressed.
-pub(super) fn release_of(b: MouseButton, col: u16, row: u16, mods: &ModifiersState) -> Mouse {
+pub(super) fn release_of(
+    b: MouseButton,
+    col: u16,
+    row: u16,
+    at: Option<(f64, f64)>,
+    mods: &ModifiersState,
+) -> Mouse {
     Mouse {
         action: MouseAction::Release,
         button: Some(b),
@@ -96,6 +114,7 @@ pub(super) fn release_of(b: MouseButton, col: u16, row: u16, mods: &ModifiersSta
         shift: mods.shift_key(),
         count: 0,
         scroll_dy: 0.0,
+        at,
     }
 }
 
@@ -143,6 +162,7 @@ pub(super) fn deliver_scroll(w: &Win, dy: f64) {
             shift: w.mods.shift_key(),
             count: 0,
             scroll_dy: dy.abs(),
+            at: w.pointer_at(),
         }),
     );
 }
@@ -292,5 +312,59 @@ mod shift_char_tests {
         assert_eq!(shift_char('5'), '%'); // M-% (query-replace)
         assert_eq!(shift_char('6'), '^'); // M-^ (join-line)
         assert_eq!(shift_char('f'), 'f'); // letters pass through (lower-cased later)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn press_at(at: Option<(f64, f64)>, count: u8) -> Vec<Message> {
+        let m = Mouse {
+            action: MouseAction::Press,
+            button: Some(MouseButton::Left),
+            row: 3,
+            col: 7,
+            ctrl: false,
+            alt: false,
+            shift: false,
+            count,
+            scroll_dy: 0.0,
+            at,
+        };
+        match mouse_message(&m) {
+            Message::Vector(v) => v,
+            _ => panic!("a mouse message is a vector"),
+        }
+    }
+
+    #[test]
+    fn the_exact_position_trails_the_positional_slots() {
+        // a press: slot 6 stays the click count, the position follows it
+        let v = press_at(Some((3.75, 7.25)), 1);
+        assert_eq!(v.len(), 8);
+        assert!(matches!(v[3], Message::Int(3)));
+        assert!(matches!(v[6], Message::Int(1)));
+        let Message::Map(entries) = &v[7] else {
+            panic!("the position is a map")
+        };
+        let (_, Message::Vector(at)) = &entries[0] else {
+            panic!("{{:at [row col]}}")
+        };
+        assert!(matches!(at[0], Message::Float(r) if r == 3.75));
+        assert!(matches!(at[1], Message::Float(c) if c == 7.25));
+    }
+
+    #[test]
+    fn with_nothing_in_slot_six_it_is_nil_so_the_slots_keep_their_places() {
+        let v = press_at(Some((1.5, 2.5)), 0);
+        assert_eq!(v.len(), 8);
+        assert!(matches!(v[6], Message::Nil));
+    }
+
+    #[test]
+    fn no_position_is_the_message_it_always_was() {
+        let v = press_at(None, 2);
+        assert_eq!(v.len(), 7);
     }
 }

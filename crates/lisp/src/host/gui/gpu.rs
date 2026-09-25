@@ -1347,9 +1347,8 @@ impl GpuWindow {
 
         let (fwf, fhf) = (fw as f32, fh as f32);
         let mut fb = FrameBuilder::new(fwf, fhf);
-        // The grid origin, not the bare inset: the CPU painter centres the vertical
-        // remainder (the rows that do not divide into whole cells), and a frame must land
-        // on the same pixels whichever target paints it.
+        // The grid origin, the one the CPU painter and the mouse hit-test use, so a frame
+        // lands on the same pixels whichever target paints it.
         let (ox, oy) = renderer.grid_origin(fw as usize, fh as usize);
         let grid = Grid {
             ox: ox as f32,

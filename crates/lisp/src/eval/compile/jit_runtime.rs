@@ -199,6 +199,32 @@ pub(crate) fn vm_direct_eligible(heap: &Heap, arm: &CompiledArm, argc: usize) ->
     !code.is_null() && code != crate::jit::BAILED && code != crate::jit::QUEUED
 }
 
+/// Would [`jit_tier_in_frame`] return `None` for `arm` without touching anything — and so
+/// may the driver skip the tier check (and the frame bookkeeping around it) outright?
+/// True for the two early exits every interpreted activation of a refused arm takes: the
+/// over-deep drain (`jit_force_vm`) and a `BAILED` arm with no deferred hot install waiting
+/// in `inline_code`. The caller has already ruled out a ceiling below Native.
+///
+/// Exists because the driver paid the tier check on EVERY non-tail call into an arm the JIT
+/// had refused — `jit_tier_in_frame`'s preamble (a TLS ceiling read, two `OnceLock`s, the
+/// `BAILED` probe) plus `settle_native_frame` on a `None` outcome: ~90 instructions of a
+/// ~1100-instruction interpreted call (2026-09-25, `perf stat` on a call-only loop at
+/// `BROOD_TIER=1`). Must mirror `jit_tier_in_frame`'s early returns: anything it would do
+/// for a `BAILED` arm with an `inline_code` staged, this must answer `false` for.
+#[cfg(feature = "jit")]
+#[inline]
+pub(crate) fn jit_tier_declines(heap: &Heap, arm: &CompiledArm) -> bool {
+    use std::sync::atomic::Ordering::Acquire;
+    if heap.jit_force_vm {
+        return true;
+    }
+    arm.jit_code.load(Acquire) == crate::jit::BAILED
+        && (!xadmit_enabled() || {
+            let ic = arm.inline_code.load(Acquire);
+            ic.is_null() || ic == crate::jit::BAILED || ic == crate::jit::QUEUED
+        })
+}
+
 #[cfg(feature = "jit")]
 pub(crate) fn jit_tier_in_frame(
     arm: &Arc<CompiledArm>,

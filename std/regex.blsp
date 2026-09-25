@@ -430,7 +430,7 @@ opening parens; `(?:...)` groups are not numbered.
 Leftmost-first, like Perl and unlike POSIX: of two matches starting at the same
 place, the one the pattern's own alternation and greediness prefer wins."
   (%regex-find (regex-search-src pattern) s 0))
-(sig find (any string -> any))
+(sig find (any string -> (or nil (map keyword any))))
 
 (defn find-all (pattern s)
   "Every non-overlapping match of `pattern` in `s`, left to right, as a vector of the
@@ -440,7 +440,7 @@ end, and steps one character past an EMPTY match so a pattern that can match not
 
     (map (regex/find-all \"\\\\d+\" \"a1b22c333\") (fn (m) (get m :text)))   → (\"1\" \"22\" \"333\")"
   (%regex-find-all (regex-search-src pattern) s))
-(sig find-all (any string -> any))
+(sig find-all (any string -> (vector (map keyword any))))
 
 ;; ---- lexing: a rule table, and a line rule ----------------------------------------
 

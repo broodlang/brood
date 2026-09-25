@@ -581,6 +581,10 @@ fn jit_lower_arm_inner(
     // `ny*ny` would otherwise reload from memory and branch twice per read.
     let slot_f64_cache: std::cell::RefCell<Vec<Option<cranelift_codegen::ir::Value>>> =
         std::cell::RefCell::new(vec![None; nslots]);
+    // Its integer twin (`Frame::slot_i64_cache`): a read of a just-stored int slot returns the
+    // SSA value instead of reloading and re-tag-checking the slot.
+    let slot_i64_cache: std::cell::RefCell<Vec<Option<cranelift_codegen::ir::Value>>> =
+        std::cell::RefCell::new(vec![None; nslots]);
     // Handle-spill scratch: `[spill_base, spill_base + reserve)` are the frame slots
     // reserved (above the compiler's slot ceiling) for spilling call-result handles
     // that must survive a later call's safepoint. `reserve` matches what arm
@@ -1368,6 +1372,7 @@ fn jit_lower_arm_inner(
         blockarg_spill_base,
         blockarg_spill_len,
         slot_f64_cache: &slot_f64_cache,
+        slot_i64_cache: &slot_i64_cache,
     };
     // A scratch `Value`-sized stack slot the handle / call / global ops write their result
     // into (the out-pointer ABI). One per arm, reused: each result is read straight back

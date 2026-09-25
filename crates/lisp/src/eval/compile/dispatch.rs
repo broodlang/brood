@@ -586,6 +586,21 @@ pub(crate) fn dbg_check_args(args: &[Value], label: &str) {
     }
 }
 
+/// Fill `arm`'s capture slots (`capture_base + k`) of the frame at `base` from the captured
+/// env `genv` — [`push_frame`]'s step for them, shared with the driver's in-place frame
+/// adoption (`ChunkExit::CallInPlace`). No allocation, so no collection.
+#[inline]
+pub(crate) fn fill_captures(heap: &mut Heap, arm: &CompiledArm, base: usize, genv: EnvRoot) {
+    if !arm.capture_names.is_empty() {
+        let cenv = heap.read_root_env(genv);
+        let capture_base = arm.nrequired + arm.noptional + arm.rest_slot.is_some() as usize;
+        for (k, &name) in arm.capture_names.iter().enumerate() {
+            let v = heap.capture_value(cenv, k, name);
+            heap.set_root_at(base + capture_base + k, v);
+        }
+    }
+}
+
 pub(crate) fn push_frame(
     heap: &mut Heap,
     arm: &CompiledArm,
@@ -628,14 +643,7 @@ pub(crate) fn push_frame(
     // — the VM-built common case) and falls back to a by-name `env_get` for a chained /
     // tree-walker env, so it's correct in both engines. Filled before optional defaults so a
     // default form may reference a capture. No GC between here and the body (no alloc).
-    if !arm.capture_names.is_empty() {
-        let cenv = heap.read_root_env(genv);
-        let capture_base = arm.nrequired + arm.noptional + arm.rest_slot.is_some() as usize;
-        for (k, &name) in arm.capture_names.iter().enumerate() {
-            let v = heap.capture_value(cenv, k, name);
-            heap.set_root_at(base + capture_base + k, v);
-        }
-    }
+    fill_captures(heap, arm, base, genv);
     // Missing optionals take their default, left-to-right (so a later default sees an
     // earlier one). `None` is a nil-default — the slot is already nil. A real default
     // evaluates against the frame: earlier params/optionals are filled and rooted;

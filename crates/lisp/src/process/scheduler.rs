@@ -1111,7 +1111,7 @@ impl Process {
         // any of this quantum's native code compares against it.
         #[cfg(feature = "jit")]
         crate::eval::compile::stamp_stack_limit(&mut self.heap);
-        let resume = self.resume.take().map(|b| *b);
+        let resume = self.resume.take();
         if super::scheduler::pool::sched_dbg() {
             if let Some(r) = &resume {
                 eprintln!("[sched] resume pid={} {}", self.pid, r.dbg_line());
@@ -1132,11 +1132,11 @@ impl Process {
 
     /// Stash a captured continuation back into the process before it parks or re-queues
     /// (so the next `run_one` resumes from it).
-    fn store_resume(&mut self, s: crate::eval::compile::Suspended) {
+    fn store_resume(&mut self, s: Box<crate::eval::compile::Suspended>) {
         if super::scheduler::pool::sched_dbg() {
             eprintln!("[sched] park pid={} {}", self.pid, s.dbg_line());
         }
-        self.resume = Some(Box::new(s));
+        self.resume = Some(s);
     }
 
     /// Establish `CURRENT` for this quantum. Resets the per-quantum thread-locals
