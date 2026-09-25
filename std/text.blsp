@@ -63,3 +63,20 @@
 
     (text/->string (text/from-string \"hi\"))   → \"hi\""
   (%string->rope s))
+
+(defn skip-forward (r at chars inside?)
+  "The first index at or after `at` that ends a run of characters from `chars` (with
+`inside?`) or of characters NOT from it (without) — how far a word, a run of blanks, or
+anything else defined by a character set reaches. Reads only the run, never the whole rope.
+
+    (text/skip-forward (text/from-string \"  ab cd\") 0 \" \" true)   → 2
+    (text/skip-forward (text/from-string \"  ab cd\") 2 \" \" false)   → 4"
+  (%rope-skip r at true chars inside?))
+
+(defn skip-backward (r at chars inside?)
+  "The smallest index at or before `at` such that every character between it and `at` is
+in the run — from `chars` with `inside?`, not from it without. The mirror of
+`skip-forward`.
+
+    (text/skip-backward (text/from-string \"ab cd\") 5 \" \" false)   → 3"
+  (%rope-skip r at false chars inside?))

@@ -338,3 +338,30 @@ twice — for a test whose answer arrived in milliseconds."
                            (= n 0) false
                            else (do (sleep 20) (gone? (dec n))))))
           (is (gone? 100)))))))
+
+(describe "proc: os/signal interrupts without closing"
+  ;; Ctrl-C for a child on pipes. To the GROUP: `sleep` holds the output pipe, so were
+  ;; only `sh` interrupted, the [:proc-closed …] would wait out the whole 30 s.
+  :isolated (test ":int ends a foreground command and the shell running it"
+    (let (p (os/spawn "sh" ["-c" "echo ready; sleep 30; echo after"]))
+      (assert= (receive ([:proc ^p out] (string/trim out)) (after 5000 :timeout)) "ready")
+      (os/signal p :int)
+      (assert= (receive
+                 ([:proc ^p out] [:printed out])
+                 ([:proc-closed ^p _] :closed)
+                 (after 5000 :timeout))
+        :closed)))
+  :isolated (test "a program that traps :int is told and carries on"
+    (let (p (os/spawn "sh"
+              ["-c" "trap 'echo caught' INT; echo ready; while :; do sleep 0.05; done"]))
+      (assert= (receive ([:proc ^p out] (string/trim out)) (after 5000 :timeout)) "ready")
+      (os/signal p :int)
+      (assert= (receive ([:proc ^p out] (string/trim out)) (after 5000 :timeout)) "caught")
+      ;; still registered and running: a second signal is accepted, not an error
+      (os/signal p :term)
+      (is (not (= :timeout (receive ([:proc-closed ^p _] :closed) (after 5000 :timeout)))))))
+  :isolated (test "an unknown signal or a closed handle throws"
+    (let (p (os/spawn "cat" []))
+      (assert-error (os/signal p :nope))
+      (os/close p)
+      (assert-error (os/signal p :int)))))

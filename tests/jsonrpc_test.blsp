@@ -1,0 +1,77 @@
+;; std/jsonrpc — JSON-RPC 2.0 over `Content-Length` framing (the wire of LSP, DAP and a
+;; stdio MCP server). The decoder is the part with history: it cuts by BYTES, keeps a
+;; partial frame for the next chunk, and survives a body that is not JSON.
+;;
+;; Register-only — discovered and run by `nest test`.
+
+(defmodule jsonrpc-test (:use test))
+
+(describe "jsonrpc — framing"
+  (test "the length is the body's UTF-8 byte count, not its character count"
+    ;; `é` is one character and two bytes: a character count would say 3
+    (assert= (jsonrpc/frame "\"é\"") "Content-Length: 4\r\n\r\n\"é\""))
+  (test "a request round-trips through decode with its id, method and params"
+    (let ([messages rest] (jsonrpc/decode (jsonrpc/request 1 "textDocument/hover" {:line 3})))
+      (assert= rest "")
+      (assert= (count messages) 1)
+      (let (m (first messages))
+        (assert= (:jsonrpc m) "2.0")
+        (assert= (:id m) 1)
+        (assert= (:method m) "textDocument/hover")
+        (assert= (get-in m [:params :line]) 3))))
+  (test "a notification has no id"
+    (is (not (contains? (first (first (jsonrpc/decode (jsonrpc/notification "exit" nil)))) :id))))
+  (test "an error response carries the reserved code"
+    (let (m (first (first (jsonrpc/decode (jsonrpc/error-response 9
+                                            (:method-not-found jsonrpc/*error-codes*)
+                                            "no")))))
+      (assert= (get-in m [:error :code]) -32601)
+      (assert= (get-in m [:error :message]) "no"))))
+
+(describe "jsonrpc — decoding a chunked stream"
+  (test "several frames in one chunk come out in order"
+    (let ([messages rest] (jsonrpc/decode (str (jsonrpc/request 1 "a" nil)
+                                            (jsonrpc/request 2 "b" nil))))
+      (assert= (map messages :id) (list 1 2))
+      (assert= rest "")))
+  (test "a frame split anywhere waits for the rest, then decodes whole"
+    (let (whole (jsonrpc/response 5 "done")
+          split-at (fn (n)
+                     (let ([early rest] (jsonrpc/decode (string/substring whole 0 n))
+                           [late remaining] (jsonrpc/decode (str rest
+                                                              (string/substring whole
+                                                                n
+                                                                (string/length whole)))))
+                       (and (empty? early) (= (count late) 1) (= remaining "")))))
+      ;; inside the header, just past the blank line, and one byte short of the end
+      (is (split-at 5))
+      (is (split-at (+ 4 (index-of whole "\r\n\r\n"))))
+      (is (split-at (dec (string/length whole))))))
+  (test "a multi-byte body is not waited on forever"
+    ;; measured in characters it is short of its byte length, and would never complete
+    (let ([messages rest] (jsonrpc/decode (jsonrpc/response 1 "ünïcödé")))
+      (assert= (:result (first messages)) "ünïcödé")
+      (assert= rest "")))
+  (test "a body that is not JSON is dropped, and the frame after it still decodes"
+    (let ([messages rest] (jsonrpc/decode (str (jsonrpc/frame "{not json")
+                                            (jsonrpc/response 2 true))))
+      (assert= (map messages :id) (list 2))
+      (assert= rest "")))
+  (test "a malformed header stops decoding and keeps the buffer"
+    (let (garbled "Content-Length: many\r\n\r\n{}")
+      (assert= (jsonrpc/decode garbled) [() garbled]))))
+
+;; A real completion reply from a real project is ~100 kB, and bedit's decoder (this one,
+;; before it moved here) reached its body with `take`/`drop` over the bytes — which go
+;; through the SEQ view, so the body became a list holding one boxed int per byte.
+;; Quadratic (1 kB 0.3 ms, 4 kB 2 ms, 16 kB 17 ms), and at ~100 kB it exhausted the 2 GB
+;; process limit and killed the LSP client. `bytes/slice` now; this pins the size that died.
+(describe "jsonrpc — a large message decodes (it used to exhaust memory)"
+  (test "an 80 kB completion reply round-trips"
+    (let (items (string/join (map (range 4000) (fn (i) (str "{\"label\":\"item" i "\"}"))) ",")
+          body (str "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[" items "]}")
+          [messages leftover] (jsonrpc/decode (jsonrpc/frame body)))
+      (is (> (string/length body) 80000))
+      (assert= (count messages) 1)
+      (assert= leftover "")
+      (assert= (count (get (first messages) :result)) 4000))))

@@ -51,6 +51,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "The character index of the LAST occurrence of needle in rope r starting strictly before `before`, or -1. With fold? the comparison is simple case folding. The backward counterpart of %rope-find, and like it, allocates nothing per call.",
         rope_rfind,
     );
+    primitives.def(
+        "%rope-skip",
+        Arity::exact(5),
+        Sig::new(vec![rope, int, any, string, any], int),
+        &["r", "at", "forward?", "set", "inside?"],
+        "Where a run of characters reaches from `at` in rope r: with inside? the run of characters IN set, else of characters NOT in it. Forward (forward? true) it answers the first index at or after `at` whose character ends the run; backward, the smallest index at or before `at` such that every character between it and `at` is in the run. Reads only the run, not the rope: a word motion over a large buffer costs the word. `at` is clamped to the rope.\n\n    (%rope-skip (text/from-string \"  ab cd\") 0 true \" \" true)   → 2",
+        rope_skip,
+    );
 }
 
 /// Simple case folding for one character: its lowercase when that is exactly one
@@ -180,4 +188,48 @@ fn rope_rfind(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(Value::Int(
         find_last_before(&rope, &needle, before, fold).map_or(-1, |i| i as i64),
     ))
+}
+
+/// How far a run of characters in (or out of) `set` reaches from `at`: forward, the first
+/// index ≥ `at` whose character does not continue the run; backward, the smallest index ≤
+/// `at` such that every character between it and `at` does. Reads only the run itself
+/// (`chars_at` walks the rope's leaves, and `prev` steps back through them), so a word
+/// motion costs the word, not the document.
+fn skip_run(rope: &ropey::Rope, at: usize, forward: bool, set: &[char], inside: bool) -> usize {
+    let n = rope.len_chars();
+    let at = at.min(n);
+    let continues = |c: char| set.contains(&c) == inside;
+    if forward {
+        let mut index = at;
+        for c in rope.chars_at(at) {
+            if !continues(c) {
+                break;
+            }
+            index += 1;
+        }
+        index
+    } else {
+        let mut index = at;
+        let mut chars = rope.chars_at(at);
+        while let Some(c) = chars.prev() {
+            if !continues(c) {
+                break;
+            }
+            index -= 1;
+        }
+        index
+    }
+}
+
+/// `(%rope-skip r at forward? set inside?)`
+fn rope_skip(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let who = "%rope-skip";
+    let forward = truthy(arg(args, 2));
+    let inside = truthy(arg(args, 4));
+    let set: Vec<char> = expect_string_ref(heap, who, arg(args, 3))?
+        .chars()
+        .collect();
+    let at = expect_int(heap, who, arg(args, 1))?.max(0) as usize;
+    let rope = expect_rope_ref(heap, who, arg(args, 0))?;
+    Ok(Value::Int(skip_run(&rope, at, forward, &set, inside) as i64))
 }

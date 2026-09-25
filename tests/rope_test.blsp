@@ -197,3 +197,28 @@
                            (empty? (text/from-string ""))]))))
           reply (receive ([:counted n e1 e2] [n e1 e2])))
       (assert= reply [11 false true]))))
+
+;; ---- text/skip-forward / skip-backward (%rope-skip) --------------------------
+;; What a word motion, M-m and M-SPC measure: how far a run of characters from (or not
+;; from) a set reaches. Native, and reading only the run — M-f used to flatten the whole
+;; buffer to a string on every keystroke to find the end of one word.
+
+(describe "text/skip-forward and skip-backward"
+  (test "forward over a run IN the set stops at the first character outside it"
+    (assert= (text/skip-forward (text/from-string "  \tab") 0 " \t" true) 3))
+  (test "forward over a run NOT in the set stops at the first character inside it"
+    (assert= (text/skip-forward (text/from-string "word, next") 0 " ," false) 4))
+  (test "backward stops where the run began"
+    (assert= (text/skip-backward (text/from-string "one two") 7 " " false) 4)
+    (assert= (text/skip-backward (text/from-string "one   two") 6 " " true) 3))
+  (test "a run that reaches the edge of the text stops there"
+    (assert= (text/skip-forward (text/from-string "aaa") 0 "a" true) 3)
+    (assert= (text/skip-backward (text/from-string "aaa") 3 "a" true) 0))
+  (test "no run at all answers where it started"
+    (assert= (text/skip-forward (text/from-string "ab") 1 " " true) 1)
+    (assert= (text/skip-backward (text/from-string "ab") 1 " " true) 1))
+  (test "an index past the end is clamped, not an error"
+    (assert= (text/skip-forward (text/from-string "ab") 99 " " true) 2))
+  (test "indices are CHARACTERS, not bytes"
+    ;; é is two bytes: a byte walk would answer 5
+    (assert= (text/skip-forward (text/from-string "ééé x") 0 " " false) 3)))

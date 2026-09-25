@@ -65,6 +65,29 @@ is the lever.
 to one core, and 14% FASTER unpinned — the 125 background compiles share the pinned core.
 CLAUDE.md already says this; it is still the first thing a pinned tier comparison shows.
 
+## 2026-09-25 — the three watch items re-hunted under load: KI-155 closed by construction
+
+KI-154, KI-155 and KI-127 were the only known issues not marked fixed, each seen once and
+explained from its shape. Each was looped under load: first with a `yes` on every core, then
+beside a `-j28` workspace suite. KI-154 ran 300 times, KI-127 300 times (the whole
+`autoload_race` binary) and KI-155 120 times. None failed.
+
+- **KI-155** was fixable anyway. Its 2026-09-17 fix spread the burst over ~500 ms, which
+  only moved the deadline. The helper now bursts until the test stops it after the watch
+  returns, so the window has events whenever it opens. Checked both ways: a 700 ms-late
+  watcher passes, and the same with the helper stopped up front fails.
+- **KI-154** was already closed (2026-09-23). The index said so and the section heading did
+  not, so the heading is fixed and the stress runs recorded. Two more ways to lose its
+  `[:hi]`, a same-initiator duplicate link and an over-read handshake frame, were ruled out
+  from the code.
+- **KI-127** stays hardened with its cause open. It has 382 clean runs now, and its
+  diagnostic is still armed.
+
+A trap worth knowing: editing a file under `tests/` while a workspace suite runs makes the
+check differentials (`check_order_differential`, `image_sigs_differential`,
+`derivation_cache_differential`) fail. They check `tests/` twice and compare, and the two
+halves read different files. That red is the edit's doing, not the checker's.
+
 ## 2026-09-23 — a VM/perf review: KI-188..191 fixed, RUNTIME reads borrow instead of pin, the loop safepoint per quantum
 
 Four read-only reviewers (interpreter, JIT, heap/GC/scheduler, benchmark standing), then the
@@ -15885,3 +15908,51 @@ the bug: a module materialised from the stdlib image carried **positions with no
 (`from_message` re-stamps through `set_form_pos`, which takes the ambient `current_file`),
 so imaged code reported a line from one file under another file's name —
 `%image-load-section` now stamps the section's own module path.
+
+## 2026-09-25 — a buffer says what an edit did: the splice log
+
+bedit's hosted buffers (issues.md H2) sent every keystroke to their buffer process as a
+splice DIFFED from the old and new text: both texts materialised per event, and the place
+guessed — in a run of equal characters the diff cannot tell which one was typed, so `a`
+typed at the front of `aaa` went out as an insert at the END, landing a collaborator's caret
+on the wrong side of it. The edit primitives know exactly what they did, so they now say it:
+`insert` / `delete-char` / `delete-backward-char` / `delete-region` share one tail
+(`buffer-apply-edit`) that shifts markers and editable regions as before and logs
+`[rope-before rope-after lo hi repl]` under `:splices` (the last 32).
+`buffer-splices-since before after` replays that chain — nil when it cannot account for the
+change (an undo restores a snapshot; a wholesale replace), for the caller to diff instead —
+and `editor/buffer-client/link-propagate-buffers` sends it, falling back to
+`link-propagate`'s diff. The walk compares rope handles, which `=` answers by identity
+before content; carrying the ropes across a process boundary is an `Arc` clone each.
+
+## 2026-09-25 — `os/signal`: Ctrl-C for a child on pipes
+
+bedit's shell buffer (issues.md P9) could run `sleep 60` and then only wait it out or kill
+the buffer: `os/close` is the one way to reach a piped child, and it kills. `os/signal p
+sig` (`%proc-signal`) sends `:int` / `:term` / `:hup` / `:quit` / `:kill` to the child's
+process GROUP — `os/spawn` already makes it a group leader so `os/close` can reap what it
+started — and leaves it registered, because a program may catch the signal and carry on.
+Guards in `tests/proc_test.blsp`; the group test goes red when the signal goes to the pid
+alone (the shell dies, `sleep` holds the pipe, `[:proc-closed …]` waits out the 30 s).
+
+## 2026-09-25 — `std/jsonrpc`: the LSP wire, once
+
+bedit's LSP client carried JSON-RPC's framing as private functions — the `Content-Length`
+header, the four message builders, and the stream decoder that cuts a chunked stdout into
+messages by BYTES (a body with one multi-byte character is longer in bytes than in
+characters, and a character count waits forever) and slices with `bytes/slice` (the SEQ
+view built one boxed int per byte and exhausted a 2 GB limit on a 100 kB completion reply).
+DAP and a stdio MCP client speak the same wire, so it is std's now: `jsonrpc/frame`,
+`request`, `notification`, `response`, `error-response`, `decode`, and the reserved
+`*error-codes*`. Guards in `tests/jsonrpc_test.blsp`.
+
+## 2026-09-25 — `%rope-skip`: word motion reads the word, not the buffer
+
+`forward-word` / `backward-word` flattened the whole rope to a string on every M-f / M-b
+and then walked it with `string/char-at`; `back-to-indentation` (M-m) and
+`whitespace-run-at` (M-SPC, M-\) did the same to look at one line, and the sentence motions
+to look at one paragraph (issues.md X5 in bedit). `%rope-skip r at forward? set inside?` —
+public as `text/skip-forward` / `text/skip-backward` — answers how far a run of characters
+from (or not from) a set reaches, walking the rope's leaves from `at` and reading only the
+run. The word and whitespace motions use it; the sentence motions slice just the paragraph.
+Guards in `tests/rope_test.blsp`; `buffer_test` holds the motions' behaviour unchanged.

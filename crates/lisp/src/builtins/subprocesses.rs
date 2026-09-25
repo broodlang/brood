@@ -65,6 +65,13 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         &["p"],
         "Terminate subprocess p: kill it if still running and close its stdin. Idempotent; returns nil. The final [:proc-closed handle code] still arrives at the owner.",
         proc_close);
+    primitives.def(
+        "%proc-signal",
+        Arity::exact(2),
+        Sig::new(vec![subprocess_ty, kw], nil_ty),
+        &["p", "sig"],
+        "Send signal sig (:int, :term, :hup, :quit or :kill) to subprocess p's whole process group — the child and everything it started — and leave it running if it chooses to survive. :int is Ctrl-C. If it exits, [:proc-closed handle code] arrives as for any exit. Returns nil; throws if p is unknown/closed or sig is not one of those. Unix only.",
+        proc_signal);
 }
 
 // ----- persistent child processes (ADR-104) ----------------------------------
@@ -183,6 +190,17 @@ pub(super) fn proc_set_binary(args: &[Value], _: EnvId, heap: &mut Heap) -> Lisp
     let on = crate::eval::truthy(arg(args, 1));
     crate::host::subprocess::set_binary(id, on)
         .map_err(|e| LispError::runtime(format!("proc-set-binary: {}", e)))?;
+    Ok(Value::nil())
+}
+
+pub(super) fn proc_signal(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_subprocess(heap, "proc-signal", arg(args, 0))?;
+    let sig = match arg(args, 1) {
+        Value::Keyword(k) => value::symbol_name_ref(k),
+        other => return Err(LispError::wrong_type(heap, "proc-signal", "keyword", other)),
+    };
+    crate::host::subprocess::signal(id, sig)
+        .map_err(|e| LispError::runtime(format!("proc-signal: {}", e)))?;
     Ok(Value::nil())
 }
 

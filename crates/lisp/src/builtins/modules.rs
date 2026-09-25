@@ -354,6 +354,9 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // encoder over the string primitives; the reader's `\u{}` escape is the
     // codepoint→char mechanism). Opt-in, never in the prelude.
     embedded_module!("json", "std/json.blsp"),
+    // JSON-RPC 2.0 over `Content-Length` framing — the wire of LSP, DAP and a stdio MCP
+    // server: build + frame a message, cut a chunked stream back into messages (by BYTES).
+    embedded_module!("jsonrpc", "std/jsonrpc.blsp"),
     // WASM component interop (ADR-071/145): load sandboxed native components,
     // call exports (marshalled by WIT types), `use-native` binding. Policy over
     // the `%wasm-*` primitives (feature `wasm`; without it the primitives are
