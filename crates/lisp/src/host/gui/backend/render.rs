@@ -374,11 +374,13 @@ impl Renderer {
     /// differently:
     ///   - **horizontal**: at the inset. The grid is LEFT-ALIGNED and the remainder
     ///     sits on the right.
-    ///   - **vertical**: the FULL remainder above the grid — anchoring the leftover
-    ///     at the *top* pushes the grid down so its bottom row (the editor's mode
-    ///     line / status bar) sits flush against the window's bottom edge (modulo the
-    ///     inset), instead of floating on half a cell. The slack reads as headroom up
-    ///     top, where the eye expects it.
+    ///   - **vertical**: BELOW the grid, too. The grid is TOP-ALIGNED: row 0 sits at
+    ///     the inset and the slack goes under the last row, as Emacs leaves it under
+    ///     the echo area. It used to go ABOVE the grid, so the bottom row sat flush
+    ///     against the window's edge. That left up to a whole row of empty space over
+    ///     the first line of text, which reads as a layout bug, not as headroom. It
+    ///     also moved every row up or down on each font-size step, for the same reason
+    ///     the horizontal remainder did (below).
     ///
     /// The horizontal half-remainder (`rem_w / 2`) that used to centre the grid is gone,
     /// and the reason is worth keeping. `rem_w` is `width % cell_w`, so it depends on the
@@ -392,11 +394,9 @@ impl Renderer {
     /// WM-independent (no window resize, so it works where `request_inner_size` is
     /// ignored), and the mouse hit-test (`px_to_cell`) shares it so clicks stay
     /// aligned with what's painted.
-    pub(crate) fn grid_origin(&self, _w_px: usize, h_px: usize) -> (usize, usize) {
+    pub(crate) fn grid_origin(&self, _w_px: usize, _h_px: usize) -> (usize, usize) {
         let inset = self.inset();
-        let ch = self.cell_h.max(1);
-        let rem_h = h_px.saturating_sub(2 * inset) % ch;
-        (inset, inset + rem_h)
+        (inset, inset)
     }
 
     /// Recompute the px size + cell metrics by shaping a reference glyph ('M') in
@@ -1487,21 +1487,20 @@ mod grid_stability_tests {
         );
     }
 
-    /// The bottom row stays flush against the bottom inset at every size — that is what
-    /// the vertical remainder going ABOVE the grid buys, and it is why a status bar on the
-    /// last row does not float.
+    /// The first row sits at the top inset at every size. The vertical remainder goes
+    /// under the grid, so the text starts where the window starts. It used to go above
+    /// the grid, which left up to a whole row of empty space over line 1, and that gap
+    /// changed on every font-size step.
     #[test]
-    fn the_bottom_row_stays_flush_at_every_size() {
+    fn the_first_row_stays_at_the_top_at_every_size() {
         let mut r = Renderer::new(1.0, default_families(), 15.0);
         let (w, h) = (1913, 1077);
         for px in 10..=30 {
             r.set_font(None, Some(px as f32));
-            let (_, y) = r.grid_origin(w, h);
-            let rows = (h - 2 * r.inset()) / r.cell_h.max(1);
             assert_eq!(
-                y + rows * r.cell_h.max(1),
-                h - r.inset(),
-                "bottom not flush at {px} px"
+                r.grid_origin(w, h).1,
+                r.inset(),
+                "row 0 moved down at {px} px"
             );
         }
     }

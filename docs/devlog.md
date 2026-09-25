@@ -16033,3 +16033,23 @@ it never came back (bedit issues.md P5). `(proc/flag :no-break true)` marks a pr
 a breakpoint passes through; std's own editor infrastructure sets it — every
 `spawn-buffer` process, the buffer registry, the evalsession worker. Guards in
 `tests/debug_test.blsp`.
+
+## 2026-09-25 (evening) — a mouse event says where the pointer is exactly; the grid starts at the top
+
+**The bug (bedit):** in a zoomed pane, the line a click selected was not the line under the
+pointer. A zoomed pane is painted in a `cell-region` at its own cell size, and the editor
+hit-tests it by dividing the pointer's offset by the zoom ratio. It only ever received the
+WHOLE window cell, rounded down before that division. At 1.5× every second row of the
+pane was ambiguous, and the error grew with the distance from the pane's top.
+
+**Shipped:** a cell-grid window's `[:mouse …]` message ends with `{:at [row col]}`, the
+pointer's position in fractional cells. It is computed by the same `grid_origin` as
+`px_to_cell`, in `CursorMoved`, and carried on every press, release, drag, move and scroll.
+Slot 6 is nil when the event has no count or delta, so every consumer reading the slots by
+position reads what it did before. The terminal and `{:input :pixels}` windows send none.
+
+**Also:** `grid_origin` puts the vertical remainder BELOW the grid, not above it. Above it
+left up to a whole row of empty space over the first line of text. It also moved every row
+on each font-size step, the same fault the horizontal remainder had until it moved.
+`the_bottom_row_stays_flush_at_every_size` is replaced by
+`the_first_row_stays_at_the_top_at_every_size`.
