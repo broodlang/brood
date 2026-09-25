@@ -458,11 +458,11 @@ pub(crate) enum VmOutcome {
     Done(Value),
     /// A clean `receive` parked: the captured continuation to store + resume on a
     /// wake (§8.2). `run_one` parks it on the mailbox.
-    Suspended(Suspended),
+    Suspended(Box<Suspended>),
     /// The reduction budget was exhausted at a loop-top safepoint (the state-capture
     /// analogue of `Suspend::Preempt`): captured the continuation so `run_one` can
     /// **re-enqueue** it (possibly onto another worker — live migration, §7).
-    Preempted(Suspended),
+    Preempted(Box<Suspended>),
     /// A hard `:kill` was pending at a loop-top safepoint (the analogue of
     /// `Suspend::Kill`): stop now, no capture — `run_one` retires the process with the
     /// mailbox's kill reason. Untrappable by construction (fires below `%try`).

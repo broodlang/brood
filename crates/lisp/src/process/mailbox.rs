@@ -677,11 +677,44 @@ const REGISTRY_SHARDS: usize = 64;
 pub(super) struct Registry {
     /// Padded: sequential pids map to adjacent shards, and unpadded a spawn burst's
     /// registrations bounced one line between every worker.
-    shards: Vec<super::scheduler::Padded<Mutex<HashMap<u64, Arc<Mailbox>>>>>,
+    shards: Vec<super::scheduler::Padded<Mutex<PidMap>>>,
+}
+
+/// The registry's per-shard map. Keyed by pid through [`PidHasher`], not std's SipHash:
+/// every `send` resolves its target here, and SipHash on one `u64` — a 128-bit state set
+/// up and finalized per lookup — was ~2.6% of `pingpong`'s instructions (2026-09-25).
+type PidMap = HashMap<u64, Arc<Mailbox>, BuildPidHasher>;
+
+/// A pid hash: the splitmix64 finalize the table/map path already uses for an int key
+/// ([`crate::core::heap::Heap::hash_int`]). Not the identity: a shard holds only pids
+/// that agree in their low six bits (the shard index), and hashbrown picks a bucket from
+/// the LOW bits of the hash — an identity hash would put a whole shard in one probe run.
+#[derive(Default, Clone, Copy)]
+pub(super) struct BuildPidHasher;
+impl std::hash::BuildHasher for BuildPidHasher {
+    type Hasher = PidHasher;
+    #[inline]
+    fn build_hasher(&self) -> PidHasher {
+        PidHasher(0)
+    }
+}
+pub(super) struct PidHasher(u64);
+impl std::hash::Hasher for PidHasher {
+    #[inline]
+    fn write_u64(&mut self, pid: u64) {
+        self.0 = crate::core::heap::Heap::hash_int(pid as i64);
+    }
+    fn write(&mut self, _: &[u8]) {
+        unreachable!("PidHasher hashes a u64 pid only")
+    }
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
 }
 
 impl Registry {
-    fn shard(&self, pid: u64) -> &Mutex<HashMap<u64, Arc<Mailbox>>> {
+    fn shard(&self, pid: u64) -> &Mutex<PidMap> {
         &self.shards[(pid as usize) & (REGISTRY_SHARDS - 1)].0
     }
 
@@ -734,7 +767,7 @@ impl Registry {
 
 pub(super) static REGISTRY: LazyLock<Registry> = LazyLock::new(|| Registry {
     shards: (0..REGISTRY_SHARDS)
-        .map(|_| super::scheduler::Padded(Mutex::new(HashMap::new())))
+        .map(|_| super::scheduler::Padded(Mutex::new(PidMap::default())))
         .collect(),
 });
 

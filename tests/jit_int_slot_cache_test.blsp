@@ -1,0 +1,64 @@
+;;; Guards for the JIT's per-slot i64 cache (`Frame::slot_i64_cache`, 2026-09-25). A read of
+;;; a slot this lowering just stored an unboxed int to returns that SSA value instead of
+;;; reloading the tag, comparing it to `Int` and branching to `deopt` — which every read of a
+;;; `let`-bound int paid before (a three-binding loop read its slots seven times; 38% fewer
+;;; instructions with the cache). The cache is only sound while every store that is NOT an
+;;; unboxed int clears it, because the bytecode reuses one slot index across sibling `let`
+;;; scopes: a stale entry reads the PREVIOUS binding's value.
+;;;
+;;; The cases here are built so a stale entry gives a different answer. Each pair of sibling
+;;; `let`s shares a slot; the first binds a computed int (cached), the second binds a value
+;;; that reaches the slot some other way — a global read (a boxed handle), a slot copy, a
+;;; float — and then reads it as an int. Each arm is driven until it SETTLES NATIVE before
+;;; the answer is checked, so the check runs the lowered code, not the VM.
+;;;
+;;; Sabotage-verified (2026-09-25): letting a handle store keep the slot's cached int
+;;; (`set_slot_flags`' `Op::Handle` arm returning the old entry) fails "a boxed store clears
+;;; the slot" — actual 6 019 000, expect 12 008 000; the other cases pass either way — guards
+;;; on the copy and float paths, not reproductions.
+
+(defmodule jit-int-slot-cache-test (:use test))
+
+;; Drive `f` until its arm settles on a tier. The compile is asynchronous and, under a
+;; loaded parallel suite, can lag any fixed call count (200 batches read `:queued` under the
+;; pre-push gate), so a round that finds it still queued waits for the compiler in TIME.
+(defn- settle (f argc batch rounds)
+  (batch)
+  (let (st (get (%jit-arm-state f argc) :state))
+    (if (or (= st :native) (= st :bailed) (= rounds 0))
+      st
+      (do (if (= st :queued) (sleep 10) nil) (settle f argc batch (- rounds 1))))))
+
+(defn- sum-over (f i acc) (if (= i 0) acc (sum-over f (- i 1) (+ acc (f i)))))
+
+(def ic-g 7)
+
+;; Slot shared by `a` (a cached int) and `b` (a global read — a boxed handle).
+(defn ic-handle (i) (+ (let (a (* i 3)) a) (let (b ic-g) (+ b 1))))
+
+;; `b` copies `c`, an int bound in the same scope: the copy carries `c`'s cached value.
+(defn ic-copy (i) (+ (let (a (* i 5)) a) (let (c (+ i 2) b c) (* b 2))))
+
+;; `a` is an int, `b` a float in the sibling scope; the int read of `d` after them
+;; must see `d`'s own store.
+(defn ic-float (i)
+  (let (r (+ (let (a (* i 2)) a) (let (b (* 1.5 i)) (if (> b 0.0) 1 0))))
+    (let (d (+ r i)) (+ d d))))
+
+(defn- expect-sum (f expect)
+  (sum-over f 2000 0)
+  (assert= expect (sum-over f 2000 0)))
+
+(describe "the JIT's per-slot i64 cache"
+  (test "a boxed store clears the slot"
+    (assert= :native (settle ic-handle 1 (fn () (sum-over ic-handle 500 0)) 500))
+    ;; sum over i of 3i + 8
+    (expect-sum ic-handle (+ (* 3 (/ (* 2000 2001) 2)) (* 8 2000))))
+  (test "a slot copy carries the source's value"
+    (assert= :native (settle ic-copy 1 (fn () (sum-over ic-copy 500 0)) 500))
+    ;; sum over i of 5i + 2(i + 2)
+    (expect-sum ic-copy (+ (* 7 (/ (* 2000 2001) 2)) (* 4 2000))))
+  (test "a float store in a sibling scope leaves a later int read alone"
+    (assert= :native (settle ic-float 1 (fn () (sum-over ic-float 500 0)) 500))
+    ;; r = 2i + 1, d = 3i + 1, result 2d = 6i + 2
+    (expect-sum ic-float (+ (* 6 (/ (* 2000 2001) 2)) (* 2 2000)))))

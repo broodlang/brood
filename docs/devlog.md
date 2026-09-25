@@ -2,6 +2,69 @@
 
 Chronological record of work sessions. Newest at the bottom.
 
+## 2026-09-25 — the VM's call and message paths, counted: four measured wins, one test race (KI-195)
+
+The handoff's stability/perf queue, taken in order. **Stability first:** three capped full VM
+runs and one tree-walker run with `BROOD_FEATURES_AUDIT=1` armed (KI-193's diagnostic). The
+audit printed nothing; one red — KI-195, `net_reactor_death` asserting the reactor's death
+sweep the instant it saw the death flag, which `reactor_died` deliberately sets first.
+Reproduced with a widened window, fixed in the test, sabotage-verified.
+
+**The VM call, counted** (`perf stat` on a call-only loop at `BROOD_TIER=1`, instructions per
+iteration differenced between N=2M and N=6M, so startup cancels): an interpreted non-tail
+call cost **~1 117 instructions** (2 056 with the call, 939 with its body inlined by hand) at
+~3.6 IPC — instruction-bound, not stall-bound (the first `perf annotate` pointed at a `lock
+decq` and a stack copy; that was sampling skid, and `instructions:upp` put it right). Two cuts:
+the driver skipped nothing for an arm the JIT had REFUSED — `jit_tier_in_frame`'s preamble and
+`settle_native_frame` ran on every call into a `BAILED` arm and at a ceiling below Native — so
+`jit_tier_declines` now answers that before the tier check; and a `Done` that returns into its
+caller no longer re-runs the loop-top safepoint (the call already ticked the reduction and ran
+the checks; a due collection or a pending heap-limit raise still takes the full path). **2 056
+→ 1 877** instructions per iteration; `make ab-vm`: `fib` −8.4%, `ackermann` −7.3%, `json`
+−4.2%; default ceiling noise (`json` read +5% in the sweep, +1.8% solo inside a 3.6% floor,
+and −1.7% in instructions). What is left of the call is spread thin: ~540 instructions in
+`exec_chunk`'s `Call` handling and the callee's entry, ~300 in `vm_run_bc`'s frame push/pop,
+~96 in `push_frame`. Two locked refcount ops per call on the (uncontended, per-process)
+`Arc<ArmHandle>` are ~7% of the call's cycles; removing them needs a non-atomic handle, i.e.
+`unsafe` in KI-188/191's territory — measured and deferred, not attempted.
+
+**`gen/call`** measured 3.6 µs against 3.0 for a hand-rolled ref+monitor+after+flush call and
+2.2 for a bare round trip; the `defserver` side adds ~100 ns. The client excess is one wrapper
+call (`call` → `call-timeout`) — the handoff's 1.2 µs has become ~0.2–0.4 µs through the
+earlier work, and there is nothing `gen`-specific left to take.
+
+**Per message.** `pingpong` is 193 ms at `BROOD_J=1` and at 12 workers — cross-core traffic
+is not the cost; ~9.3k instructions per message are. Two finds from `instructions:upp`: the
+process registry hashed every target pid with std's **SipHash** (~2.6% of the row) — it now
+uses the splitmix64 finalize the table path already uses for an int key (NOT the identity: a
+registry shard holds only pids agreeing in their low six bits, the bits hashbrown indexes
+with); and every park **copied the captured continuation by value** four times (out of
+`vm_run_bc`, through `catch_unwind`, into `handle_capture_outcome`, into `store_resume`, which
+then boxed it) — `VmOutcome::Suspended`/`Preempted` carry a `Box<Suspended>` from the capture
+on. `make ab --floor`: **`pingpong` −6.6%, `ring` −6.0%**, `spawn-live`/`supervisor` −2.5%/−3.6%
+(noise), `spawn`/`latency` noise. The rest of a message is spread: interpreting the receive
+loops themselves (~26% — a `receive` keeps its arm off the JIT), `receive_match` 7%,
+`run_one` 5%, allocation ~6%.
+
+**The JIT's int tag guard.** Read in the machine code, not argued: a loop with three `let`-bound
+ints stored the `Int` tag to a slot and reloaded it on the next instruction to compare it with
+`Int` — twice for `(+ a a)` — and reloaded the payload beside it; Cranelift does not forward
+the store. `Frame::slot_i64_cache` is the integer twin of the f64 cache, maintained in the same
+two places (`set_slot_flags`, the widened-join clear), so it rests on the same soundness
+argument (lexical scoping; parameter slots are never cached). On that loop **5.11G → 3.16G
+instructions, 314 → 157 ms**; on the benchmark rows flat (±1% — their hot arms already carry
+values in registers). Fuzz: all 13 generators ×25 plus `arithmetic`/`tier_transition`/`numeric`
+×200, 0 divergences, 0 stale. Guard `tests/jit_int_slot_cache_test.blsp` (sabotage: a handle
+store keeping the cached int reds it, 6 019 000 for 12 008 000). `BROOD_NO_INT_SLOT_CACHE=1`
+is the lever.
+
+**Gates on the final tree:** full capped VM nextest ×2 and tree-walker ×1, 1714/1714 each;
+`make gcstress` clean on all twelve files.
+
+**A trap re-met:** `json` reads 40% slower at the default ceiling than at tier 1 when pinned
+to one core, and 14% FASTER unpinned — the 125 background compiles share the pinned core.
+CLAUDE.md already says this; it is still the first thing a pinned tier comparison shows.
+
 ## 2026-09-23 — a VM/perf review: KI-188..191 fixed, RUNTIME reads borrow instead of pin, the loop safepoint per quantum
 
 Four read-only reviewers (interpreter, JIT, heap/GC/scheduler, benchmark standing), then the

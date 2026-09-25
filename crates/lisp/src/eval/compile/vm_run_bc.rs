@@ -13,7 +13,7 @@ use super::*;
 pub(crate) fn run_process_body(
     heap: &mut Heap,
     body: Value,
-    resume: Option<Suspended>,
+    resume: Option<Box<Suspended>>,
 ) -> Result<VmOutcome, LispError> {
     match resume {
         // Resume: the continuation's own `cur.arm` drives; `arm0`/`genv0` are ignored
@@ -220,7 +220,7 @@ pub(crate) fn build_program_thunk(heap: &mut Heap, form: Value) -> Value {
 pub(crate) fn run_program_body(
     heap: &mut Heap,
     prog: &mut ProgramState,
-    resume: Option<Suspended>,
+    resume: Option<Box<Suspended>>,
 ) -> Result<VmOutcome, LispError> {
     let root = heap.global();
     // First entry: install the file + root namespace + forward-ref pre-scan into the heap
@@ -517,7 +517,7 @@ pub(crate) fn vm_run_bc(
     arm0: Arc<ArmHandle>,
     args0: &[Value],
     genv0: EnvId,
-    resume: Option<Suspended>,
+    resume: Option<Box<Suspended>>,
     top_level: bool,
 ) -> Result<VmOutcome, LispError> {
     crate::perf_bump!(vm_apply);
@@ -656,6 +656,11 @@ pub(crate) fn vm_run_bc(
     // `Inst::Call` at a nonzero ip and still (correctly) never tiers.
     #[cfg(feature = "jit")]
     let mut try_jit = fresh || cur_ip == 0;
+    // Read once per driver entry: the ceiling is fixed for a run (the env is cached, and the
+    // per-thread override is set between top-level forms, never inside one). Below Native
+    // `jit_tier_in_frame` returns `None` at once, so there is no tier check to make.
+    #[cfg(feature = "jit")]
+    let native_ceiling = tier_ceiling() >= Tier::Native;
     #[cfg(not(feature = "jit"))]
     let _ = fresh; // silence unused warning when the JIT is off
 
@@ -663,137 +668,150 @@ pub(crate) fn vm_run_bc(
     // sampled at. Loop-local — a resume simply re-samples on its next epoch tick.
     let mut profiled_epoch: u64 = 0;
 
+    // Set by a `Done` that handed its value back to a caller frame: the caller resumes
+    // mid-body, so the loop-top safepoint has nothing to do that the CALL did not already
+    // do — the reduction was ticked, the deadline and quantum checks ran, and the caller's
+    // next call or back edge runs them again. Only a due collection (and the heap-limit
+    // raise a collection arms) cannot wait, and the `Done` arm declines to set this when
+    // either is pending. BEAM likewise charges a reduction per call, not per return.
+    let mut returned_to_caller = false;
+
     loop {
-        // Profiler sample: when armed and the ticker's epoch moved, record this
-        // driver's named-frame stack (cur + pending callers, innermost first).
-        // Off (the default): one relaxed bool load per frame boundary.
-        if crate::diagnostics::profile::armed() {
-            let ep = crate::diagnostics::profile::epoch();
-            if ep != profiled_epoch {
-                profiled_epoch = ep;
-                let mut stack: Vec<value::Symbol> = Vec::with_capacity(frames.len() + 1);
-                if let Some(n) = cur_arm.fn_name {
-                    stack.push(n);
-                }
-                for f in frames.iter().rev() {
-                    if let Some(n) = f.arm.fn_name {
+        'safepoint: {
+            if std::mem::take(&mut returned_to_caller) {
+                break 'safepoint;
+            }
+            // Profiler sample: when armed and the ticker's epoch moved, record this
+            // driver's named-frame stack (cur + pending callers, innermost first).
+            // Off (the default): one relaxed bool load per frame boundary.
+            if crate::diagnostics::profile::armed() {
+                let ep = crate::diagnostics::profile::epoch();
+                if ep != profiled_epoch {
+                    profiled_epoch = ep;
+                    let mut stack: Vec<value::Symbol> = Vec::with_capacity(frames.len() + 1);
+                    if let Some(n) = cur_arm.fn_name {
                         stack.push(n);
                     }
+                    for f in frames.iter().rev() {
+                        if let Some(n) = f.arm.fn_name {
+                            stack.push(n);
+                        }
+                    }
+                    crate::diagnostics::profile::record(&stack);
                 }
-                crate::diagnostics::profile::record(&stack);
             }
-        }
-        // Per-iteration safepoint / preemption / deadline — relocates every frame's
-        // slots and env in place (all on `Heap::roots`/`env_roots`). Mirrors the
-        // `Node` trampoline's loop top.
-        if !crate::process::macro_block_active() && heap.gc_due() {
-            heap.collect(&mut [], &mut []);
-        }
-        // RUNTIME-region collection (ADR-091): the VM-engine counterpart of the
-        // tree-walker's safepoint. Once churn crosses the threshold, compact the shared
-        // code region (single-process) or — on a shared runtime with the multi-process
-        // collector armed — advance the age/migrate/drain/free state machine. Every
-        // live RUNTIME handle at this frame boundary is already on `heap.roots`/
-        // `env_roots`/`live_vm_arms` (which the compactor rewrites), so no extra roots
-        // are needed. Gated on `rt_dirty`/`drain_active` (see below) and the same
-        // macro-block guard as the LOCAL collect.
-        // Gate the (costly) `rt_gc_due` probe — an `ArcSwap` load + closure count —
-        // on one cheap relaxed load: run it only when the RUNTIME region has grown
-        // since the last check (`rt_dirty`, set at the sole mint point). A def-free hot
-        // loop (`fib`, `reduce`, `apply`) trips it never and pays nothing; a mint re-arms
-        // `rt_dirty` so a collect is at most one frame late.
-        //
-        // NOTE: this gate deliberately does **not** also fire on `drain_active`. A
-        // lingering drain (a long-lived process pins the generation, so it never frees)
-        // would otherwise force this whole block — the `cur_code()` `ArcSwap` load — on
-        // *every* frame for the rest of the run, which is the multigen `rounds`-shape
-        // overhead. The drain is instead advanced/freed on `rt_dirty` (mint) frames,
-        // which occur whenever code churns; the separate drain self-report below
-        // still runs every frame so acks stay current, and a completable drain frees at
-        // the next mint (retaining one extra generation over a fully idle interval is
-        // bounded and harmless). That report is O(1) per frame only because
-        // `runtime_gen_referenced_private` short-circuits a cached verdict — the probe
-        // itself is O(this process's roots), i.e. O(recursion depth). This comment used to
-        // assert a flat "O(1) drain self-report", which is what let KI-14 hide: a deep
-        // process was re-walking 1.7M roots per report.
-        if heap.rt_dirty() && !crate::process::macro_block_active() {
-            heap.rt_dirty_clear();
-            if heap.rt_gc_due() {
-                heap.maybe_runtime_collect(&mut [], &mut []);
+            // Per-iteration safepoint / preemption / deadline — relocates every frame's
+            // slots and env in place (all on `Heap::roots`/`env_roots`). Mirrors the
+            // `Node` trampoline's loop top.
+            if !crate::process::macro_block_active() && heap.gc_due() {
+                heap.collect(&mut [], &mut []);
             }
-        }
-        // RUNTIME-drain cooperative report (ADR-091 Stage 3c): the VM-engine
-        // counterpart of the tree-walker's safepoint report. While a generation
-        // drain is armed, this process reports whether it still references the
-        // draining generation. Read-only probe; the hot path is one atomic load.
-        if heap.drain_active() {
-            crate::process::report_drain_liveness(heap);
-        }
-        // Per-process heap limit (`(process-flag :max-heap n)`): the sticky flag
-        // the loop-top collection armed raises here — catchable, and it kills
-        // just this process, with the trace showing where the data was live.
-        if let Some(live) = heap.take_proc_limit_hit() {
-            unwind(heap);
-            let limit = heap.proc_mem_limit().unwrap_or(0);
-            let mut e = crate::eval::proc_memory_limit_error(live, limit);
-            attach_vm_trace(&mut e, &cur_arm, &frames);
-            return Err(e);
-        }
-        // Once per quantum, at the reduction rollover: the soft memory limit, the mailbox
-        // bound (ADR-307) and a pending hard kill — see `loop_safepoint` in `exec_chunk`,
-        // which splits the inline loop's safepoint the same way. They used to run at every
-        // frame boundary, i.e. twice per non-tail call.
-        if crate::process::tick_capture() {
-            if let Err(mut e) = super::quantum_checks(heap) {
+            // RUNTIME-region collection (ADR-091): the VM-engine counterpart of the
+            // tree-walker's safepoint. Once churn crosses the threshold, compact the shared
+            // code region (single-process) or — on a shared runtime with the multi-process
+            // collector armed — advance the age/migrate/drain/free state machine. Every
+            // live RUNTIME handle at this frame boundary is already on `heap.roots`/
+            // `env_roots`/`live_vm_arms` (which the compactor rewrites), so no extra roots
+            // are needed. Gated on `rt_dirty`/`drain_active` (see below) and the same
+            // macro-block guard as the LOCAL collect.
+            // Gate the (costly) `rt_gc_due` probe — an `ArcSwap` load + closure count —
+            // on one cheap relaxed load: run it only when the RUNTIME region has grown
+            // since the last check (`rt_dirty`, set at the sole mint point). A def-free hot
+            // loop (`fib`, `reduce`, `apply`) trips it never and pays nothing; a mint re-arms
+            // `rt_dirty` so a collect is at most one frame late.
+            //
+            // NOTE: this gate deliberately does **not** also fire on `drain_active`. A
+            // lingering drain (a long-lived process pins the generation, so it never frees)
+            // would otherwise force this whole block — the `cur_code()` `ArcSwap` load — on
+            // *every* frame for the rest of the run, which is the multigen `rounds`-shape
+            // overhead. The drain is instead advanced/freed on `rt_dirty` (mint) frames,
+            // which occur whenever code churns; the separate drain self-report below
+            // still runs every frame so acks stay current, and a completable drain frees at
+            // the next mint (retaining one extra generation over a fully idle interval is
+            // bounded and harmless). That report is O(1) per frame only because
+            // `runtime_gen_referenced_private` short-circuits a cached verdict — the probe
+            // itself is O(this process's roots), i.e. O(recursion depth). This comment used to
+            // assert a flat "O(1) drain self-report", which is what let KI-14 hide: a deep
+            // process was re-walking 1.7M roots per report.
+            if heap.rt_dirty() && !crate::process::macro_block_active() {
+                heap.rt_dirty_clear();
+                if heap.rt_gc_due() {
+                    heap.maybe_runtime_collect(&mut [], &mut []);
+                }
+            }
+            // RUNTIME-drain cooperative report (ADR-091 Stage 3c): the VM-engine
+            // counterpart of the tree-walker's safepoint report. While a generation
+            // drain is armed, this process reports whether it still references the
+            // draining generation. Read-only probe; the hot path is one atomic load.
+            if heap.drain_active() {
+                crate::process::report_drain_liveness(heap);
+            }
+            // Per-process heap limit (`(process-flag :max-heap n)`): the sticky flag
+            // the loop-top collection armed raises here — catchable, and it kills
+            // just this process, with the trace showing where the data was live.
+            if let Some(live) = heap.take_proc_limit_hit() {
                 unwind(heap);
+                let limit = heap.proc_mem_limit().unwrap_or(0);
+                let mut e = crate::eval::proc_memory_limit_error(live, limit);
                 attach_vm_trace(&mut e, &cur_arm, &frames);
                 return Err(e);
             }
-            // A pending hard `:kill` stops now: capture mode retires the process (no
-            // capture — its heap is dropped); a nested run cannot return an outcome across
-            // its native frame, so it unwinds with the untrappable signal, which the
-            // top-level driver's `Err` arm converts to `VmOutcome::Killed` (the
-            // tree-walker's loop top has the same contract).
-            if crate::process::capture_hard_kill_pending() {
-                if capture {
-                    return Ok(VmOutcome::Killed);
+            // Once per quantum, at the reduction rollover: the soft memory limit, the mailbox
+            // bound (ADR-307) and a pending hard kill — see `loop_safepoint` in `exec_chunk`,
+            // which splits the inline loop's safepoint the same way. They used to run at every
+            // frame boundary, i.e. twice per non-tail call.
+            if crate::process::tick_capture() {
+                if let Err(mut e) = super::quantum_checks(heap) {
+                    unwind(heap);
+                    attach_vm_trace(&mut e, &cur_arm, &frames);
+                    return Err(e);
                 }
+                // A pending hard `:kill` stops now: capture mode retires the process (no
+                // capture — its heap is dropped); a nested run cannot return an outcome across
+                // its native frame, so it unwinds with the untrappable signal, which the
+                // top-level driver's `Err` arm converts to `VmOutcome::Killed` (the
+                // tree-walker's loop top has the same contract).
+                if crate::process::capture_hard_kill_pending() {
+                    if capture {
+                        return Ok(VmOutcome::Killed);
+                    }
+                    unwind(heap);
+                    return Err(crate::error::LispError::kill_signal());
+                }
+                if !capture {
+                    crate::process::refill_nested_quantum();
+                } else {
+                    // State-capture preemption (ADR-100 §8.1), in place of the coroutine
+                    // yield: the frame boundary is the safepoint. The spent budget captures the
+                    // continuation so `run_one` re-enqueues it (on any worker — live migration).
+                    let cur = BcFrame {
+                        arm: cur_arm,
+                        ip: cur_ip,
+                        base: cur_base,
+                        env: cur_env,
+                        env_base: cur_env_base,
+                        arm_slot: cur_arm_slot,
+                        ic_bases: heap.ic_bases(),
+                        entry_epoch: cur_entry_epoch,
+                        #[cfg(feature = "jit")]
+                        back_edges: cur_back_edges,
+                    };
+                    return Ok(VmOutcome::Preempted(Box::new(Suspended {
+                        frames,
+                        cur,
+                        entry_roots,
+                        entry_env,
+                        entry_arms,
+                        deadline: None,
+                    })));
+                }
+            }
+            if crate::process::deadline_exceeded() {
                 unwind(heap);
-                return Err(crate::error::LispError::kill_signal());
+                let mut e = crate::eval::deadline_error();
+                attach_vm_trace(&mut e, &cur_arm, &frames);
+                return Err(e);
             }
-            if !capture {
-                crate::process::refill_nested_quantum();
-            } else {
-                // State-capture preemption (ADR-100 §8.1), in place of the coroutine
-                // yield: the frame boundary is the safepoint. The spent budget captures the
-                // continuation so `run_one` re-enqueues it (on any worker — live migration).
-                let cur = BcFrame {
-                    arm: cur_arm,
-                    ip: cur_ip,
-                    base: cur_base,
-                    env: cur_env,
-                    env_base: cur_env_base,
-                    arm_slot: cur_arm_slot,
-                    ic_bases: heap.ic_bases(),
-                    entry_epoch: cur_entry_epoch,
-                    #[cfg(feature = "jit")]
-                    back_edges: cur_back_edges,
-                };
-                return Ok(VmOutcome::Preempted(Suspended {
-                    frames,
-                    cur,
-                    entry_roots,
-                    entry_env,
-                    entry_arms,
-                    deadline: None,
-                }));
-            }
-        }
-        if crate::process::deadline_exceeded() {
-            unwind(heap);
-            let mut e = crate::eval::deadline_error();
-            attach_vm_trace(&mut e, &cur_arm, &frames);
-            return Err(e);
         }
 
         // Either run the arm natively (if it's flagged for a tier check) or interpret it.
@@ -801,8 +819,13 @@ pub(crate) fn vm_run_bc(
         let exit = {
             #[cfg(feature = "jit")]
             {
-                if try_jit {
-                    try_jit = false;
+                // `jit_tier_declines`: an arm the JIT refused (or a drain forcing the VM) would
+                // come straight back `None` — interpret it without the tier check's preamble
+                // and `settle_native_frame`, which it paid on every call before.
+                if std::mem::take(&mut try_jit)
+                    && native_ceiling
+                    && !jit_tier_declines(heap, &cur_arm)
+                {
                     // Spinning-loop escape hatch (see JIT_QUEUED_SYNC_EDGES): a
                     // self-tail loop that exited here after spinning ~2k edges
                     // against a still-QUEUED arm compiles it right now, on this
@@ -1006,6 +1029,7 @@ pub(crate) fn vm_run_bc(
                         // The result lands where the caller pushed the callee — its
                         // operand stack continues seamlessly past the call site.
                         heap.push_root(v);
+                        returned_to_caller = !heap.gc_due() && !heap.proc_limit_pending();
                     }
                 }
             }
@@ -1147,14 +1171,14 @@ pub(crate) fn vm_run_bc(
                         entry_epoch: cur_entry_epoch,
                         back_edges: cur_back_edges,
                     };
-                    return Ok(VmOutcome::Preempted(Suspended {
+                    return Ok(VmOutcome::Preempted(Box::new(Suspended {
                         frames,
                         cur,
                         entry_roots,
                         entry_env,
                         entry_arms,
                         deadline: None,
-                    }));
+                    })));
                 }
             }
             Ok(ChunkExit::Tail {
@@ -1224,14 +1248,14 @@ pub(crate) fn vm_run_bc(
                     #[cfg(feature = "jit")]
                     back_edges: cur_back_edges,
                 };
-                return Ok(VmOutcome::Preempted(Suspended {
+                return Ok(VmOutcome::Preempted(Box::new(Suspended {
                     frames,
                     cur,
                     entry_roots,
                     entry_env,
                     entry_arms,
                     deadline: None,
-                }));
+                })));
             }
             Ok(ChunkExit::Suspend { deadline }) => {
                 // A clean `receive` parked (ADR-100 §8). `exec_chunk` rewound `cur_ip`
@@ -1253,14 +1277,14 @@ pub(crate) fn vm_run_bc(
                     #[cfg(feature = "jit")]
                     back_edges: cur_back_edges,
                 };
-                return Ok(VmOutcome::Suspended(Suspended {
+                return Ok(VmOutcome::Suspended(Box::new(Suspended {
                     frames,
                     cur,
                     entry_roots,
                     entry_env,
                     entry_arms,
                     deadline,
-                }));
+                })));
             }
             Err(e) => {
                 unwind(heap);

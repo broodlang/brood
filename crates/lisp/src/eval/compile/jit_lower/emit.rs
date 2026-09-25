@@ -178,6 +178,16 @@ pub(super) struct Frame<'a> {
     /// store→load→bitcast round-trip. `None` for slots not written as a float (params
     /// are always `None`). Shared (`RefCell`) — see `as_f64` for the invalidation rules.
     pub slot_f64_cache: &'a std::cell::RefCell<Vec<Option<cranelift_codegen::ir::Value>>>,
+    /// The integer twin of `slot_f64_cache`: the unboxed `i64` last stored to a slot via
+    /// `store_op(Op::Int)`, so [`load_slot_int`] can return it instead of reloading the tag,
+    /// comparing it to `Int`, branching to `deopt` and reloading the payload — which is what
+    /// every read of a `let`-bound int cost (Cranelift does not forward the store). Kept in
+    /// lock step with the f64 cache by [`set_slot_flags`] and the widened-join clear, so it
+    /// rests on exactly the same soundness argument: a slot is only ever cached by a
+    /// `store_op`, a `let` slot is written before it is read in its scope, and parameter
+    /// slots (written by `SelfCall`/entry with raw stores) are never cached. Empty (all
+    /// `None`) under `BROOD_NO_INT_SLOT_CACHE=1`.
+    pub slot_i64_cache: &'a std::cell::RefCell<Vec<Option<cranelift_codegen::ir::Value>>>,
 }
 
 /// How one operand-stack entry crosses a block boundary. Block params are `I64`, so the
@@ -448,8 +458,16 @@ pub(super) fn box_scalar(
     }
 }
 
+/// Is the per-slot i64 cache on? Default ON; `BROOD_NO_INT_SLOT_CACHE=1` is the A/B and
+/// bisect lever (read once).
+fn int_slot_cache_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BROOD_NO_INT_SLOT_CACHE").is_none())
+}
+
 /// Load frame slot `k` as an unboxed `i64`, tag-checking `Int` first (a non-Int
-/// operand branches to `deopt`). A register-carried param slot skips the check.
+/// operand branches to `deopt`). A register-carried param slot skips the check, and so
+/// does a slot this lowering just stored an `i64` to (`slot_i64_cache`).
 pub(super) fn load_slot_int(
     b: &mut FunctionBuilder,
     k: i64,
@@ -457,6 +475,9 @@ pub(super) fn load_slot_int(
 ) -> cranelift_codegen::ir::Value {
     if let Some((var, false)) = f.carry_vars.get(k as usize).copied().flatten() {
         return b.use_var(var);
+    }
+    if let Some(v) = f.slot_i64_cache.borrow().get(k as usize).copied().flatten() {
+        return v;
     }
     let roots_base = b.use_var(f.rb_var);
     let idx = b.ins().iadd_imm_s(f.base, k);
@@ -1086,23 +1107,37 @@ pub(super) fn as_f64_guarded(
 /// exit ([`store_result`]) can keep the identical bookkeeping without restating the per-`Op`
 /// mapping; two copies of this mapping would be a silent-divergence hazard.
 pub(super) fn set_slot_flags(b: &FunctionBuilder, dst: i64, op: Op, f: Frame) {
-    let (is_float, is_bool, f64v) = match op {
+    let (is_float, is_bool, f64v, i64v) = match op {
         // A comparison `i8` (`store_int`/`box_scalar` boxes it as `Value::Bool`) marks the
-        // slot bool; a real `i64` int does not.
-        Op::Int(v) => (false, b.func.dfg.value_type(v) == types::I8, None),
-        Op::Float(v) => (true, false, Some(v)),
-        Op::Bool(_) => (false, true, None),
+        // slot bool; a real `i64` int does not — and only a real `i64` is cached as one.
+        Op::Int(v) => {
+            let is_i8 = b.func.dfg.value_type(v) == types::I8;
+            (
+                false,
+                is_i8,
+                None,
+                (!is_i8 && int_slot_cache_enabled()).then_some(v),
+            )
+        }
+        Op::Float(v) => (true, false, Some(v), None),
+        Op::Bool(_) => (false, true, None, None),
         Op::Slot(k) => (
             f.slot_float.borrow().get(k).copied().unwrap_or(false),
             f.slot_bool.borrow().get(k).copied().unwrap_or(false),
             f.slot_f64_cache.borrow().get(k).copied().flatten(),
+            f.slot_i64_cache.borrow().get(k).copied().flatten(),
         ),
-        Op::Handle(..) | Op::HoistedVec { .. } | Op::HoistedTable { .. } => (false, false, None),
+        Op::Handle(..) | Op::HoistedVec { .. } | Op::HoistedTable { .. } => {
+            (false, false, None, None)
+        }
     };
     set_slot_float(dst, is_float, f);
     set_slot_bool(dst, is_bool, f);
     if let Some(s) = f.slot_f64_cache.borrow_mut().get_mut(dst as usize) {
         *s = f64v;
+    }
+    if let Some(s) = f.slot_i64_cache.borrow_mut().get_mut(dst as usize) {
+        *s = i64v;
     }
 }
 
