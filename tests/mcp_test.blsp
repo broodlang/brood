@@ -51,12 +51,21 @@
 ;; (runs alone — no cross-talk with other tests' spawns/GCs).
 (defn mcpt-burst (n) (when (> n 0) (spawn (+ 1 1)) (mcpt-burst (- n 1))))
 
-;; The burst SPREAD across the watcher's window: `rounds` small bursts `gap` ms apart, so
-;; some spawn/exit lands inside the window however late the watcher's subscription starts.
-;; A single burst 5 ms after the spawn was seen to come and go before a loaded CI runner
-;; scheduled the watcher (KI-155) — a slow runner, not a lost event.
-(defn mcpt-spread (rounds gap)
-  (when (> rounds 0) (sleep gap) (mcpt-burst 3) (mcpt-spread (- rounds 1) gap)))
+;; Small bursts `gap` ms apart UNTIL TOLD TO STOP, so the watcher's window holds events
+;; whenever its subscription opens. A single burst 5 ms after the spawn came and went before
+;; a loaded CI runner scheduled the watcher (KI-155), and a fixed ~500 ms spread only moved
+;; the deadline; a helper that runs until the window has closed has none. What is left for a
+;; `count 0` to mean is an event the system monitor lost — a real bug, not a slow runner.
+(defn mcpt-until-stopped (gap)
+  (mcpt-burst 3)
+  (receive (:stop nil) (after gap (mcpt-until-stopped gap))))
+
+;; Run `watch` (a thunk) with the burst helper going for its whole duration.
+(defn mcpt-watching (watch)
+  (let (helper (spawn (mcpt-until-stopped 25))
+        r (watch))
+    (send helper :stop)
+    r))
 
 (describe "mcp watch-runtime tool"
   :isolated (test "collects spawn/exit runtime events over a window"
@@ -64,8 +73,7 @@
     ;; watcher — this test process — sees their :spawn/:exit, not its own). The window
     ;; is generous: it was 300 ms, and the tree-walker differential job on a loaded
     ;; runner saw the burst land outside it (count 0) — a slow runner, not a lost event.
-    (spawn (mcpt-spread 20 25))
-    (let (r (mcp/watch-runtime-tool {:ms 1500})
+    (let (r (mcpt-watching (fn () (mcp/watch-runtime-tool {:ms 1500})))
           evs (get r :events)
           kinds (map evs (fn (e) (get e :kind))))
       (is (> (get r :count) 0))
@@ -74,8 +82,7 @@
       ;; every event carries the documented shape
       (is (every? evs (fn (e) (and (contains? e :kind) (contains? e :pid) (contains? e :detail)))))))
   (test "the :filter selects only the requested kinds"
-    (spawn (mcpt-spread 20 25))
-    (let (r (mcp/watch-runtime-tool {:ms 1500 :filter {:exit true}})
+    (let (r (mcpt-watching (fn () (mcp/watch-runtime-tool {:ms 1500 :filter {:exit true}})))
           evs (get r :events))
       (is (> (count evs) 0))
       (is (every? evs (fn (e) (= (get e :kind) :exit))))))

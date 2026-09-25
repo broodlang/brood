@@ -398,6 +398,7 @@ just past a sentence end with the whitespace after it skipped."
       else
         (let (s (buffer-scan-fwd text e limit buffer-sentence-space?))
           (if (>= s limit) best (buffer-sentence-start-before text s limit s))))))
+(sig buffer-sentence-start-before (string int int int -> int))
 
 (defn forward-sentence (buf)
   "Point moved just past the end of the current sentence — the paragraph's end when it
@@ -408,6 +409,7 @@ holds no further sentence terminator (Emacs `forward-sentence`, M-e)."
     (goto-char buf
       (+ point
         (buffer-scan-sentence-fwd (text/slice (get buf :rope) point limit) 0 (- limit point))))))
+(sig forward-sentence (buffer -> buffer))
 
 (defn backward-sentence (buf)
   "Point moved to the start of the current sentence — the previous sentence's start when
@@ -418,6 +420,7 @@ point already sits at one, the paragraph's start when there is no earlier senten
     (goto-char buf
       (+ floor
         (buffer-sentence-start-before (text/slice (get buf :rope) floor point) 0 (- point floor) 0)))))
+(sig backward-sentence (buffer -> buffer))
 
 ;; ---- mark -------------------------------------------------------------------
 

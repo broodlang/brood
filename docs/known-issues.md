@@ -148,7 +148,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-152 | **the linear-map rewrite was observable on its SEED: a tally seeded with a map holding a rope raised `cannot send a rope in a message` with the rewrite on and returned the map with it off** — the wrapper copies the accumulator's input map into its private table, and a table cannot hold every value a map can (a rope, a builtin, a lazy view, a self-referential closure), nor stand in for a record whose misses go through `Lookup`. Pre-dates ADR-360 (the `%map-int-add` shape had it too) but the idiomatic shape made it reachable from ordinary code | ✅ **FIXED 2026-09-17** — `%table-from-map` answers nil for such a seed (moved to `process.blsp`, after the `try` macro it needs: from `predicates.blsp` its body could not compile and deferred to the tree-walker per call), and the split keeps the loop AS WRITTEN as a third def the wrapper runs instead; that copy is wrapped in `(%lint-allow :generated …)`, a new category the checker does not walk (the pre-run check paid ~12M instructions per definition otherwise — measured, KI-150's class). Guards: `tests/linmap_soundness_test.blsp` seeds with a rope, a builtin, a seq-view and a `Lookup` record; `crates/lisp/tests/linmap_idiom.rs` pins the copy; `check/tests/lints.rs` pins the skip; `scripts/fuzz/generators/linmap.py` draws those seeds. `make ab --floor --all`: every row noise |
 | KI-153 | **a function whose only call sites are its own self-calls was checked as dead code — nothing in its body was ever reported, not even `(string/length 5)`** — Pass 2.9 (ADR-341) counted a self-call as a site, so the function was "live", its parameters started at ⊥ for the least fixpoint, and a self-call's arguments typed under those parameters kept them at ⊥; the same body with one outside caller, or with no self-call, was reported | ✅ **FIXED 2026-09-17** — `live_private_functions` requires a site that is NOT a self-call (`Site::Call(_, _, Some(self))`); a function reached only through itself is site-less and walked with unknown parameters. Found while checking whether ADR-360's rewritten loop kept its warnings. Guard: `types::check::tests::closure_inference::a_function_reached_only_through_itself_is_not_derived` (three shapes + a seeded control); `nest check` over std/tests/examples and `--strict` over std stay at zero. In the same commit: the linear-map rewrite's rebuilt forms carry their source positions (`rebuild_list`), so a warning inside a rewritten loop points at its line instead of the `def`'s |
 | KI-154 | **`cli::distribution duplicate_connect_is_deduplicated` failed once in a full-suite run: the client's `[:hi]` got no `[:welcome]` in 30 s (passed on retry)** — every server in that file registered `:echo` AFTER `node/start`, and the client starts the moment the port accepts, so a `[:hi]` landing between the listen and the register is dropped (a message to an unregistered name is silent, ADR-232) | ✅ **FIXED 2026-09-23** — recurred as `dual_listen_serves_tcp_and_unix_at_once` (`no pong over tcp`, passed on retry) in the review's full VM run: KI-154's fix had reached only the shared `echo_server_src`, and all twelve inline servers in `distribution.rs` still called `node/start` before `proc/register` (the helper's comment claimed otherwise). Every server now registers before it listens, and `dual_listen` prints the server's stderr on failure. Closed by construction, like the first site |
-| KI-155 | **`mcp_test` "the :filter selects only the requested kinds" saw 0 events on CI's `test` job (nextest, VM) at `a701f1e1`** — the helper's burst came 5 ms after its spawn and the watcher's 1500 ms window started when the test process was next scheduled; on a loaded runner that was after the burst had come and gone. KI-141's `(:load mcp)` had fixed the same shape once (the module load in the window) | 🔍 **WATCH 2026-09-17** — the burst is now spread over ~500 ms in 20 rounds 25 ms apart (`mcpt-spread`), so events land inside the window however late the subscription starts; both watch tests use it. A slow runner, not a lost event; if it recurs with the spread, the runtime's sysmon delivery is the next suspect |
+| KI-155 | **`mcp_test` "the :filter selects only the requested kinds" saw 0 events on CI's `test` job (nextest, VM) at `a701f1e1`** — the helper's burst came 5 ms after its spawn and the watcher's 1500 ms window started when the test process was next scheduled; on a loaded runner that was after the burst had come and gone. KI-141's `(:load mcp)` had fixed the same shape once (the module load in the window) | ✅ **FIXED 2026-09-25, by construction** — the 2026-09-17 spread (~500 ms of bursts) only moved the deadline: a subscription opening later than that still saw nothing. The helper now bursts UNTIL TOLD TO STOP, and the test stops it after the watch returns (`mcpt-watching`), so the window holds events whenever it opens. With the watcher delayed 700 ms both watch tests pass; with the helper stopped up front they both fail. 120 `mcp_test` runs under full CPU load and beside a `-j28` suite, all clean. A `count 0` now can only mean a lost sysmon event |
 | KI-156 | **every `letrec`-bound loop in the language compiled its tail self-call as a `Call` through the captured closure, never a `SelfCall`** — `(letrec (lp (fn (i acc) … (lp …))))` ran at ~100 ns per iteration against a `defn` loop's 2.3 ns (3M iterations: 300 ms vs 7). The self-call rule requires the head "not shadowed by a local"; `#3 lexical addressing` binds every capture to a frame slot, and the self-name IS a capture (the frame binds it to the closure), so `scope.lookup` found it bound and the rule declined. Silent: right answers, an order of magnitude slowly, in `defseq`'s `--loop`, every hand-written named loop and the pipeline the `for` macro emits | ✅ **FIXED 2026-09-17** — `Scope::self_slot` records the self-name's capture slot and the rule admits it (a `let` rebinding the name inside the body still resolves to its own slot and still declines). The loops above: 300 → 4–13 ms (the JIT's `SelfCall` loop, leaf-spliced). Guard: `eval::compile::tests::a_letrec_loop_is_a_self_call_and_a_shadowed_name_is_not` (sabotage-verified: the rule without the slot reds it). `make ab --floor --all`: every row inside its floor; `pingpong` read +2.5…+5% across three solo runs with IDENTICAL instruction counts (2.027 G both arms) — scheduling drift, not code |
 | KI-157 | **a native loop never saw a pending memory limit: the soft ceiling (E0043), a per-process heap limit and a mailbox overflow are raised at the VM's safepoints, and a JIT'd self-tail loop's back-edge returns to none of them** — `mem_limit.rs`'s runaway built its million cells and returned the moment its `let`-bound loop started running native (KI-156); a `defn` loop had been doing that all along | ✅ **FIXED 2026-09-17** — the batched back-edge poll `brood_rt_tick_n` returns `2` when a limit is pending (peeks: `soft_limit_hit`, `Heap::proc_limit_pending`, `current_mailbox_overflow_pending`) and the loop deopts at its back-edge (frame = next iteration's args, checkpoint just reset), so the VM re-runs that iteration and raises at its own safepoint. Guard: `mem_limit::soft_limit_trips_inside_a_native_loop` (a warmed `defn` loop; sabotage — the poll returning 0 — reds it) beside the letrec case |
 | KI-158 | **the checker's joint fixpoint (Pass 2.9) was not a function of the file: the same `std/tool/nest.blsp` inferred `run-program` as `(int 0 2)` on five runs and `0 \| 1 \| 2` on the sixth** — found by the site-walk cache's differential, which read different answers from a cache that changed only the ORDER questions were asked in | ✅ **FIXED 2026-09-17** — two channels. The specialization memo (`SPECIAL_MEMO`, keyed by name and argument types) outlived the joint round it was typed under, so a body re-typed in round one under the floored returns answered every later round (`sigs::clear_specializations`, once per round); and the returns were re-read iterating a `HashMap`, each applied at once, so which name saw which neighbour's NEW return was hash order, and the history-dependent widening (`widen_intervals_against`) landed on either side (definition order now, and the derivation's names sorted). Guard: `nest::derivation_cache_differential` — `nest check --strict --suggest-sigs` over `std/` and `tests/` with the cache and without must agree byte for byte; sabotage (a cache ignoring what moved) reds it. Also KI-137's class, one layer down: a verdict that differs between two RUNS of one list |
@@ -9794,6 +9794,12 @@ mailbox ahead of the next child's reply.
 child death, the reason in that message is the bug; if it names a 60-second silence with
 23 of 24 replies, look at the scheduler, not the loader.
 
+**Re-hunted 2026-09-25, not reproduced.** The whole `autoload_race` binary (five tests, the
+image-backed variants included) ran 150 times with a `yes` on every core, then 150 times
+beside a `-j28` workspace suite: no failure, slowest run under a second. That makes 382 clean
+runs in all. It stays a watch item with its diagnostic armed, because the one hang was never
+explained. The next occurrence names its cause.
+
 ## KI-132 — the JIT latches the syntax highlighter's walk onto the VM: every helper of `hl-spans` deopt-thrashes ✅ FIXED 2026-09-15 (ADR-353)
 
 **Symptom.** One fontify pass over a 111-line, 421-token band of `bedit/src/view.blsp`
@@ -10316,7 +10322,19 @@ let's slot and still declines, which the guard pins at both the chunk and the va
 **Guard.** `eval::compile::tests::a_letrec_loop_is_a_self_call_and_a_shadowed_name_is_not`;
 sabotage (the rule without the slot) reds it with the chunk it used to produce.
 
-## KI-155 — `mcp_test`'s watch window missed a 5 ms-late burst on a loaded runner 🔍 WATCH 2026-09-17
+## KI-155 — `mcp_test`'s watch window missed a 5 ms-late burst on a loaded runner ✅ FIXED 2026-09-25
+
+**Fixed by construction (2026-09-25).** The spread below bounded the problem instead of
+removing it: the bursts ended about 500 ms after the helper started, so a watcher scheduled
+later than that saw an empty window again. `mcpt-until-stopped` bursts every 25 ms until it
+receives `:stop`, and `mcpt-watching` sends that only after the watch has returned, so the
+window always has a helper running inside it. Checked both ways. With a 700 ms sleep before
+the watch (past the old spread's end) both tests pass. With that sleep and the helper
+stopped before the watch, both fail. Under load it ran 60 times with a `yes` on every core
+and 60 times beside a `-j28` workspace suite, all clean. A future `count 0` cannot be the
+scheduler, so it would mean the system monitor lost events.
+
+### As filed (2026-09-17)
 
 **Symptom.** CI `test` job at `a701f1e1`: `mcp watch-runtime tool › the :filter selects
 only the requested kinds` — `(is (> (count evs) 0))` false. The sibling test in the same
@@ -10333,7 +10351,21 @@ events land inside a 1500 ms window that opens any time in the first half-second
 watch tests use it. A watch item: the cause is the runner's scheduling as read from the
 shape, and the runtime's sysmon delivery is the next suspect if it recurs with the spread.
 
-## KI-154 — `duplicate_connect_is_deduplicated` waited 30 s for a welcome, once 🔍 WATCH 2026-09-17
+## KI-154 — `duplicate_connect_is_deduplicated` waited 30 s for a welcome, once ✅ FIXED 2026-09-23
+
+**Closed (2026-09-23, confirmed 2026-09-25).** The index row has the 2026-09-23 closure: the
+first fix had reached only `echo_server_src`, and the twelve inline servers were moved to
+register-before-listen after `dual_listen` failed the same way. **Stress, 2026-09-25:** the
+test ran 150 times with a `yes` on every core, then 150 times beside a `-j28` workspace
+suite, with no failure. Two other ways to lose the `[:hi]` were ruled out by reading the
+code. (1) A duplicate link's tie-break (`establish`) keeps the EXISTING link when both links
+have the same initiator, so two ends that registered in different orders could each close
+the link the other kept. That cannot happen here: `node_connect`'s pre-dial check matches the
+authenticated name (`a@127.0.0.1`), so the second `connect` never dials, and mesh gossip
+skips self and connected peers. (2) The handshake reads frames with `read_exact` and the
+responder sends the final `Auth`, so no frame behind the handshake is over-read.
+
+### As filed (2026-09-17)
 
 **Symptom.** One full-suite run: `cli::distribution duplicate_connect_is_deduplicated` failed
 with the client's `no welcome` after its 30 s `receive`, then passed on nextest's retry.
