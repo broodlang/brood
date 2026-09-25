@@ -622,8 +622,14 @@ fn a_dynamic_key_on_a_known_map_keeps_it_a_map() {
 // `(assoc-in m [*state-key* :k] …)`, and the union put 20 strict findings on it.
 #[test]
 fn assoc_in_answers_by_whether_the_receiver_can_be_a_vector() {
-    assert_eq!(ty_str("(fn (m k) (assoc-in m [k :a] 1))"), "(any, any) -> any");
-    assert_eq!(ty_str("(fn (m k) (update-in m [k] inc))"), "(any, any) -> any");
+    assert_eq!(
+        ty_str("(fn (m k) (assoc-in m [k :a] 1))"),
+        "(any, any) -> any"
+    );
+    assert_eq!(
+        ty_str("(fn (m k) (update-in m [k] inc))"),
+        "(any, any) -> any"
+    );
     assert_eq!(ty_str("(fn (k) (assoc-in nil [k] 1))"), "(any) -> map");
     assert!(
         ty_str("(fn (k) (assoc-in [[1 2]] [k 0] 9))").contains("vector"),
