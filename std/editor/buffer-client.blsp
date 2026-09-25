@@ -100,19 +100,36 @@ value — conventionally the subscribing process's pid, matching the `origin` we
 outbound edits with). Version -1, so the subscription's seed push always applies."
   {:proc proc :me me :version -1 :pending ()})
 
+(defn- link-send-splice (link splice)
+  "Send one `[lo hi repl]` to the link's process, based and tagged, and count it in
+`:pending`. The link unchanged for a splice that changes nothing."
+  (if (splice-noop? splice)
+    link
+    (let ([lo hi repl] splice)
+      (buffer-splice (get link :proc) lo hi repl (get link :me) (get link :version))
+      (assoc link
+        :pending (append (or (get link :pending) ()) (list [lo hi (string/length repl)]))))))
+
 (defn link-propagate (link old-text new-text)
   "Send the local text change `old-text` → `new-text` to the link's process as a
 based positional splice — tagged with `:me` (our echo comes back recognizable) and
 based on `:version` (the process transforms it over anything applied since) — and
 count it in `:pending` (in flight until `link-fold` pops it on the echo). Returns
 the link (unchanged when the texts are equal — pure movement sends nothing)."
-  (let (splice (text-splice old-text new-text))
-    (if (splice-noop? splice)
-      link
-      (let ([lo hi repl] splice)
-        (buffer-splice (get link :proc) lo hi repl (get link :me) (get link :version))
-        (assoc link
-          :pending (append (or (get link :pending) ()) (list [lo hi (string/length repl)])))))))
+  (link-send-splice link (text-splice old-text new-text)))
+
+(defn link-propagate-buffers (link before after)
+  "`link-propagate` for a holder whose local copy is a BUFFER: send the change `before` →
+`after` as the splices the edits actually made (`buffer-splices-since`, the buffer's own
+log), each one sent and counted as `link-propagate` sends its one. Exact where a diff
+guesses — a diff of `aaa` → `aaaa` cannot say WHICH `a` was typed, so a collaborator's
+caret beside it landed on the wrong side — and it reads no text. When the log cannot
+account for the change (an undo restored a snapshot, the text was replaced wholesale) it
+falls back to diffing the two texts, which is always correct in content."
+  (let (splices (buffer-splices-since before after))
+    (if (nil? splices)
+      (link-propagate link (buffer-text before) (buffer-text after))
+      (fold splices link link-send-splice))))
 
 (defn link-fold (link version view origin)
   "Fold one `[:buffer-updated proc version view origin]` push into `link`: returns

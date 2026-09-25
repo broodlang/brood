@@ -1430,3 +1430,29 @@ suite run. `*test-wait-ms*` is a failure deadline, reached only if a relay never
     (let (e (insert (make-buffer "a") "b"))
       (refute (buffer-modified? (mark-buffer-saved e)))
       (is (buffer-modified? (mark-buffer-modified (make-buffer "a")))))))
+
+(describe "buffer-splices-since: what the edits did, not a diff's guess"
+  (test "typing at the front of a run of equal characters is an insert at the FRONT"
+    ;; a text diff of "aaa" -> "aaaa" says [3 3 "a"]: the right size, the wrong place
+    (let (before (make-buffer "aaa"))
+      (assert= (buffer-splices-since before (insert before "a")) (list [0 0 "a"]))))
+  (test "several edits come back oldest first, each against the text the last one left"
+    (let (before (goto-char (make-buffer "abc") 1)
+          after (delete-backward-char (insert (insert before "X") "Y")))
+      (assert= (buffer-splices-since before after)
+        (list [1 1 "X"] [2 2 "Y"] [2 3 ""]))))
+  (test "a deleted region and a replace-region are logged"
+    (let (before (goto-char (set-mark (make-buffer "hello world")) 5))
+      (assert= (buffer-splices-since before (delete-region before)) (list [0 5 ""]))
+      (assert= (buffer-splices-since before (replace-region before 6 11 "there"))
+        (list [6 11 ""] [6 6 "there"]))))
+  (test "no change is no splices, and movement is no change"
+    (let (before (make-buffer "abc"))
+      (assert= (buffer-splices-since before before) ())
+      (assert= (buffer-splices-since before (goto-char before 2)) ())))
+  (test "a change the log cannot account for is nil, for the caller to diff"
+    ;; an undo restores a snapshot: the rope changes with no splice logged
+    (let (edited (insert (make-buffer "abc") "X")
+          undone (undo edited))
+      (is (nil? (buffer-splices-since edited undone)))
+      (is (nil? (buffer-splices-since (make-buffer "one") (make-buffer "two")))))))

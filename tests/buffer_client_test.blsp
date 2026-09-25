@@ -147,3 +147,25 @@
               (assert= a3 [:splice [0 0 ">"]])
               (assert= (buffer-query bp buffer-text) ">hello!")))))
       (stop-buffer bp))))
+
+(describe "link-propagate-buffers sends what the edit did"
+  :isolated (test "an `a` typed at the front of `aaa` lands at the front, past a caret beside it"
+    ;; someone's caret at 2: the real edit (insert at 0) moves it to 3; the diff's guess
+    ;; (insert at 3) would have left it at 2, on the wrong side of their text
+    (let (bp (spawn-buffer (make-buffer "aaa"))
+          _ (buffer-marker-move bp :them 2)
+          before (make-buffer "aaa")
+          after (insert before "a")
+          link (link-propagate-buffers (link-init bp (self)) before after))
+      (assert= (get link :pending) (list [0 0 1]))
+      (assert= (buffer-query bp buffer-text) "aaaa")
+      (assert= (buffer-query bp (fn (b) (buffer-marker b :them))) 3)
+      (stop-buffer bp)))
+  :isolated (test "a change the log cannot account for is still sent, as the diff"
+    (let (bp (spawn-buffer (make-buffer "abc"))
+          link (link-propagate-buffers (link-init bp (self))
+                 (make-buffer "abc")
+                 (make-buffer "abXc")))
+      (assert= (get link :pending) (list [2 2 1]))
+      (assert= (buffer-query bp buffer-text) "abXc")
+      (stop-buffer bp))))

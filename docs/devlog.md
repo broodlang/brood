@@ -15822,3 +15822,19 @@ the bug: a module materialised from the stdlib image carried **positions with no
 (`from_message` re-stamps through `set_form_pos`, which takes the ambient `current_file`),
 so imaged code reported a line from one file under another file's name —
 `%image-load-section` now stamps the section's own module path.
+
+## 2026-09-25 — a buffer says what an edit did: the splice log
+
+bedit's hosted buffers (issues.md H2) sent every keystroke to their buffer process as a
+splice DIFFED from the old and new text: both texts materialised per event, and the place
+guessed — in a run of equal characters the diff cannot tell which one was typed, so `a`
+typed at the front of `aaa` went out as an insert at the END, landing a collaborator's caret
+on the wrong side of it. The edit primitives know exactly what they did, so they now say it:
+`insert` / `delete-char` / `delete-backward-char` / `delete-region` share one tail
+(`buffer-apply-edit`) that shifts markers and editable regions as before and logs
+`[rope-before rope-after lo hi repl]` under `:splices` (the last 32).
+`buffer-splices-since before after` replays that chain — nil when it cannot account for the
+change (an undo restores a snapshot; a wholesale replace), for the caller to diff instead —
+and `editor/buffer-client/link-propagate-buffers` sends it, falling back to
+`link-propagate`'s diff. The walk compares rope handles, which `=` answers by identity
+before content; carrying the ropes across a process boundary is an `Arc` clone each.

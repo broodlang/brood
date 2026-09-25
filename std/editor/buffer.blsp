@@ -1109,6 +1109,55 @@ inside the range collapses to `lo`, one at/after `hi` moves left by the deleted 
             (buffer-markers-delete m a b))))))
 (sig buffer-adjust-markers (buffer keyword int int -> buffer))
 
+;; ---- the splice log: what an edit DID, not a guess from the text -------------------
+;; A holder that mirrors this buffer somewhere else — a buffer process, a collaborator —
+;; has to say what changed as a positional splice. Diffing the old text against the new
+;; one gets the SIZE right and the PLACE wrong in a run of equal characters: typing `a` at
+;; the front of `aaa` diffs as an insert at the END, which lands a collaborator's caret
+;; and every marker on the wrong side of it. It also materialises both texts per
+;; keystroke. The edit primitives know exactly what they did, so they say so: each logs
+;; `[rope-before rope-after lo hi repl]`, and `buffer-splices-since` replays the chain.
+
+(def *splice-log-max* 32)
+;; Entries a buffer keeps. A holder asks once per event, and one event's edits are a
+;; handful — a longer run (a macro, a rectangle over many lines) falls back to the diff,
+;; which is correct, merely approximate in placement.
+
+(defn- buffer-apply-edit (before after kind a b repl)
+  "`after` — `before` with `[lo, hi)` replaced by `repl` in its rope, where `kind`/`a`/`b`
+describe the edit as `buffer-adjust-markers` reads it — with its markers and editable regions
+shifted and the splice logged. The one tail every editing primitive shares."
+  (let (lo a
+        hi (if (= kind :insert) a b)
+        logged (assoc after
+                 :splices
+                   (take (cons [(get before :rope) (get after :rope) lo hi repl]
+                           (or (get before :splices) ()))
+                     *splice-log-max*)))
+    (buffer-adjust-editable (buffer-adjust-markers logged kind a b) kind a b)))
+(sig buffer-apply-edit (buffer buffer keyword int int string -> buffer))
+
+(defn buffer-splices-since (before after)
+  "The splices `[lo hi repl]`, oldest first, that the editing primitives made to turn
+`before`'s text into `after`'s — each positioned against the text the one before it left.
+`()` when the two hold the same text; nil when the log cannot account for the change (an
+undo restored a snapshot, the text was replaced wholesale, more edits than the log keeps),
+for the caller to diff the texts instead (`editor/buffer-client/text-splice`).
+
+Exact where a diff guesses: a diff of `aaa` → `aaaa` cannot tell WHICH `a` was typed, and
+this can. Costs no text: the walk compares rope handles."
+  (let (from (get before :rope))
+    (letrec (walk (fn (target log acc)
+                    (cond
+                      (= target from) acc
+                      (empty? log) nil
+                      else
+                        (let ([rope-before rope-after lo hi repl] (first log))
+                          (if (= rope-after target)
+                            (walk rope-before (rest log) (cons [lo hi repl] acc))
+                            nil)))))
+      (walk (get after :rope) (or (get after :splices) ()) ()))))
+(sig buffer-splices-since (buffer buffer -> (or nil list)))
 (defn insert (buf s)
   "Insert string `s` at point; point advances past it. Recorded for undo. Markers after the
 insertion point shift with the text. Throws if `buf` is read-only."
@@ -1118,14 +1167,11 @@ insertion point shift with the text. Throws if `buf` is read-only."
     (let (p (get buf :point)
           _ (buffer-barf-if-protected-insert buf p)
           buf (buffer-record-change buf))
-      (buffer-adjust-editable (buffer-adjust-markers (assoc buf
-                                                       :rope (text/insert (get buf :rope) p s)
-                                                       :point (+ p (string/length s))
-                                                       :mark nil)
-                                :insert p
-                                (string/length s))
+      (buffer-apply-edit buf
+        (assoc buf :rope (text/insert (get buf :rope) p s) :point (+ p (string/length s)) :mark nil)
         :insert p
-        (string/length s)))))
+        (string/length s)
+        s))))
 (sig insert (buffer string -> buffer))
 
 (defn delete-char (buf &optional (n 1))
@@ -1138,11 +1184,11 @@ no-op at end-of-buffer is not recorded). Throws if `buf` is read-only."
       buf
       (let (_ (buffer-barf-if-protected-delete buf p end)
             buf (buffer-record-change buf))
-        (buffer-adjust-editable (buffer-adjust-markers (assoc buf
-                                                         :rope (text/delete (get buf :rope) p end)
-                                                         :mark nil)
-                                  :delete p end)
-          :delete p end)))))
+        (buffer-apply-edit buf
+          (assoc buf :rope (text/delete (get buf :rope) p end) :mark nil)
+          :delete p
+          end
+          "")))))
 (sig delete-char (buffer &optional int -> buffer))
 
 (defn delete-backward-char (buf &optional (n 1))
@@ -1155,12 +1201,11 @@ Recorded for undo (a no-op at point 0 is not recorded). Throws if `buf` is read-
       buf
       (let (_ (buffer-barf-if-protected-delete buf start p)
             buf (buffer-record-change buf))
-        (buffer-adjust-editable (buffer-adjust-markers (assoc buf
-                                                         :rope (text/delete (get buf :rope) start p)
-                                                         :point start
-                                                         :mark nil)
-                                  :delete start p)
-          :delete start p)))))
+        (buffer-apply-edit buf
+          (assoc buf :rope (text/delete (get buf :rope) start p) :point start :mark nil)
+          :delete start
+          p
+          "")))))
 (sig delete-backward-char (buffer &optional int -> buffer))
 
 (defn insert-pair (buf open close)
@@ -1194,13 +1239,11 @@ region is empty. Recorded for undo (restoring it brings back the mark too). Thro
           (assoc buf :mark nil)
           (let (_ (buffer-barf-if-protected-delete buf lo hi)
                 buf (buffer-record-change buf))
-            (buffer-adjust-editable (buffer-adjust-markers (assoc buf
-                                                             :rope
-                                                               (text/delete (get buf :rope) lo hi)
-                                                             :point lo
-                                                             :mark nil)
-                                      :delete lo hi)
-              :delete lo hi)))))))
+            (buffer-apply-edit buf
+              (assoc buf :rope (text/delete (get buf :rope) lo hi) :point lo :mark nil)
+              :delete lo
+              hi
+              "")))))))
 
 (defn replace-region (buf start end s)
   "Replace the characters in `[start, end)` with string `s`, leaving point just after
