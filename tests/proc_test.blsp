@@ -345,12 +345,21 @@ twice — for a test whose answer arrived in milliseconds."
   :isolated (test ":int ends a foreground command and the shell running it"
     (let (p (os/spawn "sh" ["-c" "echo ready; sleep 30; echo after"]))
       (assert= (receive ([:proc ^p out] (string/trim out)) (after 5000 :timeout)) "ready")
-      (os/signal p :int)
-      (assert= (receive
-                 ([:proc ^p out] [:printed out])
-                 ([:proc-closed ^p _] :closed)
-                 (after 5000 :timeout))
-        :closed)))
+      ;; Ctrl-C again if the first one is lost, as a user would. "ready" is printed BEFORE
+      ;; the shell forks `sleep`, and a SIGINT landing in the child between fork and exec is
+      ;; taken by the shell's own inherited handler, then lost at exec — `sleep` never sees
+      ;; it, and the shell, whose child did not die of SIGINT, carries on. That is the shell,
+      ;; not `os/signal`: plain Python loses it 10-13 times in 200 (2026-09-25), and this
+      ;; assertion timed out on both tries of a loaded suite run. A resend 500 ms later has
+      ;; never been lost (0 of 300). A resend may find the child already reaped (the first
+      ;; one worked; its close is still in flight), which `os/signal` rightly refuses.
+      (letrec (interrupt (fn (tries)
+                           (try (os/signal p :int) (catch e nil))
+                           (receive
+                             ([:proc ^p out] [:printed out])
+                             ([:proc-closed ^p _] :closed)
+                             (after 500 (if (= tries 0) :timeout (interrupt (dec tries)))))))
+        (assert= (interrupt 10) :closed))))
   :isolated (test "a program that traps :int is told and carries on"
     (let (p (os/spawn "sh"
               ["-c" "trap 'echo caught' INT; echo ready; while :; do sleep 0.05; done"]))

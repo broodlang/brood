@@ -10,7 +10,9 @@
 ;;; `let`s shares a slot; the first binds a computed int (cached), the second binds a value
 ;;; that reaches the slot some other way — a global read (a boxed handle), a slot copy, a
 ;;; float — and then reads it as an int. Each arm is driven until it SETTLES NATIVE before
-;;; the answer is checked, so the check runs the lowered code, not the VM.
+;;; the answer is checked, so the check runs the lowered code, not the VM. Under a ceiling
+;;; below Native (`BROOD_VM=0`, `BROOD_TIER=1`) there is no tier to settle on, and the value
+;;; checks run on whatever engine is live.
 ;;;
 ;;; Sabotage-verified (2026-09-25): letting a handle store keep the slot's cached int
 ;;; (`set_slot_flags`' `Op::Handle` arm returning the old entry) fails "a boxed store clears
@@ -51,14 +53,17 @@
 
 (describe "the JIT's per-slot i64 cache"
   (test "a boxed store clears the slot"
-    (assert= :native (settle ic-handle 1 (fn () (sum-over ic-handle 500 0)) 500))
+    (when (%native-tier?)
+      (assert= :native (settle ic-handle 1 (fn () (sum-over ic-handle 500 0)) 500)))
     ;; sum over i of 3i + 8
     (expect-sum ic-handle (+ (* 3 (/ (* 2000 2001) 2)) (* 8 2000))))
   (test "a slot copy carries the source's value"
-    (assert= :native (settle ic-copy 1 (fn () (sum-over ic-copy 500 0)) 500))
+    (when (%native-tier?)
+      (assert= :native (settle ic-copy 1 (fn () (sum-over ic-copy 500 0)) 500)))
     ;; sum over i of 5i + 2(i + 2)
     (expect-sum ic-copy (+ (* 7 (/ (* 2000 2001) 2)) (* 4 2000))))
   (test "a float store in a sibling scope leaves a later int read alone"
-    (assert= :native (settle ic-float 1 (fn () (sum-over ic-float 500 0)) 500))
+    (when (%native-tier?)
+      (assert= :native (settle ic-float 1 (fn () (sum-over ic-float 500 0)) 500)))
     ;; r = 2i + 1, d = 3i + 1, result 2d = 6i + 2
     (expect-sum ic-float (+ (* 6 (/ (* 2000 2001) 2)) (* 2 2000)))))
