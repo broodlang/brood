@@ -1087,6 +1087,54 @@ pub(crate) fn vm_run_bc(
                     cur_back_edges = 0; // fresh counter for the callee's frame
                 }
             }
+            // `Call` minus the argument round trip: the callee's `argc` args are already the
+            // top of `roots`, so they become its first slots where they lie. `push_frame`'s
+            // remaining work for such an arm (nil the binder slots, fill the captures) is
+            // done here; there are no optionals or a rest param by construction.
+            Ok(ChunkExit::CallInPlace {
+                arm,
+                argc,
+                genv,
+                bases,
+            }) => {
+                if frames.len() + 1 > MAX_BC_FRAMES {
+                    unwind(heap);
+                    let mut e = crate::eval::bc_frame_depth_error(frames.len());
+                    attach_vm_trace(&mut e, &cur_arm, &frames);
+                    return Err(e);
+                }
+                let caller_arm = std::mem::replace(&mut cur_arm, arm);
+                frames.push(BcFrame {
+                    arm: caller_arm,
+                    ip: cur_ip,
+                    base: cur_base,
+                    env: cur_env,
+                    env_base: cur_env_base,
+                    arm_slot: cur_arm_slot,
+                    ic_bases: heap.ic_bases(),
+                    entry_epoch: cur_entry_epoch,
+                    #[cfg(feature = "jit")]
+                    back_edges: cur_back_edges,
+                });
+                heap.set_ic_bases(bases);
+                cur_env_base = heap.env_roots_len();
+                cur_env = heap.root_env(genv);
+                cur_base = heap.roots_len() - argc;
+                cur_arm_slot = if cur_arm.has_runtime_handles {
+                    heap.live_arm_push(cur_arm.clone())
+                } else {
+                    usize::MAX
+                };
+                heap.extend_roots_to_nil(cur_base + cur_arm.nslots);
+                fill_captures(heap, &cur_arm, cur_base, cur_env);
+                cur_ip = 0;
+                cur_entry_epoch = heap.global_epoch();
+                #[cfg(feature = "jit")]
+                {
+                    try_jit = true;
+                    cur_back_edges = 0;
+                }
+            }
             // A native callee `exec_chunk` ran IN PLACE (the VM→native direct call,
             // compute-frontier §7.12) ended with an outcome only the driver can honour:
             // a deopt or preempt — continue THIS activation on the VM, at its checkpoint
