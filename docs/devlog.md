@@ -15848,3 +15848,14 @@ process GROUP — `os/spawn` already makes it a group leader so `os/close` can r
 started — and leaves it registered, because a program may catch the signal and carry on.
 Guards in `tests/proc_test.blsp`; the group test goes red when the signal goes to the pid
 alone (the shell dies, `sleep` holds the pipe, `[:proc-closed …]` waits out the 30 s).
+
+## 2026-09-25 — `std/jsonrpc`: the LSP wire, once
+
+bedit's LSP client carried JSON-RPC's framing as private functions — the `Content-Length`
+header, the four message builders, and the stream decoder that cuts a chunked stdout into
+messages by BYTES (a body with one multi-byte character is longer in bytes than in
+characters, and a character count waits forever) and slices with `bytes/slice` (the SEQ
+view built one boxed int per byte and exhausted a 2 GB limit on a 100 kB completion reply).
+DAP and a stdio MCP client speak the same wire, so it is std's now: `jsonrpc/frame`,
+`request`, `notification`, `response`, `error-response`, `decode`, and the reserved
+`*error-codes*`. Guards in `tests/jsonrpc_test.blsp`.

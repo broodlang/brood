@@ -1,0 +1,123 @@
+;; std/jsonrpc.blsp — JSON-RPC 2.0 messages over a `Content-Length`-framed byte stream.
+;;
+;; Design notes (the *why*; the *what* is in the docstrings below):
+;;  - This is the wire the Language Server Protocol, the Debug Adapter Protocol and a
+;;    stdio MCP server speak: each message a JSON body behind a `Content-Length: N` header
+;;    and a blank line. A client for any of them needs the same three things — build a
+;;    message, frame it, and cut a chunked stdout stream back into messages — and bedit's
+;;    LSP client had them as private functions, where the next protocol would have copied
+;;    them.
+;;  - `Content-Length` counts BYTES and a subprocess chunk arrives as a string, so the
+;;    body is cut by UTF-8 byte offset. A frame carrying any multi-byte character is longer
+;;    in bytes than in characters; measured in characters, the decoder would wait forever
+;;    for bytes that, as characters, never arrive. The header is ASCII by the spec, so only
+;;    the body needs byte arithmetic.
+;;  - The body is cut with `bytes/slice`, never `take`/`drop`: those walk the SEQ view and
+;;    build one boxed int per byte — quadratic, and at the ~100 kB a completion reply
+;;    reaches on a real project it exhausted a 2 GB process limit.
+
+(defmodule jsonrpc
+  "JSON-RPC 2.0 messages over a `Content-Length`-framed stream — the wire of LSP, DAP and a
+stdio MCP server. Build a message (`request`, `notification`, `response`,
+`error-response`: each returns the FRAMED string, ready for `os/write`), and cut what
+arrives back into messages with `decode`, which keeps an incomplete trailing frame for the
+next chunk:
+
+    (let ([messages rest] (jsonrpc/decode (str buffer chunk)))
+      …)
+
+Error codes the spec reserves are in `*error-codes*`.")
+
+(def *error-codes*
+  ;; The codes JSON-RPC 2.0 reserves for its own errors, by what they mean.
+  {:parse-error -32700
+   :invalid-request -32600
+   :method-not-found -32601
+   :invalid-params -32602
+   :internal-error -32603})
+
+(defn frame (body)
+  "`body` (a JSON string) behind its `Content-Length` header. The length is the body's
+UTF-8 BYTE count, which is what the header means — not its character count, which differs
+as soon as the body carries a character outside ASCII.
+
+    (jsonrpc/frame \"{}\")   → \"Content-Length: 2\\r\\n\\r\\n{}\""
+  (str "Content-Length: " (bytes/length (string/->bytes body)) "\r\n\r\n" body))
+(sig frame (string -> string))
+
+(defn request (id method params)
+  "A framed request: `{\"jsonrpc\": \"2.0\", \"id\", \"method\", \"params\"}`. The peer answers
+with a response carrying the same `id`.
+
+    (:id (first (first (jsonrpc/decode (jsonrpc/request 7 \"shutdown\" nil)))))   → 7"
+  (frame (json/encode {:jsonrpc "2.0" :id id :method method :params params})))
+
+(defn notification (method params)
+  "A framed notification — a request with no `id`, which the peer does not answer.
+
+    (:method (first (first (jsonrpc/decode (jsonrpc/notification \"exit\" nil)))))   → \"exit\""
+  (frame (json/encode {:jsonrpc "2.0" :method method :params params})))
+
+(defn response (id result)
+  "A framed response to request `id`, carrying `result`. The protocol runs both ways: a
+language server asks its client things too (`client/registerCapability`), and waits for
+this.
+
+    (:result (first (first (jsonrpc/decode (jsonrpc/response 3 [1 2])))))   → [1 2]"
+  (frame (json/encode {:jsonrpc "2.0" :id id :result result})))
+
+(defn error-response (id code message)
+  "A framed error response to request `id`. `code` is an integer — one of
+`*error-codes*` for a protocol failure, `(:method-not-found jsonrpc/*error-codes*)` being
+the honest answer to a request the receiver does not implement.
+
+    (get-in (first (first (jsonrpc/decode (jsonrpc/error-response 3 -32601 \"no\")))) [:error :code])   → -32601"
+  (frame (json/encode {:jsonrpc "2.0" :id id :error {:code code :message message}})))
+
+(defn- content-length (header)
+  "The `Content-Length` value in a frame's `header` block (the text before the blank
+line), or nil when it is absent or not a number."
+  (let (i (index-of header "Content-Length:"))
+    (if (< i 0)
+      nil
+      (let (after (string/substring header (+ i 15) (string/length header))
+            eol (index-of after "\r")
+            token (string/trim (if (< eol 0) after (string/substring after 0 eol)))
+            n (string/->number token))
+        (if (int? n) n nil)))))
+(sig content-length (string -> (or nil int)))
+
+(defn- decode-acc (buf acc)
+  (let (separator (index-of buf "\r\n\r\n"))
+    (if (< separator 0)
+      [(reverse acc) buf] ; no complete header yet
+      (let (body-length (content-length (string/substring buf 0 separator)))
+        (if (nil? body-length)
+          [(reverse acc) buf] ; a malformed header: stop here, the caller keeps the buffer
+          (let (body-start (+ separator 4) ; the header is ASCII: char index = byte offset
+                bytes (string/->bytes buf)
+                total (bytes/length bytes))
+            (if (< (- total body-start) body-length)
+              [(reverse acc) buf] ; the body's bytes have not all arrived
+              (let (body-end (+ body-start body-length)
+                    body (string/bytes-> (bytes/slice bytes body-start body-end))
+                    remaining (string/bytes-> (bytes/slice bytes body-end total))
+                    message (try
+                              (json/decode body)
+                              (catch e
+                                (do
+                                  (log/warn (str "jsonrpc: a frame that is not JSON was dropped: "
+                                              (error-message e)))
+                                  nil))))
+                (decode-acc remaining (if (nil? message) acc (cons message acc)))))))))))
+
+(defn decode (buf)
+  "`[messages remaining]`: every complete frame at the front of `buf`, decoded (a map per
+message), and what is left — the start of a frame whose header or body has not all arrived,
+kept for the next chunk. A frame whose body is not JSON is dropped with a warning rather
+than stalling everything behind it; a malformed HEADER stops decoding there, since where the
+next frame starts cannot be known.
+
+    (second (jsonrpc/decode (str (jsonrpc/notification \"exit\" nil) \"Content-Len\")))   → \"Content-Len\""
+  (decode-acc buf '()))
+(sig decode (string -> (tuple list string)))
