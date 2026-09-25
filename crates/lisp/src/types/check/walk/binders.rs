@@ -571,6 +571,18 @@ pub(super) fn check_defn(
     }
 }
 
+/// Is `then_form` a guard — `(if g body fallthrough)` — whose fallthrough is the same code
+/// as `else_form`? The shape a `:when` clause of `match` lowers to: the clauses after it are
+/// written into both branches, and are reached through the guard's else.
+fn guarded_clause(heap: &Heap, then_form: Value, else_form: Value) -> bool {
+    let Some(items) = list_items(heap, then_form) else {
+        return false;
+    };
+    matches!(items.first(), Some(Value::Sym(head)) if value::symbol_is(*head, kw::IF))
+        && items.len() == 4
+        && heap.equal(items[3], else_form)
+}
+
 /// `(if test then else?)` — check the test in the outer ctx, then descend
 /// into each branch with the ctx narrowed by what the test would assert.
 /// `else` defaults to `nil` (matches the evaluator), so absent or non-pair
@@ -599,7 +611,15 @@ pub(super) fn check_if(
     // always wins, so a later one is dead code). Purely structural — no
     // scrutinee `Ty` involved, so this fires on any hand-written same-symbol
     // `%eq`-if chain too, not just `match`-generated ones.
-    if !ctx.is_suppressed(crate::types::check::ctx::SUPPRESS_UNREACHABLE) {
+    //
+    // A GUARDED clause is the exception: `(:ok :when g body)` lowers to
+    // `(if (%eq s :ok) (if g body REST) REST)`, the fallthrough REST written into BOTH
+    // branches. The copy in the else branch is dead, but the clause it holds is reached
+    // through the guard's else — so a later `:ok` is not unreachable, and saying it was
+    // flagged the ordinary shape "take this when a condition holds, else the usual `:ok`".
+    if !ctx.is_suppressed(crate::types::check::ctx::SUPPRESS_UNREACHABLE)
+        && !guarded_clause(heap, then_form, else_form)
+    {
         if let Some((sym, lit)) = literal_eq_test_raw(heap, test) {
             if let Some(dup) = find_redundant_clause(heap, else_form, sym, lit) {
                 let label =
