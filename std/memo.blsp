@@ -1,0 +1,75 @@
+;; std/memo.blsp — bounded memoisation for a hot path whose arguments are big values.
+;;
+;; Design notes (the *why*; the *what* is in the docstrings below):
+;;  - `memoize` (prelude) is the general answer and the wrong one on an editor's render
+;;    path. Its table hashes each key — and a rope hashes by its whole TEXT, so looking up
+;;    a row table keyed on a buffer's rope read the document on every frame — and a table
+;;    read hands back a COPY of the value. It also never forgets.
+;;  - What those paths want is the answer to "the same call as a moment ago?": keep the
+;;    last few calls and compare arguments with `=`, which answers at once for the same
+;;    rope handle (an edit mints a new rope; a cursor move keeps it). Bounded, so it cannot
+;;    grow; no copy on a hit.
+;;  - bedit carried three of these by hand, each a global `def` re-bound on a miss. This is
+;;    that pattern once. The store is a global, like theirs: shared by the processes that
+;;    call it, and a race between two of them costs a recomputation, never a wrong answer.
+
+(defmodule memo
+  "Bounded memoisation for hot paths: `defmemo` defines a function that remembers its
+last few calls, compared by `=` — for arguments like a buffer's rope, where hashing
+(`memoize`) would read the whole text on every call.")
+
+(defn- param-names (params)
+  "The names a parameter list binds, in order — `&optional`/`&` markers dropped, a
+`(name default)` pair reduced to its name."
+  (seq/keep params
+    (fn (p)
+      (cond
+        (and (symbol? p) (string/starts-with? (->string p) "&")) nil
+        (symbol? p) p
+        (list? p) (first p)
+        :else nil))))
+
+(defn recent-lookup (store key)
+  "The `[key value]` entry of `store` whose key is `=` to `key`, or nil. The lookup half
+of `defmemo`, public only because its expansion calls it.
+
+    (memo/recent-lookup (list [[1] :one] [[2] :two]) [2])   → [[2] :two]"
+  (seq/find store (fn (entry) (= (first entry) key))))
+
+(defn recent-remember (store key value capacity)
+  "`store` with `[key value]` in front and at most `capacity` entries — the oldest go.
+The remember half of `defmemo`.
+
+    (count (memo/recent-remember (list [[1] :a] [[2] :b]) [3] :c 2))   → 2"
+  (take (cons [key value] store) capacity))
+
+(defmacro defmemo (name capacity params & body)
+  "`defn` that remembers its last `capacity` calls: a call whose arguments are `=` to a
+remembered call's returns that call's value without running the body. Compared with `=`,
+not hashed — `=` on the SAME rope handle is immediate, where hashing a rope reads its text
+— and bounded, so the cache never grows. A docstring, if the body starts with one, stays
+the function's.
+
+For a function called over and over with the same big arguments while nothing changes:
+a render path asked twice a frame about the same buffer. The store is a global (`name`
+plus `-recent`), so every process calling the function shares it.
+
+    (defmemo rows-of 8 (rope width) \"…\" (expensive rope width))"
+  (let (doc (if (string? (first body)) (list (first body)) '())
+        forms (if (string? (first body)) (rest body) body)
+        store (symbol (str (->string name) "-recent"))
+        key (gensym "key")
+        hit (gensym "hit")
+        value (gensym "value"))
+    `(do
+       (def ~store '())
+       (defn ~name ~params
+         ~@doc
+         (let (~key [~@(param-names params)]
+               ~hit (memo/recent-lookup ~store ~key))
+           (if ~hit
+             (second ~hit)
+             (let (~value (do ~@forms))
+               (do
+                 (def ~store (memo/recent-remember ~store ~key ~value ~capacity))
+                 ~value))))))))

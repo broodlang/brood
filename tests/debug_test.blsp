@@ -508,3 +508,21 @@
       (assert= [:ok] (receive ([:ok] [:ok]) (after *test-wait-ms* :timeout)))
       (assert= 0 (count (paused dbg)))
       (dbg-stop dbg))))
+
+;; `(proc/flag :no-break true)` — infrastructure other processes wait on (a buffer process,
+;; a registry) must never park: whoever asked it something would freeze, and nothing could
+;; resume it. bedit's breakpoints parked its own buffer processes until this existed.
+(describe "debugger — a :no-break process passes a breakpoint"
+  :isolated (test "with a debugger in context, it runs straight through"
+    (let (dbg (start-debugger) me (self))
+      (spawn (with-debugger dbg
+               (fn () (proc/flag :no-break true) (break "bp" :v 1) (send me [:done]))))
+      (assert= :done (receive ([:done] :done) (after 5000 :parked)))
+      (assert= 0 (count (paused dbg)))
+      (dbg-stop dbg)))
+  (test "the flag reads back, and is off by default"
+    (let (me (self))
+      (spawn (send me [:default (proc/flag :no-break)]))
+      (assert= false (receive ([:default v] v) (after 5000 :timeout)))
+      (spawn (do (proc/flag :no-break true) (send me [:set (proc/flag :no-break)])))
+      (assert= true (receive ([:set v] v) (after 5000 :timeout))))))

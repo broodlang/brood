@@ -15956,3 +15956,35 @@ public as `text/skip-forward` / `text/skip-backward` — answers how far a run o
 from (or not from) a set reaches, walking the rope's leaves from `at` and reading only the
 run. The word and whitespace motions use it; the sentence motions slice just the paragraph.
 Guards in `tests/rope_test.blsp`; `buffer_test` holds the motions' behaviour unchanged.
+
+## 2026-09-25 — `std/memo`: `defmemo`, a bounded cache compared by `=`
+
+bedit kept three render-path caches by hand — the wrap row table, the bracket match, the
+buffer's word list — each a global re-bound on a miss (issues.md X3). They could not use
+`memoize`: its table HASHES every key, and a rope hashes by its whole text, so a row table
+keyed on a buffer's rope read the document on every lookup; a table read also copies the
+value, and the table never forgets. `(defmemo name capacity (params) body…)` is a `defn`
+that remembers its last `capacity` calls, matching arguments with `=` — immediate for the
+same rope handle — in a global store named `name-recent`. `std/format` keeps its name,
+capacity and params on the head line, as `defn`'s. Guards in `tests/memo_test.blsp`.
+
+## 2026-09-25 — `source-deps` says which calls reach outside the evaluation
+
+bedit's playground evaluates each top-level form as you stop typing, and an electric pair
+closes `(file/spit "notes.txt" "")` a moment before the text goes in — so the file was
+emptied (issues.md S5). `reflect/source-deps` now answers `:effects` per form beside
+`:defines` and `:references`: the referenced globals that write, move or remove files, run
+programs, send signals, set the clipboard or halt the runtime. Syntactic, like the rest of
+it — a call through a function of your own is not seen, and a call inside a function the
+form only defines counts; whether evaluating the form runs it is the caller's policy (the
+playground holds a `def` of one and not a `defn`). Guards in `introspection_test`.
+
+## 2026-09-25 — `proc/flag :no-break`: infrastructure a breakpoint must not park
+
+A breakpoint (`debug/break`, `break-fn`) parks whichever process reaches it — including a
+process other processes are WAITING on. bedit's breakpoint on a function its buffer
+processes call parked a buffer process, and the editor loop's next synchronous question to
+it never came back (bedit issues.md P5). `(proc/flag :no-break true)` marks a process that
+a breakpoint passes through; std's own editor infrastructure sets it — every
+`spawn-buffer` process, the buffer registry, the evalsession worker. Guards in
+`tests/debug_test.blsp`.

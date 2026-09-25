@@ -343,3 +343,23 @@ fn match_redundancy_fires_on_a_hand_written_eq_chain_too() {
         "expected an unreachable-clause warning for the hand-written chain, got {w:?}"
     );
 }
+
+#[test]
+fn redundant_clause_lint_leaves_a_clause_after_a_guarded_twin_alone() {
+    // `(:ok :when g …)` then `(:ok …)`: the guarded clause handles :ok only when `g` holds,
+    // and the plain one takes it otherwise — not unreachable. The lowering writes the
+    // fallthrough into both branches of the literal test, which made it look redundant.
+    let guarded = "(defn f (s g) (match s (:ok :when g 1) (:ok 2) (_ 3)))";
+    let w = file_warnings(guarded);
+    assert!(
+        w.iter().all(|m| !m.contains("unreachable clause")),
+        "a clause after a guarded twin is reachable: {w:?}"
+    );
+    // …while a genuine duplicate is still caught.
+    let duplicate = "(defn f (s) (match s (:ok 1) (:ok 2) (_ 3)))";
+    let w = file_warnings(duplicate);
+    assert!(
+        w.iter().any(|m| m.contains("unreachable clause")),
+        "an unguarded duplicate is dead: {w:?}"
+    );
+}

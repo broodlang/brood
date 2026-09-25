@@ -110,9 +110,11 @@ pause with `break`, and correlate with `span` (`span-spawn` is now just
 (defn- debug-break* (label scope explicit)
   "The runtime half of `break`: send the snapshot (`:scope` = the auto-captured locals,
 `:vals` = the explicitly-named ones) to the debugger in context and park until resumed.
-A no-op when no debugger is in context. `break`/`break-when` expand to a call to this."
+A no-op when no debugger is in context, and in a process that set `(proc/flag :no-break
+true)` — infrastructure other processes wait on, which must never park. `break`/`break-when`
+expand to a call to this."
   (let (ctx (%trace-context) dbg (get ctx :debugger))
-    (when dbg
+    (when (and dbg (not (%process-flag :no-break)))
       (send dbg
         [:break
           (self)

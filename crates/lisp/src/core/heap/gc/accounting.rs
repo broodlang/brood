@@ -219,6 +219,16 @@ impl Heap {
         std::mem::replace(&mut self.proc_send_errors, on)
     }
 
+    /// `(proc/flag :no-break)` — does a breakpoint pass this process through rather than
+    /// park it? Setter returns the previous value.
+    pub fn proc_no_break(&self) -> bool {
+        self.proc_no_break
+    }
+
+    pub fn set_proc_no_break(&mut self, on: bool) -> bool {
+        std::mem::replace(&mut self.proc_no_break, on)
+    }
+
     /// Take the sticky over-limit flag (post-collection live bytes) — the eval/VM
     /// safepoint probe. Clearing on read means the raise happens exactly once;
     /// if the process catches it and keeps allocating, the next collection

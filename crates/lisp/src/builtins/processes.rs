@@ -153,7 +153,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::range(1, 2),
         Sig::new(vec![any, any], any),
         &["flag", "&optional", "value"],
-        "Read or set a per-process runtime flag on the current process (Erlang process_flag/2); returns the previous (or, with no value, current) setting. Flags: :max-heap — this process's heap limit in bytes (BEAM max_heap_size analogue; positive int sets, nil clears, absent reads). Checked after each GC against the live footprint; exceeding it raises a catchable E0045 error in this process only — uncaught, it kills just the offender (the global BROOD_MEM_LIMIT hard cap aborts the whole runtime). Set it first thing in a spawned fn to cap that process: (spawn (fn () (proc/flag :max-heap 8000000) (work))). :max-mailbox — this process's mailbox bound in MESSAGES (ADR-307; positive int sets, nil clears — clearing also cancels a pending trip — absent reads). Checked by every sender at enqueue; a breach raises a catchable E0046 in THIS process at its next safepoint or receive. The sender is never blocked and no message is dropped: this is the guard against a receiver that cannot keep up eating the machine, not a backpressure channel (that stays a library concern - gen/call with a timeout). :send-errors — when truthy, a (send …) whose target NODE is unknown/disconnected raises a catchable E0060 noconnection error instead of silently dropping the message (Erlang's default; process liveness stays silent either way) — so a sender can queue-and-retry across a net-split; pairs with the reconnect reconnector.",
+        "Read or set a per-process runtime flag on the current process (Erlang process_flag/2); returns the previous (or, with no value, current) setting. Flags: :max-heap — this process's heap limit in bytes (BEAM max_heap_size analogue; positive int sets, nil clears, absent reads). Checked after each GC against the live footprint; exceeding it raises a catchable E0045 error in this process only — uncaught, it kills just the offender (the global BROOD_MEM_LIMIT hard cap aborts the whole runtime). Set it first thing in a spawned fn to cap that process: (spawn (fn () (proc/flag :max-heap 8000000) (work))). :max-mailbox — this process's mailbox bound in MESSAGES (ADR-307; positive int sets, nil clears — clearing also cancels a pending trip — absent reads). Checked by every sender at enqueue; a breach raises a catchable E0046 in THIS process at its next safepoint or receive. The sender is never blocked and no message is dropped: this is the guard against a receiver that cannot keep up eating the machine, not a backpressure channel (that stays a library concern - gen/call with a timeout). :send-errors — when truthy, a (send …) whose target NODE is unknown/disconnected raises a catchable E0060 noconnection error instead of silently dropping the message (Erlang's default; process liveness stays silent either way) — so a sender can queue-and-retry across a net-split; pairs with the reconnect reconnector. :no-break — when truthy, a breakpoint (std/debug break) passes this process through instead of parking it: for infrastructure other processes wait on (a buffer process, a registry), where a parked process freezes whoever asked it something and nothing could resume it.",
         process_flag);
     primitives.def(
         "%hibernate",
@@ -468,8 +468,17 @@ pub(super) fn process_flag(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
             };
             Ok(Value::boolean(prev))
         }
+        "no-break" => {
+            let prev = if args.len() < 2 {
+                heap.proc_no_break()
+            } else {
+                let on = !matches!(arg(args, 1), Value::Nil | Value::Bool(false));
+                heap.set_proc_no_break(on)
+            };
+            Ok(Value::boolean(prev))
+        }
         other => Err(LispError::runtime(format!(
-            "proc/flag: unknown flag :{other} (known: :max-heap, :max-mailbox, :send-errors)"
+            "proc/flag: unknown flag :{other} (known: :max-heap, :max-mailbox, :send-errors, :no-break)"
         ))),
     }
 }
