@@ -246,6 +246,19 @@ the child's mode (ADR-141). Returns nil; throws if p is unknown/closed."
 returns nil. The final [:proc-closed handle code] still arrives at the owner."
   (%proc-close p))
 
+(defn signal (p sig)
+  "Send `sig` — `:int` (Ctrl-C), `:term`, `:hup`, `:quit` or `:kill` — to subprocess `p`
+and everything it started: the child leads its own process group, and the signal goes to
+the group, so interrupting `sh -c \"make\"` reaches `make` and its compilers too. Unlike
+[[close]] the child is not unregistered: a program may catch `:int` and carry on (a REPL
+abandons the line; `less` ignores it), and when it does exit, `[:proc-closed handle code]`
+arrives as for any exit. Returns nil; throws if `p` is unknown or closed, or `sig` is not
+one of those. Unix only.
+
+    (let (p (os/spawn \"sh\" [\"-c\" \"sleep 60\"]))
+      (os/signal p :int))"
+  (%proc-signal p sig))
+
 (defn set-binary (p on)
   "Switch subprocess p's INBOUND decode between text mode (default) and binary mode
 (mirrors tcp-set-binary; outbound os/write is unaffected, ADR-141). In binary mode

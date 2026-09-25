@@ -450,6 +450,51 @@ pub fn close(id: u64) {
     release(removed);
 }
 
+/// `(proc-signal handle sig)` — deliver signal `sig` (`"int"`, `"term"`, `"hup"`,
+/// `"quit"`, `"kill"`) to the child's whole process group, leaving it registered: the
+/// child decides what the signal means, and if it exits the reaper emits
+/// `[:proc-closed …]` as for any exit. The group, not the pid, for the reason `close`
+/// uses it: `sh -c "make"` interrupted at `sh` alone leaves `make` running. Errors if
+/// the handle is unknown (closed, or already reaped) or the name is not one of these.
+pub fn signal(id: u64, sig: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let number = match sig {
+            "int" => libc::SIGINT,
+            "term" => libc::SIGTERM,
+            "hup" => libc::SIGHUP,
+            "quit" => libc::SIGQUIT,
+            "kill" => libc::SIGKILL,
+            other => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("unknown signal :{other} (one of :int :term :hup :quit :kill)"),
+                ))
+            }
+        };
+        let reg = reg();
+        let p = reg.get(&id).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "unknown or closed subprocess")
+        })?;
+        let c = crate::core::sync::lock(&p.child.child);
+        // SAFETY: the entry is still registered and we hold its child lock, so the reaper
+        // has not reaped it (it removes the entry first) and the pid — the group id, since
+        // `spawn`/`spawn_pty` make the child a group leader — cannot have been reused.
+        if unsafe { libc::killpg(c.id() as libc::pid_t, number) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (id, sig);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "signals need a Unix host",
+        ))
+    }
+}
+
 /// Release what a removed registry entry owned beyond its Rust values — today, a pty
 /// child's master fd, which is a bare `RawFd` with no `Drop`.
 ///

@@ -15838,3 +15838,13 @@ change (an undo restores a snapshot; a wholesale replace), for the caller to dif
 and `editor/buffer-client/link-propagate-buffers` sends it, falling back to
 `link-propagate`'s diff. The walk compares rope handles, which `=` answers by identity
 before content; carrying the ropes across a process boundary is an `Arc` clone each.
+
+## 2026-09-25 — `os/signal`: Ctrl-C for a child on pipes
+
+bedit's shell buffer (issues.md P9) could run `sleep 60` and then only wait it out or kill
+the buffer: `os/close` is the one way to reach a piped child, and it kills. `os/signal p
+sig` (`%proc-signal`) sends `:int` / `:term` / `:hup` / `:quit` / `:kill` to the child's
+process GROUP — `os/spawn` already makes it a group leader so `os/close` can reap what it
+started — and leaves it registered, because a program may catch the signal and carry on.
+Guards in `tests/proc_test.blsp`; the group test goes red when the signal goes to the pid
+alone (the shell dies, `sleep` holds the pipe, `[:proc-closed …]` waits out the 30 s).
