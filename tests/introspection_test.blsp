@@ -491,7 +491,19 @@
 
   (test "text with no forms has no entries"
     (assert= (reflect/source-deps "") '())
-    (assert= (reflect/source-deps ";; just a comment\n") '())))
+    (assert= (reflect/source-deps ";; just a comment\n") '()))
+
+  ;; `:effects` — what a playground must not run on a half-typed form. An electric pair
+  ;; closes `(file/spit "notes.txt" "")` before the text is typed; evaluated as you type,
+  ;; that empties the file.
+  (test "a call that writes, runs or removes is an effect"
+    (assert= (:effects (first (deps-of "(file/spit \"notes.txt\" \"\")"))) (list "file/spit"))
+    (assert= (:effects (first (deps-of "(defn ixd-go () (os/cmd \"rm\" [\"x\"]))")))
+      (list "os/cmd")))
+  (test "reading, printing and computing are not"
+    (assert= (:effects (first (deps-of "(io/puts (file/slurp \"a\") (+ 1 2))"))) '()))
+  (test "a quoted call is data, not an effect"
+    (assert= (:effects (first (deps-of "(list '(file/rm \"x\"))"))) '())))
 
 ;; `system/features` / `system/feature?` — asking the BUILD what it can do.
 ;;

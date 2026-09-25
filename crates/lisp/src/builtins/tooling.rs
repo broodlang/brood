@@ -82,7 +82,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(1),
         Sig::new(vec![string], list_ty),
         &["src"],
-        "Per TOP-LEVEL form of `src`, in document order, what it defines and what globals it uses: a list of `{:defines (…) :references (…)}` maps of name strings. What a live evaluator needs to re-run only the forms an edit could affect instead of everything below it. Syntactic, read the way find-references reads: locals are excluded, a quoted `'…` is data. It cannot see a name a macro introduces, nor a side effect through which one form reaches another without naming anything.",
+        "Per TOP-LEVEL form of `src`, in document order, what it defines, what globals it uses, and which of those change the world outside the evaluation (a file written or removed, a program run, a signal sent, the runtime halted — what a live evaluator must not run on a half-typed form): a list of `{:defines (…) :references (…) :effects (…)}` maps of name strings. What a live evaluator needs to re-run only the forms an edit could affect instead of everything below it. Syntactic, read the way find-references reads: locals are excluded, a quoted `'…` is data. It cannot see a name a macro introduces, nor a side effect through which one form reaches another without naming anything.",
         source_deps);
     primitives.def(
         "%declared-sig",
@@ -486,6 +486,36 @@ pub(super) fn references_in_source(args: &[Value], _env: EnvId, heap: &mut Heap)
     Ok(heap.list(occ))
 }
 
+/// Globals whose call changes something OUTSIDE the evaluation that asked: files written,
+/// moved or removed, programs run, signals sent, the clipboard, the runtime halted. What a
+/// live evaluator must not run on a half-typed form — an electric pair closes
+/// `(file/spit "notes.txt" "")` a moment before you type the text, and a buffer that
+/// evaluates as you type would empty the file. Reads, prints and pure computation are not
+/// here: running them early costs nothing. Syntactic, like the rest of `source-deps` — a
+/// call through a function of your own is not seen.
+const WORLD_EFFECTS: &[&str] = &[
+    "file/spit",
+    "file/spit-append",
+    "file/spit-bytes",
+    "file/spit-bytes-append",
+    "file/spit-private",
+    "file/write-lines",
+    "file/cp",
+    "file/mkdir",
+    "file/rename",
+    "file/rm",
+    "file/rmdir",
+    "os/cmd",
+    "os/run-process",
+    "os/spawn",
+    "os/spawn-pty",
+    "os/write",
+    "os/signal",
+    "os/close",
+    "os/clipboard-set",
+    "system/halt",
+];
+
 /// The module-private def spellings, which are macros rather than special forms and so are
 /// absent from [`SPECIAL_FORMS`] — still syntax, still not a dependency.
 fn is_private_def_head(name: &str) -> bool {
@@ -518,23 +548,34 @@ pub(super) fn source_deps(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispR
     let tree = crate::syntax::scope::analyze(&root, &src);
     let defines_kw = Value::Keyword(value::intern("defines"));
     let references_kw = Value::Keyword(value::intern("references"));
+    let effects_kw = Value::Keyword(value::intern("effects"));
     let mut out = Vec::new();
     for form in root.forms() {
         let defines: Vec<Value> = crate::syntax::scope::globals_in(form, &src)
             .into_iter()
             .map(|b| heap.alloc_string(&b.name))
             .collect();
-        let references: Vec<Value> = crate::syntax::scope::global_refs_in(&tree, form, &src)
+        let names: Vec<String> = crate::syntax::scope::global_refs_in(&tree, form, &src)
             .into_iter()
             // Syntax is not a dependency. `if`, `let`, `defn` and friends resolve as free
             // symbols here because nothing binds them, and listing them says nothing a
             // caller can act on — no form defines `defn`.
             .filter(|n| !SPECIAL_FORMS.contains(&n.as_str()) && !is_private_def_head(n))
-            .map(|n| heap.alloc_string(&n))
             .collect();
+        let effects: Vec<Value> = names
+            .iter()
+            .filter(|n| WORLD_EFFECTS.contains(&n.as_str()))
+            .map(|n| heap.alloc_string(n))
+            .collect();
+        let references: Vec<Value> = names.iter().map(|n| heap.alloc_string(n)).collect();
         let defines = heap.list(defines);
         let references = heap.list(references);
-        out.push(heap.map_from_pairs(vec![(defines_kw, defines), (references_kw, references)]));
+        let effects = heap.list(effects);
+        out.push(heap.map_from_pairs(vec![
+            (defines_kw, defines),
+            (references_kw, references),
+            (effects_kw, effects),
+        ]));
     }
     Ok(heap.list(out))
 }

@@ -15904,3 +15904,14 @@ value, and the table never forgets. `(defmemo name capacity (params) body…)` i
 that remembers its last `capacity` calls, matching arguments with `=` — immediate for the
 same rope handle — in a global store named `name-recent`. `std/format` keeps its name,
 capacity and params on the head line, as `defn`'s. Guards in `tests/memo_test.blsp`.
+
+## 2026-09-25 — `source-deps` says which calls reach outside the evaluation
+
+bedit's playground evaluates each top-level form as you stop typing, and an electric pair
+closes `(file/spit "notes.txt" "")` a moment before the text goes in — so the file was
+emptied (issues.md S5). `reflect/source-deps` now answers `:effects` per form beside
+`:defines` and `:references`: the referenced globals that write, move or remove files, run
+programs, send signals, set the clipboard or halt the runtime. Syntactic, like the rest of
+it — a call through a function of your own is not seen, and a call inside a function the
+form only defines counts; whether evaluating the form runs it is the caller's policy (the
+playground holds a `def` of one and not a `defn`). Guards in `introspection_test`.
