@@ -616,6 +616,30 @@ fn a_dynamic_key_on_a_known_map_keeps_it_a_map() {
     );
 }
 
+// `assoc-in` / `update-in` update a vector node by index (7da7decc), so their bodies read
+// `vector | map`. That is the answer only for a receiver that may BE a vector. One that
+// cannot is a map exactly, and an untyped one is unknown. bedit threads its model through
+// `(assoc-in m [*state-key* :k] …)`, and the union put 20 strict findings on it.
+#[test]
+fn assoc_in_answers_by_whether_the_receiver_can_be_a_vector() {
+    assert_eq!(ty_str("(fn (m k) (assoc-in m [k :a] 1))"), "(any, any) -> any");
+    assert_eq!(ty_str("(fn (m k) (update-in m [k] inc))"), "(any, any) -> any");
+    assert_eq!(ty_str("(fn (k) (assoc-in nil [k] 1))"), "(any) -> map");
+    assert!(
+        ty_str("(fn (k) (assoc-in [[1 2]] [k 0] 9))").contains("vector"),
+        "a vector receiver keeps the vector in the answer"
+    );
+    let ws = file_warnings_mode(
+        "(defmodule t)\n\
+         (defdyn *key* :state)\n\
+         (sig bump (map -> map))\n\
+         (defn bump (m) (assoc m :n 1))\n\
+         (defn step (m) (bump (assoc-in m [*key* :pending] nil)))",
+        true,
+    );
+    assert!(ws.is_empty(), "{ws:?}");
+}
+
 // ---- list shapes (2026-09-13): `(list a b)` is a positional list, not `list<A | B>` ----
 
 #[test]

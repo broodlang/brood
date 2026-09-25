@@ -2365,6 +2365,22 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
             // read a model threaded through one dynamic-key update as possibly a vector.
             return Some(Ty::of(Tag::Map));
         }
+        // `assoc-in` / `update-in` keep a VECTOR node a vector (updated by index) and turn
+        // any other node into a map. So a receiver that cannot be a vector answers `map`,
+        // exactly. A receiver of UNKNOWN type answers unknown: the body's `vector | map`
+        // is true of it too, but it is the union of two guesses about a value nobody typed,
+        // and every model threaded through a dynamic-key `(assoc-in m [*key* :k] …)` read
+        // as "possibly a vector" in strict mode. A receiver known to include a vector keeps
+        // the body's union, which is the honest answer there.
+        if !value::symbol_is(head, "update") {
+            let vector = Ty::of(Tag::Vector);
+            match map_ty.as_ref() {
+                Some(t) if t.is_disjoint(&vector) => return Some(Ty::of(Tag::Map)),
+                None => return Some(Ty::ANY),
+                Some(t) if *t == Ty::ANY => return Some(Ty::ANY),
+                Some(_) => {}
+            }
+        }
     }
     // `(assoc m k1 v1 …)` → `map<K, V>` with the assoc'd keys and values UNIONED into
     // the refinement. Carrying `K`/`V` forward unchanged — which this did, on the stated
