@@ -112,6 +112,8 @@ for every well-formed input. Hand-checked across the brood repo's std/ and tests
    'defmacro 2
    ; name params
    'defmacro- 2
+   'defmemo 3
+   ; name capacity params (std/memo — a `defn` with a bounded cache)
    'def 1
    ; name (value goes on the next line if it breaks)
    'defdyn 1

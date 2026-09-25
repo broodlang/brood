@@ -492,6 +492,9 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // LCS-based sequence diff: diff-seq, diff-lines, diff-summary, diff-patch,
     // diff-unified. O(m*n) time/space; suitable for small-to-medium sequences.
     embedded_module!("diff", "std/diff.blsp"),
+    // Bounded memoisation for hot paths (`defmemo`): the last few calls, compared by `=`
+    // — so a rope argument is matched by handle, not hashed by its whole text.
+    embedded_module!("memo", "std/memo.blsp"),
     // Markdown to HTML — a small subset, HTML-escaped. CORE, not tooling: the doc generator
     // renders its guides with it and the hosted registry its package READMEs, at request
     // time, on a shipped runtime (ADR-356).

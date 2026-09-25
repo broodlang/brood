@@ -1,0 +1,50 @@
+;; std/memo — `defmemo`: a function that remembers its last few calls, compared by `=`.
+;; The cases are the ones a render path depends on: a hit skips the body, the store is
+;; bounded, a rope argument matches by handle, and a docstring survives.
+;;
+;; Register-only — discovered and run by `nest test`.
+
+(defmodule memo-test (:use test) (:use memo))
+
+(def *calls* 0)
+
+(defmemo squared 2 (n)
+  "`n` squared, counting how often the body really runs."
+  (do (def *calls* (inc *calls*)) (* n n)))
+
+(defmemo scaled 4 (n &optional (factor 10))
+  (do (def *calls* (inc *calls*)) (* n factor)))
+
+(defmemo text-length 2 (rope)
+  (do (def *calls* (inc *calls*)) (text/length rope)))
+
+(describe "defmemo"
+  :isolated (test "a repeated call returns the remembered value without running the body"
+    (def *calls* 0)
+    (assert= (squared 7) 49)
+    (assert= (squared 7) 49)
+    (assert= *calls* 1))
+  :isolated (test "the store holds at most `capacity` calls — the oldest is forgotten"
+    (def *calls* 0)
+    (squared 1)
+    (squared 2)
+    (squared 3) ; capacity 2: `1` is gone
+    (squared 1)
+    (assert= *calls* 4)
+    (assert= (count memo-test/squared-recent) 2))
+  :isolated (test "an optional parameter's default is part of the key"
+    (def *calls* 0)
+    (assert= (scaled 3) 30)
+    (assert= (scaled 3 10) 30) ; the same call, spelled out
+    (assert= (scaled 3 2) 6)
+    (assert= *calls* 2))
+  :isolated (test "the same rope is a hit; a rope made by an edit is not"
+    (def *calls* 0)
+    (let (rope (text/from-string "abc")
+          edited (text/insert rope 3 "d"))
+      (text-length rope)
+      (text-length rope)
+      (text-length edited)
+      (assert= *calls* 2)))
+  (test "a docstring stays the function's"
+    (is (includes? (or (doc squared) "") "squared"))))

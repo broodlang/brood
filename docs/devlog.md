@@ -15893,3 +15893,14 @@ public as `text/skip-forward` / `text/skip-backward` — answers how far a run o
 from (or not from) a set reaches, walking the rope's leaves from `at` and reading only the
 run. The word and whitespace motions use it; the sentence motions slice just the paragraph.
 Guards in `tests/rope_test.blsp`; `buffer_test` holds the motions' behaviour unchanged.
+
+## 2026-09-25 — `std/memo`: `defmemo`, a bounded cache compared by `=`
+
+bedit kept three render-path caches by hand — the wrap row table, the bracket match, the
+buffer's word list — each a global re-bound on a miss (issues.md X3). They could not use
+`memoize`: its table HASHES every key, and a rope hashes by its whole text, so a row table
+keyed on a buffer's rope read the document on every lookup; a table read also copies the
+value, and the table never forgets. `(defmemo name capacity (params) body…)` is a `defn`
+that remembers its last `capacity` calls, matching arguments with `=` — immediate for the
+same rope handle — in a global store named `name-recent`. `std/format` keeps its name,
+capacity and params on the head line, as `defn`'s. Guards in `tests/memo_test.blsp`.
