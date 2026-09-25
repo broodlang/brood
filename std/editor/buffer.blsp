@@ -377,7 +377,7 @@ then whitespace or `n` — or nil when `i` doesn't end a sentence."
     nil
     (let (j (buffer-sentence-closers-end text (inc i) n))
       (if (or (>= j n) (buffer-sentence-space? (string/char-at text j))) j nil))))
-(sig buffer-sentence-end-at (string int any -> any))
+(sig buffer-sentence-end-at (string int int -> (or int nil)))
 
 (defn- buffer-scan-sentence-fwd (text i limit)
   "Index just past the first sentence end at or after `i`, capped at `limit` (the
