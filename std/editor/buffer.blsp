@@ -265,55 +265,41 @@ the target line is long enough. Clamps to the buffer's line range."
 ;; ---- word motion (M-f / M-b) ------------------------------------------------
 ;; A word is a run of non-delimiter, non-whitespace chars (same notion as the
 ;; line editor's M-f/M-b). Forward skips any non-word chars then the word;
-;; backward is the mirror. Pure scans over the buffer text.
-
-(defn- buffer-word-char? (c)
-  "True if `c` is part of a word (not whitespace or a delimiter) — matches the
-line editor's M-f/M-b notion of a word. `/` is a delimiter: a qualified name
-`math/floor` is two words, so `M-d`/`M-DEL` and `M-f`/`M-b` take the namespace
-and the name separately."
-  (not (or (= c " ")
-         (= c "/")
-         (= c "\t")
-         (= c "\n")
-         (= c "(")
-         (= c ")")
-         (= c "[")
-         (= c "]")
-         (= c "{")
-         (= c "}")
-         (= c "\"")
-         (= c ";")
-         (= c ","))))
+;; backward is the mirror. Both scan the ROPE from point (`text/skip-forward`), reading
+;; only the characters they cross.
 
 (defn- buffer-scan-fwd (text i n pred)
   "Smallest index ≥ `i` (up to `n`) whose char fails `pred` — advance while `pred`."
   (if (or (>= i n) (not (pred (string/char-at text i)))) i (buffer-scan-fwd text (inc i) n pred)))
 (sig buffer-scan-fwd (string int int fn -> int))
 
-(defn- buffer-scan-bwd (text i pred)
-  "Largest index ≤ `i` (down to 0) whose preceding char fails `pred` — retreat while `pred`."
-  (if (or (<= i 0) (not (pred (string/char-at text (dec i)))))
-    i
-    (buffer-scan-bwd text (dec i) pred)))
-(sig buffer-scan-bwd (string int fn -> int))
+(def- *word-delimiters*
+  ;; what is NOT part of a word: whitespace and the delimiters. `/` is one — a qualified
+  ;; name `math/floor` is two words, so M-d / M-DEL and M-f / M-b take the namespace and
+  ;; the name separately.
+  " /\t\n()[]{}\";,")
+
+(def- *horizontal-space*
+  ;; horizontal only: a newline is a line boundary, never whitespace to squeeze
+  " \t")
 
 (defn forward-word (buf)
-  "Point moved to the end of the next word forward (skip non-word chars, then the word)."
-  (let (text (buffer-text buf)
-        n (string/length text)
-        i (buffer-scan-fwd text (get buf :point) n (fn (c) (not (buffer-word-char? c)))))
-    (goto-char buf (buffer-scan-fwd text i n buffer-word-char?))))
+  "Point moved to the end of the next word forward (skip non-word chars, then the word).
+Scans the rope from point and reads only what it crosses: it used to flatten the whole
+buffer to a string on every M-f, which on a large file was the cost of the keystroke."
+  (let (rope (get buf :rope)
+        i (text/skip-forward rope (get buf :point) *word-delimiters* true))
+    (goto-char buf (text/skip-forward rope i *word-delimiters* false))))
 
 (defn backward-word (buf)
-  "Point moved to the start of the previous word backward (skip non-word chars, then the word)."
-  (let (text (buffer-text buf)
-        i (buffer-scan-bwd text (get buf :point) (fn (c) (not (buffer-word-char? c)))))
-    (goto-char buf (buffer-scan-bwd text i buffer-word-char?))))
+  "Point moved to the start of the previous word backward (skip non-word chars, then the
+word). Like `forward-word`, reads only the characters it crosses."
+  (let (rope (get buf :rope)
+        i (text/skip-backward rope (get buf :point) *word-delimiters* true))
+    (goto-char buf (text/skip-backward rope i *word-delimiters* false))))
 
 ;; ---- indentation motion (M-m) -----------------------------------------------
-;; Lives here rather than with the line motions above because it shares the word
-;; section's `buffer-scan-fwd` walk — it's `beginning-of-line` with the indent skipped.
+;; `beginning-of-line` with the indent skipped — the same rope scan the word motions use.
 
 (defn back-to-indentation (buf)
   "Point moved to the first non-whitespace character of its current line — the
@@ -322,7 +308,7 @@ the line is blank or all whitespace."
   (let (bol (beginning-of-line buf)
         eol (get (end-of-line bol) :point))
     (goto-char bol
-      (buffer-scan-fwd (buffer-text bol) (get bol :point) eol buffer-horizontal-space?))))
+      (math/min eol (text/skip-forward (get bol :rope) (get bol :point) *horizontal-space* true)))))
 
 ;; ---- paragraph motion (M-{ / M-}) -------------------------------------------
 ;; A paragraph is a run of non-blank lines bounded by blank (empty / whitespace-only)
@@ -418,7 +404,10 @@ just past a sentence end with the whitespace after it skipped."
 holds no further sentence terminator (Emacs `forward-sentence`, M-e)."
   (let (point (get buf :point)
         limit (math/max point (get (forward-paragraph buf) :point)))
-    (goto-char buf (buffer-scan-sentence-fwd (buffer-text buf) point limit))))
+    ;; only the paragraph is read: a sentence never reaches past it
+    (goto-char buf
+      (+ point
+        (buffer-scan-sentence-fwd (text/slice (get buf :rope) point limit) 0 (- limit point))))))
 
 (defn backward-sentence (buf)
   "Point moved to the start of the current sentence — the previous sentence's start when
@@ -426,7 +415,9 @@ point already sits at one, the paragraph's start when there is no earlier senten
 (Emacs `backward-sentence`, M-a)."
   (let (point (get buf :point)
         floor (math/min point (get (backward-paragraph buf) :point)))
-    (goto-char buf (buffer-sentence-start-before (buffer-text buf) floor point floor))))
+    (goto-char buf
+      (+ floor
+        (buffer-sentence-start-before (text/slice (get buf :rope) floor point) 0 (- point floor) 0)))))
 
 ;; ---- mark -------------------------------------------------------------------
 
@@ -1514,22 +1505,6 @@ line's start does **not** pull that trailing line in (Emacs's line-wise conventi
             hicol (- hi (text/line->char (buffer-rope buf) elraw)))
         [sl (if (and (> elraw sl) (= hicol 0)) (dec elraw) elraw)]))))
 
-(defn- buffer-horizontal-space? (c)
-  ;; horizontal only: a newline is a line boundary, never whitespace to squeeze
-  (or (= c " ") (= c "\t")))
-
-(defn- buffer-ws-run-start (txt i)
-  (if (and (> i 0) (buffer-horizontal-space? (string/char-at txt (dec i))))
-    (buffer-ws-run-start txt (dec i))
-    i))
-(sig buffer-ws-run-start (string int -> int))
-
-(defn- buffer-ws-run-end (txt i n)
-  (if (and (< i n) (buffer-horizontal-space? (string/char-at txt i)))
-    (buffer-ws-run-end txt (inc i) n)
-    i))
-(sig buffer-ws-run-end (string int int -> int))
-
 (defn whitespace-run-at (buf)
   "The span of spaces/tabs SURROUNDING point, as `[lo hi]` (`hi` exclusive; `[p p]` when
 point is not in or beside one). Scans both directions but never across a newline, so it
@@ -1539,9 +1514,10 @@ Public because the span, not just its collapse, is what callers need: `collapse-
 replaces it, `fixup-whitespace` decides what to leave in it, and a cycling command
 (Emacs 29's `cycle-spacing`, which walks one-space → none → *what was there*) has to read
 the original text out of it before touching anything."
-  (let (txt (buffer-text buf)
+  (let (rope (get buf :rope)
         p (buffer-point buf))
-    [(buffer-ws-run-start txt p) (buffer-ws-run-end txt p (string/length txt))]))
+    [(text/skip-backward rope p *horizontal-space* true)
+      (text/skip-forward rope p *horizontal-space* true)]))
 (sig whitespace-run-at (buffer -> (tuple int int)))
 
 (defn collapse-whitespace (buf seq/keep)
