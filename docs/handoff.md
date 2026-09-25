@@ -27,6 +27,14 @@ printed nothing); KI-195 (a test race) is fixed. Gates on the final tree: capped
 - JIT: `slot_i64_cache` (the f64 cache's twin) — a `let`-heavy int loop 2× faster, rows flat.
 - `gen/call`: measured, nothing gen-specific left (one wrapper call over hand-rolled).
 
+**Update, later the same day:** `CallInPlace` shipped (`bc4162dc`, interpreted call ~790
+instructions); the non-atomic handle, the receive exit and frame switching inside
+`exec_chunk` were each BUILT, measured and dropped — numbers and reasons in the devlog's
+"(later)" entry. Items 1 and 2 below stand, with that evidence: item 1's cheap form loses,
+item 2's structural form regresses the LTO build. Also in the tree: a tracked junk file named
+`arning)" -A5|` at the repo root (since `e2acbf87`, a shell-redirect slip) — the owner's to
+remove.
+
 **Next, in value order:**
 1. **Receive loops run interpreted.** ~26% of `pingpong`'s instructions are `exec_chunk`
    running the `ping`/`responder` bodies, which a `receive` keeps off the JIT. The general

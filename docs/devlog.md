@@ -2,6 +2,51 @@
 
 Chronological record of work sessions. Newest at the bottom.
 
+## 2026-09-25 (later) — the call adopts its arguments in place; three structural levers measured and NOT taken
+
+**Shipped:** `ChunkExit::CallInPlace` (`bc4162dc`) — a non-tail call into an arm whose frame is
+exactly its arguments no longer copies them into a `SmallVec`, carries them out of
+`exec_chunk` by value and `push_frame`s them back: the driver adopts `roots[len-argc..]` as
+the callee's first slots. Interpreted call ~940 → ~790 instructions (1 876 → 1 726 per
+iteration of the `BROOD_TIER=1` call-only loop); in the shipped `release-lean` build at the
+default ceiling, parent vs commit, two rounds of best-of-7: `ring` 704/693 → 700/687,
+`pingpong` 178/177 → 173/176, `json` 129 → 127/129, `ackermann`/`fib`/`supervisor` flat.
+
+**Measured and dropped — each is the answer to a question the handoff left open:**
+
+- **A non-atomic `ArmHandle` count** (the two `lock inc/dec` per call). Built as an `ArmRef`
+  with a plain count, sound by the per-process ownership argument and debug-checked by pid.
+  Cycles per interpreted call did not move (470 either way): an uncontended locked op on a
+  core-local line is cheap on this machine, so the "~7% of the call's cycles" estimate was a
+  skid artefact. Not worth an `unsafe` type.
+- **The receive as a native exit** (compute-frontier §7.3, opt-in flag while measured): a
+  receive-bearing chunk joins the subset, journals the operand stack AT the `%receive` call
+  and deopts with a planned-exit reason that feeds no deopt counter, and the VM resumes at the
+  call, parks cleanly, and re-tiers on the next back edge. Correct (`ping`/`responder` lower,
+  checksums hold) and **slower**: `pingpong` +8.6%, `ring` +10.2%, `supervisor` +4.6%,
+  `spawn-live` +2.8% — these loops do almost nothing before their receive, so each iteration
+  pays a native entry + journal + deopt for a comparison and a `send`. The lever that would
+  pay is resuming INTO native code after the receive (a second entry point per receive —
+  OSR), a JIT feature of its own. Two things the attempt taught: a flag read on the VM's
+  back edge cost +32 instructions per iteration elsewhere (register pressure in the giant
+  dispatch loop), so a re-tier hint belongs in the driver (set the frame's back-edge counter
+  one short of the interval); and `hosts-receive` counts an arm's OWN `%receive`, which any
+  such design has to exempt.
+- **Frame push/pop inside `exec_chunk`** (the driver's `Call`/`Done` arms moved into the
+  dispatch loop for callees whose tier check would decline). Inlined: 1 682 → 1 536
+  instructions and −6% cycles per call at tier 1 (`fib` −7.2% at the VM ceiling), but in the
+  LTO build `ring` +2.6% and `ackermann` +2.5% at the default ceiling, with +22% L1i misses on
+  `ring`. Out of line: `ackermann` flat but `ring` still +3.2%, and the tier-1 gain gone (a
+  dozen register references cost what the switch saved). Same compiles and bails on both
+  sides. A regression on the rows users run is stop-the-world here, so neither variant
+  shipped; the interpreted call's residue is now spread across the dispatch loop itself.
+
+**Also:** upstream's new `os/signal` `:int` test lost its SIGINT in the shell's fork→exec
+window — reproduced in plain Python (10–13 of 200) and on a clean `origin/main` build under
+load; it re-sends after 500 ms now (0 lost in 300). `jit_int_slot_cache_test`'s tier checks
+sit behind `%native-tier?`. The disk filled mid-gate (build outputs; cleared with the owner's
+go-ahead) and that gate was discarded, not read.
+
 ## 2026-09-25 — the VM's call and message paths, counted: four measured wins, one test race (KI-195)
 
 The handoff's stability/perf queue, taken in order. **Stability first:** three capped full VM
