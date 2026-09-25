@@ -41,9 +41,26 @@ default ceiling, parent vs commit, two rounds of best-of-7: `ring` 704/693 → 7
   sides. A regression on the rows users run is stop-the-world here, so neither variant
   shipped; the interpreted call's residue is now spread across the dispatch loop itself.
 
+**Found by the column refresh: every program touching `string` loaded `regex` in its
+pre-flight check.** `strings` read +4.6% (23.7 → 24.8 ms) against a 2.4% spread; `make ab
+--floor` against the previous column's commit called it noise (+3.7% on a 3.7% floor, 1 ms
+resolution), but instructions said +7.9M in the program itself while startup had FALLEN.
+`BROOD_IMAGE_TRACE` named it: `regex` and `table` materialised, and `BROOD_NO_CHECK=1` made
+them vanish. `string/fill-prefix` calls `regex/find` (since `d077b195`), which was declared
+`(any string -> any)` — a `-> any` return is exactly what ADR-370's image signature index will
+not carry, so `brood file`'s pre-flight check loaded `regex` (and, through it, `table`) to type
+the call, for every run of every program using `string`, and a cached verdict replays those
+loads. Declaring what `find`/`find-all` return (`(or nil (map keyword any))`,
+`(vector (map keyword any))`) lets the image carry them: `strings` 263.2M → 255.9M
+instructions, back to the old column. The class is worth knowing: a `-> any` declaration on a
+widely reached std function is a per-run load cost for everything that reaches it.
+
 **Also:** upstream's new `os/signal` `:int` test lost its SIGINT in the shell's fork→exec
 window — reproduced in plain Python (10–13 of 200) and on a clean `origin/main` build under
-load; it re-sends after 500 ms now (0 lost in 300). `jit_int_slot_cache_test`'s tier checks
+load; it re-sends after 500 ms now (0 lost in 300). My first version of that resend swallowed every
+error, which the `discarded-catch` lint flags, and CI's checker gate went red on `bc4162dc`;
+the owner's `f305a0fe` (a `check-allow` naming why) landed first and is what stands — my
+`c58e38c8` message still describes a narrower catch the merge superseded. `jit_int_slot_cache_test`'s tier checks
 sit behind `%native-tier?`. The disk filled mid-gate (build outputs; cleared with the owner's
 go-ahead) and that gate was discarded, not read.
 
