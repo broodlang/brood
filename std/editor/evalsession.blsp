@@ -420,7 +420,8 @@ would leave a child process behind; [[session-running?]] is the half that can be
         (when sink (send running [:subscribe sink]))
         (when root (send running [:reroot root]))
         running)
-      (spawn name (session-worker name spec root sink)))))
+      ;; the editor's loop talks to the worker: a breakpoint must never park it
+      (spawn name (do (%process-flag :no-break true) (session-worker name spec root sink))))))
 
 (defn session-request (name id timeout-ms payload &optional (reply-to nil))
   "Fire-and-forget: put request `id` on session `name`'s wire, `payload` being whatever

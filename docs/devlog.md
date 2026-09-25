@@ -15915,3 +15915,13 @@ programs, send signals, set the clipboard or halt the runtime. Syntactic, like t
 it — a call through a function of your own is not seen, and a call inside a function the
 form only defines counts; whether evaluating the form runs it is the caller's policy (the
 playground holds a `def` of one and not a `defn`). Guards in `introspection_test`.
+
+## 2026-09-25 — `proc/flag :no-break`: infrastructure a breakpoint must not park
+
+A breakpoint (`debug/break`, `break-fn`) parks whichever process reaches it — including a
+process other processes are WAITING on. bedit's breakpoint on a function its buffer
+processes call parked a buffer process, and the editor loop's next synchronous question to
+it never came back (bedit issues.md P5). `(proc/flag :no-break true)` marks a process that
+a breakpoint passes through; std's own editor infrastructure sets it — every
+`spawn-buffer` process, the buffer registry, the evalsession worker. Guards in
+`tests/debug_test.blsp`.

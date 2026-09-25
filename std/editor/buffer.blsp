@@ -1791,7 +1791,12 @@ name/file/point/mark) and rebuilds the rope inside the new process. Drive it wit
         file (buffer-file buf)
         pt (buffer-point buf)
         mk (buffer-mark buf))
-    (spawn (buffer-serve (assoc (make-buffer text name file) :point pt :mark mk) () 0))))
+    (spawn
+      (do
+        ;; every holder of this document waits on this process: a breakpoint must never
+        ;; park it (`proc/flag :no-break`), or the editor asking it anything freezes
+        (%process-flag :no-break true)
+        (buffer-serve (assoc (make-buffer text name file) :point pt :mark mk) () 0)))))
 
 (defn buffer-edit (bp f &optional origin)
   "Apply pure transform `f` (a `buffer -> buffer` fn) inside buffer process `bp`.

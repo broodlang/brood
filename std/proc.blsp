@@ -42,7 +42,10 @@ whole runtime). Set it first thing in a spawned fn to cap that process:
 (send …) whose target NODE is unknown/disconnected raises a catchable E0060 noconnection
 error instead of silently dropping the message (process liveness stays silent either
 way) — so a sender can queue-and-retry across a net-split; pairs with the reconnect
-reconnector."
+reconnector. :no-break — when truthy, a breakpoint (`debug/break`) passes this
+process through instead of parking it: for infrastructure other processes wait on (a
+buffer process, a registry), where a parked process freezes whoever asked it something
+and nothing could resume it."
   (if (empty? more) (%process-flag flag) (%process-flag flag (first more))))
 
 (defn list ()

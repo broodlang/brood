@@ -748,6 +748,11 @@ pub struct Heap {
     /// of silently dropping the message (the dist self-healing seam). Default
     /// off: Erlang's silent-send semantics.
     proc_send_errors: bool,
+    /// `(proc/flag :no-break on)` — a breakpoint (`std/debug` `break`) passes this process
+    /// through instead of parking it. For infrastructure that other processes wait on — a
+    /// buffer process, a registry — where a parked caller would freeze whoever asked it
+    /// something, and nothing could ever resume it. Default off.
+    proc_no_break: bool,
     /// Per-process GC **trace** switch (`(gc-trace on/off)`, defaulted from
     /// `BROOD_GC_TRACE`). When set, each minor/major collection prints a one-line
     /// summary to stderr — a Tier-1 observability aid for tests/benchmarks (the
@@ -1505,6 +1510,7 @@ impl Heap {
             proc_mem_limit: None,
             proc_limit_hit: None,
             proc_send_errors: false,
+            proc_no_break: false,
             gc_trace: gc_trace_default(),
             vm_cache: RefCell::new(SmallMap::new()),
             seen_free_epoch: Cell::new(0),
@@ -1595,6 +1601,7 @@ impl Heap {
             proc_mem_limit: None,
             proc_limit_hit: None,
             proc_send_errors: false,
+            proc_no_break: false,
             gc_trace: gc_trace_default(),
             vm_cache: RefCell::new(SmallMap::new()),
             seen_free_epoch: Cell::new(0),

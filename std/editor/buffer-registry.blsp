@@ -137,7 +137,8 @@ counts as absent, so the answer is never a dead pid."
   "Spawn a registry and return its pid.
 
     (let (r (editor/buffer-registry/registry-start)) (editor/buffer-registry/registry-stop r) (pid? r))   → true"
-  (spawn (registry-loop {} '())))
+  ;; every frame asks the registry synchronously: a breakpoint must never park it
+  (spawn (do (%process-flag :no-break true) (registry-loop {} '()))))
 
 (defn- registry-call (reg msg-fn &optional (timeout 2000))
   "Send `(msg-fn self ref)` to `reg` and wait for its `[:reply ref v]`; `:no-reply` after
