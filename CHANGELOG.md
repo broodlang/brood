@@ -6,6 +6,12 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**`nest update-brood`** updates the installed `brood`, `nest` and `brood-lsp` to the latest
+GitHub release — what `install.sh` installs — checked against the release's SHA-256 and
+written into the directory the running `nest` is in. `--check` only reports, `--version TAG`
+installs that release, `--dir DIR` installs elsewhere. A `nest` run from a build tree refuses
+rather than overwrite `target/`.
+
 ## v0.34.0 — a child's exit when it exits, a global that can be removed, and a pasted screenshot
 
 **A child's exit is its own message** (ADR-390). `os/spawn` sends `[:proc-exit handle code]`

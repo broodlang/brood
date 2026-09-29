@@ -46,7 +46,7 @@ mod release;
     // The build sha, not just the semver — see `cli_support::VERSION_LINE`.
     version = brood::cli_support::VERSION_LINE,
     about = "Brood project tooling — the daily driver above the `brood` language binary (ADR-028).",
-    after_help = "Also (implemented in Brood, std/tool/nest.blsp): new, run, test, check, format, doc, docs, doctest, grammar, rename, update-tooling, fetch, update, tree, add, remove, publish, search, key, ws, repl, observe, attach, completions — `nest <command> --help`.",
+    after_help = "Also (implemented in Brood, std/tool/nest.blsp): new, run, test, check, format, doc, docs, doctest, grammar, rename, update-tooling, update-brood, fetch, update, tree, add, remove, publish, search, key, ws, repl, observe, attach, completions — `nest <command> --help`.",
     propagate_version = true,
     subcommand_required = true,
     arg_required_else_help = true
@@ -234,6 +234,7 @@ const BLSP_SUBCOMMANDS: &[&str] = &[
     "run",
     "new",
     "update-tooling",
+    "update-brood",
     "rename",
     "fetch",
     "update",

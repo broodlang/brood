@@ -86,7 +86,15 @@ closure-shipping.
 
 ## Install
 
-Requires a Rust toolchain (via `rustup`). The build is a Cargo workspace; a
+Prebuilt `brood`, `nest` and `brood-lsp` for Linux and macOS (x86_64 and aarch64), from
+the latest GitHub release into `~/.local/bin`:
+
+```bash
+curl -fsSL https://brood.fly.dev/install.sh | sh
+nest update-brood           # later: move to the newest release (--check only reports)
+```
+
+To build from source instead: it requires a Rust toolchain (via `rustup`). The build is a Cargo workspace; a
 **`Makefile`** wraps the common commands (`make help` lists them all), and an
 autotools-style `./configure` records build options.
 

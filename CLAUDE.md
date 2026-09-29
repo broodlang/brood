@@ -104,8 +104,8 @@ Concretely:
   should ultimately be Brood**, with Rust only hosting the thinnest necessary
   substrate. (The REPL already moved into Brood — `std/tool/repl.blsp`, ADR-048;
   the binaries just bootstrap into `(repl-run)`. The `nest` CLI dispatch is moving the
-  same way — `std/tool/nest.blsp` owns twenty-five subcommands (ADR-322): `doc`, `docs`,
-  `doctest`, `grammar`, `format`, `check`, `test`, `run`, `new`, `update-tooling`, `rename`
+  same way — `std/tool/nest.blsp` owns twenty-six subcommands (ADR-322): `doc`, `docs`,
+  `doctest`, `grammar`, `format`, `check`, `test`, `run`, `new`, `update-tooling`, `update-brood`, `rename`
   and the package manager (`fetch`, `update`, `tree`, `add`, `remove`, `publish`, `search`,
   `key`, `ws`), `repl`, `observe`, `attach`, and shell completion (`completions`, the
   scripts; `complete`, the candidate engine — the three Rust-side commands' flags are

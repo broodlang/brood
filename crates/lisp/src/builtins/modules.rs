@@ -331,6 +331,9 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // `nest new` scaffolding (templates + new-project), split out of `project` so
     // the analysis half stays lean. `(:use project)` for *config-git-init*. Opt-in.
     embedded_module!("scaffold", "std/tool/scaffold.blsp"),
+    // `nest update-brood`: replace the installed brood/nest/brood-lsp with a GitHub
+    // release, verified by its .sha256 — install.sh from the binary itself. Opt-in.
+    embedded_module!("update-brood", "std/tool/update-brood.blsp"),
     // Identifier-aware whole-token rewrites over a project's .blsp sources — drives
     // `nest rename` for an ecosystem-wide rename that a plain sed would corrupt. Opt-in.
     embedded_module!("codemod", "std/tool/codemod.blsp"),

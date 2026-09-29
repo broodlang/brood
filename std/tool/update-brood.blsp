@@ -1,0 +1,185 @@
+;; std/tool/update-brood.blsp — `nest update-brood`: replace this Brood with a release.
+;; What `scripts/install.sh` does (latest GitHub release, this platform's tarball, its
+;; .sha256, then brood + nest + brood-lsp), from the binary already installed, into the
+;; directory it was installed to.
+
+(defmodule update-brood
+  "`nest update-brood` — update the installed `brood`, `nest` and `brood-lsp` to the latest
+GitHub release (or a named one), verified against the release's SHA-256, into the directory
+the running `nest` lives in. The pure parts (`target-triple`, `version-newer?`,
+`asset-url`) decide; `update` does the fetching and the file work.")
+
+(def- *repository* "broodlang/brood")
+(def- *binaries* ["brood" "nest" "brood-lsp"])
+;; A release tarball is ~45 MB; room to grow without letting a runaway body fill memory.
+(def- *max-download-bytes* (* 256 1024 1024))
+(def- *max-redirects* 5)
+
+;; ---- pure ------------------------------------------------------------------------
+
+(defn target-triple (os-name machine)
+  "The release target for `uname -s` and `uname -m` output, as the release assets name it,
+or a failure for a platform no release is built for.
+
+    (update-brood/target-triple \"Linux\" \"x86_64\")   → \"x86_64-unknown-linux-gnu\"
+    (update-brood/target-triple \"Darwin\" \"arm64\")   → \"aarch64-apple-darwin\""
+  (let (os-part (case os-name "Linux" "unknown-linux-gnu" "Darwin" "apple-darwin" nil)
+        arch-part (case machine
+                    "x86_64" "x86_64"
+                    "amd64" "x86_64"
+                    "aarch64" "aarch64"
+                    "arm64" "aarch64"
+                    nil))
+    (cond
+      (nil? os-part)
+        (failure (str "update-brood: no release is built for " os-name " (Linux and macOS only)"))
+      (nil? arch-part) (failure (str "update-brood: no release is built for " machine))
+      else (str arch-part "-" os-part))))
+
+(defn- version-parts (version)
+  ;; "v0.34.0" / "0.34.0" / "0.34.0-rc1" → [0 34 0]; a part that is not a number counts 0.
+  (let (plain (if (string/starts-with? version "v") (string/substring version 1) version)
+        core (first (string/split plain "-")))
+    (vec (map (string/split core ".")
+           (fn (part) (let (n (string/->number part)) (if (int? n) n 0)))))))
+
+(defn version-newer? (candidate current)
+  "True when release `candidate` is a later version than `current`; a leading `v` is ignored.
+
+    (update-brood/version-newer? \"v0.34.0\" \"0.33.0\")   → true
+    (update-brood/version-newer? \"v0.9.0\" \"0.10.0\")   → false"
+  (letrec (compare (fn (left right)
+                     (cond
+                       (and (empty? left) (empty? right)) false
+                       :else
+                         (let (a (or (first left) 0) b (or (first right) 0))
+                           (cond
+                             (> a b) true
+                             (< a b) false
+                             :else (compare (rest left) (rest right)))))))
+    (compare (seq (version-parts candidate)) (seq (version-parts current)))))
+
+(defn asset-url (tag target)
+  "The download URL of release `tag`'s tarball for `target` (add `.sha256` for its checksum).
+
+    (update-brood/asset-url \"v0.34.0\" \"x86_64-unknown-linux-gnu\")   → \"https://github.com/broodlang/brood/releases/download/v0.34.0/brood-v0.34.0-x86_64-unknown-linux-gnu.tar.gz\""
+  (str "https://github.com/"
+    *repository* "/releases/download/" tag "/brood-" tag "-" target ".tar.gz"))
+
+;; ---- effects ---------------------------------------------------------------------
+
+(defn- say (& parts) (io/puts (apply str "update-brood: " parts)))
+
+(defn- fetch-following (url redirects)
+  ;; GitHub answers a release download with a redirect to its CDN; `http/fetch` does not
+  ;; follow one, so this does, a bounded number of times.
+  (let (response (binding (*http-max-response-bytes* *max-download-bytes*) (http/fetch url))
+        status (get response :status))
+    (cond
+      (= status 0) (failure (str "update-brood: " url ": " (get response :error)))
+      (and (>= status 300) (< status 400))
+        (let (location (get (get response :headers) "location"))
+          (cond
+            (nil? location) (failure (str "update-brood: " url ": redirect without a location"))
+            (>= redirects *max-redirects*)
+              (failure (str "update-brood: " url ": too many redirects"))
+            :else (fetch-following location (inc redirects))))
+      (not (= status 200)) (failure (str "update-brood: " url ": HTTP " status))
+      :else (get response :body))))
+
+(defn- fetch (url) (fetch-following url 0))
+
+(defn- latest-tag ()
+  (with (body (fetch (str "https://api.github.com/repos/" *repository* "/releases/latest")))
+    (let (release (json/decode (string/bytes-> body))
+          tag (if (map? release) (get release :tag_name) nil))
+      (if (string? tag) tag (failure "update-brood: the latest release has no tag")))))
+
+(defn- uname (flag)
+  (let (result (os/cmd "uname" [flag]))
+    (if (os/cmd-ok? result)
+      (string/trim (os/cmd-out result))
+      (failure (str "update-brood: uname " flag " failed")))))
+
+(defn- this-target ()
+  (with (os-name (uname "-s") machine (uname "-m"))
+    (target-triple os-name machine)))
+
+(defn- install-directory (explicit)
+  ;; The directory the running `nest` is in: `install.sh` put all three binaries there.
+  ;; A build tree's binary is not an install, and overwriting it would be a surprise.
+  (let (exe (os/exe-path))
+    (cond
+      (string? explicit) explicit
+      (nil? exe) (failure "update-brood: cannot tell where this nest is installed; pass --dir")
+      (includes? exe "/target/")
+        (failure (str "update-brood: "
+                   exe " is a build tree, not an install; pass --dir to install elsewhere"))
+      :else (path/dirname exe))))
+
+(defn- verify (tarball checksum-text)
+  (let (expected (first (string/split (string/trim checksum-text) " "))
+        actual (hash/sha256-bytes tarball))
+    (if (= expected actual)
+      tarball
+      (failure (str "update-brood: checksum mismatch (expected " expected ", got " actual ")")))))
+
+(defn- unpack (tarball tag target scratch)
+  ;; → the directory in `scratch` holding the three binaries.
+  (let (archive (path/join scratch "brood.tar.gz"))
+    (file/spit-bytes archive tarball)
+    (let (result (os/cmd "tar" ["-xzf" archive "-C" scratch]))
+      (if (os/cmd-ok? result)
+        (path/join scratch (str "brood-" tag "-" target))
+        (failure (str "update-brood: tar failed: " (get result :stderr)))))))
+
+(defn- replace-binaries (from directory)
+  ;; Each binary is copied next to its target and renamed over it, so a running `nest`
+  ;; (this one) keeps its old inode and nothing sees a half-written file.
+  (fold *binaries*
+    []
+    (fn (installed binary)
+      (let (staged (path/join directory (str "." binary ".new"))
+            target (path/join directory binary))
+        (file/cp (path/join from binary) staged)
+        (file/rename staged target)
+        (conj installed target)))))
+
+(defn- install-release (tag target directory)
+  (let (url (asset-url tag target)
+        scratch (path/temp "brood-update-"))
+    (say "downloading " tag " for " target "…")
+    (file/mkdir scratch)
+    (let (outcome (try
+                    (with (tarball (fetch url)
+                            checksum
+                            (fetch (str url ".sha256"))
+                            verified
+                            (verify tarball (string/bytes-> checksum))
+                            unpacked
+                            (unpack verified tag target scratch))
+                      (replace-binaries unpacked directory)
+                      (say "installed brood " tag " to " directory)
+                      :installed)
+                    (catch problem (do (file/rmdir scratch) (throw problem)))))
+      (file/rmdir scratch)
+      outcome)))
+
+(defn update (&optional (options {}))
+  "Update the installed Brood to the latest release, or to `:version` (a tag like
+`\"v0.34.0\"`), into `:dir` (default: the directory of the running `nest`). With `:check`
+true, only says whether a newer release exists. Returns 0 when done or already current, and
+1 with a message on stderr on any failure. Backs `nest update-brood`."
+  (let ({:keys [version dir check]} options
+        current (system/brood-version)
+        outcome (with (tag (if (string? version) version (latest-tag)) target (this-target))
+                  (cond
+                    (and (nil? version) (not (version-newer? tag current)))
+                      (do (say "brood " current " is the latest release") :current)
+                    check (do (say tag " is available (installed: " current ")") :available)
+                    :else
+                      (with (directory (install-directory dir))
+                        (install-release tag target directory)))))
+    (if (failure? outcome)
+      (do (io/puts (error-message outcome) :to *err*) 1)
+      0)))

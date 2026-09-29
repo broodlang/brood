@@ -119,6 +119,12 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
    "update-tooling" {:about "Refresh the AI-assistant tooling `nest new` drops into a project — `docs/brood-for-claude.md` and the `.claude/skills/writing-brood` skill — from THIS binary. Run it after upgrading Brood; code, manifest and `CLAUDE.md` are left untouched."
                      :flags {}
                      :run (fn (o) (run-update-tooling o))}
+   "update-brood" {:about "Update the installed `brood`, `nest` and `brood-lsp` to the latest GitHub release (what `install.sh` installs), checked against its SHA-256 and written into the directory this `nest` runs from. `--check` only reports; `--version TAG` installs that release; `--dir DIR` installs somewhere else."
+                   :flags {"--check" :bool
+                           "--version" "TAG"
+                           "--dir" "DIR"}
+                   :conflicts [["--check" "--version"]]
+                   :run (fn (o) (run-update-brood o))}
    "rename" {:about "Context-aware rename of an identifier across the project's `.blsp` sources: OLD → NEW, leaving docstrings, comments and quoted data alone unless asked."
              :flags {"--swap" :bool
                      "--refs-only" :bool
@@ -838,6 +844,14 @@ reason was already printed, so the caller exits silently."
   (if (require-project "update-tooling" nil)
     (do (project/load-config) (scaffold/update-tooling) 0)
     2))
+
+(defn- run-update-brood (o)
+  ;; Not a project command: it updates the toolchain, from anywhere.
+  (let (flags (get o :flags))
+    (require-one 'update-brood)
+    (update-brood/update {:version (get flags "--version")
+                          :dir (get flags "--dir")
+                          :check (get flags "--check")})))
 
 (defn- run-rename (o)
   ;; The positionals are a LIST, so `[old new]` would not match — take them by position.
