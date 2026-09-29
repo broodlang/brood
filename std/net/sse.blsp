@@ -1,56 +1,83 @@
 ;; std/sse.blsp — Server-Sent Events (text/event-stream): a client + server framing.
 ;;
 ;; Design notes (the *why*; the *what* is in the docstrings below):
-;;  - SSE is **not** request→response like `request`: it's a long-lived `GET`
-;;    that the server holds open and *pushes* frames down forever. So it gets its
-;;    own module (reusing `http`'s URL + header helpers for the handshake) and its
-;;    own **process**: `connect` spawns a reader that streams `[:tcp …]` chunks
-;;    and `send`s each parsed event to a subscriber's mailbox — the same
-;;    deliver-to-a-mailbox shape as `gui/open` input (ADR-058) and the observer's
-;;    remote agent.
+;;  - SSE is **not** request→response like `request`: the server holds the response
+;;    open and *pushes* frames down it. So it gets its own module (reusing `http`'s URL,
+;;    header and request-head helpers for the handshake) and its own **process**:
+;;    `connect` spawns a reader that streams `[:tcp …]` chunks and `send`s each parsed
+;;    event to a subscriber's mailbox — the same deliver-to-a-mailbox shape as `gui/open`
+;;    input (ADR-058) and the observer's remote agent.
+;;  - **Any method, any body, http or https.** A browser `EventSource` is a GET, but the
+;;    streaming APIs worth talking to (OpenAI-style chat completions with `stream: true`)
+;;    are a POST with a JSON body and an `Authorization` header, over TLS. `connect` takes
+;;    `{:method :headers :body :ca}` and opens `https://` through `tls/request`, exactly as
+;;    `http/request` does, so one reader serves both.
+;;  - **HTTP/1.0, deliberately.** A 1.1 server may answer `Transfer-Encoding: chunked`, and
+;;    chunk-size lines are counted in BYTES and may fall between the bytes of one UTF-8
+;;    character — which a text-mode read (below) would decode as garbage before any Brood
+;;    code saw the framing. A 1.0 response cannot be chunked: the body is the plain byte
+;;    stream until the server closes, which is also exactly when the stream ends. Same
+;;    choice, same reason, as `http/request` (the head is `http/request-head`).
+;;  - **A refused stream still reports its body.** A non-2xx status is how an API says
+;;    "bad key", "rate limited", "no such model" — and it says it in the body. The reader
+;;    collects that body (to close, `Content-Length`, a cap, or a timeout) and ends with
+;;    `[:sse-closed {:status :headers :body}]`, so a caller can show the provider's own
+;;    message. Every connection ends with exactly ONE `[:sse-closed …]`.
 ;;  - **Pure frame parsing** (the `observe-frame` discipline): the wire grammar
-;;    (`event:`/`data:`/`id:` field lines, blank-line frame boundaries, comment
-;;    lines, `\n`/`\r\n`/`\r` terminators) is parsed by pure functions
-;;    (`parse-event`, `frames`) that are unit-testable without a socket;
-;;    only `connect`/`stream` touch IO.
+;;    (`event:`/`data:`/`id:` field lines, blank-line frame boundaries, comment lines,
+;;    `\n`/`\r\n`/`\r` terminators — a `\r\n` split across two reads included) is parsed by
+;;    pure functions (`feed`, `parse-event`, `frames`, `split-head`, `parse-head`) that are
+;;    unit-testable without a socket; only the reader process touches IO.
 ;;  - **Integrates with `ui-run` via `with-events`** (in `std/editor/ui.blsp`): wrap a
 ;;    display so its `:poll` surfaces queued `[:sse …]` messages as loop input — so
 ;;    pushed events drive the UI on the terminal *and* the GUI.
-;;  - **Text-mode reads are deliberate** (ADR-141): SSE is a UTF-8 *text*
-;;    protocol (`text/event-stream`), and the kernel's text decode — longest
-;;    valid prefix per chunk, split multibyte characters carried to the next
-;;    read — is exactly the right framing for it, so events surface as strings
-;;    with no decode step here. Binary-mode `bytes` reads are for *binary*
-;;    protocols (see http's request path).
-;;  - Opt-in (`require`), never in the prelude. http (not https) for now — the
-;;    target is a localhost daemon.
+;;  - **Text-mode reads are deliberate** (ADR-141): SSE is a UTF-8 *text* protocol
+;;    (`text/event-stream`), and the kernel's text decode — longest valid prefix per
+;;    chunk, split multibyte characters carried to the next read, over TCP and TLS alike —
+;;    is exactly the right framing for it, so events surface as strings with no decode
+;;    step here. Binary-mode `bytes` reads are for *binary* protocols (see http's request
+;;    path).
+;;  - **The reader dies with its subscriber.** It `monitor`s the subscriber and closes the
+;;    socket when that process ends, so a stopped consumer stops the stream (and, for a
+;;    metered API, the bill) without having to remember the reader's pid.
+;;  - Opt-in (`require`), never in the prelude.
 
 (defmodule sse
   "Server-Sent Events (`text/event-stream`) in Brood: a client, and server-side
 framing for pushing events over `http`'s streaming seam.
 
-    (def conn (connect \"http://127.0.0.1:7777/events\" (self)))
-    (receive ([:sse ev] ev))     ; => {:event \"run_started\" :data \"{…}\" :id \"7\"}
+    (def conn (connect \"https://api.example.com/v1/chat/completions\" (self)
+                {:method \"POST\"
+                 :headers {\"Authorization\" \"Bearer …\" \"Content-Type\" \"application/json\"}
+                 :body (json/encode {:model \"m\" :stream true :messages […]})}))
+    (receive ([:sse ev] ev))     ; => {:event \"message\" :data \"{…}\"}
     (exit conn :kill)            ; disconnect
 
 `connect` spawns a reader **process** that opens the stream and delivers each
 event to `subscriber`'s mailbox as `[:sse {:event :data :id}]` (`[:sse-open status]`
-once connected, `[:sse-closed reason]` when the link ends); it returns that process's
-pid (kill it to disconnect). The `:data` is the raw payload — `parse` it
-yourself. Pair with `with-events` (std/editor/ui.blsp) to feed events into a `ui-run` loop.
+once a 2xx head arrives, then exactly one `[:sse-closed reason]` when the link ends —
+`reason` is `{:status :headers :body}` when the server refused with a non-2xx status);
+it returns that process's pid (kill it to disconnect; it also stops by itself when the
+subscriber exits). The `:data` is the raw payload — `parse` it yourself. Pair with
+`with-events` (std/editor/ui.blsp) to feed events into a `ui-run` loop.
 
 On the server side, `headers` / `frame` / `emit` turn payloads into wire
 frames: return `(http/stream-response 200 (headers) (fn (sock) … (emit sock
 data) …))` from an `http` handler to push events to a browser `EventSource`."
   (:use http))
 
-; reuse http/parse-url + http/request-headers for the handshake
 ;; The reader consumes UNTRUSTED server output. A malicious endpoint that never
 ;; sends the head's blank line, or an event with no `\n\n` frame boundary, would
 ;; grow the reader's buffer without bound → OOM. Cap the buffered head/leftover at
 ;; 16 MiB (SSE frames are tiny; this is purely a runaway guard); past it the
 ;; reader closes the socket and reports `[:sse-closed :buffer-overflow]`.
 (def *max-buffer-bytes* (* 16 1024 1024))
+
+;; A refused stream's body is an error message, not a download: keep at most this much of
+;; it, and stop waiting for the rest after this long (a server that answers 4xx and then
+;; holds the connection open must not park the reader forever).
+(def *max-error-body-bytes* (* 1024 1024))
+(def *error-body-timeout-ms* 30000)
 
 ;; ---- pure frame parsing -----------------------------------------------------
 
@@ -97,14 +124,58 @@ the type to `\"message\"` and the data to `\"\"` (the SSE spec's defaults). Pure
   (let (ev (fold (string/split block "\n") {} field))
     (assoc ev :event (or (get ev :event) "message") :data (or (get ev :data) ""))))
 
-(defn- status (head)
-  "The numeric status from an HTTP response `head` (its first line), or 0."
-  (let (line (first (string/split head "\n"))
-        parts (string/split line " ")
+(defn- feed (state chunk)
+  "Fold one raw text `chunk` off the wire into the reader's `state` — `[buffer carry]`,
+the normalised text not yet ending in a blank line and a held-back trailing `\\r` — and
+return `[events next-state]`, `events` the parsed complete events in order. Pure.
+
+The `\\r` is held because a `\\r\\n` can arrive split across two reads: normalising the
+`\\r` alone would read it as a line end and the `\\n` after it as a second one — a blank
+line, which ends an event in the middle."
+  (let ([buffer carry] state
+        raw (str carry chunk)
+        held (if (string/ends-with? raw "\r") "\r" "")
+        whole (if (= held "") raw (string/substring raw 0 (- (string/length raw) 1)))
+        [blocks remainder] (frames (str buffer (normalize whole))))
+    [(map (seq/reject blocks (fn (block) (= block ""))) parse-event) [remainder held]]))
+
+(defn- split-head (text)
+  "`[head rest]` when `text` holds a complete response head (through its blank line —
+`\\r\\n\\r\\n`, or a bare `\\n\\n` from a lax server), else nil. Pure."
+  (let (crlf (index-of text "\r\n\r\n")
+        lf (index-of text "\n\n"))
+    (cond
+      (and (>= crlf 0) (or (< lf 0) (< crlf lf)))
+        [(string/substring text 0 crlf) (string/substring text (+ crlf 4) (string/length text))]
+      (>= lf 0) [(string/substring text 0 lf) (string/substring text (+ lf 2) (string/length text))]
+      else nil)))
+
+(defn- parse-head (head)
+  "`{:status :headers}` from a response `head` (the lines before the blank line): the
+numeric status (0 when the status line does not parse) and the headers, names
+lower-cased. Pure."
+  (let (lines (string/split (normalize head) "\n")
+        parts (string/split (or (first lines) "") " ")
         n (string/->number (nth parts 1 "0")))
     ;; `failure?`, not `or`: a malformed status line parses to a TRUTHY failure, so
     ;; `(or n 0)` would put a `#failure{…}` where the status code belongs.
-    (if (failure? n) 0 n)))
+    {:status (if (failure? n) 0 n)
+     :headers (fold (rest lines)
+                {}
+                (fn (headers line)
+                  (let (i (index-of line ":"))
+                    (if (< i 0)
+                      headers
+                      (assoc headers
+                        (string/lower (string/trim (string/substring line 0 i)))
+                          (string/trim (string/substring line (+ i 1) (string/length line))))))))}))
+
+(defn- success? (status) (and (>= status 200) (< status 300)))
+
+(defn- declared-length (headers)
+  ;; A usable Content-Length is a non-negative integer; anything else means "read to close".
+  (let (n (string/->number (or (get headers "content-length") "")))
+    (if (and (int? n) (>= n 0)) n nil)))
 
 ;; ---- server-side framing (the inverse of the parser above) ------------------
 ;; Pair with `http`'s streaming seam: a handler returns `(stream-response 200
@@ -130,63 +201,129 @@ socket a `stream-response` handler was handed. Just `(tcp/send sock (frame …))
   (tcp/send sock (frame data event)))
 
 ;; ---- the reader process (IO) ------------------------------------------------
+;; Every receive below also watches `watch`, the monitor on the subscriber: when the
+;; subscriber exits, the reader closes the socket and ends without a word (there is
+;; nobody left to tell).
 
-(defn- stream (sock subscriber buf)
-  "Process the buffered stream text `buf` — deliver every complete event to
-`subscriber` — then wait for the next chunk and recurse. Notifies the subscriber
-with `[:sse-closed reason]` when the socket closes or errors. Tail-recursive."
-  (if (> (string/length buf) *max-buffer-bytes*)
-    (do (tcp/close sock) (send subscriber [:sse-closed :buffer-overflow]))
-    (let ([blocks rest] (frames buf))
-      (doseq (b blocks)
-        (when (not (= b ""))
-          (send subscriber [:sse (parse-event b)])))
-      (receive
-        ([:tcp ^sock d] (stream sock subscriber (str rest (normalize d))))
-        ([:tcp-closed ^sock] (send subscriber [:sse-closed :closed]))
-        ([:tcp-error ^sock msg] (send subscriber [:sse-closed msg]))))))
-
-(defn- read-head (sock subscriber buf)
-  "Read until the HTTP response head's blank line, check the status, then hand the
-leftover bytes to `stream`. A non-200 status closes the connection."
+(defn- stream (sock subscriber watch state)
+  "Wait for the next chunk, deliver every event it completes to `subscriber`, recurse.
+Ends with `[:sse-closed reason]` when the socket closes or errors. Tail-recursive."
   (receive
-    ([:tcp ^sock d] (let (buf2 (str buf (normalize d))
-                          i (index-of buf2 "\n\n"))
+    ([:tcp ^sock d] (let ([events next] (feed state d))
+                      (doseq (ev events)
+                        (send subscriber [:sse ev]))
+                      (if (> (string/length (first next)) *max-buffer-bytes*)
+                        (do (tcp/close sock) (send subscriber [:sse-closed :buffer-overflow]))
+                        (stream sock subscriber watch next))))
+    ([:tcp-closed ^sock] (send subscriber [:sse-closed :closed]))
+    ([:tcp-error ^sock msg] (send subscriber [:sse-closed msg]))
+    ([:down ^watch _ _] (tcp/close sock))))
+
+(defn- refused (sock subscriber head chunks)
+  ;; The one message a non-2xx stream ends with: its status, headers and body text.
+  (tcp/close sock)
+  (send subscriber
+    [:sse-closed (assoc head :body (apply str (reverse chunks)))]))
+
+(defn- read-refusal (sock subscriber watch head chunks have)
+  "Collect a non-2xx response's body — `chunks` in reverse, `have` their byte total — to
+close, `Content-Length`, the cap or the timeout, then report it with `refused`."
+  (let (want (declared-length (get head :headers)))
+    (if (or (> have *max-error-body-bytes*) (and want (>= have want)))
+      (refused sock subscriber head chunks)
+      (receive
+        ([:tcp ^sock d] (read-refusal sock
+                          subscriber
+                          watch
+                          head
+                          (cons d chunks)
+                          (+ have (bytes/length (string/->bytes d)))))
+        ([:tcp-closed ^sock] (refused sock subscriber head chunks))
+        ([:tcp-error ^sock _] (refused sock subscriber head chunks))
+        ([:down ^watch _ _] (tcp/close sock))
+        (after *error-body-timeout-ms* (refused sock subscriber head chunks))))))
+
+(defn- read-head (sock subscriber watch buf)
+  "Read until the HTTP response head's blank line. A 2xx status sends `[:sse-open
+status]` and hands the leftover text to `stream`; any other status reads the body
+for the refusal."
+  (receive
+    ([:tcp ^sock d] (let (text (str buf d)
+                          split (split-head text))
                       (cond
-                        (> (string/length buf2) *max-buffer-bytes*)
+                        (and (nil? split) (> (string/length text) *max-buffer-bytes*))
                           (do
                             (tcp/close sock)
-                            (send subscriber
-                              [:sse-closed :buffer-overflow]))
-                        (< i 0) (read-head sock subscriber buf2)
+                            (send subscriber [:sse-closed :buffer-overflow]))
+                        (nil? split) (read-head sock subscriber watch text)
                         else
-                          (let (status (status (string/substring buf2 0 i))
-                                body (string/substring buf2 (+ i 2) (string/length buf2)))
-                            (if (= status 200)
-                              (do
-                                (send subscriber [:sse-open status])
-                                (stream sock subscriber body))
-                              (do
-                                (tcp/close sock)
-                                (send subscriber [:sse-closed (str "http " status)])))))))
+                          (let ([head-text rest] split
+                                head (parse-head head-text))
+                            (if (success? (get head :status))
+                              (let ([events state] (feed ["" ""] rest))
+                                (send subscriber [:sse-open (get head :status)])
+                                (doseq (ev events)
+                                  (send subscriber [:sse ev]))
+                                (stream sock subscriber watch state))
+                              (read-refusal sock
+                                subscriber
+                                watch
+                                head
+                                (list rest)
+                                (bytes/length (string/->bytes rest))))))))
     ([:tcp-closed ^sock] (send subscriber [:sse-closed :closed]))
-    ([:tcp-error ^sock msg] (send subscriber [:sse-closed msg]))))
+    ([:tcp-error ^sock msg] (send subscriber [:sse-closed msg]))
+    ([:down ^watch _ _] (tcp/close sock))))
 
-(defn connect (url subscriber)
-  "Open an SSE stream to `url` (http) and deliver its events to `subscriber`'s mailbox
-as `[:sse {:event :data :id}]` messages — `[:sse-open status]` once connected,
-`[:sse-closed reason]` when it ends. Runs in a **new process** (so it parks on
-`receive`, holding no worker) and returns that process's pid; `(exit pid :kill)` to
-disconnect. The socket is owned by the reader process, so call this for the process
-that should receive the events (typically the UI process — see `with-events`)."
+(defn- open-socket (u payload ca)
+  ;; The two transports, as in `http/request`: TLS sends the request with the
+  ;; handshake, plain TCP connects then sends. Both stay in TEXT mode (see the notes).
+  (if (= (get u :scheme) "https")
+    (tls/request (get u :host) (get u :port) payload ca)
+    (let (sock (tcp/connect (get u :host) (get u :port)))
+      (tcp/send sock payload)
+      sock)))
+
+(defn- run-reader (u payload ca subscriber)
+  ;; A connect that fails outright (refused, unresolvable) raises here; it becomes the
+  ;; stream's one `[:sse-closed …]` rather than a reader that dies unheard.
+  (let (watch (monitor subscriber)
+        opened (try
+                 [:ok (open-socket u payload ca)]
+                 (catch problem [:error (error-message problem)])))
+    (match opened
+      ([:ok sock] (read-head sock subscriber watch ""))
+      ([:error message] (send subscriber [:sse-closed message])))))
+
+(defn connect (url subscriber &optional (opts {}))
+  "Open an SSE stream to `url` (`http://` or `https://`) and deliver its events to
+`subscriber`'s mailbox. `opts` is `{:method :headers :body :ca}`: the method (default
+`\"GET\"`), extra request headers (over `Accept: text/event-stream`, `Cache-Control:
+no-cache`, Host / User-Agent / Connection, any of them overridable), a body (string,
+`bytes` or iolist — Content-Length is its byte count), and for https a PEM `:ca`
+replacing the Mozilla roots (a private CA, a `tls/self-signed` dev server).
+
+The subscriber receives, in order:
+- `[:sse-open status]` once a 2xx response head arrives;
+- `[:sse {:event :data :id}]` per event (`:event` defaults to `\"message\"`, `:data` is
+  the raw payload, multi-line data joined by `\\n`);
+- exactly one `[:sse-closed reason]` at the end: `:closed` (the server closed the
+  stream), `:buffer-overflow`, a transport error string (refused, TLS failure), or —
+  when the server answered a non-2xx status, with no `:sse-open` before it —
+  `{:status :headers :body}`, the body as text (a JSON API's error message).
+
+Runs in a **new process** (so it parks on `receive`, holding no worker) and returns
+its pid; `(exit pid :kill)` disconnects, and the reader also closes the stream by itself
+when `subscriber` exits. A bad URL or a CR/LF in the method, target or a header raises
+here, in the caller. Sent as HTTP/1.0 (see the module notes)."
   (let (u (http/parse-url url)
-        req (str "GET "
-              (get u :path)
-              " HTTP/1.1\r\n"
-              (http/render-headers (http/request-headers u
-                                     ""
-                                     {"Accept" "text/event-stream" "Connection" "keep-alive"}))
-              "\r\n"))
-    (spawn (let (sock (tcp/connect (get u :host) (get u :port)))
-             (tcp/send sock req)
-             (read-head sock subscriber "")))))
+        body (bytes/concat (or (get opts :body) ""))
+        headers (http/request-headers u
+                  body
+                  (merge {"Accept" "text/event-stream" "Cache-Control" "no-cache"}
+                    (or (get opts :headers) {})))
+        head (http/request-head (or (get opts :method) "GET") u headers)
+        ca (get opts :ca))
+    (when (not (includes? ["http" "https"] (get u :scheme)))
+      (error "connect: not an http or https url: " url))
+    (spawn (run-reader u [head body] ca subscriber))))

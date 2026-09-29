@@ -3567,7 +3567,7 @@ auto-loads) or `(:use name)` for bare names:
 ```clojure
 tcp      ; tcp-listen / tcp-connect / tcp-send / tcp-close … (thin wrapper over the net primitives)
 http     ; http-get / http-post / http-request / serve / stream-response
-sse      ; Server-Sent Events helpers
+sse      ; Server-Sent Events: connect (any method/headers/body, http or https) / frame / emit
 test         ; describe / test / assert= / is — the test framework
 format       ; printf-style string formatting
 json         ; json-encode / json-decode

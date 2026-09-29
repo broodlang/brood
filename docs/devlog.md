@@ -16070,3 +16070,46 @@ left up to a whole row of empty space over the first line of text. It also moved
 on each font-size step, the same fault the horizontal remainder had until it moved.
 `the_bottom_row_stays_flush_at_every_size` is replaced by
 `the_first_row_stays_at_the_top_at_every_size`.
+
+## 2026-09-29 — `sse/connect` streams a POST over https, and reports a refusal's body
+
+**The gap:** `sse/connect` was a plain-http GET, and `http/request` buffers the whole body, so
+std could not consume the most common streaming API there is — an OpenAI-style chat completion
+with `stream: true`, which is a POST with a JSON body and an `Authorization` header over TLS,
+answered with `text/event-stream`. Zubr (the coding agent built on Brood) hand-rolled it: an
+HTTP/1.0 head over `tls/request` and its own `\n\n` splitter over a bytes buffer.
+
+**Shipped:** `(sse/connect url subscriber opts)` with `opts` `{:method :headers :body :ca}`;
+`https://` goes through `tls/request` exactly as `http/request` does. The request head is now
+one public function, `http/request-head`, shared by both, so both refuse a CR/LF in the method,
+target or a header the same way — and the SSE request now keeps the URL's `?query`, which the
+old hand-built head dropped. A bad URL or header raises in the CALLER, before the reader
+process is spawned; a transport failure (refused, TLS rejection) becomes the stream's one
+`[:sse-closed "…"]` instead of a reader that died unheard.
+
+**A refusal is reported, not swallowed.** A non-2xx status is how an API says "bad key" or
+"rate limited", and it says it in the body; the old reader closed on anything but 200 and
+sent `"http 401"`. Now any 2xx opens (`[:sse-open status]`), and anything else reads the body
+(to close, Content-Length, 1 MiB or 30 s) and ends with `[:sse-closed {:status :headers
+:body}]` — no `:sse-open` before it. Every stream ends with exactly one `[:sse-closed …]`.
+
+**HTTP/1.0, not 1.1 — and the old code was wrong about it.** It sent `HTTP/1.1` and had no
+chunked decoder: any real 1.1 server streaming SSE answers `Transfer-Encoding: chunked`, whose
+size lines would have been parsed as event text. A decoder does not fit this reader either:
+chunk sizes count BYTES and may fall inside a UTF-8 character, which the kernel's text-mode
+decode (ADR-141 — what makes a character split across reads safe) would have turned into
+U+FFFD before Brood saw the framing. A 1.0 response cannot be chunked, and it ends when the
+server closes — which is when the stream ends anyway.
+
+**Also:** a `\r\n` split across two reads was normalised as two line ends — a blank line that
+cut the event in two. The pure `feed` now holds a trailing `\r` back for the next read. The
+reader `monitor`s its subscriber and closes the stream when it exits, so a stopped consumer
+stops a metered stream without keeping the reader's pid. `with-events` passes `[:sse-open …]`
+through as input too (it used to stay in the mailbox for good).
+
+**Tests** (`tests/sse_test.blsp`): pure `feed`/`split-head`/`parse-head` cases, and end to end
+— a POST with headers and a JSON body over http (`http/serve-loop` + `stream-response`), the
+same over https against a `tls/self-signed` server trusted through `:ca`, the same server
+without `:ca` (one `:sse-closed`, never an open), a 401 with its JSON body, a character and a
+`\r\n` each split across two reads, a refused port, a CR/LF header raising in the caller, and
+the reader exiting with its subscriber.

@@ -588,6 +588,28 @@ the caller's `extra` headers merged on top (so any of those can be overridden).
                 (assoc base "Content-Length" (str (count body-bytes)))))
     (merge base2 (or extra {}))))
 
+(defn request-head (method u headers)
+  "The HTTP/1.0 request head — request line, `headers` (a name→value map, see
+`request-headers`), blank line — for `method` to the parsed url `u` (from `parse-url`).
+The target is the path plus `?query` when there is one. Shared by `request` and
+`sse/connect`, so both refuse the same things: **raises** if the method, the target or
+any header carries a CR or LF (request splitting).
+
+    (http/request-head \"GET\" (http/parse-url \"http://h/p?q=1\") {\"Host\" \"h\"})   → \"GET /p?q=1 HTTP/1.0\\r\\nHost: h\\r\\n\\r\\n\""
+  ;; HTTP/1.0 on purpose: a 1.0 response cannot be chunked, so a body — buffered here, or
+  ;; an event stream read in TEXT mode by `sse` — is the plain byte stream up to close.
+  ;; The target comes from a caller-supplied URL, so it is untrusted: a CRLF in the
+  ;; path/query would end the request line and inject a header (or a whole second
+  ;; request). Same for a hand-passed method.
+  (let (target (let (q (/get u :query))
+                 (if (or (nil? q) (= q "")) (/get u :path) (str (/get u :path) "?" q))))
+    (str (http-crlf-free "request method" method)
+      " "
+      (http-crlf-free "request target" target)
+      " HTTP/1.0\r\n"
+      (render-headers headers)
+      "\r\n")))
+
 (defn request (method url &optional (opts {}))
   "Make an HTTP/1.0 request: `method` (e.g. \"GET\"/\"POST\"), `url` (http or https),
 and `opts` `{:headers <name→value map> :body <string|bytes|iolist>}`. Always
@@ -603,19 +625,7 @@ response); the root process counts."
         body (or (/get opts :body) "")
         body-bytes (bytes/concat body)
         headers (request-headers u body-bytes (/get opts :headers))
-        ;; The request target is path + ?query — a query-string GET (search APIs)
-        ;; would otherwise drop everything after the `?`.
-        target (let (q (/get u :query))
-                 (if (or (nil? q) (= q "")) (/get u :path) (str (/get u :path) "?" q)))
-        ;; The target comes from a caller-supplied URL, so it is untrusted: a CRLF
-        ;; in the path/query would end the request line and inject a header (or a
-        ;; whole second request). Same for a hand-passed method.
-        head (str (http-crlf-free "request method" method)
-               " "
-               (http-crlf-free "request target" target)
-               " HTTP/1.0\r\n"
-               (render-headers headers)
-               "\r\n")
+        head (request-head method u headers)
         ;; Binary mode before the request goes out (both transports): the peer
         ;; cannot respond before it has our request, so every response chunk
         ;; arrives as byte-faithful `bytes`.

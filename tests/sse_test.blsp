@@ -49,9 +49,39 @@
       (assert= rest "")))
   (test "normalise turns \\r\\n and \\r into \\n"
     (assert= (sse/normalize "a\r\nb\rc\nd") "a\nb\nc\nd"))
-  (test "status reads the numeric code from a response head"
-    (assert= (sse/status "HTTP/1.1 200 OK\nContent-Type: text/event-stream") 200)
-    (assert= (sse/status "HTTP/1.1 404 Not Found") 404)))
+  (test "feed carries a \\r\\n split across two reads instead of reading a blank line"
+    ;; `normalize` on the first read alone would turn its trailing \r into a line end,
+    ;; and the \n opening the second read into another — a blank line that ends the
+    ;; event after "a" and starts a second one holding "b".
+    (let ([first-events first-state] (sse/feed ["" ""] "data: a\r")
+          [second-events second-state] (sse/feed first-state "\ndata: b\r\n\r\n"))
+      (assert= (count first-events) 0)
+      (assert= (map second-events :data) (list "a\nb"))
+      (assert= second-state ["" ""])))
+  (test "feed returns every event a read completes and keeps the rest"
+    (let ([events state] (sse/feed ["data: 1" ""] "\n\nevent: e\ndata: 2\n\ndata: 3"))
+      (assert= (map events :data) (list "1" "2"))
+      (assert= (map events :event) (list "message" "e"))
+      (assert= state ["data: 3" ""])))
+  (test "feed skips the empty blocks a run of blank lines leaves"
+    (let ([events _] (sse/feed ["" ""] "\n\n\n\ndata: x\n\n"))
+      (assert= (map events :data) (list "x")))))
+
+(describe "sse — the response head"
+  (test "split-head waits for the blank line"
+    (assert= (sse/split-head "HTTP/1.0 200 OK\r\nContent-Type: text/event-stream\r\n") nil))
+  (test "split-head splits at the CRLF blank line and keeps the rest verbatim"
+    (assert= (sse/split-head "HTTP/1.0 200 OK\r\nA: b\r\n\r\ndata: x\r\n")
+      ["HTTP/1.0 200 OK\r\nA: b" "data: x\r\n"]))
+  (test "split-head accepts a lax server's bare \\n\\n"
+    (assert= (sse/split-head "HTTP/1.0 200 OK\nA: b\n\ndata: x")
+      ["HTTP/1.0 200 OK\nA: b" "data: x"]))
+  (test "parse-head reads the status and the headers, names lower-cased"
+    (assert= (sse/parse-head "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nRetry-After: 3")
+      {:status 429 :headers {"content-type" "application/json" "retry-after" "3"}}))
+  (test "a status line that does not parse reads as status 0"
+    (assert= (get (sse/parse-head "garbage") :status) 0)
+    (assert= (get (sse/parse-head "HTTP/1.1 abc") :status) 0)))
 
 (describe "sse — server-side frame building"
   (test "a single-line payload becomes one data: line + the blank line"
@@ -76,6 +106,9 @@
           wrapped (with-events fake))
       ;; empty mailbox → delegate to the wrapped display's poll
       (assert= ((get wrapped :poll) 0) :keyboard)
+      ;; the stream opening is input too
+      (send (self) [:sse-open 200])
+      (assert= ((get wrapped :poll) 0) [:sse-open 200])
       ;; a queued [:sse …] comes out first
       (send (self) [:sse {:event "x" :data "1"}])
       (assert= ((get wrapped :poll) 0) [:sse {:event "x" :data "1"}])
@@ -121,3 +154,153 @@
           (assert= (get e2 :event) "message")
           (assert= (get e2 :data) "{\"n\":1}")
           (is (not (= closed :timeout))))))))
+
+;; ---- end to end: any method, headers, body, http and https, refusals ---------------
+
+(defn- start-server (handler)
+  "Serve `handler` over plain http on a fresh port: `[server-pid port]`."
+  (let (me (self)
+        server (spawn (let (ls (http/listen 0))
+                        (send me [:listening (tcp/local-port ls)])
+                        (http/serve-loop ls handler))))
+    [server (receive ([:listening port] port) (after *test-wait-ms* :timeout))]))
+
+(defn- start-tls-server (handler)
+  "Serve `handler` over TLS on a fresh port with a `tls/self-signed` cert for localhost:
+`[server-pid port cert-pem]` — the cert is the client's `:ca`."
+  (let (me (self)
+        server (spawn (let (pair (tls/self-signed "localhost")
+                            ls (tls/listen "127.0.0.1" 0 (first pair) (second pair)))
+                        (send me [:listening (tcp/local-port ls) (first pair)])
+                        (http/serve-loop ls handler))))
+    (receive
+      ([:listening port cert] [server port cert])
+      (after *test-wait-ms* [server :timeout nil]))))
+
+(defn- serve-raw (payloads)
+  "Accept one plain connection, read the request, send each of `payloads` (an iolist
+each) with a pause between them — so each is likely its own read on the other side —
+then close. Returns the port."
+  (let (me (self))
+    (spawn (let (ls (tcp/listen "127.0.0.1" 0))
+             (send me [:port (tcp/local-port ls)])
+             (receive
+               ([:tcp-accept ^ls c] (do
+                                      (tcp/controlling-process c (self))
+                                      (receive ([:tcp ^c _] nil) (after 5000 nil))
+                                      (doseq (payload payloads)
+                                        (tcp/send c payload)
+                                        (sleep 30))
+                                      (tcp/close c)))
+               (after 5000 nil))))
+    (receive ([:port p] p) (after *test-wait-ms* :timeout))))
+
+(defn- collect-stream (acc)
+  "Every message of one stream, in order, through its `[:sse-closed …]`."
+  (receive
+    ([:sse-open status] (collect-stream (conj acc [:open status])))
+    ([:sse ev] (collect-stream (conj acc [:event (get ev :event) (get ev :data)])))
+    ([:sse-closed reason] (conj acc [:closed reason]))
+    (after *test-wait-ms* (conj acc :timeout))))
+
+(defn- echo-request (req)
+  "A handler streaming back what it was sent: the method, one header, the body."
+  (http/stream-response 200
+    (sse/headers)
+    (fn (sock)
+      (sse/emit sock (get req :method) "method")
+      (sse/emit sock (or (get (get req :headers) "authorization") "none") "auth")
+      (sse/emit sock (http/body-text req) "body")
+      (tcp/close sock))))
+
+(defn- refuse-request (req)
+  (http/response 401
+    {"Content-Type" "application/json"}
+    "{\"error\":{\"message\":\"bad key\"}}"))
+
+(describe "sse — end to end: a streaming POST, refusals, cancellation"
+  (test "a POST with headers and a JSON body streams its events over http"
+    (let ([server port] (start-server echo-request)
+          body "{\"model\":\"m\",\"stream\":true,\"text\":\"café\"}")
+      (connect (str "http://127.0.0.1:" port "/v1/chat")
+        (self)
+        {:method "POST"
+         :headers {"Authorization" "Bearer k" "Content-Type" "application/json"}
+         :body body})
+      (assert= (collect-stream [])
+        [[:open 200]
+          [:event "method" "POST"]
+          [:event "auth" "Bearer k"]
+          [:event "body" body]
+          [:closed :closed]])
+      (exit server :kill)))
+  (test "the same POST over https, trusting a self-signed cert through :ca"
+    (let ([server port cert] (start-tls-server echo-request))
+      (connect (str "https://localhost:" port "/v1/chat")
+        (self)
+        {:method "POST" :headers {"Authorization" "Bearer k"} :body "{\"n\":1}" :ca cert})
+      (assert= (collect-stream [])
+        [[:open 200]
+          [:event "method" "POST"]
+          [:event "auth" "Bearer k"]
+          [:event "body" "{\"n\":1}"]
+          [:closed :closed]])
+      (exit server :kill)))
+  (test "https without the :ca rejects the self-signed cert as a closed stream, never an open"
+    (let ([server port _] (start-tls-server echo-request))
+      (connect (str "https://localhost:" port "/") (self))
+      (let (messages (collect-stream []))
+        (assert= (count messages) 1)
+        (assert= (first (first messages)) :closed)
+        (is (string? (second (first messages)))))
+      (exit server :kill)))
+  (test "a non-2xx status ends the stream with its status, headers and body — no :sse-open"
+    (let ([server port] (start-server refuse-request))
+      (connect (str "http://127.0.0.1:" port "/") (self) {:method "POST" :body "{}"})
+      (let (messages (collect-stream [])
+            reason (second (first messages)))
+        (assert= (count messages) 1)
+        (assert= (get reason :status) 401)
+        (assert= (get (get reason :headers) "content-type") "application/json")
+        (assert= (get reason :body) "{\"error\":{\"message\":\"bad key\"}}"))
+      (exit server :kill)))
+  (test "a character split across two reads, and a \\r\\n split across two, arrive whole"
+    ;; é is C3 A9: the first read ends on C3, the next starts with A9.
+    (let (port (serve-raw [["HTTP/1.0 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: caf"
+                             (bytes 195)]
+                            [(bytes 169) "\r"]
+                            "\ndata: line\r\n\r\n"]))
+      (connect (str "http://127.0.0.1:" port "/") (self))
+      (assert= (collect-stream [])
+        [[:open 200] [:event "message" "café\nline"] [:closed :closed]])))
+  (test "a refused connection is one :sse-closed carrying the error"
+    (let (listener (tcp/listen "127.0.0.1" 0)
+          port (tcp/local-port listener))
+      ;; a port that was just free and is closed again: nothing listens there
+      (tcp/close listener)
+      (connect (str "http://127.0.0.1:" port "/") (self))
+      (let (messages (collect-stream []))
+        (assert= (count messages) 1)
+        (assert= (first (first messages)) :closed)
+        (is (string? (second (first messages)))))))
+  (test "a CR/LF in a header raises in the caller, before anything is sent"
+    (assert-error (connect "http://127.0.0.1:1/" (self) {:headers {"X-A" "b\r\nX-Injected: 1"}}))
+    (assert-error (connect "ftp://127.0.0.1/" (self))))
+  (test "the reader stops when its subscriber exits"
+    (let (me (self)
+          [server port] (start-server
+                          (fn (_)
+                            (http/stream-response 200
+                              (sse/headers)
+                              (fn (sock)
+                                (sse/emit sock "hello")
+                                ;; hold the stream open far past the test's wait
+                                (sleep 60000)
+                                (tcp/close sock)))))
+          _ (spawn (do
+                     (send me [:reader (connect (str "http://127.0.0.1:" port "/") (self))])
+                     (receive ([:sse _] nil) (after *test-wait-ms* nil))))
+          reader (receive ([:reader pid] pid) (after *test-wait-ms* :timeout))
+          watch (monitor reader))
+      (assert= (receive ([:down ^watch _ _] :stopped) (after *test-wait-ms* :timeout)) :stopped)
+      (exit server :kill))))
