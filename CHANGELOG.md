@@ -6,6 +6,36 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+## v0.34.0 — a child's exit when it exits, a global that can be removed, and a pasted screenshot
+
+**A child's exit is its own message** (ADR-390). `os/spawn` sends `[:proc-exit handle code]`
+the moment the child exits, and `[:proc-closed handle code]` stays the last message, once
+both pipes are drained. A shell that left a background job holding its stdout used to go
+unheard until the job let go: `sh -c "sleep 4 & echo started; exit 3"` reported `3` at
+4 s, and never, for a job that never ends. Everything the child wrote to a pipe before
+exiting arrives before `:proc-exit`. `os/close` also stops reading, so a descendant that
+escaped the group kill no longer keeps the handle open.
+
+**`reflect/undef` removes a global** (ADR-391). `bound?` is false afterwards, new code
+resolves the bare name through imports and root again (a module's `map` gives way to the
+prelude's), and code compiled while the name was bound raises instead of calling the old
+value: removal invalidates every cache a rebind does. Brood's own names are refused, as
+`def` refuses them. For a tool that rolls a module back to an earlier version.
+
+**`os/clipboard-image` and `os/clipboard-set-image`** (ADR-392). The OS clipboard's image
+as `{:png bytes :width :height}` (alpha kept, optionally downscaled to a `max-edge`), or
+nil; no `wl-paste`, `xclip` or `pngpaste` to shell out to. Tried on GNOME 50 / Wayland
+(through XWayland); other platforms are untested, and `docs/clipboard-images.md` says what
+was found.
+
+**`sse/connect` takes `{:method :headers :body :ca}` and speaks https.** A streaming POST
+to a chat-completions API is one call. A non-2xx answer arrives as
+`[:sse-closed {:status :headers :body}]`, so the provider's error can be shown, and every
+stream ends with exactly one `[:sse-closed …]` (a refused connection or a TLS rejection
+used to end the reader silently). A `\r\n` split across two reads no longer cuts an event
+in two, the URL's query is sent, and `with-events` passes `[:sse-open …]` through.
+`http/request-head` is public.
+
 **Native regex matching** (ADR-389). `std/regex` keeps Brood's pattern dialect — its parser,
 and the forgiving rules for a stray metacharacter — and translates each pattern for
 `regex-automata`, which does the matching. `find`, `find-all`, `replace`, `match?`,
@@ -13,6 +43,27 @@ and the forgiving rules for a stray metacharacter — and translates each patter
 went from ~0.5 ms to ~8 µs. Changed behaviour: `\w`, `\s` and `\b` are Unicode (`\d` stays
 ASCII `0-9`); `\b` works inside a `tokens` rule and in `paint`; a stray top-level `)` is a
 literal instead of silently ending the pattern.
+
+**Processes.** `os/signal` sends `:int`, `:term`, `:hup`, `:quit` or `:kill` to a child's
+whole process group and leaves it registered. `(proc/flag :no-break true)` marks a process
+a breakpoint passes through. `editor/evalsession` answers whoever asked, so a second client
+no longer waits forever, and `*ui-loop*` is the pid of the `ui-run` loop code runs inside.
+
+**New in std.** `std/jsonrpc`: JSON-RPC 2.0 over Content-Length framing (LSP, DAP, stdio
+MCP). `defmemo`: a `defn` with a small cache compared by `=`. `reflect/source-deps` answers
+`:effects`, the calls in a form that write files, run programs, send signals or halt. A GUI
+`[:mouse …]` event carries the pointer's fractional cell position.
+
+**Breaking.** `os/spawn`'s end is two messages (`:proc-exit`, then `:proc-closed`); code
+that took `:proc-closed` as "the child exited" still works, but hears it later than
+`:proc-exit`. `get-in`, `assoc-in` and `update-in` step into vectors the way `get` does.
+`partition` and `seq/chunk-every` reject a chunk size below 1; `string/->number` refuses
+digit separators.
+
+**Fixed.** KI-196: a `def` evaluated through `reflect/eval-string` or `reflect/eval` made its
+bare name "known" in every namespace, so a later module's `(map …)` compiled to `b/map`.
+KI-186 and KI-187 (checker fingerprints and type names across modules), and a VM review's
+eight correctness fixes. `string` no longer loads `regex` into every checked run.
 
 ## v0.33.0 — the pieces an editor's git porcelain is built on, and a subprocess that stops when told
 
