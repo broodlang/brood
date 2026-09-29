@@ -22,7 +22,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::range(2, 3),
         Sig::with_rest(vec![string, list_ty.union(vec_ty)], map_ty, subprocess_ty),
         &["prog", "args", "opts"],
-        "Spawn prog (a string) with args (a list/vector of strings) as a persistent child process with piped stdio. An optional opts map tunes the child: :cwd (a string) sets its working directory, :env (a map of string->string) adds environment variables on top of the inherited environment. Its stdout/stderr arrive at the calling process as [:proc handle data] / [:proc-err handle data] messages, and [:proc-closed handle code] on exit (code is the exit status, or nil if signalled). Returns a subprocess handle. Throws if prog can't be spawned.",
+        "Spawn prog (a string) with args (a list/vector of strings) as a persistent child process with piped stdio. An optional opts map tunes the child: :cwd (a string) sets its working directory, :env (a map of string->string) adds environment variables on top of the inherited environment. Its stdout/stderr arrive at the calling process as [:proc handle data] / [:proc-err handle data] messages; [:proc-exit handle code] arrives the moment the child itself exits, after the output it wrote before exiting (code is the exit status, or nil if signalled), even while a background job it started still holds its stdout; and [:proc-closed handle code] is the last message, once the child has exited AND its output is at end of file (or os/close ended it). Returns a subprocess handle. Throws if prog can't be spawned.",
         proc_spawn);
     // The same seam under a pseudo-terminal, for a child that expects to BE in a
     // terminal — a REPL, a shell, anything that asks `isatty` and drops its prompt,
@@ -63,14 +63,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(1),
         Sig::new(vec![subprocess_ty], nil_ty),
         &["p"],
-        "Terminate subprocess p: kill it if still running and close its stdin. Idempotent; returns nil. The final [:proc-closed handle code] still arrives at the owner.",
+        "Terminate subprocess p: kill it if still running and close its stdin. Idempotent; returns nil. [:proc-exit handle code] (if not already sent) and the final [:proc-closed handle code] still arrive at the owner, promptly: close also stops reading, so a descendant that escaped the kill cannot hold the handle open.",
         proc_close);
     primitives.def(
         "%proc-signal",
         Arity::exact(2),
         Sig::new(vec![subprocess_ty, kw], nil_ty),
         &["p", "sig"],
-        "Send signal sig (:int, :term, :hup, :quit or :kill) to subprocess p's whole process group — the child and everything it started — and leave it running if it chooses to survive. :int is Ctrl-C. If it exits, [:proc-closed handle code] arrives as for any exit. Returns nil; throws if p is unknown/closed or sig is not one of those. Unix only.",
+        "Send signal sig (:int, :term, :hup, :quit or :kill) to subprocess p's whole process group — the child and everything it started — and leave it running if it chooses to survive. :int is Ctrl-C. If it exits, [:proc-exit handle code] arrives as for any exit; until [:proc-closed …] the group can still be signalled, which reaches descendants the child left running. Returns nil; throws if p is unknown/closed or sig is not one of those. Unix only.",
         proc_signal);
 }
 

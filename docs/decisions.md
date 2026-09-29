@@ -25128,3 +25128,77 @@ dogfooding signal for the interpreter, and a bitset-heavy workload that wants on
 be added in its place. A program that BUILDS patterns grows Brood's translation memo
 without bound, as it grew the old compile memo; the native cache is capped at 4,096 and
 cleared when full.
+
+## ADR-390 — A child's exit is its own message: `[:proc-exit handle code]` before `[:proc-closed …]`
+
+**Status:** implemented (2026-09-29). Amends ADR-104's message vocabulary. Breaking: a caller
+that wants to know a command finished matches `:proc-exit`, not `:proc-closed`.
+
+**Context.** ADR-104 reported a child's end once, as `[:proc-closed handle code]`, and its
+stdout reader emitted it: read to end of file, then reap. A child that starts a background
+job and exits leaves the job holding its stdout, so end of file — and with it the exit —
+waited on the job: `sh -c "sleep 4 & echo started; exit 3"` reported `3` four seconds late,
+and a shell that started a server reported nothing at all. Zubr, which runs a model's bash
+commands, worked around it by trapping `EXIT` in bash to print a marker with `$?` and
+scanning the output for it.
+
+**Decision.** Exit and end of output are two events, so they are two messages:
+
+- `[:proc-exit handle code]` — the child itself exited. After every byte of output the
+  child wrote before exiting (on pipes, guaranteed; on a pty, best effort — below), and
+  never waiting on a descendant.
+- `[:proc-closed handle code]` — the handle is finished: exited AND both readers at end of
+  file, or stopped by `proc-close`. The same code, and the last message for the handle.
+
+`:proc-closed` keeps its code so a caller that wants everything, descendants' output
+included, still matches one message; `:proc-exit` always precedes it.
+
+**Mechanism** (`crates/lisp/src/host/subprocess.rs`). Each child gets a **waiter thread**,
+the one thread that reports its end and the only one that reaps it:
+
+1. `waitid(P_PID, pid, WEXITED | WNOWAIT)` — block until the child exits *without reaping
+   it*. No lock on the `Child` is held, so `proc-close` can kill meanwhile.
+2. Raise the lifecycle's *exited* signal. Each reader `poll`s its pipe beside that signal;
+   seeing it, the reader measures what the pipe holds (`FIONREAD`), delivers exactly that
+   much (reading only while `poll` says readable, so it never blocks and a descendant
+   writing without pause cannot extend it), and reports itself drained. A reader that
+   reached end of file first counts as drained.
+3. When every reader is drained, emit `:proc-exit`. A `write` to a pipe returns only once
+   its bytes are in the pipe buffer, so everything the child wrote before exiting is either
+   already delivered or inside that measure — the ordering is by construction, not timing.
+4. When every reader has finished, drop the registry entry, reap, emit `:proc-closed`.
+
+**Reaping last** is what keeps `proc-close` and `proc-signal` sound after the exit: until
+the handle is finished the child is a zombie, which holds its pid — and so its process
+group id — so a `killpg` to the group still reaches the descendants it left behind and
+cannot hit a recycled id. `close` checks a `reaped` flag under the child's lock for the one
+window where the waiter has found the entry gone and reaped.
+
+**`proc-close` stops the readers** (a second wake signal). It used to leave them reading
+to end of file, so a descendant that escaped the group kill (`setsid`) held the handle —
+and its `:proc-closed` — open forever. After a close both messages arrive promptly; the
+killed child's code is `nil`.
+
+**What is not guaranteed.** Ordering *between* stdout and stderr is not (it never was — two
+pipes, two readers). On a **pty** the line discipline hands the child's bytes to the master
+asynchronously, so its last output can still be in flight when it exits and arrive after
+`:proc-exit` — never after `:proc-closed`. Off unix (wasm32 has no processes) the waiter
+polls `try_wait` and the readers do not drain at exit, so there `:proc-exit` waits for end
+of file as `:proc-closed` did.
+
+**Rejected.**
+- *One message, stop reading at the exit.* Closing our read ends when the child exits hands
+  every background job a `SIGPIPE` on its next write — `sh -c "server &"` would kill the
+  server it meant to start.
+- *Reap at the exit.* Portable and simpler (`try_wait`), but after it the group id is only
+  safe while the group still has members; a descendant that left it keeps the pipes but not
+  the id, and a later `killpg` could reach a stranger. The zombie costs nothing.
+- *Keep `:proc-closed` as the exit and add `:proc-eof`.* The name already meant "no more
+  messages" to every receive loop that treats it as the end; moving that meaning would have
+  broken those loops silently (a loop that stops at the exit drops the descendants' output).
+
+**Consequences.** One more thread per child (stdin writer, one reader per stream, waiter).
+`editor/evalsession` takes a session down on `:proc-exit` — a child that died leaving a
+descendant on its stdout was never noticed before — and its respawn's `close` kills what
+the old child left. `tests/proc_test.blsp` gains the background-job, volume, exit-race, escaped-descendant,
+signal-after-exit, ordinary, kill and pty cases.

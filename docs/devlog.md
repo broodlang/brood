@@ -16113,3 +16113,36 @@ same over https against a `tls/self-signed` server trusted through `:ca`, the sa
 without `:ca` (one `:sse-closed`, never an open), a 401 with its JSON body, a character and a
 `\r\n` each split across two reads, a refused port, a CR/LF header raising in the caller, and
 the reader exiting with its subscriber.
+
+## 2026-09-29 — a child's exit is reported when it exits, not when its pipes close (ADR-390)
+
+**The bug:** `os/spawn` reported `[:proc-closed handle code]` only after the child's stdout
+reached end of file, because the stdout reader was the reaper. A child that started a
+background job and exited was not heard from until the job closed the pipe:
+`sh -c "sleep 4 & echo started; exit 3"` delivered `3` at 4004 ms, and a shell that started a
+server, never. Zubr worked around it with an `EXIT` trap printing a marker.
+
+**The fix:** a new first end message, `[:proc-exit handle code]`, from a per-child waiter
+thread that watches the exit with `waitid(… WNOWAIT)` — peeking, not reaping — then has each
+reader deliver what its pipe held at that moment (`FIONREAD`, read only while `poll` says
+readable) before it emits, so the child's own output comes first by construction.
+`[:proc-closed handle code]` stays the last message (exited AND drained, same code). The
+zombie is kept until then, so `os/close`/`os/signal` still address the child's group safely
+after it exits; `os/close` now also stops the readers, so a descendant that escaped the kill
+cannot hold the handle open. `editor/evalsession` goes down on `:proc-exit`.
+
+**Tests:** `tests/proc_test.blsp` — the exit arrives with its code while `sleep 60` holds the
+pipes, and `:proc-closed` does not until `os/close`; 300 000 bytes on each stream all precede
+the exit; twenty `exec head -c 200000` children, each exit after all its bytes; `os/close`
+finishes a handle whose `setsid` grandchild escaped the group kill; `os/signal` after the exit
+reaches the group and finishes the handle; the ordinary order (output, exit, closed, same
+code); a killed child's `nil` in both; a pty child's exit. `tests/evalsession_test.blsp` — the
+session reacts to `:proc-exit` and ignores `:proc-closed`.
+
+**Two guards needed a second shape before they could fail.** The 300 000-byte case passed with
+the reader's drain-at-exit removed: `sh` exits well after `tr`'s last write, so the reader always
+had the bytes first. Making the writer the exiting child (`exec head`) came up short in 40 of
+100 runs under that sabotage, so twenty in a row is the guard. The escape case passed with
+`close`'s stop signal removed because `sh` exited, and `close` killed the group, before the
+grandchild's `setsid` ran; it now waits for the grandchild to say it escaped. Both go red under
+their sabotage and green without it.

@@ -190,8 +190,8 @@ argument vector to `os/cmd` / `os/spawn` and there is nothing to quote.
 ;; message-passing to a process mailbox, which is a different thing entirely.
 ;;
 ;; The messages a child delivers keep their `[:proc handle data]` / `[:proc-err …]` /
-;; `[:proc-closed …]` tags: a receive pattern that stops matching does not fail, it silently
-;; drops the message, so those are not worth churning for symmetry.
+;; `[:proc-exit …]` / `[:proc-closed …]` tags: a receive pattern that stops matching does
+;; not fail, it silently drops the message, so those are not worth churning for symmetry.
 
 (defn spawn (prog args &optional opts)
   "Spawn prog (a string) with args (a list/vector of strings) as a persistent child
@@ -200,9 +200,20 @@ kernel green-process `spawn` (the actor primitive); it returns a subprocess hand
 pid. An optional opts map tunes the child: :cwd (a string) sets its working directory,
 :env (a map of string->string) adds environment variables on top of the inherited
 environment. Its stdout/stderr arrive at the calling process as [:proc handle data] /
-[:proc-err handle data] messages, and [:proc-closed handle code] on exit (code is the
-exit status, or nil if signalled). Returns a subprocess handle. Throws if prog can't be
-spawned."
+[:proc-err handle data] messages, then two end messages:
+
+- `[:proc-exit handle code]` the moment the child itself exits — `code` is its exit
+  status, or nil if a signal ended it. It comes after every byte the child wrote before
+  exiting, and it does not wait for a background job the child started: `sh -c \"server
+  & echo up\"` reports its exit at once though `server` still holds the pipe. Match
+  this to learn that a command finished and how.
+- `[:proc-closed handle code]` last of all, once the child has exited AND its output
+  is at end of file (or [[close]] ended it) — the same `code`, and no message for the
+  handle follows it. Match this to collect everything, descendants' output included.
+
+Returns a subprocess handle. Throws if prog can't be spawned.
+
+    (let (p (os/spawn \"sh\" [\"-c\" \"sleep 5 & exit 3\"])) (receive ([:proc-exit ^p c] c)))   → 3"
   (%proc-spawn prog args opts))
 
 (defn spawn-pty (prog args &optional opts)
@@ -242,8 +253,11 @@ the child's mode (ADR-141). Returns nil; throws if p is unknown/closed."
   (%proc-send p data))
 
 (defn close (p)
-  "Terminate subprocess p: kill it if still running and close its stdin. Idempotent;
-returns nil. The final [:proc-closed handle code] still arrives at the owner."
+  "Terminate subprocess p: kill it and everything it started if still running, close its
+stdin and stop reading its output. Idempotent; returns nil. `[:proc-exit handle code]`
+(if it has not come yet) and the final `[:proc-closed handle code]` still arrive at the
+owner, promptly — a descendant that escaped the kill cannot keep the handle open,
+because close stops reading."
   (%proc-close p))
 
 (defn signal (p sig)
@@ -251,9 +265,10 @@ returns nil. The final [:proc-closed handle code] still arrives at the owner."
 and everything it started: the child leads its own process group, and the signal goes to
 the group, so interrupting `sh -c \"make\"` reaches `make` and its compilers too. Unlike
 [[close]] the child is not unregistered: a program may catch `:int` and carry on (a REPL
-abandons the line; `less` ignores it), and when it does exit, `[:proc-closed handle code]`
-arrives as for any exit. Returns nil; throws if `p` is unknown or closed, or `sig` is not
-one of those. Unix only.
+abandons the line; `less` ignores it), and when it does exit, `[:proc-exit handle code]`
+arrives as for any exit. Until `[:proc-closed …]` the group can still be signalled, which
+reaches descendants the child left running. Returns nil; throws if `p` is unknown or
+closed, or `sig` is not one of those. Unix only.
 
     (let (p (os/spawn \"sh\" [\"-c\" \"sleep 60\"]))
       (os/signal p :int))"

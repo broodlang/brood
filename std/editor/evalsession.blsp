@@ -318,7 +318,10 @@ trips, so reaching it means the child could not stop what it was doing."
                           (when (and (= p (:proc state)) (not (string/blank? data)))
                             (log/warn (str "evalsession child: " (string/trimr data))))
                           state))
-    ([:proc-closed p code]
+    ;; The child's own exit, not the end of its output: a child that dies leaving a
+    ;; descendant holding its stdout would otherwise never be noticed. The respawn's close
+    ;; kills what it left behind, and that handle's later [:proc-closed …] falls through.
+    ([:proc-exit p code]
       (if (= p (:proc state))
         (do
           (session-emit state :down code)

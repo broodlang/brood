@@ -374,3 +374,119 @@ twice — for a test whose answer arrived in milliseconds."
       (assert-error (os/signal p :nope))
       (os/close p)
       (assert-error (os/signal p :int)))))
+
+;; ---- exit is reported when the child exits, not when its pipes close -------------------
+;; A child that starts a background job and exits leaves the job holding its stdout. The
+;; exit used to be reported only once stdout reached end of file — so the owner heard
+;; nothing until the job closed the pipe, possibly never (a shell that ran `server &`).
+;; Now `[:proc-exit …]` comes when the child itself exits, after the output it wrote, and
+;; `[:proc-closed …]` stays the last message: exited AND drained.
+
+(defn- proc-test-until-end (p acc)
+  "Every message from `p`, in arrival order, up to its [:proc-exit …] or [:proc-closed …]."
+  (receive
+    ([:proc ^p d] (proc-test-until-end p (conj acc [:out d])))
+    ([:proc-err ^p d] (proc-test-until-end p (conj acc [:err d])))
+    ([:proc-exit ^p c] (conj acc [:exit c]))
+    ([:proc-closed ^p c] (conj acc [:closed c]))
+    (after *test-wait-ms* (conj acc :timeout))))
+
+(defn- proc-test-output-size (events tag)
+  "How many characters of `tag` output (`:out` or `:err`) the events carry."
+  (reduce events
+    0
+    (fn (total event)
+      (if (and (vector? event) (= (first event) tag))
+        (+ total (count (second event)))
+        total))))
+
+(describe "proc: the exit is reported while a background job still holds the pipes"
+  :isolated (test "the child's code arrives at once, after its output, though `sleep` holds stdout"
+    (let (p (os/spawn "sh" ["-c" "sleep 60 & echo started; exit 3"])
+          started (os/now)
+          events (proc-test-until-end p []))
+      ;; before the fix this was [[:out "started\n"] :timeout]: the exit waited on `sleep`
+      (assert= events [[:out "started\n"] [:exit 3]])
+      (is (< (- (os/now) started) 10000))
+      ;; and the handle is not finished: `sleep` still holds the pipes, so no
+      ;; [:proc-closed …] yet — that one means exited AND drained
+      (assert= (receive ([:proc-closed ^p c] [:closed c]) (after 300 :still-open)) :still-open)
+      ;; os/close ends it promptly: the group is killed and the readers stop
+      (os/close p)
+      (assert= (receive ([:proc-closed ^p c] c) (after *test-wait-ms* :timeout)) 3)))
+
+  :isolated (test "everything the child wrote comes before its exit, far past a pipe buffer"
+    ;; 300 000 bytes to each stream is several pipe buffers, so most of it is read while
+    ;; the child runs and the tail is still in the pipes when it exits; the exit must wait
+    ;; for that tail on both, and must not wait for `sleep`
+    (let (p (os/spawn "sh"
+              ["-c"
+                (str "sleep 60 & "
+                  "head -c 300000 /dev/zero | tr '\\0' o; "
+                  "head -c 300000 /dev/zero | tr '\\0' e >&2; " "exit 0")])
+          events (proc-test-until-end p []))
+      (assert= (last events) [:exit 0])
+      (assert= (proc-test-output-size events :out) 300000)
+      (assert= (proc-test-output-size events :err) 300000)
+      (os/close p)))
+
+  :isolated (test "the exit waits for the tail the child left in the pipe, every time"
+    ;; The test above rarely races: `sh` exits well after `tr` wrote its last byte, and the
+    ;; reader has it by then. Here the writer IS the exiting child (`exec head`), so its
+    ;; exit lands microseconds after its last write, with that write still in the pipe.
+    ;; Verified by sabotage: with the reader's drain at exit skipped, 40 of 100 such runs
+    ;; reported the exit short of 200 000 bytes — so twenty in a row cannot all pass.
+    (letrec (trial (fn (n)
+                     (if (= n 0)
+                       :all-whole (let (p (os/spawn "sh" ["-c" "sleep 60 & exec head -c 200000 /dev/zero"])
+                             events (proc-test-until-end p [])
+                             got (proc-test-output-size events :out))
+                         (os/close p)
+                         (if (and (= got 200000) (= (last events) [:exit 0]))
+                           (trial (dec n))
+                           [:short got (last events)])))))
+      (assert= (trial 20) :all-whole)))
+
+  :isolated (test "close finishes the handle even when a descendant escaped the group kill"
+    ;; `setsid` puts `sleep` in a session of its own, out of reach of the group kill, still
+    ;; holding the pipes. `os/close` stops the readers, so [:proc-closed …] comes at once
+    ;; rather than when `sleep 5` ends. (No `setsid` on this host: nothing to escape with.)
+    ;; The grandchild says so only once it HAS escaped: closing before its `setsid` ran
+    ;; would kill it with the group, and the case would pass without testing anything.
+    (when (os/which "setsid")
+      (let (p (os/spawn "sh" ["-c" "setsid sh -c 'echo escaped; exec sleep 5' & exit 0"]))
+        (assert= (receive ([:proc ^p out] (string/trim out)) (after *test-wait-ms* :timeout))
+          "escaped")
+        (assert= (receive ([:proc-exit ^p c] c) (after *test-wait-ms* :timeout)) 0)
+        (os/close p)
+        (assert= (receive ([:proc-closed ^p c] c) (after 3000 :timeout)) 0))))
+
+  :isolated (test "after the exit the group can still be signalled, and that finishes the handle"
+    ;; the exited child is kept unreaped until the handle finishes, so its process group —
+    ;; where `sleep` still runs — is still its own to signal
+    (let (p (os/spawn "sh" ["-c" "sleep 60 & exit 0"]))
+      (assert= (receive ([:proc-exit ^p c] c) (after *test-wait-ms* :timeout)) 0)
+      (os/signal p :term)
+      (assert= (receive ([:proc-closed ^p c] c) (after *test-wait-ms* :timeout)) 0))))
+
+(describe "proc: an ordinary child reports output, then exit, then closed"
+  :isolated (test "the same code twice, in that order"
+    (let (p (os/spawn "sh" ["-c" "printf hello; printf oops >&2; exit 3"])
+          events (proc-test-until-end p [])
+          closed (receive ([:proc-closed ^p c] [:closed c]) (after *test-wait-ms* :timeout)))
+      (assert= (last events) [:exit 3])
+      (assert= (proc-test-output-size events :out) 5)
+      (assert= (proc-test-output-size events :err) 4)
+      (assert= closed [:closed 3])))
+
+  :isolated (test "a killed child has no code, in either message"
+    (let (p (os/spawn "sleep" ["60"]))
+      (os/close p)
+      (assert= (proc-test-until-end p []) [[:exit nil]])
+      (assert= (receive ([:proc-closed ^p c] [:closed c]) (after *test-wait-ms* :timeout))
+        [:closed nil])))
+
+  :isolated (test "a pty child reports its exit too"
+    (let (p (os/spawn-pty "sh" ["-c" "exit 4"]))
+      (assert= (receive ([:proc-exit ^p c] c) (after *test-wait-ms* :timeout)) 4)
+      (assert= (receive ([:proc-closed ^p c] c) (after *test-wait-ms* :timeout)) 4))))

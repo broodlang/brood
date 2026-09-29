@@ -180,10 +180,18 @@
     ;; the strike path respawns, the respawn cannot spawn, and the worker stops rather
     ;; than looping on a child that will never exist
     (let (s (editor/evalsession/session-step (es-state {:ready true :spawned-at (os/now)})
-              [:proc-closed :fake-proc 1]))
+              [:proc-exit :fake-proc 1]))
       (assert= s :session-stopped)
       ;; both the death and the failure to replace it are reported
       (assert= (map (es-events) first) '(:down :down))))
+
+  (test "the child's exit takes it down, not the end of its output"
+    ;; a child that dies while a descendant holds its stdout exits long before its pipe
+    ;; closes; waiting for [:proc-closed …] would leave the session talking to nothing
+    (let (state (es-state {:ready true :spawned-at (os/now)})
+          s (editor/evalsession/session-step state [:proc-closed :fake-proc 1]))
+      (assert= s state)
+      (is (empty? (es-events)))))
 
   (test "an inflight request is answered when its session dies"
     ;; no request may vanish without an answer: a caller that believes an answer is
@@ -191,7 +199,7 @@
     (let (_ (editor/evalsession/session-step (es-state {:ready true
                                                         :spawned-at (os/now)
                                                         :inflight {5 99}})
-              [:proc-closed :fake-proc 1])
+              [:proc-exit :fake-proc 1])
           evs (es-events)
           replies (seq/filter evs (fn (e) (= (first e) :reply))))
       (assert= (count replies) 1)
@@ -215,12 +223,12 @@
           st (editor/evalsession/session-step (es-state {:spec spec
                                                          :ready true
                                                          :spawned-at (os/now)})
-               [:proc-closed :fake-proc 1]))
+               [:proc-exit :fake-proc 1]))
       (is (not (= st :session-stopped)))
       (assert= (into [] (%table-get seen :n [])) [1])
       ;; and again, higher
       (let (_ (editor/evalsession/session-step (assoc st :spawned-at (os/now))
-                [:proc-closed :a-child 1]))
+                [:proc-exit :a-child 1]))
         (assert= (into [] (%table-get seen :n [])) [1 2]))))
 
   ;; A reset and a reroot are someone saying "try properly", not evidence that the
@@ -310,7 +318,7 @@ client whose mail can be told from the first's."
                                                         :spawned-at (os/now)
                                                         :inflight {3 99}
                                                         :routes {3 [42 other]}})
-              [:proc-closed :fake-proc 1])
+              [:proc-exit :fake-proc 1])
           [kind payload] (es-via :d))
       (assert= kind :reply)
       (assert= (get payload :id) 42)
