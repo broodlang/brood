@@ -16146,3 +16146,43 @@ had the bytes first. Making the writer the exiting child (`exec head`) came up s
 `close`'s stop signal removed because `sh` exited, and `close` killed the group, before the
 grandchild's `setsid` ran; it now waits for the grandchild to say it escaped. Both go red under
 their sabotage and green without it.
+
+## 2026-09-29 — `reflect/undef`: a global can be removed (ADR-391); KI-196
+
+**Shipped:** `(reflect/undef 'mod/name)` removes a global binding and returns whether one
+went away — the inverse of `def`, asked for by Zubr, which rolls rejected hot reloads back
+and had to tombstone what a rejected version added (`(def mod/map map)`, or a stub that
+raises). Refuses what Brood ships (reserved names, every prelude binding). Removal bumps
+`version` and `code_epoch` under the table's write guard — the same invalidation a rebind
+does, so no new machinery: every VM/JIT cache of a global's value (per-process global IC, VM
+global-read IC, fast links, inlined prim guards, leaf/self-inlined bodies, native arms, the
+shared native caches) is already stamped with one of the two, and a re-validated reference
+misses and raises `unbound symbol: … (removed by reflect/undef …)`. Side facts go through a
+new exhaustive `forget_side_facts` (ADR-320's `FactKind::ALL`), plus the declared `sig`, a
+`sig!` force and a contracted function's `%orig%` alias (ADR-383); the generation moves.
+Inside a module load the removal is staged and publishes with the load
+(`LoadStage::removed`, `LoadWrite::Undefine`, replayed by an isolate restore). The checker's
+export/namespace indexes keyed on the global COUNT, which no longer names the set once
+bindings can leave; they key on `(count, removals)`.
+
+**Not shipped, on purpose:** `reflect/load` dropping the definitions a file no longer has —
+no sound owner for a name, and the removal would have to precede compilation of the new
+source (ADR-391 has the argument). A tool diffs its two sources and calls `reflect/undef`
+first, then loads.
+
+**KI-196, found on the way:** an eval'd `(defn map …)` in one module left `map` "known" to the
+resolver in every namespace for the rest of the process, so a later
+`(reflect/eval-string "(defmodule b) (map …)")` compiled `b/map`. The inheriting eval paths
+now put the caller's known-name set back.
+
+**Tests:** `tests/undef_test.blsp` (15), `tests/eval_vm_test.blsp` +2. Hot-caller cases settle
+the arm `:native` before removing its callee; sabotage (no `code_epoch` bump on removal) reds
+5 of 15, the KI-196 sabotage 2 of 17. Green at the default ceiling, `BROOD_TIER=1`,
+`BROOD_VM=0`, and under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`.
+
+**Perf:** nothing on a call path changed (a `def` pays one read-lock probe of an empty set;
+the staged-lookup branch runs only with a load frame open). `make ab BASE=75f6855d N=5`:
+every row within ±2% except `pfib` +13% (+12% solo with `--floor`, floor 8.8%, verdict
+noise); 21 interleaved runs of the two fixed binaries put `pfib` at median 97 ms base vs
+96 ms new — drift on a parallel row on a shared box, not the change. `make ab-vm`: `fib`
+−2.9%, `collatz` −0.9%, `spawn-live` +3.0% (floor 0.5%, noise), `pfib` noise (floor 44%).

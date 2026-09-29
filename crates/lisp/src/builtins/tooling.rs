@@ -184,6 +184,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "The rebinding generation of global sym: grows with every def of that name in this runtime, 0 for a name never def'd here. For restoring a TEMPORARY rebinding without clobbering a redefinition made in between (debug/untrace-fn). Quote it: (%global-generation 'foo).",
         global_generation,
     );
+    primitives.def(
+        "reflect/undef",
+        Arity::exact(1),
+        Sig::new(vec![sym], bool_ty),
+        &["name"],
+        "Remove the global binding `name` — the inverse of `def` — and everything recorded about it (privacy, metadata, def site, declared sig). Returns true when a binding went away, false when none was bound. The symbol is the global's full name, taken as-is: pass `'my/mod/helper` for a module's definition; a bare `'helper` names the root binding. A name Brood ships (the prelude, a builtin, an embedded std module) is refused, as `def` refuses it.\n\nAfterwards `bound?` is false, and a bare reference compiled from now on resolves as if the name had never been defined — through the module's imports, then root — so removing a module's `map` lets its code reach the prelude `map` again. Code compiled while the name was bound does not keep the old value: every cache of it is invalidated, so such code raises `unbound symbol` naming the removal; re-evaluating it resolves afresh.\n\n    (reflect/undef 'no-such-global)   → false",
+        undef,
+    );
 }
 
 // ---------- source positions (editor tooling; see docs/tooling.md) ----------
@@ -821,6 +829,42 @@ pub(super) fn global_generation(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
             other,
         )),
     }
+}
+
+/// `(reflect/undef 'name)` — remove a global binding (ADR-391). Policy here, the table
+/// operation and its invalidation in [`Heap::env_undefine`]: root a package-relative name
+/// as `def` roots its target, refuse what Brood ships, and take a contracted function's
+/// uncontracted alias (ADR-383) with it — the alias is bound exactly while the public
+/// name is, and a same-module caller compiled against it must miss too.
+pub(super) fn undef(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let name = match arg(args, 0) {
+        Value::Sym(s) => s,
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "reflect/undef",
+                "symbol",
+                other,
+            ))
+        }
+    };
+    let name = heap.root_qualified_ref(name).unwrap_or(name);
+    if heap.is_reserved_global(name) || heap.is_prelude_global(name) {
+        let shown = value::symbol_name(name);
+        return Err(LispError::type_err(format!(
+            "reflect/undef: `{shown}` is a reserved name — it ships with Brood and cannot be removed"
+        ))
+        .with_hint(
+            "Reserved names are everything inside the `brood` binary: the prelude, the builtins, \
+             and the embedded std modules. Your own definitions and your packages' can be removed."
+                .to_string(),
+        ));
+    }
+    let removed = heap.env_undefine(name);
+    if let Some(alias) = crate::builtins::contracts::uncontracted_alias(name) {
+        heap.env_undefine(alias);
+    }
+    Ok(Value::boolean(removed))
 }
 
 pub(super) fn gensym(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {

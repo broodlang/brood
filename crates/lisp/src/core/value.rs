@@ -237,6 +237,16 @@ pub fn mark_dynamic(sym: Symbol) {
         .insert(sym);
 }
 
+/// Drop `sym`'s dynamic mark — `reflect/undef` removing a `defdyn` global (ADR-391). A
+/// mark left on an unbound name is not cosmetic: it keeps the name ambient for namespace
+/// resolution and exempt from the reserved-name check (see [`dynamic_syms`]).
+pub fn unmark_dynamic(sym: Symbol) {
+    DYNAMICS
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&sym);
+}
+
 /// Has `sym` been declared dynamic with `defdyn`?
 pub fn is_dynamic(sym: Symbol) -> bool {
     DYNAMICS

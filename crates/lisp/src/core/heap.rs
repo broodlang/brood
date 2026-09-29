@@ -341,15 +341,19 @@ pub(crate) struct ColdHeap {
 /// is touched by running Brood code — only by `nest check` / `check-file-deps`.
 #[derive(Default)]
 pub(crate) struct CheckHeap {
-    /// `mod/` prefix → its public `(bare, qualified)` export pairs, keyed by the global
-    /// count so a `def` invalidates it. Lets a whole-project check build the index in ONE
-    /// pass instead of rescanning every global per file (O(files²)).
+    /// `mod/` prefix → its public `(bare, qualified)` export pairs, keyed by the globals
+    /// shape (count and removals, `Heap::globals_shape`) so a `def` or a `reflect/undef`
+    /// invalidates it. Lets a whole-project check build the index in ONE pass instead of
+    /// rescanning every global per file (O(files²)).
     exports: Option<(
-        usize,
+        (usize, u64),
         std::sync::Arc<std::collections::HashMap<String, Vec<(Symbol, Symbol)>>>,
     )>,
-    /// The set of `mod/` namespace prefixes in the loaded image, count-keyed and shared.
-    known_ns: Option<(usize, std::sync::Arc<std::collections::HashSet<String>>)>,
+    /// The set of `mod/` namespace prefixes in the loaded image, shape-keyed and shared.
+    known_ns: Option<(
+        (usize, u64),
+        std::sync::Arc<std::collections::HashSet<String>>,
+    )>,
     /// The in-flight incremental-check dependency record (ADR-119).
     dep_rec: Option<CheckDepRec>,
 }

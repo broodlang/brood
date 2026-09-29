@@ -187,6 +187,36 @@ impl Heap {
             Fact::Dynamic(sym) => value::mark_dynamic(*sym),
         }
     }
+
+    /// Drop every side fact recorded about `sym` — `reflect/undef`'s half of this module
+    /// (ADR-391). A removed name must not keep its privacy, its `:deprecated`, a jump-to-
+    /// definition into code that no longer defines it, a registry mark or a `defdyn` mark,
+    /// and exhaustive over [`FactKind::ALL`] for the reason `side_facts` is: a sixth kind
+    /// cannot be recorded without this match saying what removing a name does to it.
+    pub fn forget_side_facts(&self, sym: Symbol) {
+        for kind in FactKind::ALL {
+            match kind {
+                FactKind::Private => self.runtime.unmark_private(sym),
+                FactKind::Meta => self.runtime.clear_meta(sym),
+                FactKind::DefSite => {
+                    self.runtime.def_sites_write().remove(&sym);
+                }
+                FactKind::RegistryName => {
+                    self.runtime
+                        .registry_lock
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&sym);
+                    self.runtime
+                        .registry_writers
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .retain(|(registry, _), _| *registry != sym);
+                }
+                FactKind::Dynamic => value::unmark_dynamic(sym),
+            }
+        }
+    }
 }
 
 #[cfg(test)]

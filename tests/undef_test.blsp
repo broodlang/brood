@@ -1,0 +1,197 @@
+;;; `reflect/undef` — removing a global binding (ADR-391).
+;;;
+;;; The load-bearing cases are the ones about code that was compiled while the name was
+;;; bound: a VM arm, a native (JIT'd) arm, an arm in another process. Every cache of a
+;;; global's value is stamped with the runtime's `version` or `code_epoch`, and a removal
+;;; bumps both, so such code must MISS and raise `unbound symbol` — never go on calling the
+;;; removed value. The hot-caller cases drive the caller until its arm settles NATIVE before
+;;; removing its callee, so the check runs the lowered code; under a lower tier ceiling
+;;; (`BROOD_TIER=1`, `BROOD_VM=0`) there is no native tier to settle on and the same checks
+;;; run on whatever engine is live — `make test-both` runs this file on both.
+;;;
+;;; Each test builds its own module through `reflect/eval-string`, under a name no other
+;;; test uses, so the parallel runner never sees one test remove what another calls; the
+;;; groups are `:isolated` anyway, so whatever they remove comes back for the next file.
+
+(defmodule undef-test (:use test))
+
+(purge-stale-temp "brood-undef-")
+
+;; Drive `f` until its arm settles on a tier (see `jit_int_slot_cache_test`): the compile
+;; is asynchronous, so a round that finds it still queued waits for the compiler in TIME.
+(defn- settle (f argc batch rounds)
+  (batch)
+  (let (state (get (%jit-arm-state f argc) :state))
+    (if (or (= state :native) (= state :bailed) (= rounds 0))
+      state
+      (do (if (= state :queued) (sleep 10) nil) (settle f argc batch (- rounds 1))))))
+
+;; The message of the error `thunk` raises, or `:no-error`.
+(defn- error-message-of (thunk)
+  (try (do (thunk) :no-error) (catch e (if (map? e) (get e :message) (str e)))))
+
+;; The global `module/name`, looked up at run time: these modules are built by the tests,
+;; so a qualified reference in this file would name a module `nest check` cannot see.
+(defn- hot (module name) (reflect/eval (symbol (str module "/" name))))
+
+(defn- mentions? (text needle)
+  (and (string? text) (includes? text needle)))
+
+(describe "reflect/undef removes a binding"
+  :isolated (test "bound? is false afterwards, and a second removal finds nothing"
+    (reflect/eval-string "(def undef-plain/value 41)")
+    (assert= true (bound? 'undef-plain/value))
+    (assert= true (reflect/undef 'undef-plain/value))
+    (assert= false (bound? 'undef-plain/value))
+    (assert= false (reflect/undef 'undef-plain/value)))
+
+  (test "a name never bound is not an error"
+    (assert= false (reflect/undef 'undef-never/bound-anywhere)))
+
+  (test "a name Brood ships is refused, and stays bound"
+    (assert-error (reflect/undef 'map))
+    (assert-error (reflect/undef 'reflect/undef))
+    (assert= true (bound? 'map))
+    (assert= (list 2 3) (map [1 2] inc)))
+
+  (test "its generation moves, so a saved temporary rebinding cannot be put back over it"
+    (reflect/eval-string "(def undef-gen/value 1)")
+    (let (before (%global-generation 'undef-gen/value))
+      (reflect/undef 'undef-gen/value)
+      (is (> (%global-generation 'undef-gen/value) before))))
+
+  (test "what was recorded about the name goes with it"
+    (reflect/eval-string "(defmodule undef-facts) (defn- helper (x) x)")
+    (assert= true (reflect/private? 'undef-facts/helper))
+    (reflect/undef 'undef-facts/helper)
+    (assert= false (reflect/private? 'undef-facts/helper))
+    ;; …so defining it again with a plain `defn` makes it public, not private.
+    (reflect/eval-string "(defmodule undef-facts) (defn helper (x) x)")
+    (assert= false (reflect/private? 'undef-facts/helper)))
+
+  (test "a later def binds the name again"
+    (reflect/eval-string "(def undef-again/value 1)")
+    (reflect/undef 'undef-again/value)
+    (reflect/eval-string "(def undef-again/value 2)")
+    (assert= 2 (reflect/eval 'undef-again/value))))
+
+(describe "a module's shadow of a prelude name, removed"
+  :isolated (test "code compiled from then on reaches the prelude name"
+    (reflect/eval-string "(defmodule undef-shadow) (defn map (xs f) :shadowed) (defn use-map () (map [1 2] inc))")
+    (assert= :shadowed ((hot "undef-shadow" "use-map")))
+    (reflect/undef 'undef-shadow/map)
+    ;; A bare `map` evaluated in the module now falls through to root…
+    (assert= (list 2 3) (reflect/eval-string "(defmodule undef-shadow) (map [1 2] inc)"))
+    ;; …and so does a caller re-evaluated after the removal.
+    (reflect/eval-string "(defmodule undef-shadow) (defn use-map () (map [1 2] inc))")
+    (assert= (list 2 3) ((hot "undef-shadow" "use-map"))))
+
+  (test "a caller compiled while the shadow was bound raises, never calls it"
+    (reflect/eval-string "(defmodule undef-stale) (defn map (xs f) :shadowed) (defn use-map () (map [1 2] inc))")
+    (assert= :shadowed ((hot "undef-stale" "use-map")))
+    (reflect/undef 'undef-stale/map)
+    (let (message (error-message-of (fn () ((hot "undef-stale" "use-map")))))
+      (is (mentions? message "unbound symbol: undef-stale/map"))
+      (is (mentions? message "removed by reflect/undef")))))
+
+;; A self-tail loop whose body calls a small user function: the call is the shape the JIT
+;; links fast and may splice inline (the leaf inliner), which is exactly a copy of the
+;; callee's code living in the caller — the stale value, if the removal did not reach it.
+(def- hot-source
+  "(defmodule MOD)
+   (defn step (acc) (+ acc 1))
+   (def weight 3)
+   (defn spin (n acc) (if (< n 1) acc (spin (- n 1) (step acc))))
+   (defn weigh (n acc) (if (< n 1) acc (weigh (- n 1) (+ acc weight))))")
+
+(defn- load-hot (module)
+  (reflect/eval-string (string/replace hot-source "MOD" module)))
+
+(describe "compiled callers of a removed global"
+  :isolated (test "a hot, native caller of a removed function raises instead of calling it"
+    (load-hot "undef-hot")
+    (let (spin (hot "undef-hot" "spin"))
+      (when (%native-tier?)
+        (assert= :native (settle spin 2 (fn () (spin 500 0)) 500)))
+      (assert= 500 (spin 500 0))
+      (reflect/undef 'undef-hot/step)
+      (let (message (error-message-of (fn () (spin 500 0))))
+        (is (mentions? message "unbound symbol: undef-hot/step"))
+        (is (mentions? message "removed by reflect/undef")))))
+
+  (test "a hot, native reader of a removed value raises instead of reading it"
+    (load-hot "undef-read")
+    (let (weigh (hot "undef-read" "weigh"))
+      (when (%native-tier?)
+        (assert= :native (settle weigh 2 (fn () (weigh 500 0)) 500)))
+      (assert= 1500 (weigh 500 0))
+      (reflect/undef 'undef-read/weight)
+      (is (mentions? (error-message-of (fn () (weigh 500 0))) "unbound symbol: undef-read/weight"))))
+
+  (test "defining the function again is honoured by the same caller"
+    (load-hot "undef-back")
+    (let (spin (hot "undef-back" "spin"))
+      (when (%native-tier?)
+        (assert= :native (settle spin 2 (fn () (spin 500 0)) 500)))
+      (reflect/undef 'undef-back/step)
+      (assert-error (spin 10 0))
+      (reflect/eval-string "(defmodule undef-back) (defn step (acc) (+ acc 2))")
+      (assert= 1000 (spin 500 0))
+      (when (%native-tier?)
+        (assert= :native (settle spin 2 (fn () (spin 500 0)) 500)))
+      (assert= 1000 (spin 500 0))))
+
+  (test "every process sees the removal, including ones that ran the caller hot"
+    (load-hot "undef-many")
+    (let (spin (hot "undef-many" "spin")
+          before (concurrently 8 (fn (_) (spin 2000 0))))
+      (assert= (repeat 8 2000) before)
+      (reflect/undef 'undef-many/step)
+      (let (after (concurrently 8
+                    (fn (_)
+                      (mentions? (error-message-of (fn () (spin 2000 0)))
+                        "unbound symbol: undef-many/step"))))
+        (assert= (repeat 8 true) after)))))
+
+(describe "a contracted function takes its module-boundary alias with it"
+  :isolated (test "a same-module caller compiled against the alias raises too"
+    (reflect/eval-string
+      "(defmodule undef-contract)
+       (sig twice (int -> int))
+       (defn twice (x) (* 2 x))
+       (defn quad (x) (twice (twice x)))")
+    (assert= 12 ((hot "undef-contract" "quad") 3))
+    (reflect/undef 'undef-contract/twice)
+    (assert= false (bound? 'undef-contract/%orig%twice))
+    (assert-error ((hot "undef-contract" "quad") 3))))
+
+(describe "a removal inside a module load publishes with the load"
+  :isolated (test "the loader reads the name as unbound at once, and so does everyone after"
+    (let (dir (temp-dir "brood-undef-"))
+      (file/mkdir dir)
+      (reflect/eval-string "(def undef-staged/old 1)")
+      (let (path (path/join dir "staged.blsp"))
+        (file/spit path
+          "(defmodule undef-staged)
+           (defn fresh () 1)
+           (reflect/undef 'undef-staged/old)
+           (reflect/undef 'undef-staged/fresh)
+           (def saw-old (bound? 'undef-staged/old))
+           (def saw-fresh (bound? 'undef-staged/fresh))")
+        (reflect/load path)
+        (assert= false (reflect/eval 'undef-staged/saw-old))
+        (assert= false (reflect/eval 'undef-staged/saw-fresh))
+        (assert= false (bound? 'undef-staged/old))
+        (assert= false (bound? 'undef-staged/fresh)))))
+
+  (test "a load that throws leaves the name bound"
+    (let (dir (temp-dir "brood-undef-"))
+      (file/mkdir dir)
+      (reflect/eval-string "(def undef-thrown/old 1)")
+      (let (path (path/join dir "thrown.blsp"))
+        (file/spit path
+          "(defmodule undef-thrown)
+           (reflect/undef 'undef-thrown/old)
+           (throw :broken-load)")
+        (assert-error (reflect/load path))
+        (assert= true (bound? 'undef-thrown/old))))))

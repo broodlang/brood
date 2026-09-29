@@ -127,3 +127,17 @@
 
   (test "an imported name still resolves to the module it came from"
     (assert= :ok evm-import-ok)))
+
+;; KI-196: a `def` evaluated through `reflect/eval-string` / `reflect/eval` left its bare
+;; name in the process's known-name set, which is not keyed by module — so every LATER
+;; evaluation in ANY namespace qualified that bare name to its own module. A module that
+;; defined its own `map` made `(map …)` unbound in the next module evaluated.
+(describe "an eval'd definition does not leak its bare name into other modules (KI-196)"
+  (test "a later module's bare map is still the prelude's"
+    (reflect/eval-string "(defmodule evm-leak-a) (defn map (xs f) :mine)")
+    (assert= (list 2 3) (reflect/eval-string "(defmodule evm-leak-b) (map [1 2] inc)")))
+
+  (test "and the same through reflect/eval, form by form"
+    (reflect/eval-string "(defmodule evm-leak-c)")
+    (reflect/eval '(defn first (xs) :mine))
+    (assert= 1 (reflect/eval-string "(defmodule evm-leak-d) (first [1 2])"))))

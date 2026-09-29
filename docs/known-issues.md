@@ -90,6 +90,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 
 | # | What | Status |
 |---|---|---|
+| KI-196 | **a `def` evaluated through `reflect/eval-string` or `reflect/eval` made its bare name "known" in every namespace for the rest of the process** — `(reflect/eval-string "(defmodule a) (defn map …)")` then `(reflect/eval-string "(defmodule b) (map [1 2] inc)")` raised `unbound symbol: b/map` | ✅ **FIXED 2026-09-29** — the inheriting eval paths put the caller's known-name set back after the call. Found building `reflect/undef` (ADR-391). Guard `tests/eval_vm_test.blsp` "an eval'd definition does not leak its bare name into other modules (KI-196)", sabotage-verified |
 | KI-106 | **with the prelude image on, a multi-file `nest check` loses a record's ability impl** — `nest check <any other file> tests/record_test.blsp` warns `*: no \`num/mul\` method for [:int :record-test/usd]`; the same command with the image off, or with `record_test.blsp` alone, is clean. Two files in one process is the whole repro; order does not matter | ✅ **FIXED 2026-09-04 — two layers, found by two sessions the same day, both kept.** **(1) The writer:** `image-prune-foreign-registrations` decides ownership by the QUALIFIER of a registration's key, so `num/mul`'s `*multi-algebra*` entry was credited to `std/num.blsp` — a real module the project image does not carry — and pruned at write time; but the `(defmulti num/mul :commutative)` that registers it lives in the **prelude**, so loading `num` never put it back and the project image on disk held ONE algebra instead of five. Fixed by never pruning a registration that predates the project's own load (`before-regs`); guarded in `tests/startup_image_test.blsp`, sabotage-verified. **(2) The reader:** a short root section is normally REPAIRED at load — `project-registry-snapshot` merges the live registries back over it for every name in `(%registry-names)` — and a source boot's set includes `*multi-algebra*`/`*multi-ret*` (marked by evaluating those `defmulti`s), which is why the text-cache boot never showed the symptom; an imaged boot ran no `%registry-update!`, its set was **10 names to the source boot's 12**, and the short section won. Fixed by carrying the registry-name set in the prelude image (`Heap::mark_registry_names`); the boot differential now compares the set; sabotage reddens it and the two-file check 3/3. Either layer alone hides the symptom; both are real. **And the gate that found it is a gate**: `make check-imaged` runs `nest check` over the tree with the image on, imaged boot asserted, in `green-all` and CI. The prelude image became the DEFAULT that night, gated by it (ADR-314). |
 | KI-105 | **a boot from the PRELUDE image consulted a stale stdlib section directory, and a bad offset read garbage instead of failing** — `unbound symbol: io/puts` on a tree where nothing is wrong with `io`. ADR-314 recorded this failure as real, repeatable by hand at the time, and **unreproducible**: three attempts were written and all three passed under a sabotage that removed the fix, so the mechanism stayed a hypothesis and the prelude image stayed opt-in because of it | ✅ **FIXED 2026-09-04** — **reproduced deterministically** (5/5 imaged, 0/5 with `BROOD_NO_PRELUDE_IMAGE=1`) while working the four artifact states for the default flip. Mechanism: `%add-image-source!` **appends**. An imaged boot restores bindings rather than evaluating the prelude, so `*image-sources*` comes back holding a snapshot of whatever stdlib install was live when that prelude image was written; replaying `%std-image-install` over it leaves **two directories for the same file path**, stale one first, and `%image-section-for` scans in install order. The path still exists and reads fine, so the stale offset returns garbage rather than failing cleanly and falling back to source — that readability is the whole bug. The three earlier attempts each broke it (a deleted image fails cleanly; a re-laid layout with no prelude image written under the old one has no snapshot to be stale; an omitted module has no section at all). Fix: `%std-image-reinstall!` (`std/prelude/tools.blsp`) clears the registry to its `def-` values before installing, and the imaged boot calls that. Guarded by `crates/cli/tests/prelude_image_survives_a_relaid_stdlib_image.rs` — **whose first cut passed its own sabotage**: it armed the repro wrongly (brood's prelude image was written on a boot before any stdlib image existed, so the snapshot was empty). It now discards the prelude artifacts and re-cold-boots with the full image live, asserts that arming boot really was a source boot, and fails with the original `unbound symbol: io/puts` when the fix is removed |
 | KI-104 | **`includes?` scanned a set instead of asking its trie — a correct answer given 64x too slowly** — `includes?` is the membership question people reach for first, and it special-cased maps (searching values) but not sets, so `(includes? #{…} x)` fell through to `index-of` and walked the set. The result was always right, so no test could see it | ✅ **FIXED 2026-09-02** — a `(set? coll) (%set-has? coll x)` arm ahead of the map arm in `std/prelude/seq.blsp`; 500 lookups over a 500-element set went 29 ms -> 0.4 ms, matching `contains?`. Guarded by `set_test.blsp` "includes? answers a set the same way contains? does" |
@@ -12781,3 +12782,34 @@ four times (`(spawn nil)`, `(spawn 42)`, two crashing bodies), each a latent 20 
 before the child can run. Other spawn-then-monitor pairs in the suite park the child on a
 `receive` or an `ex-*` loop first, or observe through a system monitor subscribed
 beforehand, and are not exposed.
+
+## KI-196 — an eval'd `def` made its bare name "known" in every namespace for the rest of the process ✅ FIXED 2026-09-29
+
+**Seen:** building `reflect/undef` (ADR-391), a test evaluated
+`(reflect/eval-string "(defmodule undef-shadow) (defn map (xs f) :shadowed) …")`, removed
+`undef-shadow/map`, and then `(reflect/eval-string "(defmodule undef-fresh) (map [1 2] inc)")`
+— a module that never defined `map` — raised `unbound symbol: undef-fresh/map`. Reproduced
+on `main` with no removal involved: `(defmodule sticky-a) (defn map …)` through one
+`reflect/eval-string`, `(defmodule sticky-b) (map [1 2] inc)` through the next →
+`unbound symbol: sticky-b/map`.
+
+**Cause.** The resolver adds every `def` head it qualifies to the process's
+`ns_known_names` (`add_ns_known_name`, so a macro-generated definition's self-reference
+qualifies). A file load brackets that set with its own pre-scan; the inheriting eval paths —
+`reflect/eval-string` without `reset_ns`, and `reflect/eval` — did not, so the addition
+outlived the call. The set is not keyed by module (`activate_ns_region` switches it only for a
+module a FILE pre-scanned), so the name stayed "known" in every namespace the process
+evaluated in afterwards, and the resolver's first test — `ns_knows_name` — qualified it.
+
+**Why it survived.** Every eval-string test defines names no later evaluation references
+bare, or references them only in the same module, where the qualification is right. It took
+a module shadowing a ROOT name (Zubr's rolled-back `map`) and a second module using the root
+name, in one process.
+
+**Fix.** `eval_string_inner` (inheriting path) and `eval_builtin` save the caller's set and
+put it back after the call. Nothing needs the addition afterwards: a name the call defined is
+bound by then, which is the evidence the resolver reads.
+
+**Guard.** `tests/eval_vm_test.blsp` "an eval'd definition does not leak its bare name into
+other modules (KI-196)" — both cases (through `reflect/eval-string`, and form by form
+through `reflect/eval`) red with the restores removed (2 of 17 fail), green with them.

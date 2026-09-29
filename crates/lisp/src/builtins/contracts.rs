@@ -320,7 +320,7 @@ pub(crate) fn module_of_qualified(name: Symbol) -> Option<Symbol> {
 
 /// The uncontracted alias of a QUALIFIED name; a root name has no module and so no
 /// boundary — a script's, or the prelude's, declarations are enforced at every call.
-fn uncontracted_alias(name: Symbol) -> Option<Symbol> {
+pub(crate) fn uncontracted_alias(name: Symbol) -> Option<Symbol> {
     let text = value::symbol_name_ref(name);
     let split = text.rfind('/')?;
     if split == 0 {

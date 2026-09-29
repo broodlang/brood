@@ -3286,7 +3286,7 @@ iolist in memory.
   suffixes accepted).
 
 ### Metaprogramming / self-hosting
-`reflect/eval`  `reflect/read-string`  `reflect/read-all`  `reflect/eval-string`  `reflect/load`  `macroexpand`  `macroexpand-1`  `gensym`
+`reflect/eval`  `reflect/read-string`  `reflect/read-all`  `reflect/eval-string`  `reflect/load`  `reflect/undef`  `macroexpand`  `macroexpand-1`  `gensym`
 
 There is **no user-facing `require` form** — you load an embedded standard-library
 module by *referencing* it. A qualified reference `name/foo` auto-loads `name` on
@@ -3311,6 +3311,39 @@ error-tolerant alternative (it yields a CST, used by the formatter).
 
 These three are the seed of "edit the system while it runs": read code, evaluate
 it into the live environment, replace definitions.
+
+**Removing a definition: `reflect/undef`** (ADR-391). The inverse of `def` — for a tool
+that rolls a reload back and must forget what the rejected version added:
+
+```clojure
+(reflect/eval-string "(defmodule shapes) (defn map (xs f) :mine)")
+(reflect/undef 'shapes/map)   ;=> true   — a binding went away
+(bound? 'shapes/map)          ;=> false
+(reflect/undef 'shapes/map)   ;=> false  — nothing was bound
+(reflect/undef 'map)          ; error: a name Brood ships is reserved, as for `def`
+```
+
+The symbol is the global's **full** name taken as data — `'shapes/map`, not a bare name
+resolved against the current module. Everything recorded about the name goes too: its
+privacy, `meta`, def site, declared `sig` (and a contracted function's module-boundary
+alias), `defdyn` mark; its `%global-generation` moves. Afterwards a bare reference
+*compiled from then on* resolves as though the name had never been defined — through the
+module's `(:use …)` imports, then root — so removing a module's `map` lets its code reach
+the prelude `map` again. Code **already compiled** while the name was bound (a VM arm, a
+JIT'd arm, an arm in another process) never keeps the old value: removal invalidates every
+cache of it exactly as a redefinition does, and the reference raises `unbound symbol: …
+(removed by reflect/undef …)`; re-evaluating that code resolves its references afresh. So
+a roll-back removes first and then reloads the good source, whose code then compiles
+against the table as it now is. Macros already expanded are unaffected (expansion
+happened at compile time). Inside a module load the removal is staged with the load's
+definitions and published with them (ADR-344): the loader sees the name unbound at once,
+everyone else when the load completes, and nobody if the load throws.
+
+`reflect/load` does **not** remove the definitions a file no longer contains: which names
+"belong" to a file is not something the runtime can know soundly (a name may be defined
+from two files, from the REPL, or by a macro whose expansion changed), so a tool that
+wants reload-with-forget diffs the old and new source's definitions and calls
+`reflect/undef` itself, before it loads.
 
 ### Namespaces
 

@@ -197,9 +197,15 @@ impl Heap {
         // loads). Only a process with a frame open pays the probe; every other process's
         // lookup falls straight through to the table. Cached like a table hit: a staged
         // rebind and the publish both bump `version`.
-        if let Some(val) = self.staged_lookup(sym) {
-            self.global_ic.borrow_mut().insert(sym, (cur, val));
-            return Some(val);
+        match self.staged_lookup(sym) {
+            Some(Some(val)) => {
+                self.global_ic.borrow_mut().insert(sym, (cur, val));
+                return Some(val);
+            }
+            // The open load removed it (`reflect/undef`, ADR-391): unbound for the loader
+            // until the frame publishes, whatever the table still holds.
+            Some(None) => return None,
+            None => {}
         }
         if let Some(val) = self.runtime.globals_read().get(&sym).copied() {
             self.global_ic.borrow_mut().insert(sym, (cur, val));
@@ -352,13 +358,19 @@ impl Heap {
         }
     }
 
-    /// A name defined by one of this process's open loads, innermost first.
-    fn staged_lookup(&self, sym: Symbol) -> Option<Value> {
+    /// A name one of this process's open loads defined (`Some(Some(value))`) or removed
+    /// (`Some(None)`, ADR-391), innermost first; `None` when no open load touched it.
+    fn staged_lookup(&self, sym: Symbol) -> Option<Option<Value>> {
         let cold = self.cold()?;
-        cold.load_stages
-            .iter()
-            .rev()
-            .find_map(|st| st.bindings.get(&sym).copied())
+        cold.load_stages.iter().rev().find_map(|st| {
+            if let Some(&val) = st.bindings.get(&sym) {
+                Some(Some(val))
+            } else if st.removed.contains(&sym) {
+                Some(None)
+            } else {
+                None
+            }
+        })
     }
 
     /// The index of the innermost open load that defined `sym`, if any.
@@ -410,7 +422,8 @@ impl Heap {
         // registry (the journal shape KI-134 settled on: replay the OPERATION, never a whole
         // map). `promote` takes the promote guard per value and must not nest inside the
         // guard held below, so this pass runs first.
-        let mut pending: Vec<(Symbol, Value, LoadWrite)> = Vec::with_capacity(stage.writes.len());
+        let mut pending: Vec<(Symbol, Option<Value>, LoadWrite)> =
+            Vec::with_capacity(stage.writes.len());
         let mut staged_regs: std::collections::HashMap<Symbol, Value> =
             std::collections::HashMap::new();
         for w in stage.writes {
@@ -419,7 +432,7 @@ impl Heap {
                     // A registry op later in this load builds on the map this load bound
                     // (`(defonce *reg* {})`, a swap, then an op — in any order).
                     staged_regs.insert(sym, val);
-                    pending.push((sym, val, LoadWrite::Define { sym, val }));
+                    pending.push((sym, Some(val), LoadWrite::Define { sym, val }));
                 }
                 LoadWrite::Registry { sym, op, path, val } => {
                     // Later ops on one registry within this load build on the earlier ones'
@@ -432,8 +445,14 @@ impl Heap {
                     if let Some(next) = self.registry_next(cur, op, &path, val) {
                         let next = self.promote(next);
                         staged_regs.insert(sym, next);
-                        pending.push((sym, next, LoadWrite::Registry { sym, op, path, val }));
+                        pending.push((sym, Some(next), LoadWrite::Registry { sym, op, path, val }));
                     }
+                }
+                LoadWrite::Undefine { sym } => {
+                    // A registry op later in this load starts from nothing, as it would
+                    // once the name has left the live table.
+                    staged_regs.insert(sym, Value::nil());
+                    pending.push((sym, None, LoadWrite::Undefine { sym }));
                 }
             }
         }
@@ -460,11 +479,27 @@ impl Heap {
             #[cfg(test)]
             super::table_swap_probe::begin(&self.runtime.version, &self.runtime.code_epoch);
             let mut table = self.runtime.globals_write();
+            let mut removed_any = false;
             for (sym, val, _) in &pending {
-                let shared = self.rehome_to_current_locked(*val);
-                if table.insert(*sym, shared).is_some() {
-                    rebind = true;
+                match val {
+                    Some(val) => {
+                        let shared = self.rehome_to_current_locked(*val);
+                        if table.insert(*sym, shared).is_some() {
+                            rebind = true;
+                        }
+                    }
+                    // A removal is a rebind to nothing (ADR-391): whatever baked the old
+                    // value in must re-validate, exactly as for a redefinition.
+                    None => {
+                        if table.remove(sym).is_some() {
+                            rebind = true;
+                            removed_any = true;
+                        }
+                    }
                 }
+            }
+            if removed_any {
+                self.runtime.removals.fetch_add(1, Ordering::Relaxed);
             }
             // Bump `version` BEFORE the table lock drops (KI-193). Every process's global
             // inline cache is keyed on it, so a reader that takes the table after this
@@ -522,7 +557,9 @@ impl Heap {
         j.next_seq += 1;
         if let Some(t) = Self::global_trace_target() {
             let hit = match &w {
-                LoadWrite::Define { sym, .. } | LoadWrite::Registry { sym, .. } => *sym == t,
+                LoadWrite::Define { sym, .. }
+                | LoadWrite::Registry { sym, .. }
+                | LoadWrite::Undefine { sym } => *sym == t,
             };
             if hit {
                 eprintln!(
@@ -791,7 +828,7 @@ impl Heap {
         // `global_lookup_cached` reads in, so the loader's own view is consistent.
         let cur = self
             .staged_lookup(sym)
-            .or_else(|| self.env_get(env, sym))
+            .unwrap_or_else(|| self.env_get(env, sym))
             .unwrap_or(Value::nil());
         let Some(next) = self.registry_next(cur, op, path, val) else {
             return false;
@@ -888,7 +925,7 @@ impl Heap {
         // retried forever (that is how `repl`'s `*require-edges*` edge went missing).
         let cur = self
             .staged_lookup(sym)
-            .or_else(|| self.env_get(env, sym))
+            .unwrap_or_else(|| self.env_get(env, sym))
             .unwrap_or(Value::nil());
         if !self.equal(cur, old) {
             return false;
@@ -1126,8 +1163,10 @@ impl Heap {
                 let was_staged = {
                     let st = self.cold_mut().load_stages.last_mut().expect("open load");
                     st.writes.push(LoadWrite::Define { sym, val: shared });
+                    st.removed.remove(&sym);
                     st.bindings.insert(sym, shared).is_some()
                 };
+                self.forget_undefined_mark(sym);
                 {
                     let mut generations = self
                         .runtime
@@ -1186,9 +1225,13 @@ impl Heap {
             // the first time cannot invalidate compiled code — no arm can have baked in
             // a binding that did not exist when it compiled (see `code_epoch`'s doc) —
             // and bumping here made a bulk load re-tier every JIT'd arm per `def`.
+            // That holds for a name `reflect/undef` removed, too: its removal already
+            // bumped the epoch, so every arm compiled while it was bound is gone, and an
+            // arm compiled since found it unbound (ADR-391).
             if rebind {
                 self.runtime.code_epoch.fetch_add(1, Ordering::Relaxed);
             }
+            self.forget_undefined_mark(sym);
         } else if env.is_old() {
             // The frame was tenured (a minor collection promoted it while it was
             // still being bound — e.g. a collection during a `let` rhs eval). Mutate
@@ -1208,6 +1251,138 @@ impl Heap {
         } else {
             self.local.envs[env.index()].vars.push((sym, val));
         }
+    }
+
+    /// Remove global `sym` from the table — the mechanism under `reflect/undef` (ADR-391).
+    /// Returns whether a binding went away (the live one, or one an open load of this
+    /// process staged). The caller has already refused a reserved name and rooted a
+    /// package-relative one; this is the table operation and what it invalidates.
+    ///
+    /// **Invalidation is a rebind's** (ADR-217): `version` moves, so every process's
+    /// global inline cache re-reads and finds nothing; `code_epoch` moves, so every VM
+    /// global-read cache, call-site fast link, inlined prim guard, leaf-/self-inlined
+    /// body and JIT'd arm compiled while the name was bound re-validates before it runs
+    /// again — and a re-validated reference to the name misses and raises `unbound
+    /// symbol`. There is no path on which compiled code keeps calling the removed value:
+    /// every cache of a global's value is stamped with one of the two counters. Both bump
+    /// under the table's write guard, for KI-193's reason.
+    ///
+    /// Everything recorded ABOUT the name goes with it — its side facts (privacy, meta,
+    /// def site, registry mark, `defdyn` mark), its declared `sig`, a `sig!` force — and
+    /// its generation moves, so a temporary rebinding saved before the removal cannot be
+    /// restored over it (`%global-generation`). Inside an open module load the removal is
+    /// staged like a define (ADR-344): the loader reads the name as unbound at once, and
+    /// the table loses it when the load publishes — or never, if the load throws.
+    pub fn env_undefine(&mut self, sym: Symbol) -> bool {
+        self.global_trace(sym, "undefine", None);
+        self.forget_side_facts(sym);
+        self.runtime.unforce_contract(sym);
+        let had_sig = self
+            .runtime
+            .declared_sigs
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&sym)
+            .is_some();
+        if had_sig {
+            self.runtime
+                .declared_sigs_version
+                .fetch_add(1, Ordering::Release);
+        }
+        let removed = if self.in_journalled_load() {
+            if matches!(self.staged_lookup(sym), Some(None)) {
+                return false; // this load already removed it
+            }
+            let was_live = self.runtime.globals_read().contains_key(&sym);
+            let mut was_staged = false;
+            // An outer frame of this process may have staged the name too; its publish
+            // would bind it again after the inner one removed it. Every frame that holds
+            // it drops it and records the removal after its own define.
+            for stage in self.cold_mut().load_stages.iter_mut() {
+                if stage.bindings.remove(&sym).is_some() {
+                    was_staged = true;
+                    stage.writes.push(LoadWrite::Undefine { sym });
+                }
+            }
+            let innermost = self.cold_mut().load_stages.last_mut().expect("open load");
+            if was_live {
+                innermost.removed.insert(sym);
+                if !matches!(innermost.writes.last(), Some(LoadWrite::Undefine { sym: s }) if *s == sym)
+                {
+                    innermost.writes.push(LoadWrite::Undefine { sym });
+                }
+            }
+            if was_live || was_staged {
+                let mut generations = self
+                    .runtime
+                    .global_generations
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                let generation = self.runtime.version.fetch_add(1, Ordering::Relaxed) + 1;
+                generations.insert(sym, generation);
+                self.runtime.code_epoch.fetch_add(1, Ordering::Relaxed);
+            }
+            was_live || was_staged
+        } else {
+            let mut table = self.runtime.globals_write();
+            let removed = table.remove(&sym).is_some();
+            if removed {
+                let mut generations = self
+                    .runtime
+                    .global_generations
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                let generation = self.runtime.version.fetch_add(1, Ordering::Relaxed) + 1;
+                generations.insert(sym, generation);
+                self.runtime.code_epoch.fetch_add(1, Ordering::Relaxed);
+                self.runtime.removals.fetch_add(1, Ordering::Relaxed);
+            }
+            removed
+        };
+        if removed {
+            self.runtime
+                .undefined
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(sym);
+        }
+        removed
+    }
+
+    /// Did `reflect/undef` remove `sym`, with nothing bound since? For the unbound-symbol
+    /// diagnostic only (ADR-391).
+    pub fn was_undefined(&self, sym: Symbol) -> bool {
+        self.runtime
+            .undefined
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&sym)
+    }
+
+    /// A `def` bound `sym`: it is no longer a removed name. One read-lock probe while no
+    /// name has ever been removed, which is every ordinary run.
+    fn forget_undefined_mark(&self, sym: Symbol) {
+        let any = !self
+            .runtime
+            .undefined
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty();
+        if any {
+            self.runtime
+                .undefined
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&sym);
+        }
+    }
+
+    /// What the checker's export and namespace indexes key on: the global count, and how
+    /// many times a binding has left the table. The count alone named the set while the
+    /// table only grew; a removal then a first-time `def` keeps it and changes the set.
+    fn globals_shape(&self) -> (usize, u64) {
+        let count = self.runtime.globals_read().len();
+        (count, self.runtime.removals.load(Ordering::Relaxed))
     }
 
     // ----- dynamic-variable bindings (the `binding` form) -----
@@ -1328,9 +1503,9 @@ impl Heap {
     /// rescanning every global per file (O(files²)). Empty when the module isn't loaded (no
     /// `mod/*` globals) — the checker then `require`s it first. Checker use only.
     pub fn module_public_exports(&self, prefix: &str) -> Vec<(Symbol, Symbol)> {
-        let count = self.runtime.globals_read().len();
+        let shape = self.globals_shape();
         let fresh = matches!(self.check.borrow().as_ref()
-            .and_then(|c| c.exports.as_ref()), Some((c, _)) if *c == count);
+            .and_then(|c| c.exports.as_ref()), Some((c, _)) if *c == shape);
         if !fresh {
             let mut map: std::collections::HashMap<String, Vec<(Symbol, Symbol)>> =
                 std::collections::HashMap::new();
@@ -1348,7 +1523,7 @@ impl Heap {
                     }
                 }
             }
-            self.check_mut().exports = Some((count, std::sync::Arc::new(map)));
+            self.check_mut().exports = Some((shape, std::sync::Arc::new(map)));
         }
         self.check
             .borrow()
@@ -1364,14 +1539,14 @@ impl Heap {
     /// sound because a whole-project check does no `def`s per file, so an O(1) `Arc` clone on
     /// all but the first file (was an O(globals) scan per file → O(files²)).
     pub fn known_ns_prefixes(&self) -> std::sync::Arc<std::collections::HashSet<String>> {
-        let count = self.runtime.globals_read().len();
+        let shape = self.globals_shape();
         if let Some((c, arc)) = self
             .check
             .borrow()
             .as_ref()
             .and_then(|c| c.known_ns.as_ref())
         {
-            if *c == count {
+            if *c == shape {
                 return std::sync::Arc::clone(arc);
             }
         }
@@ -1383,7 +1558,7 @@ impl Heap {
             }
         }
         let arc = std::sync::Arc::new(set);
-        self.check_mut().known_ns = Some((count, std::sync::Arc::clone(&arc)));
+        self.check_mut().known_ns = Some((shape, std::sync::Arc::clone(&arc)));
         arc
     }
 
@@ -1695,9 +1870,9 @@ impl Heap {
                     .entries
                     .iter()
                     .filter(|(_, _, _, w)| match w {
-                        LoadWrite::Define { sym, .. } | LoadWrite::Registry { sym, .. } => {
-                            *sym == t
-                        }
+                        LoadWrite::Define { sym, .. }
+                        | LoadWrite::Registry { sym, .. }
+                        | LoadWrite::Undefine { sym } => *sym == t,
                     })
                     .map(|(seq, scope, direct, _)| {
                         format!("seq={seq}/scope={scope}/direct={direct}")
@@ -1762,6 +1937,9 @@ impl Heap {
                             });
                         }
                     }
+                    LoadWrite::Undefine { sym } => {
+                        table.remove(&sym);
+                    }
                 }
             }
         }
@@ -1785,6 +1963,9 @@ impl Heap {
             self.features_audit_table(&globals, "isolate restore");
             self.runtime.version.fetch_add(1, Ordering::Relaxed);
             self.runtime.code_epoch.fetch_add(1, Ordering::Relaxed);
+            // A restore can drop bindings as well as add them, so the count alone no
+            // longer names the set (see `RuntimeCode::removals`).
+            self.runtime.removals.fetch_add(1, Ordering::Relaxed);
         }
         #[cfg(test)]
         super::table_swap_probe::end(&self.runtime.version, &self.runtime.code_epoch);

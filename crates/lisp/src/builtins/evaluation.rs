@@ -190,7 +190,13 @@ pub(super) fn eval_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispR
     // supplies the missing conclusion instead of dropping the pass: a bare name bound
     // nowhere is taken to be this namespace's. A no-op at root, where resolve already is.
     let prev_assume = heap.set_ns_assume_own(true);
+    // The caller's known-name set comes back after the compile (KI-196, see
+    // `eval_string_inner`): a `def` head this form qualifies must not stay "known" in
+    // every namespace for the rest of the process.
+    let known = heap.set_ns_known_names(std::collections::HashSet::new());
+    heap.set_ns_known_names(known.clone());
     let compiled = crate::eval::macros::compile(heap, arg(args, 0), root);
+    heap.set_ns_known_names(known);
     heap.set_ns_assume_own(prev_assume);
     let form = compiled?;
     crate::eval::compile::run_top_form(heap, form, root)
@@ -557,6 +563,20 @@ pub(super) fn eval_string_inner(
     // When loading a module (`reset_ns`), bracket the namespace at root and
     // pre-scan its def heads for forward references; the plain `reflect/eval-string` (REPL,
     // inline) inherits the current namespace and does neither (ADR-065).
+    // The inheriting path keeps the caller's known-name set for the call and puts it back
+    // afterwards (KI-196): the resolver adds every `def` head it qualifies to that set, so a
+    // `(defn map …)` evaluated here used to leave bare `map` "known" for the rest of the
+    // process — in EVERY namespace, since the set is not keyed by module — and a later
+    // `(reflect/eval-string "(defmodule other) (map …)")` compiled `other/map`. A name the
+    // call defined is bound once it returns, which is the evidence the resolver reads
+    // from then on, so nothing needs the addition to outlive the call.
+    let inherited_known = if reset_ns {
+        None
+    } else {
+        let known = heap.set_ns_known_names(std::collections::HashSet::new());
+        heap.set_ns_known_names(known.clone());
+        Some(known)
+    };
     let (prev_ns, prev_known, prev_by_module, prev_imports) = if reset_ns {
         let pn = heap.set_compile_ns(None);
         // Region model (ADR-223): per-module pre-scan; active set starts empty and each
@@ -606,6 +626,9 @@ pub(super) fn eval_string_inner(
     }
     heap.truncate_roots(base);
     heap.set_ns_assume_own(prev_assume);
+    if let Some(known) = inherited_known {
+        heap.set_ns_known_names(known);
+    }
     if let Some(pn) = prev_ns {
         heap.set_compile_ns(pn);
     }

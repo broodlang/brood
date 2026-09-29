@@ -98,6 +98,11 @@ pub(crate) enum LoadWrite {
         path: Vec<Value>,
         val: Value,
     },
+    /// A `reflect/undef` made inside the load (ADR-391): the name leaves the table when
+    /// the load publishes, and again when a restore replays the load.
+    Undefine {
+        sym: Symbol,
+    },
 }
 
 /// One OPEN module load's staging frame (KI-135, ADR-344): the bindings and registry
@@ -112,6 +117,11 @@ pub(crate) enum LoadWrite {
 pub(crate) struct LoadStage {
     pub(crate) bindings: HashMap<Symbol, Value>,
     pub(crate) writes: Vec<LoadWrite>,
+    /// Names this load removed with `reflect/undef` (ADR-391) that are still bound in the
+    /// shared table: the loading process reads them as unbound until the frame publishes,
+    /// exactly as it reads its own staged defines ahead of the table. A later define in
+    /// the same frame takes the name back out.
+    pub(crate) removed: std::collections::HashSet<Symbol>,
     /// The frame is a DIRECT `load` of a module file (KI-170), not a `require`: its
     /// publish is journalled like any load so a bystander's restore replays it whole, but
     /// the loading isolate's OWN restore discards it — the file was loaded for that
@@ -357,6 +367,18 @@ pub struct RuntimeCode {
     /// 4000-module load, and the JIT came out a net 43% *loss* against no JIT at all.
     /// `version` keeps its exact old meaning for the inline caches.
     pub(super) code_epoch: AtomicU64,
+    /// Bumped whenever a binding LEAVES the table — `reflect/undef` (ADR-391), an
+    /// `%isolate` restore. Before removal existed the table only grew between restores, so
+    /// the checker keyed its export and namespace indexes on the global COUNT; a removal
+    /// followed by a first-time `def` keeps the count and changes the set, so those
+    /// indexes key on `(count, removals)` instead ([`Heap::globals_shape`]).
+    pub(super) removals: AtomicU64,
+    /// Names `reflect/undef` removed and nothing has bound since (ADR-391). Read only by
+    /// the unbound-symbol diagnostic, so a compiled caller that still names a removed
+    /// global says WHY it is unbound; cleared by the next `def` of the name. Written on
+    /// removal and — only while non-empty — on a `def`, so an ordinary define pays one
+    /// read-lock probe.
+    pub(super) undefined: RwLock<std::collections::HashSet<Symbol>>,
     /// Where each global was *defined* — file + form position, recorded at load
     /// time before macroexpansion (ADR-031). Lives here, beside `globals`, so it
     /// is shared across a runtime's processes and updated by a redefinition, the
@@ -682,6 +704,8 @@ impl Default for RuntimeCode {
             contract_forced: RwLock::new(std::collections::HashSet::new()),
             version: AtomicU64::new(0),
             code_epoch: AtomicU64::new(0),
+            removals: AtomicU64::new(0),
+            undefined: RwLock::new(std::collections::HashSet::new()),
             def_sites: RwLock::new(HashMap::new()),
             positions: RwLock::new(HashMap::new()),
             jit_code_cache: RwLock::new(HashMap::new()),
@@ -820,6 +844,8 @@ impl RuntimeCode {
             load_journal: Mutex::new(LoadJournal::default()),
             version: AtomicU64::new(0),
             code_epoch: AtomicU64::new(0),
+            removals: AtomicU64::new(0),
+            undefined: RwLock::new(std::collections::HashSet::new()),
             def_sites: RwLock::new(HashMap::new()),
             positions: RwLock::new(HashMap::new()),
             jit_code_cache: RwLock::new(HashMap::new()),
@@ -906,6 +932,13 @@ impl RuntimeCode {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .insert(sym);
+    }
+    /// Drop a `sig!` force — the name was removed (`reflect/undef`, ADR-391).
+    pub(super) fn unforce_contract(&self, sym: Symbol) {
+        self.contract_forced
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&sym);
     }
     pub(super) fn is_contract_forced(&self, sym: Symbol) -> bool {
         self.contract_forced

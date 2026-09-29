@@ -1667,10 +1667,21 @@ pub(crate) fn unbound_error(heap: &Heap, sym: Symbol) -> LispError {
     // A deliberate rename (ADR-304's ledger) is appended to the MESSAGE, not carried as
     // a hint: a `(try … (catch e (error-message e)))` sees the message only, and the
     // caller most in need of the pointer is exactly the one that swallowed the error.
+    // A name `reflect/undef` removed (ADR-391) is said so in the message, for the same
+    // reason: the code raising this was compiled while the name was bound, and the fix —
+    // re-evaluating that code so its references resolve afresh — is not guessable from a
+    // bare "unbound".
+    let removed = if heap.was_undefined(sym) {
+        " (removed by reflect/undef; code compiled while it was bound still names it — \
+         re-evaluate that code to resolve the name afresh)"
+    } else {
+        ""
+    };
     let e = LispError::unbound(format!(
-        "unbound symbol: {}{}",
+        "unbound symbol: {}{}{}",
         name,
-        crate::renames::rename_hint(&name).unwrap_or_default()
+        crate::renames::rename_hint(&name).unwrap_or_default(),
+        removed
     ));
     // A construct an LLM reached for from another Lisp that Brood doesn't have —
     // point at the Brood way (`set!` → process, `loop` → tail recursion, …).

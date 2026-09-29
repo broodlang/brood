@@ -25202,3 +25202,84 @@ of file as `:proc-closed` did.
 descendant on its stdout was never noticed before — and its respawn's `close` kills what
 the old child left. `tests/proc_test.blsp` gains the background-job, volume, exit-race, escaped-descendant,
 signal-after-exit, ordinary, kill and pty cases.
+
+## ADR-391 — `reflect/undef`: a global can be removed, and removal invalidates like a rebind
+
+**Status:** implemented (2026-09-29). New primitive `reflect/undef`
+(`crates/lisp/src/builtins/tooling.rs`) over `Heap::env_undefine`
+(`core/heap/env_globals.rs`); `LoadWrite::Undefine`; `Heap::forget_side_facts`.
+
+**Context.** There was no way to remove a global binding. `def` rebinds, `%isolate` rolls a
+whole table back, and nothing forgets one name. Zubr — an agent that hot-reloads its own
+modules — rolls a rejected reload back by loading the last good source, and then has to
+forget what the rejected version *added*. It worked around the gap with tombstones: a name
+that shadowed a root one (`(defn map …)` in its module) was re-pointed with
+`(def mod/map map)`, anything else became a stub raising "was removed when a reload was
+rolled back". Both leave a binding behind: `bound?` stays true, the tombstone is what the
+module's bare `map` keeps resolving to (it is still `mod/map` at compile time, because the
+resolver qualifies a bare name whenever `mod/name` is bound — ADR-065), and a stub is a
+function that exists only to fail.
+
+**Decision.** `(reflect/undef 'mod/name)` removes the binding and returns whether one went
+away. Rust holds the mechanism, Brood the policy of when to call it.
+
+- **The argument is the global's full name, as data.** A quoted symbol is never resolved
+  (ADR-065: data symbols are inviolate), so `'map` inside a module still names the root
+  `map`. A package-relative name roots as a `def` target does (ADR-070).
+- **What Brood ships is refused** — reserved names (ADR-166) and every prelude binding
+  (which also covers the prelude's dynamic knobs, which `is_sealed` exempts): removing
+  `map` from the runtime is not a thing a program may do to every other program.
+- **Invalidation is a rebind's.** Removal bumps `version` (every process's global inline
+  cache) and `code_epoch` (the VM's global-read caches, call-site fast links, inlined prim
+  guards, leaf/self-inlined bodies, JIT'd arms and the shared native caches, ADR-217),
+  under the table's write guard (KI-193). No new invalidation machinery was needed: every
+  cache of a global's value is already stamped with one of the two counters, so a removal
+  is exactly a rebind to *nothing* — a re-validated reference misses and raises `unbound
+  symbol`. ADR-217's argument for not bumping the epoch on a first-time `def` still holds
+  after a removal: every arm compiled while the name was bound died with the removal's
+  bump, and one compiled since saw it unbound.
+- **Old code errs, new code re-resolves.** Namespace resolution happens at compile time,
+  so a caller compiled while `mod/map` was bound holds the symbol `mod/map`; after removal
+  it raises, it does not silently switch to the root `map` — `mod/map` in compiled code is
+  indistinguishable from an explicitly qualified `mod/map`, whose fall-through to root
+  would be wrong. The error message says `(removed by reflect/undef …)` (a runtime set of
+  removed names, cleared by the next `def`), so the fix — re-evaluate that code — is not a
+  guess. Code compiled after the removal resolves the bare name through imports, then root.
+- **Everything recorded about the name goes with it.** Its side facts (ADR-320: privacy,
+  meta, def site, registry mark, `defdyn` mark) through `forget_side_facts`, an exhaustive
+  match over `FactKind::ALL`, so a sixth kind of fact cannot be added without saying what
+  removal does to it; its declared `sig`; a `sig!` force; and a contracted function's
+  uncontracted alias (ADR-383), which is bound exactly while the public name is. Its
+  generation moves, so `%global-generation`-guarded restores (`debug/untrace-fn`) cannot
+  put a saved value back over the removal.
+- **Inside a module load, removal is staged** (ADR-344): `LoadStage::removed` makes the
+  loader read the name unbound at once, `LoadWrite::Undefine` removes it from the table
+  when the load publishes (and again when an isolate restore replays the load, KI-134),
+  and a load that throws removes nothing. An outer frame of the same process that staged
+  the name drops it too, or its later publish would bind it again.
+- **The checker's indexes** keyed the export and namespace tables on the global COUNT,
+  which named the set only while the table grew. They key on `(count, removals)` now; an
+  isolate restore bumps `removals` as well, which it could always have needed.
+
+**Not done: `reflect/load` forgetting the definitions a file dropped.** It is the obvious
+companion — Erlang replaces a module whole — and it is not a clean fit here. (1) The
+runtime has no sound owner for a name: a def site records the LAST file that defined it,
+so a name defined from two files, or re-defined at the REPL, or produced by a `def…` macro
+whose expansion changed, would be forgotten by reloading a file that still "has" it, or
+kept by one that does not. (2) The removal must happen BEFORE the new source compiles —
+otherwise the new code's bare references resolve to the stale `mod/name` the load is about
+to remove, and every such reference is born stale — but before evaluation only the
+pre-scan's spelling heuristic knows what the new source defines. (3) `reflect/load` is
+also how the scoped test runner, `nest run --watch` and the REPL load files; a silent
+removal there changes what every one of them means. A tool that wants reload-with-forget
+has both sources in hand and knows which names are its own: it diffs their definitions,
+`reflect/undef`s the vanished ones, then loads. That is policy, and it stays in Brood.
+
+**Validation.** `tests/undef_test.blsp`: `bound?` after removal; reserved names refused;
+the generation moves; the private mark goes; a module's shadow of `map` removed → newly
+compiled code reaches the prelude `map`, and a caller compiled before raises naming the
+removal; a hot caller settled NATIVE before its callee (a leaf the JIT splices) or a read
+global is removed raises instead of calling the old value; redefinition afterwards is
+honoured by the same arm; eight processes that ran the caller hot all see the removal; a
+contracted function's alias goes with it; removal inside a module load, and a load that
+throws.
