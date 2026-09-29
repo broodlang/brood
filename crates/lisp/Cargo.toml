@@ -66,10 +66,11 @@ audio = ["dep:rodio"]
 # Windows, while wgpu picks the native API per platform behind one code path — and is
 # the same API the in-browser playground would draw with (WebGPU).
 gui-gpu = ["gui", "dep:wgpu", "dep:pollster", "dep:raw-window-handle"]
-# OS clipboard access (the `clipboard-get` / `clipboard-set!` builtins), via `arboard`.
+# OS clipboard access (`os/clipboard-get` / `os/clipboard-set` for text,
+# `os/clipboard-image` / `os/clipboard-set-image` for images), via `arboard`.
 # Pulled in by `gui` (a windowed editor wants copy/paste with other apps), but its own
 # feature so it can be enabled alone. Without it the builtins are graceful no-ops
-# (`clipboard-get` → nil), so the lean runtime and headless tests link no clipboard
+# (`clipboard-get` / `clipboard-image` → nil), so the lean runtime and headless tests link no clipboard
 # stack. `arboard` keeps a process-lifetime handle so an X11/Wayland paste survives
 # while the editor runs (the selection owner must stay alive to serve paste requests).
 clipboard = ["dep:arboard"]
@@ -303,10 +304,14 @@ rodio = { version = "0.22", optional = true, default-features = false, features 
 wgpu = { version = "30", optional = true, default-features = false, features = ["wgsl", "std", "dx12", "metal", "vulkan"] }
 pollster = { version = "0.4", optional = true }
 raw-window-handle = { version = "0.6", optional = true }
-# OS clipboard (text only). `default-features = false` drops the `image-data` default
-# (no `image` crate pulled in); `wayland-data-control` adds Wayland support alongside the
-# always-built X11 backend, matching winit's dual support. See the `clipboard` feature.
-arboard = { version = "3", optional = true, default-features = false, features = ["wayland-data-control"] }
+# OS clipboard: text and images (ADR-392). `image-data` gives `get_image`/`set_image`
+# (RGBA8, which arboard decodes from the platform's PNG/TIFF). It was once left out so
+# arboard would not pull in the `image` crate, but this crate already links `image` 0.25
+# for `image-thumb` and Cargo unifies the two (one copy in the duplicate-dependency tree),
+# so the reason is gone. `default-features = false` stays so the feature list is
+# explicit; `wayland-data-control` adds Wayland support alongside the always-built X11
+# backend, matching winit's dual support. See the `clipboard` feature.
+arboard = { version = "3", optional = true, default-features = false, features = ["wayland-data-control", "image-data"] }
 # Text shaping + glyph rasterisation for the GUI grid: cosmic-text does HarfBuzz-class
 # shaping (so ZWJ emoji / flags / skin-tone sequences form one glyph), font fallback
 # (a cluster the mono font lacks falls back to the bundled Noto Color Emoji), and color

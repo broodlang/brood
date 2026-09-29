@@ -1,0 +1,52 @@
+;; tests/clipboard_test.blsp — `os/clipboard-image` / `os/clipboard-set-image` (ADR-392)
+;; where no clipboard has to exist. The process-global clipboard makes a real round trip
+;; order dependent, so nothing here WRITES to it: every call either reads (harmless, and
+;; nil on a headless box or a build without the `clipboard` feature) or is refused before
+;; the clipboard is touched. The display round trip lives in
+;; `crates/lisp/tests/clipboard_display.rs`, ignored by default and run by name.
+(defmodule clipboard-test (:use test))
+
+(defn- well-formed-image? (result)
+  ;; What a live clipboard may legitimately hold on a machine with a display: a PNG and
+  ;; the dimensions of what is in it.
+  (and (map? result)
+    (bytes? (get result :png))
+    (int? (get result :width))
+    (int? (get result :height))
+    (> (get result :width) 0)
+    (> (get result :height) 0)))
+
+(defn- no-clipboard? ()
+  (or (not (system/feature? :clipboard))
+    (and (nil? (os/env "DISPLAY")) (nil? (os/env "WAYLAND_DISPLAY")))))
+
+(describe "os/clipboard-image: nil, never an error, where there is no clipboard"
+  (test "reading answers nil or a well-formed image, and never raises"
+    (let (plain (os/clipboard-image)
+          bounded (os/clipboard-image 64))
+      (is (or (nil? plain) (well-formed-image? plain)))
+      (is (or (nil? bounded) (well-formed-image? bounded)))
+      (when (well-formed-image? bounded)
+        (is (<= (math/max (get bounded :width) (get bounded :height)) 64)))))
+
+  (test "without the clipboard feature or a display it is exactly nil"
+    (is (or (not (no-clipboard?)) (nil? (os/clipboard-image))))
+    (is (or (not (no-clipboard?)) (nil? (os/clipboard-image 2000)))))
+
+  (test "a non-positive max-edge answers nil"
+    (is (nil? (os/clipboard-image 0)))
+    (is (nil? (os/clipboard-image -5))))
+
+  (test "a max-edge that is not an int raises"
+    (assert-error (os/clipboard-image "big"))
+    (assert-error (os/clipboard-image 1.5))))
+
+(describe "os/clipboard-set-image refuses what is not an image"
+  (test "bytes that do not decode raise, before the clipboard is touched"
+    (assert-error (os/clipboard-set-image (string/->bytes "not an image")))
+    (assert-error (os/clipboard-set-image (bytes 137 80 78 71))))
+
+  (test "the refusal says what was wrong"
+    (let (message (error-of (%clipboard-set-image (string/->bytes "not an image"))))
+      (is (string? message))
+      (is (includes? message "not a decodable image")))))

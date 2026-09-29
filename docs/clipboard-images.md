@@ -3,11 +3,15 @@
 `(os/clipboard-image)` — read an image off the OS clipboard, natively, on macOS, X11 and
 Wayland: one builtin, no `wl-paste` / `xclip` / `pngpaste` to install or shell out to.
 
-> Status: **proposal.** Nothing here is implemented. It comes from Zubr (the coding agent in
-> `claudette/`), which wants "paste a screenshot into the prompt" like Claude Code does.
-> Once agreed, record it as an ADR next to
-> [ADR-095](decisions.md#adr-095--os-clipboard-clipboard-get--clipboard-set-builtins-the-clipboard-feature),
-> which it extends.
+> Status: **implemented** (2026-09-29), recorded as
+> [ADR-392](decisions.md#adr-392--clipboard-images-osclipboard-image-answers-a-png-natively-or-nil),
+> which extends
+> [ADR-095](decisions.md#adr-095--os-clipboard-clipboard-get--clipboard-set-builtins-the-clipboard-feature).
+> It comes from Zubr (the coding agent in `claudette/`), which wants "paste a screenshot
+> into the prompt" like Claude Code does. **Tried on one machine only: GNOME 50 on
+> Wayland, where it runs through XWayland** (see "Behaviour to settle"). macOS, Windows,
+> KDE, Sway and a pure X11 session are untested; the acceptance list below is not met
+> until they are, and apps should keep a shell-out fallback for a nil answer.
 
 ## Why
 
@@ -25,6 +29,11 @@ machine paste silently does nothing. The runtime already links the crate that do
 natively.
 
 ## What already exists (checked)
+
+Re-checked against the tree and arboard 3.6.1's source before implementing; all four held.
+One addition: on Linux arboard decodes the platform's PNG itself (`image`'s default
+`Limits`, 512 MB allocation cap) before Brood sees the RGBA, so Brood's guard bounds what
+it encodes, not arboard's decode.
 
 - `crates/lisp/Cargo.toml` links `arboard` 3 (feature `clipboard`, pulled in by `gui`) with
   `default-features = false, features = ["wayland-data-control"]`. The comment there says
@@ -68,6 +77,9 @@ Optional companion, mainly so the feature is testable end to end:
 (os/clipboard-set-image png-bytes)   ;; => png-bytes; no-op when unavailable
 ```
 
+(As built, it takes any format `image-thumb` decodes, and raises on bytes that are not an
+image: that is the caller's mistake, where a missing clipboard is the environment's.)
+
 ### Rust
 
 - `Cargo.toml`: `arboard = { …, features = ["wayland-data-control", "image-data"] }`;
@@ -94,10 +106,26 @@ Optional companion, mainly so the feature is testable end to end:
    hardware.** Test on GNOME/Wayland, KDE/Wayland and Sway before claiming Wayland works;
    if GNOME copes badly, document that the native path is best-effort there and let apps
    fall back to `wl-paste`.
+
+   **Found on GNOME Shell 50.1 / Wayland (Ubuntu 26.04, 2026-09-29):** the understanding
+   is right about the protocol — `libmutter-18.so` names neither `ext_data_control` nor
+   `zwlr_data_control`, so arboard falls back to X11 through XWayland (unsetting
+   `WAYLAND_DISPLAY` changes nothing). But the fallback worked for everything tried: an
+   image already on the desktop clipboard read back as a valid 508×529 PNG, a PNG copied
+   with `xclip -t image/png` read back pixel-identical, and `clipboard-set-image` was
+   readable by `xclip -o` and outlived the Brood process. Presumably Mutter bridges its
+   Wayland clipboard to XWayland; the mechanism was not examined. Not tried here: a copy
+   from an app known to be Wayland-native without the bridge (no `wl-copy` on the
+   machine), KDE, Sway.
+
 2. **The window has focus, not the terminal.** In the terminal frontend the app is not the
    focused Wayland client when the user pastes, so a compositor that gates clipboard reads
    on focus (some do for data-control) may refuse. Worth a test with `nest run` in a
    terminal, not only `--gui`.
+
+   **Found on GNOME 50 / Wayland:** the reads above were made from a process with no
+   window and no focused terminal, and succeeded, so the XWayland path is not gated on
+   focus there. Data-control compositors are still untested.
 3. **Formats.** arboard decodes what the source offers into RGBA. On macOS that is the
    pasteboard's TIFF/PNG; on Linux `image/png`. An app that puts only `image/jpeg` or
    `image/bmp` on the clipboard may come back `nil` on Linux. Say so in the docstring.
@@ -160,3 +188,8 @@ prompt line. The model sees it as an `image_url` data URL. Nothing else in Zubr 
 - `cargo tree -d` shows no duplicate `image`; the size change of the release binary is
   recorded in the ADR.
 - The GNOME/Wayland behaviour is written down, whichever way it turns out.
+
+Where it stands (2026-09-29): GNOME/Wayland (via XWayland) done and written down above;
+no-feature and no-display return nil (`tests/clipboard_test.blsp`); no duplicate `image`
+and the size change recorded in ADR-392 (the release binary came out 48 272 bytes
+smaller). macOS, a pure X11 session and a data-control Wayland compositor are still to do.

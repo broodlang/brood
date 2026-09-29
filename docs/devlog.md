@@ -16186,3 +16186,21 @@ every row within ±2% except `pfib` +13% (+12% solo with `--floor`, floor 8.8%, 
 noise); 21 interleaved runs of the two fixed binaries put `pfib` at median 97 ms base vs
 96 ms new — drift on a parallel row on a shared box, not the change. `make ab-vm`: `fib`
 −2.9%, `collatz` −0.9%, `spawn-live` +3.0% (floor 0.5%, noise), `pfib` noise (floor 44%).
+
+## 2026-09-29 — clipboard images: `os/clipboard-image` (ADR-392)
+
+**Shipped:** `(os/clipboard-image)` / `(os/clipboard-image max-edge)` →
+`{:png :width :height}` or nil, and `(os/clipboard-set-image png)`, over arboard's
+`image-data` feature (`docs/clipboard-images.md` was the proposal; it now records what was
+found). The encode, the downscale-only bound and the 16384 px / 512 MB guard live in
+`builtins/clipboard.rs`; `image-thumb`'s decode limits and resize moved into two helpers
+both use (`decode_untrusted_image`, `fit_within`), so the two image paths cannot drift.
+
+**Measured:** the gui/gpu/audio/treesit release binary went 51 886 312 → 51 838 040 bytes
+(smaller; the baseline reproduced to the byte in a second clean worktree, the cause was
+not chased). No new duplicate crate: arboard's `image` unifies with ours.
+
+**Found on this box (GNOME 50, Wayland):** Mutter has no data-control protocol, so arboard
+runs through XWayland — and that works: an image already on the desktop clipboard, an `xclip`-copied PNG
+(pixel-identical) and a Brood-set image read by `xclip` all round-tripped, from a process
+with no window or focus. Nothing else was tried; the ADR says so.

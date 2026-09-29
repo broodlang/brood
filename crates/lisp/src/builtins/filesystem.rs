@@ -517,6 +517,43 @@ pub(super) fn copy_file(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
     Ok(Value::nil())
 }
 
+/// The largest side, in pixels, of an image a primitive will decode or accept.
+pub(super) const IMAGE_MAX_SIDE: u32 = 16384;
+/// The largest buffer, in bytes, an image primitive will allocate for one image.
+pub(super) const IMAGE_MAX_ALLOC: u64 = 512 * 1024 * 1024;
+
+/// Decode an encoded image (any format the `image` build reads: PNG / JPEG / GIF / WebP
+/// / BMP) from bytes nobody vouches for — a file, the clipboard. Per-call `Limits`
+/// bound a decompression bomb (`IMAGE_MAX_SIDE` a side, `IMAGE_MAX_ALLOC` in all), and
+/// anything that is not a decodable image within them is `None`, never an error.
+pub(super) fn decode_untrusted_image(bytes: &[u8]) -> Option<image::DynamicImage> {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(IMAGE_MAX_SIDE);
+    limits.max_image_height = Some(IMAGE_MAX_SIDE);
+    limits.max_alloc = Some(IMAGE_MAX_ALLOC);
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    reader.limits(limits);
+    reader.decode().ok()
+}
+
+/// Downscale `image` to fit within `max_width`×`max_height`, aspect ratio preserved.
+/// Downscale-only: a source already within the box keeps its native size (never
+/// upscaled — `thumbnail`/`resize` would blow a small image up to fill the box). The
+/// one resize path the image primitives share (`image-thumb`, `clipboard-image`).
+pub(super) fn fit_within(
+    image: image::DynamicImage,
+    max_width: u32,
+    max_height: u32,
+) -> image::DynamicImage {
+    if image.width() <= max_width && image.height() <= max_height {
+        image
+    } else {
+        image.thumbnail(max_width, max_height)
+    }
+}
+
 /// `(image-thumb bytes max-w max-h)` — decode an encoded image (PNG / JPEG / GIF /
 /// WebP / BMP) from a byte sequence and downscale it to fit within `max-w`×`max-h`
 /// pixels (aspect ratio preserved), returning `{:width :height :rgba}` where `:rgba`
@@ -532,26 +569,10 @@ pub(super) fn image_thumb(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     if max_w <= 0 || max_h <= 0 {
         return Ok(Value::nil());
     }
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(16384);
-    limits.max_image_height = Some(16384);
-    limits.max_alloc = Some(512 * 1024 * 1024);
-    let mut reader =
-        match image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format() {
-            Ok(r) => r,
-            Err(_) => return Ok(Value::nil()),
-        };
-    reader.limits(limits);
-    let Ok(img) = reader.decode() else {
+    let Some(img) = decode_untrusted_image(&bytes) else {
         return Ok(Value::nil());
     };
-    // Downscale-only: a source already within the box keeps its native size (never
-    // upscaled — `thumbnail`/`resize` would blow a small image up to fill the box).
-    let thumb = if img.width() <= max_w as u32 && img.height() <= max_h as u32 {
-        img.to_rgba8()
-    } else {
-        img.thumbnail(max_w as u32, max_h as u32).to_rgba8()
-    };
+    let thumb = fit_within(img, max_w as u32, max_h as u32).to_rgba8();
     let (w, h) = (thumb.width(), thumb.height());
     // GC-safe: no eval between this alloc and map_from_pairs (a builtin never fires
     // GC mid-execution), mirroring file_stat holding its string handles.

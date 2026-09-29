@@ -59,6 +59,35 @@ started an operating-system process while the bare `spawn` special form started 
   "Copy string s to the OS clipboard so other apps can paste it; returns s. A no-op (still returns s) when no clipboard is available or the clipboard feature is off."
   (%clipboard-set s))
 
+(defn clipboard-image "The OS clipboard's image as `{:png bytes :width w :height h}`, or nil. `:png` is the
+image PNG-encoded (alpha kept), ready to write to a file or base64 into a request;
+`:width`/`:height` describe what is in `:png`. With `max-edge` the image is downscaled
+so its longer side is at most that many pixels (never upscaled); a non-positive bound
+answers nil.
+
+Nil when the clipboard is empty or holds text or a file list (a copied file is a path —
+read it with os/clipboard-get), when no display is reachable, and in a build without the
+clipboard feature, so a caller never branches on a build flag. On Linux only an
+`image/png` offer is read: an app that puts only JPEG or BMP on the clipboard reads as
+nil. A source over 16384 px a side or 512 MB of pixels is refused as nil. Reading blocks
+while the owning app serialises the image; call it from a worker, not a UI loop, when
+the image may be large. Platforms tried so far are listed in ADR-392.
+
+    (os/clipboard-image 0)   → nil"
+  (() (%clipboard-image nil))
+  ((max-edge) (%clipboard-image max-edge)))
+(sig clipboard-image (and (-> (or map nil)) (int -> (or map nil))))
+
+(defn clipboard-set-image (png)
+  "Put an encoded image — PNG, or any format gui/image-thumb decodes — on the OS
+clipboard so other apps can paste it; returns `png`. Raises when the bytes are not a
+decodable image; a silent no-op otherwise when no clipboard is available or the
+clipboard feature is off, like os/clipboard-set. Replaces whatever the clipboard held.
+
+    (try (os/clipboard-set-image (string/->bytes \"not an image\")) (catch _ :refused))   → :refused"
+  (%clipboard-set-image png))
+(sig clipboard-set-image (bytes -> bytes))
+
 ;; ---- environment ------------------------------------------------------------
 
 (defn env (name)

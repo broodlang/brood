@@ -25283,3 +25283,78 @@ global is removed raises instead of calling the old value; redefinition afterwar
 honoured by the same arm; eight processes that ran the caller hot all see the removal; a
 contracted function's alias goes with it; removal inside a module load, and a load that
 throws.
+
+## ADR-392 — Clipboard images: `os/clipboard-image` answers a PNG, natively, or nil
+
+**Status:** implemented (2026-09-29). Extends
+[ADR-095](#adr-095--os-clipboard-clipboard-get--clipboard-set-builtins-the-clipboard-feature).
+Design and open questions: [clipboard-images.md](clipboard-images.md).
+
+**Context.** The clipboard builtins were text only, so an app that wanted a pasted
+screenshot (Zubr, the coding agent) shelled out to `pngpaste`, `wl-paste` or `xclip`
+depending on the machine, each of which may not be installed. The runtime already linked
+`arboard`, which reads images natively; ADR-095 turned its `image-data` feature off only
+to avoid pulling in the `image` crate, and `image` 0.25 has since been linked anyway for
+`image-thumb`.
+
+**Decision.**
+
+- `(os/clipboard-image)` / `(os/clipboard-image max-edge)` → `{:png bytes :width :height}`
+  or nil, over the primitive `%clipboard-image` (one argument, nil for "native size").
+  The image is PNG-encoded in the runtime, so a caller can write it to a file or base64 it
+  without knowing about pixel formats; alpha is kept. `max-edge` downscales only, through
+  the same resize path as `image-thumb` (`builtins/filesystem.rs`'s `fit_within`, now
+  shared), and a non-positive bound is nil, as a non-positive box is for `image-thumb`.
+- **Nil, never an error, for anything about the environment:** no image on the clipboard,
+  no display, a build without the `clipboard` feature — the ADR-095 contract. A caller
+  never branches on a build flag.
+- **The clipboard is untrusted input.** A source over 16384 px a side or 512 MB of RGBA is
+  refused as nil (`IMAGE_MAX_SIDE` / `IMAGE_MAX_ALLOC`, the constants `image-thumb`'s decode
+  limits now use too), as is a buffer whose length disagrees with its dimensions. arboard
+  itself decodes the platform's PNG with `image`'s default limits, whose allocation cap is
+  the same 512 MB.
+- `(os/clipboard-set-image png)` → `png`, so the feature can be tested end to end. The bytes
+  are decoded under the same limits; bytes that are not an image **raise** (the caller's
+  mistake), a missing clipboard is a silent no-op (the environment), as for `clipboard-set`.
+- Mechanism in `host/clipboard.rs` (`get_image` / `set_image`, raw RGBA8, on the same
+  process-lifetime handle, no-ops without the feature); encoding and the guard in
+  `builtins/clipboard.rs`, where a unit test reaches them without a display.
+
+**Measured.** The `release-brood` binary with this machine's configure set (gui, gui-gpu,
+audio, treesit-grammars, jit, stdimage): 51 886 312 bytes before, 51 838 040 after —
+**48 272 bytes smaller**, not larger. The baseline was built twice (the branch point in the
+worktree, and again in a clean detached worktree) and measured the same to the byte; why
+the result shrank was not investigated. The duplicate-dependency tree is unchanged (86
+duplicated crate versions before and after, none of them `image` or `png`): Cargo unifies
+arboard's `image` with ours. `Cargo.lock` gains `tiff` and `fax`, which arboard asks
+`image` for on macOS only (the pasteboard's TIFF); a Linux build compiles neither.
+
+**Tried, on one machine only** — Ubuntu 26.04, GNOME Shell 50.1 on Wayland
+(`XDG_CURRENT_DESKTOP=ubuntu:GNOME`, `WAYLAND_DISPLAY` and `DISPLAY` both set), `xclip`
+installed, `wl-clipboard` not:
+
+- Mutter here implements neither `ext-data-control-v1` nor `wlr-data-control-unstable-v1`
+  (neither interface name is in `libmutter-18.so`), so arboard's Wayland path fails to
+  initialise and it uses **X11 through XWayland**. Unsetting `WAYLAND_DISPLAY` gave the same
+  results, as that predicts.
+- A 96×96 PNG copied with `xclip -t image/png` read back at 96×96 with pixels equal to the
+  file; an image already on the clipboard from the desktop read back as a valid 508×529
+  PNG (192×200 with `max-edge` 200). `os/clipboard-set-image` then `xclip -o` gave the
+  PNG back at its size, and it was still there after the Brood process exited (another
+  owner took the selection over; presumably Mutter's clipboard manager, not checked). With neither `DISPLAY` nor `WAYLAND_DISPLAY` the answer is nil.
+- The reads were made from a process with no window and no terminal focus, so on this
+  compositor nothing gates a clipboard read on focus.
+
+Not tried: macOS, Windows, KDE, Sway or any wlroots compositor, a pure X11 session, and a
+copy made by a Wayland-native app that is known not to go through XWayland. Those stay
+open in the design doc's "Behaviour to settle"; until someone runs them, an app should
+keep its shell-out as the fallback when this answers nil.
+
+**Consequences.** `tests/clipboard_test.blsp` covers the headless contract without writing
+the clipboard (reads, and refusals before the clipboard is touched); the display round
+trip is `crates/lisp/tests/clipboard_display.rs`, ignored by default because it clobbers
+the real, process-global clipboard, and run by name with `--features clipboard`; it puts
+text on first, so an image left over from an earlier run cannot pass for this one. Five
+Rust unit tests pin the encode, the downscale and the guard. Sabotaged once each: dropping
+the 512 MB bound reds the guard test, and a `set_image` that does nothing reds the round
+trip.
