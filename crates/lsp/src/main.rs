@@ -86,8 +86,12 @@ mod workspace_symbols;
 use line_index::LineIndex;
 
 fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
-    // stdio transport: the editor launches us and talks JSON-RPC over the pipe.
-    let (connection, io_threads) = Connection::stdio();
+    // stdio transport: the editor launches us and talks JSON-RPC over the pipe. Our own
+    // framing rather than `Connection::stdio()`: that reader allocates whatever
+    // `Content-Length` a client sends, so `Content-Length: 99999999999` aborted the
+    // server with an allocation failure (2026-09-30). Ours refuses a frame past
+    // `MAX_FRAME_BYTES` as a protocol error.
+    let (connection, io_threads) = stdio_capped();
 
     let capabilities = ServerCapabilities {
         // Incremental sync: the client sends only the changed range(s) on each
@@ -1234,3 +1238,166 @@ mod server_tests;
 #[cfg(test)]
 #[path = "robustness_tests.rs"]
 mod robustness_tests;
+
+/// The largest JSON-RPC frame the server will read. A whole-document `didOpen` of a
+/// large file is a few megabytes; 64 MiB is far past any editor's traffic and small
+/// enough that a bad header cannot take the process down.
+const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
+
+/// The reader and writer threads behind [`stdio_capped`]; `join` mirrors
+/// `lsp_server::IoThreads::join`.
+struct CappedIoThreads {
+    reader: std::thread::JoinHandle<std::io::Result<()>>,
+    writer: std::thread::JoinHandle<std::io::Result<()>>,
+}
+
+impl CappedIoThreads {
+    fn join(self) -> std::io::Result<()> {
+        match self.reader.join() {
+            Ok(r) => r?,
+            Err(err) => std::panic::panic_any(err),
+        }
+        match self.writer.join() {
+            Ok(r) => r,
+            Err(err) => std::panic::panic_any(err),
+        }
+    }
+}
+
+/// `Connection::stdio()` with a bounded frame size — same channels, same message
+/// type, same exit rule (the reader stops after an `exit` notification), but a
+/// `Content-Length` past [`MAX_FRAME_BYTES`], negative, absent or unparsable is a
+/// protocol error instead of an allocation the size of the lie.
+fn stdio_capped() -> (Connection, CappedIoThreads) {
+    let (writer_sender, writer_receiver) = crossbeam_channel::bounded::<Message>(0);
+    let (reader_sender, reader_receiver) = crossbeam_channel::bounded::<Message>(0);
+    let writer = std::thread::spawn(move || {
+        let stdout = std::io::stdout();
+        let mut stdout = stdout.lock();
+        for msg in writer_receiver {
+            msg.write(&mut stdout)?;
+        }
+        Ok(())
+    });
+    let reader = std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        let mut stdin = stdin.lock();
+        while let Some(msg) = read_frame_capped(&mut stdin)? {
+            let is_exit = matches!(&msg, Message::Notification(n) if n.method == "exit");
+            if reader_sender.send(msg).is_err() {
+                break;
+            }
+            if is_exit {
+                break;
+            }
+        }
+        Ok(())
+    });
+    (
+        Connection {
+            sender: writer_sender,
+            receiver: reader_receiver,
+        },
+        CappedIoThreads { reader, writer },
+    )
+}
+
+/// Read one `Content-Length`-framed JSON-RPC message, or `None` at a clean EOF.
+fn read_frame_capped(input: &mut impl std::io::BufRead) -> std::io::Result<Option<Message>> {
+    use std::io::{Error, ErrorKind};
+    let invalid = |what: String| Error::new(ErrorKind::InvalidData, what);
+    let mut size: Option<usize> = None;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if input.read_line(&mut line)? == 0 {
+            return if size.is_none() {
+                Ok(None)
+            } else {
+                Err(invalid("headers without a body".to_string()))
+            };
+        }
+        // Header lines are ASCII and small; a header line past the frame cap is itself
+        // a hostile client.
+        if line.len() > 8192 {
+            return Err(invalid("header line too long".to_string()));
+        }
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed.is_empty() {
+            break;
+        }
+        let Some((name, value)) = trimmed.split_once(": ") else {
+            return Err(invalid(format!("malformed header: {trimmed:?}")));
+        };
+        if name.eq_ignore_ascii_case("Content-Length") {
+            let n: usize = value
+                .trim()
+                .parse()
+                .map_err(|_| invalid(format!("bad Content-Length: {value:?}")))?;
+            if n > MAX_FRAME_BYTES {
+                return Err(invalid(format!(
+                    "Content-Length {n} exceeds the {MAX_FRAME_BYTES}-byte frame limit"
+                )));
+            }
+            size = Some(n);
+        }
+    }
+    let Some(size) = size else {
+        return Err(invalid("no Content-Length header".to_string()));
+    };
+    let mut body = vec![0u8; size];
+    input.read_exact(&mut body)?;
+    let msg: Message = serde_json::from_slice(&body)
+        .map_err(|e| invalid(format!("malformed JSON-RPC message: {e}")))?;
+    Ok(Some(msg))
+}
+
+#[cfg(test)]
+mod frame_cap_tests {
+    //! The stdio transport refuses a frame past `MAX_FRAME_BYTES` as a protocol error
+    //! (2026-09-30): `lsp_server::Connection::stdio()` allocated whatever
+    //! `Content-Length` the client sent, so one header aborted the server.
+    use super::*;
+    use std::io::Cursor;
+
+    fn framed(body: &str) -> Vec<u8> {
+        format!("Content-Length: {}\r\n\r\n{}", body.len(), body).into_bytes()
+    }
+
+    #[test]
+    fn a_well_formed_frame_reads_as_a_message() {
+        let mut input = Cursor::new(framed(r#"{"jsonrpc":"2.0","id":1,"method":"shutdown"}"#));
+        let msg = read_frame_capped(&mut input)
+            .expect("read")
+            .expect("a message");
+        assert!(matches!(msg, Message::Request(r) if r.method == "shutdown"));
+        assert!(read_frame_capped(&mut input).expect("clean EOF").is_none());
+    }
+
+    #[test]
+    fn a_content_length_past_the_cap_is_a_protocol_error_not_an_allocation() {
+        let mut input = Cursor::new(b"Content-Length: 99999999999\r\n\r\n{}".to_vec());
+        let err = read_frame_capped(&mut input).expect_err("refused");
+        assert!(err.to_string().contains("exceeds"), "{err}");
+    }
+
+    #[test]
+    fn a_missing_negative_or_unparsable_length_is_refused() {
+        for header in [
+            "X: 1\r\n\r\n{}",
+            "Content-Length: -5\r\n\r\n{}",
+            "Content-Length: abc\r\n\r\n{}",
+        ] {
+            let mut input = Cursor::new(header.as_bytes().to_vec());
+            assert!(read_frame_capped(&mut input).is_err(), "{header:?}");
+        }
+    }
+
+    #[test]
+    fn a_body_past_the_cap_is_refused_before_it_is_read() {
+        // Exactly one byte over: the cap is on the declared length, not on what arrives.
+        let header = format!("Content-Length: {}\r\n\r\n", MAX_FRAME_BYTES + 1);
+        let mut input = Cursor::new(header.into_bytes());
+        assert!(read_frame_capped(&mut input).is_err());
+    }
+}

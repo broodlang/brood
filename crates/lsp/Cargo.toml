@@ -17,6 +17,8 @@ brood = { path = "../lisp" }
 # single-threaded-per-process, so a blocking request loop owning the document
 # store sidesteps all Send/Sync friction. See docs/lsp.md.
 lsp-server = "0.10"
+# The capped stdio transport below builds the connection over its own channels.
+crossbeam-channel = "0.5"
 lsp-types = "0.97"
 serde = "1"
 serde_json = "1"

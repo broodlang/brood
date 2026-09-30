@@ -16300,7 +16300,11 @@ under GC stress. KI-207 … KI-212, ADR-395, all sabotage-verified.
 - A shebang line was a parse error, a BOM a symbol, a NUL part of a symbol, a malformed
   `\u` the regex-footgun message (KI-210).
 - `defability`, `impl`, `(:use … :only …)` and `node/connect` accepted the malformed
-  silently (KI-211).
+  silently (KI-211). A runtime refusal of an unknown `(:use … :only …)` name was added too
+  and WITHDRAWN the same day: `nest`'s imaged start on a require cycle red on it — `:only`
+  is lazy by design (mid-load, batch-pending and image-materialised modules are all
+  legitimately "provided but unbound" at refer time). The checker should report the typo;
+  it does not yet.
 - A dispatch could not exceed ~200 arms: the expansion ceiling is 1024 now and the
   compile walkers grow their stack (KI-212, ADR-395).
 - **A kernel race found through the flake**: `demonitor` could return while a death had
@@ -16320,3 +16324,39 @@ non-trapping caller; `node/monitor` of an unknown node fires `[:nodedown]` at on
 `node/spawn` on a peer without `node/serve-spawns` is dropped with a warning; a table or
 socket cannot cross nodes. Distribution otherwise held up: 200 000-deep values, 1 M-element
 vectors and 10 MB strings round-trip through a peer.
+
+## 2026-09-30 (fourth pass) — the areas the batteries had not reached, and the A/B
+
+**Committed first** (`a954922f`): the three earlier passes, after the concurrent-load
+gates went green.
+
+**Probed:** the editor buffer and rope kernel under hostile positions and sizes, an
+`http/serve` handler fed raw malformed traffic (garbage, 5 MB request lines, ten thousand
+headers, negative and lying content lengths, chunked garbage, a slowloris of fifty
+half-open connections, a hundred pipelined requests), the wasm host given garbage bytes
+and malformed text, `nest` on ten hostile project shapes (a module cycle, a missing
+`:main`, malformed and unparsable manifests, a directory named `.blsp`, a symlink loop
+under `src/`, a missing and a self-referential path dependency, a test that never
+returns, three thousand modules), and `brood-lsp` fed malformed framing, JSON, methods,
+positions and payloads.
+
+**Found and fixed:** `brood-lsp` aborted on a huge `Content-Length` (KI-214); `nest`
+walked a symlink loop under `src/` (KI-215). **Held up:** everything else — every rope and
+buffer op bounds-checks by name; the server survived every malformed input with no
+crash; the wasm host refuses garbage and caps a load at 64 MiB; `nest` names each
+manifest and dependency fault, skips a directory named `.blsp`, marks a self path dep
+`(already shown)`, hard-kills a hung test at 120 s by name, and checks three thousand
+modules in 0.6 s.
+
+**The A/B** (`make ab BASE=HEAD~1 --floor`, release, best-of-7): every row `noise` by the
+floor discipline — `fib` +1.4% (floor 1.4%), `pfib` +4.2% (0.0%), `nqueens` +3.7%
+(4.3%), `sieve` +2.8% (2.8%), `json` +2.2% (0.4%), the rest ±1%. `pfib` and `json` at
+best-of-11 solo, and the `--all` sweep (the message rows changed with ADR-394), are the
+follow-up.
+
+**The race-guard sweep:** the ledger's race guards (KI-91, KI-92, KI-194 and the rest)
+are deterministic by construction — the probe sits in the window rather than racing it —
+and each entry records its sabotage red. KI-194 re-verified today: red with the frame
+opened unconditionally, green restored. The demonitor guard (KI-213) was the exception
+because its only reproduction was load-shaped; it lives in a root-process integration
+test now.

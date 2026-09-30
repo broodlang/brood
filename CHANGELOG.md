@@ -6,6 +6,10 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Robustness review, fourth pass** (KI-214, KI-215). `brood-lsp` refuses a JSON-RPC frame past
+64 MiB as a protocol error instead of aborting on the allocation. `nest` no longer enters a
+symlinked directory under `src/`.
+
 **Robustness review, third pass** (KI-207 … KI-212, ADR-395). A `demonitor` no longer returns while a
 `[:down …]` a death has already taken is still on its way (KI-213), so the demonitor-then-flush
 idiom is sound. A `case`, `cond`, `match` or
@@ -15,7 +19,7 @@ source is refused by name; a malformed `\u{…}` says so. `string/repeat` builds
 million characters in one pass instead of running out of memory. `file/walk-files` lists a
 symlinked directory instead of entering it. `reflect/eval` of a quasiquote inside a module
 works. `defability` refuses a malformed or duplicated op, `impl` refuses a method that is
-not an op, `(:use m :only [name])` refuses a name the module does not define, and
+not an op, and
 `node/connect` names a non-string argument.
 
 **Robustness review, second pass** (KI-203 … KI-206, ADR-394). A value nested past 256

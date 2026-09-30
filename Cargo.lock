@@ -515,6 +515,7 @@ name = "brood-lsp"
 version = "0.34.0"
 dependencies = [
  "brood",
+ "crossbeam-channel",
  "lsp-server",
  "lsp-types",
  "serde",

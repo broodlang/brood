@@ -354,10 +354,11 @@
                               (defability RlLate (rll [self]))
                               (rll (rllr 1))))
       :late))
-  (test "(:use m :only [name]) names a name the loaded module does not define"
-    (is (includes? (message (fn ()
-                              (reflect/eval-string "(defmodule rl-only-a (:use math :only [rl-nope]))")))
-          "defines no `rl-nope`"))
+  (test "(:use m :only [name]) stays lazy: a name resolves at reference, not at refer"
+    ;; A runtime refusal of an unknown `:only` name was added and withdrawn the same day:
+    ;; at refer time the module may be mid-load (a cycle), batched but not reached by the
+    ;; project loader, or provided by an image whose bindings materialise on first use.
+    (assert= (reflect/eval-string "(defmodule rl-only-a (:use math :only [rl-nope]))") nil)
     (assert= (reflect/eval-string "(defmodule rl-only-b (:use math :only [abs])) (abs -3)") 3)
     (assert= (reflect/eval-string "(defmodule rl-only-c (:use format :only [*format-headers-extra*]))")
       nil)))
@@ -402,3 +403,15 @@
       ;; that the one-in-three-thousand race went unseen with the fix removed.
       (map (range 0 40) (fn (i) (spawn (worker me 2000))))
       (assert= (fold (range 0 40) 0 (fn (acc i) (receive ([:leaks k] (+ acc k))))) 0))))
+
+(describe "the project source collector and a symlink to a directory"
+  ;; The same rule as `file/walk-files`: a symlinked directory is listed by the walk it
+  ;; belongs to, never entered. `nest check` on a project with `src/up -> ..` reported 202
+  ;; phantom files under `src/up/src/up/…` before it failed on the path (2026-09-30).
+  (test "collect-sources does not enter the link"
+    (os/cmd "sh"
+      ["-c"
+        "rm -rf /tmp/brood-rl-src && mkdir -p /tmp/brood-rl-src/src/sub && ln -s .. /tmp/brood-rl-src/src/up && touch /tmp/brood-rl-src/src/a.blsp /tmp/brood-rl-src/src/sub/b.blsp /tmp/brood-rl-src/src/not-source.txt"])
+    (assert= (sort (project/collect-sources "/tmp/brood-rl-src/src"))
+      '("/tmp/brood-rl-src/src/a.blsp" "/tmp/brood-rl-src/src/sub/b.blsp"))
+    (os/cmd "sh" ["-c" "rm -rf /tmp/brood-rl-src"])))

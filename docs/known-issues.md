@@ -90,12 +90,14 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 
 | # | What | Status |
 |---|---|---|
+| KI-214 | **`brood-lsp` aborted on one header: `Content-Length: 99999999999` allocated that many bytes** — `lsp_server::Connection::stdio()` reads whatever length a client declares, so any client (or a stray byte in the pipe) could take the server down with `memory allocation of 99999999999 bytes failed` | ✅ **FIXED 2026-09-30** — the server owns its stdio framing (`stdio_capped`): a length past 64 MiB, negative, absent or unparsable is a protocol error; the crate's message type and exit rule are unchanged. Guard `crates/lsp/src/main.rs` `frame_cap_tests` (a frame one byte over the cap is refused before its body is read) — deterministic |
+| KI-215 | **`nest` entered a symlinked directory under `src/`: `src/up -> ..` made `nest check` report 202 phantom files under `src/up/src/up/…` before failing on the path** — `project/collect-sources` recursed on `file/dir?`, which follows the link (KI-209's rule, in the project tool) | ✅ **FIXED 2026-09-30** — a symlinked directory is neither entered nor listed as a source. Guard `tests/robustness_limits_test.blsp` "the project source collector and a symlink to a directory" — sabotage-verified (the phantom paths return) |
 | KI-213 | **`demonitor` raced the death path's push: a `[:down …]` taken by a death but not yet delivered landed AFTER a `demonitor` + `(receive ([:down ^m …]) (after 0))` flush** — `stream_test` "the monitor leaves no [:down] behind" red in two full suites of four; 31 leaks in 80 000 rounds of the same shape on a 28-core box | ✅ **FIXED 2026-09-30** — the death path pushes the LOCAL downs while it still holds `MONITORS` (the take and the pushes are one step to a `demonitor`; `deliver` takes only the mailbox lock and a scheduler queue, so the hold is safe; remote downs go over the wire after release). A first cut — an in-flight mark waited out by a spinning `demonitor` — stalled deaths under a loaded full suite (two timeouts) and was replaced. Guards: `crates/lisp/tests/demonitor_race.rs` (the 80 000-round shape as a ROOT process, 0.5 s — sabotage-verified: 150 leaks with the lock released before the pushes), `monitor::in_flight_tests` (a `demonitor` blocks while a holder is mid-push), and the Brood-level `tests/robustness_limits_test.blsp` case, which never reds inside the runner and is kept as a load test only |
 | KI-207 | **`reflect/eval` of a quasiquote inside a module namespace qualified `unquote` — `[1 (mod/unquote x)]` — so a `defmacro` through `eval` in a module could not use `~` at all** | ✅ **FIXED 2026-09-30** — the eval path's assume-own rule (KI-24) exempts the template markers and auto-gensyms (`is_template_marker`). Guard `tests/robustness_limits_test.blsp` "quasiquote through reflect/eval inside a module namespace" — sabotage-verified (`zzq/unquote` returns) |
 | KI-208 | **`string/repeat` was quadratic: fifty million characters asked for 16 GB and died with an allocation failure** — `(apply str (map (range n) …))` built an n-element list and an n-argument call; every `pad-*` rode on it | ✅ **FIXED 2026-09-30** — doubling (O(n) total), a gibibyte cap by name; 50 M chars 0.13 s / 375 MB. Guard: the same file, "string/repeat" — sabotage-verified (the file aborts with the old body) |
 | KI-209 | **`file/walk-files` entered a symlinked directory, so a loop (`a/up -> ..`) was walked until the kernel's link limit refused the path and forty-two `a/up/a/up/…` paths were the answer** | ✅ **FIXED 2026-09-30** — a symlink to a directory is listed, not entered (`file/stat`'s `:symlink?`). Guard: the same file, "file/walk-files and a symlink to a directory" — sabotage-verified (42 returns) |
 | KI-210 | **a shebang line was a parse error, a byte-order mark read as a symbol, a NUL read as part of a symbol, and a malformed `\u{…}` was reported as the regex-footgun letter escape** | ✅ **FIXED 2026-09-30** — `Scanner::new` skips a first-line `#!`; U+FEFF is trivia; a control character inside a symbol is named; the escape message names `\u`/`\x`. Guard: the same file, "the reader's first line and its odd bytes" — each sabotage-verified |
-| KI-211 | **silent acceptances: `(defability A (op (self)))` (a list where the vector belongs) declared an ability with NO ops, a duplicated op was accepted, `(impl A r (not-an-op …))` registered nothing and said nothing, `(:use m :only [typo])` was accepted, `(node/connect nil)` blamed `string/length`** | ✅ **FIXED 2026-09-30** — each refused by name (an impl ahead of its `defability` stays legal; `:only` is checked only once the module has finished loading, so a cycle stays safe). Guard: the same file, "abilities and imports refuse what they used to accept silently" and "node/connect" — each sabotage-verified |
+| KI-211 | **silent acceptances: `(defability A (op (self)))` (a list where the vector belongs) declared an ability with NO ops, a duplicated op was accepted, `(impl A r (not-an-op …))` registered nothing and said nothing, `(:use m :only [typo])` was accepted, `(node/connect nil)` blamed `string/length`** | ✅ **FIXED 2026-09-30, the `:only` half WITHDRAWN the same day** — `defability`, `impl` and `node/connect` refuse by name (an impl ahead of its `defability` stays legal). The runtime `:only` refusal broke `nest`'s imaged start on a require cycle (`startup_image::an_imaged_start_terminates_on_a_require_cycle`): at refer time a module may be mid-load, batched but not reached by the project loader, or provided by an image whose bindings materialise on first use — `:only` is lazy by design. An unknown `:only` name is the CHECKER's to report, and it does not yet: an open follow-up. Guard: the same file, "abilities and imports refuse what they used to accept silently" and "node/connect" — each sabotage-verified |
 | KI-212 | **a `case`/`cond`/`match`/`receive` could not exceed roughly 200 arms** — each lowers to one nested level per arm and the expansion cap was 256, so a flat 300-arm keyword table or opcode switch was refused as "macro expansion nested too deeply" | ✅ **FIXED 2026-09-30 (ADR-395)** — the cap is 1024 (and the fixpoint round limit with it), and the walkers that recurse per level — the expansion step, `compile_node`, `emit_node` — grow their native stack. 900 arms lower and dispatch at every tier, under GC stress, and through the checker. Guard: the same file, "a dispatch with hundreds of arms" — sabotage-verified (cap at 256: 4 cases red) |
 | KI-203 | **the checker panicked on a comparison against `i64::MAX` — `(<= x 9223372036854775807)` computed `MAX + 1` in the narrowing** — `attempt to add with overflow` at `guards.rs:1430`, caught by `check_forms`'s catch_unwind and reported as a crash; every `nest check`, `brood --check` and run pre-flight over such a file | ✅ **FIXED 2026-09-30** — the four bound adjustments and the index offset saturate. Guard `tests/robustness_limits_test.blsp` "the checker's comparison narrowing at the ends of i64" — sabotage-verified (`lo + back` restored: the check panics and answers one crash warning) |
 | KI-204 | **a value nested past 256 levels could not be sent, stored in a table, or tallied** — `value nested deeper than 256 levels (cannot serialise)` for a persistent stack built as `[x acc]` at 300 elements, and for `seq/frequencies` over deep keys (its fold is rewritten to build in a table, so the pure map code's answer and the rewrite's diverged) | ✅ **FIXED 2026-09-30 (ADR-394)** — every walker over a `Message` grows its own stack (`process::grow`), `Clone` and `Drop` are hand-written (the derived ones recursed per level), and the cap is a million-level sanity bound. Guards: `depth_tests` in `message.rs` and `a_deeply_nested_message_round_trips_on_a_small_stack` in `wire_tests.rs` (both on a 2 MiB thread; sabotage-verified — the `Clone` growth removed aborts the process with a stack overflow), `tests/adversarial_test.blsp` 100 000-deep round trips, `tests/robustness_limits_test.blsp` "a value nested past 256 levels crosses a send and a table" |
@@ -13153,10 +13155,15 @@ accepted; `(node/connect nil)` said `string/length: expected string`.
 **Fix.** `%defability-check-specs` (every list in the form is an op spec except a
 `:derive-record` recipe; a non-vector parameter list and a duplicated op are refused by
 name); `%register-impl-check-arity` refuses a method that is not an op of a KNOWN ability
-(an impl ahead of its `defability` stays legal, ADR-172 late binding); `%refer`'s `:only`
-branch refuses a name the module does not define once the module has finished loading
-(`module_is_loading` keeps a cycle safe; a `defdyn` name is ambient and exempt);
-`node/connect` checks its argument first.
+(an impl ahead of its `defability` stays legal, ADR-172 late binding); `node/connect` checks
+its argument first. **The `:only` refusal was withdrawn the same day:** `%refer` refused a
+name the module did not define once the module was provided, and `nest`'s imaged start on
+a require cycle red on it — at refer time a module may be mid-load (a cycle), batched but
+not reached by the project loader (every sibling claimed in one journalled load), or
+provided by a project image whose bindings materialise on first use. `:only` resolves
+lazily by design, for exactly those three; the existence question belongs to the checker,
+which does not ask it yet (`brood --check` is silent on `(:use math :only [zz-nope])`) —
+an open follow-up, not a runtime check.
 
 **Guard.** The same file, "abilities and imports refuse what they used to accept silently"
 and "node/connect" — each sabotage-verified (`nil` returns for all three acceptances).
@@ -13225,3 +13232,39 @@ Brood-level `tests/robustness_limits_test.blsp` "demonitor and a down in flight"
 ran green under every sabotage inside the runner — the runner's own load hides the
 window — and is kept as a load test only. The lesson recorded here: a race guard must run
 in the shape that reproduced the race, and this one reproduced only as a script.
+
+## KI-214 — `brood-lsp` aborted on a `Content-Length` it could not allocate ✅ FIXED 2026-09-30
+
+**Seen:** `printf 'Content-Length: 99999999999\r\n\r\n{}' | brood-lsp` → `memory allocation
+of 99999999999 bytes failed`, exit 134. Every other malformed input in the same battery
+(garbage framing, bad JSON, a request before `initialize`, an out-of-range hover
+position, a 5 MB `didOpen`, a double `shutdown`) was a clean protocol error or a
+well-formed reply.
+
+**Cause.** `lsp_server::Connection::stdio()`'s reader allocates the declared length before
+reading the body. The crate is the transport; the cap has to be ours.
+
+**Fix.** `stdio_capped` in `crates/lsp/src/main.rs`: a reader thread parses the headers
+itself, refuses a `Content-Length` past `MAX_FRAME_BYTES` (64 MiB), negative, absent or
+unparsable as `InvalidData`, reads exactly the body and decodes the crate's `Message`;
+the writer thread and the `exit`-stops-the-reader rule mirror the crate's. The
+connection is `Connection { sender, receiver }` over two rendezvous channels, so
+`main_loop` is untouched.
+
+**Guard.** `frame_cap_tests` in the same file — a well-formed frame reads, a length past
+the cap (and one byte over it) is refused before the body is read, a missing, negative
+or unparsable length is refused. Deterministic.
+
+## KI-215 — `nest` entered a symlinked directory under `src/` ✅ FIXED 2026-09-30
+
+**Seen:** a project with `src/up -> ..` — `nest check`: `Building loop (202 files)` then
+a failure on `src/up/src/up/src/up/…`, forty levels of it.
+
+**Cause.** `project/collect-sources` recursed on `file/dir?`, which follows the link —
+KI-209's mechanism, in the project tool rather than `file/walk-files`.
+
+**Fix.** A symlinked directory is neither entered nor listed (`file/stat` once per entry).
+
+**Guard.** `tests/robustness_limits_test.blsp` "the project source collector and a symlink
+to a directory" — sabotage-verified: with the link followed again the phantom paths
+return and the assertion reds.

@@ -506,9 +506,14 @@ manifest is read, naming the key, not later inside whoever consumes the map."
     (fold (file/ls dir)
       nil
       (fn (acc entry)
-        (let (p (path/join dir entry))
+        ;; A symlink to a directory is not entered (`file/walk-files` has the same rule):
+        ;; `src/up -> ..` was walked into `src/up/src/up/…` until the path was refused,
+        ;; and `nest check` reported 202 phantom files (2026-09-30).
+        (let (p (path/join dir entry)
+              st (file/stat p))
           (cond
-            (file/dir? p) (%append-two (collect-sources p) acc)
+            (and st (get st :dir?) (not (get st :symlink?))) (%append-two (collect-sources p) acc)
+            (and st (get st :dir?)) acc
             (string/ends-with? entry ".blsp") (cons p acc)
             else acc))))
     nil))

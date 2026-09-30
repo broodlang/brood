@@ -1595,8 +1595,13 @@ pub(super) fn refer(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             }
         }
         subset => {
-            // Refer just the named symbols as `mod/name` (existence not required —
-            // an unbound `mod/name` surfaces as a normal unbound-reference error).
+            // Refer just the named symbols as `mod/name`. Existence is deliberately NOT
+            // required here (an unbound `mod/name` surfaces as a normal unbound-reference
+            // error): `:only` resolves lazily, and at refer time the module may be mid-load
+            // (a cycle), batched-but-not-reached by the project loader, or provided by a
+            // project image whose bindings materialise on first use — a runtime check here
+            // refused all three on 2026-09-30 and was withdrawn. A typo in an `:only` list
+            // is the checker's to report.
             for item in heap.seq_items(subset)? {
                 let bare = expect_symbol(heap, "%refer", item)?;
                 let bare_name = value::symbol_name(bare);
@@ -1613,19 +1618,6 @@ pub(super) fn refer(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
                 {
                     return Err(LispError::runtime(format!(
                         "(:use {mod_name} :only [... {bare_name} ...]): `{bare_name}` is module-private (ADR-146); grant access with (:use-internals {mod_name}) or use the public API"
-                    )));
-                }
-                // A name the module does not define is a typo that used to surface only at
-                // the first USE of the bare name — or never, when nothing used it
-                // (`(:use math :only [zz-nope])` was accepted, 2026-09-30). Checked only
-                // when the module has finished loading: mid-load (a cycle) the set is
-                // incomplete, which is exactly why `:only` resolves lazily.
-                if !module_is_loading(heap, &mod_name)
-                    && heap.env_get(EnvId::GLOBAL, qualified).is_none()
-                    && !crate::eval::macros::is_ambient(bare)
-                {
-                    return Err(LispError::runtime(format!(
-                        "(:use {mod_name} :only [... {bare_name} ...]): `{mod_name}` defines no `{bare_name}`"
                     )));
                 }
                 refer_add(heap, bare, qualified, &mod_name)?;
