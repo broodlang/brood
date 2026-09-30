@@ -6,6 +6,8 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+## v0.35.0 — a robustness review: twenty-two defects found by adversarial probing, and a language that survives what it is given
+
 **Robustness review, fourth pass** (KI-214, KI-215). `brood-lsp` refuses a JSON-RPC frame past
 64 MiB as a protocol error instead of aborting on the allocation. `nest` no longer enters a
 symlinked directory under `src/`.
