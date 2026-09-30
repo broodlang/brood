@@ -914,6 +914,20 @@ pub(crate) fn compile_node(
     scope: &mut Scope,
     tail: bool,
 ) -> Option<Node> {
+    // A compound form recurses once per nesting level, and an expansion may be nested
+    // to `macros::MAX_DEPTH` (1024) — one level per arm of a big dispatch — so a
+    // compound step grows the native stack when it is near its end. An atom pays
+    // nothing. Compile-time only: the compiled arm is cached and shared.
+    if matches!(form.unpack(), ValueRef::Pair(_)) {
+        stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || {
+            compile_node_inner(heap, form, scope, tail)
+        })
+    } else {
+        compile_node_inner(heap, form, scope, tail)
+    }
+}
+
+fn compile_node_inner(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Option<Node> {
     match form.unpack() {
         // Self-evaluating literals. `const_node` freezes any embedded heap handle
         // into the immovable RUNTIME region — load-bearing for `Value::Str` (a LOCAL

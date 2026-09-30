@@ -90,6 +90,23 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 
 | # | What | Status |
 |---|---|---|
+| KI-213 | **`demonitor` raced the death path's push: a `[:down …]` taken by a death but not yet delivered landed AFTER a `demonitor` + `(receive ([:down ^m …]) (after 0))` flush** — `stream_test` "the monitor leaves no [:down] behind" red in two full suites of four; 31 leaks in 80 000 rounds of the same shape on a 28-core box | ✅ **FIXED 2026-09-30** — the death path pushes the LOCAL downs while it still holds `MONITORS` (the take and the pushes are one step to a `demonitor`; `deliver` takes only the mailbox lock and a scheduler queue, so the hold is safe; remote downs go over the wire after release). A first cut — an in-flight mark waited out by a spinning `demonitor` — stalled deaths under a loaded full suite (two timeouts) and was replaced. Guards: `crates/lisp/tests/demonitor_race.rs` (the 80 000-round shape as a ROOT process, 0.5 s — sabotage-verified: 150 leaks with the lock released before the pushes), `monitor::in_flight_tests` (a `demonitor` blocks while a holder is mid-push), and the Brood-level `tests/robustness_limits_test.blsp` case, which never reds inside the runner and is kept as a load test only |
+| KI-207 | **`reflect/eval` of a quasiquote inside a module namespace qualified `unquote` — `[1 (mod/unquote x)]` — so a `defmacro` through `eval` in a module could not use `~` at all** | ✅ **FIXED 2026-09-30** — the eval path's assume-own rule (KI-24) exempts the template markers and auto-gensyms (`is_template_marker`). Guard `tests/robustness_limits_test.blsp` "quasiquote through reflect/eval inside a module namespace" — sabotage-verified (`zzq/unquote` returns) |
+| KI-208 | **`string/repeat` was quadratic: fifty million characters asked for 16 GB and died with an allocation failure** — `(apply str (map (range n) …))` built an n-element list and an n-argument call; every `pad-*` rode on it | ✅ **FIXED 2026-09-30** — doubling (O(n) total), a gibibyte cap by name; 50 M chars 0.13 s / 375 MB. Guard: the same file, "string/repeat" — sabotage-verified (the file aborts with the old body) |
+| KI-209 | **`file/walk-files` entered a symlinked directory, so a loop (`a/up -> ..`) was walked until the kernel's link limit refused the path and forty-two `a/up/a/up/…` paths were the answer** | ✅ **FIXED 2026-09-30** — a symlink to a directory is listed, not entered (`file/stat`'s `:symlink?`). Guard: the same file, "file/walk-files and a symlink to a directory" — sabotage-verified (42 returns) |
+| KI-210 | **a shebang line was a parse error, a byte-order mark read as a symbol, a NUL read as part of a symbol, and a malformed `\u{…}` was reported as the regex-footgun letter escape** | ✅ **FIXED 2026-09-30** — `Scanner::new` skips a first-line `#!`; U+FEFF is trivia; a control character inside a symbol is named; the escape message names `\u`/`\x`. Guard: the same file, "the reader's first line and its odd bytes" — each sabotage-verified |
+| KI-211 | **silent acceptances: `(defability A (op (self)))` (a list where the vector belongs) declared an ability with NO ops, a duplicated op was accepted, `(impl A r (not-an-op …))` registered nothing and said nothing, `(:use m :only [typo])` was accepted, `(node/connect nil)` blamed `string/length`** | ✅ **FIXED 2026-09-30** — each refused by name (an impl ahead of its `defability` stays legal; `:only` is checked only once the module has finished loading, so a cycle stays safe). Guard: the same file, "abilities and imports refuse what they used to accept silently" and "node/connect" — each sabotage-verified |
+| KI-212 | **a `case`/`cond`/`match`/`receive` could not exceed roughly 200 arms** — each lowers to one nested level per arm and the expansion cap was 256, so a flat 300-arm keyword table or opcode switch was refused as "macro expansion nested too deeply" | ✅ **FIXED 2026-09-30 (ADR-395)** — the cap is 1024 (and the fixpoint round limit with it), and the walkers that recurse per level — the expansion step, `compile_node`, `emit_node` — grow their native stack. 900 arms lower and dispatch at every tier, under GC stress, and through the checker. Guard: the same file, "a dispatch with hundreds of arms" — sabotage-verified (cap at 256: 4 cases red) |
+| KI-203 | **the checker panicked on a comparison against `i64::MAX` — `(<= x 9223372036854775807)` computed `MAX + 1` in the narrowing** — `attempt to add with overflow` at `guards.rs:1430`, caught by `check_forms`'s catch_unwind and reported as a crash; every `nest check`, `brood --check` and run pre-flight over such a file | ✅ **FIXED 2026-09-30** — the four bound adjustments and the index offset saturate. Guard `tests/robustness_limits_test.blsp` "the checker's comparison narrowing at the ends of i64" — sabotage-verified (`lo + back` restored: the check panics and answers one crash warning) |
+| KI-204 | **a value nested past 256 levels could not be sent, stored in a table, or tallied** — `value nested deeper than 256 levels (cannot serialise)` for a persistent stack built as `[x acc]` at 300 elements, and for `seq/frequencies` over deep keys (its fold is rewritten to build in a table, so the pure map code's answer and the rewrite's diverged) | ✅ **FIXED 2026-09-30 (ADR-394)** — every walker over a `Message` grows its own stack (`process::grow`), `Clone` and `Drop` are hand-written (the derived ones recursed per level), and the cap is a million-level sanity bound. Guards: `depth_tests` in `message.rs` and `a_deeply_nested_message_round_trips_on_a_small_stack` in `wire_tests.rs` (both on a 2 MiB thread; sabotage-verified — the `Clone` growth removed aborts the process with a stack overflow), `tests/adversarial_test.blsp` 100 000-deep round trips, `tests/robustness_limits_test.blsp` "a value nested past 256 levels crosses a send and a table" |
+| KI-205 | **`%map-into` read a one-item entry as `[k nil]` and truncated a three-item one** — `(into {} [[1]])` was `{1 nil}`, `(into {} [[1 2 3]])` was `{1 2}`: a malformed entry made a map silently | ✅ **FIXED 2026-09-30** — an entry is exactly two items, else `expected a [key value] entry`. Guard: `tests/robustness_limits_test.blsp` "a map entry must be a [key value] pair" — sabotage-verified |
+| KI-206 | **a `sig` whose spec was not a type was registered silently** — `(sig f 5)`, `(sig f "int")` raised nothing and the checker had nothing to read; and five more diagnostics named the wrong thing: `string/format`'s `%d` rendered a float or a string as text, a width of 99 999 999 999 failed as `range too large to realise`, `json/decode` answered `inf` for `1e999`, `math/mod` on a float blamed `rem`, `http/fetch ""` blamed `%tcp-connect`, and `count`/`map`/`fold` on a scalar blamed `empty?` | ✅ **FIXED 2026-09-30** — `sig` refuses a spec that is neither a list nor a name; `%d` takes an integer and a width is capped by name; `json/decode` refuses a number that only overflows; `mod`, `http/request`, `count` and `seq` check and name themselves. Guards in `tests/robustness_limits_test.blsp` ("a sig spec that is not a type", "string/format", "errors that named a layer the caller never wrote") — each sabotage-verified |
+| KI-197 | **a quasiquote chain built at runtime overflowed the native stack: `(reflect/eval (quasiquote (unquote (quasiquote …))))` 3000 levels deep segfaulted** — an abort, no `.brood_crash_dump`. Two unguarded Rust walkers (`has_autogensym`, the static quasiquote rewrite) recursed per level; the expansion walk never descends into a template, so its 256-level cap never applied | ✅ **FIXED 2026-09-30** — both walkers stop at `MAX_DEPTH` (the rewrite is an optimisation, the evaluator expands what it leaves; the autogensym answer past the cap only picks which path reaches the cap's own error) and the template walk iterates a list's spine. Guard `tests/robustness_limits_test.blsp` "a quasiquote chain built at runtime" — sabotage-verified (the file aborts) |
+| KI-198 | **a macro that expands to itself, defined and used in ONE evaluated form, hung the process** — `(reflect/eval '(do (defmacro m (x) (list 'm x)) (m 1)))` never returned; the compile pass had not seen the macro, and the evaluator's lazy expansion re-entered its own tail loop with no round cap | ✅ **FIXED 2026-09-30** — the runtime path counts consecutive lazy expansions against the same `MAX_EXPAND_ROUNDS` the compile-time fixpoint uses, reset at every closure entry so a tail loop through a lazily expanded macro is never charged. Guard: the same file, "a macro that expands to itself" — sabotage-verified (the case hangs to the timeout) |
+| KI-199 | **one call could eat the machine and die with an allocation failure — `(math/pow 2 100000000)`, `(repeat 100000000000 :x)` — an abort, not an error** — `pow` multiplied linearly (a hundred million growing bignum products), `repeat` had no ceiling where a realised range has one | ✅ **FIXED 2026-09-30** — `pow` is binary exponentiation with a result-size guard at `bit/shift-left`'s cap (2^27 bits); `repeat` refuses past `MAX_REALISED_RANGE`. Guard: the same file, "math/pow" and "repeat" — sabotage-verified (both abort) |
+| KI-200 | **a pattern nested 100 000 levels asked for 6 GB before the 256-level expansion cap could refuse it** — the pattern compiler's per-level walks (`%match-count-sym`, `%pattern-vars`) are quadratic in the depth, and the cap is checked on the code they produce | ✅ **FIXED 2026-09-30** — `%match-compile-clause` refuses a pattern deeper than 128 levels before lowering, on every surface (`match`, `fn`, `let`, `receive`), in O(min(depth, cap)). The quadratic walks themselves are unchanged (depth 100 costs 0.1 s). Guard: the same file, "a pattern nested past the lowering cap" — sabotage-verified (aborts) |
+| KI-201 | **`(math/sqrt (math/pow 10 400))` answered `inf`** — the bignum read as `inf` through f64 and `inf.sqrt()` is `inf`; the root, 1e200, is perfectly representable | ✅ **FIXED 2026-09-30** — `%f64-sqrt` factors an even power of two out of a bignum wider than 1000 bits and scales the root back. Guard: the same file, "math/sqrt of a bignum" — sabotage-verified (`inf`) |
+| KI-202 | **four user-facing messages read `(math/max N …)` — the `max` → `math/max` rename wave rewrote the English word** in "nested too deeply (max 256 levels)" (macro expansion, quasiquote), the shift cap and `->fixed`'s cap; and three diagnostics named the wrong thing: `(sleep 0.5)` said `receive:`, `(receive :after 0 …)` said `first: expected list … got keyword`, a bignum where a machine int is wanted said "expected int, got int" | ✅ **FIXED 2026-09-30** — messages repaired and pinned whole; `sleep` checks its own argument; `receive` names a non-list clause; `expect_int` names the 64-bit range. Guard: the same file, "diagnostics that named the wrong thing" — sabotage-verified (each old message returns) |
 | KI-196 | **a `def` evaluated through `reflect/eval-string` or `reflect/eval` made its bare name "known" in every namespace for the rest of the process** — `(reflect/eval-string "(defmodule a) (defn map …)")` then `(reflect/eval-string "(defmodule b) (map [1 2] inc)")` raised `unbound symbol: b/map` | ✅ **FIXED 2026-09-29** — the inheriting eval paths put the caller's known-name set back after the call. Found building `reflect/undef` (ADR-391). Guard `tests/eval_vm_test.blsp` "an eval'd definition does not leak its bare name into other modules (KI-196)", sabotage-verified |
 | KI-106 | **with the prelude image on, a multi-file `nest check` loses a record's ability impl** — `nest check <any other file> tests/record_test.blsp` warns `*: no \`num/mul\` method for [:int :record-test/usd]`; the same command with the image off, or with `record_test.blsp` alone, is clean. Two files in one process is the whole repro; order does not matter | ✅ **FIXED 2026-09-04 — two layers, found by two sessions the same day, both kept.** **(1) The writer:** `image-prune-foreign-registrations` decides ownership by the QUALIFIER of a registration's key, so `num/mul`'s `*multi-algebra*` entry was credited to `std/num.blsp` — a real module the project image does not carry — and pruned at write time; but the `(defmulti num/mul :commutative)` that registers it lives in the **prelude**, so loading `num` never put it back and the project image on disk held ONE algebra instead of five. Fixed by never pruning a registration that predates the project's own load (`before-regs`); guarded in `tests/startup_image_test.blsp`, sabotage-verified. **(2) The reader:** a short root section is normally REPAIRED at load — `project-registry-snapshot` merges the live registries back over it for every name in `(%registry-names)` — and a source boot's set includes `*multi-algebra*`/`*multi-ret*` (marked by evaluating those `defmulti`s), which is why the text-cache boot never showed the symptom; an imaged boot ran no `%registry-update!`, its set was **10 names to the source boot's 12**, and the short section won. Fixed by carrying the registry-name set in the prelude image (`Heap::mark_registry_names`); the boot differential now compares the set; sabotage reddens it and the two-file check 3/3. Either layer alone hides the symptom; both are real. **And the gate that found it is a gate**: `make check-imaged` runs `nest check` over the tree with the image on, imaged boot asserted, in `green-all` and CI. The prelude image became the DEFAULT that night, gated by it (ADR-314). |
 | KI-105 | **a boot from the PRELUDE image consulted a stale stdlib section directory, and a bad offset read garbage instead of failing** — `unbound symbol: io/puts` on a tree where nothing is wrong with `io`. ADR-314 recorded this failure as real, repeatable by hand at the time, and **unreproducible**: three attempts were written and all three passed under a sabotage that removed the fix, so the mechanism stayed a hypothesis and the prelude image stayed opt-in because of it | ✅ **FIXED 2026-09-04** — **reproduced deterministically** (5/5 imaged, 0/5 with `BROOD_NO_PRELUDE_IMAGE=1`) while working the four artifact states for the default flip. Mechanism: `%add-image-source!` **appends**. An imaged boot restores bindings rather than evaluating the prelude, so `*image-sources*` comes back holding a snapshot of whatever stdlib install was live when that prelude image was written; replaying `%std-image-install` over it leaves **two directories for the same file path**, stale one first, and `%image-section-for` scans in install order. The path still exists and reads fine, so the stale offset returns garbage rather than failing cleanly and falling back to source — that readability is the whole bug. The three earlier attempts each broke it (a deleted image fails cleanly; a re-laid layout with no prelude image written under the old one has no snapshot to be stale; an omitted module has no section at all). Fix: `%std-image-reinstall!` (`std/prelude/tools.blsp`) clears the registry to its `def-` values before installing, and the imaged boot calls that. Guarded by `crates/cli/tests/prelude_image_survives_a_relaid_stdlib_image.rs` — **whose first cut passed its own sabotage**: it armed the repro wrongly (brood's prelude image was written on a boot before any stdlib image existed, so the snapshot was empty). It now discards the prelude artifacts and re-cold-boots with the full image live, asserts that arming boot really was a source boot, and fails with the original `unbound symbol: io/puts` when the fix is removed |
@@ -12813,3 +12830,398 @@ bound by then, which is the evidence the resolver reads.
 **Guard.** `tests/eval_vm_test.blsp` "an eval'd definition does not leak its bare name into
 other modules (KI-196)" — both cases (through `reflect/eval-string`, and form by form
 through `reflect/eval`) red with the restores removed (2 of 17 fail), green with them.
+
+## KI-197 — a quasiquote chain built at runtime overflowed the native stack ✅ FIXED 2026-09-30
+
+**Seen:** the 2026-09-30 robustness review evaluated constructed forms through `reflect/eval`
+(the reader caps source nesting at 256 levels, so a constructed form is the only way past it).
+`(reflect/eval (fold (range 0 3000) 1 (fn (acc i) (list 'quasiquote (list 'unquote acc)))))`
+printed `thread '<unknown>' has overflowed its stack` / `fatal runtime error: stack overflow,
+aborting` — exit 134, nothing in `.brood_crash_dump` (a SIGSEGV leaves none). Depth 300
+answered `1`, the right value.
+
+**Cause.** Two Rust walkers in `eval/macros.rs` recursed once per level with no bound:
+`has_autogensym` (does the template contain an `x#`?) and `expand_qq_rec`, the compile-pass
+rewrite of an autogensym-free `quasiquote` into builder code, whose `~x` case re-entered
+itself on the unquoted form. The expansion walk (`macroexpand_all_depth_step`) carries the
+256-level cap, but it never descends into a `quasiquote` template, so these two saw the
+whole chain. `has_autogensym` also recursed along a list's *cdr*, so a long flat template
+was a deep one to it.
+
+**Why it survived.** The reader's cap made every literal template shallow, and the cap test
+(`parser_rejects_deeply_nested_input_instead_of_overflowing`) is a reader test. No test
+evaluated a constructed form deeper than the reader allows.
+
+**Fix.** Both walkers take a depth and stop at `MAX_DEPTH`. The rewrite leaves a form it does
+not reach alone — it is an optimisation, and the evaluator expands a `quasiquote` it meets
+one level per tail-loop turn, which is why depth 3000 already answered correctly once the
+walkers stopped crashing. `has_autogensym` answers `false` past the cap (a template that deep
+cannot expand — `qq_elem` refuses it — so the answer only chooses which path reaches that
+error) and walks a list's spine in a loop.
+
+**Guard.** `tests/robustness_limits_test.blsp` "a quasiquote chain built at runtime": 3000
+and 100 000 levels evaluate to `1`, a 200 000-element flat template costs no depth, and
+auto-gensym still takes the runtime path. Sabotage-verified: with either cap removed the file
+aborts (exit 134).
+
+## KI-198 — a self-expanding macro defined and used in one form hung the evaluator ✅ FIXED 2026-09-30
+
+**Seen:** `(reflect/eval '(do (defmacro mm (x) (list 'mm x)) (mm 1)))` never returned (killed
+at the 20 s timeout, no output). The same macro at top level, used in the NEXT form, raised
+`macro expansion did not reach a fixpoint after 256 rounds` as designed.
+
+**Cause.** The compile pass expands macros before evaluation, bounded by `MAX_EXPAND_ROUNDS`
+— but `mm` did not exist when the `do` was walked, so `(mm 1)` reached the evaluator as a
+call whose head turned out to be a macro. That lazy path (`eval.rs`, the `ValueRef::Macro`
+arm) applied the expander once and `continue 'tail`ed with the result, which was the same
+call, forever. The comment on `macroexpand` even names the shape and the cap; the runtime
+path never got one.
+
+**Why it survived.** Every lazy-expansion test uses a macro that terminates. A
+self-expanding macro is a bug in user code, and the compile-time cap answered the one
+spelling anyone tried.
+
+**Fix.** `eval` counts consecutive lazy expansions against `MAX_EXPAND_ROUNDS` (now
+`pub(crate)`), with the same message as the compile-time cap. The counter resets whenever a
+closure body is entered, so a tail-recursive loop that passes through a lazily expanded
+macro on every iteration — one expansion per closure entry — is never charged for its
+iterations (guarded: a 100 000-iteration loop through a same-form `defmacro`).
+
+**Guard.** `tests/robustness_limits_test.blsp` "a macro that expands to itself, defined and
+used in one form" — sabotage-verified: with the increment removed the case hangs to the
+timeout.
+
+## KI-199 — one call could eat the machine: `math/pow` and `repeat` died with an allocation failure ✅ FIXED 2026-09-30
+
+**Seen:** `(math/pow 2 100000000)` → `memory allocation of 331368 bytes failed`, exit 134,
+under the 16 GB address-space cap — for a result that is 12.5 MB. `(repeat 100000000000 :x)`
+the same. Neither is a `LispError`; `try` cannot see an allocator abort.
+
+**Cause.** `pow-acc` multiplied linearly: a hundred million products of a bignum that grows
+by one bit each step, quadratic time and — on the runtime's allocator, between safepoints —
+memory to match. `repeat` consed the whole list with no ceiling, where a range realised past
+`MAX_REALISED_RANGE` (2^26) has been refused as a catchable error since the range work.
+
+**Why it survived.** `pow`'s tests use small exponents; the bignum tests use `bit/shift-left`,
+which has had a shift cap since the bitboard work. Nothing asked what a large exponent costs.
+
+**Fix.** `pow-acc` is exponentiation by squaring (`(math/pow 2 100000000)` is 27
+multiplications and equals `(bit/shift-left 1 100000000)`); the square is taken only while
+another round needs it, so the last step never builds twice the answer. `%pow-check-size`
+refuses, before any multiplication, a result estimated past 2^27 bits — the shift cap, so
+the two spellings of 2^n agree on what is too big — from `(* exp (log2 |base|))`, with 1024
+bits as the floor for a base already past f64. `repeat` refuses past 2^26 elements.
+
+**Guard.** `tests/robustness_limits_test.blsp` "math/pow" (the shift equality, odd/even/
+negative/float/reciprocal exponents, a bignum base, and the two refusals) and "repeat".
+Sabotage-verified: with the linear product restored the `2^100000000` case aborts; with the
+`repeat` ceiling raised, the same.
+
+## KI-200 — a deep pattern asked for gigabytes before the expansion cap could refuse it ✅ FIXED 2026-09-30
+
+**Seen:** `(reflect/eval (list 'match [1] (list <100 000-level vector pattern> 1) '(_ 2)))` →
+`memory allocation of 6442450944 bytes failed`, exit 134. Measured on the way there: depth
+250 0.26 s / 118 MB, 500 0.87 s / 187 MB, 1000 3.4 s / 427 MB, 2000 13 s / 1.4 GB — and
+every one of those ended in `macro expansion nested too deeply (max 256 levels)`, the cap
+doing its job on the code the pattern compiler had produced, after the work.
+
+**Cause.** The pattern compiler (`std/prelude/match.blsp`) walks the whole generated code
+per clause (`%match-count-sym`, to decide how to splice the fail continuation) and the
+whole pattern per level (`%pattern-vars`, threaded as `bound`), so lowering is quadratic in
+the pattern's depth. The 256-level cap is checked on the *output*, so the quadratic work
+runs first.
+
+**Why it survived.** Real patterns are a few levels deep, and the reader keeps a literal
+under 256. Depth 100 costs 0.1 s, which no test would notice.
+
+**Fix.** `%match-compile-clause` — the one entry every lowering surface reaches (`match`,
+`fn` params, destructuring `let`, `receive`) — refuses a pattern deeper than 128 levels
+before lowering it, with a walk that stops descending the moment it is past the cap (so the
+check is O(min(depth, cap)), and plain recursion rather than `any?`, which lives in a later
+prelude file than `match`). The quadratic walks are unchanged: at 128 levels they are cheap,
+and past it they never run.
+
+**Guard.** `tests/robustness_limits_test.blsp` "a pattern nested past the lowering cap" —
+all four surfaces, a map pattern (walked through its values), and depth 100 still lowering.
+Sabotage-verified: with the check disabled the `match` case aborts.
+
+## KI-201 — `math/sqrt` of a bignum past f64's range answered `inf` ✅ FIXED 2026-09-30
+
+**Seen:** `(math/sqrt (math/pow 10 400))` → `inf`. The root is `1e200`.
+
+**Cause.** `%f64-sqrt` coerced through `num_to_f64`, which answers `inf` for a bignum past
+f64's range, and `inf.sqrt()` is `inf`. A silent wrong answer: no error, no test.
+
+**Fix.** For a `BigInt` wider than 1000 bits the primitive factors out an even power of two
+— sqrt(m · 2^2k) = sqrt(m) · 2^k — sizing `m` to fit a double, so the result is f64-exact
+wherever f64 can hold it; past 2^2048 the honest float answer is still `inf`.
+
+**Guard.** `tests/robustness_limits_test.blsp` "math/sqrt of a bignum" — sabotage-verified
+(`inf` returns with the branch disabled).
+
+## KI-202 — four messages read `math/max` where they meant `max`, and three diagnostics named the wrong thing ✅ FIXED 2026-09-30
+
+**Seen:** `macro expansion nested too deeply (math/max 256 levels)`, `quasiquote template
+nested too deeply (math/max 256 levels)`, `bit/shift-left: shift amount … too large (math/max
+134217728)`, `->fixed: decimal places … too large (math/max 1000)`. And: `(sleep 0.5)` →
+`receive: timeout must be an integer (milliseconds) or nil`; `(receive :after 0 :t)` (the
+Erlang spelling) → `first: expected list, vector, set, map or bytes, got keyword (:after)`
+from `%receive-prep`; `(string/substring "abc" 0 (math/pow 2 70))` → `string/substring:
+expected int, got int (1180591620717411303424)`.
+
+**Cause.** The `max` → `math/max` rename wave rewrote the English word inside format
+strings; `crates/lisp/tests/basic.rs` pinned the reader's copy whole for exactly this reason
+(its comment names the wave) and the other four were never pinned. `sleep` is a `receive`
+with a timeout and did no checking of its own. `receive`'s clause walk assumed every clause
+is a list. `expect_int` rejects a `BigInt` through the generic wrong-type error, and a
+bignum's tag name is `int`.
+
+**Why it survived.** A corrupted message breaks nothing — the error is still raised — so a
+`contains("nested too deeply")` test stayed green. The other three are true statements about
+the wrong layer.
+
+**Fix.** The four strings repaired; `sleep` checks for a non-negative int or nil and names
+itself; `%receive-check-after` names a non-list clause and the `(after ms body…)` spelling;
+`expect_int` says "expected an int in the 64-bit range, got N" for a bignum.
+
+**Guard.** `tests/robustness_limits_test.blsp` "diagnostics that named the wrong thing" —
+each message pinned whole. Sabotage-verified: each old message returns with its fix reverted.
+
+## KI-203 — the checker panicked on a comparison against `i64::MAX` ✅ FIXED 2026-09-30
+
+**Seen:** the run pre-flight over a probe file printed `thread 'brood-main' panicked at
+crates/lisp/src/types/check/guards.rs:1430:56: attempt to add with overflow`, caught by
+`check_forms`'s catch_unwind and reported as a crash. Reproduced with one line:
+`(defn f (x) (if (<= x 9223372036854775807) :a :b))` — under `brood --check`, a plain run
+(the pre-flight), and `reflect/check-string-structured`.
+
+**Cause.** `comparison_facts` narrows the else branch of `L ≤ R` to `L ≥ R.lo + 1`; with
+`R.lo = i64::MAX` that is an overflow, a panic in a debug build and a wrapped bound in
+release. The then branch, the strict forms and the index-offset fact (`k - 1`) have the
+same shape at the other end.
+
+**Why it survived.** No test compared against the ends of `i64`; the narrowing tests use
+small literals.
+
+**Fix.** The four bound adjustments and the index offset saturate.
+
+**Guard.** `tests/robustness_limits_test.blsp` "the checker's comparison narrowing at the
+ends of i64" — sabotage-verified: with `lo + back` restored the check panics and the
+structured result carries one crash entry, so the count-is-zero assertion fails.
+
+## KI-204 — a value nested past 256 levels could not be sent, stored in a table, or tallied ✅ FIXED 2026-09-30
+
+**Seen:** `value nested deeper than 256 levels (cannot serialise)` from `send`, from
+`table/put`, and — the surprising one — from `seq/frequencies` over deep keys: its fold is
+rewritten to build in a table (ADR-360 §6), so the pure `assoc` code the user reads worked
+and the rewrite's table path raised. A persistent stack built as `[x acc]` was unsendable
+at 300 elements.
+
+**Cause.** `MAX_MESSAGE_DEPTH = 256` was a stack-safety bound: `to_message_rec`,
+`from_message`, `copy_cross_heap_rec`, `message_fits`, the wire codec and the derived
+`Clone`/`Drop` of `Message` all recurse once per level, and the dist threads run on a
+2 MiB stack. The bound was honest about that and low for the language, whose values
+(built at runtime, `def`'d, compared, hashed, printed) have no such limit — every one of
+those walkers already grows its stack.
+
+**Fix (ADR-394).** `process::grow` (`stacker::maybe_grow`) at every container step of
+every walker, on both sides of the wire; a hand-written `Clone` (containers grow) and an
+iterative `Drop` (children are moved into a worklist before any is freed); the cap is now
+`1 << 20`, a sanity bound on a runaway structure. The test-only by-value matches the manual
+`Drop` forbids were rewritten by reference.
+
+**Guard.** `message::depth_tests` (a million-deep message clones, is measured by
+`message_fits` and drops on a 2 MiB thread; every container kind) and
+`wire_tests::a_deeply_nested_message_round_trips_on_a_small_stack` (200 000 levels through
+the codec on a 2 MiB thread) — sabotage-verified: with the `Clone` growth removed the test
+process aborts with `has overflowed its stack`. `tests/adversarial_test.blsp`'s two send
+tests, which pinned the refusal, now round-trip 100 000-deep values, and
+`tests/robustness_limits_test.blsp` "a value nested past 256 levels crosses a send and a
+table" covers `send`, a table key and value, and `seq/frequencies`.
+
+## KI-205 — `%map-into` accepted a malformed entry ✅ FIXED 2026-09-30
+
+**Seen:** `(into {} [[1]])` → `{1 nil}`; `(into {} [[1 2 3]])` → `{1 2}`.
+
+**Cause.** `pair_kv` read an entry with `first`/`second` semantics — a missing slot was
+`nil`, an extra one was ignored — so a malformed entry made a map silently.
+
+**Fix.** An entry is exactly two items (a vector or a list), else
+`%map-into: expected a [key value] entry, got …`. `zipmap` and `select-keys` share the
+hook and are unaffected: they build well-formed entries.
+
+**Guard.** `tests/robustness_limits_test.blsp` "a map entry must be a [key value] pair" —
+sabotage-verified (the lenient read restored: `{1 nil}` again).
+
+## KI-206 — a silent `sig`, and five diagnostics that named the wrong layer ✅ FIXED 2026-09-30
+
+**Seen:** `(sig f 5)` and `(sig f "int")` raised nothing — the spec was registered and
+the checker, which warns on an unknown type NAME, had no name to read. `(string/format "%d"
+1.5)` → `"1.5"`; `(string/format "%99999999999s" "x")` → `range too large to realise`;
+`(json/decode "1e999")` → `inf`, which `json/encode` refuses; `(math/mod 5.5 2)` →
+`rem: expected int`; `(http/fetch "")` → `%tcp-connect: expected string, got nil`;
+`(count identity)`, `(map 5 inc)` → `empty?: expected collection`.
+
+**Fix.** `sig` refuses a spec that is neither a list nor a symbol (a type name or alias)
+at the declaration, with `if`/`%eq` only, since it expands before `cond` exists. `%d`
+takes an integer and names the column; a width past a million is refused by name.
+`json/decode` refuses a number that only overflows. `mod` checks its own arguments.
+`http/request` refuses a URL with no host. `count` names itself, and `seq` — the one
+entry `map`/`fold`/`filter` coerce through — refuses a scalar (an int, float, keyword,
+symbol, bool, fn, native, macro, ratio, decimal) by name; everything else still passes
+through it as before.
+
+**Guard.** `tests/robustness_limits_test.blsp` "a sig spec that is not a type",
+"string/format", "errors that named a layer the caller never wrote" — each sabotage-verified
+(every restored behaviour reds its own case, 2 + 7 failures across two rounds).
+
+## KI-207 — `reflect/eval` of a quasiquote inside a module qualified `unquote` ✅ FIXED 2026-09-30
+
+**Seen:** in a module file, `(reflect/eval (reflect/read-string "`[1 ~(+ 1 1)]"))` →
+`[1 (zzq/unquote (+ 1 1))]`; `(reflect/eval '(do (defmacro g (x) `(+ ~x 1)) (g 1)))` →
+`unbound symbol: zzq/unquote`. The same forms in the file itself, or at root, were fine.
+
+**Cause.** The eval path's resolver runs with `ns_assume_own` (KI-24): a bare name bound
+nowhere is taken to be this namespace's. `unquote`, `unquote-splicing` and a `#`-suffixed
+auto-gensym are bound nowhere by design — the quasiquote expander reads them by name — so
+they were qualified, and the expander no longer saw them.
+
+**Why it survived.** Every quasiquote test is in a file (the compile pass, no assume-own)
+or at root (no namespace). The REPL is the path that has both, and nobody had typed a
+`defmacro` with `~` into it inside a module.
+
+**Fix.** `is_template_marker` beside `is_syntax_keyword` in the assume-own branch.
+
+**Guard.** `tests/robustness_limits_test.blsp` "quasiquote through reflect/eval inside a
+module namespace" (the test file is a module) — sabotage-verified: the exemption removed,
+`[1 (robustness-limits-test/unquote …)]` returns.
+
+## KI-208 — `string/repeat` was quadratic and aborted at fifty million characters ✅ FIXED 2026-09-30
+
+**Seen:** `(file/spit path (string/repeat "x" 50000000))` → `memory allocation of
+2147483648 bytes failed` under the 16 GB cap. Measured before the fix: 1 M chars 0.6 s /
+624 MB, 5 M chars 2.8 s / 2.4 GB — ~500 bytes per character.
+
+**Cause.** `(apply str (map (range (max 0 n)) (fn (_) s)))`: an n-element list, then an
+n-argument `apply`. Every `string/pad-*` is built on it.
+
+**Fix.** Doubling in Brood (`%repeat-doubling`, O(log n) concatenations of O(n) total
+work): 5 M chars 0.26 s / 133 MB, 50 M chars 0.13 s / 375 MB. A result past a gibibyte is
+refused by name (the allocation it asks for fails as an abort, and the pads inherit it —
+`(string/pad-left "x" 1e11)` used to fail as `range too large to realise`).
+
+**Guard.** `tests/robustness_limits_test.blsp` "string/repeat" — sabotage-verified: with the
+old body the 50 M case aborts the file.
+
+## KI-209 — `file/walk-files` entered symlinked directories, walking a loop forty levels deep ✅ FIXED 2026-09-30
+
+**Seen:** a tree with `a/up -> ..` and `a/f` answered 42 paths, `/tmp/x/a/up/a/up/a/…/f`
+among them; the walk stopped only where the kernel refused a path with too many links
+(ELOOP), which `dir?` then read as "not a directory".
+
+**Fix.** A symlink to a directory is listed and not entered (`file/stat` once per entry,
+`:dir?` and not `:symlink?`), the way `find` without `-L` behaves.
+
+**Guard.** The same file, "file/walk-files and a symlink to a directory" — sabotage-verified
+(42 returns).
+
+## KI-210 — the reader's first line and its odd bytes ✅ FIXED 2026-09-30
+
+**Seen:** `#!/usr/bin/env brood` on line 1 → `parse error: '#' is a dispatch character`,
+so a script marked executable could not run. A file saved with a byte-order mark began
+with a symbol named U+FEFF. `a\0b` read as one three-character symbol. `"\u{D800}"` and
+`"é"` were reported as "an unknown letter escape like \d \w \s" — the regex-footgun
+message — rather than as a malformed `\u`.
+
+**Fix.** `Scanner::new` starts past a first-line `#!` (the line-start table already counts
+it, so positions hold); U+FEFF is trivia and a delimiter; a control character inside an
+atom is named (`control character U+0000 inside a symbol`); `read_string` names the escape
+it found (`\u`, `\x`, or the letter case). Verified on real files: a shebang script and a
+BOM-prefixed file both run.
+
+**Guard.** The same file, "the reader's first line and its odd bytes" — each case
+sabotage-verified (the BOM sabotage panics the reader outright).
+
+## KI-211 — abilities, imports and `node/connect` accepted the malformed silently ✅ FIXED 2026-09-30
+
+**Seen:** `(defability ZM (zm (self)))` — the `defn` spelling of the parameter list —
+registered an ability with no ops, so every `impl` of it registered nothing; a duplicated
+op was accepted and the second `defn` shadowed the first; `(impl ZA r1 (zb [x] 1))` for a
+`zb` that is not an op of `ZA` registered silently; `(:use math :only [zz-nope])` was
+accepted; `(node/connect nil)` said `string/length: expected string`.
+
+**Fix.** `%defability-check-specs` (every list in the form is an op spec except a
+`:derive-record` recipe; a non-vector parameter list and a duplicated op are refused by
+name); `%register-impl-check-arity` refuses a method that is not an op of a KNOWN ability
+(an impl ahead of its `defability` stays legal, ADR-172 late binding); `%refer`'s `:only`
+branch refuses a name the module does not define once the module has finished loading
+(`module_is_loading` keeps a cycle safe; a `defdyn` name is ambient and exempt);
+`node/connect` checks its argument first.
+
+**Guard.** The same file, "abilities and imports refuse what they used to accept silently"
+and "node/connect" — each sabotage-verified (`nil` returns for all three acceptances).
+
+## KI-212 — a dispatch could not exceed roughly 200 arms ✅ FIXED 2026-09-30
+
+**Seen:** `case` with 300 literal arms, `cond` with 300 clauses, `match` with 300
+patterns, `receive` with 200 clauses: `macro expansion nested too deeply (max 256 levels)`.
+The forms are FLAT in source — the reader's own 256-level cap is untouched — but each
+lowers to one nested `if`/`let` per arm.
+
+**Cause.** `MAX_DEPTH = 256` on the expansion walk, a stack-safety bound: the expansion
+step, `compile_node` and `emit_node` recurse once per level with no growth.
+
+**Fix (ADR-395).** The cap is 1024 (`MAX_EXPAND_ROUNDS` too, so a 900-deep chain of
+`and` expands); the three walkers grow their native stack (`stacker`, every 32 levels
+where a depth is carried, per compound form otherwise). Measured: 900 arms of every
+dispatch form and 900-deep `if`/`let`/`->`/`do` chains at all three tiers, under
+`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`, and a 900-arm `cond` source file through
+`brood --check`. On the 16 MiB worker stack the growth is a margin rather than the
+enabler (900 levels compile without it in a debug build); it is what makes the cap a
+bound on runaway expansion instead of a stack limit.
+
+**Guard.** The same file, "a dispatch with hundreds of arms" — sabotage-verified: with
+the cap back at 256, four cases red.
+
+## KI-213 — `demonitor` raced the death path's push, leaking a `[:down …]` past its flush ✅ FIXED 2026-09-30
+
+**Seen:** `tests/stream_test.blsp:344` "stream/next against a dead or silent producer › the
+monitor leaves no [:down] behind in the caller's mailbox" — red in two of four full
+`nest test` runs on 2026-09-30, green 60 of 60 alone under load. Its own comment recorded
+one earlier sighting. Reproduced on demand with the same shape (monitor a target that
+exits right after answering, receive, `demonitor`, flush with `(after 0)`, then look): **31
+leaked downs in 80 000 rounds** across 40 processes.
+
+**Cause.** `retire_pid_tail` takes the dead target's watchers under `MONITORS`
+(`take_target`), releases the lock — deliberately: nothing here delivers with a table lock
+held — and then `fire_down` pushes each down. `demonitor` in that window found no entry to
+remove (already taken), the flush found nothing queued (not yet pushed), and the down
+landed after. `demonitor`'s doc said "a down already queued is not recalled", which the
+flush handles; the in-flight case it did not name.
+
+**Why it survived.** The window is a few hundred nanoseconds on another thread; the shape
+needs a target that dies the instant it answers, and a watcher that demonitors the instant
+it receives. `stream/next` is exactly that, and only a full suite loads the box enough.
+
+**Fix.** The death path pushes the LOCAL downs while it still holds `MONITORS`
+(`fire_down_held`), so `take_target` and the pushes are one step to a `demonitor` on
+another thread: either the entry is still there and no down will ever come, or the down
+is already queued where the flush finds it. Safe to hold: `deliver` takes only the
+target's mailbox lock and a scheduler queue, and nothing takes those and then
+`MONITORS`; a remote down goes over the wire after the lock is released, and the NOPROC
+path in `add_monitor` still fires with it released. The test-only down-order probe
+(KI-183) reads from the guard in hand rather than re-taking the lock. **A first cut was
+wrong**: an in-flight mark that `demonitor` spun on (`yield_now`) passed every local
+test and then stalled crashing processes' deaths for 25 s in a loaded full suite
+(`sysmon_test`, `spawn_monitor_test` timing out) — a spinning scheduler worker under
+three concurrent suites; the atomic form has no wait at all.
+
+**Guard.** `crates/lisp/tests/demonitor_race.rs` — the 80 000-round shape evaluated as the
+ROOT process through `Interp` (0.5 s), asserting zero leaks; sabotage-verified: with the
+lock released between the take and the pushes it reports 150. Also
+`monitor::in_flight_tests` (a `demonitor` blocks while a holder of the lock is mid-push —
+a property of the design, not of the death path, so it survived the sabotage) and the
+Brood-level `tests/robustness_limits_test.blsp` "demonitor and a down in flight", which
+ran green under every sabotage inside the runner — the runner's own load hides the
+window — and is kept as a load test only. The lesson recorded here: a race guard must run
+in the shape that reproduced the race, and this one reproduced only as a script.

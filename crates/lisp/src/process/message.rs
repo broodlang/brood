@@ -23,7 +23,9 @@ use crate::core::value::{self, Closure, ClosureId, EnvId, Symbol, Value};
 use crate::error::{LispError, Pos};
 
 /// A `Send`, self-contained copy of a value, for crossing heaps.
-#[derive(Clone)]
+///
+/// `Clone` and `Drop` are written by hand (below): the derived ones recurse once per
+/// nesting level, and a value built at runtime is nested as deep as the program made it.
 pub enum Message {
     Nil,
     Bool(bool),
@@ -147,6 +149,94 @@ pub enum Message {
 /// `crate::dist` needs every field (closure-as-data shipping; ADR-033) and
 /// they're inert plain data once built — no invariant to defend at the
 /// boundary.
+/// Run `f` on a stack that has room for it. Every walker over a `Message` recurses once
+/// per nesting level, and a value built at runtime can be nested to any depth — the
+/// reader's 256-level cap is for source, not for `(fold xs nil (fn (acc x) [x acc]))` —
+/// so each CONTAINER step grows the native stack when it is near its end (a leaf pays
+/// nothing). Before 2026-09-30 the serialiser refused anything past 256 levels instead,
+/// which made a persistent stack of 300 elements unsendable and un-tallyable.
+pub(crate) fn grow<R>(f: impl FnOnce() -> R) -> R {
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, f)
+}
+
+impl Clone for Message {
+    fn clone(&self) -> Self {
+        match self {
+            Message::Nil => Message::Nil,
+            Message::Bool(b) => Message::Bool(*b),
+            Message::Int(n) => Message::Int(*n),
+            Message::BigInt(s) => Message::BigInt(s.clone()),
+            Message::Decimal(s) => Message::Decimal(s.clone()),
+            Message::Ratio(s) => Message::Ratio(s.clone()),
+            Message::Float(f) => Message::Float(*f),
+            Message::Str(s) => Message::Str(s.clone()),
+            Message::StrShared(b) => Message::StrShared(Arc::clone(b)),
+            Message::Bytes(b) => Message::Bytes(Arc::clone(b)),
+            Message::Sym(s) => Message::Sym(*s),
+            Message::Keyword(s) => Message::Keyword(*s),
+            Message::FnShared { bits, pin } => Message::FnShared {
+                bits: *bits,
+                pin: pin.clone(),
+            },
+            Message::List(items, pos) => grow(|| Message::List(items.clone(), pos.clone())),
+            Message::Vector(items) => grow(|| Message::Vector(items.clone())),
+            Message::Map(entries) => grow(|| Message::Map(entries.clone())),
+            Message::Failure(entries) => grow(|| Message::Failure(entries.clone())),
+            Message::Set(items) => grow(|| Message::Set(items.clone())),
+            Message::Ref(n) => Message::Ref(*n),
+            Message::Pid { node, id } => Message::Pid {
+                node: *node,
+                id: *id,
+            },
+            Message::Socket(id) => Message::Socket(*id),
+            Message::Subprocess(id) => Message::Subprocess(*id),
+            Message::Table(id) => Message::Table(*id),
+            Message::Closure(c) => grow(|| Message::Closure(c.clone())),
+            Message::Native(s) => Message::Native(*s),
+        }
+    }
+}
+
+impl Drop for Message {
+    /// Iterative: the children are moved out into a worklist before any of them is
+    /// freed, so a tree nested a million levels deep costs no native stack to drop.
+    /// (The derived glue recursed once per level.)
+    fn drop(&mut self) {
+        let mut work: Vec<Message> = Vec::new();
+        take_children(self, &mut work);
+        while let Some(mut m) = work.pop() {
+            take_children(&mut m, &mut work);
+        }
+    }
+}
+
+/// Move every child of `m` into `out`, leaving `m` a childless shell.
+fn take_children(m: &mut Message, out: &mut Vec<Message>) {
+    match m {
+        Message::List(items, _) | Message::Vector(items) | Message::Set(items) => {
+            out.extend(items.drain(..));
+        }
+        Message::Map(entries) | Message::Failure(entries) => {
+            for (k, v) in entries.drain(..) {
+                out.push(k);
+                out.push(v);
+            }
+        }
+        Message::Closure(c) => {
+            for (_, v) in c.captured.drain(..) {
+                out.push(v);
+            }
+            for arm in c.arms.iter_mut() {
+                for (_, d) in arm.optionals.drain(..) {
+                    out.push(d);
+                }
+                out.extend(arm.body.drain(..));
+            }
+        }
+        _ => {}
+    }
+}
+
 #[derive(Clone)]
 pub struct ClosureMsg {
     pub(crate) name: Option<Symbol>,
@@ -201,13 +291,13 @@ pub struct ClosureArmMsg {
     pub(crate) body: Vec<Message>,
 }
 
-/// Maximum nesting depth `to_message` will descend into. Past this, the
-/// serialiser errors out — a deeply nested local data structure (built by a
-/// `cons`-in-a-loop or a runaway recursion) should produce a clean error
-/// rather than aborting the sender thread with a stack overflow. The wire
-/// decoder (`dist::wire::MAX_DECODE_DEPTH`) is defined in terms of this so the
-/// two can't diverge — wire round-trip stays symmetric.
-pub(crate) const MAX_MESSAGE_DEPTH: u32 = 256;
+/// Maximum nesting depth `to_message` will descend into — a sanity bound on a runaway
+/// structure, not a stack limit: every walker grows the native stack as it descends
+/// ([`grow`]), and `Clone`/`Drop` are hand-written for the same reason, so the cap is
+/// a million levels where it was 256 (2026-09-30). The wire decoder
+/// (`dist::wire::MAX_DECODE_DEPTH`) is defined in terms of this so the two can't
+/// diverge — wire round-trip stays symmetric.
+pub(crate) const MAX_MESSAGE_DEPTH: u32 = 1 << 20;
 
 /// Deep-copy a value out of `heap` into a `Send` message. A closure is sent as
 /// data (see [`ClosureMsg`]); builtins and macros can't be.
@@ -324,6 +414,22 @@ pub fn error_reason(e: &crate::error::LispError) -> Message {
 /// `visited` carries the closures currently being serialised, so a self- or
 /// mutually-recursive *local* closure is rejected cleanly instead of looping.
 fn to_message_rec(
+    heap: &Heap,
+    v: Value,
+    visited: &mut Vec<ClosureId>,
+    depth: u32,
+    dest_runtime: Option<u64>,
+) -> Result<Message, LispError> {
+    // Every 32 levels, make sure the next 32 fit (see [`grow`]); the modulus keeps the
+    // remaining-stack read off the per-node path.
+    if depth % 32 == 31 {
+        grow(|| to_message_rec_inner(heap, v, visited, depth, dest_runtime))
+    } else {
+        to_message_rec_inner(heap, v, visited, depth, dest_runtime)
+    }
+}
+
+fn to_message_rec_inner(
     heap: &Heap,
     v: Value,
     visited: &mut Vec<ClosureId>,
@@ -815,6 +921,16 @@ fn local_lookup(heap: &Heap, env: EnvId, sym: Symbol) -> Option<Value> {
 /// stall it exists to prevent.
 pub(crate) fn message_fits(m: &Message, budget: i64) -> bool {
     fn walk(m: &Message, left: &mut i64) {
+        match m {
+            Message::List(..)
+            | Message::Vector(..)
+            | Message::Map(..)
+            | Message::Failure(..)
+            | Message::Set(..) => grow(|| walk_inner(m, left)),
+            _ => walk_inner(m, left),
+        }
+    }
+    fn walk_inner(m: &Message, left: &mut i64) {
         if *left < 0 {
             return;
         }
@@ -861,6 +977,18 @@ pub fn from_message(heap: &mut Heap, m: &Message) -> Value {
 }
 
 fn from_message_timed(heap: &mut Heap, m: &Message) -> Value {
+    match m {
+        Message::List(..)
+        | Message::Vector(..)
+        | Message::Map(..)
+        | Message::Failure(..)
+        | Message::Set(..)
+        | Message::Closure(..) => grow(|| from_message_inner(heap, m)),
+        _ => from_message_inner(heap, m),
+    }
+}
+
+fn from_message_inner(heap: &mut Heap, m: &Message) -> Value {
     match m {
         // A closure handed over by handle (same runtime, already-shared region). No rebuild,
         // no allocation — the point of the whole exercise.
@@ -1315,6 +1443,20 @@ fn copy_cross_heap_rec(
     depth: u32,
     budget: &mut i64,
 ) -> Option<Value> {
+    if depth % 32 == 31 {
+        grow(|| copy_cross_heap_rec_inner(src, dst, v, depth, budget))
+    } else {
+        copy_cross_heap_rec_inner(src, dst, v, depth, budget)
+    }
+}
+
+fn copy_cross_heap_rec_inner(
+    src: &Heap,
+    dst: &mut Heap,
+    v: Value,
+    depth: u32,
+    budget: &mut i64,
+) -> Option<Value> {
     if depth >= MAX_MESSAGE_DEPTH {
         return None;
     }
@@ -1513,15 +1655,15 @@ mod chunk_tests {
 
     /// Pull the delivered string out of a text-mode payload.
     fn text(m: Option<Message>) -> Option<String> {
-        m.map(|m| match m {
-            Message::Str(s) => s,
+        m.map(|m| match &m {
+            Message::Str(s) => s.clone(),
             _ => panic!("expected a Str payload"),
         })
     }
 
     /// Pull the delivered bytes out of a binary-mode payload.
     fn raw(m: Option<Message>) -> Vec<u8> {
-        match m {
+        match &m {
             Some(Message::Bytes(b)) => b.as_bytes().to_vec(),
             _ => panic!("expected a Bytes payload"),
         }
@@ -1960,5 +2102,68 @@ mod drain_ack_tests {
         receiver.push_root(got);
         drop(m); // the in-flight pin goes with the message
         sender_releases(&interp, sender, &receiver);
+    }
+}
+
+#[cfg(test)]
+mod depth_tests {
+    //! A message is nested as deep as the sender built it (2026-09-30: the 256-level cap
+    //! became a million-level sanity bound). Every walker must survive that on a SMALL
+    //! thread: the dist reader and the offload pool run on the default 2 MiB stack, not
+    //! the workers' 16 MiB.
+    use super::*;
+
+    /// A list nested `depth` levels, built bottom-up (the builder is not the thing under
+    /// test).
+    fn nested(depth: usize) -> Message {
+        let mut m = Message::Int(1);
+        for _ in 0..depth {
+            m = Message::List(vec![m], None);
+        }
+        m
+    }
+
+    fn on_small_stack<F: FnOnce() + Send + 'static>(f: F) {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(f)
+            .expect("spawn")
+            .join()
+            .expect("the walk must not overflow a 2 MiB stack");
+    }
+
+    #[test]
+    fn a_million_deep_message_clones_fits_and_drops_on_a_small_stack() {
+        on_small_stack(|| {
+            let m = nested(1_000_000);
+            let copy = m.clone();
+            // `message_fits` walks the whole tree; the budget is nodes, so this says no.
+            assert!(!message_fits(&copy, 4096));
+            assert!(message_fits(&nested(100), 4096));
+            drop(copy);
+            drop(m);
+        });
+    }
+
+    #[test]
+    fn every_container_kind_is_walked_iteratively() {
+        on_small_stack(|| {
+            let mut m = Message::Int(1);
+            for i in 0..300_000usize {
+                m = match i % 5 {
+                    0 => Message::List(vec![m], None),
+                    1 => Message::Vector(vec![m]),
+                    2 => Message::Map(vec![(Message::Keyword(crate::core::value::intern("k")), m)]),
+                    3 => Message::Set(vec![m]),
+                    _ => Message::Failure(vec![(
+                        Message::Keyword(crate::core::value::intern("m")),
+                        m,
+                    )]),
+                };
+            }
+            let copy = m.clone();
+            drop(m);
+            drop(copy);
+        });
     }
 }

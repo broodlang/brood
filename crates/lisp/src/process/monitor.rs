@@ -278,9 +278,25 @@ pub fn monitored_by(pid: u64) -> usize {
 /// use. Local watchers get an in-process mailbox push; remote watchers get
 /// a routed `send`, so the wire-format `[:down …]` is exactly the message a
 /// peer's process would receive locally.
+/// Fire one down. A LOCAL watcher's is pushed by the death path with `MONITORS` HELD
+/// (`fire_down_held`); this entry is for the paths that fire with it released.
 pub(super) fn fire_down(w: Watcher, dying_pid: u64, reason: Message) {
     #[cfg(test)]
     down_order_probe::record(dying_pid);
+    fire_down_inner(w, dying_pid, reason)
+}
+
+/// [`fire_down`] for a local watcher taken by a death, with the table guard in hand
+/// (KI-213): the test probe reads from the guard rather than re-taking the lock.
+pub(super) fn fire_down_held(mons: &MonitorTable, w: Watcher, dying_pid: u64, reason: Message) {
+    #[cfg(test)]
+    down_order_probe::record_from(mons, dying_pid);
+    #[cfg(not(test))]
+    let _ = mons;
+    fire_down_inner(w, dying_pid, reason)
+}
+
+fn fire_down_inner(w: Watcher, dying_pid: u64, reason: Message) {
     match w {
         Watcher::Local { pid, mref } => deliver(
             pid,
@@ -365,11 +381,20 @@ pub(crate) fn add_monitor(target: u64, watcher: Watcher) {
     fire_down(watcher, target, Message::Keyword(value::intern(pk::NOPROC)));
 }
 
-/// `(demonitor mref)` — drop the calling process's monitor with that ref. Best
-/// effort: a `[:down …]` already queued is not recalled. Indexed by `(self, mref)`, so
-/// it touches the one target's list — never the table.
+/// `(demonitor mref)` — drop the calling process's monitor with that ref. A `[:down …]`
+/// already QUEUED is not recalled (flush it with `(receive ([:down ^m …]) (after 0))`),
+/// but once this returns no down for `mref` is still on its way — a death that took
+/// the monitor before this ran pushed its down under the same lock (KI-213). Indexed by
+/// `(self, mref)`, so it touches the one target's list — never the table.
 pub fn demonitor(mref: u64) {
-    let me = self_pid();
+    demonitor_for(self_pid(), mref)
+}
+
+/// [`demonitor`] on behalf of watcher `me` — the body, so a test can play the watcher.
+pub(super) fn demonitor_for(me: u64, mref: u64) {
+    // Atomic with a death's `take_target` + local `deliver`, which run under this same
+    // lock (KI-213): either the entry is still here and no down will ever come, or the
+    // death has already pushed its down, where the caller's flush finds it.
     crate::core::sync::lock(&MONITORS).remove_local(me, mref);
 }
 
@@ -555,10 +580,18 @@ pub(super) mod down_order_probe {
         static STILL_HELD: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
     }
 
+    /// For a down fired with `MONITORS` released (a remote watcher, the NOPROC path).
     pub(in crate::process) fn record(dying_pid: u64) {
         let held = crate::core::sync::lock(&super::MONITORS)
             .by_watcher
             .contains_key(&dying_pid);
+        STILL_HELD.with(|s| s.borrow_mut().push(held));
+    }
+
+    /// For a down fired while the death path HOLDS `MONITORS` (KI-213): read from the
+    /// guard in hand — `record` would deadlock on the lock this thread already holds.
+    pub(in crate::process) fn record_from(mons: &super::MonitorTable, dying_pid: u64) {
+        let held = mons.by_watcher.contains_key(&dying_pid);
         STILL_HELD.with(|s| s.borrow_mut().push(held));
     }
 
@@ -599,5 +632,49 @@ mod tests {
         assert_eq!(a & !REF_COUNTER_MASK, base);
         assert_eq!(b & !REF_COUNTER_MASK, base);
         assert_eq!((b & REF_COUNTER_MASK).wrapping_sub(a & REF_COUNTER_MASK), 1);
+    }
+}
+
+#[cfg(test)]
+mod in_flight_tests {
+    //! KI-213: the death path takes a target's watchers under `MONITORS`, releases it,
+    //! then pushes each down. `demonitor` in that window must not return before the push,
+    //! or a `(receive ([:down ^m …]) (after 0))` flush right after it misses the down.
+    use super::*;
+
+    #[test]
+    fn demonitor_waits_for_a_death_that_has_taken_its_monitor() {
+        let (watcher, target, mref) = (u64::MAX - 50, u64::MAX - 51, u64::MAX - 52);
+        test_insert_local(target, watcher, mref);
+        // The death path: take the watchers and push their downs under ONE hold of the
+        // lock, with the push standing in for a 60 ms stall.
+        let death = std::thread::spawn(move || {
+            let mut mons = crate::core::sync::lock(&MONITORS);
+            let taken = mons.take_target(target);
+            assert_eq!(taken.len(), 1);
+            std::thread::sleep(std::time::Duration::from_millis(60)); // the push
+            drop(mons);
+        });
+        std::thread::sleep(std::time::Duration::from_millis(10)); // let the death take first
+        let started = std::time::Instant::now();
+        demonitor_for(watcher, mref);
+        let waited = started.elapsed();
+        death.join().expect("death");
+        assert!(
+            waited >= std::time::Duration::from_millis(40),
+            "demonitor returned after {waited:?}, while the death that took its monitor was still pushing"
+        );
+    }
+
+    #[test]
+    fn demonitor_of_a_registered_monitor_returns_at_once_and_forgets_it() {
+        let (watcher, target, mref) = (u64::MAX - 53, u64::MAX - 54, u64::MAX - 55);
+        test_insert_local(target, watcher, mref);
+        let started = std::time::Instant::now();
+        demonitor_for(watcher, mref);
+        assert!(started.elapsed() < std::time::Duration::from_millis(50));
+        assert!(crate::core::sync::lock(&MONITORS)
+            .take_target(target)
+            .is_empty());
     }
 }

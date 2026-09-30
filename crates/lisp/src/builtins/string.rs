@@ -983,7 +983,7 @@ pub(super) fn to_fixed(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
     const MAX_DECIMALS: i64 = 1000;
     if n > MAX_DECIMALS {
         return Err(LispError::runtime(format!(
-            "->fixed: decimal places {n} too large (math/max {MAX_DECIMALS}); an f64 has \
+            "->fixed: decimal places {n} too large (max {MAX_DECIMALS}); an f64 has \
              ~17 significant digits, so a larger count only pads zeros"
         ))
         .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE));

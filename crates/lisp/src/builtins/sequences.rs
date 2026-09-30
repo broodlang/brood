@@ -1267,28 +1267,31 @@ pub(super) fn hash_map(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
     Ok(heap.map_from_pairs(pairs))
 }
 
-/// The `[k v]` of a pair item — a `[k v]` vector or a `(k v)` list — with
-/// `first`/`second` semantics (missing slots read as `nil`). Used by
+/// The `[k v]` of a pair item — a `[k v]` vector or a `(k v)` list of exactly two
+/// items; anything else is a type error naming the entry. Used by
 /// [`map_into`] to read the items of an `into`/`zipmap` sequence.
 pub(super) fn pair_kv(heap: &Heap, who: &str, p: Value) -> Result<(Value, Value), LispError> {
     match p {
+        // Exactly two items: a one-item entry used to read as `[k nil]` and a three-item
+        // one silently dropped its tail (`(into {} [[1]])` was `{1 nil}`, 2026-09-30).
         Value::Vector(id) => {
             let v = heap.vector(id);
-            Ok((
-                v.first().copied().unwrap_or(Value::nil()),
-                v.get(1).copied().unwrap_or(Value::nil()),
-            ))
+            if v.len() == 2 {
+                return Ok((v[0], v[1]));
+            }
         }
         Value::Pair(id) => {
             let (k, rest) = heap.pair(id);
-            let val = match rest {
-                Value::Pair(rid) => heap.pair(rid).0,
-                _ => Value::nil(),
-            };
-            Ok((k, val))
+            if let Value::Pair(rid) = rest {
+                let (val, tail) = heap.pair(rid);
+                if matches!(tail, Value::Nil) {
+                    return Ok((k, val));
+                }
+            }
         }
-        _ => Err(LispError::wrong_type(heap, who, "pair or vector", p)),
+        _ => {}
     }
+    Err(LispError::wrong_type(heap, who, "a [key value] entry", p))
 }
 
 /// `(%map-into m seq)` — pour each `[k v]` item of `seq` into map `m`, returning

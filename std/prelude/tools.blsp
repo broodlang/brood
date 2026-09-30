@@ -1891,6 +1891,19 @@ resolution; `%impl-for` is what picks the winner."
   (let (specs (get *abilities* aname)
         op-spec (if specs (first (%filter specs (fn (s) (= (first s) op)))) nil)
         op-args (if op-spec (second op-spec) nil))
+    ;; A method that is not one of the ability's ops can never dispatch — no generic
+    ;; function exists for it — and used to register silently (2026-09-30). Only when the
+    ;; ability is known: an impl ahead of its `defability` is legal late binding.
+    (when (and specs (nil? op-spec))
+      (error "impl "
+        aname
+        ": `"
+        op
+        "` is not an op of "
+        aname
+        " (declared: "
+        (string/join (map (%filter specs pair?) first) " ")
+        ")"))
     ; Skip a variadic OP spec — it declares no single arity to pin against (matches the
     ; checker). Only a fixed op spec is arity-checked.
     (when (and op-spec (not (includes? op-args '&)))
@@ -2136,6 +2149,41 @@ which is meaningless for a rope, so falling through unconditionally would swap a
       (rest (rest tail)) ; skip the `:-> ret` pair
       tail)))
 
+;; Every list in a `defability` is an op spec, `(op [args…] …)`, except the value of a
+;; `:derive-record` clause (a `(fn (fields) …)`). One with a non-vector parameter list —
+;; `(zm (self))`, the `defn` spelling — was silently dropped, so the ability had no ops and
+;; every `impl` of it registered nothing (2026-09-30). A duplicated op name was accepted
+;; too; the second `defn` shadowed the first.
+(defn- %defability-check-specs (aname specs)
+  (letrec (go (fn (items after-derive seen)
+                (cond
+                  (empty? items) nil
+                  (%eq (first items) :derive-record) (go (rest items) true seen)
+                  (keyword? (first items)) (go (rest items) false seen)
+                  (pair? (first items))
+                    (let (s (first items))
+                      (cond
+                        after-derive (go (rest items) false seen)
+                        (not (symbol? (first s)))
+                          (error "defability "
+                            aname
+                            ": an op spec is (op [args…] …), got "
+                            (pr-str s))
+                        (not (vector? (second s)))
+                          (error "defability "
+                            aname
+                            ": op `"
+                            (first s)
+                            "` needs a [args…] VECTOR (the defn spelling `("
+                            (first s)
+                            " (…))` is not an op spec), got "
+                            (pr-str s))
+                        (includes? seen (first s))
+                          (error "defability " aname ": op `" (first s) "` is declared twice")
+                        else (go (rest items) false (cons (first s) seen))))
+                  else (go (rest items) false seen))))
+    (go (if (string? (first specs)) (rest specs) specs) false nil)))
+
 (defmacro defability (aname & specs)
   "Declare ability `aname`. Each op spec `(op [args…] :-> ret?)` becomes a generic
   function dispatching on its first argument's identity. An optional leading docstring
@@ -2167,6 +2215,7 @@ which is meaningless for a rope, so falling through unconditionally would swap a
   ; An op spec is a pair whose second element is the `[args]` VECTOR; that excludes a
   ; `:derive-record` recipe `(fn (fields) …)` (its second is a `(fields)` *list*) and any
   ; keyword-clause value, so only real ops are collected.
+  (%defability-check-specs aname specs)
   (let (ops (%filter specs (fn (s) (and (pair? s) (vector? (second s)))))
         ;; The ability's own docstring, if it wrote one — the leading string in `specs`.
         ;; Each generated op inherits it (see the `defn` below): an op IS the ability's

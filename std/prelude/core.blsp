@@ -229,9 +229,34 @@ this by implementing the `Display` ability, which takes over this name below.
                   (if (bound? (quote *impls*))
                     (let (methods (%map-get *impls* (quote [Seqable ->seq]) nil))
                       (if methods
-                        (if (%map-get methods t nil) (->seq coll) coll)
-                        coll))
-                    coll))))))))))
+                        (if (%map-get methods t nil) (->seq coll) (%seq-passthrough coll t))
+                        (%seq-passthrough coll t)))
+                    (%seq-passthrough coll t)))))))))))
+
+;; What `seq` answers for a kind with no sequence view of its own. A scalar — an int, a
+;; float, a keyword, a function — can never be walked, and used to pass through here to
+;; die in the caller as "empty?: expected collection" (2026-09-30); the error now names
+;; `seq` and the value. Everything else (a set, a string, a socket handle, a kind a later
+;; impl may cover) still passes through, as before. `throw` + `str` only — this is line
+;; ~230 of the prelude and `error` lives in control.blsp.
+(defn- %seq-passthrough (coll t)
+  (if (if (%eq t :int)
+        true
+        (if (%eq t :float)
+          true
+          (if (%eq t :keyword)
+            true
+            (if (%eq t :symbol)
+              true
+              (if (%eq t :bool)
+                true
+                (if (%eq t :fn)
+                  true
+                  (if (%eq t :native)
+                    true
+                    (if (%eq t :macro) true (if (%eq t :ratio) true (%eq t :decimal))))))))))
+    (throw (str "seq: expected a collection, got " t " (" (pr-str coll) ")"))
+    coll))
 
 ;; ---- folding (the workhorse; tail-recursive, so it is stack-safe) ----
 ;; The public entry coerces once via `seq`; the inner `%fold-loop` then stays in
@@ -654,6 +679,19 @@ self-call decreases an argument, and no `match` in the body can fail).
   (let (typed (if (pair? spec) (if (%eq (type-of (first spec)) :keyword) false true) false)
         type (if typed (first spec) nil)
         props (if typed (rest spec) spec))
+    ;; A type-form is a list (`(int -> int)`, `(list int)`) or a name (`int`, an alias);
+    ;; anything else was registered silently and checked by nothing — `(sig f 5)` passed
+    ;; (2026-09-30). `%eq`/`if` only: this expands before `or`/`cond` exist.
+    (if typed
+      (if (%eq (type-of type) :pair)
+        nil
+        (if (%eq (type-of type) :symbol)
+          nil
+          (throw (str "sig "
+                   name
+                   ": expected a type like (int -> int) or a type name, got "
+                   (pr-str type)))))
+      nil)
     `(do
        ~(if typed `(%register-sig '~name '~type) nil)
        ~(if (pair? props) `(%register-sig-props '~name '~props) nil))))

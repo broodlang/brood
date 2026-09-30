@@ -1,0 +1,404 @@
+;; Robustness limits — what a hostile *shape* of program does to the runtime.
+;;
+;; Every case here guards a fix from the 2026-09-30 robustness review, where a value or
+;; form a Brood program can build at runtime took the whole runtime down instead of
+;; raising: a native stack overflow (an abort, no `.brood_crash_dump`), an allocation
+;; failure (the same), or a hang. `try`/`catch` cannot see any of those, so "the
+;; assertion ran at all" is part of what each test proves — a reverted guard reds the
+;; whole file, not one case.
+;;
+;; The shapes come from `reflect/eval` of CONSTRUCTED forms: the reader caps source
+;; nesting at 256 levels, so nothing here can be written as a literal, and every walker
+;; that trusted that cap was reachable from a form built in a loop.
+
+(defmodule robustness-limits-test (:use test))
+
+(defn nest-vec (n) (fold (range 0 n) 'x (fn (acc i) [acc])))
+(defn nest-map (n) (fold (range 0 n) 'x (fn (acc i) {:k acc})))
+(defn deep-qq (n) (fold (range 0 n) 1 (fn (acc i) (list 'quasiquote (list 'unquote acc)))))
+(defn message (thunk) (try (do (thunk) :no-error) (catch e (error-message e))))
+
+(describe "a quasiquote chain built at runtime"
+  ;; `has_autogensym` and the static quasiquote rewrite both recursed the native stack
+  ;; per level: 3000 levels segfaulted, an abort nothing could catch. The evaluator
+  ;; itself handles the chain one level per tail-loop turn, so the answer is just `1`.
+  (test "3000 levels evaluates instead of overflowing the native stack"
+    (assert= (reflect/eval (deep-qq 3000)) 1))
+  (test "100 000 levels evaluates too"
+    (assert= (reflect/eval (deep-qq 100000)) 1))
+  (test "a long FLAT template costs no depth (the spine is walked, not recursed)"
+    (assert= (count (reflect/eval (list 'quasiquote (seq (range 0 200000))))) 200000))
+  (test "auto-gensym still takes the runtime path"
+    (let (f (reflect/eval '(fn () `(let (x# 1) x#)))
+          form (f))
+      ;; both occurrences of `x#` became the SAME fresh symbol
+      (assert= (first (second form)) (nth form 2))
+      (is (not (= (first (second form)) 'x#))))))
+
+(describe "a macro that expands to itself, defined and used in one form"
+  ;; The compile pass never saw the macro (it did not exist when the form was walked), so
+  ;; the evaluator expanded it lazily — and re-entered its own loop with the expansion,
+  ;; forever. The compile-time fixpoint had a 256-round cap; the runtime path had none.
+  (test "is refused after 1024 rounds instead of hanging"
+    (is (includes? (message (fn ()
+                              (reflect/eval '(do
+                                               (defmacro rl-self (x) (list 'rl-self x))
+                                               (rl-self 1)))))
+          "did not reach a fixpoint")))
+  (test "the growing variant is refused the same way"
+    (is (includes? (message (fn ()
+                              (reflect/eval '(do
+                                               (defmacro rl-grow (x) (list 'rl-grow (list 'list x)))
+                                               (rl-grow 1)))))
+          "did not reach a fixpoint")))
+  (test "a tail loop THROUGH a lazily expanded macro is not charged per iteration"
+    ;; one expansion per iteration, reset at every closure entry — 100k iterations
+    (assert= (reflect/eval '(do
+                              (defmacro rl-when (c & body) (list 'if c (cons 'do body) nil))
+                              (defn rl-loop (n acc) (rl-when (> n 0) (rl-loop (- n 1) (+ acc 1))))
+                              (rl-loop 100000 0)))
+      nil)))
+
+(describe "math/pow"
+  ;; The product was linear in the exponent: `(math/pow 2 100000000)` built a hundred
+  ;; million growing bignums and died with an allocation failure. Squaring makes it
+  ;; 27 multiplications, and a size guard refuses what would not fit anyway.
+  (test "2^100000000 is the same number `bit/shift-left` builds"
+    (assert= (math/pow 2 100000000) (bit/shift-left 1 100000000)))
+  (test "squaring agrees with the definition on odd and even exponents, all signs"
+    (assert= (math/pow 3 1048576) (* (math/pow 3 524288) (math/pow 3 524288)))
+    (assert= (math/pow 7 13) 96889010407)
+    (assert= (math/pow -2 5) -32)
+    (assert= (math/pow -2 4) 16)
+    (assert= (math/pow 10 20) 100000000000000000000)
+    (assert= (math/pow 2 -3) 1/8)
+    (assert= (math/pow 2.0 10) 1024.0)
+    (assert= (math/pow 2.0 0) 1.0)
+    (assert= (math/pow 2.0 -1074) 5e-324)
+    (assert= (math/pow 1 (math/pow 10 30)) 1)
+    (assert= (math/pow 0 (math/pow 10 30)) 0)
+    (assert= (math/pow -1 (+ 1 (math/pow 10 30))) -1)
+    (assert= (math/pow (math/pow 2 2000) 3) (math/pow 2 6000)))
+  (test "a result past the shift cap is a catchable error, not an allocation failure"
+    (is (includes? (message (fn () (math/pow 2 100000000000))) "would exceed"))
+    (is (includes? (message (fn () (math/pow (math/pow 2 2000) 1000000))) "would exceed"))))
+
+(describe "math/sqrt of a bignum"
+  ;; The bignum read as `inf` through f64, so its root was `inf` — wrong for an input
+  ;; whose root is perfectly representable.
+  (test "10^400's root is 1e200, not inf"
+    (assert= (math/sqrt (math/pow 10 400)) 1e200)
+    (assert= (math/sqrt (+ 1 (math/pow 10 400))) 1e200))
+  (test "a bignum inside f64's range still takes the exact f64 path"
+    (assert= (math/sqrt (math/pow 2 64)) 4294967296.0))
+  (test "a negative bignum still raises"
+    (assert-error (math/sqrt (- (math/pow 10 400))))))
+
+(describe "repeat"
+  ;; The same ceiling a range is realised under: past it the list is one call eating the
+  ;; machine, ending in an abort.
+  (test "past the realise cap is a catchable error"
+    (is (includes? (message (fn () (repeat 100000000000 :x))) "too many")))
+  (test "ordinary counts are unchanged"
+    (assert= (repeat 3 :a) '(:a :a :a))
+    (assert= (repeat 0 :a) nil)))
+
+(describe "a pattern nested past the lowering cap"
+  ;; The pattern compiler's work before the 256-level expansion cap refused the result
+  ;; was quadratic in the depth: a 100 000-level pattern asked for 6 GB first. The
+  ;; depth is checked before any lowering, on every surface that lowers a pattern.
+  (test "match, fn, let and receive all refuse it up front"
+    (let (deep (nest-vec 100000))
+      (is (includes? (message (fn () (reflect/eval (list 'match [1] (list deep 1) '(_ 2)))))
+            "nested deeper"))
+      (is (includes? (message (fn () (reflect/eval (list (list 'fn (list deep) 1) 1))))
+            "nested deeper"))
+      (is (includes? (message (fn () (reflect/eval (list 'let (list deep 1) 1)))) "nested deeper"))
+      (is (includes? (message (fn () (reflect/eval (list 'receive (list deep 1) '(after 0 :t)))))
+            "nested deeper"))))
+  (test "a map pattern is walked through its values"
+    (is (includes? (message (fn ()
+                              (reflect/eval (list 'match [1] (list (nest-map 100000) 1) '(_ 2)))))
+          "nested deeper")))
+  (test "sixty-four levels still lower and match; sixty-five is refused by name"
+    (assert= (reflect/eval (list 'match [1] (list (nest-vec 64) 1) '(_ 2))) 2)
+    (is (includes? (message (fn () (reflect/eval (list 'match [1] (list (nest-vec 65) 1) '(_ 2)))))
+          "nested deeper than 64"))))
+
+(describe "diagnostics that named the wrong thing"
+  (test "sleep speaks for itself, not for the receive underneath it"
+    (is (string/starts-with? (message (fn () (sleep 0.5))) "sleep:"))
+    (is (string/starts-with? (message (fn () (sleep -1))) "sleep:"))
+    (is (string/starts-with? (message (fn () (sleep "soon"))) "sleep:")))
+  (test "a receive clause that is not a list is named as such (the Erlang :after spelling)"
+    (is (includes? (message (fn () (reflect/eval '(receive :after 0 :t))))
+          "each clause must be a (pattern body...) list"))
+    (is (includes? (message (fn () (reflect/eval '(receive 5))))
+          "each clause must be a (pattern body...) list")))
+  (test "a bignum where a machine int is wanted is not reported as \"expected int, got int\""
+    (let (m (message (fn () (string/substring "abc" 0 (math/pow 2 70)))))
+      (is (includes? m "64-bit range"))
+      (is (not (includes? m "got int")))))
+  (test "the depth and size caps read `max`, the English word, not `math/max`"
+    ;; The `max` -> `math/max` rename wave rewrote these user-facing strings; each is
+    ;; pinned whole, the way the reader's own cap message already was.
+    (assert= (message (fn () (reflect/eval (fold (range 0 1100) 1 (fn (acc i) (list '+ 1 acc))))))
+      "macro expansion nested too deeply (max 1024 levels)")
+    (assert= (message (fn () (reflect/eval (list 'quasiquote (nest-vec 1100)))))
+      "quasiquote template nested too deeply (max 1024 levels)")
+    (assert= (message (fn () (bit/shift-left 1 1000000000)))
+      "bit/shift-left: shift amount 1000000000 too large (max 134217728)")
+    (is (string/starts-with? (message (fn () (math/->fixed 1.5 99999)))
+          "->fixed: decimal places 99999 too large (max 1000)"))))
+
+(describe "a value nested past 256 levels crosses a send and a table"
+  ;; The serialiser capped at 256 levels — an abort-safe bound that made a persistent
+  ;; stack built as `[x acc]` unsendable at 300 elements and broke `seq/frequencies`
+  ;; over deep keys (its fold is rewritten to build in a table). Every walker over a
+  ;; message grows its own stack now, and the cap is a million-level sanity bound.
+  (test "a 100 000-level value survives a send to another process"
+    (let (me (self) deep (nest-vec 100000))
+      (spawn (send me (nest-vec 100000)))
+      (receive (got (assert= got deep)) (after 10000 (is false)))))
+  (test "a table stores and compares a deep key and a deep value"
+    (let (t (table/new) deep (nest-vec 100000))
+      (table/put t deep :v)
+      (table/put t :k deep)
+      (assert= (table/get t deep) :v)
+      (assert= (table/get t :k) deep)))
+  (test "seq/frequencies tallies deep keys structurally"
+    (let (a (nest-vec 300) b (nest-vec 299))
+      (assert= (seq/frequencies [a a b]) {a 2 b 1})
+      (assert= (count (seq/frequencies [(nest-vec 100000) (nest-vec 100000)])) 1))))
+
+(describe "a map entry must be a [key value] pair"
+  (test "a one- or three-item entry is refused instead of read as [k nil] or truncated"
+    (assert-error (into {} [[1]]))
+    (assert-error (into {} [[1 2 3]]))
+    (assert-error (into {} '((1))))
+    (assert= (into {} [[1 2]]) {1 2})
+    (assert= (into {} '((1 2))) {1 2})
+    (assert= (map/zipmap [1 2] [3 4]) {1 3 2 4})))
+
+(describe "a sig spec that is not a type"
+  (test "is refused at the declaration, not registered silently"
+    (is (includes? (message (fn () (reflect/eval '(sig rl-sig-a 5)))) "expected a type like"))
+    (is (includes? (message (fn () (reflect/eval '(sig rl-sig-b "int")))) "expected a type like"))
+    (is (includes? (message (fn () (reflect/eval '(sig rl-sig-c [int])))) "expected a type like")))
+  (test "a list type, a type name and a property keyword are still accepted"
+    (assert= (reflect/eval '(do (defn rl-sig-d (x) x) (sig rl-sig-d (int -> int)) (rl-sig-d 1))) 1)
+    (assert= (reflect/eval '(do (def rl-sig-e 1) (sig rl-sig-e int) rl-sig-e)) 1)
+    (assert= (reflect/eval '(do (defn rl-sig-f (x) x) (sig rl-sig-f :pure) (rl-sig-f 1))) 1)))
+
+(describe "string/format"
+  (test "%d takes an integer; anything else is named, with its column"
+    (assert= (message (fn () (string/format "%d" 1.5)))
+      "format: %d expects an integer, got 1.5 at column 1")
+    (assert= (message (fn () (string/format "%5d" "x")))
+      "format: %d expects an integer, got \"x\" at column 2")
+    (assert= (string/format "%d|%5d|%-5d|" 7 7 7) "7|    7|7    |"))
+  (test "a width past a million is refused by name, not by the padding's mechanism"
+    (assert= (message (fn () (string/format "%99999999999s" "x")))
+      "format: width 99999999999 too large (max 1000000)")
+    (assert= (string/format "%12s|" "x") "           x|")))
+
+(describe "errors that named a layer the caller never wrote"
+  (test "json/decode refuses a number that only overflows to an infinity"
+    (is (includes? (message (fn () (json/decode "1e999"))) "number out of range"))
+    (is (includes? (message (fn () (json/decode "[-1e999]"))) "number out of range"))
+    (assert= (json/decode "1e300") 1e300))
+  (test "math/mod names mod, not the rem underneath it"
+    (check-allow :type-mismatch
+      ;; Under `nest test` the `sig` contract fires first, with its own message; either
+      ;; way the error names `mod` and never the `rem` underneath.
+      (let (m (message (fn () (math/mod 5.5 2))))
+        (is (includes? m "mod"))
+        (is (not (includes? m "rem:")))))
+    (assert= (math/mod -7 3) 2))
+  (test "http/request names the URL problem, not the socket it never opened"
+    (is (includes? (message (fn () (http/fetch ""))) "expected an absolute http or https URL"))
+    (is (includes? (message (fn () (http/fetch "/relative")))
+          "expected an absolute http or https URL")))
+  (test "count and seq name themselves and the scalar, not the loop's empty?"
+    (check-allow :type-mismatch
+      (assert= (message (fn () (count identity)))
+        "count: expected a collection, got :fn (#<fn identity>)")
+      (assert= (message (fn () (count :a))) "count: expected a collection, got :keyword (:a)")
+      (assert= (message (fn () (map 5 inc))) "seq: expected a collection, got :int (5)")
+      (assert= (message (fn () (fold identity 0 +)))
+        "seq: expected a collection, got :fn (#<fn identity>)"))
+    ;; what passes through still passes through
+    (assert= (count #{1 2}) 2)
+    (assert= (count "abc") 3)
+    (assert= (seq #{1}) #{1})
+    (assert= (seq "ab") "ab")))
+
+(describe "a pattern too wide to lower"
+  ;; Lowering nests one binding per element, so a wide pattern hits the 256-level
+  ;; expansion cap as surely as a deep one (a vector at 126 elements, a map at 84).
+  (test "is refused by the same pre-check, under every shape's real limit"
+    (let (wide (fn (n) (vec (map (range 0 n) (fn (i) (symbol (str "p" i)))))))
+      (assert= (reflect/eval (list 'match (vec (range 0 80)) (list (wide 80) 1) '(_ 2))) 1)
+      (is (includes? (message (fn ()
+                                (reflect/eval (list 'match
+                                                (vec (range 0 81))
+                                                (list (wide 81) 1)
+                                                '(_ 2)))))
+            "wider than 80")))))
+
+(describe "the checker's comparison narrowing at the ends of i64"
+  ;; `(<= x 9223372036854775807)` made the narrowing compute MAX + 1 — a debug-build
+  ;; panic inside `nest check`, caught by its catch_unwind and reported as a crash.
+  (test "a comparison against i64::MAX or MIN is checked, not panicked on"
+    (let (src "(defn f1 (x) (if (<= x 9223372036854775807) :a :b)) (defn f2 (x) (if (>= x -9223372036854775808) :a :b)) (defn f3 (i xs) (if (< (+ i 9223372036854775807) (count xs)) (nth xs i) nil))")
+      (assert= (count (reflect/check-string-structured src)) 0))))
+
+(describe "a dispatch with hundreds of arms"
+  ;; `case`/`cond`/`match`/`receive` lower to ONE nested level per arm, and the expansion
+  ;; cap was 256, so a flat 300-arm keyword table was refused as "nested too deeply". The
+  ;; cap is 1024 now, and the walkers that recurse per level (the expansion step,
+  ;; `compile_node`, `emit_node`) grow their native stack instead of trusting it.
+  (test "900 arms of case, match and cond lower and dispatch"
+    (assert= (reflect/eval (cons 'case
+                             (cons 899
+                               (append (mapcat (range 0 900) (fn (i) (list i (- i)))) (list :none)))))
+      -899)
+    (assert= (reflect/eval (cons 'match
+                             (cons 899
+                               (append (map (range 0 900) (fn (i) (list i (- i))))
+                                 (list '(_ :none))))))
+      -899)
+    (assert= (reflect/eval (list 'let
+                             '(x 899)
+                             (cons 'cond
+                               (append (mapcat (range 0 900) (fn (i) (list (list '= 'x i) i)))
+                                 (list 'else :none)))))
+      899))
+  (test "a 500-clause receive selects the matching message"
+    (send (self) [:t499 :hit])
+    (assert= (reflect/eval (cons 'receive
+                             (append (map (range 0 500)
+                                       (fn (i) (list [(keyword (str "t" i)) 'x] 'x)))
+                               (list '(after 0 :none)))))
+      :hit))
+  (test "a 900-level if chain and let chain evaluate"
+    (assert= (reflect/eval (fold (range 0 900) 1 (fn (acc i) (list 'if true acc 0)))) 1)
+    (assert= (reflect/eval (fold (range 0 900) 1 (fn (acc i) (list 'let (list 'x acc) 'x)))) 1)))
+
+(describe "the reader's first line and its odd bytes"
+  (test "a shebang line is skipped, and positions after it stay right"
+    (assert= (reflect/read-all "#!/usr/bin/env brood\n(+ 1 2)") '((+ 1 2)))
+    (is (includes? (message (fn () (reflect/read-all "#!/usr/bin/env brood\n(+ 1"))) "unclosed")))
+  (test "a byte-order mark is trivia, not a symbol"
+    (assert= (reflect/read-all "\u{feff}(+ 1 2)") '((+ 1 2)))
+    (assert= (reflect/read-string "(a\u{feff}b)") '(a b)))
+  (test "a control character inside a symbol is refused by name"
+    (is (includes? (message (fn () (reflect/read-string "a\u{0}b"))) "control character U+0000"))
+    (is (includes? (message (fn () (reflect/read-all "(+ 1 2)\u{0}"))) "control character U+0000")))
+  (test "a malformed escape is diagnosed by which escape it was"
+    (is (string/starts-with? (message (fn () (reflect/read-string "\"\\u{D800}\"")))
+          "malformed \\u escape"))
+    (is (string/starts-with? (message (fn () (reflect/read-string "\"\\u00e9\"")))
+          "malformed \\u escape"))
+    (is (string/starts-with? (message (fn () (reflect/read-string "\"\\xzz\"")))
+          "malformed \\x escape"))
+    (is (includes? (message (fn () (reflect/read-string "\"\\d\""))) "unknown letter escape"))
+    (assert= (reflect/read-string "\"\\u{e9}\"") "é")))
+
+(describe "string/repeat"
+  ;; `(apply str (map (range n) …))` built an n-element list AND an n-argument call:
+  ;; fifty million characters asked for sixteen gigabytes and aborted.
+  (test "fifty million characters build in one pass"
+    (assert= (string/length (string/repeat "x" 50000000)) 50000000)
+    (assert= (string/repeat "ab" 3) "ababab")
+    (assert= (string/repeat "ab" 0) "")
+    (assert= (string/repeat "" 1000000000) ""))
+  (test "a gibibyte is refused by name, and padding inherits the bound"
+    (is (includes? (message (fn () (string/repeat "ab" 1000000000))) "too large"))
+    (is (includes? (message (fn () (string/pad-left "x" 100000000000))) "too large"))))
+
+(describe "file/walk-files and a symlink to a directory"
+  (test "lists the link and does not enter it (a loop used to be walked forty levels deep)"
+    (os/cmd "sh"
+      ["-c"
+        "rm -rf /tmp/brood-rl-cyc && mkdir -p /tmp/brood-rl-cyc/a && ln -s .. /tmp/brood-rl-cyc/a/up && touch /tmp/brood-rl-cyc/a/f"])
+    (assert= (sort (file/walk-files "/tmp/brood-rl-cyc"))
+      '("/tmp/brood-rl-cyc/a/f" "/tmp/brood-rl-cyc/a/up"))
+    (os/cmd "sh" ["-c" "rm -rf /tmp/brood-rl-cyc"])))
+
+(describe "abilities and imports refuse what they used to accept silently"
+  (test "a defability op spec with a list where the vector belongs, or a duplicated op"
+    (is (includes? (message (fn () (reflect/eval '(defability RlM (rlm (self))))))
+          "needs a [args…] VECTOR"))
+    (is (includes? (message (fn () (reflect/eval '(defability RlD (rld [self]) (rld [self])))))
+          "declared twice"))
+    (assert= (reflect/eval '(do
+                              (defability RlOk
+                                "doc"
+                                (rlok [self] :-> int)
+                                (rlprov [self] :-> int (+ 1 (rlok self))))
+                              :ok))
+      :ok)
+    (assert= (reflect/eval '(do
+                              (defability RlDr :derive-record (fn (fields) nil) (rldr [self]))
+                              :ok))
+      :ok))
+  (test "an impl method that is not an op of a known ability; late binding still allowed"
+    (reflect/eval '(do (defability RlI (rli [self])) (defrecord rlir (a))))
+    (is (includes? (message (fn () (reflect/eval '(impl RlI rlir (rlj [x] 1)))))
+          "is not an op of RlI"))
+    (assert= (reflect/eval '(do (impl RlI rlir (rli [x] :fine)) (rli (rlir 1)))) :fine)
+    (assert= (reflect/eval '(do
+                              (defrecord rllr (a))
+                              (impl RlLate rllr (rll [x] :late))
+                              (defability RlLate (rll [self]))
+                              (rll (rllr 1))))
+      :late))
+  (test "(:use m :only [name]) names a name the loaded module does not define"
+    (is (includes? (message (fn ()
+                              (reflect/eval-string "(defmodule rl-only-a (:use math :only [rl-nope]))")))
+          "defines no `rl-nope`"))
+    (assert= (reflect/eval-string "(defmodule rl-only-b (:use math :only [abs])) (abs -3)") 3)
+    (assert= (reflect/eval-string "(defmodule rl-only-c (:use format :only [*format-headers-extra*]))")
+      nil)))
+
+(describe "quasiquote through reflect/eval inside a module namespace"
+  ;; This test file IS a module, so `reflect/eval` here runs under its namespace. The
+  ;; eval path's assume-own rule qualified every unbound bare symbol — `unquote` and an
+  ;; auto-gensym included — so a template answered `[1 (mod/unquote x)]` and a `defmacro`
+  ;; through eval could not use `~`.
+  (test "unquote, splice and auto-gensym keep their meaning"
+    (assert= (reflect/eval (reflect/read-string "`[1 ~(+ 1 1) ~@[3 4]]")) [1 2 3 4])
+    (assert= (reflect/eval '(do (defmacro rl-qm (x) `(+ ~x 1)) (rl-qm 1))) 2)
+    (assert= (reflect/eval '(do (defmacro rl-qh (x) `(let (g# ~x) g#)) (rl-qh 7))) 7)))
+
+(describe "node/connect"
+  (test "names a non-string argument before anything else"
+    (check-allow :type-mismatch
+      (is (string/starts-with? (message (fn () (node/connect nil)))
+            "node/connect: expected a node name string")))))
+
+(describe "demonitor and a down in flight"
+  ;; The death path takes a target's watchers under the monitors lock, releases it, then
+  ;; pushes each `[:down …]`. A `demonitor` plus a zero-timeout flush in that window found
+  ;; nothing, and the down landed after — 31 leaks in 80 000 rounds on a loaded box, red in
+  ;; two full suites of four. `demonitor` now waits out a down its death has taken, so
+  ;; after it returns the down is queued (the flush finds it) or will never come.
+  (test "after demonitor and a flush, no down for that ref lands"
+    (let (me (self)
+          round (fn (n leaks)
+                  (if (= n 0)
+                    leaks
+                    (let (t (spawn (receive ([:next from] (send from [:val 1]))))
+                          m (monitor t))
+                      (send t [:next me])
+                      (receive ([:val _] nil) ([:down ^m _ _] nil))
+                      (demonitor m)
+                      (receive ([:down ^m _ _] nil) (after 0 nil))
+                      (sleep 0)
+                      (round (- n 1) (+ leaks (receive ([:down ^m _ _] 1) (after 0 0)))))))
+          worker (fn (parent n) (send parent [:leaks (round n 0)])))
+      ;; Full scale on purpose: 80 000 rounds take a third of a second, and at a sixteenth of
+      ;; that the one-in-three-thousand race went unseen with the fix removed.
+      (map (range 0 40) (fn (i) (spawn (worker me 2000))))
+      (assert= (fold (range 0 40) 0 (fn (acc i) (receive ([:leaks k] (+ acc k))))) 0))))

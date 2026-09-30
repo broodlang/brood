@@ -62,7 +62,7 @@ pub use message::{from_message, to_message, ClosureArmMsg, ClosureMsg, Message};
 pub(crate) use scheduler::{current_mailbox_overflow_pending, take_current_mailbox_overflow};
 // The wire codec (`dist::wire`) defines its decode-depth cap in terms of this so
 // the two can't diverge; crate-internal, hence `pub(crate)`.
-pub(crate) use message::MAX_MESSAGE_DEPTH;
+pub(crate) use message::{grow, MAX_MESSAGE_DEPTH};
 // The reusable blocking-IO → mailbox seam (ADR-059): any subsystem that must
 // block runs it on a non-worker thread and delivers to a process mailbox.
 pub(crate) use io_source::{sink_pair, spawn_io_source, MailboxSink};

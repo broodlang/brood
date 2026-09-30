@@ -151,7 +151,7 @@ impl Drop for GcBlockGuard {
 /// nested `eval` frame is several KiB, and non-tail recursion stacks ~2 of them
 /// per level, so a few hundred levels of legitimate non-tail recursion already
 /// costs low-double-digit MiB of stack. We want the [`stack_budget`] guard to
-/// allow building structures at least as deep as `MAX_MESSAGE_DEPTH` (256) with
+/// allow building structures a few hundred levels deep (the message serialiser once capped at 256; it grows its own stack now) with
 /// headroom, and still fire a clean [`STACK_DEPTH_EXCEEDED`] error well before
 /// the real guard page (with room for the error-construction frames). The pages
 /// are mmap'd lazily, so unused tail pages stay uncommitted — the higher ceiling

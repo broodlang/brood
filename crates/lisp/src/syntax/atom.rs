@@ -313,12 +313,16 @@ pub fn radix_invalid_hint(token: &str) -> &'static str {
 /// which both parsers handle separately because the CST keeps the comment as
 /// its own node.)
 pub fn is_trivia_ws(c: char) -> bool {
-    c.is_whitespace() || c == ','
+    // U+FEFF is the byte-order mark an editor may write at the top of a file (and a
+    // zero-width no-break space anywhere else): it used to read as a SYMBOL, so a file
+    // saved with one began with an unbound name (2026-09-30).
+    c.is_whitespace() || c == ',' || c == '\u{feff}'
 }
 
 /// Characters that terminate an atom (and so can't appear unescaped inside one).
 pub fn is_delimiter(c: char) -> bool {
     c.is_whitespace()
+        || c == '\u{feff}'
         || matches!(
             c,
             '(' | ')' | '[' | ']' | '{' | '}' | '"' | ';' | '\'' | '`' | '~' | ','

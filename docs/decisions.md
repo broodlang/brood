@@ -25358,3 +25358,92 @@ text on first, so an image left over from an earlier run cannot pass for this on
 Rust unit tests pin the encode, the downscale and the guard. Sabotaged once each: dropping
 the 512 MB bound reds the guard test, and a `set_image` that does nothing reds the round
 trip.
+
+## ADR-393 — The float→int rounders promote past 2^63, and single-call growth is capped where a range's is
+
+**Status:** implemented (2026-09-30). Extends
+[ADR-196](#adr-196--exact-integer-division-ratios) (the exact tower) and the range realise
+cap.
+
+**Context.** Every arithmetic operation on integers promotes to a bignum on overflow, and
+`floor` — the one Float→Int primitive, which `ceil`/`round`/`quot` are Brood over — was the
+one place the tower had a cliff: a finite float past 2^63 raised "out of range for i64"
+(after an earlier fix stopped the `as i64` cast from saturating silently). The 2026-09-30
+robustness review found the neighbouring cliffs: `math/pow` and `repeat` could each take the
+runtime down with an allocation failure from one call, where a realised range has been
+refused past `MAX_REALISED_RANGE` as a catchable error.
+
+**Decision.**
+
+- `math/floor` of a finite float whose floor does not fit an `i64` **promotes** to a bignum —
+  the conversion is exact, since every double of that magnitude is an integer. `ceil` and
+  `round` inherit it. Only an infinity or NaN has no integer value and raises, and the
+  rounders keep checking that themselves so the error names the call the user wrote.
+- `math/pow` refuses, before multiplying, a result estimated past **2^27 bits** —
+  `bit/shift-left`'s cap, so `(math/pow 2 n)` and `(bit/shift-left 1 n)` agree on what is
+  too big. The estimate is `exp × log2 |base|`, with 1024 bits as the floor for a base past
+  f64's range; it is a bound on the pathological, not an exact accounting.
+- `repeat` refuses past **2^26 elements**, the range cap, for the same reason a range does:
+  past it the list is one call eating the machine, and the allocation failure it ends in is
+  an abort nothing can catch.
+
+**Consequences.** `(math/floor 1e300)` is a 300-digit integer, not an error, and a program
+that rounded a large float now gets the number `+`/`*` would have given it. The two caps are
+catchable errors naming the limit. `BROOD_MEM_LIMIT` remains the answer to the general
+question — a program that builds a huge value in many small steps — which no per-call cap
+can ask.
+
+## ADR-394 — A message is nested as deep as the sender built it: every walker grows its stack
+
+**Status:** implemented (2026-09-30). Supersedes the 256-level `MAX_MESSAGE_DEPTH` bound
+(now a million-level sanity bound). See KI-204.
+
+**Context.** Values have no nesting limit in Brood: the reader caps SOURCE at 256 levels,
+but a `fold` builds a 100 000-level `[x acc]` stack in a line, and `def`, `=`, hashing and
+printing all handle it (their walkers grow the native stack, or iterate). The one place
+that did not was the `Message` form a value takes to cross a heap — into a mailbox, a
+table, or the wire — whose walkers recursed per level and whose derived `Clone`/`Drop`
+did too. So `send` refused past 256 levels, and so did `table/put`, and so did
+`seq/frequencies` over deep keys, because the linear-map rewrite (ADR-360 §6) runs that
+fold in a table: the code the user reads worked and the optimised path raised.
+
+**Decision.**
+
+- `process::grow` (`stacker::maybe_grow`, 64 KiB red zone, 1 MiB segments) wraps every
+  container step of `to_message_rec`, `from_message`, `copy_cross_heap_rec`,
+  `message_fits`, `encode_msg` and `decode_msg_at` — the walkers with a depth check every
+  32 levels, the others at each container node. A leaf pays nothing.
+- `Message` gets a hand-written `Clone` (containers grow) and an iterative `Drop` (the
+  children are moved into a worklist before any is freed). A type with a `Drop` impl
+  cannot be destructured by value; nothing outside tests did, and the tests match by
+  reference now.
+- `MAX_MESSAGE_DEPTH` is `1 << 20`: not a stack limit any more, a bound on a runaway
+  structure. The wire decoder's cap stays defined in terms of it.
+
+**Consequences.** A deep value crosses a send, a table and the wire like any other; the
+dist threads keep their 2 MiB stacks (the codec grows its own). The cost is one
+remaining-stack read per container node on the message paths — the `pingpong`/`ring`
+rows are keyword-led tuples, a node or two each. What stays refused is a cyclic local
+closure and the kinds a message never carried (a rope, a builtin); what stays capped is
+the wire's own frame size.
+
+## ADR-395 — The expansion ceiling is 1024 levels, and the compile walkers grow their stack
+
+**Status:** implemented (2026-09-30). See KI-212.
+
+**Context.** `case`, `cond`, `match` and `receive` lower to one nested level per arm, and
+the expansion walk refused a form nested past 256 levels — a stack-safety bound for three
+recursive walkers (the expansion step, `compile_node`, `emit_node`). A flat 300-arm
+keyword table or opcode switch was therefore "nested too deeply", with a message that
+named the code the author never wrote. The reader's own 256-level cap on SOURCE nesting
+is a separate constant and is unchanged.
+
+**Decision.** `macros::MAX_DEPTH` and `MAX_EXPAND_ROUNDS` are 1024. The expansion step
+grows its native stack every 32 levels; `compile_node` grows at each compound form and
+`emit_node` at each node — compile-time only, since a compiled arm is cached and shared.
+The cap is a bound on runaway expansion, not a stack limit.
+
+**Consequences.** A dispatch may have ~900 arms; `try`/`fn` chains, which lower to more
+than one level per level, reach the cap sooner. A form past the cap still gets the cap's
+message; the pattern pre-check (64 levels, 80 elements) stays where the measured limits
+put it.

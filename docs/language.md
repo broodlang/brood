@@ -2614,7 +2614,21 @@ In the `math` module: `math/mod`  `math/rem`  `math/quot`  `math/floor`  `math/m
   including subnormals and ±0 — not the Newton's-method approximation it once was.
   All of these accept the whole numeric tower: an int, float, bignum, decimal or
   ratio argument coerces, and `floor` on a **ratio** is computed exactly rather
-  than through f64 (so `(math/floor (/ a b))` is right past 2^53).
+  than through f64 (so `(math/floor (/ a b))` is right past 2^53). A **bignum** past
+  f64's range still roots correctly — `(math/sqrt (math/pow 10 400))` is `1e200`, not
+  `inf` (the root is taken after an even power of two is factored out). `floor`,
+  `ceil` and `round` of a finite float past 2^63 **promote to a bignum**, as `+`/`*`
+  promote on overflow (ADR-393); only an infinity or NaN has no integer value and
+  raises. `pow` is exponentiation by squaring (O(log exp) multiplications), and a
+  result that would exceed 2^27 bits — `bit/shift-left`'s own cap — is refused as a
+  catchable error rather than built: `(math/pow 2 100000000000)` used to run out of
+  memory. The same ceiling bounds `(repeat n x)` at 2^26 elements, the limit a
+  range is realised under. `string/repeat` builds by doubling and refuses a result
+  past a gibibyte.
+- A source file may begin with a `#!` shebang line (skipped) or a byte-order mark
+  (trivia); a control character inside a symbol is a parse error naming it. A
+  `case`/`cond`/`match`/`receive` may have hundreds of arms: each lowers to one nested
+  level per arm and the expansion ceiling is 1024 levels (ADR-395).
 - `min`/`max` are variadic and require at least one argument. `even?`/`odd?`
   classify integers.
 - Only `%add`/`%sub`/`%mul`/`%div`/`%lt`/`%eq`, `rem`, and `floor` are Rust
@@ -3088,8 +3102,8 @@ exception and *raises*: a parse failing is data, a constructor failing is a bug.
 
 **`string/->number` decides int-vs-float from the digits**, so `"3"` gives you an `int`
 even when you wanted a float. Force it with `->float`; go the other way with `math/floor`
-or `math/round`, which both return an `int` (there is no `trunc` — `math/floor` of `-42.9`
-is `-43`):
+or `math/round`, which both return an `int` — a bignum past 2^63 (there is no `trunc` —
+`math/floor` of `-42.9` is `-43`):
 
 ```clojure
 (->float (string/->number "3"))          ;=> 3.0

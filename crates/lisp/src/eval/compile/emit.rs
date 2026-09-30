@@ -13,6 +13,12 @@ pub(crate) fn compile_chunk(body: &Node) -> Option<Chunk> {
 /// Recursively emit `node` into `code`, leaving its value on the operand stack.
 /// Returns `None` (aborting the whole chunk) on any unsupported node.
 pub(crate) fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
+    // Recurses once per nesting level of the Node tree (see `compile_node`): grow the
+    // native stack when it is near its end. Compile-time only.
+    stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || emit_node_inner(node, code))
+}
+
+fn emit_node_inner(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
     // Line coverage (ADR-148 tier 2): when armed, prefix each positioned node with a
     // `RecordLine`. Compile-time rather than a runtime check per instruction, so a
     // normal run's bytecode is unchanged — nothing to pay for when coverage is off.

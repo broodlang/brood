@@ -118,9 +118,18 @@ impl<'a> Scanner<'a> {
             }
             i += 1;
         }
+        // `#!…` on the first line is a shebang, not a form (no form begins with `#!`): skip
+        // it, so a script marked executable runs as `#!/usr/bin/env brood` — it was a
+        // parse error at 1:1 (2026-09-30). The line-start table above already counts it,
+        // so positions stay right.
+        let pos = if src.starts_with("#!") {
+            src.find('\n').map(|i| i + 1).unwrap_or(src.len())
+        } else {
+            0
+        };
         Scanner {
             src,
-            pos: 0,
+            pos,
             line_starts,
             ascii_only: src.is_ascii(),
             // line 0 never occurs (lines are 1-based), so this cannot be mistaken for a hit.
@@ -159,6 +168,11 @@ impl<'a> Scanner<'a> {
 
     /// The next-but-one char (i.e. the second char from `pos`). Used by
     /// [`Scanner::is_dot_separator`]; nothing else has a 2-char lookahead.
+    /// The char at byte offset `idx`, for a diagnostic that wants to name what it found.
+    pub fn char_at(&self, idx: usize) -> Option<char> {
+        self.src.get(idx..).and_then(|rest| rest.chars().next())
+    }
+
     pub fn peek_after(&self) -> Option<char> {
         let mut it = self.src[self.pos..].chars();
         it.next()?;

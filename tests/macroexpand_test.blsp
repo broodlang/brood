@@ -1,7 +1,7 @@
 ;;; `macroexpand` — the prelude fixpoint driver over `macroexpand-1`.
 ;;;
 ;;; The fixpoint loop is bounded (kernel audit 2026-06-03): a macro whose
-;;; expansion grows forever would otherwise spin the expander; 256 rounds
+;;; expansion grows forever would otherwise spin the expander; 1024 rounds
 ;;; matches the kernel expander's own cap. A macro that expands to a
 ;;; *structurally identical* form is a fixpoint and terminates immediately.
 

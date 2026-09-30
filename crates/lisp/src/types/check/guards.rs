@@ -1415,24 +1415,24 @@ fn comparison_facts(heap: &Heap, test: Value, ctx: &Ctx) -> Option<CmpFacts> {
     if let Some(hi) = rr.hi {
         facts
             .then_narrow
-            .extend(side_narrowing(&l, Range::at_most(hi - step)));
+            .extend(side_narrowing(&l, Range::at_most(hi.saturating_sub(step))));
     }
     if let Some(lo) = rl.lo {
         facts
             .then_narrow
-            .extend(side_narrowing(&r, Range::at_least(lo + step)));
+            .extend(side_narrowing(&r, Range::at_least(lo.saturating_add(step))));
     }
     // else: L ≥ R (or >)
     let back = 1 - step;
     if let Some(lo) = rr.lo {
         facts
             .else_narrow
-            .extend(side_narrowing(&l, Range::at_least(lo + back)));
+            .extend(side_narrowing(&l, Range::at_least(lo.saturating_add(back))));
     }
     if let Some(hi) = rl.hi {
         facts
             .else_narrow
-            .extend(side_narrowing(&r, Range::at_most(hi - back)));
+            .extend(side_narrowing(&r, Range::at_most(hi.saturating_sub(back))));
     }
     // The relational fact: `i + k < (count xs)` — a bound of an index EXPRESSION by a
     // count. `k = 0` is the plain `i < (count xs)` this started as (ADR-350).
@@ -1450,7 +1450,7 @@ fn comparison_facts(heap: &Heap, test: Value, ctx: &Ctx) -> Option<CmpFacts> {
         // `(and (<= (+ i 10) n) … (nth s (+ i 4)) …)` read an element: 4 ≤ 9. At `k = 0`
         // it says nothing — `i ≤ n` is not `i < n` — so nothing is recorded.
         if k >= 1 {
-            facts.then_index.push((i, xs, k - 1));
+            facts.then_index.push((i, xs, k.saturating_sub(1)));
         }
     }
     if !strict {

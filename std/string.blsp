@@ -419,10 +419,22 @@ the start of every line. Emacs's adaptive fill, for the common cases.
   "The string `s` concatenated `n` times (the empty string if `n` <= 0).
 
     (string/repeat \"ab\" 3)   → \"ababab\""
-  ;; Build the list of copies with the generic `range`/`map` (NOT the generic
-  ;; `repeat`, which this name would shadow inside the `string` namespace), then
-  ;; concatenate in one `apply str` pass.
-  (apply str (map (range (math/max 0 n)) (fn (_) s))))
+  ;; Doubling — O(log n) concatenations of O(n) total work. The `(apply str (map (range
+  ;; n) …))` this replaced built an n-element list AND an n-argument call: fifty million
+  ;; characters asked for 16 GB and died with an allocation failure (2026-09-30).
+  ;; A gibibyte is the ceiling: past it the answer is a single allocation that fails as
+  ;; an abort, not an error, and a width that large is a typo or an attack.
+  (when (> (* (string/length s) (math/max 0 n)) 1073741824)
+    (error "string/repeat: " (* (string/length s) n) " characters is too large (max 1073741824)"))
+  (%repeat-doubling "" s n))
+(defn- %repeat-doubling (acc piece k)
+  (cond
+    (<= k 0) acc
+    (= k 1) (str acc piece)
+    else
+      (%repeat-doubling (if (= (math/rem k 2) 1) (str acc piece) acc)
+        (str piece piece)
+        (math/quot k 2))))
 (sig repeat (string int -> string))
 
 ;; ---- interpolation and printf ------------------------------------------------
@@ -528,7 +540,7 @@ things in the same image is a name worth spending to fix.
     (= (string/char-at template i) "s")
       (format-loop template (inc i) n (rest args) (str acc (str (first args))))
     (= (string/char-at template i) "d")
-      (format-loop template (inc i) n (rest args) (str acc (str (first args))))
+      (format-loop template (inc i) n (rest args) (str acc (format-int (first args) i)))
     (= (string/char-at template i) "x")
       (format-loop template (inc i) n (rest args) (str acc (format-hex (first args) false)))
     (= (string/char-at template i) "X")
@@ -572,7 +584,7 @@ wrong), the way `%d` passes a float through."
     else
       (let (c (string/char-at template i)
             body (cond
-                   (= c "d") (str (first args))
+                   (= c "d") (format-int (first args) i)
                    (= c "s") (str (first args))
                    (= c "f") (math/->fixed (first args) 6)
                    (= c "x") (format-hex (first args) false)
@@ -597,7 +609,20 @@ wrong), the way `%d` passes a float through."
     else
       (error (str "format: a precision takes f, got '" (string/char-at template i) "' at column " i))))
 
+;; `%d` takes an integer. It used to render anything with `str`, so `(string/format "%d"
+;; 1.5)` was "1.5" and a wrong argument went unreported (2026-09-30).
+(defn- format-int (v i)
+  (if (int? v)
+    (str v)
+    (error (str "format: %d expects an integer, got " (pr-str v) " at column " i))))
+
+;; A width past this is a typo or an attack, and the padding it asks for is built
+;; through a range, whose own refusal named a mechanism the caller never saw.
+(def- format-max-width 1000000)
+
 (defn- format-pad (body w zero? left?)
+  (when (> w format-max-width)
+    (error "format: width " w " too large (max " format-max-width ")"))
   (cond
     left? (string/pad-right body w)
     zero? (string/pad-left body w "0")

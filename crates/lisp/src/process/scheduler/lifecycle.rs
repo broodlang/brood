@@ -110,8 +110,27 @@ fn retire_pid_tail(pid: u64, reason: Message) {
     // watcher woken by the down could read a target's `:monitored-by` still
     // counting the dead process's monitors — 1–5 reads in 8000 on a loaded box.
     monitor::sweep_dead_watcher(pid);
-    let watchers = crate::core::sync::lock(&monitor::MONITORS).take_target(pid);
-    for w in watchers {
+    // The LOCAL downs are pushed while `MONITORS` is still held, so `take_target` and
+    // the pushes are one step to a `demonitor` on another thread: with the lock released
+    // between them, a `demonitor` + `(receive ([:down ^m …]) (after 0))` in that gap
+    // found nothing to remove and nothing queued, and the down landed after — 31 leaks
+    // in 80 000 rounds (KI-213). Safe to hold here: `deliver` takes only the target's
+    // mailbox lock and a scheduler queue, and nothing takes those and then `MONITORS`.
+    // A remote down goes over the wire, after the lock is released.
+    let remote = {
+        let mut mons = crate::core::sync::lock(&monitor::MONITORS);
+        let mut remote = Vec::new();
+        for w in mons.take_target(pid) {
+            match w {
+                monitor::Watcher::Local { .. } => {
+                    monitor::fire_down_held(&mons, w, pid, reason.clone())
+                }
+                monitor::Watcher::Remote { .. } => remote.push(w),
+            }
+        }
+        remote
+    };
+    for w in remote {
         monitor::fire_down(w, pid, reason.clone());
     }
     // Links (ADR-067), after monitors and with no table lock held: notify every

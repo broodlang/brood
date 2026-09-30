@@ -309,7 +309,10 @@ front of an accumulated remainder wants; a vector last is converted."
     ;; identity; otherwise keep the old error, which is the honest one (ADR-253).
     (or (pair? coll) (nil? coll)) (%count-acc coll 0)
     (%impl-exact? '[Seqable ->seq] (%identity-of coll)) (count (->seq coll))
-    else (%count-acc coll 0)))
+    ;; The error names `count` and the value; it used to surface as
+    ;; "empty?: expected collection" from the loop below (2026-09-30).
+    (or (pair? coll) (nil? coll)) (%count-acc coll 0)
+    else (error (str "count: expected a collection, got " (type-of coll) " (" (pr-str coll) ")"))))
 
 (defn- %nth-list (coll i d)
   (cond (empty? coll) d (= i 0) (first coll) else (%nth-list (rest coll) (- i 1) d)))

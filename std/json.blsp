@@ -158,7 +158,12 @@ leading zeros)."
       ;; `strict-number?` is the whole grammar, so the conversion cannot fail — the
       ;; `failure?` arm exists to say so where the type is read, not to run.
       (let (n (string/->number (json-slice s i end)))
-        (if (failure? n) (error "json: invalid number at index " i) [n end]))
+        (cond
+          (failure? n) (error "json: invalid number at index " i)
+          ;; `1e999` reads as `inf`, which JSON cannot represent and `encode` refuses —
+          ;; a decode that answered it silently could not round-trip (2026-09-30).
+          (and (float? n) (math/infinite? n)) (error "json: number out of range at index " i)
+          else [n end]))
       (error "json: invalid number '" (json-slice s i end) "' at index " i))))
 
 ;; -- strings --

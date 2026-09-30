@@ -211,6 +211,14 @@ fn eval_tail_loop(
         }
     }
 
+    // Consecutive LAZY macro expansions (a macro defined in the same top-level form
+    // as its use, so the compile pass never saw it). Each one re-enters the loop
+    // with the expansion as `expr`; a macro that expands to itself would otherwise
+    // spin here forever — the compile-time `macroexpand` bounds its fixpoint at
+    // `MAX_EXPAND_ROUNDS`, and this is the same bound for the runtime path. Reset
+    // whenever a closure body is entered, so a tail loop THROUGH a lazily expanded
+    // macro (one expansion per iteration) is never charged for its iterations.
+    let mut lazy_expansions: u32 = 0;
     'tail: loop {
         match expr.unpack() {
             ValueRef::Sym(s) => {
@@ -847,6 +855,15 @@ fn eval_tail_loop(
                     // `env` across it so the `continue 'tail` re-reads the
                     // relocated handle. `arg_forms` is consumed by `bind_params`
                     // inside `apply_closure`, which roots it itself.
+                    lazy_expansions += 1;
+                    if lazy_expansions > crate::eval::macros::MAX_EXPAND_ROUNDS {
+                        return Err(LispError::runtime(format!(
+                            "macro expansion did not reach a fixpoint after {} rounds \
+                             (a macro that expands to itself?)",
+                            crate::eval::macros::MAX_EXPAND_ROUNDS
+                        ))
+                        .or_form_pos(heap, call_form));
+                    }
                     let arg_forms = heap.list_to_vec(spine)?;
                     let (expanded, new_env) = heap.root_scope(|heap| {
                         let env_r = heap.root_env(env);
@@ -1059,6 +1076,7 @@ fn eval_tail_loop(
                         // Single-form body (the common case): hand `last` straight to
                         // the loop — the safepoint roots `expr`/`env` for us, so no
                         // operand-stack push is needed.
+                        lazy_expansions = 0;
                         expr = *last;
                         env = scope;
                         continue 'tail;
@@ -1079,6 +1097,7 @@ fn eval_tail_loop(
                         }
                         Ok((heap.read_root(last_r), heap.read_root_env(scope_r)))
                     })?;
+                    lazy_expansions = 0;
                     expr = new_last;
                     env = new_scope;
                     continue 'tail;

@@ -486,6 +486,20 @@ const M_BYTES: u8 = 19;
 const M_FAILURE: u8 = 20;
 
 pub(crate) fn encode_msg(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
+    // A container step grows the native stack when it is near its end (see
+    // `process::grow`): a message is nested as deep as the sender built it.
+    match m {
+        Message::List(..)
+        | Message::Vector(..)
+        | Message::Map(..)
+        | Message::Failure(..)
+        | Message::Set(..)
+        | Message::Closure(..) => crate::process::grow(|| encode_msg_inner(w, m)),
+        _ => encode_msg_inner(w, m),
+    }
+}
+
+fn encode_msg_inner(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
     match m {
         Message::Nil => w.push(M_NIL),
         Message::Bool(false) => w.push(M_FALSE),
@@ -705,6 +719,14 @@ pub(crate) fn decode_msg(r: &mut Cursor<Vec<u8>>) -> io::Result<Message> {
 }
 
 fn decode_msg_at(r: &mut Cursor<Vec<u8>>, depth: u32) -> io::Result<Message> {
+    if depth % 32 == 31 {
+        crate::process::grow(|| decode_msg_at_inner(r, depth))
+    } else {
+        decode_msg_at_inner(r, depth)
+    }
+}
+
+fn decode_msg_at_inner(r: &mut Cursor<Vec<u8>>, depth: u32) -> io::Result<Message> {
     if depth >= MAX_DECODE_DEPTH {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

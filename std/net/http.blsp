@@ -622,6 +622,10 @@ a PEM certificate replacing the Mozilla roots as the trust anchor (private CAs,
 `tls/self-signed` dev servers). Must run in a process (it `receive`s the
 response); the root process counts."
   (let (u (parse-url url)
+        ;; A relative or empty URL parsed to a nil host, and the failure surfaced as
+        ;; "%tcp-connect: expected string, got nil" (2026-09-30).
+        _ (when (nil? (/get u :host))
+            (error "http/request: expected an absolute http or https URL, got " (pr-str url)))
         body (or (/get opts :body) "")
         body-bytes (bytes/concat body)
         headers (request-headers u body-bytes (/get opts :headers))

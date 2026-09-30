@@ -347,6 +347,7 @@
    "error-message" :errors
    "reflect/eval" :meta
    "reflect/eval-string" :meta
+   "reflect/undef" :meta
    "every?" :predicates
    "exit" :processes
    "system/feature?" :predicates

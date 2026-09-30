@@ -23,14 +23,18 @@ use std::collections::{HashMap, HashSet};
 /// Past this, return `LispError::runtime` rather than overflowing the native
 /// Rust stack — a deeply nested template, vector, or map (from a user file or
 /// a misbehaving macro) should produce a clean error, not abort the process.
-const MAX_DEPTH: u32 = 256;
+// 1024 since 2026-09-30 (was 256): a `case`/`cond`/`match`/`receive` lowers to one nested
+// level PER ARM, so a flat 300-arm dispatch — a keyword table, an opcode switch — was
+// refused as "nested too deeply". The walkers that recurse per level grow their stack
+// (`stacker`) rather than trust the cap; the cap is a bound on runaway expansion.
+const MAX_DEPTH: u32 = 1024;
 
 /// Bound on `macroexpand`'s head-fixpoint *rounds* — a different quantity from
 /// the nesting depth above (it counts successive whole-form rewrites, not
 /// recursion), kept as its own constant so tuning one never silently retunes
 /// the other. The prelude's Brood-level `macroexpand` mirrors this value
 /// (`macroexpand--max-rounds` in `std/prelude.blsp`).
-const MAX_EXPAND_ROUNDS: u32 = 256;
+pub(crate) const MAX_EXPAND_ROUNDS: u32 = 1024;
 
 /// Per-expansion auto-gensym table (Clojure-style `x#`). Maps a literal template
 /// symbol whose name ends in `#` to a single fresh gensym, so every occurrence of
@@ -101,7 +105,7 @@ fn quote_form(heap: &mut Heap, v: Value) -> Value {
 fn qq_elem(heap: &mut Heap, v: Value, depth: u32, autogen: &mut AutoGen) -> LispResult {
     if depth >= MAX_DEPTH {
         return Err(LispError::runtime(format!(
-            "quasiquote template nested too deeply (math/max {} levels)",
+            "quasiquote template nested too deeply (max {} levels)",
             MAX_DEPTH
         )));
     }
@@ -939,42 +943,76 @@ fn enforce_private_refs(
 
 /// Does `form` contain a `#`-suffixed (auto-gensym) symbol anywhere?
 fn has_autogensym(heap: &Heap, form: Value) -> bool {
-    match form.unpack() {
-        ValueRef::Sym(s) => {
-            let n = value::symbol_name_ref(s);
-            n.len() > 1 && n.ends_with('#')
+    has_autogensym_at(heap, form, 0)
+}
+
+/// The walk behind [`has_autogensym`]. Two things keep it off the native stack for a
+/// template built at runtime (the reader caps source nesting, `reflect/eval` of a
+/// constructed form does not): a list SPINE is walked in the loop, so a long flat
+/// template costs no depth, and descent stops at `MAX_DEPTH` — a template that deep
+/// cannot expand anyway (`qq_elem` refuses it), so answering `false` there only picks
+/// which path reaches that error. Before this a 3000-level `(quasiquote (unquote …))`
+/// chain overflowed the stack here, an uncatchable abort (2026-09-30).
+fn has_autogensym_at(heap: &Heap, form: Value, depth: u32) -> bool {
+    if depth >= MAX_DEPTH {
+        return false;
+    }
+    let mut cur = form;
+    loop {
+        match cur.unpack() {
+            ValueRef::Sym(s) => {
+                let n = value::symbol_name_ref(s);
+                return n.len() > 1 && n.ends_with('#');
+            }
+            ValueRef::Pair(p) => {
+                let (car, cdr) = heap.pair(p);
+                if has_autogensym_at(heap, car, depth + 1) {
+                    return true;
+                }
+                cur = cdr;
+            }
+            ValueRef::Vector(id) => {
+                return heap
+                    .vector(id)
+                    .to_vec()
+                    .iter()
+                    .any(|&it| has_autogensym_at(heap, it, depth + 1));
+            }
+            ValueRef::Map(id) => {
+                return heap.map_entries(id).iter().any(|(k, v)| {
+                    has_autogensym_at(heap, *k, depth + 1) || has_autogensym_at(heap, *v, depth + 1)
+                });
+            }
+            // A set's elements are template positions too — skipping them meant an
+            // `x#` inside `` `#{x#} `` never took the runtime (fresh-gensym) path.
+            ValueRef::Set(id) => {
+                return heap
+                    .map_entries(id)
+                    .iter()
+                    .any(|(k, _)| has_autogensym_at(heap, *k, depth + 1));
+            }
+            _ => return false,
         }
-        ValueRef::Pair(p) => {
-            let (car, cdr) = heap.pair(p);
-            has_autogensym(heap, car) || has_autogensym(heap, cdr)
-        }
-        ValueRef::Vector(id) => heap
-            .vector(id)
-            .to_vec()
-            .iter()
-            .any(|&it| has_autogensym(heap, it)),
-        ValueRef::Map(id) => heap
-            .map_entries(id)
-            .iter()
-            .any(|(k, v)| has_autogensym(heap, *k) || has_autogensym(heap, *v)),
-        // A set's elements are template positions too — skipping them meant an
-        // `x#` inside `` `#{x#} `` never took the runtime (fresh-gensym) path.
-        ValueRef::Set(id) => heap
-            .map_entries(id)
-            .iter()
-            .any(|(k, _)| has_autogensym(heap, *k)),
-        _ => false,
     }
 }
 
 /// See [`compile`]: rewrite every auto-gensym-free `quasiquote` into builder code.
 fn expand_static_quasiquotes(heap: &mut Heap, form: Value) -> Value {
-    expand_qq_rec(heap, form).0
+    expand_qq_rec(heap, form, 0).0
 }
 
 /// Returns `(rewritten, changed)` — `changed` avoids rebuilding an unchanged list
 /// (Value has no cheap identity compare), so a quasiquote-free tree is returned as-is.
-fn expand_qq_rec(heap: &mut Heap, form: Value) -> (Value, bool) {
+fn expand_qq_rec(heap: &mut Heap, form: Value, depth: u32) -> (Value, bool) {
+    // This rewrite is an optimisation (the evaluator expands a `quasiquote` it did not
+    // reach, one level per tail-loop turn), so past the cap the form is simply left
+    // alone. The expansion walk never descends into a template, which is why a
+    // runtime-built `(quasiquote (unquote (quasiquote …)))` chain 100 000 levels deep
+    // reached here unbounded and overflowed the native stack — an abort, not an
+    // error (2026-09-30).
+    if depth >= MAX_DEPTH {
+        return (form, false);
+    }
     // A VECTOR literal is an atom to `list_to_vec`, but its elements are
     // unevaluated forms — so a quasiquote nested inside one (`[a b \`(do ~@xs)]`,
     // the shape `%receive-split` returns) was invisible to this walk, the raw
@@ -987,7 +1025,7 @@ fn expand_qq_rec(heap: &mut Heap, form: Value) -> (Value, bool) {
         let mut out = Vec::with_capacity(items.len());
         let mut changed = false;
         for it in items {
-            let (e, c) = expand_qq_rec(heap, it);
+            let (e, c) = expand_qq_rec(heap, it, depth + 1);
             changed |= c;
             out.push(e);
         }
@@ -1026,7 +1064,7 @@ fn expand_qq_rec(heap: &mut Heap, form: Value) -> (Value, bool) {
             return match expand_quasiquote(heap, template) {
                 // Recurse into the builder code so a quasiquote in an unquoted
                 // sub-form is expanded too; on expander error keep the runtime form.
-                Ok(builder) => (expand_static_quasiquotes(heap, builder), true),
+                Ok(builder) => (expand_qq_rec(heap, builder, depth + 1).0, true),
                 Err(_) => (form, false),
             };
         }
@@ -1034,7 +1072,7 @@ fn expand_qq_rec(heap: &mut Heap, form: Value) -> (Value, bool) {
     let mut out = Vec::with_capacity(items.len());
     let mut changed = false;
     for it in items {
-        let (e, c) = expand_qq_rec(heap, it);
+        let (e, c) = expand_qq_rec(heap, it, depth + 1);
         changed |= c;
         out.push(e);
     }
@@ -1251,7 +1289,7 @@ pub fn resolve_reference(heap: &Heap, s: value::Symbol) -> value::Symbol {
 /// the checker still reads them as one), but they no longer change scoping: an
 /// undeclared `(def *width* 10)` inside a module is `mod/*width*`, like every other
 /// definition.
-fn is_ambient(sym: value::Symbol) -> bool {
+pub(crate) fn is_ambient(sym: value::Symbol) -> bool {
     value::is_dynamic(sym)
 }
 
@@ -1284,6 +1322,20 @@ fn is_syntax_keyword(s: value::Symbol) -> bool {
                 .collect()
         });
     SYNTAX.contains_key(&s)
+}
+
+/// A symbol the quasiquote expander reads by NAME, which no namespace may own: the
+/// `~`/`~@` markers and a `#`-suffixed auto-gensym. The file path never reaches them
+/// (they are not known names), but the runtime `eval` path's assume-own rule qualified
+/// every unbound bare symbol, so `(reflect/eval '(quasiquote [1 (unquote x)]))` inside a
+/// module answered `[1 (mod/unquote x)]` and a `defmacro` through `eval` could not use
+/// `~` at all (2026-09-30).
+fn is_template_marker(s: value::Symbol) -> bool {
+    if value::symbol_is(s, kw::UNQUOTE) || value::symbol_is(s, kw::UNQUOTE_SPLICING) {
+        return true;
+    }
+    let name = value::symbol_name_ref(s);
+    name.len() > 1 && name.ends_with('#')
 }
 
 /// Resolve one free reference symbol. Qualify only with positive evidence the name
@@ -1363,6 +1415,7 @@ fn resolve_sym(
         imported
     } else if heap.ns_assume_own()
         && !is_syntax_keyword(s)
+        && !is_template_marker(s)
         && heap.env_get(value::EnvId::GLOBAL, s).is_none()
     {
         // No pre-scan behind this form (a runtime `eval`), so "will this namespace
@@ -2806,6 +2859,23 @@ fn macroexpand_all_depth_inner(heap: &mut Heap, form: Value, env: EnvId, depth: 
 }
 
 fn macroexpand_all_depth_step(heap: &mut Heap, form: Value, env: EnvId, depth: u32) -> LispResult {
+    // Every 32 levels, make sure the next 32 fit: the step recurses once per nesting
+    // level and re-enters `eval` for each macro application on the way.
+    if depth % 32 == 31 {
+        stacker::maybe_grow(256 * 1024, 4 * 1024 * 1024, || {
+            macroexpand_all_depth_step_inner(heap, form, env, depth)
+        })
+    } else {
+        macroexpand_all_depth_step_inner(heap, form, env, depth)
+    }
+}
+
+fn macroexpand_all_depth_step_inner(
+    heap: &mut Heap,
+    form: Value,
+    env: EnvId,
+    depth: u32,
+) -> LispResult {
     // Block GC during the expansion: this walk holds partially-built LOCAL forms
     // in Rust locals and recurses into macro applications via `eval`, whose
     // safepoint would otherwise sweep them. The runtime evaluator roots its
@@ -2817,7 +2887,7 @@ fn macroexpand_all_depth_step(heap: &mut Heap, form: Value, env: EnvId, depth: u
     // purely for the stack-depth accounting it feeds. See `docs/memory-model.md`.
     if depth >= MAX_DEPTH {
         return Err(LispError::runtime(format!(
-            "macro expansion nested too deeply (math/max {} levels)",
+            "macro expansion nested too deeply (max {} levels)",
             MAX_DEPTH
         )));
     }

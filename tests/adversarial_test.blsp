@@ -104,16 +104,25 @@
 ;;
 
 (describe "adversarial: messages"
-  :isolated (test "a 300-deep nested list send errors cleanly (MAX_MESSAGE_DEPTH = 256)"
+  ;; The serialiser capped nesting at 256 levels until 2026-09-30, when every walker over
+  ;; a message became stack-safe: a persistent stack built as `[x acc]` could not be
+  ;; sent past 256 elements. A deep value now crosses like any other.
+  (test "a 100 000-deep nested list round-trips through a send"
     (let (build (fn (n acc) (if (= n 0) acc (build (- n 1) (list acc))))
-          deep (build 300 :leaf)
+          deep (build 100000 :leaf)
           me (self))
-      (assert-error (send me deep))))
+      (send me deep)
+      (receive (got (assert= got deep)) (after 5000 (is false)))))
 
-  (test "a 300-deep nested map send errors cleanly"
-    (let (deep (adv-deep-map 300)
-          me (self))
-      (assert-error (send me deep))))
+  (test "a 100 000-deep nested map round-trips through a send and a table"
+    ;; built by a fold, not `adv-deep-map`, whose recursion is not tail-position
+    (let (deep (fold (range 0 100000) {:leaf true} (fn (acc i) {:next acc}))
+          me (self)
+          t (table/new))
+      (send me deep)
+      (receive (got (assert= got deep)) (after 5000 (is false)))
+      (table/put t :k deep)
+      (assert= (table/get t :k) deep)))
 
   (test "a self-referential local closure send is rejected cleanly"
     (let (f (fn (x) (f x))

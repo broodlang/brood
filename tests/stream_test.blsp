@@ -338,4 +338,8 @@ full budget still yields the failing value, while a merely slow one is forgiven.
       (stream/next s)
       (stream/next s)
       (stream/next s)
-      (assert= before (drained-to before 2000)))))
+      ;; `<=`, not `=`: a leaked down makes the mailbox LARGER than it was, and a message
+      ;; in flight to this process when it started can make `before` read high. The leak
+      ;; this is about was real — KI-213, a `demonitor` racing the death path's push — and
+      ;; is guarded at the kernel now (robustness_limits_test "demonitor and a down in flight").
+      (is (<= (drained-to before 2000) before)))))

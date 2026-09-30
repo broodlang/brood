@@ -556,7 +556,12 @@ this clause was an expansion error."
 
     (repeat 3 :a)   → (:a :a :a)
     (repeat 0 :a)   → nil"
-  (%repeat-acc n x nil))
+  ;; The same ceiling a range is realised under (`MAX_REALISED_RANGE`, 2^26): past it
+  ;; the list is a single call eating the machine, and the allocation failure it ends
+  ;; in is an abort, not an error anything can catch (2026-09-30).
+  (if (> n 67108864)
+    (error "repeat: " n " elements is too many to build (limit 67108864)")
+    (%repeat-acc n x nil)))
 
 ;; ---- lazy / fusing seq-views (compute-frontier lever 3) ---------------------
 ;; `map`/`seq/filter`/`seq/keep`/`seq/reject` are EAGER — they return a concrete list, and

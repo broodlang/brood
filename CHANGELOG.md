@@ -6,6 +6,37 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Robustness review, third pass** (KI-207 … KI-212, ADR-395). A `demonitor` no longer returns while a
+`[:down …]` a death has already taken is still on its way (KI-213), so the demonitor-then-flush
+idiom is sound. A `case`, `cond`, `match` or
+`receive` may now have hundreds of arms (the expansion ceiling is 1024 levels, from 256).
+A script may start with `#!/usr/bin/env brood`; a byte-order mark is skipped; a NUL in
+source is refused by name; a malformed `\u{…}` says so. `string/repeat` builds fifty
+million characters in one pass instead of running out of memory. `file/walk-files` lists a
+symlinked directory instead of entering it. `reflect/eval` of a quasiquote inside a module
+works. `defability` refuses a malformed or duplicated op, `impl` refuses a method that is
+not an op, `(:use m :only [name])` refuses a name the module does not define, and
+`node/connect` names a non-string argument.
+
+**Robustness review, second pass** (KI-203 … KI-206, ADR-394). A value nested past 256
+levels now crosses a `send`, a table and the wire (the message walkers grow their own
+stack; the cap is a million-level sanity bound), so a persistent stack built as `[x acc]`
+and `seq/frequencies` over deep keys work. The checker no longer panics on a comparison
+against `i64::MAX`. `(into {} [[1]])` is an error, not `{1 nil}`; `(sig f 5)` is refused;
+`string/format`'s `%d` takes an integer and a width is capped by name; `json/decode`
+refuses `1e999`; `math/mod`, `http/request`, `count` and `seq` name themselves in their
+errors; a pattern deeper than 64 levels or wider than 80 elements is refused by name.
+
+**Robustness review** (KI-197 … KI-202). A quasiquote chain built at runtime no longer
+overflows the native stack; a macro that expands to itself, defined and used in one
+evaluated form, is refused after 256 rounds instead of hanging; `math/pow` is binary
+exponentiation and refuses a result past 2^27 bits instead of running out of memory;
+`repeat` stops at the range realise cap; a pattern deeper than 128 levels is refused before
+lowering; `(math/sqrt (math/pow 10 400))` is `1e200`, not `inf`. **`math/floor`, `ceil` and
+`round` of a float past 2^63 promote to a bignum** (ADR-393) instead of raising. Four
+messages that read `(math/max N …)` after the rename wave read `max` again; `sleep`,
+`receive` and the machine-int primitives name themselves in their errors.
+
 **`nest update-brood`** updates the installed `brood`, `nest` and `brood-lsp` to the latest
 GitHub release — what `install.sh` installs — checked against the release's SHA-256 and
 written into the directory the running `nest` is in. `--check` only reports, `--version TAG`

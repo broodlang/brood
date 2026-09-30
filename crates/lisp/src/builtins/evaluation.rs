@@ -32,7 +32,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(1),
         Sig::new(vec![string], any),
         &["s"],
-        "Read and evaluate every form in string s (the string analogue of load).",
+        "Read and evaluate every form in string s (the string analogue of load), in the CALLER'S namespace — and a `(defmodule …)` in s moves the caller there for good, as it does at the REPL. To evaluate a module source without that side effect, `%load-string` brackets the namespace.",
         eval_string,
     );
     primitives.def(

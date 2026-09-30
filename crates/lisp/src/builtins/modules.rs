@@ -1615,6 +1615,19 @@ pub(super) fn refer(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
                         "(:use {mod_name} :only [... {bare_name} ...]): `{bare_name}` is module-private (ADR-146); grant access with (:use-internals {mod_name}) or use the public API"
                     )));
                 }
+                // A name the module does not define is a typo that used to surface only at
+                // the first USE of the bare name — or never, when nothing used it
+                // (`(:use math :only [zz-nope])` was accepted, 2026-09-30). Checked only
+                // when the module has finished loading: mid-load (a cycle) the set is
+                // incomplete, which is exactly why `:only` resolves lazily.
+                if !module_is_loading(heap, &mod_name)
+                    && heap.env_get(EnvId::GLOBAL, qualified).is_none()
+                    && !crate::eval::macros::is_ambient(bare)
+                {
+                    return Err(LispError::runtime(format!(
+                        "(:use {mod_name} :only [... {bare_name} ...]): `{mod_name}` defines no `{bare_name}`"
+                    )));
+                }
                 refer_add(heap, bare, qualified, &mod_name)?;
             }
         }

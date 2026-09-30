@@ -443,6 +443,16 @@ pub(super) fn expect_rope_ref<'h>(
 
 /// Require an integer; otherwise a self-identifying type error.
 pub(super) fn expect_int(heap: &Heap, who: &str, v: Value) -> Result<i64, LispError> {
+    // A bignum IS an int to the language (`int?` says so), so the generic message
+    // read "expected int, got int (1180591620717411303424)" — true and useless. Name
+    // the actual constraint: this primitive wants a machine-sized one.
+    if let Value::BigInt(_) = v {
+        return Err(LispError::type_err(format!(
+            "{}: expected an int in the 64-bit range, got {}",
+            who,
+            crate::syntax::printer::print(heap, v),
+        )));
+    }
     expect!(heap, who, v, "int",
         Value::Int(n) => n,
     )
@@ -1126,10 +1136,14 @@ pub(super) fn floor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             // upper bound `i64::MAX as f64` rounds *up* past `i64::MAX`, so
             // the open upper comparison is the right one.
             if f < i64::MIN as f64 || f >= i64::MAX as f64 + 1.0 {
-                return Err(
-                    LispError::runtime(format!("floor: {} is out of range for i64", f))
-                        .with_code(crate::error::error_codes::INT_OVERFLOW),
-                );
+                // Finite but past i64: PROMOTE, as `+`/`*` do on overflow. Every f64
+                // of that magnitude is already an integer, so the conversion is exact
+                // — `(math/floor 1e300)` is the 10^300-ish integer the double holds,
+                // not an error (it was one until 2026-09-30: a language that promotes
+                // on overflow had a cliff at 2^63 in its one float->int crossing).
+                use num_traits::FromPrimitive;
+                let big = num_bigint::BigInt::from_f64(f).expect("a finite f64 converts");
+                return Ok(heap.alloc_bigint(big));
             }
             Ok(Value::int(f as i64))
         }
@@ -1258,7 +1272,7 @@ pub(super) fn shift_amount(n: i64, who: &str) -> Result<usize, LispError> {
     const MAX_SHIFT: i64 = 1 << 27;
     if n > MAX_SHIFT {
         return Err(LispError::runtime(format!(
-            "{}: shift amount {} too large (math/max {})",
+            "{}: shift amount {} too large (max {})",
             who, n, MAX_SHIFT
         )));
     }
@@ -1439,6 +1453,26 @@ math1_positive!(math_log2, "%log2", log2);
 math1_positive!(math_log10, "%log10", log10);
 
 pub(super) fn math_f64_sqrt(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    // A bignum past f64's range reads as `inf` through `num_to_f64`, and `inf.sqrt()`
+    // is `inf` — a wrong answer for an input whose root is perfectly representable
+    // (`(math/sqrt (math/pow 10 400))` is 1e200). Take an even power of two out
+    // first: sqrt(m * 2^2k) = sqrt(m) * 2^k, with `m` sized to fit a double.
+    if let Value::BigInt(id) = arg(args, 0) {
+        use num_traits::{Signed, ToPrimitive};
+        let n = heap.bigint(id).clone();
+        if n.is_negative() {
+            return Err(LispError::runtime(format!(
+                "%f64-sqrt: argument {} must be non-negative",
+                n
+            )));
+        }
+        let bits = n.bits();
+        if bits > 1000 {
+            let shift = ((bits - 1000) & !1) as usize;
+            let m = (&n >> shift).to_f64().unwrap_or(f64::INFINITY);
+            return Ok(Value::float(m.sqrt() * 2f64.powi((shift / 2) as i32)));
+        }
+    }
     let x = num_to_f64(heap, "%f64-sqrt", arg(args, 0))?;
     if x < 0.0 {
         return Err(LispError::runtime(format!(

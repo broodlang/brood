@@ -115,7 +115,11 @@ of 1 gives an integer). Same as `(/ n d)` for integers; errors when `d` is 0.
     (math/mod -1 3)    → 2   ; sign follows the DIVISOR"
   ;; `(abs b)` inlined so bare `mod` stays self-sufficient — `abs` now lives in the
   ;; `math` module (ADR-227) and the boot-time prelude cannot require a module.
-  (let (r (math/rem a b)) (if (< r 0) (+ r (if (< b 0) (- b) b)) r)))
+  ;; Checked here, not left to `%rem`: its message named `rem`, a function the caller
+  ;; never wrote (2026-09-30).
+  (if (and (int? a) (int? b))
+    (let (r (math/rem a b)) (if (< r 0) (+ r (if (< b 0) (- b) b)) r))
+    (error "mod: expected two integers, got " a " and " b)))
 (sig mod (int int -> int))
 
 (defability Numeric
@@ -211,20 +215,20 @@ tower, not just the int `0`. A type with no impl RAISES rather than answering.
 ;; -inf) plus `rem`/`/`/`*`. `floor` of an int is itself, so these pass ints
 ;; through unchanged.
 ;;
-;; `floor` raises on a float with no i64 floor, and its message names `floor` and the
-;; value IT was given — so when `ceil` was `(- (floor (- x)))`, `(ceil 1e300)` said
-;; "floor: -1e300 is out of range": the wrong function and the wrong sign. The rounders
-;; check their own argument first, so the error names the call the user wrote. The
-;; window is floor's: a float in [-2^63, 2^63) (NaN fails both comparisons), and neither
-;; rounder negates its argument, so nothing in that window can step out of it.
+;; `floor` raises on a float with no integer value (an infinity or NaN), and its message
+;; names `floor` and the value IT was given — so when `ceil` was `(- (floor (- x)))`,
+;; `(ceil inf)` blamed floor for `-inf`: the wrong function and the wrong sign. The
+;; rounders check their own argument first, so the error names the call the user wrote.
+;; A finite float of any magnitude has an integer floor: past 2^63 `floor` promotes to a
+;; bignum (2026-09-30), so the rounders never see an out-of-range error from it.
 (defn- %rounding-arg (who x)
-  (if (and (float? x) (not (and (>= x -9.223372036854775808e18) (< x 9.223372036854775808e18))))
-    (error who ": " x " has no integer value in the int range")
+  (if (and (float? x) (or (math/nan? x) (math/infinite? x)))
+    (error who ": " x " has no integer value")
     x))
 
 (defn ceil (x)
-  "Round `x` toward positive infinity to an integer. A float with no integer value in
-the int range (an infinity, NaN, or a magnitude past 2^63) is an error naming `math/ceil`.
+  "Round `x` toward positive infinity to an integer. A float with no integer value (an
+infinity or NaN) is an error naming `math/ceil`; a magnitude past 2^63 promotes to a bignum.
 
     (math/ceil 1.2)       → 2
     (math/ceil -1.2)      → -1"
@@ -233,7 +237,7 @@ the int range (an infinity, NaN, or a magnitude past 2^63) is an error naming `m
 ;; round half away from zero: floor(x+0.5) for x>=0, ceil(x-0.5) for x<0.
 (defn round (x)
   "Round `x` to the nearest integer (halves away from zero). A float with no integer
-value in the int range is an error naming `math/round`.
+value (an infinity or NaN) is an error naming `math/round`; a magnitude past 2^63 promotes.
 
     (math/round 2.5)       → 3
     (math/round -2.5)      → -3"
@@ -265,7 +269,7 @@ value in the int range is an error naming `math/round`.
     ;; The seed is the base's kind: `(pow 2.0 0)` answered the INT `1` until 2026-09-17,
     ;; which the overload below could not have claimed — the per-arm body check
     ;; (ADR-116 addendum) is what found it.
-    else (pow-acc base exp (if (float? base) 1.0 1))))
+    else (do (%pow-check-size base exp) (pow-acc base exp (if (float? base) 1.0 1)))))
 ;; An int base to a non-negative exponent stays an int (overflow raises); a float base
 ;; stays a float; only an exact base under a negative exponent leaves its kind (a ratio).
 ;; The arms meet at a call (ADR-116), so `(pow b 3)` on an int reads `int` — and each arm
@@ -297,7 +301,29 @@ value in the int range is an error naming `math/round`.
 
 (sig pow-reciprocal (and (float int -> float) (number int -> number)))
 
-(defn- pow-acc (base exp acc) (if (= exp 0) acc (pow-acc base (- exp 1) (* acc base))))
+;; Binary exponentiation — O(log exp) multiplications. The linear product this replaced
+;; (2026-09-30) did `exp` of them, each on a growing bignum: `(math/pow 2 100000000)`
+;; spent its time on a hundred million intermediate products and its memory on the
+;; same, and died with an allocation failure rather than a catchable error. The square
+;; is taken only while another round needs it, so the last step never builds a product
+;; twice the size of the answer.
+(defn- pow-acc (base exp acc)
+  (cond
+    (= exp 0) acc
+    (= exp 1) (* acc base)
+    else (pow-acc (* base base) (quot exp 2) (if (= (rem exp 2) 1) (* acc base) acc))))
+
+;; The largest result `pow` will build, in bits — `bit/shift-left`'s own cap (16 MB),
+;; so the two spellings of 2^n agree on what is too big. Estimated from the base's
+;; bit width, which a float log reads in O(1); a base past f64's range has at least
+;; 1024 bits, and that floor is enough to refuse what matters.
+(def- %pow-max-bits 134217728)
+(defn- %pow-check-size (base exp)
+  (when (and (int? base) (> exp 1) (> (abs base) 1))
+    (let (f (->float (abs base))
+          bits-per (if (math/infinite? f) 1024.0 (log2 f)))
+      (when (> (* exp bits-per) %pow-max-bits)
+        (error "pow: " base "^" exp " would exceed " %pow-max-bits " bits")))))
 ;; Called only with a non-negative `exp` (a negative one never returns), so the int arm's
 ;; claim is about what it answers, not what it terminates on.
 (sig pow-acc (and (int int int -> int) (float int float -> float) (number int number -> number)))

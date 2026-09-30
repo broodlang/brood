@@ -109,7 +109,7 @@ fn down_roundtrips() {
             assert_eq!(watcher_pid, 42);
             assert_eq!(mref, u64::MAX - 3);
             assert_eq!(target_pid, 7);
-            match reason {
+            match &reason {
                 Message::Vector(items) => {
                     assert!(
                         matches!(&items[0], Message::Keyword(k) if value::symbol_name(*k) == "badmatch")
@@ -150,7 +150,7 @@ fn send_with_rich_message_roundtrips() {
                 Target::Name(s) => assert_eq!(value::symbol_name(s), "echo"),
                 _ => panic!("wrong target"),
             }
-            match msg {
+            match &msg {
                 Message::Vector(items) => {
                     assert!(
                         matches!(&items[0], Message::Keyword(k) if value::symbol_name(*k) == "pong")
@@ -181,7 +181,7 @@ fn bytes_and_native_roundtrip_through_the_wire() {
         msg,
     };
     match read_full(&f) {
-        Frame::Send { msg, .. } => match msg {
+        Frame::Send { msg, .. } => match &msg {
             Message::Vector(items) => {
                 match &items[0] {
                     Message::Bytes(b) => {
@@ -293,7 +293,7 @@ fn closure_roundtrips_through_the_wire() {
         target: Target::Pid(1),
         msg: Message::Closure(Box::new(c)),
     };
-    match read_full(&f) {
+    match &read_full(&f) {
         Frame::Send {
             msg: Message::Closure(c),
             ..
@@ -335,7 +335,7 @@ fn closure_roundtrips_through_the_wire() {
         }
         other => panic!(
             "wrong frame after round-trip: {:?}",
-            std::mem::discriminant(&other)
+            std::mem::discriminant(other)
         ),
     }
 }
@@ -363,7 +363,7 @@ fn closure_with_all_options_absent_roundtrips() {
         target: Target::Pid(1),
         msg: Message::Closure(Box::new(c)),
     };
-    match read_full(&f) {
+    match &read_full(&f) {
         Frame::Send {
             msg: Message::Closure(c),
             ..
@@ -522,4 +522,51 @@ fn a_peer_cannot_mint_symbols_without_limit() {
         _ => panic!("a known symbol must still decode at the cap"),
     }
     WIRE_SYMBOLS_MINTED.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The wire codec walks a message once per nesting level in both directions, on the
+/// dist threads' default 2 MiB stack. Since 2026-09-30 a message may be nested to the
+/// serialiser's million-level sanity bound, so both walks grow the stack as they go.
+#[test]
+fn a_deeply_nested_message_round_trips_on_a_small_stack() {
+    std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            let mut m = Message::Int(7);
+            for i in 0..200_000usize {
+                m = if i % 2 == 0 {
+                    Message::List(vec![m], None)
+                } else {
+                    Message::Vector(vec![m])
+                };
+            }
+            let mut w = Vec::new();
+            encode_msg(&mut w, &m).expect("encode");
+            let mut r = Cursor::new(w);
+            let back = decode_msg(&mut r).expect("decode");
+            // Walk both down to the leaf without recursing here either.
+            let (mut a, mut b) = (&m, &back);
+            let mut levels = 0usize;
+            loop {
+                match (a, b) {
+                    (Message::List(x, _), Message::List(y, _))
+                    | (Message::Vector(x), Message::Vector(y)) => {
+                        assert_eq!(x.len(), 1);
+                        assert_eq!(y.len(), 1);
+                        a = &x[0];
+                        b = &y[0];
+                        levels += 1;
+                    }
+                    (Message::Int(x), Message::Int(y)) => {
+                        assert_eq!(*x, *y);
+                        break;
+                    }
+                    _ => panic!("shape diverged at level {levels}"),
+                }
+            }
+            assert_eq!(levels, 200_000);
+        })
+        .expect("spawn")
+        .join()
+        .expect("the codec must not overflow a 2 MiB stack");
 }

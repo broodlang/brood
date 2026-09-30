@@ -567,10 +567,25 @@ impl<'a> Parser<'a> {
             StringScan::Unterminated => Err(self.err_incomplete("unterminated string")),
             StringScan::BadEscape { at } => Err(self.err_at(
                 self.s.pos_at(at),
-                "malformed string escape: an unknown letter escape like \\d \\w \\s \
-                 is rejected (write \\\\d for a regex class); \\x needs two hex digits; \
-                 \\u needs {1-6 hex digits} (a Unicode scalar value)"
-                    .to_string(),
+                // Name the escape that failed: a malformed `\u{…}` used to be reported as
+                // an unknown letter escape, i.e. the regex footgun (2026-09-30).
+                match self.s.char_at(at + 1) {
+                    Some('u') => {
+                        "malformed \\u escape: write \\u{H…H} with 1 to 6 hex digits of a \
+                                  Unicode scalar value (up to U+10FFFF, no surrogates); \\u00e9 \
+                                  without braces is not a Brood escape"
+                            .to_string()
+                    }
+                    Some('x') => {
+                        "malformed \\x escape: \\xHH needs exactly two hex digits (an ASCII \
+                                  byte); for a codepoint write \\u{…}"
+                            .to_string()
+                    }
+                    _ => "malformed string escape: an unknown letter escape like \\d \\w \\s \
+                          is rejected (write \\\\d for a regex class); \\x needs two hex digits; \
+                          \\u needs {1-6 hex digits} (a Unicode scalar value)"
+                        .to_string(),
+                },
             )),
         }
     }
@@ -578,6 +593,19 @@ impl<'a> Parser<'a> {
     fn read_atom(&mut self) -> Result<Value, LispError> {
         let token_start = self.s.pos();
         let token = self.s.read_atom();
+        // A control character is not a delimiter (it is not whitespace), so a NUL in the
+        // source used to become PART of a symbol — `a\0b` read as one three-character
+        // name, a lone NUL as an empty-looking one (2026-09-30). Name it instead.
+        if let Some(c) = token.chars().find(|c| c.is_control()) {
+            return Err(self.err_at(
+                self.s.pos_at(token_start),
+                format!(
+                    "control character U+{:04X} inside a symbol: `{}`",
+                    c as u32,
+                    token.escape_default()
+                ),
+            ));
+        }
         match atom::classify(token) {
             AtomKind::Nil => Ok(Value::nil()),
             AtomKind::Bool(b) => Ok(Value::boolean(b)),

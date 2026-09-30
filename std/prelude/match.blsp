@@ -571,12 +571,47 @@ NON-LINEAR patterns (the same name twice) work.
 (defn- %match-irrefutable? (pat guard)
   (and (nil? guard) (or (%match-wildcard? pat) (%match-bind-sym? pat))))
 
+;; A pattern deeper than this cannot lower: the expansion cap (256 levels) refuses the code
+;; it becomes, and the compiler's per-level walks (`%match-count-sym` over the generated
+;; code, `%pattern-vars` over the pattern) make the work BEFORE that refusal quadratic in
+;; the depth — a 100 000-level pattern built at runtime asked for 6 GB and aborted the
+;; runtime before reaching the cap (2026-09-30). Checked first, in O(min(depth, cap)):
+;; the walk stops descending the moment it is past the cap.
+;; 64 levels deep and 80 elements wide — under what the 256-level expansion cap admits for
+;; every shape (measured 2026-09-30: a vector pattern lowers to 125 levels or 126
+;; elements, a map or list pattern to 84 of either), so the message a too-large pattern
+;; gets is this one, which names the pattern, never the cap's, which names the code.
+(def- %match-max-depth 64)
+(def- %match-max-width 80)
+;; Plain recursion, not `any?` — this runs at expansion time inside the prelude build,
+;; where `match` is already in use before `seq.blsp` (which defines `any?`) has loaded.
+(defn- %match-too-deep? (pat depth)
+  (cond
+    (> depth %match-max-depth) true
+    (pair? pat) (%match-seq-too-deep? pat depth 0)
+    (vector? pat) (%match-seq-too-deep? (%match-vec->list pat) depth 0)
+    (map? pat) (%match-seq-too-deep? (vals pat) depth 0)
+    else false))
+(defn- %match-seq-too-deep? (pats depth width)
+  (cond
+    (empty? pats) false
+    (>= width %match-max-width) true
+    (%match-too-deep? (first pats) (inc depth)) true
+    else (%match-seq-too-deep? (rest pats) depth (inc width))))
+
 (defn- %match-compile-clause (clause target fail)
   (let (parsed (%match-parse-clause clause)
         pat (nth parsed 0)
         guard (nth parsed 1)
         body (nth parsed 2)
         success (if (nil? guard) `(do ~@body) `(if ~guard (do ~@body) ~fail)))
+    (when (%match-too-deep? pat 0)
+      (error "match: pattern nested deeper than "
+        %match-max-depth
+        " levels or wider than "
+        %match-max-width
+        " elements: "
+        (pr-str-bounded pat)))
     (%match-compile pat target nil success fail)))
 
 ;; The no-match failure: a structured, catchable, self-describing value carrying

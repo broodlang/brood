@@ -16204,3 +16204,119 @@ not chased). No new duplicate crate: arboard's `image` unifies with ours.
 runs through XWayland — and that works: an image already on the desktop clipboard, an `xclip`-copied PNG
 (pixel-identical) and a Brood-set image read by `xclip` all round-tripped, from a process
 with no window or focus. Nothing else was tried; the ADR says so.
+
+## 2026-09-30 — a robustness review: six ways a constructed value took the runtime down
+
+**Method.** Seven batteries of adversarial programs (deep data, numeric edges, the reader,
+constructed forms through `reflect/eval`, processes and messages, I/O, deep patterns), each
+case wrapped in `try`, run under the 16 GB address-space cap with a timeout, then again under
+`BROOD_TIER=1` and `BROOD_TIER=0` as a differential. What the wrapper cannot catch is what
+was being looked for: an abort (exit 134, no `.brood_crash_dump`), a segfault, a hang. The
+tiers never disagreed on a value; the tree-walker trips its stack budget earlier on deep
+recursion, as designed.
+
+**Found and fixed** (KI-197 … KI-202, all sabotage-verified in
+`tests/robustness_limits_test.blsp`):
+
+- **Native stack overflow** from a quasiquote chain built at runtime — two walkers in
+  `eval/macros.rs` recursed per level below the expansion cap, which never descends into a
+  template. Both now stop at `MAX_DEPTH`; the template walk iterates a list's spine (KI-197).
+- **A hang** from a macro that expands to itself when defined and used in one evaluated form:
+  the evaluator's lazy expansion had no round cap where the compile-time fixpoint had one.
+  Same cap, reset at closure entry so tail loops are not charged (KI-198).
+- **Allocation aborts** from single calls: `math/pow` multiplied linearly (a hundred million
+  growing bignums for 2^100000000) and `repeat` had no ceiling. `pow` is now binary
+  exponentiation with a result-size guard at the shift cap; `repeat` stops at the range
+  realise cap (KI-199).
+- **Gigabytes before the cap** for a deep pattern: lowering is quadratic in the depth and the
+  256-level cap is checked on its output. A 128-level pre-check now runs first on every
+  surface (KI-200).
+- **A wrong answer**: `(math/sqrt (math/pow 10 400))` was `inf`. A bignum's root is now taken
+  after an even power of two is factored out (KI-201).
+- **Messages**: four strings read `(math/max N …)` after the rename wave; `sleep` blamed
+  `receive`, `receive` blamed `first`, and a bignum was "expected int, got int" (KI-202).
+
+**A design change on the way (ADR-393):** `math/floor`/`ceil`/`round` of a finite float
+past 2^63 now promote to a bignum instead of raising — the one float→int crossing was the
+one place in the numeric tower that did not promote on overflow. Only an infinity or NaN has
+no integer value.
+
+**Seen and left**, with reasons: `frequencies`/a `table` key refuse a value nested past 256
+levels (the serialise cap, a documented limit); `regex/*` never error on a malformed pattern
+(documented as a design choice in `std/regex.blsp`); `(receive)` with no clauses waits
+forever (it is the "next message" form); linking to a dead pid kills a non-trapping caller
+with `:noproc` (Erlang's semantics). The quadratic pattern-lowering walks stay: at the new
+cap they are cheap.
+
+**Method notes for next time.** `io/puts` output is lost when the process aborts — print
+the case label to `*err*` first, or an abort cannot be attributed. `pgrep -f` matches the
+shell running it; write the pattern as `[t]arget/…`. And the writing-brood skill's
+`receive … (after ms …)` is a clause, not a keyword — three of the early probes tested my
+syntax, not the runtime.
+
+**Two reds on the way that were not the review's.** `docs_test` "nothing falls through to
+:other" was red on `main` since `c468adbc`: `reflect/undef` (ADR-391) never entered the doc
+catalogue — added. `stream_test` "the monitor leaves no [:down] behind" went red once in a
+full run with `before` = 1 and the drained size 0: the baseline counted a message in flight
+to the test process when it started, and the assertion was `=`. It is `<=` now — a leaked
+down still makes the mailbox larger than it was, which is the only thing the test is about.
+5/5 green alone before the change, so this was the assertion's shape, not a defect.
+
+## 2026-09-30 (later) — "fix everything you found": the seen-and-left list, closed
+
+Every item the review had recorded as seen and left, plus what re-probing them turned up.
+KI-203 … KI-206, ADR-394, all sabotage-verified in `tests/robustness_limits_test.blsp`
+(36 cases) and two Rust test modules.
+
+- **The 256-level message cap is gone** (KI-204, ADR-394). Every walker over a `Message`
+  grows its stack, `Clone`/`Drop` are hand-written, the cap is a million-level sanity
+  bound. A 100 000-deep value now crosses a send, a table and the wire; `seq/frequencies`
+  over deep keys agrees with the map code it is a rewrite of. The `adversarial_test`
+  cases that pinned the refusal pin the round trip instead.
+- **A checker panic** found on the way (KI-203): `(<= x 9223372036854775807)` overflowed
+  the else-branch narrowing. Saturating now.
+- **`%map-into`** refuses a malformed entry (KI-205); **`sig`** refuses a spec that is not
+  a type (KI-206); `string/format`'s `%d` and width, `json/decode`'s overflow, `math/mod`,
+  `http/request`, `count` and `seq` name themselves and the value (KI-206).
+- **The pattern pre-check** sits at 64 levels and 80 elements — measured under what the
+  expansion cap admits for every shape (a vector pattern lowers to 125 levels or 126
+  elements, a map or list pattern to 84), so the message a too-large pattern gets always
+  names the pattern.
+
+**Still by design, and why:** a malformed regex is literal characters (`std/regex.blsp`
+documents it, and the probe that "found" it had the pattern and the string swapped);
+`(receive)` with no clauses waits for the next message; `link` to a dead pid kills a
+non-trapping caller with `:noproc` (Erlang's semantics).
+
+## 2026-09-30 (third pass) — "find more issues": six more, all fixed
+
+Four new batteries (files/OS/net, checker/modules/records, reader/strings/bytes,
+processes/tables), a distributed-node battery against a peer, and the earlier batteries
+under GC stress. KI-207 … KI-212, ADR-395, all sabotage-verified.
+
+- `reflect/eval` of a quasiquote inside a module qualified `unquote` (KI-207).
+- `string/repeat` was quadratic; fifty million characters aborted the runtime (KI-208).
+- `file/walk-files` entered symlinked directories, a loop forty levels deep (KI-209).
+- A shebang line was a parse error, a BOM a symbol, a NUL part of a symbol, a malformed
+  `\u` the regex-footgun message (KI-210).
+- `defability`, `impl`, `(:use … :only …)` and `node/connect` accepted the malformed
+  silently (KI-211).
+- A dispatch could not exceed ~200 arms: the expansion ceiling is 1024 now and the
+  compile walkers grow their stack (KI-212, ADR-395).
+- **A kernel race found through the flake**: `demonitor` could return while a death had
+  already taken the monitor and not yet pushed its `[:down …]`, so `stream/next`'s flush
+  missed it — 31 leaks in 80 000 rounds on demand. An in-flight mark on the monitor
+  table, waited out by `demonitor`, closes it (KI-213); the deterministic unit test is the
+  guard — the root-process integration test `demonitor_race.rs`, since the same shape
+  inside the runner never sees the race. A first cut (a spin-wait in `demonitor`) stalled
+  deaths under a loaded full suite and was replaced by pushing the local downs under the
+  lock the take already holds.
+
+**Seen and by design:** `(error "…")` reaches `catch` as the string it built (a map with
+a trace is a runtime error's shape); a trace names `defn`s, not anonymous fns;
+`file/rmdir` is documented recursive; `reflect/eval-string` inherits and keeps the
+caller's namespace (ADR-065 — its docstring now says so); a `link` to a dead pid kills a
+non-trapping caller; `node/monitor` of an unknown node fires `[:nodedown]` at once;
+`node/spawn` on a peer without `node/serve-spawns` is dropped with a warning; a table or
+socket cannot cross nodes. Distribution otherwise held up: 200 000-deep values, 1 M-element
+vectors and 10 MB strings round-trip through a peer.

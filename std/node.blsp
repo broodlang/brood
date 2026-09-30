@@ -190,6 +190,9 @@ authenticated with this runtime's `(node/cookie)`. Returns the peer's authoritat
 `name@host` node name (from the handshake) — address the peer with that value
 (`{:name … :node <that>}`), not a bare literal. This runtime must already be a
 node — call `(node/start …)` first."
+  (when (not (string? spec))
+    (error "node/connect: expected a node name string (\"name\" or \"name@host:port\"), got "
+      (pr-str spec)))
   (when (= (name) :nonode)
     (error "node/connect: this runtime is not a node yet — call (node/start name) first"))
   (let (n (string/length spec)

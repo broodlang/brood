@@ -71,11 +71,17 @@ primitives. The kernel also provides the always-available file primitives
     ;; `cons` a file (O(1)); `%append-two` a subdir's list (copies the small list, SHARES
     ;; `acc`). A plain `(append acc …)` recopies the growing accumulator per entry → O(files²)
     ;; on a large tree. Order is reversed (prepend) — fine for an unordered file set.
+    ;; A symlink to a directory is listed, not entered: `dir?` follows the link, so a
+    ;; loop (`a/up -> ..`) was walked until the kernel's link limit refused the path,
+    ;; forty-odd levels of `a/up/a/up/…` deep, and those paths were the answer (2026-09-30).
     (fold (file/ls dir)
       nil
       (fn (acc e)
-        (let (p (path/join dir e))
-          (if (file/dir? p) (%append-two (walk-files p) acc) (cons p acc)))))))
+        (let (p (path/join dir e)
+              st (file/stat p))
+          (if (and st (get st :dir?) (not (get st :symlink?)))
+            (%append-two (walk-files p) acc)
+            (cons p acc)))))))
 ;; `(or nil list)`, not `(list string)`: nil is a real return (non-directory), and the
 ;; element type cannot be proven through the `%append-two` kernel op's flat `list`.
 

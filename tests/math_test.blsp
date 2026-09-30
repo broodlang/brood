@@ -34,17 +34,32 @@
     (assert-error (math/floor "x"))
     (assert-error (ceil :k))
     (assert-error (round nil)))
-  ;; `ceil` was `(- (floor (- x)))`, so its overflow error came from `floor` with the
-  ;; negated value: "floor: -1e300 is out of range".
-  (test "an out-of-range float names the rounder that was called, and its argument"
-    (assert= (try (ceil 1e300) (catch e (error-message e)))
-      "math/ceil: 1e300 has no integer value in the int range")
-    (assert= (try (ceil -1e300) (catch e (error-message e)))
-      "math/ceil: -1e300 has no integer value in the int range")
-    (assert= (try (round 1e300) (catch e (error-message e)))
-      "math/round: 1e300 has no integer value in the int range")
-    (assert= (try (round -1e300) (catch e (error-message e)))
-      "math/round: -1e300 has no integer value in the int range"))
+  ;; `ceil` was `(- (floor (- x)))`, so its error came from `floor` with the negated
+  ;; value: "floor: -inf …". Only a float with NO integer value errors now — a finite one
+  ;; past 2^63 promotes to a bignum, the way `+`/`*` promote on overflow (2026-09-30).
+  (test "a float with no integer value names the rounder that was called, and its argument"
+    ;; `(/ 1.0 0.0)` raises, so the infinities come from overflow.
+    (let (inf (* 1e308 10.0))
+      (assert= (try (ceil inf) (catch e (error-message e)))
+        "math/ceil: inf has no integer value")
+      (assert= (try (ceil (- inf)) (catch e (error-message e)))
+        "math/ceil: -inf has no integer value")
+      (assert= (try (round inf) (catch e (error-message e)))
+        "math/round: inf has no integer value")
+      (assert= (try (round (- inf inf)) (catch e (error-message e)))
+        "math/round: nan has no integer value")))
+  (test "a finite float past 2^63 rounds to a bignum instead of erroring"
+    ;; 1e300 as a double is an exact integer between 2^996 and 2^997; every rounder
+    ;; answers that integer, and converting it back is the same double.
+    (is (int? (math/floor 1e300)))
+    (is (> (math/floor 1e300) (bit/shift-left 1 996)))
+    (is (< (math/floor 1e300) (bit/shift-left 1 997)))
+    (assert= (->float (math/floor 1e300)) 1e300)
+    (assert= (ceil 1e300) (math/floor 1e300))
+    (assert= (round 1e300) (math/floor 1e300))
+    (assert= (math/floor -1e19) -10000000000000000000)
+    (assert= (ceil -1e19) -10000000000000000000)
+    (assert= (round 9.3e18) 9300000000000000000))
   (test "ceil and round agree with floor on exact and edge arguments"
     (assert= (ceil 5/2) 3)
     (assert= (ceil -5/2) -2)
