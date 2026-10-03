@@ -16443,3 +16443,36 @@ can bind.
 `(map xs :kw)`, `comp` and `apply` callbacks are unchecked; a destructured `[tag v]` does not
 narrow a record union. `exec_chunk.rs` and `jit_runtime/support.rs` changed near the call
 path, so `make ab` and `make ab-vm` are owed on a quiet machine.
+
+## 2026-10-03 — bedit's strict ratchet, and KI-216 closed (ADR-396)
+
+**CI on `1a150b23` was red in one job: `downstream smoke (bedit @ BEDIT_REF)`.** bedit's
+`strict_ratchet_test` (zero `nest check --strict` findings) read four — five at bedit's
+HEAD. All five sat inside `try` bodies, which the 2026-10-02 review started checking. One
+was an imprecise declaration HERE: `enclosing-call` (`std/editor/highlight.blsp`) was
+declared `-> (or nil (vector (or map number string)))` for a value that is always
+`[callee argi]`, so `reflect/read-string` saw a callee that might be a number or a map; it
+is `(tuple string int)` now. The rest were bedit's own nil handling — a `json/decode` that
+may not answer a map, a `(:proc state)` re-read after the `and` that tested it, a buffer
+index tested through the buffer it found, an auto-save path for a buffer with no file —
+fixed in bedit. bedit's format, check, `--check-boot` and the ratchet plus 560 neighbouring
+tests are green against this tree; the full suite is CI's.
+
+**KI-216.** A return-checked contract shim calls its original in argument position, so a
+chain of contracted tail calls kept one suspended shim per call — `(int -> keyword)`
+ping/pong hit the 1M frame cap armed and ran flat unarmed. The deferred fix was "a VM frame
+kind that records a pending check"; it turned out a suspended shim already IS that frame,
+and what was missing was a way to recognise one. The templates now call the original
+inside `(%contract-await ret …)`, a `Prim2` mark whose resume point identifies the frame
+and whose first operand — directly below the callee's frame — is the type it will check.
+Before calling, `(%contract-tail? ret)`, a `Prim1` whose VM arm exits to the driver,
+answers whether the frame this activation returns into is such a mark with an `equal`
+type; if so the shim tail-calls. The tree-walker and nested runs answer `false` and keep
+checking; both ops keep shims off the JIT. Nothing on the ordinary call path changed.
+
+Guard `return_checked_tail_calls_collapse_and_still_check`: 2M levels at tiers 1 and 2,
+a violation at the bottom of a chain, and a narrower type at either end of a chain.
+Sabotaged both ways — never collapsing reds the flat case at tier 1, always collapsing
+reds `narrow-inner` (it returned 3 unchecked). `contract_test` 115/115 at tiers 0/1/2
+armed; the contracts cli/nest integration binaries, the prim unit tests, clippy on CI's
+flags, rustfmt and `nest format --check` clean.

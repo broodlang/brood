@@ -31,7 +31,8 @@ pub(crate) fn prim2_int_fast(op: PrimOp, a: i64, b: i64) -> Option<Value> {
         | PrimOp::VectorRef
         | PrimOp::TableHas
         | PrimOp::TableGet
-        | PrimOp::MapGet => None,
+        | PrimOp::MapGet
+        | PrimOp::ContractAwait => None,
     }
 }
 
@@ -92,9 +93,12 @@ pub(crate) fn prim_apply(op: PrimOp, x: Value, y: Value) -> Result<Option<Value>
         PrimOp::BitOr => Value::int(a | b),
         PrimOp::BitXor => Value::int(a ^ b),
         // Handled in the exec arm (they need `&mut Heap` / the heap); never reach here.
-        PrimOp::Cons | PrimOp::VectorRef | PrimOp::TableHas | PrimOp::TableGet | PrimOp::MapGet => {
-            return Ok(None)
-        }
+        PrimOp::Cons
+        | PrimOp::VectorRef
+        | PrimOp::TableHas
+        | PrimOp::TableGet
+        | PrimOp::MapGet
+        | PrimOp::ContractAwait => return Ok(None),
     };
     Ok(Some(v))
 }
@@ -234,6 +238,9 @@ pub(crate) fn prim2_inline_exec(
         // `%lookup-miss` resolves it through the `Lookup` ability). A non-map receiver
         // defers too, so the set / string / integer-index branches and every type error
         // stay in Brood, and this stays a fast path rather than a second implementation.
+        // The shim's mark (KI-216): the value of the call it wraps, untouched. It is a prim
+        // only so a frame suspended inside that call can be recognised by its resume point.
+        None if op == PrimOp::ContractAwait => Ok(Some(y)),
         None if op == PrimOp::MapGet => {
             if let ValueRef::Map(id) = x.unpack() {
                 if let Some(v) = heap.map_get_inline(id, y) {

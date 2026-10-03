@@ -293,6 +293,9 @@ pub(crate) fn exec_chunk(
                             heap.push_root(result);
                             continue;
                         }
+                        // Only the driver holds the frame stack: hand it the question,
+                        // `ret` still on top of the operands (KI-216).
+                        (PrimOp1::ContractTail, _) => return Ok(ChunkExit::ContractProbe),
                         (PrimOp1::VectorLen, ValueRef::Vector(id)) => {
                             crate::perf_bump!(prim1_inline);
                             let result = Value::Int(heap.vector(id).len() as i64);

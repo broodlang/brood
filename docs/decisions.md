@@ -25447,3 +25447,50 @@ The cap is a bound on runaway expansion, not a stack limit.
 than one level per level, reach the cap sooner. A form past the cap still gets the cap's
 message; the pattern pre-check (64 levels, 80 elements) stays where the measured limits
 put it.
+
+## ADR-396 — A contract shim tail-calls its original when an equal result check is already pending
+
+**Status:** implemented (2026-10-03). Fixes KI-216.
+
+**Context.** A shim that checks its function's declared RESULT calls the original in
+argument position — `(%contract-check-ret name ret (orig a))` — so the call is never a
+tail call. A chain of contracted tail calls (`ping` → `pong` → `ping` …, or a function
+tail-calling itself through its public name) left one suspended shim per call: armed,
+`(sig ping (int -> keyword))` mutual recursion hit the VM's 1M frame cap where the unarmed
+program is flat. Contracts are the `nest run`/`nest test` default (ADR-381), so the mode a
+developer runs in changed which programs terminate. The module boundary (ADR-383) narrows
+the exposure to root names and cross-module chains; it does not close it.
+
+**Decision.** Collapse identical pending checks, the way Racket's contract system does.
+Two prims, both VM-recognised and both harmless as plain functions:
+
+- `(%contract-await ret call)` → `call`'s value. The templates wrap the original's call
+  in it, compiled to `PrimOp::ContractAwait`, so a shim suspended in that call is
+  RECOGNISABLE: its resume point is the mark, and `ret` — the mark's first operand,
+  pushed before the call — is the operand directly below the callee's frame. No side
+  table, no frame field.
+- `(%contract-tail? ret)` → is the frame this activation returns into such a mark,
+  awaiting an `equal` `ret`? Compiled to `PrimOp1::ContractTail`, whose exec arm exits to
+  the driver (`ChunkExit::ContractProbe`) because only `vm_run_bc` holds the frame stack.
+  If it is, the shim calls its original in TAIL position: the frame beneath checks the
+  value anyway, against the same type.
+
+Every other engine answers `false`, which is always sound — the shim then checks as
+before. That covers the tree-walker, a shim at the bottom of a nested run (a callback
+under a native, the `apply` in a variadic shim's non-tail position), and any native frame:
+`chunk_in_jit_subset` refuses a chunk holding either op, so shims run on the VM while the
+originals they wrap still tier.
+
+**Consequences.**
+- Return-checked contracted tail recursion is flat at tiers 1 and 2; arguments are still
+  checked on every call. Unequal result types never collapse, so a narrower type at either
+  end of a chain still raises (`return_checked_tail_calls_collapse_and_still_check`, both
+  directions sabotage-verified).
+- A collapsed chain's failure names its OUTERMOST function (`ping`), where the
+  tree-walker, which never collapses, names the innermost (`pong`). Every function in the
+  chain returned that value, so both are true; the engines differ only in which they name.
+- The cost is on the contracted path only: one driver round trip per armed call with a
+  checked result, beside the ~3.5 µs the shim already costs. No instruction on the
+  ordinary call path changed. Shims no longer tier (they had nothing to gain from it).
+- The mark promises the check that follows it, so only a shim may use `%contract-await`;
+  like every `%` name it is internal.

@@ -103,6 +103,40 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "",
         contracts_sweep_prim,
     );
+    primitives.def(
+        "%contract-await",
+        Arity::exact(2),
+        Sig::new(vec![any, any], any),
+        &[],
+        "",
+        contract_await_prim,
+    );
+    primitives.def(
+        "%contract-tail?",
+        Arity::exact(1),
+        Sig::new(vec![any], bool_ty),
+        &[],
+        "",
+        contract_tail_p,
+    );
+}
+
+/// `(%contract-await ret v)` → `v`. The shim templates wrap the call to their original in
+/// it so a suspended shim frame is recognisable: the VM compiles it to
+/// `PrimOp::ContractAwait`, and a frame whose resume point is that instruction is a shim
+/// about to check its original's result against `ret` (KI-216, ADR-396). As a function it
+/// is the identity on its second argument. Only a shim may use it — the mark promises the
+/// check that follows it.
+fn contract_await_prim(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    Ok(arg(args, 1))
+}
+
+/// `(%contract-tail? ret)` → false. The VM answers it from the frame stack
+/// (`PrimOp1::ContractTail`): true when the frame beneath is a shim awaiting a check
+/// against an equal `ret`. Anywhere the frame stack is not in view — the tree-walker, a
+/// call through `apply` — the answer is `false`, which is always sound: the shim checks.
+fn contract_tail_p(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    Ok(Value::boolean(false))
 }
 
 /// Whether `BROOD_CONTRACTS=1` armed runtime contracts for this process. Cached: the

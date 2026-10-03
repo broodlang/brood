@@ -122,83 +122,120 @@ type; `i` is the position of the first rest argument."
 
 ;; The templates. Each parameter is named for the kernel's shim test (`%contract-orig`) and
 ;; for the trace a contract error prints; the bodies are deliberately alike.
+;;
+;; A result check makes the call to the original a NON-tail call, so a chain of contracted
+;; tail calls — `ping` → `pong` → `ping` … — used to stack one pending check per call and
+;; run out of frames where the same program unarmed runs flat (KI-216). So the call is
+;; wrapped in `%contract-await`, a mark the VM recognises on a suspended frame, and before
+;; calling, `(%contract-tail? ret)` asks whether the frame this one returns into is such a
+;; mark awaiting an EQUAL result type. If it is, that frame checks this result anyway and
+;; this shim calls its original in tail position: the pending checks collapse to one, as
+;; Racket's contract system collapses them (ADR-396). Arguments are still checked on
+;; every call. The collapsed check names the OUTERMOST function of the chain when it
+;; fails — every function in it returned the same value.
 (defn- %contract-shim-0 (%contract-name %contract-orig %contract-spec %contract-ret)
   (fn ()
-    (if (%eq %contract-ret 'any)
+    (if (or (%eq %contract-ret 'any) (%contract-tail? %contract-ret))
       (%contract-orig)
-      (%contract-check-ret %contract-name %contract-ret (%contract-orig)))))
+      (%contract-check-ret %contract-name
+        %contract-ret
+        (%contract-await %contract-ret (%contract-orig))))))
 (defn- %contract-shim-1 (%contract-name %contract-orig %contract-spec %contract-ret)
   (fn (a)
     (%contract-args! %contract-name %contract-spec (list a))
-    (if (%eq %contract-ret 'any)
+    (if (or (%eq %contract-ret 'any) (%contract-tail? %contract-ret))
       (%contract-orig a)
-      (%contract-check-ret %contract-name %contract-ret (%contract-orig a)))))
+      (%contract-check-ret %contract-name
+        %contract-ret
+        (%contract-await %contract-ret (%contract-orig a))))))
 (defn- %contract-shim-2 (%contract-name %contract-orig %contract-spec %contract-ret)
   (fn (a b)
     (%contract-args! %contract-name %contract-spec (list a b))
-    (if (%eq %contract-ret 'any)
+    (if (or (%eq %contract-ret 'any) (%contract-tail? %contract-ret))
       (%contract-orig a b)
-      (%contract-check-ret %contract-name %contract-ret (%contract-orig a b)))))
+      (%contract-check-ret %contract-name
+        %contract-ret
+        (%contract-await %contract-ret (%contract-orig a b))))))
 (defn- %contract-shim-3 (%contract-name %contract-orig %contract-spec %contract-ret)
   (fn (a b c)
     (%contract-args! %contract-name %contract-spec (list a b c))
-    (if (%eq %contract-ret 'any)
+    (if (or (%eq %contract-ret 'any) (%contract-tail? %contract-ret))
       (%contract-orig a b c)
-      (%contract-check-ret %contract-name %contract-ret (%contract-orig a b c)))))
+      (%contract-check-ret %contract-name
+        %contract-ret
+        (%contract-await %contract-ret (%contract-orig a b c))))))
 (defn- %contract-shim-4 (%contract-name %contract-orig %contract-spec %contract-ret)
   (fn (a b c d)
     (%contract-args! %contract-name %contract-spec (list a b c d))
-    (if (%eq %contract-ret 'any)
+    (if (or (%eq %contract-ret 'any) (%contract-tail? %contract-ret))
       (%contract-orig a b c d)
-      (%contract-check-ret %contract-name %contract-ret (%contract-orig a b c d)))))
+      (%contract-check-ret %contract-name
+        %contract-ret
+        (%contract-await %contract-ret (%contract-orig a b c d))))))
 (defn- %contract-shim-5 (%contract-name %contract-orig %contract-spec %contract-ret)
   (fn (a b c d e)
     (%contract-args! %contract-name %contract-spec (list a b c d e))
-    (if (%eq %contract-ret 'any)
+    (if (or (%eq %contract-ret 'any) (%contract-tail? %contract-ret))
       (%contract-orig a b c d e)
-      (%contract-check-ret %contract-name %contract-ret (%contract-orig a b c d e)))))
+      (%contract-check-ret %contract-name
+        %contract-ret
+        (%contract-await %contract-ret (%contract-orig a b c d e))))))
 (defn- %contract-shim-6 (%contract-name %contract-orig %contract-spec %contract-ret)
   (fn (a b c d e f)
     (%contract-args! %contract-name %contract-spec (list a b c d e f))
-    (if (%eq %contract-ret 'any)
+    (if (or (%eq %contract-ret 'any) (%contract-tail? %contract-ret))
       (%contract-orig a b c d e f)
-      (%contract-check-ret %contract-name %contract-ret (%contract-orig a b c d e f)))))
+      (%contract-check-ret %contract-name
+        %contract-ret
+        (%contract-await %contract-ret (%contract-orig a b c d e f))))))
 (defn- %contract-shim-7 (%contract-name %contract-orig %contract-spec %contract-ret)
   (fn (a b c d e f g)
     (%contract-args! %contract-name %contract-spec (list a b c d e f g))
-    (if (%eq %contract-ret 'any)
+    (if (or (%eq %contract-ret 'any) (%contract-tail? %contract-ret))
       (%contract-orig a b c d e f g)
-      (%contract-check-ret %contract-name %contract-ret (%contract-orig a b c d e f g)))))
+      (%contract-check-ret %contract-name
+        %contract-ret
+        (%contract-await %contract-ret (%contract-orig a b c d e f g))))))
 (defn- %contract-shim-8 (%contract-name %contract-orig %contract-spec %contract-ret)
   (fn (a b c d e f g h)
     (%contract-args! %contract-name %contract-spec (list a b c d e f g h))
-    (if (%eq %contract-ret 'any)
+    (if (or (%eq %contract-ret 'any) (%contract-tail? %contract-ret))
       (%contract-orig a b c d e f g h)
-      (%contract-check-ret %contract-name %contract-ret (%contract-orig a b c d e f g h)))))
+      (%contract-check-ret %contract-name
+        %contract-ret
+        (%contract-await %contract-ret (%contract-orig a b c d e f g h))))))
 (defn- %contract-shim-rest-0 (%contract-name %contract-orig %contract-spec %contract-ret)
   (fn (& more)
     (%contract-args! %contract-name %contract-spec more)
-    (if (%eq %contract-ret 'any)
+    (if (or (%eq %contract-ret 'any) (%contract-tail? %contract-ret))
       (apply %contract-orig more)
-      (%contract-check-ret %contract-name %contract-ret (apply %contract-orig more)))))
+      (%contract-check-ret %contract-name
+        %contract-ret
+        (%contract-await %contract-ret (apply %contract-orig more))))))
 (defn- %contract-shim-rest-1 (%contract-name %contract-orig %contract-spec %contract-ret)
   (fn (a & more)
     (%contract-args! %contract-name %contract-spec (cons a more))
-    (if (%eq %contract-ret 'any)
+    (if (or (%eq %contract-ret 'any) (%contract-tail? %contract-ret))
       (apply %contract-orig a more)
-      (%contract-check-ret %contract-name %contract-ret (apply %contract-orig a more)))))
+      (%contract-check-ret %contract-name
+        %contract-ret
+        (%contract-await %contract-ret (apply %contract-orig a more))))))
 (defn- %contract-shim-rest-2 (%contract-name %contract-orig %contract-spec %contract-ret)
   (fn (a b & more)
     (%contract-args! %contract-name %contract-spec (cons a (cons b more)))
-    (if (%eq %contract-ret 'any)
+    (if (or (%eq %contract-ret 'any) (%contract-tail? %contract-ret))
       (apply %contract-orig a b more)
-      (%contract-check-ret %contract-name %contract-ret (apply %contract-orig a b more)))))
+      (%contract-check-ret %contract-name
+        %contract-ret
+        (%contract-await %contract-ret (apply %contract-orig a b more))))))
 (defn- %contract-shim-rest-3 (%contract-name %contract-orig %contract-spec %contract-ret)
   (fn (a b c & more)
     (%contract-args! %contract-name %contract-spec (cons a (cons b (cons c more))))
-    (if (%eq %contract-ret 'any)
+    (if (or (%eq %contract-ret 'any) (%contract-tail? %contract-ret))
       (apply %contract-orig a b c more)
-      (%contract-check-ret %contract-name %contract-ret (apply %contract-orig a b c more)))))
+      (%contract-check-ret %contract-name
+        %contract-ret
+        (%contract-await %contract-ret (apply %contract-orig a b c more))))))
 
 ;; `get`, not `nth`, to read the spec: `nth` is a contracted prelude name, and a template
 ;; that reached it through its own shim would recurse without end.

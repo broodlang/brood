@@ -427,3 +427,75 @@ fn contracted_recursion_keeps_its_depth_and_its_tail_calls() {
         "mutual tail recursion through argument-only shims must stay flat:\n{text}"
     );
 }
+
+/// KI-216 (ADR-396): a RETURN-checked contracted tail call used to keep one pending check
+/// per call — `ping`/`pong` declared `(int -> keyword)` hit the VM's 1M frame cap where
+/// the unarmed program is flat. A shim now tail-calls its original when the frame it
+/// returns into already awaits a check against an equal result type. 2M levels is past
+/// the cap, so the first assertion fails without the collapse.
+///
+/// The collapse must not cost a check: a violation at the bottom of the chain is still a
+/// callee contract error, and a chain whose result types DIFFER keeps both checks — a
+/// narrower inner type (`narrow` under `wide`) and a narrower outer one (`outer` over
+/// `inner`) each still raise. Both VM tiers, since the JIT keeps shims on the VM and the
+/// originals it compiles must hand their tail calls back to the frame stack.
+#[test]
+fn return_checked_tail_calls_collapse_and_still_check() {
+    let dir = temp_dir("contracts-collapse");
+    std::fs::write(
+        dir.path.join("collapse.blsp"),
+        "(sig ping (int -> keyword))\n\
+         (sig pong (int -> keyword))\n\
+         (defn ping (n) (if (= n 0) :done (pong (dec n))))\n\
+         (defn pong (n) (if (= n 0) :done (ping (dec n))))\n\
+         (sig bad-ping (int -> keyword))\n\
+         (sig bad-pong (int -> keyword))\n\
+         (defn bad-ping (n) (if (= n 0) 42 (bad-pong (dec n))))\n\
+         (defn bad-pong (n) (if (= n 0) 42 (bad-ping (dec n))))\n\
+         (sig wide (int -> (or keyword int)))\n\
+         (sig narrow (int -> keyword))\n\
+         (defn wide (n) (narrow n))\n\
+         (check-allow :type-mismatch (defn narrow (n) n))\n\
+         (sig outer (int -> keyword))\n\
+         (sig inner (int -> (or keyword int)))\n\
+         (check-allow :type-mismatch (defn outer (n) (inner n)))\n\
+         (defn inner (n) n)\n\
+         (defn- report (label thunk)\n\
+         \x20\x20(io/puts (str label (try (thunk) (catch e (str (get e :kind) \" \" (get e :blame)))))))\n\
+         (report \"armed: \" (fn () (ping \"x\")))\n\
+         (report \"tail: \" (fn () (ping 2000000)))\n\
+         (report \"violation: \" (fn () (bad-ping 100001)))\n\
+         (report \"narrow-inner: \" (fn () (wide 3)))\n\
+         (report \"narrow-outer: \" (fn () (outer 3)))\n",
+    )
+    .expect("write program");
+    for tier in ["1", "2"] {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_brood"));
+        cmd.arg("collapse.blsp")
+            .current_dir(&dir.path)
+            .env("BROOD_CONTRACTS", "1")
+            .env("BROOD_TIER", tier)
+            .env_remove("BROOD_NO_JIT");
+        support::dies_with_parent(&mut cmd);
+        let out = cmd.output().expect("run brood");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            text.contains("armed: :contract :caller"),
+            "tier {tier}: the run must actually be armed, or the rest proves nothing:\n{text}"
+        );
+        assert!(
+            text.contains("tail: :done"),
+            "tier {tier}: return-checked mutual tail recursion must stay flat:\n{text}"
+        );
+        for case in ["violation", "narrow-inner", "narrow-outer"] {
+            assert!(
+                text.contains(&format!("{case}: :contract :callee")),
+                "tier {tier}: `{case}` must still raise a callee contract error:\n{text}"
+            );
+        }
+    }
+}

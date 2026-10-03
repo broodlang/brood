@@ -402,6 +402,8 @@ pub(super) fn emit_arith(
         // CHAMP probe through the runtime callback, like the table ops — not integer
         // arithmetic, so it is lowered in `prim.rs`, not here.
         PrimOp::MapGet => return super::bail("prim-map-get-not-int-arith"),
+        // A contract shim's mark — out of the subset (`chunk_in_jit_subset`), never here.
+        PrimOp::ContractAwait => return super::bail("prim-contract-await-vm-only"),
     })
 }
 

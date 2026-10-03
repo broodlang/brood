@@ -1244,9 +1244,10 @@ pub(crate) fn node_touches_heap(node: &Node) -> bool {
                 | PrimOp1::TypeIs(_),
             ..
         } => false,
-        // A length read is a structure read, like `nth`.
+        // A length read is a structure read, like `nth`; a contract probe reads the frame
+        // stack and only ever appears in a shim, which never tiers.
         Node::Prim1 {
-            op: PrimOp1::VectorLen,
+            op: PrimOp1::VectorLen | PrimOp1::ContractTail,
             ..
         } => true,
         Node::Const(_) | Node::Local(_) | Node::Global(_) | Node::GlobalIc { .. } => false,

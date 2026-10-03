@@ -468,6 +468,13 @@ pub(super) fn chunk_in_jit_subset(code: &[Inst]) -> bool {
     code.iter().all(|inst| match inst {
         Inst::Const(_) => true,
         Inst::Call { head: Some(h), .. } if *h == receive_sym => false,
+        // A contract shim (KI-216): `%contract-tail?` reads the VM's frame stack, which a
+        // native frame does not keep, and the mark `%contract-await` leaves only means
+        // something to a frame the driver suspended. Both keep the chunk on the VM.
+        Inst::Prim1 {
+            op: PrimOp1::ContractTail,
+            ..
+        } => false,
         Inst::Local(_)
         | Inst::Jump(_)
         | Inst::JumpIfFalse(_)

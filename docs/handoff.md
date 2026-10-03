@@ -12,11 +12,23 @@ sysctl that moves under you — that file's last section has the one-line check)
 questions are answerable here; check that file's "what this box CAN answer" before deferring
 anything.
 
-## 2026-10-02 — the type-system / contracts / AI-docs review is fixed, UNCOMMITTED
+## 2026-10-03 — bedit's strict ratchet fixed, KI-216 closed; UNCOMMITTED in both repos
 
-**State:** every finding of `docs/review-2026-10-02.md` is fixed in the working tree, with a
-sabotage-verified guard each; nothing is committed. The devlog's 2026-10-02 entry is the
-record. HEAD's own CI red (v0.35.0: clippy under rustc 1.98, and two tree-walker suite
+**State:** no open bug in `known-issues.md`. CI on `1a150b23` was red only in the bedit
+smoke (its `--strict` ratchet read 4 new findings, all inside newly-checked `try` bodies).
+Fixed: one imprecise sig here (`enclosing-call`), four nil-handling sites in `../bedit`
+(`toolchain`, `term`, `format`, `commands`). KI-216 is fixed by ADR-396 (contract shims
+collapse identical pending result checks). Devlog 2026-10-03 is the record.
+
+**To land:** commit + push bedit first, then this repo, then `make smoke-bedit ARGS=--bump`
+to move `BEDIT_REF` to bedit's pushed HEAD and commit the pin; read `make green`. bedit's
+gates were run piecemeal here (format, check, `--check-boot`, 567 targeted tests including
+the ratchet) because the harness blocks `make smoke-bedit` on this machine.
+
+## 2026-10-02 — the type-system / contracts / AI-docs review (committed as `1a150b23`)
+
+**State:** every finding of `docs/review-2026-10-02.md` is fixed, with a sabotage-verified
+guard each. The devlog's 2026-10-02 entry is the record. HEAD's own CI red (v0.35.0: clippy under rustc 1.98, and two tree-walker suite
 failures) is fixed in the same tree.
 
 **Gates run on the final tree** (targeted, capped, `-j1` — never the full suite here):
@@ -32,8 +44,7 @@ and `jit_runtime/support.rs` (the JIT stack margin) changed near the call path: 
 but `.claude/` is globally git-ignored, so those edits live on this machine only.
 
 **Open, in value order:**
-1. **KI-216** — a return-checked contracted tail call keeps a frame per call; needs an ADR
-   (a collapsing pending-check VM frame).
+1. ~~**KI-216**~~ — fixed 2026-10-03 (ADR-396).
 2. **A design call:** a *caught* contract error has no `:file`/`:line`/`:trace`. Adding them
    at the three catch sites breaks "what you throw is what you catch" for that one kind.
 3. **Checker residue:** `(map xs :kw)`, `comp` and `apply` callbacks are unchecked; a

@@ -90,7 +90,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 
 | # | What | Status |
 |---|---|---|
-| KI-216 | **a contracted function whose declared result is checked keeps a frame per tail call** — under `BROOD_CONTRACTS=1` (the `nest run`/`nest test` default), `(sig ping (int -> keyword))` mutually tail-recursive with a twin passes at 1M levels and fails cleanly at 5M against the VM's 1 048 576-frame cap, where unarmed is flat. The shim must check the result AFTER the original returns, so the original is not in tail position | 📋 **LIMITATION, deferred 2026-10-02** — needs an ADR: a VM-level pending-return-check frame that collapses when an identical check is already directly below it (Racket's approach). A shim declared `-> any` already calls the original in tail position, so mutual tail recursion through those stays flat (`contracts_mode.rs` `contracted_recursion_keeps_its_depth_and_its_tail_calls`). The error is a clean, catchable `recursion too deep`, not a crash |
+| KI-216 | **a contracted function whose declared result is checked keeps a frame per tail call** — under `BROOD_CONTRACTS=1` (the `nest run`/`nest test` default), `(sig ping (int -> keyword))` mutually tail-recursive with a twin passes at 1M levels and fails cleanly at 5M against the VM's 1 048 576-frame cap, where unarmed is flat. The shim must check the result AFTER the original returns, so the original is not in tail position | ✅ **FIXED 2026-10-03 (ADR-396)** — a shim wraps its original's call in the `%contract-await` mark and first asks `(%contract-tail? ret)`: when the frame it returns into is a shim suspended at that mark awaiting an EQUAL result type, it tail-calls its original, so identical pending checks collapse to one (Racket's approach). Unequal types never collapse; the tree-walker and nested runs answer `false` and check as before. Guard `contracts_mode.rs` `return_checked_tail_calls_collapse_and_still_check` (2M levels at tiers 1 and 2, a deep violation, both narrowing directions) — sabotage-verified both ways: a probe that never collapses reds the flat case, one that always does reds `narrow-inner` |
 | KI-214 | **`brood-lsp` aborted on one header: `Content-Length: 99999999999` allocated that many bytes** — `lsp_server::Connection::stdio()` reads whatever length a client declares, so any client (or a stray byte in the pipe) could take the server down with `memory allocation of 99999999999 bytes failed` | ✅ **FIXED 2026-09-30** — the server owns its stdio framing (`stdio_capped`): a length past 64 MiB, negative, absent or unparsable is a protocol error; the crate's message type and exit rule are unchanged. Guard `crates/lsp/src/main.rs` `frame_cap_tests` (a frame one byte over the cap is refused before its body is read) — deterministic |
 | KI-215 | **`nest` entered a symlinked directory under `src/`: `src/up -> ..` made `nest check` report 202 phantom files under `src/up/src/up/…` before failing on the path** — `project/collect-sources` recursed on `file/dir?`, which follows the link (KI-209's rule, in the project tool) | ✅ **FIXED 2026-09-30** — a symlinked directory is neither entered nor listed as a source. Guard `tests/robustness_limits_test.blsp` "the project source collector and a symlink to a directory" — sabotage-verified (the phantom paths return) |
 | KI-213 | **`demonitor` raced the death path's push: a `[:down …]` taken by a death but not yet delivered landed AFTER a `demonitor` + `(receive ([:down ^m …]) (after 0))` flush** — `stream_test` "the monitor leaves no [:down] behind" red in two full suites of four; 31 leaks in 80 000 rounds of the same shape on a 28-core box | ✅ **FIXED 2026-09-30** — the death path pushes the LOCAL downs while it still holds `MONITORS` (the take and the pushes are one step to a `demonitor`; `deliver` takes only the mailbox lock and a scheduler queue, so the hold is safe; remote downs go over the wire after release). A first cut — an in-flight mark waited out by a spinning `demonitor` — stalled deaths under a loaded full suite (two timeouts) and was replaced. Guards: `crates/lisp/tests/demonitor_race.rs` (the 80 000-round shape as a ROOT process, 0.5 s — sabotage-verified: 150 leaks with the lock released before the pushes), `monitor::in_flight_tests` (a `demonitor` blocks while a holder is mid-push), and the Brood-level `tests/robustness_limits_test.blsp` case, which never reds inside the runner and is kept as a load test only |
@@ -13280,7 +13280,7 @@ KI-209's mechanism, in the project tool rather than `file/walk-files`.
 to a directory" — sabotage-verified: with the link followed again the phantom paths
 return and the assertion reds.
 
-## KI-216 — a return-checked contracted tail call keeps a frame per call 📋 LIMITATION, deferred 2026-10-02
+## KI-216 — a return-checked contracted tail call keeps a frame per call ✅ FIXED 2026-10-03 (ADR-396)
 
 **Seen** (the 2026-10-02 type-system review): under `BROOD_CONTRACTS=1`, two functions
 declared `(sig ping (int -> keyword))` / `(sig pong (int -> keyword))` and calling each
@@ -13302,3 +13302,22 @@ Guard: `crates/cli/tests/contracts_mode.rs`
 pending return check, collapsing into an identical check already directly beneath it
 (Racket's contract system does this). It is on the call path at every tier, so it needs
 `make ab-vm` as well as `make ab`.
+
+**Fixed 2026-10-03 (ADR-396) — without a new frame kind, and off the ordinary call path.**
+A suspended shim is already a pending-check frame; what was missing was a way to RECOGNISE
+one. The templates now wrap the call to the original in `(%contract-await ret …)`, which
+compiles to a `Prim2` mark: a frame whose resume point is that instruction is a shim about
+to check against `ret`, and `ret` is the operand directly below the callee's frame. Before
+calling, a shim asks `(%contract-tail? ret)` — a `Prim1` whose VM arm exits to the driver,
+the only code that holds the frame stack — and calls its original in tail position when
+the frame it returns into is such a mark with an `equal` type. Both ops keep a chunk out of
+the JIT subset, so shims stay on the VM while the originals tier. No instruction on the
+ordinary call path changed, so the `ab`/`ab-vm` gate this entry asked for does not apply;
+the contracted path pays one driver round trip per checked call.
+
+What it does not do: the tree-walker and a shim at the bottom of a nested run answer
+`false` and check as before (sound, not flat), and a collapsed chain's failure names its
+outermost function where the tree-walker names the innermost. Guard: `contracts_mode.rs`
+`return_checked_tail_calls_collapse_and_still_check` — 2M levels at tiers 1 and 2, a
+violation at the bottom of a chain, and both narrowing directions (`narrow` under `wide`,
+`outer` over `inner`), sabotage-verified both ways.

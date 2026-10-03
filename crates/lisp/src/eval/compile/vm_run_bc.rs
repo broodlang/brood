@@ -1277,6 +1277,16 @@ pub(crate) fn vm_run_bc(
                     try_jit = true;
                 }
             }
+            Ok(ChunkExit::ContractProbe) => {
+                // `(%contract-tail? ret)` from a contract shim (KI-216, ADR-396): answer it
+                // in place of `ret` and resume the same frame. Nothing ran and nothing
+                // allocated, so the loop-top safepoint has nothing to do.
+                let top = heap.roots_len() - 1;
+                let ret = heap.root_at(top);
+                let pending = contract_check_pending(heap, &frames, cur_base, ret);
+                heap.set_root_at(top, Value::boolean(pending));
+                returned_to_caller = true;
+            }
             Ok(ChunkExit::Killed) => {
                 // Hard kill fired at the inline SelfCall safepoint.
                 return Ok(VmOutcome::Killed);
@@ -1352,6 +1362,40 @@ pub(crate) fn vm_run_bc(
             }
         }
     }
+}
+
+/// Is the current activation's result already going to be checked against `ret`? (KI-216,
+/// ADR-396.) True when the frame directly beneath — the one this activation returns into
+/// — is a contract shim suspended inside `(%contract-await ret' (orig …))`, i.e. its
+/// resume point is the [`PrimOp::ContractAwait`] mark, and `ret'` equals `ret`.
+///
+/// `ret'` needs no bookkeeping: it is the mark's first operand, pushed before the call,
+/// so it is the top of that frame's operand stack — the root directly below the current
+/// frame's base. Every way into the current frame keeps that base (a `Call` starts the
+/// callee where the caller's operands end; a `Tail` rebuilds in place), which is what
+/// makes "directly beneath" mean "this activation's value is that frame's awaited value".
+///
+/// Only `frames` is consulted, so a shim entered at the bottom of a NESTED run (a callback
+/// under a native, `apply`) answers false — conservative, never wrong: it then checks.
+fn contract_check_pending(heap: &Heap, frames: &[BcFrame], base: usize, ret: Value) -> bool {
+    let Some(caller) = frames.last() else {
+        return false;
+    };
+    let awaiting = caller
+        .arm
+        .chunk
+        .as_ref()
+        .and_then(|chunk| chunk.code.get(caller.ip))
+        .is_some_and(|inst| {
+            matches!(
+                inst,
+                Inst::Prim2 {
+                    op: PrimOp::ContractAwait,
+                    ..
+                }
+            )
+        });
+    awaiting && base > 0 && heap.equal(heap.root_at(base - 1), ret)
 }
 
 // ===================== entry =====================

@@ -76,6 +76,13 @@ pub enum PrimOp {
     ///
     /// Opt-in while it proves itself: see `mapget_enabled`.
     MapGet,
+    /// `(%contract-await ret call)` — answers `call`'s value. A contract shim wraps the
+    /// call to its original in it, and its `Inst::Prim2` is the MARK a suspended frame is
+    /// recognised by: a frame whose resume point is this instruction is a shim waiting on
+    /// its original, about to check the result against `ret`, the operand directly below
+    /// the callee's frame. `%contract-tail?` reads exactly that (KI-216). Never lowered by
+    /// the JIT: a chunk holding it stays on the VM, where the frame stack is the driver's.
+    ContractAwait,
 }
 
 /// A 3-ary inlinable primitive — the `PrimOp` family's arity-3 sibling. Three members:
@@ -153,6 +160,14 @@ pub enum PrimOp1 {
     /// which `%vector-ref` then reads through [`PrimOp::VectorRef`]. A non-vector
     /// defers to the native for its exact type error.
     VectorLen,
+    /// `(%contract-tail? ret)` — is the frame directly beneath this one a contract shim
+    /// suspended at its [`PrimOp::ContractAwait`] with a declared result EQUAL to `ret`?
+    /// Then this activation's result is already going to be checked against `ret`, and the
+    /// shim may call its original in tail position instead of stacking an identical check
+    /// per call (KI-216, ADR-396). Only the driver can see the frame stack, so the VM's exec
+    /// arm exits with [`ChunkExit::ContractProbe`]; every other engine answers `false`,
+    /// which is always sound — the shim then checks as it always did.
+    ContractTail,
 }
 
 impl PrimOp1 {
@@ -165,6 +180,7 @@ impl PrimOp1 {
             "empty?" => PrimOp1::IsEmpty,
             "type-of" => PrimOp1::TypeOf,
             "%vector-length" => PrimOp1::VectorLen,
+            "%contract-tail?" => PrimOp1::ContractTail,
             _ => return None,
         })
     }
@@ -194,6 +210,7 @@ impl PrimOp {
             _ if name == kw::TABLE_HAS => PrimOp::TableHas,
             _ if name == kw::TABLE_GET => PrimOp::TableGet,
             _ if name == kw::EQ_PRIM => PrimOp::Eq,
+            "%contract-await" => PrimOp::ContractAwait,
             _ => return None,
         })
     }
@@ -1086,6 +1103,11 @@ pub(crate) enum ChunkExit {
     /// Hard `:kill` was pending at the inline `SelfCall` safepoint. The frame is already
     /// reset (ip=0, new args in slots); the driver retires the process.
     Killed,
+    /// A `(%contract-tail? ret)` ([`PrimOp1::ContractTail`]) asked about the frame stack,
+    /// which only the driver holds. `ret` is the operand on top of `roots`, and `ip` is
+    /// already past the instruction: the driver replaces `ret` with the answer and
+    /// re-enters this same frame.
+    ContractProbe,
     /// Reduction budget exhausted at the inline `SelfCall` safepoint (capture mode). The
     /// frame is already reset (ip=0, new args in slots); the driver captures as usual.
     Preempt,

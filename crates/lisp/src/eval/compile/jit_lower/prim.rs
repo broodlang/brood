@@ -406,6 +406,8 @@ pub(super) fn emit_prim1(
                 }
             }
         }
+        // Reads the VM's frame stack — out of the subset (`chunk_in_jit_subset`).
+        PrimOp1::ContractTail => return super::bail("prim-contract-tail-vm-only"),
         PrimOp1::VectorLen => {
             // `(%vector-length v)`: one callback that reads the slab, returning the
             // length unboxed — or -1 for a non-vector, which deopts so the VM raises the
