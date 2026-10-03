@@ -178,7 +178,7 @@ impl Clone for Message {
                 bits: *bits,
                 pin: pin.clone(),
             },
-            Message::List(items, pos) => grow(|| Message::List(items.clone(), pos.clone())),
+            Message::List(items, pos) => grow(|| Message::List(items.clone(), *pos)),
             Message::Vector(items) => grow(|| Message::Vector(items.clone())),
             Message::Map(entries) => grow(|| Message::Map(entries.clone())),
             Message::Failure(entries) => grow(|| Message::Failure(entries.clone())),
@@ -214,7 +214,7 @@ impl Drop for Message {
 fn take_children(m: &mut Message, out: &mut Vec<Message>) {
     match m {
         Message::List(items, _) | Message::Vector(items) | Message::Set(items) => {
-            out.extend(items.drain(..));
+            out.append(items);
         }
         Message::Map(entries) | Message::Failure(entries) => {
             for (k, v) in entries.drain(..) {
@@ -230,7 +230,7 @@ fn take_children(m: &mut Message, out: &mut Vec<Message>) {
                 for (_, d) in arm.optionals.drain(..) {
                     out.push(d);
                 }
-                out.extend(arm.body.drain(..));
+                out.append(&mut arm.body);
             }
         }
         _ => {}

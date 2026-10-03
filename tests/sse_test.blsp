@@ -274,15 +274,15 @@ then close. Returns the port."
       (assert= (collect-stream [])
         [[:open 200] [:event "message" "café\nline"] [:closed :closed]])))
   (test "a refused connection is one :sse-closed carrying the error"
-    (let (listener (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port listener))
-      ;; a port that was just free and is closed again: nothing listens there
-      (tcp/close listener)
-      (connect (str "http://127.0.0.1:" port "/") (self))
-      (let (messages (collect-stream []))
-        (assert= (count messages) 1)
-        (assert= (first (first messages)) :closed)
-        (is (string? (second (first messages)))))))
+    ;; Port 1: a test process cannot bind below 1024, so nothing can be listening. A port
+    ;; that was just free and closed again was a race under the parallel suite — another
+    ;; test's server could take it in the gap and accept, and the stream then ended
+    ;; `[:closed :closed]` instead of carrying the refusal (CI, 2026-09-30, tree-walker).
+    (connect "http://127.0.0.1:1/" (self))
+    (let (messages (collect-stream []))
+      (assert= (count messages) 1)
+      (assert= (first (first messages)) :closed)
+      (is (string? (second (first messages))))))
   (test "a CR/LF in a header raises in the caller, before anything is sent"
     (assert-error (connect "http://127.0.0.1:1/" (self) {:headers {"X-A" "b\r\nX-Injected: 1"}}))
     (assert-error (connect "ftp://127.0.0.1/" (self))))

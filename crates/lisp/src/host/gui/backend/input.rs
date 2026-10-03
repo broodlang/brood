@@ -11,7 +11,7 @@ pub(super) const MULTI_CLICK_MS: u128 = 400;
 
 /// A key as the Brood value `term-poll`/`gui` deliver: a printable → a 1-char
 /// string, the rest → keywords. Built as a `Message` (no heap) so the GUI thread
-/// can deliver it straight to a mailbox (ADR-058). Mirrors `key_to_value`.
+/// can deliver it straight to a mailbox (ADR-059). Mirrors `key_to_value`.
 pub(super) fn key_message(k: &Key) -> Message {
     match k {
         Key::Char(c) => Message::Str(c.to_string()),
@@ -332,8 +332,10 @@ mod tests {
             scroll_dy: 0.0,
             at,
         };
-        match mouse_message(&m) {
-            Message::Vector(v) => v,
+        // `Message` implements `Drop` (its children are freed iteratively), so the vector
+        // is taken out by `mem::take` rather than moved out of the pattern.
+        match &mut mouse_message(&m) {
+            Message::Vector(v) => std::mem::take(v),
             _ => panic!("a mouse message is a vector"),
         }
     }

@@ -353,6 +353,8 @@ A zero-arg lambda `(fn () …)` body is passed through (not re-wrapped), like `s
   "Selectively receive a message from the mailbox: run the first `(pattern [:when guard] body...)` clause that matches, leaving others queued. An optional final `(after ms body...)` clause fires on timeout; `(receive)` blocks for the next message."
   (do
     (%receive-check-after clauses)
+    ;; Before the pin/tag/prep scans below, none of which bounds its walk.
+    (each (first (%receive-split clauses)) (fn (clause) (%match-refuse-too-deep (first clause))))
     (let (parts (%receive-split clauses)
           real (nth parts 0)
           ms (nth parts 1)

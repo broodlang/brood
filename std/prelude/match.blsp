@@ -605,14 +605,21 @@ NON-LINEAR patterns (the same name twice) work.
         guard (nth parsed 1)
         body (nth parsed 2)
         success (if (nil? guard) `(do ~@body) `(if ~guard (do ~@body) ~fail)))
-    (when (%match-too-deep? pat 0)
-      (error "match: pattern nested deeper than "
-        %match-max-depth
-        " levels or wider than "
-        %match-max-width
-        " elements: "
-        (pr-str-bounded pat)))
+    (%match-refuse-too-deep pat)
     (%match-compile pat target nil success fail)))
+
+;; Refuse a pattern past the lowering cap, by name. Every walk of a pattern must come AFTER
+;; this: `%match-too-deep?` stops at the cap, while an unbounded walk over a 100 000-level
+;; pattern exhausts the tree-walker's stack budget before the refusal is ever reached
+;; (`receive`'s pin and tag scans did, so only the VM reported it).
+(defn- %match-refuse-too-deep (pat)
+  (when (%match-too-deep? pat 0)
+    (error "match: pattern nested deeper than "
+      %match-max-depth
+      " levels or wider than "
+      %match-max-width
+      " elements: "
+      (pr-str-bounded pat))))
 
 ;; The no-match failure: a structured, catchable, self-describing value carrying
 ;; the context (:match / :let / a fn name), the value, and the patterns tried.
