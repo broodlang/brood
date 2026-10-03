@@ -184,17 +184,18 @@ starting with `init`. `(scan '(1 2 3) 0 +)` → `(0 1 3 6)`.
     (seq/scan [1 2 3] 0 +)      → (0 1 3 6)"
   (scan-acc f init (seq coll) (list init)))
 
-;; (zip-with f a b) — map `f` over pairs, stopping at the shorter sequence.
-(defn- zip-with-acc (f a b acc)
+;; (zip-with a b f) — map `f` over pairs, stopping at the shorter sequence. Data first,
+;; callback last (ADR-308), like every other combinator.
+(defn- zip-with-acc (a b f acc)
   (if (or (empty? a) (empty? b))
     (reverse acc)
-    (zip-with-acc f (rest a) (rest b) (cons (f (first a) (first b)) acc))))
-(defn zip-with (f a b)
+    (zip-with-acc (rest a) (rest b) f (cons (f (first a) (first b)) acc))))
+(defn zip-with (a b f)
   "Map `f` over corresponding pairs from `a` and `b`, stopping at the shorter
-input. `(zip-with + '(1 2) '(3 4))` → `(4 6)`.
+input. `(zip-with '(1 2) '(3 4) +)` → `(4 6)`.
 
-    (seq/zip-with + [1 2] [10 20])   → (11 22)"
-  (zip-with-acc f (seq a) (seq b) nil))
+    (seq/zip-with [1 2] [10 20] +)   → (11 22)"
+  (zip-with-acc (seq a) (seq b) f nil))
 
 ;; (min-by f coll) / (max-by f coll) — find the element whose key is smallest/largest.
 (defn min-by (coll f)

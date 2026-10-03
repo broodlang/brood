@@ -17,6 +17,10 @@ use std::process::Command;
 const PROBE: &str = "(defn s (xs) (math/quot (first xs) 2))\n(sig s ((vector int) -> int))\n";
 
 fn check_warnings(env: &[(&str, &str)]) -> usize {
+    check_warnings_with(&[], env)
+}
+
+fn check_warnings_with(flags: &[&str], env: &[(&str, &str)]) -> usize {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
@@ -27,6 +31,7 @@ fn check_warnings(env: &[(&str, &str)]) -> usize {
     std::fs::write(&path, PROBE).expect("write probe");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_brood"));
     cmd.arg("--check")
+        .args(flags)
         .arg(&path)
         .env_remove("BROOD_CHECK_STRICT");
     for (key, value) in env {
@@ -60,5 +65,16 @@ fn brood_check_honours_the_strict_env_flag() {
         check_warnings(&[("BROOD_CHECK_STRICT", "0")]),
         0,
         "only the spelling `1` turns strict on"
+    );
+}
+
+/// `brood --check --strict` is the flag spelling of the env switch, as `nest check --strict`
+/// is — until 2026-10-02 clap refused it as an unexpected argument.
+#[test]
+fn brood_check_accepts_the_strict_flag() {
+    assert_eq!(
+        check_warnings_with(&["--strict"], &[]),
+        1,
+        "`brood --check --strict` must put the check in strict mode"
     );
 }

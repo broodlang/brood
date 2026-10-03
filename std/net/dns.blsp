@@ -167,7 +167,10 @@
               ;; answers `[data surplus]` — the surplus is already-arrived body, and dropping
               ;; it would deadlock waiting for bytes we have.
               [len-bytes surplus] (tcp/read-n sock 2 {:timeout-ms timeout-ms})
-              len (bytes/uint len-bytes 0 2)
+              ;; `[:closed acc]` / `[:timeout acc]`: no length arrived — no answer.
+              len (if (bytes? len-bytes)
+                    (bytes/uint len-bytes 0 2)
+                    (error (str "dns: no reply length (" len-bytes ")")))
               body (read-body sock len surplus timeout-ms)
               _ (tcp/close sock)
               ancount (bytes/uint body 6 2)

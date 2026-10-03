@@ -1463,7 +1463,7 @@ fn infer_overload_inner(heap: &Heap, sym: Symbol) -> Option<Vec<Sig>> {
         return None;
     }
     let self_name = closure.name;
-    let mut sigs = Vec::with_capacity(closure.arms.len());
+    let mut arms: Vec<(Vec<Symbol>, Vec<Value>)> = Vec::with_capacity(closure.arms.len());
     for arm in closure.arms.iter() {
         // A rest/optional arm's parameters don't map 1:1 to argument positions, so it
         // can't be checked positionally — and one unreadable arm makes the *set*
@@ -1471,22 +1471,51 @@ fn infer_overload_inner(heap: &Heap, sym: Symbol) -> Option<Vec<Sig>> {
         if !arm.optionals.is_empty() || arm.rest.is_some() {
             return None;
         }
-        let params: Vec<Symbol> = arm.params.clone();
-        let param_tys = param_domains(heap, &arm.body, &params, &Ctx::default());
-        let mut ctx = match self_name {
-            Some(name) => Ctx::default().with_inferring_self(name),
-            None => Ctx::default(),
-        };
-        for &p in &params {
-            ctx = ctx.bind(p, Some(Ty::ANY));
-        }
-        let ret = arm
-            .body
-            .last()
-            .and_then(|&tail| super::infer::with_fresh_depth(|| expr_ty(heap, tail, &ctx)))
-            .unwrap_or(Ty::ANY);
-        sigs.push(Sig::new(param_tys, ret));
+        arms.push((arm.params.clone(), arm.body.clone()));
     }
+    let base = match self_name {
+        Some(name) => Ctx::default().with_inferring_self(name),
+        None => Ctx::default(),
+    };
+    // Each arm's return under a scope in which a self-call returns `R`: an arm that
+    // cannot be typed reads `any`, as before.
+    let arm_rets = |scope: &Ctx| -> Vec<Ty> {
+        arms.iter()
+            .map(|(params, body)| {
+                let mut ctx = scope.clone();
+                for &p in params {
+                    ctx = ctx.bind(p, Some(Ty::ANY));
+                }
+                body.last()
+                    .and_then(|&tail| super::infer::with_fresh_depth(|| expr_ty(heap, tail, &ctx)))
+                    .unwrap_or(Ty::ANY)
+            })
+            .collect()
+    };
+    // A self-call may land in any arm, so the ascent is over the UNION of the arms'
+    // returns; each arm is then read once more under the settled `R`.
+    let tails: Vec<Value> = arms
+        .iter()
+        .filter_map(|(_, body)| body.last().copied())
+        .collect();
+    let scope = match self_name.filter(|&n| tails.iter().any(|&t| form_mentions(heap, t, n))) {
+        Some(name) => {
+            let settled = self_ascent(heap, self_name, &tails, &base, |scope| {
+                arm_rets(scope).into_iter().reduce(Ty::union)
+            })
+            .unwrap_or(Ty::ANY);
+            base.bind(name, Some(Ty::arrow(Sig::variadic(Ty::ANY, settled))))
+        }
+        None => base.clone(),
+    };
+    let rets = arm_rets(&scope);
+    let sigs = arms
+        .iter()
+        .zip(rets)
+        .map(|((params, body), ret)| {
+            Sig::new(param_domains(heap, body, params, &Ctx::default()), ret)
+        })
+        .collect();
     Some(sigs)
 }
 
@@ -1661,6 +1690,63 @@ pub(super) fn bind_head(heap: &Heap, ctx: Ctx, head: Value, ty: Option<Ty>) -> C
     }
 }
 
+/// Bound on [`self_ascent`]: a scalar result settles in two or three rounds, a recursive
+/// list builder in four (⊥, the base case, the first `cons`, the folded `μ`); the rest is
+/// slack before the ascent is cut and the return read as unknown.
+const MAX_SELF_ASCENT_ROUNDS: usize = 8;
+
+/// The return of a body that calls ITSELF, typed in ONE question — a LOADED closure
+/// ([`infer_sig`], [`infer_overload_of`]), where Pass 2.8's file-level fixpoint never runs.
+///
+/// `type_round` types the body (its tail, or every arm's) under the scope it is handed,
+/// in which the function's own name is bound to the arrow `(any… -> R)`. The ascent starts
+/// at `R = ⊥` and each round takes `R ∪ F(R)`, widened by the ADR-349/350 discipline Pass
+/// 2.8 uses (a moving interval to its infinity, a nesting folded into a `μ`, a depth cut
+/// past the early rounds); it stops when a round adds nothing — a post-fixpoint, so every
+/// return at every recursion depth lies in `R` by induction on the depth — and reads the
+/// return as `any` when the bound runs out, never the intermediate it was cut at.
+///
+/// Before this the single pass typed the self-call as ⊥ ("Kleene from ⊥", true only of
+/// an ITERATED fixpoint) and kept the first round's answer: `(defn h (n) (if (= n 0) nil
+/// (cons n (h (- n 1)))))` in a required module inferred `-> nil`, so `(nth (h 3) 2)`
+/// warned "got nil", and `(when (nil? x) (self 0))` read as a diverging guard (2026-10-02).
+/// A body that does not mention its own name is typed once, exactly as before.
+fn self_ascent(
+    heap: &Heap,
+    self_name: Option<Symbol>,
+    bodies: &[Value],
+    ctx: &Ctx,
+    mut type_round: impl FnMut(&Ctx) -> Option<Ty>,
+) -> Option<Ty> {
+    // A parameter spelled like the function shadows it: the mention is the parameter.
+    let Some(name) = self_name
+        .filter(|&n| !ctx.is_lexical_local(n) && bodies.iter().any(|&b| form_mentions(heap, b, n)))
+    else {
+        return type_round(ctx);
+    };
+    let mut ret = Ty::NEVER;
+    let mut older: Option<Ty> = None;
+    for round in 0..MAX_SELF_ASCENT_ROUNDS {
+        let scope = ctx.bind(name, Some(Ty::arrow(Sig::variadic(Ty::ANY, ret.clone()))));
+        let mut next = type_round(&scope)?.union(ret.clone());
+        next = next.widen_intervals_against(&ret);
+        for prev in std::iter::once(&ret).chain(older.iter()) {
+            if let Some(folded) = Ty::fold_recursive(prev, &next) {
+                next = folded;
+                break;
+            }
+        }
+        if round + 1 >= MAX_SELF_ASCENT_ROUNDS / 2 {
+            next = next.widened_below(WIDEN_DEPTH);
+        }
+        if next == ret {
+            return Some(ret);
+        }
+        older = Some(std::mem::replace(&mut ret, next));
+    }
+    Some(Ty::ANY)
+}
+
 fn infer_sig_inner(heap: &Heap, sym: Symbol) -> Option<Sig> {
     let Value::Fn(cid) = super::deps::obs_global(heap, sym)? else {
         return None;
@@ -1711,6 +1797,7 @@ fn infer_sig_inner(heap: &Heap, sym: Symbol) -> Option<Sig> {
     };
     let demands = ParamDemands {
         params: param_tys,
+        optional: Vec::new(),
         rest,
     };
 
@@ -1737,7 +1824,10 @@ fn infer_sig_inner(heap: &Heap, sym: Symbol) -> Option<Sig> {
         ctx = ctx.bind(p, Some(bound));
     }
     let informative = demands.params.iter().any(|t| *t != Ty::ANY) || demands.rest.is_some();
-    match super::infer::with_fresh_depth(|| expr_ty(heap, tail, &ctx)) {
+    let typed = self_ascent(heap, self_name, &[tail], &ctx, |scope| {
+        super::infer::with_fresh_depth(|| expr_ty(heap, tail, scope))
+    });
+    match typed {
         Some(ret) => Some(demands.into_sig(ret)),
         // The return couldn't be inferred (e.g. the body calls an ability op whose facts aren't
         // on this bare ctx). Still surface the parameter demands with an `ANY` return when a
@@ -1782,22 +1872,29 @@ fn infer_return_only(
     if arms.is_empty() {
         return None;
     }
-    let mut ret: Option<Ty> = None;
-    for (binders, tail) in &arms {
-        let mut ctx = match self_name {
-            Some(name) => Ctx::default().with_inferring_self(name),
-            None => Ctx::default(),
-        };
-        for &p in binders {
-            ctx = ctx.bind(p, Some(Ty::ANY));
+    // Every arm is typed in the same round, under the same `R` for the self-call: a
+    // recursive call may land in any arm of its arity.
+    let base = match self_name {
+        Some(name) => Ctx::default().with_inferring_self(name),
+        None => Ctx::default(),
+    };
+    let tails: Vec<Value> = arms.iter().map(|(_, tail)| *tail).collect();
+    let ret = self_ascent(heap, self_name, &tails, &base, |scope| {
+        let mut ret: Option<Ty> = None;
+        for (binders, tail) in &arms {
+            let mut ctx = scope.clone();
+            for &p in binders {
+                ctx = ctx.bind(p, Some(Ty::ANY));
+            }
+            let t = super::infer::with_fresh_depth(|| expr_ty(heap, *tail, &ctx))?;
+            ret = Some(match ret {
+                Some(a) => a.union(t),
+                None => t,
+            });
         }
-        let t = super::infer::with_fresh_depth(|| expr_ty(heap, *tail, &ctx))?;
-        ret = Some(match ret {
-            Some(a) => a.union(t),
-            None => t,
-        });
-    }
-    Some(Sig::new(vec![], ret?))
+        ret
+    })?;
+    Some(Sig::new(vec![], ret))
 }
 
 /// **Same-file return inference** from a `(fn …)` *form* (not a loaded closure): the union of
@@ -1903,16 +2000,21 @@ pub(super) fn infer_return_from_form(
 /// `(numeric numeric & numeric -> …)`.
 pub(super) struct ParamDemands {
     pub params: Vec<Ty>,
+    /// The `&optional` positions' demands — each already widened by its DEFAULT's type,
+    /// since an omitted argument binds the default and the body runs over it all the same.
+    pub optional: Vec<Ty>,
     pub rest: Option<Ty>,
 }
 
 impl ParamDemands {
     /// The `Sig` these demands make with return `ret`.
     pub fn into_sig(self, ret: Ty) -> Sig {
-        match self.rest {
+        let mut sig = match self.rest {
             Some(rest) => Sig::with_rest(self.params, rest, ret),
             None => Sig::new(self.params, ret),
-        }
+        };
+        sig.optional = self.optional;
+        sig
     }
 }
 
@@ -1961,23 +2063,50 @@ pub(super) fn infer_params_from_form(
         return None; // params vary per clause — no single demand to store
     }
     let plist = *items.get(1)?;
-    // An `&optional` fn is still skipped: an optional's position may or may not be filled,
-    // so a per-position demand cannot be checked at a call site. A `& rest` fn is not: its
-    // fixed parameters bind positionally exactly as a plain fn's do, and the rest binder's
-    // demand becomes a per-argument one through `rest_element_demand`.
+    // A `& rest` fn binds its fixed parameters positionally exactly as a plain fn does,
+    // and the rest binder's demand becomes a per-argument one through
+    // `rest_element_demand`. An `&optional` position constrains only an argument that IS
+    // passed — an omitted one binds its default — so its demand is the body's domain
+    // widened by the default's type (`nil` with none): the body runs over that value too,
+    // so it is in the domain by construction. (Optionals were skipped outright until
+    // 2026-10-02, so `(h 1 :kw)` into a `string | number` optional went unchecked.)
     let raw = match plist {
         Value::Vector(id) => heap.vector(id).to_vec(),
         _ => super::walk::list_items(heap, plist).unwrap_or_default(),
     };
-    if raw
+    let optional_at = raw
         .iter()
-        .any(|&it| matches!(it, Value::Sym(s) if value::symbol_is(s, kw::AMP_OPTIONAL)))
-    {
-        return None;
-    }
-    let rest_at = raw.iter().position(|&it| {
+        .position(|&it| matches!(it, Value::Sym(s) if value::symbol_is(s, kw::AMP_OPTIONAL)));
+    let rest_marker_at = raw.iter().position(|&it| {
         matches!(it, Value::Sym(s)
             if value::symbol_is(s, kw::AMP) || value::symbol_is(s, kw::AMP_REST))
+    });
+    // The optional binders' defaults, in order: `(name default)`, or a bare `name`.
+    let optional_defaults: Vec<Option<Value>> = match optional_at {
+        Some(at) => raw[at + 1..rest_marker_at.unwrap_or(raw.len())]
+            .iter()
+            .map(|&item| match item {
+                Value::Sym(_) => Some(None),
+                Value::Pair(_) | Value::Vector(_) => {
+                    let inner = match item {
+                        Value::Vector(id) => heap.vector(id).to_vec(),
+                        _ => super::walk::list_items(heap, item).unwrap_or_default(),
+                    };
+                    match inner.as_slice() {
+                        [Value::Sym(_)] => Some(None),
+                        [Value::Sym(_), default] => Some(Some(*default)),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+            .collect::<Option<_>>()?,
+        None => Vec::new(),
+    };
+    // The count of positions before the rest binder: required ones and optional ones.
+    let rest_at = rest_marker_at.map(|at| match optional_at {
+        Some(_) => at - 1,
+        None => at,
     });
     let params = super::walk::fn_params(heap, plist);
     if params.is_empty() {
@@ -1998,8 +2127,25 @@ pub(super) fn infer_params_from_form(
         Some(fixed) if demands.len() == fixed + 1 => rest_element_demand(&demands.pop()?),
         _ => None,
     };
+    let required = demands.len().checked_sub(optional_defaults.len())?;
+    let optional = demands
+        .split_off(required)
+        .into_iter()
+        .zip(&optional_defaults)
+        .map(|(domain, default)| {
+            if domain.is_any() {
+                return domain;
+            }
+            let default_ty = match default {
+                Some(form) => expr_ty(heap, *form, &Ctx::default()).unwrap_or(Ty::ANY),
+                None => Ty::of(Tag::Nil),
+            };
+            domain.union(default_ty)
+        })
+        .collect();
     Some(ParamDemands {
         params: demands,
+        optional,
         rest,
     })
 }
@@ -3220,7 +3366,7 @@ impl Site {
                         && !scope.is_lexical_local(*head)
                         && (value::symbol_is(*head, "count")
                             || value::symbol_is(*head, "string/length")
-                            || value::symbol_is(*head, "vector-length"))
+                            || value::symbol_is(*head, "seq/vector-length"))
                 }
                 _ => false,
             },

@@ -721,8 +721,9 @@ image), or nil if it isn't a bound symbol. A bare-symbol `reflect/eval` is just 
   ;; check-allow :discarded-catch — a parse failure on half-typed input is the expected answer (not equivalent / nothing to format / no hint)
   (check-allow :discarded-catch
     (try
-      (let (sym (reflect/read-string callee))
-        (if (and (symbol? sym) (bound? sym)) (arglist (reflect/eval sym)) nil))
+      (when (string? callee)
+        (let (sym (reflect/read-string callee))
+          (if (and (symbol? sym) (bound? sym)) (arglist (reflect/eval sym)) nil)))
       (catch e nil))))
 
 ;; check-allow: deliberately non-tail — depth = the signature hint's argument count.

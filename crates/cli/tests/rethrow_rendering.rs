@@ -59,3 +59,43 @@ fn an_error_escaping_a_finally_renders_as_itself_with_its_trace() {
     assert!(stderr.contains("at boom"), "trace lost: {stderr}");
     assert!(!stderr.contains("{:kind"), "map dump leaked: {stderr}");
 }
+
+#[test]
+fn a_thrown_map_of_a_library_kind_renders_its_message() {
+    // A kind no built-in error has — a library's own — still names its sentence, and
+    // the map is unchanged for a `catch`: only the headline differs.
+    let path = script(
+        "library-kind",
+        "(when (not= (try (throw {:kind :my-lib :message \"m\" :n 1}) (catch e (get e :n))) 1)\n\
+           (throw \"catch lost the map\"))\n\
+         (throw {:kind :my-lib :message \"the widget is closed\" :widget 7})\n",
+    );
+    let (stderr, ok) = run(&path);
+    assert!(!ok);
+    assert!(
+        stderr.contains("error: my-lib: the widget is closed"),
+        "stderr: {stderr}"
+    );
+    // The echoed source line quotes the map literal; the headline must not dump it.
+    let headline = stderr.lines().find(|line| line.contains("error:")).unwrap();
+    assert!(!headline.contains("{:"), "map dump leaked: {stderr}");
+}
+
+#[test]
+fn a_contract_violation_renders_its_message() {
+    let path = script(
+        "contract",
+        "(sig f (int -> int))\n(defn f (x) x)\n(f \"two\")\n",
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_brood"))
+        .env("BROOD_NO_CHECK", "1")
+        .env("BROOD_NO_CRASH_REPORT", "1")
+        .env("BROOD_CONTRACTS", "1")
+        .arg(&path)
+        .output()
+        .expect("run brood");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(stderr.contains("error: contract: "), "stderr: {stderr}");
+    assert!(!stderr.contains("{:kind"), "map dump leaked: {stderr}");
+}

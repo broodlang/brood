@@ -133,6 +133,16 @@ impl Sig {
         }
         // Arity must line up: a fixed-arity `self` can't satisfy an `other` that
         // may pass more (or fewer) arguments than `self` accepts.
+        //
+        // Whatever the rest tails, `self` must not REQUIRE more arguments than the
+        // fewest `other` may be called with: `(int string & any -> int)` is not usable
+        // where `(int -> int)` is wanted, since a one-argument call is an arity error.
+        // The variadic-`self` arm below used to skip this, so that sig read as a
+        // subtype of `(int -> int)` and of `(-> int)`, and a union of the two arrows
+        // absorbed the one a caller could actually use.
+        if self.params.len() > other.params.len() {
+            return false;
+        }
         match (self.rest.is_some(), other.rest.is_some()) {
             (false, true) => return false, // other is variadic, self isn't
             (false, false) => {
@@ -171,6 +181,14 @@ impl Sig {
                 // `other` supplies an argument `self` has no parameter for.
                 (Some(_), None) => return false,
                 _ => {}
+            }
+        }
+        // Past every explicit position, two variadic tails meet: whatever extra arguments
+        // `other` may pass, `self`'s tail must accept. The loop above stops at the longest
+        // explicit arity, so without this `(& int -> r)` read as a subtype of `(& any -> r)`.
+        if let (Some(own_rest), Some(other_rest)) = (&self.rest, &other.rest) {
+            if !other_rest.is_subtype(own_rest) {
+                return false;
             }
         }
         true

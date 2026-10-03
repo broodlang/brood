@@ -684,7 +684,7 @@ mod enum_extras {
     fn zip_with(bencher: divan::Bencher, n: usize) {
         bench_prog(
             bencher,
-            format!("(last (zip-with + (range {n}) (range {n})))"),
+            format!("(last (zip-with (range {n}) (range {n}) +))"),
         );
     }
 

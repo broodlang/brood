@@ -322,11 +322,13 @@
   (test "a non-integer key on an integer-indexed collection is a get error"
     ;; the classic mistake: `deps` (a list of maps) where `dep` (one map) was meant
     ; the old leaked `-`/`>=` wording
-    (let (msg (try (get (list {:name "a"}) :name) (catch e (error-message e))))
-      (is (includes? msg "get:"))
-      (is (includes? msg "integer index"))
-      (is (includes? msg "keyword"))
-      (refute (includes? msg "expected number")))
+    ;; check-allow (here and below): the misuse is the failure whose message is pinned.
+    (check-allow :type-mismatch
+      (let (msg (try (get (list {:name "a"}) :name) (catch e (error-message e))))
+        (is (includes? msg "get:"))
+        (is (includes? msg "integer index"))
+        (is (includes? msg "keyword"))
+        (refute (includes? msg "expected number"))))
     (assert-error (get [1 2] :name))
     (assert-error (get (bytes 1 2) :name)))
   (test "a keyword key on a string is an ERROR now, not a silent nil"
@@ -334,25 +336,28 @@
     (assert-error (get "store" :name))
     (assert= (get "store" 0) "s"))
   (test "a non-collection is a get error naming the value"
-    (let (msg (try (get 5 :name) (catch e (error-message e))))
-      (is (includes? msg "get:"))
-      (is (includes? msg "collection"))
-      (is (includes? msg "int"))))
+    (check-allow :type-mismatch
+      (let (msg (try (get 5 :name) (catch e (error-message e))))
+        (is (includes? msg "get:"))
+        (is (includes? msg "collection"))
+        (is (includes? msg "int")))))
   (test "a default does NOT mask a wrong-typed key — only an absent one"
     (assert-error (get [1 2] :name :dflt))
     (assert-error (get "s" :name :dflt))
     (assert= (get [1 2] 9 :dflt) :dflt))
   ; the old leaked `empty?` wording
   (test "nth names itself too — it was the source of the leaked messages"
-    (let (msg (try (nth [1 2] :k) (catch e (error-message e))))
-      (is (includes? msg "nth:"))
-      (is (includes? msg "integer index"))
-      (refute (includes? msg "expected number")))
+    (check-allow :type-mismatch
+      (let (msg (try (nth [1 2] :k) (catch e (error-message e))))
+        (is (includes? msg "nth:"))
+        (is (includes? msg "integer index"))
+        (refute (includes? msg "expected number"))))
     (assert-error (nth (list 1 2) :k))
-    (let (msg (try (nth 5 0) (catch e (error-message e))))
-      (is (includes? msg "nth:"))
-      (is (includes? msg "collection"))
-      (refute (includes? msg "empty?"))))
+    (check-allow :type-mismatch
+      (let (msg (try (nth 5 0) (catch e (error-message e))))
+        (is (includes? msg "nth:"))
+        (is (includes? msg "collection"))
+        (refute (includes? msg "empty?")))))
   (test "every valid shape is untouched by the new checks"
     (assert= (get {:a 1} :a) 1)
     (assert= (get [10 20] 1) 20)
@@ -396,9 +401,10 @@
     (assert= (:a nil :dflt) :dflt))
   (test "anything else is a type error NAMING the keyword"
     ;; the likely misuse: a collection OF maps where one map was meant
-    (let (msg (try (:name (list {:name "a"})) (catch e (error-message e))))
-      (is (includes? msg ":name:"))
-      (is (includes? msg "map, set or nil")))
+    (check-allow :type-mismatch
+      (let (msg (try (:name (list {:name "a"})) (catch e (error-message e))))
+        (is (includes? msg ":name:"))
+        (is (includes? msg "map, set or nil"))))
     (assert-error (:name [1 2]))
     (assert-error (:name "str"))
     (assert-error (:name 5)))

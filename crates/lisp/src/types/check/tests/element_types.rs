@@ -151,7 +151,7 @@ fn element_type_flows_through_more_combinators() {
         r#"(+ 1 (second ["a" "b"]))"#,
         r#"(+ 1 (first (rest ["a" "b"])))"#,
         r#"(+ 1 (first (but-last ["a" "b"])))"#,
-        r#"(+ 1 (first (distinct ["a" "b"])))"#,
+        r#"(+ 1 (first (seq/distinct ["a" "b"])))"#,
         r#"(+ 1 (first (seq/dedupe ["a" "b"])))"#,
         r#"(+ 1 (first (seq/reject ["a" "b"] (fn (x) false))))"#,
         r#"(+ 1 (first (seq/take-last ["a" "b"] 1)))"#,

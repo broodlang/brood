@@ -88,8 +88,24 @@ pub(super) fn callback_arity(heap: &Heap, arg: Value, ctx: &Ctx) -> Option<Arity
         Value::Sym(s) if ctx.is_local(s) => None,
         Value::Sym(s) => arity_of(heap, s),
         Value::Pair(_) => lambda_literal_arity(heap, arg),
+        // A keyword is a function of one or two arguments: `(:k m)` / `(:k m default)`.
+        Value::Keyword(_) => Some(Arity::range(1, 2)),
         _ => None,
     }
+}
+
+/// The signature a KEYWORD has as a function: `(:k m)` / `(:k m default)` looks `:k` up
+/// in a map, a set or `nil` — anything else raises (`apply_keyword`) — and answers
+/// whatever is stored there (or the default). The receiver set mirrors the walk's own
+/// keyword-call check (`expected a map, set or nil to look up in`).
+fn keyword_sig() -> Sig {
+    use crate::core::value::Tag;
+    let receiver = Ty::of(Tag::Map)
+        .union(Ty::of(Tag::Set))
+        .union(Ty::of(Tag::Nil));
+    let mut sig = Sig::new(vec![receiver], Ty::ANY);
+    sig.optional = vec![Ty::ANY];
+    sig
 }
 
 /// The signature of a callback **argument**, when one is knowable: a named global's
@@ -104,6 +120,7 @@ pub(super) fn callback_sig(heap: &Heap, arg: Value, ctx: &Ctx) -> Option<Sig> {
             .declared_sig(s)
             .or_else(|| ctx.inferred_fn_sig(s))
             .or_else(|| sig_of(heap, s)),
+        Value::Keyword(_) => Some(keyword_sig()),
         _ => None,
     }
 }
@@ -220,10 +237,12 @@ pub(super) fn callback_desc(arg: Value) -> String {
 /// (ansi-clear))` slip. Four lock-free `symbol_is` compares, only reached on
 /// the generic-call path (so no `symbol_name` allocation on the hot path).
 pub(super) fn is_output_sink(s: Symbol) -> bool {
-    value::symbol_is(s, "print")
-        || value::symbol_is(s, "println")
+    // (`print`/`println`/`format` were the keys until 2026-10-02 — all three unbound
+    // since the `io/`/`string/` moves, so only `str` was ever guarded.)
+    value::symbol_is(s, "io/puts")
+        || value::symbol_is(s, "io/write")
         || value::symbol_is(s, "str")
-        || value::symbol_is(s, "format")
+        || value::symbol_is(s, "string/format")
 }
 
 /// The arity a signature describes: `&` rest → unbounded, `&optional` → a range, else an
@@ -842,8 +861,17 @@ pub(super) fn gradual_of_compound(heap: &Heap, expr: Value, ctx: &Ctx) -> Option
     // over-approximation), so a `(* x x)`-style body declared `int` is `stat` and
     // checked with `⊆` — no false positive (the rule only fires when every operand
     // is a known integer; `guards::expr_ty` routes it through `numeric_call_ty`).
+    // Precise only when EVERY operand is: an operand that is a call result or a
+    // `let` local over one carries an over-approximated interval, and the arithmetic
+    // over it is exactly as over-approximated — `(- (count (keys m)) 1)` reads
+    // `int[-1..]` without being able to be `-1` (2026-10-02: it was `stat` and warned).
     if let Some(t) = expr_ty(heap, expr, ctx) {
-        if is_int_closed_op(head) && t.is_subtype(&Ty::of(value::Tag::Int)) {
+        if is_int_closed_op(head)
+            && t.is_subtype(&Ty::of(value::Tag::Int))
+            && items[1..]
+                .iter()
+                .all(|&operand| !gradual_of(heap, operand, ctx).dynamic)
+        {
             return Some(GradualTy::stat(t));
         }
     }
@@ -875,10 +903,11 @@ pub(super) fn is_int_closed_op(head: Symbol) -> bool {
     value::symbol_is(head, "+")
         || value::symbol_is(head, "-")
         || value::symbol_is(head, "*")
-        || value::symbol_is(head, "quot")
-        || value::symbol_is(head, "rem")
-        || value::symbol_is(head, "mod")
         // `math/` since ADR-227 — the bare spelling no longer exists, so keying it here
-        // left this rule dead for the spelling that does (mirrors `infer.rs`).
+        // left this rule dead for the spelling that does (mirrors `infer.rs`). The integer
+        // divisions are deliberately NOT here (their bare keys, unbound since ADR-227, were
+        // removed 2026-10-02): a `(math/mod x 100)` interval is read by overlap in plain
+        // mode and by inclusion only under strict —
+        // `declarations::an_over_approximated_return_mismatch_is_strict_only` pins that.
         || value::symbol_is(head, "math/abs")
 }

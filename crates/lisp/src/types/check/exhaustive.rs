@@ -28,7 +28,7 @@ use crate::types::Ty;
 use super::ctx::Ctx;
 use super::infer::expr_ty;
 use super::sigs::declared_heap_sig;
-use super::walk::{fn_params, list_items};
+use super::walk::{fn_params, list_items, resolves_to_macro};
 
 /// Entry: walk every top-level form for sealed-`match` exhaustiveness, from the file's
 /// accumulated `ctx` (globals + sigs + abilities). `(defmodule M …)` is a directive that sets
@@ -118,8 +118,16 @@ fn walk(
                 _ => {}
             }
         }
+        // Any other form may bind: `if-let`, `for`, `try`'s `catch`, a multi-clause `fn`'s
+        // `((s) body)` — a binder this pass cannot read. Forget, for its subtree, every
+        // name it mentions, so a rebinding never keeps the OUTER sealed type.
+        let scope = if binds_nothing(heap, ctx, head) {
+            ctx.clone()
+        } else {
+            forget_symbols_in(heap, ctx, &items[1..])
+        };
         for &it in &items {
-            walk(heap, it, ctx, ns, out);
+            walk(heap, it, &scope, ns, out);
         }
     })
 }
@@ -147,7 +155,8 @@ fn walk_defn(
     }
     let sig = sig_of(heap, ctx, name, ns);
     let params = fn_params(heap, params_form);
-    let mut scope = ctx.clone();
+    // A destructuring parameter (`(fn ([s]) …)`) binds names `fn_params` does not list.
+    let mut scope = forget_symbols_in(heap, ctx, &[params_form]);
     for (i, &p) in params.iter().enumerate() {
         scope = scope.bind(p, sig.as_ref().and_then(|s| s.param(i)));
     }
@@ -205,7 +214,8 @@ fn walk_fn_seeded(
         return;
     }
     let params = fn_params(heap, params_form);
-    let mut scope = ctx.clone();
+    // A destructuring parameter (`(fn ([s]) …)`) binds names `fn_params` does not list.
+    let mut scope = forget_symbols_in(heap, ctx, &[params_form]);
     for (i, &p) in params.iter().enumerate() {
         scope = scope.bind(p, sig.and_then(|s| s.param(i)));
     }
@@ -234,6 +244,10 @@ fn walk_let(
                 if let Value::Sym(s) = target {
                     let ty = expr_ty(heap, rhs, &scope);
                     scope = scope.bind(s, ty);
+                } else {
+                    // A destructuring target rebinds every name in it, to a type this
+                    // pass does not derive.
+                    scope = forget_symbols_in(heap, &scope, &[target]);
                 }
                 i += 2;
             }
@@ -278,13 +292,16 @@ fn analyze_match(
                 let guarded = matches!(citems.get(1),
                     Some(&Value::Keyword(k)) if value::symbol_is(k, "when"));
                 let body_start = if guarded { 3 } else { 1 };
+                // The pattern's binders shadow the enclosing scope for the guard and body
+                // (`((record c {:x s}) (match s …))` matches the FIELD, not the outer `s`).
+                let clause_scope = forget_symbols_in(heap, ctx, &citems[..1]);
                 if guarded {
                     if let Some(&g) = citems.get(2) {
-                        walk(heap, g, ctx, ns, out);
+                        walk(heap, g, &clause_scope, ns, out);
                     }
                 }
                 for &b in citems.get(body_start..).unwrap_or(&[]) {
-                    walk(heap, b, ctx, ns, out);
+                    walk(heap, b, &clause_scope, ns, out);
                 }
             }
         }
@@ -367,4 +384,66 @@ fn record_pattern_id(heap: &Heap, pat: Value) -> Option<String> {
         Some(&Value::Sym(name)) => Some(value::symbol_name(name)),
         _ => None,
     }
+}
+
+/// The special forms and macros whose operands are evaluated in the enclosing scope — they
+/// bind no name, so a scrutinee's type passes through them unchanged.
+const NON_BINDING_HEADS: &[&str] = &[
+    "if", "do", "when", "unless", "cond", "and", "or", "not", "->", "->>", "throw",
+];
+
+/// Does a form with this head bind nothing? A non-macro function (a global or a local) is
+/// called with evaluated arguments, and the [`NON_BINDING_HEADS`] are known. Anything else —
+/// a binding macro (`if-let`, `for`, `try`), an unknown head, a clause list `((s) body)` —
+/// may bind, and the caller forgets the names it mentions.
+fn binds_nothing(heap: &Heap, ctx: &Ctx, head: Value) -> bool {
+    let Value::Sym(head) = head else {
+        return false;
+    };
+    if NON_BINDING_HEADS
+        .iter()
+        .any(|&name| value::symbol_is(head, name))
+    {
+        return true;
+    }
+    if resolves_to_macro(heap, ctx, head) {
+        return false;
+    }
+    ctx.is_local(head) || super::deps::obs_global(heap, head).is_some()
+}
+
+/// `ctx` with every symbol mentioned anywhere in `forms` re-bound with no type — the
+/// sound answer to a binder this pass cannot read: a name it might rebind keeps no type,
+/// rather than the OUTER binding's type (which is what manufactured the false
+/// `sealed match` warnings through a clause binder, `if-let`, `for` or `catch`).
+fn forget_symbols_in(heap: &Heap, ctx: &Ctx, forms: &[Value]) -> Ctx {
+    let mut symbols = BTreeSet::new();
+    let mut pending: Vec<Value> = forms.to_vec();
+    while let Some(form) = pending.pop() {
+        match form {
+            Value::Sym(symbol) => {
+                symbols.insert(symbol);
+            }
+            Value::Pair(_) | Value::Nil => {
+                pending.extend(list_items(heap, form).unwrap_or_default());
+            }
+            Value::Vector(id) => pending.extend(heap.vector(id).iter().copied()),
+            Value::Map(id) => {
+                for (key, entry) in heap.map_entries(id) {
+                    pending.push(key);
+                    pending.push(entry);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut scope = ctx.clone();
+    for symbol in symbols {
+        // Only a name the scope knows can carry a stale type; re-binding every symbol
+        // would clone the scope once per name in a large macro form.
+        if scope.get(symbol).is_some() || scope.is_local(symbol) {
+            scope = scope.bind(symbol, None);
+        }
+    }
+    scope
 }

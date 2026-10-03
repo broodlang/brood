@@ -51,13 +51,15 @@
 
 (describe "zip-with"
   (test "addition of pairs"
-    (assert= '(5 7 9) (zip-with + '(1 2 3) '(4 5 6))))
+    (assert= '(5 7 9) (zip-with '(1 2 3) '(4 5 6) +)))
   (test "stops at shorter"
-    (assert= '(1 4) (zip-with * '(1 2 3) '(1 2))))
+    (assert= '(1 4) (zip-with '(1 2 3) '(1 2) *)))
   (test "first empty"
-    (assert= nil (zip-with + nil '(1 2))))
+    (assert= nil (zip-with nil '(1 2) +)))
   (test "builds pairs"
-    (assert= '([1 4] [2 5]) (zip-with (fn (a b) [a b]) '(1 2) '(4 5)))))
+    (assert= '([1 4] [2 5]) (zip-with '(1 2) '(4 5) (fn (a b) [a b]))))
+  (test "data first, callback last (ADR-308)"
+    (assert= '(11 22) (seq/zip-with [1 2] [10 20] +))))
 
 (describe "intersperse"
   (test "basic"

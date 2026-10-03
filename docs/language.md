@@ -923,7 +923,10 @@ not maps).
 ## Special forms
 
 Special forms are evaluated specially (they don't evaluate all their arguments
-eagerly). They are reserved names.
+eagerly). They are reserved names. There are exactly **eight** — the
+`SpecialForm` enum in `crates/lisp/src/eval.rs`; everything else, `defmacro`
+included, is a function or a macro. (`(reflect/special-forms)` is a broader,
+highlighter-facing list that also names the core macros.)
 
 | Form | Meaning |
 |---|---|
@@ -931,12 +934,13 @@ eagerly). They are reserved names.
 | `(if test then else?)` | Evaluate `then` if `test` is truthy, else `else` (or `nil`). |
 | `(do body...)` | Evaluate forms in order; result is the last. |
 | `(def name value)` | Define/redefine `name` in the **global** environment — redefinable, the language's only mutation. |
-| `(fn (params) body...)` | A lexical closure. (`lambda` is still accepted as an exact synonym — ADR-108 — though `fn` is the only spelling used anywhere in the tree; retiring the alias is a pending cleanup, see ROADMAP.) |
+| `(fn (params) body...)` | A lexical closure. `fn` is the only spelling — the `lambda` alias was retired (ADR-162), so `(lambda …)` is an unbound symbol whose error hints at `fn`. |
 | `(let (a 1 b 2) body...)` | Sequential local bindings (each sees the previous). Brood's `let` is already sequential, so there is no separate `let*`. |
 | `(letrec (f (fn ...) g (fn ...)) body...)` | Local **mutually recursive** bindings — every name is visible in every RHS (and to itself). Plain-symbol targets only; meant for fn definitions. |
 | `` (quasiquote tmpl) `` / `` `tmpl `` | Template: literal except `~x` inserts a value and `~@xs` splices a sequence. |
-| `(defmacro name (params) body...)` | Define a macro (see below). |
 
+`defmacro` is **not** among them: it is a prelude macro that lowers to
+`(def name (%make-macro (fn …)))` (ADR-098) — see [Macros](#macros).
 `when`, `unless`, `cond`, `and`, `or`, `case`, `match`, and `comment` read like
 special forms but are **prelude macros** over `if`/`do`/`let`
 (`std/prelude/core.blsp`), expanded once by the compile pass (ADR-022) — so the
@@ -955,8 +959,8 @@ state, as processes (`spawn`/`receive`).
 ### Parameter lists
 
 Parameter lists are written as **lists** — `(defn f (x y) …)` — because code is
-made of lists (vectors `[ ]` are a data type; they're still accepted in parameter
-position, but lists are idiomatic). A list has three optional sections, in order:
+made of lists (vectors `[ ]` are a data type; a vector in parameter position is an
+error — `fn: parameter list must be a list, not a vector`, ADR-149). A list has three optional sections, in order:
 
 ```clojure
 (defn add (a b) (+ a b))                 ; required
@@ -2793,8 +2797,8 @@ In the `math` module: `math/mod`  `math/rem`  `math/quot`  `math/floor`  `math/m
   are leaves).
 - `interpose` inserts a separator between adjacent items; `interleave` alternates
   two sequences, stopping at the shorter. `zip` pairs two sequences into `[x y]`
-  vectors, stopping at the shorter. `zip-with` combines two sequences element-wise via a
-  binary function. `partition` chunks into `n`-sized groups, dropping a trailing partial
+  vectors, stopping at the shorter. `(zip-with a b f)` combines two sequences element-wise via a
+  binary function, the function last like every combinator. `partition` chunks into `n`-sized groups, dropping a trailing partial
   chunk; `chunk-every` keeps the remainder. `chunk-by` partitions consecutive equal-key runs.
 - `scan` is a running fold — returns a list of all intermediate accumulator
   values starting with the initial value (like Haskell's `scanl`).

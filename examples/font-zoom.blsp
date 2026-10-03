@@ -42,7 +42,7 @@ grows/shrinks within [*min-px* *max-px*]; anything else leaves `px` unchanged."
   (gui/font win {:height px0})
   ;; A local loop is a `letrec`-bound closure called by name — `go` closes over `win`,
   ;; so only the changing state (`px`) is threaded. Render at `px`, then wait for the
-  ;; next input and fold it in. Input arrives in this process's mailbox (ADR-058), so
+  ;; next input and fold it in. Input arrives in this process's mailbox (ADR-059), so
   ;; we park in `receive` holding no worker.
   (letrec (go (fn (px)
                 (render win px)

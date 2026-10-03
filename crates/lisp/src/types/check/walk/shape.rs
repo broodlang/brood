@@ -132,10 +132,15 @@ pub(in crate::types::check) enum SpecialHead {
     /// coverage boundary as KI-67 (`try`) and KI-70 (container literals): a rename
     /// that kills a name used inside `~(…)` left every gate green.
     Quasiquote,
-    /// `try` / `%try` / `error-of` / `assert-error` — descend, but with every
-    /// lint except `unbound` suppressed (KI-67). These forms deliberately
+    /// `error-of` / `assert-error` (and their `%try` expansions) — descend, but with
+    /// every lint except `unbound` suppressed (KI-67). These forms deliberately
     /// exercise failures, so `(error-of (first 5))` must stay silent about the
-    /// type misuse — that is the whole point of the form. An **unbound symbol**
+    /// type misuse — that is the whole point of the form. An author's own `try`
+    /// is NOT one of them (2026-10-02): its `%try` is walked as ordinary code — the
+    /// dispatch tells the two apart by the expansion's shape
+    /// (`walk::provokes_failure_on_purpose`); an unexpanded `try` head (the
+    /// fragment path) keeps the suppression, since its `catch` clause is syntax
+    /// the generic call path would misread. An **unbound symbol**
     /// is a different class: it is never the failure under test unless the
     /// author says so, and skipping the body entirely meant a rename could
     /// leave a call site dead inside a `try` with every gate green. A test that

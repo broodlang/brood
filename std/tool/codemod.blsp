@@ -577,8 +577,10 @@ ledger covers."
   ;; resolves to a function, and in a bare image every project-local callback
   ;; (`lsp-location`, `web-chunk-html`, …) answered "no" — so those calls were left
   ;; unmigrated while stdlib ones converted.
-  (check-allow :discarded-catch
-    (try (project/load-sources (project/find-root ".")) (catch e nil)))
+  (let (root (project/find-root "."))
+    (when root
+      (check-allow :discarded-catch
+        (try (project/load-sources root) (catch e nil)))))
   (let (pass (fn ()
                (fold data-first-table
                  #{}

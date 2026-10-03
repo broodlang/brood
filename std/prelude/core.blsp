@@ -864,6 +864,47 @@ no-op; the marker is read only by the type checker (`nest check`)."
     (pair? body) (map body (fn (part) (%rec-unroll part name whole)))
     else body))
 
+;; A map's entries as a type sees them: a record's hidden identity entry left out.
+(defn- %type-map-entries (v)
+  (if (get v :__id__) (%map-pairs (dissoc v :__id__)) (%map-pairs v)))
+
+;; Does the record identity `id` (`:point`, `:geo/point`, `:app/geo/point`) name the
+;; record type `t` as a `sig` spells it — bare (`point`, the defining module's own
+;; spelling) or qualified (`geo/point`)? A bare name compares the record's NAME, which
+;; `*record-ids*` holds beside the id; a qualified one must be the id's trailing path.
+(defn- %record-id-named? (id t)
+  (let (ts (->string t)
+        ids (->string id))
+    (if (%eq (%str-last-index-of ts "/") -1)
+      (%eq (get *record-ids* id) t)
+      (or (= ids ts)
+        (let (needle (str "/" ts)
+              i (%str-last-index-of ids needle))
+          (and (%le 0 i) (= (+ i (count needle)) (count ids))))))))
+
+;; The NOMINAL reading of a type name that is not a base name and not a `deftype` alias —
+;; what the checker means by it (ADR-186): a SEALED ability is the union of its member
+;; identities; a `defrecord` name is that record's identity; anything else (an OPEN
+;; ability, which the checker reads as `any`, or a name nothing defines) accepts. Until
+;; 2026-10-02 every one of these fell to the alias lookup's "unknown → accept", so
+;; `(sig area (point -> int))` let `(area 5)` through at runtime while `nest check`
+;; rejected it. A sealed name is looked up as written and by its last segment, since
+;; `defability` registers the name its author wrote.
+(defn- %nominal-type-matches? (t v)
+  (let (ts (->string t))
+    ;; A type variable (`?A`) is a static-only constraint: accept before any lookup.
+    (if (or (= (string/substring ts 0 1) "?") (not (bound? '%sealed-members)))
+      true
+      (let (slash (%str-last-index-of ts "/")
+            leaf (if (%eq slash -1) t (symbol (string/substring ts (inc slash) (string/length ts))))
+            members (or (%sealed-members t) (%sealed-members leaf))
+            id (record-id v))
+        (cond
+          members (if (includes? members (%identity-of v)) true false)
+          (and id (%record-id-named? id t)) true
+          (any? (keys *record-ids*) (fn (known) (%record-id-named? known t))) false
+          else true)))))
+
 ; unknown base name → accept
 (defn type-matches? (t v &optional seen)
   "True if value `v` inhabits the (sig …) type-expression `t`. Unknown type
@@ -947,12 +988,16 @@ cyclic alias (`(deftype a b)` `(deftype b a)`) stops instead of looping."
               (let (elem (first (rest t)))
                 (or (nil? elem)
                   (every? v (fn (x) (type-matches? elem x))))))
+          ;; A record instance is a map whose identity rides in a hidden `:__id__` entry —
+          ;; hidden from `count`, `seq`, `keys` and the checker alike — so its entries here
+          ;; are its FIELDS: `(point 1 2)` is a `(map keyword int)` (2026-10-02; the
+          ;; identity's keyword VALUE failed `int` and the contract rejected it).
           (%eq h 'map)
             (and (map? v)
               (let (ktype (first (rest t))
                     vtype (first (rest (rest t))))
                 (or (and (nil? ktype) (nil? vtype))
-                  (every? (%map-pairs v)
+                  (every? (%type-map-entries v)
                     (fn (kv)
                       (and (type-matches? ktype (first kv))
                         (type-matches? vtype (second kv))))))))
@@ -1057,9 +1102,10 @@ cyclic alias (`(deftype a b)` `(deftype b a)`) stops instead of looping."
     ;;     direction this function's unknown-type default already takes.
     (symbol? t)
       (let (expansion (%type-alias t))
-        (if (or (nil? expansion) (includes? (or seen []) t))
-          true
-          (type-matches? expansion v (conj (or seen []) t))))
+        (cond
+          (nil? expansion) (%nominal-type-matches? t v)
+          (includes? (or seen []) t) true
+          else (type-matches? expansion v (conj (or seen []) t))))
     else true))
 
 (defn- %sig-pos (xs x n)

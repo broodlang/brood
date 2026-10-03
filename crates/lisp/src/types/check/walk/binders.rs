@@ -825,6 +825,14 @@ pub(super) fn check_if(
         if let Some((sym, union)) = or_same_var_narrowing(heap, test, ctx) {
             t = t.narrow(sym, union);
         }
+        // `(contains? r :k)` selects among a record union's alternatives, as in
+        // `guards::branch_scopes`.
+        if let Some((sym, present, absent)) =
+            crate::types::check::guards::contains_key_narrowing(heap, test, ctx)
+        {
+            t = t.narrow(sym, present);
+            e = e.narrow(sym, absent);
+        }
         // …and a comparison's intervals, lengths and index bounds (ADR-350).
         apply_comparison_facts(heap, test, ctx, t, e)
     };

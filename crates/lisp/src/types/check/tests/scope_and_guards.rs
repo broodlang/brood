@@ -463,7 +463,9 @@ fn flags_zero_arg_fn_passed_bare_to_an_output_sink() {
     // The `(print ansi-clear)`-for-`(print (ansi-clear))` slip: a bare
     // zero-arity global handed to print/println/str/format stringifies the
     // function (#<fn …>), never its result — silent today.
-    for sink in &["print", "println", "str", "format"] {
+    // (The sinks as they are spelled today: `print`/`println`/`format` are unbound since
+    // the `io/` and `string/` moves, and the lint keyed on them guarded nothing.)
+    for sink in &["io/puts", "io/write", "str", "string/format"] {
         let w = check_with_defs(&["(defn home () \"\\e[H\")"], &format!("({} home)", sink));
         assert!(
             w.iter()

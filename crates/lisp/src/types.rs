@@ -1043,8 +1043,14 @@ impl Ty {
     /// — [`Ty::intersect`] enforces this collapse automatically, so this
     /// constructor is for tests/direct construction only.
     pub fn overload_of(sigs: Vec<Sig>) -> Ty {
+        // The arms in the canonical order and absorption `Ty::intersect` builds, so a
+        // directly constructed overload equals the parsed `(and …)` of the same arms.
+        let mut arms = canonical_arms(sigs);
+        if arms.len() == 1 {
+            return Ty::arrow(arms.remove(0));
+        }
         Ty {
-            overload: Some(Arc::new(sigs)),
+            overload: Some(Arc::new(arms)),
             ..Ty::flat(FN_BITS)
         }
     }
@@ -1063,7 +1069,20 @@ impl Ty {
             elem: Some(Arc::new(elem)),
             ..Ty::flat(tags & SEQ_BITS)
         }
-        .bounded()
+        .canonical_shape()
+    }
+
+    /// A freshly built shape in canonical form: its slots normalised, and an uninhabited
+    /// one (`list<never>`, `(tuple int never)`, `{a: never}`) as [`Ty::NEVER`] itself.
+    /// Built raw, such a shape compared unequal to the empty type it denotes, and the
+    /// Pass 2.9 fixpoint, which compares rounds by `==`, flipped between the two
+    /// spellings forever (a `cons` of a tuple with a not-yet-derived `never` position).
+    fn canonical_shape(self) -> Ty {
+        let out = self.normalise_len().bounded();
+        if out.alts.is_none() && out.term_is_never() {
+            return Ty::NEVER;
+        }
+        out
     }
 
     /// `map<K, V>` — a map whose keys have type `K` and values have type `V`.
@@ -1099,7 +1118,7 @@ impl Ty {
             fields: Some(Arc::new(RecordShape { fields, rest })),
             ..Ty::flat(MAP_BIT)
         }
-        .bounded()
+        .canonical_shape()
     }
 
     /// The record-shape refinement's declared fields, if this map type carries one.
@@ -1229,7 +1248,7 @@ impl Ty {
             tuple: Some(Arc::new(elems)),
             ..Ty::flat(VECTOR_BIT)
         }
-        .bounded()
+        .canonical_shape()
     }
 
     /// A positional LIST shape — a non-empty list of exactly these elements, one type
@@ -1241,7 +1260,7 @@ impl Ty {
             list_shape: Some(Arc::new(elems)),
             ..Ty::flat(PAIR_BIT)
         }
-        .bounded()
+        .canonical_shape()
     }
 
     /// The list-shape refinement, if this type is nothing but a list of a known shape —
@@ -1524,6 +1543,15 @@ impl Ty {
     fn len_eff(&self) -> Range {
         if let Some(r) = self.len {
             return r;
+        }
+        // A vector (or set) of `never` holds no element: it is the empty one, length 0.
+        // Read as unbounded, `vector<never> ∪ vector<int>[2]` hulled to `vector<int>`.
+        if self.tags & COUNT_BITS != 0
+            && self.tags & COUNT_BITS & !(VECTOR_BIT | (1u32 << bit(Tag::Set))) == 0
+            && self.tuple.is_none()
+            && self.elem.as_deref().is_some_and(Ty::is_never)
+        {
+            return Range::point(0);
         }
         // A positional shape IS its arity, when it is the only countable member.
         if self.tags & COUNT_BITS == VECTOR_BIT {
@@ -2117,24 +2145,46 @@ impl Ty {
                 .list_shape
                 .as_ref()
                 .map(|ts| Arc::new(ts.iter().map(below).collect()));
+            // An arrow whose parameters would widen is DROPPED, not widened: parameters
+            // are contravariant, so a wider domain is a NARROWER arrow, and widening it
+            // shrank the type. Only an arm that survives intact keeps its (widened) result.
             out.arrow = self
                 .arrow
                 .as_ref()
-                .map(|s| Arc::new(widen_sig(s, depth - 1)));
-            out.overload = self
-                .overload
-                .as_ref()
-                .map(|ss| Arc::new(ss.iter().map(|s| widen_sig(s, depth - 1)).collect()));
+                .and_then(|s| widen_sig(s, depth - 1))
+                .map(Arc::new);
+            if let Some(arms) = &self.overload {
+                // Dropping an arm of an intersection widens it — the sound direction.
+                let kept: Vec<Sig> = arms
+                    .iter()
+                    .filter_map(|s| widen_sig(s, depth - 1))
+                    .collect();
+                out.overload = None;
+                match kept.len() {
+                    0 => {}
+                    1 => out.arrow = kept.into_iter().next().map(Arc::new),
+                    _ => out.overload = Some(Arc::new(kept)),
+                }
+            }
         }
         // The alternatives and the subtraction sit at THIS level.
         out.alts = self
             .alts
             .as_ref()
             .map(|a| Arc::new(a.iter().map(|t| t.widened_below(depth)).collect()));
-        out.neg = self
+        // A subtracted term is the other way round: `P ∖ N` grows as `N` SHRINKS, so
+        // widening `N` would narrow the whole — `(not vector<int>)` came out `(not vector)`,
+        // which excludes vectors the original admits, and the Pass 2.9 fixpoint read that
+        // as its parameter's type. A subtraction that is already within the depth stays;
+        // one that would have to widen is dropped, which widens the whole (sound).
+        let kept: Vec<Ty> = self
             .neg
-            .as_ref()
-            .map(|n| Arc::new(n.iter().map(|t| t.widened_below(depth)).collect()));
+            .iter()
+            .flat_map(|n| n.iter())
+            .filter(|t| t.widened_below(depth) == **t)
+            .cloned()
+            .collect();
+        out.neg = (!kept.is_empty()).then(|| Arc::new(kept));
         out
     }
     /// If this type's refinement tree exceeds [`MAX_TY_NODES`] nodes, widen it to the flat
@@ -2396,8 +2446,17 @@ impl Ty {
         } else {
             None
         };
+        // Key and value types meet EXACTLY: a map in both has every key in `K1 ∩ K2` and
+        // every value in `V1 ∩ V2`, and any such map is in both. The generic merge widened
+        // two different `map<K, V>`s to a bare `map` — not even below either operand.
         let map_kv = if tags & MAP_BIT != 0 {
-            merge_intersect(&self.map_kv, &other.map_kv)
+            match (&self.map_kv, &other.map_kv) {
+                (Some(a), Some(b)) if a != b => Some(Arc::new((
+                    a.0.clone().intersect(b.0.clone()),
+                    a.1.clone().intersect(b.1.clone()),
+                ))),
+                (a, b) => merge_intersect(a, b),
+            }
         } else {
             None
         };
@@ -2557,6 +2616,29 @@ impl Ty {
         }
         .normalise_len()
         .bounded()
+        .settle_subtraction()
+    }
+
+    /// A term's subtractions with the irrelevant ones gone — a subtracted term the positive
+    /// part shares nothing with removes nothing, and keeping it made `"abc" ∩ (not (tuple
+    /// int))` a different `Ty` from `"abc"` — and an EMPTY term as [`Ty::NEVER`] itself, so
+    /// that `list<int> ∩ list<string>` (no pair has a head of both) compares equal to the
+    /// empty type it denotes rather than to an uninhabited shape that only `is_never` sees
+    /// through.
+    fn settle_subtraction(mut self) -> Ty {
+        if let Some(negs) = &self.neg {
+            let positive = self.positive();
+            let kept: Vec<Ty> = negs
+                .iter()
+                .filter(|n| !positive.is_disjoint(n))
+                .cloned()
+                .collect();
+            self.neg = (!kept.is_empty()).then(|| Arc::new(kept));
+        }
+        if self.term_is_never() {
+            return Ty::NEVER;
+        }
+        self
     }
 
     /// `¬self` — every value *not* in `self`, as a **sound over-approximation**:
@@ -2734,7 +2816,17 @@ impl Ty {
     /// count capped at [`MAX_TY_TERMS`] by collapsing the remainder with the widening
     /// merge (which is what a union always did, so the cap can only lose precision,
     /// never soundness).
-    fn from_terms(mut terms: Vec<Ty>) -> Ty {
+    fn from_terms(terms: Vec<Ty>) -> Ty {
+        Ty::from_terms_with(terms, false)
+    }
+
+    /// [`Ty::from_terms`], optionally refusing the one merge a union makes on purpose that
+    /// is not exact: two intervals (an int's, a length's) that neither overlap nor touch
+    /// merge to their HULL (ADR-350 — what keeps an index's type one term). An
+    /// intersection distributed over terms must not do that: `vector<int> ∩ (vector<string>
+    /// | vector<int>[2])` is `vector<never> | vector<int>[2]`, and hulled to one term it
+    /// read `vector<int>` — not below its operands.
+    fn from_terms_with(mut terms: Vec<Ty>, exact_ranges: bool) -> Ty {
         terms.retain(|t| !t.is_never());
         if terms.is_empty() {
             return Ty::NEVER;
@@ -2757,7 +2849,9 @@ impl Ty {
                     *existing = t;
                     continue 'next;
                 }
-                if merge_is_exact(existing, &t) {
+                if merge_is_exact(existing, &t)
+                    && (!exact_ranges || ranges_merge_exactly(existing, &t))
+                {
                     *existing = existing.clone().union_term(t);
                     continue 'next;
                 }
@@ -2769,12 +2863,25 @@ impl Ty {
         // against the old value. Without this sweep `any ∪ (A | B)` kept `B` as a
         // redundant alternative while `(A | B) ∪ any` did not — the same set, unequal,
         // which breaks every memo keyed on a `Ty`.
+        //
+        // And a term may be covered by SEVERAL others together — `(tuple (or int string))`
+        // by `vector<int> | vector<string>` — which no pairwise test sees; kept, `a ⊆ b` did
+        // not give `a ∪ b == b`. Asked only when more than one other term remains.
         let mut i = 0;
         while i < merged.len() {
             let absorbed = merged
                 .iter()
                 .enumerate()
-                .any(|(j, other)| j != i && contains(other, &merged[i]));
+                .any(|(j, other)| j != i && contains(other, &merged[i]))
+                || (merged.len() > 2 && {
+                    let others: Vec<Ty> = merged
+                        .iter()
+                        .enumerate()
+                        .filter(|(j, _)| *j != i)
+                        .map(|(_, t)| t.clone())
+                        .collect();
+                    term_covered(&merged[i], &others)
+                });
             if absorbed {
                 merged.remove(i);
             } else {
@@ -2805,6 +2912,14 @@ impl Ty {
             let first = merged.remove(i);
             merged.push(first.union_term(second));
         }
+        // The head of a union doubles as its container, and a container flagged `mu` is a
+        // binder over the WHOLE union. A closed recursive alternative must therefore not
+        // sit at the head beside others, or its binder would come to range over them.
+        if merged.len() > 1 && merged[0].mu {
+            if let Some(plain) = merged.iter().position(|t| !t.mu) {
+                merged.swap(0, plain);
+            }
+        }
         let mut head = merged.remove(0);
         if !merged.is_empty() {
             head.alts = Some(Arc::new(merged));
@@ -2814,10 +2929,10 @@ impl Ty {
 
     /// `self ∪ other` — every value in either.
     pub fn union(self, other: Ty) -> Ty {
-        // A μ on either side stays a μ of the union: its references then name the
-        // union, a SUPERSET of what they named — sound, and exact when only one side is
-        // recursive (`μX.G[X] ∪ T = μX.(G[X] ∪ T)` for any `T` the references do not
-        // reach). Two binders conflate into one, an over-approximation of both.
+        // A closed recursive operand stays its own alternative (`merge_is_exact` refuses
+        // it, `from_terms` keeps it off the head), so `int ∪ μX.(nil | vector<X>)` is
+        // exact and the same in either order. The flag below matters only for an operand
+        // whose references are still OPEN (a body under construction).
         let mu = self.mu || other.mu;
         let out = self.union_positive(other);
         if mu {
@@ -2842,10 +2957,23 @@ impl Ty {
     /// `self ∩ other` — the values in both. Distributes over the terms:
     /// `(A ∪ B) ∩ (C ∪ D)` = `(A∩C) ∪ (A∩D) ∪ (B∩C) ∪ (B∩D)`.
     pub fn intersect(self, other: Ty) -> Ty {
+        // An operand inside the other IS the meet. Exact, and it is what makes the result
+        // canonical where the slot-wise meet below is not: that one keeps a subtraction
+        // the other side already excludes (`"abc" ∩ (not (tuple int))`), lists an arrow
+        // the other already implies, and carries both of two spellings of one set — so
+        // `a ⊆ b` did not give `a ∩ b == a`, and every memo keyed on the result missed.
+        // It is also the whole answer for the common recursive case, `json ∩ json`.
+        if self.is_subtype(&other) {
+            return self;
+        }
+        if other.is_subtype(&self) {
+            return other;
+        }
         // A μ is met through its unrolling, so the references inside the result are the
-        // recursive type itself rather than a dangling placeholder.
+        // recursive type itself rather than a dangling placeholder — under a guard that
+        // ties the knot, since two recursive types meet their own pair again inside.
         if self.mu || other.mu {
-            return self.unroll().intersect(other.unroll());
+            return meet_recursive(self, other);
         }
         if self.alts.is_none() && other.alts.is_none() {
             return self.intersect_term(other);
@@ -2861,7 +2989,7 @@ impl Ty {
                 });
             }
         }
-        Ty::from_terms(out)
+        Ty::from_terms_with(out, true)
     }
 
     /// `¬self` — every value this type excludes. De Morgan over the terms:
@@ -2924,7 +3052,23 @@ impl Ty {
     /// untouched — it is the lattice, and the impossible-guard and exhaustiveness lints need
     /// its exact answer.
     pub fn is_consistent_subtype(&self, other: &Ty) -> bool {
-        self.unknowns_as_never().is_subtype(other)
+        if self.mu {
+            return self.unknowns_as_never().is_subtype(other);
+        }
+        // Term by term, because one filling is not like the others: a `pair` has a head,
+        // so `pair<never>` is EMPTY, and filling a bare `pair`'s unknown elements with
+        // `never` turned a value positively known to be a list into the empty type — a
+        // consistent subtype of everything. `(sig f (pair -> int))` then passed its
+        // parameter to `string/length` silently, in both modes, where `(list any)` warned.
+        // A pair's materialisation must keep a pair, with SOME element: that fits exactly
+        // when `other` admits such a pair at all, which is the overlap reading.
+        self.terms_vec().into_iter().all(|term| {
+            let filled = term.unknowns_as_never();
+            if filled.is_never() && !term.is_never() {
+                return !term.is_disjoint(other);
+            }
+            filled.is_subtype(other)
+        })
     }
 
     /// `self` with every nested unknown component replaced by `never` — the most specific
@@ -3029,6 +3173,12 @@ impl Ty {
             } else {
                 None
             },
+            // The term's length is the HULL over every countable member it has, so on one
+            // member it is only a bound — and a tuple's arity is the exact one. The
+            // normalisation below lets the shape win (and drops a member whose arity the
+            // bound excludes); copied through as-is, `len_eff` preferred the hull, and the
+            // vector half of `(tuple 1 2) | "abcdefg"` read as `vector[2..7]`, outside a
+            // `(len (vector int) 2 2)` it was in.
             len: if tag_bit & COUNT_BITS != 0 {
                 self.len
             } else {
@@ -3036,6 +3186,7 @@ impl Ty {
             },
             alts: None,
         }
+        .normalise_len()
     }
 
     /// Do `self` and `other` share no values? Every pair of terms must be disjoint —
@@ -3187,19 +3338,30 @@ impl Ty {
                         // `map<K, V>` its step builds instead of the union's bare `map`. An
                         // OPEN record's undeclared keys are keywords (a shape comes from a
                         // keyword-keyed literal), so it keeps the "any keyword" reading.
+                        //
+                        // A `defrecord` value's identity (`:__id__` holding a keyword
+                        // literal) is NOT one of its entries: `keys`, `vals`, `count`, `seq`
+                        // and the runtime contract's `type-matches?` all skip it, so
+                        // `(pt 1 2)` is a `map<keyword, int>` over its fields alone. Only
+                        // the relation to `map<K,V>` skips it — against a structural
+                        // `(record …)` the identity is still a field the other must allow.
                         Some(shape) => {
+                            let identity = value::intern("__id__");
+                            let entries = || {
+                                shape.fields.iter().filter(move |(name, (ty, _))| {
+                                    !(**name == identity && is_record_identity(ty))
+                                })
+                            };
                             if shape.is_open() {
                                 if !Ty::of(Tag::Keyword).is_subtype(&b.0) {
                                     return false;
                                 }
-                            } else if !shape
-                                .fields
-                                .keys()
-                                .all(|name| Ty::keyword_lit(*name).is_subtype(&b.0))
+                            } else if !entries()
+                                .all(|(name, _)| Ty::keyword_lit(*name).is_subtype(&b.0))
                             {
                                 return false;
                             }
-                            for (vty, _opt) in shape.fields.values() {
+                            for (_, (vty, _opt)) in entries() {
                                 if !vty.is_subtype(&b.1) {
                                     return false;
                                 }
@@ -3270,17 +3432,16 @@ impl Ty {
         }
         // When the sole shared tag is a literal kind and both sides pin disjoint
         // sets, no value of that tag satisfies both. One rule per independent tag.
-        if let Some(d) = lit_disjoint(shared == KEYWORD_BIT, &self.lit, &other.lit) {
-            return d;
-        }
-        if let Some(d) = lit_disjoint(shared == INT_BIT, &self.lit_int, &other.lit_int) {
-            return d;
-        }
-        if let Some(d) = lit_disjoint(shared == BOOL_BIT, &self.lit_bool, &other.lit_bool) {
-            return d;
-        }
-        if let Some(d) = lit_disjoint(shared == STR_BIT, &self.lit_str, &other.lit_str) {
-            return d;
+        //
+        // Only a PROVEN disjointness returns: overlapping literal sets may still be wholly
+        // subtracted (`¬"x" ∩ ¬string[3]` shares nothing with `string[3]`), and returning the
+        // negative answer here skipped the subtraction rule below that knows it.
+        if lit_disjoint(shared == KEYWORD_BIT, &self.lit, &other.lit) == Some(true)
+            || lit_disjoint(shared == INT_BIT, &self.lit_int, &other.lit_int) == Some(true)
+            || lit_disjoint(shared == BOOL_BIT, &self.lit_bool, &other.lit_bool) == Some(true)
+            || lit_disjoint(shared == STR_BIT, &self.lit_str, &other.lit_str) == Some(true)
+        {
+            return true;
         }
         // The sole shared tag is `int` and the intervals do not meet; or every shared tag
         // is countable and the lengths do not meet.
@@ -3297,23 +3458,44 @@ impl Ty {
         // both at once). Same soundness basis as the literal-set cases above
         // — this only ever *adds* a genuinely-disjoint verdict, never a false
         // one.
-        if shared == VECTOR_BIT {
-            if let (Some(a), Some(b)) = (&self.tuple, &other.tuple) {
-                if a.len() != b.len() {
-                    return true;
+        // …and two list shapes, the same way (a list has exactly one length). A side with
+        // an ELEMENT type and no shape holds, at the other side's arity, exactly the
+        // shape of that many elements — `vector<int>` against `(tuple string)` meets at
+        // `(tuple int) ∩ (tuple string)`, empty, which `intersect` already knew.
+        for member in [VECTOR_BIT, PAIR_BIT] {
+            if shared != member {
+                continue;
+            }
+            let shape_of = |t: &Ty| {
+                if member == VECTOR_BIT {
+                    t.tuple.as_deref().map(Vec::len)
+                } else {
+                    t.list_shape.as_deref().map(Vec::len)
                 }
-                // Only a PROVEN disjointness returns here. Returning the negative answer
-                // too would skip the subtraction check below, which is the one that knows
-                // `(tuple int|string) ∖ (tuple int)` shares nothing with `(tuple int)`.
-                if a.iter().zip(b.iter()).any(|(x, y)| x.is_disjoint(y)) {
+            };
+            if let (Some(a), Some(b)) = (shape_of(self), shape_of(other)) {
+                if a != b {
                     return true;
                 }
             }
-        }
-        // …and two list shapes, the same way (a list has exactly one length).
-        if shared == PAIR_BIT {
-            if let (Some(a), Some(b)) = (&self.list_shape, &other.list_shape) {
-                if a.len() != b.len() || a.iter().zip(b.iter()).any(|(x, y)| x.is_disjoint(y)) {
+            let Some(arity) = shape_of(self).or_else(|| shape_of(other)) else {
+                continue;
+            };
+            // A side whose length slot excludes the shape's arity holds no such member.
+            if [self, other].iter().any(|t| {
+                t.len
+                    .is_some_and(|len| !Range::subset(Range::point(arity as i64), len))
+            }) {
+                return true;
+            }
+            // Only a PROVEN disjointness returns here. Returning the negative answer too
+            // would skip the subtraction check below, which is the one that knows
+            // `(tuple int|string) ∖ (tuple int)` shares nothing with `(tuple int)`.
+            if let (Some(a), Some(b)) = (
+                member_positions(&self.positive(), member, arity),
+                member_positions(&other.positive(), member, arity),
+            ) {
+                if a.iter().zip(b.iter()).any(|(x, y)| x.is_disjoint(y)) {
                     return true;
                 }
             }
@@ -3327,6 +3509,21 @@ impl Ty {
         if shared == (1u32 << bit(Tag::Pair)) {
             if let (Some(a), Some(b)) = (self.elem_ty(), other.elem_ty()) {
                 if a.is_disjoint(&b) {
+                    return true;
+                }
+            }
+        }
+        // Two vectors (sets) whose element types are disjoint share only the EMPTY one —
+        // so they share nothing when either side's length excludes 0. (`intersect` reads
+        // `vector<string> ∩ vector<int>[2]` as `vector<never>[2]`, which is empty.)
+        let set_bit = 1u32 << bit(Tag::Set);
+        if shared & !(VECTOR_BIT | set_bit) == 0 {
+            if let (Some(a), Some(b)) = (self.elem.as_deref(), other.elem.as_deref()) {
+                let zero = Range::point(0);
+                if a.is_disjoint(b)
+                    && (!Range::subset(zero, self.len_eff())
+                        || !Range::subset(zero, other.len_eff()))
+                {
                     return true;
                 }
             }
@@ -3479,9 +3676,113 @@ impl Ty {
         Ty { mu: true, ..body }.normalise_mu()
     }
 
-    /// The canonical length slot beside a POSITIONAL shape: a tuple or a list shape is
-    /// its arity, so a stored length beside it is redundant and goes.
+    /// One term's slots in canonical form, so that one set has one representation — and a
+    /// member no value can inhabit is not kept as if one could:
+    ///
+    /// - an **element type beside a positional shape** constrains the same member, so it is
+    ///   folded into the positions (`(tuple int)` with `elem: number` is `(tuple int)`;
+    ///   with `elem: string` it is no vector at all), and dropped once the shaped member is
+    ///   the only sequence member it could speak for;
+    /// - a **positional shape no vector can have** — an empty position, or an arity the
+    ///   length slot excludes — drops its member. The length used to be dropped instead,
+    ///   silently, which made `((tuple int) | string) ∩ (len (vector int) 2 2)` come out
+    ///   `(tuple int)` rather than `never`: not a lower bound of its operands;
+    /// - a **`pair` whose elements are `never`** is no pair (a pair has a head), and a
+    ///   record shape with a required `never` field is no map;
+    /// - a tuple or a list shape is its arity, so a stored length beside one that is the
+    ///   only countable member is redundant and goes;
+    /// - a string literal set filters by the length slot, which then goes.
     fn normalise_len(mut self) -> Ty {
+        if self.rec_ref || self.mu {
+            return self;
+        }
+        if let Some(elem) = self.elem.clone() {
+            for member in [VECTOR_BIT, PAIR_BIT] {
+                if self.tags & member == 0 {
+                    continue;
+                }
+                let slot = if member == VECTOR_BIT {
+                    &mut self.tuple
+                } else {
+                    &mut self.list_shape
+                };
+                if let Some(shape) = slot.as_deref() {
+                    if !shape.iter().all(|t| t.is_subtype(&elem)) {
+                        let met: Vec<Ty> = shape
+                            .iter()
+                            .map(|t| t.clone().intersect(elem.as_ref().clone()))
+                            .collect();
+                        *slot = Some(Arc::new(met));
+                    }
+                }
+            }
+            let seq = self.tags & SEQ_BITS;
+            if (seq == VECTOR_BIT && self.tuple.is_some())
+                || (seq == PAIR_BIT && self.list_shape.is_some())
+            {
+                self.elem = None;
+            }
+        }
+        for member in [VECTOR_BIT, PAIR_BIT] {
+            let shape = if member == VECTOR_BIT {
+                &self.tuple
+            } else {
+                &self.list_shape
+            };
+            let Some(positions) = shape.as_deref() else {
+                continue;
+            };
+            let arity_excluded = self
+                .len
+                .is_some_and(|len| !Range::subset(Range::point(positions.len() as i64), len));
+            if self.tags & member == 0 || arity_excluded || positions.iter().any(Ty::is_never) {
+                self.tags &= !member;
+                if member == VECTOR_BIT {
+                    self.tuple = None;
+                } else {
+                    self.list_shape = None;
+                }
+            }
+        }
+        if self.tags & PAIR_BIT != 0 && self.elem.as_deref().is_some_and(Ty::is_never) {
+            self.tags &= !PAIR_BIT;
+            self.list_shape = None;
+        }
+        // A vector or set of `never` is the EMPTY one, so a length that excludes 0 leaves
+        // no such member — `vector<never>[2..7]` is no vector at all.
+        if self.elem.as_deref().is_some_and(Ty::is_never)
+            && self
+                .len
+                .is_some_and(|len| !Range::subset(Range::point(0), len))
+        {
+            if self.tuple.is_none() {
+                self.tags &= !VECTOR_BIT;
+            }
+            self.tags &= !(1u32 << bit(Tag::Set));
+        }
+        if self.tags & MAP_BIT != 0
+            && self.fields.as_deref().is_some_and(|shape| {
+                shape
+                    .fields
+                    .values()
+                    .any(|(ty, required)| *required && ty.is_never())
+            })
+        {
+            self.tags &= !MAP_BIT;
+        }
+        // A slot whose member is gone says nothing.
+        if self.tags & SEQ_BITS == 0 {
+            self.elem = None;
+        }
+        if self.tags & MAP_BIT == 0 {
+            self.map_kv = None;
+            self.fields = None;
+        }
+        if self.tags & FN_BITS == 0 {
+            self.arrow = None;
+            self.overload = None;
+        }
+        self.len = canon_len(self.tags, self.len);
         let shaped = (self.tags & COUNT_BITS == VECTOR_BIT && self.tuple.is_some())
             || (self.tags & COUNT_BITS == PAIR_BIT && self.list_shape.is_some());
         if shaped {
@@ -4224,8 +4525,7 @@ fn term_is_subtype_of_union(a: &Ty, others: &[Ty]) -> bool {
             if let Some(elems) = part.tuple_elems() {
                 let candidates: Vec<Vec<Ty>> = others
                     .iter()
-                    .filter(|b| b.tags & VECTOR_BIT != 0)
-                    .filter_map(|b| b.tuple_elems().cloned())
+                    .filter_map(|b| member_positions(b, VECTOR_BIT, elems.len()))
                     // A different arity shares no value with this one.
                     .filter(|c| c.len() == elems.len())
                     .collect();
@@ -4239,8 +4539,7 @@ fn term_is_subtype_of_union(a: &Ty, others: &[Ty]) -> bool {
             if let Some(elems) = part.list_shape_elems() {
                 let candidates: Vec<Vec<Ty>> = others
                     .iter()
-                    .filter(|b| b.tags & PAIR_BIT != 0)
-                    .filter_map(|b| b.list_shape_elems().cloned())
+                    .filter_map(|b| member_positions(b, PAIR_BIT, elems.len()))
                     .filter(|c| c.len() == elems.len())
                     .collect();
                 if tuple_covered_by(elems, &candidates) {
@@ -4253,9 +4552,15 @@ fn term_is_subtype_of_union(a: &Ty, others: &[Ty]) -> bool {
         // 1-tuple is. The undeclared remainder is not a position — see `record_covered_by`.
         if tag_bit == MAP_BIT {
             if let Some(shape) = part.fields.as_deref() {
+                // A candidate whose map member ALSO carries `map<K, V>` is the intersection of
+                // the two, and the covering rule reads shapes alone: counted as its shape it
+                // over-accepted — `{a: int, b: string}` read as covered by `(and (record
+                // &open :a int) (map keyword int))`, so a union absorbed that record into a
+                // term whose values cannot be strings, and a read of `:b` lost its string.
+                // Left out, it can only fail to help cover (incomplete, never unsound).
                 let candidates: Vec<&RecordShape> = others
                     .iter()
-                    .filter(|b| b.tags & MAP_BIT != 0)
+                    .filter(|b| b.tags & MAP_BIT != 0 && b.map_kv.is_none())
                     .filter_map(|b| b.fields.as_deref())
                     .collect();
                 if record_covered_by(shape, &candidates) {
@@ -4266,6 +4571,46 @@ fn term_is_subtype_of_union(a: &Ty, others: &[Ty]) -> bool {
         return false;
     }
     true
+}
+
+/// The positions one term holds for one positional member — its tuple (`VECTOR_BIT`) or
+/// list shape (`PAIR_BIT`) — as a covering candidate: each position met with the term's
+/// element type, which constrains the same member, and nothing when the term's length slot
+/// excludes the arity. Reading the shape alone over-accepted: a candidate `(tuple int)`
+/// carrying `elem: string` beside it holds no vector at all, yet covered `(tuple int)`.
+/// Not restricted to a term that is nothing but that member — the shape refines the member
+/// whatever else the term admits, so a mixed candidate covers its own vectors too.
+///
+/// A term with NO shape for the member still holds the vectors (lists) of `arity`
+/// elements its element type admits — `vector<int>`'s 1-vectors are `(tuple int)` — so it
+/// is a candidate too, with every position its element type. Without that, `(tuple (or
+/// int string))` read as outside `vector<int> | vector<string>`, which holds every such
+/// 1-vector between its two halves.
+fn member_positions(term: &Ty, member: u32, arity: usize) -> Option<Vec<Ty>> {
+    if term.tags & member == 0 || term.neg.is_some() || term.rec_ref || term.mu {
+        return None;
+    }
+    if let Some(len) = term.len {
+        if !Range::subset(Range::point(arity as i64), len) {
+            return None;
+        }
+    }
+    let shape = if member == VECTOR_BIT {
+        term.tuple.as_deref()
+    } else {
+        term.list_shape.as_deref()
+    };
+    let elem = term.elem.as_deref().cloned().unwrap_or(Ty::ANY);
+    match shape {
+        Some(shape) if shape.len() == arity => Some(
+            shape
+                .iter()
+                .map(|t| t.clone().intersect(elem.clone()))
+                .collect(),
+        ),
+        Some(_) => None,
+        None => Some(vec![elem; arity]),
+    }
 }
 
 fn tuple_is_subtype(self_elems: &[Ty], other_elems: &[Ty]) -> bool {
@@ -4311,11 +4656,8 @@ fn intersect_arrows(a: &Ty, b: &Ty) -> (Option<Arc<Sig>>, Option<Arc<Vec<Sig>>>)
         return (a.arrow.clone(), a.overload.clone());
     }
     let mut combined = sa;
-    for sig in sb {
-        if !combined.contains(&sig) {
-            combined.push(sig);
-        }
-    }
+    combined.extend(sb);
+    let combined = canonical_arms(combined);
     if combined.len() == 1 {
         (
             Some(Arc::new(combined.into_iter().next().expect("len == 1"))),
@@ -4324,6 +4666,54 @@ fn intersect_arrows(a: &Ty, b: &Ty) -> (Option<Arc<Sig>>, Option<Arc<Vec<Sig>>>)
     } else {
         (None, Some(Arc::new(combined)))
     }
+}
+
+/// Would merging these two terms' intervals lose nothing? A merged term carries ONE int
+/// interval and ONE length (over every countable member), the hull of the two sides'. That
+/// is the union exactly when the two intervals overlap or touch — and, for a length, when
+/// both sides count the same members (`string[7] ∪ vector[2]` hulls to a `[2..7]` that
+/// admits a two-character string).
+fn ranges_merge_exactly(a: &Ty, b: &Ty) -> bool {
+    fn contiguous(x: Range, y: Range) -> bool {
+        let grown = Range::new(y.lo.map(|lo| lo - 1), y.hi.map(|hi| hi + 1));
+        Range::meet(x, grown).is_some()
+    }
+    let both_pinned = matches!(a.lit_int.as_deref(), Some(LitSet::In(_)))
+        && matches!(b.lit_int.as_deref(), Some(LitSet::In(_)));
+    if a.tags & b.tags & INT_BIT != 0
+        && !both_pinned
+        && !contiguous(a.int_range_eff(), b.int_range_eff())
+    {
+        return false;
+    }
+    if a.tags & COUNT_BITS != 0 && b.tags & COUNT_BITS != 0 {
+        let (la, lb) = (a.len_eff(), b.len_eff());
+        if la != lb && (a.tags & COUNT_BITS != b.tags & COUNT_BITS || !contiguous(la, lb)) {
+            return false;
+        }
+    }
+    true
+}
+
+/// The arms of an arrow intersection in canonical form. An arm another arm already
+/// implies adds nothing — `(int -> int) and (int -> any)` is `(int -> int)` — and the
+/// arms are a SET: kept in arrival order and unabsorbed, `A ∩ B` and `B ∩ A` were
+/// different `Ty`s, and `a ⊆ b` did not give `a ∩ b == a`. Sorted by rendering; of two
+/// arms that imply each other (one set, two spellings) the first in that order stays.
+fn canonical_arms(mut arms: Vec<Sig>) -> Vec<Sig> {
+    arms.sort_by_cached_key(Sig::to_string);
+    arms.dedup();
+    let mut kept: Vec<Sig> = Vec::with_capacity(arms.len());
+    for (i, sig) in arms.iter().enumerate() {
+        let implied = arms
+            .iter()
+            .enumerate()
+            .any(|(j, other)| j != i && other.is_subtype(sig) && (!sig.is_subtype(other) || j < i));
+        if !implied {
+            kept.push(sig.clone());
+        }
+    }
+    kept
 }
 
 thread_local! {
@@ -4343,8 +4733,51 @@ fn with_rec_assumption(a: &Ty, b: &Ty, assumed: bool, relate: impl Fn(&Ty, &Ty) 
         return assumed;
     }
     REC_ASSUMPTIONS.with(|s| s.borrow_mut().push((a.clone(), b.clone())));
-    let out = relate(&a.unroll(), &b.unroll());
+    let out = stacker::maybe_grow(64 * 1024, 1024 * 1024, || relate(&a.unroll(), &b.unroll()));
     REC_ASSUMPTIONS.with(|s| {
+        s.borrow_mut().pop();
+    });
+    out
+}
+
+thread_local! {
+    /// The pairs of types whose meet [`meet_recursive`] is computing right now.
+    static REC_MEETS: std::cell::RefCell<Vec<(Ty, Ty)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// How many recursive meets may nest before [`meet_recursive`] stops descending. Far past
+/// any shape inference builds (a pair repeats within a level or two); it exists so a pair
+/// that never repeats exactly — the unrollings growing apart — still terminates.
+const MAX_REC_MEET_DEPTH: usize = 32;
+
+/// `a ∩ b` where at least one side is recursive: the meet of their unrollings.
+///
+/// Two recursive types meet THEMSELVES again one level down — `json ∩ json2` unrolls to
+/// `… | vector<json> | …` against `… | vector<json2> | …`, whose elements are the same
+/// pair — so the descent has to stop somewhere, or it overflows the stack (it did: any
+/// `deftype`d recursive type met with another, a guard narrowing a `json` parameter, aborted
+/// the checker with exit 134). Inclusion has the coinductive assumption for this; a meet
+/// cannot assume its own answer, so the re-encountered pair is answered by a SOUND
+/// over-approximation — one of the two operands, each a supertype of the true meet. The
+/// result is exact down to where the pair repeats and wider below it, which can only
+/// suppress a warning. (The usual case never gets here: `json ∩ json` and `json ∩
+/// vector<json>` are decided exactly by the inclusion shortcut in [`Ty::intersect`].)
+///
+/// The operand chosen is the one with the smaller rendering, so `a ∩ b` and `b ∩ a` agree.
+fn meet_recursive(a: Ty, b: Ty) -> Ty {
+    let (repeated, depth) = REC_MEETS.with(|s| {
+        let s = s.borrow();
+        let repeated = s
+            .iter()
+            .any(|(x, y)| (x == &a && y == &b) || (x == &b && y == &a));
+        (repeated, s.len())
+    });
+    if repeated || depth >= MAX_REC_MEET_DEPTH {
+        return if a.to_string() <= b.to_string() { a } else { b };
+    }
+    REC_MEETS.with(|s| s.borrow_mut().push((a.clone(), b.clone())));
+    let out = stacker::maybe_grow(64 * 1024, 1024 * 1024, || a.unroll().intersect(b.unroll()));
+    REC_MEETS.with(|s| {
         s.borrow_mut().pop();
     });
     out
@@ -4363,6 +4796,13 @@ fn merge_is_exact(a: &Ty, b: &Ty) -> bool {
     // term it would either drop the term (unsound) or read as `any` (imprecise) — kept
     // as its own alternative it stays exactly what it is.
     if a.rec_ref != b.rec_ref {
+        return false;
+    }
+    // A closed recursive type merges with nothing either: merged into a term, the binder
+    // would come to range over the OTHER term too — `json ∪ list` read as μX.(json-body[X]
+    // ∪ list), whose `vector<X>` then admits vectors of lists — and `A ∪ B` came out a
+    // different (wider) type than `B ∪ A`, which kept the binder as its own alternative.
+    if a.mu || b.mu {
         return false;
     }
     fn contested<T: PartialEq>(
@@ -4487,7 +4927,14 @@ fn elem_union_exact(a: &Ty, b: &Ty) -> Option<Option<Arc<Ty>>> {
     };
     let (ea, eb) = (elem_of(a), elem_of(b));
     if ea == eb {
-        return None; // identical: the plain rule keeps it
+        if a.elem == b.elem {
+            return None; // identical: the plain rule keeps it
+        }
+        // The same elements, stated once as a shape and once as an element type
+        // (`(list S) ∪ list<S>`): the plain rule reads two different slots and widens to
+        // no element type at all — which, once a lone shape stopped carrying a redundant
+        // `elem` beside it, turned a path accumulator `nil | list<S>` into bare `list`.
+        return Some((ea != Ty::ANY).then(|| Arc::new(ea)));
     }
     // The wider side's EFFECTIVE elements — carried as an element type when that side
     // stated them as a shape, since the shape itself does not survive the merge.
@@ -4513,6 +4960,12 @@ fn elem_union_exact(a: &Ty, b: &Ty) -> Option<Option<Arc<Ty>>> {
 /// of two distinct refinements isn't a single one). Shared by the `arrow` and
 /// `elem` refinements (`present` is "does this side contribute the refined
 /// members").
+/// Whether a record field's type is a `defrecord` identity — the `:__id__` slot of a
+/// nominal record holds keyword literals only (one per member).
+fn is_record_identity(ty: &Ty) -> bool {
+    ty.tags == KEYWORD_BIT && ty.lit.as_ref().is_some_and(|l| l.members().is_some())
+}
+
 fn merge_union<T: PartialEq>(
     a_present: bool,
     a: &Option<Arc<T>>,
@@ -4971,16 +5424,23 @@ impl GradualTy {
 #[cfg(test)]
 mod tests;
 
-/// [`Ty::widened_below`] over a signature's parameters and result.
-fn widen_sig(sig: &Sig, depth: usize) -> Sig {
+/// [`Ty::widened_below`] over a signature: the result widens (covariant); the parameters
+/// must come through UNCHANGED, or the arrow has no sound widening at this depth and the
+/// answer is `None` — a parameter is contravariant, so widening it narrows the arrow.
+fn widen_sig(sig: &Sig, depth: usize) -> Option<Sig> {
+    let unchanged = |t: &Ty| t.widened_below(depth) == *t;
+    if !sig.params.iter().all(unchanged)
+        || !sig.optional.iter().all(unchanged)
+        || !sig.rest.iter().all(unchanged)
+    {
+        return None;
+    }
     let mut out = sig.clone();
-    out.params = sig.params.iter().map(|t| t.widened_below(depth)).collect();
-    out.optional = sig
-        .optional
-        .iter()
-        .map(|t| t.widened_below(depth))
-        .collect();
-    out.rest = sig.rest.as_ref().map(|t| t.widened_below(depth));
     out.ret = sig.ret.widened_below(depth);
-    out
+    // A guard names exactly the type its truthy result proves; widened, it would prove
+    // more than the predicate tests.
+    if out.guard.is_some() && out.ret != sig.ret {
+        out.guard = None;
+    }
+    Some(out)
 }

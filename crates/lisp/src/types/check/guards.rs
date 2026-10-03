@@ -70,14 +70,15 @@ pub(super) fn is_syntactic_keyword(name: &str) -> bool {
 // Names that route through `SkipBody`: `quote`, `quasiquote`, `comment` —
 // syntax, never evaluated, so nothing in them is a reference.
 //
-// `try`, `%try`, `error-of` and `assert-error` route through `ErrorTesting`
-// instead (KI-67): the walk DOES descend, with every lint but `unbound`
-// suppressed. They deliberately exercise failures, so `(error-of (cons 1))`
-// must stay silent about the misuse — but an unbound symbol in there is a dead
+// `error-of` and `assert-error` (and the `%try` THEY expand to) route through
+// `ErrorTesting` instead (KI-67): the walk DOES descend, with every lint but
+// `unbound` suppressed. They deliberately exercise failures, so `(error-of (cons
+// 1))` must stay silent about the misuse — but an unbound symbol in there is a dead
 // call site, not the failure under test, and skipping the body outright let a
-// rename wave ship a broken `try` with every gate green. `%try` matters
-// post-expansion: macroexpand rewrites `(try …)` to
-// `(%try (fn () body) (fn (e) handler))` before `check_file` walks the tree.
+// rename wave ship a broken `try` with every gate green. An author's own `try` is
+// NOT error testing: macroexpand rewrites it to `(%try (fn () body) (fn (e)
+// handler))`, and that body is checked like any other code — a type misuse there is
+// as wrong as anywhere (`walk::provokes_failure_on_purpose` tells the two apart).
 
 /// A recognised type guard over a single variable: when `test` is truthy, `sym`
 /// provably has type `ty`. `then_only` marks a guard whose *negation is unsound*
@@ -703,9 +704,60 @@ pub(super) fn branch_scopes(heap: &Heap, test: Value, ctx: &Ctx) -> (Ctx, Ctx) {
     if let Some((sym, union)) = or_same_var_narrowing(heap, test, ctx) {
         then_ctx = then_ctx.narrow(sym, union);
     }
+    if let Some((sym, present, absent)) = contains_key_narrowing(heap, test, ctx) {
+        then_ctx = then_ctx.narrow(sym, present);
+        else_ctx = else_ctx.narrow(sym, absent);
+    }
     // …and what a COMPARISON proves: an int's interval, a collection's length, an index
     // bound (ADR-350).
     apply_comparison_facts(heap, test, ctx, then_ctx, else_ctx)
+}
+
+/// `(contains? r :k)` over a local whose type is a union of record shapes: a true test
+/// rules out every CLOSED alternative that does not declare `:k`, a false one every
+/// alternative that declares `:k` as REQUIRED — `(if (contains? r :ok) (:ok r) (:error
+/// r))` over `(or (record :ok int) (record :error string))` reads `int`, then `string`
+/// (2026-10-02). An open shape, a non-record term, and a `defrecord` value (whose key set
+/// a `Lookup` impl may present differently) are kept on both sides. `None` when nothing is
+/// ruled out either way, or the test is any other shape.
+pub(in crate::types::check) fn contains_key_narrowing(
+    heap: &Heap,
+    test: Value,
+    ctx: &Ctx,
+) -> Option<(Symbol, Ty, Ty)> {
+    let items = list_items(heap, test)?;
+    let [Value::Sym(head), Value::Sym(base), Value::Keyword(key)] = items[..] else {
+        return None;
+    };
+    if !value::symbol_is(head, "contains?")
+        || ctx.is_lexical_local(head)
+        || !ctx.is_lexical_local(base)
+    {
+        return None;
+    }
+    let base_ty = ctx.get(base)?;
+    let identity = value::intern("__id__");
+    // `Some(true)`: the alternative certainly has the key; `Some(false)`: certainly not.
+    let has_key = |term: &Ty| -> Option<bool> {
+        if term.record_is_open() != Some(false) {
+            return None;
+        }
+        let fields = term.record_fields()?;
+        if fields.contains_key(&identity) {
+            return None;
+        }
+        match fields.get(&key) {
+            Some((_, true)) => Some(true),
+            Some((_, false)) => None,
+            None => Some(false),
+        }
+    };
+    let present = base_ty.retain_terms(|term| has_key(term) != Some(false));
+    let absent = base_ty.retain_terms(|term| has_key(term) != Some(true));
+    if (present == base_ty && absent == base_ty) || present.is_never() || absent.is_never() {
+        return None;
+    }
+    Some((base, present, absent))
 }
 
 /// Every conjunct guard of an `and`-expansion test — a truthy `and` proves **all**
@@ -1288,7 +1340,7 @@ fn cmp_side(heap: &Heap, form: Value, ctx: &Ctx) -> Option<CmpSide> {
             };
             let counts = value::symbol_is(head, "count")
                 || value::symbol_is(head, "string/length")
-                || value::symbol_is(head, "vector-length");
+                || value::symbol_is(head, "seq/vector-length");
             if counts && !ctx.is_lexical_local(head) && ctx.is_lexical_local(target) {
                 return Some(CmpSide::Count(target));
             }
@@ -1351,7 +1403,7 @@ pub(super) fn count_alias_target(heap: &Heap, rhs: Value, ctx: &Ctx) -> Option<S
     };
     let counts = value::symbol_is(head, "count")
         || value::symbol_is(head, "string/length")
-        || value::symbol_is(head, "vector-length");
+        || value::symbol_is(head, "seq/vector-length");
     (counts && !ctx.is_lexical_local(head) && ctx.is_lexical_local(target)).then_some(target)
 }
 

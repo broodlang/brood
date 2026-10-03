@@ -29,6 +29,8 @@ mod order;
 mod properties;
 mod reach_gate;
 mod refinement;
+mod review_inference;
+mod review_lints;
 mod robustness;
 mod scope_and_guards;
 mod signatures;

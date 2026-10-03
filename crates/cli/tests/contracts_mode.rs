@@ -362,3 +362,68 @@ fn the_contract_machinery_loads_only_when_armed() {
         "an armed run must materialise it — otherwise the unarmed half proves nothing"
     );
 }
+
+/// A contract must not cost a program its recursion depth or its tail calls (2026-10-02).
+///
+/// **Depth.** Armed, at the DEFAULT tier, a `sig`-declared non-tail recursion overflowed
+/// between 4k and 8k levels where the same function unarmed — and armed at ceiling 1 —
+/// reached 200k. The shim's checks are refused the native tier (`call-mediated-boxed`), so
+/// every level nested native → `brood_rt_call_slow` → `vm_apply` → native on the Rust
+/// stack, and the drain that should hand such a subtree to the VM's heap frames could never
+/// start: the JIT's own stack margin and `vm_apply`'s were EQUAL, so the moment the JIT
+/// declined a level the VM refused it on the same measurement. `nest run`/`nest test` arm
+/// contracts by default, so dev mode had ~25x less depth than a release.
+///
+/// **Tail calls.** A shim whose declared result is `any` checks only its arguments and
+/// calls the original in TAIL position, so mutual tail recursion through two contracted
+/// functions stays flat. 2 000 000 levels is past the VM's 1 048 576-frame cap, which a
+/// shim holding a frame per level would hit.
+///
+/// The engine is pinned to ceiling 2 — the configuration the depth bug lived in — whatever
+/// the ambient environment (CI's tree-walker job sets `BROOD_VM=0`, where 50 000 levels of
+/// tree-walked recursion is a different question).
+#[test]
+fn contracted_recursion_keeps_its_depth_and_its_tail_calls() {
+    let dir = temp_dir("contracts-depth");
+    std::fs::write(
+        dir.path.join("depth.blsp"),
+        "(sig depth (int -> int))\n\
+         (check-allow :non-tail-recursion\n\
+         \x20\x20(defn depth (n) (if (= n 0) 0 (+ 1 (depth (dec n))))))\n\
+         (sig ping (int -> any))\n\
+         (sig pong (int -> any))\n\
+         (defn ping (n) (if (= n 0) :done (pong (dec n))))\n\
+         (defn pong (n) (if (= n 0) :done (ping (dec n))))\n\
+         (defn- report (label thunk)\n\
+         \x20\x20(io/puts (str label (try (thunk) (catch e (str \"RAISED \" (error-message e)))))))\n\
+         (report \"armed: \" (fn () (try (depth \"x\") (catch e (get e :blame)))))\n\
+         (report \"depth: \" (fn () (depth 50000)))\n\
+         (report \"tail: \" (fn () (ping 2000000)))\n",
+    )
+    .expect("write program");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_brood"));
+    cmd.arg("depth.blsp")
+        .current_dir(&dir.path)
+        .env("BROOD_CONTRACTS", "1")
+        .env("BROOD_TIER", "2")
+        .env_remove("BROOD_NO_JIT");
+    support::dies_with_parent(&mut cmd);
+    let out = cmd.output().expect("run brood");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        text.contains("armed: :caller"),
+        "the run must actually be armed, or the rest proves nothing:\n{text}"
+    );
+    assert!(
+        text.contains("depth: 50000"),
+        "a contracted non-tail recursion must reach the depth it reaches unarmed:\n{text}"
+    );
+    assert!(
+        text.contains("tail: :done"),
+        "mutual tail recursion through argument-only shims must stay flat:\n{text}"
+    );
+}

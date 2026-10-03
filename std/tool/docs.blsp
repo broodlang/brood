@@ -503,7 +503,7 @@ bare-surface (prelude) name, whose references are bare already."
 
 ;; Every `expr ;=> expected` example in a docstring, in source order.
 (defn- doctests-in (docstring)
-  (seq/filter (map (string/split docstring "\n") doctest-of-line) (fn (x) (not (nil? x)))))
+  (seq/keep (string/split docstring "\n") doctest-of-line))
 
 ;; Evaluate one example: `[:ok]`, `[:fail actual expected]`, or `[:error message]`.
 (defn- run-one-doctest (expr-str expected-str)

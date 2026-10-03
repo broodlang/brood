@@ -97,9 +97,9 @@ fn bytes_and_map_entries_carry_their_element_types() {
         ty_str("(map {:a 1 :b 2} (fn (kv) (first kv)))"),
         "list<:a | :b>"
     );
-    // `{}` has no entries, and says so: no key type inhabits it, and it is not
-    // provably non-empty either
-    assert_eq!(ty_str("(first {})"), "nil | vector<never>");
+    // `{}` has no entries, and says so: no key type inhabits it, so an entry tuple with a
+    // `never` position is empty too, and `first` of it is exactly `nil`
+    assert_eq!(ty_str("(first {})"), "nil");
     // A vector literal is a TUPLE, whose arity is part of its type — so it is provably
     // non-empty, the same length fact a `list<T>` carries, and `first` drops the `nil`.
     assert_eq!(ty_str("(first [1 2])"), "1");

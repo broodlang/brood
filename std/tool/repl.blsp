@@ -786,7 +786,7 @@ from your home directory doesn't load the same file twice."
         ;; Compared against the *absolute* local path, since `user` is absolute — a
         ;; bare "./.broodrc.blsp" would never match it and we'd load twice.
         local (try (path/join (file/cwd) ".broodrc.blsp") (catch _ ".broodrc.blsp")))
-    (seq/filter (if (= user local) (list user) (list user local)) (fn (p) (not (nil? p))))))
+    (seq/keep (if (= user local) (list user) (list user local)) identity)))
 
 ;; Loaded ONCE per runtime, not once per `run`: `pry` launches a nested `run`
 ;; mid-session, and re-running the user's rc there would re-execute its side effects

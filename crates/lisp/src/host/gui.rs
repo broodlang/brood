@@ -24,7 +24,7 @@
 //! * `gui-close id` destroys one window. The thread itself never exits (winit can't
 //!   restart a loop); it idles when no windows are open.
 //!
-//! **Input never blocks a worker (ADR-058).** Rather than handing keys back through
+//! **Input never blocks a worker (ADR-059).** Rather than handing keys back through
 //! a channel the Brood side polls, the GUI thread turns each key/mouse event into a
 //! `Message` and `deliver`s it straight to the subscriber's mailbox — so the
 //! observer parks in `(receive)` (holding no scheduler worker) instead of pinning

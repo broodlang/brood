@@ -10,11 +10,37 @@ use crate::types::Ty;
 /// arrow refinement isn't structurally checkable on a live closure here, so
 /// for functions the oracle asserts only tag membership — `fn` / `native`.)
 fn value_member_of(heap: &Heap, v: Value, ty: &Ty) -> bool {
+    // A recursive type (`μ`) is checked one unrolling at a time: its self-references
+    // become the whole type again, so the walk below sees the body's real shape.
+    if ty.is_recursive() {
+        return value_member_of(heap, v, &ty.unroll());
+    }
     if !ty.contains_tag(value::tag(v)) {
         return false;
     }
+    // **Int intervals** (ADR-350): `contains_tag` passes `-1` against `int[0..]`.
+    if let (Value::Int(n), Some(r)) = (v, ty.int_range()) {
+        if !crate::types::Range::subset(crate::types::Range::point(n), r) {
+            return false;
+        }
+    }
+    // **Lengths** (`with_len`): a claimed length interval must hold the value's count.
+    // Strings and bytes are left out (their count is not one heap walk here), and so is a
+    // `defrecord` value, whose count hides its identity key.
+    if let (Some(count), Some(r)) = (counted_length(heap, v), ty.count_range()) {
+        if !crate::types::Range::subset(crate::types::Range::point(count), r) {
+            return false;
+        }
+    }
     if let Some(elem) = ty.elem_ty() {
         match v {
+            Value::Set(id) => {
+                for it in heap.set_elems(id) {
+                    if !value_member_of(heap, it, &elem) {
+                        return false;
+                    }
+                }
+            }
             Value::Vector(id) => {
                 for it in heap.vector(id).to_vec() {
                     if !value_member_of(heap, it, &elem) {
@@ -140,6 +166,98 @@ fn value_member_of(heap: &Heap, v: Value, ty: &Ty) -> bool {
         }
     }
     true
+}
+
+/// The `count` of `v` for the kinds whose length is one heap walk: a vector, a PROPER
+/// list, a set, and a map that is not a `defrecord` value. `None` for anything else.
+fn counted_length(heap: &Heap, v: Value) -> Option<i64> {
+    let n = match v {
+        Value::Vector(id) => heap.vector(id).to_vec().len(),
+        Value::Pair(_) => {
+            let mut cur = v;
+            let mut n = 0usize;
+            while let Value::Pair(p) = cur {
+                n += 1;
+                cur = heap.pair(p).1;
+            }
+            if !matches!(cur, Value::Nil) {
+                return None; // improper: `count` is not a list's length
+            }
+            n
+        }
+        Value::Set(id) => heap.set_elems(id).len(),
+        Value::Map(id) => {
+            let entries = heap.map_entries(id);
+            if entries
+                .iter()
+                .any(|(k, _)| matches!(k, Value::Keyword(n) if value::symbol_is(*n, "__id__")))
+            {
+                return None;
+            }
+            entries.len()
+        }
+        _ => return None,
+    };
+    i64::try_from(n).ok()
+}
+
+/// Cases that need a definition evaluated first — a `defrecord` constructor's value
+/// cannot be produced by a closed expression. `(definitions, expression)`.
+const CASES_WITH_DEFINITIONS: [(&str, &str); 4] = [
+    ("(defrecord oracle-pt (x y))", "(count (oracle-pt 1 2))"),
+    ("(defrecord oracle-pt (x y))", "(keys (oracle-pt 1 2))"),
+    ("(defrecord oracle-pt (x y))", "(vals (oracle-pt 1 2))"),
+    ("(defrecord oracle-pt (x y))", "(seq (oracle-pt 1 2))"),
+];
+
+#[test]
+fn a_defined_constructor_s_value_holds_its_static_type() {
+    let mut claimed = 0usize;
+    for (definitions, src) in CASES_WITH_DEFINITIONS {
+        let mut interp = crate::Interp::new();
+        interp.eval_str(definitions).expect("definitions");
+        let form = crate::syntax::reader::read_one(&mut interp.heap, src).expect("parse");
+        let Some(t) = expr_ty(&interp.heap, form, &Ctx::default()) else {
+            continue;
+        };
+        claimed += 1;
+        let v = interp.eval_str(src).expect("eval");
+        assert!(
+            value_member_of(&interp.heap, v, &t),
+            "UNSOUND: {src} : static `{t}`, but the runtime value {} is not a member of it",
+            crate::syntax::printer::print(&interp.heap, v),
+        );
+    }
+    assert!(
+        claimed >= 1,
+        "no definition case was typed — the facet verified nothing"
+    );
+}
+
+#[test]
+fn value_membership_reads_intervals_lengths_and_set_elements() {
+    // The oracle's own guards: each must REJECT a value its refinement excludes, or a rule
+    // that produced the wrong interval / length / set element would pass unseen.
+    let mut interp = crate::Interp::new();
+    let heap = &mut interp.heap;
+    let neg = Value::Int(-1);
+    assert!(!value_member_of(
+        heap,
+        neg,
+        &Ty::int_in(crate::types::Range::at_least(0))
+    ));
+    assert!(value_member_of(
+        heap,
+        Value::Int(3),
+        &Ty::int_in(crate::types::Range::at_least(0))
+    ));
+    let three = crate::syntax::reader::read_one(heap, "[1 2 3]").expect("parse");
+    let two_long =
+        Ty::vector_of(Ty::of(crate::core::value::Tag::Int)).with_len(crate::types::Range::point(2));
+    assert!(!value_member_of(heap, three, &two_long));
+    let set = interp.eval_str("#{1 \"x\"}").expect("eval");
+    let ints = Ty::set_of(Ty::of(crate::core::value::Tag::Int));
+    assert!(!value_member_of(&interp.heap, set, &ints));
 }
 
 #[test]
@@ -288,12 +406,46 @@ fn expr_ty_is_a_sound_overapproximation_of_runtime_values() {
         "(math/quot 7 2)",
         "(/ 7 2)",
         "(+ 1 2.5)",
+        // ---- 2026-10-02 review: the rules whose refinement disagreed with the runtime ----
+        "(merge {:port 80} {:port \"x\"})",
+        "(merge {:a 1} {:b \"x\"})",
+        "(conj [1 2] \"x\")",
+        "(conj '(1 2) \"x\")",
+        "(into [] '(1 2))",
+        "(into #{} [1 \"x\"])",
+        "(append '(1) '(\"x\"))",
+        "(rest (cons 1 [2 3]))",
+        "(count [1 2 3])",
+        "(count {:a 1})",
+        "(count nil)",
+        "(seq [1 2])",
+        "(seq \"abc\")",
+        "(seq {:a 1})",
+        "(seq #{1 2})",
+        "(seq nil)",
+        "(seq '(1 2))",
+        "(range 5 2 -1)",
+        "(first (range 5 2 -1))",
+        "(range 0 10 3)",
+        "(seq/dedupe [1 1 2])",
+        "(count (seq/dedupe [1 1 2]))",
+        "(count (seq/distinct [1 1 2]))",
+        "(nth [1] 5 :d)",
+        "(nth [1 2] 1 :d)",
+        "(nth '(1) 3 \"d\")",
+        "(get [1] 5 :d)",
+        "(math/sin 1)",
+        "(math/rem -7 2)",
+        "(math/mod -7 2)",
+        "(- (count [1 2 3]) 1)",
         // guards / branches — a union of both arms
         "(if true 1 \"a\")",
         "(if false 1 \"a\")",
         "(let (x 5) (if (math/even? x) x nil))",
     ];
     let mut claimed = 0usize;
+    // Every unsound case, not only the first: one broken rule should not hide another.
+    let mut unsound: Vec<String> = Vec::new();
     for src in cases {
         let mut interp = crate::Interp::new();
         // Static type of the form (read in this heap, typed in the empty ctx).
@@ -304,14 +456,16 @@ fn expr_ty_is_a_sound_overapproximation_of_runtime_values() {
         claimed += 1;
         // Runtime value of the same source (fresh parse + eval).
         let v = interp.eval_str(src).expect("eval");
-        assert!(
-            value_member_of(&interp.heap, v, &t),
-            "UNSOUND: {src} : static `{t}`, but the runtime value {} (tag {}) \
+        if !value_member_of(&interp.heap, v, &t) {
+            unsound.push(format!(
+                "UNSOUND: {src} : static `{t}`, but the runtime value {} (tag {}) \
                  is not a member of it",
-            crate::syntax::printer::print(&interp.heap, v),
-            value::tag(v).name(),
-        );
+                crate::syntax::printer::print(&interp.heap, v),
+                value::tag(v).name(),
+            ));
+        }
     }
+    assert!(unsound.is_empty(), "{}", unsound.join("\n"));
     // A case the checker declines to type is skipped, so a corpus that mostly declines
     // would pass while verifying nothing. Assert the coverage instead of assuming it:
     // this is the difference between "the oracle found nothing" and "the oracle ran".
@@ -343,7 +497,7 @@ const TYPED_PARAMS: [(&str, &str, &str); 8] = [
 /// parameter, or that the runtime rejects for this parameter's value, is skipped — the
 /// pairing is deliberately a cross-product so a new rule is covered by every shape it
 /// applies to without anyone maintaining a table.
-const TYPED_BODIES: [&str; 18] = [
+const TYPED_BODIES: [&str; 35] = [
     "(get m :a)",
     "(get m :missing)",
     "(assoc m :b 2)",
@@ -362,6 +516,25 @@ const TYPED_BODIES: [&str; 18] = [
     "(str (f 1))",
     "(first xs)",
     "(first t)",
+    // 2026-10-02 review: an open later `merge` argument, `rest`/`count`/`nth`-with-default
+    // over a tuple, `conj`/`into`/`append` onto a declared collection, `seq` of each.
+    "(merge {:extra 1} r)",
+    "(merge {:a \"s\"} r)",
+    "(merge m {:z \"s\"})",
+    "(rest t)",
+    "(count t)",
+    "(count r)",
+    "(count xs)",
+    "(nth t 5 :d)",
+    "(nth xs 0 :d)",
+    "(nth xs 9 :d)",
+    "(conj xs \"s\")",
+    "(into xs [\"s\"])",
+    "(append xs [\"s\"])",
+    "(seq xs)",
+    "(seq m)",
+    "(seq t)",
+    "(seq r)",
 ];
 
 #[test]
@@ -383,6 +556,7 @@ fn a_body_typed_under_a_declared_parameter_holds_at_run_time() {
     // does not read the function, it reads what the function returned.
     let mut claimed_count = 0usize;
     let mut checked = 0usize;
+    let mut unsound: Vec<String> = Vec::new();
     for (name, param_src, value_src) in TYPED_PARAMS {
         for body_src in TYPED_BODIES {
             if !body_mentions(body_src, name) {
@@ -412,15 +586,17 @@ fn a_body_typed_under_a_declared_parameter_holds_at_run_time() {
             let Ok(v) = interp.eval_str(&program) else {
                 continue;
             };
-            assert!(
-                value_member_of(&interp.heap, v, &claimed),
-                "UNSOUND: with `{name} : {param_src}`, `{body_src}` is typed `{claimed}`, \
-                 but it evaluates to {} (tag {}), which is not a member of it",
-                crate::syntax::printer::print(&interp.heap, v),
-                value::tag(v).name(),
-            );
+            if !value_member_of(&interp.heap, v, &claimed) {
+                unsound.push(format!(
+                    "UNSOUND: with `{name} : {param_src}`, `{body_src}` is typed `{claimed}`, \
+                     but it evaluates to {} (tag {}), which is not a member of it",
+                    crate::syntax::printer::print(&interp.heap, v),
+                    value::tag(v).name(),
+                ));
+            }
         }
     }
+    assert!(unsound.is_empty(), "{}", unsound.join("\n"));
     // Same discipline as the expression facet: a pairing that mostly declines would pass
     // while verifying nothing, so the coverage is asserted rather than assumed.
     assert!(

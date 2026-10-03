@@ -295,3 +295,51 @@ fn an_edit_to_a_listed_file_outside_the_source_paths_is_not_replayed() {
         "the warning names the unbound call:\n{out}"
     );
 }
+
+/// An `impl` added in ANOTHER file moves the verdict of the file that declares the ability.
+/// `shapes.blsp` calls `(area (circle 2))`; the impl lives in `impls.blsp`, which `shapes`
+/// never mentions. The ability checks read the process registries (`*impls*`, `*sealed*`,
+/// `*abilities*`, …), and until 2026-10-02 the dependency record observed none of them — so
+/// `shapes`' fingerprint (its own mtime, the globals it names) could not move, and the
+/// re-check replayed `no impl of area` from the cache while `BROOD_NO_CHECK_CACHE=1` was
+/// clean. The registries are observed now, their fact the project's entries.
+#[test]
+fn an_impl_added_in_another_file_moves_the_cached_verdict() {
+    let dir = scratch("impl");
+    write(&dir, "project.blsp", "(project\n  :name impl)\n");
+    write(
+        &dir,
+        "src/shapes.blsp",
+        "(defmodule shapes)\n(defability Area (area [self] :-> int))\n(defrecord circle (r))\n(defn use-it () (area (circle 2)))\n",
+    );
+    write(
+        &dir,
+        "src/impls.blsp",
+        "(defmodule impls (:use shapes))\n(defn placeholder () 1)\n",
+    );
+    let (code, out) = nest_check(&dir);
+    assert_eq!(
+        code, 1,
+        "the missing impl should fail the first check:\n{out}"
+    );
+    assert!(
+        out.contains("no impl of `area`"),
+        "the first check names the missing impl:\n{out}"
+    );
+
+    write(
+        &dir,
+        "src/impls.blsp",
+        "(defmodule impls (:use shapes))\n(defn placeholder () 1)\n(impl Area shapes/circle (area [c] (* 3 (get c :r))))\n",
+    );
+    let (code, out) = nest_check(&dir);
+    assert!(
+        !out.contains("no impl of `area`"),
+        "the impl in another file must reach shapes' cached verdict:\n{out}"
+    );
+    assert_eq!(code, 0, "the check is clean once the impl exists:\n{out}");
+    assert!(
+        to_recheck(&out) >= 2,
+        "the impl must re-check the file whose verdict it moves:\n{out}"
+    );
+}

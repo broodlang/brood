@@ -130,6 +130,11 @@ impl fmt::Display for Ty {
             let name = REC_DEPTH.with(|d| rec_name(d.get().saturating_sub(1)));
             return f.write_str(&name);
         }
+        // An uninhabited term is `never` whatever its slots still say — a term with no tags
+        // but a leftover shape printed as the EMPTY STRING, which reads as nothing at all.
+        if self.is_never() {
+            return f.write_str("never");
+        }
         // A union of terms renders as its terms, joined — `(tuple int) | (tuple
         // string)`, the shape that used to print as bare `vector` because the union
         // had nowhere to keep both (ADR-262). Each term renders by the rules below.
@@ -145,10 +150,13 @@ impl fmt::Display for Ty {
                 return f.write_str("never");
             }
             let positive = self.positive_for_display();
+            // `positive == any`, not `positive.is_any()`: the latter reads the tags alone,
+            // and a positive part of every tag less a literal (`(not "x")`) printed as
+            // `(not …)` of the subtraction only, the `"x"` silently gone.
             return f.write_str(&render_subtraction(
                 &positive.to_string(),
                 negs,
-                positive.is_any(),
+                positive == Ty::ANY,
             ));
         }
         // Named points (compared by value — `Arc` isn't structural, so these
@@ -207,6 +215,15 @@ impl fmt::Display for Ty {
         // A pure map type with a known key/value type: `map<K, V>`.
         if let Some((k, v)) = self.map_kv() {
             if self.tags == MAP_BIT {
+                // Beside a record shape the term is the INTERSECTION of the two, and
+                // printing the `map<K, V>` half alone named a wider type.
+                if self.fields.is_some() {
+                    let shape = Ty {
+                        map_kv: None,
+                        ..self.clone()
+                    };
+                    return write!(f, "({shape} and map<{k}, {v}>)");
+                }
                 return write!(f, "map<{k}, {v}>");
             }
         }
@@ -418,6 +435,18 @@ impl fmt::Display for Ty {
                     || (tag as u8 as u32 == bit(Tag::Bool) && self.lit_bool.is_some())
                     || (tag as u8 as u32 == bit(Tag::Str) && self.lit_str.is_some());
                 if !is_literal_tag && self.contains_tag(tag) {
+                    let tag_bits = if (1u32 << bit(tag)) & FN_BITS != 0 {
+                        self.tags & FN_BITS
+                    } else {
+                        1u32 << bit(tag)
+                    };
+                    if let Some(member) = self.refined_member(tag_bits) {
+                        // the two function members are one arrow: print it once
+                        if tag != Tag::Native || self.tags & FN_BITS != FN_BITS {
+                            parts.push(member);
+                        }
+                        continue;
+                    }
                     // A sequence member keeps its element type beside the literals too.
                     match self.term_elem_for_display() {
                         Some(elem) if (1u32 << bit(tag)) & SEQ_BITS != 0 => {
@@ -487,13 +516,23 @@ impl fmt::Display for Ty {
                         f.write_str(" | ")?;
                     }
                     first = false;
-                    f.write_str("fn")?;
+                    match self.refined_member(fn_tags) {
+                        Some(member) => f.write_str(&member)?,
+                        None => f.write_str("fn")?,
+                    }
                     continue;
                 }
                 if !first {
                     f.write_str(" | ")?;
                 }
                 first = false;
+                // A member carrying its own shape — a tuple, a list shape, a map's key and
+                // value or record shape, an arrow — prints as that shape: the bare tag name
+                // is wider than the type, and `(tuple int) | string` read `string | vector`.
+                if let Some(member) = self.refined_member(1u32 << bit(tag)) {
+                    f.write_str(&member)?;
+                    continue;
+                }
                 f.write_str(tag.name())?;
                 // A sequence member of a MIXED term still carries the term's element
                 // type: `nil | number | vector<X>` is what a recursive value type's body
@@ -579,7 +618,10 @@ impl Ty {
                 format!("(or {})", parts.join(" "))
             };
             let positive = self.positive_for_display();
-            if positive.is_any() {
+            // `== ANY`, not `is_any()`: the latter reads the tags alone, so a positive part
+            // of every tag less a literal (`(not "x")`) wrote the subtraction only and
+            // silently dropped the `"x"` — a wider type than the one shown.
+            if positive == Ty::ANY {
                 return Some(format!("(not {inner})"));
             }
             return Some(format!("(and {} (not {inner}))", positive.to_source()?));
@@ -657,7 +699,17 @@ impl Ty {
         }
         if self.tags == MAP_BIT {
             if let Some((k, v)) = self.map_kv() {
-                return Some(format!("(map {} {})", k.to_source()?, v.to_source()?));
+                let map = format!("(map {} {})", k.to_source()?, v.to_source()?);
+                // Beside a record shape the term is the INTERSECTION of the two; the
+                // `(map K V)` half alone is a wider type than the one shown.
+                if self.fields.is_some() {
+                    let shape = Ty {
+                        map_kv: None,
+                        ..self.clone()
+                    };
+                    return Some(format!("(and {} {map})", shape.to_source()?));
+                }
+                return Some(map);
             }
             if let Some(fields) = self.record_fields() {
                 // A record's NAME is its type in a `sig` (`(sig area (t/circle -> float))`),
@@ -704,18 +756,25 @@ impl Ty {
             }
         }
         // A list shape of two or more positions is `(list T U …)` in the grammar; ONE
-        // position has no spelling of its own (`(list T)` is the uniform list), so it
-        // falls through to the element rendering, a sound widening.
+        // position has no spelling of its own (`(list T)` is the uniform list, and the
+        // element rendering below, `(len (list T) 1 _)`, admits longer lists), so it
+        // DECLINES — a suggestion must never write a wider type than the one shown.
         if let Some(elems) = self.list_shape_elems() {
-            if elems.len() >= 2 {
-                let parts: Vec<String> = elems
-                    .iter()
-                    .map(Ty::to_source)
-                    .collect::<Option<Vec<_>>>()?;
-                return Some(format!("(list {})", parts.join(" ")));
+            if elems.len() < 2 {
+                return None;
             }
+            let parts: Vec<String> = elems
+                .iter()
+                .map(Ty::to_source)
+                .collect::<Option<Vec<_>>>()?;
+            return Some(format!("(list {})", parts.join(" ")));
         }
-        if let Some(elem) = self.elem_ty() {
+        // A positional shape on a term with other members — `(tuple int) | string`, a
+        // shaped vector beside a list — renders member by member below; the element
+        // rendering here would write the vector member without its shape.
+        let positional_mixed = (self.tuple.is_some() && self.tags != VECTOR_BIT)
+            || (self.list_shape.is_some() && self.tags != PAIR_BIT);
+        if let Some(elem) = self.elem_ty().filter(|_| !positional_mixed) {
             // An element refinement describes the `pair`/`vector` members, and the type
             // may carry `nil` beside them — `nil | list<int>` is what every sequence
             // combinator returns. Render each member with its element type rather than
@@ -765,13 +824,16 @@ impl Ty {
         if self.tuple.is_some() {
             structural_tags |= VECTOR_BIT;
         }
+        if self.list_shape.is_some() {
+            structural_tags |= PAIR_BIT;
+        }
         if self.map_kv.is_some() || self.fields.is_some() {
             structural_tags |= MAP_BIT;
         }
         if self.arrow.is_some() || self.overload.is_some() {
             structural_tags |= FN_BITS;
         }
-        if structural_tags != 0 && self.tags & !structural_tags != 0 {
+        if structural_tags != 0 && (self.tags & !structural_tags != 0 || positional_mixed) {
             // Tag-table iteration, not bit isolation — see the note in
             // `term_is_subtype_of_union`: the lint's suggested `isolate_lowest_one` is
             // unstable below Rust 1.98 and this crate builds on 1.95.
@@ -925,6 +987,28 @@ impl Sig {
 }
 
 impl Ty {
+    /// The rendering of the member(s) `tag_bits` of this term when the term carries a
+    /// positional, map or arrow refinement for them — what a tag-name join must print in
+    /// place of the bare name, which names a WIDER type than this one. `None` for a member
+    /// with no such refinement (an element type and an interval are suffixes the joins
+    /// already print).
+    fn refined_member(&self, tag_bits: u32) -> Option<String> {
+        let refined = (tag_bits & VECTOR_BIT != 0 && self.tuple.is_some())
+            || (tag_bits & PAIR_BIT != 0 && self.list_shape.is_some())
+            || (tag_bits & MAP_BIT != 0 && (self.map_kv.is_some() || self.fields.is_some()))
+            || (tag_bits & FN_BITS != 0 && (self.arrow.is_some() || self.overload.is_some()));
+        if !refined {
+            return None;
+        }
+        let member = self.project_tag(tag_bits).to_string();
+        // An arrow inside a `|` join reads as part of its neighbour without parentheses.
+        Some(if tag_bits & FN_BITS != 0 {
+            format!("({member})")
+        } else {
+            member
+        })
+    }
+
     /// A small complement rendered as what it is — `(not string)`, `(not (nil | false))` —
     /// see the comment inside; `None` for an ordinary union.
     fn near_universe_negation(&self) -> Option<String> {

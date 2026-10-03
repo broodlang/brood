@@ -18,6 +18,7 @@ use crate::core::keywords as kw;
 use crate::core::value::{self, Value};
 use crate::error::Pos;
 
+use super::deps::obs_registry;
 use super::walk::list_items;
 use crate::core::registries as reg;
 
@@ -195,8 +196,11 @@ fn parse_protocol(heap: &Heap, form: Value) -> Option<(String, Protocol)> {
 fn parse_op(heap: &Heap, form: Value) -> Option<Op> {
     let items = list_items(heap, form)?;
     let name = sym_name(*items.first()?)?;
+    // The runtime takes either spelling of a parameter list — `(eqv [a b] …)` and
+    // `(eqv (a b) …)` (an `impl` method is a `defn` arm) — so the checker must too.
     let args = match *items.get(1)? {
         Value::Vector(id) => heap.vector(id).to_vec(),
+        params @ (Value::Pair(_) | Value::Nil) => list_items(heap, params)?,
         _ => return None,
     };
     let variadic = args.iter().any(|&a| is_rest_marker(a));
@@ -273,7 +277,9 @@ pub(super) fn check_behaviours(
                         bname, op.name, op.arity
                     ),
                 )),
-                Some(&Some(arity)) if arity != op.arity => out.push((
+                // A variadic op (`(render [self & more])`) declares no single arity to pin
+                // — accept any provider, as `check_impls` does.
+                Some(&Some(arity)) if !op.variadic && arity != op.arity => out.push((
                     pos,
                     format!(
                         "behaviour {}: `{}` takes {} arg(s), the behaviour needs {}",
@@ -502,7 +508,7 @@ fn record_ctor_id(heap: &Heap, form: Value) -> Option<String> {
 /// `ambiguous` records any op-fn global symbol that two DIFFERENT abilities bind (two
 /// abilities declaring the same op name, so the later `defn` clobbers the earlier's
 /// generic function — the same collision `register-ability` warns on at load). Such a
-/// symbol is removed from `op_fns` by `build_ability_info` so the static missing-impl
+/// symbol is removed from `op_fns` by `build_ability_info_visible` so the static missing-impl
 /// pass neither false-warns (attributing a call to the wrong ability) nor false-passes
 /// (suppressing a real gap because the name resolves to the other ability). The runtime
 /// and `register-ability`'s warning cover that collision instead.
@@ -636,7 +642,7 @@ fn read_impls_registry(
     impls: &mut HashSet<(String, String, String)>,
     defaults: &mut HashSet<(String, String)>,
 ) {
-    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern(reg::IMPLS)) else {
+    let Some(Value::Map(mid)) = obs_registry(heap, reg::IMPLS) else {
         return;
     };
     for (op_key, inner) in heap.map_entries(mid) {
@@ -674,7 +680,7 @@ pub(super) fn is_ability_op(heap: &Heap, info: Option<&AbilityInfo>, sym: value:
     if info.is_some_and(|info| info.op_of(sym).is_some()) {
         return true;
     }
-    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern(reg::OP_ABILITY)) else {
+    let Some(Value::Map(mid)) = obs_registry(heap, reg::OP_ABILITY) else {
         return false;
     };
     heap.map_get(mid, Value::Sym(sym)).is_some()
@@ -761,7 +767,7 @@ pub(super) fn ability_type_table(
     for &form in expanded {
         collect_register_sealed(heap, form, &mut sealed);
     }
-    read_sealed_registry(heap, &mut sealed);
+    read_sealed_registry(heap, &mut sealed, None);
     // Every ability → Some(members) if sealed, else None (open). A sealed ability declared
     // without a `defability` op list still counts (fold it in).
     let mut table: HashMap<String, Option<Vec<String>>> = HashMap::new();
@@ -886,8 +892,19 @@ impl AbilityInfo {
     }
 }
 
-/// Gather the ability facts for a file from its expanded tree + the runtime registry.
-pub(super) fn build_ability_info(heap: &Heap, expanded: &[Value]) -> AbilityInfo {
+/// Gather the ability facts for a file from its expanded tree + the runtime registry, with
+/// the registry's sealed and `:requires` declarations restricted
+/// to the abilities the file can SEE — `visible` is its require closure, the same world
+/// [`read_methods_registry`] reads (B8). The registry is process state: checking
+/// `user.blsp other.blsp` in one process left `user`'s imported module's abilities
+/// registered, and `other.blsp` — with no path to that module — was told about its sealed
+/// gaps. An ability's namespace is its `*ability-owner*` entry; a root-namespace ability
+/// (no owner) is everyone's. `None` reads everything.
+pub(super) fn build_ability_info_visible(
+    heap: &Heap,
+    expanded: &[Value],
+    visible: Option<&HashSet<String>>,
+) -> AbilityInfo {
     let mut op_fns = HashMap::new();
     let mut ctors = HashMap::new();
     let mut ambiguous = HashSet::new();
@@ -942,8 +959,8 @@ pub(super) fn build_ability_info(heap: &Heap, expanded: &[Value]) -> AbilityInfo
         &mut op_params,
         &mut provided,
     );
-    read_sealed_registry(heap, &mut sealed);
-    read_requires_registry(heap, &mut requires);
+    read_sealed_registry(heap, &mut sealed, visible);
+    read_requires_registry(heap, &mut requires, visible);
     // `:derives [A]` on a record (ADR-185) registers A's impl for that id at LOAD, not at
     // check time — so expand each `derive-into` form into the impls set here: a derived id
     // implements every op of the ability. This makes a derived member satisfy the call-site
@@ -1146,12 +1163,18 @@ fn collect_register_ability_requires(
 
 /// Union in the runtime `*ability-requires*` registry — name → its required abilities (bare
 /// name symbols) — so a `:requires` declared in an imported module is visible here too.
-fn read_requires_registry(heap: &Heap, out: &mut HashMap<String, Vec<String>>) {
-    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern(reg::ABILITY_REQUIRES))
-    else {
+fn read_requires_registry(
+    heap: &Heap,
+    out: &mut HashMap<String, Vec<String>>,
+    visible: Option<&HashSet<String>>,
+) {
+    let Some(Value::Map(mid)) = obs_registry(heap, reg::ABILITY_REQUIRES) else {
         return;
     };
     for (name, reqs) in heap.map_entries(mid) {
+        if !ability_is_visible(heap, name, visible) {
+            continue;
+        }
         if let Some(a) = sym_name(name) {
             let rs = list_items(heap, reqs)
                 .unwrap_or_default()
@@ -1172,7 +1195,7 @@ fn read_abilities_registry(
     params: &mut HashMap<(String, String), Vec<Option<crate::types::Ty>>>,
     provided: &mut HashSet<(String, String)>,
 ) {
-    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern(reg::ABILITIES)) else {
+    let Some(Value::Map(mid)) = obs_registry(heap, reg::ABILITIES) else {
         return;
     };
     for (name, specs) in heap.map_entries(mid) {
@@ -1214,7 +1237,7 @@ pub(super) fn record_id_names(
 ) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
     // Imported/already-loaded records: the runtime registry.
-    if let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern(reg::RECORD_IDS)) {
+    if let Some(Value::Map(mid)) = obs_registry(heap, reg::RECORD_IDS) {
         for (id, _) in heap.map_entries(mid) {
             if let Some(name) = sym_name(id) {
                 out.insert(name);
@@ -1335,11 +1358,18 @@ fn collect_record_registers(heap: &Heap, form: Value, out: &mut std::collections
 }
 
 /// Union in the runtime `*sealed*` registry — name → member id keywords.
-fn read_sealed_registry(heap: &Heap, out: &mut HashMap<String, Vec<String>>) {
-    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern(reg::SEALED)) else {
+fn read_sealed_registry(
+    heap: &Heap,
+    out: &mut HashMap<String, Vec<String>>,
+    visible: Option<&HashSet<String>>,
+) {
+    let Some(Value::Map(mid)) = obs_registry(heap, reg::SEALED) else {
         return;
     };
     for (name, members) in heap.map_entries(mid) {
+        if !ability_is_visible(heap, name, visible) {
+            continue;
+        }
         if let Some(a) = sym_name(name) {
             let ids = list_items(heap, members)
                 .unwrap_or_default()
@@ -1763,15 +1793,14 @@ fn read_methods_registry(
     defaults: &mut HashSet<String>,
     visible: Option<&HashSet<String>>,
 ) {
-    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern(reg::METHODS)) else {
+    let Some(Value::Map(mid)) = obs_registry(heap, reg::METHODS) else {
         return;
     };
     // `[mname key] → Some(ns)` for a registration made inside a namespace, `None` for one
     // made at the root (the prelude's).
     let mut from: HashMap<(String, Vec<String>), Option<String>> = HashMap::new();
     if visible.is_some() {
-        if let Some(Value::Map(fid)) = heap.env_get(heap.global(), value::intern(reg::METHOD_FROM))
-        {
+        if let Some(Value::Map(fid)) = obs_registry(heap, reg::METHOD_FROM) {
             for (prov, ns) in heap.map_entries(fid) {
                 let Value::Vector(pid) = prov else {
                     continue;
@@ -1883,8 +1912,7 @@ fn collect_register_multi(
 
 /// Union in the runtime `*multi-algebra*` registry — NAME → algebra keyword (or nil).
 fn read_multi_algebra_registry(heap: &Heap, algebras: &mut HashMap<String, String>) {
-    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern(reg::MULTI_ALGEBRA))
-    else {
+    let Some(Value::Map(mid)) = obs_registry(heap, reg::MULTI_ALGEBRA) else {
         return;
     };
     for (name_v, alg_v) in heap.map_entries(mid) {
@@ -1898,7 +1926,7 @@ fn read_multi_algebra_registry(heap: &Heap, algebras: &mut HashMap<String, Strin
 /// form — so a multimethod declared in another module is typed here too. The file's own
 /// `%register-multi` forms win, matching how the algebra registry is merged.
 fn read_multi_ret_registry(heap: &Heap, rets: &mut HashMap<String, crate::types::Ty>) {
-    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern(reg::MULTI_RET)) else {
+    let Some(Value::Map(mid)) = obs_registry(heap, reg::MULTI_RET) else {
         return;
     };
     for (name_v, form) in heap.map_entries(mid) {
@@ -1974,7 +2002,7 @@ pub(super) fn build_multi_info(
 /// Union in the runtime `*record-ids*` registry — id-keyword → record name (ADR-182) — so a
 /// record type loaded from another module is known here too. Only the ids (keys) are needed.
 fn read_record_ids_registry(heap: &Heap, out: &mut HashSet<String>) {
-    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern(reg::RECORD_IDS)) else {
+    let Some(Value::Map(mid)) = obs_registry(heap, reg::RECORD_IDS) else {
         return;
     };
     for (id, _name) in heap.map_entries(mid) {
@@ -2191,4 +2219,21 @@ pub(super) fn operator_domains(info: &MultiInfo) -> HashMap<value::Symbol, crate
         out.insert(value::intern(op), ordered.clone());
     }
     out
+}
+
+/// Is the registry's ability `name` in the file's world? Its namespace is its
+/// `*ability-owner*` entry (`defability`'s defining namespace, ADR-172); an ability with no
+/// owner was declared at the root and is visible everywhere, and `None` for `visible`
+/// reads the whole registry.
+fn ability_is_visible(heap: &Heap, name: Value, visible: Option<&HashSet<String>>) -> bool {
+    let Some(visible) = visible else {
+        return true;
+    };
+    let Some(Value::Map(owners)) = obs_registry(heap, "*ability-owner*") else {
+        return true;
+    };
+    match heap.map_get(owners, name).and_then(sym_name) {
+        Some(namespace) => visible.contains(&namespace),
+        None => true,
+    }
 }

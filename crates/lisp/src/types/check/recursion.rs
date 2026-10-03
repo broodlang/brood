@@ -142,7 +142,29 @@ fn analyze_fn(
 /// clause shape). A single-arity param list's first element is a symbol or a
 /// vector pattern, never a bare list.
 fn first_is_list(heap: &Heap, v: Value) -> bool {
-    matches!(list_items(heap, v).as_deref(), Some([first, ..]) if matches!(first, Value::Pair(_)))
+    // A zero-arity arm's parameter list is the empty list, which is `nil`: `(() (loop1 0))`.
+    matches!(list_items(heap, v).as_deref(),
+        Some([first, ..]) if matches!(first, Value::Pair(_) | Value::Nil))
+}
+
+/// Does the binding target `target` — a symbol, or a destructuring pattern — bind `name`?
+fn binds_symbol(heap: &Heap, target: Value, name: Symbol) -> bool {
+    match target {
+        Value::Sym(symbol) => symbol == name,
+        Value::Pair(_) => list_items(heap, target)
+            .unwrap_or_default()
+            .into_iter()
+            .any(|part| binds_symbol(heap, part, name)),
+        Value::Vector(id) => heap
+            .vector(id)
+            .iter()
+            .any(|&part| binds_symbol(heap, part, name)),
+        Value::Map(id) => heap
+            .map_entries(id)
+            .into_iter()
+            .any(|(key, part)| binds_symbol(heap, key, name) || binds_symbol(heap, part, name)),
+        _ => false,
+    }
 }
 
 /// A body (implicit `do`): the last form is in tail position, the rest are not.
@@ -228,10 +250,26 @@ fn walk_inner(
         if value::symbol_is(head, kw::LET) || value::symbol_is(head, kw::LETREC) {
             // (let (n1 v1 n2 v2 …) body…): binding *values* are non-tail; body
             // is an implicit `do`.
-            if let Some(binds) = items.get(1).and_then(|&b| list_items(heap, b)) {
-                // values are at odd indices (1,3,5,…) of the flat binding list.
-                for v in binds.iter().skip(1).step_by(2) {
-                    walk(heap, *v, false, name, here, out);
+            //
+            // A binding of `name` itself shadows the function from there on (`(let (step
+            // (fn …)) (step x))` inside `(defn step …)` calls the LOCAL): stop at it. A
+            // `letrec` binding is in scope in every value, so one shadows them all.
+            let binds = items
+                .get(1)
+                .and_then(|&b| list_items(heap, b))
+                .unwrap_or_default();
+            let recursive = value::symbol_is(head, kw::LETREC);
+            let pairs: Vec<&[Value]> = binds.chunks(2).collect();
+            if recursive && pairs.iter().any(|pair| binds_symbol(heap, pair[0], name)) {
+                return;
+            }
+            for pair in pairs {
+                // values are the second element of each flat binding pair.
+                if let Some(&bound_value) = pair.get(1) {
+                    walk(heap, bound_value, false, name, here, out);
+                }
+                if binds_symbol(heap, pair[0], name) {
+                    return;
                 }
             }
             analyze_body(heap, name, &items[2..], here, out);

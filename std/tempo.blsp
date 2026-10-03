@@ -190,7 +190,9 @@ negative year emits a leading `-` and is not interchange-safe.
 
     (tempo/->iso (tempo/new! {:day 15 :year 2026 :month 6}))   → \"2026-06-15\""
   (let (problem (tp-validate m))
-    (if problem [:error (str "tempo/new: " problem)] [:ok (tempo m (last (tp-present m)))])))
+    (if problem
+      [:error (str "tempo/new: " problem)]
+      [:ok (tempo m (or (last (tp-present m)) :year))])))
 
 (defn new! (m)
   "As `new`, but throws on invalid components instead of returning `[:error …]`."

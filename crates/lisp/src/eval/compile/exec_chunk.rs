@@ -1183,25 +1183,20 @@ pub(crate) fn attach_vm_trace(e: &mut LispError, cur_arm: &CompiledArm, frames: 
     if e.is_control() || e.trace_full() {
         return;
     }
-    fn call_site(f: &BcFrame) -> (Option<std::sync::Arc<str>>, Option<crate::error::Pos>) {
-        let pos = f
-            .arm
-            .chunk
-            .as_ref()
-            .and_then(|c| f.ip.checked_sub(1).and_then(|i| c.code.get(i)))
-            .and_then(|inst| inst.call_pos());
-        (f.arm.src_file.clone(), pos)
-    }
+    let contract_module = value::intern(CONTRACT_MODULE);
     // The running arm's entry, called from the innermost pending caller; then the
     // pending callers themselves — frame k was called from frame k-1, and the
     // driver's outermost frame (k = 0) was entered from a native boundary or the
-    // top level, which the next driver out (if any) accounts for.
-    let (file, pos) = frames.last().map(call_site).unwrap_or((None, None));
-    e.push_trace(TraceFrame {
-        name: cur_arm.fn_name.map(value::symbol_name_ref),
-        file,
-        pos,
-    });
+    // top level, which the next driver out (if any) accounts for. A contract frame
+    // is machinery and never named (see [`is_contract_arm`]).
+    if !is_contract_arm(cur_arm, contract_module) {
+        let (file, pos) = entry_site(frames, frames.len(), contract_module);
+        e.push_trace(TraceFrame {
+            name: cur_arm.fn_name.map(value::symbol_name_ref),
+            file,
+            pos,
+        });
+    }
     // An error raised in code that carries no positions — the prelude's, and so every
     // contract shim's (ADR-381) — used to escape UNTAGGED and take the position of whatever
     // frame caught it: `(try (probe …) (catch e (get e :line)))` named the `try`'s line, two
@@ -1225,26 +1220,24 @@ pub(crate) fn attach_vm_trace(e: &mut LispError, cur_arm: &CompiledArm, frames: 
     // Ownership rather than the file:
     // a primitive's error carries a position only, and a real error from a deeper user
     // frame surfaces with that frame as the running arm, never through here.
-    let contract_module = value::intern(CONTRACT_MODULE);
-    let is_shim_arm = |arm: &CompiledArm| arm.module == Some(contract_module);
     let chunk_owns = |arm: &CompiledArm, p: Pos| {
         arm.chunk
             .as_ref()
             .is_some_and(|c| c.code.iter().any(|i| i.call_pos() == Some(p)))
     };
     let tagged_by_shim = e.pos.is_some_and(|ep| {
-        (is_shim_arm(cur_arm) && chunk_owns(cur_arm, ep))
+        (is_contract_arm(cur_arm, contract_module) && chunk_owns(cur_arm, ep))
             || frames
                 .iter()
                 .rev()
-                .filter(|f| is_shim_arm(&f.arm))
+                .filter(|f| is_contract_arm(&f.arm, contract_module))
                 .any(|f| call_site(f).1 == Some(ep))
     });
     if e.pos.is_none() || tagged_by_shim {
         let inner = frames
             .iter()
             .rev()
-            .filter(|f| !is_shim_arm(&f.arm))
+            .filter(|f| !is_contract_arm(&f.arm, contract_module))
             .map(call_site)
             .find(|(_, p)| p.is_some());
         if let Some((f, Some(p))) = inner {
@@ -1252,9 +1245,60 @@ pub(crate) fn attach_vm_trace(e: &mut LispError, cur_arm: &CompiledArm, frames: 
             if e.file.is_none() || tagged_by_shim {
                 e.file = f.map(|s| s.to_string());
             }
+        } else if tagged_by_shim {
+            // No positioned call outside the machinery in THIS driver — the contracted
+            // function was entered from a native boundary or the top level, which a driver
+            // further out (or the file runner's enclosing form) accounts for. Leave the
+            // error POSITIONLESS for them rather than keep the shim's own site: a kept
+            // position is never moved again (`or_pos`), and it was reported as
+            // `std/contract.blsp`'s line under the USER's file name — the runner fills the
+            // file, not the position (2026-10-02).
+            e.pos = None;
+            e.file = None;
         }
     }
     attach_vm_trace_callers(e, frames);
+}
+
+/// A contract frame — a shim or the checks it calls, all authored by `std/contract.blsp`
+/// (ADR-385) — is MACHINERY: never named in a trace, never the position an error is
+/// reported at, and never the call site a frame is said to have been entered from. The
+/// shim's compiled body is shared by every closure its template builds (ADR-175/215, keyed
+/// on the template's body form), so the name its arm recorded was whichever contracted
+/// function first ran through it — `at string/join` for a user's `add2` (2026-10-02); the
+/// function the user called is the ORIGINAL's frame just inside, which names itself.
+#[inline]
+fn is_contract_arm(arm: &CompiledArm, contract_module: Symbol) -> bool {
+    arm.module == Some(contract_module)
+}
+
+/// The call site a pending frame's saved `ip` returns to: `code[ip - 1]` is the
+/// `Inst::Call` that pushed its callee, and its recorded `pos` (plus the arm's `src_file`)
+/// locate the call.
+fn call_site(f: &BcFrame) -> (Option<std::sync::Arc<str>>, Option<crate::error::Pos>) {
+    let pos = f
+        .arm
+        .chunk
+        .as_ref()
+        .and_then(|c| f.ip.checked_sub(1).and_then(|i| c.code.get(i)))
+        .and_then(|inst| inst.call_pos());
+    (f.arm.src_file.clone(), pos)
+}
+
+/// The call site that entered `frames[k]` (`k == frames.len()` for the running arm): the
+/// nearest pending caller below it that is not contract machinery. A frame a shim called
+/// — the ORIGINAL — was entered, as far as its author is concerned, where the shim was.
+fn entry_site(
+    frames: &[BcFrame],
+    k: usize,
+    contract_module: Symbol,
+) -> (Option<std::sync::Arc<str>>, Option<crate::error::Pos>) {
+    frames[..k]
+        .iter()
+        .rev()
+        .find(|f| !is_contract_arm(&f.arm, contract_module))
+        .map(call_site)
+        .unwrap_or((None, None))
 }
 
 /// The pending-callers half of [`attach_vm_trace`], without the running arm's own entry.
@@ -1266,23 +1310,15 @@ pub(crate) fn attach_vm_trace_callers(e: &mut LispError, frames: &[BcFrame]) {
     if e.is_control() || e.trace_full() {
         return;
     }
-    fn call_site(f: &BcFrame) -> (Option<std::sync::Arc<str>>, Option<crate::error::Pos>) {
-        let pos = f
-            .arm
-            .chunk
-            .as_ref()
-            .and_then(|c| f.ip.checked_sub(1).and_then(|i| c.code.get(i)))
-            .and_then(|inst| inst.call_pos());
-        (f.arm.src_file.clone(), pos)
-    }
+    let contract_module = value::intern(CONTRACT_MODULE);
     for k in (0..frames.len()).rev() {
         if e.trace_full() {
             break;
         }
-        let (file, pos) = match k {
-            0 => (None, None),
-            _ => call_site(&frames[k - 1]),
-        };
+        if is_contract_arm(&frames[k].arm, contract_module) {
+            continue;
+        }
+        let (file, pos) = entry_site(frames, k, contract_module);
         e.push_trace(TraceFrame {
             name: frames[k].arm.fn_name.map(value::symbol_name_ref),
             file,

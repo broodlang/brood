@@ -136,6 +136,17 @@ an over-approximated-but-precise type narrowed to `never` genuinely proves the
 branch dead. A negative test that *deliberately* writes a dead clause opts out
 with `(check-allow :unreachable-clause …)`.
 
+A dead clause is reported **once** (2026-10-02), as `unreachable clause: <the symbol
+the test named> is T, which can never be U`, and only `:unreachable-clause` silences
+it — including when the dead test is a type predicate (`(cond (string? port) …)`).
+A never-true type predicate *outside* a dead clause (`(refute (keyword? 'k))`) is a
+`:type-mismatch` finding. `:type-mismatch` also covers a non-exhaustive literal
+`match`, a multimethod or operator-sugar call with no method for its argument
+tuple, and a call with the wrong number of arguments (a named callee or an
+immediately-applied `fn`) — none of which had a category before, so none could be
+silenced. That mattered once `try` bodies were checked (KI-67): a test that provokes
+an arity error inside a `try` on purpose now says so with `check-allow`.
+
 **`:unbound` (ADR-145).** `(check-allow :unbound …)` suppresses the
 unbound-symbol lints over the wrapped forms — for globals defined at
 *runtime* that the source checker cannot see: an `eval`-driven `def`, the

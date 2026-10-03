@@ -65,12 +65,15 @@
       (send me [:tail 3])
       ;; The scan tag-skips the junk and peeks [:want 1] at index 2; the guard then
       ;; consumes both junk messages, so index 2 names [:tail 2] by consume time.
-      (assert= (try
-                 (receive
-                   ([:want x] :when (eat-junk box) [:got x])
-                   (after 1200 :no-match))
-                 (catch e [:threw e]))
-        [:got 1])
+      ;; check-allow: `eat-junk` always answers true — the guard is there for its effect,
+      ;; which is the interleaving this case builds.
+      (check-allow :constant-condition
+        (assert= (try
+                   (receive
+                     ([:want x] :when (eat-junk box) [:got x])
+                     (after 1200 :no-match))
+                   (catch e [:threw e]))
+          [:got 1]))
       ;; The interleaving actually happened — if this stops holding, the asserts below
       ;; pass for the wrong reason and the case needs rebuilding, not relaxing.
       (assert= (table/get box :ate) [0 1])

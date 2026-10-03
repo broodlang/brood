@@ -122,7 +122,7 @@ or alt-tab instead of the desktop's generic fallback.
 
 **Create and poll it in the same process.** `:draw`/`:size`/`:leave` act on the
 captured window id, but `:poll` is a `receive` on the *calling* process's mailbox
-(that's where `gui/open` delivers this window's input, ADR-058) — it ignores the
+(that's where `gui/open` delivers this window's input, ADR-059) — it ignores the
 window id. So a display made here must be polled by the process that made it; don't
 hand it to another process to run. And because the delivered key/mouse messages
 carry no window id, one process should drive **one** window (which is why
@@ -145,7 +145,7 @@ their input. Both are deferred trade-offs (ADR-059), fine for the observer."
      :configure (fn (o) (display-configure-window id o))
      ;; Input arrives as mailbox messages (gui/open delivers to this process), so
      ;; `:poll` is a `receive` that parks the process — it holds no scheduler worker
-     ;; while waiting (ADR-058), unlike a blocking poll. Returns the next key/mouse
+     ;; while waiting (ADR-059), unlike a blocking poll. Returns the next key/mouse
      ;; message, or nil after `ms` (the live-refresh tick).
      :poll (fn (ms) (ui-coalesce-motion (receive (m m) (after ms nil))))
      ;; Raise this window to the front + focus it (un-minimising) — `ui-run` calls

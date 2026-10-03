@@ -901,6 +901,41 @@ impl Ctx {
                 c.types.insert(base, retained);
             }
         }
+        // …and a guard on one FIELD rules out every CLOSED record alternative whose read
+        // of that field cannot be what the guard established: under `(if (:ok r) …)` over
+        // `(or (record :ok int) (record :error string))` the `:error` record reads `nil`
+        // there, so it is not `r` in the then-branch, and the `:ok` record (whose `:ok` is
+        // a required `int`, never falsy) is not `r` in the else-branch — where `(:error r)`
+        // is then a `string`, not `nil | string` (2026-10-02). A field the shape does not
+        // declare reads `nil` only where no `Lookup` impl can answer the miss, so a
+        // `defrecord` value (one carrying `:__id__`) keeps its alternative for an
+        // undeclared field; an OPEN shape is kept likewise. An optional field may be absent.
+        if let [PathKey::Field(field)] = keys.as_slice() {
+            if let Some(base_ty) = c.types.get(&base).cloned() {
+                let identity = crate::core::value::intern("__id__");
+                let retained = base_ty.retain_terms(|term| {
+                    if term.record_is_open() != Some(false) {
+                        return true;
+                    }
+                    let Some(fields) = term.record_fields() else {
+                        return true;
+                    };
+                    let read = match fields.get(field) {
+                        Some((ty, true)) => ty.clone(),
+                        Some((ty, false)) => ty.clone().union(Ty::of(Tag::Nil)),
+                        None if fields.contains_key(&identity) => return true,
+                        None => Ty::of(Tag::Nil),
+                    };
+                    !read.is_disjoint(&known)
+                });
+                // Selecting among alternatives only: a guard that rules out EVERY one is
+                // about a branch the shape says cannot run, which is the dead-clause
+                // lint's question, not a narrowing's.
+                if !retained.is_never() {
+                    c.types.insert(base, retained);
+                }
+            }
+        }
         c.path_types.insert((base, keys), known);
         c
     }
@@ -955,7 +990,12 @@ impl Ctx {
             }
         }
         c.locals.insert(sym);
-        c.guards.remove(&sym);
+        // A guard alias is about the binding its target named WHEN it was recorded: one
+        // keyed by `sym` is stale, and so is one whose TARGET is `sym` — under
+        // `(let (ok (int? x)) (let (x "s") (if ok …)))` the `ok` says nothing about the
+        // new `x` (2026-10-02: it narrowed it, and read a live branch as dead).
+        c.guards
+            .retain(|name, (target, ..)| *name != sym && *target != sym);
         c.count_aliases.retain(|n, xs| *n != sym && *xs != sym);
         c.index_bounds.remove(&sym);
         for bounded in c.index_bounds.values_mut() {

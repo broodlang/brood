@@ -206,8 +206,27 @@ pub(super) const JIT_HEADROOM_PROBE_FROM: u32 = 64;
 /// cover the callee's native frame plus whatever Rust the callee re-enters (`apply_value`
 /// on an outcome-4 tail chain, the deopt re-runs), and the cost of being wrong is an
 /// unrecoverable abort while the cost of being early is a VM-drained subtree.
+///
+/// **It must sit well ABOVE the VM's own nested-run reserve**
+/// ([`crate::process::NATIVE_STACK_MARGIN_BYTES`], `vm_apply`'s guard). This margin is what
+/// starts the drain: past it the slow call sets `jit_force_vm` and hands the rest of the
+/// subtree to `vm_apply`, whose heap frames are where deep recursion belongs. With the two
+/// margins EQUAL (both 512 KiB until 2026-10-02) the drain could never start — the moment
+/// the JIT declined another native level, `vm_apply` refused the drain on the same
+/// measurement and raised `recursion too deep`. A recursion whose loop alternates a native
+/// arm with an interpreted one (a contract shim over a `call-mediated-boxed` original:
+/// native → `brood_rt_call_slow` → `vm_apply` → `jit_tier_in_frame` → native, Rust stack
+/// per level) therefore died at ~4k levels where the same function unarmed reached 200k.
+/// The gap between the two is the drain's working room: one `vm_apply` re-entry plus
+/// whatever bounded native callbacks the drained subtree makes per level.
 #[cfg(feature = "jit")]
-pub(super) const JIT_STACK_MARGIN_BYTES: usize = 512 * 1024;
+pub(super) const JIT_STACK_MARGIN_BYTES: usize = 1024 * 1024;
+
+#[cfg(feature = "jit")]
+const _: () = assert!(
+    JIT_STACK_MARGIN_BYTES >= 2 * crate::process::NATIVE_STACK_MARGIN_BYTES,
+    "the JIT's drain margin must leave the VM's nested-run reserve room to drain into"
+);
 
 /// Whether there is room on the native stack for another Brood→Brood native link.
 ///

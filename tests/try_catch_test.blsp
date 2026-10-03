@@ -88,10 +88,14 @@
 
 (describe "try / catch — kernel error kinds"
   (test "type error is catchable"
-    (is (try (+ 1 "x") false (catch _ true))))
+    ;; check-allow: the type error is the failure under test; `try` bodies are checked.
+    (check-allow :type-mismatch
+      (is (try (+ 1 "x") false (catch _ true)))))
 
   (test "arity error is catchable"
-    (is (try ((fn (x) x) 1 2) false (catch _ true))))
+    ;; check-allow: the arity error is the failure under test; `try` bodies are checked.
+    (check-allow :type-mismatch
+      (is (try ((fn (x) x) 1 2) false (catch _ true)))))
 
   (test "runtime error (div by zero) is catchable"
     (is (try (/ 1 0) false (catch _ true))))
@@ -116,8 +120,11 @@
 
   (test ":kind is a keyword naming the error family"
     (assert= (get (try (/ 1 0) (catch e e)) :kind) :runtime)
-    (assert= (get (try (+ 1 "x") (catch e e)) :kind) :type)
-    (assert= (get (try ((fn (x) x) 1 2) (catch e e)) :kind) :arity))
+    ;; check-allow: the type error is the failure under test.
+    (check-allow :type-mismatch
+      (assert= (get (try (+ 1 "x") (catch e e)) :kind) :type))
+    (check-allow :type-mismatch
+      (assert= (get (try ((fn (x) x) 1 2) (catch e e)) :kind) :arity)))
 
   (test ":message is a human-readable string"
     (assert= (get (try (/ 1 0) (catch e e)) :message) "division by zero"))
@@ -132,8 +139,10 @@
 (describe "error-message"
   (test "kernel error map → :message field"
     (assert= (try (/ 1 0) (catch e (error-message e))) "division by zero")
-    (assert= (try (+ 1 "x") (catch e (error-message e)))
-      "+: expected number, got string (\"x\")"))
+    ;; check-allow: the type error's message is what this pins.
+    (check-allow :type-mismatch
+      (assert= (try (+ 1 "x") (catch e (error-message e)))
+        "+: expected number, got string (\"x\")")))
 
   (test "a raised string is returned as-is"
     (assert= (try (error "plain") (catch e (error-message e))) "plain"))

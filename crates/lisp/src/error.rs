@@ -497,7 +497,8 @@ impl LispError {
         }
         LispError(Box::new(LispErrorData {
             kind: ErrorKind::User,
-            message: crate::syntax::printer::display(heap, value),
+            message: Self::thrown_headline(value, heap)
+                .unwrap_or_else(|| crate::syntax::printer::display(heap, value)),
             trace: Vec::new(),
             control: None,
             payload: Some(value),
@@ -506,6 +507,28 @@ impl LispError {
             code: None,
             hint: None,
         }))
+    }
+
+    /// The headline for a thrown `{:kind <keyword> :message <string> …}` map whose kind
+    /// is not a built-in one (`:contract`, or a library's own): `contract: <message>`
+    /// rather than the whole map printed, which buried the sentence a reader needs among
+    /// `:blame`/`:expected`/`:got`. Only the rendering changes — the map stays the
+    /// payload, so a `catch` still binds exactly what was thrown.
+    fn thrown_headline(value: Value, heap: &crate::core::heap::Heap) -> Option<String> {
+        use crate::core::value::{intern, symbol_name_ref};
+        let Value::Map(map) = value else { return None };
+        let key = |name: &str| heap.map_get(map, Value::keyword(intern(name)));
+        let Value::Keyword(kind) = key("kind")? else {
+            return None;
+        };
+        let Value::Str(message) = key("message")? else {
+            return None;
+        };
+        Some(format!(
+            "{}: {}",
+            symbol_name_ref(kind),
+            heap.string(message)
+        ))
     }
 
     /// The inverse of [`to_value_map`](Self::to_value_map), for a **rethrow**: when

@@ -24,7 +24,8 @@ will get wrong if you write Brood like Clojure, Scheme, or Common Lisp.
    `seq/filter`. A *local*, self-contained loop is a `letrec`-bound closure called by
    name — `(letrec (go (fn (i acc) … (go …))) (go 0 0))` — which closes over the
    enclosing scope (thread only the changing state). Deep *non*-tail recursion
-   overflows the green-process stack. (`for` exists, but it is a *comprehension*.)
+   fails with a catchable `recursion too deep` error (`E0044`, ~1M frames) — correct
+   but slow to reach and wasteful. (`for` exists, but it is a *comprehension*.)
 
 3. **The collection comes FIRST, the function LAST.** `(map xs f)`, `(fold xs init f)`,
    `(reduce xs init f)` / `(reduce xs f)`, `(seq/filter xs pred)`, `(sort-by xs key-fn)`,
@@ -81,7 +82,8 @@ will get wrong if you write Brood like Clojure, Scheme, or Common Lisp.
    `(first {:a 1})` is `[:a 1]`. Map order is hash-driven, never insertion order.
    `conj`/`into` insert at each kind's natural point and **preserve the kind**;
    `conj`/`disj`/`get`/`contains?` on a set are prelude. Two deliberate exceptions:
-   `contains?` is map/set only, and a **string is not seqable** — bridge with
+   `contains?` is map/set only, and a **string is not a sequence** — `count`/`empty?`
+   accept one, but `first`/`rest`/`map`/`fold`/`into` raise; bridge with
    `string/->list` (codepoints) or `string/->graphemes` (what a human calls a
    character). `(sort coll)` is structural — `(sort [[1 0] [2 1]])` needs no comparator.
 
@@ -141,7 +143,9 @@ will get wrong if you write Brood like Clojure, Scheme, or Common Lisp.
 **Modules are namespaces.** `(defmodule name …)` compiles the file into namespace
 `name`: `def`/`defn` define `name/foo`. To call another module's names **bare**, add a
 `(:use mod)` clause to the header (`(defmodule app "…" (:use editor/display) (:use
-test))`); `(:use mod :only [a b])` for a subset. Merely *referencing* `mod/name` loads
+test))`); `(:use mod :only [a b])` for a subset, `(:use mod :exclude [a])` for all but
+some (`nest new` writes `(:use log :exclude [error])`, keeping the prelude's `error`).
+Merely *referencing* `mod/name` loads
 the module on first use but leaves names qualified. The header accepts exactly
 `(:use …)`, `(:use-internals …)`, `(:alias …)` and `(:load …)` — anything else,
 `(:require …)` included, is an error. From outside a module (REPL, `nest mcp` eval)
@@ -191,7 +195,7 @@ muscle-memory reaches for, and what Brood actually has:
 | `for` into a vector/map | `(for (x xs :when p :into []) …)`; an accumulating walk is `(fold-for (acc 0 x xs) (+ acc x))` |
 | `pmap` / `take-while` transducer | `seq/pmap` (a process per item, order kept); `seq/transduce` with `seq/reduced` to stop early |
 | raw ANSI (`clear`/`home`/cursor) | `(:use editor/ansi)` → `(ansi-clear)`/`(ansi-home)`/`(ansi-cursor r c)` are **zero-arg fns returning an escape string** — `(io/write (ansi-clear))`, never `(io/write ansi-clear)`. A render loop wants `editor/display` + `ui-run` |
-| a built-in RNG (`rand`) | `rand/seed`, `rand/int`, `rand/float`, `rand/token`, plus `seq/shuffle`/`seq/sample` — pure & seedable: each takes a seed and returns `[value next-seed]`; thread the seed through your state |
+| a built-in RNG (`rand`) | `rand/int`, `rand/float`, `rand/rng`, plus `seq/shuffle`/`seq/sample` — pure & seedable: each takes a seed (`(rand/seed n)` from any int) and returns `[value next-seed]`; thread the seed through your state. `(rand/token n)` is the exception — `n` OS-random bytes as hex, for ids/secrets |
 | a set / `#{}` | first-class: `#{1 2 3}`, `(set? s)`, `(contains? s x)`, `(conj s x)`/`(disj s x)` with no import; `set/union`/`set/intersection`/`set/difference`/`set/subset?` for the algebra |
 | `timeit` / `time` | `(dev/bench "label" expr)` prints `label: N ms` and returns the value |
 
@@ -210,26 +214,27 @@ Pure functions are the default, but reach for a **process**
   a coordinator `receive`s.
 
 Otherwise **stay pure** — a tail loop or `fold`/`map` is simpler and easier to test.
-`spawn` is a macro: `(spawn (work c))`, never `(spawn (fn () (work c)))` (the body
-never runs). Messages **deep-copy** across per-process heaps, so a `send`-ed value is
-independent in the receiver. Test concurrency with spawn-N-then-collect.
+`spawn` is a macro over its body: `(spawn (work c))` and `(spawn (fn () (work c)))` both
+run `(work c)` in the child, and a bare name is *called* — `(spawn worker)` runs
+`(worker)`. Need the child's exit reason? `(spawn-monitor expr)` → `[pid ref]`, monitored
+before the child runs (a separate `spawn` then `monitor` can report `:noproc` instead).
+Messages **deep-copy** across per-process heaps, so a `send`-ed value is independent in
+the receiver. Test concurrency with spawn-N-then-collect.
 
 ## When Brood crashes (a Rust panic)
 
-A Rust-level panic — a *kernel* fault (use-after-GC tripwire, a heap index, a
-runtime invariant), not your code raising — is appended to
-**`.brood_crash_dump`** in the working directory: a `=== brood crash dump ===`
-block with the timestamp, thread, the `panic: …` line, and a full backtrace.
-The file is **append-only** — read the **last** block. It catches panics, **not**
-`SIGSEGV`; deep recursion surfaces as a catchable `recursion too deep` error, not a
-dump. A process that raises is reported by the default crash reporter (pid, reason,
-trace) under `brood file` / `nest run`.
+First tell your program's failure from the runtime's. A process that raises is
+reported by the default crash reporter (pid, reason, trace) under `brood file` /
+`nest run`, and deep recursion is a catchable `recursion too deep` error — both are
+*your* code. A Rust **panic** (a use-after-GC tripwire, a heap index, a runtime
+invariant) is the runtime's: it is appended to **`.brood_crash_dump`** in the working
+directory (append-only — read the **last** `=== brood crash dump ===` block). A
+`SIGSEGV` leaves no dump. (Inside the Brood repo, the `brood-debug` skill is the
+full playbook.)
 
-If Brood *itself* crashes (as opposed to your program erroring), that's a runtime
-bug — write up a short report rather than working around it:
+A runtime crash is a bug to report, not to work around:
 
-1. **Minimise** to the smallest `.blsp` that still reproduces, and make it
-   deterministic.
+1. **Minimise** to the smallest deterministic `.blsp` that still reproduces.
 2. **Capture** the last dump block, plus `brood --version`.
 3. **Localise** with the knobs (`brood --debug-flags` lists them all); each one that
    flips the verdict (crash ↔ clean) names a subsystem:
@@ -237,7 +242,8 @@ bug — write up a short report rather than working around it:
    - `BROOD_GC_VERIFY=1` — walk the live graph before each collection; names the
      root→cell path of a stale handle.
    - `BROOD_TIER=1` (no JIT) / `BROOD_TIER=0` (tree-walker) — which execution tier.
-   - `nest test --jobs 1` — serialise the scheduler to rule it in or out.
+   - `BROOD_J=1` (one scheduler worker) or `nest test --jobs 1` (at most one spawned
+     process running at a time) — rules the scheduler in or out.
 4. **File it** with the repro, the dump block and which knobs change the verdict.
 
 ## Before finishing

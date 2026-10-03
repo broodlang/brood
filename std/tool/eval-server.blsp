@@ -446,7 +446,8 @@ path — the per-request evaluator process dies — but worth knowing when embed
         run (fn ()
               (try
                 {:ok true
-                 :value (pr-str-bounded (if traced
+                 ;; `acc` exists exactly when `traced`; testing it says so to the checker.
+                 :value (pr-str-bounded (if acc
                                           (eval-server-eval-traced src trace-names acc)
                                           (reflect/eval-string src)))}
                 (catch e {:ok false :error (error-message e)})))

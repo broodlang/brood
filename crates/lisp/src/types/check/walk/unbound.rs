@@ -324,10 +324,19 @@ pub(super) fn lint_discarded_symbols(
         // as its own comment says. So reading a name is NOT always effect-free, and the
         // premise this lint started from was wrong. It stays exempt unless a list follows
         // it, which is the `mod/f(x)` shape rather than the auto-load one.
-        if name.contains('/') && !followed_by_list {
+        //
+        // And a list that is itself a STATEMENT — a call whose head is a bound global, as in
+        // `(do json/encode (io/puts "x") 1)` — is not an argument list: `mod/f(x)` passes a
+        // local or a literal, never a call to a known function. Only a list that reads as
+        // arguments keeps the qualified name in scope of the lint.
+        let next_is_statement = body.get(i + 1).is_some_and(|&next| {
+            matches!(list_items(heap, next).as_deref(), Some([Value::Sym(head), ..])
+                if !ctx.is_local(*head) && !is_unbound(heap, ctx, *head))
+        });
+        if name.contains('/') && (!followed_by_list || next_is_statement) {
             continue;
         }
-        let msg = if followed_by_list {
+        let msg = if followed_by_list && !next_is_statement {
             format!(
                 "{name} is evaluated here and discarded — and the form after it is a list, \
                  which is how `{name}(x)` reads to the reader: two forms, not a call. \

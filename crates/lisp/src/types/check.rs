@@ -2177,7 +2177,13 @@ fn check_forms(
         // function's inferred sig is never cached *without* the sealed-op demand. Keyed by op
         // name off `AbilityInfo`, which sees this file's abilities AND imported ones (via the
         // heap registries), so the demand fires for a same- or other-file sealed op alike.
-        let ability_info = std::sync::Arc::new(protocol::build_ability_info(heap, &expanded));
+        // Restricted to the file's world (B8): another file's imported abilities, left in the
+        // process registry by checking it first, are none of this file's business.
+        let ability_info = std::sync::Arc::new(protocol::build_ability_info_visible(
+            heap,
+            &expanded,
+            Some(&visible),
+        ));
         annot::set_sealed_op_domains(protocol::build_sealed_op_domains(&ability_info));
         // …and on the ctx from here, not only from the body walk: the demand walk asks
         // `is_ability_op` of `ctx.ability()` to tell an op function from a same-file

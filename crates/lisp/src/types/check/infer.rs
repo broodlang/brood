@@ -516,7 +516,14 @@ fn expr_ty_inner(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                         // loaded-closure path can't see (the file isn't loaded while checked).
                         // After a declaration (authoritative), before the loaded lookup below.
                         if let Some(sg) = ctx.inferred_fn_sig(s) {
-                            if sg.ret.is_unrefined_collection() {
+                            // …and a bare `number`: the body's arithmetic over parameters
+                            // it knows only as numbers. Under THIS call's int arguments it
+                            // may close over int — the prelude's own `(defn inc (n) (+ n
+                            // 1))`, a file global inside `core.blsp`, so the by-name rule
+                            // stands aside there, read `(inc slash)` as `number` for an int
+                            // `slash` (2026-10-02). The meet with the flat answer keeps it
+                            // sound.
+                            if sg.ret.is_unrefined_collection() || sg.ret == Ty::NUMBER {
                                 // The body says nothing — or only "a collection" — about its
                                 // result from its own parameters (a pass-through, an
                                 // unconstrained accumulator, a recursive list builder whose
@@ -1034,11 +1041,12 @@ fn numeric_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
     //
     // `sqrt` is keyed `math/sqrt`: ADR-227 moved it into `std/math.blsp`, so the bare
     // spelling no longer exists (unbound without an import) and this rule was dead for the
-    // spelling that does. `sin`/`cos`/`tan` stay bare — they are still root natives.
+    // spelling that does. `sin`/`cos`/`tan` moved the same way; their bare keys outlived
+    // them here until 2026-10-02 (`rule_heads_are_bound` now guards every key).
     let is_always_float = value::symbol_is(head, "math/sqrt")
-        || value::symbol_is(head, "sin")
-        || value::symbol_is(head, "cos")
-        || value::symbol_is(head, "tan");
+        || value::symbol_is(head, "math/sin")
+        || value::symbol_is(head, "math/cos")
+        || value::symbol_is(head, "math/tan");
     if is_always_float {
         let arg = *items.get(1)?;
         let t = expr_ty(heap, arg, ctx)?;
@@ -1140,18 +1148,21 @@ fn numeric_op_kind(head: Symbol) -> Option<(bool, bool, bool, bool)> {
     let is_division = value::symbol_is(head, "/");
     // `inc`/`dec` are `(+ n 1)` / `(- n 1)` in the prelude, so they close exactly as `+`
     // and `-` do — over ints, over floats (contagion), over ratios.
+    // …and the binary kernel primitives those are written over: the prelude's own `inc` is
+    // `(%add n 1)`, so a call re-typed through its body under an int argument reads
+    // `%add` — and used to answer the primitive's flat `number` (2026-10-02).
     let is_ring = value::symbol_is(head, "+")
         || value::symbol_is(head, "-")
         || value::symbol_is(head, "*")
+        || value::symbol_is(head, "%add")
+        || value::symbol_is(head, "%sub")
+        || value::symbol_is(head, "%mul")
         || value::symbol_is(head, "inc")
         || value::symbol_is(head, "dec");
     let is_contagious = is_ring || is_division;
     let is_int_closed = is_ring
-        || value::symbol_is(head, "quot")
-        || value::symbol_is(head, "rem")
-        || value::symbol_is(head, "mod")
-        // `math/` since ADR-227 — see the `math/sqrt` note above. The integer divisions
-        // exist in both spellings (the prelude's and `math`'s).
+        // `math/` since ADR-227 — see the `math/sqrt` note above. The bare integer
+        // divisions are gone (unbound), so only the `math/` spellings are keyed.
         || value::symbol_is(head, "math/abs")
         || value::symbol_is(head, "math/quot")
         || value::symbol_is(head, "math/rem")
@@ -1237,7 +1248,13 @@ pub(super) fn numeric_result(head: Symbol, tys: &[Ty]) -> Option<Ty> {
             .map(|t| t.int_range().unwrap_or(Range::ALL))
             .collect();
         let name = value::symbol_name(head);
-        let r = match (name.as_str(), ranges.as_slice()) {
+        let spelled = match name.as_str() {
+            "%add" => "+",
+            "%sub" => "-",
+            "%mul" => "*",
+            other => other,
+        };
+        let r = match (spelled, ranges.as_slice()) {
             ("+", rs) => rs.iter().copied().reduce(Range::plus),
             ("*", rs) => rs.iter().copied().reduce(Range::times),
             ("-", [only]) => Some(Range::negated(*only)),
@@ -1256,7 +1273,7 @@ pub(super) fn numeric_result(head: Symbol, tys: &[Ty]) -> Option<Ty> {
             // `(mod a b)` with `b > 0` is in `[0, b-1]` (the sign follows the divisor);
             // `(rem a b)` the same when `a ≥ 0` too; `(quot a b)` with both non-negative
             // is in `[0, hi(a) / lo(b)]`.
-            ("mod" | "rem" | "quot" | "math/mod" | "math/rem" | "math/quot", [a, b]) => {
+            ("math/mod" | "math/rem" | "math/quot", [a, b]) => {
                 let positive_divisor = b.lo.is_some_and(|lo| lo >= 1);
                 let non_negative_dividend = a.lo.is_some_and(|lo| lo >= 0);
                 if !positive_divisor {
@@ -1550,11 +1567,15 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
                 // tuple's arity is fixed and known, so an in-range access on a
                 // well-typed value is never absent. A provably out-of-range
                 // literal index → exactly `nil` (matches the runtime, which
-                // returns nil rather than erroring).
-                return Some(match elems.get(i) {
-                    Some(t) => t.clone(),
-                    None => Ty::of(Tag::Nil),
-                });
+                // returns nil rather than erroring) — or, for `(nth coll i default)`,
+                // the DEFAULT: `(nth ["a"] 1 "")` is `""` (2026-10-02: it read `nil`).
+                return match elems.get(i) {
+                    Some(t) => Some(t.clone()),
+                    None if value::symbol_is(head, "nth") && items.len() == 4 => {
+                        Some(expr_ty(heap, items[3], ctx).unwrap_or(Ty::ANY))
+                    }
+                    None => Some(Ty::of(Tag::Nil)),
+                };
             }
             // A computed `nth` index whose INTERVAL lies inside the arity reads the union
             // of the positions it can name — `(nth [10 20] (bit/and i 1))` is `10 | 20`,
@@ -1596,6 +1617,13 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
                 // rules out from `coll_ty` itself (`Ctx::narrow_path`): under
                 // `(= (nth r 0) :ok)` the `(tuple :error string)` is not `r`, so this
                 // reads the `:ok` tuple's second position alone.
+                // An `nth` default answers wherever a term runs off its end.
+                if value::symbol_is(head, "nth") && items.len() == 4 {
+                    let default = expr_ty(heap, items[3], ctx).unwrap_or(Ty::ANY);
+                    return coll_ty
+                        .element_at_over_union(index)
+                        .map(|t| t.union(default));
+                }
                 return coll_ty.element_at_over_union(index);
             }
         }
@@ -1709,12 +1737,6 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     // `reverse`/`distinct`/`dedupe` keep a non-empty input non-empty; `rest`/`but-last`
     // may empty it — the two groups differ in exactly the `nil`.
     if value::symbol_is(head, "reverse")
-        || value::symbol_is(head, "distinct")
-        // `seq/` since ADR-227; `distinct` stayed in the core protocol.
-        || value::symbol_is(head, "seq/dedupe")
-        // `(seq x)` is `x`'s elements as a list, the same number of them (a bytes'
-        // octets, a vector's items): its element type and length are the input's.
-        || value::symbol_is(head, "seq")
         // …and `(%map-pairs m)` is the kernel's spelling of `seq` over a map: its
         // `[k v]` entries, one per key, so a `map<K, V>` walks as `(tuple K V)` here too.
         || value::symbol_is(head, "%map-pairs")
@@ -1724,9 +1746,75 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         let a = coll_ty.as_ref().and_then(|t| t.elem_ty_union());
         return list_result_over(coll_ty.as_ref(), a);
     }
+    // `seq/distinct` / `seq/dedupe` drop duplicates: the same elements, and a non-empty
+    // input stays non-empty, but the LENGTH only shrinks — `(seq/dedupe [1 1 2])` is
+    // `(1 2)`. The length is at most the input's and at least one when the input had one.
+    // (The rule was keyed bare `distinct` — unbound since ADR-227 — and carried the input
+    // length through `seq/dedupe` exactly, so its `count` read 3; 2026-10-02.)
+    if value::symbol_is(head, "seq/distinct") || value::symbol_is(head, "seq/dedupe") {
+        let coll = *items.get(1)?;
+        let coll_ty = expr_ty(heap, coll, ctx);
+        let a = coll_ty.as_ref().and_then(|t| t.elem_ty_union());
+        let shrunk = coll_ty.as_ref().and_then(|t| t.count_range()).map(|r| {
+            let lo = if input_non_empty(coll_ty.as_ref(), r) {
+                1
+            } else {
+                0
+            };
+            Range::new(Some(lo), r.hi)
+        });
+        return match shrunk {
+            Some(r) => Some(list_with_len(a.unwrap_or(Ty::ANY), r)),
+            None => list_result_over(coll_ty.as_ref(), a),
+        };
+    }
+    // `(seq x)` PASSES THROUGH a vector, string, set, list or `nil` — `(seq [1 2])` is the
+    // vector `[1 2]`, `(seq "")` the empty string — so over those it is the identity, exactly.
+    // A plain map becomes its `[k v]` entries (the `%map-pairs` rule below) and `bytes` its
+    // octets. A RECORD (a map carrying `:__id__`) walks its `Seqable` view, which an impl may
+    // redefine, and a rope or table only has one if an impl gives it: no claim. The rule
+    // used to type every input as a list of its elements, so `(seq/vector-length (seq v))`
+    // warned on the vector it is (2026-10-02).
+    if value::symbol_is(head, "seq") && items.len() == 2 {
+        // Kind by kind, and the union of the answers: `nil | vector | bytes` (what a
+        // `bytes-or-vector` parameter derives to) is itself, itself and a list of octets —
+        // declining the whole union for the one kind that converts left `std/encoding`'s
+        // octet loop reading an unknown element (2026-10-02).
+        let coll_ty = expr_ty(heap, items[1], ctx)?;
+        let passes = [Tag::Vector, Tag::Str, Tag::Set, Tag::Pair, Tag::Nil]
+            .into_iter()
+            .fold(Ty::NEVER, |acc, tag| acc.union(Ty::of(tag)));
+        let bytes = Ty::of(Tag::Bytes);
+        let map = Ty::of(Tag::Map);
+        let handled = passes.clone().union(bytes.clone()).union(map.clone());
+        if !coll_ty.clone().difference(handled).is_never() {
+            return None;
+        }
+        let mut out = coll_ty.clone().intersect(passes);
+        let bytes_part = coll_ty.clone().intersect(bytes);
+        if !bytes_part.is_never() {
+            let octets = Ty::int_in(Range::new(Some(0), Some(255)));
+            out = out.union(list_result_over(Some(&bytes_part), Some(octets))?);
+        }
+        let map_part = coll_ty.intersect(map);
+        if !map_part.is_never() {
+            if may_carry_identity(&map_part) {
+                return None;
+            }
+            let a = map_part.elem_ty_union();
+            out = out.union(list_result_over(Some(&map_part), a)?);
+        }
+        return Some(out);
+    }
     if value::symbol_is(head, "rest") || value::symbol_is(head, "but-last") {
         let coll = *items.get(1)?;
         let coll_ty = expr_ty(heap, coll, ctx);
+        // `rest` is the pair's TAIL, whatever that holds — a vector under an improper
+        // `(cons 1 [2 3])` — and a `bytes` value's rest is bytes again. Neither is the
+        // list the rule below (and the primitive's flat `list` return) claims.
+        if value::symbol_is(head, "rest") && coll_ty.as_ref().is_some_and(rest_may_not_be_a_list) {
+            return Some(Ty::ANY);
+        }
         // Of a positional shape, the shape less its head (or its last): exact, and `nil`
         // when there was one element.
         if let Some(elems) = coll_ty.as_ref().and_then(|t| t.positional_elems()) {
@@ -1763,7 +1851,7 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     // narrowed a collection's length to.
     if (value::symbol_is(head, "count")
         || value::symbol_is(head, "string/length")
-        || value::symbol_is(head, "vector-length"))
+        || value::symbol_is(head, "seq/vector-length"))
         && items.len() == 2
     {
         let arg_ty = expr_ty(heap, items[1], ctx)?;
@@ -1774,9 +1862,16 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         // declare. This is read here rather than from `count_range`, because a length in
         // the type is a refinement every RELATION consults and a bare `map` must still fit
         // a record shape under the gradual relation (`Ty::record_field_count`).
-        let r = arg_ty
-            .record_field_count()
-            .or_else(|| arg_ty.count_range())?;
+        // A `defrecord` value (one declaring `:__id__`) counts through its `Seqable` view
+        // instead — its fields less the identity by default, anything under an impl — so
+        // its shape is not its count: `(count (pt 1 2))` is 2, where the shape has 3 keys.
+        let r = if may_carry_identity(&arg_ty) {
+            arg_ty.count_range()?
+        } else {
+            arg_ty
+                .record_field_count()
+                .or_else(|| arg_ty.count_range())?
+        };
         return Some(Ty::int_in(r));
     }
     // `(range …)` is "a range of integers" (its own docstring): every argument an int
@@ -1797,9 +1892,44 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
                 2 => (Some(Range::point(0)), range_of(&bounds[0])),
                 _ => (range_of(&bounds[0]), range_of(&bounds[1])),
             };
-            let lo = start.and_then(|r| r.lo);
-            let hi = end.and_then(|r| r.hi).map(|h| h - 1);
-            let interval = Range::new(lo, hi);
+            // An ascending range lies in `[start, end - 1]`; with a STEP (`(range a b s)`)
+            // it may descend instead — `(range 5 2 -1)` is `(5 4 3)`, in `[end + 1, start]`.
+            // A step whose sign is not known is either, so the hull of both. The step
+            // used to be ignored, and every descending range read as empty (2026-10-02).
+            let ascending = Range::new(
+                start.and_then(|r| r.lo),
+                // Saturating: a bound at the edge of `i64` (`arithmetic_edge_test`'s
+                // `(range math/max-int …)`) must not overflow the checker.
+                end.and_then(|r| r.hi).map(|h| h.saturating_sub(1)),
+            );
+            let descending = Range::new(
+                end.and_then(|r| r.lo).map(|l| l.saturating_add(1)),
+                start.and_then(|r| r.hi),
+            );
+            let step = bounds.get(2).and_then(range_of);
+            let interval = match step {
+                None if items.len() == 4 => {
+                    if ascending.is_empty() {
+                        descending
+                    } else if descending.is_empty() {
+                        ascending
+                    } else {
+                        Range::hull(ascending, descending)
+                    }
+                }
+                Some(s) if s.lo.is_some_and(|lo| lo > 0) => ascending,
+                Some(s) if s.hi.is_some_and(|hi| hi < 0) => descending,
+                Some(_) => {
+                    if ascending.is_empty() {
+                        descending
+                    } else if descending.is_empty() {
+                        ascending
+                    } else {
+                        Range::hull(ascending, descending)
+                    }
+                }
+                None => ascending,
+            };
             if interval.is_empty() {
                 // `(range 0)`: no element at all — the list is `nil`
                 return Some(Ty::of(Tag::Nil));
@@ -1814,6 +1944,12 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         let non_empty = match (items.get(1), items.get(2), items.len()) {
             (Some(Value::Int(n)), None, 2) => *n > 0,
             (Some(Value::Int(a)), Some(Value::Int(b)), 3) => a < b,
+            // …and with a literal step, in the step's direction.
+            (Some(Value::Int(a)), Some(Value::Int(b)), 4) => match items.get(3) {
+                Some(Value::Int(s)) if *s > 0 => a < b,
+                Some(Value::Int(s)) if *s < 0 => a > b,
+                _ => false,
+            },
             _ => false,
         };
         // `(range n)` has exactly `n` elements when `n ≥ 0` (none otherwise), so its
@@ -1988,8 +2124,28 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
                 let mut open = false;
                 for (f, o) in shapes {
                     open |= o;
-                    for (k, v) in f {
-                        fields.insert(k, v);
+                    // An OPEN later argument may carry any key it does not declare, with
+                    // any value — including a key an earlier argument declared, which it
+                    // then overrides. So every earlier field it does not redeclare keeps
+                    // its presence (merge never removes a key) but not its type
+                    // (2026-10-02: `(merge {:port 80} opts)` read `:port` as `80`).
+                    if o {
+                        for (k, (ty, _)) in fields.iter_mut() {
+                            if !f.contains_key(k) {
+                                *ty = Ty::ANY;
+                            }
+                        }
+                    }
+                    for (k, (ty, required)) in f {
+                        // An OPTIONAL later field may be absent, and then the earlier
+                        // value stands: the union of both, present if either says so.
+                        let merged = match fields.get(&k) {
+                            Some((earlier, was_required)) if !required => {
+                                (earlier.clone().union(ty), *was_required)
+                            }
+                            _ => (ty, required),
+                        };
+                        fields.insert(k, merged);
                     }
                 }
                 if open {
@@ -2092,6 +2248,13 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     if value::symbol_is(head, "cons") && items.len() == 3 {
         let hd_ty = expr_ty(heap, items[1], ctx);
         let tail_ty = expr_ty(heap, items[2], ctx);
+        // Onto anything but a list (`nil` or a pair) the result is an IMPROPER pair:
+        // `(cons 1 [2 3])` is `(1 . [2 3])`, whose `rest` is the vector itself. Its
+        // elements are not a list's, so it is a bare `pair` (2026-10-02: it read as
+        // `list<1 | 2 | 3>`, and `(seq/vector-length (rest c))` warned).
+        if !tail_ty.as_ref().is_some_and(|t| t.is_subtype(&Ty::LIST)) {
+            return Some(Ty::of(Tag::Pair));
+        }
         // Onto `nil` or onto a positional shape, the result is a shape one longer: the
         // head in front, exactly.
         if let Some(tail) = &tail_ty {
@@ -2256,6 +2419,11 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     if value::symbol_is(head, "keys") && items.len() == 2 {
         let map_arg = *items.get(1)?;
         let map_ty = expr_ty(heap, map_arg, ctx);
+        // A record's keys come from its `Lookup`/`Seqable` impls (id-free by default): no
+        // claim from the raw shape.
+        if map_ty.as_ref().is_some_and(may_carry_identity) {
+            return None;
+        }
         if let Some(shape) = closed_record_fields(map_ty.as_ref()) {
             let names = shape
                 .keys()
@@ -2274,6 +2442,9 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     if value::symbol_is(head, "vals") && items.len() == 2 {
         let map_arg = *items.get(1)?;
         let map_ty = expr_ty(heap, map_arg, ctx);
+        if map_ty.as_ref().is_some_and(may_carry_identity) {
+            return None;
+        }
         if let Some(shape) = closed_record_fields(map_ty.as_ref()) {
             let types = shape
                 .values()
@@ -2744,7 +2915,11 @@ fn provably_non_empty(t: &Ty) -> bool {
             return !elems.is_empty();
         }
     }
-    if t.is_subtype(&Ty::of(Tag::Map)) && t.record_is_open() == Some(false) {
+    // (A `defrecord` value walks its `Seqable` view, not its keys — see `may_carry_identity`.)
+    if t.is_subtype(&Ty::of(Tag::Map))
+        && t.record_is_open() == Some(false)
+        && !may_carry_identity(t)
+    {
         return t
             .record_fields()
             .is_some_and(|fields| fields.values().any(|(_ty, required)| *required));
@@ -2774,6 +2949,11 @@ fn list_result_over(input: Option<&Ty>, elem: Option<Ty>) -> Option<Ty> {
     } else {
         list_result(elem)
     }
+}
+
+/// Is a collection of type `input`, whose length lies in `r`, provably non-empty?
+fn input_non_empty(input: Option<&Ty>, r: Range) -> bool {
+    r.lo.is_some_and(|lo| lo >= 1) || input.is_some_and(provably_non_empty)
 }
 
 /// `list<elem>` of a length within `r` (ADR-350): the `pair` member carries the length
@@ -2996,4 +3176,30 @@ fn meet_flat(specialized: Option<Ty>, flat: Option<Ty>) -> Option<Ty> {
         (Some(s), Some(f)) => Some(s.intersect(f)),
         (s, f) => s.or(f),
     }
+}
+
+/// Can `(rest x)` over `t` be something other than a list? Yes when `t` admits `bytes`
+/// (whose rest is bytes) or a pair nothing proves PROPER — a bare `pair`, which `cons`
+/// onto a vector builds and whose rest is that vector. A `list<T>` (an element
+/// refinement or a list shape) is proper: every tail of it is `nil` or a `list<T>`.
+fn rest_may_not_be_a_list(t: &Ty) -> bool {
+    t.terms_vec().iter().any(|term| {
+        term.contains_tag(Tag::Bytes)
+            || (term.contains_tag(Tag::Pair)
+                && term.elem_ty().is_none()
+                && term.list_shape_elems().is_none())
+    })
+}
+
+/// Does this map type declare the `:__id__` a `defrecord` value carries? Such a value is
+/// counted, keyed and walked through its `Seqable` view (`count`, `keys`, `vals` and `seq`
+/// all dispatch on `:__id__`), which hides the identity key by default and which an impl
+/// may redefine — so no rule may read its count or entries off the raw shape.
+fn may_carry_identity(t: &Ty) -> bool {
+    let id = value::intern("__id__");
+    t.terms_vec().iter().any(|term| {
+        term.record_fields()
+            .and_then(|fields| fields.get(&id))
+            .is_some_and(|(ty, _)| !ty.is_subtype(&Ty::of(Tag::Nil)))
+    })
 }

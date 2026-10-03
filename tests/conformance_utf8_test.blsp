@@ -18,12 +18,18 @@
 
 (defmodule conformance-utf8-test (:use test) (:use corpus))
 
-(defn- u8-bytes (hex) (encoding/hex-decode-bytes hex))
+(defn- u8-bytes (hex)
+  ;; A bad hex literal in a vector below is a broken TEST, not a rejected sequence: raise
+  ;; (outside `u8-decodes?`'s try), never hand a failure value to the decoder.
+  (let (decoded (encoding/hex-decode-bytes hex))
+    (if (bytes? decoded) decoded (error (str "u8-bytes: not hex: " hex)))))
 
 (defn- u8-decodes? (hex)
   "true if `hex` decodes as UTF-8, false if it is rejected."
-  ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
-  (check-allow :discarded-catch (try (do (string/bytes-> (u8-bytes hex)) true) (catch e false))))
+  ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer.
+  ;; The bytes are built OUTSIDE the try, so only the UTF-8 decode is what it asks about.
+  (let (raw (u8-bytes hex))
+    (check-allow :discarded-catch (try (do (string/bytes-> raw) true) (catch e false)))))
 
 ;; Every sequence in `hexes` must be rejected; returns the offenders.
 (defn- u8-accepted (hexes) (seq/filter hexes u8-decodes?))

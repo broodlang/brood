@@ -597,7 +597,7 @@
 
 (describe "contract errors carry blame"
   (test "a bad argument blames the caller, with its position and the declaration"
-    (let (e (try (c-blame 1 "two") (catch e e)))
+    (let (e (check-allow :type-mismatch (try (c-blame 1 "two") (catch e e))))
       (assert= :contract (get e :kind))
       (assert= :caller (get e :blame))
       (assert= 2 (get e :argument))
@@ -611,7 +611,7 @@
       (assert= "not an int" (get e :got))
       (is (includes? (error-message e) "result expected int"))))
   (test "the function is named as the checker resolves it"
-    (let (e (try (c-blame "x" 2) (catch e e)))
+    (let (e (check-allow :type-mismatch (try (c-blame "x" 2) (catch e e))))
       (is (string/ends-with? (->string (get e :function)) "c-blame")))))
 
 (describe "a contract is a property of the binding, not of the declaring form"
@@ -674,3 +674,92 @@
     (assert= "v2:x" (contract-boundary-fixture/wrapper "x"))
     (assert= "v2:x" (contract-boundary-fixture/direct "x"))
     (assert= (%contracts-armed?) (boundary-raises? (fn () (contract-boundary-fixture/f "x"))))))
+
+;; --- nominal types: a record name, a sealed ability, an open one (2026-10-02) ----------
+;; The checker reads a `defrecord` name as that record's identity and a SEALED ability as
+;; the union of its members (ADR-186); an OPEN ability is `any` to it. The runtime used to
+;; read all three as an unknown name and accept everything — `(c-takes-point 5)` passed
+;; armed while `nest check` rejected it.
+(defrecord c-pt (x y))
+(defrecord c-circ (r))
+(defability CSealed (c-sealed-label [s] :-> string) :sealed [c-circ])
+(impl CSealed c-circ (c-sealed-label [c] "circle"))
+(defability COpen (c-open-label [s] :-> string))
+
+(defn c-takes-pt (p) (:x p))
+(sig! c-takes-pt (c-pt -> any))
+(defn c-takes-sealed (s) (c-sealed-label s))
+(sig! c-takes-sealed (CSealed -> string))
+(defn c-takes-open (s) :open)
+(sig! c-takes-open (COpen -> keyword))
+(defn c-int-map-size (m) (count m))
+(sig! c-int-map-size ((map keyword int) -> int))
+
+(describe "nominal types are enforced the way the checker reads them"
+  (test "a record type name admits an instance of that record"
+    (assert= 1 (c-takes-pt (c-pt 1 2))))
+  (test "…and rejects anything else, blaming the caller"
+    (check-allow :type-mismatch
+      (assert= :caller (try (c-takes-pt 5) (catch e (get e :blame))))
+      (assert= :caller (try (c-takes-pt {:x 1 :y 2}) (catch e (get e :blame))))
+      (assert= :caller (try (c-takes-pt (c-circ 1)) (catch e (get e :blame))))))
+  (test "a sealed ability admits its members only"
+    (assert= "circle" (c-takes-sealed (c-circ 1)))
+    (check-allow :type-mismatch
+      (assert= :caller (try (c-takes-sealed 5) (catch e (get e :blame))))
+      (assert= :caller (try (c-takes-sealed (c-pt 1 2)) (catch e (get e :blame))))))
+  (test "an open ability is `any`, as it is to the checker"
+    (assert= :open (c-takes-open 5))
+    (assert= :open (c-takes-open (c-pt 1 2)))))
+
+(describe "a record instance's hidden identity entry is not one of its entries"
+  (test "a record satisfies (map keyword int) over its fields"
+    (assert= 2 (c-int-map-size (c-pt 1 2))))
+  (test "…and still fails it on a field"
+    (check-allow :type-mismatch
+      (assert-error (c-int-map-size (c-pt 1 "two"))))))
+
+;; --- a shim is transparent to error positions and traces (2026-10-02) -------------------
+;; Every shim of one template shares one compiled body (ADR-175/215), so the name its arm
+;; recorded was whichever contracted function ran through it FIRST, and an error raised
+;; inside a contracted function took the template's line in std/contract.blsp under the
+;; user's file name. Each pair below differs only in the `sig!`.
+(defn c-first-shimmed (xs i) (+ i (first xs)))
+(sig! c-first-shimmed (vector int -> any))
+(defn c-second-shimmed (xs i) (+ i (first xs)))
+(sig! c-second-shimmed (vector int -> any))
+;; A definition taking MORE parameters than its `sig!` declares gets the variadic shim, which
+;; `apply`s the original; an unpositioned error in that body then took the shim's own
+;; `apply` site — std/contract.blsp's line — under the caller's file name. Loaded from a
+;; string because the static checker (rightly) flags the arity disagreement this needs.
+(%load-string
+  "(defmodule contract-position-fixture)
+(defn wide-shimmed (a b) (+ a b))
+(sig! wide-shimmed (int -> int))
+(defn wide-plain (a b) (+ a b))")
+
+;; Both calls of a pair go through ONE call site, so "located where the twin's is" is an
+;; exact comparison rather than one that depends on where each call was written: the
+;; body's `+` carries no position of its own, so either error is located at its caller.
+(defn- c-error-of (f & args) (try (apply f args) (catch e e)))
+(defn- c-in-contract-module? (frame)
+  (string/ends-with? (or (get frame :file) "") "std/contract.blsp"))
+
+(describe "a contract shim is transparent to error positions and traces"
+  (test "a trace names the contracted function, never a shim or its template's first user"
+    (assert= 1 (c-first-shimmed [1] 0))
+    (let (trace (get (c-error-of c-second-shimmed ["a"] 5) :trace))
+      (assert= "contract-test/c-second-shimmed" (get (first trace) :fn))
+      (is (not (any? trace c-in-contract-module?)))
+      (is (every? trace
+            (fn (frame)
+              (let (name (or (get frame :fn) ""))
+                (or (not (string/starts-with? name "contract-test/c-"))
+                  (= name "contract-test/c-second-shimmed"))))))))
+  (test "an error inside a variadic-shimmed function is located where the twin's is"
+    (let (shimmed (c-error-of contract-position-fixture/wide-shimmed 1 "x")
+          plain (c-error-of contract-position-fixture/wide-plain 1 "x"))
+      (assert= :type (get shimmed :kind))
+      (assert= (get plain :file) (get shimmed :file))
+      (assert= (get plain :line) (get shimmed :line))
+      (assert= (get plain :col) (get shimmed :col)))))

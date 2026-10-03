@@ -53,14 +53,15 @@ Codes are grouped by [`ErrorKind`]:
 | `E0020` | `:arity` | `bind_params`, `LispError::arity(...)` | `((fn (x) x))` |
 | `E0030` | `:type` | `LispError::wrong_type(...)` / `type_err(...)` | `(first 5)` |
 | `E0040` | `:runtime` | `%div` / `rem` (with a `:hint`) | `(/ 1 0)`, `(math/rem 1 0)` |
-| `E0041` | `:runtime` | checked arithmetic overflow; `floor` of non-finite or out-of-i64 float | `(* 9223372036854775807 2)`, `(math/floor 1e20)` |
-| `E0042` | `:runtime` | index out of range (`vector-ref`, `substring`) | `(vector-ref [1 2 3] 7)`, `(substring "hi" 0 99)` |
+| `E0041` | `:runtime` | `math/floor` of a non-finite float (integers never overflow — they promote to a bignum, so `(* 9223372036854775807 2)` and `(math/floor 1e20)` both succeed) | `(math/floor (* 1e308 10.0))` |
+| `E0042` | `:runtime` | index out of range (`string/substring`, `string/char-at`, bytes and rope indexing) | `(string/substring "hi" 0 99)`, `(string/char-at "hi" 9)` |
 | `E0043` | `:runtime` | allocation crossed the soft memory limit; the eval safepoint raises (catchable) instead of OOMing the host. Off by default; set via `BROOD_MEM_LIMIT` | a runaway `(cons …)`/`(string-repeat …)` loop under a limit |
-| `E0044` | `:runtime` | evaluation used more stack than the byte budget (runaway *non-tail* recursion); raised before the coroutine stack overflows into an uncatchable SIGSEGV. Tune via `BROOD_STACK_BUDGET` | `(defn boom (n) (+ 1 (boom (+ n 1)))) (boom 0)` |
+| `E0044` | `:runtime` | runaway *non-tail* recursion: the VM's call-frame cap (`MAX_BC_FRAMES`, 1048576 frames — `recursion too deep: exceeded the VM's 1048576-frame non-tail-call limit`), or the tree-walker's stack byte budget (tune via `BROOD_STACK_BUDGET`). Clean and catchable either way — never a SIGSEGV | `(defn boom (n) (+ 1 (boom (+ n 1)))) (boom 0)` |
+| `E0045` | `:runtime` | this process's live heap stayed over its own `(proc/flag :max-heap n)` limit after a collection; raised in that process only (uncaught, it retires just the offender) | `(spawn (do (proc/flag :max-heap 1000000) (grow-forever)))` |
 | `E0046` | `:runtime` | this process's mailbox grew past its `(proc/flag :max-mailbox n)` bound (ADR-307); raised in the flooded process only, senders never blocked, nothing dropped | flood a process that set `(proc/flag :max-mailbox 8)` |
 | `E0050` | `:runtime` | file IO (`load`, `file/slurp`, `file/spit`, `file/mkdir`, `file/ls`, `file/cwd`, `check-file`, `check-file-structured`) | `(file/slurp "/no/such/file")` |
-| `E0051` | `:runtime` | `run-process` couldn't start the subprocess (with a `:hint` about PATH) | `(run-process "nope" [])` |
-| `E0060` | `:runtime` | distribution layer: `node/start` / `connect` failed | `(connect "bad@host")` |
+| `E0051` | `:runtime` | `os/run-process` couldn't start the subprocess (with a `:hint` about PATH) | `(os/run-process "nope" [])` |
+| `E0060` | `:runtime` | distribution layer: `node/start` / `node/connect` failed, or a `send` to an unreachable node under `(proc/flag :send-errors true)` | `(node/start "a" "no.such.host:1")` |
 | `E0070` | `:runtime` | `send` saw a message value nested past `MAX_MESSAGE_DEPTH` — a million levels since ADR-394, a sanity bound rather than a stack limit (with a `:hint` about chunking) | a recursively self-referential structure |
 | `E0099` | `:runtime` | `LispError::runtime(...)` (catch-all) | uncoded runtime raises |
 

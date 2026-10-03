@@ -767,7 +767,7 @@ pub(in crate::builtins) fn gui_window_id(
 
 /// `(gui-open)` / `(gui-open title)` — open a new native window and return its integer
 /// id, optionally with a title-bar string (else a default `brood observer #id`). Its
-/// key/mouse input is delivered to the **calling process's mailbox** (ADR-058), so the
+/// key/mouse input is delivered to the **calling process's mailbox** (ADR-059), so the
 /// observer parks in `(receive)` rather than pinning a worker in a blocking poll.
 /// Starts the GUI thread on the first call; each call is an independent window.
 pub(in crate::builtins) fn gui_open(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {

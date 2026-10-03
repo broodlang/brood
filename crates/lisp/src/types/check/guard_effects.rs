@@ -17,6 +17,7 @@ use crate::core::heap::Heap;
 use crate::core::keywords as kw;
 use crate::core::value::{self, Value};
 use crate::error::Pos;
+use std::collections::HashSet;
 
 use super::walk::list_items;
 
@@ -66,18 +67,41 @@ pub(super) const EFFECTFUL_IN_GUARD: &[&str] = &[
 
 /// Entry: walk every top-level form for effectful `:when` guards.
 pub(super) fn check_guards(heap: &Heap, forms: &[Value], out: &mut Vec<(Option<Pos>, String)>) {
+    // A name the file defines itself shadows the global of that spelling: a module's own
+    // `(defn exit (s) …)` is what a bare `exit` in its guards calls.
+    let mut defined = HashSet::new();
     for &form in forms {
-        walk(heap, form, out);
+        collect_defined_names(heap, form, &mut defined);
+    }
+    for &form in forms {
+        walk(heap, form, &defined, out);
     }
 }
+
+/// The heads that bind their binding list's targets for the rest of the form.
+const LET_LIKE: &[&str] = &["let", "letrec", "let*", "if-let", "when-let", "for", "loop"];
+
+/// The heads whose clauses are `(pattern body…)`, the pattern binding for its clause.
+const CLAUSE_FORMS: &[&str] = &["match", "match*", "receive", "case"];
 
 /// Recurse un-expanded code, skipping quoted data. At each list, apply the two guard shapes:
 /// a clause `(pattern :when GUARD body…)` (`:when` at index 1 — `match`/`receive`/`case`
 /// clauses and multi-clause `fn`/`defn` clauses), and a single-clause `fn`/`defn` whose
 /// `:when` follows the parameter list.
-fn walk(heap: &Heap, form: Value, out: &mut Vec<(Option<Pos>, String)>) {
+///
+/// `scope` is every name bound around `form` — the file's own definitions plus each
+/// enclosing binder's names — so a guard calling a LOCAL `send` (a `let`-bound predicate,
+/// a parameter, a module function of that name) is not read as the primitive. Binders are
+/// read generously (every symbol in a pattern counts); a name wrongly counted as bound only
+/// costs a missed warning, never a false one.
+fn walk(heap: &Heap, form: Value, scope: &HashSet<String>, out: &mut Vec<(Option<Pos>, String)>) {
     stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
+            if let Value::Vector(id) = form {
+                for &it in heap.vector(id).iter() {
+                    walk(heap, it, scope, out);
+                }
+            }
             return;
         };
         // Quoted subtrees are data (patterns / literals), not code — never guards.
@@ -86,28 +110,123 @@ fn walk(heap: &Heap, form: Value, out: &mut Vec<(Option<Pos>, String)>) {
         {
             return;
         }
-        // Shape 1: a clause `(pat :when GUARD …)` — `:when` in the second position.
+        let head_name = match items.first() {
+            Some(&Value::Sym(h)) => Some(value::symbol_name(h)),
+            _ => None,
+        };
+        let head_name = head_name.as_deref();
+        // The names this form binds for its children.
+        let mut inner = scope.clone();
+        match head_name {
+            Some(name) if LET_LIKE.contains(&name) => {
+                if let Some(&bindings) = items.get(1) {
+                    for target in binding_targets(heap, bindings) {
+                        collect_symbols(heap, target, &mut inner);
+                    }
+                }
+            }
+            Some("fn" | "lambda") => {
+                if let Some(&params) = items.get(1) {
+                    collect_symbols(heap, params, &mut inner);
+                }
+            }
+            Some("defn" | "defn-" | "defmacro") => {
+                if let Some(&params) = items.get(2) {
+                    collect_symbols(heap, params, &mut inner);
+                }
+            }
+            _ => {}
+        }
+        // Shape 1: a clause `(pat :when GUARD …)` — `:when` in the second position. The
+        // pattern's binders are in scope for the guard (and the body).
         if is_when_kw(items.get(1)) {
+            collect_symbols(heap, items[0], &mut inner);
             if let Some(&guard) = items.get(2) {
-                lint_guard(heap, guard, out);
+                lint_guard(heap, guard, &inner, out);
             }
         }
         // Shape 2: a single-clause `(fn (params) :when GUARD …)` /
         // `(defn name (params) :when GUARD …)`.
-        if let Some(&Value::Sym(h)) = items.first() {
-            let guard_index = match value::symbol_name(h).as_str() {
-                "fn" | "lambda" if is_when_kw(items.get(2)) => Some(3),
-                "defn" | "defmacro" if is_when_kw(items.get(3)) => Some(4),
-                _ => None,
-            };
-            if let Some(i) = guard_index {
-                if let Some(&guard) = items.get(i) {
-                    lint_guard(heap, guard, out);
+        let guard_index = match head_name {
+            Some("fn" | "lambda") if is_when_kw(items.get(2)) => Some(3),
+            Some("defn" | "defmacro") if is_when_kw(items.get(3)) => Some(4),
+            _ => None,
+        };
+        if let Some(i) = guard_index {
+            if let Some(&guard) = items.get(i) {
+                lint_guard(heap, guard, &inner, out);
+            }
+        }
+        let clause_form = head_name.is_some_and(|name| CLAUSE_FORMS.contains(&name));
+        for (index, &it) in items.iter().enumerate() {
+            // A clause `(pattern body…)` of a `match`: its pattern binds for its body.
+            if clause_form && index >= 2 {
+                if let Some(clause) = list_items(heap, it) {
+                    if let Some(&pattern) = clause.first() {
+                        let mut clause_scope = inner.clone();
+                        collect_symbols(heap, pattern, &mut clause_scope);
+                        walk(heap, it, &clause_scope, out);
+                        continue;
+                    }
                 }
+            }
+            walk(heap, it, &inner, out);
+        }
+    })
+}
+
+/// The targets of a binding list `(t1 v1 t2 v2 …)` / `[t1 v1 …]` — its even elements.
+fn binding_targets(heap: &Heap, bindings: Value) -> Vec<Value> {
+    let elements = match bindings {
+        Value::Vector(id) => heap.vector(id).to_vec(),
+        _ => list_items(heap, bindings).unwrap_or_default(),
+    };
+    elements.into_iter().step_by(2).collect()
+}
+
+/// Every symbol anywhere in `form` (a parameter list or a pattern), by name.
+fn collect_symbols(heap: &Heap, form: Value, out: &mut HashSet<String>) {
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || match form {
+        Value::Sym(symbol) => {
+            out.insert(value::symbol_name(symbol));
+        }
+        Value::Pair(_) => {
+            for part in list_items(heap, form).unwrap_or_default() {
+                collect_symbols(heap, part, out);
+            }
+        }
+        Value::Vector(id) => {
+            for &part in heap.vector(id).iter() {
+                collect_symbols(heap, part, out);
+            }
+        }
+        Value::Map(id) => {
+            for (key, part) in heap.map_entries(id) {
+                collect_symbols(heap, key, out);
+                collect_symbols(heap, part, out);
+            }
+        }
+        _ => {}
+    })
+}
+
+/// Every name the file defines with a `def`-family form, at any depth.
+fn collect_defined_names(heap: &Heap, form: Value, out: &mut HashSet<String>) {
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        let Some(items) = list_items(heap, form) else {
+            return;
+        };
+        if let (Some(&Value::Sym(head)), Some(&Value::Sym(name))) = (items.first(), items.get(1)) {
+            let head = value::symbol_name(head);
+            if matches!(
+                head.as_str(),
+                "def" | "def-" | "defn" | "defn-" | "defmacro" | "defdyn" | "defmulti"
+            ) {
+                out.insert(value::symbol_name(name));
             }
         }
         for &it in &items {
-            walk(heap, it, out);
+            collect_defined_names(heap, it, out);
         }
     })
 }
@@ -117,8 +236,13 @@ fn is_when_kw(v: Option<&Value>) -> bool {
 }
 
 /// Warn if `guard` contains an effectful primitive.
-fn lint_guard(heap: &Heap, guard: Value, out: &mut Vec<(Option<Pos>, String)>) {
-    if let Some(name) = effectful_head(heap, guard) {
+fn lint_guard(
+    heap: &Heap,
+    guard: Value,
+    scope: &HashSet<String>,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
+    if let Some(name) = effectful_head(heap, guard, scope) {
         out.push((
             heap.form_pos_only(guard),
             format!(
@@ -131,25 +255,28 @@ fn lint_guard(heap: &Heap, guard: Value, out: &mut Vec<(Option<Pos>, String)>) {
     }
 }
 
-/// The first effectful primitive head anywhere in `form`, or `None`. Skips quoted data.
-fn effectful_head(heap: &Heap, form: Value) -> Option<String> {
+/// The first effectful primitive head anywhere in `form`, or `None`. Skips quoted data, and
+/// a head `scope` binds — that name is not the primitive.
+fn effectful_head(heap: &Heap, form: Value, scope: &HashSet<String>) -> Option<String> {
     // Deep-form stack safety: a generated guard is as deep as its generator made it.
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || effectful_head_inner(heap, form))
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        effectful_head_inner(heap, form, scope)
+    })
 }
 
-fn effectful_head_inner(heap: &Heap, form: Value) -> Option<String> {
+fn effectful_head_inner(heap: &Heap, form: Value, scope: &HashSet<String>) -> Option<String> {
     let items = list_items(heap, form)?;
     if let Some(&Value::Sym(h)) = items.first() {
         let name = value::symbol_name(h);
         if name == "quote" || name == "quasiquote" {
             return None;
         }
-        if EFFECTFUL_IN_GUARD.contains(&name.as_str()) {
+        if EFFECTFUL_IN_GUARD.contains(&name.as_str()) && !scope.contains(&name) {
             return Some(name);
         }
     }
     for &it in &items {
-        if let Some(n) = effectful_head(heap, it) {
+        if let Some(n) = effectful_head(heap, it, scope) {
             return Some(n);
         }
     }

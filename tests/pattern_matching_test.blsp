@@ -301,10 +301,12 @@
                (catch e (match e ([:match-error ctx val pats] (list ctx val)) (_ :other))))
       (list :match 42)))
   (test "the failure carries the patterns tried"
-    (assert= (try
-               (match 7 (1 :a) (2 :b))
-               (catch e (match e ([:match-error ctx val pats] pats) (_ :no))))
-      (list 1 2)))
+    ;; check-allow: the non-exhaustive match is the failure under test.
+    (check-allow :type-mismatch
+      (assert= (try
+                 (match 7 (1 :a) (2 :b))
+                 (catch e (match e ([:match-error ctx val pats] pats) (_ :no))))
+        (list 1 2))))
   (test "an empty match always fails" (assert-error (match :anything)))
   (test "a totalised match never fails" (assert= (match :anything (_ :ok)) :ok)))
 

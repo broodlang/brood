@@ -533,9 +533,11 @@ fn the_recursive_fixpoint_keeps_the_correct_calls_silent() {
 fn the_recursive_fixpoint_declines_rather_than_under_approximate() {
     // A parameter that grows on every round — a list nesting one level deeper per
     // call — never converges as written; the call-site fixpoint declines to the flat
-    // answer, and the caller-derived one WIDENS (`Ty::widened_below`) to `1 | pair`, which
-    // is sound and exact enough: `(nest 3 1)` is a list, so `string/length` on it is a
-    // true finding and `+` (which `1` satisfies) is not.
+    // answer, and the caller-derived one folds the nesting into a recursive type (`μX. 1 |
+    // (list X)`, `Ty::fold_recursive`; it read `1 | pair`, the depth cut, before
+    // 2026-10-02). Both are sound — `(nest 3 1)` is `(((1)))`, inside either — and the μ
+    // is exact: `string/length` on it is a true finding and `+` (which `1` satisfies) is
+    // not.
     let ws = file_warnings(
         "(defn nest (i acc) (if (= i 0) acc (nest (- i 1) (list acc))))\n\
          (defn use-a () (string/length (nest 3 1)))\n\
@@ -543,7 +545,10 @@ fn the_recursive_fixpoint_declines_rather_than_under_approximate() {
     );
     assert_eq!(
         ws,
-        vec!["string/length: argument 1 expects string, got 1 | pair ((nest 3 1))".to_string()],
+        vec![
+            "string/length: argument 1 expects string, got (rec X 1 | (list X)) ((nest 3 1))"
+                .to_string()
+        ],
         "{ws:?}"
     );
     // Two arms fit the call's arity (a `:when` overload): declined, flat answer.

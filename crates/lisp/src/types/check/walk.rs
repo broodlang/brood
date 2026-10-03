@@ -208,7 +208,16 @@ fn check_arg_against_param(
         ));
         return false;
     }
-    let g = gradual_of(heap, arg, ctx);
+    // A lambda literal handed to an arrow parameter is typed UNDER that arrow's domain
+    // (`lambda_sig_under`): on its own, `(fn (x) (+ x 1))` is `(any) -> number`, which
+    // strict inclusion rejects against `(int) -> int` although every call it will receive
+    // returns an int.
+    let g = match param.as_arrow().filter(|_| fn_literal) {
+        Some(expected) => lambda_sig_under(heap, arg, expected, ctx)
+            .map(|sig| GradualTy::dynamic_within(Ty::arrow(sig)))
+            .unwrap_or_else(GradualTy::dynamic),
+        None => gradual_of(heap, arg, ctx),
+    };
     // Relax the parameter for the membership test in the two places the lattice
     // deliberately under-approximates (see `relax_param_for_arg`), so the advisory check
     // never misfires; the original `param` is still what the message reports.
@@ -238,7 +247,8 @@ fn check_arg_against_param(
 /// (`check_arg_against_param`); `infer::expr_ty` reads the result from the same arrow. An
 /// arrow in head position used to be inert: a curried `(sig cur (int -> (string -> int)))`
 /// typed `(cur 1)` and then nothing checked what it was applied to. A `fn` literal in head
-/// position is the immediate-application case `infer.rs` types by its body, not this.
+/// position — an immediate application — is checked against its parameters' domains and
+/// arity here; `infer.rs` types its result by its body.
 fn check_computed_call(
     heap: &Heap,
     form: Value,
@@ -249,10 +259,12 @@ fn check_computed_call(
     let Some(&head @ Value::Pair(_)) = items.first() else {
         return;
     };
-    let Some(sig) = expr_ty(heap, head, ctx)
-        .as_ref()
-        .and_then(Ty::as_arrow)
-        .cloned()
+    let head_ty = expr_ty(heap, head, ctx);
+    // An immediately-applied `fn` literal gets what a `let`-bound one gets at its call
+    // sites: each parameter's domain over the body, and the literal's arity — its own
+    // arrow carries neither, so `((fn (y) (string/length y)) 5)` used to pass unread.
+    let Some(sig) = super::sigs::let_bound_lambda_sig(heap, head, head_ty.as_ref(), ctx)
+        .or_else(|| head_ty.as_ref().and_then(Ty::as_arrow).cloned())
     else {
         return;
     };
@@ -260,10 +272,12 @@ fn check_computed_call(
     let argc = items.len() - 1;
     let arity = arity_of_sig(&sig);
     if !arity.accepts(argc) {
-        out.push((
-            heap.form_pos_only(form),
-            crate::eval::arity_message(&callee, arity.min, arity.max, argc, ""),
-        ));
+        if !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH) {
+            out.push((
+                heap.form_pos_only(form),
+                crate::eval::arity_message(&callee, arity.min, arity.max, argc, ""),
+            ));
+        }
         return;
     }
     for (i, &arg) in items[1..].iter().enumerate() {
@@ -419,7 +433,13 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
     // `defmulti` analogue of the ability hook above (ADR-179). Fires when a `defmulti` generic
     // is applied with at least one symbol arg (so the syntactic pass in `protocol` deferred);
     // resolves each arg's identity syntactically or from its inferred record type.
-    if let (Some(info), Value::Sym(h)) = (ctx.multi(), head) {
+    // Both are type findings — an argument tuple no method accepts — so `:type-mismatch` is
+    // their category, as for any other argument a callee does not take. They had none.
+    if let (Some(info), Value::Sym(h), false) = (
+        ctx.multi(),
+        head,
+        ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH),
+    ) {
         if info.generic_of(h).is_some() {
             super::protocol::check_multi_call_inferred(
                 heap,
@@ -538,6 +558,15 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
                     }
                     return;
                 }
+                // A `%try` an author's `try` expanded to is ordinary code: it is where a
+                // program handles its errors, and a type misuse in its body is as wrong
+                // there as anywhere (`(try (string/length 6) (catch e e))`). Only the
+                // expansions of `error-of` / `assert-error` — whose whole purpose is to
+                // provoke the failure — keep the suppression below. Falls through to the
+                // generic call path, which walks the thunk and the handler as `fn`s.
+                SpecialHead::ErrorTesting
+                    if value::symbol_is(s, kw::TRY_PRIM)
+                        && !provokes_failure_on_purpose(heap, &items) => {}
                 SpecialHead::ErrorTesting => {
                     // Walk the body into a scratch buffer and keep ONLY the
                     // unbound-symbol diagnostics. Filtering at the collection
@@ -558,7 +587,10 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
                     return;
                 }
                 SpecialHead::If => {
-                    check_if(heap, form, &items, ctx, out);
+                    let mut if_out = Vec::new();
+                    check_if(heap, form, &items, ctx, &mut if_out);
+                    drop_unwanted_dead_clause(heap, form, &items, ctx, &mut if_out);
+                    out.extend(if_out);
                     return;
                 }
                 SpecialHead::Let => {
@@ -719,7 +751,9 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         // Arity check (independent of sig — they're separate concerns).
         if let Some(a) = arity {
             let argc = items.len() - 1;
-            if !a.accepts(argc) {
+            // A deliberately wrong call — the failure a test exercises inside a `try` — opts
+            // out under `:type-mismatch`, the category every call-shape finding shares.
+            if !a.accepts(argc) && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH) {
                 // Same wording as the RUNTIME's arity error (`eval::arity_message`), and
                 // the same parameter names: the checker used to say "wrong number of
                 // arguments — expected 1, got 0" where running it said "expected 1
@@ -813,9 +847,16 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
 
         if value::symbol_is(s, "throw") && items.len() == 2 {
             match super::guards::match_coverage(heap, items[1], ctx) {
-                Some(super::guards::MatchCoverage::Missing(msg)) => {
+                // Its category is `:type-mismatch`: the scrutinee's (literal) type has
+                // members no pattern accepts — a test provoking the match failure on
+                // purpose says so with that directive. It had none before, so nothing
+                // but `:generated` could silence it.
+                Some(super::guards::MatchCoverage::Missing(msg))
+                    if !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH) =>
+                {
                     out.push((heap.form_pos_only(form), msg));
                 }
+                Some(super::guards::MatchCoverage::Missing(_)) => {}
                 // A `:total` function (ADR-351) may not reach a `match` failure the
                 // checker cannot prove unreachable: a scrutinee that is not a closed
                 // literal type, or a pattern that is not a literal, is a case the
@@ -868,32 +909,13 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         // …though only for the WIDER predicate set. `failure?` had no literal hits at all
         // across std/ + tests/, and `(failure? 42)` is precisely the "checked where it
         // cannot exist" case worth naming, so the literal skip does not apply to it.
-        let judged = value::symbol_is(s, "failure?")
-            || matches!(items.get(1), Some(Value::Sym(_)) | Some(Value::Pair(_)));
-        let author_wrote_it =
-            judged && !matches!(items.get(1), Some(&Value::Sym(a)) if is_gensym_sym(a));
-        if items.len() == 2
-            && author_wrote_it
-            && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
-        {
-            if let Some((tested, _)) = super::guards::predicate_guard_ty(heap, Some(ctx), s) {
-                let bound = gradual_of(heap, items[1], ctx).bound;
-                // A parameter bound to what its in-file callers pass (Pass 2.9) is not
-                // judged here: the guard may be there for callers that do not exist yet.
-                let derived =
-                    matches!(items.get(1), Some(&Value::Sym(a)) if ctx.is_derived_local(a));
-                if !derived && !bound.is_never() && bound != Ty::ANY && bound.is_disjoint(&tested) {
-                    out.push((
-                        arg_pos(heap, items[1], form),
-                        format!(
-                            "{}: this can never be true — {} is {}, which is never {}",
-                            name_of(s),
-                            elide(&crate::syntax::printer::print(heap, items[1]), 60),
-                            elide(&bound.to_string(), 80),
-                            tested,
-                        ),
-                    ));
-                }
+        // Its category is `:type-mismatch` — a statement about the argument's type. Where the
+        // call is the TEST of a branch the dead-clause lint proves dead, the finding is the
+        // dead clause instead: `drop_unwanted_dead_clause` drops this warning and reports
+        // the clause once, naming the symbol the author tested, under `:unreachable-clause`.
+        if !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH) {
+            if let Some(message) = never_true_predicate(heap, &items, ctx) {
+                out.push((arg_pos(heap, items[1], form), message));
             }
         }
 
@@ -1093,5 +1115,158 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
                 }
             }
         }
+    }
+}
+
+/// The never-true type-predicate lint's verdict for a call `(pred x)`: the message, when
+/// `pred` is a type predicate whose tested type is disjoint from everything `x` can be.
+/// Ignores the suppression set — the caller decides whether to report. Shared with
+/// `check_if`'s dead-clause lint ([`drop_unwanted_dead_clause`]) so that one dead
+/// clause is reported once.
+fn never_true_predicate(heap: &Heap, items: &[Value], ctx: &Ctx) -> Option<String> {
+    let Some(&Value::Sym(predicate)) = items.first() else {
+        return None;
+    };
+    if items.len() != 2 {
+        return None;
+    }
+    let argument = items[1];
+    let judged = value::symbol_is(predicate, "failure?")
+        || matches!(argument, Value::Sym(_) | Value::Pair(_));
+    let author_wrote_it = judged && !matches!(argument, Value::Sym(a) if is_gensym_sym(a));
+    if !author_wrote_it || ctx.is_local(predicate) {
+        return None;
+    }
+    let (tested, _) = super::guards::predicate_guard_ty(heap, Some(ctx), predicate)?;
+    let bound = gradual_of(heap, argument, ctx).bound;
+    // A parameter bound to what its in-file callers pass (Pass 2.9) is not judged here:
+    // the guard may be there for callers that do not exist yet.
+    let derived = matches!(argument, Value::Sym(a) if ctx.is_derived_local(a));
+    if derived || bound.is_never() || bound == Ty::ANY || !bound.is_disjoint(&tested) {
+        return None;
+    }
+    Some(format!(
+        "{}: this can never be true — {} is {}, which is never {}",
+        name_of(predicate),
+        elide(&crate::syntax::printer::print(heap, argument), 60),
+        elide(&bound.to_string(), 80),
+        tested,
+    ))
+}
+
+/// Remove THIS `if`'s dead-clause warning (`unreachable clause: …`, pushed by `check_if`)
+/// from `if_out` when it must not be reported: under `(check-allow :unreachable-clause …)`,
+/// its one category — and, when the never-true predicate lint reported the same branch,
+/// fold the two into one: one dead clause, one warning, naming the symbol the author's
+/// test named (a `match` guard's own binder rather than the scrutinee it aliases).
+///
+/// The warning is identified exactly: it is re-derived here from the same guard and
+/// narrowing `check_if` used, so a nested `if`'s warning (already judged by its own
+/// visit) is never the one removed.
+fn drop_unwanted_dead_clause(
+    heap: &Heap,
+    form: Value,
+    items: &[Value],
+    ctx: &Ctx,
+    if_out: &mut Vec<(Option<Pos>, String)>,
+) {
+    let test = items.get(1).copied().unwrap_or(Value::nil());
+    let Some(guard) = guard_assertion(heap, test, ctx) else {
+        return;
+    };
+    if guard.else_only {
+        return;
+    }
+    let then_ctx = ctx.narrow(guard.sym, guard.ty.clone());
+    let Some((binding, known)) = then_ctx.newly_dead_binding(ctx, guard.sym) else {
+        return;
+    };
+    let suppressed = ctx.is_suppressed(super::ctx::SUPPRESS_UNREACHABLE);
+    // The never-true predicate's own warning for this test, computed whatever suppression
+    // is in force, and the symbol it tested.
+    let test_items = list_items(heap, test).unwrap_or_default();
+    let predicate_warning = never_true_predicate(heap, &test_items, ctx)
+        .map(|message| (arg_pos(heap, test_items[1], test), message));
+    if !suppressed && predicate_warning.is_none() {
+        return;
+    }
+    let dead_clause = |name: Symbol| {
+        format!(
+            "unreachable clause: {} is {}, which can never be {} — this branch is dead code",
+            name_of(name),
+            known,
+            guard.ty,
+        )
+    };
+    let position = heap.form_pos_only(form);
+    let message = dead_clause(binding);
+    let Some(index) = if_out
+        .iter()
+        .position(|(pos, text)| *pos == position && *text == message)
+    else {
+        return;
+    };
+    if_out.remove(index);
+    let Some(predicate_warning) = predicate_warning else {
+        return; // suppressed, and nothing else reported this clause
+    };
+    // The predicate's warning (pushed while the test was walked, unless `:type-mismatch`
+    // held it back) is the same finding: drop it, and report the clause once, under
+    // `:unreachable-clause`, naming the symbol the author's test named — a `match`
+    // guard's own binder, not the scrutinee it aliases.
+    if let Some(earlier) = if_out.iter().position(|entry| *entry == predicate_warning) {
+        if_out.remove(earlier);
+    }
+    if suppressed {
+        return;
+    }
+    let named = match test_items.get(1) {
+        Some(&Value::Sym(tested)) => tested,
+        _ => binding,
+    };
+    if_out.insert(index.min(if_out.len()), (position, dead_clause(named)));
+}
+
+/// Is this `(%try thunk handler)` the expansion of `assert-error` or `error-of` — a form
+/// that provokes a failure ON PURPOSE, whose body the walk keeps quiet about (KI-67)?
+///
+/// `assert-error` expands to `(try (do body… false) (catch e true))` and `error-of` to
+/// `(try (do body… nil) (catch e (test/error-of-render e)))`; by the time the walk sees
+/// them they are `(%try (fn () (do … false)) (fn (e) true))` and the `nil` /
+/// `error-of-render` counterpart. Read structurally, because the macro name does not
+/// survive expansion. An author who writes the `assert-error` shape out by hand meant the
+/// same thing and is treated the same way.
+fn provokes_failure_on_purpose(heap: &Heap, items: &[Value]) -> bool {
+    let (Some(&thunk), Some(&handler)) = (items.get(1), items.get(2)) else {
+        return false;
+    };
+    // `(fn PARAMS BODY)` → its one body form.
+    let single_body = |lambda: Value| -> Option<Value> {
+        let parts = list_items(heap, lambda)?;
+        match parts.as_slice() {
+            [Value::Sym(head), _, body] if value::symbol_is(*head, kw::FN) => Some(*body),
+            _ => None,
+        }
+    };
+    let (Some(thunk_body), Some(handler_body)) = (single_body(thunk), single_body(handler)) else {
+        return false;
+    };
+    // The thunk's `(do body… LAST)`.
+    let Some(thunk_items) = list_items(heap, thunk_body) else {
+        return false;
+    };
+    let last = match thunk_items.as_slice() {
+        [Value::Sym(head), .., last] if value::symbol_is(*head, kw::DO) => *last,
+        _ => return false,
+    };
+    match last {
+        // `assert-error`: the handler answers `true`.
+        Value::Bool(false) => matches!(handler_body, Value::Bool(true)),
+        // `error-of`: the handler renders the caught error.
+        Value::Nil => list_items(heap, handler_body).is_some_and(|handler_items| {
+            matches!(handler_items.first(), Some(&Value::Sym(render))
+                if value::symbol_name(render).ends_with("error-of-render"))
+        }),
+        _ => false,
     }
 }

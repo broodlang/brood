@@ -13,7 +13,8 @@ A small, dynamic Lisp implemented in Rust.
   — every operation returns a fresh value. The only mutation is `def`, which
   *re-binds* a global (hot reload). State that genuinely changes lives in a
   **process** (`spawn` / `send` / `receive`) or behind a Rust-backed handle.
-- **No loops** (`while`, `for`, `loop`/`recur`). Iterate with recursion — proper
+- **No loops** (no `while`, no `loop`/`recur`, no imperative `for` — Brood's `for` is a
+  list *comprehension* that returns a value). Iterate with recursion — proper
   tail calls are guaranteed (including calls to *other* functions), so it's O(1)
   stack — or the combinators `fold` / `reduce` / `map` / `seq/filter`. A *local*,
   self-contained loop is a `letrec`-bound closure called by name.
@@ -52,8 +53,9 @@ name  foo-bar?  +       ; symbol (kebab-case is idiomatic)
 
 ## Special forms
 
-Only these eight are *special* (evaluator rules in `eval.rs`); everything
-else is a function or a macro:
+Only these eight are *special* (the `SpecialForm` enum in `eval.rs`); everything
+else — `defmacro` included — is a function or a macro (`(reflect/special-forms)` is a
+broader highlighter list that also names the core macros):
 
 ```
 def  fn  quote  quasiquote  if  do  let  letrec
@@ -95,7 +97,7 @@ A `fn`/`defn` body of several forms is an **implicit `do`**: each is evaluated
 for effect and the **last form's value is returned** — no explicit `(do …)`
 wrapper needed (`((fn () 1 2 3))` → `3`). Same for `let`/`when`/`letrec` bodies.
 
-**Argument order is collection-first, callback-last** (ADR-302/308) — the reverse of
+**Argument order is collection-first, callback-last** (ADR-308) — the reverse of
 Clojure: `(map xs f)`, `(fold xs init f)`, `(reduce xs init f)`, `(seq/filter xs pred)`,
 `(sort-by xs key-fn)`, `(seq/find xs pred)`. Predicates and lookups are data-first too —
 `(string/starts-with? s "#")`, `(contains? m k)`, `(index-of coll x)`. A callback's own
@@ -210,9 +212,11 @@ the prelude, the builtins and the embedded std modules are reserved. Your own gl
 and your packages stay fully redefinable, which is what hot reload is for. If a name
 you want is taken: pick another, shadow it locally (`(let (get …) …)` is fine), or
 define it in a `(defmodule your/mod …)` — that makes `your/mod/get`, which is yours.
-The prelude's data registries (`*load-path*`, `*features*`) are still rebindable — the
-rule reserves shipped **functions** — and a `defdyn` name is never reserved whatever it
-holds, so `(def *out* my-port)` still redirects output permanently.
+The rule reserves shipped **functions**; a `defdyn` name is never reserved whatever it
+holds, and it is ambient (root) — so `(def *print-length* 3)` from any module rebinds the
+one root binding, and `(def *out* my-port)` still redirects output permanently. A plain
+`def`'d prelude global that is not a `defdyn` (`*load-path*`) is NOT reachable that way:
+inside a module, `(def *load-path* …)` defines `your/mod/*load-path*`.
 
 ## Naming & docstrings
 
@@ -274,7 +278,9 @@ recursion with an accumulator:
 ```
 
 **Docstrings** go on every public `defn` / `defmacro`. First line is a complete
-one-sentence summary (it's what `(doc 'name)` and the LSP show on hover);
+one-sentence summary (it's what `(doc name)` and the LSP show on hover — `doc` and
+`arglist` take the function VALUE, `(doc inc)`, `(arglist string/join)`; a quoted
+symbol gets `nil`);
 backtick code, **bold**, and `-` bullet lists are rendered, so use them. `defn-`
 privates usually skip the docstring and use a `;;` comment instead.
 
@@ -393,9 +399,9 @@ Other things worth knowing:
   Sealed only — an *open* ability can't be a sound bound (late binding could add a member
   later), so the checker ignores an open-ability name in a sig rather than under-warning
   (ADR-192). This is what gives occurrence typing its nominal domains too.
-- **Super-abilities — `(defability B (:requires A) …)`.** A conformance contract: every
-  implementor of `B` must also satisfy `A`, and `nest check` demands it (ADR-193). Checker-only,
-  no runtime dispatch change; `:requires [A C]` chains several.
+- **Super-abilities — `(defability B :requires [A] (op [self] …))`.** A conformance
+  contract: every implementor of `B` must also satisfy `A`, and `nest check` demands it
+  (ADR-193). Checker-only, no runtime dispatch change; `:requires [A C]` names several.
 - `(satisfies? 'Shape x)` to branch instead of letting a missing op raise.
 - **Register at load time.** Top-level `impl` forms are safe; two *processes* calling
   `impl` concurrently can lose an update (it is a `def` under the hood).
@@ -661,11 +667,9 @@ path:
 (receive ([:reply x] x))                           ; selective receive
 ```
 
-**Gotcha: `spawn` is a macro — pass the expression, not a thunk.** `(spawn expr)`
-already wraps `expr` in `(fn () expr)`. So write `(spawn (work c))`, **not**
-`(spawn (fn () (work c)))` — the latter double-wraps: the child just builds a
-closure and returns, the body never runs (a silent no-op that looks like "spawn
-didn't work"). Same for `(spawn name expr)`.
+`spawn` is a macro over its body: `(spawn (work c))` and `(spawn (fn () (work c)))`
+both run `(work c)` in the child, and a bare function name is *called* —
+`(spawn worker)` runs `(worker)`. Prefer the plain expression.
 
 Each process has its own heap; messages are **deep-copied** on `send`. `(self)`
 is the current process's pid. A `send` target is a pid, a **registered name** —
@@ -693,10 +697,13 @@ and registers the new pid. The name is auto-reaped on death.
 (spawn (worker))                                   ; fire-and-forget; crashes exit the process
 (spawn :ticker (ticker 0))                         ; named + idempotent
 
-;; Userland supervisor — re-spawn on crash. `^ref` PINS the ref (match the value
-;; in `ref`, don't rebind); `~` is quasiquote-only and is a compile error here.
+;; Userland supervisor — re-spawn on crash. `spawn-monitor` returns `[pid ref]` with
+;; the monitor in place BEFORE the child runs; a separate `(monitor (spawn …))` loses
+;; the race when the child exits first and reports `:noproc` instead of the real
+;; reason. `^ref` PINS the ref (match the value in `ref`, don't rebind); `~` is
+;; quasiquote-only and is a compile error here.
 (defn supervise (worker-fn)
-  (let (pid (spawn (worker-fn)) ref (monitor pid))
+  (let ([pid ref] (spawn-monitor (worker-fn)))
     (receive
       ([:down ^ref _ :normal] :ok)
       ([:down ^ref _ reason]
@@ -704,7 +711,8 @@ and registers the new pid. The name is auto-reaped on death.
         (supervise worker-fn)))))
 ```
 
-**`(spawn-link expr)` when you need the child's death to reach you** — it spawns
+**`(spawn-monitor expr)` to watch a child, `(spawn-link expr)` when you need the
+child's death to reach you.** `spawn-link` spawns
 and `link`s **atomically**, which a hand-rolled `(let (p (spawn expr)) (link p) p)`
 does *not*: a child that exits inside that gap is linked dead and reports
 `:noproc`, silently **replacing** its real reason, so a fast `:normal` return
@@ -878,10 +886,13 @@ code paints to a terminal or a GUI window unchanged.
 
 **Input vocabulary** (what `:poll` / a raw `(receive)` delivers): a printable key
 is a **1-char string** (`"a"`); the rest are keywords — `:up :down :left :right
-:enter :backspace :escape :ctrl-c` …; the mouse is `[:mouse action button row col]`
-(`action` is `:press` / `:release` / `:drag` / `:scroll-up` / `:scroll-down` —
-`:drag` is motion with a button held, delivered once per cell crossed, so a divider
-drag is bounded; `button` is `:left` / `:right` / `:middle`, nil for scroll);
+:enter :backspace :escape :ctrl-c` …; the mouse is `[:mouse action button row col mods]`
+(`action` is `:press` / `:release` / `:drag` / `:scroll-up` / `:scroll-down`, plus
+`:move` in a window — `:drag` is motion with a button held, delivered once per cell
+crossed, so a divider drag is bounded; `button` is `:left` / `:right` / `:middle`, nil
+for scroll; `mods` is a vector of held modifiers in `:ctrl :alt :shift` order, `[]` when
+none; a `:press` appends a 7th element, its click count — 2 for a double click in a
+window, always 1 in a terminal);
 a resize is `[:resize cols rows]`. **A GUI window's close button (the X) is its own
 `:close` message** — *not* `:escape`, so an app that binds Esc to cancel/normal-mode
 can still be closed by the X. **`ui-run` quits on `:close` automatically**, so every
@@ -953,6 +964,10 @@ To run a one-off entry point without editing the manifest's `:main`, pass
   (catch e
     (io/puts "failed: " e)))
 
+(try (work)                              ; `finally` runs on success, on a raise,
+  (catch e (cleanup-failed e))           ;   and on a raise inside `catch` (ADR-306);
+  (finally (release-lock)))              ;   its value is discarded
+
 (throw [:my-error :reason])              ; throwable values are arbitrary
 (error "x out of range: " x)             ; convenience: throw with a built string
 (error (string/interp "x out of range: {x}"))  ; same, with interpolation
@@ -978,7 +993,7 @@ This is a curated tour, not the full list. For the **complete reference** —
 every builtin and prelude fn/macro with its signature and one-line summary —
 run `nest doc --all` and read it once, rather than probing names one at a time
 in the REPL. (`nest doc <module>` does the same for an opt-in module like
-`display`/`buffer`/`ansi`; `apropos`/`doc-search` search it interactively.)
+`editor/display`/`editor/buffer`/`editor/ansi`; `apropos`/`doc-search` search it interactively.)
 
 - **list / seq**: `first` `rest` `cons` `list` `count` `empty?` `nth`
   `reverse` `map` `reduce` `fold` `append` (variadic, over
@@ -995,11 +1010,14 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   with `seq/reduced` to stop early and `seq/xtake-while` as the built-in stopping stage.
 - **combinators & binding forms** (bare): `comp` `partial` `complement` `constantly`
   `juxt` (`((juxt inc dec) 5)` → `[6 4]`) `fnil` (`((fnil inc 0) nil)` → `1`)
-  `memoize` (a `table`-backed cache — put it under a `def`, never in a loop) ·
+  `memoize` (a `table`-backed cache — put it under a `def`, never in a loop; it hashes
+  every key and never forgets) · `defmemo` from the `memo` module (`(:use memo)`, then
+  `(defmemo rows-of 8 (rope width) …)`: a `defn` that remembers its last N calls compared
+  by `=` — bounded, and immediate for the same big value such as a rope) ·
   `if-let`/`when-let` test truth, `if-some`/`when-some` test presence (`false` counts) ·
   `condp` asks `(pred value test)`, value first: `(condp < 15 10 :small 100 :medium
   :large)` → `:medium`.
-- **iteration** (macros — there is no `while`/`for`-loop): `for`
+- **iteration** (macros — there is no `while` and no imperative `for` loop): `for`
   (list comprehension, with `:when`; add `:into []` / `:into {}` / `:into #{}` as the
   LAST pair to build that kind directly), `fold-for` (an accumulating comprehension:
   `(fold-for (acc 0 x xs) (+ acc x))`), `doseq` (destructuring/`:when`),
@@ -1101,9 +1119,10 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   `bit/shift-right` (64-bit, arithmetic right shift; shift amount in `[0,64)`).
 - **randomness** (pure & seedable — there is *no* global RNG; thread the seed):
   every step takes a seed and returns `[value next-seed]`, and every name is
-  qualified; the unqualified spellings do not exist. `rand/rng` (→ a 32-bit
-  int), `rand/int` `(seed n)` → `[i next]` in `[0,n)`, `rand/float` `(seed)` →
-  `[f next]` in `[0,1)`, `rand/token` `(n)`; for collections, `seq/shuffle`
+  qualified; the unqualified spellings do not exist. `rand/rng` `(seed)` →
+  `[i next]` with `i` a non-negative 32-bit int, `rand/int` `(seed n)` → `[i next]` in `[0,n)`, `rand/float` `(seed)` →
+  `[f next]` in `[0,1)`, `rand/token` `(n)` (the exception: `n` OS-random bytes as a hex string, no
+  seed); for collections, `seq/shuffle`
   `(seed coll)` and `seq/sample` `(seed coll)`; seed a stream from any int
   (e.g. `(os/now)`) with `rand/seed`. Carry `next-seed` in your
   loop/process state like any other value.
@@ -1230,7 +1249,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   false-flag them. From *outside* a module (e.g. the REPL or `nest mcp` eval),
   reach a `defn` by its qualified name: `(life/step …)`, found via `apropos`.
   **The one exception is a name declared with `defdyn`** — it is *ambient*
-  (root, never namespaced), so `(def *load-path* …)` from any module rebinds the
+  (root, never namespaced), so `(def *print-length* 3)` from any module rebinds the
   one root binding. An earmuffed name that is *not* declared is namespaced like
   everything else: a plain `(def *width* 10)` in module `a` is `a/*width*`. So
   earmuffs are a naming convention, not a scoping rule (ADR-151) — declare the
@@ -1284,23 +1303,35 @@ tail-recursive animation loop, pairs with `nest run --for`), `gen` (a stateful
 text editor on `ui-run`), and `gui` (a windowed `ui-run` app — see *Interactive
 apps* above; needs a `--features gui` build).
 
+What `nest new greeter` writes, with the module docstrings and comments abridged
+(it also writes `project.blsp`, `tests/main_test.blsp`, a `CLAUDE.md` and this file):
+
 ```lisp
 ;; src/greeter.blsp  — for a project named `greeter`
-(defmodule greeter "The project's library module — main uses it and calls greeting.")
+(defmodule greeter
+  "The greeter project's library module — `main` does `(:use greeter)` to call
+`greeting`.")
 
-(defn greeting () "hello greeter")
+(defn greeting ()
+  "Return the project's greeting string."
+  "hello greeter")
 ```
 
 ```lisp
 ;; src/main.blsp
 ;; `(:use greeter)` brings `greeter`'s public names (here `greeting`) into scope
 ;; bare; without it you'd call `(greeter/greeting)` (a qualified reference that
-;; auto-loads the module — there is no `require` form).
-(defmodule main "The project's entry-point module (nest run -> main/main)."
-  (:use greeter))
+;; auto-loads the module — there is no `require` form). `log` is the async logger;
+;; `error` is excluded so the prelude's raising `error` stays bare.
+(defmodule main
+  "The greeter project's entry-point module — the `nest run` entry by default."
+  (:use greeter)
+  (:use log :exclude [error]))
 
 (defn main ()
-  "Entry point: print the project's greeting."
+  "Entry point: start the logger and print the project's greeting."
+  (start-logger)
+  (info "starting greeter")
   (io/puts (greeting)))
 ```
 
@@ -1310,8 +1341,7 @@ apps* above; needs a `--features gui` build).
 (defmodule greeter-test (:use greeter) (:use test))
 
 (describe "greeter"
-  (test "greeting works"   (assert= (greeting) "hello greeter"))
-  (test "greeting is text" (is (string? (greeting)))))
+  (test "greeting" (assert= (greeting) "hello greeter")))
 ```
 
 `describe` groups tests; `test` defines one. `(assert= actual expected)` checks

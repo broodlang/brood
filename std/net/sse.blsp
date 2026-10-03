@@ -6,7 +6,7 @@
 ;;    header and request-head helpers for the handshake) and its own **process**:
 ;;    `connect` spawns a reader that streams `[:tcp …]` chunks and `send`s each parsed
 ;;    event to a subscriber's mailbox — the same deliver-to-a-mailbox shape as `gui/open`
-;;    input (ADR-058) and the observer's remote agent.
+;;    input (ADR-059) and the observer's remote agent.
 ;;  - **Any method, any body, http or https.** A browser `EventSource` is a GET, but the
 ;;    streaming APIs worth talking to (OpenAI-style chat completions with `stream: true`)
 ;;    are a POST with a JSON body and an `Authorization` header, over TLS. `connect` takes

@@ -340,7 +340,7 @@ enum UserEvent {
 
 /// A freshly opened window's wiring, handed back to the Brood side: its id and
 /// the shared cell size the GUI thread keeps current. Input is *not* polled — the
-/// GUI thread delivers it straight to the subscriber's mailbox (ADR-058).
+/// GUI thread delivers it straight to the subscriber's mailbox (ADR-059).
 struct OpenReply {
     id: u64,
     size: Arc<Mutex<(u16, u16)>>,
@@ -350,7 +350,7 @@ struct OpenReply {
 
 /// What the Brood side keeps per open window (keyed by the id `open` returns) —
 /// just the shared cell size for `gui-size`. Input arrives as mailbox messages,
-/// so there is no receiver to keep here (ADR-058).
+/// so there is no receiver to keep here (ADR-059).
 struct WinHandle {
     size: Arc<Mutex<(u16, u16)>>,
     /// The window's inner size in PHYSICAL pixels, republished on every resize, for

@@ -479,10 +479,13 @@ fn intersect_accumulates_three_distinct_arrows() {
 fn overload_renders_each_arm_joined_by_and() {
     let f = arr(vec![Ty::of(Tag::Int)], Ty::of(Tag::Int));
     let g = arr(vec![Ty::of(Tag::Bool)], Ty::of(Tag::Bool));
+    // The arms are a set, kept in canonical (rendering) order — so `f ∩ g` and `g ∩ f`
+    // are one `Ty` and print the same.
     assert_eq!(
-        f.intersect(g).to_string(),
-        "(int) -> int and (bool) -> bool"
+        f.clone().intersect(g.clone()).to_string(),
+        "(bool) -> bool and (int) -> int"
     );
+    assert_eq!(f.clone().intersect(g.clone()), g.intersect(f));
 }
 
 #[test]
@@ -1325,7 +1328,136 @@ fn property_corpus() -> Vec<Ty> {
         Ty::of(Tag::Fn)
             .union(Ty::of(Tag::Native))
             .union(Ty::of(Tag::Keyword)),
+        // ---- the STRUCTURED half (review 2026-10-02): every refinement the flat corpus
+        // above never exercised, each of which hid a lattice defect it would have shown.
+        // lengths and intervals
+        src_ty("(len string 3 3)"),
+        src_ty("(len (vector int) 2 7)"),
+        src_ty("(len (vector int) 2 2)"),
+        src_ty("(int 0 _)"),
+        src_ty("(int 0 10)"),
+        Ty::str_lit("abc"),
+        Ty::str_lit("abc").union(Ty::str_lit("x")),
+        src_ty("(not \"x\")").intersect(src_ty("(not (len string 3 3))")),
+        // list shapes — two positions, and the one-position shape that has no spelling
+        src_ty("(list :ok int)"),
+        Ty::list_shape_of(vec![Ty::of(Tag::Int)]),
+        // a positional shape on a MIXED term
+        src_ty("(or (tuple int) string)"),
+        src_ty("(or (vector string) (len (vector int) 2 2) (len string 7 7))"),
+        // a record shape and a uniform `map<K, V>` on one term
+        src_ty("(and (record &open :a int) (map keyword int))"),
+        rec(&[("a", Ty::of(Tag::Int), true), ("b", Ty::of(Tag::Str), true)]),
+        src_ty("(map string int)"),
+        // arrows with optional and rest parameters
+        src_ty("(int &optional string -> int)"),
+        src_ty("(int & any -> int)"),
+        src_ty("(int string & any -> int)"),
+        src_ty("(& any -> any)"),
+        src_ty("(int -> any)"),
+        src_ty("(any -> int)"),
+        // recursive types — two different μs, and one under a constructor
+        src_ty(JSON_SRC),
+        src_ty(&format!("(vector {JSON_SRC})")),
+        src_ty("(rec X (or nil int (vector X)))"),
     ]
+}
+
+/// A json-like recursive type, the shape `(deftype json …)` produces.
+const JSON_SRC: &str = "(rec X (or nil bool number string (vector X) (map string X)))";
+
+/// A type written the way a `sig` writes it.
+fn src_ty(src: &str) -> Ty {
+    let mut heap = crate::core::heap::Heap::new();
+    let form = crate::syntax::reader::read_one(&mut heap, src)
+        .unwrap_or_else(|e| panic!("`{src}` does not parse: {e:?}"));
+    super::check::annot::parse_type(&heap, form)
+        .unwrap_or_else(|| panic!("`{src}` is not a type expression"))
+}
+
+// ---- the lattice LAWS over the whole corpus (review 2026-10-02) ----
+//
+// The relations are separate code paths that must agree with each other; each law below
+// is one way they can drift, and each was violated by some term the corpus above now
+// carries. Violations are collected rather than failed one at a time, so a regression
+// reads as the whole list of pairs it broke.
+
+/// Every pair `(a, b)` of the corpus, with the operations already applied.
+fn law_violations() -> Vec<String> {
+    let corpus = property_corpus();
+    let mut bad = Vec::new();
+    let mut note = |message: String| {
+        if bad.len() < 60 {
+            bad.push(message);
+        }
+    };
+    for a in &corpus {
+        if !a.is_subtype(a) {
+            note(format!("REFLEXIVE: `{a}` ⊄ itself"));
+        }
+        for depth in 0..3 {
+            let widened = a.widened_below(depth);
+            if !a.is_subtype(&widened) {
+                note(format!(
+                    "WIDEN: `{a}` ⊄ its widening below {depth}, `{widened}`"
+                ));
+            }
+        }
+        for b in &corpus {
+            let (a_in_b, b_in_a) = (a.is_subtype(b), b.is_subtype(a));
+            let union = a.clone().union(b.clone());
+            let inter = a.clone().intersect(b.clone());
+            if !a.is_subtype(&union) || !b.is_subtype(&union) {
+                note(format!(
+                    "UPPER: `{a}` ∪ `{b}` = `{union}` is not an upper bound"
+                ));
+            }
+            if !inter.is_subtype(a) || !inter.is_subtype(b) {
+                note(format!(
+                    "LOWER: `{a}` ∩ `{b}` = `{inter}` is not a lower bound"
+                ));
+            }
+            if union != b.clone().union(a.clone()) {
+                note(format!("COMMUTE∪: `{a}` ∪ `{b}`"));
+            }
+            if inter != b.clone().intersect(a.clone()) {
+                note(format!("COMMUTE∩: `{a}` ∩ `{b}`"));
+            }
+            if a_in_b && b_in_a && a != b {
+                note(format!("CANON: `{a}` and `{b}` are one set, unequal"));
+            }
+            if a_in_b && inter != *a {
+                note(format!(
+                    "ABSORB∩: `{a}` ⊆ `{b}` but `{a}` ∩ `{b}` = `{inter}`"
+                ));
+            }
+            if a_in_b && union != *b {
+                note(format!(
+                    "ABSORB∪: `{a}` ⊆ `{b}` but `{a}` ∪ `{b}` = `{union}`"
+                ));
+            }
+            if inter.is_never() && inter != Ty::NEVER {
+                note(format!("EMPTY: `{a}` ∩ `{b}` is empty but not `never`"));
+            }
+            if a.is_disjoint(b) && !inter.is_never() {
+                note(format!("DISJOINT: `{a}` ⟂ `{b}` but ∩ = `{inter}`"));
+            }
+            if a_in_b {
+                for c in &corpus {
+                    if b.is_subtype(c) && !a.is_subtype(c) {
+                        note(format!("TRANSITIVE: `{a}` ⊆ `{b}` ⊆ `{c}`"));
+                    }
+                }
+            }
+        }
+    }
+    bad
+}
+
+#[test]
+fn the_lattice_laws_hold_over_the_structured_corpus() {
+    let bad = law_violations();
+    assert!(bad.is_empty(), "lattice law violations: {bad:#?}");
 }
 
 #[test]
@@ -2137,11 +2269,13 @@ fn a_fixpoint_ascent_folds_into_a_recursive_type_and_confirms_it() {
 #[test]
 fn set_operations_on_a_recursive_type_go_through_its_unrolling() {
     let t = nested_vectors();
-    // Union with a flat type keeps the binder: the references name the union, a
-    // superset, which is sound and here exact.
+    // Union with a flat type keeps the recursive type as a CLOSED alternative. (It used
+    // to put the binder over the union, whose references then admitted `[1]` — a wider
+    // type, and a different one from `int ∪ t`.)
     let with_int = t.clone().union(Ty::of(Tag::Int));
-    assert!(with_int.is_recursive());
     assert!(t.is_subtype(&with_int) && Ty::of(Tag::Int).is_subtype(&with_int));
+    assert!(!Ty::vector_of(Ty::of(Tag::Int)).is_subtype(&with_int));
+    assert_eq!(with_int, Ty::of(Tag::Int).union(t.clone()));
     // Intersection narrows by the guard: `(vector? x)` on the recursive type is the
     // vector arm, whose elements are the type again.
     let narrowed = t.clone().intersect(Ty::of(Tag::Vector));
@@ -2428,4 +2562,294 @@ fn a_closed_record_knows_its_field_count() {
     // `map` still fits a closed record shape.
     assert_eq!(closed.count_range(), Some(Range::at_least(0)), "{closed}");
     assert!(Ty::of(Tag::Map).is_consistent_subtype(&closed));
+}
+
+// ---- regressions from the lattice review (2026-10-02), one per defect ----
+
+/// The checker's warnings for a whole file, the way `brood --check` reports them.
+fn checker_warnings(src: &str, strict: bool) -> Vec<String> {
+    let interp = crate::Interp::new();
+    let mut heap =
+        crate::core::heap::Heap::with_regions(interp.heap.prelude_arc(), interp.heap.runtime_arc());
+    heap.set_global(crate::core::value::EnvId::GLOBAL);
+    let forms = crate::syntax::reader::read_all(&mut heap, src).expect("parse");
+    super::check::check_file_mode(&mut heap, &forms, &[], strict)
+        .into_iter()
+        .map(|(_, message)| message)
+        .collect()
+}
+
+const JSON_DEFTYPE: &str =
+    "(deftype json (or nil bool number string (vector json) (map string json)))\n";
+
+#[test]
+fn two_recursive_types_meet_without_diverging() {
+    // `μ ∩ μ` re-meets its own pair one level down; it used to recurse until the stack
+    // overflowed (exit 134). The meet must terminate AND be a lower bound of both.
+    // Neither operand inside the other (keywords on one side, strings on the other), so
+    // no inclusion shortcut answers it: the meet itself must tie the knot.
+    let json = src_ty(JSON_SRC);
+    let other = src_ty("(rec X (or nil int keyword (vector X)))");
+    assert!(!json.is_subtype(&other) && !other.is_subtype(&json));
+    let meet = json.clone().intersect(other.clone());
+    // Exact at the top, where the pair has not yet repeated; below the repeat it is an
+    // operand — a SUPERSET of the true meet (the sound direction for an advisory checker,
+    // and the one documented exception to the lower-bound law).
+    assert!(Ty::of(Tag::Int).is_subtype(&meet), "`{meet}` lost `int`");
+    assert!(
+        !Ty::of(Tag::Str).is_subtype(&meet),
+        "`{meet}` kept `string`"
+    );
+    assert!(
+        !Ty::of(Tag::Keyword).is_subtype(&meet),
+        "`{meet}` kept `keyword`"
+    );
+    assert_eq!(meet, other.clone().intersect(json.clone()));
+    assert!(json.clone().intersect(json.clone()) == json);
+    // …and the checker's entry points that reach it: a guard narrowing a `json`
+    // parameter, an `(and json json)` sig, and an overload checked against a callback.
+    for strict in [false, true] {
+        for src in [
+            "(sig json? (any -> (is json)))\n(defn json? (x) true)\n\
+             (sig f (json -> int))\n(defn f (x) (if (json? x) 1 0))",
+            "(sig f ((and json json) -> int))\n(defn f (x) 1)",
+            "(sig pick (and (int -> json) (string -> json)))\n(defn pick (x) nil)\n\
+             (sig take-fn (((or int string) -> json) -> int))\n(defn take-fn (g) 1)\n\
+             (defn use-it () (take-fn pick))",
+        ] {
+            let warnings = checker_warnings(&format!("{JSON_DEFTYPE}{src}"), strict);
+            assert!(
+                warnings.is_empty(),
+                "strict={strict}: {warnings:?} for {src}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_nominal_records_identity_is_not_one_of_its_map_entries() {
+    // `(pt 1 2)`: the hidden `:__id__` is skipped by keys/vals/count/seq and by the
+    // runtime contract, so the record is a `map<keyword, int>` over its fields alone…
+    let identity = Ty::keyword_lit(value::intern("contract-test/c-pt"));
+    let int_map = Ty::map_of(Ty::of(Tag::Keyword), Ty::of(Tag::Int));
+    for point in [
+        rec(&[
+            ("__id__", identity.clone(), true),
+            ("x", Ty::int_lit(1), true),
+            ("y", Ty::int_lit(2), true),
+        ]),
+        rec_open(&[("__id__", identity.clone(), true)]).intersect(int_map.clone()),
+    ] {
+        assert!(point.is_subtype(&int_map), "{point} ⊆ {int_map}");
+    }
+    // …and a closed key set needs only the field names.
+    let xy_map = Ty::map_of(src_ty("(or :x :y)"), Ty::of(Tag::Int));
+    let closed = rec(&[
+        ("__id__", identity.clone(), true),
+        ("x", Ty::of(Tag::Int), true),
+    ]);
+    assert!(closed.is_subtype(&xy_map));
+    // A field outside V still fails it, and an `:__id__` that is not an identity is an entry.
+    let bad = rec(&[
+        ("__id__", identity.clone(), true),
+        ("x", Ty::of(Tag::Str), true),
+    ]);
+    assert!(!bad.is_subtype(&int_map));
+    let plain = rec(&[("__id__", Ty::of(Tag::Str), true)]);
+    assert!(!plain.is_subtype(&int_map));
+    // A nominal record is still NOT inside a structural shape that omits its identity.
+    let structural = rec(&[("x", Ty::of(Tag::Int), true), ("y", Ty::of(Tag::Int), true)]);
+    assert!(!rec(&[
+        ("__id__", identity, true),
+        ("x", Ty::of(Tag::Int), true),
+        ("y", Ty::of(Tag::Int), true)
+    ])
+    .is_subtype(&structural));
+}
+
+#[test]
+fn a_record_is_not_absorbed_by_a_shape_whose_map_values_exclude_it() {
+    let record = rec(&[("a", Ty::of(Tag::Int), true), ("b", Ty::of(Tag::Str), true)]);
+    let candidate = src_ty("(and (record &open :a int) (map keyword int))");
+    let union = record.clone().union(candidate.clone());
+    assert!(record.is_subtype(&union), "`{record}` ⊄ `{union}`");
+    assert_eq!(union, candidate.union(record));
+    let warnings = checker_warnings(
+        "(sig f ((and (record &open :a int) (map keyword int)) bool -> int))\n\
+         (defn f (m c) (let (x (if c {:a 1 :b \"s\"} m)) (string/length (get x :b))))",
+        false,
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn a_projection_takes_its_own_members_length() {
+    // The term-wide length is the HULL over every countable member; on the vector member
+    // of `(tuple int int) | "abcdefg"` it read `vector[2..7]`, outside `(len (vector int)
+    // 2 2)` though the only vector in the term is a 2-tuple.
+    let mixed =
+        Ty::tuple_of(vec![Ty::of(Tag::Int), Ty::of(Tag::Int)]).union(Ty::str_lit("abcdefg"));
+    for term in mixed.terms_vec() {
+        if term.tags & VECTOR_BIT != 0 {
+            let vector = term.project_tag(VECTOR_BIT);
+            assert!(
+                vector.is_subtype(&src_ty("(len (vector int) 2 2)")),
+                "`{vector}` from `{mixed}`"
+            );
+            assert_eq!(vector.len_eff(), Range::point(2), "`{vector}`");
+        }
+    }
+    let warnings = checker_warnings(
+        "(sig g ((or (vector string) (len (vector int) 2 2) (len string 7 7)) -> int))\n\
+         (defn g (x) 1)\n(defn use-it (c) (g (if c [1 2] \"abcdefg\")))",
+        false,
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn a_variadic_arrow_still_requires_its_fixed_parameters() {
+    let needs_two = src_ty("(int string & any -> int)")
+        .as_arrow()
+        .cloned()
+        .unwrap();
+    for narrower in ["(int -> int)", "(-> int)"] {
+        let other = src_ty(narrower).as_arrow().cloned().unwrap();
+        assert!(!needs_two.is_subtype(&other), "{needs_two} <: {narrower}");
+    }
+    let union = src_ty("(int string & any -> int)").union(src_ty("(int -> int)"));
+    assert!(src_ty("(int -> int)").is_subtype(&union), "{union}");
+}
+
+#[test]
+fn a_length_contradicting_a_tuple_arity_empties_the_member() {
+    let meet = src_ty("(or (tuple int) string)").intersect(src_ty("(len (vector int) 2 2)"));
+    assert_eq!(meet, Ty::NEVER, "{meet}");
+}
+
+#[test]
+fn widening_a_subtraction_never_shrinks_the_type() {
+    let t = Ty::vector_of(Ty::of(Tag::Int)).negate();
+    for depth in 0..3 {
+        let widened = t.widened_below(depth);
+        assert!(
+            t.is_subtype(&widened),
+            "`{t}` ⊄ `{widened}` (depth {depth})"
+        );
+    }
+}
+
+#[test]
+fn a_bare_pair_parameter_is_not_a_subtype_of_everything() {
+    assert!(!Ty::of(Tag::Pair).is_consistent_subtype(&Ty::of(Tag::Str)));
+    for strict in [false, true] {
+        let warnings = checker_warnings(
+            "(sig f (pair -> int))\n(defn f (xs) (string/length xs))",
+            strict,
+        );
+        assert_eq!(warnings.len(), 1, "strict={strict}: {warnings:?}");
+    }
+}
+
+#[test]
+fn a_literal_overlap_still_consults_the_subtraction() {
+    let three = src_ty("(len string 3 3)");
+    let a = src_ty("(not \"x\")").intersect(three.clone().negate());
+    assert!(a.is_disjoint(&three), "`{a}` ⟂ `{three}`");
+    assert!(a.is_subtype(&three.clone().negate()));
+}
+
+#[test]
+fn a_rendering_declines_or_shows_what_it_cannot_drop() {
+    // `to_source` never writes a wider type than the one it was given.
+    let both = src_ty("(and (record &open :a int) (map keyword int))");
+    assert_ne!(both.to_source().as_deref(), Some("(map keyword int)"));
+    assert_eq!(Ty::list_shape_of(vec![Ty::of(Tag::Int)]).to_source(), None);
+    let minus = src_ty("(not \"x\")").intersect(src_ty("(not (len string 3 3))"));
+    let source = minus.to_source().unwrap_or_default();
+    assert!(source.is_empty() || source.contains("\"x\""), "{source}");
+    // `Display` keeps the shape and never prints nothing.
+    let mixed = src_ty("(or (tuple int) string)");
+    assert!(mixed.to_string().contains("(tuple int)"), "{mixed}");
+    let empty = Ty {
+        tuple: Some(Arc::new(vec![Ty::of(Tag::Int)])),
+        ..Ty::NEVER
+    };
+    assert_eq!(empty.to_string(), "never");
+    assert!(minus.to_string().contains("\"x\""), "{minus}");
+}
+
+#[test]
+fn one_set_has_one_representation() {
+    let (int, string, boolean, float) = (
+        Ty::of(Tag::Int),
+        Ty::of(Tag::Str),
+        Ty::of(Tag::Bool),
+        Ty::of(Tag::Float),
+    );
+    let tuples = [
+        Ty::tuple_of(vec![int.clone(), string.clone()]),
+        Ty::tuple_of(vec![int.clone(), boolean.clone()]),
+        Ty::tuple_of(vec![float.clone(), string.clone()]),
+    ];
+    // DOCUMENTED EXCEPTION: a union of products has no cheap normal form. `A×B ∪ A×C`
+    // merges exactly to `A×(B∪C)`, and which pair merges first depends on the order, so
+    // `(int,string) ∪ (int,bool) ∪ (float,string)` is `(int, string|bool) | (float,
+    // string)` one way and `(int|float, string) | (int, bool)` the other — one set, two
+    // representations. Only mutual inclusion is asserted here; a disjoint normal form
+    // (splitting every product until positions are pairwise disjoint) would fix it at a
+    // cost in terms the cap does not allow.
+    let forward = tuples[0]
+        .clone()
+        .union(tuples[1].clone())
+        .union(tuples[2].clone());
+    let backward = tuples[2]
+        .clone()
+        .union(tuples[1].clone())
+        .union(tuples[0].clone());
+    assert!(forward.is_subtype(&backward) && backward.is_subtype(&forward));
+    assert_eq!(
+        Ty::list_of(int.clone()).intersect(Ty::list_of(string.clone())),
+        Ty::NEVER
+    );
+    assert_eq!(Ty::tuple_of(vec![Ty::NEVER]), Ty::NEVER);
+    assert_eq!(rec(&[("a", Ty::NEVER, true)]), Ty::NEVER);
+    let abc = Ty::str_lit("abc");
+    assert_eq!(
+        abc.clone()
+            .intersect(Ty::tuple_of(vec![int.clone()]).negate()),
+        abc
+    );
+    // A shape and an element type stating the same elements merge to that element type —
+    // not to a bare `list` (the widening a `path/join` accumulator fell into).
+    let shaped = Ty::list_shape_of(vec![string.clone()]);
+    let uniform = Ty::of(Tag::Nil).union(Ty::list_of(string.clone()));
+    assert_eq!(shaped.clone().union_term(uniform.clone()), uniform);
+    assert_eq!(uniform.clone().union_term(shaped), uniform);
+    let narrow = arr(vec![int.clone()], int.clone());
+    let wide = arr(vec![int.clone()], Ty::ANY);
+    assert_eq!(narrow.clone().intersect(wide.clone()), narrow);
+    assert_eq!(wide.clone().intersect(narrow.clone()), narrow);
+}
+
+#[test]
+fn two_uniform_maps_meet_exactly() {
+    let meet = src_ty("(map (or keyword string) (or int string))")
+        .intersect(src_ty("(map keyword (or int bool))"));
+    assert_eq!(meet, src_ty("(map keyword int)"), "{meet}");
+}
+
+#[test]
+fn a_deep_alias_chain_does_not_overflow_the_checker() {
+    let mut src = String::new();
+    for link in 1..20_000 {
+        src.push_str(&format!("(deftype p{link} p{})\n", link + 1));
+    }
+    src.push_str("(deftype p20000 int)\n(sig deep (p1 -> int))\n(defn deep (x) x)\n");
+    // Reaching the end at all is the assertion: this aborted the process (SIGABRT).
+    let warnings = checker_warnings(&src, false);
+    assert!(
+        warnings.iter().all(|w| !w.contains("overflow")),
+        "{warnings:?}"
+    );
 }

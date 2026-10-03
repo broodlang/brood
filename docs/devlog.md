@@ -16360,3 +16360,86 @@ and each entry records its sabotage red. KI-194 re-verified today: red with the 
 opened unconditionally, green restored. The demonitor guard (KI-213) was the exception
 because its only reproduction was load-shaped; it lives in a root-process integration
 test now.
+
+## 2026-10-02 — a type-system, contracts and AI-docs review: every finding reproduced, then fixed
+
+A review of the lattice, the checker, runtime contracts and the assistant-facing docs, with
+every finding reproduced before it was filed (`docs/review-2026-10-02.md`), then fixed in
+five parallel workstreams split by file ownership. Each fix has a regression test at the
+entry point a caller reaches, sabotage-verified red.
+
+**Crashes.** `Ty::intersect` on two recursive types recursed without bound (a `deftype json`
+checked against itself overflowed the stack): a meet pair that repeats now returns a sound
+operand, and `json ∩ json` is answered exactly by an inclusion shortcut. A 20 000-link
+`deftype` alias chain aborted the checker; past 256 links it reads as `any`.
+
+**The lattice.** Union is an upper bound again (a record is not absorbed by a map shape whose
+values exclude it). A projection takes its member's own length, a variadic arrow still
+requires its fixed parameters, a length contradicting a tuple arity empties the member,
+widening never narrows a subtraction or an arrow's domain, a bare `pair` parameter is no
+longer consistent with everything, `map ∩ map` is exact, and `to_source` declines where it
+cannot be faithful. Types are canonical across a new law corpus (`types/tests.rs` checks
+reflexivity, transitivity, bounds, commutativity, absorption and `mutual ⊆ ⇒ ==` over lengths,
+intervals, literals, list shapes, records with `map_kv`, optional/rest arrows and μ types).
+A record instance is ⊆ `map<K,V>` over its declared fields, its hidden `:__id__` excepted —
+as `keys`, `count`, `seq` and now the runtime contract all read it.
+
+**Inference.** Loaded recursive closures get a widened self-ascent instead of a ⊥ self-call;
+`merge` with an open later argument, `cons` onto a vector, `seq` (kind by kind over a union),
+`range` with a step, record `count`/`keys`/`vals` and `nth` with a default match the runtime.
+A guard alias dies with its target's rebinding; int-closed arithmetic is precise only over
+precise operands; field truthiness and `contains?` select among closed-record alternatives;
+`&optional` parameters get domains; keyword callbacks are checked; a lambda passed to an
+arrow parameter is typed under that arrow (no strict false positive on `(fn (x) (+ x 1))`
+against `(int -> int)`), and an immediately-applied lambda checks its arguments and arity.
+Stale rule keys (`distinct`, `sin`/`cos`/`tan`, bare `quot`/`rem`/`mod`, `vector-length`,
+`print`/`println`/`format`) are renamed, and `rule_heads_are_bound` fails if one goes stale
+again. A same-file `number` function is re-typed under int arguments and `%add`/`%sub`/`%mul`
+close like `+`/`-`/`*`, which removed the prelude's own `(inc slash)` false positive. The
+soundness oracle now checks intervals, lengths, set elements and μ types.
+
+**Lints.** `try` bodies are checked; only `error-of`/`assert-error` keep the KI-67
+suppression, recognised by their expansion's shape. It found real defects in six std modules
+(`dns` short reads, `serve`'s attach with no session, `codemod`'s nil root, and three smaller).
+A dead clause is reported once, under `:unreachable-clause`; non-exhaustive literal matches,
+no-method calls and arity errors gained `:type-mismatch` as their opt-out (they had none).
+The `nest check` cache fingerprints the dispatch registries' content, so an impl added in
+another file re-checks the file that declares the ability; the ability registry is filtered
+to the file's own world, so a multi-file verdict no longer depends on order. Sealed-match
+exhaustiveness forgets rebound names; `impl` ops read list parameter forms; variadic
+behaviour ops accept any provider arity; the recursion and guard-effect lints respect
+scope. `brood --check --strict` exists.
+
+**Contracts.** Contracted non-tail recursion died near 4k levels armed against 200k unarmed:
+the JIT's stack margin equalled `vm_apply`'s native reserve, so once the JIT declined a level
+the VM refused it too. The JIT margin is 1 MiB, asserted at compile time to stay at least
+twice the VM's. A shim declared `-> any` tail-calls the original; a return-checked shim
+cannot, which is KI-216 (deferred — it needs a collapsing pending-check frame). `type-matches?`
+reads a record name and a sealed ability nominally, as the checker does. Contract frames are
+machinery in traces and positions. A thrown `{:kind <k> :message …}` map of a non-built-in
+kind renders as `error: <k>: <message>` instead of the whole map. `seq/zip-with` is
+data-first: `(zip-with a b f)`.
+
+**Docs.** The writing-brood and brood-debug skills, `brood-for-claude.md`, `language.md` and
+`error-codes.md` were re-verified against the binary and corrected (`spawn` of a `fn` does
+run; `spawn-monitor` instead of the spawn-then-monitor race; `(doc inc)`; `:requires [A]`;
+`lambda` is retired; eight special forms; deep recursion is a catchable E0044). Thirteen
+citations of ADR-058 (GC) for mailbox-delivered window input now cite ADR-059.
+
+**HEAD's CI was red, and is fixed here.** The v0.35.0 run failed two jobs. *Clippy (all
+features)*: rustc 1.98's `clone_on_copy` and `extend_with_drain` in `process/message.rs`, and
+an E0509 in `gui/backend/input.rs`'s test (moving a vector out of `Message`, which became
+`Drop` for the iterative free) — taken with `mem::take`. *Tree-walker differential*:
+`robustness_limits_test` "match, fn, let and receive all refuse it up front" — `receive`'s
+pin and tag scans walked a 100 000-level pattern without a bound BEFORE the lowering cap
+refused it, which exhausts the tree-walker's stack budget while the VM's heap frames
+survived to the refusal; `receive` now calls the shared `%match-refuse-too-deep` before any
+scan. And `sse_test` "a refused connection…" picked a port, released it and connected,
+racing any parallel test's server for it — it connects to port 1 now, which no test process
+can bind.
+
+**Not done here:** KI-216; a caught contract error still carries no `:file`/`:line`/`:trace`
+(adding them would break "what you throw is what you catch" for one kind — a design call);
+`(map xs :kw)`, `comp` and `apply` callbacks are unchecked; a destructured `[tag v]` does not
+narrow a record union. `exec_chunk.rs` and `jit_runtime/support.rs` changed near the call
+path, so `make ab` and `make ab-vm` are owed on a quiet machine.

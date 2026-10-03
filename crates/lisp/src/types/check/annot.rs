@@ -96,6 +96,14 @@ thread_local! {
 /// `k` self-references costs `k` copies, not `k^n`.
 const RECURSIVE_UNROLL: usize = 1;
 
+/// How deep a chain of DISTINCT aliases (`(deftype p1 p2)`, `(deftype p2 p3)`, …) may expand
+/// before the rest of it reads as `any` — sound, since `any` is a superset of whatever the
+/// tail denotes. Each link is a Rust frame pair ([`alias_ty`] → [`parse_type`]), and a
+/// 20 000-link chain used to overflow the stack and abort the checker (SIGABRT, outside any
+/// `catch_unwind`). No written type nests this deep; the recursion also grows its stack
+/// on the heap past a red zone, so a chain under the bound is never the overflow either.
+const MAX_ALIAS_CHAIN: usize = 256;
+
 /// How to SHOW a type in a diagnostic: the alias it was declared through, when one in
 /// scope expands to exactly this shape (the `model` a `sig` named, not its record), else
 /// the type's own rendering. Only a shape an alias produced during THIS check is known —
@@ -235,6 +243,9 @@ fn alias_ty(heap: &Heap, name: &str) -> Option<Ty> {
     if depth > RECURSIVE_UNROLL {
         return Some(Ty::ANY);
     }
+    if ALIASES_EXPANDING.with(|v| v.borrow().len()) >= MAX_ALIAS_CHAIN {
+        return Some(Ty::ANY);
+    }
     // A SELF-REFERENTIAL alias becomes a real μ type (C14): bind its own name the way
     // `(rec X …)` binds `X`, so the self-reference inside the body parses as the recursive
     // reference and the whole is `Ty::mu` of it. Without this the alias merely UNROLLED
@@ -266,7 +277,7 @@ fn alias_ty(heap: &Heap, name: &str) -> Option<Ty> {
     };
     REC_BOUND.with(|b| b.borrow_mut().extend(bound.iter().copied()));
     ALIASES_EXPANDING.with(|v| v.borrow_mut().push(qualified));
-    let ty = parse_type(heap, form);
+    let ty = stacker::maybe_grow(64 * 1024, 1024 * 1024, || parse_type(heap, form));
     ALIASES_EXPANDING.with(|v| {
         v.borrow_mut().pop();
     });

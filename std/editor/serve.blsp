@@ -236,7 +236,7 @@ always restored on exit."
 ;; The terminal client (above) reads input from the TTY (`term/poll`) and frames from
 ;; its mailbox — two separate streams, so it drains frames then polls the terminal. A
 ;; GUI frontend is different: `gui/open` delivers window input to the *same mailbox* the
-;; daemon pushes frames to (ADR-058), so both arrive interleaved. Hence a single unified
+;; daemon pushes frames to (ADR-059), so both arrive interleaved. Hence a single unified
 ;; `receive` loop here, rather than the drain-then-poll split — and the client uses the
 ;; display's `:draw`/`:size`/`:enter`/`:leave`, but NOT its `:poll` (input is read off the
 ;; mailbox directly). This makes the thin client frontend-agnostic, the same way `ui-run`
@@ -311,10 +311,15 @@ on exit."
   (do
     ((get display :enter))
     (try
-      (let ([cols rows] ((get display :size)))
-        (if (and (map? opts) (not (empty? opts)))
-          (send (proc/whereis serve-name) [:attach (self) cols rows opts])
-          (send (proc/whereis serve-name) [:attach (self) cols rows]))
+      (let ([cols rows] ((get display :size))
+            manager (proc/whereis serve-name))
+        ;; The documented precondition, said out loud: without it the send below had no
+        ;; addressee, and the failure read as a type error in `send`.
+        (if (nil? manager)
+          (error "attach-display-local: no serve session in this runtime — run `(serve …)` first")
+          (if (and (map? opts) (not (empty? opts)))
+            (send manager [:attach (self) cols rows opts])
+            (send manager [:attach (self) cols rows])))
         (let (session (receive
                         ([:attached s] s)
                         (after 5000

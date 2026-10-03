@@ -69,6 +69,12 @@ struct Cli {
     #[arg(long)]
     check: bool,
 
+    /// With `--check`: strict mode — a dynamic value flowing into a precisely typed
+    /// position is reported too. The flag spelling of `BROOD_CHECK_STRICT=1`, matching
+    /// `nest check --strict`.
+    #[arg(long, requires = "check")]
+    strict: bool,
+
     /// List the `BROOD_*` diagnostic environment flags used for performance
     /// triage and A/B, grouped, with one line each. The runtime has ~75 of them
     /// and knowing which to reach for was only documented outside the binary.
@@ -177,6 +183,9 @@ fn run(cli: Cli) {
     let mut interp = Interp::new();
 
     if cli.check {
+        if cli.strict {
+            brood::types::set_strict_checking(true);
+        }
         run_check_files(&mut interp, &cli.files);
         return;
     }

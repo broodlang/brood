@@ -12,6 +12,34 @@ sysctl that moves under you — that file's last section has the one-line check)
 questions are answerable here; check that file's "what this box CAN answer" before deferring
 anything.
 
+## 2026-10-02 — the type-system / contracts / AI-docs review is fixed, UNCOMMITTED
+
+**State:** every finding of `docs/review-2026-10-02.md` is fixed in the working tree, with a
+sabotage-verified guard each; nothing is committed. The devlog's 2026-10-02 entry is the
+record. HEAD's own CI red (v0.35.0: clippy under rustc 1.98, and two tree-walker suite
+failures) is fixed in the same tree.
+
+**Gates run on the final tree** (targeted, capped, `-j1` — never the full suite here):
+`nest check` and `nest check --strict` over std/tests/examples exit 0; `types::` 682/682;
+the cli + nest integration tests that touch checking, contracts, scaffolding and caching
+78/78; ~30 affected `.blsp` test files green under the VM, and the receive/pattern/try/
+robustness/sse files under the tree-walker too; `contract_test` at tiers 0/1/2 and armed;
+clippy `--all-targets --all-features -D warnings`, rustfmt, `nest format --check` clean.
+
+**Before committing:** the full suite is CI's job — push and read `make green`. `exec_chunk.rs`
+and `jit_runtime/support.rs` (the JIT stack margin) changed near the call path: `make ab` and
+`make ab-vm` on a quiet machine. `.claude/skills/{brood-testing,claudemd-drift}` were edited
+but `.claude/` is globally git-ignored, so those edits live on this machine only.
+
+**Open, in value order:**
+1. **KI-216** — a return-checked contracted tail call keeps a frame per call; needs an ADR
+   (a collapsing pending-check VM frame).
+2. **A design call:** a *caught* contract error has no `:file`/`:line`/`:trace`. Adding them
+   at the three catch sites breaks "what you throw is what you catch" for that one kind.
+3. **Checker residue:** `(map xs :kw)`, `comp` and `apply` callbacks are unchecked; a
+   destructured `[tag v]` does not narrow a closed-record union; a union of tuples is
+   canonical only up to mutual inclusion (documented in `types/tests.rs`).
+
 ## 2026-09-25 — the stability/perf queue: KI-195, four measured wins, what is left
 
 **State:** no open bug. KI-193 stays a WATCH (four full suite runs with `BROOD_FEATURES_AUDIT=1`

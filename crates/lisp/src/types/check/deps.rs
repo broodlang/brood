@@ -90,6 +90,17 @@ pub(super) fn obs_known_ns(heap: &Heap, prefix: &str) {
     heap.rec_check_dep_ns(prefix);
 }
 
+/// Record + read one of the dispatch registries the protocol passes consult (`*impls*`,
+/// `*abilities*`, `*sealed*`, `*methods*`, …). Recorded as a dependency on the registry's
+/// global, whose fact (see [`registry_fact`]) is the registry's PROJECT content: an
+/// `impl` added in another file changes the verdict of a file that never mentions it,
+/// and no def site or mtime of the checked file can see that.
+pub(super) fn obs_registry(heap: &Heap, name: &str) -> Option<Value> {
+    let sym = value::intern(name);
+    heap.rec_check_dep_sym(sym);
+    heap.env_get(heap.global(), sym)
+}
+
 /// Record that the `*protocols*` table was consulted.
 pub(super) fn obs_protocols(heap: &Heap) {
     heap.rec_check_dep_protocols();
@@ -188,6 +199,10 @@ fn fact_of_sym(heap: &Heap, sym: Symbol) -> String {
             None => "U".to_string(),
         },
     };
+    let base = match registry_fact(heap, sym) {
+        Some(fact) => format!("{base}|R{:016x}", fnv1a(&fact)),
+        None => base,
+    };
     // The sig's PRINTED form, not `hash_value`: that hashes symbols by interned id, which
     // depends on interning order and so differs from process to process — `nest check`
     // and `nest run` could never agree on a declared function's fact, and each rewrote
@@ -274,4 +289,203 @@ fn fnv1a(s: &str) -> u64 {
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
     h
+}
+
+/// The registries whose content is a checker input ([`obs_registry`]).
+const OBSERVED_REGISTRIES: &[&str] = &[
+    reg::IMPLS,
+    reg::OP_ABILITY,
+    reg::ABILITIES,
+    reg::SEALED,
+    reg::ABILITY_REQUIRES,
+    reg::METHODS,
+    reg::METHOD_FROM,
+    reg::MULTI_ALGEBRA,
+    reg::MULTI_RET,
+    reg::RECORD_IDS,
+    "*ability-owner*",
+];
+
+/// The fact of a dispatch registry: a canonical rendering of its entries, minus those a
+/// STANDARD-LIBRARY module registered. `None` for any other global.
+///
+/// Why std entries are left out: the reuse test runs once the project's sources are
+/// loaded, while the entry was stamped after the re-check — which materialises every module
+/// a loaded body names (`project-preload!`). A std module registers the same entries on
+/// every run of one build (and the cache is stamped with the build id), so its entries say
+/// nothing about the project; counted, they made a file whose check loaded `datetime` miss
+/// the cache on every run. A root-namespace entry (the prelude's, a module-less file's) is
+/// kept: the prelude is always loaded, so it is stable, and the file's is the project's.
+///
+/// Canonical: map entries sorted by their printed form, a function printed as `fn` — a
+/// CHAMP map iterates in hash order and a symbol hashes by its interned id, which differs
+/// from process to process, and a fingerprint written by one `nest check` is compared by
+/// the next.
+fn registry_fact(heap: &Heap, sym: Symbol) -> Option<String> {
+    let name = value::symbol_name(sym);
+    if !OBSERVED_REGISTRIES.contains(&name.as_str()) {
+        return None;
+    }
+    let Some(Value::Map(registry)) = heap.env_get(heap.global(), sym) else {
+        return Some("none".to_string());
+    };
+    let provenance =
+        |registry_name: &str| match heap.env_get(heap.global(), value::intern(registry_name)) {
+            Some(Value::Map(id)) => Some(id),
+            _ => None,
+        };
+    let owners = provenance("*ability-owner*");
+    let impl_from = provenance("*impl-from*");
+    let method_from = provenance("*method-from*");
+    let owner_of = |ability: Value| -> Option<String> {
+        owners
+            .and_then(|id| heap.map_get(id, ability))
+            .and_then(namespace_name)
+    };
+    let mut entries: Vec<String> = Vec::new();
+    let mut provenance_index: Option<std::collections::HashMap<String, Option<String>>> = None;
+    for (key, entry) in heap.map_entries(registry) {
+        match name.as_str() {
+            // `[ability op] → {id → fn}`: each id's impl carries its own provenance.
+            n if n == reg::IMPLS || n == reg::METHODS => {
+                let Value::Map(inner) = entry else { continue };
+                let from = if n == reg::IMPLS {
+                    impl_from
+                } else {
+                    method_from
+                };
+                let index = provenance_index.get_or_insert_with(|| {
+                    from.map(|from| {
+                        heap.map_entries(from)
+                            .into_iter()
+                            .map(|(provenance, namespace)| {
+                                (canonical(heap, provenance), namespace_name(namespace))
+                            })
+                            .collect::<std::collections::HashMap<_, _>>()
+                    })
+                    .unwrap_or_default()
+                });
+                for (inner_key, _) in heap.map_entries(inner) {
+                    // `*impl-from*` keys `[ability op id]`, `*method-from*` `[mname key]`.
+                    let wanted = match key {
+                        Value::Vector(outer_id) if n == reg::IMPLS => {
+                            let mut parts: Vec<String> = heap
+                                .vector(outer_id)
+                                .iter()
+                                .map(|&part| canonical(heap, part))
+                                .collect();
+                            parts.push(canonical(heap, inner_key));
+                            format!("[{}]", parts.join(" "))
+                        }
+                        _ => format!("[{} {}]", canonical(heap, key), canonical(heap, inner_key)),
+                    };
+                    let namespace = index
+                        .get(&wanted)
+                        .cloned()
+                        .flatten()
+                        .or_else(|| qualifier_of(heap, key));
+                    if !is_std_namespace(namespace.as_deref()) {
+                        entries.push(format!(
+                            "{}/{}",
+                            canonical(heap, key),
+                            canonical(heap, inner_key)
+                        ));
+                    }
+                }
+            }
+            n if n == reg::OP_ABILITY => {
+                if !is_std_namespace(owner_of(entry).as_deref()) {
+                    entries.push(format!(
+                        "{}={}",
+                        canonical(heap, key),
+                        canonical(heap, entry)
+                    ));
+                }
+            }
+            n if n == reg::ABILITIES
+                || n == reg::SEALED
+                || n == reg::ABILITY_REQUIRES
+                || n == "*ability-owner*" =>
+            {
+                if !is_std_namespace(owner_of(key).as_deref()) {
+                    entries.push(format!(
+                        "{}={}",
+                        canonical(heap, key),
+                        canonical(heap, entry)
+                    ));
+                }
+            }
+            // `*method-from*`, `*multi-algebra*`, `*multi-ret*`, `*record-ids*`: keyed by a
+            // qualified name (or a `[name key]` whose name is), so the key says whose it is.
+            _ => {
+                let namespace = match name.as_str() {
+                    n if n == reg::METHOD_FROM => namespace_name(entry),
+                    _ => qualifier_of(heap, key),
+                };
+                if !is_std_namespace(namespace.as_deref()) {
+                    entries.push(format!(
+                        "{}={}",
+                        canonical(heap, key),
+                        canonical(heap, entry)
+                    ));
+                }
+            }
+        }
+    }
+    entries.sort_unstable();
+    Some(entries.join(";"))
+}
+
+/// The namespace a provenance value names (a symbol, keyword or string), `None` for nil —
+/// a registration made at the root.
+fn namespace_name(value: Value) -> Option<String> {
+    match value {
+        Value::Sym(s) | Value::Keyword(s) => Some(value::symbol_name(s)),
+        _ => None,
+    }
+}
+
+/// The namespace qualifier of a registry key: `ns` of a qualified `ns/name` symbol or
+/// keyword, or of the first element of a vector key. `None` for a bare (root) name.
+fn qualifier_of(heap: &Heap, key: Value) -> Option<String> {
+    let name = match key {
+        Value::Sym(s) | Value::Keyword(s) => value::symbol_name(s),
+        Value::Vector(id) => return heap.vector(id).first().and_then(|&k| qualifier_of(heap, k)),
+        _ => return None,
+    };
+    name.rfind('/').map(|slash| name[..slash].to_string())
+}
+
+/// Is `namespace` a baked-in standard-library module? The root (`None`) is not.
+fn is_std_namespace(namespace: Option<&str>) -> bool {
+    namespace.is_some_and(|namespace| {
+        crate::builtins::modules::embedded_module_source(namespace).is_some()
+    })
+}
+
+/// A process-independent rendering of a registry value: maps sorted by printed entry,
+/// functions reduced to `fn` (their identity is the defining file's business, and a
+/// printed closure is not stable).
+fn canonical(heap: &Heap, v: Value) -> String {
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || match v {
+        Value::Map(id) => {
+            let mut entries: Vec<String> = heap
+                .map_entries(id)
+                .into_iter()
+                .map(|(key, entry)| format!("{} {}", canonical(heap, key), canonical(heap, entry)))
+                .collect();
+            entries.sort_unstable();
+            format!("{{{}}}", entries.join(", "))
+        }
+        Value::Vector(id) => {
+            let items: Vec<String> = heap
+                .vector(id)
+                .iter()
+                .map(|&e| canonical(heap, e))
+                .collect();
+            format!("[{}]", items.join(" "))
+        }
+        Value::Fn(_) | Value::Native(_) => "fn".to_string(),
+        _ => crate::syntax::printer::print(heap, v),
+    })
 }
