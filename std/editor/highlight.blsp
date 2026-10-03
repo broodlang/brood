@@ -571,7 +571,7 @@ cursor sits deep in a large file."
                         in-datum (and (> pos 0) (not (hl-delim? (string/char-at full (dec pos)))))
                         argi (if in-datum (math/max 0 (dec afterc)) afterc))
                     [callee argi]))))))))))
-(sig enclosing-call (string int -> (or nil (vector (or map number string)))))
+(sig enclosing-call (string int -> (or nil (tuple string int))))
 
 ;; ---- completion helpers (pure; candidates supplied by the caller) -----------
 
