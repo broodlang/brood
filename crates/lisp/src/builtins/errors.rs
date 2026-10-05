@@ -216,10 +216,7 @@ pub(super) fn try_catch(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResu
             //     parsing strings (`docs/llm-native.md` §4). Shape on
             //     `LispError::to_value_map`: `{:kind :message [:code] [:file
             //     :line :col] [:hint]}`.
-            let caught = match e.payload {
-                Some(v) => v,
-                None => e.to_value_map(heap),
-            };
+            let caught = e.caught_value(heap);
             apply_engine(heap, handler, &[caught], env)
         }
     }

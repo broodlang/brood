@@ -22,14 +22,18 @@
 ;; reference into a module that is not loaded yet).
 (defmodule contract)
 
+;; Raised through `%contract-raise`, not `throw`: the kernel then gives the caught map the
+;; `:code` (E0080), position and `:trace` every built-in error carries, which a plain throw
+;; does not (a caught contract error had no `:line` at all) — while a map a program throws
+;; itself still comes back exactly as thrown.
 (defn- %contract-error (name blame message argument expected got)
-  (throw {:kind :contract
-          :message message
-          :blame blame
-          :function name
-          :argument argument
-          :expected expected
-          :got got}))
+  (%contract-raise {:kind :contract
+                    :message message
+                    :blame blame
+                    :function name
+                    :argument argument
+                    :expected expected
+                    :got got}))
 
 (defn- %contract-check-args (name ptypes args i)
   "Throw a `:blame :caller` contract error if any argument fails its declared type.

@@ -763,3 +763,20 @@
       (assert= (get plain :file) (get shimmed :file))
       (assert= (get plain :line) (get shimmed :line))
       (assert= (get plain :col) (get shimmed :col)))))
+
+(describe "a caught contract error carries its position (E0080)"
+  (test "the policy's map comes back with :code, :file and :line beside its own fields"
+    ;; A contract error used to be an ordinary `throw` of the policy's map, so a CAUGHT one
+    ;; had no position at all, where every built-in error has one. It is raised through
+    ;; `%contract-raise` now, and the kernel adds what it adds to a built-in error.
+    (let (e (c-error-of c-add "1" 2))
+      (assert= :contract (get e :kind))
+      (assert= :caller (get e :blame))
+      (assert= "E0080" (get e :code))
+      (is (string? (get e :file)))
+      (is (int? (get e :line)))))
+  (test "a map a program throws itself still comes back exactly as thrown"
+    ;; What the code tells apart: a user `throw` never carries one, so even a map of kind
+    ;; `:contract` keeps the throw-shape == catch-shape contract.
+    (let (thrown {:kind :contract :message "mine" :blame :caller})
+      (assert= thrown (try (throw thrown) (catch e e))))))

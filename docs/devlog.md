@@ -16512,5 +16512,22 @@ field list but `:derives [...]` — `(defrecord pt (x int) (y int))` defined fie
 
 Verified: `nest check` and `--strict` exit 0 over std/tests/examples and over bedit;
 `types::` 692/692 with the new `check/tests/callback_shapes.rs`; the checker-facing `.blsp`
-files green. The sabotage pass over `callback_shapes` was stopped by the owner before it
-ran and is owed (handoff).
+files green.
+
+**Later the same day — the sabotage pass, and positioned contract errors.** All eight
+`callback_shapes` guards were broken in three batches (keyword arm, `apply`, `comp` stage,
+de-duplication and the `Seqable` guard; then the named-callback seed, the return check's
+path alias and the sibling re-narrowing; then the alias-chain narrowing alone): each batch
+reddened exactly the tests it targets and no other.
+
+A caught contract error now carries a position. It was an ordinary `throw` of the policy's
+map, so a `catch` saw no `:file`/`:line` where every built-in error has them; adding them at
+the catch sites by `:kind` would have changed what a program's OWN `:contract`-kind throw
+comes back as. Instead the policy raises through `%contract-raise`, which codes the error
+`E0080`; a user `throw` never carries a code, so `LispError::caught_value` — now the one rule
+the three catch sites share — enriches exactly those. Both halves of that are tested in
+`contract_test` and both sabotage-verified (skip the enrichment: the position test reds;
+enrich every map: the user-throw test reds). Under the tree-walker the position is the raise
+inside `std/contract.blsp` rather than the user's call — only the VM filters contract
+machinery out of positions (`is_contract_arm`); the caught map had no position at all
+before, on either engine.

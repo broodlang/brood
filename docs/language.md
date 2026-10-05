@@ -1968,6 +1968,8 @@ and a mismatch throws a **blamed** contract error (an opt-in "strong arrow"). Th
 is a map — `{:kind :contract :blame :caller :function 'area :argument 1 :expected number
 :got "circle" :message …}` for an argument (the caller's fault), `:blame :callee` for a
 result (the callee's) — so `(get e :blame)` names the party and `error-message` reads it.
+Caught, it also has `:code "E0080"`, `:file`/`:line`/`:col` and `:trace`, like a built-in
+error.
 
 ```clojure
 (defn area (r) (* 3.14159 r r))

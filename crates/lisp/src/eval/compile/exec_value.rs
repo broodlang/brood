@@ -797,10 +797,7 @@ pub(crate) fn exec_value(
             Ok(v) => Ok(v),
             Err(e) if e.is_control() => Err(e),
             Err(e) => {
-                let caught = match e.payload {
-                    Some(v) => v,
-                    None => e.to_value_map(heap),
-                };
+                let caught = e.caught_value(heap);
                 heap.set_root_at(frame_base + bind_slot, caught);
                 exec_value(heap, handler, frame_base, genv)
             }

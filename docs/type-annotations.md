@@ -326,8 +326,11 @@ parameters (`a b …`).
 (ROADMAP item 10): an argument that fails its type is the CALLER's — `{:kind :contract
 :blame :caller :function 'name :argument 2 :expected int :got "two" :message …}` — and a
 result that fails is the CALLEE's (`:blame :callee`, `:argument nil`). `error-message`
-reads `:message`; `(get e :blame)` reads the verdict. A callback argument is checked for
-callability only, so no blame swaps sides through a higher-order argument.
+reads `:message`; `(get e :blame)` reads the verdict. A caught one also carries what a
+built-in error does — `:code "E0080"`, `:file`/`:line`/`:col` and `:trace` — because the
+kernel raises it (`%contract-raise`); a `:contract`-kind map a program throws itself comes
+back exactly as thrown. A callback argument is checked for callability only, so no blame
+swaps sides through a higher-order argument.
 
 **`&optional` is the one shape that cannot preserve arity.** A wrapper has no way to
 tell "not supplied" from "supplied `nil`", so passing an explicit `nil` through would

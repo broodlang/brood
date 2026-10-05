@@ -1134,10 +1134,7 @@ pub(crate) fn exec_chunk(
                     Ok(v) => heap.push_root(v),
                     Err(e) if e.is_control() => return Err(e),
                     Err(e) => {
-                        let caught = match e.payload {
-                            Some(v) => v,
-                            None => e.to_value_map(heap),
-                        };
+                        let caught = e.caught_value(heap);
                         heap.set_root_at(base + bind_slot, caught);
                         let hv = exec_value(heap, handler_node, base, genv)?;
                         heap.push_root(hv);

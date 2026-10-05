@@ -287,6 +287,11 @@ pub mod error_codes {
     /// `send` saw a message value nested past `MAX_MESSAGE_DEPTH` — the
     /// deep-copy stack would have overflowed.
     pub const MESSAGE_TOO_DEEP: &str = "E0070";
+    /// A runtime contract (a `sig` armed by `BROOD_CONTRACTS`, or a `sig!`) refused an
+    /// argument or a result. Raised by `%contract-raise` with the policy's structured map
+    /// (`:blame :function :argument :expected :got`) as the caught value, plus the
+    /// position and trace a built-in error carries (see [`LispError::caught_value`]).
+    pub const CONTRACT_VIOLATION: &str = "E0080";
     pub const RUNTIME_GENERIC: &str = "E0099";
 }
 
@@ -605,6 +610,40 @@ impl LispError {
             code: None,
             hint: string_of(key("hint")),
         })))
+    }
+
+    /// What a `catch` binds for this error — the one rule all three catch sites (the
+    /// `%try` builtin, the VM's inline `TryCatch`, the node walker's) share:
+    ///
+    /// - a user `(throw v)` → `v` verbatim, the "throw shape == catch shape" contract;
+    /// - a built-in error → [`to_value_map`](Self::to_value_map)'s structured map;
+    /// - a **contract violation** (`E0080`, raised by `%contract-raise`) → the policy's
+    ///   own map, enriched with the `:code`, `:file`/`:line`/`:col` and `:trace` every
+    ///   built-in error carries. A contract map used to be an ordinary `throw`, so a
+    ///   caught one had no position at all. The code is what tells it apart: a user
+    ///   `throw` never carries one, so a map a program throws itself — even one of kind
+    ///   `:contract` — still comes back exactly as thrown.
+    pub fn caught_value(&self, heap: &mut crate::core::heap::Heap) -> Value {
+        use crate::core::value::{intern, Value};
+        match self.payload {
+            Some(Value::Map(map)) if self.code == Some(error_codes::CONTRACT_VIOLATION) => {
+                let mut entries = heap.map_entries(map);
+                if let Value::Map(extra) = self.to_value_map(heap) {
+                    for name in ["code", "file", "line", "col", "trace"] {
+                        let symbol = intern(name);
+                        let key = Value::keyword(symbol);
+                        if let Some(value) = heap.map_get(extra, key) {
+                            entries
+                                .retain(|(k, _)| !matches!(k, Value::Keyword(s) if *s == symbol));
+                            entries.push((key, value));
+                        }
+                    }
+                }
+                heap.map_from_pairs(entries)
+            }
+            Some(value) => value,
+            None => self.to_value_map(heap),
+        }
     }
 
     /// Project the structured fields into a Brood map for `catch` consumption.

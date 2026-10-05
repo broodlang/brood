@@ -12,10 +12,15 @@ sysctl that moves under you — that file's last section has the one-line check)
 questions are answerable here; check that file's "what this box CAN answer" before deferring
 anything.
 
-## 2026-10-05 — checker residue closed (devlog 2026-10-05)
+## 2026-10-05 — v0.36.0: checker residue closed, contract errors positioned (devlog 2026-10-05)
 
-**State:** no open bug. Landed on `main` on top of `f141a2b3`; read `make green` for CI's
-verdict on it.
+**State:** no open bug, nothing owed from the 2026-10-02 review. Released as **v0.36.0**
+(CHANGELOG). CI was green on `c70fcd73` (the checker work); read `make green` for the
+release commit's run.
+
+**Known limit worth a future look:** under the tree-walker a caught contract error's position
+is the raise inside `std/contract.blsp`, not the user's call — only the VM filters contract
+machinery out of positions (`exec_chunk.rs` `is_contract_arm`). Tier 0 is the legacy engine.
 - `(:use m :only [typo])` now warns at the clause (`check.rs` `setup_check_imports`,
   `ImportScope::unknown_only`). Test `modules_and_imports::an_only_import_…` (sabotaged: red).
 - Callback shapes: keyword callbacks type as their accessor (`infer::callback_ret`); named /
@@ -36,13 +41,11 @@ verdict on it.
 **Verified:** `nest check` and `--strict` exit 0 over brood's std/tests/examples and over
 bedit (no cache); `types::` 692/692; the checker-facing `.blsp` files (record, contract,
 introspection, pattern matching, sig adoption, std check, ergonomics, …) green; clippy on
-CI's flags, rustfmt and `nest format --check` clean. **Owed:** a sabotage pass over
-`check/tests/callback_shapes.rs` — the owner stopped it mid-run; only the `:only` test has
-been shown red against its own breakage.
-
-**Open design call (owner):** a caught contract error lacks `:file`/`:line`. Proposed: raise
-it from a kernel native (`%contract-raise`) so it is positioned like `E0030` without changing
-what a user's own `throw` of a `:contract`-kind map returns.
+CI's flags, rustfmt and `nest format --check` clean. Every `callback_shapes` guard
+sabotage-verified (three batches, each reddening exactly its targets).
+- A caught contract error carries `:code "E0080"`, `:file`/`:line`/`:col`, `:trace`: the
+  policy raises through `%contract-raise`, and `LispError::caught_value` (shared by all three
+  catch sites) enriches only coded payloads, so a program's own `:contract` throw is verbatim.
 
 ## 2026-10-03 — bedit's strict ratchet fixed, KI-216 closed; pushed (CI green on `f141a2b3`)
 

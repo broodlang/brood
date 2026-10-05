@@ -104,6 +104,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         contracts_sweep_prim,
     );
     primitives.def(
+        "%contract-raise",
+        Arity::exact(1),
+        Sig::new(vec![map_ty], crate::types::Ty::NEVER),
+        &[],
+        "",
+        contract_raise_prim,
+    );
+    primitives.def(
         "%contract-await",
         Arity::exact(2),
         Sig::new(vec![any, any], any),
@@ -119,6 +127,15 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "",
         contract_tail_p,
     );
+}
+
+/// `(%contract-raise m)` — raise the contract policy's error map `m` as a contract violation
+/// (`E0080`). It renders as a `throw` of `m` does (`error: contract: <message>`), and a
+/// `catch` binds `m` enriched with the position and trace a built-in error carries
+/// (`LispError::caught_value`) — where a plain `throw` of the same map is bound verbatim.
+fn contract_raise_prim(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    Err(crate::error::LispError::thrown(arg(args, 0), heap)
+        .with_code(crate::error::error_codes::CONTRACT_VIOLATION))
 }
 
 /// `(%contract-await ret v)` → `v`. The shim templates wrap the call to their original in

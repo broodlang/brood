@@ -2366,22 +2366,22 @@ run time from a value the checker never read. Returns `value` so it can wrap a b
 error is a `:blame :callee` contract error, like a function's own result mismatch."
   (if (type-matches? ret value)
     value
-    (throw {:kind :contract
-            :message (str aname
-                       "/"
-                       op
-                       ": result expected "
-                       ret
-                       ", got "
-                       (type-of value)
-                       " ("
-                       (pr-str value)
-                       ")")
-            :blame :callee
-            :function (symbol (str aname "/" op))
-            :argument nil
-            :expected ret
-            :got value})))
+    (%contract-raise {:kind :contract
+                      :message (str aname
+                                 "/"
+                                 op
+                                 ": result expected "
+                                 ret
+                                 ", got "
+                                 (type-of value)
+                                 " ("
+                                 (pr-str value)
+                                 ")")
+                      :blame :callee
+                      :function (symbol (str aname "/" op))
+                      :argument nil
+                      :expected ret
+                      :got value})))
 
 (defmacro impl (aname key & methods)
   "Register implementations of ability `aname` for dispatch id `key` — a `type-of`
