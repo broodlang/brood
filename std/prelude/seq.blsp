@@ -403,6 +403,22 @@ import (and so `(:use set)` can't shadow them).
     (empty? opts) nil
     (= (first opts) :derives) (second opts)
     else (%defrecord-derives (rest opts))))
+(defn- %defrecord-check-opts (rec opts)
+  "Refuse anything after a `defrecord`'s field list but `:derives [Ability …]`. It used to
+  be ignored: `(defrecord pt (x int) (y int))` — typed fields written one list each —
+  defined a record with fields `x` and `int` and dropped `(y int)` without a word."
+  (cond
+    (empty? opts) nil
+    (and (= (first opts) :derives) (seq (rest opts))) (%defrecord-check-opts rec (rest (rest opts)))
+    else
+      (error "defrecord "
+        rec
+        ": unexpected "
+        (pr-str (first opts))
+        " after the field list — fields are ONE list, typed ones as `(name type)` pairs: "
+        "(defrecord "
+        rec
+        " ((x int) (y int))); the only option is `:derives [Ability …]`")))
 (defn- %defrecord-qualify (nm)
   "Qualify bare name `nm` (a string) against the current ns → a `:<ns>/nm` keyword; at
 root/REPL (no ns) there is no prefix, so it is a bare `:nm`. Shared by `defrecord` (which
@@ -464,6 +480,7 @@ this clause was an expansion error."
         ;; onto the generated constructor.
         rec-doc (if (and (seq opts) (string? (first opts))) (first opts) nil)
         opts (if rec-doc (rest opts) opts)
+        _ (%defrecord-check-opts rec opts)
         fnames (map fields %defrecord-fname)
         fkws (map fnames (fn (n) (keyword (->string n))))
         ;; the nominal id — a `:module/name` KEYWORD (a keyword literal is what the

@@ -202,3 +202,12 @@
   (test "an ambiguous bare name declines rather than guessing"
     (let (w (rt-warnings "(defmodule a) (defrecord pt (x y)) (defmodule b) (defrecord pt (m n)) (sig amb (pt -> int)) (defn amb (p) 1)"))
       (is (any? w (fn (m) (includes? m "unknown type")))))))
+
+(describe "defrecord: the field list"
+  (test "anything after it but :derives is refused, naming the right spelling"
+    ;; Typed fields written one list each used to define fields `x` and `int` and drop
+    ;; `(y int)` without a word (2026-10-03).
+    (let (msg (error-of (macroexpand '(defrecord pt (x int) (y int)))))
+      (is (includes? msg "unexpected (y int) after the field list"))
+      (is (includes? msg "(defrecord pt ((x int) (y int)))")))
+    (assert= (error-of (macroexpand '(defrecord pt ((x int) (y int)) :derives []))) nil)))
