@@ -6,6 +6,36 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+## v0.36.0 — a type-system and contracts review: a checker that sees callbacks, and contracts that keep tail calls
+
+**Breaking.** `seq/zip-with` is data-first, like every other combinator (ADR-308):
+`(zip-with a b f)`. `defrecord` refuses anything after its field list but `:derives [...]` —
+`(defrecord pt (x int) (y int))` used to define fields `x` and `int` and drop `(y int)`
+silently; typed fields are one list, `(defrecord pt ((x int) (y int)))`.
+
+**Contracts.** A contracted function whose declared result is checked keeps its tail calls:
+mutual tail recursion through `(int -> keyword)` shims no longer runs out of frames at a
+million levels (KI-216, ADR-396 — identical pending result checks collapse to one).
+Contracted non-tail recursion reaches the depth it reaches unarmed (it died near 4k levels at
+the native tier). A caught contract error carries `:code "E0080"`, `:file`/`:line`/`:col`
+and `:trace` like a built-in error; a `:contract` map a program throws itself still comes
+back exactly as thrown. A record name and a sealed ability are matched nominally at run time.
+
+**The checker.** Callbacks are checked by what they are handed — a keyword (`(map ps :x)`
+types as the field), a named function (`(map xs inc)` over strings is reported), a
+`(comp …)` (and a stage handed what it cannot take), and `(apply f … xs)`. A destructured
+`[tag v]` narrows `v` after a test on `tag`, and a `match` over a tagged-tuple union no
+longer trips `--strict` on its declared result. `(:use m :only [typo])` names the missing
+name. `try` bodies are checked; `brood --check --strict` exists. The lattice and inference
+were reviewed end to end (recursive types, unions of records, intervals, `merge`/`seq`/`range`
+results, `&optional` domains, lambdas typed under the arrow they are passed to), and the
+`nest check` cache now notices an `impl` added in another file. A finding inside a clause
+a macro duplicates is reported once.
+
+**Fixes.** v0.35.0's CI red: clippy under rustc 1.98, and two tree-walker failures (a
+`receive` pattern scan before the depth refusal, a port race in `sse_test`).
+`std/editor/highlight`'s `enclosing-call` is declared `(or nil (tuple string int))`.
+
 ## v0.35.0 — a robustness review: twenty-two defects found by adversarial probing, and a language that survives what it is given
 
 **Robustness review, fourth pass** (KI-214, KI-215). `brood-lsp` refuses a JSON-RPC frame past
