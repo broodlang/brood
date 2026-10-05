@@ -10,6 +10,7 @@ use crate::syntax::reader;
 use crate::types::Ty;
 
 mod abilities;
+mod callback_shapes;
 mod caps;
 mod closure_inference;
 mod declarations;

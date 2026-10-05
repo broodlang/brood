@@ -121,8 +121,111 @@ pub(super) fn callback_sig(heap: &Heap, arg: Value, ctx: &Ctx) -> Option<Sig> {
             .or_else(|| ctx.inferred_fn_sig(s))
             .or_else(|| sig_of(heap, s)),
         Value::Keyword(_) => Some(keyword_sig()),
+        Value::Pair(_) => comp_sig(heap, arg, ctx),
         _ => None,
     }
+}
+
+/// The signature of a `(comp f … g)` form: what `g`, the first function applied, takes,
+/// and what `f`, the last, returns — so `(map xs (comp string/length inc))` over strings
+/// is checked against `inc`'s `number` like a named callback is (2026-10-03; a composed
+/// callback was never checked at all). `None` unless `comp` is the prelude's and EVERY
+/// stage has a knowable signature — one unknown stage and the composition says nothing,
+/// which is the false-positive-free answer. A stage handed a value it cannot take is
+/// [`comp_stage_mismatch`]'s finding.
+fn comp_sig(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Sig> {
+    let stages = comp_stages(heap, form, ctx)?;
+    let (first_applied, last_applied) = (stages.last()?, stages.first()?);
+    let mut sig = first_applied.clone();
+    sig.ret = last_applied.ret.clone();
+    Some(sig)
+}
+
+/// `(comp f … g)`'s stage signatures, outermost first, when `comp` is the prelude's (no
+/// local shadows it) and every stage has a signature.
+fn comp_stages(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Vec<Sig>> {
+    let items = list_items(heap, form)?;
+    let Some(&Value::Sym(head)) = items.first() else {
+        return None;
+    };
+    if !value::symbol_is(head, "comp") || ctx.is_local(head) || items.len() < 2 {
+        return None;
+    }
+    items[1..]
+        .iter()
+        .map(|&stage| callback_sig(heap, stage, ctx))
+        .collect()
+}
+
+/// `(apply f a … xs)` handing `f` what it cannot take (2026-10-03 — the applied function
+/// was checked against nothing, `apply`'s own signature being `(fn & any -> any)`). Each
+/// fixed parameter of `f` is held to what reaches it: a leading argument's type, and past
+/// those, the spread collection's element at that position (`element_at_over_union`, which
+/// over a uniform sequence is the element type or `nil`). Disjointness only, as for every
+/// callback check, and only where both sides are known.
+pub(super) fn apply_spread_mismatch(heap: &Heap, form: Value, ctx: &Ctx) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(items) = list_items(heap, form) else {
+        return out;
+    };
+    if items.len() < 3 {
+        return out;
+    }
+    let f = items[1];
+    let Some(sig) = callback_sig(heap, f, ctx) else {
+        return out;
+    };
+    let leading = &items[2..items.len() - 1];
+    let spread = expr_ty(heap, items[items.len() - 1], ctx);
+    for (position, wanted) in sig.params.iter().enumerate() {
+        let got = match leading.get(position) {
+            Some(&arg) => expr_ty(heap, arg, ctx),
+            None => spread
+                .as_ref()
+                .and_then(|t| t.element_at_over_union(Some(position - leading.len()))),
+        };
+        let Some(got) = got else { continue };
+        if got.is_any() || got.is_never() || wanted.is_never() || !got.is_disjoint(wanted) {
+            continue;
+        }
+        out.push(format!(
+            "apply: {} takes {} at position {}, but is handed {}",
+            callback_desc(f),
+            wanted,
+            position + 1,
+            got,
+        ));
+    }
+    out
+}
+
+/// A `(comp f g)` whose `g` provably returns what `f` cannot take: each adjacent pair,
+/// by the disjointness rule the callback checks use (an inferred result over-approximates,
+/// so only a result sharing NOTHING with the next stage's domain is reported).
+pub(super) fn comp_stage_mismatch(heap: &Heap, form: Value, ctx: &Ctx) -> Vec<String> {
+    let (Some(items), Some(stages)) = (list_items(heap, form), comp_stages(heap, form, ctx)) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for k in 0..stages.len().saturating_sub(1) {
+        let (outer, inner) = (&stages[k], &stages[k + 1]);
+        let Some(accepts) = outer.param(0) else {
+            continue;
+        };
+        let gives = &inner.ret;
+        if gives.is_any() || gives.is_never() || accepts.is_never() || !gives.is_disjoint(&accepts)
+        {
+            continue;
+        }
+        out.push(format!(
+            "comp: {} returns {}, but {} takes {}",
+            callback_desc(items[k + 2]),
+            gives,
+            callback_desc(items[k + 1]),
+            accepts,
+        ));
+    }
+    out
 }
 
 /// A lambda literal's signature **under the arrow it is being passed as**: its
@@ -797,6 +900,12 @@ pub(super) fn gradual_of_compound(heap: &Heap, expr: Value, ctx: &Ctx) -> Option
             match binds[i] {
                 Value::Sym(name) => {
                     scope = scope.bind(name, rhs_ty);
+                    // `(let (v el) …)` — the pattern matcher's binder over its temp — makes
+                    // `v` and `el` one value, so a narrowing of `el` (through its path
+                    // alias) reaches `v`, as in the walk's `let_bind_scope`.
+                    if let Value::Sym(target) = binds[i + 1] {
+                        scope = scope.add_alias(name, target);
+                    }
                     // The COUNT alias (ADR-350), which this binder did not record — so a
                     // length or index fact resting on `(let (n (count xs)) …)` reached the
                     // walk's argument checks and NOT the return check, which comes through
@@ -806,11 +915,22 @@ pub(super) fn gradual_of_compound(heap: &Heap, expr: Value, ctx: &Ctx) -> Option
                     {
                         scope = scope.add_count_alias(name, xs);
                     }
+                    // …and the PATH alias, for the same reason: the `match` compiler's
+                    // `(let (el (%vector-ref m 0)) (if (%eq el :ok) …))` narrowed `m` to the
+                    // clause's tuple in the walk and in `expr_ty`, but not here, so a match
+                    // over `(or (tuple :ok int) (tuple :err string))` returned `int | string`
+                    // from the `:ok` arm to the return check — a strict false positive on
+                    // every tagged-tuple dispatch with a declared result (2026-10-03).
+                    if let Some((base, keys)) =
+                        crate::types::check::guards::path_of(heap, binds[i + 1])
+                    {
+                        if !keys.is_empty() && scope.is_lexical_local(base) {
+                            scope = scope.add_path_alias(name, base, keys);
+                        }
+                    }
                 }
                 pat => {
-                    for (sym, ty) in pattern_bindings(heap, pat, rhs_ty.as_ref()) {
-                        scope = scope.bind(sym, ty);
-                    }
+                    scope = bind_pattern(heap, scope, pat, binds[i + 1], rhs_ty.as_ref());
                 }
             }
             i += 2;

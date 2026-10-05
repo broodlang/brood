@@ -868,11 +868,7 @@ pub(in crate::types::check) fn let_bind_scope(
     rhs_ty: Option<Ty>,
 ) -> Ctx {
     let Value::Sym(name) = pat else {
-        let mut scope = scope;
-        for (sym, ty) in pattern_bindings(heap, pat, rhs_ty.as_ref()) {
-            scope = scope.bind(sym, ty);
-        }
-        return scope;
+        return bind_pattern(heap, scope, pat, rhs, rhs_ty.as_ref());
     };
     let rhs_guard = guard_assertion(heap, rhs, &scope);
     let mut scope = scope.bind(name, rhs_ty.clone());

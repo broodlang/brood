@@ -16476,3 +16476,41 @@ Sabotaged both ways — never collapsing reds the flat case at tier 1, always co
 reds `narrow-inner` (it returned 3 unchecked). `contract_test` 115/115 at tiers 0/1/2
 armed; the contracts cli/nest integration binaries, the prim unit tests, clippy on CI's
 flags, rustfmt and `nest format --check` clean.
+
+## 2026-10-05 — the checker residue from the 2026-10-02 review, closed
+
+**`:only` names.** `(:use m :only [typo])` warns at the clause, naming the module and the
+missing name — the half of KI-211 the runtime could not take (a module may be mid-load or
+image-backed at refer time). Silent when the module could not be loaded at all.
+
+**Callbacks.** Four shapes were never checked against what they are handed:
+- a keyword — `(map ps :x)` now types as `(:x p)` per element (`infer::callback_ret`);
+- a NAMED function — only `fn` literals were ever seeded with the element type, so
+  `(map xs inc)` over strings was silent. A named, keyword or composed callback is now held
+  to the same seed by disjointness, except over a record collection, which may iterate
+  itself through `Seqable` (`record_test`'s `stack` was the false positive that showed it);
+- `(comp f g)` — a signature composed from its stages, plus a finding when a stage returns
+  what the next cannot take;
+- `(apply f … xs)` — `f`'s fixed parameters against the leading arguments and the spread
+  collection's elements.
+`domains::a_permissive_higher_order_stdlib_callback_stays_silent` had pinned the old silence
+on `(map [1 2 3] string/length)`, a program that raises; it now pins the finding.
+
+**Narrowing.** The return check (`gradual_of`) recorded neither the path alias nor the
+symbol alias a `let` makes, so every `match` over a tagged-tuple union with a declared
+result read each arm's binder as the union — a strict false positive. And a destructured
+`(let ([tag v] r) (if (= tag :ok) …))` never narrowed `v`: the matcher binds `tag` through
+a temp, so the guard reached the path only via an alias, and `v`, bound before the guard,
+never saw the base narrow. `narrow` now applies path narrowing to every alias the chain
+reaches, `narrow_path` re-narrows the base's other positional aliases, and the three `let`
+binders share `bind_pattern`.
+
+**Smaller.** A finding inside a clause `match` copies into two branches was reported twice;
+identical (position, message) pairs are now one. `defrecord` refuses anything after the
+field list but `:derives [...]` — `(defrecord pt (x int) (y int))` defined fields `x` and
+`int` and dropped `(y int)` silently.
+
+Verified: `nest check` and `--strict` exit 0 over std/tests/examples and over bedit;
+`types::` 692/692 with the new `check/tests/callback_shapes.rs`; the checker-facing `.blsp`
+files green. The sabotage pass over `callback_shapes` was stopped by the owner before it
+ran and is owed (handoff).

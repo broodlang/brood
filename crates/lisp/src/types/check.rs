@@ -1332,12 +1332,17 @@ fn collect_raw_qualified(heap: &Heap, forms: &[Value]) -> HashSet<String> {
 pub(crate) struct ImportScope {
     pub(crate) used: Vec<String>,
     pub(crate) aliases: Vec<(String, String)>,
+    /// `(:use mod :only [name])` naming something `mod` does not define — the check the
+    /// runtime `%refer` cannot make (KI-211: at refer time a module may be mid-load or
+    /// image-backed), reported at the `(:use …)` clause.
+    pub(crate) unknown_only: Vec<(Option<Pos>, String)>,
 }
 
 impl ImportScope {
     fn extend(&mut self, other: ImportScope) {
         self.used.extend(other.used);
         self.aliases.extend(other.aliases);
+        self.unknown_only.extend(other.unknown_only);
     }
 }
 
@@ -1347,10 +1352,11 @@ fn setup_check_imports(heap: &mut Heap, header: Value) -> ImportScope {
     // eval, so nothing LOCAL is held across the `require` eval in pass B (which can collect
     // and relocate handles). Holding a parsed `Value` across that eval was a use-after-GC.
     enum Clause {
-        Use(Symbol, Option<Vec<Symbol>>), // (module, Some(:only subset) | None = all public)
-        UseExcept(Symbol, Vec<Symbol>),   // (:use mod :exclude [names]) — all public minus names
-        Alias(Symbol, Symbol),            // (short-prefix-name, module)
-        UseInternals(Symbol),             // (:use-internals mod) — ADR-146 grant
+        // (module, Some(:only subset) | None = all public, the clause's position)
+        Use(Symbol, Option<Vec<Symbol>>, Option<Pos>),
+        UseExcept(Symbol, Vec<Symbol>), // (:use mod :exclude [names]) — all public minus names
+        Alias(Symbol, Symbol),          // (short-prefix-name, module)
+        UseInternals(Symbol),           // (:use-internals mod) — ADR-146 grant
     }
     let mut clauses: Vec<Clause> = Vec::new();
     {
@@ -1401,12 +1407,13 @@ fn setup_check_imports(heap: &mut Heap, header: Value) -> ImportScope {
                         })
                         .unwrap_or_default();
                     if is_only {
-                        clauses.push(Clause::Use(mod_sym, Some(names)));
+                        let pos = heap.form_pos_only(*clause);
+                        clauses.push(Clause::Use(mod_sym, Some(names), pos));
                     } else {
                         clauses.push(Clause::UseExcept(mod_sym, names));
                     }
                 } else {
-                    clauses.push(Clause::Use(mod_sym, None));
+                    clauses.push(Clause::Use(mod_sym, None, None));
                 }
             } else if value::symbol_is(*kw_sym, "use-internals") {
                 let Some(&Value::Sym(mod_sym)) = citems.get(1) else {
@@ -1414,7 +1421,7 @@ fn setup_check_imports(heap: &mut Heap, header: Value) -> ImportScope {
                 };
                 // A grant is also a use (publics refer bare), plus the ADR-146
                 // internals key the privacy walk consults.
-                clauses.push(Clause::Use(mod_sym, None));
+                clauses.push(Clause::Use(mod_sym, None, None));
                 clauses.push(Clause::UseInternals(mod_sym));
             } else if value::symbol_is(*kw_sym, "alias") {
                 let Some(&Value::Sym(mod_sym)) = citems.get(1) else {
@@ -1456,7 +1463,7 @@ fn setup_check_imports(heap: &mut Heap, header: Value) -> ImportScope {
     // costs a map lookup; erring toward "loaded" is what produced the false positives.
     for clause in clauses {
         match clause {
-            Clause::Use(mod_sym, subset) => {
+            Clause::Use(mod_sym, subset, pos) => {
                 // Package-rooted namespaces (ADR-070): an intra-package `(:use b)` — in a
                 // dependency, or in the root project under its `:name` — roots to `pkg/b`.
                 // The runtime `%refer` target roots via `%root-module-name`; the checker
@@ -1478,11 +1485,31 @@ fn setup_check_imports(heap: &mut Heap, header: Value) -> ImportScope {
                         let granted = heap
                             .import_of(crate::eval::macros::internals_grant_key(&mod_name))
                             .is_some();
+                        // What the module defines, for naming an `:only` entry it does not
+                        // (KI-211's follow-up). A module with no exports here is one the
+                        // check could not load — say nothing about it rather than guess.
+                        let exports: std::collections::HashSet<Symbol> =
+                            deps::obs_module_exports(heap, &prefix)
+                                .into_iter()
+                                .map(|(bare, _)| bare)
+                                .collect();
                         for bare in names {
                             let bare_name = value::symbol_name(bare);
                             let qual = value::intern(&format!("{}/{}", mod_name, bare_name));
                             if heap.is_private(qual) && !granted {
                                 continue;
+                            }
+                            let defined = exports.contains(&bare)
+                                || sigs::is_globally_bound(heap, qual)
+                                || crate::eval::derive::image_sig_arity(heap, qual).is_some();
+                            if !defined && !exports.is_empty() {
+                                scope.unknown_only.push((
+                                    pos,
+                                    format!(
+                                        "(:use {mod_name} :only [... {bare_name} ...]): \
+                                         {mod_name} defines no public `{bare_name}`"
+                                    ),
+                                ));
                             }
                             heap.add_import_lazy(bare, qual);
                         }
@@ -2104,6 +2131,7 @@ fn check_forms(
         annot::set_record_ids(protocol::record_id_names(heap, &expanded));
         // The type aliases a `sig` may name (ADR-326): loaded modules' from the heap, this
         // file's from its expanded `%register-type` forms, qualified to the file's namespace.
+        out.append(&mut import_scope.unknown_only);
         annot::set_type_aliases(
             protocol::type_alias_table(heap, &expanded, file_ns_name.as_deref()),
             file_ns_name.clone(),
@@ -2920,6 +2948,12 @@ fn check_forms(
             format!("checker internal error (advisory pass aborted; please report): {msg}"),
         ));
     }
+    // One finding per site: a macro that copies a sub-form into two branches — `match`
+    // falls through to a clause from both its tag test and its shape test — walks the same
+    // positioned source twice, and reported `inc: … got string` twice on one line. First
+    // occurrence wins, so the order is unchanged.
+    let mut seen = HashSet::new();
+    out.retain(|(pos, msg)| seen.insert((pos.map(|p| (p.line, p.col)), msg.clone())));
     out
 }
 

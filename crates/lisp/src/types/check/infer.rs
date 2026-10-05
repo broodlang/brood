@@ -825,6 +825,12 @@ fn control_flow_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
             match binds[i] {
                 Value::Sym(name) => {
                     scope = scope.bind(name, rhs_ty);
+                    // A symbol RHS is the same value (the walk's `let_bind_scope` rule): a
+                    // narrowing of one reaches the other. One map insert, not the
+                    // re-inferring half of the walk's rule ruled out below.
+                    if let Value::Sym(target) = binds[i + 1] {
+                        scope = scope.add_alias(name, target);
+                    }
                     if let Some((base, keys)) = path_of(heap, binds[i + 1]) {
                         if !keys.is_empty() && scope.is_lexical_local(base) {
                             scope = scope.add_path_alias(name, base, keys);
@@ -838,12 +844,12 @@ fn control_flow_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
                         scope = scope.add_count_alias(name, xs);
                     }
                 }
-                // A destructuring binding: each positional binder takes the element type
-                // (`super::walk::pattern_bindings`), unknown where it can't be pinned.
+                // A destructuring binding: each positional binder takes the element type,
+                // unknown where it can't be pinned, and the path it names
+                // (`super::walk::bind_pattern`).
                 pat => {
-                    for (sym, ty) in super::walk::pattern_bindings(heap, pat, rhs_ty.as_ref()) {
-                        scope = scope.bind(sym, ty);
-                    }
+                    scope =
+                        super::walk::bind_pattern(heap, scope, pat, binds[i + 1], rhs_ty.as_ref());
                 }
             }
             i += 2;
@@ -3066,6 +3072,17 @@ pub(super) fn callback_ret(heap: &Heap, f: Value, inputs: &[Option<Ty>], ctx: &C
         // typed precisely — found on an RPN reduce, 2026-08-31).
         Value::Pair(_) => lambda_ret(heap, f, inputs, ctx)
             .or_else(|| super::sigs::clause_lambda_ret(heap, f, inputs, ctx)),
+        // A keyword as the callback — `(map ps :x)` — is the accessor `(:x p)` per element,
+        // and types exactly as that call does: the field's type on a record shape, `V | nil`
+        // on a `map<K, V>`. Anything else (an element with no shape) stays unknown, as the
+        // accessor does.
+        Value::Keyword(key) => match inputs {
+            [Some(elem)] => elem.record_field_ty(key).or_else(|| {
+                elem.map_kv()
+                    .map(|(_, v)| v.clone().union(Ty::of(Tag::Nil)))
+            }),
+            _ => None,
+        },
         _ => None,
     }
 }

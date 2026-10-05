@@ -193,9 +193,18 @@ fn a_same_file_callback_is_checked_from_its_inferred_signature() {
 }
 
 #[test]
-fn a_permissive_higher_order_stdlib_callback_stays_silent() {
-    // `map`'s curated arrow is `(any) -> any`, which is disjoint from nothing.
+fn a_stdlib_callback_is_held_to_the_elements_it_is_handed() {
+    // `map`'s curated arrow is `(any) -> any`, disjoint from nothing — so this read as
+    // silent until 2026-10-03, when a named callback began to be held to the ELEMENT seed
+    // (`callback_shapes`): `string/length` over ints raises, and now says so. A callback
+    // that takes what it is handed stays silent.
     let ws = file_warnings("(defn c () (map [1 2 3] string/length))");
+    assert!(
+        ws.iter().any(|w| w
+            .contains("callback handed 1 | 2 | 3 at position 1, but string/length takes string")),
+        "{ws:?}"
+    );
+    let ws = file_warnings("(defn c () (map [1 2 3] inc))");
     assert!(!ws.iter().any(|w| w.contains("callback handed")), "{ws:?}");
 }
 

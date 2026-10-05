@@ -558,6 +558,64 @@ pub(super) fn collect_pattern_syms(heap: &Heap, pat: Value, out: &mut Vec<Symbol
     }
 }
 
+/// The PATH each binder of a flat vector pattern names, when the right-hand side is itself
+/// a path (`r`, `(:res state)`): `(let ([tag v] r) …)` binds `tag` to `r[0]` and `v` to
+/// `r[1]`. The `let` binders record these as path aliases, so a guard on `tag` narrows
+/// `r`'s tuple alternatives — and through them `v` (`Ctx::narrow_path`) — the way the
+/// `match` compiler's own `(let (el (%vector-ref m 0)) …)` already did. A rest binder ends
+/// the positions; `_` binds nothing; a nested pattern is skipped.
+pub(in crate::types::check) fn pattern_path_aliases(
+    heap: &Heap,
+    pat: Value,
+    rhs: Value,
+) -> Vec<(Symbol, Symbol, Vec<PathKey>)> {
+    let (Value::Vector(_), Some((base, keys))) =
+        (pat, crate::types::check::guards::path_of(heap, rhs))
+    else {
+        return Vec::new();
+    };
+    let Some(items) = bindings(heap, pat) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (position, item) in items.into_iter().enumerate() {
+        let Value::Sym(s) = item else { continue };
+        let nm = name_of(s);
+        if nm == "&" {
+            break;
+        }
+        if nm == "_" {
+            continue;
+        }
+        let mut path = keys.clone();
+        path.push(PathKey::Index(position));
+        out.push((s, base, path));
+    }
+    out
+}
+
+/// Bind a destructuring pattern's binders in `scope`: each to its position's type
+/// ([`pattern_bindings`]) and, over a path, to the path it names
+/// ([`pattern_path_aliases`]). The one rule the three `let` binders — the walk's,
+/// `expr_ty`'s and `gradual_of`'s — share, so they cannot drift apart again.
+pub(in crate::types::check) fn bind_pattern(
+    heap: &Heap,
+    mut scope: Ctx,
+    pat: Value,
+    rhs: Value,
+    rhs_ty: Option<&Ty>,
+) -> Ctx {
+    for (sym, ty) in pattern_bindings(heap, pat, rhs_ty) {
+        scope = scope.bind(sym, ty);
+    }
+    for (sym, base, keys) in pattern_path_aliases(heap, pat, rhs) {
+        if scope.is_lexical_local(base) {
+            scope = scope.add_path_alias(sym, base, keys);
+        }
+    }
+    scope
+}
+
 /// Parse a `let` bindings form — accepts both `(name val name val …)` lists
 /// and `[name val name val …]` vectors, the two shapes the reader emits.
 pub(in crate::types::check) fn bindings(heap: &Heap, form: Value) -> Option<Vec<Value>> {

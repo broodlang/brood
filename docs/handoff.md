@@ -12,7 +12,39 @@ sysctl that moves under you — that file's last section has the one-line check)
 questions are answerable here; check that file's "what this box CAN answer" before deferring
 anything.
 
-## 2026-10-03 — bedit's strict ratchet fixed, KI-216 closed; UNCOMMITTED in both repos
+## 2026-10-05 — checker residue closed (devlog 2026-10-05)
+
+**State:** no open bug. Landed on `main` on top of `f141a2b3`; read `make green` for CI's
+verdict on it.
+- `(:use m :only [typo])` now warns at the clause (`check.rs` `setup_check_imports`,
+  `ImportScope::unknown_only`). Test `modules_and_imports::an_only_import_…` (sabotaged: red).
+- Callback shapes: keyword callbacks type as their accessor (`infer::callback_ret`); named /
+  keyword / `(comp …)` callbacks are held to the element seed (`walk.rs`, skipped over a
+  record collection, which may iterate itself via `Seqable`); `comp_sig` +
+  `comp_stage_mismatch`; `apply_spread_mismatch` (`walk/calls.rs`).
+- Narrowing: `gradual_of`'s `let` records path + symbol aliases; `expr_ty`'s symbol alias;
+  `narrow` applies path narrowing for every alias the chain reaches; `narrow_path` re-narrows
+  sibling positional aliases; destructuring lets share `bind_pattern` (`walk/shape.rs`).
+  Fixes a strict false positive on every `match` over a tagged-tuple union with a declared
+  result, and makes `(let ([tag v] r) (if (= tag :ok) …))` narrow `v`.
+- Identical (pos, message) findings de-duplicated at the end of `check_forms`.
+- `defrecord` refuses anything after the field list but `:derives [...]`
+  (`%defrecord-check-opts`, `std/prelude/seq.blsp`) — `(defrecord pt (x int) (y int))` used to
+  define fields `x`, `int`.
+- The stray tracked file `arning)" -A5|` is deleted.
+
+**Verified:** `nest check` and `--strict` exit 0 over brood's std/tests/examples and over
+bedit (no cache); `types::` 692/692; the checker-facing `.blsp` files (record, contract,
+introspection, pattern matching, sig adoption, std check, ergonomics, …) green; clippy on
+CI's flags, rustfmt and `nest format --check` clean. **Owed:** a sabotage pass over
+`check/tests/callback_shapes.rs` — the owner stopped it mid-run; only the `:only` test has
+been shown red against its own breakage.
+
+**Open design call (owner):** a caught contract error lacks `:file`/`:line`. Proposed: raise
+it from a kernel native (`%contract-raise`) so it is positioned like `E0030` without changing
+what a user's own `throw` of a `:contract`-kind map returns.
+
+## 2026-10-03 — bedit's strict ratchet fixed, KI-216 closed; pushed (CI green on `f141a2b3`)
 
 **State:** no open bug in `known-issues.md`. CI on `1a150b23` was red only in the bedit
 smoke (its `--strict` ratchet read 4 new findings, all inside newly-checked `try` bodies).

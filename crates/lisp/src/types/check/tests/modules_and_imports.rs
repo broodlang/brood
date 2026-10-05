@@ -2,6 +2,28 @@
 
 use super::*;
 
+// ---- an `:only` entry the module does not define (KI-211's follow-up) ----
+
+#[test]
+fn an_only_import_the_module_does_not_define_is_named() {
+    // The runtime `%refer` cannot refuse it (the module may be mid-load or image-backed at
+    // refer time), so the checker is where a typo in `:only` surfaces. The real names
+    // beside it — a Brood function, a native-backed one, an image-backed module's — stay
+    // silent, which is what keeps this from re-opening the false positives that withdrew
+    // the runtime refusal.
+    let ws = file_warnings(
+        "(defmodule test/only (:use math :only [max zz-nope]) (:use string :only [join]) \
+         (:use json :only [encode]))\n\
+         (defn f (xs) (join (map xs str) (encode (max 1 2))))",
+    );
+    let only: Vec<&String> = ws.iter().filter(|w| w.contains(":only")).collect();
+    assert_eq!(only.len(), 1, "exactly the typo is named: {ws:?}");
+    assert!(
+        only[0].contains("math defines no public `zz-nope`"),
+        "it names the module and the missing name: {ws:?}"
+    );
+}
+
 // ---- unused :use import lint (Pass 4.5) ----
 
 #[test]

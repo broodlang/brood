@@ -846,10 +846,21 @@ impl Ctx {
     /// `x` the `let` bound it to.
     pub(super) fn narrow(&self, sym: Symbol, ty: Ty) -> Ctx {
         let mut c = self.clone();
-        c.narrow_chain(sym, ty.clone());
+        let reached = c.narrow_chain(sym, ty.clone());
         // A narrowing of a path's ALIAS is a narrowing of the path — and, for an index
         // position, of the base's positional alternatives (`narrow_path`'s retention).
-        if let Some((base, keys)) = c.path_aliases.get(&sym).cloned() {
+        // Every name the chain reached counts, not only `sym`: the pattern matcher binds a
+        // destructured `tag` as `(let (el (%vector-ref g 0)) (let (tag el) …))`, so a guard
+        // on `tag` reaches the path only through its alias `el` (2026-10-03).
+        let mut paths: Vec<(Symbol, Vec<PathKey>)> = reached
+            .iter()
+            .filter_map(|s| c.path_aliases.get(s).cloned())
+            .collect();
+        // Report order, not hash order (B8): the narrowing composes the same either way,
+        // but a deterministic walk keeps two runs of the check byte-identical.
+        paths.sort_by_key(|(base, keys)| (crate::core::value::symbol_name(*base), keys.len()));
+        paths.dedup();
+        for (base, keys) in paths {
             c = c.narrow_path(base, keys, ty.clone());
         }
         // A narrowing of `n` where `n` is `(count xs)` is a narrowing of `xs`'s LENGTH
@@ -898,6 +909,25 @@ impl Ctx {
                     }
                     None => true,
                 });
+                // A binder already holding ANOTHER position of the base — `v` in
+                // `(let ([tag v] r) (if (= tag :ok) … v …))` — was bound before the guard,
+                // from the union over every alternative. The alternatives the guard kept say
+                // what that position holds now, so narrow it to that (2026-10-03). Read
+                // only when every kept term answers the position; a term that does not
+                // (`element_at_over_union` → `None`) leaves the binder as it was.
+                let siblings: Vec<(Symbol, usize)> = c
+                    .path_aliases
+                    .iter()
+                    .filter_map(|(alias, (b, ks))| match ks.as_slice() {
+                        [PathKey::Index(j)] if *b == base && j != k => Some((*alias, *j)),
+                        _ => None,
+                    })
+                    .collect();
+                for (alias, j) in siblings {
+                    if let Some(at) = retained.element_at_over_union(Some(j)) {
+                        c.narrow_chain(alias, at);
+                    }
+                }
                 c.types.insert(base, retained);
             }
         }
@@ -954,7 +984,8 @@ impl Ctx {
     /// alias graph, intersecting `ty` into each visited name's type. A
     /// `visited` set caps each name at one narrow so a cycle (the
     /// always-present bidirectional edge) terminates cleanly.
-    fn narrow_chain(&mut self, sym: Symbol, ty: Ty) {
+    /// Returns every name the narrowing reached — `sym` and its let-alias chain.
+    fn narrow_chain(&mut self, sym: Symbol, ty: Ty) -> HashSet<Symbol> {
         let mut visited = HashSet::new();
         let mut queue = vec![sym];
         while let Some(s) = queue.pop() {
@@ -971,6 +1002,7 @@ impl Ctx {
                 }
             }
         }
+        visited
     }
     /// **Bind** `sym` to `ty`, overwriting any prior entry — a fresh let-bound
     /// or fn-param variable shadows the outer. `None` clears the type entry so

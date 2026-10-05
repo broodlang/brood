@@ -787,6 +787,24 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         // stays false-positive-free, per the checker's "rather miss than
         // misfire" rule. Only zero-arity is flagged: a fn that takes args is a
         // plausible intentional callback value.
+        // A `(comp f g)` stage handed what it cannot take (`comp_stage_mismatch`).
+        if value::symbol_is(s, "comp")
+            && !ctx.is_local(s)
+            && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
+        {
+            for msg in comp_stage_mismatch(heap, form, ctx) {
+                out.push((heap.form_pos_only(form), msg));
+            }
+        }
+        // …and `(apply f … xs)` handing `f` what it cannot take (`apply_spread_mismatch`).
+        if value::symbol_is(s, "apply")
+            && !ctx.is_local(s)
+            && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
+        {
+            for msg in apply_spread_mismatch(heap, form, ctx) {
+                out.push((heap.form_pos_only(form), msg));
+            }
+        }
         if is_output_sink(s) {
             for &arg in &items[1..] {
                 if let Value::Sym(a) = arg {
@@ -1085,6 +1103,58 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         // `(fold s 5381 (fn (h c) (bit/xor (* h 31) …)))` read as `any` and `(* h 31)` as
         // `number`, while the fold as a whole was already known to be an int.
         let seeded_callback = callback_seed(heap, form, &items, ctx, &literal_fits(heap));
+        // A callback that is NOT a literal — a named function, a keyword, a `(comp …)` —
+        // has a signature of its own, so it is not walked with seeded parameters; it is
+        // held to the seed instead: `(map xs inc)` over strings hands `inc` a string, and
+        // nothing said so (2026-10-03 — only literals were ever seeded). Disjointness per
+        // position, as every callback check is.
+        // A RECORD collection is skipped: one with a `Seqable` impl iterates its own way
+        // (`record_test`'s `stack` yields its `:items`), while the element type reads it as a
+        // map's entries — a hint fine for seeding a literal, wrong as a reason to report.
+        let collection_may_iterate_itself = super::sigs::combinator_args(&items)
+            .and_then(|(coll, _)| expr_ty(heap, coll, ctx))
+            .is_some_and(|t| {
+                t.record_field_ty(value::intern("__id__"))
+                    .is_some_and(|id| !id.is_subtype(&Ty::of(crate::core::value::Tag::Nil)))
+            });
+        if !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH) && !collection_may_iterate_itself
+        {
+            let named_fits = |arg: Value, _wanted: usize| {
+                !matches!(arg, Value::Pair(_)) || list_items(heap, arg).is_some_and(|f| {
+                    matches!(f.first(), Some(&Value::Sym(h)) if value::symbol_is(h, "comp"))
+                })
+            };
+            if let Some((idx, seed)) = callback_seed(heap, form, &items, ctx, &named_fits) {
+                let arg = items[idx];
+                if let (Some(cb), Some(&Value::Sym(head))) =
+                    (callback_sig(heap, arg, ctx), items.first())
+                {
+                    for (k, handed) in seed.params.iter().enumerate() {
+                        let Some(accepts) = cb.param(k) else { continue };
+                        if handed.is_any()
+                            || handed.is_never()
+                            || accepts.is_never()
+                            || !handed.is_disjoint(&accepts)
+                        {
+                            continue;
+                        }
+                        out.push((
+                            arg_pos(heap, arg, form),
+                            format!(
+                                "{}: argument {} is a callback handed {} at position {}, \
+                                 but {} takes {} there",
+                                name_of(head),
+                                idx,
+                                handed,
+                                k + 1,
+                                callback_desc(arg),
+                                accepts,
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
         // …and, over `(range (count xs))` (or `(range n)` with `n` the count of `xs`), the
         // element IS an index of `xs`: the literal's parameter is bounded by `xs`'s length
         // for its body, so `(nth xs i)` there reads the element (ADR-350's relation).
