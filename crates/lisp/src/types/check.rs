@@ -878,7 +878,7 @@ fn lint_duplicate_defs_in(
     // legal chain (`checker_survives_pathologically_deep_forms`) overflowed the native
     // stack here — the one walker of the un-expanded tree that lacked the guard, and a
     // SIGSEGV `catch_unwind` cannot catch.
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         lint_duplicate_defs_in_inner(heap, form, allowed, seen, out)
     })
 }
@@ -1021,7 +1021,7 @@ fn collect_register_sig_forms(heap: &mut Heap, form: Value, out: &mut Vec<Value>
     // the native stack (a SIGSEGV `catch_unwind` can't catch — the sibling of
     // the walk.rs/recursion.rs hardening). Grow the stack in heap-backed
     // segments like the rest.
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         collect_register_sig_forms_inner(heap, form, out)
     })
 }
@@ -1266,7 +1266,7 @@ pub fn module_direct_requires(heap: &Heap, forms: &[Value]) -> (Option<String>, 
 fn collect_require_targets(heap: &Heap, form: Value, out: &mut HashSet<String>) {
     // Guard the deep-form recursion the same way `count_defs` does — a pathologically
     // nested source must not overflow the checker's stack (tests/…deep_forms).
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         if let Some(m) = require_target(heap, form) {
             out.insert(m);
         }
@@ -3156,7 +3156,7 @@ fn def_name_and_value(heap: &Heap, form: Value) -> Option<(Symbol, Value)> {
 /// Scoped to one top-level form (usually one `defn`) rather than the whole file so a
 /// `bound?` probe in one function can't silence a genuine typo in another.
 fn collect_bound_guards(heap: &Heap, form: Value, out: &mut HashSet<Symbol>) {
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
             return;
         };
@@ -3187,7 +3187,7 @@ fn collect_bound_guards(heap: &Heap, form: Value, out: &mut HashSet<Symbol>) {
 /// lazy-init `(when (nil? *g*) (def *g* (table)))` pattern — else a function returning `*g*`
 /// infers `nil` and false-flags its callers). Skips quoted subtrees.
 fn count_defs(heap: &Heap, form: Value, counts: &mut HashMap<Symbol, usize>) {
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
             return;
         };

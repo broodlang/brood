@@ -4746,7 +4746,7 @@ fn with_rec_assumption(a: &Ty, b: &Ty, assumed: bool, relate: impl Fn(&Ty, &Ty) 
         return assumed;
     }
     REC_ASSUMPTIONS.with(|s| s.borrow_mut().push((a.clone(), b.clone())));
-    let out = stacker::maybe_grow(64 * 1024, 1024 * 1024, || relate(&a.unroll(), &b.unroll()));
+    let out = crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || relate(&a.unroll(), &b.unroll()));
     REC_ASSUMPTIONS.with(|s| {
         s.borrow_mut().pop();
     });
@@ -4789,7 +4789,7 @@ fn meet_recursive(a: Ty, b: Ty) -> Ty {
         return if a.to_string() <= b.to_string() { a } else { b };
     }
     REC_MEETS.with(|s| s.borrow_mut().push((a.clone(), b.clone())));
-    let out = stacker::maybe_grow(64 * 1024, 1024 * 1024, || a.unroll().intersect(b.unroll()));
+    let out = crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || a.unroll().intersect(b.unroll()));
     REC_MEETS.with(|s| {
         s.borrow_mut().pop();
     });

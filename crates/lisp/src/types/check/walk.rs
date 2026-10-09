@@ -87,7 +87,7 @@ fn check_unquoted(
     ctx: &Ctx,
     out: &mut Vec<(Option<Pos>, String)>,
 ) {
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         match form {
             Value::Vector(id) => {
                 for item in heap.vector(id).to_vec() {
@@ -145,7 +145,7 @@ pub(super) fn check_into(
     // the kernel's deep-value walkers); unlike a depth cap this still CHECKS
     // the deep form, and termination is structural (immutable data has no
     // cycles).
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         check_into_inner(heap, form, ctx, out)
     })
 }

@@ -154,7 +154,7 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
     // this function times [`MAX_EXPR_TY_DEPTH`] outgrew the walker's 1 MB stacker segment
     // once call-site specialization landed (2026-08-30: the deep-forms test overflowed
     // at exactly 128 frames). Grow the stack here too, so the cap is the only limit.
-    let out = stacker::maybe_grow(64 * 1024, 1024 * 1024, || expr_ty_inner(heap, form, ctx));
+    let out = crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || expr_ty_inner(heap, form, ctx));
     if owner {
         EXPR_MEMO.with(|m| m.borrow_mut().clear());
         EXPR_MEMO_OWNED.with(|o| o.set(false));
@@ -3092,7 +3092,7 @@ pub(super) fn callback_ret(heap: &Heap, f: Value, inputs: &[Option<Ty>], ctx: &C
 fn quoted_datum_ty(heap: &Heap, d: Value) -> Ty {
     // Deep-form stack safety: recurses into itself, never back through `expr_ty`'s
     // cap, so a deep quoted datum (a macro-emitted template) would overflow otherwise.
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || quoted_datum_ty_inner(heap, d))
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || quoted_datum_ty_inner(heap, d))
 }
 
 fn quoted_datum_ty_inner(heap: &Heap, d: Value) -> Ty {

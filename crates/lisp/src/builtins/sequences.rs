@@ -1614,27 +1614,30 @@ pub(super) fn tab_layout(
     at: usize,
 ) -> Result<(usize, usize), LispError> {
     use crate::host::text_width::{MAX_START_COLUMN, MAX_TAB_WIDTH, TAB_WIDTH};
+    // Bounded as an `i64` BEFORE the `usize` cast: on a 32-bit target the cast first
+    // would truncate 2^33 to 0 and let it through.
     let start_col = if args.len() > at {
-        expect_int(heap, who, arg(args, at))?.max(0) as usize
+        expect_int(heap, who, arg(args, at))?.max(0)
     } else {
         0
     };
-    if start_col > MAX_START_COLUMN {
+    if start_col > MAX_START_COLUMN as i64 {
         return Err(LispError::runtime(format!(
             "{who}: start-col must be at most {MAX_START_COLUMN}, got {start_col}"
         )));
     }
+    let start_col = start_col as usize;
     let tab_width = if args.len() > at + 1 {
-        expect_int(heap, who, arg(args, at + 1))?.max(1) as usize
+        expect_int(heap, who, arg(args, at + 1))?.max(1)
     } else {
-        TAB_WIDTH
+        TAB_WIDTH as i64
     };
-    if tab_width > MAX_TAB_WIDTH {
+    if tab_width > MAX_TAB_WIDTH as i64 {
         return Err(LispError::runtime(format!(
             "{who}: tab-width must be at most {MAX_TAB_WIDTH}, got {tab_width}"
         )));
     }
-    Ok((start_col, tab_width))
+    Ok((start_col, tab_width as usize))
 }
 
 // ---------- type reflection ----------

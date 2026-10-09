@@ -30,7 +30,7 @@ pub(super) fn walk_impl_returns(
     ctx: &Ctx,
     out: &mut Vec<(Option<Pos>, String)>,
 ) {
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
             return;
         };

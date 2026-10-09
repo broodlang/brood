@@ -9,6 +9,8 @@
   (:use tcp :exclude [send listen])
   (:use-internals http))
 
+(purge-stale-temp "brood-http-")
+
 (defn- served (r)
   "`r` as the `[port …]` vector it should be, or a failed test — the loopback helpers answer
   `:timeout | vector`, and a `:timeout` means the exchange never happened."

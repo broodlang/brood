@@ -90,6 +90,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 
 | # | What | Status |
 |---|---|---|
+| KI-217 | **the nightly AddressSanitizer job was red for eight days and hid everything after its first crash** — a 200 000-deep message decode overflowed a 2 MiB stack between two stack checks; behind it the checker overflowed in the middle of a stacker segment, and (in a normal build too) a root thread's retirement panicked in a TLS destructor and never delivered its monitors' DOWNs | ✅ **FIXED 2026-10-09** — `crate::stack::maybe_grow` raises every red zone under ASan (one door, `clippy.toml` refuses a direct `stacker::maybe_grow`); `intern`/`symbol_hash` survive their caches' teardown. Guards: the ASan lib suite 1020/1020 (single and four threads), `a_monitor_on_a_root_thread_gets_its_down_when_the_thread_exits` (sabotage-verified red), the clippy rule (sabotage-verified) |
 | KI-216 | **a contracted function whose declared result is checked keeps a frame per tail call** — under `BROOD_CONTRACTS=1` (the `nest run`/`nest test` default), `(sig ping (int -> keyword))` mutually tail-recursive with a twin passes at 1M levels and fails cleanly at 5M against the VM's 1 048 576-frame cap, where unarmed is flat. The shim must check the result AFTER the original returns, so the original is not in tail position | ✅ **FIXED 2026-10-03 (ADR-396)** — a shim wraps its original's call in the `%contract-await` mark and first asks `(%contract-tail? ret)`: when the frame it returns into is a shim suspended at that mark awaiting an EQUAL result type, it tail-calls its original, so identical pending checks collapse to one (Racket's approach). Unequal types never collapse; the tree-walker and nested runs answer `false` and check as before. Guard `contracts_mode.rs` `return_checked_tail_calls_collapse_and_still_check` (2M levels at tiers 1 and 2, a deep violation, both narrowing directions) — sabotage-verified both ways: a probe that never collapses reds the flat case, one that always does reds `narrow-inner` |
 | KI-214 | **`brood-lsp` aborted on one header: `Content-Length: 99999999999` allocated that many bytes** — `lsp_server::Connection::stdio()` reads whatever length a client declares, so any client (or a stray byte in the pipe) could take the server down with `memory allocation of 99999999999 bytes failed` | ✅ **FIXED 2026-09-30** — the server owns its stdio framing (`stdio_capped`): a length past 64 MiB, negative, absent or unparsable is a protocol error; the crate's message type and exit rule are unchanged. Guard `crates/lsp/src/main.rs` `frame_cap_tests` (a frame one byte over the cap is refused before its body is read) — deterministic |
 | KI-215 | **`nest` entered a symlinked directory under `src/`: `src/up -> ..` made `nest check` report 202 phantom files under `src/up/src/up/…` before failing on the path** — `project/collect-sources` recursed on `file/dir?`, which follows the link (KI-209's rule, in the project tool) | ✅ **FIXED 2026-09-30** — a symlinked directory is neither entered nor listed as a source. Guard `tests/robustness_limits_test.blsp` "the project source collector and a symlink to a directory" — sabotage-verified (the phantom paths return) |
@@ -13321,3 +13322,38 @@ outermost function where the tree-walker names the innermost. Guard: `contracts_
 `return_checked_tail_calls_collapse_and_still_check` — 2M levels at tiers 1 and 2, a
 violation at the bottom of a chain, and both narrowing directions (`narrow` under `wide`,
 `outer` over `inner`), sabotage-verified both ways.
+
+## KI-217 — the nightly AddressSanitizer job was red for eight days and hid everything behind its first crash ✅ FIXED 2026-10-09
+
+**Symptom.** Nightly `AddressSanitizer (kernel tests)` failed every night from 2026-10-01:
+`ERROR: AddressSanitizer: stack-overflow` in `brood-<hash>` (`-p brood --lib`), unsymbolized.
+The test running was `dist::wire::tests::a_deeply_nested_message_round_trips_on_a_small_stack`
+— the only wire test that never printed `ok`; its 2 MiB thread was the overflowing T115.
+
+**Cause.** Every recursive walker calls `stacker::maybe_grow(red_zone, segment, …)`, a promise
+that the next step's frames fit in `red_zone`. That promise is about frame SIZES, which the
+build decides: ASan gives every local its own slot plus redzones. The wire decoder checks every
+32nd level, and 32 instrumented levels outran 64 KiB on a 2 MiB thread. Behind that crash, with
+it fixed, the same mistake in the checker: `seq_aware_call_ty` is 4 KiB in a release build and
+94 KiB under ASan — one frame past its 64 KiB red zone — which surfaced as a stack overflow, a
+TLS "unknown-crash", and once a SEGV in Cranelift's optimiser on the JIT thread, depending on
+which thread and test hit it. Separately, and in every build: a root thread's `RootCtxGuard`
+retires its pid from a TLS destructor and interns the exit reason; with the thread's symbol
+cache destroyed first, `intern` panicked ("cannot access a Thread Local Storage value during or
+after destruction"), the guard's `catch_unwind` swallowed it, and retirement stopped before
+`retire_pid_tail` — a monitor on that thread never got its DOWN.
+
+**Why it survived.** ASan is nightly-only and the job stops at its first failure, so after
+2026-10-01 nothing behind the decoder test ran under ASan at all. The TLS panic printed but its
+test passed — the panic was caught, and no test asserted what retirement does after the intern.
+
+**Fix.** `crate::stack::maybe_grow` is the one door to `stacker`: under `--cfg brood_asan` it
+raises every red zone to 1 MiB and every segment to 8 MiB; `clippy.toml` refuses a direct
+`stacker::maybe_grow`. `intern` and `symbol_hash` use `try_with` and fall back to the global
+tables when their caches are gone.
+
+**Guard.** The ASan lib suite, 1020/1020 single-threaded and at four threads (it crashed in
+every configuration before). `process::scheduler::root_ctx_tests::
+a_monitor_on_a_root_thread_gets_its_down_when_the_thread_exits` — red with `with` restored
+(`mailbox_len` 0, not 1). The clippy rule — a restored direct call is `error: use of a
+disallowed method stacker::maybe_grow`.

@@ -467,7 +467,7 @@ fn is_std_namespace(namespace: Option<&str>) -> bool {
 /// functions reduced to `fn` (their identity is the defining file's business, and a
 /// printed closure is not stable).
 fn canonical(heap: &Heap, v: Value) -> String {
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || match v {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || match v {
         Value::Map(id) => {
             let mut entries: Vec<String> = heap
                 .map_entries(id)

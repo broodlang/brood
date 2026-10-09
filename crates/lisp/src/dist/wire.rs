@@ -725,6 +725,10 @@ pub(crate) fn decode_msg(r: &mut Cursor<Vec<u8>>) -> io::Result<Message> {
     decode_msg_at(r, 0)
 }
 
+/// The decoder checks the stack every 32nd level, so `process::grow`'s red zone must
+/// hold 32 levels of `decode_msg_at_inner` — it does at 64 KiB in an ordinary build,
+/// and `crate::stack` raises it for AddressSanitizer's larger frames (a 200 000-deep
+/// decode overflowed a 2 MiB stack between two checks there, from 2026-10-01).
 fn decode_msg_at(r: &mut Cursor<Vec<u8>>, depth: u32) -> io::Result<Message> {
     if depth % 32 == 31 {
         crate::process::grow(|| decode_msg_at_inner(r, depth))

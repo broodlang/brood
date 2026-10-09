@@ -919,7 +919,7 @@ pub(crate) fn compile_node(
     // compound step grows the native stack when it is near its end. An atom pays
     // nothing. Compile-time only: the compiled arm is cached and shared.
     if matches!(form.unpack(), ValueRef::Pair(_)) {
-        stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || {
+        crate::stack::maybe_grow(128 * 1024, 2 * 1024 * 1024, || {
             compile_node_inner(heap, form, scope, tail)
         })
     } else {

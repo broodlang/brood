@@ -334,7 +334,7 @@ fn defn_arities(heap: &Heap, forms: &[Value]) -> HashMap<String, Option<usize>> 
 
 fn collect_arity(heap: &Heap, form: Value, out: &mut HashMap<String, Option<usize>>) {
     // Deep-form stack safety — the one walker in this file that was not wrapped.
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         collect_arity_inner(heap, form, out)
     })
 }
@@ -453,7 +453,7 @@ fn fn_last_body(heap: &Heap, v: Value) -> Option<Value> {
 /// `(%dispatch *impls* (quote [A op]) id)` (the op-key at index 2, ADR-172 §7's inline
 /// cache); the older `(impl-for (quote [A op]) id)` carried it at index 1.
 fn find_op_key(heap: &Heap, form: Value) -> Option<(String, String)> {
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         let items = list_items(heap, form)?;
         if let Some(&Value::Sym(h)) = items.first() {
             let opkey_idx = match sym_name(Value::Sym(h)).as_deref() {
@@ -520,7 +520,7 @@ fn collect_ability_defs(
     ambiguous: &mut HashSet<value::Symbol>,
     collisions: &mut Vec<(Option<Pos>, String)>,
 ) {
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
             return;
         };
@@ -577,7 +577,7 @@ fn collect_register_impls(
     impls: &mut HashSet<(String, String, String)>,
     defaults: &mut HashSet<(String, String)>,
 ) {
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
             return;
         };
@@ -613,7 +613,7 @@ fn collect_register_impls(
 /// id as implementing **every** op of the ability (ADR-185) — so a derived member satisfies
 /// call-site missing-impl and `:sealed` exhaustiveness without running the recipe.
 fn collect_derive_into(heap: &Heap, form: Value, out: &mut Vec<(String, String)>) {
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
             return;
         };
@@ -1047,7 +1047,7 @@ fn collect_register_ability(
     params: &mut HashMap<(String, String), Vec<Option<crate::types::Ty>>>,
     provided: &mut HashSet<(String, String)>,
 ) {
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
             return;
         };
@@ -1091,7 +1091,7 @@ fn collect_register_ability(
 
 /// Collect `(…/register-sealed (quote A) (list :id …))` → ability A's sealed member ids.
 fn collect_register_sealed(heap: &Heap, form: Value, out: &mut HashMap<String, Vec<String>>) {
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
             return;
         };
@@ -1130,7 +1130,7 @@ fn collect_register_ability_requires(
     form: Value,
     out: &mut HashMap<String, Vec<String>>,
 ) {
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
             return;
         };
@@ -1307,7 +1307,7 @@ fn collect_register_types(
     file_ns: Option<&str>,
     out: &mut std::collections::HashMap<String, Value>,
 ) {
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
             return;
         };
@@ -1340,7 +1340,7 @@ fn collect_register_types(
 /// is a BARE keyword here, unlike `%register-sealed`'s quoted ability name, so it is read
 /// directly rather than through `unquote`.
 fn collect_record_registers(heap: &Heap, form: Value, out: &mut std::collections::HashSet<String>) {
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
             return;
         };
@@ -1489,7 +1489,7 @@ fn walk_ability_calls(
     info: &AbilityInfo,
     out: &mut Vec<(Option<Pos>, String)>,
 ) {
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
             return;
         };
@@ -1667,7 +1667,7 @@ fn multi_missing_warning(mname: &str, tuple: &[String]) -> String {
 /// emits `(defn NAME (& args) (let (… (multi-resolve (quote NAME) key)) …))`, so the body
 /// carries a `(multi-resolve (quote NAME) …)` — the fingerprint, mirroring `find_op_key`.
 fn find_multi_name(heap: &Heap, form: Value) -> Option<String> {
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         let items = list_items(heap, form)?;
         if let Some(&Value::Sym(h)) = items.first() {
             if sym_name(Value::Sym(h)).as_deref() == Some(kw::MULTI_RESOLVE) {
@@ -1692,7 +1692,7 @@ fn collect_multi_defs(
     generics: &mut HashMap<value::Symbol, String>,
     ctors: &mut HashMap<value::Symbol, String>,
 ) {
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
             return;
         };
@@ -1728,7 +1728,7 @@ fn collect_register_methods(
     methods: &mut HashMap<String, HashSet<Vec<String>>>,
     defaults: &mut HashSet<String>,
 ) {
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
             return;
         };
@@ -1876,7 +1876,7 @@ fn collect_register_multi(
     algebras: &mut HashMap<String, String>,
     rets: &mut HashMap<String, crate::types::Ty>,
 ) {
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
             return;
         };
@@ -2096,7 +2096,7 @@ fn walk_multi_calls(
     info: &MultiInfo,
     out: &mut Vec<(Option<Pos>, String)>,
 ) {
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
             return;
         };

@@ -368,7 +368,7 @@ fn hygiene_rename(heap: &mut Heap, template: Value) -> Value {
 }
 
 fn hyg_walk(heap: &mut Heap, v: Value, scope: &[(value::Symbol, value::Symbol)]) -> Value {
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || hyg_walk_inner(heap, v, scope))
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || hyg_walk_inner(heap, v, scope))
 }
 
 fn hyg_walk_inner(heap: &mut Heap, v: Value, scope: &[(value::Symbol, value::Symbol)]) -> Value {
@@ -604,7 +604,7 @@ fn hyg_param_list(heap: &mut Heap, params: Value, inner: &mut HygScope) -> Value
 /// to the runtime expand path (fresh gensyms per expansion). Skips `quote`/`unquote`/
 /// `quasiquote` subtrees (a `let` in caller code or quoted data isn't the template's).
 fn template_introduces_binder(heap: &Heap, v: Value) -> bool {
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         template_introduces_binder_inner(heap, v)
     })
 }
@@ -1502,7 +1502,7 @@ fn skips_as_data(heap: &Heap, form: Value) -> bool {
 }
 
 fn has_root_escape(heap: &Heap, form: Value) -> bool {
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         if skips_as_data(heap, form) {
             return false;
         }
@@ -1517,7 +1517,7 @@ fn has_root_escape(heap: &Heap, form: Value) -> bool {
 }
 
 fn rewrite_root_escapes(heap: &mut Heap, form: Value) -> Value {
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         if skips_as_data(heap, form) {
             return form;
         }
@@ -1542,7 +1542,7 @@ fn rewrite_root_escapes(heap: &mut Heap, form: Value) -> Value {
 
 fn resolve_walk(heap: &mut Heap, form: Value, ns_name: &str, locals: &[value::Symbol]) -> Value {
     // Same deep-form stack safety as macroexpand_all_depth above.
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         resolve_walk_inner(heap, form, ns_name, locals)
     })
 }
@@ -2857,7 +2857,7 @@ fn macroexpand_all_depth(heap: &mut Heap, form: Value, env: EnvId, depth: u32) -
     // heap-backed segments instead (the stacker remedy the deep-VALUE walkers
     // got on 2026-07-20, extended to the code walkers) — the fast path is a
     // couple of compares, and depth stays structurally bounded by the form.
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         macroexpand_all_depth_inner(heap, form, env, depth)
     })
 }
@@ -2890,7 +2890,7 @@ fn macroexpand_all_depth_step(heap: &mut Heap, form: Value, env: EnvId, depth: u
     // Every 32 levels, make sure the next 32 fit: the step recurses once per nesting
     // level and re-enters `eval` for each macro application on the way.
     if depth % 32 == 31 {
-        stacker::maybe_grow(256 * 1024, 4 * 1024 * 1024, || {
+        crate::stack::maybe_grow(256 * 1024, 4 * 1024 * 1024, || {
             macroexpand_all_depth_step_inner(heap, form, env, depth)
         })
     } else {

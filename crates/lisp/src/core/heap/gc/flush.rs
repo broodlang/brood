@@ -339,7 +339,7 @@ pub(super) fn flush_value(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, 
     // Deep-car-nesting guard — see `WALKER_RED_ZONE`. The GC copies live values
     // at every collection, so a deep value must survive the walk regardless of
     // how much native stack the collecting thread has left.
-    stacker::maybe_grow(WALKER_RED_ZONE, WALKER_STACK_CHUNK, || {
+    crate::stack::maybe_grow(WALKER_RED_ZONE, WALKER_STACK_CHUNK, || {
         flush_value_grown(old, new, fwd, v)
     })
 }

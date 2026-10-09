@@ -277,7 +277,7 @@ fn alias_ty(heap: &Heap, name: &str) -> Option<Ty> {
     };
     REC_BOUND.with(|b| b.borrow_mut().extend(bound.iter().copied()));
     ALIASES_EXPANDING.with(|v| v.borrow_mut().push(qualified));
-    let ty = stacker::maybe_grow(64 * 1024, 1024 * 1024, || parse_type(heap, form));
+    let ty = crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || parse_type(heap, form));
     ALIASES_EXPANDING.with(|v| {
         v.borrow_mut().pop();
     });

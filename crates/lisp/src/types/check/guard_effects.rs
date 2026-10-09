@@ -95,7 +95,7 @@ const CLAUSE_FORMS: &[&str] = &["match", "match*", "receive", "case"];
 /// read generously (every symbol in a pattern counts); a name wrongly counted as bound only
 /// costs a missed warning, never a false one.
 fn walk(heap: &Heap, form: Value, scope: &HashSet<String>, out: &mut Vec<(Option<Pos>, String)>) {
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
             if let Value::Vector(id) = form {
                 for &it in heap.vector(id).iter() {
@@ -186,7 +186,7 @@ fn binding_targets(heap: &Heap, bindings: Value) -> Vec<Value> {
 
 /// Every symbol anywhere in `form` (a parameter list or a pattern), by name.
 fn collect_symbols(heap: &Heap, form: Value, out: &mut HashSet<String>) {
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || match form {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || match form {
         Value::Sym(symbol) => {
             out.insert(value::symbol_name(symbol));
         }
@@ -212,7 +212,7 @@ fn collect_symbols(heap: &Heap, form: Value, out: &mut HashSet<String>) {
 
 /// Every name the file defines with a `def`-family form, at any depth.
 fn collect_defined_names(heap: &Heap, form: Value, out: &mut HashSet<String>) {
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
             return;
         };
@@ -259,7 +259,7 @@ fn lint_guard(
 /// a head `scope` binds — that name is not the primitive.
 fn effectful_head(heap: &Heap, form: Value, scope: &HashSet<String>) -> Option<String> {
     // Deep-form stack safety: a generated guard is as deep as its generator made it.
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         effectful_head_inner(heap, form, scope)
     })
 }

@@ -37,8 +37,9 @@ pub const MAX_TAB_WIDTH: usize = 1024;
 
 /// The largest starting column the layout functions accept. Columns are summed as the
 /// clusters advance, so the cap keeps that sum far from overflow: from `i64::MAX` a
-/// three-cluster string's width wrapped to `i64::MIN`.
-pub const MAX_START_COLUMN: usize = 1 << 32;
+/// three-cluster string's width wrapped to `i64::MIN`. 2^30, not more: it must fit a
+/// 32-bit `usize` (the wasm32 playground) with room left for the clusters' widths.
+pub const MAX_START_COLUMN: usize = 1 << 30;
 
 /// The cells a tab at column `col` spans to reach the next stop of `tab_width`.
 fn tab_span(col: usize, tab_width: usize) -> usize {

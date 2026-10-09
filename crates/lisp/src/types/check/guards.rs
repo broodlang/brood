@@ -247,7 +247,7 @@ const MAX_PATH_KEYS: usize = 32;
 /// deferred to the plain [`guard_assertion`]. Mirrors that function's structure.
 pub(super) fn path_guard_assertion(heap: &Heap, test: Value) -> Option<PathGuard> {
     // Deep-form stack safety: `(not (not (not …)))` recurses one frame per `not`.
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         path_guard_assertion_inner(heap, test)
     })
 }
@@ -349,7 +349,7 @@ fn bare_path_guard(heap: &Heap, test: Value) -> Option<PathGuard> {
 pub(super) fn guard_assertion(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Guard> {
     // Deep-form stack safety: recurses on `(not …)`, from `check_if` — 3 677 frames
     // deep on the negated-guard test before this wrap.
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         guard_assertion_inner(heap, test, ctx)
     })
 }
@@ -1519,7 +1519,7 @@ fn comparison_facts(heap: &Heap, test: Value, ctx: &Ctx) -> Option<CmpFacts> {
 /// conjuncts), every disjunct of an `or`-expansion (else-side only).
 pub(super) fn test_comparison_facts(heap: &Heap, test: Value, ctx: &Ctx) -> CmpFacts {
     // Deep-form stack safety, as `guard_assertion`.
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         test_comparison_facts_inner(heap, test, ctx)
     })
 }

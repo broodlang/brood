@@ -311,7 +311,7 @@ impl Heap {
         ) {
             return self.hash_value_into_grown(v, h);
         }
-        stacker::maybe_grow(WALKER_RED_ZONE, WALKER_STACK_CHUNK, || {
+        crate::stack::maybe_grow(WALKER_RED_ZONE, WALKER_STACK_CHUNK, || {
             self.hash_value_into_grown(v, h)
         })
     }
@@ -653,7 +653,7 @@ impl Heap {
             _ => {}
         }
         // Deep-car-nesting guard — see `WALKER_RED_ZONE`.
-        stacker::maybe_grow(WALKER_RED_ZONE, WALKER_STACK_CHUNK, || {
+        crate::stack::maybe_grow(WALKER_RED_ZONE, WALKER_STACK_CHUNK, || {
             self.equal_grown(a, b)
         })
     }
@@ -879,7 +879,7 @@ impl Heap {
             (ValueRef::Float(x), ValueRef::Float(y)) => return float_total_cmp(x, y),
             _ => {}
         }
-        stacker::maybe_grow(WALKER_RED_ZONE, WALKER_STACK_CHUNK, || {
+        crate::stack::maybe_grow(WALKER_RED_ZONE, WALKER_STACK_CHUNK, || {
             self.value_cmp_grown(a, b)
         })
     }

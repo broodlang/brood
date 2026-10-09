@@ -1614,6 +1614,36 @@ mod root_ctx_tests {
         }
     }
 
+    /// A root context's retirement runs to the end when the thread's OTHER thread-locals
+    /// are already gone. It runs in `RootCtxGuard`'s destructor and interns the exit
+    /// reason; with the symbol cache destroyed first (this thread made its root context
+    /// BEFORE first interning, so the cache was registered later and is torn down
+    /// earlier) `intern` panicked with "cannot access a Thread Local Storage value during
+    /// or after destruction", the guard swallowed it, and retirement stopped short of
+    /// `retire_pid_tail` — so a monitor on the thread never got its DOWN.
+    #[test]
+    fn a_monitor_on_a_root_thread_gets_its_down_when_the_thread_exits() {
+        let watcher = ensure_ctx().pid;
+        let (pid_tx, pid_rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            let pid = ensure_ctx().pid;
+            // First intern on this thread, after the root context exists.
+            let _ = crate::core::value::intern("root-ctx-retire-test-name");
+            pid_tx.send(pid).unwrap();
+            go_rx.recv().unwrap();
+        });
+        let target = pid_rx.recv().unwrap();
+        crate::process::monitor::monitor(target);
+        go_tx.send(()).unwrap();
+        thread.join().expect("root-ctx thread");
+        assert_eq!(
+            crate::process::mailbox::mailbox_len(watcher),
+            Some(1),
+            "the root thread's exit must deliver the watcher's DOWN"
+        );
+    }
+
     /// The explicit form, for a host that recycles a long-lived thread and wants the
     /// process-table entry gone at a known point: retiring unbinds the ctx, so the next
     /// `self` mints a fresh pid rather than handing back a deregistered one.

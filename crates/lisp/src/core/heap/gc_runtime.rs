@@ -1662,7 +1662,7 @@ fn flush_rt_value(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, v:
     // ran the thread into its guard page — an abort, not a catchable error. RT compaction
     // fires at auto-safepoints (ADR-091), so the collecting thread's remaining stack is
     // arbitrary; grow into heap-backed segments rather than assume there is room.
-    stacker::maybe_grow(WALKER_RED_ZONE, WALKER_STACK_CHUNK, || {
+    crate::stack::maybe_grow(WALKER_RED_ZONE, WALKER_STACK_CHUNK, || {
         flush_rt_value_grown(old, new, fwd, v)
     })
 }

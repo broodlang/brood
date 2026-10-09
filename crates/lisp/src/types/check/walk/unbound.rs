@@ -220,7 +220,7 @@ pub(in crate::types::check) fn resolves_to_macro(heap: &Heap, ctx: &Ctx, s: Symb
 /// is `quote`/`quasiquote`.
 pub(in crate::types::check) fn collect_def_names(heap: &Heap, form: Value, ctx: &mut Ctx) {
     // Deep-form stack safety — same stacker remedy as check_into above.
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         collect_def_names_inner(heap, form, ctx)
     })
 }

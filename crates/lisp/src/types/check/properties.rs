@@ -169,7 +169,7 @@ fn collect_fn_defs(
     allowed: &mut HashMap<Symbol, Vec<String>>,
 ) {
     // Deep-form stack safety: a `(do (do …))` chain is as deep as its generator made it.
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         collect_fn_defs_inner(heap, form, under, out, allowed)
     })
 }
@@ -352,7 +352,7 @@ impl Purity<'_> {
     /// The first effect `form` reaches, with `locals` the names bound around it (a call
     /// through a local is an unknown callee, not an effect).
     fn effect_in(&mut self, form: Value, locals: &HashSet<Symbol>) -> Option<String> {
-        stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
             self.effect_in_inner(form, locals)
         })
     }

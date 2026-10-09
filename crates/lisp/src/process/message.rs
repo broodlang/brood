@@ -156,7 +156,7 @@ pub enum Message {
 /// nothing). Before 2026-09-30 the serialiser refused anything past 256 levels instead,
 /// which made a persistent stack of 300 elements unsendable and un-tallyable.
 pub(crate) fn grow<R>(f: impl FnOnce() -> R) -> R {
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, f)
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, f)
 }
 
 impl Clone for Message {

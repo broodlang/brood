@@ -98,7 +98,7 @@ impl Heap {
     /// (KI-95).
     fn promote_in(&self, v: Value, fwd: &mut PromoteForward) -> Value {
         // Deep-car-nesting guard — see `WALKER_RED_ZONE`.
-        stacker::maybe_grow(WALKER_RED_ZONE, WALKER_STACK_CHUNK, || {
+        crate::stack::maybe_grow(WALKER_RED_ZONE, WALKER_STACK_CHUNK, || {
             self.promote_in_grown(v, fwd)
         })
     }

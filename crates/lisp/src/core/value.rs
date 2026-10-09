@@ -78,11 +78,15 @@ thread_local! {
 }
 
 pub fn intern(name: &str) -> Symbol {
-    if let Some(id) = CACHE.with(|c| c.borrow().get(name).copied()) {
+    // `try_with`, not `with`: a thread-local destructor may intern after this thread's
+    // cache is already gone (a root context's `RootCtxGuard` retires the pid and interns
+    // its exit reason at thread exit, and TLS destruction order is unspecified). The
+    // global table answers the same id, so a missing cache only costs the lock.
+    if let Ok(Some(id)) = CACHE.try_with(|c| c.borrow().get(name).copied()) {
         return id;
     }
     let id = intern_global(name);
-    CACHE.with(|c| c.borrow_mut().insert(name.to_string(), id));
+    let _ = CACHE.try_with(|c| c.borrow_mut().insert(name.to_string(), id));
     id
 }
 
@@ -141,7 +145,9 @@ fn hash_name(name: &str) -> u64 {
 #[inline]
 pub fn symbol_hash(sym: Symbol) -> u64 {
     let idx = sym as usize;
-    if let Some(h) = HASH_CACHE.with(|c| c.borrow().get(idx).copied()) {
+    // `try_with`: like `intern`, this can run from a thread-local destructor after the
+    // cache is gone; the global table answers then.
+    if let Ok(Some(h)) = HASH_CACHE.try_with(|c| c.borrow().get(idx).copied()) {
         if h != 0 {
             return h;
         }
@@ -154,7 +160,7 @@ fn symbol_hash_slow(idx: usize, sym: Symbol) -> u64 {
     // A sentinel / non-symbolic head can reach here through a compound hash; fall back to
     // the id rather than panicking in a hash function.
     let h = NAME_HASHES.get(idx).copied().unwrap_or(sym as u64);
-    HASH_CACHE.with(|c| {
+    let _ = HASH_CACHE.try_with(|c| {
         let mut c = c.borrow_mut();
         if c.len() <= idx {
             c.resize(idx + 1, 0);

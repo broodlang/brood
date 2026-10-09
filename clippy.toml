@@ -1,0 +1,3 @@
+disallowed-methods = [
+    { path = "stacker::maybe_grow", reason = "call `crate::stack::maybe_grow`: it raises the red zone to fit AddressSanitizer's larger frames" },
+]

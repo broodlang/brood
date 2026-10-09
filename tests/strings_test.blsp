@@ -125,7 +125,10 @@
     (assert-error (string/display-width "a\tb" 9223372036854775807))
     (assert-error (string/expand-tabs "\t" 0 100000000000))
     (assert-error (string/width->index "a\tb" 1 0 100000000000))
-    (assert= (string/expand-tabs "\tx" 0 1024) (str (string/repeat " " 1024) "x"))))
+    (assert= (string/expand-tabs "\tx" 0 1024) (str (string/repeat " " 1024) "x"))
+    ;; The column cap is 2^30 — it must fit a 32-bit usize (the wasm32 playground).
+    (assert= (string/display-width "a" 1073741824) 1)
+    (assert-error (string/display-width "a" 1073741825))))
 
 (describe "string/width->index — a display cell back to the character on it"
   (test "ASCII is the identity, clamped to the length"

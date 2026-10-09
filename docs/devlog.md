@@ -16586,3 +16586,22 @@ link (it would also tear down live links). Both are argued in the review record.
 **Perf gate needed elsewhere** (no benchmarks on this machine): the self-call fix touches
 frame entry and the first back edge per activation, and every closure creation now draws an
 identity from a thread-local block — `make ab` and `make ab-vm` before this ships.
+
+## 2026-10-09 — the review's CI fallout, and the nightly ASan job's eight days of red (KI-217)
+
+The review's first CI run was red in three jobs, each a gate the local runs had not reached:
+the wasm32 playground (the new `MAX_START_COLUMN` was `1 << 32`, which does not compile for a
+32-bit `usize` — now 2^30, bounded as an `i64` before the cast), and the whole-suite ratchets
+in both suite jobs (`*http-max-body-bytes*` unrecorded in `docs/bare-names.md`; `http_test`'s
+new `brood-http-` temp prefix never purged). Everything else in the 1831-test suite passed in
+both the VM and the tree-walker jobs.
+
+Looking at the nightly for the full-suite verdict found it red since 2026-10-01 in the ASan job
+— and the job stops at its first crash, so nothing behind that test had run under ASan for
+eight days. Reproduced locally with a nightly toolchain: four symptoms (a decoder overflow, a
+checker overflow, a TLS "unknown-crash", a SEGV inside Cranelift) were one cause — red zones
+sized for release frames, which ASan makes several times larger — and are fixed in one place,
+`crate::stack::maybe_grow`, now the only door to `stacker` (clippy enforces it). A fifth was a
+real bug in every build: a root thread's retirement interned from a TLS destructor after the
+symbol cache was gone, panicked, and never delivered its monitors' DOWNs. KI-217 has the
+detail; the ASan lib suite is 1020/1020 at one and four threads.

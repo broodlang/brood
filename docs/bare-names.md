@@ -71,6 +71,7 @@ Dynamic variables (`defdyn`) — earmuffed, so they cannot be mistaken for ordin
 - `*fuzzy-scorer*`
 - `*fuzzy-worker-timeout-ms*`
 - `*fuzzy-workers*`
+- `*http-max-body-bytes*`
 - `*http-max-head-bytes*`
 - `*http-max-response-bytes*`
 - `*lineedit-keymap*`

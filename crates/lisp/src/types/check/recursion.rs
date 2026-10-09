@@ -34,7 +34,7 @@ pub(super) fn check_recursion(heap: &Heap, form: Value, out: &mut Vec<(Option<Po
     // Deep-form stack safety — the same stacker remedy as walk.rs's
     // check_into/collect_def_names (host-panic hardening, 2026-07-23).
     let before = out.len();
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         check_recursion_inner(heap, form, out)
     });
     // One fault, one diagnostic. A pattern-clause `defn` is lowered to `match*`
@@ -201,7 +201,7 @@ fn walk(
     enclosing: Option<Pos>,
     out: &mut Vec<(Option<Pos>, String)>,
 ) {
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         walk_inner(heap, form, tail, name, enclosing, out)
     })
 }

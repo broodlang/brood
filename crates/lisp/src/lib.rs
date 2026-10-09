@@ -70,6 +70,7 @@ pub mod introspect; // tooling-facing queries on a live Interp (LSP today, MCP n
 pub mod jit; // tier-1 template JIT via Cranelift (feature "jit") — ADR-101, docs/value-repr.md
 pub mod process; // the green-process scheduler
 pub mod renames; // the rename ledger: where a deliberately renamed public name went (ADR-304)
+pub mod stack; // native-stack growth for the recursive walkers: the one door to `stacker`
 
 use std::sync::Arc;
 

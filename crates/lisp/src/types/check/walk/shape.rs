@@ -73,7 +73,7 @@ pub(in crate::types::check) fn sym_appears_in(heap: &Heap, form: Value, sym: Sym
 /// lints to build the full reference set of a file in one pass.
 pub(super) fn collect_syms_into(heap: &Heap, form: Value, out: &mut HashSet<Symbol>) {
     // Deep-form stack safety — same stacker remedy as the walkers above.
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         collect_syms_into_inner(heap, form, out)
     })
 }

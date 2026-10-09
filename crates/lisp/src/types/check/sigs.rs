@@ -2244,7 +2244,7 @@ fn domain_of(
     scope: &DomainScope,
     ctx: &Ctx,
 ) -> Domain {
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         domain_of_inner(heap, form, params, scope, ctx)
     })
 }
@@ -3659,7 +3659,7 @@ fn collect_form_sites(
         /// other body walkers do: this runs over EVERY file, and a macro can construct a
         /// body deeper than the reader would ever read.
         fn walk(&mut self, form: Value, scope: &Ctx, def_of: Option<Symbol>) {
-            stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+            crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
                 self.walk_inner(form, scope, def_of)
             })
         }

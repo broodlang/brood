@@ -47,7 +47,7 @@ pub(super) fn check_discarded_catches(
 
 fn walk(heap: &Heap, form: Value, out: &mut Vec<(Option<Pos>, String)>) {
     // Deep-form stack safety — the same stacker remedy as the other raw-form passes.
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || walk_inner(heap, form, out))
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || walk_inner(heap, form, out))
 }
 
 fn walk_inner(heap: &Heap, form: Value, out: &mut Vec<(Option<Pos>, String)>) {
