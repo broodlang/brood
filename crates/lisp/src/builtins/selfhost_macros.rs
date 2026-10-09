@@ -484,8 +484,11 @@ pub(super) fn check_file_deps(args: &[Value], _env: EnvId, heap: &mut Heap) -> L
     // safepoint, so `dep_keys`/`fp_val`/`warns` stay live without extra rooting
     // (same discipline as `check_file_builtin`).
     let required = required_mods_arg(heap, arg(args, 1));
+    // `path` is the current file for the walk, as in `check_file_at`.
+    let previous = heap.set_current_file(Some(path.clone()));
     let (warnings, dep_keys) =
         crate::types::check::check_file_with_deps_ext(heap, &just_forms, &required);
+    heap.set_current_file(previous);
     let fp = crate::types::check::deps_fingerprint(heap, dep_keys);
     let fp_val = heap.alloc_string(&fp);
     let mut warn_vals = Vec::with_capacity(warnings.len());
