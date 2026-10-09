@@ -1,0 +1,156 @@
+;; Inbound subprocess backpressure (host/subprocess.rs `OutputBudget`).
+;;
+;; A child's stdout/stderr reader threads used to post every chunk to the owner's mailbox
+;; as it was read, so a chatty child (`yes`) whose owner was not receiving grew that
+;; mailbox without limit. Each reader now stops reading once ~1 MiB of its chunks sit
+;; untaken (the child then blocks on its full pipe) and resumes when the owner has
+;; consumed it below 256 KiB — with no API change.
+;;
+;; The owner of each case reads nothing for a while, then measures what actually sat in
+;; its mailbox (the chunks are counted with `proc/mailbox-size` at a quiet moment and
+;; exactly that many are taken and summed), then reads the rest: everything must arrive
+;; intact and in order, followed by `[:proc-exit …]` and `[:proc-closed …]`.
+
+(defmodule proc-backpressure-test (:use test))
+
+;; The high-water mark (1 MiB) plus one read (64 KiB) of overshoot.
+(def- high-water-bound (+ (* 1024 1024) 65536))
+
+(defn- queued-count ()
+  "How many messages sit in this process's mailbox."
+  (or (proc/mailbox-size (self)) 0))
+
+(defn- take-chunks (p n acc)
+  "Take exactly `n` queued `[:proc p d]` messages; return them oldest first."
+  (if (= n 0)
+    (reverse acc)
+    (receive
+      ([:proc ^p d] (take-chunks p (dec n) (cons d acc)))
+      (after 20000 (error "take-chunks: a counted chunk never arrived")))))
+
+(defn- queued-while-idle (p)
+  "Let the readers deliver all they will to an owner that is not reading, then take the
+  chunks sitting in the mailbox. Returns `[byte-count chunks]` (the output is ASCII, so
+  characters are bytes)."
+  (sleep 400)
+  (let (chunks (take-chunks p (queued-count) nil))
+    [(reduce chunks 0 (fn (sum chunk) (+ sum (count chunk)))) chunks]))
+
+(defn- read-to-end (p acc)
+  "Read `p`'s output to its end. Returns `[output exit-code closed-code]`; the exit must
+  follow every byte of output, and the close must follow the exit."
+  (receive
+    ([:proc ^p d] (read-to-end p (cons d acc)))
+    ([:proc-exit ^p code] (let (closed (receive ([:proc-closed ^p c] c) (after 20000 :no-close)))
+                            [(string/join (reverse acc) "") code closed]))
+    (after 20000 [(string/join (reverse acc) "") :timeout :timeout])))
+
+(defn- seq-output (n)
+  "What `seq 1 n` prints, from `os/cmd` (which does not go through the readers)."
+  (get (os/cmd "seq" ["1" (str n)]) :stdout))
+
+(defn- paused-then-drained (n)
+  "Spawn `seq 1 n` owned by the calling process, read nothing for a while, then read it
+  all. Returns `[queued-bytes intact? exit-code closed-code]`."
+  (let (p (os/spawn "seq" ["1" (str n)])
+        [queued early] (queued-while-idle p)
+        [rest code closed] (read-to-end p nil))
+    [queued (= (str (string/join early "") rest) (seq-output n)) code closed]))
+
+(defn- reader-thread-count ()
+  "How many subprocess output reader threads this OS process has, by thread name
+  (`brood-proc-reader`, which the kernel truncates to 15 characters), from /proc (Linux).
+  A count by name rather than the total, which the runtime's own threads coming and
+  going would blur."
+  (count (seq/filter (file/ls "/proc/self/task")
+           (fn (task)
+             (let (comm (try (file/slurp (str "/proc/self/task/" task "/comm")) (catch _ "")))
+               (string/starts-with? comm "brood-proc-read"))))))
+
+(defn- settle-threads (target tries)
+  "Poll until the reader thread count is back to `target` (or below), or tries run out."
+  (let (now (reader-thread-count))
+    (if (or (<= now target) (= tries 0))
+      now
+      (do (sleep 50) (settle-threads target (dec tries))))))
+
+(describe "proc backpressure: an owner that does not read"
+  :isolated (test "the owner's mailbox stays under the high-water mark; nothing is lost"
+    ;; seq 1 1000000 prints 6.9 MB.
+    (let ([queued intact code closed] (paused-then-drained 1000000))
+      (is (> queued 0))
+      (is (<= queued high-water-bound))
+      (is intact)
+      (assert= code 0)
+      (assert= closed 0)))
+  (test "a child that writes everything and exits delivers it all, then the exit"
+    ;; 4 MB through a paused reader: the child can only finish once the owner reads,
+    ;; and the exit still comes after the last byte.
+    (let ([queued intact code closed] (paused-then-drained 550000))
+      (is (<= queued high-water-bound))
+      (is intact)
+      (assert= code 0)
+      (assert= closed 0)))
+  (test "a short child's exit arrives while its output is still unread"
+    ;; Under the budget the reader never waits, so the exit is reported without the
+    ;; owner taking a single chunk — a selective receive for it alone completes.
+    (let (p (os/spawn "seq" ["1" "20000"])
+          code (receive ([:proc-exit ^p c] c) (after 20000 :timeout))
+          [rest _ _] (read-to-end-after-exit p nil))
+      (assert= code 0)
+      (assert= rest (seq-output 20000)))))
+
+(defn- read-to-end-after-exit (p acc)
+  "Like `read-to-end` once `[:proc-exit …]` has already been taken: the output already
+  queued, then the close."
+  (receive
+    ([:proc ^p d] (read-to-end-after-exit p (cons d acc)))
+    ([:proc-closed ^p c] [(string/join (reverse acc) "") c nil])
+    (after 20000 [(string/join (reverse acc) "") :timeout nil])))
+
+(describe "proc backpressure: a blocked reader is released"
+  :isolated (test "os/close while the reader waits on its budget finishes the handle"
+    (let (p (os/spawn "yes" []))
+      (sleep 400)
+      (is (>= (queued-count) 1))
+      (os/close p)
+      ;; The close must reach the reader blocked on its budget, or the handle never
+      ;; finishes and [:proc-closed …] never comes. The unread output stays queued.
+      (assert= (receive ([:proc-closed ^p c] :closed) (after 20000 :timeout)) :closed)))
+  (test "os/close releases a reader fed by a descendant that escaped the kill"
+    ;; `setsid` takes the `yes` out of the child's process group, so no kill reaches it
+    ;; and it keeps the pipe full after `sh` has exited. That exit woke the reader once
+    ;; (to drain); now only the close can release it from its budget wait. Once the
+    ;; reader lets go of the pipe, the escaped `yes` dies of SIGPIPE.
+    (let (p (os/spawn "sh" ["-c" "setsid yes &"]))
+      (assert= (receive ([:proc-exit ^p c] c) (after 20000 :timeout)) 0)
+      (sleep 400)
+      (is (>= (queued-count) 1))
+      (os/close p)
+      (assert= (receive ([:proc-closed ^p c] :closed) (after 20000 :timeout)) :closed)))
+  (test "the owner dying while its reader waits frees the reader thread"
+    (let (before (reader-thread-count)
+          me (self)
+          _ (spawn (do (os/spawn "yes" []) (sleep 400) (send me [:paused (queued-count)])))
+          paused (receive ([:paused n] n) (after 20000 :timeout)))
+      (is (int? paused))
+      (is (> paused 0))
+      ;; The owner has exited. Its child is killed and the reader, waiter and writer
+      ;; threads go with it — none may stay parked on the dead owner's budget.
+      (is (<= (settle-threads before 200) before)))))
+
+(describe "proc backpressure: across processes"
+  :isolated (test "four children in parallel owners each stay bounded and intact"
+    (let (me (self)
+          workers (map (range 4)
+                    (fn (k)
+                      (spawn (send me [:result k (paused-then-drained 300000)]))))
+          results (map (range 4)
+                    (fn (_)
+                      (receive ([:result k r] r) (after 60000 :timeout)))))
+      (assert= (count workers) 4)
+      (doseq (r results)
+        (is (vector? r))
+        (is (<= (first r) high-water-bound))
+        (is (second r))
+        (assert= (nth r 2) 0)))))

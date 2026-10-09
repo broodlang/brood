@@ -363,6 +363,19 @@ command = 'scripts/warm-boot-cache.sh'
 [scripts.setup.build-std-image]
 command = 'scripts/build-std-image.sh'
 
+## The tree-walker job's profile (`--profile tree-walker` in ci.yml): the same suite on the
+## ~10x slower engine, from the SOURCE boot, outgrew the default 15-minute budget — from
+## 2026-09-30 the first try timed out (TMT at 900 s, 6445 of 6465 tests done) in 4 of 10
+## runs and passing runs took 880-898 s, so the job was green only through its retry. A
+## longer budget for THIS job only, so a hang in the VM jobs is still killed at 15 minutes.
+## Everything else — overrides, setup scripts — comes from the default profile.
+[profile.tree-walker]
+
+[[profile.tree-walker.overrides]]
+filter = 'binary(suite)'
+slow-timeout = { period = "60s", terminate-after = 25 }
+retries = 1
+
 [[profile.default.scripts]]
 filter = 'all()'
 # nextest runs setup scripts in the order their TABLES are declared above, not in this

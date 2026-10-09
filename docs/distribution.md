@@ -136,10 +136,13 @@ Silence it with `BROOD_NO_DROP_WARN=1`.
 `TcpListener` for `host:port` — and runs an acceptor thread; `connect` dials the
 matching carrier. A single `Stream { Tcp | Unix }` enum (ADR-068) carries the
 link, so everything below is transport-agnostic. Both ends perform the
-authenticated handshake (ADR-034 v2; wire **v5**, ADR-089): a 4-byte
-magic+version prefix (`b"BRD\x05"`), then a `Hello { node, nonce, eph_pub, addr }`
-exchange (each side a fresh 32-byte nonce, a fresh **ephemeral X25519 pubkey**,
-and the address peers should dial it at), then an `Auth { mac }` exchange where
+authenticated handshake (ADR-034 v2; wire **v9**, ADR-089): a 4-byte
+magic+version prefix (`b"BRD\x09"`), then a `Hello { node, nonce, eph_pub, addr,
+incarnation }` exchange (each side a fresh 32-byte nonce, a fresh **ephemeral X25519
+pubkey**, the address peers should dial it at, and its **incarnation** — a random id the
+runtime process mints once, so a peer can tell a restart from a duplicate link; it is
+covered by the MAC, and the node name crosses as bytes, interned only after the MAC
+verifies), then an `Auth { mac }` exchange where
 each side sends `HMAC-SHA256(cookie, peer_nonce || peer_eph_pub || peer_name ||
 my_name || my_addr || my_eph_pub)`. The cookie is **never on the wire** — it's an
 HMAC key, so an eavesdropper can't replay either it or a captured `Auth`; folding
@@ -269,6 +272,18 @@ lexicographically smaller node name wins** — comparing the *spelling*
 the names match on both ends. The loser's socket is `shutdown` and never
 registered; the winner replaces any prior entry under a new generation id, and
 the displaced link tears down via the shared path (§4).
+
+**A restart is not a duplicate (2026-10-09).** The tie-break applies only between two
+links from the SAME incarnation. A link from a NEW incarnation of a linked node — the peer
+restarted, possibly after its host vanished without a FIN, so our side still holds the
+dead link — always replaces the old one, and the old life's node-down fires at once
+(`[:nodedown]` to node monitors, `:noconnection` to pid monitors and links over it)
+instead of waiting for the heartbeat (§2). Before, the restarted peer's `node/connect`
+returned and was immediately refused as a duplicate, on every retry, until heartbeat
+expiry. `connect`'s reuse check also answers from a dial-address → name table, so
+`(node/connect "ed")` to a peer that calls itself `ed@127.0.0.1` reuses the live link.
+Two live runtimes misconfigured with the SAME node name now replace each other's links
+on each dial rather than the second being refused; node names must be unique.
 
 **Perf.** Cold path: the tie-break runs only at connection setup. The hot
 `send` path is unchanged — still one uncontended `RwLock` read on `NODES` plus a

@@ -26,6 +26,14 @@
 //! than buffering without bound. Write failures surface as `[:tcp-closed …]`
 //! (the reactor discovers them after `tcp-send` has returned).
 //!
+//! **Reads are flow-controlled** too, with no API change: each `[:tcp sock data]`
+//! chunk carries a credit against its socket's [`InboundFlow`], returned when the
+//! owner's mailbox lets go of the message. Past [`INBOUND_HIGH_WATER`] undelivered
+//! the reactor stops reading that socket, so the kernel buffer fills and TCP slows
+//! the peer; it reads again once the owner has taken it below
+//! [`INBOUND_LOW_WATER`]. A peer can no longer grow its owner's mailbox without
+//! bound by sending faster than the owner consumes.
+//!
 //! A socket is a `u64` id into a control-plane registry, surfaced as the scalar
 //! handle `Value::Socket(id)` (the GC never traces or moves it). Valid across
 //! this runtime's processes; not node-portable.
@@ -41,7 +49,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::Duration;
@@ -54,7 +62,10 @@ use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection};
 
 use crate::core::value;
-use crate::process::{chunk_flush, chunk_payload, sink_pair, MailboxSink, Message};
+use crate::process::{
+    chunk_flush, chunk_payload, deliver_credited, sink_pair, CreditSource, DeliveryCredit,
+    MailboxSink, Message,
+};
 
 // ---- tunables ----
 
@@ -80,6 +91,27 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 /// sees `[:tcp-closed …]`. 16 MiB comfortably covers response bodies while
 /// bounding a slow-reader DoS.
 const OUT_CAP: usize = 16 * 1024 * 1024;
+
+/// Inbound backpressure: how much a reading socket may have delivered to its owner's
+/// mailbox and not yet had taken before the reactor stops reading it. Reads used to
+/// post every chunk the moment the socket was readable, so a peer sending faster than
+/// its owner consumed grew that mailbox without bound — a memory DoS on any server.
+/// Past this mark the socket's read interest is dropped; the kernel receive buffer
+/// fills and TCP flow control slows the peer. Measured in [`InboundFlow`] cost (payload
+/// bytes plus [`MESSAGE_COST_OVERHEAD`] per chunk), so the bound holds for a peer that
+/// sends many tiny segments as well as for one that sends large ones. Overshoot is at
+/// most one read (64 KiB).
+const INBOUND_HIGH_WATER: usize = 1024 * 1024;
+
+/// Reading resumes once the outstanding cost falls below this. Well under the high-water
+/// mark so a consumer taking one chunk at a time does not flip the socket's registration
+/// per chunk.
+const INBOUND_LOW_WATER: usize = 256 * 1024;
+
+/// What one delivered chunk costs beyond its payload bytes — roughly a queued message's
+/// envelope plus its three-element vector. Without it a peer dribbling one-byte segments
+/// could queue a million messages under a one-megabyte byte budget.
+const MESSAGE_COST_OVERHEAD: usize = 256;
 
 /// How long a closing socket may keep flushing queued outbound bytes before
 /// the reactor gives up and drops it. Bounds `tcp-close` after a large
@@ -195,6 +227,7 @@ enum Cmd {
         id: u64,
         stream: MioStream,
         sink: MailboxSink,
+        subscriber: Arc<AtomicU64>,
         binary: Arc<AtomicBool>,
     },
     /// A plaintext listener.
@@ -218,6 +251,7 @@ enum Cmd {
         id: u64,
         stream: MioStream,
         sink: MailboxSink,
+        subscriber: Arc<AtomicU64>,
         binary: Arc<AtomicBool>,
         server_name: ServerName<'static>,
         request: Vec<u8>,
@@ -226,6 +260,12 @@ enum Cmd {
     /// Start reading a passive (accepted) stream — the claim half of
     /// `tcp-controlling-process` (the subscriber cell is retargeted control-side).
     Claim { id: u64 },
+    /// A claimed stream changed owner (`tcp-controlling-process` again): give it a fresh
+    /// [`InboundFlow`], resuming it if the old one held it paused.
+    Retarget { id: u64 },
+    /// The owner consumed enough of a paused stream's chunks — read it again
+    /// ([`InboundFlow::release`]).
+    Resume { id: u64 },
     /// Queue outbound bytes.
     Send { id: u64, bytes: Vec<u8> },
     /// Arm/disarm an established stream's idle timeout (`ms` = 0 disarms).
@@ -312,6 +352,105 @@ fn tcp_error_msg(id: u64, msg: &str) -> Message {
     ])
 }
 
+// ---- inbound flow control ----
+
+/// One reading socket's inbound budget: the cost of the `[:tcp sock data]` chunks it has
+/// delivered to its owner's mailbox that the owner has not yet taken. Every data chunk
+/// carries a [`DeliveryCredit`] against this, returned when the message leaves the
+/// mailbox by any route — a `receive` takes it (selective or not), the owner dies, the
+/// pid is already gone at delivery. The reactor pauses reading at
+/// [`INBOUND_HIGH_WATER`]; the release that brings the total below
+/// [`INBOUND_LOW_WATER`] sends [`Cmd::Resume`].
+///
+/// `paused` is the hand-off between the two threads. Exactly one side clears it: the
+/// releaser (which then sends `Resume`) or the reactor's own re-check in
+/// [`pause_if_full`](InboundFlow::pause_if_full) (which then keeps reading). Both sides
+/// write one atomic and read the other, so all four accesses are `SeqCst`.
+///
+/// `tcp-controlling-process` on an already-reading socket gives it a fresh flow
+/// ([`Cmd::Retarget`]): chunks still queued at the previous owner are not the new
+/// owner's to consume, and must not hold its socket paused.
+struct InboundFlow {
+    id: u64,
+    outstanding: AtomicUsize,
+    paused: AtomicBool,
+}
+
+impl InboundFlow {
+    fn new(id: u64) -> Arc<InboundFlow> {
+        Arc::new(InboundFlow {
+            id,
+            outstanding: AtomicUsize::new(0),
+            paused: AtomicBool::new(false),
+        })
+    }
+
+    /// Charge one chunk of `bytes` payload and build the credit its message carries.
+    fn charge(self: &Arc<Self>, bytes: usize) -> DeliveryCredit {
+        let cost = bytes + MESSAGE_COST_OVERHEAD;
+        self.outstanding.fetch_add(cost, Ordering::SeqCst);
+        DeliveryCredit::new(self.clone(), cost)
+    }
+
+    fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::SeqCst)
+    }
+
+    /// Reactor side, after delivering a chunk: true when reading must stop. A consumer
+    /// may drain below the low-water mark between our load and our store — it saw
+    /// `paused` false and sent nothing — so re-check after publishing the pause and take
+    /// it back ourselves if so.
+    fn pause_if_full(&self) -> bool {
+        if self.outstanding.load(Ordering::SeqCst) < INBOUND_HIGH_WATER {
+            return false;
+        }
+        self.paused.store(true, Ordering::SeqCst);
+        if self.outstanding.load(Ordering::SeqCst) < INBOUND_LOW_WATER {
+            // Whichever side wins the swap, reading continues: if the releaser won, its
+            // `Resume` arrives later and finds a socket already reading (harmless).
+            self.paused.swap(false, Ordering::SeqCst);
+            return false;
+        }
+        true
+    }
+
+    /// Detach this flow from its socket (ownership moved): its remaining credits return
+    /// here harmlessly and never send a `Resume`. Returns whether the socket was paused.
+    fn retire(&self) -> bool {
+        self.paused.swap(false, Ordering::SeqCst)
+    }
+}
+
+impl CreditSource for InboundFlow {
+    fn release(&self, cost: usize) {
+        let before = self.outstanding.fetch_sub(cost, Ordering::SeqCst);
+        if before - cost < INBOUND_LOW_WATER
+            && self.paused.load(Ordering::SeqCst)
+            && self.paused.swap(false, Ordering::SeqCst)
+            && !REACTOR_DOWN.load(Ordering::SeqCst)
+        {
+            reactor().cmd(Cmd::Resume { id: self.id });
+        }
+    }
+}
+
+/// Deliver one inbound data chunk (`bytes` long on the wire) to the socket's current
+/// owner, charged against its flow.
+fn emit_data(
+    id: u64,
+    subscriber: &AtomicU64,
+    flow: &Arc<InboundFlow>,
+    payload: Message,
+    bytes: usize,
+) {
+    let credit = flow.charge(bytes);
+    deliver_credited(
+        subscriber.load(Ordering::Acquire),
+        tcp_data_msg(id, payload),
+        credit,
+    );
+}
+
 // ---- the data plane: per-socket reactor state ----
 
 /// Outbound queue: chunks + a head offset (the first chunk may be part-written).
@@ -361,6 +500,11 @@ impl OutQ {
 struct PlainConn {
     stream: MioStream,
     sink: MailboxSink,
+    /// The sink's subscriber cell — data chunks are delivered to it directly, with a
+    /// flow-control credit ([`emit_data`]).
+    subscriber: Arc<AtomicU64>,
+    /// Inbound backpressure: chunks delivered and not yet taken ([`InboundFlow`]).
+    flow: Arc<InboundFlow>,
     binary: Arc<AtomicBool>,
     carry: Vec<u8>,
     out: OutQ,
@@ -390,6 +534,10 @@ struct TlsConn {
     stream: MioStream,
     conn: rustls::Connection,
     sink: MailboxSink,
+    /// See [`PlainConn::subscriber`].
+    subscriber: Arc<AtomicU64>,
+    /// See [`PlainConn::flow`].
+    flow: Arc<InboundFlow>,
     binary: Arc<AtomicBool>,
     carry: Vec<u8>,
     read_done: bool,
@@ -423,6 +571,7 @@ struct TlsPending {
     stream: MioStream,
     config: Arc<ServerConfig>,
     sink: MailboxSink,
+    subscriber: Arc<AtomicU64>,
     binary: Arc<AtomicBool>,
     accepted_at: Instant,
 }
@@ -593,7 +742,7 @@ fn accept_ready(
                         },
                         owner,
                         binary: binary.clone(),
-                        subscriber: ccell,
+                        subscriber: ccell.clone(),
                         claimed: false,
                         port,
                     },
@@ -603,12 +752,15 @@ fn accept_ready(
                         stream,
                         config: config.clone(),
                         sink: csink,
+                        subscriber: ccell,
                         binary,
                         accepted_at: Instant::now(),
                     }),
                     None => Rx::Plain(PlainConn {
                         stream,
                         sink: csink,
+                        subscriber: ccell,
+                        flow: InboundFlow::new(cid),
                         binary,
                         carry: Vec::new(),
                         out: OutQ::new(),
@@ -647,7 +799,9 @@ fn accept_ready(
 
 /// Desired poll interests for a plaintext connection; `None` = deregister.
 fn plain_interests(c: &PlainConn) -> Option<Interest> {
-    let want_read = c.reading && !c.read_done;
+    // A paused socket (inbound backpressure) drops read interest; `Cmd::Resume` re-reads
+    // it explicitly, since the edge that would have announced buffered data is spent.
+    let want_read = c.reading && !c.read_done && !c.flow.is_paused();
     let want_write = !c.out.is_empty();
     match (want_read, want_write) {
         (true, true) => Some(Interest::READABLE.add(Interest::WRITABLE)),
@@ -711,7 +865,7 @@ fn drive_plain(
             return true;
         }
     }
-    if readable && c.reading && !c.read_done {
+    if readable && c.reading && !c.read_done && !c.flow.is_paused() {
         let mut buf = [0u8; 65536];
         loop {
             match c.stream.read(&mut buf) {
@@ -727,7 +881,13 @@ fn drive_plain(
                     c.last_activity = Instant::now();
                     let bin = c.binary.load(Ordering::Acquire);
                     if let Some(p) = chunk_payload(&mut c.carry, &buf[..n], bin) {
-                        c.sink.emit(tcp_data_msg(id, p));
+                        emit_data(id, &c.subscriber, &c.flow, p, n);
+                        // Inbound backpressure: stop before WouldBlock. Whatever is left
+                        // stays in the kernel buffer (and then the peer's), and
+                        // `Cmd::Resume` reads it — in order, EOF included — later.
+                        if c.flow.pause_if_full() {
+                            break;
+                        }
                     }
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
@@ -752,7 +912,8 @@ fn drive_plain(
 }
 
 fn tls_interests(c: &TlsConn) -> Option<Interest> {
-    let want_read = !c.read_done;
+    // See `plain_interests` — a paused stream drops read interest.
+    let want_read = !c.read_done && !c.flow.is_paused();
     let want_write = c.conn.wants_write();
     match (want_read, want_write) {
         (true, true) => Some(Interest::READABLE.add(Interest::WRITABLE)),
@@ -839,7 +1000,7 @@ fn drive_tls(
             return tls_finish(id, c, None);
         }
     }
-    if readable && !c.read_done {
+    if readable && !c.read_done && !c.flow.is_paused() {
         loop {
             match c.conn.read_tls(&mut c.stream) {
                 Ok(0) => {
@@ -864,12 +1025,18 @@ fn drive_tls(
                                 c.last_activity = Instant::now();
                                 let bin = c.binary.load(Ordering::Acquire);
                                 if let Some(p) = chunk_payload(&mut c.carry, &buf[..got], bin) {
-                                    c.sink.emit(tcp_data_msg(id, p));
+                                    emit_data(id, &c.subscriber, &c.flow, p, got);
                                 }
                             }
                         }
                         if io.peer_has_closed() {
                             return tls_finish(id, c, None);
+                        }
+                        // Inbound backpressure (see `drive_plain`): every decrypted byte
+                        // has been delivered, so stopping here leaves only ciphertext in
+                        // the kernel buffer for `Cmd::Resume` to read later.
+                        if c.flow.pause_if_full() {
+                            break;
                         }
                     }
                     Err(e) => return tls_finish(id, c, Some(format!("tls: {e}"))),
@@ -902,11 +1069,14 @@ fn handle_cmd(cmd: Cmd, conns: &mut HashMap<u64, Rx>, registry: &mio::Registry) 
             id,
             stream,
             sink,
+            subscriber,
             binary,
         } => {
             let mut c = PlainConn {
                 stream,
                 sink,
+                subscriber,
+                flow: InboundFlow::new(id),
                 binary,
                 carry: Vec::new(),
                 out: OutQ::new(),
@@ -965,6 +1135,7 @@ fn handle_cmd(cmd: Cmd, conns: &mut HashMap<u64, Rx>, registry: &mio::Registry) 
             id,
             stream,
             sink,
+            subscriber,
             binary,
             server_name,
             request,
@@ -985,6 +1156,8 @@ fn handle_cmd(cmd: Cmd, conns: &mut HashMap<u64, Rx>, registry: &mio::Registry) 
                         stream,
                         conn: rustls::Connection::Client(conn),
                         sink,
+                        subscriber,
+                        flow: InboundFlow::new(id),
                         binary,
                         carry: Vec::new(),
                         read_done: false,
@@ -1018,11 +1191,20 @@ fn handle_cmd(cmd: Cmd, conns: &mut HashMap<u64, Rx>, registry: &mio::Registry) 
                     conns.insert(id, Rx::Plain(c));
                 }
                 Some(Rx::TlsPending(p)) => match ServerConnection::new(p.config) {
-                    Ok(conn) => {
+                    Ok(mut conn) => {
+                        // rustls caps its outbound buffer at 64 KiB by default, and
+                        // `Cmd::Send` ignores a short `write_all`, so once a slow reader
+                        // backed the socket up every byte past that cap was DROPPED,
+                        // silently, mid-stream. The bound that belongs here is ours:
+                        // `pending_out` against `OUT_CAP` drops the connection loudly
+                        // instead (the client path lifts the cap for the same reason).
+                        conn.set_buffer_limit(None);
                         let mut c = TlsConn {
                             stream: p.stream,
                             conn: rustls::Connection::Server(conn),
                             sink: p.sink,
+                            subscriber: p.subscriber,
+                            flow: InboundFlow::new(id),
                             binary: p.binary,
                             carry: Vec::new(),
                             read_done: false,
@@ -1048,6 +1230,25 @@ fn handle_cmd(cmd: Cmd, conns: &mut HashMap<u64, Rx>, registry: &mio::Registry) 
                 None => {}
             };
         }
+        Cmd::Retarget { id } => {
+            let was_paused = match conns.get_mut(&id) {
+                Some(Rx::Plain(c)) => {
+                    let was_paused = c.flow.retire();
+                    c.flow = InboundFlow::new(id);
+                    was_paused
+                }
+                Some(Rx::Tls(c)) => {
+                    let was_paused = c.flow.retire();
+                    c.flow = InboundFlow::new(id);
+                    was_paused
+                }
+                _ => false,
+            };
+            if was_paused {
+                resume_reading(id, conns, registry);
+            }
+        }
+        Cmd::Resume { id } => resume_reading(id, conns, registry),
         Cmd::Send { id, bytes } => {
             let remove = match conns.get_mut(&id) {
                 Some(Rx::Plain(c)) => {
@@ -1150,6 +1351,31 @@ fn handle_cmd(cmd: Cmd, conns: &mut HashMap<u64, Rx>, registry: &mio::Registry) 
     }
 }
 
+/// Read a stream whose inbound flow is no longer paused. Registration is edge-triggered
+/// and the socket stopped reading before `WouldBlock`, so data already buffered in the
+/// kernel will never raise a new edge — read it now, as if readiness had fired; the
+/// drive then re-registers read interest for whatever arrives after. A stale `Resume`
+/// (socket gone, or paused again since) does nothing: the release that next brings the
+/// flow below its low-water mark sends another.
+fn resume_reading(id: u64, conns: &mut HashMap<u64, Rx>, registry: &mio::Registry) {
+    let remove = match conns.get_mut(&id) {
+        Some(Rx::Plain(c)) if !c.flow.is_paused() => {
+            // Waiting on our own owner is not idleness: don't let the time spent paused
+            // count against an armed idle timeout.
+            c.last_activity = Instant::now();
+            drive_plain(id, c, true, false, registry)
+        }
+        Some(Rx::Tls(c)) if !c.flow.is_paused() => {
+            c.last_activity = Instant::now();
+            drive_tls(id, c, true, false, registry)
+        }
+        _ => false,
+    };
+    if remove {
+        teardown(id, conns, registry);
+    }
+}
+
 /// Test-only trigger for the reactor death hook: panics the reactor thread from a
 /// command, exactly like a real bug in the event loop would. Debug builds only —
 /// integration tests use it to prove the death is loud (sockets failed at their
@@ -1234,8 +1460,16 @@ fn housekeep(conns: &mut HashMap<u64, Rx>, registry: &mio::Registry) {
                     // Still gated on nothing being queued outbound: a half-close is a
                     // legitimate "I am done sending, you may still reply", and reaping a
                     // connection with unwritten data would discard that reply.
+                    //
+                    // A stream paused by inbound backpressure is not idle either: bytes
+                    // are waiting on its OWNER, not on the peer, and reaping it would
+                    // truncate a stream the owner is still reading.
                     let quiet = now.duration_since(c.last_activity) >= idle;
-                    if quiet && c.out.is_empty() && (c.reading || c.read_done) {
+                    if quiet
+                        && c.out.is_empty()
+                        && (c.reading || c.read_done)
+                        && !c.flow.is_paused()
+                    {
                         idle_reaps.push(id);
                     }
                 }
@@ -1256,7 +1490,11 @@ fn housekeep(conns: &mut HashMap<u64, Rx>, registry: &mio::Registry) {
                     }
                 } else if let Some(idle) = c.idle {
                     // Handshake already done (deadline cleared) and idle past bound.
-                    if !c.read_done && now.duration_since(c.last_activity) >= idle {
+                    // Not while paused by inbound backpressure (see the plaintext arm).
+                    if !c.read_done
+                        && !c.flow.is_paused()
+                        && now.duration_since(c.last_activity) >= idle
+                    {
                         idle_reaps.push(id);
                     }
                 }
@@ -1341,7 +1579,7 @@ pub fn connect(host: &str, port: u16, subscriber: u64) -> std::io::Result<u64> {
             kind: Kind::Stream,
             owner: subscriber,
             binary: binary.clone(),
-            subscriber: cell,
+            subscriber: cell.clone(),
             claimed: true,
             port: local,
         },
@@ -1350,6 +1588,7 @@ pub fn connect(host: &str, port: u16, subscriber: u64) -> std::io::Result<u64> {
         id,
         stream,
         sink,
+        subscriber: cell,
         binary,
     });
     // Closes the race with `reactor_died`'s sweep: the flag is set before the sweep
@@ -1419,9 +1658,13 @@ pub fn controlling_process(id: u64, pid: u64) -> std::io::Result<()> {
             None => return Err(bad_socket()),
         }
     };
-    if claim {
-        reactor().cmd(Cmd::Claim { id });
-    }
+    // A first claim starts reads; a later one moves an already-reading stream to a new
+    // owner, whose inbound budget starts fresh (see `InboundFlow`).
+    reactor().cmd(if claim {
+        Cmd::Claim { id }
+    } else {
+        Cmd::Retarget { id }
+    });
     Ok(())
 }
 
@@ -1614,7 +1857,7 @@ pub fn tls_request(
             kind: Kind::TlsStream,
             owner: subscriber,
             binary: binary.clone(),
-            subscriber: cell,
+            subscriber: cell.clone(),
             claimed: true,
             port: None,
         },
@@ -1678,6 +1921,7 @@ pub fn tls_request(
                         id,
                         stream,
                         sink,
+                        subscriber: cell,
                         binary,
                         server_name,
                         request,

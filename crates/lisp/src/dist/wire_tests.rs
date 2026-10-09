@@ -15,6 +15,7 @@ fn hello_roundtrips() {
         nonce,
         eph_pub,
         addr: "tcp:127.0.0.1:9000".to_string(),
+        incarnation: 0x0123_4567_89ab_cdef,
     };
     match read_full(&f) {
         Frame::Hello {
@@ -22,11 +23,13 @@ fn hello_roundtrips() {
             nonce: n2,
             eph_pub: e2,
             addr,
+            incarnation,
         } => {
             assert_eq!(node, "alpha");
             assert_eq!(n2, nonce);
             assert_eq!(e2, eph_pub);
             assert_eq!(addr, "tcp:127.0.0.1:9000");
+            assert_eq!(incarnation, 0x0123_4567_89ab_cdef);
         }
         _ => panic!("wrong frame"),
     }

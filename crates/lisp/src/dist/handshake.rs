@@ -3,18 +3,19 @@
 //! Both ends of a fresh TCP connection drive the same four-step exchange
 //! before either accepts a steady-state frame:
 //!
-//! 1. **Magic + version** (4 bytes, `PROTOCOL_MAGIC` = `b"BRD\x05"`). A mismatch aborts before
-//!    any allocation — a stray HTTP request or port-scanner can't push us
+//! 1. **Magic + version** (4 bytes, `PROTOCOL_MAGIC`, currently `b"BRD\x09"`). A mismatch
+//!    aborts before any allocation — a stray HTTP request or port-scanner can't push us
 //!    past this point.
-//! 2. **Hello** (`{ node, nonce, addr }`) — each side announces its name, a
-//!    fresh 32-byte nonce, and the address peers should dial to reach it (for
-//!    the cluster mesh, ADR-088). The initiator writes first; the responder
-//!    reads, then writes its own. The cookie is **never** on the wire.
-//! 3. **Auth** (`{ mac }`) — each side computes
-//!    `HMAC-SHA256(cookie, peer_nonce || peer_name || 0x00 || my_name || 0x00
-//!    || my_addr)` and sends it. Same write-then-read shape as Hello. Binding
-//!    `my_addr` into the MAC means an on-path attacker can't rewrite the
-//!    advertised mesh address in a `Hello` without the cookie — the `Auth`
+//! 2. **Hello** (`{ node, nonce, eph_pub, addr, incarnation }`) — each side announces
+//!    its name, a fresh 32-byte nonce, an ephemeral DH key, the address peers should
+//!    dial to reach it (for the cluster mesh, ADR-088) and which life of the node this
+//!    is (its incarnation, so a restart is recognisable). The initiator writes first;
+//!    the responder reads, then writes its own. The cookie is **never** on the wire.
+//! 3. **Auth** (`{ mac }`) — each side computes the MAC [`compute_mac`] documents
+//!    (the peer's nonce and key, both names, its own addr, key and incarnation) and
+//!    sends it. Same write-then-read shape as Hello. Binding `my_addr` and the
+//!    incarnation into the MAC means an on-path attacker can't rewrite the advertised
+//!    mesh address, or fake a restart, in a `Hello` without the cookie — the `Auth`
 //!    check would fail.
 //! 4. The peer's `Auth` is constant-time-compared against the expected MAC.
 //!    A mismatch is `PermissionDenied`; the link never enters `NODES`.
@@ -45,14 +46,25 @@ pub(super) enum Role {
     Responder,
 }
 
+/// What a completed handshake proved about the peer, plus the session it agreed.
+pub(super) struct Authenticated {
+    /// The peer's authoritative node name — the `NODES` key.
+    pub(super) peer: Symbol,
+    /// How a third node should dial the peer (mesh gossip, ADR-088).
+    pub(super) addr: String,
+    /// Which life of `peer` this is (`dist::local_incarnation` on its side): a link
+    /// whose incarnation differs from the registered one's means the peer restarted.
+    pub(super) incarnation: u64,
+    /// The two directional ciphers for the reader and writer (ADR-089).
+    pub(super) session: Session,
+}
+
 /// Drive the four-step exchange. Returns the peer's authoritative node name, its
-/// advertised dial address, *and* the agreed encrypted [`Session`] on success —
-/// `dist::establish` registers the link under the name, stores the address for
-/// mesh gossip, and hands the session's two directional keys to the reader/writer.
-pub(super) fn handshake<S: Read + Write>(
-    stream: &mut S,
-    role: Role,
-) -> io::Result<(Symbol, String, Session)> {
+/// advertised dial address, its incarnation *and* the agreed encrypted [`Session`]
+/// on success — `dist::establish` registers the link under the name, stores the
+/// address for mesh gossip, resolves a duplicate by the incarnation, and hands the
+/// session's two directional keys to the reader/writer.
+pub(super) fn handshake<S: Read + Write>(stream: &mut S, role: Role) -> io::Result<Authenticated> {
     // Step 1: magic + version. Reject before any allocation if we don't speak
     // the same dialect.
     stream.write_all(&PROTOCOL_MAGIC)?;
@@ -80,11 +92,13 @@ pub(super) fn handshake<S: Read + Write>(
     let my_secret = ephemeral_secret()?;
     let my_eph_pub: [u8; EPH_PUB_LEN] = PublicKey::from(&my_secret).to_bytes();
     let my_name = value::symbol_name(my_name).to_string();
+    let my_incarnation = super::local_incarnation();
     let my_hello = Frame::Hello {
         node: my_name.clone(),
         nonce: my_nonce,
         eph_pub: my_eph_pub,
         addr: my_addr.clone(),
+        incarnation: my_incarnation,
     };
     let their_hello = match role {
         Role::Initiator => {
@@ -97,7 +111,13 @@ pub(super) fn handshake<S: Read + Write>(
             h
         }
     };
-    let (peer_name, peer_nonce, peer_eph_pub, peer_addr) = their_hello;
+    let PeerHello {
+        name: peer_name,
+        nonce: peer_nonce,
+        eph_pub: peer_eph_pub,
+        addr: peer_addr,
+        incarnation: peer_incarnation,
+    } = their_hello;
 
     // Step 3 + 4: MAC the *peer's* nonce + ephemeral pubkey + the names + my own
     // advertised addr + my own ephemeral pubkey; exchange and verify. The input is
@@ -114,6 +134,7 @@ pub(super) fn handshake<S: Read + Write>(
         &my_name,
         &my_addr,
         &my_eph_pub,
+        my_incarnation,
     );
     let expected_peer_mac = compute_mac(
         &cookie,
@@ -123,6 +144,7 @@ pub(super) fn handshake<S: Read + Write>(
         &peer_name,
         &peer_addr,
         &peer_eph_pub,
+        peer_incarnation,
     );
     let verify = |their_mac: &[u8; MAC_LEN]| {
         if ct_eq(their_mac, &expected_peer_mac) {
@@ -183,12 +205,24 @@ pub(super) fn handshake<S: Read + Write>(
             recv: OpenKey::new(keys.i2r),
         },
     };
-    Ok((peer_name, peer_addr, session))
+    Ok(Authenticated {
+        peer: peer_name,
+        addr: peer_addr,
+        incarnation: peer_incarnation,
+        session,
+    })
 }
 
-fn read_hello<S: Read>(
-    stream: &mut S,
-) -> io::Result<(String, [u8; NONCE_LEN], [u8; EPH_PUB_LEN], String)> {
+/// A peer's `Hello`, unauthenticated until its `Auth` verifies.
+struct PeerHello {
+    name: String,
+    nonce: [u8; NONCE_LEN],
+    eph_pub: [u8; EPH_PUB_LEN],
+    addr: String,
+    incarnation: u64,
+}
+
+fn read_hello<S: Read>(stream: &mut S) -> io::Result<PeerHello> {
     // Pre-auth: a tiny ceiling, not the 64 MiB steady-state one.
     match read_frame_capped(stream, MAX_HANDSHAKE_FRAME)? {
         Frame::Hello {
@@ -196,7 +230,14 @@ fn read_hello<S: Read>(
             nonce,
             eph_pub,
             addr,
-        } => Ok((node, nonce, eph_pub, addr)),
+            incarnation,
+        } => Ok(PeerHello {
+            name: node,
+            nonce,
+            eph_pub,
+            addr,
+            incarnation,
+        }),
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, "expected Hello")),
     }
 }
@@ -219,8 +260,13 @@ fn read_auth<S: Read>(stream: &mut S) -> io::Result<[u8; MAC_LEN]> {
 ///      value. NUL is not a legal character in a Brood symbol name (the reader
 ///      rejects it), and the address is a `unix:`/`tcp:` form with no NUL, so
 ///      the delimiters genuinely separate the fields.
-///   3. `my_eph_pub` is fixed-length and *last*, after a `0x00` delimiter closing
-///      the variable-length `my_addr`, so it can't merge with the address.
+///   3. `my_eph_pub` is fixed-length and follows a `0x00` delimiter closing the
+///      variable-length `my_addr`, so it can't merge with the address; the fixed
+///      8-byte big-endian `my_incarnation` closes the input.
+///
+/// `my_incarnation` is each side's own [`Authenticated::incarnation`]: folding it in
+/// means an on-path attacker can't rewrite it to fake a restart, which would make
+/// `dist::establish` evict the live link it had.
 ///
 /// `my_addr` is each side's *own* advertised dial address; folding it in
 /// authenticates the `Hello.addr` field the cluster mesh relies on (ADR-088), so
@@ -241,6 +287,7 @@ fn compute_mac(
     my_name: &str,
     my_addr: &str,
     my_eph_pub: &[u8; EPH_PUB_LEN],
+    my_incarnation: u64,
 ) -> [u8; MAC_LEN] {
     use hmac::{KeyInit, Mac};
     type HmacSha256 = hmac::Hmac<sha2::Sha256>;
@@ -254,6 +301,7 @@ fn compute_mac(
     mac.update(my_addr.as_bytes());
     mac.update(&[0]);
     mac.update(my_eph_pub);
+    mac.update(&my_incarnation.to_be_bytes());
     mac.finalize().into_bytes().into()
 }
 
@@ -354,15 +402,53 @@ mod tests {
         let b = "bb";
         let addr_a = "tcp:127.0.0.1:9001";
         let addr_b = "tcp:127.0.0.1:9002";
+        let incarnation_a = 11;
+        let incarnation_b = 22;
 
         // Side A computes its outgoing MAC (over B's nonce+pubkey, then its own
-        // addr+pubkey) and the MAC it expects from B — exactly the two
+        // addr+pubkey+incarnation) and the MAC it expects from B — exactly the two
         // `compute_mac` calls `handshake` performs.
-        let a_my_mac = compute_mac(cookie, &nonce_b, &eph_b, b, a, addr_a, &eph_a);
-        let a_expects_b_mac = compute_mac(cookie, &nonce_a, &eph_a, a, b, addr_b, &eph_b);
+        let a_my_mac = compute_mac(
+            cookie,
+            &nonce_b,
+            &eph_b,
+            b,
+            a,
+            addr_a,
+            &eph_a,
+            incarnation_a,
+        );
+        let a_expects_b_mac = compute_mac(
+            cookie,
+            &nonce_a,
+            &eph_a,
+            a,
+            b,
+            addr_b,
+            &eph_b,
+            incarnation_b,
+        );
         // Side B computes the symmetric pair (peer ↔ self labels flipped).
-        let b_my_mac = compute_mac(cookie, &nonce_a, &eph_a, a, b, addr_b, &eph_b);
-        let b_expects_a_mac = compute_mac(cookie, &nonce_b, &eph_b, b, a, addr_a, &eph_a);
+        let b_my_mac = compute_mac(
+            cookie,
+            &nonce_a,
+            &eph_a,
+            a,
+            b,
+            addr_b,
+            &eph_b,
+            incarnation_b,
+        );
+        let b_expects_a_mac = compute_mac(
+            cookie,
+            &nonce_b,
+            &eph_b,
+            b,
+            a,
+            addr_a,
+            &eph_a,
+            incarnation_a,
+        );
 
         // The cross-checks that the actual handshake does — each side's
         // outgoing MAC equals the other side's expectation.
@@ -372,29 +458,89 @@ mod tests {
         // A different cookie produces a different MAC (integrity).
         assert_ne!(
             a_my_mac,
-            compute_mac("other", &nonce_b, &eph_b, b, a, addr_a, &eph_a)
+            compute_mac(
+                "other",
+                &nonce_b,
+                &eph_b,
+                b,
+                a,
+                addr_a,
+                &eph_a,
+                incarnation_a
+            )
         );
         // A different peer nonce produces a different MAC (replay defence).
         assert_ne!(
             a_my_mac,
-            compute_mac(cookie, &[3u8; NONCE_LEN], &eph_b, b, a, addr_a, &eph_a)
+            compute_mac(
+                cookie,
+                &[3u8; NONCE_LEN],
+                &eph_b,
+                b,
+                a,
+                addr_a,
+                &eph_a,
+                incarnation_a
+            )
         );
         // A tampered advertised address produces a different MAC, so a MitM
         // can't rewrite where peers will later dial us (ADR-088).
         assert_ne!(
             a_my_mac,
-            compute_mac(cookie, &nonce_b, &eph_b, b, a, "tcp:evil:6666", &eph_a)
+            compute_mac(
+                cookie,
+                &nonce_b,
+                &eph_b,
+                b,
+                a,
+                "tcp:evil:6666",
+                &eph_a,
+                incarnation_a
+            )
         );
         // A swapped *peer* ephemeral pubkey produces a different MAC, so a MitM
         // can't substitute its own DH key (ADR-089) — the Auth check would fail.
         assert_ne!(
             a_my_mac,
-            compute_mac(cookie, &nonce_b, &[99u8; EPH_PUB_LEN], b, a, addr_a, &eph_a)
+            compute_mac(
+                cookie,
+                &nonce_b,
+                &[99u8; EPH_PUB_LEN],
+                b,
+                a,
+                addr_a,
+                &eph_a,
+                incarnation_a
+            )
         );
         // A swapped *own* ephemeral pubkey also changes the MAC (both keys bound).
         assert_ne!(
             a_my_mac,
-            compute_mac(cookie, &nonce_b, &eph_b, b, a, addr_a, &[99u8; EPH_PUB_LEN])
+            compute_mac(
+                cookie,
+                &nonce_b,
+                &eph_b,
+                b,
+                a,
+                addr_a,
+                &[99u8; EPH_PUB_LEN],
+                incarnation_a
+            )
+        );
+        // A rewritten incarnation changes the MAC, so a MitM can't fake a restart
+        // and get a live link evicted.
+        assert_ne!(
+            a_my_mac,
+            compute_mac(
+                cookie,
+                &nonce_b,
+                &eph_b,
+                b,
+                a,
+                addr_a,
+                &eph_a,
+                incarnation_a + 1
+            )
         );
     }
 
@@ -426,6 +572,7 @@ mod tests {
                     nonce: [5u8; NONCE_LEN],
                     eph_pub: [6u8; EPH_PUB_LEN],
                     addr: String::new(),
+                    incarnation: 1,
                 },
             )
             .unwrap();

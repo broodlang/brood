@@ -65,9 +65,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         parse_source_positioned);
 }
 
+/// The file a parse error from one of the string readers belongs to. Its position is
+/// a line and column INSIDE the string, so without a file of its own the file runner
+/// filled in the caller's — a lockfile's `1:1` was reported as `std/tool/package.blsp:1:1`.
+const STRING_SOURCE: &str = "<string>";
+
 pub(super) fn read_string(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let s = expect_string(heap, "reflect/read-string", arg(args, 0))?;
-    reader::read_one_complete(heap, &s)
+    reader::read_one_complete(heap, &s).map_err(|error| error.or_file(STRING_SOURCE))
 }
 
 /// `(reflect/read-first s)` — parse and return the **first** form in `s`, ignoring any
@@ -76,7 +81,7 @@ pub(super) fn read_string(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 /// parsing — or erroring on — the rest.
 pub(super) fn read_first(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let s = expect_string(heap, "reflect/read-first", arg(args, 0))?;
-    reader::read_one(heap, &s)
+    reader::read_one(heap, &s).map_err(|error| error.or_file(STRING_SOURCE))
 }
 
 /// `(reflect/read-all s)` — parse *every* form in `s` and return them as a list (empty for
@@ -87,7 +92,7 @@ pub(super) fn read_first(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
 /// `reflect/read-string`; use `parse-source` for lossless, error-tolerant parsing.
 pub(super) fn read_all(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let s = expect_string(heap, "reflect/read-all", arg(args, 0))?;
-    let forms = reader::read_all(heap, &s)?;
+    let forms = reader::read_all(heap, &s).map_err(|error| error.or_file(STRING_SOURCE))?;
     Ok(heap.list(forms))
 }
 

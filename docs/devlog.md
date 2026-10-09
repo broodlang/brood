@@ -16605,3 +16605,21 @@ sized for release frames, which ASan makes several times larger — and are fixe
 real bug in every build: a root thread's retirement interned from a TLS destructor after the
 symbol cache was gone, panicked, and never delivered its monitors' DOWNs. KI-217 has the
 detail; the ASan lib suite is 1020/1020 at one and four threads.
+
+**Then: no known issue left open.** The manual Nightly on `1052ffc1` ran the whole suite
+under ASan clean (1588 s) and failed only one catalog case — `(defn identity …)` at the
+root, which the new reserved-name lint correctly reports (the runtime refuses it at every
+tier); it passed the earlier CI job only because whether a test heap seals the prelude
+depends on its environment. Renamed. Every red full-suite job since 2026-09-24 (105 jobs)
+was then read: none was KI-193's wave, which is closed, and three were one-off flakes no
+entry described — a lockfile torn read that rolled back a concurrent `nest add` (KI-218,
+reproduced 1 in 360), the stranded-work report losing a single `try_lock` race (KI-219,
+7 in 480; an earlier "fix" had only loosened the test) and a ^C landing between `sh`'s fork
+and exec (KI-220, already fixed by resending). The review's two deferred trade-offs are
+closed too: inbound flow control for sockets and child output (ADR-397 — a credit in the
+mailbox envelope, returned on drop, no API change; it surfaced KI-221, a TLS server
+dropping bytes past rustls's 64 KiB), and a restarted peer that reconnects at once (an
+incarnation in the handshake, wire v9). A string reader's parse error now names `<string>`
+rather than inheriting the caller's file — a lockfile's `1:1` used to read as
+`package.blsp:1:1`. Perf: ADR-397 adds a pointer to every queued envelope — `make ab` /
+`make ab-vm` before release, with the rest of this review's hot-path changes.

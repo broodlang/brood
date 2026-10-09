@@ -38,3 +38,12 @@
       (assert= (reflect/read-string (pr-str key)) key)
       ;; a clean name stays bare
       (assert= (pr-str (symbol "ab")) "ab"))))
+
+(describe "a parse error in a read string is placed in the string"
+  ;; Its line and column are inside the string; without a file of its own the runner
+  ;; filled in the CALLER's, so a lockfile's 1:1 read as `std/tool/package.blsp:1:1`.
+  (test "every string reader names the string, not this file"
+    (doseq (read [reflect/read-string reflect/read-first reflect/read-all])
+      (let (e (try (read "(a b") (catch e e)))
+        (assert= (get e :file) "<string>")
+        (assert= (get e :line) 1)))))

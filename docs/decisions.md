@@ -25494,3 +25494,41 @@ originals they wrap still tier.
   ordinary call path changed. Shims no longer tier (they had nothing to gain from it).
 - The mark promises the check that follows it, so only a shim may use `%contract-await`;
   like every `%` name it is internal.
+
+## ADR-397 — Inbound data from a socket or a child process is flow-controlled by mailbox credit
+
+**Status:** implemented (2026-10-09). Closes the 2026-10-08 review's inbound-backpressure
+finding (`docs/review-2026-10-08.md`).
+
+**Context.** Outbound socket data was capped (`OUT_CAP`); inbound was not. The net reactor
+posted every readable chunk to the owning process's mailbox, and a child process's reader
+threads did the same with its stdout/stderr, so a peer (or a `yes`) faster than its reader
+grew that mailbox without bound — a memory DoS on any server, and on any program that
+starts a chatty child and does not drain it. The readers (`tcp/read-n`, `read-until`,
+`drain`, a plain `receive` on `[:proc …]`) are all `receive`s, so they give the source no
+feedback.
+
+**Decision.** Per-source credit, with no API change. A source delivers each chunk with a
+`DeliveryCredit` carried in the mailbox envelope (`deliver_credited`); the credit is
+returned to the source when the envelope is DROPPED — so every way a message leaves a
+mailbox (any receive that takes it, a dead pid's delivery, the queue clear at death)
+returns it, and no removal path has to be hooked. A chunk costs its payload plus 256
+bytes, so tiny segments are bounded too. At 1 MiB outstanding the source stops reading:
+the reactor drops a socket's read interest, a child's blocking reader waits on a condvar;
+below 256 KiB it resumes (the reactor with an explicit read, since data already in the
+kernel raises no new readiness edge). The kernel's buffers then fill and TCP — or the
+child's pipe — throttles the producer. `tcp/controlling-process` gives a socket a fresh
+budget; a paused socket is exempt from the idle reaper; a child's exit, `os/close` and its
+owner's death each release a waiting reader, and the exit drain never waits, so ADR-104's
+`:proc-exit`/`:proc-closed` ordering holds whether or not the owner reads.
+
+**Consequences.**
+- A slow consumer throttles its producer instead of buffering it; data stays ordered and
+  lossless, and EOF/close still arrive after a pause.
+- Every queued envelope carries one more pointer (`None` for non-source messages); the
+  receive path for them is unchanged. On the message path, so it needs `make ab` /
+  `make ab-vm` before a release (no benchmarks run on the machine that built it).
+- The bound is per source (per socket, per output pipe), not per process; a retarget can
+  loosen one socket's bound to about 2 MiB for the instant it takes effect.
+- Found on the way: a TLS server silently dropped bytes once more than rustls's default
+  64 KiB was pending (KI-221).

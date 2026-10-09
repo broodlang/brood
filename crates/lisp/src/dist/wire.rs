@@ -56,6 +56,13 @@ pub(super) enum Frame {
         /// being folded into the `Auth` MAC (see `handshake::compute_mac`), so an
         /// on-path attacker can't redirect the gossiped address.
         addr: String,
+        /// The sender's **incarnation**: a random id minted once per runtime process
+        /// (`dist::local_incarnation`). Two links under one node name with different
+        /// incarnations are two different lives of that node, so a new one means the
+        /// peer restarted and the older link is a corpse (`dist::establish`). MACed
+        /// like the address, so an on-path attacker can't fake a restart to evict a
+        /// live link.
+        incarnation: u64,
     },
     /// Handshake step 3 & 4: an HMAC-SHA256 over the peer's nonce, both names,
     /// my advertised address, and both ephemeral DH keys — proves possession of
@@ -178,8 +185,12 @@ const MAX_GOSSIP_PEERS: usize = 4096;
 /// error that tears the whole link down on the first monitor to fire, so the
 /// byte bumps; **v8** appends a shipped closure's authoring module — its contract
 /// boundary (ADR-383) — to the `M_CLOSURE` record, one optional symbol a v7 peer
-/// would read as the next frame's bytes, so the byte bumps.
-pub(super) const PROTOCOL_MAGIC: [u8; 4] = *b"BRD\x08";
+/// would read as the next frame's bytes, so the byte bumps; **v9** appends the
+/// sender's incarnation to `Hello` (and folds it into the `Auth` MAC), so a
+/// restarted peer's new link replaces its predecessor's instead of being refused as
+/// a duplicate — a v8 peer would fail the handshake on the trailing bytes, so the
+/// byte bumps.
+pub(super) const PROTOCOL_MAGIC: [u8; 4] = *b"BRD\x09";
 pub(super) const NONCE_LEN: usize = 32;
 pub(super) const MAC_LEN: usize = 32;
 /// Length of an X25519 public key (the ephemeral DH key in `Hello`, ADR-089).
@@ -269,12 +280,14 @@ fn encode_frame(w: &mut Vec<u8>, frame: &Frame) -> io::Result<()> {
             nonce,
             eph_pub,
             addr,
+            incarnation,
         } => {
             w.push(FRAME_HELLO);
             put_str(w, node);
             w.extend_from_slice(nonce);
             w.extend_from_slice(eph_pub);
             put_str(w, addr);
+            w.extend_from_slice(&incarnation.to_be_bytes());
         }
         Frame::Auth { mac } => {
             w.push(FRAME_AUTH);
@@ -360,6 +373,7 @@ pub(super) fn decode_frame(r: &mut Cursor<Vec<u8>>) -> io::Result<Frame> {
             nonce: get_fixed::<NONCE_LEN>(r)?,
             eph_pub: get_fixed::<EPH_PUB_LEN>(r)?,
             addr: get_str(r)?,
+            incarnation: get_u64(r)?,
         }),
         FRAME_AUTH => Ok(Frame::Auth {
             mac: get_fixed::<MAC_LEN>(r)?,

@@ -1138,6 +1138,61 @@
   (test "read-lockfile is nil when there is no lock file"
     (assert= (read-lockfile (pkg-fixture-root)) nil)))
 
+;; A lock rewrite must be whole or not at all. `nest add` resolves against the lock while a
+;; concurrent `nest remove` (or `nest run`'s ensure-deps) rewrites it, and a plain spit
+;; truncates first: a read in that window failed to parse, the add rolled its own manifest
+;; edit back, and `manifest_race` lost an add on a CI runner (2026-09-24). That test hits the
+;; window about once in several hundred runs; this one widens it — a lock of a few hundred KB
+;; rewritten in a loop while another process reads it — so a torn writer fails here at once.
+(defn- pkg-lock-entries (n)
+  (map (range n)
+    (fn (i)
+      (assoc (dep-path (symbol (str "dependency-" i)) (str "../dependency-" i))
+        :resolved-path (str "/nowhere/dependency-" i)
+        :sha256 "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        :deps nil))))
+
+;; Rewrite the lock with `write` (root entries) twenty times, alternating two contents so
+;; every write changes it, then tell `parent` it is done.
+(defn- pkg-lock-writer (parent root write small large count)
+  (if (>= count 20)
+    (send parent :writer-done)
+    (do
+      (write root (if (math/even? count) small large))
+      (pkg-lock-writer parent root write small large (+ count 1)))))
+
+;; Read the lock until the writer is done; return `[torn reads]` — how many reads saw
+;; anything but one of the two whole locks, out of how many.
+(defn- pkg-lock-torn-reads (root reads torn)
+  (let (locked (try (read-lockfile root) (catch e (error-message e)))
+        whole (and (vector? locked)
+                (includes? [2 2000] (seq/vector-length locked)))
+        torn-now (if whole torn (+ torn 1)))
+    (receive
+      (:writer-done [torn-now (+ reads 1)])
+      (after 0 (pkg-lock-torn-reads root (+ reads 1) torn-now)))))
+
+(defn- pkg-lock-torn-under (write)
+  (let (root (pkg-fixture-root)
+        small (pkg-lock-entries 2)
+        large (pkg-lock-entries 2000)
+        me (self))
+    (file/mkdir root)
+    (write root small)
+    (spawn (pkg-lock-writer me root write small large 0))
+    (pkg-lock-torn-reads root 0 0)))
+
+(describe "package: a lock rewrite is never seen half-written"
+  (test "write-lockfile, read concurrently"
+    (let (outcome (pkg-lock-torn-under write-lockfile))
+      ;; the reads overlapped the writes (more reads than writes), and none was torn
+      (is (> (seq/vector-ref outcome 1) 20))
+      (assert= (seq/vector-ref outcome 0) 0)))
+  (test "ensure-deps' rewrite-if-changed, read concurrently"
+    (let (outcome (pkg-lock-torn-under package/package-write-lockfile-if-changed))
+      (is (> (seq/vector-ref outcome 1) 20))
+      (assert= (seq/vector-ref outcome 0) 0))))
+
 (describe "package: ensure-deps yields load-path entries"
   (test "returns each dep's src dir and writes the lock file"
     (let (parent (pkg-fixture-root)

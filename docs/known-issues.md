@@ -90,6 +90,11 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 
 | # | What | Status |
 |---|---|---|
+| KI-222 | **CI's tree-walker job was green only through its retry: the suite's first try timed out at 900 s in 4 of 10 runs (`TRY 1 TMT`, 6445 of 6465 tests done) and passing runs took 880–898 s** | ✅ **FIXED 2026-10-09** — not a hang: the suite on the ~10× slower engine, from the source boot, outgrew the default 15-minute budget. A `tree-walker` nextest profile gives `binary(suite)` 25 minutes in that job only (the VM jobs still kill a hang at 15); everything else inherits from the default profile (setup scripts verified). Seen as `FLAKY 2/2` on every such run, which no gate reads |
+| KI-221 | **a TLS server silently dropped response bytes once more than 64 KiB was pending** — rustls caps a server connection's outbound buffer at 64 KiB by default and `Cmd::Send` ignored the short write | ✅ **FIXED 2026-10-09** — the server path lifts the rustls limit as the client path did, so the 16 MiB `OUT_CAP` governs and fails loudly. Guard: `tests/tcp_backpressure_test.blsp` case 6 (a non-reading TLS client gets the whole response), red before the fix |
+| KI-220 | **`proc_test` ":int ends a foreground command and the shell running it" timed out (Nightly 2026-09-25, `bda4f693`, both tries)** | ✅ **FIXED 2026-09-25 (`5e778f64`), attributed 2026-10-09** — the shell prints `ready` before forking `sleep`; a SIGINT landing between fork and exec is dropped at exec (plain `sh` loses the first ^C 64 times in 200 here), so nothing exits. The test resends ^C every 500 ms. Reproduced at `bda4f693` (1 in 20); HEAD 78/78 under contention |
+| KI-219 | **`stranded_watchdog` failed: the report printed `w0: <locked>` with no state or queue (CI 2026-09-24, `2bbd0a6f`)** — then hidden by loosening the test (`17309f41`) | ✅ **FIXED 2026-10-09** — the report read each peer's queue with ONE `try_lock`, which coincides with an over-counted peer re-taking its own lock to park/wake (lock stamps confirmed it; 7 of 480 contended runs). `stranded_report_queue` retries for up to 100 ms (still deadlock-free) and the flags are always printed. Guard: the test is strict again (every `wN:` line carries state and `queue=[`), sabotage-verified; 0 of 320 contended runs |
+| KI-218 | **`manifest_race` lost an add: `a_concurrent_remove_does_not_resurrect_or_erase_an_add` (CI 2026-09-24, `9de9f2d3`)** | ✅ **FIXED 2026-09-24 (`b97d3190`), completed + reproduced 2026-10-09** — `write-lockfile` (and `ensure-deps`' rewrite-if-changed) wrote `project.lock.blsp` empty-then-write; a concurrent `nest add` reading it in the window failed to parse it and rolled back its own manifest edit. Both writers now write-temp-and-rename, with a random temp name. Reproduced 1 in 360 with a plain spit. Guard: `package_test` "a lock rewrite is never seen half-written" (12 torn reads sabotaged, 0 fixed) |
 | KI-217 | **the nightly AddressSanitizer job was red for eight days and hid everything after its first crash** — a 200 000-deep message decode overflowed a 2 MiB stack between two stack checks; behind it the checker overflowed in the middle of a stacker segment, and (in a normal build too) a root thread's retirement panicked in a TLS destructor and never delivered its monitors' DOWNs | ✅ **FIXED 2026-10-09** — `crate::stack::maybe_grow` raises every red zone under ASan (one door, `clippy.toml` refuses a direct `stacker::maybe_grow`); `intern`/`symbol_hash` survive their caches' teardown. Guards: the ASan lib suite 1020/1020 (single and four threads), `a_monitor_on_a_root_thread_gets_its_down_when_the_thread_exits` (sabotage-verified red), the clippy rule (sabotage-verified) |
 | KI-216 | **a contracted function whose declared result is checked keeps a frame per tail call** — under `BROOD_CONTRACTS=1` (the `nest run`/`nest test` default), `(sig ping (int -> keyword))` mutually tail-recursive with a twin passes at 1M levels and fails cleanly at 5M against the VM's 1 048 576-frame cap, where unarmed is flat. The shim must check the result AFTER the original returns, so the original is not in tail position | ✅ **FIXED 2026-10-03 (ADR-396)** — a shim wraps its original's call in the `%contract-await` mark and first asks `(%contract-tail? ret)`: when the frame it returns into is a shim suspended at that mark awaiting an EQUAL result type, it tail-calls its original, so identical pending checks collapse to one (Racket's approach). Unequal types never collapse; the tree-walker and nested runs answer `false` and check as before. Guard `contracts_mode.rs` `return_checked_tail_calls_collapse_and_still_check` (2M levels at tiers 1 and 2, a deep violation, both narrowing directions) — sabotage-verified both ways: a probe that never collapses reds the flat case, one that always does reds `narrow-inner` |
 | KI-214 | **`brood-lsp` aborted on one header: `Content-Length: 99999999999` allocated that many bytes** — `lsp_server::Connection::stdio()` reads whatever length a client declares, so any client (or a stray byte in the pipe) could take the server down with `memory allocation of 99999999999 bytes failed` | ✅ **FIXED 2026-09-30** — the server owns its stdio framing (`stdio_capped`): a length past 64 MiB, negative, absent or unparsable is a protocol error; the crate's message type and exit rule are unchanged. Guard `crates/lsp/src/main.rs` `frame_cap_tests` (a frame one byte over the cap is refused before its body is read) — deterministic |
@@ -201,7 +206,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-190 | **a loop that redefined itself and then made a non-tail VM call before its back-edge kept running the old body forever** — `exec_chunk` re-read its `SelfCall` epoch snapshot on every re-entry, and the frame re-enters after each non-tail call, so the `def` was already in the snapshot | ✅ **FIXED 2026-09-23** — the epoch lives in `BcFrame` (`entry_epoch`). Guard: `vm_selfcall_reload_test` "a redefinition before a non-tail call…", sabotage-verified |
 | KI-191 | **two JIT cold paths could run or resume the wrong arm across a concurrent rebind** — `jit_tier` read the code pointer and `compile_epoch` separately (a peer's reset + re-election in between passes the epoch check with the old pointer), and the fast-link deopt fallback re-resolved the callee by its CURRENT binding, whose frame-size-only shape check an equal-`nslots` arm passes | ✅ **FIXED 2026-09-23** — found by review, argued from the code rather than reproduced (both need a `def` landing inside a nanosecond window on another core): `jit_code` is re-loaded after the epoch check; `JIT_ARM_KEEPALIVE` is keyed by code pointer and the fallback resolves the arm that ran |
 | KI-192 | **the tree-walker's thin-wrapper elision staled its caller's arguments when the inner head was a lazily loaded module** — two `nest` tests (`stale_binary_refuses_to_check`, `project_image_registries`) failed once each under the tree-walker suite with KI-185's signature (`use-after-GC: bytes handle … bytes_to_list ← call_native`); deterministic under `BROOD_GC_STRESS=1` in any freshly scaffolded project's `BROOD_VM=0 nest test`, on HEAD as well | ✅ **FIXED 2026-09-23** — a bound non-dynamic head is a plain `env_get`; anything else is `eval`ed with the args rooted. Guard: `crates/cli/tests/passthrough_lazy_head.rs`, sabotage-verified |
-| KI-193 | **`brood_suite_passes` went TMT at 900 s with the `[refer] (:use sse) imported NOTHING` wave (then `editor/serve`, `set`, `sexp`, `text/…`) — 3 runs in 4 on the 2026-09-23 review tree, 0 in 1 on HEAD** — the fourth sighting of the KI-119/120/170 end state, at identical scope numbers across runs | 🔍 **ORDERING BUG FIXED; THE WAVE IS A WATCH, AUDIT ARMED 2026-09-23** — the wave recurred once more with this fix in (TRY 1, same scopes), then stopped: 3 of 3 full parallel runs red before ~14:50, **13 of 13 green after**, with no code change between the last red and the first green that could explain it (only no-op clippy edits), and HEAD 1/1 green. Not reproducible on demand since, under load, traced or not. What is known: the inconsistent state (`*features*` listing a module whose bindings are gone) is CREATED during `std_check_test`'s parallel checker workers (a cheap detector caught it once at scope 253), after the modules were loaded and kept by earlier files. The detector is now permanent: **`BROOD_FEATURES_AUDIT=1`** reports, with a backtrace, the publish / restore / live `*features*` write that produces the state (`crates/cli/tests/features_audit.rs`, sabotage-verified). **On the next sighting, re-run the full suite with it set and read the first `[features-audit]` line.** `%isolate`'s restore swapped the globals table and bumped `version`/`code_epoch` AFTER the write guard dropped (`*self.runtime.globals_write() = table;` drops it at the semicolon), and `publish_module_load` did the same after journalling. Every process's global caches key on those two counters, so a reader in the window paired the restored table with a cached `*features*` still listing the module: `require-one` short-circuits, the `:use` imports nothing. Both swaps now bump under the guard. The review's KI-192 fast path made the window hit (it shifts the tree-walker's timing); it did not open it. Guard: `core::heap::table_swap_tests` (a probe reads both counters just before the guard is taken and just after it drops), sabotage-verified by moving the bumps back out |
+| KI-193 | **`brood_suite_passes` went TMT at 900 s with the `[refer] (:use sse) imported NOTHING` wave (then `editor/serve`, `set`, `sexp`, `text/…`) — 3 runs in 4 on the 2026-09-23 review tree, 0 in 1 on HEAD** — the fourth sighting of the KI-119/120/170 end state, at identical scope numbers across runs | ☑️ **CLOSED 2026-10-09 — no recurrence in 105 full-suite jobs** (CI `test` + tree-walker differential, Nightly ×3, 2026-09-24 → 2026-10-09; every red one of them read and attributed elsewhere, none `imported NOTHING`; `BROOD_FEATURES_AUDIT` stays in the tree). Was: 🔍 **ORDERING BUG FIXED; THE WAVE IS A WATCH, AUDIT ARMED 2026-09-23** — the wave recurred once more with this fix in (TRY 1, same scopes), then stopped: 3 of 3 full parallel runs red before ~14:50, **13 of 13 green after**, with no code change between the last red and the first green that could explain it (only no-op clippy edits), and HEAD 1/1 green. Not reproducible on demand since, under load, traced or not. What is known: the inconsistent state (`*features*` listing a module whose bindings are gone) is CREATED during `std_check_test`'s parallel checker workers (a cheap detector caught it once at scope 253), after the modules were loaded and kept by earlier files. The detector is now permanent: **`BROOD_FEATURES_AUDIT=1`** reports, with a backtrace, the publish / restore / live `*features*` write that produces the state (`crates/cli/tests/features_audit.rs`, sabotage-verified). **On the next sighting, re-run the full suite with it set and read the first `[features-audit]` line.** `%isolate`'s restore swapped the globals table and bumped `version`/`code_epoch` AFTER the write guard dropped (`*self.runtime.globals_write() = table;` drops it at the semicolon), and `publish_module_load` did the same after journalling. Every process's global caches key on those two counters, so a reader in the window paired the restored table with a cached `*features*` still listing the module: `require-one` short-circuits, the `:use` imports nothing. Both swaps now bump under the guard. The review's KI-192 fast path made the window hit (it shifts the tree-walker's timing); it did not open it. Guard: `core::heap::table_swap_tests` (a probe reads both counters just before the guard is taken and just after it drops), sabotage-verified by moving the bumps back out |
 | KI-194 | **`module_publish_test` "no name or registration of a loading module is visible before it is provided" read `seen` 1 — 1-6 runs in 40 standalone on the review tree, 0 in 40 on HEAD, 0 in 40 with `BROOD_NO_JIT=1`** | ✅ **FIXED 2026-09-23** — instrumenting the observer showed the names bound, the cached `*features*` false and the TABLE's true: two publishes, not a stale read. `load` opened a frame of its own for a `defmodule` file even inside `require-one`'s frame (KI-170's wrap), so the file's definitions published live when it ended and `%require-force`'s `provide` published with the outer frame afterwards. `load` now opens a frame only when none is open. Present since KI-170 (2026-09-20); the review's changes widened the window. Guard: `module_publish_test` "a module file loaded inside an open load (KI-194)" — deterministic (a frameless process probes the live table from inside the outer frame), sabotage-verified |
 | KI-195 | **`net_reactor_death` "the death sweep must drain the registry" failed in 9 ms on one of four full capped suite runs (2026-09-25)** — the reactor was seen dead (`listen` refused) while the pre-death listener still resolved | ✅ **FIXED 2026-09-25 — a test race, not a runtime bug.** `reactor_died` sets `REACTOR_DOWN` *before* draining the registry, deliberately (a creator re-checks the flag after inserting, so nothing slips in behind the sweep); the test waited for the flag and then asserted the drain once. It now waits for the drain under the same 10 s deadline. Reproduced deterministically by widening the window (a 100 ms sleep after the store: red 1/1), green with the fix; sabotage (sweep reads instead of drains) reds it on the deadline |
 
@@ -11893,7 +11898,7 @@ frame and so reads the live table — whether its name is bound. Deterministic: 
 in the window rather than racing it. Sabotaged by opening the frame unconditionally again:
 red; restored: green. The observer test went 6/40 → 0/40.
 
-## KI-193 — the table swaps bumped the cache keys after unlocking (fixed) — the `imported NOTHING` wave it was found under is a WATCH, `BROOD_FEATURES_AUDIT` armed
+## KI-193 — the table swaps bumped the cache keys after unlocking (fixed) — the `imported NOTHING` wave it was found under is a WATCH, `BROOD_FEATURES_AUDIT` armed ☑️ CLOSED 2026-10-09 (no recurrence in 105 full-suite jobs)
 
 **Seen:** `brood_suite_passes` TMT at 900 s in the review's full VM run (TRY 1; TRY 2 passed)
 with the `[refer] (:use sse) imported NOTHING` wave, then 2/2 solo — at the same scope numbers
@@ -13357,3 +13362,72 @@ every configuration before). `process::scheduler::root_ctx_tests::
 a_monitor_on_a_root_thread_gets_its_down_when_the_thread_exits` — red with `with` restored
 (`mailbox_len` 0, not 1). The clippy rule — a restored direct call is `error: use of a
 disallowed method stacker::maybe_grow`.
+
+## KI-218 — `manifest_race` lost a concurrent add to a torn lockfile read ✅ FIXED 2026-09-24 (`b97d3190`), reproduced and completed 2026-10-09
+
+**Symptom.** `manifest_race::a_concurrent_remove_does_not_resurrect_or_erase_an_add` failed
+once in CI (2026-09-24, `9de9f2d3`): the manifest held `d3` but not `d2` — "an add was lost
+by the removal". **Cause.** The manifest edits were sound (`%file-swap`: an exclusive lock
+outside the tree across re-read and write, then temp-and-rename). The lockfile was not:
+`write-lockfile`, and `ensure-deps`' rewrite-if-changed, wrote `project.lock.blsp` with a
+plain empty-then-write spit, and a concurrent `nest add` reading it in that window failed to
+parse it and rolled its own manifest edit back. **Why it survived.** One write call wide —
+1 run in 360 under load with the plain spit — and the test printed no command output, so the
+manifest could not say which command gave up. `b97d3190` fixed `write-lockfile` the same day
+but recorded the cause as suspected (0 of 20). **Fix.** Both writers go through
+`write-lockfile`'s temp-and-rename, with a `uuid/v4` temp name (a shared timestamp made two
+writers share one). **Guard.** `package_test` "a lock rewrite is never seen half-written":
+a reader racing 20 rewrites counts torn reads — 12 with a plain spit, 0 fixed.
+
+## KI-219 — the stranded-work report dropped a worker as `<locked>` ✅ FIXED 2026-10-09
+
+**Symptom.** `stranded_watchdog::queued_work_no_worker_can_find_is_reported_within_the_window`
+failed in CI (2026-09-24, `2bbd0a6f`): `w0: <locked>` with no flags and no queue. `17309f41`
+then loosened the test to accept it; the report was never changed. **Cause.** The report
+reads each peer's queue with a single `try_lock` (it must not block: it holds its own queue
+lock). Over-counted parked workers re-probe on the same 10 ms cadence, so the scan coincides
+with a peer re-taking its OWN lock to park or wake (confirmed with temporary lock stamps) —
+7 of 480 contended runs, 0 of 240 pinned to one CPU. **Fix.** `stranded_report_queue`
+retries a busy lock (`try_lock` + `yield_now`) for up to 100 ms, still deadlock-free; the
+atomics (`parked`/`dirty`/`busy`) are always printed; a poisoned lock is read. **Guard.**
+The test is strict again — every `wN:` line must carry state and `queue=[` — sabotage-verified
+red; 0 of 320 contended runs after.
+
+## KI-220 — `proc_test`'s `:int` case lost its only ^C between fork and exec ✅ FIXED 2026-09-25 (`5e778f64`), attributed 2026-10-09
+
+**Symptom.** Nightly 2026-09-25 (`bda4f693`), both tries: "`:int` ends a foreground command
+and the shell running it" — `actual: :timeout`, `expect: :closed`. **Cause.** The shell
+prints `ready` before forking `sleep`; a SIGINT that lands between that fork and the exec is
+handled by the child's inherited handler and discarded by the exec, so `sleep` lives and the
+shell waits — nothing exits at all. `os/signal` is not at fault: plain `setsid sh -c 'echo
+ready; sleep 30'` loses the first ^C 64 times in 200 here. (5b4fc7b9, "a child's exit is
+reported when it exits", is unrelated — here nothing exits.) **Fix.** `5e778f64` resends ^C
+every 500 ms (up to 11). **Guard.** The test; the old commit's file reproduced 1 in 20, a
+40-shot copy of the old single-signal test loses 7 of 40 on current code, HEAD passed 78/78
+under contention. A trap for whoever reruns it: a background shell job starts its children
+with SIGINT ignored, so run it in the foreground.
+
+## KI-221 — a TLS server silently dropped bytes past 64 KiB pending ✅ FIXED 2026-10-09
+
+**Symptom.** Found by the inbound-backpressure work: a TLS client that read its response
+slowly received a stream with bytes missing from the middle. **Cause.** rustls caps a server
+connection's outbound plaintext buffer at 64 KiB by default; the reactor's `Cmd::Send`
+ignored the short write. **Fix.** The server path lifts the rustls limit, as the client path
+already did, so the 16 MiB `OUT_CAP` governs and drops the connection loudly. **Guard.**
+`tests/tcp_backpressure_test.blsp` case 6 — red before the fix.
+
+## KI-222 — CI's tree-walker suite outgrew its 15-minute budget and passed only on retry ✅ FIXED 2026-10-09
+
+**Symptom.** The `differential (tree-walker)` job reported `1 flaky` run after run:
+`TRY 1 TMT [900.04s] brood::suite brood_suite_passes`, then `TRY 2 PASS [~650s]`. In the 10
+runs before 2026-10-09, four first tries timed out and the passing ones took 880–898 s.
+**Cause.** No hang — the timed-out try had finished 6445 of 6465 tests. The job runs the
+whole `.blsp` suite on the tree-walker (`BROOD_VM=0`, ~10× slower) from the SOURCE boot
+(`BROOD_NO_STDIMAGE`/`BROOD_NO_PRELUDE_IMAGE`, KI-78), and the suite grew past the default
+profile's `binary(suite)` budget (15 × 60 s). **Why it survived.** `retries = 1` turned
+every timeout into `FLAKY 2/2` and a green job; nothing reads the flaky count. It was seen
+while attributing the 2026-10-09 run's real failure. **Fix.** A `tree-walker` nextest
+profile overrides only `binary(suite)` to 25 minutes, and ci.yml's tree-walker step runs
+with `--profile tree-walker`; the VM jobs keep the 15-minute kill. **Guard.** The next CI
+runs' tree-walker suite line should read `PASS` on the first try — a `TRY 1 TMT` there is
+this entry again.

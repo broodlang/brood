@@ -443,7 +443,10 @@ jobs:
           # pattern the annotate step below greps for anchors on `WORD [` — which a coloured log
           # writes as `WORD<ESC>[0m [`. That mismatch is why KI-39 went three sightings without
           # ever naming a case. The step also strips ANSI defensively; this makes it moot.
-          cargo nextest run --no-fail-fast --failure-output immediate-final --color never 2>&1 \
+          # `--profile tree-walker` (.config/nextest.toml): this engine outgrew the default
+          # 15-minute suite budget and passed only on its retry; that profile gives the suite
+          # 25 minutes here and nowhere else.
+          cargo nextest run --profile tree-walker --no-fail-fast --failure-output immediate-final --color never 2>&1 \
             | tee tree-walker-nextest.log
 
       # Name the failing cases as workflow ERROR commands, which GitHub turns into check-run

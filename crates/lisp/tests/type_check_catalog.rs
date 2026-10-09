@@ -64,7 +64,7 @@ const SHOULD_WARN: &[(&str, &str)] = &[
     ("(string/length (first (append [1 2] [3 4])))", "string/length"),   // append: int ∪ int = int
     // ---- type-variable sigs: return type resolved from argument types ----
     (
-        "(sig identity (?A -> ?A)) (defn identity (x) x) (string/length (identity 42))",
+        "(sig my-identity (?A -> ?A)) (defn my-identity (x) x) (string/length (my-identity 42))",
         "string/length",
     ), // identity(?A → ?A) on int → int, not a string
     (
@@ -163,7 +163,9 @@ const SHOULD_NOT_WARN: &[&str] = &[
     r#"(if (contains? {:a 1} :a) :yes :no)"#, // contains? as predicate
     r#"(string/length (string/join (list "a") ", "))"#, // join→string→length fine
     // ---- type-variable sigs: correct uses stay silent ----
-    "(sig identity (?A -> ?A)) (defn identity (x) x) (+ 1 (identity 42))",
+    // `my-identity`, not `identity`: that name is the prelude's, and redefining it fails
+    // at run time — the reserved-name lint says so, wherever the heap seals the prelude.
+    "(sig my-identity (?A -> ?A)) (defn my-identity (x) x) (+ 1 (my-identity 42))",
     "(sig my-first ((list ?A) -> ?A)) (defn my-first (xs) (first xs)) (+ 1 (my-first (list 1 2 3)))",
     r#"(sig const (?A ?B -> ?A)) (defn const (x y) x) (+ 1 (const 42 "x"))"#,
     // ---- ability op-name uniqueness: only a REAL same-name collision warns ----

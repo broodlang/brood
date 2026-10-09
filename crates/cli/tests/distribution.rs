@@ -2481,3 +2481,293 @@ fn concurrent_nextest_slots_never_share_a_port_slice() {
         assert!(seen.insert(support::port_slice(Some(slot), 4242, slices)));
     }
 }
+
+/// Forward every byte of `from` to `to` until `from` ends — then, unlike a real
+/// connection, leave `to` OPEN and silently drain it. The far node never sees a FIN:
+/// the shape of a host that vanished (power loss, a dropped network) rather than a
+/// process that exited.
+fn forward_then_vanish(mut from: TcpStream, mut to: TcpStream) {
+    let _ = std::io::copy(&mut from, &mut to);
+    let _ = std::io::copy(&mut to, &mut std::io::sink());
+}
+
+/// Lines of a child's stdout, each stamped with when it was read, on a channel — so a
+/// test can wait for one node's output while driving others.
+fn stamped_lines(
+    stdout: std::process::ChildStdout,
+) -> std::sync::mpsc::Receiver<(Instant, String)> {
+    use std::io::BufRead;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if sender.send((Instant::now(), line)).is_err() {
+                break;
+            }
+        }
+    });
+    receiver
+}
+
+/// Wait up to `budget` for a line containing `marker`, collecting everything read
+/// into `seen` (for the failure message). Returns when it arrived.
+fn await_line(
+    lines: &std::sync::mpsc::Receiver<(Instant, String)>,
+    marker: &str,
+    budget: Duration,
+    seen: &mut Vec<String>,
+) -> Option<Instant> {
+    let deadline = Instant::now() + budget;
+    loop {
+        let left = deadline.checked_duration_since(Instant::now())?;
+        let (at, line) = lines.recv_timeout(left).ok()?;
+        let found = line.contains(marker);
+        seen.push(line);
+        if found {
+            return Some(at);
+        }
+    }
+}
+
+/// **A restarted peer reconnects at once** — it does not wait out the heartbeat.
+///
+/// P (the first life) links to S through a relay that, when P is killed, keeps S's end of
+/// the connection open: P's host "vanished" without a FIN, so S still holds a link to a
+/// process that no longer exists, and only its heartbeat would notice — `DOWN_AFTER`
+/// (6 s) after the last frame. P comes back under the SAME name and dials S directly.
+/// Before the handshake carried an incarnation, S saw a second link from the same
+/// connector, called it a duplicate and shut the NEW one down: the restarted P's
+/// `node/connect` returned and was immediately followed by `[:nodedown]`, on every retry,
+/// until S's heartbeat expired the corpse. Now S replaces the old life's link — and the
+/// old life's watchers on S get their node-down then: a `node/monitor` its `[:nodedown]`
+/// and a pid monitor on the old P its `:noconnection`.
+#[test]
+fn a_restarted_peer_reconnects_without_waiting_for_the_heartbeat() {
+    let _g = port_lock();
+    let dir = std::env::temp_dir().join(format!("brood-dist-restart-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let port_s = free_port();
+    let port_relay = free_port();
+    let port_p1 = free_port();
+    let port_p2 = free_port();
+
+    // S: a `:watcher` that, told about the first life's pid, monitors it AND the node,
+    // then reports both downs; and an `:echo` for the second life to ping. Names are
+    // registered before `node/start` so nothing can reach S before they exist (KI-36).
+    let server = format!(
+        r#"
+(defn watch-downs (n)
+  (when (> n 0)
+    (receive
+      ([:nodedown _] (do (io/puts "OLD-LIFE-NODEDOWN") (watch-downs (dec n))))
+      ([:down _ _ reason] (do (io/puts (str "OLD-LIFE-DOWN " reason)) (watch-downs (dec n)))))))
+(defn watcher ()
+  (receive
+    ([:hello from]
+      (do (monitor from)
+          (node/monitor (first (node/list)))
+          (io/puts "WATCHING")
+          (watch-downs 2)))))
+(proc/register :watcher (spawn (watcher)))
+(proc/register :echo (self))
+(node/start :s "127.0.0.1:{port_s}" "secret-test-cookie-16+")
+(defn serve () (receive ([:ping from] (do (send from [:pong]) (serve))) (_ (serve))))
+(serve)
+"#
+    );
+    let first_life = format!(
+        r#"
+(node/start :p@127.0.0.1 "127.0.0.1:{port_p1}" "secret-test-cookie-16+")
+(def s (node/connect "s@127.0.0.1:{port_relay}"))
+(send {{:name :watcher :node s}} [:hello (self)])
+(defn idle () (do (sleep 1000) (idle)))
+(idle)
+"#
+    );
+    let second_life = format!(
+        r#"
+(node/start :p@127.0.0.1 "127.0.0.1:{port_p2}" "secret-test-cookie-16+")
+(def s (node/connect "s@127.0.0.1:{port_s}"))
+(node/monitor s)
+(send {{:name :echo :node s}} [:ping (self)])
+(receive
+  ([:pong] :ok)
+  ([:nodedown _] (throw "[:nodedown] right after connecting: S refused the restarted peer's link"))
+  (after 3000 (throw "no pong over the restarted peer's link")))
+(receive
+  ([:nodedown _] (throw "the restarted peer's link dropped after connecting"))
+  (after 500 :ok))
+(io/puts "SECOND-LIFE-OK")
+"#
+    );
+
+    let relay = std::net::TcpListener::bind(("127.0.0.1", port_relay)).expect("bind relay");
+    let mut s = spawn_brood(&dir, "server.blsp", &server);
+    wait_until_listening(port_s);
+    let s_lines = stamped_lines(s.stdout.take().expect("S stdout"));
+    // The relay: one connection, P1 → S. The S-side stream is also held here so it
+    // outlives both copy threads — S must keep seeing an open, silent connection.
+    let held = std::thread::spawn(move || {
+        let (first_life_end, _) = relay.accept().expect("relay accept");
+        let server_end = TcpStream::connect(("127.0.0.1", port_s)).expect("relay dial S");
+        let (inbound, outbound) = (
+            first_life_end.try_clone().unwrap(),
+            server_end.try_clone().unwrap(),
+        );
+        std::thread::spawn(move || forward_then_vanish(inbound, outbound));
+        let (inbound, outbound) = (server_end.try_clone().unwrap(), first_life_end);
+        std::thread::spawn(move || {
+            let mut inbound = inbound;
+            let mut outbound = outbound;
+            let _ = std::io::copy(&mut inbound, &mut outbound);
+            // P1 is gone: keep reading S's side so its writes never back up.
+            let _ = std::io::copy(&mut inbound, &mut std::io::sink());
+        });
+        server_end
+    });
+    let mut p1 = spawn_brood(&dir, "first.blsp", &first_life);
+
+    let mut seen = Vec::new();
+    let watching = await_line(&s_lines, "WATCHING", Duration::from_secs(30), &mut seen);
+    assert!(
+        watching.is_some(),
+        "S never started watching the first life.\n--- S stdout ---\n{}",
+        seen.join("\n")
+    );
+    let _server_end_held_open = held.join().expect("relay thread");
+
+    // The first life vanishes. SIGKILL closes ITS socket, but the relay keeps S's open.
+    let _ = p1.kill();
+    let _ = p1.wait();
+    let killed = Instant::now();
+    let p2 = spawn_brood(&dir, "second.blsp", &second_life);
+    let p2_out = p2.wait_with_output().expect("second life finished");
+    let p2_done = Instant::now();
+    // Both downs, in either order: each wait collects every line it reads into `seen`.
+    let nodedown = await_line(
+        &s_lines,
+        "OLD-LIFE-NODEDOWN",
+        Duration::from_secs(10),
+        &mut seen,
+    );
+    if !seen.iter().any(|line| line.contains("OLD-LIFE-DOWN")) {
+        let _ = await_line(
+            &s_lines,
+            "OLD-LIFE-DOWN",
+            Duration::from_secs(10),
+            &mut seen,
+        );
+    }
+    let _ = s.kill();
+    let s_out = s.wait_with_output().ok();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let p2_stdout = String::from_utf8_lossy(&p2_out.stdout);
+    let report = format!(
+        "\n--- second life stdout ---\n{p2_stdout}\n--- second life stderr ---\n{}\n\
+         --- S stdout ---\n{}\n--- S stderr ---\n{}",
+        String::from_utf8_lossy(&p2_out.stderr),
+        seen.join("\n"),
+        s_out
+            .map(|output| String::from_utf8_lossy(&output.stderr).to_string())
+            .unwrap_or_default()
+    );
+    assert!(
+        p2_out.status.success() && p2_stdout.contains("SECOND-LIFE-OK"),
+        "the restarted peer could not reconnect while S held its old life's link{report}"
+    );
+    assert!(
+        seen.iter()
+            .any(|line| line.contains("OLD-LIFE-DOWN") && line.contains("noconnection")),
+        "a pid monitor on the old life must get :noconnection{report}"
+    );
+    // The node-down of the old life fires when the new life links, not when the heartbeat
+    // gets round to it: by the time the second life has finished (plus slack for the
+    // printing process), S has already said so.
+    let nodedown = nodedown.unwrap_or_else(|| panic!("no [:nodedown] for the old life{report}"));
+    assert!(
+        nodedown <= p2_done + Duration::from_secs(1),
+        "the old life's [:nodedown] came {:?} after the kill, {:?} after the second life \
+         had already linked and finished — the heartbeat's timing, not the reconnect's{report}",
+        nodedown - killed,
+        nodedown.saturating_duration_since(p2_done)
+    );
+}
+
+/// **A second `node/connect` to a live peer leaves its link alone**, however it is spelled.
+///
+/// The peer is `ed@127.0.0.1`, listening on TCP and on its local Unix socket. The client
+/// links over TCP, sets up a node monitor and a pid monitor, then connects again by the
+/// bare name `"ed"` (twice). That spelling claims `ed@<this host>` and reaches a different
+/// address, so nothing short of a handshake can tell it is the same node: the dial
+/// happens, and the handshake then sees a second link from the same connector to the SAME
+/// life of the peer. Tearing the live link down for it would fire `:noconnection` to every
+/// monitor and kill every non-trapping linked process — so it must lose, and nobody may
+/// hear about it. (The repeat over the same address is answered without dialing at all.)
+#[test]
+fn a_bare_name_connect_to_a_live_peer_does_not_disturb_its_link() {
+    let _g = port_lock();
+    let home = std::env::temp_dir().join(format!("brood-bare-reconnect-{}", std::process::id()));
+    let run = home.join("run");
+    let config = home.join(".config");
+    std::fs::create_dir_all(&run).unwrap();
+    let port = free_port();
+    let env: Vec<(&str, &str)> = vec![
+        ("HOME", home.to_str().unwrap()),
+        ("XDG_CONFIG_HOME", config.to_str().unwrap()),
+        ("XDG_RUNTIME_DIR", run.to_str().unwrap()),
+    ];
+    let server = format!(
+        r#"
+(defn worker () (receive (:stop nil) (_ (worker))))
+(defn serve ()
+  (receive
+    ([:hello from] (do (send from [:pid (spawn (worker))]) (serve)))
+    ([:ping from] (do (send from [:pong]) (serve)))
+    (_ (serve))))
+(proc/register :echo (self))
+(node/start :ed@127.0.0.1 "127.0.0.1:{port}")
+(node/also-listen)
+(serve)
+"#
+    );
+    let client = format!(
+        r#"
+(node/start :cli)
+(defn tc (f n) (try (f) (catch e (if (> n 0) (do (sleep 100) (tc f (- n 1))) (throw e)))))
+(def ed (tc (fn () (node/connect "ed@127.0.0.1:{port}")) 50))
+(send {{:name :echo :node ed}} [:hello (self)])
+(def worker (receive ([:pid p] p) (after 30000 (throw "no worker pid"))))
+(monitor worker)
+(node/monitor ed)
+(def again (tc (fn () (node/connect "ed")) 50))
+(def thrice (node/connect "ed"))
+(unless (and (= again ed) (= thrice ed))
+  (throw (str "connects named different nodes: " ed " " again " " thrice)))
+(receive
+  ([:nodedown n] (throw (str "a second connect to a live peer fired [:nodedown " n "]")))
+  ([:down _ _ reason] (throw (str "a second connect to a live peer fired a monitor DOWN: " reason)))
+  (after 1500 :ok))
+(unless (= (node/list) (list ed)) (throw (str "expected exactly one link, got " (node/list))))
+(send {{:name :echo :node ed}} [:ping (self)])
+(receive ([:pong] :ok) (after 30000 (throw "no pong after the second connect")))
+(io/puts "SECOND-CONNECT-OK")
+"#
+    );
+
+    let mut server_child = spawn_brood_env(&home, "bserver.blsp", &server, &env);
+    wait_until_listening(port);
+    let client_child = spawn_brood_env(&home, "bclient.blsp", &client, &env);
+    let out = client_child.wait_with_output().expect("client finished");
+    let _ = server_child.kill();
+    let server_out = server_child.wait_with_output().expect("server reaped");
+    let _ = std::fs::remove_dir_all(&home);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains("SECOND-CONNECT-OK"),
+        "a second connect to a live peer disturbed its link.\n--- stdout ---\n{stdout}\n\
+         --- stderr ---\n{}\n--- server stderr ---\n{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&server_out.stderr)
+    );
+}

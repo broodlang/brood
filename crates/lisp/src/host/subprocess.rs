@@ -63,7 +63,10 @@ use std::sync::{Arc, Condvar, LazyLock, Mutex};
 use std::time::Duration;
 
 use crate::core::value;
-use crate::process::{chunk_flush, chunk_payload, spawn_io_source, Message};
+use crate::process::{
+    chunk_flush, chunk_payload, deliver_credited, spawn_io_source, CreditSource, DeliveryCredit,
+    Message,
+};
 
 /// A live child process: the write half (its stdin) plus a shared handle to the
 /// `Child` itself, used to reap (`wait`) and to `kill`. The stdout/stderr read
@@ -95,9 +98,8 @@ struct Proc {
     /// locks it briefly to reap. Never held across a blocking call.
     child: Arc<ChildHandle>,
     /// Where the child is in its life, shared with its readers and its waiter;
-    /// `proc-close` uses it to stop the readers. That stop is a unix wake signal, so on
-    /// wasm32 nothing reads this; allowed rather than cfg'd out, as `pty` is below.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    /// `proc-close` uses it to stop the readers (including one waiting on its inbound
+    /// budget).
     lifecycle: Arc<Lifecycle>,
     /// Inbound decode mode (default text; mirrors `net`'s socket flag, ADR-141:
     /// outbound `proc-send` is unaffected — string leaves are always UTF-8).
@@ -159,6 +161,89 @@ struct Lifecycle {
     /// finishes even while a descendant that escaped the kill still holds a pipe.
     #[cfg(unix)]
     stop: WakeSignal,
+    /// Set by `close` on every platform (where `stop` is unix-only): a reader waiting on
+    /// its [`OutputBudget`] gives up rather than wait for an owner that may never read.
+    abandoned: AtomicBool,
+    /// Each reader's inbound budget, so the exit and `close` wakes reach a reader that is
+    /// blocked waiting for its owner to consume (see [`Lifecycle::wake_budgets`]).
+    budgets: Mutex<Vec<Arc<OutputBudget>>>,
+}
+
+// ---- inbound backpressure ----
+
+/// How much one reader may have delivered to its owner's mailbox and not yet had taken
+/// before it stops reading. Readers used to post every chunk as it arrived, so a chatty
+/// child (`yes`) whose owner was not receiving grew that mailbox without limit. Past
+/// this mark the reader thread waits; the child then blocks on its full pipe, which is
+/// the backpressure a pipe already has. Measured in payload bytes plus
+/// [`MESSAGE_COST_OVERHEAD`] per chunk — the socket reactor's marks and cost
+/// (`host::net`), for the same reasons.
+const OUTPUT_HIGH_WATER: usize = 1024 * 1024;
+
+/// The reader resumes once its outstanding cost falls below this.
+const OUTPUT_LOW_WATER: usize = 256 * 1024;
+
+/// What one delivered chunk costs beyond its payload bytes (see `host::net`).
+const MESSAGE_COST_OVERHEAD: usize = 256;
+
+/// One reader's inbound budget: the cost of the chunks it delivered that the owner has
+/// not yet taken. Each chunk carries a [`DeliveryCredit`] against it, returned when the
+/// message leaves the mailbox by any route — a `receive` takes it, or the owner dies and
+/// its queue is dropped — and a return that brings the total under
+/// [`OUTPUT_LOW_WATER`] wakes the reader.
+///
+/// Lock order: this mutex is never held while delivering (delivery takes the owner's
+/// mailbox lock, and a refund runs under that lock and takes this one).
+struct OutputBudget {
+    outstanding: Mutex<usize>,
+    changed: Condvar,
+}
+
+impl OutputBudget {
+    fn new() -> Arc<OutputBudget> {
+        Arc::new(OutputBudget {
+            outstanding: Mutex::new(0),
+            changed: Condvar::new(),
+        })
+    }
+
+    /// Charge one chunk of `bytes` payload and build the credit its message carries.
+    fn charge(self: &Arc<Self>, bytes: usize) -> DeliveryCredit {
+        let cost = bytes + MESSAGE_COST_OVERHEAD;
+        *crate::core::sync::lock(&self.outstanding) += cost;
+        DeliveryCredit::new(self.clone(), cost)
+    }
+
+    /// If the reader is at its high-water mark, block until refunds bring it under the
+    /// low-water mark or `interrupted` holds (evaluated under this mutex, which every
+    /// interrupter takes before notifying — see [`Lifecycle::wake_budgets`]).
+    fn wait_for_room(&self, interrupted: impl Fn() -> bool) {
+        let mut outstanding = crate::core::sync::lock(&self.outstanding);
+        if *outstanding < OUTPUT_HIGH_WATER {
+            return;
+        }
+        while *outstanding >= OUTPUT_LOW_WATER && !interrupted() {
+            outstanding = self
+                .changed
+                .wait(outstanding)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+
+    fn wake(&self) {
+        let _held = crate::core::sync::lock(&self.outstanding);
+        self.changed.notify_all();
+    }
+}
+
+impl CreditSource for OutputBudget {
+    fn release(&self, cost: usize) {
+        let mut outstanding = crate::core::sync::lock(&self.outstanding);
+        *outstanding -= cost;
+        if *outstanding < OUTPUT_LOW_WATER {
+            self.changed.notify_all();
+        }
+    }
 }
 
 struct LifecycleState {
@@ -181,7 +266,57 @@ impl Lifecycle {
             exited: WakeSignal::new()?,
             #[cfg(unix)]
             stop: WakeSignal::new()?,
+            abandoned: AtomicBool::new(false),
+            budgets: Mutex::new(Vec::new()),
         })
+    }
+
+    /// A new reader's budget, registered so the exit and `close` wakes reach it.
+    fn new_budget(&self) -> Arc<OutputBudget> {
+        let budget = OutputBudget::new();
+        crate::core::sync::lock(&self.budgets).push(budget.clone());
+        budget
+    }
+
+    /// Wake every reader waiting on its budget, after the caller has published the state
+    /// change it is waiting for (each `wake` takes the budget's mutex, so a reader that
+    /// checked before the change is already in its wait and receives the notify).
+    fn wake_budgets(&self) {
+        let budgets = crate::core::sync::lock(&self.budgets).clone();
+        for budget in budgets {
+            budget.wake();
+        }
+    }
+
+    /// The child has exited: each reader drains what its pipe holds (see
+    /// [`drain_buffered`]), so a reader waiting on its budget must wake to do it —
+    /// `:proc-exit` waits for that drain, and must not wait on the owner reading.
+    #[cfg(unix)]
+    fn raise_exited(&self) {
+        self.exited.raise();
+        self.wake_budgets();
+    }
+
+    /// `close`: stop the readers, including one waiting on its budget.
+    fn stop_readers(&self) {
+        self.abandoned.store(true, Ordering::SeqCst);
+        #[cfg(unix)]
+        self.stop.raise();
+        self.wake_budgets();
+    }
+
+    /// Whether a reader waiting on its budget should stop waiting: the handle was
+    /// closed, or (until it has drained) the child exited.
+    fn interrupts_budget_wait(&self, drained: bool) -> bool {
+        if self.abandoned.load(Ordering::SeqCst) {
+            return true;
+        }
+        #[cfg(unix)]
+        if !drained && self.exited.raised.load(Ordering::Acquire) {
+            return true;
+        }
+        let _ = drained;
+        false
     }
 
     /// A reader has delivered everything its pipe held when the child exited.
@@ -315,6 +450,11 @@ fn end_msg(tag: &str, id: u64, code: Option<i32>) -> Message {
 /// child exits it delivers what the pipe held at that moment ([`drain_buffered`]) and
 /// reports it drained, which is what lets the waiter put `:proc-exit` after the child's
 /// own output; then it carries on reading whatever descendants still write.
+///
+/// Reads are flow-controlled: each chunk carries a credit against the reader's
+/// [`OutputBudget`], and past [`OUTPUT_HIGH_WATER`] untaken the reader waits for its
+/// owner to consume. The exit drain does not wait (it is bounded by one pipe's
+/// contents), so `:proc-exit` never waits on the owner reading.
 fn start_output_reader<R: OutputSource>(
     id: u64,
     tag: &'static str,
@@ -323,19 +463,25 @@ fn start_output_reader<R: OutputSource>(
     subscriber: u64,
     binary: Arc<AtomicBool>,
 ) {
-    spawn_io_source(subscriber, "brood-proc-reader", move |sink| {
+    let budget = lifecycle.new_budget();
+    spawn_io_source(subscriber, "brood-proc-reader", move |_sink| {
         let mut source = source;
         let mut buffer = [0u8; 65536];
         let mut carry: Vec<u8> = Vec::new();
+        // Every data chunk is charged against this reader's budget (inbound
+        // backpressure); `read_until_end` waits on it between reads.
+        let emit = |payload: Message, bytes: usize| {
+            deliver_credited(subscriber, data_msg(tag, id, payload), budget.charge(bytes));
+        };
         let mut deliver = |bytes: &[u8]| {
             let binary_mode = binary.load(Ordering::Acquire);
             if let Some(payload) = chunk_payload(&mut carry, bytes, binary_mode) {
-                sink.emit(data_msg(tag, id, payload));
+                emit(payload, bytes.len());
             }
         };
-        let drained = read_until_end(&mut source, &mut buffer, &lifecycle, &mut deliver);
+        let drained = read_until_end(&mut source, &mut buffer, &lifecycle, &budget, &mut deliver);
         if let Some(payload) = chunk_flush(&mut carry) {
-            sink.emit(data_msg(tag, id, payload));
+            emit(payload, 0);
         }
         lifecycle.reader_finished(drained);
     });
@@ -347,6 +493,7 @@ fn read_until_end<R: OutputSource>(
     source: &mut R,
     buffer: &mut [u8],
     lifecycle: &Lifecycle,
+    budget: &OutputBudget,
     deliver: &mut impl FnMut(&[u8]),
 ) -> bool {
     let data_fd = source.as_raw_fd();
@@ -386,7 +533,15 @@ fn read_until_end<R: OutputSource>(
         if watched[0].revents != 0 {
             match source.read(buffer) {
                 Ok(0) => return drained,
-                Ok(read) => deliver(&buffer[..read]),
+                Ok(read) => {
+                    deliver(&buffer[..read]);
+                    // Inbound backpressure: past the high-water mark, stop reading until
+                    // the owner has taken enough. The child blocks on its full pipe
+                    // meanwhile. The child's exit interrupts the wait (the drain below
+                    // must not depend on the owner reading — `:proc-exit` waits for it;
+                    // it is bounded by what one pipe holds), and so does `close`.
+                    budget.wait_for_room(|| lifecycle.interrupts_budget_wait(drained));
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                 // A pty master reports its slave's last close as EIO: end of file.
                 Err(_) => return drained,
@@ -446,13 +601,21 @@ fn drain_buffered<R: OutputSource>(
 fn read_until_end<R: OutputSource>(
     source: &mut R,
     buffer: &mut [u8],
-    _lifecycle: &Lifecycle,
+    lifecycle: &Lifecycle,
+    budget: &OutputBudget,
     deliver: &mut impl FnMut(&[u8]),
 ) -> bool {
     loop {
+        if lifecycle.abandoned.load(Ordering::SeqCst) {
+            return false;
+        }
         match source.read(buffer) {
             Ok(0) => return false,
-            Ok(read) => deliver(&buffer[..read]),
+            Ok(read) => {
+                deliver(&buffer[..read]);
+                // Inbound backpressure — see the unix loop.
+                budget.wait_for_room(|| lifecycle.interrupts_budget_wait(false));
+            }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
             Err(_) => return false,
         }
@@ -478,7 +641,7 @@ fn start_waiter(id: u64, child: Arc<ChildHandle>, lifecycle: Arc<Lifecycle>, sub
     spawn_io_source(subscriber, "brood-proc-wait", move |sink| {
         let code = wait_for_exit(&child);
         #[cfg(unix)]
-        lifecycle.exited.raise();
+        lifecycle.raise_exited();
         lifecycle.wait_until(|state| state.undrained == 0);
         sink.emit(end_msg("proc-exit", id, code));
         lifecycle.wait_until(|state| state.open == 0);
@@ -746,9 +909,10 @@ pub fn close(id: u64) {
             }
         }
         // Stop the readers where they are: a descendant that left the group escaped the
-        // kill and may hold a pipe open forever, and the handle must still finish.
-        #[cfg(unix)]
-        entry.lifecycle.stop.raise();
+        // kill and may hold a pipe open forever, and the handle must still finish. This
+        // also releases a reader waiting on its inbound budget for an owner that is not
+        // reading (or has died — `close_process_procs` comes here).
+        entry.lifecycle.stop_readers();
     }
     // `stdin` (in `removed`) drops here, sending EOF to the child too.
     release(removed);

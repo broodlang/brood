@@ -671,8 +671,12 @@ socket is registered *passive* (no reader until the worker calls
   "Parse `url` into {:scheme :host :port :path} with HTTP defaults applied: scheme
 http, port 80/443 by scheme, path \"/\". The RFC-3986 parsing itself lives in one
 place — `url/parse-url` (the full parser); a scheme-less input is treated as an
-`http://` authority so a bare `host[:port]/path` still parses as a host."
-  (let (with-scheme (if (>= (index-of url "://") 0) url (str "http://" url))
+`http://` authority so a bare `host[:port]/path` still parses as a host, and a
+network-path reference `//host/path` takes the scheme alone."
+  (let (with-scheme (cond
+                      (>= (index-of url "://") 0) url
+                      (string/starts-with? url "//") (str "http:" url)
+                      :else (str "http://" url))
         u (url/parse-url with-scheme)
         scheme (or (/get u :scheme) "http")
         path (let (p (/get u :path)) (if (or (nil? p) (= p "")) "/" p))

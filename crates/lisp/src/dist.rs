@@ -306,6 +306,11 @@ struct Conn {
     /// link initiated by the lexicographically smaller node name, computed
     /// identically on both ends (see `establish`).
     connector: Symbol,
+    /// The peer's incarnation, from its authenticated `Hello`: which life of the
+    /// peer this link reaches. A new link under the same name with a different one
+    /// means the peer restarted, and this link is to a process that no longer
+    /// exists (see `establish`).
+    incarnation: u64,
     /// The address a *third* node should dial to reach this peer (`"unix:PATH"` /
     /// `"tcp:HOST:PORT"`, or empty if the peer didn't advertise one), learned from
     /// the peer's authenticated `Hello`. We gossip this to other peers so the
@@ -365,6 +370,48 @@ static NEXT_LINK: AtomicU64 = AtomicU64::new(0);
 /// Connected peer node-name → its connection.
 static NODES: LazyLock<RwLock<HashMap<Symbol, Conn>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// Dial address (`"unix:PATH"` / `"tcp:HOST:PORT"`, as `node_connect` was given it)
+/// → the authenticated name of the node a handshake over it reached.
+///
+/// The name a caller hands `node_connect` is only a *claim* — `(node/connect "ed")`
+/// claims `ed@<this host>`, while the node listening on that socket may call itself
+/// `ed@127.0.0.1` — so checking `NODES` by the claimed name alone misses a live link
+/// spelled differently and dials it again. The address is what actually identifies
+/// the listener, so this lets the pre-dial check answer a second connect to a live
+/// peer from the existing link whatever name it was spelled with. Entries are
+/// dropped with their peer's link (`forget_dial_routes`), and a lookup is only
+/// trusted while `NODES` still holds the name.
+static DIAL_ROUTES: LazyLock<RwLock<HashMap<String, Symbol>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// This runtime process's **incarnation**: a random id minted once, sent in every
+/// `Hello`. A node name outlives a process — a crashed node comes back under the same
+/// name — so the name alone cannot tell a *restarted* peer's new link from a redundant
+/// second link to the *same* live peer. The incarnation can: `establish` replaces a
+/// registered link whose incarnation differs (the peer restarted; the old link reaches
+/// nothing), and resolves a same-incarnation duplicate by the connector tie-break
+/// (both links reach the live peer, so nothing may be torn down for it).
+static INCARNATION: LazyLock<u64> = LazyLock::new(|| {
+    let mut bytes = [0u8; 8];
+    match getrandom::fill(&mut bytes) {
+        Ok(()) => u64::from_be_bytes(bytes),
+        // No OS RNG: the handshake cannot mint its nonce either, so no link will form;
+        // anything distinct per process is enough for the id itself.
+        Err(_) => {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos() as u64)
+                .unwrap_or(0);
+            nanos ^ ((std::process::id() as u64) << 32)
+        }
+    }
+});
+
+/// This runtime's incarnation (see [`INCARNATION`]).
+fn local_incarnation() -> u64 {
+    *INCARNATION
+}
 
 /// Locally registered name → local process id, so a peer can address a process by
 /// a stable name before anyone holds its pid (`(proc/register :echo (self))`).
@@ -1381,22 +1428,39 @@ pub(crate) fn node_connect(peer: Symbol, addr: &str) -> io::Result<Symbol> {
             format!("cannot connect to self ({})", value::symbol_name(peer)),
         ));
     }
-    // Pre-dial de-dup: if we already have a link to the named node, reuse it
-    // without dialing. The caller may supply a stale/wrong symbol (e.g. from
-    // gossip lag), so we do a second check with the *authenticated* name after
-    // the handshake too.
-    if crate::core::sync::read(&NODES).contains_key(&peer) {
-        return Ok(peer);
+    // Pre-dial de-dup: if we already have a link to this node — under the claimed
+    // name, or reached before through this very address under whatever name the
+    // handshake gave it — reuse it without dialing. A second dial to a live peer is
+    // not harmless: it costs a handshake and leaves `establish` a same-incarnation
+    // duplicate to resolve. The claim may still be stale/wrong (e.g. gossip lag, a
+    // never-dialed spelling), so `establish` re-checks under the authenticated name.
+    if let Some(linked) = linked_peer_for(peer, addr) {
+        return Ok(linked);
     }
     let mut stream = dial(addr)?;
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
     // Deadlined like the accept side: a malicious or wedged *listener* can
     // trickle at a dialer just as easily, and this call is made from a scheduler
     // worker, so an unbounded hold here wedges a worker rather than a slot.
-    let (peer, peer_addr, session) = {
+    let authenticated = {
         let mut guarded = Deadline::new(&mut stream, HANDSHAKE_DEADLINE);
         handshake(&mut guarded, Role::Initiator)?
     };
+    let peer = authenticated.peer;
+    // The claim can name another node while the address reaches us (a second
+    // spelling of our own name, a relay looping back): the accept side refuses a
+    // peer claiming to be us, and so must the dial side, or `NODES` gains an entry
+    // for ourselves.
+    if peer == local_node() {
+        let _ = stream.shutdown(Shutdown::Both);
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "cannot connect to self ({addr} is this node, {})",
+                value::symbol_name(peer)
+            ),
+        ));
+    }
     stream.set_read_timeout(None)?; // steady-state reader blocks until the next message
                                     // Always pass to `establish` — even when we already have a link under the
                                     // authenticated name. `establish` has its own symmetric tie-break (both sides
@@ -1406,8 +1470,38 @@ pub(crate) fn node_connect(peer: Symbol, addr: &str) -> io::Result<Symbol> {
                                     // while the peer still runs `establish` on theirs — they might win, register
                                     // our doomed socket, and later fire a spurious `[:nodedown]` when the reader
                                     // hits the EOF our shutdown sent.
-    establish(peer, peer_addr, stream, Role::Initiator, session);
+    establish(authenticated, stream, Role::Initiator);
+    // Whether our link won or an existing one did, `addr` reaches `peer`.
+    crate::core::sync::write(&DIAL_ROUTES).insert(addr.to_string(), peer);
     Ok(peer)
+}
+
+/// The connected node a dial of `addr` claiming `claimed` would reach, if we can
+/// tell without dialing: `claimed` itself when linked; else the node an earlier dial
+/// of the same address authenticated as (`DIAL_ROUTES`); else the node that
+/// advertises `addr` as its dial address. Each answer is trusted only while that
+/// node is still in `NODES`.
+fn linked_peer_for(claimed: Symbol, addr: &str) -> Option<Symbol> {
+    // Lock order: NODES, then DIAL_ROUTES — nothing takes them the other way round.
+    let nodes = crate::core::sync::read(&NODES);
+    if nodes.contains_key(&claimed) {
+        return Some(claimed);
+    }
+    if let Some(&routed) = crate::core::sync::read(&DIAL_ROUTES).get(addr) {
+        if nodes.contains_key(&routed) {
+            return Some(routed);
+        }
+    }
+    nodes
+        .iter()
+        .find(|(_, link)| !link.addr.is_empty() && link.addr == addr)
+        .map(|(&name, _)| name)
+}
+
+/// Drop every `DIAL_ROUTES` entry naming `peer` — its link is gone, so an address
+/// that reached it no longer proves anything about what answers there now.
+fn forget_dial_routes(peer: Symbol) {
+    crate::core::sync::write(&DIAL_ROUTES).retain(|_, routed| *routed != peer);
 }
 
 /// Bound on a **name resolution**, which `connect_timeout` does not cover.
@@ -1511,10 +1605,11 @@ fn accept_link(mut stream: Stream) -> io::Result<()> {
     // The per-read timeout above bounds a peer that goes *silent*; the deadline
     // bounds one that stays slow. Only the second bounds how long an
     // unauthenticated peer can hold its `HandshakeSlot` (KI-97 item 1).
-    let (peer, peer_addr, session) = {
+    let authenticated = {
         let mut guarded = Deadline::new(&mut stream, HANDSHAKE_DEADLINE);
         handshake(&mut guarded, Role::Responder)?
     };
+    let peer = authenticated.peer;
     // Refuse a peer claiming to BE us — the accept-side counterpart of the check
     // `node_connect` already makes on the dial side. Reachable by a relay that
     // cross-wires two connections back to our own listener, or by a misconfigured
@@ -1532,14 +1627,37 @@ fn accept_link(mut stream: Stream) -> io::Result<()> {
         ));
     }
     stream.set_read_timeout(None)?; // steady-state reader blocks until the next message
-    establish(peer, peer_addr, stream, Role::Responder, session);
+    establish(authenticated, stream, Role::Responder);
     Ok(())
 }
 
 /// Register the authenticated link and spawn its reader + writer threads —
 /// resolving a duplicate against any existing link to the same peer first.
-/// `peer_addr` is how a third node should dial this peer (for mesh gossip).
-fn establish(peer: Symbol, peer_addr: String, stream: Stream, role: Role, session: Session) {
+/// `authenticated.addr` is how a third node should dial this peer (for mesh gossip).
+///
+/// A duplicate is one of two different things, and the peer's incarnation tells
+/// them apart:
+///
+/// - **The peer restarted** (incarnations differ). The registered link reaches a
+///   process that no longer exists — its host vanished without a FIN, so nothing has
+///   torn it down yet, and the heartbeat would only notice after `DOWN_AFTER`. The
+///   new link always wins: the old one is retired as a node-down of that old life
+///   (`retire_previous_incarnation` — `[:nodedown]` to node monitors, `:noconnection`
+///   to every monitor and link made over it), then this link registers as a
+///   brand-new peer. Refusing it instead left the restarted peer's `node/connect`
+///   returning Ok and immediately delivering `[:nodedown]`, on every retry, until our
+///   heartbeat expired the corpse.
+/// - **A second link to the same live peer** (same incarnation: two dials crossing,
+///   or two dials from one side racing). Both reach the live peer, so tearing either
+///   down must not reach a monitor: the symmetric connector tie-break picks one, and
+///   an equal connector keeps the registered link.
+fn establish(authenticated: handshake::Authenticated, stream: Stream, role: Role) {
+    let handshake::Authenticated {
+        peer,
+        addr: peer_addr,
+        incarnation,
+        session,
+    } = authenticated;
     // Who initiated *this* connection (the tie-break key).
     let connector = match role {
         Role::Initiator => local_node(),
@@ -1557,15 +1675,29 @@ fn establish(peer: Symbol, peer_addr: String, stream: Stream, role: Role, sessio
     // a reconnect/duplicate-replacement (peers already know this name). Assigned
     // on the registering path; the losing path diverges (`return`).
     let was_new;
-    let evicted: Option<Conn> = {
+    let evicted: Option<Conn> = loop {
         let mut nodes = crate::core::sync::write(&NODES);
         match nodes.get(&peer) {
+            Some(existing) if existing.incarnation != incarnation => {
+                // The peer restarted. Retire the previous life's link OUTSIDE the
+                // lock — its node-down delivers to monitors and sweeps the process
+                // tables — and with `NODES` empty for this name meanwhile, so a
+                // monitor or link made in that window fails over to `:noconnection`
+                // rather than being recorded against a link the sweep then claims.
+                // Then decide again: another link of the new life may have registered.
+                let previous = nodes.remove(&peer);
+                drop(nodes);
+                if let Some(previous) = previous {
+                    retire_previous_incarnation(peer, previous);
+                }
+                continue;
+            }
             Some(existing)
                 if value::symbol_name(connector) >= value::symbol_name(existing.connector) =>
             {
-                // The existing link wins (its connector sorts first, or it's the
-                // same initiator = a plain duplicate). We lose: close our socket
-                // and don't register or spawn.
+                // The existing link to this same life of the peer wins (its
+                // connector sorts first, or it's the same initiator = a plain
+                // duplicate). We lose: close our socket and don't register or spawn.
                 let _ = sock.shutdown(Shutdown::Both);
                 return;
             }
@@ -1579,13 +1711,14 @@ fn establish(peer: Symbol, peer_addr: String, stream: Stream, role: Role, sessio
                     Conn {
                         id,
                         connector,
+                        incarnation,
                         addr: peer_addr,
                         tx: tx.clone(),
                         sock: Arc::clone(&sock),
                         last_seen: Arc::clone(&last_seen),
                     },
                 );
-                old
+                break old;
             }
         }
     };
@@ -1883,8 +2016,24 @@ fn drop_link(peer: Symbol, id: u64) {
         }
     };
     if removed {
+        forget_dial_routes(peer);
         fire_nodedown(peer);
     }
+}
+
+/// Tear down `previous`, a link to an earlier life of `peer` that `establish` has
+/// already removed from `NODES` because the peer came back with a new incarnation.
+///
+/// This is a real node-down, not a duplicate eviction: the process at the far end of
+/// `previous` is gone, so its watchers get `[:nodedown]`, every monitor and link made
+/// over it gets its `:noconnection`, and the watchers it held on our pids are dropped
+/// — exactly what the heartbeat would have done once it expired the link, only now
+/// rather than `DOWN_AFTER` later. The link's own reader then hits the shutdown and
+/// runs `drop_link`, which no-ops on the generation id.
+fn retire_previous_incarnation(peer: Symbol, previous: Conn) {
+    let _ = previous.sock.shutdown(Shutdown::Both);
+    forget_dial_routes(peer);
+    fire_nodedown(peer);
 }
 
 /// Deliver `[:nodedown name]` to every process that called `(monitor-node name)`,
@@ -2048,27 +2197,19 @@ mod tests {
         // connector "nonode", one the peer dialed has the peer's name. "nonode" sorts
         // before "zz-…", so the second (Initiator) link evicts the first.
         let peer = value::intern("zz-evicted-peer@test");
-        let fresh_session = || Session {
-            send: session::SealKey::new([1; session::KEY_LEN]),
-            recv: session::OpenKey::new([2; session::KEY_LEN]),
-        };
         let (first, _first_far_end) = UnixStream::pair().unwrap();
         establish(
-            peer,
-            String::new(),
+            authenticated_as(peer, 5),
             Stream::Unix(first),
             Role::Responder,
-            fresh_session(),
         );
         // A monitor that went out over the first link.
         process::record_pending_remote(peer, 21, me, process::next_ref());
         let (second, _second_far_end) = UnixStream::pair().unwrap();
         establish(
-            peer,
-            String::new(),
+            authenticated_as(peer, 5),
             Stream::Unix(second),
             Role::Initiator,
-            fresh_session(),
         );
         assert_eq!(
             crate::core::sync::read(&NODES)
@@ -2081,6 +2222,143 @@ mod tests {
             process::mailbox_len(me),
             Some(1),
             "the evicted link's pending monitor must get its :noconnection"
+        );
+    }
+
+    /// What a completed handshake with `peer` (in its life `incarnation`) hands
+    /// `establish`, with a throwaway session.
+    fn authenticated_as(peer: Symbol, incarnation: u64) -> handshake::Authenticated {
+        handshake::Authenticated {
+            peer,
+            addr: String::new(),
+            incarnation,
+            session: Session {
+                send: session::SealKey::new([1; session::KEY_LEN]),
+                recv: session::OpenKey::new([2; session::KEY_LEN]),
+            },
+        }
+    }
+
+    fn registered_link(peer: Symbol) -> Option<(u64, u64)> {
+        crate::core::sync::read(&NODES)
+            .get(&peer)
+            .map(|link| (link.id, link.incarnation))
+    }
+
+    /// A peer that restarted (its old host vanished without a FIN, so the old link is
+    /// still registered) and dials us again must get its new link — the old one reaches
+    /// a process that no longer exists. Before the incarnation, the new link had the
+    /// same connector as the old one and was refused as a duplicate, so the restarted
+    /// peer's `node/connect` returned and was immediately followed by `[:nodedown]`,
+    /// on every retry, until the heartbeat expired the stale link. The old life's
+    /// watchers get their node-down now.
+    #[test]
+    fn a_restarted_peer_replaces_its_previous_life_and_fires_its_node_down() {
+        let me = process::self_pid();
+        let peer = value::intern("restarted-peer@test");
+        let (old_life, _old_far_end) = UnixStream::pair().unwrap();
+        establish(
+            authenticated_as(peer, 1),
+            Stream::Unix(old_life),
+            Role::Responder,
+        );
+        let (old_id, _) = registered_link(peer).expect("the first life registers");
+        monitor_node(peer, me);
+        // A pid monitor made over the old life.
+        process::record_pending_remote(peer, 31, me, process::next_ref());
+        assert_eq!(
+            process::mailbox_len(me),
+            Some(0),
+            "nothing fires while it is up"
+        );
+
+        // The peer comes back and dials us: the same connector (the peer) as before.
+        let (new_life, _new_far_end) = UnixStream::pair().unwrap();
+        establish(
+            authenticated_as(peer, 2),
+            Stream::Unix(new_life),
+            Role::Responder,
+        );
+        let (new_id, new_incarnation) = registered_link(peer).expect("the new life registers");
+        assert_ne!(
+            new_id, old_id,
+            "the restarted peer's link must replace the old one"
+        );
+        assert_eq!(new_incarnation, 2);
+        assert_eq!(
+            process::mailbox_len(me),
+            Some(2),
+            "the old life's node monitor gets [:nodedown] and its pid monitor :noconnection"
+        );
+        demonitor_node(peer, me);
+    }
+
+    /// The other half of the same decision: a second link to the SAME life of a live
+    /// peer — the shape a bare-name `node/connect` used to produce, and two dials
+    /// racing still can — must not disturb the link that is up. Same connector, same
+    /// incarnation: the registered link stays, and no monitor hears anything.
+    #[test]
+    fn a_second_link_to_the_same_life_leaves_the_live_link_alone() {
+        let me = process::self_pid();
+        let peer = value::intern("same-life-peer@test");
+        let (first, _first_far_end) = UnixStream::pair().unwrap();
+        establish(
+            authenticated_as(peer, 7),
+            Stream::Unix(first),
+            Role::Responder,
+        );
+        let registered = registered_link(peer).expect("the first link registers");
+        monitor_node(peer, me);
+        let mref = process::next_ref();
+        process::record_pending_remote(peer, 41, me, mref);
+
+        let (second, _second_far_end) = UnixStream::pair().unwrap();
+        establish(
+            authenticated_as(peer, 7),
+            Stream::Unix(second),
+            Role::Responder,
+        );
+        assert_eq!(
+            registered_link(peer),
+            Some(registered),
+            "a duplicate of a live link must lose to it"
+        );
+        assert_eq!(
+            process::mailbox_len(me),
+            Some(0),
+            "no [:nodedown] and no :noconnection for a peer that never went away"
+        );
+        demonitor_node(peer, me);
+        process::drop_pending_remote(peer, me, mref);
+    }
+
+    /// A connect that names a live peer by another spelling — `(node/connect "ed")`
+    /// claims `ed@<this host>` for a node that calls itself `ed@127.0.0.1` — is
+    /// answered from the existing link reached through the same address, without
+    /// dialing. The address here is unreachable, so a dial would fail the call.
+    #[test]
+    fn a_connect_spelled_differently_reuses_the_link_its_address_reached() {
+        let peer = value::intern("spelled-peer@127.0.0.1");
+        let address = "unix:/nonexistent/brood-test/spelled-peer.sock";
+        let (link, _far_end) = UnixStream::pair().unwrap();
+        establish(
+            authenticated_as(peer, 9),
+            Stream::Unix(link),
+            Role::Responder,
+        );
+        crate::core::sync::write(&DIAL_ROUTES).insert(address.to_string(), peer);
+        let other_spelling = value::intern("spelled-peer@some-host");
+        assert_eq!(
+            node_connect(other_spelling, address).ok(),
+            Some(peer),
+            "a second connect to a live peer must reuse its link, whatever the spelling"
+        );
+        // Once the link is gone, the route proves nothing: the dial is attempted.
+        let id = registered_link(peer).expect("registered").0;
+        drop_link(peer, id);
+        assert!(
+            node_connect(other_spelling, address).is_err(),
+            "a route to a node that is no longer linked must not answer a connect"
         );
     }
 

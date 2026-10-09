@@ -10,7 +10,16 @@ A whole-project review: every finding reproduced, fixed, and guarded by a sabota
 test (`docs/review-2026-10-08.md`).
 
 **Breaking.** `proc/register` binds nothing for a pid that has already exited (it used to
-leave the name bound to the corpse). `proc/system-monitor` of a dead pid raises. `csv/decode` raises on an unterminated quoted
+leave the name bound to the corpse). `proc/system-monitor` of a dead pid raises. The node
+handshake is wire v9 (it carries an incarnation): nodes on this release do not link with
+older ones. A parse error from `reflect/read-string`/`read-first`/`read-all` names
+`<string>` as its file.
+
+**Flow control.** A socket or a child process whose owner falls behind is paused at 1 MiB
+of undelivered data and resumed below 256 KiB, so a fast peer or a chatty child throttles
+instead of growing the owner's mailbox without bound (ADR-397). No API change. A restarted
+peer node reconnects at once instead of being refused until the heartbeat expired, and a
+second `node/connect` to a live peer under another spelling reuses its link. `csv/decode` raises on an unterminated quoted
 field or text after a closing quote, where it used to swallow or merge input. The HTTP server
 refuses `Transfer-Encoding` (501, or 400 beside `Content-Length`) and caps request bodies at
 `*http-max-body-bytes*` (8 MiB, 413). Wasm instance handles are opaque tokens, and an instance
@@ -44,7 +53,10 @@ DOWN after `demonitor`. LSP rename accepted names that change meaning (`^foo`); 
 mishandled `let`, `letrec` and multi-clause functions; and diagnostics landed on the wrong
 line after a lone `\r` or U+2028. A document the reader rejected lost all its diagnostics. The
 checker clamped interval arithmetic on overflow, and now warns on a top-level definition of a
-reserved name, which always fails at run time.
+reserved name, which always fails at run time. A TLS server dropped response bytes once more
+than 64 KiB was pending. A thread with a process context that exited never delivered its
+monitors' DOWNs. `http/parse-url` reads `//host/x` as a host. The nightly AddressSanitizer
+job had stopped at its first crash since 2026-10-01; it runs clean again.
 
 ## v0.36.0 — a type-system and contracts review: a checker that sees callbacks, and contracts that keep tail calls
 

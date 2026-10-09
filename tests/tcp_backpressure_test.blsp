@@ -1,0 +1,194 @@
+;; Inbound socket backpressure (host/net.rs `InboundFlow`).
+;;
+;; A reading socket used to post every chunk to its owner's mailbox the moment it was
+;; readable, so a peer sending faster than the owner consumed grew that mailbox without
+;; bound. The reactor now stops reading a socket once ~1 MiB of its chunks sit untaken in
+;; the owner's mailbox (the kernel buffer fills and TCP slows the peer), and resumes when
+;; the owner has consumed it below 256 KiB — with no API change.
+;;
+;; Each case has a sender queue far more than the high-water mark (8 MiB) while the owner
+;; reads nothing, then measures what actually sat in the owner's mailbox: the chunks are
+;; counted with `proc/mailbox-size` at a quiet moment and exactly that many are taken and
+;; summed. The bound is the high-water mark plus one read (64 KiB). Then the owner reads
+;; the rest and every byte must arrive intact and in order, followed by the close.
+;;
+;; The sender stays alive until told to close: `tcp/close` flushes for a bounded linger,
+;; and a sender that exited early would close its socket at owner death — both would cut
+;; off the bytes still queued behind the paused reader.
+
+(defmodule tcp-backpressure-test (:use test) (:use tcp :exclude [send]))
+
+;; The high-water mark (1 MiB) plus one read's worth (64 KiB) of overshoot.
+(def- high-water-bound (+ (* 1024 1024) 65536))
+
+(defn- block (k)
+  "64 KiB whose content names `k`, so a reordered or dropped block is a mismatch."
+  (bytes/concat (string/repeat (str (string/pad-left (str k) 7 "0") "|") 8192)))
+
+(defn- blocks (n) (map (range n) block))
+
+(defn- send-then-hold (parent port payload)
+  "Connect, queue every block of `payload`, tell `parent`, then hold the socket open
+  until `parent` says to close it."
+  (let (c (tcp/connect "127.0.0.1" port))
+    (doseq (b payload) (tcp/send c b))
+    (send parent [:queued (self)])
+    (receive ([:close] (tcp/close c)) (after 60000 (tcp/close c)))
+    (receive ([:done] nil) (after 60000 nil))))
+
+(defn- take-chunks (sock n acc)
+  "Take exactly `n` queued `[:tcp sock d]` messages; return them oldest first."
+  (if (= n 0)
+    (reverse acc)
+    (receive
+      ([:tcp ^sock d] (take-chunks sock (dec n) (cons d acc)))
+      (after 20000 (error "take-chunks: a counted chunk never arrived")))))
+
+(defn- queued-while-idle (sock)
+  "Let the reactor deliver all it will to an owner that is not reading, then take the
+  chunks that are sitting in the mailbox. Returns `[byte-count chunks]`."
+  (sleep 400)
+  (let (chunks (take-chunks sock (queued-count) nil))
+    [(reduce chunks 0 (fn (sum chunk) (+ sum (bytes/length chunk)))) chunks]))
+
+(defn- binary-listener ()
+  "A loopback listener whose accepted sockets start in binary mode, and its port."
+  (let (ls (tcp/listen "127.0.0.1" 0))
+    (tcp/set-binary ls true)
+    [ls (or (tcp/local-port ls) (error "the listener reported no local port"))]))
+
+(defn- queued-count ()
+  "How many messages sit in this process's mailbox."
+  (or (proc/mailbox-size (self)) 0))
+
+(defn- accept-binary (ls)
+  (let (s (receive ([:tcp-accept ^ls cs] cs) (after 20000 (error "no accept"))))
+    (tcp/controlling-process s (self))
+    s))
+
+(defn- paused-then-drained (block-count)
+  "One whole scenario on a fresh socket pair, owned by the calling process. Returns
+  `[queued-bytes intact?]`."
+  (let (payload (blocks block-count)
+        me (self)
+        [ls port] (binary-listener)
+        sender (spawn (send-then-hold me port payload))
+        s (accept-binary ls))
+    (receive ([:queued ^sender] nil) (after 60000 (error "sender never queued")))
+    (let ([queued early] (queued-while-idle s))
+      (send sender [:close])
+      (let (rest (drain s))
+        (send sender [:done])
+        (tcp/close s)
+        (tcp/close ls)
+        [queued (= (bytes/concat [early rest]) (bytes/concat payload))]))))
+
+(describe "tcp backpressure: an owner that does not read"
+  :isolated (test "the owner's mailbox stays under the high-water mark; nothing is lost"
+    (let ([queued intact] (paused-then-drained 128))
+      (is (> queued 0))
+      (is (<= queued high-water-bound))
+      (is intact)))
+  (test "a read-n consumer of the whole stream completes once reading starts"
+    (let (payload (blocks 128)
+          total (* 128 65536)
+          me (self)
+          [ls port] (binary-listener)
+          sender (spawn (send-then-hold me port payload))
+          s (accept-binary ls))
+      (receive ([:queued ^sender] nil) (after 60000 (error "sender never queued")))
+      ;; The socket is paused by now; read-n's own receives are what must resume it.
+      (sleep 400)
+      (let ([data surplus] (read-n s total {:timeout-ms 20000}))
+        (send sender [:close])
+        (let (closed (receive ([:tcp-closed ^s] :closed) (after 20000 :timeout)))
+          (send sender [:done])
+          (tcp/close s)
+          (tcp/close ls)
+          (assert= (bytes/length surplus) 0)
+          (is (= data (bytes/concat payload)))
+          (assert= closed :closed)))))
+  (test "a slow chunk-at-a-time consumer still gets every byte"
+    (let (payload (blocks 64)
+          me (self)
+          [ls port] (binary-listener)
+          sender (spawn (send-then-hold me port payload))
+          s (accept-binary ls))
+      (receive ([:queued ^sender] nil) (after 60000 (error "sender never queued")))
+      (send sender [:close])
+      (letrec (slow (fn (acc)
+                      (receive
+                        ([:tcp ^s d] (do (sleep 1) (slow (cons d acc))))
+                        ([:tcp-closed ^s] (bytes/concat (reverse acc)))
+                        (after 20000 :timeout))))
+        (let (got (slow nil))
+          (send sender [:done])
+          (tcp/close s)
+          (tcp/close ls)
+          (is (= got (bytes/concat payload))))))))
+
+(describe "tcp backpressure: ownership handoff"
+  :isolated (test "handing a paused socket to a new owner resumes it for that owner"
+    ;; The old owner keeps its queued chunks and never reads them, so its share of the
+    ;; budget would hold the socket paused forever; the new owner starts a fresh budget.
+    (let (payload (blocks 128)
+          me (self)
+          [ls port] (binary-listener)
+          sender (spawn (send-then-hold me port payload))
+          s (accept-binary ls))
+      (receive ([:queued ^sender] nil) (after 60000 (error "sender never queued")))
+      (sleep 400)
+      (let (held (queued-count)
+            heir (spawn (let (rest (receive ([:go] (drain s)) (after 60000 nil)))
+                          (send me [:rest rest]))))
+        (tcp/controlling-process s heir)
+        (send sender [:close])
+        (send heir [:go])
+        (let (rest (receive ([:rest r] r) (after 30000 :timeout))
+              early (take-chunks s held nil))
+          (send sender [:done])
+          (tcp/close s)
+          (tcp/close ls)
+          (is (bytes? rest))
+          (is (= (bytes/concat [early rest]) (bytes/concat payload))))))))
+
+(describe "tcp backpressure: across processes"
+  :isolated (test "four socket pairs in parallel owners each stay bounded and intact"
+    (let (me (self)
+          workers (map (range 4)
+                    (fn (k)
+                      (spawn (send me [:result k (paused-then-drained 64)]))))
+          results (map (range 4)
+                    (fn (_)
+                      (receive ([:result k r] r) (after 60000 :timeout)))))
+      (assert= (count workers) 4)
+      (doseq (r results)
+        (is (vector? r))
+        (is (<= (first r) high-water-bound))
+        (is (second r))))))
+
+(describe "tcp backpressure: TLS"
+  :isolated (test "a TLS response the client does not read stays bounded and arrives whole"
+    (let (payload (blocks 128)
+          me (self)
+          server (spawn (let (ck (tls/self-signed "localhost")
+                              ls (tls/listen "127.0.0.1" 0 (first ck) (second ck)))
+                          (send me [:ready (tcp/local-port ls) (first ck)])
+                          (let (c (receive ([:tcp-accept ^ls cs] cs) (after 20000 nil)))
+                            (tcp/set-binary c true)
+                            (tcp/controlling-process c (self))
+                            (receive ([:tcp ^c _] nil) (after 20000 nil))
+                            (doseq (b payload) (tcp/send c b))
+                            (send me [:queued])
+                            (receive ([:close] (tcp/close c)) (after 60000 (tcp/close c)))
+                            (receive ([:done] nil) (after 60000 nil)))))
+          [port cert] (receive ([:ready p ct] [p ct]) (after 20000 (error "no tls server")))
+          s (tls/request "localhost" port "go" cert))
+      (tcp/set-binary s true)
+      (receive ([:queued] nil) (after 60000 (error "tls server never queued")))
+      (let ([queued early] (queued-while-idle s))
+        (send server [:close])
+        (let (rest (drain s))
+          (send server [:done])
+          (is (<= queued high-water-bound))
+          (is (= (bytes/concat [early rest]) (bytes/concat payload))))))))

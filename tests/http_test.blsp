@@ -304,6 +304,12 @@
     (assert= (get (http/parse-url "http://example.com") :port) 80)
     (assert= (get (http/parse-url "http://example.com") :path) "/")
     (assert= (get (http/parse-url "http://h:8080/x") :port) 8080))
+  (test "parse-url reads a network-path reference's host, and a bare host as one"
+    ;; `//h/x` used to become `http:////h/x` — no host, path `//h/x`.
+    (assert= (get (http/parse-url "//h/x") :host) "h")
+    (assert= (get (http/parse-url "//h/x") :path) "/x")
+    (assert= (get (http/parse-url "h:81/y") :host) "h")
+    (assert= (get (http/parse-url "h:81/y") :port) 81))
   (test "parse-response reads the status line, headers, and body (a bytes value)"
     (let (r (parse-response "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nhi there"))
       (assert= (get r :status) 200)

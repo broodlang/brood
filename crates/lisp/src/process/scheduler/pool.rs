@@ -125,20 +125,19 @@ fn stranded_probe(reporter: usize) {
         let mut lines = String::new();
         for (wid, Padded((lock, _))) in WORKERS.iter().enumerate() {
             // The reporter holds its own queue lock (the caller checked it empty), so
-            // `try_lock` on it would report a phantom `<locked>`.
-            let pids: Vec<u64> = if wid == reporter {
-                Vec::new()
+            // locking it again would self-deadlock and `try_lock` would fail every time.
+            let queue = if wid == reporter {
+                "[]".to_string()
             } else {
-                match lock.try_lock() {
-                    Ok(q) => q.iter().map(|p| p.pid).collect(),
-                    Err(_) => {
-                        lines.push_str(&format!("  w{wid}: <locked>\n"));
-                        continue;
-                    }
+                match stranded_report_queue(lock) {
+                    Some(pids) => format!("{pids:?}"),
+                    None => "<locked>".to_string(),
                 }
             };
+            // The flags are atomics, so a worker is described even when its queue could
+            // not be read — never a bare `<locked>` line that omits the worker entirely.
             lines.push_str(&format!(
-                "  w{wid}: parked={} dirty={} busy={} queue={pids:?}\n",
+                "  w{wid}: parked={} dirty={} busy={} queue={queue}\n",
                 WORKER_PARKED[wid].load(Ordering::Relaxed),
                 WORKER_DIRTY[wid].load(Ordering::Relaxed),
                 WORKER_BUSY[wid].load(Ordering::Relaxed),
@@ -153,6 +152,38 @@ fn stranded_probe(reporter: usize) {
             LIVE_EXECUTORS.load(Ordering::SeqCst),
             PARKED_COUNT.load(Ordering::Relaxed),
         );
+    }
+}
+
+/// How long [`stranded_report_queue`] keeps retrying a busy queue lock. A queue lock is
+/// held for microseconds (a push, a pop, a steal probe, a park re-check), so this is only
+/// ever reached by a holder the OS descheduled mid-section — and it is paid at most once
+/// per starvation episode, on a pool that has by definition done nothing for seconds.
+const STRANDED_REPORT_LOCK_PATIENCE: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Read one peer's queued pids for the stranded-work report, retrying a busy lock for up to
+/// [`STRANDED_REPORT_LOCK_PATIENCE`]. A single `try_lock` lost to ordinary traffic: while
+/// `STEALABLE` is over-counted every parked worker re-probes on the 10 ms `STEAL_BACKOFF`,
+/// and they parked together, so they wake together — the reporter's scan coincides with its
+/// peers' own-queue re-checks and steal probes, and a CI run (2026-09-24) printed
+/// `w0: <locked>` for the very worker the report exists to show. It cannot block outright:
+/// the reporter holds its own queue lock, so waiting unboundedly on a peer's is the one
+/// shape that could deadlock the pool being diagnosed. `None` after the patience runs out.
+fn stranded_report_queue(lock: &std::sync::Mutex<VecDeque<Box<Process>>>) -> Option<Vec<u64>> {
+    let deadline = std::time::Instant::now() + STRANDED_REPORT_LOCK_PATIENCE;
+    loop {
+        match lock.try_lock() {
+            Ok(queue) => return Some(queue.iter().map(|p| p.pid).collect()),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                return Some(poisoned.into_inner().iter().map(|p| p.pid).collect())
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if std::time::Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::yield_now();
+            }
+        }
     }
 }
 

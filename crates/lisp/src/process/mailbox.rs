@@ -247,7 +247,47 @@ pub(super) struct Envelope {
     pub(super) seq: u64,
     #[cfg(feature = "dev-tools")]
     pub(super) trace: Option<Message>,
+    /// Inbound flow-control credit — `Some` only for a message a flow-controlled source
+    /// (the net reactor's `[:tcp sock data]` chunks) delivered with
+    /// [`deliver_credited`]; `None` for every other message. The credit is returned to
+    /// its source when the envelope is **dropped**, which is exactly when the message
+    /// leaves the mailbox for good: consumed by a `receive` (selective or not), dropped
+    /// at delivery to a gone pid, cleared at process death. The candidate pop/re-insert
+    /// of a selective scan MOVES the envelope, so a message merely skipped never returns
+    /// its credit. Boxed so the field is one pointer on the queue every message shares.
+    pub(super) credit: Option<Box<DeliveryCredit>>,
 }
+
+/// A source that bounds how much it has delivered into mailboxes and not yet had
+/// taken — the inbound half of socket backpressure (the net reactor pauses reading a
+/// socket past a high-water mark and resumes when enough of its chunks are consumed).
+/// `release` runs on whatever thread drops the envelope, possibly under that mailbox's
+/// state lock, so it must not block or take a mailbox lock.
+pub(crate) trait CreditSource: Send + Sync {
+    fn release(&self, cost: usize);
+}
+
+/// One message's share of a [`CreditSource`]'s budget. The source charges `cost` when
+/// it builds the credit; dropping the credit returns it. Riding inside the [`Envelope`]
+/// makes every way a message can leave the mailbox return it — there is no removal
+/// path to forget.
+pub(crate) struct DeliveryCredit {
+    source: Arc<dyn CreditSource>,
+    cost: usize,
+}
+
+impl DeliveryCredit {
+    pub(crate) fn new(source: Arc<dyn CreditSource>, cost: usize) -> DeliveryCredit {
+        DeliveryCredit { source, cost }
+    }
+}
+
+impl Drop for DeliveryCredit {
+    fn drop(&mut self) {
+        self.source.release(self.cost);
+    }
+}
+
 impl MailboxState {
     /// Push `env` onto the queue, stamping its arrival sequence and republishing the
     /// lock-free hint. Every enqueue goes through here so `seq` is never left at 0.
@@ -267,6 +307,7 @@ impl Envelope {
             seq: 0, // replaced by `MailboxState::push`
             #[cfg(feature = "dev-tools")]
             trace: None,
+            credit: None,
         }
     }
 }
@@ -821,6 +862,15 @@ pub(crate) fn deliver(pid: u64, msg: Message) {
     deliver_envelope(pid, Envelope::plain(msg));
 }
 
+/// Like [`deliver`], but the message carries a flow-control `credit` that is returned
+/// to its source when the message leaves the mailbox (see [`Envelope::credit`]). A gone
+/// `pid` drops the envelope here, which returns the credit at once.
+pub(crate) fn deliver_credited(pid: u64, msg: Message, credit: DeliveryCredit) {
+    let mut envelope = Envelope::plain(msg);
+    envelope.credit = Some(Box::new(credit));
+    deliver_envelope(pid, envelope);
+}
+
 /// Like [`deliver`], but the message carries a debugger causal context (ADR-174
 /// send-level): the receiver adopts `trace` when it pops this message. `dev-tools`
 /// only; the `send` primitive uses it when the sender has a trace context set.
@@ -832,6 +882,7 @@ pub(crate) fn deliver_traced(pid: u64, msg: Message, trace: Option<Message>) {
             msg: Payload::Wire(msg),
             seq: 0, // replaced by `MailboxState::push`
             trace,
+            credit: None,
         },
     );
 }
@@ -964,6 +1015,7 @@ fn try_deliver_local(src: &Heap, pid: u64, v: Value) -> LocalDelivery {
         seq: 0,
         #[cfg(feature = "dev-tools")]
         trace: None,
+        credit: None,
     });
     mb.note_mailbox_bound(st.queue.len());
     st.wake_pending = true;
