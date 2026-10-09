@@ -285,3 +285,17 @@
   (test "a non-encodable number inside a structure errors too"
     (is (json-encode-errs? {:a 1/3}))
     (is (json-encode-errs? [1 2 1.50M]))))
+
+(describe "decode never builds a record"
+  ;; `{"__id__": …}` decoded to `{:__id__ …}` — the record identity slot — so a JSON
+  ;; payload answered `record?` true, dispatched as that record, and re-encoded with
+  ;; the key dropped.
+  (test "an __id__ key stays a string key"
+    (let (v (as-map (decode "{\"__id__\":\"http/response\",\"a\":1}")))
+      (is (not (record? v)))
+      (assert= "http/response" (get v "__id__"))
+      (assert= 1 (get v :a))))
+  (test "decode → encode round-trips the key"
+    (assert= "{\"__id__\":\"x\"}" (encode (decode "{\"__id__\":\"x\"}"))))
+  (test "nested objects are covered too"
+    (is (not (record? (first (get (as-map (decode "{\"xs\":[{\"__id__\":\"q\"}]}")) :xs)))))))

@@ -36,11 +36,10 @@ pub(super) fn deregister(pid: u64, reason: Message, heap: Option<&Heap>) {
 fn deregister_timed(pid: u64, reason: Message, heap: Option<&Heap>) {
     EXITED.fetch_add(1, Ordering::Relaxed);
     if crate::process::sysmon::armed() {
-        // Exit event first, then the death-disarm check — so a monitor watching
-        // :exit still sees every *other* process die, and its own death (never
-        // self-reported) cleanly disarms the stream.
+        // Exit event first, then (below, after the REGISTRY removal) the death-disarm
+        // — so a monitor watching :exit still sees every *other* process die, and its
+        // own death (never self-reported) cleanly disarms the stream.
         crate::process::sysmon::emit_exit(pid, &reason);
-        crate::process::sysmon::clear_if(pid);
     }
     // **NAMES is swept BEFORE the REGISTRY removal, and the order is load-bearing.**
     // The invariant it buys: a pid absent from REGISTRY is already absent from NAMES.
@@ -55,16 +54,28 @@ fn deregister_timed(pid: u64, reason: Message, heap: Option<&Heap>) {
     // before `deregister` is called, so it still prints. The sweep in
     // `retire_pid_tail` stays (idempotent) for the `retire_root_ctx` path that shares
     // the tail.
-    crate::dist::unregister_dead_pid(pid);
-    // The three tables are taken **sequentially**, not nested: NAMES first (above),
-    // released, then REGISTRY, released, then MONITORS. `add_monitor` and
-    // `spawn_or_get` take REGISTRY *nested* inside MONITORS / NAMES
-    // respectively for their own atomic check-and-modify steps — both are
-    // deadlock-free precisely because `deregister` never holds an outer
-    // lock while reaching for REGISTRY. Don't introduce a function that
-    // holds REGISTRY while taking NAMES or MONITORS, or this becomes a
-    // genuine ordering hazard.
-    let mailbox = REGISTRY.remove(pid);
+    //
+    // The REGISTRY removal runs INSIDE the NAMES write lock (`unregister_dead_pid_while`):
+    // `proc/register` checks liveness under that lock, so with the sweep and the removal
+    // one step to it, a register either binds before the sweep (which then drops it) or
+    // sees the pid gone — never binds in between, which left a name on a corpse forever.
+    // NAMES → REGISTRY is the nesting `spawn_or_get`/`register` already use, and
+    // `add_monitor`/`link`/`sysmon::install` nest REGISTRY inside their own tables; all
+    // are deadlock-free because nothing holds REGISTRY while reaching for any of them.
+    // Don't introduce a function that holds REGISTRY while taking NAMES, MONITORS,
+    // LINKS or the sysmon table, or this becomes a genuine ordering hazard. MONITORS is
+    // taken later, sequentially.
+    let mailbox = crate::dist::unregister_dead_pid_while(pid, || REGISTRY.remove(pid));
+    // The death-disarm runs AFTER the removal, and unconditionally. After: a
+    // `proc/system-monitor` install checks liveness under the sysmon lock, so either it
+    // saw this pid alive and installed before this clear (which removes it), or it sees
+    // the pid gone and refuses — before, an install landing between the clear and the
+    // removal armed `:exit-abnormal` on a corpse for good, which silenced the kernel's
+    // own crash line (`crash_reported_elsewhere`) for every later crash. Unconditional:
+    // `armed()` is the selected-KIND mask, 0 for a subscriber that selects nothing, and
+    // such a subscriber was never reaped (KI-97); `clear_if` early-outs on its own
+    // subscription count.
+    crate::process::sysmon::clear_if(pid);
     // A process killed (link/monitor/`exit`) while parked never runs a status
     // transition back out of `ST_WAITING`, so square up the global parked count here —
     // else `parked_count` leaks upward and `report_parked_liveness` keeps scanning.
@@ -97,6 +108,9 @@ fn retire_pid_tail(pid: u64, reason: Message) {
     // port-dies-with-its-owner semantics. Without this a crashed owner orphaned the
     // child, its registry entry, and both its reader threads for the runtime's life.
     crate::host::subprocess::close_process_procs(pid);
+    // And any wasm instances it loaded — each holds a whole store and linear memory.
+    #[cfg(feature = "wasm")]
+    crate::host::wasm::close_process_instances(pid);
     // Drop any registered names that pointed at this pid — Erlang semantics
     // (a name lives only as long as its process). Without this, named-spawn
     // would see the stale entry as "already running" and never respawn.
@@ -165,8 +179,9 @@ pub(super) fn retire_root_ctx(pid: u64) {
     let reason = Message::Keyword(value::intern(pk::NORMAL));
     if crate::process::sysmon::armed() {
         crate::process::sysmon::emit_exit(pid, &reason);
-        crate::process::sysmon::clear_if(pid);
     }
+    // Unconditional, after the REGISTRY removal above — see `deregister_timed`.
+    crate::process::sysmon::clear_if(pid);
     clear_parked(&mailbox);
     // Drop anything still queued. A root ctx blocks on the condvar rather than parking a
     // `Box<Process>`, so `waiter` is normally `None` — but take it if some path did park

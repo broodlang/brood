@@ -94,7 +94,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::at_least(1),
         Sig::new(vec![string, seq, map_ty], map_ty),
         &["prog", "&", "args", "opts"],
-        "Run prog (with optional args list and an opts map {:cwd :env :stdin :timeout-ms}) to completion; returns {:stdout s :stderr s :exit n}, plus :timed-out true when the timeout killed it.",
+        "Run prog (with optional args list and an opts map {:cwd :env :stdin :timeout-ms}) to completion; returns {:stdout s :stderr s :exit n}, plus :timed-out true when the timeout ended the call. The timeout bounds the WHOLE call — a grandchild still holding the output pipes is killed with the child's process group.",
         os_cmd);
     primitives.def(
         "%halt",
@@ -250,15 +250,19 @@ pub(super) fn os_type_builtin(_: &[Value], _: EnvId, _heap: &mut Heap) -> LispRe
 ///   a background `git fetch` from asking for a password nobody can see.
 /// - `:stdin` — a string written to the child's stdin, then EOF. Without it the child's
 ///   stdin is `/dev/null`, never ours.
-/// - `:timeout-ms` — kill the child after this long. The child runs in its own process
-///   group and the WHOLE group is killed, so a grandchild (`ssh` under `git`, `sleep`
-///   under `sh`) that still holds the output pipes cannot keep the call waiting.
+/// - `:timeout-ms` — a deadline over the WHOLE call: the child exiting AND both output
+///   pipes reaching end-of-file. Past it the child's process group is killed and the call
+///   returns at once with the output read so far, `:timed-out true`, and `:exit` the
+///   child's own status (`-1` when the kill ended it; its real code when it had already
+///   exited and only a grandchild — `sleep` under `sh -c "sleep 9 &"`, `ssh` under `git` —
+///   was still holding the pipes). The child runs in its own process group, so the kill
+///   reaches such a grandchild too.
 ///
-/// Every pipe is drained on its own thread, so neither direction can fill and wedge the
-/// other: writing all of stdin before reading any output deadlocks the moment the child
-/// emits more than one pipe buffer (~64 KiB) while still being fed.
+/// Every pipe is serviced together (one `poll` loop on Unix, a thread per pipe
+/// elsewhere), so neither direction can fill and wedge the other: writing all of stdin
+/// before reading any output deadlocks the moment the child emits more than one pipe
+/// buffer (~64 KiB) while still being fed.
 pub(super) fn os_cmd(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use std::io::{Read, Write};
     use std::process::{Command, Stdio};
     let prog = expect_string(heap, "%os-cmd", arg(args, 0))?;
     let mut cmd = Command::new(&prog);
@@ -314,63 +318,9 @@ pub(super) fn os_cmd(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         LispError::runtime(format!("%os-cmd: {prog}: {e}"))
             .with_code(crate::error::error_codes::SUBPROCESS_FAILED)
     };
-    let mut child = cmd.spawn().map_err(fail)?;
-    let writer = match (child.stdin.take(), stdin_text) {
-        (Some(mut pipe), Some(text)) => Some(std::thread::spawn(move || {
-            // EPIPE from a child that exits early just ends the write
-            let _ = pipe.write_all(text.as_bytes());
-        })),
-        _ => None,
-    };
-    let drain = |pipe: Option<Box<dyn Read + Send>>| {
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            if let Some(mut p) = pipe {
-                let _ = p.read_to_end(&mut buf);
-            }
-            buf
-        })
-    };
-    let out = drain(
-        child
-            .stdout
-            .take()
-            .map(|p| Box::new(p) as Box<dyn Read + Send>),
-    );
-    let err = drain(
-        child
-            .stderr
-            .take()
-            .map(|p| Box::new(p) as Box<dyn Read + Send>),
-    );
-    let started = std::time::Instant::now();
-    let mut timed_out = false;
-    let status = loop {
-        let Some(limit) = timeout else {
-            break child.wait().map_err(fail)?;
-        };
-        if let Some(status) = child.try_wait().map_err(fail)? {
-            break status;
-        }
-        if started.elapsed() >= limit {
-            timed_out = true;
-            #[cfg(unix)]
-            // SAFETY: killpg on the group `process_group(0)` made for this child; the pid
-            // is ours until we reap it below, so the group id cannot have been reused.
-            unsafe {
-                libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
-            }
-            #[cfg(not(unix))]
-            let _ = child.kill();
-            break child.wait().map_err(fail)?;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    };
-    if let Some(w) = writer {
-        let _ = w.join();
-    }
-    let stdout_bytes = out.join().unwrap_or_default();
-    let stderr_bytes = err.join().unwrap_or_default();
+    let child = cmd.spawn().map_err(fail)?;
+    let (status, stdout_bytes, stderr_bytes, timed_out) =
+        os_cmd_collect(child, stdin_text, timeout).map_err(fail)?;
     let stdout = heap.alloc_string(&String::from_utf8_lossy(&stdout_bytes));
     let stderr = heap.alloc_string(&String::from_utf8_lossy(&stderr_bytes));
     let exit_code = status.code().unwrap_or(-1) as i64;
@@ -384,6 +334,244 @@ pub(super) fn os_cmd(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         pairs.push((kw("timed-out"), Value::Bool(true)));
     }
     Ok(heap.map_from_pairs(pairs))
+}
+
+/// What `%os-cmd` collects from a finished (or killed) child: its status, stdout,
+/// stderr, and whether the deadline ended the call.
+type OsCmdOutcome = (std::process::ExitStatus, Vec<u8>, Vec<u8>, bool);
+
+/// Feed `%os-cmd`'s child its stdin and read both output pipes in ONE `poll` loop
+/// bounded by the deadline, so no helper thread exists to outlive the call: a
+/// grandchild that keeps a pipe open past the deadline is killed with the group, and
+/// one that escaped the group (`setsid`) only finds our ends closed.
+///
+/// The child is reaped LAST. Until then its pid — the process-group id — cannot be
+/// reused, so the `killpg` below can only ever reach the group we created.
+#[cfg(unix)]
+fn os_cmd_collect(
+    mut child: std::process::Child,
+    stdin_text: Option<String>,
+    timeout: Option<std::time::Duration>,
+) -> std::io::Result<OsCmdOutcome> {
+    use std::io::{ErrorKind, Read, Write};
+    use std::os::fd::AsRawFd;
+    use std::time::Instant;
+    fn set_nonblocking(fd: libc::c_int) {
+        // SAFETY: fcntl on a pipe descriptor this function owns for its whole duration.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            if flags >= 0 {
+                libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            }
+        }
+    }
+    let deadline = timeout.map(|limit| Instant::now() + limit);
+    let stdin_bytes = stdin_text.unwrap_or_default().into_bytes();
+    let mut stdin_written = 0usize;
+    // An empty `:stdin` is EOF at once: dropping the pipe here closes it.
+    let mut stdin_pipe = child.stdin.take().filter(|_| !stdin_bytes.is_empty());
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    if let Some(pipe) = &stdin_pipe {
+        set_nonblocking(pipe.as_raw_fd());
+    }
+    if let Some(pipe) = &stdout_pipe {
+        set_nonblocking(pipe.as_raw_fd());
+    }
+    if let Some(pipe) = &stderr_pipe {
+        set_nonblocking(pipe.as_raw_fd());
+    }
+    let mut stdout_bytes = Vec::new();
+    let mut stderr_bytes = Vec::new();
+    let mut timed_out = false;
+    let mut chunk = vec![0u8; 64 * 1024];
+    // Read until the pipe would block; `None` it out at end-of-file or on an error.
+    fn drain_ready<R: Read>(pipe: &mut Option<R>, into: &mut Vec<u8>, chunk: &mut [u8]) {
+        while let Some(reader) = pipe.as_mut() {
+            match reader.read(chunk) {
+                Ok(0) => *pipe = None,
+                Ok(count) => into.extend_from_slice(&chunk[..count]),
+                Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == ErrorKind::WouldBlock => return,
+                Err(_) => *pipe = None,
+            }
+        }
+    }
+    while stdin_pipe.is_some() || stdout_pipe.is_some() || stderr_pipe.is_some() {
+        let wait_ms: libc::c_int = match deadline {
+            None => -1,
+            Some(deadline) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    timed_out = true;
+                    break;
+                }
+                // Round up, so a sub-millisecond remainder sleeps rather than spins.
+                ((deadline - now).as_millis() + 1).min(libc::c_int::MAX as u128) as libc::c_int
+            }
+        };
+        let mut descriptors = Vec::with_capacity(3);
+        if let Some(pipe) = &stdin_pipe {
+            descriptors.push(libc::pollfd {
+                fd: pipe.as_raw_fd(),
+                events: libc::POLLOUT,
+                revents: 0,
+            });
+        }
+        for fd in [
+            stdout_pipe.as_ref().map(|pipe| pipe.as_raw_fd()),
+            stderr_pipe.as_ref().map(|pipe| pipe.as_raw_fd()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            descriptors.push(libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            });
+        }
+        // SAFETY: `descriptors` is a live, correctly sized array of pollfd for the call.
+        let ready = unsafe {
+            libc::poll(
+                descriptors.as_mut_ptr(),
+                descriptors.len() as libc::nfds_t,
+                wait_ms,
+            )
+        };
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == ErrorKind::Interrupted {
+                continue;
+            }
+            // SAFETY: as below — the group is ours until the child is reaped.
+            unsafe {
+                libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+            }
+            let _ = child.wait();
+            return Err(error);
+        }
+        if ready == 0 {
+            continue; // the deadline check at the top of the loop decides
+        }
+        for descriptor in &descriptors {
+            if descriptor.revents == 0 {
+                continue;
+            }
+            let fd = descriptor.fd;
+            if stdin_pipe.as_ref().map(|pipe| pipe.as_raw_fd()) == Some(fd) {
+                let writer = stdin_pipe.as_mut().expect("checked above");
+                match writer.write(&stdin_bytes[stdin_written..]) {
+                    Ok(count) => {
+                        stdin_written += count;
+                        if stdin_written == stdin_bytes.len() {
+                            stdin_pipe = None; // EOF for the child
+                        }
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            ErrorKind::WouldBlock | ErrorKind::Interrupted
+                        ) => {}
+                    // EPIPE from a child that exits early just ends the write
+                    Err(_) => stdin_pipe = None,
+                }
+            } else if stdout_pipe.as_ref().map(|pipe| pipe.as_raw_fd()) == Some(fd) {
+                drain_ready(&mut stdout_pipe, &mut stdout_bytes, &mut chunk);
+            } else if stderr_pipe.as_ref().map(|pipe| pipe.as_raw_fd()) == Some(fd) {
+                drain_ready(&mut stderr_pipe, &mut stderr_bytes, &mut chunk);
+            }
+        }
+    }
+    // Close our ends before waiting: a child blocked writing to us must see EPIPE.
+    drop(stdin_pipe);
+    drop(stdout_pipe);
+    drop(stderr_pipe);
+    let status = loop {
+        if timed_out {
+            // SAFETY: killpg on the group `process_group(0)` made for this child; the
+            // child is not reaped yet, so its pid (the group id) cannot have been reused.
+            unsafe {
+                libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+            }
+            break child.wait()?;
+        }
+        match deadline {
+            None => break child.wait()?,
+            Some(deadline) => {
+                if let Some(status) = child.try_wait()? {
+                    break status;
+                }
+                if Instant::now() >= deadline {
+                    timed_out = true;
+                    continue;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+    };
+    Ok((status, stdout_bytes, stderr_bytes, timed_out))
+}
+
+/// The portable fallback: a thread per pipe, the child killed at the deadline. Without
+/// process groups a grandchild holding a pipe can still outlast the deadline here.
+#[cfg(not(unix))]
+fn os_cmd_collect(
+    mut child: std::process::Child,
+    stdin_text: Option<String>,
+    timeout: Option<std::time::Duration>,
+) -> std::io::Result<OsCmdOutcome> {
+    use std::io::{Read, Write};
+    let writer = match (child.stdin.take(), stdin_text) {
+        (Some(mut pipe), Some(text)) => Some(std::thread::spawn(move || {
+            // EPIPE from a child that exits early just ends the write
+            let _ = pipe.write_all(text.as_bytes());
+        })),
+        _ => None,
+    };
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut buffer = Vec::new();
+            if let Some(mut reader) = pipe {
+                let _ = reader.read_to_end(&mut buffer);
+            }
+            buffer
+        })
+    };
+    let stdout_reader = drain(
+        child
+            .stdout
+            .take()
+            .map(|pipe| Box::new(pipe) as Box<dyn Read + Send>),
+    );
+    let stderr_reader = drain(
+        child
+            .stderr
+            .take()
+            .map(|pipe| Box::new(pipe) as Box<dyn Read + Send>),
+    );
+    let started = std::time::Instant::now();
+    let mut timed_out = false;
+    let status = loop {
+        let Some(limit) = timeout else {
+            break child.wait()?;
+        };
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if started.elapsed() >= limit {
+            timed_out = true;
+            let _ = child.kill();
+            break child.wait()?;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    };
+    if let Some(writer) = writer {
+        let _ = writer.join();
+    }
+    let stdout_bytes = stdout_reader.join().unwrap_or_default();
+    let stderr_bytes = stderr_reader.join().unwrap_or_default();
+    Ok((status, stdout_bytes, stderr_bytes, timed_out))
 }
 
 /// `(%halt code)` — terminate the process immediately with `code`, which must be a

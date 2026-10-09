@@ -67,7 +67,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(1),
         Sig::new(vec![string], kw),
         &["path"],
-        "Recursively delete `path`. Bounded to paths under `_deps/` (refuses anything else). Idempotent. The package manager's cache-eviction mechanism (ADR-037).",
+        "Recursively delete `path`. Bounded to paths strictly inside a `_deps/` directory with no `..` component (refuses anything else). Idempotent. The package manager's cache-eviction mechanism (ADR-037).",
         rm_rf);
 }
 
@@ -129,6 +129,36 @@ pub(super) fn git_or_err(args: &[&str], cwd: Option<&str>) -> Result<(), LispErr
     }
 }
 
+/// The commit `git ls-remote` output names for EXACTLY `ref`. A ls-remote pattern
+/// matches any ref ENDING in it at a `/` boundary, so asking for `v1` also lists a
+/// branch `feature/v1` (or a tag `old/v1`); taking whatever line came first or last
+/// pinned a dependency to the wrong commit. Precedence, first hit wins: the tag
+/// `refs/tags/<ref>` — its peeled `^{}` line first, the commit an annotated tag points
+/// to — then the branch `refs/heads/<ref>`, then a ref spelled in full (`HEAD`,
+/// `refs/heads/main`).
+fn ls_remote_exact_match<'a>(listing: &'a str, reference: &str) -> Option<&'a str> {
+    let candidates = [
+        format!("refs/tags/{reference}^{{}}"),
+        format!("refs/tags/{reference}"),
+        format!("refs/heads/{reference}"),
+        format!("{reference}^{{}}"),
+        reference.to_string(),
+    ];
+    let advertised: Vec<(&str, &str)> = listing
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            Some((fields.next()?, fields.next()?))
+        })
+        .collect();
+    candidates.iter().find_map(|wanted| {
+        advertised
+            .iter()
+            .find(|(_, name)| *name == wanted.as_str())
+            .map(|(sha, _)| *sha)
+    })
+}
+
 /// `(%git-resolve-ref url ref)` — resolve `ref` (a tag, branch, or commit) at the
 /// remote `url` to a full commit hash via `git ls-remote`, or `nil` if no such
 /// ref exists. For an annotated tag, prefers the peeled `^{}` line (the commit the
@@ -140,7 +170,11 @@ pub(super) fn git_resolve_ref(args: &[Value], _: EnvId, heap: &mut Heap) -> Lisp
     let r = expect_string(heap, "%git-resolve-ref", arg(args, 1))?;
     reject_option_like("%git-resolve-ref", "URL", &url)?;
     reject_option_like("%git-resolve-ref", "ref", &r)?;
-    let out = run_git(&["ls-remote", &url, &r], None)?;
+    // The `^{}` pattern is needed for the peeled line: a pattern matches a ref's whole
+    // name, and an annotated tag's peeled entry is NAMED `refs/tags/<ref>^{}`, so asking
+    // for `<ref>` alone never lists it (and the tag OBJECT's sha was pinned instead).
+    let peeled_pattern = format!("{r}^{{}}");
+    let out = run_git(&["ls-remote", &url, &r, &peeled_pattern], None)?;
     if !out.status.success() {
         return Err(LispError::runtime(format!(
             "%git-resolve-ref: git ls-remote {} {} failed: {}",
@@ -151,19 +185,8 @@ pub(super) fn git_resolve_ref(args: &[Value], _: EnvId, heap: &mut Heap) -> Lisp
         .with_code(error_codes::SUBPROCESS_FAILED));
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let mut first: Option<&str> = None;
-    let mut peeled: Option<&str> = None;
-    for line in stdout.lines() {
-        let sha = line.split_whitespace().next();
-        if first.is_none() {
-            first = sha;
-        }
-        if line.trim_end().ends_with("^{}") {
-            peeled = sha;
-        }
-    }
-    if let Some(s) = peeled.or(first) {
-        return Ok(heap.alloc_string(s));
+    if let Some(sha) = ls_remote_exact_match(&stdout, &r) {
+        return Ok(heap.alloc_string(sha));
     }
     // No advertised ref: if `ref` itself looks like a commit SHA, it pins itself.
     let looks_like_sha = r.len() >= 7 && r.len() <= 40 && r.chars().all(|c| c.is_ascii_hexdigit());
@@ -360,18 +383,42 @@ pub(super) fn untar_gz(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
     }
 }
 
-/// `(%rm-rf path)` — recursively delete `path`. **Bounded to `_deps/`**: refuses
-/// any path without a `_deps` component, so a mis-computed cache path can't delete
-/// something outside the package cache. Idempotent (`:ok` if already absent). The
-/// package manager's cache-eviction mechanism (ADR-037); `nest update` re-clones.
+/// Whether `path` names something STRICTLY inside a `_deps` directory, judged lexically:
+/// a `..` component anywhere refuses outright (`root/_deps/..` is the project itself, and
+/// `_deps/x/../../y` anything at all), `.` components are ignored, and some `_deps`
+/// component must be followed by at least one more — `_deps` itself is not removable.
+fn rm_rf_target_inside_deps(path: &str) -> bool {
+    use std::path::Component;
+    let mut seen_deps = false;
+    let mut inside = false;
+    for component in std::path::Path::new(path).components() {
+        match component {
+            Component::ParentDir => return false,
+            Component::CurDir => {}
+            Component::Normal(name) => {
+                inside = seen_deps;
+                if name == "_deps" {
+                    seen_deps = true;
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => {}
+        }
+    }
+    inside
+}
+
+/// `(%rm-rf path)` — recursively delete `path`. **Bounded to `_deps/`**: refuses any
+/// path that is not strictly inside a `_deps` directory, or that has a `..` component
+/// (see `rm_rf_target_inside_deps`), so a mis-computed or hostile cache path — a
+/// dependency named `..` — can't delete something outside the package cache. Idempotent
+/// (`:ok` if already absent). The package manager's cache-eviction mechanism (ADR-037);
+/// `nest update` re-clones.
 pub(super) fn rm_rf(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "%rm-rf", arg(args, 0))?;
-    let under_deps = std::path::Path::new(&path)
-        .components()
-        .any(|c| c.as_os_str() == "_deps");
-    if !under_deps {
+    if !rm_rf_target_inside_deps(&path) {
         return Err(LispError::runtime(format!(
-            "%rm-rf: refusing to delete {} — only paths under _deps/ may be removed",
+            "%rm-rf: refusing to delete {} — only paths strictly inside a _deps/ directory, \
+             with no `..` component, may be removed",
             path
         ))
         .with_code(error_codes::FILE_IO));

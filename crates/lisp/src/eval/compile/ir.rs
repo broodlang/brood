@@ -679,6 +679,17 @@ pub struct CompiledArm {
     /// re-checks before the arm is lowered again. `false` is the safe answer (fall back to
     /// the epoch-guarded IC call), so an unobserved arm simply forgoes the link.
     pub self_global_ok: std::sync::atomic::AtomicBool,
+    /// The last [`self_binding_stamp`](super::self_binding_stamp) at which the VM proved
+    /// `dbg_name` resolves to **this very arm** — the memo behind `Inst::SelfCall`'s
+    /// first-back-edge check. A frame starts at `SELF_UNCHECKED_EPOCH`, so its first
+    /// `SelfCall` asks whether the name still names this arm: the frame may have been
+    /// entered through an ALIAS after the name was rebound (`(def old f) (def f …)
+    /// (old …)`), and then the loop must hand its tail call to the new `f`, as the
+    /// tree-walker does. The stamp (runtime tag + global epoch) makes that check one
+    /// atomic load and a compare while no `def` has happened since the last proof, so a
+    /// short loop called a million times pays the env lookup once per epoch, not once
+    /// per activation. `u64::MAX` = never proven.
+    pub self_bound_stamp: std::sync::atomic::AtomicU64,
     /// Deopt-resume checkpoint layout (devlog 2026-07-16 fix): `u32::MAX` = no
     /// checkpointing (no non-tail calls in the chunk — a from-ip-0 re-run is
     /// then effect-free). Otherwise `ckpt_slot` is the frame slot holding the

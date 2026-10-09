@@ -1,0 +1,109 @@
+;; Hash stability of map/set keys across every move a value makes, and bounded
+;; hashing of lazy ranges.
+;;
+;; A map's trie is laid out by the hash each key had when it was inserted, and the
+;; collector, `promote` and the shared-code collector COPY a map without re-hashing
+;; it. So a key's hash must survive every move that `=` survives. A function compares
+;; by identity; its hash used to be the raw handle bits, which a collection rewrites,
+;; so a function key was lost at the first GC (`get` answered nil while `count` was
+;; 1). A range hashes like the list it equals; that used to walk every element, so
+;; `(range 0 9223372036854775807)` as a key never returned.
+;;
+;; Register-only — discovered and run by `nest test`. Bodies stay tail-recursive.
+
+(defmodule hash-stability-test (:use test))
+
+(defn hs-lookup-after-gc ()
+  (let (f (fn (x) (+ x 1))
+        m (assoc {} f :found)
+        _ (%gc-collect)
+        _ (%gc-collect))
+    [(get m f) (count m) (contains? m f)]))
+
+(defn hs-worker (parent)
+  (send parent [:looked-up (hs-lookup-after-gc)]))
+
+(defn hs-spawn-workers (parent n)
+  (if (= n 0)
+    nil
+    (do
+      (spawn (hs-worker parent))
+      (hs-spawn-workers parent (- n 1)))))
+
+(defn hs-collect-results (n acc)
+  (if (= n 0)
+    acc
+    (hs-collect-results (- n 1) (cons (receive ([:looked-up result] result)) acc))))
+
+(defn hs-echo (parent)
+  (receive (m (send parent m))))
+
+;; Built from a LOCAL closure, then promoted by `def`: the promoted copy of the key
+;; lives at a new handle, and the trie was laid out by the local one's hash.
+(def hs-promoted
+  (let (f (fn (x) (* x 2)))
+    (assoc {} f :promoted)))
+
+(describe "a function as a map or set key"
+  (test "survives a collection"
+    (assert= (hs-lookup-after-gc) [:found 1 true]))
+  (test "as a set element, survives a collection"
+    (let (f (fn () :member)
+          s #{f}
+          _ (%gc-collect))
+      (is (contains? s f))))
+  (test "nested inside a vector key, survives a collection"
+    (let (f (fn (x) x)
+          m (assoc {} [f 1] :nested)
+          _ (%gc-collect))
+      (assert= (get m [f 1]) :nested)))
+  (test "a key promoted with its map by `def` is found by its own key"
+    (let (key (first (keys hs-promoted)))
+      (assert= (get hs-promoted key) :promoted)))
+  (test "two distinct closures stay distinct keys across a collection"
+    (let (f (fn () 1)
+          g (fn () 1)
+          m (assoc (assoc {} f :f) g :g)
+          _ (%gc-collect))
+      (assert= (count m) 2)
+      (assert= (get m f) :f)
+      (assert= (get m g) :g))))
+
+(describe "function keys across processes"
+  (test "workers each build, collect and look up their own function-keyed map"
+    (let (me (self))
+      (hs-spawn-workers me 16)
+      (assert= (hs-collect-results 16 nil) (repeat 16 [:found 1 true]))))
+  (test "a function-keyed map sent to a worker and back is found by its own key"
+    (let (me (self)
+          worker (spawn (hs-echo me)))
+      (send worker (assoc {} (fn () :sent) :value))
+      (let (copy (receive)
+            _ (%gc-collect))
+        (assert= (get copy (first (keys copy))) :value)))))
+
+(describe "a range as a key"
+  (test "a range too long to walk hashes and is found again"
+    (let (huge (range 0 9223372036854775807)
+          m (assoc {} huge :huge))
+      (assert= (get m (range 0 9223372036854775807)) :huge)
+      (is (contains? #{huge} (range 0 9223372036854775807)))))
+  (test "a range finds the equal list's entry, and the reverse"
+    (assert= (get (assoc {} (list 0 1 2) :list) (range 3)) :list)
+    (assert= (get (assoc {} (range 3) :range) (list 0 1 2)) :range)
+    (assert= (get (assoc {} (seq (range 300)) :long) (range 300)) :long)
+    (assert= (get (assoc {} (range 0 600 2) :stepped) (seq (range 0 600 2))) :stepped))
+  (test "lists equal up to a long shared prefix stay distinct keys"
+    (let (straight (seq (range 300))
+          bent (reverse (cons 1000 (reverse (seq (range 299)))))
+          m (assoc (assoc {} straight :straight) bent :bent))
+      (assert= (count m) 2)
+      (assert= (get m (range 300)) :straight)
+      (assert= (get m bent) :bent))))
+
+(describe "range equality at the edge of i64"
+  (test "ranges longer than i64::MAX that differ by one element are unequal"
+    (refute (= (range -9223372036854775807 9223372036854775807)
+              (range -9223372036854775807 9223372036854775806)))
+    (assert= (range -9223372036854775807 9223372036854775807)
+      (range -9223372036854775807 9223372036854775807))))

@@ -86,3 +86,22 @@
     ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
     (is (= :raised (try (do (zlib/brotli "x" 12) :ok) (catch e :raised))))
     (is (= :raised (try (do (zlib/brotli "x" -1) :ok) (catch e :raised))))))
+
+(describe "decompression output cap (max-bytes)"
+  ;; A few hundred compressed bytes can expand to gigabytes, gathered in Rust below the
+  ;; collector and the soft memory limit — so every decoder stops at a cap (default
+  ;; 1 GiB) and raises, rather than aborting the runtime on a failed allocation.
+  (test "each decoder raises once its output would pass max-bytes"
+    (let (s (big "a" 10000))
+      (assert-error (zlib/gunzip (zlib/gzip s) 9999))
+      (assert-error (zlib/uncompress (zlib/compress s) 9999))
+      (assert-error (zlib/unzip (zlib/zip s) 9999))
+      (assert-error (zlib/unbrotli (zlib/brotli s) 9999))))
+  (test "output of exactly max-bytes decodes"
+    (let (s (big "a" 10000))
+      (assert= s (string/bytes-> (zlib/gunzip (zlib/gzip s) 10000)))
+      (assert= s (string/bytes-> (zlib/uncompress (zlib/compress s) 10000)))
+      (assert= s (string/bytes-> (zlib/unzip (zlib/zip s) 10000)))
+      (assert= s (string/bytes-> (zlib/unbrotli (zlib/brotli s) 10000)))))
+  (test "a non-positive max-bytes is refused"
+    (assert-error (zlib/gunzip (zlib/gzip "x") 0))))

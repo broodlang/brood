@@ -66,3 +66,25 @@
     (assert= (->html "`**kwargs` and `[[x]]` and `<b>`")
       "<p><code>**kwargs</code> and <code>[[x]]</code> and <code>&lt;b&gt;</code></p>")
     (assert= (->html "an unclosed ` tick") "<p>an unclosed ` tick</p>")))
+
+(describe "markdown — a link's scheme is allow-listed after a browser's scrubbing"
+  ;; The deny-list compared the URL as written, so `java\tscript:` and a leading
+  ;; `\u{1}` — both of which a browser deletes before reading the scheme — rendered as
+  ;; live script links.
+  (test "tab / CR / LF inside the scheme cannot smuggle javascript:"
+    (is (includes? (->html "[x](java\tscript:alert(1))") "<a href=\"#\">x</a>"))
+    (is (includes? (->html "[x](java\nscript:alert(1))") "href=\"#\""))
+    (is (includes? (->html "[x](JaVa\rScRiPt:alert(1))") "href=\"#\"")))
+  (test "a leading C0 control or space cannot either"
+    (is (includes? (->html "[x](\u{1}javascript:alert(1))") "href=\"#\""))
+    (is (includes? (->html "[x](\u{1f} javascript:alert(1))") "href=\"#\"")))
+  (test "only http, https and mailto pass as schemes"
+    (is (includes? (->html "[x](vbscript:msgbox)") "href=\"#\""))
+    (is (includes? (->html "[x](data:text/html,hi)") "href=\"#\""))
+    (is (includes? (->html "[x](file:///etc/passwd)") "href=\"#\""))
+    (is (includes? (->html "[x](HTTPS://a.b/)") "href=\"HTTPS://a.b/\""))
+    (is (includes? (->html "[x](mailto:a@b.c)") "href=\"mailto:a@b.c\"")))
+  (test "relative URLs and fragments are kept, including a colon after the path starts"
+    (is (includes? (->html "[x](#top)") "href=\"#top\""))
+    (is (includes? (->html "[x](../a/b.html)") "href=\"../a/b.html\""))
+    (is (includes? (->html "[x](/p?next=javascript:1)") "href=\"/p?next=javascript:1\""))))

@@ -140,6 +140,13 @@ fn find_last_before(
     if before == 0 {
         return None;
     }
+    // An empty needle occurs at every index 0..=len. Answer it here: the scan below would
+    // otherwise find it at `len` forever once `before` lies past the end (`find_from`
+    // clamps a start past the end back to `len`, so `start` never advances past it).
+    if needle.is_empty() {
+        return Some((before - 1).min(rope.len_chars()));
+    }
+    let before = before.min(rope.len_chars());
     let mut last = None;
     let mut start = 0usize;
     while let Some(at) = find_from(rope, needle, start, fold) {

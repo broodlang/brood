@@ -1985,6 +1985,7 @@ fn flush_rt_closure(
         doc: cl.doc,
         env,
         module: cl.module,
+        identity: cl.identity,
     });
     ClosureId::runtime_gen(new_idx, dest)
 }

@@ -1,0 +1,39 @@
+;;; Regression guard: an unquote in a quasiquote template's DOTTED TAIL is evaluated as
+;;; the tail (2026-10-08).
+;;;
+;;; The reader reads `` `(1 . ~t) `` as `(1 unquote t)` — the pair `(unquote t)` is the
+;;; cdr — and the template builder walked that as three ordinary elements, building the
+;;; literal list `(1 unquote t)`. Now a bare `unquote` second-to-last, after at least one
+;;; element, marks the evaluated tail; `~@` in that position means the same tail.
+;;;
+;;; Both a top-level backtick (the tree-walker's `quasiquote` special form) and one inside
+;;; a macro body (expanded by the compile pass) go through `expand_quasiquote`; the cases
+;;; below cover both, at every ceiling.
+
+(defmodule quasiquote-dotted-tail-test (:use test))
+
+(defmacro qdt-tail (x t) `(list ~x . ~t))
+(defn qdt-build (t) `(1 2 . ~t))
+(defn qdt-splice-then-tail (xs t) `(0 ~@xs . ~t))
+(defn qdt-pair (v) `(:k . ~v))
+
+(describe "an unquoted dotted tail"
+  (test "the tail is spliced in as the list's rest"
+    (let (t '(3 4))
+      (assert= '(1 3 4) `(1 . ~t)))
+    (assert= '(1 2 3 4) (qdt-build '(3 4)))
+    (assert= '(1 2) (qdt-build nil)))
+
+  (test "a non-list tail builds a dotted pair"
+    (assert= (cons :k 5) (qdt-pair 5))
+    (assert= (cons 1 (cons 2 3)) (qdt-build 3)))
+
+  (test "a splice before the tail still splices"
+    (assert= '(0 7 8 9) (qdt-splice-then-tail [7 8] '(9))))
+
+  (test "a macro's template with a dotted tail expands to the evaluated tail"
+    (assert= '(1 2 3) (qdt-tail 1 (2 3))))
+
+  (test "the splicing spelling in the tail is the same tail"
+    (let (t '(3 4))
+      (assert= '(1 3 4) `(1 . ~@t)))))

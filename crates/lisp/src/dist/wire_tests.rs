@@ -11,7 +11,7 @@ fn hello_roundtrips() {
     let nonce = [7u8; NONCE_LEN];
     let eph_pub = [9u8; EPH_PUB_LEN];
     let f = Frame::Hello {
-        node: value::intern("alpha"),
+        node: "alpha".to_string(),
         nonce,
         eph_pub,
         addr: "tcp:127.0.0.1:9000".to_string(),
@@ -23,7 +23,7 @@ fn hello_roundtrips() {
             eph_pub: e2,
             addr,
         } => {
-            assert_eq!(value::symbol_name(node), "alpha");
+            assert_eq!(node, "alpha");
             assert_eq!(n2, nonce);
             assert_eq!(e2, eph_pub);
             assert_eq!(addr, "tcp:127.0.0.1:9000");

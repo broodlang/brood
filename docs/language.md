@@ -2632,7 +2632,12 @@ In the `math` module: `math/mod`  `math/rem`  `math/quot`  `math/floor`  `math/m
   range is realised under. `string/repeat` builds by doubling and refuses a result
   past a gibibyte.
 - A source file may begin with a `#!` shebang line (skipped) or a byte-order mark
-  (trivia); a control character inside a symbol is a parse error naming it. A
+  (trivia); a control character inside a symbol is a parse error naming it. The
+  shebang is a property of a whole source: `load`, `reflect/read-all` and
+  `reflect/eval-string` skip it, `nest format` keeps it, and `reflect/read-string`
+  of one form reads `#!` as the dispatch error it is. A line break is `\n`, `\r\n`
+  or a lone `\r` — exactly what an editor counts, so a diagnostic's line is the
+  editor's line; U+2028/U+2029 are ordinary whitespace, not line breaks. A
   `case`/`cond`/`match`/`receive` may have hundreds of arms: each lowers to one nested
   level per arm and the expansion ceiling is 1024 levels (ADR-395).
 - `min`/`max` are variadic and require at least one argument. `even?`/`odd?`

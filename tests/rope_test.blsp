@@ -222,3 +222,19 @@
   (test "indices are CHARACTERS, not bytes"
     ;; é is two bytes: a byte walk would answer 5
     (assert= (text/skip-forward (text/from-string "ééé x") 0 " " false) 3)))
+
+(describe "rope search past the end"
+  ;; An empty needle with `before` past the rope's end looped forever: the forward scan
+  ;; clamps a start past the end back to the end, so it never advanced. Reached from the
+  ;; editor's backward search with an empty pattern at a stale position.
+  (test "an empty needle answers the last index strictly before `before`, clamped"
+    (let (r (text/from-string "ab"))
+      (assert= (%rope-rfind r "" 3 false) 2)
+      (assert= (%rope-rfind r "" 1000 true) 2)
+      (assert= (%rope-rfind r "" 2 false) 1)
+      (assert= (%rope-rfind r "" 0 false) -1)
+      (assert= (editor/buffer/buffer-search-backward (editor/buffer/make-buffer "ab") "" 3) 2)))
+  (test "a non-empty needle with `before` past the end finds the last match"
+    (let (r (text/from-string "abcabc"))
+      (assert= (%rope-rfind r "abc" 1000 false) 3)
+      (assert= (%rope-rfind r "ABC" 1000 true) 3))))

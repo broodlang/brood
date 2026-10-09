@@ -415,9 +415,34 @@ fn advertised_addr() -> String {
         .unwrap_or_default()
 }
 
-/// `(proc/register name pid)` — bind a local name to a local process id.
-pub(crate) fn register(name: Symbol, id: u64) {
-    crate::core::sync::write(&NAMES).insert(name, id);
+/// What [`register`] did.
+pub(crate) enum Registration {
+    /// `name` now names the pid, replacing any previous holder.
+    Bound,
+    /// The pid is not alive, so nothing was bound. Indistinguishable from binding it and
+    /// the process dying a moment later — a name lives only as long as its process, so the
+    /// death would have released it — which is why this is not an error: a supervisor that
+    /// registers a child which crashed on its first line must not crash with it.
+    DeadPid,
+}
+
+/// `(proc/register name pid)` — bind a local name to a local process id, replacing any
+/// previous holder. Replacing is the contract every caller relies on (a restarted
+/// logger, a test standing in as `:editor` and handing the name back), so a live
+/// holder is not refused.
+///
+/// Decided under the `NAMES` write lock, against the same lock the death path holds
+/// across its name sweep AND its `REGISTRY` removal ([`unregister_dead_pid_while`]), so
+/// the liveness read here is exact: a pid this sees alive has not yet been swept, and
+/// the sweep will find the binding. Without the check a dead pid's name was bound after
+/// its sweep and stayed bound forever.
+pub(crate) fn register(name: Symbol, id: u64) -> Registration {
+    let mut names = crate::core::sync::write(&NAMES);
+    if !process::is_alive(id) {
+        return Registration::DeadPid;
+    }
+    names.insert(name, id);
+    Registration::Bound
 }
 
 /// `(proc/whereis name)` — the local pid registered under `name`, or `None`. Lets
@@ -459,14 +484,27 @@ pub(crate) fn name_for_pid(pid: u64) -> Option<Symbol> {
 /// for a peer the dead process watched would iterate and attempt delivery
 /// to a non-existent pid.
 pub(crate) fn unregister_dead_pid(pid: u64) {
-    let mut names = crate::core::sync::write(&NAMES);
-    names.retain(|_, &mut p| p != pid);
+    unregister_dead_pid_while(pid, || ());
+}
+
+/// [`unregister_dead_pid`], running `retire` (the death path's `REGISTRY` removal)
+/// **inside** the same `NAMES` write lock as the name sweep — so no [`register`] can
+/// fall between the sweep and the removal, see the pid still alive, and bind a name the
+/// sweep has already passed. NAMES → REGISTRY is the nesting [`spawn_or_get`] and
+/// [`register`] already use, so this adds no new lock order.
+pub(crate) fn unregister_dead_pid_while<R>(pid: u64, retire: impl FnOnce() -> R) -> R {
+    let retired = {
+        let mut names = crate::core::sync::write(&NAMES);
+        names.retain(|_, &mut p| p != pid);
+        retire()
+    };
     // Prune the dead pid from every NODE_MONITORS watcher list.
     let mut monitors = crate::core::sync::write(&NODE_MONITORS);
     for watchers in monitors.values_mut() {
         watchers.retain(|&w| w != pid);
     }
     monitors.retain(|_, v| !v.is_empty());
+    retired
 }
 
 /// Named-spawn's atomic check-or-spawn primitive. If `name` is registered
@@ -480,10 +518,10 @@ pub(crate) fn unregister_dead_pid(pid: u64) {
 /// once via `process::is_alive` for the staleness check, and once inside
 /// `spawner()` (`process::spawn` inserts a new mailbox). Both are short
 /// — sequential acquisitions, not held across awaits, never overlap with
-/// each other. Lock-ordering vs `deregister` (which holds REGISTRY, then
-/// NAMES, then MONITORS *sequentially*) is safe: deregister never holds
-/// REGISTRY while reaching for NAMES, so the NAMES → REGISTRY nesting
-/// here can't form a cycle.
+/// each other. Lock-ordering vs `deregister` is safe: deregister nests its
+/// REGISTRY removal INSIDE NAMES ([`unregister_dead_pid_while`]) — the same
+/// NAMES → REGISTRY order as here — and never holds REGISTRY while reaching
+/// for NAMES, so no cycle can form.
 ///
 /// `spawner` is **fallible** — if creating the process errors (e.g. a
 /// type-check or heap-promotion failure), we propagate without inserting
@@ -558,8 +596,13 @@ pub(crate) fn monitor_remote(target_node: Symbol, target_pid: u64, watcher_pid: 
     //   • If they run first (`NODES` already empty when `send_frame` looks),
     //     `send_frame` returns false and we fall through to the explicit cleanup
     //     below, dropping our pending entry and firing `:noconnection` ourselves.
-    // The pending entry can't be orphaned in either branch.
+    // The pending entry can't be orphaned in either branch. And it fires ONCE: when
+    // the link drops after the record but before the send, `handle_node_down` has
+    // already claimed the entry and fired, the send then fails, and the fallback finds
+    // nothing left to claim — it used to fire a second `[:down mref … :noconnection]`.
     process::record_pending_remote(target_node, target_pid, watcher_pid, mref);
+    #[cfg(test)]
+    tests::run_setup_gap_hook();
     let sent = send_frame(
         target_node,
         &Frame::Monitor {
@@ -569,8 +612,7 @@ pub(crate) fn monitor_remote(target_node: Symbol, target_pid: u64, watcher_pid: 
         },
     );
     if !sent {
-        process::drop_pending_remote(target_node, watcher_pid, mref);
-        process::fire_noconnection(target_node, target_pid, watcher_pid, mref);
+        process::fire_noconnection_if_pending(target_node, target_pid, watcher_pid, mref);
     }
 }
 
@@ -619,6 +661,8 @@ pub(crate) fn link_remote(target_node: Symbol, target_pid: u64, local_pid: u64) 
     // `local_pid` is the calling process, so this is true by construction; binding it
     // keeps the `#[must_use]`-ish intent visible rather than discarding a meaningful bool.
     let _linked = process::record_remote_link(local_pid, target_node, target_pid);
+    #[cfg(test)]
+    tests::run_setup_gap_hook();
     let sent = send_frame(
         target_node,
         &Frame::Link {
@@ -628,7 +672,9 @@ pub(crate) fn link_remote(target_node: Symbol, target_pid: u64, local_pid: u64) 
     );
     if !sent {
         // No link to that node: the target is unreachable. Fire `:noconnection`
-        // to the linker (this also drops the half-entry we just recorded).
+        // to the linker (this also drops the half-entry we just recorded) — unless a
+        // link that dropped between the record and the send already did, in which
+        // case the entry is gone and this fires nothing (no duplicate exit).
         process::deliver_remote_link_exit(
             local_pid,
             target_node,
@@ -1544,7 +1590,19 @@ fn establish(peer: Symbol, peer_addr: String, stream: Stream, role: Role, sessio
         }
     };
     if let Some(old) = evicted {
-        let _ = old.sock.shutdown(Shutdown::Both); // its reader unblocks, no-ops on the new id
+        // Its reader unblocks, and no-ops on the new id.
+        let _ = old.sock.shutdown(Shutdown::Both);
+        // Whatever was still queued on the evicted link dies with its writer — a
+        // `Monitor`/`Link` request among it never reaches the peer, and the peer (which
+        // resolves the same tie-break) may have discarded that connection unread anyway.
+        // The evicted reader's `drop_link` no-ops on the new id, so nothing else would
+        // ever resolve the couplings made over it: run the net-split cleanup for them
+        // now — every pending remote monitor and link to `peer` gets its `:noconnection`
+        // (each fires once: the entries are claimed), and the peer's watchers on our
+        // pids are dropped. Done before this link's reader starts, so nothing it carries
+        // is swept. No `[:nodedown]`: the node is still connected, over the winner.
+        process::handle_node_down(peer);
+        process::handle_link_node_down(peer);
     }
 
     ensure_heartbeat();
@@ -1674,7 +1732,7 @@ fn establish(peer: Symbol, peer_addr: String, stream: Stream, role: Role, sessio
                         }
                     }
                     Frame::Unlink { from_pid, to_pid } => {
-                        process::drop_remote_link(to_pid, peer, from_pid)
+                        process::drop_remote_link(to_pid, peer, from_pid);
                     }
                     // An exit signal for our local `to_pid`. A link death goes
                     // through the trap-or-propagate path; an explicit remote exit
@@ -1877,6 +1935,178 @@ use wire::{encode_payload, Frame};
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        static SETUP_GAP_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Run, once, whatever a test armed for the gap between `monitor_remote` /
+    /// `link_remote` recording their entry and sending the frame — the window a link
+    /// can drop in.
+    pub(super) fn run_setup_gap_hook() {
+        if let Some(hook) = SETUP_GAP_HOOK.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
+    }
+
+    fn arm_setup_gap_hook(hook: impl FnOnce() + 'static) {
+        SETUP_GAP_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    /// A link that drops between `monitor_remote` recording its pending entry and
+    /// sending the `Monitor` frame fires the watcher's `:noconnection` through the
+    /// node-down path; the send then fails, and the fallback must not fire it again.
+    #[test]
+    fn a_link_dropping_during_monitor_setup_fires_one_noconnection() {
+        let me = process::self_pid();
+        let node = value::intern("gone-during-monitor@test");
+        let mref = process::next_ref();
+        arm_setup_gap_hook(move || fire_nodedown(node));
+        monitor_remote(node, 7, me, mref);
+        assert_eq!(
+            process::mailbox_len(me),
+            Some(1),
+            "one [:down … :noconnection] per monitor, not one from each path"
+        );
+        // Control: with no drop in the gap, the fallback alone fires it.
+        monitor_remote(node, 8, me, process::next_ref());
+        assert_eq!(process::mailbox_len(me), Some(2));
+    }
+
+    /// The link twin: a link dropping between `link_remote`'s record and its send
+    /// delivers one `[:EXIT … :noconnection]`, not two.
+    #[test]
+    fn a_link_dropping_during_link_setup_fires_one_noconnection() {
+        let me = process::self_pid();
+        process::set_trap_exit(me, true);
+        let node = value::intern("gone-during-link@test");
+        arm_setup_gap_hook(move || fire_nodedown(node));
+        link_remote(node, 9, me);
+        assert_eq!(
+            process::mailbox_len(me),
+            Some(1),
+            "one [:EXIT … :noconnection] per link, not one from each path"
+        );
+        link_remote(node, 10, me);
+        assert_eq!(process::mailbox_len(me), Some(2));
+    }
+
+    /// A remote DOWN already in flight when the watcher demonitors must not land after
+    /// the demonitor — the guarantee the local path makes (KI-213).
+    #[test]
+    fn a_remote_down_arriving_after_demonitor_is_dropped() {
+        let me = process::self_pid();
+        let node = value::intern("peer-for-demonitor@test");
+        let reason = Message::Keyword(value::intern("normal"));
+        let mref = process::next_ref();
+        process::record_pending_remote(node, 11, me, mref);
+        demonitor_remote(node, me, mref);
+        process::deliver_remote_down(node, me, mref, 11, reason.clone());
+        assert_eq!(
+            process::mailbox_len(me),
+            Some(0),
+            "a DOWN for a demonitored ref was delivered"
+        );
+        // Control: a monitor still pending gets its DOWN.
+        let pending = process::next_ref();
+        process::record_pending_remote(node, 12, me, pending);
+        process::deliver_remote_down(node, me, pending, 12, reason);
+        assert_eq!(process::mailbox_len(me), Some(1));
+    }
+
+    /// A remote link exit already in flight when the local process unlinks must not
+    /// arrive after the unlink.
+    #[test]
+    fn a_remote_link_exit_arriving_after_unlink_is_dropped() {
+        let me = process::self_pid();
+        process::set_trap_exit(me, true);
+        let node = value::intern("peer-for-unlink@test");
+        let reason = Message::Keyword(value::intern("boom"));
+        assert!(process::record_remote_link(me, node, 13));
+        unlink_remote(node, 13, me);
+        process::deliver_remote_link_exit(me, node, 13, reason.clone());
+        assert_eq!(
+            process::mailbox_len(me),
+            Some(0),
+            "a link exit for an unlinked peer was delivered"
+        );
+        // Control: a live link's exit arrives.
+        assert!(process::record_remote_link(me, node, 14));
+        process::deliver_remote_link_exit(me, node, 14, reason);
+        assert_eq!(process::mailbox_len(me), Some(1));
+    }
+
+    /// A duplicate link that loses the tie-break to a newer one is evicted with its
+    /// writer queue — and with it any `Monitor` request still queued there. Its reader's
+    /// `drop_link` no-ops on the new id, so the eviction itself must resolve the
+    /// couplings made over it: a pending remote monitor gets its `:noconnection`.
+    #[test]
+    fn evicting_a_link_fires_noconnection_for_its_pending_monitors() {
+        let me = process::self_pid();
+        // This runtime never ran `node-start`, so it is `nonode`: a link WE dialed has
+        // connector "nonode", one the peer dialed has the peer's name. "nonode" sorts
+        // before "zz-…", so the second (Initiator) link evicts the first.
+        let peer = value::intern("zz-evicted-peer@test");
+        let fresh_session = || Session {
+            send: session::SealKey::new([1; session::KEY_LEN]),
+            recv: session::OpenKey::new([2; session::KEY_LEN]),
+        };
+        let (first, _first_far_end) = UnixStream::pair().unwrap();
+        establish(
+            peer,
+            String::new(),
+            Stream::Unix(first),
+            Role::Responder,
+            fresh_session(),
+        );
+        // A monitor that went out over the first link.
+        process::record_pending_remote(peer, 21, me, process::next_ref());
+        let (second, _second_far_end) = UnixStream::pair().unwrap();
+        establish(
+            peer,
+            String::new(),
+            Stream::Unix(second),
+            Role::Initiator,
+            fresh_session(),
+        );
+        assert_eq!(
+            crate::core::sync::read(&NODES)
+                .get(&peer)
+                .map(|link| link.connector),
+            Some(local_node()),
+            "the newer, smaller-connector link must have won"
+        );
+        assert_eq!(
+            process::mailbox_len(me),
+            Some(1),
+            "the evicted link's pending monitor must get its :noconnection"
+        );
+    }
+
+    /// `proc/register`'s one refusal, decided under the NAMES lock: a dead pid binds
+    /// nothing — and does not disturb a live holder's binding either.
+    #[test]
+    fn register_binds_only_live_pids() {
+        let me = process::self_pid();
+        let name = value::intern("register-refusals@test");
+        assert!(matches!(
+            register(name, u64::MAX - 77),
+            Registration::DeadPid
+        ));
+        assert_eq!(whereis(name), None, "a dead pid's name was bound");
+        assert!(matches!(register(name, me), Registration::Bound));
+        assert!(matches!(register(name, me), Registration::Bound));
+        assert!(matches!(
+            register(name, u64::MAX - 77),
+            Registration::DeadPid
+        ));
+        assert_eq!(
+            whereis(name),
+            Some(me),
+            "a dead pid displaced a live holder"
+        );
+    }
 
     /// The pre-auth connection gate: slots are bounded at the cap, the
     /// over-count from a losing `try_acquire` is rolled back (so the live count

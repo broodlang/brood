@@ -724,7 +724,7 @@ fn eval_tail_loop(
                         continue 'tail;
                     }
                     let scope = heap.new_env(Some(env));
-                    let (scope, body) = bind_sequential(heap, &binds, scope, body)?;
+                    let (scope, body) = bind_sequential(heap, &binds, scope, body, true)?;
                     match tail_of_cons(heap, body, scope)? {
                         Some((last, env_r)) => {
                             expr = last;
@@ -789,7 +789,7 @@ fn eval_tail_loop(
                         heap.env_define(scope, bind_name, Value::nil());
                         i += 2;
                     }
-                    let (scope, body) = bind_sequential(heap, &binds, scope, body)?;
+                    let (scope, body) = bind_sequential(heap, &binds, scope, body, false)?;
                     match tail_of_cons(heap, body, scope)? {
                         Some((last, env_r)) => {
                             expr = last;
@@ -2219,6 +2219,7 @@ fn build_closure(
         doc: tpl.doc.clone(),
         env: captured,
         module,
+        identity: crate::core::value::fresh_closure_identity(),
     });
     Value::func(id)
 }
@@ -2537,24 +2538,46 @@ fn uncons(heap: &Heap, v: Value) -> (Value, Value) {
 /// and the trailing `body` are kept on the operand stack across the evals;
 /// returns the relocated `(scope, body)`. `binds` is name/value-interleaved with
 /// all even slots already validated as symbols.
+///
+/// `lexical` (plain `let`): once an RHS that could have built a closure has been
+/// evaluated, the next binding goes into a fresh CHILD frame instead of being appended to
+/// the frame that closure may have captured. Frame lookup is by name over the whole chain,
+/// so appending made a later binding visible to an earlier closure:
+/// `(let (x 1 f (fn () x) x 2) (f))` answered 2, and `(defn h (x) (let (f (fn () x) x 99)
+/// (f)))` answered 99, where the compiled tiers (one slot per binding, resolved at compile
+/// time) answer 1 and the argument. Only a list RHS can build a closure (a symbol or a
+/// literal cannot), so the common atom-valued `let` still binds into one frame. `letrec`
+/// passes `false`: its names are meant to be visible to every RHS, through the one frame.
 fn bind_sequential(
     heap: &mut Heap,
     binds: &[Value],
     scope: EnvId,
     body: Value,
+    lexical: bool,
 ) -> Result<(EnvId, Value), LispError> {
     heap.root_scope(|heap| {
-        let scope_rt = heap.root_env(scope);
+        let mut scope_rt = heap.root_env(scope);
         let body_rt = heap.root(body);
         let binds_r: SmallVec<[Root; 8]> = binds.iter().map(|&b| heap.root(b)).collect();
         let n = binds.len();
+        // Has an RHS evaluated since `scope_rt`'s frame was made been able to capture it?
+        let mut frame_may_be_captured = false;
         let mut i = 0;
         while i < n {
             let bind_name = as_symbol(heap, "binding name", heap.read_root(binds_r[i]))?;
             let rhs = heap.read_root(binds_r[i + 1]);
+            let rhs_is_list = matches!(rhs.unpack(), ValueRef::Pair(_));
             let scope_now = heap.read_root_env(scope_rt);
             let val = eval_at(heap, rhs, scope_now)?;
-            let scope_now = heap.read_root_env(scope_rt);
+            let mut scope_now = heap.read_root_env(scope_rt);
+            if lexical {
+                if frame_may_be_captured {
+                    // `val` stays live across `new_env`: an allocation, never a collection.
+                    scope_now = heap.new_env(Some(scope_now));
+                    scope_rt = heap.root_env(scope_now);
+                }
+                frame_may_be_captured = rhs_is_list;
+            }
             heap.env_define(scope_now, bind_name, val);
             i += 2;
         }

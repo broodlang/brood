@@ -39,6 +39,7 @@
 //! has no exclusive owner to unmap it; only the hashed map's memory is released.
 
 use crate::core::heap::Heap;
+use crate::core::sync::lock;
 use crate::core::value::Value;
 use crate::error::{LispError, LispResult};
 use crate::process::{from_message, to_message, Message};
@@ -454,15 +455,23 @@ impl Store {
         **guard = Some(map);
     }
 
-    /// The held-lock hashed map, migrating first if this store is still dense.
+    /// The held-lock hashed map, migrating first if this store is still dense — or
+    /// an error if the table was dropped. `drop_table` tombstones and empties the
+    /// store under this same lock, so an op that passed `lookup` before the drop and
+    /// reaches the lock after it sees the tombstone here; without the check it
+    /// migrated the cleared store and resurrected a hashed map on a dropped table
+    /// (written to, and never freed).
     fn hashed_or_migrate<'g>(
         &self,
         guard: &'g mut MutexGuard<'_, Option<StoreMap>>,
-    ) -> &'g mut StoreMap {
+    ) -> Result<&'g mut StoreMap, LispError> {
+        if self.dropped.load(Ordering::SeqCst) {
+            return Err(LispError::runtime("table: no such table (dropped)"));
+        }
         if guard.is_none() {
             self.migrate_to_hashed(guard);
         }
-        guard.as_mut().expect("migrated above")
+        Ok(guard.as_mut().expect("migrated above"))
     }
 }
 
@@ -547,9 +556,14 @@ pub fn drop_table(id: u64) -> bool {
     };
     match REGISTRY.get(idx as usize) {
         Some(store) => {
-            let was_live = !store.dropped.swap(true, Ordering::Relaxed);
+            // The whole drop runs under the store lock — the lock that serializes
+            // migration — and `hashed_or_migrate` re-checks the tombstone under it,
+            // so no op that raced past `lookup` can migrate the emptied store back
+            // into a live hashed map afterwards.
+            let mut guard = lock(&store.hashed);
+            let was_live = !store.dropped.swap(true, Ordering::SeqCst);
             if was_live {
-                *store.hashed.lock().expect("table store mutex") = None;
+                *guard = None;
                 // Retire the dense fast paths too: any JIT'd inline op re-checks
                 // this flag and re-routes to the FFI, whose `lookup` then reports
                 // the drop — so a dropped table errors instead of silently writing
@@ -591,7 +605,7 @@ pub fn count(id: u64) -> Result<i64, LispError> {
         }
         // A migration raced the tally — fall through to the hashed count.
     }
-    let data = store.hashed.lock().expect("table store mutex");
+    let data = lock(&store.hashed);
     match &*data {
         Some(map) => Ok(map.values().map(|b| b.len()).sum::<usize>() as i64),
         // Raced a migration that hadn't published the map when we read the flag.
@@ -674,12 +688,12 @@ pub fn put(heap: &mut Heap, id: u64, key: Value, val: Value) -> LispResult {
     }
     // Hashed path (migrating first if still dense — an out-of-shape key/value
     // leaves the dense world for good).
-    let mut guard = store.hashed.lock().expect("table store mutex");
+    let mut guard = lock(&store.hashed);
     // Clone both out of the GC heap (also rejects non-sendable values).
     let km = to_message(heap, key)?;
     let vm = to_message(heap, val)?;
     let hash = heap.hash_value(key);
-    let map = store.hashed_or_migrate(&mut guard);
+    let map = store.hashed_or_migrate(&mut guard)?;
     let bucket = map.entry(hash).or_default();
     match find_idx(heap, bucket, key) {
         Some(i) => bucket[i].1 = vm,
@@ -709,8 +723,8 @@ pub fn get(heap: &mut Heap, id: u64, key: Value, default: Value) -> LispResult {
         }
     }
     let found = {
-        let mut guard = store.hashed.lock().expect("table store mutex");
-        let map = store.hashed_or_migrate(&mut guard);
+        let mut guard = lock(&store.hashed);
+        let map = store.hashed_or_migrate(&mut guard)?;
         let hash = heap.hash_value(key);
         // Rebuilt in the heap under the lock, straight from the stored form: the clone
         // this used to take first (to release the lock sooner) cost an allocation and a
@@ -741,8 +755,8 @@ pub fn has(heap: &mut Heap, id: u64, key: Value) -> Result<bool, LispError> {
             None => return Ok(false),
         }
     }
-    let mut guard = store.hashed.lock().expect("table store mutex");
-    let map = store.hashed_or_migrate(&mut guard);
+    let mut guard = lock(&store.hashed);
+    let map = store.hashed_or_migrate(&mut guard)?;
     let hash = heap.hash_value(key);
     Ok(map
         .get(&hash)
@@ -773,8 +787,8 @@ pub fn delete(heap: &mut Heap, id: u64, key: Value) -> LispResult {
             None => return Ok(Value::table(id)),
         }
     }
-    let mut guard = store.hashed.lock().expect("table store mutex");
-    let map = store.hashed_or_migrate(&mut guard);
+    let mut guard = lock(&store.hashed);
+    let map = store.hashed_or_migrate(&mut guard)?;
     let hash = heap.hash_value(key);
     let now_empty = if let Some(bucket) = map.get_mut(&hash) {
         if let Some(i) = find_idx(heap, bucket, key) {
@@ -904,32 +918,31 @@ fn incr_int(
                         // incremented word (done); anything else ⟹ it skipped
                         // this slot as EMPTY before our CAS ⟹ re-execute on the
                         // map (`incr` commutes, so re-executing linearizes).
-                        let mut guard = store.hashed.lock().expect("table store mutex");
+                        let mut guard = lock(&store.hashed);
                         if slot.load(Ordering::SeqCst) == SLOT_MOVED {
                             return Ok(Ok(next));
                         }
-                        return incr_hashed(heap, store, guard.as_mut(), key, delta);
+                        // (A DROP also flips `dense` and clears the slot to EMPTY:
+                        // `hashed_or_migrate` reports it rather than migrating.)
+                        let map = store.hashed_or_migrate(&mut guard)?;
+                        return incr_hashed(heap, map, key, delta);
                     }
                     Err(actual) => cur = actual,
                 }
             }
         }
     }
-    let mut guard = store.hashed.lock().expect("table store mutex");
-    if guard.is_none() {
-        store.migrate_to_hashed(&mut guard);
-    }
-    incr_hashed(heap, store, guard.as_mut(), key, delta)
+    let mut guard = lock(&store.hashed);
+    let map = store.hashed_or_migrate(&mut guard)?;
+    incr_hashed(heap, map, key, delta)
 }
 
 fn incr_hashed(
     heap: &mut Heap,
-    _store: &Store,
-    map: Option<&mut StoreMap>,
+    map: &mut StoreMap,
     key: Value,
     delta: i64,
 ) -> Result<Result<i64, IncrMiss>, LispError> {
-    let map = map.expect("hashed map exists after migration");
     let km = to_message(heap, key)?;
     let hash = heap.hash_value(key);
     let bucket = map.entry(hash).or_default();
@@ -967,7 +980,7 @@ pub fn snapshot(heap: &mut Heap, id: u64) -> LispResult {
             for (k, slot) in store.slots.slots_below(store.scan_max()) {
                 let s = slot.load(Ordering::SeqCst);
                 if s == SLOT_MOVED {
-                    break 'raw snapshot_hashed(store); // migration in flight
+                    break 'raw snapshot_hashed(store)?; // migration in flight
                 }
                 if let Some(vm) = slot_to_message(s) {
                     raw.push((Message::Int(k as i64), vm));
@@ -976,9 +989,9 @@ pub fn snapshot(heap: &mut Heap, id: u64) -> LispResult {
             if store.dense.load(Ordering::SeqCst) {
                 break 'raw raw;
             }
-            snapshot_hashed(store)
+            snapshot_hashed(store)?
         } else {
-            snapshot_hashed(store)
+            snapshot_hashed(store)?
         }
     };
     let mut pairs = Vec::with_capacity(raw.len());
@@ -995,10 +1008,10 @@ pub fn snapshot(heap: &mut Heap, id: u64) -> LispResult {
     Ok(heap.map_from_pairs_into(into, pairs))
 }
 
-fn snapshot_hashed(store: &Store) -> Vec<(Message, Message)> {
-    let mut guard = store.hashed.lock().expect("table store mutex");
-    let map = store.hashed_or_migrate(&mut guard);
-    map.values().flat_map(|b| b.iter().cloned()).collect()
+fn snapshot_hashed(store: &Store) -> Result<Vec<(Message, Message)>, LispError> {
+    let mut guard = lock(&store.hashed);
+    let map = store.hashed_or_migrate(&mut guard)?;
+    Ok(map.values().flat_map(|b| b.iter().cloned()).collect())
 }
 
 /// Hand the dense slot region of table `id` to JIT'd code: `(chunk_directory,
@@ -1022,4 +1035,37 @@ pub(crate) fn jit_dense_base(id: u64) -> Option<(*const AtomicPtr<AtomicU64>, *c
     }
     store.jit_shared.store(true, Ordering::SeqCst);
     Some((store.slots.directory(), &store.dense as *const AtomicBool))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An op that resolved its store BEFORE a `table-drop` and takes the store lock
+    /// AFTER it — the window every hashed op has between `lookup` and `lock` — must
+    /// not migrate the emptied store into a live hashed map. The interleaving is
+    /// reproduced exactly (resolve, drop, then the op's own locked step), for a store
+    /// still dense at the drop and for one already hashed.
+    #[test]
+    fn an_op_racing_a_drop_cannot_resurrect_the_hashed_map() {
+        let mut heap = Heap::new();
+        let dense_id = create();
+        put(&mut heap, dense_id, Value::int(3), Value::int(4)).expect("dense put");
+        let hashed_id = create();
+        put(&mut heap, hashed_id, Value::int(-1), Value::int(4)).expect("hashed put");
+        for id in [dense_id, hashed_id] {
+            let store = lookup(id).expect("live table");
+            assert!(drop_table(id));
+            let mut guard = lock(&store.hashed);
+            assert!(
+                store.hashed_or_migrate(&mut guard).is_err(),
+                "table {id}: a locked op after the drop was handed a map"
+            );
+            assert!(
+                guard.is_none(),
+                "table {id}: the dropped store holds a map again"
+            );
+            assert!(!store.dense.load(Ordering::SeqCst));
+        }
+    }
 }

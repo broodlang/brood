@@ -1248,6 +1248,9 @@ fn closure_from_message(heap: &mut Heap, c: &ClosureMsg) -> Value {
         doc: c.doc.clone(),
         env,
         module: c.module,
+        // A copy across heaps is a new cell — never `=` to its source — so it is a
+        // creation as far as the hash is concerned.
+        identity: crate::core::value::fresh_closure_identity(),
     });
     Value::func(id)
 }
@@ -1740,6 +1743,35 @@ mod chunk_tests {
         assert_eq!(text(chunk_flush(&mut carry)).as_deref(), Some("\u{fffd}"));
         assert!(carry.is_empty());
         assert!(chunk_flush(&mut carry).is_none()); // nothing left
+    }
+}
+
+#[cfg(test)]
+mod ratio_decode_tests {
+    use super::{from_message, Message};
+    use crate::core::heap::Heap;
+    use crate::core::value::Value;
+
+    /// A ratio off the wire is the PEER's spelling — a forged or careless one may be
+    /// unreduced. Decoding must land on the canonical value: `4/2` is the integer 2 (a
+    /// `Value::Ratio` is never integer-valued), `-3/-6` is `1/2`, and a zero denominator
+    /// does not panic the receiver.
+    #[test]
+    fn an_unreduced_wire_ratio_decodes_canonically() {
+        let mut heap = Heap::new();
+        let whole = from_message(&mut heap, &Message::Ratio("4/2".to_string()));
+        assert!(
+            matches!(whole, Value::Int(2)),
+            "\"4/2\" must decode to the integer 2"
+        );
+        let half = from_message(&mut heap, &Message::Ratio("-3/-6".to_string()));
+        match half {
+            Value::Ratio(id) => assert_eq!(heap.ratio(id).to_string(), "1/2"),
+            _ => panic!("\"-3/-6\" must decode to the ratio 1/2"),
+        }
+        // Malformed: the documented fallback, not a panic.
+        let zero_denominator = from_message(&mut heap, &Message::Ratio("1/0".to_string()));
+        assert!(matches!(zero_denominator, Value::Int(0)));
     }
 }
 

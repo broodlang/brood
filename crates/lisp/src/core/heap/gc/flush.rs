@@ -711,6 +711,8 @@ pub(super) fn flush_closure(
         doc: cl.doc,
         env,
         module: cl.module,
+        // A move, not a creation: the hash of a map key must not change under it.
+        identity: cl.identity,
     };
     fwd.mint_closure(new_idx)
 }

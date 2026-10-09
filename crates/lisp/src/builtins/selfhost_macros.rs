@@ -171,6 +171,21 @@ pub(super) fn check_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> Lisp
     Ok(heap.list(out))
 }
 
+/// `check_file_ext` over forms read from `path`, with `path` as the heap's current file
+/// for the walk (restored after) — so the checker knows which file it is reading, as a
+/// `load` of it would.
+fn check_file_at(
+    heap: &mut Heap,
+    path: &str,
+    forms: &[Value],
+    required: &[String],
+) -> Vec<(Option<crate::error::Pos>, String)> {
+    let previous = heap.set_current_file(Some(path.to_string()));
+    let warnings = crate::types::check::check_file_ext(heap, forms, required);
+    heap.set_current_file(previous);
+    warnings
+}
+
 /// `(check-file path)` — run the advisory type checker over every top-level
 /// form in the file at `path` and return a list of pre-formatted warning
 /// strings (each `"path:line:col: warning: message"`), or `nil` if clean.
@@ -190,7 +205,7 @@ pub(super) fn check_file_builtin(args: &[Value], _env: EnvId, heap: &mut Heap) -
     let forms = reader::read_all_positioned(heap, &src).map_err(|e| e.or_file(path.clone()))?;
     let just_forms: Vec<Value> = forms.into_iter().map(|(f, _)| f).collect();
     let required = required_mods_arg(heap, arg(args, 1));
-    let warnings = crate::types::check::check_file_ext(heap, &just_forms, &required);
+    let warnings = check_file_at(heap, &path, &just_forms, &required);
     let mut out = Vec::with_capacity(warnings.len());
     for (pos, msg) in &warnings {
         let s = diagnostic_line(&path, *pos, msg);
@@ -546,7 +561,7 @@ pub(super) fn check_file_structured(args: &[Value], _env: EnvId, heap: &mut Heap
     let forms = reader::read_all_positioned(heap, &src).map_err(|e| e.or_file(path.clone()))?;
     let just_forms: Vec<Value> = forms.into_iter().map(|(f, _)| f).collect();
     let required = required_mods_arg(heap, arg(args, 1));
-    let warnings = crate::types::check::check_file_ext(heap, &just_forms, &required);
+    let warnings = check_file_at(heap, &path, &just_forms, &required);
     let file_kw = Value::keyword(value::intern("file"));
     let line_kw = Value::keyword(value::intern("line"));
     let col_kw = Value::keyword(value::intern("col"));

@@ -106,10 +106,59 @@
         (try (do (agent/stop a) :no-error) (catch e :raised)))))
   (test "a crashed agent raises too"
     (let (a (agent/start (fn () 0)))
-      ;; the update fn throws inside the agent, killing it
-      ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
-      (check-allow :discarded-catch
-        (try (agent/update a (fn (n) (error "agent boom"))) (catch e nil)))
+      ;; a cast fn that throws has no caller to report to, so it kills the agent
+      (agent/cast a (fn (n) (error "agent boom")))
       (sleep 60)
       (assert= :raised
         (try (do (agent/get a identity) :no-error) (catch e :raised))))))
+
+(describe "agent: a raising f is the caller's error, and the agent keeps its state"
+  ;; `update` replied :ok BEFORE applying f, so a throwing f reported success and then
+  ;; killed the agent. Now f runs first; its error comes back to the caller and the
+  ;; agent keeps the state it had.
+  (test "update re-raises f's error and keeps the old state"
+    (let (a (agent/start (fn () 7)))
+      (assert= "agent boom"
+        (try
+          (do (agent/update a (fn (n) (error "agent boom"))) :no-error)
+          (catch e (error-message e))))
+      (assert= 7 (agent/get a identity))
+      (assert= :ok (agent/update a inc))
+      (assert= 8 (agent/get a identity))
+      (agent/stop a)))
+  (test "get re-raises f's error and the agent stays alive"
+    (let (a (agent/start (fn () 3)))
+      (assert= "get boom"
+        (try
+          (do (agent/get a (fn (n) (error "get boom"))) :no-error)
+          (catch e (error-message e))))
+      (assert= 3 (agent/get a identity))
+      (agent/stop a)))
+  (test "get-and-update re-raises f's error, or a malformed result, keeping the state"
+    (let (a (agent/start (fn () 5)))
+      (assert= :raised
+        (try
+          (do (agent/get-and-update a (fn (n) (error "gau boom"))) :no-error)
+          (catch e :raised)))
+      (assert= :raised
+        (try (do (agent/get-and-update a (fn (n) n)) :no-error) (catch e :raised)))
+      (assert= 5 (agent/get a identity))
+      (agent/stop a)))
+  (test "concurrent callers: the failing ones raise, the others' updates all land"
+    (let (a (agent/start (fn () 0))
+          me (self))
+      (dotimes (i 20)
+        (spawn (send me
+                 [:done
+                   (try
+                     (do
+                       (agent/update a
+                         (fn (n) (if (math/even? i) (inc n) (error "odd " i))))
+                       :ok)
+                     (catch e :raised))])))
+      (let (outcomes (map (range 20)
+                       (fn (_) (receive ([:done outcome] outcome) (after 5000 :timeout)))))
+        (assert= 10 (count (seq/filter outcomes (fn (o) (= o :ok)))))
+        (assert= 10 (count (seq/filter outcomes (fn (o) (= o :raised))))))
+      (assert= 10 (agent/get a identity))
+      (agent/stop a))))

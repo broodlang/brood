@@ -404,6 +404,33 @@ pub const PRELUDE: &str = concat!(
     include_str!("../../../std/protocol.blsp"),
 );
 
+/// The repo-relative paths of the files [`PRELUDE`] concatenates, in the same order —
+/// pinned to it by `prelude_paths_match_the_concatenation`. The checker reads it to know
+/// that a `def` in one of these files is the definition of a reserved name, not a
+/// redefinition of it.
+pub const PRELUDE_PATHS: &[&str] = &[
+    "std/prelude/core.blsp",
+    "std/prelude/predicates.blsp",
+    "std/prelude/map.blsp",
+    "std/prelude/control.blsp",
+    "std/prelude/match.blsp",
+    "std/prelude/process.blsp",
+    "std/prelude/seq.blsp",
+    "std/prelude/string.blsp",
+    "std/prelude/tools.blsp",
+    "std/prelude/contracts.blsp",
+    "std/protocol.blsp",
+];
+
+/// Is `file` one of the prelude's own source files? Compared by trailing path
+/// components, so an absolute path into any checkout matches.
+pub fn is_prelude_source(file: &str) -> bool {
+    let file = std::path::Path::new(file);
+    PRELUDE_PATHS
+        .iter()
+        .any(|relative| file.ends_with(relative))
+}
+
 /// Materialize the embedded prelude to a stable, read-only-ish cache file and
 /// return its path — the file the prelude's def-sites point at, so tools (the
 /// LSP's `M-.`) can open the standard library's source. The prelude is
@@ -447,6 +474,26 @@ mod prelude_hygiene {
     use super::*;
     use crate::core::value::{self, ValueRef};
     use crate::Interp;
+
+    #[test]
+    fn prelude_paths_match_the_concatenation() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let concatenated: String = PRELUDE_PATHS
+            .iter()
+            .map(|relative| {
+                std::fs::read_to_string(root.join(relative))
+                    .unwrap_or_else(|error| panic!("read {relative}: {error}"))
+            })
+            .collect();
+        assert!(
+            concatenated == PRELUDE,
+            "PRELUDE_PATHS no longer lists the files PRELUDE concatenates, in order"
+        );
+        assert!(is_prelude_source("/any/checkout/std/prelude/core.blsp"));
+        assert!(is_prelude_source("std/protocol.blsp"));
+        assert!(!is_prelude_source("/project/std/prelude/core.blsp.bak"));
+        assert!(!is_prelude_source("/project/src/core.blsp"));
+    }
 
     // There is no allowed-module list. The prelude used to force-load `string` and `seq` at
     // boot, which cost 12.1 ms of a 26 ms boot on every invocation (KI-61); then it carried

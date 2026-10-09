@@ -1191,6 +1191,38 @@ pub struct Closure {
     /// Carried verbatim across promote/freeze/message/image copies: a symbol, so it is
     /// region-independent.
     pub module: Option<Symbol>,
+    /// A move-stable token for HASHING this closure (see [`fresh_closure_identity`]).
+    /// `=` on functions is handle identity, and a handle is not stable: a collection
+    /// moves the cell (new slab index, epoch, age bit), and so do `promote`, the
+    /// prelude freeze and the shared-code collector. Every one of them rewrites the
+    /// handles that point at the cell consistently, so `=` survives a move — but a
+    /// map's trie is laid out by the hash its keys had when inserted and is copied,
+    /// not re-hashed, so a hash of the handle bits lost a function key at the first
+    /// collection. Assigned where a closure is CREATED and copied verbatim wherever
+    /// one is MOVED; equal handles are one cell, so they always agree on it. A
+    /// `clone` with altered fields (a contract shim) keeps it — a collision between
+    /// two unequal closures only costs a bucket, never a wrong answer.
+    pub identity: u64,
+}
+
+/// Each thread draws closure identities from its own block of 2^32, so creating a
+/// closure costs a thread-local increment rather than a contended atomic. Uniqueness
+/// is a matter of distribution only — [`Closure::identity`] feeds a hash, and two
+/// closures sharing one are told apart by `=`.
+static CLOSURE_IDENTITY_BLOCKS: AtomicU64 = AtomicU64::new(1);
+
+/// A fresh [`Closure::identity`] for a closure being created (not moved).
+pub fn fresh_closure_identity() -> u64 {
+    thread_local! {
+        static NEXT_CLOSURE_IDENTITY: std::cell::Cell<u64> = std::cell::Cell::new(
+            CLOSURE_IDENTITY_BLOCKS.fetch_add(1, Ordering::Relaxed) << 32,
+        );
+    }
+    NEXT_CLOSURE_IDENTITY.with(|next| {
+        let identity = next.get();
+        next.set(identity.wrapping_add(1));
+        identity
+    })
 }
 
 impl Closure {
@@ -1217,6 +1249,7 @@ impl Closure {
             doc,
             env,
             module: None,
+            identity: fresh_closure_identity(),
         }
     }
 

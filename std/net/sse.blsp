@@ -190,9 +190,17 @@ the `headers` of a `stream-response` so a browser `EventSource` reads the open s
 (defn frame (data &optional (event nil))
   "One SSE frame for `data`: every line prefixed `data: ` (so multi-line payloads
 round-trip), an optional `event:` type line first, terminated by the blank line.
-The exact inverse of `parse-event`."
+The exact inverse of `parse-event`. A line in `data` ends at `\\r\\n`, `\\r` or `\\n` —
+the three terminators a client splits on — and **raises** if `event` contains a CR or
+LF, which would end the `event:` line and inject a field of the caller's choosing.
+
+    (sse/frame \"a\\nb\" \"tick\")   → \"event: tick\\ndata: a\\ndata: b\\n\\n\""
+  ;; Splitting on `\n` alone left a bare `\r` inside a `data:` line, and a client ends
+  ;; the line there — `ok\r\rdata: injected` became two events. `normalize` first.
+  (when (and event (or (includes? (str event) "\r") (includes? (str event) "\n")))
+    (error "sse/frame: illegal CR/LF in the event type: " (pr-str event)))
   (str (if (nil? event) "" (str "event: " event "\n"))
-    (string/join (map (string/split data "\n") (fn (l) (str "data: " l))) "\n")
+    (string/join (map (string/split (normalize data) "\n") (fn (l) (str "data: " l))) "\n")
     "\n\n"))
 
 (defn emit (sock data &optional (event nil))

@@ -424,6 +424,7 @@ fn nursery_closure_old_optional_default_rewritten() {
         doc: None,
         env: None,
         module: None,
+        identity: crate::core::value::fresh_closure_identity(),
     };
     let cl_id = h.alloc_closure(cl);
     let mut roots = [Value::func(cl_id)];
@@ -474,6 +475,7 @@ fn nursery_closure_old_body_literal_rewritten() {
         doc: None,
         env: None,
         module: None,
+        identity: crate::core::value::fresh_closure_identity(),
     };
     let cl_id = h.alloc_closure(cl);
     let mut roots = [Value::func(cl_id)];
@@ -750,6 +752,7 @@ fn all_nursery_types_old_refs_rewritten_together() {
         doc: None,
         env: None,
         module: None,
+        identity: crate::core::value::fresh_closure_identity(),
     };
     let cl_val = Value::func(h.alloc_closure(cl));
 

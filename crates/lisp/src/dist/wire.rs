@@ -36,7 +36,13 @@ pub(super) enum Frame {
     /// cluster mesh: a peer stores it so it can later *gossip* us to nodes that
     /// don't know us yet.
     Hello {
-        node: Symbol,
+        /// The sender's node name, as its raw spelling — deliberately NOT a `Symbol`.
+        /// A `Hello` arrives before authentication, so interning it would let any
+        /// unauthenticated connection mint a permanent interner entry (and spend the
+        /// `MAX_WIRE_SYMBOLS` budget an authenticated link later needs). The
+        /// handshake MACs over these bytes and interns only once the peer's `Auth`
+        /// verifies.
+        node: String,
         nonce: [u8; NONCE_LEN],
         /// An **ephemeral X25519 public key**, fresh per handshake (ADR-089). Both
         /// sides exchange one in their `Hello`; the shared DH secret derives the
@@ -265,7 +271,7 @@ fn encode_frame(w: &mut Vec<u8>, frame: &Frame) -> io::Result<()> {
             addr,
         } => {
             w.push(FRAME_HELLO);
-            put_sym(w, *node);
+            put_str(w, node);
             w.extend_from_slice(nonce);
             w.extend_from_slice(eph_pub);
             put_str(w, addr);
@@ -349,7 +355,8 @@ fn encode_frame(w: &mut Vec<u8>, frame: &Frame) -> io::Result<()> {
 pub(super) fn decode_frame(r: &mut Cursor<Vec<u8>>) -> io::Result<Frame> {
     match get_u8(r)? {
         FRAME_HELLO => Ok(Frame::Hello {
-            node: get_sym(r)?,
+            // Pre-auth: the raw spelling, never interned here (see `Frame::Hello`).
+            node: get_str(r)?,
             nonce: get_fixed::<NONCE_LEN>(r)?,
             eph_pub: get_fixed::<EPH_PUB_LEN>(r)?,
             addr: get_str(r)?,

@@ -1099,7 +1099,14 @@ fn publish(
     // so its `(project …)` head isn't a binding — running the checker on it would
     // emit a spurious `unbound symbol: project`. Tier-0 syntax errors still apply.
     if !is_manifest_uri(uri) {
-        lsp_diags.extend(typecheck_diagnostics(interp, text, cst_root, index));
+        let syntax_reported = !lsp_diags.is_empty();
+        lsp_diags.extend(typecheck_diagnostics(
+            interp,
+            text,
+            cst_root,
+            index,
+            syntax_reported,
+        ));
     }
 
     send_diagnostics(connection, uri, lsp_diags, Some(doc.version))
@@ -1122,15 +1129,41 @@ fn is_manifest_uri(uri: &Uri) -> bool {
 /// LOCAL) are reclaimed after the check — the `Interp`'s heap doesn't grow per
 /// keystroke. Project sources / `defn`s the bootstrap loaded promote to RUNTIME,
 /// so they survive this reset.
+///
+/// When the READER refuses the text, there is nothing to check — and that refusal is
+/// itself the diagnostic: the CST is deliberately more tolerant than the reader (a
+/// stray `#'`, a `\c` escape, an odd-count map all parse as tooling nodes), so a file
+/// the runtime cannot even read used to show no diagnostic at all, every checker
+/// warning silently gone with it. The reader's error is published as an `ERROR` at its
+/// position — unless `syntax_reported`, i.e. the Tier-0 CST pass already flagged the
+/// text, in which case it is almost always the same fault said twice.
 fn typecheck_diagnostics(
     interp: &mut Interp,
     text: &str,
     cst_root: &cst::Node,
     index: &LineIndex,
+    syntax_reported: bool,
 ) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     let cp = interp.heap.checkpoint();
-    if let Ok(positioned) = reader::read_all_positioned(&mut interp.heap, text) {
+    let read = reader::read_all_positioned(&mut interp.heap, text);
+    if let Err(error) = &read {
+        if !syntax_reported {
+            let offset = error
+                .pos
+                .map(|pos| index.offset_of_char_pos(text, pos))
+                .unwrap_or(0);
+            let range = Range::new(
+                index.position(text, offset),
+                index.position(text, index.next_char(text, offset)),
+            );
+            let mut diag = Diagnostic::new_simple(range, format!("cannot read: {}", error.message));
+            diag.severity = Some(DiagnosticSeverity::ERROR);
+            diag.source = Some("brood".to_string());
+            out.push(diag);
+        }
+    }
+    if let Ok(positioned) = read {
         let forms: Vec<Value> = positioned.into_iter().map(|(f, _)| f).collect();
         for (pos_opt, msg) in check_file(&mut interp.heap, &forms) {
             if let Some(pos) = pos_opt {

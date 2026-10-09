@@ -76,19 +76,59 @@
   (test "a CRLF in the method is rejected"
     (assert-error (request "GET\r\nX: 1" "http://127.0.0.1:1/"))))
 
-(describe "http: content-length parsing is integer-safe"
-  ;; A well-formed Content-Length is a non-negative integer; a fractional value
-  ;; (`3.9`) could never be reached exactly and would park the reader on the
-  ;; socket until the read timeout, and a negative one is meaningless — both → 0.
-  (test "integer content-length is honoured"
-    (assert= (http/http-declared-length "POST / HTTP/1.0\r\nContent-Length: 42\r\n") 42))
-  (test "fractional content-length → 0 (no declared body)"
-    (assert= (http/http-declared-length "POST / HTTP/1.0\r\nContent-Length: 3.9\r\n") 0))
-  (test "negative content-length → 0"
-    (assert= (http/http-declared-length "POST / HTTP/1.0\r\nContent-Length: -5\r\n") 0))
-  (test "non-numeric / missing content-length → 0"
-    (assert= (http/http-declared-length "POST / HTTP/1.0\r\nContent-Length: abc\r\n") 0)
-    (assert= (http/http-declared-length "GET / HTTP/1.0\r\nHost: x\r\n") 0)))
+(describe "http: request body framing"
+  ;; A well-formed Content-Length is exactly one non-negative integer. Anything the
+  ;; server and a proxy could disagree about — garbage, a sign, a fraction, repeats that
+  ;; conflict, a Transfer-Encoding — is refused rather than guessed (request smuggling).
+  (test "an integer content-length is honoured"
+    (assert= (http/http-body-framing "POST / HTTP/1.0\r\nContent-Length: 42") [:length 42]))
+  (test "no content-length → no body"
+    (assert= (http/http-body-framing "GET / HTTP/1.0\r\nHost: x") [:length 0]))
+  (test "fractional, negative, signed or non-numeric → 400"
+    (assert= (first (http/http-body-framing "POST / HTTP/1.0\r\nContent-Length: 3.9")) :refuse)
+    (assert= (second (http/http-body-framing "POST / HTTP/1.0\r\nContent-Length: -5")) 400)
+    (assert= (second (http/http-body-framing "POST / HTTP/1.0\r\nContent-Length: +5")) 400)
+    (assert= (second (http/http-body-framing "POST / HTTP/1.0\r\nContent-Length: abc")) 400))
+  (test "repeated content-lengths must agree"
+    (assert= (http/http-body-framing "POST / HTTP/1.0\r\nContent-Length: 5\r\ncontent-length: 5")
+      [:length 5])
+    (assert= (http/http-body-framing "POST / HTTP/1.0\r\nContent-Length: 5, 5") [:length 5])
+    (assert= (second (http/http-body-framing "POST / HTTP/1.0\r\nContent-Length: 5\r\nContent-Length: 6"))
+      400))
+  (test "transfer-encoding → 501, or 400 beside a content-length"
+    (assert= (second (http/http-body-framing "POST / HTTP/1.0\r\nTransfer-Encoding: chunked")) 501)
+    (assert= (second (http/http-body-framing "POST / HTTP/1.0\r\nTransfer-Encoding: chunked\r\nContent-Length: 3"))
+      400))
+  (test "parse-request slices the body to content-length"
+    ;; the body used to be everything after the head: CL 3 + 8 bytes gave 8
+    (assert= (string/bytes-> (get (parse-request "POST / HTTP/1.0\r\nContent-Length: 3\r\n\r\nabcdefgh")
+                               :body))
+      "abc")
+    (assert= (bytes/length (get (parse-request "POST / HTTP/1.0\r\n\r\nstray") :body)) 0)))
+
+(describe "http: reason phrases"
+  (test "standard codes get their own phrase, never a borrowed OK"
+    (is (includes? (string/bytes-> (bytes/concat (render-response (response 503 {} ""))))
+          "503 Service Unavailable"))
+    (is (includes? (string/bytes-> (bytes/concat (render-head 413 {}))) "413 Content Too Large")))
+  (test "an unknown code gets a neutral phrase"
+    (let (line (string/bytes-> (bytes/concat (render-head 599 {}))))
+      (is (includes? line "599 Status"))
+      (is (not (includes? line "OK"))))))
+
+(describe "http: serve-file serves bytes"
+  (test "a binary file is served byte-for-byte (file/slurp raised on it)"
+    (let (dir (temp-dir "brood-http-")
+          _ (file/mkdir dir)
+          path (path/join dir "img.png")
+          png (bytes 137 80 78 71 13 10 26 10 0 255 254))
+      (file/spit-bytes path png)
+      (let (resp (serve-file path))
+        (file/rm path)
+        (file/rmdir dir)
+        (assert= (get resp :status) 200)
+        (assert= (get (get resp :headers) "Content-Type") "image/png")
+        (assert= (bytes/concat (get resp :body)) png)))))
 
 (describe "http: client response size accounting"
   ;; The client-collect byte cap measures chunks by type — plaintext chunks are
@@ -526,3 +566,92 @@
         (let (resp (post (str "http://127.0.0.1:" port "/up") (bytes 0 255 7)))
           (assert= (get resp :status) 200)
           (assert= (body-text resp) "[0 255 7]"))))))
+
+;; A loopback server for `handler`, answering its port (or :timeout).
+(defn- start-test-server (handler)
+  (let (me (self))
+    (spawn (do (let (ls (listen 0)) (send me [:port (tcp/local-port ls)]) (serve-loop ls handler))))
+    (receive ([:port p] p) (after *test-wait-ms* :timeout))))
+
+;; Send `payload` (an iolist) on a fresh connection and answer the whole response text.
+(defn- exchange (port payload)
+  (let (c (tcp/connect "127.0.0.1" port))
+    (tcp/send c payload)
+    (let (resp (string/bytes-> (drain c)))
+      (tcp/close c)
+      resp)))
+
+(defn- echo-body (req) (text-response (str "[" (string/bytes-> (get req :body)) "]")))
+
+(describe "http: the server refuses what it will not read, before reading it"
+  (test "a body over *http-max-body-bytes* is answered 413 without being read"
+    ;; Content-Length was trusted to any size: a 100 MB upload took a worker to 601 MB.
+    ;; The client here declares 100 MB and sends none of it, so only a server that
+    ;; answers from the head alone replies before the read timeout.
+    (let (port (start-test-server echo-body)
+          resp (exchange port "POST / HTTP/1.0\r\nContent-Length: 104857600\r\n\r\n"))
+      (is (includes? resp "413 Content Too Large"))))
+  (test "one byte over the limit is refused; a body under it is read"
+    ;; a spawned worker reads the defaults, so the boundary is the default limit
+    (let (port (start-test-server (fn (req) (text-response (str (bytes/length (get req :body))))))
+          over (exchange port
+                 (str "POST / HTTP/1.0\r\nContent-Length: " (+ *http-max-body-bytes* 1) "\r\n\r\n"))
+          under (exchange port "POST / HTTP/1.0\r\nContent-Length: 10\r\n\r\n0123456789"))
+      (is (includes? over "413 Content Too Large"))
+      (is (includes? under "200 OK"))
+      (is (includes? under "\r\n\r\n10"))))
+  (test "bytes past Content-Length are not handed to the handler"
+    (let (port (start-test-server echo-body)
+          resp (exchange port "POST / HTTP/1.0\r\nContent-Length: 3\r\n\r\nabcdefgh"))
+      (is (includes? resp "[abc]"))))
+  (test "Transfer-Encoding is refused: 501 alone, 400 beside Content-Length"
+    (let (port (start-test-server echo-body))
+      (is (includes? (exchange port
+                       "POST / HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n")
+            "501 Not Implemented"))
+      (is (includes? (exchange port
+                       "POST / HTTP/1.0\r\nTransfer-Encoding: chunked\r\nContent-Length: 3\r\n\r\nabc")
+            "400 Bad Request"))))
+  (test "an invalid or conflicting Content-Length is 400"
+    (let (port (start-test-server echo-body))
+      (is (includes? (exchange port "POST / HTTP/1.0\r\nContent-Length: -1\r\n\r\n")
+            "400 Bad Request"))
+      (is (includes? (exchange port
+                       "POST / HTTP/1.0\r\nContent-Length: 2\r\nContent-Length: 3\r\n\r\nabc")
+            "400 Bad Request")))))
+
+(describe "http: a bad request or a raising handler still gets an answer"
+  (test "a request head that is not UTF-8 is answered 400"
+    (let (port (start-test-server echo-body))
+      (is (includes? (exchange port ["GET /" (bytes 255 254) " HTTP/1.0\r\n\r\n"])
+            "400 Bad Request"))))
+  (test "a raising handler answers 500, and the server keeps serving"
+    (let (port (start-test-server (fn (req)
+                                    (if (= (get req :path) "/boom")
+                                      (error "handler boom")
+                                      (text-response "fine")))))
+      (is (includes? (exchange port "GET /boom HTTP/1.0\r\n\r\n") "500 Internal Server Error"))
+      (is (includes? (exchange port "GET / HTTP/1.0\r\n\r\n") "200 OK"))))
+  (test "a hostile ?token=%FF is a 403, not a dead worker"
+    (let (port (start-test-server (require-token "t" echo-body)))
+      (is (includes? (exchange port "GET /?token=%FF HTTP/1.0\r\n\r\n") "403 Forbidden"))))
+  (test "a response that cannot be rendered answers 500"
+    (let (port (start-test-server (fn (req) (response 200 {"X" "a\r\nEvil: 1"} "x"))))
+      (is (includes? (exchange port "GET / HTTP/1.0\r\n\r\n") "500 Internal Server Error")))))
+
+(describe "http: refusals and answers under concurrent connections"
+  (test "oversize, malformed and good requests at once each get their own answer"
+    (let (port (start-test-server echo-body)
+          me (self)
+          requests [["POST / HTTP/1.0\r\nContent-Length: 104857600\r\n\r\n" "413"]
+                     ["POST / HTTP/1.0\r\nContent-Length: 2\r\n\r\nokEXTRA" "[ok]"]
+                     ["POST / HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n" "501"]
+                     ["POST / HTTP/1.0\r\nContent-Length: x\r\n\r\n" "400"]
+                     ["POST / HTTP/1.0\r\nContent-Length: 2\r\n\r\nhi" "[hi]"]
+                     [["GET /" (bytes 255) " HTTP/1.0\r\n\r\n"] "400"]])
+      (doseq ([payload expected] requests)
+        (spawn (send me [:answer expected (includes? (exchange port payload) expected)])))
+      (dotimes (_ (count requests))
+        (receive
+          ([:answer expected ok?] (assert= [expected true] [expected ok?]))
+          (after 10000 (is false)))))))

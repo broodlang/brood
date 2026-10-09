@@ -8,8 +8,11 @@
 //! First cut (ADR-011 — ship the simple shape): **plain-symbol binders only**.
 //! - Globals: `def` / `defn` / `defmacro` names (global wherever they appear —
 //!   `def` always defines in the global env).
-//! - Locals: `fn` / `lambda` / `defn` / `defmacro` params (incl. `&optional`
-//!   `(name default)` groups and `& rest`), and `let` / `let*` binding names.
+//! - Locals: `fn` / `defn` / `defn-` / `defmacro` params (incl. `&optional`
+//!   `(name default)` groups, `& rest`, and each arm of a multi-clause form over
+//!   that arm alone), `let` binding names (sequential: a binder is visible from
+//!   itself on, never in its own or an earlier init), and `letrec` names (every
+//!   name in every init and the body).
 //!
 //! **Deferred:** destructuring *pattern* binders (ADR-021 — `(let ([a b] v) …)`,
 //! `(fn ((h & t)) …)`, `match` clause patterns). Non-symbol binder targets are
@@ -54,6 +57,11 @@ pub enum Resolution {
 struct ScopeNode {
     /// The source region this scope covers.
     span: Span,
+    /// A region inside `span` the scope does NOT cover: a `let` binder's own init.
+    /// `(let (x (+ x 1)) x)` binds `x` from the binder on, but its init still sees
+    /// the OUTER `x` — the init sits between the binder and the body, so it needs a
+    /// hole rather than a later start.
+    hole: Option<Span>,
     parent: Option<usize>,
     bindings: Vec<Binding>,
 }
@@ -69,6 +77,7 @@ pub fn analyze(root: &Node, src: &str) -> ScopeTree {
     let mut tree = ScopeTree {
         scopes: vec![ScopeNode {
             span: root.span,
+            hole: None,
             parent: None,
             bindings: Vec::new(),
         }],
@@ -188,7 +197,7 @@ impl ScopeTree {
         let mut best = 0;
         let mut best_len = u32::MAX;
         for (i, s) in self.scopes.iter().enumerate() {
-            if s.span.contains(offset) {
+            if s.span.contains(offset) && !s.hole.is_some_and(|hole| hole.contains(offset)) {
                 let len = s.span.end - s.span.start;
                 if len <= best_len {
                     best = i;
@@ -299,11 +308,41 @@ fn collect_globals(node: &Node, src: &str, out: &mut Vec<Binding>) {
     }
 }
 
+impl ScopeTree {
+    /// Open a child scope of `parent` and return its id.
+    fn open(
+        &mut self,
+        span: Span,
+        hole: Option<Span>,
+        parent: usize,
+        bindings: Vec<Binding>,
+    ) -> usize {
+        let id = self.scopes.len();
+        self.scopes.push(ScopeNode {
+            span,
+            hole,
+            parent: Some(parent),
+            bindings,
+        });
+        id
+    }
+}
+
 /// Pass 2: descend, opening a child scope at each binding form.
 fn build(node: &Node, src: &str, current: usize, tree: &mut ScopeTree) {
-    let opened = match head_sym(node, src) {
-        Some(kw::LET) => Some(let_names(node, src)),
-        Some(kw::FN) => Some(param_names(node, src, 1)),
+    let params_at = match head_sym(node, src) {
+        Some(kw::LET) => return build_let(node, src, current, tree),
+        // `letrec` makes every name visible in every init and in the body — one scope
+        // over the whole form. (Without an arm here its names resolved Free, so renaming
+        // a global `go` rewrote a local `letrec` `go` too.)
+        Some(kw::LETREC) => {
+            let scope = tree.open(node.span, None, current, let_names(node, src));
+            for child in &node.children {
+                build(child, src, scope, tree);
+            }
+            return;
+        }
+        Some(kw::FN) => 1,
         // defn/defn-/defmacro: name at index 1, param list at 2.
         //
         // `defn-` was missing here, and the symptom was not a missing feature but a WRONG
@@ -311,29 +350,99 @@ fn build(node: &Node, src: &str, current: usize, tree: &mut ScopeTree) {
         // global shares their spelling, so `references-to-global "n"` returned the `n`
         // parameter of `(defn- f (n) n)` — and rename, which writes those spans, would have
         // edited it. Most definitions in a real module are private (ADR-146).
-        Some(kw::DEFN) | Some(kw::DEFN_PRIVATE) | Some(kw::DEFMACRO) => {
-            Some(param_names(node, src, 2))
+        Some(kw::DEFN) | Some(kw::DEFN_PRIVATE) | Some(kw::DEFMACRO) => 2,
+        _ => {
+            for child in &node.children {
+                build(child, src, current, tree);
+            }
+            return;
         }
-        _ => None,
     };
-    let scope = match opened {
-        Some(bindings) => {
-            let id = tree.scopes.len();
-            tree.scopes.push(ScopeNode {
-                span: node.span,
-                parent: Some(current),
-                bindings,
-            });
-            id
+    // A multi-clause `fn`/`defn` — `((x) …) ((x y) …)` — binds each arm's params over
+    // that arm alone. Read as one params list, only the first arm's names were bound
+    // (and wrongly, over every arm), so a later arm's locals resolved as globals.
+    if let Some(arms) = clause_arms(node, params_at) {
+        for child in &node.children {
+            if arms.iter().any(|arm| std::ptr::eq(*arm, child)) {
+                let scope = tree.open(child.span, None, current, param_names(child, src, 0));
+                for inner in &child.children {
+                    build(inner, src, scope, tree);
+                }
+            } else {
+                build(child, src, current, tree);
+            }
         }
-        None => current,
-    };
-    for c in &node.children {
-        build(c, src, scope, tree);
+        return;
+    }
+    let scope = tree.open(node.span, None, current, param_names(node, src, params_at));
+    for child in &node.children {
+        build(child, src, scope, tree);
     }
 }
 
-/// The symbol names bound by a `let` binding list — names at even positions.
+/// The clause arms of a multi-clause `fn`/`defn` whose first arm sits at form-index
+/// `first`: every form from there on is a list whose own first form is a parameter
+/// list (a list or vector). `None` for an ordinary single-params form — including
+/// `(defn f ((h & t)) h)`, a single list-pattern param, since its body `h` is no arm.
+/// A docstring ahead of the arms is stepped over.
+fn clause_arms(node: &Node, first: usize) -> Option<Vec<&Node>> {
+    let docstring = node
+        .forms()
+        .nth(first)
+        .is_some_and(|form| form.kind == NodeKind::Str);
+    let arms: Vec<&Node> = node.forms().skip(first + usize::from(docstring)).collect();
+    let is_arm = |arm: &&Node| {
+        arm.kind == NodeKind::List
+            && arm
+                .forms()
+                .next()
+                .is_some_and(|params| matches!(params.kind, NodeKind::List | NodeKind::Vector))
+    };
+    (!arms.is_empty() && arms.iter().all(is_arm)).then_some(arms)
+}
+
+/// A `let`: each binder is visible from ITSELF onward — over the later binders, their
+/// inits and the body — but not inside its own init, and no earlier init sees it.
+/// One scope over the whole form (as this was) resolved the init's `x` in
+/// `(defn f (x) (let (x (+ x 1)) x))` to the inner binder and let `b` in
+/// `(let (a b b 2) …)` capture the earlier init, so a rename rewrote the wrong
+/// occurrences. Each binder opens a scope nested in the previous binder's, spanning
+/// from the binder to the form's end with its own init cut out as a hole.
+fn build_let(node: &Node, src: &str, current: usize, tree: &mut ScopeTree) {
+    let bindings = node
+        .forms()
+        .nth(1)
+        .filter(|list| matches!(list.kind, NodeKind::List | NodeKind::Vector));
+    let mut scope = current;
+    for child in &node.children {
+        let Some(binding_list) = bindings.filter(|list| std::ptr::eq(*list, child)) else {
+            // the head and trivia before the list see `current`; the body sees the
+            // innermost binder's scope (still `current` before the list is reached)
+            build(child, src, scope, tree);
+            continue;
+        };
+        let items: Vec<&Node> = binding_list.forms().collect();
+        for pair in items.chunks(2) {
+            let target = pair[0];
+            let init = pair.get(1).copied();
+            if let Some(init) = init {
+                build(init, src, scope, tree);
+            }
+            build(target, src, scope, tree);
+            if target.kind == NodeKind::Symbol {
+                let binding = Binding {
+                    name: target.text(src).to_string(),
+                    def: target.span,
+                    kind: BindingKind::Local,
+                };
+                let span = Span::new(target.span.start as usize, node.span.end as usize);
+                scope = tree.open(span, init.map(|init| init.span), scope, vec![binding]);
+            }
+        }
+    }
+}
+
+/// The symbol names bound by a `let`/`letrec` binding list — names at even positions.
 /// Non-symbol targets (patterns) are skipped (deferred).
 fn let_names(node: &Node, src: &str) -> Vec<Binding> {
     let mut out = Vec::new();
@@ -493,6 +602,97 @@ mod tests {
                 def: Span::new(let_x as usize, let_x as usize + 1),
                 kind: BindingKind::Local
             }
+        );
+    }
+
+    /// The `Local` def span of the binding the symbol at byte `at` resolves to.
+    fn local_def_at(src: &str, at: usize) -> Option<usize> {
+        let root = cst::parse(src);
+        let tree = analyze(&root, src);
+        match tree.resolve_at(&root, src, at as u32) {
+            Resolution::Defined {
+                def,
+                kind: BindingKind::Local,
+            } => Some(def.start as usize),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_let_init_sees_the_outer_binding_not_its_own_binder() {
+        // `(+ x 1)` is evaluated BEFORE the let's `x` exists: its `x` is the param.
+        let src = "(defn f (x) (let (x (+ x 1)) x))";
+        let param = src.find("x)").unwrap();
+        let binder = src.find("x (+").unwrap();
+        let init_x = src.find("x 1").unwrap();
+        let body_x = src.rfind('x').unwrap();
+        assert_eq!(
+            local_def_at(src, init_x),
+            Some(param),
+            "init sees the param"
+        );
+        assert_eq!(local_def_at(src, body_x), Some(binder), "body sees the let");
+        assert_eq!(
+            local_def_at(src, binder),
+            Some(binder),
+            "a binder is itself"
+        );
+        // and a reference set never mixes the two
+        let root = cst::parse(src);
+        let tree = analyze(&root, src);
+        assert_eq!(tree.references(&root, src, binder as u32).len(), 2);
+        assert_eq!(tree.references(&root, src, param as u32).len(), 2);
+    }
+
+    #[test]
+    fn a_later_binder_does_not_capture_an_earlier_init() {
+        // `(let (a b b 2) …)`: the first init `b` is the outer (free) `b`.
+        let src = "(let (a b b 2) (+ a b))";
+        let first_init = src.find("b b").unwrap();
+        let second_binder = first_init + 2;
+        let body_b = src.rfind('b').unwrap();
+        assert_eq!(local_def_at(src, first_init), None, "the init's b is free");
+        assert_eq!(local_def_at(src, body_b), Some(second_binder));
+        // an earlier binder IS visible in a later init
+        let chained = "(let (a 1 b (inc a)) b)";
+        assert_eq!(
+            local_def_at(chained, chained.find("a)").unwrap()),
+            Some(chained.find("a 1").unwrap())
+        );
+    }
+
+    #[test]
+    fn letrec_names_are_local_in_every_init_and_the_body() {
+        // Renaming a global `go` must not rewrite a local letrec `go`.
+        let src = "(defn go () 1)\n(letrec (go (fn (n) (if (= n 0) 0 (go (dec n))))) (go 3))";
+        let root = cst::parse(src);
+        let tree = analyze(&root, src);
+        assert_eq!(tree.references_to_global(&root, src, "go").len(), 1);
+        let binder = src.find("go (fn").unwrap();
+        let recursive = src.find("go (dec").unwrap();
+        assert_eq!(local_def_at(src, recursive), Some(binder));
+    }
+
+    #[test]
+    fn each_clause_arm_binds_its_own_params() {
+        // The second arm's `y` was Free: only the first arm's list was read as params.
+        let src = "(def y 0)\n(defn f ((x) x) ((x y) (+ x y)))";
+        let root = cst::parse(src);
+        let tree = analyze(&root, src);
+        assert_eq!(tree.references_to_global(&root, src, "y").len(), 1);
+        let second_x = src.find("x y)").unwrap();
+        let body_x = src.find("x y))").unwrap();
+        assert_eq!(local_def_at(src, body_x), Some(second_x));
+        // the same for a multi-clause `fn`, and a single list-pattern param is no arm
+        let anonymous = "(fn ((a) a) ((a b) b))";
+        assert_eq!(
+            local_def_at(anonymous, anonymous.rfind('b').unwrap()),
+            Some(anonymous.find("b)").unwrap())
+        );
+        let pattern = "(defn f ((h & t)) h)";
+        assert_eq!(
+            local_def_at(pattern, pattern.rfind('h').unwrap()),
+            Some(pattern.find("h &").unwrap())
         );
     }
 

@@ -1,6 +1,11 @@
 //! Value equality, comparison, hashing (child of heap).
 use super::*;
 
+/// How many leading elements of a list (or a range) feed its hash; past this only
+/// the length does. Bounds hashing a range — which must agree with the equal list —
+/// at O(prefix) however long it is.
+const LIST_HASH_PREFIX: usize = 256;
+
 /// Order two floats as a TOTAL order, for `value_cmp` — which is a sort key, not an
 /// IEEE predicate. `partial_cmp(...).unwrap_or(Equal)` used to stand here and it made
 /// `NaN` compare **equal to everything**, so a single `NaN` silently turned `sort` into a
@@ -390,13 +395,22 @@ impl Heap {
                 6u8.hash(h);
                 self.string(id).hash(h);
             }
+            // A list hashes its first `LIST_HASH_PREFIX` elements and then only its
+            // LENGTH — so that a range, which must hash like the list it equals,
+            // can do so in O(1) whatever its length (`(range 0 9223372036854775807)`
+            // as a key walked 2^63 elements and never returned). Two long lists that
+            // differ only past the prefix share a hash; `equal` tells them apart.
             ValueRef::Pair(id) => {
                 7u8.hash(h);
                 // Walk the cdr spine iteratively (matches `equal`'s loop).
                 let mut cur = id;
+                let mut length: u128 = 0;
                 loop {
                     let (car, cdr) = self.pair(cur);
-                    self.hash_value_into(car, h);
+                    if length < LIST_HASH_PREFIX as u128 {
+                        self.hash_value_into(car, h);
+                    }
+                    length += 1;
                     match cdr.unpack() {
                         ValueRef::Pair(next) => cur = next,
                         other => {
@@ -404,6 +418,7 @@ impl Heap {
                             // same as a 2-pair `(a b)` (whose cdr ends Nil).
                             0xFFu8.hash(h);
                             self.hash_value_into(other, h);
+                            length.hash(h);
                             break;
                         }
                     }
@@ -411,21 +426,23 @@ impl Heap {
             }
             // A range hashes byte-for-byte like the proper list it stands in for
             // (it must — `(= (range 5) (list 0 1 2 3 4))`, so they share a hash):
-            // the same `7u8` list tag, each `Int` element hashed via the same
-            // path, then the `0xFF` + `Nil` end-marker a proper list emits.
+            // the same `7u8` list tag, its first `LIST_HASH_PREFIX` `Int` elements
+            // hashed via the same path, then the `0xFF` + `Nil` end-marker a proper
+            // list emits and the exact length — O(prefix), never O(length).
             ValueRef::Range(id) => {
                 7u8.hash(h);
-                let (lo, hi, step) = self.range_parts(id);
+                let (lo, _, step) = self.range_parts(id);
+                let length = self.range_len_exact(id);
                 let mut i = lo;
-                while if step > 0 { i < hi } else { i > hi } {
+                for _ in 0..length.min(LIST_HASH_PREFIX as i128) {
                     self.hash_value_into(Value::int(i), h);
-                    i = match i.checked_add(step) {
-                        Some(v) => v,
-                        None => break,
-                    };
+                    // Past the last element the next step may leave i64; the
+                    // bounded loop above has already stopped by then.
+                    i = i.wrapping_add(step);
                 }
                 0xFFu8.hash(h);
                 self.hash_value_into(Value::nil(), h);
+                (length as u128).hash(h);
             }
             // A lazy seq-view cannot be realised here (no evaluator to run its
             // transducer), so it hashes to a single sentinel bucket — consistent
@@ -496,13 +513,17 @@ impl Heap {
                 (size as u64).hash(h);
                 acc.hash(h);
             }
+            // `=` is handle identity, but the HANDLE moves (a collection, `promote`,
+            // the freeze, the shared-code collector) while a map's trie keeps the
+            // hash its key had at insert — so hash the closure's move-stable
+            // `identity` instead, which every move carries (see `Closure::identity`).
             ValueRef::Fn(id) => {
                 10u8.hash(h);
-                id.0.hash(h);
+                self.closure(id).identity.hash(h);
             }
             ValueRef::Macro(id) => {
                 11u8.hash(h);
-                id.0.hash(h);
+                self.closure(id).identity.hash(h);
             }
             ValueRef::Native(id) => {
                 12u8.hash(h);
@@ -594,12 +615,14 @@ impl Heap {
 
     /// Structural equality of two ranges. An arithmetic sequence is fixed by its
     /// first element, length, and (for length ≥ 2) its step — so this is O(1).
+    /// The EXACT lengths: the saturating `range_len` made two ranges longer than
+    /// `i64::MAX` compare equal when one had an element the other lacked.
     fn range_eq_range(&self, x: VecId, y: VecId) -> bool {
         let (lo1, _, s1) = self.range_parts(x);
         let (lo2, _, s2) = self.range_parts(y);
-        let n1 = self.range_len(x);
-        let n2 = self.range_len(y);
-        n1 == n2 && lo1 == lo2 && (n1 < 2 || s1 == s2)
+        let n1 = self.range_len_exact(x);
+        let n2 = self.range_len_exact(y);
+        n1 == n2 && (n1 == 0 || lo1 == lo2) && (n1 < 2 || s1 == s2)
     }
 
     pub fn equal(&self, a: Value, b: Value) -> bool {

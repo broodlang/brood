@@ -17,7 +17,8 @@ use lsp_types::{Position, Range};
 /// projection is a binary search plus a short UTF-16 count.
 pub struct LineIndex {
     /// Byte offset of the start of each line. Always begins with `0`; grows by
-    /// one entry per `\n`.
+    /// one entry per line break as the reader defines it
+    /// ([`brood::syntax::scanner::line_starts`]: `\n`, `\r\n`, lone `\r`).
     line_starts: Vec<u32>,
 }
 
@@ -48,13 +49,12 @@ impl LineIndex {
             "LineIndex: document larger than 4 GiB ({} bytes)",
             text.len()
         );
-        let mut line_starts = vec![0u32];
-        for (i, b) in text.bytes().enumerate() {
-            if b == b'\n' {
-                line_starts.push((i + 1) as u32);
-            }
+        // The language's own line-break definition (`\n`, `\r\n`, lone `\r` — what
+        // an LSP client breaks on), from the one table the reader's diagnostics use:
+        // a `line:col` from `brood --check` and an LSP `Position` name the same line.
+        LineIndex {
+            line_starts: brood::syntax::scanner::line_starts(text),
         }
-        LineIndex { line_starts }
     }
 
     /// The `Position` of byte `offset` within `text` (the same text this index
@@ -114,7 +114,7 @@ impl LineIndex {
         // `col` is the count of characters already stepped over, so the enumerate index
         // is it exactly — the walk advances `byte` by whole characters, never bytes.
         for (col, c) in text[byte..].chars().enumerate() {
-            if c == '\n' || col >= target_col {
+            if c == '\n' || c == '\r' || col >= target_col {
                 break;
             }
             byte += c.len_utf8();
@@ -162,8 +162,8 @@ impl LineIndex {
         let mut byte = floor_char_boundary(text, line_start as usize);
         for c in text[byte..].chars() {
             // Stop at the line's end so a `character` past the line doesn't spill
-            // into the next one.
-            if c == '\n' {
+            // into the next one (a `\r` ends a line too — lone, or a CRLF's first byte).
+            if c == '\n' || c == '\r' {
                 break;
             }
             // Test the column *after* adding this char's width: if it would step
@@ -185,6 +185,56 @@ impl LineIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The editor's line and the reader's line must be the same line: a checker
+    /// diagnostic carries the reader's `line:col`, and the LSP projects it through
+    /// this index. LineIndex once broke on `\n` alone while the scanner also broke on
+    /// a lone `\r` and U+2028/U+2029, so a form after either was reported a line off.
+    #[test]
+    fn breaks_lines_exactly_where_the_reader_does() {
+        let text = "a\r\nb\rc\u{2028}d\ne";
+        let index = LineIndex::new(text);
+        let at = |needle: char| text.find(needle).unwrap() as u32;
+        assert_eq!(
+            index.position(text, at('b')),
+            Position::new(1, 0),
+            "after CRLF"
+        );
+        assert_eq!(
+            index.position(text, at('c')),
+            Position::new(2, 0),
+            "after lone CR"
+        );
+        assert_eq!(
+            index.position(text, at('d')),
+            Position::new(2, 2),
+            "U+2028 is no break"
+        );
+        assert_eq!(index.position(text, at('e')), Position::new(3, 0));
+        // And it agrees with the reader's own positions at every character.
+        let mut heap = brood::core::heap::Heap::new();
+        let forms = brood::syntax::reader::read_all_positioned(&mut heap, "; a\u{2028}b\r(f)\n(g)")
+            .unwrap();
+        let reader_lines: Vec<u32> = forms.iter().map(|(_, pos)| pos.line).collect();
+        assert_eq!(reader_lines, vec![2, 3]);
+        let source = "; a\u{2028}b\r(f)\n(g)";
+        let index = LineIndex::new(source);
+        let editor_lines: Vec<u32> = ["(f)", "(g)"]
+            .iter()
+            .map(|form| {
+                index
+                    .position(source, source.find(form).unwrap() as u32)
+                    .line
+                    + 1
+            })
+            .collect();
+        assert_eq!(editor_lines, reader_lines);
+        // A column past a lone CR's line end does not spill into the next line.
+        assert_eq!(
+            index.offset(source, Position::new(0, 99)),
+            source.find('\r').unwrap() as u32
+        );
+    }
 
     #[test]
     fn maps_offsets_on_a_single_line() {

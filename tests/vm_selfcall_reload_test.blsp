@@ -52,6 +52,15 @@
 ;; would see it on its next iteration).
 (defn scr-serve (n acc) (if (= n 0) acc (scr-serve (- n 1) (+ acc 2))))
 
+;; A loop entered through an ALIAS after its name was rebound (2026-10-08). The guard used
+;; to start each frame at the current epoch, assuming the name still meant this arm at
+;; entry — true for a call through the name, false through `(def old f)`. The old body's
+;; tail `(scr-alias …)` must reach the NEW binding after one iteration, as the tree-walker
+;; does: the VM answered 5 (looped on the old body) and native code 100000.
+(defn scr-alias (n acc) (if (= n 0) acc (scr-alias (- n 1) (+ acc 1))))
+(defn scr-alias-warm (k)
+  (if (= k 0) :warm (do (scr-alias 20000 0) (scr-alias-warm (- k 1)))))
+
 (describe "SelfCall observes a redefinition of its own function"
   :isolated
   ;; `:isolated` because these tests redefine globals they also assert on. Without the
@@ -73,4 +82,14 @@
   (test "a hot loop redefined from outside is reloaded on the next call"
     (assert= 200000 (scr-serve 100000 0))
     (def scr-serve (fn (n acc) :reloaded))
-    (assert= :reloaded (scr-serve 10 0))))
+    (assert= :reloaded (scr-serve 10 0)))
+
+  (test "a loop called through an alias after its name was rebound hands its tail call on"
+    ;; Warm it first, so at the native ceiling the old body is native when aliased.
+    (assert= :warm (scr-alias-warm 20))
+    (def scr-alias-old scr-alias)
+    (def scr-alias (fn (n acc) [:new n acc]))
+    (assert= [:new 4 1] (scr-alias-old 5 0))
+    (assert= [:new 99999 1] (scr-alias-old 100000 0))
+    ;; Called often enough to tier again, it still hands on.
+    (assert= [:new 9 1] (last (mapv (range 3000) (fn (_) (scr-alias-old 10 0)))))))

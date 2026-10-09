@@ -416,38 +416,51 @@ impl Range {
     pub fn disjoint(a: Range, b: Range) -> bool {
         Range::meet(a, b).is_none()
     }
-    /// Interval arithmetic, saturating: `[a,b] + [c,d] = [a+c, b+d]`, an unbounded end
-    /// stays unbounded.
+    /// Interval arithmetic: `[a,b] + [c,d] = [a+c, b+d]`, an unbounded end stays
+    /// unbounded, and an end that overflows `i64` WIDENS to unbounded (ADR-350) — it
+    /// never saturates. A saturated end is a wrong bound, not a loose one: `(+ i64::MAX
+    /// 1)` saturated to `i64::MAX`, so `(- (+ i64::MAX 1) i64::MAX)` read as exactly 0
+    /// and a `(-> (int 1 1))` declaration was reported as violated.
     pub fn plus(a: Range, b: Range) -> Range {
         Range {
-            lo: a.lo.zip(b.lo).map(|(x, y)| x.saturating_add(y)),
-            hi: a.hi.zip(b.hi).map(|(x, y)| x.saturating_add(y)),
+            lo: a.lo.zip(b.lo).and_then(|(x, y)| x.checked_add(y)),
+            hi: a.hi.zip(b.hi).and_then(|(x, y)| x.checked_add(y)),
         }
     }
+    /// `-[a,b] = [-b, -a]`; negating `i64::MIN` overflows, so that end widens.
     pub fn negated(a: Range) -> Range {
         Range {
-            lo: a.hi.map(|h| h.saturating_neg()),
-            hi: a.lo.map(|l| l.saturating_neg()),
+            lo: a.hi.and_then(i64::checked_neg),
+            hi: a.lo.and_then(i64::checked_neg),
         }
     }
     pub fn minus(a: Range, b: Range) -> Range {
         Range::plus(a, Range::negated(b))
     }
     /// `[a,b] × [c,d]` — the four corner products when every end is finite; else, the
-    /// sign is all that survives (both non-negative → `[0, ∞)`), else everything.
+    /// sign is all that survives (both non-negative → `[0, ∞)`), else everything. A
+    /// corner product that overflows widens the end on its side (a positive overflow the
+    /// upper end, a negative one the lower) rather than saturating — see [`plus`].
+    ///
+    /// [`plus`]: Range::plus
     pub fn times(a: Range, b: Range) -> Range {
         match (a.lo, a.hi, b.lo, b.hi) {
             (Some(al), Some(ah), Some(bl), Some(bh)) => {
-                let corners = [
-                    al.saturating_mul(bl),
-                    al.saturating_mul(bh),
-                    ah.saturating_mul(bl),
-                    ah.saturating_mul(bh),
-                ];
-                Range {
-                    lo: corners.iter().min().copied(),
-                    hi: corners.iter().max().copied(),
+                let corners = [(al, bl), (al, bh), (ah, bl), (ah, bh)];
+                let mut lo = Some(i64::MAX);
+                let mut hi = Some(i64::MIN);
+                for (x, y) in corners {
+                    match x.checked_mul(y) {
+                        Some(product) => {
+                            lo = lo.map(|end| end.min(product));
+                            hi = hi.map(|end| end.max(product));
+                        }
+                        // the true product is past the edge on the side its sign says
+                        None if (x < 0) == (y < 0) => hi = None,
+                        None => lo = None,
+                    }
                 }
+                Range { lo, hi }
             }
             _ => {
                 let non_negative = |r: Range| r.lo.is_some_and(|l| l >= 0);

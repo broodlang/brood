@@ -88,9 +88,10 @@ that is not an RFC 3986 unreserved character (A-Z a-z 0-9 - _ . ~) is encoded as
 ;; `s` is a CODE-POINT VECTOR (built once in `percent-decode`), so char access is
 ;; O(1) `nth` — `char-at` on the raw UTF-8 string is O(i), making the scan O(n^2).
 (defn- url-pct-decode-loop (s i n acc)
-  "Decode percent-encoded code-point vector `s` (count `n`), accumulating decoded bytes into `acc`."
+  "Decode percent-encoded code-point vector `s` (count `n`), accumulating decoded bytes
+into `acc`; the decoded byte list, or `:invalid`."
   (if (>= i n)
-    (string/bytes-> (reverse acc))
+    (reverse acc)
     (let (c (nth s i))
       (if (= c "%")
         (if (>= (+ i 2) n)
@@ -112,15 +113,26 @@ that is not an RFC 3986 unreserved character (A-Z a-z 0-9 - _ . ~) is encoded as
 
 (defn percent-decode (s)
   "Decode percent-encoded sequences in `s` → the original string, or a `failure` when
-`s` contains an invalid or incomplete %XX sequence.
+`s` contains an invalid or incomplete %XX sequence, or decodes to bytes that are not
+UTF-8.
 
     (url/percent-decode \"a%20b\")          → \"a b\"
-    (failure? (url/percent-decode \"a%ZZ\"))   → true"
+    (failure? (url/percent-decode \"a%ZZ\"))   → true
+    (failure? (url/percent-decode \"%FF\"))    → true"
   (let (v (into [] (string/->list s))
-        r (url-pct-decode-loop v 0 (count v) nil))
-    (if (= r :invalid)
-      (failure "url/percent-decode: invalid percent-encoding: " (pr-str s))
-      r)))
+        r (url-pct-decode-loop v 0 (count v) nil)
+        ;; `%FF` is well-formed percent-encoding of a byte that is not UTF-8, and the
+        ;; decoder RAISES on it — which broke this function's promise of a failure value,
+        ;; and took down an http worker decoding a hostile `?token=%FF`. The byte list is
+        ;; ints 0–255, so not-UTF-8 is the only way the decode can raise.
+        ;; check-allow :discarded-catch — the raise IS the answer: nil means "not UTF-8"
+        text (if (= r :invalid)
+               nil
+               (check-allow :discarded-catch (try (string/bytes-> r) (catch _ nil)))))
+    (cond
+      (= r :invalid) (failure "url/percent-decode: invalid percent-encoding: " (pr-str s))
+      (nil? text) (failure "url/percent-decode: not UTF-8 once decoded: " (pr-str s))
+      else text)))
 
 ;; ---- query string encoding --------------------------------------------------
 ;;
@@ -253,14 +265,32 @@ a bracketed IPv6 literal. `port-str` is nil when no `:port` is present."
   ;; given", so `http://h:8o80/` silently fell back to port 80 and connected somewhere
   ;; the URL never named. Raise instead. An EMPTY port (`host:`) stays nil: RFC 3986
   ;; §3.2.3 defines that as "use the scheme's default".
+  ;; A port is DIGITs only (RFC 3986 §3.2.3): `string/->number` also reads `+80`, which
+  ;; a client may resolve differently, so the digits are checked before the number.
   (cond
     (nil? port-str) nil
     (= port-str "") nil
     else
-      (let (n (string/->number port-str))
+      (let (n (if (every? (string/->codepoints port-str) (fn (cp) (and (>= cp 48) (<= cp 57))))
+                (string/->number port-str)
+                nil))
         (if (and (int? n) (>= n 0) (<= n 65535))
           n
           (error "url: invalid port " (pr-str port-str) " — expected an integer 0..65535")))))
+
+;; RFC 3986 §3.1: `scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`. Splitting on the
+;; first `://` alone read `/r/https://evil.com/` as scheme `/r/https` — a relative path
+;; reported as an absolute URL, which an open-redirect guard asking "is there a scheme?"
+;; gets backwards.
+(defn- url-scheme? (s)
+  (let (cps (string/->codepoints s))
+    (and (not (empty? cps))
+      (url-alpha? (first cps))
+      (every? cps
+        (fn (cp) (or (url-alpha? cp) (and (>= cp 48) (<= cp 57)) (= cp 43) (= cp 45) (= cp 46)))))))
+
+(defn- url-alpha? (cp)
+  (or (and (>= cp 65) (<= cp 90)) (and (>= cp 97) (<= cp 122))))
 
 (defn- url-parse-authority (auth)
   "Parse an RFC-3986 authority `[userinfo@]host[:port]` into `{:userinfo :host :port}`.
@@ -283,7 +313,12 @@ the `@`, or nil — it is **not** part of `:host`, so an allow-list or SSRF chec
 `:host` sees the host a client would actually connect to (`https://evil.com@good.com/`
 → host `good.com`). An IPv6 literal keeps its brackets (`\"[::1]\"`). `:query` and
 `:fragment` are the raw (still-encoded) strings, or nil when absent. Relative URLs
-(no scheme) have nil `:scheme`, `:host`, and `:port`."
+(no scheme) have nil `:scheme`, `:host`, and `:port` — except a network-path reference
+`//host/path`, which has a host and no scheme. A scheme is recognised only when it is
+well-formed (a letter, then letters, digits, `+`, `-`, `.`), so `/r/https://x/` is a path.
+
+    (:host (url/parse-url \"//evil.com/x\"))           → \"evil.com\"
+    (:scheme (url/parse-url \"/r/https://evil.com/\"))  → nil"
   ;; 1. strip fragment
   (let (frag-split (url-split-first s "#")
         before-frag (if frag-split (first frag-split) s)
@@ -292,18 +327,29 @@ the `@`, or nil — it is **not** part of `:host`, so an allow-list or SSRF chec
     (let (q-split (url-split-first before-frag "?")
           before-q (if q-split (first q-split) before-frag)
           query (if q-split (second q-split) nil))
-      ;; 3. strip scheme
+      ;; 3. strip scheme — only a well-formed one (see `url-scheme?`)
       (let (scheme-split (url-split-first before-q "://")
-            scheme (if scheme-split (first scheme-split) nil)
-            rest-url (if scheme-split (second scheme-split) before-q))
+            scheme (if (and scheme-split (url-scheme? (first scheme-split)))
+                     (first scheme-split)
+                     nil)
+            ;; a network-path reference (`//host/path`, §4.2) has an authority but no
+            ;; scheme; reading it as a path hid `evil.com` from every check on `:host`
+            network-path? (and (nil? scheme) (string/starts-with? before-q "//"))
+            rest-url (cond
+                       scheme (second scheme-split)
+                       network-path? (string/substring before-q 2 (string/length before-q))
+                       else before-q)
+            has-authority? (or scheme network-path?))
         ;; 4. split authority from path
         (let (slash (index-of rest-url "/")
-              authority (if (< slash 0)
-                          (if (nil? scheme) "" rest-url)
-                          (string/substring rest-url 0 slash))
-              path (if (< slash 0)
-                     (if (nil? scheme) rest-url "/")
-                     (string/substring rest-url slash (string/length rest-url)))
+              authority (cond
+                          (not has-authority?) ""
+                          (< slash 0) rest-url
+                          else (string/substring rest-url 0 slash))
+              path (cond
+                     (not has-authority?) rest-url
+                     (< slash 0) "/"
+                     else (string/substring rest-url slash (string/length rest-url)))
               auth-map (if (= authority "")
                          {:host nil :port nil}
                          (url-parse-authority authority)))

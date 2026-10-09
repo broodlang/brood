@@ -1,0 +1,39 @@
+;;; Regression guard: a closure built in a `let` sees the bindings that were in scope
+;;; WHEN IT WAS BUILT, never a later binding of the same name (2026-10-08).
+;;;
+;;; The tree-walker bound every name of a `let` into one environment frame, and a frame is
+;;; searched by name — so a binding made after a closure captured the frame became visible
+;;; to it. `(let (x 1 f (fn () x) x 2) (f))` answered 2 on the tree-walker (`BROOD_TIER=0`)
+;;; and 1 on the compiled tiers, which give each binding its own slot. Now a binding that
+;;; follows a list-valued RHS goes into a fresh child frame.
+;;;
+;;; The bodies below are plain top-level code and `defn`s, so this file means something at
+;;; every ceiling: run it with `BROOD_TIER=0`, `1` and `2`.
+
+(defmodule let-capture-shadow-test (:use test))
+
+(defn lcs-rebind () (let (x 1 f (fn () x) x 2) [(f) x]))
+(defn lcs-param (x) (let (f (fn () x) x 99) [(f) x]))
+(defn lcs-chain ()
+  (let (a 1 f (fn () a) a (+ a 10) g (fn () a) a (+ a 100)) [(f) (g) a]))
+;; A later binding of a name the closure reads as a GLOBAL.
+(def lcs-g :global)
+(defn lcs-global () (let (f (fn () lcs-g) lcs-g :local) [(f) lcs-g]))
+
+(describe "let bindings are lexical for the closures they build"
+  (test "a rebinding after a closure does not reach into it"
+    (assert= [1 2] (lcs-rebind))
+    (assert= [1 2] (let (x 1 f (fn () x) x 2) [(f) x])))
+
+  (test "a binding shadowing a parameter does not reach a closure built before it"
+    (assert= [5 99] (lcs-param 5)))
+
+  (test "each closure sees the binding current when it was built"
+    (assert= [1 11 111] (lcs-chain)))
+
+  (test "a binding shadowing a global does not reach a closure built before it"
+    (assert= [:global :local] (lcs-global)))
+
+  (test "sequential bindings still see the ones before them"
+    (assert= 6 (let (a 1 b (+ a 2) c (+ a b 2)) c))
+    (assert= 3 (let (a 1 a (+ a 1) a (+ a 1)) a))))

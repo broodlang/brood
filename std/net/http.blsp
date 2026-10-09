@@ -29,7 +29,10 @@ handler)` listens and runs one handler process per connection; a handler maps a
 request map to a response map. Includes request parsing, response rendering, a
 `router`, and static-file serving with MIME guessing. A handler may instead return
 a `stream-response` to keep the connection open and push over the live socket (the
-seam SSE / long-poll / chunked downloads build on). Plaintext only; pure Brood."
+seam SSE / long-poll / chunked downloads build on). A request body is framed by
+`Content-Length` alone and capped by `*http-max-body-bytes*` (413 past it); a
+`Transfer-Encoding` is refused. A handler that raises answers 500. Plaintext only; pure
+Brood."
   (:use file))
 
 ;; How long a connection may stall mid-request before we give up.
@@ -48,8 +51,16 @@ seam SSE / long-poll / chunked downloads build on). Plaintext only; pure Brood."
 ;; then top up to Content-Length if a body is declared.
 
 ;; A request head larger than this without its terminator is a bad/hostile
-;; request (slow-loris memory guard) — give up rather than buffer forever.
+;; request (slow-loris memory guard) — give up rather than buffer forever. A head that
+;; does end but runs past it is answered 431.
 (defdyn *http-max-head-bytes* 65536)
+
+;; The largest request body the server will read. `Content-Length` is the client's
+;; word, and it used to be trusted to any size: one 100 MB upload took a worker to
+;; 601 MB RSS (the chunks, their join, and the parse's copy). A request declaring
+;; more is answered 413 BEFORE any of its body is read. Rebind with `binding` around
+;; `serve` for an upload endpoint.
+(defdyn *http-max-body-bytes* (* 8 1024 1024))
 
 ;; The socket is in binary mode, so `[:tcp …]` chunks are `bytes` values: accumulate
 ;; in a reversed chunk list, scan with `bytes-index-of`. The head is ASCII (decoded
@@ -92,6 +103,18 @@ seam SSE / long-poll / chunked downloads build on). Plaintext only; pure Brood."
       ([:tcp-closed ^sock] (apply bytes/concat (reverse chunks)))
       (after *http-read-timeout-ms* (apply bytes/concat (reverse chunks))))))
 
+;; The response a request the server refuses to read is answered with.
+(defn- http-refusal (status message)
+  (response status
+    {"Content-Type" "text/plain; charset=utf-8"}
+    (str (http-reason status) ": " message "\n")))
+
+;; The head as text, or nil when it is not UTF-8. `string/bytes->` RAISES on a bad
+;; byte, which killed the connection's worker without a word to the client.
+(defn- http-decode-head (head-bytes)
+  ;; check-allow :discarded-catch — the raise IS the answer: nil means "not UTF-8"
+  (check-allow :discarded-catch (try (string/bytes-> head-bytes) (catch _ nil))))
+
 (defn- http-read-raw (sock)
   ;; `http-read-until` returns whatever it accumulated on EOF/timeout even
   ;; without the terminator (a peer that half-sends a head then drops), so the
@@ -100,22 +123,43 @@ seam SSE / long-poll / chunked downloads build on). Plaintext only; pure Brood."
   ;; `(subbytes head 0 -1)`, which threw and killed the connection's worker
   ;; process (leaking the fd) on a truncated head. A remotely-triggerable crash.
   ;; A nil `head` (the peer went away) reads as empty bytes: no marker, so nil.
+  ;;
+  ;; Everything that decides whether to read a body is settled from the head alone,
+  ;; before a byte of the body is read: a head that is not UTF-8, framing the server
+  ;; does not speak, and a body over `*http-max-body-bytes*` each come back as the
+  ;; refusal `response` to answer with.
   (let (head (or (http-read-until sock nil 0 #b"" #b"\r\n\r\n") #b"")
         marker (bytes/index-of head #b"\r\n\r\n"))
     (if (< marker 0)
       nil
-      (let (clen (http-declared-length (string/bytes-> (bytes/slice head 0 marker))))
-        (if (= clen 0)
-          head
-          ;; `head` already holds everything read so far (incl. any body bytes in
-          ;; the chunk that completed the header); seed the chunk list with it.
-          (http-read-to-length sock (list head) (bytes/length head) (+ marker 4 clen)))))))
+      (let (head-text (http-decode-head (bytes/slice head 0 marker)))
+        (cond
+          (> marker *http-max-head-bytes*) (http-refusal 431 "the request head is too large")
+          (nil? head-text) (http-refusal 400 "the request head is not UTF-8")
+          else
+            (match (http-body-framing head-text)
+              ([:refuse status message] (http-refusal status message))
+              ([:length 0] head)
+              ([:length length]
+                (if (> length *http-max-body-bytes*)
+                  (http-refusal 413
+                    (str "the body is over the server's limit of " *http-max-body-bytes* " bytes"))
+                  ;; `head` already holds everything read so far (incl. any body bytes in
+                  ;; the chunk that completed the header); seed the chunk list with it.
+                  (http-read-to-length sock
+                    (list head)
+                    (bytes/length head)
+                    (+ marker 4 length))))))))))
 
 (defn read-request (sock)
   "Read one HTTP request from `sock` (owned by the calling process): the head
 through the blank line, plus the body when `Content-Length` declares one. Returns
-the raw request as a `bytes` value, or nil if the peer closed without sending
-anything.
+the raw request as a `bytes` value, nil if the peer closed without sending a whole
+head, or — for a request the server will not read — the refusal `response` to answer
+it with: 413 for a body over `*http-max-body-bytes*`, 431 for a head over
+`*http-max-head-bytes*`, 400 for a head that is not UTF-8 or a `Content-Length` that is
+not one non-negative integer, and 501 for `Transfer-Encoding` (400 beside a
+`Content-Length`), which this server does not decode.
 
 The socket must be in **binary mode** (the server sets it once, for the
 connection's whole life) so the framing is byte-faithful: chunks arrive as
@@ -146,18 +190,49 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
             (string/lower (string/trim (string/substring line 0 i)))
               (string/trim (string/substring line (+ i 1) (string/length line)))))))))
 
-(defn- http-declared-length (head)
-  ;; A well-formed Content-Length is a non-negative *integer* byte count. A
-  ;; missing, non-numeric, negative, or fractional value → 0 (no declared body):
-  ;; a fractional length (`3.9`) could never be reached exactly, parking the
-  ;; worker until the read timeout, and a negative one is meaningless. (The read
-  ;; timeout already bounds an honestly-shaped but lying huge length.)
-  (let (lines (string/split head "\r\n")
-        v (/get (http-parse-headers (rest lines)) "content-length"))
-    (if (nil? v)
-      0
-      (let (n (string/->number v))
-        (if (and (int? n) (>= n 0)) n 0)))))
+;; Every value of header `name` (lower-case) across the head's header lines, trimmed —
+;; a repeated header is several lines, which `http-parse-headers`' map collapses.
+(defn- http-header-values (lines name)
+  (fold lines
+    nil
+    (fn (values line)
+      (let (i (index-of line ":"))
+        (if (and (>= i 0) (= (string/lower (string/trim (string/substring line 0 i))) name))
+          (cons (string/trim (string/substring line (+ i 1) (string/length line))) values)
+          values)))))
+
+(defn- http-digits? (s)
+  (and (not (= s "")) (every? (string/->codepoints s) (fn (cp) (and (>= cp 48) (<= cp 57))))))
+
+;; How the body of the request with head `head` (text, through its last header line) is
+;; framed: `[:length n]` — `n` the bytes after the blank line that ARE the body, 0 when
+;; none is declared — or `[:refuse status message]`.
+;;
+;; The body used to be everything after the head, whatever `Content-Length` said
+;; (`Content-Length: 3` + `abcdefgh` gave the handler 8 bytes), and `Transfer-Encoding:
+;; chunked` was ignored, so the chunk-size lines reached the handler as body. A server
+;; and a proxy that disagree on where a body ends is request smuggling, so anything
+;; ambiguous is refused rather than guessed: a `Transfer-Encoding` (this server does not
+;; decode one — 501, or 400 beside a `Content-Length`, the classic smuggling pair), and
+;; a `Content-Length` that is not exactly one non-negative integer (garbage, a sign, a
+;; fraction, or repeats that disagree — `5, 5` and two `5` lines agree and are fine).
+(defn- http-body-framing (head)
+  (let (lines (rest (string/split head "\r\n"))
+        lengths (mapcat (http-header-values lines "content-length")
+                  (fn (value) (map (string/split value ",") string/trim)))
+        encoded? (not (empty? (http-header-values lines "transfer-encoding"))))
+    (cond
+      (and encoded? (not (empty? lengths)))
+        [:refuse 400 "Transfer-Encoding and Content-Length together"]
+      encoded? [:refuse 501 "Transfer-Encoding is not supported; send a Content-Length"]
+      (empty? lengths) [:length 0]
+      (not (every? lengths http-digits?))
+        [:refuse 400 "Content-Length is not a non-negative integer"]
+      (> (count (seq/distinct (map lengths string/->number))) 1)
+        [:refuse 400 "conflicting Content-Length values"]
+      else
+        (let (length (string/->number (first lengths)))
+          (if (int? length) [:length length] [:refuse 400 "Content-Length is not an integer"])))))
 
 (defn parse-request (raw)
   "Parse a raw HTTP request (`bytes`, from `read-request`) into
@@ -165,8 +240,12 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
   request target is split at its first `?`: `:path` is what a `router` matches (`/events`,
   never `/events?token=…`) and `:query` the raw query string, `\"\"` when there is none —
   decode it with `url/query-decode`. The head is ASCII and decoded to strings; `:body` is a `bytes` value (raw — decode it with
-  `utf8-bytes->string` for a text/form body). A string `raw` is accepted too (encoded to
-  bytes first), so `(parse-request \"GET /…\")` still works."
+  `utf8-bytes->string` for a text/form body): exactly the `Content-Length` bytes after the
+  head (fewer if `raw` is short), and empty when no valid length is declared — bytes past
+  it are not part of this request. A string `raw` is accepted too (encoded to
+  bytes first), so `(parse-request \"GET /…\")` still works.
+
+    (string/bytes-> (:body (http/parse-request \"POST / HTTP/1.0\\r\\nContent-Length: 3\\r\\n\\r\\nabcdefgh\")))   → \"abc\""
   (let (raw (if (string? raw) (string/->bytes raw) raw)
         marker (bytes/index-of raw #b"\r\n\r\n")
         ;; No blank-line terminator (a bare request line, or truncated): the
@@ -174,7 +253,15 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
         ;; 0 -1)`, which throws. Mirrors `parse-response`'s guard.
         head-end (if (< marker 0) (bytes/length raw) marker)
         head (string/bytes-> (bytes/slice raw 0 head-end))
-        body (if (< marker 0) #b"" (bytes/slice raw (+ marker 4) (bytes/length raw)))
+        body (if (< marker 0)
+               #b""
+               (let (start (+ marker 4)
+                     declared (match (http-body-framing head)
+                                ([:length length] length)
+                                (_ 0)))
+                 (let (end (+ start declared)
+                       available (bytes/length raw))
+                   (bytes/slice raw start (if (< end available) end available)))))
         lines (string/split head "\r\n")
         req (string/split (first lines) " ")
         (path query) (http-split-first (nth req 1 "/") "?"))
@@ -187,17 +274,61 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
 (sig parse-request ((or bytes string) -> map))
 
 ;; ---- responses --------------------------------------------------------------
+;; The standard reason phrases (RFC 9110 §15). A code missing here used to render as
+;; `503 OK`; it now renders with the neutral `http-reason` fallback.
 (def *http-status-text*
-  {200 "OK"
+  {100 "Continue"
+   101 "Switching Protocols"
+   200 "OK"
    201 "Created"
+   202 "Accepted"
+   203 "Non-Authoritative Information"
    204 "No Content"
+   205 "Reset Content"
+   206 "Partial Content"
+   300 "Multiple Choices"
    301 "Moved Permanently"
    302 "Found"
+   303 "See Other"
+   304 "Not Modified"
+   307 "Temporary Redirect"
+   308 "Permanent Redirect"
    400 "Bad Request"
+   401 "Unauthorized"
+   402 "Payment Required"
    403 "Forbidden"
    404 "Not Found"
    405 "Method Not Allowed"
-   500 "Internal Server Error"})
+   406 "Not Acceptable"
+   407 "Proxy Authentication Required"
+   408 "Request Timeout"
+   409 "Conflict"
+   410 "Gone"
+   411 "Length Required"
+   412 "Precondition Failed"
+   413 "Content Too Large"
+   414 "URI Too Long"
+   415 "Unsupported Media Type"
+   416 "Range Not Satisfiable"
+   417 "Expectation Failed"
+   421 "Misdirected Request"
+   422 "Unprocessable Content"
+   426 "Upgrade Required"
+   428 "Precondition Required"
+   429 "Too Many Requests"
+   431 "Request Header Fields Too Large"
+   451 "Unavailable For Legal Reasons"
+   500 "Internal Server Error"
+   501 "Not Implemented"
+   502 "Bad Gateway"
+   503 "Service Unavailable"
+   504 "Gateway Timeout"
+   505 "HTTP Version Not Supported"})
+
+;; The reason phrase for `status`: the standard one, else a neutral word — never "OK"
+;; for a status that is not.
+(defn- http-reason (status)
+  (/get *http-status-text* status "Status"))
 
 ;; ---- responses: the Response ability ----------------------------------------
 ;;
@@ -289,7 +420,7 @@ bytes can never disagree."
     ["HTTP/1.0 "
       (str status)
       " "
-      (/get *http-status-text* status "OK")
+      (http-reason status)
       "\r\n"
       (render-headers headers)
       "\r\n"
@@ -309,7 +440,7 @@ whose body is written incrementally over the socket afterwards (see
   ["HTTP/1.0 "
     (str status)
     " "
-    (/get *http-status-text* status "OK")
+    (http-reason status)
     "\r\n"
     (render-headers headers)
     "\r\n"])
@@ -351,9 +482,11 @@ rather than closed after a body. An identity check on the record, not a key snif
 (sig mime-type (string -> any))
 
 (defn serve-file (path)
-  "A 200 response serving the file at `path` with a guessed Content-Type, or 404 if it is missing."
+  "A 200 response serving the file at `path` with a guessed Content-Type, or 404 if it is
+missing. The body is the file's raw bytes, so an image or an archive is served as-is."
+  ;; `file/slurp` decodes TEXT and raised on the first PNG — every binary file 500'd.
   (if (regular? path)
-    (response 200 {"Content-Type" (mime-type path)} (file/slurp path))
+    (response 200 {"Content-Type" (mime-type path)} (file/slurp-bytes path))
     (not-found)))
 
 ;; ---- routing ----------------------------------------------------------------
@@ -487,11 +620,38 @@ socket is registered *passive* (no reader until the worker calls
   (tcp/set-binary c true)
   (tcp/controlling-process c (self))
   (let (raw (read-request c))
-    (if (nil? raw)
-      (tcp/close c)
-      ;; One dispatch: each response type knows how it reaches the socket, including
-      ;; whether it closes it (a `stream-response` must not — its `:stream` fn owns it).
-      (send-response (handler (parse-request raw)) c))))
+    (cond
+      (nil? raw) (tcp/close c)
+      ;; a request the server will not read: answer the refusal `read-request` built
+      (not (bytes? raw)) (send-response raw c)
+      else (http-answer c handler raw))))
+
+;; Whether nothing of `resp` can have reached the wire when its `send-response` raised:
+;; a plain `response` renders the whole exchange before its one `tcp/send`, and a value
+;; with no `Response` impl at all fails at dispatch. A `stream-response` (or a kind from
+;; outside this module) may already have written its head.
+(defn- http-unsent? (resp)
+  (or (not (record? resp)) (= (record-id resp) :http/response)))
+
+;; Run `handler` on the request and send what it returns. A handler that raises, or a
+;; response that cannot be rendered, used to kill the worker with the client still
+;; waiting and nothing sent: the client now gets a 500 and the connection closes. The
+;; error is then re-raised, so the worker still dies of it and the crash reporter still
+;; names it — the 500 is for the client, not instead of the report.
+;;
+;; One dispatch: each response type knows how it reaches the socket, including whether
+;; it closes it (a `stream-response` must not — its `:stream` fn owns it).
+(defn- http-answer (c handler raw)
+  (match (try [:ok (handler (parse-request raw))] (catch problem [:raised problem]))
+    ([:ok resp] (try
+                  (send-response resp c)
+                  (catch problem
+                    (if (http-unsent? resp)
+                      (send-response (http-refusal 500 "the response could not be sent") c)
+                      (tcp/close c))
+                    (throw problem))))
+    ([:raised problem] (send-response (http-refusal 500 "the handler raised") c)
+      (throw problem))))
 
 (defn serve (port handler)
   "Listen on 127.0.0.1:`port` and serve `handler` forever. **Blocks** (the accept loop runs in the calling process) — `(spawn (serve …))` to run it in the background. One handler process per connection (HTTP/1.0)."

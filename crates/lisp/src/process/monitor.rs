@@ -455,17 +455,47 @@ pub(crate) fn record_pending_remote(
 /// Forget a pending remote monitor — the sender-side counterpart to
 /// `drop_monitor`, called from `dist::demonitor_remote`. Identified by
 /// (target_node, watcher_pid, mref) — the same triple `record_pending_remote`
-/// stored.
-pub(crate) fn drop_pending_remote(target_node: Symbol, watcher_pid: u64, mref: u64) {
-    let mut t = crate::core::sync::lock(&PENDING_REMOTE);
-    if let Some(v) = t.get_mut(&target_node) {
-        v.retain(|p| !(p.watcher_pid == watcher_pid && p.mref == mref));
-        // Prune the emptied key so the map doesn't hold one entry per node
-        // ever monitored (this runs once per completed/dropped monitor).
-        if v.is_empty() {
-            t.remove(&target_node);
-        }
+/// stored. Returns whether the entry was there — the one-shot's claim ticket: a
+/// demonitor, the DOWN arriving, a net-split and `monitor_remote`'s unreachable
+/// fallback can race for the same entry, and only the caller that removed it may
+/// deliver a `[:down …]` for it.
+pub(crate) fn drop_pending_remote(target_node: Symbol, watcher_pid: u64, mref: u64) -> bool {
+    take_pending(
+        &mut crate::core::sync::lock(&PENDING_REMOTE),
+        target_node,
+        watcher_pid,
+        mref,
+    )
+}
+
+/// Remove one pending entry from the locked table, returning whether it was there.
+///
+/// Every `[:down …]` for a remote monitor is delivered **while the caller still holds
+/// the `PENDING_REMOTE` lock it claimed the entry under** — the remote twin of the
+/// local path's `fire_down_held` (KI-213). Claim and push are then one step to a
+/// `demonitor` on another thread: either it removes the entry first and no down is
+/// ever pushed, or the down is already queued by the time it finds nothing to remove,
+/// so a `(receive ([:down ^m …]) (after 0))` flush right after `demonitor` sees it.
+/// Safe to hold: `deliver` takes only the watcher's mailbox lock and a scheduler
+/// queue, and nothing takes those and then `PENDING_REMOTE`.
+fn take_pending(
+    table: &mut HashMap<Symbol, Vec<PendingRemote>>,
+    target_node: Symbol,
+    watcher_pid: u64,
+    mref: u64,
+) -> bool {
+    let Some(v) = table.get_mut(&target_node) else {
+        return false;
+    };
+    let before = v.len();
+    v.retain(|p| !(p.watcher_pid == watcher_pid && p.mref == mref));
+    let removed = v.len() != before;
+    // Prune the emptied key so the map doesn't hold one entry per node
+    // ever monitored (this runs once per completed/dropped monitor).
+    if v.is_empty() {
+        table.remove(&target_node);
     }
+    removed
 }
 
 /// An inbound `Frame::Down` from the authenticated `peer`: a monitor we asked
@@ -475,6 +505,11 @@ pub(crate) fn drop_pending_remote(target_node: Symbol, watcher_pid: u64, mref: u
 /// `[:down mref … :noconnection]` on a later node-down, which a `gen/call`-style
 /// receive pinned on that ref can mis-route (KI-96) — then deliver the
 /// `[:down mref pid reason]` the watcher is waiting on.
+///
+/// **Only if the entry was still pending.** A DOWN already in flight when the watcher
+/// `demonitor`ed must not land after the demonitor returned — the guarantee the local
+/// path makes (KI-213) — and one whose entry a net-split already resolved has had its
+/// `:noconnection` delivered.
 pub(crate) fn deliver_remote_down(
     peer: Symbol,
     watcher_pid: u64,
@@ -482,7 +517,11 @@ pub(crate) fn deliver_remote_down(
     target_pid: u64,
     reason: Message,
 ) {
-    drop_pending_remote(peer, watcher_pid, mref);
+    let mut table = crate::core::sync::lock(&PENDING_REMOTE);
+    if !take_pending(&mut table, peer, watcher_pid, mref) {
+        return;
+    }
+    // Pushed under the claim — see `take_pending`.
     deliver(
         watcher_pid,
         down_message(
@@ -532,41 +571,51 @@ pub(crate) fn demonitor_remote_fanout(mref: u64) {
 /// there. Kept as separate functions on purpose (the down vs. exit semantics
 /// differ), not forced behind shared scaffolding.
 pub(crate) fn handle_node_down(node: Symbol) {
-    let pendings = crate::core::sync::lock(&PENDING_REMOTE)
-        .remove(&node)
-        .unwrap_or_default();
-    for p in pendings {
-        deliver(
-            p.watcher_pid,
-            down_message(
-                Message::Pid {
-                    node: p.target_node,
-                    id: p.target_pid,
-                },
-                p.mref,
-                Message::Keyword(value::intern(pk::NOCONNECTION)),
-            ),
-        );
+    {
+        let mut table = crate::core::sync::lock(&PENDING_REMOTE);
+        // Pushed under the claim — see `take_pending`.
+        for p in table.remove(&node).unwrap_or_default() {
+            deliver(
+                p.watcher_pid,
+                noconnection_down(p.target_node, p.target_pid, p.mref),
+            );
+        }
     }
     drop_monitor(|w| matches!(*w, Watcher::Remote { node: n, .. } if n == node));
 }
 
-/// Fire `:noconnection` to one watcher (the link isn't up, so we can't ask
-/// the peer to monitor for us). Shared with `dist::monitor_remote`. Uses the
-/// same `down_message` shape as a real DOWN so the watcher's `receive` clause
-/// doesn't have to special-case anything.
-pub(crate) fn fire_noconnection(target_node: Symbol, target_pid: u64, watcher_pid: u64, mref: u64) {
-    deliver(
-        watcher_pid,
-        down_message(
-            Message::Pid {
-                node: target_node,
-                id: target_pid,
-            },
-            mref,
-            Message::Keyword(value::intern(pk::NOCONNECTION)),
-        ),
-    );
+/// Fire `:noconnection` to one watcher whose monitor request could not reach the peer
+/// (the link isn't up, so we can't ask it to monitor for us) — **if the monitor is still
+/// pending**. `dist::monitor_remote` records the entry before sending, so a link that
+/// drops in between has already fired this down through [`handle_node_down`]; firing it
+/// here too was a duplicate `[:down mref … :noconnection]`. Uses the same `down_message`
+/// shape as a real DOWN so the watcher's `receive` clause doesn't have to special-case
+/// anything.
+pub(crate) fn fire_noconnection_if_pending(
+    target_node: Symbol,
+    target_pid: u64,
+    watcher_pid: u64,
+    mref: u64,
+) {
+    let mut table = crate::core::sync::lock(&PENDING_REMOTE);
+    if take_pending(&mut table, target_node, watcher_pid, mref) {
+        // Pushed under the claim — see `take_pending`.
+        deliver(
+            watcher_pid,
+            noconnection_down(target_node, target_pid, mref),
+        );
+    }
+}
+
+fn noconnection_down(target_node: Symbol, target_pid: u64, mref: u64) -> Message {
+    down_message(
+        Message::Pid {
+            node: target_node,
+            id: target_pid,
+        },
+        mref,
+        Message::Keyword(value::intern(pk::NOCONNECTION)),
+    )
 }
 
 /// KI-183: when a dying process's `[:down …]` fires, has it already released the monitors

@@ -100,6 +100,20 @@
       (assert= (get ev :event) "tick")
       (assert= (get ev :data) "a\nb"))))
 
+(describe "sse — frame cannot be made to inject a field or an event"
+  ;; `frame` split data on `\n` only and spliced the event type verbatim, so a bare
+  ;; `\r` in data ended the data line on the client, and a newline in the event type
+  ;; started a field of the caller's choosing.
+  (test "a CR in data is a line end, not a smuggled field (parsed by our own reader)"
+    (let ([events _] (sse/feed ["" ""] (sse/frame "ok\r\rdata: injected")))
+      (assert= 1 (count events))
+      (assert= "ok\n\ndata: injected" (get (first events) :data))))
+  (test "every terminator is split: \\r\\n, \\r and \\n"
+    (assert= (sse/frame "a\r\nb\rc\nd") "data: a\ndata: b\ndata: c\ndata: d\n\n"))
+  (test "CR or LF in the event type raises"
+    (assert-error (sse/frame "x" "a\ndata: evil"))
+    (assert-error (sse/frame "x" "a\revil"))))
+
 (describe "with-events — merges [:sse …] into ui-run input"
   (test "a queued sse message is returned by :poll before the underlying display"
     (let (fake {:poll (fn (ms) :keyboard) :size (fn () [80 24])}

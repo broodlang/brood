@@ -29,6 +29,17 @@ use unicode_width::UnicodeWidthStr;
 /// The default tab width: a tab stop every 8 columns (Emacs's `tab-width`).
 pub const TAB_WIDTH: usize = 8;
 
+/// The widest tab stop the layout functions accept. A tab expands to up to this many
+/// spaces, so the cap is what bounds `expand_tabs`'s output to a small multiple of its
+/// input — uncapped, `(string/expand-tabs "\t" 0 100000000000)` asked the allocator for
+/// 400 GB and aborted the runtime.
+pub const MAX_TAB_WIDTH: usize = 1024;
+
+/// The largest starting column the layout functions accept. Columns are summed as the
+/// clusters advance, so the cap keeps that sum far from overflow: from `i64::MAX` a
+/// three-cluster string's width wrapped to `i64::MIN`.
+pub const MAX_START_COLUMN: usize = 1 << 32;
+
 /// The cells a tab at column `col` spans to reach the next stop of `tab_width`.
 fn tab_span(col: usize, tab_width: usize) -> usize {
     let tab_width = tab_width.max(1);

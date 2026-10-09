@@ -8,8 +8,11 @@
 
 use std::collections::HashMap;
 
-use brood::syntax::atom::{classify, is_delimiter, AtomKind};
+use brood::core::heap::Heap;
+use brood::core::value::{symbol_name, Value};
 use brood::syntax::cst::Node;
+use brood::syntax::printer::symbol_needs_bars;
+use brood::syntax::reader;
 use brood::syntax::scope::ScopeTree;
 use lsp_types::{Range, TextEdit, Uri, WorkspaceEdit};
 
@@ -71,14 +74,23 @@ pub fn rename(
     })
 }
 
-/// Whether `name` is a legal plain Brood symbol: non-empty, no delimiter or
-/// whitespace characters, and not something the reader would classify as a
-/// number / keyword / `nil` / `true` / `false`. Shared with the cross-file
-/// rename path ([`workspace`](crate::workspace)).
+/// Whether `name`, written bare, reads back as exactly the symbol `name` — the only
+/// spelling a rename may write, since every edit splices the bare text in. The
+/// printer's own round-trip predicate ([`symbol_needs_bars`]) refuses what it would
+/// bar-quote (a delimiter, a control character, a dispatching `#`/`^` first
+/// character — `^foo` reads as `(%pin foo)`, a different program — a number,
+/// `nil`/`true`/`false`, a keyword); the read-back then confirms it against the
+/// reader itself, so no spelling the two disagree on can slip through. Shared with
+/// the cross-file rename path ([`workspace`](crate::workspace)).
 pub(crate) fn is_valid_symbol(name: &str) -> bool {
-    !name.is_empty()
-        && !name.chars().any(|c| c.is_whitespace() || is_delimiter(c))
-        && matches!(classify(name), AtomKind::Symbol)
+    if symbol_needs_bars(name, false) {
+        return false;
+    }
+    let mut heap = Heap::new();
+    match reader::read_one_complete(&mut heap, name) {
+        Ok(Value::Sym(symbol)) => symbol_name(symbol) == name,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -111,6 +123,23 @@ mod tests {
         assert_eq!(rename_at("(defn f (x) x)", "defn f", "(bad)"), None);
         assert_eq!(rename_at("(defn f (x) x)", "defn f", "42"), None);
         assert_eq!(rename_at("(defn f (x) x)", "defn f", ":kw"), None);
+    }
+
+    #[test]
+    fn rejects_a_name_that_does_not_read_back_as_itself() {
+        // `^foo` reads as `(%pin foo)` — a rename to it changes the program's meaning;
+        // `#foo` is a dispatch error, `|foo` an unterminated bar symbol, and a
+        // control character is refused in a bare token.
+        for bad in [
+            "^foo", "#foo", "|foo", "a\u{1}b", "a\u{7f}", "nil", "1/2", ".",
+        ] {
+            assert_eq!(rename_at("(defn f (x) x)", "defn f", bad), None, "{bad:?}");
+            assert!(!is_valid_symbol(bad), "{bad:?}");
+        }
+        for good in ["g", "a^b", "a#", "string/join", "set!", "->x", "+"] {
+            assert!(is_valid_symbol(good), "{good:?}");
+        }
+        assert_eq!(rename_at("(defn f (x) x)", "defn f", "a^b"), Some(1));
     }
 
     #[test]

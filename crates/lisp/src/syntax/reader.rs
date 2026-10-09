@@ -16,9 +16,15 @@ use crate::error::{LispError, Pos};
 use crate::syntax::atom::{self, AtomKind};
 use crate::syntax::scanner::{Scanner, StringScan};
 
-/// Read every form in `src`.
+// A first-line `#!…` shebang belongs to a source FILE, so the whole-source readers
+// (`read_all`, `read_all_positioned`, and `read_one`, which reads a file's leading
+// header) step past it; `read_one_complete` — a datum read, `reflect/read-string` —
+// does not, and reports `#!` as the dispatch error it is (`scanner::shebang_len`).
+
+/// Read every form in `src` (a whole source text: a first-line shebang is skipped).
 pub fn read_all(heap: &mut Heap, src: &str) -> Result<Vec<Value>, LispError> {
     let mut parser = Parser::new(heap, src);
+    parser.s.skip_shebang();
     let mut forms = Vec::new();
     loop {
         parser.s.skip_trivia();
@@ -35,6 +41,7 @@ pub fn read_all(heap: &mut Heap, src: &str) -> Result<Vec<Value>, LispError> {
 /// reported against the enclosing top-level form (see `docs/tooling.md`).
 pub fn read_all_positioned(heap: &mut Heap, src: &str) -> Result<Vec<(Value, Pos)>, LispError> {
     let mut parser = Parser::new(heap, src);
+    parser.s.skip_shebang();
     let mut forms = Vec::new();
     loop {
         parser.s.skip_trivia();
@@ -49,9 +56,11 @@ pub fn read_all_positioned(heap: &mut Heap, src: &str) -> Result<Vec<(Value, Pos
 }
 
 /// Read exactly one form, ignoring any trailing input. For internal callers that
-/// pass a known single form (macro/type tests, the printer round-trip).
+/// pass a known single form (macro/type tests, the printer round-trip), and for
+/// `reflect/read-first`, which reads a FILE's leading header — so it skips a shebang.
 pub fn read_one(heap: &mut Heap, src: &str) -> Result<Value, LispError> {
     let mut parser = Parser::new(heap, src);
+    parser.s.skip_shebang();
     parser.s.skip_trivia();
     if parser.s.at_end() {
         return Err(parser.err_incomplete("unexpected end of input"));

@@ -37,6 +37,31 @@
 
 (defmodule linmap-soundness-test (:use test))
 
+;; 5. (2026-10-08) A SINK fed something other than the accumulator. The next iteration's
+;; accumulator must be the table, but the proof admitted any value at the self-call's
+;; accumulator slot — a fresh `{}`, a global, another local — so the rewritten body ran
+;; `table-add` on a plain map ("expected table, got map"). A fold literal's return is the
+;; same sink. These must decline the rewrite and give the source's answer.
+(def lm-reset-base {:q 1})
+(defn lm-reset (xs acc)
+  (if (empty? xs)
+    acc
+    (let (x (first xs))
+      (if (= x :reset)
+        (lm-reset (rest xs) {})
+        (lm-reset (rest xs) (assoc acc x (+ (get acc x 0) 1)))))))
+(defn lm-swap (xs acc other)
+  (if (empty? xs)
+    acc
+    (let (x (first xs))
+      (if (= x :swap)
+        (lm-swap (rest xs) other other)
+        (lm-swap (rest xs) (assoc acc x (+ (get acc x 0) 1)) other)))))
+(defn lm-fold-reset (xs)
+  (fold xs {} (fn (acc x) (if (= x :reset) {} (assoc acc x (+ (get acc x 0) 1))))))
+(defn lm-fold-global (xs)
+  (fold xs {} (fn (acc x) (if (= x :reset) lm-reset-base (assoc acc x (+ (get acc x 0) 1))))))
+
 ;; Base case returns a *derived scalar*, not the accumulator.
 (defn lm-count-uniq (xs acc)
   (if (empty? xs)
@@ -218,6 +243,13 @@
     ;; `seq/frequencies` is this shape now.
     (assert= {:a 3 :b 1 :c 1} (seq/frequencies '(:a :b :a :c :a)))
     (assert= {} (seq/frequencies nil)))
+
+  (test "an accumulator slot fed a value other than the accumulator declines the rewrite"
+    (assert= {:a 2} (lm-reset [:a :b :reset :a :a] {}))
+    (assert= {:z 5 :a 1 :b 1} (lm-swap [:a :swap :a :b] {} {:z 5}))
+    (assert= {:a 1} (lm-fold-reset [:a :b :reset :a]))
+    (assert= {:q 1 :a 1} (lm-fold-global [:a :reset :a]))
+    (assert= {:q 1} lm-reset-base))
 
   (test "quoted data is left alone by the source rewrite"
     (let (out (lm-quoted '(:a) {}))

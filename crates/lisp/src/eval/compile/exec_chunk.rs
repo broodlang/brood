@@ -971,8 +971,18 @@ pub(crate) fn exec_chunk(
                 // re-arm and keep looping.
                 let ep = heap.global_epoch();
                 if ep != *entry_epoch {
+                    // A fresh frame (`SELF_UNCHECKED_EPOCH`) checks once too: it may have
+                    // been entered through an alias after `dbg_name` was rebound. The memo
+                    // answers without a lookup when this arm was proven at this epoch.
+                    let fresh = *entry_epoch == super::SELF_UNCHECKED_EPOCH;
                     *entry_epoch = ep;
-                    if let Some(name) = arm.dbg_name {
+                    let stamp = super::self_binding_stamp(heap, ep);
+                    let proven = fresh
+                        && arm
+                            .self_bound_stamp
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                            == stamp;
+                    if let (false, Some(name)) = (proven, arm.dbg_name) {
                         let env = heap.read_root_env(genv);
                         // ADR-366: the epoch may also have moved because a miss IN THIS LOOP
                         // loaded a module, which marked this arm stale and dropped its cache
@@ -1028,6 +1038,8 @@ pub(crate) fn exec_chunk(
                                 Err(e) => return Err(e),
                             });
                         }
+                        arm.self_bound_stamp
+                            .store(stamp, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
                 // Reset frame in place (same as the old outer-loop SelfTail handler).
@@ -1256,6 +1268,12 @@ pub(crate) fn attach_vm_trace(e: &mut LispError, cur_arm: &CompiledArm, frames: 
             e.pos = None;
             e.file = None;
         }
+    } else if e.file.is_none() && e.pos.is_some_and(|ep| chunk_owns(cur_arm, ep)) {
+        // The running arm's own instruction tagged the error (`tag_pos` sets a position
+        // only): it happened in THIS arm's source file. Left unset, the file runner filled
+        // in the user's file — a `std/math.blsp` line reported under the script's name,
+        // with no excerpt — where the tree-walker (`or_form_pos`) names the right file.
+        e.file = cur_arm.src_file.as_deref().map(str::to_string);
     }
     attach_vm_trace_callers(e, frames);
 }

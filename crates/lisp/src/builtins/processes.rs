@@ -174,7 +174,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::range(0, 2),
         Sig::new(vec![any, any], any),
         &["&optional", "pid", "opts"],
-        "Read, arm, or clear a subscription to the kernel system monitor — runtime events pushed to subscriber processes as [:system kind subject-pid detail] mailbox messages (the observability event stream's kernel sources). Kinds: :gc {:pause-us :collections :live} (a collection of subject's heap finished), :spawn (detail = parent pid), :exit (detail = the structured exit reason monitors see; :exit-abnormal selects only CRASHES — a reason other than :normal, :kill/:killed, :shutdown or [:shutdown x], the deliberate exits a supervisor produces — filtered before any message is built), :deopt (detail = the JIT arm's fn name, or nil). ONE SUBSCRIPTION PER SUBSCRIBER PID (ADR-305): no args reads the CALLER's config map (nil if none); (proc/system-monitor :all) lists every subscription; (proc/system-monitor nil) clears the caller's and (proc/system-monitor nil pid) clears pid's; (proc/system-monitor pid) arms every event at pid; (proc/system-monitor pid {:gc true :gc-min-pause-us 1000 :exit-abnormal true}) selects exactly the truthy keys (:gc-min-pause-us = report only pauses that long). Arming/clearing returns that pid's PREVIOUS config. Events about a subscriber itself are never sent to it (no feedback loops), and a subscriber's death drops its subscription. Policy lives in telemetry/watch-runtime (re-emits as telemetry events) and crash-report (the default crash reporter).",
+        "Read, arm, or clear a subscription to the kernel system monitor — runtime events pushed to subscriber processes as [:system kind subject-pid detail] mailbox messages (the observability event stream's kernel sources). Kinds: :gc {:pause-us :collections :live} (a collection of subject's heap finished), :spawn (detail = parent pid), :exit (detail = the structured exit reason monitors see; :exit-abnormal selects only CRASHES — a reason other than :normal, :kill/:killed, :shutdown or [:shutdown x], the deliberate exits a supervisor produces — filtered before any message is built), :deopt (detail = the JIT arm's fn name, or nil). ONE SUBSCRIPTION PER SUBSCRIBER PID (ADR-305): no args reads the CALLER's config map (nil if none); (proc/system-monitor :all) lists every subscription; (proc/system-monitor nil) clears the caller's and (proc/system-monitor nil pid) clears pid's; (proc/system-monitor pid) arms every event at pid (raising if pid is not a live process);(proc/system-monitor pid {:gc true :gc-min-pause-us 1000 :exit-abnormal true}) selects exactly the truthy keys (:gc-min-pause-us = report only pauses that long). Arming/clearing returns that pid's PREVIOUS config. Events about a subscriber itself are never sent to it (no feedback loops), and a subscriber's death drops its subscription. Policy lives in telemetry/watch-runtime (re-emits as telemetry events) and crash-report (the default crash reporter).",
         system_monitor);
     primitives.def(
         "%spawn-count",
@@ -221,7 +221,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         // `:name` lookups in `send`/`node-name` use keywords, so the sig must too.
         Sig::new(vec![sym.union(kw), pid_ty], pid_ty),
         &["name", "pid"],
-        "Bind a local name so peers can address this process via {:name name :node this-node}. Returns the pid.",
+        "Bind a local name so peers can address this process via {:name name :node this-node}. Returns the pid. Replaces any previous holder of the name. A pid that has already exited binds nothing — the same outcome as registering it and the process exiting, which releases its names.",
         register_name);
     primitives.def(
         "proc/whereis",
@@ -615,12 +615,18 @@ pub(super) fn ref_deactivate(args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
 
 /// `(proc/register name pid)` — bind a local name so peers can address this process by
 /// `{:name name :node this-node}` before they hold its pid. Returns the pid.
+///
+/// Replaces any previous holder. A pid that is no longer alive binds nothing (see
+/// `dist::Registration::DeadPid` for why that is not an error).
 pub(super) fn register_name(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let name = expect_node_name(heap, "register", arg(args, 0))?;
     match arg(args, 1) {
         Value::Pid { node, id } if crate::dist::is_local(node) => {
-            crate::dist::register(name, id);
-            Ok(Value::pid(node, id))
+            match crate::dist::register(name, id) {
+                crate::dist::Registration::Bound | crate::dist::Registration::DeadPid => {
+                    Ok(Value::pid(node, id))
+                }
+            }
         }
         Value::Pid { .. } => Err(LispError::type_err(
             "register: can only register a local pid",
@@ -842,7 +848,12 @@ pub(super) fn system_monitor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
                     }
                 }
             }
-            sysmon::install(m)
+            sysmon::install(m).map_err(|sysmon::DeadSubscriber| {
+                LispError::runtime(format!(
+                    "proc/system-monitor: pid {id} is not a live process — a subscription \
+                     on it would never be delivered or removed"
+                ))
+            })?
         }
         other => {
             return Err(LispError::wrong_type(

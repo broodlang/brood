@@ -1603,23 +1603,37 @@ pub(super) fn display_width(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
 /// The optional `start-col` and `tab-width` tail of the cell-layout primitives
 /// (`string/display-width`, `string/width->index`, `string/expand-tabs`), starting at
 /// argument `at`: each an int when supplied, else 0 and `TAB_WIDTH`. A negative
-/// column is 0; a tab width below 1 is 1 (a stop every column).
+/// column is 0; a tab width below 1 is 1 (a stop every column). A column past
+/// `MAX_START_COLUMN` or a tab width past `MAX_TAB_WIDTH` is an error: the first
+/// overflowed the column sum, the second made `string/expand-tabs` allocate without
+/// bound and abort the runtime.
 pub(super) fn tab_layout(
     heap: &Heap,
     who: &str,
     args: &[Value],
     at: usize,
 ) -> Result<(usize, usize), LispError> {
+    use crate::host::text_width::{MAX_START_COLUMN, MAX_TAB_WIDTH, TAB_WIDTH};
     let start_col = if args.len() > at {
         expect_int(heap, who, arg(args, at))?.max(0) as usize
     } else {
         0
     };
+    if start_col > MAX_START_COLUMN {
+        return Err(LispError::runtime(format!(
+            "{who}: start-col must be at most {MAX_START_COLUMN}, got {start_col}"
+        )));
+    }
     let tab_width = if args.len() > at + 1 {
         expect_int(heap, who, arg(args, at + 1))?.max(1) as usize
     } else {
-        crate::host::text_width::TAB_WIDTH
+        TAB_WIDTH
     };
+    if tab_width > MAX_TAB_WIDTH {
+        return Err(LispError::runtime(format!(
+            "{who}: tab-width must be at most {MAX_TAB_WIDTH}, got {tab_width}"
+        )));
+    }
     Ok((start_col, tab_width))
 }
 

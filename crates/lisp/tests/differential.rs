@@ -254,6 +254,25 @@ const CORPUS: &[&str] = &[
     "(defn dz (a b) (/ a b)) (dz 1 0)",            // Prim2 fallback (Div) → div-by-zero
     "(defn add1 (x) (+ x 1)) (def + (fn (a b) (* a b))) (add1 5)", // redefine + → guard fallback
     "(defn cz (a b) (cons a b)) (cz 1 (list 2 3))",                // Prim2 Cons inline
+    // 2026-10-08 review: a `let` binding after a closure is not visible to it (the
+    // tree-walker bound a `let` into one frame searched by name), …
+    "(let (x 1 f (fn () x) x 2) (f))",
+    "(defn h (x) (let (f (fn () x) x 99) (f))) (h 5)",
+    "(defn lg () (let (f (fn () (count [1])) count 5) [(f) count])) (lg)",
+    // … a self-tail loop called through an alias after its name was rebound hands its
+    // tail call to the new binding (the VM looped on the old body; native too), …
+    "(defn cnt (n acc) (if (= n 0) acc (cnt (- n 1) (+ acc 1)))) \
+     (map (range 0 300) (fn (_) (cnt 2000 0))) \
+     (def old-cnt cnt) (def cnt (fn (n acc) [:new n acc])) \
+     [(old-cnt 5 0) (old-cnt 3000 0)]",
+    // … an accumulator slot fed a fresh map declines the linear-map rewrite, …
+    "(defn tally (xs acc) (if (empty? xs) acc (let (x (first xs)) \
+       (if (= x :reset) (tally (rest xs) {}) \
+         (tally (rest xs) (assoc acc x (+ (get acc x 0) 1))))))) \
+     (tally [:a :b :reset :a :a] {})",
+    "(fold [:a :b :reset :a] {} (fn (acc x) (if (= x :reset) {} (assoc acc x (+ (get acc x 0) 1)))))",
+    // … and an unquote in a quasiquote's dotted tail is the evaluated tail.
+    "(def t '(3 4)) [`(1 . ~t) `(1 2 . ~5)]",
 ];
 
 #[test]

@@ -246,9 +246,24 @@ unsafe impl GlobalAlloc for Counting {
 /// Bytes currently allocated across the whole process (the wrapping sum of the
 /// per-thread shards — see `LIVE`).
 pub fn live_bytes() -> usize {
-    LIVE.iter().fold(0usize, |acc, s| {
+    let sum = LIVE.iter().fold(0usize, |acc, s| {
         acc.wrapping_add(s.0.load(Ordering::Relaxed))
-    })
+    });
+    settle_live_sum(sum, APPROX_LIVE.load(Ordering::Relaxed))
+}
+
+/// Reject a torn shard sum. The shards are read one at a time, not as a snapshot, so
+/// a block allocated on one thread and freed on another can be seen freed (its
+/// shard wrapped below zero) before it is seen allocated: the wrapping sum then reads
+/// ≈2^64 — a bogus hard-limit abort under `BROOD_MEM_LIMIT` and a garbage peak. No
+/// real live figure exceeds `isize::MAX` (no allocation can), so a sum past it is
+/// stale by construction and the previous settled figure stands in.
+fn settle_live_sum(sum: usize, previous: usize) -> usize {
+    if sum > isize::MAX as usize {
+        previous
+    } else {
+        sum
+    }
 }
 
 /// The largest [`live_bytes`] has ever been (since process start). The high-water
@@ -381,5 +396,34 @@ fn init_limits_inner(defaults: Option<(usize, usize)>) {
         .or_else(|| hard.map(|h| h / 4 * 3));
     if let Some(s) = soft {
         set_soft_limit(s);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A torn read of the shards — one seen with a free whose allocation it has not
+    /// seen yet — must not surface as a ≈2^64 live figure (a bogus hard-limit abort).
+    /// Driven through `live_bytes` itself: a shard is pushed below zero exactly as a
+    /// cross-thread free does, read, and restored.
+    #[test]
+    fn a_torn_shard_sum_does_not_read_as_a_huge_live_figure() {
+        let torn = 1usize << 40;
+        LIVE[0].0.fetch_sub(torn, Ordering::Relaxed);
+        let observed = live_bytes();
+        let peak = peak_bytes();
+        LIVE[0].0.fetch_add(torn, Ordering::Relaxed);
+        assert!(
+            observed <= isize::MAX as usize,
+            "torn sum leaked out: {observed}"
+        );
+        assert!(
+            peak <= isize::MAX as usize,
+            "torn sum reached the peak: {peak}"
+        );
+        // A sane sum passes through untouched; a torn one keeps the previous figure.
+        assert_eq!(settle_live_sum(4096, 7), 4096);
+        assert_eq!(settle_live_sum(usize::MAX - 10, 7), 7);
     }
 }

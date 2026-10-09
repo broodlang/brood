@@ -224,24 +224,46 @@ pub(crate) fn record_remote_link(local_pid: u64, node: Symbol, remote_pid: u64) 
     true
 }
 
-/// Drop the cross-node link `local_pid ↔ (node, remote_pid)` (best-effort).
-pub(crate) fn drop_remote_link(local_pid: u64, node: Symbol, remote_pid: u64) {
-    if let Some(v) = lock(&REMOTE_LINKS).get_mut(&local_pid) {
-        v.retain(|&(n, p)| !(n == node && p == remote_pid));
+/// Drop the cross-node link `local_pid ↔ (node, remote_pid)`, returning whether it
+/// was there. The bool is what makes every resolution of a remote link happen ONCE:
+/// an unlink, the peer's link exit, a net-split and `link_remote`'s unreachable
+/// fallback can each race for the same entry, and only the one that removes it may
+/// act on it. An emptied bin is removed, so the table holds no key per pid that ever
+/// linked across a node.
+pub(crate) fn drop_remote_link(local_pid: u64, node: Symbol, remote_pid: u64) -> bool {
+    let mut table = lock(&REMOTE_LINKS);
+    let Some(peers) = table.get_mut(&local_pid) else {
+        return false;
+    };
+    let before = peers.len();
+    peers.retain(|&(n, p)| !(n == node && p == remote_pid));
+    let removed = peers.len() != before;
+    if peers.is_empty() {
+        table.remove(&local_pid);
     }
+    removed
 }
 
 /// Deliver a **remote link death** to local `to_pid`: the linked process
 /// `from_pid` on `from_node` exited with `reason`. Drops the reverse remote-link
 /// entry, then delivers via the trap-or-propagate path (the `[:EXIT]` message
-/// carries the *remote* pid). Inbound `Frame::Exit { link: true }`.
+/// carries the *remote* pid). Inbound `Frame::Exit { link: true }`, and
+/// `dist::link_remote`'s unreachable-node fallback.
+///
+/// **Only if the entry was still there.** A link exit already in flight when the
+/// local process `unlink`ed must not arrive after the unlink returned (the local
+/// guarantee, KI-213), and a net-split that already fired `:noconnection` for this
+/// link has resolved it — firing again here was the duplicate `[:EXIT … :noconnection]`
+/// a link dropped during `link_remote`'s setup produced.
 pub(crate) fn deliver_remote_link_exit(
     to_pid: u64,
     from_node: Symbol,
     from_pid: u64,
     reason: Message,
 ) {
-    drop_remote_link(to_pid, from_node, from_pid);
+    if !drop_remote_link(to_pid, from_node, from_pid) {
+        return;
+    }
     deliver_exit_to(
         to_pid,
         Message::Pid {
@@ -278,10 +300,45 @@ pub(crate) fn handle_node_down(node: Symbol) {
             }
             peers.retain(|&(n, _)| n != node);
         }
+        // A pid whose only remote peers were on `node` keeps no empty bin.
+        t.retain(|_, peers| !peers.is_empty());
         hits
     };
     let reason = Message::Keyword(value::intern(pk::NOCONNECTION));
     for (local, remote) in affected {
         deliver_exit_to(local, Message::Pid { node, id: remote }, reason.clone());
+    }
+}
+
+#[cfg(test)]
+mod remote_link_tests {
+    use super::*;
+
+    /// A pid whose remote links are all resolved — by an unlink or by a net-split —
+    /// keeps no empty bin in `REMOTE_LINKS`: the table must not grow one key per pid
+    /// that ever linked across a node.
+    #[test]
+    fn resolved_remote_links_leave_no_empty_bins() {
+        let me = self_pid();
+        set_trap_exit(me, true);
+        let node = value::intern("bins@test");
+
+        assert!(record_remote_link(me, node, 1));
+        assert!(drop_remote_link(me, node, 1), "the link was there to drop");
+        assert!(
+            !lock(&REMOTE_LINKS).contains_key(&me),
+            "an unlink left an empty bin"
+        );
+        assert!(
+            !drop_remote_link(me, node, 1),
+            "a second drop finds nothing"
+        );
+
+        assert!(record_remote_link(me, node, 2));
+        handle_node_down(node);
+        assert!(
+            !lock(&REMOTE_LINKS).contains_key(&me),
+            "a net-split left an empty bin"
+        );
     }
 }

@@ -531,7 +531,19 @@ land in a later slice."
 ;; own project.blsp is read (post-clone) for its transitive deps.
 
 (defn- package-deps-dir (root) (path/join root "_deps"))
-(defn- package-git-target (root nm) (path/join (package-deps-dir root) (->string nm)))
+;; Every fetched dep's directory is computed here, and every one of them may be deleted
+;; and re-created, so the name is re-checked at the point it becomes a path: a name that
+;; slipped past an entry point (a lock, a registry, a caller of a public verb) must not
+;; aim `%rm-rf` outside `_deps/`.
+(defn- package-git-target (root nm)
+  (let (name-str (->string nm))
+    (when (not (project/valid-dep-name? name-str))
+      (error "package: refusing dependency name "
+        (pr-str name-str)
+        " — it is not a single plain directory name, so _deps/"
+        name-str
+        " would point outside _deps/"))
+    (path/join (package-deps-dir root) name-str)))
 
 ;; The commit to pin: reuse the lock's when it still matches the manifest's
 ;; url+ref (avoids a network round-trip); otherwise resolve via ls-remote.
@@ -812,6 +824,36 @@ an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and 
 ;; model — Cargo's index, npm's packument — so resolving N packages is N requests, not
 ;; N×versions). Names cross as symbols; the URL wants the string, so `(->string nm)`.
 
+;; A dependency name the REGISTRY serves becomes `_deps/<name>/` exactly like one the user
+;; typed, but nobody reviewed it: a compromised registry answering `"../.."` must not get
+;; that far. Refused at the boundary, naming the release that carried it.
+(defn- registry-dep-name (package-name dep-name)
+  (when (not (project/valid-dep-name? dep-name))
+    (error "package: the registry lists a dependency of "
+      (->string package-name)
+      " named "
+      (pr-str dep-name)
+      ", which is not a plain package name — refusing it"))
+  (symbol dep-name))
+
+;; A registry-supplied external URL must be http(s). Unlike a `:tarball` MANIFEST dep (where
+;; the user typed the URL and `file://` is a legitimate offline/local source), this URL comes
+;; from the registry's JSON — a compromised or MITM'd (plain-http) registry must NOT be able to
+;; point the client at a `file://` (or other) local resource to read + extract (the sha256 pin
+;; is no defence, since the same party supplies the checksum). Every path that downloads a
+;; release's `:source_url` goes through this check (ADR-211).
+(defn- registry-check-source-url (nm version source-url)
+  (when (and (not (string/starts-with? source-url "https://"))
+          (not (string/starts-with? source-url "http://")))
+    (error "package: "
+      (->string nm)
+      " "
+      version
+      " declares a non-http(s) source URL — refusing (a registry release's external bytes must"
+      " come from http(s), got: "
+      source-url
+      ")")))
+
 (defn- registry-releases-url (base nm)
   (str base "/api/v1/packages/" (->string nm) "/releases"))
 
@@ -829,7 +871,7 @@ as having no versions rather than raising mid-search); any other error raises."
            ;; unconstrained, so this stays backward-compatible with old releases.
            :brood (get release :brood)
            :dependencies (map (or (get release :dependencies) nil)
-                           (fn (d) [(symbol (get d :name)) (get d :version)]))})))
+                           (fn (d) [(registry-dep-name nm (get d :name)) (get d :version)]))})))
     ([:error 404 _message] nil)
     ([:error _status message] (error "package: listing releases of "
                                 (->string nm)
@@ -922,22 +964,7 @@ TOFU-pinned signing key, nil for an unsigned package)."
   ;; EITHER WAY the sha256 is verified before anything is extracted — the registry is never
   ;; trusted for the bytes, so an external URL is exactly as safe as a hosted one.
   (let (external (and source-url (not (= source-url ""))))
-    ;; A registry-supplied external URL must be http(s). Unlike a `:tarball` MANIFEST dep (where
-    ;; the user typed the URL and `file://` is a legitimate offline/local source), this URL comes
-    ;; from the registry's JSON — a compromised or MITM'd (plain-http) registry must NOT be able to
-    ;; point the client at a `file://` (or other) local resource to read + extract (the sha256 pin
-    ;; is no defence, since the same party supplies the checksum). Refuse it (ADR-211).
-    (when (and external
-            (not (string/starts-with? source-url "https://"))
-            (not (string/starts-with? source-url "http://")))
-      (error "package: "
-        (->string nm)
-        " "
-        version
-        " declares a non-http(s) source URL — refusing (a registry release's external bytes must"
-        " come from http(s), got: "
-        source-url
-        ")"))
+    (when external (registry-check-source-url nm version source-url))
     (let (bytes (if external
                   (package-fetch-bytes source-url)
                   (registry-download-hosted base nm version))
@@ -1060,6 +1087,11 @@ sha256 pin still holds."
   (let (base (registry-base-for nil)
         name-sym (if (symbol? nm) nm (symbol nm))
         name-str (if (string? nm) nm (->string nm))
+        _checked (when (not (project/valid-dep-name? name-str))
+                   (error "package: "
+                     (pr-str name-str)
+                     " is not a plain package name — refusing to install it into "
+                     dest-dir))
         version (registry-latest-version name-sym))
     (when (nil? version)
       (error "package: "
@@ -1070,6 +1102,8 @@ sha256 pin still holds."
       ([:ok meta] (let (checksum (get meta :checksum)
                         source-url (get meta :source_url)
                         external (and source-url (not (= source-url "")))
+                        _scheme (when external
+                                  (registry-check-source-url name-str version source-url))
                         bytes (if external
                                 (package-fetch-bytes source-url)
                                 (registry-download-hosted base name-sym version))
@@ -1545,21 +1579,11 @@ suspected cause of `manifest_race` losing an add on a CI runner (2026-09-24)."
 
 (defn- package-has-dep? (deps nm) (any? deps (fn (d) (= (get d :name) nm))))
 
-;; A dependency name is written VERBATIM into project.blsp (unquoted, as a
-;; symbol), so it has to be one that reads back as itself. Without this check
-;; `nest add "" :path ../x` wrote `:dependencies [[ :path "../x"]]` — a manifest
-;; that no longer parses — and every later `nest` command in that project failed
-;; with an internal parse error until the file was repaired by hand. Any name
-;; containing a space, quote, bracket or paren did the same.
-;;
-;; The round-trip IS the property we need: whatever survives `reflect/read-first`
-;; unchanged is safe to write back out. That also correctly rejects a numeric name
-;; ("5" reads as an int, not a symbol) without a hand-maintained character list.
-(defn- package-valid-dep-name? (nm)
-  (and (string? nm)
-    (not (= nm ""))
-    ;; check-allow :discarded-catch — a body / signature / name that does not parse or verify is the negative answer
-    (= (check-allow :discarded-catch (try (reflect/read-first nm) (catch _ nil))) (symbol nm))))
+;; A dependency name is written VERBATIM into project.blsp (unquoted, as a symbol) and
+;; names the `_deps/<name>/` directory, so `add` refuses one `project/valid-dep-name?`
+;; rejects. Without it `nest add "" :path ../x` wrote `:dependencies [[ :path "../x"]]` —
+;; a manifest that no longer parses — and `nest add .. …` aimed the re-fetch's delete at
+;; the project itself.
 
 ;; --- editing project.blsp safely --------------------------------------------
 ;; The manifest edit is a read-modify-write: read the source, splice an entry in or
@@ -1620,10 +1644,10 @@ suspected cause of `manifest_race` losing an add on a CI runner (2026-09-24)."
   "Add a dependency to project.blsp and re-lock. `nm` is the require-name; `spec` is `:path PATH`, `:git URL :ref REF`, `:git URL :version RANGE` (newest matching tag, ADR-209), or `:tarball URL :sha256 HEX` (strings). A :git/:tarball dep is fetched into _deps/ as part of the re-lock. Backs `nest add`."
   ;; Checked BEFORE anything is written, so a bad name can't leave a half-edited
   ;; manifest behind.
-  (when (not (package-valid-dep-name? nm))
+  (when (not (project/valid-dep-name? nm))
     (error "package: "
       (pr-str nm)
-      " is not a usable dependency name — it must be a plain symbol written verbatim into project.blsp (no spaces, quotes, brackets, parens, and not a number)"))
+      " is not a usable dependency name — it must be a plain symbol written verbatim into project.blsp (no spaces, quotes, brackets, parens, and not a number) and a single directory name under _deps/ (no `/` or `\\`, not starting with `.`, `-` or `~`)"))
   (package-in-project
     (fn (root)
       (let (dep (project/parse-dep (apply vector (cons (symbol nm) (map spec package-spec-token)))))

@@ -203,6 +203,34 @@ fn qq_seq(
     depth: u32,
     autogen: &mut AutoGen,
 ) -> LispResult {
+    // A dotted unquote tail: `` `(a b . ~t) `` reads as `(a b unquote t)` — the pair
+    // `(unquote t)` IS the cdr — so a bare `unquote` symbol second-to-last, with something
+    // before it, marks the evaluated tail. Built element by element it came out as the
+    // literal `(a b unquote t)`. `~@` there means the same tail (there is nothing to splice
+    // it into but the end). The prefix conses onto the tail, so a non-list tail makes the
+    // dotted pair the template spells: `` `(1 . ~2) `` is `(1 . 2)`.
+    if !is_vector && items.len() >= 3 {
+        let marker = items[items.len() - 2];
+        if matches!(marker.unpack(), ValueRef::Sym(s)
+            if value::symbol_is(s, kw::UNQUOTE) || value::symbol_is(s, kw::UNQUOTE_SPLICING))
+        {
+            let prefix = &items[..items.len() - 2];
+            let tail = items[items.len() - 1];
+            let prefix_has_splice = prefix
+                .iter()
+                .any(|&it| tagged(heap, it, kw::UNQUOTE_SPLICING).is_some());
+            if prefix_has_splice {
+                let built = qq_seq(heap, prefix, false, depth, autogen)?;
+                return Ok(heap.list(vec![sym("append"), built, tail]));
+            }
+            let mut out = tail;
+            for &it in prefix.iter().rev() {
+                let e = qq_elem(heap, it, depth, autogen)?;
+                out = heap.list(vec![sym("cons"), e, out]);
+            }
+            return Ok(out);
+        }
+    }
     let has_splice = items
         .iter()
         .any(|&it| tagged(heap, it, kw::UNQUOTE_SPLICING).is_some());

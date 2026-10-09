@@ -618,7 +618,7 @@ pub(crate) fn vm_run_bc(
                 return Err(e);
             }
             cur_ip = 0usize;
-            cur_entry_epoch = heap.global_epoch();
+            cur_entry_epoch = SELF_UNCHECKED_EPOCH;
             #[cfg(feature = "jit")]
             {
                 cur_back_edges = 0;
@@ -1080,7 +1080,7 @@ pub(crate) fn vm_run_bc(
                 // native `Done`/`Tail`/error is then handled by the shared arms above —
                 // identical to the old inline call-site tiering, minus the duplication.
                 cur_ip = 0;
-                cur_entry_epoch = heap.global_epoch();
+                cur_entry_epoch = SELF_UNCHECKED_EPOCH;
                 #[cfg(feature = "jit")]
                 {
                     try_jit = true;
@@ -1128,7 +1128,7 @@ pub(crate) fn vm_run_bc(
                 heap.extend_roots_to_nil(cur_base + cur_arm.nslots);
                 fill_captures(heap, &cur_arm, cur_base, cur_env);
                 cur_ip = 0;
-                cur_entry_epoch = heap.global_epoch();
+                cur_entry_epoch = SELF_UNCHECKED_EPOCH;
                 #[cfg(feature = "jit")]
                 {
                     try_jit = true;
@@ -1254,7 +1254,7 @@ pub(crate) fn vm_run_bc(
                 }
                 cur_arm = arm;
                 cur_ip = 0;
-                cur_entry_epoch = heap.global_epoch();
+                cur_entry_epoch = SELF_UNCHECKED_EPOCH;
                 // The tail callee occupies a fresh frame at ip 0 — give it a tier check
                 // too (whether the tail call came from the VM or a JIT'd arm). This is what
                 // lets mutually-recursive arms reached only via tail calls run natively.

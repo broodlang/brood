@@ -82,6 +82,10 @@
                15 182 207 252 248 179 44 67 231 34 82 86 196 248 55 168 101 72 201 44 204 53 72 8 5
                152 124 183 11 225 123]
       (into [] (crypto/pbkdf2 "password" "salt" 1 32))))
+  (test "an iteration count past u32 is refused, not truncated"
+    ;; 2^32 + 1 used to truncate to 1 iteration and derive the 1-iteration key.
+    (assert-error (crypto/pbkdf2 "password" "salt" 4294967297 32))
+    (assert-error (crypto/pbkdf2 "password" "salt" 0 32)))
   (test "string and byte-vector salt agree for ASCII salt"
     ;; "salt" = [115 97 108 116]; both paths must produce the same key
     (assert= (crypto/pbkdf2 "password" "salt" 100 32)

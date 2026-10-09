@@ -40,9 +40,12 @@
   6). Inverse: `gunzip`."
   (if (nil? level) (%gzip (as-bytes data)) (%gzip (as-bytes data) level)))
 
-(defn gunzip (data)
-  "Decompress gzip `bytes` back to a `bytes` value. Raises on data that isn't valid gzip."
-  (%gunzip data))
+(defn gunzip (data &optional max-bytes)
+  "Decompress gzip `bytes` back to a `bytes` value. Raises on data that isn't valid gzip, and
+  on output past `max-bytes` (default 1 GiB) — a few hundred bytes of hostile input can
+  expand to gigabytes, so name a smaller cap for untrusted data or a larger one for big
+  trusted payloads."
+  (%gunzip data max-bytes))
 
 ;; ---- zlib (RFC 1950) — 2-byte header + Adler-32 checksum ----
 
@@ -51,15 +54,17 @@
   0-9 (default 6). Inverse: `uncompress`."
   (if (nil? level) (%zlib-compress (as-bytes data)) (%zlib-compress (as-bytes data) level)))
 
-(defn uncompress (data)
-  "Decompress zlib `bytes` to a `bytes` value. Raises on invalid data."
-  (%zlib-uncompress data))
+(defn uncompress (data &optional max-bytes)
+  "Decompress zlib `bytes` to a `bytes` value. Raises on invalid data, and on output past
+  `max-bytes` (default 1 GiB; see `gunzip`)."
+  (%zlib-uncompress data max-bytes))
 
 ;; ---- raw deflate (RFC 1951) — no header or checksum ----
 
-(defn unzip (data)
-  "Decompress raw-DEFLATE `bytes` to a `bytes` value. Raises on invalid data."
-  (%inflate data))
+(defn unzip (data &optional max-bytes)
+  "Decompress raw-DEFLATE `bytes` to a `bytes` value. Raises on invalid data, and on output
+  past `max-bytes` (default 1 GiB; see `gunzip`)."
+  (%inflate data max-bytes))
 
 ;; ---- brotli (RFC 7932) — the HTTP `Content-Encoding: br` format ----
 
@@ -69,9 +74,10 @@
   (0 = fastest, 11 = best; default 5). Inverse: `unbrotli`."
   (if (nil? quality) (%brotli (as-bytes data)) (%brotli (as-bytes data) quality)))
 
-(defn unbrotli (data)
-  "Decompress brotli `bytes` back to a `bytes` value. Raises on data that isn't valid brotli."
-  (%unbrotli data))
+(defn unbrotli (data &optional max-bytes)
+  "Decompress brotli `bytes` back to a `bytes` value. Raises on data that isn't valid brotli,
+  and on output past `max-bytes` (default 1 GiB; see `gunzip`)."
+  (%unbrotli data max-bytes))
 
 ;; (restored: this is zlib's zip — compression, not the sequence pairing)
 (defn zip (data &optional level)

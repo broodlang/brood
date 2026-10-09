@@ -294,6 +294,31 @@ than being fetched into `_deps/<name>/`."
     (project-reject-reserved-opts name opts)
     (dep-tarball name url sha)))
 
+;; A dependency name is two things at once: a symbol written verbatim into project.blsp
+;; (so it must read back as itself — a space, quote, paren or a numeric spelling would
+;; corrupt the manifest), and the directory `_deps/<name>/` the package manager clones
+;; into and DELETES on re-fetch. A name of `..` or `../x` made that directory the project
+;; itself or a sibling of it, and the re-fetch's `%rm-rf` emptied it. So a name is one
+;; plain path component, by the same rules `nest new` applies to a project name. Checked
+;; for EVERY name that reaches `_deps/`: the root manifest, a fetched dependency's own
+;; manifest, `nest add`, and the names a registry serves.
+(defn valid-dep-name? (name)
+  "Whether string `name` is usable as a dependency name: it reads back as the symbol it
+spells, and it is a single path component — no `/`, `\\` or NUL, and not starting with `.`
+(so never `.` or `..`), `-` or `~`.
+
+    (project/valid-dep-name? \"my-dep\")  → true
+    (project/valid-dep-name? \"../x\")    → false"
+  (and (string? name)
+    (not (= name ""))
+    (not (includes? ".-~" (string/substring name 0 1)))
+    (not (includes? name "/"))
+    (not (includes? name "\\"))
+    (not (includes? name "\0"))
+    ;; check-allow :discarded-catch — a name that does not read is the negative answer
+    (= (check-allow :discarded-catch (try (reflect/read-first name) (catch _ nil)))
+      (symbol name))))
+
 ;; Normalise one `[name kind spec & opts]` entry into the dep record for its kind.
 (defn parse-dep (entry)
   "Parse one `:dependencies` vector entry `[name kind & opts]` into a normalised dep record, dispatching on `kind` (`:git`/`:path`/`:tarball`/`:version`) and recording the `:optional` flag (ADR-172)."
@@ -304,6 +329,10 @@ than being fetched into `_deps/<name>/`."
         kind (seq/vector-ref entry 1)
         opts (project-vec-drop entry 3))
     (when (not (symbol? name)) (error "project: dependency name must be a symbol, got " name))
+    (when (not (valid-dep-name? (->string name)))
+      (error "project: dependency name "
+        name " is not a plain package name — it becomes a directory under _deps/, so it must be one"
+        " path component (no `/` or `\\`, not starting with `.`, `-` or `~`)"))
     (let (base (cond
                  (= kind :git) (project-parse-git-dep name entry)
                  (= kind :path) (project-parse-path-dep name entry)

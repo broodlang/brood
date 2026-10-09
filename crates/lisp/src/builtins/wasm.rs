@@ -56,7 +56,8 @@ pub(super) fn register(primitives: &mut super::Primitives) {
 
 /// `(%wasm-load content)` — instantiate a sandboxed WASM component from
 /// `content`: a `bytes` value (a compiled `.wasm` component) or a string (WAT
-/// text — handy for tests and the REPL). Returns the instance token.
+/// text — handy for tests and the REPL). Returns the instance token. The calling
+/// process owns the instance: it is closed when that process exits.
 pub(super) fn wasm_load(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let bytes: Vec<u8> = match arg(args, 0) {
         Value::Bytes(id) => heap.bytes(id).as_bytes().to_vec(),
@@ -70,7 +71,7 @@ pub(super) fn wasm_load(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
             ))
         }
     };
-    crate::host::wasm::load(&bytes).map(|id| Value::Int(id as i64))
+    crate::host::wasm::load(&bytes, crate::process::self_pid()).map(|id| Value::Int(id as i64))
 }
 
 /// `(%wasm-call inst name args)` — call export `name` of instance `inst` with

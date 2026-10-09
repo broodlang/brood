@@ -235,3 +235,40 @@
   (test "an IPv6 authority round-trips"
     (assert= "http://[::1]:8080/p"
       (url/build (url/parse-url "http://[::1]:8080/p")))))
+
+(describe "parse-url — scheme and network-path references (RFC 3986 3.1, 4.2)"
+  (test "a network-path reference has a host and no scheme"
+    ;; it used to read as the PATH `//evil.com/x` with a nil host, hiding the host from
+    ;; any check made on `:host`
+    (let (u (url/parse-url "//evil.com/x"))
+      (assert= nil (get u :scheme))
+      (assert= "evil.com" (get u :host))
+      (assert= "/x" (get u :path)))
+    (assert= 8080 (get (url/parse-url "//h:8080/p?q=1") :port)))
+  (test "a `://` after a slash is a path, not a scheme"
+    (let (u (url/parse-url "/r/https://evil.com/"))
+      (assert= nil (get u :scheme))
+      (assert= nil (get u :host))
+      (assert= "/r/https://evil.com/" (get u :path))))
+  (test "a scheme must start with a letter and use only letters, digits, + - ."
+    (assert= nil (get (url/parse-url "1http://h/") :scheme))
+    (assert= nil (get (url/parse-url "ht_tp://h/") :scheme))
+    (assert= "svn+ssh" (get (url/parse-url "svn+ssh://h/r") :scheme)))
+  (test "a plain relative path is unchanged"
+    (let (u (url/parse-url "a/b"))
+      (assert= nil (get u :host))
+      (assert= "a/b" (get u :path)))))
+
+(describe "parse-url — a port is digits only"
+  (test "a signed port raises"
+    (assert-error (url/parse-url "http://h:+80/p"))
+    (assert-error (url/parse-url "http://h: 80/p"))))
+
+(describe "percent-decode — bytes that are not UTF-8 are a failure, not a raise"
+  (test "%FF answers a failure value"
+    (is (failure? (url/percent-decode "%FF")))
+    (is (failure? (url/percent-decode "ok%C3"))))
+  (test "a query carrying one fails as a whole, without raising"
+    (is (failure? (url/query-decode "token=%FF"))))
+  (test "valid multi-byte UTF-8 still decodes"
+    (assert= "é" (url/percent-decode "%C3%A9"))))

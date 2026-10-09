@@ -6,7 +6,31 @@ use super::*;
 fn warnings(src: &str) -> Vec<Diagnostic> {
     let mut interp = brood::Interp::new();
     let a = analyze(src);
-    typecheck_diagnostics(&mut interp, src, &a.cst, &a.line_index)
+    typecheck_diagnostics(&mut interp, src, &a.cst, &a.line_index, false)
+}
+
+#[test]
+fn a_text_the_reader_refuses_publishes_the_readers_error() {
+    // The CST tolerates `\c` (a Clojure character literal) as an atom, so Tier 0 says
+    // nothing; the reader refuses it, and every checker warning used to vanish with no
+    // diagnostic in their place.
+    let src = "(defn f () (+ 1 \"x\"))\n(g \\c)";
+    let diags = warnings(src);
+    let error = diags
+        .iter()
+        .find(|d| d.severity == Some(DiagnosticSeverity::ERROR))
+        .unwrap_or_else(|| panic!("expected the reader's error: {diags:?}"));
+    assert!(
+        error.message.starts_with("cannot read: "),
+        "{}",
+        error.message
+    );
+    assert_eq!(error.range.start.line, 1, "positioned at the refused text");
+    // …and not doubled when the CST already reported the text.
+    let mut interp = brood::Interp::new();
+    let unclosed = "(defn f (";
+    let a = analyze(unclosed);
+    assert!(typecheck_diagnostics(&mut interp, unclosed, &a.cst, &a.line_index, true).is_empty());
 }
 
 #[test]

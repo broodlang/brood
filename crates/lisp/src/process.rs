@@ -117,5 +117,5 @@ pub(crate) use scheduler::set_reduction_budget_for_test;
 pub(crate) use mailbox::{deliver, is_alive, read_name_address};
 pub(crate) use monitor::{
     add_monitor, deliver_remote_down, demonitor_remote_fanout, drop_monitor, drop_pending_remote,
-    fire_noconnection, handle_node_down, record_pending_remote, Watcher,
+    fire_noconnection_if_pending, handle_node_down, record_pending_remote, Watcher,
 };

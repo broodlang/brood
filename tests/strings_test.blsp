@@ -117,7 +117,15 @@
   (test "a multi-codepoint emoji cluster is one double-width glyph"
     ;; string-length counts codepoints (>1); string/display-width counts cells (2).
     (is (> (string/length "👨‍👩‍👧") 1))
-    (assert= (string/display-width "👨‍👩‍👧") 2)))
+    (assert= (string/display-width "👨‍👩‍👧") 2))
+  (test "a layout past the caps raises instead of wrapping or aborting"
+    ;; From i64::MAX the column sum wrapped to i64::MIN; a 10^11 tab width asked the
+    ;; allocator for 400 GB and aborted the runtime. Both are catchable errors now.
+    (assert-error (string/display-width "a\tb" 9223372036854775807 9223372036854775807))
+    (assert-error (string/display-width "a\tb" 9223372036854775807))
+    (assert-error (string/expand-tabs "\t" 0 100000000000))
+    (assert-error (string/width->index "a\tb" 1 0 100000000000))
+    (assert= (string/expand-tabs "\tx" 0 1024) (str (string/repeat " " 1024) "x"))))
 
 (describe "string/width->index — a display cell back to the character on it"
   (test "ASCII is the identity, clamped to the length"

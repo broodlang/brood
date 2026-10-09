@@ -42,10 +42,10 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         gzip);
     primitives.def(
         "%gunzip",
-        Arity::exact(1),
-        Sig::new(vec![any], bytes_ty),
-        &["bytes"],
-        "Decompress gzip data (RFC 1952) back to a bytes value; errors on data that isn't valid gzip. See `zlib/gunzip`.",
+        Arity::range(1, 2),
+        Sig::with_rest(vec![any], int, bytes_ty),
+        &["bytes", "max-bytes"],
+        "Decompress gzip data (RFC 1952) back to a bytes value; errors on data that isn't valid gzip, or whose output would exceed `max-bytes` (default 1 GiB). See `zlib/gunzip`.",
         gunzip);
     primitives.def(
         "%zlib-compress",
@@ -56,10 +56,10 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         zlib_compress);
     primitives.def(
         "%zlib-uncompress",
-        Arity::exact(1),
-        Sig::new(vec![any], bytes_ty),
-        &["bytes"],
-        "Decompress zlib data (RFC 1950) to a bytes value; errors on invalid data. See `zlib/uncompress`.",
+        Arity::range(1, 2),
+        Sig::with_rest(vec![any], int, bytes_ty),
+        &["bytes", "max-bytes"],
+        "Decompress zlib data (RFC 1950) to a bytes value; errors on invalid data, or output past `max-bytes` (default 1 GiB). See `zlib/uncompress`.",
         zlib_uncompress);
     primitives.def(
         "%deflate",
@@ -70,10 +70,10 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         deflate);
     primitives.def(
         "%inflate",
-        Arity::exact(1),
-        Sig::new(vec![any], bytes_ty),
-        &["bytes"],
-        "Decompress raw DEFLATE data (RFC 1951) to a bytes value; errors on invalid data. See `zlib/unzip`.",
+        Arity::range(1, 2),
+        Sig::with_rest(vec![any], int, bytes_ty),
+        &["bytes", "max-bytes"],
+        "Decompress raw DEFLATE data (RFC 1951) to a bytes value; errors on invalid data, or output past `max-bytes` (default 1 GiB). See `zlib/unzip`.",
         inflate);
     primitives.def(
         "%brotli",
@@ -84,10 +84,10 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         brotli);
     primitives.def(
         "%unbrotli",
-        Arity::exact(1),
-        Sig::new(vec![any], bytes_ty),
-        &["bytes"],
-        "Decompress brotli data (RFC 7932) to a bytes value; errors on invalid data. See `zlib/unbrotli`.",
+        Arity::range(1, 2),
+        Sig::with_rest(vec![any], int, bytes_ty),
+        &["bytes", "max-bytes"],
+        "Decompress brotli data (RFC 7932) to a bytes value; errors on invalid data, or output past `max-bytes` (default 1 GiB). See `zlib/unbrotli`.",
         unbrotli);
 }
 
@@ -121,11 +121,42 @@ fn encode<W: Write + FinishBytes>(
         .map_err(|e| LispError::runtime(format!("{name}: {e}")))
 }
 
-/// Read all bytes out of a read-adapter decoder `dec` (the decompressed output).
-fn decode<R: Read>(name: &str, mut dec: R) -> Result<Vec<u8>, LispError> {
+/// The most a decoder prim will produce when the caller names no `max-bytes`. A few
+/// hundred compressed bytes can expand to gigabytes, and the output is gathered in Rust,
+/// below the collector and the soft memory limit — so without a cap a "zip bomb" took the
+/// process down with an allocation failure instead of raising.
+const DEFAULT_DECOMPRESS_LIMIT: usize = 1 << 30; // 1 GiB
+
+/// The output cap for a decoder prim's optional 2nd arg: absent → the default, else a
+/// positive byte count.
+fn decompress_limit(name: &str, args: &[Value], heap: &Heap) -> Result<usize, LispError> {
+    match arg(args, 1) {
+        Value::Nil => Ok(DEFAULT_DECOMPRESS_LIMIT),
+        v => {
+            let n = expect_int(heap, name, v)?;
+            if n < 1 {
+                return Err(LispError::runtime(format!(
+                    "{name}: max-bytes must be positive (got {n})"
+                )));
+            }
+            Ok(n as usize)
+        }
+    }
+}
+
+/// Read the decompressed output out of a read-adapter decoder `dec`, refusing once it
+/// passes `limit` bytes. The read is bounded at `limit + 1`, so a bomb costs the cap and
+/// one byte, never its full expansion.
+fn decode<R: Read>(name: &str, dec: R, limit: usize) -> Result<Vec<u8>, LispError> {
     let mut out = Vec::new();
-    dec.read_to_end(&mut out)
+    dec.take(limit as u64 + 1)
+        .read_to_end(&mut out)
         .map_err(|e| LispError::runtime(format!("{name}: not valid compressed data: {e}")))?;
+    if out.len() > limit {
+        return Err(LispError::runtime(format!(
+            "{name}: decompressed output exceeds max-bytes ({limit} bytes); pass a larger max-bytes if the data is trusted"
+        )));
+    }
     Ok(out)
 }
 
@@ -158,10 +189,11 @@ pub(super) fn gzip(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(bytes_to_value(&out, heap))
 }
 
-/// `(%gunzip bytes)` — decompress gzip data, returned as `bytes`.
+/// `(%gunzip bytes [max-bytes])` — decompress gzip data, returned as `bytes`.
 pub(super) fn gunzip(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let limit = decompress_limit("%gunzip", args, heap)?;
     let data = collect_bytes("%gunzip", arg(args, 0), heap)?;
-    let out = decode("%gunzip", GzDecoder::new(&data[..]))?;
+    let out = decode("%gunzip", GzDecoder::new(&data[..]), limit)?;
     Ok(bytes_to_value(&out, heap))
 }
 
@@ -174,10 +206,11 @@ pub(super) fn zlib_compress(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
     Ok(bytes_to_value(&out, heap))
 }
 
-/// `(%zlib-uncompress bytes)` — decompress zlib data, returned as `bytes`.
+/// `(%zlib-uncompress bytes [max-bytes])` — decompress zlib data, returned as `bytes`.
 pub(super) fn zlib_uncompress(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let limit = decompress_limit("%zlib-uncompress", args, heap)?;
     let data = collect_bytes("%zlib-uncompress", arg(args, 0), heap)?;
-    let out = decode("%zlib-uncompress", ZlibDecoder::new(&data[..]))?;
+    let out = decode("%zlib-uncompress", ZlibDecoder::new(&data[..]), limit)?;
     Ok(bytes_to_value(&out, heap))
 }
 
@@ -190,10 +223,11 @@ pub(super) fn deflate(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(bytes_to_value(&out, heap))
 }
 
-/// `(%inflate bytes)` — decompress raw DEFLATE data, returned as `bytes`.
+/// `(%inflate bytes [max-bytes])` — decompress raw DEFLATE data, returned as `bytes`.
 pub(super) fn inflate(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let limit = decompress_limit("%inflate", args, heap)?;
     let data = collect_bytes("%inflate", arg(args, 0), heap)?;
-    let out = decode("%inflate", DeflateDecoder::new(&data[..]))?;
+    let out = decode("%inflate", DeflateDecoder::new(&data[..]), limit)?;
     Ok(bytes_to_value(&out, heap))
 }
 
@@ -233,9 +267,28 @@ pub(super) fn brotli(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(bytes_to_value(&out, heap))
 }
 
-/// `(%unbrotli bytes)` — decompress brotli data, returned as `bytes`.
+/// `(%unbrotli bytes [max-bytes])` — decompress brotli data, returned as `bytes`.
 pub(super) fn unbrotli(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let limit = decompress_limit("%unbrotli", args, heap)?;
     let data = collect_bytes("%unbrotli", arg(args, 0), heap)?;
-    let out = decode("%unbrotli", brotli::Decompressor::new(&data[..], 4096))?;
+    let out = decode(
+        "%unbrotli",
+        brotli::Decompressor::new(&data[..], 4096),
+        limit,
+    )?;
     Ok(bytes_to_value(&out, heap))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The default cap holds against a source that never ends — the shape of a
+    /// decompression bomb, where the output is unbounded by anything but the reader.
+    #[test]
+    fn default_cap_stops_an_endless_stream() {
+        let error = decode("%test", std::io::repeat(0), DEFAULT_DECOMPRESS_LIMIT)
+            .expect_err("an endless stream must hit the cap");
+        assert!(error.to_string().contains("exceeds max-bytes"), "{error}");
+    }
 }

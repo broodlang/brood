@@ -1382,26 +1382,163 @@
 ;; Any name with a space, quote, bracket or paren did the same.
 (describe "package: dependency-name validation (manifest safety)"
   (test "a plain symbol name is accepted"
-    (is (package/package-valid-dep-name? "parser")))
-  (test "kebab-case is accepted" (is (package/package-valid-dep-name? "my-dep")))
-  (test "a namespaced name is accepted" (is (package/package-valid-dep-name? "http")))
-  (test "a non-ASCII identifier is accepted" (is (package/package-valid-dep-name? "日本語")))
-  (test "the empty string is rejected" (refute (package/package-valid-dep-name? "")))
-  (test "a space-only name is rejected" (refute (package/package-valid-dep-name? " ")))
+    (is (project/valid-dep-name? "parser")))
+  (test "kebab-case is accepted" (is (project/valid-dep-name? "my-dep")))
+  (test "a namespaced name is accepted" (is (project/valid-dep-name? "http")))
+  (test "a non-ASCII identifier is accepted" (is (project/valid-dep-name? "日本語")))
+  (test "the empty string is rejected" (refute (project/valid-dep-name? "")))
+  (test "a space-only name is rejected" (refute (project/valid-dep-name? " ")))
   (test "a name with an inner space is rejected"
-    (refute (package/package-valid-dep-name? "a b")))
-  (test "an open paren is rejected" (refute (package/package-valid-dep-name? "(")))
-  (test "a close paren is rejected" (refute (package/package-valid-dep-name? ")")))
-  (test "a quote character is rejected" (refute (package/package-valid-dep-name? "\"")))
-  (test "a bracket is rejected" (refute (package/package-valid-dep-name? "[x]")))
+    (refute (project/valid-dep-name? "a b")))
+  (test "an open paren is rejected" (refute (project/valid-dep-name? "(")))
+  (test "a close paren is rejected" (refute (project/valid-dep-name? ")")))
+  (test "a quote character is rejected" (refute (project/valid-dep-name? "\"")))
+  (test "a bracket is rejected" (refute (project/valid-dep-name? "[x]")))
   (test "a number is rejected (it reads as an int, not a symbol)"
-    (refute (package/package-valid-dep-name? "5")))
-  (test "a keyword is rejected" (refute (package/package-valid-dep-name? ":kw")))
-  (test "a non-string is rejected" (refute (package/package-valid-dep-name? 5)))
+    (refute (project/valid-dep-name? "5")))
+  (test "a keyword is rejected" (refute (project/valid-dep-name? ":kw")))
+  (test "a non-string is rejected" (refute (project/valid-dep-name? 5)))
   (test "a trailing-newline name is rejected"
-    (refute (package/package-valid-dep-name? "a\n")))
+    (refute (project/valid-dep-name? "a\n")))
   (test "add refuses a corrupting name before touching the manifest"
-    (is (includes? (try (package/add "" ":path" "../x") (catch e e)) "not a usable dependency name"))))
+    (is (includes? (try (package/add "" ":path" "../x") (catch e e)) "not a usable dependency name")))
+  ;; A dep name is also the directory `_deps/<name>/`, which a re-fetch deletes.
+  (test "a name that is not one path component is rejected"
+    (refute (project/valid-dep-name? ".."))
+    (refute (project/valid-dep-name? "."))
+    (refute (project/valid-dep-name? "../x"))
+    (refute (project/valid-dep-name? "a/b"))
+    (refute (project/valid-dep-name? "a\\b"))
+    (refute (project/valid-dep-name? ".hidden"))
+    (refute (project/valid-dep-name? "-flag"))
+    (refute (project/valid-dep-name? "~home")))
+  (test "add refuses a name that escapes _deps/"
+    (is (includes? (try (package/add ".." ":path" "../x") (catch e e))
+          "not a usable dependency name")))
+  (test "the manifest parser refuses a name that escapes _deps/"
+    (is (includes? (try
+                     (project/parse-dep [(symbol "..") :path "../x"])
+                     (catch e (error-message e)))
+          "not a plain package name"))
+    (is (includes? (try
+                     (project/parse-dep [(symbol "../x") :git "file:///x" :ref "v1"])
+                     (catch e (error-message e)))
+          "not a plain package name")))
+  (test "a TRANSITIVE manifest naming `..` is refused, and the project is left intact"
+    ;; Before the fix the tarball resolver computed `app/_deps/..` — the project
+    ;; itself — saw a directory there, and `%rm-rf`'d it before fetching.
+    (let (parent (pkg-fixture-root)
+          mid-dir (path/join parent "mid")
+          app-dir (path/join parent "app"))
+      (pkg-write-project mid-dir
+        "mid" "mid" "(defn f () 1)"
+        " :dependencies [[.. :tarball \"file:///nonexistent.tar.gz\" :sha256 \"00\"]]")
+      (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
+      (is (includes? (try
+                       (resolve-deps app-dir (list (dep-path 'mid "../mid")) nil)
+                       (catch e (error-message e)))
+            "not a plain package name"))
+      (is (file/exists? (path/join app-dir "project.blsp")))))
+  (test "a dependency name the REGISTRY serves is validated too"
+    (let (parent (pkg-fixture-root)
+          [bytes checksum] (rr-build parent "foo" "1.0.0" "")
+          spec {"foo" {"1.0.0" {:deps [["../evil" "^1"]] :checksum checksum :bytes bytes}}}
+          base (mock-registry-start (rr-handler spec)))
+      (is (includes? (try (package/registry-list-versions base 'foo) (catch e (error-message e)))
+            "not a plain package name"))))
+  (test "registry-install refuses a name that is not one path component"
+    (is (includes? (try
+                     (package/registry-install ".." "/tmp/nowhere/_deps")
+                     (catch e (error-message e)))
+          "not a plain package name"))))
+
+;; `%rm-rf` is the package cache's delete. Its guard is the last line of defence when a
+;; computed path is wrong, so it is judged lexically and strictly: a `..` anywhere, or
+;; `_deps` itself, is refused — `root/_deps/..` used to pass (it HAS a `_deps`
+;; component) and emptied the project.
+(describe "package: %rm-rf stays strictly inside _deps/"
+  (test "`_deps/..` is refused and the project survives"
+    (let (root (pkg-fixture-root))
+      (file/mkdir (path/join root "_deps"))
+      (file/spit (path/join root "keep.txt") "x")
+      (is (includes? (try
+                       (%rm-rf (path/join (path/join root "_deps") ".."))
+                       (catch e (error-message e)))
+            "refusing"))
+      (is (file/exists? (path/join root "keep.txt")))))
+  (test "a `..` deeper in the path is refused"
+    (let (root (pkg-fixture-root))
+      (file/mkdir (path/join (path/join root "_deps") "x"))
+      (file/spit (path/join root "keep.txt") "x")
+      (is (includes? (try (%rm-rf (str root "/_deps/x/../..")) (catch e (error-message e)))
+            "refusing"))
+      (is (file/exists? (path/join root "keep.txt")))))
+  (test "`_deps` itself is refused"
+    (let (root (pkg-fixture-root))
+      (file/mkdir (path/join root "_deps"))
+      (is (includes? (try (%rm-rf (path/join root "_deps")) (catch e (error-message e))) "refusing"))
+      (is (file/dir? (path/join root "_deps")))))
+  (test "a directory inside `_deps` is removed"
+    (let (root (pkg-fixture-root)
+          target (path/join (path/join root "_deps") "dep"))
+      (file/mkdir target)
+      (file/spit (path/join target "f") "x")
+      (assert= (%rm-rf target) :ok)
+      (refute (file/exists? target)))))
+
+;; `registry-install` (the runtime plugin install) fetches a release's `:source_url` just as
+;; the resolver does, so it must refuse a non-http(s) one just as the resolver does (ADR-211):
+;; it used to read a `file://` URL the registry handed it.
+(describe "package: registry-install refuses a non-http(s) source URL"
+  (test "a registry-supplied file:// source URL is refused"
+    (let (parent (pkg-fixture-root)
+          dest (path/join parent "_deps")
+          [wrapped-bytes _sha] (mock-package-tarball-wrapped parent "evil")
+          local (path/join parent "evil-local.tar.gz")
+          _ (file/spit-bytes local wrapped-bytes)
+          checksum (hash/sha256-bytes (file/slurp-bytes local))
+          base (mock-registry-start (fn (req)
+                                      (cond
+                                        (= (get req :path) "/api/v1/packages/evil/releases")
+                                          (http/ok "{\"releases\":[{\"version\":\"1.0.0\",\"dependencies\":[]}]}")
+                                        (= (get req :path) "/api/v1/packages/evil/releases/1.0.0")
+                                          (http/ok (json/encode {:checksum checksum
+                                                                 :version "1.0.0"
+                                                                 :source_url (str "file://" local)
+                                                                 :dependencies []}))
+                                        else (http/not-found)))))
+      (binding (*config-registry* base)
+        (is (includes? (try (package/registry-install "evil" dest) (catch e (error-message e)))
+              "non-http(s) source URL")))
+      (refute (file/exists? (path/join dest "evil"))))))
+
+;; `git ls-remote <url> v1` lists every ref ENDING in `v1` — a branch `feature/v1` as well as
+;; the tag — and the resolver used to take the first line, which sorts before the tag.
+(describe "package: a git ref resolves to exactly that ref"
+  (test "a tag wins over a branch whose name ends in it"
+    (let (dir (pkg-fixture-root))
+      (pkg-write-project dir "gr" "gr" "(defn f () 1)" "")
+      (let (url (pkg-git-init dir))
+        (pkg-git-tag dir "v1")
+        (let (tagged (os/cmd-out (os/cmd "git" ["-C" dir "rev-parse" "HEAD"])))
+          (os/run-process "git" (list "-C" dir "checkout" "-q" "-b" "feature/v1"))
+          (file/spit (path/join dir "more.txt") "x")
+          (os/run-process "git" (list "-C" dir "add" "-A"))
+          (os/run-process "git" (list "-C" dir "commit" "-q" "-m" "branch"))
+          (assert= (package/package-git-commit-for (dep-git 'gr url "v1" nil) nil) tagged)))))
+  (test "an annotated tag resolves to the commit it points at, not the tag object"
+    (let (dir (pkg-fixture-root))
+      (pkg-write-project dir "gr" "gr" "(defn f () 1)" "")
+      (let (url (pkg-git-init dir)
+            head (os/cmd-out (os/cmd "git" ["-C" dir "rev-parse" "HEAD"])))
+        (os/run-process "git" (list "-C" dir "tag" "-a" "v2" "-m" "release"))
+        (assert= (package/package-git-commit-for (dep-git 'gr url "v2" nil) nil) head))))
+  (test "a branch resolves when there is no tag of that name"
+    (let (dir (pkg-fixture-root))
+      (pkg-write-project dir "gr" "gr" "(defn f () 1)" "")
+      (let (url (pkg-git-init dir)
+            head (os/cmd-out (os/cmd "git" ["-C" dir "rev-parse" "HEAD"])))
+        (assert= (package/package-git-commit-for (dep-git 'gr url "main" nil) nil) head)))))
 
 ;; A dependency's `main` is its ENTRY POINT, not part of its library surface: `nest
 ;; run` only ever uses the ROOT project's `:main`, and nothing requires a dep's. Two

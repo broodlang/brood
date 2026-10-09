@@ -7,7 +7,7 @@
   "CSV decoding and encoding, written entirely in Brood (pure; opt-in).
 
     (csv/decode \"a,b\\n1,2\")
-    ;; => ((\"a\" \"b\") (\"1\" \"2\"))
+    ;; => ([\"a\" \"b\"] [\"1\" \"2\"])   — a list of rows, each a VECTOR of strings
     (csv/decode-maps \"name,age\\nAlice,30\")
     ;; => ({\"name\" \"Alice\" \"age\" \"30\"})
     (csv/encode '((\"a\" \"b\") (\"1\" \"2\")))
@@ -16,7 +16,9 @@
     ;; => \"name,age\\nAlice,30\"
 
 Quoted fields may contain commas, newlines, and escaped quotes (\"\").
-Both \\n and \\r\\n line endings are accepted on input; \\n is emitted.")
+Both \\n and \\r\\n line endings are accepted on input; \\n is emitted. Malformed
+input — a quoted field that never closes, or text after a closing quote — raises,
+as `json/decode` does, rather than decoding to rows that look right and aren't.")
 
 ;; ---- CSV parsing ------------------------------------------------------------
 ;;
@@ -47,6 +49,12 @@ Both \\n and \\r\\n line endings are accepted on input; \\n is emitted.")
   "Core parser loop. Returns a list of rows (each a vector of strings)."
   (let (c (csv-at s i n))
     (cond
+      ;; ── end of input inside a quoted field ────────────────────────────────
+      ;; The quote never closed. Returning the rows swallowed everything after the
+      ;; opening quote into one field — `a,"b\n1,2` read as ONE row — which looks like
+      ;; data and isn't.
+      (and (nil? c) (= state :quoted)) (error "csv/decode: unterminated quoted field")
+
       ;; ── end of input ──────────────────────────────────────────────────────
       (nil? c)
         (let (row (into [] (reverse (cons (csv-field field-acc) row-acc))))
@@ -184,14 +192,9 @@ Both \\n and \\r\\n line endings are accepted on input; \\n is emitted.")
               :quote-seen field-acc
               row-acc
               rows-acc)
-          ;; anything else after closing quote → back to unquoted (lenient)
-          else
-            (csv-parse-loop s
-              (+ i 1)
-              n
-              :unquoted (cons c field-acc)
-              row-acc
-              rows-acc))
+          ;; anything else after a closing quote is malformed (RFC 4180 §2.7). It used
+          ;; to be merged into the field (`"a"b` → `ab`), which silently invents a value.
+          else (error "csv/decode: unexpected " (pr-str c) " after a closing quote at index " i))
 
       else
       ;; Should never happen — fall back to unquoted
@@ -201,7 +204,8 @@ Both \\n and \\r\\n line endings are accepted on input; \\n is emitted.")
   "Parse a CSV string → a list of rows, where each row is a vector of strings.
 Handles quoted fields (which may contain commas and newlines), `\"\"` as an
 escaped quote inside a quoted field, and both `\\n` and `\\r\\n` line endings.
-An empty string returns an empty list.
+An empty string returns an empty list. Malformed input — a quoted field that never
+closes, or anything but a separator after a closing quote — **raises**.
 
     (csv/decode \"a,b\n1,2\")   → ([\"a\" \"b\"] [\"1\" \"2\"])"
   (if (= s "")
@@ -229,7 +233,8 @@ An empty string returns an empty list.
 
 (defn decode-maps (s)
   "Parse a CSV string where the first row is a header row. Returns a list of
-maps from header→value strings. An empty or header-only CSV returns nil/empty."
+maps from header→value strings. An empty or header-only CSV returns nil/empty;
+malformed input raises, as `decode` does."
   (let (rows (decode s))
     (if (or (nil? rows) (empty? rows))
       nil

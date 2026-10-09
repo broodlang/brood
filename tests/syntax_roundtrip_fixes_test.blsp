@@ -1,0 +1,40 @@
+;; Reader / printer / formatter round-trip fixes (review 2026-10-08): a shebang survives
+;; `nest format`, a datum read refuses `#!`, a range at the i64 edge prints and stops, and
+;; a symbol holding a control character prints in a form that reads back as itself.
+(defmodule syntax-roundtrip-fixes-test
+  (:use test))
+
+(describe "a shebang belongs to a source file"
+  (test "formatting a script keeps its shebang line"
+    ;; the lossless CST had no node for it, so every re-emission deleted it
+    (assert= (format/source "#!/usr/bin/env brood\n(io/puts   \"hi\")")
+      "#!/usr/bin/env brood\n(io/puts \"hi\")\n")
+    (let (formatted (format/source "#!/usr/bin/env brood\n\n(defn main ()\n(io/puts   1))"))
+      (is (string/starts-with? formatted "#!/usr/bin/env brood\n"))
+      (assert= (format/source formatted) formatted)))
+  (test "a whole-source read skips it; a datum read refuses it"
+    (assert= (reflect/read-all "#!/usr/bin/env brood\n(+ 1 2)") '((+ 1 2)))
+    (assert= (reflect/read-first "#!/usr/bin/env brood\n(defmodule m)") '(defmodule m))
+    (is (includes? (error-of (reflect/read-string "#!not a shebang\n42")) "dispatch"))
+    ;; only on the first line, and only at its very start
+    (is (includes? (error-of (reflect/read-all " #!x\n42")) "dispatch"))))
+
+(describe "a range at the edge of i64 prints and stops"
+  (test "the last element is the one before the step would overflow"
+    (assert= (pr-str (range 9223372036854775800 9223372036854775807 5))
+      "(9223372036854775800 9223372036854775805)")
+    (assert= (pr-str (range -9223372036854775800 -9223372036854775807 -5))
+      "(-9223372036854775800 -9223372036854775805)"))
+  (test "a range as a list's tail stops too"
+    (assert= (pr-str (cons 1 (range 9223372036854775800 9223372036854775807 5)))
+      "(1 9223372036854775800 9223372036854775805)")))
+
+(describe "a name holding a control character prints readably"
+  (test "symbols and keywords are bar-quoted and read back as themselves"
+    (let (sym (symbol "a\u{1}b")
+          key (keyword "k\u{7f}"))
+      (is (string/starts-with? (pr-str sym) "|"))
+      (assert= (reflect/read-string (pr-str sym)) sym)
+      (assert= (reflect/read-string (pr-str key)) key)
+      ;; a clean name stays bare
+      (assert= (pr-str (symbol "ab")) "ab"))))

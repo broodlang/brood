@@ -79,8 +79,9 @@ pub(super) fn handshake<S: Read + Write>(
     let my_nonce = fresh_nonce()?;
     let my_secret = ephemeral_secret()?;
     let my_eph_pub: [u8; EPH_PUB_LEN] = PublicKey::from(&my_secret).to_bytes();
+    let my_name = value::symbol_name(my_name).to_string();
     let my_hello = Frame::Hello {
-        node: my_name,
+        node: my_name.clone(),
         nonce: my_nonce,
         eph_pub: my_eph_pub,
         addr: my_addr.clone(),
@@ -109,8 +110,8 @@ pub(super) fn handshake<S: Read + Write>(
         &cookie,
         &peer_nonce,
         &peer_eph_pub,
-        peer_name,
-        my_name,
+        &peer_name,
+        &my_name,
         &my_addr,
         &my_eph_pub,
     );
@@ -118,28 +119,38 @@ pub(super) fn handshake<S: Read + Write>(
         &cookie,
         &my_nonce,
         &my_eph_pub,
-        my_name,
-        peer_name,
+        &my_name,
+        &peer_name,
         &peer_addr,
         &peer_eph_pub,
     );
-    let their_mac = match role {
-        Role::Initiator => {
-            write_frame(stream, &Frame::Auth { mac: my_mac })?;
-            read_auth(stream)?
-        }
-        Role::Responder => {
-            let m = read_auth(stream)?;
-            write_frame(stream, &Frame::Auth { mac: my_mac })?;
-            m
+    let verify = |their_mac: &[u8; MAC_LEN]| {
+        if ct_eq(their_mac, &expected_peer_mac) {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "node handshake MAC mismatch (wrong cookie?)",
+            ))
         }
     };
-    if !ct_eq(&their_mac, &expected_peer_mac) {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "node handshake MAC mismatch (wrong cookie?)",
-        ));
+    match role {
+        Role::Initiator => {
+            write_frame(stream, &Frame::Auth { mac: my_mac })?;
+            verify(&read_auth(stream)?)?;
+        }
+        // The responder verifies the initiator's proof BEFORE sending its own: an
+        // unauthenticated dialer gets nothing back — not even a MAC computed under the
+        // cookie over a nonce it chose.
+        Role::Responder => {
+            verify(&read_auth(stream)?)?;
+            write_frame(stream, &Frame::Auth { mac: my_mac })?;
+        }
     }
+
+    // Only now is the peer's name trusted, so only now does it reach the interner
+    // (append-only, and budgeted for wire data — see `Frame::Hello`).
+    let peer_name = value::intern(&peer_name);
 
     // Authenticated: derive the session. The DH secret is keyed by the *initiator's*
     // nonce first (both ends order it the same regardless of role), so both compute
@@ -177,7 +188,7 @@ pub(super) fn handshake<S: Read + Write>(
 
 fn read_hello<S: Read>(
     stream: &mut S,
-) -> io::Result<(Symbol, [u8; NONCE_LEN], [u8; EPH_PUB_LEN], String)> {
+) -> io::Result<(String, [u8; NONCE_LEN], [u8; EPH_PUB_LEN], String)> {
     // Pre-auth: a tiny ceiling, not the 64 MiB steady-state one.
     match read_frame_capped(stream, MAX_HANDSHAKE_FRAME)? {
         Frame::Hello {
@@ -218,15 +229,16 @@ fn read_auth<S: Read>(stream: &mut S) -> io::Result<[u8; MAC_LEN]> {
 /// so each MAC authenticates *both* keys, defeating a MitM DH-key substitution
 /// (ADR-089): a swapped `Hello.eph_pub` makes the `Auth` check fail.
 ///
-/// Names travel as canonical (interned) UTF-8 spellings, identical on both
-/// sides regardless of interner state.
+/// Names travel as their UTF-8 spellings, identical on both sides regardless of
+/// interner state — and the peer's is MACed as the raw bytes it sent, never
+/// interned before the MAC verifies.
 #[allow(clippy::too_many_arguments)]
 fn compute_mac(
     cookie: &str,
     peer_nonce: &[u8; NONCE_LEN],
     peer_eph_pub: &[u8; EPH_PUB_LEN],
-    peer_name: Symbol,
-    my_name: Symbol,
+    peer_name: &str,
+    my_name: &str,
     my_addr: &str,
     my_eph_pub: &[u8; EPH_PUB_LEN],
 ) -> [u8; MAC_LEN] {
@@ -235,9 +247,9 @@ fn compute_mac(
     let mut mac = HmacSha256::new_from_slice(cookie.as_bytes()).expect("HMAC key length is fine");
     mac.update(peer_nonce);
     mac.update(peer_eph_pub);
-    mac.update(value::symbol_name(peer_name).as_bytes());
+    mac.update(peer_name.as_bytes());
     mac.update(&[0]);
-    mac.update(value::symbol_name(my_name).as_bytes());
+    mac.update(my_name.as_bytes());
     mac.update(&[0]);
     mac.update(my_addr.as_bytes());
     mac.update(&[0]);
@@ -338,8 +350,8 @@ mod tests {
         let nonce_b = [2u8; NONCE_LEN];
         let eph_a = [10u8; EPH_PUB_LEN];
         let eph_b = [20u8; EPH_PUB_LEN];
-        let a = value::intern("aa");
-        let b = value::intern("bb");
+        let a = "aa";
+        let b = "bb";
         let addr_a = "tcp:127.0.0.1:9001";
         let addr_b = "tcp:127.0.0.1:9002";
 
@@ -383,6 +395,72 @@ mod tests {
         assert_ne!(
             a_my_mac,
             compute_mac(cookie, &nonce_b, &eph_b, b, a, addr_a, &[99u8; EPH_PUB_LEN])
+        );
+    }
+
+    /// An unauthenticated dialer must leave no trace: its `Hello` name is not
+    /// interned (the interner is append-only and the wire-symbol budget is shared
+    /// with every authenticated link), and the responder refuses it without first
+    /// sending its own `Auth` MAC. Drives the real responder handshake over a socket
+    /// pair against a hand-written dialer that presents a bogus MAC.
+    #[test]
+    fn unauthenticated_dialer_mints_no_symbol_and_gets_no_mac() {
+        use std::os::unix::net::UnixStream;
+        use std::time::Duration;
+        let junk_name = "preauth-hello-name-that-must-never-be-interned-7f3a";
+        let (mut responder_end, mut dialer_end) = UnixStream::pair().unwrap();
+        responder_end
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        dialer_end
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let dialer = std::thread::spawn(move || {
+            dialer_end.write_all(&PROTOCOL_MAGIC).unwrap();
+            let mut magic = [0u8; 4];
+            dialer_end.read_exact(&mut magic).unwrap();
+            write_frame(
+                &mut dialer_end,
+                &Frame::Hello {
+                    node: junk_name.to_string(),
+                    nonce: [5u8; NONCE_LEN],
+                    eph_pub: [6u8; EPH_PUB_LEN],
+                    addr: String::new(),
+                },
+            )
+            .unwrap();
+            // The responder's own Hello.
+            match read_frame_capped(&mut dialer_end, MAX_HANDSHAKE_FRAME).unwrap() {
+                Frame::Hello { .. } => {}
+                _ => panic!("expected the responder's Hello"),
+            }
+            write_frame(
+                &mut dialer_end,
+                &Frame::Auth {
+                    mac: [0u8; MAC_LEN],
+                },
+            )
+            .unwrap();
+            // Everything the responder sends after its Hello: must be nothing.
+            let mut rest = Vec::new();
+            dialer_end.read_to_end(&mut rest).unwrap();
+            rest
+        });
+        let outcome = handshake(&mut responder_end, Role::Responder);
+        drop(responder_end);
+        let after_hello = dialer.join().unwrap();
+        match outcome {
+            Err(error) => assert_eq!(error.kind(), io::ErrorKind::PermissionDenied),
+            Ok(_) => panic!("a bogus MAC must not authenticate"),
+        }
+        assert!(
+            value::intern_existing(junk_name).is_none(),
+            "an unauthenticated Hello interned its node name"
+        );
+        assert!(
+            after_hello.is_empty(),
+            "the responder sent {} bytes (its Auth MAC) to an unauthenticated dialer",
+            after_hello.len()
         );
     }
 

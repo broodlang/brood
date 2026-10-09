@@ -392,6 +392,25 @@ fn bind_def(heap: &mut Heap, name: Value, v: Value) -> Result<(), LispError> {
 /// infinite non-tail recursion into a catchable error before it exhausts memory.
 const MAX_BC_FRAMES: usize = 1 << 20;
 
+/// The `entry_epoch` a FRESH frame starts at: never a real epoch, so the frame's first
+/// `Inst::SelfCall` takes the hot-reload guard's slow path and proves the arm's `dbg_name`
+/// still names this arm before looping on it. A frame entered through an alias of a
+/// rebound name would otherwise loop on the old body forever — the guard used to start at
+/// the CURRENT epoch, assuming the name still meant this arm at entry. The proof is
+/// memoised on the arm ([`CompiledArm::self_bound_stamp`]), so the cost is one compare
+/// per activation while no `def` intervenes. Distinct from `u64::MAX` (the stale-arm and
+/// deopt-resume sentinel), which always re-resolves.
+pub(crate) const SELF_UNCHECKED_EPOCH: u64 = u64::MAX - 1;
+
+/// The key under which [`CompiledArm::self_bound_stamp`] memoises "`dbg_name` resolves to
+/// this arm": the runtime's tag in the high 24 bits over the global epoch in the low 40.
+/// A shared prelude arm is reached from several runtimes whose epochs count
+/// independently, so the epoch alone could prove a fact about another runtime's table.
+#[inline]
+pub(crate) fn self_binding_stamp(heap: &Heap, epoch: u64) -> u64 {
+    (heap.runtime_tag() << 40) | (epoch & ((1u64 << 40) - 1))
+}
+
 /// One suspended bytecode activation: where to resume (`ip`) and how to tear its
 /// frame down. Promoted out of [`vm_run_bc`]'s body (it was a local `struct Frame`)
 /// so a captured [`Suspended`] continuation can hold the whole stack. The indices
@@ -538,6 +557,7 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                 jit_float_deopts: std::sync::atomic::AtomicU32::new(0),
                 float_globals: std::sync::OnceLock::new(),
                 self_global_ok: std::sync::atomic::AtomicBool::new(false),
+                self_bound_stamp: std::sync::atomic::AtomicU64::new(u64::MAX),
                 ckpt_slot: u32::MAX,
                 compile_epoch: AtomicU64::new(0),
                 stale_bindings: std::sync::atomic::AtomicBool::new(false),

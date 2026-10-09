@@ -150,14 +150,31 @@ fn refresh_bits(list: &[SysMon]) {
     SUBSCRIBED.store(list.len(), Ordering::Relaxed);
 }
 
+/// The subscriber pid named in an [`install`] is not a live process.
+#[derive(Debug)]
+pub struct DeadSubscriber;
+
 /// Install `m` as its pid's subscription (replacing that pid's previous one, if
-/// any), returning the previous configuration for that pid.
-pub fn install(m: SysMon) -> Option<SysMon> {
+/// any), returning the previous configuration for that pid — or [`DeadSubscriber`],
+/// installing nothing, when `m.pid` is not alive.
+///
+/// The liveness check runs **under the subscriber lock**, and `deregister` clears a
+/// dying pid's subscription only AFTER removing it from the registry: so either this
+/// sees the pid alive and installs before that clear (which then removes it), or it
+/// sees the pid gone. Unchecked, a subscription installed on a dead pid was never
+/// removed — and one selecting `:exit-abnormal` kept `crash_reported_elsewhere` true
+/// for good, so the kernel's own crash line stood down for every later crash while
+/// the reports went to a corpse. Safe to nest: nothing holds `REGISTRY` while
+/// reaching for this lock.
+pub fn install(m: SysMon) -> Result<Option<SysMon>, DeadSubscriber> {
     let mut list = crate::core::sync::lock(&MONITORS);
+    if !super::is_alive(m.pid) {
+        return Err(DeadSubscriber);
+    }
     let prev = remove_from(&mut list, m.pid);
     list.push(m);
     refresh_bits(&list);
-    prev
+    Ok(prev)
 }
 
 /// Clear `pid`'s subscription, returning what it was (None if it had none).
@@ -186,8 +203,9 @@ pub fn all() -> Vec<SysMon> {
     crate::core::sync::lock(&MONITORS).clone()
 }
 
-/// Disarm `dead_pid`'s subscription if it had one — called by `deregister` so a
-/// dead subscriber doesn't keep charging every event site in the runtime.
+/// Disarm `dead_pid`'s subscription if it had one — called by `deregister` (after the
+/// registry removal, and whether or not anything is `armed()`) so a dead subscriber
+/// doesn't keep charging every event site in the runtime.
 pub(super) fn clear_if(dead_pid: u64) {
     // NOT `armed()`: that is the selected-KIND mask, which is 0 for a subscriber that
     // selects nothing — and such a subscriber then never got reaped at all. Gate on
@@ -334,6 +352,39 @@ pub fn emit_deopt(subject: u64, fn_name: Option<Symbol>) {
 mod tests {
     use super::*;
 
+    /// Install a subscription for a pid that is not a live process — `install` refuses
+    /// those, and these tests drive `clear_if` with synthetic pids.
+    fn install_for_synthetic_pid(m: SysMon) {
+        let mut list = crate::core::sync::lock(&MONITORS);
+        remove_from(&mut list, m.pid);
+        list.push(m);
+        refresh_bits(&list);
+    }
+
+    /// The `install` half of the dead-subscriber race: a pid that is not alive is
+    /// refused, and nothing is armed for it.
+    #[test]
+    fn install_refuses_a_dead_subscriber() {
+        let corpse = SysMon {
+            pid: 987_654_324,
+            gc: false,
+            gc_min_pause_us: 0,
+            spawn: false,
+            exit: false,
+            exit_abnormal: true,
+            deopt: false,
+        };
+        assert!(
+            install(corpse).is_err(),
+            "a dead pid must not be subscribed"
+        );
+        assert!(current_for(corpse.pid).is_none());
+        assert!(
+            !crash_reported_elsewhere(),
+            "a refused install must not stand the kernel's crash line down"
+        );
+    }
+
     /// KI-97 item 4: a dead subscriber is reaped even when it selected no event kinds.
     ///
     /// `clear_if` gated on `armed()`, which is the mask of *selected kinds* — 0 for a
@@ -353,7 +404,7 @@ mod tests {
             exit_abnormal: false,
             deopt: false,
         };
-        install(quiet);
+        install_for_synthetic_pid(quiet);
         assert!(
             current_for(quiet.pid).is_some(),
             "the subscription must be installed"
@@ -385,7 +436,7 @@ mod tests {
             exit_abnormal: false,
             deopt: false,
         };
-        install(live);
+        install_for_synthetic_pid(live);
         clear_if(987_654_323); // some other process died
         assert!(
             current_for(live.pid).is_some(),

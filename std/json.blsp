@@ -306,8 +306,11 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
           (error "json: expected ':' after key at index " j1)
           (let ([v j2] (json-value s (skip-ws s (+ j1 1) n) n)
                 j3 (skip-ws s j2 n)
-                ; JSON keys → keywords (acc is always a map)
-                acc2 (%map-assoc acc (keyword k) v)
+                ; JSON keys → keywords (acc is always a map) — except `__id__`, which
+                ; stays a STRING key: `:__id__` is the slot a record's identity lives in,
+                ; so `{"__id__":"x"}` decoded to a value that answered `record?` and
+                ; re-encoded WITHOUT the key. Decoded JSON is never a record.
+                acc2 (%map-assoc acc (if (= k "__id__") k (keyword k)) v)
                 c (json-at s j3 n))
             (cond
               (= c 44) (object-acc s (+ j3 1) n acc2)
@@ -343,9 +346,12 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
 (defn decode (s)
   "Parse JSON text `s` into Brood data: object → a map with **keyword** keys, array →
 a vector, string → string, number → int/float, true/false → bool, null → nil. Errors
-on malformed input or trailing content. Pure.
+on malformed input or trailing content. Pure. The one key that stays a string is
+`\"__id__\"`: as the keyword `:__id__` it would make the object a record, so decoded JSON
+could pass for one.
 
-    (json/decode \"[1,2]\")   → [1 2]"
+    (json/decode \"[1,2]\")   → [1 2]
+    (record? (json/decode \"{\\\"__id__\\\":\\\"x\\\"}\"))   → false"
   (let (
         ; int code points: O(1) nth, one native pass
         s (string/->codepoints s)

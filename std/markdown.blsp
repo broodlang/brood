@@ -19,27 +19,40 @@
 (defn- md-escape (s)
   (-> (str s) (string/replace "&" "&amp;") (string/replace "<" "&lt;") (string/replace ">" "&gt;")))
 
-;; Schemes that execute rather than fetch. A link carrying one runs script the moment it is
-;; clicked, with the page's own origin — which for anything rendering third-party Markdown
-;; (a package README on a registry, a dependency's guide in a generated site) means whoever
-;; wrote that Markdown chose the code.
-(def- *md-unsafe-schemes* ["javascript:" "vbscript:" "data:"])
+;; The schemes a link may carry. Anything else is refused: some schemes execute rather than
+;; fetch (`javascript:`, `vbscript:`, `data:text/html,<script>…`), and a link carrying one
+;; runs script the moment it is clicked, with the page's own origin — which for anything
+;; rendering third-party Markdown (a package README on a registry, a dependency's guide in
+;; a generated site) means whoever wrote that Markdown chose the code.
+;;
+;; An ALLOW-list, because the deny-list it replaced was beaten twice by spelling: first by
+;; case (`JaVaScRiPt:`), then by the characters a browser deletes before it reads the
+;; scheme — `java\tscript:` and a leading `\u{1}` both rendered as live script links.
+(def- *md-safe-schemes* ["http" "https" "mailto"])
+
+;; Scrub what the URL parser in a browser scrubs before it reads the scheme: every ASCII
+;; tab, CR and LF anywhere, and C0 controls or spaces at either end.
+(defn- md-url-scrub (url)
+  (let (kept (seq/reject (string/->codepoints url) (fn (cp) (or (= cp 9) (= cp 10) (= cp 13))))
+        edge? (fn (cp) (<= cp 32)))
+    (string/codepoints-> (reverse (drop-while (reverse (drop-while kept edge?)) edge?)))))
+
+;; The scheme of a scrubbed URL — the text before its first `:`, when that comes before any
+;; `/`, `?` or `#` — lower-cased; nil for a relative URL or a fragment.
+(defn- md-url-scheme (url)
+  (let (colon (index-of url ":")
+        cut (string/span-until url 0 "/?#"))
+    (if (and (>= colon 0) (< colon cut)) (string/lower (string/substring url 0 colon)) nil)))
 
 ;; Escape a URL for an `href="…"` attribute (adds `"` to `md-escape`) and neutralise a link
-;; that would execute, so a guide's Markdown can't break out of the attribute or inject
-;; script into the generated site.
-;;
-;; The scheme is matched LOWER-CASED. It used to be compared as written, which caught
-;; `javascript:` and let `JaVaScRiPt:` through — and a browser matches a scheme
-;; case-insensitively, so the spelling that got through is the one an attacker would use.
-;; `vbscript:` and `data:` are refused for the same reason: `data:text/html,<script>…` is a
-;; document with an origin, not a document that is fetched.
+;; whose scheme is not allowed, so a guide's Markdown can't break out of the attribute or
+;; inject script into the generated site.
 (defn- md-attr (url)
-  (let (trimmed (string/trim url)
-        lowered (string/lower trimmed))
-    (if (any? *md-unsafe-schemes* (fn (scheme) (string/starts-with? lowered scheme)))
-      "#"
-      (string/replace (md-escape trimmed) "\"" "&quot;"))))
+  (let (scrubbed (md-url-scrub url)
+        scheme (md-url-scheme scrubbed))
+    (if (or (nil? scheme) (includes? *md-safe-schemes* scheme))
+      (string/replace (md-escape scrubbed) "\"" "&quot;")
+      "#")))
 
 ;; A non-code text run: turn `[text](url)` into a link, HTML-escape everything else.
 

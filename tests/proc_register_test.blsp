@@ -1,0 +1,62 @@
+;; `proc/register` decides under the name table's lock against the process's death:
+;; a name is never bound to a pid that has already exited (it used to stay bound to the
+;; corpse for good). A live holder's name IS replaced — every caller relies on that (a
+;; restarted logger, a test standing in as `:editor` and handing the name back).
+(defmodule proc-register-test (:use test))
+
+(describe "proc/register binds only the living"
+  (test "a pid that has already exited binds nothing"
+    (let ([gone r] (spawn-monitor :done))
+      (receive ([:down ^r _ _] nil) (after *test-wait-ms* nil))
+      ;; the same outcome as registering it and the process exiting: no binding
+      (assert= gone (proc/register :proc-register-test-corpse gone))
+      (assert= nil (proc/whereis :proc-register-test-corpse))))
+
+  (test "a dead pid does not displace a live holder"
+    (let (holder (spawn (receive (:stop nil)))
+          [gone r] (spawn-monitor :done))
+      (receive ([:down ^r _ _] nil) (after *test-wait-ms* nil))
+      (proc/register :proc-register-test-kept holder)
+      (proc/register :proc-register-test-kept gone)
+      (assert= holder (proc/whereis :proc-register-test-kept))
+      (proc/unregister :proc-register-test-kept)
+      (send holder :stop)))
+
+  (test "a live holder's name is handed to the new registrant"
+    (let (holder (spawn (receive (:stop nil)))
+          other (spawn (receive (:stop nil))))
+      (proc/register :proc-register-test-held holder)
+      (assert= other (proc/register :proc-register-test-held other))
+      (assert= other (proc/whereis :proc-register-test-held))
+      (proc/unregister :proc-register-test-held)
+      (send holder :stop)
+      (send other :stop)))
+
+  (test "re-registering the holder is fine"
+    (let (holder (spawn (receive (:stop nil))))
+      (proc/register :proc-register-test-again holder)
+      (assert= holder (proc/register :proc-register-test-again holder))
+      (assert= holder (proc/whereis :proc-register-test-again))
+      (proc/unregister :proc-register-test-again)
+      (send holder :stop)))
+
+  (test "a holder's death frees its name for a new owner"
+    (let ([holder r] (spawn-monitor (receive (:stop nil)))
+          next-owner (spawn (receive (:stop nil))))
+      (proc/register :proc-register-test-freed holder)
+      (send holder :stop)
+      (receive ([:down ^r _ _] nil) (after *test-wait-ms* nil))
+      (assert= next-owner (proc/register :proc-register-test-freed next-owner))
+      (assert= next-owner (proc/whereis :proc-register-test-freed))
+      (proc/unregister :proc-register-test-freed)
+      (send next-owner :stop)))
+
+  ;; Many processes racing for one name, each dying right after: whoever binds it, the
+  ;; name never outlives its holder — the bind and the death's sweep are one step apart.
+  (test "a name never outlives the process it is bound to, under a race"
+    (let (racers (mapv (range 32)
+                   (fn (_)
+                     (spawn (proc/register :proc-register-test-race (self)))))
+          refs (mapv racers monitor))
+      (doseq (r refs) (receive ([:down ^r _ _] nil) (after *test-wait-ms* nil)))
+      (assert= nil (proc/whereis :proc-register-test-race)))))

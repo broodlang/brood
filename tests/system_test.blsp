@@ -97,6 +97,16 @@
           r (os/cmd "sh" ["-c" "sleep 10; true"] {:timeout-ms 100}))
       (is (:timed-out r))
       (is (< (- (os/now) t0) 5000))))
+  (test ":timeout-ms bounds the call even after the child itself has exited"
+    ;; `sh` exits at once, but the backgrounded `sleep` keeps the stdout pipe open: the
+    ;; call used to wait out the sleep reading to end-of-file, past any deadline
+    (let (t0 (os/now)
+          r (os/cmd "sh" ["-c" "sleep 10 & echo hi"] {:timeout-ms 300}))
+      (is (< (- (os/now) t0) 5000))
+      (is (:timed-out r))
+      ;; what was read before the deadline is kept, and the exit is sh's own
+      (assert= (os/cmd-out r) "hi")
+      (assert= (:exit r) 0)))
   (test "a command that finishes in time is not marked"
     (is (nil? (:timed-out (os/cmd "true" [] {:timeout-ms 5000}))))))
 

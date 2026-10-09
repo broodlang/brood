@@ -6,6 +6,46 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+A whole-project review: every finding reproduced, fixed, and guarded by a sabotage-verified
+test (`docs/review-2026-10-08.md`).
+
+**Breaking.** `proc/register` binds nothing for a pid that has already exited (it used to
+leave the name bound to the corpse). `proc/system-monitor` of a dead pid raises. `csv/decode` raises on an unterminated quoted
+field or text after a closing quote, where it used to swallow or merge input. The HTTP server
+refuses `Transfer-Encoding` (501, or 400 beside `Content-Length`) and caps request bodies at
+`*http-max-body-bytes*` (8 MiB, 413). Wasm instance handles are opaque tokens, and an instance
+closes when the process that loaded it exits. Dependency names must be one plain path
+component (no `/`, `\`, leading `.`, `-` or `~`). The decompression prims cap output at
+1 GiB (an optional `max-bytes` raises it); `string/expand-tabs` and friends refuse a tab width
+past 1024; `crypto/pbkdf2` refuses an iteration count past 2^32−1.
+
+**Security.** A dependency named `..` could make a fetch delete the project. An
+unauthenticated peer could exhaust the distribution symbol budget before the handshake checked
+it. `registry-install` accepted `file://` sources. Markdown links passed `java\tscript:`;
+`sse/frame` let a CR or an event name inject fields. Bytes past `Content-Length` reached the
+handler, and a malformed request or a throwing handler dropped the connection without a
+response (now 400/431/500). `%git-resolve-ref` resolved tag `v1` to branch `feature/v1`, and
+pinned annotated tags to the tag object instead of the commit. `json/decode` of an `"__id__"`
+key produced a value that answered `record?`.
+
+**Fixes.** A self-tail loop called through an alias after its name was rebound ran the old
+body under the VM and JIT. The linear-map rewrite crashed a loop that reset its accumulator
+to `{}`. A function used as a map or set key was lost after a garbage collection. The
+tree-walker's `let` let a closure see a later binding of its name. An error inside std code
+was reported under the user's file. `` `(1 . ~t) `` built `(1 unquote t)`. `agent/update`
+reported `:ok` before applying its function. `nest format` deleted a script's `#!` line, and
+`reflect/read-string` silently skipped one. Hashing or printing a range near `i64::MAX` never
+finished, and two such ranges differing by one element were `=`. `%rope-rfind` could loop
+forever. `%os-cmd :timeout-ms` waited on grandchildren. `url/percent-decode` raised instead of
+returning its failure, and `url/parse-url` misread `//host/x`, `/r/https://…` and port `+80`.
+`serve-file` served binary files as text. A system-monitor subscription left on a dead pid
+silenced crash reporting. Remote monitors and links could deliver `:noconnection` twice, or a
+DOWN after `demonitor`. LSP rename accepted names that change meaning (`^foo`); its scopes
+mishandled `let`, `letrec` and multi-clause functions; and diagnostics landed on the wrong
+line after a lone `\r` or U+2028. A document the reader rejected lost all its diagnostics. The
+checker clamped interval arithmetic on overflow, and now warns on a top-level definition of a
+reserved name, which always fails at run time.
+
 ## v0.36.0 — a type-system and contracts review: a checker that sees callbacks, and contracts that keep tail calls
 
 **Breaking.** `seq/zip-with` is data-first, like every other combinator (ADR-308):

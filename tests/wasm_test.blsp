@@ -169,7 +169,28 @@
     (let (huge "(component
                   (core module $m (memory (export \"m\") 5000))
                   (core instance $i (instantiate $m)))")
-      (is (= (try (do (instantiate huge) :loaded) (catch e :denied)) :denied)))))
+      (is (= (try (do (instantiate huge) :loaded) (catch e :denied)) :denied))))
+  (test "an instance dies with the process that loaded it"
+    ;; It used to outlive its loader for the runtime's life: twenty processes that each
+    ;; loaded a 3200-page memory and exited left 10 GB mapped and every handle callable.
+    (let (me (self)
+          loader (spawn (do (send me [:inst (instantiate *scalars-wat*)]) (receive (:go :ok))))
+          watch (monitor loader))
+      (receive
+        ([:inst inst]
+          ;; Shared while the owner lives: the handle is a capability.
+          (assert= (call inst "add" 2 3) 5)
+          (send loader :go)
+          (receive ([:down ^watch _ _] :ok) (after 10000 (is false)))
+          (is (= (try (call inst "add" 2 3) (catch e :closed)) :closed)))
+        (after 10000 (is false)))))
+  (test "a handle is an unguessable token, not a counter"
+    (let (first-inst (instantiate *scalars-wat*)
+          second-inst (instantiate *scalars-wat*))
+      (is (> first-inst 1000000))
+      (is (not (= (+ first-inst 1) second-inst)))
+      (close first-inst)
+      (close second-inst))))
 
 (describe "wasm: use-native binds exports as Brood functions"
   (test "bound names call straight through"

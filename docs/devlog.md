@@ -16531,3 +16531,58 @@ enrich every map: the user-throw test reds). Under the tree-walker the position 
 inside `std/contract.blsp` rather than the user's call — only the VM filters contract
 machinery out of positions (`is_contract_arm`); the caught map had no position at all
 before, on either engine.
+
+## 2026-10-08 — a whole-project review: forty-odd defects reproduced, then fixed
+
+Six reviewers read every layer at `0f5ff008` — heap/GC, VM + JIT, scheduler + distribution,
+builtins + host bindings, reader/checker/LSP, the stdlib — each reproducing a finding (or
+tracing a concrete path, marked plausible) before filing it. Seven workstreams then fixed them
+in this working tree, split by file ownership, each fix with a regression test at the entry
+point a caller reaches and each test sabotage-verified red. The per-finding record — finding,
+fix, guard — is `docs/review-2026-10-08.md`; this entry is what it taught.
+
+**Security first.** A dependency named `..` made a re-fetch `%rm-rf` the project itself: the
+guard asked only that SOME path component be `_deps`, and no entry point (manifest, fetched
+manifest, `nest add`, registry JSON) validated a name. Both layers are fixed — names are one
+plain component, and `%rm-rf` refuses `..` and anything not strictly inside `_deps`. The
+distribution handshake interned a peer's claimed node name before checking its MAC, so junk
+connections could exhaust the wire symbol budget for good; the name is now bytes until
+`ct_eq` passes. The HTTP server trusted framing (no body cap, `Content-Length` overrun kept,
+`Transfer-Encoding` ignored, workers dying without a response); markdown's scheme filter and
+`sse/frame` were injectable; `registry-install` took `file://`; wasm handles were guessable
+and outlived their process; PBKDF2 truncated its iteration count to one round.
+
+**Silent wrong answers, which is the class that matters most here.** A self-tail loop called
+through an alias after a rebind ran the old body at tiers 1 and 2 — the hot-reload guard
+assumed the name meant this arm when the frame began; frames now start at a sentinel epoch so
+the first back edge checks (the native tier refuses such an arm, `self-loop-name-rebound`).
+The linear-map rewrite accepted any value at the accumulator slot, so a loop that reset to
+`{}` crashed. A closure as a map key was lost at the first collection because its hash was
+handle bits a move rewrites — closures now carry a move-stable `identity`. The tree-walker's
+`let` let a closure see a later binding. A self-reported "ok" from `agent/update` preceded the
+update that killed it.
+
+**What the gates missed, and why.** Every one of these was reachable from ordinary Brood; the
+suite stayed green because each guard tested the piece its author wrote rather than the
+caller's entry point — KI-97's quiet-subscriber reaping was tested by calling `clear_if`
+directly while the death path never called it, and the tree-walker `let` bug is invisible to
+`brood --test` at `BROOD_TIER=0` (test bodies do not reach the tree-walker), so its guard is
+the Rust differential. The checker's new reserved-name lint passed its own tests and put 229
+warnings on the prelude's own definitions — caught only by running the project's zero-warning
+gate, not the feature's tests, the KI-106 lesson again; `boot::PRELUDE_PATHS` (pinned to
+`PRELUDE` by a test) now tells the checker which files define those names.
+
+**Breaking.** `proc/register` binds nothing for a dead pid. It briefly also refused a name a
+live process held; that was reverted before landing, because every one of the 22 callers
+(six in std, sixteen in bedit — a restarted logger, a test standing in as `:editor` and
+handing the name back) registers precisely to take the name over. `csv/decode` raises on
+an unterminated quote or junk after a closing quote. `%rm-rf` refuses `_deps` itself. Wasm
+handles are opaque tokens. `proc/system-monitor` of a dead pid raises.
+
+**Not done here, by decision:** inbound socket backpressure (a design question — the
+recommendation is an explicit re-arm mode, as an ADR) and preferring a restarting peer's new
+link (it would also tear down live links). Both are argued in the review record.
+
+**Perf gate needed elsewhere** (no benchmarks on this machine): the self-call fix touches
+frame entry and the first back edge per activation, and every closure creation now draws an
+identity from a thread-local block — `make ab` and `make ab-vm` before this ships.

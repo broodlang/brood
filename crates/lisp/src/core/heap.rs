@@ -1915,15 +1915,21 @@ impl Heap {
 
     /// The number of elements a range yields. O(1).
     pub fn range_len(&self, id: VecId) -> i64 {
+        // Saturate — a range longer than i64::MAX can't be materialised anyway.
+        self.range_len_exact(id).min(i64::MAX as i128) as i64
+    }
+
+    /// The EXACT number of elements a range yields, unsaturated. O(1). A wide range
+    /// (`i64::MIN..i64::MAX`) has more than `i64::MAX` elements, so anything that
+    /// distinguishes two ranges by length — equality, hashing — must use this, not
+    /// the saturating [`range_len`](Self::range_len).
+    pub fn range_len_exact(&self, id: VecId) -> i128 {
         let (lo, hi, step) = self.range_parts(id);
-        // step is non-zero and the range is non-empty by construction. Compute in
-        // i128: a wide range (e.g. i64::MIN..i64::MAX) overflows an i64 span even
-        // though its element count is meaningful. Saturate on the way back — a range
-        // longer than i64::MAX can't be materialised anyway.
+        // step is non-zero by construction; an empty range has a non-positive span.
         let (lo, hi, step) = (lo as i128, hi as i128, step as i128);
         let span = if step > 0 { hi - lo } else { lo - hi };
         let mag = step.abs();
-        (((span + mag - 1) / mag).min(i64::MAX as i128)) as i64
+        ((span + mag - 1) / mag).max(0)
     }
 
     /// Materialise a range's elements into a `Vec<Value>` of `Int`s — the slow

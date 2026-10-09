@@ -410,6 +410,33 @@ pub(crate) fn jit_tier_in_frame(
             arm.jit_code.store(crate::jit::BAILED, Release);
             return None;
         }
+        // A self-tail loop reached while its `dbg_name` no longer names it — an alias called
+        // after the name was rebound — must hand its tail call to the NEW binding, and only
+        // the VM's `Inst::SelfCall` guard does that: the native back-edge loops on the old
+        // body unconditionally. So such an arm stays on the VM, and (unlike a lowering
+        // bail) not for good: back the hotness counter off, so a later election re-observes
+        // the binding — a `def` restoring it lets the arm tier again.
+        {
+            let genv = heap.read_root_env(env);
+            record_self_global_ok(arm, heap, genv);
+            if arm.dbg_name.is_some()
+                && !arm.self_global_ok.load(Relaxed)
+                && arm
+                    .chunk
+                    .as_ref()
+                    .is_some_and(|c| c.code.iter().any(|i| matches!(i, Inst::SelfCall { .. })))
+            {
+                if crate::diagnostics::debug_flags::jit_bail_trace() {
+                    let name = arm
+                        .dbg_name
+                        .map(crate::core::value::symbol_name_ref)
+                        .unwrap_or("<closure>");
+                    eprintln!("[jit-bail] arm={name} reason=self-loop-name-rebound");
+                }
+                arm.jit_calls.store(0, Relaxed);
+                return None;
+            }
+        }
         arm.compile_epoch.store(heap.global_epoch(), Release);
         if arm
             .jit_code
@@ -427,7 +454,6 @@ pub(crate) fn jit_tier_in_frame(
             // constant isn't lowered onto the integer path (see `record_float_globals`).
             let genv = heap.read_root_env(env);
             record_float_globals(arm, heap, genv);
-            record_self_global_ok(arm, heap, genv);
             if JIT_COMPILER
                 .enqueue((arm.clone(), slot_tags, heap.runtime_tag()))
                 .is_err()

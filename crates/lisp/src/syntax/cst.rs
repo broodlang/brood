@@ -115,6 +115,14 @@ pub fn parse(src: &str) -> Node {
         depth: 0,
     };
     let mut children = Vec::new();
+    // A first-line `#!…` shebang is trivia — a `Comment` node — so every re-emission
+    // of the tree (`nest format`, LSP formatting, code actions) keeps it: the reader
+    // skips it, and this parser used to start past it too, so the lossless tree had
+    // no node for it and formatting a script deleted its shebang.
+    cst.s.skip_shebang();
+    if cst.s.pos() > 0 {
+        children.push(cst.leaf(NodeKind::Comment, 0));
+    }
     while cst.s.peek().is_some() {
         children.push(cst.trivia_or_form());
     }
@@ -358,7 +366,7 @@ impl<'a> Cst<'a> {
     /// `#{…}` as a set. (Without this the `#` scanned as a lone atom and the
     /// `{…}` as a separate map, so the formatter re-emitted the glued `#{` as
     /// `# {}` — two tokens — which no longer reads back as a set.) Any other
-    /// `#x` is an ordinary atom character (e.g. the symbol `#q`).
+    /// `#x` is an `Error` node, matching the reader, which refuses it.
     fn hash(&mut self, start: usize) -> Node {
         if self.s.starts_with("#b\"") {
             self.s.bump(); // '#'
@@ -368,8 +376,16 @@ impl<'a> Cst<'a> {
             self.s.bump(); // '#' — `seq` consumes the opening `{`
             self.seq(NodeKind::Set, '}', start)
         } else {
-            // `#` is an ordinary atom character (e.g. the symbol `#q`).
-            self.atom(start)
+            // Every other `#`-led token is a reader error (`#foo`, Clojure's `#(…)`,
+            // `#'x`, `#_`): an `Error` node over the token, so the CST does not hand
+            // tooling a symbol the reader refuses. For `#(` the token is the lone `#`
+            // and the list after it parses on its own — the parse resumes, as at
+            // every CST error.
+            self.s.read_atom();
+            if self.s.pos() == start {
+                self.s.bump(); // `#` followed by a delimiter is never empty-spanned
+            }
+            self.leaf(NodeKind::Error, start)
         }
     }
 
@@ -588,9 +604,41 @@ mod tests {
         // The empty set is still one Set node (the case the demo hit).
         assert_eq!(parse("#{}").forms().next().unwrap().kind, NodeKind::Set);
 
-        // A `#`-prefixed symbol like `#q` stays an ordinary atom — only `#{`
-        // opens a set.
-        assert_eq!(parse("#q").forms().next().unwrap().kind, NodeKind::Symbol);
+        // Any other `#`-led token is an Error, as the reader refuses it — the CST
+        // used to hand tooling `#q` as a symbol.
+        assert_eq!(parse("#q").forms().next().unwrap().kind, NodeKind::Error);
+    }
+
+    #[test]
+    fn hash_dispatch_the_reader_refuses_is_an_error_node() {
+        // `#(` is the lone `#` as an Error, then the list parses on its own.
+        let src = "#(+ 1 %)";
+        let root = parse(src);
+        let kinds: Vec<NodeKind> = root.forms().map(|n| n.kind).collect();
+        assert_eq!(kinds, vec![NodeKind::Error, NodeKind::List]);
+        assert_eq!(root.forms().next().unwrap().text(src), "#");
+        assert_eq!(root.text(src), src);
+        // `foo#` is still one symbol: `#` dispatches only at a token's start.
+        assert_eq!(parse("foo#").forms().next().unwrap().kind, NodeKind::Symbol);
+    }
+
+    #[test]
+    fn a_shebang_is_kept_as_a_comment_node() {
+        // The lossless tree must hold the shebang, or every re-emission (`nest
+        // format`, LSP formatting) deletes it.
+        let src = "#!/usr/bin/env brood\n(io/puts   \"hi\")";
+        let root = parse(src);
+        let first = &root.children[0];
+        assert_eq!(first.kind, NodeKind::Comment);
+        assert_eq!(first.text(src), "#!/usr/bin/env brood\n");
+        assert_eq!(root.forms().next().unwrap().kind, NodeKind::List);
+        let mut rebuilt = String::new();
+        for child in &root.children {
+            rebuilt.push_str(child.text(src));
+        }
+        assert_eq!(rebuilt, src);
+        // Not at the start of the text, `#!` is no shebang.
+        assert_eq!(parse(" #!x").forms().next().unwrap().kind, NodeKind::Error);
     }
 
     #[test]

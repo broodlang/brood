@@ -173,3 +173,18 @@
       (assert= 400 (count ms))
       (assert= "vc1" (get (first (csv/decode-maps (str header "\n" row))) "c1"))
       (assert= "vc400" (get (first (csv/decode-maps (str header "\n" row))) "c400")))))
+
+(describe "decode — malformed quoting raises, never decodes to rows"
+  (test "an unterminated quoted field raises instead of swallowing the rest"
+    ;; it used to read `a,"b\n1,2` as ONE row whose second field held everything after
+    ;; the quote
+    (assert-error (csv/decode "a,\"b\n1,2"))
+    (assert-error (csv/decode "\"never closed")))
+  (test "text after a closing quote raises instead of merging into the field"
+    (assert-error (csv/decode "\"a\"b"))
+    (assert-error (csv/decode "x,\"a\" ,y")))
+  (test "decode-maps raises too"
+    (assert-error (csv/decode-maps "h1,h2\n\"a\"b,c")))
+  (test "well-formed quoting still decodes"
+    (assert= (list ["a" "b,c" "d\"e"]) (csv/decode "a,\"b,c\",\"d\"\"e\""))
+    (assert= (list ["a"] ["b"]) (csv/decode "\"a\"\r\n\"b\"\r\n"))))

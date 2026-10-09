@@ -25,13 +25,34 @@ read+write primitive for compare-and-swap-style patterns.")
 ;; instead of a second hand-rolled request/reply that blocked forever against a dead
 ;; agent.
 
+;; A synchronous op runs the caller's `f` INSIDE the agent, so a throwing `f` is the
+;; caller's error, not the agent's: `agent-apply` catches it, the reply carries it back
+;; (`[:raised problem]`, beside `[:ok value]`), `agent-result` re-raises it in the caller,
+;; and the agent carries on with its OLD state. `update` used to reply `:ok` BEFORE
+;; applying `f`, so a throwing `f` reported success and then killed the agent — every
+;; later call raised "server died" for an update the caller had been told succeeded.
+;; A `cast` has no caller to tell, so a throwing cast `f` still crashes the agent loudly.
+(defn- agent-apply (f state)
+  (try [:ok (f state)] (catch problem [:raised problem])))
+
 (defn- agent-loop (state)
   (receive
-    ([:$call from r [:get f]] (send from [:reply r (f state)]) (agent-loop state))
-    ([:$call from r [:update f]] (send from [:reply r :ok]) (agent-loop (f state)))
-    ([:$call from r [:get-and-update f]] (let (res (f state))
-                                           (send from [:reply r (first res)])
-                                           (agent-loop (second res))))
+    ([:$call from r [:get f]] (send from [:reply r (agent-apply f state)]) (agent-loop state))
+    ([:$call from r [:update f]] (match (agent-apply f state)
+                                   ([:ok next] (send from [:reply r [:ok :ok]])
+                                     (agent-loop next))
+                                   (raised (send from [:reply r raised]) (agent-loop state))))
+    ([:$call from r [:get-and-update f]] (match (agent-apply (fn (current)
+                                                               (let (pair (f current))
+                                                                 (if (and (vector? pair)
+                                                                       (= (count pair) 2))
+                                                                   pair
+                                                                   (error "agent/get-and-update: f must return [result new-state], got "
+                                                                     (pr-str pair)))))
+                                                  state)
+                                           ([:ok [result next]] (send from [:reply r [:ok result]])
+                                             (agent-loop next))
+                                           (raised (send from [:reply r raised]) (agent-loop state))))
     ([:$call from r :stop] (send from [:reply r :ok]))
     ([:$cast f] (agent-loop (f state)))
     ([:$stop] nil)
@@ -59,25 +80,37 @@ if its owner crashes and vice versa."
 ;; hand-rolled `(receive ([:reply ^r v] v))` these replaced had neither, so any of
 ;; them parked the caller FOREVER — no error, no timeout, nothing to wake it.
 
+(defn- agent-result (reply)
+  ;; Unwrap a synchronous op's reply: the value, or the caller's own `f` error re-raised.
+  (match reply
+    ([:ok value] value)
+    ([:raised problem] (throw problem))))
+
 (defn get (pid f)
   "Call `(f state)` inside the agent and return the result. Blocks until the
 agent replies (up to 5 s; a dead agent raises rather than hanging). Use
-`identity` to return the state as-is."
-  (gen/call pid [:get f]))
+`identity` to return the state as-is. If `f` raises, the error is re-raised here and
+the agent keeps running."
+  (agent-result (gen/call pid [:get f])))
 
 (defn update (pid f)
-  "Replace the agent's state with `(f state)`. Blocks until acknowledged (up to
-5 s; a dead agent raises rather than hanging)."
-  (gen/call pid [:update f]))
+  "Replace the agent's state with `(f state)` and return `:ok`. Blocks until applied (up
+to 5 s; a dead agent raises rather than hanging). If `f` raises, the error is re-raised
+here and the agent keeps its previous state."
+  (agent-result (gen/call pid [:update f])))
 
 (defn get-and-update (pid f)
   "Atomically read and update: `f` must return a 2-vector `[result new-state]`.
 Returns `result` and leaves the agent with `new-state`. Blocks until the agent
-replies (up to 5 s; a dead agent raises rather than hanging)."
-  (gen/call pid [:get-and-update f]))
+replies (up to 5 s; a dead agent raises rather than hanging). If `f` raises (or returns
+anything but a 2-vector), the error is re-raised here and the agent keeps its previous
+state."
+  (agent-result (gen/call pid [:get-and-update f])))
 
 (defn cast (pid f)
-  "Fire-and-forget update: apply `(f state)` asynchronously, no reply waited."
+  "Fire-and-forget update: apply `(f state)` asynchronously, no reply waited. There is no
+caller to report to, so an `f` that raises crashes the agent (let it crash) — use
+`update` when the error should come back to you."
   (send pid [:$cast f]))
 (sig cast ((or map pid) any -> nil))
 

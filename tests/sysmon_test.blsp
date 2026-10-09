@@ -82,7 +82,27 @@ worker's mailbox so it can't satisfy a later test's receive."
       (assert= true (get cfg :exit))
       (assert= false (get cfg :deopt))
       (assert= 250 (get cfg :gc-min-pause-us)))
-    (proc/system-monitor nil)))
+    (proc/system-monitor nil))
+
+  ;; The death-disarm ran only while some subscriber had a kind SELECTED, so one that
+  ;; selected nothing outlived its process for good (KI-97) — here through a real death,
+  ;; not by calling the reaper directly.
+  :isolated (test "a subscriber that selects nothing is still reaped when it dies"
+    (let (me (self)
+          quiet (spawn (do (proc/system-monitor (self) {}) (send me :armed) (receive (:go nil)))))
+      (assert= :armed (receive (:armed :armed) (after *test-wait-ms* :timeout)))
+      (assert= [quiet] (mapv (proc/system-monitor :all) (fn (c) (get c :pid))))
+      (send quiet :go)
+      (assert= [] (sysmon-wait-empty 100))))
+
+  ;; A subscription on a corpse is never delivered and never removed — and one selecting
+  ;; :exit-abnormal stood the kernel's own crash line down for every later crash.
+  :isolated (test "subscribing a pid that has already exited is refused and arms nothing"
+    (let ([gone r] (spawn-monitor :done))
+      (receive ([:down ^r _ _] nil) (after *test-wait-ms* nil))
+      (is (includes? (error-of (proc/system-monitor gone {:exit-abnormal true}))
+            "not a live process"))
+      (assert= [] (proc/system-monitor :all)))))
 
 (describe "system-monitor events"
   :isolated (test "spawn and exit events arrive with pid, parent, and reason"

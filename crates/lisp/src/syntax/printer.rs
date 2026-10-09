@@ -130,7 +130,12 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
                 }
                 first = false;
                 write_value(out, heap, Value::int(i), readable, depth + 1);
-                i += step;
+                // A range ending near `i64::MAX`/`MIN` would wrap here (and loop
+                // forever in release): the next element past the edge does not exist.
+                i = match i.checked_add(step) {
+                    Some(next) => next,
+                    None => break,
+                };
             }
             out.push(')');
         }
@@ -288,7 +293,10 @@ fn write_list(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u3
                     }
                     first = false;
                     write_value(out, heap, Value::int(i), readable, depth + 1);
-                    i += step;
+                    i = match i.checked_add(step) {
+                        Some(next) => next,
+                        None => break, // the range's last element sits at the i64 edge
+                    };
                 }
                 break;
             }
@@ -352,14 +360,15 @@ fn write_symbol(out: &mut String, name: &str, readable: bool, keyword: bool) {
 /// Would the bare `name` fail to read back as this same symbol/keyword? Symbols and
 /// keywords built from arbitrary strings (`(symbol "a b")`, `(keyword "")`) can hold
 /// spellings that aren't a clean atom token — those need `|…|` bars to round-trip.
-fn symbol_needs_bars(name: &str, keyword: bool) -> bool {
+pub fn symbol_needs_bars(name: &str, keyword: bool) -> bool {
     use crate::syntax::atom::{classify, is_delimiter, AtomKind};
     // Not a single clean atom token: empty, or holding whitespace / a delimiter / the
-    // bar-escape chars themselves. True for both symbols and keywords.
+    // bar-escape chars themselves / a control character (which the reader refuses in a
+    // bare token but reads verbatim between bars). True for both symbols and keywords.
     if name.is_empty()
         || name
             .chars()
-            .any(|c| is_delimiter(c) || c == '|' || c == '\\')
+            .any(|c| is_delimiter(c) || c == '|' || c == '\\' || c.is_control())
     {
         return true;
     }

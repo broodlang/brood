@@ -35,7 +35,7 @@ pub struct Scanner<'a> {
     pos: usize,
     /// Byte offsets of every line *start* in `src`. `line_starts[0] == 0`;
     /// each subsequent entry is the byte just past a line break (`\n` — which
-    /// also covers CRLF — a lone `\r`, or U+2028/U+2029). So the line
+    /// also covers CRLF — or a lone `\r`; see [`line_starts`]). So the line
     /// containing byte `b` is the largest `i` with `line_starts[i] <= b`.
     /// ~4 bytes per source line — 5–6 KB for the prelude, negligible.
     line_starts: Vec<u32>,
@@ -87,50 +87,57 @@ pub enum BarScan {
     Unterminated,
 }
 
+/// The byte offset of every line start in `src`: `0`, then the byte just past each
+/// line break. **This is the language's one definition of a line break** — `\n`,
+/// `\r\n` (one break, recorded at its `\n`) and a lone `\r` — and every consumer that
+/// turns a byte offset into a line (the reader's diagnostics, the CST, the language
+/// server's `LineIndex`) builds its table here, so a `line:col` means the same line
+/// everywhere. It is exactly the set an LSP client breaks on: the Unicode separators
+/// U+2028/U+2029 are deliberately NOT breaks — they once were here, and every
+/// diagnostic after one then named a line the editor did not have.
+pub fn line_starts(src: &str) -> Vec<u32> {
+    let bytes = src.as_bytes();
+    // Sized for the common `\n`-only case; a lone CR just grows the Vec.
+    let newline_count = bytes.iter().filter(|&&byte| byte == b'\n').count();
+    let mut starts = Vec::with_capacity(newline_count + 1);
+    starts.push(0);
+    for (index, &byte) in bytes.iter().enumerate() {
+        match byte {
+            b'\n' => starts.push((index + 1) as u32),
+            // CRLF's break is recorded by its `\n`; only a lone CR breaks here.
+            b'\r' if bytes.get(index + 1) != Some(&b'\n') => starts.push((index + 1) as u32),
+            _ => {}
+        }
+    }
+    starts
+}
+
+/// The byte length of a first-line `#!…` shebang in `src`, through its line break, or
+/// 0 when `src` has none. A shebang is a property of a source FILE (a script marked
+/// executable runs as `#!/usr/bin/env brood`), so only the whole-source readers skip it
+/// and the CST keeps it as a comment; a datum read (`reflect/read-string`) sees `#!` as
+/// the dispatch error it is.
+pub fn shebang_len(src: &str) -> usize {
+    if !src.starts_with("#!") {
+        return 0;
+    }
+    let bytes = src.as_bytes();
+    match bytes
+        .iter()
+        .position(|&byte| byte == b'\n' || byte == b'\r')
+    {
+        Some(index) if bytes[index] == b'\r' && bytes.get(index + 1) == Some(&b'\n') => index + 2,
+        Some(index) => index + 1,
+        None => src.len(),
+    }
+}
+
 impl<'a> Scanner<'a> {
     pub fn new(src: &'a str) -> Self {
-        // Build the line-start table in one byte-walk. `\n` covers Unix and
-        // (via its second byte) CRLF; a *lone* `\r` (classic-Mac, or a stray
-        // CR mid-file) and the Unicode line/paragraph separators U+2028/U+2029
-        // also break a line — otherwise every diagnostic after one reports a
-        // wrong line:col (kernel audit). Sized for the common `\n`-only case;
-        // the rare extra breaks just grow the Vec.
-        let bytes = src.as_bytes();
-        let nl_count = bytes.iter().filter(|&&b| b == b'\n').count();
-        let mut line_starts = Vec::with_capacity(nl_count + 1);
-        line_starts.push(0);
-        let mut i = 0;
-        while i < bytes.len() {
-            match bytes[i] {
-                b'\n' => line_starts.push((i + 1) as u32),
-                // CRLF's break is recorded by its `\n`; only a lone CR breaks here.
-                b'\r' if bytes.get(i + 1) != Some(&b'\n') => line_starts.push((i + 1) as u32),
-                // U+2028 LINE SEPARATOR (E2 80 A8) / U+2029 PARAGRAPH
-                // SEPARATOR (E2 80 A9) in UTF-8.
-                0xE2 if bytes.get(i + 1) == Some(&0x80)
-                    && matches!(bytes.get(i + 2), Some(&0xA8) | Some(&0xA9)) =>
-                {
-                    line_starts.push((i + 3) as u32);
-                    i += 3;
-                    continue;
-                }
-                _ => {}
-            }
-            i += 1;
-        }
-        // `#!…` on the first line is a shebang, not a form (no form begins with `#!`): skip
-        // it, so a script marked executable runs as `#!/usr/bin/env brood` — it was a
-        // parse error at 1:1 (2026-09-30). The line-start table above already counts it,
-        // so positions stay right.
-        let pos = if src.starts_with("#!") {
-            src.find('\n').map(|i| i + 1).unwrap_or(src.len())
-        } else {
-            0
-        };
         Scanner {
             src,
-            pos,
-            line_starts,
+            pos: 0,
+            line_starts: line_starts(src),
             ascii_only: src.is_ascii(),
             // line 0 never occurs (lines are 1-based), so this cannot be mistaken for a hit.
             pos_memo: std::cell::Cell::new((0, 0, 0)),
@@ -143,6 +150,15 @@ impl<'a> Scanner<'a> {
     #[inline]
     pub fn pos(&self) -> usize {
         self.pos
+    }
+
+    /// Step past a first-line shebang ([`shebang_len`]). For the whole-source readers
+    /// only; call before reading anything. The line-start table already counts the
+    /// shebang's line, so positions after it stay right.
+    pub fn skip_shebang(&mut self) {
+        if self.pos == 0 {
+            self.pos = shebang_len(self.src);
+        }
     }
 
     #[inline]
@@ -214,7 +230,9 @@ impl<'a> Scanner<'a> {
     /// own copy because it must record the comment's span as a node.
     pub fn skip_line_comment(&mut self) {
         while let Some(c) = self.bump() {
-            if c == '\n' {
+            // A comment ends at a line break — [`line_starts`]' definition, so a lone
+            // `\r` ends one too (a CRLF's `\r` does not: its `\n` ends it).
+            if c == '\n' || (c == '\r' && self.peek() != Some('\n')) {
                 break;
             }
         }
@@ -584,18 +602,47 @@ mod tests {
     }
 
     #[test]
-    fn line_starts_count_lone_cr_and_unicode_separators() {
-        // CRLF is one break (via its `\n`); a lone CR, U+2028, and U+2029
-        // each break a line of their own (kernel audit: diagnostics after a
-        // lone CR reported a wrong line:col).
+    fn line_starts_count_lone_cr_but_not_unicode_separators() {
+        // CRLF is one break (via its `\n`); a lone CR breaks a line of its own
+        // (kernel audit: diagnostics after a lone CR reported a wrong line:col).
+        // U+2028/U+2029 do NOT: an LSP client does not break on them, so a
+        // diagnostic after one named a line the editor did not have.
         let src = "a\r\nb\rc\u{2028}d\u{2029}e";
         let s = Scanner::new(src);
         let pos_of = |ch: char| s.pos_at(src.find(ch).unwrap());
         assert_eq!((pos_of('a').line, pos_of('a').col), (1, 1));
         assert_eq!((pos_of('b').line, pos_of('b').col), (2, 1), "after CRLF");
         assert_eq!((pos_of('c').line, pos_of('c').col), (3, 1), "after lone CR");
-        assert_eq!((pos_of('d').line, pos_of('d').col), (4, 1), "after U+2028");
-        assert_eq!((pos_of('e').line, pos_of('e').col), (5, 1), "after U+2029");
+        assert_eq!(
+            (pos_of('d').line, pos_of('d').col),
+            (3, 3),
+            "U+2028 is no break"
+        );
+        assert_eq!(
+            (pos_of('e').line, pos_of('e').col),
+            (3, 5),
+            "U+2029 is no break"
+        );
+    }
+
+    #[test]
+    fn a_comment_ends_at_a_lone_cr() {
+        let mut s = Scanner::new("; c\rx");
+        s.skip_trivia();
+        assert_eq!(s.peek(), Some('x'));
+        let mut crlf = Scanner::new("; c\r\nx");
+        crlf.skip_trivia();
+        assert_eq!(crlf.peek(), Some('x'));
+    }
+
+    #[test]
+    fn the_shebang_is_measured_through_its_line_break() {
+        assert_eq!(shebang_len("#!/usr/bin/env brood\n(x)"), 21);
+        assert_eq!(shebang_len("#!b\r\n(x)"), 5);
+        assert_eq!(shebang_len("#!b"), 3);
+        assert_eq!(shebang_len("(x)"), 0);
+        // Only the whole-source readers skip it; a bare scanner starts at 0.
+        assert_eq!(Scanner::new("#!b\nx").pos(), 0);
     }
 
     /// The ASCII fast path in `pos_at` must agree with the char-walk it replaces, at

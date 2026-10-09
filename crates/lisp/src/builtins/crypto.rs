@@ -361,11 +361,17 @@ pub(super) fn pbkdf2_sha256_fn(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
     let salt = collect_bytes("%pbkdf2-sha256-bytes", arg(args, 1), heap)?;
     let iterations = expect_int(heap, "%pbkdf2-sha256-bytes", arg(args, 2))?;
     let key_len = expect_int(heap, "%pbkdf2-sha256-bytes", arg(args, 3))?;
-    if iterations <= 0 {
-        return Err(LispError::runtime(
-            "%pbkdf2-sha256-bytes: iterations must be positive",
-        ));
-    }
+    // The loop counter is a u32 (RFC 2898's `c`), so a count past u32::MAX is refused
+    // rather than truncated: `as u32` made 2^32 + 1 iterations derive the 1-iteration key.
+    let iterations = match u32::try_from(iterations) {
+        Ok(count) if count >= 1 => count,
+        _ => {
+            return Err(LispError::runtime(format!(
+                "%pbkdf2-sha256-bytes: iterations must be in 1..={}, got {iterations}",
+                u32::MAX
+            )));
+        }
+    };
     if !(1..=512).contains(&key_len) {
         return Err(LispError::runtime(
             "%pbkdf2-sha256-bytes: key-len must be in 1..=512",
@@ -383,7 +389,7 @@ pub(super) fn pbkdf2_sha256_fn(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
         let mut u: Vec<u8> = mac.finalize().into_bytes().to_vec();
         let mut t = u.clone();
         // U_n = HMAC(password, U_{n-1}); T_i = XOR of all U_j
-        for _ in 1..(iterations as u32) {
+        for _ in 1..iterations {
             let mut mac2 = HmacSha256::new_from_slice(&pw)
                 .map_err(|e| LispError::runtime(format!("%pbkdf2-sha256-bytes: {e}")))?;
             mac2.update(&u);

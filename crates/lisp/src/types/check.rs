@@ -1847,6 +1847,47 @@ pub fn check_forms_here(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, S
     check_forms(heap, forms, &[], super::strict_checking(), true)
 }
 
+/// A top-level `(def name …)` (what `defn`/`def-`/… expand to) of a RESERVED name — one
+/// the language ships, ADR-166 — always fails when it runs (`eval`'s `def` arm refuses
+/// it before evaluating the value), so the checker says so up front instead of passing a
+/// file that cannot load. The same predicate the runtime asks, `Heap::is_reserved_global`
+/// on the name as `def` roots it, so the two cannot disagree about the list.
+///
+/// Only outside a module: inside `(defmodule m …)` the expanded head is already `m/name`,
+/// which is reserved only when `m` is an embedded std module — and loading that module is
+/// exactly the one context the runtime exempts, so checking std's own sources must not
+/// warn on every definition in them. For the same reason a form read from one of the
+/// prelude's own files (`boot::PRELUDE_PATHS`) is the definition, not a redefinition —
+/// the file-checking primitives set the heap's current file for the walk.
+fn reserved_def_warning(heap: &Heap, expanded: Value) -> Option<String> {
+    if heap.compile_ns().is_some() {
+        return None;
+    }
+    if heap
+        .current_file()
+        .is_some_and(crate::boot::is_prelude_source)
+    {
+        return None;
+    }
+    let items = list_items(heap, expanded)?;
+    let (Some(Value::Sym(head)), Some(Value::Sym(name))) = (items.first(), items.get(1)) else {
+        return None;
+    };
+    if value::symbol_name_ref(*head) != kw::DEF {
+        return None;
+    }
+    let name = *name;
+    let name = heap.root_qualified_ref(name).unwrap_or(name);
+    heap.is_reserved_global(name).then(|| {
+        format!(
+            "`{}` is a reserved name — it ships with Brood and cannot be redefined, so this \
+             definition fails when it runs; pick another name, or define it inside a \
+             `(defmodule …)`",
+            value::symbol_name(name)
+        )
+    })
+}
+
 fn check_forms(
     heap: &mut Heap,
     forms: &[Value],
@@ -2010,6 +2051,9 @@ fn check_forms(
             // references, ADR-227 follow-up), relocating `f` — re-read the live handle
             // from the root stack before the header checks that dereference it.
             let f = heap.root_at(roots_base + j);
+            if let Some(message) = reserved_def_warning(heap, exp) {
+                out.push((heap.form_pos_only(f), message));
+            }
             // Make the file's imports + required modules resolvable for the rest of the walk.
             // For a `(defmodule … (:use …))` header, populate the import table DIRECTLY from its
             // clauses (`setup_check_imports`) instead of evaling the expanded header — the eval

@@ -51,3 +51,15 @@
   (test "an error escaping a contract shim reports the innermost positioned call site, not the catch site"
     (let (line (try (pep-through-shim (fn (x) x)) (catch e (get e :line))))
       (assert= 33 line))))
+
+;; An error a VM instruction raises inside a STD function carries that function's file
+;; (2026-10-08). `tag_pos` set a line and column only, and the file runner then filled in
+;; the user's file: `std/math.blsp`'s 121:13 reported under the script's name, with no
+;; excerpt, where the tree-walker named `std/math.blsp`.
+(defn pep-mod (a) (math/mod a 0))
+
+(describe "errors raised in std code name the std file"
+  (test "a std function's failing instruction reports its own file"
+    (let (file (try (pep-mod 7) (catch e (get e :file))))
+      (is (string? file))
+      (is (string/ends-with? file "math.blsp")))))

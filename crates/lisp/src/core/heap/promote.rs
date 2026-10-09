@@ -390,6 +390,7 @@ impl Heap {
             doc: cl.doc,
             env,
             module: cl.module,
+            identity: cl.identity,
         };
         // Fill the reserved slot exactly once. The handle isn't published (bound
         // in a global / shipped to a process) until `promote` returns, so nothing

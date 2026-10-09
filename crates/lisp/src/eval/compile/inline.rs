@@ -522,6 +522,15 @@ pub(crate) fn first_arg_is_local(args: &[Node], s: usize) -> bool {
 /// occur only at a sink (so the new map is linearly consumed, never aliased).
 /// Anything else → not linear (bail). `sink` is this position's flow role.
 pub(crate) fn linmap_linear(node: &Node, s: usize, sink: LinSink, idiom: Option<LinIdiom>) -> bool {
+    // The next iteration's accumulator must BE the table: the rewritten body runs table
+    // ops on whatever arrives in slot `s`. So at a `SelfArg` sink only `s` itself or an
+    // update of `s` may flow — a fresh `{}`, a global, another local, or a read result
+    // would reach `table-add` as a plain value (`(tally (rest xs) {})` crashed with
+    // "expected table, got map"). A `Return` sink stays lenient: the wrapper snapshots
+    // the result only when it is the table.
+    if sink == LinSink::SelfArg && !linmap_yields_acc(node, s, idiom) {
+        return false;
+    }
     let rest_linear = |rest: &[Node]| rest.iter().all(|a| linmap_linear(a, s, LinSink::No, idiom));
     match node {
         Node::Local(k) => *k != s || sink != LinSink::No,
@@ -605,6 +614,21 @@ pub(crate) fn linmap_linear(node: &Node, s: usize, sink: LinSink, idiom: Option<
     }
 }
 
+/// Is `node`'s value (shallowly) the accumulator `s` — `s` itself, an update op or fused
+/// add applied to `s`, or a control form whose sink positions [`linmap_linear`] checks in
+/// turn? The shape a `SelfArg` sink demands.
+fn linmap_yields_acc(node: &Node, s: usize, idiom: Option<LinIdiom>) -> bool {
+    match node {
+        Node::Local(k) => *k == s,
+        Node::Call { callee, args, .. } => call_head_sym(callee).is_some_and(|h| {
+            (first_arg_is_local(args, s) && linmap_update_op(h).is_some())
+                || idiom.is_some_and(|i| i.fused_add(h, args, s).is_some())
+        }),
+        Node::If(..) | Node::Do(_) | Node::LetBind { .. } => true,
+        _ => false,
+    }
+}
+
 /// Does `s` appear as the first arg of an UPDATE op anywhere? (Only then is the
 /// rewrite a win — a read-only accumulator gains nothing.)
 pub(crate) fn linmap_has_update(node: &Node, s: usize, idiom: Option<LinIdiom>) -> bool {
@@ -683,7 +707,9 @@ pub(crate) fn linmap_probe_fn(heap: &Heap, params: &[Symbol], body: &[Value]) ->
     }
     let node = compile_body(heap, body, &mut scope, true)?;
     let idiom = LinIdiom::resolve(heap);
-    (linmap_has_update(&node, 0, idiom) && linmap_linear(&node, 0, LinSink::Return, idiom))
+    // The literal's return IS the next accumulator (the fold threads it back in), so it is
+    // a `SelfArg` sink, not a `Return`: `(if (= x :reset) {} (assoc acc …))` must decline.
+    (linmap_has_update(&node, 0, idiom) && linmap_linear(&node, 0, LinSink::SelfArg, idiom))
         .then_some(())
 }
 
