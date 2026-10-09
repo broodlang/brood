@@ -6,6 +6,8 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+## v0.37.0 — a whole-project review: forty-six defects fixed, inbound flow control, and every known issue closed
+
 A whole-project review: every finding reproduced, fixed, and guarded by a sabotage-verified
 test (`docs/review-2026-10-08.md`).
 
