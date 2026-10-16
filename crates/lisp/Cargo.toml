@@ -196,7 +196,7 @@ smallvec = { version = "1", features = ["union"] }
 # the row width). `num-traits` for `Zero`/`Signed`/`ToPrimitive`. (Even division
 # uses `BigInt`'s inherent `%`/`/`, which truncate toward zero like i64 — so no
 # `num-integer`/`div_rem` dependency is needed.)
-num-bigint = "0.4.6"
+num-bigint = "0.5.1"
 num-traits = "0.2"
 # Arbitrary-precision base-10 decimals (`Value::Decimal`): exact money / Postgres
 # `numeric` values a binary `f64` can't represent. Built on `num-bigint` (already a
