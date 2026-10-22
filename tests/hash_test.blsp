@@ -202,6 +202,30 @@
                  "daa833b7d6b8a702038b274eaea3f4e4be9d914eeb61f1702e696c203a126854")
         (encoding/hex-encode-bytes m)))))
 
+(describe "blake3"
+  ;; Vectors from the BLAKE3 reference implementation (empty input is
+  ;; test_vectors.json's input_len 0; "abc" is the b3sum digest).
+  (test "known digest for empty string"
+    (assert= "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+      (hash/blake3 "")))
+  (test "known digest for abc"
+    (assert= "6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85"
+      (hash/blake3 "abc")))
+  (test "output length is 64 hex chars"
+    (assert= 64 (string/length (hash/blake3 "anything"))))
+  (test "bytes and string forms agree"
+    (assert= (hash/blake3 "abc") (hash/blake3-bytes hash-test-abc)))
+  (test "blake3-raw: 32 bytes, hex of it is blake3-bytes"
+    (let (raw-digest (hash/blake3-raw hash-test-abc))
+      (assert= 32 (count raw-digest))
+      (assert= (hash/blake3-bytes hash-test-abc) (encoding/hex-encode-bytes raw-digest))))
+  (test "a bytes value and a vector of the same bytes digest the same"
+    (assert= (%digest :blake3 (string/->bytes "abc")) (%digest :blake3 [97 98 99])))
+  (test "different inputs give different digests"
+    (is (not (= (hash/blake3 "a") (hash/blake3 "b")))))
+  (test "%hmac refuses :blake3"
+    (assert-error (%hmac :blake3 [1 2 3] [4 5 6]))))
+
 (describe "string"
   (test "returns an integer"
     (is (int? (hash/string "hello"))))

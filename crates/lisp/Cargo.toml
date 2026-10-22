@@ -236,6 +236,11 @@ hmac = "0.13"
 sha2 = "0.11"
 sha1 = "0.11"
 md-5 = "0.11"
+# BLAKE3 for `(%digest :blake3 …)` (content-addressed chunks) and the wasm host's
+# compiled-component cache key. `pure` keeps the build free of the crate's C/assembly
+# back ends: x86 still gets its Rust SSE2/SSE4.1/AVX2 intrinsics (only AVX-512 is
+# lost), and an aarch64 cross build (a Raspberry Pi) needs no cross C compiler.
+blake3 = { version = "1.8", features = ["pure"] }
 # Cryptographically-strong random nonces for the handshake. `getrandom` reads
 # the OS RNG directly — no allocator, no global state, just bytes.
 getrandom = "0.4"

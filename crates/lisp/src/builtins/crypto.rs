@@ -1,6 +1,6 @@
 //! Cryptographic primitives: digests, HMAC, authenticated encryption, key
 //! derivation, and a CSPRNG. Rust *mechanism* only — the single place the kernel
-//! reaches for the `md5`/`sha1`/`sha2`/`hmac`/`chacha20poly1305` crates; all
+//! reaches for the `md5`/`sha1`/`sha2`/`blake3`/`hmac`/`chacha20poly1305` crates; all
 //! string-input / hex-output / nonce-generation *policy* is Brood in
 //! `std/hash.blsp` / `std/crypto.blsp`. Raw bytes in, raw `bytes` out (via
 //! [`bytes_to_value`]), so digests chain without a hex round-trip at each step.
@@ -18,8 +18,9 @@ pub(super) fn register(primitives: &mut super::Primitives) {
     use crate::core::value::{Arity, Tag};
     use crate::types::{Sig, Ty};
     // The two hashing primitives. `%digest` and `%hmac` take an algorithm keyword
-    // (:md5/:sha1/:sha256/:sha384/:sha512) + byte-sequence input and return the
-    // RAW digest/MAC as a bytes value. Everything else — string input (via
+    // (:md5/:sha1/:sha256/:sha384/:sha512, and :blake3 for `%digest` only) +
+    // byte-sequence input and return the RAW digest/MAC as a bytes value.
+    // Everything else — string input (via
     // `string->utf8-bytes`), hex output (via `bytes->hex`), and the public
     // `sha256`/`hmac-sha256`/… names — is Brood policy in std/hash.blsp. (Collapsed
     // the former 15 `%sha*`/`%md5` + 6 `%hmac-*` prims to these two: ADR-006, the
@@ -30,14 +31,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(2),
         Sig::new(vec![kw, any], bytes_ty),
         &["algo", "bytes"],
-        "Raw digest of a byte sequence (bytes value, vector, or list of byte ints 0–255) under algorithm keyword `algo` (:md5 :sha1 :sha256 :sha384 :sha512), returned as a bytes value (not hex). The one digest primitive; the public sha256/md5/… hex/string names are Brood over this in std/hash.blsp.",
+        "Raw digest of a byte sequence (bytes value, vector, or list of byte ints 0–255) under algorithm keyword `algo` (:md5 :sha1 :sha256 :sha384 :sha512 :blake3), returned as a bytes value (not hex). The one digest primitive; the public sha256/md5/… hex/string names are Brood over this in std/hash.blsp.",
         digest);
     primitives.def(
         "%hmac",
         Arity::exact(3),
         Sig::new(vec![kw, any, any], bytes_ty),
         &["algo", "key-bytes", "msg-bytes"],
-        "HMAC of `msg-bytes` keyed by `key-bytes` (both byte sequences) under algorithm keyword `algo` (:md5 :sha1 :sha256 :sha384 :sha512), returned as a bytes value (raw MAC, not hex). The public hmac-sha256/… names are Brood over this in std/hash.blsp.",
+        "HMAC of `msg-bytes` keyed by `key-bytes` (both byte sequences) under algorithm keyword `algo` (:md5 :sha1 :sha256 :sha384 :sha512; not :blake3, which is keyed differently and has no HMAC), returned as a bytes value (raw MAC, not hex). The public hmac-sha256/… names are Brood over this in std/hash.blsp.",
         hmac);
     primitives.def(
         "%random-bytes",
@@ -104,6 +105,9 @@ enum HashAlgo {
     Sha256,
     Sha384,
     Sha512,
+    /// BLAKE3, 32-byte output. Digest only: BLAKE3 has its own keyed mode and
+    /// no HMAC construction, so `%hmac` refuses it rather than inventing one.
+    Blake3,
 }
 
 fn hash_algo(name: &'static str, kw: Value, heap: &mut Heap) -> Result<HashAlgo, LispError> {
@@ -116,8 +120,9 @@ fn hash_algo(name: &'static str, kw: Value, heap: &mut Heap) -> Result<HashAlgo,
         "sha256" => Ok(HashAlgo::Sha256),
         "sha384" => Ok(HashAlgo::Sha384),
         "sha512" => Ok(HashAlgo::Sha512),
+        "blake3" => Ok(HashAlgo::Blake3),
         other => Err(LispError::runtime(format!(
-            "{name}: unknown algorithm :{other} (want :md5 :sha1 :sha256 :sha384 :sha512)"
+            "{name}: unknown algorithm :{other} (want :md5 :sha1 :sha256 :sha384 :sha512 :blake3)"
         ))),
     }
 }
@@ -151,6 +156,7 @@ pub(super) fn digest(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             use sha2::{Digest, Sha512};
             Sha512::digest(&bytes).to_vec()
         }
+        HashAlgo::Blake3 => blake3::hash(&bytes).as_bytes().to_vec(),
     };
     Ok(bytes_to_value(&out, heap))
 }
@@ -195,6 +201,11 @@ pub(super) fn hmac(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             let mut mac = Hmac::<Sha512>::new_from_slice(&key).map_err(mac_err)?;
             mac.update(&msg);
             mac.finalize().into_bytes().to_vec()
+        }
+        HashAlgo::Blake3 => {
+            return Err(LispError::runtime(
+                "%hmac: :blake3 has no HMAC (BLAKE3 has its own keyed mode); want :md5 :sha1 :sha256 :sha384 :sha512",
+            ));
         }
     };
     Ok(bytes_to_value(&out, heap))
