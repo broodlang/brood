@@ -26,7 +26,7 @@
 //! Mechanism only — loading policy (paths, manifests, `use-native` binding)
 //! lives in `std/wasm.blsp` and the package manager.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
 use wasmtime::component::{Component, Func, Linker, Type, Val};
@@ -59,6 +59,10 @@ const MAX_GUEST_BYTES: usize = 256 * 1024 * 1024;
 /// Cap the source handed to `Component::new` — compiling/validating an
 /// arbitrarily large blob is unmetered CPU + memory at load time.
 const MAX_COMPONENT_BYTES: usize = 64 * 1024 * 1024;
+/// How many compiled components [`COMPILED`] keeps. A caller reloads a handful of
+/// distinct components, not hundreds; each entry pins its machine code for as
+/// long as it stays cached, so the bound is small.
+const COMPILED_CACHE_ENTRIES: usize = 4;
 /// How many linear memories / tables one component may own. The byte budget
 /// already bounds their total *size*; these bound the per-object bookkeeping
 /// (and the multi-GiB virtual reservation wasmtime makes per memory), which the
@@ -200,6 +204,68 @@ fn lock_inst(inst: &Arc<Mutex<WasmInst>>) -> std::sync::MutexGuard<'_, WasmInst>
     crate::core::sync::lock(inst)
 }
 
+/// Compiled components, keyed by the BLAKE3 of their source bytes, least
+/// recently used first, at most [`COMPILED_CACHE_ENTRIES`].
+///
+/// `Component::new` compiles the whole component with Cranelift — seconds on a
+/// small ARM board — and a caller reloads the same bytes on purpose: to give back
+/// linear memory (it never shrinks) and to recover from a trap (a trapped store is
+/// poisoned). Only the compiled code is shared. Every load still builds a new
+/// `Store`, so the instance's memories, tables, globals and fuel start fresh.
+/// The key is a cryptographic hash, not `Hash`: the source is untrusted, and a
+/// collision would hand one caller another component's code.
+struct CompiledCache {
+    entries: VecDeque<([u8; 32], Component)>,
+}
+
+impl CompiledCache {
+    /// The component compiled from source hashing to `key`, marked most recently used.
+    fn get(&mut self, key: &[u8; 32]) -> Option<Component> {
+        let position = self
+            .entries
+            .iter()
+            .position(|(entry_key, _)| entry_key == key)?;
+        let entry = self.entries.remove(position)?;
+        let component = entry.1.clone();
+        self.entries.push_back(entry);
+        Some(component)
+    }
+
+    /// Remember `component` under `key`, evicting the least recently used entry
+    /// past the bound. A key already present (two loads of the same bytes compiled
+    /// at once) keeps the entry it has.
+    fn insert(&mut self, key: [u8; 32], component: Component) {
+        if self.entries.iter().any(|(entry_key, _)| *entry_key == key) {
+            return;
+        }
+        while self.entries.len() >= COMPILED_CACHE_ENTRIES {
+            self.entries.pop_front();
+        }
+        self.entries.push_back((key, component));
+    }
+}
+
+static COMPILED: LazyLock<Mutex<CompiledCache>> = LazyLock::new(|| {
+    Mutex::new(CompiledCache {
+        entries: VecDeque::with_capacity(COMPILED_CACHE_ENTRIES),
+    })
+});
+
+/// The compiled form of `source`: from [`COMPILED`] when these exact bytes were
+/// compiled before, else compiled now and remembered. A source that fails to
+/// compile is not remembered, so it fails the same way every time.
+fn compiled_component(engine: &Engine, source: &[u8]) -> Result<Component, LispError> {
+    let key = *blake3::hash(source).as_bytes();
+    if let Some(component) = crate::core::sync::lock(&COMPILED).get(&key) {
+        return Ok(component);
+    }
+    // Compile outside the lock: it takes seconds, and a load of some other
+    // component must not wait behind it.
+    let component = Component::new(engine, source).map_err(|e| wasm_err("%wasm-load", e))?;
+    crate::core::sync::lock(&COMPILED).insert(key, component.clone());
+    Ok(component)
+}
+
 /// The shared engine: fuel metering on, Cranelift, built once.
 fn engine() -> &'static Engine {
     static E: OnceLock<Engine> = OnceLock::new();
@@ -244,7 +310,8 @@ fn trap_err(who: &str, e: wasmtime::Error) -> LispError {
 
 /// Instantiate a component from source bytes (a compiled `.wasm` component or
 /// WAT text — `wasmtime` accepts both), owned by process `owner`. Returns the
-/// registry token.
+/// registry token. The compiled code comes from [`COMPILED`] when these bytes
+/// were loaded before; the instance and its store are always new.
 pub fn load(src: &[u8], owner: u64) -> Result<u64, LispError> {
     if src.len() > MAX_COMPONENT_BYTES {
         return Err(wasm_err(
@@ -256,7 +323,7 @@ pub fn load(src: &[u8], owner: u64) -> Result<u64, LispError> {
         ));
     }
     let engine = engine();
-    let component = Component::new(engine, src).map_err(|e| wasm_err("%wasm-load", e))?;
+    let component = compiled_component(engine, src)?;
     let mut store = new_store(engine);
     // Instantiation may run start functions — meter it like a call.
     store
@@ -635,5 +702,118 @@ fn seq_items(heap: &Heap, who: &str, v: Value) -> Result<Vec<Value>, LispError> 
             Ok(out)
         }
         other => Err(LispError::wrong_type(heap, who, "list or vector", other)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A component whose `bump` counts calls in a global AND in linear memory,
+    /// returning `global + 1000 * memory-word` — so a first call on a fresh
+    /// instance is 1001 and anything else means state leaked between instances.
+    const COUNTER_WAT: &str = r#"(component
+      (core module $m
+        (memory 1)
+        (global $count (mut i32) (i32.const 0))
+        (func (export "bump") (result i32)
+          (global.set $count (i32.add (global.get $count) (i32.const 1)))
+          (i32.store (i32.const 0) (i32.add (i32.load (i32.const 0)) (i32.const 1)))
+          (i32.add (global.get $count) (i32.mul (i32.load (i32.const 0)) (i32.const 1000)))))
+      (core instance $i (instantiate $m))
+      (func $bump (result s32) (canon lift (core func $i "bump")))
+      (export "bump" (func $bump)))"#;
+
+    /// A distinct, trivially valid component per `index` (the export name differs).
+    fn numbered_wat(index: usize) -> String {
+        format!(
+            r#"(component
+              (core module $m (func (export "f") (result i32) i32.const {index}))
+              (core instance $i (instantiate $m))
+              (func $f (result s32) (canon lift (core func $i "f")))
+              (export "f{index}" (func $f)))"#
+        )
+    }
+
+    fn bump(id: u64) -> i32 {
+        let instance = instance("test", id).expect("live instance");
+        let mut instance = lock_inst(&instance);
+        let instance = &mut *instance;
+        let func = instance.exports.get("bump").expect("bump export").0;
+        instance.store.set_fuel(FUEL_PER_CALL).expect("fuel");
+        let mut results = [Val::Bool(false)];
+        func.call(&mut instance.store, &[], &mut results)
+            .expect("bump call");
+        match results[0] {
+            Val::S32(value) => value,
+            ref other => panic!("bump returned {other:?}"),
+        }
+    }
+
+    fn cache_holds(source: &[u8]) -> bool {
+        let key = *blake3::hash(source).as_bytes();
+        crate::core::sync::lock(&COMPILED)
+            .entries
+            .iter()
+            .any(|(entry_key, _)| *entry_key == key)
+    }
+
+    #[test]
+    fn reloading_the_same_source_reuses_the_compiled_component_but_not_its_state() {
+        let source = COUNTER_WAT.as_bytes();
+        let first = load(source, 0).expect("first load");
+        assert_eq!(bump(first), 1001);
+        assert_eq!(bump(first), 2002);
+        let second = load(source, 0).expect("second load");
+        assert_ne!(first, second);
+        // A fresh store: the global and the linear memory both start over.
+        assert_eq!(bump(second), 1001);
+        // And the first instance is untouched by the second.
+        assert_eq!(bump(first), 3003);
+        close(first);
+        close(second);
+    }
+
+    #[test]
+    fn a_source_that_fails_to_compile_is_not_cached_and_fails_again() {
+        let source = b"(component (bogus";
+        assert!(load(source, 0).is_err());
+        assert!(!cache_holds(source));
+        assert!(load(source, 0).is_err());
+    }
+
+    #[test]
+    fn the_cache_is_bounded_and_evicts_the_least_recently_used() {
+        let engine = engine();
+        let component = Component::new(engine, numbered_wat(0)).expect("compile");
+        let mut cache = CompiledCache {
+            entries: VecDeque::new(),
+        };
+        let key = |index: u8| [index; 32];
+        for index in 0..COMPILED_CACHE_ENTRIES as u8 {
+            cache.insert(key(index), component.clone());
+        }
+        // Touch the oldest, so the next insert evicts the second-oldest instead.
+        assert!(cache.get(&key(0)).is_some());
+        cache.insert(key(100), component.clone());
+        assert_eq!(cache.entries.len(), COMPILED_CACHE_ENTRIES);
+        assert!(cache.get(&key(0)).is_some());
+        assert!(cache.get(&key(1)).is_none());
+        assert!(cache.get(&key(100)).is_some());
+        // Inserting a key already present keeps one entry for it.
+        cache.insert(key(100), component);
+        assert_eq!(cache.entries.len(), COMPILED_CACHE_ENTRIES);
+    }
+
+    #[test]
+    fn distinct_sources_past_the_bound_still_load() {
+        let mut ids = Vec::new();
+        for index in 0..COMPILED_CACHE_ENTRIES + 2 {
+            ids.push(load(numbered_wat(index).as_bytes(), 0).expect("load"));
+        }
+        assert!(crate::core::sync::lock(&COMPILED).entries.len() <= COMPILED_CACHE_ENTRIES);
+        for id in ids {
+            close(id);
+        }
     }
 }

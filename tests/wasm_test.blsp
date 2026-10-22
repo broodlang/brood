@@ -96,6 +96,22 @@
      (func $spin (canon lift (core func $i \"spin\")))
      (export \"spin\" (func $spin)))")
 
+;; A component whose `bump` counts its calls in a global AND in linear memory and
+;; returns `global + 1000 * memory-word`: 1001 on the first call of a fresh
+;; instance, so any state carried over from an earlier instance shows.
+(def *counter-wat*
+  "(component
+     (core module $m
+       (memory 1)
+       (global $count (mut i32) (i32.const 0))
+       (func (export \"bump\") (result i32)
+         (global.set $count (i32.add (global.get $count) (i32.const 1)))
+         (i32.store (i32.const 0) (i32.add (i32.load (i32.const 0)) (i32.const 1)))
+         (i32.add (global.get $count) (i32.mul (i32.load (i32.const 0)) (i32.const 1000)))))
+     (core instance $i (instantiate $m))
+     (func $bump (result s32) (canon lift (core func $i \"bump\")))
+     (export \"bump\" (func $bump)))")
+
 (describe "wasm: scalar exports round-trip"
   (test "s32 add and f64 scale"
     (let (inst (instantiate *scalars-wat*))
@@ -191,6 +207,29 @@
       (is (not (= (+ first-inst 1) second-inst)))
       (close first-inst)
       (close second-inst))))
+
+(describe "wasm: reloading the same source"
+  ;; The compiled component is cached by its source's hash; the instance never is.
+  (test "a reload starts from fresh globals and memory"
+    (let (first-inst (instantiate *counter-wat*))
+      (assert= (call first-inst "bump") 1001)
+      (assert= (call first-inst "bump") 2002)
+      (let (second-inst (instantiate *counter-wat*))
+        (assert= (call second-inst "bump") 1001)
+        ; the first instance is untouched by the second
+        (assert= (call first-inst "bump") 3003)
+        (close second-inst))
+      (close first-inst)))
+  (test "a reload after a trap gives a working instance"
+    (let (trapped (instantiate *spin-wat*))
+      (is (= (try (call trapped "spin") (catch e :trapped)) :trapped))
+      (close trapped))
+    (let (reloaded (instantiate *spin-wat*))
+      (assert= (exports reloaded) [["spin" 0]])
+      (close reloaded)))
+  (test "garbage source fails the same way twice (failures are not cached)"
+    (is (= (try (instantiate "(component (bogus") (catch e :bad)) :bad))
+    (is (= (try (instantiate "(component (bogus") (catch e :bad)) :bad))))
 
 (describe "wasm: use-native binds exports as Brood functions"
   (test "bound names call straight through"
