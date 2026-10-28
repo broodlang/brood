@@ -122,6 +122,11 @@
     (let (s (vt/screen (fed 10 1 "a\e[31mred\e[0mb") nil))
       (assert= (:text s) "aredb")
       (assert= (:spans s) [[1 4 {:fg [205 0 0]}]])))
+  ;; a shell prompt is several colours on one row: a host paints the spans in order, so
+  ;; a row's spans handed back last-first painted the text after the first one twice
+  (test "spans ascend within a row as well as across rows"
+    (let (s (vt/screen (fed 10 2 "\e[34ma\e[0m \e[33mb\e[0m \e[35mc\r\n\e[31md\e[0m \e[32me") nil))
+      (assert= (map (:spans s) (fn (sp) (take sp 2))) '((0 1) (2 3) (4 5) (6 7) (8 9)))))
   (test "bold, italic, underline, strike, dim stack and 22/23/24/29 clear them"
     (let (v (fed 10 1 "\e[1;3;4;9;2m"))
       (assert= (:attr v) {:bold true :italic true :underline true :strike true :dim true})

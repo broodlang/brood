@@ -877,7 +877,9 @@ cursor in it (its row is padded out to the cursor, so the offset always exists).
                         cursor2 (if at-cursor?
                                   (+ pos (text-length (seq/subvec row 0 (:col vt))))
                                   cursor))
-                    (go (inc r) (inc end) (cons text texts) (append (reverse spans2) spans) cursor2)))))
+                    ;; `spans2` is consed, last-first, which is the order the accumulator
+                    ;; keeps for the one `reverse` at the end
+                    (go (inc r) (inc end) (cons text texts) (append spans2 spans) cursor2)))))
     (go 0 0 () () 0)))
 
 ;; ---- input: an editor key as the bytes a program expects ---------------------------------------------
