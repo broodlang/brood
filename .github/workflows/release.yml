@@ -87,12 +87,12 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
-          # Intel mac: cross-compiled on the Apple-Silicon runner (macos-14). GitHub's
+          # Intel mac: cross-compiled on the Apple-Silicon runner (macos-15). GitHub's
           # Intel macos-13 runners are scarce/deprecated; arm64 macs build x86_64-apple-
           # darwin natively (same OS SDK, `-C` via the added rustup target).
-          - os: macos-14
+          - os: macos-15
             target: x86_64-apple-darwin
     steps:
       - uses: actions/checkout@v7
