@@ -75,7 +75,7 @@ fn a_completion_for_a_waiter_that_gave_up_is_dropped_at_delivery() {
               ;;    re-adding us: the loader cannot tell the difference, and this is exactly
               ;;    the state the race produces.
               (%require-enqueue-waiter! k (self) r)
-              (%require-release! k)
+              (%require-release! k nil)
               ;; Nothing may have queued: the ref is deactivated.
               (%mailbox-size (self)))
             "#,

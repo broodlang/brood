@@ -4904,7 +4904,7 @@ thread (the recursive walk aborts it). CI's threads had enough stack, which is w
 2026-10-30 (KI-312: the parallel cold build hung on a cycle of many modules and on a broken
 dependency). mur-forge's `nest check` hung after the ADR-512 migration (its `_deps/hatch` still
 on the old vectors) where the sequential walk reported the error at once, and bedit's cold build
-on 0.49.0 hung too. A 24-module `(:use …)` ring reproduced it on every run: the one process that
+on 0.49.0 hung too. A ring of 24 modules, each aliasing the next, reproduced it on every run: the one process that
 breaks a cross-process cycle shortens it by one member a round, and the waiters far from the
 break reach the 30 s backstop and force-load mid-cycle. Letting every member but one break at
 once just moved the claims around, because each member checks on its own tick. Pool workers now

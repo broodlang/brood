@@ -11,7 +11,7 @@
 //! - what a WARM start materialises: the walk's own requires once became edges of the root
 //!   section, which a warm start replays, loading the whole project (0.2 s → 1.3 s);
 //! - a module that throws at load fails the build, naming its file, instead of hanging;
-//! - a `(:use …)` RING of modules builds — every worker that starts one meets the others
+//! - a RING of modules aliasing each other builds — every worker that starts one meets the others
 //!   as a require cycle split across processes — and a broken module under the ring fails
 //!   the build instead of hanging it.
 
@@ -176,8 +176,11 @@ fn a_module_that_throws_at_load_fails_the_parallel_build() {
 
 const RING: usize = 24;
 
-/// `RING` modules, each `(:use …)`ing the next and the last the first, so a pool worker that
-/// starts any of them meets the others' loads as one require cycle split across processes.
+/// `RING` modules, each aliasing the next and the last the first, so a pool worker that starts
+/// any of them meets the others' loads as one require cycle split across processes. `:alias`,
+/// not `:use`: a refer-all `:use` of a module still loading is an error in its own right, met
+/// whenever the walk reaches a module whose cycle partner is mid-load, so a `:use` ring is not
+/// a program; an aliased ring is, and is how real projects close their cycles.
 /// With `broken`, every module also `:use`s `bad`, which throws at load.
 fn ring_fixture(tag: &str, broken: bool) -> PathBuf {
     let dir =
@@ -201,7 +204,7 @@ fn ring_fixture(tag: &str, broken: bool) -> PathBuf {
         std::fs::write(
             dir.join(format!("src/r{i}.blsp")),
             format!(
-                "(defmodule r{i}{uses_bad} (:use r{}))\n(def here true)\n(defn v{i} () {i})\n",
+                "(defmodule r{i}{uses_bad} (:alias r{}))\n(def here true)\n(defn v{i} () {i})\n",
                 (i + 1) % RING
             ),
         )

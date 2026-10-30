@@ -15608,12 +15608,12 @@ threads had enough stack to pass; this machine's did not.
 **Guard.** `typed::tests::a_deep_untyped_pattern_is_walked_on_a_small_stack` strips a
 100 000-level pattern on a 256 KB thread; the recursive walk aborts it.
 
-## KI-312 — a cold parallel build hung on a `(:use …)` cycle of many modules, and on a broken dependency ✅ FIXED 2026-10-30
+## KI-312 — a cold parallel build hung on a require cycle of many modules, and on a broken dependency ✅ FIXED 2026-10-30
 
 **Seen:** mur-forge's `nest check` hung after the ADR-512 migration, with its `_deps/hatch` still
 on the old parameter vectors; `BROOD_LOAD_SEQUENTIAL=1` reported the error at once. Then bedit's
 cold `nest run --check-boot` on 0.49.0 hung in two runs of two (`[require] BUG: waited 30s …`),
-and a project of 24 modules each `:use`ing the next, the last the first, hung on every run while
+and a project of 24 modules each aliasing the next, the last the first, hung on every run while
 the sequential walk loaded it in 0.15 s.
 
 **Cause.** Three, compounding.

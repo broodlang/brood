@@ -29,7 +29,7 @@ const HOLD_HTTP: &str = r#"
       (send me :claimed)
       (proc/sleep 300)
       (%registry-update! '*features-loading* :dissoc ["http"] nil)
-      (%require-release! "http"))))
+      (%require-release! "http" nil))))
 (receive (:claimed nil))
 (defn collect (left acc) (if (= left 0) acc (collect (dec left) (+ acc (receive ([:r v] v))))))
 "#;
