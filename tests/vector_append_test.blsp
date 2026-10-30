@@ -63,7 +63,10 @@
           seconds (/ (- (os/now-ns) started) 1000000000.0))
       (assert= (count built) 200000)
       (assert= (nth built 199999) 199999)
-      (assert (< seconds 5.0))))
+      ;; Under BROOD_GC_STRESS a collection runs at nearly every allocation, so the clock
+      ;; measures the stress mode, not the conj: the loop took 51 s there, linear or not. The
+      ;; bound holds everywhere else; a copy per step would not finish under either.
+      (when (not (os/env "BROOD_GC_STRESS")) (assert (< seconds 5.0)))))
 
   (test "keeps every version right across collections"
     (let (chain (fold (range 2000)
