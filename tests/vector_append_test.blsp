@@ -8,6 +8,15 @@
 (defn conj-build (n)
   (fold (range n) [] (fn (acc i) (conj acc i))))
 
+;; The same fold building a list: linear on every engine, the conj loop's yardstick.
+(defn- cons-build (n)
+  (fold (range n) (list) (fn (acc i) (cons i acc))))
+
+(defn- seconds-for (thunk)
+  (let (started (os/now-ns))
+    (thunk)
+    (/ (- (os/now-ns) started) 1000000000.0)))
+
 ;; Sum a vector by index in a self-tail loop: hot enough to run natively, so the elements
 ;; are read the way the JIT reads them, through the vector's cached pointer.
 (defn indexed-sum (v)
@@ -58,7 +67,13 @@
     (assert= (conj-build 5000) (vec (range 5000))))
 
   (test "is linear: 200 000 conjs finish (a copy each step would move about 480 GB)"
-    (let (started (os/now-ns)
+    ;; Bounded against a list built by the same fold, timed in the same process, so the
+    ;; engine and the runner's load scale both: a fixed 5 s read 5.2 s on a loaded
+    ;; tree-walker runner. The conj loop runs 5-20 times the list's time across the tiers;
+    ;; a copy per step is tens of seconds of memcpy alone, hundreds to thousands of times it.
+    ;; The 10 s floor keeps a very fast list from shrinking the bound to nothing.
+    (let (list-seconds (seconds-for (fn () (cons-build 200000)))
+          started (os/now-ns)
           built (conj-build 200000)
           seconds (/ (- (os/now-ns) started) 1000000000.0))
       (assert= (count built) 200000)
@@ -66,7 +81,8 @@
       ;; Under BROOD_GC_STRESS a collection runs at nearly every allocation, so the clock
       ;; measures the stress mode, not the conj: the loop took 51 s there, linear or not. The
       ;; bound holds everywhere else; a copy per step would not finish under either.
-      (when (not (os/env "BROOD_GC_STRESS")) (assert (< seconds 5.0)))))
+      (when (not (os/env "BROOD_GC_STRESS"))
+        (assert (< seconds (math/max 10.0 (* 100 list-seconds)))))))
 
   (test "keeps every version right across collections"
     (let (chain (fold (range 2000)
