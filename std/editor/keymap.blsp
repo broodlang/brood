@@ -227,3 +227,27 @@ happens to be in memory. Pure over the keymap data — no dispatch, no eval, no 
             existing (get keymap k)
             sub (if (map? existing) existing {}))
         (assoc keymap k (keymap-bind sub (rest keys) command))))))
+
+;; check-allow: deliberately non-tail — depth = the keymap's chord nesting, a few levels.
+(check-allow :non-tail-recursion
+  (defn keymap-overlay (below above)
+    "Lay keymap `above` over keymap `below`: `above` wins every key it binds, except where
+  BOTH bind a key to a prefix sub-keymap — those two sub-keymaps are overlaid the same way,
+  so a key `above` leaves unbound under the prefix still reaches `below`'s. This is how
+  Emacs composes a mode's `C-x` map with the global one: a mode that binds `C-x C-x` keeps
+  `C-x b`.
+
+  Anything else `above` binds replaces what is under it outright: a command, a prefix over
+  a command, and an explicit `nil` (which is how a keymap hides a lower key). So a command
+  bound to the prefix itself still owns it, and nothing below reaches through.
+
+    (editor/keymap/keymap-overlay {:x {:b 'buf :c 'low}} {:x {:c 'high}})   ;=> {:x {:b buf, :c high}}
+    (editor/keymap/keymap-overlay {:x {:b 'buf}} {:x 'cmd})                 ;=> {:x cmd}
+    (editor/keymap/keymap-overlay {:x {:b 'buf}} {:x {:b nil}})             ;=> {:x {:b nil}}"
+    (fold above
+      below
+      (fn (acc entry)
+        (let ([k v] entry
+              under (get acc k))
+          (assoc acc k (if (and (map? v) (map? under)) (keymap-overlay under v) v)))))))
+(sig keymap-overlay (map map -> map))
