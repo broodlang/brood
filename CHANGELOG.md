@@ -18,6 +18,8 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   after the first time (KI-313). One block now moves every native frame under it to the
   parking path, not only the innermost, so a fold whose step had compiled before it first
   blocked no longer holds its worker on each later call.
+- GUI: a background band one row tall at the window's edge bleeds sideways only, so a header
+  line on the top row stays centred on its text (ADR-508).
 
 ## v0.49.0 — lists for parameters, a linear conj, and no open issues
 
