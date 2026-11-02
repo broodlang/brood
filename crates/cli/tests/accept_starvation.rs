@@ -16,7 +16,11 @@ use std::time::{Duration, Instant};
 
 const SERVER: &str = r#"
 (def listener (tcp/listen "127.0.0.1" 0))
-(file/spit "port.txt" (str (tcp/local-port listener)))
+;; Written whole, then renamed into place: the client reads the port the moment `port.txt`
+;; exists, and `file/spit` creates the file before it writes it, so a client that won that race
+;; read "" and died on `string/->number` (CI's tree-walker job, 2026-11-02; KI-315).
+(file/spit "port.tmp" (str (tcp/local-port listener)))
+(file/rename "port.tmp" "port.txt")
 ;; The quiet windows start once the client has made all 50 connections, not when this server
 ;; starts: a client slow to boot (a loaded machine) otherwise left the first window empty, so
 ;; nothing was closed and the second accepted 31 and starved for good.

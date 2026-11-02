@@ -15696,3 +15696,23 @@ generation gone and is a no-op.
 another between `drop_link`'s removal and its delivery, it failed every run; with the fix under
 the same sleeps it passes. 500 runs of the case without them, and the 62 dist tests, green.
 
+## KI-315 — `accept_starvation`'s client could read an empty port file and die ✅ FIXED 2026-11-02
+
+**Seen:** CI's tree-walker job on `fe79302d` (a docs-only commit) failed
+`the_backlog_is_accepted_once_descriptors_free_up` with "the client never connected all 50"
+after its 60 s deadline. The test printed neither process's output then (`8ed2e022` added it).
+
+**Cause.** The server wrote its port with `file/spit "port.txt"` and the client polled
+`file/exists?` and read the file the moment it appeared. `file/spit` (`std::fs::write`) creates
+and truncates the file, then writes, so a client that read in between got `""` — or a partial
+port — and died on `string/->number` or a refused connect. The old test did not watch the
+client, so it waited out the full 60 s. Not slowness: boot plus 50 connects takes 0.12 s under
+`BROOD_TIER=0` here.
+
+**Fix.** The server writes `port.tmp` and `file/rename`s it to `port.txt`, so the file appears
+whole. The other cross-process file handshakes in the tests use a file's existence only.
+
+**Guard.** Widening the window (an empty `port.txt`, 300 ms, then the port) failed the test
+every run, with the client's own error in the new report; with the rename, the same widened
+window on `port.tmp` passes.
+

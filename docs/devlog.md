@@ -4978,3 +4978,10 @@ the link and deliver later, on its thread. The link now leaves `NODES` before th
 `disconnect` fires the monitors itself. Two temporary sleeps reproduced it every run and the fix
 held under them; 500 runs of the case, the dist tests, the full suite and clippy green here.
 
+2026-11-02 (KI-315). `accept_starvation` timed out in CI's tree-walker job on a docs-only commit:
+the client never made its 50 connections. Not speed (0.12 s under `BROOD_TIER=0` here) but a
+handshake race: the client read `port.txt` as soon as it existed, and `file/spit` creates the
+file before writing it, so the client could read `""` and die. The server now writes a temporary
+file and renames it into place. Widening the window reproduced it every run; the fix holds under
+the same window.
+
