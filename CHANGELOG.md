@@ -4,6 +4,17 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## v0.49.1 — the parallel cold build finishes
+
+**Fixed.**
+- The parallel cold build (`nest run`/`nest test` on a project with no startup image) no
+  longer hangs (KI-312). A cycle of modules waiting on each other across the build's
+  processes is broken whole instead of one member per 250 ms round, so a long cycle no longer
+  livelocks into the 30 s backstop. A failing module ends the build at once instead of
+  waiting on loads still in flight, and every process waiting on a module that fails gets
+  its error instead of loading it again. bedit's cold build went from hanging to a few
+  seconds.
+
 ## v0.49.0 — lists for parameters, a linear conj, and no open issues
 
 Every parameter list is a list (ADR-512): ability op specs, `impl` methods and `defbehaviour`
