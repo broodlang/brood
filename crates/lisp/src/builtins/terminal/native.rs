@@ -1464,12 +1464,22 @@ fn parse_gui_ops(
             // `[:cursor row col style colour blink]`: a blink the window animates itself
             // (ADR-469), `{:interval ms :blinks n}`; absent or unreadable is steady.
             let blink = parts.get(5).and_then(|v| cursor_blink_from(heap, *v));
+            // `[:cursor row col style colour blink under face]`: the text under the caret and
+            // the face it is painted in, which a block draws over its solid fill (ADR-515);
+            // absent, nil or not a string is none, and an absent face is the default one.
+            let under_face = gui_face(heap, parts.get(7).copied().unwrap_or(Value::nil()));
+            let under = parts
+                .get(6)
+                .and_then(|v| expect_string(heap, "%gui-draw", *v).ok())
+                .filter(|s| !s.is_empty())
+                .map(|s| (s, under_face));
             ops.push(crate::host::gui::Op::Cursor {
                 row: clamp_u16(row_i),
                 col: clamp_u16(col_i),
                 style,
                 color,
                 blink,
+                under,
             });
         } else if tag == tags.rect_t {
             let Ok(row_i) = expect_int(heap, "%gui-draw", arg(&parts, 1)) else {

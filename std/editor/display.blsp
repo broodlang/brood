@@ -19,6 +19,9 @@
 ;;   [:cursor row col style]        …shaped :block / :bar / :underline / :hollow
 ;;   [:cursor row col style colour] …in `colour` (a face colour; `style` may be nil)
 ;;   [:cursor row col style colour blink] …blinked by the GUI window itself (`cursor-blink`)
+;;   [:cursor row col style colour blink under face] …a block drawn solid, `under` (the
+;;                                  text in its cell) over it in `face`, coloured the
+;;                                  background (ADR-515)
 ;;   [:rect row col w h face]       fill a w×h cell block with `face`'s :bg colour
 ;;   [:rect row col w h face r]     …with corners rounded by `r` cells (GUI only)
 ;;   [:frect x y w h face op r]     sub-cell rounded rect (cell-unit floats); GUI-only
@@ -60,7 +63,7 @@ styled by `face` (a map like `{:fg :red :bold true}`).
     [:text row col s]
     [:text row col s face]))
 
-(defn cursor (row col &optional (style nil) (color nil) (blink nil))
+(defn cursor (row col &optional (style nil) (color nil) (blink nil) (under nil) (face nil))
   "A render op placing the text cursor at (`row`, `col`). With `style` — `:bar`
 (a thin insertion caret on the cell's left edge), `:underline` (a rule along the
 cell bottom), `:hollow` (an outline box around the cell, the cursor of a window
@@ -71,13 +74,23 @@ the caret accordingly and the terminal maps it to its matching steady cursor
 at half strength and rims it solid, every other shape is solid; the terminal ignores
 it. With `blink` (a `cursor-blink` map) the GUI window blinks the caret ITSELF, between
 frames: the app draws it once and no turn of its loop runs per toggle (ADR-469). With
-none it's `[:cursor row col]`, unchanged (a block caret).
+`under` (the text in the caret's cell — one character, or a cluster) a BLOCK caret is
+drawn as Emacs draws its box: the cell filled solid in the caret's colour and `under`
+painted over it in the window background, so the character stays readable through
+the caret (ADR-515); a wide character's block covers both its cells. With `face` (the
+cell's own face map) `under` keeps its weight, slant, family and underline — a bold
+keyword stays bold under the caret; its colours and size are the caret's. Other shapes and
+the terminal ignore it; without it a block is the half-strength wash. With none of
+these it's `[:cursor row col]`, unchanged (a block caret).
 
     (editor/display/cursor 1 2)   ;=> [:cursor 1 2]
     (editor/display/cursor 1 2 :hollow)   ;=> [:cursor 1 2 :hollow]
     (editor/display/cursor 1 2 nil :red)   ;=> [:cursor 1 2 nil :red]
-    (editor/display/cursor 1 2 :bar nil {:interval 530 :blinks 10})   ;=> [:cursor 1 2 :bar nil {:interval 530 :blinks 10}]"
+    (editor/display/cursor 1 2 :bar nil {:interval 530 :blinks 10})   ;=> [:cursor 1 2 :bar nil {:interval 530 :blinks 10}]
+    (editor/display/cursor 1 2 :block nil nil \"x\")   ;=> [:cursor 1 2 :block nil nil \"x\"]"
   (cond
+    (not (nil? face)) [:cursor row col style color blink under face]
+    (not (nil? under)) [:cursor row col style color blink under]
     (not (nil? blink)) [:cursor row col style color blink]
     (not (nil? color)) [:cursor row col style color]
     (not (nil? style)) [:cursor row col style]

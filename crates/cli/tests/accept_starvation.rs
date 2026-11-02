@@ -66,14 +66,33 @@ fn the_backlog_is_accepted_once_descriptors_free_up() {
     std::fs::write(directory.join("server.blsp"), SERVER).expect("write the server");
     std::fs::write(directory.join("client.blsp"), CLIENT).expect("write the client");
 
-    let server = brood(&directory, "server.blsp", Some(40));
+    let mut server = brood(&directory, "server.blsp", Some(40));
     let mut client = brood(&directory, "client.blsp", None);
     let deadline = Instant::now() + Duration::from_secs(60);
     while !directory.join("connected.txt").exists() {
-        assert!(
-            Instant::now() < deadline,
-            "the client never connected all 50"
-        );
+        // A client that died or stalled used to fail this with nothing but the sentence (CI's
+        // tree-walker job, 2026-11-02, on a run that passed here in 8 s): both processes'
+        // own words say which, and neither is left running.
+        let client_exited = client.try_wait().ok().flatten();
+        if client_exited.is_some() || Instant::now() >= deadline {
+            let _ = client.kill();
+            let _ = server.kill();
+            let client_output = client.wait_with_output().expect("the client's output");
+            let server_output = server.wait_with_output().expect("the server's output");
+            let _ = std::fs::remove_dir_all(&directory);
+            panic!(
+                "the client never connected all 50 ({}) — client stdout: {} client stderr: {} \
+                 server stdout: {} server stderr: {}",
+                match client_exited {
+                    Some(status) => format!("it exited first, {status}"),
+                    None => "60 s passed".to_string(),
+                },
+                String::from_utf8_lossy(&client_output.stdout),
+                String::from_utf8_lossy(&client_output.stderr),
+                String::from_utf8_lossy(&server_output.stdout),
+                String::from_utf8_lossy(&server_output.stderr),
+            );
+        }
         std::thread::sleep(Duration::from_millis(20));
     }
     let output = server.wait_with_output().expect("the server finishes");

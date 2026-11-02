@@ -148,6 +148,7 @@ fn caret(row: u16, col: u16) -> Arc<[Op]> {
                 interval_ms: 500,
                 blinks: 0,
             }),
+            under: None,
         },
     ])
 }

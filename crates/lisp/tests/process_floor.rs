@@ -54,17 +54,23 @@
 //! interrupt's window state (64 B) inline on every mailbox. Both are boxed at first use now,
 //! the probe's `flags` word alone staying inline: 2 780 locally.
 //!
-//! Lowered 2 800 → 2 720 (2026-11-02): the floor had crept to 2 799 here and 2 802 on CI —
-//! ADR-505's redirect offer and ADR-509's nursery byte budget, each a field on a hot path,
-//! put it 2 B over on a docs-only commit. The debug build also copied every entered arm's
+//! Raised 2 800 → 2 825 (2026-11-02), for build-to-build variation, not growth: CI read 2 802
+//! on `fe79302d`. The same per-process code measured 2 787 at `63afdb45` and 2 799 at
+//! `cad037a4`, whose only code change is the GUI's `bleed.rs`. Each binary repeats its own
+//! figure exactly, so the 12 B is how one build lays out what a spawn allocates, and the
+//! readings from `fac6c240` on span 2 786–2 802. 2 825 still reds both regressions recorded
+//! above (2 831 from the byte trigger's fields, 2 872 from the mailbox lanes).
+//!
+//! Lowered 2 825 → 2 700 (2026-11-02, later): the debug build copied every entered arm's
 //! call-site positions into a per-process table (129 B per parked process, nothing in
-//! release) for JIT stale-value reports; it is filled only under `BROOD_JIT_VERIFY` now:
-//! 2 670. Sabotage: the tree before it, and this one run with `BROOD_JIT_VERIFY=1`, both read
-//! 2 799 and red this bound.
+//! release) for JIT stale-value reports; it is filled only under `BROOD_JIT_VERIFY` now. The
+//! build that read 2 799 reads 2 670. 2 700 leaves the 12 B build variation above plus
+//! margin, and still reds a step the size of the byte trigger's (+44 B, 2 714) or the
+//! lanes' (+85 B). Sabotage: this tree run with `BROOD_JIT_VERIFY=1` reads 2 799 and reds it.
 
 use brood::Interp;
 
-const FLOOR_BYTES: i64 = 2720;
+const FLOOR_BYTES: i64 = 2700;
 
 #[test]
 fn a_parked_process_costs_no_more_than_the_floor() {

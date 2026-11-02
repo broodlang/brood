@@ -3436,6 +3436,38 @@ impl GpuWindow {
                 }
                 // A blinking caret in its hidden half (ADR-469) draws nothing.
                 Op::Cursor { blink: Some(_), .. } if renderer.caret_hidden => {}
+                // A block with the text under it, Emacs's box (ADR-515): the cell solid in
+                // the caret's colour, the text over it in its own face, coloured the window
+                // background.
+                Op::Cursor {
+                    row,
+                    col,
+                    style: CursorStyle::Block,
+                    color,
+                    under: Some((under, under_face)),
+                    ..
+                } => {
+                    let left = g.ox + *col as f32 * g.cw;
+                    let top = g.oy + *row as f32 * g.ch - g.scroll_dy;
+                    let cells = unit_cells(under).max(1);
+                    let fill = color.unwrap_or(CURSOR_FG);
+                    fb.solid(
+                        left,
+                        top,
+                        cells as f32 * g.cw,
+                        g.ch,
+                        [fill[0], fill[1], fill[2], 255],
+                        0.0,
+                        Edge::Plain,
+                    );
+                    let glyph = Op::Text {
+                        row: *row,
+                        col: *col,
+                        s: under.clone(),
+                        face: under_face.under_caret(renderer.bg()),
+                    };
+                    self.expand(fb, renderer, std::slice::from_ref(&glyph), g);
+                }
                 Op::Cursor {
                     row,
                     col,
