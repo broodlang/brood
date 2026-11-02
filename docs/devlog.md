@@ -4914,3 +4914,15 @@ failure rather than waiting for the jobs in flight, which reloaded the broken de
 and over, and a waiter on a failed load raises the loader's error rather than loading the
 module itself. bedit's cold build: hung to 2.4–7 s; mur-forge's 8.7 s to 2.1–3.3 s (debug). Guards
 in `parallel_load.rs` and `require_failure_test.blsp`, each sabotage-verified (ADR-426 amendment).
+
+2026-11-02 (KI-313: KI-309 again). The Nightly on `a1bced33` failed
+`a_native_walk_that_hosts_a_park_blocks_once_and_then_parks` once more, with KI-309's fix in, and
+passed on the same commit the next night. A path the fix did not cover: the suspend-host latch
+blames the innermost native activation under a blocked `receive`, and the outer ones only on
+later parks ("converges outward"). The test's walk calls a closure reducer that opens the
+window; when that reducer had tiered before the first block, the walk called it natively, the
+block latched the reducer, and the walk blocked its worker again on the next call. A latching
+gateway now passes the block to the activation enclosing it (`blame_enclosing_gateway`, both
+clear sites), so every native frame under the receive latches on one park, at no per-call cost.
+Only enclosing activations are live, so a native that ran later is still never blamed. Unit
+guard in `eval/compile/tests.rs`. Built here; not run here (CI and the Nightly).

@@ -2693,6 +2693,49 @@ fn a_suspend_latch_takes_back_the_code_it_published() {
     );
 }
 
+/// KI-313: one park latches every native arm under it. A native walk calling a native
+/// reducer that opens a window blocks with both on the stack; the latch named only the
+/// innermost, so the walk stayed native and blocked its worker again on the next call
+/// (`interrupt_one_worker`'s native-walk case, intermittently: only when the reducer had
+/// tiered before the first block). The reducer's exit hands the block to the walk.
+#[cfg(feature = "jit")]
+#[test]
+fn a_suspend_latch_reaches_the_native_activation_enclosing_it() {
+    use std::sync::atomic::Ordering::Acquire;
+    let mut interp = crate::Interp::new();
+    let heap = &mut interp.heap;
+    let walk = published_native_arm(heap, (0x0313_0001, 2));
+    let reducer = published_native_arm(heap, (0x0313_0002, 2));
+    let (walk_gateway, reducer_gateway) = (11, 12);
+    // The receive blocked under the reducer; its gateway has exited and restored the walk's.
+    heap.blocked_under_gateway = reducer_gateway;
+    heap.cur_native_gateway = walk_gateway;
+    let base = heap.roots_len();
+    let reducer_exit = NativeExit {
+        outcome: 0,
+        gateway: reducer_gateway,
+        env: heap.global(),
+    };
+    native_feedback(heap, &reducer, base, reducer.nslots, &reducer_exit);
+    assert_eq!(reducer.jit_code.load(Acquire), crate::jit::BAILED);
+    heap.cur_native_gateway = 0;
+    let walk_exit = NativeExit {
+        outcome: 0,
+        gateway: walk_gateway,
+        env: heap.global(),
+    };
+    native_feedback(heap, &walk, base, walk.nslots, &walk_exit);
+    assert_eq!(
+        walk.jit_code.load(Acquire),
+        crate::jit::BAILED,
+        "the walk hosted the blocked receive and stayed native"
+    );
+    assert_eq!(
+        heap.blocked_under_gateway, 0,
+        "the outermost exit leaves no blame behind"
+    );
+}
+
 /// KI-309: a latch is final only if nothing stores over it. Every write to an arm's
 /// `jit_code` goes through `CompiledArm::replace_code` (a compare-and-swap from what the
 /// writer read) or `clear_code_unless_latched`, except the latch itself storing `BAILED`;

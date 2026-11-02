@@ -139,7 +139,7 @@ pub(crate) fn jit_latch_dirty_blocked(
     argc: usize,
     epoch: u64,
 ) {
-    heap.blocked_under_gateway = 0;
+    blame_enclosing_gateway(heap);
     // Shed THIS site's fast link first, unconditionally: the latch stores `BAILED`
     // into `arm.jit_code`, but the FastLink mirror's hit path (and the raw load JIT'd
     // callers emit) never re-reads `jit_code` — so without this, a long-lived process

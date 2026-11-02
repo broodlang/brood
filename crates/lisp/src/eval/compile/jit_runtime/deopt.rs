@@ -247,8 +247,8 @@ pub(crate) fn vm_resume_deopt(
 /// arm that hosts a parking receive therefore belongs on the VM: latch it `BAILED` on the
 /// FIRST occurrence (one park is proof of shape, unlike a type-deopt, which needs 16 to
 /// separate thrash from noise). Arms are shared (ADR-215), so one latch heals every
-/// process; a park under a native→native chain latches the innermost enclosing arm per
-/// occurrence and converges outward over successive parks.
+/// process; a park under a native→native chain latches every arm on it, innermost first,
+/// as each activation exits ([`blame_enclosing_gateway`]).
 ///
 /// The latch is mostly LATENT today: the `%receive` fence only catches a direct `%receive`
 /// call, and the shapes that would host one indirectly are fenced by other means — a `def`-
@@ -274,6 +274,18 @@ pub(crate) fn jit_latch_suspend_host(heap: &Heap, arm: &CompiledArm) {
     }
 }
 
+/// Hand a dirty block an activation just latched for to the native activation enclosing it
+/// — the token the exiting gateway restored into `cur_native_gateway`, or 0 when there is
+/// none — so that one latches too when it exits. Every native frame under the blocked
+/// `receive` keeps the process uncapturable, and the latch only ever named the innermost: a
+/// native walk calling a native reducer latched the reducer, and the walk, still native,
+/// blocked its worker again on the next call before it latched in turn (KI-313). Only an
+/// enclosing activation is still live, so a native that runs later is never blamed.
+#[cfg(feature = "jit")]
+pub(crate) fn blame_enclosing_gateway(heap: &mut Heap) {
+    heap.blocked_under_gateway = heap.cur_native_gateway;
+}
+
 /// Post-invoke suspend check for a native gateway that has its arm in hand: latch if the
 /// mailbox recorded a dirty-block under THIS activation's token (see
 /// [`Heap::blocked_under_gateway`] — an exact match, so a native that merely ran later in
@@ -284,7 +296,7 @@ pub(crate) fn jit_latch_suspend_host(heap: &Heap, arm: &CompiledArm) {
 pub(super) fn jit_suspend_feedback(heap: &mut Heap, arm: &CompiledArm, outcome: i64, gw_seq: u64) {
     let blocked = heap.blocked_under_gateway == gw_seq && gw_seq != 0;
     if blocked {
-        heap.blocked_under_gateway = 0;
+        blame_enclosing_gateway(heap);
     }
     // A receive loop (ADR-410) parks through exactly that channel on purpose: the driver
     // captures its frame at ip 0 and the wake re-enters it natively, so it is not a host

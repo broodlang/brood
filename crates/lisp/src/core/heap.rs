@@ -1301,7 +1301,9 @@ pub struct Heap {
     /// like `jit_dbg_fn`), and after the invoke latches its arm `BAILED` iff the recorded
     /// token is ITS OWN — so only the arm that actually enclosed the blocking receive is
     /// latched, never a native that merely ran later in the same quantum (in a gen-server,
-    /// that would be the hot post-receive handler). `0` = none. A block with no live JIT
+    /// that would be the hot post-receive handler). A latching gateway then hands the token
+    /// on to the activation enclosing it (`blame_enclosing_gateway`), so every native frame
+    /// under the receive latches as it exits. `0` = none. A block with no live JIT
     /// gateway (a Rust-native shape, `map`/`try` callbacks) records 0 and latches nothing.
     #[cfg_attr(not(feature = "jit"), allow(dead_code))] // only JIT gateways bump it
     pub(crate) native_gateway_seq: u64,
