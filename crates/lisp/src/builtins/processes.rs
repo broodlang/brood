@@ -226,7 +226,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::range(1, 2),
         Sig::new(vec![any, any], any),
         &["flag", "&optional", "value"],
-        "Read or set a per-process runtime flag on the current process; returns the previous (or, with no value, current) setting. Flags: :max-heap — this process's heap limit in bytes (positive int sets, nil clears, absent reads). Checked after each GC against the live footprint; exceeding it raises a catchable E0045 error in this process only — uncaught, it kills just the offender (the global BROOD_MEM_LIMIT hard cap aborts the whole runtime). Set it first thing in a spawned fn to cap that process: (spawn (fn () (proc/flag :max-heap 8000000) (work))). :max-mailbox — this process's mailbox bound in MESSAGES (ADR-307; positive int sets, nil clears — clearing also cancels a pending trip — absent reads). Checked by every sender at enqueue; a breach raises a catchable E0046 in THIS process at its next safepoint or receive. The sender is never blocked and no message is dropped: this is the guard against a receiver that cannot keep up eating the machine, not a backpressure channel (that stays a library concern - gen/call with a timeout). :send-errors — when truthy, a (send …) whose target NODE is unknown/disconnected raises a catchable E0060 noconnection error instead of silently dropping the message (process liveness stays silent either way) — so a sender can queue-and-retry across a net-split; pairs with the reconnect reconnector. :no-break — when truthy, a breakpoint (std/debug break) passes this process through instead of parking it: for infrastructure other processes wait on (a buffer process, a registry), where a parked process freezes whoever asked it something and nothing could resume it.",
+        "Read or set a per-process runtime flag on the current process; returns the previous (or, with no value, current) setting. Flags: :max-heap — this process's heap limit in bytes (positive int sets, nil clears, absent reads). Checked after each GC against the live footprint; exceeding it raises a catchable E0045 error in this process only — uncaught, it kills just the offender (the global BROOD_MEM_LIMIT hard cap aborts the whole runtime). Set it first thing in a spawned fn to cap that process: (spawn (fn () (proc/flag :max-heap 8000000) (work))). :max-mailbox — this process's mailbox bound in MESSAGES (ADR-307; positive int sets, nil clears — clearing also cancels a pending trip — absent reads). Checked by every sender at enqueue; a breach raises a catchable E0046 in THIS process at its next safepoint or receive. The sender is never blocked and no message is dropped: this is the guard against a receiver that cannot keep up eating the machine, not a backpressure channel (that stays a library concern - gen/call with a timeout). :send-errors — when truthy, a (send …) whose target NODE is unknown/disconnected raises a catchable E0060 noconnection error instead of silently dropping the message (process liveness stays silent either way) — so a sender can queue-and-retry across a net-split; pairs with the reconnect reconnector. :no-break — when truthy, a breakpoint (std/debug break) passes this process through instead of parking it: for infrastructure other processes wait on (a buffer process, a registry), where a parked process freezes whoever asked it something and nothing could resume it. :responsive — for a process whose job is to keep answering (an editor loop, a REPL): a native call that waits on the outside world (os/cmd, run-process) is reported to it after the wait as the message [:blocking-call {:native :detail :ms}] when truthy, or refused with a catchable E0048 before the wait when :refuse (ADR-517); nil or false is ordinary. The read answers nil, :report or :refuse.",
         process_flag);
     primitives.def(
         "%hibernate",
@@ -699,8 +699,31 @@ pub(super) fn process_flag(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
             };
             Ok(Value::boolean(prev))
         }
+        "responsive" => {
+            use crate::process::responsive::Responsive;
+            let prev = if args.len() < 2 {
+                heap.proc_responsive()
+            } else {
+                let mode = match arg(args, 1) {
+                    Value::Nil | Value::Bool(false) => Responsive::Off,
+                    v @ Value::Keyword(_)
+                        if expect_keyword(heap, "proc/flag :responsive", v)
+                            .is_ok_and(|k| value::symbol_name_ref(k) == "refuse") =>
+                    {
+                        Responsive::Refuse
+                    }
+                    _ => Responsive::Report,
+                };
+                heap.set_proc_responsive(mode)
+            };
+            Ok(match prev {
+                Responsive::Off => Value::nil(),
+                Responsive::Report => value::kw("report"),
+                Responsive::Refuse => value::kw("refuse"),
+            })
+        }
         other => Err(LispError::runtime(format!(
-            "proc/flag: unknown flag :{other} (known: :max-heap, :max-mailbox, :send-errors, :no-break)"
+            "proc/flag: unknown flag :{other} (known: :max-heap, :max-mailbox, :send-errors, :no-break, :responsive)"
         ))),
     }
 }

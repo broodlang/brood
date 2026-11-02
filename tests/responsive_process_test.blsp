@@ -1,0 +1,53 @@
+;; A responsive process — `(proc/flag :responsive mode)` (ADR-517): a native call that waits
+;; on the outside world is reported to the process after the wait, or refused before it.
+;;
+;; Coverage:
+;;   - the flag reads nil / :report / :refuse and a set returns the previous mode
+;;   - :refuse raises a catchable E0048 naming the call, and the command never runs
+;;   - :report lets the call through and then sends [:blocking-call {:native :detail :ms}]
+;;   - an ordinary process gets no message
+;; Each case runs in its own process, so the flag never reaches the test runner.
+
+(defmodule responsive-process-test (:use test))
+
+(defn- in-process (body)
+  "Run `body` in a fresh process and answer what it returned."
+  (let (me (self))
+    (spawn (fn () (send me [:done (body)])))
+    (receive ([:done value] value) (after 20000 :timed-out))))
+
+(defn- blocking-reports ()
+  "The `[:blocking-call …]` facts already in this process's mailbox, oldest first."
+  (letrec (drain (fn (acc)
+                   (receive ([:blocking-call facts] (drain (conj acc facts))) (after 0 acc))))
+    (drain [])))
+
+(describe "a responsive process"
+  (test "the flag reads its mode and a set answers the previous one"
+    (assert= (in-process (fn ()
+                           [(proc/flag :responsive)
+                             (proc/flag :responsive true)
+                             (proc/flag :responsive :refuse)
+                             (proc/flag :responsive nil)
+                             (proc/flag :responsive)]))
+      [nil nil :report :refuse nil]))
+  (test "a refusing process is refused with E0048 before the command runs"
+    (let (marker (path/temp (str "brood-responsive-" (rand/token 8))))
+      (assert= (in-process (fn ()
+                             (proc/flag :responsive :refuse)
+                             (try
+                               (os/cmd "touch" [marker])
+                               (catch e [(get e :code) (includes? (error-message e) "touch")]))))
+        ["E0048" true])
+      (is (not (file/exists? marker)))))
+  (test "a reporting process runs the command, then is told what held it and for how long"
+    (let (facts (in-process (fn ()
+                              (proc/flag :responsive true)
+                              (os/cmd "true" ["one" "two"])
+                              (blocking-reports))))
+      (assert= (count facts) 1)
+      (assert= (:native (first facts)) "os/cmd")
+      (assert= (:detail (first facts)) "true one two")
+      (is (int? (:ms (first facts))))))
+  (test "an ordinary process is told nothing"
+    (assert= (in-process (fn () (os/cmd "true" []) (blocking-reports))) [])))

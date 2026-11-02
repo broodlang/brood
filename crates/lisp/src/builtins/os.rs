@@ -335,11 +335,17 @@ pub(super) fn os_cmd(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use std::process::{Command, Stdio};
     let prog = expect_string(heap, "%os-cmd", arg(args, 0))?;
     let mut cmd = Command::new(&prog);
+    let mut argv = Vec::new();
     if args.len() > 1 && !matches!(arg(args, 1), Value::Nil) {
         for a in heap.seq_items(arg(args, 1))? {
-            cmd.arg(expect_string(heap, "%os-cmd", a)?);
+            argv.push(expect_string(heap, "%os-cmd", a)?);
         }
     }
+    cmd.args(&argv);
+    // a responsive process is told it waited, or refused the wait (ADR-517)
+    let blocking = crate::process::responsive::enter_blocking(heap, "os/cmd", || {
+        crate::process::responsive::command_detail(&prog, &argv)
+    })?;
     let mut stdin_text: Option<String> = None;
     let mut timeout: Option<std::time::Duration> = None;
     let (cwd, env) = super::subprocesses::child_options(heap, "os/cmd", arg(args, 2))?;
@@ -398,6 +404,9 @@ pub(super) fn os_cmd(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         )
         .map_err(fail)?
     };
+    if let Some(call) = blocking {
+        call.report(heap);
+    }
     if stop == Some(Stop::Killed) {
         return Err(LispError::kill_signal());
     }
@@ -1037,11 +1046,18 @@ pub(super) fn run_process(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
             }
         }
     }
-    match std::process::Command::new(&prog)
+    // a responsive process is told it waited, or refused the wait (ADR-517)
+    let blocking = crate::process::responsive::enter_blocking(heap, "run-process", || {
+        crate::process::responsive::command_detail(&prog, &argv)
+    })?;
+    let status = std::process::Command::new(&prog)
         .args(&argv)
         .stdin(std::process::Stdio::null())
-        .status()
-    {
+        .status();
+    if let Some(call) = blocking {
+        call.report(heap);
+    }
+    match status {
         Ok(status) => Ok(Value::int(status.code().unwrap_or(-1) as i64)),
         Err(e) => Err(
             LispError::runtime(format!("os/run-process: {}: {}", prog, e))

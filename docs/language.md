@@ -2875,6 +2875,20 @@ restart it. This is the guard against a slow receiver quietly eating the machine
 Backpressure proper stays a library concern: `gen/call` with a timeout is
 already a bounded round-trip.
 
+**`:responsive`** marks a process whose job is to keep answering — an editor's loop, a
+REPL's reader (ADR-517). A native call that waits on the outside world (`os/cmd`,
+`run-process`) is then reported to it or refused, instead of silently freezing it:
+
+```clojure
+(proc/flag :responsive true)     ; report: after the wait, [:blocking-call {:native :detail :ms}]
+(proc/flag :responsive :refuse)  ; refuse: a catchable E0048 before the wait — for a test
+(proc/flag :responsive nil)      ; ordinary again; the read answers nil, :report or :refuse
+```
+
+The report arrives in the process's own mailbox behind whatever it already has, so a loop
+handles it as one more event (bedit keeps it in its slow-turn log). The fix it points at is
+always the same: move the call off the process, into a task, a port or a worker.
+
 ### Going idle (`proc/hibernate`)
 
 `(proc/hibernate)` tells the runtime this process is about to wait a long time, so it

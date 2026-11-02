@@ -232,6 +232,19 @@ impl Heap {
         std::mem::replace(&mut self.extras_mut().proc_no_break, on)
     }
 
+    /// `(proc/flag :responsive)` — how this process treats a blocking native call
+    /// (ADR-517). Setter returns the previous mode.
+    pub(crate) fn proc_responsive(&self) -> crate::process::responsive::Responsive {
+        self.extras().map(|e| e.proc_responsive).unwrap_or_default()
+    }
+
+    pub(crate) fn set_proc_responsive(
+        &mut self,
+        mode: crate::process::responsive::Responsive,
+    ) -> crate::process::responsive::Responsive {
+        std::mem::replace(&mut self.extras_mut().proc_responsive, mode)
+    }
+
     /// Take the sticky over-limit flag (post-collection live bytes) — the eval/VM
     /// safepoint probe. Clearing on read means the raise happens exactly once;
     /// if the process catches it and keeps allocating, the next collection

@@ -81,6 +81,7 @@ pub(crate) mod message;
 pub(crate) mod monitor;
 mod pressure;
 mod receive_spec;
+pub(crate) mod responsive;
 pub(crate) use pressure::{near_soft_limit, soft_limit_crossed};
 pub(crate) use receive_spec::spec_key as receive_spec_key;
 mod scheduler;

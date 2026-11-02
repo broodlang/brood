@@ -317,6 +317,9 @@ pub mod error_codes {
     /// its interrupt window (`proc/interruptible ms thunk`) passed. Catchable, and sticky: a
     /// catch inside the window is interrupted again until `proc/interruptible` closes it.
     pub const INTERRUPTED: &str = "E0047";
+    /// A process marked `(proc/flag :responsive :refuse)` called a native that waits on the
+    /// outside world (`os/cmd`, `run-process`), which it refuses before the wait (ADR-517).
+    pub const BLOCKED_RESPONSIVE: &str = "E0048";
     /// File IO failed: `load` / `slurp` / `spit` / `make-dir` / `list-dir` /
     /// `cwd` / `check-file` couldn't read or write a path.
     pub const FILE_IO: &str = "E0050";

@@ -556,6 +556,11 @@ pub(crate) struct HeapExtras {
     /// something, and nothing could ever resume it. Default off.
     pub(crate) proc_no_break: bool,
 
+    /// `(proc/flag :responsive mode)` — how this process treats a native call that waits on
+    /// the outside world: ordinary (the default), reported to it after the wait, or refused
+    /// with `E0048` (ADR-517).
+    pub(crate) proc_responsive: crate::process::responsive::Responsive,
+
     /// Per-process GC **trace** switch (`(gc-trace on/off)`, defaulted from
     /// `BROOD_GC_TRACE`). When set, each minor/major collection prints a one-line
     /// summary to stderr — a Tier-1 observability aid for tests/benchmarks (the

@@ -17,6 +17,9 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 - GUI: a geometric mark (`●` `■` `◆` `▲`, U+25A0–U+25FF and the large circles and squares) is
   centred in its cell at every size and line height (ADR-516), instead of sitting where its
   font puts it on the baseline, which dropped a status dot below the text beside it.
+- A process whose job is to keep answering can mark itself `(proc/flag :responsive true)`: an
+  `os/cmd` or `run-process` it runs is then reported to it after the wait as
+  `[:blocking-call {:native :detail :ms}]`, or refused with `E0048` under `:refuse` (ADR-517).
 
 **Fixed.**
 - The parallel cold build (`nest run`/`nest test` on a project with no startup image) no
