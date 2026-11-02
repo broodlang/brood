@@ -4,14 +4,12 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
-## Unreleased
+## v0.49.1 — the parallel cold build finishes
 
 **Changed.**
 - A GUI window splits the space its rows leave over between the top and bottom margins
   (ADR-508 addendum), instead of putting it all under the last row, where it could leave a
   band up to a row and a half tall under an editor's echo area.
-
-## v0.49.1 — the parallel cold build finishes
 
 **Fixed.**
 - The parallel cold build (`nest run`/`nest test` on a project with no startup image) no
