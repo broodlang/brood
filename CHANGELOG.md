@@ -4,6 +4,13 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## Unreleased
+
+**Fixed.**
+- A command run by `os/cmd` dies with the process waiting on it (ADR-514). A process killed
+  while it waits (`exit`, `task/cancel`) kills the command and the processes it started,
+  instead of leaving it running to the end with nobody to read its answer.
+
 ## v0.49.1 — the parallel cold build finishes
 
 **Fixed.**

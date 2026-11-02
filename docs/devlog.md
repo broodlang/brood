@@ -4933,3 +4933,14 @@ strip stood taller above its text than below. A band one row tall now bleeds int
 margins only; anything taller still bleeds every way it touches. The new unit test went red
 with the rule removed. Checked here: the `host::gui::backend::bleed` unit tests; not run here:
 the suite.
+
+2026-11-02 (ADR-514, `os/cmd`'s child dies with its caller): bedit's live project search
+cancels the previous search task on every keystroke, and each cancelled `rg` kept running:
+`os/cmd` waits in native code, where an exit signal only set the caller's flag. The wait now
+polls in 20 ms slices and checks the caller's `kill_pending` between them (hard or soft, as a
+woken native-nested `receive` does); a kill takes down the child's process group and raises
+the kill signal. The deadline and the kill are one `Stop` in the wait. Also: `underline_rects`
+(ADR-513) warned as dead code in a build without `gui`, where only its unit tests use it.
+Checked here: the new `blocking_native` test (red with the check disabled) and the other two in
+that file, `system_test` (the `:timeout-ms` tests), `doc_examples_test`, clippy with and
+without `gui`; not run here: the suite.

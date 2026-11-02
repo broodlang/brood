@@ -409,6 +409,20 @@ pub(crate) fn capture_hard_kill_pending() -> bool {
     })
 }
 
+/// Has the current green process been sent an exit signal it will die of, hard or soft?
+/// What a native call that waits on the outside world (`%os-cmd`'s child) checks between
+/// waits, as a blocked native-nested `receive` does when it wakes: the call is the
+/// process's wait, so a soft exit is due there too. Never true on the root thread, which
+/// is not killable.
+pub(crate) fn capture_kill_pending() -> bool {
+    in_capture_run()
+        && CURRENT.with(|c| {
+            c.borrow()
+                .as_ref()
+                .is_some_and(|ctx| ctx.mailbox.kill_pending.load(Ordering::Relaxed))
+        })
+}
+
 // ----- the run queue + worker pool -------------------------------------------
 
 pub(super) static NEXT_PID: AtomicU64 = AtomicU64::new(1);

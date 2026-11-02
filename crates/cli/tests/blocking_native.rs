@@ -100,3 +100,71 @@ fn a_process_runs_while_every_worker_loops_under_a_native_frame() {
     }
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+/// **The child of `os/cmd` dies with its caller.** `os/cmd` waits in native code, where an
+/// exit signal used to reach only the caller's flag: the caller died when the command
+/// returned, and the command ran to the end on a worker nothing read from again — a
+/// cancelled search task left its `rg` running. The wait now looks for its caller's exit
+/// signal between polls and kills the child's group. Each stop here — the untrappable
+/// `:kill`, a soft exit, `task/cancel` — is tried on a caller blocked on a 30 s `sleep`.
+const CALLER_DIES: &str = r#"
+(defn wait-for (ready? tries)
+  (cond
+    (ready?) true
+    (= tries 0) false
+    :else (do (proc/sleep 20) (wait-for ready? (dec tries)))))
+(defn alive? (pid) (= 0 (:exit (os/cmd "kill" ["-0" pid]))))
+(defn started (pid-file)
+  ;; the child's pid, once it has written it
+  (wait-for (fn () (and (file/exists? pid-file) (not (= "" (string/trim (file/slurp pid-file))))))
+    250)
+  (string/trim (file/slurp pid-file)))
+(defn blocked (pid-file)
+  (os/cmd "sh" ["-c" (str "echo $$ > " pid-file "; exec sleep 30")]))
+(defn report (label pid)
+  (io/puts label
+    (if (wait-for (fn () (not (alive? pid))) 100) "child died with its caller" "child outlived its caller")))
+(defn by-exit (label reason)
+  (let ([caller ref] (spawn-monitor (blocked (str label ".pid")))
+        pid (started (str label ".pid")))
+    (exit caller reason)
+    (receive
+      ([:down ^ref _ _] nil)
+      (after 2000 (io/puts label "caller survived")))
+    (report label pid)))
+(by-exit "kill" :kill)
+(by-exit "shutdown" :shutdown)
+(let (handle (task/task (fn () (blocked "cancel.pid")))
+      pid (started "cancel.pid"))
+  (task/cancel handle)
+  (report "cancel" pid))
+"#;
+
+#[test]
+fn a_command_dies_with_the_process_waiting_on_it() {
+    let directory = std::env::temp_dir().join(format!("brood-cmd-dies-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("create the scratch directory");
+    std::fs::write(directory.join("main.blsp"), CALLER_DIES).expect("write the script");
+    for tier in ["0", "2"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_brood"))
+            .arg("main.blsp")
+            .current_dir(&directory)
+            .env("BROOD_TIER", tier)
+            .output()
+            .expect("run brood");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for label in ["kill", "shutdown", "cancel"] {
+            assert!(
+                stdout.contains(&format!("{label} child died with its caller")),
+                "tier {tier}, stopped by {label}: the command outlived its caller\n\
+                 stdout: {stdout}\nstderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        for label in ["kill", "shutdown", "cancel"] {
+            let _ = std::fs::remove_file(directory.join(format!("{label}.pid")));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&directory);
+}

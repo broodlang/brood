@@ -201,6 +201,9 @@ a `$` in it is one argument. `opts`:
 - `:stdin` — a string fed to the child's stdin, then EOF (else stdin is empty).
 - `:timeout-ms` — kill the child, and every process it started, after this long.
 
+The child dies with its caller: a process killed while it waits here (`exit`, `task/cancel`)
+kills the command and every process it started, and dies itself as it would in a `receive`.
+
     (os/cmd-out (os/cmd \"echo\" [\"a b\"]))   ;=> \"a b\"
     (os/cmd-out (os/cmd \"cat\" [] {:stdin \"piped\"}))   ;=> \"piped\"
     (os/cmd-out (os/cmd \"sh\" [\"-c\" \"echo $X\"] {:env {\"X\" \"set\"}}))   ;=> \"set\"

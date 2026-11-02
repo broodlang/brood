@@ -84,6 +84,8 @@ impl Default for Face {
 /// `thickness`-square steps rising and falling `2 × thickness` over a `4 × thickness` period.
 /// The phase is the ABSOLUTE x, so the wave under one word is continuous across the cells
 /// (and runs) it is painted in. Shared by the CPU and GPU painters.
+// the painters are `gui`-only, its unit tests are not
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
 pub(crate) fn underline_rects(
     left: isize,
     y: isize,

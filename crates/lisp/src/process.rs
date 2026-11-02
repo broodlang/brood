@@ -154,7 +154,7 @@ pub fn parked_process_count() -> usize {
 // when to capture a continuation (vs. yield the coroutine / block the root), and by the
 // `receive` gate to tell a capturable top-level receive from a native-nested one.
 pub(crate) use scheduler::{
-    Safepoint, TreeWalkGuard, capture_hard_kill_pending, capture_top_level,
+    Safepoint, TreeWalkGuard, capture_hard_kill_pending, capture_kill_pending, capture_top_level,
     charge as charge_reductions, charge_native, dirty_block, driver_safepoint, expire_quantum,
     in_capture_run, set_capture_top_level, stop_between_elements, tick_nested,
 };

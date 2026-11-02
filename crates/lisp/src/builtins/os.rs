@@ -382,11 +382,25 @@ pub(super) fn os_cmd(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     // a live worker and a process woken meanwhile is not routed to it. Without this, two
     // `os/cmd` calls — or one beside a tree-walked `receive` — on a two-worker pool left no
     // worker to run anything else until a command returned (KI-280).
-    let (status, stdout_bytes, stderr_bytes, timed_out) = {
+    //
+    // The child dies with its caller: the wait checks the calling process's exit signal
+    // between polls, and a killed caller kills the child's group and dies itself, as it
+    // would in a `receive`. Without it a cancelled task (`task/cancel`) left its command
+    // running to the end on a worker nothing would read from again.
+    let (status, stdout_bytes, stderr_bytes, stop) = {
         let _dirty = crate::process::dirty_block();
         let child = cmd.spawn().map_err(fail)?;
-        os_cmd_collect(child, stdin_text, timeout).map_err(fail)?
+        os_cmd_collect(
+            child,
+            stdin_text,
+            timeout,
+            crate::process::capture_kill_pending,
+        )
+        .map_err(fail)?
     };
+    if stop == Some(Stop::Killed) {
+        return Err(LispError::kill_signal());
+    }
     let stdout = heap.alloc_string(&String::from_utf8_lossy(&stdout_bytes));
     let stderr = heap.alloc_string(&String::from_utf8_lossy(&stderr_bytes));
     let exit_code = status.code().unwrap_or(-1) as i64;
@@ -395,20 +409,46 @@ pub(super) fn os_cmd(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         (kw("stderr"), stderr),
         (kw("exit"), Value::int(exit_code)),
     ];
-    if timed_out {
+    if stop == Some(Stop::Deadline) {
         pairs.push((kw("timed-out"), Value::Bool(true)));
     }
     Ok(heap.map_from_pairs(pairs))
 }
 
+/// Why `%os-cmd` stopped waiting before its child finished, and killed it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Stop {
+    /// `:timeout-ms` ran out.
+    Deadline,
+    /// The calling process was sent an exit signal: the child dies with it.
+    Killed,
+}
+
+/// The longest one wait of `%os-cmd` runs before it looks for its caller's exit signal
+/// again — how long a killed caller's child can outlive it.
+const KILL_CHECK: std::time::Duration = std::time::Duration::from_millis(20);
+
 /// What `%os-cmd` collects from a finished (or killed) child: its status, stdout,
-/// stderr, and whether the deadline ended the call.
-type OsCmdOutcome = (std::process::ExitStatus, Vec<u8>, Vec<u8>, bool);
+/// stderr, and what stopped the call early, if anything did.
+type OsCmdOutcome = (std::process::ExitStatus, Vec<u8>, Vec<u8>, Option<Stop>);
+
+/// What, if anything, stops the wait now: the deadline passed, or `killed` says the caller
+/// is dying.
+fn os_cmd_stop(deadline: Option<std::time::Instant>, killed: fn() -> bool) -> Option<Stop> {
+    if killed() {
+        Some(Stop::Killed)
+    } else if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+        Some(Stop::Deadline)
+    } else {
+        None
+    }
+}
 
 /// Feed `%os-cmd`'s child its stdin and read both output pipes in ONE `poll` loop
-/// bounded by the deadline, so no helper thread exists to outlive the call: a
-/// grandchild that keeps a pipe open past the deadline is killed with the group, and
-/// one that escaped the group (`setsid`) only finds our ends closed.
+/// bounded by the deadline and by `killed` (asked at least every [`KILL_CHECK`]), so no
+/// helper thread exists to outlive the call: a grandchild that keeps a pipe open past
+/// either is killed with the group, and one that escaped the group (`setsid`) only finds
+/// our ends closed.
 ///
 /// The child is reaped LAST. Until then its pid — the process-group id — cannot be
 /// reused, so the `killpg` below can only ever reach the group we created.
@@ -417,6 +457,7 @@ fn os_cmd_collect(
     mut child: std::process::Child,
     stdin_text: Option<String>,
     timeout: Option<std::time::Duration>,
+    killed: fn() -> bool,
 ) -> std::io::Result<OsCmdOutcome> {
     use std::io::{ErrorKind, Read, Write};
     use std::os::fd::AsRawFd;
@@ -448,7 +489,7 @@ fn os_cmd_collect(
     }
     let mut stdout_bytes = Vec::new();
     let mut stderr_bytes = Vec::new();
-    let mut timed_out = false;
+    let mut stop = None;
     let mut chunk = vec![0u8; 64 * 1024];
     // Read until the pipe would block; `None` it out at end-of-file or on an error.
     fn drain_ready<R: Read>(pipe: &mut Option<R>, into: &mut Vec<u8>, chunk: &mut [u8]) {
@@ -463,18 +504,15 @@ fn os_cmd_collect(
         }
     }
     while stdin_pipe.is_some() || stdout_pipe.is_some() || stderr_pipe.is_some() {
-        let wait_ms: libc::c_int = match deadline {
-            None => -1,
-            Some(deadline) => {
-                let now = Instant::now();
-                if now >= deadline {
-                    timed_out = true;
-                    break;
-                }
-                // Round up, so a sub-millisecond remainder sleeps rather than spins.
-                ((deadline - now).as_millis() + 1).min(libc::c_int::MAX as u128) as libc::c_int
-            }
-        };
+        stop = os_cmd_stop(deadline, killed);
+        if stop.is_some() {
+            break;
+        }
+        // Round up, so a sub-millisecond remainder sleeps rather than spins.
+        let wait = deadline.map_or(KILL_CHECK, |deadline| {
+            KILL_CHECK.min(deadline.saturating_duration_since(Instant::now()))
+        });
+        let wait_ms = (wait.as_millis() + 1) as libc::c_int;
         let mut descriptors = Vec::with_capacity(3);
         if let Some(pipe) = &stdin_pipe {
             descriptors.push(libc::pollfd {
@@ -517,7 +555,7 @@ fn os_cmd_collect(
             return Err(error);
         }
         if ready == 0 {
-            continue; // the deadline check at the top of the loop decides
+            continue; // the stop check at the top of the loop decides
         }
         for descriptor in &descriptors {
             if descriptor.revents == 0 {
@@ -552,8 +590,11 @@ fn os_cmd_collect(
     drop(stdin_pipe);
     drop(stdout_pipe);
     drop(stderr_pipe);
+    // The pipes are closed but the child may still run (it closed its own output): it is
+    // waited for under the same two stops, polled, since a blocking `wait` would hear
+    // neither.
     let status = loop {
-        if timed_out {
+        if stop.is_some() {
             // SAFETY: killpg on the group `process_group(0)` made for this child; the
             // child is not reaped yet, so its pid (the group id) cannot have been reused.
             unsafe {
@@ -561,30 +602,26 @@ fn os_cmd_collect(
             }
             break child.wait()?;
         }
-        match deadline {
-            None => break child.wait()?,
-            Some(deadline) => {
-                if let Some(status) = child.try_wait()? {
-                    break status;
-                }
-                if Instant::now() >= deadline {
-                    timed_out = true;
-                    continue;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(2));
-            }
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        stop = os_cmd_stop(deadline, killed);
+        if stop.is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(2));
         }
     };
-    Ok((status, stdout_bytes, stderr_bytes, timed_out))
+    Ok((status, stdout_bytes, stderr_bytes, stop))
 }
 
-/// The portable fallback: a thread per pipe, the child killed at the deadline. Without
-/// process groups a grandchild holding a pipe can still outlast the deadline here.
+/// The portable fallback: a thread per pipe, the child killed at the deadline or when
+/// `killed` says the caller is dying. Without process groups a grandchild holding a pipe
+/// can still outlast either here.
 #[cfg(not(unix))]
 fn os_cmd_collect(
     mut child: std::process::Child,
     stdin_text: Option<String>,
     timeout: Option<std::time::Duration>,
+    killed: fn() -> bool,
 ) -> std::io::Result<OsCmdOutcome> {
     use std::io::{Read, Write};
     // `Builder::spawn`, not `thread::spawn`: the OS can refuse a thread (KI-241), and the
@@ -621,17 +658,14 @@ fn os_cmd_collect(
             return Err(error);
         }
     };
-    let started = std::time::Instant::now();
-    let mut timed_out = false;
+    let deadline = timeout.map(|limit| std::time::Instant::now() + limit);
+    let mut stop = None;
     let status = loop {
-        let Some(limit) = timeout else {
-            break child.wait()?;
-        };
         if let Some(status) = child.try_wait()? {
             break status;
         }
-        if started.elapsed() >= limit {
-            timed_out = true;
+        stop = os_cmd_stop(deadline, killed);
+        if stop.is_some() {
             let _ = child.kill();
             break child.wait()?;
         }
@@ -642,7 +676,7 @@ fn os_cmd_collect(
     }
     let stdout_bytes = stdout_reader.join().unwrap_or_default();
     let stderr_bytes = stderr_reader.join().unwrap_or_default();
-    Ok((status, stdout_bytes, stderr_bytes, timed_out))
+    Ok((status, stdout_bytes, stderr_bytes, stop))
 }
 
 /// `(%halt code)` — terminate the process immediately with `code`, which must be a
