@@ -16,10 +16,12 @@
 //! of the frame without knowing about it.
 //!
 //! Text backgrounds do not bleed: a run's width is the shaper's to know. A rounded or
-//! translucent fill does not either (a pill or a wash is not a band). Inside a
-//! `ScrollRegion` only the sides bleed, since its rows move. A `CellRegion` paints at
-//! its own metrics and is left alone. A `Fragment` is bled inside, and the result kept by
-//! the fragment's address ([`Bleed`]), so an unchanged fragment stays one allocation.
+//! translucent fill does not either (a pill or a wash is not a band), and a band one row
+//! tall is a line of text that bleeds sideways only (it would stand off-centre around its
+//! text). Inside a `ScrollRegion` only the sides bleed, since its rows move. A
+//! `CellRegion` paints at its own metrics and is left alone. A `Fragment` is bled inside,
+//! and the result kept by the fragment's address ([`Bleed`]), so an unchanged fragment
+//! stays one allocation.
 
 use super::render::Renderer;
 use crate::host::gui::{Face, FragmentOps, Op};
@@ -281,11 +283,17 @@ impl Band {
     /// The `FRect`s that carry this band over the margins it touches: the side pieces at
     /// its own rows, and (when `vertical`) the top and bottom pieces, widened over a side
     /// margin the band also touches so a corner is covered too.
+    ///
+    /// A band one row tall is a LINE (a header line, a mode line, a highlighted row) and
+    /// bleeds sideways only: its text sits in that row, and a line stretched up or down into
+    /// the margin stands off-centre around it. Emacs paints its header line inside the
+    /// frame's internal border the same way.
     fn pieces(&self, m: &Margins, vertical: bool) -> Vec<Op> {
+        let surface = vertical && self.y1 - self.y0 > 1.0 + TOUCH;
         let left = m.left > 0.0 && self.x0 <= TOUCH;
         let right = m.right > 0.0 && self.x1 >= m.cols - TOUCH;
-        let top = vertical && m.top > 0.0 && self.y0 <= TOUCH;
-        let bottom = vertical && m.bottom > 0.0 && self.y1 >= m.rows - TOUCH;
+        let top = surface && m.top > 0.0 && self.y0 <= TOUCH;
+        let bottom = surface && m.bottom > 0.0 && self.y1 >= m.rows - TOUCH;
         let piece = |x: f32, y: f32, w: f32, h: f32| Op::FRect {
             x,
             y,
@@ -410,6 +418,18 @@ mod tests {
         assert!(matches!(bled[0], Op::Clear));
         assert!(matches!(bled[1], Op::Rect { .. }));
         assert!(matches!(bled[4], Op::Clear));
+    }
+
+    #[test]
+    fn a_line_on_the_top_row_bleeds_sideways_only() {
+        // a header line: row 0, every column. Carried up into the top margin it would stand
+        // a quarter-row taller above its text than below it
+        let frame = vec![rect(0, 0, 80, 1, [9, 9, 9])];
+        let bled = edge_bleed(&frame, &MARGINS).expect("bled");
+        assert_eq!(
+            frects(&bled),
+            vec![[-0.5, 0.0, 0.5, 1.0], [80.0, 0.0, 0.75, 1.0]]
+        );
     }
 
     #[test]

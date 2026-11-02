@@ -4926,3 +4926,10 @@ gateway now passes the block to the activation enclosing it (`blame_enclosing_ga
 clear sites), so every native frame under the receive latches on one park, at no per-call cost.
 Only enclosing activations are live, so a native that ran later is still never blamed. Unit
 guard in `eval/compile/tests.rs`. Built here; not run here (CI and the Nightly).
+
+2026-11-02 (ADR-508 addendum, a line bleeds sideways only): bedit's header line sits on the
+grid's top row, and the edge bleed carried its colour up over the window's top inset, so the
+strip stood taller above its text than below. A band one row tall now bleeds into the side
+margins only; anything taller still bleeds every way it touches. The new unit test went red
+with the rule removed. Checked here: the `host::gui::backend::bleed` unit tests; not run here:
+the suite.
