@@ -14,6 +14,10 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   waiting on loads still in flight, and every process waiting on a module that fails gets
   its error instead of loading it again. bedit's cold build went from hanging to a few
   seconds.
+- A native loop that calls a function which blocks in `receive` stops blocking its worker
+  after the first time (KI-313). One block now moves every native frame under it to the
+  parking path, not only the innermost, so a fold whose step had compiled before it first
+  blocked no longer holds its worker on each later call.
 
 ## v0.49.0 — lists for parameters, a linear conj, and no open issues
 
