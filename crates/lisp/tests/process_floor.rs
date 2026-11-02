@@ -53,10 +53,17 @@
 //! put a parked process at 2 872 (CI) — the latest-lane index (a 48 B `HashMap`) and the
 //! interrupt's window state (64 B) inline on every mailbox. Both are boxed at first use now,
 //! the probe's `flags` word alone staying inline: 2 780 locally.
+//!
+//! Raised 2 800 → 2 825 (2026-11-02), for build-to-build variation, not growth: CI read 2 802
+//! on `fe79302d`. The same per-process code measured 2 787 at `63afdb45` and 2 799 at
+//! `cad037a4`, whose only code change is the GUI's `bleed.rs`. Each binary repeats its own
+//! figure exactly, so the 12 B is how one build lays out what a spawn allocates, and the
+//! readings from `fac6c240` on span 2 786–2 802. 2 825 still reds both regressions recorded
+//! above (2 831 from the byte trigger's fields, 2 872 from the mailbox lanes).
 
 use brood::Interp;
 
-const FLOOR_BYTES: i64 = 2800;
+const FLOOR_BYTES: i64 = 2825;
 
 #[test]
 fn a_parked_process_costs_no_more_than_the_floor() {
