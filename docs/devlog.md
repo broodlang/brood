@@ -4933,3 +4933,11 @@ strip stood taller above its text than below. A band one row tall now bleeds int
 margins only; anything taller still bleeds every way it touches. The new unit test went red
 with the rule removed. Checked here: the `host::gui::backend::bleed` unit tests; not run here:
 the suite.
+
+2026-11-02 (KI-313 reopened). Run on the test machine, the case's bail trace shows the window's
+reducer `step` bails `chunk-outside-jit-subset` and is never native, so the native-reducer path
+`63afdb45` closed cannot be what failed in the Nightly. The hand-off stays: the gap is real and
+its guard goes red under sabotage. 1980 isolated runs of the case (300 with every core spinning,
+480 and 1200 as 12 and 48 concurrent loops) all passed, each with one block latching
+`%vector-fold-walk`. KI-313 is back in "Open and watching"; next is the Nightly's own setup, the
+full suite with `treesit-grammars`, under a bail trace.

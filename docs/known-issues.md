@@ -68,7 +68,30 @@ the scheduler, dist, GC or the JIT — run it repeatedly.
 
 (An open entry's `## KI-N` section goes here until it is resolved.)
 
-(None open.)
+## KI-313 — KI-309 again: `interrupt_one_worker`'s native-walk case blocked its worker twice 👀 WATCHING
+
+**Seen:** `a_native_walk_that_hosts_a_park_blocks_once_and_then_parks` failed `<= dirty + 1` ("a
+native walk blocked more than once") in the Nightly on `a1bced33` (run 41188576448, suite run 3
+of 3), with KI-309's fix in. The next Nightly on the same commit passed. No bail trace: the suite
+does not arm `BROOD_JIT_BAIL_TRACE`.
+
+**Not reproduced.** On the test machine, 1980 isolated runs of the case at `63afdb45` passed:
+300 one after another with every core spinning, 480 as 12 concurrent loops, 1200 as 48. Every
+traced run took the same path: ONE `dirty-receive-block` under the walk's first native activation,
+which latches `%vector-fold-walk`. The window's reducer `step` never goes native (it bails
+`chunk-outside-jit-subset`), so it is never a second native frame under the receive.
+
+**What `63afdb45` fixed, and what it did not.** The latch blamed only the innermost native
+activation under a blocked `receive`, so a native walk calling a NATIVE reducer latched the reducer
+and blocked again on the next call. `blame_enclosing_gateway` now hands the block to the enclosing
+activation, so one park latches every native frame under it (guard:
+`a_suspend_latch_reaches_the_native_activation_enclosing_it`, sabotage-verified). That gap is real,
+but this case cannot hit it while `step` bails, so it does not explain the Nightly failure; the
+first account of KI-313 said it did, and was wrong.
+
+**Still to try:** the Nightly's conditions: the full suite in parallel, built with
+`--features brood/treesit-grammars` (`scripts/nextest-no-flakes.sh`), looped; and a bail trace
+on the case under that suite, so a second failure names its arms.
 
 ## Index — status per issue
 
@@ -76,7 +99,7 @@ Each closed row's full section is `## KI-N` in [archive/known-issues-closed.md](
 
 | # | What | Status |
 |---|---|---|
-| KI-313 | **KI-309 again: `interrupt_one_worker`'s native-walk case saw its worker block twice** — `a_native_walk_that_hosts_a_park_blocks_once_and_then_parks` failed `<= dirty + 1` in the Nightly on `a1bced33` (run 41188576448, suite run 3 of 3), after KI-309's fix; the next Nightly on the same commit passed | ✅ **FIXED 2026-11-02** — the suspend-host latch named only the INNERMOST native activation under the blocked `receive`. When the reducer `step` had tiered before the first block, the walk (`%vector-fold-walk`) called it natively: the block latched `step`, the walk stayed native and blocked again on the next call. A latching gateway now hands the block to the activation enclosing it (`blame_enclosing_gateway`), so one park latches every native frame under it. Guard: `a_suspend_latch_reaches_the_native_activation_enclosing_it` (red when the hand-off clears to 0, by construction: the walk's exit then never matches). Not run here; CI |
+| KI-313 | **KI-309 again: `interrupt_one_worker`'s native-walk case saw its worker block twice** — `a_native_walk_that_hosts_a_park_blocks_once_and_then_parks` failed `<= dirty + 1` in the Nightly on `a1bced33` (run 41188576448, suite run 3 of 3), after KI-309's fix; the next Nightly on the same commit passed | 👀 **WATCHING** — not reproduced in 1980 isolated runs on the test machine (quiet and under load). `63afdb45` closed a real latch gap (a native reducer under a native walk), but this case's reducer never goes native, so that is not the cause. Next: the Nightly's own conditions (full parallel suite, `treesit-grammars`) with a bail trace. Section above |
 | KI-312 | **a cold parallel build hung on a require cycle of many modules, and on a broken dependency** — bedit's cold `nest run --check-boot` never finished on 0.49.0 (two in two), a 24-module ring hung where the sequential walk takes 0.15 s, and mur-forge with a stale `hatch` sat for minutes instead of reporting the ADR-512 error; waiters reached the 30 s backstop and force-loaded | ✅ **FIXED 2026-10-30** — pool workers give a cross-process cycle up rather than break it one process a round (`*require-cycle-abandons*`), the driver kills the pool at the first real failure, and a waiter on a failed load raises its error instead of loading it again. Guards: `parallel_load.rs` (a ring builds; a failure does not wait out loads in flight; a broken module under a ring fails) and `require_failure_test.blsp` (every waiter raises, the module loads once), each sabotage-verified |
 | KI-311 | **`table_address_space`'s exit case read 192 MB of growth with every table reclaimed** — 2000 spawned and exited processes moved the process's `VmSize` through the allocator's arenas (CI tree-walker job on `543f0b86`, and once before) | ✅ **FIXED 2026-10-30** — the case counts the table store's own chunk mappings (`core::table::chunks_mapped`); with `release_owned` disabled it reads 2000 and fails |
 | KI-310 | **a `fn` or `let` over a 100 000-level pattern overflowed the native stack** — `robustness_limits_test` aborted on the desktop (not in CI): `mentions_types` recursed per level before the pattern depth cap could refuse it | ✅ **FIXED 2026-10-30** — the walk uses a work list. Guard: `a_deep_untyped_pattern_is_walked_on_a_small_stack` (256 KB thread; the recursive walk aborts it) |

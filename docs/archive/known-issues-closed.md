@@ -15608,28 +15608,6 @@ threads had enough stack to pass; this machine's did not.
 **Guard.** `typed::tests::a_deep_untyped_pattern_is_walked_on_a_small_stack` strips a
 100 000-level pattern on a 256 KB thread; the recursive walk aborts it.
 
-## KI-313 — KI-309 again: a native walk over a parking reducer blocked its worker twice ✅ FIXED 2026-11-02
-
-**Seen:** `interrupt_one_worker`'s `a_native_walk_that_hosts_a_park_blocks_once_and_then_parks`
-failed `<= dirty + 1` in the Nightly on `a1bced33` (run 41188576448, suite run 3 of 3), with
-KI-309's fix in. The next Nightly on the same commit passed.
-
-**Cause.** The suspend-host latch blamed only the innermost native activation under a
-dirty-blocked `receive` and cleared the token, so the activations enclosing it stayed native
-until later parks. The case's walk (`%vector-fold-walk`) calls a closure reducer that opens the
-window. When that reducer had tiered before the first block, the walk called it natively: the
-block latched the reducer, the walk stayed native, and it blocked its worker again on the next
-call. Whether the reducer tiered first depended on timing, hence once in two nights.
-
-**Fix.** A latching gateway hands the block to the activation enclosing it
-(`blame_enclosing_gateway`, at both clear sites in `jit_runtime/deopt.rs`), so one park latches
-every native frame under the `receive`, at no per-call cost. Only enclosing activations are
-live, so a native that ran later is still never blamed.
-
-**Guard.** `a_suspend_latch_reaches_the_native_activation_enclosing_it` in
-`eval/compile/tests.rs`: red when the hand-off clears to 0, by construction, since the walk's
-exit then never matches.
-
 ## KI-312 — a cold parallel build hung on a require cycle of many modules, and on a broken dependency ✅ FIXED 2026-10-30
 
 **Seen:** mur-forge's `nest check` hung after the ADR-512 migration, with its `_deps/hatch` still
