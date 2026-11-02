@@ -820,10 +820,12 @@ impl Renderer {
     /// differently:
     ///   - **horizontal**: at the inset. The grid is LEFT-ALIGNED and the remainder
     ///     sits on the right.
-    ///   - **vertical**: BELOW the grid, too. The grid is TOP-ALIGNED: row 0 sits at
-    ///     the inset and the slack goes under the last row, as Emacs leaves it under
-    ///     the echo area. Slack ABOVE the grid would leave up to a whole row of empty
-    ///     space over line 1 and move every row on each font-size step.
+    ///   - **vertical**: SPLIT, half above row 0 and half below the last row. All of it
+    ///     under the last row read as a band of empty window up to a row and a half
+    ///     tall under the echo area (the inset plus a row less a pixel), which looks like
+    ///     a layout bug; all of it above would do the same over line 1. Split, neither
+    ///     margin exceeds the inset plus half a row. Rows move on a font-size step
+    ///     whichever way the slack goes, since every row's height changes.
     ///
     /// Don't centre the grid on the horizontal half-remainder (`rem_w / 2`): `rem_w` is
     /// `width % cell_w`, so it depends on the CELL SIZE, and a font-size zoom would slide
@@ -833,9 +835,11 @@ impl Renderer {
     /// WM-independent (no window resize, so it works where `request_inner_size` is
     /// ignored), and the mouse hit-test (`px_to_cell`) shares it so clicks stay
     /// aligned with what's painted.
-    pub(crate) fn grid_origin(&self, _w_px: usize, _h_px: usize) -> (usize, usize) {
+    pub(crate) fn grid_origin(&self, _w_px: usize, h_px: usize) -> (usize, usize) {
         let inset = self.inset();
-        (inset, inset)
+        let cell_h = self.cell_h.max(1);
+        let slack = h_px.saturating_sub(2 * inset) % cell_h;
+        (inset, inset + slack / 2)
     }
 
     /// Recompute the px size + cell metrics by shaping a reference glyph ('M') in
@@ -2259,18 +2263,21 @@ mod grid_stability_tests {
         );
     }
 
-    /// The first row sits at the top inset at every size. The vertical remainder goes
-    /// under the grid, so the text starts where the window starts.
+    /// The vertical remainder is split above and below the grid at every size: all of it
+    /// under the last row stood as a band of empty window up to a row and a half tall under
+    /// the echo area. The two margins differ by the odd pixel at most.
     #[test]
-    fn the_first_row_stays_at_the_top_at_every_size() {
+    fn the_vertical_remainder_is_split_above_and_below_at_every_size() {
         let mut r = Renderer::new(1.0, default_families(), 15.0);
         let (w, h) = (1913, 1077);
         for px in 10..=30 {
             r.set_font(None, Some(px as f32));
-            assert_eq!(
-                r.grid_origin(w, h).1,
-                r.inset(),
-                "row 0 moved down at {px} px"
+            let (_, rows) = super::super::bleed::grid_cells(&r, w, h);
+            let top = r.grid_origin(w, h).1;
+            let bottom = h - top - rows as usize * r.cell_h;
+            assert!(
+                top.abs_diff(bottom) <= 1,
+                "at {px} px the margins are {top} above and {bottom} below"
             );
         }
     }

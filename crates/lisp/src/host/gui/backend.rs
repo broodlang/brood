@@ -2169,7 +2169,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
             WindowEvent::ModifiersChanged(m) => w.mods = m.state(),
             WindowEvent::Resized(_) => {
                 // The sub-cell remainder is placed at paint time (`grid_origin`:
-                // centred horizontally, anchored top vertically), so there's no
+                // on the right, and split above and below), so there's no
                 // window-resize snap to do here — it works on every WM.
                 // Wake the app loop so it re-renders at the new (cols, rows)
                 // now, rather than after its (possibly long) poll timeout.

@@ -4952,3 +4952,12 @@ the kill signal. The deadline and the kill are one `Stop` in the wait. Also: `un
 Checked here: the new `blocking_native` test (red with the check disabled) and the other two in
 that file, `system_test` (the `:timeout-ms` tests), `doc_examples_test`, clippy with and
 without `gui`; not run here: the suite.
+
+2026-11-02 (ADR-508 addendum, the vertical remainder is split): bedit's user asked why there
+was such a gap under the echo area. The grid was top-anchored (1518e4b0, so row 0 stays put
+across font sizes), which put the whole vertical remainder, up to a row less a pixel, under the
+last row on top of the inset. Asked, the user chose to split it: `grid_origin` puts half above
+row 0. The stability test that pinned row 0 at the inset now pins the split (the margins differ
+by a pixel at most, at every size from 10 to 30 px), and went red with the old origin. Every
+reader (the painters, the bleed margins, the mouse hit-test) goes through `grid_origin`.
+Checked here: the `host::gui` unit tests; not run here: the suite.
