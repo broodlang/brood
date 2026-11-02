@@ -489,7 +489,7 @@ checksum = "36f64beae40a84da1b4b26ff2761a5b895c12adc41dc25aaee1c4f2bbfe97a6e"
 
 [[package]]
 name = "brood"
-version = "0.49.0"
+version = "0.49.1"
 dependencies = [
  "arboard",
  "arc-swap",
@@ -553,7 +553,7 @@ dependencies = [
 
 [[package]]
 name = "brood-lsp"
-version = "0.49.0"
+version = "0.49.1"
 dependencies = [
  "brood",
  "crossbeam-channel",
@@ -565,7 +565,7 @@ dependencies = [
 
 [[package]]
 name = "brood-playground"
-version = "0.49.0"
+version = "0.49.1"
 dependencies = [
  "brood",
  "wasm-bindgen",
@@ -573,7 +573,7 @@ dependencies = [
 
 [[package]]
 name = "brood-tab"
-version = "0.49.0"
+version = "0.49.1"
 dependencies = [
  "brood",
  "wasm-bindgen",
@@ -769,7 +769,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "cli"
-version = "0.49.0"
+version = "0.49.1"
 dependencies = [
  "brood",
  "clap",
@@ -2645,7 +2645,7 @@ dependencies = [
 
 [[package]]
 name = "nest"
-version = "0.49.0"
+version = "0.49.1"
 dependencies = [
  "brood",
  "clap",
