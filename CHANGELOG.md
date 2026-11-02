@@ -4,13 +4,6 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
-## Unreleased
-
-**Fixed.**
-- A command run by `os/cmd` dies with the process waiting on it (ADR-514). A process killed
-  while it waits (`exit`, `task/cancel`) kills the command and the processes it started,
-  instead of leaving it running to the end with nobody to read its answer.
-
 ## v0.49.1 — the parallel cold build finishes
 
 **Fixed.**
@@ -21,10 +14,13 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   waiting on loads still in flight, and every process waiting on a module that fails gets
   its error instead of loading it again. bedit's cold build went from hanging to a few
   seconds.
-- A native loop that calls a function which blocks in `receive` stops blocking its worker
-  after the first time (KI-313). One block now moves every native frame under it to the
-  parking path, not only the innermost, so a fold whose step had compiled before it first
-  blocked no longer holds its worker on each later call.
+- A command run by `os/cmd` dies with the process waiting on it (ADR-514). A process killed
+  while it waits (`exit`, `task/cancel`) kills the command and the processes it started,
+  instead of leaving it running to the end with nobody to read its answer.
+- A native loop whose callback had compiled natively before it first blocked in `receive`
+  stops blocking its worker after that first time: one block now moves every native frame
+  under it to the parking path, not only the innermost. (Found chasing KI-313, which this
+  turned out not to be; KI-313 is still watched.)
 - GUI: a background band one row tall at the window's edge bleeds sideways only, so a header
   line on the top row stays centred on its text (ADR-508).
 
