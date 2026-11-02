@@ -1177,6 +1177,11 @@ impl Renderer {
             );
             (false, false)
         };
+        // A geometric mark (a status dot) sits in the middle of its cell, not where its
+        // font's design puts it on the baseline (ADR-516).
+        if !color && is_centred_symbol(g) {
+            centre_ink_vertically(&mut rgba, cw, ch);
+        }
         CachedGlyph {
             color,
             subpixel,
@@ -1313,6 +1318,50 @@ pub(super) fn canvas_over(
     rgba[idx + 3] = out_a as u8;
 }
 
+/// Whether cluster `g` is a geometric MARK rather than text: one character from Unicode's
+/// Geometric Shapes block (`●` `■` `◆` `▲` `○` …) or the large circles and squares of
+/// Miscellaneous Symbols and Arrows (`⬤` `⬛` `⭕`). These are drawn as status dots, bullets
+/// and markers, which read as centred in their cell; their fonts place them on the baseline
+/// at heights that differ from font to font (ADR-516). Box drawing and block elements are
+/// not here: they fill their cell edge to edge already.
+pub(super) fn is_centred_symbol(g: &str) -> bool {
+    let mut chars = g.chars();
+    let (Some(c), None) = (chars.next(), chars.next()) else {
+        return false;
+    };
+    matches!(c, '\u{25A0}'..='\u{25FF}' | '\u{2B1B}'..='\u{2B2F}' | '\u{2B55}')
+}
+
+/// The first and last rows of a baked `w`×`h` RGBA canvas that carry ink, or `None` for a
+/// blank one. Ink is any pixel with coverage, so a gray glyph (coverage in the alpha) and a
+/// subpixel one (coverage per channel) are measured alike.
+pub(super) fn ink_rows(rgba: &[u8], w: usize, h: usize) -> Option<(usize, usize)> {
+    let stride = w * 4;
+    let inked = |row: &usize| {
+        rgba[row * stride..(row + 1) * stride]
+            .chunks(4)
+            .any(|p| p[3] > 0 && p[..3].iter().any(|c| *c > 0))
+    };
+    Some(((0..h).find(inked)?, (0..h).rev().find(inked)?))
+}
+
+/// Move the rows of a baked `w`×`h` RGBA canvas so its ink's top and bottom margins are
+/// equal, the odd pixel below; a blank canvas is left as it is. The move is a rotation of
+/// whole rows: the rows that wrap round are ones the ink leaves blank, since it moves by at
+/// most the margin on the side it moves into.
+fn centre_ink_vertically(rgba: &mut [u8], w: usize, h: usize) {
+    let Some((first, last)) = ink_rows(rgba, w, h) else {
+        return;
+    };
+    let target = (first + (h - 1 - last)) / 2;
+    let stride = w * 4;
+    if target < first {
+        rgba.rotate_left((first - target) * stride);
+    } else {
+        rgba.rotate_right((target - first) * stride);
+    }
+}
+
 /// Where a cluster's glyphs sit in its baked canvas. `Baseline { y, .. }` puts the text
 /// baseline at row `y` (the shared grid baseline, so a fallback symbol aligns with
 /// the surrounding text); with `grid: Some(cell_w)` each glyph is moved onto the cell of
@@ -1383,6 +1432,29 @@ pub(crate) fn unit_cells(unit: &str) -> usize {
         unit.len()
     } else {
         cluster_cells(unit)
+    }
+}
+
+/// The cells a block caret over `text` covers (ADR-515): the text's width, at least one, so
+/// the caret over a wide character covers both its cells.
+pub(crate) fn caret_cells(text: &str) -> usize {
+    unit_cells(text).max(1)
+}
+
+/// What a block caret at `(row, col)` draws over its solid fill (ADR-515): the text under it
+/// as an ordinary text op, in its own face coloured `ground`, the window background
+/// ([`Face::under_caret`]). Both painters draw the fill, `caret_cells` wide, then this.
+pub(crate) fn caret_glyph(
+    row: u16,
+    col: u16,
+    (text, face): &(String, crate::host::gui::Face),
+    ground: [u8; 3],
+) -> Op {
+    Op::Text {
+        row,
+        col,
+        s: text.clone(),
+        face: face.under_caret(ground),
     }
 }
 
@@ -2475,5 +2547,58 @@ mod font_tests {
             scanned,
             "the second ask loaded again"
         );
+    }
+}
+
+#[cfg(test)]
+mod centred_symbol_tests {
+    use super::*;
+
+    fn glyph_ink(glyph: &CachedGlyph) -> Option<(usize, usize)> {
+        ink_rows(&glyph.rgba, glyph.width, glyph.height)
+    }
+
+    /// A status dot (bedit's VCS state, a modified marker) and the geometric shapes like it
+    /// mean "here is a mark", not text: they sit in the MIDDLE of their cell, as a terminal
+    /// draws them, wherever their font's design puts them on the baseline. DejaVu's sit
+    /// low, and a taller line (`set_line_height`) made it plainer: the dot at the end of a
+    /// mode line read as dropped below the text. Every size, both line heights, gray and
+    /// subpixel: the ink's top and bottom margins differ by a pixel at most.
+    #[test]
+    fn a_geometric_symbol_is_centred_in_its_cell() {
+        for line_height in [1.0, 1.4] {
+            for px in 10..=30 {
+                for subpixel in [false, true] {
+                    let mut r = Renderer::new(1.0, default_families(), px as f32);
+                    r.set_line_height(line_height);
+                    for symbol in ["●", "■", "◆", "▲", "○", "◉"] {
+                        let glyph =
+                            r.build_cluster(symbol, r.default_family, false, false, 1, subpixel);
+                        let (first, last) = glyph_ink(&glyph)
+                            .unwrap_or_else(|| panic!("{symbol} at {px} px drew no ink"));
+                        let above = first;
+                        let below = glyph.height - 1 - last;
+                        assert!(
+                            above.abs_diff(below) <= 1,
+                            "{symbol} at {px} px, line height {line_height}, subpixel \
+                             {subpixel}: {above} rows above its ink, {below} below"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Text is not centred: a letter keeps its place on the baseline, so `x` and `g` still
+    /// line up with each other after the symbols move.
+    #[test]
+    fn a_letter_stays_on_the_baseline() {
+        let mut r = Renderer::new(1.0, default_families(), 15.0);
+        let x = r.build_cluster("x", r.default_family, false, false, 1, false);
+        let g = r.build_cluster("g", r.default_family, false, false, 1, false);
+        let (x_top, x_bottom) = glyph_ink(&x).expect("x drew no ink");
+        let (_, g_bottom) = glyph_ink(&g).expect("g drew no ink");
+        assert!(g_bottom > x_bottom, "g's descender no longer drops below x");
+        assert!(x_top > 0);
     }
 }

@@ -444,13 +444,13 @@ fn leaf_columns(op: &Op, ox: usize, cw: usize, ligatures: bool) -> Option<(isize
             )
         }
         // a block over a wide character covers its cells (ADR-515)
-        Op::Cursor { col, under, .. } => cells(
-            *col as usize,
-            *col as usize
-                + under
-                    .as_ref()
-                    .map_or(1, |(text, _)| unit_cells(text).max(1)),
-        ),
+        Op::Cursor { col, under, .. } => {
+            let col = *col as usize;
+            cells(
+                col,
+                col + under.as_ref().map_or(1, |(text, _)| caret_cells(text)),
+            )
+        }
         Op::Rect { col, w, .. } => cells(*col as usize, *col as usize + *w as usize),
         Op::VSpans { col0, cols, .. } => cells(*col0 as usize, *col0 as usize + cols.len()),
         Op::Cells {
@@ -1046,6 +1046,23 @@ fn collect_zones(
 
 // ---- rasterising the ops ----------------------------------------------------------
 
+/// The pixel rows a caret on grid `row` paints: its cell's top, which is above `oy` while the
+/// row scrolls off the viewport's top, and the span drawn, clipped to `[oy, fb_h)` rather
+/// than dropped, so the caret tracks its text through a whole smooth scroll. `None` when
+/// none of it shows.
+fn caret_rows(
+    row: u16,
+    oy: usize,
+    ch: usize,
+    scroll_dy: isize,
+    fb_h: usize,
+) -> Option<(isize, usize, usize)> {
+    let cell_top = oy as isize + row as isize * ch as isize - scroll_dy;
+    let draw_top = cell_top.max(oy as isize);
+    let draw_bottom = (cell_top + ch as isize).min(fb_h as isize);
+    (draw_top < draw_bottom).then_some((cell_top, draw_top as usize, draw_bottom as usize))
+}
+
 /// Render `ops` into `canvas` (its band is the clip: rows outside it are untouched)
 /// with the given `scroll_dy` pixel shift (positive = content shifted upward). Called
 /// recursively for `ScrollRegion` — each region overrides the parent's `scroll_dy`
@@ -1299,28 +1316,20 @@ pub(super) fn render_ops(
                 col,
                 style: crate::host::gui::CursorStyle::Block,
                 color,
-                under: Some((under, under_face)),
+                under: Some(under),
                 ..
             } => {
-                let cells = unit_cells(under).max(1);
-                let cell_top = oy as isize + *row as isize * ch as isize - scroll_dy;
-                let draw_top = cell_top.max(oy as isize);
-                let draw_bottom = (cell_top + ch as isize).min(fb_h as isize);
-                if draw_top < draw_bottom {
+                if let Some((_, draw_top, draw_bottom)) = caret_rows(*row, oy, ch, scroll_dy, fb_h)
+                {
                     fill_cell(
                         canvas,
                         ox + *col as usize * cw,
-                        draw_top as usize,
-                        cells * cw,
-                        (draw_bottom - draw_top) as usize,
+                        draw_top,
+                        caret_cells(&under.0) * cw,
+                        draw_bottom - draw_top,
                         pack(color.unwrap_or(CURSOR_FG)),
                     );
-                    let glyph = Op::Text {
-                        row: *row,
-                        col: *col,
-                        s: under.clone(),
-                        face: under_face.under_caret(r.bg()),
-                    };
+                    let glyph = caret_glyph(*row, *col, under, r.bg());
                     render_ops(
                         std::slice::from_ref(&glyph),
                         canvas,
@@ -1341,20 +1350,14 @@ pub(super) fn render_ops(
                 color,
                 ..
             } => {
-                // Compute the logical cell bounds in framebuffer pixels. `cell_top`
-                // may be < oy (partially scrolled off the viewport top) — clip the
-                // draw range to [oy, fb_h) rather than suppressing the cursor entirely,
-                // so it tracks the text through the full smooth-scroll animation.
-                let cell_top = oy as isize + *row as isize * ch as isize - scroll_dy;
-                let cell_bottom = cell_top + ch as isize;
-                let draw_top = cell_top.max(oy as isize);
-                let draw_bottom = cell_bottom.min(fb_h as isize);
-                if draw_top < draw_bottom {
+                if let Some((cell_top, draw_top, draw_bottom)) =
+                    caret_rows(*row, oy, ch, scroll_dy, fb_h)
+                {
                     cursor_cell(
                         canvas,
                         ox + *col as usize * cw,
-                        draw_top as usize,
-                        draw_bottom as usize,
+                        draw_top,
+                        draw_bottom,
                         cw,
                         ch,
                         cell_top,

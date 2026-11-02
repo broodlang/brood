@@ -14,6 +14,9 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   `editor/display/cursor`'s sixth and seventh arguments) is drawn as Emacs draws its box, the
   cell solid in the caret's colour and the character over it in the background, bold or italic
   as it is (ADR-515), instead of a half-strength wash.
+- GUI: a geometric mark (`●` `■` `◆` `▲`, U+25A0–U+25FF and the large circles and squares) is
+  centred in its cell at every size and line height (ADR-516), instead of sitting where its
+  font puts it on the baseline, which dropped a status dot below the text beside it.
 
 **Fixed.**
 - The parallel cold build (`nest run`/`nest test` on a project with no startup image) no
