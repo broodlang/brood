@@ -168,7 +168,7 @@ pub const FLAGS: &[DebugFlag] = &[
     f(
         "BROOD_JIT_VERIFY",
         JIT,
-        "scan staged call args for a stale LOCAL handle (use-after-GC); works in plain release",
+        "scan staged call args for a stale LOCAL handle (use-after-GC); works in plain release. In a debug build it also records call-site positions, so stale-value reports name file:line",
     ),
     f(
         "BROOD_JIT_VERIFY_FN",

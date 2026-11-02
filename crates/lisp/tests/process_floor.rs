@@ -53,10 +53,18 @@
 //! put a parked process at 2 872 (CI) — the latest-lane index (a 48 B `HashMap`) and the
 //! interrupt's window state (64 B) inline on every mailbox. Both are boxed at first use now,
 //! the probe's `flags` word alone staying inline: 2 780 locally.
+//!
+//! Lowered 2 800 → 2 720 (2026-11-02): the floor had crept to 2 799 here and 2 802 on CI —
+//! ADR-505's redirect offer and ADR-509's nursery byte budget, each a field on a hot path,
+//! put it 2 B over on a docs-only commit. The debug build also copied every entered arm's
+//! call-site positions into a per-process table (129 B per parked process, nothing in
+//! release) for JIT stale-value reports; it is filled only under `BROOD_JIT_VERIFY` now:
+//! 2 670. Sabotage: the tree before it, and this one run with `BROOD_JIT_VERIFY=1`, both read
+//! 2 799 and red this bound.
 
 use brood::Interp;
 
-const FLOOR_BYTES: i64 = 2800;
+const FLOOR_BYTES: i64 = 2720;
 
 #[test]
 fn a_parked_process_costs_no_more_than_the_floor() {

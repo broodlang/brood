@@ -1198,7 +1198,8 @@ pub struct Heap {
     /// by the same site id as [`Self::vm_call_ics`]. Lets a crash map a runtime call site
     /// back to its `.blsp` file:line (call-site ids are positional + reset on
     /// `runtime_collect`, so this is grown/cleared in lockstep). For diagnosing the JIT
-    /// stale-operand bug — see `dbg_site_pos` / `dbg_set_site_pos`.
+    /// stale-operand bug — see `dbg_site_pos` / `dbg_set_site_pos`. Filled only under
+    /// `BROOD_JIT_VERIFY`, so a process pays for it only when someone is looking.
     #[cfg(debug_assertions)]
     dbg_site_pos: RefCell<Vec<Option<(crate::error::Pos, Option<Arc<str>>)>>>,
     /// Global-read inline caches (ADR-096) — the value-position counterpart of

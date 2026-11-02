@@ -624,9 +624,11 @@ impl Heap {
             self.next_ic_base.set(base + arm.nsites);
             base
         };
+        // Copy the arm's compile-time site positions into the absolute debug table — only
+        // under BROOD_JIT_VERIFY: a copy per arm block entered was 129 B on every parked
+        // process of a debug build (`process_floor`), for reports nothing reads otherwise.
         #[cfg(debug_assertions)]
-        {
-            // Copy the arm's compile-time site positions into the absolute debug table.
+        if crate::diagnostics::debug_flags::jit_verify() {
             let mut dbg = self.dbg_site_pos.borrow_mut();
             dbg.resize(base as usize + arm.nsites as usize, None);
             for (i, p) in arm.site_pos.iter().enumerate() {
@@ -723,7 +725,7 @@ impl Heap {
             .and_then(|o| o.clone())
         {
             Some((p, file)) => format!("{}:{}:{}", file.as_deref().unwrap_or("?"), p.line, p.col),
-            None => format!("<site {site}: no recorded pos>"),
+            None => format!("<site {site}: no recorded pos; BROOD_JIT_VERIFY=1 records them>"),
         }
     }
 

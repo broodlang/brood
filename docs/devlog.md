@@ -4961,3 +4961,11 @@ row 0. The stability test that pinned row 0 at the inset now pins the split (the
 by a pixel at most, at every size from 10 to 30 px), and went red with the old origin. Every
 reader (the painters, the bleed margins, the mouse hit-test) goes through `grid_origin`.
 Checked here: the `host::gui` unit tests; not run here: the suite.
+
+2026-11-02 (`process_floor` at its bound). CI failed the floor ratchet on `fe79302d`, a docs-only
+commit: 2 802 B per parked process against 2 800. Not jitter: it reads 2 799 here on every run,
+up ~19 B since 2026-10-28 from ADR-505's redirect offer and ADR-509's nursery byte budget, both
+fields on hot paths. The debug build also copied every entered arm's call-site positions into a
+per-process table for JIT stale-value reports, 129 B per parked process that release never
+pays; it fills only under `BROOD_JIT_VERIFY` now, for 2 670, and the bound drops to 2 720. Run
+with the flag on, the guard reads 2 799 and goes red. Full suite and clippy green here.
