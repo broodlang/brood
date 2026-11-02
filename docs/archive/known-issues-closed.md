@@ -15674,3 +15674,25 @@ address-space footprint. The case asserts fewer than 16 new chunks over 2000 exi
 **Guard.** The case itself: with `release_owned` disabled it reads 2000 new chunks and fails.
 The other cases in the file still read `VmSize` for single-process churn, where no process
 spawning moves the allocator.
+
+## KI-314 — `disconnect` could return before `[:nodedown]` reached its monitors ✅ FIXED 2026-11-02
+
+**Seen:** `dist::tests::a_guest_is_never_registered_under_the_name_it_claims` failed
+`its [:nodedown]` (`left: Some(0)`, `right: Some(1)`) once in 13 runs of the full suite on the
+test machine, 2026-11-02 — a mailbox read right after `disconnect` found nothing.
+
+**Cause.** `disconnect` shut the socket down and then ran `drop_link`. The shutdown woke our
+own reader thread, which hit EOF and ran `drop_link` too. When the reader won, it removed the
+`NODES` entry and was about to deliver `[:nodedown]` while `disconnect`'s `drop_link` found the
+entry gone and returned. `[:nodedown]` still fired exactly once, but after `disconnect`
+returned, on another thread. Any caller of `(disconnect …)` that looks at its mailbox next has
+the same race.
+
+**Fix.** `disconnect` removes the entry first (`remove_current_link`, which `drop_link` shares),
+then shuts the socket, then fires the monitors itself. The reader's `drop_link` on EOF finds the
+generation gone and is a no-op.
+
+**Guard.** The case itself. With a sleep between the shutdown and the old `drop_link`, and
+another between `drop_link`'s removal and its delivery, it failed every run; with the fix under
+the same sleeps it passes. 500 runs of the case without them, and the 62 dist tests, green.
+

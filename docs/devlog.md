@@ -4970,3 +4970,11 @@ JIT stale-value reports, 129 B per parked process that release never pays; it fi
 `BROOD_JIT_VERIFY` now, so the build that read 2 799 reads 2 670, and the bound drops to 2 700,
 which still reds a step the size of the two recorded regressions. Run with the flag on, the
 guard reads 2 799 and goes red. Full suite and clippy green here.
+
+2026-11-02 (KI-314). One of 13 full-suite runs on the test machine failed
+`a_guest_is_never_registered_under_the_name_it_claims`: no `[:nodedown]` right after
+`disconnect`. `disconnect` shut the socket before its own `drop_link`, so our reader could take
+the link and deliver later, on its thread. The link now leaves `NODES` before the shutdown and
+`disconnect` fires the monitors itself. Two temporary sleeps reproduced it every run and the fix
+held under them; 500 runs of the case, the dist tests, the full suite and clippy green here.
+

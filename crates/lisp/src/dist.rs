@@ -1066,21 +1066,28 @@ pub(crate) fn connected_nodes() -> Vec<Symbol> {
 }
 
 /// `(disconnect name)` — tear the link to peer `name` down now, *without* exiting
-/// this process. Shuts the socket down (so the peer's reader hits EOF and fires
-/// its own node-down) and runs `drop_link` on our side, which removes the `NODES`
-/// entry and fires `[:nodedown name]` to our monitors. Same teardown the reader
-/// takes on a clean peer exit, just triggered deliberately. Returns `true` if a link existed, `false` if there was
-/// nothing connected under `name`. Our own reader will also hit EOF and call
-/// `drop_link(name, id)`, but the generation-id guard makes the second call a
-/// no-op, so `[:nodedown]` fires exactly once.
+/// this process: remove the `NODES` entry, shut the socket down (so the peer's reader
+/// hits EOF and fires its own node-down), and fire `[:nodedown name]` to our monitors —
+/// the teardown the reader takes on a clean peer exit, triggered deliberately. Returns
+/// `true` if a link existed, `false` if there was nothing connected under `name`.
+///
+/// The entry goes BEFORE the shutdown, so `[:nodedown]` has been delivered when this
+/// returns. Shutting down first woke our own reader, which could remove the entry and be
+/// about to deliver when this side's removal found nothing and returned — a caller that
+/// looked at its mailbox next saw no `[:nodedown]` yet. The reader's `drop_link` on EOF
+/// now finds the entry gone and is a no-op, so it still fires exactly once.
 pub(crate) fn disconnect(peer: Symbol) -> bool {
     let conn = crate::core::sync::read(&NODES)
         .get(&peer)
         .map(|c| (Arc::clone(&c.sock), c.id));
     match conn {
         Some((sock, id)) => {
+            let removed = remove_current_link(peer, id);
             let _ = sock.shutdown(Shutdown::Both);
-            drop_link(peer, id);
+            if removed {
+                forget_dial_routes(peer);
+                fire_nodedown(peer);
+            }
             true
         }
         None => false,
@@ -2339,19 +2346,23 @@ fn mesh_consider(peers: Vec<(Symbol, String)>) {
 /// Remove a link from `NODES` **iff** it's still this generation (so an evicted or
 /// replaced link can't tear down its successor), and fire node-down watchers.
 fn drop_link(peer: Symbol, id: u64) {
-    let removed = {
-        let mut nodes = crate::core::sync::write(&NODES);
-        match nodes.get(&peer) {
-            Some(c) if c.id == id => {
-                nodes.remove(&peer);
-                true
-            }
-            _ => false,
-        }
-    };
+    let removed = remove_current_link(peer, id);
     if removed {
         forget_dial_routes(peer);
         fire_nodedown(peer);
+    }
+}
+
+/// Remove `peer`'s `NODES` entry iff it is still generation `id`; `true` when this call
+/// removed it, so the caller is the one that fires its node-down.
+fn remove_current_link(peer: Symbol, id: u64) -> bool {
+    let mut nodes = crate::core::sync::write(&NODES);
+    match nodes.get(&peer) {
+        Some(c) if c.id == id => {
+            nodes.remove(&peer);
+            true
+        }
+        _ => false,
     }
 }
 
