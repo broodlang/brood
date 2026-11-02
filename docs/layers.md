@@ -71,8 +71,10 @@ new resolution code.
   throwing hook leaves state unchanged — a bad layer can't crash the loop). Side
   effects (incl. `spawn` for async work) ride along; async results return as
   mailbox messages handled by the `ui-run` loop.
-- **Chord ownership:** a prefix sub-map comes wholesale from its winning layer (no
-  cross-layer prefix merging in v1).
+- **Prefixes compose across layers** (ADR-514), as Emacs's keymaps do: each layer
+  is laid over the ones below it (`keymap-overlay`), so a mode binding `C-x C-x`
+  keeps the global `C-x b`. A command or explicit `nil` above, at the key or any
+  prefix of it, hides what is below; `scope-bindings` shadows by the same rule.
 
 ## Buffer-type binding (Phase 2)
 
@@ -195,6 +197,6 @@ The first real use of layers is editing modes — and it sets the tier line:
 
 ## Deferred (named, not precluded)
 
-`:applies-to` (decentralised type binding) · per-binding `when`-guards · cross-layer
-prefix/chord merging · `:commands` manifest + M-x / which-key palette ·
-precedence-as-a-value / nested layers · regex filename matching (M2 engine).
+`:applies-to` (decentralised type binding) · per-binding `when`-guards · `:commands`
+manifest + M-x / which-key palette · precedence-as-a-value / nested layers · regex
+filename matching (M2 engine).

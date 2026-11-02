@@ -4914,3 +4914,12 @@ failure rather than waiting for the jobs in flight, which reloaded the broken de
 and over, and a waiter on a failed load raises the loader's error rather than loading the
 module itself. bedit's cold build: hung to 2.4–7 s; mur-forge's 8.7 s to 2.1–3.3 s (debug). Guards
 in `parallel_load.rs` and `require_failure_test.blsp`, each sabotage-verified (ADR-426 amendment).
+
+2026-10-28 (ADR-514, keymap prefixes compose across layers): a layer binding one chord under
+a prefix took the whole prefix, so bedit's terminal mode left `C-x b` / `C-x o` / `C-x k`
+undefined and any mode with a `C-c` chord hid the global `C-c` map. Layers are now overlaid
+(`editor/keymap/keymap-overlay`), merging prefix maps at every level; dispatch merges only the
+pressed key's maps, and `scope-bindings` shadows by the same rule. Guards: layers_test
+"prefixes compose across layers" and the shadow tests, keymap_test "keymap-overlay". Checked
+here: `nest format --check`, `nest check` and `--strict`. Owed on the test machine: the suite,
+and the sabotage (restore the first-layer-wins lookup, see "C-x b" go red, put it back).

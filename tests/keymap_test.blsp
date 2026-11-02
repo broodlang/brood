@@ -157,3 +157,26 @@
     (assert= {} (keymap-index {}))
     (assert= '() (keymap-bindings {}))
     (assert= {} (keymap-index {:ctrl-x {}}))))
+
+(describe "keymap-overlay — one keymap laid over another"
+  (test "a key bound only below shows through a prefix both bind"
+    (assert= (keymap-overlay {:ctrl-x {"b" 'a/buffer :ctrl-x 'a/exchange}}
+               {:ctrl-x {:ctrl-x 'a/send}})
+      {:ctrl-x {"b" 'a/buffer :ctrl-x 'a/send}}))
+  (test "the merge goes on at every level of a chord"
+    (assert= (keymap-overlay {:ctrl-x {"r" {"j" 'a/jump}}} {:ctrl-x {"r" {"s" 'a/save}}})
+      {:ctrl-x {"r" {"j" 'a/jump "s" 'a/save}}}))
+  (test "a command above replaces a prefix below, and a prefix above replaces a command"
+    (assert= (keymap-overlay {:ctrl-x {"b" 'a/buffer}} {:ctrl-x 'a/own})
+      {:ctrl-x 'a/own})
+    (assert= (keymap-overlay {:ctrl-x 'a/own} {:ctrl-x {"b" 'a/buffer}})
+      {:ctrl-x {"b" 'a/buffer}}))
+  (test "an explicit nil above hides the key below it and nothing beside it"
+    (let (km (keymap-overlay {:ctrl-x {"b" 'a/buffer "k" 'a/kill}} {:ctrl-x {"b" nil}}))
+      (is (contains? (get km :ctrl-x) "b"))
+      (assert= (map/get-in km [:ctrl-x "b"]) nil)
+      (assert= (map/get-in km [:ctrl-x "k"]) 'a/kill)))
+  (test "an empty keymap on either side changes nothing"
+    (let (km {:ctrl-x {"b" 'a/buffer}})
+      (assert= (keymap-overlay km {}) km)
+      (assert= (keymap-overlay {} km) km))))

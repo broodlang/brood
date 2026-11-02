@@ -308,10 +308,90 @@
     (let (b (init-buffer-layers (set-buffer-type {} :t-sys)))
       (assert= (map (active-layers b) (fn (l) (get l :name))) (list 'a 'b)))))
 
+;; ---- prefixes compose across layers (ADR-514) -------------------------------
+;; A mode that binds one chord under a prefix (a terminal's C-x C-x) keeps the lower
+;; layer's other chords under it (the global C-x b), as Emacs's keymaps compose.
+
+(def layer-global
+  {:name 'global
+   :keymap (-> {}
+             (keymap-bind [:ctrl-x "b"] 'layers-test/cmd-x)
+             (keymap-bind [:ctrl-x :ctrl-x] 'layers-test/cmd-x)
+             (keymap-bind [:ctrl-x "r" "j"] 'layers-test/cmd-x))})
+
+(def layer-term
+  {:name 'term
+   :keymap (-> {}
+             (keymap-bind [:ctrl-x :ctrl-x] 'layers-test/cmd-y)
+             (keymap-bind [:ctrl-x "c"] 'layers-test/cmd-y)
+             (keymap-bind [:ctrl-x "r" "s"] 'layers-test/cmd-y))})
+
+; one binds the C-x prefix itself to a command, and C-x s explicitly to nothing
+(def layer-owner {:name 'owner :keymap {:ctrl-x 'layers-test/cmd-y}})
+(def layer-hider {:name 'hider :keymap {:ctrl-x {"s" nil}}})
+
+(defn- chord (ctx keys)
+  "Dispatch `keys` one at a time through `ctx`'s layers; the `:log` the commands left."
+  (get (first (fold keys [ctx nil] (fn (acc k) (layer-dispatch (first acc) (second acc) k no-fb))))
+    :log))
+
+(def term-over-global {:log "" :layers (list 'layers-test/layer-term 'layers-test/layer-global)})
+
+(describe "prefixes compose across layers"
+  (test "a lower layer's chord resolves through a higher layer that binds only others"
+    (assert= (chord term-over-global [:ctrl-x "b"]) "X"))
+  (test "a higher layer's chord still wins over a lower one's"
+    (assert= (chord term-over-global [:ctrl-x :ctrl-x]) "Y")
+    (assert= (chord term-over-global [:ctrl-x "c"]) "Y"))
+  (test "a three-key chord merges at each level"
+    (assert= (chord term-over-global [:ctrl-x "r" "j"]) "X")
+    (assert= (chord term-over-global [:ctrl-x "r" "s"]) "Y"))
+  (test "an explicit nil hides the lower key and nothing beside it"
+    (let (ctx {:log ""
+               :layers (list {:name 'hide :keymap {:ctrl-x {"b" nil}}} 'layers-test/layer-global)})
+      (assert= (chord ctx [:ctrl-x "b"]) "")
+      (assert= (chord ctx [:ctrl-x :ctrl-x]) "X")))
+  (test "a command bound to the prefix itself still owns it"
+    (let (ctx {:log "" :layers (list 'layers-test/layer-owner 'layers-test/layer-global)})
+      (assert= (layer-binding ctx :ctrl-x) 'layers-test/cmd-y)
+      ;; the prefix ran its command; "b" is a fresh key, unbound at the top
+      (assert= (chord ctx [:ctrl-x "b"]) "Y")))
+  (test "a command between two prefix maps stops the merge below it"
+    (let (ctx {:log ""
+               :layers (list 'layers-test/layer-term
+                         'layers-test/layer-owner 'layers-test/layer-global)})
+      (assert= (chord ctx [:ctrl-x "c"]) "Y")
+      ;; owner's command replaced global's map, so only term's own C-x map is left
+      (assert= (layer-binding ctx :ctrl-x) (get (:keymap layer-term) :ctrl-x))
+      (assert= (chord ctx [:ctrl-x "b"]) "")))
+  (test "a prefix one layer owns comes back with exactly that layer's bindings"
+    (assert= (layer-binding {:layers (list 'layers-test/layer-global 'layers-test/layer-a)} :ctrl-x)
+      (get (:keymap layer-global) :ctrl-x)))
+  (test "active-keymap answers what layer-binding answers"
+    (let (stacks (list (get term-over-global :layers)
+                   (list 'layers-test/layer-owner 'layers-test/layer-global)
+                   (list 'layers-test/layer-term 'layers-test/layer-owner 'layers-test/layer-global)
+                   (list 'layers-test/layer-global 'layers-test/layer-owner)))
+      (assert= (into []
+                 (seq/reject stacks
+                   (fn (stack)
+                     (let (ctx {:layers stack})
+                       (= (get (active-keymap ctx) :ctrl-x) (layer-binding ctx :ctrl-x))))))
+        [])))
+  (test "scope-binding merges a prefix across scopes: the buffer's map over the model's"
+    (let (buffer {:layers (list 'layers-test/layer-term)}
+          model {:layers (list 'layers-test/layer-global)}
+          sub (scope-binding (list buffer model) :ctrl-x))
+      (assert= (get sub "b") 'layers-test/cmd-x)
+      (assert= (get sub "c") 'layers-test/cmd-y)
+      (assert= (get sub :ctrl-x) 'layers-test/cmd-y)
+      (assert= sub (get (scope-keymap (list buffer model)) :ctrl-x)))))
+
 ;; ---- scope-bindings: the keymap with its provenance kept --------------------
-;; The point of these is the SHADOW rule. `active-keymap` merges layers shallowly, so a
-;; layer that binds one key under a prefix takes the whole prefix with it — and help that
-;; tested shadowing per leaf would report a binding that dispatch will never reach.
+;; The point of these is the SHADOW rule. Prefixes compose across layers (ADR-514), so a
+;; layer that binds one key under a prefix leaves the lower layer's other keys in force —
+;; but one that binds the prefix itself to a command hides the whole chord, and help that
+;; tested only the leaf would report a binding dispatch will never reach.
 
 (def layer-low
   {:name 'low :keymap {"a" 'layers-test/cmd-x :ctrl-x {"k" 'layers-test/cmd-x}}})
@@ -319,10 +399,19 @@
 (def layer-high
   {:name 'high :keymap {"b" 'layers-test/cmd-y :ctrl-x {"s" 'layers-test/cmd-y}}})
 
+(defn- sb-in (layers sequence)
+  "The `scope-bindings` entry for key `sequence` in the stack `layers` (head highest)."
+  (seq/find (scope-bindings (list {:layers layers})) (fn (e) (= (get e :sequence) sequence))))
+
+(defn- sb-from (layers layer sequence)
+  "The `scope-bindings` entry `layer` makes for key `sequence` in the stack `layers` — for a
+sequence two layers both bind, where `sb-in` finds the higher one's."
+  (seq/find (scope-bindings (list {:layers layers}))
+    (fn (e) (and (= (get e :sequence) sequence) (= (get e :layer) layer)))))
+
 (defn- sb-for (sequence)
   "The `scope-bindings` entry for key `sequence` in the high-over-low fixture stack."
-  (seq/find (scope-bindings (list {:layers (list 'layers-test/layer-high 'layers-test/layer-low)}))
-    (fn (e) (= (get e :sequence) sequence))))
+  (sb-in (list 'layers-test/layer-high 'layers-test/layer-low) sequence))
 
 (describe "scope-bindings keeps the layer a binding came from"
   (test "an unshadowed binding names its layer and nothing shadows it"
@@ -331,19 +420,49 @@
         ['layers-test/cmd-x 'low nil])))
   (test "the higher layer's own binding is in force"
     (assert= (get (sb-for ["b"]) :shadowed-by) nil))
-  (test "a whole CHORD is shadowed, not just the leaf the higher layer bound"
-    ;; low binds C-x k and high binds C-x s: nothing overlaps at the leaf, yet the shallow
-    ;; merge hands the entire :ctrl-x sub-map to high, so C-x k is unreachable and says so
-    (assert= (get (sb-for [:ctrl-x "k"]) :shadowed-by) 'high))
-  (test "the shadowing layer's own chord binding is in force"
+  (test "a chord under a prefix a higher layer also binds is NOT shadowed"
+    ;; low binds C-x k and high binds C-x s: the two C-x maps merge, so C-x k is in force
+    (assert= (get (sb-for [:ctrl-x "k"]) :shadowed-by) nil))
+  (test "the higher layer's own chord binding is in force"
     (assert= (get (sb-for [:ctrl-x "s"]) :shadowed-by) nil))
+  (test "the same full sequence higher up shadows it; another under the prefix does not"
+    (assert= (get (sb-in (list 'layers-test/layer-low 'layers-test/layer-chord) [:ctrl-x :ctrl-e])
+               :shadowed-by)
+      nil)
+    ;; both layers bind C-x k: top's is in force, low's is the one it shadows
+    (let (stack (list {:name 'top :keymap {:ctrl-x {"k" 'layers-test/cmd-y}}}
+                  'layers-test/layer-low))
+      (assert= (get (sb-from stack 'top [:ctrl-x "k"]) :shadowed-by) nil)
+      (assert= (get (sb-from stack 'low [:ctrl-x "k"]) :shadowed-by) 'top)))
+  (test "a command bound to the prefix shadows every chord under it"
+    (assert= (get (sb-in (list 'layers-test/layer-owner 'layers-test/layer-low) [:ctrl-x "k"])
+               :shadowed-by)
+      'owner))
+  (test "an explicit nil shadows the key it names and nothing beside it"
+    (let (stack (list 'layers-test/layer-hider 'layers-test/layer-high))
+      (assert= (get (sb-in stack [:ctrl-x "s"]) :shadowed-by) 'hider)
+      (assert= (get (sb-in stack ["b"]) :shadowed-by) nil)))
+  (test "a prefix map higher up shadows a lower command on that key"
+    (assert= (get (sb-in (list 'layers-test/layer-low 'layers-test/layer-owner) [:ctrl-x])
+               :shadowed-by)
+      'low))
   (test "what is in force agrees with what scope-keymap dispatches"
     ;; the property that matters: every unshadowed binding is reachable through the merged
     ;; keymap, and every shadowed one is not — help derived from dispatch, not beside it
-    (let (ctxs (list {:layers (list 'layers-test/layer-high 'layers-test/layer-low)})
-          km (scope-keymap ctxs))
-      (assert= (map/get-in km [:ctrl-x "k"]) nil)
-      (assert= (map/get-in km [:ctrl-x "s"]) 'layers-test/cmd-y)))
+    (let (stacks (list (list 'layers-test/layer-high 'layers-test/layer-low)
+                   (list 'layers-test/layer-owner 'layers-test/layer-low)
+                   (list 'layers-test/layer-low 'layers-test/layer-owner)
+                   (list 'layers-test/layer-hider 'layers-test/layer-high 'layers-test/layer-low)))
+      (assert= (into []
+                 (mapcat stacks
+                   (fn (stack)
+                     (let (ctxs (list {:layers stack})
+                           km (scope-keymap ctxs))
+                       (seq/filter (scope-bindings ctxs)
+                         (fn (e)
+                           (not (= (= (map/get-in km (get e :sequence)) (get e :command))
+                                  (nil? (get e :shadowed-by))))))))))
+        [])))
   (test "a layer with no keymap contributes nothing and breaks nothing"
     (assert= (count (scope-bindings (list {:layers (list {:name 'bare})}))) 0)))
 
