@@ -49,8 +49,8 @@ use winit::window::Window;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::host::gui::backend::{
-    CURSOR_FG, Renderer, cursor_rim, holds_blinking_caret, luma, paint_stall_ms, snap_hairline,
-    text_px_width, text_units, unit_cells,
+    CURSOR_FG, Renderer, caret_cells, caret_glyph, cursor_rim, holds_blinking_caret, luma,
+    paint_stall_ms, snap_hairline, text_px_width, text_units, unit_cells,
 };
 use crate::host::gui::effects::{EmitterStep, FrameEffects};
 use crate::host::gui::{Align, CursorStyle, Face, MAX_PARTICLES, Op};
@@ -3444,12 +3444,12 @@ impl GpuWindow {
                     col,
                     style: CursorStyle::Block,
                     color,
-                    under: Some((under, under_face)),
+                    under: Some(under),
                     ..
                 } => {
                     let left = g.ox + *col as f32 * g.cw;
                     let top = g.oy + *row as f32 * g.ch - g.scroll_dy;
-                    let cells = unit_cells(under).max(1);
+                    let cells = caret_cells(&under.0);
                     let fill = color.unwrap_or(CURSOR_FG);
                     fb.solid(
                         left,
@@ -3460,12 +3460,7 @@ impl GpuWindow {
                         0.0,
                         Edge::Plain,
                     );
-                    let glyph = Op::Text {
-                        row: *row,
-                        col: *col,
-                        s: under.clone(),
-                        face: under_face.under_caret(renderer.bg()),
-                    };
+                    let glyph = caret_glyph(*row, *col, under, renderer.bg());
                     self.expand(fb, renderer, std::slice::from_ref(&glyph), g);
                 }
                 Op::Cursor {
