@@ -443,7 +443,14 @@ fn leaf_columns(op: &Op, ox: usize, cw: usize, ligatures: bool) -> Option<(isize
                 text_end_cell(s, col, face.scale.max(1) as usize, ligatures),
             )
         }
-        Op::Cursor { col, .. } => cells(*col as usize, *col as usize + 1),
+        // a block over a wide character covers its cells (ADR-515)
+        Op::Cursor { col, under, .. } => cells(
+            *col as usize,
+            *col as usize
+                + under
+                    .as_ref()
+                    .map_or(1, |(text, _)| unit_cells(text).max(1)),
+        ),
         Op::Rect { col, w, .. } => cells(*col as usize, *col as usize + *w as usize),
         Op::VSpans { col0, cols, .. } => cells(*col0 as usize, *col0 as usize + cols.len()),
         Op::Cells {
@@ -611,6 +618,7 @@ fn leaf_translates(
                 style: nst,
                 color: ncolor,
                 blink: nblink,
+                under: nunder,
             },
             Op::Cursor {
                 row: or,
@@ -618,12 +626,14 @@ fn leaf_translates(
                 style: ost,
                 color: ocolor,
                 blink: oblink,
+                under: ounder,
             },
         ) => {
             nc == oc
                 && nst == ost
                 && ncolor == ocolor
                 && nblink == oblink
+                && nunder == ounder
                 && oy as isize + *nr as isize * ch_i - new.dy
                     == oy as isize + *or as isize * ch_i - old.dy + delta
         }
@@ -752,15 +762,17 @@ fn blit_deltas(new: &Leaves, old: &Leaves, k: usize, oy: usize, ch: usize) -> Ve
                         col: a,
                         style: sa,
                         color: ca,
+                        under: ua,
                         ..
                     },
                     Op::Cursor {
                         col: b,
                         style: sb,
                         color: cb,
+                        under: ub,
                         ..
                     },
-                ) => a == b && sa == sb && ca == cb,
+                ) => a == b && sa == sb && ca == cb && ua == ub,
                 (
                     Op::Rect {
                         col: a,
@@ -1280,6 +1292,48 @@ pub(super) fn render_ops(
             }
             // A blinking caret in its hidden half (ADR-469) paints nothing.
             Op::Cursor { blink: Some(_), .. } if r.caret_hidden => {}
+            // A block with the text under it, Emacs's box (ADR-515): the cell solid in the
+            // caret's colour, the text over it in its own face, coloured the window background.
+            Op::Cursor {
+                row,
+                col,
+                style: crate::host::gui::CursorStyle::Block,
+                color,
+                under: Some((under, under_face)),
+                ..
+            } => {
+                let cells = unit_cells(under).max(1);
+                let cell_top = oy as isize + *row as isize * ch as isize - scroll_dy;
+                let draw_top = cell_top.max(oy as isize);
+                let draw_bottom = (cell_top + ch as isize).min(fb_h as isize);
+                if draw_top < draw_bottom {
+                    fill_cell(
+                        canvas,
+                        ox + *col as usize * cw,
+                        draw_top as usize,
+                        cells * cw,
+                        (draw_bottom - draw_top) as usize,
+                        pack(color.unwrap_or(CURSOR_FG)),
+                    );
+                    let glyph = Op::Text {
+                        row: *row,
+                        col: *col,
+                        s: under.clone(),
+                        face: under_face.under_caret(r.bg()),
+                    };
+                    render_ops(
+                        std::slice::from_ref(&glyph),
+                        canvas,
+                        r,
+                        ox,
+                        oy,
+                        cw,
+                        ch,
+                        bg0,
+                        scroll_dy,
+                    );
+                }
+            }
             Op::Cursor {
                 row,
                 col,
@@ -2069,6 +2123,7 @@ mod render_robustness {
                         style: CursorStyle::Block,
                         color: None,
                         blink: None,
+                        under: None,
                     },
                     Op::Text {
                         row: 1,
@@ -2136,6 +2191,7 @@ mod render_robustness {
                 style: CursorStyle::Bar,
                 color: None,
                 blink: None,
+                under: None,
             },
         ]);
     }
@@ -2239,6 +2295,7 @@ mod strip_diff_tests {
             style: CursorStyle::Block,
             color: None,
             blink: None,
+            under: None,
         }
     }
 
@@ -2665,6 +2722,7 @@ mod strip_diff_tests {
                 interval_ms: 530,
                 blinks: 10,
             }),
+            under: None,
         }
     }
 
@@ -2835,6 +2893,7 @@ mod strip_diff_tests {
             style: CursorStyle::Bar,
             color: None,
             blink: None,
+            under: None,
         }
     }
 
@@ -3085,6 +3144,7 @@ mod strip_diff_tests {
                 style: CursorStyle::Block,
                 color: None,
                 blink: None,
+                under: None,
             },
             Op::Cursor {
                 row: 2,
@@ -3092,6 +3152,7 @@ mod strip_diff_tests {
                 style: CursorStyle::Hollow,
                 color: None,
                 blink: None,
+                under: None,
             },
             Op::Cursor {
                 row: 5,
@@ -3099,6 +3160,7 @@ mod strip_diff_tests {
                 style: CursorStyle::Underline,
                 color: None,
                 blink: None,
+                under: None,
             },
             Op::CellRegion {
                 x: 14,

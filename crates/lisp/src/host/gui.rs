@@ -79,6 +79,26 @@ impl Default for Face {
     }
 }
 
+impl Face {
+    /// The face a block caret draws the text under it in (ADR-515): the cell's own face
+    /// (its family, weight, slant and underline), coloured `ground`, the window
+    /// background, with no background or reverse of its own, so it reads as a cut-out of
+    /// the solid caret. Its scale is one: the caret is one cell tall, and a scaled glyph
+    /// would spill out of it.
+    // the painters are `gui`-only, its unit test is not
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))]
+    pub(crate) fn under_caret(self, ground: [u8; 3]) -> Face {
+        Face {
+            fg: Some(ground),
+            bg: None,
+            reverse: false,
+            underline_rgb: None,
+            scale: 1,
+            ..self
+        }
+    }
+}
+
 /// The rectangles `(x, y, w, h)` (pixels) an underline paints under a run `w` pixels wide from
 /// `left`, its rule's top at `y` and `thickness` tall: one rule, or for a wave a zigzag of
 /// `thickness`-square steps rising and falling `2 × thickness` over a `4 × thickness` period.
@@ -395,6 +415,14 @@ pub enum Op {
         /// Blink the caret in the window, with no frame from the app per toggle
         /// (`[:cursor row col style colour blink]`, ADR-469); `None` is a steady caret.
         blink: Option<CursorBlink>,
+        /// The text under the caret and the face it is painted in
+        /// (`[:cursor row col style colour blink under face]`, ADR-515). With it a BLOCK
+        /// caret is drawn as Emacs draws its box: the cell filled solid in the caret's
+        /// colour and this text drawn over it in its own face, coloured the window
+        /// background ([`Face::under_caret`]), so the character stays readable through the
+        /// caret, bold or italic as it is. Without it a block is the half-strength wash it
+        /// always was. Other shapes ignore it.
+        under: Option<(String, Face)>,
     },
     /// Fill a `w`×`h` block of cells from `(row, col)` with `face`'s background — a
     /// solid panel (a popup card, a selection band, a gutter wash). Like a multi-row
@@ -846,6 +874,35 @@ mod underline_rect_tests {
         let heights: std::collections::BTreeSet<isize> =
             rects.iter().map(|(_, y, _, _)| *y).collect();
         assert!(heights.len() > 1);
+    }
+}
+
+#[cfg(test)]
+mod under_caret_tests {
+    use super::Face;
+
+    #[test]
+    fn the_text_under_a_block_caret_keeps_its_face_in_the_background_colour() {
+        let cell = Face {
+            fg: Some([200, 100, 50]),
+            bg: Some([10, 10, 10]),
+            bold: true,
+            italic: true,
+            reverse: true,
+            underline: true,
+            underline_rgb: Some([255, 0, 0]),
+            family: Some(2),
+            scale: 3,
+            ..Face::default()
+        };
+        let under = cell.under_caret([30, 30, 46]);
+        assert_eq!(under.fg, Some([30, 30, 46]));
+        assert_eq!(under.bg, None);
+        assert!(under.bold && under.italic && under.underline);
+        assert!(!under.reverse);
+        assert_eq!(under.underline_rgb, None);
+        assert_eq!(under.family, Some(2));
+        assert_eq!(under.scale, 1);
     }
 }
 

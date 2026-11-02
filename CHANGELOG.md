@@ -10,6 +10,10 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 - A GUI window splits the space its rows leave over between the top and bottom margins
   (ADR-508 addendum), instead of putting it all under the last row, where it could leave a
   band up to a row and a half tall under an editor's echo area.
+- GUI: a block caret given the text under it and its face (`[:cursor … under face]`,
+  `editor/display/cursor`'s sixth and seventh arguments) is drawn as Emacs draws its box, the
+  cell solid in the caret's colour and the character over it in the background, bold or italic
+  as it is (ADR-515), instead of a half-strength wash.
 
 **Fixed.**
 - The parallel cold build (`nest run`/`nest test` on a project with no startup image) no
