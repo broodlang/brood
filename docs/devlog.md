@@ -4934,6 +4934,14 @@ margins only; anything taller still bleeds every way it touches. The new unit te
 with the rule removed. Checked here: the `host::gui::backend::bleed` unit tests; not run here:
 the suite.
 
+2026-11-02 (KI-313 reopened). Run on the test machine, the case's bail trace shows the window's
+reducer `step` bails `chunk-outside-jit-subset` and is never native, so the native-reducer path
+`63afdb45` closed cannot be what failed in the Nightly. The hand-off stays: the gap is real and
+its guard goes red under sabotage. 1980 isolated runs of the case (300 with every core spinning,
+480 and 1200 as 12 and 48 concurrent loops) all passed, each with one block latching
+`%vector-fold-walk`. KI-313 is back in "Open and watching"; next is the Nightly's own setup, the
+full suite with `treesit-grammars`, under a bail trace.
+
 2026-11-02 (ADR-514, `os/cmd`'s child dies with its caller): bedit's live project search
 cancels the previous search task on every keystroke, and each cancelled `rg` kept running:
 `os/cmd` waits in native code, where an exit signal only set the caller's flag. The wait now
