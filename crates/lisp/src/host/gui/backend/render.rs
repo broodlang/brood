@@ -2593,7 +2593,7 @@ mod centred_symbol_tests {
     /// line up with each other after the symbols move.
     #[test]
     fn a_letter_stays_on_the_baseline() {
-        let mut r = Renderer::new(1.0, default_families(), 15.0);
+        let r = Renderer::new(1.0, default_families(), 15.0);
         let x = r.build_cluster("x", r.default_family, false, false, 1, false);
         let g = r.build_cluster("g", r.default_family, false, false, 1, false);
         let (x_top, x_bottom) = glyph_ink(&x).expect("x drew no ink");
