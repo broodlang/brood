@@ -1230,17 +1230,21 @@ resolve in the advisory checker. Returns the project root.
     ;; namespace resolution — `config` here is `project/config` (this body is
     ;; compiled in the `project` namespace), so the apply resolves.
     ;; `settings/read-form` never throws — a broken config is `{}`, so no nest command
-    ;; is stopped by it — and each value or key the declarations reject is said on stderr.
+    ;; is stopped by it — but it is never SILENT: what the file failed to say (it does not
+    ;; read, a key has no value) and each value or key the declarations reject go to stderr.
     ;; A rejected value is warned about and NOT applied — `:git-init "no"` is truthy and
     ;; would otherwise still run `git init` — so `accepted` hands `config` nil for it, which
     ;; `config` skips, leaving the setting as it was.
-    (let (cfg (settings/read-form (file/slurp p) 'config)
+    (let (text (file/slurp p)
+          cfg (settings/read-form text 'config)
           accepted (fn (key)
                      (let (value (get cfg key))
                        (if (settings/valid? (settings/spec-of :project/user-config key) value)
                          value
                          nil))))
-      (doseq (w (settings/warnings :project/user-config cfg p)) (io/puts w :to *err*))
+      (doseq (w (into (settings/read-warnings text 'config p)
+                  (settings/warnings :project/user-config cfg p)))
+        (io/puts w :to *err*))
       (config :git-init
         (accepted :git-init)
         :registry (accepted :registry)

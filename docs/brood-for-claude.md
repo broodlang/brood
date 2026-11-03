@@ -1099,6 +1099,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   fallback args…)`, so a redefinition takes and an unloaded module is simply absent ·
   `settings` for a user config file that is data (ADR-428): `(settings/define :app/settings
   :cursor {:default :block :type '(or :block :bar) :doc "…"})` once, then `read-file`,
+  `file-warnings` (a file that does not read, said with its line, never silently `{}`),
   `warnings`, `value-of` (the default when unset or invalid) and `default-source` (the
   documented file to write the first time) ·
   `if-let`/`when-let` test truth, `if-some`/`when-some` test presence (`false` counts) ·
