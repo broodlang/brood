@@ -725,6 +725,14 @@ restart is never wrong where the lead-in is right, and is right everywhere the l
 ;; is the one case no tree can answer — text that does not parse yet, which is the ordinary
 ;; state of a line being typed — and there the lexical fallback carries the previous line.
 
+(defn- ts-leading-columns (line:string -> int)
+  ;; the COLUMN `line`'s text starts at: its leading whitespace's display width, a tab
+  ;; reaching the next stop of the ambient `*tab-width*` (ADR-537). A character count was
+  ;; read as a column, so a line indented with two tabs came back as column 2
+  (string/display-width (string/substring line
+                          0
+                          (- (string/length line) (string/length (string/triml line))))))
+
 (defn- ts-prev-nonblank (text: (or string rope) bol:int -> (or nil (tuple int string)))
   ;; `[indent last-token]` of the nearest non-blank line before `bol`, or nil when there is
   ;; none — what the indenter carries when no tree can answer.
@@ -737,9 +745,7 @@ restart is never wrong where the lead-in is right, and is right everywhere the l
       (cond
         (and (< nl 0) (= (string/trim l) "")) nil
         (= (string/trim l) "") (ts-prev-nonblank text ls)
-        else
-          [(- (string/length l) (string/length (string/triml l)))
-            (or (last (string/split (string/trim l) " ")) "")]))))
+        else [(ts-leading-columns l) (or (last (string/split (string/trim l) " ")) "")]))))
 
 (defn- ts-chain (node p acc)
   ;; the kinds of every node containing offset `p`, outermost first
@@ -992,7 +998,7 @@ shape `nest format` answers for Brood, and it is checked line-for-line against r
         (if (= (string/trim line) "")
           (let (previous (ts-prev-nonblank text bol))
             (if (nil? previous) 0 (first previous)))
-          (- (string/length line) (string/length (string/triml line))))
+          (ts-leading-columns line))
       ;; No tree can say what is open while the text does not parse — an unterminated
       ;; `do` collapses into an error node rather than staying open — which is the
       ;; ordinary state of a line someone is still typing. Carry the previous non-blank

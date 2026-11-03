@@ -1718,11 +1718,15 @@ pub(super) fn display_width(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
 /// measure inside it — `string/clip-cells` and the rest of std included — without
 /// threading a width through each call. `None` when it is unbound or not an int (a
 /// heap built without the prelude), which falls back to `TAB_WIDTH`. A value below 1 is
-/// 1, as an argument is.
+/// 1, as an argument is; one past `MAX_TAB_WIDTH` is `MAX_TAB_WIDTH`. An explicit argument
+/// that large is an error, but the ambient value is set once — from a config file, an
+/// `.editorconfig` — and read by every measure of a frame: raising there made a single
+/// `tab_width = 2000` take down every render.
 fn ambient_tab_width(heap: &Heap) -> Option<i64> {
+    use crate::host::text_width::MAX_TAB_WIDTH;
     static TAB_WIDTH_SYMBOL: LazyLock<Symbol> = LazyLock::new(|| value::intern("*tab-width*"));
     match heap.env_get(EnvId::GLOBAL, *TAB_WIDTH_SYMBOL) {
-        Some(Value::Int(n)) => Some(n.max(1)),
+        Some(Value::Int(n)) => Some(n.clamp(1, MAX_TAB_WIDTH as i64)),
         _ => None,
     }
 }

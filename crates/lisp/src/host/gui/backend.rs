@@ -92,6 +92,11 @@ use cosmic_text::{
 
 use unicode_segmentation::UnicodeSegmentation;
 
+// A RAW tab in a text op advances to the next SCREEN stop of the fixed `TAB_WIDTH`, as a
+// terminal's does: the painter has no line column and no Brood heap, so it cannot read a
+// program's `*tab-width*` (ADR-537). A program that lays tabs out at its own width expands
+// them before it paints (`string/expand-tabs`, which does read it) — bedit's view does, so
+// no raw tab reaches this code from it.
 use crate::host::text_width::{TAB_WIDTH, cluster_cells, cluster_cells_at};
 
 /// The winit cursor for a frontend-neutral `CursorShape`.

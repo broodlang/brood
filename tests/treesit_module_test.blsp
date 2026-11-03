@@ -663,7 +663,20 @@
       (let (tree (editor/treesit/open-tree tsm-hcl-src :hcl)
             echo-bol (index-of tsm-hcl-src "      echo"))
         (assert= (editor/treesit/indent-column tsm-hcl-src :hcl echo-bol tsm-hcl-indent tree) 6)
-        (editor/treesit/free-tree tree)))))
+        (editor/treesit/free-tree tree)))
+
+    ;; the answer is a COLUMN: a line indented with tabs keeps the column its tabs reach, at
+    ;; the ambient tab width (ADR-537) — not the count of its tab characters
+    (test "a heredoc line indented with tabs keeps its column, not its character count"
+      (let (src "x = <<EOT\n\t\techo hi\n\t\t\nEOT\n"
+            echo-bol (index-of src "\t\techo")
+            blank-bol (+ echo-bol (string/length "\t\techo hi\n")))
+        (assert= (editor/treesit/indent-column src :hcl echo-bol tsm-hcl-indent) 16)
+        (assert= (binding (*tab-width* 4)
+                   (editor/treesit/indent-column src :hcl echo-bol tsm-hcl-indent))
+          8)
+        ;; a blank verbatim line continues the content's column
+        (assert= (editor/treesit/indent-column src :hcl blank-bol tsm-hcl-indent) 16)))))
 
 (when (and (tsm-installed? :rust) (tsm-installed? :go))
   (describe "Rust and Go: a call's function name"
