@@ -206,6 +206,8 @@ pub struct WindowSpec {
     pub ime: bool,
     /// What a mouse-wheel notch does (the `{:wheel …}` open option, ADR-441).
     pub wheel: WheelMode,
+    /// Which Option key is Meta on macOS (the `{:option-meta …}` open option, ADR-541).
+    pub option_meta: OptionMeta,
 }
 
 /// Who repeats a held key in a GUI window (ADR-441).
@@ -236,6 +238,37 @@ pub enum WheelMode {
     Glide,
 }
 
+/// Which Option key is Meta on macOS (the `{:option-meta …}` open option, ADR-541) — Emacs's
+/// `ns-alternate-modifier` / `ns-right-alternate-modifier`. An Option key that is not Meta
+/// COMPOSES, as everywhere else on a Mac: right-Option+2 types `@` on a German layout, and
+/// the `@` arrives as typed text. Only macOS reports which side is held, so elsewhere Alt is
+/// Meta and AltGr is AltGr (never Alt to the OS), whatever this says.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum OptionMeta {
+    /// Left Option is Meta, right Option composes (`:left`, the default).
+    #[default]
+    Left,
+    /// Right Option is Meta, left Option composes (`:right`).
+    Right,
+    /// Both Option keys are Meta (`:both`) — nothing composes with Option.
+    Both,
+    /// Neither is Meta (`:none`) — both compose, as in every other Mac app.
+    None,
+}
+
+impl OptionMeta {
+    /// Whether Alt, held on the sides given, is Meta. `left` / `right` say which Option keys
+    /// the OS reports down; when it reports neither (every platform but macOS), Alt is Meta.
+    pub fn alt_is_meta(self, left: bool, right: bool) -> bool {
+        if !left && !right {
+            return true;
+        }
+        let left_meta = matches!(self, OptionMeta::Left | OptionMeta::Both);
+        let right_meta = matches!(self, OptionMeta::Right | OptionMeta::Both);
+        (left && left_meta) || (right && right_meta)
+    }
+}
+
 impl Default for WindowSpec {
     /// The plain window: default title and size, decorated (a derived `Default` would
     /// give a borderless one), no app id.
@@ -250,6 +283,7 @@ impl Default for WindowSpec {
             key_repeat: KeyRepeat::App,
             ime: true,
             wheel: WheelMode::Lines,
+            option_meta: OptionMeta::Left,
         }
     }
 }

@@ -15738,3 +15738,26 @@ whole. The other cross-process file handshakes in the tests use a file's existen
 every run, with the client's own error in the new report; with the rename, the same widened
 window on `port.tmp` passes.
 
+
+## KI-336 — a non-Latin keyboard layout lost every Control and Meta shortcut ✅ FIXED 2026-11-03
+
+**Symptom.** With a Russian (Greek, Hebrew, Arabic, Ukrainian …) layout active, `C-x C-f`, `C-a`,
+`M-x` did nothing in a window: Control+A arrived as `:ctrl-ф`. On macOS Option was always Meta,
+so a layout's Option characters (`@ { [ |` on German) could not be typed. A dead key with
+Control or Alt (German Ctrl+`^`, US-Mac Option+e) delivered nothing.
+
+**Cause.** `translate_key` read a chord's character from winit's `key_without_modifiers`, which
+is the key in the ACTIVE layout, and kept it whatever script it was. winit was never told which
+Option key is Alt, and `Key::Dead` fell to the `_ => None` arm whatever modifiers were held.
+
+**Why it survived.** The translation took a `winit::event::KeyEvent`, which a test cannot build
+(its platform half is private), so it had no tests beyond its helpers, and every gate runs on a
+US layout.
+
+**Fix.** ADR-541: the translation is a pure function over a `KeyPress`; a chord whose character
+is not Latin is read by the key's US position, an Option key that is not Meta (`{:option-meta
+…}`, default left Meta, right composing) composes, and a dead key in a chord is its accent.
+
+**Guard.** `host::gui::backend::input::adr_541_tests`. With the positional fallback removed, four
+went red, e.g. `left: "ctrl-ф" right: "ctrl-a"` and `left: "-" right: "ctrl-'"`; restored, all
+ten green.

@@ -28,7 +28,7 @@ pub(crate) use {
 
 use super::{
     CursorShape, Key, KeyRepeat, Keystroke, LatencySample, Mouse, MouseAction, MouseButton, Op,
-    PAINT_PHASES, RepeatCounts, WheelMode, WindowSpec,
+    OptionMeta, PAINT_PHASES, RepeatCounts, WheelMode, WindowSpec,
 };
 
 use crate::core::sync::lock;
@@ -1337,6 +1337,13 @@ struct Win {
     /// per frame and window geometry, so a repaint (a caret blink, an expose) reuses it.
     bleed: bleed::Bleed,
     mods: ModifiersState,
+    /// Which Option keys the OS reports held, `(left, right)` — only macOS reports them —
+    /// and which of them is Meta (`WindowSpec::option_meta`, ADR-541): `chord_modifiers`.
+    option_sides: (bool, bool),
+    option_meta: OptionMeta,
+    /// The active layout types a non-Latin script, as its last letter key said
+    /// (`layout_is_non_latin`): its chords are read by US position (ADR-541).
+    non_latin_layout: bool,
     cursor: (u16, u16),
     /// The pointer's last physical pixel position `(x, y)` — what a pixel-input
     /// window reports in place of the cell, and the position a press/release carries.
@@ -1530,6 +1537,19 @@ fn build_window(
         }
         None => attributes,
     };
+    // Which Option key is Meta (ADR-541): winit then reads that side's keys without their
+    // Option layer — left-Option+e is `e` for `M-e`, not a dead `´` — and the other side
+    // composes as the layout says. The translation drops Alt for a composing side.
+    #[cfg(target_os = "macos")]
+    let attributes = {
+        use winit::platform::macos::{OptionAsAlt, WindowAttributesExtMacOS};
+        attributes.with_option_as_alt(match spec.option_meta {
+            OptionMeta::Left => OptionAsAlt::OnlyLeft,
+            OptionMeta::Right => OptionAsAlt::OnlyRight,
+            OptionMeta::Both => OptionAsAlt::Both,
+            OptionMeta::None => OptionAsAlt::None,
+        })
+    };
     let window = elwt
         .create_window(attributes)
         .map_err(|e| format!("window: {e}"))?;
@@ -1580,6 +1600,9 @@ fn build_window(
         frame: Vec::new(),
         bleed: bleed::Bleed::default(),
         mods: ModifiersState::empty(),
+        option_sides: (false, false),
+        option_meta: spec.option_meta,
+        non_latin_layout: false,
         cursor: (0, 0),
         cursor_px: (0, 0),
         cursor_at: (0.0, 0.0),
@@ -2167,7 +2190,14 @@ impl ApplicationHandler<UserEvent> for GuiApp {
             WindowEvent::CloseRequested => {
                 deliver(w.subscriber, Message::Keyword(value::intern("close")));
             }
-            WindowEvent::ModifiersChanged(m) => w.mods = m.state(),
+            WindowEvent::ModifiersChanged(m) => {
+                use winit::keyboard::ModifiersKeyState;
+                w.mods = m.state();
+                w.option_sides = (
+                    m.lalt_state() == ModifiersKeyState::Pressed,
+                    m.ralt_state() == ModifiersKeyState::Pressed,
+                );
+            }
             WindowEvent::Resized(_) => {
                 // The sub-cell remainder is placed at paint time (`grid_origin`:
                 // on the right, and split above and below), so there's no
@@ -2208,9 +2238,10 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 // `[:text …]`, not a key, and is held as itself: its repeats are found
                 // the same way, and `gui-held-key` reports it as `[:text …]`.
                 ElementState::Pressed if !is_synthetic => {
-                    let stroke = typed_text(&ke, w.mods)
-                        .map(Keystroke::Text)
-                        .or_else(|| translate_key(&ke, w.mods).map(Keystroke::Key));
+                    let press = KeyPress::of(&ke);
+                    w.non_latin_layout = layout_is_non_latin(&press, w.non_latin_layout);
+                    let stroke =
+                        translate_keystroke(&press, w.chord_modifiers(), w.non_latin_layout);
                     match stroke.and_then(|stroke| {
                         w.keyboard.press(stroke, ke.physical_key, Instant::now())
                     }) {
@@ -2232,10 +2263,9 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 // (winit emits them for a key let go while unfocused — exactly when we must
                 // stop).
                 ElementState::Released => {
-                    if let Some(message) = w
-                        .keyboard
-                        .release(ke.physical_key, translate_key(&ke, w.mods))
-                    {
+                    let translated =
+                        translate_key(&KeyPress::of(&ke), w.chord_modifiers(), w.non_latin_layout);
+                    if let Some(message) = w.keyboard.release(ke.physical_key, translated) {
                         deliver(w.subscriber, message);
                     }
                 }
@@ -2931,6 +2961,13 @@ fn update_cells(window: &winit::window::Window, r: &Renderer, size: &Arc<Mutex<(
 }
 
 impl Win {
+    /// The modifiers a key event is translated under (`chord_modifiers`): Alt is Meta
+    /// unless the only Option keys held are ones that compose (ADR-541).
+    fn chord_modifiers(&self) -> crate::host::gui::KeyModifiers {
+        let (left, right) = self.option_sides;
+        chord_modifiers(self.mods, left, right, self.option_meta)
+    }
+
     /// The pointer position a mouse message carries, as `(col, row)` — the cell for a
     /// cell-grid window, the physical pixel `(x, y)` for a pixel-input one. One place,
     /// so press, release and motion cannot disagree about the unit.

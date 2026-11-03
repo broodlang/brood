@@ -950,6 +950,15 @@ pub(in crate::builtins) fn gui_open(args: &[Value], _: EnvId, heap: &mut Heap) -
         Some(v) => crate::eval::truthy(v),
         None => true,
     };
+    //   :option-meta :left  — which Option key is Meta on macOS; the other composes
+    //     (`:right`, `:both`, `:none`; ADR-541). Elsewhere Alt is Meta and AltGr AltGr.
+    let option_meta =
+        match keyword_option("option-meta", &["left", "right", "both", "none"])?.as_deref() {
+            Some("right") => crate::host::gui::OptionMeta::Right,
+            Some("both") => crate::host::gui::OptionMeta::Both,
+            Some("none") => crate::host::gui::OptionMeta::None,
+            _ => crate::host::gui::OptionMeta::Left,
+        };
     let spec = crate::host::gui::WindowSpec {
         title,
         size,
@@ -960,6 +969,7 @@ pub(in crate::builtins) fn gui_open(args: &[Value], _: EnvId, heap: &mut Heap) -
         key_repeat,
         ime,
         wheel,
+        option_meta,
     };
     let id =
         crate::host::gui::open(crate::process::self_pid(), spec).map_err(LispError::runtime)?;

@@ -226,7 +226,9 @@ suits it: `:title` names it, `:width`/`:height` size it (logical pixels), `:inpu
 and `:vsync true` are the game options (ADR-374), `:key-repeat :os` hands a held key's repeat
 to the OS (the user's delay and rate; at most one undelivered, taken back at the
 release), `:ime false` turns the input method off and `:wheel :glide` makes a wheel notch
-glide instead of scrolling its three lines at once (ADR-441), and `{:decorations false}`
+glide instead of scrolling its three lines at once (ADR-441), `:option-meta` picks which macOS
+Option key is Meta, the other composing (`:left`, the default, `:right`, `:both`, `:none`;
+ADR-541), and `{:decorations false}`
 drops the OS title bar and frame for an app that draws its own chrome (a browser's tab
 strip and toolbar) and would otherwise sit under a redundant second title. A shipped app
 should also pass `:app-id` — the desktop application id the installed

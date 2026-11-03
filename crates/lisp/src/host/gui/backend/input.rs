@@ -3,7 +3,7 @@
 //! bookkeeping that turns raw events into `[:key …]` / `[:mouse …]` messages.
 
 use super::*;
-use crate::host::gui::{KeyModifiers, character_chord, named_key};
+use crate::host::gui::{KeyModifiers, OptionMeta, character_chord, named_key};
 
 /// Max gap between consecutive presses (same button, same cell) that still counts
 /// as part of one click chain — the double/triple-click window, in milliseconds.
@@ -311,20 +311,160 @@ pub(super) fn shifted_chord_char(logical: Option<char>, base: char) -> char {
     }
 }
 
+/// One key event as the translation reads it: winit's `KeyEvent` without the platform
+/// parts a test cannot build, so the whole OS-key-to-Brood-key rule is a pure function
+/// (`translate_keystroke`) a unit test drives with any layout's keys (ADR-541).
+pub(super) struct KeyPress<'event> {
+    /// What the layout says the key is, Shift and the layout's levels applied.
+    pub(super) logical: &'event WKey,
+    /// The text the keystroke typed, dead keys and compose applied — none on a release.
+    pub(super) text: Option<&'event str>,
+    /// The key with no modifier applied, in the ACTIVE layout (`key_without_modifiers`):
+    /// `ф` for the A key under a Russian layout.
+    pub(super) unmodified: WKey,
+    /// Where the key is on the keyboard, whatever the layout.
+    pub(super) physical: PhysicalKey,
+}
+
+impl<'event> KeyPress<'event> {
+    pub(super) fn of(event: &'event KeyEvent) -> KeyPress<'event> {
+        use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
+        KeyPress {
+            logical: &event.logical_key,
+            text: event.text.as_deref(),
+            unmodified: event.key_without_modifiers(),
+            physical: event.physical_key,
+        }
+    }
+}
+
+/// The modifiers a key event is translated under: winit's state, with Alt dropped when
+/// the only Option keys held are ones that compose (`OptionMeta`, macOS). `left_option` /
+/// `right_option` are the sides the OS reports down — both false off macOS, where Alt is
+/// always Meta (AltGr is never Alt to the OS on Linux or Windows, so it composes there
+/// already).
+pub(super) fn chord_modifiers(
+    mods: ModifiersState,
+    left_option: bool,
+    right_option: bool,
+    option_meta: OptionMeta,
+) -> KeyModifiers {
+    KeyModifiers {
+        alt: mods.alt_key() && option_meta.alt_is_meta(left_option, right_option),
+        ..key_modifiers(mods)
+    }
+}
+
+/// True for a character a chord can be bound by as the layout gives it: ASCII, or a
+/// letter or sign of the Latin script (`ö`, `ç`, `ß`, `§`). A Cyrillic, Greek, Hebrew,
+/// Arabic, … letter is not — Emacs's keymaps spell `C-x`, not `C-ч`.
+pub(super) fn is_latin(c: char) -> bool {
+    c.is_ascii()
+        || matches!(c,
+            '\u{a0}'..='\u{24f}'          // Latin-1 Supplement, Latin Extended-A and -B
+            | '\u{1e00}'..='\u{1eff}'     // Latin Extended Additional
+            | '\u{2c60}'..='\u{2c7f}'     // Latin Extended-C
+            | '\u{a720}'..='\u{a7ff}'     // Latin Extended-D
+            | '\u{ab30}'..='\u{ab6f}') // Latin Extended-E
+}
+
+/// The character the key at `physical` types on a US QWERTY layout, unshifted — what a
+/// chord falls back to when the active layout's character for it is not Latin.
+pub(super) fn us_layout_char(physical: PhysicalKey) -> Option<char> {
+    use winit::keyboard::KeyCode;
+    let PhysicalKey::Code(code) = physical else {
+        return None;
+    };
+    Some(match code {
+        KeyCode::KeyA => 'a',
+        KeyCode::KeyB => 'b',
+        KeyCode::KeyC => 'c',
+        KeyCode::KeyD => 'd',
+        KeyCode::KeyE => 'e',
+        KeyCode::KeyF => 'f',
+        KeyCode::KeyG => 'g',
+        KeyCode::KeyH => 'h',
+        KeyCode::KeyI => 'i',
+        KeyCode::KeyJ => 'j',
+        KeyCode::KeyK => 'k',
+        KeyCode::KeyL => 'l',
+        KeyCode::KeyM => 'm',
+        KeyCode::KeyN => 'n',
+        KeyCode::KeyO => 'o',
+        KeyCode::KeyP => 'p',
+        KeyCode::KeyQ => 'q',
+        KeyCode::KeyR => 'r',
+        KeyCode::KeyS => 's',
+        KeyCode::KeyT => 't',
+        KeyCode::KeyU => 'u',
+        KeyCode::KeyV => 'v',
+        KeyCode::KeyW => 'w',
+        KeyCode::KeyX => 'x',
+        KeyCode::KeyY => 'y',
+        KeyCode::KeyZ => 'z',
+        KeyCode::Digit0 => '0',
+        KeyCode::Digit1 => '1',
+        KeyCode::Digit2 => '2',
+        KeyCode::Digit3 => '3',
+        KeyCode::Digit4 => '4',
+        KeyCode::Digit5 => '5',
+        KeyCode::Digit6 => '6',
+        KeyCode::Digit7 => '7',
+        KeyCode::Digit8 => '8',
+        KeyCode::Digit9 => '9',
+        KeyCode::Backquote => '`',
+        KeyCode::Minus => '-',
+        KeyCode::Equal => '=',
+        KeyCode::BracketLeft => '[',
+        KeyCode::BracketRight => ']',
+        KeyCode::Backslash => '\\',
+        KeyCode::Semicolon => ';',
+        KeyCode::Quote => '\'',
+        KeyCode::Comma => ',',
+        KeyCode::Period => '.',
+        KeyCode::Slash => '/',
+        _ => return None,
+    })
+}
+
+/// True for the physical keys that are LETTERS on a US layout — the keys a layout's
+/// script is told by.
+fn is_letter_position(physical: PhysicalKey) -> bool {
+    us_layout_char(physical).is_some_and(|c| c.is_ascii_lowercase())
+}
+
+/// Whether the active layout types a non-Latin script, after `press`: a letter key's
+/// unmodified character says so (`ф` yes, `a` or `é` no), any other key leaves `before`
+/// standing. Kept per window across presses because some keys of a non-Latin layout type
+/// ASCII punctuation — Greek's Q key is `;`, Hebrew's is `/` — and a chord on one of them
+/// must still be `C-q`, while a Dvorak layout's `'` on the same key must stay `C-'`.
+pub(super) fn layout_is_non_latin(press: &KeyPress, before: bool) -> bool {
+    if !is_letter_position(press.physical) {
+        return before;
+    }
+    match &press.unmodified {
+        WKey::Character(s) => match s.chars().next() {
+            Some(c) if c.is_alphabetic() => !is_latin(c),
+            _ => before,
+        },
+        _ => before,
+    }
+}
+
 /// The text a plain keystroke (no Control / Alt / Super) typed, when it is MORE than one
 /// character — a compose sequence or a layout key that types several. Delivered as
 /// `[:text "…"]` rather than squeezed into one key (the first character was all that
 /// survived before ADR-441). A one-character keystroke is not text: it stays the 1-char
 /// key string `translate_key` makes of it, so every keymap that binds a character binds
 /// it however it was typed.
-pub(super) fn typed_text(ke: &KeyEvent, mods: ModifiersState) -> Option<String> {
-    if mods.control_key() || mods.alt_key() || mods.super_key() {
+pub(super) fn typed_text(press: &KeyPress, modifiers: KeyModifiers) -> Option<String> {
+    if modifiers.ctrl || modifiers.alt || modifiers.super_key {
         return None;
     }
-    let WKey::Character(_) = &ke.logical_key else {
+    let WKey::Character(_) = press.logical else {
         return None;
     };
-    let text = ke.text.as_deref()?;
+    let text = press.text?;
     let mut chars = text.chars();
     chars.next()?;
     (chars.next().is_some() && !text.chars().any(char::is_control)).then(|| text.to_string())
@@ -353,10 +493,58 @@ pub(super) fn is_modifier_key(ke: &KeyEvent) -> bool {
     )
 }
 
-pub(super) fn translate_key(ke: &KeyEvent, mods: ModifiersState) -> Option<Key> {
-    use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
-    let modifiers = key_modifiers(mods);
-    match &ke.logical_key {
+/// What one press delivers (ADR-441, ADR-541): the text it typed when that is several
+/// characters (`typed_text`), else its key (`translate_key`). `modifiers` are the ones the
+/// chord is read under (`chord_modifiers`), `non_latin_layout` what `layout_is_non_latin`
+/// last said.
+pub(super) fn translate_keystroke(
+    press: &KeyPress,
+    modifiers: KeyModifiers,
+    non_latin_layout: bool,
+) -> Option<Keystroke> {
+    typed_text(press, modifiers)
+        .map(Keystroke::Text)
+        .or_else(|| translate_key(press, modifiers, non_latin_layout).map(Keystroke::Key))
+}
+
+/// The character a key names in a chord, and whether it is the LAYOUT's (true) or the US
+/// position's fallback (false). The key read WITHOUT modifiers, so the layout's
+/// composition (some layouts' Alt+`-` is `–`, macOS Option+letters accents) does not mangle
+/// the chord — the keymap binds the base character (`-`, `f`). A dead key in a chord is the
+/// accent it carries (German Ctrl+`^`), where it used to be dropped. And when that character
+/// is not Latin — the A key under a Russian layout is `ф` — or is punctuation on a letter
+/// key of a non-Latin layout (Greek's `;` on Q), the chord is the key's US identity:
+/// `C-ф` is `C-a`, as in Emacs, so `C-x C-f` works whichever layout is active.
+fn chord_base(press: &KeyPress, non_latin_layout: bool) -> Option<(char, bool)> {
+    let character = |key: &WKey| match key {
+        WKey::Character(s) => s.chars().next(),
+        WKey::Dead(accent) => *accent,
+        _ => None,
+    };
+    let layout = character(&press.unmodified).or_else(|| character(press.logical));
+    let positional = us_layout_char(press.physical);
+    match layout {
+        Some(c)
+            if is_latin(c)
+                && !(non_latin_layout
+                    && is_letter_position(press.physical)
+                    && !c.is_alphabetic()) =>
+        {
+            Some((c, true))
+        }
+        _ => positional.map(|c| (c, false)).or(layout.map(|c| (c, true))),
+    }
+}
+
+/// The key one press (or release) names, or none for a key the app is never sent (a bare
+/// modifier, a dead key's half of a composition).
+pub(super) fn translate_key(
+    press: &KeyPress,
+    modifiers: KeyModifiers,
+    non_latin_layout: bool,
+) -> Option<Key> {
+    let chord = modifiers.ctrl || modifiers.alt || modifiers.super_key;
+    match press.logical {
         // Space carries modifiers like a character key would, so Ctrl/Alt survive (Emacs
         // `C-SPC` set-mark → :ctrl- , `C-M-SPC` mark-sexp → :ctrl-meta- , matching
         // crossterm) rather than collapsing to a self-inserted space.
@@ -370,34 +558,35 @@ pub(super) fn translate_key(ke: &KeyEvent, mods: ModifiersState) -> Option<Key> 
         // so the editor binds `C-<left>` / `C-S-<arrow>` as distinctly as `:shift-up`
         // (shift-select) from a plain arrow.
         WKey::Named(named) => Some(Key::Named(named_key(named_key_base(named)?, modifiers))),
-        WKey::Character(s) => {
-            let chord = modifiers.ctrl || modifiers.alt || modifiers.super_key;
-            if !chord {
-                // Plain typing keeps what the key TYPED: `ke.text` has dead keys and
-                // compose applied (`´` then `e` types `é`), where the logical key is the
-                // bare `e`. A release has no text, so it falls back to the logical key —
-                // a release is matched to its press by the physical key, never by this.
-                let typed = ke.text.as_deref().and_then(|t| t.chars().next());
-                let c = typed
-                    .filter(|c| !c.is_control())
-                    .or_else(|| s.chars().next())?;
-                return Some(Key::Char(c));
-            }
-            // For a chord, read the key WITHOUT modifiers, so layout composition (on
-            // some layouts Alt+`-` composes to en-dash `–`, macOS Option+letters to
-            // accents) doesn't mangle the chord — the keymap binds the BASE character
-            // (`-`, `f`). `key_without_modifiers()` also strips SHIFT, so a chord with
-            // Shift held takes its glyph from the layout (`shifted_chord_char`): Emacs
-            // `M->` = Alt+Shift+`.` must reach the `alt->` binding, not `alt-.`.
-            let logical = s.chars().next();
-            let base = match ke.key_without_modifiers() {
-                WKey::Character(b) => b.chars().next(),
-                _ => logical,
-            }?;
-            let c = if modifiers.shift {
+        WKey::Character(s) if !chord => {
+            // Plain typing keeps what the key TYPED: `text` has dead keys and compose
+            // applied (`´` then `e` types `é`), where the logical key is the bare `e`, and
+            // is the layout's own character (`ф`, `@` from AltGr+Q). A release has no text,
+            // so it falls back to the logical key — a release is matched to its press by
+            // the physical key, never by this.
+            let typed = press.text.and_then(|t| t.chars().next());
+            let c = typed
+                .filter(|c| !c.is_control())
+                .or_else(|| s.chars().next())?;
+            Some(Key::Char(c))
+        }
+        // A dead key alone starts a composition: the character it ends in arrives as text.
+        WKey::Character(_) | WKey::Dead(_) | WKey::Unidentified(_) if chord => {
+            let (base, from_layout) = chord_base(press, non_latin_layout)?;
+            // `chord_base` strips SHIFT too, so a chord with Shift held takes its glyph
+            // from the layout (`shifted_chord_char`): Emacs `M->` = Alt+Shift+`.` must reach
+            // the `alt->` binding, not `alt-.`. A chord read by its US position takes the
+            // US glyph: the layout's shifted character is for a different key.
+            let c = if !modifiers.shift {
+                base
+            } else if from_layout {
+                let logical = match press.logical {
+                    WKey::Character(s) => s.chars().next(),
+                    _ => None,
+                };
                 shifted_chord_char(logical, base)
             } else {
-                base
+                shifted_chord_char(None, base)
             };
             Some(character_chord(c, modifiers))
         }
@@ -732,5 +921,287 @@ mod keystroke_tests {
         ));
         let press = keystroke_message(&Keystroke::Text("ab".to_string()));
         assert!(matches!(payload(&press, "text"), Message::Str(s) if s == "ab"));
+    }
+}
+
+/// ADR-541: chords under a non-Latin layout read the key's US position, an Option key that
+/// composes is not Meta, and a dead key in a chord is not dropped.
+#[cfg(test)]
+mod adr_541_tests {
+    use super::*;
+    use winit::keyboard::{KeyCode, SmolStr};
+
+    fn character(s: &str) -> WKey {
+        WKey::Character(SmolStr::new(s))
+    }
+
+    /// A press of the key at `code`: what the layout calls it (`logical`), the text it
+    /// typed, and its unmodified character in the active layout.
+    fn press<'event>(
+        logical: &'event WKey,
+        text: Option<&'event str>,
+        unmodified: WKey,
+        code: KeyCode,
+    ) -> KeyPress<'event> {
+        KeyPress {
+            logical,
+            text,
+            unmodified,
+            physical: PhysicalKey::Code(code),
+        }
+    }
+
+    fn held(ctrl: bool, alt: bool, shift: bool) -> KeyModifiers {
+        KeyModifiers {
+            ctrl,
+            alt,
+            shift,
+            super_key: false,
+        }
+    }
+
+    /// What the press delivers, spelled: a key's name or character, `[:text …]`'s text in
+    /// brackets, `-` for nothing.
+    fn delivered(press: &KeyPress, modifiers: KeyModifiers, non_latin: bool) -> String {
+        match translate_keystroke(press, modifiers, non_latin) {
+            Some(Keystroke::Key(Key::Named(name))) => name.to_string(),
+            Some(Keystroke::Key(Key::Char(c))) => c.to_string(),
+            Some(Keystroke::Text(text)) => format!("[{text}]"),
+            None => "-".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_russian_chord_is_the_keys_us_identity_and_typing_stays_russian() {
+        // Russian: the A key types ф, the X key ч, the F key а
+        let ef = character("ф");
+        let a_key = press(&ef, Some("ф"), character("ф"), KeyCode::KeyA);
+        assert_eq!(delivered(&a_key, held(true, false, false), true), "ctrl-a");
+        assert_eq!(delivered(&a_key, held(false, true, false), true), "alt-a");
+        assert_eq!(
+            delivered(&a_key, held(true, true, false), true),
+            "ctrl-meta-a"
+        );
+        assert_eq!(delivered(&a_key, held(false, false, false), true), "ф");
+        let che = character("ч");
+        let x_key = press(&che, Some("ч"), character("ч"), KeyCode::KeyX);
+        assert_eq!(delivered(&x_key, held(true, false, false), true), "ctrl-x");
+        // whatever the window remembered of the layout: the character itself says it
+        assert_eq!(delivered(&x_key, held(true, false, false), false), "ctrl-x");
+        // Shift: the US glyph, not the layout's character for the key
+        let big_ef = character("Ф");
+        let shifted = press(&big_ef, Some("Ф"), character("ф"), KeyCode::KeyA);
+        assert_eq!(delivered(&shifted, held(false, true, true), true), "alt-A");
+        let big_yu = character("Ю");
+        let period_key = press(&big_yu, Some("Ю"), character("ю"), KeyCode::Period);
+        assert_eq!(
+            delivered(&period_key, held(false, true, true), true),
+            "alt->"
+        );
+        // the Russian `.` (on the US `/` key) is ASCII: the layout's own
+        let period = character(".");
+        let slash_key = press(&period, Some("."), character("."), KeyCode::Slash);
+        assert_eq!(
+            delivered(&slash_key, held(true, false, false), true),
+            "ctrl-."
+        );
+    }
+
+    #[test]
+    fn greek_hebrew_and_arabic_chords_read_the_us_position() {
+        let theta = character("θ");
+        let u_key = press(&theta, Some("θ"), character("θ"), KeyCode::KeyU);
+        assert_eq!(delivered(&u_key, held(true, false, false), true), "ctrl-u");
+        // Greek's Q key types `;` — on a non-Latin layout a letter key is its letter
+        let semicolon = character(";");
+        let q_key = press(&semicolon, Some(";"), character(";"), KeyCode::KeyQ);
+        assert_eq!(delivered(&q_key, held(true, false, false), true), "ctrl-q");
+        assert_eq!(delivered(&q_key, held(false, false, false), true), ";");
+        // Hebrew: the X key is ס, the W key `'`
+        let samekh = character("ס");
+        let x_key = press(&samekh, Some("ס"), character("ס"), KeyCode::KeyX);
+        assert_eq!(delivered(&x_key, held(true, false, false), true), "ctrl-x");
+        let apostrophe = character("'");
+        let w_key = press(&apostrophe, Some("'"), character("'"), KeyCode::KeyW);
+        assert_eq!(delivered(&w_key, held(true, false, false), true), "ctrl-w");
+        // Arabic: the S key is س
+        let seen = character("س");
+        let s_key = press(&seen, Some("س"), character("س"), KeyCode::KeyS);
+        assert_eq!(delivered(&s_key, held(true, false, false), true), "ctrl-s");
+    }
+
+    #[test]
+    fn latin_layouts_keep_their_own_characters() {
+        // Dvorak: the Q key types `'`, its chords are the layout's
+        let apostrophe = character("'");
+        let q_key = press(&apostrophe, Some("'"), character("'"), KeyCode::KeyQ);
+        assert_eq!(delivered(&q_key, held(true, false, false), false), "ctrl-'");
+        // and the X key types q
+        let q = character("q");
+        let x_key = press(&q, Some("q"), character("q"), KeyCode::KeyX);
+        assert_eq!(delivered(&x_key, held(true, false, false), false), "ctrl-q");
+        // German: ö is Latin, so C-ö stays C-ö
+        let o_umlaut = character("ö");
+        let semicolon_key = press(&o_umlaut, Some("ö"), character("ö"), KeyCode::Semicolon);
+        assert_eq!(
+            delivered(&semicolon_key, held(true, false, false), false),
+            "ctrl-ö"
+        );
+        // AZERTY: the Q key types a
+        let a = character("a");
+        let azerty_q = press(&a, Some("a"), character("a"), KeyCode::KeyQ);
+        assert_eq!(
+            delivered(&azerty_q, held(true, false, false), false),
+            "ctrl-a"
+        );
+    }
+
+    #[test]
+    fn the_layouts_script_is_told_by_its_letter_keys() {
+        let ef = character("ф");
+        let russian_a = press(&ef, Some("ф"), character("ф"), KeyCode::KeyA);
+        assert!(layout_is_non_latin(&russian_a, false));
+        let a = character("a");
+        let us_a = press(&a, Some("a"), character("a"), KeyCode::KeyA);
+        assert!(!layout_is_non_latin(&us_a, true));
+        // punctuation, or a key that is not a letter's, says nothing either way
+        let semicolon = character(";");
+        let greek_q = press(&semicolon, Some(";"), character(";"), KeyCode::KeyQ);
+        assert!(layout_is_non_latin(&greek_q, true));
+        assert!(!layout_is_non_latin(&greek_q, false));
+        let one = character("1");
+        let digit = press(&one, Some("1"), character("1"), KeyCode::Digit1);
+        assert!(layout_is_non_latin(&digit, true));
+    }
+
+    #[test]
+    fn altgr_and_composing_option_text_inserts() {
+        // AltGr+Q on a German layout: the OS reports no Alt (ISO_Level3_Shift on Linux,
+        // Ctrl+Alt filtered on Windows), so the press is the `@` it typed
+        let at = character("@");
+        let q_key = press(&at, Some("@"), character("q"), KeyCode::KeyQ);
+        assert_eq!(delivered(&q_key, held(false, false, false), false), "@");
+        // macOS, right Option composing: Alt is held, but not Meta
+        let modifiers = chord_modifiers(ModifiersState::ALT, false, true, OptionMeta::Left);
+        assert!(!modifiers.alt);
+        let digit_key = press(&at, Some("@"), character("2"), KeyCode::Digit2);
+        assert_eq!(delivered(&digit_key, modifiers, false), "@");
+        // left Option is Meta
+        let modifiers = chord_modifiers(ModifiersState::ALT, true, false, OptionMeta::Left);
+        assert_eq!(delivered(&digit_key, modifiers, false), "alt-2");
+    }
+
+    #[test]
+    fn which_option_key_is_meta() {
+        // no side reported (Linux, Windows): Alt is Meta whatever the option says
+        for option in [
+            OptionMeta::Left,
+            OptionMeta::Right,
+            OptionMeta::Both,
+            OptionMeta::None,
+        ] {
+            assert!(option.alt_is_meta(false, false));
+        }
+        assert!(OptionMeta::Left.alt_is_meta(true, false));
+        assert!(!OptionMeta::Left.alt_is_meta(false, true));
+        assert!(OptionMeta::Right.alt_is_meta(false, true));
+        assert!(!OptionMeta::Right.alt_is_meta(true, false));
+        assert!(OptionMeta::Both.alt_is_meta(false, true));
+        assert!(!OptionMeta::None.alt_is_meta(true, true));
+        // both held, one of them Meta: Meta
+        assert!(OptionMeta::Left.alt_is_meta(true, true));
+        // Control and the rest are never touched
+        let modifiers = chord_modifiers(
+            ModifiersState::ALT | ModifiersState::CONTROL,
+            false,
+            true,
+            OptionMeta::Left,
+        );
+        assert!(modifiers.ctrl && !modifiers.alt);
+    }
+
+    #[test]
+    fn a_dead_key_in_a_chord_is_its_accent_and_alone_it_composes() {
+        // German: the key left of 1 is a dead `^`
+        let circumflex = WKey::Dead(Some('^'));
+        let dead = press(&circumflex, None, WKey::Dead(Some('^')), KeyCode::Backquote);
+        assert_eq!(delivered(&dead, held(true, false, false), false), "ctrl-^");
+        assert_eq!(delivered(&dead, held(false, false, false), false), "-");
+        // macOS Option+e without Option as Meta is a dead `´`; as Meta it is M-e
+        let acute = WKey::Dead(Some('´'));
+        let e_key = press(&acute, None, character("e"), KeyCode::KeyE);
+        assert_eq!(delivered(&e_key, held(false, true, false), false), "alt-e");
+        // a dead key naming no accent falls back to its position
+        let unnamed = WKey::Dead(None);
+        let silent = press(&unnamed, None, WKey::Dead(None), KeyCode::Quote);
+        assert_eq!(
+            delivered(&silent, held(true, false, false), false),
+            "ctrl-'"
+        );
+    }
+
+    #[test]
+    fn composed_text_arrives_as_text_and_named_keys_keep_their_modifiers() {
+        // dead `´` then `e`: the second press typed é — the logical key is the bare e
+        let e = character("e");
+        let composed = press(&e, Some("é"), character("e"), KeyCode::KeyE);
+        assert_eq!(delivered(&composed, held(false, false, false), false), "é");
+        // a compose sequence that typed several characters is text
+        let several = press(&e, Some("ǘ̃"), character("e"), KeyCode::KeyE);
+        assert_eq!(delivered(&several, held(false, false, false), false), "[ǘ̃]");
+        // a non-text key under a non-Latin layout keeps every modifier
+        let left = WKey::Named(NamedKey::ArrowLeft);
+        let arrow = press(
+            &left,
+            None,
+            WKey::Named(NamedKey::ArrowLeft),
+            KeyCode::ArrowLeft,
+        );
+        assert_eq!(
+            delivered(&arrow, held(true, false, true), true),
+            "ctrl-shift-left"
+        );
+        let space = WKey::Named(NamedKey::Space);
+        let space_key = press(
+            &space,
+            Some(" "),
+            WKey::Named(NamedKey::Space),
+            KeyCode::Space,
+        );
+        assert_eq!(
+            delivered(&space_key, held(true, false, false), true),
+            "ctrl- "
+        );
+    }
+
+    #[test]
+    fn a_release_names_the_same_key_its_press_did() {
+        // a release has no text; under a Russian layout it is still `C-a`'s key
+        let ef = character("ф");
+        let release = press(&ef, None, character("ф"), KeyCode::KeyA);
+        assert!(matches!(
+            translate_key(&release, held(true, false, false), true),
+            Some(Key::Named(name)) if name == "ctrl-a"
+        ));
+        assert!(matches!(
+            translate_key(&release, held(false, false, false), true),
+            Some(Key::Char('ф'))
+        ));
+    }
+
+    #[test]
+    fn the_us_position_table_covers_the_typewriter_keys() {
+        assert_eq!(us_layout_char(PhysicalKey::Code(KeyCode::KeyZ)), Some('z'));
+        assert_eq!(
+            us_layout_char(PhysicalKey::Code(KeyCode::Digit0)),
+            Some('0')
+        );
+        assert_eq!(
+            us_layout_char(PhysicalKey::Code(KeyCode::Backslash)),
+            Some('\\')
+        );
+        assert_eq!(us_layout_char(PhysicalKey::Code(KeyCode::F1)), None);
+        assert!(is_latin('a') && is_latin('ö') && is_latin('ß') && is_latin('ł'));
+        assert!(!is_latin('ф') && !is_latin('θ') && !is_latin('ס') && !is_latin('س'));
     }
 }
