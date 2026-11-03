@@ -1,4 +1,4 @@
-//! Non-tail self-recursion lint (advisory).
+//! Non-tail self-recursion lint (advisory), for a `defn` and for a `letrec`-bound `fn`.
 //!
 //! Brood has no `while`/`for`; loops are recursion, and **tail** calls run in
 //! O(1) stack (the eval `'tail:` loop). A function that calls *itself* in a
@@ -66,12 +66,37 @@ fn check_recursion_inner(heap: &Heap, form: Value, out: &mut Vec<(Option<Pos>, S
     {
         return;
     }
+    // Quoted data is not code. `assert=` quotes the form it checks into its failure
+    // message, so a definition under test was walked twice: once expanded, and once as
+    // the quoted copy, which is NOT expanded — a `match` there is an ordinary call, so
+    // the self-call in its last clause read as an argument, in non-tail position.
+    if matches!(items.first(), Some(&Value::Sym(h))
+        if value::symbol_is(h, kw::QUOTE) || value::symbol_is(h, kw::QUASIQUOTE))
+    {
+        return;
+    }
     if let (Some(&Value::Sym(head)), true) = (items.first(), items.len() >= 3)
         && value::symbol_is(head, kw::DEF)
         && let Value::Sym(name) = items[1]
         && is_fn_form(heap, items[2])
     {
         analyze_fn(heap, name, items[2], heap.form_pos_only(form), out);
+    }
+    // A `letrec` loop is the other place a self-call lives: `(letrec (go (fn (i) …)) (go
+    // 0))` is how a body loops without a top-level `defn`, and its self-call is held to the
+    // same rule. Each `fn`-valued binding is analysed under its LOCAL name; a call to a
+    // sibling is not a self-call (mutual recursion is out of scope here, as for `defn`).
+    if let (Some(&Value::Sym(head)), true) = (items.first(), items.len() >= 3)
+        && value::symbol_is(head, kw::LETREC)
+        && let Some(binds) = list_items(heap, items[1])
+    {
+        for pair in binds.chunks(2) {
+            if let [Value::Sym(name), bound] = *pair
+                && is_fn_form(heap, bound)
+            {
+                analyze_fn(heap, name, bound, heap.form_pos_only(form), out);
+            }
+        }
     }
     // Recurse so nested definitions (a `defn` inside `do` / `test` / `describe`,
     // a closure-defining `def` in a body) are covered too.
@@ -118,7 +143,9 @@ fn analyze_fn(
     if multi {
         for &arm in &items[1..] {
             // arm = (params body…): body is everything after the param list.
-            if let Some(arm_items) = list_items(heap, arm) {
+            if let Some(arm_items) = list_items(heap, arm)
+                && !binds_symbol(heap, arm_items[0], name)
+            {
                 analyze_body(heap, name, &arm_items[1..], enclosing, out);
             }
         }
@@ -126,7 +153,11 @@ fn analyze_fn(
         // (fn params body…): body is everything after the param list. A bare
         // `(fn)` — mid-edit source; the advisory checker sees anything — has
         // neither params nor body, and must not panic the checker thread.
-        if let Some(body) = items.get(2..) {
+        // A parameter spelled like the function shadows it: `(go)` in the body calls the
+        // argument, not the function.
+        if let Some(body) = items.get(2..)
+            && !binds_symbol(heap, items[1], name)
+        {
             analyze_body(heap, name, body, enclosing, out);
         }
     }

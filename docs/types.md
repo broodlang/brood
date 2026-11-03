@@ -440,8 +440,8 @@ never a false positive.
   `ability/impl-for` in its body), an identity is taken only when certain, and the
   impl set unions this file's `register-impl` forms with the runtime
   `ability/*impls*` registry so cross-file impls count. Stack-guarded for deep forms.
-- ✅ **Non-tail self-recursion lint** (`check/recursion.rs`). A `defn` whose
-  self-call sits in a non-tail position is flagged — deep non-tail recursion
+- ✅ **Non-tail self-recursion lint** (`check/recursion.rs`). A `defn`, or a `fn` a
+  `letrec` binds (since 2026-11-03), whose self-call sits in a non-tail position is flagged — deep non-tail recursion
   exhausts the small green-process stack. Since 2026-06-29 that is a **clean,
   catchable error**, not the uncatchable segfault it once was: under the VM the
   ~1M `MAX_BC_FRAMES` cap raises `recursion too deep: exceeded the VM's

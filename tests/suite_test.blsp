@@ -126,7 +126,8 @@
 (describe "letrec"
   ;; Self-recursive local function — the simplest letrec.
   (test "self-recursion"
-    (assert= (letrec (fact (fn (n) (if (<= n 1) 1 (* n (fact (- n 1)))))) (fact 6)) 720))
+    (check-allow :non-tail-recursion
+      (assert= (letrec (fact (fn (n) (if (<= n 1) 1 (* n (fact (- n 1)))))) (fact 6)) 720)))
   ;; Mutually recursive locals — the canonical reason letrec exists.
   (test "mutual recursion"
     (assert= (letrec (even? (fn (n) (if (= n 0) true (odd? (- n 1))))

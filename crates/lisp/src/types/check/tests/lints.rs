@@ -56,6 +56,67 @@ fn a_docstringd_multi_arity_fn_is_read_arm_by_arm() {
 }
 
 #[test]
+fn a_letrec_loop_is_held_to_the_tail_rule() {
+    // A `letrec`-bound `fn` is a loop without a `defn`; its self-call is checked under the
+    // local name, wherever the `letrec` sits.
+    assert!(
+        recursion_warnings("(letrec (go (fn (i) (if (= i 0) 0 (+ 1 (go (dec i)))))) (go 9))")
+            .iter()
+            .any(|w| w.contains("go") && w.contains("non-tail"))
+    );
+    assert!(
+        !recursion_warnings(
+            "(defn walk-all (xs) \
+               (letrec (walk (fn (ys) (match ys (() nil) ((y & r) (cons y (walk r)))))) \
+                 (walk xs)))"
+        )
+        .is_empty()
+    );
+    // Tail self-calls, through `if`, `match` and an `or` pattern, are silent.
+    assert!(
+        recursion_warnings(
+            "(letrec (go (fn (i acc) (if (= i 0) acc (go (dec i) (inc acc))))) (go 9 0))"
+        )
+        .is_empty()
+    );
+    assert!(
+        recursion_warnings(
+            "(letrec (go (fn (n) (match n ((or 0 -1) :done) (_ (go (- n 1)))))) (go 9))"
+        )
+        .is_empty()
+    );
+    // A call to a sibling is not a self-call.
+    assert!(
+        recursion_warnings("(letrec (inc2 (fn (n) (+ n 2)) go (fn (n) (* 2 (inc2 n)))) (go 1))")
+            .is_empty()
+    );
+}
+
+#[test]
+fn quoted_code_is_data_to_the_recursion_lint() {
+    // `assert=` quotes the form it checks into its failure message. The quoted copy is not
+    // macroexpanded, so its `match` reads as a call and the tail self-call as an argument:
+    // walked as code, this tail-recursive loop was reported.
+    assert!(
+        recursion_warnings(
+            "(list (quote (letrec (go (fn (n) (match n ((or 0 -1) :done) (_ (go (- n 1)))))) \
+               (go 9))))"
+        )
+        .is_empty()
+    );
+    assert!(recursion_warnings("(list (quote (def f (fn (n) (+ 1 (f n))))))").is_empty());
+}
+
+#[test]
+fn a_parameter_spelled_like_the_function_shadows_it() {
+    // `(go)` in the body calls the argument, not the function.
+    assert!(recursion_warnings("(defn go (go) (+ 1 (go)))").is_empty());
+    assert!(
+        recursion_warnings("(letrec (step (fn (step x) (+ 1 (step x)))) (step inc 1))").is_empty()
+    );
+}
+
+#[test]
 fn unused_let_binding_lint() {
     // Basic unused binding — warned.
     let w = file_warnings("(let (x 1) 2)");

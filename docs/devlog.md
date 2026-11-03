@@ -4985,3 +4985,15 @@ file before writing it, so the client could read `""` and die. The server now wr
 file and renames it into place. Widening the window reproduced it every run; the fix holds under
 the same window.
 
+2026-11-03 (design pass items 10 and 11). Item 11, a lint for `(or <parser> default)`, was
+already in: `check_if`'s truthy-failure lint (2026-09-10) fires on every shape that lowers to an
+`if` over a positively-known failure, which a probe confirmed for `or`, `and`, `when`, `cond`,
+`if-let`, `when-let`, a `let`-bound parse and an unannotated wrapper. Item 10 was half in: the
+non-tail self-recursion lint read only `defn`s, so a `letrec` loop's `(+ 1 (go …))` passed
+silently. It now checks each `fn` a `letrec` binds under its local name. Turning that on found
+two false positives the `defn` path had too: the walk entered quoted data (`assert=` quotes the
+form it checks, and the unexpanded `match` in the copy put a tail self-call in argument
+position), and a parameter spelled like the function was taken for the function. One new
+warning across `std/`, `tests/` and `examples/`, `suite_test`'s deliberate `fact`, opted out.
+Three guards in `check/tests/lints.rs`, each red with its fix removed; the checker's 719 unit
+tests, `nest check` and `--strict` at zero.

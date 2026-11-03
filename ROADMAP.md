@@ -228,15 +228,22 @@ another Lisp has it.
 9. ⬜ **`cond`'s catch-all.** It is the bare symbol `else`; `:else` works only because a
    keyword is truthy. Either make `:else` a checker lint (a second spelling, which
    ADR-170's "one spelling per thing" refuses) or accept it silently and say so.
-10. ⬜ **Tail position is not checkable.** With no `recur`, nothing tells you that a
-    `letrec` loop's self-call is in tail position. A non-tail one shows up at runtime as
-    "recursion too deep", at whatever depth the data reaches. Candidate: a checker lint
-    for a self-call in a `letrec`/`defn` body that is not in tail position. This is
-    additive tooling, not a new form.
-11. ⬜ **Lint the common misuse of failure values.** A failure is truthy (ADR-310), so the
-    old `(or (string/->number s) 0)` habit returns the failure. The checker knows which
-    functions return a failure; flag `(or <failure-returning call> default)` and
-    `(if <failure-returning call> …)`.
+10. ✅ **Tail position is not checkable (2026-11-03).** With no `recur`, nothing told you that
+    a `letrec` loop's self-call was in tail position; a non-tail one showed up at runtime as
+    "recursion too deep", at whatever depth the data reached. The `defn` half already
+    existed (`check/recursion.rs`, the non-tail self-recursion lint); it now reaches every
+    `fn` a `letrec` binds, under its local name. Two false positives went with it: a quoted
+    form (`assert=` quotes the form it checks, and the unexpanded copy read a `match`'s tail
+    clause as an argument) and a parameter spelled like the function. One new warning across
+    `std/`, `tests/`, `examples/`: `suite_test`'s deliberate non-tail `fact`, now under
+    `check-allow`. Still out of scope, as for `defn`: mutual recursion between `letrec`
+    siblings, and a self-call inside a `try` body (the handler frame stays).
+11. ✅ **Lint the common misuse of failure values — already shipped (2026-09-10, `22be2f4d`).**
+    A failure is truthy (ADR-310), so the old `(or (string/->number s) 0)` habit returns the
+    failure. `check_if`'s truthy-failure lint flags any test whose type positively includes
+    `failure`, and since `or`/`and`/`when`/`cond`/`if-let`/`when-let` all lower to that `if`,
+    it covers every one of them, and a `let`-bound or wrapped (inferred) parser too; checked
+    2026-11-03. ADR-316 reports the same failure reaching a typed parameter.
 12. ⬜ **Lifetime traps.**
     - `memoize` inside a loop leaks a table per call.
     - A `table` dies with the process that made it, unless a global can reach it (ADR-418).
