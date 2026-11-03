@@ -68,12 +68,13 @@ pub(super) fn clipboard_get(_args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
 /// responsive process is told of it or refused it, and the worker is marked dirty-blocked
 /// for the wait, so a task reading the clipboard does not take a scheduler worker hostage.
 /// Writing is not: it hands the text to this process's own selection owner and waits on
-/// nobody.
+/// nobody. A read made while another is still waiting on the owner raises at once rather
+/// than queueing behind it (`host::clipboard::Busy`): the one waiting may never end.
 fn read_clipboard<T>(
     heap: &mut Heap,
     native: &'static str,
     what: &'static str,
-    read: impl FnOnce() -> T,
+    read: impl FnOnce() -> Result<T, crate::host::clipboard::Busy>,
 ) -> Result<T, LispError> {
     let blocking = crate::process::responsive::enter_blocking(heap, native, || what.into())?;
     let value = {
@@ -83,7 +84,11 @@ fn read_clipboard<T>(
     if let Some(call) = blocking {
         call.report(heap);
     }
-    Ok(value)
+    value.map_err(|_| {
+        LispError::runtime(format!(
+            "{native}: another clipboard read is still waiting on the clipboard's owner"
+        ))
+    })
 }
 
 /// `(clipboard-set s)` — copy string `s` to the OS clipboard so other apps can paste

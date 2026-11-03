@@ -66,7 +66,7 @@ started an operating-system process while the bare `spawn` special form started 
   (%now-ns))
 
 (defn clipboard-get ()
-  "The OS clipboard's text, or nil when empty / non-text / unavailable (no display server, or a build without the clipboard feature). A read waits on the app that owns the selection, so it is a blocking call to a responsive process (`proc/flag :responsive`, ADR-536): a UI loop reads it from a task.
+  "The OS clipboard's text, or nil when empty / non-text / unavailable (no display server, or a build without the clipboard feature). Raises at once while another read is still waiting on the clipboard's owner, rather than queueing behind one that may never end. A read waits on the app that owns the selection, so it is a blocking call to a responsive process (`proc/flag :responsive`, ADR-536): a UI loop reads it from a task.
 
     (os/clipboard-get)   ;~> \"the copied text\", or nil"
   (%clipboard-get))
