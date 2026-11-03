@@ -54,6 +54,9 @@ use crate::host::gui::backend::{
 };
 use crate::host::gui::effects::{EmitterStep, FrameEffects};
 use crate::host::gui::{Align, CursorStyle, Face, MAX_PARTICLES, Op};
+// A raw tab advances to the next SCREEN stop of the fixed `TAB_WIDTH`, as the CPU painter's
+// does (`backend.rs`): the painter cannot read a program's `*tab-width*` (ADR-537), so a
+// program that wants its own width expands tabs before it paints (`string/expand-tabs`).
 use crate::host::text_width::{TAB_WIDTH, cluster_cells, cluster_cells_at};
 
 const DEFAULT_FG: [u8; 3] = [0xe5, 0xe5, 0xe5];
