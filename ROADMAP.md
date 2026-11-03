@@ -218,9 +218,10 @@ another Lisp has it.
    whose hint is the list spelling, as ADR-149 made it for `defn`. The other two were never
    parameters: `defmethod`'s `[money money]` is a tuple of dispatch ids and `{:keys [a b]}`
    names the keys to bind — data, so vectors, as are `:sealed` and `:requires` member lists.
-7. ⬜ **Two polymorphism mechanisms.** Abilities dispatch on the first argument;
-   `defmulti` dispatches on the tuple of argument identities (ADR-179). Write the rule for
-   which one a library author picks, and say in one place why both exist.
+7. ✅ **Two polymorphism mechanisms (2026-11-03, ADR-523).** Both stay, each for its job: an
+   ability unless the choice depends on more than the first argument (a symmetric binary
+   operator). The rule is in `language.md` §Polymorphism, and `nest check` reports a
+   `defmulti` whose methods vary only the first argument, an ability written the long way.
 8. ⬜ **What a record is.** A record is a map with a reserved `:__id__` key: `type-of` is
    `:map`, but `=` is nominal. Audit which map operations expose `:__id__` (`keys`,
    `count`, `seq`, `merge` with a plain map, `into {}`, `pr-str`, JSON encoding) and make

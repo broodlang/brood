@@ -1751,6 +1751,74 @@ impl MultiInfo {
     }
 }
 
+/// A `defmulti` this file declares whose methods all agree past the first position — a
+/// one-argument multimethod, or several methods that differ only in the first argument's
+/// identity — is single dispatch: an ability op written the long way (ADR-523). Abilities are
+/// the single-dispatch mechanism; `defmulti` is for a choice that depends on more than the
+/// first argument (a symmetric binary operator, ADR-179). A `:commutative` or
+/// `:antisymmetric` multimethod's mirrored tuples vary the second position, so it never fires.
+/// `(check-allow :single-dispatch …)` around the `defmulti` opts out.
+pub(super) fn lint_single_dispatch_multis(
+    heap: &Heap,
+    expanded: &[Value],
+    info: &MultiInfo,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
+    for &form in expanded {
+        scan_single_dispatch(heap, form, info, out);
+    }
+}
+
+fn scan_single_dispatch(
+    heap: &Heap,
+    form: Value,
+    info: &MultiInfo,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
+        let Some(items) = list_items(heap, form) else {
+            return;
+        };
+        let Some(&Value::Sym(head)) = items.first() else {
+            return;
+        };
+        if value::symbol_is(head, kw::QUOTE) || value::symbol_is(head, kw::QUASIQUOTE) {
+            return;
+        }
+        if value::symbol_is(head, "%lint-allow")
+            && matches!(items.get(1), Some(&Value::Keyword(k)) if value::symbol_is(k, "single-dispatch"))
+        {
+            return;
+        }
+        if value::symbol_is(head, kw::DEF)
+            && let Some(&Value::Sym(name)) = items.get(1)
+            && let Some(mname) = info.generic_of(name)
+        {
+            if let Some(tuples) = info.methods.get(mname)
+                && let Some(first) = tuples.iter().next()
+                && (first.len() == 1 || tuples.len() >= 2)
+                && tuples
+                    .iter()
+                    .all(|t| t.len() == first.len() && t[1..] == first[1..])
+            {
+                out.push((
+                    heap.form_pos_only(form),
+                    format!(
+                        "multimethod {mname}: every method dispatches on the first argument \
+                         alone, which is single dispatch — define an ability instead; \
+                         `defmulti` is for a choice that depends on more than the first \
+                         argument (ADR-523)"
+                    ),
+                ));
+            }
+            return;
+        }
+        for &item in &items[1..] {
+            scan_single_dispatch(heap, item, info, out);
+        }
+    })
+}
+
 /// The diagnostic for a multimethod call whose identity tuple has no method.
 fn multi_missing_warning(mname: &str, tuple: &[String]) -> String {
     let key = tuple

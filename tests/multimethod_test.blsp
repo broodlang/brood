@@ -10,9 +10,12 @@
 
 (defmulti mm-cmp :antisymmetric)
 (defmethod mm-cmp [:int :string] (n s) 1) ; an int sorts after a string, say
-(defmulti mm-desc) ; no algebra
-(defmethod mm-desc :default (x) :other)
-(defmethod mm-desc [:int] (n) :int)
+;; One-argument multimethods are single dispatch — an ability's job (ADR-523) — and these
+;; exist to exercise the mechanism, so they opt out of the lint that says so.
+(check-allow :single-dispatch
+  (defmulti mm-desc) ; no algebra
+  (defmethod mm-desc :default (x) :other)
+  (defmethod mm-desc [:int] (n) :int))
 
 (describe "multiple dispatch"
   (test "an exact identity-tuple dispatches to its method"
@@ -72,12 +75,19 @@
 ;; `:-> int` while a method returned a string would be worse than not declaring at all: the
 ;; checker would confidently type every call wrong.
 
-(defmulti mm-typed :-> int)
-(defmethod mm-typed [:string] (s) (string/length s))
-(defmethod mm-typed [:int] (n) n)
+(check-allow :single-dispatch
+  (defmulti mm-typed :-> int)
+  (defmethod mm-typed [:string] (s) (string/length s))
+  (defmethod mm-typed [:int] (n) n))
 
 (defmulti mm-typed-alg :commutative :-> int)
 (defmethod mm-typed-alg [:int :string] (n s) (+ n (string/length s)))
+
+;; These snippets are one-argument multimethods — single dispatch, which the checker reports
+;; as an ability written the long way (ADR-523). They are here for their return types, so
+;; each opts out of that lint.
+(defn- one-arg-checker-messages (src)
+  (checker-messages (str "(check-allow :single-dispatch " src ")")))
 
 (describe "defmulti :-> RET — the declared return type"
   (test "a declared return is recorded and readable"
@@ -101,21 +111,22 @@
   ;; the multi, the dispatch key, the declared type, and what the body actually yields.
 
   (test "a method whose body conforms to the declared return is silent"
-    (assert= (checker-messages "(defmulti k :-> int) (defmethod k [:int] (n) n)") (list)))
+    (assert= (one-arg-checker-messages "(defmulti k :-> int) (defmethod k [:int] (n) n)") (list)))
 
   (test "a method that violates the declared return warns, naming the key and both types"
-    (let (w (checker-messages "(defmulti k :-> int) (defmethod k [:string] (s) \"nope\")"))
+    (let (w (one-arg-checker-messages "(defmulti k :-> int) (defmethod k [:string] (s) \"nope\")"))
       (is (not (empty? w)))
       (is (includes? (first w) "multimethod k"))
       (is (includes? (first w) "[:string]"))
       (is (includes? (first w) "declared return type int"))))
 
   (test "an undeclared multimethod constrains nothing"
-    (assert= (checker-messages "(defmulti k) (defmethod k [:string] (s) \"anything\") (defmethod k [:int] (n) n)")
+    (assert= (one-arg-checker-messages "(defmulti k) (defmethod k [:string] (s) \"anything\") (defmethod k [:int] (n) n)")
       (list)))
 
   (test "a declared `any` return imposes no constraint"
-    (assert= (checker-messages "(defmulti k :-> any) (defmethod k [:string] (s) \"fine\")") (list)))
+    (assert= (one-arg-checker-messages "(defmulti k :-> any) (defmethod k [:string] (s) \"fine\")")
+      (list)))
 
   ;; ABSENT is not `nil`. `nil` is a legal return type — `sig` and `defability` both take
   ;; `:-> nil` — so "was a return declared?" is a question about POSITION, never about the
@@ -128,12 +139,30 @@
     (is (not (nil? (error-of (reflect/macroexpand (quote (defmulti dang :commutative :->))))))))
 
   (test "`:-> nil` is a legal declaration, not a missing one"
-    (assert= (checker-messages "(defmulti k :-> nil) (defmethod k [:int] (n) nil)") (list)))
+    (assert= (one-arg-checker-messages "(defmulti k :-> nil) (defmethod k [:int] (n) nil)") (list)))
 
   (test "and a declared nil return is ENFORCED, not silently dropped"
     ;; The whole point of distinguishing it: `render` promises nil, so using its result as a
     ;; number is a provable mismatch. Before, a nil return was indistinguishable from no
     ;; declaration at all and this warned nowhere.
-    (let (w (checker-messages "(defmulti k :-> nil) (defmethod k [:int] (n) nil) (defn u () (+ 1 (k 5)))"))
+    (let (w (one-arg-checker-messages "(defmulti k :-> nil) (defmethod k [:int] (n) nil) (defn u () (+ 1 (k 5)))"))
       (is (not (empty? w)))
       (is (any? w (fn (m) (includes? m "got nil")))))))
+
+;; ADR-523: abilities are single dispatch; `defmulti` is for a choice that depends on more
+;; than the first argument. A `defmulti` whose methods vary only the first position is an
+;; ability written the long way, and the checker says so.
+(defn- says-single-dispatch? (src)
+  (any? (checker-messages src) (fn (m) (includes? m "single dispatch"))))
+
+(describe "defmulti that is single dispatch (ADR-523)"
+  (test "a one-argument multimethod is reported"
+    (is (says-single-dispatch? "(defmulti sd1) (defmethod sd1 [:int] (n) n)")))
+  (test "methods that differ only in the first argument are reported"
+    (is (says-single-dispatch? "(defmulti sd2) (defmethod sd2 [:int :int] (a b) a) (defmethod sd2 [:string :int] (a b) b)")))
+  (test "a second position that varies is multiple dispatch, and is silent"
+    (is (not (says-single-dispatch? "(defmulti sd3) (defmethod sd3 [:int :int] (a b) a) (defmethod sd3 [:int :string] (a b) b)"))))
+  (test "a :commutative multimethod's mirror varies the second position, and is silent"
+    (is (not (says-single-dispatch? "(defmulti sd4 :commutative) (defmethod sd4 [:int :string] (a b) a) (defmethod sd4 [:string :string] (a b) b)"))))
+  (test "check-allow :single-dispatch opts out"
+    (is (not (says-single-dispatch? "(check-allow :single-dispatch (defmulti sd5) (defmethod sd5 [:int] (n) n))")))))

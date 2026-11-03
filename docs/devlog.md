@@ -5034,3 +5034,9 @@ inside a loop it leaked one each time; its only callers were its own tests, and 
 memoisation already used `defmemo`. Removed, with its ledger entry. The other lifetime trap, a
 table dying with its creator, was already loud; its error now names the creator's exit and the
 fixes.
+
+2026-11-03 (ADR-523, design pass item 7). Abilities dispatch on the first argument, `defmulti`
+on all of them, and nothing said which to pick. The user chose a rule plus a lint: an ability
+unless the choice depends on more than the first argument, stated once in `language.md`, and
+`nest check` reports a `defmulti` whose methods vary only the first position. It found two in
+the tree, both in `multimethod_test` exercising the mechanism, which now opt out.

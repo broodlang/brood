@@ -2104,6 +2104,7 @@ fn check_file_passes(
         &ctx,
         out,
     );
+    protocol::lint_single_dispatch_multis(heap, &expanded, &multi_info, out);
     // The body walk, with the names each form guards with `(bound? 'name)` — a
     // deliberately conditional reference to an ambient another module defines, which
     // must not read as unbound. The exemption is per form.

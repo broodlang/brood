@@ -384,6 +384,15 @@ kind — from any module, at any time, without editing the dispatcher.
 `defability`/`impl`/`defrecord` are built in — always available, no import, no
 `(:use ability)`.
 
+> **Which one: an ability or `defmulti`?** Brood has two dispatch mechanisms, each for one
+> job (ADR-523). Use an **ability** — almost always — when the implementation depends on the
+> first argument's type: `display`, `seq`, a storage port. Use **`defmulti`** only when it
+> depends on more than the first argument, the case first-argument dispatch cannot express:
+> a symmetric binary operator, where `(+ money 5)` and `(+ 5 money)` must reach the same
+> method ([below](#polymorphism-multiple-dispatch-defmulti), ADR-179). `nest check` reports a
+> `defmulti` whose methods vary only the first argument — it is an ability written the long
+> way, without the ability's provided ops, `:requires` or checker support.
+
 An argument's **dispatch identity** is one of two things:
 
 - for a built-in value, its `type-of` **kind** — `:int` `:float` `:string`
