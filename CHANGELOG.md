@@ -23,6 +23,11 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 - A process whose job is to keep answering can mark itself `(proc/flag :responsive true)`: an
   `os/cmd` or `run-process` it runs is then reported to it after the wait as
   `[:blocking-call {:native :detail :ms}]`, or refused with `E0048` under `:refuse` (ADR-517).
+- `string/display-width` and `string/width->index` step over ASCII a byte at a time instead of
+  running the Unicode grapheme segmenter over it, with the same answers (the segmenter still
+  decides every cluster that is not plain ASCII, and the ASCII character before one): about
+  0.9 ms a megabyte where it was 20, which an editor pays several times a keystroke on a
+  minified file's or a log's one long line.
 
 **Fixed.**
 - The parallel cold build (`nest run`/`nest test` on a project with no startup image) no

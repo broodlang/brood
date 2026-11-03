@@ -41,6 +41,78 @@ pub const MAX_TAB_WIDTH: usize = 1024;
 /// 32-bit `usize` (the wasm32 playground) with room left for the clusters' widths.
 pub const MAX_START_COLUMN: usize = 1 << 30;
 
+/// The grapheme clusters of `s`, exactly as `s.graphemes(true)` yields them, without
+/// running the segmenter over ASCII.
+///
+/// The layout functions below walk a whole string per call, and an editor asks them of
+/// whole lines: the column of point, where a row breaks, how far a line scrolls. On a
+/// minified file or a log the line is a megabyte, and the Unicode segmenter cost ~20 ms
+/// per megabyte per call — several calls a keystroke. Nearly all of such a line is
+/// ASCII, where the cluster rules are decided by the next byte alone:
+///
+/// - CR LF is one cluster (GB3); every other ASCII control breaks on both sides (GB4/5).
+/// - Two ASCII characters always break between them: nothing in ASCII extends,
+///   prepends or joins (GB999).
+/// - An ASCII character that is not a control MAY be extended by what follows it (a
+///   combining mark, a ZWJ — GB9/9a), so when the next byte is not ASCII the segmenter
+///   decides that one cluster.
+///
+/// Anything starting with a non-ASCII byte goes to the segmenter too, from a cluster
+/// boundary, which is where every cluster starts.
+pub fn clusters(s: &str) -> Clusters<'_> {
+    Clusters { s, at: 0 }
+}
+
+/// The iterator [`clusters`] answers.
+pub struct Clusters<'a> {
+    s: &'a str,
+    at: usize,
+}
+
+impl<'a> Iterator for Clusters<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<&'a str> {
+        let start = self.at;
+        if start >= self.s.len() {
+            return None;
+        }
+        let end = cluster_end(self.s, start);
+        self.at = end;
+        Some(&self.s[start..end])
+    }
+}
+
+/// The byte offset where the cluster starting at byte `start` (a cluster boundary, before
+/// the end of `s`) ends — [`clusters`]'s rule.
+fn cluster_end(s: &str, start: usize) -> usize {
+    let bytes = s.as_bytes();
+    let byte = bytes[start];
+    if byte.is_ascii() {
+        match bytes.get(start + 1).copied() {
+            None => start + 1,
+            Some(b'\n') if byte == b'\r' => start + 2,
+            Some(after) if after.is_ascii() || byte.is_ascii_control() => start + 1,
+            Some(_) => start + first_cluster_len(&s[start..]),
+        }
+    } else {
+        start + first_cluster_len(&s[start..])
+    }
+}
+
+/// Whether the byte at `at` is a printable ASCII character that is a cluster of its own
+/// (the byte after it ASCII too, or none) — one cell, one char, no segmenter: the step
+/// the layout loops below take for nearly every character of a source file or a log.
+#[inline]
+fn lone_printable(bytes: &[u8], at: usize) -> bool {
+    (b' '..=b'~').contains(&bytes[at]) && bytes.get(at + 1).is_none_or(u8::is_ascii)
+}
+
+/// The byte length of the first grapheme cluster of a non-empty `s`, by the segmenter.
+fn first_cluster_len(s: &str) -> usize {
+    s.graphemes(true).next().map_or(s.len(), str::len)
+}
+
 /// The cells a tab at column `col` spans to reach the next stop of `tab_width`.
 fn tab_span(col: usize, tab_width: usize) -> usize {
     let tab_width = tab_width.max(1);
@@ -53,6 +125,13 @@ fn tab_span(col: usize, tab_width: usize) -> usize {
 /// A tab is 0 here — its width is a function of its column, which only the
 /// column-carrying functions below know (`cluster_cells_at`).
 pub fn cluster_cells(cluster: &str) -> usize {
+    // a printable ASCII character is one cell — the common cluster, answered without the
+    // width tables
+    if let [byte] = cluster.as_bytes()
+        && (b' '..=b'~').contains(byte)
+    {
+        return 1;
+    }
     match cluster.width() {
         0 => 0,
         1 => 1,
@@ -75,9 +154,22 @@ pub fn cluster_cells_at(cluster: &str, col: usize, tab_width: usize) -> usize {
 /// next stop. `(string/display-width "a😀b")` is 4 — `a` and `b` one cell each, the
 /// emoji two; `"a\tb"` is 9.
 pub fn display_width_from(s: &str, start_col: usize, tab_width: usize) -> usize {
+    let bytes = s.as_bytes();
     let mut col = start_col;
-    for cluster in s.graphemes(true) {
-        col += cluster_cells_at(cluster, col, tab_width);
+    let mut at = 0;
+    while at < bytes.len() {
+        if lone_printable(bytes, at) {
+            col += 1;
+            at += 1;
+        } else if bytes[at] == b'\t' {
+            // a tab is a control: a cluster of its own whatever follows (GB4)
+            col += tab_span(col, tab_width);
+            at += 1;
+        } else {
+            let end = cluster_end(s, at);
+            col += cluster_cells_at(&s[at..end], col, tab_width);
+            at = end;
+        }
     }
     col - start_col
 }
@@ -97,16 +189,30 @@ pub fn display_width(s: &str) -> usize {
 /// (chars -> cells), this maps a click back (cells -> chars); one module, so they
 /// cannot disagree.
 pub fn index_at_cell_from(s: &str, cell: usize, start_col: usize, tab_width: usize) -> usize {
+    let bytes = s.as_bytes();
     let mut col = start_col;
     let cell = start_col + cell;
     let mut chars = 0;
-    for cluster in s.graphemes(true) {
-        let width = cluster_cells_at(cluster, col, tab_width);
+    let mut at = 0;
+    while at < bytes.len() {
+        let (width, end) = if lone_printable(bytes, at) {
+            (1, at + 1)
+        } else if bytes[at] == b'\t' {
+            (tab_span(col, tab_width), at + 1)
+        } else {
+            let end = cluster_end(s, at);
+            (cluster_cells_at(&s[at..end], col, tab_width), end)
+        };
         if width > 0 && cell < col + width {
             return chars;
         }
         col += width;
-        chars += cluster.chars().count();
+        chars += if end == at + 1 {
+            1
+        } else {
+            s[at..end].chars().count()
+        };
+        at = end;
     }
     chars
 }
@@ -126,7 +232,7 @@ pub fn expand_tabs(s: &str, start_col: usize, tab_width: usize) -> std::borrow::
     }
     let mut out = String::with_capacity(s.len() + tab_width.max(1) * 4);
     let mut col = start_col;
-    for cluster in s.graphemes(true) {
+    for cluster in clusters(s) {
         let width = cluster_cells_at(cluster, col, tab_width);
         if cluster == "\t" {
             out.extend(std::iter::repeat_n(' ', width));
@@ -239,5 +345,63 @@ mod tests {
         // from a mid-line column the tab's span follows the line's stops
         assert_eq!(index_at_cell_from("\tx", 4, 3, TAB_WIDTH), 0);
         assert_eq!(index_at_cell_from("\tx", 5, 3, TAB_WIDTH), 1);
+    }
+
+    /// The fast cluster walk splits exactly where `graphemes(true)` does — on ASCII, on
+    /// every place where ASCII meets something that may extend it, and on text that is
+    /// not ASCII at all.
+    #[test]
+    fn clusters_split_where_graphemes_do() {
+        let cases = [
+            "",
+            "plain ascii, with punctuation; and digits 0123",
+            "a\tb\t\tc",
+            "line\r\nnext\rlone\ncr",
+            "e\u{0301}x",
+            "ae\u{0301}\u{0302}b",
+            "x\u{200d}y",
+            "a😀b👨‍👩‍👧c🇿🇦🇿🇦🇿d👍🏽",
+            "中文 mixed 日本",
+            "\u{7}bell\u{7f}del\u{0}nul",
+            "\t\u{0301}after a tab",
+            "\r\u{0301}",
+            "ascii then \u{0915}\u{094d}\u{0937} devanagari",
+            "\u{1100}\u{1161}\u{11a8} hangul jamo",
+        ];
+        for s in cases {
+            let fast: Vec<&str> = clusters(s).collect();
+            let slow: Vec<&str> = s.graphemes(true).collect();
+            assert_eq!(fast, slow, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn mixed_text_measures_as_the_grapheme_walk_does() {
+        // the fast path must not change a single answer: widths and inverses over text
+        // that switches between ASCII and not, tabs included
+        let s = "ab\tc😀d e\u{0301}f\t中g";
+        let mut slow_width = 0;
+        for cluster in s.graphemes(true) {
+            slow_width += cluster_cells_at(cluster, slow_width, TAB_WIDTH);
+        }
+        assert_eq!(display_width(s), slow_width);
+        for cell in 0..=slow_width + 2 {
+            let mut col = 0;
+            let mut chars = 0;
+            let mut found = None;
+            for cluster in s.graphemes(true) {
+                let width = cluster_cells_at(cluster, col, TAB_WIDTH);
+                if found.is_none() && width > 0 && cell < col + width {
+                    found = Some(chars);
+                }
+                col += width;
+                chars += cluster.chars().count();
+            }
+            assert_eq!(
+                index_at_cell(s, cell),
+                found.unwrap_or(chars),
+                "cell {cell}"
+            );
+        }
     }
 }
