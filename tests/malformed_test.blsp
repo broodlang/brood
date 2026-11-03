@@ -201,8 +201,8 @@
     (assert= nil (seq/filter nil odd?))
     (assert= 0 (fold nil 0 +)))
 
-  (test "(reduce f '()) with no init value returns nil"
-    (assert= nil (reduce '() +)))
+  (test "(reduce '() f) with no init value raises — there is nothing to return (ADR-519)"
+    (is (includes? (error-of (reduce '() +)) "reduce: an empty collection and no start value")))
 
   (test "(reduce f init '()) returns init unchanged"
     (assert= 0 (reduce '() 0 +))))

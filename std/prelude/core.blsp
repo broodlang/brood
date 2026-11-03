@@ -411,15 +411,20 @@ fusing path, and `seq` calls it to coerce — use `seq` or `into` in your own co
 ;; (ADR-308), matching `Enum.reduce/3` and `/2`. The 2-arg form must seq-coerce
 ;; `coll` itself before splitting head/tail, because the bare `(first coll)`/
 ;; `(rest coll)` calls bypass fold's coercion and a map would error.
-(defn reduce (coll x & more)
-  "Reduce a collection with `f`. Either `(reduce coll acc f)` or `(reduce coll f)` (using the first item as the initial value). Maps reduce as their `[k v]` pairs.
+(defn reduce "Reduce a collection with `f`. Either `(reduce coll acc f)` or `(reduce coll f)` (using the first item as the initial value). Maps reduce as their `[k v]` pairs.
 
     (reduce [1 2 3] +)    ;=> 6
     (reduce [1 2] 10 +)   ;=> 13   ; with an explicit start
-    (reduce [] +)         ;=> nil  ; no items and no start"
-  (if (empty? more)
-    (let (s (seq coll)) (fold (rest s) (first s) x))
-    (fold coll x (first more))))
+    (reduce [] 0 +)       ;=> 0    ; an empty collection gives the start
+
+With no start, an empty collection has no value to give and raises (ADR-519): a `nil`
+there was a result nobody asked for."
+  ((coll f) (let (s (seq coll))
+              (if (empty? s)
+                (error "reduce: an empty collection and no start value, so there is nothing to "
+                  "return — give one: (reduce coll start f)")
+                (fold (rest s) (first s) f))))
+  ((coll init f) (fold coll init f)))
 
 ;; ---- arithmetic (variadic, built on the 2-arg primitives) ----
 ;; Multi-arity (ADR-047): the 0/1/2-argument clauses bind their parameters

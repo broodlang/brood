@@ -87,6 +87,21 @@
   (test "by negative"
     (assert= 1 (max-by '(3 1 5 2) (fn (n) (- n))))))
 
+(describe "reduce without a start value (ADR-519)"
+  (test "a non-empty collection starts from its first item"
+    (assert= 6 (reduce [1 2 3] +))
+    (assert= 7 (reduce [7] +))
+    (assert= [:a 1] (reduce {:a 1} (fn (acc kv) acc))))
+  (test "an empty collection with no start raises instead of answering nil"
+    (is (includes? (error-of (reduce [] +)) "reduce: an empty collection and no start value"))
+    (is (includes? (error-of (reduce (list) +)) "give one: (reduce coll start f)"))
+    (is (includes? (error-of (reduce {} +)) "reduce: an empty collection")))
+  (test "a start value makes the empty case an answer"
+    (assert= 0 (reduce [] 0 +))
+    (assert= 13 (reduce [1 2] 10 +)))
+  (test "an argument past the reducer is an arity error, not ignored"
+    (is (string? (error-of (reflect/eval '(reduce [1 2] 0 + :extra)))))))
+
 (describe "reduce-while"
   (test "halts early when the reducer returns :halt"
     (assert= 105 (reduce-while (range 1000) 0 (fn (a x) (if (> a 100) [:halt a] [:cont (+ a x)])))))

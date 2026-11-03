@@ -252,9 +252,10 @@ another Lisp has it.
 
     Both are documented, neither is caught. Decide on a lint, or a construct that cannot
     be misused.
-13. ⬜ **Small silent results.** `(reduce [] +)` is `nil`: no items and no seed gives
-    absence, not a failure or a raise. Decide whether that is the right channel under
-    ADR-310.
+13. ✅ **Small silent results (2026-11-03, ADR-519).** `(reduce [] +)` was `nil`: no items
+    and no seed gave absence. Decided by design: a seedless `reduce` raises on an empty
+    collection (a program error, so not a `failure`), and `reduce` is two clauses, so an
+    argument past the reducer is an arity error instead of being ignored.
 14. ⬜ **Reserved names vs hot redefinition.** `(def get …)` at the top level is an error
     (ADR-166), but `(defn get …)` inside a module defines `mod/get`, and a `let` may shadow
     it. Every rule is sound, but there is no single place that tells a user of a
