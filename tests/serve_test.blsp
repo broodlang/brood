@@ -808,10 +808,37 @@
   (test "the window client sets and answers through its display's clipboard"
     (let (me (self)
           asked (ref))
-      (assert= (drive-backlog (fn (me)
-                                {:draw (fn (f) nil)
-                                 :leave (fn () nil)
-                                 :clipboard-set (fn (text) (send me [:set text]))
-                                 :clipboard-get (fn () "on the client")})
-                 [[:clipboard-set "copied"] [:clipboard-get me asked]])
-        [[:set "copied"] [:clipboard asked "on the client"]]))))
+      (let (seen (drive-backlog (fn (me)
+                                  {:draw (fn (f) nil)
+                                   :leave (fn () nil)
+                                   :clipboard-set (fn (text) (send me [:set text]))
+                                   :clipboard-get (fn () "on the client")})
+                   [[:clipboard-set "copied"] [:clipboard-get me asked]])
+            ;; the get is answered by a reader beside the loop, which may outlive the loop
+            answer (or (seq/find seen (fn (message) (= (first message) :clipboard)))
+                     (receive
+                       ([:clipboard ^asked text] [:clipboard asked text])
+                       (after test/*wait-ms* :none))))
+        (assert= (first seen) [:set "copied"])
+        (assert= answer [:clipboard asked "on the client"]))))
+
+  (test "a slow clipboard does not hold the window client's painting back"
+    ;; the clipboard's owner takes its time answering (a busy app, a big selection): the
+    ;; client must go on painting and shipping keys while it is read, and answer when it is
+    (let (me (self)
+          asked (ref)
+          display {:draw (fn (f) (send me [:drew (frame-text f)]))
+                   :leave (fn () nil)
+                   :clipboard-get (fn () (receive (after 800 "slow to read")))}
+          client (spawn (editor/serve/attach-display-loop nil me display)))
+      (send client [:clipboard-get me asked])
+      (send client [:frame [(text 0 0 "painted meanwhile")]])
+      ;; the frame is painted long before the clipboard answers
+      (assert= (receive
+                 ([:drew text] text)
+                 ([:clipboard ^asked _] :answered-first)
+                 (after 600 :none))
+        "painted meanwhile")
+      (assert= (receive ([:clipboard ^asked text] text) (after test/*wait-ms* :none))
+        "slow to read")
+      (send client [:bye]))))

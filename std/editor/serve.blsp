@@ -679,12 +679,15 @@ copy, never the client loop. Returns nil."
 (defn- attach-clipboard-answer (display from asked)
   "Answer the session `from`'s `[:clipboard-get from asked]` with this machine's clipboard
 text (`[:clipboard asked text]`, `text` nil when it is empty or not text): `display`'s
-`:clipboard-get` when it has one, else `os/clipboard-get`. Always answers, so the session
-waits no longer than a round trip."
-  (let (getter (get display :clipboard-get)
-        text (check-allow :discarded-catch
-               (try (if getter (getter) (os/clipboard-get)) (catch _ nil))))
-    (send from [:clipboard asked (if (string? text) text nil)])))
+`:clipboard-get` when it has one, else `os/clipboard-get`. Read by a process of its own,
+which answers when the read is done: the clipboard's owner can be slow to hand its text over,
+and the client loop must go on painting and shipping keys meanwhile — the session never waits
+for the answer anyway (`client-clipboard-ask`). Always answers. Returns nil."
+  (let (getter (get display :clipboard-get))
+    (spawn (let (text (check-allow :discarded-catch
+                        (try (if getter (getter) (os/clipboard-get)) (catch _ nil))))
+             (send from [:clipboard asked (if (string? text) text nil)]))))
+  nil)
 
 (defn- attach-ship-key (session key)
   "Ship one terminal `key` to the daemon's `session`, with whether a key is down here."
