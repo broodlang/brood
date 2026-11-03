@@ -167,7 +167,7 @@ impl Pattern {
     }
 
     /// The NFA a [`pike_search`] simulates, or `None` past the NFA cap.
-    fn nfa(&self) -> Option<&thompson::NFA> {
+    pub(super) fn nfa(&self) -> Option<&thompson::NFA> {
         self.nfa.get_or_init(|| build_nfa(&self.sources)).as_ref()
     }
 }
@@ -1113,6 +1113,105 @@ fn pike_search(
         at += 1;
     }
     Ok(found)
+}
+
+/// The leftmost-first match over `input` among threads STARTED before byte `starts_end`
+/// (unanchored), as `(match, alive)` — `match` its `(start, end)`, and `alive` whether, at the
+/// input's END, some thread that could still have beaten it (or, with no match, any thread at
+/// all) was waiting for more text. Only an answer with `alive` false is final: a window of a
+/// text cut it, and a longer window could change it (`ab*c|a`'s first branch, cut by the
+/// window, loses to `a` — wrongly). Our Pike VM rather than `meta`, because only a simulation
+/// of the NFA can say a thread was still running; look-around sees the haystack past the
+/// input's end, so the window's last character is judged as the text has it.
+pub(super) fn pike_settled(
+    nfa: &thompson::NFA,
+    input: &Input<'_>,
+    starts_end: usize,
+    poll: &mut InterruptPoll,
+) -> Result<(Option<(usize, usize)>, bool), LispError> {
+    let start = nfa.start_anchored();
+    let slot_len = nfa.group_info().implicit_slot_len();
+    let state_count = nfa.states().len();
+    let mut current = ActiveStates::new(state_count, slot_len);
+    let mut next = ActiveStates::new(state_count, slot_len);
+    let mut stack = Vec::new();
+    let mut scratch = vec![None; slot_len];
+    let mut found = None;
+    let mut at = input.start();
+    let match_of = |slots: &[Option<NonMaxUsize>], end: usize| {
+        slots
+            .first()
+            .copied()
+            .flatten()
+            .map(|begin| (begin.get(), end))
+    };
+    while at <= input.end() {
+        poll.tick()?;
+        if current.dense.is_empty() && (found.is_some() || at >= starts_end) {
+            return Ok((found, false));
+        }
+        if found.is_none() && at < starts_end {
+            scratch.iter_mut().for_each(|slot| *slot = None);
+            closure(
+                nfa,
+                &mut stack,
+                &mut scratch,
+                &mut current,
+                input,
+                at,
+                start,
+            );
+        }
+        if at == input.end() {
+            // what is left at the end: a match here, or a thread ahead of any match that
+            // needed the text that comes next
+            for index in 0..current.dense.len() {
+                let state = current.dense[index];
+                match nfa.state(state) {
+                    State::Match { .. } => {
+                        found = match_of(current.slots_of(state), at);
+                        return Ok((found, false));
+                    }
+                    State::ByteRange { .. } | State::Sparse(_) | State::Dense(_) => {
+                        return Ok((found, true));
+                    }
+                    _ => {}
+                }
+            }
+            return Ok((found, false));
+        }
+        for index in 0..current.dense.len() {
+            let state = current.dense[index];
+            let target = match nfa.state(state) {
+                State::ByteRange { trans } => {
+                    trans.matches(input.haystack(), at).then_some(trans.next)
+                }
+                State::Sparse(sparse) => sparse.matches(input.haystack(), at),
+                State::Dense(dense) => dense.matches(input.haystack(), at),
+                State::Match { .. } => {
+                    found = match_of(current.slots_of(state), at);
+                    break;
+                }
+                _ => None,
+            };
+            if let Some(target) = target {
+                scratch.copy_from_slice(current.slots_of(state));
+                closure(
+                    nfa,
+                    &mut stack,
+                    &mut scratch,
+                    &mut next,
+                    input,
+                    at + 1,
+                    target,
+                );
+            }
+        }
+        std::mem::swap(&mut current, &mut next);
+        next.dense.clear();
+        at += 1;
+    }
+    Ok((found, false))
 }
 
 /// Add `start`'s epsilon closure at position `at` to `active`, in priority order, each state

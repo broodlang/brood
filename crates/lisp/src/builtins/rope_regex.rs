@@ -31,7 +31,7 @@
 //! one path that copies — a window at a time, never the rest of the rope (see each fallback).
 
 use super::args::{arg, expect_int, expect_rope_ref, expect_string_ref};
-use super::regex_native::{Kind, Pattern, SEARCH_WINDOW, compiled, kw};
+use super::regex_native::{Kind, Pattern, SEARCH_WINDOW, compiled, kw, pike_settled};
 use crate::core::heap::Heap;
 use crate::core::value::{EnvId, Value};
 use crate::error::{LispError, LispResult};
@@ -635,10 +635,13 @@ struct Window {
     high: usize,
 }
 
-/// [`find_forward`] by `meta`, a window at a time: matches STARTING in the next
-/// `SEARCH_WINDOW` bytes, searched over those bytes and as far past them as a match of the
-/// pattern can reach (its longest match, or another window for an unbounded pattern — and
-/// further while a match runs into the window's end). A scan past `limit` resumes at the
+/// [`find_forward`] without the lazy DFA, a window at a time: matches STARTING in the next
+/// `SEARCH_WINDOW` bytes (or up to `limit`), read over those bytes and as far past them as a
+/// match of the pattern can reach (its longest match, or another window for an unbounded
+/// pattern). The answer is EXACT: the window is doubled, from the same start, while a thread
+/// of the matcher that could still beat the match found was waiting at its end
+/// ([`pike_settled`]) — so `ab*c|a` past the window is the long match, never the `a`, and
+/// the common case is one window. A scan past `limit` resumes at the
 /// window it reached, so a window's spans copy the window, not the rest of the rope. `window`
 /// keeps the copy between calls, so finding every match in a window copies it once.
 #[allow(clippy::too_many_arguments)]
@@ -667,7 +670,9 @@ fn fallback_forward(
             .is_some_and(|held| held.low <= at && at < held.starts_end);
         if !held {
             poll.advance(InterruptPoll::EVERY)?;
-            let starts_end = bytes.boundary_up(at.saturating_add(SEARCH_WINDOW));
+            // a bounded scan (a window's spans) needs no starts past its limit
+            let starts_end =
+                bytes.boundary_up(at.saturating_add(SEARCH_WINDOW).min(limit.max(at + 1)));
             let high = bytes.boundary_up(starts_end.saturating_add(reach));
             let (text, context) = window_text(rope, bytes, at, high);
             *window = Some(Window {
@@ -681,17 +686,30 @@ fn fallback_forward(
         let Some(held) = window.as_mut() else {
             return Ok(Found::Missing);
         };
-        let found = meta_search(
-            &rx,
-            &held.text,
-            at - held.context,
-            held.high - held.context,
-            allow_empty,
-        )
-        .map(|(start, end)| (held.context + start, held.context + end));
+        let context = held.context;
+        // The answer in this window, and whether more text could change it. Our Pike VM says
+        // exactly whether a thread was still running at the window's end; without one (the
+        // NFA past its cap) `meta` answers, and a match touching the end is the only sign.
+        let (found, alive) = match rx.nfa() {
+            Some(nfa) => {
+                let input = Input::new(&held.text).range(at - context..held.high - context);
+                let (found, alive) = pike_settled(nfa, &input, held.starts_end - context, poll)?;
+                (
+                    found.map(|(start, end)| (context + start, context + end)),
+                    alive,
+                )
+            }
+            None => {
+                let found = meta_search(&rx, &held.text, at - context, held.high - context, true)
+                    .map(|(start, end)| (context + start, context + end))
+                    .filter(|&(start, _)| start < held.starts_end || held.high >= bytes.len);
+                let alive = found.is_some_and(|(_, end)| end == held.high);
+                (found, alive)
+            }
+        };
         match found {
-            // an unbounded match running into the window's end may run on: read further
-            Some((_, end)) if rx.longest.is_none() && end == held.high && held.high < bytes.len => {
+            // more text could change the answer: read further, from the same start
+            _ if alive && held.high < bytes.len => {
                 poll.advance(InterruptPoll::EVERY)?;
                 let high = bytes.boundary_up(held.high.saturating_add(held.high - held.low));
                 let (text, context) = window_text(rope, bytes, held.low, high);
@@ -699,9 +717,11 @@ fn fallback_forward(
                 held.context = context;
                 held.high = high;
             }
-            Some((start, end)) if start < held.starts_end || held.high >= bytes.len => {
-                return Ok(Found::Match(start, end));
+            // an empty match, when one is not wanted: look again a character on
+            Some((start, end)) if start == end && !allow_empty => {
+                at = bytes.next_char(start);
             }
+            Some((start, end)) => return Ok(Found::Match(start, end)),
             _ => {
                 if held.starts_end >= bytes.len {
                     return Ok(Found::Missing);
@@ -1210,5 +1230,37 @@ mod tests {
         assert_eq!(last, naive_all(r"\bfoo\b", &text).last().copied());
         let copied = COPIED.with(std::cell::Cell::get);
         assert!(copied < 300_000, "copied {copied} bytes of {}", text.len());
+    }
+
+    /// Every match by the rope search, from the start, with no limit.
+    fn all_unbounded(source: &str, rope: &ropey::Rope) -> Vec<(usize, usize)> {
+        let mut all = Vec::new();
+        each_match(source, rope, 0, usize::MAX, |start, end| {
+            all.push((start, end));
+            true
+        })
+        .unwrap();
+        all
+    }
+
+    #[test]
+    fn a_window_does_not_cut_the_preferred_branch_short() {
+        // `\b` before non-ASCII text: the windowed fallback. The first branch matches only
+        // past the window's end; the second matches inside it. Leftmost-first prefers the
+        // first — a window that stopped early would answer the shorter `a`.
+        let text = format!("ü a{}c ü", "b".repeat(200_000));
+        let rope = ropey::Rope::from_str(&text);
+        let source = r"\bab*c|\ba";
+        assert_eq!(all_unbounded(source, &rope), naive_all(source, &text));
+    }
+
+    #[test]
+    fn a_long_german_word_across_windows_is_one_match() {
+        // a word far longer than a window, ending in `ung`, among short German words
+        let word = format!("Donaudampfschiff{}ung", "fahrtsgesellschaft".repeat(10_000));
+        let text = format!("{} {word} Größe Übung Ende", "Größe Straße".repeat(5_000));
+        let rope = ropey::Rope::from_str(&text);
+        let source = r"\b\w+ung\b";
+        assert_eq!(all_unbounded(source, &rope), naive_all(source, &text));
     }
 }
