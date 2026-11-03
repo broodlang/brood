@@ -162,6 +162,9 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     // Caches whose key determines the value.
     ("builtins/regex_native.rs", "CACHES", PureCache),
     ("builtins/regex_native.rs", "LEXERS", PureCache),
+    // The rope-search engines (ADR-540): compiled from a pattern's text and nothing else,
+    // like CACHES beside it — the same pattern gives the same engine in every runtime.
+    ("builtins/rope_regex.rs", "ENGINES", PureCache),
     ("host/treesit.rs", "TREE_CACHE", PureCache),
     ("host/treesit.rs", "PARSER_POOL", PureCache),
     ("host/gui.rs", "NAMES", PureCache),
