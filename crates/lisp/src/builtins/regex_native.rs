@@ -131,7 +131,7 @@ type Cache = HashMap<Box<str>, Arc<Pattern>>;
 /// (`stepped`, ADR-493), built the first time one is.
 pub(super) struct Pattern {
     regex: Regex,
-    longest: Option<usize>,
+    pub(super) longest: Option<usize>,
     sources: Box<[Box<str>]>,
     match_kind: MatchKind,
     stepped: OnceLock<Option<Stepped>>,
