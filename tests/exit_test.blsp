@@ -207,3 +207,37 @@
     ; the fallback must stay put — this is the case the old code got right
     (let ([p m] (spawn-monitor :done))
       (assert= (ex-down-reason p m) :normal))))
+
+;; A soft signal lands at the NEXT receive — including one that never parks: a scan that
+;; matches a message already queued, or an `(after 0 …)` that expires at once. Both used
+;; to run straight past a pending signal (only the park and block paths checked), so a
+;; process that sent itself an exit and polled its mailbox lived on until it next blocked.
+;; Each body tells `parent` if it got past the receive, which it must not.
+(defn ex-self-exit-then-poll (parent)
+  (do
+    (exit (self) :badness)
+    (receive (_ :got) (after 0 :timeout))
+    (send parent :survived)
+    (receive (_ nil))))
+(defn ex-self-exit-then-match (parent)
+  (do
+    (send (self) :queued)
+    (exit (self) :badness)
+    (receive (:queued :matched))
+    (send parent :survived)
+    (receive (_ nil))))
+
+(describe "a soft exit lands at a receive that does not park"
+  (test "an (after 0 …) poll honours it"
+    (let (me (self)
+          [p m] (spawn-monitor (ex-self-exit-then-poll me)))
+      (assert= (ex-down-reason p m) :badness)
+      ;; the :down is a barrier: anything the body sent before dying is already queued
+      (assert= (receive (:survived :survived) (after 0 :died-at-the-poll)) :died-at-the-poll)))
+
+  (test "a receive whose first scan matches honours it"
+    (let (me (self)
+          [p m] (spawn-monitor (ex-self-exit-then-match me)))
+      (assert= (ex-down-reason p m) :badness)
+      (assert= (receive (:survived :survived) (after 0 :died-at-the-receive))
+        :died-at-the-receive))))

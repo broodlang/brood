@@ -87,7 +87,7 @@
   (test "by negative"
     (assert= 1 (max-by '(3 1 5 2) (fn (n) (- n))))))
 
-(describe "reduce without a start value (ADR-519)"
+(describe "reduce without a start value (ADR-521)"
   (test "a non-empty collection starts from its first item"
     (assert= 6 (reduce [1 2 3] +))
     (assert= 7 (reduce [7] +))

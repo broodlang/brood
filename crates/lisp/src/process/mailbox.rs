@@ -1747,6 +1747,15 @@ fn receive_match_timed(
     if let Some((len, limit)) = ctx.mailbox.take_overflow_hit() {
         return Err(crate::eval::proc_mailbox_limit_error(len, limit));
     }
+    // A soft `(exit pid reason)` is honoured at the NEXT `receive` — every one, not only
+    // one that parks or blocks. Those two paths checked `kill_pending`; a receive whose
+    // first scan matched, or whose `(after 0 …)` expired at once, ran straight past it,
+    // so a process that sent itself an exit and polled its mailbox lived on until it next
+    // blocked. Only in a scheduler-run green process, whose body driver turns the
+    // untrappable `Control::Kill` into death (the root thread is not killable).
+    if crate::process::in_capture_run() && ctx.mailbox.kill_pending.load(Ordering::Relaxed) {
+        return Err(LispError::kill_signal());
+    }
     // Whether this `receive` runs under state capture (a capture-mode green process):
     // the receive is re-entered from scratch on every wake, so its deadline must be
     // persisted across resumes rather than recomputed.

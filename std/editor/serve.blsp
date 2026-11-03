@@ -48,7 +48,7 @@ window) — same protocol, different frontend. Many clients may attach at once
 ;; ---- the seam: a display frontend that lives on the wire ---------------------
 
 ; nil ⇒ ui-run treats it as :tick (re-render)
-(defn remote-display (client cols rows)
+(defn remote-display (client cols rows &optional resume)
   "A `ui-run` display (`{:enter :leave :size :draw :poll}`) bound to a remote
 frontend `client` (its pid): `:draw` ships the frame to `client` as `[:frame f]`,
 `:poll` returns the next key the client shipped back (`[:key k held?]`, `held?`
@@ -58,9 +58,21 @@ client that sends `[:key k]` is taken as holding none). Runs inside the
 session process (the one `ui-run` runs in), so the client's keys land in *this*
 process's mailbox. `:size` is the `[cols rows]` the client reported at attach (live
 resize is deferred — re-attach to resize). `:leave` tells the client to restore its
-terminal (`[:bye]`). A `[:detach]` from the client, or a monitor `[:down …]` (the
-client died or the link dropped), returns `:close` — which `ui-run` treats as an
-immediate quit, tearing the session down.
+terminal (`[:bye]`). A `[:detach]` from the client returns `:close` — which `ui-run`
+treats as an immediate quit, tearing the session down.
+
+The client's death — it crashed, or its link dropped — is `:close` too, unless the session
+RESUMES (`resume`, `{:ms :manager :token :monitor}` from a `serve` given `:resume-ms`; ADR-519).
+Then the session PARKS instead: it keeps running with nobody to draw to, tells `:manager`
+so (`[:parked session token]`), and the app folds `[:client-lost]`, its cue to make what
+the client left behind safe. A manager that hands it a new client (`[:adopt token client
+cols rows]`) un-parks it: the new client is told the session (`[:attached session]`) and
+given the window as it stands — its options, the textures and sound data still live, the
+last frame without the sounds it already played — the size becomes the new client's, and
+the app folds `[:client-back]`. A manager may also ask a session that still HAS a client
+to hand itself over (`[:claim token client cols rows]`), when its user attached again
+before the old link's death was known: see [[remote-claim]]. A session still parked `:ms`
+after it parked ends (exit reason `:client-gone`); `:forever` waits for an adopter.
 
 Any OTHER mailbox message is returned as app input, matching the local displays
 (`gui-display`/`editor/ui/*term-display*` poll the whole mailbox): a served app's async event
@@ -70,41 +82,81 @@ those messages would strand in the session's mailbox (a selective receive never
 consumes them), leaving a served app deaf to everything but keys.
 
     (editor/serve/remote-display client 80 24)   ;~> {:enter … :leave … :size … :draw … :poll …} shipping frames to `client`"
-  (let (held (table/new))
-    (merge
-      {:enter (fn () (serve-busy-start held (fn (on) (serve-send-busy client on))))
-       ; the *client* owns the real terminal, not us
-       :leave (fn () (send client [:bye]))
-       :size (fn () [cols rows])
-       ;; whether a key is down in the CLIENT's window, as its last key said: every change
-       ;; to it comes with a key, so this is as current as the input the loop has taken.
-       ;; The table dies with the session process, which made it
-       :key-held? (fn () (table/get held :held? false))
-       ;; newest-wins at the source (ADR-492): a frame still queued for a client that has
-       ;; not taken it is replaced by the next, here or in the client node's mailbox
-       :draw (fn (f) (serve-send-frame client f))
-       ;; The pixel-space seam (ADR-374) over the wire: a texture, its release, and the
-       ;; window options an app asks for after attaching (`:input :pixels`, a title) each
-       ;; go to the client as a message its loop applies to its own display — so a game
-       ;; written against a display map serves to a thin client's window unchanged.
-       :texture (fn (tex rgba w h) (send client [:texture tex rgba w h]))
-       :texture-free (fn (tex) (send client [:texture-free tex]))
-       :sound (fn (snd pcm rate channels) (send client [:sound-data snd pcm rate channels]))
-       :sound-free (fn (snd) (send client [:sound-free snd]))
-       :configure (fn (o) (send client [:window o]))
-       ;; The client's input is what it ships: its keys, its detach, its death. Taken
-       ;; ahead of the session's background messages (ADR-490) — every clause is
-       ;; tag-led, so the scan passes a backlog without rebuilding any of it.
-       :poll-input (fn () (serve-busy-kick held (remote-take-input client held)))
-       ;; the client ships a key as `[:key k held?]` over the link, where no lane survives:
-       ;; the quit key is that shape (ADR-491), so a C-g interrupts a busy session
-       :quit-message (fn (key) [:key key])
-       ;; and only from this client: a guest link that can reach the session must not stop it
-       :quit-from client}
-      ;; the oldest message of any kind, tagged: the client's input as above, anything
-      ;; else async app input — the event bus, as local displays deliver it — but not the
-      ;; USER's, so it holds no idle timer back
-      (display-polls (fn (ms) (serve-busy-kick-tagged held (remote-receive-tagged client held ms)))))))
+  ;; the display's state, in a table the session process owns: the client it serves now
+  ;; (nil while parked) and the monitor on it, the size, whether a key is down there, the
+  ;; quit key (to re-arm for an adopter), when it parked — and, for a resuming session, the
+  ;; window a new client is given: the last frame, the options, the live textures and sounds
+  (let (state (table/new))
+    (do
+      (table/put state :client client)
+      (table/put state :monitor (:monitor resume))
+      (table/put state :size [cols rows])
+      (merge
+        {:enter (fn ()
+                  (serve-busy-start state
+                    (fn (on) (serve-to state (fn (to) (serve-send-busy to on))))))
+         ; the *client* owns the real terminal, not us
+         :leave (fn () (serve-to state (fn (to) (send to [:bye]))))
+         :size (fn () (table/get state :size))
+         ;; whether a key is down in the CLIENT's window, as its last key said: every change
+         ;; to it comes with a key, so this is as current as the input the loop has taken.
+         ;; The table dies with the session process, which made it
+         :key-held? (fn () (table/get state :held? false))
+         ;; newest-wins at the source (ADR-492): a frame still queued for a client that has
+         ;; not taken it is replaced by the next, here or in the client node's mailbox. A
+         ;; resuming session keeps it, for the client that adopts it
+         :draw (fn (f)
+                 (do
+                   (when resume (table/put state :frame f))
+                   (serve-to state (fn (to) (serve-send-frame to f)))))
+         ;; The pixel-space seam (ADR-374) over the wire: a texture, its release, and the
+         ;; window options an app asks for after attaching (`:input :pixels`, a title) each
+         ;; go to the client as a message its loop applies to its own display — so a game
+         ;; written against a display map serves to a thin client's window unchanged. A
+         ;; resuming session remembers what is live, for a client that adopts it.
+         :texture (fn (tex rgba w h)
+                    (serve-seam state resume :textures tex [:texture tex rgba w h]))
+         :texture-free (fn (tex) (serve-seam state resume :textures tex [:texture-free tex]))
+         :sound (fn (snd pcm rate channels)
+                  (serve-seam state resume :sounds snd [:sound-data snd pcm rate channels]))
+         :sound-free (fn (snd) (serve-seam state resume :sounds snd [:sound-free snd]))
+         :configure (fn (o)
+                      (do
+                        (when resume
+                          (table/put state :window (merge (table/get state :window {}) o)))
+                        (serve-to state (fn (to) (send to [:window o])))))
+         ;; The client's input is what it ships: its keys, its detach, its death. Taken
+         ;; ahead of the session's background messages (ADR-490) — every clause is
+         ;; tag-led, so the scan passes a backlog without rebuilding any of it.
+         :poll-input (fn () (serve-busy-kick state (remote-take-input state resume)))
+         ;; the client ships a key as `[:key k held?]` over the link, where no lane survives:
+         ;; the quit key is that shape (ADR-491), so a C-g interrupts a busy session. Kept,
+         ;; so an adopting client's C-g is armed too
+         :quit-message (fn (key) (do (table/put state :quit-key key) [:key key]))
+         ;; and only from this client: a guest link that can reach the session must not stop it
+         :quit-from client}
+        ;; the oldest message of any kind, tagged: the client's input as above, anything
+        ;; else async app input — the event bus, as local displays deliver it — but not the
+        ;; USER's, so it holds no idle timer back
+        (display-polls (fn (ms)
+                         (serve-busy-kick-tagged state (remote-receive-tagged state resume ms))))))))
+
+(defn- serve-to (state deliver)
+  "Call `deliver` with the client the display `state` serves now — or not at all while the
+session is parked, with nobody to send to."
+  (let (client (table/get state :client nil))
+    (when client (deliver client))))
+
+(defn- serve-seam (state resume kind id message)
+  "Send a texture or sound `message` about `id` to the client — and, for a resuming session,
+keep what is LIVE under `kind` (`:textures` / `:sounds`): the data message while it lives,
+nothing once freed, so an adopting client is given exactly what the old one held."
+  (do
+    (when resume
+      (let (live (table/get state kind {})
+            freed? (contains? #{:texture-free :sound-free} (first message)))
+        (table/put state kind (if freed? (dissoc live id) (assoc live id message)))))
+    (serve-to state (fn (to) (send to message)))))
 
 (defn- serve-send-frame (client frame)
   "Ship `frame` to `client` as `[:frame frame]`, superseding one still queued for it
@@ -182,84 +234,303 @@ until it is idle (no interrupt window open) — then wait for the next kick."
           (serve-busy-wait loop notify show)
           (serve-busy-probe loop notify show))))))
 
-(defn- remote-receive-tagged (client held ms)
+(defn- remote-receive-tagged (state resume ms)
   "A remote display's `:poll-tagged`: the oldest message, waiting up to `ms`, as
-`[message input?]` — the client's keys, detach and death are input — or nil on timeout."
-  (receive
-    ([:key k held?] (do (table/put held :held? held?) [k true]))
-    ([:key k] [k true])
-    ([:detach] [:close true])
-    ([:down _ ^client _] [:close true])
-    (m [m false])
-    (after ms nil)))
+`[message input?]` — the client's keys, detach and death are input, and so are a manager's
+hand-overs — or nil on timeout. A parked session waits no longer than its time to live,
+and ends when that is up."
+  (let (client (table/get state :client nil))
+    (receive
+      ([:key k held?] (do (table/put state :held? held?) [k true]))
+      ([:key k] [k true])
+      ([:detach] [:close true])
+      ([:down _ ^client _] [(remote-client-lost state resume) true])
+      ([:adopt token adopter cols rows] [(remote-adopt state resume token adopter cols rows) true])
+      ([:claim token claimant cols rows] [(remote-claim state resume token claimant cols rows) true])
+      (m [m false])
+      (after (remote-parked-wait state resume ms) (remote-parked-expiry state resume)))))
 
-(defn- remote-take-input (client held)
-  "The next input `client` shipped this session — a key (noting whether one is held in
-`held`), or `:close` for a detach or the client's death — without waiting; nil when
-none came. Only THE CLIENT's death closes the session: the session process may monitor
-other things (a collab app monitors every hosted buffer process, whose `[:down …]` must
-reach its update as app input for rehost/reshare, not tear the session down)."
-  (receive
-    ([:key k held?] (do (table/put held :held? held?) k))
-    ; a client that does not say
-    ([:key k] k)
-    ([:detach] :close)
-    ; client process died / link net-split
-    ([:down _ ^client _] :close)
-    (after 0 nil)))
+(defn- remote-take-input (state resume)
+  "The next input the client shipped this session — a key (noting whether one is held in
+`state`), `:close` for a detach, its death ([[remote-client-lost]]), a new client handed
+this session ([[remote-adopt]], [[remote-claim]]) — without waiting; nil when none came.
+Only THE CLIENT's death counts: the session process may monitor other things (a collab
+app monitors every hosted buffer process, whose `[:down …]` must reach its update as app
+input for rehost/reshare, not tear the session down)."
+  (let (client (table/get state :client nil))
+    (receive
+      ([:key k held?] (do (table/put state :held? held?) k))
+      ; a client that does not say
+      ([:key k] k)
+      ([:detach] :close)
+      ; client process died / link net-split
+      ([:down _ ^client _] (remote-client-lost state resume))
+      ([:adopt token adopter cols rows] (remote-adopt state resume token adopter cols rows))
+      ([:claim token claimant cols rows] (remote-claim state resume token claimant cols rows))
+      (after 0 nil))))
+
+(defn- remote-client-lost (state resume)
+  "The client died or its link dropped: `:close`, ending the session — or, for a session
+that resumes, PARK it (nobody to draw to, the manager told) and hand the app
+`[:client-lost]`."
+  (if (nil? resume)
+    :close (do
+      (table/put state :client nil)
+      (table/put state :monitor nil)
+      (table/put state :held? false)
+      (table/put state :parked-at (os/now))
+      (send (:manager resume) [:parked (self) (:token resume)])
+      [:client-lost])))
+
+(defn- remote-adopt (state resume token client cols rows)
+  "A new `client` (`cols`×`rows`) takes over this parked session: monitored, told the
+session, given the window as it stands ([[serve-replay]]), its C-g armed — and the app is
+handed `[:client-back]`. Only the manager's `token` adopts, and only a PARKED session: a
+stray `[:adopt …]` must not take a live session's screen. Anything else is ignored (nil,
+which the loop reads as a timeout)."
+  (if (or (nil? resume) (not (= token (:token resume))) (not (nil? (table/get state :client nil))))
+    nil
+    (let (key (table/get state :quit-key nil))
+      (do
+        (table/put state :monitor (monitor client))
+        (table/put state :client client)
+        (table/put state :size [cols rows])
+        (table/put state :parked-at nil)
+        (send client [:attached (self)])
+        (serve-replay state client)
+        (when key (proc/set-quit-key [:key key] editor/ui/*ui-quit-busy-ms* client))
+        [:client-back]))))
+
+;; How long a session asked to hand itself over waits for its present client to say it is
+;; still there. A live client answers in a round trip; one whose link dropped unnoticed
+;; never does, and the user attaching again is waiting on this.
+(def- serve-claim-ms 1500)
+
+(defn- remote-claim (state resume token claimant cols rows)
+  "The manager asks this session — which still has a client — whether `claimant`, attached
+under the same identity, may take it over. It may when that client is gone without its
+death being known yet: a link that dropped without closing, the laptop that slept, which
+the user attaching again notices long before the network does. The client is asked
+(`[:ping session ref]`, which every client loop answers `[:pong ref]`) and given
+`serve-claim-ms`: an answer means two windows on purpose, and the manager is told to give
+`claimant` a session of its own (`[:declined session claimant]`); silence or its death
+hands this session to `claimant` ([[remote-adopt]]), the old client dropped and told
+`[:bye]` in case its link comes back. A session parked meanwhile is simply adopted. Ignored
+without the manager's token."
+  (cond
+    (or (nil? resume) (not (= token (:token resume)))) nil
+    (nil? (table/get state :client nil))
+      (do
+        (send (:manager resume) [:claimed (self) claimant])
+        (remote-adopt state resume token claimant cols rows))
+    else
+      (let (old (table/get state :client nil)
+            asked (ref))
+        (do
+          (send old [:ping (self) asked])
+          (if (receive ([:pong ^asked] true) ([:down _ ^old _] false) (after serve-claim-ms false))
+            (do (send (:manager resume) [:declined (self) claimant]) nil)
+            (let (watch (table/get state :monitor nil))
+              (do
+                (when watch (demonitor watch))
+                (send old [:bye])
+                (table/put state :client nil)
+                (table/put state :monitor nil)
+                (send (:manager resume) [:claimed (self) claimant])
+                (remote-adopt state resume token claimant cols rows))))))))
+
+(defn- serve-replay (state client)
+  "Give a `client` that took this session over the window as it stands: the window options
+asked for so far, the textures and sound data still live, then the last frame — without
+its sounds and bursts, which played when it was first drawn. A new grid redraws anyway;
+the same grid would draw nothing until the model changed (ADR-444)."
+  (let (options (table/get state :window nil)
+        frame (table/get state :frame nil))
+    (do
+      (when options (send client [:window options]))
+      (doseq (message (vals (table/get state :textures {}))) (send client message))
+      (doseq (message (vals (table/get state :sounds {}))) (send client message))
+      (when frame (send client [:frame (serve-without-one-shots frame)])))))
+
+(def- serve-one-shot-tags #{:sound :burst})
+
+(defn- serve-without-one-shots (ops)
+  "`ops` (a frame, or a region's ops) without its one-shot ops — `[:sound …]`, `[:burst …]`
+— at any depth: the frame as a screen, the inverse of `editor/display/frame-one-shots`."
+  (if (vector? ops)
+    (into []
+      (map (seq/reject ops (fn (op) (and (vector? op) (contains? serve-one-shot-tags (first op)))))
+        serve-without-one-shots))
+    ops))
+
+(defn- remote-parked-wait (state resume ms)
+  "How long a poll may park: `ms`, or no longer than a parked session has left to live."
+  (let (parked-at (table/get state :parked-at nil)
+        lives (:ms resume))
+    (if (or (nil? parked-at) (not (number? lives)))
+      ms
+      (math/max 0 (math/min ms (- (+ parked-at lives) (os/now)))))))
+
+(defn- remote-parked-expiry (state resume)
+  "A poll timed out: nil (the loop's tick) — or, for a session parked past its time to live,
+the end of it: no client came back for it. The exit lands at the receive after it."
+  (let (parked-at (table/get state :parked-at nil)
+        lives (:ms resume))
+    (if (and parked-at (number? lives) (>= (os/now) (+ parked-at lives)))
+      (do (exit (self) :client-gone) (receive (after 0 nil)))
+      nil)))
 ;; ---- daemon side -------------------------------------------------------------
 
-(defn- serve-session (client cols rows opts make-model view update)
-  "One attached client's session: monitor the client (so its death tears us down),
-tell it our pid (so it can ship keys here), then run the app's `ui-run` against a
-`remote-display` to that client. A fresh `(make-model)` per session keeps clients
-independent. When the client attached with a non-empty `opts` map (its identity —
-see `attach`), it is queued to this session's own mailbox as `[:client-opts opts]`
-BEFORE `ui-run` starts, so it is the first event the app's `update` folds (through
-`remote-display`'s async pass-through) — the seam a collaborative app reads a
-participant's name from.
-
-A client that attached over a GUEST link (`node/grant-guest`, ADR-415) is marked `:guest
-true` — the app decides what a guest may do — and, when its grant names who it is, gets
-THAT name whatever its `opts` claim: the host chose it when it handed out the cookie, and
-the client cannot."
-  (monitor client)
-  (send client [:attached (self)])
+(defn- serve-identity (client opts)
+  "Who `client` is, as its session sees it: the identity `opts` map it attached with —
+except that a client on a GUEST link (`node/grant-guest`, ADR-415) is marked `:guest true`
+(the app decides what a guest may do) and, when its grant names who it is, gets THAT name
+whatever its `opts` claim: the host chose it when it handed out the cookie, and the
+client cannot."
   (let (grant (node/peer-grant client)
-        claimed (if (map? opts) opts {})
-        identity (cond
-                   (nil? grant) opts
-                   (string? (:as grant)) (assoc claimed :name (:as grant) :guest true)
-                   else (assoc claimed :guest true)))
-    (when (and (map? identity) (not (empty? identity)))
-      (send (self) [:client-opts identity])))
-  (ui-run (make-model) view update (remote-display client cols rows)))
+        claimed (if (map? opts) opts {}))
+    (cond
+      (nil? grant) claimed
+      (string? (:as grant)) (assoc claimed :name (:as grant) :guest true)
+      else (assoc claimed :guest true))))
 
-(defn- serve-manager (make-model view update &optional sessions)
+(defn- serve-session (client cols rows identity resume make-model view update)
+  "One attached client's session: monitor the client (so its death tears us down, or parks
+us — `resume`, see `remote-display`), tell it our pid (so it can ship keys here), then run
+the app's `ui-run` against a `remote-display` to that client. A fresh `(make-model)` per
+session keeps clients independent. A non-empty `identity` ([[serve-identity]]) is queued
+to this session's own mailbox as `[:client-opts identity]` BEFORE `ui-run` starts, so it
+is the first event the app's `update` folds (through `remote-display`'s async
+pass-through) — the seam a collaborative app reads a participant's name from."
+  (let (watch (monitor client))
+    (do
+      (send client [:attached (self)])
+      (when (and (map? identity) (not (empty? identity)))
+        (send (self) [:client-opts identity]))
+      (ui-run (make-model)
+        view
+        update
+        (remote-display client cols rows (when resume (assoc resume :monitor watch)))))))
+
+(defn- serve-resumes? (opts identity)
+  "Whether a session for `identity` parks when its client is lost: the server resumes
+(`:resume-ms`) and the client said who it is — an anonymous client's session could be
+handed to anyone."
+  (and (map? opts) (not (nil? (:resume-ms opts))) (string? (:name identity))))
+
+;; The manager's state, `live`: `:sessions` (pid -> `{:identity :token :parked?}`) and
+;; `:pending` (a client waiting while sessions under its identity are asked to hand
+;; themselves over: client -> `{:asking session :others [session …] :cols :rows
+;; :identity}`). `app` is what a new session is made of: `{:make-model :view :update
+;; :opts}`.
+
+(defn- serve-forget (live kind key)
+  "`live` without `key` in its `kind` table (`:sessions` or `:pending`). Not `update`:
+inside `serve-manager` that name is the APP's update function, which a call meant for the
+manager's own state once reached."
+  (assoc live kind (dissoc (get live kind) key)))
+
+(defn- serve-spawn (live app client cols rows identity)
+  "`live` with a NEW session for `client` — resuming when the server does and `client` is
+named."
+  (let (opts (:opts app)
+        token (ref)
+        resume (when (serve-resumes? opts identity)
+                 {:ms (:resume-ms opts) :manager (self) :token token})
+        session (spawn (serve-session client
+                         cols
+                         rows
+                         identity
+                         resume
+                         (:make-model app)
+                         (:view app)
+                         (:update app))))
+    (do
+      (monitor session)
+      (map/assoc-in live [:sessions session] {:identity identity :token token :parked? false}))))
+
+(defn- serve-ask (live app client cols rows identity candidates)
+  "Ask the first of `candidates` still alive to hand itself over to `client`
+([[remote-claim]]), keeping the rest for if it declines — or, with none left, give `client`
+a session of its own."
+  (let (alive (seq/filter candidates (fn (session) (contains? (:sessions live) session))))
+    (if (empty? alive)
+      (serve-spawn live app client cols rows identity)
+      (let (session (first alive))
+        (do
+          (send session [:claim (map/get-in live [:sessions session :token]) client cols rows])
+          (map/assoc-in live
+            [:pending client]
+            {:asking session :others (rest alive) :cols cols :rows rows :identity identity}))))))
+
+(defn- serve-ask-next (live app client)
+  "The session `client` waited on declined or died: ask the next ([[serve-ask]])."
+  (let (entry (map/get-in live [:pending client]))
+    (serve-ask (serve-forget live :pending client)
+      app
+      client
+      (:cols entry)
+      (:rows entry)
+      (:identity entry)
+      (:others entry))))
+
+(defn- serve-attach (live app client cols rows given)
+  "`live` after `client` attached with identity `given`: handed the PARKED session of the
+same identity when the server resumes; else, when a session of that identity still has a
+client, that session asked whether its client is really there ([[serve-ask]] — a dropped
+link is often noticed by the user attaching again before the network notices it); else a
+session of its own."
+  (let (identity (serve-identity client given)
+        mine (if (serve-resumes? (:opts app) identity)
+               (seq/filter (keys (:sessions live))
+                 (fn (session) (= (map/get-in live [:sessions session :identity]) identity)))
+               [])
+        parked (seq/find mine (fn (session) (map/get-in live [:sessions session :parked?]))))
+    (cond
+      parked
+        (do
+          (send parked [:adopt (map/get-in live [:sessions parked :token]) client cols rows])
+          (map/assoc-in live [:sessions parked :parked?] false))
+      (not (empty? mine)) (serve-ask live app client cols rows identity mine)
+      else (serve-spawn live app client cols rows identity))))
+
+(defn- serve-session-down (live app session)
+  "`live` after `session` ended: forgotten, and every client waiting on its answer moved
+on to the next ([[serve-ask-next]])."
+  (let (gone (serve-forget live :sessions session)
+        waiting (seq/filter (keys (:pending gone))
+                  (fn (client) (= (map/get-in gone [:pending client :asking]) session))))
+    (fold waiting gone (fn (acc client) (serve-ask-next acc app client)))))
+
+(defn- serve-manager (make-model view update &optional opts live)
   "The session manager loop (registered under `serve-name`): on each `[:attach client
-cols rows]` / `[:attach client cols rows opts]`, spawn an independent session for that
-client (`opts` — the client's identity map — defaults to `{}` for an old-style attach).
-Live sessions are tracked (monitored; pruned on `[:down …]`) so `[:shutdown from r]` —
-the `serve-stop` message — can end every one of them: each killed session's client sees
-its monitor fire and closes cleanly. Tail-recursive."
-  (let (ss (or sessions ()))
+cols rows]` / `[:attach client cols rows opts]`, give that client a session
+([[serve-attach]]: its own, the parked one it left, or the one whose old client turns out
+to be gone — `opts` is the client's identity map, `{}` for an old-style attach). Live
+sessions are tracked (monitored; pruned on `[:down …]`, marked on `[:parked …]`, answers
+to a hand-over on `[:claimed …]` / `[:declined …]`) so `[:shutdown from r]` — the
+`serve-stop` message — can end every one of them: each killed session's client sees its
+monitor fire and closes cleanly. Tail-recursive."
+  (let (state (or live {:sessions {} :pending {}})
+        app {:make-model make-model :view view :update update :opts opts}
+        again (fn (next) (serve-manager make-model view update opts next)))
     (receive
-      ([:attach client cols rows] (let (s (spawn (serve-session client
-                                                   cols
-                                                   rows
-                                                   {}
-                                                   make-model
-                                                   view
-                                                   update)))
-                                    (monitor s)
-                                    (serve-manager make-model view update (cons s ss))))
-      ([:attach client cols rows opts] (let (s (spawn (serve-session client
-                                                        cols rows opts make-model view update)))
-                                         (monitor s)
-                                         (serve-manager make-model view update (cons s ss))))
-      ([:down _ p _] (serve-manager make-model view update (seq/reject ss (fn (x) (= x p)))))
-      ([:shutdown from r] (do (doseq (s ss) (exit s :kill)) (send from [:reply r (count ss)])))
-      (_ (serve-manager make-model view update ss)))))
+      ([:attach client cols rows] (again (serve-attach state app client cols rows {})))
+      ([:attach client cols rows given] (again (serve-attach state app client cols rows given)))
+      ([:parked session token] (again (if (= token (map/get-in state [:sessions session :token]))
+                                        (map/assoc-in state [:sessions session :parked?] true)
+                                        state)))
+      ([:claimed session client] (again (serve-forget state :pending client)))
+      ([:declined session client] (again (if (= session
+                                               (map/get-in state [:pending client :asking]))
+                                           (serve-ask-next state app client)
+                                           state)))
+      ([:down _ p _] (again (serve-session-down state app p)))
+      ([:shutdown from r] (let (sessions (keys (:sessions state)))
+                            (do
+                              (doseq (s sessions) (exit s :kill))
+                              (send from [:reply r (count sessions)]))))
+      (_ (again state)))))
 
 (defn serve-stop (&optional mgr)
   "Stop serving: kill every live session (each client's monitor fires and its window
@@ -275,7 +546,7 @@ wedged manager. The counterpart of `serve`.
         (send pid [:shutdown (self) r])
         (receive ([:reply ^r v] v) (after 2000 :no-reply))))))
 
-(defn serve (make-model view update)
+(defn serve (make-model view update &optional opts)
   "Serve a `ui-run` app from THIS runtime to attaching frontends (ADR-090). `make-model`
 is a 0-arg thunk producing a *fresh* initial model per client; `view`/`update` are the
 usual `ui-run` functions. Registers a session manager under `serve-name` and returns
@@ -284,8 +555,18 @@ its pid (non-blocking) — a daemon's `main` typically calls `(serve …)` then 
 its own session. The program must already be a node (`node-start` / `nest run --name`).
 Opt-in: a runtime serves nothing unless it calls `serve`.
 
-    (editor/serve/serve (fn () {:n 0}) view update)   ;~> #<pid …> of the session manager, registered as :ui"
-  (proc/register serve-name (spawn (serve-manager make-model view update))))
+`opts` `{:resume-ms N}` makes a session OUTLIVE its client (ADR-519): when a named client
+(one that attached with `{:name …}`) dies or its link drops, its session parks for `N` ms
+(or `:forever`) with all its state, and the next attach under the same identity takes it
+over where it was — the emacsclient whose daemon kept its buffers through a dropped ssh.
+An attach under that identity while its session still has a client asks the old client
+whether it is there, and takes the session over when it is not: the link that dropped
+without anyone noticing yet. The app folds `[:client-lost]` and `[:client-back]` as it
+goes (see `remote-display`).
+
+    (editor/serve/serve (fn () {:n 0}) view update)   ;~> #<pid …> of the session manager, registered as :ui
+    (editor/serve/serve (fn () {:n 0}) view update {:resume-ms 3600000})   ;~> the same, a dropped client's session kept an hour"
+  (proc/register serve-name (spawn (serve-manager make-model view update opts))))
 
 ;; ---- client side (the thin frontend) -----------------------------------------
 
@@ -306,6 +587,8 @@ frame taken so far, nil at the start."
     ([:frame f] (attach-drain peer f))
     ;; a terminal has no busy cursor to show (ADR-491)
     ([:busy _] (attach-drain peer latest))
+    ;; the session asking whether this window is still here (`remote-claim`, ADR-519)
+    ([:ping from asked] (do (send from [:pong asked]) (attach-drain peer latest)))
     ([:bye] :closed)
     ([:nodedown ^peer] :closed)
     ([:down _ _ _] :closed)
@@ -428,6 +711,9 @@ backlog (`attach-display-backlog`), which paints only the newest."
                                                                                                              display)))
     ;; the daemon's loop is busy, or no longer (ADR-491): the window's wait cursor
     ([:busy on] (do (attach-display-busy display on) (attach-display-loop peer session display)))
+    ;; the session asking whether this window is still here (`remote-claim`, ADR-519) —
+    ;; before the catch-all below, which would ship it to the session as a key
+    ([:ping from asked] (do (send from [:pong asked]) (attach-display-loop peer session display)))
     ([:bye] nil)
     ([:nodedown ^peer] nil)
     ([:down _ _ _] nil)

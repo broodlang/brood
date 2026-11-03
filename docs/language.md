@@ -2353,8 +2353,10 @@ blocking). Clauses may carry a `:when` guard.
 
 An optional trailing **`(after ms body...)`** clause bounds the wait: if no
 message matches within `ms` milliseconds, `body` runs instead. `(after 0 …)` is a
-non-blocking poll. Because the timeout body is ordinary code, a timeout is
-**catchable** — throw from it and catch with `try`/`catch`:
+non-blocking poll. A receive with ONLY an `after` clause, `(receive (after ms body))`,
+matches nothing: it waits `ms` and leaves the mailbox alone, like `proc/sleep`
+(ADR-520). `(receive)` with no clauses at all takes the next message. Because the
+timeout body is ordinary code, a timeout is **catchable** — throw from it and catch with `try`/`catch`:
 
 ```clojure
 (try

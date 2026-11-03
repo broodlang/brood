@@ -252,7 +252,7 @@ another Lisp has it.
 
     Both are documented, neither is caught. Decide on a lint, or a construct that cannot
     be misused.
-13. ✅ **Small silent results (2026-11-03, ADR-519).** `(reduce [] +)` was `nil`: no items
+13. ✅ **Small silent results (2026-11-03, ADR-521).** `(reduce [] +)` was `nil`: no items
     and no seed gave absence. Decided by design: a seedless `reduce` raises on an empty
     collection (a program error, so not a `failure`), and `reduce` is two clauses, so an
     argument past the reducer is an arity error instead of being ignored.

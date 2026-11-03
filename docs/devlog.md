@@ -5016,7 +5016,7 @@ there that the KI-313 loop's older binaries kept rewriting; `doc-catalog` baked 
 section headers into the stdlib image, and `nest stdimage` rebuilt from the installed image, so
 it kept them. The copy is keyed by the prelude text now, and the image builds from source.
 
-2026-11-03 (ADR-519, design pass item 13). `(reduce [] +)` answered `nil`, and `reduce`'s
+2026-11-03 (ADR-521, design pass item 13). `(reduce [] +)` answered `nil`, and `reduce`'s
 `(coll x & more)` ignored a fourth argument. It is two clauses now: `(coll f)` raises on an
 empty collection, naming `(reduce coll start f)`, and `(coll init f)` is `fold`. Nothing in the
 tree relied on the `nil`.

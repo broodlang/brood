@@ -17,8 +17,8 @@
 
 ;; The gap that breaks the two-step form, widened until the child has certainly exited:
 ;; a loaded box or a boundary-trace wrapper amounts to the same yield. `eventually` polls
-;; with `sleep`, never `(receive (after 5 nil))` — an empty clause list matches anything,
-;; so a bare timed receive would eat the very `[:down …]` the test is waiting for.
+;; with `sleep`. (A bare `(receive (after 5 nil))` used to match anything and eat the very
+;; `[:down …]` the test waits for; since ADR-520 it waits like `sleep`.)
 (defn- await-exit (pid)
   (eventually "the child exiting" (fn () (not (proc/alive? pid)))))
 

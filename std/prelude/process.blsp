@@ -120,12 +120,10 @@ A zero-arg lambda `(fn () …)` body is passed through (not re-wrapped), like `s
   `(%spawn-monitor ~(%spawn-body-thunk expr)))
 
 ;; ---- sleep: park on the scheduler timer (policy in Brood) ---------------
-;; Sleep `ms` milliseconds in the current process. A bare `(receive (after ms …))`
-;; would *consume* the next queued message — an empty clause list matches anything,
-;; so `%receive` grabs whatever is in the mailbox and returns immediately instead of
-;; waiting. We pin a fresh, unforgeable `(ref)` as the only real clause (`~never`):
-;; no message can ever match it, so selective receive leaves every real message
-;; queued and the timeout always fires. Parks the green process on the scheduler's
+;; Sleep `ms` milliseconds in the current process. A bare `(receive (after ms …))` does
+;; the same since ADR-520 (it used to consume the next queued message); `sleep` keeps its
+;; own never-matching clause — a fresh, unforgeable `(ref)` — so it says what it means
+;; and checks its argument by name. Parks the green process on the scheduler's
 ;; timer (it does NOT block a worker thread) — which is why sleep is pure Brood
 ;; rather than a Rust primitive.
 ;; `sleep` is defined AFTER `receive`, below — see the note at its definition.
@@ -424,7 +422,7 @@ A zero-arg lambda `(fn () …)` body is passed through (not re-wrapped), like `s
               (if (= rest-pin first-pin) first-pin nil))))))))
 
 (defmacro receive (& clauses)
-  "Selectively receive a message from the mailbox: run the first `(pattern [:when guard] body...)` clause that matches, leaving others queued. An optional final `(after ms body...)` clause fires on timeout; `(receive)` blocks for the next message.
+  "Selectively receive a message from the mailbox: run the first `(pattern [:when guard] body...)` clause that matches, leaving others queued. An optional final `(after ms body...)` clause fires on timeout; `(receive)` blocks for the next message, and `(receive (after ms body...))` waits `ms` without touching the mailbox.
 
     (do (send (self) [:doc-ping 1]) (receive ([:doc-ping n] n)))   ;=> 1
     (receive ([:doc-never-sent] :got) (after 0 :timed-out))       ;=> :timed-out"
@@ -441,11 +439,20 @@ A zero-arg lambda `(fn () …)` body is passed through (not re-wrapped), like `s
           ;; Walk each pattern once; both halves below read the same prep.
           preps (%receive-prep real 0)
           ;; The matcher answers "which clause, and what did it bind?" as `[idx var…]`,
-          ;; or nil for no match. No clauses: take the next message as-is.
+          ;; or nil for no match. No clauses at all — `(receive)` — takes the next message
+          ;; as-is. Only an `after` — `(receive (after ms body))` — matches NOTHING: it
+          ;; waits, leaving the mailbox alone, which is what everyone who wrote it meant
+          ;; (ADR-520). It used to take the next queued message and return it instead of
+          ;; the body, so as a pause it ate a message and returned at once.
           ;; A native spec when every clause is a simple shape (ADR-409); else the closure.
-          spec (if (empty? real) (%receive-spec-key [[:bind]]) (%receive-spec real))
+          waits-only (and (empty? real) (not (nil? ms)))
+          spec (cond
+                 waits-only nil
+                 (empty? real) (%receive-spec-key [[:bind]])
+                 else (%receive-spec real))
           matcher (cond
                     spec spec
+                    waits-only `(fn (~msg) nil)
                     (empty? real) `(fn (~msg) [0 ~msg])
                     else
                       `(fn (~msg)

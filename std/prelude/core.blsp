@@ -417,7 +417,7 @@ fusing path, and `seq` calls it to coerce — use `seq` or `into` in your own co
     (reduce [1 2] 10 +)   ;=> 13   ; with an explicit start
     (reduce [] 0 +)       ;=> 0    ; an empty collection gives the start
 
-With no start, an empty collection has no value to give and raises (ADR-519): a `nil`
+With no start, an empty collection has no value to give and raises (ADR-521): a `nil`
 there was a result nobody asked for."
   ((coll f) (let (s (seq coll))
               (if (empty? s)
