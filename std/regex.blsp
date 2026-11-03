@@ -47,6 +47,12 @@ group captured, `find-all` every non-overlapping match, and `replace`/`split`
 build on those. `tokens` lexes a line with a rule table, `paint` finds the text a
 line rule colours.
 
+A buffer is searched in place, never flattened: `rope-find` / `rope-find-backward`
+search a rope, `rope-count` counts its matches in slices that add up, and `rope-spans`
+lists the ones in a window — reading `^ $ .` a line at a time, as a buffer search
+does. `escape` quotes text into a pattern; `incomplete?` says a typed pattern is not
+finished yet.
+
 The dialect: literals, `.`, `* + ?` (and their lazy `*? +? ??` forms), `{m,n}`,
 `^ $`, `[...]`/`[^...]` sets with ranges and classes, `\\d \\w \\s \\D \\W \\S \\b \\B`, escapes,
 `|`, capturing `(...)` and non-capturing `(?:...)`. No backreferences or
@@ -357,6 +363,9 @@ rather than handed to the engine, which refuses one. A set with no members at al
       :class (regex-class-src (:k a))
       :set (regex-set-src a)
       :group (str (if (:cap a) "(" "(?:") (regex-alt-src (:alt a)) ")")
+      :line-any "[^\\n]"
+      :line-start "(?m:^)"
+      :line-end "(?m:$)"
       (error "regex: no translation for atom " (pr-str a)))))
 
 (check-allow :non-tail-recursion
@@ -445,6 +454,142 @@ end, and steps one character past an EMPTY match so a pattern that can match not
 
     (map (regex/find-all \"\\\\d+\" \"a1b22c333\") (fn (m) (get m :text)))   ;=> (\"1\" \"22\" \"333\")"
   (%regex-find-all (regex-search-src pattern) s))
+
+;; ---- searching a rope, and a search box's pattern (ADR-540) ------------------------
+;; An editor's buffer is a rope, and the functions above take a string: flattening the rope
+;; to search it is a copy of the document per search, and incremental search searches on
+;; every key. The `rope-*` functions search the rope in place — the pattern's lazy DFA
+;; stepped over its leaves (`crates/lisp/src/builtins/rope_regex.rs`) — so a search costs
+;; the distance to its match, and a count can be taken in slices that add up exactly.
+;;
+;; They read the pattern as a BUFFER search does, Emacs's way, unless told otherwise: `^`
+;; and `$` are a LINE's start and end, and `.` stops at a newline — so `a.*z` asks about a
+;; line, not the rest of the file (`{:lines? false}` for the string meaning). `{:fold? true}`
+;; ignores case (simple case folding, character for character). A match is never empty: a
+;; search asks where the text is, and an empty match answers nothing.
+
+;; check-allow: deliberately non-tail — depth = pattern nesting, not subject length.
+(check-allow :non-tail-recursion
+  (defn- regex-lines-atom (a)
+    "Atom `a` read the way a buffer search reads it: `.` short of a newline, `^`/`$` at a
+line's ends."
+    (case (:t a)
+      :any {:t :line-any}
+      :bol {:t :line-start}
+      :eol {:t :line-end}
+      :group (assoc a :alt (regex-lines-alt (:alt a)))
+      a)))
+
+(check-allow :non-tail-recursion
+  (defn- regex-lines-alt (branches)
+    "Every atom of an alternation read the buffer search's way ([[regex-lines-atom]])."
+    (map branches
+      (fn (branch)
+        (map branch
+          (fn (piece)
+            (if (nil? (:q piece))
+              (regex-lines-atom piece)
+              (assoc piece :a (regex-lines-atom (:a piece))))))))))
+
+(def- regex-rope-cache (table/new))
+
+(defn- regex-rope-src (pattern opts)
+  "`pattern` translated for a rope search under `opts` (`:fold?`, `:lines?` — on unless
+false). Memoised by the pattern and its flags."
+  (let (fold? (= true (:fold? opts))
+        lines? (not (= false (:lines? opts)))
+        key (str (if fold? "i" "-") (if lines? "m" "-") pattern)
+        hit (table/get regex-rope-cache key))
+    (if (string? hit)
+      hit
+      (let (ast (regex-parse pattern)
+            src (str (if fold? "(?i)" "") (regex-alt-src (if lines? (regex-lines-alt ast) ast))))
+        (table/put regex-rope-cache key src)
+        src))))
+
+(defn rope-find (pattern r from &optional (opts {}))
+  "The first non-empty match of `pattern` in rope `r` starting at or after char index
+`from`, as the map [[find]] answers (`{:start :end :text :groups}`, char offsets into the
+rope), or nil. Searches the rope in place: the cost is the distance to the match, not the
+size of the text. `opts`: `:fold?` ignores case; `:lines?` (on unless false) makes `^`/`$`
+a line's ends and `.` stop at a newline, as a buffer search wants.
+
+    (get (regex/rope-find \"o+\" (text/from-string \"foo boo\") 3) :start)                ;=> 5
+    (get (regex/rope-find \"^b\" (text/from-string \"ab\\nbc\") 0) :start)                ;=> 3
+    (get (regex/rope-find \"FOO\" (text/from-string \"a foo\") 0 {:fold? true}) :text)   ;=> \"foo\""
+  (%rope-regex-find r (regex-rope-src pattern opts) from))
+
+(defn rope-find-backward (pattern r before &optional (opts {}))
+  "The non-empty match of `pattern` in rope `r` that starts LAST while ending at or before
+char index `before` — Emacs's `re-search-backward` — as the map [[find]] answers, or nil.
+Reads backward from `before`, so the cost is the distance to the match. `opts` as
+[[rope-find]].
+
+    (get (regex/rope-find-backward \"[fb]o+\" (text/from-string \"foo boo\") 7) :start)   ;=> 4
+    (get (regex/rope-find-backward \"[fb]o+\" (text/from-string \"foo boo\") 4) :start)   ;=> 0
+    (get (regex/rope-find-backward \"o+\" (text/from-string \"foo boo\") 7) :start)      ;=> 6"
+  (%rope-regex-rfind r (regex-rope-src pattern opts) before))
+
+(defn rope-count (pattern r from limit &optional (opts {}))
+  "`[n resume]`: how many non-overlapping, non-empty matches of `pattern` in rope `r`, scanned
+from char index `from`, START before `limit`. `resume` is where the next slice begins — the
+first match starting at or past `limit`, or the first point past it where no match is in
+progress — or nil once the scan reached the end. Counting a large text in slices (`limit` a
+little past `from` each time) adds up to exactly the whole count, and no slice costs much
+more than its length: what a search's match count runs on while the editor stays
+responsive. `(rope-count p r 0 at)` is how many matches start before `at`. `opts` as
+[[rope-find]].
+
+    (regex/rope-count \"ab\" (text/from-string \"ab ab ab\") 0 100)   ;=> [3 nil]
+    (regex/rope-count \"ab\" (text/from-string \"ab ab ab\") 0 4)     ;=> [2 5]
+    (regex/rope-count \"ab\" (text/from-string \"ab ab ab\") 0 6)     ;=> [2 6]"
+  (%rope-regex-count r (regex-rope-src pattern opts) from limit))
+
+(defn rope-spans (pattern r from to &optional (opts {}))
+  "Every non-overlapping, non-empty match of `pattern` in rope `r` that starts in char range
+`[from, to)`, as a vector of `[start end]` (an end may lie past `to`) — at most 4096. What
+highlighting the matches in a window wants: the cost is the window, not the rope. `opts` as
+[[rope-find]].
+
+    (regex/rope-spans \"o+\" (text/from-string \"foo boo zoo\") 0 6)   ;=> [[1 3] [5 7]]"
+  (%rope-regex-spans r (regex-rope-src pattern opts) from to))
+
+(def- regex-escaped-chars "\\.*+?{}()[]^$|")
+
+(defn escape (s:string -> string)
+  "The pattern that matches the text `s` literally — every character the dialect gives a
+meaning to escaped.
+
+    (regex/escape \"a.b*\")                      ;=> \"a\\\\.b\\\\*\"
+    (regex/match? (regex/escape \"(x)\") \"f(x)\")  ;=> true"
+  (string/join (map (string/->list s)
+                 (fn (c) (if (includes? regex-escaped-chars c) (str "\\" c) c)))
+    ""))
+
+(defn incomplete? (pattern:string -> bool)
+  "True when `pattern` stops part-way through a construct — an unclosed `(` group or `[`
+set, or a trailing backslash: what a search box is shown while its pattern is still being
+typed (Emacs's `[incomplete input]`). The dialect reads such a pattern anyway, leniently, so
+this is the only way to tell that the text is unfinished rather than meant.
+
+    (regex/incomplete? \"foo(ba\")    ;=> true
+    (regex/incomplete? \"[a-\")       ;=> true
+    (regex/incomplete? \"foo(bar)\")  ;=> false
+    (regex/incomplete? \"a)\")        ;=> false"
+  (let (pcs (into [] (string/->list pattern))
+        n (count pcs))
+    (letrec (walk (fn (i depth in-set?)
+                    (if (>= i n)
+                      (or in-set? (> depth 0))
+                      (let (c (nth pcs i))
+                        (cond
+                          (= c "\\") (if (>= (inc i) n) true (walk (+ i 2) depth in-set?))
+                          in-set? (walk (inc i) depth (not (= c "]")))
+                          (= c "[") (walk (inc i) depth true)
+                          (= c "(") (walk (inc i) (inc depth) false)
+                          (= c ")") (walk (inc i) (math/max 0 (dec depth)) false)
+                          else (walk (inc i) depth false))))))
+      (walk 0 0 false))))
 
 ;; ---- lexing: a rule table, and a line rule ----------------------------------------
 

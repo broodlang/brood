@@ -449,3 +449,74 @@
       (doseq (i (range n))
         (assert= (first (get got i)) (str (* i 7)))
         (is (> (second (get got i)) 2))))))
+
+;; ---- a rope, searched in place (ADR-540) ------------------------------------------
+;; The rope functions read a pattern the way a buffer search does — `^`/`$` at a line's
+;; ends, `.` short of a newline — and their answers must agree with `find` over the same
+;; text, leaf boundaries or not.
+(describe "regex over a rope"
+  (test "rope-find is find over the flattened text, from an offset"
+    (let (text "alpha beta\ngamma beta delta"
+          r (text/from-string text))
+      (assert= (get (rope-find "beta" r 0) :start) 6)
+      (assert= (get (rope-find "beta" r 7) :start) 17)
+      (assert= (rope-find "beta" r 18) nil)
+      (assert= (get (rope-find "(\\w+) (\\w+)" r 11) :text) "gamma beta")
+      (assert= (get (second (get (rope-find "(\\w+) (\\w+)" r 11) :groups)) :text) "beta")))
+  (test "a match straddling the rope's leaves is found whole"
+    (let (text (string/join (map (range 3000) (fn (i) (str "w" i))) " ")
+          r (text/from-string text)
+          at (index-of text "w2999"))
+      (assert= (get (rope-find "w2999\\b" r 0) :start) at)
+      (assert= (first (rope-count "w\\d+" r 0 (string/length text))) 3000)))
+  (test "line mode: ^ $ and . stay on a line unless :lines? is false"
+    (let (r (text/from-string "ab\ncd\nab"))
+      (assert= (get (rope-find "^ab" r 1) :start) 6)
+      (assert= (get (rope-find "b$" r 0) :start) 1)
+      (assert= (get (rope-find "b.c" r 0) :start) nil)
+      (assert= (get (rope-find "b.c" r 0 {:lines? false}) :start) 1)
+      (assert= (rope-find "^ab" r 1 {:lines? false}) nil)))
+  (test ":fold? ignores case"
+    (let (r (text/from-string "Foo FOO foo"))
+      (assert= (map (rope-spans "foo" r 0 100) first) '(8))
+      (assert= (map (rope-spans "foo" r 0 100 {:fold? true}) first) '(0 4 8))))
+  (test "a match is never empty"
+    (let (r (text/from-string "aa x b xx"))
+      (assert= (rope-spans "x*" r 0 100) [[3 4] [7 9]])))
+  (test "rope-find-backward: the last start, ending by `before`"
+    (let (r (text/from-string "foo foo xfoo"))
+      (assert= (get (rope-find-backward "fo+" r 12) :start) 9)
+      (assert= (get (rope-find-backward "fo+" r 11) :text) "fo")
+      (assert= (get (rope-find-backward "fo+" r 9) :start) 4)
+      (assert= (rope-find-backward "fo+" r 1) nil)))
+  (test "rope-count counts the matches that START before its limit"
+    (let (r (text/from-string "ab ab ab ab"))
+      (assert= (rope-count "ab" r 0 6) [2 6])
+      (assert= (rope-count "ab" r 0 7) [3 8])
+      (assert= (rope-count "ab" r 6 100) [2 nil])))
+  (test "a count taken in slices adds up to the whole"
+    (let (text (string/join (map (range 500) (fn (i) (if (= 0 (math/mod i 3)) "hit" "miss"))) " ")
+          r (text/from-string text)
+          whole (count (find-all "hit" text)))
+      (letrec (slices (fn (from total)
+                        (let ([n resume] (rope-count "hit" r from (+ from 50)))
+                          (if (nil? resume) (+ total n) (slices resume (+ total n))))))
+        (assert= (slices 0 0) whole))))
+  (test "a Unicode word boundary before non-ASCII text still answers"
+    (let (r (text/from-string "über foo über foo"))
+      (assert= (map (rope-spans "\\bfoo\\b" r 0 100) first) '(5 14))
+      (assert= (get (rope-find-backward "\\bfoo\\b" r 17) :start) 14))))
+
+(describe "regex escape and incomplete?"
+  (test "escape matches its text literally"
+    (doseq (s ["a.b" "(x)" "[y]" "1+1=2?" "^$|\\" "{3}"])
+      (is (matches? (escape s) s))))
+  (test "incomplete? — an unclosed group or set, or a trailing backslash"
+    (is (incomplete? "foo\\"))
+    (is (incomplete? "(a|b"))
+    (is (incomplete? "[abc"))
+    (is (not (incomplete? "[]")))
+    (is (not (incomplete? "[]]")))
+    (is (not (incomplete? "\\(")))
+    (is (not (incomplete? "a)b")))
+    (is (not (incomplete? "")))))

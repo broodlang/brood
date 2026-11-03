@@ -114,7 +114,7 @@ const CACHE_LIMIT: usize = 4096;
 
 /// Which semantics a compiled pattern runs under — and so which cache holds it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum Kind {
+pub(super) enum Kind {
     LeftmostFirst = 0,
     Longest = 1,
 }
@@ -129,7 +129,7 @@ type Cache = HashMap<Box<str>, Arc<Pattern>>;
 /// from the parsed pattern once, when the pattern is compiled. An unbounded pattern is
 /// searched over a large text by the same patterns as a lazy DFA driven a byte at a time
 /// (`stepped`, ADR-493), built the first time one is.
-struct Pattern {
+pub(super) struct Pattern {
     regex: Regex,
     longest: Option<usize>,
     sources: Box<[Box<str>]>,
@@ -213,7 +213,7 @@ fn cache(kind: Kind) -> &'static Mutex<Cache> {
 /// The compiled form of `pattern` under `kind`, from the cache or compiled now. Compiling
 /// happens outside the lock: two threads meeting the same new pattern both compile it and
 /// one insert wins, which is cheaper than holding every other thread for the compile.
-fn compiled(who: &str, pattern: &str, kind: Kind) -> Result<Arc<Pattern>, LispError> {
+pub(super) fn compiled(who: &str, pattern: &str, kind: Kind) -> Result<Arc<Pattern>, LispError> {
     if let Some(hit) = cache(kind)
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -336,7 +336,7 @@ fn match_spans(s: &str, caps: &Captures) -> Vec<Option<Span>> {
         .collect()
 }
 
-fn kw(name: &str) -> Value {
+pub(super) fn kw(name: &str) -> Value {
     Value::keyword(value::intern(name))
 }
 
@@ -376,7 +376,7 @@ fn match_value(heap: &mut Heap, id: StrId, spans: &[Option<Span>]) -> Value {
 }
 
 /// Bytes of text one windowed or stepped search covers between interrupt polls (ADR-491).
-const SEARCH_WINDOW: usize = 64 * 1024;
+pub(super) const SEARCH_WINDOW: usize = 64 * 1024;
 
 /// The leftmost-first match of `rx` in `s` starting at or after byte `start` — `search`
 /// over `s[start..]`, but with an interrupt poll every [`SEARCH_WINDOW`] bytes however the

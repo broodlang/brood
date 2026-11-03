@@ -57,6 +57,7 @@ mod io;
 mod json;
 mod line_diff;
 mod regex_native;
+mod rope_regex;
 mod text_search;
 // `pub(crate)` for `eval::unbound_error`'s KI-120 diagnostic, which asks whether a missing
 // qualified name belongs to a baked-in module that `*features*` records as loaded.
@@ -196,6 +197,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     fuzzy::register(&mut primitives);
     text_search::register(&mut primitives);
     regex_native::register(&mut primitives);
+    rope_regex::register(&mut primitives);
     // Appended for the same order reason: the browser-tab display primitives.
     tab::register(&mut primitives);
     // And again: the native half of `json/encode`.

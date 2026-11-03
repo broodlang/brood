@@ -4104,7 +4104,9 @@ sse      ; Server-Sent Events: connect (any method/headers/body, http or https) 
 test         ; describe / test / assert= / is — the test framework
 format       ; printf-style string formatting
 json         ; json-encode / json-decode
-regex        ; match? / matches? / find / find-all / replace / split / tokens / paint —
+regex        ; match? / matches? / find / find-all / replace / split / tokens / paint,
+             ;   rope-find / rope-find-backward / rope-count / rope-spans (a rope in place,
+             ;   ADR-540), escape / incomplete? —
              ;   Brood's pattern dialect, translated for the native engine (ADR-389)
 set          ; set-specific algebra: set / union / intersection / difference / subset?
              ;   (conj/disj/get/into/contains? on a set are prelude — no import needed)
