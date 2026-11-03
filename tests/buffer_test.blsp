@@ -628,6 +628,15 @@
       (try
         (revert-buffer (make-buffer "x" "gone" "/no/such/dir/brood-revert.txt"))
         (catch e :raised))))
+  (test "buffer-from-file takes text already read, decoded and stamped as a read is"
+    (let (path (str (temp-dir "brood-buf-") ".txt"))
+      (file/spit path "on disk\r\n")
+      (let (b (buffer-from-file path "read once\r\n"))
+        (assert= (buffer-text b) "read once\n")
+        (assert= (buffer-eol b) :crlf)
+        (assert= (buffer-file b) path)
+        (assert= (get b :file-mtime) (file/mtime path))
+        (is (not (buffer-modified? b))))))
   (test "eol-decode and eol-encode are inverses on a CRLF text"
     (let (decoded (eol-decode "x\r\n\r\ny"))
       (assert= decoded {:text "x\n\ny" :eol :crlf})

@@ -157,14 +157,18 @@ endings ([[eol-decode]]), else `:lf`.
     (editor/buffer/buffer-eol (editor/buffer/make-buffer \"x\"))   ;=> :lf"
   (or (get buf :eol) :lf))
 
-(defn buffer-from-file (path)
+(defn buffer-from-file (path &optional contents)
   "Read the file at `path` into a fresh buffer, with `:file` set to `path` so
 `save-buffer` can write it back, stamped with the file's mtime (`buffer-stamp-file`). A
 file with CRLF line endings is read with bare newlines and remembered as `:eol :crlf`
 ([[buffer-eol]]), so the save writes CRLF again.
 
+`contents` is the file's text when the caller has read it already — an editor that reads
+the bytes once to tell a text file from a binary one (`string/bytes->` failing is the
+answer) hands the decoded text here rather than reading the file a second time.
+
     (editor/buffer/buffer-from-file \"notes.txt\")   ;~> …a buffer named notes.txt holding the file's text, :file set…"
-  (let ({:keys [text eol]} (eol-decode (file/slurp path))
+  (let ({:keys [text eol]} (eol-decode (if (nil? contents) (file/slurp path) contents))
         buf (make-buffer text path path))
     (buffer-stamp-file (if (= eol :crlf) (assoc buf :eol :crlf) buf))))
 
