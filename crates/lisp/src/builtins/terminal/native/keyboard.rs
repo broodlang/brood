@@ -639,14 +639,23 @@ fn absorb(keyboard: &mut TerminalKeyboard) -> std::io::Result<()> {
         keyboard.inbox.arrive(events, Instant::now(), drained);
     } else {
         // the inline REPL: every key is a press, as a terminal always sent it
-        for event in events {
-            match event {
-                Event::Key(key) if key.kind == KeyEventKind::Release => {}
-                event => keyboard.inbox.push(Input::Event(event), None),
-            }
+        for event in events.into_iter().filter_map(inline_event) {
+            keyboard.inbox.push(Input::Event(event), None);
         }
     }
     Ok(())
+}
+
+/// What the INLINE seam (the REPL's line editor, `term-raw-enter`) takes of an event read
+/// from the tty: a key release is dropped (it reads presses, as a terminal always sent them),
+/// and so is a focus report — a full-screen app that died without `term-leave` can leave
+/// the terminal sending them, and a line editor has nothing to do with one.
+fn inline_event(event: Event) -> Option<Event> {
+    match event {
+        Event::Key(key) if key.kind == KeyEventKind::Release => None,
+        Event::FocusGained | Event::FocusLost => None,
+        event => Some(event),
+    }
 }
 
 /// The press of the key held now, if one is, from everything the tty has buffered.
@@ -925,6 +934,20 @@ mod tests {
 
     fn pressed(event: KeyEvent) -> Polled {
         Polled::Key(KeyDelivery::Press(event))
+    }
+
+    // The inline REPL never sees a focus report — one a crashed full-screen app left the
+    // terminal sending — nor a key release; a press is kept.
+    #[test]
+    fn the_inline_seam_drops_focus_reports_and_releases() {
+        let a = KeyCode::Char('a');
+        assert!(super::inline_event(Event::FocusGained).is_none());
+        assert!(super::inline_event(Event::FocusLost).is_none());
+        assert!(super::inline_event(Event::Key(release(a, NONE))).is_none());
+        assert!(matches!(
+            super::inline_event(Event::Key(press(a, NONE))),
+            Some(Event::Key(_))
+        ));
     }
 
     // A terminal asked for focus reports (`CSI ?1004h`) sends `CSI I` / `CSI O`, which

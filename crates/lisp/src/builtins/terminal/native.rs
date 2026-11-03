@@ -502,9 +502,17 @@ pub(in crate::builtins) fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) 
 /// capture are no-ops.
 pub(in crate::builtins) fn term_raw_enter(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     use crossterm::cursor::Show;
-    use crossterm::event::DisableMouseCapture;
+    use crossterm::event::{DisableFocusChange, DisableMouseCapture};
     crossterm::terminal::enable_raw_mode().map_err(term_err)?;
-    crossterm::execute!(std::io::stdout(), Show, DisableMouseCapture).map_err(term_err)?;
+    // focus reports off too: a full-screen app that died without `term-leave` left them on,
+    // and the line editor has no use for them (its reader drops any that still arrive)
+    crossterm::execute!(
+        std::io::stdout(),
+        Show,
+        DisableMouseCapture,
+        DisableFocusChange
+    )
+    .map_err(term_err)?;
     Ok(Value::nil())
 }
 
