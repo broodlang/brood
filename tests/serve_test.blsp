@@ -499,3 +499,239 @@
       (send (self) [:bye])
       (assert= (editor/serve/attach-display-loop nil (self) {:draw (fn (f) nil) :leave (fn () nil)})
         nil))))
+
+;; A session that outlives its client (`serve` given `:resume-ms`): a named client's death
+;; parks its session, and the next attach under the same name takes it over where it was.
+;; The app shows the lost / back events it folds, so a frame says what it was told.
+(defn resume-up (m input c r)
+  (cond
+    (= input [:client-lost]) (assoc m :who "lost")
+    (= input [:client-back]) (assoc m :who "back")
+    else (up m input c r)))
+
+(defn resume-client-wait (report)
+  ;; wait to be told to die — its death is the dropped link. Until then a live window:
+  ;; it answers the session's ping, and tells `report` of a [:bye]. Told :deaf, it stops
+  ;; answering — a link that dropped with nobody the wiser yet
+  (receive
+    (:die nil)
+    (:deaf (resume-client-deaf report))
+    ([:ping from asked] (do (send from [:pong asked]) (resume-client-wait report)))
+    ([:bye] (do (send report :old-client-bye) (resume-client-wait report)))
+    (_ (resume-client-wait report))))
+
+(defn resume-client-deaf (report)
+  (receive
+    (:die nil)
+    ([:bye] (do (send report :old-client-bye) (resume-client-deaf report)))
+    (_ (resume-client-deaf report))))
+
+(defn await-frame-prefix (prefix)
+  ;; the text of the first frame that starts with `prefix`, skipping those before it (the
+  ;; identity's frame can come before or after a key's); :none if none does
+  (receive
+    ([:frame f] (if (string/starts-with? (frame-text f) prefix)
+                  (frame-text f)
+                  (await-frame-prefix prefix)))
+    (after test/*wait-ms* :none)))
+
+(defn resume-client (mgr report opts)
+  ;; attach as `opts`, press "+", say the session and the frame it drew, then wait to be
+  ;; told to die — its death is the dropped link
+  (send mgr [:attach (self) 80 24 opts])
+  (receive
+    ([:attached s] (do
+                     (receive ([:frame _] nil) (after test/*wait-ms* nil))
+                     (send s [:key "+"])
+                     (let (seen (await-frame-prefix "n=1"))
+                       (send report [:client s seen])
+                       (resume-client-wait report))))
+    (after test/*wait-ms* (send report [:client nil :no-attach]))))
+
+(defn await-frame-text (wanted)
+  ;; `wanted` once a frame says it, skipping the frames before it; :none if none does
+  (receive
+    ([:frame f] (if (= (frame-text f) wanted) wanted (await-frame-text wanted)))
+    (after test/*wait-ms* :none)))
+
+(describe "serve: a session outlives a dropped client (:resume-ms)"
+  (test "a named client's session parks when it dies, and the same name takes it back"
+    (let (me (self)
+          mgr (spawn (editor/serve/serve-manager mk vw resume-up {:resume-ms :forever}))
+          first-client (spawn (resume-client mgr me {:name "ann"}))
+          [session seen] (receive ([:client s t] [s t]) (after test/*wait-ms* [nil :none])))
+      (is (string/starts-with? seen "n=1"))
+      (monitor session)
+      (send first-client :die)
+      ;; the session is still there, parked: no [:down] for it
+      (assert= (receive ([:down _ ^session _] :down) (after 300 :alive)) :alive)
+      (send mgr [:attach me 80 24 {:name "ann"}])
+      ;; adopted: the SAME session, the last frame first, then the app told it is back
+      (assert= (receive ([:attached s] s) (after test/*wait-ms* :none)) session)
+      (is (string/starts-with? (frame-text (receive ([:frame f] f) (after test/*wait-ms* :none)))
+            "n=1"))
+      (assert= (await-frame-text "n=1 who=back") "n=1 who=back")
+      (send session [:key "+"])
+      (assert= (frame-text (receive ([:frame f] f) (after test/*wait-ms* :none))) "n=2 who=back")
+      (send session [:key "q"])))
+
+  (test "another name gets a session of its own, not the parked one"
+    (let (me (self)
+          mgr (spawn (editor/serve/serve-manager mk vw resume-up {:resume-ms :forever}))
+          first-client (spawn (resume-client mgr me {:name "ann"}))
+          [session _] (receive ([:client s t] [s t]) (after test/*wait-ms* [nil :none])))
+      (send first-client :die)
+      (send mgr [:attach me 80 24 {:name "bob"}])
+      (let (other (receive ([:attached s] s) (after test/*wait-ms* :none)))
+        (is (not (= other session)))
+        (send other [:key "q"])
+        (exit session :kill))))
+
+  (test "an anonymous client's session ends with it — it could be handed to anyone"
+    (let (me (self)
+          mgr (spawn (editor/serve/serve-manager mk vw resume-up {:resume-ms :forever}))
+          first-client (spawn (resume-client mgr me {}))
+          [session _] (receive ([:client s t] [s t]) (after test/*wait-ms* [nil :none])))
+      (monitor session)
+      (send first-client :die)
+      (assert= (receive ([:down _ ^session _] :down) (after test/*wait-ms* :alive)) :down)))
+
+  (test "a parked session no one comes back for ends when its time is up"
+    (let (me (self)
+          mgr (spawn (editor/serve/serve-manager mk vw resume-up {:resume-ms 100}))
+          first-client (spawn (resume-client mgr me {:name "ann"}))
+          [session _] (receive ([:client s t] [s t]) (after test/*wait-ms* [nil :none])))
+      (monitor session)
+      (send first-client :die)
+      (assert= (receive ([:down _ ^session reason] reason) (after test/*wait-ms* :alive))
+        :client-gone)))
+
+  (test "an adopt without the manager's token, or for a live session, is ignored"
+    (let (me (self)
+          mgr (spawn (editor/serve/serve-manager mk vw resume-up {:resume-ms :forever}))
+          first-client (spawn (resume-client mgr me {:name "ann"}))
+          [session _] (receive ([:client s t] [s t]) (after test/*wait-ms* [nil :none])))
+      (send session [:adopt (ref) me 80 24])
+      (assert= (receive ([:attached s] s) (after 300 :ignored)) :ignored)
+      (send first-client :die)
+      (send session [:adopt (ref) me 80 24])
+      (assert= (receive ([:attached s] s) (after 300 :ignored)) :ignored)
+      (exit session :kill)))
+
+  (test "without :resume-ms a dropped client still ends its session"
+    (let (me (self)
+          mgr (spawn (editor/serve/serve-manager mk vw resume-up))
+          first-client (spawn (resume-client mgr me {:name "ann"}))
+          [session _] (receive ([:client s t] [s t]) (after test/*wait-ms* [nil :none])))
+      (monitor session)
+      (send first-client :die)
+      (assert= (receive ([:down _ ^session _] :down) (after test/*wait-ms* :alive)) :down))))
+
+(describe "serve: an attach while the old client's death is not yet known (:resume-ms)"
+  (test "an old client that still answers keeps its session: two windows on purpose"
+    (let (me (self)
+          mgr (spawn (editor/serve/serve-manager mk vw resume-up {:resume-ms :forever}))
+          first-client (spawn (resume-client mgr me {:name "ann"}))
+          [session _] (receive ([:client s t] [s t]) (after test/*wait-ms* [nil :none])))
+      (send mgr [:attach me 80 24 {:name "ann"}])
+      (let (other (receive ([:attached s] s) (after test/*wait-ms* :none)))
+        (is (not (= other :none)))
+        (is (not (= other session)))
+        (send other [:key "q"])
+        (send first-client :die)
+        (exit session :kill))))
+
+  (test "an old client that no longer answers hands its session over, and is told bye"
+    (let (me (self)
+          mgr (spawn (editor/serve/serve-manager mk vw resume-up {:resume-ms :forever}))
+          first-client (spawn (resume-client mgr me {:name "ann"}))
+          [session _] (receive ([:client s t] [s t]) (after test/*wait-ms* [nil :none])))
+      (send first-client :deaf)
+      (send mgr [:attach me 80 24 {:name "ann"}])
+      (assert= (receive ([:attached s] s) (after test/*wait-ms* :none)) session)
+      (assert= (await-frame-text "n=1 who=back") "n=1 who=back")
+      (assert= (receive (:old-client-bye :bye) (after test/*wait-ms* :none)) :bye)
+      ;; the old client's death, when the network finally says so, is no longer this
+      ;; session's business: it keeps serving the new one
+      (send first-client :die)
+      (send session [:key "+"])
+      (assert= (await-frame-text "n=2 who=back") "n=2 who=back")
+      (send session [:key "q"])))
+
+  (test "a terminal client answers the session's ping"
+    (send (self) [:ping (self) :asked])
+    (send (self) [:bye])
+    (editor/serve/attach-drain nil nil)
+    (assert= (receive ([:pong r] r) (after 0 :none)) :asked))
+
+  (test "a window client answers the session's ping, and does not ship it as a key"
+    (let (shipped (table/new)
+          display {:draw (fn (f) nil) :leave (fn () nil)})
+      (send (self) [:ping (self) :asked])
+      (send (self) [:bye])
+      (editor/serve/attach-display-loop nil (self) display)
+      (assert= (receive ([:pong r] r) (after 0 :none)) :asked)
+      (assert= (receive ([:key k _] k) (after 0 :none)) :none))))
+
+(defn poll-input-until (display ms)
+  ;; the display's next input, polled until one comes or `ms` is up — the client's death
+  ;; reaches the mailbox when the kernel delivers it, which a single poll can miss
+  (let (input ((get display :poll-input)))
+    (cond
+      (not (nil? input)) input
+      (<= ms 0) :none
+      else (receive (after 10 (poll-input-until display (- ms 10)))))))
+
+(describe "serve: a client that takes a session over is given the window as it stands"
+  (test "options, live textures and sounds, and the last frame without its sound"
+    (let (me (self)
+          token (ref)
+          old (spawn (receive (_ nil)))
+          display (editor/serve/remote-display old 80 24 {:ms :forever :manager me :token token})
+          draw (get display :draw))
+      (monitor old)
+      ((get display :configure) {:title "game"})
+      ((get display :configure) {:input :pixels})
+      ((get display :texture) 1 :rgba-one 2 2)
+      ((get display :texture) 2 :rgba-two 2 2)
+      ((get display :texture-free) 1)
+      ((get display :sound) 7 :pcm 44100 1)
+      (draw [[:clear] [:sound 7 1.0] [:text 0 0 "board"]])
+      ;; the old client goes: the session parks
+      (exit old :kill)
+      (assert= (poll-input-until display test/*wait-ms*) [:client-lost])
+      (assert= (receive ([:parked _ t] t) (after test/*wait-ms* :none)) token)
+      (send (self) [:adopt token me 100 30])
+      (assert= ((get display :poll-input)) [:client-back])
+      (assert= ((get display :size)) [100 30])
+      (assert= (receive ([:attached _] :attached) (after 0 :none)) :attached)
+      (assert= (receive ([:window o] o) (after 0 :none)) {:title "game" :input :pixels})
+      (assert= (receive ([:texture id _ _ _] id) (after 0 :none)) 2) ; 1 was freed
+      (assert= (receive ([:texture id _ _ _] id) (after 0 :none)) :none)
+      (assert= (receive ([:sound-data id _ _ _] id) (after 0 :none)) 7)
+      (assert= (receive ([:frame f] f) (after 0 :none)) [[:clear] [:text 0 0 "board"]]))))
+
+;; An app update that refuses anything but its own model, as a real app's does (bedit's
+;; `ed-update` checks its argument): the manager once handed ITS state to the app's
+;; update on a hand-over, because its parameter named `update` shadowed the function.
+(defn strict-up (m input c r)
+  (if (contains? m :n) (resume-up m input c r) (error "strict-up: not this app's model")))
+
+(describe "serve: the manager keeps serving after a hand-over"
+  (test "a session handed over by a silent client, then another attach, both answered"
+    (let (me (self)
+          mgr (spawn (editor/serve/serve-manager mk vw strict-up {:resume-ms :forever}))
+          first-client (spawn (resume-client mgr me {:name "ann"}))
+          [session _] (receive ([:client s t] [s t]) (after test/*wait-ms* [nil :none])))
+      (monitor mgr)
+      (send first-client :deaf)
+      (send mgr [:attach me 80 24 {:name "ann"}])
+      (assert= (receive ([:attached s] s) (after test/*wait-ms* :none)) session)
+      (send mgr [:attach me 80 24 {:name "bob"}])
+      (let (other (receive ([:attached s] (if (= s session) :same s)) (after test/*wait-ms* :none)))
+        (is (not (= other :none)))
+        (is (not (= other :same)))
+        (assert= (receive ([:down _ ^mgr _] :manager-died) (after 0 :serving)) :serving)
+        (exit other :kill)
+        (exit session :kill)
+        (send first-client :die)))))
