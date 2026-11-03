@@ -375,6 +375,105 @@
   (test "a layer with no keymap contributes nothing and breaks nothing"
     (assert= (count (scope-bindings (list {:layers (list {:name 'bare})}))) 0)))
 
+;; ---- help and dispatch agree on every sequence ------------------------------
+;; Three layers, prefixes and commands shadowing each other at every depth — the MIDDLE
+;; layer binding a prefix key to a command the layers on either side use as a prefix is
+;; the case that once split them: the merged keymap help reads dropped the bottom layer's
+;; chord that dispatch still ran.
+
+(def- stack-top
+  {:name 'top
+   :keymap {:c {:p 'top/c-p} :x {:a 'top/x-a} :m {:n {:o 'top/m-n-o}}}})
+
+(def- stack-middle
+  {:name 'middle
+   :keymap {:c 'middle/c
+            :x {:a {:q 'middle/x-a-q} :d 'middle/x-d}
+            :y {:b 'middle/y-b}
+            :m {:n 'middle/m-n}
+            :u nil}})
+
+(def- stack-bottom
+  {:name 'bottom
+   :keymap {:c {:f 'bottom/c-f :p 'bottom/c-p}
+            :x {:b 'bottom/x-b :a {:r 'bottom/x-a-r} :d {:e 'bottom/x-d-e}}
+            :y 'bottom/y
+            :m {:n {:s 'bottom/m-n-s}}
+            :u 'bottom/u
+            :w {:v 'bottom/w-v}}})
+
+(def- stack-scopes
+  (list {:layers (list 'layers-test/stack-top)}
+    {:layers (list 'layers-test/stack-middle 'layers-test/stack-bottom)}))
+
+(defn- stack-dispatched (sequence)
+  "What dispatch does with `sequence`, key by key through `scope-resolve`: the command it
+runs at the last key, `[:early command]` when a command ends the chord before it, `:prefix`
+when the sequence is still a prefix, nil when a key is unbound."
+  (letrec (walk (fn (pending keys)
+                  (let ([binding entered] (scope-resolve stack-scopes pending (first keys))
+                        more (rest keys))
+                    (cond
+                      (not (nil? entered)) (if (empty? more) :prefix (walk entered more))
+                      (nil? binding) nil
+                      (empty? more) binding
+                      else [:early binding]))))
+    (walk nil sequence)))
+
+(defn- stack-in-keymap (keymap sequence)
+  "The same question asked of a merged keymap, as help reads it."
+  (let (binding (get keymap (first sequence))
+        more (rest sequence))
+    (cond
+      (map? binding) (if (empty? more) :prefix (stack-in-keymap binding more))
+      (nil? binding) nil
+      (empty? more) binding
+      else [:early binding])))
+
+(defn- stack-sequences ()
+  "Every sequence any layer of the stack binds, each of its prefixes, and a key past each."
+  (let (bound (mapcat [stack-top stack-middle stack-bottom]
+                (fn (layer) (map (keymap-bindings (:keymap layer)) second)))
+        prefixes (mapcat bound
+                   (fn (sequence) (map (range 1 (count sequence)) (fn (n) (vec (take sequence n)))))))
+    (seq/distinct (append bound
+                    prefixes
+                    (map bound (fn (sequence) (conj sequence :zz)))
+                    [[:u] [:u :k]]))))
+
+(describe "help and dispatch agree on every key sequence of a mixed stack"
+  (test "the merged keymap answers what dispatch does"
+    (let (keymap (scope-keymap stack-scopes)
+          wrong (seq/filter (stack-sequences)
+                  (fn (sequence)
+                    (not (= (stack-dispatched sequence) (stack-in-keymap keymap sequence))))))
+      (assert= []
+        (vec (map wrong
+               (fn (sequence)
+                 [sequence (stack-dispatched sequence) (stack-in-keymap keymap sequence)]))))))
+
+  (test "a binding help calls in force is the one dispatch runs, and a shadowed one is not"
+    (let (wrong (seq/filter (scope-bindings stack-scopes)
+                  (fn (entry)
+                    (let (runs? (= (stack-dispatched (:sequence entry)) (:command entry)))
+                      (if (nil? (:shadowed-by entry)) (not runs?) runs?)))))
+      (assert= []
+        (vec (map wrong (fn (entry) [(:sequence entry) (:layer entry) (:shadowed-by entry)]))))))
+
+  (test "the cases that matter, spelled out"
+    ;; a middle command on a prefix the top and bottom both use: bottom's chord survives
+    (assert= 'bottom/c-f (stack-dispatched [:c :f]))
+    (assert= 'top/c-p (stack-dispatched [:c :p]))
+    ;; top's command over middle's and bottom's prefixes
+    (assert= [:early 'top/x-a] (stack-dispatched [:x :a :q]))
+    ;; top's prefix over middle's command over bottom's prefix, one level down: the same
+    ;; rule — the command is passed over, bottom's chord survives (Emacs reads it so too)
+    (assert= 'bottom/m-n-s (stack-dispatched [:m :n :s]))
+    (assert= 'top/m-n-o (stack-dispatched [:m :n :o]))
+    ;; middle's nil unbinds bottom's command
+    (assert= nil (stack-dispatched [:u]))
+    (assert= 'bottom/w-v (stack-dispatched [:w :v]))))
+
 (describe "layer-facet — the first layer's value, without resolving the rest"
   (test "answers what the head of layer-collect does"
     (let (ctx {:layers [{:name 'a} {:name 'b :x 1} {:name 'c :x 2}]})

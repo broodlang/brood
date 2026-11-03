@@ -269,3 +269,21 @@
     (assert= {:ctrl-c nil} (keymap-merge {:ctrl-c {"f" 'a/find}} {:ctrl-c nil})))
   (test "a prefix in the higher keymap replaces a lower command"
     (assert= {:ctrl-c {"f" 'a/find}} (keymap-merge {:ctrl-c 'a/cmd} {:ctrl-c {"f" 'a/find}}))))
+
+(describe "a stack of keymaps: one rule for a key and for the merged map"
+  (def- km-stack
+    [{:c {:p 'a/top-p} :m {:n {:o 'a/top-o}}}
+      {:c 'a/middle :m {:n 'a/middle-n} :u nil}
+      {:c {:f 'a/low-f} :m {:n {:s 'a/low-s}} :u 'a/low-u}])
+  (test "a middle command under a higher prefix is passed over, at any depth"
+    (assert= 'a/low-f (get (keymap-stack-binding km-stack :c) :f))
+    (assert= 'a/low-s (map/get-in (keymap-merge-stack km-stack) [:m :n :s]))
+    (assert= 'a/top-o (map/get-in (keymap-merge-stack km-stack) [:m :n :o])))
+  (test "the first keymap's command or nil hides the rest"
+    (assert= nil (keymap-stack-binding km-stack :u))
+    (is (contains? (keymap-merge-stack km-stack) :u))
+    (assert= 'a/middle (keymap-stack-binding (rest km-stack) :c)))
+  (test "every key of the merged map is what the stack binds it to"
+    (let (merged (keymap-merge-stack km-stack))
+      (doseq (key (keys merged))
+        (assert= (keymap-stack-binding km-stack key) (get merged key))))))

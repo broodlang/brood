@@ -311,14 +311,16 @@ per key SEQUENCE: prefixes merge all the way down (`keymap-merge`, ADR-535), so 
     (get (editor/layers/active-keymap {:layers (list {:keymap {:x 'one}} {:keymap {:x 'two :y 'three}})}) :x)   ;=> one
     (get (editor/layers/active-keymap {:layers (list {:keymap {:x 'one}} {:keymap {:x 'two :y 'three}})}) :y)   ;=> three
     (map/get-in (editor/layers/active-keymap {:layers (list {:keymap {:c {:p 'mode}}} {:keymap {:c {:f 'global}}})}) [:c :f])   ;=> global"
-  (fold (reverse (layer-collect ctx :keymap)) {} keymap-merge))
+  (keymap-merge-stack (layer-collect ctx :keymap)))
 
 (defn layer-binding (ctx key)
   "What `key` is bound to in the context's active keymap — the same answer as
-`(get (active-keymap ctx) key)`, without building the merged map: the first layer whose
-keymap has `key` decides (an explicit `nil` binding included, as the merge keeps it), and
-when it binds a PREFIX, the prefix keymaps of every layer below it merge under it.
-What dispatch asks on every keystroke; the merge is for help text that wants the whole map.
+`(get (active-keymap ctx) key)`, without building the merged map, and by the same rule
+(`keymap-stack-binding`, which `active-keymap`'s merge applies to every key): the first layer
+whose keymap has `key` decides (an explicit `nil` binding included), and when it binds a
+PREFIX, the prefix keymaps of every layer below it merge under it. What dispatch asks on
+every keystroke; the merge is for help text that wants the whole map. Lower layers are
+resolved only for a prefix key.
 
     (editor/layers/layer-binding {:layers (list {:keymap {:x 'one}} {:keymap {:x 'two :y 'three}})} :y)   ;=> three
     (get (editor/layers/layer-binding {:layers (list {:keymap {:c {:p 'mode}}} {:keymap {:c {:f 'global}}})} :c) :f)   ;=> global"
@@ -330,28 +332,23 @@ What dispatch asks on every keystroke; the merge is for help text that wants the
     (let (keymap (get (layers-resolve (first layers)) :keymap))
       (if (and (map? keymap) (contains? keymap key))
         (let (binding (get keymap key))
-          (if (map? binding) (layers-prefix-under (rest layers) key binding) binding))
+          (if (map? binding)
+            (layers-stack-binding (cons keymap
+                                    (map (rest layers)
+                                      (fn (layer) (get (layers-resolve layer) :keymap))))
+              key)
+            binding))
         (layer-binding-in (rest layers) key)))))
 
 ;; Memoised (`defmemo` compares with `=`, immediate for the same maps): a prefix key merges
 ;; the same layers' sub-keymaps on every press, and the answer is the same until a layer or
 ;; a binding changes.
-(memo/defmemo layers-merge-prefix
+(memo/defmemo layers-stack-binding
   32
-  (low high)
-  "[[keymap-merge]] for a prefix two layers both bind — memoised, as dispatch asks it per key."
-  (keymap-merge low high))
-
-(defn- layers-prefix-under (layers key merged)
-  "`merged` (the prefix keymap a higher layer binds `key` to) with the prefix keymap of every
-lower layer in `layers` that binds `key` to one merged under it; a lower layer binding `key`
-to a command contributes nothing — the higher layer made it a prefix."
-  (if (empty? layers)
-    merged
-    (let (binding (get (get (layers-resolve (first layers)) :keymap) key))
-      (layers-prefix-under (rest layers)
-        key
-        (if (map? binding) (layers-merge-prefix binding merged) merged)))))
+  (keymaps key)
+  "[[keymap-stack-binding]] — the one rule `active-keymap`'s merge applies too — memoised,
+as dispatch asks it on every press of a prefix key."
+  (keymap-stack-binding keymaps key))
 
 (defn layer-resolve (ctx pending key)
   "`keymap-resolve` over the context's layers: `[binding pending']` for `key`, looked up

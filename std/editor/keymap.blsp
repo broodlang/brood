@@ -232,25 +232,55 @@ happens to be in memory. Pure over the keymap data — no dispatch, no eval, no 
             sub (if (map? existing) existing {}))
         (assoc keymap k (keymap-bind sub (rest keys) command))))))
 
+;; ---- a stack of keymaps, read as one -------------------------------------------------
+;; ONE rule, for dispatch and for help alike (ADR-535): `keymap-stack-binding` is what a key
+;; means in a stack, and `keymap-merge-stack` is that rule applied to every key, all the way
+;; down. A dispatcher that asks one key at a time (`editor/layers/layer-binding`) and a help
+;; screen that reads the whole merged map then cannot disagree about any sequence.
+
+(defn keymap-stack-binding (keymaps key)
+  "What `key` is bound to in a STACK of keymaps (highest precedence first): the first keymap
+that binds `key` decides — a command, or an explicit nil, is the answer and hides every
+keymap below. When it binds a prefix, the answer is the prefix keymaps of every keymap that
+binds `key` to one, merged the same way ([[keymap-merge-stack]]); a keymap binding `key` to a
+command beneath that is passed over, as Emacs passes over a sequence a map has no prefix for.
+Nil when no keymap binds `key`.
+
+    (get (editor/keymap/keymap-stack-binding [{:c {:p 'top}} {:c 'mid} {:c {:f 'low}}] :c) :f)   ;=> low
+    (editor/keymap/keymap-stack-binding [{:c 'mid} {:c {:f 'low}}] :c)   ;=> mid"
+  (let (holders (seq/filter keymaps (fn (keymap) (and (map? keymap) (contains? keymap key))))
+        top (if (empty? holders) nil (get (first holders) key)))
+    (if (map? top)
+      (keymap-merge-stack (seq/filter (map holders (fn (keymap) (get keymap key))) map?))
+      top)))
+
 ;; check-allow: deliberately non-tail — depth = the keymaps' chord nesting, a few levels.
 (check-allow :non-tail-recursion
-  (defn keymap-merge (low high)
-    "`high` laid over `low`, prefixes merged all the way down: each key SEQUENCE resolves to
-`high`'s binding when `high` has one, else to `low`'s. Where both bind a key to a prefix
-keymap the two sub-keymaps merge the same way, so `low`'s `C-c f` survives `high`'s
-`C-c C-p` (Emacs's semantics for a mode map over the global map). A non-keymap binding in
-`high` — a command, or an explicit nil — takes the whole key, prefix and all; a prefix in
-`high` over a command in `low` is the prefix.
+  (defn keymap-merge-stack (keymaps)
+    "A STACK of keymaps (highest precedence first) as one keymap, every key read by
+[[keymap-stack-binding]] all the way down — so each key sequence means in the merged map
+exactly what it means walked through the stack a key at a time. A mode map's `C-c C-p` over
+the global map's `C-c f` keeps both (Emacs's semantics).
+
+    (map/get-in (editor/keymap/keymap-merge-stack [{:c {:p 'top}} {:c 'mid} {:c {:f 'low}}]) [:c :f])   ;=> low
+    (editor/keymap/keymap-merge-stack [{:c nil} {:c {:f 'low}}])   ;=> {:c nil}"
+    (let (stack (seq/filter keymaps map?))
+      (if (< (count stack) 2)
+        (or (first stack) {})
+        (fold (seq/distinct (mapcat stack keys))
+          {}
+          (fn (acc key) (assoc acc key (keymap-stack-binding stack key))))))))
+
+(defn keymap-merge (low high)
+  "`high` laid over `low` — [[keymap-merge-stack]] of the two: each key SEQUENCE resolves to
+`high`'s binding when `high` has one, else to `low`'s, prefixes merged all the way down, so
+`low`'s `C-c f` survives `high`'s `C-c C-p`. A command or an explicit nil in `high` takes the
+whole key, prefix and all; a prefix in `high` over a command in `low` is the prefix.
 
     (map/get-in (editor/keymap/keymap-merge {:ctrl-c {\"f\" 'find}} {:ctrl-c {:ctrl-p 'preview}}) [:ctrl-c \"f\"])   ;=> find
     (map/get-in (editor/keymap/keymap-merge {:ctrl-c {\"f\" 'find}} {:ctrl-c {:ctrl-p 'preview}}) [:ctrl-c :ctrl-p])   ;=> preview
     (editor/keymap/keymap-merge {:ctrl-c {\"f\" 'find}} {:ctrl-c nil})   ;=> {:ctrl-c nil}"
-    (fold high
-      low
-      (fn (acc [key binding])
-        (let (under (get acc key))
-          (assoc acc
-            key (if (and (map? binding) (map? under)) (keymap-merge under binding) binding)))))))
+  (keymap-merge-stack [high low]))
 
 ;; ---- key descriptions: the Emacs spelling of a key, both ways ------------------------
 ;; A key is what the frontends deliver (`host::gui::character_chord` / `named_key`, the one
