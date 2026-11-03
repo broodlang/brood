@@ -89,6 +89,16 @@
         (file/spit (path/join dir "a.txt") "edited\n")
         (file/spit (path/join dir "fresh.txt") "f\n")
         (assert= (changed dir) (list "a.txt" "fresh.txt")))))
+  (test "changed: staged, renamed (the new name), untracked in a new directory, non-ASCII"
+    (let (dir (git-repository "brood-vcs-git-changed-kinds-"))
+      (when dir
+        (git dir "mv" "a.txt" "moved.txt")
+        (file/spit (path/join dir "sub/b.txt") "staged\n")
+        (git dir "add" "sub/b.txt")
+        (file/mkdir (path/join dir "fresh"))
+        (file/spit (path/join dir "fresh/new.txt") "n\n")
+        (file/spit (path/join dir "café.txt") "c\n")
+        (assert= (changed dir) (list "café.txt" "fresh/new.txt" "moved.txt" "sub/b.txt")))))
   (test "id: HEAD's short sha, and whether the tree moved since"
     (let (dir (git-repository "brood-vcs-git-id-"))
       (when dir
@@ -96,7 +106,23 @@
           (assert= (string/length (:id clean)) 12)
           (refute (:dirty? clean))
           (file/spit (path/join dir "a.txt") "edited\n")
-          (is (:dirty? (id dir))))))))
+          (is (:dirty? (id dir)))))))
+  (test "asking never writes the index, so a commit made meanwhile finds no index.lock"
+    ;; a file whose mtime moved but whose text did not is what makes `git status` / `git
+    ;; diff` refresh the index and write it back — under index.lock, the moment a user's
+    ;; own `git commit` could collide with it
+    (let (dir (git-repository "brood-vcs-git-locks-"))
+      (when dir
+        (let (index-sum (fn () (:stdout (os/cmd "cksum" [(path/join dir ".git/index")])))
+              _ (os/cmd "touch" ["-d" "2001-01-01 00:00" (path/join dir "a.txt")])
+              before (index-sum))
+          (id dir)
+          (changed dir)
+          (base-text (path/join dir "a.txt"))
+          (assert= (index-sum) before)
+          ;; and the fixture can see a write: a git that may take the lock does write it
+          (git dir "status" "--porcelain")
+          (refute (= (index-sum) before)))))))
 
 (defn fake-files (root) (list (str "listed-under-" (path/basename root))))
 (defn fake-base-text (root path) (str "before:" (path/basename path)))
