@@ -204,9 +204,10 @@ several frontends attach at once; `nest attach` is the thin `emacsclient`, conne
 *before* it takes the terminal so a bad spec/cookie is a clean error. The app-on-daemon
 *push* complements the observer's *pull* remote-attach (§`nest observe --connect`).
 The session's clipboard is the client's (ADR-539): an app calls
-`client-clipboard-set` / `client-clipboard-get` in its `update`, which ask the window's
+`client-clipboard-set` / `client-clipboard-ask` in its `update`, which reach the window's
 machine over the link (`[:clipboard-set text]`, `[:clipboard-get session ref]` →
-`[:clipboard ref text]`, the get timed out so a dead client never stalls the session).
+`[:clipboard ref text]`, which arrives at `update` as an event — answered nil by a timer when
+the client says nothing, so a dead client never stalls the session).
 Deferred (ADR-011): a shared model across clients, live resize, per-client viewports.
 
 ## Rust vs. Brood (ADR-006)

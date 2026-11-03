@@ -736,18 +736,24 @@
         (send first-client :die)))))
 
 ;; ---- the client's clipboard, across the link (ADR-539) ---------------------------
-;; A served app asks its CLIENT's machine for the clipboard: "c" copies, "v" pastes into
-;; the model (shown as `clip=`), any message the app was not asking for is kept as
-;; `stray`, so a late clipboard answer leaking in as app input would show.
+;; A served app asks its CLIENT's machine for the clipboard: "c" copies; "v" asks, and the
+;; answer for that ask, an event, is pasted into the model (`clip=`); an answer for any other
+;; ref is counted as `ignored`; "+" counts keys, so a frame shows the loop kept taking them
+;; while an ask was out.
 (defn clip-view (m c r)
-  [(text 0 0 (str "clip=" (get m :clip "none") (if (get m :stray) " stray" "")))])
+  [(text 0
+     0
+     (str "n=" (get m :n 0) " clip=" (get m :clip "none") " ignored=" (get m :ignored 0)))])
 
 (defn clip-up (m input c r)
-  (cond
-    (= input "c") (assoc m :sent (editor/serve/client-clipboard-set "copied"))
-    (= input "v") (assoc m :clip (or (editor/serve/client-clipboard-get) "nothing"))
-    (vector? input) (assoc m :stray true)
-    else m))
+  (match input
+    ("c" (assoc m :sent (editor/serve/client-clipboard-set "copied")))
+    ("v" (assoc m :asked (editor/serve/client-clipboard-ask)))
+    ("+" (assoc m :n (inc (get m :n 0))))
+    ([:clipboard ref text] (if (and (not (nil? ref)) (= ref (get m :asked)))
+                             (assoc m :clip (or text "nothing") :asked nil)
+                             (assoc m :ignored (inc (get m :ignored 0)))))
+    (_ m)))
 
 (defn clip-attach (mgr)
   ;; attach the test process as the client; the session pid, its first frame taken
@@ -764,41 +770,39 @@
       (assert= (receive ([:clipboard-set text] text) (after test/*wait-ms* :none)) "copied")
       (exit session :kill)))
 
-  (test "a paste asks the client, and its answer is what the session gets"
+  (test "a paste asks without waiting, and the client's answer arrives as an event"
     (let (mgr (spawn (editor/serve/serve-manager (fn () {}) clip-view clip-up))
           session (clip-attach mgr))
       (send session [:key "v"])
-      (receive
-        ([:clipboard-get from asked] (send from [:clipboard asked "from the client"]))
-        (after test/*wait-ms* nil))
-      (assert= (await-frame-text "clip=from the client") "clip=from the client")
+      (let (question (receive ([:clipboard-get from asked] [from asked]) (after test/*wait-ms* nil)))
+        ;; the ask is out and unanswered: the loop still takes a key and draws it
+        (send session [:key "+"])
+        (assert= (await-frame-text "n=1 clip=none ignored=0") "n=1 clip=none ignored=0")
+        (send (first question) [:clipboard (second question) "from the client"]))
+      (assert= (await-frame-text "n=1 clip=from the client ignored=0")
+        "n=1 clip=from the client ignored=0")
       (exit session :kill)))
 
-  (test "a client that never answers costs the paste half a second, not the session"
+  (test "a client that never answers is answered for at the timeout"
     (let (mgr (spawn (editor/serve/serve-manager (fn () {}) clip-view clip-up))
           session (clip-attach mgr)
           started (os/now))
       (send session [:key "v"])
       (let (asked (receive ([:clipboard-get _ asked] asked) (after test/*wait-ms* nil)))
         (is (not (nil? asked)))
-        ;; no answer: the paste gives up, and the session draws on
-        (assert= (await-frame-text "clip=nothing") "clip=nothing")
+        (assert= (await-frame-text "n=0 clip=nothing ignored=0") "n=0 clip=nothing ignored=0")
         (let (waited (- (os/now) started))
           (is (>= waited 450))
           (is (< waited 3000)))
-        ;; the answer that comes too late is dropped, not folded as app input
+        ;; the real answer, too late: an event the app takes as one for no ask of its own
         (send session [:clipboard asked "late"])
-        (send session [:key "v"])
-        (receive
-          ([:clipboard-get from again] (send from [:clipboard again "fresh"]))
-          (after test/*wait-ms* nil))
-        (assert= (await-frame-text "clip=fresh") "clip=fresh"))
+        (assert= (await-frame-text "n=0 clip=nothing ignored=1") "n=0 clip=nothing ignored=1"))
       (exit session :kill)))
 
   (test "outside a served session there is no client to ask"
     (assert= [(editor/serve/served-client)
                (editor/serve/client-clipboard-set "x")
-               (editor/serve/client-clipboard-get 0)]
+               (editor/serve/client-clipboard-ask 0)]
       [nil nil nil]))
 
   (test "the window client sets and answers through its display's clipboard"

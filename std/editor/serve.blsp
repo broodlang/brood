@@ -255,9 +255,6 @@ and ends when that is up."
       ([:down _ ^client _] [(remote-client-lost state resume) true])
       ([:adopt token adopter cols rows] [(remote-adopt state resume token adopter cols rows) true])
       ([:claim token claimant cols rows] [(remote-claim state resume token claimant cols rows) true])
-      ;; a clipboard answer that came after its asker stopped waiting (`client-clipboard-get`):
-      ;; dropped, not leaked to the app as an event it never asked for
-      ([:clipboard _ _] nil)
       (m [m false])
       (after (remote-parked-wait state resume ms) (remote-parked-expiry state resume)))))
 
@@ -433,13 +430,15 @@ pass-through) — the seam a collaborative app reads a participant's name from."
 ;;   session -> client  [:clipboard-get session ref]   what is on it?
 ;;   client -> session  [:clipboard ref text]           the answer (`text` nil when empty)
 ;;
-;; A set is a cast — nothing waits for it. A get waits `serve-clipboard-ms` at most: a
-;; client that is gone without its death being known yet (ADR-519's dropped link) answers
-;; nothing, and the session's loop must not hang on it. An answer that comes later is
-;; dropped by the session's poll.
+;; Nothing waits. A set is a cast; a get is ASKED (`client-clipboard-ask`) and its answer
+;; reaches the app's `update` as an event, like any other background message — so the
+;; session's loop never stops for the round trip. A client that is gone without its death
+;; being known yet (ADR-519's dropped link) answers nothing, so the ask also schedules its
+;; own answer, `[:clipboard ref nil]`, `serve-clipboard-ms` later: the app hears about every
+;; ask exactly once if it takes the first answer for a ref and ignores the rest.
 
-;; How long a session waits for its client to say what is on its clipboard. A live client
-;; answers in a round trip; a yank is what waits.
+;; How long a session gives its client to say what is on its clipboard before answering
+;; itself nil. A live client answers in a round trip.
 (def- serve-clipboard-ms 500)
 
 (defn served-client ()
@@ -460,21 +459,24 @@ served session or while it is parked. A cast: nothing waits for the client.
   (let (client (served-client))
     (if (nil? client) nil (do (send client [:clipboard-set text]) text))))
 
-(defn client-clipboard-get (&optional (ms serve-clipboard-ms))
-  "The text on the clipboard of the machine this served session's client runs on (ADR-539),
-waiting `ms` (500 by default) for the client to say — nil when it is empty or not text,
-when the client does not answer in time (a dropped link must not hang the session), outside
-a served session, and while it is parked. Only the answer is taken from the mailbox: keys
-that arrive meanwhile wait for the loop.
+(defn client-clipboard-ask (&optional (ms serve-clipboard-ms))
+  "Ask the machine this served session's client runs on what is on its clipboard (ADR-539),
+without waiting: the answer arrives in the session's mailbox — and so at the app's `update`
+— as `[:clipboard ref text]`, `text` nil when the clipboard is empty or not text. Returns
+`ref`, to match the answer by; nil, asking nothing, outside a served session and while it is
+parked. A client that does not answer within `ms` (500 by default) is answered for:
+`[:clipboard ref nil]` arrives then, so the app hears about every ask. Its real answer may
+still come after that; take the first `[:clipboard ref …]` for a ref and ignore the rest.
 
-    (editor/serve/client-clipboard-get)   ;=> nil"
+    (editor/serve/client-clipboard-ask)   ;=> nil"
   (let (client (served-client))
     (if (nil? client)
       nil
       (let (asked (ref))
         (do
           (send client [:clipboard-get (self) asked])
-          (receive ([:clipboard ^asked text] (if (string? text) text nil)) (after ms nil)))))))
+          (timer/send-after ms (self) [:clipboard asked nil])
+          asked)))))
 
 (defn- serve-resumes? (opts identity)
   "Whether a session for `identity` parks when its client is lost: the server resumes
@@ -920,7 +922,7 @@ is always torn down (`:leave`) on exit. `cookie` defaults to `(node/cookie)`; `o
 the optional identity map (see `attach`).
 
 The session's clipboard is this machine's (ADR-539): what it sets (`client-clipboard-set`)
-lands here and what it asks for (`client-clipboard-get`) is read here — through `display`'s
+lands here and what it asks for (`client-clipboard-ask`) is read here — through `display`'s
 `:clipboard-set` (a 1-arg fn) and `:clipboard-get` (0-arg, the text or nil) when it has
 them, else the OS clipboard.
 

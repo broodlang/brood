@@ -68,6 +68,36 @@ the scheduler, dist, GC or the JIT — run it repeatedly.
 
 (An open entry's `## KI-N` section goes here until it is resolved.)
 
+## KI-334 — a served session whose loop dies takes its unsaved buffers with it — OPEN 2026-11-03
+
+**Symptom.** In bedit's local window, a loop that dies abnormally (a panic in a native call,
+an error outside `update` and `view`) has every unsaved file buffer auto-saved and a fresh loop
+started over the same buffers (bedit's `src/lifeline.blsp`). In a `serve` session the same
+death ends the session: the client sees the session's `[:down …]` and closes, and every buffer
+that lived in the session's model is gone — no sidecar, no restart. Found while giving served
+sessions the window's startup path (ADR-539's bedit side); not seen in use.
+
+**Cause.** Two halves. `serve-session` runs the app's `ui-run` unsupervised: the manager
+monitors the session and only forgets it on `[:down …]`, and ADR-519's parking covers the
+CLIENT going away, never the session's own loop. And bedit's recovery stands on things a
+served session does not have: its buffers are not hosted in processes of their own, because
+hosting goes through the buffer registry (`frames/frames-registry-start`), which registers
+the runtime-wide name `:buffer-registry` — one per runtime, so a registry per session
+collides on it, and one shared by every session would show each session (a guest's
+included) the others' buffers. A collab session already hosts its slot 0 through the collab
+registry, which a second hosting would double.
+
+**Why it survived.** Nothing kills a served session's loop in a test, and the window's
+lifeline tests run the window's loop. Served sessions started from a bare `ed-init` model
+until ADR-539, so nothing in them looked like the window's.
+
+**Fix.** Not yet. It needs a supervised session in `editor/serve` — the manager respawning a
+dead session's loop for the same client over state that outlived it — and, in bedit, a
+registry that is per session without being a runtime-wide name, so served buffers can be
+hosted and recovered as the window's are.
+
+**Guard.** None yet.
+
 ## KI-313 — KI-309 again: `interrupt_one_worker`'s native-walk case blocked its worker twice 👀 WATCHING
 
 **Seen:** `a_native_walk_that_hosts_a_park_blocks_once_and_then_parks` failed `<= dirty + 1` ("a
@@ -99,6 +129,7 @@ Each closed row's full section is `## KI-N` in [archive/known-issues-closed.md](
 
 | # | What | Status |
 |---|---|---|
+| KI-334 | **a served session whose loop dies takes its unsaved buffers with it** — the local window's loop auto-saves and restarts over its buffers (bedit's lifeline); a `serve` session's loop dying just ends the session, its buffers in its model | **OPEN** — needs a supervised session in `editor/serve` and per-session buffer hosting in bedit (the buffer registry's runtime-wide name blocks it); found with ADR-539 |
 | KI-316 | **the doc catalogue filed `match` under `case` and three names under `:other`, after a prelude edit** — `doc_catalog_test` red on a tree whose only prelude change added 28 lines, while an older build ran beside it | ✅ **FIXED 2026-11-03** — every Brood wrote its prelude to one shared `~/.cache/brood/prelude.blsp`, so whichever ran last owned it and a newer build's def-sites pointed into an older text; `doc-catalog` bakes the section headers it reads from that file into the stdlib image, and `nest stdimage` rebuilt from the image it was replacing, so the wrong headers survived every rebuild. The copy is now keyed by the prelude's text (`prelude-source-<hash>/prelude.blsp`) and `nest stdimage` builds from source. Guard: `boot::prelude_copy_tests` (red with the unkeyed name) |
 | KI-315 | **`accept_starvation`'s client could read an empty port file and die** — CI's tree-walker job failed "the client never connected all 50" after 60 s on `fe79302d` | ✅ **FIXED 2026-11-02** — the server `file/spit` the port and the client read it the moment `port.txt` existed; `file/spit` creates the file before it writes it, so the client could read `""` (or a partial port) and die, and the old test waited out its 60 s. The server writes `port.tmp` and renames it into place. Reproduced on demand by widening that window (client: `string/->number: not a number: ""`); green with the rename under the same window |
 | KI-314 | **`disconnect` could return before `[:nodedown]` reached its monitors** — `dist::tests::a_guest_is_never_registered_under_the_name_it_claims` read an empty mailbox right after `disconnect` (once in 13 full-suite runs on the test machine, 2026-11-02) | ✅ **FIXED 2026-11-02** — the socket was shut before `disconnect`'s own `drop_link`, so our reader could remove the link and be about to deliver while `disconnect` found nothing and returned. The link leaves `NODES` before the shutdown now. Reproduced on demand with two temporary sleeps (red), green with the fix under them; 500 runs of the case and the 62 dist tests green |
