@@ -118,12 +118,55 @@ agreed. `buffer-from-file` and `save-buffer` stamp it; `buffer-file-changed?` re
   (let (f (get buf :file))
     (assoc buf :file-mtime (if (nil? f) nil (file/mtime f)))))
 
+;; ---- line endings ------------------------------------------------------------
+;; A buffer's text always ends its lines with a bare newline: motion, search, a regex's `$`,
+;; RET and every mode see one line ending. A file written with CRLF (Windows) is decoded at
+;; the read and encoded again at the save, so it goes back to disk the way it came; Emacs's
+;; `buffer-file-coding-system` end-of-line part. A file MIXING the two is left alone — read
+;; byte for byte, its stray `\r`s in the text — because no single choice writes it back
+;; unchanged.
+
+(defn eol-decode (text)
+  "`{:text :eol}` for a file's `text`: when every newline in it follows a carriage return
+(and there is one), `:eol :crlf` and the text with each `\\r\\n` made `\\n`; otherwise
+`:eol :lf` and the text untouched — a file that mixes the two included.
+
+    (:eol (editor/buffer/eol-decode \"a\\r\\nb\\r\\n\"))   ;=> :crlf
+    (:eol (editor/buffer/eol-decode \"a\\r\\nb\\n\"))   ;=> :lf
+    (:eol (editor/buffer/eol-decode \"no newline\"))   ;=> :lf"
+  (let (decoded (string/replace text "\r\n" "\n")
+        removed (- (string/length text) (string/length decoded)))
+    (if (= removed 0)
+      {:text text :eol :lf}
+      (let (rope (text/from-string decoded)
+            ;; the line the end is on counts the newlines before it
+            newlines (text/char->line rope (text/length rope)))
+        (if (= newlines removed) {:text decoded :eol :crlf} {:text text :eol :lf})))))
+
+(defn eol-encode (text eol)
+  "`text` as a file with line ending `eol` holds it: each newline a `\\r\\n` for `:crlf`,
+unchanged for `:lf`. The inverse of [[eol-decode]].
+
+    (count (editor/buffer/eol-encode \"a\\nb\\n\" :crlf))   ;=> 6"
+  (if (= eol :crlf) (string/replace text "\n" "\r\n") text))
+
+(defn buffer-eol (buf)
+  "The line ending `buf`'s file is written with: `:crlf` for a file read with CRLF line
+endings ([[eol-decode]]), else `:lf`.
+
+    (editor/buffer/buffer-eol (editor/buffer/make-buffer \"x\"))   ;=> :lf"
+  (or (get buf :eol) :lf))
+
 (defn buffer-from-file (path)
   "Read the file at `path` into a fresh buffer, with `:file` set to `path` so
-`save-buffer` can write it back, stamped with the file's mtime (`buffer-stamp-file`).
+`save-buffer` can write it back, stamped with the file's mtime (`buffer-stamp-file`). A
+file with CRLF line endings is read with bare newlines and remembered as `:eol :crlf`
+([[buffer-eol]]), so the save writes CRLF again.
 
     (editor/buffer/buffer-from-file \"notes.txt\")   ;~> …a buffer named notes.txt holding the file's text, :file set…"
-  (buffer-stamp-file (make-buffer (file/slurp path) path path)))
+  (let ({:keys [text eol]} (eol-decode (file/slurp path))
+        buf (make-buffer text path path))
+    (buffer-stamp-file (if (= eol :crlf) (assoc buf :eol :crlf) buf))))
 
 (defn find-file-buffer (path)
   "Open `path` for editing, vim/emacs `find-file` style: its contents if the file
@@ -135,15 +178,18 @@ unsaved buffer rather than erroring.
   (if (file/exists? path) (buffer-from-file path) (make-buffer "" path path)))
 
 (defn save-buffer (buf)
-  "Write `buf`'s text to its `:file`; raise if it has none. Returns `buf` stamped with
-the file's new mtime (`buffer-stamp-file`) and unmodified (`mark-buffer-saved`), so a caller
-that keeps the result knows the file and the text agree again.
+  "Write `buf`'s text to its `:file`, with the line ending it was read with
+([[buffer-eol]]); raise if it has none. Returns `buf` stamped with the file's new mtime
+(`buffer-stamp-file`) and unmodified (`mark-buffer-saved`), so a caller that keeps the
+result knows the file and the text agree again.
 
     (editor/buffer/save-buffer buf)   ;~> buf, stamped and unmodified — after writing its text to its :file"
   (let (f (get buf :file))
     (if (nil? f)
       (error "save-buffer: buffer has no file: " (get buf :name))
-      (do (file/spit f (buffer-text buf)) (mark-buffer-saved (buffer-stamp-file buf))))))
+      (do
+        (file/spit f (eol-encode (buffer-text buf) (buffer-eol buf)))
+        (mark-buffer-saved (buffer-stamp-file buf))))))
 
 (defn buffer-file-changed? (buf)
   "True when the file behind `buf` has been written since the buffer last agreed with it

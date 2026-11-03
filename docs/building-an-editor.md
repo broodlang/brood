@@ -91,7 +91,7 @@ The vocabulary you'll use most:
   the model, not the command layer, so no consumer can forget to check. Build a
   generated/`special-mode` buffer (a process list, a help page) with `make-buffer`
   *then* `set-read-only` it — construction never checks the flag.
-- **Files:** `buffer-from-file` (file/slurp) · `save-buffer` (file/spit)
+- **Files:** `buffer-from-file` (file/slurp) · `save-buffer` (file/spit) — a CRLF file is held with bare newlines and written back with CRLF (`eol-decode` / `eol-encode`, `buffer-eol`)
 
 Because operations are pure, you compose them with `->` and they never surprise
 you with aliasing. A command is just a function `buffer -> buffer`.
