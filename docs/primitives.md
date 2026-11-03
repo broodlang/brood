@@ -291,8 +291,8 @@ literal — no constructor call.
 |  | `%regex-find-all` | 2 | Every non-overlapping match, as a vector of those maps; an empty match steps one character on. |
 |  | `%regex-tokens` | 3 | Lex s with a vector of patterns and their tags: at the earliest position any rule has a non-empty match, the first such rule takes its LONGEST match. A vector of `{:start :end :text :tag}`. |
 |  | `%regex-paint` | 5 | `[start end]` of the text a pattern matches between a prefix at the line's start and a suffix after it (longest first, shortest when lazy), or nil — a line rule's painted group. |
-|  | `%rope-regex-find` | 3 | The leftmost-first NON-EMPTY match in a ROPE at or after char index `from`, as `%regex-find`'s map, searched in place (the lazy DFA stepped over the leaves, ADR-540). `regex/rope-find`. |
-|  | `%rope-regex-rfind` | 3 | The non-empty match starting LAST while ending at or before `before` (Emacs's `re-search-backward`), or nil. `regex/rope-find-backward`. |
+|  | `%rope-regex-find` | 4 | The leftmost-first match (non-empty unless `empty?`) in a ROPE at or after char index `from`, as `%regex-find`'s map, searched in place (the lazy DFA stepped over the leaves, ADR-540). `regex/rope-find`. |
+|  | `%rope-regex-rfind` | 4 | The match (non-empty unless `empty?`) starting LAST while ending at or before `before` (Emacs's `re-search-backward`), or nil. `regex/rope-find-backward`. |
 |  | `%rope-regex-count` | 4 | `[n resume]`: non-overlapping non-empty matches scanned from `from` that START before `limit` — `resume` where the next slice begins (the next match, or a point past `limit` where none is in progress), nil at the end. Slices add up exactly. `regex/rope-count`. |
 |  | `%rope-regex-spans` | 4 | Every non-empty match starting in `[from, to)` as `[start end]` (at most 4096) — a window's highlights. `regex/rope-spans`. |
 | **Networking** (thin non-blocking socket mechanism, ADR-062; `std/net/*` is the Brood library) | `tcp-listen` | 2 | Bind a listening socket on host:port (port 0 = OS-assigned); connections arrive as [:tcp-accept lsock client] messages to the calling process. Returns a socket. |

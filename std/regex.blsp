@@ -465,8 +465,9 @@ end, and steps one character past an EMPTY match so a pattern that can match not
 ;; They read the pattern as a BUFFER search does, Emacs's way, unless told otherwise: `^`
 ;; and `$` are a LINE's start and end, and `.` stops at a newline — so `a.*z` asks about a
 ;; line, not the rest of the file (`{:lines? false}` for the string meaning). `{:fold? true}`
-;; ignores case (simple case folding, character for character). A match is never empty: a
-;; search asks where the text is, and an empty match answers nothing.
+;; ignores case (simple case folding, character for character). A match is never empty unless
+;; `{:empty? true}` asks for one (a search box that stops on one, as Emacs's isearch does);
+;; a count and a window's spans never include one.
 
 ;; check-allow: deliberately non-tail — depth = pattern nesting, not subject length.
 (check-allow :non-tail-recursion
@@ -512,12 +513,15 @@ false). Memoised by the pattern and its flags."
 `from`, as the map [[find]] answers (`{:start :end :text :groups}`, char offsets into the
 rope), or nil. Searches the rope in place: the cost is the distance to the match, not the
 size of the text. `opts`: `:fold?` ignores case; `:lines?` (on unless false) makes `^`/`$`
-a line's ends and `.` stop at a newline, as a buffer search wants.
+a line's ends and `.` stop at a newline, as a buffer search wants; `:empty?` lets an EMPTY
+match be the answer (`x*` stops before the first character, as Emacs's `re-search-forward`
+does) where by default one is stepped over.
 
     (get (regex/rope-find \"o+\" (text/from-string \"foo boo\") 3) :start)                ;=> 5
     (get (regex/rope-find \"^b\" (text/from-string \"ab\\nbc\") 0) :start)                ;=> 3
-    (get (regex/rope-find \"FOO\" (text/from-string \"a foo\") 0 {:fold? true}) :text)   ;=> \"foo\""
-  (%rope-regex-find r (regex-rope-src pattern opts) from))
+    (get (regex/rope-find \"FOO\" (text/from-string \"a foo\") 0 {:fold? true}) :text)   ;=> \"foo\"
+    (get (regex/rope-find \"x*\" (text/from-string \"ab x\") 0 {:empty? true}) :end)   ;=> 0"
+  (%rope-regex-find r (regex-rope-src pattern opts) from (= true (:empty? opts))))
 
 (defn rope-find-backward (pattern r before &optional (opts {}))
   "The non-empty match of `pattern` in rope `r` that starts LAST while ending at or before
@@ -528,7 +532,7 @@ Reads backward from `before`, so the cost is the distance to the match. `opts` a
     (get (regex/rope-find-backward \"[fb]o+\" (text/from-string \"foo boo\") 7) :start)   ;=> 4
     (get (regex/rope-find-backward \"[fb]o+\" (text/from-string \"foo boo\") 4) :start)   ;=> 0
     (get (regex/rope-find-backward \"o+\" (text/from-string \"foo boo\") 7) :start)      ;=> 6"
-  (%rope-regex-rfind r (regex-rope-src pattern opts) before))
+  (%rope-regex-rfind r (regex-rope-src pattern opts) before (= true (:empty? opts))))
 
 (defn rope-count (pattern r from limit &optional (opts {}))
   "`[n resume]`: how many non-overlapping, non-empty matches of `pattern` in rope `r`, scanned

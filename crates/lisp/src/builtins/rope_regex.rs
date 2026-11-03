@@ -49,18 +49,18 @@ pub(super) fn register(primitives: &mut super::Primitives) {
     use crate::types::Sig;
     primitives.def(
         "%rope-regex-find",
-        Arity::exact(3),
-        Sig::new(vec![rope, string, int], map_or_nil),
-        &["r", "pattern", "from"],
-        "The leftmost-first NON-EMPTY match of the regex-automata pattern in rope r starting at or after char index from, as {:start :end :text :groups [...]} in CHAR offsets — or nil. Searches the rope in place (its lazy DFA stepped over the leaves), so the cost is the distance to the match. regex/rope-find is this over the translated pattern.",
+        Arity::exact(4),
+        Sig::new(vec![rope, string, int, any], map_or_nil),
+        &["r", "pattern", "from", "empty?"],
+        "The leftmost-first match (NON-EMPTY unless empty? — then an empty match is an answer too) of the regex-automata pattern in rope r starting at or after char index from, as {:start :end :text :groups [...]} in CHAR offsets — or nil. Searches the rope in place (its lazy DFA stepped over the leaves), so the cost is the distance to the match. regex/rope-find is this over the translated pattern.",
         rope_regex_find,
     );
     primitives.def(
         "%rope-regex-rfind",
-        Arity::exact(3),
-        Sig::new(vec![rope, string, int], map_or_nil),
-        &["r", "pattern", "before"],
-        "The NON-EMPTY match of the regex-automata pattern in rope r that starts LAST while ending at or before char index before (Emacs's re-search-backward), as the map %rope-regex-find answers — or nil. Reads backward from before, so the cost is the distance to the match.",
+        Arity::exact(4),
+        Sig::new(vec![rope, string, int, any], map_or_nil),
+        &["r", "pattern", "before", "empty?"],
+        "The match (NON-EMPTY unless empty?, when an empty one AT before counts too) of the regex-automata pattern in rope r that starts LAST while ending at or before char index before (Emacs's re-search-backward), as the map %rope-regex-find answers — or nil. Reads backward from before, so the cost is the distance to the match.",
         rope_regex_rfind,
     );
     primitives.def(
@@ -419,13 +419,14 @@ enum Found {
     Quit,
 }
 
-/// The leftmost-first non-empty match starting at or after byte `from` (bounded by
-/// `limit` as [`scan_forward`] is), by the DFAs.
+/// The leftmost-first match starting at or after byte `from` (bounded by `limit` as
+/// [`scan_forward`] is), by the DFAs — non-empty unless `allow_empty`.
 fn find_forward(
     engine: &Engine,
     bytes: &mut RopeBytes<'_>,
     from: usize,
     limit: usize,
+    allow_empty: bool,
     poll: &mut InterruptPoll,
 ) -> Result<Found, LispError> {
     engine.with_caches(|forward_cache, reverse_cache| {
@@ -459,7 +460,7 @@ fn find_forward(
             else {
                 return Ok(Found::Quit);
             };
-            if start == end {
+            if start == end && !allow_empty {
                 if end >= bytes.len {
                     return Ok(Found::Missing);
                 }
@@ -471,13 +472,15 @@ fn find_forward(
     })
 }
 
-/// The non-empty match starting last while ending at or before byte `before`, by the DFAs:
+/// The match starting last while ending at or before byte `before` (non-empty unless
+/// `allow_empty`, when an empty match AT `before` counts), by the DFAs:
 /// the reverse DFA unanchored from `before` meets candidate starts largest first; each is
 /// confirmed (and its end found) by the forward DFA anchored there and bounded at `before`.
 fn find_backward(
     engine: &Engine,
     bytes: &mut RopeBytes<'_>,
     before: usize,
+    allow_empty: bool,
     poll: &mut InterruptPoll,
 ) -> Result<Found, LispError> {
     engine.with_caches(|forward_cache, reverse_cache| {
@@ -492,7 +495,7 @@ fn find_backward(
                        start: usize,
                        poll: &mut InterruptPoll|
          -> Result<Option<Found>, LispError> {
-            if start >= before || !bytes.is_boundary(start) {
+            if start > before || (start == before && !allow_empty) || !bytes.is_boundary(start) {
                 return Ok(None);
             }
             match scan_forward(
@@ -505,7 +508,7 @@ fn find_backward(
                 true,
                 poll,
             )? {
-                Scan::End(end) if end > start => Ok(Some(Found::Match(start, end))),
+                Scan::End(end) if end > start || allow_empty => Ok(Some(Found::Match(start, end))),
                 Scan::Quit => Ok(Some(Found::Quit)),
                 _ => Ok(None),
             }
@@ -569,6 +572,7 @@ fn fallback_forward(
     rope: &ropey::Rope,
     bytes: &mut RopeBytes<'_>,
     from: usize,
+    allow_empty: bool,
 ) -> Result<Option<(usize, usize)>, LispError> {
     let rx = compiled("%rope-regex-find", source, Kind::LeftmostFirst)?;
     let context = bytes.boundary_down(from.saturating_sub(1));
@@ -580,7 +584,7 @@ fn fallback_forward(
         let Some(found) = rx.search(&Input::new(&text).range(at..)) else {
             return Ok(None);
         };
-        if found.is_empty() {
+        if found.is_empty() && !allow_empty {
             at = found.end() + text[found.end()..].chars().next().map_or(1, char::len_utf8);
             continue;
         }
@@ -596,6 +600,7 @@ fn fallback_backward(
     rope: &ropey::Rope,
     bytes: &mut RopeBytes<'_>,
     before: usize,
+    allow_empty: bool,
 ) -> Result<Option<(usize, usize)>, LispError> {
     let rx = compiled("%rope-regex-rfind", source, Kind::LeftmostFirst)?;
     let text_end = if before < bytes.len {
@@ -605,16 +610,23 @@ fn fallback_backward(
     };
     let text = text_of(rope, 0, text_end);
     let mut poll = InterruptPoll::new();
-    let mut at = before;
-    while at > 0 {
-        at -= 1;
+    // candidate starts from `before` itself (an empty match there) or the byte before it, down
+    let first = if allow_empty {
+        Some(before)
+    } else {
+        before.checked_sub(1)
+    };
+    let Some(first) = first else {
+        return Ok(None);
+    };
+    for at in (0..=first).rev() {
         if !text.is_char_boundary(at) {
             continue;
         }
         poll.tick()?;
         let input = Input::new(&text).range(at..before).anchored(Anchored::Yes);
         if let Some(found) = rx.search(&input)
-            && !found.is_empty()
+            && (allow_empty || !found.is_empty())
         {
             return Ok(Some((found.start(), found.end())));
         }
@@ -701,6 +713,11 @@ fn match_value(heap: &mut Heap, spans: &[GroupSpan]) -> Value {
     ])
 }
 
+/// Whether a flag argument is set (anything but nil and false).
+fn truthy(v: Value) -> bool {
+    !matches!(v, Value::Nil | Value::Bool(false))
+}
+
 /// A char-index argument as the rope's byte index, clamped to it.
 fn byte_arg(heap: &Heap, who: &str, v: Value, rope: &ropey::Rope) -> Result<usize, LispError> {
     let chars = expect_int(heap, who, v)?.max(0) as usize;
@@ -713,17 +730,20 @@ fn rope_regex_find(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let spans = {
         let source = expect_string_ref(heap, who, arg(args, 1))?;
         let rope = expect_rope_ref(heap, who, arg(args, 0))?;
+        let allow_empty = truthy(arg(args, 3));
         let from = byte_arg(heap, who, arg(args, 2), rope)?;
         let mut bytes = RopeBytes::new(rope);
         let mut poll = InterruptPoll::new();
         let engine = engine(source);
         let found = match engine.as_ref() {
-            Some(engine) => find_forward(engine, &mut bytes, from, usize::MAX, &mut poll)?,
+            Some(engine) => {
+                find_forward(engine, &mut bytes, from, usize::MAX, allow_empty, &mut poll)?
+            }
             None => Found::Quit,
         };
         let span = match found {
             Found::Match(start, end) => Some((start, end)),
-            Found::Quit => fallback_forward(source, rope, &mut bytes, from)?,
+            Found::Quit => fallback_forward(source, rope, &mut bytes, from, allow_empty)?,
             Found::Resume(_) | Found::Missing => None,
         };
         match span {
@@ -741,16 +761,17 @@ fn rope_regex_rfind(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         let source = expect_string_ref(heap, who, arg(args, 1))?;
         let rope = expect_rope_ref(heap, who, arg(args, 0))?;
         let before = byte_arg(heap, who, arg(args, 2), rope)?;
+        let allow_empty = truthy(arg(args, 3));
         let mut bytes = RopeBytes::new(rope);
         let mut poll = InterruptPoll::new();
         let engine = engine(source);
         let found = match engine.as_ref() {
-            Some(engine) => find_backward(engine, &mut bytes, before, &mut poll)?,
+            Some(engine) => find_backward(engine, &mut bytes, before, allow_empty, &mut poll)?,
             None => Found::Quit,
         };
         let span = match found {
             Found::Match(start, end) => Some((start, end)),
-            Found::Quit => fallback_backward(source, rope, &mut bytes, before)?,
+            Found::Quit => fallback_backward(source, rope, &mut bytes, before, allow_empty)?,
             Found::Resume(_) | Found::Missing => None,
         };
         match span {
@@ -778,7 +799,7 @@ fn each_match(
     loop {
         poll.tick()?;
         let found = match engine.as_ref() {
-            Some(engine) => find_forward(engine, &mut bytes, at, limit, &mut poll)?,
+            Some(engine) => find_forward(engine, &mut bytes, at, limit, false, &mut poll)?,
             None => Found::Quit,
         };
         match found {
@@ -790,7 +811,7 @@ fn each_match(
             }
             Found::Resume(resume) => return Ok(Some(resume)),
             Found::Missing => return Ok(None),
-            Found::Quit => match fallback_forward(source, rope, &mut bytes, at)? {
+            Found::Quit => match fallback_forward(source, rope, &mut bytes, at, false)? {
                 Some((start, end)) => {
                     if !each(start, end) {
                         return Ok(Some(start));
@@ -942,7 +963,7 @@ mod tests {
         let mut bytes = RopeBytes::new(&rope);
         let mut poll = InterruptPoll::new();
         let at = |bytes: &mut RopeBytes<'_>, poll: &mut InterruptPoll, before| match find_backward(
-            &engine, bytes, before, poll,
+            &engine, bytes, before, false, poll,
         )
         .unwrap()
         {
@@ -962,5 +983,38 @@ mod tests {
         let rope = rope_of(text);
         assert_eq!(all_forward(r"\bfoo\b", &rope), naive_all(r"\bfoo\b", text));
         assert_eq!(all_forward(r"\bü", &rope), naive_all(r"\bü", text));
+    }
+
+    #[test]
+    fn an_empty_match_is_an_answer_when_asked_for() {
+        let rope = rope_of("ab xx");
+        let engine = Engine::build("x*").unwrap();
+        let mut bytes = RopeBytes::new(&rope);
+        let mut poll = InterruptPoll::new();
+        let forward =
+            |bytes: &mut RopeBytes<'_>, poll: &mut InterruptPoll, from, empty| match find_forward(
+                &engine,
+                bytes,
+                from,
+                usize::MAX,
+                empty,
+                poll,
+            )
+            .unwrap()
+            {
+                Found::Match(start, end) => Some((start, end)),
+                _ => None,
+            };
+        assert_eq!(forward(&mut bytes, &mut poll, 0, true), Some((0, 0)));
+        assert_eq!(forward(&mut bytes, &mut poll, 0, false), Some((3, 5)));
+        let backward = |bytes: &mut RopeBytes<'_>, poll: &mut InterruptPoll, before, empty| {
+            match find_backward(&engine, bytes, before, empty, poll).unwrap() {
+                Found::Match(start, end) => Some((start, end)),
+                _ => None,
+            }
+        };
+        // an empty match AT `before` is the last start; without it, the `x` before it
+        assert_eq!(backward(&mut bytes, &mut poll, 2, true), Some((2, 2)));
+        assert_eq!(backward(&mut bytes, &mut poll, 5, false), Some((4, 5)));
     }
 }

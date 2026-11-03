@@ -482,7 +482,11 @@
       (assert= (map (rope-spans "foo" r 0 100 {:fold? true}) first) '(0 4 8))))
   (test "a match is never empty"
     (let (r (text/from-string "aa x b xx"))
-      (assert= (rope-spans "x*" r 0 100) [[3 4] [7 9]])))
+      (assert= (rope-spans "x*" r 0 100) [[3 4] [7 9]])
+      (assert= (get (rope-find "x*" r 0) :start) 3)
+      (assert= (get (rope-find "x*" r 0 {:empty? true}) :end) 0)
+      (assert= (get (rope-find-backward "x*" r 5 {:empty? true}) :start) 5)
+      (assert= (get (rope-find-backward "x*" r 5) :start) 3)))
   (test "rope-find-backward: the last start, ending by `before`"
     (let (r (text/from-string "foo foo xfoo"))
       (assert= (get (rope-find-backward "fo+" r 12) :start) 9)
