@@ -567,6 +567,76 @@
         (save-buffer mixed)
         (assert= (file/slurp lf-path) "a\nb\n")
         (assert= (file/slurp mixed-path) "a\r\nb\n"))))
+  ;; Revert: the file's text comes back as one undoable edit, so a revert (or another
+  ;; writer's change picked up by auto-revert) never costs the history before it.
+  (test "revert-buffer re-reads the file as ONE undoable edit, and is unmodified after"
+    (let (path (str (temp-dir "brood-buf-") ".txt"))
+      (file/spit path "v1\n")
+      (let (edited (-> (buffer-from-file path) end-of-buffer (insert "mine\n"))
+            _ (file/spit path "theirs\n")
+            reverted (revert-buffer edited))
+        (assert= (buffer-text reverted) "theirs\n")
+        (is (not (buffer-modified? reverted)))
+        (is (not (buffer-file-changed? reverted)))
+        (assert= (get reverted :file-mtime) (file/mtime path))
+        ;; one undo: the text before the revert, unsaved edits and all, now modified
+        (let (back (undo reverted))
+          (assert= (buffer-text back) "v1\nmine\n")
+          (is (buffer-modified? back))
+          ;; and the history before it is still there: the same undo run, one step further
+          (assert= (buffer-text (undo-next (undo-next (undo-start reverted)))) "v1\n")))))
+  (test "revert-buffer after typing is its own step, not merged into the typing"
+    (let (path (str (temp-dir "brood-buf-") ".txt"))
+      (file/spit path "a\n")
+      (let (typed (-> (buffer-from-file path)
+                    end-of-buffer
+                    (insert "b")
+                    amalgamate-undo
+                    (insert "c"))
+            _ (file/spit path "z\n")
+            reverted (revert-buffer typed))
+        (assert= (buffer-text (undo reverted)) "a\nbc"))))
+  (test "revert-buffer of a file that did not change records nothing"
+    (let (path (str (temp-dir "brood-buf-") ".txt"))
+      (file/spit path "same\n")
+      (let (b (buffer-from-file path)
+            reverted (revert-buffer b))
+        (assert= (get reverted :undo) (get b :undo))
+        (is (not (buffer-modified? reverted))))))
+  (test "revert-buffer of a read-only buffer: the text changes, it stays read-only, undo keeps it so"
+    (let (path (str (temp-dir "brood-buf-") ".txt"))
+      (file/spit path "old\n")
+      (let (b (set-read-only (buffer-from-file path) true)
+            _ (file/spit path "new\n")
+            reverted (revert-buffer b))
+        (assert= (buffer-text reverted) "new\n")
+        (is (read-only? reverted))
+        (let (back (undo reverted))
+          (assert= (buffer-text back) "old\n")
+          (is (read-only? back))))))
+  (test "revert-buffer takes up the file's line ending as it is now"
+    (let (path (str (temp-dir "brood-buf-") ".txt"))
+      (file/spit path "a\nb\n")
+      (let (b (buffer-from-file path)
+            _ (file/spit path "a\r\nb\r\nc\r\n")
+            reverted (revert-buffer b))
+        (assert= (buffer-text reverted) "a\nb\nc\n")
+        (assert= (buffer-eol reverted) :crlf))))
+  (test "revert-buffer raises for a buffer with no file, or a file that is gone"
+    (assert= :raised (try (revert-buffer (make-buffer "x")) (catch e :raised)))
+    (assert= :raised
+      (try
+        (revert-buffer (make-buffer "x" "gone" "/no/such/dir/brood-revert.txt"))
+        (catch e :raised))))
+  (test "buffer-from-file takes text already read, decoded and stamped as a read is"
+    (let (path (str (temp-dir "brood-buf-") ".txt"))
+      (file/spit path "on disk\r\n")
+      (let (b (buffer-from-file path "read once\r\n"))
+        (assert= (buffer-text b) "read once\n")
+        (assert= (buffer-eol b) :crlf)
+        (assert= (buffer-file b) path)
+        (assert= (get b :file-mtime) (file/mtime path))
+        (is (not (buffer-modified? b))))))
   (test "eol-decode and eol-encode are inverses on a CRLF text"
     (let (decoded (eol-decode "x\r\n\r\ny"))
       (assert= decoded {:text "x\n\ny" :eol :crlf})

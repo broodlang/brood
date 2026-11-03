@@ -21,8 +21,9 @@
 (defmodule settings
   "Declared settings read from a data config file — `define` a setting once (default, type,
 doc) under a registry id, then `read-form` the user's `(config …)` form, `value-of` a
-setting with its fallback, `warnings` for every typo, and `default-source` for the
-documented file to write the first time. ADR-428."
+setting with its fallback, `read-warnings` for a file that did not read as written,
+`warnings` for every typo, and `default-source` for the documented file to write the
+first time. ADR-428."
   (:use registry))
 
 ;; ---- declaring ------------------------------------------------------------
@@ -67,7 +68,8 @@ already there, and return the stored spec. `spec` keys:
 (defn read-form (text:string head:symbol -> map)
   "The keys and values of the first form in `text` when it is `(head :key value …)`, as a
 map — `{}` when it is some other form, or when `text` does not read. Never evaluates and
-never throws: a broken config file must not stop the program it configures.
+never throws: a broken config file must not stop the program it configures. Nor should it
+be silent: `read-warnings` says what this left out and why.
 
     (settings/read-form \"(config :hl-line false :cursor :bar)\" 'config)   ;=> {:hl-line false :cursor :bar}
     (settings/read-form \"(config :x\" 'config)   ;=> {}
@@ -90,6 +92,72 @@ never throws: a broken config file must not stop the program it configures.
     (if (file/exists? file)
       (try (read-form (file/slurp file) head) (catch e {}))
       {})))
+
+(defn- head-form? (form head)
+  (and (pair? form) (= (first form) head)))
+
+(defn- parse-failure (text)
+  "The reader's complaint about `text` as a map (`:message :line :col`), or nil when all of
+it reads."
+  (check-allow :discarded-catch
+    (try (do (reflect/read-all text) nil) (catch e (if (map? e) e {:message (pr-str e)})))))
+
+(defn- first-form (text)
+  "`[form]` when the first form of `text` reads, else nil — a vector, so a first form that is
+itself nil still counts as read."
+  (check-allow :discarded-catch
+    (try [(reflect/read-first text)] (catch e nil))))
+
+(defn read-warnings (text:string head:symbol label:string -> vector)
+  "What `read-form` could not take from `text`, as readable strings that start with `label`
+(the file's name): text that does not read (with its line and column, and whether the
+`(head …)` form before it still applies), a first form that is not `(head …)`, text after
+that form, and a key left without a value. Empty when `read-form` took all of it — an
+empty or comment-only file included. `warnings` then checks the keys it did take.
+
+    (settings/read-warnings \"(config :x 1 :y)\" 'config \"init.blsp\")   ;=> [\"init.blsp: :y has no value, so it is ignored\"]
+    (settings/read-warnings \"(config :x\" 'config \"init.blsp\")   ;=> [\"init.blsp:1:1: unclosed list (opened here) — the file does not read, so none of it applies\"]"
+  (let (failure (parse-failure text)
+        first-read (first-form text)
+        form-text (str "(" head " …) form")
+        applies? (and first-read (head-form? (first first-read) head)))
+    (cond
+      failure
+        [(str label
+           ":"
+           (get failure :line "?")
+           ":"
+           (get failure :col "?")
+           ": "
+           (get failure :message "does not read")
+           (if applies?
+             (str " — after the " form-text ", which still applies")
+             " — the file does not read, so none of it applies"))]
+      (nil? first-read) []
+      (not applies?) [(str label ": the file is not a " form-text ", so none of it applies")]
+      else
+        (let (pairs (rest (first first-read))
+              dangling (if (= 1 (math/mod (count pairs) 2))
+                         [(str label ": " (pr-str (last pairs)) " has no value, so it is ignored")]
+                         [])
+              trailing (if (> (count (reflect/read-all text)) 1)
+                         [(str label
+                            ": the text after the " form-text
+                            " is ignored — put every setting inside it")]
+                         []))
+          (into dangling trailing)))))
+
+(defn file-warnings (file:string head:symbol label:string -> vector)
+  "`read-warnings` over the contents of `file` — empty when the file is missing (no file is
+no config, which is not a mistake), one line when it cannot be read.
+
+    (settings/file-warnings \"/no/such/settings-file.blsp\" 'config \"init.blsp\")   ;=> []"
+  (check-allow :discarded-catch
+    (if (file/exists? file)
+      (try
+        (read-warnings (file/slurp file) head label)
+        (catch e [(str label ": cannot be read — " (if (map? e) (get e :message "") (pr-str e)))]))
+      [])))
 
 ;; ---- checking -------------------------------------------------------------
 

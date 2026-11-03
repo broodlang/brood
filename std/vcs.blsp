@@ -33,15 +33,23 @@ before it was edited ([[base-text]]), and what the tree is at ([[id]])."
 
 (defn- run (program:string args: (or list vector) root:string -> (or string nil))
   "`program`'s stdout for `args`, run in `root` — or nil when there is no such program, it
-fails, or it exits non-zero."
+fails, or it exits non-zero. Every question this module asks is a READ, asked by a tool
+the user did not point at git (an editor's gutter, a project's file list), so git is told
+to take no optional lock: a `git status` or `git diff` would otherwise refresh the index
+and write it under `index.lock`, and the user's own `git commit` at that moment fails
+with \"Unable to create '.git/index.lock': File exists\"."
   (let (r (check-allow :discarded-catch
             (try
-              (os/cmd program args {:cwd root :env {"GIT_TERMINAL_PROMPT" "0"}})
+              (os/cmd program
+                args
+                {:cwd root :env {"GIT_TERMINAL_PROMPT" "0" "GIT_OPTIONAL_LOCKS" "0"}})
               (catch _ nil))))
     (if (and r (= (get r :exit) 0)) (get r :stdout) nil)))
 
-(defn- lines (out:any -> (or (list string) nil))
-  (if (nil? out) nil (seq/reject (string/split out "\n") empty?)))
+(defn- fields (out:string -> (list string))
+  "The NUL-separated fields of a `-z` git listing — without `-z` git writes a non-ASCII name
+quoted, which no file is called."
+  (seq/reject (string/split out (string/int->char 0)) empty?))
 
 ;; --- git -------------------------------------------------------------------------------------
 
@@ -52,13 +60,28 @@ work tree. `-z` because without it git writes a non-ASCII name quoted, which no 
 called. nil when git cannot answer.
 
     (vcs/git-files \"/\")   ;=> nil"
-  (let (split (fn (out) (seq/reject (string/split out (string/int->char 0)) empty?))
-        listed (run "git" ["ls-files" "-z" "--cached" "--others" "--exclude-standard"] root)
+  (let (listed (run "git" ["ls-files" "-z" "--cached" "--others" "--exclude-standard"] root)
         gone (run "git" ["ls-files" "-z" "--deleted"] root))
     (if (nil? listed)
       nil
-      (let (deleted (set/set (if gone (split gone) [])))
-        (sort (seq/distinct (seq/reject (split listed) (fn (f) (contains? deleted f)))))))))
+      (let (deleted (set/set (if gone (fields gone) [])))
+        (sort (seq/distinct (seq/reject (fields listed) (fn (f) (contains? deleted f)))))))))
+
+(defn- status-paths (out)
+  "The paths `git status --porcelain -z` printed (`out`, or nil), in order. Each entry is
+`XY path`; a rename or copy (`R` / `C`) is followed by its old path as an entry of its own,
+which is not the file this work touches now, so it is skipped."
+  (if (nil? out)
+    []
+    (:paths (fold (fields out)
+              {:paths [] :skip? false}
+              (fn (state entry)
+                (cond
+                  (:skip? state) (assoc state :skip? false)
+                  (< (string/length entry) 4) state
+                  else
+                    {:paths (conj (:paths state) (string/substring entry 3 (string/length entry)))
+                     :skip? (contains? #{"R" "C"} (string/substring entry 0 1))}))))))
 
 (defn git-changed (root:string -> (or (list string) nil))
   "The files this work touches in the git checkout at `root`: the commits not yet upstream
@@ -71,13 +94,16 @@ root-relative, sorted. nil when git cannot answer.
                        ["rev-parse" "--abbrev-ref" "--symbolic-full-name" "@{upstream}"]
                        root)
                    "origin/main")
-        asked [(run "git" ["diff" "--name-only" (str (string/trim upstream) "...HEAD")] root)
-                (run "git" ["diff" "--name-only" "HEAD"] root)
-                (run "git" ["diff" "--name-only" "--cached"] root)
-                (run "git" ["ls-files" "--others" "--exclude-standard"] root)])
-    (if (every? asked nil?)
+        committed (run "git"
+                    ["diff" "--name-only" "-z" (str (string/trim upstream) "...HEAD")]
+                    root)
+        ;; the index, the work tree and the untracked files in ONE `status`, not `git diff
+        ;; HEAD` + `--cached` + `ls-files --others`: the porcelain `git diff` writes the
+        ;; index it refreshes even under GIT_OPTIONAL_LOCKS=0, and `status` does not
+        working (run "git" ["status" "--porcelain" "-z" "--untracked-files=all"] root))
+    (if (and (nil? committed) (nil? working))
       nil
-      (sort (seq/distinct (mapcat asked (fn (out) (or (lines out) []))))))))
+      (sort (seq/distinct (into (if committed (vec (fields committed)) []) (status-paths working)))))))
 
 (defn git-base-text (root:string path:string -> (or string nil))
   "The text of `path` (absolute) at HEAD — what `git diff` compares the working file against.

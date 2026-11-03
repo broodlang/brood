@@ -157,14 +157,18 @@ endings ([[eol-decode]]), else `:lf`.
     (editor/buffer/buffer-eol (editor/buffer/make-buffer \"x\"))   ;=> :lf"
   (or (get buf :eol) :lf))
 
-(defn buffer-from-file (path)
+(defn buffer-from-file (path &optional contents)
   "Read the file at `path` into a fresh buffer, with `:file` set to `path` so
 `save-buffer` can write it back, stamped with the file's mtime (`buffer-stamp-file`). A
 file with CRLF line endings is read with bare newlines and remembered as `:eol :crlf`
 ([[buffer-eol]]), so the save writes CRLF again.
 
+`contents` is the file's text when the caller has read it already — an editor that reads
+the bytes once to tell a text file from a binary one (`string/bytes->` failing is the
+answer) hands the decoded text here rather than reading the file a second time.
+
     (editor/buffer/buffer-from-file \"notes.txt\")   ;~> …a buffer named notes.txt holding the file's text, :file set…"
-  (let ({:keys [text eol]} (eol-decode (file/slurp path))
+  (let ({:keys [text eol]} (eol-decode (if (nil? contents) (file/slurp path) contents))
         buf (make-buffer text path path))
     (buffer-stamp-file (if (= eol :crlf) (assoc buf :eol :crlf) buf))))
 
@@ -190,6 +194,38 @@ result knows the file and the text agree again.
       (do
         (file/spit f (eol-encode (buffer-text buf) (buffer-eol buf)))
         (mark-buffer-saved (buffer-stamp-file buf))))))
+
+(defn revert-buffer (buf:buffer -> buffer)
+  "`buf` with its file's text read back in — the file as it is NOW, its line ending
+included — as ONE undoable edit, then unmodified and stamped with the file's mtime: a
+single `undo` brings back the text it had, unsaved edits and all (Emacs's `revert-buffer`
+keeps the undo list the same way). What a revert, and an auto-revert picking up another
+writer's change, need so neither costs the history before it. A read-only buffer is
+reverted too, and stays read-only; a file whose text did not change records nothing.
+Raises when `buf` has no file or the file cannot be read.
+
+    (editor/buffer/revert-buffer buf)   ;~> buf holding its file's text, unmodified — undo gives back what it held"
+  (let (f (or (get buf :file) (error "revert-buffer: buffer has no file: " (get buf :name)))
+        {:keys [text eol]} (eol-decode (file/slurp f))
+        reread (if (= text (buffer-text buf))
+                 buf
+                 ;; through the mutators, so markers, the edit log a held parse is updated
+                 ;; from and the history all see one edit; widened for it — a read-only
+                 ;; buffer's file changes too — and its own step, never merged into typing
+                 (let (open (dissoc (assoc buf :undo-amalgamate false) :editable)
+                       ;; point stays where it was, clamped — not after the new text
+                       replaced (goto-char (replace-region open 0 (buffer-length open) text)
+                                  (math/min (buffer-point buf) (string/length text)))
+                       restored (if (contains? buf :editable)
+                                  (assoc replaced :editable (get buf :editable))
+                                  replaced))
+                   ;; the step's snapshot is of the WIDENED buffer: undo would leave it
+                   ;; writable, so it is the buffer as it was, narrowing and all
+                   (if (get buf :undo-disabled)
+                     restored
+                     (assoc restored :undo (cons (buffer-snapshot buf) (rest (get restored :undo)))))))
+        with-eol (if (= eol :crlf) (assoc reread :eol :crlf) (dissoc reread :eol)))
+    (buffer-stamp-file (mark-buffer-saved with-eol))))
 
 (defn buffer-file-changed? (buf)
   "True when the file behind `buf` has been written since the buffer last agreed with it

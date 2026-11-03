@@ -53,6 +53,41 @@
   (test "a missing file reads as {}"
     (assert= {} (read-file "/no/such/dir/std-settings-test.blsp" 'config))))
 
+(describe "settings: read-warnings — a file that reads as less than it says is said"
+  (test "a clean form, an empty file and a comment-only file are quiet"
+    (assert= [] (read-warnings "(config :hl-line false)" 'config "init.blsp"))
+    (assert= [] (read-warnings "" 'config "init.blsp"))
+    (assert= [] (read-warnings "  ;; nothing set yet\n" 'config "init.blsp")))
+  (test "a file that does not read names where, and that none of it applies"
+    (assert= ["init.blsp:3:1: unclosed list (opened here) — the file does not read, so none of it applies"]
+      (read-warnings "(config :a 1)\n\n(config :b" 'other "init.blsp"))
+    (assert= ["init.blsp:1:1: unclosed list (opened here) — the file does not read, so none of it applies"]
+      (read-warnings "(config :a 1\n" 'config "init.blsp")))
+  (test "a stray paren after the form names where, and that the form still applies"
+    (assert= {:a 1} (read-form "(config :a 1))" 'config))
+    (assert= ["init.blsp:1:14: unexpected ')' — after the (config …) form, which still applies"]
+      (read-warnings "(config :a 1))" 'config "init.blsp")))
+  (test "another form first, or text after the form, is said"
+    (assert= ["init.blsp: the file is not a (config …) form, so none of it applies"]
+      (read-warnings "(other :a 1)" 'config "init.blsp"))
+    (assert= ["init.blsp: the file is not a (config …) form, so none of it applies"]
+      (read-warnings "\"config\"" 'config "init.blsp"))
+    (assert= ["init.blsp: the text after the (config …) form is ignored — put every setting inside it"]
+      (read-warnings "(config :a 1)\n(config :b 2)" 'config "init.blsp")))
+  (test "a key with no value is said by name"
+    (assert= ["init.blsp: :b has no value, so it is ignored"]
+      (read-warnings "(config :a 1 :b)" 'config "init.blsp")))
+  (test "file-warnings reads the file; a missing one is quiet"
+    (let (file (path/temp "std-settings-test-"))
+      (do
+        (file/spit file "(config :a")
+        (let (said (file-warnings file 'config "init.blsp"))
+          (do
+            (file/rm file)
+            (assert= ["init.blsp:1:1: unclosed list (opened here) — the file does not read, so none of it applies"]
+              said)))))
+    (assert= [] (file-warnings "/no/such/dir/std-settings-test.blsp" 'config "init.blsp"))))
+
 (describe "settings: valid?, warnings"
   (test "unset is always valid; a set value must match the type and the predicate"
     (is (valid? (spec-of :std-settings-test/editor :cursor) nil))
