@@ -186,6 +186,31 @@
     (assert= (string/width->index "\tx" 4 3) 0)
     (assert= (string/width->index "\tx" 5 3) 1)))
 
+;; The tab width a call is not handed is the dynamic `*tab-width*` (ADR-537), so an
+;; editor binds it once around a pane's render and every measure inside — std's own
+;; included — lays tabs out on the buffer's stops.
+(describe "the ambient tab width"
+  (test "unbound, a tab stop is every 8 columns"
+    (assert= *tab-width* 8)
+    (assert= (string/display-width "\tx") 9))
+  (test "a binding moves the stops for all three, and their std callers"
+    (binding (*tab-width* 4)
+      (assert= (string/display-width "\tx") 5)
+      (assert= (string/expand-tabs "a\tb") "a   b")
+      (assert= (string/width->index "a\tb" 3) 1)
+      (assert= (string/width->index "a\tb" 4) 2)
+      (assert= (string/clip-cells "\tabcdef" 6) "\tab")))
+  (test "an explicit tab-width still wins over the binding"
+    (binding (*tab-width* 4) (assert= (string/display-width "\tx" 0 2) 3)))
+  (test "the binding is the process's own, and ends with its body"
+    (binding (*tab-width* 2)
+      (let (parent (self))
+        (spawn (send parent [:child-width (string/display-width "\t")]))
+        (assert= (receive ([:child-width width] width) (after 5000 :timeout)) 8)))
+    (assert= (string/display-width "\t") 8))
+  (test "a width below 1 is a stop every column, as an argument is"
+    (binding (*tab-width* 0) (assert= (string/display-width "\t\t") 2))))
+
 ;; The grapheme-INDEXED accessors (ADR-159). `string->graphemes` already gave the
 ;; clusters, but only as a whole vector — so the documented-correct cursor step
 ;; ("step by cluster, never by codepoint") cost a vector of every cluster in the

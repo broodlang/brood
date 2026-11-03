@@ -105,6 +105,13 @@
 ;; about (records with an `impl Display`, ropes, tables, functions) is handed to
 ;; `pr-str` unchanged, so custom printing keeps working and this stays small.
 
+;; The columns between tab stops wherever text is laid out by cell (ADR-537): the tab
+;; width `string/display-width`, `string/width->index` and `string/expand-tabs` use when
+;; not handed one, so `(binding (*tab-width* 4) …)` around an editor's pane render makes
+;; every measure inside it — `string/clip-cells` and the rest of std too — agree on
+;; a tab of 4. Emacs's `tab-width`, and its default.
+(defdyn *tab-width* 8)
+
 (defdyn *print-length* 100)
 (defdyn *print-level* 8)
 ;; The third bound, and in practice the one that saves a display: a TEXT leaf's
