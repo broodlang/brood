@@ -5020,3 +5020,11 @@ it kept them. The copy is keyed by the prelude text now, and the image builds fr
 `(coll x & more)` ignored a fourth argument. It is two clauses now: `(coll f)` raises on an
 empty collection, naming `(reduce coll start f)`, and `(coll init f)` is `fold`. Nothing in the
 tree relied on the `nil`.
+
+2026-11-03 (design pass item 14). Item 14 asked for one place that says where redefinition
+stops; `language.md` §Immutability has it as a table now. Probing each row found two holes in
+ADR-166's gate: `(def string/join …)` was accepted in a process that had not loaded `string`
+(names are sealed as their module loads, and a `def` target, unlike a reference, did not load
+it), and `(def if 1)` succeeded, binding a global no `(if …)` call can reach. The `def`
+expansion now loads an embedded module its target names, and `def` refuses a special form's
+name. `crates/lisp/tests/reserved_def_targets.rs`, each case red with its fix removed.

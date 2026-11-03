@@ -1378,6 +1378,21 @@ impl<'e> Machine<'e> {
         // **Before** the value is evaluated: the name is fully known by now, so running the
         // RHS first only meant a rejected `def` had already fired its side effects —
         // `(def map (do (print "SIDE") 1))` printed, *then* errored.
+        // A special form's name is reserved too, and more absolutely: `(if …)` is the form
+        // whatever the global table holds, so `(def if 1)` bound a global nothing could call
+        // and only a bare `if` read back — a definition that worked by accident.
+        if is_special_form(name) {
+            let shown = value::symbol_name(name);
+            return Err(LispError::type_err(format!(
+                "def: `{shown}` is a special form — the language's syntax, not a global — and \
+                 cannot be defined"
+            ))
+            .with_hint(format!(
+                "A call `({shown} …)` is always the special form, so a global named `{shown}` \
+                 could never be called. Pick another name."
+            ))
+            .or_form_pos(heap, expr));
+        }
         if heap.is_reserved_global(name) {
             let shown = value::symbol_name(name);
             return Err(LispError::type_err(format!(

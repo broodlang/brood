@@ -181,6 +181,32 @@ pub fn require_qualified_head(heap: &mut Heap, env: EnvId, s: Symbol) -> Result<
     Ok(true)
 }
 
+/// Load the embedded std module a `def` TARGET names, if it is not loaded yet, so the
+/// reserved-name check (ADR-166) sees that module's surface. A name is sealed when its module
+/// loads; before this, `(def string/join …)` in a process that had not loaded `string` was
+/// accepted, and the module's own definition then overwrote it, or it shadowed the module's
+/// function until then — whichever ran first decided. A qualified *reference* already loads
+/// its module (the head hook above, the miss path); this is the same inference for a `def`.
+///
+/// Only a prefix that names an embedded module loads: a `def` under your own namespace
+/// (`myns/foo`) is a new global, not a reference to a module that must exist. A bound target
+/// needs nothing — its module is loaded, or it is yours.
+pub fn require_def_target(heap: &mut Heap, env: EnvId, target: Symbol) -> Result<(), LispError> {
+    if heap.env_get(EnvId::GLOBAL, target).is_some() {
+        return Ok(());
+    }
+    let Some(module) = module_to_require(heap, target) else {
+        return Ok(());
+    };
+    if heap.compile_ns() == Some(module)
+        || crate::builtins::modules::embedded_module_source(value::symbol_name_ref(module))
+            .is_none()
+    {
+        return Ok(());
+    }
+    ensure_required(heap, env, module).map(|_| ())
+}
+
 /// Record the module of a resolved qualified reference `qualified_name` for auto-require
 /// (deferred; drained by [`drain_pending`]). A no-op unless recording is armed. Pure —
 /// interns a symbol and pushes to a thread-local, no heap/GC work — so it is safe to

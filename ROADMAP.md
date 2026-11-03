@@ -256,10 +256,11 @@ another Lisp has it.
     and no seed gave absence. Decided by design: a seedless `reduce` raises on an empty
     collection (a program error, so not a `failure`), and `reduce` is two clauses, so an
     argument past the reducer is an arity error instead of being ignored.
-14. ⬜ **Reserved names vs hot redefinition.** `(def get …)` at the top level is an error
-    (ADR-166), but `(defn get …)` inside a module defines `mod/get`, and a `let` may shadow
-    it. Every rule is sound, but there is no single place that tells a user of a
-    "redefine anything at runtime" system where redefinition stops.
+14. ✅ **Reserved names vs hot redefinition (2026-11-03, ADR-166 amendment).** One table in
+    `docs/language.md` §Immutability now says where redefinition stops. Writing it found two
+    holes, both closed by design: a `def` under a not-yet-loaded std module was accepted (it
+    now loads the module first, so the seal applies), and `(def if 1)` bound a global no call
+    could reach (special forms are refused).
 
 #### C. Teaching — the "Coming from Clojure" table
 

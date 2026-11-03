@@ -403,6 +403,23 @@ pub fn macroexpand_1(heap: &mut Heap, form: Value, env: EnvId) -> Result<(Value,
     // A no-op for a bare head or an already-loaded one (ADR-227 follow-up).
     let mut form = form;
     let mut env = env;
+    // `(def std-module/name …)`: load that module before the `def` runs, so its names are
+    // sealed and the reserved check refuses the rebind whatever was loaded before
+    // (`derive::require_def_target`). `form` is rooted across the load for the reason given
+    // below; `env` is not read after it.
+    if value::symbol_is(s, kw::DEF)
+        && let Some(ValueRef::Sym(target)) = heap
+            .list_items(form)
+            .and_then(|items| items.get(1).map(|v| v.unpack()))
+    {
+        let rb = heap.roots_len();
+        heap.push_root(form);
+        let r = crate::eval::derive::require_def_target(heap, env, target);
+        form = heap.root_at(rb);
+        heap.truncate_roots(rb);
+        r?;
+        return Ok((form, false));
+    }
     let mut head_macro = macro_head_id(heap, env, s);
     if head_macro.is_none() {
         // The require LOADS a module — arbitrary eval, therefore a collection that

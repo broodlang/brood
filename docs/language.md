@@ -144,6 +144,21 @@ a binding is made, it never changes. Concretely:
   **dynamic variable is never reserved**, whatever it holds: `defdyn` declares a name
   rebindable, so `(def *out* my-port)` — a permanent output redirect — still works
   alongside the scoped `binding` form.
+
+  **Where redefinition stops**, in one place:
+
+  | You write | Result |
+  |---|---|
+  | `(def my-fn …)`, `(def my/mod/f …)` — your own globals, your packages | redefines; running code sees it on its next lookup (hot reload) |
+  | `(def get …)`, `(defmacro when …)` — the prelude, a builtin | refused: reserved (ADR-166) |
+  | `(def string/join …)` — an embedded std module's function | refused, whether or not `string` has loaded yet: the `def` loads it first |
+  | `(def if …)` — one of the eight special forms | refused: `(if …)` is always the form, so the global could never be called |
+  | `(def *load-path* …)`, a `defdyn` name | redefines: shipped *data* and dynamic variables are not reserved |
+  | `(defn get …)` inside `(defmodule app/x …)` | defines `app/x/get`, a new name of yours |
+  | `(let (get …) …)`, a `fn` parameter named `get` | a local; nothing global changes |
+  | redefine a `defmethod` / `impl` | ordinary hot reload into the dispatch registry |
+  | redefine your own **macro** | later expansions use it; code already expanded keeps the old expansion until it is re-evaluated |
+  | `(reflect/undef 'mine)` / `(reflect/undef 'map)` | removes yours / refused for a shipped name |
 - **No imperative loop.** There is no `while` (and nothing to make it progress
   without mutation). Iteration is **recursion** — proper tail calls give O(1)
   stack — or, for state that must evolve over time, a **process** (`spawn` /
