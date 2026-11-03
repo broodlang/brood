@@ -952,7 +952,7 @@ not a header, or does not read: the load itself reports a malformed one."
                     targets (cond
                               (= head :load) (rest clause)
                               (includes? [:use :use-internals :alias] head) (list (second clause))
-                              :else nil))
+                              else nil))
                 (fold targets
                   acc
                   (fn (a m) (if (symbol? m) (cons (%root-module-name m) a) a))))

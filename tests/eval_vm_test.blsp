@@ -98,7 +98,7 @@
     (reflect/eval '(let (a 1 b 2) (+ a b)))
     (reflect/eval '(do 1 7))
     (reflect/eval '((fn (x) x) 5))
-    (reflect/eval '(cond false :a else :b))
+    (reflect/eval '(cond (= 1 2) :a else :b))
     (reflect/eval '(match 2 (x (* x 2))))))
 (def evm-prelude
   (list (reflect/eval '(count (list 1 2 3))) (reflect/eval '(map (list 1 2) (fn (x) (* x 2))))))

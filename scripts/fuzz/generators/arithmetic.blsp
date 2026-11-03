@@ -52,7 +52,7 @@
             (let (test (str "(" (draw-choice comparisons) " " (expr below) " " (expr below) ")"))
               (str "(if " test " " (expr below) " " (expr below) ")"))
           (< roll 0.85) (str "(" (draw-choice unary-ops) " " (expr below) ")")
-          :else (str "(let (t " (expr below) ") (" (draw-choice binary-ops) " t " (expr below) "))"))))))
+          else (str "(let (t " (expr below) ") (" (draw-choice binary-ops) " t " (expr below) "))"))))))
 
 (defn program (seed)
   (rng-reset seed)

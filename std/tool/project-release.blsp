@@ -537,7 +537,7 @@ Linux so a gnu + musl matrix cannot collide.
              (includes? triple "windows") "windows"
              (includes? triple "linux") (if (string/ends-with? triple "musl") "linux-musl" "linux")
              (includes? triple "freebsd") "freebsd"
-             :else nil))
+             else nil))
     (if os (str os "-" arch) triple)))
 
 (defn release-windows-triple? (triple:string -> bool)
@@ -591,7 +591,7 @@ output path; with several, each binary gets a per-target suffix.
           " name the output binary.\n  Give the path explicitly: nest release -o <path>")
         "2")
 
-    :else
+    else
       (let (stem (or output name))
         (cons "ok"
           (if (empty? targets)

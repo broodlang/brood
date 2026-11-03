@@ -572,7 +572,7 @@ fn a_self_call_argument_is_typed_in_its_enclosing_scope() {
                  (< j2 0) (inc j)\n\
                  (>= j2 (count rows)) (inc j)\n\
                  (nil? (nth rows j2)) (scan rows j2 dir n)\n\
-                 :else (scan rows j2 dir (dec n))))))\n\
+                 else (scan rows j2 dir (dec n))))))\n\
          (defn use-it (rows) (string/length (scan rows 3 1 1)))",
     );
     assert!(

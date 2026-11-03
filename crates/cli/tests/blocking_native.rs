@@ -112,7 +112,7 @@ const CALLER_DIES: &str = r#"
   (cond
     (ready?) true
     (= tries 0) false
-    :else (do (proc/sleep 20) (wait-for ready? (dec tries)))))
+    else (do (proc/sleep 20) (wait-for ready? (dec tries)))))
 (defn alive? (pid) (= 0 (:exit (os/cmd "kill" ["-0" pid]))))
 (defn started (pid-file)
   ;; the child's pid, once it has written it

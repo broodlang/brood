@@ -93,7 +93,7 @@
             true
             acc)
 
-        :else
+        else
           (dm-scan-describe-body where
             (rest forms)
             true

@@ -44,7 +44,7 @@
                          (expr below)
                          ")"))
               (str "(if " test " " (expr below) " " (expr below) ")"))
-          :else (str "(math/abs " (expr below) ")"))))))
+          else (str "(math/abs " (expr below) ")"))))))
 
 ;; `pick` cycles the argument type by phase: int (negative and positive), float, bignum
 ;; (past i64), small int.

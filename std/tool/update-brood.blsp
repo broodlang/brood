@@ -51,12 +51,12 @@ or a failure for a platform no release is built for.
   (letrec (compare (fn (left right)
                      (cond
                        (and (empty? left) (empty? right)) false
-                       :else
+                       else
                          (let (a (or (first left) 0) b (or (first right) 0))
                            (cond
                              (> a b) true
                              (< a b) false
-                             :else (compare (rest left) (rest right)))))))
+                             else (compare (rest left) (rest right)))))))
     (compare (seq (version-parts candidate)) (seq (version-parts current)))))
 
 (defn asset-url (tag target)
@@ -83,9 +83,9 @@ or a failure for a platform no release is built for.
             (nil? location) (failure (str "update-brood: " url ": redirect without a location"))
             (>= redirects *max-redirects*)
               (failure (str "update-brood: " url ": too many redirects"))
-            :else (fetch-following location (inc redirects))))
+            else (fetch-following location (inc redirects))))
       (not (= status 200)) (failure (str "update-brood: " url ": HTTP " status))
-      :else (get response :body))))
+      else (get response :body))))
 
 (defn- fetch (url) (fetch-following url 0))
 
@@ -115,7 +115,7 @@ or a failure for a platform no release is built for.
       (includes? exe "/target/")
         (failure (str "update-brood: "
                    exe " is a build tree, not an install; pass --dir to install elsewhere"))
-      :else (path/dirname exe))))
+      else (path/dirname exe))))
 
 (defn- verify (tarball checksum-text)
   (let (expected (first (string/split (string/trim checksum-text) " "))
@@ -179,7 +179,7 @@ true, only says whether a newer release exists. Returns 0 when done or already c
                     (and (nil? version) (not (version-newer? tag current)))
                       (do (say "brood " current " is the latest release") :current)
                     check (do (say tag " is available (installed: " current ")") :available)
-                    :else
+                    else
                       (with (directory (install-directory dir))
                         (install-release tag target directory)))))
     (if (failure? outcome)

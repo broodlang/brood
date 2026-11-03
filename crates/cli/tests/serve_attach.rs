@@ -36,7 +36,7 @@ fn attach_drives_a_served_app_over_the_link() {
   (cond
     (= input "+") (assoc m :n (+ (get m :n) 1))
     (= input "q") (assoc m :done true)
-    :else m))
+    else m))
 (editor/serve/serve mk vw up)
 (defn park () (receive (_ (park))))
 (park)

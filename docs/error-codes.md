@@ -131,7 +131,7 @@ you need the precision.
     (case (get e :kind)
       :unbound (do-handle-missing-dep e)
       :type    (raise e)            ; real bug, surface it
-      :else    (log-and-retry e))))
+      else    (log-and-retry e))))
 
 ;; Specific: only this exact failure can be retried, not all runtimes.
 (try

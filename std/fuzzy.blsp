@@ -185,7 +185,7 @@ this function rearranged (`fuzzy-dp-row`), so the library has one definition of 
         (fuzzy-make-term :exclude (string/substring piece 1 length) false false)
       (string/starts-with? piece "=")
         (fuzzy-make-term :literal (string/substring piece 1 length) false false)
-      :else
+      else
         (let (start? (string/starts-with? piece "^")
               from (if start? 1 0)
               end? (and (string/ends-with? piece "$") (> length from))
@@ -224,7 +224,7 @@ first on a tie."
     (nil? best) candidate
     (nil? candidate) best
     (> (first candidate) (first best)) candidate
-    :else best))
+    else best))
 
 (defn- fuzzy-walk (qchars hay-string bonuses at)
   "`[score positions]` for the GREEDY alignment of `qchars` within `hay-string` from index
@@ -281,7 +281,7 @@ matters because the greedy walk cannot backtrack: `limits.ex` against
   (cond
     (nil? a) b
     (nil? b) a
-    :else (math/max a b)))
+    else (math/max a b)))
 
 (defn- fuzzy-gap-arrival (gap-best j)
   "The best score reaching `j` across a gap, from `gap-best` — the running maximum of
@@ -379,7 +379,7 @@ file name's, for a path) and/or the end — else the best-scoring place it occur
           (fuzzy-run-at bonuses at-start length)
           nil)
       (:end? term) (if (run? (- n length)) (fuzzy-run-at bonuses (- n length) length) nil)
-      :else
+      else
         (letrec (go (fn (from best)
                       (let (at (index-of hay-string text from))
                         (if (< at 0)
@@ -555,7 +555,7 @@ key is only built on a tie."
     (cond
       (< score worst-score) true
       (> score worst-score) false
-      :else (> (compare (fuzzy-key score cand file?) worst) 0))))
+      else (> (compare (fuzzy-key score cand file?) worst) 0))))
 
 (defn- fuzzy-place (best k score cand file?)
   "The fold state `[count worst kept]` after `cand` is placed in `best` (ascending by key)
@@ -575,7 +575,7 @@ which is rare once the first k are in."
                       (nil? score) state
                       (< (first state) k) (fuzzy-place (third state) k score cand file?)
                       (fuzzy-worse? score cand file? (second state)) state
-                      :else (fuzzy-place (third state) k score cand file?))))))
+                      else (fuzzy-place (third state) k score cand file?))))))
     last))
 
 (defn- fuzzy-all (score-of cands file?)
@@ -750,7 +750,7 @@ then lexicographic. A query with no terms keeps `cands` in their given order. Sc
       ;; sort beats an interpreted fold, over it the fold pulls away. A ratio, not a size:
       ;; what matters is how many candidates get sorted per row actually displayed.
       (> n (* 100 k)) (fuzzy-fold (fuzzy-score-of query options) cands k file?)
-      :else (take (fuzzy-all (fuzzy-score-of query options) cands file?) k))))
+      else (take (fuzzy-all (fuzzy-score-of query options) cands file?) k))))
 (sig top (string seqable &optional (or nil int) (or nil map) -> seqable))
 
 (defn filter (query:string cands:seqable &optional (options nil) -> seqable)
@@ -811,7 +811,7 @@ subsequences); a literal by a literal containing it, at the same anchors."
               (and (:start? newer) (:end? newer) (= newer-text older-text))
             (:start? older) (and (:start? newer) (string/starts-with? newer-text older-text))
             (:end? older) (and (:end? newer) (string/ends-with? newer-text older-text))
-            :else (includes? newer-text older-text)))))))
+            else (includes? newer-text older-text)))))))
 
 (defn- fuzzy-refines? (older newer)
   "Whether query terms `newer` can only match a subset of what `older` matched: each older

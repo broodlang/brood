@@ -228,7 +228,7 @@ The first map is the base, so merging into a record keeps it that record, while 
 merged INTO a plain map contributes only its fields."
   ;; Seeded with nil, not `{}`: the first non-nil map IS the accumulator — no copy, and a
   ;; record base keeps its identity (`into {}` reads a record as its fields).
-  (let (merged (reduce maps nil (fn (acc m) (cond (nil? m) acc (nil? acc) m :else (into acc m)))))
+  (let (merged (reduce maps nil (fn (acc m) (cond (nil? m) acc (nil? acc) m else (into acc m)))))
     (if (nil? merged) {} merged)))
 
 (defn update (coll k f & args)

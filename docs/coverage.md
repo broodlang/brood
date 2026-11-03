@@ -217,7 +217,7 @@ Two design points make it precise:
 - **A branch is keyed by its TEST's source position, not the `if`'s line.** Sibling `if`s
   expanded from one `cond`/`match` share a line but their tests have distinct positions, so
   they stay separate branches.
-- **A constant test is not a branch.** `(if :else …)` — the tail of a `cond` — is folded away
+- **A constant test is not a branch.** `(if true …)` is folded away
   at compile time (`compile_node`), so it never instruments. Only a real decision counts. A
   test with no position (a bare `Local`/`Global`, `(if flag …)`) is skipped too; line
   coverage still covers it.

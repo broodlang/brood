@@ -225,9 +225,11 @@ another Lisp has it.
    `:map`, but `=` is nominal. Audit which map operations expose `:__id__` (`keys`,
    `count`, `seq`, `merge` with a plain map, `into {}`, `pr-str`, JSON encoding) and make
    them agree with `fields`.
-9. ⬜ **`cond`'s catch-all.** It is the bare symbol `else`; `:else` works only because a
-   keyword is truthy. Either make `:else` a checker lint (a second spelling, which
-   ADR-170's "one spelling per thing" refuses) or accept it silently and say so.
+9. ✅ **`cond`'s catch-all (2026-11-03, ADR-518).** It is the bare symbol `else`; `:else`
+   worked only because a keyword is truthy. Decided by design rather than lint: `cond` refuses
+   any constant test at expansion (truthy: it always runs; falsy: it never can), with a hint
+   for `:else`, and an `else` that is not last. Every `:else` test in brood and bedit is now
+   `else`.
 10. ✅ **Tail position is not checkable (2026-11-03).** With no `recur`, nothing told you that
     a `letrec` loop's self-call was in tail position; a non-tail one showed up at runtime as
     "recursion too deep", at whatever depth the data reached. The `defn` half already
@@ -263,7 +265,7 @@ another Lisp has it.
 ⬜ Add rows for the habits that are still wrong and are not yet in the table:
 - collection-first argument order and the missing `->>`;
 - `condp` taking the value first;
-- `else` rather than `:else`;
+- `else` rather than `:else` (a constant `cond` test raises, ADR-518);
 - a failure being truthy (the `or`-default habit);
 - `let` on an `*earmuffed*` name being lexical, and `spawn` not inheriting `binding`s;
 - callable keywords but not callable maps or vectors;

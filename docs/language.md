@@ -1029,9 +1029,10 @@ evaluator's core stays minimal and they cost nothing extra at runtime.
 (`(comment body…)` ignores its body and yields `nil` — the form-level "don't run
 this", since Brood has no `#_` discard reader macro. The body is still *read*, so
 it must be balanced sexps; the checker skips it, so names inside need not resolve.) `cond` is still flat test/expr pairs with **`else`** as
-the catch-all (ADR-004; `:else` was a second blessed spelling and is no longer
-special — it still catches, but only because a keyword is truthy, exactly as
-`true` or `42` would); `and`/`or` short-circuit left-to-right and return the
+the catch-all (ADR-004), and `else` must be the last test. A **constant** test is refused
+when the `cond` expands (ADR-518): `:else`, `true` or `42` would catch only because they
+happen to be truthy, and `false` or `nil` names a clause that can never run, so neither is
+a branch; `(cond … :else x)` raises with a hint to write `else`; `and`/`or` short-circuit left-to-right and return the
 deciding value, each subexpression evaluated once. There is **no iteration special
 form**: data is immutable and there is no local mutation (ADR-026), so loops are
 expressed as recursion (proper tail calls make this O(1) stack) — or, for evolving

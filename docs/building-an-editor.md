@@ -208,7 +208,7 @@ A **command** is a function `editor -> editor` (or `editor -> :quit` to exit). A
     (cond
       (< line top)              (assoc ed :top line)
       (>= line (+ top height))  (assoc ed :top (- line (dec height)))
-      :else ed)))
+      else ed)))
 
 (def *keymap*
   {:up        (cmd--on-buffer (fn (b) (backward-line b)))
@@ -230,7 +230,7 @@ unbound key is a no-op. Returns a new editor state, or `:quit`."
     (contains? *keymap* key) ((get *keymap* key) ed)
     (and (string? key) (= (string/length key) 1))
       ((cmd--on-buffer (fn (b) (insert b key))) ed)
-    :else ed))
+    else ed))
 ```
 
 Note how `dispatch` is pure: `editor + key -> editor`. The keymap is just a map

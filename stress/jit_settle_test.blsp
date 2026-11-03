@@ -26,7 +26,7 @@
   (cond
     (and (settled? g 2) (settled? leaf 1)) true
     (= rounds 0) false
-    :else (do (proc/sleep 2) (await-settled (- rounds 1)))))
+    else (do (proc/sleep 2) (await-settled (- rounds 1)))))
 
 (describe "jit: interpreted callers' native callees settle"
   (test "a leaf and a re-lowered loop both settle, and still compute"

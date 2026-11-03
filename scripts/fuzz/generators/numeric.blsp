@@ -42,7 +42,7 @@
                             -4611686018427387904 9223372036854775807 -9223372036854775808
                             9007199254740993 1180591620717411303424 -1180591620717411303424
                             9223372036854775807]))
-      :else
+      else
         (draw-choice ["0.0" "-0.0" "1.5" "2.0" "0.1" "3.14" "-2.5" "1e308" "-1e16" "0.5" "100.0"]))))
 
 (def binary-ops ["+" "-" "*" "math/max" "math/min" "math/quot" "math/rem" "math/mod"])
@@ -66,7 +66,7 @@
           (< roll 0.9)
             (str "(let (t " (expr below) ") (" (draw-choice binary-ops) " t " (expr below) "))")
           ;; division can yield a float or an error — both must match across engines
-          :else (str "(math/quot " (expr below) " (math/max 1 (math/abs " (expr below) ")))"))))))
+          else (str "(math/quot " (expr below) " (math/max 1 (math/abs " (expr below) ")))"))))))
 
 (defn program (seed)
   (rng-reset seed)

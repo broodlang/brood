@@ -47,7 +47,7 @@ fn a_send_right_after_connect_reaches_the_peer() {
         (defn first-lost (listener port remaining)
           (cond (= remaining 0) :none
                 (= (round listener port) :lost) remaining
-                :else (first-lost listener port (- remaining 1))))
+                else (first-lost listener port (- remaining 1))))
         (let (listener (tcp/listen "127.0.0.1" 0)
               lost (first-lost listener (tcp/local-port listener) 100))
           (tcp/close listener)

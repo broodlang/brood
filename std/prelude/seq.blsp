@@ -280,7 +280,7 @@ Always true for `n` <= 0.
         (not (map? from)) (%map-into to from)
         (%map-get from :__id__ nil) (%map-into to (seq from))
         (empty? to) from
-        :else (%map-into to (%map-pairs from)))
+        else (%map-into to (%map-pairs from)))
     ;; Set target: add each item (duplicates collapse). Without this branch the
     ;; `else` would pour a set into a LIST — `(into #{} [1 1 2])` as `(1 1 2)`.
     (set? to) (fold from to %set-add)

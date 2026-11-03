@@ -30,7 +30,7 @@
     (cond
       (< roll 0.4) [:literal (draw-choice ["1" "2" "0" ":k" ":q" "42"])]
       (< roll 0.7) [:unquote (draw-choice ["x" "y"])]
-      :else [:splice (draw-choice ["xs" "ys" "ws"])])))
+      else [:splice (draw-choice ["xs" "ys" "ws"])])))
 
 ;; Depth-bounded tree walks: the recursion is at most a few levels deep by construction.
 (check-allow :non-tail-recursion

@@ -36,7 +36,7 @@ debugger breaks at (`debug/break-fn`); stepping is not supported.")
           ;; a header with no length: drop it rather than wait forever
           (nil? n) (take-messages (bytes/slice buf start (bytes/length buf)) acc)
           (< (bytes/length buf) (+ start n)) [(reverse acc) buf]
-          :else
+          else
             (take-messages (bytes/slice buf (+ start n) (bytes/length buf))
               (cons (json/decode (string/bytes-> (bytes/slice buf start (+ start n)))) acc)))))))
 
@@ -106,7 +106,7 @@ debugger breaks at (`debug/break-fn`); stepping is not supported.")
                                        (string/substring l 7 (string/length l))
                                      (string/starts-with? l "(defn ")
                                        (string/substring l 6 (string/length l))
-                                     :else nil))
+                                     else nil))
                           (when rest (first (string/split rest " ")))))
             above (reverse (seq/subvec lines 0 (math/min line (count lines))))
             name (seq/find (map above defn-name) string?))

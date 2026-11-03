@@ -132,7 +132,7 @@
       (< roll 0.78) (token-bytes (draw-choice tokens))
       (< roll 0.9) (draw-choice junk-bytes)
       ;; a run of one delimiter to stress nesting / balance
-      :else
+      else
         (token-bytes (string/repeat (draw-choice ["(" ")" "[" "]" "{" "}" "'" "~"]) (draw-int 1 40))))))
 
 (defn program (seed)

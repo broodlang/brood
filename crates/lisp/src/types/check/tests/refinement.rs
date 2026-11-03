@@ -476,7 +476,7 @@ fn a_re_tagged_match_result_keeps_each_arm_apart_through_inference() {
              ([:error status why] [:error status why c])\n\
              ([:ok claims] [:ok claims c])))\n\
          (defn claims-for (n)\n\
-           (cond (< n 0) [:error 502 \"neg\"] :else [:ok {:email \"a\"}]))\n\
+           (cond (< n 0) [:error 502 \"neg\"] else [:ok {:email \"a\"}]))\n\
          (sig use (int -> any))\n\
          (defn use (n)\n\
            (match (complete n 1)\n\

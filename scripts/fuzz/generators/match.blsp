@@ -73,7 +73,7 @@
                                           [(conj texts text) next-binds])))
                 inner (string/join texts " "))
             [(if (= (:kind node) :vector) (str "[" inner "]") (str "(" inner ")")) final-binds])
-        :else [(render-value node) binds]))))
+        else [(render-value node) binds]))))
 
 (defn literal-mutation (node)
   "A scalar literal that differs from `node`, for the clause that must not match."

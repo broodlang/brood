@@ -24,7 +24,7 @@ fn sig_of(sigs: &[(String, String)], name: &str) -> String {
 
 const COUNT_UP: &str = "(defmodule order-probe)
 (defn count-up (i n acc)
-  (cond (>= i n) acc :else (count-up (+ i 1) n (+ acc i))))
+  (cond (>= i n) acc else (count-up (+ i 1) n (+ acc i))))
 (defn use-it () (count-up 0 10 0))";
 
 #[test]

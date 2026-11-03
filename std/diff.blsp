@@ -162,7 +162,7 @@ the hunks above it added and removed; inside a hunk, the replacing line at the s
                         (< line old-start) (+ line delta)
                         (< line (+ old-start old-count))
                           (+ new-start (math/min (- line old-start) (math/max 0 (dec new-count))))
-                        :else (walk (rest remaining) (+ delta (- new-count old-count))))))))
+                        else (walk (rest remaining) (+ delta (- new-count old-count))))))))
     (walk hunks 0)))
 
 (defn- last-line (text)
@@ -284,7 +284,7 @@ each prefixed with ` ` (keep), `-` (delete), or `+` (insert).
       (= p "/dev/null") nil
       (or (string/starts-with? p "a/") (string/starts-with? p "b/"))
         (string/substring p 2 (string/length p))
-      :else p)))
+      else p)))
 
 (defn- git-header-paths (line)
   "`[old new]` from a `diff --git a/x b/y` line (the split is at ` b/`, so a path with a
@@ -336,7 +336,7 @@ become a header line and corrupt every patch built from that file."
             :old-left (:old-count h)
             :new-left (:new-count h)))
       hunks? st
-      :else (assoc st :file (assoc file :headers (into (:headers file) [line]))))))
+      else (assoc st :file (assoc file :headers (into (:headers file) [line]))))))
 
 (defn- push-hunk-line (st line old? new?)
   "The parse state with `line` appended to the open hunk, spending its counts."
@@ -361,7 +361,7 @@ become a header line and corrupt every patch built from that file."
     (string/starts-with? line "+") (push-hunk-line st line false true)
     (string/starts-with? line "-") (push-hunk-line st line true false)
     ;; a context line; an EMPTY one is a context line whose trailing space was stripped
-    :else (push-hunk-line st line true true)))
+    else (push-hunk-line st line true true)))
 
 (defn- finish-hunks (file)
   "A parsed file with each hunk's lines put back in order as a vector."
@@ -436,7 +436,7 @@ counts are recomputed; nil when the range holds no change at all.
                      ;; outside the range: the side the patch ADDS is dropped, the side it
                      ;; would REMOVE stays as it is, i.e. as context
                      (= tag (if reverse? "-" "+")) (assoc acc :dropped? true)
-                     :else (assoc acc :out (cons (str " " body) (:out acc)) :dropped? false)))))
+                     else (assoc acc :out (cons (str " " body) (:out acc)) :dropped? false)))))
         out (into [] (reverse (:out kept)))
         old-n (count (seq/filter out
                        (fn (l)
@@ -506,7 +506,7 @@ written for `line-hunks`: a change gutter is `(hunks-status (mapcat hunks hunk-c
                       (assoc state :old (inc (:old state)) :removed (inc (:removed state)))
                     (string/starts-with? line "+")
                       (assoc state :new (inc (:new state)) :added (inc (:added state)))
-                    :else
+                    else
                       (let (flushed (flush state))
                         (assoc flushed :old (inc (:old flushed)) :new (inc (:new flushed))))))))
     (:out (flush final))))

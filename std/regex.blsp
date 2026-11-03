@@ -278,7 +278,7 @@ walked the parser's way — a `)` inside `[...]` or after a backslash is not a p
           (if (> depth 0)
             (regex-literal-strays pcs (inc i) (dec depth) false (conj acc c))
             (regex-literal-strays pcs (inc i) depth false (conj (conj acc "\\") c)))
-        :else (regex-literal-strays pcs (inc i) depth false (conj acc c))))))
+        else (regex-literal-strays pcs (inc i) depth false (conj acc c))))))
 
 (defn- regex-parse (pattern)
   "Parse `pattern` into its list of top-level branches."
@@ -341,7 +341,7 @@ rather than handed to the engine, which refuses one. A set with no members at al
     (cond
       (and (= members "") (:neg a)) "(?s:.)"
       (= members "") "[^\\s\\S]"
-      :else (str "[" (if (:neg a) "^" "") members "]"))))
+      else (str "[" (if (:neg a) "^" "") members "]"))))
 
 ;; check-allow: deliberately non-tail — depth = pattern nesting, not subject length.
 (check-allow :non-tail-recursion

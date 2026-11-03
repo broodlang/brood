@@ -44,7 +44,7 @@
           (< roll 0.85) (str "(if (< " (expr below) " 0) (error \"neg\") " (expr below) ")")
           ;; `nth` out of range answers nil rather than throwing, so the throw this leaf
           ;; exists to exercise is made explicit
-          :else (str "(or (nth [10 20 30] " (expr below) ") (error \"oob\"))"))))))
+          else (str "(or (nth [10 20 30] " (expr below) ") (error \"oob\"))"))))))
 
 ;; A nested try/catch: the inner catch answers a sentinel, then more arithmetic runs under
 ;; the outer accumulation — catch-then-continue.

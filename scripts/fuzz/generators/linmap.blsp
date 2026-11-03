@@ -80,7 +80,7 @@
       ;; 2-arity get: raises on a miss
       (< roll 0.93) (str "(assoc m " key " (+ (get m " key ") " addend "))")
       ;; different read key: no fuse
-      :else (str "(assoc m " key " (+ (get m :other 0) " addend "))"))))
+      else (str "(assoc m " key " (+ (get m :other 0) " addend "))"))))
 
 (defn program (seed)
   (rng-reset seed)

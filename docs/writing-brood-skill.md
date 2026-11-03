@@ -49,7 +49,8 @@ will get wrong if you write Brood like Clojure, Scheme, or Common Lisp.
 6. **Truthiness:** only `nil` and `false` are falsy. `0`, `-1`, `""`, `[]`, `{}`, `#{}`
    are **truthy** — but the **empty *list* is falsy** (`()` ≡ `nil`), so test
    emptiness with `(empty? x)`, never a bare `(if a-maybe-list …)`. `cond`'s
-   catch-all is `:else` (or `else`) — never `t`/`true`. The sentinel trap:
+   catch-all is `else`, last — never `:else`, `t` or `true` (a constant test raises,
+   ADR-518). The sentinel trap:
    `index-of` answers **-1** for "absent", so `(when (index-of s "x") …)` is always
    true — test `(>= (index-of s "x") 0)`, or `(includes? s "x")`. `nest check` flags a
    condition that can never be false.

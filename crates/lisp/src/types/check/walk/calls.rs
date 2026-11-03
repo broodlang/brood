@@ -929,7 +929,7 @@ pub(super) fn gradual_of_compound(heap: &Heap, expr: Value, ctx: &Ctx) -> Option
         let &last = items.last()?;
         return Some(gradual_of(heap, last, &scope));
     }
-    // `(cond t1 r1 … :else rN)` → join of the result positions (odd index ≥ 2).
+    // `(cond t1 r1 … else rN)` → join of the result positions (odd index ≥ 2).
     if value::symbol_is(head, kw::COND) {
         let results: Vec<Value> = items[2..].iter().step_by(2).copied().collect();
         return gradual_join(heap, &results, ctx);

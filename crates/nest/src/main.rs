@@ -136,6 +136,28 @@ enum Cmd {
 /// Skipped when the image is switched OFF (`BROOD_NO_STDIMAGE=1`): there is no point
 /// spending ~1 s writing a file nothing will read, and doing it unconditionally made every
 /// `nest` command in a parallel test run pay for it.
+/// `nest stdimage` builds from SOURCE: unless the image is already off, run this same
+/// command again with `BROOD_NO_STDIMAGE=1` and exit with its status.
+///
+/// The build `require`s every module and snapshots what it binds, and the boot installs any
+/// current image first, so with the image on every module came OUT of the image being
+/// replaced: a rebuild re-wrote the old values and could never repair one. That is how a
+/// value baked from another build's prelude (`doc-catalog`'s section headers, read while a
+/// shared prelude copy held an older text) survived every `nest stdimage` (2026-11-03).
+fn stdimage_from_source() {
+    if std::env::var_os("BROOD_NO_STDIMAGE").is_some() {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let status = std::process::Command::new(exe)
+        .args(std::env::args_os().skip(1))
+        .env("BROOD_NO_STDIMAGE", "1")
+        .status();
+    std::process::exit(status.ok().and_then(|st| st.code()).unwrap_or(1));
+}
+
 fn ensure_stdimage(interp: &mut Interp) {
     if std::env::var_os("BROOD_NO_STDIMAGE").is_some() {
         return;
@@ -172,6 +194,8 @@ fn ensure_stdimage(interp: &mut Interp) {
     let ok = std::process::Command::new(exe)
         .arg("stdimage")
         .env_remove("BROOD_CONTRACTS")
+        // From source, never from the image being replaced (`stdimage_from_source`).
+        .env("BROOD_NO_STDIMAGE", "1")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -397,6 +421,9 @@ fn run_blsp(max_parallel: Option<usize>, argv: Vec<String>) {
 }
 
 fn run_main(cli: Cli) {
+    if matches!(cli.cmd, Cmd::Stdimage) {
+        stdimage_from_source();
+    }
     init_runtime(cli.max_parallel);
 
     let mut interp = Interp::new();

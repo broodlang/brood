@@ -118,7 +118,7 @@
 (describe "control & binding"
   (test "conditionals"
     (assert= (if (< 1 2) :y :n) :y)
-    (assert= (cond false :a true :b else :c) :b)
+    (assert= (cond (= 1 2) :a (= 1 1) :b else :c) :b)
     (assert= (when true 1 2 3) 3))
   (test "let is sequential" (assert= (let (a 1 b (+ a 1)) (+ a b)) 3))
   (test "lexical closures" (assert= (let (adder (fn (a) (fn (b) (+ a b)))) ((adder 3) 4)) 7)))

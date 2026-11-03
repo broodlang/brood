@@ -356,7 +356,7 @@ fn a_request_lands_in_the_innermost_window_and_the_outer_needs_its_own() {
         (defn interrupt-until (pid tries)
           (cond (proc/interrupt pid) :landed
                 (= tries 0) :never
-                :else (do (proc/sleep 10) (interrupt-until pid (dec tries)))))
+                else (do (proc/sleep 10) (interrupt-until pid (dec tries)))))
         (def worker
           (spawn (send root [:outer (proc/interruptible nil
                                       (fn () (do (send root [:inner (first (proc/interruptible nil
@@ -455,7 +455,7 @@ fn a_receive_inside_a_region_parks_and_an_interrupt_lands_after_it_resumes() {
         (defn interrupt-until (pid tries)
           (cond (proc/interrupt pid) :landed
                 (= tries 0) :never
-                :else (do (proc/sleep 10) (interrupt-until pid (dec tries)))))
+                else (do (proc/sleep 10) (interrupt-until pid (dec tries)))))
         (send woken :go)
         [ran
          (= answers (vec (seq/repeat 256 [:ok :went])))

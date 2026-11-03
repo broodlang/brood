@@ -130,7 +130,7 @@ question out: it is nil.
     (cond
       found {:kind (first found) :root dir}
       (or (<= limit 0) (= dir (path/dirname dir))) nil
-      :else (locate-from (path/dirname dir) rows (dec limit)))))
+      else (locate-from (path/dirname dir) rows (dec limit)))))
 
 (defn locate (dir:string -> (or (record :kind keyword :root string) nil))
   "The checkout `dir` is in: `{:kind :git :root \"/src/app\"}` — the nearest directory, walking
@@ -162,7 +162,7 @@ nil when `dir` is in none.
     (cond
       (symbol? answers) (apply reflect/call-if-bound answers nil (cons (:root where) args))
       (fn? answers) (apply answers (cons (:root where) args))
-      :else nil)))
+      else nil)))
 
 ;; Trusted, not verified: each question is answered by a backend's hook, called late, so the
 ;; checker cannot see its result. The row's hooks are held to these types by the contract

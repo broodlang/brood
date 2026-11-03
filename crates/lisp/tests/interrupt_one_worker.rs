@@ -44,11 +44,11 @@ const PRELUDE: &str = r#"
       (let (info (proc/info pid))
         (cond (nil? info) :dead
               (= :waiting (:status info)) :parked
-              :else (do (proc/sleep 1) (await-waiting pid)))))
+              else (do (proc/sleep 1) (await-waiting pid)))))
     (defn interrupt-until (pid tries)
       (cond (proc/interrupt pid) :landed
             (= tries 0) :never
-            :else (do (proc/sleep 1) (interrupt-until pid (dec tries)))))
+            else (do (proc/sleep 1) (interrupt-until pid (dec tries)))))
 "#;
 
 /// A process waits in a window opened by `open` (`(open ceiling thunk)`), and the program

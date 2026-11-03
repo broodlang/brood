@@ -455,7 +455,7 @@ optional `#ref`), `:path` (an existing directory, or one spelled as a path), els
         (string/starts-with? source "~")
         (file/dir? source))
         :path
-      :else :registry)))
+      else :registry)))
 
 (defn- template-fetch (source)
   "The package `source` names, on disk: `{:root <its directory> :pin <how a manifest reaches
@@ -477,7 +477,7 @@ it, after the name> :temporary <a directory to remove afterwards, or nil>}`."
           {:root dest
            :pin (str ":git " (pr-str url) " :ref " (pr-str (or ref commit)))
            :temporary dest})
-      :else
+      else
         (let (dest (path/temp "brood-template-"))
           (when (not (project/valid-dep-name? source))
             (error "new: --from " (pr-str source) " is not a path, a git URL or a package name"))
@@ -514,7 +514,7 @@ only one, else the one called \"default\"."
             ")"))
       (= (count names) 1) (pick (first names))
       (includes? names "default") (pick "default")
-      :else
+      else
         (error "new: "
           source
           " has several templates — choose one with --template ("

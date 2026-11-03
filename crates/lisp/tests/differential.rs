@@ -127,7 +127,7 @@ const CORPUS: &[&str] = &[
     "(defn mk-let () (let (f (fn (n) (if (= n 0) :done (f (- n 1))))) f)) (let (me (self)) (try (do (send me (mk-let)) :ACCEPT) (catch _ :REJECT)))",
     "(defn mk-letrec () (letrec (f (fn (n) (if (= n 0) :done (f (- n 1))))) f)) (let (me (self)) (try (do (send me (mk-letrec)) :ACCEPT) (catch _ :REJECT)))",
     "(defn mk-let () (let (f (fn (n) (if (= n 0) :done (f (- n 1))))) f)) ((mk-let) 10)",
-    "(cond false :a (= 1 1) :b else :c)",
+    "(cond (= 1 2) :a (= 1 1) :b else :c)",
     "(when (< 1 2) (+ 1 1) (* 3 3))",
     // macros in a fn body — the VM must defer a closure whose body still holds an
     // *unexpanded* (forward-referenced / lazily-expanded) macro, or it would compile

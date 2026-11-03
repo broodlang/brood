@@ -4997,3 +4997,21 @@ position), and a parameter spelled like the function was taken for the function.
 warning across `std/`, `tests/` and `examples/`, `suite_test`'s deliberate `fact`, opted out.
 Three guards in `check/tests/lints.rs`, each red with its fix removed; the checker's 719 unit
 tests, `nest check` and `--strict` at zero.
+
+2026-11-03 (ADR-518, design pass item 9). `cond`'s `:else` caught only because a keyword is
+truthy. The user's rule for this class: accidental logic must not work, fixed by design where
+possible and by lint only otherwise. `cond` now refuses a constant test at expansion (a
+symbol or a call is a test; anything else evaluates to itself), naming `:else` specifically,
+and refuses an `else` that is not last, which used to drop every later clause in silence.
+96 `:else` tests in brood went to `else`; a regex pass also caught one `:else` RESULT (coverage's
+branch state), restored by hand, and the data uses (pattern literals, coverage states, a
+manifest string) were left alone. Four tests used `(cond false …)` / `(cond true …)` on
+purpose and now use computed tests; `const_test_fold_test` keeps the compiler's `if` fold
+covered with an `if` chain ending in `(if true x nil)`. First build: `type-of` names a list
+`:pair`, not `:list`, so every call test read as a constant and the prelude failed to expand.
+
+2026-11-03 (KI-316). The ADR-518 suite run failed `doc_catalog_test` on names the change never
+touched. Every Brood shares the cache directory, and the prelude's source copy was one file
+there that the KI-313 loop's older binaries kept rewriting; `doc-catalog` baked that file's
+section headers into the stdlib image, and `nest stdimage` rebuilt from the installed image, so
+it kept them. The copy is keyed by the prelude text now, and the image builds from source.

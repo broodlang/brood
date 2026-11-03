@@ -2235,7 +2235,7 @@ fn a_native_preempt_captures_the_loop_frame_not_its_callee() {
         .eval_str(
             "(defn pre-g (x) (cond (< x 0) (- 0 x) (< x 10) (+ x 1) (< x 100) (+ x 2) \
              (< x 1000) (+ x 3) (< x 10000) (+ x 4) (< x 100000) (+ x 5) \
-             (< x 1000000) (+ x 6) :else (+ x 7)))",
+             (< x 1000000) (+ x 6) else (+ x 7)))",
         )
         .expect("define pre-g");
     interp

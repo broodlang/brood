@@ -1470,7 +1470,7 @@ error a catch-all sees, so the kernel keeps raising it (sticky) until the window
             "  (fn (m input c r) (cond (= input \"s\") (do (mark \"spinning\") (spin 0))\n"
             "                          (= input :ctrl-g) (do (mark \"quit-folded\") m)\n"
             "                          (= input \"q\") (assoc m :done true)\n"
-            "                          :else m))\n"
+            "                          else m))\n"
             "  editor/ui/*term-display*)\n"
             "(mark \"exited\")\n"))
         (let (nest (sibling-binary "nest")

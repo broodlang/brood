@@ -38,7 +38,7 @@
           ;; a literal keyword, a type variable, garbage
           (< roll 0.7) (str ":" (draw-choice ["a" "b" "ok" "x"]))
           (< roll 0.85) (str "?" (draw-choice ["A" "B" "el"]))
-          :else (draw-choice ["foo" "Unknown" "123" "()"])))
+          else (draw-choice ["foo" "Unknown" "123" "()"])))
       (let (roll (draw-float) below (- depth 1))
         (cond
           (< roll 0.2)
@@ -49,7 +49,7 @@
           (< roll 0.75) (str "(or " (type-form below) " " (type-form below) ")")
           (< roll 0.85) (str "(and " (type-form below) " " (type-form below) ")")
           ;; malformed: empty / under-arity / bad arrows
-          :else
+          else
             (case (draw-int 0 8)
               0 "(or)"
               1 "(and)"

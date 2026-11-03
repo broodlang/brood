@@ -1371,8 +1371,8 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   calls, so recursion is just calling a name (a `defn`, or a local `letrec`); see
   *Looping is recursion*. Namespaces *do* exist now (ADR-065) but are `mod/name`-flat,
   not Clojure's `require :as` aliasing.
-- **Not Scheme / CL**: no `setq`, no `cond`-with-`t`-catch-all (use `else`
-  or `:else`).
+- **Not Scheme / CL**: no `setq`, no `cond`-with-`t`-catch-all: write `else`. Not
+  Clojure's `:else` either — `cond` refuses any constant test (ADR-518).
 - **`sort` on heterogeneous / non-numeric items uses *structural* order.**
   `(sort coll)` is `<` for numbers, lexicographic for vectors/lists, text order
   for strings/symbols/keywords (so `(sort [[1 0] [2 1]])` works, no comparator

@@ -202,13 +202,13 @@ What a registration checks beside `face-table-problems`.
     (not (map? injections)) (list (str (pr-str injections) " is not an injection spec map"))
     (not (every? (keys injections) (fn (k) (contains? #{:rules :faces} k))))
       (list "an injection spec takes :rules and :faces only")
-    :else
+    else
       (let (rules (get injections :rules [])
             faces (get injections :faces {}))
         (cond
           (not (or (vector? rules) (list? rules))) (list ":rules is a vector of injection rules")
           (not (map? faces)) (list ":faces maps a language keyword to its face table")
-          :else
+          else
             (append (mapcat rules (fn (rule) (injection-rule-problems rule faces)))
               (mapcat (%map-pairs faces)
                 (fn ([lang table])

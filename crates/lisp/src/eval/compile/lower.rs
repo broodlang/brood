@@ -1035,12 +1035,11 @@ fn compile_node_inner(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -
                     // LSP nav) has already happened, and nothing about evaluation order
                     // changes because a constant test evaluates to itself.
                     //
-                    // This is what makes a constant catch-all free. `cond` expands to
-                    // nested `if`s, so `(cond … :else x)` ends in `(if :else x nil)`;
-                    // without this fold that emits a keyword constant + a branch, which
-                    // drops the whole arm out of the unboxed-i64 register worker's
-                    // subset. The fold is general (`(if true a b)`, `(cond … 42 x)` alike), so
-                    // no spelling is privileged and no caller has to know the rule.
+                    // Without this fold a literal test emits a constant + a branch, which
+                    // drops the whole arm out of the unboxed-i64 register worker's subset
+                    // (the `(cond … :else x)` cliff, before ADR-518 made `cond` refuse a
+                    // constant test). A hand-written `(if true a b)` and macro output that
+                    // builds a literal test still reach here, so the fold stays general.
                     if let Some(t) = const_truthiness(&cond) {
                         return Some(if t { then } else { els });
                     }

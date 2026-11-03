@@ -131,7 +131,7 @@ re-derive the inputs.
         [:env-bound (string/interp "{(dp2 hops)} env-chain frames walked per lookup")]
       (and ic (< ic 0.9))
         [:dispatch-bound (string/interp "call-site inline cache hit rate {(pct ic)}")]
-      :else
+      else
         [:balanced
           (string/interp "no interpreted counter dominates ({(get rs :allocations)} allocations, {(get rs :gc-collections)} collections, {(get rs :native-runs)} native runs / {(get rs :native-deopts)} deopts — judge allocation separately)")])))
 

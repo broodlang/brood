@@ -154,7 +154,7 @@ embedded copy, a bundle).
           [{:kind :m :month m :week w :day d} end])
       (= head "J")
         [{:kind :julian :day (rule-int (string/substring body 1 (string/length body)))} end]
-      :else [{:kind :zero :day (rule-int body)} end])))
+      else [{:kind :zero :day (rule-int body)} end])))
 
 (defn- scan-change (s i)
   ;; [{:date :time} next-index] for `date[/time]`
@@ -279,7 +279,7 @@ the rule applied to every year. A failure when the rule does not parse.
               at (index-of real "/zoneinfo/"))
           (parse-tzif (file/slurp-bytes "/etc/localtime")
             (if (>= at 0) (string/substring real (+ at 10) (string/length real)) "localtime")))
-      :else (rule-zone "UTC0"))))
+      else (rule-zone "UTC0"))))
 
 (defn- last-at-or-before (times seconds)
   ;; index of the last transition at or before `seconds`, or -1
@@ -307,7 +307,7 @@ east of UTC.
       (>= i 0) (type-of (nth (:indices zone) i))
       ;; before the first transition: the first type (RFC 8536 §3.2)
       (not (empty? (:types zone))) (type-of 0)
-      :else {:offset 0 :dst? false :abbr "UTC"})))
+      else {:offset 0 :dst? false :abbr "UTC"})))
 
 ;; check-allow: the offset alone, in seconds — an int from a TZif type (`bytes/int`) or a
 ;; rule (`rule-int`), which the checker cannot follow through `map/select-keys`.
@@ -343,7 +343,7 @@ Java's and Temporal's default.
     (datetime/epoch-ms-> (cond
                            (empty? readings) (- wall (* 1000 before))
                            (= prefer :later) (last readings)
-                           :else (first readings)))))
+                           else (first readings)))))
 
 (sig offset->string (int -> string))
 (defn offset->string (seconds)

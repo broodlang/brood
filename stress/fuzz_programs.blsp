@@ -102,7 +102,7 @@
                 (expr (conj params binder) below)
                 ")"))
           ;; small vector build + constant-index read (MakeVector/VectorRef)
-          :else
+          else
             (let (size (random-int 2 4))
               (str "(nth ["
                 (string/join (map (range size) (fn (_) (expr params below))) " ")
@@ -134,7 +134,7 @@
                 ") "
                 (spaced (i64-expr params below) (i64-expr params below))
                 ")"))
-          :else
+          else
             (let (binder (fresh-name "q"))
               (str "(let ("
                 binder
@@ -552,7 +552,7 @@
       ;; "sound" would make every soundness check hollow
       (= (:exit result) 2)
         (error "fuzz_programs: `brood --check` refused to run: " (string/trim (:stderr result)))
-      :else
+      else
         (let (real (seq/filter (string/split (string/trim (str (:stdout result) (:stderr result)))
                                  "\n")
                      (fn (line)
@@ -590,7 +590,7 @@
   (cond
     (>= index (count chars)) index
     (and (= (nth chars index) "\"") (not (= (nth chars (- index 1)) "\\"))) (+ index 1)
-    :else (scan-string-end chars (+ index 1))))
+    else (scan-string-end chars (+ index 1))))
 
 (defn- scan-while (chars index keep?)
   (if (and (< index (count chars)) (keep? (nth chars index)))
@@ -609,7 +609,7 @@
             (tokenize-from chars end (conj tokens (string/join (seq/subvec chars index end) ""))))
         (= char ";") (tokenize-from chars (scan-while chars index (fn (c) (not (= c "\n")))) tokens)
         (contains? *whitespace* char) (tokenize-from chars (+ index 1) tokens)
-        :else
+        else
           (let (end (scan-while chars
                       index
                       (fn (c) (not (or (contains? *whitespace* c) (contains? *delimiters* c))))))
@@ -770,7 +770,7 @@
     (= (first args) "--start")
       (parse-options (rest (rest args))
         (assoc options :start (count-argument "--start" (second args))))
-    :else (error "fuzz_programs: unknown argument: " (first args))))
+    else (error "fuzz_programs: unknown argument: " (first args))))
 
 (defn- clip (text width) (if (> (string/length text) width) (string/substring text 0 width) text))
 
@@ -837,7 +837,7 @@
                        seed " transient (diverged once, converged on re-check — skipped)"))
             (when (not keep) (file/rm path))
             [:transient clean]))
-      :else
+      else
         (do
           (when (not keep) (file/rm path))
           (io/puts (str "seed " seed " ok (" (last-line-prefix (first outputs) 60) ")"))
@@ -875,7 +875,7 @@
                      seeds
                      " seeds agreed but NOT ONE ran to a clean exit — the corpus is dead, not the engines agreeing"))
           (system/halt 1))
-      :else
+      else
         (do
           (io/puts (str "---- fuzz: " seeds " seeds, all configs agree (" live " ran clean)"))
           (when (and (not (:keep options)) (empty? (file/ls outdir))) (file/rmdir outdir))

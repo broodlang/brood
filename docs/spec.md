@@ -210,7 +210,7 @@ the expander calls, and `%make-macro` is the one primitive that tags it as such.
 | `(if t a b?)` | Evaluate `t`; if truthy (§8) evaluate `a`, else `b` (or `nil`). `a`/`b` are in tail position. |
 | `(when t body...)` | If `t` is truthy, evaluate `body`; else `nil`. |
 | `(unless t body...)` | If `t` is falsy, evaluate `body`; else `nil`. |
-| `(cond t₁ e₁ t₂ e₂ …)` | Even number of forms. Evaluate tests left to right; the first truthy test's `eᵢ` is the result (tail position). `else` or `:else` as a test always matches. No match ⇒ `nil`. |
+| `(cond t₁ e₁ t₂ e₂ …)` | Even number of forms. Evaluate tests left to right; the first truthy test's `eᵢ` is the result (tail position). `else`, which must be the last test, always matches; a constant test (`:else`, `true`, `nil`, a number) raises at expansion (ADR-518). No match ⇒ `nil`. |
 | `(do body...)` | Evaluate in order; result is the last (tail position), or `nil` if empty. |
 | `(def name v?)` | Evaluate `v` (or `nil`) and bind `name` globally (redefinable — the language's only mutation). Result: `name`. |
 | `(fn (params) body...)` | A closure capturing the current environment. The parameter list is a **list**, not a vector (ADR-149) — a vector there is an error. |

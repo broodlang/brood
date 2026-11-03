@@ -688,7 +688,7 @@ network-path reference `//host/path` takes the scheme alone.
   (let (with-scheme (cond
                       (>= (index-of url "://") 0) url
                       (string/starts-with? url "//") (str "http:" url)
-                      :else (str "http://" url))
+                      else (str "http://" url))
         u (url/parse-url with-scheme)
         scheme (or (/get u :scheme) "http")
         path (let (p (/get u :path)) (if (or (nil? p) (= p "")) "/" p))
@@ -900,7 +900,7 @@ response map (`:body` is `bytes`; see `body-text`).
           (> (+ have size) http/*max-response-bytes*)
             (failure "http: response exceeded http/*max-response-bytes*")
           (= size 0) (http-read-trailers sock rest (bytes/concat (reverse acc)))
-          :else
+          else
             (let (chunk (http-read-exactly sock (+ size 2) rest))
               (if (failure? chunk)
                 chunk
@@ -914,7 +914,7 @@ response map (`:body` is `bytes`; see `body-text`).
     (cond
       (failure? line) line
       (= (bytes/length (first line)) 2) [body (second line)]
-      :else (http-read-trailers sock (second line) body))))
+      else (http-read-trailers sock (second line) body))))
 
 (defn- http-read-to-close (sock seed)
   ;; a body with no framing: everything until the server closes
@@ -949,7 +949,7 @@ nothing but its close.
                    no-body? [#b"" rest]
                    chunked? (http-read-chunks sock rest nil 0)
                    (int? length) (http-read-exactly sock length rest)
-                   :else (http-read-to-close sock rest)))
+                   else (http-read-to-close sock rest)))
         (if (failure? body)
           body
           {:response (assoc resp :body (first body))
@@ -1004,7 +1004,7 @@ nothing but its close.
             (if (failure? again)
               {:sock nil :result again}
               (http-settle again (http-exchange again u method target ropts)))))
-      :else (http-settle first-sock first-try))))
+      else (http-settle first-sock first-try))))
 
 (defn- http-settle (sock result)
   ;; keep the socket after a response that leaves it usable; close it otherwise

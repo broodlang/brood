@@ -25,14 +25,14 @@
 
 (describe "cond — wrong syntax"
   (test "even clause count works normally"
-    (assert= (cond true :yes false :no) :yes)
-    (assert= (cond false :no else :yes) :yes))
+    (assert= (cond (= 1 1) :yes (= 1 2) :no) :yes)
+    (assert= (cond (= 1 2) :no else :yes) :yes))
 
   (test "empty cond returns nil"
     (assert= (cond) nil))
 
   (test "cond with else clause works"
-    (assert= (cond false :never else :default) :default))
+    (assert= (cond (= 1 2) :never else :default) :default))
 
   (test "odd clause count raises a clear error"
     (let (msg (expand-error '(cond true)))
@@ -49,20 +49,28 @@
       (is (includes? msg "c"))))
 
   (test "correct 4-clause cond does NOT raise"
-    (assert= (cond false :a false :b else :c) :c))
+    (assert= (cond (= 1 2) :a (= 1 3) :b else :c) :c))
 
   (test "else as sole clause does not raise (returns nil)"
     ;; (cond else) is degenerate but tolerated — else has no expression and
     ;; expands to nil. Not worth erroring; the oddness guard exempts else.
     (assert= (reflect/eval '(cond else)) nil))
 
-  (test ":else is no longer a blessed spelling — only `else` is"
-    ;; A keyword is self-evaluating and truthy, so `:else` never needed a special
-    ;; case: as an ordinary test it still catches (like `true` or `42` would).
-    (assert= (reflect/eval '(cond false 1 :else :caught)) :caught)
-    (assert= (reflect/eval '(cond false 1 42 :caught)) :caught)
-    ;; …but the oddness guard exempts only `else`, so a lone `:else` is now the
-    ;; missing-expression error it always was for any other test.
+  (test "a constant test is refused — `else` is the only catch-all (ADR-518)"
+    ;; `:else` used to catch only because a keyword is truthy: accidental logic. Every
+    ;; constant test is refused at expansion, truthy (its clause always runs) or falsy
+    ;; (it never can), and `else` must come last.
+    (is (includes? (error-of (reflect/eval '(cond (= 1 2) 1 :else :caught)))
+          "cond: `:else` is a keyword, truthy by accident, not the catch-all — write `else`"))
+    (is (includes? (error-of (reflect/eval '(cond (= 1 2) 1 42 :caught)))
+          "cond: the test 42 is a constant, so its clause always runs — write `else` for a catch-all"))
+    (is (includes? (error-of (reflect/eval '(cond false 1 else :caught)))
+          "cond: the test false is a constant, so its clause can never run"))
+    (is (includes? (error-of (reflect/eval '(cond else 1 (= 1 1) 2)))
+          "cond: `else` is not the last test, so every clause after it is dead"))
+    (assert= (reflect/eval '(cond (= 1 2) 1 else :caught)) :caught)
+    ;; …and the oddness guard exempts only `else`, so a lone `:else` is the
+    ;; missing-expression error it is for any other test.
     (assert-error (reflect/eval '(cond :else)))))
 
 ;; ── 2. %defseq — non-string docstring ─────────────────────────────────────────

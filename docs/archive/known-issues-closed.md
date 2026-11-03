@@ -15696,6 +15696,28 @@ generation gone and is a no-op.
 another between `drop_link`'s removal and its delivery, it failed every run; with the fix under
 the same sleeps it passes. 500 runs of the case without them, and the 62 dist tests, green.
 
+## KI-316 — the doc catalogue read another build's prelude ✅ FIXED 2026-11-03
+
+**Seen:** `doc_catalog_test` failed on the ADR-518 tree: `binding`, `conj` and `spawn-monitor`
+fell through to `:other` and `match` read as `:control` (the `case` section). The tree's only
+prelude change was 28 lines added to `core.blsp`; an older build (the KI-313 loop's worktree)
+was running at the same time.
+
+**Cause.** Three layers. Every Brood writes its embedded prelude to a cache file so def-sites
+have a source to point at, and it was ONE file, `~/.cache/brood/prelude.blsp`, rewritten by
+whichever binary differed from it last; a binary's recorded lines then pointed into another
+build's text. `doc-catalog` reads that file's section headers when it loads, and loading
+happens while the stdlib image is built, so the headers of the older text were baked in. And
+`nest stdimage` booted with the current image installed, so its `require`s came out of the
+image it was replacing: a rebuild re-wrote the same stale value. With the image off the
+catalogue was right.
+
+**Fix.** The copy is named by its content (`prelude-source-<hash>/prelude.blsp`, written by
+rename, pruned like the prelude images), so a path always means one text. `nest stdimage`
+re-runs itself with `BROOD_NO_STDIMAGE=1` (and `ensure_stdimage`'s child gets it directly), so
+an image is built from source. Guard: `boot::prelude_copy_tests` (red with the unkeyed name);
+the rebuild half by construction, since the reproduced failure cleared only with the image off.
+
 ## KI-315 — `accept_starvation`'s client could read an empty port file and die ✅ FIXED 2026-11-02
 
 **Seen:** CI's tree-walker job on `fe79302d` (a docs-only commit) failed

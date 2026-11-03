@@ -855,7 +855,7 @@ fn control_flow_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
         let scope = sequence_scope(heap, &items[2..items.len() - 1], &scope);
         return expr_ty(heap, last, &scope);
     }
-    // `(cond test1 res1 test2 res2 … :else resN)` — union of the *result*
+    // `(cond test1 res1 test2 res2 … else resN)` — union of the *result*
     // positions (every odd index from 2 onward). Surface form (post-expansion this
     // is nested `if`s, handled above); kept for fragments.
     if value::symbol_is(head, kw::COND) {

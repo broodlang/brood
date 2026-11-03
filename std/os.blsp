@@ -261,14 +261,14 @@ argument vector to `os/cmd` / `os/spawn` and there is nothing to quote.
             (= c "\"") (shell-split-walk more :plain word true acc)
             (and (= c "\\") (contains? *shell-double-escapes* next))
               (shell-split-walk (rest more) :double (str word next) true acc)
-            :else (shell-split-walk more :double (str word c) true acc))
+            else (shell-split-walk more :double (str word c) true acc))
         (contains? *shell-blank-chars* c)
           (shell-split-walk more :plain "" false (if started? (cons word acc) acc))
         (= c "'") (shell-split-walk more :single word true acc)
         (= c "\"") (shell-split-walk more :double word true acc)
         (and (= c "\\") (not (nil? next)))
           (shell-split-walk (rest more) :plain (str word next) true acc)
-        :else (shell-split-walk more :plain (str word c) true acc)))))
+        else (shell-split-walk more :plain (str word c) true acc)))))
 
 (defn shell-split (s:string -> list)
   "The words a POSIX shell splits `s` into, without running one — the inverse of

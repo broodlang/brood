@@ -31,7 +31,7 @@
       (< roll 0.5) (draw-choice ["a" "b"])
       (< roll 0.7) (str (draw-choice [0 1 2 -1 3 -2 7]))
       (< roll 0.85) (str (draw-choice [1152921504606846976 -1152921504606846976 9007199254740993]))
-      :else (draw-choice ["0.0" "1.5" "2.0" "-2.5" "100.0"]))))
+      else (draw-choice ["0.0" "1.5" "2.0" "-2.5" "100.0"]))))
 
 (def operators ["+" "-" "*" "math/max" "math/min" "math/quot" "math/rem"])
 
@@ -52,7 +52,7 @@
                          (expr below)
                          ")"))
               (str "(if " test " " (expr below) " " (expr below) ")"))
-          :else (str "(let (t " (expr below) ") (" (draw-choice operators) " t " (expr below) "))"))))))
+          else (str "(let (t " (expr below) ") (" (draw-choice operators) " t " (expr below) "))"))))))
 
 (defn variants (body)
   "Semantics-preserving rewrites of `body`, every one equal to it."

@@ -172,6 +172,18 @@ pub fn cache_dir() -> Option<std::path::PathBuf> {
 /// on a machine that is editing the standard library — the only kind that writes these —
 /// every rebuild mints a new file and nothing is ever old enough for an age rule to catch.
 fn prelude_image_prune(dir: &std::path::Path, keep: &std::path::Path) {
+    prune_cache_entries(dir, keep, |name| {
+        name.starts_with("prelude-expanded-") && name.ends_with(".img")
+    });
+}
+
+/// The count-and-age prune [`prelude_image_prune`] describes, over the entries of `dir`
+/// whose name `matches` — a file or a directory — never touching `keep`.
+fn prune_cache_entries(
+    dir: &std::path::Path,
+    keep: &std::path::Path,
+    matches: impl Fn(&str) -> bool,
+) {
     const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
     const MAX_KEEP: usize = 16;
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -182,24 +194,30 @@ fn prelude_image_prune(dir: &std::path::Path, keep: &std::path::Path) {
         let path = entry.path();
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !(name.starts_with("prelude-expanded-") && name.ends_with(".img")) || path == keep {
+        if !matches(&name) || path == keep {
             continue;
         }
         match entry.metadata().and_then(|metadata| metadata.modified()) {
             Ok(modified) => others.push((modified, path)),
             // Unreadable metadata: not worth keeping around.
-            Err(_) => {
-                let _ = std::fs::remove_file(&path);
-            }
+            Err(_) => remove_cache_entry(&path),
         }
     }
     others.sort_unstable_by_key(|other| std::cmp::Reverse(other.0));
     for (rank, (modified, path)) in others.iter().enumerate() {
         let stale = modified.elapsed().ok().is_some_and(|age| age > MAX_AGE);
         if rank >= MAX_KEEP || stale {
-            let _ = std::fs::remove_file(path);
+            remove_cache_entry(path);
         }
     }
+}
+
+fn remove_cache_entry(path: &std::path::Path) {
+    let _ = if path.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    };
 }
 
 /// Run the prelude's `(%std-image-reinstall!)` in the builder heap, returning its result
@@ -470,9 +488,16 @@ pub fn is_prelude_source(file: &str) -> bool {
 /// return its path — the file the prelude's def-sites point at, so tools (the
 /// LSP's `M-.`) can open the standard library's source. The prelude is
 /// `include_str!`'d, so it has no source file at runtime; this writes one copy
-/// to `$XDG_CACHE_HOME/brood/prelude.blsp` (falling back to `~/.cache`), only
-/// when missing or stale (a new build ships a different prelude). Editing it
-/// has no effect — it's a navigation artefact, not a load path.
+/// to `$XDG_CACHE_HOME/brood/prelude-source-<hash>/prelude.blsp` (falling back to
+/// `~/.cache`), where `<hash>` is the prelude TEXT's. Editing it has no effect — it's
+/// a navigation artefact, not a load path.
+///
+/// Keyed by content because every Brood on the machine shares the cache: one
+/// unkeyed `prelude.blsp` was rewritten by whichever binary ran last, so a binary
+/// whose def-sites point into it read another prelude's lines. The doc catalogue
+/// maps those sites onto section headers and filed `match` under `case` while an
+/// older build ran beside a newer one (2026-11-03). A keyed path names one text
+/// for good.
 ///
 /// A cache dir that cannot be written (a read-only `HOME` in a container) falls
 /// back to the system temp dir: the doc catalogue derives categories from these
@@ -497,16 +522,21 @@ fn temp_dir_prelude_copy() -> Option<String> {
 }
 
 fn write_prelude_copy(dir: &std::path::Path) -> Option<String> {
-    std::fs::create_dir_all(dir).ok()?;
-    let path = dir.join("prelude.blsp");
-    // Rewrite only when the on-disk copy is absent or differs from this build's
-    // embedded prelude — keeps the file stable across runs and across versions.
-    let stale = match std::fs::read(&path) {
-        Ok(existing) => existing != PRELUDE.as_bytes(),
-        Err(_) => true,
-    };
-    if stale {
-        std::fs::write(&path, PRELUDE).ok()?;
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    PRELUDE.hash(&mut h);
+    let own = dir.join(format!("prelude-source-{:016x}", h.finish()));
+    std::fs::create_dir_all(&own).ok()?;
+    let path = own.join("prelude.blsp");
+    // Write when absent, or when a partial write (a killed process) left it short:
+    // the name fixes the content, so a copy that matches is never written again.
+    let complete = std::fs::read(&path).is_ok_and(|existing| existing == PRELUDE.as_bytes());
+    if !complete {
+        // Write beside it and rename into place, so a reader never sees half a file.
+        let partial = own.join(format!("prelude.blsp.{}", std::process::id()));
+        std::fs::write(&partial, PRELUDE).ok()?;
+        std::fs::rename(&partial, &path).ok()?;
+        prune_cache_entries(dir, &own, |name| name.starts_with("prelude-source-"));
     }
     Some(path.to_string_lossy().into_owned())
 }
@@ -836,6 +866,33 @@ mod replay_tests {
             replay_std_image_install(&mut heap, root).is_none(),
             "an install replay that raised was treated as a successful boot step"
         );
+    }
+}
+
+#[cfg(test)]
+mod prelude_copy_tests {
+    use super::*;
+
+    /// The copy is named by its text, so a cache shared with another build can never hand
+    /// this binary's def-sites someone else's lines; a copy cut short (a killed writer) at
+    /// this build's name is completed, not trusted.
+    #[test]
+    fn the_prelude_copy_is_named_by_its_text_and_completed_if_short() {
+        let dir = std::env::temp_dir().join(format!("brood-prelude-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Another build's unkeyed copy, as older binaries still write it: never read.
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("prelude.blsp"), "(an older prelude)").unwrap();
+        let path = write_prelude_copy(&dir).expect("a writable cache gets a copy");
+        assert!(
+            path.contains("prelude-source-"),
+            "the copy is not keyed: {path}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), PRELUDE);
+        std::fs::write(&path, &PRELUDE[..100]).unwrap();
+        assert_eq!(write_prelude_copy(&dir).as_deref(), Some(path.as_str()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), PRELUDE);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

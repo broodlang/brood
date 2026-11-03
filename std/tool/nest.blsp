@@ -1052,7 +1052,7 @@ so a matching local setup needs no flag."
       (not (and (string? file) (file/exists? file)))
         (do (io/puts (str "nest profile: no such file: " file) :to *err*) 2)
       (not (int? hz)) (do (io/puts "nest profile: --hz wants a number" :to *err*) 2)
-      :else
+      else
         (let (_ (dev/profile-start hz)
               outcome (try
                         (do
