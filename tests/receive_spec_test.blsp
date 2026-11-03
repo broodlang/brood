@@ -120,3 +120,23 @@
         (let (sums (map (range 50) (fn (_) (receive ([:sum s] s) (after 20000 :timeout)))))
           (send server :stop)
           (assert= (+ (* 49 50 1/2) 50) (fold sums 0 +)))))))
+
+;; ADR-520: a receive with nothing but an `after` waits, leaving the mailbox alone. It
+;; used to take the next queued message and return IT instead of the timeout body — so
+;; every `(receive (after ms nil))` written as a pause ate a message and returned at once.
+(describe "a receive with only an after clause waits"
+  (test "a queued message is left queued, and the timeout body is the answer"
+    (send (self) :queued)
+    (assert= (receive (after 10 :timed-out)) :timed-out)
+    (assert= (receive (m m) (after 0 :empty)) :queued))
+
+  (test "it waits its time out even with messages queued"
+    (send (self) :queued)
+    (let (start (os/now))
+      (receive (after 30 nil))
+      (is (>= (- (os/now) start) 25)))
+    (assert= (receive (m m) (after 0 :empty)) :queued))
+
+  (test "(receive) with no clauses still takes the next message"
+    (send (self) :next)
+    (assert= (receive) :next)))
