@@ -26,16 +26,19 @@ pub(in crate::builtins) fn term_err(e: std::io::Error) -> LispError {
 /// restores the terminal if the program panics, so a crash never wrecks it.
 pub(in crate::builtins) fn term_enter(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     use crossterm::cursor::Hide;
-    use crossterm::event::EnableMouseCapture;
+    use crossterm::event::{EnableFocusChange, EnableMouseCapture};
     use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
     enable_raw_mode().map_err(term_err)?;
     // Mouse capture rides with the full-screen path only (not the inline REPL
     // seam), so click/scroll reach `term-poll`. It costs terminal text-selection
-    // while active — standard for a TUI, and only for the duration of the UI.
+    // while active — standard for a TUI, and only for the duration of the UI. Focus
+    // reports (`CSI ?1004h`) too: the terminal says when it gains and loses the keyboard,
+    // delivered as a window's `:focus-in` / `:blur` (ADR-536), off again on leave.
     crossterm::execute!(
         std::io::stdout(),
         EnterAlternateScreen,
         EnableMouseCapture,
+        EnableFocusChange,
         Hide
     )
     .map_err(term_err)?;
@@ -51,13 +54,14 @@ pub(in crate::builtins) fn term_enter(_: &[Value], _: EnvId, _: &mut Heap) -> Li
 /// disable raw mode). The normal-path teardown for `term-enter`.
 pub(in crate::builtins) fn term_leave(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     use crossterm::cursor::Show;
-    use crossterm::event::DisableMouseCapture;
+    use crossterm::event::{DisableFocusChange, DisableMouseCapture};
     use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
     keyboard::restore();
     crossterm::execute!(
         std::io::stdout(),
         Show,
         DisableMouseCapture,
+        DisableFocusChange,
         LeaveAlternateScreen
     )
     .map_err(term_err)?;
@@ -71,7 +75,7 @@ pub(in crate::builtins) fn term_leave(_: &[Value], _: EnvId, _: &mut Heap) -> Li
 /// errors are swallowed (the normal path is the Brood `term-leave`).
 pub fn restore_terminal() {
     use crossterm::cursor::Show;
-    use crossterm::event::DisableMouseCapture;
+    use crossterm::event::{DisableFocusChange, DisableMouseCapture};
     use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
     // before leaving the alternate screen, whose flag stack the push went on
     keyboard::restore();
@@ -79,6 +83,7 @@ pub fn restore_terminal() {
         std::io::stdout(),
         Show,
         DisableMouseCapture,
+        DisableFocusChange,
         LeaveAlternateScreen
     );
     let _ = disable_raw_mode();
@@ -139,14 +144,23 @@ pub(in crate::builtins) fn term_size(_: &[Value], _: EnvId, heap: &mut Heap) -> 
 pub(in crate::builtins) fn term_poll(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let ms = expect_int(heap, "%term-poll", arg(args, 0))?.max(0) as u64;
     match keyboard::next(std::time::Duration::from_millis(ms)).map_err(term_err)? {
-        Some(keyboard::Polled::Key(keyboard::KeyDelivery::Press(event))) => {
-            Ok(key_to_value(heap, event))
-        }
-        Some(keyboard::Polled::Key(keyboard::KeyDelivery::Release(press))) => {
-            Ok(key_up_value(heap, press))
-        }
-        Some(keyboard::Polled::Mouse(mouse)) => Ok(mouse_to_value(heap, mouse)),
-        Some(keyboard::Polled::Other) | None => Ok(Value::nil()),
+        Some(polled) => Ok(polled_value(heap, polled)),
+        None => Ok(Value::nil()),
+    }
+}
+
+/// One poll's yield as the app sees it — the same value `term-poll` answers and the input
+/// forwarder delivers: a key, `[:key-up press]`, a `[:mouse …]`, `:focus-in` / `:blur` (a
+/// window's spelling, so an app handles both frontends' focus alike), or nil for an event
+/// it does not report.
+fn polled_value(heap: &mut Heap, polled: keyboard::Polled) -> Value {
+    match polled {
+        keyboard::Polled::Key(keyboard::KeyDelivery::Press(event)) => key_to_value(heap, event),
+        keyboard::Polled::Key(keyboard::KeyDelivery::Release(press)) => key_up_value(heap, press),
+        keyboard::Polled::Mouse(mouse) => mouse_to_value(heap, mouse),
+        keyboard::Polled::Focus(true) => value::kw("focus-in"),
+        keyboard::Polled::Focus(false) => value::kw("blur"),
+        keyboard::Polled::Other => Value::nil(),
     }
 }
 
@@ -2383,16 +2397,7 @@ fn forward_input(pid: u64, stop: &std::sync::atomic::AtomicBool) {
             Ok(None) => continue,
             Err(_) => return,
         };
-        let value = match event {
-            keyboard::Polled::Key(keyboard::KeyDelivery::Press(event)) => {
-                key_to_value(&mut heap, event)
-            }
-            keyboard::Polled::Key(keyboard::KeyDelivery::Release(press)) => {
-                key_up_value(&mut heap, press)
-            }
-            keyboard::Polled::Mouse(mouse) => mouse_to_value(&mut heap, mouse),
-            keyboard::Polled::Other => Value::nil(),
-        };
+        let value = polled_value(&mut heap, event);
         if matches!(value, Value::Nil) {
             continue;
         }
@@ -2403,6 +2408,39 @@ fn forward_input(pid: u64, stop: &std::sync::atomic::AtomicBool) {
         heap = Heap::new();
     }
 }
+#[cfg(test)]
+mod focus_tests {
+    use super::{keyboard, polled_value};
+    use crate::core::heap::Heap;
+    use crate::core::value::{self, Value};
+
+    // A focus report reads as a window's focus event, so an app (bedit's clipboard read on
+    // focus) handles the terminal and the window alike; an unreported event is nil.
+    fn keyword_name(value: Value) -> Option<String> {
+        match value {
+            Value::Keyword(symbol) => Some(value::symbol_name_ref(symbol).to_string()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_focus_report_reads_as_a_windows_focus_event() {
+        let mut heap = Heap::new();
+        assert_eq!(
+            keyword_name(polled_value(&mut heap, keyboard::Polled::Focus(true))).as_deref(),
+            Some("focus-in")
+        );
+        assert_eq!(
+            keyword_name(polled_value(&mut heap, keyboard::Polled::Focus(false))).as_deref(),
+            Some("blur")
+        );
+        assert!(matches!(
+            polled_value(&mut heap, keyboard::Polled::Other),
+            Value::Nil
+        ));
+    }
+}
+
 #[cfg(test)]
 mod gui_face_tests {
     use super::gui_face;

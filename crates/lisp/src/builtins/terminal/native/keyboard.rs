@@ -284,8 +284,11 @@ fn types_text(key: &KeyEvent) -> bool {
 pub(super) enum Polled {
     Key(KeyDelivery),
     Mouse(MouseEvent),
-    /// An event a poll does not report (a resize, focus, a paste): the poll returns nil at
-    /// once, so the app looks again.
+    /// The terminal gained (`true`) or lost the keyboard — reported once `term-enter` asked
+    /// for focus reports (`CSI ?1004h`): the app sees `:focus-in` / `:blur`, as a window's.
+    Focus(bool),
+    /// An event a poll does not report (a resize, a paste): the poll returns nil at once, so
+    /// the app looks again.
     Other,
 }
 
@@ -531,6 +534,8 @@ impl Inbox {
                     }
                 }
                 Input::Event(Event::Mouse(mouse)) => return Some(Polled::Mouse(mouse)),
+                Input::Event(Event::FocusGained) => return Some(Polled::Focus(true)),
+                Input::Event(Event::FocusLost) => return Some(Polled::Focus(false)),
                 Input::Event(_) => return Some(Polled::Other),
             }
         }
@@ -920,6 +925,32 @@ mod tests {
 
     fn pressed(event: KeyEvent) -> Polled {
         Polled::Key(KeyDelivery::Press(event))
+    }
+
+    // A terminal asked for focus reports (`CSI ?1004h`) sends `CSI I` / `CSI O`, which
+    // crossterm reads as FocusGained / FocusLost: each is handed to the app in its place
+    // among the keys, not dropped as an event a poll does not report.
+    #[test]
+    fn focus_reports_are_delivered_in_order_with_the_keys() {
+        let mut reads = Reads::new();
+        let a = KeyCode::Char('a');
+        reads.inbox.arrive(
+            vec![
+                Event::FocusLost,
+                Event::FocusGained,
+                Event::Key(press(a, NONE)),
+            ],
+            reads.at(10),
+            true,
+        );
+        assert_eq!(
+            reads.drain(),
+            vec![
+                Polled::Focus(false),
+                Polled::Focus(true),
+                pressed(press(a, NONE))
+            ]
+        );
     }
 
     fn released(event: KeyEvent) -> Polled {
