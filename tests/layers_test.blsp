@@ -309,9 +309,10 @@
       (assert= (map (active-layers b) (fn (l) (get l :name))) (list 'a 'b)))))
 
 ;; ---- scope-bindings: the keymap with its provenance kept --------------------
-;; The point of these is the SHADOW rule. `active-keymap` merges layers shallowly, so a
-;; layer that binds one key under a prefix takes the whole prefix with it — and help that
-;; tested shadowing per leaf would report a binding that dispatch will never reach.
+;; The point of these is the SHADOW rule. Prefixes merge across layers (ADR-535), so a layer
+;; binding one key under a prefix shadows only that SEQUENCE — and a layer binding the
+;; prefix key itself to a command takes every sequence under it. Help must say exactly what
+;; dispatch reaches.
 
 (def layer-low
   {:name 'low :keymap {"a" 'layers-test/cmd-x :ctrl-x {"k" 'layers-test/cmd-x}}})
@@ -331,19 +332,46 @@
         ['layers-test/cmd-x 'low nil])))
   (test "the higher layer's own binding is in force"
     (assert= (get (sb-for ["b"]) :shadowed-by) nil))
-  (test "a whole CHORD is shadowed, not just the leaf the higher layer bound"
-    ;; low binds C-x k and high binds C-x s: nothing overlaps at the leaf, yet the shallow
-    ;; merge hands the entire :ctrl-x sub-map to high, so C-x k is unreachable and says so
-    (assert= (get (sb-for [:ctrl-x "k"]) :shadowed-by) 'high))
-  (test "the shadowing layer's own chord binding is in force"
+  (test "a prefix both layers bind merges: the lower layer's chord stays in force"
+    ;; low binds C-x k and high binds C-x s: nothing overlaps at the leaf, so both work —
+    ;; an Emacs mode map's C-c C-p beside the global map's C-c f
+    (assert= (get (sb-for [:ctrl-x "k"]) :shadowed-by) nil)
     (assert= (get (sb-for [:ctrl-x "s"]) :shadowed-by) nil))
-  (test "what is in force agrees with what scope-keymap dispatches"
+  (test "the same sequence in both: the higher layer's wins"
+    (let (entries (scope-bindings (list {:layers (list {:name 'high
+                                                        :keymap {:ctrl-x {"k" 'layers-test/cmd-y}}}
+                                                   'layers-test/layer-low)}))
+          low-entry (seq/find entries
+                      (fn (e) (and (= (:layer e) 'low) (= (:sequence e) [:ctrl-x "k"]))))
+          high-entry (seq/find entries (fn (e) (= (:layer e) 'high))))
+      (assert= 'high (:shadowed-by low-entry))
+      (assert= nil (:shadowed-by high-entry))))
+  (test "a command bound to the prefix key takes every chord under it"
+    (let (entries (scope-bindings (list {:layers (list {:name 'high
+                                                        :keymap {:ctrl-x 'layers-test/cmd-y}}
+                                                   'layers-test/layer-low)}))
+          low-entry (seq/find entries (fn (e) (= (:sequence e) [:ctrl-x "k"]))))
+      (assert= 'high (:shadowed-by low-entry))))
+  (test "what is in force agrees with what scope-keymap and dispatch reach"
     ;; the property that matters: every unshadowed binding is reachable through the merged
-    ;; keymap, and every shadowed one is not — help derived from dispatch, not beside it
+    ;; keymap — help derived from dispatch, not beside it
     (let (ctxs (list {:layers (list 'layers-test/layer-high 'layers-test/layer-low)})
           km (scope-keymap ctxs))
-      (assert= (map/get-in km [:ctrl-x "k"]) nil)
-      (assert= (map/get-in km [:ctrl-x "s"]) 'layers-test/cmd-y)))
+      (assert= (map/get-in km [:ctrl-x "k"]) 'layers-test/cmd-x)
+      (assert= (map/get-in km [:ctrl-x "s"]) 'layers-test/cmd-y)
+      (assert= (get (scope-binding ctxs :ctrl-x) "k") 'layers-test/cmd-x)
+      (assert= (get (scope-binding ctxs :ctrl-x) "s") 'layers-test/cmd-y)))
+  (test "a mode's C-c C-p over a global C-c f: both keys run, across two scopes"
+    (let (ctxs (list {:layers (list {:name 'mode :keymap {:ctrl-c {:ctrl-p 'layers-test/cmd-y}}})}
+                 {:layers (list {:name 'global :keymap {:ctrl-c {"f" 'layers-test/cmd-x}}})})
+          [_ pending] (scope-resolve ctxs nil :ctrl-c))
+      (assert= ['layers-test/cmd-x nil] (scope-resolve ctxs pending "f"))
+      (assert= ['layers-test/cmd-y nil] (scope-resolve ctxs pending :ctrl-p))))
+  (test "an explicit nil in a higher layer still unbinds the sequence"
+    (let (ctxs (list {:layers (list {:name 'user :keymap {:ctrl-x {"k" nil}}}
+                                'layers-test/layer-low)})
+          [_ pending] (scope-resolve ctxs nil :ctrl-x))
+      (assert= [nil nil] (scope-resolve ctxs pending "k"))))
   (test "a layer with no keymap contributes nothing and breaks nothing"
     (assert= (count (scope-bindings (list {:layers (list {:name 'bare})}))) 0)))
 

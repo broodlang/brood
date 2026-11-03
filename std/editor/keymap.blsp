@@ -232,6 +232,26 @@ happens to be in memory. Pure over the keymap data — no dispatch, no eval, no 
             sub (if (map? existing) existing {}))
         (assoc keymap k (keymap-bind sub (rest keys) command))))))
 
+;; check-allow: deliberately non-tail — depth = the keymaps' chord nesting, a few levels.
+(check-allow :non-tail-recursion
+  (defn keymap-merge (low high)
+    "`high` laid over `low`, prefixes merged all the way down: each key SEQUENCE resolves to
+`high`'s binding when `high` has one, else to `low`'s. Where both bind a key to a prefix
+keymap the two sub-keymaps merge the same way, so `low`'s `C-c f` survives `high`'s
+`C-c C-p` (Emacs's semantics for a mode map over the global map). A non-keymap binding in
+`high` — a command, or an explicit nil — takes the whole key, prefix and all; a prefix in
+`high` over a command in `low` is the prefix.
+
+    (map/get-in (editor/keymap/keymap-merge {:ctrl-c {\"f\" 'find}} {:ctrl-c {:ctrl-p 'preview}}) [:ctrl-c \"f\"])   ;=> find
+    (map/get-in (editor/keymap/keymap-merge {:ctrl-c {\"f\" 'find}} {:ctrl-c {:ctrl-p 'preview}}) [:ctrl-c :ctrl-p])   ;=> preview
+    (editor/keymap/keymap-merge {:ctrl-c {\"f\" 'find}} {:ctrl-c nil})   ;=> {:ctrl-c nil}"
+    (fold high
+      low
+      (fn (acc [key binding])
+        (let (under (get acc key))
+          (assoc acc
+            key (if (and (map? binding) (map? under)) (keymap-merge under binding) binding)))))))
+
 ;; ---- key descriptions: the Emacs spelling of a key, both ways ------------------------
 ;; A key is what the frontends deliver (`host::gui::character_chord` / `named_key`, the one
 ;; rule both the window and the terminal spell keys by — ADR-328, ADR-441): a 1-char string,

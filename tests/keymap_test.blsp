@@ -255,3 +255,17 @@
 
   (test "a whole sequence round-trips"
     (assert= km-canonical-keys (key-parse (key-description km-canonical-keys)))))
+
+(describe "keymap-merge lays one keymap over another, prefixes merged deeply"
+  (test "both keymaps' chords under a shared prefix survive"
+    (let (merged (keymap-merge {:ctrl-c {"f" 'a/find}} {:ctrl-c {:ctrl-p 'a/preview}}))
+      (assert= 'a/find (map/get-in merged [:ctrl-c "f"]))
+      (assert= 'a/preview (map/get-in merged [:ctrl-c :ctrl-p]))))
+  (test "the same sequence: the higher keymap wins, at any depth"
+    (assert= {:ctrl-x {:ctrl-c {"q" 'a/high}}}
+      (keymap-merge {:ctrl-x {:ctrl-c {"q" 'a/low}}} {:ctrl-x {:ctrl-c {"q" 'a/high}}})))
+  (test "a command or nil in the higher keymap takes the prefix whole"
+    (assert= {:ctrl-c 'a/cmd} (keymap-merge {:ctrl-c {"f" 'a/find}} {:ctrl-c 'a/cmd}))
+    (assert= {:ctrl-c nil} (keymap-merge {:ctrl-c {"f" 'a/find}} {:ctrl-c nil})))
+  (test "a prefix in the higher keymap replaces a lower command"
+    (assert= {:ctrl-c {"f" 'a/find}} (keymap-merge {:ctrl-c 'a/cmd} {:ctrl-c {"f" 'a/find}}))))

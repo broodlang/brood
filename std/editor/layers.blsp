@@ -161,7 +161,10 @@ core knows nothing about buffers."
 ;;   * :activate/:deactivate fire for the ONE layer toggled; :on-focus/:on-blur/
 ;;     :on-close (and your own events, via `run-event`) fan across ALL active layers.
 ;;   * a throwing hook is isolated (state unchanged) — a bad layer can't crash the loop.
-;;   * a chord is owned by its winning layer (no cross-layer prefix merge).
+;;   * prefixes merge across layers (Emacs's semantics, ADR-535): the first layer binding
+;;     each key of a sequence decides, and a prefix keymap there merges with the same
+;;     prefix in every layer below — a mode's `C-c C-p` and the global `C-c f` both work.
+;;     A layer binding a key to a command (or to nil) takes that key, prefix and all.
 ;; ============================================================================
 
 ;; ---- resolution -------------------------------------------------------------
@@ -301,21 +304,24 @@ changing major mode while minor modes stay on.
 ;; ---- keymap consumer (bridge to keymap) -------------------------------------
 
 (defn active-keymap (ctx)
-  "Merge the keymaps of all active layers into one, head (highest precedence)
-winning. A prefix sub-map comes wholesale from its winning layer (no cross-layer
-prefix merge), so a layer owns its chord.
+  "Merge the keymaps of all active layers into one, head (highest precedence) winning
+per key SEQUENCE: prefixes merge all the way down (`keymap-merge`, ADR-535), so a mode's
+`C-c C-p` and the global `C-c f` both stand, as an Emacs mode map sits over the global map.
 
     (get (editor/layers/active-keymap {:layers (list {:keymap {:x 'one}} {:keymap {:x 'two :y 'three}})}) :x)   ;=> one
-    (get (editor/layers/active-keymap {:layers (list {:keymap {:x 'one}} {:keymap {:x 'two :y 'three}})}) :y)   ;=> three"
-  (apply merge (cons {} (reverse (layer-collect ctx :keymap)))))
+    (get (editor/layers/active-keymap {:layers (list {:keymap {:x 'one}} {:keymap {:x 'two :y 'three}})}) :y)   ;=> three
+    (map/get-in (editor/layers/active-keymap {:layers (list {:keymap {:c {:p 'mode}}} {:keymap {:c {:f 'global}}})}) [:c :f])   ;=> global"
+  (fold (reverse (layer-collect ctx :keymap)) {} keymap-merge))
 
 (defn layer-binding (ctx key)
   "What `key` is bound to in the context's active keymap — the same answer as
 `(get (active-keymap ctx) key)`, without building the merged map: the first layer whose
-keymap has `key` owns it (an explicit `nil` binding included, as the merge keeps it).
+keymap has `key` decides (an explicit `nil` binding included, as the merge keeps it), and
+when it binds a PREFIX, the prefix keymaps of every layer below it merge under it.
 What dispatch asks on every keystroke; the merge is for help text that wants the whole map.
 
-    (editor/layers/layer-binding {:layers (list {:keymap {:x 'one}} {:keymap {:x 'two :y 'three}})} :y)   ;=> three"
+    (editor/layers/layer-binding {:layers (list {:keymap {:x 'one}} {:keymap {:x 'two :y 'three}})} :y)   ;=> three
+    (get (editor/layers/layer-binding {:layers (list {:keymap {:c {:p 'mode}}} {:keymap {:c {:f 'global}}})} :c) :f)   ;=> global"
   (layer-binding-in (layers-list ctx) key))
 
 (defn- layer-binding-in (layers key)
@@ -323,8 +329,29 @@ What dispatch asks on every keystroke; the merge is for help text that wants the
     nil
     (let (keymap (get (layers-resolve (first layers)) :keymap))
       (if (and (map? keymap) (contains? keymap key))
-        (get keymap key)
+        (let (binding (get keymap key))
+          (if (map? binding) (layers-prefix-under (rest layers) key binding) binding))
         (layer-binding-in (rest layers) key)))))
+
+;; Memoised (`defmemo` compares with `=`, immediate for the same maps): a prefix key merges
+;; the same layers' sub-keymaps on every press, and the answer is the same until a layer or
+;; a binding changes.
+(memo/defmemo layers-merge-prefix
+  32
+  (low high)
+  "[[keymap-merge]] for a prefix two layers both bind — memoised, as dispatch asks it per key."
+  (keymap-merge low high))
+
+(defn- layers-prefix-under (layers key merged)
+  "`merged` (the prefix keymap a higher layer binds `key` to) with the prefix keymap of every
+lower layer in `layers` that binds `key` to one merged under it; a lower layer binding `key`
+to a command contributes nothing — the higher layer made it a prefix."
+  (if (empty? layers)
+    merged
+    (let (binding (get (get (layers-resolve (first layers)) :keymap) key))
+      (layers-prefix-under (rest layers)
+        key
+        (if (map? binding) (layers-merge-prefix binding merged) merged)))))
 
 (defn layer-resolve (ctx pending key)
   "`keymap-resolve` over the context's layers: `[binding pending']` for `key`, looked up
@@ -517,7 +544,7 @@ the composite layer list for multi-scope dispatch, e.g. (focused-buffer app-mode
 
 (defn scope-keymap (ctxs)
   "The merged active keymap across several scopes `ctxs` (first = highest
-precedence; a layer still owns its chord).
+precedence; prefixes merge across layers, as [[active-keymap]]).
 
     (get (editor/layers/scope-keymap [{:layers (list {:keymap {:x 'buf}})} {:layers (list {:keymap {:x 'app :y 'quit}})}]) :x)   ;=> buf
     (get (editor/layers/scope-keymap [{:layers (list {:keymap {:x 'buf}})} {:layers (list {:keymap {:x 'app :y 'quit}})}]) :y)   ;=> quit"
@@ -536,17 +563,23 @@ precedence; a layer still owns its chord).
     (editor/layers/scope-resolve [{:layers (list {:keymap {:x 'buf}})}] nil :x)   ;=> [buf nil]"
   (if (nil? pending) (keymap-classify (scope-binding ctxs key)) (keymap-resolve pending nil key)))
 
-(defn- scope-shadow-of (layers i k)
-  "The `:name` of the highest-precedence layer BEFORE index `i` whose keymap owns first
-key `k`, or nil when nothing above binds it.
-
-`k` is the FIRST key of a sequence, not the whole sequence, and that is the whole
-subtlety: `active-keymap` merges layers **shallowly**, so a layer that binds `C-x s`
-takes the entire `C-x` sub-map with it and shadows a lower layer's `C-x k` as well —
-the semantics note at the top of this file calls it \"a chord is owned by its winning
-layer\". A shadow test done per leaf would report that `C-x k` still works. It does not."
-  (let (above (seq/find (take layers i) (fn (l) (contains? (or (:keymap l) {}) k))))
-    (if (nil? above) nil (:name above))))
+(defn- scope-winner (candidates sequence depth)
+  "The index of the layer whose binding `sequence` reaches, by the rule [[layer-binding]]
+dispatches with: `candidates` is `[index keymap]` per layer still in the running, highest
+precedence first, each keymap the layer's sub-keymap at `depth`. The first that binds the
+key at `depth` decides — a command or nil there ends the walk (a command bound to a prefix
+shadows every longer sequence under it); a prefix carries on with every candidate that binds
+that key to a prefix too, since those merge. Nil when nothing binds the sequence."
+  (let (key (nth sequence depth)
+        hit (seq/find candidates (fn ([_ keymap]) (contains? keymap key))))
+    (cond
+      (nil? hit) nil
+      (or (= depth (dec (count sequence))) (not (map? (get (second hit) key)))) (first hit)
+      else
+        (scope-winner (for ([index keymap] candidates :when (map? (get keymap key)))
+                        [index (get keymap key)])
+          sequence
+          (inc depth)))))
 
 (defn scope-bindings (ctxs:seqable -> vector)
   "Every binding the scopes `ctxs` make (first scope = highest precedence), each WITH the
@@ -559,24 +592,28 @@ into one keymap, after which no caller can say which layer won a key, or what th
 That is what help needs and cannot reconstruct: `describe-bindings` groups by layer,
 `describe-key` names the layer a key came from, and a which-key popup dims what is shadowed.
 
-It is derived from the same shallow-merge rule `active-keymap` dispatches through
-(`scope-shadow-of`), rather than re-deriving precedence beside it. Help that computes
-its own answer is help that drifts from the dispatcher and then lies — and a lying keymap
-help is worse than none, because it is believed.
+It is derived from the rule dispatch resolves a key sequence by (`scope-winner`: the first
+layer binding each key decides, prefixes merging across layers), rather than re-deriving
+precedence beside it. Help that computes its own answer is help that drifts from the
+dispatcher and then lies — and a lying keymap help is worse than none, because it is
+believed. A binding is shadowed only by a layer that binds the same SEQUENCE, or a prefix
+of it to a command (or to nil): a mode's `C-c C-p` leaves the global `C-c f` in force.
 
     (editor/layers/scope-bindings (list {:layers (list {:name :mode :keymap {:a 'go}})}))   ;=> [{:sequence [:a] :command go :layer :mode :shadowed-by nil}]"
-  (let (layers (map (compose-layers ctxs) layers-resolve))
+  (let (layers (vec (map (compose-layers ctxs) layers-resolve))
+        candidates (map (range (count layers)) (fn (i) [i (or (:keymap (nth layers i)) {})])))
     (into []
       (mapcat (range (count layers))
         (fn (i)
           (let (layer (nth layers i))
             (map (keymap-bindings (or (:keymap layer) {}))
               (fn (pair)
-                (let ([command sequence] pair)
+                (let ([command sequence] pair
+                      winner (scope-winner candidates sequence 0))
                   {:sequence sequence
                    :command command
                    :layer (:name layer)
-                   :shadowed-by (scope-shadow-of layers i (first sequence))})))))))))
+                   :shadowed-by (if (or (nil? winner) (= winner i)) nil (:name (nth layers winner)))})))))))))
 
 (defn scope-dispatch (ctxs state pending key fallback)
   "Dispatch `key` through the merged keymap of `ctxs` (precedence by order), running

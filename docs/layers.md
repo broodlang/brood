@@ -71,8 +71,9 @@ new resolution code.
   throwing hook leaves state unchanged — a bad layer can't crash the loop). Side
   effects (incl. `spawn` for async work) ride along; async results return as
   mailbox messages handled by the `ui-run` loop.
-- **Chord ownership:** a prefix sub-map comes wholesale from its winning layer (no
-  cross-layer prefix merging in v1).
+- **Prefixes merge across layers** (ADR-535, Emacs's semantics): the first layer binding
+  each key of a sequence decides, and a prefix there merges with the same prefix below it —
+  a mode's `C-c C-p` and the global `C-c f` both work. A command (or nil) takes the key whole.
 
 ## Buffer-type binding (Phase 2)
 
@@ -143,8 +144,8 @@ run-event (ctx event)                -> fan event hooks across active layers (fo
 close-context (ctx)                  -> :on-close fan + deactivate-all (the full close path)
 request-close (ctx name)             -> from an :on-close hook: ask the app to close companion `name`
 close-requests (ctx)                 -> the companions a closed context asked to take with it
-active-keymap (ctx)                  -> merge active layers' :keymap (head wins) — for help text
-layer-binding (ctx key)              -> what `key` is bound to: the first layer that binds it (no merge)
+active-keymap (ctx)                  -> merge active layers' :keymap (head wins per key sequence, prefixes merged deeply) — for help text
+layer-binding (ctx key)              -> what `key` is bound to: the first layer that binds it; a prefix merges with the layers below
 layer-resolve (ctx pending key)      -> keymap-resolve over the layers → [binding pending']
 layer-dispatch (ctx pending key fb)  -> layer-resolve + keymap-run → [ctx' pending']
 ```
@@ -195,6 +196,6 @@ The first real use of layers is editing modes — and it sets the tier line:
 
 ## Deferred (named, not precluded)
 
-`:applies-to` (decentralised type binding) · per-binding `when`-guards · cross-layer
-prefix/chord merging · `:commands` manifest + M-x / which-key palette ·
+`:applies-to` (decentralised type binding) · per-binding `when`-guards ·
+`:commands` manifest + M-x / which-key palette ·
 precedence-as-a-value / nested layers · regex filename matching (M2 engine).
