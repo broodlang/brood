@@ -51,3 +51,25 @@
       (is (int? (:ms (first facts))))))
   (test "an ordinary process is told nothing"
     (assert= (in-process (fn () (os/cmd "true" []) (blocking-reports))) [])))
+
+;; A clipboard READ waits on another program too: the selection's owner serialises what it
+;; holds (an X11 conversion, a Wayland data-offer pipe), and a hung or slow owner holds the
+;; reader. An editor's yank read it inside the keypress, unseen by the flag (ADR-536).
+(describe "a responsive process and the clipboard"
+  (test "a refusing process is refused a clipboard read, text or image"
+    (assert= (in-process (fn ()
+                           (proc/flag :responsive :refuse)
+                           [(try (os/clipboard-get) (catch e (get e :code)))
+                             (try (os/clipboard-image) (catch e (get e :code)))]))
+      ["E0048" "E0048"]))
+  (test "a reporting process is told a clipboard read held it"
+    (let (facts (in-process (fn ()
+                              (proc/flag :responsive true)
+                              (os/clipboard-get)
+                              (blocking-reports))))
+      (assert= (into [] (map facts :native)) ["os/clipboard-get"])))
+  (test "writing the clipboard waits on nobody, so it is never refused"
+    (assert= (in-process (fn ()
+                           (proc/flag :responsive :refuse)
+                           (os/clipboard-set "brood responsive test")))
+      "brood responsive test")))

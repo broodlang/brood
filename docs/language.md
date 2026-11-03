@@ -2904,7 +2904,8 @@ already a bounded round-trip.
 
 **`:responsive`** marks a process whose job is to keep answering — an editor's loop, a
 REPL's reader (ADR-517). A native call that waits on the outside world (`os/cmd`,
-`run-process`) is then reported to it or refused, instead of silently freezing it:
+`run-process`, a clipboard read — ADR-536) is then reported to it or refused, instead of
+silently freezing it:
 
 ```clojure
 (proc/flag :responsive true)     ; report: after the wait, [:blocking-call {:native :detail :ms}]

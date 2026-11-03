@@ -50,10 +50,40 @@ pub(super) fn register(primitives: &mut super::Primitives) {
 /// unavailable (no display server, or a build without the `clipboard` feature). The
 /// editor's yank consults this so text copied in another app pastes in.
 pub(super) fn clipboard_get(_args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    match crate::host::clipboard::get_text() {
+    let text = read_clipboard(
+        heap,
+        "os/clipboard-get",
+        "text",
+        crate::host::clipboard::get_text,
+    )?;
+    match text {
         Some(s) => Ok(heap.alloc_string(&s)),
         None => Ok(Value::nil()),
     }
+}
+
+/// A clipboard READ waits on another program: the selection's owner serialises what it
+/// holds (an X11 conversion, a Wayland data-offer pipe), and a hung owner holds the reader
+/// until the backend gives up. So it is a blocking call like `os/cmd` (ADR-517, ADR-536): a
+/// responsive process is told of it or refused it, and the worker is marked dirty-blocked
+/// for the wait, so a task reading the clipboard does not take a scheduler worker hostage.
+/// Writing is not: it hands the text to this process's own selection owner and waits on
+/// nobody.
+fn read_clipboard<T>(
+    heap: &mut Heap,
+    native: &'static str,
+    what: &'static str,
+    read: impl FnOnce() -> T,
+) -> Result<T, LispError> {
+    let blocking = crate::process::responsive::enter_blocking(heap, native, || what.into())?;
+    let value = {
+        let _dirty = crate::process::dirty_block();
+        read()
+    };
+    if let Some(call) = blocking {
+        call.report(heap);
+    }
+    Ok(value)
 }
 
 /// `(clipboard-set s)` — copy string `s` to the OS clipboard so other apps can paste
@@ -139,7 +169,13 @@ pub(super) fn clipboard_image(args: &[Value], _: EnvId, heap: &mut Heap) -> Lisp
             Some(u32::try_from(edge).unwrap_or(u32::MAX))
         }
     };
-    let Some((width, height, rgba)) = crate::host::clipboard::get_image() else {
+    let image = read_clipboard(
+        heap,
+        "os/clipboard-image",
+        "image",
+        crate::host::clipboard::get_image,
+    )?;
+    let Some((width, height, rgba)) = image else {
         return Ok(Value::nil());
     };
     let Some(encoded) = encode_png(width, height, rgba, max_edge) else {

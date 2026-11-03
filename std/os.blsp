@@ -66,7 +66,7 @@ started an operating-system process while the bare `spawn` special form started 
   (%now-ns))
 
 (defn clipboard-get ()
-  "The OS clipboard's text, or nil when empty / non-text / unavailable (no display server, or a build without the clipboard feature).
+  "The OS clipboard's text, or nil when empty / non-text / unavailable (no display server, or a build without the clipboard feature). A read waits on the app that owns the selection, so it is a blocking call to a responsive process (`proc/flag :responsive`, ADR-536): a UI loop reads it from a task.
 
     (os/clipboard-get)   ;~> \"the copied text\", or nil"
   (%clipboard-get))
@@ -87,7 +87,7 @@ Nil when the clipboard is empty or holds text or a file list (a copied file is a
 read it with os/clipboard-get), when no display is reachable, and in a build without the
 clipboard feature, so a caller never branches on a build flag. On Linux only an
 `image/png` offer is read: an app that puts only JPEG or BMP on the clipboard reads as
-nil. A source over 16384 px a side or 512 MB of pixels is refused as nil. Reading blocks
+nil. A source over 16384 px a side or 512 MB of pixels is refused as nil. Reading blocks (a blocking call to a responsive process, ADR-536)
 while the owning app serialises the image; call it from a worker, not a UI loop, when
 the image may be large. Platforms tried so far are listed in ADR-392.
 
