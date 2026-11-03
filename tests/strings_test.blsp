@@ -209,7 +209,13 @@
         (assert= (receive ([:child-width width] width) (after 5000 :timeout)) 8)))
     (assert= (string/display-width "\t") 8))
   (test "a width below 1 is a stop every column, as an argument is"
-    (binding (*tab-width* 0) (assert= (string/display-width "\t\t") 2))))
+    (binding (*tab-width* 0) (assert= (string/display-width "\t\t") 2)))
+  (test "an ambient width past the 1024 cap is the cap, not a raised measure"
+    ;; an explicit argument that large is still an error; the binding is a setting
+    (binding (*tab-width* 2000)
+      (assert= (string/display-width "\t") 1024)
+      (assert= (string/width->index "\tx" 1024) 1))
+    (assert-error (string/display-width "\t" 0 2000))))
 
 ;; The grapheme-INDEXED accessors (ADR-159). `string->graphemes` already gave the
 ;; clusters, but only as a whole vector — so the documented-correct cursor step
