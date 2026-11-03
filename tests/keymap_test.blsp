@@ -157,3 +157,101 @@
     (assert= {} (keymap-index {}))
     (assert= '() (keymap-bindings {}))
     (assert= {} (keymap-index {:ctrl-x {}}))))
+
+;; ---- key-parse / key-description: the Emacs spelling of a key, both ways ------------
+
+(def km-canonical-keys
+  ;; One of every shape the frontends deliver (`character_chord` / `named_key`).
+  ["a"
+    "A"
+    "é"
+    " "
+    "<"
+    "-"
+    :ctrl-x :ctrl--
+    (keyword "ctrl- ")
+    (keyword "ctrl-meta- ")
+    :alt-x :alt-O
+    (keyword "alt->")
+    (keyword "alt-%")
+    (keyword "ctrl-meta-$")
+    :ctrl-meta-i :super-s
+    :super-S :ctrl-super-s
+    (keyword "alt-super->")
+    :left :shift-up
+    :ctrl-left :ctrl-shift-left
+    :alt-shift-up :ctrl-meta-delete
+    :enter :ctrl-enter
+    :ctrl-meta-enter :backspace
+    :ctrl-backspace :delete
+    :page-up :page-down
+    :home :end
+    :tab :back-tab
+    :escape :f1
+    :f12 :f24
+    :ctrl-f5 :shift-f5
+    :super-f12 :insert
+    :menu :volume-up
+    :media-play-pause])
+
+(describe "key-parse reads an Emacs key description"
+  (test "characters, chords and prefixes"
+    (assert= [:ctrl-x :ctrl-f] (key-parse "C-x C-f"))
+    (assert= [:ctrl-c "t" "f"] (key-parse "C-c t f"))
+    (assert= [(keyword "alt-%")] (key-parse "M-%"))
+    (assert= [(keyword "ctrl-meta-$")] (key-parse "C-M-$"))
+    (assert= [(keyword "ctrl-meta-$")] (key-parse "M-C-$"))
+    (assert= [:ctrl--] (key-parse "C--"))
+    (assert= ["C"] (key-parse "C"))
+    (assert= [:ctrl-x "4" :ctrl-f] (key-parse "  C-x   4 C-f ")))
+
+  (test "Emacs's words for keys"
+    (assert= [:enter] (key-parse "RET"))
+    (assert= [:tab] (key-parse "TAB"))
+    (assert= [" "] (key-parse "SPC"))
+    (assert= [(keyword "ctrl- ")] (key-parse "C-SPC"))
+    (assert= [:escape] (key-parse "ESC"))
+    (assert= [:backspace] (key-parse "DEL"))
+    (assert= [:ctrl-x :backspace] (key-parse "C-x DEL")))
+
+  (test "named keys in angle brackets, and their Emacs aliases"
+    (assert= [:f5] (key-parse "<f5>"))
+    (assert= [:ctrl-meta-enter] (key-parse "C-M-<return>"))
+    (assert= [:ctrl-meta-enter] (key-parse "<C-M-return>"))
+    (assert= [:ctrl-left] (key-parse "C-<left>"))
+    (assert= [:page-up :page-down] (key-parse "<prior> <next>"))
+    (assert= [:back-tab] (key-parse "<backtab>"))
+    (assert= [:back-tab] (key-parse "S-TAB"))
+    (assert= [:shift-up] (key-parse "S-<up>")))
+
+  (test "Shift folds into a character the way the keyboard does"
+    (assert= ["A"] (key-parse "S-a"))
+    (assert= [:alt-O] (key-parse "M-O"))
+    (assert= [:alt-O] (key-parse "M-S-o"))
+    (assert= [:ctrl-a] (key-parse "C-S-a"))
+    (assert= [:ctrl-a] (key-parse "C-A")))
+
+  (test "what is not a key is a failure naming it"
+    (is (failure? (key-parse "")))
+    (is (failure? (key-parse "   ")))
+    (is (failure? (key-parse nil)))
+    (is (failure? (key-parse "C-x foo")))
+    (is (includes? (error-message (key-parse "C-x foo")) "foo"))
+    (is (failure? (key-parse "<nope>")))
+    (is (failure? (key-parse "<f25>")))
+    (is (failure? (key-parse "H-x")))))
+
+(describe "key-description is key-parse's inverse"
+  (test "a sequence prints the way Emacs writes it"
+    (assert= "C-x C-f" (key-description [:ctrl-x :ctrl-f]))
+    (assert= "C-SPC" (key-description [(keyword "ctrl- ")]))
+    (assert= "M-s o" (key-description [:alt-s "o"]))
+    (assert= "C-S-left" (key-description [:ctrl-shift-left]))
+    (assert= "s-<f12>" (key-description [:super-f12])))
+
+  (test "every key the frontends deliver reads back from its description"
+    (doseq (key km-canonical-keys)
+      (assert= [key] (key-parse (single-key-description key)))))
+
+  (test "a whole sequence round-trips"
+    (assert= km-canonical-keys (key-parse (key-description km-canonical-keys)))))

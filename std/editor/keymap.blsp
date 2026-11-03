@@ -33,6 +33,10 @@ hot-swaps behaviour.
     (def *km* (keymap-bind {} [:ctrl-x :ctrl-e] 'eval-last-sexp))
     (keymap-step *km* pending state key fallback)        ; => [state' pending']
 
+A key's Emacs spelling reads both ways: `key-description` prints `[:ctrl-x :ctrl-f]` as
+`C-x C-f`, and `key-parse` reads it back, so a config file can bind a key the way help
+names it.
+
 Used by `std/editor/lineedit.blsp` (self-insert fallback) and `std/tool/observer.blsp` (no-op
 fallback); the same pattern is how the editor's keymaps work.")
 
@@ -227,3 +231,230 @@ happens to be in memory. Pure over the keymap data — no dispatch, no eval, no 
             existing (get keymap k)
             sub (if (map? existing) existing {}))
         (assoc keymap k (keymap-bind sub (rest keys) command))))))
+
+;; ---- key descriptions: the Emacs spelling of a key, both ways ------------------------
+;; A key is what the frontends deliver (`host::gui::character_chord` / `named_key`, the one
+;; rule both the window and the terminal spell keys by — ADR-328, ADR-441): a 1-char string,
+;; or a keyword spelling its modifiers in a fixed order,
+;; `[ctrl-meta-|ctrl-|alt-][shift-][super-]<name>`. A human writes the same key the way
+;; Emacs prints it — `C-x C-f`, `M-%`, `C-M-<return>`. `key-description` is the printer and
+;; `key-parse` its inverse (ADR-535), so help text and a config file speak one language:
+;; whatever `describe-key` shows can be pasted into a binding.
+
+(def- key-modifier-spellings
+  ;; A keyword-name prefix and its Emacs spelling, LONGEST FIRST so `ctrl-meta-` is seen
+  ;; before `ctrl-`. The list is the whole modifier vocabulary; add a row to add one.
+  [["ctrl-meta-" "C-M-"]
+    ["ctrl-" "C-"]
+    ["meta-" "M-"]
+    ["alt-" "M-"]
+    ["shift-" "S-"]
+    ["super-" "s-"]])
+
+(def- key-angle-names
+  ;; The named keys Emacs writes in angle brackets (`<insert>`, `<f5>`), beyond the function
+  ;; keys `key-function-name?` recognises by shape: the ones ADR-441 named.
+  #{"insert"
+    "menu" "pause" "scroll-lock" "help" "find" "undo" "redo" "copy" "cut" "paste" "select" "execute"
+    "cancel" "clear" "back" "forward" "volume-up" "volume-down" "volume-mute" "media-play-pause"
+    "media-stop" "media-next" "media-previous"})
+
+(def- key-plain-names
+  ;; The named keys the printer writes bare (`left`, `C-enter`, `page-down`): the motion and
+  ;; editing keys that carry modifiers in their name, and the three that keep their own.
+  #{"up"
+    "down" "left" "right" "home" "end" "page-up" "page-down" "enter" "backspace" "delete" "tab"
+    "back-tab" "escape"})
+
+(def- key-word-names
+  ;; Emacs's own words for a key, as `kbd` reads them.
+  {"RET" "enter" "TAB" "tab" "SPC" " " "ESC" "escape" "DEL" "backspace"})
+
+(def- key-angle-aliases
+  ;; Emacs's `<name>` for a key this vocabulary names otherwise.
+  {"return" "enter"
+   "backtab" "back-tab"
+   "prior" "page-up"
+   "next" "page-down"
+   "deletechar" "delete"
+   "kp-enter" "enter"})
+
+(def- key-modifier-letters
+  ;; The modifier a written `X-` prefix names.
+  {"C" :ctrl "M" :meta "S" :shift "s" :super})
+
+(defn- key-function-name? (name)
+  "Whether `name` is a function key's, `f1` … `f24`."
+  (and (> (string/length name) 1)
+    (string/starts-with? name "f")
+    (let (number (string/->number (string/substring name 1 (string/length name))))
+      (and (int? number) (>= number 1) (<= number 24)))))
+
+(defn- key-angle-name? (name)
+  "Whether the key named `name` (its modifiers already spelled) is written `<name>`."
+  (or (contains? key-angle-names name) (key-function-name? name)))
+
+;; check-allow: deliberately non-tail — depth = the number of modifiers on one key (C-M-S-x
+;; is three), not any input size.
+(check-allow :non-tail-recursion
+  (defn- key-name-description (name)
+    "The Emacs spelling of a key keyword's NAME — its modifier prefixes replaced one at a
+time, innermost last, and a bare space as `SPC`.
+
+A prefix test per modifier rather than a chain of `string/replace` passes over every key:
+inverting a keymap labels a few hundred keys, and seven scans each was ~40 µs a key."
+    (let (hit (seq/find key-modifier-spellings (fn (p) (string/starts-with? name (first p)))))
+      (cond
+        (= name " ") "SPC"
+        (nil? hit) (if (key-angle-name? name) (str "<" name ">") name)
+        else
+          (let ([prefix spelling] hit)
+            (str spelling
+              (key-name-description (string/substring name
+                                      (string/length prefix)
+                                      (string/length name)))))))))
+
+(defn single-key-description (key)
+  "The Emacs spelling of one key: `:ctrl-e` → `C-e`, `:alt-g` → `M-g`, `:ctrl-meta-i` →
+`C-M-i`, `:ctrl-shift-left` → `C-S-left`, `:f5` → `<f5>`, a space as `SPC`, a 1-char string
+as itself. [[key-parse]] reads every spelling this writes back to the same key.
+
+    (editor/keymap/single-key-description :ctrl-meta-i)   ;=> \"C-M-i\"
+    (editor/keymap/single-key-description (keyword \"ctrl- \"))   ;=> \"C-SPC\"
+    (editor/keymap/single-key-description :super-f5)   ;=> \"s-<f5>\""
+  (cond
+    (string? key) (if (= key " ") "SPC" key)
+    (keyword? key) (key-name-description (->string key))
+    else (str key)))
+
+(defn key-description (keys)
+  "The Emacs spelling of a key sequence, its keys space-joined — Emacs's `key-description`.
+The inverse of [[key-parse]].
+
+    (editor/keymap/key-description [:ctrl-x :ctrl-f])   ;=> \"C-x C-f\"
+    (editor/keymap/key-description [:alt-s \"o\"])   ;=> \"M-s o\""
+  (string/join (map keys single-key-description) " "))
+
+(defn- key-peel-modifiers (token modifiers)
+  "`[modifiers rest]`: the `C-` / `M-` / `S-` / `s-` prefixes peeled off the front of
+`token` into the set `modifiers`, for as long as a key is left after the dash — so `C--` is
+Ctrl and `-`, and a lone `C` is the letter."
+  (let (modifier (and (> (string/length token) 2)
+                   (= (string/substring token 1 2) "-")
+                   (get key-modifier-letters (string/substring token 0 1))))
+    (if modifier
+      (key-peel-modifiers (string/substring token 2 (string/length token))
+        (conj modifiers modifier))
+      [modifiers token])))
+
+(defn- key-named-base (name)
+  "The vocabulary's name for the named key written `name` (in angle brackets or bare), or
+nil when it names none."
+  (let (canonical (or (get key-angle-aliases name) name))
+    (if (or (contains? key-plain-names canonical) (key-angle-name? canonical)) canonical nil)))
+
+(defn- key-angle? (token)
+  "Whether `token` is written in angle brackets, `<name>`."
+  (and (> (string/length token) 2) (string/starts-with? token "<") (string/ends-with? token ">")))
+
+(defn- key-base (token modifiers)
+  "`[modifiers base]` for a written key after its outer modifiers: `base` is `[:char c]` or
+`[:named name]`. A failure when `token` names no key. Angle brackets may hold modifiers of
+their own (`<C-return>`, the older Emacs spelling)."
+  (let (word (get key-word-names token))
+    (cond
+      (= word " ") [modifiers [:char " "]]
+      (string? word) [modifiers [:named word]]
+      (key-angle? token)
+        (let ([inner-modifiers inner] (key-peel-modifiers (string/substring token
+                                                            1
+                                                            (dec (string/length token)))
+                                        modifiers)
+              name (key-named-base inner))
+          (if (nil? name)
+            (failure "key-parse: no such key: " token)
+            [inner-modifiers [:named name]]))
+      (= (count (string/->graphemes token)) 1) [modifiers [:char token]]
+      else
+        (let (name (key-named-base token))
+          (if (nil? name)
+            (failure "key-parse: not a key (one key per word, a named key as <name>): " token)
+            [modifiers [:named name]])))))
+
+(defn- key-case (glyph upper?)
+  "`glyph` upper- or lower-cased, kept as it is when its other case is not one character
+(`ß` upper-cases to `SS`) — the frontends' rule."
+  (let (cased (if upper? (string/upper glyph) (string/lower glyph)))
+    (if (= (count (string/->graphemes cased)) 1) cased glyph)))
+
+(defn- key-chord-prefix (modifiers)
+  "The Ctrl / Meta part of a key's name for the set `modifiers`."
+  (let (ctrl (contains? modifiers :ctrl)
+        meta (contains? modifiers :meta))
+    (cond
+      (and ctrl meta) "ctrl-meta-"
+      ctrl "ctrl-"
+      meta "alt-"
+      else "")))
+
+(defn- key-build (modifiers base)
+  "The key the frontends deliver for `base` under `modifiers` (`character_chord` /
+`named_key`). A character chord folds Shift into the glyph — Ctrl lower-cases it, otherwise
+Shift upper-cases it and a written capital stays one (`M-O` is Alt+Shift+o) — and a named
+key spells Shift in its name; Shift+Tab is `:back-tab`."
+  (let ([kind name] base
+        ctrl (contains? modifiers :ctrl)
+        super (contains? modifiers :super)
+        shift (contains? modifiers :shift)
+        prefix (key-chord-prefix modifiers))
+    (cond
+      (= kind :named)
+        (if (and (= name "tab") (= modifiers #{:shift}))
+          :back-tab (keyword (str prefix (if shift "shift-" "") (if super "super-" "") name)))
+      (or ctrl super (contains? modifiers :meta))
+        (keyword (str prefix
+                   (if super "super-" "")
+                   (cond
+                     ctrl (key-case name false)
+                     shift (key-case name true)
+                     else name)))
+      shift (key-case name true)
+      else name)))
+
+(defn- key-parse-one (token)
+  "One written key → the key, or a failure."
+  (let ([modifiers unmodified] (key-peel-modifiers token #{})
+        parsed (key-base unmodified modifiers))
+    (if (failure? parsed)
+      parsed
+      (let ([all-modifiers base] parsed) (key-build all-modifiers base)))))
+
+(defn- key-parse-words (words)
+  "The keys `words` name, in order, or the first word's failure."
+  (fold words
+    []
+    (fn (keys word)
+      (if (failure? keys)
+        keys
+        (let (key (key-parse-one word)) (if (failure? key) key (conj keys key)))))))
+
+(defn key-parse (text)
+  "The key SEQUENCE an Emacs key description names — Emacs's `kbd` / `key-parse`: a vector
+of the keys [[keymap-bind]] binds, or a `failure` naming the word that is not a key.
+
+One key per space-separated word: modifiers `C-` `M-` `S-` `s-` (Ctrl, Meta, Shift, Super)
+before a character (`C-x`, `M-%`, `C-M-$`), Emacs's words `RET` `TAB` `SPC` `ESC` `DEL`, and
+a named key in angle brackets (`<f5>`, `<return>`, `<prior>`, `C-<left>`). Every spelling
+[[key-description]] writes reads back to the same key, so whatever help shows for a key can
+be pasted into a binding.
+
+    (editor/keymap/key-parse \"C-x C-f\")   ;=> [:ctrl-x :ctrl-f]
+    (editor/keymap/key-parse \"C-c t f\")   ;=> [:ctrl-c \"t\" \"f\"]
+    (editor/keymap/key-parse \"C-M-<return>\")   ;=> [:ctrl-meta-enter]
+    (editor/keymap/key-parse \"C-x RET\")   ;=> [:ctrl-x :enter]
+    (editor/keymap/key-parse \"S-TAB\")   ;=> [:back-tab]
+    (error-message (editor/keymap/key-parse \"C-x foo\"))   ;=> \"key-parse: not a key (one key per word, a named key as <name>): foo\""
+  (let (words (if (string? text) (string/fields text) nil))
+    (if (empty? words)
+      (failure "key-parse: not a key sequence: " (if (string? text) (str "\"" text "\"") text))
+      (key-parse-words words))))
