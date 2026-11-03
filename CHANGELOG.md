@@ -10,6 +10,9 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 - A GUI window splits the space its rows leave over between the top and bottom margins
   (ADR-508 addendum), instead of putting it all under the last row, where it could leave a
   band up to a row and a half tall under an editor's echo area.
+- A GUI background band one row tall on the window's edge row bleeds into the margin there
+  too (ADR-508 addendum), so an editor's header line reaches the top of the frame instead of
+  leaving a strip of window above it.
 - GUI: a block caret given the text under it and its face (`[:cursor … under face]`,
   `editor/display/cursor`'s sixth and seventh arguments) is drawn as Emacs draws its box, the
   cell solid in the caret's colour and the character over it in the background, bold or italic
