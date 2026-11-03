@@ -28,10 +28,10 @@
 //!
 //! Where the lazy DFA cannot go — a Unicode word boundary (`\b`) before non-ASCII text — the
 //! search falls back to the `meta` regex over the text it needs, materialised. That is the
-//! one path that copies, and it says so in each fallback below.
+//! one path that copies — a window at a time, never the rest of the rope (see each fallback).
 
 use super::args::{arg, expect_int, expect_rope_ref, expect_string_ref};
-use super::regex_native::{Kind, SEARCH_WINDOW, compiled, kw};
+use super::regex_native::{Kind, Pattern, SEARCH_WINDOW, compiled, kw, pike_settled};
 use crate::core::heap::Heap;
 use crate::core::value::{EnvId, Value};
 use crate::error::{LispError, LispResult};
@@ -225,6 +225,15 @@ impl<'r> RopeBytes<'r> {
             next += 1;
         }
         next
+    }
+
+    /// The character boundary at or after `at`, clamped to the rope.
+    fn boundary_up(&mut self, at: usize) -> usize {
+        let mut at = at.min(self.len);
+        while at < self.len && !self.is_boundary(at) {
+            at += 1;
+        }
+        at
     }
 
     /// The character boundary at or before `at`.
@@ -435,6 +444,10 @@ fn find_forward(
             if from > bytes.len {
                 return Ok(Found::Missing);
             }
+            // A pattern that matches only EMPTY (`x*` over text with no `x`) comes round this
+            // loop once per character, each scan a byte long — so the scans' own polls never
+            // fire. One per turn keeps a search through a whole rope interruptible (ADR-491).
+            poll.tick()?;
             let end = match scan_forward(
                 &engine.forward,
                 forward_cache,
@@ -560,41 +573,170 @@ fn find_backward(
 // Where the lazy DFA quit, the `meta` regex runs over the text the question needs, copied
 // out of the rope. Byte offsets below are the rope's.
 
+#[cfg(test)]
+thread_local! {
+    /// Bytes the fallback has copied out of a rope on this thread — what the tests bound.
+    static COPIED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The rope's bytes `[from, to)` as a string (both char boundaries).
 fn text_of(rope: &ropey::Rope, from: usize, to: usize) -> String {
+    #[cfg(test)]
+    COPIED.with(|copied| copied.set(copied.get() + (to - from)));
     rope.byte_slice(from..to).to_string()
 }
 
-/// [`find_forward`] by `meta` over `[context, scan_end)` of the rope (`context` a char
-/// boundary at or before `from`, for look-behind): matches starting before `scan_end`.
+/// The first match of `rx` in `text` starting at or after byte `at` and lying within
+/// `[at, end)` — `text` reaches one character past `end` so look-ahead sees it — skipping an
+/// empty match unless `allow_empty`.
+fn meta_search(
+    rx: &Pattern,
+    text: &str,
+    at: usize,
+    end: usize,
+    allow_empty: bool,
+) -> Option<(usize, usize)> {
+    let mut at = at;
+    while at <= end {
+        let found = rx.search(&Input::new(text).range(at..end))?;
+        if found.is_empty() && !allow_empty {
+            at = found.end() + text[found.end()..].chars().next().map_or(1, char::len_utf8);
+            continue;
+        }
+        return Some((found.start(), found.end()));
+    }
+    None
+}
+
+/// The text a fallback window reads: the rope's chars `[low, high)` with one char of context
+/// either side for look-around, as `(text, context)` — `context` the byte the text starts at.
+fn window_text(
+    rope: &ropey::Rope,
+    bytes: &mut RopeBytes<'_>,
+    low: usize,
+    high: usize,
+) -> (String, usize) {
+    let context = bytes.boundary_down(low.saturating_sub(1));
+    let text_end = if high < bytes.len {
+        bytes.next_char(high)
+    } else {
+        high
+    };
+    (text_of(rope, context, text_end), context)
+}
+
+/// One window of the rope the forward fallback has copied: matches STARTING in
+/// `[low, starts_end)` are its to find, read over `[low, high)` (`text` from `context`).
+struct Window {
+    text: String,
+    context: usize,
+    low: usize,
+    starts_end: usize,
+    high: usize,
+}
+
+/// [`find_forward`] without the lazy DFA, a window at a time: matches STARTING in the next
+/// `SEARCH_WINDOW` bytes (or up to `limit`), read over those bytes and as far past them as a
+/// match of the pattern can reach (its longest match, or another window for an unbounded
+/// pattern). The answer is EXACT: the window is doubled, from the same start, while a thread
+/// of the matcher that could still beat the match found was waiting at its end
+/// ([`pike_settled`]) — so `ab*c|a` past the window is the long match, never the `a`, and
+/// the common case is one window. A scan past `limit` resumes at the
+/// window it reached, so a window's spans copy the window, not the rest of the rope. `window`
+/// keeps the copy between calls, so finding every match in a window copies it once.
+#[allow(clippy::too_many_arguments)]
 fn fallback_forward(
     source: &str,
     rope: &ropey::Rope,
     bytes: &mut RopeBytes<'_>,
     from: usize,
+    limit: usize,
     allow_empty: bool,
-) -> Result<Option<(usize, usize)>, LispError> {
+    window: &mut Option<Window>,
+    poll: &mut InterruptPoll,
+) -> Result<Found, LispError> {
     let rx = compiled("%rope-regex-find", source, Kind::LeftmostFirst)?;
-    let context = bytes.boundary_down(from.saturating_sub(1));
-    let text = text_of(rope, context, bytes.len);
-    let mut at = from - context;
-    let mut poll = InterruptPoll::new();
-    while at <= text.len() {
-        poll.tick()?;
-        let Some(found) = rx.search(&Input::new(&text).range(at..)) else {
-            return Ok(None);
-        };
-        if found.is_empty() && !allow_empty {
-            at = found.end() + text[found.end()..].chars().next().map_or(1, char::len_utf8);
-            continue;
+    let reach = rx.longest.unwrap_or(SEARCH_WINDOW);
+    let mut at = from;
+    loop {
+        if at > bytes.len {
+            return Ok(Found::Missing);
         }
-        return Ok(Some((context + found.start(), context + found.end())));
+        if at >= limit {
+            return Ok(Found::Resume(at));
+        }
+        let held = window
+            .as_ref()
+            .is_some_and(|held| held.low <= at && at < held.starts_end);
+        if !held {
+            poll.advance(InterruptPoll::EVERY)?;
+            // a bounded scan (a window's spans) needs no starts past its limit
+            let starts_end =
+                bytes.boundary_up(at.saturating_add(SEARCH_WINDOW).min(limit.max(at + 1)));
+            let high = bytes.boundary_up(starts_end.saturating_add(reach));
+            let (text, context) = window_text(rope, bytes, at, high);
+            *window = Some(Window {
+                text,
+                context,
+                low: at,
+                starts_end,
+                high,
+            });
+        }
+        let Some(held) = window.as_mut() else {
+            return Ok(Found::Missing);
+        };
+        let context = held.context;
+        // The answer in this window, and whether more text could change it. Our Pike VM says
+        // exactly whether a thread was still running at the window's end; without one (the
+        // NFA past its cap) `meta` answers, and a match touching the end is the only sign.
+        let (found, alive) = match rx.nfa() {
+            Some(nfa) => {
+                let input = Input::new(&held.text).range(at - context..held.high - context);
+                let (found, alive) = pike_settled(nfa, &input, held.starts_end - context, poll)?;
+                (
+                    found.map(|(start, end)| (context + start, context + end)),
+                    alive,
+                )
+            }
+            None => {
+                let found = meta_search(&rx, &held.text, at - context, held.high - context, true)
+                    .map(|(start, end)| (context + start, context + end))
+                    .filter(|&(start, _)| start < held.starts_end || held.high >= bytes.len);
+                let alive = found.is_some_and(|(_, end)| end == held.high);
+                (found, alive)
+            }
+        };
+        match found {
+            // more text could change the answer: read further, from the same start
+            _ if alive && held.high < bytes.len => {
+                poll.advance(InterruptPoll::EVERY)?;
+                let high = bytes.boundary_up(held.high.saturating_add(held.high - held.low));
+                let (text, context) = window_text(rope, bytes, held.low, high);
+                held.text = text;
+                held.context = context;
+                held.high = high;
+            }
+            // an empty match, when one is not wanted: look again a character on
+            Some((start, end)) if start == end && !allow_empty => {
+                at = bytes.next_char(start);
+            }
+            Some((start, end)) => return Ok(Found::Match(start, end)),
+            _ => {
+                if held.starts_end >= bytes.len {
+                    return Ok(Found::Missing);
+                }
+                at = held.starts_end;
+            }
+        }
     }
-    Ok(None)
 }
 
-/// [`find_backward`] by `meta`: an anchored attempt at each start going back from
-/// `before`, over the text up to `before` and the character after it.
+/// [`find_backward`] by `meta`: the match starting last while ending by `before`, read a
+/// window at a time going back, each twice the last (so the copying adds up to about twice
+/// the distance read). Within a window the match STARTS are walked forward — each search finds
+/// the next start that has a match ending by `before` — so the cost is a search per match,
+/// not per byte; the last start in the window is the answer.
 fn fallback_backward(
     source: &str,
     rope: &ropey::Rope,
@@ -603,35 +745,44 @@ fn fallback_backward(
     allow_empty: bool,
 ) -> Result<Option<(usize, usize)>, LispError> {
     let rx = compiled("%rope-regex-rfind", source, Kind::LeftmostFirst)?;
-    let text_end = if before < bytes.len {
-        bytes.next_char(before)
-    } else {
-        before
-    };
-    let text = text_of(rope, 0, text_end);
     let mut poll = InterruptPoll::new();
-    // candidate starts from `before` itself (an empty match there) or the byte before it, down
-    let first = if allow_empty {
-        Some(before)
-    } else {
-        before.checked_sub(1)
-    };
-    let Some(first) = first else {
-        return Ok(None);
-    };
-    for at in (0..=first).rev() {
-        if !text.is_char_boundary(at) {
-            continue;
-        }
-        poll.tick()?;
-        let input = Input::new(&text).range(at..before).anchored(Anchored::Yes);
-        if let Some(found) = rx.search(&input)
-            && (allow_empty || !found.is_empty())
+    if allow_empty {
+        // an empty match AT `before` is the last start there can be
+        let (text, context) = window_text(rope, bytes, before, before);
+        let at = before - context;
+        if rx
+            .search(&Input::new(&text).range(at..at).anchored(Anchored::Yes))
+            .is_some()
         {
-            return Ok(Some((found.start(), found.end())));
+            return Ok(Some((before, before)));
         }
     }
-    Ok(None)
+    // starts below `top` are this window's; above it, an earlier window already looked
+    let mut top = before;
+    let mut width = SEARCH_WINDOW;
+    loop {
+        if top == 0 {
+            return Ok(None);
+        }
+        poll.advance(InterruptPoll::EVERY)?;
+        let low = bytes.boundary_down(top.saturating_sub(width));
+        let (text, context) = window_text(rope, bytes, low, before);
+        let mut at = low - context;
+        let mut last = None;
+        while let Some((start, end)) = meta_search(&rx, &text, at, before - context, allow_empty) {
+            if context + start >= top {
+                break;
+            }
+            poll.tick()?;
+            last = Some((context + start, context + end));
+            at = start + text[start..].chars().next().map_or(1, char::len_utf8);
+        }
+        if last.is_some() {
+            return Ok(last);
+        }
+        top = low;
+        width = width.saturating_mul(2);
+    }
 }
 
 // ---- answering ------------------------------------------------------------------
@@ -743,7 +894,19 @@ fn rope_regex_find(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         };
         let span = match found {
             Found::Match(start, end) => Some((start, end)),
-            Found::Quit => fallback_forward(source, rope, &mut bytes, from, allow_empty)?,
+            Found::Quit => match fallback_forward(
+                source,
+                rope,
+                &mut bytes,
+                from,
+                usize::MAX,
+                allow_empty,
+                &mut None,
+                &mut poll,
+            )? {
+                Found::Match(start, end) => Some((start, end)),
+                _ => None,
+            },
             Found::Resume(_) | Found::Missing => None,
         };
         match span {
@@ -796,11 +959,25 @@ fn each_match(
     let mut poll = InterruptPoll::new();
     let engine = engine(source);
     let mut at = from;
+    let mut window = None;
     loop {
         poll.tick()?;
         let found = match engine.as_ref() {
             Some(engine) => find_forward(engine, &mut bytes, at, limit, false, &mut poll)?,
             None => Found::Quit,
+        };
+        let found = match found {
+            Found::Quit => fallback_forward(
+                source,
+                rope,
+                &mut bytes,
+                at,
+                limit,
+                false,
+                &mut window,
+                &mut poll,
+            )?,
+            found => found,
         };
         match found {
             Found::Match(start, end) => {
@@ -810,16 +987,7 @@ fn each_match(
                 at = end;
             }
             Found::Resume(resume) => return Ok(Some(resume)),
-            Found::Missing => return Ok(None),
-            Found::Quit => match fallback_forward(source, rope, &mut bytes, at, false)? {
-                Some((start, end)) => {
-                    if !each(start, end) {
-                        return Ok(Some(start));
-                    }
-                    at = end;
-                }
-                None => return Ok(None),
-            },
+            Found::Missing | Found::Quit => return Ok(None),
         }
     }
 }
@@ -1016,5 +1184,83 @@ mod tests {
         // an empty match AT `before` is the last start; without it, the `x` before it
         assert_eq!(backward(&mut bytes, &mut poll, 2, true), Some((2, 2)));
         assert_eq!(backward(&mut bytes, &mut poll, 5, false), Some((4, 5)));
+    }
+
+    #[test]
+    fn a_pattern_that_only_matches_empty_stops_at_its_limit() {
+        // `x*` over text with no `x`: every position is an empty match, stepped over one by
+        // one; a bounded scan must still stop at its limit, not read the rest of the rope
+        let rope = ropey::Rope::from_str(&"a".repeat(200_000));
+        let engine = Engine::build("x*").unwrap();
+        let mut bytes = RopeBytes::new(&rope);
+        let mut poll = InterruptPoll::new();
+        match find_forward(&engine, &mut bytes, 0, 100, false, &mut poll).unwrap() {
+            Found::Resume(at) => assert!(at <= 101, "resumed at {at}"),
+            _ => panic!("the scan went past its limit"),
+        }
+    }
+
+    #[test]
+    fn the_fallback_copies_the_window_it_is_asked_about() {
+        // non-ASCII text makes `\\b` quit the lazy DFA, so this is the copying path
+        let text = "über foo ".repeat(100_000);
+        let rope = ropey::Rope::from_str(&text);
+        COPIED.with(|copied| copied.set(0));
+        let mut spans = Vec::new();
+        each_match(r"\bfoo\b", &rope, 0, 1000, |start, end| {
+            if start >= 1000 {
+                return false;
+            }
+            spans.push((start, end));
+            true
+        })
+        .unwrap();
+        let expected: Vec<_> = naive_all(r"\bfoo\b", &text)
+            .into_iter()
+            .filter(|&(start, _)| start < 1000)
+            .collect();
+        assert_eq!(spans, expected);
+        let copied = COPIED.with(std::cell::Cell::get);
+        assert!(copied < 300_000, "copied {copied} bytes of {}", text.len());
+
+        // backward from the end: the last `foo`, from a copy of the text near it
+        COPIED.with(|copied| copied.set(0));
+        let mut bytes = RopeBytes::new(&rope);
+        let last = fallback_backward(r"\bfoo\b", &rope, &mut bytes, text.len(), false).unwrap();
+        assert_eq!(last, naive_all(r"\bfoo\b", &text).last().copied());
+        let copied = COPIED.with(std::cell::Cell::get);
+        assert!(copied < 300_000, "copied {copied} bytes of {}", text.len());
+    }
+
+    /// Every match by the rope search, from the start, with no limit.
+    fn all_unbounded(source: &str, rope: &ropey::Rope) -> Vec<(usize, usize)> {
+        let mut all = Vec::new();
+        each_match(source, rope, 0, usize::MAX, |start, end| {
+            all.push((start, end));
+            true
+        })
+        .unwrap();
+        all
+    }
+
+    #[test]
+    fn a_window_does_not_cut_the_preferred_branch_short() {
+        // `\b` before non-ASCII text: the windowed fallback. The first branch matches only
+        // past the window's end; the second matches inside it. Leftmost-first prefers the
+        // first — a window that stopped early would answer the shorter `a`.
+        let text = format!("ü a{}c ü", "b".repeat(200_000));
+        let rope = ropey::Rope::from_str(&text);
+        let source = r"\bab*c|\ba";
+        assert_eq!(all_unbounded(source, &rope), naive_all(source, &text));
+    }
+
+    #[test]
+    fn a_long_german_word_across_windows_is_one_match() {
+        // a word far longer than a window, ending in `ung`, among short German words
+        let word = format!("Donaudampfschiff{}ung", "fahrtsgesellschaft".repeat(10_000));
+        let text = format!("{} {word} Größe Übung Ende", "Größe Straße".repeat(5_000));
+        let rope = ropey::Rope::from_str(&text);
+        let source = r"\b\w+ung\b";
+        assert_eq!(all_unbounded(source, &rope), naive_all(source, &text));
     }
 }
