@@ -665,8 +665,7 @@
     (assert= (receive ([:pong r] r) (after 0 :none)) :asked))
 
   (test "a window client answers the session's ping, and does not ship it as a key"
-    (let (shipped (table/new)
-          display {:draw (fn (f) nil) :leave (fn () nil)})
+    (let (display {:draw (fn (f) nil) :leave (fn () nil)})
       (send (self) [:ping (self) :asked])
       (send (self) [:bye])
       (editor/serve/attach-display-loop nil (self) display)
