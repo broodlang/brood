@@ -148,8 +148,9 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     // provides (a tab), keyed by path as files are, read alike by every runtime.
     ("boot/image.rs", "MEMORY_IMAGES", OneMachine),
     ("host/clipboard.rs", "CLIPBOARD", OneMachine),
-    // the clipboard's reader, apart from the owner so a wedged read blocks no write (ADR-536)
-    ("host/clipboard.rs", "READER", OneMachine),
+    // the clipboard's reader, apart from the owner so a wedged read blocks no write, and
+    // replaced past a deadline so it blocks no later read for good (ADR-536)
+    ("host/clipboard.rs", "READERS", OneMachine),
     ("host/treesit.rs", "DYNAMIC", OneMachine),
     // Grammars declared and not yet loaded (ADR-481): the same machine-wide table as
     // DYNAMIC, one step earlier.
