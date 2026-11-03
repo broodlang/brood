@@ -1,10 +1,11 @@
 ;; std/memo.blsp — bounded memoisation for a hot path whose arguments are big values.
 ;;
 ;; Design notes (the *why*; the *what* is in the docstrings below):
-;;  - `memoize` (prelude) is the general answer and the wrong one on an editor's render
-;;    path. Its table hashes each key — and a rope hashes by its whole TEXT, so looking up
+;;  - `memoize` (a prelude function, removed by ADR-522) was the general answer and the wrong
+;;    one on an editor's render path. Its table hashed each key — and a rope hashes by its whole TEXT, so looking up
 ;;    a row table keyed on a buffer's rope read the document on every frame — and a table
-;;    read hands back a COPY of the value. It also never forgets.
+;;    read hands back a COPY of the value. It also never forgot, and a call inside a loop
+;;    made a new table each time. `defmemo` is now the only memoisation.
 ;;  - What those paths want is the answer to "the same call as a moment ago?": keep the
 ;;    last few calls and compare arguments with `=`, which answers at once for the same
 ;;    rope handle (an edit mints a new rope; a cursor move keeps it). Bounded, so it cannot
@@ -15,8 +16,9 @@
 
 (defmodule memo
   "Bounded memoisation for hot paths: `defmemo` defines a function that remembers its
-last few calls, compared by `=` — for arguments like a buffer's rope, where hashing
-(`memoize`) would read the whole text on every call.")
+last few calls, compared by `=` — for arguments like a buffer's rope, where hashing would
+read the whole text on every call. Memoisation lives at a definition, so a cache cannot be
+made per call (ADR-522).")
 
 (defn- param-names (params)
   "The names a parameter list binds, in order — `&optional`/`&` markers dropped, a

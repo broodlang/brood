@@ -573,7 +573,7 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // module declares the namespace they live in — ten names for one idea is what a
     // namespace is for, and bare is the scarce resource.
     // The less common functions over functions (ADR-506): complement, constantly, juxt,
-    // fnil, memoize. Defined in the prelude under these names; this file declares the
+    // fnil. Defined in the prelude under these names; this file declares the
     // module they belong to. identity, partial and comp stay bare.
     embedded_module!("combinator", "std/combinator.blsp"),
     // The pair accessors caar … cdddr (ADR-506), defined in the prelude under these names.

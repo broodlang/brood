@@ -198,7 +198,6 @@ pub const RENAMES: &[(&str, &str, &str)] = &[
     ("constantly", "combinator/constantly", "ADR-506"),
     ("juxt", "combinator/juxt", "ADR-506"),
     ("fnil", "combinator/fnil", "ADR-506"),
-    ("memoize", "combinator/memoize", "ADR-506"),
     // ADR-433 — `gen/start` takes options; the two one-line wrappers that did not compose
     // are gone. The target is a CALL SHAPE, not a name: rewriting `gen/start-link` to bare
     // `gen/start` would silently drop the link, so `--fix-renames` leaves any target that

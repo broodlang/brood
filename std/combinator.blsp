@@ -13,4 +13,4 @@
     ((combinator/juxt first last) [1 2 3])   ;=> [1 3]
     ((combinator/fnil inc 0) nil)            ;=> 1
 
-`combinator/memoize` caches a function's results by argument list in a table it owns.")
+To remember a function's answers, define it with `memo/defmemo` (ADR-522).")

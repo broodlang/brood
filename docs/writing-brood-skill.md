@@ -193,7 +193,7 @@ muscle-memory reaches for, and what Brood actually has:
 | `parse-int` / `Integer.parseInt` | `(string/->number s)` → an int, a float, or a **failure** (trap #7); `(string/->number "1F" 16)` for a radix |
 | `some?` (non-nil) | `(not (nil? x))`; Brood's `any?` is "some element matches a pred" |
 | `set!` / `swap!` / atoms | nothing — state is a process or a `table` (trap #1) |
-| `combinator/memoize`, `combinator/juxt`, `combinator/fnil`, `condp`, `if-some` | all exist; the first three in `combinator/` (or bare under `(:use combinator)`), the last two bare. `condp` is value-first: `(condp < 15 10 :small 100 :medium :large)` → `:medium` |
+| `combinator/juxt`, `combinator/fnil`, `condp`, `if-some` | all exist; the first two in `combinator/` (or bare under `(:use combinator)`), the last two bare. `condp` is value-first: `(condp < 15 10 :small 100 :medium :large)` → `:medium` |
 | `for` into a vector/map | `(for (x xs :when p :into []) …)`; an accumulating walk is `(fold-for (acc 0 x xs) (+ acc x))` |
 | `pmap` / `seq/take-while` transducer | `seq/pmap` (a process per item, order kept); `seq/transduce` with `seq/reduced` to stop early |
 | raw ANSI (`clear`/`home`/cursor) | `(:use editor/ansi)` → `(ansi-clear)`/`(ansi-home)`/`(ansi-cursor r c)` are **zero-arg fns returning an escape string** — `(io/write (ansi-clear))`, never `(io/write ansi-clear)`. A render loop wants `editor/display` + `ui-run` |

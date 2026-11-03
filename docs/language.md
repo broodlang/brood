@@ -3329,7 +3329,7 @@ kernel primitive), so neither walks nor materialises the entries.
 
 ### Higher-order
 `map`  `seq/filter`  `seq/reject`  `seq/mapv`  `seq/filterv`  `seq/rejectv`  `reduce`  `fold`  `apply`
-`comp`  `partial`  `combinator/complement`  `combinator/constantly`  `identity`  `combinator/juxt`  `combinator/fnil`  `combinator/memoize`  `seq/pmap`
+`comp`  `partial`  `combinator/complement`  `combinator/constantly`  `identity`  `combinator/juxt`  `combinator/fnil`  `seq/pmap`
 
 `combinator/juxt` applies several functions to the same arguments and returns the results as a
 vector (`((combinator/juxt first count) [7 8 9])` is `[7 3]` — the two-field sort key); `combinator/fnil`
@@ -3337,13 +3337,11 @@ patches a `nil` first argument with a default (`(update m :n (combinator/fnil in
 is `map` with `(f x)` for every item in its own process, results in order, a worker's
 error re-raised in the caller (ADR-379).
 
-**`combinator/memoize`** returns `f` remembering every answer. Its cache is a `table` the returned
-function captures — the one mutable structure, and the reason the rest of this list can
-stay pure — so: keys are the argument list compared structurally (memoize over values,
-never a pid or closure); every hit is a fresh copy, as a table read is; the cache is
-shared across processes; and a table has no finalizer, so bind the result with `def` — a
-`combinator/memoize` inside a loop leaks a table per call. A memoized global is an anonymous
-closure: put a `(sig …)` beside the `def` to give its callers a type.
+There is no `memoize` function (ADR-522): a cache made by a call could be made per call, and
+inside a loop each one was a table nothing dropped. Memoisation lives at a definition —
+`(defmemo name capacity (params…) body…)` from the `memo` module defines a function that
+remembers its last `capacity` calls, compared with `=`, in a global store: bounded, and
+there is one per definition by construction.
 
 ```clojure
 (map (list 1 2 3) inc)                      ;=> (2 3 4)

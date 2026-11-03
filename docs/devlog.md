@@ -5028,3 +5028,9 @@ ADR-166's gate: `(def string/join …)` was accepted in a process that had not l
 it), and `(def if 1)` succeeded, binding a global no `(if …)` call can reach. The `def`
 expansion now loads an embedded module its target names, and `def` refuses a special form's
 name. `crates/lisp/tests/reserved_def_targets.rs`, each case red with its fix removed.
+
+2026-11-03 (ADR-522, design pass item 12). `combinator/memoize` made a fresh table per call, so
+inside a loop it leaked one each time; its only callers were its own tests, and every real
+memoisation already used `defmemo`. Removed, with its ledger entry. The other lifetime trap, a
+table dying with its creator, was already loud; its error now names the creator's exit and the
+fixes.

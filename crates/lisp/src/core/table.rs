@@ -555,7 +555,9 @@ impl Store {
         guard: &'g mut MutexGuard<'_, Option<StoreMap>>,
     ) -> Result<&'g mut StoreMap, LispError> {
         if self.dropped.load(Ordering::SeqCst) {
-            return Err(LispError::runtime("table: no such table (dropped)"));
+            return Err(LispError::runtime(
+                "table: no such table — it was dropped, or the process that created it has exited",
+            ));
         }
         if guard.is_none() {
             self.migrate_to_hashed(guard);
@@ -632,9 +634,13 @@ fn lookup(id: u64) -> Result<&'static Store, LispError> {
     match current_store(id) {
         Some(store) if !store.dropped.load(Ordering::Relaxed) => Ok(store),
         _ => Err(LispError::runtime(format!(
-            "table {}: no such table (dropped?)",
-            id
-        ))),
+            "table {id}: no such table — it was dropped, or the process that created it has \
+             exited"
+        ))
+        .with_hint(
+            "A table lives as long as the process that made it, unless a global holds it \
+             (ADR-418): `def` it, or create it in the process that outlives its readers.",
+        )),
     }
 }
 

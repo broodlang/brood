@@ -246,12 +246,11 @@ another Lisp has it.
     `failure`, and since `or`/`and`/`when`/`cond`/`if-let`/`when-let` all lower to that `if`,
     it covers every one of them, and a `let`-bound or wrapped (inferred) parser too; checked
     2026-11-03. ADR-316 reports the same failure reaching a typed parameter.
-12. ⬜ **Lifetime traps.**
-    - `memoize` inside a loop leaks a table per call.
-    - A `table` dies with the process that made it, unless a global can reach it (ADR-418).
-
-    Both are documented, neither is caught. Decide on a lint, or a construct that cannot
-    be misused.
+12. ✅ **Lifetime traps (2026-11-03, ADR-522).** `combinator/memoize` made a table per call,
+    so one inside a loop leaked a table each time. Removed: memoisation lives at a definition
+    (`memo/defmemo`, bounded, a global store), one cache per definition by construction. A
+    table that outlived its creator already failed loudly; its error now says the creating
+    process exited, and how to keep a table alive.
 13. ✅ **Small silent results (2026-11-03, ADR-521).** `(reduce [] +)` was `nil`: no items
     and no seed gave absence. Decided by design: a seedless `reduce` raises on an empty
     collection (a program error, so not a `failure`), and `reduce` is two clauses, so an

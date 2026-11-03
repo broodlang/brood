@@ -270,6 +270,9 @@
       (let (t (receive ([:tbl h] h)))
         (tt-await-exit child)
         (assert-error (table/get t :k))
+        ;; …and the error says why, not just that it is gone (ADR-522 asked for the
+        ;; lifetime rule to be visible where it bites).
+        (is (includes? (error-of (table/get t :k)) "the process that created it has exited"))
         (is (not (table/drop t))))))
 
   (test "a table its creator stored in a global outlives the creator"

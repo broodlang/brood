@@ -1,5 +1,5 @@
 ;;; ADR-379 — the small library gaps (ROADMAP "what the other Lisps have" item 9): the
-;;; combinators `juxt`/`fnil`/`memoize`, the control forms `condp`/`if-some`/`when-some`,
+;;; combinators `juxt`/`fnil` (`memoize` is gone, ADR-522), the control forms `condp`/`if-some`/`when-some`,
 ;;; `seq/cycle`, the walkers, `seq/pmap`, and `string/format`'s justification.
 (defmodule library-gaps-test (:use test) (:use math))
 
@@ -18,39 +18,12 @@
     ;; a `false` is a value, not an absence
     (assert= false ((combinator/fnil identity :d) false))))
 
-(describe "memoize — a table the function captures"
-  (test "the first call computes, the next with = arguments remembers"
-    (let (t (table/new)
-          slow (combinator/memoize (fn (n) (table/incr t :calls) (* n n))))
-      (assert= 16 (slow 4))
-      (assert= 16 (slow 4))
-      (assert= 25 (slow 5))
-      (assert= 2 (table/get t :calls))
-      (table/drop t)))
-  (test "keys are the whole argument list, compared structurally"
-    (let (t (table/new)
-          f (combinator/memoize (fn (a b) (table/incr t :calls) [a b])))
-      (assert= [1 {:k 2}] (f 1 {:k 2}))
-      (assert= [1 {:k 2}] (f 1 {:k 2}))
-      (assert= [2 {:k 2}] (f 2 {:k 2}))
-      (assert= 2 (table/get t :calls))
-      (table/drop t)))
-  (test "a nil answer is remembered too — absence is not a miss"
-    (let (t (table/new)
-          f (combinator/memoize (fn (x) (table/incr t :calls) nil)))
-      (assert= nil (f 1))
-      (assert= nil (f 1))
-      (assert= 1 (table/get t :calls))
-      (table/drop t)))
-  :isolated (test "across processes: the cache is one, so a spawned caller hits what the parent computed"
-    (def gaps-memo-calls (table/new))
-    (def gaps-memo (combinator/memoize (fn (n) (table/incr gaps-memo-calls :calls) (* 2 n))))
-    (assert= 10 (gaps-memo 5))
-    (let (me (self))
-      (spawn (send me [:memo (gaps-memo 5)]))
-      (assert= [:memo 10] (receive ([:memo v] [:memo v]) (after 2000 :timeout))))
-    (assert= 1 (table/get gaps-memo-calls :calls))
-    (table/drop gaps-memo-calls)))
+(describe "no memoize function (ADR-522)"
+  (test "memoisation lives at a definition, so a cache cannot be made per call"
+    ;; `combinator/memoize` made a table per call and kept it, so one inside a loop leaked a
+    ;; table each time. `memo/defmemo` is the one way to memoise.
+    (assert= false (bound? 'combinator/memoize))
+    (assert= false (bound? 'memoize))))
 
 (describe "condp / if-some / when-some"
   (test "condp takes the subject first and asks (pred expr test), value first"
