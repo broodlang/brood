@@ -66,23 +66,31 @@
   (let (a (if (nil? v) (dissoc (or attr {}) k) (assoc (or attr {}) k v)))
     (if (empty? a) nil a)))
 
-(defn- channel-at (parameters:vector j:int)
-  (math/clamp (or (nth parameters j nil) 0) 0 255))
+(defn- channel-at (parameters:vector j:int -> (or nil int))
+  "Parameter `j` as a colour channel, 0–255: an empty or missing slot is 0, as ECMA-48
+reads one; anything that is not a number — a `:` group where a `;` form wanted a plain
+channel — is nil, and the colour it was part of is malformed."
+  (let (v (nth parameters j nil))
+    (cond
+      (nil? v) 0
+      (int? v) (math/clamp v 0 255)
+      else nil)))
 
 (defn- extended-colour (parameters:vector i:int -> (tuple any int))
   "The colour after a `;`-separated 38 / 48 / 58 at `parameters[i]`: `[colour
 next-index]` — `5;n` an index, `2;r;g;b` a true colour (`2;;r;g;b`, an empty
-colour-space slot first, is read too); anything else is skipped with the colour unset.
-The `:` spellings arrive as one group and are [[group-colour]]'s."
+colour-space slot first, is read too). Anything else — an unknown kind, or a channel
+that is a `:` group (`38;5;1:2`) — is `[nil next-index]`: malformed, skipped, the
+attributes left alone. The `:` spellings arrive as one group and are [[group-colour]]'s."
   (let (kind (nth parameters i nil))
     (cond
       (= kind 5) [(channel-at parameters (inc i)) (+ i 2)]
       (= kind 2)
-        (let (j (if (nil? (nth parameters (inc i) nil)) (+ i 2) (inc i)))
-          [[(channel-at parameters j)
-             (channel-at parameters (inc j))
-             (channel-at parameters (+ j 2))]
-            (+ j 3)])
+        (let (j (if (nil? (nth parameters (inc i) nil)) (+ i 2) (inc i))
+              channels [(channel-at parameters j)
+                         (channel-at parameters (inc j))
+                         (channel-at parameters (+ j 2))])
+          [(if (includes? channels nil) nil channels) (+ j 3)])
       else [nil (inc i)])))
 
 (defn- group-colour (group:vector -> any)
@@ -117,7 +125,8 @@ group this model does not know — or one whose sub-parameters it cannot read �
     (cond
       (= p 0) (one nil)
       (not (nil? colour-key))
-        (let ([c j] (extended-colour parameters (inc i))) [(attr-set attr colour-key c) j])
+        (let ([c j] (extended-colour parameters (inc i)))
+          [(if (nil? c) attr (attr-set attr colour-key c)) j])
       (<= 30 p 37) (one (attr-set attr :fg (- p 30)))
       (<= 40 p 47) (one (attr-set attr :bg (- p 40)))
       (<= 90 p 97) (one (attr-set attr :fg (- p 82)))
@@ -133,7 +142,12 @@ group this model does not know — or one whose sub-parameters it cannot read �
       else (sgr-number attr parameters i 0))))
 
 (defn- param-number (p:string -> (or nil int))
-  (if (= p "") nil (let (n (string/->number p)) (if (int? n) n nil))))
+  "A parameter's digits as a number, nil for an empty slot — and for anything but digits
+(`-5`, `+5`, `1e3`): ECMA-48 parameters are decimal digits, so a sign or an exponent is
+malformed and reads as an empty slot, never as a negative count."
+  (if (or (= p "") (< (string/span p 0 "0123456789") (string/length p)))
+    nil
+    (let (n (string/->number p)) (if (int? n) n nil))))
 
 (defn- param-or-group (p:string -> any)
   (if (includes? p ":") (into [] (map (string/split p ":") param-number)) (param-number p)))
@@ -556,9 +570,7 @@ would write spaces where the program asked for deletion."
 
 (defn- ansi-param (params default)
   "The numeric parameter of a CSI, or `default` — `ESC[A` and `ESC[1A` are the same."
-  (if (= params "")
-    default
-    (let (n (string/->number params)) (if (int? n) n default))))
+  (let (n (param-number params)) (if (nil? n) default n)))
 
 (defn- ansi-csi (lines row col params final)
   "Apply one CSI; returns [lines row col]. Anything not listed is a no-op, which is the

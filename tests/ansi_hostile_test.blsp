@@ -1,0 +1,93 @@
+;; std/ansi + std/vt over HOSTILE escape parameters. A decoder sits on a pipe from a
+;; program the reader does not control, so no byte sequence may make it raise: a malformed
+;; parameter list is ignored, as ECMA-48 practice has it. Since ADR-580 a `:` group is a
+;; vector inside the parameters, and the `;`-spelled 38 / 48 / 58 forms once read one as a
+;; colour channel (`ESC[38;5;1:2m` raised in `math/min`). The cases below are a FIXED table:
+;; a hand-written list of the known shapes, and a deterministic set generated once from a
+;; fixed seed — the same sequences on every run.
+
+(defmodule ansi-hostile-test (:use test))
+
+(def- atoms
+  ;; parameter spellings, well-formed and not: empty, colour kinds, huge, signed,
+  ;; exponents, decimals, `:` groups of every shape
+  [""
+    "0" "1" "2" "4" "5" "9" "38" "48" "58" "59" "255" "256" "99999999999999999999" "-1" "+3" "1e3"
+    "1.5" "1:2" "2::1:2:3" "5:" ":" "::" "4:9" "38:5" "38:2:1" "38:2::1:2:3:4:5:6" "2:"])
+
+(def- hand-written
+  ;; the reported crashes, and their relatives
+  ["38;5;1:2"
+    "38;5;4:3" "38;2;1:2;3;4" "48;2;1;2:3;4" "58;5;9:9" "38;2;;1:2;3;4" "38;2" "38;5" "38"
+    "48;2;1;2" "38;9;1" "38;5;-1" "38;2;-1;-2;-3" "38;5;99999999999999999999" "1:2:3:4;38;5;1:2"
+    ";;;" ":;:" "38;:;:" "-5" "+5" "1e9"])
+
+(defn- generated-cases (seed count-left acc)
+  "`count-left` parameter strings built from `atoms` with the PRNG at `seed`, each one to
+eight atoms joined by `;` — a fixed list, since the seed is."
+  (if (= count-left 0)
+    acc
+    (let ([length next-seed] (rand/int seed 8)
+          [parts last-seed] (fold (range (inc length))
+                              [[] next-seed]
+                              (fn (state _)
+                                (let ([parts at] state
+                                      [index after] (rand/int at (count atoms)))
+                                  [(conj parts (nth atoms index)) after]))))
+      (generated-cases last-seed (dec count-left) (conj acc (string/join parts ";"))))))
+
+(def- cases (into hand-written (generated-cases 580 200 [])))
+
+(def- vt-finals
+  ;; every CSI the terminal acts on, private and intermediate forms included
+  ["m"
+    "A" "B" "C" "D" "E" "F" "G" "`" "d" "H" "f" "I" "Z" "J" "K" "L" "M" "P" "@" "X" "S" "T" "r" "h"
+    "l" "n" "c" "s" "u" "t" " q"])
+
+(defn- raises? (thunk)
+  (try (do (thunk) false) (catch _ true)))
+
+(defn- failing (f)
+  "The cases `f` raises on — empty when the decoder survives every one."
+  (into [] (seq/filter cases (fn (parameters) (raises? (fn () (f parameters)))))))
+
+(describe "ansi: no SGR parameter list raises"
+  (test "the reported crashes decode, leaving the attributes alone"
+    (assert= (second (ansi/feed (ansi/decoder) "\e[1;38;5;1:2mx")) [["x" {:bold true}]])
+    (assert= (second (ansi/feed (ansi/decoder) "\e[31m\e[38;2;1:2;3;4mx")) [["x" {:fg 1}]])
+    (assert= (ansi/sgr {:fg 1} (ansi/params "38;5;4:3")) {:fg 1}))
+  (test "a malformed colour is skipped whole: what follows it still applies"
+    (assert= (ansi/sgr nil (ansi/params "38;5;1:2;1")) {:bold true})
+    (assert= (ansi/sgr nil (ansi/params "38;2;1:2;3;4;3")) {:italic true}))
+  (test "a signed or exponent parameter is an empty slot, never a negative count"
+    (assert= (ansi/params "-5;+5;1e3") [nil nil nil])
+    (assert= (ansi/render "abc" "\e[-5Dx") "abx"))
+  (test "ansi/feed survives every case"
+    (assert= (failing (fn (parameters) (ansi/feed (ansi/decoder) (str "a\e[" parameters "mb")))) []))
+  (test "ansi/sgr survives every case, from the default face and from a full one"
+    (assert= (failing (fn (parameters) (ansi/sgr nil (ansi/params parameters)))) [])
+    (assert= (failing (fn (parameters)
+                        (ansi/sgr {:fg 1 :bg [1 2 3] :bold true :underline true}
+                          (ansi/params parameters))))
+      []))
+  (test "ansi/strip and ansi/render survive every case"
+    (assert= (failing (fn (parameters) (ansi/strip (str "a\e[" parameters "mb")))) [])
+    (assert= (failing (fn (parameters)
+                        (doseq (final ["m" "A" "D" "F" "K" "J"])
+                          (ansi/render "one\ntwo" (str "\e[" parameters final "x")))))
+      [])))
+
+(describe "vt: no CSI parameter list raises"
+  (test "the reported crash leaves the attribute alone"
+    (assert= (:attr (vt/feed (vt/make 4 1) "\e[1;38;5;1:2m")) {:bold true}))
+  (test "vt/feed survives every case with every final it acts on"
+    (assert= (failing (fn (parameters)
+                        (doseq (final vt-finals)
+                          (vt/feed (vt/make 8 3) (str "ab\r\n\e[" parameters final "x")))))
+      []))
+  (test "the private-mode forms survive every case"
+    (assert= (failing (fn (parameters)
+                        (doseq (final ["h" "l" "c"])
+                          (vt/feed (vt/make 8 3)
+                            (str "\e[?" parameters final "\e[>" parameters final)))))
+      [])))
