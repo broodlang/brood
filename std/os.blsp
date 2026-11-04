@@ -435,7 +435,7 @@ the child's stderr arrives as `[:proc handle data]` like everything else and the
 no `[:proc-err …]` stream. A caller that needs the two apart wants pipes.
 
 The child gets its own session and controlling terminal, so job control and ^C reach
-IT rather than the program hosting it. Unix only.
+IT rather than the program hosting it. Unix only: on Windows it raises, naming ConPTY (KI-369).
 
     (os/spawn-pty \"bash\" [\"-i\"] {:cols 100 :rows 30})   ;~> a subprocess handle; output arrives as [:proc handle data]"
   (%pty-spawn prog args opts))

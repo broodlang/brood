@@ -5,6 +5,52 @@ guard. The index, the filing rules and any open entry live in [known-issues.md](
 
 ---
 
+## KI-364 — Windows has no platform shell: a `sh -c` command needs an `sh` on PATH ✅ fixed 2026-11-04
+
+**Symptom.** On Windows every program that ran a command line as `(os/cmd "sh" ["-c" line])`
+— bedit's M-! / M-|, M-x compile, the project shell — raised `program not found` unless an
+`sh` was on PATH (Git for Windows, MSYS2). CI's Windows runner has Git's `sh` on PATH in a
+bash step, so bedit's `shell_command_test` passed there and proved nothing about a machine
+without one.
+
+**Cause.** Brood had no notion of the platform's command interpreter, and the obvious one,
+`cmd.exe /d /s /c LINE`, could not be spelled through `os/cmd`: the kernel built the Windows
+command line with the MSVC quoting rules (`Command::arg`), which put `\"` inside a quoted
+argument, and `cmd` does not read `\"` — any line holding a double quote reached it mangled.
+
+**Why it survived.** Nothing ran a command line on Windows until the platform smoke job.
+
+**Fix.** `:raw-args` on `os/cmd`, `os/spawn` and `os/detach`: on Windows the arguments are
+written into the command line as given (`CommandExt::raw_arg`); ignored elsewhere.
+`os/shell` is the platform's interpreter (`["sh" "-c"]`, or `[%COMSPEC% "/d" "/s" "/c"]`),
+and `os/shell-cmd` / `os/shell-spawn` run a line through it — on Windows as `"LINE"`, raw,
+which `cmd /s` strips and runs as typed. bedit's M-! / M-|, compile and project shell use
+them. A deliberate non-fix: an `sh` on PATH is not preferred over `cmd.exe` on Windows; a
+line is written in the platform shell's language, as Emacs's `shell-file-name` default does.
+
+**Guard.** `tests/platform_test.blsp` "the platform's shell": a line with quotes and two
+spaces echoed back exactly, a pipe and `&&`, an exit code, `os/shell-spawn` streaming — on
+the Windows runner (cmd prints the quotes) and on macOS and Linux (sh removes them).
+
+## KI-365 — `file/spit-private` is not private on Windows ✅ fixed 2026-11-04
+
+**Symptom.** `file/spit-private` writes a file readable by its owner only (0600) on Unix. On
+Windows it was a plain `File::create`, so the file took its directory's inherited ACL —
+under a shared directory as readable as the directory. bedit's auto-save sidecars use it.
+
+**Cause.** `nodes.rs`'s `spit_private` had a `cfg(unix)` arm only, and `file/stat`'s
+`:mode` is 0 on Windows, so nothing could report it.
+
+**Why it survived.** No test ran on Windows that asked.
+
+**Fix.** After the create and before the first byte, the file's DACL is replaced with a
+protected one granting the current user (from the process token) full control and nothing
+else — no inherited entries, no group, no `Users` (`SetEntriesInAclW` +
+`SetNamedSecurityInfoW` with `PROTECTED_DACL_SECURITY_INFORMATION`).
+
+**Guard.** `tests/platform_test.blsp` "owner-only files": on Windows the ACL is read back
+with `icacls` — one entry, the current user's, not inherited; elsewhere mode 0600.
+
 ## KI-102 — `tcp/set-binary` on an accepted socket is racy ✅ fixed 2026-09-02
 
 **Symptom.** `breakage/chaos2_tcp_stress.blsp` P38 ("binary mode round-trip") failed in CI:

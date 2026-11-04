@@ -68,53 +68,41 @@ the scheduler, dist, GC or the JIT — run it repeatedly.
 
 (An open entry's `## KI-N` section goes here until it is resolved.)
 
-## KI-364 — Windows has no platform shell: a `sh -c` command needs an `sh` on PATH — OPEN 2026-11-04
+## KI-369 — Windows has no pseudo-terminal: `os/spawn-pty` raises, so terminal buffers cannot run — OPEN 2026-11-04
 
-**Symptom.** On Windows, every program that runs a command line as `(os/cmd "sh" ["-c" line])`
-or `(os/spawn "sh" …)` — bedit's M-! / M-|, M-x compile, the project shell and the browser
-opener among them — raises `os/cmd: … program not found` unless an `sh` is on PATH (Git for
-Windows' `usr/bin`, MSYS2, Cygwin). CI's Windows runner has Git's `sh` on PATH in a bash step,
-so bedit's `shell_command_test` passes there and proves nothing about a machine without one.
+**Symptom.** On Windows `(os/spawn-pty prog args)` raises `pty-spawn: a pseudo-terminal on
+Windows needs ConPTY, which this runtime does not drive yet (KI-369)`. Everything built on
+a pty is therefore Unix-only: bedit's terminal buffers (C-x p t, C-x p r, M-x claude,
+C-u M-x term) and its line-mode project REPL; on Windows bedit says so when one is asked
+for (`terminal/term-unavailable`) rather than failing in the spawn. `os/pty-mode` answers
+nil there.
 
-**Cause.** Brood has no notion of the platform's command interpreter. The obvious port,
-`cmd.exe /d /s /c LINE`, cannot be spelled through `os/cmd`: the kernel builds the Windows
-command line with the MSVC quoting rules (Rust's `Command::arg`), which put `\"` inside a
-quoted argument — and `cmd.exe` does not read `\"`, so any line holding a double quote reaches
-it mangled. It needs the line passed RAW (`CommandExt::raw_arg`), which `%os-cmd` / `%os-spawn`
-have no option for.
+**Cause.** `host/subprocess.rs`'s pty half is `openpty` + `setsid` + `TIOCSCTTY` + termios,
+all Unix. Windows's equivalent is ConPTY (`CreatePseudoConsole`, Windows 10 1809+), and the
+child must be started with `CreateProcessW` and a `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`
+attribute list — which `std::process::Command` cannot pass on stable Rust
+(`CommandExt::raw_attribute` is unstable). The subprocess registry is built on
+`std::process::Child` (`ChildSlot`: its kill, `try_wait`, the waiter's reap), so a ConPTY
+child is a second child type through every one of those paths, not a spawn function beside
+the Unix one.
 
-**Why it survived.** Nothing ran a command line on Windows until the platform smoke job
-(2026-11-04), and that runner has an `sh`.
+**Why it survived.** Nothing ran a pty on Windows; the platform smoke job (2026-11-04) runs
+`proc_test` on macOS only and asserts the raise on Windows (`tests/platform_test.blsp`).
 
-**Fix.** Not yet. The shape: a `:raw-args` option on `os/cmd` / `os/spawn` (Windows only,
-ignored elsewhere) and an `os/shell-argv` answering `["sh" "-c" line]` or
-`["cmd.exe" "/d" "/s" "/c" line]` with the line raw — then the callers ask for the platform's
-shell rather than naming `sh`. bedit's `shell-file-name`-style setting would sit on top.
+**Fix.** Not yet. What it takes: (1) a child abstraction in `host/subprocess.rs` over
+`std::process::Child` and a raw process handle (`WaitForSingleObject` / `GetExitCodeProcess`
+for the waiter, `TerminateProcess` + the Job Object of ADR-592 for close); (2) the spawn —
+two anonymous pipes, `CreatePseudoConsole` at `cols`×`rows`, an attribute list, a command
+line built with the same quoting `Command` uses, `CreateProcessW` with
+`EXTENDED_STARTUPINFO_PRESENT`; (3) the existing reader and stdin-writer threads over the
+pipe handles as `File`s (they already run thread-per-pipe off Unix); (4) `pty_resize` →
+`ResizePseudoConsole`, close → `ClosePseudoConsole` after the child; (5) `pty_input_mode`
+stays nil — ConPTY exposes no termios, so password detection (ADR-570) needs another signal
+there. Then `tests/platform_test.blsp`'s pty case runs on Windows as on Unix, and bedit's
+`term-unavailable` goes.
 
-**Guard.** None yet. `tests/platform_test.blsp` spawns `cmd.exe` with a line holding no quote,
-which is all that works today.
-
-## KI-365 — `file/spit-private` is not private on Windows — OPEN 2026-11-04
-
-**Symptom.** `file/spit-private` writes a file "readable by its owner only" (0600) on Unix. On
-Windows it is a plain `File::create`: the file takes its directory's inherited ACL. Under the
-user's profile that is the user, SYSTEM and Administrators, so a node cookie or a token under
-`~/.config` stays private in practice; anywhere else (a project on a shared drive, `C:\work`)
-it is as readable as its directory. bedit's auto-save sidecars (`#file#`, beside the file) use
-it, so on Windows a sidecar is exactly as private as the file it shadows — and bedit's
-`recover_test` does not assert their mode there.
-
-**Cause.** `nodes.rs`'s `spit_private` has a `cfg(unix)` arm only; `file/stat`'s `:mode` is 0
-on Windows, so nothing could even report it.
-
-**Why it survived.** No test runs on Windows that asks; the Unix test (mode `0600`) cannot be
-written against a Windows ACL.
-
-**Fix.** Not yet: create the file with a security descriptor granting only the current user
-(`SetNamedSecurityInfoW` with a protected DACL, through `windows-sys`), and say in the
-docstring what a Windows owner-only file means.
-
-**Guard.** None yet.
+**Guard.** `tests/platform_test.blsp` — "a pseudo-terminal": on Windows the raise names
+ConPTY; bedit's `tests/shell_command_test.blsp` — `term-unavailable` says so on Windows.
 
 ## KI-357 — a module materialised from a startup image has fewer registry writers than its source load — OPEN 2026-11-04
 
@@ -241,8 +229,9 @@ Each closed row's full section is `## KI-N` in [archive/known-issues-closed.md](
 
 | # | What | Status |
 |---|---|---|
-| KI-365 | **`file/spit-private` is not private on Windows** — a plain create there, so the file takes its directory's ACL; bedit's auto-save sidecars are as private as the file beside them | **OPEN** — needs an owner-only DACL on create |
-| KI-364 | **Windows has no platform shell** — a `sh -c` command line needs an `sh` on PATH, and `cmd.exe /c` cannot be spelled through `os/cmd` because a `"` in the line reaches it MSVC-quoted | **OPEN** — needs raw arguments on `os/cmd` / `os/spawn` and an `os/shell-argv` |
+| KI-369 | **Windows has no pseudo-terminal** — `os/spawn-pty` raises naming ConPTY, so terminal buffers and the line-mode REPL are Unix-only | **OPEN** — needs ConPTY: a raw-handle child type in the subprocess registry, `CreatePseudoConsole` + `CreateProcessW` with an attribute list |
+| KI-365 | **`file/spit-private` is not private on Windows** — a plain create there, so the file takes its directory's ACL; bedit's auto-save sidecars are as private as the file beside them | ✅ **FIXED 2026-11-04** — a protected one-entry DACL (the current user) set before the write. Guard: `tests/platform_test.blsp` "owner-only files", the ACL read back with `icacls` on the Windows runner |
+| KI-364 | **Windows has no platform shell** — a `sh -c` command line needs an `sh` on PATH, and `cmd.exe /c` cannot be spelled through `os/cmd` because a `"` in the line reaches it MSVC-quoted | ✅ **FIXED 2026-11-04** — `:raw-args` on `os/cmd` / `os/spawn` / `os/detach`, and `os/shell` / `os/shell-cmd` / `os/shell-spawn` (`cmd.exe /d /s /c "LINE"` on Windows). Guard: `tests/platform_test.blsp` "the platform's shell", quotes, spaces, pipes and `&&` on the Windows runner |
 | KI-357 | **a module materialised from a startup image has fewer registry writers than its source load** — the project image credits none, the stdlib image credits map entries but no list member, so `registry/written-by` of an imaged module answers less | **OPEN** — needs a kernel op that credits an existing entry, called as an imaged module materialises |
 | KI-356 | **a plugin's bare-closure hook registered from a timer or a process it spawned cannot be taken back** — no load is open, no claimant is bound, and the closure names nothing the retirement backstop can match | **OPEN** — needs the runtime to say which module defined a closure, or a claimant spawned processes and timers inherit |
 | KI-334 | **a served session whose loop dies takes its unsaved buffers with it** — the local window's loop auto-saves and restarts over its buffers (bedit's lifeline); a `serve` session's loop dying just ends the session, its buffers in its model | **OPEN** — needs a supervised session in `editor/serve` and per-session buffer hosting in bedit (the buffer registry's runtime-wide name blocks it); found with ADR-539 |
