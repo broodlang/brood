@@ -51,6 +51,46 @@ else — no inherited entries, no group, no `Users` (`SetEntriesInAclW` +
 **Guard.** `tests/platform_test.blsp` "owner-only files": on Windows the ACL is read back
 with `icacls` — one entry, the current user's, not inherited; elsewhere mode 0600.
 
+## KI-369 — Windows has no pseudo-terminal: `os/spawn-pty` raises, so terminal buffers cannot run ✅ fixed 2026-11-04
+
+**Symptom.** On Windows `(os/spawn-pty prog args)` raised `pty-spawn: a pseudo-terminal on
+Windows needs ConPTY, which this runtime does not drive yet (KI-369)`. Everything built on a
+pty was Unix-only: bedit's terminal buffers (C-x p t, C-x p r, M-x claude, C-u M-x term) and
+its line-mode project REPL, which said so instead (`terminal/term-unavailable`).
+
+**Cause.** `host/subprocess.rs`'s pty half is `openpty` + `setsid` + `TIOCSCTTY` + termios,
+all Unix. Windows's equivalent, ConPTY (`CreatePseudoConsole`, Windows 10 1809+), attaches
+its child at creation through a `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` attribute list, which
+`std::process::Command` cannot pass on stable Rust — and the subprocess registry was built
+on `std::process::Child`.
+
+**Why it survived.** Nothing ran a pty on Windows; the platform smoke job ran `proc_test` on
+macOS only and asserted the raise on Windows.
+
+**Fix.** ADR-597. The registry's slot holds a `ChildProcess`: a `std::process::Child`, or on
+Windows a `ConsoleChild` — a raw process handle (`WaitForSingleObject` /
+`GetExitCodeProcess`, `TerminateProcess`) and the pseudoconsole — so the waiter, `close` and
+the reap serve both, and the reader / writer threads run over the two pipe ends unchanged.
+The spawn (`host/subprocess/conpty.rs`): two pipes, `CreatePseudoConsole`, the attribute list,
+`Command`'s argument quoting (or raw with `:raw-args`), a Unicode environment block,
+`CreateProcessW` suspended with its std handles set invalid under `STARTF_USESTDHANDLES` (a
+runtime with redirected stdio otherwise hands the child those), resumed inside its Job
+Object. The waiter closes the pseudoconsole after the exit, which is what ends the output
+pipe. `os/resize-pty` is `ResizePseudoConsole`. The ConPTY functions are looked up at run
+time, so a Windows before 10 1809 raises (`this Windows has no ConPTY …`) rather than failing
+to load the executable. `os/pty-mode` / `os/pty-password?` answer nil for a ConPTY child — a
+deliberate non-fix: a pseudoconsole has no termios, and nil is ADR-570's "unknown", so bedit
+falls back to the prompt's text. `os/shell-spawn-pty` runs a line through the platform's
+shell under a pty; bedit's terminal worker uses it, and `term-unavailable` is gone.
+
+**Guard.** `tests/pty_test.blsp` (portable, in the Windows and macOS smoke sets): output,
+stderr on the one channel, the exit code, `:env` / `:cwd`, size and resize (`mode con` on
+Windows), the input mode (nil on Windows), `cmd.exe` / `sh -i` answering a typed line, close;
+`tests/platform_test.blsp`'s pty case; `host::subprocess::conpty::command_line_tests` on the
+Windows runner; bedit's `terminal_test` (a live `cmd /k` taking keys on its screen) and
+`passwd_test` in its Windows smoke. Not sabotage-verified on Windows beyond the first run:
+before this change the same pty_test cases raised there (the entry's symptom).
+
 ## KI-102 — `tcp/set-binary` on an accepted socket is racy ✅ fixed 2026-09-02
 
 **Symptom.** `breakage/chaos2_tcp_stress.blsp` P38 ("binary mode round-trip") failed in CI:

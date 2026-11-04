@@ -9,6 +9,8 @@
 
 (defmodule pty-test (:use test))
 
+(purge-stale-temp "brood-pty-")
+
 (defn- windows? () (= (os/type) :windows))
 
 (defn- screen-text (acc)
@@ -50,7 +52,9 @@
       (is (includes? (pty-drain child "") "two words"))))
 
   :isolated (test "stderr is the terminal too: one channel"
-    (let (child (os/shell-spawn-pty (if (windows?) "echo out& echo err 1>&2" "echo out; echo err >&2")))
+    (let (child (os/shell-spawn-pty (if (windows?)
+                                      "echo out& echo err 1>&2"
+                                      "echo out; echo err >&2")))
       (let (out (pty-drain child ""))
         (is (includes? out "out"))
         (is (includes? out "err")))))
@@ -63,7 +67,9 @@
   :isolated (test ":env and :cwd reach the child"
     (let (directory (temp-dir "brood-pty-")
           _ (file/mkdir directory)
-          child (os/shell-spawn-pty (if (windows?) "echo %BROOD_PTY_VALUE%& cd" "echo $BROOD_PTY_VALUE; pwd")
+          child (os/shell-spawn-pty (if (windows?)
+                                      "echo %BROOD_PTY_VALUE%& cd"
+                                      "echo $BROOD_PTY_VALUE; pwd")
                   {:env {"BROOD_PTY_VALUE" "from-the-env"} :cwd directory})
           out (pty-drain child ""))
       (is (includes? out "from-the-env"))
