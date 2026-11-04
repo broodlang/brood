@@ -330,8 +330,9 @@ struct Conn {
     /// `Arc<[u8]>`, so wrapping a freshly encoded frame takes its buffer as it is
     /// instead of copying it into a new allocation.
     tx: SyncSender<Outbound>,
-    /// Whether the peer speaks v11, so a send in a lane goes as `FRAME_SEND_LANE`
-    /// (ADR-492). A v10 peer is sent every message as the plain `Send` it knows.
+    /// Whether the peer speaks the current protocol (v12), so a send in a lane goes as
+    /// `FRAME_SEND_LANE` (ADR-492) and a record crosses (ADR-542). A v10 peer is sent every
+    /// message as the plain `Send` it knows, and no record.
     lanes: bool,
     /// The `proc/send-latest` frames queued on this link and not yet written, one per
     /// target and key (ADR-492) — shared with the writer, which writes a ticket's frame
@@ -1221,6 +1222,16 @@ pub(crate) fn route_in_lane(
         _ => None,
     };
     let lane = if lanes { lane } else { process::Lane::Normal };
+    // A v10 peer (one not speaking the current protocol) cannot decode a record (ADR-542):
+    // refused here, the way an unencodable message is below, rather than sent as bytes that
+    // would tear the link down at the other end.
+    if !lanes && msg.holds_record() {
+        eprintln!(
+            "dist: cannot send a record to {}: the peer speaks protocol v10, which has no records",
+            value::symbol_name(node)
+        );
+        return true;
+    }
     // A guest link is told about every local pid in the message, which is what lets it
     // reply to one (ADR-415) — noted on the link the message goes out on, before it is
     // queued there.

@@ -340,7 +340,10 @@ fn apply_keyword(heap: &mut Heap, kw: Value, argv: &[Value]) -> LispResult {
     match argv[0].unpack() {
         // A map: the value at the key. A set: the element itself when present, so
         // `(:a s)` agrees with `(contains? s :a)` — the ADR-156 rule.
-        ValueRef::Map(id) => Ok(heap.map_get(id, kw).unwrap_or(default)),
+        // A record (ADR-542): the field — its fields are a map, its id is none of them.
+        ValueRef::Map(id) | ValueRef::Record { fields: id, .. } => {
+            Ok(heap.map_get(id, kw).unwrap_or(default))
+        }
         ValueRef::Set(id) => Ok(heap.map_get(id, kw).map(|_| kw).unwrap_or(default)),
         // `nil` is the empty collection, as everywhere else in the language.
         ValueRef::Nil => Ok(default),

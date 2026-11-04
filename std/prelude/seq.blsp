@@ -274,11 +274,13 @@ Always true for `n` <= 0.
     ;; never `%map-pairs`, which would carry its `:__id__` across and turn the target into
     ;; that record (`(into {} r)` returned `r` itself; `(merge {:z 1} r)` became an `r`).
     ;; A plain map poured into an EMPTY map is the answer itself, as with vectors below.
+    ;; A record target (ADR-542) conj's each item through `Conjable` (a custom collection
+    ;; defines how); a record `from` is read through `seq`, its fields by default.
+    (%record? to) (fold (seq from) to %conj-one)
     (map? to)
       (cond
-        (%map-get to :__id__ nil) (fold (seq from) to %conj-one)
+        (%record? from) (%map-into to (seq from))
         (not (map? from)) (%map-into to from)
-        (%map-get from :__id__ nil) (%map-into to (seq from))
         (empty? to) from
         else (%map-into to (%map-pairs from)))
     ;; Set target: add each item (duplicates collapse). Without this branch the
@@ -307,18 +309,17 @@ Always true for `n` <= 0.
     ;; a flat copy plus one: the kernel op, not a trip through `into`/`append`
     (vector? coll) (%vector-concat coll [x])
     (set? coll) (%set-add coll x)
-    ;; a record dispatches to its `Conjable` impl (default: the map behaviour below); a
-    ;; custom-collection record defines its own insertion. `%map-get` distinguishes it from
-    ;; a plain map, and `conj-onto` is only reached for records, so its late definition is fine.
+    ;; a record (ADR-542) dispatches to its `Conjable` impl (default: the map behaviour
+    ;; below); a custom-collection record defines its own insertion. `conj-onto` is only
+    ;; reached for records, so its late definition is fine.
+    (%record? coll) (conj-onto coll x)
     (map? coll)
-      (if (%map-get coll :__id__ nil)
-        (conj-onto coll x)
-        (cond
-          (map? x) (merge coll x)
-          (and (vector? x) (= (count x) 2)) (assoc coll (nth x 0) (nth x 1))
-          else
-            (error "conj: adding to a map takes a [k v] pair or a map, got "
-              (pr-str x))))
+      (cond
+        (map? x) (merge coll x)
+        (and (vector? x) (= (count x) 2)) (assoc coll (nth x 0) (nth x 1))
+        else
+          (error "conj: adding to a map takes a [k v] pair or a map, got "
+            (pr-str x)))
     (pair? coll) (cons x coll)
     ;; A built-in kind with a `Conjable` impl of its own — the third of the collection
     ;; seams, matching `seq` and `count` (ADR-253). Gated on `%impl-exact?` so a kind
@@ -465,11 +466,11 @@ prelude declares one, so `:derives` always names an ability from your own code."
         ;; the nominal id — a `:module/name` KEYWORD (a keyword literal is what the
         ;; checker tracks via `Ty::keyword_lit`), captured at definition.
         id (%defrecord-qualify (->string rec))
-        ;; ctor body: a MAP LITERAL (built here, at macro time) whose values are the field
-        ;; symbols, with the reserved `:__id__` carrying the id keyword. Emitting a real
-        ;; map value (not a `(hash-map …)` call) is what makes the checker infer the result
-        ;; as a record shape carrying the `:__id__` keyword literal.
-        body (%zipmap (cons :__id__ fkws) (cons id fnames))
+        ;; ctor body: a record of the id over a MAP LITERAL of the fields (built here, at
+        ;; macro time) — its own value kind (ADR-542), so nothing that operates on a map
+        ;; can see or write the id. The literal is what lets the checker infer each
+        ;; field's type at the call.
+        body (list '%record id (%zipmap fkws fnames))
         ;; Generated bindings carry a docstring: a constructor and its accessors are
         ;; public surface, and one with no `(doc …)` at all is a hole in `nest doc`,
         ;; the LSP and `(audit/undocumented)` alike. The record's own docstring, when it

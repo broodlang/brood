@@ -2402,13 +2402,9 @@ impl Heap {
             Value::Range(id) => self.range_len(id),
             Value::Bytes(id) => self.bytes(id).as_bytes().len() as i64,
             Value::Set(id) => self.map_size(id) as i64,
-            Value::Map(id) => {
-                let record_id = Value::Keyword(*crate::core::value::RECORD_ID_SYMBOL);
-                if self.map_get(id, record_id).is_some_and(crate::eval::truthy) {
-                    return None;
-                }
-                self.map_size(id) as i64
-            }
+            // A record (ADR-542) is its own kind and counts through the prelude's `count`,
+            // which consults `Counted`/`Seqable`; a plain map needs no probe for it.
+            Value::Map(id) => self.map_size(id) as i64,
             Value::Pair(mut id) => {
                 let mut n = 1i64;
                 loop {

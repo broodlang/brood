@@ -18,12 +18,28 @@
     (let (p (point 3 4))
       (assert= (point-x p) 3)
       (assert= (point-y p) 4)))
-  (test "a record IS a plain map underneath; :__id__ is directly accessible"
-    (is (map? (point 1 2)))
+  (test "a record is its own kind, not a map; its id is in the value, never a key (ADR-542)"
+    (assert= (type-of (point 1 2)) :record)
+    (check-allow :type-mismatch (is (not (map? (point 1 2)))))
     (assert= (get (point 1 2) :x) 1)
-    ;; the identity is still reachable by direct key access (get), even though the
-    ;; collection view hides it (next test) — `get`/`assoc` treat the record as a map.
-    (assert= (get (point 1 2) :__id__) :record-test/point))
+    ;; there is no reserved key: `:__id__` is an ordinary keyword, absent from the fields
+    (assert= (get (point 1 2) :__id__) nil)
+    (assert= (record-id (point 1 2)) :record-test/point))
+  (test "a map cannot pose as a record, and a record cannot lose its identity (ADR-542)"
+    ;; the forge: a map that spells the old reserved key is still a plain map
+    (let (forged (assoc {:x 1 :y 2} :__id__ :record-test/point))
+      (is (not (record? forged)))
+      (is (not (= forged (point 1 2)))))
+    ;; dissoc / assoc / update keep the record, with its id
+    (assert= (record-id (dissoc (point 1 2) :__id__)) :record-test/point)
+    (assert= (record-id (assoc (point 1 2) :x 9)) :record-test/point)
+    (assert= (record-id (update (point 1 2) :x inc)) :record-test/point)
+    ;; the field views never show an id
+    (assert= (sort (map/reduce-kv (point 1 2) [] (fn (acc k _) (conj acc k)))) (list :x :y))
+    (is (not (record? (map/select-keys (point 1 2) [:x])))))
+  (test "a record prints as #id{fields}, never as a map literal (ADR-542)"
+    (is (string/starts-with? (pr-str (point 1 2)) "#record-test/point{"))
+    (is (not (includes? (pr-str (point 1 2)) ":__id__"))))
   (test "the collection view (Seqable) is the fields — :__id__ never leaks"
     ;; count/keys/vals/seq/map/fold go through the record's `Seqable` view (its fields,
     ;; id-free) — so `:__id__` doesn't leak into iteration (it did before ADR-172 §7's

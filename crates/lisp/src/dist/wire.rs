@@ -220,8 +220,12 @@ const MAX_GOSSIP_PEERS: usize = 4096;
 /// responder answers a v10 dialer in v10 and a dialer redials a v10 responder offering
 /// v10 (`handshake::agree_version`), and a v10 link never carries the new frame — a
 /// priority or latest send to its peer goes as the plain `Send` v10 knows, so the bytes
-/// on a v10 link are exactly v10's.
-pub(super) const PROTOCOL_MAGIC: [u8; 4] = *b"BRD\x0b";
+/// on a v10 link are exactly v10's. **v12** adds `M_RECORD`, a record (ADR-542) — to a v11
+/// peer the new tag is a decode error, so the byte bumps and a v11 node does not link with a
+/// v12 one (greenfield, as every bump before lanes). A v12 node still speaks v10 to a v10
+/// peer, and a message carrying a record is refused for such a link rather than sent as
+/// bytes the peer cannot read ([`Message::holds_record`]); "current" below means v12.
+pub(super) const PROTOCOL_MAGIC: [u8; 4] = *b"BRD\x0c";
 /// The version before lanes, which a v11 node still speaks to a v10 peer (ADR-492).
 pub(super) const PROTOCOL_MAGIC_V10: [u8; 4] = *b"BRD\x0a";
 pub(super) const NONCE_LEN: usize = 32;
@@ -593,6 +597,9 @@ const M_BYTES: u8 = 19;
 const M_FAILURE: u8 = 20;
 /// An improper list ([`Message::Dotted`]): a count, then the items with the tail last.
 const M_DOTTED: u8 = 21;
+/// A record (ADR-542, [`Message::Record`]): its id by name, then its fields encoded exactly
+/// like `M_MAP`'s entries. Only a v12 link carries one.
+const M_RECORD: u8 = 22;
 
 pub(crate) fn encode_msg(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
     // A container step grows the native stack when it is near its end (see
@@ -702,14 +709,14 @@ fn encode_msg_inner(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
                 encode_msg(w, v)?;
             }
         }
-        // A record cannot cross a node link yet: the tag, and the protocol version that
-        // lets a link to an older peer refuse it rather than tear down, land with the step
-        // that starts constructing records (ADR-542, step 2). Until then nothing makes one.
-        Message::Record(..) => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "a record cannot cross a node link yet (ADR-542)",
-            ));
+        Message::Record(id, entries) => {
+            w.push(M_RECORD);
+            put_sym(w, *id);
+            put_u32(w, entries.len() as u32);
+            for (k, v) in entries {
+                encode_msg(w, k)?;
+                encode_msg(w, v)?;
+            }
         }
         Message::Set(items) => {
             w.push(M_SET);
@@ -920,6 +927,17 @@ fn decode_msg_at_inner(r: &mut Cursor<Vec<u8>>, depth: u32) -> io::Result<Messag
                 entries.push((k, v));
             }
             Message::Map(entries)
+        }
+        M_RECORD => {
+            let id = get_sym(r)?;
+            let n = get_u32(r)? as usize;
+            let mut entries = Vec::with_capacity(prealloc(r, n));
+            for _ in 0..n {
+                let k = decode_msg_at(r, depth + 1)?;
+                let v = decode_msg_at(r, depth + 1)?;
+                entries.push((k, v));
+            }
+            Message::Record(id, entries)
         }
         M_FAILURE => {
             let n = get_u32(r)? as usize;

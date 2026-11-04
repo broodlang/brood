@@ -741,12 +741,11 @@
     (assert= :open (c-takes-open 5))
     (assert= :open (c-takes-open (c-pt 1 2)))))
 
-(describe "a record instance's hidden identity entry is not one of its entries"
-  (test "a record satisfies (map keyword int) over its fields"
-    (assert= 2 (c-int-map-size (c-pt 1 2))))
-  (test "…and still fails it on a field"
+(describe "a record is its own kind, so (map …) does not admit one (ADR-542)"
+  (test "a record does not satisfy (map keyword int); its fields do"
     (check-allow :type-mismatch
-      (assert-error (c-int-map-size (c-pt 1 "two"))))))
+      (assert-error (c-int-map-size (c-pt 1 2))))
+    (assert= 2 (c-int-map-size (fields (c-pt 1 2))))))
 
 ;; --- a shim is transparent to error positions and traces (2026-10-02) -------------------
 ;; Every shim of one template shares one compiled body (ADR-175/215), so the name its arm

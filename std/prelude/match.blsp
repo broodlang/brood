@@ -481,7 +481,8 @@ NON-LINEAR patterns (the same name twice) work.
     ;;                    `:or` default). Never fails.
     ;;   {:k pat}       — MAP PATTERN: the key must be PRESENT and its
     ;;                    value must match `pat`, else the clause fails.
-    `(if (map? ~target)
+    ;; a record (ADR-542) destructures by its fields, as a map does
+    `(if (%map-like? ~target)
        ~(%match-compile-map-entries (%match-map-entries pat)
           target
           bound

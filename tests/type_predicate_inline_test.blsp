@@ -88,17 +88,19 @@
     (dolist (x samples)
       (assert= (kinds-by-type-of x) (kinds x))))
 
-  (test "the collapsing rules hold: a bigint is an int, a range is a pair, a record is a map"
+  (test "the collapsing rules hold: a bigint is an int, a range is a pair; a record is its own kind"
     (do
       (is (int? (* 1000000000000 1000000000000)))
       (is (pair? (range 0 3)))
-      (is (map? (pt 1 2)))
+      (check-allow :type-mismatch (is (not (map? (pt 1 2)))))
+      (assert= :record (type-of (pt 1 2)))
       (assert= false (map? #{1}))))
 
   (test "hot loops past the tiering threshold answer the same"
     (do
       (assert= 2000 (hot vector? 2000 0))
-      (assert= 4000 (hot map? 2000 0))
+      ;; one map among the samples; the record is not one (ADR-542)
+      (assert= 2000 (hot map? 2000 0))
       (assert= 4000 (hot int? 2000 0)) ; 1 and the bigint
       (assert= 4000 (hot pair? 2000 0))
       (assert= 2000 (hot string? 2000 0)))))

@@ -130,11 +130,29 @@ pub(super) fn expect_keyword(heap: &Heap, who: &str, v: Value) -> Result<value::
     )
 }
 
-/// Require a map.
-pub(super) fn expect_map(heap: &Heap, who: &str, v: Value) -> Result<MapId, LispError> {
-    expect!(heap, who, v, "map",
-        Value::Map(id) => id,
-    )
+/// Require a map or a **record** (ADR-542), answering the field map and, for a record, its
+/// identity — the map primitives work on a record's fields, which never include its id, so
+/// a record passes through every field operation with nothing to hide. A primitive that
+/// returns a modified map hands the id to [`rewrap`] so a record stays the same record kind.
+pub(super) fn expect_fields(
+    heap: &Heap,
+    who: &str,
+    v: Value,
+) -> Result<(MapId, Option<value::Symbol>), LispError> {
+    match v {
+        Value::Map(id) => Ok((id, None)),
+        Value::Record { id, fields } => Ok((fields, Some(id))),
+        other => Err(LispError::wrong_type(heap, who, "map", other)),
+    }
+}
+
+/// The map a field operation produced, as the kind its input was: a record of `id` when
+/// the input was one ([`expect_fields`]), else the map unchanged.
+pub(super) fn rewrap(result: Value, id: Option<value::Symbol>) -> Value {
+    match (result, id) {
+        (Value::Map(fields), Some(id)) => Value::record(id, fields),
+        (other, _) => other,
+    }
 }
 
 /// Require a set.

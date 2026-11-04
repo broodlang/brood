@@ -336,36 +336,38 @@ which is why `count` is O(1) and structural key equality is O(log n).
 
 ### Records
 
-`defrecord` names a map shape and gives it an **identity for dispatch**. There is no new
-value kind — a record *is* a map underneath, so every map operation above still applies
-— but the constructor bakes in a reserved `:__id__` field holding a `:module/name`
-keyword, so `ability` dispatch tells a record apart from a bare map and from other
-records. `(defrecord point (x y))` defines a positional constructor and one accessor per
-field:
+`defrecord` defines a **record**: a value of its own kind (ADR-542) — `type-of` is
+`:record`, `map?` is false — holding named fields and a nominal **identity** (a
+`:module/name` keyword) that `ability` dispatch reads. The identity lives in the value, not
+among the fields, so no map operation can see, write or forge it. `(defrecord point (x y))`
+defines a positional constructor and one accessor per field:
 
 ```lisp
 (defrecord point (x y))
-(def p (point 3 4))      ; {:__id__ :<ns>/point, :x 3, :y 4}
+(def p (point 3 4))      ; #<ns>/point{:x 3, :y 4}
 (point-x p)              ;=> 3             ; accessor, one per field
-(= (assoc p :x 9) (point 9 4))   ;=> true  ; a fresh record, id and all
-(fields p)               ;=> {:x 3 :y 4}   ; the clean, id-free view
+(= (assoc p :x 9) (point 9 4))   ;=> true  ; a fresh record of the same type
+(fields p)               ;=> {:x 3 :y 4}   ; the fields as a plain map
 (record? p)              ;=> true
 (record-id p)            ;~> :<ns>/point
-(= (point 1 2) {:x 1 :y 2})   ;=> false    ; the bare map has no :__id__ entry
-(= (point 1 2) (point 1 2))   ;=> true     ; same fields, same id
+(= (point 1 2) {:x 1 :y 2})   ;=> false    ; a record is never a map
+(= (point 1 2) (point 1 2))   ;=> true     ; same type, same fields
 ```
+
+Field access works as on a map: `get`, a keyword call, `assoc`, `update`, `dissoc`, `keys`,
+`vals`, `count`, `seq` and `{:keys …}` destructuring all read or change the **fields**, and
+`assoc`/`update`/`dissoc` return the same record type. There is no reserved key —
+`(assoc {:x 1 :y 2} :__id__ :point)` is just a map with an ordinary key, never a record. A
+record prints as `#point{:x 3, :y 4}` (`#geo/point{…}` for a module's record).
 
 The accessors are the reason to reach for it: `(point-x p)` names the field, and a
 typo `(point-witdh p)` is a call to an **undefined function** — caught by `nest check`
 and at runtime — whereas `(get p :witdh)` silently returns `nil`.
 
-**Equality is structural; dispatch is nominal.** `=` has no record case: it compares two
-maps entry by entry, and the `:__id__` entry is one of them. So a record is never `=` to a
-bare map with the same fields, nor to a record of another type with the same fields — the
-ids differ — while two records of one type with equal fields are `=`. The identity is
-nominal only where ability dispatch reads it (below). `record?`/`record-id`/`fields` are
-the identity API. Functional update
-is plain `assoc`/`merge` (the id rides along).
+**Equality is nominal and structural.** Two records are `=` when they are the same record
+type with equal fields; a record is never `=` to a map, nor to a record of another type with
+the same fields. `record?`/`record-id`/`fields` are the identity API. Functional update is
+plain `assoc`/`merge`, and the record keeps its type.
 
 A field may carry a type — `(defrecord point ((x int) (y int)))` — and when every
 field is typed, `(sig …)` declarations are emitted for the constructor and
@@ -556,11 +558,10 @@ silent `nil`. The thrown value is a **structured map**, `{:kind :no-impl :messag
 `(catch e (get e :id))` — rather than parse the string; `error-message` still
 returns that same human text.
 
-**Records dispatch as themselves; plain maps do not.** `(type-of r)` is still `:map`
-for a `defrecord` value and `get`/`assoc` still treat it as a map — the nominal id is
-carried in a reserved `:__id__` field (a record is *not* `=` to a bare map, though). A
-`defrecord` value dispatches on its `:module/name` id; a plain map, **even one carrying
-a `:type` field**, stays `:map` and lands on the `:map` impl. That is the ADR-011 line —
+**Records dispatch as themselves; plain maps do not.** `(type-of r)` is `:record` for a
+`defrecord` value, and its nominal id lives in the value (ADR-542). A `defrecord` value
+dispatches on its `:module/name` id; a plain map, **even one carrying a `:type` field**,
+stays `:map` and lands on the `:map` impl. That is the ADR-011 line —
 the identity is explicit and construction-time, never inferred from a field.
 
 A record whose contents are not its fields (a multimap, a sorted map) implements
@@ -626,18 +627,17 @@ view of a record — `fields` returns the field map with the internal id omitted
 `(ability-ops 'Shape)` exposes the declared op specs as data, the same hook the
 checker and LSP read.
 
-The id is held in a reserved `:__id__` field, reachable by direct `(get r :__id__)`,
-but the record's **collection view is the fields, id-free**: `seq`/`count`/`keys`/`vals`
+The id is part of the value, read with `record-id`; the record's **collection view is its
+fields**: `seq`/`count`/`keys`/`vals`
 — and `map`/`seq/filter`/`fold`/`for`/`into`, which coerce through `seq` — see only the
 fields, so `(count (circle 2))` is `1`. This is the `Seqable` ability (op `->seq`,
 default = the fields); a custom-collection record overrides it to define its own
 iteration — and `first`/`rest`/`empty?`/`nth` read that view too. A record that knows its
 size without walking its view implements `Counted` (op `->count`), which `count` and
-`empty?` consult first: a queue answers both in O(1). `(fields r)` gives the id-free map
-explicitly; nothing else should read
-`:__id__` directly (the stable seam a future hidden slot would swap behind).
+`empty?` consult first: a queue answers both in O(1). `(fields r)` gives the fields as a
+plain map explicitly.
 A record being `≠` a bare map with the same fields, and printing with its id, are
-*intended* (records are nominal), not leaks; `json-encode` omits the id, so it
+*intended* (records are nominal), not leaks; `json-encode` writes the fields, so it
 never reaches the wire.
 
 **What the checker does.** `nest check` verifies each `impl` provides the ability's
@@ -832,14 +832,14 @@ import, no activation step. Built-ins are unchanged and pay no dispatch cost.
 (impl Display usd
   (->string (m) (str "$" (math/->fixed (/ (get m :cents) 100.0) 2))))
 
-(io/puts (usd 1050))          ; prints .50   (not {:__id__ :money/usd, :cents 1050})
+(io/puts (usd 1050))          ; prints $10.50   (not #money/usd{:cents 1050})
 (->string (usd 1050))         ;=> "$10.50"   ; the explicit call, for use inside str/string/interp
 ```
 
 Scope is the screen printers; `str` / `pr-str` / `string/interp` stay on the native renderer
 (reach for `(->string x)` explicitly there). It rides on the prelude's `*show*`
 dynamic var, so `(binding (*show* nil) …)` disables it for a scope. Default record
-printing keeps its `:__id__` — that is intended (records print unlike bare maps); the
+printing is `#id{fields}` — that is intended (records print unlike bare maps); the
 protocol is the per-record *override*, not a change to the default.
 
 #### `defbehaviour`: the module-as-implementor contract

@@ -856,10 +856,8 @@ impl Heap {
 
     /// **The dispatch identity of `v` — the one definition.**
     ///
-    /// Mirrors `%identity-of` (`std/prelude/abilities.blsp`) exactly: an identity-carrying record
-    /// answers with its nominal `:__id__` keyword, everything else with its `type-of` kind. A
-    /// map whose `:__id__` is absent or falsy is a plain map and dispatches as `:map` — the
-    /// distinction `record?` documents, and the reason this cannot be a bare `map_get`.
+    /// Mirrors `%identity-of` (`std/prelude/abilities.blsp`) exactly: a record (ADR-542)
+    /// answers with its nominal id keyword, everything else with its `type-of` kind.
     ///
     /// It exists as a shared function because until now it did not: the identity was written
     /// out once in Brood and **re-derived by hand** in the compiler's devirtualization
@@ -871,13 +869,8 @@ impl Heap {
     /// is the wrong impl, silently. So: one definition, and `identity_agreement.rs` pins it to
     /// the Brood one.
     pub fn dispatch_identity(&self, v: Value) -> Value {
-        if let Value::Map(mid) = v {
-            let key = Value::keyword(*crate::core::value::RECORD_ID_SYMBOL);
-            if let Some(id) = self.map_get(mid, key)
-                && crate::eval::truthy(id)
-            {
-                return id;
-            }
+        if let Value::Record { id, .. } = v {
+            return Value::keyword(id);
         }
         Value::keyword(crate::core::value::tag(v).keyword())
     }
@@ -886,48 +879,49 @@ impl Heap {
     /// `get` may answer — the one rule [`PrimOp::MapGet`](crate::eval::compile::PrimOp)
     /// follows in the VM (`prim2_inline_exec`) and in native code (`brood_rt_map_get`).
     ///
-    /// A present, non-nil value is the answer outright. On a miss (absent key, or a stored
-    /// `nil` — indistinguishable to the caller and treated alike by `get`) the wrapper's
-    /// only remaining work is `%lookup-miss`, which consults the `Lookup` ability for a
-    /// **record** and returns its fallback for anything else. So a plain map's miss is
-    /// answered here too — `nil`, exactly what `%map-get` gave — and only a map carrying
-    /// a truthy `:__id__` declines, the same test [`Self::dispatch_identity`] applies. That
-    /// second probe runs on misses alone; a hit never pays it, and a plain map's miss
-    /// never pays the generic fallback dispatch (ADR-296).
-    pub fn map_get_inline(&self, mid: MapId, k: Value) -> Option<Value> {
-        match self.map_get(mid, k) {
-            Some(v) if !matches!(v, Value::Nil) => Some(v),
-            _ => {
-                let key = Value::keyword(*crate::core::value::RECORD_ID_SYMBOL);
-                match self.map_get(mid, key) {
-                    Some(id) if crate::eval::truthy(id) => None,
-                    _ => Some(Value::nil()),
-                }
+    /// The inline `(get coll k)` for a map or a record (ADR-542), or `None` to decline. A
+    /// plain map always answers: the value, or `nil` on a miss (absent key, or a stored `nil`
+    /// — treated alike by `get`), exactly what `%map-get` gives. A **record** answers a field
+    /// it holds (non-nil); its miss declines, since only `get`'s `%lookup-miss` consults the
+    /// `Lookup` ability a custom-collection record answers through. Anything else declines.
+    /// A plain map's miss pays no second probe (before ADR-542 every miss looked for a hidden
+    /// `:__id__`).
+    pub fn map_get_inline(&self, coll: Value, k: Value) -> Option<Value> {
+        match coll {
+            Value::Map(mid) => Some(self.map_get(mid, k).unwrap_or(Value::nil())),
+            Value::Record { fields, .. } => {
+                self.map_get(fields, k).filter(|v| !matches!(v, Value::Nil))
             }
+            _ => None,
         }
     }
 
-    /// `(get m k default)` on a map — the 3-arity twin of [`Self::map_get_inline`], and
-    /// exactly `get`'s own arm: `(let (v (%map-get m k nil)) (if (nil? v) (let (r
-    /// (%lookup-miss m k nil)) (if (nil? r) (%map-get m k default) r)) v))`. So a present
-    /// non-nil value is answered; anything else — an absent key or a stored nil — answers,
-    /// for a plain map, the stored nil or the default when the key is absent, and is
-    /// DECLINED (`None`) for a record, whose miss the `Lookup` ability may resolve. A record
-    /// is declined even when the default is non-nil: answering the default there skipped
-    /// `Lookup`, so `(get multimap k [])` answered `[]` for a key holding values (KI-298).
+    /// `(get coll k default)` — the 3-arity twin of [`Self::map_get_inline`], and exactly
+    /// `get`'s own arm: a map answers the stored value (a stored `nil` included), or `default`
+    /// when the key is absent; a record answers a field it holds (non-nil) and declines its
+    /// miss, which the `Lookup` ability may resolve even under a non-nil default (KI-298).
     /// Shared by the VM's `Inst::Prim3` arm and `brood_rt_map_get3`, so the two cannot
     /// disagree (ADR-368).
-    pub fn map_get3_inline(&self, mid: MapId, k: Value, default: Value) -> Option<Value> {
-        let found = self.map_get(mid, k);
-        if let Some(v) = found
-            && !matches!(v, Value::Nil)
-        {
-            return Some(v);
+    pub fn map_get3_inline(&self, coll: Value, k: Value, default: Value) -> Option<Value> {
+        match coll {
+            Value::Map(mid) => Some(self.map_get(mid, k).unwrap_or(default)),
+            Value::Record { fields, .. } => {
+                self.map_get(fields, k).filter(|v| !matches!(v, Value::Nil))
+            }
+            _ => None,
         }
-        let key = Value::keyword(*crate::core::value::RECORD_ID_SYMBOL);
-        match self.map_get(mid, key) {
-            Some(id) if crate::eval::truthy(id) => None,
-            _ => Some(found.unwrap_or(default)),
+    }
+
+    /// The inline `(assoc coll k v)` for a map or a record — a record stays the same record
+    /// (ADR-542) — or `None` to decline (a vector, and every error, stay in the wrapper).
+    pub fn map_assoc_inline(&mut self, coll: Value, k: Value, v: Value) -> Option<Value> {
+        match coll {
+            Value::Map(mid) => Some(self.map_assoc(mid, k, v)),
+            Value::Record { id, fields } => match self.map_assoc(fields, k, v) {
+                Value::Map(fields) => Some(Value::record(id, fields)),
+                other => Some(other),
+            },
+            _ => None,
         }
     }
 

@@ -845,6 +845,7 @@ impl Ty {
             | (1u32 << bit(Tag::Vector))
             | (1u32 << bit(Tag::Set))
             | (1u32 << bit(Tag::Map))
+            | (1u32 << bit(Tag::Record))
             | (1u32 << bit(Tag::Bytes)),
     );
 
@@ -858,6 +859,7 @@ impl Ty {
             | (1u32 << bit(Tag::Vector))
             | (1u32 << bit(Tag::Set))
             | (1u32 << bit(Tag::Map))
+            | (1u32 << bit(Tag::Record))
             | (1u32 << bit(Tag::Bytes))
             | (1u32 << bit(Tag::Str))
             | (1u32 << bit(Tag::Rope))
@@ -1999,6 +2001,10 @@ impl Ty {
             "pair?" => Ty::of(Tag::Pair),
             "vector?" => Ty::of(Tag::Vector),
             "map?" => Ty::of(Tag::Map),
+            // A map or a record (ADR-542) — the test a map pattern and the field operations
+            // make. The checker still models a record as a map shape (ADR-542, step 3 moves
+            // it to `Record`), so this narrows to `map` for now.
+            "%map-like?" => Ty::of(Tag::Map),
             "set?" => Ty::of(Tag::Set),
             "ref?" => Ty::of(Tag::Ref),
             "pid?" => Ty::of(Tag::Pid),

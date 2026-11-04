@@ -5053,3 +5053,18 @@ tiers and under GC stress with the verifier; with the young-copy arm removed, GC
 panics on the stale-handle tripwire. The node-link codec refuses a record for now: its tag
 and the protocol version that lets an older peer refuse one cleanly come with step 2, when
 `defrecord` starts constructing them.
+
+2026-11-04 (ADR-542, step 2). `defrecord` constructs a real record now (`(%record :id {…})`),
+and the leaks of item 8 are gone by construction: a map spelling `:__id__` is a plain map, and
+`dissoc`, `update`, `reduce-kv`, `select-keys` and printing never see an id. The `%map-*`
+primitives take a record and act on its fields (an `assoc`/`dissoc` keeps the record), so the
+prelude's `:__id__` probes in `seq`, `count`, `get`, `keys`, `into`, `conj` and the contract
+matcher became `%record?` tests or went away, as did every Rust probe (VM/JIT `get`, `count`,
+dispatch identity, JSON, arithmetic and ordering dispatch, the `first`/`rest` hand-back). A
+plain map's `get` miss no longer pays a second probe for a hidden id, and a record's field hit
+stays inline in the VM and native code (a miss still declines to `Lookup`). The node-link
+protocol is v12 with an `M_RECORD` tag; a v10 link refuses a message carrying a record. The
+checker still models a record as the map shape with an `__id__` literal, which `%record`'s
+inference produces, until step 3. Found on the way: the VM's `first`/`rest` hand-back and its
+binary-operator redirect both tested for a MAP operand (every record used to be one), so a
+record's `->seq` under `first` blocked its worker at tier 1 — `interrupt_one_worker` caught it.

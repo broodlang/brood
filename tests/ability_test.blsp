@@ -64,7 +64,7 @@
   (test "a plain map dispatches as :map, not as any record"
     (assert= (size {:type :circle :r 9}) 2))
   (test "the identity is a module/name keyword captured at definition"
-    (assert= (get (circle 1) :__id__) :ability-test/circle))
+    (assert= (record-id (circle 1)) :ability-test/circle))
   (test "a record is still a structural map for get/assoc"
     (assert= (get (circle 2) :r) 2)
     (assert= (get (assoc (circle 2) :r 9) :r) 9)))

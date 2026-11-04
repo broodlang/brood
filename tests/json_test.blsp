@@ -370,8 +370,11 @@
     (assert= (%json-encode-plain [1 inf]) nil)
     (assert= (%json-encode-plain #{1}) nil)
     (assert= (%json-encode-plain {[1] 2}) nil)
-    (assert= (%json-encode-plain {:__id__ :point :x 1}) nil)
+    ;; a record is the Brood encoder's (its fields, or its own impl)
+    (assert= (%json-encode-plain (point 1 2)) nil)
     (assert= (%json-encode-plain (range 3)) nil)
     ;; and `encode` still answers those the way the Brood encoder does
     (assert= (encode (range 3)) "[0,1,2]")
-    (assert= (encode {:__id__ :point :x 1}) "{\"x\":1}")))
+    (assert= (decode (encode (point 1 2))) {:x 1 :y 2})
+    ;; and `:__id__` is an ordinary key: a map spelling it is a plain map (ADR-542)
+    (assert= (encode {:__id__ :point}) "{\"__id__\":\"point\"}")))

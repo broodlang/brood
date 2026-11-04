@@ -44,11 +44,9 @@
   ;; key pays one `nil?` test.
   ;;
   ;; Raw prims and a `bound?` guard, as in `seq`: this file loads six before `*impls*`.
-  ;; `%identity-of` is the obvious way to get the dispatch id and it uses bare `get`, so it
-  ;; re-enters here and recurses forever. `coll` is already known to be a map, so its id is
-  ;; just `:__id__` — read it with the prim.
+  ;; A plain map has no id and falls straight through; a record's is the kernel's.
   (if (bound? (quote *impls*))
-    (let (id (%map-get coll (quote :__id__) nil))
+    (let (id (%record-id coll))
       (if id
         (let (methods (%map-get *impls* (quote [Lookup lookup-get]) nil))
           (if methods
@@ -79,24 +77,26 @@ a wrong-typed one.
   ;; The diagnostics cost the integer-key form ~25% and the keyword-key form nothing.
   ;; Accepted deliberately: keyword keys are the overwhelming majority of call sites, and
   ;; positional access in hot code goes through `nth`/`vector-ref`, which is unaffected.
-  ((coll k) (cond
-              (map? coll)
-                (let (v (%map-get coll k nil))
-                  (if (nil? v) (%lookup-miss coll k v) v))
-              (set? coll) (if (%set-has? coll k) k nil)
-              (nil? coll) nil
-              (string? coll)
-                (if (int? k)
-                  (if (and (>= k 0) (< k (string/length coll))) (string/char-at coll k) nil)
-                  (%get-unanswerable coll k))
-              (int? k) (nth coll k nil)
-              else (%get-unanswerable coll k)))
+  ((coll k)
+    (cond
+      ;; a record (ADR-542) reads its fields; `map?` first, so a map pays nothing
+      (or (map? coll) (%record? coll))
+        (let (v (%map-get coll k nil))
+          (if (nil? v) (%lookup-miss coll k v) v))
+      (set? coll) (if (%set-has? coll k) k nil)
+      (nil? coll) nil
+      (string? coll)
+        (if (int? k)
+          (if (and (>= k 0) (< k (string/length coll))) (string/char-at coll k) nil)
+          (%get-unanswerable coll k))
+      (int? k) (nth coll k nil)
+      else (%get-unanswerable coll k)))
   ;; The map branch reads with a nil default, not `default`: a non-nil default on an absent
   ;; key skipped `%lookup-miss`, so a record collection answered the default for a key it
   ;; holds (KI-298). A `Lookup` that answers nil keeps the default. The VM and native code
   ;; run `PrimOp3::MapGet3`, which answers a plain map without the call.
   ((coll k default) (cond
-                      (map? coll)
+                      (or (map? coll) (%record? coll))
                         (let (v (%map-get coll k nil))
                           (if (nil? v)
                             (let (r (%lookup-miss coll k nil))
@@ -141,7 +141,7 @@ A multi-key result prints in the map's internal order, not the order given."
   ;; `& kvs` rest-list + the multi-pair loop, going straight to the kernel op.
   ((coll k v) (if (vector? coll) (%vector-assoc coll k v) (%map-assoc coll k v)))
   ((coll & kvs) (if (vector? coll) (%assoc-vec-pairs coll kvs) (%assoc-map-pairs coll kvs))))
-(sig assoc ((or vector map) & any -> any))
+(sig assoc ((or vector map record) & any -> any))
 
 ;; (dissoc m k1 k2 …) -> a fresh map with each key removed.
 (defn dissoc (m & ks)
@@ -154,8 +154,8 @@ A multi-key result prints in the map's internal order, not the order given."
 ;; `%map-pairs` (kernel) is the single map enumerator: the entries as a list of
 ;; [k v] vectors, in one O(n) pass. `keys`/`vals`/`contains?` (and `map/reduce-kv`) are all
 ;; Brood over it — no per-key `get`, so no O(n²).
-;; `seq` (not `%map-pairs`) so a record's keys/vals are its fields — no internal `:__id__`.
-(defn keys (m: (or nil map) -> any)
+;; `seq` (not `%map-pairs`) so a record that is a custom collection answers for itself.
+(defn keys (m: (or nil map record) -> any)
   "The keys of map `m` (a record's are its fields, id-free). A record that stores its
 contents elsewhere answers for itself through the `Lookup` ability — a multimap gives its
 DISTINCT keys, not one per value.
@@ -171,18 +171,17 @@ stable one."
 
 (defn- %keys-via-lookup (m)
   "This map's own `lookup-keys`, or nil when it has no `Lookup` impl. Raw prims and a `bound?`
-guard, as in `seq`: this file loads six before `*impls*`, and `%identity-of` reads `:__id__`
-with bare `get`."
-  (if (map? m)
+guard, as in `seq`: this file loads six before `*impls*`."
+  (if (%record? m)
     (if (bound? (quote *impls*))
-      (let (id (%map-get m (quote :__id__) nil))
+      (let (id (%record-id m))
         (if id
           (let (methods (%map-get *impls* (quote [Lookup lookup-keys]) nil))
             (if methods (if (%map-get methods id nil) (lookup-keys m) nil) nil))
           nil))
       nil)
     nil))
-(defn vals (m: (or nil map) -> any)
+(defn vals (m: (or nil map record) -> any)
   "The values of map `m` (a record's are its fields, id-free).
 
     (vals {:a 1})  ;=> (1)
@@ -217,7 +216,7 @@ can.)
 ;; an implementation detail of *constructing* a fresh immutable map (no `Value` is
 ;; ever mutable, no path-copy per entry), so the merge family rides it for speed
 ;; while staying fully immutable.
-(defn merge (& maps: (or nil map) -> any)
+(defn merge (& maps: (or nil map record) -> any)
   "A single map combining the given maps left to right; on a duplicate key the rightmost map wins. `nil` maps are skipped, so `(merge)` is `{}`.
 
     (merge {:a 1} {:a 9})        ;=> {:a 9}    ; rightmost wins
@@ -253,7 +252,7 @@ Works on maps (by key) and vectors (by integer index, which must be in range).
 ;; `get`'s are (KI-298).
 (defn- %get-in-has? (m k)
   (cond
-    (map? m) (or (contains? m k) (not (nil? (%lookup-miss m k nil))))
+    (or (map? m) (%record? m)) (or (contains? m k) (not (nil? (%lookup-miss m k nil))))
     (set? m) (%set-has? m k)
     (int? k)
       (if (or (vector? m) (pair? m) (string? m) (bytes? m))
@@ -285,7 +284,8 @@ Works on maps (by key) and vectors (by integer index, which must be in range).
     (map/assoc-in {} [:a :b] 1)            ;=> {:a {:b 1}}
     (map/assoc-in [[1 2]] [0 1] 9)         ;=> [[1 9]]"
     (let (k (first path)
-          m (if (or (map? m) (and (vector? m) (int? k))) m {})
+          ;; a record (ADR-542) is stored into like a map, keeping its type
+          m (if (or (map? m) (%record? m) (and (vector? m) (int? k))) m {})
           ks (rest path))
       (if (empty? ks)
         (assoc m k v)

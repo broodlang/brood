@@ -85,13 +85,10 @@ struct ProvenReceiver {
 /// shape (a variable, a non-record call, a map literal that *could* be a record) → `None`.
 fn mono_arg_identity(heap: &Heap, arg: &Node) -> Option<ProvenReceiver> {
     match arg {
-        // A literal constant. A folded map literal could be a record (`{:__id__ …}`), whose
-        // identity is nominal — exclude every map (the direct-ctor path covers real records).
+        // A literal constant: its identity is its kind, or — a record (ADR-542) — the id it
+        // carries in the value. A map constant is always a plain map now.
         Node::Const(cv) => {
             let v = cv.load();
-            if matches!(v.unpack(), ValueRef::Map(_)) {
-                return None;
-            }
             Some(ProvenReceiver {
                 id: heap.dispatch_identity(v),
                 constructor: None,
@@ -141,9 +138,9 @@ fn mono_arg_identity(heap: &Heap, arg: &Node) -> Option<ProvenReceiver> {
             // symbol guards nothing — it misses every module-qualified head and accepts a
             // rebound bare one. The sound test is structural, on the value
             // the head is bound to NOW: a `defrecord` constructor is one arm whose one
-            // body form is the map literal `{:__id__ <id> …}` — and that `:__id__` IS the
-            // dispatch identity, so a closure that builds it constructs exactly the values
-            // `impl`s for this id are written for, whatever its name.
+            // body form is `(%record <id> {…})` — and that id IS the dispatch identity, so
+            // a closure that builds it constructs exactly the values `impl`s for this id
+            // are written for, whatever its name.
             let bound = heap.env_get(heap.global(), ctor)?;
             match bound.unpack() {
                 ValueRef::Fn(cid) if closure_constructs_record(heap, cid, id) => {
@@ -161,9 +158,9 @@ fn mono_arg_identity(heap: &Heap, arg: &Node) -> Option<ProvenReceiver> {
 
 /// True iff closure `cid` is a record constructor for `id`: a single arm (any fixed
 /// arity, no optionals or rest — `defrecord` emits positional fields) whose ONE body form
-/// is a map literal whose `:__id__` entry is `id`. That literal is what `defrecord` emits
-/// (`{:__id__ :mp/circle, :r r}`), and the `:__id__` it bakes in is the identity ability
-/// dispatch reads (`Heap::dispatch_identity`), so this is the property a devirtualization
+/// is `(%record id {…})`. That is what `defrecord` emits (`(%record :mp/circle {:r r})`),
+/// and the id it bakes in is the identity ability dispatch reads
+/// (`Heap::dispatch_identity`, ADR-542), so this is the property a devirtualization
 /// actually depends on — not the name the head happens to carry.
 fn closure_constructs_record(heap: &Heap, cid: ClosureId, id: Value) -> bool {
     let closure = heap.closure(cid);
@@ -174,14 +171,14 @@ fn closure_constructs_record(heap: &Heap, cid: ClosureId, id: Value) -> bool {
     if !arm.optionals.is_empty() || arm.rest.is_some() || arm.body.len() != 1 {
         return false;
     }
-    let record_id = Value::keyword(value::intern(kw::RECORD_ID));
-    match arm.body[0].unpack() {
-        ValueRef::Map(mid) => matches!(
-            (heap.map_get(mid, record_id).map(|v| v.unpack()), id.unpack()),
-            (Some(ValueRef::Keyword(a)), ValueRef::Keyword(b)) if a == b
-        ),
-        _ => false,
-    }
+    let Some(items) = heap.list_items(arm.body[0]) else {
+        return false;
+    };
+    matches!(
+        (items.first().copied(), items.get(1).copied(), id),
+        (Some(head), Some(Value::Keyword(a)), Value::Keyword(b))
+            if is_symbol_named(head, "%record") && a == b
+    )
 }
 
 /// Is `v` the symbol `name`, bare or root-qualified (`/name`)?

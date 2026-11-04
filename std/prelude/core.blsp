@@ -197,37 +197,36 @@ this by implementing the `Display` ability, which takes over this name below.
           ;; filter/reduce would walk it with `first`/`rest`, and `(rest bytes)` copies
           ;; all-but-the-first byte — O(n) per step, O(n^2) total. `bytes->list` is a single O(n) native pass.
           (if (%eq t :map)
-            ;; A record (a map carrying `:__id__`) takes its `Seqable` view — the fields,
-            ;; id-free, by default — so it never leaks `:__id__` into map/fold/keys and a
+            (%map-pairs coll)
+            ;; A record (ADR-542) takes its `Seqable` view — its fields by default — so a
             ;; custom collection can define its own iteration. `->seq` is only reached for
             ;; records (never at boot, which has none), so its late definition is fine.
-            (if (%map-get coll :__id__ nil)
+            (if (%eq t :record)
               (->seq coll)
-              (%map-pairs coll))
-            (if (%eq t :bytes)
-              (%bytes->list coll)
-              ;; Lists and nil ARE their own seq view and take the hot path untouched. Any
-              ;; other kind reaching here is one `seq` has no native view of — a rope, a
-              ;; table — and must not be returned UNCHANGED (`(seq rope)` would silently
-              ;; answer the rope itself). Consult `Seqable`, but only where an impl exists for that
-              ;; kind SPECIFICALLY: its `:default` is a record's fields, meaningless here.
-              ;;
-              ;; ONLY what is available at line 106 of the prelude. `get` and `%identity-of`
-              ;; re-enter `seq` (they are built on the protocol `seq` provides), and `or` is a
-              ;; MACRO defined 550 lines further down — used here it compiles as a call to a
-              ;; not-yet-macro and recurses until the stack budget trips, during prelude
-              ;; expansion, before anything can report which function did it. So: `if`, `%eq`,
-              ;; `bound?` and `%map-get`, nothing else. (ADR-253)
-              (if (%eq t :pair)
-                coll
-                (if (%eq t :nil)
+              (if (%eq t :bytes)
+                (%bytes->list coll)
+                ;; Lists and nil ARE their own seq view and take the hot path untouched. Any
+                ;; other kind reaching here is one `seq` has no native view of — a rope, a
+                ;; table — and must not be returned UNCHANGED (`(seq rope)` would silently
+                ;; answer the rope itself). Consult `Seqable`, but only where an impl exists for that
+                ;; kind SPECIFICALLY: its `:default` is a record's fields, meaningless here.
+                ;;
+                ;; ONLY what is available at line 106 of the prelude. `get` and `%identity-of`
+                ;; re-enter `seq` (they are built on the protocol `seq` provides), and `or` is a
+                ;; MACRO defined 550 lines further down — used here it compiles as a call to a
+                ;; not-yet-macro and recurses until the stack budget trips, during prelude
+                ;; expansion, before anything can report which function did it. So: `if`, `%eq`,
+                ;; `bound?` and `%map-get`, nothing else. (ADR-253)
+                (if (%eq t :pair)
                   coll
-                  (if (bound? (quote *impls*))
-                    (let (methods (%map-get *impls* (quote [Seqable ->seq]) nil))
-                      (if methods
-                        (if (%map-get methods t nil) (->seq coll) (%seq-passthrough coll t))
-                        (%seq-passthrough coll t)))
-                    (%seq-passthrough coll t)))))))))))
+                  (if (%eq t :nil)
+                    coll
+                    (if (bound? (quote *impls*))
+                      (let (methods (%map-get *impls* (quote [Seqable ->seq]) nil))
+                        (if methods
+                          (if (%map-get methods t nil) (->seq coll) (%seq-passthrough coll t))
+                          (%seq-passthrough coll t)))
+                      (%seq-passthrough coll t))))))))))))
 
 ;; What `seq` answers for a kind with no sequence view of its own. A scalar — an int, a
 ;; float, a keyword, a function — can never be walked, so it raises here naming `seq` and
@@ -921,10 +920,6 @@ since its clause either always runs or never does. `else` must be the last test.
     (pair? body) (map body (fn (part) (%rec-unroll part name whole)))
     else body))
 
-;; A map's entries as a type sees them: a record's hidden identity entry left out.
-(defn- %type-map-entries (v)
-  (if (get v :__id__) (%map-pairs (dissoc v :__id__)) (%map-pairs v)))
-
 ;; Does the record identity `id` (`:point`, `:geo/point`, `:app/geo/point`) name the
 ;; record type `t` as a `sig` spells it — bare (`point`, the defining module's own
 ;; spelling) or qualified (`geo/point`)? A bare name compares the record's NAME, which
@@ -979,6 +974,25 @@ since its clause either always runs or never does. `else` must be the last test.
              (type-matches? field-type field-value))
         (%record-fields-match? (rest (rest fields)) v)))
     true))
+
+;; The id a shape's `:__id__` pseudo-field names — a `defrecord` constructor's result type
+;; carries one (ADR-542) — or nil for a plain map shape.
+(defn- %shape-record-id (fields)
+  (cond
+    (not (pair? (rest fields))) nil
+    (%eq (first fields) :__id__) (second fields)
+    else (%shape-record-id (rest (rest fields)))))
+
+;; The field list without its `:__id__` pseudo-field (walked with an accumulator, in order).
+(defn- %shape-without-id (fields)
+  (%shape-without-id-into fields nil))
+(defn- %shape-without-id-into (fields kept)
+  (cond
+    (not (pair? (rest fields))) (append (reverse kept) fields)
+    (%eq (first fields) :__id__) (append (reverse kept) (rest (rest fields)))
+    else
+      (%shape-without-id-into (rest (rest fields))
+        (cons (second fields) (cons (first fields) kept)))))
 
 ;; Whether the record field list `fields` declares the key `k`.
 (defn- %record-declares? (fields k)
@@ -1081,16 +1095,13 @@ call therefore walks only what changed since the last check — the rest is one 
               (let (elem (first (rest t)))
                 (or (nil? elem)
                   (every? v (fn (x) (type-matches? elem x))))))
-          ;; A record instance is a map whose identity rides in a hidden `:__id__` entry —
-          ;; hidden from `count`, `seq`, `keys` and the checker alike — so its entries here
-          ;; are its FIELDS: `(point 1 2)` is a `(map keyword int)` (the identity's keyword
-          ;; VALUE must not be checked against `int`).
+          ;; A record is its own kind (ADR-542), not a map, so `(map K V)` never admits one.
           (%eq h 'map)
             (and (map? v)
               (let (ktype (first (rest t))
                     vtype (first (rest (rest t))))
                 (or (and (nil? ktype) (nil? vtype))
-                  (every? (%type-map-entries v)
+                  (every? (%map-pairs v)
                     (fn (kv)
                       (and (type-matches? ktype (first kv))
                         (type-matches? vtype (second kv))))))))
@@ -1104,12 +1115,20 @@ call therefore walks only what changed since the last check — the rest is one 
           ;; a tagged union — and the contract has to agree with the checker
           ;; about it or `sig!` and `nest check` would disagree on the same
           ;; declaration.
+          ;; A shape carrying the `:__id__` pseudo-field is a `defrecord` constructor's result:
+          ;; it admits a record of exactly that id (ADR-542), checked against its fields. A
+          ;; shape without one admits a map or a record — an accessor's `(record &open :x T)`
+          ;; takes any value carrying `:x`.
             (let (open? (%eq (second t) '&open)
-                  fields (if open? (rest (rest t)) (rest t)))
-              (and (map? v)
+                  all (if open? (rest (rest t)) (rest t))
+                  id (%shape-record-id all)
+                  fields (if id (%shape-without-id all) all)
+                  fv (if (%record? v) (%record-fields v) v))
+              (and (if id (%eq (%record-id v) id) (or (map? v) (%record? v)))
+                ;; fields read from `v` itself: a record's `get` asks its `Lookup` on a miss
                 (%record-fields-match? fields v)
                 (or open?
-                  (every? (%map-pairs v) (fn (kv) (%record-declares? fields (first kv)))))))
+                  (every? (%map-pairs fv) (fn (kv) (%record-declares? fields (first kv)))))))
           (%eq h
             'tuple)
           ;; A fixed-arity positional vector shape (ADR-128): exact

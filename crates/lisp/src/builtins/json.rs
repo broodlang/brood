@@ -97,14 +97,9 @@ fn encode(
             }
             out.push(']');
         }
+        // A record (ADR-542) encodes as its fields, or by its own impl: the Brood encoder's.
+        Value::Record { .. } => return Ok(false),
         Value::Map(id) => {
-            // A record (a truthy `:__id__`) encodes as its fields, or by its own impl.
-            if heap
-                .map_get(id, value::kw("__id__"))
-                .is_some_and(|tag| !matches!(tag, Value::Nil | Value::Bool(false)))
-            {
-                return Ok(false);
-            }
             out.push('{');
             for (i, (key, item)) in heap.map_entries(id).into_iter().enumerate() {
                 if i > 0 {
