@@ -68,6 +68,43 @@ the scheduler, dist, GC or the JIT — run it repeatedly.
 
 (An open entry's `## KI-N` section goes here until it is resolved.)
 
+## KI-357 — a module materialised from a startup image has fewer registry writers than its source load — OPEN 2026-11-04
+
+**Symptom.** `registry/written-by #{'m}` (ADR-582) answers what module `m`'s load wrote when
+`m` loaded from source in this process. When `m` came out of a startup image instead, it
+answers less:
+
+- **The project image** (`.brood/image.bin`, ADR-218/419): nothing at all. A project or
+  dependency module materialised from it has no writer for any registry entry, map or list;
+  `%registry-writer` answers nil for each.
+- **The stdlib image**: map entries are credited (each module's registrations replay with the
+  module as their writer); list-registry members are not — the build skips every registry
+  whose value is not a map. No std module adds a list member at load today
+  (`editor/layers`' `*system-layers*` and `*auto-type-by-file*` are filled by programs, not
+  by std), so nothing is lost yet.
+
+A program that loads and unloads plugins at run time is unaffected: a plugin loads from source,
+and its writes are credited as it loads. Not seen in use: bedit retires packages, never its
+own modules.
+
+**Cause.** The writer journal (`RuntimeCode::registry_writers`) is a property of the loads a
+process ran. The stdlib image carries each module's map registrations grouped by writer and
+replays them with `%registry-update! … key` (`%replay-std-regs!`), which re-credits them; it has
+no shape for a list member (whose position is precedence — `:append-new` vs `:cons-new` — and
+whose replay would reorder the list). The project image installs registry VALUES wholesale in
+its root section and replays no registration.
+
+**Why it survived.** ADR-582's guards load their fixtures from source; the KI-136 differential
+(`image_registrations_match_source`) compares the keys an imaged module registers, not who is
+credited with them.
+
+**Fix.** Not yet. The project image already records each module's registrations
+(`:owners` in `.brood/image.modules`, for the partial rebuild): re-crediting them when the
+module materialises needs a "credit this existing entry" kernel op beside `%registry-update!`.
+List members would ride the same op, recorded as `[registry member]` per module.
+
+**Guard.** None yet.
+
 ## KI-356 — a plugin's bare-closure hook registered from a timer or a process it spawned cannot be taken back — OPEN 2026-11-04
 
 **Symptom.** bedit removes or updates a package while it runs and takes back everything the
@@ -156,6 +193,7 @@ Each closed row's full section is `## KI-N` in [archive/known-issues-closed.md](
 
 | # | What | Status |
 |---|---|---|
+| KI-357 | **a module materialised from a startup image has fewer registry writers than its source load** — the project image credits none, the stdlib image credits map entries but no list member, so `registry/written-by` of an imaged module answers less | **OPEN** — needs a kernel op that credits an existing entry, called as an imaged module materialises |
 | KI-356 | **a plugin's bare-closure hook registered from a timer or a process it spawned cannot be taken back** — no load is open, no claimant is bound, and the closure names nothing the retirement backstop can match | **OPEN** — needs the runtime to say which module defined a closure, or a claimant spawned processes and timers inherit |
 | KI-334 | **a served session whose loop dies takes its unsaved buffers with it** — the local window's loop auto-saves and restarts over its buffers (bedit's lifeline); a `serve` session's loop dying just ends the session, its buffers in its model | **OPEN** — needs a supervised session in `editor/serve` and per-session buffer hosting in bedit (the buffer registry's runtime-wide name blocks it); found with ADR-539 |
 | KI-336 | **a non-Latin keyboard layout lost every Control and Meta shortcut** — Control+A under a Russian layout arrived as `:ctrl-ф`; macOS Option was always Meta, so a layout's Option characters could not be typed; a dead key with Control or Alt delivered nothing | ✅ **FIXED 2026-11-03** — ADR-541: a chord whose character is not Latin is read by the key's US position, `{:option-meta …}` picks which Option is Meta (left by default, the right one composing), a dead key in a chord is its accent. Guard: `host::gui::backend::input::adr_541_tests` (red with the fallback removed) |
