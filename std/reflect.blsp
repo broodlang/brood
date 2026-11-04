@@ -401,6 +401,16 @@ names nothing (ADR-596).
     (reflect/fn-module 42)                  ;=> nil"
   (%fn-module f))
 
+(defn project-modules ()
+  "The short names of the active project's modules, as strings, sorted — every name a
+`mod/name` inside the project roots to `project/mod/name` (ADR-070) — or `[]` outside a
+project. What a host checks a plugin's module names against before loading it (ADR-604).
+
+    (vector? (reflect/project-modules))   ;=> true"
+  (let (current (%set-package-context nil nil))
+    (%set-package-context (first current) (second current))
+    (vec (sort (map (or (second current) ()) ->string)))))
+
 (defn with-modules-apart (modules thunk)
   "Call `thunk` with `modules` (names, as strings or symbols) resolving as THEMSELVES rather
 than into the active project: inside project `bedit`, `org/f` names bedit's `bedit/org/f`

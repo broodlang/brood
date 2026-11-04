@@ -302,22 +302,6 @@ after this gives that one back its live value, which is not the image's write."
         (when (not (image-entry-present? (%map-get before registry nil) path))
           (%registry-update! registry :credit path nil writer))))))
 
-(defn- registration-key (registration)
-  ;; `[registry key-path]` for a map entry, `[registry member]` for a list member
-  [(get registration 0) (or (get registration 1) (get registration 2))])
-
-(defn- image-preexisting-reg-keys (before-regs:map -> set)
-  "The `[registry key]` pairs already registered BEFORE this project's sources loaded, as a
-set — a list registry's member as `[registry member]`. Everything in it belongs to the
-prelude (or the binary), not to any module this load brought in — so no module load will
-ever replay it, and pruning it loses it for good."
-  (fold (keys before-regs)
-    #{}
-    (fn (acc m)
-      (fold (get before-regs m)
-        acc
-        (fn (acc2 registration) (conj acc2 (registration-key registration)))))))
-
 (defn image-prune-foreign-registrations (before-regs:map &optional carried?:any -> int)
   "Remove from the live registries every registration OWNED by a module this project's
 image does not carry — a std module (or anything else outside `*module-files*`) that
@@ -339,19 +323,15 @@ foreign ones here is the project-image half of the same rule — the std module 
 its own entries when it loads, from source or from its image. Root-level registrations
 (an unqualified key, no owner) and project/dependency-owned ones are kept.
 
-**`before-regs` is what the prune must NOT touch** (KI-106). Ownership is decided by the
-QUALIFIER of a registration's key, which is not always its registrar: `num/mul`'s qualifier
-is `num`, and `std/num.blsp` is a real module — but the `(defmulti num/mul :commutative)`
-that registers it lives in the PRELUDE. So the entry was judged foreign, pruned, and baked
-out of the image, and loading `num` never put it back because `num` never registered it.
-An imaged boot then restored a `*multi-algebra*` holding one entry instead of five, the
-checker lost every `num/*` algebra, and every commutative mirror it derives from them went
-with it — `(* 3 (usd 500))` warned `no num/mul method for [:int :record-test/usd]` while
-the runtime dispatched it correctly.
-
-The rule that fixes it needs no name heuristics: a registration that was already there
-before this project loaded a single file cannot be owned by anything this load brought in.
-Skip those, prune the rest.
+Ownership is the WRITER the kernel journalled (KI-136), not a key's qualifier: the prelude's
+`(defmulti num/mul :commutative)` has no writer, so it is never a module's registration and
+never pruned (KI-106, which an exemption for everything registered before the project
+loaded used to cover). That exemption is gone (ADR-604): a std module the BUILD loaded
+before the project — `nest`'s own toolchain from source, when no stdlib image existed yet —
+wrote `:http/response`, `:log/line-backend` … before a single project file loaded, the
+exemption baked them into the image, and the next, imaged run started with record ids whose
+constructors no module had defined. `before-regs` is no longer consulted; it stays in the
+signature for its callers.
 
 `write-image` calls this inside an `%isolate`, so the pruning is rolled back the moment
 the image is written and the running session keeps every registration it had — but the
@@ -363,16 +343,13 @@ permanent rather than transient.
         foreign? (fn (m) (not (carried? m)))
         regs (stdimage/registrations-by-module)
         impls (stdimage/%std-impls-by-module)
-        keep (image-preexisting-reg-keys before-regs)
         n-regs (fold (seq/filter (keys regs) foreign?)
                  0
                  (fn (n m)
                    (fold (get regs m)
                      n
                      (fn (n2 registration)
-                       (if (contains? keep (registration-key registration))
-                         n2
-                         (do (stdimage/retract-registration! registration) (+ n2 1)))))))
+                       (do (stdimage/retract-registration! registration) (+ n2 1))))))
         n-impls (fold (seq/filter (keys impls) foreign?)
                   0
                   (fn (n m)

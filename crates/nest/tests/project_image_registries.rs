@@ -95,11 +95,18 @@ fn scaffold_writers(dir: &Path) {
 }
 
 fn nest_test(dir: &Path) -> (bool, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_nest"))
-        .arg("test")
-        .current_dir(dir)
-        .output()
-        .expect("spawn nest test");
+    nest_test_with_cache(dir, None)
+}
+
+/// `nest test` in `dir`, with its cache directory (where the stdlib image lives) at `cache`
+/// when given — a fresh one has no stdlib image, so the first run loads std from SOURCE.
+fn nest_test_with_cache(dir: &Path, cache: Option<&Path>) -> (bool, String) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_nest"));
+    command.arg("test").current_dir(dir);
+    if let Some(cache) = cache {
+        command.env("XDG_CACHE_HOME", cache);
+    }
+    let out = command.output().expect("spawn nest test");
     let text = format!(
         "--- stdout ---\n{}\n--- stderr ---\n{}",
         String::from_utf8_lossy(&out.stdout),
@@ -161,5 +168,32 @@ fn an_imaged_boot_credits_each_registry_entry_to_the_module_that_wrote_it() {
     assert!(
         text2.contains("1 passed, 0 failed"),
         "run 2 ran the test\n{text2}"
+    );
+}
+
+/// ADR-604: with NO stdlib image yet, run 1 loads std from source — `nest`'s own toolchain
+/// (`http`, `log`, `observer`, `application`, …) registers its record ids before a single
+/// project file loads — and writes both images. Those ids belong to std modules the imaged
+/// run 2 never loads; the prune used to exempt everything registered before the project
+/// loaded, so they were baked into the project image and run 2 started with record ids whose
+/// constructors nothing defined (`:http/response`, `:log/line-backend`, …). Reproduced on a
+/// clean cache with nest 77f15601 and with this branch before the fix.
+#[test]
+fn a_cold_first_run_without_a_stdlib_image_images_no_foreign_record_ids() {
+    let dir = std::env::temp_dir().join(format!("brood-regimg-cold-{}", std::process::id()));
+    let cache =
+        std::env::temp_dir().join(format!("brood-regimg-cold-cache-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&cache);
+    std::fs::create_dir_all(&cache).unwrap();
+    scaffold(&dir);
+    let (ok1, text1) = nest_test_with_cache(&dir, Some(&cache));
+    assert!(ok1, "run 1 (std and project from source) failed:\n{text1}");
+    let (ok2, text2) = nest_test_with_cache(&dir, Some(&cache));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&cache);
+    assert!(
+        ok2,
+        "run 2 (both images) has a record id whose constructor no module defined:\n{text2}"
     );
 }
