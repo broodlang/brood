@@ -128,6 +128,10 @@ pub fn register_family(
 pub fn register_installed_family(_name: u32, _family_name: String) -> Result<(), String> {
     Err(NOT_COMPILED.into())
 }
+/// No GUI backend at all: nothing is headless (`gui/available?` is the question).
+pub fn headless() -> bool {
+    false
+}
 pub fn font_info(_family: Option<u32>) -> Result<super::FontInfo, String> {
     Err(NOT_COMPILED.into())
 }
