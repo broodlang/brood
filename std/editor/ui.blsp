@@ -380,7 +380,9 @@ synthesized back-compat timer below and any app that hasn't moved to named timer
 
 ;; ---- named timers (ADR-102) -------------------------------------------------
 ;; A model may carry `:timers` — a map `name -> spec`, where a spec is `{:every ms}`
-;; (repeating) or `{:after ms}` (one-shot), optionally with `:idle? true` (count from
+;; (repeating) or `{:after ms}` (one-shot), optionally with `:command? true` (the timer
+;; continues the user's own command, so its fold is served as input's: no background ceiling,
+;; ADR-564) and `:idle? true` (count from
 ;; the last *real* input, not from arm/last-fire). Each firing delivers `[:timer name]`
 ;; as loop input; an idle timer pauses while input flows and resumes once it settles.
 ;; A key held down counts as input flowing, before its first repeat as after it.
@@ -533,6 +535,14 @@ a far-future timer can't oversleep a responsive app."
     (if (nil? best)
       *ui-idle-cap*
       (math/max 1 (math/min *ui-idle-cap* (- best now))))))
+
+(defn- ui-command-timer? (timers event)
+  "Whether the `[:timer name]` firing `event` continues the user's own command — its spec says
+`:command? true` (a keyboard macro's next slice) — so its fold is served as input's is: no
+background ceiling stops it (`ui-event-ceiling-ms`), only the quit key, as a command run in
+one turn would be. A step that ran past the ceiling and was stopped would leave the model it
+started from, and the timer would run the same step again."
+  (= true (get (get timers (second event)) :command?)))
 
 (defn- ui-fire (timers clock now)
   "Service the timers at time `now`: find the earliest *live* timer whose deadline has
@@ -1123,7 +1133,12 @@ re-raises, surfacing a genuine startup bug instead of spinning."
                           clock2 (second fr))
                       (if (nil? event)
                         (ui-loop model good clock2 view update display)
-                        (let (next (ui-fold update model event cols rows false))
+                        (let (next (ui-fold update
+                                     model
+                                     event
+                                     cols
+                                     rows
+                                     (ui-command-timer? timers event)))
                           (ui-loop next good clock2 view update display)))))
                 ;; a message: fold it, drain, then — with timers — stamp `:last-input` if
                 ;; the turn folded USER input (ADR-490): only input resets idle timers, so
@@ -1173,7 +1188,14 @@ re-raises, surfacing a genuine startup bug instead of spinning."
                                    (ui-fire timers clock2 (ui-now next1)))
                         tevent (first serviced)
                         clock3 (second serviced)
-                        next (if (nil? tevent) next1 (ui-fold update next1 tevent cols rows false)))
+                        next (if (nil? tevent)
+                               next1
+                               (ui-fold update
+                                 next1
+                                 tevent
+                                 cols
+                                 rows
+                                 (ui-command-timer? timers tevent))))
                     (cond
                       (ui-close-quits? next pending) nil
                       (focus-request? pending)
@@ -1192,7 +1214,8 @@ key/mouse value (`\"a\"`, `:up`, `[:mouse …]`), or a timer firing. `view` is p
 model and sets `:done` to quit.
 
 **Timers (ADR-102).** Declare time-driven work as data on the model: `:timers`, a map
-`name -> {:every ms}` / `{:after ms}` (optionally `:idle? true`). The loop parks the
+`name -> {:every ms}` / `{:after ms}` (optionally `:idle? true`, and `:command? true` for a timer
+that carries on the user's own command — a fold no background ceiling stops). The loop parks the
 poll until the soonest is due and folds `[:timer name]` when it fires — so a steady
 animation timer and several idle one-shots coexist, each on its own clock. An idle timer
 waits for input to settle, and a key held down is not settled: while the display's
