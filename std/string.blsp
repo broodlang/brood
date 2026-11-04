@@ -338,15 +338,16 @@ when it is wider, so a bar always spans its field.
 
 ;; ---- fill: greedy word-wrap -------------------------------------------------
 
-(defn- fill-pack (acc word width)
+(defn- fill-pack (acc word prefix width)
   "Greedy line-accumulator step. `acc` is `[cur done]`: the current (in-progress) line and
-the completed lines, newest first. Extend `cur` with `word` when the result still fits in
-`width` columns; otherwise flush `cur` onto `done` and start a fresh line at `word`.
-Prepending to `done` is O(1) (the caller reverses once), so a whole fill is O(words)."
+the completed lines, newest first. Extend `cur` with `word` when the line — `prefix` and all —
+still fits in `width` display columns (a wide glyph two, a tab to its tab stop at
+`*tab-width*`, as `string/display-width` counts them); otherwise flush `cur` onto `done` and start a
+fresh line at `word`. Prepending to `done` is O(1) (the caller reverses once)."
   (let ([cur done] acc)
     (cond
       (= cur "") [word done]
-      (<= (+ (string/length cur) 1 (string/length word)) width) [(str cur " " word) done]
+      (<= (string/display-width (str prefix cur " " word)) width) [(str cur " " word) done]
       else [word (cons cur done)])))
 
 (defn fields (s:string &optional (sep:string " ") -> (or nil (list string)))
@@ -385,6 +386,9 @@ lined up under it after (`[\"- \" \"  \"]`); a paragraph whose first line is ind
 than the rest keeps both. Each line's room is `width` less its own prefix. [[fill-prefixes]]
 finds the pair a paragraph uses, [[fill-prefix]] the first of them.
 
+`width` is in display COLUMNS, as an editor's fill column is: a wide glyph counts two and a tab
+reaches its tab stop at `*tab-width*` (`string/display-width`).
+
     (string/fill \"abc\" 10)   ;=> \"abc\"   ; already fits, so unchanged
     (string/fill \";; aa\\n;; bb\" 20 \";; \")   ;=> \";; aa bb\"
     (string/fill \"- aa bb cc\" 7 [\"- \" \"  \"])   ;=> \"- aa bb\\n  cc\""
@@ -395,12 +399,11 @@ finds the pair a paragraph uses, [[fill-prefix]] the first of them.
                "\n")
         flat (replace (replace body "\n" " ") "\t" " ")
         words (fields flat)
-        first-room (math/max 1 (- width (length first-prefix)))
-        rest-room (math/max 1 (- width (length rest-prefix)))
         ;; the line being packed is the first while no line is done
         [cur done] (fold words
                      ["" ()]
-                     (fn (acc w) (fill-pack acc w (if (empty? (second acc)) first-room rest-room))))
+                     (fn (acc w)
+                       (fill-pack acc w (if (empty? (second acc)) first-prefix rest-prefix) width)))
         filled (reverse (if (= cur "") done (cons cur done))))
     (if (empty? filled)
       ""
@@ -413,8 +416,20 @@ finds the pair a paragraph uses, [[fill-prefix]] the first of them.
 ;; BULLET, after that, is a list item's: `-` `+` `*` `•`, `1.` `2)`, and an Org checkbox —
 ;; kept on the first line only, the lines after it lined up under the item's text. A bullet
 ;; needs the space after it, so `*emphasis*` and `-flag` are words.
-(def- fill-marker-pattern "^[ \t]*(?:(?:;+|#+|//+|--|>[ \t>]*)[ \t]*)?")
+(def- fill-default-markers
+  ;; the comment and quote markers a paragraph's lines keep when the caller names none — the
+  ;; common cases of every language at once; an editor passes its mode's own
+  [";" "#" "//" "--" ">"])
 (def- fill-bullet-pattern "^(?:[-+*•]|[0-9]+[.)])[ \t]+(?:\\[[ xX-]\\][ \t]+)?")
+
+(defn- fill-marker-pattern (markers)
+  ;; indentation, then any run of `markers` (each repeatable: `;;`, `###`, `> >`) with the
+  ;; spaces after them
+  (if (empty? markers)
+    "^[ \t]*"
+    (str "^[ \t]*(?:(?:"
+      (join (map markers (fn (marker) (str "(?:" (regex/escape marker) ")+"))) "|")
+      ")[ \t]*)*")))
 
 (defn- fill-match (pattern line)
   ;; the text `pattern` matches at the start of `line`, or ""
@@ -426,42 +441,48 @@ finds the pair a paragraph uses, [[fill-prefix]] the first of them.
   ;; the list bullet after `marker` at the start of `line`, or ""
   (fill-match fill-bullet-pattern (substring line (length marker) (length line))))
 
-(defn fill-prefixes (s:string -> (tuple string string))
+(defn fill-prefixes (s:string &optional (markers:any nil) -> (tuple string string))
   "The `[first rest]` prefixes paragraph `s` fills with ([[fill]]): what its first line keeps,
 and what every line after it starts with — Emacs's adaptive fill (`fill-context-prefix`).
 
-The first is the first non-blank line's indentation, comment or quote marker (`;;`, `#`,
-`//`, `--`, `>` and `> >`) and list bullet (`-`, `+`, `*`, `•`, `1.`, `2)`, an Org `[ ]`). The
-rest is the SECOND line's indentation and marker when there is one — the paragraph says how
-it continues, so a hanging indent, a comment and a docstring's indentation are all kept as
-written. A one-line paragraph continues with its first prefix, its bullet turned to spaces:
-a list item's text lines up under the item.
+The first is the first non-blank line's indentation, comment or quote marker and list bullet
+(`-`, `+`, `*`, `•`, `1.`, `2)`, an Org `[ ]`). The markers are `markers` — a mode's own, Emacs's
+`adaptive-fill-regexp` per mode: `[\"#\"]` for Python, `[\"//\" \"*\"]` for a C block comment's
+` * ` lines, `[\">\"]` for prose — else the common ones of every language at once (`;` `#`
+`//` `--` `>`). Only a marker
+is kept on every line: in C, `#include` is no comment. The rest is the SECOND line's
+indentation and marker when there is one — the paragraph says how it continues, so a hanging
+indent, a comment and a docstring's indentation are all kept as written. A one-line paragraph
+continues with its first prefix, its bullet turned to spaces: a list item's text lines up under
+the item.
 
     (string/fill-prefixes \"  ;; hello\")   ;=> [\"  ;; \" \"  ;; \"]
     (string/fill-prefixes \"- item\")   ;=> [\"- \" \"  \"]
     (string/fill-prefixes \"1. first\\n   second\")   ;=> [\"1. \" \"   \"]
-    (string/fill-prefixes \"> > quoted\")   ;=> [\"> > \" \"> > \"]"
-  (let (lines (seq/reject (split s "\n") blank?)
+    (string/fill-prefixes \"> > quoted\")   ;=> [\"> > \" \"> > \"]
+    (string/fill-prefixes \"#include <a.h>\" [\"//\" \"*\"])   ;=> [\"\" \"\"]"
+  (let (pattern (fill-marker-pattern (if (nil? markers) fill-default-markers markers))
+        lines (seq/reject (split s "\n") blank?)
         line (if (empty? lines) "" (first lines))
-        marker (fill-match fill-marker-pattern line)
+        marker (fill-match pattern line)
         bullet (fill-bullet line marker)
         first-prefix (str marker bullet))
     (cond
-      (> (count lines) 1) [first-prefix (fill-match fill-marker-pattern (second lines))]
+      (> (count lines) 1) [first-prefix (fill-match pattern (second lines))]
       (= bullet "") [first-prefix first-prefix]
       ;; the bullet's characters become spaces; a tab after it stays a tab
       else [first-prefix (str marker (regex/replace "[^ \t]" bullet " "))])))
 
-(defn fill-prefix (s:string -> string)
+(defn fill-prefix (s:string &optional (markers:any nil) -> string)
   "The fill prefix of paragraph `s`'s first line: its indentation, a comment or quote marker
-(`;;`, `#`, `//`, `--`, `>`) with the space after it, and a list bullet — the first of
+(of `markers`, else every language's common ones) with the space after it, and a list bullet — the first of
 [[fill-prefixes]]. Emacs's adaptive fill, for the common cases.
 
     (string/fill-prefix \"  ;; hello\")   ;=> \"  ;; \"
     (string/fill-prefix \"    code\")   ;=> \"    \"
     (string/fill-prefix \"* item\")   ;=> \"* \"
     (string/fill-prefix \"plain\")   ;=> \"\""
-  (first (fill-prefixes s)))
+  (first (fill-prefixes s markers)))
 
 (defn repeat (s:string n:int -> string)
   "The string `s` concatenated `n` times (the empty string if `n` <= 0).

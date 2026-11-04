@@ -511,7 +511,8 @@ cached: a line inserted at line 10, then the window (moved down one) shown again
           [_ known? state] (line-cache-state-within (line-cache) lexer rope 150 1000)
           [cache far? none] (line-cache-state-within (line-cache) lexer rope 150 40))
       (assert= [known? state] [true 150])
-      (assert= [far? none] [false nil])
+      ;; where the walk stopped, and the exact state that line starts in
+      (assert= [far? none] [false [40 40]])
       ;; asking again goes on from the checkpoints the last walk left
       (letrec (ask (fn (c tries)
                      (let ([c2 found? value] (line-cache-state-within c lexer rope 150 40))
