@@ -24,7 +24,7 @@
   "An immutable binary-tree pane layout (Emacs-style tiled splits) over the M3
 display seam. A leaf shows an opaque payload; a `:row`/`:col` split divides its rect
 by a `:ratio`, reserving one cell for a divider. `pane-layout` turns a tree + a
-rect into pane rects + divider rects; `pane-split`/`pane-delete`/`pane-other`
+rect into pane rects + divider rects; `pane-split`/`pane-split-edge`/`pane-delete`/`pane-other`
 restructure it; `pane-swap`/`pane-rotate`/`pane-transpose`/`pane-flip` move panes
 around and `pane-neighbor` finds the pane in a direction (windmove); `divider-at` +
 `pane-ratio-for` + `pane-set-ratio` implement drag-to-resize over the kernel's `:drag`
@@ -202,6 +202,22 @@ even panes: the original (still selected) becomes child `a`, a new pane showing
        :ratio 0.5
        :a leaf
        :b {:pane true :payload new-payload :selected false}})))
+
+(defn pane-split-edge (tree:map side:keyword new-payload:any &optional (size:number 0.3) -> map)
+  "Split the WHOLE layout, not the selected pane: a new pane showing `new-payload` along
+`side` of it (`:bottom` `:top` `:left` `:right`), taking the fraction `size` of the frame
+(clamped to `[0.1 0.9]`), the rest keeping its arrangement — Emacs's side windows
+(`display-buffer-in-side-window`). Selection stays where it was. The new pane is the last in
+traversal order for `:bottom` / `:right`, the first for `:top` / `:left`.
+
+    (editor/pane/pane-payload-at (editor/pane/pane-split-edge (editor/pane/pane-split (editor/pane/pane-single :a) :col :b) :bottom :c) '(:b))   ;=> :c"
+  (let (fraction (math/max 0.1 (math/min 0.9 size))
+        leaf {:pane true :payload new-payload :selected false}
+        dir (if (or (= side :left) (= side :right)) :col :row)
+        before? (or (= side :top) (= side :left)))
+    (if before?
+      {:split true :dir dir :ratio fraction :a leaf :b tree}
+      {:split true :dir dir :ratio (- 1 fraction) :a tree :b leaf})))
 
 (defn pane-delete (tree:map -> map)
   "Delete the selected pane: its sibling subtree takes the split's place, and

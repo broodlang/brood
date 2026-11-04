@@ -49,7 +49,24 @@
   (test "delete-others collapses to just the selected pane"
     (let (t (pane-delete-others (wt-tree3)))
       (assert= (pane-count t) 1)
-      (assert= (pane-selected-payload t) {:buf 0}))))
+      (assert= (pane-selected-payload t) {:buf 0})))
+
+  (test "split-edge puts a pane along a side of the WHOLE layout, selection kept"
+    (let (bottom (pane-split-edge (wt-tree3) :bottom {:buf 7} 0.25)
+          left (pane-split-edge (wt-tree3) :left {:buf 8}))
+      (assert= (pane-count bottom) 4)
+      (assert= (pane-payload-at bottom '(:b)) {:buf 7})
+      (assert= (get bottom :dir) :row)
+      (assert= (get bottom :ratio) 0.75)
+      (assert= (pane-selected-payload bottom) {:buf 0})
+      (assert= (pane-payload-at left '(:a)) {:buf 8})
+      (assert= (get left :dir) :col)
+      (assert= (get left :ratio) 0.3)
+      (assert= (pane-selected-payload left) {:buf 0})))
+  (test "a side pane's share of the frame is its size, clamped"
+    (let (l (pane-layout (pane-split-edge (pane-single {:buf 0}) :bottom {:buf 1} 0.25) [0 0 80 41]))
+      (assert= (map (get l :panes) (fn (p) (get p :rect))) (list [0 0 80 30] [0 31 80 10])))
+    (assert= (get (pane-split-edge (pane-single {:buf 0}) :top {:buf 1} 2) :ratio) 0.9)))
 
 (describe "layout geometry (tree + rect -> pane & divider rects)"
   (test "a lone pane fills the whole rect, no dividers"
