@@ -7,6 +7,10 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 ## v0.49.1 — the parallel cold build finishes
 
 **Changed.**
+- `std/editor/buffer`'s undo history is capped by size (ADR-550): past
+  `editor/buffer/*undo-strong-limit*` the oldest undo groups are dropped, whole, until the rest
+  fits `*undo-limit*` (Emacs's two limits), so a buffer edited for days no longer keeps every
+  text it held. `trim-undo` applies new limits at once; nil turns the cap off.
 - A GUI window splits the space its rows leave over between the top and bottom margins
   (ADR-508 addendum), instead of putting it all under the last row, where it could leave a
   band up to a row and a half tall under an editor's echo area.

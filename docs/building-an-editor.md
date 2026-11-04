@@ -315,7 +315,10 @@ Everything except the loop is pure, so test it like any other Brood code:
   command that is several edits (a replace, a transpose, a query-replace-all) one undo
   step, and `buffer-modified?` is kept by the buffer itself — every edit passes one
   choke point that sets it, and undoing back to the saved text clears it — so no
-  command can change the text and forget to say so.
+  command can change the text and forget to say so. The history is capped by size, as
+  Emacs's `undo-limit` / `undo-strong-limit` cap its own (ADR-550): past
+  `editor/buffer/*undo-strong-limit*` the oldest steps go, whole, until the rest fits
+  `*undo-limit*` — so a buffer edited all week does not keep every text it ever held.
 - **Multiple buffers / windows.** Either hold a list of buffers in editor state,
   or give each its own process via `spawn-buffer` and render the *views* it
   replies with. The reply-with-views boundary is the same one a remote frontend
