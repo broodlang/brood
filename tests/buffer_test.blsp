@@ -1287,11 +1287,13 @@ suite run. `test/*wait-ms*` is a failure deadline, reached only if a relay never
 (describe "undo-region-restore (the pure core)"
   (test "chunk-wise over CHARACTERS: the changed span is what the region is tested against"
     ;; "old" -> "new" occupies chars 2..5; a region there undoes it, one elsewhere doesn't
-    (assert= (editor/buffer/undo-region-restore "a\nold\nz" "a\nnew\nz" 2 5) "a\nold\nz")
-    (assert= (editor/buffer/undo-region-restore "a\nold\nz" "a\nnew\nz" 0 1) "a\nnew\nz"))
+    (assert= (editor/buffer/undo-region-restore "a\nold\nz" "a\nnew\nz" 2 5)
+      ["a\nold\nz" (list [:new 0 2] [:old 2 3] [:new 5 2])])
+    (assert= (editor/buffer/undo-region-restore "a\nold\nz" "a\nnew\nz" 0 1)
+      ["a\nnew\nz" (list [:new 0 7])]))
 
   (test "identical texts are unchanged whatever the region"
-    (assert= (editor/buffer/undo-region-restore "a\nb" "a\nb" 0 9) "a\nb")))
+    (assert= (editor/buffer/undo-region-restore "a\nb" "a\nb" 0 9) ["a\nb" (list [:new 0 3])])))
 
 ;; ---- undo-in-region is CHARACTER-precise, like Emacs ------------------------------
 ;; A line-granular version answered "undo that line's last change", which is a different
@@ -1951,10 +1953,10 @@ suite run. `test/*wait-ms*` is a failure deadline, reached only if a relay never
       (assert= (get redacted :undo) ())
       (assert= (buffer-text (undo redacted)) "Password: ")
       (is (not (includes? (str (get redacted :undo) (get redacted :pending-undo)) "hun")))))
-  (test "the splice log holds the delete alone, marked as a redaction"
+  (test "the splice log records the delete as a redaction"
     (let (b (typed (end-of-buffer (make-buffer "pw: ")) ["a" "b"])
           redacted (redact-region b 4 6))
-      (assert= (count (get redacted :splices)) 1)
+      (assert= (nth (first (get redacted :splices)) 6) :redact)
       (assert= (buffer-edits-since b redacted) (list [4 6 "" :redact]))))
   (test "a read-only buffer is redacted all the same and stays read-only"
     (let (redacted (redact-region (set-read-only (make-buffer "abcdef") true) 1 3))
@@ -1990,3 +1992,134 @@ suite run. `test/*wait-ms*` is a failure deadline, reached only if a relay never
                  (fn (rope) (and (not (nil? rope)) (includes? (text/->string rope) "sec"))))))
       ;; a holder that synced at the redaction still replays the edit after it
       (assert= (buffer-edits-since redacted next) (list [4 4 "\n" nil])))))
+
+;; Every text a buffer still holds besides its own: each log entry's ropes, its run's mid
+;; texts and replacement, and each undo snapshot's rope — where a redacted secret could hide.
+(defn- held-texts (buf)
+  (append (mapcat (or (get buf :splices) ())
+            (fn (entry)
+              (let ([before after _ _ replacement mids _] entry)
+                (append (seq/keep [before after] (fn (rope) (when rope (text/->string rope))))
+                  [replacement]
+                  (map mids (fn (mid) (text/->string (first mid))))))))
+    (map (or (get buf :undo) ()) (fn (snapshot) (text/->string (get snapshot :rope))))))
+
+(defn- holds? (buf secret) (any? (held-texts buf) (fn (text) (includes? text secret))))
+
+;; The shell's case: output arrives at the process mark (before the typed-ahead text) and
+;; the auto-opened password read redacts the type-ahead, both in ONE event.
+(defn- prompt-event ()
+  (let (synced (insert (insert (make-buffer "") "$ sudo x\n") "hun")
+        output (replace-region synced 9 9 "pw: "))
+    [synced (redact-region output 13 16)]))
+
+(describe "a redaction reaches every holder, whatever else the event did"
+  (test "the event's earlier edits stay walkable under the redaction"
+    (let ([synced redacted] (prompt-event))
+      (assert= (buffer-text redacted) "$ sudo x\npw: ")
+      (assert= (buffer-edits-since synced redacted) (list [9 9 "pw: " nil] [13 16 "" :redact]))))
+  (test "the next edit lets go of every entry that held the secret"
+    (let ([_ redacted] (prompt-event)
+          next (insert redacted "\n"))
+      (is (holds? redacted "hun")) ; until then, for a holder syncing this event
+      (is (not (holds? next "hun")))))
+  (test "a holder the log cannot reach is still sent a redaction"
+    (let ([synced redacted] (prompt-event)
+          next (insert redacted "x"))
+      (assert= (buffer-edits-since synced next) nil)
+      (assert= (buffer-edits-between synced next) (list [9 12 "" :redact] [9 9 "pw: x" nil]))))
+  (test "a copy applying another holder's redaction keeps nothing of the text"
+    (let (copy (apply-splice (apply-splice (make-buffer "pw: ") 4 4 "h") 5 5 "un")
+          cleaned (apply-splice copy 4 7 "" :redact))
+      (is (holds? copy "hun"))
+      (assert= (buffer-text cleaned) "pw: ")
+      (assert= (buffer-text (undo cleaned)) "pw: ")
+      (is (not (holds? cleaned "hun")))))
+  (test "an undo-group around a redaction does not bring the history back"
+    (let (b (insert (end-of-buffer (make-buffer "pw: ")) "hun")
+          grouped (undo-group b (fn (inner) (redact-region inner 4 7))))
+      (assert= (get grouped :undo) ())
+      (assert= (buffer-text (undo grouped)) "pw: ")
+      (is (not (holds? (insert grouped "\n") "hun"))))))
+
+;; ADR-579: a property change is not a text change — nothing moves, a text consumer sees
+;; nothing, and a holder applies it as what it is.
+(describe "put-properties — a property change, not a text change"
+  (test "markers and the narrowing in the range stay where they were"
+    (let (b (narrow-to (buffer-marker-set (make-buffer "abcdef") :m 3) [[2 5]])
+          put (put-properties (widen b) :face 0 6 [[0 6 :x]])
+          narrowed (put-properties b :face 2 5 [[2 5 :x]]))
+      (assert= (buffer-marker put :m) 3)
+      (assert= (editable-regions narrowed) [[2 5]])
+      (assert= (buffer-text put) "abcdef")))
+  (test "the log records a property entry; text consumers see no change"
+    (let (b (make-buffer "abcdef")
+          put (put-properties b :face 1 5 [[2 4 :red]]))
+      (assert= (buffer-edits-since b put) (list [1 1 "" [:put-properties 4 {:face [[1 3 :red]]}]]))
+      (assert= (buffer-splices-since b put) ())))
+  (test "an undo of it is a property entry too"
+    (let (b (coloured "abcdef" [[0 6 :red]])
+          cleared (put-properties b :face 2 4 [])
+          undone (undo cleared))
+      (assert= (buffer-properties undone :face) [[0 6 :red]])
+      (assert= (buffer-edits-since cleared undone)
+        (list [2 2 "" [:put-properties 2 {:face [[0 2 :red]]}]]))))
+  (test "a holder applies the entry without touching its text or its markers"
+    (let (b (make-buffer "abcdef")
+          put (put-properties b :face 1 5 [[2 4 :red]])
+          [lo hi replacement properties] (first (buffer-edits-since b put))
+          copy (buffer-marker-set (goto-char (make-buffer "abcdef") 3) :m 2)
+          applied (apply-splice copy lo hi replacement properties))
+      (assert= (buffer-properties applied :face) [[2 4 :red]])
+      (assert= (buffer-point applied) 3)
+      (assert= (buffer-marker applied :m) 2)
+      (assert= (buffer-properties (undo applied) :face) []))))
+
+(describe "undo-in-region gives back properties"
+  (test "the restored text has the properties it had"
+    (let (b (insert (make-buffer "") "aabb\n" {:f [[0 4 :a]]})
+          cut (delete-char (goto-char b 1) 2)
+          restored (undo-in-region (assoc (goto-char cut 0) :mark 3)))
+      (assert= (buffer-text restored) "aabb\n")
+      (assert= (buffer-properties restored :f) [[0 4 :a]])))
+  (test "a holder replaying the region undo ends with the same properties"
+    (let (b (insert (make-buffer "") "aabb\n" {:f [[0 4 :a]]})
+          cut (delete-char (goto-char b 1) 2)
+          restored (undo-in-region (assoc (goto-char cut 0) :mark 3))
+          copy (fold (buffer-edits-since cut restored)
+                 (assoc cut :splices ())
+                 (fn (acc edit)
+                   (let ([lo hi replacement properties] edit)
+                     (apply-splice acc lo hi replacement properties)))))
+      (assert= (buffer-text copy) "aabb\n")
+      (assert= (buffer-properties copy :f) [[0 4 :a]]))))
+
+(describe "propertied appends are one run; a comparison sends only what changed"
+  (test "coloured chunks appended one after another are one entry"
+    (let (b (end-of-buffer (make-buffer "$ make\n"))
+          after (fold (range 40)
+                  b
+                  (fn (acc i) (insert acc "ab" {:face [[0 1 (if (math/even? i) :red :blue)]]}))))
+      (assert= (count (get after :splices)) 1)
+      (let (edit (first (buffer-edits-since b after))
+            [lo hi replacement properties] edit)
+        (assert= [lo hi (string/length replacement)] [7 7 80])
+        (assert= (count (get properties :face)) 40)
+        (assert= (first (get properties :face)) [0 1 :red])
+        (assert= (last (get properties :face)) [78 79 :blue]))))
+  (test "a holder that synced mid-run gets the rest with its properties"
+    (let (b (end-of-buffer (make-buffer ""))
+          mid (insert b "ab" {:face [[0 2 :red]]})
+          after (insert mid "cd" {:face [[0 2 :blue]]}))
+      (assert= (buffer-edits-since mid after) (list [2 2 "cd" {:face [[0 2 :blue]]}]))))
+  (test "a delete back into a coloured run clips its properties"
+    (let (b (make-buffer "")
+          after (delete-backward-char (insert b "abcd" {:face [[0 4 :red]]}) 2))
+      (assert= (buffer-edits-since b after) (list [0 0 "ab" {:face [[0 2 :red]]}]))))
+  (test "the comparison sends the minimal range, widened to the properties it changed"
+    (let (before (insert (make-buffer "") "abc" {:face [[0 3 :red]]})
+          after (insert (make-buffer "") "abcd" {:face [[1 3 :red]]}))
+      (assert= (buffer-edits-between before after) (list [0 3 "abcd" {:face [[1 3 :red]]}]))
+      (assert= (buffer-edits-between (make-buffer "abc")
+                 (insert (make-buffer "") "abX" {:face [[2 3 :red]]}))
+        (list [2 3 "X" {:face [[0 1 :red]]}])))))

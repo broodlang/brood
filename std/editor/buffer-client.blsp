@@ -41,7 +41,9 @@ origin]` push into the link and tells the caller what to do with its LOCAL copy:
                         your in-flight edits) to your local copy, laying the text
                         `properties` it came with (`{key spans}` relative to `repl`,
                         or nil — ADR-579) on its new text (`buffer-apply-action`);
-                        `:redact` for its properties is a REDACTION (ADR-581)
+                        `:redact` for its properties is a REDACTION (ADR-581), and
+                        `[:put-properties width changes]` a PROPERTY CHANGE over
+                        `[lo, lo + width)` whose splice is empty (the text untouched)
       :resync         — ambiguous concurrent collision: refetch the authoritative
                         text (e.g. `(buffer-query (get link :proc) buffer-text)`)
       [:text s properties] — a full-text view (a closure edit / the seed): rebuild
@@ -103,15 +105,15 @@ no edit is sent.
   "`buf` with the content half of a `link-fold` action applied, TEXT PROPERTIES included —
 the buffer-holder twin of `text-apply-action`: `[:splice [lo hi repl] properties]` by
 `apply-splice` (whatever the copy's read-only state: the text already changed where it is
-authoritative) — or by `redact-region` when its properties are `:redact`, a redaction that
-leaves no trace in this copy either — `[:text t properties]` by replacing the whole text when it or its
-properties differ, anything else leaving `buf` as it is.
+authoritative), which also takes the two edits that are not plain splices — `:redact`, a
+redaction that leaves no trace in this copy either (no history, no log), and a property
+change (`[:put-properties width changes]`), which touches no text — `[:text t properties]`
+by replacing the whole text when it or its properties differ, anything else leaving `buf` as
+it is.
 
     (editor/buffer/buffer-text (editor/buffer-client/buffer-apply-action (editor/buffer/make-buffer \"hello\") [:splice [0 1 \"J\"] nil]))   ;=> \"Jello\""
   (match action
-    ([:splice [lo hi repl] properties] (if (= properties :redact)
-                                         (redact-region buf lo hi)
-                                         (apply-splice buf lo hi repl properties)))
+    ([:splice [lo hi repl] properties] (apply-splice buf lo hi repl properties))
     ([:text replacement properties] (if (and (string? replacement)
                                           (not (and (= replacement (buffer-text buf))
                                                  (= (or properties {}) (buffer-property-map buf)))))
@@ -173,8 +175,9 @@ outbound edits with). Version -1, so the subscription's seed push always applies
 (defn- link-send-splice (link splice &optional properties)
   "Send one `[lo hi repl]` to the link's process, based and tagged, with the text
 `properties` its replacement comes with, and count it in `:pending`. The link unchanged for
-a splice that changes nothing."
-  (if (splice-noop? splice)
+a splice that changes nothing — but a property change (`[:put-properties …]`, the text
+untouched, so its splice is empty) is sent."
+  (if (and (splice-noop? splice) (nil? properties))
     link
     (let ([lo hi repl] splice)
       (buffer-splice (get link :proc) lo hi repl (get link :me) (get link :version) properties)
@@ -191,27 +194,19 @@ the link (unchanged when the texts are equal — pure movement sends nothing)."
 
 (defn link-propagate-buffers (link before after)
   "`link-propagate` for a holder whose local copy is a BUFFER: send the change `before` →
-`after` as the splices the edits actually made (`buffer-edits-since`, the buffer's own
-log), each one sent and counted as `link-propagate` sends its one, with the text
-properties its inserted text came with (ADR-579). Exact where a diff guesses — a diff of
-`aaa` → `aaaa` cannot say WHICH `a` was typed, so a collaborator's caret beside it landed
-on the wrong side — and it reads no text. When the log cannot account for the change (the
-text was replaced wholesale, more history than it keeps) it falls back to diffing the two
-texts, which is always correct in content; a buffer with text properties then sends its
-whole text with all of them, the one splice that keeps the properties right too."
-  (let (edits (buffer-edits-since before after))
-    (cond
-      (not (nil? edits))
-        (fold edits
-          link
-          (fn (acc edit)
-            (let ([lo hi repl properties] edit) (link-send-splice acc [lo hi repl] properties))))
-      (empty? (buffer-property-map after))
-        (link-propagate link (buffer-text before) (buffer-text after))
-      else
-        (link-send-splice link
-          [0 (buffer-length before) (buffer-text after)]
-          (buffer-property-map after)))))
+`after` as the edits actually made (`buffer-edits-between`: the buffer's own log), each one
+sent and counted as `link-propagate` sends its one, with the text properties its inserted
+text came with (ADR-579) — a redaction as a redaction (ADR-581), a property change as one.
+Exact where a diff guesses — a diff of `aaa` → `aaaa` cannot say WHICH `a` was typed, so a
+collaborator's caret beside it landed on the wrong side — and it reads no text. When the log
+cannot account for the change (the text was replaced wholesale, more history than it keeps)
+it sends what a comparison finds: the minimal changed range, widened to cover any changed
+property, with its properties — correct in content and properties, nothing outside it
+moved, and a redaction since `before` still redacts."
+  (fold (buffer-edits-between before after)
+    link
+    (fn (acc edit)
+      (let ([lo hi repl properties] edit) (link-send-splice acc [lo hi repl] properties)))))
 
 (defn link-fold (link:map version:int view:any origin:any -> (tuple map any))
   "Fold one `[:buffer-updated proc version view origin]` push into `link`: returns

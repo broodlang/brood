@@ -213,7 +213,7 @@
                          (after test/*wait-ms* (error "no seed arrived"))))
         (assert= action [:text "ok" {:face [[0 2 :green]]}]))
       (stop-buffer bp)))
-  :isolated (test "the diff fallback of a propertied buffer sends the whole text with them"
+  :isolated (test "the diff fallback of a propertied buffer sends the changed range with its properties"
     (let (bp (spawn-buffer (make-buffer "abc"))
           after (insert (make-buffer "") "abX" {:face [[2 3 :red]]}))
       (link-propagate-buffers (link-init bp (self)) (make-buffer "abc") after)
@@ -247,4 +247,81 @@
         (assert= (buffer-text cleaned) "pw: ")
         (assert= (get cleaned :undo) ())
         (assert= (buffer-text (undo cleaned)) "pw: "))
+      (stop-buffer bp))))
+
+;; The shell's case, over the wire: output appended and the type-ahead redacted in ONE event
+;; of the holder that redacts. The other holder's copy had the type-ahead (recorded in its
+;; history, one splice per key); after the event it holds no text with it anywhere.
+(defn- secret-held? (buf secret)
+  (any? (append (mapcat (or (get buf :splices) ())
+                  (fn (entry)
+                    (let ([before after _ _ replacement mids _] entry)
+                      (append (seq/keep [before after] (fn (rope) (when rope (text/->string rope))))
+                        [replacement]
+                        (map mids (fn (mid) (text/->string (first mid))))))))
+          (map (or (get buf :undo) ()) (fn (snapshot) (text/->string (get snapshot :rope)))))
+    (fn (text) (includes? text secret))))
+
+(defn- next-push (link)
+  (receive
+    ([:buffer-updated _bp v w o] (link-fold link v w o))
+    (after test/*wait-ms* (error "no push arrived"))))
+
+(describe "a redaction after another edit in the same event"
+  :isolated (test "reaches the other holder as a redaction, its history and log cleared"
+    (let (bp (spawn-buffer (make-buffer "$ sudo x\nhun")))
+      (subscribe-buffer bp content-view)
+      (let ([seeded _] (next-push (link-init bp :other))
+            ;; the other holder's copy took the type-ahead a key at a time
+            other (fold ["h" "u" "n"]
+                    (make-buffer "$ sudo x\n")
+                    (fn (acc key) (apply-splice acc (buffer-length acc) (buffer-length acc) key)))
+            synced (insert (make-buffer "$ sudo x\n") "hun")
+            ;; one event: output at the process mark, then the redaction
+            redacted (redact-region (replace-region synced 9 9 "pw: ") 13 16)
+            _ (link-propagate-buffers (link-init bp (self)) synced redacted)
+            [after-output output-action] (next-push seeded)
+            [_ redact-action] (next-push after-output)
+            cleaned (buffer-apply-action (buffer-apply-action other output-action) redact-action))
+        (assert= output-action [:splice [9 9 "pw: "] nil])
+        (assert= redact-action [:splice [13 16 ""] :redact])
+        (is (secret-held? other "hun"))
+        (assert= (buffer-text cleaned) "$ sudo x\npw: ")
+        (assert= (get cleaned :undo) ())
+        (is (not (secret-held? cleaned "hun")))
+        (assert= (buffer-query bp buffer-text) "$ sudo x\npw: "))
+      (stop-buffer bp)))
+  :isolated (test "a holder too far behind for the log still redacts"
+    (let (bp (spawn-buffer (make-buffer "$ sudo x\nhun")))
+      (subscribe-buffer bp content-view)
+      (let ([seeded _] (next-push (link-init bp :other))
+            synced (insert (make-buffer "$ sudo x\n") "hun")
+            redacted (insert (redact-region (replace-region synced 9 9 "pw: ") 13 16) "x")
+            _ (link-propagate-buffers (link-init bp (self)) synced redacted)
+            [after-redact redact-action] (next-push seeded)
+            [_ insert-action] (next-push after-redact))
+        (assert= redact-action [:splice [9 12 ""] :redact])
+        (assert= insert-action [:splice [9 9 "pw: x"] nil])
+        (assert= (buffer-query bp buffer-text) "$ sudo x\npw: x"))
+      (stop-buffer bp))))
+
+;; A property change crosses as one: an empty splice and the change, so nothing in the other
+;; holder's copy moves.
+(describe "a property change travels as one"
+  :isolated (test "the other holder gets the properties, its text and positions untouched"
+    (let (bp (spawn-buffer (make-buffer "abcdef")))
+      (subscribe-buffer bp content-view)
+      (let ([seeded _] (next-push (link-init bp :other))
+            before (make-buffer "abcdef")
+            after (put-properties before :face 1 5 [[2 4 :red]])
+            _ (link-propagate-buffers (link-init bp (self)) before after)
+            [_ action] (next-push seeded)
+            other (buffer-marker-set (goto-char (make-buffer "abcdef") 3) :m 2)
+            applied (buffer-apply-action other action))
+        (assert= action [:splice [1 1 ""] [:put-properties 4 {:face [[1 3 :red]]}]])
+        (assert= (buffer-text applied) "abcdef")
+        (assert= (buffer-properties applied :face) [[2 4 :red]])
+        (assert= [(buffer-point applied) (buffer-marker applied :m)] [3 2])
+        (assert= (text-apply-action "abcdef" action) "abcdef")
+        (assert= (buffer-query bp (fn (b) (buffer-properties b :face))) [[2 4 :red]]))
       (stop-buffer bp))))
