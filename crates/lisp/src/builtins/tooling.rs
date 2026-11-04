@@ -200,6 +200,25 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "The rebinding generation of global sym: grows with every def of that name in this runtime, 0 for a name never def'd here. For restoring a TEMPORARY rebinding without clobbering a redefinition made in between (debug/untrace-fn). Quote it: (%global-generation 'foo).",
         global_generation,
     );
+    // What a load (re)bound, from the generations the runtime already stamps (ADR-597): the
+    // generation now, and every global defined or removed after one — so a plugin host asks
+    // "what did this package's load define?" without reading every global's value.
+    primitives.def(
+        "reflect/generation",
+        Arity::exact(0),
+        Sig::nullary(int),
+        &[],
+        "The runtime's global generation now: every later `def` or `reflect/undef` of a global stamps it with a greater one. Hand it to `reflect/rebound-since` after a load to learn what the load bound.\n\n    (int? (reflect/generation))   ;=> true",
+        runtime_generation,
+    );
+    primitives.def(
+        "reflect/rebound-since",
+        Arity::exact(1),
+        Sig::new(vec![int], any),
+        &["generation"],
+        "Every global defined, redefined or removed since `generation` (a `reflect/generation` taken before), as a list of symbols in no particular order — a removed one is no longer `bound?`. What a load bound, read from the stamps the runtime keeps anyway, with no global's value touched.\n\n    (reflect/rebound-since (reflect/generation))   ;=> ()",
+        rebound_since,
+    );
     primitives.def(
         "reflect/undef",
         Arity::exact(1),
@@ -233,6 +252,21 @@ pub(super) fn form_pos(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResu
 /// / docs/lsp.md). Takes a symbol, so quote it: `(source-location 'foo)`.
 pub(super) fn source_location(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
     let name = expect_symbol(heap, "reflect/source-location", arg(args, 0))?;
+    // The root escape asks for exactly that global (ADR-597), as `def` binds it: `/org/f` is
+    // `org/f` even inside a project whose own `org` module would root `org/f`.
+    if let Some(exact) = root_escaped(name) {
+        return Ok(match heap.def_site(exact) {
+            Some(loc) => {
+                let file = heap.alloc_string(&loc.file);
+                heap.alloc_vector(vec![
+                    file,
+                    Value::int(loc.pos.line as i64),
+                    Value::int(loc.pos.col as i64),
+                ])
+            }
+            None => Value::nil(),
+        });
+    }
     // Rooted as `declared-signature` roots it (ADR-560): inside project bedit,
     // `keyhelp/ed-first-line` is `bedit/keyhelp/ed-first-line`, and the def site is recorded
     // under the full name — so a query by the name the code itself writes answered nil.
@@ -275,6 +309,16 @@ fn existing_name_arg(heap: &Heap, who: &str, v: Value) -> Result<Option<value::S
 /// The global a name query means: `commands/cmd-open` is `bedit/commands/cmd-open` inside
 /// project bedit (ADR-070) — the same rooting an `(eval 'commands/cmd-open)` behind a
 /// keymap gets; a bare name resolves in the current namespace, as a def head would.
+/// The global a root-escaped name (`/org/f`) names exactly — `org/f`, never rooted — or
+/// `None` for any other name (`/` alone is division).
+fn root_escaped(sym: value::Symbol) -> Option<value::Symbol> {
+    let spelled = value::symbol_name(sym);
+    match spelled.strip_prefix('/') {
+        Some(exact) if !exact.is_empty() => Some(value::intern(exact)),
+        _ => None,
+    }
+}
+
 fn rooted_name(heap: &Heap, sym: value::Symbol) -> value::Symbol {
     heap.root_qualified_ref(sym)
         .unwrap_or_else(|| crate::eval::macros::resolve_reference(heap, sym))
@@ -821,6 +865,32 @@ pub(super) fn global_generation(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
     Ok(Value::Int(heap.global_generation(name) as i64))
 }
 
+/// `(reflect/generation)` — the runtime's global generation now (ADR-597).
+pub(super) fn runtime_generation(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    Ok(Value::Int(heap.runtime_generation() as i64))
+}
+
+/// `(reflect/rebound-since generation)` — the globals stamped after `generation` (ADR-597).
+pub(super) fn rebound_since(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let generation = match arg(args, 0).as_int() {
+        Some(generation) => generation.max(0) as u64,
+        None => {
+            return Err(LispError::wrong_type(
+                heap,
+                "reflect/rebound-since",
+                "int",
+                arg(args, 0),
+            ));
+        }
+    };
+    let names: Vec<Value> = heap
+        .rebound_since(generation)
+        .into_iter()
+        .map(Value::Sym)
+        .collect();
+    Ok(heap.list(names))
+}
+
 /// `(reflect/undef 'name)` — remove a global binding (ADR-391). Policy here, the table
 /// operation and its invalidation in [`Heap::env_undefine`]: root a package-relative name
 /// as `def` roots its target, refuse what Brood ships, and take a contracted function's
@@ -828,7 +898,9 @@ pub(super) fn global_generation(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
 /// name is, and a same-module caller compiled against it must miss too.
 pub(super) fn undef(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let name = expect_symbol(heap, "reflect/undef", arg(args, 0))?;
-    let name = heap.root_qualified_ref(name).unwrap_or(name);
+    // The root escape names a global exactly, as it does for `def` (ADR-597): `/org/f` is the
+    // global `org/f` even where a package context would root `org/f` to `bedit/org/f`.
+    let name = root_escaped(name).unwrap_or_else(|| heap.root_qualified_ref(name).unwrap_or(name));
     if heap.is_reserved_global(name) || heap.is_prelude_global(name) {
         let shown = value::symbol_name(name);
         return Err(LispError::type_err(format!(

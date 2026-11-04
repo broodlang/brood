@@ -272,6 +272,25 @@ impl Heap {
             .unwrap_or(0)
     }
 
+    /// The runtime's global generation now (ADR-597): every later `def` or removal of a
+    /// global stamps it with a greater one (`RuntimeCode::global_generations`).
+    pub fn runtime_generation(&self) -> u64 {
+        self.runtime.version.load(Ordering::Relaxed)
+    }
+
+    /// Every global stamped after `generation` — defined, redefined or removed since
+    /// (ADR-597). One pass over the stamps; no value is read.
+    pub fn rebound_since(&self, generation: u64) -> Vec<Symbol> {
+        self.runtime
+            .global_generations
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|&(_, &stamped)| stamped > generation)
+            .map(|(&sym, _)| sym)
+            .collect()
+    }
+
     /// Is `sym` bound in the global table (prelude + user `def`s)? An authoritative,
     /// non-racy read of `runtime.globals` (which is seeded with the prelude). Used by
     /// the unbound-symbol diagnostic to tell a *spuriously*-unbound known global (the

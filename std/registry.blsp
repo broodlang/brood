@@ -40,6 +40,14 @@ so a module that registers at load is safe to reload. Returns `entry`.
     (registry/put! :doc/greetings :en \"hello\")   ;=> \"hello\""
   (do (%registry-update! 'registry/*registries* :assoc [id key] entry) entry))
 
+(defn put-new! (id:any key:any entry:any -> bool)
+  "Register `entry` under `key` in the registry `id` only when nothing is there, in one locked
+step, and answer whether it did — first one wins, so a key held this way is a runtime-wide
+slot: two windows, two processes, cannot both take it.
+
+    (registry/put-new! :doc/slots :only 1)   ;~> true the first time, false while it is held"
+  (= true (%registry-update! 'registry/*registries* :assoc-new [id key] entry)))
+
 (defn entries (id:any -> map)
   "The registry `id` as a map of key → entry — `{}` for a registry nothing has written.
 
@@ -222,3 +230,60 @@ when it was written.
       value
       (if (nil? credit) false credit)
       (:writer write))))
+
+;; ---- ability impls a module registered (ADR-597) ---------------------------------------
+;; `written-by` leaves the impl tables out: an impl is retired with the type it is for
+;; (`reflect/undef`), and a write-back would corrupt them. But a plugin's `impl` of an ability
+;; for a type it does not own — a core ability, a core type — outlives the plugin that way,
+;; calling a helper that is gone. Every registration is kept by precedence tier with the
+;; namespace that made it (`*impl-tiers*`, ADR-432), so one module's can be found and taken
+;; back exactly, the tier below it winning again.
+
+(defn impls-by (writers:set -> vector)
+  "Every ability impl a namespace in `writers` (module symbols) registered and that is still
+registered: `{:ability :op :key :rank :from}`, what [[retract-impl]] takes back. An impl from
+code of no module (a file without a `defmodule`, the REPL) is credited to nobody.
+
+    (registry/impls-by #{'nobody/at-all})   ;=> []"
+  (fold (%map-pairs (or *impl-tiers* {}))
+    []
+    (fn (found entry)
+      (let ([slot tiers] entry
+            [ability op key] slot)
+        (fold (%map-pairs tiers)
+          found
+          (fn (acc tier)
+            (let ([rank registered] tier
+                  from (second registered))
+              (if (contains? writers from)
+                (conj acc {:ability ability :op op :key key :rank rank :from from})
+                acc))))))))
+
+(defn retract-impl (impl:map -> bool)
+  "Take back one impl [[impls-by]] listed — only while its tier still holds that namespace's
+registration — and answer whether it did. The highest tier left for the slot is what
+dispatch finds again (a core impl the plugin's outranked, or shadowed at another tier); with
+none left the slot is unclaimed, as before anything implemented it.
+
+    (registry/retract-impl {:ability 'Nobody :op 'op :key :none :rank 1 :from 'nobody})   ;=> false"
+  (let (slot [(:ability impl) (:op impl) (:key impl)]
+        op-key [(:ability impl) (:op impl)]
+        tiers (or (get (or *impl-tiers* {}) slot) {})
+        registered (get tiers (:rank impl)))
+    (if (or (nil? registered) (not (= (second registered) (:from impl))))
+      false
+      (let (left (dissoc tiers (:rank impl))
+            best (fold (%map-pairs left)
+                   nil
+                   (fn (winner tier)
+                     (if (or (nil? winner) (> (first tier) (first winner))) tier winner))))
+        (%registry-update! '*impl-tiers* :dissoc [slot (:rank impl)] nil)
+        (if (nil? best)
+          (do
+            (%registry-update! '*impls* :dissoc [op-key (:key impl)] nil)
+            (%registry-update! '*impl-from* :dissoc [slot] nil)
+            (%registry-update! '*impl-tiers* :dissoc [slot] nil))
+          (do
+            (%registry-update! '*impls* :assoc [op-key (:key impl)] (first (second best)))
+            (%registry-update! '*impl-from* :assoc [slot] (second (second best)))))
+        true))))

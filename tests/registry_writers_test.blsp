@@ -137,7 +137,8 @@
     (is (nil? (registry/writer :regwriters/acting :later)))
     (is (nil? (registry/writer :regwriters/acting :after)))
     ;; a thrown thunk still puts the previous writer back
-    (assert= (try (registry/with-acting-writer (quote regwriters-plugin) (fn () (error "boom")))
+    (assert= (try
+               (registry/with-acting-writer (quote regwriters-plugin) (fn () (error "boom")))
                (catch e (error-message e)))
       "boom")
     (is (nil? (registry/acting-writer)))))
@@ -150,3 +151,52 @@
     (assert= (reflect/fn-module (fn () 1)) 'registry-writers-test)
     (is (nil? (reflect/fn-module 42)))
     (is (nil? (reflect/fn-module +)))))
+
+(fixture "regwriters-impl"
+  (str "(defmodule regwriters-impl)\n"
+    "(defn helper (s) :plugin)\n" "(impl Port :keyword (emit (k s) (helper s)))\n"))
+
+(describe "ability impls a module registered"
+  :isolated (test "are listed by namespace and taken back, the slot as it was before"
+    (%with-load-journal
+      (fn ()
+        (let (before (satisfies? 'Port :a))
+          (require-one 'regwriters-impl)
+          (let (impls (registry/impls-by #{'regwriters-impl}))
+            (assert= (map impls (fn (impl) [(:ability impl) (:key impl)])) '([Port :keyword]))
+            (is (satisfies? 'Port :a))
+            (is (registry/retract-impl (first impls)))
+            ;; taken back once: the tier is no longer that namespace's
+            (refute (registry/retract-impl (first impls)))
+            (assert= (satisfies? 'Port :a) before)
+            (assert= (registry/impls-by #{'regwriters-impl}) [])))))))
+
+(describe "reflect/rebound-since"
+  :isolated (test "names what was defined, redefined or removed after a generation, and nothing else"
+    (reflect/eval '(def regwriters-early 1))
+    (let (generation (reflect/generation))
+      (reflect/eval '(def regwriters-late 2))
+      (reflect/eval '(def regwriters-late 3))
+      (let (rebound (reflect/rebound-since generation))
+        (is (includes? rebound 'regwriters-late))
+        (refute (includes? rebound 'regwriters-early)))
+      (reflect/undef 'regwriters-early)
+      (is (includes? (reflect/rebound-since generation) 'regwriters-early))
+      (assert= (reflect/rebound-since (reflect/generation)) ()))))
+
+(describe "registry/put-new!"
+  :isolated (test "the first one wins, until the key is free again"
+    (is (registry/put-new! :regwriters/slots :only {:holder 1}))
+    (refute (registry/put-new! :regwriters/slots :only {:holder 2}))
+    (assert= (registry/lookup :regwriters/slots :only) {:holder 1})
+    (registry/remove! :regwriters/slots :only)
+    (is (registry/put-new! :regwriters/slots :only {:holder 3}))))
+
+(describe "the root escape names a global exactly"
+  :isolated (test "in reflect/source-location and reflect/undef"
+    (let (file (path/join *dir* "regwriters-escape.blsp"))
+      (file/spit file "(defn /regwriters-escape/f () 1)\n")
+      (reflect/load file)
+      (assert= (first (reflect/source-location '/regwriters-escape/f)) file)
+      (is (reflect/undef '/regwriters-escape/f))
+      (refute (bound? 'regwriters-escape/f)))))
