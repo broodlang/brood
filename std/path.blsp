@@ -52,13 +52,19 @@ ignored so `(basename \"/usr/bin/\")` returns `\"bin\"`. `(basename \"/\")` retu
 
 (defn dirname (p:string -> string)
   "The directory part of `p` — everything up to but not including the final /.
-Returns `\".\"` for a bare name, `\"/\"` for the root.
+Returns `\".\"` for a bare name, `\"/\"` for the root. A root is its own directory: on
+Windows that includes a drive's `C:/` (and a bare `C:`) and a UNC share's
+`//server/share/`, so a walk up the tree ends there as it does at `/`.
 
-    (path/dirname \"/a/b/c.txt\")    ;=> \"/a/b\""
-  (let (n (string/length p)
+    (path/dirname \"/a/b/c.txt\")    ;=> \"/a/b\"
+    (path/dirname \"/\")             ;=> \"/\""
+  (let (root (root-of p)
+        n (string/length p)
         e (if (and (> n 1) (= (string/char-at p (- n 1)) "/")) (- n 1) n)
         i (string/last-index-of p "/" e))
     (cond
+      (bare-drive? p) p
+      (and root (<= i (dec (string/length root)))) root
       (< i 0) "."
       (= i 0) "/"
       else (string/substring p 0 i))))
@@ -130,13 +136,22 @@ redundant slashes. An absolute path starts with the `\"/\"` component.
   "Resolve `.` and `..` components in `p`. Does not touch the filesystem.
 `\"a/b/../c\"` → `\"a/c\"`;  `\"/a/b/../../c\"` → `\"/c\"`.
 
-    (path/normalize \"a/./b/../c\")  ;=> \"a/c\""
-  (let (absolute (string/starts-with? p "/")
-        parts (seq/filter (string/split p "/") (fn (s) (not (or (= s "") (= s ".")))))
+    (path/normalize \"a/./b/../c\")  ;=> \"a/c\"
+    (path/normalize \"/..\")         ;=> \"/\"
+
+A root stays: `..` above it is discarded. On Windows that root may be a drive's `C:/` or a
+UNC share's `//server/share/` (kept with its two slashes)."
+  (let (root (root-of p)
+        absolute (not (nil? root))
+        tail (cond
+               (not absolute) p
+               (>= (string/length root) (string/length p)) ""
+               else (string/substring p (string/length root) (string/length p)))
+        parts (seq/filter (string/split tail "/") (fn (s) (not (or (= s "") (= s ".")))))
         resolved (normalize-reduce parts nil absolute))
     (cond
-      (nil? resolved) (if absolute "/" ".")
-      absolute (str "/" (path-glue (first resolved) (rest resolved)))
+      (nil? resolved) (or root ".")
+      absolute (str root (path-glue (first resolved) (rest resolved)))
       else (path-glue (first resolved) (rest resolved)))))
 
 (defn- normalize-reduce (parts stack absolute)
@@ -188,7 +203,47 @@ divergent pair still yields a valid relative path (`/x/y` from `/a/b` → `../..
 ;; this module splits on nothing else — so what Windows adds here is only its ROOTS: a
 ;; drive letter (`C:/`, or `C:\` as a person types it) and a UNC share (`\\server`). Only
 ;; on Windows: elsewhere `C:/x` is a relative path whose first directory is named `C:`.
-(defn- windows? () (= (%os-type) :windows))
+(defdyn path/*windows-rules* nil)
+;; Which roots this module reads: nil (the default) asks the OS; true or false forces
+;; Windows's rules or POSIX's — so a test on any host can pin both (`binding`).
+
+(defn- windows? ()
+  (let (forced path/*windows-rules*) (if (nil? forced) (= (%os-type) :windows) forced)))
+
+(defn- letter? (character)
+  (includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" character))
+
+(defn- unc-root (p)
+  ;; Windows: `//server/share/` (or with `\`) — the root of a UNC path, in `/` form, or nil.
+  ;; A share with no name yet (`//server`) roots at `//server/`.
+  (when (and (windows?) (or (string/starts-with? p "//") (string/starts-with? p "\\\\")))
+    (let (text (string/replace p "\\" "/")
+          n (string/length text)
+          server-end (index-of text "/" 2)
+          share-end (if (< server-end 0) -1 (index-of text "/" (inc server-end))))
+      (cond
+        (= n 2) text
+        (< server-end 0) (str text "/")
+        (= server-end (dec n)) text
+        (< share-end 0) (str text "/")
+        else (string/substring text 0 (inc share-end))))))
+
+(defn- root-of (p)
+  ;; The root `p` starts with — `/`, and on Windows a drive's `C:/` or a UNC share's
+  ;; `//server/share/`, in `/` form — or nil for a relative path. `dirname` and `normalize`
+  ;; stop at it: it is its own parent, as `/` is.
+  (cond
+    (unc-root p) (unc-root p)
+    (drive-rooted? p) (str (string/substring p 0 2) "/")
+    (string/starts-with? p "/") "/"
+    else nil))
+
+(defn- bare-drive? (p)
+  ;; Windows: `C:` alone — the drive's current directory; its own parent here
+  (and (= (string/length p) 2)
+    (= (string/char-at p 1) ":")
+    (letter? (string/char-at p 0))
+    (windows?)))
 
 (defn- drive-rooted? (p)
   (and (>= (string/length p) 3)
@@ -332,7 +387,7 @@ exactly that name — how a file name from the disk goes into text that will be 
   ;; `//` does — Emacs reads `/x/C:/y` as `C:/y` there (ADR-592). Elsewhere it is a name.
   (and (< (inc i) n)
     (= (string/char-at text (inc i)) ":")
-    (includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" (string/char-at text i))
+    (letter? (string/char-at text i))
     (or (= (+ i 2) n) (= (string/char-at text (+ i 2)) "/") (= (string/char-at text (+ i 2)) "\\"))
     (windows?)))
 
@@ -342,7 +397,10 @@ right after a `/`, and at a `~` / `~name` component right after a `/` when it na
 that `keep?` does not claim as an entry of the directory before it."
   (and (> i start)
     (= (string/char-at text (dec i)) "/")
-    (or (= (string/char-at text i) "/")
+    (or
+      (and (= (string/char-at text i) "/")
+        ;; Windows: a `//` the live text STARTS with is a UNC share, not a restart
+        (not (and (= (dec i) start) (windows?))))
       (drive-start? text i n)
       (and (= (string/char-at text i) "~")
         (let (slash (index-of text "/" i)
@@ -354,7 +412,14 @@ that `keep?` does not claim as an entry of the directory before it."
   (cond
     (>= i n) start
     (restart-at? text i n start keep? directory-of)
-      (restart-scan text (inc i) n i keep? directory-of)
+    ;; Windows: a `//` part-way through starts a UNC path, so the new path keeps both
+    ;; slashes (`C:/x//srv/share` is `//srv/share`); elsewhere it starts at the second
+      (restart-scan text
+        (inc i)
+        n
+        (if (and (= (string/char-at text i) "/") (windows?)) (dec i) i)
+        keep?
+        directory-of)
     else (restart-scan text (inc i) n start keep? directory-of)))
 
 (defn- never-kept (directory component) false)
@@ -401,3 +466,61 @@ of file with your privileges. Neither is possible with a name they cannot predic
 
     (path/temp \"myapp-\")   ;~> \"/tmp/myapp-…32 random hex chars…\""
   (path/join (temp-root) (str prefix (encoding/hex-encode-bytes (%random-bytes 16)))))
+
+;; ---- file: URIs (RFC 8089) ----------------------------------------------------
+;; What a language server, a browser or a file manager names a file with. Both directions
+;; live here so they agree: a server sends `file:///c%3A/x` (VS Code's spelling, the colon
+;; encoded and the drive lower-cased) and expects to recognise its own URIs in requests.
+
+(defn- encode-segments (text)
+  (string/join (map (string/split text "/") url/percent-encode) "/"))
+
+(defn to-file-uri (p:string -> string)
+  "The `file:` URI (RFC 8089) of the absolute path `p`, each segment percent-encoded (a
+space is `%20`): `file:///a/b`. On Windows a drive path `C:/x` (or `C:\\x`) is
+`file:///C:/x` and a UNC path `//server/share/x` is `file://server/share/x`.
+
+    (path/to-file-uri \"/my project/a.rs\")   ;=> \"file:///my%20project/a.rs\""
+  (let (text (forward-slashes p))
+    (cond
+      (unc-root text)
+        (str "file://" (encode-segments (string/substring text 2 (string/length text))))
+      (drive-rooted? text)
+        (str "file:///"
+          (string/substring text 0 2)
+          (encode-segments (string/substring text 2 (string/length text))))
+      else (str "file://" (encode-segments text)))))
+
+(defn- uri-authority (text)
+  ;; `//host/x` → [host "/x"]; `//host` → [host "/"]
+  (let (slash (index-of text "/" 2))
+    (if (< slash 0)
+      [(string/substring text 2 (string/length text)) "/"]
+      [(string/substring text 2 slash) (string/substring text slash (string/length text))])))
+
+(defn from-file-uri (uri:string -> (or string nil))
+  "The path a `file:` `uri` names, percent-decoded — the inverse of [[to-file-uri]] — or
+nil when `uri` is not a `file:` URI. `file:///x`, `file:/x` and `file://localhost/x` are
+`/x`; another host is a UNC path `//host/x`. On Windows a drive (`file:///C:/x`, or
+`file:///c%3A/x` as VS Code writes it) is `C:/x`, its letter upper-cased. Text that does
+not decode is left as it is.
+
+    (path/from-file-uri \"file:///my%20project/a.rs\")   ;=> \"/my project/a.rs\""
+  (when (string/starts-with? uri "file:")
+    (let (after-scheme (string/substring uri 5 (string/length uri))
+          [host raw] (if (string/starts-with? after-scheme "//")
+                       (uri-authority after-scheme)
+                       ["" after-scheme])
+          decoded (url/percent-decode raw)
+          local (if (string? decoded) decoded raw)
+          drive? (and (windows?)
+                   (>= (string/length local) 3)
+                   (= (string/char-at local 0) "/")
+                   (letter? (string/char-at local 1))
+                   (= (string/char-at local 2) ":")))
+      (cond
+        drive?
+          (str (string/upper (string/char-at local 1))
+            (string/substring local 2 (string/length local)))
+        (or (= host "") (= host "localhost")) local
+        else (str "//" host local)))))

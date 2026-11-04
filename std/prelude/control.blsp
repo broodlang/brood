@@ -109,13 +109,31 @@ release run from a subdirectory resolved every embedded file against the wrong p
 
     (%include-str-path \"/etc/hostname\")   ;=> \"/etc/hostname\""
   (cond
-    (string/starts-with? rel "/") rel
+    (%include-absolute? rel) rel
     else
       (let (base (or root
                    (%include-package-root)
                    (when (and (bound? 'project/*root*) project/*root*) project/*root*)
                    (file/cwd)))
-        (if (string/ends-with? base "/") (/str base rel) (/str base "/" rel)))))
+        (%include-under base rel))))
+
+;; Windows's roots, for the prelude, which cannot load `path` (ADR-592): `C:/` / `C:\` and
+;; a UNC `\\server`. `path/absolute?` is the public rule; this is its bootstrap copy.
+(defn- %include-drive-rooted? (path)
+  (and (= (%os-type) :windows)
+    (>= (string/length path) 3)
+    (= (string/substring path 1 2) ":")
+    (or (= (string/substring path 2 3) "/") (= (string/substring path 2 3) "\\"))))
+
+(defn- %include-absolute? (path)
+  (or (string/starts-with? path "/")
+    (%include-drive-rooted? path)
+    (and (= (%os-type) :windows) (string/starts-with? path "\\\\"))))
+
+(defn- %include-under (base rel)
+  (if (or (string/ends-with? base "/") (string/ends-with? base "\\"))
+    (/str base rel)
+    (/str base "/" rel)))
 
 (defn %include-package-root ()
   "The root of the package the file being loaded belongs to — the nearest directory at or
@@ -125,17 +143,27 @@ REPL form, an `eval`) or the file is in no project.
     (%include-package-root)   ;~> \"/home/me/app\" while loading /home/me/app/src/x.blsp"
   (let (file (%current-file))
     (when (string? file)
-      (%include-root-above (%include-dirname (if (string/starts-with? file "/")
+      (%include-root-above (%include-dirname (if (%include-absolute? file)
                                                file
-                                               (/str (file/cwd) "/" file)))))))
+                                               (%include-under (file/cwd) file)))))))
 
+;; The directory of `path`; a root (`/`, and on Windows `C:/`) is its own.
 (defn- %include-dirname (path)
-  (let (at (%str-last-index-of path "/")) (if (> at 0) (string/substring path 0 at) "/")))
+  (let (slash (%str-last-index-of path "/")
+        backslash (if (= (%os-type) :windows) (%str-last-index-of path "\\") -1)
+        at (if (> backslash slash) backslash slash))
+    (cond
+      (and (%include-drive-rooted? path) (<= at 2)) (string/substring path 0 3)
+      (> at 0) (string/substring path 0 at)
+      else "/")))
+
+(defn- %include-root? (dir)
+  (or (= dir "/") (and (%include-drive-rooted? dir) (= (string/length dir) 3))))
 
 (defn- %include-root-above (dir)
   (cond
-    (file/exists? (/str dir "/project.blsp")) dir
-    (= dir "/") nil
+    (file/exists? (%include-under dir "project.blsp")) dir
+    (%include-root? dir) nil
     else (%include-root-above (%include-dirname dir))))
 
 ;; Every file an `include-str` or `include-bytes` read in this runtime, as `{path true}`. A

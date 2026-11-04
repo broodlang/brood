@@ -123,11 +123,11 @@ on this machine share one cookie; set `$BROOD_COOKIE` to override."
           secret)))))
 
 ;; The per-user dir holding local node sockets. $XDG_RUNTIME_DIR is the right
-;; home (tmpfs, cleared on logout); fall back to /tmp/brood-<user> when a bare /
+;; home (tmpfs, cleared on logout); fall back to <temp-root>/brood-<user> when a bare /
 ;; cron / ssh session leaves it unset.
 (defn- node-runtime-dir ()
   (str (or (os/env "XDG_RUNTIME_DIR")
-         (str "/tmp/brood-" (or (os/env "USER") (os/env "LOGNAME") "shared")))
+         (path/join (path/temp-root) (str "brood-" (or (os/user-name) "shared"))))
     "/brood"))
 
 (defn- node-socket-path (s) (str (node-runtime-dir) "/" s ".sock"))

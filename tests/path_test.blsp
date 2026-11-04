@@ -188,3 +188,72 @@
     (assert= (path/substitute "") "")
     (assert= (path/substitute "a/b") "a/b")
     (assert= (path/substitute-start "/") 0)))
+
+;; Windows's roots (ADR-592), pinned on every host by `path/*windows-rules*`: a walk up the
+;; tree (`dirname` until it stops changing) must end at the drive or the share, never fall
+;; through to "." and so to the working directory.
+(defn- windows-rules (thunk) (binding (path/*windows-rules* true) (thunk)))
+(defn- posix-rules (thunk) (binding (path/*windows-rules* false) (thunk)))
+
+(defn- walk-up (p)
+  (let (parent (path/dirname p)) (if (= parent p) p (walk-up parent))))
+
+(describe "path roots on Windows: a drive and a share are fixed points"
+  (test "dirname stops at the drive's root"
+    (windows-rules (fn ()
+                     (assert= (path/dirname "C:/Users") "C:/")
+                     (assert= (path/dirname "C:/") "C:/")
+                     (assert= (path/dirname "C:") "C:")
+                     (assert= (path/dirname "C:/a/b") "C:/a")
+                     (assert= (path/dirname "C:\\Users") "C:/"))))
+  (test "dirname stops at a UNC share's root"
+    (windows-rules (fn ()
+                     (assert= (path/dirname "//srv/share/x") "//srv/share/")
+                     (assert= (path/dirname "//srv/share/") "//srv/share/")
+                     (assert= (path/dirname "//srv/share/x/y") "//srv/share/x"))))
+  (test "a walk up ends at the root it started under"
+    (windows-rules (fn ()
+                     (assert= (walk-up "C:/Users/me/src/app/a.rs") "C:/")
+                     (assert= (walk-up "D:/work") "D:/")
+                     (assert= (walk-up "//srv/share/proj/a") "//srv/share/"))))
+  (test "normalize keeps the root, and .. above it is discarded"
+    (windows-rules (fn ()
+                     (assert= (path/normalize "C:/") "C:/")
+                     (assert= (path/normalize "C:/..") "C:/")
+                     (assert= (path/normalize "C:/a/../b") "C:/b")
+                     (assert= (path/normalize "//srv/share/x") "//srv/share/x")
+                     (assert= (path/normalize "//srv/share/x/../..") "//srv/share/"))))
+  (test "a typed path keeps a leading // as a share, and // part-way starts one"
+    (windows-rules (fn ()
+                     (assert= (path/substitute "//srv/share/x") "//srv/share/x")
+                     (assert= (path/substitute "C:/x//srv/share") "//srv/share")
+                     (assert= (path/substitute "/x/C:/y") "C:/y"))))
+  (test "under POSIX rules nothing changes: C: is a name, // restarts"
+    (posix-rules (fn ()
+                   (assert= (path/dirname "C:/Users") "C:")
+                   (assert= (path/normalize "C:/..") ".")
+                   (assert= (path/normalize "//srv/share/x") "/srv/share/x")
+                   (assert= (path/substitute "/a//etc") "/etc")
+                   (assert= (walk-up "/a/b/c") "/")))))
+
+(describe "file: URIs (RFC 8089)"
+  (test "a POSIX path, segments percent-encoded, and back"
+    (posix-rules (fn ()
+                   (assert= (path/to-file-uri "/my project/a.rs") "file:///my%20project/a.rs")
+                   (assert= (path/from-file-uri "file:///my%20project/a.rs") "/my project/a.rs")
+                   (assert= (path/from-file-uri "file:/x/y") "/x/y")
+                   (assert= (path/from-file-uri "file://localhost/x") "/x")
+                   (assert= (path/from-file-uri "file:///c%3A/x") "/c:/x"))))
+  (test "a drive path is file:///C:/x, and VS Code's file:///c%3A/x reads back as C:/x"
+    (windows-rules (fn ()
+                     (assert= (path/to-file-uri "C:/x/a b.rs") "file:///C:/x/a%20b.rs")
+                     (assert= (path/to-file-uri "C:\\x\\a.rs") "file:///C:/x/a.rs")
+                     (assert= (path/from-file-uri "file:///C:/x/a.rs") "C:/x/a.rs")
+                     (assert= (path/from-file-uri "file:///c%3A/x/a.rs") "C:/x/a.rs")
+                     (assert= (path/from-file-uri (path/to-file-uri "C:/x y/é.rs")) "C:/x y/é.rs"))))
+  (test "a UNC path is the URI's host"
+    (windows-rules (fn ()
+                     (assert= (path/to-file-uri "//srv/share/x") "file://srv/share/x")
+                     (assert= (path/from-file-uri "file://srv/share/x") "//srv/share/x"))))
+  (test "anything else is not a file URI"
+    (is (nil? (path/from-file-uri "https://example.org/x")))))
