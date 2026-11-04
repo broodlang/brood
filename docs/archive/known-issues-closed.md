@@ -15761,3 +15761,33 @@ is not Latin is read by the key's US position, an Option key that is not Meta (`
 **Guard.** `host::gui::backend::input::adr_541_tests`. With the positional fallback removed, four
 went red, e.g. `left: "ctrl-ф" right: "ctrl-a"` and `left: "-" right: "ctrl-'"`; restored, all
 ten green.
+
+## KI-360 — a terminal without the kitty keyboard protocol could not send `C-;`, `C-.`, `C-'` and friends ✅ FIXED 2026-11-04
+
+**Symptom.** In the terminal display (ADR-586) a chord the legacy keyboard encoding has no byte
+for — Control with most punctuation (`C-;`, `C-.`, `C-'`, `C-,`), `C-S-letter`, `C-<return>` —
+arrived as the bare key or not at all. bedit's `C-.` (embark) and `C-'` (avy) were unreachable
+there. kitty, foot, WezTerm, Ghostty, Alacritty 0.13+ and iTerm2 speak the kitty protocol, which
+`term-enter` turns on, and send every chord; xterm and tmux send them only through xterm's
+`modifyOtherKeys`.
+
+**Cause.** `modifyOtherKeys` (`CSI > 4 ; 2 m` turns it on) sends a chord as
+`CSI 27 ; mods ; code ~`. crossterm read the tty, and its parser has no case for that form — it
+dropped the sequence — so `term-enter` could not ask for it.
+
+**Fix.** On Unix Brood reads the tty itself (`builtins/terminal/native/tty.rs`) and decodes the
+bytes (`decoder.rs`) into crossterm's own `Event` values, so nothing downstream changed. The
+decoder reads everything crossterm read — the legacy keys, SS3, cursor and function keys with
+modifiers, the kitty protocol and `CSI u`, SGR / rxvt / X10 mouse, focus, bracketed paste — and
+adds `CSI 27 ; mods ; code ~`, the legacy bytes 0x1C–0x1F as `C-\ C-] C-^ C-_` (crossterm read
+`C-4`…`C-7`, so `C-/` was no undo), and a terminal's answers to queries swallowed. A resize, which
+writes no byte, is the terminal's size changing between reads (the wait is sliced at 50 ms).
+`term-enter` asks for `modifyOtherKeys` 2 where the kitty protocol is not spoken; every leave
+resets it (`CSI > 4 ; 0 m`). Under tmux, `set -g extended-keys on` lets the request through
+(tmux 3.5's `set -g extended-keys-format csi-u` sends the `CSI u` form, read as well). A terminal
+that speaks neither protocol (the Linux console, older VTE) has no way to send these chords at all.
+The Windows console sends no bytes; crossterm still reads it there.
+
+**Guard.** `decoder` unit tests on byte strings (modifyOtherKeys, `CSI u`, the legacy bytes, a
+sequence split across reads, queries' answers swallowed); `tests/term_display_test.blsp` under a
+pty: the request on enter, the reset on leave, `C-;` and `C-_` reaching the app.

@@ -72,8 +72,29 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(1),
         Sig::new(vec![vec_ty], nil_ty),
         &["frame"],
-        "Paint a frame — a vector of render ops: [:clear], [:text row col str], [:text row col str face], [:rect row col w h face], [:cursor row col] / [:cursor row col style]. A face is a map like {:fg :red :bold true}; a colour is a palette keyword (:red … :dark-grey, the terminal's named colour) or an explicit [r g b] vector / \"#rrggbb\" hex string (a true-colour cell). [:rect …] fills a w×h cell block with the face's background (a solid panel). The optional cursor `style` is :block (default), :bar, or :underline — the steady caret shape. The in-process frontend for the display protocol; returns nil.",
+        "Paint a frame — a vector of render ops: [:clear], [:text row col str], [:text row col str face], [:rect row col w h face], [:cursor row col] / [:cursor row col style]. A face is a map like {:fg :red :bold true}; a colour is a palette keyword (:red … :dark-grey, the terminal's named colour) or an explicit [r g b] vector / \"#rrggbb\" hex string (a true-colour cell). [:rect …] fills a w×h cell block with the face's background (a solid panel). The optional cursor `style` is :block (default), :bar, or :underline — the steady caret shape; the terminal's cursor shows at the frame's last [:cursor] (a :hollow one only when there is no other) and is hidden in a frame with none. Only the cells that differ from what the terminal shows are written (ADR-586), in the colours the terminal has (term-colors). The in-process frontend for the display protocol; returns nil.",
         term_draw);
+    primitives.def(
+        "%term-invalidate",
+        Arity::exact(0),
+        Sig::new(vec![], nil_ty.clone()),
+        &[],
+        "Forget what the terminal shows, so the next term-draw clears it and writes every cell — for when something other than term-draw wrote to the screen. A resize does it by itself. Returns nil. (ADR-586)",
+        term_invalidate);
+    primitives.def(
+        "%term-bg",
+        Arity::range(1, 2),
+        Sig::with_optional(vec![any], vec![any], nil_ty),
+        &["bg", "fg"],
+        "The terminal's default face: [:clear] fills with bg, and a cell whose face names no :bg / :fg is drawn in bg / fg — what gui-bg is to a window, so a theme made for a dark window is not drawn on a light terminal's own background. A colour is a palette keyword, [r g b] or \"#rrggbb\" (degraded to the terminal's depth); nil is the terminal's own. The next frame repaints whole. Returns nil. (ADR-586)",
+        term_bg);
+    primitives.def(
+        "%term-colors",
+        Arity::range(0, 1),
+        Sig::with_optional(vec![], vec![kw.union(nil_ty.clone())], kw),
+        &["depth"],
+        "The colour depth term-draw writes at: :truecolor, :256 or :16 — read from $COLORTERM (truecolor / 24bit) and $TERM (…256color, …-direct) unless set. With depth, set it (nil goes back to the environment's) and repaint the next frame whole. A true colour is drawn as the nearest colour the depth has; a named colour (:red) is always the terminal's own. (ADR-586)",
+        term_colors);
     // Inline (relative-motion) variant of the seam, for an in-place line editor
     // that must NOT take over the screen: `term-raw-enter`/`term-raw-leave` toggle
     // raw mode only (no alternate screen, cursor stays visible, scrollback kept),

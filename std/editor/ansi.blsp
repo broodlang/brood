@@ -52,3 +52,14 @@ separate flush step. The ESC byte is the `\\e` string escape.")
 
     (editor/ansi/ansi-show-cursor)   ;=> \"\\e[?25h\""
   "\e[?25h")
+
+(defn ansi-clipboard (text &optional (selection :clipboard))
+  "The OSC 52 escape that puts `text` on the clipboard of the machine the TERMINAL runs on —
+the only clipboard a program on the far end of ssh, or on a console with no display, can
+reach: the terminal (xterm, kitty, foot, WezTerm, iTerm2, Windows Terminal, tmux with
+`set-clipboard on`) decodes it and sets its own. `selection` `:primary` names the PRIMARY
+selection instead. A terminal that does not know the escape ignores it (ADR-587).
+
+    (= (editor/ansi/ansi-clipboard \"hi\") \"\\e]52;c;aGk=\\x07\")   ;=> true
+    (= (editor/ansi/ansi-clipboard \"hi\" :primary) \"\\e]52;p;aGk=\\x07\")   ;=> true"
+  (str "\e]52;" (if (= selection :primary) "p" "c") ";" (encoding/base64-encode text) "\x07"))

@@ -64,19 +64,54 @@ Merge the result into the display map.
   ;; a key typed while the loop is busy is queued where the kernel's quit key sees it, so a
   ;; terminal C-g stops a stuck turn. So the terminal polls the mailbox as the window does —
   ;; input first, and the loop's background messages arrive tagged as such (ADR-490).
-  (merge {:enter (fn ()
-                   (do
-                     (term/enter)
-                     (term/forward-input (self))))
-          :leave (fn ()
-                   (do
-                     (term/forward-input nil)
-                     (term/leave)))
-          :size term/size
-          :draw term/draw
-          :poll-input (fn () (ui-take-input))
-          :key-held? (fn () (not (nil? (term/held-key))))}
+  (merge
+    {:enter (fn ()
+              (do
+                (term/enter)
+                (term/forward-input (self))))
+     :leave (fn ()
+              (do
+                (term/forward-input nil)
+                (term/leave)))
+     :size term/size
+     :draw term/draw
+     :poll-input (fn () (ui-take-input))
+     :key-held? (fn () (not (nil? (term/held-key))))
+     ;; a kill reaches the clipboard of the machine the user sits at: the desktop's
+     ;; when there is one, the TERMINAL's (OSC 52) over ssh or on a console (ADR-587)
+     :clipboard-set (fn (text) (term-clipboard-set text))
+     :primary-set (fn (text) (term-clipboard-set text :primary))}
     (display-polls (fn (ms) (ui-receive-tagged ms)))))
+
+(defn display-available? ()
+  "Whether a native window can be opened here: the runtime has the GUI backend
+(`gui/available?`) and the session has a display to put it on — `$WAYLAND_DISPLAY` or
+`$DISPLAY` on Linux and the BSDs, a desktop login (not an ssh session) on macOS, always on
+Windows. A headless GUI runtime (`BROOD_GUI_HEADLESS`) counts as one: its windows open,
+drawing nothing. The question a program that can run in a window OR the terminal asks
+before choosing — Emacs's `-nw` when there is no display (ADR-587).
+
+    (bool? (editor/ui/display-available?))   ;=> true"
+  (let (set? (fn (name) (let (value (os/env name)) (and (string? value) (not (= value ""))))))
+    (and (gui/available?)
+      (or (gui/headless?)
+        (case (os/type)
+          :windows true
+          :macos (not (or (set? "SSH_CONNECTION") (set? "SSH_TTY")))
+          (or (set? "WAYLAND_DISPLAY") (set? "DISPLAY")))))))
+
+(defn term-clipboard-set (text &optional (selection :clipboard))
+  "Put `text` on the clipboard (or, `selection` `:primary`, the PRIMARY selection) of the
+machine the user sits at, from a program in a TERMINAL: the desktop's own when a display is
+reachable (`display-available?`, `os/clipboard-set`), else the terminal's, through the OSC
+52 escape (`editor/ansi/ansi-clipboard`) — what reaches the user's machine from the far end
+of ssh, from tmux, from a console. A terminal without OSC 52 ignores it. Returns nil (ADR-587).
+
+    (editor/ui/term-clipboard-set \"copied\")   ;~> nil, \"copied\" on the user's clipboard"
+  (if (display-available?)
+    (if (= selection :primary) (os/primary-set text) (os/clipboard-set text))
+    (io/write (editor/ansi/ansi-clipboard text selection)))
+  nil)
 
 (defn- ui-coalesce-motion (msg)
   "Collapse a flood of pointer-motion events — a `:drag` or a `:move` — down to the

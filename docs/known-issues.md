@@ -193,6 +193,7 @@ Each closed row's full section is `## KI-N` in [archive/known-issues-closed.md](
 
 | # | What | Status |
 |---|---|---|
+| KI-360 | **a terminal without the kitty keyboard protocol cannot send `C-;`, `C-.`, `C-'`** — xterm's `modifyOtherKeys` form has no parser in crossterm, so it is not asked for | ✅ **fixed** 2026-11-04 — Brood reads and decodes the tty's bytes itself (`decoder`), `modifyOtherKeys` 2 asked for where kitty is not spoken |
 | KI-357 | **a module materialised from a startup image has fewer registry writers than its source load** — the project image credits none, the stdlib image credits map entries but no list member, so `registry/written-by` of an imaged module answers less | **OPEN** — needs a kernel op that credits an existing entry, called as an imaged module materialises |
 | KI-356 | **a plugin's bare-closure hook registered from a timer or a process it spawned cannot be taken back** — no load is open, no claimant is bound, and the closure names nothing the retirement backstop can match | **OPEN** — needs the runtime to say which module defined a closure, or a claimant spawned processes and timers inherit |
 | KI-334 | **a served session whose loop dies takes its unsaved buffers with it** — the local window's loop auto-saves and restarts over its buffers (bedit's lifeline); a `serve` session's loop dying just ends the session, its buffers in its model | **OPEN** — needs a supervised session in `editor/serve` and per-session buffer hosting in bedit (the buffer registry's runtime-wide name blocks it); found with ADR-539 |

@@ -280,16 +280,18 @@ fn types_text(key: &KeyEvent) -> bool {
 }
 
 /// What one poll yields.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub(super) enum Polled {
     Key(KeyDelivery),
     Mouse(MouseEvent),
     /// The terminal gained (`true`) or lost the keyboard — reported once `term-enter` asked
     /// for focus reports (`CSI ?1004h`): the app sees `:focus-in` / `:blur`, as a window's.
     Focus(bool),
-    /// An event a poll does not report (a resize, a paste): the poll returns nil at once, so
-    /// the app looks again.
-    Other,
+    /// The terminal is now this many columns and rows (SIGWINCH): the app sees
+    /// `[:resize cols rows]`, as a window's (ADR-586).
+    Resize(u16, u16),
+    /// Text pasted while bracketed paste is on (`term-enter` turns it on): `[:paste text]`.
+    Paste(String),
 }
 
 /// One thing read from the tty, waiting in [`Inbox::ahead`].
@@ -536,7 +538,8 @@ impl Inbox {
                 Input::Event(Event::Mouse(mouse)) => return Some(Polled::Mouse(mouse)),
                 Input::Event(Event::FocusGained) => return Some(Polled::Focus(true)),
                 Input::Event(Event::FocusLost) => return Some(Polled::Focus(false)),
-                Input::Event(_) => return Some(Polled::Other),
+                Input::Event(Event::Resize(cols, rows)) => return Some(Polled::Resize(cols, rows)),
+                Input::Event(Event::Paste(text)) => return Some(Polled::Paste(text)),
             }
         }
         None
@@ -569,6 +572,16 @@ pub(super) struct TerminalKeyboard {
     /// Whether the full-screen UI has the terminal (`term-enter` to `term-leave`): only then
     /// is a hold inferred and a key-up delivered. The inline REPL reads keys as it always did.
     taken: bool,
+    /// Whether `term-enter` asked for xterm's `modifyOtherKeys` (mode 2), where the kitty
+    /// protocol is not spoken, so the leave resets it (KI-360).
+    modify_other_keys: bool,
+    /// The terminal's size as last seen, while it is taken: a resize is reported when it
+    /// changes (the tty's bytes say nothing of one; crossterm used SIGWINCH).
+    #[cfg(unix)]
+    size: Option<(u16, u16)>,
+    /// The tty's bytes, read and decoded by Brood (`tty`, `decoder`).
+    #[cfg(unix)]
+    tty: super::tty::TtyInput,
     inbox: Inbox,
 }
 
@@ -576,8 +589,19 @@ pub(super) struct TerminalKeyboard {
 static TERMINAL_KEYBOARD: Mutex<TerminalKeyboard> = Mutex::new(TerminalKeyboard {
     enhanced: false,
     taken: false,
+    modify_other_keys: false,
+    #[cfg(unix)]
+    size: None,
+    #[cfg(unix)]
+    tty: super::tty::TtyInput::new(),
     inbox: Inbox::new(),
 });
+
+/// xterm's `modifyOtherKeys` mode 2 on, and back to the terminal's own setting: a chord the
+/// legacy bytes cannot say (`C-;`, `C-.`, `C-S-a`) then arrives as `CSI 27 ; mods ; code ~`,
+/// which `decoder` reads. tmux passes it on with `set -g extended-keys on`.
+const MODIFY_OTHER_KEYS_ON: &str = "\x1b[>4;2m";
+const MODIFY_OTHER_KEYS_OFF: &str = "\x1b[>4;0m";
 
 fn keyboard() -> MutexGuard<'static, TerminalKeyboard> {
     TERMINAL_KEYBOARD
@@ -586,31 +610,57 @@ fn keyboard() -> MutexGuard<'static, TerminalKeyboard> {
 }
 
 /// After the alternate screen is entered (kitty keeps one flag stack per screen): take the
-/// keyboard, and push [`FLAGS`] when stdout is a terminal that says it speaks the protocol.
+/// keyboard, and push [`FLAGS`] when stdout is a terminal that says it speaks the protocol —
+/// else ask for xterm's `modifyOtherKeys` (KI-360), which a terminal without it ignores.
 /// Best effort; a terminal that does not answer is left as it was.
 pub(super) fn enhance() {
     use std::io::IsTerminal;
     let mut keyboard = keyboard();
     keyboard.taken = true;
     keyboard.inbox.reset(Some(Instant::now()));
+    #[cfg(unix)]
+    {
+        keyboard.size = crossterm::terminal::size().ok();
+    }
     if keyboard.enhanced || !std::io::stdout().is_terminal() {
         return;
     }
-    if matches!(
+    let speaks_kitty = matches!(
         crossterm::terminal::supports_keyboard_enhancement(),
         Ok(true)
-    ) && crossterm::execute!(
-        std::io::stdout(),
-        crossterm::event::PushKeyboardEnhancementFlags(FLAGS)
-    )
-    .is_ok()
+    );
+    // the query is crossterm's, read through crossterm's own reader: whatever else it read
+    // meanwhile (keys typed during the query) comes over to the inbox
+    let mut typed = Vec::new();
+    while matches!(crossterm::event::poll(Duration::ZERO), Ok(true)) {
+        match crossterm::event::read() {
+            Ok(event) => typed.push(event),
+            Err(_) => break,
+        }
+    }
+    keyboard.inbox.arrive(typed, Instant::now(), true);
+    if speaks_kitty
+        && crossterm::execute!(
+            std::io::stdout(),
+            crossterm::event::PushKeyboardEnhancementFlags(FLAGS)
+        )
+        .is_ok()
     {
         keyboard.enhanced = true;
+    } else if !keyboard.modify_other_keys && write_to_terminal(MODIFY_OTHER_KEYS_ON).is_ok() {
+        keyboard.modify_other_keys = true;
     }
 }
 
-/// Before the alternate screen is left, on every path out: pop what [`enhance`] pushed, and
-/// forget the keys. Idempotent; errors are swallowed.
+fn write_to_terminal(sequence: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    out.write_all(sequence.as_bytes())?;
+    out.flush()
+}
+
+/// Before the alternate screen is left, on every path out: pop what [`enhance`] pushed (or
+/// turn `modifyOtherKeys` back off), and forget the keys. Idempotent; errors are swallowed.
 pub(super) fn restore() {
     let mut keyboard = keyboard();
     keyboard.taken = false;
@@ -621,20 +671,14 @@ pub(super) fn restore() {
             crossterm::event::PopKeyboardEnhancementFlags
         );
     }
+    if std::mem::take(&mut keyboard.modify_other_keys) {
+        let _ = write_to_terminal(MODIFY_OTHER_KEYS_OFF);
+    }
 }
 
 /// Read everything the tty has buffered into the inbox, without waiting.
 fn absorb(keyboard: &mut TerminalKeyboard) -> std::io::Result<()> {
-    use crossterm::event::{poll, read};
-    let mut events = Vec::new();
-    let mut drained = false;
-    while keyboard.inbox.len() + events.len() < READ_AHEAD {
-        if !poll(Duration::ZERO)? {
-            drained = true;
-            break;
-        }
-        events.push(read()?);
-    }
+    let (events, drained) = read_events(keyboard)?;
     if keyboard.taken {
         keyboard.inbox.arrive(events, Instant::now(), drained);
     } else {
@@ -646,6 +690,54 @@ fn absorb(keyboard: &mut TerminalKeyboard) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Every event the tty has waiting, without waiting, and whether that drained it. On Unix the
+/// bytes are Brood's to read and decode (`tty`, `decoder` — KI-360), and a resize is the
+/// terminal's size changing since the last look while the screen is taken; elsewhere (the
+/// Windows console, which sends no bytes to decode) crossterm reads them.
+#[cfg(unix)]
+fn read_events(keyboard: &mut TerminalKeyboard) -> std::io::Result<(Vec<Event>, bool)> {
+    let mut events = Vec::new();
+    if keyboard.taken
+        && let Ok(size) = crossterm::terminal::size()
+        && keyboard.size != Some(size)
+    {
+        keyboard.size = Some(size);
+        events.push(Event::Resize(size.0, size.1));
+    }
+    let room = READ_AHEAD.saturating_sub(keyboard.inbox.len());
+    let drained = keyboard.tty.read_available(&mut events, room)?;
+    Ok((events, drained))
+}
+
+#[cfg(not(unix))]
+fn read_events(keyboard: &mut TerminalKeyboard) -> std::io::Result<(Vec<Event>, bool)> {
+    use crossterm::event::{poll, read};
+    let mut events = Vec::new();
+    let mut drained = false;
+    while keyboard.inbox.len() + events.len() < READ_AHEAD {
+        if !poll(Duration::ZERO)? {
+            drained = true;
+            break;
+        }
+        events.push(read()?);
+    }
+    Ok((events, drained))
+}
+
+/// Wait up to `wait` for the tty to have input, without the keyboard lock held. On Unix the
+/// wait is cut into slices, so a resize (which writes no byte) is seen within one.
+#[cfg(unix)]
+fn wait_for_input(wait: Duration) -> std::io::Result<bool> {
+    const RESIZE_SLICE: Duration = Duration::from_millis(50);
+    let fd = keyboard().tty.fd()?;
+    super::tty::readable(fd, wait.min(RESIZE_SLICE))
+}
+
+#[cfg(not(unix))]
+fn wait_for_input(wait: Duration) -> std::io::Result<bool> {
+    crossterm::event::poll(wait)
+}
+
 /// What the INLINE seam (the REPL's line editor, `term-raw-enter`) takes of an event read
 /// from the tty: a key release is dropped (it reads presses, as a terminal always sent them),
 /// and so is a focus report — a full-screen app that died without `term-leave` can leave
@@ -654,6 +746,8 @@ fn inline_event(event: Event) -> Option<Event> {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Release => None,
         Event::FocusGained | Event::FocusLost => None,
+        // the line editor reflows on every repaint; a resize is nothing it reads as a key
+        Event::Resize(..) => None,
         event => Some(event),
     }
 }
@@ -691,7 +785,7 @@ pub(super) fn next(timeout: Duration) -> std::io::Result<Option<Polled>> {
             };
             until.saturating_duration_since(now)
         };
-        if crossterm::event::poll(wait)? {
+        if wait_for_input(wait)? {
             keyboard().inbox.woke(Instant::now());
         }
     }

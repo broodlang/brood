@@ -1,0 +1,114 @@
+;; tests/sudo_test.blsp — reading and writing a file through sudo (ADR-588), against a
+;; STAND-IN sudo: a shell script that speaks the flags `sudo` takes (`-n`, `-S`, `-k`, `-v`,
+;; `-p`, `-u`, `--`), keeps its "credential cache" as a file, and runs the command as the
+;; test's own user. No test runs the real sudo.
+(defmodule sudo-test
+  (:use test))
+
+(defn- stub-source (state)
+  (str "#!/bin/sh\n"
+    "state="
+    (os/shell-quote state)
+    "\n"
+    "noninteractive=0; from_stdin=0; ignore_cache=0; validate=0\n"
+    "while [ $# -gt 0 ]; do\n"
+    "  case \"$1\" in\n"
+    "    -n) noninteractive=1 ;; -S) from_stdin=1 ;; -k) ignore_cache=1 ;; -v) validate=1 ;;\n"
+    "    -p|-u) shift ;;\n"
+    "    --) shift; break ;;\n"
+    "    *) break ;;\n"
+    "  esac\n"
+    "  shift\n"
+    "done\n"
+    "echo \"$noninteractive $from_stdin $ignore_cache $validate $*\" >> \"$state/calls\"\n"
+    "needs_password=1\n"
+    "[ -f \"$state/nopasswd\" ] && needs_password=0\n"
+    "[ -f \"$state/cached\" ] && [ $ignore_cache = 0 ] && needs_password=0\n"
+    "if [ $needs_password = 1 ]; then\n"
+    "  if [ $from_stdin = 1 ] && [ $noninteractive = 0 ]; then\n"
+    "    IFS= read -r typed\n"
+    "    if [ \"$typed\" != secret ]; then echo 'Sorry, try again.' >&2; exit 1; fi\n"
+    "    [ -f \"$state/nocache\" ] || touch \"$state/cached\"\n"
+    "  else\n"
+    "    echo 'sudo: a password is required' >&2; exit 1\n"
+    "  fi\n"
+    "fi\n"
+    "[ $validate = 1 ] && exit 0\n"
+    "exec \"$@\"\n"))
+
+(defn- with-stub (body)
+  "Run `(body dir opts)` with a fresh stand-in sudo in a temp `dir`, `opts` naming it."
+  (let (dir (test/temp-dir "brood-sudo-")
+        stub (str dir "/sudo"))
+    (do
+      (file/mkdir dir)
+      (file/spit stub (stub-source dir))
+      (os/cmd "chmod" ["+x" stub])
+      (try
+        (body dir {:program stub})
+        (finally (file/rmdir dir))))))
+
+(describe "sudo (ADR-588)"
+  (test "asks whether a password is needed, without prompting"
+    (with-stub (fn (dir opts)
+                 (do
+                   (is (sudo/password-required? opts))
+                   (file/spit (str dir "/nopasswd") "")
+                   (is (not (sudo/password-required? opts)))))))
+  (test "a read without the password it needs fails, saying so"
+    (with-stub (fn (dir opts)
+                 (do
+                   (file/spit (str dir "/file") "root's text")
+                   (let (result (sudo/read (str dir "/file") opts))
+                     (do
+                       (is (failure? result))
+                       (is (includes? (error-message result) "a password is required"))))))))
+  (test "a wrong password fails and caches nothing"
+    (with-stub (fn (dir opts)
+                 (do
+                   (file/spit (str dir "/file") "root's text")
+                   (is (failure? (sudo/read (str dir "/file") (assoc opts :password "wrong"))))
+                   (is (not (file/exists? (str dir "/cached"))))))))
+  (test "the password validates once; sudo's cache serves the next call"
+    (with-stub (fn (dir opts)
+                 (do
+                   (file/spit (str dir "/file") "root's text")
+                   (assert= (sudo/read (str dir "/file") (assoc opts :password "secret"))
+                     "root's text")
+                   (assert= (sudo/read (str dir "/file") opts) "root's text")
+                   (is (not (sudo/password-required? opts)))))))
+  (test "a missing file reads as nil"
+    (with-stub (fn (dir opts)
+                 (do
+                   (file/spit (str dir "/nopasswd") "")
+                   (assert= (sudo/read (str dir "/absent") opts) nil)))))
+  (test "a write replaces the text in place, keeping the mode, and never holds the password"
+    (with-stub
+      (fn (dir opts)
+        (let (path (str dir "/hosts")
+              text "secret\n127.0.0.1 localhost\n")
+          (do
+            (file/spit path "old")
+            (os/cmd "chmod" ["640" path])
+            (let (mode-before (:mode (file/stat path)))
+              (do
+                (assert= (sudo/write path text (assoc opts :password "secret")) true)
+                (assert= (file/slurp path) text)
+                (assert= (:mode (file/stat path)) mode-before)))
+            ;; the command's stdin was the text alone: it ran as `-n`, after `-v`
+            (is (includes? (file/slurp (str dir "/calls")) "0 1 0 1"))
+            (is (includes? (file/slurp (str dir "/calls")) "1 0 0 0 sh -c")))))))
+  (test "a sudo that caches nothing gets the password and the text in one call"
+    (with-stub (fn (dir opts)
+                 (let (path (str dir "/conf"))
+                   (do
+                     (file/spit (str dir "/nocache") "")
+                     (assert= (sudo/write path "line one\n" (assoc opts :password "secret")) true)
+                     (assert= (file/slurp path) "line one\n")
+                     (is (includes? (file/slurp (str dir "/calls")) "0 1 1 0 sh -c")))))))
+  (test "a write creates a file that was not there"
+    (with-stub (fn (dir opts)
+                 (do
+                   (file/spit (str dir "/nopasswd") "")
+                   (assert= (sudo/write (str dir "/new") "fresh" opts) true)
+                   (assert= (file/slurp (str dir "/new")) "fresh"))))))

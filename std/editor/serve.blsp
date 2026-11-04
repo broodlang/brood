@@ -23,8 +23,8 @@
 ;;
 ;; **Many clients** can attach at once — each gets its own session process running its
 ;; own `ui-run` over a fresh `(make-model)`, so sessions are independent. A *shared*
-;; model across clients (collaborative editing), live terminal **resize** after attach,
-;; and per-client viewports onto shared buffers are deferred (ADR-011) — the slice proves
+;; model across clients (collaborative editing) and per-client viewports onto shared
+;; buffers are deferred (ADR-011); a client's resize after attach is live (ADR-587) — the slice proves
 ;; the seam. Detach, client death, and a dropped link all tear the session down cleanly.
 
 (defmodule editor/serve
@@ -70,8 +70,8 @@ whether a key is down in the client's window, which `:key-held?` then answers, s
 session's `ui-run` holds its idle timers through a held key as a local window's does; a
 client that sends `[:key k]` is taken as holding none). Runs inside the
 session process (the one `ui-run` runs in), so the client's keys land in *this*
-process's mailbox. `:size` is the `[cols rows]` the client reported at attach (live
-resize is deferred — re-attach to resize). `:leave` tells the client to restore its
+process's mailbox. `:size` is the `[cols rows]` the client reported at attach, and then the
+size of each `[:resize cols rows]` it ships (ADR-587). `:leave` tells the client to restore its
 terminal (`[:bye]`). A `[:detach]` from the client returns `:close` — which `ui-run`
 treats as an immediate quit, tearing the session down.
 
@@ -260,8 +260,8 @@ hand-overs — or nil on timeout. A parked session waits no longer than its time
 and ends when that is up."
   (let (client (table/get state :client nil))
     (receive
-      ([:key k held?] (do (table/put state :held? held?) [k true]))
-      ([:key k] [k true])
+      ([:key k held?] (do (table/put state :held? held?) [(remote-note-resize state k) true]))
+      ([:key k] [(remote-note-resize state k) true])
       ([:detach] [:close true])
       ([:client-can from capabilities] (remote-note-capabilities state from capabilities))
       ([:down _ ^client _] [(remote-client-lost state resume) true])
@@ -269,6 +269,20 @@ and ends when that is up."
       ([:claim token claimant cols rows] [(remote-claim state resume token claimant cols rows) true])
       (m [m false])
       (after (remote-parked-wait state resume ms) (remote-parked-expiry state resume)))))
+
+(defn- remote-note-resize (state input)
+  "`input`, a key the client shipped — and when it is the client's `[:resize cols rows]` (a
+terminal's SIGWINCH, a window dragged bigger), that size made the display's `:size` first,
+so the session's next frame is laid out for the client as it is now: live resize, where a
+client used to keep the size it attached with (ADR-587)."
+  (do
+    (when (and (vector? input)
+            (= (count input) 3)
+            (= (first input) :resize)
+            (int? (nth input 1))
+            (int? (nth input 2)))
+      (table/put state :size [(nth input 1) (nth input 2)]))
+    input))
 
 (defn- remote-take-input (state resume)
   "The next input the client shipped this session — a key (noting whether one is held in
@@ -279,9 +293,9 @@ app monitors every hosted buffer process, whose `[:down …]` must reach its upd
 input for rehost/reshare, not tear the session down)."
   (let (client (table/get state :client nil))
     (receive
-      ([:key k held?] (do (table/put state :held? held?) k))
+      ([:key k held?] (do (table/put state :held? held?) (remote-note-resize state k)))
       ; a client that does not say
-      ([:key k] k)
+      ([:key k] (remote-note-resize state k))
       ([:detach] :close)
       ;; what this client can be asked beyond keys and frames ([[served-client-can?]])
       ([:client-can from capabilities] (remote-note-capabilities state from capabilities))
@@ -734,41 +748,6 @@ goes (see `remote-display`).
   "A unique transient node name for a client, so two clients on one box don't collide."
   (keyword (str "attach-" (os/now))))
 
-(defn- attach-drain (peer latest)
-  "Take every frame the daemon has queued (non-blocking) and draw only the newest — a
-frame is the whole screen, so the ones before it would be painted only to be painted
-over, while a key waits (ADR-490) — returning `:open`, or `:closed` if the daemon said
-`[:bye]` (the app quit), the link to `peer` dropped, or the session process died
-(`[:down …]` from the monitor) — the last covers a session that died *without* a clean
-`[:bye]` (e.g. a throwing `make-model`, which runs before `ui-run` can install its
-`:leave`), so the client never hangs waiting on a dead session. `latest` is the newest
-frame taken so far, nil at the start."
-  (receive
-    ([:frame f] (attach-drain peer f))
-    ;; a terminal has no busy cursor to show (ADR-491)
-    ([:busy _] (attach-drain peer latest))
-    ;; the session asking whether this window is still here (`remote-claim`, ADR-519)
-    ([:ping from asked] (do (send from [:pong asked]) (attach-drain peer latest)))
-    ;; the session's kill and yank reach this machine's clipboard (ADR-539)
-    ([:clipboard-set text] (do
-                             (attach-clipboard-set editor/ui/*term-display* text)
-                             (attach-drain peer latest)))
-    ([:clipboard-get from asked] (do
-                                   (attach-clipboard-answer editor/ui/*term-display* from asked)
-                                   (attach-drain peer latest)))
-    ;; and its highlight this machine's PRIMARY (ADR-562)
-    ([:primary-set text] (do
-                           (attach-clipboard-set editor/ui/*term-display* text :primary)
-                           (attach-drain peer latest)))
-    ([:primary-get from asked] (do
-                                 (attach-clipboard-answer editor/ui/*term-display*
-                                   from asked :primary)
-                                 (attach-drain peer latest)))
-    ([:bye] :closed)
-    ([:nodedown ^peer] :closed)
-    ([:down _ _ _] :closed)
-    (after 0 (do (when (not (nil? latest)) (term/draw latest)) :open))))
-
 (def- attach-selections
   ;; Per selection a session can reach on its client's machine: the display's entries for
   ;; it, the OS pair it falls back to, and the tag its answer carries (ADR-539, ADR-562)
@@ -805,25 +784,6 @@ waits for the answer anyway (`client-clipboard-ask`). Always answers. Returns ni
              (send from [(:answer row) asked (if (string? text) text nil)]))))
   nil)
 
-(defn- attach-ship-key (session key)
-  "Ship one terminal `key` to the daemon's `session`, with whether a key is down here."
-  (send session [:key key (display-key-held? editor/ui/*term-display*)]))
-
-(defn- attach-loop (peer session)
-  "The thin client loop: ship any key the terminal already has, FIRST (ADR-490); then draw
-the newest pushed frame, poll the local terminal briefly and ship what it gives the
-daemon's `session`. Tail-recursive (O(1) stack). Ends when the daemon says `[:bye]` or
-the link drops."
-  (let (queued (term/poll 0))
-    (cond
-      (not (nil? queued)) (do (attach-ship-key session queued) (attach-loop peer session))
-      (= (attach-drain peer nil) :closed) nil
-      else
-        (let (key (term/poll 30))
-          (do
-            (when (not (nil? key)) (attach-ship-key session key))
-            (attach-loop peer session))))))
-
 (defn- attach-handshake (peer cols rows &optional opts)
   "Report our `cols`×`rows` (and, when given, our identity `opts` map — e.g.
 `{:name \"alice\"}`) and ask `peer`'s session manager to attach us; return the
@@ -842,43 +802,29 @@ and frames (its PRIMARY selection, ADR-562); every daemon since the identity att
     ([:nodedown ^peer] nil)
     (after 5000 (error "attach: no response from the server (is it serving?)"))))
 
-(defn- attach-session (peer &optional opts)
-  "Report our terminal size, ask `peer`'s session manager to attach us, and run the
-client loop once the daemon replies with our session pid."
-  (let ([cols rows] (term/size)
-        session (attach-handshake peer cols rows opts))
-    (when session (monitor session) (attach-loop peer session))))
-
 (defn attach (spec &optional cookie opts)
   "Attach this terminal to a `ui-run` app served by the peer named in `spec`
 (\"name\" over a local Unix socket, or \"name@host:port\" over TCP) — the
-`emacsclient` to a daemon's `serve`. `cookie` defaults to `(node/cookie)` (the shared
-`~/.config/brood/cookie`); `opts` is an optional identity map (e.g. `{:name \"alice\"}`)
-the daemon hands the session as a `[:client-opts …]` event. Connects *before* taking
-the terminal, so a refused / wrong-cookie / bad-spec error surfaces cleanly without
-wrecking the screen; then enters raw mode, paints the frames the daemon pushes, and
-ships back every key until the app quits (`[:bye]`) or the link drops. The terminal is
-always restored on exit.
+`emacsclient -nw` to a daemon's `serve`: `attach-display` over the terminal display
+(`editor/ui/*term-display*`), which delivers the terminal's keys to the client's mailbox as
+a window delivers its own, writes only the cells a frame changed, and puts what the session
+copies on this machine's clipboard — through the terminal (OSC 52) when no desktop is
+reachable (ADR-587). `cookie` defaults to `(node/cookie)`; `opts` is an optional identity
+map (e.g. `{:name \"alice\"}`) the daemon hands the session as a `[:client-opts …]` event.
+Connects *before* taking the terminal, so a refused / wrong-cookie / bad-spec error
+surfaces cleanly without wrecking the screen. The terminal is always restored on exit.
 
     (editor/serve/attach \"editor\")   ;~> returns, terminal restored, once the app quits or the link drops"
-  (node/start (attach-gen-name) "127.0.0.1:0" (or cookie (node/cookie)))
-  (let (peer (node/connect spec))
-    ; raises a clean error on failure, terminal untouched
-    (node/monitor peer)
-    (term/enter)
-    (try
-      (do (attach-session peer opts) (term/leave))
-      (catch e (term/leave) (throw e)))))
+  (attach-display spec editor/ui/*term-display* cookie opts))
 
-;; ---- client side (a GUI / any-display frontend) ------------------------------
-;; The terminal client (above) reads input from the TTY (`term/poll`) and frames from
-;; its mailbox — two separate streams, so it drains frames then polls the terminal. A
-;; GUI frontend is different: `gui/open` delivers window input to the *same mailbox* the
-;; daemon pushes frames to (ADR-059), so both arrive interleaved. Hence a single unified
-;; `receive` loop here, rather than the drain-then-poll split — and the client uses the
-;; display's `:draw`/`:size`/`:enter`/`:leave`, but NOT its `:poll` (input is read off the
-;; mailbox directly). This makes the thin client frontend-agnostic, the same way `ui-run`
-;; and the daemon-side `remote-display` already are (ADR-046).
+;; ---- client side (any display: a window, the terminal) ----------------------
+;; Window input arrives on the *same mailbox* the daemon pushes frames to (ADR-059), and
+;; so does the terminal's, from its input forwarder (ADR-491) — so one unified `receive`
+;; loop serves both, and the client uses the display's `:draw`/`:size`/`:enter`/`:leave`,
+;; but NOT its `:poll` (input is read off the mailbox directly). This makes the thin client
+;; frontend-agnostic, the same way `ui-run` and the daemon-side `remote-display` already
+;; are (ADR-046). The terminal had a client of its own, drain-then-poll over `term/poll`,
+;; until the terminal display could do all a window does (ADR-587).
 
 (defn- attach-display-loop (peer session display)
   "The any-display client loop: frames, control, and window input all land on THIS
@@ -1040,8 +986,8 @@ seam messages that came `after` it. Returns nil."
 
 (defn attach-display (spec display &optional cookie opts)
   "Attach `display` — any `ui-run` frontend map, e.g. `(gui-display)` (a native window)
-— to a `ui-run` app served by `spec` (\"name\", or \"name@host:port\"). The GUI analogue
-of `attach` (which is terminal-only): the daemon runs the app, this client paints the
+or `editor/ui/*term-display*` (the terminal, which is what `attach` passes) — to a `ui-run`
+app served by `spec` (\"name\", or \"name@host:port\"): the daemon runs the app, this client paints the
 frames it pushes to `display` and ships back its input, until the app quits or the link
 drops. Because window input and daemon frames share this process's mailbox, one receive
 loop (`attach-display-loop`) serves both. Connects *before* entering the display, so a
@@ -1113,7 +1059,8 @@ on exit.
 ;; point. Distinct per-participant cursors (each user their own caret/selection) need
 ;; edit-surviving **markers** in `std/buffer` + point moved off the buffer onto a
 ;; participant — deferred (see the myedit `docs/remote-multiplayer-plan.md`, Slice 2c, and
-;; `docs/actor-architecture.md`). Live resize is deferred as for `serve`.
+;; `docs/actor-architecture.md`). A shared session keeps the size it started with: its
+;; clients may each be another size, where a `serve` session has one client to follow.
 
 (defn- shared-hub (clients frame size)
   "The fan-out hub for a shared session: the changing set of attached client pids, the
