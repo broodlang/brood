@@ -572,21 +572,33 @@ would write spaces where the program asked for deletion."
   "The numeric parameter of a CSI, or `default` — `ESC[A` and `ESC[1A` are the same."
   (let (n (param-number params)) (if (nil? n) default n)))
 
+(def- render-column-max 4096)
+;; The furthest column a cursor motion reaches. A write past a line's end pads it out to the
+;; cursor, so `ESC[999999999C` then one character would build a gigabyte line; a real
+;; terminal stops the cursor at its right margin, and no line a program draws is wider.
+
+(def- render-row-max 4096)
+;; The furthest row below the text a cursor motion reaches — the same bound downwards.
+
 (defn- ansi-csi (lines row col params final)
   "Apply one CSI; returns [lines row col]. Anything not listed is a no-op, which is the
-right answer for colour (`m`) and the honest one for what this does not model."
-  (let (n (ansi-param params 1))
+right answer for colour (`m`) and the honest one for what this does not model. A motion
+stops at `render-column-max` columns and `render-row-max` rows past the text, as a real
+terminal's cursor stops at its margins."
+  (let (n (ansi-param params 1)
+        column (fn (c) (math/clamp c 0 render-column-max))
+        down (fn (r) (math/min r (+ (count lines) render-row-max))))
     (cond
       ; cursor up / down / forward / back
       (= final "A") [lines (math/max 0 (- row n)) col]
-      (= final "B") [lines (+ row n) col]
-      (= final "C") [lines row (+ col n)]
+      (= final "B") [lines (down (+ row n)) col]
+      (= final "C") [lines row (column (+ col n))]
       (= final "D") [lines row (math/max 0 (- col n))]
       ; carriage-return-and-move-line
-      (= final "E") [lines (+ row n) 0]
+      (= final "E") [lines (down (+ row n)) 0]
       (= final "F") [lines (math/max 0 (- row n)) 0]
       ; column
-      (= final "G") [lines row (math/max 0 (dec n))]
+      (= final "G") [lines row (column (dec n))]
       ; erase in line: 0/absent = to end (the only form a line editor emits)
       (= final "K")
         (if (= (ansi-param params 0) 0)
@@ -647,8 +659,10 @@ can be reached by the sequences modelled here.
 
 Models: `\\r`, `\\n`, cursor up/down/forward/back (`A`–`D`), next/previous line (`E`/`F`),
 column (`G`), erase-to-end-of-line (`K`) and erase-to-end-of-display (`J`). Everything
-else — colour included — is dropped. NOT a terminal emulator: no absolute positioning,
-no wrapping, no alternate screen."
+else — colour included — is dropped. A motion stops 4096 columns in, and 4096 rows past
+the text, as a terminal's cursor stops at its margins: output cannot make a huge line by
+moving the cursor far out and writing there. NOT a terminal emulator: no absolute
+positioning, no wrapping, no alternate screen."
   (if (and (not (includes? chunk "\e")) (not (includes? chunk "\r")))
     ;; the common case: ordinary output, which only ever appends
     (str text chunk)
