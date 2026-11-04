@@ -406,7 +406,7 @@ rather than a pty.
 
 A program reading a secret (`sudo`, `ssh`, `git` asking for credentials, anything over
 `getpass`) turns its terminal's echo OFF and keeps line mode for that one read, then
-turns echo back on. A program with its own line editor (readline's bash, Erlang's shell,
+turns echo back on. A program with its own line editor (readline's bash, an interactive language shell,
 a raw-mode REPL) turns echo off too, but along with line mode, and echoes for itself —
 so echo alone would call every prompt of theirs a password. This is the pair: echo off
 AND canonical.
