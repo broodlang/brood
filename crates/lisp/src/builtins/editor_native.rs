@@ -87,7 +87,7 @@ pub(super) fn register_glyphless(primitives: &mut super::Primitives) {
         Arity::exact(1),
         Sig::new(vec![string], Ty::vector_of(int)),
         &["s"],
-        "A vector of the character index of every GLYPHLESS character in s, in order: the invisible format characters — U+200B zero width space, U+2060 word joiner and the invisible math operators, the bidi controls (U+200E/F, U+202A–202E, U+2066–2069, U+061C), U+FEFF, U+FFF9–FFFB, the tag characters U+E0001 and U+E0020–E007F — and not the joiners (U+200C/D) or the other format characters a script's shaping consumes. What the cell layout shows as `<200b>` when *glyphless-display* is :hex-code (ADR-556); a view lays its escape face over these.\n\n    (string/glyphless-indices \"a\\u{200b}b\\u{202e}\")   ;=> [1 3]\n    (string/glyphless-indices \"plain\")   ;=> []",
+        "A vector of the character index of every GLYPHLESS character in s, in order: the invisible format characters — U+200B zero width space, U+2060 word joiner and the invisible math operators, the bidi controls (U+200E/F, U+202A–202E, U+2066–2069, U+061C), the deprecated format characters U+206A–206F, U+FEFF, U+FFF9–FFFB, the tag characters U+E0001 and U+E0020–E007F — and not the joiners (U+200C/D) or the other format characters a script's shaping consumes. What the cell layout shows as `<200b>` when *glyphless-display* is :hex-code (ADR-556); a view lays its escape face over these.\n\n    (string/glyphless-indices \"a\\u{200b}b\\u{202e}\")   ;=> [1 3]\n    (string/glyphless-indices \"plain\")   ;=> []",
         string_glyphless_indices,
     );
 }
