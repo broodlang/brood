@@ -157,20 +157,61 @@ endings ([[eol-decode]]), else `:lf`.
     (editor/buffer/buffer-eol (editor/buffer/make-buffer \"x\"))   ;=> :lf"
   (or (get buf :eol) :lf))
 
+;; ---- the byte-order mark -------------------------------------------------------
+;; A UTF-8 file may open with U+FEFF, the "signature" (Windows tools write one). It is no
+;; part of the text: Emacs decodes such a file as `utf-8-with-signature`, keeps the mark off
+;; the buffer — so it is neither shown (as `<feff>`) nor moved over, searched or counted in
+;; a column — and writes it back on save. The buffer remembers it as `:bom true`, as it
+;; remembers `:eol :crlf`.
+
+(def- byte-order-mark "\u{feff}")
+
+(defn file-text-decode (text)
+  "`{:text :eol :bom}` for the text a file holds, as a buffer keeps it: a leading byte-order
+mark taken off (`:bom` true when there was one), then the line endings as [[eol-decode]]
+reads them. What `buffer-from-file` and `revert-buffer` do to a file's text, and what
+anything comparing a file to a buffer must do to it too.
+
+    (editor/buffer/file-text-decode \"\\u{feff}a\\r\\nb\\r\\n\")   ;=> {:text \"a\\nb\\n\" :eol :crlf :bom true}
+    (editor/buffer/file-text-decode \"plain\")   ;=> {:text \"plain\" :eol :lf :bom false}"
+  (let (bom (string/starts-with? text byte-order-mark)
+        {:keys [text eol]} (eol-decode (if bom (string/substring text 1) text)))
+    {:text text :eol eol :bom bom}))
+
+(defn file-text-encode (text eol bom)
+  "`text` as a file holds it: its newlines written as `eol` ([[eol-encode]]) and, when
+`bom`, the byte-order mark in front. The inverse of [[file-text-decode]].
+
+    (editor/buffer/file-text-encode \"a\\n\" :crlf true)   ;=> \"\\u{feff}a\\r\\n\""
+  (let (encoded (eol-encode text eol)) (if bom (str byte-order-mark encoded) encoded)))
+
+(defn buffer-bom? (buf)
+  "Whether `buf`'s file is written with a leading byte-order mark — it was read with one
+([[file-text-decode]]); Emacs's `utf-8-with-signature`.
+
+    (editor/buffer/buffer-bom? (editor/buffer/make-buffer \"x\"))   ;=> false"
+  (= true (get buf :bom)))
+
+(defn- buffer-with-file-coding (buf eol bom)
+  "`buf` remembering the line ending and signature its file was read with — a key only for
+what differs from a plain LF file, so a buffer of one carries neither."
+  (let (with-eol (if (= eol :crlf) (assoc buf :eol :crlf) (dissoc buf :eol)))
+    (if bom (assoc with-eol :bom true) (dissoc with-eol :bom))))
+
 (defn buffer-from-file (path &optional contents)
   "Read the file at `path` into a fresh buffer, with `:file` set to `path` so
 `save-buffer` can write it back, stamped with the file's mtime (`buffer-stamp-file`). A
 file with CRLF line endings is read with bare newlines and remembered as `:eol :crlf`
-([[buffer-eol]]), so the save writes CRLF again.
+([[buffer-eol]]), and one opening with a byte-order mark is read without it and remembered
+as `:bom true` ([[buffer-bom?]]), so the save writes both back.
 
 `contents` is the file's text when the caller has read it already — an editor that reads
 the bytes once to tell a text file from a binary one (`string/bytes->` failing is the
 answer) hands the decoded text here rather than reading the file a second time.
 
     (editor/buffer/buffer-from-file \"notes.txt\")   ;~> …a buffer named notes.txt holding the file's text, :file set…"
-  (let ({:keys [text eol]} (eol-decode (if (nil? contents) (file/slurp path) contents))
-        buf (make-buffer text path path))
-    (buffer-stamp-file (if (= eol :crlf) (assoc buf :eol :crlf) buf))))
+  (let ({:keys [text eol bom]} (file-text-decode (if (nil? contents) (file/slurp path) contents)))
+    (buffer-stamp-file (buffer-with-file-coding (make-buffer text path path) eol bom))))
 
 (defn find-file-buffer (path)
   "Open `path` for editing, vim/emacs `find-file` style: its contents if the file
@@ -182,8 +223,8 @@ unsaved buffer rather than erroring.
   (if (file/exists? path) (buffer-from-file path) (make-buffer "" path path)))
 
 (defn save-buffer (buf)
-  "Write `buf`'s text to its `:file`, with the line ending it was read with
-([[buffer-eol]]); raise if it has none. Returns `buf` stamped with the file's new mtime
+  "Write `buf`'s text to its `:file`, with the line ending and byte-order mark it was read with
+([[buffer-eol]], [[buffer-bom?]]); raise if it has none. Returns `buf` stamped with the file's new mtime
 (`buffer-stamp-file`) and unmodified (`mark-buffer-saved`), so a caller that keeps the
 result knows the file and the text agree again.
 
@@ -192,7 +233,7 @@ result knows the file and the text agree again.
     (if (nil? f)
       (error "save-buffer: buffer has no file: " (get buf :name))
       (do
-        (file/spit f (eol-encode (buffer-text buf) (buffer-eol buf)))
+        (file/spit f (file-text-encode (buffer-text buf) (buffer-eol buf) (buffer-bom? buf)))
         (mark-buffer-saved (buffer-stamp-file buf))))))
 
 (defn revert-buffer (buf:buffer -> buffer)
@@ -206,7 +247,7 @@ Raises when `buf` has no file or the file cannot be read.
 
     (editor/buffer/revert-buffer buf)   ;~> buf holding its file's text, unmodified — undo gives back what it held"
   (let (f (or (get buf :file) (error "revert-buffer: buffer has no file: " (get buf :name)))
-        {:keys [text eol]} (eol-decode (file/slurp f))
+        {:keys [text eol bom]} (file-text-decode (file/slurp f))
         reread (if (= text (buffer-text buf))
                  buf
                  ;; through the mutators, so markers, the edit log a held parse is updated
@@ -224,8 +265,8 @@ Raises when `buf` has no file or the file cannot be read.
                    (if (get buf :undo-disabled)
                      restored
                      (assoc restored :undo (cons (buffer-snapshot buf) (rest (get restored :undo)))))))
-        with-eol (if (= eol :crlf) (assoc reread :eol :crlf) (dissoc reread :eol)))
-    (buffer-stamp-file (mark-buffer-saved with-eol))))
+        coded (buffer-with-file-coding reread eol bom))
+    (buffer-stamp-file (mark-buffer-saved coded))))
 
 (defn buffer-file-changed? (buf)
   "True when the file behind `buf` has been written since the buffer last agreed with it
