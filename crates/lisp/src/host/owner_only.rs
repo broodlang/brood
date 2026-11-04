@@ -4,7 +4,7 @@
 //! a file before writing a byte; `file/mkdir-private` on a directory, inherited by what is
 //! made inside it.
 
-use windows_sys::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, GENERIC_ALL, HANDLE, LocalFree};
+use windows_sys::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
     EXPLICIT_ACCESS_W, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT, SET_ACCESS, SetEntriesInAclW,
     SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
@@ -15,6 +15,12 @@ use windows_sys::Win32::Security::{
     TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+/// Full control of a file or directory, in its SPECIFIC rights (winnt.h's FILE_ALL_ACCESS,
+/// whose windows-sys home needs a feature for one constant). Not GENERIC_ALL: given with
+/// inheritance flags, a generic right is split into two ACEs — the mapped one for the
+/// directory and an inherit-only generic one — so the directory would carry two entries.
+const FILE_ALL_ACCESS: u32 = 0x001F_01FF;
 
 /// Give `path` the owner-only DACL. `inherited` (a directory): files and directories made
 /// inside it take the same single entry.
@@ -52,7 +58,7 @@ pub(crate) fn restrict_to_owner(path: &std::path::Path, inherited: bool) -> std:
     // points into the same buffer, alive until the end of this function.
     let user_sid = unsafe { (*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid };
     let entry = EXPLICIT_ACCESS_W {
-        grfAccessPermissions: GENERIC_ALL,
+        grfAccessPermissions: FILE_ALL_ACCESS,
         grfAccessMode: SET_ACCESS,
         grfInheritance: if inherited {
             SUB_CONTAINERS_AND_OBJECTS_INHERIT
