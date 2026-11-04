@@ -1580,10 +1580,9 @@
       (is (includes? (try (package/registry-list-versions base 'foo) (catch e (error-message e)))
             "not a plain package name"))))
   (test "registry-install refuses a name that is not one path component"
-    (is (includes? (try
-                     (package/registry-install ".." "/tmp/nowhere/_deps")
-                     (catch e (error-message e)))
-          "not a plain package name"))))
+    (let (result (package/registry-install ".." "/tmp/nowhere/_deps"))
+      (is (failure? result))
+      (is (includes? (error-message result) "not a plain package name")))))
 
 ;; `%rm-rf` is the package cache's delete. Its guard is the last line of defence when a
 ;; computed path is wrong, so it is judged lexically and strictly: a `..` anywhere, or
@@ -1641,8 +1640,9 @@
                                                                  :dependencies []}))
                                         else (http/not-found)))))
       (binding (project/*config-registry* base)
-        (is (includes? (try (package/registry-install "evil" dest) (catch e (error-message e)))
-              "non-http(s) source URL")))
+        (let (result (package/registry-install "evil" dest))
+          (is (failure? result))
+          (is (includes? (error-message result) "non-http(s) source URL"))))
       (refute (file/exists? (path/join dest "evil"))))))
 
 ;; `git ls-remote <url> v1` lists every ref ENDING in `v1` — a branch `feature/v1` as well as
@@ -1767,3 +1767,68 @@
         :bad-signature)
       (assert= (:status (package/signature-verdict "p" "1.0.0" "abc" nil nil pubkey))
         :signature-dropped))))
+
+;; ADR-559: the runtime surface an app drives — list, latest version, install — answers a
+;; failure CARRYING THE REASON for every outcome short of a bug. `registry-enhancers` used to
+;; answer nil for "the registry is down", and an editor's package browser showed an empty list.
+(defn mock-runtime-handler (nm version checksum bytes overrides)
+  "The one-package registry, with `overrides` (`{path response}`) answering first."
+  (let (served (mock-runtime-registry nm version checksum bytes nil nil))
+    (fn (req)
+      (let (override (get overrides (get req :path)))
+        (if (nil? override) (served req) override)))))
+
+(defn- mock-server-error (message)
+  (http/response 500 {"Content-Type" "application/json"} (json/encode {:error message})))
+
+(describe "package: the runtime registry calls say why they failed"
+  (test "an unreachable registry is a failure naming it, from all three"
+    (binding (project/*config-registry* "http://127.0.0.1:1")
+      (let (listed (package/registry-enhancers 'bedit)
+            latest (package/registry-latest-version "anything")
+            installed (package/registry-install "anything" (path/join (pkg-fixture-root) "plugins")))
+        (is (failure? listed))
+        (is (includes? (error-message listed) "cannot reach the registry"))
+        (is (failure? latest))
+        (is (includes? (error-message latest) "cannot reach the registry"))
+        (is (failure? installed))
+        (is (includes? (error-message installed) "cannot reach the registry")))))
+  (test "a registry answering an error passes its message through"
+    (binding (project/*config-registry* (mock-registry-start (fn (_request)
+                                                               (mock-server-error "database down"))))
+      (let (listed (package/registry-enhancers 'bedit))
+        (is (failure? listed))
+        (is (includes? (error-message listed) "database down")))))
+  (test "an unpublished package: no latest version, and an install that says so"
+    (binding (project/*config-registry* (mock-registry-start (fn (_request) (http/not-found))))
+      (assert= (package/registry-latest-version "ghost") nil)
+      (let (installed (package/registry-install "ghost" (path/join (pkg-fixture-root) "plugins")))
+        (is (failure? installed))
+        (is (includes? (error-message installed) "not published")))))
+  (test "a failed download is a failure, and leaves nothing installed"
+    (let (parent (pkg-fixture-root)
+          dest (path/join parent "plugins")
+          [bytes checksum] (mock-package-tarball parent "dlfail")
+          handler (mock-runtime-handler "dlfail"
+                    "1.0.0"
+                    checksum
+                    bytes
+                    {"/api/v1/packages/dlfail/releases/1.0.0/tarball" (mock-server-error "gone")}))
+      (binding (project/*config-registry* (mock-registry-start handler))
+        (let (installed (package/registry-install "dlfail" dest))
+          (is (failure? installed))
+          (is (includes? (error-message installed) "downloading dlfail 1.0.0 failed: gone"))
+          (refute (file/exists? (path/join dest "dlfail")))))))
+  (test "a checksum mismatch is a failure, and leaves an installed copy alone"
+    (let (parent (pkg-fixture-root)
+          dest (path/join parent "plugins")
+          [bytes _checksum] (mock-package-tarball parent "tampered")
+          kept (path/join dest "tampered")
+          _ (file/mkdir kept)
+          _ (file/spit (path/join kept "project.blsp") "(project :name \"tampered\")")
+          handler (mock-runtime-handler "tampered" "1.0.0" "0000" bytes {}))
+      (binding (project/*config-registry* (mock-registry-start handler))
+        (let (installed (package/registry-install "tampered" dest))
+          (is (failure? installed))
+          (is (includes? (error-message installed) "sha256 mismatch"))
+          (is (file/exists? (path/join kept "project.blsp"))))))))
