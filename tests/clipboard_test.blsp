@@ -17,11 +17,17 @@
     (> (get result :height) 0)))
 
 (defn- no-clipboard? ()
+  ;; A display server is Linux's condition for a clipboard; macOS and Windows have one
+  ;; without (a CI runner's included), so there the clipboard may hold anything.
   (or (not (system/feature? :clipboard))
-    (and (nil? (os/env "DISPLAY")) (nil? (os/env "WAYLAND_DISPLAY")))))
+    (and (= (os/type) :linux) (nil? (os/env "DISPLAY")) (nil? (os/env "WAYLAND_DISPLAY")))))
 
+;; The reading groups are :isolated (run alone): on a machine with a real clipboard (any Mac,
+;; a Windows desktop, a Linux box with a display) two reads at once are one read and a `Busy`
+;; refusal, by design (host/clipboard.rs) — a read waits on the owner, and the next is not
+;; queued behind one that may never end.
 (describe "os/clipboard-image: nil, never an error, where there is no clipboard"
-  (test "reading answers nil or a well-formed image, and never raises"
+  :isolated (test "reading answers nil or a well-formed image, and never raises"
     (let (plain (os/clipboard-image)
           bounded (os/clipboard-image 64))
       (is (or (nil? plain) (well-formed-image? plain)))
@@ -52,7 +58,7 @@
       (is (includes? message "not a decodable image")))))
 
 (describe "os/primary-get: the PRIMARY selection, read only (ADR-553)"
-  (test "reading answers nil or text, and never raises"
+  :isolated (test "reading answers nil or text, and never raises"
     (let (text (os/primary-get))
       (is (or (nil? text) (string? text)))))
 

@@ -147,7 +147,8 @@ fn prelude_image_path() -> Option<std::path::PathBuf> {
     Some(cache_dir()?.join(format!("prelude-expanded-{:016x}.img", h.finish())))
 }
 
-/// Brood's cache directory: `$XDG_CACHE_HOME/brood`, else `$HOME/.cache/brood`; `None`
+/// Brood's cache directory: `$XDG_CACHE_HOME/brood`, else `$HOME/.cache/brood` (on Windows
+/// with no `HOME`, `%USERPROFILE%\.cache\brood`); `None`
 /// when neither gives one. A relative or empty `XDG_CACHE_HOME` is ignored, as the XDG
 /// spec says, and an empty `HOME` gives nothing.
 ///
@@ -161,7 +162,19 @@ pub fn cache_dir() -> Option<std::path::PathBuf> {
     set("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
-        .or_else(|| set("HOME").map(|home| PathBuf::from(home).join(".cache")))
+        // Windows: a native shell sets no HOME; the profile directory is the home `path/home`
+        // answers there too (ADR-592).
+        .or_else(|| {
+            set("HOME")
+                .or_else(|| {
+                    if cfg!(windows) {
+                        set("USERPROFILE")
+                    } else {
+                        None
+                    }
+                })
+                .map(|home| PathBuf::from(home).join(".cache"))
+        })
         .map(|base| base.join("brood"))
 }
 

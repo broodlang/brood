@@ -109,7 +109,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::at_least(1),
         Sig::new(vec![string, seq, map_ty], map_ty),
         &["prog", "&", "args", "opts"],
-        "Run prog (with optional args list and an opts map {:cwd :env :stdin :timeout-ms}) to completion; returns {:stdout s :stderr s :exit n}, plus :timed-out true when the timeout ended the call. The timeout bounds the WHOLE call — a grandchild still holding the output pipes is killed with the child's process group.",
+        "Run prog (with optional args list and an opts map {:cwd :env :stdin :timeout-ms :raw-args}) to completion; returns {:stdout s :stderr s :exit n}, plus :timed-out true when the timeout ended the call. The timeout bounds the WHOLE call — a grandchild still holding the output pipes is killed with the child's process group.",
         os_cmd);
     primitives.def(
         "%halt",
@@ -341,14 +341,15 @@ pub(super) fn os_cmd(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             argv.push(expect_string(heap, "%os-cmd", a)?);
         }
     }
-    cmd.args(&argv);
+    let super::subprocesses::ChildOptions { cwd, env, raw_args } =
+        super::subprocesses::child_options(heap, "os/cmd", arg(args, 2))?;
+    crate::host::subprocess::add_args(&mut cmd, &argv, raw_args);
     // a responsive process is told it waited, or refused the wait (ADR-517)
     let blocking = crate::process::responsive::enter_blocking(heap, "os/cmd", || {
         crate::process::responsive::command_detail(&prog, &argv)
     })?;
     let mut stdin_text: Option<String> = None;
     let mut timeout: Option<std::time::Duration> = None;
-    let (cwd, env) = super::subprocesses::child_options(heap, "os/cmd", arg(args, 2))?;
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
@@ -623,8 +624,9 @@ fn os_cmd_collect(
 }
 
 /// The portable fallback: a thread per pipe, the child killed at the deadline or when
-/// `killed` says the caller is dying. Without process groups a grandchild holding a pipe
-/// can still outlast either here.
+/// `killed` says the caller is dying. On Windows every process the child started goes
+/// with it (a `ProcessTree`); elsewhere off Unix a grandchild holding a pipe can still
+/// outlast either.
 #[cfg(not(unix))]
 fn os_cmd_collect(
     mut child: std::process::Child,
@@ -633,6 +635,13 @@ fn os_cmd_collect(
     killed: fn() -> bool,
 ) -> std::io::Result<OsCmdOutcome> {
     use std::io::{Read, Write};
+    let tree = crate::host::subprocess::ProcessTree::of(&child);
+    let stop_child = |child: &mut std::process::Child| {
+        if let Some(tree) = &tree {
+            tree.terminate();
+        }
+        let _ = child.kill();
+    };
     // `Builder::spawn`, not `thread::spawn`: the OS can refuse a thread (KI-241), and the
     // child is already running, so a refusal kills and reaps it and is the call's error.
     let stdin_pipe = child.stdin.take();
@@ -675,7 +684,7 @@ fn os_cmd_collect(
         }
         stop = os_cmd_stop(deadline, killed);
         if stop.is_some() {
-            let _ = child.kill();
+            stop_child(&mut child);
             break child.wait()?;
         }
         std::thread::sleep(std::time::Duration::from_millis(2));

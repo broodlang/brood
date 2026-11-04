@@ -136,6 +136,9 @@ struct ChildSlot {
     /// so `close` and `signal` may `killpg` it; after, they must not, and they check this
     /// under the same lock.
     reaped: bool,
+    /// The child's Job Object on Windows, so `close` ends what it started too; `None`
+    /// elsewhere, where its process group does that.
+    tree: Option<ProcessTree>,
 }
 
 /// Where a child is in its life: shared by its reader threads, its waiter thread and
@@ -767,16 +770,140 @@ pub fn reset_inherited_signals(command: &mut Command) {
 #[cfg(not(unix))]
 pub fn reset_inherited_signals(_command: &mut Command) {}
 
+/// Put `args` on `command`. With `raw` on Windows each is written into the command line
+/// exactly as given, unquoted — what `cmd.exe /d /s /c "LINE"` needs, since `cmd` does not
+/// read the MSVC quoting `Command::arg` applies (a `"` in the line became `\"`), KI-364.
+/// Elsewhere `raw` changes nothing: a Unix child gets its arguments as an array.
+pub fn add_args(command: &mut Command, args: &[String], raw: bool) {
+    #[cfg(windows)]
+    if raw {
+        use std::os::windows::process::CommandExt;
+        for argument in args {
+            command.raw_arg(argument);
+        }
+        return;
+    }
+    let _ = raw;
+    command.args(args);
+}
+
+/// Windows's process group: a Job Object holding a child, which every process the child
+/// starts joins too, so stopping the child stops its whole tree (ADR-592). Killing the
+/// child alone left a `sh -c "…; sleep 60"` grandchild running and holding the output
+/// pipes. Off Windows it holds nothing — the child leads its own process group there.
+pub(crate) struct ProcessTree {
+    #[cfg(windows)]
+    job: windows_sys::Win32::Foundation::HANDLE,
+}
+
+// SAFETY: a job handle is a kernel handle, usable from any thread; it is closed once, on
+// drop, and `terminate` only reads it.
+#[cfg(windows)]
+unsafe impl Send for ProcessTree {}
+#[cfg(windows)]
+unsafe impl Sync for ProcessTree {}
+
+impl ProcessTree {
+    /// A job holding `child` — or `None` off Windows, or when the OS refuses one (the
+    /// child is then stopped alone, as before).
+    pub(crate) fn of(child: &Child) -> Option<ProcessTree> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::System::JobObjects::{
+                AssignProcessToJobObject, CreateJobObjectW,
+            };
+            // SAFETY: a null name and default security make an anonymous job, owned here
+            // and closed on drop.
+            let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if job.is_null() {
+                return None;
+            }
+            let tree = ProcessTree { job };
+            // SAFETY: both handles are live — the job just made, the child's held by
+            // `child`.
+            let assigned = unsafe { AssignProcessToJobObject(job, child.as_raw_handle()) };
+            (assigned != 0).then_some(tree)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = child;
+            None
+        }
+    }
+
+    /// End every process in the tree.
+    pub(crate) fn terminate(&self) {
+        // SAFETY: the job handle is live until drop.
+        #[cfg(windows)]
+        let _ = unsafe { windows_sys::Win32::System::JobObjects::TerminateJobObject(self.job, 1) };
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ProcessTree {
+    fn drop(&mut self) {
+        // SAFETY: owned, closed once. Closing does not end the processes (no
+        // KILL_ON_JOB_CLOSE): a command that finished may leave a daemon running, as on Unix.
+        let _ = unsafe { windows_sys::Win32::Foundation::CloseHandle(self.job) };
+    }
+}
+
+/// `(os/detach prog args opts)` — start `prog` and let it go: no pipes (its stdio is the
+/// null device), no handle, not stopped when its caller dies, and not in the caller's
+/// process group or Job Object. What opening a URL or a file in another application wants:
+/// the opener may start the browser itself, which must outlive the editor and must not
+/// hold a pipe the editor waits on. The child is reaped on a thread of its own.
+pub fn detach(
+    prog: &str,
+    args: &[String],
+    cwd: Option<&str>,
+    env: &[EnvEntry],
+    raw: bool,
+) -> std::io::Result<()> {
+    let mut command = Command::new(prog);
+    add_args(&mut command, args, raw);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: no console of ours, no Ctrl-C of ours
+        command.creation_flags(0x0000_0008 | 0x0000_0200);
+    }
+    if let Some(dir) = cwd {
+        command.current_dir(dir);
+    }
+    apply_env(&mut command, env);
+    reset_inherited_signals(&mut command);
+    let mut child = command.spawn()?;
+    // Reap it when it ends, so it leaves no zombie; a refused thread only costs that.
+    let _ = std::thread::Builder::new()
+        .name("brood-detached-wait".into())
+        .spawn(move || {
+            let _ = child.wait();
+        });
+    Ok(())
+}
+
 pub fn spawn(
     prog: &str,
     args: &[String],
     cwd: Option<&str>,
     env: &[EnvEntry],
+    raw_args: bool,
     subscriber: u64,
 ) -> std::io::Result<u64> {
     let mut command = Command::new(prog);
+    add_args(&mut command, args, raw_args);
     command
-        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -877,6 +1004,7 @@ fn register_child(
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let child = Arc::new(ChildHandle {
         slot: Mutex::new(ChildSlot {
+            tree: ProcessTree::of(&child),
             child,
             reaped: false,
         }),
@@ -1006,6 +1134,9 @@ fn shut_down(entry: Proc) {
             #[cfg(unix)]
             unsafe {
                 libc::killpg(slot.child.id() as libc::pid_t, libc::SIGKILL);
+            }
+            if let Some(tree) = &slot.tree {
+                tree.terminate();
             }
             let _ = slot.child.kill();
         }
@@ -1438,7 +1569,7 @@ pub fn spawn_pty(
 ) -> std::io::Result<u64> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
-        "pty-spawn: pseudo-terminals are a Unix facility",
+        "pty-spawn: a pseudo-terminal on Windows needs ConPTY, which this runtime does not drive yet (KI-369)",
     ))
 }
 

@@ -1,0 +1,209 @@
+;; The platform layer in one PORTABLE file: what the OS decides — where home and the temp
+;; directory are, what an absolute path looks like, whether file bytes are translated,
+;; how a program is found and spawned — asked the same way on Linux, macOS and Windows.
+;;
+;; The other files that touch these (path_test, file_test, system_test, proc_test) assume a
+;; POSIX userland, so CI's Windows smoke runs THIS one in their place
+;; (scripts/ci/platform-smoke.sh). Each case states the platform rule it pins; where the
+;; rule differs by OS, the case says both answers.
+
+(defmodule platform-test (:use test))
+
+(purge-stale-temp "brood-platform-")
+
+(defn- windows? () (= (os/type) :windows))
+
+;; The home directory, which every machine CI runs on has.
+(defn- home () (or (path/home) (error "platform-test: no home directory (HOME / USERPROFILE)")))
+
+;; A path in the form cmd.exe's own redirections read for certain (`\`), for a line run
+;; through cmd.
+(defn- backslashed (path) (string/replace path "/" "\\"))
+
+(defn- fresh-dir ()
+  (let (directory (temp-dir "brood-platform-"))
+    (file/mkdir directory)
+    directory))
+
+(describe "where things are"
+  (test "os/type names this OS"
+    (is (contains? #{:linux :macos :windows} (os/type))))
+  (test "the home directory is known and absolute — USERPROFILE on Windows, where no HOME is set"
+    (let (home (home))
+      (is (not (= home "")))
+      (is (path/absolute? home))
+      (is (file/dir? home))))
+  (test "~ expands to the home directory"
+    (assert= (path/absolute "~") (path/home))
+    (assert= (path/absolute "~/notes.txt") (str (path/home) "/notes.txt")))
+  (test "a path under the home abbreviates to ~ and back"
+    (assert= (path/abbreviate (path/join (home) "src")) "~/src")
+    (assert= (path/absolute (path/abbreviate (path/join (home) "src")))
+      (path/join (home) "src")))
+  (test "the temp directory exists, and path/temp names a fresh path inside it"
+    (is (file/dir? (path/temp-root)))
+    (assert= (path/dirname (path/temp "x-")) (path/temp-root)))
+  (test "the working directory is absolute and is a directory"
+    (is (path/absolute? (file/cwd)))
+    (is (file/dir? (file/cwd))))
+  (test "an absolute path is left alone by path/absolute — the cwd included"
+    (assert= (path/absolute (file/cwd)) (file/cwd)))
+  (test "kernel paths use / — never a backslash, never Windows's \\\\?\\ prefix"
+    (is (not (includes? (file/cwd) "\\")))
+    (is (not (includes? (path/temp-root) "\\")))
+    (is (not (includes? (path/home) "\\")))
+    (is (not (includes? (os/canonicalize ".") "\\")))
+    (is (not (includes? (os/exe-path) "\\")))))
+
+(describe "absolute paths"
+  (test "a /-rooted path is absolute everywhere"
+    (is (path/absolute? "/a/b"))
+    (is (not (path/relative? "/a/b"))))
+  (test "a drive letter is a root on Windows, and only there"
+    (assert= (path/absolute? "C:/Users") (windows?))
+    (assert= (path/absolute? "C:\\Users") (windows?))
+    (is (not (path/absolute? "C:"))))
+  (test "a typed path starts over at a drive root on Windows, as at // (Emacs's rule)"
+    (assert= (path/substitute "/somewhere/else/D:/x") (if (windows?) "D:/x" "/somewhere/else/D:/x"))
+    (assert= (path/substitute "/somewhere//etc") "/etc"))
+  (test "joining onto a drive-rooted path starts over there, as onto a /-rooted one"
+    (assert= (path/join "a" "/b") "/b")
+    (assert= (path/join "a" "D:/b") (if (windows?) "D:/b" "a/D:/b"))))
+
+(describe "files: bytes go to disk as given"
+  (test "CRLF is written and read back untranslated — no text mode on Windows"
+    (let (file (path/join (fresh-dir) "crlf.txt"))
+      (file/spit file "one\r\ntwo\r\n")
+      (assert= (count (file/slurp-bytes file)) 10)
+      (assert= (file/slurp file) "one\r\ntwo\r\n")))
+  (test "a byte-order mark is kept: three bytes, then the text"
+    (let (file (path/join (fresh-dir) "bom.txt"))
+      (file/spit file "\u{feff}text")
+      (assert= (count (file/slurp-bytes file)) 7)
+      (assert= (file/slurp file) "\u{feff}text")))
+  (test "a name with spaces and non-ASCII is one file, listed by its name"
+    (let (directory (fresh-dir)
+          file (path/join directory "My Notes — été.txt"))
+      (file/spit file "x")
+      (is (file/exists? file))
+      (assert= (vec (file/ls directory)) ["My Notes — été.txt"])))
+  (test "a directory with spaces holds files like any other"
+    (let (directory (path/join (fresh-dir) "a dir"))
+      (file/mkdir directory)
+      (file/spit (path/join directory "f") "y")
+      (assert= (file/slurp (path/join directory "f")) "y"))))
+
+(describe "processes"
+  (test "os/which finds the platform's shell — cmd as cmd.exe on Windows"
+    (let (found (os/which (if (windows?) "cmd" "sh")))
+      (is (and (string? found) (path/absolute? found)))))
+  (test "os/which answers nil for nothing"
+    (is (nil? (os/which "brood-surely-no-such-program"))))
+  (test "os/cmd runs the platform's shell and reads its output"
+    (let (result (if (windows?)
+                   (os/cmd "cmd.exe" ["/d" "/c" "echo hello"])
+                   (os/cmd "sh" ["-c" "echo hello"])))
+      (assert= (:exit result) 0)
+      (assert= (os/cmd-out result) "hello")))
+  (test "os/cmd runs in the :cwd it is given — a path with a space in it"
+    (let (directory (path/join (fresh-dir) "work dir"))
+      (file/mkdir directory)
+      (file/spit (path/join directory "marker.txt") "")
+      (let (result (if (windows?)
+                     (os/cmd "cmd.exe" ["/d" "/c" "dir /b"] {:cwd directory})
+                     (os/cmd "ls" [] {:cwd directory})))
+        (assert= (os/cmd-out result) "marker.txt"))))
+  (test "a timeout stops the command's own children too — a Job Object on Windows"
+    ;; the shell starts a child that holds the output pipe for 30 s; killing only the shell
+    ;; left it running and the call waiting it out
+    (let (started (os/now)
+          result (if (windows?)
+                   (os/cmd "cmd.exe" ["/d" "/c" "ping -n 30 127.0.0.1"] {:timeout-ms 300})
+                   (os/cmd "sh" ["-c" "sleep 30; true"] {:timeout-ms 300})))
+      (is (:timed-out result))
+      (is (< (- (os/now) started) 10000))))
+  (test "a failing command is an exit code, not a raise"
+    (let (result (if (windows?)
+                   (os/cmd "cmd.exe" ["/d" "/c" "exit 3"])
+                   (os/cmd "sh" ["-c" "exit 3"])))
+      (assert= (:exit result) 3)))
+  (test "a program that does not exist raises, rather than answering"
+    (is (= :raised (try (os/cmd "brood-surely-no-such-program") (catch _ :raised))))))
+
+(describe "the platform's shell (KI-364)"
+  (test "os/shell is sh -c, or cmd.exe /d /s /c on Windows"
+    (assert= (vec (rest (os/shell))) (if (windows?) ["/d" "/s" "/c"] ["-c"])))
+  (test "a line with quotes and spaces reaches the shell as typed"
+    ;; cmd's echo prints its quotes, sh's removes them; before :raw-args, cmd got \" for each
+    (assert= (os/cmd-out (os/shell-cmd "echo \"two  words\""))
+      (if (windows?) "\"two  words\"" "two  words")))
+  (test "pipes and && are the shell's"
+    (assert= (os/cmd-out (os/shell-cmd (if (windows?)
+                                         "echo first&& echo hello | findstr hello"
+                                         "echo first && echo hello | grep hello")))
+      (if (windows?) "first\r\nhello" "first\nhello")))
+  (test "a failing line is its exit code"
+    (assert= (:exit (os/shell-cmd "exit 4")) 4))
+  (test "os/shell-spawn streams the line's output"
+    (let (child (os/shell-spawn "echo \"spawned it\""))
+      (is (includes? (receive ([:proc ^child data] data) (after 10000 "nothing arrived"))
+            "spawned it"))
+      (os/close child))))
+
+(describe "a spawned child's tree goes with it"
+  (test "closing an os/spawn child stops what it started — a Job Object on Windows"
+    ;; the child starts a grandchild that writes a marker after two seconds; closing the
+    ;; child at once must stop the grandchild too, so the marker never appears
+    (let (marker (path/join (fresh-dir) "marker")
+          child (os/shell-spawn (if (windows?)
+                                  (str "cmd /d /c \"ping -n 3 127.0.0.1 >nul & echo done> "
+                                    (backslashed marker)
+                                    "\"")
+                                  (str "(sleep 2; echo done > '" marker "')"))))
+      (receive (after 300 nil))
+      (os/close child)
+      (receive (after 4000 nil))
+      (is (not (file/exists? marker))))))
+
+(describe "a pseudo-terminal"
+  (test "spawns on Unix; on Windows it raises naming ConPTY, never obscurely (KI-369)"
+    (if (windows?)
+      (let (raised (try (os/spawn-pty "cmd.exe" []) (catch e (str e))))
+        (is (string? raised))
+        (is (includes? raised "ConPTY")))
+      (let (child (os/spawn-pty "sh" ["-c" "echo in a pty"]))
+        (is (includes? (receive ([:proc ^child data] data) (after 10000 "nothing arrived"))
+              "in a pty"))
+        (os/close child)))))
+
+(describe "owner-only files (KI-365)"
+  (test "file/spit-private leaves a file only its owner can read"
+    (let (file (path/join (fresh-dir) "secret"))
+      (file/spit-private file "s3cr3t")
+      (assert= (file/slurp file) "s3cr3t")
+      (if (windows?)
+        ;; the ACL read back: one entry, the current user's, nothing inherited
+        (let (listing (os/cmd-out (os/cmd "icacls" [(backslashed file)]))
+              entries (seq/filter (string/split listing "\n") (fn (line) (includes? line ":("))))
+          (assert= (count entries) 1)
+          (is (includes? (string/lower (or (first entries) ""))
+                (string/lower (or (os/env "USERNAME") "?"))))
+          (is (not (includes? (or (first entries) "") "(I)"))))
+        (assert= (math/mod (:mode (file/stat file)) 512) 384)))))
+
+(describe "handing something to the desktop"
+  (test "os/detach starts a program that outlives nothing of ours, and answers nil"
+    (let (marker (path/join (fresh-dir) "detached"))
+      (is (nil? (if (windows?)
+                  (os/detach "cmd.exe"
+                    ["/d" "/s" "/c" (str "\"echo x> " (backslashed marker) "\"")]
+                    {:raw-args true})
+                  (os/detach "sh" ["-c" (str "echo x > '" marker "'")]))))
+      (letrec (written? (fn (tries)
+                          (cond
+                            (file/exists? marker) true
+                            (<= tries 0) false
+                            else (receive (after 50 (written? (dec tries)))))))
+        (is (written? 200)))))
+  (test "os/detach raises for a program that cannot be started"
+    (is (= :raised (try (os/detach "brood-surely-no-such-program" []) (catch _ :raised))))))

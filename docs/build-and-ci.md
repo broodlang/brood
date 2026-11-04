@@ -52,3 +52,36 @@ and CI paid cold builds while appearing cached. `save-if: false` keeps the resto
 the release workflow claiming budget: releases are rare and already minutes of
 cross-compilation, while CI runs on every push and is where a cold build costs someone
 waiting.
+
+## macOS and Windows run a smoke set, not the suite (`macos-check`, `windows-smoke`)
+
+The suite runs on Linux only: most of it is the language, which does not change with the OS,
+and a macOS minute costs ten Linux ones. What does change — paths, files, processes, the pty,
+the clipboard — is run on both by `scripts/ci/platform-smoke.sh`, with a `nest` built there
+with the gui, headless. The script lists each file and why it is in the set; the portable half
+(`tests/platform_test.blsp`, `buffer_test`, `strings_test`, `encoding_test`, `clipboard_test`)
+runs on both, the POSIX-userland half (`path_test`, `file_test`, `io_test`, `system_test`,
+`proc_test`) on macOS only, since it assumes `sh`, `pwd` and `/tmp`. Both jobs also run the gui
+key translation unit tests (`host::gui::backend::input`, ADR-541's Option-as-Meta and AltGr).
+
+What that proves, per OS (2026-11-04):
+
+| | macOS | Windows |
+|---|---|---|
+| home, temp, cwd, absolute paths (ADR-592) | ✅ | ✅ (drive roots, `/` form) |
+| CRLF / BOM bytes untranslated; the editor buffer keeps both | ✅ | ✅ |
+| names with spaces and non-ASCII | ✅ | ✅ |
+| `os/which`; a command line through the platform's shell (`os/shell-cmd`) | ✅ `sh -c` | ✅ `cmd.exe /d /s /c`, the line raw: quotes, pipes, `&&` (KI-364) |
+| a timeout, C-g or `os/close` stops the child's children too (`os/cmd`, `os/spawn`) | ✅ process group | ✅ Job Object (ADR-592) |
+| a pty (`os/spawn-pty`) and POSIX signals | ✅ | ❌ no pty — KI-369 (raises naming ConPTY); no POSIX signals |
+| clipboard reads against a real clipboard | ✅ | ✅ |
+| owner-only files (`file/spit-private`) | ✅ mode 0600 | ✅ a one-entry DACL, read back with `icacls` (KI-365) |
+| key translation (Option / AltGr) | ✅ unit tests | ✅ unit tests |
+| `os/detach` (and `os/open`'s opener started detached) | ✅ | ✅ |
+| a window, font discovery, file watching | not run (headless) | not run (headless) |
+
+What the first runs found: a test asserted `/tmp` where macOS's `pwd` says `/private/tmp`
+(fixed in the test); two clipboard reads at once answer `Busy` on any machine that has a
+clipboard — by design, so the reading tests run `:isolated`; and, from bedit's smoke job on
+Windows, `os/cmd` there killed only its child, leaving a grandchild running and holding the
+pipes — the Job Object of ADR-592.

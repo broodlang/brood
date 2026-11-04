@@ -2008,7 +2008,7 @@ ordinary library, which the server stores as \"nothing\"."
 (defn- package-config-dir ()
   (let (xdg (os/env "XDG_CONFIG_HOME"))
     (path/join (if (nil? xdg)
-                 (path/join (or (os/env "HOME")
+                 (path/join (or (path/home)
                               (error "package-config-dir: neither XDG_CONFIG_HOME nor HOME is set"))
                    ".config")
                  xdg)

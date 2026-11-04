@@ -98,7 +98,7 @@ e.g. to `monitor`/`link` a remote child — rather than fire-and-forget."
 ;; spit-private primitives — the kernel only carries bytes.
 
 (defn- node-config-dir ()
-  (str (or (os/env "XDG_CONFIG_HOME") (str (os/env "HOME") "/.config")) "/brood"))
+  (str (or (os/env "XDG_CONFIG_HOME") (str (path/home) "/.config")) "/brood"))
 
 (defn- node-cookie-path () (str (node-config-dir) "/cookie"))
 
