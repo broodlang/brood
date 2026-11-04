@@ -50,3 +50,15 @@
     (let (message (error-of (%clipboard-set-image (string/->bytes "not an image"))))
       (is (string? message))
       (is (includes? message "not a decodable image")))))
+
+(describe "os/primary-get: the PRIMARY selection, read only (ADR-553)"
+  (test "reading answers nil or text, and never raises"
+    (let (text (os/primary-get))
+      (is (or (nil? text) (string? text)))))
+
+  (test "without the clipboard feature or a display it is exactly nil"
+    (is (or (not (no-clipboard?)) (nil? (os/primary-get)))))
+
+  (test "os/primary-set refuses a value that is not a string, before any selection is touched"
+    (assert-error (os/primary-set 42))
+    (assert-error (os/primary-set nil))))

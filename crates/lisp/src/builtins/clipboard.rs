@@ -44,6 +44,43 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         &["png"],
         "Put an encoded image (PNG, or any format image-thumb decodes) on the OS clipboard; returns its argument. Raises when the bytes are not a decodable image within the image-thumb limits; a no-op otherwise when no clipboard is available or the clipboard feature is off.",
         clipboard_set_image);
+    primitives.def(
+        "%primary-get",
+        Arity::exact(0),
+        Sig::nullary(any),
+        &[],
+        "The PRIMARY selection's text (X11 / Wayland: what is highlighted, pasted by a middle click), or nil when empty / non-text / unavailable (not Linux, no display, a compositor without a primary selection, or a build without the clipboard feature). A blocking read like %clipboard-get, under the same rules. ADR-553.",
+        primary_get);
+    primitives.def(
+        "%primary-set",
+        Arity::exact(1),
+        Sig::new(vec![string], string),
+        &["s"],
+        "Own the PRIMARY selection with string s, leaving the CLIPBOARD alone; returns s. A no-op (still returns s) where there is no primary selection or no clipboard feature. ADR-553.",
+        primary_set);
+}
+
+/// `(%primary-get)` — the PRIMARY selection's text, or nil. Read through the same blocking
+/// seam and reader as the clipboard ([`read_clipboard`]), since its owner is another app too.
+pub(super) fn primary_get(_args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let text = read_clipboard(
+        heap,
+        "os/primary-get",
+        "primary selection",
+        crate::host::clipboard::get_primary_text,
+    )?;
+    match text {
+        Some(s) => Ok(heap.alloc_string(&s)),
+        None => Ok(Value::nil()),
+    }
+}
+
+/// `(%primary-set s)` — own the PRIMARY selection with `s`; returns `s`. Waits on nobody,
+/// like [`clipboard_set`].
+pub(super) fn primary_set(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let s = expect_string(heap, "os/primary-set", arg(args, 0))?;
+    crate::host::clipboard::set_primary_text(&s);
+    Ok(arg(args, 0))
 }
 
 /// `(clipboard-get)` — the OS clipboard's text, or nil when it's empty / non-text /

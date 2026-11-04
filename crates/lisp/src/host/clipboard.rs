@@ -186,10 +186,75 @@ mod enabled {
             });
         }
     }
+
+    /// The PRIMARY selection's text — X11's and Wayland's "what is highlighted", pasted by
+    /// a middle click — read like the clipboard's (the same reader, so the same [`Busy`]
+    /// rule). There is no such selection off Linux: nothing to read there.
+    #[cfg(all(
+        unix,
+        not(any(target_os = "macos", target_os = "android", target_os = "emscripten"))
+    ))]
+    pub fn get_primary_text() -> Result<Option<String>, Busy> {
+        use arboard::{GetExtLinux, LinuxClipboardKind};
+        Readers(&READERS)
+            .read(fresh_reader, READ_DEADLINE, |clipboard| {
+                clipboard
+                    .get()
+                    .clipboard(LinuxClipboardKind::Primary)
+                    .text()
+                    .ok()
+            })
+            .map(Option::flatten)
+    }
+
+    /// No primary selection off Linux: nothing to read.
+    #[cfg(not(all(
+        unix,
+        not(any(target_os = "macos", target_os = "android", target_os = "emscripten"))
+    )))]
+    pub fn get_primary_text() -> Result<Option<String>, Busy> {
+        Ok(None)
+    }
+
+    /// Own the PRIMARY selection with `s`, on the owner's handle beside the clipboard's
+    /// text — the CLIPBOARD itself is not touched. Silently nothing where the display
+    /// offers no primary selection.
+    #[cfg(all(
+        unix,
+        not(any(target_os = "macos", target_os = "android", target_os = "emscripten"))
+    ))]
+    pub fn set_primary_text(s: &str) {
+        use arboard::{LinuxClipboardKind, SetExtLinux};
+        if let Some(mutex) = handle()
+            && let Ok(mut clipboard) = mutex.lock()
+        {
+            let _ = clipboard
+                .set()
+                .clipboard(LinuxClipboardKind::Primary)
+                .text(s.to_owned());
+        }
+    }
+
+    /// No primary selection off Linux: nowhere to put it.
+    #[cfg(not(all(
+        unix,
+        not(any(target_os = "macos", target_os = "android", target_os = "emscripten"))
+    )))]
+    pub fn set_primary_text(_s: &str) {}
 }
 
 #[cfg(feature = "clipboard")]
-pub use enabled::{get_image, get_text, set_image, set_text};
+pub use enabled::{get_image, get_primary_text, get_text, set_image, set_primary_text, set_text};
+
+/// No clipboard compiled in: no primary selection to read.
+#[cfg(not(feature = "clipboard"))]
+pub fn get_primary_text() -> Result<Option<String>, Busy> {
+    Ok(None)
+}
+
+/// No clipboard compiled in: no primary selection to own.
+#[cfg(not(feature = "clipboard"))]
+pub fn set_primary_text(_s: &str) {}
 
 /// No clipboard compiled in: nothing to read.
 #[cfg(not(feature = "clipboard"))]
