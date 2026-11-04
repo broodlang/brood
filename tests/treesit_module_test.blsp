@@ -1324,11 +1324,17 @@
   (let (source (path/join dir (str "shim-" grammar ".c"))
         entry (str "tree_sitter_" grammar))
     (file/spit source
-      (str "extern const void *" entry "(void);\n"
-        "const void *tree_sitter_tsswap(void) { return " entry "(); }\n"))
+      (str "extern const void *"
+        entry "(void);\n" "const void *tree_sitter_tsswap(void) { return " entry "(); }\n"))
     (os/cmd "cc"
-      ["-shared" "-fPIC" "-o" out source (str "-L" tsm-grammar-dir)
-       (str "-l:libtree-sitter-" grammar ".so") (str "-Wl,-rpath," tsm-grammar-dir)])))
+      ["-shared"
+        "-fPIC"
+        "-o"
+        out
+        source
+        (str "-L" tsm-grammar-dir)
+        (str "-l:libtree-sitter-" grammar ".so")
+        (str "-Wl,-rpath," tsm-grammar-dir)])))
 
 (when (and (os/which "cc")
         (file/exists? (str tsm-grammar-dir "libtree-sitter-json.so"))

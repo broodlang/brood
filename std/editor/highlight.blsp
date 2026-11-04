@@ -817,7 +817,8 @@ the checkpoints it made."
         (let (exact (assoc cache :verified nil)
               [key found] (lc-floor (:tree exact) 0 target [i entry]))
           (lc-state-walk exact lex rope key (first found) key target budget))
-      (and (not (nil? budget)) (<= budget 0)) [(first (lc-walk-end cache i state state)) [lc-far i state]]
+      (and (not (nil? budget)) (<= budget 0))
+        [(first (lc-walk-end cache i state state)) [lc-far i state]]
       else
         (let (reuse? (and entry (= (count entry) 3) (= (first entry) state))
               out (if reuse? (nth entry 2) (second (lex (lc-line-text rope i) state)))
