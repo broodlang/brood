@@ -172,6 +172,10 @@ when the cut fell inside a run."
     (assert= (ansi/strip "a\e]2;title\x07b") "ab"))
   (test "carriage returns still go"
     (assert= (ansi/strip "\e[1mx\r\n\e[0m") "x\n"))
+  (test "strip's own scan keeps exactly the text the decoder keeps"
+    (doseq (s (conj samples long-csi))
+      (assert= [s (ansi/strip s)]
+        [s (string/replace (ansi/segments-text (whole s)) "\r" "")])))
   (test "an over-long CSI never leaks its tail"
     (assert= (ansi/strip long-csi) "aX\nY")))
 

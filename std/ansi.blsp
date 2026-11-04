@@ -460,14 +460,36 @@ its faces.
                [(if (nil? attr) spans (conj spans [at end attr])) end])))))
 
 ;; ---- strip: the escapes removed --------------------------------------------------------------
+;; The decoder's piece walk with nothing decoded: no SGR parameters read, no attribute
+;; folded, no segments built or merged — only the text after each escape kept, so a
+;; colourful log costs one split and a few character reads per escape.
+
+(defn- strip-pieces (pieces:vector i:int n:int in-string:bool acc -> string)
+  "The text of the ESC-separated `pieces` from `i` with every escape removed, `acc` the
+text so far, reversed."
+  (if (>= i n)
+    (string/join (reverse acc) "")
+    (let (piece (nth pieces i))
+      (if (and in-string (string/starts-with? piece "\\"))
+        (strip-pieces pieces (inc i) n false (cons (tail-from piece 1) acc))
+        (let (scan (escape-scan piece false))
+          (case (first scan)
+            :skip (strip-pieces pieces (inc i) n false (cons (tail-from piece (second scan)) acc))
+            :string (strip-pieces pieces (inc i) n true acc)
+            ;; cancelled by the next ESC, or cut off at the end: nothing of it shows
+            (strip-pieces pieces (inc i) n false acc)))))))
 
 (defn strip (s:string -> string)
-  "`s` with all ANSI escape sequences and carriage returns removed — the whole string
-decoded ([[feed]]) and its text kept. A sequence cut off at the end is dropped; for a
-STREAM, where the rest of it is in the next read, thread a [[decoder]] instead.
+  "`s` with all ANSI escape sequences and carriage returns removed — exactly the text
+[[feed]] decodes from the whole string, without building its segments. A sequence cut
+off at the end is dropped; for a STREAM, where the rest of it is in the next read,
+thread a [[decoder]] instead.
 
     (ansi/strip (str (string/int->char 27) \"[1mx\" (string/int->char 27) \"[0m\"))   ;=> \"x\""
-  (let (plain (if (includes? s "\e") (segments-text (second (feed (decoder) s))) s))
+  (let (plain (if (includes? s "\e")
+                (let (pieces (into [] (string/split s "\e")))
+                  (strip-pieces pieces 1 (count pieces) false (list (first pieces))))
+                s))
     (if (includes? plain "\r") (string/replace plain "\r" "") plain)))
 
 ;; ---- the CSI scan `render` shares -------------------------------------------------------------
