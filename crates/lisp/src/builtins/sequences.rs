@@ -342,19 +342,22 @@ pub(super) fn register(primitives: &mut super::Primitives) {
     // registry map, done in ONE kernel call so two concurrent registrations cannot each
     // read the old map and clobber each other. Internal; `register-impl`/`provide`/
     // `defability`/… in the prelude call it, never user code.
-    // The optional fifth argument names the module making the write for the KI-136 writer
-    // journal (`%registry-writer`); an image replay passes the module it is replaying.
+    // The optional fifth argument names who the write credits in the KI-136 writer journal
+    // (`%registry-writer`) — an image replay passes the module it is replaying, `false`
+    // credits nobody; the optional sixth makes the op conditional on the entry's writer
+    // (ADR-582: `registry/retract`, `registry/restore`).
     primitives.def(
         "%registry-update!",
-        Arity::range(4, 5),
-        Sig::new(vec![any, any, any, any, any], any),
+        Arity::range(4, 6),
+        Sig::new(vec![any, any, any, any, any, any], any),
         &[],
         "",
         registry_update,
     );
-    // Who wrote a registry entry (KI-136): the module whose load made it, or nil for an
-    // entry nobody owns (a prelude/root write). What lets the stdlib image carry each
-    // registration WITH the module that made it rather than with the registry's own.
+    // Who wrote a registry entry (KI-136, ADR-582): the module whose load made it, or the
+    // namespace-less file (its path), or nil for an entry nobody owns (a prelude/root
+    // write). What lets the stdlib image carry each registration WITH the module that made
+    // it rather than with the registry's own.
     primitives.def(
         "%registry-writer",
         Arity::exact(2),
@@ -1458,10 +1461,17 @@ pub(super) fn dispatch_proven(args: &[Value], _: EnvId, heap: &mut Heap) -> Lisp
     }
 }
 
-/// `(%registry-update! name op path value)` — atomically read-modify-write a global that
-/// holds a registry (KI-22). `name` is the global's symbol, `op` one of `:assoc`,
-/// `:assoc-new`, `:dissoc`, `:cons-new`, `path` a vector of one or two keys (nil for
-/// `:cons-new`). Returns true if the registry was written, false if the op declined.
+/// `(%registry-update! name op path value [from] [if-writer])` — atomically read-modify-write
+/// a global that holds a registry (KI-22). `name` is the global's symbol, `op` one of
+/// `:assoc`, `:assoc-new`, `:dissoc`, `:cons-new`, `:append-new`, `:remove`, `:merge`, `path`
+/// a vector of one or two keys (nil for a list op). Returns true if the registry was
+/// written, false if the op declined.
+///
+/// `from` is who the write credits in the writer journal (KI-136, ADR-582): nil for the
+/// default (the namespace being compiled, else the namespace-less file being loaded), a
+/// symbol for a module, a string for a file (its absolute path), `false` for nobody.
+/// `if-writer` (a module symbol or a file string) makes the op conditional: it applies only
+/// while the entry it targets is still credited to that writer.
 ///
 /// The whole sequence runs inside [`Heap::registry_update`] under the runtime's registry
 /// lock — see there for why `(def *X* (assoc *X* …))` in Brood cannot be made safe.
@@ -1498,19 +1508,14 @@ pub(super) fn registry_update(args: &[Value], env: EnvId, heap: &mut Heap) -> Li
         crate::core::value::ValueRef::Vector(id) => heap.vector(id).to_vec(),
         _ => Vec::new(),
     };
-    let from = match args.get(4).copied().unwrap_or(Value::Nil) {
+    let writer = match args.get(4).copied().unwrap_or(Value::Nil) {
+        Value::Nil => heap.current_registry_writer(),
+        Value::Bool(false) => None,
+        other => Some(registry_writer_arg(heap, other)?),
+    };
+    let guard = match args.get(5).copied().unwrap_or(Value::Nil) {
         Value::Nil => None,
-        Value::Sym(s) => Some(s),
-        // A module KEY as the image replay holds it (a string): the same name, interned.
-        Value::Str(id) => Some(value::intern(heap.string(id))),
-        v => {
-            return Err(LispError::wrong_type(
-                heap,
-                "%registry-update!",
-                "symbol",
-                v,
-            ));
-        }
+        other => Some(registry_writer_arg(heap, other)?),
     };
     Ok(Value::boolean(heap.registry_update(
         env,
@@ -1518,23 +1523,55 @@ pub(super) fn registry_update(args: &[Value], env: EnvId, heap: &mut Heap) -> Li
         op,
         &path,
         arg(args, 3),
-        from,
+        writer,
+        guard,
     )))
 }
 
-/// `(%registry-writer name path)` — the module whose load wrote registry `name`'s entry at
-/// `path` (a vector of one or two keys), or nil for an entry nobody owns. See
-/// [`Heap::registry_writer`] (KI-136).
+/// A writer as Brood names one (ADR-582): a module symbol, or a file's path string.
+fn registry_writer_arg(
+    heap: &Heap,
+    value: Value,
+) -> Result<crate::core::heap::RegistryWriter, LispError> {
+    use crate::core::heap::RegistryWriter;
+    match value {
+        Value::Sym(module) => Ok(RegistryWriter::Module(module)),
+        Value::Str(id) => Ok(RegistryWriter::File(value::intern(heap.string(id)))),
+        other => Err(LispError::wrong_type(
+            heap,
+            "%registry-update!",
+            "symbol or string",
+            other,
+        )),
+    }
+}
+
+/// A writer as Brood sees one (ADR-582): a module as its symbol, a file as its path string.
+fn registry_writer_value(heap: &mut Heap, writer: crate::core::heap::RegistryWriter) -> Value {
+    use crate::core::heap::RegistryWriter;
+    match writer {
+        RegistryWriter::Module(module) => Value::Sym(module),
+        RegistryWriter::File(file) => {
+            let path = value::symbol_name(file);
+            heap.alloc_string(&path)
+        }
+    }
+}
+
+/// `(%registry-writer name path)` — who wrote registry `name`'s entry at `path` (a vector of
+/// one or two keys; `[member]` for a list registry): the module whose load wrote it, as a
+/// symbol, or the namespace-less file, as its path string — nil for an entry nobody owns.
+/// See [`Heap::registry_writer`] (KI-136, ADR-582).
 pub(super) fn registry_writer(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
     let sym = expect_symbol(heap, "%registry-writer", arg(args, 0))?;
     let path = match arg(args, 1).unpack() {
         crate::core::value::ValueRef::Vector(id) => heap.vector(id).to_vec(),
         _ => Vec::new(),
     };
-    Ok(heap
-        .registry_writer(sym, &path)
-        .map(Value::Sym)
-        .unwrap_or(Value::Nil))
+    Ok(match heap.registry_writer(sym, &path) {
+        Some(writer) => registry_writer_value(heap, writer),
+        None => Value::Nil,
+    })
 }
 
 /// `(%registry-member? name key)` — is registry global `name` a map containing `key`, read

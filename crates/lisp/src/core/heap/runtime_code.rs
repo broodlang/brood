@@ -100,6 +100,13 @@ pub(crate) enum LoadWrite {
         op: RegistryOp,
         path: Vec<Value>,
         val: Value,
+        /// Who the write credits (ADR-582) — the module, or the namespace-less file, whose
+        /// load staged it — recorded in the writer journal only when the op APPLIES: at the
+        /// publish, or as a restore replays it. A load that throws credits nobody.
+        writer: Option<RegistryWriter>,
+        /// The op applies only while the entry's writer is still this one (ADR-582's
+        /// conditional retract and restore), checked again wherever the op is applied.
+        guard: Option<RegistryWriter>,
     },
     /// A `reflect/undef` made inside the load (ADR-391): the name leaves the table when
     /// the load publishes, and again when a restore replays the load.
@@ -157,6 +164,37 @@ pub(super) struct LoadJournal {
     /// field is what lets a restore replay a bystander's direct load (KI-170's window) while
     /// discarding its own isolate's (the per-file scoping `nest test` promises).
     pub(super) entries: Vec<(u64, u64, bool, LoadWrite)>,
+}
+
+/// Who wrote a registry entry (KI-136, ADR-582): the module whose load made the write, or —
+/// for a load with no namespace, a file without a `defmodule` — that FILE, by its absolute
+/// path. `%registry-writer` answers a module as a symbol and a file as a string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RegistryWriter {
+    Module(Symbol),
+    File(Symbol),
+}
+
+/// One member of a list registry in the writer journal: the member as it printed when the
+/// slot was made, and who added it.
+#[derive(Debug, Clone)]
+pub(crate) struct MemberSlot {
+    pub(crate) printed: String,
+    pub(crate) writer: Option<RegistryWriter>,
+}
+
+/// The writer journal (KI-136, ADR-582) — who wrote each registry entry. A map entry is
+/// keyed by its printed key path. A LIST registry's members are kept as one slot per member
+/// in the list's own order, so a member is found by POSITION, through the same `equal` the
+/// `:remove` op matches with: two closures that print alike (`#<fn>`) are two members with
+/// two writers, never one key. Each slot keeps its member's printed form, so a list that
+/// changed underneath (a whole-value swap, a `def`) is noticed — the slots answer for
+/// nothing until an op realigns them, writer-less. No `Value` is held, so the journal is no
+/// collector root. Cloned with a globals snapshot and restored with it (an `%isolate`).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RegistryWriters {
+    pub(crate) entries: HashMap<(Symbol, String), RegistryWriter>,
+    pub(crate) members: HashMap<Symbol, Vec<MemberSlot>>,
 }
 
 /// read-modify-write has to happen inside one kernel call (KI-22).
@@ -298,17 +336,18 @@ pub struct RuntimeCode {
     /// Recorded on the write path only, under the lock already held, so it costs one
     /// `HashSet` insert per registration and nothing at all per lookup.
     pub(super) registry_lock: Mutex<HashSet<Symbol>>,
-    /// KI-136: WHO wrote each registry entry — `(registry, printed key path)` → the module
-    /// whose load made the write (its compile namespace at the time), for every entry a
-    /// `%registry-update!` set. A registration is data about the module that made it, and
-    /// the startup image has to carry it with THAT module: attributing by the key's
-    /// qualifier credited `:syntax/comment` — a face `editor/highlight` declares — to the
-    /// registry's own module, so materialising `editor/face` registered twenty-six faces
-    /// where its source load registers six. Written under `registry_lock` (lock order:
-    /// `registry_lock` → this), read by `%registry-writer`. A root write (no namespace)
-    /// clears the entry: nothing owns it, so the image keeps it in the registry's own
-    /// value rather than replaying it.
-    pub(super) registry_writers: Mutex<HashMap<(Symbol, String), Symbol>>,
+    /// KI-136 / ADR-582: WHO wrote each registry entry (see [`RegistryWriters`]) — the
+    /// module whose load made the write (its compile namespace at the time), or the file a
+    /// namespace-less load was reading, for every entry a `%registry-update!` set. A
+    /// registration is data about the module that made it, and the startup image has to
+    /// carry it with THAT module: attributing by the key's qualifier credited
+    /// `:syntax/comment` — a face `editor/highlight` declares — to the registry's own
+    /// module, so materialising `editor/face` registered twenty-six faces where its source
+    /// load registers six. Written ONLY under `registry_lock` (lock order: `registry_lock`
+    /// → this), read by `%registry-writer`. A write with no writer (a prelude or run-time
+    /// write) clears the entry: nothing owns it, so the image keeps it in the registry's
+    /// own value rather than replaying it.
+    pub(super) registry_writers: Mutex<RegistryWriters>,
     /// ADR-419: the modules whose LOAD evaluated source text — `reflect/eval-string`,
     /// `%load-string`, `%eval-in` with a namespace open. What such a load defines depends on
     /// a string the module computed, which no scan of its file can see, so the project image
@@ -629,6 +668,9 @@ pub struct GlobalsSnapshot {
     /// module-load write at or past it landed after the table was read, and is replayed
     /// over the restored table (KI-134).
     pub(super) journal_mark: u64,
+    /// The writer journal as it stood with `saved` (ADR-582): restored with the table, and
+    /// the journalled loads' writes re-credited as they are replayed over it.
+    pub(super) writers: RegistryWriters,
     /// The `rt_collect_block` depth this snapshot established (post-increment). Restore
     /// asserts the live depth still matches — catching an out-of-order (non-LIFO) restore,
     /// which would release the wrong scope's suppression.
@@ -760,7 +802,7 @@ impl Default for RuntimeCode {
             global_generations: RwLock::new(SymbolMap::default()),
             meta: RwLock::new(SymbolMap::default()),
             registry_lock: Mutex::new(HashSet::new()),
-            registry_writers: Mutex::new(HashMap::new()),
+            registry_writers: Mutex::new(RegistryWriters::default()),
             dynamic_loaders: Mutex::new(HashSet::new()),
             load_journal: Mutex::new(LoadJournal::default()),
             // A default (un-seeded) runtime reserves nothing — the prelude hasn't run.
@@ -916,7 +958,7 @@ impl RuntimeCode {
             globals: RwLock::new(globals),
             global_generations: RwLock::new(SymbolMap::default()),
             registry_lock: Mutex::new(HashSet::new()),
-            registry_writers: Mutex::new(HashMap::new()),
+            registry_writers: Mutex::new(RegistryWriters::default()),
             dynamic_loaders: Mutex::new(HashSet::new()),
             load_journal: Mutex::new(LoadJournal::default()),
             version: AtomicU64::new(0),

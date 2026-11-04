@@ -445,6 +445,11 @@ pub(crate) struct ColdHeap {
     pub(crate) current_file_arc: Option<Arc<str>>,
     /// The namespace being compiled (`defmodule`).
     pub(crate) compile_ns: Option<Symbol>,
+    /// The file a `reflect/load` is reading when that file declares no module — its
+    /// absolute path, interned — which a registry write made while no namespace is open
+    /// credits (ADR-582). `None` outside such a load, and for a file that has a
+    /// `defmodule` (its writes credit the module).
+    pub(crate) root_load_file: Option<Symbol>,
     /// Names the current namespace defines — the *active* forward-ref set, which
     /// [`Heap::activate_ns_region`] switches to the module `%in-ns` opens.
     pub(crate) ns_known_names: HashSet<Symbol>,
@@ -1539,11 +1544,12 @@ mod roots_buf;
 /// a runtime holds in common, and the generation machinery around them.
 mod runtime_code;
 use self::runtime_code::{
-    ClosureTemplateMap, ConstClosureMap, LoadStage, LoadWrite, reg_trace_enabled,
+    ClosureTemplateMap, ConstClosureMap, LoadStage, LoadWrite, MemberSlot, RegistryWriters,
+    reg_trace_enabled,
 };
 pub use self::runtime_code::{
-    GenPin, GlobalsSnapshot, NameMeta, RegistryOp, RuntimeCode, SourceLoc, SymbolHasher, SymbolMap,
-    VmCacheMap,
+    GenPin, GlobalsSnapshot, NameMeta, RegistryOp, RegistryWriter, RuntimeCode, SourceLoc,
+    SymbolHasher, SymbolMap, VmCacheMap,
 };
 mod slabs;
 mod small_map;

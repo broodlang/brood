@@ -192,6 +192,26 @@ impl Heap {
         self.cold().and_then(|c| c.compile_ns)
     }
 
+    /// Set the namespace-less file a `reflect/load` is reading (ADR-582), returning the
+    /// prior value so the caller can restore it (loads nest). See `ColdHeap::root_load_file`.
+    pub fn set_root_load_file(&mut self, file: Option<Symbol>) -> Option<Symbol> {
+        if file.is_none() && self.cold().is_none() {
+            return None;
+        }
+        std::mem::replace(&mut self.cold_mut().root_load_file, file)
+    }
+
+    /// Who a registry write made now credits when the caller names nobody (ADR-582): the
+    /// namespace being compiled, else the namespace-less file being loaded, else nobody.
+    pub(crate) fn current_registry_writer(&self) -> Option<crate::core::heap::RegistryWriter> {
+        use crate::core::heap::RegistryWriter;
+        self.compile_ns().map(RegistryWriter::Module).or_else(|| {
+            self.cold()
+                .and_then(|c| c.root_load_file)
+                .map(RegistryWriter::File)
+        })
+    }
+
     // ----- package-rooted namespaces (ADR-070) -----
 
     /// Enter a dependency's load: `prefix` is the dep's local name, `modules` the

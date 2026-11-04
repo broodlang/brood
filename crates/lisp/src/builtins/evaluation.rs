@@ -376,7 +376,17 @@ pub(super) fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     // through the load) — so ns state never leaks out of a file and the four ns fields
     // stay in sync. It owns the heap for the load; reach it via `scope.heap()`.
     let form_vals: Vec<Value> = forms.iter().map(|(f, _)| *f).collect();
+    let declares_module = crate::eval::macros::file_opens_ns(heap, &form_vals);
     let mut scope = crate::eval::macros::NsLoadScope::enter(heap, &form_vals);
+    // A file with no `defmodule` loads in the root namespace, where a registry write has no
+    // module to credit: it credits the FILE, by its absolute path (ADR-582), so what a
+    // plugin's loose file registered can be found and taken back like a module's.
+    if !declares_module {
+        let absolute = std::path::absolute(&path)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| path.clone());
+        scope.credit_file(crate::core::value::intern(&absolute));
+    }
     let heap = scope.heap();
 
     // **Bounded loading — the core memory guarantee (docs/memory-review.md).**

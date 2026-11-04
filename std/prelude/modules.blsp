@@ -726,8 +726,9 @@ not declared: `satisfies?` answers no, `%sealed-members` answers nil, and an abi
 resolves against an ability the runtime has never heard of."
   (let (regs (or (get (or *std-regs* {}) key) []))
     ;; `key` as the writer: the namespace at this moment is whoever required the module,
-    ;; and the writer journal (KI-136) must credit the module being materialised.
-    (doseq (r regs) (%registry-update! (get r 0) :assoc (get r 1) (get r 2) key))
+    ;; and the writer journal (KI-136) must credit the module being materialised — a
+    ;; module, so a symbol (a string names a FILE, ADR-582).
+    (doseq (r regs) (%registry-update! (get r 0) :assoc (get r 1) (get r 2) (symbol key)))
     (count regs)))
 
 ;; --- the stdlib image, from the prelude --------------------------------------
