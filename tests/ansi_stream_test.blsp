@@ -1,0 +1,123 @@
+;; std/ansi — the STREAMING decoder (`decoder` / `feed`), the SGR attribute model it shares
+;; with `vt`, and `strip` rebuilt over it (ADR-567). The property that matters is the one a
+;; pipe forces: output arrives in chunks the reader did not choose, so feeding a stream cut
+;; at ANY position must decode exactly as feeding it whole — half an escape never shows.
+
+(defmodule ansi-stream-test (:use test))
+
+(defn- whole (s) (second (ansi/feed (ansi/decoder) s)))
+
+(defn- join-segments (segments)
+  "`segments` with adjacent runs of one attribute joined — what two chunks' segments are
+when the cut fell inside a run."
+  (reduce segments
+    []
+    (fn (out segment)
+      (let (previous (last out))
+        (if (and previous (= (second previous) (second segment)))
+          (assoc out (dec (count out)) [(str (first previous) (first segment)) (second segment)])
+          (conj out segment))))))
+
+(defn- fed-in (chunks)
+  "The segments of `chunks` fed one after another through one decoder."
+  (second (reduce chunks
+            [(ansi/decoder) []]
+            (fn (state chunk)
+              (let ([decoder segments] state
+                    [next-decoder got] (ansi/feed decoder chunk))
+                [next-decoder (into segments got)])))))
+
+(defn- split-everywhere-agrees? (s)
+  "Whether every two-way cut of `s`, and the one-character-at-a-time feed, decode as `s` whole."
+  (let (expected (whole s)
+        n (string/length s))
+    (and (every? (range (inc n))
+           (fn (i)
+             (= expected
+               (join-segments (fed-in [(string/substring s 0 i) (string/substring s i n)])))))
+      (= expected (join-segments (fed-in (string/->list s)))))))
+
+(def- samples
+  ["\e[1mERROR\e[0m: done"
+    "a\e[0;31mred\e[38;5;196mx\e[48;2;1;2;3my\e[m z" "x\e[38:2::9:8:7mtrue\e[39m"
+    "pre\e]0;a title\x07post" "\e]8;;http://example.com\e\\link\e]8;;\e\\ after"
+    "a\e[2K\e[1Gb\e[?25lc\e[>4;2md" "\e(Bq\e7x\e8\e=y" "é\e[1m😀\e[0mü" "\e[3\e[1mx"
+    "\ePq#0;2;0;0;0\e\\after-dcs" "line one\r\n\e[32mline two\e[0m\r\n"])
+
+(describe "ansi/feed: one chunk"
+  (test "SGR sets attributes; the text keeps no escape"
+    (assert= (whole "\e[1mERROR\e[0m: done") [["ERROR" {:bold true}] [": done" nil]]))
+  (test "16, 256 and true colour, and the resets"
+    (assert= (whole "a\e[0;31mred\e[38;5;196mx\e[48;2;1;2;3my\e[m z")
+      [["a" nil] ["red" {:fg 1}] ["x" {:fg 196}] ["y" {:fg 196 :bg [1 2 3]}] [" z" nil]])
+    (assert= (whole "\e[91;44mb") [["b" {:fg 9 :bg 4}]])
+    (assert= (whole "\e[3;4mi\e[23mu\e[24mn")
+      [["i" {:italic true :underline true}] ["u" {:underline true}] ["n" nil]]))
+  (test "OSC titles and hyperlinks are consumed, by BEL or by ESC backslash"
+    (assert= (whole "pre\e]0;a title\x07post") [["prepost" nil]])
+    (assert= (whole "\e]8;;http://example.com\e\\link\e]8;;\e\\ after") [["link after" nil]]))
+  (test "cursor, erase, private and charset sequences are consumed, not shown"
+    (assert= (whole "a\e[2K\e[1Gb\e[?25lc\e[>4;2md") [["abcd" nil]])
+    (assert= (whole "\e(Bq\e7x\e8\e=y") [["qxy" nil]])
+    (assert= (whole "\ePq#0;2;0;0;0\e\\after-dcs") [["after-dcs" nil]]))
+  (test "an ESC inside a CSI cancels it; the new sequence counts"
+    (assert= (whole "\e[3\e[1mx") [["x" {:bold true}]]))
+  (test "control characters stay in the text for the caller"
+    (assert= (whole "a\rb\n") [["a\rb\n" nil]]))
+  (test "UTF-8 around the escapes is kept whole"
+    (assert= (whole "é\e[1m😀\e[0mü") [["é" nil] ["😀" {:bold true}] ["ü" nil]]))
+  (test "plain text is one segment in the current attribute"
+    (let ([decoder _] (ansi/feed (ansi/decoder) "\e[32m"))
+      (assert= (second (ansi/feed decoder "plain")) [["plain" {:fg 2}]])))
+  (test "empty input decodes to nothing"
+    (assert= (whole "") [])))
+
+(describe "ansi/feed: a stream cut anywhere"
+  (test "every two-way cut, and one character at a time, decodes as the whole"
+    (doseq (s samples) (assert= [s (split-everywhere-agrees? s)] [s true])))
+  (test "the half of an escape a chunk ends inside is held, never shown"
+    (let ([decoder got] (ansi/feed (ansi/decoder) "ok \e[1"))
+      (assert= got [["ok " nil]])
+      (assert= (second (ansi/feed decoder "mERROR")) [["ERROR" {:bold true}]])))
+  (test "an OSC string open at a chunk's end swallows its content until the terminator"
+    (let ([d1 g1] (ansi/feed (ansi/decoder) "a\e]0;long ti")
+          [d2 g2] (ansi/feed d1 "tle still")
+          [d3 g3] (ansi/feed d2 "\e")
+          [_ g4] (ansi/feed d3 "\\b"))
+      (assert= [g1 g2 g3 g4] [[["a" nil]] [] [] [["b" nil]]])
+      ;; the string's content is discarded as it comes, not kept pending
+      (assert= (:pending d2) "")))
+  (test "attributes carry from one chunk to the next"
+    (assert= (fed-in ["\e[31mred " "still red\e[0m plain"])
+      [["red " {:fg 1}] ["still red" {:fg 1}] [" plain" nil]])))
+
+(describe "ansi/segments-text and ansi/segments-spans"
+  (test "the text, and the spans at an offset"
+    (let (segments (whole "a\e[1mbc\e[0md\e[4me"))
+      (assert= (ansi/segments-text segments) "abcde")
+      (assert= (ansi/segments-spans segments 5) [[6 8 {:bold true}] [9 10 {:underline true}]]))))
+
+(describe "ansi/sgr and the colours"
+  (test "22 clears bold and dim together; 39 / 49 the colours"
+    (assert= (ansi/sgr {:bold true :dim true :fg 3 :bg 4} [22 39]) {:bg 4})
+    (assert= (ansi/sgr {:bg 4} [49]) nil))
+  (test "an empty parameter reads as 0, a reset"
+    (assert= (ansi/sgr {:fg 1} (ansi/params ";1")) {:bold true}))
+  (test "the cube and the grey ramp"
+    (assert= (ansi/colour 196 ansi/xterm-palette) [255 0 0])
+    (assert= (ansi/colour 232 ansi/xterm-palette) [8 8 8])
+    (assert= (ansi/colour 16 ["#000000"]) [0 0 0]))
+  (test "a face resolves indexes through the caller's palette"
+    (assert= (ansi/face {:fg 1 :underline true} {:colors (into [] (seq/repeat 16 "#123456"))})
+      {:fg "#123456" :underline true})))
+
+(describe "ansi/strip over the decoder"
+  (test "an OSC title is removed whole — its text never leaks"
+    (assert= (ansi/strip "a\e]2;title\x07b") "ab"))
+  (test "carriage returns still go"
+    (assert= (ansi/strip "\e[1mx\r\n\e[0m") "x\n")))
+
+(describe "ansi/render: strings"
+  (test "an OSC title is dropped through its terminator, not shown"
+    (assert= (ansi/render "" "a\e]0;a title\x07b") "ab")
+    (assert= (ansi/render "" "a\e]8;;http://x\e\\link") "alink")))
