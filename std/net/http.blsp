@@ -837,9 +837,11 @@ response); the root process counts."
                (if (= (/get u :scheme) "https")
                  (tls/request (/get u :host) (/get u :port) [head body-bytes] (/get opts :ca) true)
                  (let (s (tcp/connect (/get u :host) (/get u :port)))
-                   (tcp/set-binary s true)
-                   (tcp/send s [head body-bytes])
-                   s))
+                   ;; connected, then the send failed (the peer reset us): the socket is
+                   ;; ours to close, or every such request leaks a descriptor
+                   (try
+                     (do (tcp/set-binary s true) (tcp/send s [head body-bytes]) s)
+                     (catch e (do (tcp/close s) (throw e))))))
                (catch e (failure (error-message e)))))
     (if (failure? sock)
       {:status 0 :error (error-message sock) :headers {} :body #b""}
