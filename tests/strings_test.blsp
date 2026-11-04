@@ -874,3 +874,32 @@
     (assert= (string/fill-prefix "plain") ""))
   (test "no prefix is the old behaviour"
     (assert= (string/fill "aa\nbb" 70) "aa bb")))
+
+(describe "string: a hanging fill (adaptive fill's two prefixes)"
+  (test "a pair puts the first prefix on the first line and the rest on every other"
+    (assert= (string/fill "- aa bb cc dd" 8 ["- " "  "]) "- aa bb\n  cc dd")
+    (assert= (string/fill "- aa\n  bb cc dd" 8 ["- " "  "]) "- aa bb\n  cc dd"))
+  (test "each line's room is the width less its own prefix"
+    ;; an indented first line: 6 columns of room on it, 10 after
+    (assert= (string/fill "    aa bb cc dd ee" 10 ["    " ""]) "    aa bb\ncc dd ee"))
+  (test "blank input is still empty"
+    (assert= (string/fill "" 10 ["- " "  "]) ""))
+  (test "a list item continues under its text"
+    (assert= (string/fill-prefixes "- item") ["- " "  "])
+    (assert= (string/fill-prefixes "  * item") ["  * " "    "])
+    (assert= (string/fill-prefixes "12) item") ["12) " "    "])
+    (assert= (string/fill-prefixes "- [ ] task") ["- [ ] " "      "]))
+  (test "a bullet's tab stays a tab"
+    (assert= (string/fill-prefixes "-\titem") ["-\t" " \t"]))
+  (test "a comment or quote keeps its marker on every line, a bullet inside it too"
+    (assert= (string/fill-prefixes ";; text") [";; " ";; "])
+    (assert= (string/fill-prefixes "> > quoted") ["> > " "> > "])
+    (assert= (string/fill-prefixes "  ;; - item") ["  ;; - " "  ;;   "]))
+  (test "the second line says how a paragraph continues"
+    (assert= (string/fill-prefixes "Term\n    definition") ["" "    "])
+    (assert= (string/fill-prefixes "1. one\n   two") ["1. " "   "])
+    (assert= (string/fill-prefixes "  \"Doc line\nrest of it") ["  " ""])
+    (assert= (string/fill-prefixes "\n# a\n# b") ["# " "# "]))
+  (test "a word is not a bullet"
+    (assert= (string/fill-prefixes "*emphasis* here") ["" ""])
+    (assert= (string/fill-prefixes "-flag") ["" ""])))

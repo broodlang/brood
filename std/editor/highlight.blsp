@@ -795,6 +795,84 @@ compares them.
           [walked acc] (lc-start moved {:lex (:lex lexer) :rope rope :lo bottom :hi top} '()))
       [(lc-retain walked bottom top) (reverse acc)])))
 
+(def- lc-far
+  ;; what the walk answers when it ran out of lines to lex before the target
+  :editor.highlight/far)
+
+(defn- lc-state-walk (cache lex rope i state last-key target budget)
+  "Lex from line `i`, which starts in `state` (exact), down to line `target`, answering
+`[cache state-at-target]`: a checkpoint every `lc-checkpoint-every` lines and where an old
+entry disagrees, and back in step with a tentative chain the moment its entry agrees. `budget`
+is how many more lines it may lex (nil, any number); spent before the target, it answers
+`[cache lc-far]`, keeping the checkpoints it made."
+  (let (tree (:tree cache)
+        verified (:verified cache)
+        tentative? (and (not (nil? verified)) (> i verified))
+        entry (lc-get tree 0 i))
+    (cond
+      (>= i target) (lc-walk-end cache i state state)
+      ;; back in step: the old chain is exact from here, so resume from its entry nearest the target
+      (and tentative? entry (= (first entry) state))
+        (let (exact (assoc cache :verified nil)
+              [key found] (lc-floor (:tree exact) 0 target [i entry]))
+          (lc-state-walk exact lex rope key (first found) key target budget))
+      (and (not (nil? budget)) (<= budget 0)) [(first (lc-walk-end cache i state state)) lc-far]
+      else
+        (let (reuse? (and entry (= (count entry) 3) (= (first entry) state))
+              out (if reuse? (nth entry 2) (second (lex (lc-line-text rope i) state)))
+              write (cond
+                      (and entry (not (= (first entry) state))) [state]
+                      entry nil
+                      (>= (- i last-key) lc-checkpoint-every) [state]
+                      else nil))
+          (lc-state-walk (if write (assoc cache :tree (lc-put tree i write)) cache)
+            lex
+            rope
+            (inc i)
+            out
+            (if (or entry write) i last-key)
+            target
+            (if (or (nil? budget) reuse?) budget (dec budget)))))))
+
+(defn- lc-state (cache lexer rope line change budget)
+  ;; `line-cache-state`'s walk, with a budget of lines to lex (nil for none)
+  (if (:stateless? lexer)
+    [cache (:initial lexer)]
+    (let (moved (if (nil? (:tree cache))
+                  (assoc cache :rope rope :tree (lc-put nil 0 [(:initial lexer)]))
+                  (lc-edited cache rope change))
+          target (math/max 0 (math/min line (text/line-count rope)))
+          tree (:tree moved)
+          verified (:verified moved)
+          [key _] (lc-floor tree 0 target [0 nil])
+          from (if (and (not (nil? verified)) (> key verified)) verified key))
+      (lc-state-walk moved (:lex lexer) rope from (first (lc-get tree 0 from)) from target budget))))
+
+(defn line-cache-state (cache lexer rope line &optional (change nil))
+  "`[cache' state]`: the state line `line` of `rope` starts in, by a stateful `lexer`, and the
+cache to pass next time — the question `syntax-ppss` answers in Emacs, for a caller that wants
+a line's STATE rather than its colours (is this line inside a string, how deep in brackets).
+It lexes from the cache's nearest checkpoint above `line` (at most `lc-checkpoint-every` lines
+of an unedited region), or from the first line an edit touched, and keeps checkpoints as it
+goes, so asking again near the same place costs a few lines. `change` is
+`line-cache-update`'s. A line past the end starts in the state the last line ends in; a
+stateless lexer's lines all start in its `:initial`. [[line-cache-state-within]] is the same
+question with a budget.
+
+    (second (editor/highlight/line-cache-state (editor/highlight/line-cache) (editor/highlight/line-lexer (fn (line state) [[] (+ state (string/length line))]) 0) (text/from-string \"ab\\ncde\\nf\") 2))   ;=> 5"
+  (lc-state cache lexer rope line change nil))
+
+(defn line-cache-state-within (cache lexer rope line limit &optional (change nil))
+  "`[cache' known? state]`: [[line-cache-state]] lexing at most `limit` lines — for a caller on
+a keypress that must not read a cold region (a large file whose cache is still being built, the
+lines below an edit that changed every state after it). When the answer is further than that,
+`known?` is false and `state` nil, and the cache keeps the checkpoints the walk made, so asking
+again goes on from there; when it is in reach, as `line-cache-state`.
+
+    (second (editor/highlight/line-cache-state-within (editor/highlight/line-cache) (editor/highlight/line-lexer (fn (line state) [[] (inc state)]) 0) (text/from-string \"a\\nb\\nc\\nd\") 3 1))   ;=> false"
+  (let ([walked state] (lc-state cache lexer rope line change limit))
+    (if (= state lc-far) [walked false nil] [walked true state])))
+
 ;; ---- the shared span -> runs tiler ------------------------------------------
 ;; `face-at` / `ranges-face` / `fontify-runs` are the renderer-agnostic core: a
 ;; caller hands in the lexer `spans` plus one `ranges` overlay channel and gets

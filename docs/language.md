@@ -3414,7 +3414,7 @@ Every operation whose **subject is a string** lives in the `string` module
 `string/blank?`  `string/starts-with?`  `string/ends-with?`  `string/repeat`
 `string/pad-left`  `string/pad-right`  `string/->graphemes`
 `string/grapheme-count`  `string/grapheme-at`  `string/substring-graphemes`
-`string/normalize`  `string/fill`
+`string/normalize`  `string/fill`  `string/fill-prefixes`  `string/fill-prefix`
 
 Bare in the prelude — these operate on *any* collection or bridge a string to
 another type, so they are **not** string-library ops:
