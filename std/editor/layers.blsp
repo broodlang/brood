@@ -436,6 +436,41 @@ The Emacs `interpreter-mode-alist`: a script with no extension is typed by its s
     (editor/layers/register-interpreter-type \"bash\" :shell)   ;~> …the registry updated: a #!/bin/bash script is now :shell…"
   (%registry-update! 'editor/layers/*auto-type-by-interpreter* :assoc [name] type))
 
+;; ---- taking a registration back -------------------------------------------------------
+;; A plugin that registered a mode is removed or replaced while the program runs; what it
+;; registered goes with it. Each is the inverse of its `register-*`, an operation like the
+;; register was (journalled with a load, kept by an isolate restore); `registry/written-by`
+;; finds every one a module's load made.
+
+(defn unregister-system-layer (ref)
+  "Drop `ref` from the always-on system layers. True when it was one.
+
+    (editor/layers/unregister-system-layer 'nobody/layer)   ;=> false"
+  (= true (%registry-update! 'editor/layers/*system-layers* :remove [] ref)))
+
+(defn unregister-type-layers (type)
+  "Drop buffer `type`'s layer binding: a new buffer of that type gets no layers from it.
+True when it had one.
+
+    (editor/layers/unregister-type-layers :nobody-type)   ;=> false"
+  (and (contains? *type-layers* type)
+    (= true (%registry-update! 'editor/layers/*type-layers* :dissoc [type] nil))))
+
+(defn unregister-file-type (spec type)
+  "Drop the filename rule mapping `spec` to `type` — exactly the one `register-file-type`
+made. True when there was one.
+
+    (editor/layers/unregister-file-type \".nobody\" :nobody-type)   ;=> false"
+  (= true
+    (%registry-update! 'editor/layers/*auto-type-by-file* :remove [] {:match spec :type type})))
+
+(defn unregister-interpreter-type (name)
+  "Drop the `#!` interpreter `name`'s type mapping. True when it had one.
+
+    (editor/layers/unregister-interpreter-type \"nobody\")   ;=> false"
+  (and (contains? *auto-type-by-interpreter* name)
+    (= true (%registry-update! 'editor/layers/*auto-type-by-interpreter* :dissoc [name] nil))))
+
 (defn shebang-interpreter (line:string -> (or nil string))
   "The interpreter a `#!` `line` names — `\"bash\"` for `#!/usr/bin/env bash` and for
 `#!/bin/bash -e`, `\"python3\"` for `#!/usr/bin/python3` — or nil for a line that is not a

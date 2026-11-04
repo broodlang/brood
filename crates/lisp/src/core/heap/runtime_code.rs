@@ -174,6 +174,11 @@ pub enum RegistryOp {
     /// twin, for a registry whose ORDER is precedence and whose newcomers rank lowest
     /// (`editor/layers/*system-layers*`, KI-141).
     AppendNew,
+    /// Remove the members of a list-valued global equal to the value — the retraction of a
+    /// `:cons-new` / `:append-new`, an op (journalled with a load, replayed by an isolate
+    /// restore) where a compare-and-swap would be a live write the restore drops. Declines
+    /// when the value is not a member.
+    Remove,
     /// Merge a map into the map at a one-key `path` (creating it), the whole read-merge-write
     /// under the registry lock — `face-set`'s restyle, where a lost update is a missing key
     /// (`registry_test`: 64 concurrent merges into one face must all land). Non-map values

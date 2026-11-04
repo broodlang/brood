@@ -692,13 +692,24 @@ impl Heap {
         // The writer journal (KI-136): who owns this entry now. A `:dissoc` retires it; any
         // other write records the writing module, or clears the entry for a root write.
         {
-            let key = (sym, self.registry_path_key(path));
+            // A list op owns one MEMBER, not the list: its entry is keyed by the member, so
+            // `(%registry-writer 'list-global [member])` names who added it and a `:remove`
+            // retires exactly that.
+            let list_op = matches!(
+                op,
+                RegistryOp::ConsNew | RegistryOp::AppendNew | RegistryOp::Remove
+            );
+            let key = if list_op {
+                (sym, self.registry_path_key(&[val]))
+            } else {
+                (sym, self.registry_path_key(path))
+            };
             let mut writers = rt
                 .registry_writers
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             match (op, from.or_else(|| self.compile_ns())) {
-                (RegistryOp::Dissoc, _) | (_, None) => {
+                (RegistryOp::Dissoc | RegistryOp::Remove, _) | (_, None) => {
                     writers.remove(&key);
                 }
                 (_, Some(writer)) => {
@@ -773,6 +784,18 @@ impl Heap {
                 let mut items = self.list_to_vec(cur).unwrap_or_default();
                 items.push(val);
                 self.list(items)
+            }
+            RegistryOp::Remove => {
+                if !self.list_contains(cur, val) {
+                    return None;
+                }
+                let kept: Vec<Value> = self
+                    .list_to_vec(cur)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|&item| !self.equal(item, val))
+                    .collect();
+                self.list(kept)
             }
             RegistryOp::Merge => {
                 let ValueRef::Map(patch) = val.unpack() else {

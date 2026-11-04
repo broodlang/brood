@@ -1486,10 +1486,11 @@ pub(super) fn registry_update(args: &[Value], env: EnvId, heap: &mut Heap) -> Li
         "dissoc" => RegistryOp::Dissoc,
         "cons-new" => RegistryOp::ConsNew,
         "append-new" => RegistryOp::AppendNew,
+        "remove" => RegistryOp::Remove,
         "merge" => RegistryOp::Merge,
         _ => {
             return Err(LispError::type_err(
-                "%registry-update!: op must be :assoc, :assoc-new, :dissoc, :cons-new, :append-new or :merge",
+                "%registry-update!: op must be :assoc, :assoc-new, :dissoc, :cons-new, :append-new, :remove or :merge",
             ));
         }
     };

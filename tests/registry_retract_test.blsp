@@ -1,0 +1,58 @@
+;;; Taking a plugin's registrations back: `registry/written-by` lists what a module's load
+;;; wrote into any registry — a map entry by its key path, a list registry's member by the
+;;; member (the kernel journals the writer of each, KI-136) — and `registry/retract` /
+;;; `editor/layers`' `unregister-*` take them back as journalled operations.
+;;;
+;;; The fixture is a module nothing else knows, written to a temp dir on `*load-path*`, so
+;;; its writes are made by ITS load.
+
+(defmodule registry-retract-test (:use test))
+
+(purge-stale-temp "regretract-")
+(def- *dir* (temp-dir "regretract-"))
+(file/mkdir *dir*)
+(reflect/add-load-path *dir*)
+(file/spit (path/join *dir* "regretract-plugin.blsp")
+  (str "(defmodule regretract-plugin)\n"
+    "(registry/put! :regretract/rows :plugin-row {:hook 'regretract-plugin/hook})\n"
+    "(editor/layers/register-system-layer 'regretract-plugin/layer)\n"
+    "(editor/layers/register-type-layers :regretract-type ['regretract-plugin/layer])\n"
+    "(editor/layers/register-file-type \".regretract\" :regretract-type)\n"
+    "(editor/layers/register-interpreter-type \"regretract\" :regretract-type)\n"
+    "(defn hook () :ran)\n"))
+
+(describe "registry/written-by and retract"
+  :isolated (test "every write a plugin's load made is listed, by writer, and taken back"
+    (registry/put! :regretract/rows :core-row 1)
+    (assert= ((reflect/eval 'regretract-plugin/hook)) :ran) ; a qualified reference loads it
+    (let (writes (registry/written-by #{'regretract-plugin})
+          globals (into #{} (map writes :global)))
+      (assert= (registry/writer :regretract/rows :plugin-row) 'regretract-plugin)
+      (is (nil? (registry/writer :regretract/rows :core-row)))
+      (is (contains? globals 'registry/*registries*))
+      (is (contains? globals 'editor/layers/*system-layers*))
+      (is (contains? globals 'editor/layers/*auto-type-by-file*))
+      (is (contains? globals 'editor/layers/*type-layers*))
+      (is (contains? globals 'editor/layers/*auto-type-by-interpreter*))
+      (doseq (write writes) (is (registry/retract write)))
+      (assert= (registry/written-by #{'regretract-plugin}) [])
+      (is (nil? (registry/lookup :regretract/rows :plugin-row)))
+      (assert= (registry/lookup :regretract/rows :core-row) 1)
+      (is (not (includes? editor/layers/*system-layers* 'regretract-plugin/layer)))
+      (is (nil? (editor/layers/layers-for-type :regretract-type)))
+      (is (not (any? editor/layers/*auto-type-by-file*
+                 (fn (rule) (= (:type rule) :regretract-type))))))))
+
+(describe "editor/layers unregister-*"
+  :isolated (test "each takes back exactly what its register made"
+    (editor/layers/register-system-layer 'regretract-test/layer)
+    (editor/layers/register-type-layers :regretract-own ['regretract-test/layer])
+    (editor/layers/register-file-type ".own" :regretract-own)
+    (editor/layers/register-interpreter-type "own" :regretract-own)
+    (is (editor/layers/unregister-system-layer 'regretract-test/layer))
+    (is (editor/layers/unregister-type-layers :regretract-own))
+    (is (editor/layers/unregister-file-type ".own" :regretract-own))
+    (is (editor/layers/unregister-interpreter-type "own"))
+    (is (not (editor/layers/unregister-system-layer 'regretract-test/layer)))
+    (is (not (includes? editor/layers/*system-layers* 'regretract-test/layer)))
+    (is (nil? (editor/layers/layers-for-type :regretract-own)))))

@@ -91,3 +91,78 @@ so the order never depends on which module happened to load first.
 
     (do (registry/put! :doc/steps :b {:rank 2}) (registry/put! :doc/steps :a {:rank 1}) (map (registry/ranked :doc/steps) first))   ;=> (:a :b)"
   (let (order (ranked-table (entries id))) (if (list? order) order (list))))
+
+;; ---- who wrote an entry, and taking it back (ADR-581's companion) --------------------
+;; The kernel journals the module whose LOAD made each registry write (KI-136): a map entry
+;; by its key path, a list registry's member by the member itself. That is enough for a
+;; program that loads plugins to take back everything one registered — here, in a std table
+;; (`editor/layers`, `editor/face`) or anywhere else — without each registry keeping its own
+;; ownership. A write made at run time, outside any load, has no writer.
+
+(defn writer (id:any key:any -> any)
+  "The module whose load wrote the entry under `key` in the registry `id`, or nil (a root
+or run-time write, or no entry).
+
+    (registry/writer :doc/nobody :k)   ;=> nil"
+  (%registry-writer 'registry/*registries* [id key]))
+
+(def- module-state-registries
+  #{'*features*
+    '*features-loading* '*require-edges* '*module-files* '*impls* '*impl-from* '*impl-tiers*})
+;; The module system's own bookkeeping, which a write-back would corrupt: what is loaded,
+;; the require edges, where a package's modules are, and the ability impls (retired with
+;; the definitions they name, by `reflect/undef`).
+
+(defn written-by (modules:set -> vector)
+  "Every registry entry a load of one of `modules` (a set of module symbols) wrote and that
+is still there: `{:global sym :path [k …] :value v}` for a map entry (one or two keys deep),
+`{:global sym :member v}` for a member of a list registry (`editor/layers`'
+`*system-layers*`). What [[retract]] takes back. The module system's own bookkeeping is not
+listed.
+
+    (registry/written-by #{'nobody/at-all})   ;=> []"
+  (fold (%registry-names)
+    []
+    (fn (found global)
+      (let (value (if (bound? global) (reflect/eval global) nil)
+            mine? (fn (path) (contains? modules (%registry-writer global path))))
+        (cond
+          (contains? module-state-registries global) found
+          (map? value)
+            (fold value
+              found
+              (fn (acc entry)
+                (let ([outer inner] entry)
+                  (cond
+                    (mine? [outer]) (conj acc {:global global :path [outer] :value inner})
+                    (map? inner)
+                      (fold inner
+                        acc
+                        (fn (deeper pair)
+                          (let ([key nested] pair)
+                            (if (mine? [outer key])
+                              (conj deeper {:global global :path [outer key] :value nested})
+                              deeper))))
+                    else acc))))
+          (or (list? value) (vector? value))
+            (fold value
+              found
+              (fn (acc member)
+                (if (mine? [member]) (conj acc {:global global :member member}) acc)))
+          else found)))))
+
+(defn retract (write:map -> bool)
+  "Take back one registry write [[written-by]] listed: dissoc its `:path`, or remove its
+`:member` from the list. An operation like the write was, so a load journal replays it and an
+isolate restore keeps it. True when there was something to take back.
+
+    (registry/retract {:global 'registry/*registries* :path [:doc/none :k]})   ;=> false"
+  (if (contains? write :member)
+    (= true (%registry-update! (:global write) :remove [] (:member write)))
+    (let (path (:path write)
+          table (if (bound? (:global write)) (reflect/eval (:global write)) nil)
+          present? (if (= (count path) 1)
+                     (and (map? table) (contains? table (first path)))
+                     (let (inner (and (map? table) (get table (first path))))
+                       (and (map? inner) (contains? inner (second path))))))
+      (and present? (= true (%registry-update! (:global write) :dissoc path nil))))))
