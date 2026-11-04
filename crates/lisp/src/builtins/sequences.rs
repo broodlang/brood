@@ -448,7 +448,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::range(1, 3),
         Sig::with_optional(vec![string], vec![int, int], int),
         &["s", "start-col", "tab-width"],
-        "How many terminal/grid cells string s occupies (grapheme-cluster aware: an emoji / flag / CJK char counts as 2, a combining mark 0, a tab the cells to its next stop). The width-aware counterpart to string/length. The optional start-col (default 0) is the column s is laid out from — a chunk of a longer line passes its column so its tabs land on the LINE's stops — and tab-width the distance between stops — by default the dynamic *tab-width* (8 unless a binding says otherwise).\n\n    (string/display-width \"Hi there\")   ;=> 8\n    (binding (*tab-width* 4) (string/display-width \"\\tx\"))   ;=> 5\n    (string/display-width \"a\\tb\")       ;=> 9\n    (string/display-width \"\\tx\" 3)      ;=> 6",
+        "How many terminal/grid cells string s occupies (grapheme-cluster aware: an emoji / flag / CJK char counts as 2, a combining mark 0, a tab the cells to its next stop, a glyphless character such as U+200B 0 — or its `<200b>` escape's cells when the dynamic *glyphless-display* is :hex-code, ADR-556). The width-aware counterpart to string/length. The optional start-col (default 0) is the column s is laid out from — a chunk of a longer line passes its column so its tabs land on the LINE's stops — and tab-width the distance between stops — by default the dynamic *tab-width* (8 unless a binding says otherwise).\n\n    (string/display-width \"Hi there\")   ;=> 8\n    (binding (*tab-width* 4) (string/display-width \"\\tx\"))   ;=> 5\n    (string/display-width \"a\\tb\")       ;=> 9\n    (string/display-width \"\\tx\" 3)      ;=> 6\n    (binding (*glyphless-display* :hex-code) (string/display-width \"a\\u{200b}b\"))   ;=> 8",
         display_width);
     // type reflection — the tag predicates (nil?/int?/string?/…) are Brood
     // (std/prelude.blsp) over this one reflective primitive.
@@ -1697,10 +1697,12 @@ pub(super) fn display_width(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
     match v {
         Value::Str(id) => {
             let (start_col, tab_width) = tab_layout(heap, "string/display-width", args, 1)?;
+            let glyphless = ambient_glyphless(heap);
             Ok(Value::int(crate::host::text_width::display_width_from(
                 heap.string(id),
                 start_col,
                 tab_width,
+                glyphless,
             ) as i64))
         }
         _ => Err(LispError::wrong_type(
@@ -1728,6 +1730,21 @@ fn ambient_tab_width(heap: &Heap) -> Option<i64> {
     match heap.env_get(EnvId::GLOBAL, *TAB_WIDTH_SYMBOL) {
         Some(Value::Int(n)) => Some(n.clamp(1, MAX_TAB_WIDTH as i64)),
         _ => None,
+    }
+}
+
+/// How a cell-layout call lays out the glyphless characters (ADR-556): the prelude's
+/// dynamic `*glyphless-display*`, read through the binding stack as `*tab-width*` is —
+/// `:hex-code` shows each as its `<200b>` escape (`Glyphless::HexCode`); anything else,
+/// the default `:hidden` and an unbound variable included, leaves them zero cells.
+pub(super) fn ambient_glyphless(heap: &Heap) -> crate::host::text_width::Glyphless {
+    use crate::host::text_width::Glyphless;
+    static GLYPHLESS_SYMBOL: LazyLock<Symbol> =
+        LazyLock::new(|| value::intern("*glyphless-display*"));
+    static HEX_CODE: LazyLock<Symbol> = LazyLock::new(|| value::intern("hex-code"));
+    match heap.env_get(EnvId::GLOBAL, *GLYPHLESS_SYMBOL) {
+        Some(Value::Keyword(name)) if name == *HEX_CODE => Glyphless::HexCode,
+        _ => Glyphless::Hidden,
     }
 }
 

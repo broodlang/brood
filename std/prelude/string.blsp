@@ -112,6 +112,16 @@
 ;; a tab of 4. Emacs's `tab-width`, and its default.
 (defdyn *tab-width* 8)
 
+;; How the cell layout shows a GLYPHLESS character (ADR-556) — an invisible format
+;; character: a zero width space, a word joiner, a bidi control, a BOM in mid-text, a tag
+;; character (`string/glyphless-indices` finds them). `:hidden`, zero cells, as a terminal
+;; draws them; `:hex-code`, as a visible escape — `<200b>` — that `string/display-width`,
+;; `string/width->index` and `string/expand-tabs` all lay out alike, so an editor binding it
+;; around a render shows them with the cursor, a click and a wrap still agreeing. Emacs's
+;; `glyphless-char-display`; hidden by default, so a terminal emulator's grid stays a
+;; terminal's.
+(defdyn *glyphless-display* :hidden)
+
 (defdyn *print-length* 100)
 (defdyn *print-level* 8)
 ;; The third bound, and in practice the one that saves a display: a TEXT leaf's

@@ -503,8 +503,10 @@ fn next_id() -> u64 {
 /// OS window — `gui-open` hands back a fake window with a fixed cell grid, every
 /// draw/window op is a silent no-op, and no key/mouse events ever arrive. A
 /// windowed app's loop runs unchanged (paced by its own `(after)` timer), so it
-/// can be tested / soak-run / CI'd with no popup. Read once at first use.
-fn headless() -> bool {
+/// can be tested / soak-run / CI'd with no popup. Read once at first use. Public as
+/// `gui/headless?` (ADR-557): a question with no font engine behind it — `gui-font-info`,
+/// `gui-cell-size` — errors headless, so an app asks this before asking it.
+pub fn headless() -> bool {
     static H: OnceLock<bool> = OnceLock::new();
     *H.get_or_init(|| {
         std::env::var("BROOD_GUI_HEADLESS")

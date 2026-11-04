@@ -217,6 +217,39 @@
       (assert= (string/width->index "\tx" 1024) 1))
     (assert-error (string/display-width "\t" 0 2000))))
 
+;; A glyphless character — an invisible format character: a zero width space, a bidi
+;; control — is zero cells, as a terminal draws it, unless `*glyphless-display*` is
+;; `:hex-code` (ADR-556): then all three cell-layout primitives lay it out as its visible
+;; `<200b>` escape, so a view showing it keeps the caret, a click and a wrap in step.
+(describe "glyphless characters"
+  (test "hidden by default: zero cells, left in place"
+    (assert= *glyphless-display* :hidden)
+    (assert= (string/display-width "a\u{200b}b") 2)
+    (assert= (string/expand-tabs "a\u{200b}b") "a\u{200b}b"))
+  (test ":hex-code shows each as its escape, in all three"
+    (binding (*glyphless-display* :hex-code)
+      (assert= (string/display-width "a\u{200b}b") 8)
+      (assert= (string/expand-tabs "a\u{202e}b") "a<202e>b")
+      (assert= (string/expand-tabs "\u{e0041}") "<e0041>")
+      ;; every cell of the escape is the character; the cell after it the next
+      (assert= (string/width->index "a\u{200b}b" 1) 1)
+      (assert= (string/width->index "a\u{200b}b" 6) 1)
+      (assert= (string/width->index "a\u{200b}b" 7) 2)
+      ;; std's callers follow: the clip keeps the escape whole or drops it
+      (assert= (string/clip-cells "a\u{200b}b" 4) "a")))
+  (test "a tab after an escape still reaches the line's stop"
+    (binding (*glyphless-display* :hex-code)
+      (assert= (string/expand-tabs "\u{200b}\tx") "<200b>  x")))
+  (test "the joiners stay part of their text: an emoji ZWJ sequence is one glyph"
+    (binding (*glyphless-display* :hex-code)
+      (assert= (string/display-width "👨‍👩‍👧") 2)
+      (assert= (string/glyphless-indices "a\u{200d}b") [])))
+  (test "glyphless-indices finds them by character index"
+    (assert= (string/glyphless-indices "x\u{2066}y\u{200f}\u{feff}") [1 3 4])
+    (assert= (string/glyphless-indices "") []))
+  (test "any other value of the variable leaves them hidden"
+    (binding (*glyphless-display* :box) (assert= (string/display-width "\u{200b}") 0))))
+
 ;; The grapheme-INDEXED accessors (ADR-159). `string->graphemes` already gave the
 ;; clusters, but only as a whole vector — so the documented-correct cursor step
 ;; ("step by cluster, never by codepoint") cost a vector of every cluster in the

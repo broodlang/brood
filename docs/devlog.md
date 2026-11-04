@@ -5040,3 +5040,15 @@ on all of them, and nothing said which to pick. The user chose a rule plus a lin
 unless the choice depends on more than the first argument, stated once in `language.md`, and
 `nest check` reports a `defmulti` whose methods vary only the first position. It found two in
 the tree, both in `multimethod_test` exercising the mechanism, which now opt out.
+
+2026-11-04 (ADR-556). bedit's review against Emacs's bug archive found the invisible format
+characters invisible: a zero width space, a BOM in mid-text and the bidi controls of a Trojan
+Source attack were zero cells, and a view that drew anything there would have put every caret
+and click after it off by the width it drew. The cell layout now takes a third knob beside the
+tab width: `*glyphless-display*` bound to `:hex-code` lays each glyphless character out as its
+`<200b>` escape in all three primitives, and `string/glyphless-indices` says where they are. The
+class is decided per character, which is why ZWJ and ZWNJ stay out of it.
+
+2026-11-04 (ADR-557). The same review: a `:font` that is not installed became DejaVu silently.
+`gui/font-info` knew (`:not-found`), but it errors headless and nothing could tell headless
+from windowed without reading the environment by hand. `gui/headless?` is that question.

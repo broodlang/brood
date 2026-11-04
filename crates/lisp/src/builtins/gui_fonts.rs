@@ -32,6 +32,27 @@ pub(super) fn register(primitives: &mut super::Primitives) {
     );
 }
 
+/// `%gui-headless?` (ADR-557), registered after every other primitive for the intern-order
+/// reason in the module doc.
+pub(super) fn register_headless(primitives: &mut super::Primitives) {
+    use super::signature_types::*;
+    use crate::core::value::Arity;
+    use crate::types::Sig;
+    primitives.def(
+        "%gui-headless?",
+        Arity::exact(0),
+        Sig::new(vec![], bool_ty),
+        &[],
+        "True when this runtime's GUI is HEADLESS (BROOD_GUI_HEADLESS set in a --features gui build): windows open as fakes with a fixed grid and draw nothing, and there is no font engine — so %gui-font-info and %gui-cell-size error. False in a windowed runtime, and without --features gui (where %gui-compiled? is the question).",
+        gui_headless,
+    );
+}
+
+/// `(%gui-headless?)` — see the registration; `host::gui::headless`.
+fn gui_headless(_args: &[Value], _: EnvId, _heap: &mut Heap) -> LispResult {
+    Ok(Value::boolean(crate::host::gui::headless()))
+}
+
 /// `(%gui-font-info [family])` — see the registration.
 fn gui_font_info(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let family = match arg(args, 0) {

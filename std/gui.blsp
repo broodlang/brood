@@ -15,6 +15,12 @@
     (gui/available?)   ;~> true in a --features gui build, false otherwise"
   (%gui-compiled?))
 
+(defn headless? ()
+  "True when this runtime's GUI is HEADLESS — `BROOD_GUI_HEADLESS` set in a --features gui build: `gui/open` hands back a fake window that draws nothing, and there is no font engine, so the questions only one can answer (`gui/font-info`, `gui/cell-size`) error. Ask it before such a question, as `gui/available?` is asked before a side effect, rather than calling and catching (ADR-557): an app that tells its user the font they configured is not installed asks `gui/font-info` only when this is false. False in a windowed runtime and without --features gui.
+
+    (bool? (gui/headless?))   ;=> true"
+  (%gui-headless?))
+
 (defn close (id)
   "Close window id (the teardown for gui/open). Idempotent; an unknown id is a no-op.
 
@@ -136,7 +142,7 @@
   (%gui-font-register name styles))
 
 (defn font-info (&optional family)
-  "Where font family `family` (a keyword; the window default when omitted) got its faces, as a map: :name (the family shaping uses), :requested (the installed name a :family-name registration asked for, or nil), :origin (:bundled, :files, :system, or :not-found — asked for by name, not installed, the bundled DejaVu standing in), :regular / :bold / :italic / :bold-italic (the file each style resolved to), :fallbacks (a vector of {:name :file} — the installed fonts loaded so far to draw glyphs the primary font lacks, CJK or symbols, in the order first needed), :system-scanned (whether the installed fonts have been scanned yet: only on demand) and :ligatures. The diagnostic for \"I asked for Iosevka, why does it look like DejaVu\". Answered on the GUI thread after every registration sent before it. Errors headless and without --features gui.
+  "Where font family `family` (a keyword; the window default when omitted) got its faces, as a map: :name (the family shaping uses), :requested (the installed name a :family-name registration asked for, or nil), :origin (:bundled, :files, :system, or :not-found — asked for by name, not installed, the bundled DejaVu standing in), :regular / :bold / :italic / :bold-italic (the file each style resolved to), :fallbacks (a vector of {:name :file} — the installed fonts loaded so far to draw glyphs the primary font lacks, CJK or symbols, in the order first needed), :system-scanned (whether the installed fonts have been scanned yet: only on demand) and :ligatures. The diagnostic for \"I asked for Iosevka, why does it look like DejaVu\". Answered on the GUI thread after every registration sent before it. Errors headless (ask `gui/headless?` first, ADR-557) and without --features gui.
 
     (gui/font-info :code)   ;~> {:name \"JetBrains Mono\" :origin :system :regular \"/usr/share/fonts/…\" :fallbacks [] …}
     (fn? gui/font-info)   ;=> true"
