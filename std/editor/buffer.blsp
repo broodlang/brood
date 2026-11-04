@@ -2020,25 +2020,12 @@ is never merged, into or onto."
           (cons [r1 (- length (- hi lo))] mids)
           merged-properties]))))
 
-(defn- buffer-splice-log-seal (log)
-  "`log` with a REDACTION at its head (`redact-region`'s entry) sealed: its text from before
-the redaction, and every entry older than it — the places the log still held the redacted
-characters, its ropes and runs — let go, the entry alone left, with no text to walk back
-to. Done by the next edit, so a holder replaying the log in the event that redacted (a
-buffer process, another frame, both sync every event) still walks through it, the text is
-held one edit at most, and a holder further behind compares instead (`buffer-edits-between`,
-which redacts too)."
-  (let (head (when (not (empty? log)) (first log)))
-    (if (and head (= (nth head 6) :redact) (not (nil? (first head))))
-      (list (assoc head 0 nil))
-      log)))
-
 (defn- buffer-splice-log-push (log before-rope after-rope lo hi repl &optional properties)
   "`log` with the splice `[lo hi repl]` (`before-rope` → `after-rope`) recorded: merged into
 the newest entry when it continues that entry's run, else a new entry, the oldest dropped
 past `*splice-log-max*`. `properties` is what the inserted text came with, relative to
 `repl` — or a property change (`[:put-properties width changes]`), an entry of its own."
-  (let (log (buffer-splice-log-seal log)
+  (let (log (or log ())
         merged (when (not (empty? log))
                  (buffer-splice-coalesce (first log) before-rope after-rope lo hi repl properties)))
     (if merged
@@ -2489,7 +2476,7 @@ the text, recorded for undo.
 
     (editor/buffer/buffer-text (editor/buffer/apply-splice (editor/buffer/set-read-only (editor/buffer/make-buffer \"abc\") true) 3 3 \"d\"))   ;=> \"abcd\""
   (cond
-    (= properties :redact) (buffer-redact buf lo hi true)
+    (= properties :redact) (buffer-redact buf lo hi)
     (property-change? properties)
       (let ([_ width changes] properties
             [from to] (property-change-range buf lo width)
@@ -2526,11 +2513,10 @@ the text, recorded for undo.
 ;; has had, so a holder too far behind for the log still sends one (`buffer-edits-between`),
 ;; and an `undo-group` around one does not bring the history back.
 
-(defn- buffer-redact (buf:buffer lo:int hi:int foreign?:bool -> buffer)
-  "[[redact-region]]'s work: the owner's (`foreign?` false) keeps its log's earlier entries
-under the redaction's until its next edit; a copy applying another holder's redaction
-(`apply-splice`) keeps nothing — it replays no log of its own to anyone, so its entry names
-no text to walk back to."
+(defn- buffer-redact (buf:buffer lo:int hi:int -> buffer)
+  "[[redact-region]]'s work, the owner's and a copy applying another holder's redaction
+(`apply-splice`) alike: the log is left with the redaction alone, naming no text from before
+it — no rope it keeps holds the redacted characters."
   (let (length (buffer-length buf)
         from (buffer-clamp 0 length lo)
         to (math/max from (buffer-clamp 0 length hi)))
@@ -2555,11 +2541,7 @@ no text to walk back to."
                        (nil? regions) deleted
                        (empty? regions) (assoc deleted :editable regions)
                        else
-                         (buffer-adjust-editable (assoc deleted :editable regions) :delete from to))
-            ;; the log as it was, a redaction before this one sealed (`buffer-apply-edit`
-            ;; pushed the delete as a plain entry, which this one replaces)
-            earlier (if foreign? () (buffer-splice-log-seal (or (get buf :splices) ())))
-            entry [(if foreign? nil (get buf :rope)) (get narrowed :rope) from to "" () :redact])
+                         (buffer-adjust-editable (assoc deleted :editable regions) :delete from to)))
         (assoc narrowed
           :modified true
           :undo ()
@@ -2567,24 +2549,26 @@ no text to walk back to."
           :undo-size 0
           :undo-amalgamate false
           :redactions (inc (or (get buf :redactions) 0))
-          :splices (take (cons entry earlier) *splice-log-max*))))))
+          ;; the entry names no text to walk back to: a holder comparing from before the
+          ;; redaction finds the change by `buffer-edits-between`, which redacts too
+          :splices (list [nil (get narrowed :rope) from to "" () :redact]))))))
 
 (defn redact-region (buf:buffer lo:int hi:int -> buffer)
   "`buf` with the characters `[lo, hi)` deleted and every trace of them gone: the undo
 history is dropped (any snapshot before the delete may hold part of the text — a password
 typed one key at a time leaves a snapshot per key), none is recorded for the delete, and the
 splice log records the delete as a redaction (`[lo hi \"\" :redact]` from
-`buffer-edits-since`), so a holder replaying it (a buffer process, another frame) redacts
-its copy too instead of recording the delete in its own history. The log's earlier entries
-stay under it until the buffer's next edit, which seals them, letting go of every text from
-before; a holder that cannot walk the log by then still redacts (`buffer-edits-between`). An
+`buffer-edits-between`), so a holder replaying it (a buffer process, another frame) redacts
+its copy too instead of recording the delete in its own history. The log keeps nothing from
+before it — no rope holding the redacted text stays in memory — so a holder comparing from
+before the redaction finds the change by `buffer-edits-between`, which redacts too. An
 `undo-group` around it drops the history too. Point, mark, markers, text properties and the
 narrowing are carried as for any edit; a read-only or narrowed buffer is redacted all the
 same (the owner removes its own text). Emacs has no single call for it: `read-passwd` keeps
 the text out of the buffer in the first place.
 
     (editor/buffer/buffer-text (editor/buffer/undo (editor/buffer/redact-region (editor/buffer/insert (editor/buffer/end-of-buffer (editor/buffer/make-buffer \"pw: \")) \"hun\") 4 7)))   ;=> \"pw: \""
-  (buffer-redact buf lo hi false))
+  (buffer-redact buf lo hi))
 
 ;; ---- rectangles: column-block ops (Emacs C-x r r/k/d/o/c/t/y) ---------------
 ;; A RECTANGLE is the character grid between two corners — point and mark taken as
