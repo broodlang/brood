@@ -280,14 +280,17 @@
             ;; one event: output at the process mark, then the redaction
             redacted (redact-region (replace-region synced 9 9 "pw: ") 13 16)
             _ (link-propagate-buffers (link-init bp (self)) synced redacted)
-            [after-output output-action] (next-push seeded)
-            [_ redact-action] (next-push after-output)
-            cleaned (buffer-apply-action (buffer-apply-action other output-action) redact-action))
+            ;; the redacting buffer keeps no text from before the redaction, so the event
+            ;; arrives as the comparison sends it: the changed range redacted, then the text
+            [after-redaction redact-action] (next-push seeded)
+            [_ output-action] (next-push after-redaction)
+            cleaned (buffer-apply-action (buffer-apply-action other redact-action) output-action))
+        (assert= redact-action [:splice [9 12 ""] :redact])
         (assert= output-action [:splice [9 9 "pw: "] nil])
-        (assert= redact-action [:splice [13 16 ""] :redact])
         (is (secret-held? other "hun"))
         (assert= (buffer-text cleaned) "$ sudo x\npw: ")
-        (assert= (get cleaned :undo) ())
+        ;; the text inserted after the redaction is undoable; nothing before it is
+        (assert= (buffer-text (undo cleaned)) "$ sudo x\n")
         (is (not (secret-held? cleaned "hun")))
         (assert= (buffer-query bp buffer-text) "$ sudo x\npw: "))
       (stop-buffer bp)))
