@@ -495,8 +495,9 @@ pub const STATE_DUMP: &str = r#"
 ;; `regex` and `table` since 2026-09-23: `string/fill-prefix` names `regex/find` (whose
 ;; memos are tables), so a source load of `string` loads both at expansion and an imaged
 ;; one defers them to the first call. `encoding` since 2026-10-12, the same way: `path/temp`
-;; names `encoding/hex-encode-bytes`.
-(doseq (m ['map 'seq 'io 'string 'math 'reflect 'path 'file 'regex 'table 'encoding])
+;; names `encoding/hex-encode-bytes`. `url` and `bytes` since 2026-11-05: `path/to-file-uri`
+;; and `path/from-file-uri` name `url/percent-encode` / `url/percent-decode`.
+(doseq (m ['map 'seq 'io 'string 'math 'reflect 'path 'file 'regex 'table 'encoding 'url 'bytes])
   (require-one m))
 
 (defn- dyn? (n)
