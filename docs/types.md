@@ -685,8 +685,8 @@ marked **(enforced)** are compile errors if violated; the rest are review rules.
    The `tag_universe_is_consistent` test checks bits are dense and in order, so a
    tag *missing from* or *misordered in* `ALL_TAGS` fails CI (the gap a plain
    match can't catch, since Rust can't enumerate variants). Don't introduce a
-   value kind that can't be a tag. **There are 22 tags today** (…`Bytes`,
-   `Decimal`, `Set`), and the lattice's tag bitset is a **`u32`** (`Ty { tags: u32,
+   value kind that can't be a tag. **There are 25 tags today** (…`Set`, `Ratio`,
+   `Failure`, `Record`), and the lattice's tag bitset is a **`u32`** (`Ty { tags: u32,
    … }`, ADR-078), so it has headroom to 32 atoms. `UNIVERSE` computes in `u64` and narrows to dodge
    the `1u32 << 32` const-overflow at the cap; a *33rd* tag must widen the `tags`
    field to `u64` (the `TAG_COUNT <= 32` assert in `types.rs` is the tripwire).

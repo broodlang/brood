@@ -1,0 +1,64 @@
+;; The record value kind (ADR-542, step 1): the kernel half, exercised through its
+;; primitives before `defrecord` constructs one. Each path a value takes — equality and
+;; hashing, the printer, a send between processes, a global (promotion), a table (the
+;; message form) — must keep a record a record, with its id, and never let it read as a map.
+(defmodule record-kind-test (:use test))
+
+(defn- pt (x y) (%record :point {:x x :y y}))
+
+(def record-kind-global (pt 5 6))
+
+(describe "a record is its own kind (ADR-542)"
+  (test "type-of is :record; it is not a map"
+    (assert= :record (type-of (pt 1 2)))
+    (is (%record? (pt 1 2)))
+    ;; the checker knows this can never be true; asserting it is the point
+    (check-allow :type-mismatch (is (not (map? (pt 1 2)))))
+    (is (not (%record? {:x 1 :y 2}))))
+  (test "the id and the fields come back out"
+    (assert= :point (%record-id (pt 1 2)))
+    (assert= {:x 1 :y 2} (%record-fields (pt 1 2)))
+    (is (map? (%record-fields (pt 1 2))))
+    (assert= nil (%record-id {:x 1}))
+    (assert= {} (%record-fields (%record :empty nil))))
+  (test "equal records: same id and same fields; never equal to a map"
+    (assert= (pt 1 2) (pt 1 2))
+    (is (not (= (pt 1 2) (pt 1 3))))
+    (is (not (= (pt 1 2) (%record :other {:x 1 :y 2}))))
+    (is (not (= (pt 1 2) {:x 1 :y 2}))))
+  (test "a record keys a map and a set by its value"
+    (assert= :found (get {(pt 1 2) :found} (pt 1 2)))
+    (assert= 1 (count (conj #{(pt 1 2)} (pt 1 2))))
+    (is (not (contains? #{{:x 1 :y 2}} (pt 1 2)))))
+  (test "it prints as #id{fields}, never as a map literal"
+    ;; fields print in the map's own (hash) order, as a map's do
+    (let (s (pr-str (%record :point {:x 1 :y 2})))
+      (is (string/starts-with? s "#point{"))
+      (is (includes? s ":x 1"))
+      (is (includes? s ":y 2")))
+    (assert= "#geo/point{:x 1}" (pr-str (%record :geo/point {:x 1}))))
+  (test "a global holding one is promoted with its id"
+    (assert= :point (%record-id record-kind-global))
+    (assert= (pt 5 6) record-kind-global))
+  (test "a table stores and returns a record"
+    (let (t (table/new))
+      (table/put t :r (pt 3 4))
+      (assert= (pt 3 4) (table/get t :r))
+      (assert= :point (%record-id (table/get t :r)))
+      (table/drop t))))
+
+(describe "a record across processes (ADR-542)"
+  :isolated (test "a sent record arrives as a record with its id"
+    (let (me (self))
+      (spawn (send me [:r (pt 7 8)]))
+      (let (got (receive ([:r r] r) (after 5000 :timeout)))
+        (assert= :record (type-of got))
+        (assert= :point (%record-id got))
+        (assert= (pt 7 8) got))))
+  :isolated (test "many processes build records and fan them in"
+    (let (me (self) n 32)
+      (dotimes (i n) (spawn (send me [:r (pt i (* 2 i))])))
+      (let (got (reduce (range n) [] (fn (acc _) (receive ([:r r] (conj acc r)) (after 5000 acc)))))
+        (assert= n (count got))
+        (is (every? got
+              (fn (r) (and (%record? r) (= (* 2 (:x (%record-fields r))) (:y (%record-fields r)))))))))))

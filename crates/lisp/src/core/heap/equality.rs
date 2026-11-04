@@ -237,6 +237,8 @@ fn tag_rank(v: Value) -> u8 {
         ValueRef::Set(_) => 19,
         // A failure is not a collection; it sorts after every collection kind.
         ValueRef::Failure(_) => 24,
+        // A record is not a collection either (ADR-542); it sorts after a failure.
+        ValueRef::Record { .. } => 25,
         ValueRef::Fn(_) => 9,
         ValueRef::Native(_) => 10,
         ValueRef::Macro(_) => 11,
@@ -557,6 +559,27 @@ impl Heap {
                 (size as u64).hash(h);
                 acc.hash(h);
             }
+            // A record hashes its identity and then its fields, under its own tag byte
+            // (25), so it never hashes equal to a map, or to another record type with
+            // the same fields (ADR-542).
+            ValueRef::Record {
+                id: rid,
+                fields: id,
+            } => {
+                25u8.hash(h);
+                crate::core::value::symbol_hash(rid).hash(h);
+                let mut acc = 0u64;
+                let mut size = 0usize;
+                self.fold_entries(id, &mut |k, val| {
+                    size += 1;
+                    let mut e = std::collections::hash_map::DefaultHasher::new();
+                    self.hash_value_into_grown(k, &mut e);
+                    self.hash_value_into_grown(val, &mut e);
+                    acc ^= e.finish();
+                });
+                (size as u64).hash(h);
+                acc.hash(h);
+            }
             ValueRef::Set(id) => {
                 // Order-insensitive like Map (XOR the per-element hashes), but a
                 // distinct tag byte (18) and **keys only** (a set's backing values are
@@ -802,6 +825,11 @@ impl Heap {
             (Set(x), Set(y)) => self.map_equal(x, y),
             // Two failures are equal iff they carry the same fields (same CHAMP).
             (Failure(x), Failure(y)) => self.map_equal(x, y),
+            // Two records are equal iff they are the same record type with the same
+            // fields; a record never equals a map (ADR-542).
+            (Record { id: a, fields: x }, Record { id: b, fields: y }) => {
+                a == b && self.map_equal(x, y)
+            }
             (Fn(x), Fn(y)) => x == y,
             (Macro(x), Macro(y)) => x == y,
             (Native(x), Native(y)) => x == y,
@@ -1046,7 +1074,14 @@ impl Heap {
             // insertion history and two `equal` maps could compare non-`Equal`.
             // Failures compare by their fields, exactly as maps do — one arm, since
             // the two share the entry-walking CHAMP underneath.
-            (Map(x), Map(y)) | (Failure(x), Failure(y)) => {
+            // Two records of different types order by their ids' spelling; of one type,
+            // by their fields as maps do.
+            (Record { id: a, .. }, Record { id: b, .. }) if a != b => {
+                crate::core::value::symbol_name_ref(a).cmp(crate::core::value::symbol_name_ref(b))
+            }
+            (Map(x), Map(y))
+            | (Failure(x), Failure(y))
+            | (Record { fields: x, .. }, Record { fields: y, .. }) => {
                 let (sx, sy) = (self.map_size(x), self.map_size(y));
                 if sx != sy {
                     return sx.cmp(&sy);

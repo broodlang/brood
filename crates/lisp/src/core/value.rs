@@ -486,6 +486,7 @@ pub enum HandleKind {
     Map,
     Set,
     Failure,
+    Record,
     Str,
     BigInt,
     Decimal,
@@ -507,6 +508,7 @@ impl HandleKind {
             HandleKind::Map => "map",
             HandleKind::Set => "set",
             HandleKind::Failure => "failure",
+            HandleKind::Record => "record",
             HandleKind::Str => "string",
             HandleKind::BigInt => "bigint",
             HandleKind::Decimal => "decimal",
@@ -518,12 +520,12 @@ impl HandleKind {
         }
     }
 
-    /// The slab the object lives in: a range and a seq-view are stored as vectors, a set
-    /// and a failure as maps, and a macro as a closure.
+    /// The slab the object lives in: a range and a seq-view are stored as vectors, a set,
+    /// a failure and a record's fields as maps, and a macro as a closure.
     pub fn slab(self) -> HandleKind {
         match self {
             HandleKind::Range | HandleKind::SeqView => HandleKind::Vector,
-            HandleKind::Set | HandleKind::Failure => HandleKind::Map,
+            HandleKind::Set | HandleKind::Failure | HandleKind::Record => HandleKind::Map,
             HandleKind::Macro => HandleKind::Fn,
             kind => kind,
         }
@@ -581,6 +583,7 @@ impl Value {
             Value::Map(id) => (HandleKind::Map, id.0),
             Value::Set(id) => (HandleKind::Set, id.0),
             Value::Failure(id) => (HandleKind::Failure, id.0),
+            Value::Record { fields, .. } => (HandleKind::Record, fields.0),
             Value::Str(id) => (HandleKind::Str, id.0),
             Value::BigInt(id) => (HandleKind::BigInt, id.0),
             Value::Decimal(id) => (HandleKind::Decimal, id.0),
@@ -799,9 +802,20 @@ pub enum Value {
     /// error-kind split is needed to tell them apart. Added at the END to preserve the
     /// JIT's pinned discriminant order.
     Failure(MapId),
+    /// A **record** (ADR-542): a `defrecord` value. Its nominal identity `id` (the
+    /// `:module/name` id, interned) lives in the value; its fields are an ordinary CHAMP
+    /// map (so the field map rides the map GC / region / forwarding machinery verbatim,
+    /// the way [`Value::Set`] and [`Value::Failure`] do). Nothing that operates on a map
+    /// can see or write the identity, so a record cannot be forged from a map, nor turn
+    /// into one by accident. `type-of` is `:record`; `map?` is false. Added at the END
+    /// to preserve the JIT's pinned discriminant order.
+    Record {
+        id: Symbol,
+        fields: MapId,
+    },
 }
 
-/// The highest valid [`Value`] discriminant — currently [`Value::Failure`], the last
+/// The highest valid [`Value`] discriminant — currently [`Value::Record`], the last
 /// variant (new kinds are appended at the END to preserve the JIT's pinned order).
 ///
 /// `eval::compile::dispatch::dbg_check_args` reads this to tell a real value from
@@ -819,7 +833,7 @@ pub enum Value {
 /// that — the test target keeps it live — so the warning only ever appeared in a real
 /// install build.
 #[cfg(any(debug_assertions, test))]
-pub(crate) const MAX_VALUE_DISCRIMINANT: u8 = 26;
+pub(crate) const MAX_VALUE_DISCRIMINANT: u8 = 27;
 
 /// The **unpacked** view of a [`Value`] — the form you `match` against.
 ///
@@ -853,6 +867,9 @@ impl Value {
             | (V::SeqView(a), V::SeqView(b)) => a.0 == b.0,
             (V::Map(a), V::Map(b)) | (V::Set(a), V::Set(b)) | (V::Failure(a), V::Failure(b)) => {
                 a.0 == b.0
+            }
+            (V::Record { id: x, fields: a }, V::Record { id: y, fields: b }) => {
+                x == y && a.0 == b.0
             }
             (V::Fn(a), V::Fn(b)) | (V::Macro(a), V::Macro(b)) => a.0 == b.0,
             (V::Bytes(a), V::Bytes(b)) => a.0 == b.0,
@@ -942,6 +959,12 @@ impl Value {
     #[inline]
     pub fn failure(id: MapId) -> Value {
         Value::Failure(id)
+    }
+    /// A **record** of identity `id` over the CHAMP field map `fields`. See
+    /// [`Value::Record`].
+    #[inline]
+    pub fn record(id: Symbol, fields: MapId) -> Value {
+        Value::Record { id, fields }
     }
     #[inline]
     pub fn func(id: ClosureId) -> Value {
@@ -1060,6 +1083,7 @@ pub enum Tag {
     Set,
     Ratio,
     Failure,
+    Record,
 }
 
 impl Tag {
@@ -1091,6 +1115,7 @@ impl Tag {
             Tag::Set => "set",
             Tag::Ratio => "ratio",
             Tag::Failure => "failure",
+            Tag::Record => "record",
         }
     }
 
@@ -1112,8 +1137,8 @@ impl Tag {
     /// Every tag, in discriminant order — the one list; the type lattice's atoms
     /// (`types::ALL_TAGS`) and the keyword cache above both read it. The check below
     /// pins each entry to its own discriminant, so a reorder or a gap fails to compile;
-    /// a tag appended after `Failure` must extend this list and move that check's end.
-    pub const ALL: [Tag; 24] = [
+    /// a tag appended after `Record` must extend this list and move that check's end.
+    pub const ALL: [Tag; 25] = [
         Tag::Nil,
         Tag::Bool,
         Tag::Int,
@@ -1138,6 +1163,7 @@ impl Tag {
         Tag::Set,
         Tag::Ratio,
         Tag::Failure,
+        Tag::Record,
     ];
 }
 
@@ -1151,20 +1177,22 @@ const _: () = {
         i += 1;
     }
     assert!(
-        Tag::Failure as usize + 1 == Tag::ALL.len(),
+        Tag::Record as usize + 1 == Tag::ALL.len(),
         "Tag::ALL must end at the last tag"
     );
 };
 
 /// Re-wrap a forwarded/promoted CHAMP `id` in the same kind `original` had, so a
-/// storage walk that moved the trie preserves map-vs-set-vs-failure identity.
-/// [`Value::Map`], [`Value::Set`] and [`Value::Failure`] share one storage
-/// representation, so every storage-level walk matches all three in one arm.
+/// storage walk that moved the trie preserves map-vs-set-vs-failure-vs-record identity
+/// (a record keeps its id). [`Value::Map`], [`Value::Set`], [`Value::Failure`] and a
+/// [`Value::Record`]'s fields share one storage representation, so every storage-level
+/// walk matches all four in one arm.
 #[inline]
 pub fn champ_rewrap(original: Value, id: MapId) -> Value {
     match original {
         Value::Set(_) => Value::set(id),
         Value::Failure(_) => Value::failure(id),
+        Value::Record { id: rid, .. } => Value::record(rid, id),
         _ => Value::map(id),
     }
 }
@@ -1209,6 +1237,7 @@ pub fn tag(v: Value) -> Tag {
         // A set is its OWN type — distinct from map (unlike a range/pair alias).
         Value::Set(_) => Tag::Set,
         Value::Failure(_) => Tag::Failure,
+        Value::Record { .. } => Tag::Record,
         // A ratio is its OWN exact type — distinct from int/float/decimal.
         Value::Ratio(_) => Tag::Ratio,
     }
@@ -1753,6 +1782,10 @@ pub(crate) mod jit_layout {
             Value::Set(MapId::local(0)),
             Value::Ratio(RatioId::local(0)),
             Value::Failure(MapId::local(0)),
+            Value::Record {
+                id: 0,
+                fields: MapId::local(0),
+            },
         ];
         // Exhaustiveness guard: this match must name every variant. When a new
         // variant appears, add it here AND to `all` above.
@@ -1784,6 +1817,7 @@ pub(crate) mod jit_layout {
                 | Value::Decimal(_)
                 | Value::Set(_)
                 | Value::Failure(_)
+                | Value::Record { .. }
                 | Value::Ratio(_) => {}
             }
         }
@@ -1876,14 +1910,18 @@ mod discriminant_bound_tests {
                 Value::Decimal(_) => 23,
                 Value::Set(_) => 24,
                 Value::Ratio(_) => 25,
-                // Keep this arm LAST, and keep MAX_VALUE_DISCRIMINANT equal to it.
                 Value::Failure(_) => 26,
+                // Keep this arm LAST, and keep MAX_VALUE_DISCRIMINANT equal to it.
+                Value::Record { .. } => 27,
             }
         }
 
         // The tag byte the tripwire reads must agree with the declared order, so a
         // value of the last variant sits exactly at the bound — not past it.
-        let last = Value::Failure(MapId::local(0));
+        let last = Value::Record {
+            id: 0,
+            fields: MapId::local(0),
+        };
         assert_eq!(variant_index(&last), MAX_VALUE_DISCRIMINANT);
         let tag = last.raw_tag();
         assert_eq!(

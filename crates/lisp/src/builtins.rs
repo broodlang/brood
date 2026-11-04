@@ -56,6 +56,7 @@ mod gui_fonts;
 mod io;
 mod json;
 mod line_diff;
+mod records;
 mod regex_native;
 mod rope_regex;
 mod text_search;
@@ -183,6 +184,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     os::register(&mut primitives);
     selfhost_macros::register(&mut primitives);
     errors::register(&mut primitives);
+    records::register(&mut primitives);
     dynamic::register(&mut primitives);
     contracts::register(&mut primitives);
     processes::register(&mut primitives);

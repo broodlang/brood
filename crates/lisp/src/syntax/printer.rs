@@ -184,6 +184,25 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
             }
             out.push('}');
         }
+        // `#point{:x 1, :y 2}` (`#geo/point{…}` for a module's record): the id, then the
+        // fields as a map prints them. Never a map literal, so printing a record and reading
+        // the text back cannot make a map pose as one (ADR-542).
+        ValueRef::Record { id: rid, fields } => {
+            out.push('#');
+            out.push_str(&crate::core::value::symbol_name(rid));
+            out.push('{');
+            let mut first = true;
+            for (k, val) in heap.map_entries(fields) {
+                if !first {
+                    out.push_str(", ");
+                }
+                first = false;
+                write_value(out, heap, k, readable, depth + 1);
+                out.push(' ');
+                write_value(out, heap, val, readable, depth + 1);
+            }
+            out.push('}');
+        }
         ValueRef::Set(id) => {
             // `#{a b c}` — elements only (the backing values are all `true`), in the
             // CHAMP's insertion order. Reads back as a set literal.

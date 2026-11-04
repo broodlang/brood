@@ -512,6 +512,7 @@ fn to_prelude(v: Value) -> Value {
         ValueRef::Map(id) => Value::map(MapId::prelude(id.index())),
         ValueRef::Set(id) => Value::set(MapId::prelude(id.index())),
         ValueRef::Failure(id) => Value::failure(MapId::prelude(id.index())),
+        ValueRef::Record { id: rid, fields } => Value::record(rid, MapId::prelude(fields.index())),
         ValueRef::Str(id) => Value::str_(StrId::prelude(id.index())),
         ValueRef::BigInt(id) => Value::bigint(BigIntId::prelude(id.index())),
         ValueRef::Decimal(id) => Value::decimal(DecimalId::prelude(id.index())),

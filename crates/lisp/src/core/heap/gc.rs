@@ -715,7 +715,10 @@ impl Heap {
                     id.0,
                     |s| s.vectors.len(),
                 ),
-                ValueRef::Map(id) | ValueRef::Set(id) | ValueRef::Failure(id)
+                ValueRef::Map(id)
+                | ValueRef::Set(id)
+                | ValueRef::Failure(id)
+                | ValueRef::Record { fields: id, .. }
                     if id.region() == LOCAL =>
                 {
                     ("map", id.is_old(), id.generation(), id.index(), id.0, |s| {
@@ -809,7 +812,10 @@ impl Heap {
                 {
                     work.extend(young.vectors[index].iter().map(|&v| Pending::Value(v, raw)));
                 }
-                ValueRef::Map(_) | ValueRef::Set(_) | ValueRef::Failure(_)
+                ValueRef::Map(_)
+                | ValueRef::Set(_)
+                | ValueRef::Failure(_)
+                | ValueRef::Record { .. }
                     if first_visit(&mut seen_maps, index) =>
                 {
                     let node = &young.maps[index];

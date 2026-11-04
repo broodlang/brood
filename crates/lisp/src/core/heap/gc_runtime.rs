@@ -96,7 +96,10 @@ impl Heap {
                 ValueRef::Vector(id) if id.region() == RUNTIME => {
                     work.extend(self.vector(id).iter().copied());
                 }
-                ValueRef::Map(id) | ValueRef::Set(id) | ValueRef::Failure(id)
+                ValueRef::Map(id)
+                | ValueRef::Set(id)
+                | ValueRef::Failure(id)
+                | ValueRef::Record { fields: id, .. }
                     if id.region() == RUNTIME =>
                 {
                     // `fold_entries` walks the trie in place — no intermediate Vec
@@ -912,7 +915,10 @@ impl Heap {
                         work.extend(self.vector(id).iter().copied());
                     }
                 }
-                ValueRef::Map(id) | ValueRef::Set(id) | ValueRef::Failure(id)
+                ValueRef::Map(id)
+                | ValueRef::Set(id)
+                | ValueRef::Failure(id)
+                | ValueRef::Record { fields: id, .. }
                     if id.region() == RUNTIME =>
                 {
                     if id.code_gen() == generation {
@@ -1725,7 +1731,10 @@ fn flush_rt_value_grown(
         }
         // Map, set and failure share one CHAMP store — forward the trie once and
         // re-wrap in the kind that came in. One arm in place of two near-identical ones.
-        ValueRef::Map(id) | ValueRef::Set(id) | ValueRef::Failure(id)
+        ValueRef::Map(id)
+        | ValueRef::Set(id)
+        | ValueRef::Failure(id)
+        | ValueRef::Record { fields: id, .. }
             if id.region() == RUNTIME && id.code_gen() == g =>
         {
             crate::core::value::champ_rewrap(v, flush_rt_map(old, new, forward, id))

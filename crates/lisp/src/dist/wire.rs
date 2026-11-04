@@ -702,6 +702,15 @@ fn encode_msg_inner(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
                 encode_msg(w, v)?;
             }
         }
+        // A record cannot cross a node link yet: the tag, and the protocol version that
+        // lets a link to an older peer refuse it rather than tear down, land with the step
+        // that starts constructing records (ADR-542, step 2). Until then nothing makes one.
+        Message::Record(..) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "a record cannot cross a node link yet (ADR-542)",
+            ));
+        }
         Message::Set(items) => {
             w.push(M_SET);
             put_u32(w, items.len() as u32);

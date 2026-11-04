@@ -100,6 +100,10 @@ pub enum Message {
     Map(Vec<(Message, Message)>),
     /// A **failure** value — its fields, mirroring `Map` (they share one CHAMP store).
     Failure(Vec<(Message, Message)>),
+    /// A **record** (ADR-542) — its identity and its fields. In-process the id is the
+    /// interned `Symbol`; the node-link wire codec re-encodes it by name, as it does a
+    /// keyword, since separate runtimes have independent interners.
+    Record(Symbol, Vec<(Message, Message)>),
     /// A set value — its elements (the backing values are all `true`, so only the
     /// elements ship). Rebuilt as a `Value::Set` on the receiver, preserving the
     /// distinct set type across a `send`/node boundary.
@@ -228,7 +232,7 @@ impl Message {
             | Message::Dotted(items)
             | Message::Vector(items)
             | Message::Set(items) => items.iter().for_each(visit),
-            Message::Map(entries) | Message::Failure(entries) => {
+            Message::Map(entries) | Message::Failure(entries) | Message::Record(_, entries) => {
                 for (key, value) in entries {
                     visit(key);
                     visit(value);
@@ -257,7 +261,7 @@ impl Message {
             | Message::Dotted(items)
             | Message::Vector(items)
             | Message::Set(items) => items.iter_mut().for_each(visit),
-            Message::Map(entries) | Message::Failure(entries) => {
+            Message::Map(entries) | Message::Failure(entries) | Message::Record(_, entries) => {
                 for (key, value) in entries {
                     visit(key);
                     visit(value);
@@ -286,6 +290,7 @@ impl Message {
                 | Message::Vector(..)
                 | Message::Map(..)
                 | Message::Failure(..)
+                | Message::Record(..)
                 | Message::Set(..)
                 | Message::Closure(..)
         )
@@ -316,6 +321,7 @@ impl Clone for Message {
             Message::Vector(items) => grow(|| Message::Vector(items.clone())),
             Message::Map(entries) => grow(|| Message::Map(entries.clone())),
             Message::Failure(entries) => grow(|| Message::Failure(entries.clone())),
+            Message::Record(id, entries) => grow(|| Message::Record(*id, entries.clone())),
             Message::Set(items) => grow(|| Message::Set(items.clone())),
             Message::Ref(n) => Message::Ref(*n),
             Message::Pid { node, id } => Message::Pid {
@@ -353,7 +359,7 @@ fn take_children(m: &mut Message, out: &mut Vec<Message>) {
         | Message::Set(items) => {
             out.append(items);
         }
-        Message::Map(entries) | Message::Failure(entries) => {
+        Message::Map(entries) | Message::Failure(entries) | Message::Record(_, entries) => {
             for (k, v) in entries.drain(..) {
                 out.push(k);
                 out.push(v);
@@ -648,6 +654,14 @@ trait CopyTarget {
     fn map(&mut self, entries: Vec<(Self::Out, Self::Out)>) -> Self::Out;
     fn set(&mut self, elements: Vec<Self::Out>) -> Self::Out;
     fn failure(&mut self, src: &Heap, id: MapId, depth: u32) -> Result<Self::Out, Self::Decline>;
+    /// A record (ADR-542): its identity `rid` and its field map.
+    fn record(
+        &mut self,
+        src: &Heap,
+        rid: Symbol,
+        fields: MapId,
+        depth: u32,
+    ) -> Result<Self::Out, Self::Decline>;
     fn closure(
         &mut self,
         src: &Heap,
@@ -808,6 +822,7 @@ fn copy_value_inner<T: CopyTarget>(
             target.map(entries)
         }
         Value::Failure(id) => target.failure(src, id, depth)?,
+        Value::Record { id: rid, fields } => target.record(src, rid, fields, depth)?,
         Value::Set(id) => {
             target.reserve(src.map_size(id) as i64)?;
             // Off the trie, as a map's entries are (`copy_entries`): the values are all
@@ -957,6 +972,20 @@ impl CopyTarget for IntoMessage {
     #[inline]
     fn failure(&mut self, src: &Heap, id: MapId, depth: u32) -> Result<Message, LispError> {
         Ok(Message::Failure(copy_entries(self, src, id, depth)?))
+    }
+    /// A record crosses as its identity and its fields — the map path for the fields.
+    #[inline]
+    fn record(
+        &mut self,
+        src: &Heap,
+        rid: Symbol,
+        fields: MapId,
+        depth: u32,
+    ) -> Result<Message, LispError> {
+        Ok(Message::Record(
+            rid,
+            copy_entries(self, src, fields, depth)?,
+        ))
     }
     /// Share by handle when the destination is THIS runtime and the closure already lives
     /// in the shared region — the serialised twin of [`IntoHeap`]'s, and the guards mirror
@@ -1260,7 +1289,7 @@ fn collect_symbols(heap: &Heap, form: Value, out: &mut std::collections::HashSet
                 collect_symbols(heap, item, out);
             }
         }
-        Value::Map(id) | Value::Failure(id) => {
+        Value::Map(id) | Value::Failure(id) | Value::Record { fields: id, .. } => {
             for (k, v) in heap.map_entries(id) {
                 collect_symbols(heap, k, out);
                 collect_symbols(heap, v, out);
@@ -1334,7 +1363,7 @@ fn collect_qualified_syms(heap: &Heap, form: Value, out: &mut Vec<Symbol>) {
                 collect_qualified_syms(heap, item, out);
             }
         }
-        Value::Map(id) | Value::Failure(id) => {
+        Value::Map(id) | Value::Failure(id) | Value::Record { fields: id, .. } => {
             for (k, v) in heap.map_entries(id) {
                 collect_qualified_syms(heap, k, out);
                 collect_qualified_syms(heap, v, out);
@@ -1419,6 +1448,7 @@ pub(crate) fn message_fits(m: &Message, budget: i64) -> bool {
             | Message::Vector(..)
             | Message::Map(..)
             | Message::Failure(..)
+            | Message::Record(..)
             | Message::Set(..) => grow(|| walk_inner(m, left)),
             _ => walk_inner(m, left),
         }
@@ -1440,7 +1470,7 @@ pub(crate) fn message_fits(m: &Message, budget: i64) -> bool {
                     }
                 }
             }
-            Message::Map(entries) | Message::Failure(entries) => {
+            Message::Map(entries) | Message::Failure(entries) | Message::Record(_, entries) => {
                 for (k, v) in entries {
                     walk(k, left);
                     walk(v, left);
@@ -1588,6 +1618,19 @@ fn from_message_inner(heap: &mut Heap, m: &Message, depth: u32) -> Value {
             }
             match heap.map_from_pairs(pairs) {
                 Value::Map(id) => Value::failure(id),
+                other => other,
+            }
+        }
+        Message::Record(rid, entries) => {
+            let mut pairs = Vec::with_capacity(entries.len());
+            for (k, v) in entries {
+                pairs.push((
+                    from_message_nested(heap, k, depth + 1),
+                    from_message_nested(heap, v, depth + 1),
+                ));
+            }
+            match heap.map_from_pairs(pairs) {
+                Value::Map(id) => Value::record(*rid, id),
                 other => other,
             }
         }
@@ -2028,6 +2071,15 @@ impl CopyTarget for IntoHeap<'_> {
     }
     #[inline]
     fn failure(&mut self, _src: &Heap, _id: MapId, _depth: u32) -> Result<Value, Declined> {
+        Err(Declined)
+    }
+    fn record(
+        &mut self,
+        _src: &Heap,
+        _rid: Symbol,
+        _fields: MapId,
+        _depth: u32,
+    ) -> Result<Value, Declined> {
         Err(Declined)
     }
     /// A closure that **already lives in the shared code region** crosses to a process

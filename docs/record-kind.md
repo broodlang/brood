@@ -1,6 +1,8 @@
 # Records are maps with a magic key — leaks today, and a real kind later
 
-**Status: OPEN — scoped 2026-10-27.** It has two parts. Of the **leaks** (§2), `into` and
+**Status: DECIDED 2026-11-04 — option A, ADR-542; landing in steps.** Step 1 (the kernel kind
+and its `%record` primitives, nothing yet constructing one) is in. Earlier status: **OPEN — scoped
+2026-10-27.** It has two parts. Of the **leaks** (§2), `into` and
 `merge` were **fixed 2026-10-27**: a record source is read through `seq`, and `merge` is seeded
 with its first map. The `assoc :__id__` forge is still open (see §2). A **`Record` value kind**
 (§4) would reverse ADR-130 and ADR-168 on purpose. It's a larger change, estimated at 50–70

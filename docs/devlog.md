@@ -5040,3 +5040,16 @@ on all of them, and nothing said which to pick. The user chose a rule plus a lin
 unless the choice depends on more than the first argument, stated once in `language.md`, and
 `nest check` reports a `defmulti` whose methods vary only the first position. It found two in
 the tree, both in `multimethod_test` exercising the mechanism, which now opt out.
+
+2026-11-04 (ADR-542, design pass item 8, step 1). Decided: a record is its own value kind —
+`Value::Record { id, fields }`, `type-of` `:record`, printed `#point{…}` — superseding ADR-130
+and ADR-168's "a record is a structural map", whose premise no longer held once `=` turned
+nominal. Step 1 is the kernel half with nothing constructing one yet: the variant (appended,
+`MAX_VALUE_DISCRIMINANT` 27), its `Tag`, equality and hashing (id and fields), ordering, the
+printer, the message codec, the collectors (young copy, RUNTIME flush, promotion, freeze),
+and `%record`/`%record?`/`%record-id`/`%record-fields` in a new `builtins/records.rs`.
+`tests/record_kind_test.blsp` takes a record through every one of those paths, at both
+tiers and under GC stress with the verifier; with the young-copy arm removed, GC stress
+panics on the stale-handle tripwire. The node-link codec refuses a record for now: its tag
+and the protocol version that lets an older peer refuse one cleanly come with step 2, when
+`defrecord` starts constructing them.

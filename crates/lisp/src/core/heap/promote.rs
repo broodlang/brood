@@ -188,7 +188,10 @@ impl Heap {
             // parent, so the parent's `children` array can be wired to the freshly
             // allocated RUNTIME sub-node handles — then re-wrap in the kind that came
             // in. `fwd` is shared, so KI-95's DAG forwarding applies to all three.
-            ValueRef::Map(id) | ValueRef::Set(id) | ValueRef::Failure(id)
+            ValueRef::Map(id)
+            | ValueRef::Set(id)
+            | ValueRef::Failure(id)
+            | ValueRef::Record { fields: id, .. }
                 if id.region() == LOCAL =>
             {
                 crate::core::value::champ_rewrap(v, self.promote_map_node(id, fwd))
