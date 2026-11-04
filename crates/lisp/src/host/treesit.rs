@@ -2389,6 +2389,7 @@ fn load_library(
         })?;
     let abi = language.abi_version() as i64;
     crate::core::sync::lock(&DYNAMIC).insert(lang.to_string(), language.clone());
+    crate::core::sync::lock(&LOADED_FROM).insert(lang.to_string(), path.to_string());
     // A re-load replaces the entry, so a grammar can be swapped without restarting; the
     // parser pool is keyed by language name and holds parsers bound to the OLD language, so
     // it is cleared for this one rather than left to hand out stale parsers.
@@ -2417,6 +2418,92 @@ static DYNAMIC: LazyLock<Mutex<HashMap<String, tree_sitter::Language>>> =
 #[cfg(feature = "treesit")]
 fn dynamic_language(lang: &str) -> Option<tree_sitter::Language> {
     crate::core::sync::lock(&DYNAMIC).get(lang).cloned()
+}
+
+/// The library each grammar in [`DYNAMIC`] was loaded from, keyed by language name — what
+/// [`grammar_info`] reports as `:source`, so "which grammar is this" has an answer a user
+/// can go and look at. Written beside `DYNAMIC`, after it (never held together).
+#[cfg(feature = "treesit")]
+static LOADED_FROM: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// `(%tree-sitter-grammar-info lang)` — what the grammar `lang` parses with IS (ADR-583):
+/// `{:lang :abi :version :name :source :named :anonymous :fields}`. `:named` and `:anonymous`
+/// are the visible node kinds (aliases included, hidden and supertype rules not — no tree
+/// ever holds one) as keyword sets, `:fields` the field names; `:version` is the grammar's
+/// own `"major.minor.patch"` and `:name` its name, both nil before ABI 15, which did not
+/// record them; `:source` the library path, or `:built-in`.
+///
+/// Loads the grammar when it is only declared — asking what a grammar contains is a use of
+/// it — and errors as a parse would when there is none. The answer is the whole vocabulary a
+/// language's face table, indent spec and injections may name, which is what makes a grammar
+/// update that renamed a node DETECTABLE: the editor compares the names it wrote against this
+/// set instead of finding out from a file that stopped colouring.
+#[cfg(feature = "treesit")]
+pub fn grammar_info(heap: &mut Heap, lang: &str) -> LispResult {
+    let language = language_for(lang)?;
+    let keyword = |name: &str| Value::keyword(value::intern(name));
+    let mut named = Vec::new();
+    let mut anonymous = Vec::new();
+    for id in 0..language.node_kind_count() {
+        let Ok(id) = u16::try_from(id) else { break };
+        if !language.node_kind_is_visible(id) {
+            continue;
+        }
+        let Some(kind) = language.node_kind_for_id(id) else {
+            continue;
+        };
+        if language.node_kind_is_named(id) {
+            named.push(keyword(kind));
+        } else {
+            anonymous.push(keyword(kind));
+        }
+    }
+    let fields: Vec<Value> = (1..=language.field_count())
+        .filter_map(|id| u16::try_from(id).ok())
+        .filter_map(|id| language.field_name_for_id(id))
+        .map(keyword)
+        .collect();
+    let named = heap.set_from_elems(named);
+    let anonymous = heap.set_from_elems(anonymous);
+    let fields = heap.set_from_elems(fields);
+    let version = match language.metadata() {
+        Some(meta) => heap.alloc_string_owned(format!(
+            "{}.{}.{}",
+            meta.major_version, meta.minor_version, meta.patch_version
+        )),
+        None => Value::Nil,
+    };
+    let name = match language.name() {
+        Some(name) => heap.alloc_string(name),
+        None => Value::Nil,
+    };
+    let source = if dynamic_language(lang).is_some() {
+        match crate::core::sync::lock(&LOADED_FROM).get(lang).cloned() {
+            Some(path) => heap.alloc_string_owned(path),
+            None => keyword("loaded"),
+        }
+    } else {
+        keyword("built-in")
+    };
+    Ok(heap.map_from_pairs(vec![
+        (keyword("lang"), keyword(lang)),
+        (keyword("abi"), Value::int(language.abi_version() as i64)),
+        (keyword("version"), version),
+        (keyword("name"), name),
+        (keyword("source"), source),
+        (keyword("named"), named),
+        (keyword("anonymous"), anonymous),
+        (keyword("fields"), fields),
+    ]))
+}
+
+#[cfg(not(feature = "treesit"))]
+pub fn grammar_info(_heap: &mut crate::core::heap::Heap, lang: &str) -> LispResult {
+    Err(LispError::runtime(format!(
+        "%tree-sitter-grammar-info::{lang}: this runtime was built without tree-sitter \
+         (rebuild with --features treesit)"
+    )))
 }
 
 /// What a declared grammar is waiting on: its library, or the reason it did not load.

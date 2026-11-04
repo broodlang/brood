@@ -220,6 +220,8 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     editor_native::register_glyphless(&mut primitives);
     // And again: whether the GUI is headless, asked before a font-engine query (ADR-557).
     gui_fonts::register_headless(&mut primitives);
+    // And again: what a loaded grammar contains (ADR-583).
+    treesit::register_grammar_info(&mut primitives);
 }
 
 #[cfg(test)]

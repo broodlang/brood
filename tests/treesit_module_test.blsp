@@ -1144,3 +1144,157 @@
         (free-tree kept)
         (assert= (owned-trees) [])
         (send child :done)))))
+
+;; ---- grammar drift: the names a language wrote against the grammar it has (ADR-583) ------
+
+(describe "language-names: every kind and field a language's tables refer to"
+  (test "faces, injections, indent and definitions, each by its own shape"
+    (assert= (language-names {:faces {:string :s
+                                      {:kind :identifier
+                                       :field :name
+                                       :parent {:kind :call :field :function}} :f
+                                      {:text "def"} :k}
+                              :injections [{:content {:kind :heredoc_template :parent :heredoc}
+                                            :exclude :heredoc_marker
+                                            :lang-from :heredoc_identifier
+                                            :aliases {"BASH" :bash}}]
+                              :indent {:width 2
+                                       :blocks #{:do_block}
+                                       :brackets #{:arguments}
+                                       :dedent #{"end"}
+                                       :opens #{"{"}
+                                       :verbatim #{:heredoc_body}}
+                              :definitions {:kinds #{:method} :calls #{"def"}}})
+      {:kinds #{:string
+                :identifier :call :heredoc_template :heredoc :heredoc_marker :heredoc_identifier
+                :do_block :arguments :heredoc_body :method}
+       :fields #{:name :function}}))
+
+  (test "an empty language refers to nothing"
+    (assert= (language-names {}) {:kinds #{} :fields #{}})))
+
+(def tsm-drift-info
+  {:lang :demo :abi 14 :named #{:call :identifier} :anonymous #{:def} :fields #{:name}})
+
+(describe "grammar-problems: what the grammar lacks, named"
+  (test "a grammar with every name has no problems; anonymous tokens and ERROR count"
+    (assert= (grammar-problems tsm-drift-info {:kinds #{:call :def :ERROR} :fields #{:name}}) '()))
+
+  (test "each missing kind and field is its own message, sorted, naming the grammar"
+    (assert= (grammar-problems tsm-drift-info
+               {:kinds #{:heredoc_body :call :alpha} :fields #{:body}})
+      '("node kind `alpha` is not in the :demo grammar" "node kind `heredoc_body` is not in the :demo grammar"
+         "field `body` is not in the :demo grammar")))
+
+  (test "no grammar at all is one problem, not a raise"
+    (assert= (language-grammar-problems :tsm-no-such-grammar {:faces {:x :y}})
+      '("no :tsm-no-such-grammar grammar to check"))))
+
+(describe "grammar-fingerprint: the grammar's shape, not its bytes"
+  (test "the same names hash alike whatever their order; a renamed node does not"
+    (let (a {:abi 14 :named #{:call :identifier} :anonymous #{:def} :fields #{:name}}
+          b {:abi 14
+             :named #{:identifier :call}
+             :anonymous #{:def}
+             :fields #{:name}
+             :source "/x.so"}
+          renamed {:abi 14 :named #{:call :ident} :anonymous #{:def} :fields #{:name}}
+          other-abi (assoc a :abi 15))
+      (assert= (grammar-fingerprint a) (grammar-fingerprint b))
+      (refute (= (grammar-fingerprint a) (grammar-fingerprint renamed)))
+      (refute (= (grammar-fingerprint a) (grammar-fingerprint other-abi))))))
+
+(when tsm-grammars?
+  (describe "grammar-info: a built-in grammar's vocabulary"
+    (test "kinds, tokens, fields and ABI come from the grammar itself"
+      (let (info (grammar-info :ruby))
+        (assert= (:lang info) :ruby)
+        (is (int? (:abi info)))
+        (is (contains? (:named info) :method))
+        (is (contains? (:anonymous info) :def))
+        (is (contains? (:fields info) :name))
+        ;; a hidden rule is never a node's kind
+        (refute (contains? (:named info) :_statement))))
+
+    (test "a language checked against it: present names pass, a renamed one is reported"
+      (assert= (language-grammar-problems :ruby
+                 {:faces {:method :f {:parent :method :field :name} :g}})
+        '())
+      (assert= (language-grammar-problems :ruby {:faces {:method_definition :f}})
+        '("node kind `method_definition` is not in the :ruby grammar")))))
+
+(describe "grammar-info without a grammar"
+  (test "raises, as a parse would"
+    (is (check-allow :discarded-catch
+          (try (do (grammar-info :tsm-no-such-grammar) false) (catch _ true))))))
+
+;; Fetching at a revision and the manifest, against a local repository: `file://` is a git
+;; URL, so this is the real fetch path with no network. The "grammar" is a C file with the
+;; generator's ABI line — enough to compile; nothing here loads it.
+(def tsm-git? (and (os/which "git") (os/which "cc")))
+
+(defn- tsm-git (dir & args)
+  (os/cmd "git"
+    (append ["-C" dir "-c" "user.name=t" "-c" "user.email=t@t" "-c" "commit.gpgsign=false"] args)))
+
+(defn- tsm-commit (repository text)
+  ;; write `text` as the grammar's parser.c, commit it, answer the commit
+  (file/spit (path/join repository "src" "parser.c")
+    (str "#define LANGUAGE_VERSION 14\nint tree_sitter_demo(void) { return " text "; }\n"))
+  (tsm-git repository "add" "-A")
+  (tsm-git repository "commit" "-q" "-m" text)
+  (string/trim (:stdout (tsm-git repository "rev-parse" "HEAD"))))
+
+(purge-stale-temp "brood-grammarpin-")
+
+(when tsm-git?
+  (describe "grammar-install at a revision, and the manifest it writes"
+    (test "installs the pinned commit, records it, and moves to another on the next install"
+      (let (root (temp-dir "brood-grammarpin-")
+            repository (path/join root "repo")
+            out (path/join root "out")
+            work (path/join root "work")
+            url (str "file://" repository))
+        (file/mkdir (path/join repository "src"))
+        (tsm-git repository "init" "-q")
+        (let (first-commit (tsm-commit repository "1")
+              second-commit (tsm-commit repository "2")
+              pinned (grammar-install url :demo out work {:revision first-commit})
+              library (path/join out "libtree-sitter-demo.so")
+              manifest (grammar-manifest library))
+          (assert= pinned {:ok library :commit first-commit})
+          (is (includes? (file/slurp (path/join work "demo" "src" "parser.c")) "return 1;"))
+          (assert= (:revision manifest) first-commit)
+          (assert= (:commit manifest) first-commit)
+          (assert= (:source manifest) url)
+          (assert= (:abi manifest) 14)
+          (assert= (:sha256 manifest) (grammar-file-hash library))
+          ;; the same checkout moved to the default branch's head: an update
+          (let (updated (grammar-install url :demo out work))
+            (assert= (:commit updated) second-commit)
+            (assert= (:revision (grammar-manifest library)) nil)
+            (assert= (:commit (grammar-manifest library)) second-commit))
+          ;; and back to the pin; an abbreviated hash cannot be fetched, and says so
+          (assert= (:commit (grammar-fetch url (path/join work "demo") first-commit)) first-commit)
+          (is (includes? (:error (grammar-fetch url
+                                   (path/join work "demo")
+                                   (string/substring first-commit 0 12)))
+                "abbreviated")))
+        (file/rmdir root)))
+
+    (test "a revision the repository does not have is an error, not the default branch"
+      (let (root (temp-dir "brood-grammarpin-")
+            repository (path/join root "repo"))
+        (file/mkdir (path/join repository "src"))
+        (tsm-git repository "init" "-q")
+        (tsm-commit repository "1")
+        (is (contains? (grammar-fetch (str "file://" repository) (path/join root "work") "v9.9.9")
+              :error))
+        (file/rmdir root)))))
+
+(describe "the manifest's place"
+  (test "beside the library, not a library itself"
+    (assert= (grammar-manifest-path "/g/libtree-sitter-c-sharp.so")
+      "/g/libtree-sitter-c-sharp.manifest"))
+  (test "a library with no manifest has none"
+    (assert= (grammar-manifest "/nonexistent/libtree-sitter-x.so") nil)))

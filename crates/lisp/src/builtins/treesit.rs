@@ -827,3 +827,27 @@ pub(super) fn tree_sitter_owned_trees(_: &[Value], _: EnvId, heap: &mut Heap) ->
         .collect();
     Ok(heap.alloc_vector(owned))
 }
+
+// ---- what a loaded grammar contains (ADR-583) ----------------------------------------
+
+/// Asking a grammar for its vocabulary — registered LAST from `builtins::register`, for the
+/// intern-table order reason `register_tree_queries` gives.
+pub(super) fn register_grammar_info(primitives: &mut super::Primitives) {
+    use super::signature_types::*;
+    use crate::core::value::Arity;
+    use crate::types::Sig;
+    primitives.def(
+        "%tree-sitter-grammar-info",
+        Arity::exact(1),
+        Sig::new(vec![kw], map_ty),
+        &["lang"],
+        "What the grammar for the language keyword `lang` contains, as {:lang :abi :version :name :source :named :anonymous :fields}: :named and :anonymous the visible node kinds as keyword sets (aliases included; hidden rules and supertypes are never a node's kind), :fields the field names as a keyword set, :abi the grammar's tree-sitter ABI, :version its own \"major.minor.patch\" and :name its name (both nil before ABI 15), :source the library path it was loaded from or :built-in. The vocabulary a face table, an indent spec or an injection rule may name — what makes a grammar update that renamed a node detectable (ADR-583). Loads a declared grammar, as a parse would; errors when the runtime has no grammar for `lang`, or in a build without feature `treesit`.",
+        tree_sitter_grammar_info,
+    );
+}
+
+/// `(%tree-sitter-grammar-info lang)` — `crate::host::treesit::grammar_info`.
+pub(super) fn tree_sitter_grammar_info(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let lang = ts_lang(heap, "%tree-sitter-grammar-info", arg(args, 0))?;
+    crate::host::treesit::grammar_info(heap, &lang)
+}
