@@ -52,7 +52,8 @@
   ;; `:cwd` — the directory to run IN. Without it, a caller that needs one has to build a
   ;; `sh -c "cd '<dir>' && ..."` string — a shell, and its quoting, purely to change directory.
   (test "an optional working directory runs the child there"
-    (assert= "/tmp" (string/trim (get (os/cmd "pwd" [] {:cwd "/tmp"}) :stdout)))
+    ;; the real directory: on macOS /tmp is a link to /private/tmp, which is what pwd says
+    (assert= (os/canonicalize "/tmp") (string/trim (get (os/cmd "pwd" [] {:cwd "/tmp"}) :stdout)))
     (assert= "/usr" (string/trim (get (os/cmd "pwd" [] {:cwd "/usr"}) :stdout))))
   (test "omitting it, or passing nil, inherits this process's directory"
     (let (here (string/trim (get (os/cmd "pwd") :stdout)))

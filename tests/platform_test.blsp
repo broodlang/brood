@@ -13,6 +13,9 @@
 
 (defn- windows? () (= (os/type) :windows))
 
+;; The home directory, which every machine CI runs on has.
+(defn- home () (or (path/home) (error "platform-test: no home directory (HOME / USERPROFILE)")))
+
 (defn- fresh-dir ()
   (let (directory (temp-dir "brood-platform-"))
     (file/mkdir directory)
@@ -22,17 +25,17 @@
   (test "os/type names this OS"
     (is (contains? #{:linux :macos :windows} (os/type))))
   (test "the home directory is known and absolute — USERPROFILE on Windows, where no HOME is set"
-    (let (home (path/home))
-      (is (string? home))
+    (let (home (home))
+      (is (not (= home "")))
       (is (path/absolute? home))
       (is (file/dir? home))))
   (test "~ expands to the home directory"
     (assert= (path/absolute "~") (path/home))
     (assert= (path/absolute "~/notes.txt") (str (path/home) "/notes.txt")))
   (test "a path under the home abbreviates to ~ and back"
-    (assert= (path/abbreviate (path/join (path/home) "src")) "~/src")
-    (assert= (path/absolute (path/abbreviate (path/join (path/home) "src")))
-      (path/join (path/home) "src")))
+    (assert= (path/abbreviate (path/join (home) "src")) "~/src")
+    (assert= (path/absolute (path/abbreviate (path/join (home) "src")))
+      (path/join (home) "src")))
   (test "the temp directory exists, and path/temp names a fresh path inside it"
     (is (file/dir? (path/temp-root)))
     (assert= (path/dirname (path/temp "x-")) (path/temp-root)))
@@ -86,8 +89,7 @@
 (describe "processes"
   (test "os/which finds the platform's shell — cmd as cmd.exe on Windows"
     (let (found (os/which (if (windows?) "cmd" "sh")))
-      (is (string? found))
-      (is (path/absolute? found))))
+      (is (and (string? found) (path/absolute? found)))))
   (test "os/which answers nil for nothing"
     (is (nil? (os/which "brood-surely-no-such-program"))))
   (test "os/cmd runs the platform's shell and reads its output"
@@ -110,5 +112,4 @@
                    (os/cmd "sh" ["-c" "exit 3"])))
       (assert= (:exit result) 3)))
   (test "a program that does not exist raises, rather than answering"
-    (is (= :raised
-          (try (os/cmd "brood-surely-no-such-program") (catch _ :raised))))))
+    (is (= :raised (try (os/cmd "brood-surely-no-such-program") (catch _ :raised))))))

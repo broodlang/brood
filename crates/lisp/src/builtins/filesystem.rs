@@ -232,29 +232,6 @@ fn windows_path_text(text: &str) -> String {
     unprefixed.replace('\\', "/")
 }
 
-#[cfg(test)]
-mod windows_path_text_tests {
-    use super::windows_path_text;
-
-    #[test]
-    fn a_drive_path_takes_forward_slashes() {
-        assert_eq!(windows_path_text(r"C:\Users\me\src"), "C:/Users/me/src");
-    }
-
-    #[test]
-    fn the_verbatim_prefix_is_dropped() {
-        assert_eq!(windows_path_text(r"\\?\C:\Users\me"), "C:/Users/me");
-    }
-
-    #[test]
-    fn a_verbatim_unc_path_is_a_unc_path_again() {
-        assert_eq!(
-            windows_path_text(r"\\?\UNC\server\share\x"),
-            "//server/share/x"
-        );
-    }
-}
-
 /// Strip Linux's `" (deleted)"` marker from a `/proc/self/exe` readlink.
 ///
 /// The kernel appends it when the running binary's inode has been UNLINKED — which is not
@@ -933,5 +910,28 @@ impl Drop for FileLock<'_> {
     fn drop(&mut self) {
         // Not actionable here, and closing the file would release it regardless.
         let _ = self.file.unlock();
+    }
+}
+
+#[cfg(test)]
+mod windows_path_text_tests {
+    use super::windows_path_text;
+
+    #[test]
+    fn a_drive_path_takes_forward_slashes() {
+        assert_eq!(windows_path_text(r"C:\Users\me\src"), "C:/Users/me/src");
+    }
+
+    #[test]
+    fn the_verbatim_prefix_is_dropped() {
+        assert_eq!(windows_path_text(r"\\?\C:\Users\me"), "C:/Users/me");
+    }
+
+    #[test]
+    fn a_verbatim_unc_path_is_a_unc_path_again() {
+        assert_eq!(
+            windows_path_text(r"\\?\UNC\server\share\x"),
+            "//server/share/x"
+        );
     }
 }

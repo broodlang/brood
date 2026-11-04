@@ -304,14 +304,13 @@ jobs:
           cargo check --workspace --exclude brood-tab --exclude brood-playground --all-targets
           --features brood/gui-gpu --features brood/audio --features brood/treesit-grammars
 
-  # Whether the runtime RUNS on Windows, which nothing has yet shown: build `brood` and run
-  # a program that spawns, sends, receives and requires a std module. Allowed to fail while
-  # the port is new — its log is the to-do list — and to be made a gate (drop
-  # `continue-on-error`) once it has passed.
+  # Whether the runtime RUNS on Windows: build `brood` and run a program that spawns, sends,
+  # receives and requires a std module, then a gui `nest` running the platform smoke set.
+  # A gate since 2026-11-04 (it was `continue-on-error` while the port was new): the probe
+  # had passed, and the smoke set's first run found only a test race (clipboard reads).
   windows-smoke:
-    name: Windows runs a program (the port's probe)
+    name: Windows runs a program and the platform smoke set
     runs-on: windows-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
