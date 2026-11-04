@@ -59,6 +59,9 @@
     (assert= (path/absolute? "C:/Users") (windows?))
     (assert= (path/absolute? "C:\\Users") (windows?))
     (is (not (path/absolute? "C:"))))
+  (test "a typed path starts over at a drive root on Windows, as at // (Emacs's rule)"
+    (assert= (path/substitute "/somewhere/else/D:/x") (if (windows?) "D:/x" "/somewhere/else/D:/x"))
+    (assert= (path/substitute "/somewhere//etc") "/etc"))
   (test "joining onto a drive-rooted path starts over there, as onto a /-rooted one"
     (assert= (path/join "a" "/b") "/b")
     (assert= (path/join "a" "D:/b") (if (windows?) "D:/b" "a/D:/b"))))
@@ -106,6 +109,15 @@
                      (os/cmd "cmd.exe" ["/d" "/c" "dir /b"] {:cwd directory})
                      (os/cmd "ls" [] {:cwd directory})))
         (assert= (os/cmd-out result) "marker.txt"))))
+  (test "a timeout stops the command's own children too — a Job Object on Windows"
+    ;; the shell starts a child that holds the output pipe for 30 s; killing only the shell
+    ;; left it running and the call waiting it out
+    (let (started (os/now)
+          result (if (windows?)
+                   (os/cmd "cmd.exe" ["/d" "/c" "ping -n 30 127.0.0.1"] {:timeout-ms 300})
+                   (os/cmd "sh" ["-c" "sleep 30; true"] {:timeout-ms 300})))
+      (is (:timed-out result))
+      (is (< (- (os/now) started) 10000))))
   (test "a failing command is an exit code, not a raise"
     (let (result (if (windows?)
                    (os/cmd "cmd.exe" ["/d" "/c" "exit 3"])

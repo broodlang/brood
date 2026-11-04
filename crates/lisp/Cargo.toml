@@ -378,6 +378,12 @@ wasmtime-wasi = { version = "50", default-features = false, features = ["p2"], o
 [target.'cfg(any(unix, windows))'.dependencies]
 libc = "0.2"
 
+# Windows: a Job Object per `os/cmd` child, so stopping the command (C-g, a timeout, a
+# killed caller) stops every process it started — Windows's process group. Already in the
+# dependency tree (transitive), at this version.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects"] }
+
 # Non-wasm substrate: mimalloc (its C build + per-thread heaps don't cross to wasm,
 # where core/alloc.rs BACKEND falls back to the system allocator) and mio (its
 # epoll/kqueue socket reactor has no wasm backend; the wasm net stub needs none).

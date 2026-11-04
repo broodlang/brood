@@ -327,6 +327,15 @@ exactly that name — how a file name from the disk goes into text that will be 
   (or (= component "~")
     (not (nil? (%user-home (string/substring component 1 (string/length component)))))))
 
+(defn- drive-start? (text i n)
+  ;; Windows: a drive root (`C:/`, `C:\`, or a bare `C:` at the end) starts a path over, as
+  ;; `//` does — Emacs reads `/x/C:/y` as `C:/y` there (ADR-592). Elsewhere it is a name.
+  (and (< (inc i) n)
+    (= (string/char-at text (inc i)) ":")
+    (includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" (string/char-at text i))
+    (or (= (+ i 2) n) (= (string/char-at text (+ i 2)) "/") (= (string/char-at text (+ i 2)) "\\"))
+    (windows?)))
+
 (defn- restart-at? (text i n start keep? directory-of)
   "Does a new path begin at index `i` of `text` (length `n`, live from `start`)? At a `/`
 right after a `/`, and at a `~` / `~name` component right after a `/` when it names a home
@@ -334,6 +343,7 @@ that `keep?` does not claim as an entry of the directory before it."
   (and (> i start)
     (= (string/char-at text (dec i)) "/")
     (or (= (string/char-at text i) "/")
+      (drive-start? text i n)
       (and (= (string/char-at text i) "~")
         (let (slash (index-of text "/" i)
               component (string/substring text i (if (< slash 0) n slash)))
@@ -351,7 +361,7 @@ that `keep?` does not claim as an entry of the directory before it."
 
 (defn substitute-start (text:string &optional keep? -> int)
   "Where the part of `text` that still counts begins: 0, or the index of the last `//`'s
-second slash or `/~/`'s `~`. Everything before it was overridden — a prompt paints it as a
+second slash or `/~/`'s `~` (on Windows also `/C:/`'s drive letter). Everything before it was overridden — a prompt paints it as a
 shadow. `keep?`, when given, is `(fn (directory component) -> bool)`: true when the
 `~name` `component` is a real entry of `directory` (the text before it, its variables
 expanded) and so is a file there, not a home.

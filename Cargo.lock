@@ -547,6 +547,7 @@ dependencies = [
  "web-time",
  "webpki-roots",
  "wgpu",
+ "windows-sys 0.61.2",
  "winit",
  "x25519-dalek",
 ]
