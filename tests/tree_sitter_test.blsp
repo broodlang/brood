@@ -122,12 +122,13 @@
         (is (nil? (tst-search root (fn (n) (or (get n :error) (get n :missing))))))))))
 
 ;; ---- errors ----------------------------------------------------------------
-;; Runs regardless of grammars: an unknown language throws whether or not any
-;; grammar is built in.
+;; Runs regardless of grammars: an unknown language throws whether or not any grammar is
+;; built in. Not `:python`: treesit_module_test declares an installed Python grammar, and in
+;; the same run that made this parse succeed.
 
 (describe "tree-sitter-parse errors"
   (test "an unknown language throws"
-    (assert-error (%tree-sitter-parse "x" :python))))
+    (assert-error (%tree-sitter-parse "x" :tst-no-grammar-has-this-name))))
 
 ;; ---- grammars loaded at runtime ---------------------------------------------
 ;; The kernel ships no language list (ADR-093's follow-up): a grammar it was not built with
