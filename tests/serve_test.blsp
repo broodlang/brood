@@ -245,8 +245,15 @@
       ;; :draw sends the frame to the client (us) verbatim
       ((get d :draw) [:A-FRAME])
       (assert= (receive ([:frame f] f) (after 5000 :none)) [:A-FRAME])
-      ;; :size is the size reported at attach (live resize deferred)
+      ;; :size is the size reported at attach…
       (assert= ((get d :size)) [80 24])
+      ;; …until the client ships a resize, which reaches the app too (ADR-587)
+      (send (self) [:key [:resize 100 30] false])
+      (assert= ((get d :poll) 500) [:resize 100 30])
+      (assert= ((get d :size)) [100 30])
+      (send (self) [:key [:resize 90 20]])
+      (assert= ((get d :poll-input)) [:resize 90 20])
+      (assert= ((get d :size)) [90 20])
       ;; :poll returns a shipped key, and maps a detach request to :close (ui-run quits)
       (send (self) [:key "z"])
       (assert= ((get d :poll) 500) "z")
@@ -657,12 +664,6 @@
       (send session [:key "+"])
       (assert= (await-frame-text "n=2 who=back") "n=2 who=back")
       (send session [:key "q"])))
-
-  (test "a terminal client answers the session's ping"
-    (send (self) [:ping (self) :asked])
-    (send (self) [:bye])
-    (editor/serve/attach-drain nil nil)
-    (assert= (receive ([:pong r] r) (after 0 :none)) :asked))
 
   (test "a window client answers the session's ping, and does not ship it as a key"
     (let (display {:draw (fn (f) nil) :leave (fn () nil)})

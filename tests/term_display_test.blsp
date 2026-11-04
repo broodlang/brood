@@ -1,0 +1,137 @@
+;; tests/term_display_test.blsp — the terminal display, end to end (ADR-586, ADR-587).
+;;
+;; A real `ui-run` over `editor/ui/*term-display*` under a pseudo-terminal, read back through
+;; `std/vt` — the terminal emulator — so what is asserted is what a terminal SHOWS: the frame
+;; drawn, the cursor where the frame put it, a keystroke's update costing the cells it changed
+;; and not the screen, a bracketed paste arriving whole as `[:paste text]`, a resize as
+;; `[:resize cols rows]`, and the terminal given back (the alternate screen left) on exit.
+;; The pure halves — the cell grid, the diff, the colour depth — are the Rust unit tests in
+;; `crates/lisp/src/builtins/terminal/native/screen.rs`.
+(defmodule term-display-test
+  (:use test)
+  (:use suite-helpers))
+
+(def- app-source
+  ;; a `ui-run` app: the model's text and the last event on screen, a panel of background
+  ;; below them (so a full repaint is many cells and a keystroke's update few), the cursor
+  ;; after the text
+  (str "(defmodule term-display-app (:use editor/ui))\n"
+    "(ui-run {:text \"start\" :event \"none\"}\n" "  (fn (m cols rows)\n" "    [[:clear]\n"
+    "     [:text 0 0 (str \"text:\" (:text m))]\n"
+    "     [:text 1 0 (str \"size:\" cols \"x\" rows)]\n"
+    "     [:text 2 0 (str \"event:\" (:event m))]\n"
+    "     [:rect 3 0 cols (- rows 3) {:bg \"#202040\"}]\n" "     [:text 4 2 \"日本\" {:fg :yellow}]\n"
+    "     [:cursor 0 (+ 5 (string/length (:text m))) :bar]])\n" "  (fn (m input cols rows)\n"
+    "    (cond\n" "      (= input \"q\") (assoc m :done true)\n"
+    "      (string? input) (assoc m :text (str (:text m) input))\n"
+    "      (and (vector? input) (= (first input) :paste))\n"
+    "        (assoc m :event (str \"paste \" (string/replace (second input) \"\\n\" \"|\")))\n"
+    "      (and (vector? input) (= (first input) :resize))\n"
+    "        (assoc m :event (str \"resize \" (nth input 1) \"x\" (nth input 2)))\n"
+    "      else m))\n" "  editor/ui/*term-display*)\n"))
+
+(defn- screen-text (vt)
+  (string/join (vt/lines vt) "\n"))
+
+(defn- read-until (p state pred ms)
+  "Feed the child's output into `state`'s vt until `(pred vt)` holds or `ms` passes; the
+state, with `:bytes` the count of bytes read since it was last reset and `:closed` once the
+child exited."
+  (if (pred (:vt state))
+    state
+    (receive
+      ([:proc ^p data] (read-until p
+                         (assoc state
+                           :vt (vt/feed (:vt state) data)
+                           :bytes (+ (:bytes state) (string/length data)))
+                         pred
+                         ms))
+      ([:proc-closed ^p _] (assoc state :closed true))
+      (after ms state))))
+
+(defn- showing? (needle)
+  (fn (vt) (includes? (screen-text vt) needle)))
+
+(describe "the terminal display under a pty (ADR-586)"
+  :isolated (test "draws the frame, writes only what changed, and takes pastes and resizes"
+    (let (dir (test/temp-dir "brood-term-display-")
+          script (str dir "/app.blsp"))
+      (do
+        (file/mkdir dir)
+        (file/spit script app-source)
+        (let (p (os/spawn-pty (sibling-binary "nest") ["run" script] {:cols 40 :rows 10})
+              first-frame (read-until p
+                            {:vt (vt/make 40 10) :bytes 0}
+                            (showing? "size:40x10")
+                            20000))
+          (do
+            (is (vt/mode (:vt first-frame) :alt-screen))
+            (is (includes? (screen-text (:vt first-frame)) "text:start"))
+            ;; a wide grapheme takes its two cells
+            (is (includes? (screen-text (:vt first-frame)) "日本"))
+            ;; the cursor is shown where the frame put it, and bracketed paste is on
+            (assert= (vt/cursor (:vt first-frame)) [0 10])
+            (is (vt/mode (:vt first-frame) :cursor-visible))
+            (is (vt/mode (:vt first-frame) :bracketed-paste))
+            ;; the first frame writes the 280-cell panel; a keystroke writes the cell it changed
+            (is (> (:bytes first-frame) 280))
+            (os/write p "x")
+            (let (typed (read-until p
+                          (assoc first-frame :bytes 0)
+                          (fn (vt) (= (vt/cursor vt) [0 11]))
+                          20000))
+              (do
+                (is (includes? (screen-text (:vt typed)) "text:startx"))
+                (is (< (:bytes typed) 80))
+                ;; a paste arrives whole, newlines and all
+                (os/write p "\e[200~hello\nworld\e[201~")
+                (let (pasted (read-until p typed (showing? "event:paste hello|world") 20000))
+                  (do
+                    (is (includes? (screen-text (:vt pasted)) "event:paste hello|world"))
+                    (is (includes? (screen-text (:vt pasted)) "text:startx"))
+                    ;; a resize reaches the app at once, and the next frame is drawn whole
+                    (os/resize-pty p 50 12)
+                    (let (resized (read-until p
+                                    (assoc pasted :vt (vt/resize (:vt pasted) 50 12))
+                                    (showing? "event:resize 50x12")
+                                    20000))
+                      (do
+                        (is (includes? (screen-text (:vt resized)) "size:50x12"))
+                        (os/write p "q")
+                        (let (closed (read-until p resized (fn (vt) false) 20000))
+                          (do
+                            (is (:closed closed))
+                            ;; the terminal is given back
+                            (is (not (vt/mode (:vt closed) :alt-screen)))
+                            (is (not (vt/mode (:vt closed) :bracketed-paste)))
+                            (is (vt/mode (:vt closed) :cursor-visible))))))))))))
+        (file/rmdir dir)))))
+
+(describe "term/colors (ADR-586)"
+  (test "names the depth and can be set and reset"
+    (let (environment (term/colors))
+      (do
+        (is (contains? #{:truecolor :256 :16} environment))
+        (assert= (term/colors :16) :16)
+        (assert= (term/colors) :16)
+        (assert= (term/colors nil) environment))))
+  (test "refuses a depth it does not know"
+    (is (failure? (try (term/colors :lots) (catch e (failure (error-message e))))))))
+
+(describe "term/bg (ADR-586)"
+  (test "takes a colour or nil for the default face, and refuses anything else"
+    (assert= (term/bg "#1e1e2e" "#cdd6f4") nil)
+    (assert= (term/bg [30 30 46]) nil)
+    (assert= (term/bg nil) nil)
+    (is (failure? (try (term/bg "not a colour") (catch e (failure (error-message e))))))))
+
+(describe "the terminal clipboard (ADR-587)"
+  (test "OSC 52 carries the text base64-encoded, to the clipboard or PRIMARY"
+    (assert= (editor/ansi/ansi-clipboard "héllo")
+      (str "\e]52;c;" (encoding/base64-encode "héllo") "\x07"))
+    (is (string/starts-with? (editor/ansi/ansi-clipboard "x" :primary) "\e]52;p;")))
+  (test "the terminal display carries clipboard setters, so an attached session's kills land"
+    (is (fn? (:clipboard-set editor/ui/*term-display*)))
+    (is (fn? (:primary-set editor/ui/*term-display*))))
+  (test "display-available? answers a boolean"
+    (is (bool? (editor/ui/display-available?)))))
