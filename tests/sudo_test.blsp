@@ -118,7 +118,10 @@
                    (do
                      (file/spit (str dir "/nopasswd") "")
                      (file/spit-bytes path [99 97 102 233 10 0 255])
-                     (assert= (vec (sudo/read-bytes path opts)) [99 97 102 233 10 0 255])
+                     (let (bytes (sudo/read-bytes path opts))
+                       (do
+                         (is (bytes? bytes))
+                         (when (bytes? bytes) (assert= (vec bytes) [99 97 102 233 10 0 255]))))
                      (let (text (sudo/read path opts))
                        (do
                          (is (failure? text))
