@@ -377,11 +377,48 @@ fn named_kw(base: &'static str, k: &crossterm::event::KeyEvent) -> Value {
 pub(in crate::builtins) fn write_term_bytes(bytes: &[u8]) -> std::io::Result<()> {
     if !capture_write(&String::from_utf8_lossy(bytes)) {
         use std::io::Write;
-        let mut real = std::io::stdout();
-        real.write_all(bytes)?;
-        real.flush()?;
+        let mut real = std::io::stdout().lock();
+        let mut rest = bytes;
+        // stdout may be a NON-BLOCKING descriptor (a pipe a parent set so, a pty under load):
+        // a full buffer is EAGAIN, a transient — wait until it drains, never fail the frame
+        while !rest.is_empty() {
+            match real.write(rest) {
+                Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+                Ok(written) => rest = &rest[written..],
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => wait_writable(),
+                Err(e) => return Err(e),
+            }
+        }
+        loop {
+            match real.flush() {
+                Ok(()) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => wait_writable(),
+                Err(e) => return Err(e),
+            }
+        }
     }
     Ok(())
+}
+
+/// Block until stdout can take more bytes (or 100 ms pass): what a write that met EAGAIN on a
+/// non-blocking stdout waits for before it tries again.
+fn wait_writable() {
+    #[cfg(unix)]
+    {
+        let mut descriptor = libc::pollfd {
+            fd: libc::STDOUT_FILENO,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd, a bounded timeout.
+        unsafe {
+            libc::poll(&mut descriptor, 1, 100);
+        }
+    }
+    #[cfg(not(unix))]
+    std::thread::sleep(std::time::Duration::from_millis(10));
 }
 
 /// Parse a frame value (the op-vector `term-draw`/`term-emit`/`gui-draw` all
@@ -542,7 +579,7 @@ fn style_of(heap: &Heap, face: Value) -> screen::Style {
 /// hidden in a frame with none.
 pub(in crate::builtins) fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let parsed = frame_ops(heap, arg(args, 0), "%term-draw", "vector (a frame)")?;
-    let (cols, rows) = crossterm::terminal::size().map_err(term_err)?;
+    let (cols, rows) = draw_size();
     let mut state = terminal_screen();
     let mut next = match &state.shown {
         Some(shown) if shown.cols == cols && shown.rows == rows => shown.clone(),
@@ -560,6 +597,30 @@ pub(in crate::builtins) fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) 
         write_term_bytes(&out).map_err(term_err)?;
     }
     Ok(Value::nil())
+}
+
+/// The size a frame is painted at: the terminal's, or — with no terminal to ask (no
+/// controlling tty: a CI runner, `nest mcp`, output captured by `with-out-str`) — `$COLUMNS` ×
+/// `$LINES`, else 80×24. A draw never fails for want of a terminal; it paints a screen of the
+/// size a terminal would most likely have, as `term-draw` did before it diffed (ADR-586).
+fn draw_size() -> (u16, u16) {
+    if let Ok((cols, rows)) = crossterm::terminal::size()
+        && cols > 0
+        && rows > 0
+    {
+        return (cols, rows);
+    }
+    let from_environment = |name: &str, fallback: u16| {
+        std::env::var(name)
+            .ok()
+            .and_then(|text| text.trim().parse::<u16>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(fallback)
+    };
+    (
+        from_environment("COLUMNS", 80),
+        from_environment("LINES", 24),
+    )
 }
 
 /// Paint parsed frame ops onto `target` (see [`term_draw`]), a face's missing colours taken
@@ -2760,7 +2821,7 @@ mod focus_tests {
         let parts = heap.vector(id).to_vec();
         assert_eq!(keyword_name(parts[0]).as_deref(), Some("paste"));
         assert_eq!(
-            expect_string(&heap, "test", parts[1]).unwrap(),
+            expect_string(&heap, "%term-poll", parts[1]).unwrap(),
             "a\nb".to_string()
         );
     }
