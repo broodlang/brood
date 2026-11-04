@@ -42,7 +42,8 @@ when the cut fell inside a run."
     "a\e[0;31mred\e[38;5;196mx\e[48;2;1;2;3my\e[m z" "x\e[38:2::9:8:7mtrue\e[39m"
     "pre\e]0;a title\x07post" "\e]8;;http://example.com\e\\link\e]8;;\e\\ after"
     "a\e[2K\e[1Gb\e[?25lc\e[>4;2md" "\e(Bq\e7x\e8\e=y" "é\e[1m😀\e[0mü" "\e[3\e[1mx"
-    "\ePq#0;2;0;0;0\e\\after-dcs" "line one\r\n\e[32mline two\e[0m\r\n"])
+    "\ePq#0;2;0;0;0\e\\after-dcs" "line one\r\n\e[32mline two\e[0m\r\n"
+    "x\e[1;4:3mcurly\e[4:0m\e[58:5:1mu\e[59;38:2:1:2:3mv"])
 
 (describe "ansi/feed: one chunk"
   (test "SGR sets attributes; the text keeps no escape"
@@ -109,7 +110,41 @@ when the cut fell inside a run."
     (assert= (ansi/colour 16 ["#000000"]) [0 0 0]))
   (test "a face resolves indexes through the caller's palette"
     (assert= (ansi/face {:fg 1 :underline true} {:colors (into [] (seq/repeat 16 "#123456"))})
-      {:fg "#123456" :underline true})))
+      {:fg "#123456" :underline true}))
+  (test "a face resolves the underline colour, and passes its style through"
+    (assert= (ansi/face {:underline true :underline-style :curly :underline-colour 1} nil)
+      {:underline true :underline-style :curly :underline-colour [205 0 0]})))
+
+(describe "ansi: colon sub-parameters (ECMA-48 / ITU T.416)"
+  (test "params keeps a `:` group together as one parameter"
+    (assert= (ansi/params "4:3") [[4 3]])
+    (assert= (ansi/params "1;38:2::9:8:7;4") [1 [38 2 nil 9 8 7] 4]))
+  (test "4:n is the underline style, and is never italic"
+    (assert= (whole "\e[4:3mc") [["c" {:underline true :underline-style :curly}]])
+    (assert= (ansi/sgr nil [[4 2]]) {:underline true :underline-style :double})
+    (assert= (ansi/sgr nil [[4 4]]) {:underline true :underline-style :dotted})
+    (assert= (ansi/sgr nil [[4 5]]) {:underline true :underline-style :dashed})
+    (assert= (ansi/sgr {:underline true :underline-style :curly} [[4 1]]) {:underline true}))
+  (test "4:0 clears only the underline, not the rest"
+    (assert= (whole "\e[1;31;4:3mx\e[4:0my")
+      [["x" {:bold true :fg 1 :underline true :underline-style :curly}] ["y" {:bold true :fg 1}]]))
+  (test "a plain 4 is single, and 24 clears the style too"
+    (assert= (ansi/sgr {:underline true :underline-style :curly} [4]) {:underline true})
+    (assert= (ansi/sgr {:bold true :underline true :underline-style :curly} [24]) {:bold true}))
+  (test "38 / 48 colours with and without the colour-space id"
+    (assert= (ansi/sgr nil (ansi/params "38:2::1:2:3")) {:fg [1 2 3]})
+    (assert= (ansi/sgr nil (ansi/params "38:2:1:2:3")) {:fg [1 2 3]})
+    (assert= (ansi/sgr nil (ansi/params "38:5:196")) {:fg 196})
+    (assert= (ansi/sgr nil (ansi/params "48:2::9:8:7;48:5:4")) {:bg 4}))
+  (test "58 is the underline colour in either spelling; 59 resets it"
+    (assert= (ansi/sgr nil (ansi/params "58:2::1:2:3")) {:underline-colour [1 2 3]})
+    (assert= (ansi/sgr nil (ansi/params "58;5;9")) {:underline-colour 9})
+    (assert= (ansi/sgr {:underline-colour 9 :bold true} [59]) {:bold true}))
+  (test "an unknown group, or an unreadable one, changes nothing"
+    (assert= (ansi/sgr {:fg 1} (ansi/params "4:9")) {:fg 1})
+    (assert= (ansi/sgr {:fg 1} (ansi/params "38:7:1")) {:fg 1})
+    (assert= (ansi/sgr {:fg 1} (ansi/params "38:5")) {:fg 1})
+    (assert= (ansi/sgr nil (ansi/params "1:2;3")) {:italic true})))
 
 (describe "ansi/strip over the decoder"
   (test "an OSC title is removed whole — its text never leaks"

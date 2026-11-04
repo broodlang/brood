@@ -14,31 +14,52 @@
   titles and hyperlinks, DCS, charset selection) is consumed. Emacs's `ansi-color` with
   its `ansi-color-context`.
 - [[sgr]] / [[params]] — the SGR attribute fold, `{:fg :bg :bold :dim :italic :underline
-  :inverse :strike}`; [[colour]] / [[face]] / [[xterm-palette]] — an attribute as display
+  :underline-style :underline-colour :inverse :strike}`, `:` sub-parameters (`4:3`,
+  `38:2::r:g:b`) read per ECMA-48 / ITU T.416; [[colour]] / [[face]] / [[xterm-palette]] — an attribute as display
   colours. `vt` (the terminal emulator) uses the same model.
 - [[strip]] — the escapes and carriage returns removed from a whole string.
 - [[render]] — the cursor and erase sequences a line editor emits, applied.")
 
 ;; ---- SGR: the attribute state ------------------------------------------------------------
-;; An attribute is nil (the default face) or a map of the keys set: `:fg` / `:bg` a palette
-;; index (0–255) or a true colour `[r g b]`, and the flags `:bold :dim :italic :underline
-;; :inverse :strike`. `vt` keeps one per cell; the decoder keeps the current one.
+;; An attribute is nil (the default face) or a map of the keys set: `:fg` / `:bg` /
+;; `:underline-colour` a palette index (0–255) or a true colour `[r g b]`, the flags `:bold
+;; :dim :italic :underline :inverse :strike`, and `:underline-style` — `:double :curly
+;; :dotted :dashed` beside `:underline true` (a single underline has no style key). `vt`
+;; keeps one per cell; the decoder keeps the current one.
 
 (def- sgr-flags
-  ;; parameter -> the `[key value]` pairs it sets (nil clears); 22 clears bold AND dim
+  ;; parameter -> the `[key value]` pairs it sets (nil clears); 22 clears bold AND dim, and
+  ;; a plain 4 is a SINGLE underline, so it drops a style a `4:3` set
   {1 [[:bold true]]
    2 [[:dim true]]
    3 [[:italic true]]
-   4 [[:underline true]]
+   4 [[:underline true] [:underline-style nil]]
    7 [[:inverse true]]
    9 [[:strike true]]
    22 [[:bold nil] [:dim nil]]
    23 [[:italic nil]]
-   24 [[:underline nil]]
+   24 [[:underline nil] [:underline-style nil]]
    27 [[:inverse nil]]
    29 [[:strike nil]]
    39 [[:fg nil]]
-   49 [[:bg nil]]})
+   49 [[:bg nil]]
+   59 [[:underline-colour nil]]})
+
+(def- underline-styles
+  ;; the `4:n` sub-parameter (ITU T.416, as kitty / VTE / iTerm2 read it) -> the pairs it sets
+  {0 [[:underline nil] [:underline-style nil]]
+   1 [[:underline true] [:underline-style nil]]
+   2 [[:underline true] [:underline-style :double]]
+   3 [[:underline true] [:underline-style :curly]]
+   4 [[:underline true] [:underline-style :dotted]]
+   5 [[:underline true] [:underline-style :dashed]]})
+
+(def- colour-keys
+  ;; the extended-colour parameter -> the key its colour goes to
+  {38 :fg 48 :bg 58 :underline-colour})
+
+(defn- attr-pairs (attr: (or nil map) pairs: (or nil vector) -> (or nil map))
+  (fold pairs attr (fn (a kv) (attr-set a (first kv) (second kv)))))
 
 (defn- attr-set (attr: (or nil map) k:keyword v:any -> (or nil map))
   "`attr` with `k` set (removed when `v` is nil), nil once empty — the default face has no map."
@@ -49,9 +70,10 @@
   (math/clamp (or (nth parameters j nil) 0) 0 255))
 
 (defn- extended-colour (parameters:vector i:int -> (tuple any int))
-  "The colour after a 38 / 48 at `parameters[i]`: `[colour next-index]` — `5;n` an index,
-`2;r;g;b` a true colour (the ITU `2::r:g:b` form carries an empty colourspace slot
-first); anything else is skipped with the colour unset."
+  "The colour after a `;`-separated 38 / 48 / 58 at `parameters[i]`: `[colour
+next-index]` — `5;n` an index, `2;r;g;b` a true colour (`2;;r;g;b`, an empty
+colour-space slot first, is read too); anything else is skipped with the colour unset.
+The `:` spellings arrive as one group and are [[group-colour]]'s."
   (let (kind (nth parameters i nil))
     (cond
       (= kind 5) [(channel-at parameters (inc i)) (+ i 2)]
@@ -63,31 +85,72 @@ first); anything else is skipped with the colour unset."
             (+ j 3)])
       else [nil (inc i)])))
 
-(defn- sgr-step (attr: (or nil map) parameters:vector i:int -> (tuple any int))
-  "One SGR parameter applied: `[attr next-index]`."
-  (let (p (or (nth parameters i nil) 0)
-        one (fn (a) [a (inc i)]))
+(defn- group-colour (group:vector -> any)
+  "The colour a `38:…` / `48:…` / `58:…` sub-parameter group names, nil when it names none:
+`5:n` an index, `2:r:g:b` a true colour — or `2:cs:r:g:b`, with the colour-space id
+(usually empty, `38:2::r:g:b`) first, which ITU T.416 puts there."
+  (let (n (count group))
+    (case (nth group 1 nil)
+      5 (if (< n 3) nil (channel-at group 2))
+      2
+        (cond
+          (>= n 6) [(channel-at group 3) (channel-at group 4) (channel-at group 5)]
+          (= n 5) [(channel-at group 2) (channel-at group 3) (channel-at group 4)]
+          else nil)
+      nil)))
+
+(defn- sgr-group (attr: (or nil map) group:vector -> (or nil map))
+  "A `:`-joined SGR parameter group (`4:3`, `38:2::r:g:b`) applied as ONE parameter. A
+group this model does not know — or one whose sub-parameters it cannot read — leaves
+`attr` alone: a sub-parameter never spills into the parameters after it."
+  (let (head (first group)
+        colour-key (get colour-keys head))
+    (cond
+      (= head 4) (attr-pairs attr (get underline-styles (or (nth group 1 nil) 0)))
+      (nil? colour-key) attr
+      else (let (c (group-colour group)) (if (nil? c) attr (attr-set attr colour-key c))))))
+
+(defn- sgr-number (attr: (or nil map) parameters:vector i:int p:int -> (tuple any int))
+  "The plain SGR parameter `p`, at `parameters[i]`, applied: `[attr next-index]`."
+  (let (one (fn (a) [a (inc i)])
+        colour-key (get colour-keys p))
     (cond
       (= p 0) (one nil)
-      (= p 38) (let ([c j] (extended-colour parameters (inc i))) [(attr-set attr :fg c) j])
-      (= p 48) (let ([c j] (extended-colour parameters (inc i))) [(attr-set attr :bg c) j])
+      (not (nil? colour-key))
+        (let ([c j] (extended-colour parameters (inc i))) [(attr-set attr colour-key c) j])
       (<= 30 p 37) (one (attr-set attr :fg (- p 30)))
       (<= 40 p 47) (one (attr-set attr :bg (- p 40)))
       (<= 90 p 97) (one (attr-set attr :fg (- p 82)))
       (<= 100 p 107) (one (attr-set attr :bg (- p 92)))
-      else (one (fold (get sgr-flags p) attr (fn (a kv) (attr-set a (first kv) (second kv))))))))
+      else (one (attr-pairs attr (get sgr-flags p))))))
 
-(defn params (s:string -> (vector (or nil int)))
-  "The numeric parameters of a CSI's parameter bytes `s` as a vector of ints, an empty
-slot nil. `:` sub-parameters are read as `;` — enough for the `38:2::r:g:b` colour form.
+(defn- sgr-step (attr: (or nil map) parameters:vector i:int -> (tuple any int))
+  "One SGR parameter applied: `[attr next-index]` — a `:` group whole, an empty slot as 0."
+  (let (raw (nth parameters i nil))
+    (cond
+      (vector? raw) [(sgr-group attr raw) (inc i)]
+      (int? raw) (sgr-number attr parameters i raw)
+      else (sgr-number attr parameters i 0))))
+
+(defn- param-number (p:string -> (or nil int))
+  (if (= p "") nil (let (n (string/->number p)) (if (int? n) n nil))))
+
+(defn- param-or-group (p:string -> any)
+  (if (includes? p ":") (into [] (map (string/split p ":") param-number)) (param-number p)))
+
+(defn params (s:string -> vector)
+  "The parameters of a CSI's parameter bytes `s`: a vector with one entry per
+`;`-separated parameter — an int, nil for an empty slot, or, for a parameter carrying
+`:` sub-parameters (ECMA-48 / ITU T.416: `4:3` a curly underline, `38:2::r:g:b` a true
+colour), the vector of its sub-parameters, read as one parameter.
 
     (ansi/params \"1;38;5;196\")   ;=> [1 38 5 196]
-    (ansi/params \"0;\")   ;=> [0 nil]"
-  (if (= s "")
-    []
-    (into []
-      (map (string/split (if (includes? s ":") (string/replace s ":" ";") s) ";")
-        (fn (p) (if (= p "") nil (let (n (string/->number p)) (if (int? n) n nil))))))))
+    (ansi/params \"0;\")   ;=> [0 nil]
+    (ansi/params \"4:3;38:2::9:8:7\")   ;=> [[4 3] [38 2 nil 9 8 7]]"
+  (cond
+    (= s "") []
+    (includes? s ":") (into [] (map (string/split s ";") param-or-group))
+    else (into [] (map (string/split s ";") param-number))))
 
 (defn sgr (attr: (or nil map) parameters:vector)
   "`attr` with the SGR `parameters` (as [[params]] reads them) applied, nil for the
@@ -96,7 +159,14 @@ default face; no parameters at all is a reset, as `ESC[m` is.
     (ansi/sgr nil [1 31])   ;=> {:bold true :fg 1}
     (ansi/sgr {:bold true :fg 1} [22])   ;=> {:fg 1}
     (ansi/sgr nil [38 2 255 128 0])   ;=> {:fg [255 128 0]}
-    (ansi/sgr {:fg 1} [])   ;=> nil"
+    (ansi/sgr {:bold true} [[4 3]])   ;=> {:bold true :underline true :underline-style :curly}
+    (ansi/sgr {:bold true :underline true} [[4 0]])   ;=> {:bold true}
+    (ansi/sgr {:fg 1} [])   ;=> nil
+
+A `:` group (see [[params]]) is one parameter: `4:0`–`4:5` the underline style (none,
+single, double, curly, dotted, dashed), `38:` / `48:` / `58:` a foreground, background or
+underline colour (`58`, and `59` to reset it, are the underline colour in either
+spelling). A group it does not know changes nothing."
   (letrec (go (fn (current i)
                 (if (>= i (count parameters))
                   current
@@ -147,8 +217,9 @@ entries, each `[r g b]` or a hex string), 16–231 the 6×6×6 cube, 232–255 t
 (defn face (attr: (or nil map) palette:any -> (or nil map))
   "The SGR `attr` as a display face `{:fg [r g b] :bg … :bold …}`, colours through
 `palette` — `{:colors <16 entries> :fg <default fg> :bg <default bg>}`, the defaults used
-when inverse video needs a colour the text never set (nil: xterm's colours). Nil for the
-default face.
+when inverse video needs a colour the text never set (nil: xterm's colours). An
+`:underline-colour` resolves the same way; the other keys (`:underline-style` among them)
+pass through. Nil for the default face.
 
     (ansi/face {:fg 1 :bold true} nil)   ;=> {:bold true :fg [205 0 0]}
     (ansi/face nil nil)   ;=> nil"
@@ -158,8 +229,12 @@ default face.
           fg (if (nil? (:fg attr)) nil (colour (:fg attr) colors))
           bg (if (nil? (:bg attr)) nil (colour (:bg attr) colors))
           [fg2 bg2] (if (:inverse attr) [(or bg (:bg palette)) (or fg (:fg palette))] [fg bg])
-          flags (dissoc attr :fg :bg :inverse))
-      (attr-set (attr-set flags :fg fg2) :bg bg2))))
+          underline (:underline-colour attr)
+          flags (dissoc attr :fg :bg :inverse :underline-colour))
+      (attr-pairs flags
+        [[:fg fg2]
+          [:bg bg2]
+          [:underline-colour (if (nil? underline) nil (colour underline colors))]]))))
 
 ;; ---- the streaming decoder ---------------------------------------------------------------
 ;; Output arrives in chunks the reader did not choose, so an escape may be cut anywhere:

@@ -32,7 +32,8 @@ host owns the pty and the scrollback."
 
 ;; ---- the shape -----------------------------------------------------------------
 ;; A cell is `[grapheme attr]`; `attr` is nil for the default face, else the SGR map
-;; `{:fg :bg :bold :dim :italic :underline :inverse :strike}` with colours as a palette
+;; `{:fg :bg :bold :dim :italic :underline :inverse :strike}` (and the underline's
+;; `:underline-style` / `:underline-colour`, see `ansi/sgr`) with colours as a palette
 ;; index (0–255) or an `[r g b]` vector. A wide grapheme's second cell is `["" attr]`.
 ;; The terminal itself is the record below — declared, so the checker knows its cursor
 ;; and bounds are ints wherever the arithmetic reads them.
@@ -402,7 +403,7 @@ entry while already there does nothing."
     vt
     (fn (v n)
       (cond
-        (nil? n) v
+        (not (int? n)) v
         private? (set-private-mode v n on)
         else (set-ansi-mode v n on)))))
 
@@ -419,14 +420,21 @@ entry while already there does nothing."
 
 ;; ---- CSI ------------------------------------------------------------------------------------------
 
-(defn- param (params: (vector (or nil int)) i:int default:int -> int)
+(defn- number-at (params:vector i:int -> (or nil int))
+  "Parameter `i` as a number: a `:` sub-parameter group (see `ansi/params`) reads as its
+first, which is all a non-SGR sequence means by one."
+  (let (v (nth params i nil)
+        n (if (vector? v) (nth v 0 nil) v))
+    (if (int? n) n nil)))
+
+(defn- param (params:vector i:int default:int -> int)
   "Parameter `i`, `default` when absent or 0 — `CSI A` and `CSI 0 A` both mean 1."
-  (let (v (nth params i nil))
+  (let (v (number-at params i))
     (if (or (nil? v) (= v 0)) default v)))
 
-(defn- selector (params: (vector (or nil int)) -> int)
+(defn- selector (params:vector -> int)
   "The first parameter as a selector, where 0 is a value of its own (`CSI 0 J`)."
-  (or (nth params 0 nil) 0))
+  (or (number-at params 0) 0))
 
 (defn- origin-row (vt:terminal r:int -> int)
   "A 1-based row from the program made absolute — relative to the scroll region in origin mode."
