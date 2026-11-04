@@ -1145,6 +1145,23 @@ mod pty {
         Ok(())
     }
 
+    /// The local modes of the terminal behind pty master `fd` that say how input is being
+    /// read: whether it echoes (`ECHO`) and whether it is line-buffered (`ICANON`).
+    pub(super) fn input_mode(fd: RawFd) -> std::io::Result<super::PtyInputMode> {
+        // SAFETY: `termios` is plain old data, so all-zero is a valid value for
+        // `tcgetattr` to overwrite; `fd` is a pty master we opened and still hold.
+        let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+        // SAFETY: as above — a valid descriptor and a valid, writable termios.
+        let rc = unsafe { libc::tcgetattr(fd, &mut termios) };
+        if rc == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(super::PtyInputMode {
+            echo: termios.c_lflag & libc::ECHO != 0,
+            canonical: termios.c_lflag & libc::ICANON != 0,
+        })
+    }
+
     /// Open a pty pair, returning `(master, slave)` as OWNED descriptors.
     ///
     /// Owned rather than raw so that every `?` on the way through [`super::spawn_pty`]
@@ -1354,6 +1371,52 @@ pub fn pty_resize(id: u64, cols: u16, rows: u16) -> std::io::Result<()> {
         ));
     };
     pty::set_winsize(fd, cols, rows)
+}
+
+/// How a pty child's terminal is reading input right now: the two termios local modes a
+/// host showing the child's input itself needs (ADR-570).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PtyInputMode {
+    /// `ECHO`: the line discipline echoes what is typed.
+    pub echo: bool,
+    /// `ICANON`: input is read a LINE at a time, edited by the line discipline. A program
+    /// with its own line editor (readline, Erlang's shell, a raw-mode REPL) turns this off
+    /// along with `ECHO` and echoes for itself; a password read (`getpass`, `sudo`, ssh's
+    /// `readpassphrase`) turns off `ECHO` alone — which is what tells the two apart.
+    pub canonical: bool,
+}
+
+/// `(pty-mode handle)` — how pty child `id`'s terminal is reading input: echo and
+/// canonical (line) mode.
+///
+/// A program reading a password clears `ECHO` and keeps `ICANON` for that read, then
+/// restores both. That pair is the one reliable signal a host showing the child's input
+/// itself has that the next line is a secret — a prompt regexp is only a guess.
+///
+/// `tcgetattr` on the MASTER answers with the slave's termios on Linux and macOS (a
+/// master's mode ioctls go to its linked slave), so no slave descriptor is kept open for
+/// this. `Ok(None)` when the handle is unknown or already closed — the child is gone, so
+/// there is no terminal to ask, and a caller checking around a prompt should not have to
+/// race the child's exit. An error for a piped child (misuse) or a failed `tcgetattr`.
+#[cfg(unix)]
+pub fn pty_input_mode(id: u64) -> std::io::Result<Option<PtyInputMode>> {
+    let registry = reg();
+    let Some(p) = registry.get(&id) else {
+        return Ok(None);
+    };
+    let Some(fd) = p.pty else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "pty-mode: this child was spawned with pipes, not a pty",
+        ));
+    };
+    pty::input_mode(fd).map(Some)
+}
+
+/// Off Unix there is no pty, so nothing is known about how it reads: `None`.
+#[cfg(not(unix))]
+pub fn pty_input_mode(_id: u64) -> std::io::Result<Option<PtyInputMode>> {
+    Ok(None)
 }
 
 #[cfg(not(unix))]
