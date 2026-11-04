@@ -5080,3 +5080,8 @@ checker still models a record as the map shape with an `__id__` literal, which `
 inference produces, until step 3. Found on the way: the VM's `first`/`rest` hand-back and its
 binary-operator redirect both tested for a MAP operand (every record used to be one), so a
 record's `->seq` under `first` blocked its worker at tier 1 — `interrupt_one_worker` caught it.
+
+2026-11-04 (ADR-542, step 2 measured). `make ab` against step 1 (`bc191163`): every row within
+±1.6% at the default tier. `make ab-vm`: `fib` −1.0%, `spawn-live` +0.2%, `collatz` +2.1%
+(inside its floor), and `pfib` +5–7.5% — but byte-identical binaries read +8.1% on `pfib` at
+tier 1 in the same session, so that row's spread is the measurement, not the change.
