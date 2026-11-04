@@ -180,3 +180,24 @@
         (receive ([:registry-removed "plain" why] why) (after test/*wait-ms* :timeout)))
       (assert= (registry-entries reg) [])
       (registry-stop reg))))
+
+;; ADR-579: a document's text properties (a program's colours) are part of it — shared from
+;; a holder's copy, kept by the mirror, given back by a respawn.
+(describe "buffer-registry — text properties are part of the document"
+  (test "a document shared with properties starts its process with them"
+    (let (reg (registry-start)
+          p (registry-share reg "log" {:text "ok\n" :properties {:ansi [[0 2 {:fg 2}]]}} {}))
+      (assert= (buffer-query p (fn (b) (buffer-properties b :ansi))) [[0 2 {:fg 2}]])
+      (registry-stop reg)))
+  (test "a respawn from the mirror keeps the properties an append brought"
+    (let (reg (registry-start {:mirror true})
+          p1 (registry-share reg "out" "$ make\n" {}))
+      (registry-watch reg (self))
+      (buffer-splice p1 7 7 "ERROR\n" :someone nil {:ansi [[0 5 {:fg 1}]]})
+      (buffer-query p1 buffer-text) ; a barrier: the push is on its way to the registry
+      (registry-share reg "out" "" {}) ; and a second: the registry folded it
+      (exit p1 :kill)
+      (let (p2 (await-added "out"))
+        (assert= (buffer-query p2 buffer-text) "$ make\nERROR\n")
+        (assert= (buffer-query p2 (fn (b) (buffer-properties b :ansi))) [[7 12 {:fg 1}]]))
+      (registry-stop reg))))

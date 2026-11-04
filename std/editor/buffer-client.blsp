@@ -37,12 +37,15 @@ origin]` push into the link and tells the caller what to do with its LOCAL copy:
     [link' action], action ∈
       :stale          — old/duplicate version: ignore the push entirely
       :noop           — nothing to apply (your own echo; a cursor-only delta)
-      [:splice [lo hi repl]] — apply this splice (already transformed over your
-                        in-flight edits) to your local text
+      [:splice [lo hi repl] properties] — apply this splice (already transformed over
+                        your in-flight edits) to your local copy, laying the text
+                        `properties` it came with (`{key spans}` relative to `repl`,
+                        or nil — ADR-579) on its new text (`buffer-apply-action`);
+                        `:redact` for its properties is a REDACTION (ADR-581)
       :resync         — ambiguous concurrent collision: refetch the authoritative
                         text (e.g. `(buffer-query (get link :proc) buffer-text)`)
-      [:text s]       — a full-text view (a closure edit / the seed): rebuild your
-                        copy from `s` if it differs
+      [:text s properties] — a full-text view (a closure edit / the seed): rebuild
+                        your copy from `s` and its `properties` if they differ
 
 The fold is pure (no sends, no receives) — the merge matrix is testable with
 hand-fed pushes. Start a link with `link-init` (version -1, so the subscription
@@ -84,26 +87,61 @@ no edit is sent.
     (str (string/substring text 0 lo) repl (string/substring text hi (string/length text)))))
 
 (defn text-apply-action (text:string action:any -> string)
-  "`text` with the CONTENT half of a `link-fold` action applied — `[:splice s]` by
-`text-apply-splice`, `[:text t]` by replacement, anything else (`:noop`, `:stale`,
-`:resync`) leaving it as it is. The whole of what a plain-string holder does with a push;
-a `:resync` is the caller's to act on (it needs the process).
+  "`text` with the CONTENT half of a `link-fold` action applied — `[:splice s _]` by
+`text-apply-splice`, `[:text t _]` by replacement, anything else (`:noop`, `:stale`,
+`:resync`) leaving it as it is. The whole of what a plain-string holder does with a push
+(it keeps no text properties); a `:resync` is the caller's to act on (it needs the process).
 
-    (editor/buffer-client/text-apply-action \"hello\" [:splice [0 1 \"J\"]])   ;=> \"Jello\"
+    (editor/buffer-client/text-apply-action \"hello\" [:splice [0 1 \"J\"] nil])   ;=> \"Jello\"
     (editor/buffer-client/text-apply-action \"hello\" :noop)   ;=> \"hello\""
   (match action
-    ([:splice splice] (text-apply-splice text splice))
-    ([:text replacement] (if (string? replacement) replacement text))
+    ([:splice splice _] (text-apply-splice text splice))
+    ([:text replacement _] (if (string? replacement) replacement text))
     (_ text)))
+
+(defn buffer-apply-action (buf action)
+  "`buf` with the content half of a `link-fold` action applied, TEXT PROPERTIES included —
+the buffer-holder twin of `text-apply-action`: `[:splice [lo hi repl] properties]` by
+`apply-splice` (whatever the copy's read-only state: the text already changed where it is
+authoritative) — or by `redact-region` when its properties are `:redact`, a redaction that
+leaves no trace in this copy either — `[:text t properties]` by replacing the whole text when it or its
+properties differ, anything else leaving `buf` as it is.
+
+    (editor/buffer/buffer-text (editor/buffer-client/buffer-apply-action (editor/buffer/make-buffer \"hello\") [:splice [0 1 \"J\"] nil]))   ;=> \"Jello\""
+  (match action
+    ([:splice [lo hi repl] properties] (if (= properties :redact)
+                                         (redact-region buf lo hi)
+                                         (apply-splice buf lo hi repl properties)))
+    ([:text replacement properties] (if (and (string? replacement)
+                                          (not (and (= replacement (buffer-text buf))
+                                                 (= (or properties {}) (buffer-property-map buf)))))
+                                      (apply-splice buf
+                                        0
+                                        (buffer-length buf)
+                                        replacement
+                                        properties)
+                                      buf))
+    (_ buf)))
 
 ;; ---- the wire-view normalizer -------------------------------------------------
 
+(defn content-view (buf)
+  "The projection a holder that keeps a whole COPY subscribes with: `[text markers
+participants properties]` — the document, every marker, the pid → name registry and the
+text properties (`buffer-property-map`). Sent on the seed and on closure edits; structured
+ops push O(change) deltas instead. Runs in the buffer process.
+
+    (editor/buffer-client/content-view (editor/buffer/make-buffer \"hi\"))   ;=> [\"hi\" {} {} {}]"
+  [(buffer-text buf) (buffer-markers buf) (get buf :participants {}) (buffer-property-map buf)])
+
 (defn view-parts (view)
-  "Normalize a push `view` to `{:text :splice :cursors :names}`. Three wire shapes:
-the presence triple `[text markers names]` (closure edits and the seed), a DELTA map
-`{:splice [lo hi repl]? :markers … :participants …}` (structured `buffer-splice` /
-`buffer-marker-move` / `[:write]` ops — O(change), the document never ships), or a
-bare text string (plain projections, tests).
+  "Normalize a push `view` to `{:text :splice :properties :cursors :names}`. Three wire
+shapes: the presence vector `[text markers names]` — or `[text markers names properties]`,
+[[content-view]]'s — (closure edits and the seed), a DELTA map `{:splice [lo hi repl]?
+:properties … :markers … :participants …}` (structured `buffer-splice` /
+`buffer-marker-move` / `[:write]` ops — O(change), the document never ships), or a bare
+text string (plain projections, tests). `:properties` is the splice's (relative to its
+replacement) in a delta and the whole document's in a vector; nil when the view has none.
 
     (get (editor/buffer-client/view-parts [\"abc\" {} {}]) :text)           ;=> \"abc\"
     (get (editor/buffer-client/view-parts {:splice [0 1 \"x\"]}) :splice)   ;=> [0 1 \"x\"]"
@@ -111,10 +149,16 @@ bare text string (plain projections, tests).
     (map? view)
       {:text nil
        :splice (get view :splice)
+       :properties (get view :properties)
        :cursors (or (get view :markers) {})
        :names (or (get view :participants) {})}
-    (vector? view) {:text (nth view 0) :splice nil :cursors (nth view 1) :names (nth view 2)}
-    else {:text view :splice nil :cursors {} :names {}}))
+    (vector? view)
+      {:text (nth view 0)
+       :splice nil
+       :properties (nth view 3 nil)
+       :cursors (nth view 1)
+       :names (nth view 2)}
+    else {:text view :splice nil :properties nil :cursors {} :names {}}))
 
 ;; ---- the link -----------------------------------------------------------------
 
@@ -126,13 +170,14 @@ outbound edits with). Version -1, so the subscription's seed push always applies
     (get (editor/buffer-client/link-init :proc :me) :version)   ;=> -1"
   {:proc proc :me me :version -1 :pending ()})
 
-(defn- link-send-splice (link splice)
-  "Send one `[lo hi repl]` to the link's process, based and tagged, and count it in
-`:pending`. The link unchanged for a splice that changes nothing."
+(defn- link-send-splice (link splice &optional properties)
+  "Send one `[lo hi repl]` to the link's process, based and tagged, with the text
+`properties` its replacement comes with, and count it in `:pending`. The link unchanged for
+a splice that changes nothing."
   (if (splice-noop? splice)
     link
     (let ([lo hi repl] splice)
-      (buffer-splice (get link :proc) lo hi repl (get link :me) (get link :version))
+      (buffer-splice (get link :proc) lo hi repl (get link :me) (get link :version) properties)
       (assoc link
         :pending (append (or (get link :pending) ()) (list [lo hi (string/length repl)]))))))
 
@@ -146,16 +191,27 @@ the link (unchanged when the texts are equal — pure movement sends nothing)."
 
 (defn link-propagate-buffers (link before after)
   "`link-propagate` for a holder whose local copy is a BUFFER: send the change `before` →
-`after` as the splices the edits actually made (`buffer-splices-since`, the buffer's own
-log), each one sent and counted as `link-propagate` sends its one. Exact where a diff
-guesses — a diff of `aaa` → `aaaa` cannot say WHICH `a` was typed, so a collaborator's
-caret beside it landed on the wrong side — and it reads no text. When the log cannot
-account for the change (an undo restored a snapshot, the text was replaced wholesale) it
-falls back to diffing the two texts, which is always correct in content."
-  (let (splices (buffer-splices-since before after))
-    (if (nil? splices)
-      (link-propagate link (buffer-text before) (buffer-text after))
-      (fold splices link link-send-splice))))
+`after` as the splices the edits actually made (`buffer-edits-since`, the buffer's own
+log), each one sent and counted as `link-propagate` sends its one, with the text
+properties its inserted text came with (ADR-579). Exact where a diff guesses — a diff of
+`aaa` → `aaaa` cannot say WHICH `a` was typed, so a collaborator's caret beside it landed
+on the wrong side — and it reads no text. When the log cannot account for the change (the
+text was replaced wholesale, more history than it keeps) it falls back to diffing the two
+texts, which is always correct in content; a buffer with text properties then sends its
+whole text with all of them, the one splice that keeps the properties right too."
+  (let (edits (buffer-edits-since before after))
+    (cond
+      (not (nil? edits))
+        (fold edits
+          link
+          (fn (acc edit)
+            (let ([lo hi repl properties] edit) (link-send-splice acc [lo hi repl] properties))))
+      (empty? (buffer-property-map after))
+        (link-propagate link (buffer-text before) (buffer-text after))
+      else
+        (link-send-splice link
+          [0 (buffer-length before) (buffer-text after)]
+          (buffer-property-map after)))))
 
 (defn link-fold (link:map version:int view:any origin:any -> (tuple map any))
   "Fold one `[:buffer-updated proc version view origin]` push into `link`: returns
@@ -168,11 +224,11 @@ applied it (and may be ahead of it, mid-fast-typing), so content is never rebuil
 from it: the matching `:pending` splice is popped and the version bumps (`:noop`).
 A foreign SPLICE that is strictly apart from every in-flight splice of ours merges
 exactly: it is transformed over them (`splice-transform-all` — the same function the
-process uses on ours) into the `[:splice …]` to apply, and the pendings are remapped
+process uses on ours) into the `[:splice … properties]` to apply, and the pendings are remapped
 over it, as the process will when they arrive after it. A foreign splice that
 touches a span one of ours also touched is genuinely ambiguous → `:pending` resets
 and the caller must `:resync` from the process. A full-text view (closure edits, the
-seed) is handed back as `[:text s]` — unless we hold IN-FLIGHT edits, where rebuilding
+seed) is handed back as `[:text s properties]` — unless we hold IN-FLIGHT edits, where rebuilding
 from it would clobber them (the attach seed racing a first keystroke: the stale
 snapshot rewound the local copy to empty, the own-echo after it was rightly a `:noop`,
 and the next keystroke spliced at 0 — `qZ` for `Zq`); that case is `:resync` too,
@@ -216,10 +272,11 @@ cursor-only delta is `:noop`."
           [nlink
             [:splice
               (splice-transform-all splice
-                (map pending (fn (p) (let ([plo phi plen] p) [plo phi plen]))))]]
+                (map pending (fn (p) (let ([plo phi plen] p) [plo phi plen]))))
+              (get vp :properties)]]
         splice [nlink :resync]
         (nil? text) [nlink :noop]
         ;; a full-text rebuild over in-flight edits would clobber them — resync
         ;; (atomic snapshot; includes our sends by FIFO order), pendings reset
         (not (empty? pending)) [(assoc nlink :pending ()) :resync]
-        else [nlink [:text text]]))))
+        else [nlink [:text text (get vp :properties)]]))))

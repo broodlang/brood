@@ -37,7 +37,7 @@ buffer to a new file or name, `registry-remove` kills one everywhere, and a
 a second frame, a remote session or a mirror sharing one buffer set — every holder links
 its own copy to the same process."
   (:use editor/buffer) ; spawn-buffer / make-buffer / stop-buffer — the processes it directs
-  (:use editor/buffer-client)) ; link-init / link-fold / text-apply-action — the optional mirror
+  (:use editor/buffer-client)) ; link-init / link-fold / buffer-apply-action / content-view — the optional mirror
 (defn registry-key (name:string meta:map -> string)
   "The identity a buffer is shared under: its file (`:file` in `meta`) when it has one,
 else its `name`. Two buffers with the same name and different files are two documents.
@@ -63,30 +63,44 @@ counts as absent, so the answer is never a dead pid."
   (let (e (get entries key))
     (if (and e (nil? (proc/info (:proc e)))) nil e)))
 
-(defn- registry-spawn (name text meta mirror?)
-  "A fresh, monitored entry for a document — and, `mirror?`, subscribed to, with the text it
-started from as its mirror (a `link-init` link the pushes fold through)."
-  (let (bp (spawn-buffer (make-buffer text name (:file meta)))
+(defn- registry-seed-buffer (name content meta)
+  "The buffer a document starts from: `content` is its text, or `{:text :properties}` — the
+text and the text properties (`{key spans}`, ADR-579) a holder's copy already has, so a
+coloured log shared after it was written keeps its colours in every frame."
+  (let (text (if (map? content) (or (:text content) "") content)
+        properties (when (map? content) (:properties content))
+        made (make-buffer text name (:file meta)))
+    (if (or (nil? properties) (empty? properties)) made (assoc made :properties properties))))
+
+(defn- registry-spawn (name seed meta mirror?)
+  "A fresh, monitored entry for a document, its process started from the buffer `seed` —
+and, `mirror?`, subscribed to (`content-view`, so the mirror sees the text properties too),
+with `seed` as its mirror: an undo-less buffer the pushes fold through
+(`buffer-apply-action`), from which a died process is respawned with its properties."
+  (let (bp (spawn-buffer seed)
         entry {:name name :proc bp :meta meta :mref (monitor bp)})
     (if mirror?
-      (do (subscribe-buffer bp buffer-text) (assoc entry :link (link-init bp (self)) :text text))
+      (do
+        (subscribe-buffer bp content-view)
+        (assoc entry :link (link-init bp (self)) :mirror (disable-undo seed)))
       entry)))
 
 (defn- registry-mirror-push (entries bp version view origin)
-  "Fold one push from directed process `bp` into its entry's text mirror."
+  "Fold one push from directed process `bp` into its entry's mirror buffer."
   (let (hit (registry-entry-by-proc entries bp))
     (if (nil? hit)
       entries
       (let ([key entry] hit
             [link action] (link-fold (:link entry) version view origin))
-        (assoc entries key (assoc entry :link link :text (text-apply-action (:text entry) action)))))))
+        (assoc entries
+          key (assoc entry :link link :mirror (buffer-apply-action (:mirror entry) action)))))))
 
 (defn- registry-loop (entries watchers mirror?)
   ;; entries: {key {:name <string> :proc <pid> :meta <map> :mref <monitor ref>
-  ;;                [:link <link> :text <string>]}} — the last two only when `mirror?`;
+  ;;                [:link <link> :mirror <buffer>]}} — the last two only when `mirror?`;
   ;; watchers: a list of pids
   (receive
-    ([:share name text meta from r]
+    ([:share name content meta from r]
       (let (key (registry-key name meta)
             existing (registry-live entries key))
         (if existing
@@ -97,7 +111,7 @@ started from as its mirror (a `link-init` link the pushes fold through)."
           ;; back from the MIRROR, not from the asker's copy — the asker may be the
           ;; holder that missed the last edits.
           (let (dead (get entries key)
-                seed (if (and mirror? dead) (:text dead) text)
+                seed (if (and mirror? dead) (:mirror dead) (registry-seed-buffer name content meta))
                 entry (registry-spawn name seed meta mirror?)
                 bp (:proc entry))
             ;; notify BEFORE replying: the reply is the barrier a caller that is also a
@@ -162,7 +176,7 @@ started from as its mirror (a `link-init` link the pushes fold through)."
                              (registry-notify watchers [:registry-removed key :died])
                              (if mirror?
                                (let (entry (registry-spawn (:name dead)
-                                             (:text dead)
+                                             (:mirror dead)
                                              (:meta dead)
                                              true))
                                  (do
@@ -179,7 +193,7 @@ started from as its mirror (a `link-init` link the pushes fold through)."
 ;; ---- the API ------------------------------------------------------------------
 
 (defn registry-start (&optional (opts {}))
-  "Spawn a registry and return its pid. `opts`: `{:mirror true}` keeps a text mirror of
+  "Spawn a registry and return its pid. `opts`: `{:mirror true}` keeps a mirror (text and text properties) of
 every document (the registry subscribes to each process it spawns) and RESPAWNS a process
 that dies from it, under the same key, instead of dropping the entry — for a registry that
 must outlive its holders' copies (a daemon serving sessions that come and go). Without it
@@ -197,15 +211,17 @@ the holders are the copies, and the first to re-share a died buffer brings the t
     (send reg (msg-fn (self) r))
     (receive ([:reply ^r v] v) (after timeout :no-reply))))
 
-(defn registry-share (reg:pid name:string text:string meta:map &optional (timeout:int 2000) -> any)
+(defn registry-share (reg:pid name:string content:any meta:map &optional (timeout:int 2000) -> any)
   "The ONE buffer process for the document `name`/`meta` names (`registry-key`): spawned
-from `text` and `meta` (`{:file :type :dir}` — what a holder needs to build its own copy;
-`:file` backs the process's buffer) on the first ask, the existing pid after. Serialised
-in the registry, so two askers at once get the same process. `:no-reply` when the registry
-does not answer within `timeout` ms.
+from `content` and `meta` (`{:file :type :dir}` — what a holder needs to build its own copy;
+`:file` backs the process's buffer) on the first ask, the existing pid after. `content` is
+the text, or `{:text :properties}` — the text with the text properties (`{key spans}`,
+ADR-579) the asker's copy has, so they reach every holder. Serialised in the registry, so
+two askers at once get the same process. `:no-reply` when the registry does not answer
+within `timeout` ms.
 
     (let (r (editor/buffer-registry/registry-start)) (let (p (editor/buffer-registry/registry-share r \"notes\" \"hello\" {})) (editor/buffer-registry/registry-stop r) (pid? p)))   ;=> true"
-  (registry-call reg (fn (me r) [:share name text meta me r]) timeout))
+  (registry-call reg (fn (me r) [:share name content meta me r]) timeout))
 
 (defn registry-rekey
   (reg:pid old-key:string name:string meta:map &optional (timeout:int 2000) -> any)
