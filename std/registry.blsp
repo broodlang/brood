@@ -166,3 +166,12 @@ isolate restore keeps it. True when there was something to take back.
                      (let (inner (and (map? table) (get table (first path))))
                        (and (map? inner) (contains? inner (second path))))))
       (and present? (= true (%registry-update! (:global write) :dissoc path nil))))))
+
+(defn restore (write:map value:any -> bool)
+  "Put `value` back at the map entry [[written-by]] listed as `write` (its `:global` and
+`:path`) — what a plugin's write REPLACED, so taking the plugin back leaves the entry as it
+was before rather than gone. An operation like the write was (journalled with a load, kept
+by an isolate restore); the entry then has no writer. True when it was written.
+
+    (do (registry/put! :doc/restored :k 1) (registry/restore {:global 'registry/*registries* :path [:doc/restored :k]} 2) (registry/lookup :doc/restored :k))   ;=> 2"
+  (= true (%registry-update! (:global write) :assoc (:path write) value)))

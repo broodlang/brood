@@ -35,6 +35,13 @@
       (is (contains? globals 'editor/layers/*type-layers*))
       (is (contains? globals 'editor/layers/*auto-type-by-interpreter*))
       (doseq (write writes) (is (registry/retract write)))
+      ;; a replaced entry can be put back as it was
+      (is (registry/restore {:global (quote registry/*registries*)
+                             :path [:regretract/rows :core-row]}
+            2))
+      (assert= (registry/lookup :regretract/rows :core-row) 2)
+      (registry/restore {:global (quote registry/*registries*) :path [:regretract/rows :core-row]}
+        1)
       (assert= (registry/written-by #{'regretract-plugin}) [])
       (is (nil? (registry/lookup :regretract/rows :plugin-row)))
       (assert= (registry/lookup :regretract/rows :core-row) 1)
