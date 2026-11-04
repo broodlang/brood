@@ -72,12 +72,15 @@ What that proves, per OS (2026-11-04):
 | CRLF / BOM bytes untranslated; the editor buffer keeps both | ✅ | ✅ |
 | names with spaces and non-ASCII | ✅ | ✅ |
 | `os/which`, `os/cmd` through the platform's shell | ✅ `sh` | ✅ `cmd.exe`, quote-free lines only (KI-364) |
+| a timeout or C-g stops the command's children too | ✅ process group | ✅ Job Object (ADR-592) |
 | `os/spawn`, a pty, signals | ✅ | not run — no pty (ConPTY is not wired), no POSIX signals |
 | clipboard reads against a real clipboard | ✅ | ✅ |
 | owner-only files (`file/spit-private`) | ✅ (`file_test`) | ❌ KI-365 |
 | key translation (Option / AltGr) | ✅ unit tests | ✅ unit tests |
 | a window, font discovery, file watching | not run (headless) | not run (headless) |
 
-Two findings came from the first runs: a test asserted `/tmp` where macOS's `pwd` says
-`/private/tmp` (fixed in the test), and two clipboard reads at once answer `Busy` on any
-machine that has a clipboard — by design, so the reading tests are `:serial`.
+What the first runs found: a test asserted `/tmp` where macOS's `pwd` says `/private/tmp`
+(fixed in the test); two clipboard reads at once answer `Busy` on any machine that has a
+clipboard — by design, so the reading tests run `:isolated`; and, from bedit's smoke job on
+Windows, `os/cmd` there killed only its child, leaving a grandchild running and holding the
+pipes — the Job Object of ADR-592.
