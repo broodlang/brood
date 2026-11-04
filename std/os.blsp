@@ -105,6 +105,26 @@ clipboard feature is off, like os/clipboard-set. Replaces whatever the clipboard
     (try (os/clipboard-set-image (string/->bytes \"not an image\")) (catch _ :refused))   ;=> :refused"
   (%clipboard-set-image png))
 
+(defn primary-get ()
+  "The PRIMARY selection's text, or nil. PRIMARY is the X11 / Wayland selection that holds
+whatever was last HIGHLIGHTED, the one a middle click pastes; the CLIPBOARD (os/clipboard-get)
+holds what was last explicitly copied. nil when it is empty or not text, off Linux (no such
+selection), with no display, on a compositor that offers none, and in a build without the
+clipboard feature. A blocking read under os/clipboard-get's rules (ADR-536, ADR-553): a UI
+loop reads it from a task.
+
+    (string? (or (os/primary-get) \"\"))   ;=> true"
+  (%primary-get))
+
+(defn primary-set (s)
+  "Own the PRIMARY selection with string s — what a middle click in another app now pastes —
+leaving the CLIPBOARD as it was; returns s. What an editor does when a mouse drag selects text
+(Emacs's `select-active-regions`). A no-op (still returns s) where there is no primary
+selection or no clipboard feature (ADR-553).
+
+    (os/primary-set \"hello\")   ;~> \"hello\""
+  (%primary-set s))
+
 ;; ---- environment ------------------------------------------------------------
 
 (defn env (name:string -> (or string nil))

@@ -51,6 +51,19 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 - GUI: a background band one row tall at the window's edge bleeds sideways only, so a header
   line on the top row stays centred on its text (ADR-508).
 
+**Added.**
+- `os/primary-get` / `os/primary-set`: the X11 / Wayland PRIMARY selection (what is
+  highlighted, pasted by a middle click), beside the clipboard pair, which it leaves alone
+  (ADR-553). nil and a no-op off Linux.
+- `regex/rope-find` takes `:bound`, a char index no match may end past, with `^` / `$` / `\b`
+  still reading the text beyond it — Emacs's `re-search-forward` BOUND, what a search confined
+  to a region wants (ADR-554). `%rope-regex-find` takes it as an optional fifth argument.
+
+**Fixed.**
+- `regex/rope-find` through the window fallback (a Unicode `\b` before non-ASCII text) no
+  longer drops a greedy match's last character at the end of the rope: `\bü+` over `a üüü`
+  is `üüü`, as `regex/find` says (ADR-554).
+
 ## v0.49.0 — lists for parameters, a linear conj, and no open issues
 
 Every parameter list is a list (ADR-512): ability op specs, `impl` methods and `defbehaviour`
