@@ -464,6 +464,46 @@ cached: a line inserted at line 10, then the window (moved down one) shown again
         lexed (lc-lexed))
     [(count lexed) (= spans (lc-truth lexer edited (- n 39) (inc n)))]))
 
+(defn lc-depth-lexer ()
+  ;; a state that changes on every line it touches: the running count of `(` minus `)`
+  (line-lexer (fn (line state)
+                [[]
+                  (+ state
+                    (count (seq/filter (string/->list line) (fn (c) (= c "("))))
+                    (- 0 (count (seq/filter (string/->list line) (fn (c) (= c ")"))))))])
+    0))
+
+(describe "line-cache-state — the state a line starts in (syntax-ppss's question)"
+  (test "a line's state is the lex from the top, cold and from a checkpoint"
+    (let (lexer (lc-depth-lexer)
+          rope (text/from-string (string/join (map (range 200) (fn (_) "(a")) "\n"))
+          [cache state] (line-cache-state (line-cache) lexer rope 150))
+      (assert= state 150)
+      (assert= (second (line-cache-state cache lexer rope 170)) 170)
+      (assert= (second (line-cache-state cache lexer rope 0)) 0)
+      ;; past the end: the state the last line ends in
+      (assert= (second (line-cache-state cache lexer rope 999)) 200)))
+  (test "after an edit, exact: the lines below it are re-lexed, not trusted"
+    (let (lexer (lc-depth-lexer)
+          rope (text/from-string (string/join (map (range 100) (fn (_) "(a")) "\n"))
+          [cache _] (line-cache-state (line-cache) lexer rope 90)
+          edited (text/insert rope 0 "((")
+          [cache2 state] (line-cache-state cache lexer edited 90))
+      (assert= state 92)
+      (assert= (second (line-cache-state cache2 lexer edited 95)) 97)))
+  (test "an edit that changes no state is back in step at once, and the colours agree"
+    (let (lexer (lc-fence-lexer (self))
+          rope (text/from-string (string/join (map (range 300) (fn (_) "x")) "\n"))
+          [cache _] (line-cache-state (line-cache) lexer rope 290)
+          _ (lc-lexed)
+          edited (text/insert rope 2 "y")
+          [cache2 state] (line-cache-state cache lexer edited 290))
+      (assert= state :text)
+      ;; the edited line and one more to see the state agree, never the 290 lines
+      (is (< (count (lc-lexed)) 40))
+      (assert= (second (line-cache-update cache2 lexer edited 280 300))
+        (second (line-cache-update (line-cache) lexer edited 280 300))))))
+
 (describe "line-cache-update — a lean cache"
   (test "an edit inside a fence re-lexes that line only, however deep the fence"
     (let (me (self)
