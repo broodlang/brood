@@ -2502,15 +2502,15 @@ unsafe fn open_library(
         }
     });
     // SAFETY: the caller's, for each attempt.
-    if let Some(dir) = beside {
-        if let Some(library) = unsafe { open_copy_at(&dir.join(&name), &bytes) } {
-            return Ok((Ok(library), LoadedVia::Beside));
-        }
+    if let Some(dir) = beside
+        && let Some(library) = unsafe { open_copy_at(&dir.join(&name), &bytes) }
+    {
+        return Ok((Ok(library), LoadedVia::Beside));
     }
-    if let Some(dir) = grammar_cache_dir() {
-        if let Some(library) = unsafe { open_copy_at(&dir.join(&name), &bytes) } {
-            return Ok((Ok(library), LoadedVia::Cache));
-        }
+    if let Some(dir) = grammar_cache_dir()
+        && let Some(library) = unsafe { open_copy_at(&dir.join(&name), &bytes) }
+    {
+        return Ok((Ok(library), LoadedVia::Cache));
     }
     Ok((
         unsafe { libloading::Library::new(path) },
