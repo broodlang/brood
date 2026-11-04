@@ -86,14 +86,21 @@ with `seed` as its mirror: an undo-less buffer the pushes fold through
       entry)))
 
 (defn- registry-mirror-push (entries bp version view origin)
-  "Fold one push from directed process `bp` into its entry's mirror buffer."
+  "Fold one push from directed process `bp` into its entry's mirror buffer — which keeps, like
+a buffer process, no undo history (`disable-undo`) and no splice log: nobody replays the
+mirror's log, and every entry would pin the texts it spans, a redacted secret among them
+(ADR-581)."
   (let (hit (registry-entry-by-proc entries bp))
     (if (nil? hit)
       entries
       (let ([key entry] hit
-            [link action] (link-fold (:link entry) version view origin))
+            [link action] (link-fold (:link entry) version view origin)
+            mirror (buffer-apply-action (:mirror entry) action))
         (assoc entries
-          key (assoc entry :link link :mirror (buffer-apply-action (:mirror entry) action)))))))
+          key
+            (assoc entry
+              :link link
+              :mirror (if (contains? mirror :splices) (dissoc mirror :splices) mirror)))))))
 
 (defn- registry-loop (entries watchers mirror?)
   ;; entries: {key {:name <string> :proc <pid> :meta <map> :mref <monitor ref>

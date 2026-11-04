@@ -201,3 +201,18 @@
         (assert= (buffer-query p2 buffer-text) "$ make\nERROR\n")
         (assert= (buffer-query p2 (fn (b) (buffer-properties b :ansi))) [[7 12 {:fg 1}]]))
       (registry-stop reg))))
+
+;; ADR-579: a property change reaches the mirror as one, so a respawn keeps it.
+(describe "buffer-registry — the mirror takes a property change"
+  (test "a respawn from the mirror keeps properties put on text already there"
+    (let (reg (registry-start {:mirror true})
+          p1 (registry-share reg "out" "ERROR\n" {}))
+      (registry-watch reg (self))
+      (buffer-splice p1 0 0 "" :someone nil [:put-properties 5 {:ansi [[0 5 {:fg 1}]]}])
+      (buffer-query p1 buffer-text) ; a barrier: the push is on its way to the registry
+      (registry-share reg "out" "" {}) ; and a second: the registry folded it
+      (exit p1 :kill)
+      (let (p2 (await-added "out"))
+        (assert= (buffer-query p2 buffer-text) "ERROR\n")
+        (assert= (buffer-query p2 (fn (b) (buffer-properties b :ansi))) [[0 5 {:fg 1}]]))
+      (registry-stop reg))))
