@@ -90,6 +90,12 @@ arg silently becoming `nil`.
 | | `term/draw` | 1 | paint a **frame** — a vector of render ops `[:clear]` / `[:text row col s]` / `[:text row col s face]` / `[:cursor row col]`, where a face is a map like `{:fg :red :bold true}` → nil. The frontend that interprets the display protocol |
 | | `term/raw-enter` | 0 | enter raw mode **only** — no alternate screen, cursor stays visible, scrollback preserved → nil. The seam for an *inline* editor (the REPL, `std/editor/lineedit.blsp`); use `term/enter` for a full-screen TUI. Pair with `term/raw-leave` |
 | | `term/raw-leave` | 0 | leave raw mode (teardown for `term/raw-enter`) → nil |
+| | `term/invalidate` | 0 | forget what the terminal shows: the next `term/draw` paints every cell (ADR-586) |
+| | `term/colors` | 0–1 | the colour depth frames are written at (`:truecolor` / `:256` / `:16`), or set it (ADR-586) |
+| | `term/bg` | 1–2 | the terminal's default face — what `[:clear]` fills, a face with no colour of its own drawn in (ADR-586) |
+| | `term/suspend` | 0 | give the terminal back, stop the process (SIGSTOP), take it again when continued (ADR-586) |
+| | `term/refresh` | 0 | raw mode back and the next frame painted whole, after a stop and continue (ADR-586) |
+| | `term/repaint-due?` | 0 | whether the next `term/draw` paints the screen whole (ADR-586) |
 | | `term/emit` | 1 | paint inline, **relative**-motion ops: `[:print str]` / `[:print str face]` / `[:cr]` / `[:nl]` / `[:up n]` / `[:down n]` / `[:col n]` / `[:clear-eol]` / `[:clear-below]` / `[:clear-screen]` → nil. The inline counterpart to `term/draw` (which is absolute); queues all ops then flushes once |
 | **Process introspection** | `proc/mailbox-size` | 1 | `(proc/mailbox-size pid)` → the number of messages queued in a live local process's mailbox (its receive backlog), or `nil` for a remote/dead pid. The one process-state accessor Brood can't reach (the queue lives behind the scheduler registry); `(list-processes)` + `self` are the others. Used by `std/tool/observer.blsp` |
 | | `proc/info` | 1 | `(proc/info pid)` → a snapshot map of a live local process — `{:id :node :name :status :mailbox :monitored-by :parent :memory}` (`:status` `:running`/`:runnable`/`:waiting`; `:name` nil if unregistered; `:parent` the spawner's id, nil for the root; `:memory` LOCAL heap-footprint bytes, published on `receive` — 0 for a process that never receives) — or `nil` for a remote/dead pid. Assembled from registry/scheduler/monitor cells (ADR-051). The observer reads this |
@@ -134,6 +140,7 @@ arg silently becoming `nil`.
 | | `file/exists?` `file/dir?` | 1 | path exists / is a directory → bool |
 | | `file/ls` | 1 | entry names directly under a directory (sorted) |
 | | `file/mkdir` | 1 | create a directory and parents (`mkdir -p`) |
+| | `file/mkdir-private` | 1 | `file/mkdir`, the directory itself owner-only (0700) — the directory counterpart of `file/spit-private` (ADR-588) |
 | | `file/spit` | 2 | write a string to a file (write-side of `reflect/load`) |
 | | `file/slurp` | 1 | read a whole file into a string (read-side of `file/spit`; unlike `reflect/load`, does not evaluate) |
 | | `file/mtime` | 1 | last-modified time as epoch-milliseconds, or nil if missing (cheap stat; pair with `reflect/load` for hot-reload) |

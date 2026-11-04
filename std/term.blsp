@@ -104,6 +104,33 @@ foreground, a stray write to stdout). A resize does it by itself (ADR-586).
     (term/invalidate)   ;=> nil"
   (%term-invalidate))
 
+(defn suspend ()
+  "Give the terminal back and stop this process, as a shell's C-z stops a job — Emacs's
+`suspend-frame` in a terminal. The screen is left (`term/leave`), SIGSTOP raised, and when
+the shell continues the job (`fg`) the terminal is taken again (`term/enter`) and the next
+frame painted whole. A full-screen app reads C-z as a key (the terminal is raw), so this is
+what its C-z binding calls; a SIGTSTP sent from outside reaches `ui-run`'s terminal display
+as the same (ADR-586). Unix only.
+
+    (term/suspend)   ;~> nil, once the shell has continued the job"
+  (%term-suspend))
+
+(defn refresh ()
+  "After this process was stopped and continued by someone else (SIGSTOP, then SIGCONT): raw
+mode back on — a shell resets the terminal when a job stops — and the next frame painted
+whole. The terminal display does it on SIGCONT (ADR-586).
+
+    (term/refresh)   ;~> nil"
+  (%term-refresh))
+
+(defn repaint-due? ()
+  "Whether the next `term/draw` paints the screen whole — what the terminal shows was
+forgotten (a resize, a continue, `term/invalidate`) — so a loop that skips drawing a model
+that did not change must draw this time (ADR-586).
+
+    (bool? (term/repaint-due?))   ;=> true"
+  (%term-repaint-due))
+
 (defn bg (background &optional (foreground nil))
   "Set the terminal's DEFAULT FACE — what `gui/bg` is to a window: `[:clear]` fills with
 `background`, and a cell whose face names no `:bg` (no `:fg`) is drawn in `background`

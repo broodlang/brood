@@ -82,7 +82,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(2),
         Sig::new(vec![subprocess_ty, kw], nil_ty),
         &["p", "sig"],
-        "Send signal sig (:int, :term, :hup, :quit or :kill) to subprocess p's whole process group — the child and everything it started — and leave it running if it chooses to survive. :int is Ctrl-C. If it exits, [:proc-exit handle code] arrives as for any exit; until [:proc-closed …] the group can still be signalled, which reaches descendants the child left running. Returns nil; throws if p is unknown/closed or sig is not one of those. Unix only.",
+        "Send signal sig (:int, :term, :hup, :quit, :kill, or the job-control :tstp, :stop, :cont, :winch) to subprocess p's whole process group — the child and everything it started — and leave it running if it chooses to survive. :int is Ctrl-C. If it exits, [:proc-exit handle code] arrives as for any exit; until [:proc-closed …] the group can still be signalled, which reaches descendants the child left running. Returns nil; throws if p is unknown/closed or sig is not one of those. Unix only.",
         proc_signal);
 }
 

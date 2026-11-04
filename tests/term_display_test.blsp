@@ -11,25 +11,33 @@
   (:use test)
   (:use suite-helpers))
 
-(def- app-source
+(defn- app-source (marker)
   ;; a `ui-run` app: the model's text and the last event on screen, a panel of background
   ;; below them (so a full repaint is many cells and a keystroke's update few), the cursor
   ;; after the text
   (str "(defmodule term-display-app (:use editor/ui))\n"
-    "(ui-run {:text \"start\" :event \"none\"}\n" "  (fn (m cols rows)\n" "    [[:clear]\n"
+    "(ui-run {:text \"start\" :event \"none\" :on-hangup (fn (m sig) (file/spit "
+    (pr-str marker)
+    " (str sig)))}\n"
+    "  (fn (m cols rows)\n"
+    "    [[:clear]\n"
     "     [:text 0 0 (str \"text:\" (:text m))]\n"
     "     [:text 1 0 (str \"size:\" cols \"x\" rows)]\n"
     "     [:text 2 0 (str \"event:\" (:event m))]\n"
-    "     [:rect 3 0 cols (- rows 3) {:bg \"#202040\"}]\n" "     [:text 4 2 \"日本\" {:fg :yellow}]\n"
-    "     [:cursor 0 (+ 5 (string/length (:text m))) :bar]])\n" "  (fn (m input cols rows)\n"
-    "    (cond\n" "      (= input \"q\") (assoc m :done true)\n"
+    "     [:rect 3 0 cols (- rows 3) {:bg \"#202040\"}]\n"
+    "     [:text 4 2 \"日本\" {:fg :yellow}]\n"
+    "     [:cursor 0 (+ 5 (string/length (:text m))) :bar]])\n"
+    "  (fn (m input cols rows)\n"
+    "    (cond\n"
+    "      (= input \"q\") (assoc m :done true)\n"
     "      (string? input) (assoc m :text (str (:text m) input))\n"
     "      (and (vector? input) (= (first input) :paste))\n"
     "        (assoc m :event (str \"paste \" (string/replace (second input) \"\\n\" \"|\")))\n"
     "      (keyword? input) (assoc m :event (str \"key \" input))\n"
     "      (and (vector? input) (= (first input) :resize))\n"
     "        (assoc m :event (str \"resize \" (nth input 1) \"x\" (nth input 2)))\n"
-    "      else m))\n" "  editor/ui/*term-display*)\n"))
+    "      else m))\n"
+    "  editor/ui/*term-display*)\n"))
 
 (defn- screen-text (vt)
   (string/join (vt/lines vt) "\n"))
@@ -60,7 +68,7 @@ child exited."
           script (str dir "/app.blsp"))
       (do
         (file/mkdir dir)
-        (file/spit script app-source)
+        (file/spit script (app-source (str dir "/hangup")))
         (let (p (os/spawn-pty (sibling-binary "nest") ["run" script] {:cols 40 :rows 10})
               first-frame (read-until p
                             {:vt (vt/make 40 10) :bytes 0}
@@ -124,6 +132,48 @@ child exited."
                             (is (vt/mode (:vt closed) :cursor-visible))))))))))))
         (file/rmdir dir)))))
 
+(describe "the terminal display and the process's signals (ADR-586)"
+  :isolated (test "SIGTSTP gives the terminal back, SIGCONT repaints, SIGTERM restores it and runs :on-hangup"
+    (let (dir (test/temp-dir "brood-term-signals-")
+          script (str dir "/app.blsp")
+          marker (str dir "/hangup"))
+      (do
+        (file/mkdir dir)
+        (file/spit script (app-source marker))
+        (let (p (os/spawn-pty (sibling-binary "nest") ["run" script] {:cols 40 :rows 10})
+              up (read-until p {:vt (vt/make 40 10) :bytes 0} (showing? "size:40x10") 20000))
+          (do
+            (is (vt/mode (:vt up) :alt-screen))
+            ;; stopped from outside: the screen is given back before the process stops
+            (os/signal p :tstp)
+            (let (stopped (read-until p up (fn (vt) (not (vt/mode vt :alt-screen))) 20000))
+              (do
+                (is (not (vt/mode (:vt stopped) :alt-screen)))
+                ;; continued: taken again and painted whole
+                (os/signal p :cont)
+                (let (back (read-until p
+                             (assoc stopped :bytes 0)
+                             (fn (vt)
+                               (and (vt/mode vt :alt-screen)
+                                 (includes? (screen-text vt) "size:40x10")))
+                             20000))
+                  (do
+                    (is (vt/mode (:vt back) :alt-screen))
+                    (is (includes? (screen-text (:vt back)) "text:start"))
+                    ;; a resize there and back between two looks still repaints the screen
+                    (os/resize-pty p 60 14)
+                    (os/resize-pty p 40 10)
+                    (let (bounced (read-until p (assoc back :bytes 0) (fn (vt) false) 1500))
+                      (is (> (:bytes bounced) 280)))
+                    ;; SIGTERM: the app's :on-hangup runs, the terminal is restored, it exits
+                    (os/signal p :term)
+                    (let (ended (read-until p back (fn (vt) false) 20000))
+                      (do
+                        (is (:closed ended))
+                        (is (not (vt/mode (:vt ended) :alt-screen)))
+                        (assert= (file/slurp marker) ":term")))))))))
+        (file/rmdir dir)))))
+
 (describe "term/colors (ADR-586)"
   (test "names the depth and can be set and reset"
     (let (environment (term/colors))
@@ -150,5 +200,10 @@ child exited."
   (test "the terminal display carries clipboard setters, so an attached session's kills land"
     (is (fn? (:clipboard-set editor/ui/*term-display*)))
     (is (fn? (:primary-set editor/ui/*term-display*))))
+  (test "OSC 52 carries at most 100000 bytes, as Emacs's xterm-max-cut-length"
+    (is (editor/ui/osc52-fits? (string/repeat "x" 100000)))
+    (is (not (editor/ui/osc52-fits? (string/repeat "x" 100001))))
+    ;; counted in bytes, not characters
+    (is (not (editor/ui/osc52-fits? (string/repeat "é" 50001)))))
   (test "display-available? answers a boolean"
     (is (bool? (editor/ui/display-available?)))))

@@ -579,6 +579,10 @@ pub(super) struct TerminalKeyboard {
     /// changes (the tty's bytes say nothing of one; crossterm used SIGWINCH).
     #[cfg(unix)]
     size: Option<(u16, u16)>,
+    /// The SIGWINCH count as last seen (`tty::resize_generation`): a resize is reported when
+    /// it moved, even back to the size last seen.
+    #[cfg(unix)]
+    resizes_seen: u64,
     /// The tty's bytes, read and decoded by Brood (`tty`, `decoder`).
     #[cfg(unix)]
     tty: super::tty::TtyInput,
@@ -592,6 +596,8 @@ static TERMINAL_KEYBOARD: Mutex<TerminalKeyboard> = Mutex::new(TerminalKeyboard 
     modify_other_keys: false,
     #[cfg(unix)]
     size: None,
+    #[cfg(unix)]
+    resizes_seen: 0,
     #[cfg(unix)]
     tty: super::tty::TtyInput::new(),
     inbox: Inbox::new(),
@@ -620,7 +626,9 @@ pub(super) fn enhance() {
     keyboard.inbox.reset(Some(Instant::now()));
     #[cfg(unix)]
     {
+        super::tty::watch_resizes();
         keyboard.size = crossterm::terminal::size().ok();
+        keyboard.resizes_seen = super::tty::resize_generation();
     }
     if keyboard.enhanced || !std::io::stdout().is_terminal() {
         return;
@@ -697,11 +705,13 @@ fn absorb(keyboard: &mut TerminalKeyboard) -> std::io::Result<()> {
 #[cfg(unix)]
 fn read_events(keyboard: &mut TerminalKeyboard) -> std::io::Result<(Vec<Event>, bool)> {
     let mut events = Vec::new();
+    let generation = super::tty::resize_generation();
     if keyboard.taken
         && let Ok(size) = crossterm::terminal::size()
-        && keyboard.size != Some(size)
+        && (keyboard.size != Some(size) || keyboard.resizes_seen != generation)
     {
         keyboard.size = Some(size);
+        keyboard.resizes_seen = generation;
         events.push(Event::Resize(size.0, size.1));
     }
     let room = READ_AHEAD.saturating_sub(keyboard.inbox.len());

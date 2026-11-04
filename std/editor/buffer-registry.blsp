@@ -39,12 +39,20 @@ its own copy to the same process."
   (:use editor/buffer) ; spawn-buffer / make-buffer / stop-buffer — the processes it directs
   (:use editor/buffer-client)) ; link-init / link-fold / buffer-apply-action / content-view — the optional mirror
 (defn registry-key (name:string meta:map -> string)
-  "The identity a buffer is shared under: its file (`:file` in `meta`) when it has one,
-else its `name`. Two buffers with the same name and different files are two documents.
+  "The identity a buffer is shared under: `:key` in `meta` when the app names one (one file
+edited two ways — as root and as another user — is two documents), else its file (`:file`)
+when it has one, else its `name`. Two buffers with the same name and different files are two
+documents.
 
     (editor/buffer-registry/registry-key \"README.md\" {:file \"/a/README.md\"})   ;=> \"/a/README.md\"
+    (editor/buffer-registry/registry-key \"hosts\" {:file \"/etc/hosts\" :key \"/etc/hosts#sudo:root\"})   ;=> \"/etc/hosts#sudo:root\"
     (editor/buffer-registry/registry-key \"*scratch*\" {})   ;=> \"*scratch*\""
-  (let (file (get meta :file)) (if (string? file) file name)))
+  (let (key (get meta :key)
+        file (get meta :file))
+    (cond
+      (string? key) key
+      (string? file) file
+      else name)))
 
 ;; ---- the loop ---------------------------------------------------------------
 

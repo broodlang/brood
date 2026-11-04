@@ -30,7 +30,7 @@
     "    if [ \"$typed\" != secret ]; then echo 'Sorry, try again.' >&2; exit 1; fi\n"
     "    [ -f \"$state/nocache\" ] || touch \"$state/cached\"\n"
     "  else\n"
-    "    echo 'sudo: a password is required' >&2; exit 1\n"
+    "    if [ -f \"$state/message\" ]; then cat \"$state/message\" >&2; else echo 'sudo: a password is required' >&2; fi; exit 1\n"
     "  fi\n"
     "fi\n"
     "[ $validate = 1 ] && exit 0\n"
@@ -111,4 +111,63 @@
                  (do
                    (file/spit (str dir "/nopasswd") "")
                    (assert= (sudo/write (str dir "/new") "fresh" opts) true)
-                   (assert= (file/slurp (str dir "/new")) "fresh"))))))
+                   (assert= (file/slurp (str dir "/new")) "fresh")))))
+  (test "a file that is not UTF-8 is read byte for byte, and refused as text"
+    (with-stub (fn (dir opts)
+                 (let (path (str dir "/latin1"))
+                   (do
+                     (file/spit (str dir "/nopasswd") "")
+                     (file/spit-bytes path [99 97 102 233 10 0 255])
+                     (assert= (vec (sudo/read-bytes path opts)) [99 97 102 233 10 0 255])
+                     (let (text (sudo/read path opts))
+                       (do
+                         (is (failure? text))
+                         (is (includes? (error-message text) "not UTF-8")))))))))
+  (test "sudo-rs's wording is a refusal too: the cache-less fallback still runs"
+    (with-stub
+      (fn (dir opts)
+        (let (path (str dir "/conf"))
+          (do
+            (file/spit (str dir "/nocache") "")
+            (file/spit (str dir "/message") "sudo: interactive authentication is required\n")
+            (assert= (sudo/write path "rs\n" (assoc opts :password "secret")) true)
+            (assert= (file/slurp path) "rs\n")
+            ;; and with no password, the refusal is said as one
+            (is (includes? (error-message (sudo/read path opts)) "a password is required")))))))
+  (test "a write that cannot finish leaves the old file whole"
+    (with-stub
+      (fn (dir opts)
+        (let (locked (str dir "/locked")
+              path (str locked "/sudoers"))
+          (do
+            (file/spit (str dir "/nopasswd") "")
+            (file/mkdir locked)
+            (file/spit path "root ALL=(ALL) ALL\n")
+            ;; no room for the temporary file beside it
+            (os/cmd "chmod" ["555" locked])
+            (is (failure? (sudo/write path "broken" opts)))
+            (os/cmd "chmod" ["755" locked])
+            (assert= (file/slurp path) "root ALL=(ALL) ALL\n")
+            (is (empty? (seq/filter (file/ls locked)
+                          (fn (name) (string/starts-with? name ".sudo-write"))))))))))
+  (test "file/mkdir-private makes an owner-only directory, and makes an existing one so"
+    (let (dir (test/temp-dir "brood-private-dir-")
+          inner (str dir "/a/b"))
+      (do
+        (file/mkdir-private inner)
+        (assert= (math/mod (:mode (file/stat inner)) 512) 448)
+        (os/cmd "chmod" ["755" inner])
+        (file/mkdir-private inner)
+        (assert= (math/mod (:mode (file/stat inner)) 512) 448)
+        (file/rmdir dir))))
+  (test "a symbolic link is written through: the target replaced, the link kept"
+    (with-stub (fn (dir opts)
+                 (let (target (str dir "/real.conf")
+                       link (str dir "/link.conf"))
+                   (do
+                     (file/spit (str dir "/nopasswd") "")
+                     (file/spit target "old\n")
+                     (os/cmd "ln" ["-s" target link])
+                     (assert= (sudo/write link "new\n" opts) true)
+                     (assert= (file/slurp target) "new\n")
+                     (is (:symlink? (file/stat link)))))))))

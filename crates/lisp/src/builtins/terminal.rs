@@ -82,6 +82,27 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "Forget what the terminal shows, so the next term-draw clears it and writes every cell — for when something other than term-draw wrote to the screen. A resize does it by itself. Returns nil. (ADR-586)",
         term_invalidate);
     primitives.def(
+        "%term-suspend",
+        Arity::exact(0),
+        Sig::new(vec![], nil_ty.clone()),
+        &[],
+        "Give the terminal back (term-leave), stop this process with SIGSTOP as a shell's C-z stops a job, and take the terminal again when it is continued (term-enter, the next frame painted whole). Unix only. Returns nil. (ADR-586)",
+        term_suspend);
+    primitives.def(
+        "%term-refresh",
+        Arity::exact(0),
+        Sig::new(vec![], nil_ty.clone()),
+        &[],
+        "After being stopped and continued by someone else: raw mode back on and the next frame painted whole. Returns nil. (ADR-586)",
+        term_refresh);
+    primitives.def(
+        "%term-repaint-due",
+        Arity::exact(0),
+        Sig::nullary(bool_ty),
+        &[],
+        "Whether the next term-draw paints the screen whole — it was forgotten (a resize, a continue, term-invalidate) — so a loop that skips drawing an unchanged model must draw anyway. (ADR-586)",
+        term_repaint_due);
+    primitives.def(
         "%term-bg",
         Arity::range(1, 2),
         Sig::with_optional(vec![any], vec![any], nil_ty),
