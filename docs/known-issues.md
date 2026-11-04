@@ -68,6 +68,26 @@ the scheduler, dist, GC or the JIT — run it repeatedly.
 
 (An open entry's `## KI-N` section goes here until it is resolved.)
 
+## KI-360 — a terminal without the kitty keyboard protocol cannot send `C-;`, `C-.`, `C-'` and friends — OPEN 2026-11-04
+
+**Symptom.** In the terminal display (ADR-586) a chord the legacy keyboard encoding has no byte
+for — Control with most punctuation (`C-;`, `C-.`, `C-'`, `C-,`), `C-S-letter`, `C-<return>` —
+arrives as the bare key or not at all. bedit's `C-.` (embark) and `C-'` (avy) are unreachable
+there. kitty, foot, WezTerm, Ghostty, Alacritty 0.13+ and iTerm2 speak the kitty protocol, which
+`term-enter` turns on, and send every chord; xterm, GNOME Terminal (VTE) and tmux without
+`extended-keys` do not.
+
+**Cause.** Those terminals offer xterm's `modifyOtherKeys` instead (`CSI > 4 ; 2 m` turns it on;
+a chord then arrives as `CSI 27 ; mods ; code ~`). crossterm, which reads the tty, has no parser
+for that form, so `term-enter` does not ask for it: asked for and unparsed, every Control chord
+would arrive as garbage.
+
+**Fix.** Read the tty's bytes ahead of crossterm's parser in `keyboard::absorb`, decode the
+`CSI 27 ; m ; c ~` form into a `KeyEvent`, and turn `modifyOtherKeys` on where
+`supports_keyboard_enhancement` says no.
+
+**Guard.** None yet.
+
 ## KI-357 — a module materialised from a startup image has fewer registry writers than its source load — OPEN 2026-11-04
 
 **Symptom.** `registry/written-by #{'m}` (ADR-582) answers what module `m`'s load wrote when
@@ -193,6 +213,7 @@ Each closed row's full section is `## KI-N` in [archive/known-issues-closed.md](
 
 | # | What | Status |
 |---|---|---|
+| KI-360 | **a terminal without the kitty keyboard protocol cannot send `C-;`, `C-.`, `C-'`** — xterm's `modifyOtherKeys` form has no parser in crossterm, so it is not asked for | **OPEN** — needs the tty's bytes decoded ahead of crossterm |
 | KI-357 | **a module materialised from a startup image has fewer registry writers than its source load** — the project image credits none, the stdlib image credits map entries but no list member, so `registry/written-by` of an imaged module answers less | **OPEN** — needs a kernel op that credits an existing entry, called as an imaged module materialises |
 | KI-356 | **a plugin's bare-closure hook registered from a timer or a process it spawned cannot be taken back** — no load is open, no claimant is bound, and the closure names nothing the retirement backstop can match | **OPEN** — needs the runtime to say which module defined a closure, or a claimant spawned processes and timers inherit |
 | KI-334 | **a served session whose loop dies takes its unsaved buffers with it** — the local window's loop auto-saves and restarts over its buffers (bedit's lifeline); a `serve` session's loop dying just ends the session, its buffers in its model | **OPEN** — needs a supervised session in `editor/serve` and per-session buffer hosting in bedit (the buffer registry's runtime-wide name blocks it); found with ADR-539 |
