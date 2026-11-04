@@ -84,7 +84,9 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
                    "--cover" :bool
                    "--cover-lines" :bool
                    "--cover-branches" :bool
-                   "--cover-min" {:value "PCT" :int [0 100]}}
+                   "--cover-min" {:value "PCT" :int [0 100]}
+                   ;; keep the real XDG config / state / data homes, not a scratch one (ADR-602)
+                   "--real-home" :bool}
            :positional ["file" "test-file"]
            :many true
            :run (fn (options) (run-test options))}

@@ -344,6 +344,16 @@ function shim is variadic.
 
 ## Running
 
+**A `nest test` run has a home of its own (ADR-602).** Before anything loads, the runner sets
+`BROOD_TEST_RUN=1` (`(test/running?)`) and points `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and
+`XDG_DATA_HOME` into a fresh per-run directory (`(test/scratch-dir)`), removed when the run
+ends — so a test that persists something (a history, a recent-files list, a config) writes
+there, never into the user's real home. Programs that keep their files under the XDG homes
+need no test-mode code. `XDG_CACHE_HOME` is left alone (Brood's stdlib image lives there);
+`nest`'s own preferences still read the user's `~/.config/brood/config.blsp`
+(`BROOD_USER_CONFIG_HOME`). `nest test --real-home`, or `BROOD_TEST_HOME=keep`, keeps the real
+homes. Both are environment variables, so a process a test starts is part of the run too.
+
 In a project, run the whole suite with **`nest test`** (or `make suite`, or
 `cargo test`): the runner discovers `tests/**/*_test.blsp`, loads them, and calls
 `run-tests` once (`nest test` passes `:trace`). `run-tests` itself takes the flags

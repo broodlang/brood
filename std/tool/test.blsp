@@ -107,6 +107,30 @@ docs/testing.md for the full guide."
     (test/reset-units)   ;~> the registry emptied"
   (def test/*units* nil))
 
+;; --- the test run: said by the runner, and a home of its own (ADR-602) -------------
+;; `nest test` sets `BROOD_TEST_RUN=1` before the interpreter exists, and — unless
+;; `--real-home` or `BROOD_TEST_HOME=keep` — points `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and
+;; `XDG_DATA_HOME` into a fresh per-run directory (`BROOD_TEST_SCRATCH`), removed when the
+;; run ends. A program that keeps its files under the XDG directories needs to do nothing:
+;; its tests write the scratch home, never the user's. Both are environment variables, so a
+;; program a test starts is part of the run too.
+
+(defn running? ()
+  "Whether this process is part of a test run: `nest test` said so when it started
+(`BROOD_TEST_RUN`), or a test run started it. Not a guess from what is loaded — a program
+can ask it to keep a test away from something real.
+
+    (test/running?)   ;~> true under `nest test`"
+  (= (os/env "BROOD_TEST_RUN") "1"))
+
+(defn scratch-dir ()
+  "The test run's private scratch home — the directory `XDG_CONFIG_HOME`, `XDG_STATE_HOME`
+and `XDG_DATA_HOME` point into (`config/`, `state/`, `data/`) — or nil when the run kept the
+real home (`nest test --real-home`, `BROOD_TEST_HOME=keep`) or this is no test run.
+
+    (test/scratch-dir)   ;~> \"/tmp/brood-test-home-…\" under `nest test`"
+  (when (running?) (os/env "BROOD_TEST_SCRATCH")))
+
 ;; --- temp fixtures -----------------------------------------------------------
 ;; A test that needs a real directory builds one under /tmp. Two rules keep these
 ;; from biting each other (learned the hard way — see docs/devlog.md):
