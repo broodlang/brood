@@ -764,12 +764,12 @@ pub unsafe extern "C" fn brood_rt_map_get3(
     d2: i64,
 ) -> i64 {
     unsafe {
-        use crate::core::value::Value;
         let h = &mut *heap;
-        let Value::Map(id) = words_to_val(m0, m1, m2) else {
-            return 1;
-        };
-        match h.map_get3_inline(id, words_to_val(k0, k1, k2), words_to_val(d0, d1, d2)) {
+        match h.map_get3_inline(
+            words_to_val(m0, m1, m2),
+            words_to_val(k0, k1, k2),
+            words_to_val(d0, d1, d2),
+        ) {
             Some(v) => {
                 *out = v;
                 0
@@ -803,13 +803,18 @@ pub unsafe extern "C" fn brood_rt_map_assoc(
     v2: i64,
 ) -> i64 {
     unsafe {
-        use crate::core::value::Value;
         let h = &mut *heap;
-        let Value::Map(id) = words_to_val(m0, m1, m2) else {
-            return 1;
-        };
-        *out = h.map_assoc(id, words_to_val(k0, k1, k2), words_to_val(v0, v1, v2));
-        0
+        match h.map_assoc_inline(
+            words_to_val(m0, m1, m2),
+            words_to_val(k0, k1, k2),
+            words_to_val(v0, v1, v2),
+        ) {
+            Some(v) => {
+                *out = v;
+                0
+            }
+            None => 1,
+        }
     }
 }
 
@@ -837,12 +842,8 @@ pub unsafe extern "C" fn brood_rt_map_get(
     k2: i64,
 ) -> i64 {
     unsafe {
-        use crate::core::value::Value;
         let h = &mut *heap;
-        let Value::Map(id) = words_to_val(m0, m1, m2) else {
-            return 1;
-        };
-        match h.map_get_inline(id, words_to_val(k0, k1, k2)) {
+        match h.map_get_inline(words_to_val(m0, m1, m2), words_to_val(k0, k1, k2)) {
             Some(v) => {
                 *out = v;
                 0

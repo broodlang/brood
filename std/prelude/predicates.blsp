@@ -70,6 +70,15 @@
 
     (set? #{1})    ;=> true"
   (%eq (type-of x) :set))
+;; A map or a record (ADR-542): what the field operations and a map pattern accept. The
+;; checker knows it as a type predicate (`Ty::tested_by`).
+(defn %map-like? (x)
+  "Whether `x` is a map or a record — a value with fields a map pattern can read.
+
+    (%map-like? {:a 1})   ;=> true
+    (%map-like? [1 2])    ;=> false"
+  (if (map? x) true (%record? x)))
+
 (defn failure? (x)
   "True if `x` is a **failure** — the value a function returns when it cannot
 interpret its input, as opposed to raising.
@@ -344,7 +353,7 @@ front of an accumulated remainder wants; a vector last is converted."
   (let (methods (if (bound? (quote *impls*))
                   (%map-get *impls* (quote [Counted ->count]) nil)
                   nil))
-    (if (if methods (%map-get methods (%map-get r :__id__ nil) nil) false)
+    (if (if methods (%map-get methods (%record-id r) nil) false)
       (->count r)
       (count (->seq r)))))
 (defn count (coll)
@@ -365,9 +374,9 @@ front of an accumulated remainder wants; a vector last is converted."
     (string? coll) (string/length coll)
     (vector? coll) (%vector-length coll)
     (bytes? coll) (%byte-length coll)
-    ;; a record counts as its `Seqable` view (its fields, id-free, by default) — not the
-    ;; raw map, which would include the internal `:__id__`. `%map-get` distinguishes it.
-    (map? coll) (if (%map-get coll :__id__ nil) (%count-record coll) (%map-count coll))
+    (map? coll) (%map-count coll)
+    ;; a record (ADR-542) counts as its `Counted`/`Seqable` view — its fields by default
+    (%record? coll) (%count-record coll)
     (set? coll) (%set-count coll)
     ;; A rope and a table have an O(1) size (ADR-253). Sized
     ;; directly rather than through `Seqable`, whose `->seq` is a LIST view: a rope

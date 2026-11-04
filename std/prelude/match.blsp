@@ -481,7 +481,8 @@ NON-LINEAR patterns (the same name twice) work.
     ;;                    `:or` default). Never fails.
     ;;   {:k pat}       — MAP PATTERN: the key must be PRESENT and its
     ;;                    value must match `pat`, else the clause fails.
-    `(if (map? ~target)
+    ;; a record (ADR-542) destructures by its fields, as a map does
+    `(if (%map-like? ~target)
        ~(%match-compile-map-entries (%match-map-entries pat)
           target
           bound
@@ -533,7 +534,7 @@ NON-LINEAR patterns (the same name twice) work.
 
 ;; `(record name {map-pattern}?)` — assert the target is a `defrecord` value of nominal id
 ;; `name`, then match the optional map pattern against its fields. `record-id` returns the
-;; value's `:__id__` (or nil for a non-record), so the whole test is a single `%eq` against
+;; value's id (or nil for a non-record), so the whole test is a single `%eq` against
 ;; the id derived from `name` at expansion; a non-record simply fails. The inner map pattern
 ;; is compiled by the ordinary map path, so `{:k p}` / `:keys` / `:or` all work unchanged.
 (defn- %match-compile-record (pat target bound success fail)

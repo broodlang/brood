@@ -1,7 +1,8 @@
 # Records are maps with a magic key — leaks today, and a real kind later
 
 **Status: DECIDED 2026-11-04 — option A, ADR-542; landing in steps.** Step 1 (the kernel kind
-and its `%record` primitives, nothing yet constructing one) is in. Earlier status: **OPEN — scoped
+and its `%record` primitives) and step 2 (`defrecord` constructs one; every `:__id__` probe is
+gone; node links at protocol v12) are in; step 3 moves the checker. Earlier status: **OPEN — scoped
 2026-10-27.** It has two parts. Of the **leaks** (§2), `into` and
 `merge` were **fixed 2026-10-27**: a record source is read through `seq`, and `merge` is seeded
 with its first map. The `assoc :__id__` forge is still open (see §2). A **`Record` value kind**

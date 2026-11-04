@@ -1,43 +1,30 @@
 ;; ---- record identity and library-value predicates -----------------------------
 
 (defn %identity-of (x)
-  "The dispatch identity of `x`: its nominal record id (a `module/name` keyword) if it
-  is an identity-carrying record, else its `type-of` kind. This — with `record?` /
-  `record-id` / `fields` — is the seam a later kernel slot swaps behind. The collection
-  paths still probe `:__id__` themselves for speed (`seq`, `count`, `keys`, `into`/`conj`,
-  the contracts, and the kernel's inline `get`/dispatch); `docs/record-kind.md` lists them."
-  ; one hash on the hot path: `get` (not `contains?` + `get`). `:__id__` is a reserved
-  ; keyword a record always carries and is never nil, so a present id is truthy.
-  (if (map? x)
-    (let (id (get x :__id__))
-      (if id id (type-of x)))
-    (type-of x)))
+  "The dispatch identity of `x`: its nominal record id (a `module/name` keyword) if it is a
+  record (ADR-542), else its `type-of` kind."
+  (let (id (%record-id x))
+    (if id id (type-of x))))
 
 (defn record? (x)
-  "True if `x` is an identity-carrying record (a `defrecord` value). Requires a
-  *truthy* `:__id__` — matching `%identity-of`, which treats a nil/false id as a plain
-  map and dispatches on `type-of`. (A `defrecord` value always carries a truthy keyword
-  id; the guard only matters for a hand-written `{:__id__ nil …}` literal, which must not
-  be seen as a record by `record?`/`record-id`/`fields` while dispatching as `:map`.)
+  "True if `x` is a record (a `defrecord` value) — its own kind since ADR-542, never a map.
 
     (record? 42) ;=> false
     (record? {:a 1}) ;=> false"
-  (if (and (map? x) (get x :__id__)) true false))
+  (%record? x))
 
 (defn record-id (x)
   "The nominal id (`module/name` keyword) of record `x`, or nil if `x` is not a record.
   Unlike `%identity-of`, never falls back to `type-of`.
 
     (record-id {:a 1}) ;=> nil"
-  (if (record? x) (get x :__id__) nil))
+  (%record-id x))
 
 (defn fields (x)
-  "The FIELDS of record `x` as a plain map — its identity omitted. The explicit id-free
-  view; the default `Seqable` view a record's `seq`/`count`/`keys`/`map`/`fold` already
-  give (so those don't leak `:__id__`). A plain map is returned unchanged.
+  "The FIELDS of record `x` as a plain map. A plain map is returned unchanged.
 
     (fields {:a 1 :b 2}) ;=> {:a 1 :b 2}"
-  (if (record? x) (dissoc x :__id__) x))
+  (if (%record? x) (%record-fields x) x))
 
 ; ---- library type predicates ------------------------------------------------
 ; Every TYPE PREDICATE is bare (`list?`/`vector?`/`map?`/`set?`/`record?`), so a value's
@@ -1067,7 +1054,7 @@ An optional leading docstring is carried onto the generated function.
 ;; Seqable — a value's list/seq view: the seam `seq` (and thus `map`/`filter`/`fold`/
 ;; `for`/`into`, plus `count`/`keys`/`vals`) consults for a RECORD. The default is the
 ;; record's fields (id-free) as `[k v]` pairs, so a record iterates, counts, and keys as
-;; its fields and never leaks the internal `:__id__`; a custom-collection record overrides
+;; its fields; a custom-collection record overrides
 ;; `->seq` to define its own iteration. Built-ins never reach here — `seq` takes their
 ;; native path — so this is purely the record extension point (à la `Display`), at zero
 ;; cost to built-ins.
@@ -1108,7 +1095,7 @@ kernel `rest` hands it back to the engine (ADR-505)."
 its `Seqable` view is empty. `(empty? r)` for a record, as the kernel `empty?` hands it back to
 the engine (ADR-505)."
   (let (methods (%map-get *impls* (quote [Counted ->count]) nil)
-        method (if methods (%map-get methods (%map-get r :__id__ nil) nil) nil))
+        method (if methods (%map-get methods (%record-id r) nil) nil))
     (if method
       (let (n (method r)) (and (int? n) (= n 0)))
       (empty? (->seq r)))))

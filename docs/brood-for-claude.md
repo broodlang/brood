@@ -86,7 +86,7 @@ Common macros (expanded once at the compile pass — runtime-free): `defmacro`
 (binding (*log-level* :debug) (do-thing))           ; scoped rebind
 
 (defrecord point (x y))                             ; a record: a map + a nominal identity
-(point 3 4)                                         ; => {:__id__ :<ns>/point, :x 3, :y 4}
+(point 3 4)                                         ; => #<ns>/point{:x 3, :y 4}
 (point-x (point 3 4))                               ; => 3  (accessor per field; a typo is a
                                                     ;        checker-caught undefined-fn, not silent nil)
 ;; update with plain assoc/merge; `(record? r)`/`(record-id r)`/`(fields r)` are the id
@@ -391,12 +391,13 @@ Other things worth knowing:
   `:module/name` id, and two record shapes dispatch apart even with identical fields. A
   plain map (even one carrying a `:type` field) is *never* rerouted — it dispatches as
   `:map`; identity comes only from `defrecord`, never sniffed.
-- **A record is still a map underneath.** `(type-of r)` is `:map`, and `get`/`assoc`
-  behave as on a map — `(get r :__id__)` even reaches the id. But a record is **NOT `=`**
-  to a bare map with the same fields (nominal), and its
-  **collection view is the fields, id-free**: `seq`/`count`/`keys`/`vals`/`map`/`fold`
-  over a record see its fields, never `:__id__` (via the `Seqable` ability). Use
-  `record?`/`record-id`/`fields` to test/read the identity explicitly.
+- **A record is its own kind, not a map** (ADR-542). `(type-of r)` is `:record` and
+  `(map? r)` is false, but field access works as on a map: `get`, keyword calls, `assoc`,
+  `update`, `dissoc` and `{:keys …}` destructuring act on its fields and keep it the same
+  record type. Its identity is in the value, never a key — no `:__id__` to read or forge —
+  and it is **NOT `=`** to a map with the same fields. Its collection view
+  (`seq`/`count`/`keys`/`vals`/`map`/`fold`) is its fields (the `Seqable` ability). Use
+  `record?`/`record-id`/`fields` for the identity and the plain field map.
 - **Match a record by id + fields** with `(record name {:k p …})` — the `name` fixes the
   nominal id (bare = current ns, or `mod/name`) and the optional `{…}` is a map pattern over
   its fields (`{:k p}` / `:keys` / `:or` compose); a plain map or a different record fails.

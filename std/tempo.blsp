@@ -370,7 +370,7 @@ worse.
   ;; would make this module depend on an undocumented duck-typing contract.
   (datetime/datetime y mo d h mi s ms))
 
-(defn- tp-floor-dt (t:map -> datetime)
+(defn- tp-floor-dt (t:tempo -> datetime)
   (let (m (tempo-by-unit t))
     (tp-dt (get m :year)
       (get m :month 1)
@@ -386,7 +386,7 @@ worse.
     (tempo/from-ms (tempo/parse! \"1970-01-02\"))   ;=> 86400000"
   (datetime/->epoch-ms (tp-floor-dt t)))
 
-(defn to-ms (t:map -> int)
+(defn to-ms (t:tempo -> int)
   "The instant `t` closes, in Unix epoch milliseconds (**exclusive**).
 
     (tempo/to-ms (tempo/parse! \"1970-01-02\"))   ;=> 172800000"
@@ -640,7 +640,7 @@ value yields a one-element vector.
     (let (s (first ss))
       (tp-width-acc (+ acc (- (span-to s) (span-from s))) (rest ss)))))
 
-(defn total-width (x:map -> int)
+(defn total-width (x: (or tempo span iset) -> int)
   "The total time `x` covers in milliseconds, **excluding** gaps. The free/busy
 answer: how much time is actually taken.
 
@@ -791,7 +791,7 @@ wrong. February yields 28 or 29 parts because the calendar says so.
              :ms (get dt :ms 0)})
     (tempo (tp-restrict all u) u)))
 
-(defn shift (t:map n:int -> map)
+(defn shift (t:tempo n:int -> tempo)
   "`t` moved `n` steps of its own resolution — negative to go back. Calendar
 arithmetic for years and months, exact millisecond arithmetic below that.
 
@@ -846,7 +846,7 @@ arithmetic for years and months, exact millisecond arithmetic below that.
   ;; after the sign (`-0044`), not three.
   (if (< n 0) (str "-" (string/pad-left (str (- n)) w "0")) (string/pad-left (str n) w "0")))
 
-(defn ->iso (t:map -> string)
+(defn ->iso (t:tempo -> string)
   "`t` as an ISO 8601 string at its own precision — no more, no less. A month
 prints as a month; nothing is padded out to a full timestamp.
 
@@ -893,7 +893,7 @@ end is the exclusive endpoint, so `parse-span` reads back what this writes.
     "/"
     (datetime/->iso (datetime/epoch-ms-> (span-to s)))))
 
-(defn ->iso-set (x:map -> string)
+(defn ->iso-set (x: (or tempo span iset) -> string)
   "An interval set as its spans in ISO 8601 interval form, comma-separated. An
 empty set renders as the empty string.
 

@@ -269,16 +269,15 @@ Always true for `n` <= 0.
     ;; mutable), so O(result-nodes) allocation, not O(n) fresh path-copies. A map
     ;; `from` is read as its entries first (`%map-into` takes a list/vector of `[k v]`).
     ;; a record target conj's each item via `Conjable` (a custom collection defines how);
-    ;; a plain map uses the GC-quiet CHAMP builder. `%map-get` tells them apart.
-    ;; A RECORD `from` is read through `seq` — its collection view, the fields by default —
-    ;; never `%map-pairs`, which would carry its `:__id__` across and turn the target into
-    ;; that record (`(into {} r)` returned `r` itself; `(merge {:z 1} r)` became an `r`).
+    ;; a plain map uses the GC-quiet CHAMP builder.
     ;; A plain map poured into an EMPTY map is the answer itself, as with vectors below.
+    ;; A record target (ADR-542) conj's each item through `Conjable` (a custom collection
+    ;; defines how); a record `from` is read through `seq`, its fields by default.
+    (%record? to) (fold (seq from) to %conj-one)
     (map? to)
       (cond
-        (%map-get to :__id__ nil) (fold (seq from) to %conj-one)
+        (%record? from) (%map-into to (seq from))
         (not (map? from)) (%map-into to from)
-        (%map-get from :__id__ nil) (%map-into to (seq from))
         (empty? to) from
         else (%map-into to (%map-pairs from)))
     ;; Set target: add each item (duplicates collapse). Without this branch the
@@ -307,18 +306,17 @@ Always true for `n` <= 0.
     ;; a flat copy plus one: the kernel op, not a trip through `into`/`append`
     (vector? coll) (%vector-concat coll [x])
     (set? coll) (%set-add coll x)
-    ;; a record dispatches to its `Conjable` impl (default: the map behaviour below); a
-    ;; custom-collection record defines its own insertion. `%map-get` distinguishes it from
-    ;; a plain map, and `conj-onto` is only reached for records, so its late definition is fine.
+    ;; a record (ADR-542) dispatches to its `Conjable` impl (default: the map behaviour
+    ;; below); a custom-collection record defines its own insertion. `conj-onto` is only
+    ;; reached for records, so its late definition is fine.
+    (%record? coll) (conj-onto coll x)
     (map? coll)
-      (if (%map-get coll :__id__ nil)
-        (conj-onto coll x)
-        (cond
-          (map? x) (merge coll x)
-          (and (vector? x) (= (count x) 2)) (assoc coll (nth x 0) (nth x 1))
-          else
-            (error "conj: adding to a map takes a [k v] pair or a map, got "
-              (pr-str x))))
+      (cond
+        (map? x) (merge coll x)
+        (and (vector? x) (= (count x) 2)) (assoc coll (nth x 0) (nth x 1))
+        else
+          (error "conj: adding to a map takes a [k v] pair or a map, got "
+            (pr-str x)))
     (pair? coll) (cons x coll)
     ;; A built-in kind with a `Conjable` impl of its own — the third of the collection
     ;; seams, matching `seq` and `count` (ADR-253). Gated on `%impl-exact?` so a kind
@@ -366,10 +364,10 @@ import (and so `(:use set)` can't shadow them).
 ;;   (defn point-y (p)   (get p :y))
 ;; The accessors are the point: `(point-x p)` names the field, and a typo
 ;; `(point-witdh p)` is an undefined-function error the checker catches — where
-;; `(get p :witdh)` silently returns nil. Records ARE maps (no new Value or tag),
-;; so update with `assoc`/`merge` — but they are NOMINAL since ADR-177: the baked
-;; `:__id__` makes `(= (point 1 2) {:x 1 :y 2})` false and carries dispatch
-;; identity. No generated `point?` predicate; write one over `record-id` if needed.
+;; `(get p :witdh)` silently returns nil. A record is its own value kind (ADR-542): its
+;; fields update with `assoc`/`merge`, its identity lives in the value, so
+;; `(= (point 1 2) {:x 1 :y 2})` is false and dispatch reads the id. No generated
+;; `point?` predicate; write one over `record-id` if needed.
 ;;
 ;; A field may carry a type: `(defrecord point ((x int) (y int)))`. When *every*
 ;; field is typed, `sig`s are emitted too — the constructor's `(record …)` return
@@ -406,7 +404,7 @@ import (and so `(:use set)` can't shadow them).
 (defn- %defrecord-qualify (nm)
   "Qualify bare name `nm` (a string) against the current ns → a `:<ns>/nm` keyword; at
 root/REPL (no ns) there is no prefix, so it is a bare `:nm`. Shared by `defrecord` (which
-bakes a record's `:__id__`) and `%ability-id-kw` (an impl's bare id) so the two AGREE — a
+bakes a record's id) and `%ability-id-kw` (an impl's bare id) so the two AGREE — a
 record built at root and an impl for it at root must land on the same dispatch id."
   (let (ns (reflect/current-ns))
     (if ns (keyword (str (->string ns) "/" nm)) (keyword nm))))
@@ -425,13 +423,14 @@ record built at root and an impl for it at root must land on the same dispatch i
 
 (defmacro defrecord (rec fields & opts)
   "Define record `rec` with `fields` — a positional constructor `(rec …)` plus a
-`rec-field` accessor per field. A record is an immutable map that also carries a
-**nominal identity**: a reserved `:__id__` field holding a `:module/name` keyword baked
-in at definition, so `ability` dispatch tells it apart from a bare map and from other
-records (a record is NOT `=` to a bare map with the same fields). `record?`/`record-id`/`fields` are the clean, id-free view.
+`rec-field` accessor per field. A record is its own immutable value kind (ADR-542): named
+fields plus a **nominal identity** — a `:module/name` keyword baked in at definition and
+held in the value, never among the fields — so `ability` dispatch tells it apart from a
+map and from other records (a record is NOT `=` to a map with the same fields).
+`record?`/`record-id`/`fields` are the identity API; `get`/`assoc` work on the fields.
 
 A field is a bare symbol or `(field type)`; the constructor result is inferred as a
-record SHAPE carrying the `:__id__` keyword literal, so a value's identity flows through
+record type carrying its id, so a value's identity flows through
 the checker to dispatch sites (`(let (c (circle 2)) (area c))` is checkable). When every
 field is typed, per-accessor signatures are emitted too.
 
@@ -442,7 +441,7 @@ called with the field names at expansion, and the methods it returns are spliced
 and it must be loaded before this `defrecord`.
 
     (defmodule geometry)
-    (defrecord circle (r))          ; (circle 2) → {:__id__ :geometry/circle, :r 2}
+    (defrecord circle (r))          ; (circle 2) → #geometry/circle{:r 2}
     (impl Shape circle (area (c) (* 3.14 (get c :r) (get c :r))))
 
     ;; deriving: the ability supplies the recipe, the record just names it
@@ -465,11 +464,11 @@ prelude declares one, so `:derives` always names an ability from your own code."
         ;; the nominal id — a `:module/name` KEYWORD (a keyword literal is what the
         ;; checker tracks via `Ty::keyword_lit`), captured at definition.
         id (%defrecord-qualify (->string rec))
-        ;; ctor body: a MAP LITERAL (built here, at macro time) whose values are the field
-        ;; symbols, with the reserved `:__id__` carrying the id keyword. Emitting a real
-        ;; map value (not a `(hash-map …)` call) is what makes the checker infer the result
-        ;; as a record shape carrying the `:__id__` keyword literal.
-        body (%zipmap (cons :__id__ fkws) (cons id fnames))
+        ;; ctor body: a record of the id over a MAP LITERAL of the fields (built here, at
+        ;; macro time) — its own value kind (ADR-542), so nothing that operates on a map
+        ;; can see or write the id. The literal is what lets the checker infer each
+        ;; field's type at the call.
+        body (list '%record id (%zipmap fkws fnames))
         ;; Generated bindings carry a docstring: a constructor and its accessors are
         ;; public surface, and one with no `(doc …)` at all is a hole in `nest doc`,
         ;; the LSP and `(audit/undocumented)` alike. The record's own docstring, when it

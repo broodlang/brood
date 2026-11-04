@@ -284,9 +284,24 @@ mod tests {
     use std::time::Duration;
 
     /// A reader slot of the test's own, for as long as the process lasts (a wedged read
-    /// holds it): leaked rather than a `static`, so it is no process-wide table.
+    /// holds it): leaked rather than a `static`, so it is no process-wide table. Under the
+    /// AddressSanitizer build the leak is declared intended — nothing keeps a pointer to the
+    /// slot once the test returns, so LeakSanitizer reported every one (Nightly on
+    /// `9ae14363`), and an ignored object's reachable children (a wedged handle) go with it.
     fn slot() -> &'static ReaderSlot<u32> {
-        Box::leak(Box::new(Mutex::new(None)))
+        let slot: &'static ReaderSlot<u32> = Box::leak(Box::new(Mutex::new(None)));
+        #[cfg(brood_asan)]
+        {
+            unsafe extern "C" {
+                fn __lsan_ignore_object(p: *const std::ffi::c_void);
+            }
+            // SAFETY: `slot` is a live heap object for the rest of the process; this only
+            // marks it for the leak checker.
+            unsafe {
+                __lsan_ignore_object(slot as *const ReaderSlot<u32> as *const std::ffi::c_void)
+            };
+        }
+        slot
     }
 
     /// Readers whose handles are numbered by `made`, the count of handles made so far.

@@ -722,3 +722,34 @@ fn a_normal_send_is_the_frame_a_v10_peer_reads() {
     encode_msg(&mut v10, &Message::Int(1)).unwrap();
     assert_eq!(encode_payload(&f).unwrap(), v10);
 }
+
+/// A record crosses a v12 link as itself (ADR-542): its id by name and its fields. Before
+/// the `M_RECORD` tag the encoder refused one outright.
+#[test]
+fn a_record_round_trips_with_its_id_and_fields() {
+    let id = crate::core::value::intern("geo/point");
+    let x = crate::core::value::intern("x");
+    let m = Message::Record(id, vec![(Message::Keyword(x), Message::Int(3))]);
+    let mut w = Vec::new();
+    encode_msg(&mut w, &m).expect("a record encodes");
+    let back = decode_msg(&mut Cursor::new(w)).expect("and decodes");
+    match &back {
+        Message::Record(back_id, entries) => {
+            assert_eq!(crate::core::value::symbol_name(*back_id), "geo/point");
+            assert_eq!(entries.len(), 1);
+            assert!(matches!(entries[0], (Message::Keyword(k), Message::Int(3)) if k == x));
+        }
+        _ => panic!("a record came back as another kind"),
+    }
+}
+
+/// A v10 peer has no `M_RECORD`, so a message carrying a record — however deep — is one a
+/// send to such a link refuses (ADR-542); one with none is not.
+#[test]
+fn a_message_says_whether_it_holds_a_record() {
+    let id = crate::core::value::intern("point");
+    let record = Message::Record(id, vec![]);
+    let nested = Message::Vector(vec![Message::Int(1), Message::List(vec![record], None)]);
+    assert!(nested.holds_record());
+    assert!(!Message::Vector(vec![Message::Int(1)]).holds_record());
+}

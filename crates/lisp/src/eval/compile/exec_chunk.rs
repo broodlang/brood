@@ -583,11 +583,11 @@ pub(crate) fn exec_chunk(
                         // `dispatch` (passthrough loop, `apply` test, `eval::apply`,
                         // `call_native`'s arity check on a one-argument call) would reach.
                         // The JIT's `unary_fallback` calls the same functions. The operand
-                        // stays rooted at `n - 1` across a collection inside it. A map — a
-                        // record is one — dispatches below instead, where the builtin can
-                        // hand a record's `->seq` back to be called here (ADR-505).
+                        // stays rooted at `n - 1` across a collection inside it. A record
+                        // (ADR-542) dispatches below instead, where the builtin can hand its
+                        // `->seq` back to be called here (ADR-505).
                         (PrimOp1::First | PrimOp1::Rest | PrimOp1::IsEmpty, _)
-                            if !matches!(sa.unpack(), ValueRef::Map(_)) =>
+                            if !matches!(sa.unpack(), ValueRef::Record { .. }) =>
                         {
                             crate::perf_bump!(prim1_fallback);
                             let cur_env = heap.read_root_env(genv);
@@ -619,12 +619,12 @@ pub(crate) fn exec_chunk(
                 let cur_env = heap.read_root_env(genv);
                 let sa = heap.root_at(n - 1);
                 let argv: SmallVec<[Value; 4]> = SmallVec::from_slice(&[sa]);
-                // A map operand — a record is one — is where Brood runs under the call: a
-                // record's `->seq` or `->count`, called from the builtin or from the
-                // prelude's `count`. Dispatched as a call, a closure comes back un-run and
-                // gets a frame of its own, so a `receive` inside parks (ADR-505). Every
-                // other operand keeps the nested run.
-                if matches!(sa.unpack(), ValueRef::Map(_)) {
+                // A record operand (ADR-542) is where Brood runs under the call: its `->seq`
+                // or `->count`, called from the builtin or from the prelude's `count`.
+                // Dispatched as a call, a closure comes back un-run and gets a frame of its
+                // own, so a `receive` inside parks (ADR-505). Every other operand keeps the
+                // nested run.
+                if matches!(sa.unpack(), ValueRef::Record { .. }) {
                     let step = dispatch(heap, callee, argv, true, cur_env);
                     heap.truncate_roots(n - 1);
                     match step.map_err(|e| tag_pos(e, pos))? {
@@ -741,9 +741,7 @@ pub(crate) fn exec_chunk(
                         // is the rule; a record's miss and every non-map receiver
                         // defer to the real `get` below.
                         PrimOp3::MapGet3 => {
-                            if let ValueRef::Map(mid) = sa.unpack()
-                                && let Some(v) = heap.map_get3_inline(mid, sb, sc)
-                            {
+                            if let Some(v) = heap.map_get3_inline(sa, sb, sc) {
                                 crate::perf_bump!(prim2_inline);
                                 done = Some(v);
                             }
@@ -760,9 +758,9 @@ pub(crate) fn exec_chunk(
                         // a vector (or anything else) defers to the wrapper's own branches.
                         // The operands stay rooted at n-3..n across the allocation.
                         PrimOp3::MapAssoc => {
-                            if let ValueRef::Map(mid) = sa.unpack() {
+                            if let Some(v) = heap.map_assoc_inline(sa, sb, sc) {
                                 crate::perf_bump!(prim2_inline);
-                                done = Some(heap.map_assoc(mid, sb, sc));
+                                done = Some(v);
                             }
                         }
                     }

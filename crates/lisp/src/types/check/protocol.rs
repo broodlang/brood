@@ -456,30 +456,14 @@ fn find_op_key(heap: &Heap, form: Value) -> Option<(String, String)> {
     })
 }
 
-/// The record id (`:__id__` keyword's name) a `defrecord` constructor body carries —
-/// a map literal `{:__id__ :ID …}` (the current form) or a legacy `(hash-map :__id__ …)`.
+/// The record id a `defrecord` constructor body carries: `(%record :ID {…})` (ADR-542). A map
+/// literal is a plain map whatever keys it spells, so nothing else is a constructor body.
 fn record_ctor_id(heap: &Heap, form: Value) -> Option<String> {
-    // map literal body — `{:__id__ :ID …}`
-    if let Value::Map(mid) = form {
-        return heap.map_entries(mid).into_iter().find_map(|(k, v)| {
-            matches!(k, Value::Keyword(kk) if value::symbol_is(kk, "__id__"))
-                .then(|| sym_name(v))
-                .flatten()
-        });
-    }
     let items = list_items(heap, form)?;
-    if !matches!(items.first(), Some(&Value::Sym(h)) if head_name(h) == "hash-map") {
+    if !matches!(items.first(), Some(&Value::Sym(h)) if head_name(h) == "%record") {
         return None;
     }
-    // pairs after the head: find the value following the `:__id__` key
-    let mut i = 1;
-    while i + 1 < items.len() {
-        if matches!(items[i], Value::Keyword(k) if value::symbol_is(k, "__id__")) {
-            return sym_name(items[i + 1]);
-        }
-        i += 2;
-    }
-    None
+    sym_name(*items.get(1)?)
 }
 
 /// Collect `(…/register-impl (quote A) (quote op) :ID …)` forms from this file.

@@ -1,4 +1,6 @@
-use super::args::{arg, expect_int, expect_map, expect_rope_ref, expect_set, expect_symbol, two};
+use super::args::{
+    arg, expect_fields, expect_int, expect_rope_ref, expect_set, expect_symbol, rewrap, two,
+};
 use super::realize_seqview;
 use crate::core::heap::Heap;
 use crate::core::value::{self, EnvId, Symbol, Value};
@@ -503,21 +505,14 @@ pub(super) fn realize_seqviews<'a>(
     })
 }
 
-/// If `v` is a RECORD (a `Value::Map` carrying `:__id__`), return its `Seqable` view — the
-/// list its `->seq` ability op yields (its fields id-free by default, or a custom
+/// If `v` is a RECORD (ADR-542), return its `Seqable` view — the
+/// list its `->seq` ability op yields (its fields by default, or a custom
 /// collection's own sequence). Lets `first`/`rest`/`empty?` treat a record AS its sequence
 /// (ADR-172 §7). Only reached on the builtin fallback: `first`/`rest` are `PrimOp1`s the JIT
 /// inlines for lists, so the hot `fold--loop` never calls these. Returns `None` for a
 /// non-record, so the caller keeps its normal path (a plain map stays a map).
 pub(super) fn record_seq(heap: &mut Heap, v: Value) -> Result<Option<Value>, LispError> {
-    let m = match v {
-        Value::Map(m) => m,
-        _ => return Ok(None),
-    };
-    if heap
-        .map_get(m, Value::Keyword(*crate::core::value::RECORD_ID_SYMBOL))
-        .is_none()
-    {
+    if !matches!(v, Value::Record { .. }) {
         return Ok(None);
     }
     let genv = heap.global();
@@ -539,10 +534,9 @@ pub(super) fn record_seq(heap: &mut Heap, v: Value) -> Result<Option<Value>, Lis
 /// is no record, the call was not offered, or the prelude has not defined the shim yet; the
 /// builtin then asks the record here, nested ([`record_seq`]).
 fn record_redirect(heap: &mut Heap, args: &[Value], shim: &str, v: Value) -> Option<LispError> {
-    let Value::Map(m) = v else {
+    if !matches!(v, Value::Record { .. }) {
         return None;
-    };
-    heap.map_get(m, Value::Keyword(*crate::core::value::RECORD_ID_SYMBOL))?;
+    }
     let genv = heap.global();
     let callee = heap.env_get(genv, crate::core::value::intern(shim))?;
     if !heap.redirect_offered(args) {
@@ -722,12 +716,10 @@ pub(super) fn is_pair(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 /// [`record_seq`] is.
 fn record_counted(heap: &mut Heap, v: Value) -> Result<Option<Value>, LispError> {
     use crate::core::value::intern;
-    let Value::Map(m) = v else {
+    let Value::Record { id, .. } = v else {
         return Ok(None);
     };
-    let Some(id) = heap.map_get(m, Value::Keyword(*crate::core::value::RECORD_ID_SYMBOL)) else {
-        return Ok(None);
-    };
+    let id = Value::Keyword(id);
     let genv = heap.global();
     let Some(Value::Map(impls)) = heap.env_get(genv, intern("*impls*")) else {
         return Ok(None);
@@ -1424,13 +1416,13 @@ pub(super) fn pair_kv(heap: &Heap, who: &str, p: Value) -> Result<(Value, Value)
 /// mutates only build-local trie nodes, so it allocates O(result-nodes) rather
 /// than O(n·depth).
 pub(super) fn map_into(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let into = expect_map(heap, "%map-into", arg(args, 0))?;
+    let (into, record) = expect_fields(heap, "%map-into", arg(args, 0))?;
     let items = heap.seq_items(arg(args, 1))?;
     let mut pairs = Vec::with_capacity(items.len());
     for it in items {
         pairs.push(pair_kv(heap, "%map-into", it)?);
     }
-    Ok(heap.map_from_pairs_into(into, pairs))
+    Ok(rewrap(heap.map_from_pairs_into(into, pairs), record))
 }
 
 /// `(%dispatch impls op-key id)` — ability dispatch through the per-op inline cache
@@ -1612,7 +1604,7 @@ pub(super) fn registry_names(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 /// `(%map-get m k [default])` — the value `k` maps to, or `default` (nil if
 /// omitted) when absent.
 pub(super) fn map_get(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_map(heap, "%map-get", arg(args, 0))?;
+    let (id, _) = expect_fields(heap, "%map-get", arg(args, 0))?;
     Ok(heap
         .map_get(id, arg(args, 1))
         .unwrap_or_else(|| arg(args, 2)))
@@ -1620,8 +1612,11 @@ pub(super) fn map_get(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 
 /// `(%map-assoc m k v)` — a fresh map with `k` bound to `v`.
 pub(super) fn map_assoc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_map(heap, "%map-assoc", arg(args, 0))?;
-    Ok(heap.map_assoc(id, arg(args, 1), arg(args, 2)))
+    let (id, record) = expect_fields(heap, "%map-assoc", arg(args, 0))?;
+    Ok(rewrap(
+        heap.map_assoc(id, arg(args, 1), arg(args, 2)),
+        record,
+    ))
 }
 
 /// `(%map-int-add m k delta)` — a fresh map with `k`'s value incremented by the
@@ -1631,22 +1626,23 @@ pub(super) fn map_assoc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
 /// idiomatic spelling — into `%table-add`, which is the same `+`, so the two agree
 /// on every input (see [`Heap::map_int_add`]).
 pub(super) fn map_int_add(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_map(heap, "%map-int-add", arg(args, 0))?;
+    let (id, record) = expect_fields(heap, "%map-int-add", arg(args, 0))?;
     let delta = expect_int(heap, "%map-int-add", arg(args, 2))?;
     heap.map_int_add(id, arg(args, 1), delta)
+        .map(|m| rewrap(m, record))
 }
 
 /// `(%map-dissoc m k)` — a fresh map with `k` removed.
 pub(super) fn map_dissoc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_map(heap, "%map-dissoc", arg(args, 0))?;
-    Ok(heap.map_dissoc(id, arg(args, 1)))
+    let (id, record) = expect_fields(heap, "%map-dissoc", arg(args, 0))?;
+    Ok(rewrap(heap.map_dissoc(id, arg(args, 1)), record))
 }
 
 /// `(%map-pairs m)` — the entries as a list of `[k v]` vectors, in the trie's hash-derived
 /// order (not insertion order), in one O(n) pass. The *single* map enumerator: `keys`/`vals`/
 /// `contains?`/`map/reduce-kv` are all Brood over it (std/prelude/map.blsp, std/map.blsp).
 pub(super) fn map_pairs(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_map(heap, "%map-pairs", arg(args, 0))?;
+    let (id, _) = expect_fields(heap, "%map-pairs", arg(args, 0))?;
     let entries = heap.map_entries(id); // copy out, releasing the borrow before we alloc
     Ok(entry_pair_list(heap, &entries))
 }
@@ -1669,7 +1665,7 @@ fn entry_pair_list(heap: &mut Heap, entries: &[(Value, Value)]) -> Value {
 /// its subtree size, so this never walks (or allocates) the entries; it's what
 /// `count`/`empty?` on a map use instead of materialising `%map-pairs`.
 pub(super) fn map_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_map(heap, "%map-count", arg(args, 0))?;
+    let (id, _) = expect_fields(heap, "%map-count", arg(args, 0))?;
     Ok(Value::int(heap.map_size(id) as i64))
 }
 

@@ -559,7 +559,7 @@ pub(super) fn num_bin(
         // dispatching on both operands. Gating on the Map *tag* keeps the record check off
         // the numeric path — a float/decimal operand falls straight to the float arm. A pair
         // with no method raises `no-method`; a plain (non-record) map errors in `num_to_f64`.
-        (Value::Map(_), _) | (_, Value::Map(_)) if is_record(heap, a) || is_record(heap, b) => {
+        (Value::Record { .. }, _) | (_, Value::Record { .. }) => {
             num_multi_dispatch(heap, who, args, a, b)
         }
         // A float operand anywhere: the float path (a BigInt/Decimal coerces via `f64` —
@@ -572,16 +572,9 @@ pub(super) fn num_bin(
     }
 }
 
-/// True when `v` is an identity-carrying record — a map whose reserved `:__id__` key
-/// (`defrecord` bakes it in) holds a *truthy* id. A plain map, or a hand-written
-/// `{:__id__ nil}`, is not a record: this matches `record?`/`identity-of`, which
-/// dispatch a nil/false id as `:map`.
-fn is_record(heap: &Heap, v: Value) -> bool {
-    let Value::Map(m) = v else { return false };
-    match heap.map_get(m, Value::Keyword(*crate::core::value::RECORD_ID_SYMBOL)) {
-        Some(id) => !matches!(id, Value::Nil | Value::Bool(false)),
-        None => false,
-    }
+/// True when `v` is a record (ADR-542).
+fn is_record(_heap: &Heap, v: Value) -> bool {
+    matches!(v, Value::Record { .. })
 }
 
 /// Dispatch an arithmetic operator to the `Num` MULTIMETHOD (ADR-179) when a record is an
@@ -633,9 +626,7 @@ fn ordering_redirect(
     a: Value,
     b: Value,
 ) -> Option<LispError> {
-    if !matches!((a, b), (Value::Map(_), _) | (_, Value::Map(_)))
-        || !(is_record(heap, a) || is_record(heap, b))
-    {
+    if !(is_record(heap, a) || is_record(heap, b)) {
         return None;
     }
     let genv = heap.global();
@@ -857,7 +848,7 @@ fn ordering(heap: &mut Heap, who: &str, a: Value, b: Value) -> Result<Option<Ord
     Ok(match (a, b) {
         (Value::Int(x), Value::Int(y)) => Some(x.cmp(&y)),
         _ if both_exact(a, b) => Some(heap.value_cmp(a, b)),
-        (Value::Map(_), _) | (_, Value::Map(_)) if is_record(heap, a) || is_record(heap, b) => {
+        (Value::Record { .. }, _) | (_, Value::Record { .. }) => {
             Some(compare_multi_dispatch(heap, who, a, b)?)
         }
         _ => num_to_f64(heap, who, a)?.partial_cmp(&num_to_f64(heap, who, b)?),

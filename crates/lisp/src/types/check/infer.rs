@@ -1464,6 +1464,7 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     let len = items.len();
     match value::symbol_name_ref(head) {
         "list" => list_literal_ty(heap, items, ctx),
+        "%record" if len == 3 => record_ctor_ty(heap, items, ctx),
         "vector" => element_union(heap, &items[1..], ctx).map(Ty::vector_of),
         "%vector-ref" if len == 3 => vector_ref_ty(heap, items, ctx),
         name @ ("first" | "second" | "third" | "last" | "nth") => {
@@ -2606,6 +2607,23 @@ fn interpose_ty(heap: &Heap, items: &[Value], ctx: &Ctx) -> Option<Ty> {
 /// | B`, where `B` is the 2-arg callback's return. The result joins the empty-input case
 /// (`init`) with a step result (`B`). The no-init `(reduce coll f)` starts the
 /// accumulator at `coll`'s first element. Both `init` and `B` must be known, else flat.
+/// `(%record :id {fields…})` — what a `defrecord` constructor's body is (ADR-542): the
+/// record shape the checker has always modelled a record by, the field literal's shape plus
+/// the `__id__` pseudo-field holding the id literal. The runtime value is its own kind; the
+/// checker keeps this map-shaped model until it moves to a `Record` tag (ADR-542, step 3),
+/// so a constructor's body agrees with the record type its `sig` declares.
+fn record_ctor_ty(heap: &Heap, items: &[Value], ctx: &Ctx) -> Option<Ty> {
+    let Value::Keyword(id) = items[1] else {
+        return None;
+    };
+    let mut fields = expr_ty(heap, items[2], ctx)?.record_fields()?.clone();
+    fields.insert(
+        value::intern(crate::core::keywords::RECORD_ID),
+        (Ty::keyword_lit(id), true),
+    );
+    Some(Ty::record_of(fields))
+}
+
 fn reduce_ty(heap: &Heap, is_reduce: bool, items: &[Value], ctx: &Ctx) -> Option<Ty> {
     let (collection, f) = super::sigs::combinator_args(items)?;
     let collection_ty = expr_ty(heap, collection, ctx);

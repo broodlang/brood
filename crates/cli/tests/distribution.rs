@@ -74,6 +74,61 @@ fn two_nodes_connect_and_message() {
     );
 }
 
+/// A record crosses a node link as a record (ADR-542): the far runtime gets the same kind,
+/// with its id re-interned by name, `=` to one it builds itself, and echoes it back intact.
+/// Before protocol v12 the wire codec had no record tag.
+#[test]
+fn a_record_crosses_a_node_link_as_a_record() {
+    let _g = port_lock();
+    let dir = std::env::temp_dir().join(format!("brood-dist-rec-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let port_a = free_port();
+    let port_b = free_port();
+    let server = format!(
+        r#"
+(defrecord point (x y))
+(proc/register :rec (self))
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
+(defn serve ()
+  (receive
+    ([:rec from r] (do (send from [:back (record? r) (record-id r) (= r (point 1 2)) r]) (serve)))
+    (_ (serve))))
+(serve)
+"#
+    );
+    let client = format!(
+        r#"
+(defrecord point (x y))
+(node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(node/connect "a@127.0.0.1:{port_a}")
+(send {{:name :rec :node :a@127.0.0.1}} [:rec (self) (point 1 2)])
+(receive
+  ([:back is-record id same r]
+    (do (unless (and is-record (= id :point) same (record? r) (= r (point 1 2)))
+          (throw (str "record mangled in transit: " (pr-str [is-record id same r]))))
+        (io/puts "RECORD-OK")))
+  (after 30000 (throw "no reply")))
+"#
+    );
+    let mut a = spawn_brood(&dir, "server.blsp", &server);
+    wait_until_listening(port_a);
+    let b = spawn_brood(&dir, "client.blsp", &client);
+    let out = b.wait_with_output().expect("client finished");
+    let _ = a.kill();
+    let _ = a.wait();
+    let mut a_err = String::new();
+    if let Some(mut e) = a.stderr.take() {
+        let _ = e.read_to_string(&mut a_err);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success() && stdout.contains("RECORD-OK"),
+        "client failed.\n--- client stdout ---\n{stdout}\n--- client stderr ---\n{stderr}\n--- server stderr ---\n{a_err}"
+    );
+}
+
 /// A **clean** peer exit (process returns → OS closes the socket) fires
 /// `[:nodedown]` on the survivor **promptly** — via the reader's socket-EOF path,
 /// not the ~6s heartbeat timeout — and drops the peer from `(node/list)`.

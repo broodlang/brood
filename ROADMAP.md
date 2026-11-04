@@ -224,7 +224,9 @@ another Lisp has it.
    `defmulti` whose methods vary only the first argument, an ability written the long way.
 8. 🚧 **What a record is (2026-11-04, ADR-542 — in progress).** Decided: a record is its own value
    kind (`type-of` `:record`, printed `#point{…}`), so no map operation can see or forge an
-   identity. Step 1 (the kernel kind) is in; `defrecord` moves onto it next. Original item:
+   identity. Steps 1 (the kernel kind) and 2 (`defrecord` builds one; the map operations,
+   the VM/JIT `get`/`assoc` and node links carry one) are in; the checker's move to a `Record`
+   tag is next. Original item:
    **What a record is.** A record is a map with a reserved `:__id__` key: `type-of` is
    `:map`, but `=` is nominal. Audit which map operations expose `:__id__` (`keys`,
    `count`, `seq`, `merge` with a plain map, `into {}`, `pr-str`, JSON encoding) and make

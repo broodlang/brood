@@ -192,9 +192,7 @@ pub(crate) fn prim2_inline_exec(
         // only so a frame suspended inside that call can be recognised by its resume point.
         None if op == PrimOp::ContractAwait => Ok(Some(y)),
         None if op == PrimOp::MapGet => {
-            if let ValueRef::Map(id) = x.unpack()
-                && let Some(v) = heap.map_get_inline(id, y)
-            {
+            if let Some(v) = heap.map_get_inline(x, y) {
                 crate::perf_bump!(prim2_inline);
                 return Ok(Some(v));
             }
@@ -259,7 +257,7 @@ pub(crate) fn prim2_dispatch_rooted(
     result.map_err(|e| tag_pos(e, pos))
 }
 
-/// [`prim2_dispatch_rooted`] for an operand that is a map — a record is one — where the
+/// [`prim2_dispatch_rooted`] for an operand that is a record (ADR-542) — where the
 /// builtin may hand its call back: a record's `num/add` under `+`, its `compare-to` under
 /// `<` (ADR-505). Dispatched as a call, so a closure comes back un-run as `Step::Tail` and
 /// the caller pushes its frame where the result goes; a `receive` inside then parks.
@@ -294,10 +292,11 @@ pub(crate) fn prim2_dispatch_step(
 }
 
 /// Whether a binary primitive's fallback may run Brood under the builtin — an operand is a
-/// map, which every record is — and so goes through [`prim2_dispatch_step`] (ADR-505).
+/// record (ADR-542), whose arithmetic, ordering and `Lookup` are Brood — and so goes through
+/// [`prim2_dispatch_step`] (ADR-505).
 #[inline]
 pub(crate) fn prim2_may_redirect(a: Value, b: Value) -> bool {
-    matches!(a.unpack(), ValueRef::Map(_)) || matches!(b.unpack(), ValueRef::Map(_))
+    matches!(a.unpack(), ValueRef::Record { .. }) || matches!(b.unpack(), ValueRef::Record { .. })
 }
 
 /// [`prim2_dispatch_rooted`]'s 3-ary sibling: operands already rooted at

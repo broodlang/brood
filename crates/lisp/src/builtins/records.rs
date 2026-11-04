@@ -9,13 +9,14 @@ use crate::error::{LispError, LispResult};
 /// `fields` in the prelude are the policy over these.
 pub(super) fn register(primitives: &mut super::Primitives) {
     use super::signature_types::*;
-    use crate::core::value::{Arity, Tag};
+    use crate::core::value::Arity;
     use crate::types::Sig;
-    let record_ty = crate::types::Ty::of(Tag::Record);
     primitives.def(
         "%record",
         Arity::exact(2),
-        Sig::new(vec![kw, map_ty.union(nil_ty)], record_ty.clone()),
+        // `any`, not `record`: the checker types a `%record` call itself, as the record shape
+        // it models a record by, until it moves to a `Record` tag (ADR-542, step 3).
+        Sig::new(vec![kw, map_ty.union(nil_ty)], any),
         &["id", "fields"],
         "A record of identity id (a keyword, `:point` or `:geo/point`) over the field map fields. The primitive behind a `defrecord` constructor.",
         record_new,
@@ -39,9 +40,9 @@ pub(super) fn register(primitives: &mut super::Primitives) {
     primitives.def(
         "%record-fields",
         Arity::exact(1),
-        Sig::new(vec![any], map_ty.union(nil_ty)),
+        Sig::new(vec![any], map_ty),
         &["x"],
-        "The fields of record x as a plain map, else nil.",
+        "The fields of record x as a plain map; raises for anything that is not a record.",
         record_fields,
     );
 }
@@ -84,10 +85,16 @@ pub(super) fn record_id(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     })
 }
 
-/// `(%record-fields x)`: the field map, or `nil` for anything else.
-pub(super) fn record_fields(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(match arg(args, 0) {
-        Value::Record { fields, .. } => Value::map(fields),
-        _ => Value::nil(),
-    })
+/// `(%record-fields r)`: the field map. A non-record raises — the prelude's `fields` asks
+/// `%record?` first — so the result is always a map, which is what the checker is told.
+pub(super) fn record_fields(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    match arg(args, 0) {
+        Value::Record { fields, .. } => Ok(Value::map(fields)),
+        other => Err(LispError::wrong_type(
+            heap,
+            "%record-fields",
+            "record",
+            other,
+        )),
+    }
 }

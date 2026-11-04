@@ -587,6 +587,7 @@ pub(super) fn base_ty(name: &str) -> Option<Ty> {
         "decimal" => Ty::of(Tag::Decimal),
         "ratio" => Ty::of(Tag::Ratio),
         "failure" => Ty::of(Tag::Failure),
+        "record" => Ty::of(Tag::Record),
         "fn" => Ty::of(Tag::Fn).union(Ty::of(Tag::Native)),
         "rope" => Ty::of(Tag::Rope),
         "pid" => Ty::of(Tag::Pid),
@@ -847,7 +848,7 @@ pub fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
 
 /// The base type names [`parse_type`]'s symbol arm accepts — kept beside it for the same
 /// reason [`TYPE_HEADS`] is; `base_type_names_all_parse` pins the two together.
-pub(super) const BASE_TYPE_NAMES: [&str; 30] = [
+pub(super) const BASE_TYPE_NAMES: [&str; 31] = [
     "any",
     "never",
     "int",
@@ -871,6 +872,7 @@ pub(super) const BASE_TYPE_NAMES: [&str; 30] = [
     "decimal",
     "ratio",
     "failure",
+    "record",
     "fn",
     "rope",
     "pid",

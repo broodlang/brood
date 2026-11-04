@@ -442,17 +442,39 @@ impl Heap {
             if undecided { None } else { Some(true) }
         };
         if symbol_named(head, "record") {
-            let Value::Map(map_id) = value else {
-                return Some(false);
+            // A map, or a record's fields (ADR-542). A record INSTANCE answers `get` on a
+            // missing (or nil) key through its `Lookup` impl (`%lookup-miss`), which only
+            // the walk can call; a field it holds is its field map's own entry either way.
+            let (map_id, instance_id) = match value {
+                Value::Map(map_id) => (map_id, None),
+                Value::Record { id, fields } => (fields, Some(id)),
+                _ => return Some(false),
             };
-            // A record INSTANCE answers `get` on a missing (or nil) key through its
-            // `Lookup` impl (`%lookup-miss`), which only the walk can call; a field it
-            // holds is the map's own entry either way.
-            let record_id = Value::Keyword(*crate::core::value::RECORD_ID_SYMBOL);
-            let instance = self.map_get(map_id, record_id).is_some();
+            let instance = instance_id.is_some();
             let open = items.get(1).is_some_and(|item| symbol_named(item, "&open"));
             // `key type` pairs; a dangling odd key is ignored, as the walk ignores it.
-            let (fields, _) = items[if open { 2 } else { 1 }..].as_chunks::<2>();
+            let (all_fields, _) = items[if open { 2 } else { 1 }..].as_chunks::<2>();
+            // The `:__id__` pseudo-field a `defrecord` constructor's result type carries
+            // names the record type: such a shape admits only a record of that id, and the
+            // pseudo-field is no field of it. A shape without one admits a map or a record,
+            // as `type-matches?` does (an accessor's `&open` shape takes any carrier).
+            let id_key = Value::Keyword(*crate::core::value::RECORD_ID_SYMBOL);
+            let is_id = |field: &[Value; 2]| matches!((field[0], id_key), (Value::Keyword(a), Value::Keyword(b)) if a == b);
+            if let Some(field) = all_fields.iter().find(|field| is_id(field)) {
+                let wanted = match field[1] {
+                    Value::Keyword(wanted) => wanted,
+                    _ => return None,
+                };
+                if instance_id != Some(wanted) {
+                    return Some(false);
+                }
+            }
+            let fields: Vec<[Value; 2]> = all_fields
+                .iter()
+                .filter(|field| !is_id(field))
+                .copied()
+                .collect();
+            let fields = fields.as_slice();
             // Keyword field names only: the closed check below compares names by identity,
             // as `%record-declares?` does with `%eq`, which is exact only for interned keys.
             if fields
