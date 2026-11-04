@@ -330,62 +330,12 @@ per grapheme, which is what a frame used to cost."
       (seq/subvec (splice (cursor-row vt) col col (seq/repeat n (erase-cell vt))) 0 (:cols vt)))))
 
 ;; ---- SGR: the attribute state ------------------------------------------------------------
-
-(def- sgr-flags
-  ;; parameter -> the `[key value]` pairs it sets (nil clears); 22 clears bold AND dim
-  {1 [[:bold true]]
-   2 [[:dim true]]
-   3 [[:italic true]]
-   4 [[:underline true]]
-   7 [[:inverse true]]
-   9 [[:strike true]]
-   22 [[:bold nil] [:dim nil]]
-   23 [[:italic nil]]
-   24 [[:underline nil]]
-   27 [[:inverse nil]]
-   29 [[:strike nil]]
-   39 [[:fg nil]]
-   49 [[:bg nil]]})
-
-(defn- attr-set (attr:attr k:keyword v:any -> attr)
-  "`attr` with `k` set (removed when `v` is nil), nil once empty — the default face has no map."
-  (let (a (if (nil? v) (dissoc (or attr {}) k) (assoc (or attr {}) k v)))
-    (if (empty? a) nil a)))
-
-(defn- extended-colour (params:vector i:int -> (tuple any int))
-  "The colour after a 38 / 48 at `params[i]`: `[colour next-index]` — `5;n` an index,
-`2;r;g;b` a true colour (the ITU `2::r:g:b` form carries an empty colourspace slot
-first); anything else is skipped with the colour unset."
-  (let (channel (fn (j) (clamp (or (nth params j nil) 0) 0 255))
-        kind (nth params i nil))
-    (cond
-      (= kind 5) [(channel (inc i)) (+ i 2)]
-      (= kind 2)
-        (let (j (if (nil? (nth params (inc i) nil)) (+ i 2) (inc i)))
-          [[(channel j) (channel (inc j)) (channel (+ j 2))] (+ j 3)])
-      else [nil (inc i)])))
-
-(defn- sgr-step (attr:attr params:vector i:int -> (tuple attr int))
-  "One SGR parameter applied: `[attr next-index]`."
-  (let (p (or (nth params i nil) 0)
-        one (fn (a) [a (inc i)]))
-    (cond
-      (= p 0) (one nil)
-      (= p 38) (let ([c j] (extended-colour params (inc i))) [(attr-set attr :fg c) j])
-      (= p 48) (let ([c j] (extended-colour params (inc i))) [(attr-set attr :bg c) j])
-      (<= 30 p 37) (one (attr-set attr :fg (- p 30)))
-      (<= 40 p 47) (one (attr-set attr :bg (- p 40)))
-      (<= 90 p 97) (one (attr-set attr :fg (- p 82)))
-      (<= 100 p 107) (one (attr-set attr :bg (- p 92)))
-      else (one (fold (get sgr-flags p) attr (fn (a kv) (attr-set a (first kv) (second kv))))))))
+;; The attribute model — what each SGR parameter sets, 16 / 256 / true colour — is `ansi`'s
+;; (`ansi/sgr`), shared with the streaming decoder line-mode output is read with.
 
 (defn- sgr (vt:terminal params:vector -> terminal)
   "SGR: `params` folded into the current attributes; an empty list is a reset."
-  (letrec (go (fn (attr i)
-                (if (>= i (count params))
-                  attr
-                  (let ([attr2 j] (sgr-step attr params i)) (go attr2 j)))))
-    (assoc vt :attr (if (empty? params) nil (go (:attr vt) 0)))))
+  (assoc vt :attr (ansi/sgr (:attr vt) params)))
 
 ;; ---- the saved cursor and the alternate screen ------------------------------------------------
 
@@ -469,15 +419,6 @@ entry while already there does nothing."
 
 ;; ---- CSI ------------------------------------------------------------------------------------------
 
-(defn- parse-params (s:string -> (vector (or nil int)))
-  "The numeric parameters of `s` (`\"1;5\"`) as a vector of ints, an empty slot nil.
-`:` sub-parameters are read as `;` — enough for the `38:2::r:g:b` colour form."
-  (if (= s "")
-    []
-    (into []
-      (map (string/split (if (includes? s ":") (string/replace s ":" ";") s) ";")
-        (fn (p) (if (= p "") nil (let (n (string/->number p)) (if (int? n) n nil))))))))
-
 (defn- param (params: (vector (or nil int)) i:int default:int -> int)
   "Parameter `i`, `default` when absent or 0 — `CSI A` and `CSI 0 A` both mean 1."
   (let (v (nth params i nil))
@@ -533,7 +474,7 @@ and last byte are inspected — an SGR, most of what a program emits, is digits 
 Dispatched on the prefix + intermediate + final together, so `?h`, `>c` and ` q` are
 their own sequences rather than flags on `h`, `c` and `q`."
   (let ([prefix digits intermediate] (csi-parts body)
-        params (parse-params digits)
+        params (ansi/params digits)
         n1 (param params 0 1)
         row (:row vt)
         col (:col vt))
@@ -741,59 +682,8 @@ near the bottom), blanks enter at the bottom when it grows."
 
 ;; ---- reading the screen back ------------------------------------------------------------------------
 
-(def xterm-palette
-  ;; the 16 ANSI colours as xterm draws them — the default palette
-  [[0 0 0]
-    [205 0 0]
-    [0 205 0]
-    [205 205 0]
-    [0 0 238]
-    [205 0 205]
-    [0 205 205]
-    [229 229 229]
-    [127 127 127]
-    [255 0 0]
-    [0 255 0]
-    [255 255 0]
-    [92 92 255]
-    [255 0 255]
-    [0 255 255]
-    [255 255 255]])
-
-(defn- cube-level (n:int -> int)
-  (if (= n 0) 0 (+ 55 (* n 40))))
-
-(defn colour (c:any palette:vector -> any)
-  "Colour `c` — a palette index or `[r g b]` — as a colour: 0–15 from `palette` (16
-entries, each `[r g b]` or a hex string), 16–231 the 6×6×6 cube, 232–255 the grey ramp.
-
-    (vt/colour 1 vt/xterm-palette)   ;=> [205 0 0]
-    (vt/colour 196 vt/xterm-palette)   ;=> [255 0 0]
-    (vt/colour [1 2 3] vt/xterm-palette)   ;=> [1 2 3]"
-  (cond
-    (not (int? c)) c
-    (< c 16) (nth palette c)
-    (< c 232)
-      (let (i (- c 16))
-        [(cube-level (quot i 36)) (cube-level (mod (quot i 6) 6)) (cube-level (mod i 6))])
-    else (let (g (+ 8 (* 10 (- c 232)))) [g g g])))
-
-(defn face (attr:attr palette:any -> attr)
-  "The SGR `attr` of a cell as a display face `{:fg [r g b] :bg … :bold …}`, colours
-through `palette` — `{:colors <16 entries> :fg <default fg> :bg <default bg>}`, the
-defaults used when inverse video needs a colour the cell never set. Nil for a default cell.
-
-    (vt/face {:fg 1 :bold true} nil)   ;=> {:bold true, :fg [205 0 0]}
-    (vt/face nil nil)   ;=> nil"
-  (if (nil? attr)
-    nil
-    (let (colors (or (:colors palette) xterm-palette)
-          fg (if (nil? (:fg attr)) nil (colour (:fg attr) colors))
-          bg (if (nil? (:bg attr)) nil (colour (:bg attr) colors))
-          [fg2 bg2] (if (:inverse attr) [(or bg (:bg palette)) (or fg (:fg palette))] [fg bg])
-          flags (dissoc attr :fg :bg :inverse)
-          styled (attr-set (attr-set flags :fg fg2) :bg bg2))
-      styled)))
+;; A cell's attribute becomes a display face through `ansi/face` (and `ansi/colour`,
+;; `ansi/xterm-palette`): the colours are the attribute model's, not the screen's.
 
 (defn- shown-cells (row:row keep:int -> int)
   "How many leading cells of `row` are shown: through the last non-blank cell, and never
@@ -817,7 +707,7 @@ concatenated, `spans` the `[start end face]` runs of one attribute (reversed, co
   (letrec (go (fn (i pos cur start texts spans)
                 (if (>= i (count cells))
                   [(string/join (reverse texts) "")
-                    (if (nil? cur) spans (cons [start pos (face cur palette)] spans))
+                    (if (nil? cur) spans (cons [start pos (ansi/face cur palette)] spans))
                     pos]
                   (let ([g attr] (nth cells i)
                         next (+ pos (string/length g))
@@ -831,13 +721,13 @@ concatenated, `spans` the `[start end face]` runs of one attribute (reversed, co
                           attr
                           pos
                           texts2
-                          (cons [start pos (face cur palette)] spans)))))))
+                          (cons [start pos (ansi/face cur palette)] spans)))))))
     (go 0 base nil base () ())))
 
 (defn line (row:row palette:any -> (tuple string vector))
   "A row of cells — one of `:evicted`, or `(nth (:grid vt) r)` — as `[text spans]`:
 its text with trailing blanks trimmed and the `[start end face]` spans over it from
-offset 0, faces through `palette` (see [[face]]). What a host appends to its scrollback.
+offset 0, faces through `palette` (see `ansi/face`). What a host appends to its scrollback.
 
     (vt/line (nth (:grid (vt/feed (vt/make 6 1) \"\\e[32mok\")) 0) nil)   ;=> [\"ok\" [[0 2 {:fg [0 205 0]}]]]"
   (let ([text spans _] (cells-line (seq/subvec row 0 (shown-cells row 0)) 0 palette))
@@ -853,7 +743,7 @@ offset 0, faces through `palette` (see [[face]]). What a host appends to its scr
   "The screen as a buffer would show it: `{:text :spans :cursor :cursor-visible
 :cursor-style :title :mouse :alt-screen}` — rows joined by newlines with trailing blanks trimmed, `:spans`
 the `[start end face]` faces over that text (the `highlight-spans` shape, ascending and
-non-overlapping) through `palette` (see [[face]]), and `:cursor` the char offset of the
+non-overlapping) through `palette` (see `ansi/face`), and `:cursor` the char offset of the
 cursor in it (its row is padded out to the cursor, so the offset always exists).
 
     (:text (vt/screen (vt/feed (vt/make 4 2) \"ab\\r\\ncd\") nil))   ;=> \"ab\\ncd\"

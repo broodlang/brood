@@ -135,13 +135,14 @@
     (assert= (:fg (:attr (fed 4 1 "\e[38;5;196m"))) 196)
     (assert= (:fg (:attr (fed 4 1 "\e[38;2;1;2;3m"))) [1 2 3])
     (assert= (:bg (:attr (fed 4 1 "\e[48:2::9:8:7m"))) [9 8 7])
-    (assert= (vt/colour 196 vt/xterm-palette) [255 0 0])
-    (assert= (vt/colour 232 vt/xterm-palette) [8 8 8]))
+    (assert= (ansi/colour 196 ansi/xterm-palette) [255 0 0])
+    (assert= (ansi/colour 232 ansi/xterm-palette) [8 8 8]))
   (test "bright colours are palette 8–15, resolved through the caller's palette"
     (let (s (vt/screen (fed 4 1 "\e[91mx") {:colors (into [] (seq/repeat 16 [1 1 1]))}))
       (assert= (:spans s) [[0 1 {:fg [1 1 1]}]])))
   (test "inverse swaps fg and bg, falling back to the palette's defaults"
-    (assert= (vt/face {:inverse true :fg 1} {:fg [9 9 9] :bg [0 0 0]}) {:fg [0 0 0] :bg [205 0 0]}))
+    (assert= (ansi/face {:inverse true :fg 1} {:fg [9 9 9] :bg [0 0 0]})
+      {:fg [0 0 0] :bg [205 0 0]}))
   (test "the cursor is a char offset into the joined text, its row padded to reach it"
     (let (s (vt/screen (fed 10 3 "ab\r\n\e[5Cx\e[2D") nil))
       (assert= (:text s) "ab\n     x\n")

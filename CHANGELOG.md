@@ -6,7 +6,21 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## v0.49.1 — the parallel cold build finishes
 
+**Added.**
+- A streaming ANSI decoder (ADR-567): `(ansi/feed (ansi/decoder) chunk)` turns a chunk of
+  program output into `[text attr]` segments with the SGR attributes (16 / 256 / true colour,
+  bold, italic, underline, …) carried from chunk to chunk, and holds an escape a chunk ends
+  inside until the next one finishes it, so a sequence split across two reads never shows as
+  `1mERROR`. Every other escape (cursor motion, erase, OSC titles and hyperlinks, DCS, charset
+  selection) is consumed. `ansi/segments-text` / `ansi/segments-spans` read the segments;
+  `ansi/sgr`, `ansi/params`, `ansi/colour`, `ansi/face` and `ansi/xterm-palette` are the
+  attribute model, which `vt` now uses too (`vt/colour`, `vt/face` and `vt/xterm-palette`
+  moved to `ansi/`).
+
 **Changed.**
+- `ansi/strip` is the decoder over a whole string, so an OSC title or hyperlink is removed
+  whole instead of leaving its text behind; `ansi/render` drops an OSC string through its
+  terminator too.
 - A GUI window splits the space its rows leave over between the top and bottom margins
   (ADR-508 addendum), instead of putting it all under the last row, where it could leave a
   band up to a row and a half tall under an editor's echo area.
