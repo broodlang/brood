@@ -1799,6 +1799,17 @@
       (let (listed (package/registry-enhancers 'bedit))
         (is (failure? listed))
         (is (includes? (error-message listed) "database down")))))
+  (test "a 2xx answer that is not JSON is a failure, never a raise"
+    (binding (project/*config-registry* (mock-registry-start (fn (_request)
+                                                               (http/response 200
+                                                                 {"Content-Type" "text/html"}
+                                                                 "<html>proxy</html>"))))
+      (let (listed (package/registry-enhancers 'bedit)
+            latest (package/registry-latest-version "anything"))
+        (is (failure? listed))
+        (is (includes? (error-message listed) "no JSON"))
+        (is (failure? latest))
+        (is (includes? (error-message latest) "no JSON")))))
   (test "an unpublished package: no latest version, and an install that says so"
     (binding (project/*config-registry* (mock-registry-start (fn (_request) (http/not-found))))
       (assert= (package/registry-latest-version "ghost") nil)
