@@ -163,6 +163,9 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     // How many times each language's grammar has loaded, which a held tree's reparse checks
     // (ADR-583): a fact about the machine-wide DYNAMIC table, so as wide as it.
     ("host/treesit.rs", "GRAMMAR_EPOCHS", OneMachine),
+    // Serialises the private copies a grammar is dlopened from (ADR-583): the dynamic loader
+    // and the temporary directory are the process's, so the lock is too.
+    ("host/treesit.rs", "GRAMMAR_COPY_LOCK", OneMachine),
     // Facts of the binary: the std sources baked into it, and the signatures derived from
     // them (the stdlib id is a build constant).
     ("types/check.rs", "STD_REQUIRES", FactOfTheBinary),

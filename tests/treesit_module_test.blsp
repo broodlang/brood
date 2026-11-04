@@ -1312,3 +1312,58 @@
       "/g/libtree-sitter-c-sharp.manifest"))
   (test "a library with no manifest has none"
     (assert= (grammar-manifest "/nonexistent/libtree-sitter-x.so") nil)))
+
+;; A library rebuilt IN PLACE and loaded again is the new build (ADR-583). The dynamic loader
+;; answers a name it has opened with the object it already has, so before the private
+;; content-named copy this kept parsing with the first build until the process restarted.
+;; Two one-line shims export the same entry point, `tree_sitter_tsswap`, each answering a
+;; different installed grammar (JSON, then TOML) — two builds of one "language" whose node
+;; kinds tell them apart, compiled in a moment.
+(defn- tsm-shim (dir grammar out)
+  ;; a library exporting `tree_sitter_tsswap` that answers `grammar`'s language
+  (let (source (path/join dir (str "shim-" grammar ".c"))
+        entry (str "tree_sitter_" grammar))
+    (file/spit source
+      (str "extern const void *" entry "(void);\n"
+        "const void *tree_sitter_tsswap(void) { return " entry "(); }\n"))
+    (os/cmd "cc"
+      ["-shared" "-fPIC" "-o" out source (str "-L" tsm-grammar-dir)
+       (str "-l:libtree-sitter-" grammar ".so") (str "-Wl,-rpath," tsm-grammar-dir)])))
+
+(when (and (os/which "cc")
+        (file/exists? (str tsm-grammar-dir "libtree-sitter-json.so"))
+        (file/exists? (str tsm-grammar-dir "libtree-sitter-toml.so")))
+  (describe "a grammar replaced at the same path and loaded again"
+    (test "the new build is the one in use, and a held tree of it parses afresh"
+      (let (root (temp-dir "brood-grammarpin-")
+            library (path/join root "libtree-sitter-tsswap.so")
+            built-json (path/join root "json.so")
+            built-toml (path/join root "toml.so"))
+        (file/mkdir root)
+        (tsm-shim root "json" built-json)
+        (tsm-shim root "toml" built-toml)
+        (file/cp built-json library)
+        (%tree-sitter-load-grammar library :tsswap)
+        (let (first-info (grammar-info :tsswap)
+              tree (open-tree "{\"a\": 1}\n" :tsswap))
+          (is (contains? (:named first-info) :object))
+          ;; rebuilt in place: a new file at the same path
+          (file/rm library)
+          (file/cp built-toml library)
+          (%tree-sitter-load-grammar library :tsswap)
+          (let (second-info (grammar-info :tsswap))
+            (is (contains? (:named second-info) :table))
+            (refute (contains? (:named second-info) :object))
+            (assert= (:source second-info) library)
+            (refute (= (grammar-fingerprint first-info) (grammar-fingerprint second-info)))
+            ;; a parse is the new grammar's, and the held tree of the old one is not
+            ;; reparsed from: what changed is everything
+            (assert= (:kind (%tree-sitter-parse "a = 1\n" :tsswap)) :document)
+            (let (next (update-tree tree "a = 1\n" :tsswap))
+              (assert= (tree-changes next) true)
+              (free-tree next)))
+          (free-tree tree))
+        ;; the same build loaded again is the object already loaded, not a second one
+        (%tree-sitter-load-grammar library :tsswap)
+        (is (contains? (:named (grammar-info :tsswap)) :table))
+        (file/rmdir root)))))
