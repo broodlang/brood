@@ -557,11 +557,14 @@ child and everything it started are stopped ([[close]], its Job Object). Answers
 for that, so a key bound to it cannot kill its caller.
 
     (os/interrupt (os/spawn \"sh\" [\"-c\" \"sleep 60\"]))   ;~> :interrupted (:closed on Windows)"
-  (try
-    (if (= (type) :windows)
-      (do (close p) :closed)
-      (do (signal p :int) :interrupted))
-    (catch _ nil)))
+  ;; check-allow :discarded-catch — an unknown or closed `p` is the one failure, and nil
+  ;; is its documented answer
+  (check-allow :discarded-catch
+    (try
+      (if (= (type) :windows)
+        (do (close p) :closed)
+        (do (signal p :int) :interrupted))
+      (catch _ nil))))
 
 (defn trap (sig & pid)
   "Deliver signal `sig` sent to THIS runtime — `:term`, `:int` (Ctrl-C) or `:hup`, or the job
