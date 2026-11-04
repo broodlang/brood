@@ -1698,6 +1698,10 @@ as an ordinary frame too, and a `receive` in it parks."
 ; shadowed ones included, so `next-impl` can reach the impl one tier down (ADR-432). Read
 ; only by `%next-impl` and the image writers, never on dispatch.
 (def- *impl-tiers* {})
+; [ability op id] → {tier → ([fn ns] …)}: the registrations a SAME-tier one from another
+; namespace replaced, newest first (ADR-604), so taking the newer one back (`registry/retract-impl`)
+; restores the one it replaced rather than leaving the slot empty.
+(def- *impl-shadowed* {})
 ; qualified-op-fn-symbol → the ability that declared it. An ability op becomes a global
 ; `defn` named after the op (qualified to the declaring ns), so two abilities in the SAME
 ; ns declaring the same op name would have the second silently clobber the first's op

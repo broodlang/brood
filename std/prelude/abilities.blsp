@@ -202,6 +202,17 @@ the image was written."
     (when (>= new-rank old-rank)
       (%registry-update! '*impls* :assoc [op-key key] f)
       (%registry-update! '*impl-from* :assoc [prov-key] from))
+    ; A same-tier registration from another namespace replaces the one in its tier: keep the
+    ; replaced one, so taking the newer back restores it (ADR-604). The same namespace again
+    ; is a reload, which replaces itself.
+    (let (incumbent (get (or (get *impl-tiers* prov-key) {}) new-rank))
+      (when (and incumbent (not (= (second incumbent) from)))
+        (%registry-update! '*impl-shadowed*
+          :assoc [prov-key new-rank]
+          (cons incumbent
+            (reverse (fold (or (get (or (get *impl-shadowed* prov-key) {}) new-rank) '())
+                       '()
+                       (fn (kept entry) (if (= (second entry) from) kept (cons entry kept)))))))))
     ; Every tier is kept, the winner's and the shadowed ones', for `next-impl` (ADR-432).
     (%registry-update! '*impl-tiers* :assoc [prov-key new-rank] [f from])
     nil))
@@ -276,7 +287,8 @@ which is meaningless for a rope, so falling through unconditionally would swap a
     (when had
       (%registry-update! '*impls* :dissoc [op-key key] nil)
       (%registry-update! '*impl-from* :dissoc [prov-key] nil)
-      (%registry-update! '*impl-tiers* :dissoc [prov-key] nil))
+      (%registry-update! '*impl-tiers* :dissoc [prov-key] nil)
+      (%registry-update! '*impl-shadowed* :dissoc [prov-key] nil))
     had))
 
 (defn %derive-into (aname id fields from)

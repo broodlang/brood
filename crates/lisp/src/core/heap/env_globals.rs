@@ -272,14 +272,14 @@ impl Heap {
             .unwrap_or(0)
     }
 
-    /// The runtime's global generation now (ADR-597): every later `def` or removal of a
+    /// The runtime's global generation now (ADR-603): every later `def` or removal of a
     /// global stamps it with a greater one (`RuntimeCode::global_generations`).
     pub fn runtime_generation(&self) -> u64 {
         self.runtime.version.load(Ordering::Relaxed)
     }
 
     /// Every global stamped after `generation` — defined, redefined or removed since
-    /// (ADR-597). One pass over the stamps; no value is read.
+    /// (ADR-603). One pass over the stamps; no value is read.
     pub fn rebound_since(&self, generation: u64) -> Vec<Symbol> {
         self.runtime
             .global_generations
@@ -1399,6 +1399,32 @@ impl Heap {
                 .copied(),
             _ => None,
         }
+    }
+
+    /// The registries holding an entry or a member credited to one of `writers` (ADR-604):
+    /// what `registry/written-by` walks, so taking a plugin back costs what the plugin wrote
+    /// rather than every registry in the runtime. One pass over the writer journal.
+    pub fn registries_written_by(&self, writers: &[RegistryWriter]) -> Vec<Symbol> {
+        let journal = self
+            .runtime
+            .registry_writers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut found: std::collections::BTreeSet<Symbol> = journal
+            .entries
+            .iter()
+            .filter(|(_, writer)| writers.contains(writer))
+            .map(|((sym, _), _)| *sym)
+            .collect();
+        for (sym, slots) in &journal.members {
+            if slots
+                .iter()
+                .any(|slot| slot.writer.is_some_and(|writer| writers.contains(&writer)))
+            {
+                found.insert(*sym);
+            }
+        }
+        found.into_iter().collect()
     }
 
     /// List registry `sym`'s members in order, each with who added it and the op that did

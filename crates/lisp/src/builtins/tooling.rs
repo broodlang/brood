@@ -200,7 +200,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "The rebinding generation of global sym: grows with every def of that name in this runtime, 0 for a name never def'd here. For restoring a TEMPORARY rebinding without clobbering a redefinition made in between (debug/untrace-fn). Quote it: (%global-generation 'foo).",
         global_generation,
     );
-    // What a load (re)bound, from the generations the runtime already stamps (ADR-597): the
+    // What a load (re)bound, from the generations the runtime already stamps (ADR-603): the
     // generation now, and every global defined or removed after one — so a plugin host asks
     // "what did this package's load define?" without reading every global's value.
     primitives.def(
@@ -252,7 +252,7 @@ pub(super) fn form_pos(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResu
 /// / docs/lsp.md). Takes a symbol, so quote it: `(source-location 'foo)`.
 pub(super) fn source_location(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
     let name = expect_symbol(heap, "reflect/source-location", arg(args, 0))?;
-    // The root escape asks for exactly that global (ADR-597), as `def` binds it: `/org/f` is
+    // The root escape asks for exactly that global (ADR-603), as `def` binds it: `/org/f` is
     // `org/f` even inside a project whose own `org` module would root `org/f`.
     if let Some(exact) = root_escaped(name) {
         return Ok(match heap.def_site(exact) {
@@ -865,12 +865,12 @@ pub(super) fn global_generation(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
     Ok(Value::Int(heap.global_generation(name) as i64))
 }
 
-/// `(reflect/generation)` — the runtime's global generation now (ADR-597).
+/// `(reflect/generation)` — the runtime's global generation now (ADR-603).
 pub(super) fn runtime_generation(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(Value::Int(heap.runtime_generation() as i64))
 }
 
-/// `(reflect/rebound-since generation)` — the globals stamped after `generation` (ADR-597).
+/// `(reflect/rebound-since generation)` — the globals stamped after `generation` (ADR-603).
 pub(super) fn rebound_since(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let generation = match arg(args, 0).as_int() {
         Some(generation) => generation.max(0) as u64,
@@ -898,7 +898,7 @@ pub(super) fn rebound_since(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
 /// name is, and a same-module caller compiled against it must miss too.
 pub(super) fn undef(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let name = expect_symbol(heap, "reflect/undef", arg(args, 0))?;
-    // The root escape names a global exactly, as it does for `def` (ADR-597): `/org/f` is the
+    // The root escape names a global exactly, as it does for `def` (ADR-603): `/org/f` is the
     // global `org/f` even where a package context would root `org/f` to `bedit/org/f`.
     let name = root_escaped(name).unwrap_or_else(|| heap.root_qualified_ref(name).unwrap_or(name));
     if heap.is_reserved_global(name) || heap.is_prelude_global(name) {

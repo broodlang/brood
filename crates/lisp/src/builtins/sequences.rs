@@ -378,6 +378,16 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "List registry `name`'s members in order, each as `[member writer op]`: who added it (a module symbol, a file path string, or nil) and the op that did (`:cons-new`, `:append-new`, or nil when unknown). Empty when `name` is not a list.",
         registry_members,
     );
+    // The registries a set of writers wrote into (ADR-604), so `registry/written-by` walks
+    // those instead of every registry.
+    primitives.def(
+        "%registries-written-by",
+        Arity::exact(1),
+        Sig::new(vec![any], any),
+        &["writers"],
+        "The registries holding an entry or list member credited to one of `writers` (module symbols, file path strings), as a list of symbols. What `registry/written-by` walks.",
+        registries_written_by,
+    );
     // The process's acting writer (ADR-596): who its registry writes outside a load credit.
     primitives.def(
         "%acting-writer",
@@ -1614,6 +1624,25 @@ pub(super) fn registry_members(args: &[Value], _env: EnvId, heap: &mut Heap) -> 
         rows.push(heap.alloc_vector(vec![member, writer, added_by]));
     }
     Ok(heap.list(rows))
+}
+
+/// `(%registries-written-by writers)` — the registries holding something credited to one of
+/// `writers` (a seq of module symbols and file path strings; other values are ignored).
+pub(super) fn registries_written_by(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let items = match arg(args, 0).unpack() {
+        crate::core::value::ValueRef::Vector(id) => heap.vector(id).to_vec(),
+        _ => heap.list_to_vec(arg(args, 0)).unwrap_or_default(),
+    };
+    let writers: Vec<crate::core::heap::RegistryWriter> = items
+        .into_iter()
+        .filter_map(|item| registry_writer_arg(heap, item).ok())
+        .collect();
+    let names: Vec<Value> = heap
+        .registries_written_by(&writers)
+        .into_iter()
+        .map(Value::Sym)
+        .collect();
+    Ok(heap.list(names))
 }
 
 /// `(%acting-writer)` — this process's acting writer (ADR-596), or nil.

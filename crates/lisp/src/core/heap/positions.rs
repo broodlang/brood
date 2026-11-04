@@ -314,15 +314,30 @@ impl Heap {
     /// asks about module `editor/treesit`, which no project provides, and is left bare.
     /// An already-rooted `bedit/commands/cmd-open` asks about `bedit/commands` — also not
     /// in the short-name set — so rooting is idempotent. `None` = nothing to root.
+    ///
+    /// A name bound EXACTLY whose rooted spelling is not bound is left as it is (ADR-604): a
+    /// plugin's module `org`, loaded apart from the project's `org`
+    /// (`reflect/with-modules-apart`), defines `org/f`, and a late-bound `'org/f` — a keymap
+    /// command, a hook — must reach it rather than an unbound `bedit/org/f`. Checked outside
+    /// the memo, since a load can bind either name after the first lookup.
     pub(crate) fn root_qualified_ref(&self, sym: Symbol) -> Option<Symbol> {
         // Outside a package there is nothing to root, and no cold state to memoise in.
         let cold = self.cold().filter(|c| c.package_prefix.is_some())?;
-        if let Some(&cached) = cold.rooted_ref_ic.borrow().get(&sym) {
-            return cached;
+        let cached = cold.rooted_ref_ic.borrow().get(&sym).copied();
+        let answer = match cached {
+            Some(answer) => answer,
+            None => {
+                let answer = self.root_qualified_ref_uncached(sym);
+                cold.rooted_ref_ic.borrow_mut().insert(sym, answer);
+                answer
+            }
+        };
+        let rooted = answer?;
+        let globals = self.runtime.globals_read();
+        if globals.contains_key(&sym) && !globals.contains_key(&rooted) {
+            return None;
         }
-        let answer = self.root_qualified_ref_uncached(sym);
-        cold.rooted_ref_ic.borrow_mut().insert(sym, answer);
-        answer
+        Some(rooted)
     }
 
     /// Could [`root_qualified_ref`](Self::root_qualified_ref) root a name `ns_name/…` — is
@@ -638,14 +653,25 @@ impl Heap {
             // Qualify the recorded name to the current namespace (ADR-065) so the
             // def-site key matches the global the resolver will actually define
             // (`foo/name`); a no-op at root or for an already-qualified name.
-            ValueRef::Sym(name) => Some(match self.compile_ns() {
-                Some(ns) => crate::eval::macros::qualify_name(
-                    self,
-                    &crate::core::value::symbol_name(ns),
-                    name,
-                ),
-                None => name,
-            }),
+            // Then rooted exactly as the `def` arm roots its target (ADR-604), so the site
+            // is recorded under the global the definition actually binds — a root-escaped
+            // `/org/f` inside project `bedit` binds `bedit/org/f`, and its site said `org/f`.
+            ValueRef::Sym(name) => {
+                let qualified = match self.compile_ns() {
+                    Some(ns) => crate::eval::macros::qualify_name(
+                        self,
+                        &crate::core::value::symbol_name(ns),
+                        name,
+                    ),
+                    None => name,
+                };
+                let spelled = crate::core::value::symbol_name(qualified);
+                let exact = match spelled.strip_prefix('/') {
+                    Some(rest) if !rest.is_empty() => crate::core::value::intern(rest),
+                    _ => qualified,
+                };
+                Some(self.root_qualified_ref(exact).unwrap_or(exact))
+            }
             _ => None,
         }
     }

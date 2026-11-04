@@ -29,7 +29,8 @@ The **in-force** ADRs live in six files by number, each in number order:
 | 200–299 | [decisions/adr-200-299.md](decisions/adr-200-299.md) |
 | 300–399 | [decisions/adr-300-399.md](decisions/adr-300-399.md) |
 | 400–499 | [decisions/adr-400-499.md](decisions/adr-400-499.md) |
-| 500–599 | [decisions/adr-500-599.md](decisions/adr-500-599.md) — a new ADR goes at the bottom |
+| 500–599 | [decisions/adr-500-599.md](decisions/adr-500-599.md) |
+| 600–699 | [decisions/adr-600-699.md](decisions/adr-600-699.md) — a new ADR goes at the bottom |
 
 To jump to one, open its file and search for its `## ADR-NNN` header. The per-entry
 **Status** line is the source of truth for current state (the table below is a navigation

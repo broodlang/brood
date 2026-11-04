@@ -401,6 +401,24 @@ names nothing (ADR-596).
     (reflect/fn-module 42)                  ;=> nil"
   (%fn-module f))
 
+(defn with-modules-apart (modules thunk)
+  "Call `thunk` with `modules` (names, as strings or symbols) resolving as THEMSELVES rather
+than into the active project: inside project `bedit`, `org/f` names bedit's `bedit/org/f`
+— except here, for an `org` listed, where it names `org/f`. Every other module still roots as
+it did, so code loaded here reaches the project's own modules as before. How a host loads a
+plugin whose module shares a short name with one of its own without the plugin loading INTO
+the host's module (ADR-604). The context is restored on the way out, a throw included, and a
+process spawned inside inherits it. Outside a project it simply calls `thunk`.
+
+    (reflect/with-modules-apart [\"org\"] (fn () :loaded))   ;=> :loaded"
+  (let (apart (into #{} (map modules (fn (module) (symbol (->string module)))))
+        current (%set-package-context nil nil)
+        prefix (first current)
+        project-modules (second current))
+    (%set-package-context prefix
+      (seq/reject project-modules (fn (module) (contains? apart module))))
+    (try (thunk) (finally (%set-package-context prefix project-modules)))))
+
 (defn current-file ()
   "The path of the file currently being loaded, or nil.
 

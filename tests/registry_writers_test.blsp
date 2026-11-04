@@ -200,3 +200,37 @@
       (assert= (first (reflect/source-location '/regwriters-escape/f)) file)
       (is (reflect/undef '/regwriters-escape/f))
       (refute (bound? 'regwriters-escape/f)))))
+
+(fixture "regwriters-shadow-a"
+  "(defmodule regwriters-shadow-a)\n(impl Port :keyword (emit (k s) :a))\n")
+(fixture "regwriters-shadow-b"
+  "(defmodule regwriters-shadow-b)\n(impl Port :keyword (emit (k s) :b))\n")
+(fixture "regwriters-shadow-c"
+  "(defmodule regwriters-shadow-c)\n(impl Port :keyword (emit (k s) :c))\n")
+(fixture "regwriters-shadow-d"
+  "(defmodule regwriters-shadow-d)\n(impl Port :keyword (emit (k s) :d))\n")
+
+(defn- port-keyword ()
+  (let (f (get (or (get *impls* ['Port 'emit]) {}) :keyword)) (when f (f :k nil))))
+
+(describe "a same-tier impl another module replaced"
+  :isolated (test "comes back when the replacing one is taken back"
+    (%with-load-journal
+      (fn ()
+        (require-one 'regwriters-shadow-a)
+        (require-one 'regwriters-shadow-b)
+        (assert= (port-keyword) :b)
+        ;; A's is kept under B's, listed as shadowed
+        (assert= (map (registry/impls-by #{'regwriters-shadow-a}) :shadowed?) '(true))
+        (is (registry/retract-impl (first (registry/impls-by #{'regwriters-shadow-b}))))
+        (assert= (port-keyword) :a)
+        (is (registry/retract-impl (first (registry/impls-by #{'regwriters-shadow-a}))))
+        (is (nil? (port-keyword))))))
+  :isolated (test "a replaced one taken back first never comes back"
+    (%with-load-journal (fn ()
+                          (require-one 'regwriters-shadow-c)
+                          (require-one 'regwriters-shadow-d)
+                          (is (registry/retract-impl (first (registry/impls-by #{'regwriters-shadow-c}))))
+                          (assert= (port-keyword) :d)
+                          (is (registry/retract-impl (first (registry/impls-by #{'regwriters-shadow-d}))))
+                          (is (nil? (port-keyword)))))))

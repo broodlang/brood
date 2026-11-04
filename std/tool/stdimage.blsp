@@ -85,7 +85,8 @@ answer whether there was one.
 ;; never describes baked-in std.
 (def- %std-regs-skip
   #{'*features*
-    '*features-loading* '*require-edges* '*module-files* '*impls* '*impl-from* '*impl-tiers*})
+    '*features-loading* '*require-edges* '*module-files* '*impls* '*impl-from* '*impl-tiers*
+    '*impl-shadowed*})
 
 (defn- %reg-owner (reg path entry)
   "The module that OWNS registry `reg`'s entry at `path`: the module whose load WROTE it
