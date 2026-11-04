@@ -57,6 +57,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         current_file,
     );
     primitives.def(
+        "%fn-module",
+        Arity::exact(1),
+        Sig::new(vec![any], any),
+        &["f"],
+        "The module whose source function `f` was written in, as a symbol — an anonymous `fn` too, which carries its defining module from the code that built it — or nil for a builtin, a non-function, or code of no known module.",
+        fn_module,
+    );
+    primitives.def(
         "%source-location",
         Arity::exact(1),
         Sig::new(vec![sym], vec_ty.union(nil_ty)),
@@ -547,6 +555,30 @@ fn line_col(src: &str, starts: &[u32], b: usize) -> (u32, u32) {
     let line = starts.partition_point(|&s| s as usize <= b) - 1; // 0-based
     let col = src[starts[line] as usize..b].chars().count();
     (line as u32 + 1, col as u32 + 1)
+}
+
+/// `(%fn-module f)` — the module whose source `f` was written in (ADR-596): the
+/// [`Closure::module`](crate::core::value::Closure::module) the contract boundary already
+/// keeps, so asking costs a field read. A top-level `defn` leaves that field empty — its
+/// qualified name stands in for it at compile time — so its name's namespace answers.
+pub(super) fn fn_module(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    Ok(match arg(args, 0) {
+        Value::Fn(id) => {
+            let closure = heap.closure(id);
+            match (closure.module, closure.name) {
+                (Some(module), _) => Value::Sym(module),
+                (None, Some(name)) => {
+                    let spelled = value::symbol_name(name);
+                    match spelled.rfind('/') {
+                        Some(slash) if slash > 0 => Value::Sym(value::intern(&spelled[..slash])),
+                        _ => Value::Nil,
+                    }
+                }
+                (None, None) => Value::Nil,
+            }
+        }
+        _ => Value::Nil,
+    })
 }
 
 pub(super) fn current_file(_args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {

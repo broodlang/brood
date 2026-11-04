@@ -1,0 +1,152 @@
+;;; Who a registry write credits beyond a module's own load (ADR-595, ADR-596):
+;;; - `:credit` names the writer of an entry that is already there — how a startup image that
+;;;   installs registry values whole says whose load wrote each (KI-357);
+;;; - a list member keeps the op that added it, so the stdlib image replays it at the same end
+;;;   of the list (`%registry-members`, `stdimage/registrations-by-module`);
+;;; - a process carries an ACTING WRITER: the load that spawned it, or what
+;;;   `registry/with-acting-writer` set, so what a plugin's timer or worker registers at run
+;;;   time is the plugin's (KI-356);
+;;; - `reflect/fn-module` says which module an anonymous `fn` was written in.
+;;;
+;;; The fixtures are modules nothing else knows, written to a temp dir on `*load-path*`.
+
+(defmodule registry-writers-test (:use test))
+
+(purge-stale-temp "regwriters-")
+(def- *dir* (temp-dir "regwriters-"))
+(file/mkdir *dir*)
+(reflect/add-load-path *dir*)
+
+(defn- fixture (name text)
+  "Write fixture `name`.blsp under the load path, and answer its path."
+  (let (path (path/join *dir* (str name ".blsp")))
+    (file/spit path text)
+    path))
+
+(defn- members-of (registry)
+  "`[member writer op]` per member of list registry `registry`, as vectors."
+  (vec (map (%registry-members registry) vec)))
+
+(describe ":credit"
+  :isolated (test "credits a map entry and a list member that are there, and nothing else"
+    (registry/put! :regwriters/rows :row 1)
+    (%registry-update! 'registry-writers-test/*credited* :append-new nil :first)
+    (%registry-update! 'registry-writers-test/*credited* :append-new nil :second)
+    (is (%registry-update! 'registry/*registries* :credit [:regwriters/rows :row] nil 'somebody))
+    (assert= (registry/writer :regwriters/rows :row) 'somebody)
+    (assert= (registry/lookup :regwriters/rows :row) 1)
+    ;; a list member by its position
+    (is (%registry-update! 'registry-writers-test/*credited* :credit [1] nil "/a/file.blsp"))
+    (assert= (%registry-writer 'registry-writers-test/*credited* [:second]) "/a/file.blsp")
+    (assert= registry-writers-test/*credited* '(:first :second))
+    ;; nothing there, nothing credited
+    (refute (%registry-update! 'registry/*registries* :credit [:regwriters/rows :none] nil 'x))
+    (refute (%registry-update! 'registry-writers-test/*credited* :credit [2] nil 'x))
+    (refute (%registry-update! 'registry-writers-test/*credited* :credit [-1] nil 'x))
+    ;; guarded like any op: only while the entry is still the expected writer's
+    (refute (%registry-update! 'registry/*registries* :credit [:regwriters/rows :row] nil 'y 'other))
+    (is (%registry-update! 'registry/*registries* :credit [:regwriters/rows :row] nil 'y 'somebody))
+    (assert= (registry/writer :regwriters/rows :row) 'y)))
+
+(fixture "regwriters-lists"
+  (str "(defmodule regwriters-lists)\n"
+    "(%registry-update! 'registry-writers-test/*hooks* :append-new nil :appended-1)\n"
+    "(%registry-update! 'registry-writers-test/*hooks* :cons-new nil :consed-1)\n"
+    "(%registry-update! 'registry-writers-test/*hooks* :append-new nil :appended-2)\n"
+    "(%registry-update! 'registry-writers-test/*hooks* :cons-new nil :consed-2)\n"
+    "(registry/put! :regwriters/lists :row :from-lists)\n"))
+
+(describe "a list member through the stdlib image's record"
+  :isolated (test "each member keeps its op, and replaying the record rebuilds the list"
+    (%registry-update! 'registry-writers-test/*hooks* :append-new nil :core)
+    (%with-load-journal
+      (fn ()
+        (require-one 'regwriters-lists)
+        (let (source registry-writers-test/*hooks*
+              source-members (members-of 'registry-writers-test/*hooks*)
+              record (get (stdimage/registrations-by-module) "regwriters-lists"))
+          (assert= source '(:consed-2 :consed-1 :core :appended-1 :appended-2))
+          (assert= source-members
+            [[:consed-2 'regwriters-lists :cons-new]
+              [:consed-1 'regwriters-lists :cons-new]
+              [:core nil :append-new]
+              [:appended-1 'regwriters-lists :append-new]
+              [:appended-2 'regwriters-lists :append-new]])
+          ;; the record is what the image carries for the module: its four members, consed
+          ;; ones in the order replaying rebuilds the list, and its entry (beside the module
+          ;; system's own rows)
+          (assert= (seq/keep record
+                     (fn (registration) (when (nil? (get registration 1)) (get registration 2))))
+            '(:appended-1 :appended-2 :consed-1 :consed-2))
+          (is (any? record (fn (registration) (= (get registration 1) [:regwriters/lists :row]))))
+          ;; the image is written with every module's registrations taken out …
+          (doseq (registration record) (is (stdimage/retract-registration! registration)))
+          (assert= registry-writers-test/*hooks* '(:core))
+          (is (nil? (registry/lookup :regwriters/lists :row)))
+          ;; … and materialising the module replays them: the same list, the same writers
+          (assert= (%replay-registrations! "regwriters-lists" record) (count record))
+          (assert= registry-writers-test/*hooks* source)
+          (assert= (members-of 'registry-writers-test/*hooks*) source-members)
+          (assert= (registry/writer :regwriters/lists :row) 'regwriters-lists)
+          ;; and taken back again, so no later file meets this fixture's rows
+          (doseq (registration record) (stdimage/retract-registration! registration)))))))
+
+(fixture "regwriters-spawner"
+  (str "(defmodule regwriters-spawner)\n"
+    "(defn- work ()\n" "  (receive ([:go parent]\n"
+    "            (do (registry/put! :regwriters/spawned :row :from-worker)\n"
+    "                (%registry-update! 'registry-writers-test/*spawned* :append-new nil (fn () :worker))\n"
+    "                (send parent :done)))))\n" "(def worker (spawn (work)))\n"
+    "(defn hook () (fn () :anonymous))\n"))
+
+(describe "the acting writer"
+  :isolated (test "a process a module's load spawned registers as that module, after the load"
+    (%with-load-journal
+      (fn ()
+        (require-one 'regwriters-spawner)
+        ;; the load is over; the worker it spawned writes now, at run time
+        (send (reflect/eval 'regwriters-spawner/worker) [:go (self)])
+        (receive (:done nil) (after 5000 (error "the fixture's worker never wrote")))
+        (assert= (registry/writer :regwriters/spawned :row) 'regwriters-spawner)
+        (assert= (get (first (members-of 'registry-writers-test/*spawned*)) 1) 'regwriters-spawner)
+        (let (writes (registry/written-by #{'regwriters-spawner}))
+          (assert= (count writes) 2)
+          (doseq (write writes) (is (registry/retract write))))
+        (is (nil? (registry/lookup :regwriters/spawned :row)))
+        (is (empty? registry-writers-test/*spawned*)))))
+  (test "a process with no load behind it credits nobody, until it says whose code it runs"
+    (is (nil? (registry/acting-writer)))
+    (assert= (registry/with-acting-writer 'regwriters-plugin (fn () (registry/acting-writer)))
+      'regwriters-plugin)
+    (is (nil? (registry/acting-writer))))
+  :isolated (test "with-acting-writer credits the extent, and every process it starts"
+    (registry/with-acting-writer 'regwriters-plugin
+      (fn ()
+        (registry/put! :regwriters/acting :direct 1)
+        (let (me (self))
+          ;; a grandchild too: a timer or a task is a process some helper spawned
+          (spawn (spawn (do (registry/put! :regwriters/acting :spawned 2) (send me :spawned))))
+          (receive (:spawned nil) (after 5000 (error "the spawned process never wrote"))))))
+    ;; and a process spawned after the extent does not
+    (let (me (self))
+      (spawn (do (registry/put! :regwriters/acting :later 4) (send me :later)))
+      (receive (:later nil) (after 5000 (error "the later process never wrote"))))
+    (registry/put! :regwriters/acting :after 3)
+    (assert= (registry/writer :regwriters/acting :direct) 'regwriters-plugin)
+    (assert= (registry/writer :regwriters/acting :spawned) 'regwriters-plugin)
+    (is (nil? (registry/writer :regwriters/acting :later)))
+    (is (nil? (registry/writer :regwriters/acting :after)))
+    ;; a thrown thunk still puts the previous writer back
+    (assert= (try (registry/with-acting-writer (quote regwriters-plugin) (fn () (error "boom")))
+               (catch e (error-message e)))
+      "boom")
+    (is (nil? (registry/acting-writer)))))
+
+(describe "reflect/fn-module"
+  (test "an anonymous fn knows the module it was written in"
+    (require-one 'regwriters-spawner)
+    (assert= (reflect/fn-module ((reflect/eval 'regwriters-spawner/hook))) 'regwriters-spawner)
+    (assert= (reflect/fn-module (reflect/eval 'regwriters-spawner/hook)) 'regwriters-spawner)
+    (assert= (reflect/fn-module (fn () 1)) 'registry-writers-test)
+    (is (nil? (reflect/fn-module 42)))
+    (is (nil? (reflect/fn-module +)))))

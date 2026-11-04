@@ -181,6 +181,10 @@ pub enum RegistryWriter {
 pub(crate) struct MemberSlot {
     pub(crate) printed: String,
     pub(crate) writer: Option<RegistryWriter>,
+    /// The op that added the member — `ConsNew` or `AppendNew` — so the stdlib image can
+    /// replay it at the same end of the list its source load put it (ADR-595). `None` for a
+    /// slot rebuilt writer-less, or one credited without being added (`:credit`).
+    pub(crate) added_by: Option<RegistryOp>,
 }
 
 /// The writer journal (KI-136, ADR-582) — who wrote each registry entry. A map entry is
@@ -222,6 +226,11 @@ pub enum RegistryOp {
     /// (`registry_test`: 64 concurrent merges into one face must all land). Non-map values
     /// on either side decline.
     Merge,
+    /// Credit an EXISTING entry to the op's writer, leaving the registry's value as it is
+    /// (ADR-595) — how a startup image that installs registry values whole says whose load
+    /// wrote each entry. `path` is the key path of a map registry's entry, or `[index]` for
+    /// a list registry's member at that position. Declines when there is no such entry.
+    Credit,
 }
 
 /// What a `(meta name …)` form records about a global (ADR-283): three independent facts,

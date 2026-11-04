@@ -202,14 +202,29 @@ impl Heap {
     }
 
     /// Who a registry write made now credits when the caller names nobody (ADR-582): the
-    /// namespace being compiled, else the namespace-less file being loaded, else nobody.
+    /// namespace being compiled, else the namespace-less file being loaded, else the
+    /// process's ACTING writer (ADR-596) — the load that spawned it, or what
+    /// `registry/with-acting-writer` set — else nobody. What `spawn` hands a child as its
+    /// acting writer, too.
     pub(crate) fn current_registry_writer(&self) -> Option<crate::core::heap::RegistryWriter> {
         use crate::core::heap::RegistryWriter;
-        self.compile_ns().map(RegistryWriter::Module).or_else(|| {
-            self.cold()
-                .and_then(|c| c.root_load_file)
-                .map(RegistryWriter::File)
-        })
+        self.compile_ns()
+            .map(RegistryWriter::Module)
+            .or_else(|| {
+                self.cold()
+                    .and_then(|c| c.root_load_file)
+                    .map(RegistryWriter::File)
+            })
+            .or(self.acting_writer)
+    }
+
+    /// The process's acting writer (ADR-596), set for an extent by
+    /// `registry/with-acting-writer`; returns the one it replaces.
+    pub(crate) fn set_acting_writer(
+        &mut self,
+        writer: Option<crate::core::heap::RegistryWriter>,
+    ) -> Option<crate::core::heap::RegistryWriter> {
+        std::mem::replace(&mut self.acting_writer, writer)
     }
 
     // ----- package-rooted namespaces (ADR-070) -----

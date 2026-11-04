@@ -99,8 +99,32 @@ so the order never depends on which module happened to load first.
 ;; key path, a list registry's member by its position, matched with the same `=` `:remove`
 ;; uses. That is enough for a program that loads plugins to take back everything one
 ;; registered — here, in a std table (`editor/layers`, `editor/face`) or anywhere else —
-;; without each registry keeping its own ownership. A write made at run time, outside any
-;; load, has no writer.
+;; without each registry keeping its own ownership.
+;;
+;; A write made at run time, outside any load, credits the process's ACTING WRITER (ADR-596):
+;; the load that spawned the process, or the spawner's own acting writer, or what
+;; [[with-acting-writer]] set — so a timer, a task or a worker a plugin started registers as
+;; the plugin, and taking the plugin back takes those writes too. A process with none (the
+;; program, anything spawned outside a load) credits nobody.
+
+(defn acting-writer (-> any)
+  "Who a registry write this process makes outside any load credits: the module (a symbol)
+or namespace-less file (its absolute path, a string) whose load spawned it or one of its
+ancestors, or what [[with-acting-writer]] set — nil when nobody.
+
+    (registry/acting-writer)   ;~> nil — in a process nothing spawned under a load"
+  (%acting-writer))
+
+(defn with-acting-writer (writer:any thunk:any -> any)
+  "Call `thunk` with the registry writes it makes outside a load — and those of every
+process it spawns, a timer's included — credited to `writer` (a module symbol, a file's
+absolute path, or nil for nobody), and answer what it answers. A program that runs a
+plugin's code at run time (a command, a hook) says whose code it is with this, so what the
+plugin registers there is [[written-by]] the plugin.
+
+    (registry/with-acting-writer 'my-plugin (fn () (registry/acting-writer)))   ;=> my-plugin"
+  (let (previous (%set-acting-writer! writer))
+    (try (thunk) (finally (%set-acting-writer! previous)))))
 
 (defn writer (id:any key:any -> any)
   "Who wrote the entry under `key` in the registry `id`: the module whose load wrote it (a

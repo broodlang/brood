@@ -389,6 +389,18 @@ live, from a buffer that is mid-edit half the time.
     (reflect/form-pos 42)   ;=> nil"
   (%form-pos form))
 
+(defn fn-module (f)
+  "The module whose source function `f` was written in, as a symbol — an anonymous `fn`
+too, which knows the module of the code that built it; a top-level function by its qualified
+name — or nil for a builtin, a value that is not a function, or code of no module (the
+prelude, a file without a `defmodule`). How a
+program that unloads a plugin finds the plugin's closures in its tables, where a bare `fn`
+names nothing (ADR-596).
+
+    (reflect/fn-module reflect/fn-module)   ;=> reflect
+    (reflect/fn-module 42)                  ;=> nil"
+  (%fn-module f))
+
 (defn current-file ()
   "The path of the file currently being loaded, or nil.
 

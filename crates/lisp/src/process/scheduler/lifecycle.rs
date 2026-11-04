@@ -415,6 +415,13 @@ fn spawn_impl_timed(
     let (package_prefix, package_modules) = heap.package_context();
     child.set_package_context(package_prefix, package_modules);
 
+    // The acting writer (ADR-596): what the child registers outside a load is credited to
+    // whoever the spawner's writes are — the module whose load is spawning it, else the
+    // spawner's own acting writer. A timer or a worker a plugin starts thereby registers as
+    // the plugin, and taking the plugin's writes back takes those too. A copy of a `Copy`
+    // field: nothing for a spawn outside a load with no acting writer.
+    child.acting_writer = heap.current_registry_writer();
+
     // Transparent causal-context propagation (opt-in, zero cost when unused): if the
     // spawner has a debugger trace context set (the debugger sets it inside a
     // `span`/`with-debugger`), promote it into the shared runtime — valid in the child,

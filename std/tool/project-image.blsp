@@ -215,7 +215,9 @@ come from `*module-files*`).
                   (fn (m n)
                     (let (k (or (project-image-section-of n) ""))
                       (assoc m k (cons n (or (get m k) nil))))))
-        root (append (project-image-registry-names seen carried?) (get grouped "")))
+        registries (project-image-registry-names seen carried?)
+        _ (%set-project-image-credits! (image-credits registries carried?))
+        root (append registries (get grouped "") ['*project-image-credits*]))
     (cons ["" root]
       (map
         (seq/reject (keys grouped)
@@ -231,14 +233,90 @@ come from `*module-files*`).
             (or (= k "") (not (carried? k)))))
         (fn (k) [k (get grouped k)])))))
 
+;; ── Who wrote what the image carries (ADR-595) ────────────────────────────────
+;; The root section installs every registry's value WHOLE, so an entry a carried module's
+;; load wrote is live from the install on — and the writer journal, a property of the loads
+;; THIS process ran, had no writer for it: `registry/written-by` of an imaged module answered
+;; nothing (KI-357). So the image carries who wrote each entry, and the install credits them
+;; (`%registry-update! … :credit`) the moment the values land, while a list member's position
+;; is still the one it was written at.
+
+(defn- image-credit-writer? (writer carried?)
+  ;; a carried module's load, or a namespace-less file's (its defs ride the root section)
+  (or (string? writer) (and (symbol? writer) (carried? (->string writer)))))
+
+(defn- image-credits (registries carried?)
+  "`[registry path writer]` for every entry of `registries` a carried load wrote — a map
+entry one or two keys deep by its key path, a list member by `[index]`."
+  (fold registries
+    []
+    (fn (credits registry)
+      (let (value (if (bound? registry) (reflect/eval registry) nil)
+            credit (fn (found path)
+                     (let (writer (%registry-writer registry path))
+                       (if (image-credit-writer? writer carried?)
+                         (conj found [registry path writer])
+                         found))))
+        (cond
+          (map? value)
+            (fold (%map-pairs value)
+              credits
+              (fn (found entry)
+                (let ([outer inner] entry
+                      writer (%registry-writer registry [outer]))
+                  (cond
+                    (image-credit-writer? writer carried?) (conj found [registry [outer] writer])
+                    (and (nil? writer) (map? inner))
+                      (fold (%map-pairs inner)
+                        found
+                        (fn (deeper pair) (credit deeper [outer (first pair)])))
+                    else found))))
+          (list? value)
+            (second (fold (%registry-members registry)
+                      [0 credits]
+                      (fn (state row)
+                        (let ([index found] state
+                              writer (get row 1))
+                          [(inc index)
+                            (if (image-credit-writer? writer carried?)
+                              (conj found [registry [index] writer])
+                              found)]))))
+          else credits)))))
+
+(defn- image-entry-present? (value path)
+  ;; whether registry value `value` holds an entry at key `path`, or any member at all
+  (cond
+    (map? value)
+      (and (contains? value (first path))
+        (or (= (count path) 1)
+          (let (inner (get value (first path))) (and (map? inner) (contains? inner (second path))))))
+    else (not (nil? value))))
+
+(defn- image-credit-writes! (live)
+  "Credit the writes the root section just installed to the loads that made them, except an
+entry the registries held before the install (`live`, `[registry value]` pairs): the merge
+after this gives that one back its live value, which is not the image's write."
+  (let (before (fold live {} (fn (table pair) (%map-assoc table (first pair) (second pair)))))
+    (doseq (credit (or (%project-image-credits) []))
+      (let ([registry path writer] credit)
+        (when (not (image-entry-present? (%map-get before registry nil) path))
+          (%registry-update! registry :credit path nil writer))))))
+
+(defn- registration-key (registration)
+  ;; `[registry key-path]` for a map entry, `[registry member]` for a list member
+  [(get registration 0) (or (get registration 1) (get registration 2))])
+
 (defn- image-preexisting-reg-keys (before-regs:map -> set)
   "The `[registry key]` pairs already registered BEFORE this project's sources loaded, as a
-set. Everything in it belongs to the prelude (or the binary), not to any module this load
-brought in — so no module load will ever replay it, and pruning it loses it for good."
+set — a list registry's member as `[registry member]`. Everything in it belongs to the
+prelude (or the binary), not to any module this load brought in — so no module load will
+ever replay it, and pruning it loses it for good."
   (fold (keys before-regs)
     #{}
     (fn (acc m)
-      (fold (get before-regs m) acc (fn (acc2 t) (conj acc2 [(get t 0) (get t 1)]))))))
+      (fold (get before-regs m)
+        acc
+        (fn (acc2 registration) (conj acc2 (registration-key registration)))))))
 
 (defn image-prune-foreign-registrations (before-regs:map &optional carried?:any -> int)
   "Remove from the live registries every registration OWNED by a module this project's
@@ -291,10 +369,10 @@ permanent rather than transient.
                  (fn (n m)
                    (fold (get regs m)
                      n
-                     (fn (n2 t)
-                       (if (contains? keep [(get t 0) (get t 1)])
+                     (fn (n2 registration)
+                       (if (contains? keep (registration-key registration))
                          n2
-                         (do (%registry-update! (get t 0) :dissoc (get t 1) nil) (+ n2 1)))))))
+                         (do (stdimage/retract-registration! registration) (+ n2 1)))))))
         n-impls (fold (seq/filter (keys impls) foreign?)
                   0
                   (fn (n m)
@@ -361,7 +439,11 @@ the record the next partial rebuild reads.
                (fn (m entry)
                  (let ([mod triples] entry)
                    (if (contains? *module-files* mod)
-                     (%map-assoc m mod (vec (map triples (fn (t) [(get t 0) (get t 1)]))))
+                     ;; map entries only: a list member is a value, which the record (printed
+                     ;; data) cannot always carry — a closure prints `#<fn>`
+                     (%map-assoc m
+                       mod
+                       (vec (seq/keep triples (fn (t) (when (get t 1) [(get t 0) (get t 1)])))))
                      m)))))
     (if (nil? reloaded)
       live
@@ -485,6 +567,8 @@ the record the next partial rebuild reads.
               ;; back — live wins on a conflict, because it is the loaded module's own word.
               (let (live (project-registry-snapshot))
                 (%image-load-section path (first root-sec) (second root-sec))
+                ;; Before the merge: a list member's credit names its position as written.
+                (image-credit-writes! live)
                 (project-registry-merge-live! live))
               ;; A partial rebuild (ADR-419) decides which sections to keep HERE: it needs the
               ;; recorded edges the root section just brought, and the replay below must not
