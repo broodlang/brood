@@ -1625,24 +1625,24 @@ relative to `lo` — `{key spans}`, or nil when there are none."
                       (if (empty? inside) acc (assoc acc key inside))))))
       (when (not (empty? found)) found))))
 
-(defn buffer-property-map (buf)
+(defn buffer-property-map (buf:buffer -> map)
   "Every text property of `buf` as `{key [[start end value] …]}` — per key its ascending,
 non-overlapping spans — or `{}` when it has none. What a holder ships with the text (a buffer
 process's seed, another frame's copy) so the copy has them too.
 
     (editor/buffer/buffer-property-map (editor/buffer/make-buffer \"abc\"))   ;=> {}"
-  (or (get buf :properties) {}))
+  (let (properties (get buf :properties)) (if (map? properties) properties {})))
 
-(defn buffer-properties (buf key)
+(defn buffer-properties (buf:buffer key:any -> vector)
   "The spans `[[start end value] …]` of text property `key` in `buf`, ascending and
 non-overlapping — `[]` when it has none. They are where the characters they were put on
 are now: every edit carries them (ADR-579).
 
     (editor/buffer/buffer-properties (editor/buffer/insert (editor/buffer/insert (editor/buffer/make-buffer \"\") \"ab\" {:face [[0 2 :red]]}) \"!\") :face)   ;=> [[0 2 :red]]
     (editor/buffer/buffer-properties (editor/buffer/insert (editor/buffer/goto-char (editor/buffer/insert (editor/buffer/make-buffer \"\") \"ab\" {:face [[0 2 :red]]}) 0) \"!\") :face)   ;=> [[1 3 :red]]"
-  (or (get (or (get buf :properties) {}) key) []))
+  (let (spans (get (buffer-property-map buf) key)) (if (vector? spans) spans [])))
 
-(defn buffer-properties-in (buf key lo hi)
+(defn buffer-properties-in (buf:buffer key:any lo:int hi:int -> vector)
   "The spans of text property `key` that overlap `[lo, hi)`, clipped to it — what a view
 painting those characters needs, found by a binary search rather than a walk of them all.
 
@@ -1654,7 +1654,7 @@ painting those characters needs, found by a binary search rather than a walk of 
         (let ([from to value] span)
           (if (< from hi) (conj out [(math/max from lo) (math/min to hi) value]) out))))))
 
-(defn put-properties (buf key lo hi spans)
+(defn put-properties (buf:buffer key:any lo:int hi:int spans:seqable -> buffer)
   "`buf` with text property `key` over `[lo, hi)` set to `spans` (`[[start end value] …]` in
 buffer offsets, clipped to the range; `[]` removes `key` there) — Emacs's
 `set-text-properties` for one property. The other keys over the range are kept, point and
