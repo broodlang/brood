@@ -1,0 +1,105 @@
+;; std/sudo.blsp — reading and writing a file as another user, through `sudo` (ADR-588).
+(defmodule sudo
+  "Reading and writing a file as another user — root by default — through `sudo`: what an
+editor needs to edit `/etc/hosts` (Emacs's TRAMP `/sudo::` method), and what an installer or
+a script fixing a system file needs too.
+
+A password is the CALLER's to ask for and is never kept here: it is handed to `sudo` on its
+standard input for one validation (`sudo -S -v`), so sudo's own credential cache — its
+timestamp, as for a `sudo` typed in a shell — is what lets the next call go without one. The
+file's text never shares a stream with the password: every command runs as `sudo -n`, which
+never reads a password, after the validation (or after `password-required?` said none is
+needed). A sudo configured to cache nothing (`timestamp_timeout=0`) gets the password and
+the command in one call, with `-k`, so the password is the line sudo reads first.
+
+Writing goes through `sh -c 'cat > FILE'` as the target user: the file keeps its owner and
+mode, as an editor's save in place does, and nothing it writes is echoed back.
+
+`sudo/*program*` names the sudo to run — a test binds a stand-in script, so no test runs the real
+one; `opts`' `:program` does the same for one call.
+
+    (sudo/password-required? {:program \"false\"})   ;=> true")
+
+(defdyn sudo/*program* "sudo")
+;; The sudo program run — a path or a name on `PATH`. A test binds a stand-in.
+
+(def- sudo-env
+  ;; sudo's messages in English, so a missing password is told from another failure
+  {"LC_ALL" "C" "LANG" "C"})
+
+(defn- program-of (opts)
+  (or (:program opts) sudo/*program*))
+
+(defn- user-args (opts)
+  (if (:user opts) ["-u" (:user opts)] []))
+
+(defn password-required? (&optional (opts {}))
+  "Whether running a command through sudo needs a password typed NOW — false when sudo's
+policy needs none (`NOPASSWD`) or its credential cache still holds one from an earlier
+call. Asks `sudo -n -v`, which never prompts. `opts` `:program` overrides `sudo/*program*`.
+
+    (sudo/password-required? {:program \"true\"})   ;=> false"
+  (not (= 0 (:exit (os/cmd (program-of opts) ["-n" "-v"] {:env sudo-env})))))
+
+(defn- password-missing? (result)
+  (includes? (or (:stderr result) "") "password is required"))
+
+(defn- failure-of (who result)
+  (failure (str "sudo/"
+             who
+             ": "
+             (let (said (string/trim (or (:stderr result) "")))
+               (if (= said "") (str "exit " (:exit result)) said)))))
+
+(defn- run-as (opts who command input)
+  "Run `command` (a vector) through sudo as `opts`' user with `input` on its stdin: the
+command's result map — whatever its exit — or a failure when sudo itself refused (a wrong
+password, none given when one is required). See the module doc for how a password goes."
+  (let (program (program-of opts)
+        password (:password opts)
+        validated (when password
+                    (os/cmd program ["-S" "-p" "" "-v"] {:stdin (str password "\n") :env sudo-env})))
+    (if (and validated (not (= 0 (:exit validated))))
+      (failure-of who validated)
+      (let (result (os/cmd program
+                     (append ["-n"] (user-args opts) ["--"] command)
+                     {:stdin input :env sudo-env}))
+        (cond
+          (not (password-missing? result)) result
+          ;; validated, yet sudo keeps no cache: the password and the input in one call,
+          ;; `-k` so the password is the line sudo reads before the command sees any
+          password
+            (let (once (os/cmd program
+                         (append ["-S" "-k" "-p" ""] (user-args opts) ["--"] command)
+                         {:stdin (str password "\n" input) :env sudo-env}))
+              (if (password-missing? once) (failure-of who once) once))
+          else (failure (str "sudo/" who ": a password is required")))))))
+
+;; the file read, telling a missing file (exit 3) from a read that failed
+(def- read-script "if [ -e \"$1\" ]; then exec cat -- \"$1\"; else exit 3; fi")
+
+(defn read (path &optional (opts {}))
+  "The text of the file at `path`, read as `opts`' `:user` (root by default) through sudo;
+nil when no file is there; a failure when sudo refuses or the read fails — `sudo/read: a
+password is required` when one is and `opts` has no `:password`. `:password` is handed to
+sudo once and kept nowhere; `:program` overrides `sudo/*program*`.
+
+    (sudo/read \"/etc/shadow\" {:password typed})   ;~> the file's text, or a failure"
+  (let (result (run-as opts "read" ["sh" "-c" read-script "sh" path] ""))
+    (cond
+      (failure? result) result
+      (= 0 (:exit result)) (:stdout result)
+      (= 3 (:exit result)) nil
+      else (failure-of "read" result))))
+
+(defn write (path text &optional (opts {}))
+  "Write `text` to the file at `path` as `opts`' `:user` (root by default) through sudo,
+replacing what it held — in place, so the file keeps its owner and mode — and creating it
+when it does not exist. True, or a failure as `sudo/read` gives one.
+
+    (sudo/write \"/etc/hosts\" text {:password typed})   ;~> true, or a failure"
+  (let (result (run-as opts "write" ["sh" "-c" "cat > \"$1\"" "sh" path] text))
+    (cond
+      (failure? result) result
+      (= 0 (:exit result)) true
+      else (failure-of "write" result))))
