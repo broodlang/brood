@@ -106,13 +106,16 @@ foreground, a stray write to stdout). A resize does it by itself (ADR-586).
 
 (defn suspend ()
   "Give the terminal back and stop this process, as a shell's C-z stops a job — Emacs's
-`suspend-frame` in a terminal. The screen is left (`term/leave`), SIGSTOP raised, and when
-the shell continues the job (`fg`) the terminal is taken again (`term/enter`) and the next
-frame painted whole. A full-screen app reads C-z as a key (the terminal is raw), so this is
-what its C-z binding calls; a SIGTSTP sent from outside reaches `ui-run`'s terminal display
-as the same (ADR-586). Unix only.
+`suspend-frame` in a terminal. The screen is left (`term/leave`), SIGTSTP raised with its
+default action, and when the shell continues the job (`fg`) the terminal is taken again
+(`term/enter`) and the next frame painted whole: `:suspended`. When nothing could continue a
+stopped process — its process group is orphaned, as under `gnome-terminal -- prog`, `ssh host
+prog` or `exec prog` — it does not stop, keeps the terminal, and answers `:no-job-control`
+(stopped, it would stay frozen with whatever it had not saved). A full-screen app reads C-z
+as a key (the terminal is raw), so this is what its C-z binding calls; a SIGTSTP sent from
+outside reaches `ui-run`'s terminal display as the same (ADR-586). Unix only.
 
-    (term/suspend)   ;~> nil, once the shell has continued the job"
+    (term/suspend)   ;~> :suspended once the shell has continued the job, or :no-job-control"
   (%term-suspend))
 
 (defn refresh ()

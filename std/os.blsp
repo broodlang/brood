@@ -448,7 +448,9 @@ closed, or `sig` is not one of those. Unix only.
 control signals `:tstp` (stop) and `:cont` (continued) — to a process as the message
 `[:signal sig]` instead of its default action (which for the first three ends the runtime,
 and for `:tstp` stops it): what lets a full-screen terminal app restore the terminal before
-it stops or exits and repaint after it continues (ADR-586). The process is the caller, or `pid`; `(os/trap sig nil)` gives the
+it stops or exits and repaint after it continues (ADR-586). A SECOND `:term` or `:hup`
+arriving after the first was handed over does what it did before the trap: the program had
+its chance, and a loop wedged before it read the first can still be ended. The process is the caller, or `pid`; `(os/trap sig nil)` gives the
 signal back what it did before it was trapped (the default, or the `SIG_IGN` a `nohup`
 leaves). One subscriber per signal: a later trap replaces an earlier one. Returns the
 previous subscriber, or nil. If the subscriber has exited when the signal arrives, the

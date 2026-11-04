@@ -84,9 +84,9 @@ pub(super) fn register(primitives: &mut super::Primitives) {
     primitives.def(
         "%term-suspend",
         Arity::exact(0),
-        Sig::new(vec![], nil_ty.clone()),
+        Sig::nullary(kw),
         &[],
-        "Give the terminal back (term-leave), stop this process with SIGSTOP as a shell's C-z stops a job, and take the terminal again when it is continued (term-enter, the next frame painted whole). Unix only. Returns nil. (ADR-586)",
+        "Give the terminal back (term-leave), stop this process with SIGTSTP (its default action) as a shell's C-z stops a job, and take the terminal again when it is continued (term-enter, the next frame painted whole): :suspended. When nothing could continue it — the process group is orphaned, as under `gnome-terminal -- prog` or `ssh host prog` — it keeps the terminal and answers :no-job-control. Unix only. (ADR-586)",
         term_suspend);
     primitives.def(
         "%term-refresh",

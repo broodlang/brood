@@ -826,6 +826,8 @@ struct Trap {
     /// leaves on SIGHUP, the REPL's Ctrl-C handler — put back when the trap is lifted or
     /// its subscriber has exited.
     prior: Option<libc::sigaction>,
+    /// Whether a signal has been handed to the subscriber since it trapped it.
+    delivered: bool,
 }
 
 #[cfg(unix)]
@@ -850,6 +852,7 @@ static SIGNAL_TRAPS: std::sync::Mutex<[Trap; 5]> = std::sync::Mutex::new(
         Trap {
             subscriber: 0,
             prior: None,
+            delivered: false,
         }
     }; 5],
 );
@@ -916,7 +919,13 @@ fn start_signal_pipe() -> Result<(), String> {
             };
             let mut traps = signal_traps();
             let subscriber = traps[index].subscriber;
-            if subscriber != 0 && crate::process::is_alive(subscriber) {
+            // A SECOND SIGTERM or SIGHUP while trapped is the default action: the first was
+            // handed over and the program has not ended — a wedged loop, a hook that hangs —
+            // and whoever sent it again means it (ADR-586). Ctrl-C and job control repeat.
+            let escalate =
+                traps[index].delivered && matches!(TRAPPABLE_SIGNALS[index].0, "term" | "hup");
+            if subscriber != 0 && crate::process::is_alive(subscriber) && !escalate {
+                traps[index].delivered = true;
                 crate::process::deliver(
                     subscriber,
                     crate::process::Message::Vector(vec![
@@ -925,7 +934,8 @@ fn start_signal_pipe() -> Result<(), String> {
                     ]),
                 );
             } else {
-                // Nobody is left to act on it: the signal does what it did before it was
+                // Nobody is left to act on it (or it is a repeated SIGTERM / SIGHUP): the
+                // signal does what it did before it was
                 // trapped, so a dead subscriber cannot make the runtime unkillable.
                 traps[index].lift(signum);
                 drop(traps);
@@ -991,6 +1001,7 @@ pub(super) fn trap_signal(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
             trap.lift(signum);
         } else {
             trap.subscriber = subscriber;
+            trap.delivered = false;
             // Installed on every trap (something may have replaced the handler since), but
             // the disposition to restore is the one from before the FIRST trap.
             unsafe {

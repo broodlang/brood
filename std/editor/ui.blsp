@@ -693,8 +693,18 @@ whatever it throws is logged, never kept from the exit. nil, so the loop stops."
   (when (hangup-request? input)
     (let (hook (get model :on-hangup))
       (when (fn? hook)
-        (try (hook model (second input)) (catch e (ui-log-error "on-hangup" e))))))
+        ;; a hook that hangs must not keep a hung-up program alive: past the grace the
+        ;; terminal is given back and the runtime exits (129, as a SIGHUP death would)
+        (let (watchdog (spawn (receive
+                                (:hook-done nil)
+                                (after *ui-hangup-grace-ms* (do (term/leave) (system/halt 129))))))
+          (do
+            (try (hook model (second input)) (catch e (ui-log-error "on-hangup" e)))
+            (send watchdog :hook-done))))))
   nil)
+
+(def *ui-hangup-grace-ms* 10000)
+;; How long a model's `:on-hangup` may run before the runtime exits anyway (ADR-586).
 
 (defn- display-repaint-due? (display)
   ;; the display forgot what it shows (a terminal resized or continued): draw this turn

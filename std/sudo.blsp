@@ -17,11 +17,14 @@ asking sudo again — `sudo -n true` — not by its message: classic sudo says \
 required\", sudo-rs \"interactive authentication is required\", and either may be translated.
 
 A file is READ as its bytes (`read-bytes`, through `base64`, so nothing is lost to a text
-decode); `read` is its text, refused when the bytes are not UTF-8. A WRITE never truncates the
-file in place: the text goes to a temporary file beside it — owner and mode copied from the
-file (`cp -p`) — which is renamed over it, so a full disk or a killed pipe leaves the old file
-whole. A symbolic link is written through (its target replaced, the link kept); a file with
-other hard links is written in place, since a rename would part it from them.
+decode); `read` is its text, refused when the bytes are not UTF-8. A WRITE goes to a temporary
+file beside the file — given its owner, mode, ACLs, extended attributes and SELinux context —
+which is renamed over it, so a full disk or a killed pipe leaves the old file whole. Where a
+rename cannot be had it writes in place instead: a file with other hard links (a rename would
+part it from them), a directory the user may not write, a file bind-mounted into a container
+(the rename refused, EBUSY). A symbolic link is written through (its target replaced, the
+link kept). The temporary file is removed on every exit the shell sees, and one a SIGKILL
+left is cleared by the next write.
 
 `sudo/*program*` names the sudo to run — a test binds a stand-in script, so no test runs the real
 one; `opts`' `:program` does the same for one call.
@@ -66,7 +69,7 @@ user, never by its message (classic sudo and sudo-rs word it differently)."
              (let (said (string/trim (or (:stderr result) "")))
                (if (= said "") (str "exit " (:exit result)) said)))))
 
-(defn- run-as (opts who command input)
+(defn- run-as (opts who command input own-exits)
   "Run `command` (a vector) through sudo as `opts`' user with `input` on its stdin: the
 command's result map — whatever its exit — or a failure when sudo itself refused (a wrong
 password, none given when one is required). See the module doc for how a password goes."
@@ -80,14 +83,18 @@ password, none given when one is required). See the module doc for how a passwor
                      (append ["-n"] (user-args opts) ["--"] command)
                      {:stdin input :env sudo-env}))
         (cond
-          (not (sudo-refused? opts result)) result
+          ;; an exit the command itself chose (the read's 3: no file) is its answer — never
+          ;; sudo's, which a probe would wrongly say it is when sudo caches nothing
+          (or (contains? own-exits (:exit result)) (not (sudo-refused? opts result))) result
           ;; validated, yet sudo keeps no cache: the password and the input in one call,
           ;; `-k` so the password is the line sudo reads before the command sees any
           password
             (let (once (os/cmd program
                          (append ["-S" "-k" "-p" ""] (user-args opts) ["--"] command)
                          {:stdin (str password "\n" input) :env sudo-env}))
-              (if (sudo-refused? opts once) (failure-of who once) once))
+              (if (and (not (contains? own-exits (:exit once))) (sudo-refused? opts once))
+                (failure-of who once)
+                once))
           else (failure (str "sudo/" who ": a password is required")))))))
 
 ;; the file's bytes as Base64 (no text decode can lose one), a missing file told by exit 3
@@ -100,7 +107,7 @@ password is required` when one is and `opts` has no `:password`. Byte-faithful: 
 comes through `base64`, so a binary or a file in another encoding arrives exactly.
 
     (sudo/read-bytes \"/etc/shadow\" {:password typed})   ;~> the file's bytes, or a failure"
-  (let (result (run-as opts "read" ["sh" "-c" read-script "sh" path] ""))
+  (let (result (run-as opts "read" ["sh" "-c" read-script "sh" path] "" #{0 3}))
     (cond
       (failure? result) result
       (= 0 (:exit result))
@@ -127,19 +134,33 @@ the file. `:password` is handed to sudo once and kept nowhere; `:program` overri
             (catch _
               (failure (str "sudo/read: " path " is not UTF-8 text (sudo/read-bytes reads it)"))))))))
 
-;; The write, as the target user: through a symbolic link to its target; in place when the
-;; file has other hard links; otherwise a temporary file beside it — owner and mode copied
-;; with `cp -p`, or the umask's mode for a new file — renamed over it once fully written.
+;; The write, as the target user. Its own failures exit 4 (so they are never taken for sudo's
+;; refusal). Through a symbolic link to its target. In place — `cat > FILE` — when a rename
+;; cannot be had: the file has other hard links, no temporary file can be made beside it (a
+;; user who may write the file but not its directory), or the rename itself is refused (a file
+;; bind-mounted into a container, /etc/hosts under Docker: EBUSY). Otherwise a temporary file
+;; beside it, given the file's owner, mode, ACLs, extended attributes and SELinux context
+;; (`cp --preserve=all --attributes-only`, else `cp -p`; `chcon --reference`; the ACL copied
+;; with getfacl/setfacl), or the umask's mode for a new file, filled, and renamed over it. The
+;; temporary file is removed on every way out the shell sees (EXIT, HUP, INT, TERM), and one a
+;; SIGKILL left behind is cleared by the next write.
 (def- write-script
   (str "target=$1\n"
     "if [ -L \"$target\" ]; then resolved=$(readlink -f \"$target\") && target=$resolved; fi\n"
-    "if [ -e \"$target\" ]; then\n" "  links=$(ls -ld -- \"$target\" | awk '{print $2}')\n"
-    "  if [ \"$links\" -gt 1 ]; then cat > \"$target\"; exit $?; fi\n" "fi\n"
-    "dir=$(dirname \"$target\")\n" "tmp=$(mktemp \"$dir/.sudo-write.XXXXXX\") || exit 1\n"
-    "if [ -e \"$target\" ]; then cp -p -- \"$target\" \"$tmp\" || { rm -f -- \"$tmp\"; exit 1; }\n"
-    "else chmod \"$(printf '%o' $((0666 & ~$(umask))))\" \"$tmp\"; fi\n"
-    "if cat > \"$tmp\" && mv -f -- \"$tmp\" \"$target\"; then exit 0; fi\n" "rm -f -- \"$tmp\"\n"
-    "exit 1\n"))
+    "in_place() { cat > \"$target\" || exit 4; exit 0; }\n" "if [ -e \"$target\" ]; then\n"
+    "  links=$(ls -ld -- \"$target\" | awk '{print $2}')\n"
+    "  if [ \"$links\" -gt 1 ]; then in_place; fi\n" "fi\n" "dir=$(dirname \"$target\")\n"
+    "find \"$dir\" -maxdepth 1 -name '.sudo-write.*' -type f -mmin +1 -exec rm -f {} + 2>/dev/null\n"
+    "tmp=$(mktemp \"$dir/.sudo-write.XXXXXX\" 2>/dev/null) || in_place\n"
+    "trap 'rm -f -- \"$tmp\"' EXIT\n" "trap 'exit 4' HUP INT TERM\n" "if [ -e \"$target\" ]; then\n"
+    "  cp --preserve=all --attributes-only -- \"$target\" \"$tmp\" 2>/dev/null"
+    " || cp -p -- \"$target\" \"$tmp\" 2>/dev/null || { rm -f -- \"$tmp\"; in_place; }\n"
+    "  if command -v chcon >/dev/null 2>&1; then chcon --reference=\"$target\" -- \"$tmp\" 2>/dev/null; fi\n"
+    "  if command -v getfacl >/dev/null 2>&1 && command -v setfacl >/dev/null 2>&1; then\n"
+    "    getfacl -p -- \"$target\" 2>/dev/null | setfacl --set-file=- -- \"$tmp\" 2>/dev/null\n"
+    "  fi\n" "else\n" "  chmod \"$(printf '%o' $((0666 & ~$(umask))))\" \"$tmp\"\n" "fi\n"
+    "cat > \"$tmp\" || exit 4\n" "if mv -f -- \"$tmp\" \"$target\" 2>/dev/null; then exit 0; fi\n"
+    "cat -- \"$tmp\" > \"$target\" || exit 4\n" "exit 0\n"))
 
 (defn write (path text &optional (opts {}))
   "Write `text` to the file at `path` as `opts`' `:user` (root by default) through sudo,
@@ -149,7 +170,7 @@ for links) — and creating it when it does not exist. True, or a failure as `su
 gives one.
 
     (sudo/write \"/etc/hosts\" text {:password typed})   ;~> true, or a failure"
-  (let (result (run-as opts "write" ["sh" "-c" write-script "sh" path] text))
+  (let (result (run-as opts "write" ["sh" "-c" write-script "sh" path] text #{0 4}))
     (cond
       (failure? result) result
       (= 0 (:exit result)) true
