@@ -640,7 +640,7 @@ value yields a one-element vector.
     (let (s (first ss))
       (tp-width-acc (+ acc (- (span-to s) (span-from s))) (rest ss)))))
 
-(defn total-width (x:record -> int)
+(defn total-width (x: (or tempo span iset) -> int)
   "The total time `x` covers in milliseconds, **excluding** gaps. The free/busy
 answer: how much time is actually taken.
 
@@ -893,7 +893,7 @@ end is the exclusive endpoint, so `parse-span` reads back what this writes.
     "/"
     (datetime/->iso (datetime/epoch-ms-> (span-to s)))))
 
-(defn ->iso-set (x:record -> string)
+(defn ->iso-set (x: (or tempo span iset) -> string)
   "An interval set as its spans in ISO 8601 interval form, comma-separated. An
 empty set renders as the empty string.
 
