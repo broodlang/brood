@@ -844,10 +844,17 @@ recorded anything, all of it is replaced by one snapshot of `buf`. O(1) either w
 history is never walked. An armed `amalgamate-undo` still applies to the group as a whole.
 
     (count (get (editor/buffer/undo-group (editor/buffer/make-buffer \"ab\") (fn (b) (editor/buffer/insert (editor/buffer/insert b \"x\") \"y\"))) :undo))   ;=> 1"
-  (let (after (f (assoc buf :undo () :undo-size 0 :undo-amalgamate false))
+  (let (
+        ;; `f` runs with no undo run either: a trim of its own history (its edits passing
+        ;; the strong limit) cuts the pending run by what IT dropped, and the outer run is
+        ;; a tail of a history it never saw
+        after (f (assoc buf :undo () :undo-size 0 :undo-amalgamate false :pending-undo ()))
         history (or (get buf :undo) ())
-        ;; what `f` recorded is thrown away below, so its size goes with it
-        after (assoc after :undo-size (or (get buf :undo-size) 0)))
+        ;; what `f` recorded is thrown away below, so its size goes with it, and the outer
+        ;; run comes back as it was
+        after (assoc after
+                :undo-size (or (get buf :undo-size) 0)
+                :pending-undo (get buf :pending-undo)))
     (cond
       (empty? (get after :undo))
         (assoc after :undo history :undo-amalgamate (get buf :undo-amalgamate))
@@ -1077,7 +1084,17 @@ whole thing back.
           ;; record the pre-state (so this is itself undoable), then swap the text.
           ;; Point is clamped; the MARK is kept so the region stays live for a repeat.
           (let ([undone tail] found
-                pushed (buffer-record-change buf)
+                ;; a step of its own, never amalgamated into a typing run before it: our
+                ;; pre-state is then always the new head of the history
+                pushed (buffer-record-change (assoc buf :undo-amalgamate false))
+                ;; recording may have TRIMMED the history (`trim-undo`), dropping its oldest
+                ;; entries — which `tail`, cut from the history before, still holds. Only
+                ;; what survived the trim may stay: the history after our pre-state is the
+                ;; old history's first `survivors` entries, and `tail` starts at the
+                ;; consumed entry's successor
+                survivors (dec (count (get pushed :undo)))
+                consumed-at (- (count (or (get buf :undo) ())) (count tail) 1)
+                tail (apply list (take tail (math/max 0 (- survivors consumed-at 1))))
                 rope (text/from-string undone)
                 [same-lo same-hi changed] (%str-splice-diff text undone))
             (assoc pushed
@@ -1092,10 +1109,18 @@ whole thing back.
                   changed)
               ;; the consumed change is dropped from history and OUR pre-state sits on
               ;; top, so a plain `undo` still takes this step back while another region
-              ;; undo continues backwards through the same lines. The consumed entry's cost
-              ;; stays in `:undo-size` — an over-count, so a trim comes early, and the trim
-              ;; recounts the history exactly.
-              :undo (cons (assoc (first (get pushed :undo)) :region-undo true) tail)
+              ;; undo continues backwards through the same lines. The size is recounted from
+              ;; what is left (our pre-state is priced by the next push), so `:undo` and
+              ;; `:undo-size` agree — a region undo is a command, not a keystroke, and the
+              ;; walk is the history's length at most.
+              :undo
+                (if (get buf :undo-disabled)
+                  (get pushed :undo)
+                  (cons (assoc (first (get pushed :undo)) :region-undo true) tail))
+              :undo-size
+                (if (get buf :undo-disabled)
+                  (get pushed :undo-size)
+                  (fold tail 0 (fn (acc snapshot) (+ acc (or (get snapshot :cost) 0)))))
               :point (math/min (get buf :point) (text/length rope))
               ;; `bounds` being non-nil says the mark is set; the `or` says so to the
               ;; checker (`:mark` reads `nil | int` on its own), with point as the

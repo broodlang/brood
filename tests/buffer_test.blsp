@@ -485,6 +485,27 @@
       (let (b (undo-limit-type-chars (make-buffer "") 10))
         (assert= (count (get b :undo)) 1)
         (assert= (buffer-text (undo b)) "xxxxxxxxx"))))
+  (test "a group's own trim leaves the outer undo run alone"
+    ;; a run in progress, then a group whose own edits pass the strong limit: the group's
+    ;; trim drops ITS steps, which were never the outer run's
+    (let (b (undo-limit-type-chars (make-buffer "") 2)
+          running (undo-next (undo-start b))
+          grouped (binding (editor/buffer/*undo-limit* 5000 editor/buffer/*undo-strong-limit* 5000)
+                    (undo-group running
+                      (fn (inner) (fold (range 10) inner (fn (acc _) (insert acc "y")))))))
+      (is (> (count (get running :pending-undo)) 0))
+      (assert= (count (get grouped :pending-undo)) (count (get running :pending-undo)))))
+  (test "a region undo whose record trims keeps the size the recount of its history"
+    ;; the region is the LAST line: the consumed change is the head, and the rest of the
+    ;; history is what the record's trim cut
+    (let (b (fold (range 8) (make-buffer "") (fn (acc _) (insert acc "x\n")))
+          length (buffer-length b)
+          region (binding (editor/buffer/*undo-limit* 3100 editor/buffer/*undo-strong-limit* 3100)
+                   (undo-in-region (assoc b :mark (- length 2) :point length))))
+      (assert= (buffer-text region) "x\nx\nx\nx\nx\nx\nx\n")
+      (is (< (count (get region :undo)) (count (get b :undo))))
+      (assert= (get region :undo-size)
+        (fold (get region :undo) 0 (fn (acc snapshot) (+ acc (or (get snapshot :cost) 0)))))))
   (test "an undo run in progress loses the same oldest steps"
     (let (b (undo-limit-type-chars (make-buffer "") 20)
           running (undo-next (undo-start b))
