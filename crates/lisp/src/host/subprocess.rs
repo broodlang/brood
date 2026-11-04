@@ -1380,7 +1380,7 @@ pub struct PtyInputMode {
     /// `ECHO`: the line discipline echoes what is typed.
     pub echo: bool,
     /// `ICANON`: input is read a LINE at a time, edited by the line discipline. A program
-    /// with its own line editor (readline, an interactive language shell, a raw-mode REPL) turns this off
+    /// with its own line editor (readline, a raw-mode REPL) turns this off
     /// along with `ECHO` and echoes for itself; a password read (`getpass`, `sudo`, ssh's
     /// `readpassphrase`) turns off `ECHO` alone — which is what tells the two apart.
     pub canonical: bool,
