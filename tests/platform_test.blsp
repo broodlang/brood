@@ -65,8 +65,9 @@
     (is (not (path/absolute? "C:"))))
   (test "a typed path starts over at a drive root on Windows, as at // (Emacs's rule)"
     (assert= (path/substitute "/somewhere/else/D:/x") (if (windows?) "D:/x" "/somewhere/else/D:/x"))
-    ;; `//` starts over everywhere; on Windows it starts a UNC path, so both slashes stay
-    (assert= (path/substitute "/somewhere//etc") (if (windows?) "//etc" "/etc")))
+    ;; part-way through, `//` starts over at the second slash on every OS (a share only
+    ;; at the start of a name)
+    (assert= (path/substitute "/somewhere//etc") "/etc"))
   (test "joining onto a drive-rooted path starts over there, as onto a /-rooted one"
     (assert= (path/join "a" "/b") "/b")
     (assert= (path/join "a" "D:/b") (if (windows?) "D:/b" "a/D:/b"))))

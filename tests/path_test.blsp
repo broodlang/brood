@@ -223,10 +223,10 @@
                      (assert= (path/normalize "C:/a/../b") "C:/b")
                      (assert= (path/normalize "//srv/share/x") "//srv/share/x")
                      (assert= (path/normalize "//srv/share/x/../..") "//srv/share/"))))
-  (test "a typed path keeps a leading // as a share, and // part-way starts one"
+  (test "a typed path keeps a leading // as a share; // part-way restarts at the second slash"
     (windows-rules (fn ()
                      (assert= (path/substitute "//srv/share/x") "//srv/share/x")
-                     (assert= (path/substitute "C:/x//srv/share") "//srv/share")
+                     (assert= (path/substitute "C:/x//srv/share") "/srv/share")
                      (assert= (path/substitute "/x/C:/y") "C:/y"))))
   (test "under POSIX rules nothing changes: C: is a name, // restarts"
     (posix-rules (fn ()

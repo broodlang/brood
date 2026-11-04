@@ -413,15 +413,11 @@ that `keep?` does not claim as an entry of the directory before it."
 (defn- restart-scan (text i n start keep? directory-of)
   (cond
     (>= i n) start
+    ;; the new path starts at the second slash — on Windows too: Emacs's
+    ;; search_embedded_absfilename keeps `//` as a share only at the START of a name
+    ;; (`restart-at?`), so `C:/x//srv/share` is `/srv/share`, as it is everywhere
     (restart-at? text i n start keep? directory-of)
-    ;; Windows: a `//` part-way through starts a UNC path, so the new path keeps both
-    ;; slashes (`C:/x//srv/share` is `//srv/share`); elsewhere it starts at the second
-      (restart-scan text
-        (inc i)
-        n
-        (if (and (= (string/char-at text i) "/") (windows?)) (dec i) i)
-        keep?
-        directory-of)
+      (restart-scan text (inc i) n i keep? directory-of)
     else (restart-scan text (inc i) n start keep? directory-of)))
 
 (defn- never-kept (directory component) false)
