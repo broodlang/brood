@@ -50,6 +50,15 @@ window) — same protocol, different frontend. Many clients may attach at once
 ;; draws to now — nil while it is parked; nil outside a served session, and in a
 ;; `serve-shared` one, which has no one client (ADR-539).
 
+(defdyn editor/serve/*served-client-can* nil)
+;; frames (`:can` in its attach identity — `:primary`, ADR-562 — which the session and the
+;; manager note as `[:client-can client capabilities]`); `#{}` for a client that said nothing,
+;; which is every client older than the saying.
+;; for a client that said nothing, which is every client older than the saying.
+
+;; What this runtime's clients say they can do: their machine's PRIMARY selection (ADR-562).
+(def- attach-capabilities [:primary])
+
 ;; ---- the seam: a display frontend that lives on the wire ---------------------
 
 ; nil ⇒ ui-run treats it as :tick (re-render)
@@ -142,7 +151,9 @@ consumes them), leaving a served app deaf to everything but keys.
          :quit-from client
          ;; the client it serves NOW — nil while parked — for what the session asks of the
          ;; client's machine (its clipboard: [[client-clipboard-set]], ADR-539)
-         :served-client (fn () (table/get state :client nil))}
+         :served-client (fn () (table/get state :client nil))
+         ;; and what that client said it can do ([[served-client-can?]], ADR-562)
+         :served-client-can (fn () (table/get state :client-can #{}))}
         ;; the oldest message of any kind, tagged: the client's input as above, anything
         ;; else async app input — the event bus, as local displays deliver it — but not the
         ;; USER's, so it holds no idle timer back
@@ -252,6 +263,7 @@ and ends when that is up."
       ([:key k held?] (do (table/put state :held? held?) [k true]))
       ([:key k] [k true])
       ([:detach] [:close true])
+      ([:client-can from capabilities] (remote-note-capabilities state from capabilities))
       ([:down _ ^client _] [(remote-client-lost state resume) true])
       ([:adopt token adopter cols rows] [(remote-adopt state resume token adopter cols rows) true])
       ([:claim token claimant cols rows] [(remote-claim state resume token claimant cols rows) true])
@@ -271,11 +283,24 @@ input for rehost/reshare, not tear the session down)."
       ; a client that does not say
       ([:key k] k)
       ([:detach] :close)
+      ;; what this client can be asked beyond keys and frames ([[served-client-can?]])
+      ([:client-can from capabilities] (remote-note-capabilities state from capabilities))
       ; client process died / link net-split
       ([:down _ ^client _] (remote-client-lost state resume))
       ([:adopt token adopter cols rows] (remote-adopt state resume token adopter cols rows))
       ([:claim token claimant cols rows] (remote-claim state resume token claimant cols rows))
       (after 0 nil))))
+
+(defn- remote-note-capabilities (state from capabilities)
+  "Note what the client `from` can do beyond keys and frames (`[:client-can from capabilities]`,
+ADR-562: the session's own note of its first client's identity, the manager's on a hand-over)
+— only for the client the session serves now, a stale one's word
+counting for nothing. Nil: nothing for the loop to fold."
+  (do
+    (when (and (= from (table/get state :client nil))
+            (or (vector? capabilities) (list? capabilities)))
+      (table/put state :client-can (into #{} capabilities)))
+    nil))
 
 (defn- remote-client-lost (state resume)
   "The client died or its link dropped: `:close`, ending the session — or, for a session
@@ -284,6 +309,7 @@ that resumes, PARK it (nobody to draw to, the manager told) and hand the app
   (if (nil? resume)
     :close (do
       (table/put state :client nil)
+      (table/put state :client-can #{})
       (table/put state :monitor nil)
       (table/put state :held? false)
       (table/put state :parked-at (os/now))
@@ -302,6 +328,8 @@ which the loop reads as a timeout)."
       (do
         (table/put state :monitor (monitor client))
         (table/put state :client client)
+        ;; what the new client can do the manager says next (`[:client-can …]`)
+        (table/put state :client-can #{})
         (table/put state :size [cols rows])
         (table/put state :parked-at nil)
         (send client [:attached (self)])
@@ -343,6 +371,7 @@ without the manager's token."
                 (when watch (demonitor watch))
                 (send old [:bye])
                 (table/put state :client nil)
+                (table/put state :client-can #{})
                 (table/put state :monitor nil)
                 (send (:manager resume) [:claimed (self) claimant])
                 (remote-adopt state resume token claimant cols rows))))))))
@@ -402,6 +431,12 @@ client cannot."
       (string? (:as grant)) (assoc claimed :name (:as grant) :guest true)
       else (assoc claimed :guest true))))
 
+(defn- serve-capabilities (identity)
+  "What a client's identity says it can do beyond keys and frames (`:can`, ADR-562) — `[]`
+for one that says nothing, as every client older than the saying."
+  (let (can (when (map? identity) (get identity :can)))
+    (if (or (vector? can) (list? can)) (vec can) [])))
+
 (defn- serve-session (client cols rows identity resume make-model view update)
   "One attached client's session: monitor the client (so its death tears us down, or parks
 us — `resume`, see `remote-display`), tell it our pid (so it can ship keys here), then run
@@ -414,11 +449,15 @@ pass-through) — the seam a collaborative app reads a participant's name from."
         display (remote-display client cols rows (when resume (assoc resume :monitor watch))))
     (do
       (send client [:attached (self)])
+      ;; what the client said it can do (`:can` in its identity, ADR-562), noted by the
+      ;; display before anything asks it ([[served-client-can?]])
+      (send (self) [:client-can client (serve-capabilities identity)])
       (when (and (map? identity) (not (empty? identity)))
         (send (self) [:client-opts identity]))
       ;; bound for the session's life, `make-model` included: who the session draws to now
       ;; ([[served-client]])
-      (binding (editor/serve/*served-client* (get display :served-client))
+      (binding (editor/serve/*served-client* (get display :served-client)
+                editor/serve/*served-client-can* (get display :served-client-can))
         (ui-run (make-model) view update display)))))
 
 ;; ---- the client's clipboard, across the link (ADR-539) --------------------------
@@ -485,33 +524,47 @@ still come after that; take the first `[:clipboard ref …]` for a ref and ignor
 ;;   session -> client  [:primary-set text]          own the client's PRIMARY with `text`
 ;;   session -> client  [:primary-get session ref]   what is in it?
 ;;   client -> session  [:primary ref text]           the answer (`text` nil when empty)
+;;
+;; Sent only to a client that SAID it handles them (`:can [:primary]` in its attach identity,
+;; [[served-client-can?]]): an older client's window ships an unknown message
+;; back as a key, and its terminal lets them pile up, so a session serving one has no PRIMARY.
+
+(defn served-client-can? (capability)
+  "Whether the client the served session the caller runs in draws to now said it can do
+`capability` (`:primary`, ADR-562) — false outside a served session, while it is parked, and
+for a client that said nothing (one older than the saying).
+
+    (editor/serve/served-client-can? :primary)   ;=> false"
+  (let (can-of editor/serve/*served-client-can*)
+    (and (not (nil? (served-client))) (not (nil? can-of)) (contains? (can-of) capability))))
 
 (defn client-primary-set (text)
   "Own the PRIMARY selection of the machine this served session's client runs on with `text`
 (ADR-562) — what a drag highlights there, pasteable by a middle click in the user's other
-apps — and return `text`; nil, sending nothing, outside a served session or while it is
-parked. A cast, as [[client-clipboard-set]].
+apps — and return `text`; nil, sending nothing, outside a served session, while it is parked,
+or when its client cannot ([[served-client-can?]]). A cast, as [[client-clipboard-set]].
 
     (editor/serve/client-primary-set \"hello\")   ;=> nil"
-  (let (client (served-client))
-    (if (nil? client) nil (do (send client [:primary-set text]) text))))
+  (if (served-client-can? :primary)
+    (do (send (served-client) [:primary-set text]) text)
+    nil))
 
 (defn client-primary-ask (&optional (ms serve-clipboard-ms))
   "Ask the machine this served session's client runs on what its PRIMARY selection holds
 (ADR-562), without waiting: the answer reaches the app's `update` as `[:primary ref text]`,
 `text` nil when it is empty, not text, or the machine has none. Returns `ref`; nil, asking
-nothing, outside a served session and while it is parked. Answered for after `ms` as
+nothing, outside a served session, while it is parked, or when its client cannot
+([[served-client-can?]]) — the app then has no PRIMARY. Answered for after `ms` as
 [[client-clipboard-ask]] is: take the first `[:primary ref …]` for a ref.
 
     (editor/serve/client-primary-ask)   ;=> nil"
-  (let (client (served-client))
-    (if (nil? client)
-      nil
-      (let (asked (ref))
-        (do
-          (send client [:primary-get (self) asked])
-          (timer/send-after ms (self) [:primary asked nil])
-          asked)))))
+  (if (served-client-can? :primary)
+    (let (asked (ref))
+      (do
+        (send (served-client) [:primary-get (self) asked])
+        (timer/send-after ms (self) [:primary asked nil])
+        asked))
+    nil))
 
 (defn- serve-resumes? (opts identity)
   "Whether a session for `identity` parks when its client is lost: the server resumes
@@ -560,6 +613,8 @@ a session of its own."
       (let (session (first alive))
         (do
           (send session [:claim (map/get-in live [:sessions session :token]) client cols rows])
+          ;; and what the claimant can do, which the session takes once it is the claimant's
+          (send session [:client-can client (serve-capabilities identity)])
           (map/assoc-in live
             [:pending client]
             {:asking session :others (rest alive) :cols cols :rows rows :identity identity}))))))
@@ -584,13 +639,17 @@ session of its own."
   (let (identity (serve-identity client given)
         mine (if (serve-resumes? (:opts app) identity)
                (seq/filter (keys (:sessions live))
-                 (fn (session) (= (map/get-in live [:sessions session :identity]) identity)))
+                 ;; who, not what their client can do: a newer client resumes the same session
+                 (fn (session)
+                   (= (dissoc (map/get-in live [:sessions session :identity]) :can)
+                     (dissoc identity :can))))
                [])
         parked (seq/find mine (fn (session) (map/get-in live [:sessions session :parked?]))))
     (cond
       parked
         (do
           (send parked [:adopt (map/get-in live [:sessions parked :token]) client cols rows])
+          (send parked [:client-can client (serve-capabilities identity)])
           (map/assoc-in live [:sessions parked :parked?] false))
       (not (empty? mine)) (serve-ask live app client cols rows identity mine)
       else (serve-spawn live app client cols rows identity))))
@@ -771,11 +830,13 @@ the link drops."
 session pid it replies with, nil if the link drops first (`[:nodedown]`), or error on
 timeout. The connect handshake shared by the terminal (`attach`) and GUI
 (`attach-display`) clients — the only difference between them is the frontend, not the
-protocol. An empty/nil `opts` sends the old 4-element attach, so a new client still
-speaks to an old daemon."
-  (if (and (map? opts) (not (empty? opts)))
-    (send {:name serve-name :node peer} [:attach (self) cols rows opts])
-    (send {:name serve-name :node peer} [:attach (self) cols rows]))
+protocol. The identity always goes, carrying `:can` — what this client can be asked beyond keys
+and frames (its PRIMARY selection, ADR-562); every daemon since the identity attach reads it."
+  ;; the identity also says what this client can do beyond keys and frames (`:can`, ADR-562):
+  ;; a session asks it of a client that said so, and an older daemon's app reads the map's
+  ;; other keys and leaves this one
+  (send {:name serve-name :node peer}
+    [:attach (self) cols rows (assoc (if (map? opts) opts {}) :can attach-capabilities)])
   (receive
     ([:attached session] session)
     ([:nodedown ^peer] nil)
