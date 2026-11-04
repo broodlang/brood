@@ -71,6 +71,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         make_dir,
     );
     primitives.def(
+        "file/mkdir-private",
+        Arity::exact(1),
+        Sig::new(vec![string], nil_ty),
+        &["path"],
+        "Create a directory and any missing parents (like mkdir -p), the directory itself owner-only (0700 on Unix) whether it was made now or was already there — where an app keeps what other users must not read (an editor's sidecars of files edited as root, ADR-588), as file/spit-private is for a file.\n\n    (file/mkdir-private \"state/auto-save\")   ;~> nil, state/auto-save made, mode 0700",
+        make_private_dir,
+    );
+    primitives.def(
         "file/spit",
         Arity::exact(2),
         Sig::new(vec![string, iolist], nil_ty),
@@ -338,6 +346,24 @@ pub(super) fn make_dir(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
         LispError::runtime(format!("file/mkdir: {}: {}", path, e))
             .with_code(crate::error::error_codes::FILE_IO)
     })?;
+    Ok(Value::nil())
+}
+
+/// `(file/mkdir-private path)` — `file/mkdir`, then the directory made owner-only (0700 on
+/// Unix; elsewhere just made). Returns nil.
+pub(super) fn make_private_dir(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
+    let path = expect_string(heap, "file/mkdir-private", arg(args, 0))?;
+    make_dir(args, env, heap)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).map_err(|e| {
+            LispError::runtime(format!("file/mkdir-private: {}: {}", path, e))
+                .with_code(crate::error::error_codes::FILE_IO)
+        })?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(Value::nil())
 }
 

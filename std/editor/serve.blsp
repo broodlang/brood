@@ -847,11 +847,31 @@ back, and pointer motion goes coalesced (`display-poll-input`)."
 for `:close` (the window's X button), detach and end. With whether a key is down here,
 read after the window delivered `input`: a press, its key-up and a blur each change it,
 so the session learns of every change."
-  (if (= input :close)
+  (if (attach-quit-input? input)
     (send session [:detach])
     (do
       (send session [:key input (display-key-held? display)])
+      (attach-repaint-if-due display)
       (attach-display-loop peer session display))))
+
+(defn- attach-quit-input? (input)
+  "Whether the client's own `input` ends its attachment: the window's X button (`:close`),
+or the terminal's SIGTERM / SIGHUP (`[:hangup sig]`, ADR-586) — detached, so a private
+session parks rather than taking a hung-up client for a live one."
+  (or (= input :close) (editor/ui/hangup-request? input)))
+
+;; the frame each client loop last painted, by client pid: what a terminal shows again after
+;; it was resized or continued, before the session has a new frame to send (ADR-586)
+(def- attach-frames (table/new))
+
+(defn- attach-repaint-if-due (display)
+  "Paint the last frame again when `display` forgot what it shows (a terminal continued
+after C-z, or resized back to its size) — the session sends a frame only when its model
+changed. Returns nil."
+  (let (due (get display :repaint-due?)
+        frame (table/get attach-frames (self) nil))
+    (when (and (fn? due) (due) frame) ((get display :draw) frame)))
+  nil)
 
 (defn- attach-display-receive (peer session display)
   "One message for the client loop when no window input was queued: a frame or control
@@ -971,7 +991,7 @@ window's `:close`, detach and end without painting."
         (do
           (attach-display-show display latest carried after)
           (attach-display-loop peer session display))
-      (= input :close) (send session [:detach])
+      (attach-quit-input? input) (send session [:detach])
       else
         (do
           (send session [:key input (display-key-held? display)])
@@ -981,6 +1001,7 @@ window's `:close`, detach and end without painting."
   "Paint `latest` with the skipped frames' one-shot ops `carried` appended, then apply the
 seam messages that came `after` it. Returns nil."
   ((get display :draw) (if (empty? carried) latest (into latest carried)))
+  (table/put attach-frames (self) latest)
   (attach-display-apply-all display after)
   nil)
 
@@ -1011,6 +1032,7 @@ them, else the OS clipboard. Its PRIMARY selection likewise (ADR-562): `client-p
       (let ([cols rows] ((get display :size))
             session (attach-handshake peer cols rows opts))
         (when session (monitor session) (attach-display-loop peer session display))
+        (table/put attach-frames (self) nil)
         ((get display :leave)))
       (catch e ((get display :leave)) (throw e)))))
 

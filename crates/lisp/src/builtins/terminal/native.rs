@@ -644,6 +644,45 @@ pub(in crate::builtins) fn term_invalidate(_: &[Value], _: EnvId, _: &mut Heap) 
     Ok(Value::nil())
 }
 
+/// `(term-suspend)` — give the terminal back and stop this process, as a shell's C-z stops a
+/// job (Emacs's `suspend-frame` in a terminal): the screen left (`term-leave`), SIGSTOP
+/// raised — the shell takes over until `fg` — and on continuing the screen taken again
+/// (`term-enter`), to be repainted whole. Unix only; returns nil. (ADR-586)
+pub(in crate::builtins) fn term_suspend(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
+    #[cfg(unix)]
+    {
+        term_leave(args, env, heap)?;
+        // SAFETY: raise only sends a signal to this process.
+        unsafe {
+            libc::raise(libc::SIGSTOP);
+        }
+        term_enter(args, env, heap)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (args, env, heap);
+        Err(LispError::runtime(
+            "term/suspend: this platform has no job control",
+        ))
+    }
+}
+
+/// `(term-refresh)` — after this process was stopped and continued by someone else
+/// (SIGSTOP, SIGCONT): raw mode back (a shell resets the tty when a job stops) and the next
+/// frame painted whole. Returns nil. (ADR-586)
+pub(in crate::builtins) fn term_refresh(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    crossterm::terminal::enable_raw_mode().map_err(term_err)?;
+    invalidate_screen();
+    Ok(Value::nil())
+}
+
+/// `(term-repaint-due)` — whether the next frame must be painted whole though the app's model
+/// did not change: the screen was forgotten (a resize, a continue, `term-invalidate`), so a
+/// loop that skips drawing an unchanged model must draw this time. (ADR-586)
+pub(in crate::builtins) fn term_repaint_due(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    Ok(Value::Bool(terminal_screen().shown.is_none()))
+}
+
 /// `(term-bg bg fg)` — the terminal's default face: `[:clear]` fills with `bg`, and a cell whose
 /// face names no `:bg` / `:fg` is drawn in `bg` / `fg` — the terminal's `gui/bg`, so a theme
 /// designed for a dark window is not drawn on a light terminal's own background. nil for

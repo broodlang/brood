@@ -54,7 +54,17 @@ impl Decoder {
     pub(super) fn feed(&mut self, bytes: &[u8], more_follows: bool, out: &mut Vec<Event>) {
         for (index, byte) in bytes.iter().enumerate() {
             self.pending.push(*byte);
+            // ESC ESC: the first is the Escape key, the second starts whatever follows (an
+            // Alt chord, a sequence, another Escape) — `\x1b\x1b[A` is Escape then Up
+            if self.pending == [0x1B, 0x1B] {
+                out.push(Event::Key(KeyCode::Esc.into()));
+                self.pending.remove(0);
+            }
             let input_available = more_follows || index + 1 < bytes.len();
+            if self.in_paste() {
+                self.feed_paste(out);
+                continue;
+            }
             match parse(&self.pending, input_available) {
                 Ok(None) => {}
                 Ok(Some(decoded)) => {
@@ -68,20 +78,61 @@ impl Decoder {
         }
     }
 
+    /// Whether a bracketed paste has begun (`ESC [ 2 0 0 ~`) and not yet ended. A paste is
+    /// never timed out — over ssh it arrives in pieces as slowly as the link likes — and
+    /// ends only at `ESC [ 2 0 1 ~`.
+    pub(super) fn in_paste(&self) -> bool {
+        self.pending.starts_with(PASTE_START)
+    }
+
+    /// One more byte of a paste: the whole paste once its end has come, else wait — handing
+    /// the text over in pieces of [`PASTE_PIECE`] bytes when it is that long, so a runaway
+    /// paste (its end lost) costs memory up to a bound, never more.
+    fn feed_paste(&mut self, out: &mut Vec<Event>) {
+        if self.pending.ends_with(PASTE_END) {
+            let body = &self.pending[PASTE_START.len()..self.pending.len() - PASTE_END.len()];
+            out.push(Event::Paste(String::from_utf8_lossy(body).to_string()));
+            self.pending.clear();
+        } else if self.pending.len() >= PASTE_START.len() + PASTE_PIECE + PASTE_END.len() {
+            // keep the bytes that may begin the end marker, and a character cut in two
+            let keep = PASTE_END.len() - 1;
+            let mut cut = self.pending.len() - keep;
+            while cut > PASTE_START.len() && (self.pending[cut] & 0b1100_0000) == 0b1000_0000 {
+                cut -= 1;
+            }
+            let body = &self.pending[PASTE_START.len()..cut];
+            out.push(Event::Paste(String::from_utf8_lossy(body).to_string()));
+            let rest = self.pending[cut..].to_vec();
+            self.pending = PASTE_START.to_vec();
+            self.pending.extend(rest);
+        }
+    }
+
     /// Whether a sequence is part-read, waiting for the rest of its bytes.
     pub(super) fn waiting(&self) -> bool {
         !self.pending.is_empty()
     }
 
     /// A part-read sequence that will not be completed — the read ended and nothing more
-    /// came: a lone ESC is the Escape key, anything else is dropped.
+    /// came: a lone ESC is the Escape key, anything else is dropped. A paste is never given
+    /// up this way ([`Decoder::in_paste`]).
     pub(super) fn flush(&mut self, out: &mut Vec<Event>) {
+        if self.in_paste() {
+            return;
+        }
         if self.pending == [0x1B] {
             out.push(Event::Key(KeyCode::Esc.into()));
         }
         self.pending.clear();
     }
 }
+
+const PASTE_START: &[u8] = b"\x1B[200~";
+const PASTE_END: &[u8] = b"\x1B[201~";
+
+/// The most of a paste held before it is handed over in pieces: a paste whose end marker
+/// was lost must not grow without bound (bytes, never time — ssh delivers at its own pace).
+const PASTE_PIECE: usize = 16 * 1024 * 1024;
 
 /// Decode a whole byte string, as one read with nothing following it — for the tests.
 #[cfg(test)]
@@ -692,7 +743,71 @@ mod tests {
             vec![pressed(KeyCode::Char('a'), CONTROL | ALT)]
         );
         assert_eq!(decode(b"\x1b"), vec![pressed(KeyCode::Esc, NONE)]);
-        assert_eq!(decode(b"\x1b\x1b"), vec![pressed(KeyCode::Esc, NONE)]);
+        // ESC ESC is Escape, and the second ESC goes on to start what follows
+        assert_eq!(
+            decode(b"\x1b\x1b"),
+            vec![pressed(KeyCode::Esc, NONE), pressed(KeyCode::Esc, NONE)]
+        );
+        assert_eq!(
+            decode(b"\x1b\x1b\x1b"),
+            vec![pressed(KeyCode::Esc, NONE); 3]
+        );
+        assert_eq!(
+            decode(b"\x1b\x1b[A"),
+            vec![pressed(KeyCode::Esc, NONE), pressed(KeyCode::Up, NONE)]
+        );
+        assert_eq!(
+            decode(b"\x1b\x1bf"),
+            vec![
+                pressed(KeyCode::Esc, NONE),
+                pressed(KeyCode::Char('f'), ALT)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_paste_is_never_timed_out_and_ends_only_at_its_end_marker() {
+        let mut decoder = Decoder::new();
+        let mut out = Vec::new();
+        // a stall right after the start marker, before any of the text
+        decoder.feed(b"\x1b[200~", false, &mut out);
+        decoder.flush(&mut out);
+        assert!(decoder.in_paste());
+        decoder.feed(b"first line\n", false, &mut out);
+        // the link went quiet: whatever gives up on a stalled sequence must not end a paste
+        assert!(decoder.in_paste());
+        decoder.flush(&mut out);
+        assert!(out.is_empty());
+        decoder.feed(b"\x1bnot a key", false, &mut out);
+        decoder.flush(&mut out);
+        assert!(out.is_empty());
+        decoder.feed(b" end\x1b[201~q", false, &mut out);
+        assert_eq!(
+            out,
+            vec![
+                Event::Paste("first line\n\x1bnot a key end".to_string()),
+                pressed(KeyCode::Char('q'), NONE)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_runaway_paste_is_handed_over_in_pieces() {
+        let mut decoder = Decoder::new();
+        let mut out = Vec::new();
+        decoder.feed(b"\x1b[200~", true, &mut out);
+        let piece = vec![b'x'; PASTE_PIECE + 10];
+        decoder.feed(&piece, true, &mut out);
+        assert_eq!(out.len(), 1);
+        decoder.feed(b"\x1b[201~", false, &mut out);
+        let total: usize = out
+            .iter()
+            .map(|event| match event {
+                Event::Paste(text) => text.len(),
+                _ => 0,
+            })
+            .sum();
+        assert_eq!(total, PASTE_PIECE + 10);
     }
 
     #[test]

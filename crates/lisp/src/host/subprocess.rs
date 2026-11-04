@@ -1034,10 +1034,17 @@ pub fn signal(id: u64, sig: &str) -> std::io::Result<()> {
             "hup" => libc::SIGHUP,
             "quit" => libc::SIGQUIT,
             "kill" => libc::SIGKILL,
+            // job control: a terminal app is stopped and continued with these (ADR-586)
+            "tstp" => libc::SIGTSTP,
+            "stop" => libc::SIGSTOP,
+            "cont" => libc::SIGCONT,
+            "winch" => libc::SIGWINCH,
             other => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    format!("unknown signal :{other} (one of :int :term :hup :quit :kill)"),
+                    format!(
+                        "unknown signal :{other} (one of :int :term :hup :quit :kill :tstp :stop :cont :winch)"
+                    ),
                 ));
             }
         };

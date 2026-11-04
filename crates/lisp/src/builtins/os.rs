@@ -807,10 +807,14 @@ pub(super) fn interrupt_taken(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult
 
 /// The signals a Brood process may trap, by the keyword it names them with.
 #[cfg(unix)]
-const TRAPPABLE_SIGNALS: [(&str, libc::c_int); 3] = [
+const TRAPPABLE_SIGNALS: [(&str, libc::c_int); 5] = [
     ("term", libc::SIGTERM),
     ("int", libc::SIGINT),
     ("hup", libc::SIGHUP),
+    // job control, for a full-screen terminal app that must give the terminal back before it
+    // stops and repaint after it continues (ADR-586)
+    ("tstp", libc::SIGTSTP),
+    ("cont", libc::SIGCONT),
 ];
 
 /// One trappable signal's trap.
@@ -841,17 +845,17 @@ impl Trap {
 /// reads it (it only writes the pipe), so a lock is safe, and it orders a trap against the
 /// reader thread lifting one.
 #[cfg(unix)]
-static SIGNAL_TRAPS: std::sync::Mutex<[Trap; 3]> = std::sync::Mutex::new(
+static SIGNAL_TRAPS: std::sync::Mutex<[Trap; 5]> = std::sync::Mutex::new(
     [const {
         Trap {
             subscriber: 0,
             prior: None,
         }
-    }; 3],
+    }; 5],
 );
 
 #[cfg(unix)]
-fn signal_traps() -> std::sync::MutexGuard<'static, [Trap; 3]> {
+fn signal_traps() -> std::sync::MutexGuard<'static, [Trap; 5]> {
     SIGNAL_TRAPS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -956,7 +960,7 @@ pub(super) fn trap_signal(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
             .position(|(n, _)| *n == name.as_str())
         else {
             return Err(LispError::runtime(format!(
-                "%trap-signal: cannot trap :{name} (expected :term, :int or :hup)"
+                "%trap-signal: cannot trap :{name} (expected :term, :int, :hup, :tstp or :cont)"
             )));
         };
         let subscriber = match arg(args, 1) {

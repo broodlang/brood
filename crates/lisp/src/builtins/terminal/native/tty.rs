@@ -92,6 +92,36 @@ impl TtyInput {
     }
 }
 
+/// How many SIGWINCHes this process has had: a resize is reported when it moves, even when
+/// the terminal is back at the size it was at the last look (A → B → A between two reads
+/// still repaints — the terminal reflowed the screen in between).
+static RESIZE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+extern "C" fn count_resize(_: libc::c_int) {
+    RESIZE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Count SIGWINCH from now on (once per process; the handler only bumps a counter, which is
+/// async-signal-safe). The keyboard reads [`resize_generation`].
+pub(super) fn watch_resizes() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        // SAFETY: a zeroed sigaction with a handler that touches only an atomic.
+        unsafe {
+            let handler: extern "C" fn(libc::c_int) = count_resize;
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = handler as usize as libc::sighandler_t;
+            action.sa_flags = libc::SA_RESTART;
+            libc::sigemptyset(&mut action.sa_mask);
+            libc::sigaction(libc::SIGWINCH, &action, std::ptr::null_mut());
+        }
+    });
+}
+
+pub(super) fn resize_generation() -> u64 {
+    RESIZE_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Whether `fd` has bytes to read, waiting up to `timeout` for some. An interrupted wait
 /// (a signal) is "nothing yet".
 pub(super) fn readable(fd: RawFd, timeout: Duration) -> io::Result<bool> {
