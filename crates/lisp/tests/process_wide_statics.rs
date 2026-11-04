@@ -157,6 +157,9 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     ("host/treesit.rs", "DECLARED", OneMachine),
     // Where each grammar in DYNAMIC was loaded from (ADR-583): written beside it, as wide.
     ("host/treesit.rs", "LOADED_FROM", OneMachine),
+    // How many times each language's grammar has loaded, which a held tree's reparse checks
+    // (ADR-583): a fact about the machine-wide DYNAMIC table, so as wide as it.
+    ("host/treesit.rs", "GRAMMAR_EPOCHS", OneMachine),
     // Facts of the binary: the std sources baked into it, and the signatures derived from
     // them (the stdlib id is a build constant).
     ("types/check.rs", "STD_REQUIRES", FactOfTheBinary),

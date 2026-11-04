@@ -1223,6 +1223,20 @@
       (assert= (language-grammar-problems :ruby {:faces {:method_definition :f}})
         '("node kind `method_definition` is not in the :ruby grammar")))))
 
+;; A grammar load moves only ITS language's epoch: a held Elixir tree still reparses
+;; incrementally after the HCL grammar loads. One runtime-wide counter made every held tree of
+;; every language parse afresh whenever any grammar loaded — a file of a new language opened.
+(when (and tsm-grammars? (file/exists? (str tsm-grammar-dir "libtree-sitter-hcl.so")))
+  (describe "a grammar load leaves other languages' trees incremental"
+    (test "an Elixir tree reparses incrementally across an HCL grammar load"
+      (let (src "x = 1\ny = 2\n"
+            tree (open-tree src :elixir)
+            _ (%tree-sitter-load-grammar (str tsm-grammar-dir "libtree-sitter-hcl.so") :hcl)
+            next (update-tree tree "x = 1\ny = 23\n" :elixir))
+        (is (vector? (tree-changes next)))
+        (free-tree tree)
+        (free-tree next)))))
+
 (describe "grammar-info without a grammar"
   (test "raises, as a parse would"
     (is (check-allow :discarded-catch

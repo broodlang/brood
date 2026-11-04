@@ -1712,15 +1712,24 @@ fn normalized_pieces_keep_empty(mut ranges: Vec<(usize, usize)>) -> Vec<(usize, 
 // A gone handle still reads as `nil` from every query and reparsing from it is a full
 // parse — but now only its holder can make it gone.
 
-/// Bumped by every `%tree-sitter-load-grammar`. A tree parsed under an older grammar is
-/// never handed to the new grammar's parser as the tree to reparse from: that is not stale
-/// but ill-formed, and fails the parse outright (see `load_grammar`).
+/// Per language, bumped by every load of that language's grammar. A tree parsed under an
+/// older grammar is never handed to the new grammar's parser as the tree to reparse from:
+/// that is not stale but ill-formed, and fails the parse outright (see `load_grammar`).
+///
+/// Per LANGUAGE, not one counter for the runtime: loading the HCL grammar says nothing about
+/// an Elixir tree, and a single counter made every held tree of every language reparse from
+/// scratch whenever any grammar loaded — which, with grammars declared and loaded at first
+/// use (ADR-481), is whenever a file of a new language is first opened (ADR-583).
 #[cfg(feature = "treesit")]
-static GRAMMAR_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static GRAMMAR_EPOCHS: LazyLock<Mutex<HashMap<String, u64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[cfg(feature = "treesit")]
-fn grammar_epoch() -> u64 {
-    GRAMMAR_EPOCH.load(std::sync::atomic::Ordering::Acquire)
+fn grammar_epoch(lang: &str) -> u64 {
+    crate::core::sync::lock(&GRAMMAR_EPOCHS)
+        .get(lang)
+        .copied()
+        .unwrap_or(0)
 }
 
 /// One handle's document: the tree, the text it was parsed from (a rope clone — ropey
@@ -1958,7 +1967,7 @@ pub fn tree_open(text: ropey::Rope, lang: &str, owner: u64) -> Result<u64, LispE
             tree,
             text,
             lang: lang.to_string(),
-            epoch: grammar_epoch(),
+            epoch: grammar_epoch(lang),
             changed: None,
         },
         owner,
@@ -1983,7 +1992,7 @@ pub fn tree_reparse(
     // Resolved before the epoch is read: a declared grammar's first use (re)loads it here and
     // moves the epoch, and the old tree must then not be handed to the new grammar's parser.
     language_for(lang)?;
-    let previous = tree_entry(old).filter(|e| e.lang == lang && e.epoch == grammar_epoch());
+    let previous = tree_entry(old).filter(|e| e.lang == lang && e.epoch == grammar_epoch(lang));
     let Some(previous) = previous else {
         return tree_open(text, lang, owner); // gone, another language, or another grammar
     };
@@ -2402,8 +2411,10 @@ fn load_library(
     crate::core::sync::lock(&TREE_CACHE).retain(|(l, _, _)| l != lang);
     // Held tree handles keep answering queries from the trees they have — those are valid
     // trees, merely from the old grammar — but none is reparsed FROM again, for the reason
-    // above: a reparse after this sees a newer epoch and parses afresh.
-    GRAMMAR_EPOCH.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    // above: a reparse after this sees a newer epoch for this language and parses afresh.
+    *crate::core::sync::lock(&GRAMMAR_EPOCHS)
+        .entry(lang.to_string())
+        .or_insert(0) += 1;
     Ok((abi, language))
 }
 
