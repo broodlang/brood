@@ -442,6 +442,71 @@
       (assert= (buffer-search-backward b "abc" 0) nil)
       (assert= (buffer-search-backward b "zzz" 7) nil))))
 
+(defn- undo-limit-type-chars (buffer n)
+  "`buffer` with `n` single-char inserts, each its own undo step."
+  (fold (range n) buffer (fn (acc _) (insert acc "x"))))
+
+(describe "buffer undo limit"
+  (test "each step is priced once the next is pushed, and the size is their sum"
+    (let (b (undo-limit-type-chars (make-buffer "") 3)
+          history (get b :undo))
+      (assert= (count history) 3)
+      (assert= (get (first history) :cost) nil)
+      (assert= (vec (map (rest history) :cost)) [1025 1025])
+      (assert= (get b :undo-size) 2050)))
+  (test "a large step costs the text it changed"
+    (let (b (-> (make-buffer "") (insert (string/repeat "y" 5000)) (insert "z")))
+      (assert= (get (second (get b :undo)) :cost) (+ 1024 5000))))
+  (test "past the strong limit the oldest steps go until the rest fits the limit"
+    (binding (editor/buffer/*undo-limit* 3000 editor/buffer/*undo-strong-limit* 5000)
+      (let (b (undo-limit-type-chars (make-buffer "") 40))
+        (is (<= (get b :undo-size) 5000))
+        (is (< (count (get b :undo)) 8))
+        ;; undo still walks back as far as what was kept, one char per step
+        (let (oldest (fold (range (count (get b :undo)))
+                       (undo-start b)
+                       (fn (acc _) (undo-next acc))))
+          (assert= (buffer-length oldest) (- 40 (count (get b :undo))))))))
+  (test "the size the trim leaves is the recount of what it kept"
+    (binding (editor/buffer/*undo-limit* 3000 editor/buffer/*undo-strong-limit* 5000)
+      (let (b (undo-limit-type-chars (make-buffer "") 40))
+        (assert= (get b :undo-size)
+          (fold (get b :undo) 0 (fn (acc snapshot) (+ acc (or (get snapshot :cost) 0))))))))
+  (test "a trim drops whole groups: every kept state is between two groups"
+    (binding (editor/buffer/*undo-limit* 3000 editor/buffer/*undo-strong-limit* 5000)
+      (let (b (fold (range 30)
+                (make-buffer "")
+                (fn (acc _) (undo-group acc (fn (inner) (insert (insert inner "a") "b"))))))
+        (is (< (count (get b :undo)) 30))
+        (is (every? (get b :undo) (fn (snapshot) (math/even? (text/length (get snapshot :rope))))))
+        (assert= (buffer-text (undo b)) (string/repeat "ab" 29)))))
+  (test "the newest step is kept whatever it costs"
+    (binding (editor/buffer/*undo-limit* 0 editor/buffer/*undo-strong-limit* 0)
+      (let (b (undo-limit-type-chars (make-buffer "") 10))
+        (assert= (count (get b :undo)) 1)
+        (assert= (buffer-text (undo b)) "xxxxxxxxx"))))
+  (test "an undo run in progress loses the same oldest steps"
+    (let (b (undo-limit-type-chars (make-buffer "") 20)
+          running (undo-next (undo-start b))
+          trimmed (binding (editor/buffer/*undo-limit* 3000 editor/buffer/*undo-strong-limit* 3000)
+                    (trim-undo running)))
+      (is (< (count (get trimmed :undo)) (count (get running :undo))))
+      (is (<= (count (get trimmed :pending-undo)) (count (get trimmed :undo))))
+      ;; walking the rest of the run lands on states the trimmed history still holds
+      (let (walked (fold (range 30) trimmed (fn (acc _) (undo-next acc))))
+        (is (includes? (map (get walked :undo) buffer-text) (buffer-text walked))))))
+  (test "a strong limit below the limit is read as the limit"
+    (binding (editor/buffer/*undo-limit* 5000 editor/buffer/*undo-strong-limit* 1000)
+      (let (b (undo-limit-type-chars (make-buffer "") 40))
+        (is (<= (get b :undo-size) 5000))
+        ;; the history fills to the limit and stays there, rather than being cut to nothing
+        (is (>= (count (get b :undo)) 4)))))
+  (test "a nil limit keeps everything"
+    (binding (editor/buffer/*undo-limit* nil)
+      (assert= (count (get (undo-limit-type-chars (make-buffer "") 50) :undo)) 50)))
+  (test "disabling undo zeroes the size"
+    (assert= (get (disable-undo (undo-limit-type-chars (make-buffer "") 3)) :undo-size) 0)))
+
 ; amalgamated: one step
 (describe "buffer undo (tree)"
   (test "undo restores the text and point before the last edit"

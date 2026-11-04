@@ -714,6 +714,100 @@ command) into one undo, the Emacs way — keeping this primitive's default simpl
     (count (get (editor/buffer/insert (editor/buffer/amalgamate-undo (editor/buffer/insert (editor/buffer/make-buffer \"\") \"a\")) \"b\") :undo))   ;=> 1"
   (assoc buf :undo-amalgamate true))
 
+;; ---- the undo limit (Emacs's undo-limit / undo-strong-limit) ------------------
+;; A history nobody trims is a memory leak over a long session, so `:undo` is capped by
+;; SIZE. A snapshot shares every rope leaf its edit did not touch, so what it alone keeps
+;; alive is the text its step changed plus the leaf and path that edit copied: its COST is
+;; the changed chars (the old side and the new, `text/changed-range` against the state
+;; that came after it) plus `*undo-step-cost*`. The cost is known once the NEXT snapshot is
+;; pushed, so it is stamped on the old head then (`:cost`), and the buffer keeps the
+;; running sum as `:undo-size`.
+;;
+;; Trimming is Emacs's two limits: nothing happens until the history passes
+;; `*undo-strong-limit*`, then the oldest snapshots go until what is left fits
+;; `*undo-limit*` — one O(history) pass per (strong - limit) worth of edits, never per
+;; keystroke. A snapshot IS one undo group (amalgamation and `undo-group` fold a run into
+;; one), so dropping whole snapshots never cuts a group in half; the newest group is kept
+;; whatever its size. Only an EDIT trims: an undo run walks the oldest entries, which are
+;; what a trim drops, so its own steps never trim and a run reaches the end of a history at
+;; the limit. Both limits are `defdyn`s: an editor binds them, or re-`def`s them from its
+;; settings (every process of the image then sees them); nil turns the cap off.
+
+(defdyn editor/buffer/*undo-limit* 2000000)
+;; What a trimmed history is cut back to, in cost units (≈ chars). See the section note.
+
+(defdyn editor/buffer/*undo-strong-limit* 3000000)
+;; The size a history may reach before it is trimmed back to `*undo-limit*`.
+
+(def *undo-step-cost* 1024)
+;; What one snapshot costs beyond the text its step changed: the rope leaf (ropey's are up
+;; to ~1 KB) and the internal nodes its edit copied, which the snapshot alone keeps alive.
+
+(defn undo-cost (older newer)
+  "What snapshot (or buffer) `older` costs to keep on the undo history when `newer` is the
+state after it: the chars its step changed, old side and new, plus `*undo-step-cost*`.
+
+    (editor/buffer/undo-cost (editor/buffer/make-buffer \"abcd\") (editor/buffer/make-buffer \"abXcd\"))   ;=> 1025"
+  (let (range (text/changed-range (get older :rope) (get newer :rope)))
+    (if (nil? range)
+      *undo-step-cost*
+      (let ([start old-end new-end] range)
+        (+ *undo-step-cost* (- old-end start) (- new-end start))))))
+
+(defn- buffer-undo-keep (history limit)
+  "How many snapshots of `history` (newest first) fit in `limit`: their summed `:cost` stays
+within it, and the newest is kept whatever it costs. Answers `[kept size]`."
+  (letrec (walk (fn (entries kept size)
+                  (if (empty? entries)
+                    [kept size]
+                    (let (next (+ size (or (get (first entries) :cost) 0)))
+                      (if (and (> kept 0) (> next limit))
+                        [kept size]
+                        (walk (rest entries) (inc kept) next))))))
+    (walk history 0 0)))
+
+(defn trim-undo (buf:buffer -> buffer)
+  "`buf` with its undo history cut back to `*undo-limit*` when it has grown past
+`*undo-strong-limit*` — the oldest snapshots dropped, whole (each is one undo group), the
+newest always kept. A current undo run (`:pending-undo`, a tail of the history) loses the
+same oldest entries, so it never walks into a dropped one. Every edit calls this (an undo
+step does not, so a run can walk back through all of a history at the limit);
+call it after lowering the limits to apply them at once.
+
+    (count (get (binding (editor/buffer/*undo-limit* 0 editor/buffer/*undo-strong-limit* 0) (editor/buffer/trim-undo (editor/buffer/insert (editor/buffer/insert (editor/buffer/make-buffer \"\") \"a\") \"b\"))) :undo))   ;=> 1"
+  (let (limit *undo-limit*
+        ;; never below the limit: a strong limit under it would trim on every edit and drop
+        ;; nothing, an O(history) pass a keystroke
+        strong (when limit (math/max limit (or *undo-strong-limit* limit)))
+        history (or (get buf :undo) ()))
+    (if (or (nil? limit) (<= (or (get buf :undo-size) 0) strong))
+      buf
+      (let ([kept size] (buffer-undo-keep history limit)
+            dropped (- (count history) kept)
+            pending (or (get buf :pending-undo) ()))
+        (if (= dropped 0)
+          (assoc buf :undo-size size)
+          (assoc buf
+            :undo (apply list (take history kept))
+            :undo-size size
+            :pending-undo (apply list (take pending (math/max 0 (- (count pending) dropped))))))))))
+
+(defn- buffer-undo-cons (buf history snapshot)
+  "`buf` with `snapshot` pushed onto `history` as its new head: the old head's `:cost` is
+stamped now that the state after it is known (`snapshot`), and `:undo-size` grows by it."
+  (let (head (first history)
+        priced? (or (nil? head) (get head :cost))
+        cost (if priced? 0 (undo-cost head snapshot))
+        history (if priced? history (cons (assoc head :cost cost) (rest history))))
+    (assoc buf :undo (cons snapshot history) :undo-size (+ (or (get buf :undo-size) 0) cost))))
+
+(defn- buffer-undo-push (buf history snapshot)
+  "[[buffer-undo-cons]], then the history trimmed when it passed the strong limit
+(`trim-undo`) — what every EDIT records through. An undo step does not trim: the run it is
+part of walks the oldest entries, which are the ones a trim drops, so a run at the limit
+would eat the history it is undoing. A run at most doubles the history; the next edit trims."
+  (trim-undo (buffer-undo-cons buf history snapshot)))
+
 (defn- buffer-record-change (buf:buffer -> buffer)
   "Record that `buf`'s text is about to change — called by EVERY editing op, and only by
 one that really changes the text. Two facts follow from a change, and this is the one place
@@ -734,9 +828,9 @@ restarts it whenever the previous command wasn't an undo.)"
         (assoc buf
           :undo-amalgamate false)
       else
-        (assoc buf
-          :undo (cons (buffer-snapshot buf) (or (get buf :undo) ()))
-          :undo-amalgamate false))))
+        (buffer-undo-push (assoc buf :undo-amalgamate false)
+          (or (get buf :undo) ())
+          (buffer-snapshot buf)))))
 
 (defn undo-group (buf:buffer f: (buffer -> buffer) -> buffer)
   "Apply `f` (`buffer -> buffer`) to `buf` as ONE undo step, however many edits it makes:
@@ -750,15 +844,17 @@ recorded anything, all of it is replaced by one snapshot of `buf`. O(1) either w
 history is never walked. An armed `amalgamate-undo` still applies to the group as a whole.
 
     (count (get (editor/buffer/undo-group (editor/buffer/make-buffer \"ab\") (fn (b) (editor/buffer/insert (editor/buffer/insert b \"x\") \"y\"))) :undo))   ;=> 1"
-  (let (after (f (assoc buf :undo () :undo-amalgamate false))
-        history (or (get buf :undo) ()))
+  (let (after (f (assoc buf :undo () :undo-size 0 :undo-amalgamate false))
+        history (or (get buf :undo) ())
+        ;; what `f` recorded is thrown away below, so its size goes with it
+        after (assoc after :undo-size (or (get buf :undo-size) 0)))
     (cond
       (empty? (get after :undo))
         (assoc after :undo history :undo-amalgamate (get buf :undo-amalgamate))
       (get buf :undo-disabled) (assoc after :undo history)
       (and (get buf :undo-amalgamate) (not (empty? history)))
         (assoc after :undo history :undo-amalgamate false)
-      else (assoc after :undo (cons (buffer-snapshot buf) history) :undo-amalgamate false))))
+      else (buffer-undo-push (assoc after :undo-amalgamate false) history (buffer-snapshot buf)))))
 
 ;; ---- modified: does the text differ from the file? ---------------------------
 ;; The buffer owns this, because only the buffer sees every change: an editor that kept the
@@ -799,7 +895,7 @@ bound — editing ops on the result record nothing, so undo stays a no-op. Like 
 `buffer-disable-undo`.
 
     (get (editor/buffer/insert (editor/buffer/disable-undo (editor/buffer/make-buffer \"\")) \"a\") :undo)   ;=> nil"
-  (assoc buf :undo-disabled true :undo () :pending-undo ()))
+  (assoc buf :undo-disabled true :undo () :undo-size 0 :pending-undo ()))
 
 (defn- buffer-restore (buf snap)
   "Restore the `{:rope :point :mark}` (and `:markers`, `:editable`) of `snap` into `buf`,
@@ -837,10 +933,11 @@ leaves the buffer unmodified.
     (if (empty? p)
       buf
       (let (restored (buffer-log-restore buf (buffer-restore buf (first p))))
-        (assoc restored
-          :undo (cons (buffer-snapshot buf) (or (get buf :undo) ()))
-          :pending-undo (rest p)
-          :modified (not (= (get restored :rope) (get buf :saved-rope))))))))
+        (buffer-undo-cons (assoc restored
+                            :pending-undo (rest p)
+                            :modified (not (= (get restored :rope) (get buf :saved-rope))))
+          (or (get buf :undo) ())
+          (buffer-snapshot buf))))))
 
 ;; ---- undo in a region: undo only the lines you selected ----------------------
 ;; Emacs's `undo-in-region`, and it costs almost nothing here — because of what
@@ -995,7 +1092,9 @@ whole thing back.
                   changed)
               ;; the consumed change is dropped from history and OUR pre-state sits on
               ;; top, so a plain `undo` still takes this step back while another region
-              ;; undo continues backwards through the same lines.
+              ;; undo continues backwards through the same lines. The consumed entry's cost
+              ;; stays in `:undo-size` — an over-count, so a trim comes early, and the trim
+              ;; recounts the history exactly.
               :undo (cons (assoc (first (get pushed :undo)) :region-undo true) tail)
               :point (math/min (get buf :point) (text/length rope))
               ;; `bounds` being non-nil says the mark is set; the `or` says so to the
