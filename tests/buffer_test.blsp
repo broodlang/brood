@@ -442,6 +442,92 @@
       (assert= (buffer-search-backward b "abc" 0) nil)
       (assert= (buffer-search-backward b "zzz" 7) nil))))
 
+(defn- undo-limit-type-chars (buffer n)
+  "`buffer` with `n` single-char inserts, each its own undo step."
+  (fold (range n) buffer (fn (acc _) (insert acc "x"))))
+
+(describe "buffer undo limit"
+  (test "each step is priced once the next is pushed, and the size is their sum"
+    (let (b (undo-limit-type-chars (make-buffer "") 3)
+          history (get b :undo))
+      (assert= (count history) 3)
+      (assert= (get (first history) :cost) nil)
+      (assert= (vec (map (rest history) :cost)) [1025 1025])
+      (assert= (get b :undo-size) 2050)))
+  (test "a large step costs the text it changed"
+    (let (b (-> (make-buffer "") (insert (string/repeat "y" 5000)) (insert "z")))
+      (assert= (get (second (get b :undo)) :cost) (+ 1024 5000))))
+  (test "past the strong limit the oldest steps go until the rest fits the limit"
+    (binding (editor/buffer/*undo-limit* 3000 editor/buffer/*undo-strong-limit* 5000)
+      (let (b (undo-limit-type-chars (make-buffer "") 40))
+        (is (<= (get b :undo-size) 5000))
+        (is (< (count (get b :undo)) 8))
+        ;; undo still walks back as far as what was kept, one char per step
+        (let (oldest (fold (range (count (get b :undo)))
+                       (undo-start b)
+                       (fn (acc _) (undo-next acc))))
+          (assert= (buffer-length oldest) (- 40 (count (get b :undo))))))))
+  (test "the size the trim leaves is the recount of what it kept"
+    (binding (editor/buffer/*undo-limit* 3000 editor/buffer/*undo-strong-limit* 5000)
+      (let (b (undo-limit-type-chars (make-buffer "") 40))
+        (assert= (get b :undo-size)
+          (fold (get b :undo) 0 (fn (acc snapshot) (+ acc (or (get snapshot :cost) 0))))))))
+  (test "a trim drops whole groups: every kept state is between two groups"
+    (binding (editor/buffer/*undo-limit* 3000 editor/buffer/*undo-strong-limit* 5000)
+      (let (b (fold (range 30)
+                (make-buffer "")
+                (fn (acc _) (undo-group acc (fn (inner) (insert (insert inner "a") "b"))))))
+        (is (< (count (get b :undo)) 30))
+        (is (every? (get b :undo) (fn (snapshot) (math/even? (text/length (get snapshot :rope))))))
+        (assert= (buffer-text (undo b)) (string/repeat "ab" 29)))))
+  (test "the newest step is kept whatever it costs"
+    (binding (editor/buffer/*undo-limit* 0 editor/buffer/*undo-strong-limit* 0)
+      (let (b (undo-limit-type-chars (make-buffer "") 10))
+        (assert= (count (get b :undo)) 1)
+        (assert= (buffer-text (undo b)) "xxxxxxxxx"))))
+  (test "a group's own trim leaves the outer undo run alone"
+    ;; a run in progress, then a group whose own edits pass the strong limit: the group's
+    ;; trim drops ITS steps, which were never the outer run's
+    (let (b (undo-limit-type-chars (make-buffer "") 2)
+          running (undo-next (undo-start b))
+          grouped (binding (editor/buffer/*undo-limit* 5000 editor/buffer/*undo-strong-limit* 5000)
+                    (undo-group running
+                      (fn (inner) (fold (range 10) inner (fn (acc _) (insert acc "y")))))))
+      (is (> (count (get running :pending-undo)) 0))
+      (assert= (count (get grouped :pending-undo)) (count (get running :pending-undo)))))
+  (test "a region undo whose record trims keeps the size the recount of its history"
+    ;; the region is the LAST line: the consumed change is the head, and the rest of the
+    ;; history is what the record's trim cut
+    (let (b (fold (range 8) (make-buffer "") (fn (acc _) (insert acc "x\n")))
+          length (buffer-length b)
+          region (binding (editor/buffer/*undo-limit* 3100 editor/buffer/*undo-strong-limit* 3100)
+                   (undo-in-region (assoc b :mark (- length 2) :point length))))
+      (assert= (buffer-text region) "x\nx\nx\nx\nx\nx\nx\n")
+      (is (< (count (get region :undo)) (count (get b :undo))))
+      (assert= (get region :undo-size)
+        (fold (get region :undo) 0 (fn (acc snapshot) (+ acc (or (get snapshot :cost) 0)))))))
+  (test "an undo run in progress loses the same oldest steps"
+    (let (b (undo-limit-type-chars (make-buffer "") 20)
+          running (undo-next (undo-start b))
+          trimmed (binding (editor/buffer/*undo-limit* 3000 editor/buffer/*undo-strong-limit* 3000)
+                    (trim-undo running)))
+      (is (< (count (get trimmed :undo)) (count (get running :undo))))
+      (is (<= (count (get trimmed :pending-undo)) (count (get trimmed :undo))))
+      ;; walking the rest of the run lands on states the trimmed history still holds
+      (let (walked (fold (range 30) trimmed (fn (acc _) (undo-next acc))))
+        (is (includes? (map (get walked :undo) buffer-text) (buffer-text walked))))))
+  (test "a strong limit below the limit is read as the limit"
+    (binding (editor/buffer/*undo-limit* 5000 editor/buffer/*undo-strong-limit* 1000)
+      (let (b (undo-limit-type-chars (make-buffer "") 40))
+        (is (<= (get b :undo-size) 5000))
+        ;; the history fills to the limit and stays there, rather than being cut to nothing
+        (is (>= (count (get b :undo)) 4)))))
+  (test "a nil limit keeps everything"
+    (binding (editor/buffer/*undo-limit* nil)
+      (assert= (count (get (undo-limit-type-chars (make-buffer "") 50) :undo)) 50)))
+  (test "disabling undo zeroes the size"
+    (assert= (get (disable-undo (undo-limit-type-chars (make-buffer "") 3)) :undo-size) 0)))
+
 ; amalgamated: one step
 (describe "buffer undo (tree)"
   (test "undo restores the text and point before the last edit"
@@ -643,6 +729,48 @@
       (assert= (eol-encode (:text decoded) :crlf) "x\r\n\r\ny")
       (assert= (eol-decode "") {:text "" :eol :lf})
       (assert= (eol-decode "lone\r") {:text "lone\r" :eol :lf})))
+  ;; The byte-order mark: Emacs's utf-8-with-signature — off the text, back on save.
+  (test "a file opening with a byte-order mark reads without it and saves with it again"
+    (let (path (str (temp-dir "brood-buf-") ".txt"))
+      (file/spit path "\u{feff}one\ntwo\n")
+      (let (b (buffer-from-file path))
+        (assert= (buffer-text b) "one\ntwo\n")
+        (assert= (buffer-length b) 8)
+        (is (buffer-bom? b))
+        (is (not (buffer-modified? b)))
+        (save-buffer (-> b end-of-buffer (insert "three\n")))
+        (assert= (file/slurp path) "\u{feff}one\ntwo\nthree\n"))))
+  (test "a byte-order mark and CRLF together both go back"
+    (let (path (str (temp-dir "brood-buf-") ".txt"))
+      (file/spit path "\u{feff}a\r\nb\r\n")
+      (let (b (buffer-from-file path))
+        (assert= (buffer-text b) "a\nb\n")
+        (is (buffer-bom? b))
+        (assert= (buffer-eol b) :crlf)
+        (save-buffer b)
+        (assert= (file/slurp path) "\u{feff}a\r\nb\r\n"))))
+  (test "a file without one gains none, and a mark past the start is text"
+    (let (path (str (temp-dir "brood-buf-") ".txt"))
+      (file/spit path "a\u{feff}b\n")
+      (let (b (buffer-from-file path))
+        (is (not (buffer-bom? b)))
+        (assert= (buffer-text b) "a\u{feff}b\n")
+        (save-buffer b)
+        (assert= (file/slurp path) "a\u{feff}b\n"))))
+  (test "revert-buffer takes up the file's byte-order mark as it is now"
+    (let (path (str (temp-dir "brood-buf-") ".txt"))
+      (file/spit path "x\n")
+      (let (b (buffer-from-file path)
+            _ (file/spit path "\u{feff}y\n")
+            reverted (revert-buffer b))
+        (assert= (buffer-text reverted) "y\n")
+        (is (buffer-bom? reverted))
+        (file/spit path "z\n")
+        (is (not (buffer-bom? (revert-buffer reverted)))))))
+  (test "file-text-decode and file-text-encode are inverses"
+    (assert= (file-text-decode "\u{feff}x\r\ny") {:text "x\ny" :eol :crlf :bom true})
+    (assert= (file-text-encode "x\ny" :crlf true) "\u{feff}x\r\ny")
+    (assert= (file-text-decode "") {:text "" :eol :lf :bom false}))
   (test "a buffer with no file, or never stamped, has not changed on disk"
     (is (not (buffer-file-changed? (make-buffer "x"))))
     (is (not (buffer-file-changed? (make-buffer "x" "n" "/nowhere/at/all")))))

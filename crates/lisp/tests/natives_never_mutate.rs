@@ -40,6 +40,8 @@ const EFFECTFUL: &[&str] = &[
     "%clipboard-image",
     "%clipboard-set",
     "%clipboard-set-image",
+    "%primary-get",
+    "%primary-set",
     "%gui-bg!",
     "%gui-cell-size",
     "%gui-close",

@@ -750,14 +750,28 @@
     ("c" (assoc m :sent (editor/serve/client-clipboard-set "copied")))
     ("v" (assoc m :asked (editor/serve/client-clipboard-ask)))
     ("+" (assoc m :n (inc (get m :n 0))))
+    ;; the PRIMARY pair (ADR-562): a highlight, and a middle click's ask
+    ("h" (assoc m :sent (editor/serve/client-primary-set "highlighted")))
+    ("m" (assoc m :asked (editor/serve/client-primary-ask)))
     ([:clipboard ref text] (if (and (not (nil? ref)) (= ref (get m :asked)))
                              (assoc m :clip (or text "nothing") :asked nil)
                              (assoc m :ignored (inc (get m :ignored 0)))))
+    ([:primary ref text] (if (and (not (nil? ref)) (= ref (get m :asked)))
+                           (assoc m :clip (str "primary " (or text "nothing")) :asked nil)
+                           (assoc m :ignored (inc (get m :ignored 0)))))
     (_ m)))
 
 (defn clip-attach (mgr)
   ;; attach the test process as the client; the session pid, its first frame taken
   (send mgr [:attach (self) 80 24])
+  (let (session (receive ([:attached s] s) (after test/*wait-ms* nil)))
+    (receive ([:frame _] nil) (after test/*wait-ms* nil))
+    session))
+
+(defn clip-attach-can (mgr)
+  ;; attach the test process as a client that says it handles PRIMARY (ADR-562), as this
+  ;; runtime's `attach` does
+  (send mgr [:attach (self) 80 24 {:can [:primary]}])
   (let (session (receive ([:attached s] s) (after test/*wait-ms* nil)))
     (receive ([:frame _] nil) (after test/*wait-ms* nil))
     session))
@@ -802,8 +816,56 @@
   (test "outside a served session there is no client to ask"
     (assert= [(editor/serve/served-client)
                (editor/serve/client-clipboard-set "x")
-               (editor/serve/client-clipboard-ask 0)]
-      [nil nil nil]))
+               (editor/serve/client-clipboard-ask 0)
+               (editor/serve/client-primary-set "x")
+               (editor/serve/client-primary-ask 0)]
+      [nil nil nil nil nil]))
+
+  (test "a highlight in the session owns its client's PRIMARY (ADR-562)"
+    (let (mgr (spawn (editor/serve/serve-manager (fn () {}) clip-view clip-up))
+          session (clip-attach-can mgr))
+      (send session [:key "h"])
+      (assert= (receive ([:primary-set text] text) (after test/*wait-ms* :none)) "highlighted")
+      (exit session :kill)))
+
+  (test "a middle click asks for the client's PRIMARY, answered as an event"
+    (let (mgr (spawn (editor/serve/serve-manager (fn () {}) clip-view clip-up))
+          session (clip-attach-can mgr))
+      (send session [:key "m"])
+      (let (question (receive ([:primary-get from asked] [from asked]) (after test/*wait-ms* nil)))
+        (send (first question) [:primary (second question) "selected there"]))
+      (assert= (await-frame-text "n=0 clip=primary selected there ignored=0")
+        "n=0 clip=primary selected there ignored=0")
+      (exit session :kill)))
+
+  (test "a client that does not say it can is sent no PRIMARY message at all"
+    ;; an older client: its window would ship one back as a key, its terminal let them pile
+    (let (mgr (spawn (editor/serve/serve-manager (fn () {}) clip-view clip-up))
+          session (clip-attach mgr))
+      (send session [:key "h"])
+      (send session [:key "m"])
+      (send session [:key "+"])
+      ;; the `+` drawn: the two keys before it were folded, and asked nothing of us
+      (assert= (await-frame-text "n=1 clip=none ignored=0") "n=1 clip=none ignored=0")
+      (assert= (receive ([:primary-set _] :sent) ([:primary-get _ _] :asked) (after 0 :nothing))
+        :nothing)
+      (exit session :kill)))
+
+  (test "the window client sets and answers through its display's PRIMARY"
+    (let (me (self)
+          asked (ref))
+      (let (seen (drive-backlog (fn (me)
+                                  {:draw (fn (f) nil)
+                                   :leave (fn () nil)
+                                   :primary-set (fn (text) (send me [:set-primary text]))
+                                   :primary-get (fn () "highlighted on the client")})
+                   [[:primary-set "drag"] [:primary-get me asked]])
+            answer (or (seq/find seen (fn (message) (= (first message) :primary)))
+                     (receive
+                       ([:primary ^asked text] [:primary asked text])
+                       (after test/*wait-ms* :none))))
+        (assert= (first seen) [:set-primary "drag"])
+        (assert= answer [:primary asked "highlighted on the client"]))))
 
   (test "the window client sets and answers through its display's clipboard"
     (let (me (self)

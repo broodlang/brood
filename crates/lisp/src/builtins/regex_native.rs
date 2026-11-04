@@ -1123,10 +1123,16 @@ fn pike_search(
 /// window, loses to `a` — wrongly). Our Pike VM rather than `meta`, because only a simulation
 /// of the NFA can say a thread was still running; look-around sees the haystack past the
 /// input's end, so the window's last character is judged as the text has it.
+///
+/// `last` says the input's end is as far as any match may reach — the text's end, or a search
+/// bound (ADR-554). A thread waiting there for more text can then never get it, so it is no
+/// reason to read on: it is passed over and a match ending at the end, behind it in priority,
+/// is the answer (`ü+` over a window that ends the text is all of it, not all but its last).
 pub(super) fn pike_settled(
     nfa: &thompson::NFA,
     input: &Input<'_>,
     starts_end: usize,
+    last: bool,
     poll: &mut InterruptPoll,
 ) -> Result<(Option<(usize, usize)>, bool), LispError> {
     let start = nfa.start_anchored();
@@ -1172,7 +1178,7 @@ pub(super) fn pike_settled(
                         found = match_of(current.slots_of(state), at);
                         return Ok((found, false));
                     }
-                    State::ByteRange { .. } | State::Sparse(_) | State::Dense(_) => {
+                    State::ByteRange { .. } | State::Sparse(_) | State::Dense(_) if !last => {
                         return Ok((found, true));
                     }
                     _ => {}

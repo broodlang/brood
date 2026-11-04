@@ -357,6 +357,18 @@
         (tcp/close c)
         (tcp/close ls)))))
 
+;; ADR-559: the one-shot client promised `:status 0` for a transport failure, but a connection
+;; that could not be made raised out of `tcp/connect` — so a registry that was down threw past
+;; the package client's status checks instead of answering why.
+(describe "http: a connection that cannot be made is a :status 0 response, not a raise"
+  (test "nothing listening"
+    (let (listener (tcp/listen "127.0.0.1" 0)
+          port (tcp/local-port listener)
+          _ (tcp/close listener)
+          response (http/fetch (str "http://127.0.0.1:" port "/")))
+      (assert= (:status response) 0)
+      (is (includes? (:error response) "Connection refused")))))
+
 (describe "http: a binary request body survives byte-faithfully"
   ;; read-request reads in binary mode, so a POST body containing bytes that
   ;; aren't valid UTF-8 (0xFF 0x80) reaches the handler intact — the old text-mode

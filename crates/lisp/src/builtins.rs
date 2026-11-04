@@ -216,6 +216,10 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     treesit::register_injections(&mut primitives);
     // And again: handing a held tree to another process (ADR-495).
     treesit::register_tree_ownership(&mut primitives);
+    // And again: where the glyphless characters are in a string (ADR-556).
+    editor_native::register_glyphless(&mut primitives);
+    // And again: whether the GUI is headless, asked before a font-engine query (ADR-557).
+    gui_fonts::register_headless(&mut primitives);
 }
 
 #[cfg(test)]

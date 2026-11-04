@@ -5053,6 +5053,18 @@ tiers and under GC stress with the verifier; with the young-copy arm removed, GC
 panics on the stale-handle tripwire. The node-link codec refuses a record for now: its tag
 and the protocol version that lets an older peer refuse one cleanly come with step 2, when
 `defrecord` starts constructing them.
+2026-11-04 (ADR-556). bedit's review against Emacs's bug archive found the invisible format
+characters invisible: a zero width space, a BOM in mid-text and the bidi controls of a Trojan
+Source attack were zero cells, and a view that drew anything there would have put every caret
+and click after it off by the width it drew. The cell layout now takes a third knob beside the
+tab width: `*glyphless-display*` bound to `:hex-code` lays each glyphless character out as its
+`<200b>` escape in all three primitives, and `string/glyphless-indices` says where they are. The
+class is decided per character, which is why ZWJ and ZWNJ stay out of it.
+
+2026-11-04 (ADR-557). The same review: a `:font` that is not installed became DejaVu silently.
+`gui/font-info` knew (`:not-found`), but it errors headless and nothing could tell headless
+from windowed without reading the environment by hand. `gui/headless?` is that question.
+
 
 2026-11-04 (ADR-542, step 2). `defrecord` constructs a real record now (`(%record :id {…})`),
 and the leaks of item 8 are gone by construction: a map spelling `:__id__` is a plain map, and

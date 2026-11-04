@@ -7,6 +7,10 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 ## v0.49.1 — the parallel cold build finishes
 
 **Changed.**
+- `std/editor/buffer`'s undo history is capped by size (ADR-550): past
+  `editor/buffer/*undo-strong-limit*` the oldest undo groups are dropped, whole, until the rest
+  fits `*undo-limit*` (Emacs's two limits), so a buffer edited for days no longer keeps every
+  text it held. `trim-undo` applies new limits at once; nil turns the cap off.
 - A GUI window splits the space its rows leave over between the top and bottom margins
   (ADR-508 addendum), instead of putting it all under the last row, where it could leave a
   band up to a row and a half tall under an editor's echo area.
@@ -46,6 +50,19 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   turned out not to be; KI-313 is still watched.)
 - GUI: a background band one row tall at the window's edge bleeds sideways only, so a header
   line on the top row stays centred on its text (ADR-508).
+
+**Added.**
+- `os/primary-get` / `os/primary-set`: the X11 / Wayland PRIMARY selection (what is
+  highlighted, pasted by a middle click), beside the clipboard pair, which it leaves alone
+  (ADR-553). nil and a no-op off Linux.
+- `regex/rope-find` takes `:bound`, a char index no match may end past, with `^` / `$` / `\b`
+  still reading the text beyond it — Emacs's `re-search-forward` BOUND, what a search confined
+  to a region wants (ADR-554). `%rope-regex-find` takes it as an optional fifth argument.
+
+**Fixed.**
+- `regex/rope-find` through the window fallback (a Unicode `\b` before non-ASCII text) no
+  longer drops a greedy match's last character at the end of the rope: `\bü+` over `a üüü`
+  is `üüü`, as `regex/find` says (ADR-554).
 
 ## v0.49.0 — lists for parameters, a linear conj, and no open issues
 

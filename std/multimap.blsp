@@ -6,10 +6,8 @@
 ;; order is UNSPECIFIED — the CHAMP trie's, which follows keyword interning and so is not
 ;; even stable across processes. `keys`/`values`/`->seq` all inherit it; sort if it matters.
 ;;
-;; The record wraps the inner map rather than *being* it: a record carries its identity
-;; in a reserved `:__id__` field, which `keys`/`count` would see — so a bare-map
-;; representation would have leaked `:__id__` out of `keys` and counted it in
-;; `empty?`. Wrapping keeps the inner map pristine and buys the identity:
+;; The record wraps the inner map rather than *being* it: its fields hold the inner map,
+;; and its own identity (a record is its own kind, ADR-542) buys the rest:
 ;; `multimap?` is a real predicate, a multimap is never `=` to a plain key→list map, and
 ;; it prints as itself.
 

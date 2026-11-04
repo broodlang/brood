@@ -49,6 +49,16 @@
     (assert= (reflect/arglist variadic) '(a b & more)))
   (test "arglist of a non-function is nil" (assert= (reflect/arglist 42) nil)))
 
+;; ADR-560: under `nest test` / `nest run` contracts are armed, so a `sig`'d global holds a
+;; checking shim whose own parameters are the template's `(a b)`. An editor's describe-function
+;; asked and showed `(a b)` for every command; the question is about the author's function.
+(defn intro-shimmed (left right) (+ left right))
+(sig intro-shimmed (int int -> int))
+(describe "arglist sees through a contract shim"
+  (test "the author's parameters, not the shim template's"
+    (assert= (reflect/arglist intro-shimmed) '(left right))
+    (assert= (reflect/arglists intro-shimmed) '((left right)))))
+
 (describe "global table introspection"
   (test "bound? reflects the global table"
     (defn a-defined-name () nil)
@@ -471,6 +481,38 @@
 ;; has to answer to re-run only the forms an edit could affect: without it, "everything
 ;; below the edit" is the only correct answer, and a buffer of twenty forms costs twenty
 ;; evaluations per keystroke-settling.
+;; source-load-order — several changed files, in the order a fresh load would run them
+(describe "source-load-order"
+  (defn- slo-files (sources)
+    ;; each `[name text]` written to a fresh dir; the paths, in the given order
+    (let (dir (test/temp-dir "slo-"))
+      (file/mkdir dir)
+      (seq/mapv sources
+        (fn ([name text])
+          (let (path (path/join dir (str name ".blsp"))) (do (file/spit path text) path))))))
+
+  (test "a module comes after the ones it uses, moved up to just before it"
+    (let ([caller loose macros] (slo-files [["caller"
+                                              "(defmodule slo/caller (:use slo/macros))\n(defn f () (m))"]
+                                             ["loose" "(defmodule slo/loose)\n(defn g () 1)"]
+                                             ["macros" "(defmodule slo/macros)\n(defmacro m () 1)"]]))
+      (assert= (reflect/source-load-order [caller loose macros]) [macros caller loose])))
+  (test "a qualified reference requires its module too"
+    (let ([caller macros] (slo-files [["caller"
+                                        "(defmodule slq/caller)\n(defn f () (slq/macros/m))"]
+                                       ["macros" "(defmodule slq/macros)\n(defmacro m () 1)"]]))
+      (assert= (reflect/source-load-order [caller macros]) [macros caller])))
+  (test "a chain is followed through, and a cycle still places every file once"
+    (let ([a b c] (slo-files [["a" "(defmodule slc/a (:use slc/b))"]
+                               ["b" "(defmodule slc/b (:use slc/c))"]
+                               ["c" "(defmodule slc/c (:use slc/a))"]]))
+      (assert= (count (reflect/source-load-order [a b c])) 3)
+      (assert= (into #{} (reflect/source-load-order [a b c])) #{a b c}))
+    (let ([a b c] (slo-files [["a" "(defmodule sld/a (:use sld/b))"]
+                               ["b" "(defmodule sld/b (:use sld/c))"]
+                               ["c" "(defmodule sld/c)"]]))
+      (assert= (reflect/source-load-order [a b c]) [c b a]))))
+
 (describe "source-deps"
   (defn deps-of (src) (reflect/source-deps src))
 
@@ -596,7 +638,16 @@
   ;; cold image while `resolves?` still answers.
   (test "it answers where bound? cannot"
     (is (reflect/resolves? 'uuid/v4))
-    (is (not (reflect/resolves? 'uuid/no-such-function)))))
+    (is (not (reflect/resolves? 'uuid/no-such-function))))
+  ;; ADR-560: the module is everything before the LAST `/` — this used to require `'editor`
+  (test "a name in a nested module resolves"
+    (is (reflect/resolves? 'editor/lineedit/lineedit-insert))
+    (is (not (reflect/resolves? 'editor/lineedit/no-such-function))))
+  ;; and a name already bound loads nothing: asking must not re-run its module
+  (test "a bound name answers without loading its module again"
+    (let (before (%global-generation 'regex/find))
+      (is (reflect/resolves? 'regex/find))
+      (assert= (%global-generation 'regex/find) before))))
 
 ;; `references-in-source` reports lines the way the reader counts them: a lone CR breaks a
 ;; line (as in every diagnostic), CRLF is one break. It once counted only `\n`, so a file

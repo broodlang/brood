@@ -792,6 +792,19 @@ any header carries a CR or LF (request splitting).
       (render-headers headers)
       "\r\n")))
 
+(defn- http-collect-response (sock)
+  ;; `request`'s read: the whole response off a connected `sock`, then the socket closed
+  (let (result (http-collect sock nil 0))
+    ;; Always close our side. The success path's peer-close already reclaimed
+    ;; the fd (`close` is idempotent → a harmless no-op), but the timeout/error
+    ;; path did NOT: without this, a server that accepts then stalls leaks one
+    ;; fd + reactor/registry entry per request for the caller's whole life — an
+    ;; fd-exhaustion DoS for any process that fetches untrusted URLs in a loop.
+    (tcp/close sock)
+    (if (= (first result) :error)
+      {:status 0 :error (second result) :headers {} :body #b""}
+      (parse-response (second result)))))
+
 (defn request (method url &optional (opts {}))
   "Make an HTTP/1.0 request: `method` (e.g. \"GET\"/\"POST\"), `url` (http or https),
 and `opts` `{:headers <name→value map> :body <string|bytes|iolist>}`. Always
@@ -816,22 +829,23 @@ response); the root process counts."
         ;; cannot respond before it has our request, so every response chunk
         ;; arrives as byte-faithful `bytes`. TLS sends the request itself, so
         ;; the mode goes in with it.
-        sock (if (= (/get u :scheme) "https")
-               (tls/request (/get u :host) (/get u :port) [head body-bytes] (/get opts :ca) true)
-               (let (s (tcp/connect (/get u :host) (/get u :port)))
-                 (tcp/set-binary s true)
-                 (tcp/send s [head body-bytes])
-                 s)))
-    (let (result (http-collect sock nil 0))
-      ;; Always close our side. The success path's peer-close already reclaimed
-      ;; the fd (`close` is idempotent → a harmless no-op), but the timeout/error
-      ;; path did NOT: without this, a server that accepts then stalls leaks one
-      ;; fd + reactor/registry entry per request for the caller's whole life — an
-      ;; fd-exhaustion DoS for any process that fetches untrusted URLs in a loop.
-      (tcp/close sock)
-      (if (= (first result) :error)
-        {:status 0 :error (second result) :headers {} :body #b""}
-        (parse-response (second result))))))
+        ;; A connection that cannot be made — nothing listening, a name that does not
+        ;; resolve, a TLS handshake refused — is a TRANSPORT failure like a dropped read,
+        ;; so it answers `:status 0` as the docstring promises (and `request-on` already
+        ;; did). `tcp/connect` raises it, and it used to escape from here (ADR-559).
+        sock (try
+               (if (= (/get u :scheme) "https")
+                 (tls/request (/get u :host) (/get u :port) [head body-bytes] (/get opts :ca) true)
+                 (let (s (tcp/connect (/get u :host) (/get u :port)))
+                   ;; connected, then the send failed (the peer reset us): the socket is
+                   ;; ours to close, or every such request leaks a descriptor
+                   (try
+                     (do (tcp/set-binary s true) (tcp/send s [head body-bytes]) s)
+                     (catch e (do (tcp/close s) (throw e))))))
+               (catch e (failure (error-message e)))))
+    (if (failure? sock)
+      {:status 0 :error (error-message sock) :headers {} :body #b""}
+      (http-collect-response sock))))
 
 (defn fetch (url &optional (opts {}))
   "GET `url` (http or https) — `request` with method \"GET\". `opts` may carry a

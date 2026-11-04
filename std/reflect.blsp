@@ -169,6 +169,75 @@ cannot see, both the caller's policy to decide: a name a macro introduces, and a
 anything."
   (%source-deps src))
 
+(defn- source-module (src)
+  "`{:name :uses}` for the module source `src`: the name its `(defmodule …)` header opens (a
+string; nil for a file with no header) and every name it refers to — its header's `(:use …)`
+modules and every global its forms name ([[source-deps]]'s references), so a module reached
+only through a qualified macro (`other/mac`) counts as well as one it `:use`s."
+  (let (header (check-allow :discarded-catch (try (%read-first src) (catch _ nil)))
+        name (when (and (list? header) (= (first header) 'defmodule) (symbol? (second header)))
+               (->string (second header)))
+        uses (check-allow :discarded-catch
+               (try (mapcat (%source-deps src) (fn (form) (or (:references form) ()))) (catch _ ()))))
+    {:name name :uses uses}))
+
+(defn- source-required (uses modules)
+  "The modules of `modules` (name -> file) that the reference names `uses` reach: a name that
+IS a module (a header's `(:use b)`), or whose qualifier is one (`b/f`, `b/mac`)."
+  (seq/distinct (seq/keep uses
+                  (fn (used)
+                    (cond
+                      (contains? modules used) used
+                      (includes? used "/")
+                        (let (qualifier (string/substring used 0 (string/last-index-of used "/")))
+                          (when (contains? modules qualifier) qualifier))
+                      else nil)))))
+
+(defn source-load-order (files)
+  "`files` (paths of `.blsp` sources) reordered so each comes after the files whose modules it
+requires — its `(:use …)` modules and the modules it names qualified — the order a fresh load
+would have run them in: the given order, but with a file's requirements moved up to just before
+it (as a load requires them on reaching it). A require cycle is broken where the walk meets it.
+
+What reloading SEVERAL changed files needs (`project/reload-changed`, an editor updating a
+plugin): `reflect/load` of one file in walk order would expand a caller's macro with the
+definition it already had, and only a second reload would pick up the changed one. Reads
+each file's text; does not evaluate it.
+
+    (reflect/source-load-order [])   ;=> []"
+  (let (infos (map files (fn (file) [file (source-module (file/slurp file))]))
+        modules (into {}
+                  (seq/keep infos (fn ([file info]) (when (:name info) [(:name info) file]))))
+        required (into {}
+                   (map infos
+                     (fn ([file info])
+                       [file
+                         (seq/keep (source-required (:uses info) modules)
+                           (fn (module)
+                             (let (dependency (get modules module))
+                               (when (not (= dependency file)) dependency))))]))))
+    ;; depth-first, a file's requirements before it: `[file expanded?]` frames on an
+    ;; explicit stack, `entered` to break a cycle, `done` for what is already placed
+    (letrec (walk (fn (stack entered done out)
+                    (if (empty? stack)
+                      out
+                      (let ([file expanded?] (first stack)
+                            more (rest stack))
+                        (cond
+                          expanded?
+                            (if (contains? done file)
+                              (walk more entered done out)
+                              (walk more entered (conj done file) (conj out file)))
+                          (contains? entered file) (walk more entered done out)
+                          else
+                            (walk (append (map (get required file)
+                                            (fn (dependency) [dependency false]))
+                                    (cons [file true] more))
+                              (conj entered file)
+                              done
+                              out))))))
+      (walk (map files (fn (file) [file false])) #{} #{} []))))
+
 (defn references-in-source (name source)
   "Occurrences of the global `name` in `source`, as a list of [line col] (1-based); locals that shadow it are excluded.
 
@@ -236,15 +305,19 @@ Loading is a side effect, and deliberate: there is no way to know whether a name
 without the module that would define it. A module that fails to load answers false
 rather than raising — to a caller asking whether a citation is good, a module that
 cannot load is a citation that does not work."
-  (let (text (->string name)
-        slash (index-of text "/"))
-    (if (< slash 1)
-      ;; bare, or the `/` operator itself — `index-of` answers -1, never nil
-      (bound? name)
-      (let (module (string/substring text 0 slash)
-            loaded (check-allow :discarded-catch
-                     (try (do (require-one (symbol module)) true) (catch _ false))))
-        (and loaded (bound? name))))))
+  ;; A name already bound answers at once, loading nothing. Otherwise the REFERENCE is
+  ;; evaluated, which loads the module the way code naming it would (ADR-560): the module
+  ;; a name means is not the text before its first `/` (`editor/buffer/make-buffer` is
+  ;; module `editor/buffer`), and inside a project `model/f` is the project's
+  ;; `bedit/model/f` — requiring `'model` by that spelling loaded the project's module a
+  ;; SECOND time under another name, redefining every function in it.
+  (cond
+    (bound? name) true
+    ;; bare (or the `/` operator itself), and unbound — `index-of` answers -1, never nil
+    (< (index-of (->string name) "/") 1) false
+    else
+      (check-allow :discarded-catch
+        (or (try (do (reflect/eval name) true) (catch _ false)) (bound? name)))))
 
 (defn call-if-bound (name fallback & args)
   "Call the function `name` — a symbol, resolved NOW — with `args`, or answer `fallback`

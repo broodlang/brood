@@ -49,10 +49,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
     use crate::types::Sig;
     primitives.def(
         "%rope-regex-find",
-        Arity::exact(4),
-        Sig::new(vec![rope, string, int, any], map_or_nil),
-        &["r", "pattern", "from", "empty?"],
-        "The leftmost-first match (NON-EMPTY unless empty? — then an empty match is an answer too) of the regex-automata pattern in rope r starting at or after char index from, as {:start :end :text :groups [...]} in CHAR offsets — or nil. Searches the rope in place (its lazy DFA stepped over the leaves), so the cost is the distance to the match. regex/rope-find is this over the translated pattern.",
+        Arity::range(4, 5),
+        Sig::with_optional(
+            vec![rope, string, int, any],
+            vec![int.union(nil_ty)],
+            map_or_nil,
+        ),
+        &["r", "pattern", "from", "empty?", "&optional", "bound"],
+        "The leftmost-first match (NON-EMPTY unless empty? — then an empty match is an answer too) of the regex-automata pattern in rope r starting at or after char index from, as {:start :end :text :groups [...]} in CHAR offsets — or nil. With bound (a char index; nil or absent is the rope's end) no match ends past it, while look-around still sees the text beyond (Emacs's re-search-forward BOUND, ADR-554). Searches the rope in place (its lazy DFA stepped over the leaves), so the cost is the distance to the match. regex/rope-find is this over the translated pattern.",
         rope_regex_find,
     );
     primitives.def(
@@ -429,19 +433,24 @@ enum Found {
 }
 
 /// The leftmost-first match starting at or after byte `from` (bounded by `limit` as
-/// [`scan_forward`] is), by the DFAs — non-empty unless `allow_empty`.
+/// [`scan_forward`] is), by the DFAs — non-empty unless `allow_empty`. No match ends past
+/// byte `bound` (`usize::MAX`: the rope's end), though look-around still sees the bytes
+/// beyond it — Emacs's `re-search-forward` BOUND (ADR-554).
+#[allow(clippy::too_many_arguments)]
 fn find_forward(
     engine: &Engine,
     bytes: &mut RopeBytes<'_>,
     from: usize,
     limit: usize,
+    bound: usize,
     allow_empty: bool,
     poll: &mut InterruptPoll,
 ) -> Result<Found, LispError> {
+    let bound = bound.min(bytes.len);
     engine.with_caches(|forward_cache, reverse_cache| {
         let mut from = from;
         loop {
-            if from > bytes.len {
+            if from > bound {
                 return Ok(Found::Missing);
             }
             // A pattern that matches only EMPTY (`x*` over text with no `x`) comes round this
@@ -453,7 +462,7 @@ fn find_forward(
                 forward_cache,
                 bytes,
                 from,
-                bytes.len,
+                bound,
                 limit,
                 false,
                 poll,
@@ -474,7 +483,7 @@ fn find_forward(
                 return Ok(Found::Quit);
             };
             if start == end && !allow_empty {
-                if end >= bytes.len {
+                if end >= bound {
                     return Ok(Found::Missing);
                 }
                 from = bytes.next_char(end);
@@ -651,15 +660,18 @@ fn fallback_forward(
     bytes: &mut RopeBytes<'_>,
     from: usize,
     limit: usize,
+    bound: usize,
     allow_empty: bool,
     window: &mut Option<Window>,
     poll: &mut InterruptPoll,
 ) -> Result<Found, LispError> {
     let rx = compiled("%rope-regex-find", source, Kind::LeftmostFirst)?;
     let reach = rx.longest.unwrap_or(SEARCH_WINDOW);
+    // no match reads past `bound`: the windows stop there (their look-around still sees on)
+    let bound = bound.min(bytes.len);
     let mut at = from;
     loop {
-        if at > bytes.len {
+        if at > bound {
             return Ok(Found::Missing);
         }
         if at >= limit {
@@ -673,7 +685,9 @@ fn fallback_forward(
             // a bounded scan (a window's spans) needs no starts past its limit
             let starts_end =
                 bytes.boundary_up(at.saturating_add(SEARCH_WINDOW).min(limit.max(at + 1)));
-            let high = bytes.boundary_up(starts_end.saturating_add(reach));
+            let high = bytes
+                .boundary_up(starts_end.saturating_add(reach))
+                .min(bound);
             let (text, context) = window_text(rope, bytes, at, high);
             *window = Some(Window {
                 text,
@@ -693,7 +707,10 @@ fn fallback_forward(
         let (found, alive) = match rx.nfa() {
             Some(nfa) => {
                 let input = Input::new(&held.text).range(at - context..held.high - context);
-                let (found, alive) = pike_settled(nfa, &input, held.starts_end - context, poll)?;
+                // a window that reaches the bound (or the text's end) has no more to read
+                let last = held.high >= bound;
+                let (found, alive) =
+                    pike_settled(nfa, &input, held.starts_end - context, last, poll)?;
                 (
                     found.map(|(start, end)| (context + start, context + end)),
                     alive,
@@ -702,16 +719,18 @@ fn fallback_forward(
             None => {
                 let found = meta_search(&rx, &held.text, at - context, held.high - context, true)
                     .map(|(start, end)| (context + start, context + end))
-                    .filter(|&(start, _)| start < held.starts_end || held.high >= bytes.len);
+                    .filter(|&(start, _)| start < held.starts_end || held.high >= bound);
                 let alive = found.is_some_and(|(_, end)| end == held.high);
                 (found, alive)
             }
         };
         match found {
             // more text could change the answer: read further, from the same start
-            _ if alive && held.high < bytes.len => {
+            _ if alive && held.high < bound => {
                 poll.advance(InterruptPoll::EVERY)?;
-                let high = bytes.boundary_up(held.high.saturating_add(held.high - held.low));
+                let high = bytes
+                    .boundary_up(held.high.saturating_add(held.high - held.low))
+                    .min(bound);
                 let (text, context) = window_text(rope, bytes, held.low, high);
                 held.text = text;
                 held.context = context;
@@ -723,7 +742,7 @@ fn fallback_forward(
             }
             Some((start, end)) => return Ok(Found::Match(start, end)),
             _ => {
-                if held.starts_end >= bytes.len {
+                if held.starts_end >= bound {
                     return Ok(Found::Missing);
                 }
                 at = held.starts_end;
@@ -875,7 +894,7 @@ fn byte_arg(heap: &Heap, who: &str, v: Value, rope: &ropey::Rope) -> Result<usiz
     Ok(rope.char_to_byte(chars.min(rope.len_chars())))
 }
 
-/// `(%rope-regex-find r pattern from)`
+/// `(%rope-regex-find r pattern from empty? [bound])` — `bound` nil or absent: the rope's end
 fn rope_regex_find(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let who = "%rope-regex-find";
     let spans = {
@@ -883,13 +902,23 @@ fn rope_regex_find(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         let rope = expect_rope_ref(heap, who, arg(args, 0))?;
         let allow_empty = truthy(arg(args, 3));
         let from = byte_arg(heap, who, arg(args, 2), rope)?;
+        let bound = match arg(args, 4) {
+            Value::Nil => usize::MAX,
+            given => byte_arg(heap, who, given, rope)?,
+        };
         let mut bytes = RopeBytes::new(rope);
         let mut poll = InterruptPoll::new();
         let engine = engine(source);
         let found = match engine.as_ref() {
-            Some(engine) => {
-                find_forward(engine, &mut bytes, from, usize::MAX, allow_empty, &mut poll)?
-            }
+            Some(engine) => find_forward(
+                engine,
+                &mut bytes,
+                from,
+                usize::MAX,
+                bound,
+                allow_empty,
+                &mut poll,
+            )?,
             None => Found::Quit,
         };
         let span = match found {
@@ -900,6 +929,7 @@ fn rope_regex_find(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
                 &mut bytes,
                 from,
                 usize::MAX,
+                bound,
                 allow_empty,
                 &mut None,
                 &mut poll,
@@ -963,7 +993,9 @@ fn each_match(
     loop {
         poll.tick()?;
         let found = match engine.as_ref() {
-            Some(engine) => find_forward(engine, &mut bytes, at, limit, false, &mut poll)?,
+            Some(engine) => {
+                find_forward(engine, &mut bytes, at, limit, usize::MAX, false, &mut poll)?
+            }
             None => Found::Quit,
         };
         let found = match found {
@@ -973,6 +1005,7 @@ fn each_match(
                 &mut bytes,
                 at,
                 limit,
+                usize::MAX,
                 false,
                 &mut window,
                 &mut poll,
@@ -1165,6 +1198,7 @@ mod tests {
                 bytes,
                 from,
                 usize::MAX,
+                usize::MAX,
                 empty,
                 poll,
             )
@@ -1186,6 +1220,72 @@ mod tests {
         assert_eq!(backward(&mut bytes, &mut poll, 5, false), Some((4, 5)));
     }
 
+    /// The bounded forward match of `pattern` in `text` from `from`, by the DFAs when they
+    /// answer and the fallback when they quit — as `%rope-regex-find` runs them.
+    fn bounded(pattern: &str, text: &str, from: usize, bound: usize) -> Option<(usize, usize)> {
+        let rope = rope_of(text);
+        let mut bytes = RopeBytes::new(&rope);
+        let mut poll = InterruptPoll::new();
+        let found = match Engine::build(pattern) {
+            Some(engine) => find_forward(
+                &engine,
+                &mut bytes,
+                from,
+                usize::MAX,
+                bound,
+                false,
+                &mut poll,
+            )
+            .unwrap(),
+            None => Found::Quit,
+        };
+        let found = match found {
+            Found::Quit => fallback_forward(
+                pattern,
+                &rope,
+                &mut bytes,
+                from,
+                usize::MAX,
+                bound,
+                false,
+                &mut None,
+                &mut poll,
+            )
+            .unwrap(),
+            found => found,
+        };
+        match found {
+            Found::Match(start, end) => Some((start, end)),
+            _ => None,
+        }
+    }
+
+    // ADR-554: a bound caps where a match may END (Emacs's re-search-forward BOUND) — a greedy
+    // pattern stops at it rather than being refused — while look-around still reads the real
+    // text beyond it, so `$` and `\b` at the bound are judged as the text has them.
+    #[test]
+    fn a_bound_caps_the_match_end_and_look_around_sees_past_it() {
+        assert_eq!(bounded("a+", "aaaa", 0, 2), Some((0, 2)));
+        assert_eq!(bounded("a+", "xxaaaa", 0, 2), None);
+        assert_eq!(bounded("b", "aaab", 0, 3), None);
+        assert_eq!(bounded("b", "aaab", 0, 4), Some((3, 4)));
+        // `$` at a bound that is not a line's end does not match there
+        assert_eq!(bounded("(?m:o$)", "foo bar", 0, 3), None);
+        assert_eq!(bounded("(?m:o$)", "foo\nbar", 0, 3), Some((2, 3)));
+        // `\b` at the bound sees the word go on: no boundary inside `foobar`
+        assert_eq!(bounded(r"foo\b", "foobar", 0, 3), None);
+        assert_eq!(bounded(r"foo\b", "foo bar", 0, 3), Some((0, 3)));
+        // the fallback (a Unicode word boundary before non-ASCII text quits the lazy DFA)
+        assert_eq!(bounded(r"\bü+", "üüüü", 0, 4), Some((0, 4)));
+        assert_eq!(bounded(r"ü\b", "üü", 0, 2), None);
+        assert_eq!(bounded(r"ü\b", "ü ü", 0, 2), Some((0, 2)));
+        // no bound is the rope's end
+        assert_eq!(bounded("a+", "aaaa", 0, usize::MAX), Some((0, 4)));
+        // a fallback window ending the text takes a greedy match to the end, not to its last
+        // character but one (the thread waiting for more text there will never get it)
+        assert_eq!(bounded(r"\bü+", "a üüü", 0, usize::MAX), Some((2, 8)));
+    }
+
     #[test]
     fn a_pattern_that_only_matches_empty_stops_at_its_limit() {
         // `x*` over text with no `x`: every position is an empty match, stepped over one by
@@ -1194,7 +1294,7 @@ mod tests {
         let engine = Engine::build("x*").unwrap();
         let mut bytes = RopeBytes::new(&rope);
         let mut poll = InterruptPoll::new();
-        match find_forward(&engine, &mut bytes, 0, 100, false, &mut poll).unwrap() {
+        match find_forward(&engine, &mut bytes, 0, 100, usize::MAX, false, &mut poll).unwrap() {
             Found::Resume(at) => assert!(at <= 101, "resumed at {at}"),
             _ => panic!("the scan went past its limit"),
         }

@@ -345,7 +345,7 @@ pub(crate) enum OnShim {
 
 /// The original closure a contract shim wraps, if `val` is one. A shim is a closure whose
 /// captured frame binds [`ORIGINAL`] — evidence the value carries itself.
-fn shim_original(heap: &Heap, val: Value) -> Option<Value> {
+pub(crate) fn shim_original(heap: &Heap, val: Value) -> Option<Value> {
     let ValueRef::Fn(id) = val.unpack() else {
         return None;
     };

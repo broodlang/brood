@@ -15,7 +15,7 @@
 //! were appended later, for the same order reason.
 
 use super::args::arg;
-use super::sequences::tab_layout;
+use super::sequences::{ambient_glyphless, tab_layout};
 use crate::core::heap::Heap;
 use crate::core::value::{self, EnvId, Value, ValueRef};
 use crate::error::{LispError, LispResult};
@@ -51,7 +51,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::range(2, 4),
         Sig::with_optional(vec![string, int], vec![int, int], int),
         &["s", "cell", "start-col", "tab-width"],
-        "The character index in s of the grapheme cluster occupying display cell `cell` (0-based), or (string/length s) when cell is at or past the string's width — the inverse of string/display-width. A cell inside a 2-cell glyph (emoji, CJK) gives that glyph's start, a cell inside a tab's span the tab, and a combining mark rides with its base, so mapping a mouse click back to a character lands BEFORE a wide glyph, never inside it. The cells -> chars half of the editor's column geometry; string/display-width is the chars -> cells half, and the optional start-col (default 0) / tab-width (default the dynamic *tab-width*, 8) are the same tab layout it takes.\n\n    (string/width->index \"a😀b\" 2)   ;=> 1\n    (string/width->index \"a😀b\" 3)   ;=> 2\n    (string/width->index \"a\\tb\" 5)   ;=> 1",
+        "The character index in s of the grapheme cluster occupying display cell `cell` (0-based), or (string/length s) when cell is at or past the string's width — the inverse of string/display-width. A cell inside a 2-cell glyph (emoji, CJK) gives that glyph's start, a cell inside a tab's span the tab, a cell inside a glyphless character's `<200b>` escape (under *glyphless-display* :hex-code) that character's cluster, and a combining mark rides with its base, so mapping a mouse click back to a character lands BEFORE a wide glyph, never inside it. The cells -> chars half of the editor's column geometry; string/display-width is the chars -> cells half, and the optional start-col (default 0) / tab-width (default the dynamic *tab-width*, 8) are the same tab layout it takes.\n\n    (string/width->index \"a😀b\" 2)   ;=> 1\n    (string/width->index \"a😀b\" 3)   ;=> 2\n    (string/width->index \"a\\tb\" 5)   ;=> 1",
         string_width_to_index,
     );
     // The third leg of the tab layout: the string a frontend is handed, tabs already
@@ -61,7 +61,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::range(1, 3),
         Sig::with_optional(vec![string], vec![int, int], string),
         &["s", "start-col", "tab-width"],
-        "s with every tab replaced by the spaces that carry it to its next tab stop, laid out from column start-col (default 0) with a stop every tab-width columns (default the dynamic *tab-width*, 8) — so the result occupies exactly (string/display-width s start-col tab-width) cells, with no tab left for a frontend to misplace (a render op has no column to expand one from; a terminal would use the SCREEN column). A view lays each chunk of a line out with the column it starts at, so the stops stay the line's. Returns s itself when it holds no tab.\n\n    (string/expand-tabs \"a\\tb\")     ;=> \"a       b\"\n    (string/expand-tabs \"\\tx\" 3)    ;=> \"     x\"\n    (string/expand-tabs \"\\tx\" 0 4)  ;=> \"    x\"\n    (binding (*tab-width* 2) (string/expand-tabs \"\\tx\"))   ;=> \"  x\"",
+        "s with every tab replaced by the spaces that carry it to its next tab stop, laid out from column start-col (default 0) with a stop every tab-width columns (default the dynamic *tab-width*, 8) — so the result occupies exactly (string/display-width s start-col tab-width) cells, with no tab left for a frontend to misplace (a render op has no column to expand one from; a terminal would use the SCREEN column). A view lays each chunk of a line out with the column it starts at, so the stops stay the line's. When the dynamic *glyphless-display* is :hex-code, every glyphless character (string/glyphless-indices — a zero width space, a bidi control) is replaced by its visible escape too, `<200b>`, which is what string/display-width counts it as (ADR-556). Returns s itself when there is nothing to replace.\n\n    (string/expand-tabs \"a\\tb\")     ;=> \"a       b\"\n    (string/expand-tabs \"\\tx\" 3)    ;=> \"     x\"\n    (string/expand-tabs \"\\tx\" 0 4)  ;=> \"    x\"\n    (binding (*tab-width* 2) (string/expand-tabs \"\\tx\"))   ;=> \"  x\"\n    (binding (*glyphless-display* :hex-code) (string/expand-tabs \"a\\u{200b}b\"))   ;=> \"a<200b>b\"",
         string_expand_tabs,
     );
     // What changed between two ropes (ADR-471): the line-state highlight cache asks it once
@@ -74,6 +74,42 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "nil when ropes old and new hold the same text, else [start old-end new-end] in CHAR offsets: chars [start, old-end) of old became [start, new-end) of new, everything before start and after the ends being common to both. Found by comparing the two texts chunk by chunk from each end (a memcmp per chunk run, no string built) — exact for any single contiguous change (a keystroke, a paste, an undo), and correct but wider than necessary for a scattered one. The edit shape treesit's update-tree takes.",
         rope_changed_range,
     );
+}
+
+/// `string/glyphless-indices` (ADR-556), registered after every other primitive for the
+/// intern-order reason in the module doc.
+pub(super) fn register_glyphless(primitives: &mut super::Primitives) {
+    use super::signature_types::*;
+    use crate::core::value::Arity;
+    use crate::types::{Sig, Ty};
+    primitives.def(
+        "string/glyphless-indices",
+        Arity::exact(1),
+        Sig::new(vec![string], Ty::vector_of(int)),
+        &["s"],
+        "A vector of the character index of every GLYPHLESS character in s, in order: the invisible format characters — U+200B zero width space, U+2060 word joiner and the invisible math operators, the bidi controls (U+200E/F, U+202A–202E, U+2066–2069, U+061C), the deprecated format characters U+206A–206F, U+FEFF, U+FFF9–FFFB, the tag characters U+E0001 and U+E0020–E007F — and not the joiners (U+200C/D) or the other format characters a script's shaping consumes. What the cell layout shows as `<200b>` when *glyphless-display* is :hex-code (ADR-556); a view lays its escape face over these.\n\n    (string/glyphless-indices \"a\\u{200b}b\\u{202e}\")   ;=> [1 3]\n    (string/glyphless-indices \"plain\")   ;=> []",
+        string_glyphless_indices,
+    );
+}
+
+/// `(string/glyphless-indices s)` — see the registration; `text_width::glyphless_indices`.
+fn string_glyphless_indices(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let indices = match arg(args, 0) {
+        Value::Str(id) => crate::host::text_width::glyphless_indices(heap.string(id)),
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "string/glyphless-indices",
+                "string",
+                other,
+            ));
+        }
+    };
+    let items = indices
+        .into_iter()
+        .map(|index| Value::int(index as i64))
+        .collect();
+    Ok(heap.alloc_vector(items))
 }
 
 struct Tags {
@@ -268,9 +304,10 @@ fn string_width_to_index(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
         }
     };
     let (start_col, tab_width) = tab_layout(heap, "string/width->index", args, 2)?;
-    Ok(Value::int(
-        crate::host::text_width::index_at_cell_from(s, cell, start_col, tab_width) as i64,
-    ))
+    let glyphless = ambient_glyphless(heap);
+    Ok(Value::int(crate::host::text_width::index_at_cell_from(
+        s, cell, start_col, tab_width, glyphless,
+    ) as i64))
 }
 
 /// `(string/expand-tabs s &optional start-col tab-width)` — see the registration;
@@ -288,8 +325,13 @@ fn string_expand_tabs(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         }
     };
     let (start_col, tab_width) = tab_layout(heap, "string/expand-tabs", args, 1)?;
-    let expanded = match crate::host::text_width::expand_tabs(heap.string(id), start_col, tab_width)
-    {
+    let glyphless = ambient_glyphless(heap);
+    let expanded = match crate::host::text_width::expand_tabs(
+        heap.string(id),
+        start_col,
+        tab_width,
+        glyphless,
+    ) {
         std::borrow::Cow::Borrowed(_) => return Ok(Value::Str(id)),
         std::borrow::Cow::Owned(expanded) => expanded,
     };

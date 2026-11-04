@@ -483,6 +483,8 @@ it, after the name> :temporary <a directory to remove afterwards, or nil>}`."
             (error "new: --from " (pr-str source) " is not a path, a git URL or a package name"))
           (file/mkdir dest)
           (let (installed (package/registry-install source dest))
+            ;; a failed install is a value carrying its reason (ADR-559); `nest new` stops on it
+            (when (failure? installed) (error "new: " (error-message installed)))
             {:root (:path installed)
              :pin (str ":version " (pr-str (str "^" (:version installed))))
              :temporary dest})))))

@@ -1150,6 +1150,10 @@
   "A loop that never ends: only an interrupt stops it."
   (quit-spin (inc n)))
 
+(defn- busy-for (ms)
+  "Work that runs `ms` and then ends — at safepoints throughout, so an interrupt can land in it."
+  (letrec (spin (fn (until) (if (< (os/now) until) (spin until) nil))) (spin (+ (os/now) ms))))
+
 (defn- quit-stubborn (swallowed)
   "Work that catches EVERY error, an interrupt too, and goes on: Emacs's quit is not an
 error a catch-all sees, so the kernel keeps raising it (sticky) until the window closes."
@@ -1318,6 +1322,43 @@ error a catch-all sees, so the kernel keeps raising it (sticky) until the window
         (is (:interrupted report))
         (is (>= (:ms report) 50)))
       (assert= (lane-await-seen) [[:after 1]])))
+  (test "a :command? timer's fold is the user's: no background ceiling stops it (ADR-564)"
+    ;; a step past the ceiling, on a repeating timer that drops itself when the step is
+    ;; done: stopped at the ceiling it would keep the model it began from and run again
+    (let (me (self)
+          step (fn (model input cols rows)
+                 (cond
+                   (= input :quit) (assoc model :done true)
+                   (= input [:timer :step])
+                     (do (busy-for 150) (send me [:stepped]) (assoc model :timers {}))
+                   else model))
+          loop (lane-start me
+                 {:timers {:step {:every 1 :command? true}}
+                  :event-ceiling-ms 50
+                  :on-slow (fn (report) (send me [:slow report]))}
+                 step))
+      (send loop :go)
+      (assert= (receive ([:stepped] :once) (after 3000 :never)) :once)
+      (assert= (receive ([:stepped] :again) (after 300 :no)) :no)
+      (is (not (:interrupted (receive ([:slow report] report) (after 0 {})))))
+      (send loop :quit)))
+  (test "a plain timer's fold past the ceiling is stopped, as any background fold"
+    (let (me (self)
+          step (fn (model input cols rows)
+                 (cond
+                   (= input :quit) (assoc model :done true)
+                   (= input [:timer :step])
+                     (do (busy-for 150) (send me [:stepped]) (assoc model :timers {}))
+                   else model))
+          loop (lane-start me
+                 {:timers {:step {:after 1}}
+                  :event-ceiling-ms 50
+                  :on-slow (fn (report) (send me [:slow report]))}
+                 step))
+      (send loop :go)
+      (is (:interrupted (receive ([:slow report] report) (after 3000 {}))))
+      (assert= (receive ([:stepped] :done) (after 300 :no)) :no)
+      (send loop :quit)))
   (test "a fast fold is untouched: C-g is an ordinary key, and nothing is reported"
     (let (me (self)
           loop (lane-start me

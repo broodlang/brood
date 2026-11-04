@@ -1054,7 +1054,7 @@ An optional leading docstring is carried onto the generated function.
 ;; Seqable — a value's list/seq view: the seam `seq` (and thus `map`/`filter`/`fold`/
 ;; `for`/`into`, plus `count`/`keys`/`vals`) consults for a RECORD. The default is the
 ;; record's fields (id-free) as `[k v]` pairs, so a record iterates, counts, and keys as
-;; its fields and never leaks the internal `:__id__`; a custom-collection record overrides
+;; its fields; a custom-collection record overrides
 ;; `->seq` to define its own iteration. Built-ins never reach here — `seq` takes their
 ;; native path — so this is purely the record extension point (à la `Display`), at zero
 ;; cost to built-ins.

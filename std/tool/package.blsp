@@ -805,12 +805,19 @@ an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and 
     (cond
       (= status 0) [:error 0 (str "cannot reach the registry at " url ": " (get resp :error))]
       (and (>= status 200) (< status 300))
-        (let (data (json/decode (http/body-text resp)))
-          (if (map? data)
-            [:ok data]
-            [:error
-              status
-              (str "the registry at " url " answered with a JSON value that is not an object")]))
+      ;; a body that is not JSON at all (a proxy's HTML page, a truncated answer) is the
+      ;; registry answering badly, an error like the rest — never a raise out of here
+        (let (data (try (json/decode (http/body-text resp)) (catch e (failure (error-message e)))))
+          (cond
+            (map? data) [:ok data]
+            (failure? data)
+              [:error
+                status
+                (str "the registry at " url " answered with no JSON: " (error-message data))]
+            else
+              [:error
+                status
+                (str "the registry at " url " answered with a JSON value that is not an object")]))
       else [:error status (registry-error-text resp)])))
 
 ;; --- the resolver's registry provider (ADR-209) ---------------------------------
@@ -944,7 +951,13 @@ TOFU-pinned signing key, nil for an unsigned package)."
   (let (resp (http/fetch (registry-tarball-url base name version))
         status (get resp :status))
     (when (not (and (>= status 200) (< status 300)))
-      (error "package: downloading " name " " version " failed (HTTP " status ")"))
+      ;; the reason, not just the number: the transport's complaint, or the server's text
+      (error "package: downloading "
+        name
+        " "
+        version
+        " failed: "
+        (if (= status 0) (get resp :error) (registry-error-text resp))))
     (get resp :body)))
 
 (defn- registry-download-extract
@@ -1060,25 +1073,47 @@ for the user or nil. Never raises: every input here comes from a registry or a f
 ;; a running app (an editor) can let a user add/remove plugins live. The sha256 verify is
 ;; identical to the resolver's: the registry is never trusted for the bytes.
 
+;; A runtime install is driven by an APP — an editor's package browser — and every way it can
+;; go wrong short of a bug (the registry unreachable or erroring, the package unpublished, a
+;; refused source URL, a failed download, a checksum that does not match) is an outcome its
+;; user has to be TOLD, with the reason. So these three answer a `failure` carrying that
+;; reason (ADR-310) rather than raising or answering nil: `registry-enhancers` said nil for
+;; "the registry is down" and the editor showed an empty list (ADR-559).
+
 (defn registry-latest-version (name)
   "The newest published version string of package `name` (a symbol or string) at the configured
-registry, or nil if it is unpublished. Backs an app's 'is there an update?' check.
+registry, nil if it is unpublished, or a `failure` carrying the reason when the registry could
+not be asked (unreachable, or answering an error). Backs an app's 'is there an update?' check.
 
-    (package/registry-latest-version 'json)   ;~> \"1.4.2\", or nil when unpublished"
+    (package/registry-latest-version 'json)   ;~> \"1.4.2\", nil when unpublished, a failure when the registry is down"
   (let (base (registry-base-for nil)
-        versions (registry-list-versions base (if (symbol? name) name (symbol name))))
-    (fold versions nil (fn (best v) (if (or (nil? best) (version/newer? v best)) v best)))))
+        name-sym (if (symbol? name) name (symbol name)))
+    (match (registry-get-json (registry-releases-url base name-sym))
+      ([:ok data] (fold (or (get data :releases) nil)
+                    nil
+                    (fn (best release)
+                      (let (version (get release :version))
+                        (if (or (nil? best) (version/newer? version best)) version best)))))
+      ([:error 404 _message] nil)
+      ([:error _status message] (failure "package: listing releases of "
+                                  (->string name-sym)
+                                  " failed: "
+                                  message)))))
 
 (defn registry-enhancers (app)
   "The packages published to the configured registry that ENHANCE application `app` — a list of
-`{:name :latest_version :description :kind :enhances}` maps, or nil on a request failure. The
-runtime side of `nest search --enhances`: an app lists its own installable plugins.
+`{:name :latest_version :description :kind :enhances}` maps — or a `failure` carrying the reason
+when the registry could not be asked (unreachable, or answering an error). The runtime side of
+`nest search --enhances`: an app lists its own installable plugins, and says why it cannot.
 
     (package/registry-enhancers 'bedit)   ;~> ({:name \"bedit-git\" :latest_version \"0.3.1\" :description \"…\" :kind … :enhances …} …)"
   (let (base (registry-base-for nil))
-    (match (registry-get-json (registry-search-url base "" app))
+    (match (registry-get-json (registry-search-url base "" (->string app)))
       ([:ok data] (or (get data :packages) nil))
-      ([:error _status _message] nil))))
+      ([:error _status message] (failure "package: listing the packages that enhance "
+                                  (->string app)
+                                  " failed: "
+                                  message)))))
 
 ;; A runtime install has no lock to pin a signing key in (ADR-212's TOFU), so the install
 ;; directory keeps its own: `.signing-pins.blsp`, `{name pubkey}`. Without it, the user-package
@@ -1111,67 +1146,113 @@ runtime side of `nest search --enhances`: an app lists its own installable plugi
 (defn registry-install (name: (or keyword string symbol) dest-dir:any -> any)
   "Download, sha-VERIFY, and extract the newest release of package `name` into `dest-dir/<name>/`
 at runtime — the user-package install path, independent of any project `_deps`/manifest. Returns
-`{:name :version :path :checksum :signature :warning}`. Errors on an unknown package, a download
-failure, or a checksum mismatch (the same integrity guarantee `nest add` gives — the registry is
-never trusted for the bytes). The signature is checked as the lock path checks it (ADR-212,
-`signature-verdict`), with the key pinned on first use in `dest-dir/.signing-pins.blsp`:
-`:signature` is the verdict's status and `:warning` its sentence (nil when there is nothing to
-say). Advisory, like every signing check: a bad or changed signature is reported, not refused.
+`{:name :version :path :checksum :signature :warning}`, or a `failure` carrying the reason
+(ADR-559): a name that is not one path component, an unpublished package, the registry
+unreachable or erroring, a refused source URL, a failed download, a checksum mismatch (the same
+integrity guarantee `nest add` gives — the registry is never trusted for the bytes), an archive
+that does not extract. A failure before extraction leaves an installed copy as it was.
+The signature is checked as the lock path checks it (ADR-212, `signature-verdict`), with the key
+pinned on first use in `dest-dir/.signing-pins.blsp`: `:signature` is the verdict's status and
+`:warning` its sentence (nil when there is nothing to say). Advisory, like every signing check:
+a bad or changed signature is reported, not refused.
 
     (package/registry-install \"bedit-git\" \"/home/me/.local/share/bedit/packages\")   ;~> {:name \"bedit-git\" :version \"0.3.1\" :path \"…/bedit-git\" :checksum \"…\" :signature … :warning nil}"
   (let (base (registry-base-for nil)
         name-sym (if (symbol? name) name (symbol name))
-        name-str (if (string? name) name (->string name))
-        _checked (when (not (project/valid-dep-name? name-str))
-                   (error "package: "
-                     (pr-str name-str)
-                     " is not a plain package name — refusing to install it into "
-                     dest-dir))
-        version (registry-latest-version name-sym))
-    (when (nil? version)
-      (error "package: "
-        name-str " is not published on " base " (run `nest search " name-str "` to see what is)"))
-    (match (registry-get-json (registry-release-url base name-sym version))
-      ([:error 404 _message] (error "package: no release " name-str " " version))
-      ([:error _status message] (error "package: " message))
-      ([:ok meta]
-        (let (checksum (get meta :checksum)
-              source-url (get meta :source_url)
-              external (and source-url (not (= source-url "")))
-              _scheme (when external
-                        (registry-check-source-url name-str version source-url))
-              bytes (if external
-                      (package-fetch-bytes source-url)
-                      (registry-download-hosted base name-sym version))
-              got (hash/sha256-bytes bytes))
-          (when (not (= got checksum))
-            (error "package: "
-              name-str " " version " sha256 mismatch — declared " checksum ", got " got
-              " (tampered or corrupted — not installed)"))
-          (let (target (path/join dest-dir name-str)
-                archive (path/join dest-dir (str name-str ".tar.gz")))
-            ;; `file/rmdir`, not `%rm-rf`: that one deletes only inside a `_deps/`, which a
-            ;; runtime install directory (an editor's plugins) is not — so a REINSTALL
-            ;; failed. The name was checked as one path component above, so `target` is
-            ;; `dest-dir/<name>` and nothing else.
-            (when (file/dir? target) (file/rmdir target))
-            (file/mkdir dest-dir)
-            (file/spit-bytes archive bytes)
-            (proc/offload %untar-gz archive target (if external 1 0))
-            (file/rm archive)
-            (let (verdict (signature-verdict name-str
-                            version
-                            checksum
-                            (get meta :signature)
-                            (get meta :pubkey)
-                            (get (runtime-pins dest-dir) name-str)))
-              (runtime-pin! dest-dir name-str (:pin verdict))
-              {:name name-str
-               :version version
-               :path target
-               :checksum checksum
-               :signature (:status verdict)
-               :warning (:warning verdict)})))))))
+        name-str (if (string? name) name (->string name)))
+    (if (not (project/valid-dep-name? name-str))
+      (failure "package: "
+        (pr-str name-str)
+        " is not a plain package name — refusing to install it into "
+        dest-dir)
+      (let (version (registry-latest-version name-sym))
+        (cond
+          (failure? version) version
+          (nil? version)
+            (failure "package: "
+              name-str " is not published on " base " (run `nest search " name-str
+              "` to see what is)")
+          else (registry-install-release base name-sym name-str version dest-dir))))))
+
+(defn- registry-install-release (base name-sym name-str version dest-dir)
+  ;; `registry-install` past the name and version: the release's metadata, its bytes, the
+  ;; checksum, the extraction, the signature verdict — a failure at any step answered as one
+  (match (registry-get-json (registry-release-url base name-sym version))
+    ([:error 404 _message] (failure "package: no release " name-str " " version))
+    ([:error _status message] (failure "package: fetching the release "
+                                name-str " " version " failed: " message))
+    ([:ok meta] (let (checksum (get meta :checksum)
+                      bytes (registry-install-bytes base
+                              name-sym
+                              name-str
+                              version
+                              (get meta :source_url)))
+                  (cond
+                    (failure? bytes) bytes
+                    (not (= (hash/sha256-bytes bytes) checksum))
+                      (failure "package: "
+                        name-str
+                        " "
+                        version
+                        " sha256 mismatch — declared "
+                        checksum
+                        ", got "
+                        (hash/sha256-bytes bytes)
+                        " (tampered or corrupted — not installed)")
+                    else (registry-install-extract name-str version checksum bytes meta dest-dir))))))
+
+(defn- registry-install-bytes (base name-sym name-str version source-url)
+  ;; The release's archive bytes — from its external `:source_url` when it has one (refused
+  ;; unless http(s), ADR-211), else from the registry — or a failure saying why not. The
+  ;; fetchers raise on a refused URL, an error status or a transport failure, each with a
+  ;; sentence naming the package or URL; at a runtime install each of those is an outcome to
+  ;; report, so that sentence becomes the failure's reason.
+  (let (external (and source-url (not (= source-url ""))))
+    (try
+      (if external
+        (do
+          (registry-check-source-url name-str version source-url)
+          (package-fetch-bytes source-url))
+        (registry-download-hosted base name-sym version))
+      (catch e (failure (error-message e))))))
+
+(defn- registry-install-extract (name-str version checksum bytes meta dest-dir)
+  ;; Unpack verified `bytes` into `dest-dir/<name>/`, pin the signing key, answer the result.
+  ;; `file/rmdir`, not `%rm-rf`: that one deletes only inside a `_deps/`, which a runtime
+  ;; install directory (an editor's plugins) is not — so a REINSTALL failed. The name was
+  ;; checked as one path component, so `target` is `dest-dir/<name>` and nothing else.
+  (let (source-url (get meta :source_url)
+        external (and source-url (not (= source-url "")))
+        target (path/join dest-dir name-str)
+        archive (path/join dest-dir (str name-str ".tar.gz")))
+    (when (file/dir? target) (file/rmdir target))
+    (file/mkdir dest-dir)
+    (file/spit-bytes archive bytes)
+    (let (extracted (try
+                      (do (proc/offload %untar-gz archive target (if external 1 0)) true)
+                      (catch e
+                        (failure "package: extracting "
+                          name-str
+                          " "
+                          version
+                          " failed: "
+                          (error-message e)))))
+      (file/rm archive)
+      (if (failure? extracted)
+        (do (when (file/dir? target) (file/rmdir target)) extracted)
+        (let (verdict (signature-verdict name-str
+                        version
+                        checksum
+                        (get meta :signature)
+                        (get meta :pubkey)
+                        (get (runtime-pins dest-dir) name-str)))
+          (runtime-pin! dest-dir name-str (:pin verdict))
+          {:name name-str
+           :version version
+           :path target
+           :checksum checksum
+           :signature (:status verdict)
+           :warning (:warning verdict)})))))
 
 ;; Two resolutions of the same name must agree on their source. Different kinds can
 ;; never agree (checked here, since it is the one rule that is *about* the pair rather

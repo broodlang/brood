@@ -21,6 +21,16 @@
 //! A string laid out from a column other than 0 (a chunk of a longer line) passes
 //! that column as `start_col`, and the stops stay the line's. Without this a tab was
 //! a zero-width cluster: `a\tb` painted as `ab` and every tab-indented line flush left.
+//!
+//! **Glyphless characters (ADR-556).** The invisible format characters — a zero-width
+//! space, a word joiner, the bidi controls a "Trojan Source" attack hides in, a BOM in
+//! mid-text, a tag character ([`is_glyphless`]) — are zero cells, as a terminal draws
+//! them. Laid out [`Glyphless::HexCode`] (the dynamic `*glyphless-display*` bound to
+//! `:hex-code`, Emacs's `glyphless-char-display`) each one is shown instead as its hex
+//! escape, `<200b>`: it occupies the escape's cells, `expand_tabs` writes the escape in
+//! its place, and a cell anywhere in it maps back to its cluster. The class is decided
+//! per CHARACTER, never by its neighbours, so a string measured in pieces (a view's
+//! chunks) sums to the whole. None is ASCII, so the ASCII fast path never meets one.
 
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -40,6 +50,92 @@ pub const MAX_TAB_WIDTH: usize = 1024;
 /// three-cluster string's width wrapped to `i64::MIN`. 2^30, not more: it must fit a
 /// 32-bit `usize` (the wasm32 playground) with room left for the clusters' widths.
 pub const MAX_START_COLUMN: usize = 1 << 30;
+
+/// How a glyphless character ([`is_glyphless`]) is laid out (ADR-556): `Hidden`, zero
+/// cells, as a terminal draws it (the default); `HexCode`, as its visible escape
+/// (`<200b>`, [`glyphless_escape`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Glyphless {
+    Hidden,
+    HexCode,
+}
+
+/// Whether `c` is a GLYPHLESS character: an invisible format character (Unicode general
+/// category Cf) with no part in shaping a script — so nothing on screen says it is
+/// there. They are: U+061C ARABIC LETTER MARK, U+200B ZERO WIDTH SPACE, U+200E / U+200F
+/// the LTR / RTL marks, U+202A–U+202E the bidi embeddings and overrides, U+2060 WORD
+/// JOINER and U+2061–U+2064 the invisible math operators, U+2066–U+2069 the bidi
+/// isolates, U+206A–U+206F the deprecated format characters, U+FEFF (a BOM, or a
+/// zero-width no-break space in mid-text), U+FFF9–U+FFFB the interlinear annotation
+/// marks, and U+E0001 / U+E0020–U+E007F the tag characters ("ASCII smuggling").
+///
+/// The Cf characters a script's shaping consumes are left out, because showing them
+/// would break ordinary text: ZWNJ / ZWJ (U+200C / U+200D — Persian, the Indic scripts,
+/// every emoji ZWJ sequence), the prepended concatenation marks (U+0600–U+0605, U+06DD,
+/// U+070F, U+0890–U+0891, U+08E2, U+110BD, U+110CD), U+180E MONGOLIAN VOWEL SEPARATOR,
+/// the hieroglyph, shorthand and musical format controls, and U+00AD SOFT HYPHEN, which
+/// fonts draw.
+pub fn is_glyphless(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x061C
+            | 0x200B
+            | 0x200E..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x2064
+            | 0x2066..=0x206F
+            | 0xFEFF
+            | 0xFFF9..=0xFFFB
+            | 0xE0001
+            | 0xE0020..=0xE007F
+    )
+}
+
+/// The visible escape a glyphless `c` is laid out as under [`Glyphless::HexCode`]: its
+/// code point in lowercase hex, at least four digits, between angle brackets — `<200b>`,
+/// `<e0041>`. ASCII, so its cells are its length.
+pub fn glyphless_escape(c: char) -> String {
+    format!("<{:04x}>", c as u32)
+}
+
+/// The cells [`glyphless_escape`] of `c` occupies, without building it.
+fn glyphless_escape_cells(c: char) -> usize {
+    let digits = (32 - (c as u32).leading_zeros()).div_ceil(4) as usize;
+    2 + digits.max(4)
+}
+
+/// Whether `s` holds a glyphless character — a cheap reject for the common text, every
+/// ASCII character included.
+fn has_glyphless(s: &str) -> bool {
+    s.chars().any(|c| c as u32 >= 0x061C && is_glyphless(c))
+}
+
+/// [`cluster_cells_at`] laid out `glyphless`: under [`Glyphless::HexCode`] a cluster
+/// holding glyphless characters is the cells of the rest of it plus each one's escape — a
+/// lone zero-width space six cells, a tag-sequence flag its two plus the tags' escapes.
+fn layout_cells(cluster: &str, col: usize, tab_width: usize, glyphless: Glyphless) -> usize {
+    if glyphless == Glyphless::HexCode && has_glyphless(cluster) {
+        let rest: String = cluster.chars().filter(|&c| !is_glyphless(c)).collect();
+        let escapes: usize = cluster
+            .chars()
+            .filter(|&c| is_glyphless(c))
+            .map(glyphless_escape_cells)
+            .sum();
+        cluster_cells(&rest) + escapes
+    } else {
+        cluster_cells_at(cluster, col, tab_width)
+    }
+}
+
+/// The codepoint index of every glyphless character in `s` ([`is_glyphless`]), in
+/// order — where a view lays an escape face over the `<200b>` it shows.
+pub fn glyphless_indices(s: &str) -> Vec<usize> {
+    s.chars()
+        .enumerate()
+        .filter(|&(_, c)| is_glyphless(c))
+        .map(|(index, _)| index)
+        .collect()
+}
 
 /// The grapheme clusters of `s`, exactly as `s.graphemes(true)` yields them, without
 /// running the segmenter over ASCII.
@@ -150,10 +246,15 @@ pub fn cluster_cells_at(cluster: &str, col: usize, tab_width: usize) -> usize {
 }
 
 /// The display width, in cells, of `s` laid out from column `start_col` with stops
-/// every `tab_width`: the sum of its grapheme clusters' widths, a tab reaching its
-/// next stop. `(string/display-width "a😀b")` is 4 — `a` and `b` one cell each, the
-/// emoji two; `"a\tb"` is 9.
-pub fn display_width_from(s: &str, start_col: usize, tab_width: usize) -> usize {
+/// every `tab_width`, glyphless characters laid out `glyphless`: the sum of its grapheme
+/// clusters' widths, a tab reaching its next stop. `(string/display-width "a😀b")` is 4 —
+/// `a` and `b` one cell each, the emoji two; `"a\tb"` is 9.
+pub fn display_width_from(
+    s: &str,
+    start_col: usize,
+    tab_width: usize,
+    glyphless: Glyphless,
+) -> usize {
     let bytes = s.as_bytes();
     let mut col = start_col;
     let mut at = 0;
@@ -167,28 +268,36 @@ pub fn display_width_from(s: &str, start_col: usize, tab_width: usize) -> usize 
             at += 1;
         } else {
             let end = cluster_end(s, at);
-            col += cluster_cells_at(&s[at..end], col, tab_width);
+            col += layout_cells(&s[at..end], col, tab_width, glyphless);
             at = end;
         }
     }
     col - start_col
 }
 
-/// `display_width_from` at column 0 with the default tab width.
+/// `display_width_from` at column 0 with the default tab width, glyphless characters
+/// hidden.
 pub fn display_width(s: &str) -> usize {
-    display_width_from(s, 0, TAB_WIDTH)
+    display_width_from(s, 0, TAB_WIDTH, Glyphless::Hidden)
 }
 
 /// The inverse of `display_width`: the codepoint index of the grapheme cluster that
 /// occupies display cell `cell` (counted from `start_col`, with stops every
-/// `tab_width`), or the codepoint count of `s` when `cell` lies at or past its end. A
-/// cell inside a 2-cell glyph maps to that glyph's start, a cell inside a tab's span to
-/// the tab, and a zero-width cluster (a combining mark) belongs to the cell of the base
+/// `tab_width`, glyphless characters laid out `glyphless`), or the codepoint count of `s`
+/// when `cell` lies at or past its end. A cell inside a 2-cell glyph maps to that glyph's
+/// start, a cell inside a tab's span to the tab, a cell inside a glyphless escape to its
+/// cluster, and a zero-width cluster (a combining mark) belongs to the cell of the base
 /// before it — so a click anywhere on a wide glyph puts point before it, never inside
 /// it. The column half of the editor's mouse mapping: `display_width` places the caret
 /// (chars -> cells), this maps a click back (cells -> chars); one module, so they
 /// cannot disagree.
-pub fn index_at_cell_from(s: &str, cell: usize, start_col: usize, tab_width: usize) -> usize {
+pub fn index_at_cell_from(
+    s: &str,
+    cell: usize,
+    start_col: usize,
+    tab_width: usize,
+    glyphless: Glyphless,
+) -> usize {
     let bytes = s.as_bytes();
     let mut col = start_col;
     let cell = start_col + cell;
@@ -201,7 +310,7 @@ pub fn index_at_cell_from(s: &str, cell: usize, start_col: usize, tab_width: usi
             (tab_span(col, tab_width), at + 1)
         } else {
             let end = cluster_end(s, at);
-            (cluster_cells_at(&s[at..end], col, tab_width), end)
+            (layout_cells(&s[at..end], col, tab_width, glyphless), end)
         };
         if width > 0 && cell < col + width {
             return chars;
@@ -217,25 +326,39 @@ pub fn index_at_cell_from(s: &str, cell: usize, start_col: usize, tab_width: usi
     chars
 }
 
-/// `index_at_cell_from` at column 0 with the default tab width.
+/// `index_at_cell_from` at column 0 with the default tab width, glyphless characters
+/// hidden.
 pub fn index_at_cell(s: &str, cell: usize) -> usize {
-    index_at_cell_from(s, cell, 0, TAB_WIDTH)
+    index_at_cell_from(s, cell, 0, TAB_WIDTH, Glyphless::Hidden)
 }
 
 /// `s` with every tab replaced by the spaces that carry it to its next stop, laid out
-/// from column `start_col` with stops every `tab_width` — so the result's
-/// `display_width` is `s`'s, cluster for cluster, with no tab left for a frontend to
-/// misplace. Borrows `s` unchanged when it holds no tab (the common line).
-pub fn expand_tabs(s: &str, start_col: usize, tab_width: usize) -> std::borrow::Cow<'_, str> {
-    if !s.contains('\t') {
+/// from column `start_col` with stops every `tab_width` — and, laid out
+/// [`Glyphless::HexCode`], every glyphless character replaced by its escape (after the
+/// rest of its cluster) — so the result's `display_width` is `s`'s, cluster for
+/// cluster, with no tab or invisible character left for a frontend to misplace.
+/// Borrows `s` unchanged when there is nothing to replace (the common line).
+pub fn expand_tabs(
+    s: &str,
+    start_col: usize,
+    tab_width: usize,
+    glyphless: Glyphless,
+) -> std::borrow::Cow<'_, str> {
+    let shows_glyphless = glyphless == Glyphless::HexCode && has_glyphless(s);
+    if !s.contains('\t') && !shows_glyphless {
         return std::borrow::Cow::Borrowed(s);
     }
     let mut out = String::with_capacity(s.len() + tab_width.max(1) * 4);
     let mut col = start_col;
     for cluster in clusters(s) {
-        let width = cluster_cells_at(cluster, col, tab_width);
+        let width = layout_cells(cluster, col, tab_width, glyphless);
         if cluster == "\t" {
             out.extend(std::iter::repeat_n(' ', width));
+        } else if shows_glyphless && has_glyphless(cluster) {
+            out.extend(cluster.chars().filter(|&c| !is_glyphless(c)));
+            for c in cluster.chars().filter(|&c| is_glyphless(c)) {
+                out.push_str(&glyphless_escape(c));
+            }
         } else {
             out.push_str(cluster);
         }
@@ -247,6 +370,9 @@ pub fn expand_tabs(s: &str, start_col: usize, tab_width: usize) -> std::borrow::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const HIDDEN: Glyphless = Glyphless::Hidden;
+    const HEX: Glyphless = Glyphless::HexCode;
 
     #[test]
     fn ascii_is_one_per_char() {
@@ -310,24 +436,24 @@ mod tests {
         assert_eq!(display_width("abcdefgh\tx"), 17);
         assert_eq!(display_width("\t\t"), 16);
         // the stops are the LINE's: a chunk starting at column 3 tabs to 8, not 11
-        assert_eq!(display_width_from("\tx", 3, TAB_WIDTH), 6);
-        assert_eq!(display_width_from("\tx", 0, 4), 5);
+        assert_eq!(display_width_from("\tx", 3, TAB_WIDTH, HIDDEN), 6);
+        assert_eq!(display_width_from("\tx", 0, 4, HIDDEN), 5);
     }
 
     #[test]
     fn expand_tabs_materialises_the_same_width() {
-        assert_eq!(expand_tabs("a\tb", 0, 8), "a       b");
-        assert_eq!(expand_tabs("\tx", 3, 8), "     x");
-        assert_eq!(expand_tabs("\tx", 0, 4), "    x");
-        assert_eq!(expand_tabs("no tabs", 0, 8), "no tabs");
+        assert_eq!(expand_tabs("a\tb", 0, 8, HIDDEN), "a       b");
+        assert_eq!(expand_tabs("\tx", 3, 8, HIDDEN), "     x");
+        assert_eq!(expand_tabs("\tx", 0, 4, HIDDEN), "    x");
+        assert_eq!(expand_tabs("no tabs", 0, 8, HIDDEN), "no tabs");
         assert!(matches!(
-            expand_tabs("no tabs", 0, 8),
+            expand_tabs("no tabs", 0, 8, HIDDEN),
             std::borrow::Cow::Borrowed(_)
         ));
         for (s, col) in [("a\tb\t\tc", 0), ("\t😀\tz", 5), ("x\ty", 7)] {
             assert_eq!(
-                display_width_from(&expand_tabs(s, col, 8), col, 8),
-                display_width_from(s, col, 8),
+                display_width_from(&expand_tabs(s, col, 8, HIDDEN), col, 8, HIDDEN),
+                display_width_from(s, col, 8, HIDDEN),
                 "{s:?} from {col}"
             );
         }
@@ -343,8 +469,8 @@ mod tests {
         assert_eq!(index_at_cell("a\tb", 8), 2);
         assert_eq!(index_at_cell("a\tb", 9), 3);
         // from a mid-line column the tab's span follows the line's stops
-        assert_eq!(index_at_cell_from("\tx", 4, 3, TAB_WIDTH), 0);
-        assert_eq!(index_at_cell_from("\tx", 5, 3, TAB_WIDTH), 1);
+        assert_eq!(index_at_cell_from("\tx", 4, 3, TAB_WIDTH, HIDDEN), 0);
+        assert_eq!(index_at_cell_from("\tx", 5, 3, TAB_WIDTH, HIDDEN), 1);
     }
 
     /// The fast cluster walk splits exactly where `graphemes(true)` does — on ASCII, on
@@ -403,5 +529,97 @@ mod tests {
                 "cell {cell}"
             );
         }
+    }
+
+    #[test]
+    fn the_glyphless_class_is_the_invisible_format_characters() {
+        for c in [
+            '\u{200B}',
+            '\u{200E}',
+            '\u{200F}',
+            '\u{202A}',
+            '\u{202E}',
+            '\u{2060}',
+            '\u{2066}',
+            '\u{2069}',
+            '\u{FEFF}',
+            '\u{061C}',
+            '\u{E0001}',
+            '\u{E0041}',
+        ] {
+            assert!(is_glyphless(c), "{:04x}", c as u32);
+        }
+        // the joiners and the marks a script's shaping consumes stay hidden; a soft
+        // hyphen is drawn; ordinary text is not glyphless
+        for c in [
+            '\u{200C}', '\u{200D}', '\u{00AD}', '\u{0600}', '\u{180E}', 'a', ' ', '\t',
+        ] {
+            assert!(!is_glyphless(c), "{:04x}", c as u32);
+        }
+    }
+
+    #[test]
+    fn hidden_glyphless_characters_are_zero_cells() {
+        // a terminal's rule, and the default
+        assert_eq!(display_width("a\u{200B}b"), 2);
+        assert_eq!(display_width("\u{202E}"), 0);
+    }
+
+    #[test]
+    fn hex_code_shows_each_glyphless_character_as_its_escape() {
+        assert_eq!(display_width_from("a\u{200B}b", 0, 8, HEX), 8);
+        assert_eq!(expand_tabs("a\u{200B}b", 0, 8, HEX), "a<200b>b");
+        assert_eq!(expand_tabs("\u{202E}x\u{2066}", 0, 8, HEX), "<202e>x<2066>");
+        // a five-digit code point takes five digits
+        assert_eq!(expand_tabs("\u{E0041}", 0, 8, HEX), "<e0041>");
+        assert_eq!(display_width_from("\u{E0041}", 0, 8, HEX), 7);
+        // tabs and escapes in one string keep the line's stops
+        assert_eq!(expand_tabs("\u{200B}\tx", 0, 8, HEX), "<200b>  x");
+        // a string with nothing to show is borrowed
+        assert!(matches!(
+            expand_tabs("plain", 0, 8, HEX),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        // the joiners are not shown: an emoji ZWJ sequence is still one 2-cell glyph
+        assert_eq!(display_width_from("👨‍👩‍👧", 0, 8, HEX), 2);
+    }
+
+    #[test]
+    fn a_cell_in_an_escape_maps_back_to_its_character() {
+        // a=[0,1) <200b>=[1,7) b=[7,8)
+        assert_eq!(index_at_cell_from("a\u{200B}b", 0, 0, 8, HEX), 0);
+        for cell in 1..7 {
+            assert_eq!(index_at_cell_from("a\u{200B}b", cell, 0, 8, HEX), 1);
+        }
+        assert_eq!(index_at_cell_from("a\u{200B}b", 7, 0, 8, HEX), 2);
+        assert_eq!(index_at_cell_from("a\u{200B}b", 8, 0, 8, HEX), 3);
+    }
+
+    #[test]
+    fn pieces_of_a_string_sum_to_the_whole() {
+        // per character, never by context: a view measuring chunks agrees with the line
+        let whole = "x\u{202E}\u{2066}yz\u{FEFF}";
+        let chars: Vec<char> = whole.chars().collect();
+        for split in 0..=chars.len() {
+            let head: String = chars[..split].iter().collect();
+            let tail: String = chars[split..].iter().collect();
+            let head_cells = display_width_from(&head, 0, 8, HEX);
+            assert_eq!(
+                head_cells + display_width_from(&tail, head_cells, 8, HEX),
+                display_width_from(whole, 0, 8, HEX),
+                "split at {split}"
+            );
+        }
+        let expanded = expand_tabs(whole, 0, 8, HEX);
+        assert_eq!(
+            display_width_from(&expanded, 0, 8, HEX),
+            display_width_from(whole, 0, 8, HEX)
+        );
+    }
+
+    #[test]
+    fn glyphless_indices_are_codepoint_offsets() {
+        assert_eq!(glyphless_indices("a\u{200B}😀\u{202E}"), vec![1, 3]);
+        assert!(glyphless_indices("plain").is_empty());
     }
 }

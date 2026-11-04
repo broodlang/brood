@@ -157,20 +157,61 @@ endings ([[eol-decode]]), else `:lf`.
     (editor/buffer/buffer-eol (editor/buffer/make-buffer \"x\"))   ;=> :lf"
   (or (get buf :eol) :lf))
 
+;; ---- the byte-order mark -------------------------------------------------------
+;; A UTF-8 file may open with U+FEFF, the "signature" (Windows tools write one). It is no
+;; part of the text: Emacs decodes such a file as `utf-8-with-signature`, keeps the mark off
+;; the buffer — so it is neither shown (as `<feff>`) nor moved over, searched or counted in
+;; a column — and writes it back on save. The buffer remembers it as `:bom true`, as it
+;; remembers `:eol :crlf`.
+
+(def- byte-order-mark "\u{feff}")
+
+(defn file-text-decode (text)
+  "`{:text :eol :bom}` for the text a file holds, as a buffer keeps it: a leading byte-order
+mark taken off (`:bom` true when there was one), then the line endings as [[eol-decode]]
+reads them. What `buffer-from-file` and `revert-buffer` do to a file's text, and what
+anything comparing a file to a buffer must do to it too.
+
+    (editor/buffer/file-text-decode \"\\u{feff}a\\r\\nb\\r\\n\")   ;=> {:text \"a\\nb\\n\" :eol :crlf :bom true}
+    (editor/buffer/file-text-decode \"plain\")   ;=> {:text \"plain\" :eol :lf :bom false}"
+  (let (bom (string/starts-with? text byte-order-mark)
+        {:keys [text eol]} (eol-decode (if bom (string/substring text 1) text)))
+    {:text text :eol eol :bom bom}))
+
+(defn file-text-encode (text eol bom)
+  "`text` as a file holds it: its newlines written as `eol` ([[eol-encode]]) and, when
+`bom`, the byte-order mark in front. The inverse of [[file-text-decode]].
+
+    (editor/buffer/file-text-encode \"a\\n\" :crlf true)   ;=> \"\\u{feff}a\\r\\n\""
+  (let (encoded (eol-encode text eol)) (if bom (str byte-order-mark encoded) encoded)))
+
+(defn buffer-bom? (buf)
+  "Whether `buf`'s file is written with a leading byte-order mark — it was read with one
+([[file-text-decode]]); Emacs's `utf-8-with-signature`.
+
+    (editor/buffer/buffer-bom? (editor/buffer/make-buffer \"x\"))   ;=> false"
+  (= true (get buf :bom)))
+
+(defn- buffer-with-file-coding (buf eol bom)
+  "`buf` remembering the line ending and signature its file was read with — a key only for
+what differs from a plain LF file, so a buffer of one carries neither."
+  (let (with-eol (if (= eol :crlf) (assoc buf :eol :crlf) (dissoc buf :eol)))
+    (if bom (assoc with-eol :bom true) (dissoc with-eol :bom))))
+
 (defn buffer-from-file (path &optional contents)
   "Read the file at `path` into a fresh buffer, with `:file` set to `path` so
 `save-buffer` can write it back, stamped with the file's mtime (`buffer-stamp-file`). A
 file with CRLF line endings is read with bare newlines and remembered as `:eol :crlf`
-([[buffer-eol]]), so the save writes CRLF again.
+([[buffer-eol]]), and one opening with a byte-order mark is read without it and remembered
+as `:bom true` ([[buffer-bom?]]), so the save writes both back.
 
 `contents` is the file's text when the caller has read it already — an editor that reads
 the bytes once to tell a text file from a binary one (`string/bytes->` failing is the
 answer) hands the decoded text here rather than reading the file a second time.
 
     (editor/buffer/buffer-from-file \"notes.txt\")   ;~> …a buffer named notes.txt holding the file's text, :file set…"
-  (let ({:keys [text eol]} (eol-decode (if (nil? contents) (file/slurp path) contents))
-        buf (make-buffer text path path))
-    (buffer-stamp-file (if (= eol :crlf) (assoc buf :eol :crlf) buf))))
+  (let ({:keys [text eol bom]} (file-text-decode (if (nil? contents) (file/slurp path) contents)))
+    (buffer-stamp-file (buffer-with-file-coding (make-buffer text path path) eol bom))))
 
 (defn find-file-buffer (path)
   "Open `path` for editing, vim/emacs `find-file` style: its contents if the file
@@ -182,8 +223,8 @@ unsaved buffer rather than erroring.
   (if (file/exists? path) (buffer-from-file path) (make-buffer "" path path)))
 
 (defn save-buffer (buf)
-  "Write `buf`'s text to its `:file`, with the line ending it was read with
-([[buffer-eol]]); raise if it has none. Returns `buf` stamped with the file's new mtime
+  "Write `buf`'s text to its `:file`, with the line ending and byte-order mark it was read with
+([[buffer-eol]], [[buffer-bom?]]); raise if it has none. Returns `buf` stamped with the file's new mtime
 (`buffer-stamp-file`) and unmodified (`mark-buffer-saved`), so a caller that keeps the
 result knows the file and the text agree again.
 
@@ -192,7 +233,7 @@ result knows the file and the text agree again.
     (if (nil? f)
       (error "save-buffer: buffer has no file: " (get buf :name))
       (do
-        (file/spit f (eol-encode (buffer-text buf) (buffer-eol buf)))
+        (file/spit f (file-text-encode (buffer-text buf) (buffer-eol buf) (buffer-bom? buf)))
         (mark-buffer-saved (buffer-stamp-file buf))))))
 
 (defn revert-buffer (buf:buffer -> buffer)
@@ -206,7 +247,7 @@ Raises when `buf` has no file or the file cannot be read.
 
     (editor/buffer/revert-buffer buf)   ;~> buf holding its file's text, unmodified — undo gives back what it held"
   (let (f (or (get buf :file) (error "revert-buffer: buffer has no file: " (get buf :name)))
-        {:keys [text eol]} (eol-decode (file/slurp f))
+        {:keys [text eol bom]} (file-text-decode (file/slurp f))
         reread (if (= text (buffer-text buf))
                  buf
                  ;; through the mutators, so markers, the edit log a held parse is updated
@@ -224,8 +265,8 @@ Raises when `buf` has no file or the file cannot be read.
                    (if (get buf :undo-disabled)
                      restored
                      (assoc restored :undo (cons (buffer-snapshot buf) (rest (get restored :undo)))))))
-        with-eol (if (= eol :crlf) (assoc reread :eol :crlf) (dissoc reread :eol)))
-    (buffer-stamp-file (mark-buffer-saved with-eol))))
+        coded (buffer-with-file-coding reread eol bom))
+    (buffer-stamp-file (mark-buffer-saved coded))))
 
 (defn buffer-file-changed? (buf)
   "True when the file behind `buf` has been written since the buffer last agreed with it
@@ -714,6 +755,100 @@ command) into one undo, the Emacs way — keeping this primitive's default simpl
     (count (get (editor/buffer/insert (editor/buffer/amalgamate-undo (editor/buffer/insert (editor/buffer/make-buffer \"\") \"a\")) \"b\") :undo))   ;=> 1"
   (assoc buf :undo-amalgamate true))
 
+;; ---- the undo limit (Emacs's undo-limit / undo-strong-limit) ------------------
+;; A history nobody trims is a memory leak over a long session, so `:undo` is capped by
+;; SIZE. A snapshot shares every rope leaf its edit did not touch, so what it alone keeps
+;; alive is the text its step changed plus the leaf and path that edit copied: its COST is
+;; the changed chars (the old side and the new, `text/changed-range` against the state
+;; that came after it) plus `*undo-step-cost*`. The cost is known once the NEXT snapshot is
+;; pushed, so it is stamped on the old head then (`:cost`), and the buffer keeps the
+;; running sum as `:undo-size`.
+;;
+;; Trimming is Emacs's two limits: nothing happens until the history passes
+;; `*undo-strong-limit*`, then the oldest snapshots go until what is left fits
+;; `*undo-limit*` — one O(history) pass per (strong - limit) worth of edits, never per
+;; keystroke. A snapshot IS one undo group (amalgamation and `undo-group` fold a run into
+;; one), so dropping whole snapshots never cuts a group in half; the newest group is kept
+;; whatever its size. Only an EDIT trims: an undo run walks the oldest entries, which are
+;; what a trim drops, so its own steps never trim and a run reaches the end of a history at
+;; the limit. Both limits are `defdyn`s: an editor binds them, or re-`def`s them from its
+;; settings (every process of the image then sees them); nil turns the cap off.
+
+(defdyn editor/buffer/*undo-limit* 2000000)
+;; What a trimmed history is cut back to, in cost units (≈ chars). See the section note.
+
+(defdyn editor/buffer/*undo-strong-limit* 3000000)
+;; The size a history may reach before it is trimmed back to `*undo-limit*`.
+
+(def *undo-step-cost* 1024)
+;; What one snapshot costs beyond the text its step changed: the rope leaf (ropey's are up
+;; to ~1 KB) and the internal nodes its edit copied, which the snapshot alone keeps alive.
+
+(defn undo-cost (older newer)
+  "What snapshot (or buffer) `older` costs to keep on the undo history when `newer` is the
+state after it: the chars its step changed, old side and new, plus `*undo-step-cost*`.
+
+    (editor/buffer/undo-cost (editor/buffer/make-buffer \"abcd\") (editor/buffer/make-buffer \"abXcd\"))   ;=> 1025"
+  (let (range (text/changed-range (get older :rope) (get newer :rope)))
+    (if (nil? range)
+      *undo-step-cost*
+      (let ([start old-end new-end] range)
+        (+ *undo-step-cost* (- old-end start) (- new-end start))))))
+
+(defn- buffer-undo-keep (history limit)
+  "How many snapshots of `history` (newest first) fit in `limit`: their summed `:cost` stays
+within it, and the newest is kept whatever it costs. Answers `[kept size]`."
+  (letrec (walk (fn (entries kept size)
+                  (if (empty? entries)
+                    [kept size]
+                    (let (next (+ size (or (get (first entries) :cost) 0)))
+                      (if (and (> kept 0) (> next limit))
+                        [kept size]
+                        (walk (rest entries) (inc kept) next))))))
+    (walk history 0 0)))
+
+(defn trim-undo (buf:buffer -> buffer)
+  "`buf` with its undo history cut back to `*undo-limit*` when it has grown past
+`*undo-strong-limit*` — the oldest snapshots dropped, whole (each is one undo group), the
+newest always kept. A current undo run (`:pending-undo`, a tail of the history) loses the
+same oldest entries, so it never walks into a dropped one. Every edit calls this (an undo
+step does not, so a run can walk back through all of a history at the limit);
+call it after lowering the limits to apply them at once.
+
+    (count (get (binding (editor/buffer/*undo-limit* 0 editor/buffer/*undo-strong-limit* 0) (editor/buffer/trim-undo (editor/buffer/insert (editor/buffer/insert (editor/buffer/make-buffer \"\") \"a\") \"b\"))) :undo))   ;=> 1"
+  (let (limit *undo-limit*
+        ;; never below the limit: a strong limit under it would trim on every edit and drop
+        ;; nothing, an O(history) pass a keystroke
+        strong (when limit (math/max limit (or *undo-strong-limit* limit)))
+        history (or (get buf :undo) ()))
+    (if (or (nil? limit) (<= (or (get buf :undo-size) 0) strong))
+      buf
+      (let ([kept size] (buffer-undo-keep history limit)
+            dropped (- (count history) kept)
+            pending (or (get buf :pending-undo) ()))
+        (if (= dropped 0)
+          (assoc buf :undo-size size)
+          (assoc buf
+            :undo (apply list (take history kept))
+            :undo-size size
+            :pending-undo (apply list (take pending (math/max 0 (- (count pending) dropped))))))))))
+
+(defn- buffer-undo-cons (buf history snapshot)
+  "`buf` with `snapshot` pushed onto `history` as its new head: the old head's `:cost` is
+stamped now that the state after it is known (`snapshot`), and `:undo-size` grows by it."
+  (let (head (first history)
+        priced? (or (nil? head) (get head :cost))
+        cost (if priced? 0 (undo-cost head snapshot))
+        history (if priced? history (cons (assoc head :cost cost) (rest history))))
+    (assoc buf :undo (cons snapshot history) :undo-size (+ (or (get buf :undo-size) 0) cost))))
+
+(defn- buffer-undo-push (buf history snapshot)
+  "[[buffer-undo-cons]], then the history trimmed when it passed the strong limit
+(`trim-undo`) — what every EDIT records through. An undo step does not trim: the run it is
+part of walks the oldest entries, which are the ones a trim drops, so a run at the limit
+would eat the history it is undoing. A run at most doubles the history; the next edit trims."
+  (trim-undo (buffer-undo-cons buf history snapshot)))
+
 (defn- buffer-record-change (buf:buffer -> buffer)
   "Record that `buf`'s text is about to change — called by EVERY editing op, and only by
 one that really changes the text. Two facts follow from a change, and this is the one place
@@ -734,9 +869,9 @@ restarts it whenever the previous command wasn't an undo.)"
         (assoc buf
           :undo-amalgamate false)
       else
-        (assoc buf
-          :undo (cons (buffer-snapshot buf) (or (get buf :undo) ()))
-          :undo-amalgamate false))))
+        (buffer-undo-push (assoc buf :undo-amalgamate false)
+          (or (get buf :undo) ())
+          (buffer-snapshot buf)))))
 
 (defn undo-group (buf:buffer f: (buffer -> buffer) -> buffer)
   "Apply `f` (`buffer -> buffer`) to `buf` as ONE undo step, however many edits it makes:
@@ -750,15 +885,24 @@ recorded anything, all of it is replaced by one snapshot of `buf`. O(1) either w
 history is never walked. An armed `amalgamate-undo` still applies to the group as a whole.
 
     (count (get (editor/buffer/undo-group (editor/buffer/make-buffer \"ab\") (fn (b) (editor/buffer/insert (editor/buffer/insert b \"x\") \"y\"))) :undo))   ;=> 1"
-  (let (after (f (assoc buf :undo () :undo-amalgamate false))
-        history (or (get buf :undo) ()))
+  (let (
+        ;; `f` runs with no undo run either: a trim of its own history (its edits passing
+        ;; the strong limit) cuts the pending run by what IT dropped, and the outer run is
+        ;; a tail of a history it never saw
+        after (f (assoc buf :undo () :undo-size 0 :undo-amalgamate false :pending-undo ()))
+        history (or (get buf :undo) ())
+        ;; what `f` recorded is thrown away below, so its size goes with it, and the outer
+        ;; run comes back as it was
+        after (assoc after
+                :undo-size (or (get buf :undo-size) 0)
+                :pending-undo (get buf :pending-undo)))
     (cond
       (empty? (get after :undo))
         (assoc after :undo history :undo-amalgamate (get buf :undo-amalgamate))
       (get buf :undo-disabled) (assoc after :undo history)
       (and (get buf :undo-amalgamate) (not (empty? history)))
         (assoc after :undo history :undo-amalgamate false)
-      else (assoc after :undo (cons (buffer-snapshot buf) history) :undo-amalgamate false))))
+      else (buffer-undo-push (assoc after :undo-amalgamate false) history (buffer-snapshot buf)))))
 
 ;; ---- modified: does the text differ from the file? ---------------------------
 ;; The buffer owns this, because only the buffer sees every change: an editor that kept the
@@ -799,7 +943,7 @@ bound — editing ops on the result record nothing, so undo stays a no-op. Like 
 `buffer-disable-undo`.
 
     (get (editor/buffer/insert (editor/buffer/disable-undo (editor/buffer/make-buffer \"\")) \"a\") :undo)   ;=> nil"
-  (assoc buf :undo-disabled true :undo () :pending-undo ()))
+  (assoc buf :undo-disabled true :undo () :undo-size 0 :pending-undo ()))
 
 (defn- buffer-restore (buf snap)
   "Restore the `{:rope :point :mark}` (and `:markers`, `:editable`) of `snap` into `buf`,
@@ -837,10 +981,11 @@ leaves the buffer unmodified.
     (if (empty? p)
       buf
       (let (restored (buffer-log-restore buf (buffer-restore buf (first p))))
-        (assoc restored
-          :undo (cons (buffer-snapshot buf) (or (get buf :undo) ()))
-          :pending-undo (rest p)
-          :modified (not (= (get restored :rope) (get buf :saved-rope))))))))
+        (buffer-undo-cons (assoc restored
+                            :pending-undo (rest p)
+                            :modified (not (= (get restored :rope) (get buf :saved-rope))))
+          (or (get buf :undo) ())
+          (buffer-snapshot buf))))))
 
 ;; ---- undo in a region: undo only the lines you selected ----------------------
 ;; Emacs's `undo-in-region`, and it costs almost nothing here — because of what
@@ -980,7 +1125,17 @@ whole thing back.
           ;; record the pre-state (so this is itself undoable), then swap the text.
           ;; Point is clamped; the MARK is kept so the region stays live for a repeat.
           (let ([undone tail] found
-                pushed (buffer-record-change buf)
+                ;; a step of its own, never amalgamated into a typing run before it: our
+                ;; pre-state is then always the new head of the history
+                pushed (buffer-record-change (assoc buf :undo-amalgamate false))
+                ;; recording may have TRIMMED the history (`trim-undo`), dropping its oldest
+                ;; entries — which `tail`, cut from the history before, still holds. Only
+                ;; what survived the trim may stay: the history after our pre-state is the
+                ;; old history's first `survivors` entries, and `tail` starts at the
+                ;; consumed entry's successor
+                survivors (dec (count (get pushed :undo)))
+                consumed-at (- (count (or (get buf :undo) ())) (count tail) 1)
+                tail (apply list (take tail (math/max 0 (- survivors consumed-at 1))))
                 rope (text/from-string undone)
                 [same-lo same-hi changed] (%str-splice-diff text undone))
             (assoc pushed
@@ -995,8 +1150,18 @@ whole thing back.
                   changed)
               ;; the consumed change is dropped from history and OUR pre-state sits on
               ;; top, so a plain `undo` still takes this step back while another region
-              ;; undo continues backwards through the same lines.
-              :undo (cons (assoc (first (get pushed :undo)) :region-undo true) tail)
+              ;; undo continues backwards through the same lines. The size is recounted from
+              ;; what is left (our pre-state is priced by the next push), so `:undo` and
+              ;; `:undo-size` agree — a region undo is a command, not a keystroke, and the
+              ;; walk is the history's length at most.
+              :undo
+                (if (get buf :undo-disabled)
+                  (get pushed :undo)
+                  (cons (assoc (first (get pushed :undo)) :region-undo true) tail))
+              :undo-size
+                (if (get buf :undo-disabled)
+                  (get pushed :undo-size)
+                  (fold tail 0 (fn (acc snapshot) (+ acc (or (get snapshot :cost) 0)))))
               :point (math/min (get buf :point) (text/length rope))
               ;; `bounds` being non-nil says the mark is set; the `or` says so to the
               ;; checker (`:mark` reads `nil | int` on its own), with point as the

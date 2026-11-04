@@ -91,7 +91,7 @@ The vocabulary you'll use most:
   the model, not the command layer, so no consumer can forget to check. Build a
   generated/`special-mode` buffer (a process list, a help page) with `make-buffer`
   *then* `set-read-only` it — construction never checks the flag.
-- **Files:** `buffer-from-file` (file/slurp, or text you already read) · `save-buffer` (file/spit) · `revert-buffer` (the file read back as one undoable edit) — a CRLF file is held with bare newlines and written back with CRLF (`eol-decode` / `eol-encode`, `buffer-eol`)
+- **Files:** `buffer-from-file` (file/slurp, or text you already read) · `save-buffer` (file/spit) · `revert-buffer` (the file read back as one undoable edit) — a CRLF file is held with bare newlines and written back with CRLF (`eol-decode` / `eol-encode`, `buffer-eol`); a file opening with a byte-order mark is held without it and written back with it, Emacs's `utf-8-with-signature` (`file-text-decode` / `file-text-encode`, `buffer-bom?`)
 
 Because operations are pure, you compose them with `->` and they never surprise
 you with aliasing. A command is just a function `buffer -> buffer`.
@@ -315,7 +315,10 @@ Everything except the loop is pure, so test it like any other Brood code:
   command that is several edits (a replace, a transpose, a query-replace-all) one undo
   step, and `buffer-modified?` is kept by the buffer itself — every edit passes one
   choke point that sets it, and undoing back to the saved text clears it — so no
-  command can change the text and forget to say so.
+  command can change the text and forget to say so. The history is capped by size, as
+  Emacs's `undo-limit` / `undo-strong-limit` cap its own (ADR-550): past
+  `editor/buffer/*undo-strong-limit*` the oldest steps go, whole, until the rest fits
+  `*undo-limit*` — so a buffer edited all week does not keep every text it ever held.
 - **Multiple buffers / windows.** Either hold a list of buffers in editor state,
   or give each its own process via `spawn-buffer` and render the *views* it
   replies with. The reply-with-views boundary is the same one a remote frontend

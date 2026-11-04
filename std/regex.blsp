@@ -515,13 +515,17 @@ rope), or nil. Searches the rope in place: the cost is the distance to the match
 size of the text. `opts`: `:fold?` ignores case; `:lines?` (on unless false) makes `^`/`$`
 a line's ends and `.` stop at a newline, as a buffer search wants; `:empty?` lets an EMPTY
 match be the answer (`x*` stops before the first character, as Emacs's `re-search-forward`
-does) where by default one is stepped over.
+does) where by default one is stepped over; `:bound` (a char index) is where a match must END
+by — a greedy pattern stops there rather than being refused, while `^`, `$` and `\\b` still read
+the text past it (Emacs's BOUND, what a search confined to a region wants; ADR-554).
 
     (get (regex/rope-find \"o+\" (text/from-string \"foo boo\") 3) :start)                ;=> 5
     (get (regex/rope-find \"^b\" (text/from-string \"ab\\nbc\") 0) :start)                ;=> 3
     (get (regex/rope-find \"FOO\" (text/from-string \"a foo\") 0 {:fold? true}) :text)   ;=> \"foo\"
-    (get (regex/rope-find \"x*\" (text/from-string \"ab x\") 0 {:empty? true}) :end)   ;=> 0"
-  (%rope-regex-find r (regex-rope-src pattern opts) from (= true (:empty? opts))))
+    (get (regex/rope-find \"x*\" (text/from-string \"ab x\") 0 {:empty? true}) :end)   ;=> 0
+    (get (regex/rope-find \"a+\" (text/from-string \"aaaa\") 0 {:bound 2}) :end)       ;=> 2
+    (regex/rope-find \"o$\" (text/from-string \"foo bar\") 0 {:bound 3})               ;=> nil"
+  (%rope-regex-find r (regex-rope-src pattern opts) from (= true (:empty? opts)) (:bound opts)))
 
 (defn rope-find-backward (pattern r before &optional (opts {}))
   "The non-empty match of `pattern` in rope `r` that starts LAST while ending at or before

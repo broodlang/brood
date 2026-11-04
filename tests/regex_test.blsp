@@ -487,6 +487,26 @@
       (assert= (get (rope-find "x*" r 0 {:empty? true}) :end) 0)
       (assert= (get (rope-find-backward "x*" r 5 {:empty? true}) :start) 5)
       (assert= (get (rope-find-backward "x*" r 5) :start) 3)))
+  (test ":bound — a match ends by it, look-around reads past it (ADR-554)"
+    (let (r (text/from-string "aaaa foo\nbar foobar üüü"))
+      (assert= (get (rope-find "a+" r 0 {:bound 2}) :text) "aa")
+      (assert= (get (rope-find "a+" r 0) :text) "aaaa")
+      (assert= (rope-find "foo" r 0 {:bound 7}) nil)
+      (assert= (get (rope-find "foo" r 0 {:bound 8}) :start) 5)
+      ;; `$` at the bound is a line's end only where the text has one
+      (assert= (get (rope-find "o$" r 0 {:bound 8}) :start) 7)
+      (assert= (rope-find "foo$" r 9 {:bound 16}) nil)
+      ;; `\b` at the bound sees `bar` go on
+      (assert= (rope-find "foo\\b" r 9 {:bound 16}) nil)
+      ;; groups come from the bounded match
+      (assert= (get (first (get (rope-find "(a+)" r 0 {:bound 3}) :groups)) :text) "aaa")
+      ;; a Unicode word boundary quits the lazy DFA: the fallback is bounded too
+      (assert= (get (rope-find "\\bü+" r 20 {:bound 22}) :text) "üü")
+      (assert= (rope-find "ü\\b" r 20 {:bound 22}) nil)
+      ;; an empty match at the bound is an answer when one is asked for
+      (assert= (get (rope-find "x*" r 2 {:bound 2 :empty? true}) :start) 2)
+      ;; a greedy match through the fallback reaches the rope's end whole
+      (assert= (get (rope-find "\\bü+" r 20) :text) "üüü")))
   (test "rope-find-backward: the last start, ending by `before`"
     (let (r (text/from-string "foo foo xfoo"))
       (assert= (get (rope-find-backward "fo+" r 12) :start) 9)
