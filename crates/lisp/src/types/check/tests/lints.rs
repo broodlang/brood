@@ -201,6 +201,12 @@ fn unused_let_binding_lint() {
         file_warnings("(let (p 1) {:on-complete (fn (x) (+ x p))})").is_empty(),
         "binding captured by a closure inside a map should be silent"
     );
+    // A set literal evaluates its elements as a map literal does (a writer set handed to
+    // `registry/written-by`, `#{file}`, read as an unused `file`).
+    assert!(
+        file_warnings("(let (x 1) #{x})").is_empty(),
+        "binding used as a set element should be silent"
+    );
     // The map descent must not mask genuine dead bindings.
     let w = file_warnings("(let (s 1) {:start 2})");
     assert!(
