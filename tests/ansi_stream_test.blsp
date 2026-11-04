@@ -45,6 +45,12 @@ when the cut fell inside a run."
     "\ePq#0;2;0;0;0\e\\after-dcs" "line one\r\n\e[32mline two\e[0m\r\n"
     "x\e[1;4:3mcurly\e[4:0m\e[58:5:1mu\e[59;38:2:1:2:3mv"])
 
+(defn- digits (n d) (string/join (seq/repeat n d) ""))
+
+(def- long-csi
+  ;; a CSI past the 256-character cap, finished; another, aborted by a newline
+  (str "a\e[" (digits 258 "1") "mX\e[" (digits 258 "2") "\nY"))
+
 (describe "ansi/feed: one chunk"
   (test "SGR sets attributes; the text keeps no escape"
     (assert= (whole "\e[1mERROR\e[0m: done") [["ERROR" {:bold true}] [": done" nil]]))
@@ -76,6 +82,21 @@ when the cut fell inside a run."
 (describe "ansi/feed: a stream cut anywhere"
   (test "every two-way cut, and one character at a time, decodes as the whole"
     (doseq (s samples) (assert= [s (split-everywhere-agrees? s)] [s true])))
+  (test "an over-long CSI agrees too, cut anywhere"
+    (assert= (whole long-csi) [["aX\nY" nil]])
+    (doseq (s (string/split long-csi "X")) (assert (split-everywhere-agrees? s))))
+  (test "a CSI past the cap is swallowed through its final byte, chunks later"
+    (let ([d1 g1] (ansi/feed (ansi/decoder) (str "a\e[" (digits 200 "1")))
+          [d2 g2] (ansi/feed d1 (digits 200 "1"))
+          [d3 g3] (ansi/feed d2 (digits 50 "1"))
+          [_ g4] (ansi/feed d3 "mX"))
+      (assert= [g1 g2 g3 g4] [[["a" nil]] [] [] [["X" nil]]])
+      ;; swallowed, not held: nothing of it waits in the decoder
+      (assert= [(:pending d2) (:inside d2)] ["" :csi])))
+  (test "a swallowed CSI is ended by a control character, or cancelled by an ESC"
+    (let ([d _] (ansi/feed (ansi/decoder) (str "\e[" (digits 300 "1"))))
+      (assert= (second (ansi/feed d "\nX")) [["\nX" nil]])
+      (assert= (second (ansi/feed d "\e[1mY")) [["Y" {:bold true}]])))
   (test "the half of an escape a chunk ends inside is held, never shown"
     (let ([decoder got] (ansi/feed (ansi/decoder) "ok \e[1"))
       (assert= got [["ok " nil]])
@@ -150,7 +171,9 @@ when the cut fell inside a run."
   (test "an OSC title is removed whole — its text never leaks"
     (assert= (ansi/strip "a\e]2;title\x07b") "ab"))
   (test "carriage returns still go"
-    (assert= (ansi/strip "\e[1mx\r\n\e[0m") "x\n")))
+    (assert= (ansi/strip "\e[1mx\r\n\e[0m") "x\n"))
+  (test "an over-long CSI never leaks its tail"
+    (assert= (ansi/strip long-csi) "aX\nY")))
 
 (describe "ansi/render: strings"
   (test "an OSC title is dropped through its terminator, not shown"

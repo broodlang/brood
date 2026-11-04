@@ -239,46 +239,52 @@ pass through. Nil for the default face.
 ;; ---- the streaming decoder ---------------------------------------------------------------
 ;; Output arrives in chunks the reader did not choose, so an escape may be cut anywhere:
 ;; `ESC[1` at the end of one read and `mERROR` at the start of the next. The decoder is a
-;; value — `{:attr :pending :in-string}` — threaded from one chunk to the next: `:attr` the
+;; value — `{:attr :pending :inside}` — threaded from one chunk to the next: `:attr` the
 ;; SGR attributes in force, `:pending` the start of an escape the chunk ended inside (it is
-;; prepended to the next chunk), `:in-string` true while inside an OSC / DCS / APC / PM /
-;; SOS string whose terminator has not arrived (its content is discarded as it comes, so a
-;; long or unterminated string holds no memory).
+;; prepended to the next chunk), and `:inside` what the chunk ended inside of that is
+;; being SWALLOWED rather than held — `:string`, an OSC / DCS / APC / PM / SOS string
+;; whose terminator has not arrived, or `:csi`, a CSI past `csi-pending-max` whose final
+;; byte has not — nil otherwise. A swallowed sequence's content is discarded as it comes,
+;; so a long or unterminated one holds no memory, and its tail never shows as text.
 ;;
 ;; The scan splits the chunk at ESC: the first piece is text, every later piece starts
 ;; with the body of one escape and continues with text. A piece is examined only as far as
 ;; its escape reaches (a few ASCII characters), then the rest is taken whole — no
 ;; per-character walk over the text.
 
-(def- csi-pending-max 256) ; an unfinished CSI longer than this is garbage, not a sequence
+(def- csi-pending-max 256) ; an unfinished CSI longer than this is swallowed, not held
 
 (defn decoder ()
   "A fresh streaming decoder: the default attributes, nothing pending. Thread it through
 [[feed]], one per stream (stdout and stderr are two).
 
     (:attr (ansi/decoder))   ;=> nil"
-  {:attr nil :pending "" :in-string false})
+  {:attr nil :pending "" :inside nil})
 
 (defn- code-at (piece:string i:int -> int)
   (string/char->int (string/char-at piece i)))
 
+(def- csi-body-bytes
+  ;; the bytes a CSI holds before its final byte: parameters (0x30–0x3F) and
+  ;; intermediates (0x20–0x2F)
+  " !\"#$%&'()*+,-./0123456789:;<=>?")
+
 (defn- csi-scan (piece:string i:int n:int -> vector)
   "From index `i` of a CSI's body: `[:final end]` past its final byte (0x40–0x7E),
 `[:incomplete]` when the piece ends first, or `[:abort at]` at a byte no CSI may hold
-(a control character inside one cancels it, and the character is text again)."
-  (if (>= i n)
-    [:incomplete]
-    (let (k (code-at piece i))
-      (cond
-        (<= 0x40 k 0x7e) [:final (inc i)]
-        (<= 0x20 k 0x3f) (csi-scan piece (inc i) n)
-        else [:abort i]))))
+(a control character inside one cancels it, and the character is text again). The run
+of body bytes is one native `string/span`, not a walk."
+  (let (j (string/span piece i csi-body-bytes))
+    (cond
+      (>= j n) [:incomplete]
+      (<= 0x40 (code-at piece j) 0x7e) [:final (inc j)]
+      else [:abort j])))
 
 (defn- plain-sgr-body? (body:string -> bool)
   "Whether a CSI body ending in `m` is SGR: parameters only — digits, `;` and `:`. A
 private marker (`ESC[>4;2m` is xterm's modifyOtherKeys, not a colour) or an
 intermediate byte makes it some other sequence."
-  (regex/matches? "[0-9;:]*" body))
+  (= (string/span body 0 "0123456789;:") (string/length body)))
 
 (defn- intermediate-scan (piece:string j:int n:int -> vector)
   "From index `j`, past an escape's intermediate bytes (0x20–0x2F) and its final byte."
@@ -295,23 +301,26 @@ intermediate byte makes it some other sequence."
       [:sgr body end]
       [:skip end])))
 
-(defn- escape-scan (piece:string -> vector)
-  "What the escape starting `piece` (the text after an ESC) is: `[:sgr body end]`, `[:skip
-end]` (consumed; text resumes at `end`), `[:string]` (an OSC-like string still open at the
-piece's end) or `[:incomplete]` (the piece ends inside the escape)."
+(defn- escape-scan (piece:string sgr?:bool -> vector)
+  "What the escape starting `piece` (the text after an ESC) is: `[:sgr body end]` (only
+when `sgr?` — else an SGR is `[:skip end]` like any CSI), `[:skip end]` (consumed; text
+resumes at `end`), `[:string]` (an OSC-like string still open at the piece's end),
+`[:csi]` (a CSI past `csi-pending-max` still open at the piece's end) or `[:incomplete]`
+(the piece ends inside the escape)."
   (let (n (string/length piece))
     (if (= n 0)
       [:incomplete]
-      (let (lead (string/char-at piece 0)
-            k (code-at piece 0))
+      ;; `char->int` reads the first character natively — no one-character substring
+      (let (k (string/char->int piece))
         (cond
-          (= lead "[")
+          (= k 0x5b)
             (let (scan (csi-scan piece 1 n))
               (case (first scan)
-                :final (csi-final piece (second scan))
+                :final (if sgr? (csi-final piece (second scan)) [:skip (second scan)])
                 :abort [:skip (second scan)]
-                (if (> n csi-pending-max) [:skip n] [:incomplete])))
-          (includes? "]PX^_" lead)
+                (if (> n csi-pending-max) [:csi] [:incomplete])))
+          ;; `]` OSC, `P` DCS, `X` SOS, `^` PM, `_` APC
+          (includes? [0x5d 0x50 0x58 0x5e 0x5f] k)
             (let (bel (index-of piece "\x07"))
               (if (>= bel 0) [:skip (inc bel)] [:string]))
           ;; intermediates then one final byte: charset selection (`ESC ( B`), `ESC # 8`
@@ -321,17 +330,22 @@ piece's end) or `[:incomplete]` (the piece ends inside the escape)."
           ;; ESC then a control character: the ESC alone is dropped
           else [:skip 0])))))
 
-(defn- emit (acc text:string attr -> any)
-  (if (= text "") acc (cons [text attr] acc)))
-
 (defn- tail-from (piece:string at:int -> string)
   (if (= at 0) piece (string/substring piece at (string/length piece))))
 
-(defn- string-piece (piece:string attr acc -> vector)
-  "Inside an OSC-like string, the piece before the next ESC: `[in-string acc]` — still
-inside when no BEL ends it here, else the text after the BEL emitted."
-  (let (bel (index-of piece "\x07"))
-    (if (>= bel 0) [false (emit acc (tail-from piece (inc bel)) attr)] [true acc])))
+(defn- swallow-head (piece:string inside -> (tuple any (or nil string)))
+  "The text before a chunk's first ESC when the last chunk ended `inside` a swallowed
+sequence: `[inside' text]` — still inside (text nil) when the sequence's end is not
+here, else nil and the text after it. A string ends at a BEL (an `ESC \\\\` is its next
+piece's); a CSI at its final byte, or at a control character, which is text again."
+  (if (= inside :string)
+    (let (bel (index-of piece "\x07"))
+      (if (>= bel 0) [nil (tail-from piece (inc bel))] [:string nil]))
+    (let (scan (csi-scan piece 0 (string/length piece)))
+      (if (= (first scan) :incomplete) [:csi nil] [nil (tail-from piece (second scan))]))))
+
+(defn- emit (acc text:string attr -> any)
+  (if (= text "") acc (cons [text attr] acc)))
 
 (defn- merge-runs (reversed -> vector)
   "The reversed `[text attr]` list as a vector in order, adjacent runs of one attribute
@@ -346,22 +360,24 @@ joined into one segment."
                      (cons [(list text) attr] out))))))
     (into [] (map runs (fn (run) [(string/join (first run) "") (second run)])))))
 
-(defn- finish (attr pending:string in-string:bool acc -> vector)
-  [{:attr attr :pending pending :in-string in-string} (merge-runs acc)])
+(defn- finish (attr pending:string inside acc -> vector)
+  [{:attr attr :pending pending :inside inside} (merge-runs acc)])
 
-(defn- feed-pieces (pieces:vector i:int n:int attr in-string:bool acc -> vector)
-  "Walk the ESC-separated `pieces` from `i`: `[decoder segments]`."
+(defn- feed-pieces (pieces:vector i:int n:int attr inside acc -> vector)
+  "Walk the ESC-separated `pieces` from `i`: `[decoder segments]`. `inside` is what the
+last piece left open (`:string`, `:csi` or nil); only a string outlives the ESC that
+starts the next piece — that ESC ends a swallowed CSI."
   (if (>= i n)
-    (finish attr "" in-string acc)
+    (finish attr "" inside acc)
     (let (piece (nth pieces i)
           last? (= i (dec n)))
       (cond
         ;; inside a string: `ESC \` ends it; any other escape cancels it and starts anew
-        (and in-string (= piece "") last?) (finish attr "\e" true acc)
-        (and in-string (string/starts-with? piece "\\"))
-          (feed-pieces pieces (inc i) n attr false (emit acc (tail-from piece 1) attr))
+        (and (= inside :string) (= piece "") last?) (finish attr "\e" :string acc)
+        (and (= inside :string) (string/starts-with? piece "\\"))
+          (feed-pieces pieces (inc i) n attr nil (emit acc (tail-from piece 1) attr))
         else
-          (let (scan (escape-scan piece))
+          (let (scan (escape-scan piece true))
             (case (first scan)
               :sgr
                 (let (next-attr (sgr attr (params (second scan))))
@@ -369,24 +385,27 @@ joined into one segment."
                     (inc i)
                     n
                     next-attr
-                    false
+                    nil
                     (emit acc (tail-from piece (nth scan 2)) next-attr)))
               :skip
                 (feed-pieces pieces
                   (inc i)
                   n
                   attr
-                  false
+                  nil
                   (emit acc (tail-from piece (second scan)) attr))
               :string
                 (if last?
-                  (finish attr "" true acc)
-                  (feed-pieces pieces (inc i) n attr true acc))
+                  (finish attr "" :string acc)
+                  (feed-pieces pieces (inc i) n attr :string acc))
+              ;; an over-long CSI at the chunk's end is swallowed through its final byte,
+              ;; in this chunk or a later one; an ESC arriving first cancels it
+              :csi (if last? (finish attr "" :csi acc) (feed-pieces pieces (inc i) n attr nil acc))
               ;; :incomplete — held for the next chunk when the chunk ends here; an ESC
               ;; arriving inside it instead cancels it
               (if last?
-                (finish attr (str "\e" piece) false acc)
-                (feed-pieces pieces (inc i) n attr false acc))))))))
+                (finish attr (str "\e" piece) nil acc)
+                (feed-pieces pieces (inc i) n attr nil acc))))))))
 
 (defn feed (state:map chunk:string -> vector)
   "Decode `chunk`, the next piece of a stream, with the decoder `state`: `[state'
@@ -400,21 +419,24 @@ stream at ANY position decodes the same as feeding it whole.
 
 SGR (`ESC[…m`) changes the attributes; every other escape — CSI cursor motion and erase,
 OSC (titles, OSC 8 hyperlinks, ended by BEL or `ESC \\\\`), DCS / APC / PM / SOS strings,
-charset selection, two-character escapes — is consumed and shows nothing. Control
-characters (`\\r`, `\\b`, BEL outside a string, …) stay in the text for the caller: `\\r`
-means one thing to a log (drop it) and another to a progress line (overwrite). At the end
-of a stream an escape still pending is incomplete and is dropped with the decoder."
+charset selection, two-character escapes — is consumed and shows nothing. A CSI that runs
+past 256 characters without its final byte is not held: it is swallowed through that
+byte, however many chunks later it comes. Control characters (`\\r`, `\\b`, BEL outside a
+string, …) stay in the text for the caller: `\\r` means one thing to a log (drop it) and
+another to a progress line (overwrite). At the end of a stream an escape still pending is
+incomplete and is dropped with the decoder."
   (let (text (str (:pending state) chunk)
         attr (:attr state)
-        in-string (:in-string state))
+        inside (:inside state))
     (cond
       (= text "") [(assoc state :pending "") []]
-      (and (not in-string) (not (includes? text "\e"))) [(assoc state :pending "") [[text attr]]]
+      (and (nil? inside) (not (includes? text "\e"))) [(assoc state :pending "") [[text attr]]]
       else
         (let (pieces (into [] (string/split text "\e"))
               head (first pieces)
-              [still-in acc] (if in-string (string-piece head attr ()) [false (emit () head attr)]))
-          (feed-pieces pieces 1 (count pieces) attr still-in acc)))))
+              [still-inside head-text] (if (nil? inside) [nil head] (swallow-head head inside))
+              acc (if (nil? head-text) () (emit () head-text attr)))
+          (feed-pieces pieces 1 (count pieces) attr still-inside acc)))))
 
 (defn segments-text (segments:vector -> string)
   "The text of decoded `segments`, attributes dropped.
