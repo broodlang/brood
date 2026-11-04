@@ -240,6 +240,71 @@ kills the command and every process it started, and dies itself as it would in a
 (sig cmd
   (string &optional (or list vector) map -> (record &open :stdout string :stderr string :exit int)))
 
+;; ---- the platform's shell (KI-364) --------------------------------------------
+;; A command LINE — pipes, redirections, `&&` — needs the platform's command interpreter.
+;; Naming `sh` works where there is one; Windows has `cmd.exe`, which reads its line raw:
+;; `cmd /d /s /c "LINE"` strips the outer quotes and runs LINE as typed, so the line goes
+;; into the command line unquoted (`:raw-args`), not through the MSVC quoting a normal
+;; argument gets (where a `"` in the line became `\"`, which `cmd` does not read).
+
+(defn shell ()
+  "The platform's command interpreter as the argument vector a command line follows:
+`[\"sh\" \"-c\"]`, or on Windows `[%COMSPEC% \"/d\" \"/s\" \"/c\"]` (`cmd.exe` when
+`COMSPEC` is unset). [[shell-cmd]] and [[shell-spawn]] run a line through it.
+
+    (contains? #{\"sh\" \"cmd.exe\"} (first (os/shell)))   ;~> true, unless COMSPEC names another"
+  (if (= (type) :windows) [(or (env "COMSPEC") "cmd.exe") "/d" "/s" "/c"] ["sh" "-c"]))
+
+(defn- shell-call (line opts)
+  ;; `[program args opts]` running `line` through [[shell]]
+  (let (interpreter (shell))
+    (if (= (type) :windows)
+      [(first interpreter)
+        (conj (vec (rest interpreter)) (str "\"" line "\""))
+        (assoc (or opts {}) :raw-args true)]
+      [(first interpreter) (conj (vec (rest interpreter)) line) (or opts {})])))
+
+(defn shell-cmd (line:string &optional (opts {}))
+  "Run the command line `line` through the platform's shell ([[shell]]) to completion — the
+line as a person types it, pipes and quotes included — and answer as [[cmd]] does, with
+[[cmd]]'s options. `sh -c` on Unix, `cmd.exe /d /s /c` on Windows (so the line is written
+in that shell's language there).
+
+    (os/cmd-out (os/shell-cmd \"echo hello\"))   ;=> \"hello\""
+  (let ([program arguments options] (shell-call line opts))
+    (cmd program arguments options)))
+
+(defn shell-spawn (line:string &optional opts)
+  "Start the command line `line` through the platform's shell ([[shell]]) as a persistent
+child — [[spawn]] for a line rather than a program and its arguments, with [[spawn]]'s
+messages and options.
+
+    (os/shell-spawn \"echo hi\")   ;~> a subprocess handle; [:proc handle \"hi\\n\"] arrives"
+  (let ([program arguments options] (shell-call line opts))
+    (%proc-spawn program arguments options)))
+
+(defn detach (prog args &optional opts)
+  "Start `prog` with `args` and let it go: no pipes, no handle, and it is not stopped when
+the caller dies (it is in neither the caller's process group nor, on Windows, its Job
+Object). For handing something to another application that must outlive the caller.
+Options as [[spawn]]. Returns nil; raises when `prog` cannot be started.
+
+    (os/detach \"brood-surely-no-such-program\" [])   ;~> raises: it cannot be started"
+  (%os-detach prog args opts))
+
+(defn open (target:string -> nil)
+  "Open `target` — a URL, or a path — in the application the desktop opens it with (the
+default browser for a URL), detached ([[detach]]): `open` on macOS, the URL protocol handler
+on Windows (`rundll32 url.dll,FileProtocolHandler`, which no shell parses, so `&` and
+spaces in the URL are safe), `xdg-open` elsewhere. Returns nil; raises when the opener
+cannot be started.
+
+    (os/open \"https://example.org\")   ;~> nil, the page opening in the browser"
+  (case (type)
+    :macos (detach "open" [target])
+    :windows (detach "rundll32.exe" ["url.dll,FileProtocolHandler" target])
+    (detach "xdg-open" [target])))
+
 (defn cmd-ok? (result:map -> bool)
   "True if the command result has exit code 0.
 

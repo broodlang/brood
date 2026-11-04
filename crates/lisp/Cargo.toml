@@ -378,11 +378,12 @@ wasmtime-wasi = { version = "50", default-features = false, features = ["p2"], o
 [target.'cfg(any(unix, windows))'.dependencies]
 libc = "0.2"
 
-# Windows: a Job Object per `os/cmd` child, so stopping the command (C-g, a timeout, a
+# Windows: a Job Object per `os/cmd` / `os/spawn` child, so stopping it (C-g, a timeout, a
 # killed caller) stops every process it started — Windows's process group. Already in the
-# dependency tree (transitive), at this version.
+# dependency tree (transitive), at this version. And the owner-only DACL `file/spit-private`
+# writes there (KI-365).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading"] }
 
 # Non-wasm substrate: mimalloc (its C build + per-thread heaps don't cross to wasm,
 # where core/alloc.rs BACKEND falls back to the system allocator) and mio (its

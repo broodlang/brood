@@ -109,7 +109,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::at_least(1),
         Sig::new(vec![string, seq, map_ty], map_ty),
         &["prog", "&", "args", "opts"],
-        "Run prog (with optional args list and an opts map {:cwd :env :stdin :timeout-ms}) to completion; returns {:stdout s :stderr s :exit n}, plus :timed-out true when the timeout ended the call. The timeout bounds the WHOLE call — a grandchild still holding the output pipes is killed with the child's process group.",
+        "Run prog (with optional args list and an opts map {:cwd :env :stdin :timeout-ms :raw-args}) to completion; returns {:stdout s :stderr s :exit n}, plus :timed-out true when the timeout ended the call. The timeout bounds the WHOLE call — a grandchild still holding the output pipes is killed with the child's process group.",
         os_cmd);
     primitives.def(
         "%halt",
@@ -341,14 +341,15 @@ pub(super) fn os_cmd(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             argv.push(expect_string(heap, "%os-cmd", a)?);
         }
     }
-    cmd.args(&argv);
+    let super::subprocesses::ChildOptions { cwd, env, raw_args } =
+        super::subprocesses::child_options(heap, "os/cmd", arg(args, 2))?;
+    crate::host::subprocess::add_args(&mut cmd, &argv, raw_args);
     // a responsive process is told it waited, or refused the wait (ADR-517)
     let blocking = crate::process::responsive::enter_blocking(heap, "os/cmd", || {
         crate::process::responsive::command_detail(&prog, &argv)
     })?;
     let mut stdin_text: Option<String> = None;
     let mut timeout: Option<std::time::Duration> = None;
-    let (cwd, env) = super::subprocesses::child_options(heap, "os/cmd", arg(args, 2))?;
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
@@ -622,50 +623,9 @@ fn os_cmd_collect(
     Ok((status, stdout_bytes, stderr_bytes, stop))
 }
 
-/// Windows's process group: a Job Object holding the child, which every process the child
-/// starts joins too. Stopping the command terminates the job, so a `sh -c "… ; sleep 60"`
-/// grandchild dies with it — killing only the child left the grandchild running AND holding
-/// the output pipes, so the drain threads (and the caller) waited on it to the end.
-#[cfg(windows)]
-struct ProcessTree(windows_sys::Win32::Foundation::HANDLE);
-
-#[cfg(windows)]
-impl ProcessTree {
-    /// A job holding `child`, or `None` when the OS refuses one (the child is then stopped
-    /// alone, as before).
-    fn of(child: &std::process::Child) -> Option<ProcessTree> {
-        use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
-        // SAFETY: a null name and default security make an anonymous job; the handle is
-        // owned here and closed on drop.
-        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
-        if job.is_null() {
-            return None;
-        }
-        let tree = ProcessTree(job);
-        // SAFETY: both handles are live — the job just made, the child's held by `child`.
-        let assigned = unsafe { AssignProcessToJobObject(job, child.as_raw_handle()) };
-        (assigned != 0).then_some(tree)
-    }
-
-    fn terminate(&self) {
-        // SAFETY: the job handle is live until drop.
-        let _ = unsafe { windows_sys::Win32::System::JobObjects::TerminateJobObject(self.0, 1) };
-    }
-}
-
-#[cfg(windows)]
-impl Drop for ProcessTree {
-    fn drop(&mut self) {
-        // SAFETY: owned, closed once. Closing does not end the processes (no
-        // KILL_ON_JOB_CLOSE): a command that finished may leave a daemon running, as on Unix.
-        let _ = unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
-    }
-}
-
 /// The portable fallback: a thread per pipe, the child killed at the deadline or when
 /// `killed` says the caller is dying. On Windows every process the child started goes
-/// with it (a [`ProcessTree`]); elsewhere off Unix a grandchild holding a pipe can still
+/// with it (a `ProcessTree`); elsewhere off Unix a grandchild holding a pipe can still
 /// outlast either.
 #[cfg(not(unix))]
 fn os_cmd_collect(
@@ -675,10 +635,8 @@ fn os_cmd_collect(
     killed: fn() -> bool,
 ) -> std::io::Result<OsCmdOutcome> {
     use std::io::{Read, Write};
-    #[cfg(windows)]
-    let tree = ProcessTree::of(&child);
+    let tree = crate::host::subprocess::ProcessTree::of(&child);
     let stop_child = |child: &mut std::process::Child| {
-        #[cfg(windows)]
         if let Some(tree) = &tree {
             tree.terminate();
         }
