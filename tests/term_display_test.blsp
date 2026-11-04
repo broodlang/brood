@@ -205,6 +205,27 @@ child exited."
             (is (:closed (read-until p up (fn (vt) false) 5000)))))
         (file/rmdir dir)))))
 
+(describe "a frame the terminal never received (ADR-586)"
+  :isolated (test "is not taken as shown: the next frame repaints whole"
+    (let (dir (test/temp-dir "brood-term-lost-")
+          script (str dir "/draw.blsp"))
+      (do
+        (file/mkdir dir)
+        (file/spit script
+          (str "(check-allow :discarded-catch (try (term/draw [[:text 0 0 \"x\"]]) (catch _ nil)))\n"
+            "(file/spit "
+            (pr-str (str dir "/due"))
+            " (str (term/repaint-due?)))\n"))
+        ;; stdout a full device: the write fails (ENOSPC)
+        (os/cmd "sh"
+          ["-c"
+            (str (os/shell-quote (sibling-binary "nest"))
+              " run "
+              (os/shell-quote script)
+              " > /dev/full")])
+        (assert= (file/slurp (str dir "/due")) "true")
+        (file/rmdir dir)))))
+
 (describe "term/colors (ADR-586)"
   (test "names the depth and can be set and reset"
     (let (environment (term/colors))

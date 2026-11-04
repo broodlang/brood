@@ -232,6 +232,11 @@ a `$` in it is one argument. `opts`:
 The child dies with its caller: a process killed while it waits here (`exit`, `task/cancel`)
 kills the command and every process it started, and dies itself as it would in a `receive`.
 
+The child runs in a SESSION of its own (as does an `os/spawn` child): its own process group,
+and no controlling terminal — so nothing it starts can prompt on this program's terminal or
+stop reading it. A command that wants a terminal (sudo or ssh asking for a password) fails at
+once instead of hanging behind a full-screen program; `os/spawn-pty` gives it one.
+
     (os/cmd-out (os/cmd \"echo\" [\"a b\"]))   ;=> \"a b\"
     (os/cmd-out (os/cmd \"cat\" [] {:stdin \"piped\"}))   ;=> \"piped\"
     (os/cmd-out (os/cmd \"sh\" [\"-c\" \"echo $X\"] {:env {\"X\" \"set\"}}))   ;=> \"set\"

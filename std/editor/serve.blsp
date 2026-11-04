@@ -908,6 +908,14 @@ backlog (`attach-display-backlog`), which paints only the newest."
     ([:primary-get from asked] (do
                                  (attach-clipboard-answer display from asked :primary)
                                  (attach-display-loop peer session display)))
+    ;; the terminal's own signals, acted on here as the local terminal display acts on them
+    ;; (ADR-586): C-z / SIGTSTP suspends this client, SIGCONT repaints it — each a resize
+    ;; the session re-lays out for — and SIGHUP / SIGTERM detach it, so a private session
+    ;; parks rather than shipping `[:signal :hup]` to the session as a key
+    ([:signal sig] (let (input (editor/ui/term-signal [:signal sig]))
+                     (if (nil? input)
+                       (attach-display-loop peer session display)
+                       (attach-ship-input peer session display input))))
     ([:bye] nil)
     ([:nodedown ^peer] nil)
     ([:down _ _ _] nil)

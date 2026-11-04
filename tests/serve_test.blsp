@@ -352,6 +352,13 @@
       ;; every upload, the newest frame's own included, before the one paint
       (assert= (last seen) [:drew [[:sprite 19 0 0 1 1]]])))
 
+  (test "a hung-up terminal client detaches — its SIGHUP is not shipped to the session as a key"
+    (let (seen (drive-backlog (fn (me) {:draw (fn (f) nil) :leave (fn () nil)})
+                 [[:signal :hup] [:frame [[:text 0 0 "after"]]]]))
+      (do
+        (assert= (first seen) [:detach])
+        (is (empty? (seq/filter seen (fn (e) (= (first e) :key))))))))
+
   (test "a texture freed after the newest frame is freed only after that frame is painted"
     (assert= (drive-backlog (fn (me)
                               {:draw (fn (f) (send me [:drew f]))

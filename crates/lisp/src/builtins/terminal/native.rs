@@ -593,8 +593,13 @@ pub(in crate::builtins) fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) 
     screen::render(shown.as_ref(), &next, depth, cursor, &mut out);
     *shown = Some(next);
     drop(state);
-    if !out.is_empty() {
-        write_term_bytes(&out).map_err(term_err)?;
+    if !out.is_empty()
+        && let Err(error) = write_term_bytes(&out)
+    {
+        // what the terminal shows is no longer known: the next frame repaints it whole,
+        // rather than diffing against a screen this one never reached
+        invalidate_screen();
+        return Err(term_err(error));
     }
     Ok(Value::nil())
 }
@@ -722,7 +727,31 @@ pub(in crate::builtins) fn job_control_available() -> bool {
         parent_group >= 0
             && parent_group != group
             && libc::getsid(parent) == libc::getsid(0)
-            && libc::tcgetpgrp(libc::STDIN_FILENO) == group
+            && terminal_foreground_group() == Some(group)
+    }
+}
+
+/// The foreground process group of the terminal the keyboard is read from: stdin when it is a
+/// terminal, else `/dev/tty` — as `tty.rs` chooses — so a program whose stdin is a pipe still
+/// asks the terminal it actually reads keys from.
+#[cfg(unix)]
+fn terminal_foreground_group() -> Option<libc::pid_t> {
+    // SAFETY: isatty / open / tcgetpgrp / close on descriptors this function owns or stdin.
+    unsafe {
+        if libc::isatty(libc::STDIN_FILENO) == 1 {
+            let group = libc::tcgetpgrp(libc::STDIN_FILENO);
+            return (group >= 0).then_some(group);
+        }
+        let descriptor = libc::open(
+            c"/dev/tty".as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOCTTY,
+        );
+        if descriptor < 0 {
+            return None;
+        }
+        let group = libc::tcgetpgrp(descriptor);
+        libc::close(descriptor);
+        (group >= 0).then_some(group)
     }
 }
 
