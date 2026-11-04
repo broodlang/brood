@@ -98,8 +98,8 @@
       (assert= (registry/written-by #{'regretract-pred-b}) [])
       (assert= (count (registry/written-by #{'regretract-pred-a})) 1)
       ;; and A's goes with A
-      (is (%with-load-journal
-            (fn () (registry/retract (first (registry/written-by #{'regretract-pred-a}))))))
+      (is (%with-load-journal (fn ()
+                                (registry/retract (first (registry/written-by #{'regretract-pred-a}))))))
       (refute (= (typed "/x/one.pa") :regretract-pred))
       (assert= (registry/written-by #{'regretract-pred-a}) []))))
 
