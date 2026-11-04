@@ -72,6 +72,17 @@
     (assert= (path/join "a" "/b") "/b")
     (assert= (path/join "a" "D:/b") (if (windows?) "D:/b" "a/D:/b"))))
 
+(describe "file times"
+  (test "file/set-mtime dates a file, with no touch program, and file/mtime reads it back"
+    (let (file (path/join (fresh-dir) "aged.txt"))
+      (file/spit file "x")
+      (file/set-mtime file 1577836800000)
+      (assert= (file/mtime file) 1577836800000)
+      (assert= (:mtime (file/stat file)) 1577836800000)
+      (is (string? (try
+                     (do (file/set-mtime (path/join (fresh-dir) "missing") 0) nil)
+                     (catch e (error-message e))))))))
+
 (describe "files: bytes go to disk as given"
   (test "CRLF is written and read back untranslated — no text mode on Windows"
     (let (file (path/join (fresh-dir) "crlf.txt"))

@@ -144,6 +144,7 @@ arg silently becoming `nil`.
 | | `file/spit` | 2 | write a string to a file (write-side of `reflect/load`) |
 | | `file/slurp` | 1 | read a whole file into a string (read-side of `file/spit`; unlike `reflect/load`, does not evaluate) |
 | | `file/mtime` | 1 | last-modified time as epoch-milliseconds, or nil if missing (cheap stat; pair with `reflect/load` for hot-reload) |
+| | `file/set-mtime` | 2 | set the last-modified time to epoch-milliseconds — the portable `touch -t` (no program needed) |
 | | `file/stat` | 1 | one-stat metadata map `{:dir? :size :mtime :atime :symlink? :exec? :mode :nlink :uid :gid :owner :group}`, or nil if missing (collapses `file/dir?`+`file/size`+`file/mtime` for a directory lister + a recency sort) |
 | | `file/slurp-bytes` | 1 | Read the whole file at path as a bytes value. The byte-faithful read slurp can't be (file/slurp is UTF-8 and throws on a non-text file). Pairs with hash/sha256-bytes / hash/sha256-raw and the encoding byte variants — e.g. hashing a binary asset. |
 | | `file/spit-bytes` | 2 | Write any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139) to path byte-faithfully, replacing any existing file. Returns nil. |
