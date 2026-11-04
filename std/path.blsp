@@ -208,7 +208,9 @@ divergent pair still yields a valid relative path (`/x/y` from `/a/b` → `../..
 ;; Windows's rules or POSIX's — so a test on any host can pin both (`binding`).
 
 (defn- windows? ()
-  (let (forced path/*windows-rules*) (if (nil? forced) (= (%os-type) :windows) forced)))
+  ;; a bool either way, so `absolute?` and the rest still declare one (sig_adoption_test)
+  (let (forced path/*windows-rules*)
+    (if (nil? forced) (= (%os-type) :windows) (= forced true))))
 
 (defn- letter? (character)
   (includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" character))
