@@ -203,8 +203,55 @@ pub(super) fn register(primitives: &mut super::Primitives) {
 /// the answer stops being usable the moment the binary is upgraded in place.
 pub(super) fn exe_path(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match std::env::current_exe() {
-        Ok(p) => Ok(heap.alloc_string(strip_deleted_marker(&p.to_string_lossy()))),
+        Ok(p) => Ok(heap.alloc_string(strip_deleted_marker(&host_path_text(&p)))),
         Err(_) => Ok(Value::nil()),
+    }
+}
+
+/// A path the host handed back (the cwd, the executable, a canonical path), as the text
+/// Brood's `path` module reads (ADR-592). On Windows that is `/` separators — Win32 takes
+/// them, and `path` splits on nothing else — and no `\\?\` verbatim prefix, which
+/// `fs::canonicalize` adds and most programs a path is handed to refuse. Elsewhere the
+/// path as it is: a `\` there is an ordinary character of a file name.
+fn host_path_text(path: &std::path::Path) -> String {
+    let text = path.to_string_lossy();
+    if cfg!(windows) {
+        windows_path_text(&text)
+    } else {
+        text.into_owned()
+    }
+}
+
+/// [`host_path_text`]'s Windows rule, over text so it is tested on every host.
+fn windows_path_text(text: &str) -> String {
+    let unprefixed = if let Some(share) = text.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{share}")
+    } else {
+        text.strip_prefix(r"\\?\").unwrap_or(text).to_string()
+    };
+    unprefixed.replace('\\', "/")
+}
+
+#[cfg(test)]
+mod windows_path_text_tests {
+    use super::windows_path_text;
+
+    #[test]
+    fn a_drive_path_takes_forward_slashes() {
+        assert_eq!(windows_path_text(r"C:\Users\me\src"), "C:/Users/me/src");
+    }
+
+    #[test]
+    fn the_verbatim_prefix_is_dropped() {
+        assert_eq!(windows_path_text(r"\\?\C:\Users\me"), "C:/Users/me");
+    }
+
+    #[test]
+    fn a_verbatim_unc_path_is_a_unc_path_again() {
+        assert_eq!(
+            windows_path_text(r"\\?\UNC\server\share\x"),
+            "//server/share/x"
+        );
     }
 }
 
@@ -232,7 +279,7 @@ fn strip_deleted_marker(path: &str) -> &str {
 
 pub(super) fn cwd(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match std::env::current_dir() {
-        Ok(p) => Ok(heap.alloc_string(&p.to_string_lossy())),
+        Ok(p) => Ok(heap.alloc_string(&host_path_text(&p))),
         Err(e) => Err(LispError::runtime(format!("file/cwd: {}", e))
             .with_code(crate::error::error_codes::FILE_IO)),
     }
@@ -293,13 +340,13 @@ pub(super) fn path_canonicalize(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
         }
         if let Ok(real) = std::fs::canonicalize(&prefix) {
             let out = apply_tail(real, &comps[k..]);
-            return Ok(heap.alloc_string(&out.to_string_lossy()));
+            return Ok(heap.alloc_string(&host_path_text(&out)));
         }
     }
     // Nothing (not even the root) canonicalized — a broken mount. Fall back to a
     // purely lexical normalization so callers still get a stable, `..`-free path.
     let out = apply_tail(PathBuf::new(), &comps);
-    Ok(heap.alloc_string(&out.to_string_lossy()))
+    Ok(heap.alloc_string(&host_path_text(&out)))
 }
 
 /// `(file/dir? path)` — true if `path` exists and is a directory.

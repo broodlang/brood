@@ -645,7 +645,7 @@ session is armed, else inline. The meta-command counterpart of `repl-eval`."
   (let (override (os/env "BROOD_HISTORY"))
     (if override
       override
-      (str (or (os/env "HOME") ".") "/.brood_history"))))
+      (str (or (path/home) ".") "/.brood_history"))))
 
 (defn- repl-history->text (history)
   "Serialize `history` (newest first) to file text: the most recent
@@ -777,7 +777,7 @@ Returns (and the process exits) at end of input."
 `./.broodrc.blsp` for a project-local one. Duplicates collapse, so running the REPL
 from your home directory doesn't load the same file twice."
   (let (user (or (os/env "BROOD_RC")
-               (let (home (os/env "HOME")) (if home (path/join home ".broodrc.blsp") nil)))
+               (let (home (path/home)) (if home (path/join home ".broodrc.blsp") nil)))
         ;; Compared against the *absolute* local path, since `user` is absolute — a
         ;; bare "./.broodrc.blsp" would never match it and we'd load twice.
         local (try (path/join (file/cwd) ".broodrc.blsp") (catch _ ".broodrc.blsp")))

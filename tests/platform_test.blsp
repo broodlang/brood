@@ -1,0 +1,114 @@
+;; The platform layer in one PORTABLE file: what the OS decides — where home and the temp
+;; directory are, what an absolute path looks like, whether file bytes are translated,
+;; how a program is found and spawned — asked the same way on Linux, macOS and Windows.
+;;
+;; The other files that touch these (path_test, file_test, system_test, proc_test) assume a
+;; POSIX userland, so CI's Windows smoke runs THIS one in their place
+;; (scripts/ci/platform-smoke.sh). Each case states the platform rule it pins; where the
+;; rule differs by OS, the case says both answers.
+
+(defmodule platform-test (:use test))
+
+(purge-stale-temp "brood-platform-")
+
+(defn- windows? () (= (os/type) :windows))
+
+(defn- fresh-dir ()
+  (let (directory (temp-dir "brood-platform-"))
+    (file/mkdir directory)
+    directory))
+
+(describe "where things are"
+  (test "os/type names this OS"
+    (is (contains? #{:linux :macos :windows} (os/type))))
+  (test "the home directory is known and absolute — USERPROFILE on Windows, where no HOME is set"
+    (let (home (path/home))
+      (is (string? home))
+      (is (path/absolute? home))
+      (is (file/dir? home))))
+  (test "~ expands to the home directory"
+    (assert= (path/absolute "~") (path/home))
+    (assert= (path/absolute "~/notes.txt") (str (path/home) "/notes.txt")))
+  (test "a path under the home abbreviates to ~ and back"
+    (assert= (path/abbreviate (path/join (path/home) "src")) "~/src")
+    (assert= (path/absolute (path/abbreviate (path/join (path/home) "src")))
+      (path/join (path/home) "src")))
+  (test "the temp directory exists, and path/temp names a fresh path inside it"
+    (is (file/dir? (path/temp-root)))
+    (assert= (path/dirname (path/temp "x-")) (path/temp-root)))
+  (test "the working directory is absolute and is a directory"
+    (is (path/absolute? (file/cwd)))
+    (is (file/dir? (file/cwd))))
+  (test "an absolute path is left alone by path/absolute — the cwd included"
+    (assert= (path/absolute (file/cwd)) (file/cwd)))
+  (test "kernel paths use / — never a backslash, never Windows's \\\\?\\ prefix"
+    (is (not (includes? (file/cwd) "\\")))
+    (is (not (includes? (path/temp-root) "\\")))
+    (is (not (includes? (path/home) "\\")))
+    (is (not (includes? (os/canonicalize ".") "\\")))
+    (is (not (includes? (os/exe-path) "\\")))))
+
+(describe "absolute paths"
+  (test "a /-rooted path is absolute everywhere"
+    (is (path/absolute? "/a/b"))
+    (is (not (path/relative? "/a/b"))))
+  (test "a drive letter is a root on Windows, and only there"
+    (assert= (path/absolute? "C:/Users") (windows?))
+    (assert= (path/absolute? "C:\\Users") (windows?))
+    (is (not (path/absolute? "C:"))))
+  (test "joining onto a drive-rooted path starts over there, as onto a /-rooted one"
+    (assert= (path/join "a" "/b") "/b")
+    (assert= (path/join "a" "D:/b") (if (windows?) "D:/b" "a/D:/b"))))
+
+(describe "files: bytes go to disk as given"
+  (test "CRLF is written and read back untranslated — no text mode on Windows"
+    (let (file (path/join (fresh-dir) "crlf.txt"))
+      (file/spit file "one\r\ntwo\r\n")
+      (assert= (count (file/slurp-bytes file)) 10)
+      (assert= (file/slurp file) "one\r\ntwo\r\n")))
+  (test "a byte-order mark is kept: three bytes, then the text"
+    (let (file (path/join (fresh-dir) "bom.txt"))
+      (file/spit file "\u{feff}text")
+      (assert= (count (file/slurp-bytes file)) 7)
+      (assert= (file/slurp file) "\u{feff}text")))
+  (test "a name with spaces and non-ASCII is one file, listed by its name"
+    (let (directory (fresh-dir)
+          file (path/join directory "My Notes — été.txt"))
+      (file/spit file "x")
+      (is (file/exists? file))
+      (assert= (vec (file/ls directory)) ["My Notes — été.txt"])))
+  (test "a directory with spaces holds files like any other"
+    (let (directory (path/join (fresh-dir) "a dir"))
+      (file/mkdir directory)
+      (file/spit (path/join directory "f") "y")
+      (assert= (file/slurp (path/join directory "f")) "y"))))
+
+(describe "processes"
+  (test "os/which finds the platform's shell — cmd as cmd.exe on Windows"
+    (let (found (os/which (if (windows?) "cmd" "sh")))
+      (is (string? found))
+      (is (path/absolute? found))))
+  (test "os/which answers nil for nothing"
+    (is (nil? (os/which "brood-surely-no-such-program"))))
+  (test "os/cmd runs the platform's shell and reads its output"
+    (let (result (if (windows?)
+                   (os/cmd "cmd.exe" ["/d" "/c" "echo hello"])
+                   (os/cmd "sh" ["-c" "echo hello"])))
+      (assert= (:exit result) 0)
+      (assert= (os/cmd-out result) "hello")))
+  (test "os/cmd runs in the :cwd it is given — a path with a space in it"
+    (let (directory (path/join (fresh-dir) "work dir"))
+      (file/mkdir directory)
+      (file/spit (path/join directory "marker.txt") "")
+      (let (result (if (windows?)
+                     (os/cmd "cmd.exe" ["/d" "/c" "dir /b"] {:cwd directory})
+                     (os/cmd "ls" [] {:cwd directory})))
+        (assert= (os/cmd-out result) "marker.txt"))))
+  (test "a failing command is an exit code, not a raise"
+    (let (result (if (windows?)
+                   (os/cmd "cmd.exe" ["/d" "/c" "exit 3"])
+                   (os/cmd "sh" ["-c" "exit 3"])))
+      (assert= (:exit result) 3)))
+  (test "a program that does not exist raises, rather than answering"
+    (is (= :raised
+          (try (os/cmd "brood-surely-no-such-program") (catch _ :raised))))))

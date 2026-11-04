@@ -1184,7 +1184,7 @@ resolve in the advisory checker. Returns the project root.
   ; $XDG_CONFIG_HOME, else ~/.config
   (let (xdg (os/env "XDG_CONFIG_HOME"))
     (if (nil? xdg)
-      (path/join (or (os/env "HOME")
+      (path/join (or (path/home)
                    (error "config-base-dir: neither XDG_CONFIG_HOME nor HOME is set"))
         ".config")
       xdg)))

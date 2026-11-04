@@ -126,13 +126,14 @@ docs/testing.md for the full guide."
 (defdyn test/*stale-temp-age-ms* 3600000)
 
 (defn purge-stale-temp (prefix)
-  "Best-effort remove every `/tmp/<prefix>*` left by an earlier run — a directory tree *or* a plain file (a fixture may be either) — that was last modified more than `test/*stale-temp-age-ms*` (an hour) ago. Call once at FILE LOAD (a top-level form), before any test creates fixtures. The age is what keeps it off a LIVE fixture: /tmp is shared by every run on the machine, and a run of the same file beside this one (another checkout, another terminal) had its fixtures deleted under it. Bounds /tmp growth and recovers from crashed runs.
+  "Best-effort remove every `/tmp/<prefix>*` (under [[path/temp-root]], so the user's temp directory on Windows) left by an earlier run — a directory tree *or* a plain file (a fixture may be either) — that was last modified more than `test/*stale-temp-age-ms*` (an hour) ago. Call once at FILE LOAD (a top-level form), before any test creates fixtures. The age is what keeps it off a LIVE fixture: /tmp is shared by every run on the machine, and a run of the same file beside this one (another checkout, another terminal) had its fixtures deleted under it. Bounds /tmp growth and recovers from crashed runs.
 
     (test/purge-stale-temp \"brood-myapp-\")   ;~> /tmp/brood-myapp-* older than an hour removed"
-  (let (cutoff (- (os/now) test/*stale-temp-age-ms*))
-    (doseq (e (file/ls "/tmp"))
+  (let (cutoff (- (os/now) test/*stale-temp-age-ms*)
+        root (path/temp-root))
+    (doseq (e (file/ls root))
       (when (string/starts-with? e prefix)
-        (let (p (path/join "/tmp" e)
+        (let (p (path/join root e)
               modified (file/mtime p))
           (when (and (int? modified) (< modified cutoff))
             (if (file/dir? p) (file/rmdir p) (file/rm p))))))))

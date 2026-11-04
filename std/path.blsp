@@ -110,7 +110,7 @@ an empty argument list.
     (let (p (first parts))
       (cond
         (= p "") (join-loop (rest parts) acc)
-        (string/starts-with? p "/") (join-loop (rest parts) (list p))
+        (rooted? p) (join-loop (rest parts) (list p))
         else (join-loop (rest parts) (cons p acc))))))
 (sig join-loop :total)
 
@@ -184,18 +184,63 @@ divergent pair still yields a valid relative path (`/x/y` from `/a/b` → `../..
 
 ;; ---- predicates -------------------------------------------------------------
 
+;; Windows (ADR-592). Paths the runtime hands back there use `/` — Win32 accepts it, and
+;; this module splits on nothing else — so what Windows adds here is only its ROOTS: a
+;; drive letter (`C:/`, or `C:\` as a person types it) and a UNC share (`\\server`). Only
+;; on Windows: elsewhere `C:/x` is a relative path whose first directory is named `C:`.
+(defn- windows? () (= (%os-type) :windows))
+
+(defn- drive-rooted? (p)
+  (and (>= (string/length p) 3)
+    (= (string/char-at p 1) ":")
+    (or (= (string/char-at p 2) "/") (= (string/char-at p 2) "\\"))
+    (windows?)))
+
+(defn- rooted? (p)
+  (or (string/starts-with? p "/")
+    (drive-rooted? p)
+    (and (string/starts-with? p "\\\\") (windows?))))
+
 (defn absolute? (p)
-  "True if `p` is an absolute path (starts with `/`).
+  "True if `p` is an absolute path: it starts with `/` — or, on Windows, with a drive
+letter's root (`C:/`, `C:\\`) or a UNC share (`\\\\server`).
 
     (path/absolute? \"/a\")          ;=> true
     (path/absolute? \"a\")           ;=> false"
-  (string/starts-with? p "/"))
+  (rooted? p))
 
 (defn relative? (p)
-  "True if `p` is a relative path (does not start with `/`).
+  "True if `p` is a relative path — not [[absolute?]].
 
     (path/relative? \"a\")           ;=> true"
-  (not (string/starts-with? p "/")))
+  (not (rooted? p)))
+
+(defn- forward-slashes (native)
+  ;; A path read from the environment, in the `/` form this module speaks: on Windows its
+  ;; `\` become `/`; elsewhere a `\` is an ordinary character of a name and stays.
+  (if (windows?) (string/replace native "\\" "/") native))
+
+(defn- set-variable (name)
+  (let (value (%getenv name)) (when (and value (not (= value ""))) value)))
+
+(defn home (-> (or string nil))
+  "The current user's home directory: `$HOME`, or on Windows — where a native shell sets no
+`HOME` — `%USERPROFILE%`, in `/` form. Nil when neither is set. What `~` means to
+[[absolute]] and [[abbreviate]], and where a program keeps its `~/.config`.
+
+    (= (path/home) (path/absolute \"~\"))   ;=> true"
+  (let (home (or (set-variable "HOME") (when (windows?) (set-variable "USERPROFILE"))))
+    (when home (forward-slashes home))))
+
+(defn temp-root (-> string)
+  "The directory [[temp]] names its paths in: `/tmp`, or on Windows the user's temp
+directory (`%TEMP%`, else `%TMP%`, in `/` form) — Windows has no `/tmp`, and `\\tmp` on
+the current drive is usually not there.
+
+    (file/dir? (path/temp-root))   ;=> true"
+  (if (windows?)
+    (forward-slashes (or (set-variable "TEMP") (set-variable "TMP") "C:/Windows/Temp"))
+    "/tmp"))
 
 ;; Filesystem existence/type predicates are I/O and live in `file`
 ;; (`file/exists?`, `file/regular?`, `file/dir?`). `path` stays pure — it only
@@ -220,10 +265,10 @@ string is returned as is. Makes a path absolute, not canonical — it does not c
     (path/absolute? (path/absolute \"a\"))                     ;=> true
     (= (path/absolute \"~root/x\") (str (%user-home \"root\") \"/x\"))   ;=> true"
   (cond
-    (or (= path "") (string/starts-with? path "/")) path
-    (= path "~") (or (%getenv "HOME") path)
+    (or (= path "") (rooted? path)) path
+    (= path "~") (or (home) path)
     (string/starts-with? path "~/")
-      (str (or (%getenv "HOME") "~") (string/substring path 1 (string/length path)))
+      (str (or (home) "~") (string/substring path 1 (string/length path)))
     (string/starts-with? path "~") (or (expand-user path) (path/join (or base (file/cwd)) path))
     else (path/join (or base (file/cwd)) path)))
 
@@ -233,12 +278,12 @@ expansion, the way a shell prompt shows a directory. A path outside the home, or
 that merely starts with the home's text (`/home/me2` under `/home/me`), is unchanged.
 
     (path/abbreviate (str (%getenv \"HOME\") \"/src\"))   ;=> \"~/src\""
-  (let (home (%getenv "HOME"))
+  (let (home-directory (home))
     (cond
-      (or (nil? home) (= home "")) path
-      (= path home) "~"
-      (string/starts-with? path (str home "/"))
-        (str "~" (string/substring path (string/length home) (string/length path)))
+      (nil? home-directory) path
+      (= path home-directory) "~"
+      (string/starts-with? path (str home-directory "/"))
+        (str "~" (string/substring path (string/length home-directory) (string/length path)))
       else path)))
 
 ;; ---- a path as a person types it -------------------------------------------
@@ -333,7 +378,8 @@ what follows the last `//` or `/~/` ([[substitute-start]]), with its variables e
     (string/substring expanded start (string/length expanded))))
 
 (defn temp (prefix:string -> string)
-  "A fresh, unpredictable path under `/tmp`: `<prefix><32 hex chars>`, NOT created —
+  "A fresh, unpredictable path under `/tmp` ([[temp-root]]: the user's temp directory on
+Windows): `<prefix><32 hex chars>`, NOT created —
 `file/spit` a file there or `file/mkdir` a directory. The name comes from the OS CSPRNG, so
 it is unique across processes and across runs, and cannot be guessed ahead of time.
 
@@ -344,4 +390,4 @@ path first — as a symlink to something you own — so the `file/spit` overwrit
 of file with your privileges. Neither is possible with a name they cannot predict.
 
     (path/temp \"myapp-\")   ;~> \"/tmp/myapp-…32 random hex chars…\""
-  (path/join "/tmp" (str prefix (encoding/hex-encode-bytes (%random-bytes 16)))))
+  (path/join (temp-root) (str prefix (encoding/hex-encode-bytes (%random-bytes 16)))))
