@@ -72,7 +72,7 @@ the same client from what it retained (`serve-retain`), after the app's crash ho
 ;; ---- the seam: a display frontend that lives on the wire ---------------------
 
 ; nil ⇒ ui-run treats it as :tick (re-render)
-(defn remote-display (client cols rows &optional resume session)
+(defn remote-display (client cols rows &optional resume supervision)
   "A `ui-run` display (`{:enter :leave :size :draw :poll}`) bound to a remote
 frontend `client` (its pid): `:draw` ships the frame to `client` as `[:frame f]`,
 `:poll` returns the next key the client shipped back (`[:key k held?]`, `held?`
@@ -105,13 +105,19 @@ output — reaches its `update` exactly as it would locally. Without the pass-th
 those messages would strand in the session's mailbox (a selective receive never
 consumes them), leaving a served app deaf to everything but keys.
 
-`session`, when given, is the session's SUPERVISOR (ADR-593), which outlives this loop: the
-display tells it who the client is and its size whenever either changes
-(`[:editor/serve/session-state …]`), so a loop restarted after this one died serves the
-same client at the same size, and tells an adopting client the supervisor
-(`[:session session]`, after `[:attached …]`) — the pid whose end, not this loop's, ends
-the client. A `client` of nil with `resume` is a restarted loop of a PARKED session: it
-starts parked.
+`supervision`, when given, is `{:session :ledger :restarted?}` (ADR-593). `:session` is the
+session's SUPERVISOR, which outlives this loop: the display tells it who the client is and
+its size whenever either changes (`[:editor/serve/session-state …]`), so a loop restarted
+after this one died serves the same client at the same size, and tells an adopting client
+the supervisor (`[:session session]`, after `[:attached …]`) — the pid whose end, not this
+loop's, ends the client. `:ledger` is a table the session owns, where the display notes the
+sequence number of each numbered key it TAKES (`[:key k held? seq]`, as a client attached to
+a supervised session ships them): a restarted loop tells the client the last one, and the
+client sends again every key after it — the keys the dead loop never took. `:restarted?`
+holds the client's input back until the loop has folded the events queued ahead of it (its
+identity, `[:session-restarted …]`; `[:editor/serve/started]` marks their end), so a key
+typed through the restart is never folded before them. A `client` of nil with `resume` is a
+restarted loop of a PARKED session: it starts parked.
 
     (editor/serve/remote-display client 80 24)   ;~> {:enter … :leave … :size … :draw … :poll …} shipping frames to `client`"
   ;; the display's state, in a table the session process owns: the client it serves now
@@ -123,7 +129,9 @@ starts parked.
       (table/put state :client client)
       (table/put state :monitor (:monitor resume))
       (table/put state :size [cols rows])
-      (table/put state :session session)
+      (table/put state :session (:session supervision))
+      (table/put state :ledger (:ledger supervision))
+      (table/put state :awaiting-start (= true (:restarted? supervision)))
       ;; a restarted loop of a parked session: parked from its start
       (when (and (nil? client) resume) (table/put state :parked-at (os/now)))
       (merge
@@ -163,7 +171,10 @@ starts parked.
          ;; The client's input is what it ships: its keys, its detach, its death. Taken
          ;; ahead of the session's background messages (ADR-490) — every clause is
          ;; tag-led, so the scan passes a backlog without rebuilding any of it.
-         :poll-input (fn () (serve-busy-kick state (remote-take-input state resume)))
+         :poll-input (fn ()
+                       (if (table/get state :awaiting-start false)
+                         nil
+                         (serve-busy-kick state (remote-take-input state resume))))
          ;; the client ships a key as `[:key k held?]` over the link, where no lane survives:
          ;; the quit key is that shape (ADR-491), so a C-g interrupts a busy session. Kept,
          ;; so an adopting client's C-g is armed too
@@ -281,6 +292,10 @@ hand-overs — or nil on timeout. A parked session waits no longer than its time
 and ends when that is up."
   (let (client (table/get state :client nil))
     (receive
+      ([:key k held? number] (do
+                               (remote-note-seq state number)
+                               (table/put state :held? held?)
+                               [(remote-note-resize state k) true]))
       ([:key k held?] (do (table/put state :held? held?) [(remote-note-resize state k) true]))
       ([:key k] [(remote-note-resize state k) true])
       ([:detach] [:close true])
@@ -288,8 +303,19 @@ and ends when that is up."
       ([:down _ ^client _] [(remote-client-lost state resume) true])
       ([:adopt token adopter cols rows] [(remote-adopt state resume token adopter cols rows) true])
       ([:claim token claimant cols rows] [(remote-claim state resume token claimant cols rows) true])
+      ;; a restarted loop has folded what was queued ahead of its client's input: take it
+      ;; from now on (nil: a tick)
+      ([:editor/serve/started] (do (table/put state :awaiting-start false) nil))
       (m [m false])
       (after (remote-parked-wait state resume ms) (remote-parked-expiry state resume)))))
+
+(defn- remote-note-seq (state number)
+  "Note in the session's ledger (`:ledger` in the display `state`) that the client's key
+numbered `number` was taken — what a restarted loop tells the client it need not send again
+(ADR-593). Returns nil."
+  (let (ledger (table/get state :ledger nil))
+    (when (and ledger (int? number)) (table/put ledger :taken number)))
+  nil)
 
 (defn- remote-note-resize (state input)
   "`input`, a key the client shipped — and when it is the client's `[:resize cols rows]` (a
@@ -341,6 +367,10 @@ app monitors every hosted buffer process, whose `[:down …]` must reach its upd
 input for rehost/reshare, not tear the session down)."
   (let (client (table/get state :client nil))
     (receive
+      ([:key k held? number] (do
+                               (remote-note-seq state number)
+                               (table/put state :held? held?)
+                               (remote-note-resize state k)))
       ([:key k held?] (do (table/put state :held? held?) (remote-note-resize state k)))
       ; a client that does not say
       ([:key k] (remote-note-resize state k))
@@ -508,9 +538,9 @@ for one that says nothing, as every client older than the saying."
 ;; app's crash hook runs (`:on-crash` — an editor writes its unsaved buffers' sidecars
 ;; there) and, within the restart budget, a fresh loop is started for the same client from
 ;; what the dead one RETAINED ([[serve-retain]]) — an editor's buffer registry, whose
-;; processes outlived the loop. The client is told the new loop (`[:attached loop]`) and
-;; keeps its window; it monitors the session, not the loop, so only the session's end
-;; ends it.
+;; processes outlived the loop. The client is told the new loop (`[:reattached loop …]`),
+;; sends it again every key the dead one never took, and keeps its window; it monitors the
+;; session, not the loop, so only the session's end ends it.
 
 ;; How many times a session's loop may be restarted inside `serve-restart-window-ms` before
 ;; the session is let go — so a fault that recurs on every start cannot spin. The app's
@@ -539,17 +569,21 @@ loop's death arrives as a message ([[serve-supervise]]) and a `:kill` of this pr
 `serve-stop` — takes the loop with it."
   (do
     (proc/trap-exit true)
-    (serve-supervise (serve-start-loop {:client client
-                                        :size [cols rows]
-                                        :identity identity
-                                        :capabilities {client (serve-capabilities identity)}
-                                        :resume (when resume (assoc resume :session (self)))
-                                        :app app
-                                        :retained nil
-                                        :deaths []
-                                        :pending []}
-                       (:make-model app)
-                       nil))))
+    (serve-supervise
+      (serve-start-loop
+        {:client client
+         :size [cols rows]
+         :identity identity
+         :capabilities {client (serve-capabilities identity)}
+         :resume (when resume (assoc resume :session (self)))
+         :app app
+         :retained nil
+         :deaths []
+         :pending []
+         ;; the last numbered key a loop took ([[remote-display]])
+         :ledger (table/new)}
+        (:make-model app)
+        nil))))
 
 (defn- serve-start-loop (session make-model death)
   "`session` with a fresh loop running ([[serve-loop]]), linked to this process: its model
@@ -567,27 +601,40 @@ events the app's `update` folds (through `remote-display`'s async pass-through):
 client said it can do (ADR-562), a non-empty identity ([[serve-identity]]) as
 `[:client-opts identity]` — the seam a collaborative app reads a participant's name from,
 and a guest is known by — and, for a loop restarted after one died, `[:session-restarted
-death]` (`{:reason :saved :restarting? :restarts :identity}`), its cue to say so. A loop of a parked
-session (no client) starts parked."
+death]` (`{:reason :saved :restarting? :restarts :identity}`), its cue to say so. A
+restarted loop tells its client only after those, in one `[:reattached loop session
+last-taken]`: the client switches to it and sends again, in order, every key numbered after
+`last-taken` — the keys the dead loop never took, typed into it or into the gap — which the
+loop takes once its start events are folded. A loop of a parked session (no client) starts
+parked."
   (let (client (:client session)
         [cols rows] (:size session)
         resume (:resume session)
         watch (when client (monitor client))
+        ledger (:ledger session)
         display (remote-display client
                   cols
                   rows
                   (when resume (assoc resume :monitor watch))
-                  supervisor)
+                  {:session supervisor :ledger ledger :restarted? (not (nil? death))})
         identity (:identity session)
         app (:app session))
     (do
-      (when client
+      ;; the first loop tells its client at once, as before supervision
+      (when (and client (nil? death))
         (send client [:attached (self)])
-        (send client [:session supervisor])
-        (send (self) [:client-can client (get (:capabilities session) client [])]))
+        (send client [:session supervisor]))
+      (when client (send (self) [:client-can client (get (:capabilities session) client [])]))
       (when (and (map? identity) (not (empty? identity)))
         (send (self) [:client-opts identity]))
-      (when death (send (self) [:session-restarted death]))
+      (when death
+        (send (self) [:session-restarted death])
+        ;; the end of what folds ahead of the client's input ([[remote-display]])
+        (send (self) [:editor/serve/started])
+        ;; and only now the client, in ONE message: this loop, the session, and the last key
+        ;; the dead loop took — it sends every key after that again, before any new one
+        (when client
+          (send client [:reattached (self) supervisor (table/get ledger :taken nil)])))
       ;; bound for the loop's life, `make-model` included: who the session draws to now
       ;; ([[served-client]]) and the session itself ([[served-session]])
       (binding (editor/serve/*served-client* (get display :served-client)
@@ -1098,7 +1145,7 @@ so the session learns of every change."
   (if (attach-quit-input? input)
     (send session [:detach])
     (do
-      (send session [:key input (display-key-held? display)])
+      (attach-send-input session input (display-key-held? display))
       (attach-repaint-if-due display)
       (attach-display-loop peer session display))))
 
@@ -1158,6 +1205,12 @@ backlog (`attach-display-backlog`), which paints only the newest."
                                  (attach-display-loop peer session display)))
     ;; the session's loop died and was restarted (ADR-593): the input goes to the new one
     ([:attached next] (attach-display-loop peer next display))
+    ;; …told in one message by a restarted loop: switch to it and send again every key it
+    ;; took none of, before any window input that follows
+    ([:reattached next supervisor taken] (do
+                                           (attach-note-session supervisor)
+                                           (attach-resend-after next taken)
+                                           (attach-display-loop peer next display)))
     ;; the session itself, which outlives its loop: ITS end ends this client
     ([:session supervisor] (do
                              (attach-note-session supervisor)
@@ -1187,8 +1240,52 @@ session restarts. A client that was told no session ends on any death, as before
     (and (not (nil? supervisor)) (not (= who supervisor)))))
 
 (defn- attach-forget-session ()
-  "Forget the calling client's session ([[attach-note-session]]), its loop over. Returns nil."
+  "Forget the calling client's session ([[attach-note-session]]) and the input it kept
+([[attach-send-input]]), its loop over. Returns nil."
   (table/put attach-sessions (self) nil)
+  (table/put attach-inputs (self) nil)
+  nil)
+
+;; The input each client loop shipped to a supervised session, by client pid: `{:seq n :log
+;; [[seq message] …]}`, the newest `attach-input-log-max` kept — what it sends again to a loop
+;; restarted after one died that never took them (ADR-593)
+(def- attach-inputs (table/new))
+
+;; How many shipped inputs a client keeps for a restart: far more than a restart's gap holds,
+;; and a bound on what a client that never sees one carries.
+(def- attach-input-log-max 256)
+
+(defn- attach-send-input (session input held?)
+  "Ship one window `input` to the loop `session`: `[:key input held?]` — and, when the client
+is attached to a supervised session ([[attach-note-session]]), numbered, `[:key input held?
+seq]`, and kept, so a loop that dies before taking it does not lose it
+([[attach-resend-after]]). Returns nil."
+  (if (nil? (table/get attach-sessions (self) nil))
+    (send session [:key input held?])
+    (let (kept (table/get attach-inputs (self) {:seq 0 :log []})
+          number (inc (:seq kept))
+          message [:key input held? number]
+          log (conj (:log kept) [number message]))
+      (do
+        (table/put attach-inputs
+          (self)
+          {:seq number
+           :log (if (> (count log) attach-input-log-max)
+                  (into [] (drop log (- (count log) attach-input-log-max)))
+                  log)})
+        (send session message))))
+  nil)
+
+(defn- attach-resend-after (session taken)
+  "Send the loop `session` — restarted after one died — every kept input numbered after
+`taken`, the last one the dead loop took (nil: none), in the order it was typed; the ones it
+took are forgotten. Returns nil."
+  (let (kept (table/get attach-inputs (self) {:seq 0 :log []})
+        after (into []
+                (seq/filter (:log kept) (fn (entry) (or (nil? taken) (> (first entry) taken))))))
+    (do
+      (doseq (entry after) (send session (second entry)))
+      (table/put attach-inputs (self) (assoc kept :log after))))
   nil)
 
 (defn- attach-display-apply (display message)
@@ -1273,7 +1370,7 @@ window's `:close`, detach and end without painting."
       (attach-quit-input? input) (send session [:detach])
       else
         (do
-          (send session [:key input (display-key-held? display)])
+          (attach-send-input session input (display-key-held? display))
           (attach-display-paint peer session display latest carried after)))))
 
 (defn- attach-display-show (display latest carried after)
@@ -1416,6 +1513,7 @@ which is dropped (a nil ⇒ tick) rather than leaked to the app."
 event bus) — or nil on timeout, and for a `:size` reply past its 200ms window, which is
 dropped rather than leaked to the app."
   (receive
+    ([:key k _held? _seq] [k true])
     ([:key k _held?] [k true])
     ([:key k] [k true])
     ([:hub-size _ _] nil)
@@ -1426,7 +1524,7 @@ dropped rather than leaked to the app."
   "The next key any client of a shared session shipped, without waiting; nil when none
 came. Whether a key is down is per client, and one shared model has no client to ask, so
 a shared session keeps its idle timers."
-  (receive ([:key k _held?] k) ([:key k] k) (after 0 nil)))
+  (receive ([:key k _held? _seq] k) ([:key k _held?] k) ([:key k] k) (after 0 nil)))
 
 (defn- serve-shared-manager (session hub)
   "The session manager for a SHARED session: every client attaches to the SAME running

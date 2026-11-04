@@ -26,7 +26,8 @@ evaluated). Listens on 127.0.0.1 only.
 (def *web-tabs* nil)
 
 (defn- tabs ()
-  "Tab id → the session process its input goes to. Created on first use."
+  "Tab id → the session process its input goes to, and `[:inputs id]` → the input a tab keeps
+for a restarted loop (ADR-593). Created on first use."
   (when (nil? *web-tabs*) (def *web-tabs* (table/new)))
   *web-tabs*)
 
@@ -121,7 +122,15 @@ loop the tab's input goes to; `supervisor` the session it belongs to, once it sa
 died and was restarted under it (`[:attached next]`) takes the tab's input from then on."
   (receive
     ([:attached next] (do (table/put (tabs) id next) (stream sock id next supervisor)))
-    ([:session given] (do (monitor given) (stream sock id session given)))
+    ([:session given] (do (monitor given) (tab-supervised id) (stream sock id session given)))
+    ;; a restarted loop: the tab's input goes to it, every input the dead one never took
+    ;; sent again first
+    ([:reattached next given taken] (do
+                                      (when (nil? supervisor) (monitor given))
+                                      (tab-supervised id)
+                                      (table/put (tabs) id next)
+                                      (tab-resend-after id next taken)
+                                      (stream sock id next given)))
     ([:down _ who _] (when (and supervisor (not (= who supervisor)))
                        (stream sock id session supervisor)))
     ([:frame f] (let (j (frame-json f))
@@ -157,7 +166,8 @@ session's `remote-display` sends to."
             (table/put (tabs) id session)
             (sse/emit sock (json/encode {:id id}) "hello")
             (stream sock id session nil)
-            (table/delete (tabs) id)))
+            (table/delete (tabs) id)
+            (table/delete (tabs) [:inputs id])))
         (tcp/close sock)))))
 
 (defn- input (req)
@@ -171,8 +181,47 @@ message would arrive (`[:key m]`)."
       (nil? m) (response 400 {} "not an input message")
       else
         (do
-          (send session [:key m])
+          (send session (tab-input-message id m))
           (response 204 {} "")))))
+
+;; How many inputs a tab keeps for a loop restarted after one died (ADR-593).
+(def- tab-input-log-max 256)
+
+(defn- tab-input-message (id m)
+  "The message a tab's input `m` is shipped as: `[:key m]` — or, once the tab's session said
+it supervises its loop, numbered `[:key m false n]` and kept under `[:inputs id]`, so a loop
+that dies before taking it does not lose it ([[tab-resend-after]])."
+  (let (kept (table/get (tabs) [:inputs id] nil))
+    (if (nil? kept)
+      [:key m]
+      (let (number (inc (:seq kept))
+            message [:key m false number]
+            log (conj (:log kept) [number message]))
+        (do
+          (table/put (tabs)
+            [:inputs id]
+            {:seq number
+             :log (if (> (count log) tab-input-log-max)
+                    (into [] (drop log (- (count log) tab-input-log-max)))
+                    log)})
+          message)))))
+
+(defn- tab-supervised (id)
+  "Start numbering tab `id`'s input: its session supervises its loop. Returns nil."
+  (when (nil? (table/get (tabs) [:inputs id] nil))
+    (table/put (tabs) [:inputs id] {:seq 0 :log []}))
+  nil)
+
+(defn- tab-resend-after (id session taken)
+  "Send the restarted loop `session` every input tab `id` kept numbered after `taken` (the
+last the dead loop took), in order, and forget the rest. Returns nil."
+  (let (kept (table/get (tabs) [:inputs id] {:seq 0 :log []})
+        after (into []
+                (seq/filter (:log kept) (fn (entry) (or (nil? taken) (> (first entry) taken))))))
+    (do
+      (doseq (entry after) (send session (second entry)))
+      (table/put (tabs) [:inputs id] (assoc kept :log after))))
+  nil)
 
 (defn handler ()
   "The request handler: the static page, the event stream, and input by tab id.

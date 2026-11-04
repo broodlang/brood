@@ -947,6 +947,20 @@
                                 (send report [:client-ended])))
     (after test/*wait-ms* (send report [:ready :no-attach]))))
 
+;; A served typewriter that can die: a one-letter key is appended (and the text retained),
+;; "crash" kills the loop, a restarted loop says so. The ORDER keys fold in shows in the text.
+(defn typing-up (m input c r)
+  (cond
+    (= input "crash") (do (exit (self) :boom) (receive (after 0 nil)) m)
+    (and (vector? input) (= (first input) :session-restarted))
+      (assoc m :who (str "restarted " (:restarts (second input))))
+    (and (string? input) (= (string/length input) 1))
+      (let (typed (str (or (:typed m) "") input)) (do (serve-retain typed) (assoc m :typed typed)))
+    else m))
+
+(defn typing-vw (m c r)
+  [(text 0 0 (str "typed=" (or (:typed m) "") (if (get m :who) (str " who=" (get m :who)) "")))])
+
 ;; The served session's buffers, in a registry the SESSION owns: the model shows the text
 ;; of its one document, read from the document's process — which outlives the loop.
 (defn registry-notes (registry)
@@ -994,10 +1008,12 @@
                    (after test/*wait-ms* :none))
           [2 true :boom])
         ;; the client is told the new loop, under the same session, and the count is back
-        (let (next-loop (receive ([:attached s] s) (after test/*wait-ms* :none)))
+        (let ([next-loop told] (receive
+                                 ([:reattached l s _] [l s])
+                                 (after test/*wait-ms* [:none :none])))
           (is (pid? next-loop))
           (is (not (= next-loop first-loop)))
-          (assert= (receive ([:session s] s) (after test/*wait-ms* :none)) session)
+          (assert= told session)
           (assert= (await-frame-text "n=2 who=restarted 1") "n=2 who=restarted 1")
           (send next-loop [:key "+"])
           (assert= (await-frame-text "n=3 who=restarted 1") "n=3 who=restarted 1")
@@ -1024,6 +1040,30 @@
         (assert= (receive ([:client-ended] :ended) (after 0 :running)) :running)
         (send client :close)
         (assert= (receive ([:client-ended] :ended) (after test/*wait-ms* :running)) :ended))))
+
+  (test "keys typed into a loop that dies, before it took them, reach the new loop in order"
+    ;; the window client numbers each key it ships to a supervised session; the dead loop
+    ;; took "crash" and none after it, so the restarted loop is sent c d e again, in order,
+    ;; and folds them after its start events — and never "crash", which would kill it again
+    (let (me (self)
+          opts {:supervise {:restart (fn (retained death) {:typed (or retained "")})}}
+          mgr (spawn (editor/serve/serve-manager (fn () {:typed ""}) typing-vw typing-up opts)))
+      (spawn (supervised-window-client mgr me))
+      (let (client (receive ([:ready c] c) (after test/*wait-ms* :no-attach)))
+        (is (pid? client))
+        (assert= (wait-drew "typed=") :ok)
+        (send client "a")
+        (send client "b")
+        (assert= (wait-drew "typed=ab") :ok)
+        ;; all four in the client's mailbox at once: shipped before the loop has died
+        (send client "crash")
+        (send client "c")
+        (send client "d")
+        (send client "e")
+        (assert= (wait-drew "typed=abcde who=restarted 1") :ok)
+        (send client "f")
+        (assert= (wait-drew "typed=abcdef who=restarted 1") :ok)
+        (send client :close))))
 
   (test "the session's documents outlive its loop, and are saved when the budget runs out"
     (let (me (self)
@@ -1054,7 +1094,7 @@
           (is restarting?)
           (monitor registry)
           ;; the restarted loop read the text from the document's process, which lived on
-          (let (next-loop (receive ([:attached s] s) (after test/*wait-ms* :none)))
+          (let (next-loop (receive ([:reattached l _ _] l) (after test/*wait-ms* :none)))
             (assert= (await-frame-text "notes=unsaved text who=restarted 1")
               "notes=unsaved text who=restarted 1")
             ;; a second death inside the window: past `:max 1` — saved, and the session ends

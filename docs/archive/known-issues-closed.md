@@ -15818,8 +15818,8 @@ until ADR-539, so nothing in them looked like the window's.
 **Fix.** ADR-593. A served session is a supervisor process running its loop linked: a loop
 that dies runs the app's `:supervise` `:on-crash` hook with what the loop handed
 `serve-retain`, then — within a budget of 3 a minute — restarts the loop from `:restart` for
-the same client, which is told the new loop (`[:attached …]`) and, monitoring the session
-rather than the loop, keeps its window. `registry-start` takes `{:owner pid}`: a registry that
+the same client, which is told the new loop (`[:reattached …]`), sends it again every key the
+dead loop never took and, monitoring the session rather than the loop, keeps its window. `registry-start` takes `{:owner pid}`: a registry that
 lives as long as its owner and stops its documents with it, so one per session needs no name
 and leaks nothing. bedit hosts a served private session's buffers in a registry the session
 owns (`remote/ed-served-host`), writes their sidecars from the buffer processes when the loop
