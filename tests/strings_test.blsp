@@ -902,4 +902,17 @@
     (assert= (string/fill-prefixes "\n# a\n# b") ["# " "# "]))
   (test "a word is not a bullet"
     (assert= (string/fill-prefixes "*emphasis* here") ["" ""])
-    (assert= (string/fill-prefixes "-flag") ["" ""])))
+    (assert= (string/fill-prefixes "-flag") ["" ""]))
+  (test "a mode's own markers: only those are kept, a C block comment's ` * ` among them"
+    (assert= (string/fill-prefixes "#include <a.h>" ["//" "*"]) ["" ""])
+    (assert= (string/fill-prefixes " * aa bb\n * cc" ["//" "*"]) [" * " " * "])
+    (assert= (string/fill-prefixes " * - item" ["//" "*"]) [" * - " " *   "])
+    (assert= (string/fill-prefixes "# Heading" [">"]) ["" ""])
+    (assert= (string/fill-prefixes "> > q" [">"]) ["> > " "> > "])
+    (assert= (string/fill-prefixes "    code" []) ["    " "    "])))
+
+(describe "string: fill counts display columns"
+  (test "a wide glyph is two columns"
+    (assert= (string/fill "日本 日本 日本" 10) "日本 日本\n日本"))
+  (test "a tab in a prefix reaches its tab stop"
+    (assert= (binding (*tab-width* 8) (string/fill "aa bb cc" 13 "\t")) "\taa bb\n\tcc")))
