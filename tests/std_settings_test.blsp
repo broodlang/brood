@@ -132,3 +132,13 @@
   (test "it reads back as exactly the defaults it does not comment out"
     (assert= {:hl-line true :cursor :block}
       (read-form (default-source :std-settings-test/editor 'config "") 'config))))
+
+(describe "settings: undefine"
+  (test "a removed declaration is gone from specs and the default file"
+    (define :std-settings-test/plugin :theirs {:default 1 :doc "A plugin's."})
+    (define :std-settings-test/plugin :ours {:default 2 :doc "Ours."})
+    (is (undefine :std-settings-test/plugin :theirs))
+    (assert= (map (specs :std-settings-test/plugin) :name) '(:ours))
+    (is (not (includes? (default-source :std-settings-test/plugin 'config "") ":theirs"))))
+  (test "removing what was never declared says so"
+    (is (not (undefine :std-settings-test/plugin :never)))))
