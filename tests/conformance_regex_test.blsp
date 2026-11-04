@@ -6,8 +6,9 @@
 ;; a POSIX-vs-Perl judgement. Each case names a pattern, a haystack and the spans of the
 ;; first match and of every group in it (`[]` for a group that did not take part).
 ;;
-;; Brood's pattern dialect is not upstream's: it has no case-insensitive mode, no POSIX
-;; `[[:class:]]` sets, and `\n`/`\xHH` mean the letters `n`/`x`, never a byte. Those cases
+;; Brood's pattern dialect is not upstream's: `\n`/`\xHH` mean the letters `n`/`x`, never a byte,
+;; and a `]` first in a set closes it. (A case-insensitive case runs with `:fold? true`, and
+;; the POSIX `[[:class:]]` sets are read since ADR-573.) Those cases
 ;; are listed in `rx-divergent` with the reason, and the list is checked both ways: a
 ;; listed case that starts agreeing fails too, so the list cannot outlive its reason.
 ;;
@@ -18,11 +19,7 @@
 (defmodule conformance-regex-test (:use test) (:use corpus))
 
 (def- rx-divergent
-  {"basic51" "no case-insensitive mode"
-   "basic57" "no POSIX [[:upper:]] set"
-   "basic58" "no POSIX [[:lower:]] set"
-   "basic59" "no POSIX [[:upper:]] set"
-   "basic65" "\\n in a pattern is the letter n"
+  {"basic65" "\\n in a pattern is the letter n"
    "basic66" "\\n in a pattern is the letter n"
    "basic68" "\\n in a pattern is the letter n"
    "basic171" "\\xHH in a pattern is the letter x"
@@ -80,7 +77,9 @@
                    (rx-unescape (get case "haystack"))
                    (get case "haystack"))
         found (try
-                (regex/find (get case "regex") haystack)
+                (regex/find (get case "regex")
+                  haystack
+                  {:fold? (= true (get case "case-insensitive"))})
                 (catch e [:raised (error-message e)])))
     (cond
       (nil? found) []

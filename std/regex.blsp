@@ -30,6 +30,12 @@
 ;;                       `\n` is an `n` (write a newline as a newline)
 ;;   |                   alternation
 ;;   (...)  (?:...)      a capturing group, and a non-capturing one
+;;   [[:alpha:]] …       a POSIX class inside a set, Emacs's (Unicode-aware) meanings:
+;;                       alpha alnum digit xdigit upper lower space blank punct cntrl
+;;                       graph print word ascii nonascii — `[^[:space:]]`, `[[:alpha:]_-]`
+;;   (?i) (?-i)          case folding on / off for the rest of the enclosing group (the
+;;   (?i:...) (?-i:...)  whole pattern at the top), or for one non-capturing group; every
+;;                       string search also takes `{:fold? true}`, which is `(?i)` in front
 ;;
 ;; A malformed pattern is never an error: a stray `*`, `{` or `)` and an unterminated
 ;; `[` mean the characters they look like, because in a hand-written pattern they
@@ -54,9 +60,10 @@ does. `escape` quotes text into a pattern; `incomplete?` says a typed pattern is
 finished yet.
 
 The dialect: literals, `.`, `* + ?` (and their lazy `*? +? ??` forms), `{m,n}`,
-`^ $`, `[...]`/`[^...]` sets with ranges and classes, `\\d \\w \\s \\D \\W \\S \\b \\B`, escapes,
-`|`, capturing `(...)` and non-capturing `(?:...)`. No backreferences or
-lookaround. Each pattern is parsed once and compiled once, then cached.")
+`^ $`, `[...]`/`[^...]` sets with ranges, classes and POSIX classes (`[[:alpha:]]`), `\\d \\w \\s
+\\D \\W \\S \\b \\B`, escapes, `|`, capturing `(...)` and non-capturing `(?:...)`, and case folding —
+`(?i)`, `(?i:...)`, or `{:fold? true}` on any search. No backreferences or lookaround. Each
+pattern is parsed once and compiled once, then cached.")
 
 ;; ---- parse: pattern string -> AST -------------------------------------------
 ;; A pattern parses to a list of BRANCHES (the top-level alternation); each branch
@@ -97,17 +104,68 @@ it once, as the string the guard proved it is."
         hi (regex-peek pcs (+ i 2)))
     (if (and (= d "-") (not (nil? hi)) (not (= hi "]"))) hi nil)))
 
+;; The POSIX bracket classes, written INSIDE a set (`[[:alpha:]]`, `[^[:space:]x]`), and what
+;; each is in the engine's syntax. Emacs's meanings, which are Unicode-aware where POSIX's are
+;; ASCII: `alpha` is every letter, `upper`/`lower` every cased letter (and, under `(?i)`, both),
+;; `alnum` a letter or a decimal digit — while `digit` stays ASCII 0-9, as `\d` does, and
+;; `xdigit` the hex digits. A name that is not here keeps the old reading: `[[:foo:]]` is a set
+;; of the characters `[:fo` followed by a `]`.
+(def- regex-posix-classes
+  {"alpha" "\\p{Alphabetic}"
+   "alnum" "\\p{Alphabetic}\\p{Nd}"
+   "digit" "0-9"
+   "xdigit" "0-9A-Fa-f"
+   "upper" "\\p{Uppercase}"
+   "lower" "\\p{Lowercase}"
+   "space" "\\s"
+   "blank" "\\p{Zs}\\t"
+   "punct" "\\p{P}\\p{S}"
+   "cntrl" "\\p{Cc}"
+   "graph" "[^\\s\\p{C}]"
+   "print" "[^\\p{C}]"
+   "word" "\\w"
+   "ascii" "\\x00-\\x7F"
+   "nonascii" "[^\\x00-\\x7F]"})
+
+(defn- regex-posix-end (pcs: (vector string) i:int -> (or nil int))
+  "Where the POSIX class `[:name:]` starting at `i` inside a set ends (the index past its
+`:]`), or nil when there is none there — or its name is not one of [[regex-posix-classes]]."
+  (when (and (= (regex-peek pcs i) "[") (= (regex-peek pcs (inc i)) ":"))
+    (letrec (scan (fn (k:int name:string)
+                    (let (c (regex-peek pcs k))
+                      (cond
+                        (and (= c ":") (= (regex-peek pcs (inc k)) "]"))
+                          (when (contains? regex-posix-classes name) (+ k 2))
+                        (and (string? c)
+                          (includes? "abcdefghijklmnopqrstuvwxyz" c)
+                          (< (string/length name) 8))
+                          (scan (inc k) (str name c))
+                        else nil))))
+      (scan (+ i 2) ""))))
+
+(defn- regex-posix-name (pcs i end)
+  "The name of the POSIX class from `i` to `end` ([[regex-posix-end]]): what is between `[:`
+and `:]`."
+  (apply str (seq/subvec pcs (+ i 2) (- end 2))))
+
 (defn- regex-set-body (pcs i chars ranges classes)
   "Collect a set's members until the closing `]`; returns [chars ranges classes next].
 Three kinds live side by side inside one `[...]`: literal chars, `a-z` ranges, and
-the `\\d`/`\\w`/`\\s` classes — so `[\\w.-]` (every character a file path is made
-of) says what it looks like it says."
-  (let (c (regex-peek pcs i))
+the classes — `\\d`/`\\w`/`\\s` and the POSIX `[:alpha:]` kind ([[regex-posix-end]]) — so
+`[\\w.-]` (every character a file path is made of) says what it looks like it says."
+  (let (c (regex-peek pcs i)
+        posix-end (when (= c "[") (regex-posix-end pcs i)))
     (cond
       (nil? c) [chars ranges classes i]
       ; unterminated set → take what we have
       (= c "]") [chars ranges classes (inc i)]
-      ; consume the ]
+      ;; a POSIX class: its name, as a string, among the classes
+      (int? posix-end)
+        (regex-set-body pcs
+          posix-end
+          chars
+          ranges
+          (cons (regex-posix-name pcs i posix-end) classes))
       (= c "\\")
         (let (e (regex-peek pcs (inc i)))
           (cond
@@ -142,10 +200,28 @@ of) says what it looks like it says."
     ;; test runs once per distinct (state-set, char) behind the DFA memo either way.
     [{:t :set :neg neg :chars (apply str chars) :ranges ranges :classes classes} nxt]))
 
+(defn- regex-fold-flag (pcs i)
+  "The case flag a group opening at `i` (a `(`) sets, as `[fold? scoped? body]`, or nil when
+it sets none: `(?i)` and `(?-i)` turn case folding on or off for the rest of the enclosing
+group (the whole pattern at the top), `(?i:…)` and `(?-i:…)` for the group they open, whose
+body starts at `body`."
+  (when (= (regex-peek pcs (inc i)) "?")
+    (let (negated (= (regex-peek pcs (+ i 2)) "-")
+          flag-at (if negated (+ i 3) (+ i 2))
+          closer (regex-peek pcs (inc flag-at)))
+      (when (and (= (regex-peek pcs flag-at) "i") (or (= closer ")") (= closer ":")))
+        [(not negated) (= closer ":") (+ flag-at 2)]))))
+
 (defn- regex-atom (pcs i)
   "Parse one atom at `i`; returns [atom next]."
-  (let (c (regex-peek pcs i))
+  (let (c (regex-peek pcs i)
+        flag (when (= c "(") (regex-fold-flag pcs i)))
     (cond
+      ;; `(?i)` / `(?-i)`: zero-width, the engine reads it with the scope Perl gives it
+      (and flag (not (second flag))) [{:t :fold :on (first flag)} (nth flag 2)]
+      (and flag (second flag))
+        (let ([alt nxt] (regex-alt pcs (nth flag 2)))
+          [{:t :group :alt alt :cap false :fold (first flag)} (inc nxt)])
       (= c "(")
       ;; `(?:` opens a group that only groups; a bare `(` also CAPTURES, and is
       ;; numbered by the pass below rather than here (the number is the order of
@@ -266,7 +342,8 @@ walked the parser's way — a `)` inside `[...]` or after a backslash is not a p
   (if (>= i (count pcs))
     acc
     (let (c (nth pcs i)
-          next (regex-peek pcs (inc i)))
+          next (regex-peek pcs (inc i))
+          posix-end (if in-set (regex-posix-end pcs i) nil))
       (cond
         (= c "\\")
           (regex-literal-strays pcs
@@ -274,6 +351,9 @@ walked the parser's way — a `)` inside `[...]` or after a backslash is not a p
             depth
             in-set
             (if (nil? next) (conj acc c) (conj (conj acc c) next)))
+        ;; a POSIX class inside a set (`[[:alpha:])]`) is passed whole: its `]` closes nothing
+        (int? posix-end)
+          (regex-literal-strays pcs posix-end depth true (into acc (seq/subvec pcs i posix-end)))
         in-set (regex-literal-strays pcs (inc i) depth (not (= c "]")) (conj acc c))
         (= c "[")
         ;; a set runs to the first `]` after its `[`, whatever is between — `[]` and `[^]`
@@ -321,15 +401,18 @@ ASCII, so its negation is the ASCII complement, not the engine's Unicode `\\D`."
     "\\s"))
 
 (defn- regex-class-member-src (k)
-  "A `\\d`/`\\w`/`\\s` class or its negation written inside a set. The ASCII complement of
-`\\d` is a nested class, which the engine reads as a union member."
-  (case k
-    :digit "0-9"
-    :word "\\w"
-    :not-digit "[^0-9]"
-    :not-word "\\W"
-    :not-space "\\S"
-    "\\s"))
+  "A `\\d`/`\\w`/`\\s` class or its negation written inside a set, or a POSIX class by its
+name ([[regex-posix-classes]]). The ASCII complement of `\\d` is a nested class, which the
+engine reads as a union member."
+  (if (string? k)
+    (get regex-posix-classes k)
+    (case k
+      :digit "0-9"
+      :word "\\w"
+      :not-digit "[^0-9]"
+      :not-word "\\W"
+      :not-space "\\S"
+      "\\s")))
 
 (defn- regex-set-src (a)
   "A `[...]` set. A range written backwards (`[z-a]`) holds nothing, so it is dropped
@@ -362,7 +445,11 @@ rather than handed to the engine, which refuses one. A set with no members at al
       :nwordb "\\B"
       :class (regex-class-src (:k a))
       :set (regex-set-src a)
-      :group (str (if (:cap a) "(" "(?:") (regex-alt-src (:alt a)) ")")
+      :group
+        (str (cond (= true (:fold a)) "(?i:" (= false (:fold a)) "(?-i:" (:cap a) "(" else "(?:")
+          (regex-alt-src (:alt a))
+          ")")
+      :fold (if (:on a) "(?i)" "(?-i)")
       :line-any "[^\\n]"
       :line-start "(?m:^)"
       :line-end "(?m:$)"
@@ -414,23 +501,33 @@ a literal, and the engine caches its compiled form under exactly this text."
         src))))
 
 ;; ---- does it match? -------------------------------------------------------------
+;; Every string search takes an optional `opts` map, as the rope searches do: `{:fold? true}`
+;; ignores case, the same as writing `(?i)` at the pattern's start — which is all it does, so
+;; a string search and a rope search under the same flag agree character for character.
 
-(defn match? (pattern:any s:string -> bool)
+(defn- regex-opts-pattern (pattern opts)
+  "`pattern` with what `opts` asks for written into it: `(?i)` in front under `:fold?`."
+  (if (= true (:fold? opts)) (str "(?i)" pattern) pattern))
+
+(defn match? (pattern:any s:string &optional (opts:map {}) -> bool)
   "True if `pattern` matches anywhere in `s` (a search). `^`/`$` anchor to the
 start/end of the whole string, so e.g. `(match? \"\\\\.blsp$\" name)` tests a suffix.
+`opts`: `{:fold? true}` ignores case (as `(?i)` does), here and in every string search.
 
-    (regex/match? \"^a\" \"abc\")   ;=> true"
-  (%regex-match? (regex-search-src pattern) s))
+    (regex/match? \"^a\" \"abc\")                     ;=> true
+    (regex/match? \"^a\" \"ABC\" {:fold? true})       ;=> true
+    (regex/match? \"(?i)password:\" \"Password:\")    ;=> true"
+  (%regex-match? (regex-search-src (regex-opts-pattern pattern opts)) s))
 
-(defn matches? (pattern:any s:string -> bool)
+(defn matches? (pattern:any s:string &optional (opts:map {}) -> bool)
   "True if `pattern` matches the **entire** string `s` (anchored both ends).
 
     (regex/matches? \"[0-9]+\" \"a1b22\")   ;=> false   ; the WHOLE string must match"
-  (%regex-match? (regex-whole-src pattern) s))
+  (%regex-match? (regex-whole-src (regex-opts-pattern pattern opts)) s))
 
 ;; ---- where, and with which groups -----------------------------------------------
 
-(defn find (pattern:any s:string -> (or nil (map keyword any)))
+(defn find (pattern:any s:string &optional (opts:map {}) -> (or nil (map keyword any)))
   "The leftmost match of `pattern` in `s`, or nil. The match is
 `{:start :end :text :groups [...]}` — half-open char offsets, the matched text, and
 one entry per `(...)` group in the pattern (each itself `{:start :end :text}`, or
@@ -444,16 +541,16 @@ opening parens; `(?:...)` groups are not numbered.
 
 Leftmost-first, like Perl and unlike POSIX: of two matches starting at the same
 place, the one the pattern's own alternation and greediness prefer wins."
-  (%regex-find (regex-search-src pattern) s 0))
+  (%regex-find (regex-search-src (regex-opts-pattern pattern opts)) s 0))
 
-(defn find-all (pattern:any s:string -> (vector (map keyword any)))
+(defn find-all (pattern:any s:string &optional (opts:map {}) -> (vector (map keyword any)))
   "Every non-overlapping match of `pattern` in `s`, left to right, as a vector of the
 maps `find` returns (empty when there are none). Scanning resumes at each match's
 end, and steps one character past an EMPTY match so a pattern that can match nothing
 (`a*`) terminates instead of finding the same empty match forever.
 
     (map (regex/find-all \"\\\\d+\" \"a1b22c333\") (fn (m) (get m :text)))   ;=> (\"1\" \"22\" \"333\")"
-  (%regex-find-all (regex-search-src pattern) s))
+  (%regex-find-all (regex-search-src (regex-opts-pattern pattern opts)) s))
 
 ;; ---- searching a rope, and a search box's pattern (ADR-540) ------------------------
 ;; An editor's buffer is a rope, and the functions above take a string: flattening the rope
@@ -589,9 +686,11 @@ this is the only way to tell that the text is unfinished rather than meant.
     (letrec (walk (fn (i depth in-set?)
                     (if (>= i n)
                       (or in-set? (> depth 0))
-                      (let (c (nth pcs i))
+                      (let (c (nth pcs i)
+                            posix-end (if in-set? (regex-posix-end pcs i) nil))
                         (cond
                           (= c "\\") (if (>= (inc i) n) true (walk (+ i 2) depth in-set?))
+                          (int? posix-end) (walk posix-end depth true)
                           in-set? (walk (inc i) depth (not (= c "]")))
                           (= c "[") (walk (inc i) depth true)
                           (= c "(") (walk (inc i) (inc depth) false)
@@ -667,7 +766,7 @@ empty pattern `\"\"` is an absent prefix or suffix.
         (str acc (string/substring s at (get m :start)) piece)
         replacement))))
 
-(defn replace (pattern s replacement)
+(defn replace (pattern s replacement &optional (opts {}))
   "Replace every non-overlapping match of `pattern` in `s`. `replacement` is either a
 template string, where `$0` is the whole match, `$1`..`$9` are the groups and `$$` is
 a literal dollar, or a FUNCTION of the match map — which is the one to reach for when
@@ -677,7 +776,7 @@ the new text has to be computed rather than spliced.
     (regex/replace \"\\\\d+\" \"a1b22\" (fn (m) (str \"<\" (get m :text) \">\")))   ;=> \"a<1>b<22>\"
 
 A group that did not participate expands to the empty string."
-  (regex-replace-loop s (find-all pattern s) 0 0 "" replacement))
+  (regex-replace-loop s (find-all pattern s opts) 0 0 "" replacement))
 
 (defn- regex-split-loop (s matches j at acc)
   (if (>= j (count matches))
@@ -689,7 +788,7 @@ A group that did not participate expands to the empty string."
         (get m :end)
         (into acc [(string/substring s at (get m :start))])))))
 
-(defn split (pattern:any s:string -> any)
+(defn split (pattern:any s:string &optional (opts:map {}) -> any)
   "Split `s` on every non-overlapping match of `pattern`, returning the pieces between
 them — the regex counterpart of `string/split`, which separates on a literal.
 
@@ -697,4 +796,4 @@ them — the regex counterpart of `string/split`, which separates on a literal.
 
 Separators are dropped, and an empty piece between two adjacent separators is kept, so
 the result always has one more element than there were matches."
-  (regex-split-loop s (find-all pattern s) 0 0 []))
+  (regex-split-loop s (find-all pattern s opts) 0 0 []))

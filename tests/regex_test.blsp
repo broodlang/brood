@@ -544,3 +544,82 @@
     (is (not (incomplete? "\\(")))
     (is (not (incomplete? "a)b")))
     (is (not (incomplete? "")))))
+
+;; ADR-573: case folding written in the pattern (`(?i)`, `(?i:…)`) or asked for (`:fold?`), and
+;; the POSIX bracket classes — read the same by the string searches and the rope searches.
+(describe "regex case folding"
+  (test "(?i) folds the rest of the pattern, every alternative included"
+    (is (match? "(?i)password:" "[sudo] Password: "))
+    (is (match? "(?i)abc|xyz" "XYZ"))
+    (is (not (match? "password:" "Password:"))))
+  (test "(?-i) turns it back off, and (?i:…) folds one group"
+    (is (match? "(?i)a(?-i)b" "Ab"))
+    (is (not (match? "(?i)a(?-i)b" "AB")))
+    (is (match? "x(?i:abc)y" "xABCy"))
+    (is (not (match? "x(?i:abc)y" "XABCY"))))
+  (test "a folding group does not capture; the groups after it keep their numbers"
+    (let (m (find "(?i:id)=(\\d+)" "ID=42"))
+      (assert= (get m :text) "ID=42")
+      (assert= (count (get m :groups)) 1)
+      (assert= (get (first (get m :groups)) :text) "42")))
+  (test ":fold? on every string search is (?i) in front"
+    (is (match? "^abc$" "ABC" {:fold? true}))
+    (is (matches? "[a-c]+" "AbC" {:fold? true}))
+    (assert= (get (find "beta" "ALPHA BETA" {:fold? true}) :start) 6)
+    (assert= (count (find-all "o" "fOo" {:fold? true})) 2)
+    (assert= (replace "x" "aXbx" "-" {:fold? true}) "a-b-")
+    (assert= (split "and" "aANDb" {:fold? true}) ["a" "b"]))
+  (test "a pattern that is not a flag still means what it did"
+    (is (match? "(?:i)" "i"))
+
+    (is (not (incomplete? "(?i)abc")))
+    (is (incomplete? "(?i:abc"))))
+
+(describe "regex POSIX classes"
+  (test "each class inside a set"
+    (is (matches? "[[:alpha:]]+" "abcÄß"))
+    (is (matches? "[[:digit:]]+" "0123"))
+    (is (not (match? "[[:digit:]]" "٣")))
+    (is (matches? "[[:alnum:]]+" "a1Ä٣"))
+    (is (matches? "[[:upper:]]+" "ABÄ"))
+    (is (not (match? "[[:upper:]]" "abä")))
+    (is (matches? "[[:lower:]]+" "abä"))
+    (is (matches? "[[:space:]]+" " \t\n"))
+    (is (matches? "[[:blank:]]+" " \t"))
+    (is (not (match? "[[:blank:]]" "\n")))
+    (is (matches? "[[:punct:]]+" "!?.,;:$+<=>^`|~"))
+    (is (matches? "[[:xdigit:]]+" "09afAF"))
+    (is (not (match? "[[:xdigit:]]" "g")))
+    (is (matches? "[[:cntrl:]]" "\u{7}"))
+    (is (matches? "[[:graph:]]+" "a!é"))
+    (is (not (match? "[[:graph:]]" " ")))
+    (is (matches? "[[:print:]]+" "a b"))
+    (is (matches? "[[:word:]]+" "a_1"))
+    (is (matches? "[[:ascii:]]+" "az~"))
+    (is (matches? "[[:nonascii:]]+" "éß")))
+  (test "classes mix with chars and ranges, and negate with the set"
+    (is (matches? "[[:alpha:]_-]+" "a_b-c"))
+    (is (matches? "[^[:space:]]+" "abc"))
+    (is (not (match? "[^[:space:]]" " \t")))
+    (is (matches? "[[:digit:][:upper:]]+" "A1B2")))
+  (test "under (?i) upper and lower are any cased letter, as Emacs folds them"
+    (is (matches? "(?i)[[:upper:]]+" "aB")))
+  (test "an unknown name keeps the old reading, and a paren after a class is literal"
+    (is (match? "[[:foo:]]" ":]"))
+    (is (matches? "[[:alpha:])]+" "a)b"))
+    (is (not (incomplete? "[[:alpha:](]")))))
+
+(describe "regex case folding and POSIX classes over a rope"
+  (test "rope searches read (?i) and the POSIX classes as string searches do"
+    (let (text "Alpha BETA gamma\n[sudo] Password: x"
+          r (text/from-string text))
+      (doseq (pattern ["(?i)beta"
+                        "x(?i:bc)" "[[:upper:]]+" "[[:alpha:]]+:" "(?i)password:" "[^[:space:]]+"
+                        "[[:punct:]]"])
+        (assert= (map (rope-spans pattern r 0 (string/length text) {:lines? false})
+                   (fn (span) (string/substring text (first span) (second span))))
+          (map (find-all pattern text) :text)))))
+  (test ":fold? and (?i) agree on a rope"
+    (let (r (text/from-string "a Foo foo FOO"))
+      (assert= (rope-spans "foo" r 0 13 {:fold? true}) (rope-spans "(?i)foo" r 0 13))
+      (assert= (count (rope-spans "(?i)foo" r 0 13)) 3))))
