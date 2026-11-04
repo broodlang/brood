@@ -108,21 +108,36 @@ the buffer-holder twin of `text-apply-action`: `[:splice [lo hi repl] properties
 authoritative), which also takes the two edits that are not plain splices — `:redact`, a
 redaction that leaves no trace in this copy either (no history, no log), and a property
 change (`[:put-properties width changes]`), which touches no text — `[:text t properties]`
-by replacing the whole text when it or its properties differ, anything else leaving `buf` as
-it is.
+by replacing the whole text when it differs, and when only its PROPERTIES differ by a property
+change over the whole text (point, markers, the modified flag and the text itself left as
+they are; undo takes the properties back), anything else leaving `buf` as it is.
 
-    (editor/buffer/buffer-text (editor/buffer-client/buffer-apply-action (editor/buffer/make-buffer \"hello\") [:splice [0 1 \"J\"] nil]))   ;=> \"Jello\""
+    (editor/buffer/buffer-text (editor/buffer-client/buffer-apply-action (editor/buffer/make-buffer \"hello\") [:splice [0 1 \"J\"] nil]))   ;=> \"Jello\"
+    (editor/buffer/buffer-point (editor/buffer-client/buffer-apply-action (editor/buffer/goto-char (editor/buffer/make-buffer \"hello\") 2) [:text \"hello\" {:face [[0 1 :red]]}]))   ;=> 2"
   (match action
     ([:splice [lo hi repl] properties] (apply-splice buf lo hi repl properties))
-    ([:text replacement properties] (if (and (string? replacement)
-                                          (not (and (= replacement (buffer-text buf))
-                                                 (= (or properties {}) (buffer-property-map buf)))))
-                                      (apply-splice buf
-                                        0
-                                        (buffer-length buf)
-                                        replacement
-                                        properties)
-                                      buf))
+    ([:text replacement properties]
+      (let (wanted (or properties {})
+            current (buffer-property-map buf))
+        (cond
+          (not (string? replacement)) buf
+          (not (= replacement (buffer-text buf)))
+            (apply-splice buf 0 (buffer-length buf) replacement properties)
+          (= wanted current) buf
+          else
+          ;; the same text: set every key either side has, over all of it — a key only
+          ;; this copy has is cleared (`[]`); the text is what the file has no less than
+          ;; before, so the modified flag stays
+            (assoc (apply-splice buf
+                     0
+                     0
+                     ""
+                     [:put-properties
+                       (buffer-length buf)
+                       (fold (keys current)
+                         wanted
+                         (fn (acc key) (if (contains? acc key) acc (assoc acc key []))))])
+              :modified (buffer-modified? buf)))))
     (_ buf)))
 
 ;; ---- the wire-view normalizer -------------------------------------------------
@@ -172,17 +187,31 @@ outbound edits with). Version -1, so the subscription's seed push always applies
     (get (editor/buffer-client/link-init :proc :me) :version)   ;=> -1"
   {:proc proc :me me :version -1 :pending ()})
 
+(defn- link-property-change? (properties)
+  "Whether a splice's `properties` are a PROPERTY CHANGE (`[:put-properties width changes]`)."
+  (and (vector? properties) (= (first properties) :put-properties)))
+
 (defn- link-send-splice (link splice &optional properties)
   "Send one `[lo hi repl]` to the link's process, based and tagged, with the text
 `properties` its replacement comes with, and count it in `:pending`. The link unchanged for
 a splice that changes nothing — but a property change (`[:put-properties …]`, the text
-untouched, so its splice is empty) is sent."
+untouched, so its splice is empty) is sent, and counted over the RANGE it changes
+(`[lo lo+width width]`, no length change), so a foreign edit inside it is seen to collide."
   (if (and (splice-noop? splice) (nil? properties))
     link
-    (let ([lo hi repl] splice)
+    (let ([lo hi repl] splice
+          in-flight (if (link-property-change? properties)
+                      (let (width (math/max 0 (nth properties 1))) [lo (+ lo width) width])
+                      [lo hi (string/length repl)]))
       (buffer-splice (get link :proc) lo hi repl (get link :me) (get link :version) properties)
-      (assoc link
-        :pending (append (or (get link :pending) ()) (list [lo hi (string/length repl)]))))))
+      (assoc link :pending (append (or (get link :pending) ()) (list in-flight))))))
+
+(defn- link-splice-range (splice properties)
+  "The range a pushed `splice` touches, as `[lo hi repl]`: a property change's is the range
+it changes (its splice is empty), anything else its own."
+  (if (link-property-change? properties)
+    (let ([lo _ _] splice) [lo (+ lo (math/max 0 (nth properties 1))) ""])
+    splice))
 
 (defn link-propagate (link old-text new-text)
   "Send the local text change `old-text` → `new-text` to the link's process as a
@@ -240,9 +269,12 @@ cursor-only delta is `:noop`."
           pending (or (get link :pending) ())
           ;; a foreign splice can merge exactly iff it's strictly apart from every
           ;; in-flight splice of ours; touching/overlapping is ambiguous → resync
+          properties (get vp :properties)
+          ;; what the foreign splice touches: a property change's whole range
+          touched (when splice (link-splice-range splice properties))
           mergeable? (and splice
                        (or (empty? pending)
-                         (every? pending (fn (p) (splice-disjoint? splice p)))))
+                         (every? pending (fn (p) (splice-disjoint? touched p)))))
           npending (cond
                      (and own? splice) (rest pending)
                      ; our echo — first in, first home
@@ -264,11 +296,14 @@ cursor-only delta is `:noop`."
       (cond
         own? [nlink :noop]
         (and splice mergeable?)
-          [nlink
-            [:splice
-              (splice-transform-all splice
-                (map pending (fn (p) (let ([plo phi plen] p) [plo phi plen]))))
-              (get vp :properties)]]
+          (let ([lo hi repl] (splice-transform-all touched pending))
+            (if (link-property-change? properties)
+              ;; the range moved with our in-flight edits; the text is still untouched
+              [nlink
+                [:splice
+                  [lo lo ""]
+                  [:put-properties (- hi lo) (nth properties 2)]]]
+              [nlink [:splice [lo hi repl] properties]]))
         splice [nlink :resync]
         (nil? text) [nlink :noop]
         ;; a full-text rebuild over in-flight edits would clobber them — resync

@@ -2125,3 +2125,101 @@ suite run. `test/*wait-ms*` is a failure deadline, reached only if a relay never
       (assert= (buffer-edits-between (make-buffer "abc")
                  (insert (make-buffer "") "abX" {:face [[2 3 :red]]}))
         (list [2 3 "X" {:face [[0 1 :red]]}])))))
+
+;; ---- concurrent redactions and property changes, the redaction marker through the
+;; comparison, every property change in the walk, no rope holding the secret
+
+(defn- next-push-properties (bp)
+  "The `:properties` of the next push from `bp`, `:none` when none comes."
+  (receive ([:buffer-updated ^bp _ view _] (get view :properties)) (after 1000 :none)))
+
+(describe "a redaction or property change racing another holder's edit in its range"
+  :isolated (test "a redaction grows over text typed inside it from another frame"
+    (let (bp (spawn-buffer (make-buffer "pw: hunter")))
+      (buffer-splice bp 6 6 "X" :b 0)
+      (buffer-splice bp 4 10 "" :a 0 :redact)
+      (assert= (buffer-query bp buffer-text) "pw: ")
+      (stop-buffer bp)))
+  :isolated (test "a redaction across an edit's edge covers the edit's text too"
+    (let (bp (spawn-buffer (make-buffer "pw: hunter!")))
+      (buffer-splice bp 8 11 "ZZZZ" :b 0)
+      (buffer-splice bp 4 10 "" :a 0 :redact)
+      (assert= (buffer-query bp buffer-text) "pw: ")
+      (stop-buffer bp)))
+  :isolated (test "an edit before the redaction only moves it"
+    (let (bp (spawn-buffer (make-buffer "pw: hunter")))
+      (buffer-splice bp 0 0 ">> " :b 0)
+      (buffer-splice bp 4 10 "" :a 0 :redact)
+      (assert= (buffer-query bp buffer-text) ">> pw: ")
+      (stop-buffer bp)))
+  :isolated (test "a property change is laid on its range, split around the inserted text"
+    (let (bp (spawn-buffer (make-buffer "abcdef")))
+      (subscribe-buffer bp nil)
+      (next-push-properties bp)
+      (buffer-splice bp 3 3 "X" :b 0)
+      (buffer-splice bp 1 1 "" :a 0 [:put-properties 4 {:face [[0 4 :red]]}])
+      (assert= (buffer-query bp buffer-text) "abcXdef")
+      (assert= (buffer-query bp (fn (b) (buffer-properties b :face))) [[1 3 :red] [4 6 :red]])
+      ;; what a holder in step with the process is pushed: the same result over the range
+      (assert= (next-push-properties bp) nil)
+      (assert= (next-push-properties bp) [:put-properties 5 {:face [[0 2 :red] [3 5 :red]]}])
+      (stop-buffer bp))))
+
+(describe "a redaction always reaches a holder the log cannot reach as one"
+  (test "even when the event put the same characters back where they were"
+    (let (before (insert (end-of-buffer (make-buffer "pw: ")) "hun")
+          after (insert (goto-char (redact-region before 4 7) 4) "hun"))
+      (assert= (buffer-text after) (buffer-text before))
+      (assert= (buffer-edits-between before after) (list [4 7 "" :redact] [4 4 "hun" nil]))
+      ;; and the holder applying it can undo nothing back
+      (let (holder (fold (buffer-edits-between before after)
+                     before
+                     (fn (acc edit)
+                       (let ([lo hi repl properties] edit) (apply-splice acc lo hi repl properties)))))
+        (assert= (buffer-text holder) "pw: hun")
+        ;; its one undo step is the re-insert's, back to the redacted text
+        (assert= (map (get holder :undo) (fn (snapshot) (text/->string (get snapshot :rope))))
+          (list "pw: ")))))
+  (test "a redaction and an edit after it elsewhere: the union is redacted"
+    (let (before (insert (end-of-buffer (make-buffer "pw: ")) "hun")
+          after (insert (goto-char (redact-region before 4 7) 0) "> "))
+      (assert= (buffer-edits-between before after)
+        (list [0 7 "" :redact] [0 0 "> pw: " nil])))))
+
+(describe "every property change after a holder's version is in its path"
+  (test "a change behind an insert and its delete is not skipped"
+    (let (b (make-buffer "abc")
+          painted (put-properties b :face 0 3 [[0 3 :a]])
+          typed (delete-backward-char (insert painted "x"))
+          owner (put-properties typed :face 0 1 []))
+      (assert= (buffer-text owner) "abc")
+      (let (holder (fold (buffer-edits-between b owner)
+                     b
+                     (fn (acc edit)
+                       (let ([lo hi repl properties] edit) (apply-splice acc lo hi repl properties)))))
+        (assert= (buffer-property-map holder) (buffer-property-map owner))
+        (assert= (buffer-property-map owner) {:face [[1 3 :a]]})))))
+
+;; Every rope reachable from a value: a buffer's fields, maps, vectors and lists, walked.
+(defn- reachable-ropes (value)
+  (cond
+    (rope? value) (list value)
+    (or (map? value) (record? value))
+      (mapcat (keys value) (fn (key) (reachable-ropes (get value key))))
+    (or (vector? value) (list? value)) (mapcat value reachable-ropes)
+    else ()))
+
+(describe "a redaction leaves no rope holding the secret"
+  (test "not the saved baseline, not an annotation, not the history"
+    (let (b (annotate (mark-buffer-saved (make-buffer "pw: hunter")) :lint [1])
+          typed (insert (end-of-buffer b) "!")
+          redacted (redact-region typed 4 10))
+      (is (any? (reachable-ropes typed) (fn (rope) (includes? (text/->string rope) "hunter"))))
+      (assert= (buffer-text redacted) "pw: !")
+      (is (not (any? (reachable-ropes redacted) (fn (rope) (includes? (text/->string rope) "hunt")))))
+      (is (buffer-modified? redacted))
+      (is (get (annotation redacted :lint) :stale?))))
+  (test "a copy applying another holder's redaction keeps none either"
+    (let (copy (mark-buffer-saved (make-buffer "pw: hunter"))
+          cleaned (apply-splice copy 4 10 "" :redact))
+      (is (not (any? (reachable-ropes cleaned) (fn (rope) (includes? (text/->string rope) "hunt"))))))))
