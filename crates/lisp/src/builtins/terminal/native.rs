@@ -68,7 +68,10 @@ pub(in crate::builtins) fn term_leave(_: &[Value], _: EnvId, _: &mut Heap) -> Li
     use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
     keyboard::restore();
     invalidate_screen();
-    crossterm::execute!(
+    // Best effort, never an error: leaving is what every exit path does, and after a hang-up
+    // the terminal is gone — a write there fails (EIO), and a leave that threw then turned a
+    // clean exit into a crash a supervisor restarted on the dead terminal.
+    let _ = crossterm::execute!(
         std::io::stdout(),
         crossterm::cursor::SetCursorStyle::DefaultUserShape,
         Show,
@@ -76,9 +79,8 @@ pub(in crate::builtins) fn term_leave(_: &[Value], _: EnvId, _: &mut Heap) -> Li
         DisableFocusChange,
         crossterm::event::DisableBracketedPaste,
         LeaveAlternateScreen
-    )
-    .map_err(term_err)?;
-    disable_raw_mode().map_err(term_err)?;
+    );
+    let _ = disable_raw_mode();
     Ok(Value::nil())
 }
 
@@ -644,19 +646,52 @@ pub(in crate::builtins) fn term_invalidate(_: &[Value], _: EnvId, _: &mut Heap) 
     Ok(Value::nil())
 }
 
+/// Whether a shell can continue this process if it stops: job control is there. A process
+/// group is ORPHANED — nobody left to `fg` it — when its parent is not in another group of the
+/// same session: `gnome-terminal -- bedit -nw`, `ssh host bedit -nw`, `exec bedit -nw` all make
+/// the editor its own session's leader. The kernel drops a SIGTSTP sent to an orphaned group
+/// for exactly this reason; this asks first, so a suspend that cannot happen is said.
+#[cfg(unix)]
+pub(in crate::builtins) fn job_control_available() -> bool {
+    // SAFETY: these only read process ids.
+    unsafe {
+        let group = libc::getpgrp();
+        let parent = libc::getppid();
+        let parent_group = libc::getpgid(parent);
+        parent_group >= 0
+            && parent_group != group
+            && libc::getsid(parent) == libc::getsid(0)
+            && libc::tcgetpgrp(libc::STDIN_FILENO) == group
+    }
+}
+
 /// `(term-suspend)` — give the terminal back and stop this process, as a shell's C-z stops a
-/// job (Emacs's `suspend-frame` in a terminal): the screen left (`term-leave`), SIGSTOP
-/// raised — the shell takes over until `fg` — and on continuing the screen taken again
-/// (`term-enter`), to be repainted whole. Unix only; returns nil. (ADR-586)
+/// job (Emacs's `suspend-frame` in a terminal): the screen left (`term-leave`), SIGTSTP raised
+/// with its default action — the shell takes over until `fg` — and on continuing the screen
+/// taken again (`term-enter`), to be repainted whole. `:suspended`; or `:no-job-control`, the
+/// terminal kept, when nothing could continue a stopped editor ([`job_control_available`]):
+/// stopped there, it would stay frozen with its unsaved text. Unix only. (ADR-586)
 pub(in crate::builtins) fn term_suspend(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     #[cfg(unix)]
     {
-        term_leave(args, env, heap)?;
-        // SAFETY: raise only sends a signal to this process.
-        unsafe {
-            libc::raise(libc::SIGSTOP);
+        if !job_control_available() {
+            return Ok(value::kw("no-job-control"));
         }
-        term_enter(args, env, heap)
+        term_leave(args, env, heap)?;
+        // SIGTSTP with its DEFAULT action (a trap may have taken it): the kernel's own
+        // orphaned-group rule then applies too, where SIGSTOP would stop unconditionally.
+        // SAFETY: sigaction with a zeroed struct naming SIG_DFL, restored after.
+        unsafe {
+            let mut default: libc::sigaction = std::mem::zeroed();
+            default.sa_sigaction = libc::SIG_DFL;
+            libc::sigemptyset(&mut default.sa_mask);
+            let mut previous: libc::sigaction = std::mem::zeroed();
+            libc::sigaction(libc::SIGTSTP, &default, &mut previous);
+            libc::raise(libc::SIGTSTP);
+            libc::sigaction(libc::SIGTSTP, &previous, std::ptr::null_mut());
+        }
+        term_enter(args, env, heap)?;
+        Ok(value::kw("suspended"))
     }
     #[cfg(not(unix))]
     {

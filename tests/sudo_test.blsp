@@ -34,7 +34,7 @@
     "  fi\n"
     "fi\n"
     "[ $validate = 1 ] && exit 0\n"
-    "exec \"$@\"\n"))
+    "PATH=\"$state/bin:$PATH\" exec \"$@\"\n"))
 
 (defn- with-stub (body)
   "Run `(body dir opts)` with a fresh stand-in sudo in a temp `dir`, `opts` naming it."
@@ -134,22 +134,6 @@
             (assert= (file/slurp path) "rs\n")
             ;; and with no password, the refusal is said as one
             (is (includes? (error-message (sudo/read path opts)) "a password is required")))))))
-  (test "a write that cannot finish leaves the old file whole"
-    (with-stub
-      (fn (dir opts)
-        (let (locked (str dir "/locked")
-              path (str locked "/sudoers"))
-          (do
-            (file/spit (str dir "/nopasswd") "")
-            (file/mkdir locked)
-            (file/spit path "root ALL=(ALL) ALL\n")
-            ;; no room for the temporary file beside it
-            (os/cmd "chmod" ["555" locked])
-            (is (failure? (sudo/write path "broken" opts)))
-            (os/cmd "chmod" ["755" locked])
-            (assert= (file/slurp path) "root ALL=(ALL) ALL\n")
-            (is (empty? (seq/filter (file/ls locked)
-                          (fn (name) (string/starts-with? name ".sudo-write"))))))))))
   (test "file/mkdir-private makes an owner-only directory, and makes an existing one so"
     (let (dir (test/temp-dir "brood-private-dir-")
           inner (str dir "/a/b"))
@@ -170,4 +154,81 @@
                      (os/cmd "ln" ["-s" target link])
                      (assert= (sudo/write link "new\n" opts) true)
                      (assert= (file/slurp target) "new\n")
-                     (is (:symlink? (file/stat link)))))))))
+                     (is (:symlink? (file/stat link))))))))
+  (test "a write that fails halfway leaves the old file whole, and no temporary file"
+    (with-stub
+      (fn (dir opts)
+        (let (path (str dir "/sudoers"))
+          (do
+            (file/spit (str dir "/nopasswd") "")
+            (file/spit path "root ALL=(ALL) ALL\n")
+            ;; the text stops after three bytes: a full disk, a killed pipe
+            (fake-tool dir "cat" "head -c 3; exit 1")
+            (is (failure? (sudo/write path "broken text\n" opts)))
+            (assert= (file/slurp path) "root ALL=(ALL) ALL\n")
+            (is (no-temporaries? dir)))))))
+  (test "a rename the filesystem refuses (a bind-mounted file, EBUSY) is a write in place"
+    (with-stub (fn (dir opts)
+                 (let (path (str dir "/hosts"))
+                   (do
+                     (file/spit (str dir "/nopasswd") "")
+                     (file/spit path "old\n")
+                     (fake-tool dir
+                       "mv" "echo 'mv: cannot move: Device or resource busy' >&2; exit 1")
+                     (assert= (sudo/write path "new\n" opts) true)
+                     (assert= (file/slurp path) "new\n")
+                     (is (no-temporaries? dir)))))))
+  (test "a user who may write the file but not its directory writes it in place"
+    (with-stub (fn (dir opts)
+                 (let (locked (str dir "/locked")
+                       path (str locked "/conf"))
+                   (do
+                     (file/spit (str dir "/nopasswd") "")
+                     (file/mkdir locked)
+                     (file/spit path "old\n")
+                     (os/cmd "chmod" ["555" locked])
+                     (assert= (sudo/write path "new\n" opts) true)
+                     (os/cmd "chmod" ["755" locked])
+                     (assert= (file/slurp path) "new\n"))))))
+  (test "the file's ACL survives the rename"
+    (with-stub
+      (fn (dir opts)
+        (let (path (str dir "/shadow"))
+          (do
+            (file/spit (str dir "/nopasswd") "")
+            (file/spit path "old\n")
+            ;; only where this filesystem keeps ACLs (and the tools are here)
+            (when (and (os/which "setfacl")
+                    (= 0 (:exit (os/cmd "setfacl" ["-m" "u:65534:r" path]))))
+              (do
+                (assert= (sudo/write path "new\n" opts) true)
+                (is (includes? (:stdout (os/cmd "getfacl" ["-n" path])) "user:65534:r--")))))))))
+  (test "a temporary file a killed write left behind is cleared by the next"
+    (with-stub (fn (dir opts)
+                 (let (path (str dir "/conf")
+                       stale (str dir "/.sudo-write.left0"))
+                   (do
+                     (file/spit (str dir "/nopasswd") "")
+                     (file/spit path "old\n")
+                     (file/spit stale "half")
+                     (os/cmd "touch" ["-d" "10 minutes ago" stale])
+                     (assert= (sudo/write path "new\n" opts) true)
+                     (is (not (file/exists? stale))))))))
+  (test "a sudo that caches nothing still opens a file that does not exist yet as new"
+    (with-stub (fn (dir opts)
+                 (do
+                   (file/spit (str dir "/nocache") "")
+                   (assert= (sudo/read-bytes (str dir "/new.conf") (assoc opts :password "secret"))
+                     nil))))))
+
+(defn- fake-tool (dir name body)
+  "A stand-in `name` first on the PATH the stand-in sudo runs its command with."
+  (let (bin (str dir "/bin")
+        tool (str bin "/" name))
+    (do
+      (file/mkdir bin)
+      (file/spit tool (str "#!/bin/sh\n" body "\n"))
+      (os/cmd "chmod" ["+x" tool]))))
+
+(defn- no-temporaries? (dir)
+  (empty? (seq/filter (file/ls dir) (fn (name) (string/starts-with? name ".sudo-write")))))

@@ -108,6 +108,18 @@ impl Decoder {
         }
     }
 
+    /// A paste whose end marker never came, given up — the tty silent for
+    /// [`PASTE_SILENCE`] ([`paste_stalled`]): the text so far handed over as the paste, and
+    /// keys are keys again. Without it a lost end marker swallowed every key, C-g included,
+    /// until [`PASTE_PIECE`] bytes had been typed.
+    pub(super) fn give_up_paste(&mut self, out: &mut Vec<Event>) {
+        if self.in_paste() {
+            let body = &self.pending[PASTE_START.len()..];
+            out.push(Event::Paste(String::from_utf8_lossy(body).to_string()));
+            self.pending.clear();
+        }
+    }
+
     /// Whether a sequence is part-read, waiting for the rest of its bytes.
     pub(super) fn waiting(&self) -> bool {
         !self.pending.is_empty()
@@ -125,6 +137,17 @@ impl Decoder {
         }
         self.pending.clear();
     }
+}
+
+/// How long the tty may be completely silent in the middle of a paste before the paste is
+/// taken as having lost its end marker. A slow link delivers a paste slowly but steadily —
+/// bytes keep coming — so silence this long is a marker that will not come, not a slow paste.
+pub(super) const PASTE_SILENCE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Whether a paste in progress has stalled: no byte at all for [`PASTE_SILENCE`] since the
+/// last one came (`silent_for`).
+pub(super) fn paste_stalled(in_paste: bool, silent_for: std::time::Duration) -> bool {
+    in_paste && silent_for >= PASTE_SILENCE
 }
 
 const PASTE_START: &[u8] = b"\x1B[200~";
@@ -789,6 +812,25 @@ mod tests {
                 pressed(KeyCode::Char('q'), NONE)
             ]
         );
+    }
+
+    #[test]
+    fn a_paste_whose_end_never_comes_is_given_up_after_silence_not_while_bytes_trickle() {
+        use std::time::Duration;
+        // bytes arriving, however slowly, never stall a paste…
+        assert!(!paste_stalled(true, Duration::from_millis(2900)));
+        assert!(!paste_stalled(false, Duration::from_secs(60)));
+        // …complete silence does
+        assert!(paste_stalled(true, PASTE_SILENCE));
+        let mut decoder = Decoder::new();
+        let mut out = Vec::new();
+        decoder.feed(b"\x1b[200~half a pas", false, &mut out);
+        decoder.give_up_paste(&mut out);
+        assert_eq!(out, vec![Event::Paste("half a pas".to_string())]);
+        // and keys are keys again: C-g reaches the app
+        let mut out = Vec::new();
+        decoder.feed(b"\x07", false, &mut out);
+        assert_eq!(out, vec![pressed(KeyCode::Char('g'), CONTROL)]);
     }
 
     #[test]

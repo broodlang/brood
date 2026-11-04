@@ -93,7 +93,7 @@ arg silently becoming `nil`.
 | | `term/invalidate` | 0 | forget what the terminal shows: the next `term/draw` paints every cell (ADR-586) |
 | | `term/colors` | 0–1 | the colour depth frames are written at (`:truecolor` / `:256` / `:16`), or set it (ADR-586) |
 | | `term/bg` | 1–2 | the terminal's default face — what `[:clear]` fills, a face with no colour of its own drawn in (ADR-586) |
-| | `term/suspend` | 0 | give the terminal back, stop the process (SIGSTOP), take it again when continued (ADR-586) |
+| | `term/suspend` | 0 | give the terminal back, stop the process (SIGTSTP), take it again when continued → `:suspended`; `:no-job-control` (nothing stopped) in an orphaned process group (ADR-586) |
 | | `term/refresh` | 0 | raw mode back and the next frame painted whole, after a stop and continue (ADR-586) |
 | | `term/repaint-due?` | 0 | whether the next `term/draw` paints the screen whole (ADR-586) |
 | | `term/emit` | 1 | paint inline, **relative**-motion ops: `[:print str]` / `[:print str face]` / `[:cr]` / `[:nl]` / `[:up n]` / `[:down n]` / `[:col n]` / `[:clear-eol]` / `[:clear-below]` / `[:clear-screen]` → nil. The inline counterpart to `term/draw` (which is absolute); queues all ops then flushes once |

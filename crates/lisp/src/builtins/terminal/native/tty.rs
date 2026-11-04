@@ -62,11 +62,11 @@ impl TtyInput {
         let mut buffer = [0u8; 4096];
         while out.len() < room {
             if !readable(fd, Duration::ZERO)? {
-                if self.decoder.waiting()
-                    && self
-                        .last_bytes
-                        .is_some_and(|at| at.elapsed() >= SEQUENCE_PATIENCE)
-                {
+                let silent_for = self.last_bytes.map_or(Duration::ZERO, |at| at.elapsed());
+                if super::decoder::paste_stalled(self.decoder.in_paste(), silent_for) {
+                    // a paste whose end marker was lost: hand it over, keys are keys again
+                    self.decoder.give_up_paste(out);
+                } else if self.decoder.waiting() && silent_for >= SEQUENCE_PATIENCE {
                     self.decoder.flush(out);
                 }
                 return Ok(true);

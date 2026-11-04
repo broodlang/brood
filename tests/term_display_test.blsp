@@ -11,14 +11,16 @@
   (:use test)
   (:use suite-helpers))
 
-(defn- app-source (marker)
+(defn- app-source (marker &optional (hang? false))
   ;; a `ui-run` app: the model's text and the last event on screen, a panel of background
   ;; below them (so a full repaint is many cells and a keystroke's update few), the cursor
   ;; after the text
   (str "(defmodule term-display-app (:use editor/ui))\n"
     "(ui-run {:text \"start\" :event \"none\" :on-hangup (fn (m sig) (file/spit "
     (pr-str marker)
-    " (str sig)))}\n"
+    " (str sig)) (when "
+    (pr-str hang?)
+    " (receive (:never nil))))}\n"
     "  (fn (m cols rows)\n"
     "    [[:clear]\n"
     "     [:text 0 0 (str \"text:\" (:text m))]\n"
@@ -133,7 +135,7 @@ child exited."
         (file/rmdir dir)))))
 
 (describe "the terminal display and the process's signals (ADR-586)"
-  :isolated (test "SIGTSTP gives the terminal back, SIGCONT repaints, SIGTERM restores it and runs :on-hangup"
+  :isolated (test "SIGTSTP with no job control keeps the terminal, SIGCONT repaints, SIGTERM restores it and runs :on-hangup"
     (let (dir (test/temp-dir "brood-term-signals-")
           script (str dir "/app.blsp")
           marker (str dir "/hangup"))
@@ -144,12 +146,17 @@ child exited."
               up (read-until p {:vt (vt/make 40 10) :bytes 0} (showing? "size:40x10") 20000))
           (do
             (is (vt/mode (:vt up) :alt-screen))
-            ;; stopped from outside: the screen is given back before the process stops
+            ;; this app leads its own session under the pty — an ORPHANED process group, as
+            ;; under `gnome-terminal -- app` or `ssh host app`: nothing could `fg` it, so a
+            ;; SIGTSTP must not stop it (it would freeze for good); it keeps the terminal and
+            ;; goes on answering keys
             (os/signal p :tstp)
-            (let (stopped (read-until p up (fn (vt) (not (vt/mode vt :alt-screen))) 20000))
+            (os/write p "z")
+            (let (stopped (read-until p up (showing? "text:startz") 20000))
               (do
-                (is (not (vt/mode (:vt stopped) :alt-screen)))
-                ;; continued: taken again and painted whole
+                (is (vt/mode (:vt stopped) :alt-screen))
+                (is (includes? (screen-text (:vt stopped)) "text:startz"))
+                ;; continued (as after a stop someone else made): raw again, painted whole
                 (os/signal p :cont)
                 (let (back (read-until p
                              (assoc stopped :bytes 0)
@@ -159,7 +166,7 @@ child exited."
                              20000))
                   (do
                     (is (vt/mode (:vt back) :alt-screen))
-                    (is (includes? (screen-text (:vt back)) "text:start"))
+                    (is (includes? (screen-text (:vt back)) "text:startz"))
                     ;; a resize there and back between two looks still repaints the screen
                     (os/resize-pty p 60 14)
                     (os/resize-pty p 40 10)
@@ -172,6 +179,30 @@ child exited."
                         (is (:closed ended))
                         (is (not (vt/mode (:vt ended) :alt-screen)))
                         (assert= (file/slurp marker) ":term")))))))))
+        (file/rmdir dir)))))
+
+(describe "a program that will not end on SIGTERM (ADR-586)"
+  :isolated (test "a second SIGTERM ends it — its :on-hangup hung"
+    (let (dir (test/temp-dir "brood-term-hang-")
+          script (str dir "/app.blsp")
+          marker (str dir "/hangup"))
+      (do
+        (file/mkdir dir)
+        (file/spit script (app-source marker true))
+        (let (p (os/spawn-pty (sibling-binary "nest") ["run" script] {:cols 40 :rows 10})
+              up (read-until p {:vt (vt/make 40 10) :bytes 0} (showing? "size:40x10") 20000))
+          (do
+            (is (vt/mode (:vt up) :alt-screen))
+            (os/signal p :term)
+            (letrec (await (fn (left)
+                             (cond
+                               (file/exists? marker) true
+                               (<= left 0) false
+                               else (do (proc/sleep 20) (await (- left 20))))))
+              (is (await 10000)))
+            ;; the hook hangs; the loop does not end; the second SIGTERM is the default action
+            (os/signal p :term)
+            (is (:closed (read-until p up (fn (vt) false) 5000)))))
         (file/rmdir dir)))))
 
 (describe "term/colors (ADR-586)"
