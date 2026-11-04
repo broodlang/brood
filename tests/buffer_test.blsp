@@ -1811,3 +1811,171 @@ suite run. `test/*wait-ms*` is a failure deadline, reached only if a relay never
     (let (n (narrow-to (make-buffer "hello world") [[0 5]]))
       (assert= (buffer-text (insert (goto-char n 2) "XY")) "heXYllo world")
       (is (includes? (error-of (insert (goto-char n 8) "Z")) "read-only")))))
+
+(describe "replace-region counts characters, not grapheme clusters"
+  (test "a combining mark in the range takes no extra character with it"
+    (let (b (make-buffer (str "e" (string/int->char 769) "xyz")))
+      (assert= (buffer-text (replace-region b 0 2 "Q")) "Qxyz")))
+  (test "a range ending before it starts deletes nothing and inserts at the start"
+    (assert= (buffer-text (replace-region (make-buffer "abc") 2 1 "Z")) "abZc")))
+
+;; ---- text properties (ADR-579) ----------------------------------------------------
+;; Emacs's semantics: the property belongs to the characters — it moves with them, text
+;; typed inside a span does not take it, a delete shrinks a span, undo gives it back.
+
+(defn- coloured (text spans) (insert (make-buffer "") text {:face spans}))
+(defn- region-of (buf from to) (goto-char (set-mark (goto-char buf from)) to))
+
+(describe "text properties move with the text"
+  (test "inserted text carries the properties it came with, relative to itself"
+    (let (b (insert (end-of-buffer (make-buffer "log: ")) "ok fail" {:face [[3 7 :red]]}))
+      (assert= (buffer-properties b :face) [[8 12 :red]])))
+  (test "an insert before a span moves it; after it leaves it put"
+    (let (b (coloured "abcdef" [[2 4 :red]]))
+      (assert= (buffer-properties (insert (goto-char b 0) "XY") :face) [[4 6 :red]])
+      (assert= (buffer-properties (insert (goto-char b 5) "XY") :face) [[2 4 :red]])))
+  (test "typing inside a span splits it around the new text, which has none"
+    (let (b (insert (goto-char (coloured "abcdef" [[0 6 :red]]) 3) "ZZ"))
+      (assert= (buffer-text b) "abcZZdef")
+      (assert= (buffer-properties b :face) [[0 3 :red] [5 8 :red]])))
+  (test "text inserted at a span's edge is outside it"
+    (let (b (coloured "abc" [[0 3 :red]]))
+      (assert= (buffer-properties (insert (goto-char b 3) "!") :face) [[0 3 :red]])
+      (assert= (buffer-properties (insert (goto-char b 0) "!") :face) [[1 4 :red]])))
+  (test "a delete shrinks the spans it cuts, drops the one it empties, joins what meets"
+    (let (b (coloured "aaXXbbYYcc" [[0 2 :a] [2 4 :x] [4 6 :a] [8 10 :c]]))
+      (assert= (buffer-properties (delete-region (region-of b 2 4)) :face)
+        [[0 4 :a] [6 8 :c]])
+      (assert= (buffer-properties (delete-region (region-of b 1 9)) :face)
+        [[0 1 :a] [1 2 :c]])))
+  (test "appending in the same value joins the run; a chunk boundary never shows"
+    (let (b (insert (end-of-buffer (coloured "ab" [[0 2 :red]])) "cd" {:face [[0 2 :red]]}))
+      (assert= (buffer-properties b :face) [[0 4 :red]])))
+  (test "a buffer whose properties all went carries no :properties key"
+    (let (b (delete-region (region-of (coloured "abc" [[0 3 :red]]) 0 3)))
+      (assert= (buffer-property-map b) {})
+      (is (not (contains? b :properties)))))
+  (test "keys are independent"
+    (let (b (insert (make-buffer "") "abcd" {:face [[0 2 :red]] :link [[1 4 "url"]]}))
+      (assert= (buffer-properties (delete-char (goto-char b 0) 1) :link) [[0 3 "url"]])
+      (assert= (buffer-properties (delete-char (goto-char b 0) 1) :face) [[0 1 :red]])))
+  (test "unsorted, overlapping or out-of-range spans are normalized on insert"
+    (let (b (insert (make-buffer "") "abcd" {:face [[2 9 :b] [0 3 :a]]}))
+      (assert= (buffer-properties b :face) [[0 3 :a] [3 4 :b]])))
+  (test "buffer-properties-in clips to the range"
+    (assert= (buffer-properties-in (coloured "abcdef" [[0 2 :a] [3 6 :b]]) :face 1 4)
+      [[1 2 :a] [3 4 :b]])))
+
+(describe "text properties and undo"
+  (test "undo brings deleted text back with its properties"
+    (let (b (coloured "abcdef" [[1 5 :red]])
+          cut (delete-region (region-of b 0 6)))
+      (assert= (buffer-properties (undo cut) :face) [[1 5 :red]])))
+  (test "undo of a propertied insert removes the text and its properties"
+    (let (b (make-buffer "ab")
+          added (insert (end-of-buffer b) "cd" {:face [[0 2 :red]]}))
+      (assert= (buffer-property-map (undo added)) {})))
+  (test "redo puts them back"
+    (let (b (insert (make-buffer "") "ab" {:face [[0 2 :red]]})
+          undone (undo-next (undo-start b))
+          redone (undo-next (undo-start undone)))
+      (assert= (buffer-properties redone :face) [[0 2 :red]])))
+  (test "a region undo carries the properties outside the change"
+    (let (b (insert (goto-char (insert (make-buffer "") "a\nb\nc\n" {:face [[4 5 :red]]}) 0) "X")
+          region (region-of b 0 1))
+      (assert= (buffer-properties b :face) [[5 6 :red]])
+      (assert= (buffer-properties (undo-in-region region) :face) [[4 5 :red]])))
+  (test "revert replaces the text, properties and all, as one undoable edit"
+    (let (path (str (temp-dir "brood-buf-") ".txt")
+          _ (file/spit path "fresh\n")
+          b (assoc (coloured "old" [[0 3 :red]]) :file path)
+          reverted (revert-buffer b))
+      (assert= (buffer-property-map reverted) {})
+      (assert= (buffer-properties (undo reverted) :face) [[0 3 :red]]))))
+
+(describe "put-properties — a property change is an edit"
+  (test "sets one key over a range, keeping the others, point and mark"
+    (let (b (goto-char (insert (make-buffer "") "abcdef" {:link [[0 6 "u"]]}) 4)
+          put (put-properties b :face 1 5 [[2 4 :red]]))
+      (assert= (buffer-properties put :face) [[2 4 :red]])
+      (assert= (buffer-properties put :link) [[0 6 "u"]])
+      (assert= (buffer-point put) 4)
+      (assert= (buffer-text put) "abcdef")))
+  (test "an empty span list removes the key there, and undo restores it"
+    (let (b (coloured "abcdef" [[0 6 :red]])
+          cleared (put-properties b :face 2 4 []))
+      (assert= (buffer-properties cleared :face) [[0 2 :red] [4 6 :red]])
+      (assert= (buffer-properties (undo cleared) :face) [[0 6 :red]])))
+  (test "an unchanged property is no edit"
+    (let (b (coloured "abc" [[0 3 :red]]))
+      (is (= (put-properties b :face 0 3 [[0 3 :red]]) b))))
+  (test "the splice log says what a propertied edit carried"
+    (let (b (make-buffer "ab")
+          after (insert (end-of-buffer b) "cd" {:face [[0 1 :red]]}))
+      (assert= (buffer-edits-since b after) (list [2 2 "cd" {:face [[0 1 :red]]}]))
+      (assert= (buffer-splices-since b after) (list [2 2 "cd"]))))
+  (test "an undo's logged splice carries the restored properties"
+    (let (b (coloured "abcdef" [[1 5 :red]])
+          cut (delete-region (region-of b 0 6))
+          undone (undo cut))
+      (assert= (buffer-edits-since cut undone) (list [0 0 "abcdef" {:face [[1 5 :red]]}])))))
+
+(describe "apply-splice — another holder's edit on a read-only copy"
+  (test "applies through read-only and stays read-only"
+    (let (b (apply-splice (set-read-only (make-buffer "abc") true) 1 2 "XY" {:face [[0 2 :red]]}))
+      (assert= (buffer-text b) "aXYc")
+      (assert= (buffer-properties b :face) [[1 3 :red]])
+      (is (read-only? b))))
+  (test "a narrowing is carried through the splice"
+    (let (b (apply-splice (narrow-to (make-buffer "abcdef") [[4 6]]) 0 0 "ZZ"))
+      (assert= (editable-regions b) [[6 8]]))))
+
+(describe "text properties in a buffer process"
+  :isolated (test "a propertied splice lands with its properties; a spawned copy keeps them"
+    (let (bp (spawn-buffer (coloured "ab" [[0 2 :green]])))
+      (buffer-splice bp 2 2 "cd" nil nil {:face [[0 2 :red]]})
+      (assert= (buffer-query bp (fn (b) (buffer-properties b :face))) [[0 2 :green] [2 4 :red]])
+      (stop-buffer bp))))
+
+;; ---- redaction (ADR-581) ----------------------------------------------------------
+;; A secret typed into a buffer one key at a time leaves a snapshot per key; removing it
+;; must leave none — no undo brings any of it back, the splice log says only that it went.
+
+(defn- typed (buf keys) (fold keys buf (fn (acc key) (insert acc key))))
+
+(describe "redact-region — a delete that leaves no trace"
+  (test "no undo or redo brings any part of the text back"
+    (let (b (typed (end-of-buffer (make-buffer "Password: ")) ["h" "u" "n" "t" "e" "r"])
+          redacted (redact-region b 10 16))
+      (assert= (buffer-text redacted) "Password: ")
+      (assert= (get redacted :undo) ())
+      (assert= (buffer-text (undo redacted)) "Password: ")
+      (is (not (includes? (str (get redacted :undo) (get redacted :pending-undo)) "hun")))))
+  (test "the splice log holds the delete alone, marked as a redaction"
+    (let (b (typed (end-of-buffer (make-buffer "pw: ")) ["a" "b"])
+          redacted (redact-region b 4 6))
+      (assert= (count (get redacted :splices)) 1)
+      (assert= (buffer-edits-since b redacted) (list [4 6 "" :redact]))))
+  (test "a read-only buffer is redacted all the same and stays read-only"
+    (let (redacted (redact-region (set-read-only (make-buffer "abcdef") true) 1 3))
+      (assert= (buffer-text redacted) "adef")
+      (is (read-only? redacted))))
+  (test "point, markers and properties are carried"
+    (let (b (buffer-marker-set (insert (make-buffer "") "xxSECRETyy" {:face [[8 10 :red]]}) :m 9)
+          redacted (redact-region b 2 8))
+      (assert= (buffer-point redacted) 4)
+      (assert= (buffer-marker redacted :m) 3)
+      (assert= (buffer-properties redacted :face) [[2 4 :red]])))
+  (test "an empty range is no edit"
+    (let (b (insert (make-buffer "") "ab"))
+      (is (= (redact-region b 1 1) b)))))
+
+(describe "redaction in a buffer process"
+  :isolated (test "a redacting splice leaves the process no history and no log"
+    (let (bp (spawn-buffer (make-buffer "pw: ")))
+      (buffer-splice bp 4 4 "secret" :me nil nil)
+      (buffer-splice bp 4 10 "" :me nil :redact)
+      (assert= (buffer-query bp buffer-text) "pw: ")
+      (assert= (buffer-query bp (fn (b) (get b :undo))) ())
+      (is (nil? (buffer-query bp (fn (b) (get b :splices)))))
+      (stop-buffer bp))))
