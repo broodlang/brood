@@ -1347,6 +1347,10 @@
         (let (first-info (grammar-info :tsswap)
               tree (open-tree "{\"a\": 1}\n" :tsswap))
           (is (contains? (:named first-info) :object))
+          ;; opened from a copy beside it, which is gone once mapped
+          (assert= (:loaded-via first-info) :beside)
+          (assert= (sort (file/ls root))
+            (sort ["json.so" "libtree-sitter-tsswap.so" "shim-json.c" "shim-toml.c" "toml.so"]))
           ;; rebuilt in place: a new file at the same path
           (file/rm library)
           (file/cp built-toml library)
@@ -1366,4 +1370,24 @@
         ;; the same build loaded again is the object already loaded, not a second one
         (%tree-sitter-load-grammar library :tsswap)
         (is (contains? (:named (grammar-info :tsswap)) :table))
+        (file/rmdir root)))
+
+    ;; A grammar directory the user cannot write: the copy goes to the user's cache directory,
+    ;; and the rebuilt library is still the one in use. (Skipped as root, who writes anyway.)
+    (test "a read-only grammar directory falls back to the cache"
+      (let (root (temp-dir "brood-grammarpin-")
+            locked (path/join root "locked")
+            library (path/join locked "libtree-sitter-tsswap.so")
+            built-json (path/join root "json.so"))
+        (file/mkdir locked)
+        (tsm-shim root "json" built-json)
+        (file/cp built-json library)
+        (os/cmd "chmod" ["555" locked])
+        (when (not (os/cmd-ok? (os/cmd "sh" ["-c" "touch \"$1/probe\"" "sh" locked])))
+          (%tree-sitter-load-grammar library :tsswap)
+          (let (info (grammar-info :tsswap))
+            (assert= (:loaded-via info) :cache)
+            (assert= (:source info) library)
+            (is (contains? (:named info) :object))))
+        (os/cmd "chmod" ["755" locked])
         (file/rmdir root)))))
