@@ -1277,21 +1277,35 @@
       (assert= (thing/thing-answer) 42) ; the image now holds what is on disk
       (assert= (project/reload-changed root) []))) ; and is current again
   :isolated (test "changed files reload in load order, so a changed macro reaches its caller at once"
-    ;; `aaa/caller` sorts before `zzz/macros` in a walk, and expands its macro: reloaded in
-    ;; walk order it would expand the OLD macro and need a second reload
+    ;; the caller is whichever of two files the walk lists FIRST, and expands the other's
+    ;; macro: reloaded in walk order it would expand the OLD macro and need a second reload
     (let (root (pt-fixture)
-          macros (path/join root "src/zzz.blsp")
-          caller (path/join root "src/aaa.blsp"))
-      (file/spit macros "(defmodule zzz \"m\")\n(defmacro answer () 1)\n")
-      (file/spit caller "(defmodule aaa \"c\" (:use zzz))\n(defn caller-answer () (answer))\n")
+          _ (file/spit (path/join root "src/aaa.blsp") "")
+          _ (file/spit (path/join root "src/zzz.blsp") "")
+          walked (seq/mapv (seq/filter (project/source-files root)
+                             (fn (f)
+                               (or (string/ends-with? f "aaa.blsp")
+                                 (string/ends-with? f "zzz.blsp"))))
+                   path/stem)
+          [caller-name macros-name] walked
+          macros (path/join root (str "src/" macros-name ".blsp"))
+          caller (path/join root (str "src/" caller-name ".blsp"))
+          macro-source (fn (n)
+                         (str "(defmodule " macros-name " \"m\")\n(defmacro answer () " n ")\n"))
+          caller-answer (fn () ((reflect/eval (symbol (str caller-name "/caller-answer"))))))
+      (file/spit macros (macro-source 1))
+      (file/spit caller
+        (str "(defmodule "
+          caller-name " \"c\" (:use " macros-name "))\n(defn caller-answer () (answer))\n"))
       (project/setup root)
       (project/load-sources root)
-      (assert= (aaa/caller-answer) 1)
-      (file/spit macros "(defmodule zzz \"m\")\n(defmacro answer () 2)\n")
+      (assert= (caller-answer) 1)
+      (file/spit macros (macro-source 2))
       (file/spit caller
-        "(defmodule aaa \"c\" (:use zzz))\n(defn caller-answer () (+ 0 (answer)))\n")
+        (str "(defmodule "
+          caller-name " \"c\" (:use " macros-name "))\n(defn caller-answer () (+ 0 (answer)))\n"))
       (assert= (project/reload-changed root) [macros caller])
-      (assert= (aaa/caller-answer) 2)))
+      (assert= (caller-answer) 2)))
   :isolated (test "a source added since boot counts as changed"
     ;; a file the image has never loaded is exactly what a long-lived one is most likely
     ;; to be wrong about
