@@ -7,9 +7,13 @@ use crate::builtins::bytes::collect_bytes;
 use crate::builtins::io::capture_write;
 use crate::builtins::numeric::num_to_f64;
 
+#[cfg(unix)]
+mod decoder;
 mod fragments;
 mod keyboard;
 mod screen;
+#[cfg(unix)]
+mod tty;
 // The thin crossterm seam: enter/leave the alternate screen, read keys, and
 // paint a *frame* — a Brood vector of render ops. The protocol's meaning is
 // data (the ops); these primitives are the in-process frontend that interprets

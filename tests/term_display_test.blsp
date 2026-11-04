@@ -26,6 +26,7 @@
     "      (string? input) (assoc m :text (str (:text m) input))\n"
     "      (and (vector? input) (= (first input) :paste))\n"
     "        (assoc m :event (str \"paste \" (string/replace (second input) \"\\n\" \"|\")))\n"
+    "      (keyword? input) (assoc m :event (str \"key \" input))\n"
     "      (and (vector? input) (= (first input) :resize))\n"
     "        (assoc m :event (str \"resize \" (nth input 1) \"x\" (nth input 2)))\n"
     "      else m))\n" "  editor/ui/*term-display*)\n"))
@@ -43,6 +44,7 @@ child exited."
       ([:proc ^p data] (read-until p
                          (assoc state
                            :vt (vt/feed (:vt state) data)
+                           :raw (str (:raw state "") data)
                            :bytes (+ (:bytes state) (string/length data)))
                          pred
                          ms))
@@ -97,6 +99,20 @@ child exited."
                                     20000))
                       (do
                         (is (includes? (screen-text (:vt resized)) "size:50x12"))
+                        ;; no kitty protocol here, so xterm's modifyOtherKeys was asked for
+                        ;; (KI-360), and the chords it sends are read: C-; and C-S-a…
+                        (is (includes? (:raw first-frame) "\e[>4;2m"))
+                        (os/write p "\e[27;5;59~")
+                        (let (chorded (read-until p resized (showing? "key :ctrl-;") 20000))
+                          (do
+                            (is (includes? (screen-text (:vt chorded)) "key :ctrl-;"))
+                            ;; …and C-/, whose legacy byte is C-_'s
+                            (os/write p "\x1f")
+                            (is (includes? (screen-text (:vt (read-until p
+                                                               chorded
+                                                               (showing? "key :ctrl-_")
+                                                               20000)))
+                                  "key :ctrl-_"))))
                         (os/write p "q")
                         (let (closed (read-until p resized (fn (vt) false) 20000))
                           (do
@@ -104,6 +120,7 @@ child exited."
                             ;; the terminal is given back
                             (is (not (vt/mode (:vt closed) :alt-screen)))
                             (is (not (vt/mode (:vt closed) :bracketed-paste)))
+                            (is (includes? (:raw closed) "\e[>4;0m"))
                             (is (vt/mode (:vt closed) :cursor-visible))))))))))))
         (file/rmdir dir)))))
 

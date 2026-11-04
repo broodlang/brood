@@ -13,7 +13,9 @@ taking over the terminal for a full-screen UI (so click/scroll reach `term/poll`
 terminal that speaks the kitty keyboard protocol is asked to report repeats and releases
 (popped again by `term/leave` and every exit path); in any other a held key is inferred
 from its repeats. Either way `term/poll` delivers `[:key-up …]` and `term/held-key` knows
-the key held. Bracketed paste is turned on, so a paste arrives whole (`[:paste text]`), and
+the key held. A terminal without the kitty protocol is asked for xterm's `modifyOtherKeys`
+instead, so a chord with no legacy bytes (`C-;`, `C-.`, `C-S-a`) still arrives — xterm sends
+it; under tmux add `set -g extended-keys on` to `~/.tmux.conf` (KI-360). Bracketed paste is turned on, so a paste arrives whole (`[:paste text]`), and
 the next `term/draw` paints the screen whole (ADR-586). Pair with `term/leave`.
 
     (term/enter)   ;~> the terminal taken over: raw mode, alternate screen, mouse capture"
