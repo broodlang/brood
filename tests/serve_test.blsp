@@ -905,3 +905,222 @@
       (assert= (receive ([:clipboard ^asked text] text) (after test/*wait-ms* :none))
         "slow to read")
       (send client [:bye]))))
+
+;; ---- ADR-593: a session supervises its loop -----------------------------------------
+;; The served counter, able to die: "crash" — or a `[:crash]` from anywhere, since a parked
+;; loop has no keys — kills its loop outright (an exit signal, which no `try` in `ui-run`
+;; catches). Every count is handed to the session (`serve-retain`), and a restarted loop
+;; shows how many restarts it is.
+(defn crash-up (m input c r)
+  (cond
+    (or (= input "crash") (= input [:crash])) (do (exit (self) :boom) (receive (after 0 nil)) m)
+    (and (vector? input) (= (first input) :session-restarted))
+      (assoc m :who (str "restarted " (:restarts (second input))))
+    else
+      (let (next (resume-up m input c r))
+        (do (when (not (= (:n next) (:n m))) (serve-retain (:n next))) next))))
+
+;; `serve` options supervising the counter: the crash hook reports what it was handed to
+;; `report`, and a restart starts from the retained count. `supervise` adds to (or
+;; overrides) the hooks, `extra` to the options.
+(defn crash-opts (report supervise extra)
+  (merge {:supervise (merge {:on-crash (fn (retained death)
+                                         (do
+                                           (send report
+                                             [:saved retained (:restarting? death) (:reason death)])
+                                           :saved))
+                             :restart (fn (retained death) {:n (or retained 0)})}
+                       supervise)}
+    extra))
+
+;; A window client that watches the loop it attached to, as `attach-display` does — so a
+;; client that ended on its loop's death would end here — and says when it has ended.
+(defn supervised-window-client (mgr report)
+  (send mgr [:attach (self) 80 24])
+  (receive
+    ([:attached loop-process] (do
+                                (monitor loop-process)
+                                (send report [:ready (self)])
+                                (editor/serve/attach-display-loop nil
+                                  loop-process
+                                  (gui-mock-display report))
+                                (send report [:client-ended])))
+    (after test/*wait-ms* (send report [:ready :no-attach]))))
+
+;; The served session's buffers, in a registry the SESSION owns: the model shows the text
+;; of its one document, read from the document's process — which outlives the loop.
+(defn registry-notes (registry)
+  (let (entries (editor/buffer-registry/registry-entries registry))
+    (editor/buffer/buffer-query (:proc (first entries)) editor/buffer/buffer-text)))
+
+(defn registry-mk ()
+  (let (registry (editor/buffer-registry/registry-start {:owner (served-session)}))
+    (do
+      (editor/buffer-registry/registry-share registry "notes" "unsaved text" {:file "/tmp/notes"})
+      (serve-retain {:registry registry})
+      {:n 0 :registry registry :notes (registry-notes registry)})))
+
+(defn registry-vw (m c r)
+  [(text 0 0 (str "notes=" (:notes m) (if (get m :who) (str " who=" (get m :who)) "")))])
+
+;; The crash hook an editor has: every document's text written out ("auto-saved") from its
+;; process, into `directory`; the paths written.
+(defn save-documents (registry directory)
+  (into []
+    (map (editor/buffer-registry/registry-entries registry)
+      (fn (entry)
+        (let (path (str directory "/" (:name entry)))
+          (do
+            (file/spit path
+              (editor/buffer/buffer-query (:proc entry) editor/buffer/buffer-text))
+            path))))))
+
+(describe "serve: a session supervises its loop (ADR-593)"
+  (test "a loop that dies runs the crash hook and is restarted for the same client from what it retained"
+    (let (me (self)
+          mgr (spawn (editor/serve/serve-manager mk vw crash-up (crash-opts me {} {}))))
+      (send mgr [:attach me 80 24])
+      (let (first-loop (receive ([:attached s] s) (after test/*wait-ms* :none))
+            session (receive ([:session s] s) (after test/*wait-ms* :none)))
+        (is (pid? session))
+        (is (not (= first-loop session)))
+        (monitor session)
+        (send first-loop [:key "+"])
+        (send first-loop [:key "+"])
+        (assert= (await-frame-text "n=2") "n=2")
+        (send first-loop [:key "crash"])
+        (assert= (receive
+                   ([:saved retained restarting? reason] [retained restarting? reason])
+                   (after test/*wait-ms* :none))
+          [2 true :boom])
+        ;; the client is told the new loop, under the same session, and the count is back
+        (let (next-loop (receive ([:attached s] s) (after test/*wait-ms* :none)))
+          (is (pid? next-loop))
+          (is (not (= next-loop first-loop)))
+          (assert= (receive ([:session s] s) (after test/*wait-ms* :none)) session)
+          (assert= (await-frame-text "n=2 who=restarted 1") "n=2 who=restarted 1")
+          (send next-loop [:key "+"])
+          (assert= (await-frame-text "n=3 who=restarted 1") "n=3 who=restarted 1")
+          ;; a quit is no death: the session ends with it, no hook, no restart
+          (send next-loop [:key "q"])
+          (assert= (receive ([:down _ ^session reason] reason) (after test/*wait-ms* :alive))
+            :normal)
+          (assert= (receive ([:saved _ _ _] :saved) (after 0 :none)) :none)))))
+
+  (test "the window client keeps its window through the restart and ships to the new loop"
+    (let (me (self)
+          mgr (spawn (editor/serve/serve-manager mk vw crash-up (crash-opts me {} {}))))
+      (spawn (supervised-window-client mgr me))
+      (let (client (receive ([:ready c] c) (after test/*wait-ms* :no-attach)))
+        (is (pid? client))
+        (assert= (wait-drew "n=0") :ok)
+        (send client "+")
+        (assert= (wait-drew "n=1") :ok)
+        (send client "crash")
+        (assert= (wait-drew "n=1 who=restarted 1") :ok)
+        (send client "+")
+        (assert= (wait-drew "n=2 who=restarted 1") :ok)
+        ;; the dead loop's [:down] did not end the client
+        (assert= (receive ([:client-ended] :ended) (after 0 :running)) :running)
+        (send client :close)
+        (assert= (receive ([:client-ended] :ended) (after test/*wait-ms* :running)) :ended))))
+
+  (test "the session's documents outlive its loop, and are saved when the budget runs out"
+    (let (me (self)
+          directory (test/temp-dir "brood-serve-saved-")
+          _ (file/mkdir directory)
+          opts {:supervise {:max 1
+                            :on-crash (fn (retained death)
+                                        (let (saved (save-documents (:registry retained) directory))
+                                          (do
+                                            (send me
+                                              [:saved (:registry retained) (:restarting? death)])
+                                            saved)))
+                            :restart (fn (retained death)
+                                       {:n 0
+                                        :registry (:registry retained)
+                                        :notes (registry-notes (:registry retained))})}}
+          mgr (spawn (editor/serve/serve-manager registry-mk registry-vw crash-up opts)))
+      (send mgr [:attach me 80 24])
+      (let (first-loop (receive ([:attached s] s) (after test/*wait-ms* :none))
+            session (receive ([:session s] s) (after test/*wait-ms* :none)))
+        (monitor session)
+        (assert= (await-frame-text "notes=unsaved text") "notes=unsaved text")
+        (send first-loop [:key "crash"])
+        (let ([registry restarting?] (receive
+                                       ([:saved registry restarting?] [registry restarting?])
+                                       (after test/*wait-ms* [nil :none])))
+          (is (pid? registry))
+          (is restarting?)
+          (monitor registry)
+          ;; the restarted loop read the text from the document's process, which lived on
+          (let (next-loop (receive ([:attached s] s) (after test/*wait-ms* :none)))
+            (assert= (await-frame-text "notes=unsaved text who=restarted 1")
+              "notes=unsaved text who=restarted 1")
+            ;; a second death inside the window: past `:max 1` — saved, and the session ends
+            (send next-loop [:key "crash"])
+            (assert= (receive ([:saved _ again?] again?) (after test/*wait-ms* :none)) false)
+            (assert= (receive ([:down _ ^session reason] reason) (after test/*wait-ms* :alive))
+              :boom)
+            ;; the registry was the session's: it ended with it, its documents saved first
+            (assert= (receive ([:down _ ^registry _] :ended) (after test/*wait-ms* :alive)) :ended)
+            (assert= (file/slurp (str directory "/notes")) "unsaved text"))))))
+
+  (test "a parked session's loop that dies is restarted parked, and its user takes it back"
+    (let (me (self)
+          mgr (spawn (editor/serve/serve-manager mk
+                       vw
+                       crash-up
+                       (crash-opts me {} {:resume-ms :forever})))
+          first-client (spawn (resume-client mgr me {:name "ann"}))
+          [first-loop seen] (receive ([:client s t] [s t]) (after test/*wait-ms* [nil :none]))
+          watch-client (monitor first-client))
+      (is (string/starts-with? seen "n=1"))
+      (send first-client :die)
+      (receive ([:down ^watch-client _ _] nil) (after test/*wait-ms* nil))
+      ;; let the loop fold its client's death and park
+      (receive (after 200 nil))
+      (send first-loop [:crash])
+      (assert= (receive
+                 ([:saved retained restarting? _] [retained restarting?])
+                 (after test/*wait-ms* :none))
+        [1 true])
+      ;; the same name comes back: the restarted loop, parked, is handed to it
+      (send mgr [:attach me 80 24 {:name "ann"}])
+      (let (next-loop (receive ([:attached s] s) (after test/*wait-ms* :none)))
+        (is (pid? next-loop))
+        (is (not (= next-loop first-loop)))
+        ;; the retained count, and the restarted loop takes this client's keys (whether its
+        ;; `[:client-back]` or its own start events fold first is the input lane's to say)
+        (is (string/starts-with? (await-frame-prefix "n=1") "n=1"))
+        (send next-loop [:key "+"])
+        (is (string/starts-with? (await-frame-prefix "n=2") "n=2"))
+        (send next-loop [:key "q"]))))
+
+  (test "without a restart the hook still runs and the session ends, its client with it"
+    (let (me (self)
+          mgr (spawn (editor/serve/serve-manager mk vw crash-up (crash-opts me {:restart nil} {}))))
+      (send mgr [:attach me 80 24])
+      (let (first-loop (receive ([:attached s] s) (after test/*wait-ms* :none))
+            session (receive ([:session s] s) (after test/*wait-ms* :none)))
+        (monitor session)
+        (send first-loop [:key "crash"])
+        (assert= (receive ([:saved _ restarting? _] restarting?) (after test/*wait-ms* :none))
+          false)
+        (assert= (receive ([:down _ ^session reason] reason) (after test/*wait-ms* :alive)) :boom)
+        (assert= (receive ([:attached s] s) (after 0 :none)) :none))))
+
+  (test "a session with no supervision ends when its loop dies, as before"
+    (let (me (self)
+          mgr (spawn (editor/serve/serve-manager mk vw crash-up)))
+      (send mgr [:attach me 80 24])
+      (let (first-loop (receive ([:attached s] s) (after test/*wait-ms* :none))
+            session (receive ([:session s] s) (after test/*wait-ms* :none)))
+        (monitor session)
+        (send first-loop [:key "crash"])
+        (assert= (receive ([:down _ ^session reason] reason) (after test/*wait-ms* :alive)) :boom))))
+
+  (test "serve-retain and served-session say nothing outside a served session"
+    (do
+      (assert= (served-session) nil)
+      (assert= (serve-retain {:anything 1}) nil))))

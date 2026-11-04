@@ -15791,3 +15791,44 @@ The Windows console sends no bytes; crossterm still reads it there.
 **Guard.** `decoder` unit tests on byte strings (modifyOtherKeys, `CSI u`, the legacy bytes, a
 sequence split across reads, queries' answers swallowed); `tests/term_display_test.blsp` under a
 pty: the request on enter, the reset on leave, `C-;` and `C-_` reaching the app.
+
+## KI-334 — a served session whose loop dies takes its unsaved buffers with it ✅ FIXED 2026-11-04
+
+**Symptom.** In bedit's local window, a loop that dies abnormally (a panic in a native call,
+an error outside `update` and `view`) has every unsaved file buffer auto-saved and a fresh loop
+started over the same buffers (bedit's `src/lifeline.blsp`). In a `serve` session the same
+death ends the session: the client sees the session's `[:down …]` and closes, and every buffer
+that lived in the session's model is gone — no sidecar, no restart. Found while giving served
+sessions the window's startup path (ADR-539's bedit side); not seen in use.
+
+**Cause.** Two halves. `serve-session` runs the app's `ui-run` unsupervised: the manager
+monitors the session and only forgets it on `[:down …]`, and ADR-519's parking covers the
+CLIENT going away, never the session's own loop. And bedit's recovery stands on things a
+served session does not have: its buffers are not hosted in processes of their own, because
+hosting goes through the buffer registry (`frames/frames-registry-start`), which registers
+the runtime-wide name `:buffer-registry` — one per runtime, so a registry per session
+collides on it, and one shared by every session would show each session (a guest's
+included) the others' buffers. A collab session already hosts its slot 0 through the collab
+registry, which a second hosting would double.
+
+**Why it survived.** Nothing kills a served session's loop in a test, and the window's
+lifeline tests run the window's loop. Served sessions started from a bare `ed-init` model
+until ADR-539, so nothing in them looked like the window's.
+
+**Fix.** ADR-593. A served session is a supervisor process running its loop linked: a loop
+that dies runs the app's `:supervise` `:on-crash` hook with what the loop handed
+`serve-retain`, then — within a budget of 3 a minute — restarts the loop from `:restart` for
+the same client, which is told the new loop (`[:attached …]`) and, monitoring the session
+rather than the loop, keeps its window. `registry-start` takes `{:owner pid}`: a registry that
+lives as long as its owner and stops its documents with it, so one per session needs no name
+and leaks nothing. bedit hosts a served private session's buffers in a registry the session
+owns (`remote/ed-served-host`), writes their sidecars from the buffer processes when the loop
+dies (`lifeline/emergency-save!`) and restarts over them (`remote/ed-served-restart`); a
+shared session saves from, and restarts over, the collab registry it already had.
+
+**Guard.** `tests/serve_test.blsp` "serve: a session supervises its loop (ADR-593)" (a loop
+that dies is restarted for the same client from what it retained; the window client keeps its
+window; the session's documents outlive its loop and are saved when the budget runs out; a
+parked session restarted and adopted; no restart, no supervision) and
+`tests/buffer_registry_test.blsp` "buffer-registry — an owner's lifetime"; bedit's
+`tests/remote_test.blsp` "remote — a served session's loop that dies is saved and restarted".

@@ -26,6 +26,8 @@
 ;; model across clients (collaborative editing) and per-client viewports onto shared
 ;; buffers are deferred (ADR-011); a client's resize after attach is live (ADR-587) — the slice proves
 ;; the seam. Detach, client death, and a dropped link all tear the session down cleanly.
+;; A session SUPERVISES its loop (ADR-593): the loop dying runs the app's crash hook and
+;; restarts it, within a budget, for the same client — see `serve`'s `:supervise`.
 
 (defmodule editor/serve
   "Serve a `ui-run` app to remote frontends — the Emacs `--daemon`/`emacsclient`
@@ -37,7 +39,9 @@ the frontend whose `:draw` sends the frame over the node link and whose `:poll`
 receives the client's input. The thin client is frontend-agnostic: `attach` paints to
 the terminal, `attach-display` to any `ui-run` display (e.g. `(gui-display)`, a native
 window) — same protocol, different frontend. Many clients may attach at once
-(independent sessions). Built purely on `ui-run` + the node-link primitives."
+(independent sessions). Each session supervises its loop: one that dies is restarted for
+the same client from what it retained (`serve-retain`), after the app's crash hook
+(`:supervise`, ADR-593). Built purely on `ui-run` + the node-link primitives."
   (:use editor/ui))
 
 ;; The registered name a daemon's session-manager listens under, and an attaching
@@ -59,10 +63,16 @@ window) — same protocol, different frontend. Many clients may attach at once
 ;; What this runtime's clients say they can do: their machine's PRIMARY selection (ADR-562).
 (def- attach-capabilities [:primary])
 
+(defdyn editor/serve/*served-session* nil)
+;; In a served session's loop process (`serve`), the SESSION's pid — its supervisor, which
+;; outlives the loop (ADR-593): what a loop hands what should survive it ([[serve-retain]]),
+;; and what owns state that lives as long as the session (a buffer registry's `:owner`).
+;; nil outside one.
+
 ;; ---- the seam: a display frontend that lives on the wire ---------------------
 
 ; nil ⇒ ui-run treats it as :tick (re-render)
-(defn remote-display (client cols rows &optional resume)
+(defn remote-display (client cols rows &optional resume session)
   "A `ui-run` display (`{:enter :leave :size :draw :poll}`) bound to a remote
 frontend `client` (its pid): `:draw` ships the frame to `client` as `[:frame f]`,
 `:poll` returns the next key the client shipped back (`[:key k held?]`, `held?`
@@ -95,6 +105,14 @@ output — reaches its `update` exactly as it would locally. Without the pass-th
 those messages would strand in the session's mailbox (a selective receive never
 consumes them), leaving a served app deaf to everything but keys.
 
+`session`, when given, is the session's SUPERVISOR (ADR-593), which outlives this loop: the
+display tells it who the client is and its size whenever either changes
+(`[:editor/serve/session-state …]`), so a loop restarted after this one died serves the
+same client at the same size, and tells an adopting client the supervisor
+(`[:session session]`, after `[:attached …]`) — the pid whose end, not this loop's, ends
+the client. A `client` of nil with `resume` is a restarted loop of a PARKED session: it
+starts parked.
+
     (editor/serve/remote-display client 80 24)   ;~> {:enter … :leave … :size … :draw … :poll …} shipping frames to `client`"
   ;; the display's state, in a table the session process owns: the client it serves now
   ;; (nil while parked) and the monitor on it, the size, whether a key is down there, the
@@ -105,6 +123,9 @@ consumes them), leaving a served app deaf to everything but keys.
       (table/put state :client client)
       (table/put state :monitor (:monitor resume))
       (table/put state :size [cols rows])
+      (table/put state :session session)
+      ;; a restarted loop of a parked session: parked from its start
+      (when (and (nil? client) resume) (table/put state :parked-at (os/now)))
       (merge
         {:enter (fn ()
                   (serve-busy-start state
@@ -281,8 +302,35 @@ client used to keep the size it attached with (ADR-587)."
             (= (first input) :resize)
             (int? (nth input 1))
             (int? (nth input 2)))
-      (table/put state :size [(nth input 1) (nth input 2)]))
+      (table/put state :size [(nth input 1) (nth input 2)])
+      (serve-report state))
     input))
+
+(defn- serve-session-of (resume)
+  "The session the manager knows this loop by: its supervisor (`:session` in `resume`,
+ADR-593), or the loop itself for a display made without one."
+  (or (:session resume) (self)))
+
+(defn- serve-report (state)
+  "Tell the session's supervisor (`:session` in the display `state`, when it has one) the
+client this loop serves now and its size, `[:editor/serve/session-state {:client :size}]` —
+what a loop restarted after this one died starts from (ADR-593). Returns nil."
+  (let (session (table/get state :session nil))
+    (when session
+      (send session
+        [:editor/serve/session-state
+          {:client (table/get state :client nil) :size (table/get state :size nil)}])))
+  nil)
+
+(defn- serve-tell-attached (state client)
+  "Tell `client` the loop it ships its input to — this one, `[:attached loop]` — and, for a
+supervised session, the session itself (`[:session supervisor]`), whose end and not the
+loop's ends the client: a loop that dies is restarted, and the restarted one says
+`[:attached …]` again (ADR-593)."
+  (send client [:attached (self)])
+  (let (session (table/get state :session nil))
+    (when session (send client [:session session])))
+  nil)
 
 (defn- remote-take-input (state resume)
   "The next input the client shipped this session — a key (noting whether one is held in
@@ -327,7 +375,8 @@ that resumes, PARK it (nobody to draw to, the manager told) and hand the app
       (table/put state :monitor nil)
       (table/put state :held? false)
       (table/put state :parked-at (os/now))
-      (send (:manager resume) [:parked (self) (:token resume)])
+      (serve-report state)
+      (send (:manager resume) [:parked (serve-session-of resume) (:token resume)])
       [:client-lost])))
 
 (defn- remote-adopt (state resume token client cols rows)
@@ -346,7 +395,8 @@ which the loop reads as a timeout)."
         (table/put state :client-can #{})
         (table/put state :size [cols rows])
         (table/put state :parked-at nil)
-        (send client [:attached (self)])
+        (serve-report state)
+        (serve-tell-attached state client)
         (serve-replay state client)
         (when key (proc/set-quit-key [:key key] editor/ui/*ui-quit-busy-ms* client))
         [:client-back]))))
@@ -371,7 +421,7 @@ without the manager's token."
     (or (nil? resume) (not (= token (:token resume)))) nil
     (nil? (table/get state :client nil))
       (do
-        (send (:manager resume) [:claimed (self) claimant])
+        (send (:manager resume) [:claimed (serve-session-of resume) claimant])
         (remote-adopt state resume token claimant cols rows))
     else
       (let (old (table/get state :client nil)
@@ -379,7 +429,7 @@ without the manager's token."
         (do
           (send old [:ping (self) asked])
           (if (receive ([:pong ^asked] true) ([:down _ ^old _] false) (after serve-claim-ms false))
-            (do (send (:manager resume) [:declined (self) claimant]) nil)
+            (do (send (:manager resume) [:declined (serve-session-of resume) claimant]) nil)
             (let (watch (table/get state :monitor nil))
               (do
                 (when watch (demonitor watch))
@@ -387,7 +437,7 @@ without the manager's token."
                 (table/put state :client nil)
                 (table/put state :client-can #{})
                 (table/put state :monitor nil)
-                (send (:manager resume) [:claimed (self) claimant])
+                (send (:manager resume) [:claimed (serve-session-of resume) claimant])
                 (remote-adopt state resume token claimant cols rows))))))))
 
 (defn- serve-replay (state client)
@@ -451,28 +501,220 @@ for one that says nothing, as every client older than the saying."
   (let (can (when (map? identity) (get identity :can)))
     (if (or (vector? can) (list? can)) (vec can) [])))
 
-(defn- serve-session (client cols rows identity resume make-model view update)
-  "One attached client's session: monitor the client (so its death tears us down, or parks
-us — `resume`, see `remote-display`), tell it our pid (so it can ship keys here), then run
-the app's `ui-run` against a `remote-display` to that client. A fresh `(make-model)` per
-session keeps clients independent. A non-empty `identity` ([[serve-identity]]) is queued
-to this session's own mailbox as `[:client-opts identity]` BEFORE `ui-run` starts, so it
-is the first event the app's `update` folds (through `remote-display`'s async
-pass-through) — the seam a collaborative app reads a participant's name from."
-  (let (watch (monitor client)
-        display (remote-display client cols rows (when resume (assoc resume :monitor watch))))
+;; ---- the session: a supervisor over its loop (ADR-593) ---------------------------
+;; A session is TWO processes. The SESSION — the pid the manager knows, monitors and kills
+;; — supervises; the LOOP, linked to it, runs the app's `ui-run` and is the pid the client
+;; ships its input to. The session outlives its loop: when the loop dies abnormally, the
+;; app's crash hook runs (`:on-crash` — an editor writes its unsaved buffers' sidecars
+;; there) and, within the restart budget, a fresh loop is started for the same client from
+;; what the dead one RETAINED ([[serve-retain]]) — an editor's buffer registry, whose
+;; processes outlived the loop. The client is told the new loop (`[:attached loop]`) and
+;; keeps its window; it monitors the session, not the loop, so only the session's end
+;; ends it.
+
+;; How many times a session's loop may be restarted inside `serve-restart-window-ms` before
+;; the session is let go — so a fault that recurs on every start cannot spin. The app's
+;; `:supervise` map may say otherwise (`:max`, `:window-ms`).
+(def- serve-restart-max 3)
+(def- serve-restart-window-ms 60000)
+
+;; How many of the manager's latest hand-over messages a session keeps, to give a loop
+;; restarted before it took them. Replaying one it did take is harmless: an adopt of a
+;; session that has a client is ignored, a claim asks the client again.
+(def- serve-pending-max 6)
+
+;; The ways a loop ends WITHOUT failing: its app quit, its parked session's time ran out.
+(def- serve-loop-ends #{:normal :client-gone})
+
+(defn- serve-restart-allowed? (deaths now max window-ms)
+  "Whether a loop that died at `now` may be started again, given the times of the session's
+earlier loop `deaths`: fewer than `max` of them inside the last `window-ms`."
+  (< (count (seq/filter deaths (fn (at) (< (- now at) window-ms)))) max))
+
+(defn- serve-session (client cols rows identity resume app)
+  "One attached client's SESSION (ADR-593): this process supervises the app's loop
+([[serve-loop]]), which it starts linked, and outlives it. `resume` (ADR-519) gains
+`:session`, this pid, which the loop names itself by to the manager. Trapping exits, so the
+loop's death arrives as a message ([[serve-supervise]]) and a `:kill` of this process —
+`serve-stop` — takes the loop with it."
+  (do
+    (proc/trap-exit true)
+    (serve-supervise (serve-start-loop {:client client
+                                        :size [cols rows]
+                                        :identity identity
+                                        :capabilities {client (serve-capabilities identity)}
+                                        :resume (when resume (assoc resume :session (self)))
+                                        :app app
+                                        :retained nil
+                                        :deaths []
+                                        :pending []}
+                       (:make-model app)
+                       nil))))
+
+(defn- serve-start-loop (session make-model death)
+  "`session` with a fresh loop running ([[serve-loop]]), linked to this process: its model
+from `(make-model)`, `death` what ended the loop before it (nil for the first)."
+  (let (supervisor (self)
+        loop-process (spawn-link (serve-loop supervisor session make-model death)))
+    (assoc session :loop loop-process)))
+
+(defn- serve-loop (supervisor session make-model death)
+  "A session's LOOP: monitor the client (so its death tears the session down, or parks it
+— see `remote-display`), tell it this loop and the `supervisor` session, then run the app's
+`ui-run` against a `remote-display` to it. A fresh `(make-model)` per session keeps clients
+independent. Queued to this loop's own mailbox before `ui-run` starts, so they are the first
+events the app's `update` folds (through `remote-display`'s async pass-through): what the
+client said it can do (ADR-562), a non-empty identity ([[serve-identity]]) as
+`[:client-opts identity]` — the seam a collaborative app reads a participant's name from,
+and a guest is known by — and, for a loop restarted after one died, `[:session-restarted
+death]` (`{:reason :saved :restarting? :restarts :identity}`), its cue to say so. A loop of a parked
+session (no client) starts parked."
+  (let (client (:client session)
+        [cols rows] (:size session)
+        resume (:resume session)
+        watch (when client (monitor client))
+        display (remote-display client
+                  cols
+                  rows
+                  (when resume (assoc resume :monitor watch))
+                  supervisor)
+        identity (:identity session)
+        app (:app session))
     (do
-      (send client [:attached (self)])
-      ;; what the client said it can do (`:can` in its identity, ADR-562), noted by the
-      ;; display before anything asks it ([[served-client-can?]])
-      (send (self) [:client-can client (serve-capabilities identity)])
+      (when client
+        (send client [:attached (self)])
+        (send client [:session supervisor])
+        (send (self) [:client-can client (get (:capabilities session) client [])]))
       (when (and (map? identity) (not (empty? identity)))
         (send (self) [:client-opts identity]))
-      ;; bound for the session's life, `make-model` included: who the session draws to now
-      ;; ([[served-client]])
+      (when death (send (self) [:session-restarted death]))
+      ;; bound for the loop's life, `make-model` included: who the session draws to now
+      ;; ([[served-client]]) and the session itself ([[served-session]])
       (binding (editor/serve/*served-client* (get display :served-client)
-                editor/serve/*served-client-can* (get display :served-client-can))
-        (ui-run (make-model) view update display)))))
+                editor/serve/*served-client-can* (get display :served-client-can)
+                editor/serve/*served-session* supervisor)
+        (ui-run (make-model) (:view app) (:update app) display)))))
+
+(defn- serve-supervise (session)
+  "The session's loop over its running loop: keep what the loop retains and reports (its
+client and size), pass the manager's hand-overs on to it — keeping the latest, for a loop
+restarted before it took them — and when it ends, [[serve-loop-ended]]."
+  (let (loop-process (:loop session))
+    (receive
+      ([:editor/serve/retain value] (serve-supervise (assoc session :retained value)))
+      ([:editor/serve/session-state facts] (serve-supervise (assoc session
+                                                              :client (:client facts)
+                                                              :size
+                                                                (or (:size facts)
+                                                                  (:size session)))))
+      ;; the manager's word for the loop: a parked session adopted, one asked to hand itself
+      ;; over, what a client can do
+      ((and message (or [:adopt _ _ _ _] [:claim _ _ _ _] [:client-can _ _])) (do
+                                                                                (send loop-process
+                                                                                  message)
+                                                                                (serve-supervise (serve-note-forwarded session
+                                                                                                   message))))
+      ([:EXIT ^loop-process reason] (serve-loop-ended session reason))
+      (_ (serve-supervise session)))))
+
+(defn- serve-note-forwarded (session message)
+  "`session` after passing the manager's `message` to its loop: kept among the latest
+`serve-pending-max`, and a client's capabilities noted (`[:client-can client
+capabilities]`), so a restarted loop knows what its client can do."
+  (let (pending (conj (:pending session) message)
+        kept (if (> (count pending) serve-pending-max) (into [] (rest pending)) pending))
+    (match message
+      ([:client-can client capabilities] (assoc session
+                                           :pending kept
+                                           :capabilities
+                                             (assoc (:capabilities session)
+                                               client capabilities)))
+      (_ (assoc session :pending kept)))))
+
+(defn- serve-crash-hook (on-crash retained death)
+  "Run the app's crash hook `(on-crash retained death)` and answer what it returns — nil
+when it fails, which is said on stderr: a hook that cannot save must not also cost the
+restart."
+  (check-allow :discarded-catch
+    (try
+      (on-crash retained death)
+      (catch e
+        (do
+          (io/puts (str "serve: the session's crash hook failed: " (error-message e)) :to *err*)
+          nil)))))
+
+(defn- serve-loop-ended (session reason)
+  "The session's loop ended with `reason`. A quit or a parked session's expiry
+(`serve-loop-ends`) ends the session. Any other end is a death: the app's crash hook runs
+(`:on-crash` in its `:supervise` options — [[serve-crash-hook]]) with what the loop retained
+and `{:reason :restarting?}`, and then, when the app can restart one (`:restart`) and the
+budget allows ([[serve-restart-allowed?]]), a fresh loop starts over the retained value for
+the same client (or parked, when it had none), the manager's latest hand-overs given to it
+again; otherwise the session ends, and its client with it. The session ends with its
+loop's reason ([[serve-end]])."
+  (if (contains? serve-loop-ends reason)
+    (serve-end reason)
+    (let (now (os/now)
+          supervise (or (:supervise (or (:opts (:app session)) {})) {})
+          restart (:restart supervise)
+          deaths (:deaths session)
+          restarting? (and (fn? restart)
+                        (serve-restart-allowed? deaths
+                          now
+                          (or (:max supervise) serve-restart-max)
+                          (or (:window-ms supervise) serve-restart-window-ms)))
+          on-crash (:on-crash supervise)
+          retained (:retained session)
+          saved (when (fn? on-crash)
+                  (serve-crash-hook on-crash retained {:reason reason :restarting? restarting?}))
+          death {:reason reason
+                 :saved saved
+                 :restarting? restarting?
+                 :restarts (inc (count deaths))
+                 :identity (:identity session)})
+      (if restarting?
+        (let (client (:client session)
+              restarted (serve-start-loop (assoc session :deaths (conj deaths now))
+                          (fn () (restart retained death))
+                          death))
+          (do
+            ;; the dead loop may have died busy: its client's wait cursor goes
+            (when client (serve-send-busy client false))
+            (doseq (message (:pending session)) (send (:loop restarted) message))
+            (serve-supervise restarted)))
+        (serve-end reason)))))
+
+(defn- serve-end (reason)
+  "End the session with its loop's `reason`, so whoever watches the session (its client,
+the manager) learns how it ended as a watcher of the loop did: return for `:normal`, else
+exit with it — no longer trapping, so the exit is this process's own and not a message."
+  (when (not (= reason :normal))
+    (proc/trap-exit false)
+    (exit (self) reason)
+    (receive (after 0 nil)))
+  reason)
+
+(defn served-session ()
+  "The SESSION the served loop the caller runs in belongs to (ADR-593) — its supervisor's
+pid, which outlives the loop: a loop that dies is restarted under it. What should live as
+long as the session and no longer is tied to it (a buffer registry's `{:owner …}`), and what
+a restarted loop starts from is handed to it ([[serve-retain]]). Nil outside a `serve`
+session.
+
+    (editor/serve/served-session)   ;=> nil"
+  editor/serve/*served-session*)
+
+(defn serve-retain (value)
+  "Hand the session the served loop the caller runs in belongs to ([[served-session]])
+`value`: what its app's `:supervise` hooks are given if this loop dies — `:on-crash` to
+save from, `:restart` to build the next loop's model from (ADR-593). The latest value
+retained wins; plain data and pids (an editor's buffer registry, the flags its model
+carries), since it crosses into the session's process. Returns `value`; nil, keeping
+nothing, outside a served session.
+
+    (editor/serve/serve-retain {:registry nil})   ;=> nil"
+  (let (session (served-session))
+    (if (nil? session) nil (do (send session [:editor/serve/retain value]) value))))
 
 ;; ---- the client's clipboard, across the link (ADR-539) --------------------------
 ;; A served app runs on the daemon, but the clipboard its user means is the one on the
@@ -605,14 +847,7 @@ named."
         token (ref)
         resume (when (serve-resumes? opts identity)
                  {:ms (:resume-ms opts) :manager (self) :token token})
-        session (spawn (serve-session client
-                         cols
-                         rows
-                         identity
-                         resume
-                         (:make-model app)
-                         (:view app)
-                         (:update app))))
+        session (spawn (serve-session client cols rows identity resume app)))
     (do
       (monitor session)
       (map/assoc-in live [:sessions session] {:identity identity :token token :parked? false}))))
@@ -737,6 +972,19 @@ An attach under that identity while its session still has a client asks the old 
 whether it is there, and takes the session over when it is not: the link that dropped
 without anyone noticing yet. The app folds `[:client-lost]` and `[:client-back]` as it
 goes (see `remote-display`).
+
+Every session SUPERVISES its loop (ADR-593): the session is a process of its own, which the
+loop runs linked under and the client watches. `opts` `{:supervise {:on-crash f :restart g}}`
+says what a loop that dies abnormally costs: `(f retained death)` runs first — the place to
+save what the loop held (an editor's unsaved buffers, as auto-save sidecars) — and then
+`(g retained death)` makes the model a fresh loop starts from, for the same client (parked,
+when it had none), which is told the new loop and keeps its window; the app folds
+`[:session-restarted death]` first. `retained` is what the loop last handed
+[[serve-retain]] (nil if nothing), `death` `{:reason :restarting? …}` (`:saved`, the hook's
+answer, `:restarts`, and the client's `:identity` for `g`, so a guest's session is still one
+before its first key). At most `:max` restarts (3) inside `:window-ms` (60000):
+past that, and without a `:restart`, the hook still runs and the session ends — its client
+with it, as before supervision. A quit, or a parked session's expiry, is no death.
 
     (editor/serve/serve (fn () {:n 0}) view update)   ;~> #<pid …> of the session manager, registered as :ui
     (editor/serve/serve (fn () {:n 0}) view update {:resume-ms 3600000})   ;~> the same, a dropped client's session kept an hour"
@@ -908,10 +1156,40 @@ backlog (`attach-display-backlog`), which paints only the newest."
     ([:primary-get from asked] (do
                                  (attach-clipboard-answer display from asked :primary)
                                  (attach-display-loop peer session display)))
+    ;; the session's loop died and was restarted (ADR-593): the input goes to the new one
+    ([:attached next] (attach-display-loop peer next display))
+    ;; the session itself, which outlives its loop: ITS end ends this client
+    ([:session supervisor] (do
+                             (attach-note-session supervisor)
+                             (attach-display-loop peer session display)))
     ([:bye] nil)
     ([:nodedown ^peer] nil)
-    ([:down _ _ _] nil)
+    ([:down _ who _] (when (attach-survives-down? who) (attach-display-loop peer session display)))
     (m (attach-ship-input peer session display m))))
+
+;; the session each client loop is attached to, by client pid, once it said so (`[:session
+;; supervisor]`, ADR-593): only that pid's death ends the client, a loop's is a restart
+(def- attach-sessions (table/new))
+
+(defn- attach-note-session (supervisor)
+  "Monitor the session `supervisor` the calling client is attached to and remember it, so a
+death of its loop — restarted under it — no longer ends the client. Returns nil."
+  (when (nil? (table/get attach-sessions (self) nil))
+    (monitor supervisor)
+    (table/put attach-sessions (self) supervisor))
+  nil)
+
+(defn- attach-survives-down? (who)
+  "Whether the calling client goes on after `who` died: when it is attached to a session that
+said so ([[attach-note-session]]) and `who` is not that session — only its loop, which the
+session restarts. A client that was told no session ends on any death, as before."
+  (let (supervisor (table/get attach-sessions (self) nil))
+    (and (not (nil? supervisor)) (not (= who supervisor)))))
+
+(defn- attach-forget-session ()
+  "Forget the calling client's session ([[attach-note-session]]), its loop over. Returns nil."
+  (table/put attach-sessions (self) nil)
+  nil)
 
 (defn- attach-display-apply (display message)
   "Apply one of the daemon's seam messages — a texture or its release, a sound or its
@@ -978,7 +1256,8 @@ Window input is not taken here: `attach-display-paint` ships it before the paint
                   (attach-display-backlog peer session display latest carried after)))
     ([:bye] (attach-display-show display latest carried after))
     ([:nodedown ^peer] nil)
-    ([:down _ _ _] nil)
+    ([:down _ who _] (when (attach-survives-down? who)
+                       (attach-display-backlog peer session display latest carried after)))
     (after 0 (attach-display-paint peer session display latest carried after))))
 
 (defn- attach-display-paint (peer session display latest carried after)
@@ -1033,6 +1312,7 @@ them, else the OS clipboard. Its PRIMARY selection likewise (ADR-562): `client-p
             session (attach-handshake peer cols rows opts))
         (when session (monitor session) (attach-display-loop peer session display))
         (table/put attach-frames (self) nil)
+        (attach-forget-session)
         ((get display :leave)))
       (catch e ((get display :leave)) (throw e)))))
 
@@ -1065,7 +1345,8 @@ on exit.
                       ([:attached s] s)
                       (after 5000
                         (error "attach-display-local: the local serve manager did not answer"))))
-        (when session (monitor session) (attach-display-loop nil session display)))
+        (when session (monitor session) (attach-display-loop nil session display))
+        (attach-forget-session))
       ((get display :leave)))
     (catch e ((get display :leave)) (throw e))))
 

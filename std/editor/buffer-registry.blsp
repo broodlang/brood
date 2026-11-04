@@ -110,18 +110,26 @@ mirror's log, and every entry would pin the texts it spans, a redacted secret am
               :link link
               :mirror (if (contains? mirror :splices) (dissoc mirror :splices) mirror)))))))
 
-(defn- registry-loop (entries watchers mirror?)
+(defn- registry-stop-all (entries)
+  "Stop every directed process in `entries` — a `registry-stop`, or the owner gone."
+  (doseq (entry (%map-pairs entries))
+    (do (demonitor (:mref (second entry))) (stop-buffer (:proc (second entry))))))
+
+(defn- registry-loop (entries watchers mirror? owner)
   ;; entries: {key {:name <string> :proc <pid> :meta <map> :mref <monitor ref>
   ;;                [:link <link> :mirror <buffer>]}} — the last two only when `mirror?`;
-  ;; watchers: a list of pids
+  ;; watchers: a list of pids; owner: the pid whose end ends the registry, or nil
   (receive
+    ;; the OWNER ended: the registry was its, and goes with it, stopping every document —
+    ;; checked before a directed process's death, which is the same message shape
+    ([:down _ ^owner _] (registry-stop-all entries))
     ([:share name content meta from r]
       (let (key (registry-key name meta)
             existing (registry-live entries key))
         (if existing
           (do
             (send from [:reply r (:proc existing)])
-            (registry-loop entries watchers mirror?))
+            (registry-loop entries watchers mirror? owner))
           ;; A mirrored entry whose process died before its `[:down]` was folded comes
           ;; back from the MIRROR, not from the asker's copy — the asker may be the
           ;; holder that missed the last edits.
@@ -135,25 +143,25 @@ mirror's log, and every entry would pin the texts it spans, a redacted secret am
             ;; by a hair under load
             (registry-notify watchers [:registry-added key name bp meta])
             (send from [:reply r bp])
-            (registry-loop (assoc entries key entry) watchers mirror?)))))
+            (registry-loop (assoc entries key entry) watchers mirror? owner)))))
     ([:buffer-updated bp version view origin] (registry-loop (registry-mirror-push entries
                                                                bp version view origin)
-                                                watchers mirror?))
+                                                watchers mirror? owner))
     ([:rekey old name meta from r]
       (let (e (get entries old)
             key (registry-key name meta))
         (cond
-          (nil? e) (do (send from [:reply r nil]) (registry-loop entries watchers mirror?))
+          (nil? e) (do (send from [:reply r nil]) (registry-loop entries watchers mirror? owner))
           ;; another live document already has the new identity: refuse rather than let
           ;; two processes claim one file
           (and (not (= key old)) (registry-live entries key))
-            (do (send from [:reply r :taken]) (registry-loop entries watchers mirror?))
+            (do (send from [:reply r :taken]) (registry-loop entries watchers mirror? owner))
           else
             (do
               (registry-notify watchers [:registry-renamed old key name meta])
               (send from [:reply r key])
               (registry-loop (assoc (dissoc entries old) key (assoc e :name name :meta meta))
-                watchers mirror?)))))
+                watchers mirror? owner)))))
     ([:entries from r] (do
                          (send from
                            [:reply
@@ -162,22 +170,23 @@ mirror's log, and every entry would pin the texts it spans, a redacted secret am
                                (map (%map-pairs entries)
                                  (fn ([key e])
                                    {:key key :name (:name e) :proc (:proc e) :meta (:meta e)})))])
-                         (registry-loop entries watchers mirror?)))
+                         (registry-loop entries watchers mirror? owner)))
     ([:remove key from r] (let (e (get entries key))
                             (if (nil? e)
                               (do
                                 (send from [:reply r nil])
-                                (registry-loop entries watchers mirror?))
+                                (registry-loop entries watchers mirror? owner))
                               (do
                                 (demonitor (:mref e))
                                 (stop-buffer (:proc e))
                                 (registry-notify watchers [:registry-removed key :killed])
                                 (send from [:reply r (:proc e)])
-                                (registry-loop (dissoc entries key) watchers mirror?)))))
+                                (registry-loop (dissoc entries key) watchers mirror? owner)))))
     ([:watch pid] (registry-loop entries
                     (if (includes? watchers pid) watchers (cons pid watchers))
-                    mirror?))
-    ([:unwatch pid] (registry-loop entries (seq/reject watchers (fn (w) (= w pid))) mirror?))
+                    mirror?
+                    owner))
+    ([:unwatch pid] (registry-loop entries (seq/reject watchers (fn (w) (= w pid))) mirror? owner))
     ;; One of the directed processes died: it is no longer the process for its key. Without
     ;; a mirror the holders still have the text and one of them will share it again. With
     ;; one, the registry respawns it from the mirror at once — the document survives its
@@ -185,7 +194,7 @@ mirror's log, and every entry would pin the texts it spans, a redacted secret am
     ;; removed-then-added pair a re-share produces, so a holder relinks either way.
     ([:down _ pid _] (let (hit (registry-entry-by-proc entries pid))
                        (if (nil? hit)
-                         (registry-loop entries watchers mirror?)
+                         (registry-loop entries watchers mirror? owner)
                          (let ([key dead] hit)
                            (do
                              (registry-notify watchers [:registry-removed key :died])
@@ -197,13 +206,10 @@ mirror's log, and every entry would pin the texts it spans, a redacted secret am
                                  (do
                                    (registry-notify watchers
                                      [:registry-added key (:name dead) (:proc entry) (:meta dead)])
-                                   (registry-loop (assoc entries key entry) watchers mirror?)))
-                               (registry-loop (dissoc entries key) watchers mirror?)))))))
-    ([:stop from r] (do
-                      (doseq (entry (%map-pairs entries))
-                        (do (demonitor (:mref (second entry))) (stop-buffer (:proc (second entry)))))
-                      (send from [:reply r (count entries)])))
-    (_ (registry-loop entries watchers mirror?))))
+                                   (registry-loop (assoc entries key entry) watchers mirror? owner)))
+                               (registry-loop (dissoc entries key) watchers mirror? owner)))))))
+    ([:stop from r] (do (registry-stop-all entries) (send from [:reply r (count entries)])))
+    (_ (registry-loop entries watchers mirror? owner))))
 
 ;; ---- the API ------------------------------------------------------------------
 
@@ -214,10 +220,25 @@ that dies from it, under the same key, instead of dropping the entry — for a r
 must outlive its holders' copies (a daemon serving sessions that come and go). Without it
 the holders are the copies, and the first to re-share a died buffer brings the text.
 
-    (let (r (editor/buffer-registry/registry-start)) (editor/buffer-registry/registry-stop r) (pid? r))   ;=> true"
+`{:owner pid}` gives the registry a LIFETIME: it lives as long as `pid` does, and when `pid`
+ends — however it ends — it stops every document's process and ends too (ADR-593). Without
+one it lives until `registry-stop`. A registry need not be named or unique: one per served
+session, owned by the session's supervisor (`editor/serve/served-session`), keeps that
+session's buffers in processes that outlive its loop — a restarted loop adopts them — and
+goes with the session, where a runtime-wide name could hold only one and leak the rest.
+
+    (let (r (editor/buffer-registry/registry-start)) (editor/buffer-registry/registry-stop r) (pid? r))   ;=> true
+    (let (owner (spawn (receive (:go nil))) r (editor/buffer-registry/registry-start {:owner owner}) w (monitor r)) (send owner :go) (receive ([:down ^w _ _] :ended) (after 2000 :alive)))   ;=> :ended"
   ;; every frame asks the registry synchronously: a breakpoint must never park it
-  (let (mirror? (= true (get opts :mirror)))
-    (spawn (do (%process-flag :no-break true) (registry-loop {} '() mirror?)))))
+  (let (mirror? (= true (get opts :mirror))
+        owner (get opts :owner))
+    (spawn
+      (do
+        (%process-flag :no-break true)
+        ;; monitored from inside, before the first message: an owner already gone
+        ;; ends the registry at once rather than never
+        (when (pid? owner) (monitor owner))
+        (registry-loop {} '() mirror? (if (pid? owner) owner nil))))))
 
 (defn- registry-call (reg msg-fn &optional (timeout 2000))
   "Send `(msg-fn self ref)` to `reg` and wait for its `[:reply ref v]`; `:no-reply` after

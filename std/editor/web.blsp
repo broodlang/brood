@@ -113,25 +113,33 @@ A build of an app that runs in the tab copies these beside its bundle.
         (not-found)
         (response 200 {"Content-Type" mime} body)))))
 
-(defn- stream (sock id session)
+(defn- stream (sock id session supervisor)
   "Pump a tab's session to its event stream until the app quits, the session dies,
-or the tab goes away (its socket closes). Each message is one SSE event."
+or the tab goes away (its socket closes). Each message is one SSE event. `session` is the
+loop the tab's input goes to; `supervisor` the session it belongs to, once it said so
+(`[:session supervisor]`, ADR-593) — then only ITS death ends the stream, and a loop that
+died and was restarted under it (`[:attached next]`) takes the tab's input from then on."
   (receive
-    ([:frame f] (let (j (frame-json f)) (when j (sse/emit sock j "frame")) (stream sock id session)))
+    ([:attached next] (do (table/put (tabs) id next) (stream sock id next supervisor)))
+    ([:session given] (do (monitor given) (stream sock id session given)))
+    ([:down _ who _] (when (and supervisor (not (= who supervisor)))
+                       (stream sock id session supervisor)))
+    ([:frame f] (let (j (frame-json f))
+                  (when j (sse/emit sock j "frame"))
+                  (stream sock id session supervisor)))
     ([:texture tex rgba w h] (sse/emit sock (texture-json tex rgba w h) "texture")
-      (stream sock id session))
+      (stream sock id session supervisor))
     ([:texture-free tex] (sse/emit sock (json/encode {:tex tex}) "texture-free")
-      (stream sock id session))
+      (stream sock id session supervisor))
     ([:window o] (sse/emit sock (json/encode o) "window")
-      (stream sock id session))
+      (stream sock id session supervisor))
     ([:sound-data snd pcm rate channels] (sse/emit sock (sound-json snd pcm rate channels) "sound")
-      (stream sock id session))
+      (stream sock id session supervisor))
     ([:sound-free snd] (sse/emit sock (json/encode {:snd snd}) "sound-free")
-      (stream sock id session))
+      (stream sock id session supervisor))
     ([:bye] nil)
-    ([:down _ _ _] nil)
     ([:tcp-closed _] (send session [:detach]))
-    (_ (stream sock id session))))
+    (_ (stream sock id session supervisor))))
 
 (defn- events (req)
   "The `/events` handler: attach a fresh session for this tab, announce its id, then
@@ -148,7 +156,7 @@ session's `remote-display` sends to."
             (monitor session)
             (table/put (tabs) id session)
             (sse/emit sock (json/encode {:id id}) "hello")
-            (stream sock id session)
+            (stream sock id session nil)
             (table/delete (tabs) id)))
         (tcp/close sock)))))
 
