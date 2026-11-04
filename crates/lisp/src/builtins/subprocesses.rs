@@ -216,7 +216,7 @@ pub(super) fn pty_spawn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
         argv,
         cwd,
         env,
-        raw_args: _,
+        raw_args,
     } = spawn_spec(heap, "os/spawn-pty", args)?;
     let mut cols: u16 = 80;
     let mut rows: u16 = 24;
@@ -233,8 +233,16 @@ pub(super) fn pty_spawn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
         }
     }
     let owner = crate::process::self_pid();
-    match crate::host::subprocess::spawn_pty(&prog, &argv, cwd.as_deref(), &env, owner, cols, rows)
-    {
+    match crate::host::subprocess::spawn_pty(
+        &prog,
+        &argv,
+        raw_args,
+        cwd.as_deref(),
+        &env,
+        owner,
+        cols,
+        rows,
+    ) {
         Ok(id) => Ok(Value::subprocess(id)),
         Err(e) => Err(LispError::runtime(format!("os/spawn-pty {}: {}", prog, e))
             .with_code(crate::error::error_codes::SUBPROCESS_FAILED)),
@@ -253,8 +261,8 @@ pub(super) fn pty_resize(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
 }
 
 /// `(pty-mode handle)` — `{:echo bool :canonical bool}`, how a pty child's terminal reads
-/// input right now; nil when the child is gone (or off Unix), so a caller checking at a
-/// prompt need not race its exit.
+/// input right now; nil when the child is gone, so a caller checking at a prompt need not
+/// race its exit — and for a Windows ConPTY child, which has no termios to ask.
 pub(super) fn pty_mode(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_subprocess(heap, "os/pty-mode", arg(args, 0))?;
     match crate::host::subprocess::pty_input_mode(id) {

@@ -342,6 +342,8 @@ jobs:
         run: scripts/ci/platform-smoke.sh target/debug/nest.exe
       - name: gui key translation unit tests (AltGr is Ctrl+Alt here, ADR-541)
         run: cargo test -p brood --features gui --lib host::gui::backend::input
+      - name: ConPTY command-line quoting unit tests (KI-369)
+        run: cargo test -p brood --features gui --lib host::subprocess::conpty
 
   build-test:
     name: test

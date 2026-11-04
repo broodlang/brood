@@ -436,6 +436,7 @@ enum Stop {
 
 /// The longest one wait of `%os-cmd` runs before it looks for its caller's exit signal
 /// again — how long a killed caller's child can outlive it.
+#[cfg(unix)]
 const KILL_CHECK: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// What `%os-cmd` collects from a finished (or killed) child: its status, stdout,

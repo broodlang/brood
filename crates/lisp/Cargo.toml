@@ -381,9 +381,11 @@ libc = "0.2"
 # Windows: a Job Object per `os/cmd` / `os/spawn` child, so stopping it (C-g, a timeout, a
 # killed caller) stops every process it started — Windows's process group. Already in the
 # dependency tree (transitive), at this version. And the owner-only DACL `file/spit-private`
-# writes there (KI-365).
+# writes there (KI-365). And ConPTY, the pseudo-terminal `os/spawn-pty` drives there
+# (KI-369): pipes, a pseudoconsole, `CreateProcessW` with an attribute list, and the
+# loader lookup that finds the ConPTY functions on a Windows new enough to have them.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_LibraryLoader"] }
 
 # Non-wasm substrate: mimalloc (its C build + per-thread heaps don't cross to wasm,
 # where core/alloc.rs BACKEND falls back to the system allocator) and mio (its

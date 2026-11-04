@@ -1,0 +1,128 @@
+;; The pseudo-terminal in one PORTABLE file: `os/spawn-pty` and `os/shell-spawn-pty` asked
+;; the same way on Linux, macOS and Windows — a Unix pty there, a ConPTY pseudoconsole on
+;; Windows (KI-369, ADR-597). Each case runs the platform's own shell; where the platform
+;; answers differently (a size is `stty size` on Unix, `mode con` on Windows; the input
+;; mode is unknown on Windows), the case says both answers.
+;;
+;; proc_test.blsp keeps the Unix-only pty cases (termios modes, descriptors, `sh -i`);
+;; CI's Windows smoke runs this file (scripts/ci/platform-smoke.sh).
+
+(defmodule pty-test (:use test))
+
+(defn- windows? () (= (os/type) :windows))
+
+(defn- screen-text (acc)
+  ;; a ConPTY child's screen arrives as VT sequences (cursor moves between words), so
+  ;; the text is compared with them stripped, on every platform alike
+  (ansi/strip acc))
+
+(defn- pty-drain (child acc)
+  "Everything `child` writes until its handle closes or it falls quiet."
+  (receive
+    ([:proc ^child data] (pty-drain child (str acc data)))
+    ([:proc-closed ^child code] (screen-text acc))
+    (after test/*wait-ms* (screen-text acc))))
+
+(defn- pty-await (child acc want)
+  "Read `child` until `want` appears on its screen — an interactive child never exits."
+  (if (includes? (screen-text acc) want)
+    (screen-text acc)
+    (receive
+      ([:proc ^child data] (pty-await child (str acc data) want))
+      ([:proc-closed ^child code] (screen-text acc))
+      (after test/*wait-ms* (screen-text acc)))))
+
+;; A line that pauses about `seconds`, then runs `then`, in the platform's shell.
+(defn- after-pause (seconds then)
+  (if (windows?)
+    (str "ping -n " (inc seconds) " 127.0.0.1 >nul & " then)
+    (str "sleep " seconds "; " then)))
+
+(describe "pty: a child under a terminal"
+  :isolated (test "a line's output arrives as [:proc handle data]"
+    (let (child (os/shell-spawn-pty "echo in a pty"))
+      (is (includes? (pty-drain child "") "in a pty"))))
+
+  :isolated (test "a program and its arguments, through os/spawn-pty"
+    (let (child (if (windows?)
+                  (os/spawn-pty (first (os/shell)) ["/d" "/c" "echo two words"])
+                  (os/spawn-pty "sh" ["-c" "echo two words"])))
+      (is (includes? (pty-drain child "") "two words"))))
+
+  :isolated (test "stderr is the terminal too: one channel"
+    (let (child (os/shell-spawn-pty (if (windows?) "echo out& echo err 1>&2" "echo out; echo err >&2")))
+      (let (out (pty-drain child ""))
+        (is (includes? out "out"))
+        (is (includes? out "err")))))
+
+  :isolated (test "the exit code is reported, then the handle closes with it"
+    (let (child (os/shell-spawn-pty "exit 4"))
+      (assert= (receive ([:proc-exit ^child code] code) (after test/*wait-ms* :timeout)) 4)
+      (assert= (receive ([:proc-closed ^child code] code) (after test/*wait-ms* :timeout)) 4)))
+
+  :isolated (test ":env and :cwd reach the child"
+    (let (directory (temp-dir "brood-pty-")
+          _ (file/mkdir directory)
+          child (os/shell-spawn-pty (if (windows?) "echo %BROOD_PTY_VALUE%& cd" "echo $BROOD_PTY_VALUE; pwd")
+                  {:env {"BROOD_PTY_VALUE" "from-the-env"} :cwd directory})
+          out (pty-drain child ""))
+      (is (includes? out "from-the-env"))
+      (is (includes? out (path/basename directory))))))
+
+(describe "pty: a terminal has a size"
+  :isolated (test "the child is told the window it was given"
+    (let (child (os/shell-spawn-pty (if (windows?) "mode con" "stty size") {:cols 100 :rows 30})
+          out (pty-drain child ""))
+      ;; `stty size` prints "rows cols"; `mode con` lists Lines: and Columns:
+      (if (windows?)
+        (do (is (includes? out "100")) (is (includes? out "30")))
+        (assert= "30 100" (string/trim out)))))
+
+  :isolated (test "resize-pty changes it"
+    (let (child (os/shell-spawn-pty (after-pause 1 (if (windows?) "mode con" "stty size"))
+                  {:cols 80 :rows 24})
+          _ (os/resize-pty child 120 40)
+          out (pty-drain child ""))
+      (if (windows?)
+        (do (is (includes? out "120")) (is (includes? out "40")))
+        (assert= "40 120" (string/trim out)))))
+
+  :isolated (test "resizing a piped child is refused rather than silently ignored"
+    (let (child (os/shell-spawn (after-pause 5 "echo late")))
+      (assert= :refused (try (do (os/resize-pty child 80 24) :resized) (catch _ :refused)))
+      (os/close child))))
+
+(describe "pty: how the terminal reads input (ADR-570)"
+  :isolated (test "a fresh terminal echoes a line at a time on Unix; unknown (nil) on Windows"
+    (let (child (os/shell-spawn-pty (after-pause 5 "echo late"))
+          _ (receive (after 200 nil))
+          mode (os/pty-mode child)
+          password (os/pty-password? child))
+      (os/close child)
+      (if (windows?)
+        (do (assert= nil mode) (assert= nil password))
+        (do (assert= {:echo true :canonical true} mode) (assert= false password)))))
+
+  :isolated (test "a piped child is refused: it has no terminal"
+    (let (child (os/shell-spawn (after-pause 5 "echo late")))
+      (assert= :refused (try (do (os/pty-mode child) :answered) (catch _ :refused)))
+      (os/close child))))
+
+(describe "pty: an interactive shell, hosted"
+  :isolated (test "the platform's shell prompts, takes a line and answers it"
+    ;; the answer (42) is not in the line typed, so finding it is the shell's reply,
+    ;; never the echo of the input; RET is a carriage return on both
+    (let (child (if (windows?)
+                  (os/spawn-pty (first (os/shell)) [] {:cols 80 :rows 24})
+                  (os/spawn-pty "sh" ["-i"] {:cols 80 :rows 24}))
+          _ (os/write child (if (windows?) "set /a 6*7\r" "echo $((6*7))\r"))
+          out (pty-await child "" "42"))
+      (os/close child)
+      (is (includes? out "42"))))
+
+  :isolated (test "close ends a running child, and the handle finishes"
+    (let (child (os/shell-spawn-pty (after-pause 30 "echo never")))
+      (receive (after 200 nil))
+      (os/close child)
+      (is (not (= :timeout
+                 (receive ([:proc-closed ^child code] :closed) (after test/*wait-ms* :timeout))))))))
