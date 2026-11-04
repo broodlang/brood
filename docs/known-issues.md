@@ -68,6 +68,33 @@ the scheduler, dist, GC or the JIT — run it repeatedly.
 
 (An open entry's `## KI-N` section goes here until it is resolved.)
 
+## KI-356 — a plugin's bare-closure hook registered from a timer or a process it spawned cannot be taken back — OPEN 2026-11-04
+
+**Symptom.** bedit removes or updates a package while it runs and takes back everything the
+package registered (ADR-582; bedit's `packages/retire-package`). One kind of registration
+survives the removal: a hook the package registers AT RUN TIME as a bare closure (an
+anonymous `fn`, not a symbol naming one of its functions) from a context that is neither a
+module load nor one of the package's commands or hooks — a timer callback, or a process the
+package spawned. The row stays in its registry, holding a closure over code that is gone;
+calling it runs the old package's code. Not seen in use: bedit's own registries take hook
+SYMBOLS, and no installed package registers this way.
+
+**Cause.** Ownership has three sources and this write has none of them. The kernel journals a
+registry write's writer only while a module LOAD is open (KI-136, ADR-582); bedit claims a
+run-time write for the package whose command or hook is running (`ownership/with-symbol-
+claimant`), but a timer or a spawned process runs outside that dynamic extent; and the
+retirement backstop finds a row by what it NAMES — a symbol in the package's namespaces, a
+named function defined in its files — and a bare closure names nothing (`pr-str` gives
+`#<fn>`).
+
+**Fix.** Not yet. Either the runtime records which module DEFINED a closure (its code object
+knows its namespace; exposing it would let the backstop match an anonymous `fn` too), or a
+spawned process and a timer inherit the claimant of the code that created them (a process
+flag the scheduler carries into `spawn`, read by the claim).
+
+**Guard.** None yet; bedit's `tests/plugin_registry_test.blsp` covers every attributable
+kind.
+
 ## KI-334 — a served session whose loop dies takes its unsaved buffers with it — OPEN 2026-11-03
 
 **Symptom.** In bedit's local window, a loop that dies abnormally (a panic in a native call,
@@ -129,6 +156,7 @@ Each closed row's full section is `## KI-N` in [archive/known-issues-closed.md](
 
 | # | What | Status |
 |---|---|---|
+| KI-356 | **a plugin's bare-closure hook registered from a timer or a process it spawned cannot be taken back** — no load is open, no claimant is bound, and the closure names nothing the retirement backstop can match | **OPEN** — needs the runtime to say which module defined a closure, or a claimant spawned processes and timers inherit |
 | KI-334 | **a served session whose loop dies takes its unsaved buffers with it** — the local window's loop auto-saves and restarts over its buffers (bedit's lifeline); a `serve` session's loop dying just ends the session, its buffers in its model | **OPEN** — needs a supervised session in `editor/serve` and per-session buffer hosting in bedit (the buffer registry's runtime-wide name blocks it); found with ADR-539 |
 | KI-336 | **a non-Latin keyboard layout lost every Control and Meta shortcut** — Control+A under a Russian layout arrived as `:ctrl-ф`; macOS Option was always Meta, so a layout's Option characters could not be typed; a dead key with Control or Alt delivered nothing | ✅ **FIXED 2026-11-03** — ADR-541: a chord whose character is not Latin is read by the key's US position, `{:option-meta …}` picks which Option is Meta (left by default, the right one composing), a dead key in a chord is its accent. Guard: `host::gui::backend::input::adr_541_tests` (red with the fallback removed) |
 | KI-316 | **the doc catalogue filed `match` under `case` and three names under `:other`, after a prelude edit** — `doc_catalog_test` red on a tree whose only prelude change added 28 lines, while an older build ran beside it | ✅ **FIXED 2026-11-03** — every Brood wrote its prelude to one shared `~/.cache/brood/prelude.blsp`, so whichever ran last owned it and a newer build's def-sites pointed into an older text; `doc-catalog` bakes the section headers it reads from that file into the stdlib image, and `nest stdimage` rebuilt from the image it was replacing, so the wrong headers survived every rebuild. The copy is now keyed by the prelude's text (`prelude-source-<hash>/prelude.blsp`) and `nest stdimage` builds from source. Guard: `boot::prelude_copy_tests` (red with the unkeyed name) |
