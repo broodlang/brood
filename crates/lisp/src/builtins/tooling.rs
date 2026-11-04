@@ -225,7 +225,11 @@ pub(super) fn form_pos(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResu
 /// / docs/lsp.md). Takes a symbol, so quote it: `(source-location 'foo)`.
 pub(super) fn source_location(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
     let name = expect_symbol(heap, "reflect/source-location", arg(args, 0))?;
-    match heap.def_site(name) {
+    // Rooted as `declared-signature` roots it (ADR-560): inside project bedit,
+    // `keyhelp/ed-first-line` is `bedit/keyhelp/ed-first-line`, and the def site is recorded
+    // under the full name — so a query by the name the code itself writes answered nil.
+    let rooted = rooted_name(heap, name);
+    match heap.def_site(rooted).or_else(|| heap.def_site(name)) {
         Some(loc) => {
             let file = heap.alloc_string(&loc.file);
             Ok(heap.alloc_vector(vec![
@@ -279,7 +283,12 @@ pub(super) fn type_signature(args: &[Value], _env: EnvId, heap: &mut Heap) -> Li
     let Some(sym) = existing_name_arg(heap, "reflect/type-signature", arg(args, 0))? else {
         return Ok(Value::nil());
     };
-    match crate::types::check::signature_string(heap, sym) {
+    // Rooted first, as `declared-signature` is (ADR-560): `model/f` inside a project is the
+    // project's `bedit/model/f`.
+    let rooted = rooted_name(heap, sym);
+    match crate::types::check::signature_string(heap, rooted)
+        .or_else(|| crate::types::check::signature_string(heap, sym))
+    {
         Some(signature) => Ok(heap.alloc_string(&signature)),
         None => Ok(Value::nil()),
     }
@@ -574,8 +583,16 @@ pub(super) fn doc(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
 /// then `& rest`. `nil` for a non-function (or a primitive without recorded
 /// params). Feeds signature help / hover.
 /// `(reflect/arglists f)` — one parameter list per arm (see `arglist`, which shows the last).
+/// The function a reflective question is about: the ORIGINAL when `f` is a contract shim
+/// (ADR-381). A `sig`'d global holds a shim while contracts are armed — under `nest run` and
+/// `nest test`, which is where an editor's help asks — and the shim's own parameters are the
+/// template's `(a b)`, not the author's (ADR-560).
+fn unshimmed(heap: &Heap, f: Value) -> Value {
+    super::contracts::shim_original(heap, f).unwrap_or(f)
+}
+
 pub(super) fn arglists(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
-    let id = match arg(args, 0) {
+    let id = match unshimmed(heap, arg(args, 0)) {
         Value::Fn(id) | Value::Macro(id) => id,
         Value::Native(_) => {
             let one = arglist(args, _env, heap)?;
@@ -603,7 +620,7 @@ pub(super) fn arglists(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResu
 }
 
 pub(super) fn arglist(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
-    let id = match arg(args, 0) {
+    let id = match unshimmed(heap, arg(args, 0)) {
         Value::Fn(id) | Value::Macro(id) => id,
         // A primitive carries its param names as a flat `&'static` list (incl. any
         // `&`/`&optional` markers, already in order) — hand them back as symbols.
