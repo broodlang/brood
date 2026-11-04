@@ -848,8 +848,10 @@ thing a long-lived image is most likely to be wrong about."
       (fn (f) (not (= (get project/*loaded-mtimes* f) (or (file/mtime f) 0)))))))
 
 (defn reload-changed (root)
-  "Reload every project source under `root` that has changed since this image loaded it,
-and answer the paths reloaded (empty when the image is already current).
+  "Reload every project source under `root` that has changed since this image loaded it, in
+load order (`reflect/source-load-order`: a module after the ones it requires, so a changed
+macro is in place before the file that expands it), and answer the paths reloaded (empty
+when the image is already current).
 
 What a long-lived image calls before it acts on the project's behalf. A no-op costs one
 `stat` per source file — about a millisecond for a sixty-file project — and the common
@@ -859,7 +861,9 @@ The example is the no-op, because it is the only answer that does not depend on 
 machine: a root holding no project sources has nothing to reload.
 
     (project/reload-changed \"/nonexistent\")   ;=> []"
-  (let (changed (changed-sources root))
+  ;; in load order (`reflect/source-load-order`): a changed macro is defined again before
+  ;; the changed file that expands it is, so one reload is enough
+  (let (changed (reflect/source-load-order (changed-sources root)))
     (doseq (f changed)
       ;; the load-time requires belong to the root section, exactly as in `load-sources`
       (binding (*require-parent* "") (reflect/load f))

@@ -481,6 +481,38 @@
 ;; has to answer to re-run only the forms an edit could affect: without it, "everything
 ;; below the edit" is the only correct answer, and a buffer of twenty forms costs twenty
 ;; evaluations per keystroke-settling.
+;; source-load-order — several changed files, in the order a fresh load would run them
+(describe "source-load-order"
+  (defn- slo-files (sources)
+    ;; each `[name text]` written to a fresh dir; the paths, in the given order
+    (let (dir (test/temp-dir "slo-"))
+      (file/mkdir dir)
+      (seq/mapv sources
+        (fn ([name text])
+          (let (path (path/join dir (str name ".blsp"))) (do (file/spit path text) path))))))
+
+  (test "a module comes after the ones it uses, moved up to just before it"
+    (let ([caller loose macros] (slo-files [["caller"
+                                              "(defmodule slo/caller (:use slo/macros))\n(defn f () (m))"]
+                                             ["loose" "(defmodule slo/loose)\n(defn g () 1)"]
+                                             ["macros" "(defmodule slo/macros)\n(defmacro m () 1)"]]))
+      (assert= (reflect/source-load-order [caller loose macros]) [macros caller loose])))
+  (test "a qualified reference requires its module too"
+    (let ([caller macros] (slo-files [["caller"
+                                        "(defmodule slq/caller)\n(defn f () (slq/macros/m))"]
+                                       ["macros" "(defmodule slq/macros)\n(defmacro m () 1)"]]))
+      (assert= (reflect/source-load-order [caller macros]) [macros caller])))
+  (test "a chain is followed through, and a cycle still places every file once"
+    (let ([a b c] (slo-files [["a" "(defmodule slc/a (:use slc/b))"]
+                               ["b" "(defmodule slc/b (:use slc/c))"]
+                               ["c" "(defmodule slc/c (:use slc/a))"]]))
+      (assert= (count (reflect/source-load-order [a b c])) 3)
+      (assert= (into #{} (reflect/source-load-order [a b c])) #{a b c}))
+    (let ([a b c] (slo-files [["a" "(defmodule sld/a (:use sld/b))"]
+                               ["b" "(defmodule sld/b (:use sld/c))"]
+                               ["c" "(defmodule sld/c)"]]))
+      (assert= (reflect/source-load-order [a b c]) [c b a]))))
+
 (describe "source-deps"
   (defn deps-of (src) (reflect/source-deps src))
 
