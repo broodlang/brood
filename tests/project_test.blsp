@@ -1282,6 +1282,8 @@
     (let (root (pt-fixture)
           _ (file/spit (path/join root "src/aaa.blsp") "")
           _ (file/spit (path/join root "src/zzz.blsp") "")
+          ;; the walk reads the source paths `project/setup` binds
+          _ (project/setup root)
           walked (seq/mapv (seq/filter (project/source-files root)
                              (fn (f)
                                (or (string/ends-with? f "aaa.blsp")
