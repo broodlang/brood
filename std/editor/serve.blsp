@@ -478,6 +478,41 @@ still come after that; take the first `[:clipboard ref …]` for a ref and ignor
           (timer/send-after ms (self) [:clipboard asked nil])
           asked)))))
 
+;; The PRIMARY selection (ADR-553) crosses the link the same way (ADR-562): what the user
+;; highlights in a served app is the CLIENT machine's PRIMARY, and a middle click pastes the
+;; client's — three more messages, the clipboard's shape with its own tags:
+;;
+;;   session -> client  [:primary-set text]          own the client's PRIMARY with `text`
+;;   session -> client  [:primary-get session ref]   what is in it?
+;;   client -> session  [:primary ref text]           the answer (`text` nil when empty)
+
+(defn client-primary-set (text)
+  "Own the PRIMARY selection of the machine this served session's client runs on with `text`
+(ADR-562) — what a drag highlights there, pasteable by a middle click in the user's other
+apps — and return `text`; nil, sending nothing, outside a served session or while it is
+parked. A cast, as [[client-clipboard-set]].
+
+    (editor/serve/client-primary-set \"hello\")   ;=> nil"
+  (let (client (served-client))
+    (if (nil? client) nil (do (send client [:primary-set text]) text))))
+
+(defn client-primary-ask (&optional (ms serve-clipboard-ms))
+  "Ask the machine this served session's client runs on what its PRIMARY selection holds
+(ADR-562), without waiting: the answer reaches the app's `update` as `[:primary ref text]`,
+`text` nil when it is empty, not text, or the machine has none. Returns `ref`; nil, asking
+nothing, outside a served session and while it is parked. Answered for after `ms` as
+[[client-clipboard-ask]] is: take the first `[:primary ref …]` for a ref.
+
+    (editor/serve/client-primary-ask)   ;=> nil"
+  (let (client (served-client))
+    (if (nil? client)
+      nil
+      (let (asked (ref))
+        (do
+          (send client [:primary-get (self) asked])
+          (timer/send-after ms (self) [:primary asked nil])
+          asked)))))
+
 (defn- serve-resumes? (opts identity)
   "Whether a session for `identity` parks when its client is lost: the server resumes
 (`:resume-ms`) and the client said who it is — an anonymous client's session could be
@@ -662,31 +697,53 @@ frame taken so far, nil at the start."
     ([:clipboard-get from asked] (do
                                    (attach-clipboard-answer editor/ui/*term-display* from asked)
                                    (attach-drain peer latest)))
+    ;; and its highlight this machine's PRIMARY (ADR-562)
+    ([:primary-set text] (do
+                           (attach-clipboard-set editor/ui/*term-display* text :primary)
+                           (attach-drain peer latest)))
+    ([:primary-get from asked] (do
+                                 (attach-clipboard-answer editor/ui/*term-display*
+                                   from asked :primary)
+                                 (attach-drain peer latest)))
     ([:bye] :closed)
     ([:nodedown ^peer] :closed)
     ([:down _ _ _] :closed)
     (after 0 (do (when (not (nil? latest)) (term/draw latest)) :open))))
 
-(defn- attach-clipboard-set (display text)
-  "Put the session's `text` on THIS machine's clipboard (ADR-539): through `display`'s
-`:clipboard-set` when it has one, else `os/clipboard-set`. A clipboard that fails costs the
-copy, never the client loop. Returns nil."
-  (let (setter (get display :clipboard-set))
+(def- attach-selections
+  ;; Per selection a session can reach on its client's machine: the display's entries for
+  ;; it, the OS pair it falls back to, and the tag its answer carries (ADR-539, ADR-562)
+  {:clipboard {:set :clipboard-set :get :clipboard-get :answer :clipboard}
+   :primary {:set :primary-set :get :primary-get :answer :primary}})
+
+(defn- attach-os-set (selection text)
+  ;; the OS side of `selection` — a literal call each, so the checker sees both
+  (if (= selection :primary) (os/primary-set text) (os/clipboard-set text)))
+
+(defn- attach-os-get (selection)
+  (if (= selection :primary) (os/primary-get) (os/clipboard-get)))
+
+(defn- attach-clipboard-set (display text &optional (selection :clipboard))
+  "Put the session's `text` in THIS machine's `selection` — `:clipboard` (ADR-539) or
+`:primary` (ADR-562): through `display`'s `:clipboard-set` / `:primary-set` when it has one,
+else the OS's. A selection that fails costs the copy, never the client loop. Returns nil."
+  (let (setter (get display (:set (get attach-selections selection))))
     (check-allow :discarded-catch
-      (try (if setter (setter text) (os/clipboard-set text)) (catch _ nil))))
+      (try (if setter (setter text) (attach-os-set selection text)) (catch _ nil))))
   nil)
 
-(defn- attach-clipboard-answer (display from asked)
-  "Answer the session `from`'s `[:clipboard-get from asked]` with this machine's clipboard
-text (`[:clipboard asked text]`, `text` nil when it is empty or not text): `display`'s
-`:clipboard-get` when it has one, else `os/clipboard-get`. Read by a process of its own,
-which answers when the read is done: the clipboard's owner can be slow to hand its text over,
-and the client loop must go on painting and shipping keys meanwhile — the session never waits
-for the answer anyway (`client-clipboard-ask`). Always answers. Returns nil."
-  (let (getter (get display :clipboard-get))
+(defn- attach-clipboard-answer (display from asked &optional (selection :clipboard))
+  "Answer the session `from`'s ask for THIS machine's `selection` — `[:clipboard asked text]`
+or `[:primary asked text]`, `text` nil when it is empty or not text: `display`'s
+`:clipboard-get` / `:primary-get` when it has one, else the OS's. Read by a process of its
+own, which answers when the read is done: a selection's owner can be slow to hand its text
+over, and the client loop must go on painting and shipping keys meanwhile — the session never
+waits for the answer anyway (`client-clipboard-ask`). Always answers. Returns nil."
+  (let (row (get attach-selections selection)
+        getter (get display (:get row)))
     (spawn (let (text (check-allow :discarded-catch
-                        (try (if getter (getter) (os/clipboard-get)) (catch _ nil))))
-             (send from [:clipboard asked (if (string? text) text nil)]))))
+                        (try (if getter (getter) (attach-os-get selection)) (catch _ nil))))
+             (send from [(:answer row) asked (if (string? text) text nil)]))))
   nil)
 
 (defn- attach-ship-key (session key)
@@ -817,6 +874,13 @@ backlog (`attach-display-backlog`), which paints only the newest."
     ([:clipboard-get from asked] (do
                                    (attach-clipboard-answer display from asked)
                                    (attach-display-loop peer session display)))
+    ;; and its highlight this machine's PRIMARY (ADR-562)
+    ([:primary-set text] (do
+                           (attach-clipboard-set display text :primary)
+                           (attach-display-loop peer session display)))
+    ([:primary-get from asked] (do
+                                 (attach-clipboard-answer display from asked :primary)
+                                 (attach-display-loop peer session display)))
     ([:bye] nil)
     ([:nodedown ^peer] nil)
     ([:down _ _ _] nil)
@@ -927,7 +991,9 @@ the optional identity map (see `attach`).
 The session's clipboard is this machine's (ADR-539): what it sets (`client-clipboard-set`)
 lands here and what it asks for (`client-clipboard-ask`) is read here — through `display`'s
 `:clipboard-set` (a 1-arg fn) and `:clipboard-get` (0-arg, the text or nil) when it has
-them, else the OS clipboard.
+them, else the OS clipboard. Its PRIMARY selection likewise (ADR-562): `client-primary-set` /
+`client-primary-ask`, through `:primary-set` / `:primary-get`, else `os/primary-set` /
+`os/primary-get`.
 
     (editor/serve/attach-display \"editor@host:4000\" (editor/ui/gui-display))   ;~> returns when the app quits or the link drops"
   (node/start (attach-gen-name) "127.0.0.1:0" (or cookie (node/cookie)))
