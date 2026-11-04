@@ -75,7 +75,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(1),
         Sig::new(vec![string], nil_ty),
         &["path"],
-        "Create a directory and any missing parents (like mkdir -p), the directory itself owner-only (0700 on Unix) whether it was made now or was already there — where an app keeps what other users must not read (an editor's sidecars of files edited as root, ADR-588), as file/spit-private is for a file.\n\n    (file/mkdir-private \"state/auto-save\")   ;~> nil, state/auto-save made, mode 0700",
+        "Create a directory and any missing parents (like mkdir -p), the directory itself owner-only (0700 on Unix, a protected one-entry DACL its contents inherit on Windows) whether it was made now or was already there — where an app keeps what other users must not read (an editor's sidecars of files edited as root, ADR-588), as file/spit-private is for a file.\n\n    (file/mkdir-private \"state/auto-save\")   ;~> nil, state/auto-save made, mode 0700",
         make_private_dir,
     );
     primitives.def(
@@ -374,7 +374,7 @@ pub(super) fn make_dir(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
 }
 
 /// `(file/mkdir-private path)` — `file/mkdir`, then the directory made owner-only (0700 on
-/// Unix; elsewhere just made). Returns nil.
+/// Unix; on Windows a protected one-entry DACL its contents inherit, KI-365). Returns nil.
 pub(super) fn make_private_dir(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "file/mkdir-private", arg(args, 0))?;
     make_dir(args, env, heap)?;
@@ -386,7 +386,12 @@ pub(super) fn make_private_dir(args: &[Value], env: EnvId, heap: &mut Heap) -> L
                 .with_code(crate::error::error_codes::FILE_IO)
         })?;
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    crate::host::owner_only::restrict_to_owner(std::path::Path::new(&path), true).map_err(|e| {
+        LispError::runtime(format!("file/mkdir-private: {}: {}", path, e))
+            .with_code(crate::error::error_codes::FILE_IO)
+    })?;
+    #[cfg(not(any(unix, windows)))]
     let _ = path;
     Ok(Value::nil())
 }
