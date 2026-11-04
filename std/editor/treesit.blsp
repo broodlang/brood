@@ -1369,10 +1369,12 @@ without opening every library to ask.
 
 (defn grammar-info (lang:keyword -> map)
   "What the grammar `lang` parses with contains (ADR-583): `{:lang :abi :version :name
-:source :named :anonymous :fields}` — its visible node kinds (`:named`, `:anonymous`) and
-field names (`:fields`) as keyword sets, its tree-sitter ABI, its own version and name (nil
-before ABI 15, which did not record them) and the library it came from (`:source`, or
-`:built-in`). Loads a declared grammar, as its first parse would; raises when the runtime
+:source :loaded-via :named :anonymous :fields}` — its visible node kinds (`:named`,
+`:anonymous`) and field names (`:fields`) as keyword sets, its tree-sitter ABI, its own version
+and name (nil before ABI 15, which did not record them), the library it came from (`:source`,
+or `:built-in`) and how that was opened (`:loaded-via`: `:beside` or `:cache`, a copy named for
+its content, so a library rebuilt in place loads as the new build; `:in-place` when no copy
+could be made, and a rebuilt library may then stay the old one until a restart). Loads a declared grammar, as its first parse would; raises when the runtime
 has none for `lang`. What `grammar-problems` checks a language's tables against.
 
     (try (editor/treesit/grammar-info :no-grammar-has-this-name) (catch _ :none))   ;=> :none"
