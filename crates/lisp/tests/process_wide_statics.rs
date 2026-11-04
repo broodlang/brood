@@ -79,6 +79,9 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     // The terminal's input forwarder (ADR-491): one thread reading the one tty this OS process
     // has, delivering to whichever process asked for its input.
     ("builtins/terminal/native.rs", "FORWARDER", OneMachine),
+    // What the one tty shows now, cell by cell, and its colour depth (ADR-586): the next
+    // frame writes only what differs from it, whichever runtime draws.
+    ("builtins/terminal/native.rs", "TERMINAL_SCREEN", OneMachine),
     // The net reactor multiplexes every socket in the OS process on one thread.
     ("host/net.rs", "STARTING", OneMachine),
     // One audio thread owns the output device for the whole OS process.

@@ -9,6 +9,7 @@ use crate::builtins::numeric::num_to_f64;
 
 mod fragments;
 mod keyboard;
+mod screen;
 // The thin crossterm seam: enter/leave the alternate screen, read keys, and
 // paint a *frame* — a Brood vector of render ops. The protocol's meaning is
 // data (the ops); these primitives are the in-process frontend that interprets
@@ -33,15 +34,20 @@ pub(in crate::builtins) fn term_enter(_: &[Value], _: EnvId, _: &mut Heap) -> Li
     // seam), so click/scroll reach `term-poll`. It costs terminal text-selection
     // while active — standard for a TUI, and only for the duration of the UI. Focus
     // reports (`CSI ?1004h`) too: the terminal says when it gains and loses the keyboard,
-    // delivered as a window's `:focus-in` / `:blur` (ADR-536), off again on leave.
+    // delivered as a window's `:focus-in` / `:blur` (ADR-536), off again on leave. And
+    // bracketed paste (`CSI ?2004h`, ADR-586): a paste arrives as ONE `[:paste text]`, not as
+    // keys an editor would indent, pair and complete one at a time.
     crossterm::execute!(
         std::io::stdout(),
         EnterAlternateScreen,
         EnableMouseCapture,
         EnableFocusChange,
+        crossterm::event::EnableBracketedPaste,
         Hide
     )
     .map_err(term_err)?;
+    // the alternate screen starts blank: the first frame is written whole
+    invalidate_screen();
     // The kitty keyboard protocol, when the terminal speaks it: repeats and releases are
     // reported, so a held key stops with the hand (`keyboard`). Pushed on the alternate
     // screen (each screen has its own flag stack), only here — the inline REPL seam keeps
@@ -57,11 +63,14 @@ pub(in crate::builtins) fn term_leave(_: &[Value], _: EnvId, _: &mut Heap) -> Li
     use crossterm::event::{DisableFocusChange, DisableMouseCapture};
     use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
     keyboard::restore();
+    invalidate_screen();
     crossterm::execute!(
         std::io::stdout(),
+        crossterm::cursor::SetCursorStyle::DefaultUserShape,
         Show,
         DisableMouseCapture,
         DisableFocusChange,
+        crossterm::event::DisableBracketedPaste,
         LeaveAlternateScreen
     )
     .map_err(term_err)?;
@@ -79,11 +88,14 @@ pub fn restore_terminal() {
     use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
     // before leaving the alternate screen, whose flag stack the push went on
     keyboard::restore();
+    invalidate_screen();
     let _ = crossterm::execute!(
         std::io::stdout(),
+        crossterm::cursor::SetCursorStyle::DefaultUserShape,
         Show,
         DisableMouseCapture,
         DisableFocusChange,
+        crossterm::event::DisableBracketedPaste,
         LeaveAlternateScreen
     );
     let _ = disable_raw_mode();
@@ -151,8 +163,8 @@ pub(in crate::builtins) fn term_poll(args: &[Value], _: EnvId, heap: &mut Heap) 
 
 /// One poll's yield as the app sees it — the same value `term-poll` answers and the input
 /// forwarder delivers: a key, `[:key-up press]`, a `[:mouse …]`, `:focus-in` / `:blur` (a
-/// window's spelling, so an app handles both frontends' focus alike), or nil for an event
-/// it does not report.
+/// window's spelling, so an app handles both frontends' focus alike), `[:resize cols rows]`
+/// (a window's too) or `[:paste text]` — or nil for a mouse event or key it does not report.
 fn polled_value(heap: &mut Heap, polled: keyboard::Polled) -> Value {
     match polled {
         keyboard::Polled::Key(keyboard::KeyDelivery::Press(event)) => key_to_value(heap, event),
@@ -160,7 +172,19 @@ fn polled_value(heap: &mut Heap, polled: keyboard::Polled) -> Value {
         keyboard::Polled::Mouse(mouse) => mouse_to_value(heap, mouse),
         keyboard::Polled::Focus(true) => value::kw("focus-in"),
         keyboard::Polled::Focus(false) => value::kw("blur"),
-        keyboard::Polled::Other => Value::nil(),
+        keyboard::Polled::Resize(cols, rows) => {
+            // what the terminal showed is gone with the old size: the next frame repaints it
+            invalidate_screen();
+            heap.alloc_vector(vec![
+                value::kw("resize"),
+                Value::int(cols as i64),
+                Value::int(rows as i64),
+            ])
+        }
+        keyboard::Polled::Paste(text) => {
+            let text = heap.alloc_string(&text);
+            heap.alloc_vector2(value::kw("paste"), text)
+        }
     }
 }
 
@@ -336,10 +360,6 @@ fn named_kw(base: &'static str, k: &crossterm::event::KeyEvent) -> Value {
     ))
 }
 
-/// `(term-draw frame)` — paint a frame: a vector of op vectors `[:clear]`,
-/// `[:text row col str]`, `[:text row col str face]`, `[:cursor row col]`.
-/// Unknown ops are skipped (forward-compatible protocol). Queues all ops then
-/// flushes once, so a frame paints without intermediate tearing.
 /// Write rendered terminal bytes (escape sequences) to stdout — unless an MCP
 /// stdout-capture is active on this thread, in which case divert them into the
 /// capture buffer instead. During a `nest mcp` `tools/call`, stdout *is* the
@@ -392,87 +412,214 @@ pub(in crate::builtins) fn frame_ops(
     Ok(out)
 }
 
-pub(in crate::builtins) fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use crossterm::cursor::MoveTo;
-    use crossterm::style::{Attribute, Print, ResetColor, SetAttribute};
-    use crossterm::terminal::{Clear, ClearType};
+/// What the terminal shows now, as the last `term-draw` left it, and what its cursor is doing
+/// (ADR-586) — so the next frame writes only the cells that changed. `None` until the first
+/// frame after `term-enter` (and after `term-invalidate`, or a resize): that frame clears the
+/// screen and writes every cell. One per OS process, as the terminal is.
+struct TerminalScreen {
+    shown: Option<screen::Screen>,
+    cursor: screen::CursorState,
+    /// The colour depth set by `term-colors`, overriding what `$COLORTERM` / `$TERM` say.
+    depth: Option<screen::ColorDepth>,
+    /// The default face `term-bg` set: what `[:clear]` fills with, and the colours of a face
+    /// that names none — a window's background (`gui/bg`) for the terminal.
+    default_face: screen::Style,
+}
 
+static TERMINAL_SCREEN: std::sync::Mutex<TerminalScreen> = std::sync::Mutex::new(TerminalScreen {
+    shown: None,
+    cursor: screen::CursorState {
+        visible: false,
+        shape: None,
+    },
+    depth: None,
+    default_face: screen::Style {
+        fg: None,
+        bg: None,
+        bold: false,
+        italic: false,
+        underline: screen::Underline::None,
+        underline_colour: None,
+        reverse: false,
+    },
+});
+
+fn terminal_screen() -> std::sync::MutexGuard<'static, TerminalScreen> {
+    TERMINAL_SCREEN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Forget what the terminal shows, so the next frame repaints it whole: on entering and
+/// leaving the full screen, on a resize, and when something else may have written to it.
+///
+/// `try_lock`, never `lock`: [`restore_terminal`] calls this from the panic path, which may
+/// run on the very thread whose `term-draw` holds the lock — waiting there would hang the
+/// crash. A screen it cannot take is one a draw is replacing anyway.
+pub(in crate::builtins) fn invalidate_screen() {
+    let mut state = match TERMINAL_SCREEN.try_lock() {
+        Ok(state) => state,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return,
+    };
+    state.shown = None;
+    // `term-enter` hid the cursor; so does every leave path's restore before the next enter
+    state.cursor = screen::CursorState::default();
+}
+
+/// The colour depth frames are written at: the one `term-colors` set, else what the
+/// environment says ([`screen::ColorDepth::detect`]).
+fn color_depth(state: &TerminalScreen) -> screen::ColorDepth {
+    state.depth.unwrap_or_else(|| {
+        screen::ColorDepth::detect(
+            std::env::var("COLORTERM").ok().as_deref(),
+            std::env::var("TERM").ok().as_deref(),
+        )
+    })
+}
+
+/// A face map as the [`screen::Style`] its cells are drawn in — the same reading of `:fg`,
+/// `:bg`, `:bold`, `:italic`, `:underline` (a flag, a colour, or `{:color c :style :wave}`)
+/// and `:reverse` as [`apply_face`]. A non-map face is the terminal's default style.
+fn style_of(heap: &Heap, face: Value) -> screen::Style {
+    let Value::Map(id) = face else {
+        return screen::Style::default();
+    };
+    let k = &*FACE_KEYS;
+    let colour = |key| {
+        heap.map_get(id, key)
+            .and_then(|v| color_of(heap, v))
+            .and_then(screen::Colour::of)
+    };
+    let (underline, underline_colour) = match heap
+        .map_get(id, k.underline)
+        .filter(|v| face_truthy(*v))
+    {
+        None => (screen::Underline::None, None),
+        Some(Value::Map(spec)) => {
+            let wave = matches!((heap.map_get(spec, k.style), k.wave), (Some(Value::Keyword(a)), Value::Keyword(b)) if a == b);
+            (
+                if wave {
+                    screen::Underline::Curly
+                } else {
+                    screen::Underline::Straight
+                },
+                heap.map_get(spec, k.color)
+                    .and_then(|v| color_of(heap, v))
+                    .and_then(screen::Colour::of),
+            )
+        }
+        Some(Value::Bool(_)) => (screen::Underline::Straight, None),
+        Some(other) => (
+            screen::Underline::Straight,
+            color_of(heap, other).and_then(screen::Colour::of),
+        ),
+    };
+    screen::Style {
+        fg: colour(k.fg),
+        bg: colour(k.bg),
+        bold: heap.map_get(id, k.bold).is_some_and(face_truthy),
+        italic: heap.map_get(id, k.italic).is_some_and(face_truthy),
+        underline,
+        underline_colour,
+        reverse: heap.map_get(id, k.reverse).is_some_and(face_truthy),
+    }
+}
+
+/// `(term-draw frame)` — paint a frame: a vector of op vectors `[:clear]`,
+/// `[:text row col str]`, `[:text row col str face]`, `[:rect row col w h face]`,
+/// `[:cursor row col]` / `[:cursor row col style]`, `[:scroll-region dy ops]` (its ops drawn
+/// in place). Unknown ops are skipped (forward-compatible protocol). The frame is painted
+/// over the screen the terminal shows ([`TERMINAL_SCREEN`]) and only the cells it changed
+/// are written, in one flush (ADR-586). The cursor shows where the frame's last `[:cursor]`
+/// puts it — a `:hollow` one (an unfocused pane's) only when there is no other — and is
+/// hidden in a frame with none.
+pub(in crate::builtins) fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let parsed = frame_ops(heap, arg(args, 0), "%term-draw", "vector (a frame)")?;
+    let (cols, rows) = crossterm::terminal::size().map_err(term_err)?;
+    let mut state = terminal_screen();
+    let mut next = match &state.shown {
+        Some(shown) if shown.cols == cols && shown.rows == rows => shown.clone(),
+        _ => screen::Screen::new(cols, rows),
+    };
+    next.cursor = None;
+    paint_ops(heap, parsed, &mut next, state.default_face)?;
+    let depth = color_depth(&state);
+    let mut out: Vec<u8> = Vec::new();
+    let TerminalScreen { shown, cursor, .. } = &mut *state;
+    screen::render(shown.as_ref(), &next, depth, cursor, &mut out);
+    *shown = Some(next);
+    drop(state);
+    if !out.is_empty() {
+        write_term_bytes(&out).map_err(term_err)?;
+    }
+    Ok(Value::nil())
+}
+
+/// Paint parsed frame ops onto `target` (see [`term_draw`]), a face's missing colours taken
+/// from `default_face` (`term-bg`).
+fn paint_ops(
+    heap: &Heap,
+    parsed: Vec<(value::Symbol, Vec<Value>)>,
+    target: &mut screen::Screen,
+    default_face: screen::Style,
+) -> Result<(), LispError> {
+    use crate::host::gui::CursorStyle;
     let clear_t = value::intern("clear");
     let text_t = value::intern("text");
     let cursor_t = value::intern("cursor");
     let rect_t = value::intern("rect");
     let scroll_region_t = value::intern("scroll-region");
-    // Use a deque so scroll-region inner ops can be prepended and processed in order.
+    // a scroll region's ops are drawn in place, in order: a deque they are prepended to
     let mut queue: std::collections::VecDeque<(value::Symbol, Vec<Value>)> = parsed.into();
-    let mut out: Vec<u8> = Vec::new();
+    let mut hollow: Option<screen::Cursor> = None;
+    let mut solid: Option<screen::Cursor> = None;
     while let Some((tag, parts)) = queue.pop_front() {
-        let (tag, parts) = (tag, parts);
         if tag == clear_t {
-            crossterm::queue!(out, Clear(ClearType::All)).map_err(term_err)?;
+            target.clear(default_face);
         } else if tag == rect_t {
-            // [:rect row col w h face] — fill the block by printing `w` spaces in the
-            // face on each of the `h` rows, so the face `:bg` (or `:reverse`) shows.
             let row = expect_int(heap, "%term-draw", arg(&parts, 1))?;
             let col = expect_int(heap, "%term-draw", arg(&parts, 2))?;
-            // `w`/`h` are attacker-reachable ints that size an allocation and a loop,
-            // so they get `clamp_extent`, not a bare `.max(0)`: `" ".repeat(w)` with a
-            // huge `w` is an allocator abort, which no `try` can catch (see MAX_EXTENT).
-            let w = clamp_extent(expect_int(heap, "%term-draw", arg(&parts, 3))?) as usize;
-            let h = clamp_extent(expect_int(heap, "%term-draw", arg(&parts, 4))?) as i64;
+            // `w`/`h` clamped as they always were (MAX_EXTENT); the screen clips the rest
+            let width = clamp_extent(expect_int(heap, "%term-draw", arg(&parts, 3))?) as i64;
+            let height = clamp_extent(expect_int(heap, "%term-draw", arg(&parts, 4))?) as i64;
             let face = parts.get(5).copied().unwrap_or(Value::nil());
-            let fill = " ".repeat(w);
-            for i in 0..h {
-                // `saturating_add`: `row` and `i` are both bounded but `row` is a raw
-                // caller int, so `row + i` near i64::MAX panics under debug-assertions
-                // (the build this repo's own debug guidance recommends). Clamp after a
-                // saturating add, never before it.
-                crossterm::queue!(
-                    out,
-                    MoveTo(clamp_u16(col), clamp_u16(row.saturating_add(i)))
-                )
-                .map_err(term_err)?;
-                apply_face(&mut out, heap, face)?;
-                crossterm::queue!(
-                    out,
-                    Print(&fill),
-                    SetAttribute(Attribute::Reset),
-                    ResetColor
-                )
-                .map_err(term_err)?;
-            }
+            target.fill(
+                row,
+                col,
+                width,
+                height,
+                style_of(heap, face).over(default_face),
+            );
         } else if tag == cursor_t {
-            use crate::host::gui::CursorStyle;
-            use crossterm::cursor::SetCursorStyle;
             let row = expect_int(heap, "%term-draw", arg(&parts, 1))?;
             let col = expect_int(heap, "%term-draw", arg(&parts, 2))?;
-            crossterm::queue!(out, MoveTo(clamp_u16(col), clamp_u16(row))).map_err(term_err)?;
-            // honour the optional style keyword so the caret shape matches the GUI
-            match cursor_style_from(parts.get(3).copied().unwrap_or(Value::nil())) {
-                CursorStyle::Bar => {
-                    crossterm::queue!(out, SetCursorStyle::SteadyBar).map_err(term_err)?
-                }
-                CursorStyle::Underline => {
-                    crossterm::queue!(out, SetCursorStyle::SteadyUnderScore).map_err(term_err)?
-                }
-                CursorStyle::Block | CursorStyle::Hollow => {
-                    crossterm::queue!(out, SetCursorStyle::SteadyBlock).map_err(term_err)?
-                }
+            if row < 0 || col < 0 || row >= target.rows as i64 || col >= target.cols as i64 {
+                continue;
+            }
+            let style = cursor_style_from(parts.get(3).copied().unwrap_or(Value::nil()));
+            let at = screen::Cursor {
+                row: row as u16,
+                col: col as u16,
+                shape: match style {
+                    CursorStyle::Bar => screen::CursorShape::Bar,
+                    CursorStyle::Underline => screen::CursorShape::Underline,
+                    CursorStyle::Block | CursorStyle::Hollow => screen::CursorShape::Block,
+                },
+            };
+            if matches!(style, CursorStyle::Hollow) {
+                hollow = Some(at);
+            } else {
+                solid = Some(at);
             }
         } else if tag == text_t {
             let row = expect_int(heap, "%term-draw", arg(&parts, 1))?;
             let col = expect_int(heap, "%term-draw", arg(&parts, 2))?;
-            let s = expect_string(heap, "%term-draw", arg(&parts, 3))?;
-            crossterm::queue!(out, MoveTo(clamp_u16(col), clamp_u16(row))).map_err(term_err)?;
-            apply_face(
-                &mut out,
-                heap,
-                parts.get(4).copied().unwrap_or(Value::nil()),
-            )?;
-            crossterm::queue!(out, Print(s), SetAttribute(Attribute::Reset), ResetColor)
-                .map_err(term_err)?;
+            let text = expect_string(heap, "%term-draw", arg(&parts, 3))?;
+            let face = parts.get(4).copied().unwrap_or(Value::nil());
+            target.put_text(row, col, &text, style_of(heap, face).over(default_face));
         } else if tag == scroll_region_t {
-            // terminal can't do sub-pixel offsets; flatten by prepending inner ops to the queue.
+            // a terminal can't do sub-cell offsets: the inner ops are drawn where they are
             let inner_val = arg(&parts, 2);
             if let Ok(inner_parsed) = frame_ops(heap, inner_val, "%term-draw", "scroll-region ops")
             {
@@ -482,8 +629,71 @@ pub(in crate::builtins) fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) 
             }
         }
     }
-    write_term_bytes(&out).map_err(term_err)?;
+    target.cursor = solid.or(hollow);
+    Ok(())
+}
+
+/// `(term-invalidate)` — forget what the terminal shows: the next `term-draw` clears it and
+/// writes every cell. For when something other than `term-draw` wrote to the screen.
+pub(in crate::builtins) fn term_invalidate(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    invalidate_screen();
     Ok(Value::nil())
+}
+
+/// `(term-bg bg fg)` — the terminal's default face: `[:clear]` fills with `bg`, and a cell whose
+/// face names no `:bg` / `:fg` is drawn in `bg` / `fg` — the terminal's `gui/bg`, so a theme
+/// designed for a dark window is not drawn on a light terminal's own background. nil for
+/// either is the terminal's own. The next frame repaints whole.
+pub(in crate::builtins) fn term_bg(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let colour = |v: Value| -> Result<Option<screen::Colour>, LispError> {
+        match v {
+            Value::Nil => Ok(None),
+            other => color_of(heap, other)
+                .and_then(screen::Colour::of)
+                .map(Some)
+                .ok_or_else(|| LispError::wrong_type(heap, "term/bg", "a colour or nil", other)),
+        }
+    };
+    let bg = colour(arg(args, 0))?;
+    let fg = colour(arg(args, 1))?;
+    let mut state = terminal_screen();
+    state.default_face = screen::Style {
+        fg,
+        bg,
+        ..screen::Style::default()
+    };
+    state.shown = None;
+    Ok(Value::nil())
+}
+
+/// `(term-colors)` — the colour depth frames are written at, `:truecolor`, `:256` or `:16`;
+/// `(term-colors depth)` sets it (nil goes back to what `$COLORTERM` / `$TERM` say) and
+/// repaints the next frame whole.
+pub(in crate::builtins) fn term_colors(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let mut state = terminal_screen();
+    if !args.is_empty() {
+        state.depth = match arg(args, 0) {
+            Value::Nil => None,
+            Value::Keyword(name) => Some(
+                screen::ColorDepth::named(value::symbol_name(name).as_str()).ok_or_else(|| {
+                    LispError::runtime(format!(
+                        "term/colors: not a colour depth: :{} (:truecolor, :256 or :16)",
+                        value::symbol_name(name)
+                    ))
+                })?,
+            ),
+            other => {
+                return Err(LispError::wrong_type(
+                    heap,
+                    "term/colors",
+                    "a colour depth keyword or nil",
+                    other,
+                ));
+            }
+        };
+        state.shown = None;
+    }
+    Ok(value::kw(color_depth(&state).name()))
 }
 
 /// `(term-raw-enter)` — raw mode only: no alternate screen, the cursor stays
@@ -2428,12 +2638,12 @@ fn forward_input(pid: u64, stop: &std::sync::atomic::AtomicBool) {
 }
 #[cfg(test)]
 mod focus_tests {
-    use super::{keyboard, polled_value};
+    use super::{expect_string, keyboard, polled_value};
     use crate::core::heap::Heap;
     use crate::core::value::{self, Value};
 
     // A focus report reads as a window's focus event, so an app (bedit's clipboard read on
-    // focus) handles the terminal and the window alike; an unreported event is nil.
+    // focus) handles the terminal and the window alike; so do a resize and a paste.
     fn keyword_name(value: Value) -> Option<String> {
         match value {
             Value::Keyword(symbol) => Some(value::symbol_name_ref(symbol).to_string()),
@@ -2452,10 +2662,29 @@ mod focus_tests {
             keyword_name(polled_value(&mut heap, keyboard::Polled::Focus(false))).as_deref(),
             Some("blur")
         );
-        assert!(matches!(
-            polled_value(&mut heap, keyboard::Polled::Other),
-            Value::Nil
-        ));
+    }
+
+    #[test]
+    fn a_resize_and_a_paste_read_as_a_windows_events() {
+        let mut heap = Heap::new();
+        let resize = polled_value(&mut heap, keyboard::Polled::Resize(100, 30));
+        let Value::Vector(id) = resize else {
+            panic!("expected [:resize cols rows], got {resize:?}");
+        };
+        let parts = heap.vector(id).to_vec();
+        assert_eq!(keyword_name(parts[0]).as_deref(), Some("resize"));
+        assert!(matches!(parts[1], Value::Int(100)));
+        assert!(matches!(parts[2], Value::Int(30)));
+        let paste = polled_value(&mut heap, keyboard::Polled::Paste("a\nb".to_string()));
+        let Value::Vector(id) = paste else {
+            panic!("expected [:paste text], got {paste:?}");
+        };
+        let parts = heap.vector(id).to_vec();
+        assert_eq!(keyword_name(parts[0]).as_deref(), Some("paste"));
+        assert_eq!(
+            expect_string(&heap, "test", parts[1]).unwrap(),
+            "a\nb".to_string()
+        );
     }
 }
 

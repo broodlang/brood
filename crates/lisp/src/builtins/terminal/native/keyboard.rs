@@ -280,16 +280,18 @@ fn types_text(key: &KeyEvent) -> bool {
 }
 
 /// What one poll yields.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub(super) enum Polled {
     Key(KeyDelivery),
     Mouse(MouseEvent),
     /// The terminal gained (`true`) or lost the keyboard — reported once `term-enter` asked
     /// for focus reports (`CSI ?1004h`): the app sees `:focus-in` / `:blur`, as a window's.
     Focus(bool),
-    /// An event a poll does not report (a resize, a paste): the poll returns nil at once, so
-    /// the app looks again.
-    Other,
+    /// The terminal is now this many columns and rows (SIGWINCH): the app sees
+    /// `[:resize cols rows]`, as a window's (ADR-586).
+    Resize(u16, u16),
+    /// Text pasted while bracketed paste is on (`term-enter` turns it on): `[:paste text]`.
+    Paste(String),
 }
 
 /// One thing read from the tty, waiting in [`Inbox::ahead`].
@@ -536,7 +538,8 @@ impl Inbox {
                 Input::Event(Event::Mouse(mouse)) => return Some(Polled::Mouse(mouse)),
                 Input::Event(Event::FocusGained) => return Some(Polled::Focus(true)),
                 Input::Event(Event::FocusLost) => return Some(Polled::Focus(false)),
-                Input::Event(_) => return Some(Polled::Other),
+                Input::Event(Event::Resize(cols, rows)) => return Some(Polled::Resize(cols, rows)),
+                Input::Event(Event::Paste(text)) => return Some(Polled::Paste(text)),
             }
         }
         None
@@ -654,8 +657,35 @@ fn inline_event(event: Event) -> Option<Event> {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Release => None,
         Event::FocusGained | Event::FocusLost => None,
+        // the line editor reflows on every repaint; a resize is nothing it reads as a key
+        Event::Resize(..) => None,
         event => Some(event),
     }
+}
+
+/// A key read in the LEGACY encoding (no kitty protocol) as the key that was pressed. The bytes
+/// 0x1C–0x1F are what a terminal sends for Control with `\`, `]`, `^` and `_` — and for `C-/`,
+/// which shares `C-_`'s byte — but crossterm reads them as Control with `4`…`7` (the keys that
+/// produce them on a VT220). Spelled as Emacs names them, `C-_` is undo in a terminal as in a
+/// window. Under the kitty protocol a key arrives as itself, so nothing is rewritten there.
+pub(super) fn legacy_control(polled: Polled) -> Polled {
+    let Polled::Key(KeyDelivery::Press(key)) = polled else {
+        return polled;
+    };
+    let symbol = match key.code {
+        KeyCode::Char('4') => '\\',
+        KeyCode::Char('5') => ']',
+        KeyCode::Char('6') => '^',
+        KeyCode::Char('7') => '_',
+        _ => return polled,
+    };
+    if key.modifiers - KeyModifiers::ALT != KeyModifiers::CONTROL {
+        return polled;
+    }
+    Polled::Key(KeyDelivery::Press(KeyEvent {
+        code: KeyCode::Char(symbol),
+        ..key
+    }))
 }
 
 /// The press of the key held now, if one is, from everything the tty has buffered.
@@ -679,7 +709,11 @@ pub(super) fn next(timeout: Duration) -> std::io::Result<Option<Polled>> {
             let mut keyboard = keyboard();
             absorb(&mut keyboard)?;
             if let Some(polled) = keyboard.inbox.deliver() {
-                return Ok(Some(polled));
+                return Ok(Some(if keyboard.enhanced {
+                    polled
+                } else {
+                    legacy_control(polled)
+                }));
             }
             let now = Instant::now();
             if now >= deadline {
@@ -893,6 +927,35 @@ mod tests {
         assert_eq!(tracker.held(), Some(press(right, NONE)));
         tracker.take(release(right, NONE), []);
         assert_eq!(tracker.held(), None);
+    }
+
+    #[test]
+    fn the_legacy_control_bytes_are_the_symbols_they_are_sent_for() {
+        let control = KeyModifiers::CONTROL;
+        let pressed = |code, modifiers| Polled::Key(KeyDelivery::Press(press(code, modifiers)));
+        // 0x1F — C-_ and C-/ — which crossterm reads as Control+7
+        assert_eq!(
+            super::legacy_control(pressed(KeyCode::Char('7'), control)),
+            pressed(KeyCode::Char('_'), control)
+        );
+        assert_eq!(
+            super::legacy_control(pressed(KeyCode::Char('4'), control)),
+            pressed(KeyCode::Char('\\'), control)
+        );
+        // Meta held too (ESC before the byte): still the symbol
+        assert_eq!(
+            super::legacy_control(pressed(KeyCode::Char('5'), control | KeyModifiers::ALT)),
+            pressed(KeyCode::Char(']'), control | KeyModifiers::ALT)
+        );
+        // a plain 7, and anything else, untouched
+        assert_eq!(
+            super::legacy_control(pressed(KeyCode::Char('7'), KeyModifiers::NONE)),
+            pressed(KeyCode::Char('7'), KeyModifiers::NONE)
+        );
+        assert_eq!(
+            super::legacy_control(Polled::Focus(true)),
+            Polled::Focus(true)
+        );
     }
 
     #[test]

@@ -13,7 +13,8 @@ taking over the terminal for a full-screen UI (so click/scroll reach `term/poll`
 terminal that speaks the kitty keyboard protocol is asked to report repeats and releases
 (popped again by `term/leave` and every exit path); in any other a held key is inferred
 from its repeats. Either way `term/poll` delivers `[:key-up …]` and `term/held-key` knows
-the key held. Pair with `term/leave`.
+the key held. Bracketed paste is turned on, so a paste arrives whole (`[:paste text]`), and
+the next `term/draw` paints the screen whole (ADR-586). Pair with `term/leave`.
 
     (term/enter)   ;~> the terminal taken over: raw mode, alternate screen, mouse capture"
   (%term-enter))
@@ -45,8 +46,10 @@ up first: reported by a terminal that speaks the kitty keyboard protocol, and in
 any other (tmux, a legacy terminal) when a held key's repeats stop — a held key there is
 the same press arriving faster than a hand can press one key, and a tapped key has no
 key-up. A held key's repeat already superseded in the buffered input is dropped, so a
-backlog never plays on after the key is up; a press is never dropped, nor typed text, which
-a paste is made of. `term/held-key` names the key held. Always pass a finite `ms`.
+backlog never plays on after the key is up; a press is never dropped, nor typed text. After
+`term/enter` a paste arrives whole, as `[:paste text]` (bracketed paste), and a resize of the
+terminal as `[:resize cols rows]` — a window's spelling, so a `ui-run` app re-renders at the
+new size at once (ADR-586). `term/held-key` names the key held. Always pass a finite `ms`.
 
     (term/poll 50)   ;~> \"a\", :ctrl-c, [:mouse :press :left 3 10 []], [:key-up :ctrl-n], or nil on timeout"
   (%term-poll ms))
@@ -81,8 +84,46 @@ explicit [r g b] vector / \"#rrggbb\" hex string. [:rect …] fills a w×h cell 
 face's background. The optional cursor `style` is :block (default), :bar, or :underline. The
 in-process frontend for the display protocol; returns nil.
 
+The frame is painted over what the terminal already shows, cell by cell, and only the cells
+that CHANGED are written (ADR-586) — so a frame that redraws the whole screen from `[:clear]`
+costs the bytes of what moved, not of the screen, and a terminal over ssh does not flicker. A
+wide character takes two cells; a true colour is written as the nearest colour the terminal
+has (`term/colors`). The terminal's cursor shows at the frame's last `[:cursor]` (a `:hollow`
+one only when there is no other), and is hidden in a frame with none.
+
     (term/draw [[:clear] [:text 0 0 \"hello\" {:fg :red}] [:cursor 0 5]])   ;~> nil"
   (%term-draw frame))
+
+(defn invalidate ()
+  "Forget what the terminal shows, so the next `term/draw` clears it and writes every cell —
+for after something other than `term/draw` wrote to the screen (a program run in the
+foreground, a stray write to stdout). A resize does it by itself (ADR-586).
+
+    (term/invalidate)   ;=> nil"
+  (%term-invalidate))
+
+(defn bg (background &optional (foreground nil))
+  "Set the terminal's DEFAULT FACE — what `gui/bg` is to a window: `[:clear]` fills with
+`background`, and a cell whose face names no `:bg` (no `:fg`) is drawn in `background`
+(`foreground`). A theme made for a dark window is then drawn on its own background, not on
+a light terminal's. A colour is a palette keyword, `[r g b]` or `\"#rrggbb\"` (degraded to
+the terminal's depth, `term/colors`); nil is the terminal's own. The next frame repaints
+whole (ADR-586). Returns nil.
+
+    (term/bg \"#1e1e2e\" \"#cdd6f4\")   ;~> nil — the next frame drawn on the theme's base
+    (term/bg nil)   ;=> nil"
+  (%term-bg background foreground))
+
+(defn colors (&optional (depth :environment))
+  "The colour depth `term/draw` writes at: `:truecolor`, `:256` or `:16`. Read from
+`$COLORTERM` (`truecolor` / `24bit`) and `$TERM` (`…-256color`, `…-direct`), as Emacs reads
+them; over ssh `COLORTERM` is rarely passed on, so a remote session is usually `:256`. Given
+a `depth`, set it — nil goes back to the environment's — and repaint the next frame whole. A
+true colour (`\"#1e1e2e\"`) is drawn as the nearest colour the depth has; a named one (`:red`)
+is always the terminal's own (ADR-586).
+
+    (contains? #{:truecolor :256 :16} (term/colors))   ;=> true"
+  (if (= depth :environment) (%term-colors) (%term-colors depth)))
 
 (defn raw-enter ()
   "Enter raw mode only — NO alternate screen, cursor stays visible, scrollback preserved.
