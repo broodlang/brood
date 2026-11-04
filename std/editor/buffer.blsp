@@ -1757,12 +1757,24 @@ into."
           (cons [r1 (- (string/length repl) (- hi lo))] mids)
           nil]))))
 
+(defn- buffer-splice-log-seal (log)
+  "`log` with a REDACTION at its head (`redact-region`'s entry) sealed: its text from before
+the redaction — the one place the log still held the redacted characters — let go. Done by
+the next edit, so a holder replaying the log in the event that redacted (a buffer process,
+another frame, both sync every event) still gets the redaction, and the text is held one
+edit at most; a holder further behind diffs instead (the walk cannot pass a sealed entry)."
+  (let (head (when (not (empty? log)) (first log)))
+    (if (and head (= (nth head 6) :redact) (not (nil? (first head))))
+      (cons (assoc head 0 nil) (rest log))
+      log)))
+
 (defn- buffer-splice-log-push (log before-rope after-rope lo hi repl &optional properties)
   "`log` with the splice `[lo hi repl]` (`before-rope` → `after-rope`) recorded: merged into
 the newest entry when it continues that entry's run, else a new entry, the oldest dropped
 past `*splice-log-max*`. `properties` — what the inserted text came with, relative to
 `repl` — makes it an entry of its own."
-  (let (merged (when (and (nil? properties) (not (empty? log)))
+  (let (log (buffer-splice-log-seal log)
+        merged (when (and (nil? properties) (not (empty? log)))
                  (buffer-splice-coalesce (first log) before-rope after-rope lo hi repl)))
     (if merged
       (cons merged (rest log))
@@ -2106,7 +2118,8 @@ history is dropped (any snapshot before the delete may hold part of the text —
 typed one key at a time leaves a snapshot per key), none is recorded for the delete, and the
 splice log is left with the delete alone, marked as a redaction, so a holder replaying it
 (a buffer process, another frame — `buffer-edits-since` answers its properties as
-`:redact`) redacts its copy too instead of recording the delete in its own history. Point,
+`:redact`) redacts its copy too instead of recording the delete in its own history; the
+buffer's next edit seals that entry, letting go of the text from before. Point,
 mark, markers, text properties and the narrowing are carried as for any edit; a read-only
 or narrowed buffer is redacted all the same (the owner removes its own text). Emacs has no
 single call for it: `read-passwd` keeps the text out of the buffer in the first place.

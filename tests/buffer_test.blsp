@@ -1979,3 +1979,14 @@ suite run. `test/*wait-ms*` is a failure deadline, reached only if a relay never
       (assert= (buffer-query bp (fn (b) (get b :undo))) ())
       (is (nil? (buffer-query bp (fn (b) (get b :splices)))))
       (stop-buffer bp))))
+
+(describe "a redaction's log entry lets the text go"
+  (test "the next edit seals it: no entry holds a text with the secret in it"
+    (let (b (typed (end-of-buffer (make-buffer "pw: ")) ["s" "e" "c"])
+          redacted (redact-region b 4 7)
+          next (insert redacted "\n")
+          ropes (mapcat (get next :splices) (fn (entry) [(first entry) (second entry)])))
+      (is (not (any? ropes
+                 (fn (rope) (and (not (nil? rope)) (includes? (text/->string rope) "sec"))))))
+      ;; a holder that synced at the redaction still replays the edit after it
+      (assert= (buffer-edits-since redacted next) (list [4 4 "\n" nil])))))
