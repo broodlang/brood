@@ -376,6 +376,40 @@ unknown, closed, or was spawned with pipes.
     (os/resize-pty p 120 40)   ;~> nil; the child sees SIGWINCH and redraws"
   (%pty-resize p cols rows))
 
+(defn pty-mode (p)
+  "How pty child `p`'s terminal is reading input right now: `{:echo bool :canonical
+bool}` — its termios `ECHO` flag (the terminal echoes what is typed) and `ICANON` flag
+(input is read a line at a time, edited by the terminal).
+
+A host that shows the child's input ITSELF — an editor's line-mode REPL, which inserts
+what is typed and sends the line on RET — reads this to learn what the program asked
+for. Most callers want [[pty-password?]], the question this answers. Read it when output
+arrives or before a line is sent, not on every frame.
+
+`nil` when `p` is unknown or already closed (the child is gone, so a caller need not race
+its exit), and off Unix, where nothing is known. Throws if `p` was spawned with pipes
+rather than a pty.
+
+    (os/pty-mode (os/spawn-pty \"sh\" [\"-c\" \"sleep 1\"]))   ;~> {:echo true :canonical true}"
+  (%pty-mode p))
+
+(defn pty-password? (p)
+  "Whether pty child `p` is reading a line it does not want shown — a password.
+
+A program reading a secret (`sudo`, `ssh`, `git` asking for credentials, anything over
+`getpass`) turns its terminal's echo OFF and keeps line mode for that one read, then
+turns echo back on. A program with its own line editor (readline's bash, Erlang's shell,
+a raw-mode REPL) turns echo off too, but along with line mode, and echoes for itself —
+so echo alone would call every prompt of theirs a password. This is the pair: echo off
+AND canonical.
+
+`true` or `false`; `nil` when nothing can be known — `p` closed, or off Unix — so a caller
+can fall back to guessing from the prompt's text. Throws if `p` was spawned with pipes.
+
+    (os/pty-password? (os/spawn-pty \"sh\" [\"-c\" \"stty -echo; read secret\"]))   ;~> true, once stty has run"
+  (let (mode (%pty-mode p))
+    (if (nil? mode) nil (and (:canonical mode) (not (:echo mode))))))
+
 (defn write (p data)
   "Write data to subprocess p's stdin (blocking) and flush. data is any iolist — a
 string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those,

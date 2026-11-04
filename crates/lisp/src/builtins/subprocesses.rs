@@ -43,6 +43,17 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         &["p", "cols", "rows"],
         "Tell pty child p its terminal is now cols x rows; it sees SIGWINCH and redraws. Returns nil; throws if p is unknown, closed, or was spawned with pipes rather than a pty.",
         pty_resize);
+    // How a pty child's terminal reads input (termios ECHO and ICANON, ADR-570): a
+    // program reading a password turns echo off and keeps line mode, so a host that shows
+    // the child's input itself — an editor's line-mode REPL — knows to read that line
+    // masked instead.
+    primitives.def(
+        "%pty-mode",
+        Arity::exact(1),
+        Sig::new(vec![subprocess_ty], map_or_nil),
+        &["p"],
+        "How pty child p's terminal is reading input right now: {:echo bool :canonical bool} — its termios ECHO flag (the line discipline echoes what is typed) and ICANON flag (input is read a line at a time). A program reading a password (sudo, ssh, getpass) turns echo off and keeps canonical mode for that read; a program with its own line editor (readline, a REPL in raw mode) turns both off. Returns nil when p is unknown or already closed, or off Unix, where nothing is known. Throws if p was spawned with pipes rather than a pty.",
+        pty_mode);
     primitives.def(
         "%proc-send",
         Arity::exact(2),
@@ -199,6 +210,21 @@ pub(super) fn pty_resize(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
     crate::host::subprocess::pty_resize(id, cols, rows)
         .map_err(|e| LispError::runtime(format!("os/resize-pty: {}", e)))?;
     Ok(Value::nil())
+}
+
+/// `(pty-mode handle)` — `{:echo bool :canonical bool}`, how a pty child's terminal reads
+/// input right now; nil when the child is gone (or off Unix), so a caller checking at a
+/// prompt need not race its exit.
+pub(super) fn pty_mode(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_subprocess(heap, "os/pty-mode", arg(args, 0))?;
+    match crate::host::subprocess::pty_input_mode(id) {
+        Ok(Some(mode)) => Ok(heap.map_from_pairs(vec![
+            (value::kw("echo"), Value::boolean(mode.echo)),
+            (value::kw("canonical"), Value::boolean(mode.canonical)),
+        ])),
+        Ok(None) => Ok(Value::nil()),
+        Err(e) => Err(LispError::runtime(format!("os/pty-mode: {}", e))),
+    }
 }
 
 pub(super) fn proc_send(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
