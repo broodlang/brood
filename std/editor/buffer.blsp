@@ -2111,7 +2111,7 @@ mark, markers, text properties and the narrowing are carried as for any edit; a 
 or narrowed buffer is redacted all the same (the owner removes its own text). Emacs has no
 single call for it: `read-passwd` keeps the text out of the buffer in the first place.
 
-    (editor/buffer/buffer-text (editor/buffer/undo (editor/buffer/redact-region (editor/buffer/insert (editor/buffer/make-buffer \"pw: \") \"hun\") 4 7)))   ;=> \"pw: \""
+    (editor/buffer/buffer-text (editor/buffer/undo (editor/buffer/redact-region (editor/buffer/insert (editor/buffer/end-of-buffer (editor/buffer/make-buffer \"pw: \")) \"hun\") 4 7)))   ;=> \"pw: \""
   (let (length (buffer-length buf)
         from (buffer-clamp 0 length lo)
         to (math/max from (buffer-clamp 0 length hi)))
