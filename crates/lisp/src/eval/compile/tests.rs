@@ -2734,6 +2734,40 @@ fn a_suspend_latch_reaches_every_copy_of_the_function() {
     assert_eq!(later.jit_code.load(Acquire), crate::jit::BAILED);
 }
 
+/// The admitted-copies map forgets dead functions. Every re-evaluated def (eval-buffer, a
+/// hot reload) admits its arm under a NEW key and never touches the old one again, so the
+/// old entry — whose `Weak` holds the dropped arm's allocation — stayed for the runtime's
+/// life: one per redefinition. An admission now sweeps the map when it has doubled, so it
+/// stays within twice its live keys plus the floor.
+#[cfg(feature = "jit")]
+#[test]
+fn suspend_admission_sweeps_the_copies_of_dead_functions() {
+    use crate::core::heap::SUSPEND_SWEEP_FLOOR;
+    let mut interp = crate::Interp::new();
+    let heap = &mut interp.heap;
+    let kept = published_native_arm(heap, (0x0609_0000, 1));
+    assert!(heap.jit_suspend_admit(&kept));
+    // a thousand redefinitions, each admitted once and then dropped
+    for generation in 0..1000u64 {
+        let arm = published_native_arm(heap, (0x0609_1000 + generation, 1));
+        assert!(heap.jit_suspend_admit(&arm));
+    }
+    let keys = heap.jit_suspend_admitted_keys();
+    assert!(
+        keys <= SUSPEND_SWEEP_FLOOR + 1,
+        "{keys} keys admitted for one live function: the dead ones were never swept"
+    );
+    // the live copy survived every sweep, and a later latch still reaches it
+    let blocked = published_native_arm(heap, (0x0609_0000, 1));
+    assert!(heap.jit_suspend_admit(&blocked));
+    heap.jit_suspend_latch_function((0x0609_0000, 1));
+    assert_eq!(
+        kept.jit_code.load(std::sync::atomic::Ordering::Acquire),
+        crate::jit::BAILED,
+        "the sweep dropped a live copy, which the latch no longer reaches"
+    );
+}
+
 /// Found chasing KI-313, and not its cause: one park latches every native arm under it. A
 /// native walk calling a native reducer that opens a window blocks with both on the stack;
 /// the latch named only the innermost, so the walk stayed native and blocked its worker again on the next call
