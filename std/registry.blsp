@@ -40,6 +40,14 @@ so a module that registers at load is safe to reload. Returns `entry`.
     (registry/put! :doc/greetings :en \"hello\")   ;=> \"hello\""
   (do (%registry-update! 'registry/*registries* :assoc [id key] entry) entry))
 
+(defn put-new! (id:any key:any entry:any -> bool)
+  "Register `entry` under `key` in the registry `id` only when nothing is there, in one locked
+step, and answer whether it did — first one wins, so a key held this way is a runtime-wide
+slot: two windows, two processes, cannot both take it.
+
+    (registry/put-new! :doc/slots :only 1)   ;~> true the first time, false while it is held"
+  (= true (%registry-update! 'registry/*registries* :assoc-new [id key] entry)))
+
 (defn entries (id:any -> map)
   "The registry `id` as a map of key → entry — `{}` for a registry nothing has written.
 
@@ -99,8 +107,32 @@ so the order never depends on which module happened to load first.
 ;; key path, a list registry's member by its position, matched with the same `=` `:remove`
 ;; uses. That is enough for a program that loads plugins to take back everything one
 ;; registered — here, in a std table (`editor/layers`, `editor/face`) or anywhere else —
-;; without each registry keeping its own ownership. A write made at run time, outside any
-;; load, has no writer.
+;; without each registry keeping its own ownership.
+;;
+;; A write made at run time, outside any load, credits the process's ACTING WRITER (ADR-596):
+;; the load that spawned the process, or the spawner's own acting writer, or what
+;; [[with-acting-writer]] set — so a timer, a task or a worker a plugin started registers as
+;; the plugin, and taking the plugin back takes those writes too. A process with none (the
+;; program, anything spawned outside a load) credits nobody.
+
+(defn acting-writer (-> any)
+  "Who a registry write this process makes outside any load credits: the module (a symbol)
+or namespace-less file (its absolute path, a string) whose load spawned it or one of its
+ancestors, or what [[with-acting-writer]] set — nil when nobody.
+
+    (registry/acting-writer)   ;~> nil — in a process nothing spawned under a load"
+  (%acting-writer))
+
+(defn with-acting-writer (writer:any thunk:any -> any)
+  "Call `thunk` with the registry writes it makes outside a load — and those of every
+process it spawns, a timer's included — credited to `writer` (a module symbol, a file's
+absolute path, or nil for nobody), and answer what it answers. A program that runs a
+plugin's code at run time (a command, a hook) says whose code it is with this, so what the
+plugin registers there is [[written-by]] the plugin.
+
+    (registry/with-acting-writer 'my-plugin (fn () (registry/acting-writer)))   ;=> my-plugin"
+  (let (previous (%set-acting-writer! writer))
+    (try (thunk) (finally (%set-acting-writer! previous)))))
 
 (defn writer (id:any key:any -> any)
   "Who wrote the entry under `key` in the registry `id`: the module whose load wrote it (a
@@ -112,7 +144,8 @@ root or run-time write, or no entry).
 
 (def- module-state-registries
   #{'*features*
-    '*features-loading* '*require-edges* '*module-files* '*impls* '*impl-from* '*impl-tiers*})
+    '*features-loading* '*require-edges* '*module-files* '*impls* '*impl-from* '*impl-tiers*
+    '*impl-shadowed*})
 ;; The module system's own bookkeeping, which a write-back would corrupt: what is loaded,
 ;; the require edges, where a package's modules are, and the ability impls (retired with
 ;; the definitions they name, by `reflect/undef`).
@@ -126,7 +159,8 @@ v :writer w}` for a member of a LIST registry (`editor/layers`' `*system-layers*
 not listed, and neither are a vector-valued global's elements: no registry op adds one.
 
     (registry/written-by #{'nobody/at-all})   ;=> []"
-  (fold (%registry-names)
+  ;; only the registries the journal says these writers wrote into (ADR-604), not every one
+  (fold (%registries-written-by (vec writers))
     []
     (fn (found global)
       (let (value (if (bound? global) (reflect/eval global) nil)
@@ -198,3 +232,96 @@ when it was written.
       value
       (if (nil? credit) false credit)
       (:writer write))))
+
+;; ---- ability impls a module registered (ADR-603, ADR-604) ------------------------------
+;; `written-by` leaves the impl tables out: an impl is retired with the type it is for
+;; (`reflect/undef`), and a write-back would corrupt them. But a plugin's `impl` of an ability
+;; for a type it does not own — a core ability, a core type — outlives the plugin that way,
+;; calling a helper that is gone. Every registration is kept by precedence tier with the
+;; namespace that made it (`*impl-tiers*`, ADR-432), and one a same-tier registration from
+;; another namespace replaced is kept under it (`*impl-shadowed*`), so one module's can be
+;; found and taken back exactly: the tier below winning again, or the impl it replaced.
+
+(defn impls-by (writers:set)
+  "Every ability impl a namespace in `writers` (module symbols) registered and that is still
+registered — the one dispatch finds in its tier, or one a later registration of the same tier
+replaced (`:shadowed? true`): `{:ability :op :key :rank :from :shadowed?}`, what
+[[retract-impl]] takes back. An impl from code of no module (a file without a `defmodule`,
+the REPL) is credited to nobody.
+
+    (registry/impls-by #{'nobody/at-all})   ;=> []"
+  (let (listed (fn (found slot rank registered shadowed?)
+                 (let ([ability op key] slot)
+                   (if (contains? writers (second registered))
+                     (conj found
+                       {:ability ability
+                        :op op
+                        :key key
+                        :rank rank
+                        :from (second registered)
+                        :shadowed? shadowed?})
+                     found))))
+    (fold (%map-pairs (or *impl-shadowed* {}))
+      (fold (%map-pairs (or *impl-tiers* {}))
+        []
+        (fn (found entry)
+          (let ([slot tiers] entry)
+            (fold (%map-pairs tiers)
+              found
+              (fn (acc tier) (listed acc slot (first tier) (second tier) false))))))
+      (fn (found entry)
+        (let ([slot tiers] entry)
+          (fold (%map-pairs tiers)
+            found
+            (fn (acc tier)
+              (fold (second tier)
+                acc
+                (fn (deeper registered) (listed deeper slot (first tier) registered true))))))))))
+
+(defn- reinstate-winner (slot)
+  ;; dispatch for `slot` set to its highest tier left, or unclaimed with none
+  (let (op-key [(first slot) (second slot)]
+        key (nth slot 2)
+        best (fold (%map-pairs (or (get (or *impl-tiers* {}) slot) {}))
+               nil
+               (fn (winner tier)
+                 (if (or (nil? winner) (> (first tier) (first winner))) tier winner))))
+    (if (nil? best)
+      (do
+        (%registry-update! '*impls* :dissoc [op-key key] nil)
+        (%registry-update! '*impl-from* :dissoc [slot] nil)
+        (%registry-update! '*impl-tiers* :dissoc [slot] nil)
+        (%registry-update! '*impl-shadowed* :dissoc [slot] nil))
+      (do
+        (%registry-update! '*impls* :assoc [op-key key] (first (second best)))
+        (%registry-update! '*impl-from* :assoc [slot] (second (second best)))))))
+
+(defn retract-impl (impl:map -> bool)
+  "Take back one impl [[impls-by]] listed — only while it is still that namespace's
+registration — and answer whether it did. Where it had replaced another namespace's impl in
+its tier, that one is put back; dispatch then finds the highest tier left for the slot (a core
+impl the plugin's outranked, or the one it replaced); with none left the slot is unclaimed,
+as before anything implemented it. A replaced impl taken back just leaves the stack.
+
+    (registry/retract-impl {:ability 'Nobody :op 'op :key :none :rank 1 :from 'nobody})   ;=> false"
+  (let (slot [(:ability impl) (:op impl) (:key impl)]
+        rank (:rank impl)
+        from (:from impl)
+        registered (get (or (get (or *impl-tiers* {}) slot) {}) rank)
+        replaced (or (get (or (get (or *impl-shadowed* {}) slot) {}) rank) '())
+        others (reverse (fold replaced
+                          '()
+                          (fn (kept entry) (if (= (second entry) from) kept (cons entry kept))))))
+    (cond
+      (and (not (:shadowed? impl)) registered (= (second registered) from))
+        (do
+          (if (empty? others)
+            (%registry-update! '*impl-tiers* :dissoc [slot rank] nil)
+            (do
+              (%registry-update! '*impl-tiers* :assoc [slot rank] (first others))
+              (%registry-update! '*impl-shadowed* :assoc [slot rank] (rest others))))
+          (reinstate-winner slot)
+          true)
+      (and (:shadowed? impl) (< (count others) (count replaced)))
+        (do (%registry-update! '*impl-shadowed* :assoc [slot rank] others) true)
+      else false)))

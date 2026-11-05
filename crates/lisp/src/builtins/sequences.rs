@@ -368,6 +368,43 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "",
         registry_writer,
     );
+    // A list registry's members with who added each and how (ADR-595): what the stdlib
+    // image replays a list member with, and what a project image credits by position.
+    primitives.def(
+        "%registry-members",
+        Arity::exact(1),
+        Sig::new(vec![any], any),
+        &["name"],
+        "List registry `name`'s members in order, each as `[member writer op]`: who added it (a module symbol, a file path string, or nil) and the op that did (`:cons-new`, `:append-new`, or nil when unknown). Empty when `name` is not a list.",
+        registry_members,
+    );
+    // The registries a set of writers wrote into (ADR-604), so `registry/written-by` walks
+    // those instead of every registry.
+    primitives.def(
+        "%registries-written-by",
+        Arity::exact(1),
+        Sig::new(vec![any], any),
+        &["writers"],
+        "The registries holding an entry or list member credited to one of `writers` (module symbols, file path strings), as a list of symbols. What `registry/written-by` walks.",
+        registries_written_by,
+    );
+    // The process's acting writer (ADR-596): who its registry writes outside a load credit.
+    primitives.def(
+        "%acting-writer",
+        Arity::exact(0),
+        Sig::new(vec![], any),
+        &[],
+        "Who a registry write this process makes outside any load credits: the module (a symbol) or namespace-less file (a path string) whose load spawned it or an ancestor, or what `registry/with-acting-writer` set — nil when nobody.",
+        acting_writer,
+    );
+    primitives.def(
+        "%set-acting-writer!",
+        Arity::exact(1),
+        Sig::new(vec![any], any),
+        &["writer"],
+        "Set this process's acting writer (a module symbol, a file path string, or nil for nobody) and return the one it replaces. `registry/with-acting-writer` sets it for an extent.",
+        set_acting_writer,
+    );
     // The general form of the above (KI-23): compare-and-swap, for a registry whose update
     // is not a single map/list op. Lets the transform stay a Brood function while the
     // read-decide-write stays indivisible; `registry-swap!` in the prelude retries on it.
@@ -1490,9 +1527,10 @@ pub(super) fn registry_update(args: &[Value], env: EnvId, heap: &mut Heap) -> Li
         "append-new" => RegistryOp::AppendNew,
         "remove" => RegistryOp::Remove,
         "merge" => RegistryOp::Merge,
+        "credit" => RegistryOp::Credit,
         _ => {
             return Err(LispError::type_err(
-                "%registry-update!: op must be :assoc, :assoc-new, :dissoc, :cons-new, :append-new, :remove or :merge",
+                "%registry-update!: op must be :assoc, :assoc-new, :dissoc, :cons-new, :append-new, :remove, :merge or :credit",
             ));
         }
     };
@@ -1562,6 +1600,68 @@ pub(super) fn registry_writer(args: &[Value], _env: EnvId, heap: &mut Heap) -> L
     };
     Ok(match heap.registry_writer(sym, &path) {
         Some(writer) => registry_writer_value(heap, writer),
+        None => Value::Nil,
+    })
+}
+
+/// `(%registry-members name)` — list registry `name`'s members as `[member writer op]`
+/// vectors, in order (ADR-595). See [`Heap::registry_members`].
+pub(super) fn registry_members(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    use crate::core::heap::RegistryOp;
+    let sym = expect_symbol(heap, "%registry-members", arg(args, 0))?;
+    let members = heap.registry_members(sym);
+    let mut rows = Vec::with_capacity(members.len());
+    for (member, writer, added_by) in members {
+        let writer = match writer {
+            Some(writer) => registry_writer_value(heap, writer),
+            None => Value::Nil,
+        };
+        let added_by = match added_by {
+            Some(RegistryOp::ConsNew) => Value::Keyword(value::intern("cons-new")),
+            Some(RegistryOp::AppendNew) => Value::Keyword(value::intern("append-new")),
+            _ => Value::Nil,
+        };
+        rows.push(heap.alloc_vector(vec![member, writer, added_by]));
+    }
+    Ok(heap.list(rows))
+}
+
+/// `(%registries-written-by writers)` — the registries holding something credited to one of
+/// `writers` (a seq of module symbols and file path strings; other values are ignored).
+pub(super) fn registries_written_by(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let items = match arg(args, 0).unpack() {
+        crate::core::value::ValueRef::Vector(id) => heap.vector(id).to_vec(),
+        _ => heap.list_to_vec(arg(args, 0)).unwrap_or_default(),
+    };
+    let writers: Vec<crate::core::heap::RegistryWriter> = items
+        .into_iter()
+        .filter_map(|item| registry_writer_arg(heap, item).ok())
+        .collect();
+    let names: Vec<Value> = heap
+        .registries_written_by(&writers)
+        .into_iter()
+        .map(Value::Sym)
+        .collect();
+    Ok(heap.list(names))
+}
+
+/// `(%acting-writer)` — this process's acting writer (ADR-596), or nil.
+pub(super) fn acting_writer(_args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    Ok(match heap.acting_writer {
+        Some(writer) => registry_writer_value(heap, writer),
+        None => Value::Nil,
+    })
+}
+
+/// `(%set-acting-writer! writer)` — set this process's acting writer (ADR-596): a module
+/// symbol, a file path string, or nil for nobody. Returns the one it replaces.
+pub(super) fn set_acting_writer(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let writer = match arg(args, 0) {
+        Value::Nil | Value::Bool(false) => None,
+        other => Some(registry_writer_arg(heap, other)?),
+    };
+    Ok(match heap.set_acting_writer(writer) {
+        Some(previous) => registry_writer_value(heap, previous),
         None => Value::Nil,
     })
 }

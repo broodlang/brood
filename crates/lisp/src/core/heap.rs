@@ -1336,6 +1336,13 @@ pub struct Heap {
     /// else — a builtin another builtin called from Rust, with a slice of its own — keeps
     /// the nested call.
     redirect_offer: usize,
+    /// Who a registry write this process makes OUTSIDE any load credits (ADR-596): the module
+    /// (or namespace-less file) whose load spawned this process, or an ancestor's, or what a
+    /// `registry/with-acting-writer` set for an extent. `spawn` hands it to the child — so a
+    /// timer, a task, a worker started by a plugin registers as that plugin. `None` for a
+    /// process nothing spawned under a load and nothing set: its run-time writes credit
+    /// nobody, as before.
+    pub(crate) acting_writer: Option<RegistryWriter>,
     /// Per-process state almost no process touches — the GC statistics, the `proc/flag`
     /// settings, a test's shared-code floor — boxed at its first write. Inline it was ~130
     /// bytes on every process; most never collect, never set a flag, and park
@@ -1965,6 +1972,7 @@ impl Heap {
             blocked_under_gateway: 0,
             jit_i64_overflow: false,
             redirect_offer: 0,
+            acting_writer: None,
         }
     }
 

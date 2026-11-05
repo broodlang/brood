@@ -54,13 +54,39 @@ claims it by prefix."
   "`triple` (`[registry-symbol key-path value]`) appended to module `m`'s entries."
   (%map-assoc acc m (append (or (%map-get acc m nil) []) [triple])))
 
+(defn- %add-member-regs (acc reg)
+  "`acc` with each member of list registry `reg` added under the module whose load added it,
+as `[reg nil member op]` (ADR-595) — in the order replaying them rebuilds the list: an
+`:append-new` member front to back, a `:cons-new` one back to front, since each lands at the
+front. A member with no module writer, or whose op the journal does not know, is the
+prelude's or the root's and stays in the list's own value."
+  (let (members (%registry-members reg)
+        added-by (fn (op) (seq/filter members (fn (row) (= (get row 2) op))))
+        owned (fn (row)
+                (let ([member writer op] row)
+                  (when (symbol? writer) [(->string writer) [reg nil member op]]))))
+    (fold (seq/keep (append (added-by :append-new) (reverse (added-by :cons-new))) owned)
+      acc
+      (fn (grouped pair) (%add-reg grouped (first pair) (second pair))))))
+
+(defn retract-registration! (registration)
+  "Take one registration [[registrations-by-module]] listed out of its registry — dissoc a
+map entry's key path (`[reg path value]`), remove a list member (`[reg nil member op]`) — and
+answer whether there was one.
+
+    (stdimage/retract-registration! ['registry/*registries* [:doc/none :k] 1])   ;=> false"
+  (if (nil? (get registration 1))
+    (%registry-update! (get registration 0) :remove [] (get registration 2) nil)
+    (%registry-update! (get registration 0) :dissoc (get registration 1) nil)))
+
 ;; The registries a load WRITES that are not registrations: runtime state (`*features*`,
 ;; `*features-loading*`), the require edges and impls the image carries in their own
 ;; sections, and `*module-files*`, which maps a PACKAGE's modules to disk paths and so
 ;; never describes baked-in std.
 (def- %std-regs-skip
   #{'*features*
-    '*features-loading* '*require-edges* '*module-files* '*impls* '*impl-from* '*impl-tiers*})
+    '*features-loading* '*require-edges* '*module-files* '*impls* '*impl-from* '*impl-tiers*
+    '*impl-shadowed*})
 
 (defn- %reg-owner (reg path entry)
   "The module that OWNS registry `reg`'s entry at `path`: the module whose load WROTE it
@@ -75,7 +101,8 @@ wrote (its writer a path string, ADR-582), which no module materialises either."
 
 (defn- %std-regs-by-module ()
   "Every non-impl registration a std module load performs, grouped by the module whose LOAD
-performed it — `[registry-symbol key-path value]` triples.
+performed it — `[registry-symbol key-path value]` triples, and `[registry-symbol nil member op]`
+for a member of a LIST registry, with the op that added it (ADR-595).
 
 The registries are enumerable — `(%registry-names)` is every global a `%registry-update!`
 has written — and each entry's owner is the module that wrote it, which the kernel journals
@@ -89,23 +116,26 @@ attributed per inner entry when its outer key has no writer."
     {}
     (fn (acc reg)
       (let (v (if (bound? reg) (reflect/eval reg) nil))
-        (if (or (contains? %std-regs-skip reg) (not (map? v)))
-          acc
-          (fold (%map-pairs v)
-            acc
-            (fn (a entry)
-              (let ([k1 v1] entry
-                    m (%reg-owner reg [k1] entry))
-                (cond
-                  m (%add-reg a m [reg [k1] v1])
-                  (map? v1)
-                    (fold (%map-pairs v1)
-                      a
-                      (fn (a2 kv2)
-                        (let ([k2 v2] kv2
-                              m2 (%reg-owner reg [k1 k2] kv2))
-                          (if m2 (%add-reg a2 m2 [reg [k1 k2] v2]) a2))))
-                  else a)))))))))
+        (cond
+          (contains? %std-regs-skip reg) acc
+          (list? v) (%add-member-regs acc reg)
+          (not (map? v)) acc
+          else
+            (fold (%map-pairs v)
+              acc
+              (fn (a entry)
+                (let ([k1 v1] entry
+                      m (%reg-owner reg [k1] entry))
+                  (cond
+                    m (%add-reg a m [reg [k1] v1])
+                    (map? v1)
+                      (fold (%map-pairs v1)
+                        a
+                        (fn (a2 kv2)
+                          (let ([k2 v2] kv2
+                                m2 (%reg-owner reg [k1 k2] kv2))
+                            (if m2 (%add-reg a2 m2 [reg [k1 k2] v2]) a2))))
+                    else a)))))))))
 
 (defn- %prune-attributed-registrations! ()
   "Remove from the live registries every entry some module's load wrote, so the values
@@ -115,13 +145,14 @@ when its source loads, so a value that still carried them would double the ones 
 registry's own module and smuggle in every other module's (KI-136). Called inside an
 `%isolate` by `build`, so the running session keeps every registration it had."
   (doseq (entry (%map-pairs (%std-regs-by-module)))
-    (doseq (t (second entry))
-      (%registry-update! (get t 0) :dissoc (get t 1) nil))))
+    (doseq (registration (second entry))
+      (retract-registration! registration))))
 
 (defn registrations-by-module ()
   "Every live non-impl registration, grouped by the module that OWNS it: module name →
-vector of `[registry-symbol key-path value]` triples (the grouping the stdlib image is
-built from, see `%std-regs-by-module`). Public so the PROJECT image can ask the same
+vector of `[registry-symbol key-path value]` triples and `[registry-symbol nil member op]` list
+members (the grouping the stdlib image is built from, see `%std-regs-by-module`, and what
+[[retract-registration!]] takes back). Public so the PROJECT image can ask the same
 question at write time: a registration whose owner is a module the project image does not
 carry must not travel in it (KI-89)."
   (%std-regs-by-module))

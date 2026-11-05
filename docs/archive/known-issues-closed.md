@@ -15878,3 +15878,84 @@ window; the session's documents outlive its loop and are saved when the budget r
 parked session restarted and adopted; no restart, no supervision) and
 `tests/buffer_registry_test.blsp` "buffer-registry — an owner's lifetime"; bedit's
 `tests/remote_test.blsp` "remote — a served session's loop that dies is saved and restarted".
+
+## KI-357 — a module materialised from a startup image had fewer registry writers than its source load ✅ FIXED 2026-11-04
+
+**Symptom.** `registry/written-by #{'m}` (ADR-582) answers what module `m`'s load wrote when
+`m` loaded from source in this process. When `m` came out of a startup image instead, it
+answered less:
+
+- **The project image** (`.brood/image.bin`, ADR-218/419): nothing at all. A project or
+  dependency module materialised from it had no writer for any registry entry, map or list;
+  `%registry-writer` answered nil for each.
+- **The stdlib image**: map entries were credited (each module's registrations replay with the
+  module as their writer); list-registry members were not — the build skipped every registry
+  whose value is not a map. No std module adds a list member at load today
+  (`editor/layers`' `*system-layers*` and `*auto-type-by-file*` are filled by programs, not
+  by std), so nothing was lost yet.
+
+A program that loads and unloads plugins at run time was unaffected: a plugin loads from source,
+and its writes are credited as it loads. Not seen in use: bedit retires packages, never its
+own modules.
+
+**Cause.** The writer journal (`RuntimeCode::registry_writers`) is a property of the loads a
+process ran. The stdlib image carries each module's map registrations grouped by writer and
+replays them with `%registry-update! … key` (`%replay-std-regs!`), which re-credits them; it had
+no shape for a list member (whose position is precedence — `:append-new` vs `:cons-new` — and
+whose replay would reorder the list). The project image installs registry VALUES wholesale in
+its root section and replayed no registration.
+
+**Why it survived.** ADR-582's guards load their fixtures from source; the KI-136 differential
+(`image_registrations_match_source`) compared the keys an imaged module registers, and a map
+entry's writer, but no list member.
+
+**Fix.** ADR-595. `%registry-update!` gains `:credit` — name the writer of an entry that is
+already there (a map entry by its key path, a list member by `[index]`), the value untouched;
+a list member's journal slot keeps the op that added it (`%registry-members`). The stdlib image
+records a list member as `[registry nil member op]`, takes it out of the value it snapshots, and
+replays it with its op as the module materialises (`%replay-registrations!`). The project image
+carries `[registry path writer]` for every entry a carried load wrote (`*project-image-credits*`,
+in its root section) and credits them as the root section is installed, before the live entries
+are merged back.
+
+**Guard.** `crates/lisp/tests/image_registrations_match_source.rs` compares every entry's writer
+and every list member's writer and op, materialised against loaded, for each std module;
+`tests/registry_writers_test.blsp` — `:credit`, and a fixture's appended and consed members
+taken out and replayed into the same list with the same writers;
+`crates/nest/tests/project_image_registries.rs`
+`an_imaged_boot_credits_each_registry_entry_to_the_module_that_wrote_it` — a project module's
+map entry and list members credited to it on an imaged boot as on a source one.
+
+## KI-356 — a plugin's bare-closure hook registered from a timer or a process it spawned could not be taken back ✅ FIXED 2026-11-04
+
+**Symptom.** bedit removes or updates a package while it runs and takes back everything the
+package registered (ADR-582; bedit's `packages/retire-package`). One kind of registration
+survived the removal: a hook the package registers AT RUN TIME as a bare closure (an
+anonymous `fn`, not a symbol naming one of its functions) from a context that is neither a
+module load nor one of the package's commands or hooks — a timer callback, or a process the
+package spawned. The row stayed in its registry, holding a closure over code that is gone;
+calling it ran the old package's code. Not seen in use: bedit's own registries take hook
+SYMBOLS, and no installed package registers this way.
+
+**Cause.** Ownership had three sources and this write had none of them. The kernel journalled a
+registry write's writer only while a module LOAD is open (KI-136, ADR-582); bedit claims a
+run-time write for the package whose command or hook is running (`ownership/with-symbol-
+claimant`), but a timer or a spawned process runs outside that dynamic extent; and the
+retirement backstop finds a row by what it NAMES — a symbol in the package's namespaces, a
+named function defined in its files — and a bare closure names nothing (`pr-str` gives
+`#<fn>`).
+
+**Fix.** ADR-596, both halves the entry proposed. Every process has an ACTING WRITER, set at
+`spawn` to whoever the spawner's registry writes credit (the module whose load is spawning it,
+else the spawner's own acting writer), and a registry write outside any load credits it —
+so a worker a plugin's load spawned, and every process that one starts (a timer, a task), writes
+as the plugin. `registry/with-acting-writer` sets it for an extent; bedit's
+`ownership/with-symbol-claimant` runs a package's command or hook under it, and its claim falls
+back to it. `reflect/fn-module` answers the module an anonymous `fn` was written in
+(`Closure::module`, already kept for the contract boundary), and bedit's backstop matches a
+closure by it.
+
+**Guard.** `tests/registry_writers_test.blsp` "the acting writer" and "reflect/fn-module"; bedit's
+`tests/plugin_registry_test.blsp` "bare closures a package registers from its processes and
+timers" — a closure from a worker the package's load spawned, from a timer's fire hook and from
+a process that hook started, each credited to the package and gone after its removal.

@@ -104,70 +104,6 @@ there. Then `tests/platform_test.blsp`'s pty case runs on Windows as on Unix, an
 **Guard.** `tests/platform_test.blsp` — "a pseudo-terminal": on Windows the raise names
 ConPTY; bedit's `tests/shell_command_test.blsp` — `term-unavailable` says so on Windows.
 
-## KI-357 — a module materialised from a startup image has fewer registry writers than its source load — OPEN 2026-11-04
-
-**Symptom.** `registry/written-by #{'m}` (ADR-582) answers what module `m`'s load wrote when
-`m` loaded from source in this process. When `m` came out of a startup image instead, it
-answers less:
-
-- **The project image** (`.brood/image.bin`, ADR-218/419): nothing at all. A project or
-  dependency module materialised from it has no writer for any registry entry, map or list;
-  `%registry-writer` answers nil for each.
-- **The stdlib image**: map entries are credited (each module's registrations replay with the
-  module as their writer); list-registry members are not — the build skips every registry
-  whose value is not a map. No std module adds a list member at load today
-  (`editor/layers`' `*system-layers*` and `*auto-type-by-file*` are filled by programs, not
-  by std), so nothing is lost yet.
-
-A program that loads and unloads plugins at run time is unaffected: a plugin loads from source,
-and its writes are credited as it loads. Not seen in use: bedit retires packages, never its
-own modules.
-
-**Cause.** The writer journal (`RuntimeCode::registry_writers`) is a property of the loads a
-process ran. The stdlib image carries each module's map registrations grouped by writer and
-replays them with `%registry-update! … key` (`%replay-std-regs!`), which re-credits them; it has
-no shape for a list member (whose position is precedence — `:append-new` vs `:cons-new` — and
-whose replay would reorder the list). The project image installs registry VALUES wholesale in
-its root section and replays no registration.
-
-**Why it survived.** ADR-582's guards load their fixtures from source; the KI-136 differential
-(`image_registrations_match_source`) compares the keys an imaged module registers, not who is
-credited with them.
-
-**Fix.** Not yet. The project image already records each module's registrations
-(`:owners` in `.brood/image.modules`, for the partial rebuild): re-crediting them when the
-module materialises needs a "credit this existing entry" kernel op beside `%registry-update!`.
-List members would ride the same op, recorded as `[registry member]` per module.
-
-**Guard.** None yet.
-
-## KI-356 — a plugin's bare-closure hook registered from a timer or a process it spawned cannot be taken back — OPEN 2026-11-04
-
-**Symptom.** bedit removes or updates a package while it runs and takes back everything the
-package registered (ADR-582; bedit's `packages/retire-package`). One kind of registration
-survives the removal: a hook the package registers AT RUN TIME as a bare closure (an
-anonymous `fn`, not a symbol naming one of its functions) from a context that is neither a
-module load nor one of the package's commands or hooks — a timer callback, or a process the
-package spawned. The row stays in its registry, holding a closure over code that is gone;
-calling it runs the old package's code. Not seen in use: bedit's own registries take hook
-SYMBOLS, and no installed package registers this way.
-
-**Cause.** Ownership has three sources and this write has none of them. The kernel journals a
-registry write's writer only while a module LOAD is open (KI-136, ADR-582); bedit claims a
-run-time write for the package whose command or hook is running (`ownership/with-symbol-
-claimant`), but a timer or a spawned process runs outside that dynamic extent; and the
-retirement backstop finds a row by what it NAMES — a symbol in the package's namespaces, a
-named function defined in its files — and a bare closure names nothing (`pr-str` gives
-`#<fn>`).
-
-**Fix.** Not yet. Either the runtime records which module DEFINED a closure (its code object
-knows its namespace; exposing it would let the backstop match an anonymous `fn` too), or a
-spawned process and a timer inherit the claimant of the code that created them (a process
-flag the scheduler carries into `spawn`, read by the claim).
-
-**Guard.** None yet; bedit's `tests/plugin_registry_test.blsp` covers every attributable
-kind.
-
 ## KI-313 — KI-309 again: `interrupt_one_worker`'s native-walk case blocked its worker twice 👀 WATCHING
 
 **Seen:** `a_native_walk_that_hosts_a_park_blocks_once_and_then_parks` failed `<= dirty + 1` ("a
@@ -203,8 +139,8 @@ Each closed row's full section is `## KI-N` in [archive/known-issues-closed.md](
 | KI-369 | **Windows has no pseudo-terminal** — `os/spawn-pty` raises naming ConPTY, so terminal buffers and the line-mode REPL are Unix-only | **OPEN** — needs ConPTY: a raw-handle child type in the subprocess registry, `CreatePseudoConsole` + `CreateProcessW` with an attribute list |
 | KI-365 | **`file/spit-private` is not private on Windows** — a plain create there, so the file takes its directory's ACL; bedit's auto-save sidecars are as private as the file beside them | ✅ **FIXED 2026-11-04** — a protected one-entry DACL (the current user) set before the write. Guard: `tests/platform_test.blsp` "owner-only files", the ACL read back with `icacls` on the Windows runner |
 | KI-364 | **Windows has no platform shell** — a `sh -c` command line needs an `sh` on PATH, and `cmd.exe /c` cannot be spelled through `os/cmd` because a `"` in the line reaches it MSVC-quoted | ✅ **FIXED 2026-11-04** — `:raw-args` on `os/cmd` / `os/spawn` / `os/detach`, and `os/shell` / `os/shell-cmd` / `os/shell-spawn` (`cmd.exe /d /s /c "LINE"` on Windows). Guard: `tests/platform_test.blsp` "the platform's shell", quotes, spaces, pipes and `&&` on the Windows runner |
-| KI-357 | **a module materialised from a startup image has fewer registry writers than its source load** — the project image credits none, the stdlib image credits map entries but no list member, so `registry/written-by` of an imaged module answers less | **OPEN** — needs a kernel op that credits an existing entry, called as an imaged module materialises |
-| KI-356 | **a plugin's bare-closure hook registered from a timer or a process it spawned cannot be taken back** — no load is open, no claimant is bound, and the closure names nothing the retirement backstop can match | **OPEN** — needs the runtime to say which module defined a closure, or a claimant spawned processes and timers inherit |
+| KI-357 | **a module materialised from a startup image had fewer registry writers than its source load** — the project image credited none, the stdlib image credited map entries but no list member, so `registry/written-by` of an imaged module answered less | ✅ **fixed** 2026-11-04 — ADR-595: a `:credit` registry op; the stdlib image replays a list member with the op that added it, the project image credits what it carries as it installs |
+| KI-356 | **a plugin's bare-closure hook registered from a timer or a process it spawned could not be taken back** — no load was open, no claimant bound, and the closure named nothing the retirement backstop could match | ✅ **fixed** 2026-11-04 — ADR-596: a process's acting writer (inherited at `spawn`, set by `registry/with-acting-writer`) credits its run-time writes; `reflect/fn-module` names an anonymous `fn`'s module |
 | KI-334 | **a served session whose loop dies takes its unsaved buffers with it** — the local window's loop auto-saves and restarts over its buffers (bedit's lifeline); a `serve` session's loop dying just ends the session, its buffers in its model | ✅ **FIXED 2026-11-04** — ADR-593: a session is a supervisor over its loop, which a death restarts (within a budget) for the same client after the app's `:on-crash` hook, from what the loop retained; `registry-start {:owner pid}` gives a registry a session's lifetime, so bedit hosts a served session's buffers in processes that outlive its loop, auto-saves them and restarts over them. Guards: `serve_test` "serve: a session supervises its loop", `buffer_registry_test` "an owner's lifetime" |
 | KI-336 | **a non-Latin keyboard layout lost every Control and Meta shortcut** — Control+A under a Russian layout arrived as `:ctrl-ф`; macOS Option was always Meta, so a layout's Option characters could not be typed; a dead key with Control or Alt delivered nothing | ✅ **FIXED 2026-11-03** — ADR-541: a chord whose character is not Latin is read by the key's US position, `{:option-meta …}` picks which Option is Meta (left by default, the right one composing), a dead key in a chord is its accent. Guard: `host::gui::backend::input::adr_541_tests` (red with the fallback removed) |
 | KI-316 | **the doc catalogue filed `match` under `case` and three names under `:other`, after a prelude edit** — `doc_catalog_test` red on a tree whose only prelude change added 28 lines, while an older build ran beside it | ✅ **FIXED 2026-11-03** — every Brood wrote its prelude to one shared `~/.cache/brood/prelude.blsp`, so whichever ran last owned it and a newer build's def-sites pointed into an older text; `doc-catalog` bakes the section headers it reads from that file into the stdlib image, and `nest stdimage` rebuilt from the image it was replacing, so the wrong headers survived every rebuild. The copy is now keyed by the prelude's text (`prelude-source-<hash>/prelude.blsp`) and `nest stdimage` builds from source. Guard: `boot::prelude_copy_tests` (red with the unkeyed name) |

@@ -724,12 +724,33 @@ Returns the number replayed.
 Without this a materialised `datetime` is bound and its impls dispatch, but `Temporal` is
 not declared: `satisfies?` answers no, `%sealed-members` answers nil, and an ability op
 resolves against an ability the runtime has never heard of."
-  (let (regs (or (get (or *std-regs* {}) key) []))
-    ;; `key` as the writer: the namespace at this moment is whoever required the module,
-    ;; and the writer journal (KI-136) must credit the module being materialised — a
-    ;; module, so a symbol (a string names a FILE, ADR-582).
-    (doseq (r regs) (%registry-update! (get r 0) :assoc (get r 1) (get r 2) (symbol key)))
-    (count regs)))
+  (%replay-registrations! key (or (get (or *std-regs* {}) key) [])))
+
+(defn- %replay-registrations! (key regs)
+  "Apply `regs` — the registrations module `key`'s load performed, as the stdlib image
+records them — crediting each to the module. Returns the number replayed.
+
+A map entry is `[registry key-path value]`, put back with `:assoc`. A list registry's member
+is `[registry nil member op]`, added back with the op that added it (`:cons-new` or
+`:append-new`, ADR-595), so it lands at the end of the list its source load put it."
+  ;; `key` as the writer: the namespace at this moment is whoever required the module,
+  ;; and the writer journal (KI-136) must credit the module being materialised — a
+  ;; module, so a symbol (a string names a FILE, ADR-582).
+  (doseq (r regs)
+    (%registry-update! (get r 0) (or (get r 3) :assoc) (get r 1) (get r 2) (symbol key)))
+  (count regs))
+
+(def- *project-image-credits* nil)
+
+(defn- %set-project-image-credits! (credits)
+  "Record `credits` — `[registry path writer]` for every registry entry a carried module's
+load wrote, `path` an entry's key path or `[index]` for a list member — in the ROOT global
+a project image carries them in (ADR-595), and return them. `project-image` sets it before
+writing and reads it back when the root section is installed."
+  (def- *project-image-credits* credits)
+  *project-image-credits*)
+
+(defn- %project-image-credits () *project-image-credits*)
 
 ;; --- the stdlib image, from the prelude --------------------------------------
 ;;
@@ -1677,6 +1698,10 @@ as an ordinary frame too, and a `receive` in it parks."
 ; shadowed ones included, so `next-impl` can reach the impl one tier down (ADR-432). Read
 ; only by `%next-impl` and the image writers, never on dispatch.
 (def- *impl-tiers* {})
+; [ability op id] → {tier → ([fn ns] …)}: the registrations a SAME-tier one from another
+; namespace replaced, newest first (ADR-604), so taking the newer one back (`registry/retract-impl`)
+; restores the one it replaced rather than leaving the slot empty.
+(def- *impl-shadowed* {})
 ; qualified-op-fn-symbol → the ability that declared it. An ability op becomes a global
 ; `defn` named after the op (qualified to the declaring ns), so two abilities in the SAME
 ; ns declaring the same op name would have the second silently clobber the first's op

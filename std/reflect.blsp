@@ -389,6 +389,46 @@ live, from a buffer that is mid-edit half the time.
     (reflect/form-pos 42)   ;=> nil"
   (%form-pos form))
 
+(defn fn-module (f)
+  "The module whose source function `f` was written in, as a symbol — an anonymous `fn`
+too, which knows the module of the code that built it; a top-level function by its qualified
+name — or nil for a builtin, a value that is not a function, or code of no module (the
+prelude, a file without a `defmodule`). How a
+program that unloads a plugin finds the plugin's closures in its tables, where a bare `fn`
+names nothing (ADR-596).
+
+    (reflect/fn-module reflect/fn-module)   ;=> reflect
+    (reflect/fn-module 42)                  ;=> nil"
+  (%fn-module f))
+
+(defn project-modules ()
+  "The short names of the active project's modules, as strings, sorted — every name a
+`mod/name` inside the project roots to `project/mod/name` (ADR-070) — or `[]` outside a
+project. What a host checks a plugin's module names against before loading it (ADR-604).
+
+    (vector? (reflect/project-modules))   ;=> true"
+  (let (current (%set-package-context nil nil))
+    (%set-package-context (first current) (second current))
+    (vec (sort (map (or (second current) ()) ->string)))))
+
+(defn with-modules-apart (modules thunk)
+  "Call `thunk` with `modules` (names, as strings or symbols) resolving as THEMSELVES rather
+than into the active project: inside project `bedit`, `org/f` names bedit's `bedit/org/f`
+— except here, for an `org` listed, where it names `org/f`. Every other module still roots as
+it did, so code loaded here reaches the project's own modules as before. How a host loads a
+plugin whose module shares a short name with one of its own without the plugin loading INTO
+the host's module (ADR-604). The context is restored on the way out, a throw included, and a
+process spawned inside inherits it. Outside a project it simply calls `thunk`.
+
+    (reflect/with-modules-apart [\"org\"] (fn () :loaded))   ;=> :loaded"
+  (let (apart (into #{} (map modules (fn (module) (symbol (->string module)))))
+        current (%set-package-context nil nil)
+        prefix (first current)
+        project-modules (second current))
+    (%set-package-context prefix
+      (seq/reject project-modules (fn (module) (contains? apart module))))
+    (try (thunk) (finally (%set-package-context prefix project-modules)))))
+
 (defn current-file ()
   "The path of the file currently being loaded, or nil.
 
