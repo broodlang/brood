@@ -7,6 +7,14 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 ## v0.49.1 — the parallel cold build finishes
 
 **Added.**
+- **A frame can declare a seam row** (ADR-610). `[:seam row]` (`editor/display/seam`) anchors
+  the rows above `row` to the window's top and the rows from it down to its bottom, so the last
+  row ends exactly on the bottom inset at every window height; the leftover pixels lie at the
+  seam, painted by the row above it. An editor names its bottom mode line and its echo area
+  stops floating off the bottom edge as the window resizes. `{:top-band false}` says row 0 is not
+  a band, and the top gets the inset the sides have. One row map places every row for both
+  painters, the damage strips, the edge bleed and the mouse hit-test; `gui/render-frame` and
+  `gui/capture` return `:seam` and `:row-tops`. A frame without the op lays out as before.
 - **A frame can be painted into memory by the window's own painter** (ADR-609).
   `gui/render-frame frame spec` paints a frame as a window of a given size, font, inset and
   background would — the same layout rule, edge bleed and glyph rasteriser — with no window
@@ -26,6 +34,13 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   moved to `ansi/`).
 
 **Changed.**
+- **GUI text sits by CSS's line box and blends in linear light** (ADR-611). The baseline is
+  the half-leading one around the font's OS/2 typo box (hhea when the typo metrics are
+  missing), rounded once, so it is the same pixel in every row; DejaVu-style fonts no longer
+  sit low, and a geometric mark (`●`, `✓`) centres on the lowercase beside it rather than the
+  cell. Text blends in linear light with the encoded lerp's weight on both painters (the GPU
+  through the sRGB view), and `gui-text-contrast!`'s γ is the gamma light-on-dark text is
+  weighted at; its default is now 1.4 (was 1.0), so light text on a dark ground reads fuller.
 - **A GUI window's row 0 starts at its top edge** (ADR-508 addendum). The inset is a margin on
   the left, right and bottom only, and the leftover height goes under the last row. The top
   margin was the inset plus half the leftover, so an editor's header line had a strip of window

@@ -85,6 +85,14 @@ pub fn key_repeats(_id: u64) -> Result<super::RepeatCounts, String> {
 pub fn latency(_id: u64) -> Result<Vec<super::LatencySample>, String> {
     Err(NOT_COMPILED.into())
 }
+pub fn latency_histograms(
+    _id: u64,
+) -> Result<(super::LatencyHistogram, super::LatencyHistogram), String> {
+    Err(NOT_COMPILED.into())
+}
+pub fn key_repeat(_id: u64) -> bool {
+    false
+}
 pub fn draw(_id: u64, _ops: Vec<Op>) -> Result<(), String> {
     Err(NOT_COMPILED.into())
 }

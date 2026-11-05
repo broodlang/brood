@@ -8,6 +8,7 @@
 //! `render_ops` is fuzzed against wild inputs here.
 
 use super::render::CpuTexture;
+use super::rows::RowMap;
 use super::*;
 
 // Paint-breakdown diagnostics (BROOD_STALL_MS): single GUI thread, so Relaxed is
@@ -124,15 +125,18 @@ fn dump_canvas(canvas: &[u32], w: usize, h: usize) {
 // ---- the strip diff ----------------------------------------------------------
 
 /// The signed pixel-row band `[top, bottom)` an op paints, before clipping, given the
-/// grid origin `oy`, cell height `ch` and the scroll shift `dy` in effect where it
+/// grid's row map `rows` (ADR-610) and the scroll shift `dy` in effect where it
 /// sits; `None` for an op that paints nothing (a cursor zone). Conservative by
 /// construction — a band may be wider than the pixels actually touched, never
 /// narrower — since it decides which rows a change re-rasterises. A `Clear` is the
 /// whole framebuffer; a `ScrollRegion` is not an entry (its children are, each with
 /// its shift), so it never gets here.
-fn op_band(op: &Op, dy: isize, oy: usize, ch: usize) -> Option<(isize, isize)> {
+fn op_band(op: &Op, dy: isize, rows: &RowMap) -> Option<(isize, isize)> {
+    let ch = rows.ch;
     let ch_i = ch as isize;
-    let cell_top = |row: u16| oy as isize + row as isize * ch_i - dy;
+    let cell_top = |row: u16| rows.y(row as isize).saturating_sub(dy);
+    // The height of `n` rows from `row`, through the map: a span into the seam takes the gap.
+    let span = |row: u16, n: usize| rows.span(row as isize, n.min(isize::MAX as usize) as isize);
     // A height in cells as pixels, saturating: the op vocabulary allows u16::MAX rows.
     let px_h = |cells: usize| (cells as isize).saturating_mul(ch_i);
     let band = |top: isize, h: isize| Some((top, top.saturating_add(h)));
@@ -173,11 +177,11 @@ fn op_band(op: &Op, dy: isize, oy: usize, ch: usize) -> Option<(isize, isize)> {
         }
         Op::Text { row, face, .. } => band(cell_top(*row), px_h(face.scale.max(1) as usize)),
         Op::Cursor { row, .. } => band(cell_top(*row), ch_i),
-        Op::Rect { row, h, .. } => band(cell_top(*row), px_h(*h as usize)),
+        Op::Rect { row, h, .. } => band(cell_top(*row), span(*row, *h as usize)),
         Op::FRect { y, h, .. } => {
             // shifted like a cell (`cell_top`): an frect inside a scroll region moves
-            let top = oy as f32 + y * ch as f32 - dy as f32;
-            let bottom = top + h * ch as f32;
+            let top = rows.yf(*y) - dy as f32;
+            let bottom = top + rows.spanf(*y, *h);
             if !top.is_finite() || !bottom.is_finite() {
                 // Non-finite geometry paints nothing sensible; treat it as everywhere
                 // so whatever it did paint is repainted.
@@ -199,20 +203,23 @@ fn op_band(op: &Op, dy: isize, oy: usize, ch: usize) -> Option<(isize, isize)> {
                 })
                 .max()
                 .unwrap_or(0);
-            band(cell_top(*row0) + dy, px_h(tallest)) // VSpans ignore the scroll shift
+            band(cell_top(*row0) + dy, span(*row0, tallest)) // VSpans ignore the scroll shift
         }
         Op::Cells { row0, w, bytes, .. } | Op::CellsRgb { row0, w, bytes, .. } => {
             let bits = bytes.len().saturating_mul(8);
-            let rows = bits.div_ceil((*w).max(1) as usize);
-            band(cell_top(*row0) + dy, px_h(rows)) // as do the bitboards
+            let board_rows = bits.div_ceil((*w).max(1) as usize);
+            band(cell_top(*row0) + dy, span(*row0, board_rows)) // as do the bitboards
         }
         Op::ScrollRegion { .. } => Some((isize::MIN, isize::MAX)),
         // A region paints only inside its own rect, whose height is in PARENT cells — so
         // this band is exact even though the ops inside it are on a different grid.
-        Op::CellRegion { y, h, .. } => band(cell_top(*y), px_h(*h as usize)),
+        Op::CellRegion { y, h, .. } => band(cell_top(*y), span(*y, *h as usize)),
         // Never a leaf: `flatten` splices a fragment's ops into the frame's leaves, and
         // `render_ops` descends into it — so a fragment itself has no band of its own.
         Op::Fragment(_) => None,
+        // A seam places the rows; it paints nothing (a new one invalidates the whole frame:
+        // `Renderer::set_layout`).
+        Op::Seam { .. } => None,
     }
 }
 
@@ -258,36 +265,44 @@ fn flatten<'a>(ops: &'a [Op], ch: usize, dy: isize, out: &mut Vec<Entry<'a>>) {
     }
 }
 
-/// The cell-row strips of a `fb_h`-tall framebuffer whose grid starts at `oy`:
-/// strip 0 is the top margin `[0, oy)`, strip `k ≥ 1` the cell row `k-1`, the last
-/// one whatever remainder is left below the grid. The unit of the frame diff: a strip
+/// The cell-row strips of a `fb_h`-tall framebuffer whose rows the map `rows` places:
+/// strip 0 is the top margin `[0, top)`, strip `k ≥ 1` the cell row `k-1` (`[y(k-1),
+/// y(k))`, so the row above a seam is one strip with its gap), and the strips past the
+/// grid whatever is left below it, a cell at a time. The unit of the frame diff: a strip
 /// is repainted whole or not at all, so the diff never has to reason about pixels.
 struct Strips {
-    oy: usize,
-    ch: usize,
+    rows: RowMap,
     fb_h: usize,
     count: usize,
 }
 
 impl Strips {
-    fn new(oy: usize, ch: usize, fb_h: usize) -> Strips {
-        let ch = ch.max(1);
-        let oy = oy.min(fb_h);
+    fn new(rows: RowMap, fb_h: usize) -> Strips {
+        let top = rows.top.min(fb_h);
+        // the rows it takes to reach the bottom: at most one past the uniform count, since
+        // the gap only pushes rows down
+        let mut n = (fb_h - top).div_ceil(rows.ch);
+        while n > 0 && rows.y(n as isize - 1) >= fb_h as isize {
+            n -= 1;
+        }
+        while rows.y(n as isize) < fb_h as isize {
+            n += 1;
+        }
         Strips {
-            oy,
-            ch,
+            rows,
             fb_h,
-            count: 1 + (fb_h - oy).div_ceil(ch),
+            count: 1 + n,
         }
     }
 
     /// Strip `k`'s pixel rows, clipped to the framebuffer.
     fn rows(&self, k: usize) -> (usize, usize) {
+        let clip = |y: isize| (y.max(0) as usize).min(self.fb_h);
         if k == 0 {
-            (0, self.oy)
+            (0, clip(self.rows.top as isize))
         } else {
-            let top = self.oy + (k - 1) * self.ch;
-            (top.min(self.fb_h), (top + self.ch).min(self.fb_h))
+            let row = k as isize - 1;
+            (clip(self.rows.y(row)), clip(self.rows.y(row + 1)))
         }
     }
 
@@ -300,11 +315,10 @@ impl Strips {
             return 0..0;
         }
         let strip_of = |y: isize| -> usize {
-            let y = y as usize;
-            if y < self.oy {
+            if y < self.rows.top as isize {
                 0
             } else {
-                (1 + (y - self.oy) / self.ch).min(self.count - 1)
+                (1 + self.rows.row_of(y as f64 + 0.5) as usize).min(self.count - 1)
             }
         };
         strip_of(top)..strip_of(bottom - 1) + 1
@@ -322,11 +336,12 @@ struct Leaves<'a> {
 }
 
 impl<'a> Leaves<'a> {
-    fn of(ops: &'a [Op], strips: &Strips, oy: usize, ch: usize, caret_hidden: bool) -> Leaves<'a> {
+    fn of(ops: &'a [Op], strips: &Strips, caret_hidden: bool) -> Leaves<'a> {
+        let rows = &strips.rows;
         let mut leaves = Vec::new();
-        flatten(ops, ch, 0, &mut leaves);
+        flatten(ops, rows.ch, 0, &mut leaves);
         let bands: Vec<Option<(isize, isize)>> =
-            leaves.iter().map(|e| op_band(e.op, e.dy, oy, ch)).collect();
+            leaves.iter().map(|e| op_band(e.op, e.dy, rows)).collect();
         let mut per_strip = vec![Vec::new(); strips.count];
         for (i, band) in bands.iter().enumerate() {
             if let Some((top, bottom)) = band {
@@ -562,10 +577,10 @@ fn strip_columns(
 
 /// The pixel top of a leaf that is a translatable cell-row op (text, cursor, a rect), as
 /// `op_band` places it; `None` for the others.
-fn leaf_top(op: &Op, dy: isize, oy: usize, ch: usize) -> Option<isize> {
+fn leaf_top(op: &Op, dy: isize, rows: &RowMap) -> Option<isize> {
     match op {
         Op::Text { row, .. } | Op::Cursor { row, .. } | Op::Rect { row, .. } => {
-            Some(oy as isize + *row as isize * ch as isize - dy)
+            Some(rows.y(*row as isize).saturating_sub(dy))
         }
         _ => None,
     }
@@ -580,12 +595,11 @@ fn leaf_translates(
     old: &Entry,
     delta: isize,
     (y0, y1): (isize, isize),
-    oy: usize,
+    rows: &RowMap,
     cw: usize,
-    ch: usize,
 ) -> bool {
     let (src0, src1) = (y0 - delta, y1 - delta);
-    let ch_i = ch as isize;
+    let top = |row: u16, dy: isize| rows.y(row as isize).saturating_sub(dy);
     let covers = |top: f32, bottom: f32, margin: f32, lo: isize, hi: isize| {
         top + margin <= lo as f32 && bottom - margin >= hi as f32
     };
@@ -608,8 +622,7 @@ fn leaf_translates(
             nc == oc
                 && nf == of
                 && ns == os
-                && oy as isize + *nr as isize * ch_i - new.dy
-                    == oy as isize + *or as isize * ch_i - old.dy + delta
+                && top(*nr, new.dy) == top(*or, old.dy).saturating_add(delta)
         }
         (
             Op::Cursor {
@@ -634,8 +647,7 @@ fn leaf_translates(
                 && ncolor == ocolor
                 && nblink == oblink
                 && nunder == ounder
-                && oy as isize + *nr as isize * ch_i - new.dy
-                    == oy as isize + *or as isize * ch_i - old.dy + delta
+                && top(*nr, new.dy) == top(*or, old.dy).saturating_add(delta)
         }
         (
             Op::Rect {
@@ -658,9 +670,13 @@ fn leaf_translates(
             if nc != oc || nw != ow || nf != of || nrad != orad {
                 return false;
             }
-            let ntop = oy as isize + *nr as isize * ch_i - new.dy;
-            let otop = oy as isize + *or as isize * ch_i - old.dy;
-            if nh == oh && ntop == otop + delta {
+            let (ntop, otop) = (top(*nr, new.dy), top(*or, old.dy));
+            // heights through the map: the row above a seam is taller by its gap
+            let (nheight, oheight) = (
+                rows.span(*nr as isize, *nh as isize),
+                rows.span(*or as isize, *oh as isize),
+            );
+            if nheight == oheight && ntop == otop.saturating_add(delta) {
                 return true;
             }
             // a solid fill: the same pixels wherever it is, away from its corners
@@ -671,13 +687,13 @@ fn leaf_translates(
             };
             covers(
                 ntop as f32,
-                (ntop + *nh as isize * ch_i) as f32,
+                ntop.saturating_add(nheight) as f32,
                 margin,
                 y0,
                 y1,
             ) && covers(
                 otop as f32,
-                (otop + *oh as isize * ch_i) as f32,
+                otop.saturating_add(oheight) as f32,
                 margin,
                 src0,
                 src1,
@@ -706,18 +722,19 @@ fn leaf_translates(
             if nx != ox_ || nw != ow || nf != of || nop != oop || nrad != orad {
                 return false;
             }
-            let ntop = oy as f32 + ny * ch as f32 - new.dy as f32;
-            let otop = oy as f32 + oy_ * ch as f32 - old.dy as f32;
+            let ntop = rows.yf(*ny) - new.dy as f32;
+            let otop = rows.yf(*oy_) - old.dy as f32;
+            let (nheight, oheight) = (rows.spanf(*ny, *nh), rows.spanf(*oy_, *oh));
             if !(ntop.is_finite() && otop.is_finite()) {
                 return false;
             }
-            if nh == oh && (ntop - otop - delta as f32).abs() < 1e-3 {
+            if (nheight - oheight).abs() < 1e-3 && (ntop - otop - delta as f32).abs() < 1e-3 {
                 return true;
             }
             // the same slop `op_band` allows a hairline's snap, plus the corners
             let margin = nrad * cw as f32 + 5.0;
-            covers(ntop, ntop + nh * ch as f32, margin, y0, y1)
-                && covers(otop, otop + oh * ch as f32, margin, src0, src1)
+            covers(ntop, ntop + nheight, margin, y0, y1)
+                && covers(otop, otop + oheight, margin, src0, src1)
         }
         // bitboards and column spans ignore the scroll shift and are never translated
         _ => false,
@@ -727,11 +744,11 @@ fn leaf_translates(
 /// The pixel translations that could carry an old leaf onto the first translatable
 /// leaf of the new strip `k`: for each old leaf equal to it up to its row, the
 /// difference of their tops. The candidates a strip's blit is tried at.
-fn blit_deltas(new: &Leaves, old: &Leaves, k: usize, oy: usize, ch: usize) -> Vec<isize> {
+fn blit_deltas(new: &Leaves, old: &Leaves, k: usize, rows: &RowMap) -> Vec<isize> {
     let mut deltas = Vec::new();
     for &i in &new.per_strip[k] {
         let leaf = &new.leaves[i as usize];
-        let Some(top) = leaf_top(leaf.op, leaf.dy, oy, ch) else {
+        let Some(top) = leaf_top(leaf.op, leaf.dy, rows) else {
             continue;
         };
         // a whole-pane rect anchors nothing (it matches anywhere by covering)
@@ -739,7 +756,7 @@ fn blit_deltas(new: &Leaves, old: &Leaves, k: usize, oy: usize, ch: usize) -> Ve
             continue;
         }
         for old_leaf in &old.leaves {
-            let Some(old_top) = leaf_top(old_leaf.op, old_leaf.dy, oy, ch) else {
+            let Some(old_top) = leaf_top(old_leaf.op, old_leaf.dy, rows) else {
                 continue;
             };
             let same = match (leaf.op, old_leaf.op) {
@@ -816,9 +833,8 @@ fn strip_translates(
     delta: isize,
     (y0, y1): (usize, usize),
     fb_h: usize,
-    oy: usize,
+    rows: &RowMap,
     cw: usize,
-    ch: usize,
 ) -> bool {
     let (src0, src1) = (y0 as isize - delta, y1 as isize - delta);
     if src0 < 0 || src1 > fb_h as isize {
@@ -841,9 +857,8 @@ fn strip_translates(
             &old.leaves[j],
             delta,
             (y0 as isize, y1 as isize),
-            oy,
+            rows,
             cw,
-            ch,
         ) {
             return false;
         }
@@ -863,10 +878,10 @@ fn strip_blits(
     dirty: &[bool],
     strips: &Strips,
     fb_h: usize,
-    oy: usize,
     cw: usize,
-    ch: usize,
 ) -> Vec<(usize, usize)> {
+    let rows = &strips.rows;
+    let ch = rows.ch;
     let mut blits = Vec::new();
     let mut last_delta: Option<isize> = None;
     for k in 1..strips.count {
@@ -875,19 +890,21 @@ fn strip_blits(
         }
         let (y0, y1) = strips.rows(k);
         if y1 - y0 != ch {
-            continue; // a partial strip at the bottom: its rows are its own
+            // a partial strip at the bottom, or the row above a seam with its gap: its rows
+            // are its own
+            continue;
         }
         let mut candidates = Vec::new();
         if let Some(d) = last_delta {
             candidates.push(d);
         }
-        for d in blit_deltas(new, old, k, oy, ch) {
+        for d in blit_deltas(new, old, k, rows) {
             if !candidates.contains(&d) {
                 candidates.push(d);
             }
         }
         for delta in candidates {
-            if strip_translates(new, old, k, delta, (y0, y1), fb_h, oy, cw, ch) {
+            if strip_translates(new, old, k, delta, (y0, y1), fb_h, rows, cw) {
                 blits.push((k, (y0 as isize - delta) as usize));
                 last_delta = Some(delta);
                 break;
@@ -1046,20 +1063,21 @@ fn collect_zones(
 
 // ---- rasterising the ops ----------------------------------------------------------
 
-/// The pixel rows a caret on grid `row` paints: its cell's top, which is above `oy` while the
-/// row scrolls off the viewport's top, and the span drawn, clipped to `[oy, fb_h)` rather
+/// The pixel rows a caret on grid `row` paints: its cell's top (`RowMap::y`), which is above
+/// the grid's top while the row scrolls off the viewport's top, and the span drawn, clipped to
+/// `[top, fb_h)` rather
 /// than dropped, so the caret tracks its text through a whole smooth scroll. `None` when
 /// none of it shows.
 fn caret_rows(
     row: u16,
-    oy: usize,
-    ch: usize,
+    rows: &RowMap,
     scroll_dy: isize,
     fb_h: usize,
 ) -> Option<(isize, usize, usize)> {
-    let cell_top = oy as isize + row as isize * ch as isize - scroll_dy;
-    let draw_top = cell_top.max(oy as isize);
-    let draw_bottom = (cell_top + ch as isize).min(fb_h as isize);
+    let cell_top = rows.y(row as isize).saturating_sub(scroll_dy);
+    let draw_top = cell_top.max(rows.top as isize);
+    // a caret is a cell tall, also on the row above a seam
+    let draw_bottom = cell_top.saturating_add(rows.ch as isize).min(fb_h as isize);
     (draw_top < draw_bottom).then_some((cell_top, draw_top as usize, draw_bottom as usize))
 }
 
@@ -1075,15 +1093,17 @@ pub(super) fn render_ops(
     canvas: &mut Canvas,
     r: &mut Renderer,
     ox: usize,
-    oy: usize,
+    rows: &RowMap,
     cw: usize,
-    ch: usize,
     bg0: u32,
     scroll_dy: isize,
 ) {
     let fb_h = canvas.h;
+    // `oy` is the clip every shifted op stops at (nothing is painted above row 0); every
+    // row's pixel top comes from the map (`rows.y`), never from `oy + row * ch`
+    let (oy, ch) = (rows.top, rows.ch);
     for op in ops {
-        if let Some((top, bottom)) = op_band(op, scroll_dy, oy, ch)
+        if let Some((top, bottom)) = op_band(op, scroll_dy, rows)
             && (bottom <= canvas.y0 as isize || top >= canvas.y1 as isize)
         {
             continue;
@@ -1092,10 +1112,10 @@ pub(super) fn render_ops(
             Op::Clear => canvas.fill_rows(0, fb_h, bg0),
             Op::ScrollRegion { dy_frac, ops } => {
                 let inner_dy = scroll_px(*dy_frac, ch);
-                render_ops(ops, canvas, r, ox, oy, cw, ch, bg0, inner_dy);
+                render_ops(ops, canvas, r, ox, rows, cw, bg0, inner_dy);
             }
             Op::Fragment(fragment) => {
-                render_ops(&fragment.0, canvas, r, ox, oy, cw, ch, bg0, scroll_dy);
+                render_ops(&fragment.0, canvas, r, ox, rows, cw, bg0, scroll_dy);
             }
             Op::CellRegion {
                 x, y, h, px, ops, ..
@@ -1111,8 +1131,8 @@ pub(super) fn render_ops(
                 if region.cell_w == 0 || region.cell_h == 0 {
                     continue;
                 }
-                let top = oy as isize + *y as isize * ch as isize - scroll_dy;
-                let bottom = top.saturating_add((*h as isize).saturating_mul(ch as isize));
+                let top = rows.y(*y as isize).saturating_sub(scroll_dy);
+                let bottom = top.saturating_add(rows.span(*y as isize, *h as isize));
                 let (y0, y1) = (
                     top.max(canvas.y0 as isize).max(0) as usize,
                     bottom.min(canvas.y1 as isize).max(0) as usize,
@@ -1130,9 +1150,8 @@ pub(super) fn render_ops(
                     &mut inner,
                     r,
                     region_ox,
-                    region_oy,
+                    &RowMap::uniform(region_oy, region.cell_h),
                     region.cell_w,
-                    region.cell_h,
                     bg0,
                     0,
                 );
@@ -1164,7 +1183,7 @@ pub(super) fn render_ops(
                 let scale = face.scale.max(1) as usize;
                 let ch_s = ch * scale;
                 // Compute the effective top with scroll offset; clip to the grid origin.
-                let top_signed = oy as isize + *row as isize * ch as isize - scroll_dy;
+                let top_signed = rows.y(*row as isize).saturating_sub(scroll_dy);
                 let clip_skip = (oy as isize - top_signed).max(0) as usize;
                 if clip_skip >= ch_s {
                     continue; // entirely above the grid origin
@@ -1243,8 +1262,9 @@ pub(super) fn render_ops(
                 // (reverse swaps in the fg). No background → nothing to paint.
                 let bg = if face.reverse { face.fg } else { face.bg };
                 if let Some(bg) = bg {
-                    let top_signed = oy as isize + *row as isize * ch as isize - scroll_dy;
-                    let h_px = *h as isize * ch as isize;
+                    let top_signed = rows.y(*row as isize).saturating_sub(scroll_dy);
+                    // through the map: a panel whose bottom is the seam covers the gap
+                    let h_px = rows.span(*row as isize, *h as isize);
                     let clip_skip = (oy as isize - top_signed).max(0);
                     let visible_h = (h_px - clip_skip).max(0) as usize;
                     if visible_h > 0 {
@@ -1297,9 +1317,9 @@ pub(super) fn render_ops(
                     fill_rrect(
                         canvas,
                         ox as f32 + *x * cw as f32,
-                        oy as f32 + *y * ch as f32 - scroll_dy as f32,
+                        rows.yf(*y) - scroll_dy as f32,
                         *w * cw as f32,
-                        *h * ch as f32,
+                        rows.spanf(*y, *h),
                         *radius * cw as f32,
                         bg,
                         *opacity,
@@ -1319,8 +1339,7 @@ pub(super) fn render_ops(
                 under: Some(under),
                 ..
             } => {
-                if let Some((_, draw_top, draw_bottom)) = caret_rows(*row, oy, ch, scroll_dy, fb_h)
-                {
+                if let Some((_, draw_top, draw_bottom)) = caret_rows(*row, rows, scroll_dy, fb_h) {
                     fill_cell(
                         canvas,
                         ox + *col as usize * cw,
@@ -1335,9 +1354,8 @@ pub(super) fn render_ops(
                         canvas,
                         r,
                         ox,
-                        oy,
+                        rows,
                         cw,
-                        ch,
                         bg0,
                         scroll_dy,
                     );
@@ -1351,7 +1369,7 @@ pub(super) fn render_ops(
                 ..
             } => {
                 if let Some((cell_top, draw_top, draw_bottom)) =
-                    caret_rows(*row, oy, ch, scroll_dy, fb_h)
+                    caret_rows(*row, rows, scroll_dy, fb_h)
                 {
                     cursor_cell(
                         canvas,
@@ -1378,6 +1396,8 @@ pub(super) fn render_ops(
             | Op::Bloom { .. }
             | Op::Crt { .. }
             | Op::Burst { .. } => {}
+            // Placed the rows this walk paints with (`Renderer::rows`); paints nothing itself.
+            Op::Seam { .. } => {}
             Op::Emitter { id, .. } => paint_particles(canvas, r, *id),
             // The pixel-space ops, in software: the GPU target draws them instanced; here
             // each pixel of the quad's bounding box is turned back into the quad's own
@@ -1484,16 +1504,22 @@ pub(super) fn render_ops(
                 }
             }
             Op::VSpans { row0, col0, cols } => {
-                let top0 = oy + *row0 as usize * ch;
                 for (i, segs) in cols.iter().enumerate() {
                     let left = ox + (*col0 as usize + i) * cw;
-                    let mut y = top0;
+                    let mut row = *row0 as isize;
                     for (h, color) in segs {
-                        let span_h = *h as usize * ch;
+                        let (top, span_h) = (rows.y(row), rows.span(row, *h as isize));
                         if let Some(rgb) = color {
-                            fill_cell(canvas, left, y, cw, span_h, pack(*rgb));
+                            fill_cell(
+                                canvas,
+                                left,
+                                top.max(0) as usize,
+                                cw,
+                                span_h.max(0) as usize,
+                                pack(*rgb),
+                            );
                         }
-                        y += span_h;
+                        row = row.saturating_add(*h as isize);
                     }
                 }
             }
@@ -1521,8 +1547,10 @@ pub(super) fn render_ops(
                             let x = bit % wmod;
                             let y = bit / wmod;
                             let left = ox + (*col0 as usize + x * asp) * cw;
-                            let top = oy + (*row0 as usize + y) * ch;
-                            fill_cell(canvas, left, top, cell_w, ch, packed);
+                            let row = (*row0 as usize + y) as isize;
+                            let top = rows.y(row).max(0) as usize;
+                            let span_h = rows.span(row, 1).max(0) as usize;
+                            fill_cell(canvas, left, top, cell_w, span_h, packed);
                             b &= b - 1;
                         }
                     }
@@ -1549,8 +1577,10 @@ pub(super) fn render_ops(
                         let x = bit % wmod;
                         let y = bit / wmod;
                         let left = ox + (*col0 as usize + x * asp) * cw;
-                        let top = oy + (*row0 as usize + y) * ch;
-                        fill_cell(canvas, left, top, cell_w, ch, pack(rgb));
+                        let row = (*row0 as usize + y) as isize;
+                        let top = rows.y(row).max(0) as usize;
+                        let span_h = rows.span(row, 1).max(0) as usize;
+                        fill_cell(canvas, left, top, cell_w, span_h, pack(rgb));
                         b &= b - 1;
                     }
                 }
@@ -1763,14 +1793,15 @@ fn raster_effects(
     fx: &crate::host::gui::effects::FrameEffects,
 ) {
     use crate::host::gui::effects::{apply_bloom, apply_crt, apply_lighting};
-    let (cw, ch) = (r.cell_w.max(1), r.cell_h.max(1));
-    let (ox, oy) = r.grid_origin(fb_w, fb_h);
+    let cw = r.cell_w.max(1);
+    let (ox, _) = r.grid_origin(fb_w, fb_h);
+    let rows = r.rows(fb_w, fb_h);
     let bg0 = pack(r.bg());
     let split = fx.overlay_at.unwrap_or(frame.len());
     let (scene, overlay) = frame.split_at(split);
     let mut canvas = Canvas::band(pixels, fb_w, fb_h, 0, fb_h);
     canvas.fill_rows(0, fb_h, bg0);
-    render_ops(scene, &mut canvas, r, ox, oy, cw, ch, bg0, 0);
+    render_ops(scene, &mut canvas, r, ox, &rows, cw, bg0, 0);
     let carried: Vec<u32> = frame
         .iter()
         .filter_map(|op| match op {
@@ -1788,7 +1819,7 @@ fn raster_effects(
     }
     apply_lighting(pixels, fb_w, fb_h, fx);
     let mut canvas = Canvas::band(pixels, fb_w, fb_h, 0, fb_h);
-    render_ops(overlay, &mut canvas, r, ox, oy, cw, ch, bg0, 0);
+    render_ops(overlay, &mut canvas, r, ox, &rows, cw, bg0, 0);
     if let Some(bloom) = fx.bloom {
         apply_bloom(pixels, fb_w, fb_h, bloom);
     }
@@ -1804,9 +1835,11 @@ pub(super) fn raster_frame(
     fb_h: usize,
     force: bool,
 ) -> Vec<DamageRect> {
-    let (cw, ch) = (r.cell_w.max(1), r.cell_h.max(1));
-    let (ox, oy) = r.grid_origin(fb_w, fb_h);
-    let strips = Strips::new(oy, ch, fb_h);
+    let cw = r.cell_w.max(1);
+    let (ox, _) = r.grid_origin(fb_w, fb_h);
+    let rows = r.rows(fb_w, fb_h);
+    let ch = rows.ch;
+    let strips = Strips::new(rows, fb_h);
     let fresh = r.canvas_size != (fb_w, fb_h);
     if fresh {
         r.canvas = vec![0u32; fb_w * fb_h];
@@ -1839,11 +1872,11 @@ pub(super) fn raster_frame(
         } else if same {
             (Vec::new(), Vec::new(), Vec::new())
         } else {
-            let new = Leaves::of(frame, &strips, oy, ch, r.caret_hidden);
-            let old = Leaves::of(&r.prev_ops, &strips, oy, ch, r.prev_caret_hidden);
+            let new = Leaves::of(frame, &strips, r.caret_hidden);
+            let old = Leaves::of(&r.prev_ops, &strips, r.prev_caret_hidden);
             let mut dirty = strip_diff(&new, &old, &strips);
             let blits = if gui_blit_enabled() {
-                strip_blits(&new, &old, &dirty, &strips, fb_h, oy, cw, ch)
+                strip_blits(&new, &old, &dirty, &strips, fb_h, cw)
             } else {
                 Vec::new()
             };
@@ -1894,7 +1927,7 @@ pub(super) fn raster_frame(
         // still expects a clean background, and a strip repaint needs one either
         // way (the rect's old pixels are exactly what changed).
         canvas.fill_rows(rect.y0, rect.y1 - rect.y0, bg0);
-        render_ops(frame, &mut canvas, r, ox, oy, cw, ch, bg0, 0);
+        render_ops(frame, &mut canvas, r, ox, &rows, cw, bg0, 0);
     }
     r.canvas = pixels;
     if !same_ops {
@@ -2073,7 +2106,16 @@ mod render_robustness {
         let (fb_w, fb_h) = (64usize, 48usize);
         let mut buf = vec![0u32; fb_w * fb_h];
         let mut canvas = Canvas::full(&mut buf, fb_w, fb_h);
-        render_ops(ops, &mut canvas, &mut r, 2, 2, cw, ch, 0, 0);
+        render_ops(
+            ops,
+            &mut canvas,
+            &mut r,
+            2,
+            &RowMap::uniform(2, ch),
+            cw,
+            0,
+            0,
+        );
     }
 
     fn face_bg() -> Face {
@@ -2327,10 +2369,10 @@ mod strip_diff_tests {
 
     /// Which strips (cell rows, 1-based; 0 is the top margin) a change dirties.
     fn dirty_rows(new: &[Op], old: &[Op], oy: usize, ch: usize, fb_h: usize) -> Vec<usize> {
-        let strips = Strips::new(oy, ch, fb_h);
+        let strips = Strips::new(RowMap::uniform(oy, ch), fb_h);
         strip_diff(
-            &Leaves::of(new, &strips, oy, ch, false),
-            &Leaves::of(old, &strips, oy, ch, false),
+            &Leaves::of(new, &strips, false),
+            &Leaves::of(old, &strips, false),
             &strips,
         )
         .iter()
@@ -2389,10 +2431,10 @@ mod strip_diff_tests {
     fn a_clear_added_or_removed_dirties_everything() {
         let old = vec![text(0, "a")];
         let new = vec![Op::Clear, text(0, "a")];
-        let strips = Strips::new(0, 10, 30);
+        let strips = Strips::new(RowMap::uniform(0, 10), 30);
         let all: Vec<bool> = strip_diff(
-            &Leaves::of(&new, &strips, 0, 10, false),
-            &Leaves::of(&old, &strips, 0, 10, false),
+            &Leaves::of(&new, &strips, false),
+            &Leaves::of(&old, &strips, false),
             &strips,
         );
         // every strip that has rows (the top margin is empty at oy = 0)
@@ -2859,10 +2901,10 @@ mod strip_diff_tests {
         let new = vec![Op::Clear, shared.clone(), text(4, "L2")];
         assert_eq!(dirty_rows(&new, &old, 0, 10, 60), vec![5]);
         // the frames' fragments are one allocation: the leaves are the same ops in memory
-        let strips = Strips::new(0, 10, 60);
+        let strips = Strips::new(RowMap::uniform(0, 10), 60);
         let (a, b) = (
-            Leaves::of(&new, &strips, 0, 10, false),
-            Leaves::of(&old, &strips, 0, 10, false),
+            Leaves::of(&new, &strips, false),
+            Leaves::of(&old, &strips, false),
         );
         assert!(std::ptr::eq(a.leaves[1].op, b.leaves[1].op));
         // a fragment rebuilt with the same ops is equal, just not by pointer
@@ -3179,7 +3221,16 @@ mod strip_diff_tests {
         {
             let mut canvas = Canvas::full(&mut full, fb_w, fb_h);
             canvas.fill_rows(0, fb_h, bg0);
-            render_ops(&frame, &mut canvas, &mut renderer, ox, oy, cw, ch, bg0, 0);
+            render_ops(
+                &frame,
+                &mut canvas,
+                &mut renderer,
+                ox,
+                &RowMap::uniform(oy, ch),
+                cw,
+                bg0,
+                0,
+            );
         }
         const GARBAGE: u32 = 0x00de_ad42;
         // rects that cut through glyphs, a scaled cell, rounded corners, the turned quad,
@@ -3196,7 +3247,16 @@ mod strip_diff_tests {
             {
                 let mut canvas = Canvas::rect(&mut pixels, fb_w, fb_h, (x0, y0), (x1, y1));
                 canvas.fill_rows(y0, y1 - y0, bg0);
-                render_ops(&frame, &mut canvas, &mut renderer, ox, oy, cw, ch, bg0, 0);
+                render_ops(
+                    &frame,
+                    &mut canvas,
+                    &mut renderer,
+                    ox,
+                    &RowMap::uniform(oy, ch),
+                    cw,
+                    bg0,
+                    0,
+                );
             }
             for y in 0..fb_h {
                 for x in 0..fb_w {
@@ -3214,11 +3274,11 @@ mod strip_diff_tests {
 
     #[test]
     fn a_strip_whose_ops_have_no_known_columns_is_repainted_whole() {
-        let strips = Strips::new(0, 10, 40);
+        let strips = Strips::new(RowMap::uniform(0, 10), 40);
         let columns = |new: &[Op], old: &[Op]| {
             let (a, b) = (
-                Leaves::of(new, &strips, 0, 10, false),
-                Leaves::of(old, &strips, 0, 10, false),
+                Leaves::of(new, &strips, false),
+                Leaves::of(old, &strips, false),
             );
             strip_columns(&a, &b, 1, 200, 0, 8, false)
         };
@@ -3265,7 +3325,16 @@ mod cell_region_tests {
         let mut buf = vec![0u32; fb_w * fb_h];
         {
             let mut canvas = Canvas::full(&mut buf, fb_w, fb_h);
-            render_ops(ops, &mut canvas, &mut r, 0, 0, cw, ch, 0, 0);
+            render_ops(
+                ops,
+                &mut canvas,
+                &mut r,
+                0,
+                &RowMap::uniform(0, ch),
+                cw,
+                0,
+                0,
+            );
         }
         buf
     }
@@ -3615,7 +3684,16 @@ mod cell_region_tests {
                 rot: 1.0e30,
             },
         ];
-        render_ops(&ops, &mut canvas, &mut r, 0, 0, cw, ch, 0, 0);
+        render_ops(
+            &ops,
+            &mut canvas,
+            &mut r,
+            0,
+            &RowMap::uniform(0, ch),
+            cw,
+            0,
+            0,
+        );
         let at = |x: usize, y: usize| buf[y * fb_w + x];
         let green = pack([10, 200, 30]);
         assert_eq!(at(4, 4), green);
@@ -3695,9 +3773,8 @@ mod cell_region_tests {
             &mut canvas,
             &mut r,
             0,
-            0,
+            &RowMap::uniform(0, ch),
             cw,
-            ch,
             0,
             0,
         );
@@ -3714,9 +3791,8 @@ mod cell_region_tests {
             &mut canvas2,
             &mut r,
             0,
-            0,
+            &RowMap::uniform(0, ch),
             cw,
-            ch,
             0,
             0,
         );
@@ -3734,9 +3810,8 @@ mod cell_region_tests {
             &mut canvas3,
             &mut r,
             0,
-            0,
+            &RowMap::uniform(0, ch),
             cw,
-            ch,
             0,
             0,
         );

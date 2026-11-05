@@ -102,7 +102,7 @@
   (%gui-held-key id))
 
 (defn latency (id)
-  "Window id's recent input-to-present samples, oldest first (at most 64), each a map of milliseconds: `:total` — from the GUI thread receiving an input (a key press, a mouse button, a wheel step) to the paint of the first frame that arrived after it returning from its present — and `:paint`, that paint's share; a frame the GPU render target drew adds its phases `:encode` `:upload` `:acquire` `:submit` `:present`. Which frame answers an input cannot be known across the app's mailbox, so the next frame drawn is taken as its answer; a present returning means the compositor has the frame, not that the panel shows it (up to one refresh more). Empty headless. `BROOD_GUI_TRACE=1` prints each sample as it is taken (ADR-440).
+  "Window id's recent input-to-present samples, oldest first (at most 64), each a map of milliseconds, with `:input` — `:key` or `:pointer` (ADR-612): `:total` — from the GUI thread receiving an input (a key press, a mouse button, a wheel step) to the paint of the first frame that arrived after it returning from its present — and `:paint`, that paint's share; a frame the GPU render target drew adds its phases `:encode` `:upload` `:acquire` `:submit` `:present`. Which frame answers an input cannot be known across the app's mailbox, so the next frame drawn is taken as its answer; a present returning means the compositor has the frame, not that the panel shows it (up to one refresh more). Empty headless. `BROOD_GUI_TRACE=1` prints each sample as it is taken (ADR-440).
 
     (gui/latency id)   ;~> [{:total 6.1 :paint 1.2 :encode 0.3 …} …]
     (fn? gui/latency)   ;=> true"
@@ -115,6 +115,135 @@
     (fn? gui/key-repeats)   ;=> true"
   (%gui-key-repeats id))
 
+(defn key-repeat? (id)
+  "Whether the key press window id's app is folding is an OS auto-repeat of a key held down (under `{:key-repeat :os}`), rather than a fresh press. Each press marks it as it leaves the app's mailbox, so asked while folding that press it is exact — a double tap is two fresh presses, a held key's first press is fresh and every one after it a repeat. What an app needs to keep a held key calm: a held C-v scrolls, and the flash a single C-v earns is skipped. False before any key, under `{:key-repeat :app}`, for a window not open, and headless (ADR-612).
+
+    (gui/key-repeat? id)   ;~> true while folding the repeats of a held key"
+  (%gui-key-repeat? id))
+
+;; ---- input→present as a distribution (ADR-612) ------------------------------------
+;; A window counts every input-to-present time since it opened into log-linear buckets,
+;; keys apart from the pointer. A histogram is plain data — `{:count n :max-us n :buckets
+;; {upper-us n}}` — so it adds (two sessions), subtracts (a window of time between two
+;; readings) and persists as it is; the percentiles are read off it here.
+
+(defn latency-histogram (id)
+  "Window id's input-to-present times since it opened, as two distributions: `{:key h :pointer h}`. Each `h` is `{:count n :max-us n :buckets {upper-us n}}` — how many inputs were answered, the slowest in microseconds, and per bucket (keyed by the largest value it holds, in microseconds; exact below 16 us, then 16 buckets per power of two, so at most 6.25% wide) how many fell in it. A key is a press, an OS repeat or an input method's commit; the pointer is a button or a wheel step. Taken as `gui/latency` takes its samples: from the GUI thread receiving the input to the present of the first frame that arrived after it. Read the percentiles with `gui/latency-percentiles`; both empty headless (ADR-612).
+
+    (gui/latency-histogram id)   ;~> {:key {:count 412 :max-us 18211 :buckets {4351 3 …}} :pointer {…}}"
+  (%gui-latency-histogram id))
+
+(def- *empty-latency* {:count 0 :max-us 0 :buckets {}})
+
+(defn latency-merge (a b)
+  "Histograms `a` and `b` (`gui/latency-histogram`'s shape) as one: their counts and buckets added, the larger maximum. nil reads as empty, so a fold can start from nil.
+
+    (gui/latency-merge {:count 1 :max-us 900 :buckets {911 1}} {:count 2 :max-us 4000 :buckets {911 1 4095 1}})   ;=> {:count 3 :max-us 4000 :buckets {911 2 4095 1}}
+    (gui/latency-merge nil {:count 1 :max-us 5 :buckets {5 1}})   ;=> {:count 1 :max-us 5 :buckets {5 1}}"
+  (let (a (or a *empty-latency*)
+        b (or b *empty-latency*))
+    {:count (+ (or (:count a) 0) (or (:count b) 0))
+     :max-us (math/max (or (:max-us a) 0) (or (:max-us b) 0))
+     :buckets (fold (or (:buckets b) {})
+                (or (:buckets a) {})
+                (fn (acc [upper n]) (assoc acc upper (+ n (get acc upper 0)))))}))
+
+(defn latency-since (now before)
+  "What histogram `now` counted after histogram `before` — two readings of the same window's `gui/latency-histogram`, `before` the earlier (nil for none): the inputs between them, a window of time. Its `:max-us` is the top of its slowest bucket, no higher than `now`'s maximum, since a maximum cannot be subtracted.
+
+    (gui/latency-since {:count 3 :max-us 4000 :buckets {911 2 4095 1}} {:count 1 :max-us 900 :buckets {911 1}})   ;=> {:count 2 :max-us 4000 :buckets {911 1 4095 1}}"
+  (let (before (or before *empty-latency*)
+        buckets (fold (or (:buckets now) {})
+                  {}
+                  (fn (acc [upper n])
+                    (let (left (- n (get (or (:buckets before) {}) upper 0)))
+                      (if (> left 0) (assoc acc upper left) acc))))
+        top (reduce (keys buckets) 0 math/max))
+    {:count (math/max 0 (- (or (:count now) 0) (or (:count before) 0)))
+     :max-us (math/min top (or (:max-us now) 0))
+     :buckets buckets}))
+
+(defn- latency-at (pairs total permille max-us)
+  ;; the top of the first bucket (ascending `pairs`) whose running count reaches the
+  ;; `permille`th input, never above the maximum; integer ranks, so p99 of 100 is the 99th
+  (let (rank (math/max 1 (math/quot (+ (* total permille) 999) 1000)))
+    (letrec (walk (fn (left seen)
+                    (if (empty? left)
+                      max-us
+                      (let ([upper n] (first left)
+                            reached (+ seen n))
+                        (if (>= reached rank) (math/min upper max-us) (walk (rest left) reached))))))
+      (walk pairs 0))))
+
+(defn latency-percentiles (histogram)
+  "The median, p99, p99.9 and maximum of `histogram` (`gui/latency-histogram`'s shape) in milliseconds, with how many inputs it counts: `{:count :p50 :p99 :p999 :max}`. A percentile reads as the top of the bucket it lands in (at most 6.25% over the true value, never under it, never above the maximum). An empty histogram has nil percentiles. The tail is the point: at ten keys a second one input in a thousand is one every hundred seconds, which is what typing feels, and a median cannot show it (ADR-612).
+
+    (gui/latency-percentiles {:count 4 :max-us 9000 :buckets {2047 2 4095 1 9215 1}})   ;=> {:count 4 :p50 2.047 :p99 9.0 :p999 9.0 :max 9.0}
+    (:p50 (gui/latency-percentiles {:count 0 :max-us 0 :buckets {}}))   ;=> nil"
+  (let (total (or (:count histogram) 0)
+        max-us (or (:max-us histogram) 0)
+        pairs (sort (vec (or (:buckets histogram) {})))
+        ms (fn (us) (/ us 1000.0)))
+    (if (<= total 0)
+      {:count 0 :p50 nil :p99 nil :p999 nil :max nil}
+      {:count total
+       :p50 (ms (latency-at pairs total 500 max-us))
+       :p99 (ms (latency-at pairs total 990 max-us))
+       :p999 (ms (latency-at pairs total 999 max-us))
+       :max (ms max-us)})))
+
+;; ---- the desktop's reduced-motion preference (ADR-612) ----------------------------
+;; Every platform has a switch for "show me less animation", and an app that animates is
+;; asked to honour it. None of them is a window property, so it is read where each desktop
+;; keeps it: GNOME's gsettings, KDE's kdeglobals, macOS's universal-access defaults, and the
+;; Windows animation setting. The readers are pure over the text each source gives, so they
+;; are tested on any machine.
+
+(defn reduce-motion-from (os answers)
+  "Whether `answers` — what each source said on `os` (an `os/type` keyword), as a map of strings or nil for a source that said nothing — ask for reduced motion. `:gnome` is `gsettings get org.gnome.desktop.interface enable-animations` (\"false\" asks), `:kde` the text of kdeglobals (an `AnimationDurationFactor=0` asks), `:macos` `defaults read com.apple.universalaccess reduceMotion` (\"1\" asks), `:windows` `reg query` of `MinAnimate` under the desktop's WindowMetrics (0 asks: what the \"Animation effects\" switch turns off).
+
+    (gui/reduce-motion-from :linux {:gnome \"false\"})   ;=> true
+    (gui/reduce-motion-from :linux {:gnome \"true\" :kde \"[KDE]\\nAnimationDurationFactor=0\\n\"})   ;=> true
+    (gui/reduce-motion-from :macos {:macos \"0\"})   ;=> false
+    (gui/reduce-motion-from :windows {:windows \"    MinAnimate    REG_SZ    0\"})   ;=> true"
+  (let (said (fn (k) (string/trim (or (get answers k) ""))))
+    (case os
+      :macos (= (said :macos) "1")
+      :windows (regex/match? "MinAnimate\\s+REG_SZ\\s+0(\\s|$)" (said :windows))
+      (or (= (said :gnome) "false")
+        (any? (string/split (said :kde) "\n")
+          (fn (line) (regex/matches? "\\s*AnimationDurationFactor\\s*=\\s*0+(\\.0*)?\\s*" line)))))))
+
+(defn- desktop-answer (prog args)
+  ;; what `prog args` printed when it ran and succeeded, else nil — a source that is not
+  ;; installed, or fails, says nothing
+  (when (os/which prog)
+    (let (result (os/cmd prog args))
+      (when (os/cmd-ok? result) (os/cmd-out result)))))
+
+(defn reduce-motion? ()
+  "Whether the desktop asks apps for less animation: GNOME's \"Animations\" switch off, KDE's animation speed at instant, macOS's Reduce Motion, or Windows' \"Animation effects\" off (`gui/reduce-motion-from` reads each). Best-effort and synchronous — it runs the platform's settings tool, a few milliseconds — so read it once (at startup) rather than per frame; a source that is missing or fails counts as not asking, and so does any error. Needs no window and no GUI build (ADR-612).
+
+    (bool? (gui/reduce-motion?))   ;=> true"
+  (check-allow :discarded-catch
+    (try
+      (let (os (os/type)
+            kdeglobals (path/join (or (os/env "XDG_CONFIG_HOME")
+                                    (path/join (or (os/env "HOME") "") ".config"))
+                         "kdeglobals"))
+        (reduce-motion-from os
+          (case os
+            :macos
+              {:macos (desktop-answer "defaults"
+                        ["read" "com.apple.universalaccess" "reduceMotion"])}
+            :windows
+              {:windows (desktop-answer "reg"
+                          ["query" "HKCU\\Control Panel\\Desktop\\WindowMetrics" "/v" "MinAnimate"])}
+            {:gnome (desktop-answer "gsettings"
+                      ["get" "org.gnome.desktop.interface" "enable-animations"])
+             :kde (when (file/exists? kdeglobals) (file/slurp kdeglobals))})))
+      (catch _ false))))
+
 (defn settle (id)
   "Tell window id the app finished a turn with nothing new to draw; returns nil. What a `gui/draw` would have told the window about the app's progress, without a frame: the next wheel-glide step may fire, and the input the turn answered is dropped from `gui/latency` instead of being pinned on the next unrelated frame. `ui-run` sends it on every turn it skips (ADR-444), through the display's `:settle`. No-op headless.
 
@@ -122,7 +251,8 @@
   (%gui-settle id))
 
 (defn draw (id frame)
-  "Paint a frame (the same render-op vector term/draw takes) to window id; returns nil. Unknown ops are skipped (forward-compatible). A text op's face may carry :scale n (GUI only, integer >=1, capped at 16): the text is drawn n× larger in an n×n block of cells anchored at its row/col — the per-pane/per-buffer font knob; the terminal frontend renders scale 1. A `[:cursor row col]` op may carry an optional `style` keyword (`[:cursor row col style]`) — :block (default, a 50% overlay), :bar (a thin caret on the cell's left edge), :underline (a rule along the cell bottom), or :hollow (an outline box, the cursor of an unfocused window) — and an optional colour after it (`[:cursor row col style colour]`, a face colour; `style` may be nil), the caret's colour: a block washes its cell in it at 50% and rims it solid, the other shapes are solid in it. A `[:rect row col w h face]` op fills a w×h cell block with the face's background colour — a solid panel painted directly (no glyphs), the multi-row generalisation of a status bar. A `[:cursor-zone x y w h shape]` op marks a hover hot-zone: while the pointer is over it the window shows the resize cursor `shape` (:col-resize ↔ / :row-resize ↕), hit-tested on the GUI thread (ADR-080); it draws nothing and the terminal ignores it. A `[:vspans row0 col0 cols]` op is the column-renderer fast path (raycasters, spectrum bars): `cols` is a vector with one entry per cell-column (`col0`, `col0+1`, …), each a top-to-bottom stack of `[height colour]` segments painted from `row0` down — `colour` a face keyword (`:red`), an `[r g b]` triple (0..255), or nil (transparent). The per-cell fill happens natively here, so a wide scene costs the Brood side O(columns), not O(cells); GUI-only (the terminal ignores it). Two ops live in PIXEL space rather than cells — physical pixels from the window's top-left, drawn by both window painters — instanced on the GPU render target (a `--with-gui-gpu` build, which draws on the GPU unless BROOD_GUI_GPU=0), in software by the CPU painter, so a game draws on any GUI build; the terminal skips them: `[:quad x y w h color]` / `[:quad x y w h color rot]` fills a w×h rect with color (a face colour, or an [r g b a] vector for a translucent one) turned `rot` radians about its centre, and `[:sprite tex x y w h]` / `[:sprite tex x y w h uv tint rot]` draws texture `tex` (a handle from gui/texture) there, sampling `uv` (`[u0 v0 du dv]`, texture space, a negative extent mirrors; the whole texture by default) multiplied by `tint` (opaque white by default). Build them with gui/sprite and gui/line rather than by hand — the runtime knows only the quad; a sheet frame, a flip, a line are Brood over it. Text joins them with `[:text-px x y s face]`: the run shaped as a `:text` op would be (the same face keys), its top at y and its left edge at x in physical pixels — or its centre / right edge, with `:align :center` / `:align :right` in the face — so a HUD caption or a title sits where a game wants it, not on a cell row; both window painters draw it, the terminal skips it. And a frame can carry SOUND: `[:sound snd]` / `[:sound snd vol]` plays the sound gui/sound (or editor/ui/display-sound) kept under handle snd, once, when the frame is drawn — on whichever window draws it, so it crosses the wire to a thin client and a browser tab with the frame, and a headless test sees it in the frame; `vol` is the peak amplitude 0..1 (default ~0.18). MUSIC is state rather than an event: `[:music snd]` / `[:music snd vol]` keeps that sound LOOPING for as long as the frames drawn carry the op — the same handle again keeps the track going (a new vol fades to it), another handle switches tracks, and a frame without one fades it out, so a thin client or a late joiner hears the game's music from the next frame it draws; the first music op of a frame wins. A frame can also ask for EFFECTS, painted by both window painters (on the GPU in shaders, by the CPU painter in software) and skipped by the terminal: `[:ambient color]` turns lighting on — what is drawn before the frame's `[:overlay]` (all of it, without one) is multiplied by a light map starting at that colour, to which every `[:light x y radius color]` / `[:light x y radius color intensity]` adds its colour falling smoothly to nothing at its radius; ops after `[:overlay]` are the unlit layer (a HUD, or something that glows). `[:bloom threshold intensity radius]` adds back, blurred `radius` pixels wide, what is brighter than `threshold` (0..1); `[:crt scanlines curvature vignette]` dims every other row, bulges the picture and darkens its corners — both over the finished frame. PARTICLES are state like music: `[:emitter id x y opts]` keeps emitter `id` alive at (x, y) while frames carry it — `opts` a map of `:rate` (per second), `:life [min max]` seconds, `:speed [min max]` px/s, `:angle` and `:spread` radians (0 points right, y down), `:gravity [gx gy]`, `:drag`, `:size [birth death]` px, `:color` / `:color-end`, `:blend :add`, `:shape :square`, `:max` (live particles, default 1024) — simulated in the window (a compute shader on the GPU) and drawn where the op sits, so a frame carries one op per emitter, never one per particle; a frame without it stops the emission and lets its particles live out their lives. `[:burst id n]` emits n at once from the frame's emitter `id`, once, when the frame is drawn.
+  "Paint a frame (the same render-op vector term/draw takes) to window id; returns nil. Unknown ops are skipped (forward-compatible). A text op's face may carry :scale n (GUI only, integer >=1, capped at 16): the text is drawn n× larger in an n×n block of cells anchored at its row/col — the per-pane/per-buffer font knob; the terminal frontend renders scale 1. A `[:cursor row col]` op may carry an optional `style` keyword (`[:cursor row col style]`) — :block (default, a 50% overlay), :bar (a thin caret on the cell's left edge), :underline (a rule along the cell bottom), or :hollow (an outline box, the cursor of an unfocused window) — and an optional colour after it (`[:cursor row col style colour]`, a face colour; `style` may be nil), the caret's colour: a block washes its cell in it at 50% and rims it solid, the other shapes are solid in it. A `[:seam row]` op says how the rows sit in the window (ADR-610): rows above `row` are anchored to the top, rows from it down to the bottom, so the last row ends exactly at the bottom inset at every window height and the leftover pixels lie between row `row - 1` and row `row`, painted by the row above (an editor names its bottom mode line; nil keeps the leftover under the last row); `[:seam row {:top-band false}]` also says row 0 is not a band, so the top gets the inset like the sides (the grid loses those rows, and the window sends a resize when this changes). Rows stay whole cells, and the mouse hit-test inverts the same map; frame state, read at the top level, skipped by the terminal. 
+A `[:rect row col w h face]` op fills a w×h cell block with the face's background colour — a solid panel painted directly (no glyphs), the multi-row generalisation of a status bar. A `[:cursor-zone x y w h shape]` op marks a hover hot-zone: while the pointer is over it the window shows the resize cursor `shape` (:col-resize ↔ / :row-resize ↕), hit-tested on the GUI thread (ADR-080); it draws nothing and the terminal ignores it. A `[:vspans row0 col0 cols]` op is the column-renderer fast path (raycasters, spectrum bars): `cols` is a vector with one entry per cell-column (`col0`, `col0+1`, …), each a top-to-bottom stack of `[height colour]` segments painted from `row0` down — `colour` a face keyword (`:red`), an `[r g b]` triple (0..255), or nil (transparent). The per-cell fill happens natively here, so a wide scene costs the Brood side O(columns), not O(cells); GUI-only (the terminal ignores it). Two ops live in PIXEL space rather than cells — physical pixels from the window's top-left, drawn by both window painters — instanced on the GPU render target (a `--with-gui-gpu` build, which draws on the GPU unless BROOD_GUI_GPU=0), in software by the CPU painter, so a game draws on any GUI build; the terminal skips them: `[:quad x y w h color]` / `[:quad x y w h color rot]` fills a w×h rect with color (a face colour, or an [r g b a] vector for a translucent one) turned `rot` radians about its centre, and `[:sprite tex x y w h]` / `[:sprite tex x y w h uv tint rot]` draws texture `tex` (a handle from gui/texture) there, sampling `uv` (`[u0 v0 du dv]`, texture space, a negative extent mirrors; the whole texture by default) multiplied by `tint` (opaque white by default). Build them with gui/sprite and gui/line rather than by hand — the runtime knows only the quad; a sheet frame, a flip, a line are Brood over it. Text joins them with `[:text-px x y s face]`: the run shaped as a `:text` op would be (the same face keys), its top at y and its left edge at x in physical pixels — or its centre / right edge, with `:align :center` / `:align :right` in the face — so a HUD caption or a title sits where a game wants it, not on a cell row; both window painters draw it, the terminal skips it. And a frame can carry SOUND: `[:sound snd]` / `[:sound snd vol]` plays the sound gui/sound (or editor/ui/display-sound) kept under handle snd, once, when the frame is drawn — on whichever window draws it, so it crosses the wire to a thin client and a browser tab with the frame, and a headless test sees it in the frame; `vol` is the peak amplitude 0..1 (default ~0.18). MUSIC is state rather than an event: `[:music snd]` / `[:music snd vol]` keeps that sound LOOPING for as long as the frames drawn carry the op — the same handle again keeps the track going (a new vol fades to it), another handle switches tracks, and a frame without one fades it out, so a thin client or a late joiner hears the game's music from the next frame it draws; the first music op of a frame wins. A frame can also ask for EFFECTS, painted by both window painters (on the GPU in shaders, by the CPU painter in software) and skipped by the terminal: `[:ambient color]` turns lighting on — what is drawn before the frame's `[:overlay]` (all of it, without one) is multiplied by a light map starting at that colour, to which every `[:light x y radius color]` / `[:light x y radius color intensity]` adds its colour falling smoothly to nothing at its radius; ops after `[:overlay]` are the unlit layer (a HUD, or something that glows). `[:bloom threshold intensity radius]` adds back, blurred `radius` pixels wide, what is brighter than `threshold` (0..1); `[:crt scanlines curvature vignette]` dims every other row, bulges the picture and darkens its corners — both over the finished frame. PARTICLES are state like music: `[:emitter id x y opts]` keeps emitter `id` alive at (x, y) while frames carry it — `opts` a map of `:rate` (per second), `:life [min max]` seconds, `:speed [min max]` px/s, `:angle` and `:spread` radians (0 points right, y down), `:gravity [gx gy]`, `:drag`, `:size [birth death]` px, `:color` / `:color-end`, `:blend :add`, `:shape :square`, `:max` (live particles, default 1024) — simulated in the window (a compute shader on the GPU) and drawn where the op sits, so a frame carries one op per emitter, never one per particle; a frame without it stops the emission and lets its particles live out their lives. `[:burst id n]` emits n at once from the frame's emitter `id`, once, when the frame is drawn.
 
     (gui/draw id [[:clear] [:text 0 0 \"hello\" {:fg :red}]])   ;~> nil"
   (%gui-draw id frame))
@@ -149,7 +279,7 @@
   (%gui-font-info family))
 
 (defn inset (px)
-  "Set the window content inset to px logical pixels: a blank margin on the left, right and bottom of the cell grid, so a GUI app's text breathes instead of sitting flush against the frame. There is none above row 0: the first row starts at the window's top edge, so a header line or tab bar is the top of the window (ADR-508). Applies to every open window and the default for ones opened later; the grid loses 2*px of width and px of height (fewer cells) and re-renders. The inset is shared by the renderer and mouse hit-testing, so clicks stay aligned. Needs --features gui. Returns nil.
+  "Set the window content inset to px logical pixels: a blank margin on the left, right and bottom of the cell grid, so a GUI app's text breathes instead of sitting flush against the frame. There is none above row 0 unless the frame says row 0 is not a band (`[:seam row {:top-band false}]`, ADR-610): the first row starts at the window's top edge, so a header line or tab bar is the top of the window (ADR-508). Applies to every open window and the default for ones opened later; the grid loses 2*px of width and px of height (fewer cells) and re-renders. The inset is shared by the renderer and mouse hit-testing, so clicks stay aligned. Needs --features gui. Returns nil.
 
     (gui/inset 12)   ;~> nil; a 12 px margin left, right and below every window's cell grid"
   (%gui-inset! px))
@@ -180,7 +310,7 @@
   (%gui-text-aa! mode))
 
 (defn text-contrast (gamma)
-  "Set the text contrast exponent γ: 1.0 by default (the plain linear-light blend), clamped to 0.5..3.0. A monochrome glyph's partial coverage is lifted to cov^(1/γ) where the text is lighter than the pixel it lands on — light text on a dark ground, which a linear-light blend renders with thin stems, reads fuller; a glyph's interior and exterior, dark-on-light text and colour emoji are untouched. 1.4–1.8 is the range other linear-light renderers ship. Applies to every open window and the default for ones opened later; a pure repaint. Needs --features gui. Returns nil.
+  "Set the text contrast exponent γ: 1.4 by default, clamped to 0.5..3.0. Text blends in linear light with the weight of a lerp of the encoded colours (ADR-611); a monochrome glyph's partial coverage is first lifted to cov^(1/γ) where the text is lighter than the pixel it lands on, so γ is the perceptual gamma light-on-dark text is weighted at — 1.0 the encoded lerp's weight (thin stems on a dark ground), about 2.2 linear light's (soft). A glyph's interior and exterior, dark-on-light text and colour emoji are untouched. Applies to every open window and the default for ones opened later; a pure repaint. Needs --features gui. Returns nil.
 
     (gui/text-contrast 1.6)   ;~> nil; light-on-dark text reads fuller"
   (%gui-text-contrast! gamma))
@@ -211,9 +341,9 @@
 
 (sig render-frame (vector &optional (or nil map) -> frame-image))
 (defn render-frame (frame &optional spec)
-  "Paint `frame` (a gui/draw frame) into memory as a window described by `spec` would paint it, and return the picture: `{:width :height :rgba :cell [w h] :grid [cols rows] :origin [x y] :inset px}`, `:rgba` being width*height*4 bytes (row-major, opaque) and the rest the geometry it was painted with — the cell in physical pixels, the grid in cells, where the grid's top-left sits, the inset. It is the WINDOW's own CPU painter that paints it — the same layout rule (row 0 at the top edge; the inset a margin left, right and below), the same edge bleed, the same glyph rasteriser — so what a test asserts about the pixels is true of the window. Needs no window and no display, so it runs headless and in `nest test`. `spec` (every key optional) is the window it stands in for: `:width`/`:height` in physical pixels (840x560), `:font` (an installed family's name, as gui/font-register's `:family-name` resolves one, or a family keyword the offscreen painter knows — the bundled `:mono` by default), `:size` (the font px, 15), `:line-height` (1.4), `:inset` (logical px, 0), `:bg` (the window colour), `:scale` (HiDPI, 1), `:text-aa`, `:ligatures`. Read a pixel with gui/pixel, save it with gui/write-png. Needs --features gui.
+  "Paint `frame` (a gui/draw frame) into memory as a window described by `spec` would paint it, and return the picture: `{:width :height :rgba :cell [w h] :grid [cols rows] :origin [x y] :inset px :seam row :row-tops [y …]}`, `:rgba` being width*height*4 bytes (row-major, opaque) and the rest the geometry it was painted with — the cell in physical pixels, the grid in cells, where the grid's top-left sits, the inset, the frame's `[:seam row]` (nil without one) and the pixel row every grid row starts at, then where the last one ends (`:row-tops`, `rows + 1` entries — ADR-610). It is the WINDOW's own CPU painter that paints it — the same layout rule (row 0 at the top edge, or at the inset when the frame's seam says row 0 is not a band; the inset a margin left, right and below; the leftover height at the seam or under the last row), the same edge bleed, the same glyph rasteriser — so what a test asserts about the pixels is true of the window. Needs no window and no display, so it runs headless and in `nest test`. `spec` (every key optional) is the window it stands in for: `:width`/`:height` in physical pixels (840x560), `:font` (an installed family's name, as gui/font-register's `:family-name` resolves one, or a family keyword the offscreen painter knows — the bundled `:mono` by default), `:size` (the font px, 15), `:line-height` (1.4), `:inset` (logical px, 0), `:bg` (the window colour), `:scale` (HiDPI, 1), `:text-aa`, `:ligatures`. Read a pixel with gui/pixel, save it with gui/write-png. Needs --features gui.
 
-    (gui/render-frame [[:clear] [:text 0 0 \"hi\" {:fg :red}]] {:width 200 :height 60 :inset 6})   ;~> {:width 200 :height 60 :rgba … :cell [9 21] :grid [20 2] :origin [6 0] :inset 6}"
+    (gui/render-frame [[:clear] [:text 0 0 \"hi\" {:fg :red}]] {:width 200 :height 60 :inset 6})   ;~> {:width 200 :height 60 :rgba … :cell [9 21] :grid [20 2] :origin [6 0] :inset 6 :seam nil :row-tops [0 21 42]}"
   (%gui-render-frame frame spec))
 
 (sig capture (int -> frame-image))

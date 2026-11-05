@@ -28,6 +28,7 @@
 use super::bleed::{self, Margins};
 use super::paint::raster_frame;
 use super::render::{CpuTexture, Renderer, default_families};
+use super::rows;
 use super::{DEFAULT_FAMILY, Families, RenderDefaults, TextAa, deliver, resize_message};
 use crate::core::sync::lock;
 use crate::core::value;
@@ -232,6 +233,10 @@ impl Painter {
             }
             Request::Draw { id, ops } => {
                 if let Some(window) = self.windows.get_mut(&id) {
+                    // the rows the frame lays out (ADR-610), as `UserEvent::Draw` takes them
+                    if window.renderer.set_layout(rows::frame_layout(&ops)) {
+                        window.publish_size();
+                    }
                     window.frame = ops;
                 }
             }
@@ -400,9 +405,11 @@ impl Painter {
 /// bound keeps a wild `:width` from asking for a canvas the size of memory.
 const MAX_EDGE: u32 = 16_384;
 
-/// `frame` painted by `r` as a `w`×`h` window paints it: bled to the window's edges as
-/// `RedrawRequested` bleeds it, then [`raster`].
+/// `frame` painted by `r` as a `w`×`h` window paints it: its rows laid out as the frame
+/// declares (`Op::Seam`, ADR-610 — as `UserEvent::Draw` takes them), bled to the window's
+/// edges as `RedrawRequested` bleeds it, then [`raster`].
 pub(super) fn picture(r: &mut Renderer, frame: &[Op], w: usize, h: usize) -> FrameImage {
+    r.set_layout(rows::frame_layout(frame));
     let margins = Margins::of(r, w, h);
     let bled = bleed::edge_bleed(frame, &margins);
     raster(r, bled.as_deref().unwrap_or(frame), w, h)
@@ -422,14 +429,20 @@ pub(super) fn raster(r: &mut Renderer, frame: &[Op], w: usize, h: usize) -> Fram
         rgba.extend_from_slice(&[(pixel >> 16) as u8, (pixel >> 8) as u8, pixel as u8, 255]);
     }
     let (origin_x, origin_y) = r.grid_origin(w, h);
+    let grid = bleed::grid_cells(r, w, h);
+    let map = r.rows(w, h);
     FrameImage {
         width: w as u32,
         height: h as u32,
         rgba,
         cell: (r.cell_w as u32, r.cell_h as u32),
-        grid: bleed::grid_cells(r, w, h),
+        grid,
         origin: (origin_x as u32, origin_y as u32),
         inset: r.inset() as u32,
+        seam: r.seam().filter(|&seam| seam < grid.1),
+        row_tops: (0..=grid.1 as isize)
+            .map(|row| map.y(row).clamp(0, u32::MAX as isize) as u32)
+            .collect(),
     }
 }
 
@@ -555,5 +568,147 @@ mod tests {
         assert_eq!(inked(x + cell_w, y), 0, "ink in the cell after");
         assert_eq!(inked(x, y - cell_h), 0, "ink in the cell above");
         assert_eq!(inked(x, y + cell_h), 0, "ink in the cell below");
+    }
+
+    // ---- the seam (ADR-610) ---------------------------------------------------------
+
+    const ABOVE: [u8; 3] = [40, 40, 200];
+    const MODE: [u8; 3] = [200, 200, 40];
+    const ECHO: [u8; 3] = [40, 200, 200];
+
+    /// A `w`×`h` picture at font size `px` (line height 1.4, inset 6) of `ops`.
+    fn render_at(ops: Vec<Op>, w: u32, h: u32, px: f32) -> FrameImage {
+        let spec = RenderSpec {
+            size: Some((w, h)),
+            inset: Some(6.0),
+            bg: Some(BACKGROUND),
+            px: Some(px),
+            line_height: Some(1.4),
+            ..RenderSpec::default()
+        };
+        ask(|reply| Request::Render { ops, spec, reply }).expect("the offscreen painter answers")
+    }
+
+    /// An editor's frame on a `cols`×`rows` grid with the seam at its mode line: a header
+    /// band on row 0 (columns 1..4 only, so it does not bleed and its top shows), the body
+    /// rows, the body's last row in its own colour (what the seam's gap must carry), the
+    /// mode line on the seam row and the echo area on the last row.
+    fn editor_frame(cols: u16, rows: u16, top_band: bool) -> Vec<Op> {
+        let seam = rows - 2;
+        vec![
+            Op::Clear,
+            Op::Seam {
+                row: Some(seam),
+                top_band,
+            },
+            Op::Rect {
+                row: 0,
+                col: 1,
+                w: 3,
+                h: 1,
+                face: Face {
+                    bg: Some(HEADER),
+                    ..Face::default()
+                },
+                radius: 0.0,
+            },
+            band(1, seam - 2, BODY, cols),
+            band(seam - 1, 1, ABOVE, cols),
+            band(seam, 1, MODE, cols),
+            band(rows - 1, 1, ECHO, cols),
+        ]
+    }
+
+    /// THE LAYOUT PROPERTY, over every window height in one row's span and two font sizes,
+    /// with row 0 a band and not: the last row ends exactly at the bottom inset; row 0 starts
+    /// at y = 0 with the band and at the inset without; the leftover is painted by the row
+    /// above the seam, so no pixel row of the window is left bare; and the hit-test gives the
+    /// centre of every row back to that row, on both sides of the seam.
+    #[test]
+    fn the_seam_holds_the_leftover_at_every_height() {
+        let x = 200u32;
+        for px in [15.0f32, 21.0] {
+            let cell_h = render_at(vec![Op::Clear], 400, 300, px).cell.1;
+            for h in 300..300 + cell_h {
+                for top_band in [true, false] {
+                    // the grid for this layout: the seam op decides the top margin
+                    let probe = vec![
+                        Op::Clear,
+                        Op::Seam {
+                            row: None,
+                            top_band,
+                        },
+                    ];
+                    let (cols, rows) = render_at(probe, 400, h, px).grid;
+                    let image = render_at(editor_frame(cols, rows, top_band), 400, h, px);
+                    let at = |y: u32| pixel(&image, x, y);
+                    let what = format!("px {px}, h {h}, top band {top_band}");
+                    let tops = &image.row_tops;
+                    let seam = rows - 2;
+                    assert_eq!(image.seam, Some(seam), "{what}");
+                    assert_eq!(tops.len(), rows as usize + 1, "{what}");
+                    // the bottom: the last row ends on the inset, the inset is the echo's
+                    assert_eq!(tops[rows as usize], h - 6, "{what}");
+                    assert_eq!(at(h - 7), ECHO, "{what}");
+                    assert_eq!(at(h - 6), ECHO, "{what}: the inset is bled echo");
+                    assert_eq!(at(h - 1), ECHO, "{what}");
+                    assert_eq!(at(h - 7 - cell_h), MODE, "{what}");
+                    // the top: row 0 at y = 0 with a band, at the inset without
+                    let top = if top_band { 0 } else { 6 };
+                    assert_eq!(tops[0], top, "{what}");
+                    assert_eq!(image.origin.1, top, "{what}");
+                    let header_x = 6 + 2 * image.cell.0;
+                    assert_eq!(pixel(&image, header_x, top), HEADER, "{what}");
+                    if !top_band {
+                        // the margin is the window's, above the header too: a band one row
+                        // tall does not bleed up
+                        assert_eq!(pixel(&image, 6, top - 1), BACKGROUND, "{what}");
+                        assert_eq!(pixel(&image, header_x, 0), BACKGROUND, "{what}");
+                        assert_eq!(pixel(&image, header_x, top - 1), BACKGROUND, "{what}");
+                    }
+                    // rows above the seam are top-anchored, the gap sits at the seam
+                    for k in 0..seam as usize {
+                        assert_eq!(tops[k], top + k as u32 * cell_h, "{what}: row {k}");
+                    }
+                    let gap_from = tops[seam as usize - 1] + cell_h;
+                    let gap_to = tops[seam as usize];
+                    assert!(gap_to - gap_from < cell_h, "{what}");
+                    for y in gap_from..gap_to {
+                        assert_eq!(at(y), ABOVE, "{what}: the gap at y {y}");
+                    }
+                    // no bare pixel row anywhere down the middle of the window below the
+                    // header (which is three columns wide, so that its top shows)
+                    for y in tops[1]..h {
+                        assert_ne!(at(y), BACKGROUND, "{what}: bare window at y {y}");
+                    }
+                    // the hit-test inverts the same map
+                    let mut renderer = Renderer::new(1.0, default_families(), px);
+                    renderer.set_line_height(1.4);
+                    renderer.set_inset(6.0);
+                    renderer.set_layout((Some(seam), top_band));
+                    for k in 0..rows as usize {
+                        let centre = (tops[k] + tops[k + 1]) as f64 / 2.0;
+                        let position = winit::dpi::PhysicalPosition::new(x as f64, centre);
+                        let (_, row) =
+                            super::super::px_to_cell(position, &renderer, 400, h as usize);
+                        assert_eq!(row as usize, k, "{what}: the centre of row {k}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// No seam is the old layout exactly: rows from the top edge, the leftover under the
+    /// last row (other programs are untouched by ADR-610).
+    #[test]
+    fn without_a_seam_the_leftover_stays_under_the_last_row() {
+        let image = render_at(vec![Op::Clear], 400, 307, 15.0);
+        let cell_h = image.cell.1;
+        let rows = image.grid.1 as u32;
+        assert_eq!(image.seam, None);
+        assert_eq!(
+            image.row_tops,
+            (0..=rows).map(|k| k * cell_h).collect::<Vec<_>>()
+        );
     }
 }

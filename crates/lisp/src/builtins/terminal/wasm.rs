@@ -59,6 +59,8 @@ wasm_unsupported_builtins!(
     gui_size,
     gui_size_px,
     gui_latency,
+    gui_latency_histogram,
+    gui_key_repeat,
     gui_key_repeats,
     gui_settle,
     gui_texture,

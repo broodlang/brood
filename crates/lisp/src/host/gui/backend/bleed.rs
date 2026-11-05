@@ -1,9 +1,10 @@
 //! EDGE BLEED: a background that reaches the edge of the cell grid continues to the edge
 //! of the window.
 //!
-//! The grid rarely fills the window. The inset sits on the left, right and bottom (row 0 is
-//! at the top edge, `Renderer::grid_origin`), and the sub-cell remainder (up to a cell less
-//! one pixel) lands on the right and bottom. Painted with
+//! The grid rarely fills the window. The inset sits on the left, right and bottom, and on
+//! the top when row 0 is not a band (`Renderer::rows`); the sub-cell remainder (up to a
+//! cell less one pixel) lands on the right, and at the frame's seam or under the last row
+//! (ADR-610). Painted with
 //! the window background alone, that margin cuts every full-width band short of the
 //! frame: a mode line, a current-line highlight or a gutter stops a few pixels from the
 //! edge, which reads as unfinished. Emacs paints its mode line and fringes through the
@@ -33,41 +34,50 @@ const TOUCH: f32 = 1e-3;
 
 /// The grid and the margin around it, in CELL units: what [`edge_bleed`] needs to place
 /// the margin pieces, and the key that says when a bled frame is stale.
+///
+/// The margins are measured through the renderer's row map, so with a seam (ADR-610) the
+/// bottom margin is the inset alone: the leftover sits at the seam, inside the grid, where
+/// a band ending at the seam covers it by the map itself (`RowMap::span`), not here.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(super) struct Margins {
     pub(super) cols: f32,
     pub(super) rows: f32,
     pub(super) left: f32,
     pub(super) right: f32,
+    /// Above row 0: none when row 0 is a band, the inset when it is not.
+    pub(super) top: f32,
     pub(super) bottom: f32,
 }
 
 impl Margins {
     /// The margins of a `w_px`×`h_px` window painted by `r`: the grid
-    /// [`grid_cells`] gives, placed at [`Renderer::grid_origin`].
+    /// [`grid_cells`] gives, placed by [`Renderer::grid_origin`] and [`Renderer::rows`].
     pub(super) fn of(r: &Renderer, w_px: usize, h_px: usize) -> Margins {
         let (cw, ch) = (r.cell_w.max(1), r.cell_h.max(1));
         let (cols, rows) = grid_cells(r, w_px, h_px);
-        let (ox, oy) = r.grid_origin(w_px, h_px);
-        let (grid_w, grid_h) = (cols as usize * cw, rows as usize * ch);
+        let (ox, _) = r.grid_origin(w_px, h_px);
+        let map = r.rows(w_px, h_px);
+        let grid_w = cols as usize * cw;
+        let grid_bottom = map.y(rows as isize).max(0) as usize;
         let cells = |px: usize, cell: usize| px as f32 / cell as f32;
         Margins {
             cols: cols as f32,
             rows: rows as f32,
             left: cells(ox, cw),
             right: cells(w_px.saturating_sub(ox + grid_w), cw),
-            bottom: cells(h_px.saturating_sub(oy + grid_h), ch),
+            top: cells(map.top, ch),
+            bottom: cells(h_px.saturating_sub(grid_bottom), ch),
         }
     }
 }
 
 /// The cell grid a `w_px`×`h_px` window holds: the window less the inset on the left, right
-/// and bottom (none on top: row 0 starts at the window's top edge, [`Renderer::grid_origin`]),
-/// in whole cells, at least one each way. What the app is told its size is.
+/// and bottom, and on the top when row 0 is not a band ([`Renderer::grid_top`]), in whole
+/// cells, at least one each way. What the app is told its size is.
 pub(super) fn grid_cells(r: &Renderer, w_px: usize, h_px: usize) -> (u16, u16) {
     let inset = r.inset();
     let usable_w = w_px.saturating_sub(2 * inset);
-    let usable_h = h_px.saturating_sub(inset);
+    let usable_h = h_px.saturating_sub(inset + r.grid_top());
     let cols = (usable_w / r.cell_w.max(1)).max(1).min(u16::MAX as usize) as u16;
     let rows = (usable_h / r.cell_h.max(1)).max(1).min(u16::MAX as usize) as u16;
     (cols, rows)
@@ -279,11 +289,14 @@ fn band(op: &Op) -> Option<Band> {
 
 impl Band {
     /// The `FRect`s that carry this band over the margins it touches: the side pieces at
-    /// its own rows, and (when `vertical`) the bottom piece, widened over a side
+    /// its own rows, and (when `vertical`) the top and bottom pieces, widened over a side
     /// margin the band also touches so a corner is covered too.
     fn pieces(&self, m: &Margins, vertical: bool) -> Vec<Op> {
         let left = m.left > 0.0 && self.x0 <= TOUCH;
         let right = m.right > 0.0 && self.x1 >= m.cols - TOUCH;
+        // up only for a band taller than one row (a gutter, a pane background): a one-row band
+        // (the current line on row 0) bled up would sit its text low in a taller band
+        let top = vertical && m.top > 0.0 && self.y0 <= TOUCH && self.y1 - self.y0 > 1.0 + TOUCH;
         let bottom = vertical && m.bottom > 0.0 && self.y1 >= m.rows - TOUCH;
         let piece = |x: f32, y: f32, w: f32, h: f32| Op::FRect {
             x,
@@ -319,6 +332,9 @@ impl Band {
         } else {
             self.x1.min(m.cols)
         };
+        if top {
+            pieces.push(piece(x0, -m.top, x1 - x0, m.top));
+        }
         if bottom {
             pieces.push(piece(x0, m.rows, x1 - x0, m.bottom));
         }
@@ -335,6 +351,7 @@ mod tests {
         rows: 24.0,
         left: 0.5,
         right: 0.75,
+        top: 0.0,
         bottom: 0.5,
     };
 
@@ -580,5 +597,32 @@ mod tests {
             ..MARGINS
         };
         assert!(edge_bleed(&[rect(0, 0, 80, 24, [1, 1, 1])], &flush).is_none());
+    }
+
+    /// With a top margin (row 0 not a band, ADR-610), a band on row 0 continues up through
+    /// it as it continues down through the bottom one: a gutter reaches the window's top
+    /// edge, widened over the side margin it touches.
+    #[test]
+    fn a_band_on_row_zero_covers_the_top_margin_when_there_is_one() {
+        let framed = Margins {
+            top: 0.5,
+            ..MARGINS
+        };
+        let bled = edge_bleed(&[rect(0, 0, 4, 24, [5, 5, 5])], &framed).expect("bled");
+        assert_eq!(
+            frects(&bled),
+            vec![
+                [-0.5, 0.0, 0.5, 24.0],
+                [-0.5, -0.5, 4.5, 0.5],
+                [-0.5, 24.0, 4.5, 0.5],
+            ]
+        );
+        // without one, nothing goes above row 0
+        let flush_top = edge_bleed(&[rect(0, 0, 4, 1, [5, 5, 5])], &MARGINS).expect("bled");
+        assert!(frects(&flush_top).iter().all(|piece| piece[1] >= 0.0));
+        // a band one row tall (the current line) does not bleed up even with one: its text
+        // would sit low in a taller band; it still bleeds sideways
+        let line = edge_bleed(&[rect(0, 0, 80, 1, [5, 5, 5])], &framed).expect("bled");
+        assert!(frects(&line).iter().all(|piece| piece[1] >= 0.0));
     }
 }

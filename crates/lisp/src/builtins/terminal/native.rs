@@ -1377,7 +1377,7 @@ pub(in crate::builtins) fn gui_settle(args: &[Value], _: EnvId, heap: &mut Heap)
 }
 
 /// `(%gui-latency id)` — window `id`'s recent input-to-present samples, oldest first, as
-/// maps of milliseconds: `:total` (input to present) and `:paint` (the paint's share),
+/// maps of milliseconds (and `:input`, `:key` or `:pointer`, ADR-612): `:total` (input to present) and `:paint` (the paint's share),
 /// plus the GPU paint's `:encode` `:upload` `:acquire` `:submit` `:present` phases when
 /// the GPU target drew it (ADR-440). GC-safe: a builtin never fires GC mid-execution,
 /// so the maps stay live until the vector holds them.
@@ -1390,6 +1390,13 @@ pub(in crate::builtins) fn gui_latency(args: &[Value], _: EnvId, heap: &mut Heap
         let mut pairs = vec![
             (value::kw("total"), ms(sample.total_us)),
             (value::kw("paint"), ms(sample.paint_us)),
+            (
+                value::kw("input"),
+                value::kw(match sample.input {
+                    crate::host::gui::InputKind::Key => "key",
+                    crate::host::gui::InputKind::Pointer => "pointer",
+                }),
+            ),
         ];
         if let Some(split) = sample.split {
             for (name, us) in crate::host::gui::PAINT_PHASES.into_iter().zip(split) {
@@ -1401,6 +1408,45 @@ pub(in crate::builtins) fn gui_latency(args: &[Value], _: EnvId, heap: &mut Heap
     Ok(heap.alloc_vector(maps))
 }
 
+/// `(%gui-latency-histogram id)` — window `id`'s input-to-present distribution since it
+/// opened, `{:key h :pointer h}`, each `h` a `{:count n :max-us n :buckets {upper-us n}}` —
+/// a bucket's key its largest value in microseconds, so two histograms add bucket by bucket
+/// (ADR-612). Percentiles are std's (`gui/latency-percentiles`), over this data. GC-safe as
+/// `gui_latency` is.
+pub(in crate::builtins) fn gui_latency_histogram(
+    args: &[Value],
+    _: EnvId,
+    heap: &mut Heap,
+) -> LispResult {
+    let id = gui_window_id(heap, "%gui-latency-histogram", arg(args, 0))?;
+    let (keys, pointer) = crate::host::gui::latency_histograms(id).map_err(LispError::runtime)?;
+    let count = |n: u64| Value::int(n as i64);
+    let mut histogram = |h: &crate::host::gui::LatencyHistogram| {
+        let buckets: Vec<_> = h
+            .buckets()
+            .map(|(upper_us, n)| (count(upper_us), count(n)))
+            .collect();
+        let buckets = heap.map_from_pairs(buckets);
+        heap.map_from_pairs(vec![
+            (value::kw("count"), count(h.count)),
+            (value::kw("max-us"), count(h.max_us)),
+            (value::kw("buckets"), buckets),
+        ])
+    };
+    let keys = histogram(&keys);
+    let pointer = histogram(&pointer);
+    Ok(heap.map_from_pairs(vec![
+        (value::kw("key"), keys),
+        (value::kw("pointer"), pointer),
+    ]))
+}
+
+/// `(%gui-key-repeat? id)` — whether the last key press window `id`'s app took from its
+/// mailbox was an OS auto-repeat (ADR-612); false for a window not open.
+pub(in crate::builtins) fn gui_key_repeat(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = gui_window_id(heap, "%gui-key-repeat?", arg(args, 0))?;
+    Ok(Value::boolean(crate::host::gui::key_repeat(id)))
+}
 /// `(gui-key-repeats id)` — how window `id`'s held keys have repeated since it opened:
 /// `{:delivered n :dropped n :delay ms :interval ms}`, `:delay` and `:interval` the
 /// desktop's as the last key that repeated showed them (nil before any has).
@@ -1791,6 +1837,7 @@ struct GuiOpTags {
     crt_t: value::Symbol,
     emitter_t: value::Symbol,
     burst_t: value::Symbol,
+    seam_t: value::Symbol,
 }
 impl GuiOpTags {
     fn new() -> Self {
@@ -1822,6 +1869,7 @@ impl GuiOpTags {
             crt_t: value::intern("crt"),
             emitter_t: value::intern("emitter"),
             burst_t: value::intern("burst"),
+            seam_t: value::intern("seam"),
         }
     }
 }
@@ -2254,6 +2302,20 @@ fn parse_gui_ops(
                 color,
                 intensity,
             });
+        } else if tag == tags.seam_t {
+            // `[:seam row]` / `[:seam row {:top-band b}]` (ADR-610): row a non-negative int or
+            // nil (no seam); `:top-band` true unless the map says false or nil.
+            let row = match arg(&parts, 1) {
+                Value::Int(n) => u16::try_from(n.max(0)).ok(),
+                _ => None,
+            };
+            let top_band = match parts.get(2).copied() {
+                Some(Value::Map(opts)) => heap
+                    .map_get(opts, value::kw("top-band"))
+                    .is_none_or(crate::eval::truthy),
+                _ => true,
+            };
+            ops.push(crate::host::gui::Op::Seam { row, top_band });
         } else if tag == tags.overlay_t {
             ops.push(crate::host::gui::Op::Overlay);
         } else if tag == tags.bloom_t {
@@ -2487,7 +2549,7 @@ pub(in crate::builtins) fn gui_windows(_: &[Value], _: EnvId, heap: &mut Heap) -
 }
 
 /// A picture as Brood sees it: `{:width :height :rgba :cell [w h] :grid [cols rows]
-/// :origin [x y] :inset px}` — `gui/image-thumb`'s `{:width :height :rgba}` plus the
+/// :origin [x y] :inset px :seam row-or-nil :row-tops [y …]}` — `gui/image-thumb`'s `{:width :height :rgba}` plus the
 /// geometry it was painted with, so `gui/write-png` and `gui/texture` take it as is.
 fn frame_image_value(heap: &mut Heap, image: crate::host::gui::FrameImage) -> Value {
     let pair = |heap: &mut Heap, a: u32, b: u32| {
@@ -2499,6 +2561,16 @@ fn frame_image_value(heap: &mut Heap, image: crate::host::gui::FrameImage) -> Va
     let cell = pair(heap, image.cell.0, image.cell.1);
     let grid = pair(heap, image.grid.0 as u32, image.grid.1 as u32);
     let origin = pair(heap, image.origin.0, image.origin.1);
+    let row_tops = heap.alloc_vector(
+        image
+            .row_tops
+            .iter()
+            .map(|&y| Value::int(y as i64))
+            .collect(),
+    );
+    let seam = image
+        .seam
+        .map_or(Value::nil(), |row| Value::int(row as i64));
     let pairs = vec![
         (value::kw("width"), Value::int(image.width as i64)),
         (value::kw("height"), Value::int(image.height as i64)),
@@ -2507,6 +2579,8 @@ fn frame_image_value(heap: &mut Heap, image: crate::host::gui::FrameImage) -> Va
         (value::kw("grid"), grid),
         (value::kw("origin"), origin),
         (value::kw("inset"), Value::int(image.inset as i64)),
+        (value::kw("seam"), seam),
+        (value::kw("row-tops"), row_tops),
     ];
     heap.map_from_pairs(pairs)
 }

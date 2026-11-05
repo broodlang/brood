@@ -166,6 +166,20 @@
   (fold-for (acc 0 y (range y0 (+ y0 h)) x (range x0 (+ x0 w)))
     (if (= (gui/pixel image x y) capture-bg) acc (inc acc))))
 
+(defn- inked-rows (image x0 y0 w h)
+  "The rows, counted from y0, of the w×h rectangle at (x0, y0) holding ink."
+  (into [] (seq/filter (range h) (fn (dy) (> (ink-in image x0 (+ y0 dy) w 1) 0)))))
+
+(defn- lowercase-rows (size)
+  "An `x` on each of three rows at `size` px and a line height of 1.25: the cell height
+and, per row, the rows of its cell the `x` inks."
+  (let (face {:fg [255 255 255]}
+        image (gui/render-frame [[:clear] [:text 0 0 "x" face] [:text 1 0 "x" face]
+                                 [:text 2 0 "x" face]]
+                (assoc (capture-spec) :size size :line-height 1.25))
+        [cell-w cell-h] (:cell image))
+    [cell-h (map [0 1 2] (fn (row) (inked-rows image 6 (* row cell-h) cell-w cell-h)))]))
+
 (describe "gui/render-frame — the window's painter, without a window"
   (test "row 0 starts at the window's top edge: a band on it is coloured from y = 0"
     (when-gui (fn ()
@@ -210,7 +224,18 @@
                   (is (= (ink-in image (- x cell-w) cell-h cell-w cell-h) 0))
                   (is (= (ink-in image (+ x cell-w) cell-h cell-w cell-h) 0))
                   (is (= (ink-in image x 0 cell-w cell-h) 0))
-                  (is (= (ink-in image x (* 2 cell-h) cell-w cell-h) 0)))))))
+                  (is (= (ink-in image x (* 2 cell-h) cell-w cell-h) 0))))))
+
+  (test "a lowercase letter sits on the same pixels in every row, in its row's middle (ADR-611)"
+    (when-gui
+      (fn ()
+        (doseq (size [11 15 22])
+          (let ([cell-h rows] (lowercase-rows size)
+                [top bottom] [(first (first rows)) (last (first rows))]
+                middle (/ (+ top bottom 1) 2.0))
+            (is (every? rows (fn (inked) (= inked (first rows)))))
+            (is (<= (math/abs (- middle (/ cell-h 2.0))) 1.0))))))))
+
 
 (describe "gui/write-png and gui/pixel"
   (test "a picture written as PNG decodes back to the same pixels, cropped and scaled"
@@ -243,3 +268,154 @@
 (describe "gui/capture"
   (test "a window that is not open is an error, not an empty picture"
     (assert-error (gui/capture 987654321))))
+
+;; ADR-612: input→present as a distribution, read off plain histograms — synthetic data
+;; only; nothing here measures anything
+(describe "gui/latency-percentiles — the tail typing feels"
+  (test "p50, p99 and p99.9 land on the bucket tops, never above the maximum"
+    ;; 1000 inputs: 980 at ~2 ms, 15 at ~8 ms, 5 at ~40 ms
+    (let (h {:count 1000 :max-us 40000 :buckets {2047 980 8191 15 40959 5}}
+          p (gui/latency-percentiles h))
+      (assert= (:count p) 1000)
+      (assert= (:p50 p) 2.047)
+      (assert= (:p99 p) 8.191)
+      (assert= (:p999 p) 40.0)
+      (assert= (:max p) 40.0)))
+  (test "p99 of a hundred inputs is the ninety-ninth, not the hundredth"
+    (let (p (gui/latency-percentiles {:count 100 :max-us 50000 :buckets {1023 99 51199 1}}))
+      (assert= (:p99 p) 1.023)
+      (assert= (:p999 p) 50.0)))
+  (test "an empty histogram has no percentiles"
+    (assert= (gui/latency-percentiles {:count 0 :max-us 0 :buckets {}})
+      {:count 0 :p50 nil :p99 nil :p999 nil :max nil})))
+
+(describe "gui/latency-merge and gui/latency-since — histograms are data"
+  (test "two sessions add bucket by bucket"
+    (let (merged (gui/latency-merge {:count 2 :max-us 3000 :buckets {1023 1 3071 1}}
+                   {:count 1 :max-us 900 :buckets {1023 1}}))
+      (assert= merged {:count 3 :max-us 3000 :buckets {1023 2 3071 1}})
+      (assert= (gui/latency-merge nil merged) merged)))
+  (test "a window of time is the later reading less the earlier"
+    (let (before {:count 2 :max-us 3000 :buckets {1023 1 3071 1}}
+          now {:count 5 :max-us 9000 :buckets {1023 3 3071 1 9215 1}}
+          window (gui/latency-since now before))
+      (assert= window {:count 3 :max-us 9000 :buckets {1023 2 9215 1}})
+      ;; the window's own maximum is its slowest bucket's top, under the session's
+      (assert= (:max-us (gui/latency-since {:count 3 :max-us 9000 :buckets {1023 2 9215 1}}
+                          {:count 1 :max-us 9000 :buckets {9215 1}}))
+        1023)
+      (assert= (gui/latency-since now nil) now))))
+
+(describe "gui/key-repeat? and gui/latency-histogram without a window"
+  (test "a window that is not open has no repeat and no histogram"
+    (assert= (gui/key-repeat? 987654) false)
+    (assert-error (gui/latency-histogram 987654))))
+
+(describe "gui/reduce-motion-from — each desktop's switch, read from what it says"
+  (test "GNOME's animations switch off asks for reduced motion"
+    (is (gui/reduce-motion-from :linux {:gnome "false"}))
+    (is (not (gui/reduce-motion-from :linux {:gnome "true"}))))
+  (test "KDE's animation speed at instant asks, any other speed does not"
+    (is (gui/reduce-motion-from :linux {:kde "[General]\nx=1\n[KDE]\nAnimationDurationFactor=0\n"}))
+    (is (not (gui/reduce-motion-from :linux {:kde "[KDE]\nAnimationDurationFactor=0.5\n"}))))
+  (test "macOS Reduce Motion and Windows' animation effects"
+    (is (gui/reduce-motion-from :macos {:macos "1\n"}))
+    (is (not (gui/reduce-motion-from :macos {:macos "0"})))
+    (is (gui/reduce-motion-from :windows
+          {:windows "HKEY_CURRENT_USER\\Control Panel\\Desktop\\WindowMetrics\n    MinAnimate    REG_SZ    0\n"}))
+    (is (not (gui/reduce-motion-from :windows {:windows "    MinAnimate    REG_SZ    1"}))))
+  (test "a source that said nothing does not ask"
+    (is (not (gui/reduce-motion-from :linux {:gnome nil :kde nil})))
+    (is (not (gui/reduce-motion-from :windows {}))))
+  (test "the live read answers a boolean on any machine"
+    (is (bool? (gui/reduce-motion?)))))
+
+;; --- the seam (ADR-610): rows above it top-anchored, from it down bottom-anchored ------
+
+(def- seam-header [200 40 40])
+(def- seam-body [40 200 40])
+(def- seam-above [40 40 200])
+(def- seam-mode [200 200 40])
+(def- seam-echo [40 200 200])
+
+(defn- seam-spec (h size)
+  {:width 400 :height h :inset 6 :bg capture-bg :size size :line-height 1.4})
+
+(defn- seam-frame (cols rows top-band)
+  "An editor's frame: a header on row 0 (three columns, so it does not bleed), the body,
+the body's last row in its own colour, the mode line on the seam and the echo area last."
+  (let (seam (- rows 2))
+    [[:clear]
+      [:seam seam {:top-band top-band}]
+      [:rect 0 1 3 1 {:bg seam-header}]
+      [:rect 1 0 cols (- seam 2) {:bg seam-body}]
+      [:rect (dec seam) 0 cols 1 {:bg seam-above}]
+      [:rect seam 0 cols 1 {:bg seam-mode}]
+      [:rect (dec rows) 0 cols 1 {:bg seam-echo}]]))
+
+(defn- seam-failures (h size top-band)
+  "What breaks the layout rule for a window `h` px tall at font `size`: a vector of
+descriptions, empty when the rule holds."
+  (let ([cols rows] (:grid (gui/render-frame [[:clear] [:seam nil {:top-band top-band}]]
+                             (seam-spec h size)))
+        image (gui/render-frame (seam-frame cols rows top-band) (seam-spec h size))
+        tops (:row-tops image)
+        [cell-w cell-h] (:cell image)
+        seam (- rows 2)
+        top (if top-band 0 6)
+        gap-from (+ (nth tops (dec seam)) cell-h)
+        gap-to (nth tops seam)
+        bare (seq/filter (range (second tops) h) (fn (y) (= (gui/pixel image 200 y) capture-bg)))
+        gap-wrong (seq/filter (range gap-from gap-to)
+                    (fn (y) (not (= (gui/pixel image 200 y) seam-above)))))
+    (vec (seq/filter [(when (not (= (:seam image) seam)) [:seam (:seam image)])
+                       (when (not (= (last tops) (- h 6))) [:last-row-ends (last tops)])
+                       (when (not (= (gui/pixel image 200 (dec h)) seam-echo))
+                         :bottom-inset-not-echo)
+                       (when (not (= (first tops) top)) [:row-0 (first tops)])
+                       (when (not (= (gui/pixel image (+ 6 (* 2 cell-w)) top) seam-header))
+                         :header-not-at-top)
+                       (when (and (not top-band) (not (= (gui/pixel image 6 (dec top)) capture-bg)))
+                         :top-margin-painted)
+                       (when (>= (- gap-to gap-from) cell-h) [:gap (- gap-to gap-from)])
+                       (when (not (empty? gap-wrong)) [:gap-not-the-row-above (first gap-wrong)])
+                       (when (not (empty? bare)) [:bare-row (first bare)])]
+           (fn (failure) (not (nil? failure)))))))
+
+(describe "gui/render-frame — the seam holds the leftover at every height (ADR-610)"
+  (test "every height in one row's span, two font sizes, row 0 a band and not"
+    (when-gui (fn ()
+                (doseq (size [15 21])
+                  (let (cell-h (second (:cell (gui/render-frame [[:clear]] (seam-spec 300 size)))))
+                    (doseq (h (range 300 (+ 300 cell-h)))
+                      (doseq (top-band [true false])
+                        (is (= [size h top-band (seam-failures h size top-band)]
+                              [size h top-band []]))))))))))
+
+(test "without a seam the leftover stays under the last row"
+  (when-gui (fn ()
+              (let (image (gui/render-frame [[:clear]] (seam-spec 307 15))
+                    cell-h (second (:cell image)))
+                (is (nil? (:seam image)))
+                (is (= (:row-tops image)
+                      (vec (map (range (inc (second (:grid image)))) (fn (k) (* k cell-h))))))))))
+
+(describe "gui/render-frame — what bleeds into a top margin (ADR-610)"
+  (test "a one-row band on row 0 stays out of it; a taller band reaches the top edge"
+    (when-gui (fn ()
+                (let (spec (seam-spec 300 15)
+                      [cols rows] (:grid (gui/render-frame [[:clear] [:seam nil {:top-band false}]]
+                                           spec))
+                      image (gui/render-frame [[:clear]
+                                                [:seam (- rows 2) {:top-band false}]
+                                                [:rect 0 0 cols 1 {:bg seam-above}]
+                                                [:rect 0 0 3 (- rows 2) {:bg seam-body}]]
+                              spec)
+                      [cell-w _] (:cell image)
+                      line-x (+ 6 (* 10 cell-w))
+                      gutter-x (+ 6 cell-w))
+                  (is (= (first (:row-tops image)) 6))
+                  (is (every? (vec (range 0 6)) (fn (y) (= (gui/pixel image line-x y) capture-bg))))
+                  (is (= (gui/pixel image line-x 6) seam-above))
+                  (is (= (gui/pixel image gutter-x 0) seam-body))
+                  (is (= (gui/pixel image 0 0) seam-body)))))))

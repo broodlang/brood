@@ -6,12 +6,15 @@
 
 mod bleed;
 #[cfg(all(test, feature = "gui-gpu"))]
+mod gpu_ink;
+#[cfg(all(test, feature = "gui-gpu"))]
 mod gpu_replay;
 mod input;
 mod keyboard;
 mod offscreen;
 mod paint;
 mod render;
+mod rows;
 
 use input::*;
 use keyboard::*;
@@ -23,13 +26,14 @@ use render::*;
 #[cfg(feature = "gui-gpu")]
 pub(crate) use {
     paint::holds_blinking_caret, paint::paint_stall_ms, paint::text_px_width, render::caret_cells,
-    render::caret_glyph, render::cursor_rim, render::luma, render::snap_hairline,
-    render::text_units, render::unit_cells,
+    render::caret_glyph, render::cursor_rim, render::luminance, render::snap_hairline,
+    render::text_units, render::unit_cells, rows::RowMap,
 };
 
 use super::{
-    CursorShape, Key, KeyRepeat, Keystroke, LatencySample, Mouse, MouseAction, MouseButton, Op,
-    OptionMeta, PAINT_PHASES, RepeatCounts, WheelMode, WindowSpec,
+    CursorShape, InputKind, Key, KeyRepeat, Keystroke, LatencyHistogram, LatencyLog, LatencySample,
+    Mouse, MouseAction, MouseButton, Op, OptionMeta, PAINT_PHASES, RepeatCounts, WheelMode,
+    WindowSpec,
 };
 
 use crate::core::sync::lock;
@@ -43,7 +47,7 @@ use crate::process::{
 
 use std::cell::RefCell;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 use std::num::NonZeroU32;
 
@@ -150,6 +154,12 @@ const DEFAULT_PX: f32 = 15.0;
 // typical ~1.2 so text gets vertical breathing room and the grid reads as an
 // editor, not a console. Drives `cell_h` (and so the row count) in `recompute`.
 const LINE_HEIGHT: f32 = 1.4;
+
+// The text contrast exponent γ a window starts with: the perceptual gamma light-on-dark text is
+// weighted at (`TextInk`, ADR-611). 1.0 is the encoded lerp's weight, which reads thin for
+// light text on a dark ground (its stems lose light where they straddle pixels); 2.2 is linear
+// light's, which reads soft (ADR-358). 1.4 is between: fuller stems, rims that do not glow.
+const TEXT_CONTRAST: f32 = 1.4;
 
 /// The velocity a wheel notch of `dy` (±1 per notch on most mice) leaves the kinetic
 /// scroll with, on top of the `carried` velocity of a glide already running the same
@@ -464,7 +474,8 @@ struct OpenReply {
     size: Arc<Mutex<(u16, u16)>>,
     size_px: Arc<Mutex<(u32, u32)>>,
     keys: Arc<Mutex<KeyReport>>,
-    latency: Arc<Mutex<VecDeque<LatencySample>>>,
+    key_repeat: Arc<AtomicBool>,
+    latency: Arc<Mutex<LatencyLog>>,
 }
 
 /// What the Brood side keeps per open window (keyed by the id `open` returns) —
@@ -479,9 +490,13 @@ struct WinHandle {
     /// for `gui-held-key` (the source of truth for a held key — immune to a missed key-up,
     /// ADR-086), and how its repeats went, for `gui-key-repeats`.
     keys: Arc<Mutex<KeyReport>>,
+    /// Whether the last key press the app took from its mailbox was an OS repeat
+    /// (`Keyboard::received_repeat`), for `gui-key-repeat?` (ADR-612).
+    key_repeat: Arc<AtomicBool>,
     /// The last `LATENCY_SAMPLES` input-to-present samples, newest last, for
-    /// `gui-latency` (ADR-440).
-    latency: Arc<Mutex<VecDeque<LatencySample>>>,
+    /// `gui-latency` (ADR-440), and the session's distribution per kind of input, for
+    /// `gui-latency-histogram` (ADR-612).
+    latency: Arc<Mutex<LatencyLog>>,
 }
 
 /// The one GUI thread's event-loop proxy, started lazily on the first `open`.
@@ -785,6 +800,7 @@ pub fn open(subscriber: u64, spec: WindowSpec) -> Result<u64, String> {
                 size,
                 size_px: Arc::new(Mutex::new(size_px)),
                 keys: Arc::default(),
+                key_repeat: Arc::default(),
                 latency: Arc::default(),
             },
         );
@@ -807,6 +823,7 @@ pub fn open(subscriber: u64, spec: WindowSpec) -> Result<u64, String> {
         size,
         size_px,
         keys,
+        key_repeat,
         latency,
     } = reply_rx
         .recv()
@@ -817,6 +834,7 @@ pub fn open(subscriber: u64, spec: WindowSpec) -> Result<u64, String> {
             size,
             size_px,
             keys,
+            key_repeat,
             latency,
         },
     );
@@ -972,8 +990,27 @@ pub fn key_repeats(id: u64) -> Result<RepeatCounts, String> {
 pub fn latency(id: u64) -> Result<Vec<LatencySample>, String> {
     let w = lock(windows());
     let h = w.get(&id).ok_or("gui window not open")?;
-    let samples = lock(&h.latency).iter().copied().collect();
+    let samples = lock(&h.latency).samples.iter().copied().collect();
     Ok(samples)
+}
+
+/// `(gui-latency-histogram id)` — window `id`'s input-to-present distribution since it
+/// opened, keys and pointer apart (ADR-612). Both empty headless.
+pub fn latency_histograms(id: u64) -> Result<(LatencyHistogram, LatencyHistogram), String> {
+    let w = lock(windows());
+    let h = w.get(&id).ok_or("gui window not open")?;
+    let log = lock(&h.latency);
+    Ok((log.keys.clone(), log.pointer.clone()))
+}
+
+/// `(gui-key-repeat? id)` — whether the last key press window `id`'s app took from its
+/// mailbox was an OS auto-repeat (ADR-612): exact for the press the app is folding, since
+/// the mark is set as the press leaves the mailbox. False for a window not open (one
+/// closed under a turn that still names it) and headless.
+pub fn key_repeat(id: u64) -> bool {
+    lock(windows())
+        .get(&id)
+        .is_some_and(|h| h.key_repeat.load(Ordering::Acquire))
 }
 
 /// `(gui-draw id ops)` — paint a frame to window `id`.
@@ -1551,12 +1588,13 @@ struct Win {
     opened_at: Instant,
     /// When the earliest input not yet answered by a frame arrived (a key press, a
     /// button, a wheel step) — consumed by the next `UserEvent::Draw` (ADR-440).
-    input_at: Option<Instant>,
+    input_at: Option<(Instant, InputKind)>,
     /// The input stamp the frame waiting to be painted answers, carried to the paint so
     /// it can report input -> present.
-    draw_input: Option<Instant>,
-    /// The last `LATENCY_SAMPLES` input-to-present samples, shared with `gui-latency`.
-    latency: Arc<Mutex<VecDeque<LatencySample>>>,
+    draw_input: Option<(Instant, InputKind)>,
+    /// The last `LATENCY_SAMPLES` input-to-present samples and the session's distribution,
+    /// shared with `gui-latency` and `gui-latency-histogram`.
+    latency: Arc<Mutex<LatencyLog>>,
     /// The frame's blinking caret and its clock (ADR-469), `None` when the frame on screen
     /// has no `[:cursor … blink]`: the window toggles it itself, between frames.
     caret_blink: Option<CaretBlink>,
@@ -1588,7 +1626,7 @@ struct RenderDefaults {
     line_height: f32,
     /// How monochrome text is anti-aliased.
     text_aa: TextAa,
-    /// The text contrast exponent (1.0 = the plain linear-light blend).
+    /// The text contrast exponent (`TEXT_CONTRAST`; 1.0 = no lift, the encoded lerp's weight).
     text_contrast: f32,
     /// Whether punctuation runs are shaped together (programming ligatures).
     ligatures: bool,
@@ -1603,7 +1641,7 @@ impl Default for RenderDefaults {
             bg: None,
             line_height: LINE_HEIGHT,
             text_aa: TextAa::Auto,
-            text_contrast: 1.0,
+            text_contrast: TEXT_CONTRAST,
             ligatures: false,
         }
     }
@@ -1805,6 +1843,7 @@ impl GuiApp {
                     size: win.size.clone(),
                     size_px: win.size_px.clone(),
                     keys: win.keyboard.report(),
+                    key_repeat: win.keyboard.received_repeat(),
                     latency: win.latency.clone(),
                 }));
                 self.ids.insert(id, wid);
@@ -2020,6 +2059,12 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     }
                     reconcile_music(w, &ops);
                     w.renderer.emitters.frame_arrived(&ops);
+                    // The rows this frame lays out (ADR-610): its seam, and whether row 0 is
+                    // a band. A change of band moves the top margin, so the grid holds
+                    // another number of rows: the app is told, and lays out for it.
+                    if w.renderer.set_layout(rows::frame_layout(&ops)) {
+                        publish_size(w);
+                    }
                     // Refresh the cursor hot-zones from this frame, then store it. The walk
                     // goes INTO the regions (`ScrollRegion`, `CellRegion`), resolving each
                     // zone to pixels with the metrics its own region is painted at.
@@ -2270,27 +2315,33 @@ impl ApplicationHandler<UserEvent> for GuiApp {
         // turn that settles with nothing to draw (`settle`) drops it. A press the arms below
         // drop (an auto-repeat) is stamped too — the frame the app's own repeat draws
         // answers it, which is what the user waits on. A bare modifier is not: `C-x` is
-        // timed from the `x`, not from however long Ctrl was held before it.
-        let is_input = match &event {
+        // timed from the `x`, not from however long Ctrl was held before it. Each stamp names
+        // its kind, so key-to-paint is counted apart from the pointer (ADR-612).
+        let input = match &event {
             WindowEvent::KeyboardInput {
                 event: key_event,
                 is_synthetic,
                 ..
-            } => {
-                key_event.state == ElementState::Pressed
-                    && !is_synthetic
-                    && !is_modifier_key(key_event)
+            } => (key_event.state == ElementState::Pressed
+                && !is_synthetic
+                && !is_modifier_key(key_event))
+            .then_some(InputKind::Key),
+            WindowEvent::MouseInput { state, .. } => {
+                (*state == ElementState::Pressed).then_some(InputKind::Pointer)
             }
-            WindowEvent::MouseInput { state, .. } => *state == ElementState::Pressed,
             // a horizontal-only wheel event scrolls nothing here, so no frame answers it
             WindowEvent::MouseWheel { delta, .. } => match delta {
                 MouseScrollDelta::LineDelta(_, y) => *y != 0.0,
                 MouseScrollDelta::PixelDelta(position) => position.y != 0.0,
-            },
+            }
+            .then_some(InputKind::Pointer),
             // an input method's commit is typing, whatever the keyboard did
-            WindowEvent::Ime(winit::event::Ime::Commit(text)) => !text.is_empty(),
-            _ => false,
+            WindowEvent::Ime(winit::event::Ime::Commit(text)) => {
+                (!text.is_empty()).then_some(InputKind::Key)
+            }
+            _ => None,
         };
+        let is_input = input.is_some();
         if is_input && w.busy_check.is_none() {
             // the loop may now be busy with this input: look in a moment (ADR-491)
             w.busy_check = Some(Instant::now() + BUSY_PROBE);
@@ -2300,7 +2351,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
             // phase, and the next blink is a whole interval away (ADR-469)
             wake_caret(w, true);
             if w.input_at.is_none() {
-                w.input_at = Some(Instant::now());
+                w.input_at = input.map(|kind| (Instant::now(), kind));
             }
         }
         // A key that reached the window ends a composition that already ended: one that
@@ -2334,9 +2385,11 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 );
             }
             WindowEvent::Resized(_) => {
-                // The sub-cell remainder is placed at paint time (`grid_origin`:
-                // on the right, and split above and below), so there's no
-                // window-resize snap to do here — it works on every WM.
+                // The sub-cell remainder is placed at paint time (`Renderer::rows`: on the
+                // right, and at the frame's seam or under the last row, ADR-610), so there's
+                // no window-resize snap to do here — it works on every WM. The caret's pixels
+                // move with a seam's gap, so the input method is told again.
+                update_ime_area(w);
                 // Wake the app loop so it re-renders at the new (cols, rows)
                 // now, rather than after its (possibly long) poll timeout.
                 publish_size(w);
@@ -2380,13 +2433,15 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     match stroke.and_then(|stroke| {
                         w.keyboard.press(stroke, ke.physical_key, Instant::now())
                     }) {
-                        Some(KeyMessage::Press(message)) => deliver(w.subscriber, message),
+                        Some(KeyMessage::Press(message, receipt)) => {
+                            deliver_credited(w.subscriber, message, receipt)
+                        }
                         Some(KeyMessage::Repeat(message, credit)) => {
                             deliver_credited(w.subscriber, message, credit)
                         }
-                        Some(KeyMessage::Restroke { up, press }) => {
+                        Some(KeyMessage::Restroke { up, press, receipt }) => {
                             deliver(w.subscriber, up);
-                            deliver(w.subscriber, press);
+                            deliver_credited(w.subscriber, press, receipt);
                         }
                         None => {}
                     }
@@ -2553,13 +2608,15 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 // one cell — hit-testing only when the *cell* changed would step straight
                 // over them. The `set_cursor` below is still guarded by a change in shape,
                 // which is the call that costs anything.
-                let (grid_x, grid_y) = w
-                    .renderer
-                    .grid_origin(psz.width as usize, psz.height as usize);
+                // The zones are in the grid's uniform pixels (`cursor_zones`); the pointer is
+                // taken there through the row map's inverse, as a click is (ADR-610).
+                let (width, height) = (psz.width as usize, psz.height as usize);
+                let (grid_x, _) = w.renderer.grid_origin(width, height);
+                let grid_y = w.renderer.rows(width, height).uniform_y(position.y);
                 let want = shape_at(
                     &w.zones,
                     position.x as isize - grid_x as isize,
-                    position.y as isize - grid_y as isize,
+                    grid_y.floor() as isize,
                 );
                 if want != w.shape {
                     w.shape = want;
@@ -2797,9 +2854,9 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     }
                 }
                 if let Some(split) = painted
-                    && let Some(input_at) = w.draw_input.take()
+                    && let Some((input_at, kind)) = w.draw_input.take()
                 {
-                    record_latency(w, input_at, paint_start, presented, split);
+                    record_latency(w, input_at, kind, paint_start, presented, split);
                 }
                 w.particles_next = w
                     .renderer
@@ -2989,12 +3046,12 @@ fn update_ime_area(w: &mut Win) {
         return;
     };
     let inner = w.window.inner_size();
-    let (origin_x, origin_y) = w
-        .renderer
-        .grid_origin(inner.width as usize, inner.height as usize);
+    let (width_px, height_px) = (inner.width as usize, inner.height as usize);
+    let (origin_x, _) = w.renderer.grid_origin(width_px, height_px);
+    // the caret's uniform grid pixels as window pixels, through the row map (ADR-610)
     let area = (
         x.saturating_add(origin_x as isize),
-        y.saturating_add(origin_y as isize),
+        w.renderer.rows(width_px, height_px).window_y(y),
         width,
         height,
     );
@@ -3034,6 +3091,7 @@ fn end_composition(w: &mut Win) {
 fn record_latency(
     w: &Win,
     input_at: Instant,
+    input: InputKind,
     paint_start: Instant,
     presented: Instant,
     split: Option<[u64; 5]>,
@@ -3042,6 +3100,7 @@ fn record_latency(
         total_us: presented.duration_since(input_at).as_micros() as u64,
         paint_us: presented.duration_since(paint_start).as_micros() as u64,
         split,
+        input,
     };
     if let Some(threshold_ms) = paint_stall_ms()
         && u128::from(sample.total_us) >= threshold_ms * 1000
@@ -3065,11 +3124,7 @@ fn record_latency(
             ms(sample.paint_us),
         );
     }
-    let mut samples = lock(&w.latency);
-    if samples.len() == LATENCY_SAMPLES {
-        samples.pop_front();
-    }
-    samples.push_back(sample);
+    lock(&w.latency).record(sample, LATENCY_SAMPLES);
 }
 
 /// Republish a window's size to the Brood side and wake its app loop with the
@@ -3133,10 +3188,11 @@ fn px_clamped(pos: PhysicalPosition<f64>) -> (u16, u16) {
     (clamp(pos.x), clamp(pos.y))
 }
 
-/// A window pixel position to a (col, row) character cell, clamped to u16. The grid
-/// origin (`grid_origin` — inset plus the remainder placement, the same the grid is
-/// painted with) is subtracted first, so a click lands on the cell painted under it;
-/// a click in the surrounding margin clamps to the edge cell.
+/// A window pixel position to a (col, row) character cell, clamped to u16. The column
+/// subtracts the grid's left edge; the row is the row map's inverse (`RowMap::row_at`, the
+/// same map the grid is painted with, seam and all — ADR-610), so a click lands on the cell
+/// painted under it; a click in the surrounding margin clamps to the edge cell, and one in
+/// a seam's gap is the row above it, whose backgrounds paint the gap.
 /// [`px_to_cell`] without the floor: the pointer's `(row, col)` in fractional window cells,
 /// from the same grid origin and cell, so `floor` of it is exactly the cell `px_to_cell`
 /// gives. Clamped at 0 like it.
@@ -3146,18 +3202,17 @@ fn px_to_cell_frac(
     w_px: usize,
     h_px: usize,
 ) -> (f64, f64) {
-    let (ox, oy) = r.grid_origin(w_px, h_px);
+    let (ox, _) = r.grid_origin(w_px, h_px);
     let col = (pos.x - ox as f64).max(0.0) / r.cell_w.max(1) as f64;
-    let row = (pos.y - oy as f64).max(0.0) / r.cell_h.max(1) as f64;
+    let row = r.rows(w_px, h_px).row_at(pos.y);
     (row, col)
 }
 
 fn px_to_cell(pos: PhysicalPosition<f64>, r: &Renderer, w_px: usize, h_px: usize) -> (u16, u16) {
-    let (ox, oy) = r.grid_origin(w_px, h_px);
+    let (ox, _) = r.grid_origin(w_px, h_px);
     let col =
         ((pos.x - ox as f64).max(0.0) as usize / r.cell_w.max(1)).min(u16::MAX as usize) as u16;
-    let row =
-        ((pos.y - oy as f64).max(0.0) as usize / r.cell_h.max(1)).min(u16::MAX as usize) as u16;
+    let row = r.rows(w_px, h_px).row_of(pos.y);
     (col, row)
 }
 

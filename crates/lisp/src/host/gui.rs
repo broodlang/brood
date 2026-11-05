@@ -161,8 +161,9 @@ pub struct FontInfo {
 /// answer (ADR-609). `rgba` is `width * height * 4` bytes, row-major, opaque. The rest
 /// is the geometry the picture was painted with, so a test can find a row or a cell in
 /// it without re-deriving the layout rule: the cell in physical px, the grid in cells,
-/// where the grid's top-left sits and the inset. Plain data, defined here so the
-/// builtins compile without the GUI.
+/// where the grid's top-left sits, the inset, the seam the frame declared and the pixel
+/// top of every row (ADR-610). Plain data, defined here so the builtins compile without
+/// the GUI.
 #[derive(Clone, Debug, Default)]
 pub struct FrameImage {
     pub width: u32,
@@ -172,6 +173,13 @@ pub struct FrameImage {
     pub grid: (u16, u16),
     pub origin: (u32, u32),
     pub inset: u32,
+    /// The frame's seam row (`Op::Seam`), when it declared one inside the grid.
+    pub seam: Option<u16>,
+    /// The pixel row each grid row starts at, then where the last one ends: `grid.1 + 1`
+    /// entries, read off the renderer's row map (`RowMap::y`), so row `k` covers
+    /// `[row_tops[k], row_tops[k] + cell.1)` and a seam's leftover is the step between
+    /// `row_tops[seam - 1] + cell.1` and `row_tops[seam]`.
+    pub row_tops: Vec<u32>,
 }
 
 /// Which font `gui/render-frame` paints with: a family keyword the offscreen painter
@@ -346,6 +354,8 @@ pub struct LatencySample {
     /// the GPU paint's phases — encode, upload, acquire, submit, present — in
     /// microseconds; `None` on the CPU painter
     pub split: Option<[u64; 5]>,
+    /// what kind of input it answers (ADR-612)
+    pub input: InputKind,
 }
 
 /// How a window's held keys have repeated since it opened (`gui-key-repeats`, ADR-441):
@@ -365,6 +375,168 @@ pub struct RepeatCounts {
 
 /// The names of `LatencySample::split`'s phases, in order.
 pub const PAINT_PHASES: [&str; 5] = ["encode", "upload", "acquire", "submit", "present"];
+
+/// Which kind of input a latency sample answers (ADR-612): a key (a press, an OS repeat, an
+/// input method's commit) or the pointer (a button, a wheel step). Kept apart because "how
+/// fast does a key show" is the number typing feels, and a wheel step answered by a glide is
+/// a different question.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputKind {
+    Key,
+    Pointer,
+}
+
+/// A window's input-to-present times as a DISTRIBUTION (ADR-612): every sample since the
+/// window opened, counted into log-linear buckets — exact below 16 µs, then 16 buckets per
+/// power of two, so a bucket is at most 1/16 (6.25%) wide — with the count and the largest
+/// sample. The ring of recent samples (`LatencyLog::samples`) answers "what were the last
+/// few"; this answers p50 / p99 / p99.9 over a whole session, where the tail that typing
+/// feels lives (one key in a thousand at ten keys a second is one every hundred seconds).
+/// Fixed size, so recording costs an index and an add on the GUI thread whatever the count.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LatencyHistogram {
+    counts: Vec<u64>,
+    pub count: u64,
+    pub max_us: u64,
+}
+
+impl Default for LatencyHistogram {
+    fn default() -> Self {
+        LatencyHistogram {
+            counts: vec![0; LatencyHistogram::BUCKETS],
+            count: 0,
+            max_us: 0,
+        }
+    }
+}
+
+impl LatencyHistogram {
+    /// Sub-buckets per power of two (4 bits): a bucket's width is 1/16 of its lower bound.
+    const SUB: u64 = 16;
+    /// Samples at or past 2^30 µs (about 18 minutes) share the last bucket.
+    const CEILING_US: u64 = (1 << 30) - 1;
+    /// 16 exact buckets, then 16 for each power of two from 2^4 up to 2^29.
+    pub const BUCKETS: usize = 16 + 26 * 16;
+
+    /// The bucket `us` falls in.
+    pub fn bucket_of(us: u64) -> usize {
+        let us = us.min(Self::CEILING_US);
+        if us < Self::SUB {
+            return us as usize;
+        }
+        let octave = 63 - u64::from(us.leading_zeros());
+        let shift = octave - 4;
+        let sub = (us >> shift) & (Self::SUB - 1);
+        (Self::SUB + shift * Self::SUB + sub) as usize
+    }
+
+    /// The largest value bucket `index` holds, in microseconds: what a percentile that
+    /// lands in it reads as, so a percentile is never under the samples it stands for.
+    pub fn bucket_upper_us(index: usize) -> u64 {
+        let index = index as u64;
+        if index < Self::SUB {
+            return index;
+        }
+        let shift = (index - Self::SUB) / Self::SUB;
+        let sub = (index - Self::SUB) % Self::SUB;
+        ((Self::SUB + sub) << shift) + (1 << shift) - 1
+    }
+
+    /// Count one sample of `us` microseconds.
+    pub fn record(&mut self, us: u64) {
+        self.counts[Self::bucket_of(us)] += 1;
+        self.count += 1;
+        self.max_us = self.max_us.max(us);
+    }
+
+    /// The buckets holding any sample, ascending, as `(upper bound µs, count)`.
+    pub fn buckets(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.counts
+            .iter()
+            .enumerate()
+            .filter(|(_, count)| **count > 0)
+            .map(|(index, count)| (Self::bucket_upper_us(index), *count))
+    }
+}
+
+/// What a window keeps of its input-to-present times: the last `samples` (newest last,
+/// `gui-latency`, ADR-440) and the session's distribution per kind of input
+/// (`gui-latency-histogram`, ADR-612).
+#[derive(Clone, Debug, Default)]
+pub struct LatencyLog {
+    pub samples: std::collections::VecDeque<LatencySample>,
+    pub keys: LatencyHistogram,
+    pub pointer: LatencyHistogram,
+}
+
+impl LatencyLog {
+    /// Keep `sample`, dropping the oldest past `ring` samples, and count it in its kind's
+    /// distribution.
+    pub fn record(&mut self, sample: LatencySample, ring: usize) {
+        if self.samples.len() == ring {
+            self.samples.pop_front();
+        }
+        self.samples.push_back(sample);
+        match sample.input {
+            InputKind::Key => self.keys.record(sample.total_us),
+            InputKind::Pointer => self.pointer.record(sample.total_us),
+        }
+    }
+}
+
+#[cfg(test)]
+mod latency_histogram_tests {
+    use super::*;
+
+    #[test]
+    fn every_value_lands_in_a_bucket_whose_upper_bound_is_within_a_sixteenth() {
+        let mut previous = 0;
+        for us in (0..5000).chain([65_535, 1_000_000, 123_456_789]) {
+            let index = LatencyHistogram::bucket_of(us);
+            let upper = LatencyHistogram::bucket_upper_us(index);
+            assert!(upper >= us, "{us} µs reads as {upper}");
+            assert!(
+                (upper - us) * 16 <= us.max(1),
+                "{us} µs reads as {upper}: too wide"
+            );
+            assert!(
+                index >= previous || us > 5000,
+                "buckets ascend with the value"
+            );
+            previous = index;
+        }
+    }
+
+    #[test]
+    fn the_last_bucket_holds_everything_past_the_ceiling() {
+        let last = LatencyHistogram::BUCKETS - 1;
+        assert_eq!(LatencyHistogram::bucket_of(u64::MAX), last);
+        assert_eq!(LatencyHistogram::bucket_of(1 << 30), last);
+        assert_eq!(LatencyHistogram::bucket_upper_us(last), (1 << 30) - 1);
+    }
+
+    #[test]
+    fn a_log_counts_each_kind_apart_and_keeps_a_bounded_ring() {
+        let mut log = LatencyLog::default();
+        let sample = |total_us, input| LatencySample {
+            total_us,
+            paint_us: 0,
+            split: None,
+            input,
+        };
+        for us in [4_000, 5_000, 6_000] {
+            log.record(sample(us, InputKind::Key), 2);
+        }
+        log.record(sample(90_000, InputKind::Pointer), 2);
+        assert_eq!(log.samples.len(), 2);
+        assert_eq!((log.keys.count, log.keys.max_us), (3, 6_000));
+        assert_eq!((log.pointer.count, log.pointer.max_us), (1, 90_000));
+        let buckets: Vec<_> = log.keys.buckets().collect();
+        assert_eq!(buckets.len(), 3);
+        assert!(buckets.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        assert_eq!(buckets.iter().map(|(_, count)| count).sum::<u64>(), 3);
+    }
+}
 
 /// The pointer shape a cursor zone requests — frontend-neutral (mapped to a winit
 /// `CursorIcon` only inside the GUI backend). `ColResize` is the ↔ used for a
@@ -759,6 +931,29 @@ pub enum Op {
     /// one that would, so the scanners that read those stay at the top level and in
     /// regions.
     Fragment(FragmentOps),
+    /// How the frame's rows sit in the window (`[:seam row]` / `[:seam row {:top-band b}]`,
+    /// ADR-610): state of the frame, read at the top level only (the first one wins), and
+    /// painting nothing itself.
+    ///
+    /// `row` is the SEAM: rows above it are anchored to the top of the window, rows from it
+    /// down to the bottom, so the last row ends exactly at the bottom inset, and the
+    /// leftover height (the window less the margins, mod one row) lies between row
+    /// `row - 1` and row `row`, painted by the backgrounds of the row above it. An editor
+    /// names its bottom mode line: the echo area stays on the window's bottom edge and the
+    /// leftover becomes the text body's partial line, as in Emacs. `None` (or a row past
+    /// the grid) leaves the leftover under the last row.
+    ///
+    /// `top_band` says row 0 is a full-width band (a header line, a tab bar): no margin
+    /// above it. False gives the top the inset as the sides have it, and the grid loses
+    /// those rows (the window re-publishes its size when it changes). True, the default,
+    /// is the layout of a frame without the op.
+    ///
+    /// The rows stay whole cells and the app stays in cell units: only the renderer's
+    /// row-to-pixel map (`backend::rows::RowMap`) and its inverse in the hit-test change.
+    Seam {
+        row: Option<u16>,
+        top_band: bool,
+    },
 }
 
 /// How an emitter emits: what an `[:emitter id x y opts]` op's map says, with defaults
@@ -1127,16 +1322,18 @@ pub(crate) mod gpu; // the wgpu render target behind `BROOD_GUI_GPU=1`
 pub use disabled::{
     TextAa, bg, busy, capture, cell_size, close, drag_move, drag_resize, draw, focus, font,
     font_info, fullscreen, grab, headless, held_key, host_main_thread, icon, input_mode, inset,
-    key_repeats, latency, ligatures, line_height, maximize, minimize, next_texture_id, open,
-    register_family, register_installed_family, render_frame, settle, size, size_px, sound,
-    sound_free, text_aa, text_contrast, texture, texture_free, title, window_ids,
+    key_repeat, key_repeats, latency, latency_histograms, ligatures, line_height, maximize,
+    minimize, next_texture_id, open, register_family, register_installed_family, render_frame,
+    settle, size, size_px, sound, sound_free, text_aa, text_contrast, texture, texture_free, title,
+    window_ids,
 };
 
 #[cfg(feature = "gui")]
 pub use backend::{
     TextAa, bg, busy, capture, cell_size, close, drag_move, drag_resize, draw, focus, font,
     font_info, fullscreen, grab, headless, held_key, host_main_thread, icon, input_mode, inset,
-    key_repeats, latency, ligatures, line_height, maximize, minimize, next_texture_id, open,
-    register_family, register_installed_family, render_frame, settle, size, size_px, sound,
-    sound_free, text_aa, text_contrast, texture, texture_free, title, window_ids,
+    key_repeat, key_repeats, latency, latency_histograms, ligatures, line_height, maximize,
+    minimize, next_texture_id, open, register_family, register_installed_family, render_frame,
+    settle, size, size_px, sound, sound_free, text_aa, text_contrast, texture, texture_free, title,
+    window_ids,
 };
