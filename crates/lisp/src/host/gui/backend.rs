@@ -14,6 +14,7 @@ mod keyboard;
 mod offscreen;
 mod paint;
 mod render;
+mod rows;
 
 use input::*;
 use keyboard::*;
@@ -26,7 +27,7 @@ use render::*;
 pub(crate) use {
     paint::holds_blinking_caret, paint::paint_stall_ms, paint::text_px_width, render::caret_cells,
     render::caret_glyph, render::cursor_rim, render::luminance, render::snap_hairline,
-    render::text_units, render::unit_cells,
+    render::text_units, render::unit_cells, rows::RowMap,
 };
 
 use super::{
@@ -2058,6 +2059,12 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     }
                     reconcile_music(w, &ops);
                     w.renderer.emitters.frame_arrived(&ops);
+                    // The rows this frame lays out (ADR-610): its seam, and whether row 0 is
+                    // a band. A change of band moves the top margin, so the grid holds
+                    // another number of rows: the app is told, and lays out for it.
+                    if w.renderer.set_layout(rows::frame_layout(&ops)) {
+                        publish_size(w);
+                    }
                     // Refresh the cursor hot-zones from this frame, then store it. The walk
                     // goes INTO the regions (`ScrollRegion`, `CellRegion`), resolving each
                     // zone to pixels with the metrics its own region is painted at.
@@ -2378,9 +2385,11 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 );
             }
             WindowEvent::Resized(_) => {
-                // The sub-cell remainder is placed at paint time (`grid_origin`:
-                // on the right, and split above and below), so there's no
-                // window-resize snap to do here — it works on every WM.
+                // The sub-cell remainder is placed at paint time (`Renderer::rows`: on the
+                // right, and at the frame's seam or under the last row, ADR-610), so there's
+                // no window-resize snap to do here — it works on every WM. The caret's pixels
+                // move with a seam's gap, so the input method is told again.
+                update_ime_area(w);
                 // Wake the app loop so it re-renders at the new (cols, rows)
                 // now, rather than after its (possibly long) poll timeout.
                 publish_size(w);
@@ -2599,13 +2608,15 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 // one cell — hit-testing only when the *cell* changed would step straight
                 // over them. The `set_cursor` below is still guarded by a change in shape,
                 // which is the call that costs anything.
-                let (grid_x, grid_y) = w
-                    .renderer
-                    .grid_origin(psz.width as usize, psz.height as usize);
+                // The zones are in the grid's uniform pixels (`cursor_zones`); the pointer is
+                // taken there through the row map's inverse, as a click is (ADR-610).
+                let (width, height) = (psz.width as usize, psz.height as usize);
+                let (grid_x, _) = w.renderer.grid_origin(width, height);
+                let grid_y = w.renderer.rows(width, height).uniform_y(position.y);
                 let want = shape_at(
                     &w.zones,
                     position.x as isize - grid_x as isize,
-                    position.y as isize - grid_y as isize,
+                    grid_y.floor() as isize,
                 );
                 if want != w.shape {
                     w.shape = want;
@@ -3035,12 +3046,12 @@ fn update_ime_area(w: &mut Win) {
         return;
     };
     let inner = w.window.inner_size();
-    let (origin_x, origin_y) = w
-        .renderer
-        .grid_origin(inner.width as usize, inner.height as usize);
+    let (width_px, height_px) = (inner.width as usize, inner.height as usize);
+    let (origin_x, _) = w.renderer.grid_origin(width_px, height_px);
+    // the caret's uniform grid pixels as window pixels, through the row map (ADR-610)
     let area = (
         x.saturating_add(origin_x as isize),
-        y.saturating_add(origin_y as isize),
+        w.renderer.rows(width_px, height_px).window_y(y),
         width,
         height,
     );
@@ -3177,10 +3188,11 @@ fn px_clamped(pos: PhysicalPosition<f64>) -> (u16, u16) {
     (clamp(pos.x), clamp(pos.y))
 }
 
-/// A window pixel position to a (col, row) character cell, clamped to u16. The grid
-/// origin (`grid_origin` — inset plus the remainder placement, the same the grid is
-/// painted with) is subtracted first, so a click lands on the cell painted under it;
-/// a click in the surrounding margin clamps to the edge cell.
+/// A window pixel position to a (col, row) character cell, clamped to u16. The column
+/// subtracts the grid's left edge; the row is the row map's inverse (`RowMap::row_at`, the
+/// same map the grid is painted with, seam and all — ADR-610), so a click lands on the cell
+/// painted under it; a click in the surrounding margin clamps to the edge cell, and one in
+/// a seam's gap is the row above it, whose backgrounds paint the gap.
 /// [`px_to_cell`] without the floor: the pointer's `(row, col)` in fractional window cells,
 /// from the same grid origin and cell, so `floor` of it is exactly the cell `px_to_cell`
 /// gives. Clamped at 0 like it.
@@ -3190,18 +3202,17 @@ fn px_to_cell_frac(
     w_px: usize,
     h_px: usize,
 ) -> (f64, f64) {
-    let (ox, oy) = r.grid_origin(w_px, h_px);
+    let (ox, _) = r.grid_origin(w_px, h_px);
     let col = (pos.x - ox as f64).max(0.0) / r.cell_w.max(1) as f64;
-    let row = (pos.y - oy as f64).max(0.0) / r.cell_h.max(1) as f64;
+    let row = r.rows(w_px, h_px).row_at(pos.y);
     (row, col)
 }
 
 fn px_to_cell(pos: PhysicalPosition<f64>, r: &Renderer, w_px: usize, h_px: usize) -> (u16, u16) {
-    let (ox, oy) = r.grid_origin(w_px, h_px);
+    let (ox, _) = r.grid_origin(w_px, h_px);
     let col =
         ((pos.x - ox as f64).max(0.0) as usize / r.cell_w.max(1)).min(u16::MAX as usize) as u16;
-    let row =
-        ((pos.y - oy as f64).max(0.0) as usize / r.cell_h.max(1)).min(u16::MAX as usize) as u16;
+    let row = r.rows(w_px, h_px).row_of(pos.y);
     (col, row)
 }
 

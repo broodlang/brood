@@ -7,6 +7,14 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 ## v0.49.1 — the parallel cold build finishes
 
 **Added.**
+- **A frame can declare a seam row** (ADR-610). `[:seam row]` (`editor/display/seam`) anchors
+  the rows above `row` to the window's top and the rows from it down to its bottom, so the last
+  row ends exactly on the bottom inset at every window height; the leftover pixels lie at the
+  seam, painted by the row above it. An editor names its bottom mode line and its echo area
+  stops floating off the bottom edge as the window resizes. `{:top-band false}` says row 0 is not
+  a band, and the top gets the inset the sides have. One row map places every row for both
+  painters, the damage strips, the edge bleed and the mouse hit-test; `gui/render-frame` and
+  `gui/capture` return `:seam` and `:row-tops`. A frame without the op lays out as before.
 - **A frame can be painted into memory by the window's own painter** (ADR-609).
   `gui/render-frame frame spec` paints a frame as a window of a given size, font, inset and
   background would — the same layout rule, edge bleed and glyph rasteriser — with no window

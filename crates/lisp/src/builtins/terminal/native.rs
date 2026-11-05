@@ -1837,6 +1837,7 @@ struct GuiOpTags {
     crt_t: value::Symbol,
     emitter_t: value::Symbol,
     burst_t: value::Symbol,
+    seam_t: value::Symbol,
 }
 impl GuiOpTags {
     fn new() -> Self {
@@ -1868,6 +1869,7 @@ impl GuiOpTags {
             crt_t: value::intern("crt"),
             emitter_t: value::intern("emitter"),
             burst_t: value::intern("burst"),
+            seam_t: value::intern("seam"),
         }
     }
 }
@@ -2300,6 +2302,20 @@ fn parse_gui_ops(
                 color,
                 intensity,
             });
+        } else if tag == tags.seam_t {
+            // `[:seam row]` / `[:seam row {:top-band b}]` (ADR-610): row a non-negative int or
+            // nil (no seam); `:top-band` true unless the map says false or nil.
+            let row = match arg(&parts, 1) {
+                Value::Int(n) => u16::try_from(n.max(0)).ok(),
+                _ => None,
+            };
+            let top_band = match parts.get(2).copied() {
+                Some(Value::Map(opts)) => heap
+                    .map_get(opts, value::kw("top-band"))
+                    .is_none_or(crate::eval::truthy),
+                _ => true,
+            };
+            ops.push(crate::host::gui::Op::Seam { row, top_band });
         } else if tag == tags.overlay_t {
             ops.push(crate::host::gui::Op::Overlay);
         } else if tag == tags.bloom_t {
@@ -2533,7 +2549,7 @@ pub(in crate::builtins) fn gui_windows(_: &[Value], _: EnvId, heap: &mut Heap) -
 }
 
 /// A picture as Brood sees it: `{:width :height :rgba :cell [w h] :grid [cols rows]
-/// :origin [x y] :inset px}` — `gui/image-thumb`'s `{:width :height :rgba}` plus the
+/// :origin [x y] :inset px :seam row-or-nil :row-tops [y …]}` — `gui/image-thumb`'s `{:width :height :rgba}` plus the
 /// geometry it was painted with, so `gui/write-png` and `gui/texture` take it as is.
 fn frame_image_value(heap: &mut Heap, image: crate::host::gui::FrameImage) -> Value {
     let pair = |heap: &mut Heap, a: u32, b: u32| {
@@ -2545,6 +2561,16 @@ fn frame_image_value(heap: &mut Heap, image: crate::host::gui::FrameImage) -> Va
     let cell = pair(heap, image.cell.0, image.cell.1);
     let grid = pair(heap, image.grid.0 as u32, image.grid.1 as u32);
     let origin = pair(heap, image.origin.0, image.origin.1);
+    let row_tops = heap.alloc_vector(
+        image
+            .row_tops
+            .iter()
+            .map(|&y| Value::int(y as i64))
+            .collect(),
+    );
+    let seam = image
+        .seam
+        .map_or(Value::nil(), |row| Value::int(row as i64));
     let pairs = vec![
         (value::kw("width"), Value::int(image.width as i64)),
         (value::kw("height"), Value::int(image.height as i64)),
@@ -2553,6 +2579,8 @@ fn frame_image_value(heap: &mut Heap, image: crate::host::gui::FrameImage) -> Va
         (value::kw("grid"), grid),
         (value::kw("origin"), origin),
         (value::kw("inset"), Value::int(image.inset as i64)),
+        (value::kw("seam"), seam),
+        (value::kw("row-tops"), row_tops),
     ];
     heap.map_from_pairs(pairs)
 }
