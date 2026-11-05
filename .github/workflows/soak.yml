@@ -1,13 +1,13 @@
 name: Soak
 
-# The weekly long hunt (ROADMAP Supervision G). The nightly runs the node soak for two hours
+# The weekly long hunt (ROADMAP Supervision G). The full run (full.yml) runs the node soak for two hours
 # at speed; this runs it for five under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`, where every
 # safepoint collects and the verifier walks the live graph first, so a handle held across a
 # collection anywhere in the handshake, reconnect, remote-send or supervisor-restart paths is
 # caught rather than surviving by luck. Laps are far slower under stress, so the hub's lap and
 # stall limits are stretched to match.
 #
-# `make green` reports this workflow's newest completed run beside CI's and the nightly's.
+# `make green` reports this workflow's newest completed run beside CI's and the full run's.
 
 on:
   schedule:

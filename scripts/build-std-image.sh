@@ -14,8 +14,9 @@
 # any other case ran imaged depended on scheduling.
 #
 # One build up front removes the ambiguity in both directions: with this script the suite runs
-# imaged, and the one job that must cover source sets BROOD_NO_STDIMAGE=1 explicitly (ci.yml's
-# tree-walker job) rather than getting the source path by accident.
+# imaged, and the jobs that must cover source set BROOD_NO_STDIMAGE=1 explicitly (ci.yml's
+# contracts-armed job per push, full.yml's tree-walker job weekly) rather than getting the
+# source path by accident.
 #
 # Like `warm-boot-cache.sh` beside it, this is infrastructure and must never redden a run: every
 # failure path exits 0. If `nest` is not built yet there is simply no image, and the suite behaves

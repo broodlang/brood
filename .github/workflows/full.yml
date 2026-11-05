@@ -1,4 +1,11 @@
-name: Nightly
+name: Full (weekly)
+
+# The ABSOLUTELY FULL run: everything per-push CI (ci.yml) leaves out because it would make
+# every push wait — the tree-walker differential (~40 min), the repeat runs, GC stress, the
+# stress suite, the tier audit, the soaks (one of them 2 h) and the sanitizers. Weekly, plus
+# `gh workflow run full.yml` before a release or after a change to the engines. This was the
+# daily "Nightly" until 2026-11-05; it went weekly when the tree-walker job moved here, so
+# per-push CI could answer in ~12 minutes instead of ~40.
 
 # CI answers "did this commit pass?" — once. It cannot answer the question CLAUDE.md
 # actually asks, which is "is this tree green?", because a one-in-N race passes N-1 runs
@@ -11,20 +18,20 @@ name: Nightly
 # the failure needed a particular interleaving, so it showed up as an intermittent red
 # that looked like a flaky test and was filed as "not reproducible" for a fortnight.
 #
-# Nightly, not per-push, deliberately: these are minutes-expensive and their findings are
+# Weekly, not per-push, deliberately: these are minutes-expensive and their findings are
 # rarely attributable to one commit anyway. A red here is a bug hunt, not a bisect.
 
 on:
   schedule:
-    # 03:00 UTC — after the day's pushes, before the next morning.
-    - cron: "0 3 * * *"
+    # Sunday 03:00 UTC — after the week's pushes, before the next week starts.
+    - cron: "0 3 * * 0"
   workflow_dispatch:
 
-# Unlike CI's, this concurrency group does NOT cancel in progress: a nightly that is
+# Unlike CI's, this concurrency group does NOT cancel in progress: a full run that is
 # cancelled by a manual dispatch has told nobody anything, and the whole value here is
 # in runs that actually finish.
 concurrency:
-  group: nightly
+  group: full
   cancel-in-progress: false
 
 jobs:
@@ -309,3 +316,143 @@ jobs:
 
       - name: make loom
         run: make loom
+
+  # The ADR-076 differential gate — the whole suite through the tree-walker
+  # (`BROOD_TIER=0`), the second half of `make test-both`. The VM is
+  # the default engine and `differential.rs` already checks per-expression
+  # agreement inside the normal run, so this is the belt-and-braces pass that
+  # catches a divergence only a full tree-walked suite would show.
+  #
+  # The tree-walker is ~10x slower than the VM (CLAUDE.md): ~40 minutes, which made it the
+  # whole wait of every per-push CI run. It runs here, weekly and on dispatch (moved from
+  # ci.yml 2026-11-05) — the same trade-off that keeps `test-both` out of `make check`.
+  tree-walker:
+    name: differential (tree-walker)
+    runs-on: ubuntu-latest
+    steps:
+      # The tree-walked suite's debug build, its nextest log and the rust cache outgrew the
+      # runner's free disk: the runner died with "No space left on device" twice in a row
+      # (2026-11-04/05). The preinstalled toolchains this job never uses are ~30 GB.
+      - name: Free disk space
+        shell: bash
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/local/share/powershell
+          df -h /
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      # Pinned for the same reason as build-test's.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.150
+
+      # No --all-features here: this job only needs the default surface (the
+      # engine under test), so it skips the gui/audio system-dep install above.
+      #
+      # Output is tee'd so the step below can upload it. Reading a run's LOG needs admin on
+      # the repository (`/actions/runs/:id/logs` → 403 otherwise), which means a failure here
+      # is undiagnosable to anyone without it — and this job fails in ways that do not
+      # reproduce locally, so "read the log" is exactly what one needs to do. An artifact is
+      # downloadable with plain read access (`gh run download`), so the failing case travels
+      # out of CI regardless of permissions. `pipefail` keeps the tee from masking the exit
+      # code.
+      # `--failure-output immediate-final` repeats every failure in one block at the end, which
+      # is what makes the parse below a parse rather than a guess.
+      - name: Test (nextest, BROOD_TIER=0)
+        id: tw
+        env:
+          BROOD_TIER: 0
+          # KI-78: this job, already the "other configuration", also keeps the stdlib image's
+          # and the prelude image's SOURCE paths covered (both artifacts are default-on, so
+          # without this every job would run imaged). BROOD_NO_STDIMAGE is also the nextest
+          # `build-std-image` setup script's own off switch.
+          BROOD_NO_STDIMAGE: 1
+          BROOD_NO_PRELUDE_IMAGE: 1
+        shell: bash
+        run: |
+          set -o pipefail
+          # `--color never`: nextest colours its output under CI even into a pipe, and every
+          # pattern the annotate step below greps for anchors on `WORD [` — which a coloured log
+          # writes as `WORD<ESC>[0m [`. That mismatch is why KI-39 went three sightings without
+          # ever naming a case. The step also strips ANSI defensively; this makes it moot.
+          # `--profile tree-walker` (.config/nextest.toml): this engine outgrew the default
+          # 15-minute suite budget and passed only on its retry; that profile gives the suite
+          # 25 minutes here and nowhere else.
+          # Through `nextest-no-flakes.sh`: a test that passes only on its retry fails the job.
+          NEXTEST_LOG=tree-walker-nextest.log scripts/nextest-no-flakes.sh \
+            --profile tree-walker --no-fail-fast --failure-output immediate-final --color never
+
+      # Name the failing cases as workflow ERROR commands, which GitHub turns into check-run
+      # ANNOTATIONS. This exists because of a permissions asymmetry that cost real time on
+      # KI-39: a run's *log* needs admin on the repository (`/actions/runs/:id/logs` → 403,
+      # `rerun-failed-jobs` → 401), but annotations are readable with plain read access
+      # (`gh api repos/:o/:r/check-runs/:id/annotations`). Before this, the only annotation a
+      # failure produced was the runner's own "Process completed with exit code 100" — which
+      # says a test failed and nothing about which, so a job that does not reproduce locally
+      # was undiagnosable without admin. The artifact below covers the same gap; this is the
+      # cheaper half, since it needs no download and shows on the run page.
+      #
+      # nextest marks failures as `        FAIL [   1.234s] binary case_name`, and a suite
+      # wrapper prints its own inner failures as `    tests/foo_test.blsp:12: test failed: …`.
+      # Emit both, deduplicated, capped so a mass failure cannot bury the summary.
+      - name: Annotate the failing cases (on failure)
+        if: failure() && steps.tw.outcome == 'failure'
+        shell: bash
+        run: |
+          if [ ! -f tree-walker-nextest.log ]; then
+            echo "::error::tree-walker: no nextest log — the step failed before running tests"
+            exit 0
+          fi
+
+          # Grep a de-ANSI'd COPY, never the raw log. nextest colours under CI, so the raw log
+          # holds `Summary<ESC>[0m [1922.084s]` and a `Summary \[` pattern cannot match it — the
+          # exact reason this step reported nothing for three KI-39 sightings while the run page
+          # showed a green annotate step. `--color never` above prevents it at the source; this
+          # keeps the step correct even if that regresses or a tool colours anyway.
+          sed -E $'s/\x1b\\[[0-9;]*[A-Za-z]//g' tree-walker-nextest.log > tree-walker-plain.log
+
+          # A case can end in more ways than FAIL: `TIMEOUT [ 300.010s]` is how the run of
+          # 2026-08-17 actually failed, and it matched none of the original three patterns.
+          grep -hoE '^[[:space:]]*(TRY [0-9]+ )?(FAIL|TIMEOUT|SIGSEGV|SIGABRT|ABORT|LEAK) \[[^]]*\] .*' tree-walker-plain.log \
+            | sed 's/^[[:space:]]*//' | sort -u | head -25 \
+            | while IFS= read -r line; do echo "::error::tree-walker nextest: $line"; done || true
+          # `(:[0-9]+)?` for the column: the harness reports some failures as `file:line:col:`
+          # and others as `file:line:`. Tested against a real two-failure log — without the
+          # optional column this missed `registry_test.blsp:55:9` and annotated only half the
+          # failures, which is worse than annotating none.
+          grep -hoE 'tests/[A-Za-z0-9_./-]+\.blsp:[0-9]+(:[0-9]+)?: test failed: .*' tree-walker-plain.log \
+            | sort -u | head -25 \
+            | while IFS= read -r line; do echo "::error::tree-walker in-language: $line"; done || true
+          # A summary line regardless, so the annotation set is never empty on a failure.
+          grep -hoE 'Summary \[[^]]*\].*' tree-walker-plain.log | tail -1 \
+            | while IFS= read -r line; do echo "::error::tree-walker $line"; done || true
+
+          # UNCONDITIONAL FALLBACK. Run 32054863012 (2026-08-17) proved the greps are not enough
+          # on their own: the step ran and SUCCEEDED (the `|| true` fix works) yet emitted no
+          # annotation at all — not even the Summary line, which nextest always prints. The cause
+          # was the ANSI mismatch fixed above, found only by finally downloading the artifact.
+          #
+          # A diagnostic that reports nothing when its patterns miss is the failure mode this
+          # whole step exists to avoid (KI-39 lost three sightings to exactly that). So: if
+          # nothing above matched, annotate the log's tail verbatim. Ugly, bounded, never silent.
+          if ! grep -qE '(FAIL \[|TIMEOUT \[|test failed:|Summary \[)' tree-walker-plain.log; then
+            echo "::error::tree-walker: none of the failure patterns matched this log — dumping its tail"
+            tail -30 tree-walker-plain.log \
+              | while IFS= read -r line; do
+                  [ -n "$line" ] && echo "::error::tree-walker raw: $line"
+                done || true
+            echo "::error::tree-walker: log is $(wc -l < tree-walker-plain.log) lines, $(wc -c < tree-walker-plain.log) bytes"
+          fi
+
+      - name: Upload the tree-walker log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: tree-walker-nextest-log
+          path: tree-walker-nextest.log
+          retention-days: 14
+

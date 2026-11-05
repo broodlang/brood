@@ -32,6 +32,18 @@ same work in 88 s.
   `cli_support::install_crash_dump` writes `.brood_crash_dump`) and function names for
   `gdb --batch -ex run -ex bt`.
 
+## Per push is bounded by `test`; the full run is weekly (`ci.yml`, `full.yml`)
+
+A push waits for its slowest job, so every job in `ci.yml` has to fit beside `test` (~12
+minutes). The tree-walker differential took ~40 minutes and made a run take 76 minutes wall
+clock (2026-11-05), so it moved to `full.yml` with the repeat runs, GC stress, the stress
+suite, the tier audit, the soaks and the sanitizers. That workflow runs every Sunday 03:00 UTC
+and on `gh workflow run full.yml` (before a release, after an engine change). What the
+tree-walker job also covered per push stays per push: std's and the prelude's source load paths
+(KI-78) run in `contracts-armed`, under `BROOD_NO_STDIMAGE` / `BROOD_NO_PRELUDE_IMAGE`. The
+type-checker gates are a job of their own (`typecheck`) for the same reason clippy is: in `test`
+they ran after the suite.
+
 ## Clippy is its own CI job (`ci.yml` `lint`)
 
 The reason is serialisation, not shared artifacts. `cargo clippy` runs `clippy-driver`, whose

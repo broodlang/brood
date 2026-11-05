@@ -103,10 +103,11 @@ if [ "$do_remote" = 1 ]; then
     local_ahead=$(git rev-list --count origin/main..HEAD 2>/dev/null || echo 0)
     [ "${local_ahead:-0}" -gt 0 ] && note "HEAD is $local_ahead commit(s) ahead of origin/main — CI has not seen them"
 
-    # The repetition and duration a per-push run cannot afford: the nightly (suite ×3, GC
+    # The repetition and duration a per-push run cannot afford: the weekly full run (the
+    # tree-walker differential, suite ×3, GC
     # stress, the runtime and node soaks) and the weekly soak under GC stress. Their newest
     # COMPLETED run counts: a red there is a race nobody has fixed yet, which is the work.
-    for scheduled in Nightly Soak; do
+    for scheduled in full.yml soak.yml; do
       row=$(gh run list --workflow "$scheduled" --limit 10 \
               --json conclusion,headSha,databaseId,createdAt \
               -q '.[] | select(.conclusion=="success" or .conclusion=="failure")

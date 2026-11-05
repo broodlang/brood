@@ -49,26 +49,39 @@ on:
         type: boolean
         required: false
         default: false
+      test-partitions:
+        description: >-
+          Split `nest test` over this many parallel jobs (`--partitions N --shard K`). A run
+          waits for its slowest job, so a suite of minutes is cut by about this factor; each
+          shard pays ~30 s of setup (checkout, the cached toolchain, `nest fetch`).
+        type: number
+        required: false
+        default: 1
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
-  test:
-    name: check + format + test
+  # The toolchain, once per run: built here (or found in the cache), then restored by the
+  # check job and every test shard, which run side by side.
+  brood:
+    name: brood toolchain
     runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.brood.outputs.sha }}
+      shards: ${{ steps.shards.outputs.list }}
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@stable
-
       # The toolchain is the expensive part, so it is cached on the brood commit it
       # was built from — a brood push invalidates it, which is exactly when a rebuild
       # is wanted.
       - name: Resolve brood HEAD
         id: brood
         run: echo "sha=$(git ls-remote https://github.com/broodlang/brood.git "${{ inputs.brood-ref }}"  | cut -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: The test shards
+        id: shards
+        run: echo "list=$(seq 0 $(( ${{ inputs.test-partitions }} - 1 )) | jq -cs .)" >> "$GITHUB_OUTPUT"
 
       - name: Cache the brood toolchain
         id: cache-brood
@@ -77,11 +90,27 @@ jobs:
           path: ~/.local/bin
           key: brood-bin-${{ runner.os }}-${{ steps.brood.outputs.sha }}
 
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.cache-brood.outputs.cache-hit != 'true'
+
+      - name: Fetch brood
+        if: steps.cache-brood.outputs.cache-hit != 'true'
+        run: git clone --depth 1 --branch "${{ inputs.brood-ref }}" https://github.com/broodlang/brood.git "$RUNNER_TEMP/brood"
+
+      # A brood push misses the toolchain cache above every time, and built cold that was
+      # ~5.5 minutes of every package run. The target directory is cached too, so a miss
+      # recompiles only the brood crates that changed, not the dependency graph.
+      - uses: Swatinem/rust-cache@v2
+        if: steps.cache-brood.outputs.cache-hit != 'true'
+        with:
+          workspaces: ${{ runner.temp }}/brood
+          prefix-key: package-ci-brood
+          cache-on-failure: true
+
       - name: Build brood
         if: steps.cache-brood.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch "${{ inputs.brood-ref }}" https://github.com/broodlang/brood.git /tmp/brood
-          cd /tmp/brood
+          cd "$RUNNER_TEMP/brood"
           # `cargo build` rather than `make install`: the default cargo features already
           # include `dev-tools`, which is what carries `nest test` — the lean
           # `RUN_FEATURES` build does NOT have it, so a package's suite could not run.
@@ -94,6 +123,20 @@ jobs:
           cargo build --release --features brood/treesit-grammars --bin brood --bin nest
           mkdir -p "$HOME/.local/bin"
           cp target/release/brood target/release/nest "$HOME/.local/bin/"
+
+  check:
+    name: check + format
+    needs: brood
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Restore the brood toolchain
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.local/bin
+          key: brood-bin-${{ runner.os }}-${{ needs.brood.outputs.sha }}
+          fail-on-cache-miss: true
 
       - name: Resolve dependencies
         run: |
@@ -109,6 +152,30 @@ jobs:
         run: |
           export PATH="$HOME/.local/bin:$PATH"
           nest format --check
+
+  test:
+    name: test${{ inputs.test-partitions > 1 && format(' (shard {0})', matrix.shard) || '' }}
+    needs: brood
+    if: inputs.run-tests || inputs.boot-check
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.brood.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Restore the brood toolchain
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.local/bin
+          key: brood-bin-${{ runner.os }}-${{ needs.brood.outputs.sha }}
+          fail-on-cache-miss: true
+
+      - name: Resolve dependencies
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          [ -f project.blsp ] && nest fetch || echo "no project.blsp — nothing to fetch"
 
       # Started as a plain container rather than a job-level `services:` block, because a
       # `services:` mapping cannot be made conditional — every caller would pay for a
@@ -141,7 +208,7 @@ jobs:
           docker exec ci-postgres pg_isready -U postgres
 
       - name: Boot check
-        if: inputs.boot-check
+        if: inputs.boot-check && matrix.shard == 0
         env:
           PGHOST: 127.0.0.1
           PGPORT: "5432"
@@ -165,4 +232,8 @@ jobs:
           PGDATABASE: postgres
         run: |
           export PATH="$HOME/.local/bin:$PATH"
-          nest test
+          if [ "${{ inputs.test-partitions }}" -gt 1 ]; then
+            nest test --partitions "${{ inputs.test-partitions }}" --shard "${{ matrix.shard }}"
+          else
+            nest test
+          fi

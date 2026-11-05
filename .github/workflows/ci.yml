@@ -10,9 +10,13 @@ on:
   push:
     branches: [main]
   pull_request:
-  # So the expensive tree-walker differential job (below, main-push only) can be
-  # run on demand against a branch before merging.
   workflow_dispatch:
+
+# What is NOT here: the tree-walker differential (the whole suite through BROOD_TIER=0, ~40
+# minutes, ADR-076), the repeat runs, GC stress, the soaks and the sanitizers. They run in
+# full.yml once a week and on dispatch. Per push this workflow is bounded by its longest job
+# (`test`, ~12 minutes); with the differential here it was ~40 minutes before anything said
+# green.
 
 # One in-flight run per ref. On a branch a new push cancels the run in flight: only the newest
 # commit matters there. On main it does not: several sessions push to main minutes apart, and
@@ -403,6 +407,18 @@ jobs:
       - name: Doctests
         run: cargo test --doc --features brood/treesit-grammars
 
+  # The type-checker gates, in a job of their own so they run beside the suite instead of
+  # after it: in `test` they added ~2 minutes to the longest job of every run.
+  typecheck:
+    name: type checker (nest check, plain and strict — zero warnings)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
       # The advisory type checker's ONE hard reject, which is batch/CI-only by
       # design (ADR-123/124/125/126): the checker never gates the live image, so
       # nothing but a run like this one can hold `std/` + `tests/` at zero
@@ -431,147 +447,6 @@ jobs:
           shopt -s globstar nullglob
           cargo run -q -p nest --features brood/treesit-grammars -- \
             check --strict std/**/*.blsp tests/**/*.blsp
-
-  # The ADR-076 differential gate — the whole suite through the tree-walker
-  # (`BROOD_TIER=0`), the second half of `make test-both`. The VM is
-  # the default engine and `differential.rs` already checks per-expression
-  # agreement inside the normal run, so this is the belt-and-braces pass that
-  # catches a divergence only a full tree-walked suite would show.
-  #
-  # The tree-walker is ~10x slower than the VM (CLAUDE.md), so this would roughly
-  # triple PR latency for a rarely-firing gate. It runs on main pushes and on
-  # manual dispatch instead — the same trade-off that keeps `test-both` out of
-  # the local `make check`.
-  tree-walker:
-    name: differential (tree-walker)
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      # The tree-walked suite's debug build, its nextest log and the rust cache outgrew the
-      # runner's free disk: the runner died with "No space left on device" twice in a row
-      # (2026-11-04/05). The preinstalled toolchains this job never uses are ~30 GB.
-      - name: Free disk space
-        shell: bash
-        run: |
-          df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
-            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/local/share/powershell
-          df -h /
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-      # Pinned for the same reason as build-test's.
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.150
-
-      # No --all-features here: this job only needs the default surface (the
-      # engine under test), so it skips the gui/audio system-dep install above.
-      #
-      # Output is tee'd so the step below can upload it. Reading a run's LOG needs admin on
-      # the repository (`/actions/runs/:id/logs` → 403 otherwise), which means a failure here
-      # is undiagnosable to anyone without it — and this job fails in ways that do not
-      # reproduce locally, so "read the log" is exactly what one needs to do. An artifact is
-      # downloadable with plain read access (`gh run download`), so the failing case travels
-      # out of CI regardless of permissions. `pipefail` keeps the tee from masking the exit
-      # code.
-      # `--failure-output immediate-final` repeats every failure in one block at the end, which
-      # is what makes the parse below a parse rather than a guess.
-      - name: Test (nextest, BROOD_TIER=0)
-        id: tw
-        env:
-          BROOD_TIER: 0
-          # KI-78: this job, already the "other configuration", also keeps the stdlib image's
-          # and the prelude image's SOURCE paths covered (both artifacts are default-on, so
-          # without this every job would run imaged). BROOD_NO_STDIMAGE is also the nextest
-          # `build-std-image` setup script's own off switch.
-          BROOD_NO_STDIMAGE: 1
-          BROOD_NO_PRELUDE_IMAGE: 1
-        shell: bash
-        run: |
-          set -o pipefail
-          # `--color never`: nextest colours its output under CI even into a pipe, and every
-          # pattern the annotate step below greps for anchors on `WORD [` — which a coloured log
-          # writes as `WORD<ESC>[0m [`. That mismatch is why KI-39 went three sightings without
-          # ever naming a case. The step also strips ANSI defensively; this makes it moot.
-          # `--profile tree-walker` (.config/nextest.toml): this engine outgrew the default
-          # 15-minute suite budget and passed only on its retry; that profile gives the suite
-          # 25 minutes here and nowhere else.
-          # Through `nextest-no-flakes.sh`: a test that passes only on its retry fails the job.
-          NEXTEST_LOG=tree-walker-nextest.log scripts/nextest-no-flakes.sh \
-            --profile tree-walker --no-fail-fast --failure-output immediate-final --color never
-
-      # Name the failing cases as workflow ERROR commands, which GitHub turns into check-run
-      # ANNOTATIONS. This exists because of a permissions asymmetry that cost real time on
-      # KI-39: a run's *log* needs admin on the repository (`/actions/runs/:id/logs` → 403,
-      # `rerun-failed-jobs` → 401), but annotations are readable with plain read access
-      # (`gh api repos/:o/:r/check-runs/:id/annotations`). Before this, the only annotation a
-      # failure produced was the runner's own "Process completed with exit code 100" — which
-      # says a test failed and nothing about which, so a job that does not reproduce locally
-      # was undiagnosable without admin. The artifact below covers the same gap; this is the
-      # cheaper half, since it needs no download and shows on the run page.
-      #
-      # nextest marks failures as `        FAIL [   1.234s] binary case_name`, and a suite
-      # wrapper prints its own inner failures as `    tests/foo_test.blsp:12: test failed: …`.
-      # Emit both, deduplicated, capped so a mass failure cannot bury the summary.
-      - name: Annotate the failing cases (on failure)
-        if: failure() && steps.tw.outcome == 'failure'
-        shell: bash
-        run: |
-          if [ ! -f tree-walker-nextest.log ]; then
-            echo "::error::tree-walker: no nextest log — the step failed before running tests"
-            exit 0
-          fi
-
-          # Grep a de-ANSI'd COPY, never the raw log. nextest colours under CI, so the raw log
-          # holds `Summary<ESC>[0m [1922.084s]` and a `Summary \[` pattern cannot match it — the
-          # exact reason this step reported nothing for three KI-39 sightings while the run page
-          # showed a green annotate step. `--color never` above prevents it at the source; this
-          # keeps the step correct even if that regresses or a tool colours anyway.
-          sed -E $'s/\x1b\\[[0-9;]*[A-Za-z]//g' tree-walker-nextest.log > tree-walker-plain.log
-
-          # A case can end in more ways than FAIL: `TIMEOUT [ 300.010s]` is how the run of
-          # 2026-08-17 actually failed, and it matched none of the original three patterns.
-          grep -hoE '^[[:space:]]*(TRY [0-9]+ )?(FAIL|TIMEOUT|SIGSEGV|SIGABRT|ABORT|LEAK) \[[^]]*\] .*' tree-walker-plain.log \
-            | sed 's/^[[:space:]]*//' | sort -u | head -25 \
-            | while IFS= read -r line; do echo "::error::tree-walker nextest: $line"; done || true
-          # `(:[0-9]+)?` for the column: the harness reports some failures as `file:line:col:`
-          # and others as `file:line:`. Tested against a real two-failure log — without the
-          # optional column this missed `registry_test.blsp:55:9` and annotated only half the
-          # failures, which is worse than annotating none.
-          grep -hoE 'tests/[A-Za-z0-9_./-]+\.blsp:[0-9]+(:[0-9]+)?: test failed: .*' tree-walker-plain.log \
-            | sort -u | head -25 \
-            | while IFS= read -r line; do echo "::error::tree-walker in-language: $line"; done || true
-          # A summary line regardless, so the annotation set is never empty on a failure.
-          grep -hoE 'Summary \[[^]]*\].*' tree-walker-plain.log | tail -1 \
-            | while IFS= read -r line; do echo "::error::tree-walker $line"; done || true
-
-          # UNCONDITIONAL FALLBACK. Run 32054863012 (2026-08-17) proved the greps are not enough
-          # on their own: the step ran and SUCCEEDED (the `|| true` fix works) yet emitted no
-          # annotation at all — not even the Summary line, which nextest always prints. The cause
-          # was the ANSI mismatch fixed above, found only by finally downloading the artifact.
-          #
-          # A diagnostic that reports nothing when its patterns miss is the failure mode this
-          # whole step exists to avoid (KI-39 lost three sightings to exactly that). So: if
-          # nothing above matched, annotate the log's tail verbatim. Ugly, bounded, never silent.
-          if ! grep -qE '(FAIL \[|TIMEOUT \[|test failed:|Summary \[)' tree-walker-plain.log; then
-            echo "::error::tree-walker: none of the failure patterns matched this log — dumping its tail"
-            tail -30 tree-walker-plain.log \
-              | while IFS= read -r line; do
-                  [ -n "$line" ] && echo "::error::tree-walker raw: $line"
-                done || true
-            echo "::error::tree-walker: log is $(wc -l < tree-walker-plain.log) lines, $(wc -c < tree-walker-plain.log) bytes"
-          fi
-
-      - name: Upload the tree-walker log (on failure)
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: tree-walker-nextest-log
-          path: tree-walker-nextest.log
-          retention-days: 14
 
   # `examples/`: the user-facing programs, which no gate ran until 2026-08-17 — and they had
   # rotted three separate ways by then. `examples/editor` had called a module that moved to a
@@ -684,7 +559,13 @@ jobs:
       - name: Build brood + nest
         run: cargo build --release -p cli -p nest
 
-      - name: nest test over the repo (BROOD_CONTRACTS=1)
+      # Also the per-push run of std's and the prelude's SOURCE load paths (KI-78): both images
+      # are default-on, so without these every job would run imaged. The tree-walker job carried
+      # this until it moved to the weekly full.yml.
+      - name: nest test over the repo (BROOD_CONTRACTS=1, std loaded from source)
+        env:
+          BROOD_NO_STDIMAGE: 1
+          BROOD_NO_PRELUDE_IMAGE: 1
         run: ./scripts/test-contracts.sh
 
   # DOWNSTREAM smoke: bedit (github.com/broodlang/bedit) against the brood under test.
@@ -765,8 +646,8 @@ jobs:
   # exactness-sensitive `=` has never accepted since exact rationals landed. It failed on
   # every build and no one saw it, because there was no runner (found 2026-08-13).
   #
-  # Same guard as the tree-walker job: main pushes and manual dispatch, not every PR. Move it
-  # to a `schedule:` if it starts costing more than it catches.
+  # Main pushes and manual dispatch, not every PR. Move it to full.yml if it starts costing
+  # more than it catches (it runs beside `test` in ~3 minutes, so it does not lengthen a run).
   breakage:
     name: breakage suite (JIT + GC tripwire armed)
     if: github.event_name != 'pull_request'
