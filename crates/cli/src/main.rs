@@ -170,6 +170,9 @@ fn run(cli: Cli) {
     // Plain runs and the REPL stay unlimited unless the user opts in (ADR-043); `--test`
     // additionally defaults a ceiling on (see run_test_files).
     brood::cli_support::init_runtime(cli.max_parallel);
+    // Started with `BROOD_TEST_ARM=1`: a test runner asked for this process to be a test run
+    // with a scratch home of its own (ADR-608) — armed before the interpreter exists.
+    brood::cli_support::arm_requested_test_run();
 
     // A bare `brood new foo` (or run/test/... ) parses `new` as a FILE and dies
     // with a cryptic "cannot read new". Project tooling lives in `nest`, not
@@ -197,6 +200,7 @@ fn run(cli: Cli) {
     }
     if !cli.files.is_empty() {
         run_files(&mut interp, &cli.files);
+        brood::cli_support::remove_test_scratch_home();
         brood::diagnostics::perf::dump_if_requested(); // BROOD_PERF_STATS=1 — VM work attribution
         brood::process::l1_stats::dump_if_requested(); // BROOD_L1_STATS=1
         return;
@@ -211,6 +215,7 @@ fn run(cli: Cli) {
         let _guard = RawTermGuard;
         interp.eval_str("(repl/run)")
     };
+    brood::cli_support::remove_test_scratch_home();
     if let Err(e) = result {
         report_error(&e);
         std::process::exit(1);
