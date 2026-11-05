@@ -166,7 +166,7 @@
 (defn- latency-at (pairs total permille max-us)
   ;; the top of the first bucket (ascending `pairs`) whose running count reaches the
   ;; `permille`th input, never above the maximum; integer ranks, so p99 of 100 is the 99th
-  (let (rank (math/max 1 (math/quot (+ (* total permille) 999) 1000)))
+  (let (rank (math/max 1 (math/quot (math/round (+ (* total permille) 999)) 1000)))
     (letrec (walk (fn (left seen)
                     (if (empty? left)
                       max-us
@@ -180,8 +180,7 @@
 
     (gui/latency-percentiles {:count 4 :max-us 9000 :buckets {2047 2 4095 1 9215 1}})   ;=> {:count 4 :p50 2.047 :p99 9.0 :p999 9.0 :max 9.0}
     (:p50 (gui/latency-percentiles {:count 0 :max-us 0 :buckets {}}))   ;=> nil"
-  ;; a count is an integer by construction; anything else counts nothing
-  (let (total (let (n (:count histogram)) (if (int? n) n 0))
+  (let (total (or (:count histogram) 0)
         max-us (or (:max-us histogram) 0)
         pairs (sort (vec (or (:buckets histogram) {})))
         ms (fn (us) (/ us 1000.0)))
@@ -316,24 +315,6 @@ A `[:rect row col w h face]` op fills a w×h cell block with the face's backgrou
     (gui/text-contrast 1.6)   ;~> nil; light-on-dark text reads fuller"
   (%gui-text-contrast! gamma))
 
-;; A picture as gui/image-thumb decodes and gui/render-frame / gui/capture paint it: its size
-;; in pixels and `:rgba`, width*height*4 bytes. gui/write-png and gui/pixel read one.
-(deftype image (record &open :width int :height int :rgba bytes))
-
-;; What a window paints, as pixels, with the geometry it was painted with (ADR-609).
-(deftype frame-image
-  (record &open
-    :width int
-    :height int
-    :rgba bytes
-    :cell (tuple int int)
-    :grid (tuple int int)
-    :origin (tuple int int)
-    :inset int
-    :seam (or nil int)
-    :row-tops (vector int)))
-
-(sig image-thumb ((or bytes (vector int)) int int -> (or nil image)))
 (defn image-thumb (bytes max-w max-h)
   "Decode an encoded image (PNG/JPEG/GIF/WebP/BMP) from a byte sequence and downscale it to fit within max-w×max-h pixels (aspect ratio preserved), returning {:width :height :rgba} where :rgba is a width*height*4 bytes value (row-major RGBA8). nil when the bytes aren't a decodable image or the dims are non-positive. Per-call decode limits bound a decompression bomb. The one image primitive; rendering (half-block cells, a GUI texture) is Brood policy over the decoded buffer.
 
@@ -342,14 +323,12 @@ A `[:rect row col w h face]` op fills a w×h cell block with the face's backgrou
 
 ;; --- frame capture: what a window paints, as pixels (ADR-609) -------------------------
 
-(sig render-frame (vector &optional (or nil map) -> frame-image))
 (defn render-frame (frame &optional spec)
   "Paint `frame` (a gui/draw frame) into memory as a window described by `spec` would paint it, and return the picture: `{:width :height :rgba :cell [w h] :grid [cols rows] :origin [x y] :inset px :seam row :row-tops [y …]}`, `:rgba` being width*height*4 bytes (row-major, opaque) and the rest the geometry it was painted with — the cell in physical pixels, the grid in cells, where the grid's top-left sits, the inset, the frame's `[:seam row]` (nil without one) and the pixel row every grid row starts at, then where the last one ends (`:row-tops`, `rows + 1` entries — ADR-610). It is the WINDOW's own CPU painter that paints it — the same layout rule (row 0 at the top edge, or at the inset when the frame's seam says row 0 is not a band; the inset a margin left, right and below; the leftover height at the seam or under the last row), the same edge bleed, the same glyph rasteriser — so what a test asserts about the pixels is true of the window. Needs no window and no display, so it runs headless and in `nest test`. `spec` (every key optional) is the window it stands in for: `:width`/`:height` in physical pixels (840x560), `:font` (an installed family's name, as gui/font-register's `:family-name` resolves one, or a family keyword the offscreen painter knows — the bundled `:mono` by default), `:size` (the font px, 15), `:line-height` (1.4), `:inset` (logical px, 0), `:bg` (the window colour), `:scale` (HiDPI, 1), `:text-aa`, `:ligatures`. Read a pixel with gui/pixel, save it with gui/write-png. Needs --features gui.
 
     (gui/render-frame [[:clear] [:text 0 0 \"hi\" {:fg :red}]] {:width 200 :height 60 :inset 6})   ;~> {:width 200 :height 60 :rgba … :cell [9 21] :grid [20 2] :origin [6 0] :inset 6 :seam nil :row-tops [0 21 42]}"
   (%gui-render-frame frame spec))
 
-(sig capture (int -> frame-image))
 (defn capture (id)
   "Window id's current frame painted into memory as the window paints it — the picture gui/render-frame returns, with the window's own size, font, inset and background. For a real window it is rasterised on the GUI thread by the window's renderer (a GPU window's by the CPU painter over the same frame, without its sprites). HEADLESS, a window has nothing to paint with unless the runtime runs under `BROOD_GUI_HEADLESS=paint`: then every window is painted offscreen, keeps its settings and frames, and reports the grid the real cell metrics give — so an app's real loop can be looked at with no display (gui/windows finds the window it opened). Errors for a window that is not open and for a plain headless one.
 
@@ -368,14 +347,13 @@ A `[:rect row col w h face]` op fills a w×h cell block with the face's backgrou
     (gui/write-png {:width 1 :height 1 :rgba (bytes/concat (bytes/int-> 255 1) (bytes/int-> 0 1) (bytes/int-> 0 1) (bytes/int-> 255 1))} \"/tmp/red.png\")   ;~> \"/tmp/red.png\""
   (%image-write-png image path opts))
 
-(sig pixel (image number number -> (or nil (tuple int int int))))
 (defn pixel (image x y)
-  "The colour of pixel (`x`, `y`) of `image` (a {:width :height :rgba} map) as `[r g b]`, or nil outside it (a coordinate that is not an integer names no pixel). What a test reads a picture with.
+  "The colour of pixel (`x`, `y`) of `image` (a {:width :height :rgba} map) as `[r g b]`, or nil outside it. What a test reads a picture with.
 
     (gui/pixel {:width 1 :height 1 :rgba (bytes/concat (bytes/int-> 30 1) (bytes/int-> 30 1) (bytes/int-> 46 1) (bytes/int-> 255 1))} 0 0)   ;=> [30 30 46]"
-  (when (and (int? x) (int? y) (>= x 0) (>= y 0) (< x (:width image)) (< y (:height image)))
+  (when (and (>= x 0) (>= y 0) (< x (:width image)) (< y (:height image)))
     (let (rgba (:rgba image)
-          at (* 4 (+ x (* y (:width image)))))
+          at (math/round (* 4 (+ x (* y (:width image))))))
       [(bytes/at rgba at) (bytes/at rgba (+ at 1)) (bytes/at rgba (+ at 2))])))
 
 ;; --- pixel space: the sprite / quad layer ---------------------------------------------

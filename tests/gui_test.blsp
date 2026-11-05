@@ -160,15 +160,18 @@
 (defn- capture-spec ()
   {:width 400 :height 203 :inset 6 :bg capture-bg :size 15 :line-height 1.4})
 
-(sig ink-in (map int int int int -> int))
 (defn- ink-in (image x0 y0 w h)
   "How many pixels of the w×h rectangle at (x0, y0) are not the window background."
-  (fold-for (acc 0 y (range y0 (+ y0 h)) x (range x0 (+ x0 w)))
+  (fold-for (acc 0
+              y
+              (range (math/round y0) (math/round (+ y0 h)))
+              x
+              (range (math/round x0) (math/round (+ x0 w))))
     (if (= (gui/pixel image x y) capture-bg) acc (inc acc))))
 
 (defn- inked-rows (image x0 y0 w h)
   "The rows, counted from y0, of the w×h rectangle at (x0, y0) holding ink."
-  (into [] (seq/filter (range h) (fn (dy) (> (ink-in image x0 (+ y0 dy) w 1) 0)))))
+  (into [] (seq/filter (range h) (fn (dy) (> (ink-in image x0 (math/round (+ y0 dy)) w 1) 0)))))
 
 (defn- lowercase-rows (size)
   "An `x` on each of three rows at `size` px and a line height of 1.25: the cell height
@@ -232,10 +235,8 @@ and, per row, the rows of its cell the `x` inks."
     (when-gui (fn ()
                 (doseq (size [11 15 22])
                   (let ([cell-h rows] (lowercase-rows size)
-                        inked (or (first rows) (error "no row was measured"))
-                        [top bottom] [(or (first inked) (error "the x inked nothing"))
-                                       (or (last inked) (error "the x inked nothing"))]
-                        middle (/ (+ top bottom 1) 2.0))
+                        [top bottom] [(first (first rows)) (last (first rows))]
+                        middle (/ (+ (or top 0) (or bottom 0) 1) 2.0))
                     (is (every? rows (fn (inked) (= inked (first rows)))))
                     (is (<= (math/abs (- middle (/ cell-h 2.0))) 1.0))))))))
 
@@ -246,8 +247,7 @@ and, per row, the rows of its cell the `x` inks."
                               (capture-spec))
                       path (str (path/temp "brood-capture-") ".png")
                       _ (gui/write-png image path {:crop [0 0 10 4] :scale 3})
-                      back (or (gui/image-thumb (file/slurp-bytes path) 100 100)
-                             (error "the written PNG did not decode")))
+                      back (gui/image-thumb (file/slurp-bytes path) 100 100))
                   (file/rm path)
                   (is (= [(:width back) (:height back)] [30 12]))
                   (is (= (gui/pixel back 0 0) capture-band))
@@ -362,14 +362,12 @@ descriptions, empty when the rule holds."
                              (seam-spec h size)))
         image (gui/render-frame (seam-frame cols rows top-band) (seam-spec h size))
         tops (:row-tops image)
-        ;; a row's top, which a frame of `rows` rows has for every row below `rows`
-        top-of (fn (row) (or (nth tops row) (error "no top for row " row)))
         [cell-w cell-h] (:cell image)
         seam (- rows 2)
         top (if top-band 0 6)
-        gap-from (+ (top-of (dec seam)) cell-h)
-        gap-to (top-of seam)
-        bare (seq/filter (range (top-of 1) h) (fn (y) (= (gui/pixel image 200 y) capture-bg)))
+        gap-from (math/round (+ (nth tops (dec seam)) cell-h))
+        gap-to (nth tops seam)
+        bare (seq/filter (range (second tops) h) (fn (y) (= (gui/pixel image 200 y) capture-bg)))
         gap-wrong (seq/filter (range gap-from gap-to)
                     (fn (y) (not (= (gui/pixel image 200 y) seam-above)))))
     (vec (seq/filter [(when (not (= (:seam image) seam)) [:seam (:seam image)])
@@ -402,7 +400,8 @@ descriptions, empty when the rule holds."
                     cell-h (second (:cell image)))
                 (is (nil? (:seam image)))
                 (is (= (:row-tops image)
-                      (vec (map (range (inc (second (:grid image)))) (fn (k) (* k cell-h))))))))))
+                      (vec (map (range (math/round (inc (second (:grid image)))))
+                             (fn (k) (* k cell-h))))))))))
 
 (describe "gui/render-frame — what bleeds into a top margin (ADR-610)"
   (test "a one-row band on row 0 stays out of it; a taller band reaches the top edge"
