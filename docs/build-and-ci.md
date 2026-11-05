@@ -34,8 +34,9 @@ same work in 88 s.
 
 ## Per push is bounded by `test`; the full run is weekly (`ci.yml`, `full.yml`)
 
-A push waits for its slowest job, so every job in `ci.yml` has to fit beside `test` (~12
-minutes). The tree-walker differential took ~40 minutes and made a run take 76 minutes wall
+A push waits for its slowest job, so every job in `ci.yml` has to fit beside `test`, which runs
+the suite in two halves on two runners (`nextest --partition count:K/2`, ~8-10 minutes each).
+The tree-walker differential took ~40 minutes and made a run take 76 minutes wall
 clock (2026-11-05), so it moved to `full.yml` with the repeat runs, GC stress, the stress
 suite, the tier audit, the soaks and the sanitizers. That workflow runs every Sunday 03:00 UTC
 and on `gh workflow run full.yml` (before a release, after an engine change). What the

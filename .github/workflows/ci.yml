@@ -15,7 +15,7 @@ on:
 # What is NOT here: the tree-walker differential (the whole suite through BROOD_TIER=0, ~40
 # minutes, ADR-076), the repeat runs, GC stress, the soaks and the sanitizers. They run in
 # full.yml once a week and on dispatch. Per push this workflow is bounded by its longest job
-# (`test`, ~12 minutes); with the differential here it was ~40 minutes before anything said
+# (`test`, the suite split over two runners); with the differential here it was ~40 minutes before anything said
 # green.
 
 # One in-flight run per ref. On a branch a new push cancels the run in flight: only the newest
@@ -350,8 +350,15 @@ jobs:
         run: cargo test -p brood --features gui --lib host::subprocess::conpty
 
   build-test:
-    name: test
+    name: test (${{ matrix.partition }}/2)
     runs-on: ubuntu-latest
+    # The suite in two halves on two runners (nextest --partition count:K/2): run whole, it was
+    # ~12-16 minutes and the longest job of every push. The cargo checks and the doctests run in
+    # the first half only.
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [1, 2]
     steps:
       - uses: actions/checkout@v7
 
@@ -380,11 +387,13 @@ jobs:
       # features, so workspace feature unification would turn them back on and hide
       # a lean-build break.
       - name: Check (no default features)
+        if: matrix.partition == 1
         run: cargo check -p brood --no-default-features
 
       # The LEAN runtime feature set, isolated the way `make release-brood` builds it
       # (`-p cli`), so a dev-tools-gating slip fails here instead of at deploy time.
       - name: Check (lean runtime — isolated -p cli, matches release-brood)
+        if: matrix.partition == 1
         run: cargo check -p cli --no-default-features --features brood/jit
 
       # Same as `make test`: nextest process-isolates each case (a green-process
@@ -392,7 +401,7 @@ jobs:
       # whole run down) and the grammar tests need the vendored tree-sitter parsers.
       # Through `nextest-no-flakes.sh`: a test that passes only on its retry fails the job.
       - name: Test (nextest)
-        run: scripts/nextest-no-flakes.sh --no-fail-fast --features brood/treesit-grammars
+        run: scripts/nextest-no-flakes.sh --no-fail-fast --features brood/treesit-grammars --partition count:${{ matrix.partition }}/2
 
       # The `gui`/`gui-gpu` renderer tests do not run above: the nextest step builds
       # the DEFAULT surface plus grammars, and `gui` is opt-in, so every
@@ -405,6 +414,7 @@ jobs:
       # DEFAULT set was a third distinct feature configuration in this job, so it rebuilt
       # the whole graph a third time to run a handful of doctests.
       - name: Doctests
+        if: matrix.partition == 1
         run: cargo test --doc --features brood/treesit-grammars
 
   # The type-checker gates, in a job of their own so they run beside the suite instead of
