@@ -256,8 +256,10 @@
     ;; one level up (`target/release/deps/` → `target/release/`), and skip if absent.
     ;; Skipped (exe nil) in a run that loads std from SOURCE (BROOD_NO_STDIMAGE: the
     ;; contracts-armed job, the weekly tree-walker): no image exists there, so the child has to
-    ;; build one from nothing (it failed there, 2026-11-05), and the race is an imaged run's to
-    ;; catch: every imaged run keeps this case.
+    ;; build one from nothing — and under BROOD_CONTRACTS=1 `stdimage/build-at` refuses to write
+    ;; one by design (the image would carry the contract shims), so the child failed every time
+    ;; before its race began (2026-11-05: 12 of 12 with contracts and an empty cache, 0 of 12
+    ;; without). The race is an imaged run's to catch: every imaged run keeps this case.
     (let (exe (when (not (os/env "BROOD_NO_STDIMAGE")) (sibling-binary "brood"))
           prog (path/temp "stdimage-race-")
           _ (file/spit prog
