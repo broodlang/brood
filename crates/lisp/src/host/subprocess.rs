@@ -770,6 +770,27 @@ pub fn reset_inherited_signals(command: &mut Command) {
 #[cfg(not(unix))]
 pub fn reset_inherited_signals(_command: &mut Command) {}
 
+/// Start a pipe child in a NEW SESSION (`setsid`), which also makes it the leader of its own
+/// process group — so a `killpg` on its pid still ends it and everything it started — and
+/// leaves it no controlling terminal. Without that, a child that opens `/dev/tty` (sudo
+/// asking for a password, ssh asking about a host key or a passphrase, pinentry-curses) wrote
+/// its prompt over a full-screen program's display and, reading, stopped on SIGTTIN forever:
+/// it was in a background group of the runtime's session. With no terminal it fails at once
+/// instead ("no tty present"), which a caller can report. Emacs does the same for its pipe
+/// processes (Bug#30762). A pty child (`spawn_pty`) gets its own session and terminal.
+#[cfg(unix)]
+pub fn new_session(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: runs in the forked child before exec; `setsid` is async-signal-safe. It fails
+    // only for a process-group leader, which a freshly forked child never is.
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+}
+
 /// Put `args` on `command`. With `raw` on Windows each is written into the command line
 /// exactly as given, unquoted — what `cmd.exe /d /s /c "LINE"` needs, since `cmd` does not
 /// read the MSVC quoting `Command::arg` applies (a `"` in the line became `\"`), KI-364.
@@ -868,10 +889,7 @@ pub fn detach(
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
+    new_session(&mut command);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -912,10 +930,7 @@ pub fn spawn(
     // pipes. (A pty child already leads its own session — `spawn_pty` — and the same
     // `killpg` covers it.)
     #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
+    new_session(&mut command);
     if let Some(dir) = cwd {
         command.current_dir(dir);
     }

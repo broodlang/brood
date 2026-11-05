@@ -375,11 +375,10 @@ pub(super) fn os_cmd(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     });
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    // its own session: its own process group (killpg ends what it started) and no
+    // controlling terminal, so nothing it runs can prompt on, or stop reading, ours
     #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
+    crate::host::subprocess::new_session(&mut cmd);
     let fail = |e: std::io::Error| {
         LispError::runtime(format!("%os-cmd: {prog}: {e}"))
             .with_code(crate::error::error_codes::SUBPROCESS_FAILED)
@@ -605,7 +604,7 @@ fn os_cmd_collect(
     // neither.
     let status = loop {
         if stop.is_some() {
-            // SAFETY: killpg on the group `process_group(0)` made for this child; the
+            // SAFETY: killpg on the group the child leads (`new_session` made it a session leader); the
             // child is not reaped yet, so its pid (the group id) cannot have been reused.
             unsafe {
                 libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);

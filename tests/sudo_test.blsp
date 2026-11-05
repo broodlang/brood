@@ -34,7 +34,9 @@
     "  fi\n"
     "fi\n"
     "[ $validate = 1 ] && exit 0\n"
-    "PATH=\"$state/bin:$PATH\" exec \"$@\"\n"))
+    "export PATH=\"$state/bin:$PATH\"\n"
+    "if [ -f \"$state/cut\" ]; then head -c \"$(cat \"$state/cut\")\" | \"$@\"; exit $?; fi\n"
+    "exec \"$@\"\n"))
 
 (defn- with-stub (body)
   "Run `(body dir opts)` with a fresh stand-in sudo in a temp `dir`, `opts` naming it."
@@ -206,17 +208,52 @@
               (do
                 (assert= (sudo/write path "new\n" opts) true)
                 (is (includes? (:stdout (os/cmd "getfacl" ["-n" path])) "user:65534:r--")))))))))
-  (test "a temporary file a killed write left behind is cleared by the next"
-    (with-stub (fn (dir opts)
-                 (let (path (str dir "/conf")
-                       stale (str dir "/.sudo-write.left0"))
-                   (do
-                     (file/spit (str dir "/nopasswd") "")
-                     (file/spit path "old\n")
-                     (file/spit stale "half")
-                     (os/cmd "touch" ["-d" "10 minutes ago" stale])
-                     (assert= (sudo/write path "new\n" opts) true)
-                     (is (not (file/exists? stale))))))))
+  (test "a temporary file a SIGKILL left behind a day ago is cleared — another writer's, never"
+    (with-stub
+      (fn (dir opts)
+        (let (path (str dir "/conf")
+              stale (str dir "/.sudo-write.99.left0")
+              filling (str dir "/.sudo-write.98.busy0"))
+          (do
+            (file/spit (str dir "/nopasswd") "")
+            (file/spit path "old\n")
+            (file/spit stale "half")
+            (os/cmd "touch" ["-d" "2 days ago" stale])
+            ;; another write's stage, minutes old: perhaps still being filled
+            (file/spit filling "part")
+            (os/cmd "touch" ["-d" "10 minutes ago" filling])
+            (assert= (sudo/write path "new\n" opts) true)
+            (is (not (file/exists? stale)))
+            (is (file/exists? filling)))))))
+  (test "a caller killed halfway — its text cut short — leaves the file as it was"
+    (with-stub
+      (fn (dir opts)
+        (let (path (str dir "/target.conf")
+              old (string/repeat "ORIGINAL-LINE\n" 100))
+          (do
+            (file/spit (str dir "/nopasswd") "")
+            (file/spit path old)
+            ;; the pipe closes after ten bytes, as when the caller dies
+            (file/spit (str dir "/cut") "10")
+            (let (result (sudo/write path (string/repeat "NEW-CONTENT\n" 100) opts))
+              (do
+                (is (failure? result))
+                (is (includes? (error-message result) "10 of 1200 bytes"))))
+            (assert= (file/slurp path) old)
+            (is (no-temporaries? dir)))))))
+  (test "an in-place write that does not land whole puts the old text back"
+    (with-stub
+      (fn (dir opts)
+        (let (path (str dir "/hosts"))
+          (do
+            (file/spit (str dir "/nopasswd") "")
+            (file/spit path "old\n")
+            ;; no rename to be had, and the copy into the file comes out wrong
+            (fake-tool dir "mv" "exit 1")
+            (fake-tool dir "cmp" "exit 1")
+            (is (failure? (sudo/write path "new\n" opts)))
+            (assert= (file/slurp path) "old\n")
+            (is (no-temporaries? dir)))))))
   (test "a sudo that caches nothing still opens a file that does not exist yet as new"
     (with-stub (fn (dir opts)
                  (do
@@ -234,4 +271,6 @@
       (os/cmd "chmod" ["+x" tool]))))
 
 (defn- no-temporaries? (dir)
-  (empty? (seq/filter (file/ls dir) (fn (name) (string/starts-with? name ".sudo-write")))))
+  (empty? (seq/filter (file/ls dir)
+            (fn (name)
+              (or (string/starts-with? name ".sudo-write") (string/starts-with? name ".sudo-keep"))))))

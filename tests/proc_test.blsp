@@ -94,6 +94,26 @@
         (assert= got (bytes 207 128))
         (os/close p)))))
 
+(describe "a pipe child leads a session of its own, with no controlling terminal"
+  ;; so nothing it runs (sudo, ssh, pinentry) can prompt on a full-screen program's terminal
+  ;; or stop on SIGTTIN reading it — it fails at once instead (Emacs's Bug#30762)
+  :isolated (test "os/cmd and os/spawn: the child's session id is its own pid; /dev/tty does not open"
+    (let (probe "echo \"$(ps -o sid= -p $$ | tr -d ' ') $$\"; (exec 3</dev/tty) 2>/dev/null && echo tty || echo none"
+          answer (fn (out)
+                   (let (lines (string/split (string/trim out) "\n")
+                         ids (vec (string/split (first lines) " ")))
+                     [(= (first ids) (second ids)) (second lines)])))
+      (do
+        (assert= (answer (:stdout (os/cmd "sh" ["-c" probe]))) [true "none"])
+        (let (p (os/spawn "sh" ["-c" probe])
+              out (letrec (gather (fn (acc)
+                                    (receive
+                                      ([:proc ^p d] (gather (str acc d)))
+                                      ([:proc-closed ^p _] acc)
+                                      (after test/*wait-ms* acc))))
+                    (gather "")))
+          (assert= (answer out) [true "none"]))))))
+
 (describe "proc: stdout stream + exit code"
   :isolated (test "a child's stdout then [:proc-closed handle code] with its exit status"
     (let (p (os/spawn "sh" ["-c" "printf hello; exit 3"]))

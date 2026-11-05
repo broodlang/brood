@@ -114,15 +114,26 @@ whoever had it before. A platform without Unix signals has nothing to route."
 suspends (`term/suspend`) and SIGCONT refreshes (`term/refresh`) — each answering a
 `[:resize cols rows]`, so the app re-lays out and the loop repaints — and SIGTERM / SIGHUP
 become `[:hangup sig]`, which ends the loop (`ui-run`). Anything else as it came."
-  (let (message (when tagged (first tagged)))
-    (cond
-      (= message [:signal :tstp]) (do (term/suspend) (term-resize-input))
-      (= message [:signal :cont]) (do (term/refresh) (term-resize-input))
-      (or (= message [:signal :term]) (= message [:signal :hup])) [[:hangup (second message)] true]
-      else tagged)))
+  (let (input (when tagged (term-signal (first tagged))))
+    (if (nil? input) tagged [input true])))
 
-(defn- term-resize-input ()
-  (let ([cols rows] (term/size)) [[:resize cols rows] true]))
+(defn term-signal (message)
+  "The input a terminal display's signal `message` becomes, acted on — or nil when `message`
+is not one: `[:signal :tstp]` suspends (`term/suspend`) and `[:signal :cont]` refreshes
+(`term/refresh`), each answering `[:resize cols rows]` so the app re-lays out and repaints;
+`[:signal :term]` / `[:signal :hup]` become `[:hangup sig]`. What `*term-display*`'s poll
+does, for a loop that receives its mailbox itself (an attached client, std/editor/serve).
+
+    (editor/ui/term-signal [:signal :hup])   ;=> [:hangup :hup]
+    (editor/ui/term-signal \"a\")   ;=> nil"
+  (cond
+    (= message [:signal :tstp]) (do (term/suspend) (term-resize))
+    (= message [:signal :cont]) (do (term/refresh) (term-resize))
+    (or (= message [:signal :term]) (= message [:signal :hup])) [:hangup (second message)]
+    else nil))
+
+(defn- term-resize ()
+  (let ([cols rows] (term/size)) [:resize cols rows]))
 
 (defn display-available? ()
   "Whether a native window can be opened here: the runtime has the GUI backend

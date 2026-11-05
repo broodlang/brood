@@ -163,7 +163,7 @@ arg silently becoming `nil`.
 | | `%argv` | 0 | Command-line arguments as a vector of strings (including argv[0]). |
 | | `%os-type` | 0 | The host OS as a keyword: :linux, :macos, or :windows. |
 | | `%os-cmd` | 1+ | Run prog (with optional args list) capturing stdout/stderr; returns {:stdout s :stderr s :exit n}. |
-| | `%os-detach` | 2–3 | Start prog with args and let it go: null stdio, no handle, not stopped with the caller (own process group; no Job Object on Windows). |
+| | `%os-detach` | 2–3 | Start prog with args and let it go: null stdio, no handle, not stopped with the caller (own session — process group, no controlling terminal; no Job Object on Windows). |
 | | `%halt` | 1 | Terminate the process with exit code. Never returns. |
 | | `image-thumb` | 3 | Decode an encoded image (PNG/JPEG/GIF/WebP/BMP) from a byte sequence and downscale it to fit within max-w×max-h pixels (aspect ratio preserved), returning {:width :height :rgba} where :rgba is a width*height*4 bytes value (row-major RGBA8). |
 | **Macro support** | `macroexpand-1` `macroexpand` | 1 | expand a form (one step / fully) |
