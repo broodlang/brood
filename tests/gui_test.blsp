@@ -181,52 +181,49 @@ and, per row, the rows of its cell the `x` inks."
 
 (describe "gui/render-frame — the window's painter, without a window"
   (test "row 0 starts at the window's top edge: a band on it is coloured from y = 0"
-    (when-gui
-      (fn ()
-        (let (cols (first (:grid (gui/render-frame [[:clear]] (capture-spec))))
-              image (gui/render-frame [[:clear] [:rect 0 0 cols 1 {:bg capture-band}]]
-                      (capture-spec))
-              [_ cell-h] (:cell image))
-          (is (= (:origin image) [6 0]))
-          (is (= (gui/pixel image 200 0) capture-band))
-          (is (= (gui/pixel image 200 (dec cell-h)) capture-band))
-          (is (= (gui/pixel image 200 cell-h) capture-bg))))))
+    (when-gui (fn ()
+                (let (cols (first (:grid (gui/render-frame [[:clear]] (capture-spec))))
+                      image (gui/render-frame [[:clear] [:rect 0 0 cols 1 {:bg capture-band}]]
+                              (capture-spec))
+                      [_ cell-h] (:cell image))
+                  (is (= (:origin image) [6 0]))
+                  (is (= (gui/pixel image 200 0) capture-band))
+                  (is (= (gui/pixel image 200 (dec cell-h)) capture-band))
+                  (is (= (gui/pixel image 200 cell-h) capture-bg))))))
 
   (test "the inset is a margin on the left, right and bottom; the leftover is below"
-    (when-gui
-      (fn ()
-        (let (image (gui/render-frame [[:clear] [:rect 1 1 3 2 {:bg capture-band}]]
-                      (capture-spec))
-              [cell-w cell-h] (:cell image)
-              [cols rows] (:grid image))
-          (is (= (:inset image) 6))
-          (is (= cols (math/quot (- 400 12) cell-w)))
-          (is (= rows (math/quot (- 203 6) cell-h)))
-          (is (= (gui/pixel image 3 (+ cell-h 2)) capture-bg))
-          (is (= (gui/pixel image (+ 6 cell-w) (+ cell-h 2)) capture-band))
-          (is (= (gui/pixel image (+ 6 cell-w) 202) capture-bg))))))
+    (when-gui (fn ()
+                (let (image (gui/render-frame [[:clear] [:rect 1 1 3 2 {:bg capture-band}]]
+                              (capture-spec))
+                      [cell-w cell-h] (:cell image)
+                      [cols rows] (:grid image))
+                  (is (= (:inset image) 6))
+                  (is (= cols (math/quot (- 400 12) cell-w)))
+                  (is (= rows (math/quot (- 203 6) cell-h)))
+                  (is (= (gui/pixel image 3 (+ cell-h 2)) capture-bg))
+                  (is (= (gui/pixel image (+ 6 cell-w) (+ cell-h 2)) capture-band))
+                  (is (= (gui/pixel image (+ 6 cell-w) 202) capture-bg))))))
 
   (test "a band reaching the grid's edges bleeds through the margin to the window's"
-    (when-gui
-      (fn ()
-        (let ([cols rows] (:grid (gui/render-frame [[:clear]] (capture-spec)))
-              image (gui/render-frame [[:clear] [:rect (dec rows) 0 cols 1 {:bg capture-band}]]
-                      (capture-spec)))
-          (is (= (gui/pixel image 0 202) capture-band))
-          (is (= (gui/pixel image 399 202) capture-band))))))
+    (when-gui (fn ()
+                (let ([cols rows] (:grid (gui/render-frame [[:clear]] (capture-spec)))
+                      image (gui/render-frame [[:clear]
+                                                [:rect (dec rows) 0 cols 1 {:bg capture-band}]]
+                              (capture-spec)))
+                  (is (= (gui/pixel image 0 202) capture-band))
+                  (is (= (gui/pixel image 399 202) capture-band))))))
 
   (test "a glyph's ink is inside its own cell"
-    (when-gui
-      (fn ()
-        (let (image (gui/render-frame [[:clear] [:text 1 2 "M" {:fg [255 255 255]}]]
-                      (capture-spec))
-              [cell-w cell-h] (:cell image)
-              x (+ 6 (* 2 cell-w)))
-          (is (> (ink-in image x cell-h cell-w cell-h) 10))
-          (is (= (ink-in image (- x cell-w) cell-h cell-w cell-h) 0))
-          (is (= (ink-in image (+ x cell-w) cell-h cell-w cell-h) 0))
-          (is (= (ink-in image x 0 cell-w cell-h) 0))
-          (is (= (ink-in image x (* 2 cell-h) cell-w cell-h) 0))))))
+    (when-gui (fn ()
+                (let (image (gui/render-frame [[:clear] [:text 1 2 "M" {:fg [255 255 255]}]]
+                              (capture-spec))
+                      [cell-w cell-h] (:cell image)
+                      x (+ 6 (* 2 cell-w)))
+                  (is (> (ink-in image x cell-h cell-w cell-h) 10))
+                  (is (= (ink-in image (- x cell-w) cell-h cell-w cell-h) 0))
+                  (is (= (ink-in image (+ x cell-w) cell-h cell-w cell-h) 0))
+                  (is (= (ink-in image x 0 cell-w cell-h) 0))
+                  (is (= (ink-in image x (* 2 cell-h) cell-w cell-h) 0))))))
 
   (test "a lowercase letter sits on the same pixels in every row, in its row's middle (ADR-611)"
     (when-gui
@@ -238,23 +235,27 @@ and, per row, the rows of its cell the `x` inks."
             (is (every? rows (fn (inked) (= inked (first rows)))))
             (is (<= (math/abs (- middle (/ cell-h 2.0))) 1.0))))))))
 
+
 (describe "gui/write-png and gui/pixel"
   (test "a picture written as PNG decodes back to the same pixels, cropped and scaled"
-    (when-gui
-      (fn ()
-        (let (image (gui/render-frame [[:clear] [:rect 0 0 2 1 {:bg capture-band}]]
-                      (capture-spec))
-              path (str (path/temp "brood-capture-") ".png")
-              _ (gui/write-png image path {:crop [0 0 10 4] :scale 3})
-              back (gui/image-thumb (file/slurp-bytes path) 100 100))
-          (file/rm path)
-          (is (= [(:width back) (:height back)] [30 12]))
-          (is (= (gui/pixel back 0 0) capture-band))
-          (is (= (gui/pixel back 29 11) capture-band))))))
+    (when-gui (fn ()
+                (let (image (gui/render-frame [[:clear] [:rect 0 0 2 1 {:bg capture-band}]]
+                              (capture-spec))
+                      path (str (path/temp "brood-capture-") ".png")
+                      _ (gui/write-png image path {:crop [0 0 10 4] :scale 3})
+                      back (gui/image-thumb (file/slurp-bytes path) 100 100))
+                  (file/rm path)
+                  (is (= [(:width back) (:height back)] [30 12]))
+                  (is (= (gui/pixel back 0 0) capture-band))
+                  (is (= (gui/pixel back 29 11) capture-band))))))
 
   (test "a pixel outside the picture is nil"
-    (let (image {:width 1 :height 1 :rgba (bytes/concat (bytes/int-> 1 1) (bytes/int-> 2 1)
-                                             (bytes/int-> 3 1) (bytes/int-> 255 1))})
+    (let (image {:width 1
+                 :height 1
+                 :rgba (bytes/concat (bytes/int-> 1 1)
+                         (bytes/int-> 2 1)
+                         (bytes/int-> 3 1)
+                         (bytes/int-> 255 1))})
       (is (= (gui/pixel image 0 0) [1 2 3]))
       (is (nil? (gui/pixel image 1 0)))
       (is (nil? (gui/pixel image 0 -1)))))
@@ -265,3 +266,64 @@ and, per row, the rows of its cell the `x` inks."
 (describe "gui/capture"
   (test "a window that is not open is an error, not an empty picture"
     (assert-error (gui/capture 987654321))))
+
+;; ADR-612: input→present as a distribution, read off plain histograms — synthetic data
+;; only; nothing here measures anything
+(describe "gui/latency-percentiles — the tail typing feels"
+  (test "p50, p99 and p99.9 land on the bucket tops, never above the maximum"
+    ;; 1000 inputs: 980 at ~2 ms, 15 at ~8 ms, 5 at ~40 ms
+    (let (h {:count 1000 :max-us 40000 :buckets {2047 980 8191 15 40959 5}}
+          p (gui/latency-percentiles h))
+      (assert= (:count p) 1000)
+      (assert= (:p50 p) 2.047)
+      (assert= (:p99 p) 8.191)
+      (assert= (:p999 p) 40.0)
+      (assert= (:max p) 40.0)))
+  (test "p99 of a hundred inputs is the ninety-ninth, not the hundredth"
+    (let (p (gui/latency-percentiles {:count 100 :max-us 50000 :buckets {1023 99 51199 1}}))
+      (assert= (:p99 p) 1.023)
+      (assert= (:p999 p) 50.0)))
+  (test "an empty histogram has no percentiles"
+    (assert= (gui/latency-percentiles {:count 0 :max-us 0 :buckets {}})
+      {:count 0 :p50 nil :p99 nil :p999 nil :max nil})))
+
+(describe "gui/latency-merge and gui/latency-since — histograms are data"
+  (test "two sessions add bucket by bucket"
+    (let (merged (gui/latency-merge {:count 2 :max-us 3000 :buckets {1023 1 3071 1}}
+                   {:count 1 :max-us 900 :buckets {1023 1}}))
+      (assert= merged {:count 3 :max-us 3000 :buckets {1023 2 3071 1}})
+      (assert= (gui/latency-merge nil merged) merged)))
+  (test "a window of time is the later reading less the earlier"
+    (let (before {:count 2 :max-us 3000 :buckets {1023 1 3071 1}}
+          now {:count 5 :max-us 9000 :buckets {1023 3 3071 1 9215 1}}
+          window (gui/latency-since now before))
+      (assert= window {:count 3 :max-us 9000 :buckets {1023 2 9215 1}})
+      ;; the window's own maximum is its slowest bucket's top, under the session's
+      (assert= (:max-us (gui/latency-since {:count 3 :max-us 9000 :buckets {1023 2 9215 1}}
+                          {:count 1 :max-us 9000 :buckets {9215 1}}))
+        1023)
+      (assert= (gui/latency-since now nil) now))))
+
+(describe "gui/key-repeat? and gui/latency-histogram without a window"
+  (test "a window that is not open has no repeat and no histogram"
+    (assert= (gui/key-repeat? 987654) false)
+    (assert-error (gui/latency-histogram 987654))))
+
+(describe "gui/reduce-motion-from — each desktop's switch, read from what it says"
+  (test "GNOME's animations switch off asks for reduced motion"
+    (is (gui/reduce-motion-from :linux {:gnome "false"}))
+    (is (not (gui/reduce-motion-from :linux {:gnome "true"}))))
+  (test "KDE's animation speed at instant asks, any other speed does not"
+    (is (gui/reduce-motion-from :linux {:kde "[General]\nx=1\n[KDE]\nAnimationDurationFactor=0\n"}))
+    (is (not (gui/reduce-motion-from :linux {:kde "[KDE]\nAnimationDurationFactor=0.5\n"}))))
+  (test "macOS Reduce Motion and Windows' animation effects"
+    (is (gui/reduce-motion-from :macos {:macos "1\n"}))
+    (is (not (gui/reduce-motion-from :macos {:macos "0"})))
+    (is (gui/reduce-motion-from :windows
+          {:windows "HKEY_CURRENT_USER\\Control Panel\\Desktop\\WindowMetrics\n    MinAnimate    REG_SZ    0\n"}))
+    (is (not (gui/reduce-motion-from :windows {:windows "    MinAnimate    REG_SZ    1"}))))
+  (test "a source that said nothing does not ask"
+    (is (not (gui/reduce-motion-from :linux {:gnome nil :kde nil})))
+    (is (not (gui/reduce-motion-from :windows {}))))
+  (test "the live read answers a boolean on any machine"
+    (is (bool? (gui/reduce-motion?)))))

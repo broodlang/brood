@@ -102,7 +102,7 @@
   (%gui-held-key id))
 
 (defn latency (id)
-  "Window id's recent input-to-present samples, oldest first (at most 64), each a map of milliseconds: `:total` — from the GUI thread receiving an input (a key press, a mouse button, a wheel step) to the paint of the first frame that arrived after it returning from its present — and `:paint`, that paint's share; a frame the GPU render target drew adds its phases `:encode` `:upload` `:acquire` `:submit` `:present`. Which frame answers an input cannot be known across the app's mailbox, so the next frame drawn is taken as its answer; a present returning means the compositor has the frame, not that the panel shows it (up to one refresh more). Empty headless. `BROOD_GUI_TRACE=1` prints each sample as it is taken (ADR-440).
+  "Window id's recent input-to-present samples, oldest first (at most 64), each a map of milliseconds, with `:input` — `:key` or `:pointer` (ADR-612): `:total` — from the GUI thread receiving an input (a key press, a mouse button, a wheel step) to the paint of the first frame that arrived after it returning from its present — and `:paint`, that paint's share; a frame the GPU render target drew adds its phases `:encode` `:upload` `:acquire` `:submit` `:present`. Which frame answers an input cannot be known across the app's mailbox, so the next frame drawn is taken as its answer; a present returning means the compositor has the frame, not that the panel shows it (up to one refresh more). Empty headless. `BROOD_GUI_TRACE=1` prints each sample as it is taken (ADR-440).
 
     (gui/latency id)   ;~> [{:total 6.1 :paint 1.2 :encode 0.3 …} …]
     (fn? gui/latency)   ;=> true"
@@ -114,6 +114,135 @@
     (gui/key-repeats id)   ;~> {:delivered 412 :dropped 3 :delay 500.1 :interval 33.3}
     (fn? gui/key-repeats)   ;=> true"
   (%gui-key-repeats id))
+
+(defn key-repeat? (id)
+  "Whether the key press window id's app is folding is an OS auto-repeat of a key held down (under `{:key-repeat :os}`), rather than a fresh press. Each press marks it as it leaves the app's mailbox, so asked while folding that press it is exact — a double tap is two fresh presses, a held key's first press is fresh and every one after it a repeat. What an app needs to keep a held key calm: a held C-v scrolls, and the flash a single C-v earns is skipped. False before any key, under `{:key-repeat :app}`, for a window not open, and headless (ADR-612).
+
+    (gui/key-repeat? id)   ;~> true while folding the repeats of a held key"
+  (%gui-key-repeat? id))
+
+;; ---- input→present as a distribution (ADR-612) ------------------------------------
+;; A window counts every input-to-present time since it opened into log-linear buckets,
+;; keys apart from the pointer. A histogram is plain data — `{:count n :max-us n :buckets
+;; {upper-us n}}` — so it adds (two sessions), subtracts (a window of time between two
+;; readings) and persists as it is; the percentiles are read off it here.
+
+(defn latency-histogram (id)
+  "Window id's input-to-present times since it opened, as two distributions: `{:key h :pointer h}`. Each `h` is `{:count n :max-us n :buckets {upper-us n}}` — how many inputs were answered, the slowest in microseconds, and per bucket (keyed by the largest value it holds, in microseconds; exact below 16 us, then 16 buckets per power of two, so at most 6.25% wide) how many fell in it. A key is a press, an OS repeat or an input method's commit; the pointer is a button or a wheel step. Taken as `gui/latency` takes its samples: from the GUI thread receiving the input to the present of the first frame that arrived after it. Read the percentiles with `gui/latency-percentiles`; both empty headless (ADR-612).
+
+    (gui/latency-histogram id)   ;~> {:key {:count 412 :max-us 18211 :buckets {4351 3 …}} :pointer {…}}"
+  (%gui-latency-histogram id))
+
+(def- *empty-latency* {:count 0 :max-us 0 :buckets {}})
+
+(defn latency-merge (a b)
+  "Histograms `a` and `b` (`gui/latency-histogram`'s shape) as one: their counts and buckets added, the larger maximum. nil reads as empty, so a fold can start from nil.
+
+    (gui/latency-merge {:count 1 :max-us 900 :buckets {911 1}} {:count 2 :max-us 4000 :buckets {911 1 4095 1}})   ;=> {:count 3 :max-us 4000 :buckets {911 2 4095 1}}
+    (gui/latency-merge nil {:count 1 :max-us 5 :buckets {5 1}})   ;=> {:count 1 :max-us 5 :buckets {5 1}}"
+  (let (a (or a *empty-latency*)
+        b (or b *empty-latency*))
+    {:count (+ (or (:count a) 0) (or (:count b) 0))
+     :max-us (math/max (or (:max-us a) 0) (or (:max-us b) 0))
+     :buckets (fold (or (:buckets b) {})
+                (or (:buckets a) {})
+                (fn (acc [upper n]) (assoc acc upper (+ n (get acc upper 0)))))}))
+
+(defn latency-since (now before)
+  "What histogram `now` counted after histogram `before` — two readings of the same window's `gui/latency-histogram`, `before` the earlier (nil for none): the inputs between them, a window of time. Its `:max-us` is the top of its slowest bucket, no higher than `now`'s maximum, since a maximum cannot be subtracted.
+
+    (gui/latency-since {:count 3 :max-us 4000 :buckets {911 2 4095 1}} {:count 1 :max-us 900 :buckets {911 1}})   ;=> {:count 2 :max-us 4000 :buckets {911 1 4095 1}}"
+  (let (before (or before *empty-latency*)
+        buckets (fold (or (:buckets now) {})
+                  {}
+                  (fn (acc [upper n])
+                    (let (left (- n (get (or (:buckets before) {}) upper 0)))
+                      (if (> left 0) (assoc acc upper left) acc))))
+        top (reduce (keys buckets) 0 math/max))
+    {:count (math/max 0 (- (or (:count now) 0) (or (:count before) 0)))
+     :max-us (math/min top (or (:max-us now) 0))
+     :buckets buckets}))
+
+(defn- latency-at (pairs total permille max-us)
+  ;; the top of the first bucket (ascending `pairs`) whose running count reaches the
+  ;; `permille`th input, never above the maximum; integer ranks, so p99 of 100 is the 99th
+  (let (rank (math/max 1 (math/quot (+ (* total permille) 999) 1000)))
+    (letrec (walk (fn (left seen)
+                    (if (empty? left)
+                      max-us
+                      (let ([upper n] (first left)
+                            reached (+ seen n))
+                        (if (>= reached rank) (math/min upper max-us) (walk (rest left) reached))))))
+      (walk pairs 0))))
+
+(defn latency-percentiles (histogram)
+  "The median, p99, p99.9 and maximum of `histogram` (`gui/latency-histogram`'s shape) in milliseconds, with how many inputs it counts: `{:count :p50 :p99 :p999 :max}`. A percentile reads as the top of the bucket it lands in (at most 6.25% over the true value, never under it, never above the maximum). An empty histogram has nil percentiles. The tail is the point: at ten keys a second one input in a thousand is one every hundred seconds, which is what typing feels, and a median cannot show it (ADR-612).
+
+    (gui/latency-percentiles {:count 4 :max-us 9000 :buckets {2047 2 4095 1 9215 1}})   ;=> {:count 4 :p50 2.047 :p99 9.0 :p999 9.0 :max 9.0}
+    (:p50 (gui/latency-percentiles {:count 0 :max-us 0 :buckets {}}))   ;=> nil"
+  (let (total (or (:count histogram) 0)
+        max-us (or (:max-us histogram) 0)
+        pairs (sort (vec (or (:buckets histogram) {})))
+        ms (fn (us) (/ us 1000.0)))
+    (if (<= total 0)
+      {:count 0 :p50 nil :p99 nil :p999 nil :max nil}
+      {:count total
+       :p50 (ms (latency-at pairs total 500 max-us))
+       :p99 (ms (latency-at pairs total 990 max-us))
+       :p999 (ms (latency-at pairs total 999 max-us))
+       :max (ms max-us)})))
+
+;; ---- the desktop's reduced-motion preference (ADR-612) ----------------------------
+;; Every platform has a switch for "show me less animation", and an app that animates is
+;; asked to honour it. None of them is a window property, so it is read where each desktop
+;; keeps it: GNOME's gsettings, KDE's kdeglobals, macOS's universal-access defaults, and the
+;; Windows animation setting. The readers are pure over the text each source gives, so they
+;; are tested on any machine.
+
+(defn reduce-motion-from (os answers)
+  "Whether `answers` — what each source said on `os` (an `os/type` keyword), as a map of strings or nil for a source that said nothing — ask for reduced motion. `:gnome` is `gsettings get org.gnome.desktop.interface enable-animations` (\"false\" asks), `:kde` the text of kdeglobals (an `AnimationDurationFactor=0` asks), `:macos` `defaults read com.apple.universalaccess reduceMotion` (\"1\" asks), `:windows` `reg query` of `MinAnimate` under the desktop's WindowMetrics (0 asks: what the \"Animation effects\" switch turns off).
+
+    (gui/reduce-motion-from :linux {:gnome \"false\"})   ;=> true
+    (gui/reduce-motion-from :linux {:gnome \"true\" :kde \"[KDE]\\nAnimationDurationFactor=0\\n\"})   ;=> true
+    (gui/reduce-motion-from :macos {:macos \"0\"})   ;=> false
+    (gui/reduce-motion-from :windows {:windows \"    MinAnimate    REG_SZ    0\"})   ;=> true"
+  (let (said (fn (k) (string/trim (or (get answers k) ""))))
+    (case os
+      :macos (= (said :macos) "1")
+      :windows (regex/match? "MinAnimate\\s+REG_SZ\\s+0(\\s|$)" (said :windows))
+      (or (= (said :gnome) "false")
+        (any? (string/split (said :kde) "\n")
+          (fn (line) (regex/matches? "\\s*AnimationDurationFactor\\s*=\\s*0+(\\.0*)?\\s*" line)))))))
+
+(defn- desktop-answer (prog args)
+  ;; what `prog args` printed when it ran and succeeded, else nil — a source that is not
+  ;; installed, or fails, says nothing
+  (when (os/which prog)
+    (let (result (os/cmd prog args))
+      (when (os/cmd-ok? result) (os/cmd-out result)))))
+
+(defn reduce-motion? ()
+  "Whether the desktop asks apps for less animation: GNOME's \"Animations\" switch off, KDE's animation speed at instant, macOS's Reduce Motion, or Windows' \"Animation effects\" off (`gui/reduce-motion-from` reads each). Best-effort and synchronous — it runs the platform's settings tool, a few milliseconds — so read it once (at startup) rather than per frame; a source that is missing or fails counts as not asking, and so does any error. Needs no window and no GUI build (ADR-612).
+
+    (bool? (gui/reduce-motion?))   ;=> true"
+  (check-allow :discarded-catch
+    (try
+      (let (os (os/type)
+            kdeglobals (path/join (or (os/env "XDG_CONFIG_HOME")
+                                    (path/join (or (os/env "HOME") "") ".config"))
+                         "kdeglobals"))
+        (reduce-motion-from os
+          (case os
+            :macos
+              {:macos (desktop-answer "defaults"
+                        ["read" "com.apple.universalaccess" "reduceMotion"])}
+            :windows
+              {:windows (desktop-answer "reg"
+                          ["query" "HKCU\\Control Panel\\Desktop\\WindowMetrics" "/v" "MinAnimate"])}
+            {:gnome (desktop-answer "gsettings"
+                      ["get" "org.gnome.desktop.interface" "enable-animations"])
+             :kde (when (file/exists? kdeglobals) (file/slurp kdeglobals))})))
+      (catch _ false))))
 
 (defn settle (id)
   "Tell window id the app finished a turn with nothing new to draw; returns nil. What a `gui/draw` would have told the window about the app's progress, without a frame: the next wheel-glide step may fire, and the input the turn answered is dropped from `gui/latency` instead of being pinned on the next unrelated frame. `ui-run` sends it on every turn it skips (ADR-444), through the display's `:settle`. No-op headless.

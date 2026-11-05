@@ -279,8 +279,22 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(1),
         Sig::new(vec![int], vec_ty),
         &["id"],
-        "Window id's recent input-to-present samples, oldest first (at most 64), each a map of milliseconds: :total — from the GUI thread receiving an input (a key press, a mouse button, a wheel step) to the paint of the first frame that arrived after it returning from its present — and :paint, that paint's share; a frame drawn by the GPU render target adds its phases :encode :upload :acquire :submit :present. Which frame answers an input cannot be known across the app's mailbox, so the next frame drawn is taken as the answer; a present returning means the compositor has the frame, not that the panel shows it (up to one refresh more). Empty headless. BROOD_GUI_TRACE=1 prints each sample as it is taken. ADR-440.",
+        "Window id's recent input-to-present samples, oldest first (at most 64), each a map of milliseconds, with :input (:key or :pointer, ADR-612): :total — from the GUI thread receiving an input (a key press, a mouse button, a wheel step) to the paint of the first frame that arrived after it returning from its present — and :paint, that paint's share; a frame drawn by the GPU render target adds its phases :encode :upload :acquire :submit :present. Which frame answers an input cannot be known across the app's mailbox, so the next frame drawn is taken as the answer; a present returning means the compositor has the frame, not that the panel shows it (up to one refresh more). Empty headless. BROOD_GUI_TRACE=1 prints each sample as it is taken. ADR-440.",
         gui_latency);
+    primitives.def(
+        "%gui-latency-histogram",
+        Arity::exact(1),
+        Sig::new(vec![int], map_ty),
+        &["id"],
+        "Window id's input-to-present times since it opened as a distribution, keys apart from the pointer: {:key h :pointer h}, each h a map of :count (inputs answered), :max-us (the slowest, microseconds) and :buckets, a map from a bucket's largest value in microseconds to how many inputs fell in it — exact below 16 us, then 16 buckets per power of two, so a bucket is at most 6.25% wide. A key is a press, an OS repeat or an input method's commit; the pointer a button or a wheel step. Histograms add bucket by bucket (gui/latency-merge, gui/latency-since) and gui/latency-percentiles reads p50 / p99 / p99.9 off one. Both empty headless. ADR-612.",
+        gui_latency_histogram);
+    primitives.def(
+        "%gui-key-repeat?",
+        Arity::exact(1),
+        Sig::new(vec![int], bool_ty),
+        &["id"],
+        "Whether the last key press window id's app took from its mailbox was an OS auto-repeat of a key held down (under {:key-repeat :os}) rather than a fresh press. Each press marks it as it leaves the mailbox, so asked while folding a press it answers for that press exactly; a repeat taken back at the release marks nothing. False before any key, under {:key-repeat :app} (no repeat is delivered), for a window not open, and headless. ADR-612.",
+        gui_key_repeat);
     primitives.def(
         "%gui-key-repeats",
         Arity::exact(1),
