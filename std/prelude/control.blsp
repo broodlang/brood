@@ -406,14 +406,42 @@ The steps after a failure never run, so a pipe does not have to end in `(if (fai
       (empty? (rest clauses)) (first clauses)
       else
         `(if (~p ~e ~(first clauses)) ~(second clauses) ~(%condp-clauses p e (rest (rest clauses)))))))
+;; The message for a `condp` whose second argument is not a function: it names the value
+;; (once, when the argument is that value spelled out) and the spelling with the first two
+;; arguments swapped.
+(defn %condp-swap-message (expr pred shown)
+  (str "condp: the second argument, "
+    (if (= (pr-str pred) shown) shown (str (pr-str pred) " (" shown ")"))
+    ", is not a function — the subject comes first: write (condp "
+    (pr-str pred)
+    " "
+    (pr-str expr)
+    " …), which asks ("
+    (pr-str expr)
+    " "
+    (pr-str pred)
+    " test)"))
+;; `condp`'s run-time half of that check: `p` is the evaluated predicate. A function, so the
+;; template emits one call and no name a caller could capture.
+(defn %condp-check (p expr pred)
+  (when (not (or (fn? p) (keyword? p)))
+    (error (%condp-swap-message expr pred (pr-str p)))))
 (defmacro condp (expr pred & clauses)
   "Evaluate `expr` once, then take the first `test result` pair whose `(pred expr test)` is truthy; a lone trailing form is the default, and with none a miss raises. `cond` with the predicate factored out — `case` compares literals, this asks a function. The subject comes first, as in `case` and `match`, and each clause reads in the order its test runs: `(condp line string/starts-with? \"#\" …)` asks `(string/starts-with? line \"#\")`, value first like every data-first predicate.
 
     (condp 15 < 10 :small 100 :medium :large)   ;=> :medium
     (condp :b = :a 1 :b 2)                      ;=> 2
     (condp \"# Title\" string/starts-with? \"#\" :heading \"-\" :item :text)   ;=> :heading"
+  ;; The likeliest slip is the other order, `(condp = x …)`: the predicate slot then holds
+  ;; the subject. A constant there is refused as the form expands; any other non-function
+  ;; raises before the first test, naming the swap — rather than `cannot call
+  ;; non-function` from inside the first clause. A keyword is callable, so it stays allowed.
+  (when (and (%cond-constant? pred) (not (keyword? pred)))
+    (error (%condp-swap-message expr pred (pr-str pred))))
   (let (e (reflect/gensym "e") p (reflect/gensym "p"))
-    `(let (~e ~expr ~p ~pred) ~(%condp-clauses p e clauses))))
+    `(let (~e ~expr ~p ~pred)
+       (%condp-check ~p '~expr '~pred)
+       ~(%condp-clauses p e clauses))))
 
 ;; ---- with: sequential match-binding with fall-through -----------------------
 ;; `with` — the FAILURE let. Bindings read exactly like `let`'s; the first value that is a

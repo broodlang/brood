@@ -35,6 +35,18 @@
   (test "condp threads: the subject is the first operand (ADR-507)"
     (assert= :item
       (-> "  - milk" string/trim (condp string/starts-with? "#" :heading "-" :item :text))))
+  (test "the other order names the swap, not `cannot call non-function`"
+    ;; `(condp = x …)`: the predicate slot holds the subject. A value there raises before
+    ;; the first test with the spelling to write; a constant is refused as the form expands.
+    (let (x 2
+          msg (check-allow :type-mismatch
+                (try (condp = x 1 :a 2 :b) (catch e (error-message e)))))
+      (is (includes? msg "condp: the second argument, x (2), is not a function"))
+      (is (includes? msg "write (condp x = …)")))
+    (let (msg (try (reflect/macroexpand-1 '(condp = 2 1 :a 2 :b)) (catch e (error-message e))))
+      (is (includes? msg "condp: the second argument, 2, is not a function")))
+    ;; a keyword is callable, so it is a predicate: `(:k m test)` reads `m` with a default
+    (assert= :one (condp {:a 1} :a 1 :one :other)))
   (test "condp evaluates the expression and the predicate once each"
     (let (t (table/new))
       (assert= :yes
@@ -45,8 +57,11 @@
   (test "no clause and no default raises, naming the value"
     (is (includes? (error-message (try (condp :zz = :a 1) (catch e e))) ":zz")))
   (test "a predicate-first call fails loudly rather than choosing a clause"
-    (check-allow :type-mismatch
-      (assert-error (condp < 15 10 :small :large))))
+    ;; refused as the form expands — a literal can never be the predicate
+    (let (msg (try
+                (reflect/macroexpand-1 '(condp < 15 10 :small :large))
+                (catch e (error-message e))))
+      (is (includes? msg "write (condp 15 < …)"))))
   (test "if-some / when-some test presence, so false is a value"
     (assert= false (if-some (x false) x :absent))
     (assert= :absent (if-some (x nil) x :absent))

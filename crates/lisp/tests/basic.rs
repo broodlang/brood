@@ -997,6 +997,16 @@ fn hints_name_only_features_that_exist() {
     // `some?` must name BOTH readings — it was freed because they get confused.
     let s = hint("(some? 1)");
     assert!(s.contains("any?") && s.contains("nil?"), "{s}");
+    // ADR-308 deleted the thread-last pipes: the hint names the one pipe, its `$`, and the
+    // conditional pipe — each checked bound in the live image, as above.
+    for removed in ["->>", "some->>", "cond->>"] {
+        let t = hint(&format!("({removed} [1 2] (map inc))"));
+        assert!(
+            t.contains("`->`") && t.contains("`$`") && t.contains("`cond->`"),
+            "{t}"
+        );
+    }
+    assert_eq!(run("(list (bound? '->) (bound? 'cond->))"), "(true true)");
 }
 
 /// A bare name that exists only as `mod/name` — because `(require-one 'mod)` loaded

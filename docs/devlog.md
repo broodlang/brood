@@ -5126,6 +5126,7 @@ for collection-first order and the single `->` pipe (no `->>`, ADR-308), `condp`
 order, `else` (ADR-518), truthy failures (ADR-310), lexical `let` and per-process dynamic
 bindings, keywords as the only callable data (ADR-165), and `()` being `nil`. Each row is written
 as Brood's own design, with its reason, not as a gap with Clojure; the table's introduction now
-says Brood is its own language. Two findings, left unfixed: `condp` written in Clojure's order
-fails with a hint about `f(x)` call syntax that does not name the cause, and `->>` gets a bare
-"unbound symbol".
+says Brood is its own language. Then the two rough edges the rows exposed: `condp` written in the
+other order now names the swap (a literal in the predicate slot is refused when the form expands;
+any other non-function raises before the first test, instead of `cannot call non-function` with a
+hint about `f(x)` syntax), and `->>`/`some->>`/`cond->>` carry a hint naming `->`, `$` and `cond->`.

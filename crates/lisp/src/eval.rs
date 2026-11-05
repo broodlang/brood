@@ -851,6 +851,14 @@ pub(crate) fn foreign_construct_hint(name: &str) -> Option<&'static str> {
              already a lazy O(1) value. For an unbounded/streaming source, a process that \
              `send`s values."
         }
+        // Deleted by ADR-308: every collection function takes its collection first, so one
+        // pipe threads them all.
+        "->>" | "some->>" | "cond->>" => {
+            "Brood has one pipe, `->`: every collection function takes its collection \
+             first (ADR-308), so the threaded value is always the first argument — \
+             `(-> xs (map f) (seq/filter even?))`. Where a step's subject is not first, \
+             `$` places the value: `(-> n (- 100 $))`. `cond->` is the conditional pipe."
+        }
         "progn" | "begin" => "Brood spells `progn`/`begin` as `do`.",
         "mapcar" => "Brood spells `mapcar` as `map`.",
         "null?" => "Brood tests nil with `nil?` (and `empty?` for an empty collection).",
