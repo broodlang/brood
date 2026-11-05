@@ -219,7 +219,7 @@ child exited."
         ;; stdout a full device: the write fails (ENOSPC)
         (os/cmd "sh"
           ["-c"
-            (str (os/shell-quote (sibling-binary "nest"))
+            (str (os/shell-quote (or (sibling-binary "nest") "nest"))
               " run "
               (os/shell-quote script)
               " > /dev/full")])

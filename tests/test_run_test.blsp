@@ -21,7 +21,7 @@
   (test "a file kept under the config home lands in the scratch home"
     (let (scratch (test/scratch-dir))
       (when scratch
-        (let (file (path/join (os/env "XDG_CONFIG_HOME") "test-run-test" "state.blsp"))
+        (let (file (path/join (or (os/env "XDG_CONFIG_HOME") "") "test-run-test" "state.blsp"))
           (file/mkdir (path/dirname file))
           (file/spit file "[1]")
           (is (string/starts-with? file scratch))
