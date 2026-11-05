@@ -25,6 +25,13 @@
     ([:proc-closed ^child code] (screen-text acc))
     (after test/*wait-ms* (screen-text acc))))
 
+(defn- console-field (out name)
+  ;; `mode con`'s `Lines:` or `Columns:` value, read as that field: a `30` or `100` found
+  ;; anywhere in the output (the keyboard rate, a code page) proved nothing. The spaces
+  ;; between name and value may arrive as cursor moves, which the strip removes.
+  (let (found (regex/find (str name ":\\s*(\\d+)") out))
+    (when found (get (first (get found :groups)) :text))))
+
 (defn- pty-await (child acc want)
   "Read `child` until `want` appears on its screen — an interactive child never exits."
   (if (includes? (screen-text acc) want)
@@ -76,12 +83,21 @@
       (is (includes? out (path/basename directory))))))
 
 (describe "pty: a terminal has a size"
+  (test "the size is read from mode con's Lines: and Columns: fields, not any number in it"
+    (let (out "Status for device CON:\n    Lines:          30\n    Columns:        100\n    Keyboard rate:  31\n    Code page:      65001")
+      (assert= "30" (console-field out "Lines"))
+      (assert= "100" (console-field out "Columns"))
+      ;; the strip can leave no space between a field and its value
+      (assert= "100" (console-field "Lines:30Columns:100" "Columns"))
+      ;; a 30 elsewhere is not the Lines field
+      (assert= nil (console-field "Keyboard rate: 30\n    Columns: 100" "Lines"))))
+
   :isolated (test "the child is told the window it was given"
     (let (child (os/shell-spawn-pty (if (windows?) "mode con" "stty size") {:cols 100 :rows 30})
           out (pty-drain child ""))
       ;; `stty size` prints "rows cols"; `mode con` lists Lines: and Columns:
       (if (windows?)
-        (do (is (includes? out "100")) (is (includes? out "30")))
+        (do (assert= "30" (console-field out "Lines")) (assert= "100" (console-field out "Columns")))
         (assert= "30 100" (string/trim out)))))
 
   :isolated (test "resize-pty changes it"
@@ -90,7 +106,7 @@
           _ (os/resize-pty child 120 40)
           out (pty-drain child ""))
       (if (windows?)
-        (do (is (includes? out "120")) (is (includes? out "40")))
+        (do (assert= "40" (console-field out "Lines")) (assert= "120" (console-field out "Columns")))
         (assert= "40 120" (string/trim out)))))
 
   :isolated (test "resizing a piped child is refused rather than silently ignored"
