@@ -353,7 +353,7 @@ fn apply_keyword(heap: &mut Heap, kw: Value, argv: &[Value]) -> LispResult {
             let got = crate::syntax::printer::print(heap, other);
             let tag = crate::core::value::tag(other).name();
             Err(LispError::type_err(format!(
-                "{shown}: expected a map, set or nil to look up in, got {tag} ({got})"
+                "{shown}: expected a map, record, set or nil to look up in, got {tag} ({got})"
             ))
             .with_hint(format!(
                 "a keyword reads a KEY, so the argument has to be keyed. If that is a                  collection OF maps, you want one element of it (or `(map {shown} coll)`                  for all of them); for a nested key use `(map/get-in coll [{shown} …])`."

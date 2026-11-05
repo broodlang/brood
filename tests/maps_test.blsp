@@ -413,7 +413,7 @@
     (check-allow :type-mismatch
       (let (msg (try (:name (list {:name "a"})) (catch e (error-message e))))
         (is (includes? msg ":name:"))
-        (is (includes? msg "map, set or nil"))))
+        (is (includes? msg "map, record, set or nil"))))
     (assert-error (:name [1 2]))
     (assert-error (:name "str"))
     (assert-error (:name 5)))

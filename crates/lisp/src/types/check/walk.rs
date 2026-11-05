@@ -592,7 +592,7 @@ fn check_keyword_accessor(
             out.push((
                 arg_pos(heap, items[1], form),
                 format!(
-                    "{shown}: expected a map, set or nil to look up in, got {} ({})",
+                    "{shown}: expected a map, record, set or nil to look up in, got {} ({})",
                     gradual.bound,
                     crate::syntax::printer::print(heap, items[1]),
                 ),

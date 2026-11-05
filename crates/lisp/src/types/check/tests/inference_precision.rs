@@ -1218,3 +1218,22 @@ fn the_unknown_keyed_value_is_read_by_overlap_under_strict() {
     );
     assert!(!map_into_record.is_empty(), "a known map is no record");
 }
+
+// A field guard over a value whose kind is unknown proves the field, not the kind: under
+// `(when (:sudo b) …)` an unannotated `b` is "a map or a record carrying `:sudo`"
+// (`Ty::keyed_of_open`), so it still passes on to a record parameter — a `map` shape there
+// told a buffer record it was a map (ADR-542). In both modes.
+#[test]
+fn a_field_guard_on_an_unknown_value_keeps_both_keyed_kinds() {
+    let src = "\
+         (defmodule t)\n\
+         (defrecord buf ((name string)))\n\
+         (sig name-of (buf -> string))\n\
+         (defn name-of (b) (:name b))\n\
+         (defn k1 (b) (when (= true (:sudo b)) (name-of b)))\n\
+         (defn k2 (b) (when (:sudo b) (name-of b)))";
+    for strict in [false, true] {
+        let ws = file_warnings_mode(src, strict);
+        assert!(ws.is_empty(), "strict={strict}: {ws:?}");
+    }
+}

@@ -889,19 +889,31 @@ impl Ty {
     /// inclusion. `None` when the term does not carry both kinds unrefined; otherwise the
     /// rest of the term, without the two keyed tags (`never` when there is none).
     pub fn without_unknown_keyed(&self) -> Option<Ty> {
-        if self.tags & SHAPE_BITS != SHAPE_BITS
-            || self.fields.is_some()
-            || self.map_kv.is_some()
-            || self.neg.is_some()
-        {
+        if self.fields.is_some() {
             return None;
         }
-        Some(
-            (0..32)
-                .map(|i| 1u32 << i)
-                .filter(|b| self.tags & b != 0 && b & SHAPE_BITS == 0)
-                .fold(Ty::NEVER, |acc, b| acc.union(self.project_tag(b))),
-        )
+        self.keyed_kind_unknown().map(|(_, _, rest)| rest)
+    }
+
+    /// A term whose keyed KIND is unknown — it carries both `map` and `record`, with no
+    /// `map<K, V>` refinement (which only a map has) — split into its map projection, its
+    /// record projection, and the rest. A shape riding on both (a field guard over an
+    /// unannotated value, [`Ty::keyed_of_open`]) is one such term; the bare `map | record`
+    /// is the other. Strict checking accepts the keyed part when EITHER projection fits:
+    /// the value is one kind or the other, and which is not known.
+    pub fn keyed_kind_unknown(&self) -> Option<(Ty, Ty, Ty)> {
+        if self.tags & SHAPE_BITS != SHAPE_BITS || self.map_kv.is_some() || self.neg.is_some() {
+            return None;
+        }
+        let rest = (0..32)
+            .map(|i| 1u32 << i)
+            .filter(|b| self.tags & b != 0 && b & SHAPE_BITS == 0)
+            .fold(Ty::NEVER, |acc, b| acc.union(self.project_tag(b)));
+        Some((
+            self.project_tag(MAP_BIT),
+            self.project_tag(RECORD_BIT),
+            rest,
+        ))
     }
 
     /// Is this type known only by what it is NOT — `any`, or `any` less a guard's
@@ -1133,6 +1145,21 @@ impl Ty {
     /// ability-as-a-type resolves to.
     pub fn record_of_open(fields: BTreeMap<Symbol, (Ty, bool)>) -> Ty {
         Ty::record_shape(fields, Ty::ANY)
+    }
+
+    /// An open shape over BOTH keyed kinds — "a map or a record carrying these fields"
+    /// (ADR-542): what a field guard proves of a value whose kind it does not know
+    /// (`(when (:sudo b) …)` over an unannotated `b`). A `map` shape alone would rule out
+    /// the record `b` may be.
+    pub fn keyed_of_open(fields: BTreeMap<Symbol, (Ty, bool)>) -> Ty {
+        Ty {
+            fields: Some(Arc::new(RecordShape {
+                fields,
+                rest: Ty::ANY,
+            })),
+            ..Ty::flat(SHAPE_BITS)
+        }
+        .canonical_shape()
     }
 
     /// The general constructor: declared fields plus the type of every undeclared key.
@@ -5487,9 +5514,9 @@ impl GradualTy {
             if strict && !by_exclusion {
                 // The unknown keyed part (`map | record`, nothing known of either) is read
                 // by overlap; the rest of the term strictly.
-                if let Some(rest) = term.without_unknown_keyed() {
-                    let keyed = Ty::of(Tag::Map).union(Ty::of(Tag::Record));
-                    return !keyed.is_disjoint(&expected)
+                if let Some((map, record, rest)) = term.keyed_kind_unknown() {
+                    return (map.is_consistent_subtype(&expected)
+                        || record.is_consistent_subtype(&expected))
                         && (rest.is_never() || rest.is_consistent_subtype(&expected));
                 }
                 return term.is_consistent_subtype(&expected);

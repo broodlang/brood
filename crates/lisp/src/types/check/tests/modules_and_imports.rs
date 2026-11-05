@@ -110,7 +110,7 @@ fn keyword_accessor_receiver_is_checked() {
     let w = warnings("(:name 5)");
     assert!(
         w.iter()
-            .any(|s| s.contains(":name") && s.contains("map, set or nil")),
+            .any(|s| s.contains(":name") && s.contains("map, record, set or nil")),
         "{w:?}"
     );
     assert!(!warnings("(:name \"str\")").is_empty());

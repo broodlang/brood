@@ -311,7 +311,7 @@ keyword** — including an integer-indexed collection, because `(:name deps)` wh
 (:name {:name "ada"})    ;=> "ada"
 (:name #{:name})         ;=> :name        ; membership, like get
 (:name nil)              ;=> nil
-(:name [{:name "ada"}])  ;=> RAISED :name: expected a map, set or nil to look up in, got vector ([{:name "ada"}])
+(:name [{:name "ada"}])  ;=> RAISED :name: expected a map, record, set or nil to look up in, got vector ([{:name "ada"}])
 ```
 
 The advisory checker knows the form (ADR-167): it flags a receiver that provably

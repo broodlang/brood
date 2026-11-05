@@ -840,8 +840,10 @@ pub(super) fn check_if(
                     // typed, and says nothing about the base's other keys — a closed
                     // shape here would claim they are absent, which the guard never
                     // established.
+                    // On both keyed kinds (ADR-542): the guard proves the field, not
+                    // whether the base is a map or a record.
                     let base_record = fields.iter().rev().fold(pg.ty.clone(), |acc, &k| {
-                        Ty::record_of_open(std::iter::once((k, (acc, true))).collect())
+                        Ty::keyed_of_open(std::iter::once((k, (acc, true))).collect())
                     });
                     t.narrow(pg.base, base_record)
                 }

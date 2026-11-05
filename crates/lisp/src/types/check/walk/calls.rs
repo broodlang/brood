@@ -95,12 +95,13 @@ pub(super) fn callback_arity(heap: &Heap, arg: Value, ctx: &Ctx) -> Option<Arity
 }
 
 /// The signature a KEYWORD has as a function: `(:k m)` / `(:k m default)` looks `:k` up
-/// in a map, a set or `nil` — anything else raises (`apply_keyword`) — and answers
-/// whatever is stored there (or the default). The receiver set mirrors the walk's own
-/// keyword-call check (`expected a map, set or nil to look up in`).
+/// in a map, a record (its fields, ADR-542), a set or `nil` — anything else raises
+/// (`apply_keyword`) — and answers whatever is stored there (or the default). The receiver
+/// set mirrors the walk's own keyword-call check.
 fn keyword_sig() -> Sig {
     use crate::core::value::Tag;
     let receiver = Ty::of(Tag::Map)
+        .union(Ty::of(Tag::Record))
         .union(Ty::of(Tag::Set))
         .union(Ty::of(Tag::Nil));
     let mut sig = Sig::new(vec![receiver], Ty::ANY);
