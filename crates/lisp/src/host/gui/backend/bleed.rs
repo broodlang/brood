@@ -1,8 +1,9 @@
 //! EDGE BLEED: a background that reaches the edge of the cell grid continues to the edge
 //! of the window.
 //!
-//! The grid rarely fills the window. The inset sits on every edge, and the sub-cell
-//! remainder (up to a cell less one pixel) lands on the right and bottom. Painted with
+//! The grid rarely fills the window. The inset sits on the left, right and bottom (row 0 is
+//! at the top edge, `Renderer::grid_origin`), and the sub-cell remainder (up to a cell less
+//! one pixel) lands on the right and bottom. Painted with
 //! the window background alone, that margin cuts every full-width band short of the
 //! frame: a mode line, a current-line highlight or a gutter stops a few pixels from the
 //! edge, which reads as unfinished. Emacs paints its mode line and fringes through the
@@ -16,8 +17,7 @@
 //! of the frame without knowing about it.
 //!
 //! Text backgrounds do not bleed: a run's width is the shaper's to know. A rounded or
-//! translucent fill does not either (a pill or a wash is not a band). A band one row tall (a
-//! header line on the top row) bleeds up too: a strip of window above it read as a gap.
+//! translucent fill does not either (a pill or a wash is not a band).
 //! Inside a `ScrollRegion` only the sides bleed, since its rows move. A `CellRegion` paints
 //! at its own metrics and is left alone. A `Fragment` is bled inside, and the result kept by
 //! the fragment's address ([`Bleed`]), so an unchanged fragment stays one allocation.
@@ -38,7 +38,6 @@ pub(super) struct Margins {
     pub(super) cols: f32,
     pub(super) rows: f32,
     pub(super) left: f32,
-    pub(super) top: f32,
     pub(super) right: f32,
     pub(super) bottom: f32,
 }
@@ -56,19 +55,19 @@ impl Margins {
             cols: cols as f32,
             rows: rows as f32,
             left: cells(ox, cw),
-            top: cells(oy, ch),
             right: cells(w_px.saturating_sub(ox + grid_w), cw),
             bottom: cells(h_px.saturating_sub(oy + grid_h), ch),
         }
     }
 }
 
-/// The cell grid a `w_px`×`h_px` window holds: the window less the inset on every edge,
+/// The cell grid a `w_px`×`h_px` window holds: the window less the inset on the left, right
+/// and bottom (none on top: row 0 starts at the window's top edge, [`Renderer::grid_origin`]),
 /// in whole cells, at least one each way. What the app is told its size is.
 pub(super) fn grid_cells(r: &Renderer, w_px: usize, h_px: usize) -> (u16, u16) {
     let inset = r.inset();
     let usable_w = w_px.saturating_sub(2 * inset);
-    let usable_h = h_px.saturating_sub(2 * inset);
+    let usable_h = h_px.saturating_sub(inset);
     let cols = (usable_w / r.cell_w.max(1)).max(1).min(u16::MAX as usize) as u16;
     let rows = (usable_h / r.cell_h.max(1)).max(1).min(u16::MAX as usize) as u16;
     (cols, rows)
@@ -280,17 +279,11 @@ fn band(op: &Op) -> Option<Band> {
 
 impl Band {
     /// The `FRect`s that carry this band over the margins it touches: the side pieces at
-    /// its own rows, and (when `vertical`) the top and bottom pieces, widened over a side
+    /// its own rows, and (when `vertical`) the bottom piece, widened over a side
     /// margin the band also touches so a corner is covered too.
-    ///
-    /// A band one row tall bleeds up or down like any other: a header line on the top row
-    /// fills the margin above it, its text a little low in the strip, which reads as the
-    /// frame's edge where a strip of window background above it read as a gap (Ghostty's
-    /// `window-padding-color = extend` carries every edge row the same way).
     fn pieces(&self, m: &Margins, vertical: bool) -> Vec<Op> {
         let left = m.left > 0.0 && self.x0 <= TOUCH;
         let right = m.right > 0.0 && self.x1 >= m.cols - TOUCH;
-        let top = vertical && m.top > 0.0 && self.y0 <= TOUCH;
         let bottom = vertical && m.bottom > 0.0 && self.y1 >= m.rows - TOUCH;
         let piece = |x: f32, y: f32, w: f32, h: f32| Op::FRect {
             x,
@@ -326,9 +319,6 @@ impl Band {
         } else {
             self.x1.min(m.cols)
         };
-        if top {
-            pieces.push(piece(x0, -m.top, x1 - x0, m.top));
-        }
         if bottom {
             pieces.push(piece(x0, m.rows, x1 - x0, m.bottom));
         }
@@ -344,7 +334,6 @@ mod tests {
         cols: 80.0,
         rows: 24.0,
         left: 0.5,
-        top: 0.25,
         right: 0.75,
         bottom: 0.5,
     };
@@ -419,33 +408,13 @@ mod tests {
     }
 
     #[test]
-    fn a_line_on_the_top_row_fills_the_margin_above_it() {
-        // a header line: row 0, every column. Left at its row, the top margin was a strip
-        // of window between the frame and the header, which read as a gap
-        let frame = vec![rect(0, 0, 80, 1, [9, 9, 9])];
-        let bled = edge_bleed(&frame, &MARGINS).expect("bled");
-        assert_eq!(
-            frects(&bled),
-            vec![
-                [-0.5, 0.0, 0.5, 1.0],
-                [80.0, 0.0, 0.75, 1.0],
-                [-0.5, -0.25, 81.25, 0.25],
-            ]
-        );
-    }
-
-    #[test]
-    fn a_band_on_the_top_left_corner_covers_the_corner() {
+    fn a_band_on_the_left_edge_covers_the_bottom_corner() {
         // a gutter: column 0, every row
         let frame = vec![rect(0, 0, 4, 24, [5, 5, 5])];
         let bled = edge_bleed(&frame, &MARGINS).expect("bled");
         assert_eq!(
             frects(&bled),
-            vec![
-                [-0.5, 0.0, 0.5, 24.0],
-                [-0.5, -0.25, 4.5, 0.25],
-                [-0.5, 24.0, 4.5, 0.5],
-            ]
+            vec![[-0.5, 0.0, 0.5, 24.0], [-0.5, 24.0, 4.5, 0.5],]
         );
     }
 
@@ -606,7 +575,6 @@ mod tests {
     fn no_margin_no_pieces() {
         let flush = Margins {
             left: 0.0,
-            top: 0.0,
             right: 0.0,
             bottom: 0.0,
             ..MARGINS

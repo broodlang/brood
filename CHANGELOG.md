@@ -18,6 +18,10 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   moved to `ansi/`).
 
 **Changed.**
+- **A GUI window's row 0 starts at its top edge** (ADR-508 addendum). The inset is a margin on
+  the left, right and bottom only, and the leftover height goes under the last row. The top
+  margin was the inset plus half the leftover, so an editor's header line had a strip of window
+  above it, or its text sat low in a taller band when that strip was painted.
 - `std/editor/buffer`'s undo history is capped by size (ADR-550): past
   `editor/buffer/*undo-strong-limit*` the oldest undo groups are dropped, whole, until the rest
   fits `*undo-limit*` (Emacs's two limits), so a buffer edited for days no longer keeps every

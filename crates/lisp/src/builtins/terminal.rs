@@ -377,7 +377,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(1),
         Sig::new(vec![Ty::of_tags(&[Tag::Int, Tag::Float])], nil_ty),
         &["px"],
-        "Set the window content inset to px logical pixels: a blank margin before the cell grid on every window edge, so a GUI app's text breathes instead of sitting flush against the frame. Applies to every open window and the default for ones opened later; the grid loses 2*px per axis (fewer cells) and re-renders. The inset is shared by the renderer and mouse hit-testing, so clicks stay aligned. Needs --features gui. Returns nil.",
+        "Set the window content inset to px logical pixels: a blank margin on the left, right and bottom of the cell grid, so a GUI app's text breathes instead of sitting flush against the frame. There is none above row 0: the first row starts at the window's top edge (ADR-508). Applies to every open window and the default for ones opened later; the grid loses 2*px of width and px of height (fewer cells) and re-renders. The inset is shared by the renderer and mouse hit-testing, so clicks stay aligned. Needs --features gui. Returns nil.",
         gui_inset);
     // The window background (`gui-bg!`): the clear / inset-margin / snap-remainder fill,
     // so a GUI app's padding matches its theme instead of the hardcoded default.

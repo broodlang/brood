@@ -734,7 +734,8 @@ impl Renderer {
     }
 
     /// The content inset in PHYSICAL pixels (the logical `base_inset` × HiDPI
-    /// scale) — the margin painted before the cell grid on every edge, and the
+    /// scale) — the margin on the grid's left, right and bottom (never above row 0,
+    /// [`Renderer::grid_origin`]), and the
     /// offset every pixel↔cell conversion shares (`update_cells`, `px_to_cell`,
     /// `paint`) so the grid the renderer draws and the one the mouse hit-tests stay
     /// the same. 0 leaves the grid flush to the window edge (the default).
@@ -814,32 +815,32 @@ impl Renderer {
         self.invalidate();
     }
 
-    /// The grid's top-left origin in PHYSICAL px, beyond the inset. `cols`/`rows`
-    /// are floor divisions, so an arbitrary window leaves up to one cell of sub-cell
-    /// remainder per axis that doesn't fill a whole cell. The two axes place it
-    /// differently:
-    ///   - **horizontal**: at the inset. The grid is LEFT-ALIGNED and the remainder
-    ///     sits on the right.
-    ///   - **vertical**: SPLIT, half above row 0 and half below the last row. All of it
-    ///     under the last row read as a band of empty window up to a row and a half
-    ///     tall under the echo area (the inset plus a row less a pixel), which looks like
-    ///     a layout bug; all of it above would do the same over line 1. Split, neither
-    ///     margin exceeds the inset plus half a row. Rows move on a font-size step
-    ///     whichever way the slack goes, since every row's height changes.
+    /// The grid's top-left origin in PHYSICAL px. THE LAYOUT RULE, in one place:
     ///
-    /// Don't centre the grid on the horizontal half-remainder (`rem_w / 2`): `rem_w` is
-    /// `width % cell_w`, so it depends on the CELL SIZE, and a font-size zoom would slide
-    /// the whole grid sideways by up to half a cell on every step. Symmetric margins are
-    /// not worth a grid that moves; the cost is a right margin up to one cell wider.
+    ///   - **Row 0 starts at the window's top edge.** Nothing is ever painted above it, so
+    ///     a header line or tab bar on row 0 is the top of the window, its text centred in
+    ///     its own row like every other row's.
+    ///   - **The inset is a margin on the LEFT, RIGHT and BOTTOM** ([`grid_cells`]).
+    ///   - **The leftover is on the right and at the bottom**: `cols`/`rows` are floor
+    ///     divisions, so up to a cell less a pixel per axis is left over, and it goes
+    ///     after the grid, never before it.
+    ///
+    /// Why not a top margin: it was the inset plus half the vertical leftover, so its height
+    /// changed with the window and the font, and it put a strip of window between the title
+    /// bar and a header line. Painting the header's colour into it (ADR-508's edge bleed)
+    /// still left the header's text sitting low in a taller strip. With no top margin there
+    /// is nothing to cover and nothing to centre (2026-11-05, ADR-508 addendum).
+    ///
+    /// Why not centre horizontally on the leftover: it is `width % cell_w`, so it depends on
+    /// the cell size, and a font-size zoom would slide the grid sideways on every step.
     ///
     /// WM-independent (no window resize, so it works where `request_inner_size` is
     /// ignored), and the mouse hit-test (`px_to_cell`) shares it so clicks stay
     /// aligned with what's painted.
-    pub(crate) fn grid_origin(&self, _w_px: usize, h_px: usize) -> (usize, usize) {
-        let inset = self.inset();
-        let cell_h = self.cell_h.max(1);
-        let slack = h_px.saturating_sub(2 * inset) % cell_h;
-        (inset, inset + slack / 2)
+    ///
+    /// [`grid_cells`]: super::bleed::grid_cells
+    pub(crate) fn grid_origin(&self, _w_px: usize, _h_px: usize) -> (usize, usize) {
+        (self.inset(), 0)
     }
 
     /// Recompute the px size + cell metrics by shaping a reference glyph ('M') in
@@ -2335,22 +2336,26 @@ mod grid_stability_tests {
         );
     }
 
-    /// The vertical remainder is split above and below the grid at every size: all of it
-    /// under the last row stood as a band of empty window up to a row and a half tall under
-    /// the echo area. The two margins differ by the odd pixel at most.
+    /// Row 0 starts at the window's top edge at every font size and inset, and the rows fill
+    /// down to the bottom inset with less than a row left over: a header line on row 0 is the
+    /// top of the window, with no strip of margin above it to show as a gap (the bug this rule
+    /// replaced: the top margin was the inset plus half the leftover).
     #[test]
-    fn the_vertical_remainder_is_split_above_and_below_at_every_size() {
+    fn row_zero_starts_at_the_top_edge_at_every_size() {
         let mut r = Renderer::new(1.0, default_families(), 15.0);
         let (w, h) = (1913, 1077);
-        for px in 10..=30 {
-            r.set_font(None, Some(px as f32));
-            let (_, rows) = super::super::bleed::grid_cells(&r, w, h);
-            let top = r.grid_origin(w, h).1;
-            let bottom = h - top - rows as usize * r.cell_h;
-            assert!(
-                top.abs_diff(bottom) <= 1,
-                "at {px} px the margins are {top} above and {bottom} below"
-            );
+        for inset in [0.0, 8.0, 12.0] {
+            r.set_inset(inset);
+            for px in 10..=30 {
+                r.set_font(None, Some(px as f32));
+                let (_, rows) = super::super::bleed::grid_cells(&r, w, h);
+                assert_eq!(r.grid_origin(w, h).1, 0, "at {px} px, inset {inset}");
+                let below = h - rows as usize * r.cell_h;
+                assert!(
+                    below >= r.inset() && below < r.inset() + r.cell_h,
+                    "at {px} px, inset {inset}: {below} px below the last row"
+                );
+            }
         }
     }
 

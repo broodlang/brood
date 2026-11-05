@@ -406,9 +406,9 @@ enum UserEvent {
         family: Option<u32>,
         px: Option<f32>,
     },
-    /// Set the content inset (logical px) — the margin before the cell grid on
-    /// every window edge — for every open window and ones opened later. Behind
-    /// `gui-inset!`. The grid loses `2*inset` px of usable area per axis, so its
+    /// Set the content inset (logical px) — the margin on the cell grid's left,
+    /// right and bottom — for every open window and ones opened later. Behind
+    /// `gui-inset!`. The grid loses `2*inset` px of width and `inset` of height, so its
     /// cell count shrinks; the window re-renders at the new size.
     Inset { px: f32 },
     /// Set the window background — the fill for `Op::Clear`, the pre-clear, and the
@@ -1476,7 +1476,7 @@ struct RenderDefaults {
     family: Option<u32>,
     /// Default cell font size, logical px.
     px: f32,
-    /// Content inset (logical px) before the grid on every edge.
+    /// Content inset (logical px) left, right and below the grid.
     inset: f32,
     /// Window background; `None` = `DEFAULT_BG`.
     bg: Option<[u8; 3]>,
